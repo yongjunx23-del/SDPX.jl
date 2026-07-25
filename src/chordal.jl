@@ -232,6 +232,25 @@ end
 
 Analysis for every PSD block, for diagnostics and for deciding whether the
 decomposition is worth implementing on a given model family.
+
+That decision has been made for the benchmark family this solver targets, and
+the answer was no. On the `m = 6119` lattice bootstrap problem every one of the
+32 blocks is chordal, and not one of them would benefit:
+
+```text
+  block   dim   cliques   largest   cost ratio
+      1    52         1        52        1.000
+      2    23         2        22        1.750
+      4    40         2        39        1.488
+      5    70         2        69        1.687
+```
+
+The largest clique is nearly the whole block throughout, so splitting would
+replace one `k³` factorization with cliques almost as large *and* add coupling
+constraints between them — the `beneficial` field is false for all 32. This is
+why detection is implemented and the transformation is not: the transformation
+is a large piece of machinery whose own gate says it would never fire here.
+Re-run this on a new model family before concluding the same holds there.
 """
 chordal_summary(prob::SDPProblem) =
     [analyze_chordal_structure(prob, block) for block in 1:prob.dims.L]

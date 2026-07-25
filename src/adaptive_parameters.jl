@@ -5,6 +5,25 @@
     line-search contraction or fraction-to-boundary safety. Decisions
     are bounded, smoothed, recorded, and disabled after repeated
     numerical regressions.
+
+    `parameter_strategy` defaults to `:fixed`, and the benchmark that
+    gates that default (plan Milestone H) is recorded here because the
+    result is not the one the machinery was built expecting:
+
+        problem            strategy   status    iters   rel. gap    secs
+        SDP Task_Low08     fixed      Optimal      27   4.55e-07    59.2
+        SDP Task_Low08     adaptive   Stalled      41   2.73e-05    93.1
+        LP sparse          fixed      Optimal      13   3.75e-11   0.016
+        LP sparse          adaptive   Optimal      13   3.13e-11   0.070
+
+    On the SDP, adaptive loses on every axis at once — it converts an
+    Optimal solve into a Stalled one, ends two orders of magnitude
+    further from the requested tolerance, and takes longer to get there.
+    On the LP it matches the fixed schedule iteration for iteration and
+    so earns nothing. Milestone H's exit condition is that adaptive is
+    default only where it passes the runtime, robustness, and accuracy
+    gates; on the benchmarks in this repository it passes none of them,
+    which is why the default stays `:fixed` and this stays opt-in.
 =====================================================================#
 
 mutable struct AdaptiveIPMController{T}
