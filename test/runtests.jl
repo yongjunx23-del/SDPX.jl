@@ -27,4 +27,5 @@ using Test
     include("spectrum_regressions.jl")
     include("extensions_regressions.jl")
     include("lp_sparse.jl")
+    include("examples.jl")
 end

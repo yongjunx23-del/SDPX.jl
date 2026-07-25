@@ -76,6 +76,25 @@ result = solve(Float64x4.(c), [Float64x4.(A)], [Float64x4.(C)],
                Matrix{Float64x4}(undef, 2, 0), Float64x4[]; verbosity=0)
 ```
 
+On this problem that changes nothing — at the default tolerance both
+arithmetics return the same digits, and the wider one only costs time.
+[`examples/02_extended_precision.jl`](examples/02_extended_precision.jl) shows
+where the difference actually appears: `Float64` stalls at a tolerance of
+1e-14 while `Float64x4` goes on tracking the requested tolerance down to
+1e-30.
+
+## Examples
+
+[`examples/`](examples/) holds runnable versions of the above and more — the
+LP path and its sparse/dense selector, independent certificate checking
+including a solve the certificate refuses to accept, and the JuMP interface.
+They are executed by the test suite, so they do not go stale.
+
+```bash
+julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia --project=examples examples/01_basic_sdp.jl
+```
+
 ## Public API
 
 The package is pre-1.0 and marked experimental, but these are the entry points
@@ -323,7 +342,7 @@ positive-semidefinite triangle constraints, including JuMP's `PSDCone()`
 syntax:
 
 ```julia
-using JuMP, SDPX
+using JuMP, LinearAlgebra, SDPX   # `Symmetric` comes from LinearAlgebra
 
 model = Model(() -> SDPX.Optimizer(sparse=:auto, verbosity=0))
 @variable(model, x[1:2])
