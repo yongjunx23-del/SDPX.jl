@@ -176,4 +176,56 @@ end
         )
         @test allocated == 0
     end
+
+    @testset "Schur regularization escalates only on unfactorable S" begin
+        # The escalation exists for the iterates near convergence where the
+        # Schur complement loses positivity to rounding. Its trigger is a
+        # failed `cholesky!`, so this pins down both halves of that contract:
+        # a merely ill-conditioned S must factor untouched, and a singular or
+        # indefinite one must be regularized back to a usable factorization
+        # rather than propagating a failure.
+        m, side, blocks = 12, 4, 2
+        rng = MersenneTwister(3)
+        coefficients = [zeros(m, side, side) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            entry = randn(rng, side, side)
+            coefficients[l][i, :, :] = entry + entry'
+        end
+        problem = SDPX.ingest(
+            ones(m),
+            coefficients,
+            [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks],
+            zeros(m, 0),
+            Float64[];
+            verbosity=0,
+        )
+        options = SDPX.SolverOptions{Float64}(verbosity=0)
+        workspace = SDPX.Workspace(problem)
+        basis =
+            qr(randn(MersenneTwister(9), m, m)).Q * Matrix{Float64}(1.0I, m, m)
+        function factor_with_smallest_eigenvalue(smallest)
+            eigenvalues = collect(range(1.0, 2.0, length=m))
+            eigenvalues[1] = smallest
+            schur = basis * Diagonal(eigenvalues) * basis'
+            SDPX.copy_owned!(workspace.S, schur)
+            return SDPX._factor_dense_kkt_native!(workspace, problem, options)
+        end
+
+        # Positive definite, however badly scaled: no regularization at all.
+        for smallest in (1.0, 1e-8, 1e-14)
+            outcome = factor_with_smallest_eigenvalue(smallest)
+            @test outcome.ok
+            @test outcome.reg_attempts == 0
+        end
+
+        # Singular and indefinite: `cholesky!` fails, the escalation runs, and
+        # the factorization succeeds. One attempt sufficed in every case
+        # measured; the loop allows six as a safety net.
+        for smallest in (0.0, -1e-14, -1e-8)
+            outcome = factor_with_smallest_eigenvalue(smallest)
+            @test outcome.ok
+            @test 1 <= outcome.reg_attempts <= 6
+        end
+    end
+
 end
