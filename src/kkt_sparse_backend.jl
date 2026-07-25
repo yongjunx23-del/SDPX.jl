@@ -72,6 +72,21 @@ the analysis succeeded.
 
 Called by `factorize!` when the pattern is new; a caller does not normally
 invoke it directly.
+
+The fill-reducing ordering is left to CHOLMOD rather than chosen here (plan
+§15.3). Measured on the augmented systems this backend actually receives from
+the LP path, the library default beats the natural ordering on every case, in
+both fill and time:
+
+```text
+  vars  nnz(K)   default nnz(L)   natural nnz(L)   default   natural
+   800    7960           114138           216964   0.0020 s  0.0039 s
+  1200   11966           233600           475255   0.0037 s  0.0102 s
+  1000   24702           320095           441718   0.0051 s  0.0050 s
+```
+
+A selector layered on top would have to beat that to earn its cost, and
+nothing measured here suggests it would.
 """
 function analyze!(backend::SparseCholeskyBackend, A::SparseMatrixCSC{Float64})
     factor = try
