@@ -109,6 +109,13 @@ project's source code is included.
 of equilibration, adaptive regularisation, and residual-driven iterative
 refinement, and is used as a reference solver in benchmarks.
 
+Development also benefited from ChatGPT by OpenAI and Claude by Anthropic for
+code review, algorithm exploration, performance analysis, test design,
+documentation, and release preparation. They are credited as AI-assisted
+development tools, not as legal authors or copyright holders. See
+[CONTRIBUTORS.md](CONTRIBUTORS.md) for the complete contributor and
+acknowledgement record.
+
 ## The optimization problem
 The function
 ```julia
