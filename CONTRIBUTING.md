@@ -69,6 +69,27 @@ states the problem, tolerance, precision, thread count, and hardware. Solver
 comparisons are extremely sensitive to all five, and an unqualified claim is
 usually wrong.
 
+## AI-assisted contributions
+
+ChatGPT and Claude have been used as development assistants for parts of code
+review, algorithm exploration, profiling, test design, documentation, and
+release preparation. They are acknowledged in
+[CONTRIBUTORS.md](CONTRIBUTORS.md) as tools rather than legal authors or
+copyright holders.
+
+AI-assisted pull requests are welcome, but the human contributor remains
+responsible for the change:
+
+- disclose the AI tool when it materially influenced the implementation;
+- inspect every suggested code path instead of accepting generated code
+  blindly;
+- provide the same tests, numerical validation, and benchmark evidence required
+  for a manually written change;
+- verify that generated text or code does not copy material under incompatible
+  terms;
+- never include credentials, private benchmark data, or confidential prompts in
+  an issue or pull request.
+
 ## Provenance
 
 SDPX derives from [SDPJSolver.jl](https://github.com/FishboneChiang/SDPJSolver.jl)
