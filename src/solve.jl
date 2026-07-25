@@ -1531,6 +1531,40 @@ function _solve_pipeline!(
             deadline=deadline,
         )
     else
+        # Pre-flight against the memory actually available. Nothing compared
+        # the workspace size against anything before this, so a model too large
+        # for the machine simply ran until an allocation failed, with no
+        # indication of which dimension caused it.
+        #
+        # Deliberately *not* checked against `plan.memory_budget_bytes`: that
+        # field is `available × extended_precision_memory_fraction`, a budget
+        # for extended-precision buffers rather than for the whole workspace.
+        # The lattice benchmark's floor is 2.8 GiB against a 10% budget it
+        # exceeds comfortably while still running fine, so comparing the two
+        # would warn on a workload that works.
+        #
+        # Uses the O(1) floor rather than the full estimate, which walks every
+        # coefficient and would cost more than the solve it precedes.
+        let floor_bytes = dense_workspace_floor_bytes(
+                T,
+                reduced.dims.m,
+                reduced.dims.n,
+                reduced.dims.L,
+                plan.threads,
+            ),
+            available = _available_memory_bytes()
+
+            if available > 0 && floor_bytes > available
+                push!(
+                    warnings,
+                    "The dense workspace needs at least " *
+                    "$(round(floor_bytes / 2^30; digits=2)) GiB but only " *
+                    "$(round(available / 2^30; digits=2)) GiB is available; " *
+                    "the solve may exhaust memory. Reduce the thread count or " *
+                    "the precision, or move to a larger machine.",
+                )
+            end
+        end
         core_options = _replace_solver_options(
             opts;
             algorithm=:sdp,

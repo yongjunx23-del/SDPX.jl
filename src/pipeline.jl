@@ -809,6 +809,38 @@ rather than a central guess; see `estimate_sdp_workspace_bytes`."""
 const WORKSPACE_ESTIMATE_MARGIN_NUMERATOR = 3
 const WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR = 2
 
+"""
+    dense_workspace_floor_bytes(::Type{T}, m, n, L, thread_count) -> Int
+
+Lower bound on the workspace, computed from the dimensions alone.
+
+[`estimate_sdp_workspace_bytes`](@ref) is deliberately kept off the hot path
+because it walks every sparse coefficient object, which can cost more than a
+warmed solve. That makes it unusable as a *pre-flight* check — by the time it
+can be called, the allocation it would have warned about has already happened.
+
+This counts only the terms that follow from `m`, `n`, and the thread count: the
+Schur complement and its factorization scratch, the task-local reductions, and
+the equality blocks. Those dominate at the sizes where the budget is at risk,
+and omitting the per-block terms keeps it `O(1)`. It is a floor, so exceeding
+the budget here means the real workspace exceeds it too; not exceeding it
+proves nothing.
+
+No margin is applied. The margin in the full estimate exists to make it an
+upper bound; a bound that is deliberately low must not carry one.
+"""
+function dense_workspace_floor_bytes(::Type{T}, m::Integer, n::Integer,
+                                     L::Integer, thread_count::Integer) where {T}
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    schur_bins = T === BigFloat ? 1 : min(max(Int(thread_count), 1), max(Int(L), 1))
+    elements =
+        2 * Int(m) * Int(m) +
+        schur_bins * Int(m) * Int(m) +
+        Int(m) * Int(n) +
+        2 * Int(n) * Int(n)
+    return scalar_bytes * elements
+end
+
 function estimate_sdp_workspace_bytes(
     prob::SDPProblem{T},
     thread_count::Int,

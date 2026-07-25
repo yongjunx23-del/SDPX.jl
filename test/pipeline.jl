@@ -1,6 +1,7 @@
 using LinearAlgebra
 using SparseArrays
 using MathOptInterface
+using MultiFloats: Float64x4
 using SDPX
 using Test
 
@@ -1190,4 +1191,50 @@ end
     narrow = SDPX.schur_bin_report(Float64, 2000, 32, 8)
     @test wide.bytes_per_bin >= narrow.bytes_per_bin
     @test wide.selected_bins <= narrow.selected_bins
+
+    @testset "dense workspace floor is a cheap lower bound" begin
+        # Used as a pre-flight memory check, so two properties matter: it must
+        # be below the full estimate (a floor that over-predicts would warn on
+        # models that fit), and it must not walk the coefficient data.
+        m, side, blocks = 80, 5, 3
+        coefficients = [zeros(m, side, side) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            coefficients[l][i, 1, 1] = float(i + l)
+        end
+        problem = SDPX.ingest(
+            ones(m),
+            coefficients,
+            [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks],
+            zeros(m, 0),
+            Float64[];
+            verbosity=0,
+        )
+        floor_bytes = SDPX.dense_workspace_floor_bytes(
+            Float64,
+            problem.dims.m,
+            problem.dims.n,
+            problem.dims.L,
+            1,
+        )
+        @test floor_bytes > 0
+        @test floor_bytes <= SDPX.estimate_sdp_workspace_bytes(problem, 1)
+
+        # O(1) in the problem data: same dimensions, same answer, whatever the
+        # coefficients contain.
+        @test floor_bytes == SDPX.dense_workspace_floor_bytes(
+            Float64,
+            problem.dims.m,
+            problem.dims.n,
+            problem.dims.L,
+            1,
+        )
+        # Grows with the thread count, which is what makes it the right check
+        # for a thread-driven memory blowup.
+        @test SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 8) >
+              SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 1)
+        # Wider arithmetic needs more, not the same.
+        @test SDPX.dense_workspace_floor_bytes(Float64x4, 500, 0, 8, 1) >
+              SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 1)
+    end
+
 end
