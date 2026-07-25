@@ -43,6 +43,9 @@ mutable struct LPWorkspace{T}
     complementarity::Vector{T}
     target::Vector{T}
     weights::Vector{T}
+    # Set after construction, once presolve and scaling have settled `G`.
+    # `nothing` keeps the dense factorization (see `_lp_sparse_system`).
+    sparse_system::Any
 end
 
 function LPWorkspace(
@@ -79,6 +82,7 @@ function LPWorkspace(
         alloc_zeros(T, inequalities),
         alloc_zeros(T, inequalities),
         alloc_zeros(T, inequalities),
+        nothing,
     )
 end
 
@@ -112,6 +116,25 @@ function _extract_lp_rows(prob::SDPProblem{T}) where {T}
         _lp_copy_scalar!(h, row, prob.C[row][1, 1])
     end
     return G, h
+end
+
+"""
+    _lp_sparse_system(prob, G, B) -> Union{Nothing,LPSparseSystem}
+
+The sparse Newton system for this LP, or `nothing` to keep the dense path.
+
+`G` is taken *after* presolve and scaling rather than read back out of `prob`,
+because both transform it in place; rebuilding from the original problem would
+factor a different matrix than the one the iteration uses.
+
+Gated on the problem having been stored sparsely to begin with. Re-sparsifying a
+`DenseCons` problem would report whatever incidental zeros its data happens to
+contain, which is not structural sparsity and is not a basis for choosing a
+factorization.
+"""
+function _lp_sparse_system(prob::SDPProblem{T}, G::Matrix{T}, B::Matrix{T}) where {T}
+    prob.cons isa SparseCons{T} || return nothing
+    return lp_sparse_candidate(sparse(G), sparse(B), T)
 end
 
 @inline function _lp_copy_scalar!(
@@ -529,6 +552,10 @@ function _lp_assemble_hessian!(
     thread_count::Int,
     kernel::Symbol,
 ) where {T}
+    # The sparse path forms its own `GᵀDG` directly in sparse arithmetic, so
+    # the dense `m×m` product here would be pure waste -- and at the sizes that
+    # select the sparse path it is the more expensive of the two.
+    workspace.sparse_system === nothing || return workspace.H
     if T === Float64
         if thread_count > 1 &&
            LinearAlgebra.BLAS.get_num_threads() == 1 &&
@@ -631,11 +658,37 @@ function _lp_solve_factor!(factor::LPCholeskyFactor, rhs)
     return kcholsolve!(factor.factor, rhs)
 end
 
+"""
+    LPSparseFactor{T}
+
+The sparse factorization dressed in the same `issuccess`/`_lp_solve_factor!`
+interface the dense factor objects use, so the iteration does not branch.
+"""
+struct LPSparseFactor{T}
+    system::LPSparseSystem{T}
+    success::Bool
+end
+
+LinearAlgebra.issuccess(factor::LPSparseFactor) = factor.success
+
+function _lp_solve_factor!(factor::LPSparseFactor, rhs)
+    factor.success ||
+        throw(ArgumentError("sparse LP KKT factorization did not succeed"))
+    return lp_sparse_solve!(rhs, factor.system)
+end
+
 function _lp_factor_kkt!(
     workspace::LPWorkspace{T},
     B::Matrix{T},
     regularization::T,
 ) where {T}
+    system = workspace.sparse_system
+    if system isa LPSparseSystem{T}
+        return LPSparseFactor{T}(
+            system,
+            lp_sparse_factor!(system, workspace.weights, regularization),
+        )
+    end
     _lp_populate_kkt!(
         workspace.K,
         workspace.H,
@@ -1071,6 +1124,9 @@ function solve_lp!(
         equalities;
         packed_hessian=packed_hessian,
     )
+    # Decided once, on the `G` the iteration will actually use. A `nothing`
+    # here keeps every downstream call on the dense path unchanged.
+    workspace.sparse_system = _lp_sparse_system(prob, G, B)
     x = x0 === nothing ? alloc_zeros(T, variables) :
         _owned_array_copy(T, x0) ./ scaling.variable
     y = y0 === nothing ? alloc_zeros(T, equalities) :
