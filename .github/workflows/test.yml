@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['*']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Julia ${{ matrix.julia-version }} / ${{ matrix.os }} / ${{ matrix.threads }} threads
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1.10', '1']
+        os: [ubuntu-latest]
+        threads: ['1', '4']
+        include:
+          # Spot-check the other platforms once, on the current release. The
+          # thread count is part of the matrix rather than fixed because several
+          # kernels have threaded and serial paths that must agree exactly.
+          - julia-version: '1'
+            os: macOS-latest
+            threads: '4'
+          - julia-version: '1'
+            os: windows-latest
+            threads: '4'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+      - uses: julia-actions/cache@v2
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: ${{ matrix.threads }}
+
+  bench-smoke:
+    name: Benchmark smoke test (small tier only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Instantiate benchmark environment
+        run: julia --project=bench -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+      # Only the :small tier runs here. The large sparse and lattice-bootstrap
+      # benchmarks take hours, need multi-gigabyte generated inputs, and are
+      # slower still in BigFloat — they are run manually, never in CI.
+      - name: Run small-tier smoke benchmark
+        run: |
+          julia --project=bench -e '
+            include("bench/run.jl")
+            main(; tiers=(:small,), types=(Float64,), reps=1, results_path=tempname())'
+
+  quality:
+    name: Package quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - name: Project.toml is registry-ready
+        run: |
+          julia -e '
+            using TOML
+            p = TOML.parsefile("Project.toml")
+            for key in ("name", "uuid", "version", "authors")
+                haskey(p, key) || error("Project.toml is missing $key")
+            end
+            # Guard against ever re-inheriting the upstream SDPJSolver.jl UUID.
+            p["uuid"] == "e804a123-63fa-4b55-87b9-d771b4a5c602" &&
+                error("Project.toml still carries the upstream SDPJSolver.jl UUID")
+            (haskey(p, "compat") && haskey(p["compat"], "julia")) ||
+                error("Project.toml needs a [compat] entry for julia")
+            println("Project.toml OK: ", p["name"], " v", p["version"], " ", p["uuid"])'
+      - name: Upstream solver implementation is not vendored
+        run: |
+          test ! -e src/functions.jl
+          test ! -e src/SDPJSolver.jl
+          if grep -R -nE \
+            '^[[:space:]]*function[[:space:]]+(getResidue|NewtonStep|NewtonStepSparse|f1|df|f|sdpBFGS|findFeasibleBFGS)[[:space:]]*\(' \
+            src; then
+            echo "An implementation from the former SDPJSolver.jl core was reintroduced"
+            exit 1
+          fi
+          if grep -R -nE '^[[:space:]]*module[[:space:]]+SDPJSolver([[:space:]]|$)' src; then
+            echo "The former SDPJSolver module was reintroduced"
+            exit 1
+          fi
+          echo "No former SDPJSolver numerical implementation is present"
+      - name: No large or generated files committed
+        run: |
+          big=$(find . -path ./.git -prune -o -type f -size +2M -print)
+          if [ -n "$big" ]; then echo "Files over 2MB are committed:"; echo "$big"; exit 1; fi
+          if git ls-files | grep -qE '(^|/)Manifest\.toml$'; then
+            echo "Manifest.toml must not be committed for a package"; exit 1
+          fi
+          echo "No oversized or generated files committed"

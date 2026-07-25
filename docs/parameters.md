@@ -1,0 +1,144 @@
+# SDPX Solver Parameters
+
+These defaults come from `SolverOptions{T}`. Differences in the legacy
+`sdp(...)` wrapper are listed separately.
+
+## Interior-point method and initialization
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `β` | `0.1` | Centering/complementarity reduction target. Each step targets `β*μ`; smaller values are usually more aggressive. |
+| `γ` | `0.9` | Backtracking reduction factor. An infeasible trial step is reduced as `t ← γ*t`. |
+| `Ωp` | `1` | Initial primal PSD matrices: `X_l=Ωp*I`. |
+| `Ωd` | `1` | Initial dual PSD matrices: `Y_l=Ωd*I`. |
+| `predictor` | `:classic` | Predictor rule: `:classic` or `:sdpb`. |
+| `refine_steps` | `1` | Number of iterative-refinement passes for the KKT predictor/corrector solutions. |
+| `step_rule` | `:backtrack` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto` (fraction-to-boundary for blocks up to `2x2`, backtracking otherwise). |
+| `parameter_policy` | `:fixed` | `:fixed` uses the supplied `β`/`γ`; `:auto` selects a calibrated sparse `2x2` profile from the incidence structure. |
+
+## Convergence and stopping
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `ϵ_gap` | `1e-10` | Relative primal-dual gap tolerance. |
+| `ϵ_primal` | `1e-10` | Primal residual tolerance. |
+| `ϵ_dual` | `1e-10` | Dual residual tolerance. |
+| `termination` | `:relative` | Uses scale-normalized stopping tests. `:legacy` restores the old absolute/positive-gap test. |
+| `iter_max` | `200` | Maximum outer iterations. The legacy keyword is `iterMax`. |
+| `max_time` | `Inf` | Wall-clock solve limit in seconds. |
+| `callback` | `nothing` | Called after every iteration. Returning `true` stops with `UserStopped`. |
+
+## Restarts and numerical safeguards
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `restart` | `true` | Whether to rescale the collapsed side and continue after step-size collapse. |
+| `min_step` | `1e-10` | A backtracking step below this value triggers a convergence-tail check or restart. |
+| `omega_step` | `1e5` | Per-restart multiplier applied to the collapsed `X` or `Y` side. |
+| `max_restarts` | `5` | Maximum restarts in the new API. |
+| `max_omega` | `1e50` | Compatibility field. The new `solve!` loop does not read it directly. |
+
+For fixed-exponent types such as `Float64x4`, SDPX also limits the effective
+restart multiplier and returns `NumericalBreakdown` when an iterate becomes
+non-finite.
+
+## Precision, equilibration, and storage
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `precision_bits` | `997` | Working precision for `BigFloat` only. It does not affect fixed-width `Float64x4`. |
+| `convert_inputs` | `false` | Whether to re-round `BigFloat` inputs to `precision_bits`. |
+| `equilibrate` | `false` | Apply PSD-block diagonal congruence scaling and variable scaling before solving. |
+| `sparse` | `:auto` | Storage selection used during ingestion. `:auto` distinguishes sparse coefficient storage from aggregate PSD and Schur density; `true`/`:sparse` and `false`/`:dense` force a path. |
+| `extended_precision_blas` | `:off` | Extended-precision Schur backend: `:off`, conservative `:auto`, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. |
+| `extended_precision_memory_fraction` | `0.10` | Maximum fraction of physical memory that the crossover may reserve for packed extended-precision panels. |
+| `force_gc` | `false` | Retained A/B compatibility field. The main solve path does not currently read it. |
+
+The current `equilibrate(prob)` implementation accepts dense ingestion only.
+The following combination therefore throws an error instead of automatically
+equilibrating sparse data:
+
+```julia
+prob = ingest(c, A, C, B, b; sparse=true)
+opts = SolverOptions{T}(equilibrate=true)
+```
+
+## Output, timing, and checkpoints
+
+| Parameter | Default | Meaning |
+|---|---:|---|
+| `verbosity` | `1` | `0` is silent; values of `1` or higher print iteration information. |
+| `timing` | `false` | Records total elapsed time in the result. Full phase-level timing is not yet implemented. |
+| `checkpoint_every` | `0` | Save every N iterations; `0` disables checkpointing. |
+| `checkpoint_path` | `""` | Checkpoint file path. |
+| `mode` | `OPTIMIZE` | `OPTIMIZE` or the internal feasibility mode `FEASIBILITY`. |
+
+## Legacy `sdp(...)` defaults
+
+The common legacy call is equivalent to:
+
+```julia
+sdp(c, A, C, B, b;
+    β=0.1, γ=0.9, Ωp=1, Ωd=1,
+    ϵ_gap=1e-10, ϵ_primal=1e-10, ϵ_dual=1e-10,
+    iterMax=200, prec=300,
+    restart=true, minStep=1e-10,
+    maxOmega=1e50, OmegaStep=1e5,
+    sparse=:auto, verbosity=1,
+    termination=:relative,
+    equilibrate=false, refine_steps=1, predictor=:classic,
+    max_time=Inf, callback=nothing)
+```
+
+Two differences matter:
+
+1. `prec=300` is expressed in decimal digits and is converted internally to
+   approximately `997` bits. It affects `BigFloat` only.
+2. The legacy wrapper derives its restart limit from `maxOmega/OmegaStep`.
+   Their defaults produce `max_restarts=10`, while directly constructing
+   `SolverOptions` defaults to `5`.
+
+## Recommended settings for sparse CSDR problems
+
+Use automatic selection for the optimized many-`2x2`-block family:
+
+```julia
+parameter_policy=:auto
+Ωp=10
+Ωd=10
+predictor=:sdpb
+max_restarts=10
+refine_steps=1
+sparse=:auto
+equilibrate=false
+```
+
+The zero-probe policy currently selects:
+
+| Maximum active variables per `2x2` block | `β` | `γ` |
+|---:|---:|---:|
+| 1 to 6 | `0.1` | `0.85` |
+| 7 to 14 | `0.1` | `0.8` |
+| 15 or more | `0.4` | `0.7` |
+
+This is an empirical structural policy for the tested sparse block-arrow CSDR
+family, not a universal replacement for fixed parameters. Problems outside
+that shape retain the supplied `β` and `γ`. Sparse ingestion still does not
+support internal equilibration.
+
+For `BigFloat` accuracy runs on the same problem, `β=0.1, γ=0.75` was more
+stable at tolerances from `1e-12` through `1e-30`.
+
+The extended-precision matrix kernels remain opt-in:
+
+```julia
+opts = SolverOptions{Float64x4}(
+    extended_precision_blas=:auto,
+    extended_precision_memory_fraction=0.10,
+)
+```
+
+Automatic mode accounts for arithmetic type, packed dimensions, coefficient
+and active density, expected Schur density, Julia thread count, and the memory
+budget. It retains the sparse outer-product route when packing is not
+predicted to amortize.

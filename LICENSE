@@ -1,6 +1,7 @@
 MIT License
 
-Copyright (c) 2022 Li-Yuan Chiang
+Copyright (c) 2022 Li-Yuan Chiang (SDPJSolver.jl, from which SDPX.jl is derived)
+Copyright (c) 2026 SDPX.jl contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

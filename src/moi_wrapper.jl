@@ -1,0 +1,821 @@
+#=====================================================================
+    MathOptInterface wrapper.
+
+    SDPX uses geometric SDP form directly:
+
+        min c'x
+        s.t. sum_i x_i A_i^(l) - C^(l) >= 0
+             B'x = b.
+
+    The wrapper is intentionally non-incremental. JuMP/MOI builds a
+    cached model, then `copy_to` finalizes all PSD incidence data in one
+    pass and calls the same `ingest`/`solve!` core as the native API.
+=====================================================================#
+
+const MOI = MathOptInterface
+
+abstract type AbstractMOIConstraintInfo end
+
+struct MOIPSDConstraintInfo <: AbstractMOIConstraintInfo
+    block::Int
+    scaled::Bool
+end
+
+struct MOIEqualityConstraintInfo{T} <: AbstractMOIConstraintInfo
+    column::Int
+    constant::T
+end
+
+struct MOIScalarInequalityConstraintInfo{T} <: AbstractMOIConstraintInfo
+    block::Int
+    bound::T
+    direction::T
+end
+
+struct MOISOCConstraintInfo <: AbstractMOIConstraintInfo
+    block::Int
+    dimension::Int
+end
+
+mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
+    options::SolverOptions{T}
+    problem::Union{Nothing,SDPProblem{T}}
+    result::Union{Nothing,SDPResult{T}}
+    num_variables::Int
+    sense::MOI.OptimizationSense
+    objective_constant::T
+    constraint_info::Dict{Any,AbstractMOIConstraintInfo}
+    solve_time::Float64
+
+    function Optimizer{T}(; kwargs...) where {T<:AbstractFloat}
+        optimizer = new{T}(
+            SolverOptions{T}(sparse=:auto),
+            nothing,
+            nothing,
+            0,
+            MOI.MIN_SENSE,
+            zero(T),
+            Dict{Any,AbstractMOIConstraintInfo}(),
+            0.0,
+        )
+        for (name, value) in kwargs
+            _set_raw_option!(optimizer, String(name), value)
+        end
+        return optimizer
+    end
+end
+
+Optimizer(; kwargs...) = Optimizer{Float64}(; kwargs...)
+
+const _MOI_OPTION_ALIASES = Dict(
+    "beta" => :β,
+    "gamma" => :γ,
+    "omega_p" => :Ωp,
+    "omega_d" => :Ωd,
+    "tol_gap" => :ϵ_gap,
+    "tol_primal" => :ϵ_primal,
+    "tol_dual" => :ϵ_dual,
+    "max_iter" => :iter_max,
+    "time_limit" => :max_time,
+    "verbose" => :verbosity,
+    "max_iterations" => :iter_max,
+    "precision" => :precision_bits,
+    "num_threads" => :threads,
+)
+
+function _replace_option(options::SolverOptions{T}, name::Symbol, value) where {T}
+    names = fieldnames(typeof(options))
+    index = findfirst(==(name), names)
+    index === nothing && throw(ArgumentError("unknown SDPX option: $name"))
+    field_type = fieldtype(typeof(options), index)
+    converted = if name === :verbosity && value isa Bool
+        value ? 1 : 0
+    elseif field_type === Any
+        value
+    else
+        convert(field_type, value)
+    end
+    values = NamedTuple{names}(Tuple(getfield(options, field) for field in names))
+    replacement = NamedTuple{(name,)}((converted,))
+    return SolverOptions{T}(; merge(values, replacement)...)
+end
+
+function _option_symbol(options::SolverOptions, name::String)
+    symbol = get(_MOI_OPTION_ALIASES, name, Symbol(name))
+    symbol in fieldnames(typeof(options)) ||
+        throw(MOI.UnsupportedAttribute(MOI.RawOptimizerAttribute(name)))
+    return symbol
+end
+
+function _set_raw_option!(optimizer::Optimizer, name::String, value)
+    if name == "tolerance"
+        for field in (:ϵ_gap, :ϵ_primal, :ϵ_dual)
+            optimizer.options = _replace_option(optimizer.options, field, value)
+        end
+        return nothing
+    end
+    symbol = _option_symbol(optimizer.options, name)
+    optimizer.options = _replace_option(optimizer.options, symbol, value)
+    return nothing
+end
+
+# ---- model lifecycle ----
+
+MOI.supports_incremental_interface(::Optimizer) = false
+
+function MOI.empty!(optimizer::Optimizer{T}) where {T}
+    optimizer.problem = nothing
+    optimizer.result = nothing
+    optimizer.num_variables = 0
+    optimizer.sense = MOI.MIN_SENSE
+    optimizer.objective_constant = zero(T)
+    empty!(optimizer.constraint_info)
+    optimizer.solve_time = 0.0
+    return nothing
+end
+
+MOI.is_empty(optimizer::Optimizer) = optimizer.problem === nothing
+
+function Base.show(io::IO, optimizer::Optimizer{T}) where {T}
+    if optimizer.result === nothing
+        print(io, "SDPX.Optimizer{$T} (not solved)")
+    else
+        print(
+            io,
+            "SDPX.Optimizer{$T} ($(optimizer.result.status), " *
+            "$(optimizer.result.iterations) iterations)",
+        )
+    end
+end
+
+# ---- supported model forms ----
+
+const MOIPSDSet = Union{
+    MOI.PositiveSemidefiniteConeTriangle,
+    MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle},
+}
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.VectorAffineFunction{T}},
+    ::Type{S},
+) where {T,S<:MOIPSDSet}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.VectorAffineFunction{T}},
+    ::Type{MOI.SecondOrderCone},
+) where {T}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{MOI.VectorOfVariables},
+    ::Type{MOI.SecondOrderCone},
+)
+    return true
+end
+
+const MOIScalarInequalitySet{T} = Union{MOI.GreaterThan{T},MOI.LessThan{T}}
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.ScalarAffineFunction{T}},
+    ::Type{S},
+) where {T,S<:MOIScalarInequalitySet{T}}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.VariableIndex},
+    ::Type{S},
+) where {T,S<:MOIScalarInequalitySet{T}}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{MOI.VectorOfVariables},
+    ::Type{S},
+) where {S<:MOIPSDSet}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.ScalarAffineFunction{T}},
+    ::Type{MOI.EqualTo{T}},
+) where {T}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.VariableIndex},
+    ::Type{MOI.EqualTo{T}},
+) where {T}
+    return true
+end
+
+function MOI.supports(
+    ::Optimizer{T},
+    ::MOI.ObjectiveFunction{MOI.ScalarAffineFunction{T}},
+) where {T}
+    return true
+end
+
+MOI.supports(::Optimizer, ::MOI.ObjectiveFunction{MOI.VariableIndex}) = true
+MOI.supports(::Optimizer, ::MOI.ObjectiveSense) = true
+
+# ---- source-model conversion ----
+
+_is_scaled_psd(::MOI.PositiveSemidefiniteConeTriangle) = false
+_is_scaled_psd(::MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}) = true
+
+function _triangle_coordinates(side::Int)
+    coordinates = Tuple{Int,Int}[]
+    sizehint!(coordinates, side * (side + 1) ÷ 2)
+    for column in 1:side, row in 1:column
+        push!(coordinates, (row, column))
+    end
+    return coordinates
+end
+
+function _new_constraint_index!(
+    counts::Dict{Any,Int},
+    ::Type{F},
+    ::Type{S},
+) where {F,S}
+    key = (F, S)
+    value = get(counts, key, 0) + 1
+    counts[key] = value
+    return MOI.ConstraintIndex{F,S}(value)
+end
+
+function _append_psd_constraint!(
+    A::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    C::Vector{Matrix{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,S},
+) where {T,F,S<:MOIPSDSet}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    side = MOI.side_dimension(set)
+    coordinates = _triangle_coordinates(side)
+    dimension = length(coordinates)
+    MOI.output_dimension(function_value) == dimension ||
+        throw(DimensionMismatch("PSD function dimension does not match side dimension $side"))
+    block_C = zeros(T, side, side)
+    builders = Dict{
+        Int,
+        Tuple{Vector{Int},Vector{Int},Vector{T}},
+    }()
+    scaled = _is_scaled_psd(set)
+    sqrt_two = sqrt(T(2))
+
+    function append_coefficient!(
+        variable::Int,
+        row::Int,
+        column::Int,
+        coefficient::T,
+    )
+        rows, columns, values = get!(builders, variable) do
+            (Int[], Int[], T[])
+        end
+        push!(rows, row)
+        push!(columns, column)
+        push!(values, coefficient)
+        if row != column
+            push!(rows, column)
+            push!(columns, row)
+            push!(values, coefficient)
+        end
+        return nothing
+    end
+
+    constants = function_value isa MOI.VectorAffineFunction{T} ?
+                function_value.constants : zeros(T, dimension)
+    @inbounds for output in 1:dimension
+        row, column = coordinates[output]
+        scale = scaled && row != column ? sqrt_two : one(T)
+        value = constants[output] / scale
+        block_C[row, column] = -value
+        row != column && (block_C[column, row] = -value)
+    end
+
+    if function_value isa MOI.VectorAffineFunction{T}
+        for term in function_value.terms
+            output = term.output_index
+            row, column = coordinates[output]
+            scale = scaled && row != column ? sqrt_two : one(T)
+            variable = index_map[term.scalar_term.variable].value
+            coefficient = term.scalar_term.coefficient / scale
+            append_coefficient!(variable, row, column, coefficient)
+        end
+    else
+        for (output, variable_index) in pairs(function_value.variables)
+            row, column = coordinates[output]
+            scale = scaled && row != column ? sqrt_two : one(T)
+            variable = index_map[variable_index].value
+            coefficient = inv(scale)
+            append_coefficient!(variable, row, column, coefficient)
+        end
+    end
+
+    block_A = [spzeros(T, side, side) for _ in 1:optimizer.num_variables]
+    for (variable, (rows, columns, values)) in builders
+        matrix = sparse(rows, columns, values, side, side)
+        dropzeros!(matrix)
+        block_A[variable] = matrix
+    end
+    push!(A, block_A)
+    push!(C, block_C)
+    destination_index = _new_constraint_index!(counts, F, S)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIPSDConstraintInfo(length(A), scaled)
+    return nothing
+end
+
+function _append_equality_constraint!(
+    columns::Vector{Vector{T}},
+    rhs::Vector{T},
+    constants::Vector{T},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,MOI.EqualTo{T}},
+) where {T,F}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    coefficients = zeros(T, optimizer.num_variables)
+    constant = zero(T)
+    if function_value isa MOI.ScalarAffineFunction{T}
+        constant = function_value.constant
+        for term in function_value.terms
+            coefficients[index_map[term.variable].value] += term.coefficient
+        end
+    else
+        coefficients[index_map[function_value].value] = one(T)
+    end
+    push!(columns, coefficients)
+    push!(rhs, set.value - constant)
+    push!(constants, constant)
+    destination_index = _new_constraint_index!(counts, F, MOI.EqualTo{T})
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIEqualityConstraintInfo{T}(length(rhs), constant)
+    return nothing
+end
+
+function _append_scalar_inequality!(
+    A::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    C::Vector{Matrix{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,S},
+) where {T,F,S<:MOIScalarInequalitySet{T}}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    coefficients = zeros(T, optimizer.num_variables)
+    constant = zero(T)
+    if function_value isa MOI.ScalarAffineFunction{T}
+        constant = function_value.constant
+        for term in function_value.terms
+            coefficients[index_map[term.variable].value] += term.coefficient
+        end
+    else
+        coefficients[index_map[function_value].value] = one(T)
+    end
+    if set isa MOI.GreaterThan{T}
+        bound = set.lower
+        direction = one(T)
+        block_C = reshape(T[bound - constant], 1, 1)
+    else
+        bound = set.upper
+        direction = -one(T)
+        coefficients .*= -one(T)
+        block_C = reshape(T[constant - bound], 1, 1)
+    end
+    block_A = [
+        sparse(reshape(T[coefficients[variable]], 1, 1))
+        for variable in 1:optimizer.num_variables
+    ]
+    push!(A, block_A)
+    push!(C, block_C)
+    destination_index = _new_constraint_index!(counts, F, S)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIScalarInequalityConstraintInfo{T}(
+            length(A),
+            bound,
+            direction,
+        )
+    return nothing
+end
+
+function _append_soc_constraint!(
+    A::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    C::Vector{Matrix{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,MOI.SecondOrderCone},
+) where {T,F}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    dimension = set.dimension
+    MOI.output_dimension(function_value) == dimension ||
+        throw(DimensionMismatch("SOC function dimension does not match its set"))
+    constants = function_value isa MOI.VectorAffineFunction{T} ?
+                function_value.constants : zeros(T, dimension)
+    block_constant = zeros(T, dimension, dimension)
+    block_constant[1, 1] = constants[1]
+    @inbounds for index in 2:dimension
+        block_constant[index, index] = constants[1]
+        block_constant[1, index] = constants[index]
+        block_constant[index, 1] = constants[index]
+    end
+    coefficient_blocks = [
+        zeros(T, dimension, dimension)
+        for _ in 1:optimizer.num_variables
+    ]
+    if function_value isa MOI.VectorAffineFunction{T}
+        for term in function_value.terms
+            output = term.output_index
+            variable = index_map[term.scalar_term.variable].value
+            coefficient = term.scalar_term.coefficient
+            matrix = coefficient_blocks[variable]
+            if output == 1
+                @inbounds for index in 1:dimension
+                    matrix[index, index] += coefficient
+                end
+            else
+                matrix[1, output] += coefficient
+                matrix[output, 1] += coefficient
+            end
+        end
+    else
+        for (output, variable_index) in pairs(function_value.variables)
+            variable = index_map[variable_index].value
+            matrix = coefficient_blocks[variable]
+            if output == 1
+                @inbounds for index in 1:dimension
+                    matrix[index, index] += one(T)
+                end
+            else
+                matrix[1, output] += one(T)
+                matrix[output, 1] += one(T)
+            end
+        end
+    end
+    push!(A, sparse.(coefficient_blocks))
+    # SDPX stores sum(A_i*x_i) - C, whereas the lifted matrix above is
+    # exactly the affine SOC function.
+    push!(C, -block_constant)
+    destination_index =
+        _new_constraint_index!(counts, F, MOI.SecondOrderCone)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOISOCConstraintInfo(length(A), dimension)
+    return nothing
+end
+
+function _objective_data(
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+) where {T}
+    c = zeros(T, optimizer.num_variables)
+    constant = zero(T)
+    sense = MOI.get(source, MOI.ObjectiveSense())
+    if sense != MOI.FEASIBILITY_SENSE
+        function_type = MOI.get(source, MOI.ObjectiveFunctionType())
+        if function_type == MOI.ScalarAffineFunction{T}
+            function_value = MOI.get(
+                source,
+                MOI.ObjectiveFunction{MOI.ScalarAffineFunction{T}}(),
+            )
+            constant = function_value.constant
+            for term in function_value.terms
+                c[index_map[term.variable].value] += term.coefficient
+            end
+        elseif function_type == MOI.VariableIndex
+            variable = MOI.get(source, MOI.ObjectiveFunction{MOI.VariableIndex}())
+            c[index_map[variable].value] = one(T)
+        else
+            throw(MOI.UnsupportedAttribute(MOI.ObjectiveFunction{function_type}()))
+        end
+    end
+    sense == MOI.MAX_SENSE && (c .*= -one(T))
+    return c, constant, sense
+end
+
+function _check_copy_attributes(optimizer::Optimizer, source)
+    for attribute in MOI.get(source, MOI.ListOfModelAttributesSet())
+        if attribute == MOI.Name() ||
+           attribute == MOI.ObjectiveSense() ||
+           attribute isa MOI.ObjectiveFunction
+            continue
+        end
+        throw(MOI.UnsupportedAttribute(attribute))
+    end
+    for attribute in MOI.get(source, MOI.ListOfVariableAttributesSet())
+        attribute == MOI.VariableName() && continue
+        throw(MOI.UnsupportedAttribute(attribute))
+    end
+    for (F, S) in MOI.get(source, MOI.ListOfConstraintTypesPresent())
+        MOI.supports_constraint(optimizer, F, S) ||
+            throw(MOI.UnsupportedConstraint{F,S}())
+        for attribute in MOI.get(source, MOI.ListOfConstraintAttributesSet{F,S}())
+            attribute == MOI.ConstraintName() && continue
+            throw(MOI.UnsupportedAttribute(attribute))
+        end
+    end
+    return nothing
+end
+
+function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
+    _check_copy_attributes(optimizer, source)
+    MOI.empty!(optimizer)
+    index_map = MOI.Utilities.IndexMap()
+    source_variables = MOI.get(source, MOI.ListOfVariableIndices())
+    optimizer.num_variables = length(source_variables)
+    for (i, variable) in pairs(source_variables)
+        index_map[variable] = MOI.VariableIndex(i)
+    end
+
+    A = Vector{SparseMatrixCSC{T,Int}}[]
+    C = Matrix{T}[]
+    equality_columns = Vector{T}[]
+    equality_rhs = T[]
+    equality_constants = T[]
+    counts = Dict{Any,Int}()
+
+    for (F, S) in MOI.get(source, MOI.ListOfConstraintTypesPresent())
+        for source_index in MOI.get(source, MOI.ListOfConstraintIndices{F,S}())
+            if S <: MOIPSDSet
+                _append_psd_constraint!(
+                    A, C, optimizer, source, index_map, counts, source_index,
+                )
+            elseif S <: MOI.EqualTo{T}
+                _append_equality_constraint!(
+                    equality_columns,
+                    equality_rhs,
+                    equality_constants,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif S <: MOIScalarInequalitySet{T}
+                _append_scalar_inequality!(
+                    A,
+                    C,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif S == MOI.SecondOrderCone
+                _append_soc_constraint!(
+                    A,
+                    C,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            else
+                throw(MOI.UnsupportedConstraint{F,S}())
+            end
+        end
+    end
+    isempty(A) && throw(ArgumentError("SDPX requires at least one PSD constraint"))
+
+    B = zeros(T, optimizer.num_variables, length(equality_columns))
+    for column in eachindex(equality_columns)
+        copyto!(view(B, :, column), equality_columns[column])
+    end
+    c, objective_constant, sense = _objective_data(optimizer, source, index_map)
+    optimizer.sense = sense
+    optimizer.objective_constant = objective_constant
+    optimizer.problem = ingest(
+        c,
+        A,
+        C,
+        B,
+        equality_rhs;
+        sparse=optimizer.options.sparse,
+        verbosity=optimizer.options.verbosity,
+    )
+    optimizer.result = nothing
+    return index_map
+end
+
+# ---- solve and result attributes ----
+
+function MOI.optimize!(optimizer::Optimizer)
+    optimizer.problem === nothing &&
+        error("no model has been copied to SDPX")
+    optimizer.solve_time = @elapsed begin
+        optimizer.result = solve!(optimizer.problem, optimizer.options)
+    end
+    return nothing
+end
+
+MOI.get(::Optimizer, ::MOI.SolverName) = "SDPX"
+function MOI.get(::Optimizer, ::MOI.SolverVersion)
+    version = Base.pkgversion(@__MODULE__)
+    return version === nothing ? "unknown" : string(version)
+end
+MOI.get(optimizer::Optimizer, ::MOI.RawSolver) = optimizer.result
+MOI.get(optimizer::Optimizer, ::MOI.NumberOfVariables) = optimizer.num_variables
+MOI.get(optimizer::Optimizer, ::MOI.ObjectiveSense) = optimizer.sense
+MOI.set(optimizer::Optimizer, ::MOI.ObjectiveSense, sense) =
+    (optimizer.sense = sense)
+MOI.get(optimizer::Optimizer, ::MOI.SolveTimeSec) = optimizer.solve_time
+MOI.get(optimizer::Optimizer, ::MOI.BarrierIterations) =
+    optimizer.result === nothing ? 0 : optimizer.result.iterations
+MOI.get(optimizer::Optimizer, ::MOI.ResultCount) =
+    optimizer.result === nothing ? 0 : 1
+MOI.get(optimizer::Optimizer, ::MOI.RawStatusString) =
+    optimizer.result === nothing ? "optimize! not called" : optimizer.result.message
+
+MOI.supports(::Optimizer, ::MOI.TerminationStatus) = true
+function MOI.get(optimizer::Optimizer, ::MOI.TerminationStatus)
+    optimizer.result === nothing && return MOI.OPTIMIZE_NOT_CALLED
+    status = optimizer.result.status
+    status == Optimal && return MOI.OPTIMAL
+    status == InfeasibleCert && return MOI.INFEASIBLE
+    status == IterLimit && return MOI.ITERATION_LIMIT
+    status == TimeLimit && return MOI.TIME_LIMIT
+    status == UserStopped && return MOI.INTERRUPTED
+    status == Stalled && return MOI.SLOW_PROGRESS
+    status == MaxRestartsExceeded && return MOI.SLOW_PROGRESS
+    return MOI.NUMERICAL_ERROR
+end
+
+MOI.supports(::Optimizer, ::MOI.PrimalStatus) = true
+function MOI.get(optimizer::Optimizer, attribute::MOI.PrimalStatus)
+    optimizer.result === nothing && return MOI.NO_SOLUTION
+    attribute.result_index == 1 || return MOI.NO_SOLUTION
+    return optimizer.result.status == Optimal ?
+           MOI.FEASIBLE_POINT : MOI.OTHER_RESULT_STATUS
+end
+
+MOI.supports(::Optimizer, ::MOI.DualStatus) = true
+function MOI.get(optimizer::Optimizer, attribute::MOI.DualStatus)
+    optimizer.result === nothing && return MOI.NO_SOLUTION
+    attribute.result_index == 1 || return MOI.NO_SOLUTION
+    return optimizer.result.status == Optimal ?
+           MOI.FEASIBLE_POINT : MOI.OTHER_RESULT_STATUS
+end
+
+function _check_result(optimizer::Optimizer, attribute)
+    MOI.check_result_index_bounds(optimizer, attribute)
+    return optimizer.result
+end
+
+MOI.supports(::Optimizer, ::MOI.ObjectiveValue) = true
+MOI.supports(::Optimizer, ::MOI.DualObjectiveValue) = true
+MOI.supports(::Optimizer, ::MOI.RelativeGap) = true
+MOI.supports(::Optimizer, ::MOI.VariablePrimal) = true
+MOI.supports(::Optimizer, ::MOI.ConstraintPrimal) = true
+MOI.supports(::Optimizer, ::MOI.ConstraintDual) = true
+
+function MOI.get(optimizer::Optimizer, attribute::MOI.ObjectiveValue)
+    result = _check_result(optimizer, attribute)
+    value = optimizer.sense == MOI.MAX_SENSE ? -result.pObj : result.pObj
+    return value + optimizer.objective_constant
+end
+
+function MOI.get(optimizer::Optimizer, attribute::MOI.DualObjectiveValue)
+    result = _check_result(optimizer, attribute)
+    value = optimizer.sense == MOI.MAX_SENSE ? -result.dObj : result.dObj
+    return value + optimizer.objective_constant
+end
+
+function MOI.get(optimizer::Optimizer, attribute::MOI.RelativeGap)
+    result = _check_result(optimizer, attribute)
+    return result.gap_rel
+end
+
+function MOI.get(
+    optimizer::Optimizer,
+    attribute::MOI.VariablePrimal,
+    variable::MOI.VariableIndex,
+)
+    result = _check_result(optimizer, attribute)
+    return result.x[variable.value]
+end
+
+function _pack_psd_matrix(matrix::AbstractMatrix{T}, scaled::Bool) where {T}
+    side = size(matrix, 1)
+    packed = Vector{T}(undef, side * (side + 1) ÷ 2)
+    sqrt_two = sqrt(T(2))
+    output = 0
+    @inbounds for column in 1:side, row in 1:column
+        output += 1
+        scale = scaled && row != column ? sqrt_two : one(T)
+        packed[output] = scale * matrix[row, column]
+    end
+    return packed
+end
+
+function MOI.get(
+    optimizer::Optimizer,
+    attribute::MOI.ConstraintPrimal,
+    index::MOI.ConstraintIndex,
+)
+    result = _check_result(optimizer, attribute)
+    info = optimizer.constraint_info[index]
+    if info isa MOIPSDConstraintInfo
+        return _pack_psd_matrix(result.X[info.block], info.scaled)
+    end
+    if info isa MOIScalarInequalityConstraintInfo
+        return info.bound + info.direction * result.X[info.block][1, 1]
+    end
+    if info isa MOISOCConstraintInfo
+        matrix = result.X[info.block]
+        return vcat(matrix[1, 1], Vector(view(matrix, 2:info.dimension, 1)))
+    end
+    equality = info::MOIEqualityConstraintInfo
+    return dot(view(optimizer.problem.B, :, equality.column), result.x) +
+           equality.constant
+end
+
+function MOI.get(
+    optimizer::Optimizer,
+    attribute::MOI.ConstraintDual,
+    index::MOI.ConstraintIndex,
+)
+    result = _check_result(optimizer, attribute)
+    info = optimizer.constraint_info[index]
+    if info isa MOIPSDConstraintInfo
+        return _pack_psd_matrix(result.Y[info.block], info.scaled)
+    end
+    if info isa MOIScalarInequalityConstraintInfo
+        return info.direction * result.Y[info.block][1, 1]
+    end
+    if info isa MOISOCConstraintInfo
+        matrix = result.Y[info.block]
+        dual = Vector{eltype(matrix)}(undef, info.dimension)
+        dual[1] = tr(matrix)
+        @inbounds for index in 2:info.dimension
+            dual[index] = 2matrix[1, index]
+        end
+        return dual
+    end
+    equality = info::MOIEqualityConstraintInfo
+    return result.y[equality.column]
+end
+
+# ---- optimizer attributes ----
+
+MOI.supports(::Optimizer, ::MOI.Silent) = true
+MOI.get(optimizer::Optimizer, ::MOI.Silent) = optimizer.options.verbosity == 0
+function MOI.set(optimizer::Optimizer, ::MOI.Silent, silent::Bool)
+    verbosity = silent ? 0 : max(optimizer.options.verbosity, 1)
+    optimizer.options = _replace_option(optimizer.options, :verbosity, verbosity)
+    return nothing
+end
+
+MOI.supports(::Optimizer, ::MOI.TimeLimitSec) = true
+MOI.get(optimizer::Optimizer, ::MOI.TimeLimitSec) = optimizer.options.max_time
+function MOI.set(optimizer::Optimizer, ::MOI.TimeLimitSec, value::Real)
+    optimizer.options = _replace_option(optimizer.options, :max_time, value)
+    return nothing
+end
+function MOI.set(optimizer::Optimizer, ::MOI.TimeLimitSec, ::Nothing)
+    optimizer.options = _replace_option(optimizer.options, :max_time, Inf)
+    return nothing
+end
+
+MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
+function MOI.get(optimizer::Optimizer, attribute::MOI.RawOptimizerAttribute)
+    symbol = _option_symbol(optimizer.options, attribute.name)
+    return getfield(optimizer.options, symbol)
+end
+function MOI.set(
+    optimizer::Optimizer,
+    attribute::MOI.RawOptimizerAttribute,
+    value,
+)
+    _set_raw_option!(optimizer, attribute.name, value)
+    return nothing
+end
