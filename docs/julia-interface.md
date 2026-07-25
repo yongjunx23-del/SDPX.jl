@@ -38,8 +38,8 @@ equality presolve and the selected LP/SDP equilibration automatically.
 ## Float64 example
 
 ```julia
-using JuMP, SDPX
-import MathOptInterface as MOI
+using JuMP, LinearAlgebra, SDPX   # `Symmetric` comes from LinearAlgebra;
+                                  # `MOI` is re-exported by JuMP
 
 model = Model(() -> SDPX.Optimizer(
     sparse=:auto,
@@ -70,7 +70,7 @@ Use a typed JuMP model and typed optimizer when the coefficients are not
 ordinary `Float64` values:
 
 ```julia
-using JuMP, SDPX
+using JuMP, LinearAlgebra, SDPX   # `Symmetric` comes from LinearAlgebra
 using MultiFloats: Float64x4
 
 const T = Float64x4
