@@ -566,10 +566,22 @@ Cholesky sweeps over 4100 blocks with one closed-form root per block.
    needed and ~6.4 s/iteration at 32 threads, the sparse solve lands near
    700–950 s against Clarabel's 1114.86 s. Schur assembly is still the largest
    phase.
-3. **MOI/JuMP overhead (~1.8×).** The wrapper calls the same `ingest`/`solve!`
-   core, so the cost is in model construction, not the iteration loop — the
-   earlier "missing equality presolve" diagnosis was wrong and is retracted
-   (presolve removes the same 88 dependent rows through both paths).
+3. **MOI/JuMP overhead — measured, and much smaller than claimed.** Timing
+   construction and solve separately (Float64, 1 thread):
+
+   | model | MOI solve vs native | `copy_to` vs native `ingest` |
+   |---|---|---|
+   | 2 blocks, side 8, m=30 | **1.00×** | 1.9× (0.2 ms vs 0.1 ms) |
+   | 3 blocks, side 12, m=60 | **1.02×** | 2.5× (1.1 ms vs 0.5 ms) |
+
+   The wrapper adds essentially nothing to the solve, and the construction gap
+   is sub-millisecond against a 15 ms solve. The earlier "~1.8× slower via
+   JuMP" figure does not reproduce at the MOI layer and is retracted, as is the
+   "missing equality presolve" diagnosis that preceded it (presolve removes the
+   same 88 dependent rows through both paths). Plan §7.3's code-level targets
+   are already in place: one shared canonical empty CSC rather than an object
+   per variable-constraint pair, sparse triplet construction, and
+   `supports_incremental_interface = false`.
 4. **BigFloat throughput.** At this historical checkpoint, fixed-width
    threading was repaired, while BigFloat remained serial and substantially
    slower than `Float64x4`. With precision ruled out as the binding constraint

@@ -14,6 +14,8 @@ using Test
     include("lp_regressions.jl")
     include("solver_regressions.jl")
     include("kkt_regressions.jl")
+    include("kkt_sparse_backend.jl")
+    include("mixed_precision_kkt_regressions.jl")
     include("result_certificate.jl")
     include("moi_regressions.jl")
     include("extended_blas_regressions.jl")

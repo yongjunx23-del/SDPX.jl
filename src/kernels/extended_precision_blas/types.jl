@@ -57,9 +57,20 @@ function arithmetic_family(::Type{T}) where {T}
 end
 
 function _element_storage_bytes(::Type{BigFloat})
-    # MPFR limbs live outside the eight-byte Julia object. Include the object,
-    # significand, and a conservative allocator/header allowance.
-    return max(88, cld(precision(BigFloat), 8) + 56)
+    # MPFR limbs live outside the eight-byte Julia object, and Julia's allocator
+    # rounds each allocation up to a size class, so the true cost is well above
+    # object + significand. Measured bytes per element (allocating a 10,000-entry
+    # BigFloat vector, best of three after warm-up):
+    #
+    #   precision   64    128   256   512   1024   2048
+    #   limb bytes   8     16    32    64    128    256
+    #   measured  88.2  104.2  120.2 168.2  232.2  376.2
+    #
+    # The previous formula returned 88 bytes at 256-bit precision against a real
+    # cost of 120, which is the wrong direction for a memory *budget*: it
+    # promises a solve will fit and then it does not. This is deliberately an
+    # upper bound over the whole measured range.
+    return cld(precision(BigFloat), 8) * 5 ÷ 4 + 128
 end
 _element_storage_bytes(::Type{T}) where {T} = max(sizeof(T), 1)
 

@@ -192,7 +192,21 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
     end
-    _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
+    predictor_ok = if ws.mixed_precision !== nothing &&
+                      ws.mixed_precision.active
+        _solve_mixed_kkt_guarded!(ws, prob, opts, r)
+    else
+        _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
+        true
+    end
+    predictor_ok || return (
+        status=:breakdown,
+        reason="Native extended-precision fallback could not factor the Schur complement",
+        p_res=p_res,
+        d_res=d_res,
+        reg_attempts=ws.mixed_precision.native_regularization_attempts,
+        q_pivoted=false,
+    )
     _with_blas_threads(parallel_blas) do
         threaded_direction_blocks!(ws, prob, Y)
     end
@@ -220,7 +234,21 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
     end
-    _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
+    corrector_ok = if ws.mixed_precision !== nothing &&
+                      ws.mixed_precision.active
+        _solve_mixed_kkt_guarded!(ws, prob, opts, r)
+    else
+        _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
+        true
+    end
+    corrector_ok || return (
+        status=:breakdown,
+        reason="Native extended-precision fallback could not factor the Schur complement",
+        p_res=p_res,
+        d_res=d_res,
+        reg_attempts=ws.mixed_precision.native_regularization_attempts,
+        q_pivoted=false,
+    )
 
     refine_steps, refine_residual = refine_direction!(ws, prob, opts, r)
 

@@ -348,7 +348,7 @@ export SDPX_MEMORY_LIMIT_BYTES=28GiB
   --project="$ENVIRONMENT" \
   --startup-file=no \
   -t 4 \
-  "$SOURCE/test/runtests.jl" \
+  -e 'using Pkg; Pkg.test("SDPX"; coverage=false)' \
   2>&1 | tee "$RESULT/tests.log"
 
 "$JULIA_BIN" \

@@ -1,4 +1,5 @@
 [deps]
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 StableRNGs = "860ef19b-820b-49d6-a774-d7a799459cd3"

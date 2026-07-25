@@ -371,6 +371,7 @@ mutable struct Workspace{T}
     block_norms::Vector{T}
     block_ok::Vector{Bool}
     extended_precision::ExtendedPrecisionWorkspace
+    mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
     thread_count::Int
 end
 
@@ -402,6 +403,8 @@ function Workspace(
     prob::SDPProblem{T};
     extended_precision_blas::Symbol=:off,
     extended_precision_memory_fraction::Float64=0.10,
+    mixed_precision_kkt::Symbol=:off,
+    mixed_precision_memory_fraction::Float64=0.10,
     thread_count::Int=Threads.nthreads(),
 ) where {T}
     L, m, n, k = prob.dims
@@ -423,6 +426,11 @@ function Workspace(
         extended_precision_memory_fraction,
         selected_threads,
         fused_arrow,
+    )
+    mixed_precision = _mixed_precision_workspace(
+        prob,
+        mixed_precision_kkt,
+        mixed_precision_memory_fraction,
     )
     block_nbins = max(1, min(selected_threads, L))
     schur_nbins = _schur_parallel_bins(T, m, L, selected_threads)
@@ -491,7 +499,8 @@ function Workspace(
         alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n),
         block_bins, schur_bins, [alloc_zeros(T, m) for _ in 1:block_nbins],
-        alloc_zeros(T, L), ones(Bool, L), extended_precision, selected_threads)
+        alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
+        selected_threads)
     if T === BigFloat && extended_precision.lower_only
         ExtendedPrecisionBLAS.prepare_triangle_storage!(workspace.S)
         for partial in workspace.Spartial

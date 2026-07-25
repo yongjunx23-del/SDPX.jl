@@ -27,6 +27,22 @@ scalar to the working precision, but it does not create information. To gain
 accuracy, rebuild the source data inside
 `setprecision(BigFloat, precision_bits) do ... end`.
 
+## Guarded mixed-precision KKT solves
+
+Dense, non-arrow `BigFloat` and fixed-width extended-precision problems may
+opt into `mixed_precision_kkt=:auto`. SDPX then factors the Schur and equality
+complements in Float64 but computes residuals and accumulates corrections in
+the requested arithmetic. Ordinary Float64 is never redirected.
+
+This is a guarded accelerator rather than a change in the numerical contract:
+loss of positive definiteness or rank during Float64 conversion, a conservative
+condition estimate above `1e8`, an excessive predicted correction count,
+non-finite conversion, or failed target-precision refinement switches back to
+the native factorization and recomputes the direction. Repeated rejection is
+cooled down and eventually disabled for that solve. The default remains
+`:off`; see the [mixed-precision KKT benchmark](../bench/mixed_precision_kkt/RESULTS.md)
+for the current promotion evidence and exact thresholds.
+
 ## Tolerance vs. precision
 
 `ϵ_gap` below roughly `100·eps(T)` is usually unreachable — `solve!` warns up

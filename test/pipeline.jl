@@ -67,6 +67,67 @@ end
     classification = SDPX.classify_problem(problem)
     @test classification.cone == :lp
     @test SDPX.build_execution_plan(problem).algorithm == :lp_primal_dual
+    @test SDPX.lp_initial_scale_indicator(problem) ≈ 2.0
+
+    fast_parameters =
+        SDPX.recommended_parameters(problem, SDPX.SolverOptions{Float64}())
+    @test fast_parameters.profile == :lp_mehrotra_fast_start
+    @test fast_parameters.β == 0.02
+    @test fast_parameters.γ == 0.99
+
+    distant_problem = SDPX.ingest(
+        [1.0],
+        [reshape([1.0], 1, 1, 1)],
+        [fill(2_000.0, 1, 1)],
+        zeros(1, 0),
+        Float64[];
+        sparse=true,
+        verbosity=0,
+    )
+    @test distant_problem.cons isa SDPX.SparseCons{Float64}
+    @test SDPX.lp_initial_scale_indicator(distant_problem) == 2_000.0
+    conservative_parameters = SDPX.recommended_parameters(
+        distant_problem,
+        SDPX.SolverOptions{Float64}(),
+    )
+    @test conservative_parameters.profile ==
+          :lp_mehrotra_conservative_start
+    @test conservative_parameters.β == 0.1
+    @test conservative_parameters.γ == 0.9
+    distant_result = SDPX.solve!(
+        distant_problem,
+        SDPX.SolverOptions{Float64}(
+            algorithm=:lp,
+            ϵ_gap=1e-8,
+            ϵ_primal=1e-8,
+            ϵ_dual=1e-8,
+            iter_max=150,
+            verbosity=0,
+        ),
+    )
+    @test distant_result.status == SDPX.Optimal
+    @test distant_result.diagnostics.plan.parameter_profile ==
+          :lp_mehrotra_conservative_start
+    @test first(distant_result.parameter_history).beta == 0.1
+    @test first(distant_result.parameter_history).gamma == 0.9
+    setprecision(BigFloat, 256) do
+        distant_bigfloat = SDPX.ingest(
+            BigFloat[1],
+            [reshape(BigFloat[1], 1, 1, 1)],
+            [fill(BigFloat(2_000), 1, 1)],
+            zeros(BigFloat, 1, 0),
+            BigFloat[];
+            verbosity=0,
+        )
+        bigfloat_parameters = SDPX.recommended_parameters(
+            distant_bigfloat,
+            SDPX.SolverOptions{BigFloat}(),
+        )
+        @test bigfloat_parameters.profile ==
+              :lp_mehrotra_conservative_start
+        @test bigfloat_parameters.β == BigFloat(1) / BigFloat(10)
+        @test bigfloat_parameters.γ == BigFloat(9) / BigFloat(10)
+    end
 
     fixed = SDPX.solve(
         problem;
@@ -92,7 +153,7 @@ end
         @test length(result.parameter_history) == result.iterations
     end
     @test all(
-        row -> 0.02 <= row.beta <= 0.50 && 0.65 <= row.gamma <= 0.95,
+        row -> 0.02 <= row.beta <= 0.50 && 0.65 <= row.gamma <= 0.99,
         adaptive.parameter_history,
     )
 
@@ -465,4 +526,552 @@ end
         end
         @test d.reason === :none
     end
+end
+
+@testset "precision-limited stalls report InsufficientPrecision" begin
+    # A Float64 solve asked for a tolerance below what Float64 can deliver must
+    # say so, rather than returning a bare `Stalled` that gives the user nothing
+    # to act on. This is the distinction the stagnation detector's
+    # `:precision_floor` verdict exists to make.
+    prob = unbalanced_arrow_problem(blocks=6, shared=3)
+    impossible = 1e-25          # far below eps(Float64)
+    r = SDPX.solve!(prob, SDPX.SolverOptions{Float64}(
+        ϵ_gap=impossible, ϵ_primal=impossible, ϵ_dual=impossible,
+        iter_max=150, verbosity=0, diagnostics=true))
+
+    @test r.status != SDPX.Optimal          # must not claim success
+    if r.termination.reason === :precision_floor
+        @test r.status == SDPX.InsufficientPrecision
+        @test occursin("precision floor", r.message)
+    else
+        # Whatever it was, it still may not be dressed up as optimal.
+        @test r.status in (SDPX.Stalled, SDPX.IterLimit, SDPX.MaxRestartsExceeded,
+                           SDPX.InsufficientPrecision, SDPX.NumericalBreakdown)
+    end
+end
+
+@testset "no uncertified status maps to MOI.OPTIMAL" begin
+    # Plan §5.2: a success code must never be produced for an internal state
+    # that was not certified. Check the mapping exhaustively so a newly added
+    # status cannot silently inherit `MOI.OPTIMAL`.
+    certified = (SDPX.Optimal, SDPX.FeasibleCert)
+    for status in instances(SDPX.SolveStatus)
+        optimizer = SDPX.Optimizer()
+        prob = analytic_lp_problem()
+        r = SDPX.solve!(prob, SDPX.SolverOptions{Float64}(verbosity=0))
+        # Rebuild the result carrying the status under test.
+        forced = SDPX.SDPResult{Float64}(
+            status, "forced", r.x, r.X, r.y, r.Y, r.pObj, r.dObj, r.gap_rel,
+            r.p_res, r.d_res, r.iterations, r.restarts, r.regularizations,
+            r.timings, r.parameter_history, r.diagnostics)
+        optimizer.result = forced
+        mapped = PIPELINE_MOI.get(optimizer, PIPELINE_MOI.TerminationStatus())
+        if status in certified
+            @test mapped == PIPELINE_MOI.OPTIMAL
+        else
+            @test mapped != PIPELINE_MOI.OPTIMAL
+        end
+    end
+end
+
+@testset "equality presolve decides rank in the solve arithmetic" begin
+    # Plan §5.4: presolve must not decide rank in narrower arithmetic than the
+    # solve. Two equality columns differing by `delta` are genuinely dependent
+    # at Float64 when delta < eps(Float64), and genuinely independent at
+    # Float64x4. A downcast to Float64 anywhere in the rank decision would make
+    # the extended types wrongly drop a column — silently changing the feasible
+    # set — and that is exactly what this pins.
+    function near_dependent(::Type{T}, delta) where {T}
+        m = 4
+        B = zeros(T, m, 2)
+        B[1, 1] = one(T); B[2, 1] = one(T)
+        B[1, 2] = one(T); B[2, 2] = one(T) + T(delta)
+        A = [zeros(T, m, 2, 2)]
+        for i in 1:m
+            A[1][i, :, :] = Matrix{T}(I, 2, 2) .* T(i)
+        end
+        return SDPX.ingest(ones(T, m), A, [Matrix{T}(T(0.5) * I, 2, 2)],
+            B, T[1, 1]; verbosity=0)
+    end
+
+    # Comfortably resolvable at every width: both columns are kept.
+    for T in (Float64, BigFloat)
+        prob = near_dependent(T, 1e-8)
+        @test length(SDPX._equality_rank_indices(prob.B, 0)) == 2
+    end
+
+    # Below Float64's resolution: Float64 must call it dependent...
+    narrow = near_dependent(Float64, 1e-20)
+    @test length(SDPX._equality_rank_indices(narrow.B, 0)) == 1
+
+    # ...while BigFloat, whose eps is ~1e-77, must not.
+    setprecision(BigFloat, 256) do
+        wide = near_dependent(BigFloat, 1e-20)
+        @test length(SDPX._equality_rank_indices(wide.B, 0)) == 2
+    end
+end
+
+@testset "workspace memory estimate is an upper bound" begin
+    # Plan P0 / §19.3: the estimate is used as a memory budget, so it must never
+    # come in under the real allocation. An estimate that is too small promises
+    # a large high-precision solve will fit and then it does not.
+    #
+    # Before this was pinned, the estimate ran 1.05x-1.38x low for Float64 and
+    # Float64x4 and 1.49x-1.71x low for BigFloat (whose per-element cost was
+    # assumed to be 88 bytes at 256-bit precision against a measured 120).
+    function block_problem(::Type{T}, L, m, k) where {T}
+        rng = StableRNG(4)
+        A = [zeros(T, m, k, k) for _ in 1:L]
+        for l in 1:L, i in 1:m
+            M = randn(rng, k, k)
+            A[l][i, :, :] = T.(M + M')
+        end
+        C = [Matrix{T}(one(T) * I, k, k) for _ in 1:L]
+        return SDPX.ingest(ones(T, m), A, C, zeros(T, m, 0), zeros(T, 0); verbosity=0)
+    end
+
+    for T in (Float64, BigFloat), (L, m, k) in ((2, 20, 5), (3, 40, 8)), threads in (1, 4)
+        prob = block_problem(T, L, m, k)
+        estimate = SDPX.estimate_sdp_workspace_bytes(prob, threads)
+        SDPX.Workspace(prob)                      # warm up, so @allocated excludes compilation
+        GC.gc()
+        measured = minimum(@allocated(SDPX.Workspace(prob)) for _ in 1:3)
+        @test estimate >= measured
+    end
+end
+
+@testset "reported residuals match independent recomputation" begin
+    # Plan §5.3: no scaled or reduced-system residual may be exposed as the
+    # final public certificate. Whatever `SDPResult` advertises must be
+    # reproducible from the original problem data, and `gap_rel` must be
+    # reconstructible from the objectives reported alongside it.
+    prob = unbalanced_arrow_problem(blocks=5, shared=3)
+    opts = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=200)
+    r = SDPX.solve!(prob, opts)
+    certificate = SDPX.result_certificate(prob, r, opts)
+
+    @test r.p_res ≈ certificate.primal_affine_residual rtol = 1e-10
+    @test r.d_res ≈ certificate.dual_affine_residual rtol = 1e-10
+    expected_gap = abs(r.pObj - r.dObj) / max(1, (abs(r.pObj) + abs(r.dObj)) / 2)
+    @test r.gap_rel ≈ expected_gap rtol = 1e-10
+end
+
+@testset "crossover calibration cache" begin
+    EPB = SDPX.ExtendedPrecisionBLAS
+    mktempdir() do dir
+        withenv("SDPX_CALIBRATION_DIR" => dir) do
+            for family in (:fixed_extended, :bigfloat)
+                static = EPB.static_profile(family)
+                @test static.source === :static
+
+                # With no cache present the static defaults must be used, so an
+                # uncalibrated machine behaves exactly as before calibration existed.
+                @test EPB.load_profile(family).source === :static
+                @test EPB.load_profile(family).minimum_columns == static.minimum_columns
+
+                # Round-trip a measured profile.
+                measured = EPB.CalibrationProfile(
+                    minimum_columns=11, minimum_work=1234.0, minimum_speedup=1.5,
+                    minimum_schur_density=0.3, minimum_nnz_ratio=0.5,
+                    source=:calibrated)
+                path = EPB.save_profile(family, measured)
+                @test path !== nothing && isfile(path)
+                loaded = EPB.load_profile(family)
+                @test loaded.source === :calibrated
+                @test loaded.minimum_columns == 11
+                @test loaded.minimum_work ≈ 1234.0
+                @test loaded.minimum_nnz_ratio ≈ 0.5
+
+                # A corrupt cache must never break a solve — it falls back silently.
+                write(path, "this is not a calibration file\n@@@@\n")
+                @test EPB.load_profile(family).source === :static
+            end
+        end
+    end
+
+    # The signature must be stable within a run, or the cache would never hit.
+    @test EPB.hardware_signature() == EPB.hardware_signature()
+    @test !isempty(EPB.hardware_signature())
+end
+
+"""A small SDP with 2x2 blocks and an equality row, so it takes the dense
+Schur/Workspace path rather than the dedicated LP solver."""
+function unbalanced_block_sdp()
+    m = 3
+    A = [zeros(m, 2, 2)]
+    for i in 1:m
+        A[1][i, :, :] = Matrix{Float64}(I, 2, 2) .* i
+    end
+    C = [Matrix{Float64}(0.5I, 2, 2)]
+    B = reshape([1.0, 0.0, 0.0], m, 1)
+    return SDPX.ingest(ones(m), A, C, B, [1.0]; verbosity=0)
+end
+
+@testset "KKT backend abstraction" begin
+    # Plan §15.1: the KKT path must be named in one place rather than rederived
+    # from `if ws.arrow !== nothing` chains at each call site, and §10 requires
+    # the selected plan be visible in diagnostics. The predicted
+    # `plan.kkt_backend` is computed from problem structure before a workspace
+    # exists; `select_backend` is the actual runtime choice. They are separate
+    # code paths and can drift apart, so pin that they agree.
+    function backends_for(prob)
+        ws = SDPX.Workspace(prob)
+        actual = SDPX.select_backend(ws)
+        plan = SDPX.build_execution_plan(prob, SDPX.SolverOptions{Float64}())
+        return (actual=actual, ws=ws, planned=plan.kkt_backend)
+    end
+
+    # An SDP model goes through the Schur/Workspace path.
+    dense = unbalanced_block_sdp()
+    d = backends_for(dense)
+    @test d.actual isa SDPX.DenseCholeskyBackend
+    @test SDPX.backend_name(d.actual) === :dense_cholesky
+    @test SDPX.supports_equalities(d.actual)
+    @test string(d.planned) == string(SDPX.backend_name(d.actual))
+
+    # An all-scalar-cone model is dispatched to the dedicated LP solver, which
+    # factorizes its own dense `K` and never builds an SDP `Workspace`. Its
+    # backend is therefore selected separately, and the plan reports that one.
+    lp = analytic_lp_problem()
+    lp_plan = SDPX.build_execution_plan(lp, SDPX.SolverOptions{Float64}())
+    lp_backend = SDPX.select_lp_backend(lp.dims.n)
+    @test string(lp_plan.kkt_backend) == string(SDPX.backend_name(lp_backend))
+    @test SDPX.backend_name(SDPX.select_lp_backend(0)) === :positive_definite_cholesky
+    @test SDPX.backend_name(SDPX.select_lp_backend(3)) === :dense_lu
+
+    arrow = unbalanced_arrow_problem(blocks=4, shared=2)
+    a = backends_for(arrow)
+    @test a.actual isa SDPX.ArrowBackend
+    @test SDPX.backend_name(a.actual) === :block_arrow
+    # The arrow reduction eliminates local blocks against a reduced shared
+    # system with no room for equality rows, which is why the solve path
+    # asserts n == 0 on it.
+    @test !SDPX.supports_equalities(a.actual)
+    @test string(a.planned) == string(SDPX.backend_name(a.actual))
+
+    # `analyze` reports structure that is fixed for the whole solve, and is the
+    # hook §15.2 symbolic reuse will attach to.
+    info = SDPX.analyze(a.actual, arrow)
+    @test info.backend === :block_arrow
+    @test info.equalities == 0
+    @test info.arrow_exact
+    @test info.symbolic_reuse == false      # no sparse factorization backend yet
+
+    # Counters that do not apply must read `nothing`, so "not applicable" is
+    # distinguishable from "zero".
+    @test SDPX.statistics(d.actual, d.ws).arrow_blocks === nothing
+    @test SDPX.statistics(a.actual, a.ws).arrow_blocks == 4
+end
+
+@testset "worker reporting distinguishes cores from threads (§18.4)" begin
+    # §18.4: "Do not describe oversubscribed workers as core scaling." That
+    # requires keeping requested workers, effective workers, and actual physical
+    # cores apart — a distinction `Threads.nthreads()` cannot make.
+    physical = SDPX.physical_core_count()
+    @test physical >= 1
+    @test physical == SDPX.physical_core_count()       # stable within a run
+
+    modest = SDPX.worker_report(2, 2)
+    @test modest.requested_workers == 2
+    @test modest.effective_workers == 2
+    @test modest.physical_cores == physical
+    @test !modest.oversubscribed
+
+    # Asking for more workers than the machine has must be reported as
+    # oversubscription, not as scaling headroom.
+    heavy = SDPX.worker_report(4 * physical, 4 * physical)
+    @test heavy.oversubscribed
+    @test heavy.requested_workers == 4 * physical
+
+    # Requested and effective differ whenever the plan caps the request.
+    capped = SDPX.worker_report(64, 1)
+    @test capped.requested_workers == 64
+    @test capped.effective_workers == 1
+    @test !capped.oversubscribed          # one worker cannot oversubscribe
+
+    # Julia's visible core count is reported under its own name, because it can
+    # be narrower than the hardware (affinity, JULIA_CPU_THREADS, containers)
+    # and labelling it "logical cores" would be wrong.
+    @test modest.julia_visible_cores == Sys.CPU_THREADS
+    @test modest.logical_cores >= modest.physical_cores
+end
+
+@testset "mixed-precision :auto is gated, not unreachable (§16.4)" begin
+    # An `:auto` path that can never fire is indistinguishable from `:off`, so
+    # pin the boundary. `:auto` requires m >= MIXED_KKT_MINIMUM_AUTO_DIMENSION;
+    # below that it declines, at and above it engages. `:on` is not subject to
+    # the dimension gate (it still respects the memory and backend gates).
+    function extended_problem(m)
+        side, blocks = 4, 2
+        rng = StableRNG(31)
+        A = [zeros(BigFloat, m, side, side) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            M = randn(rng, side, side)
+            A[l][i, :, :] = BigFloat.(M + M')
+        end
+        C = [Matrix{BigFloat}(one(BigFloat) * I, side, side) for _ in 1:blocks]
+        return SDPX.ingest(ones(BigFloat, m), A, C,
+            zeros(BigFloat, m, 0), BigFloat[]; verbosity=0)
+    end
+
+    threshold = SDPX.MIXED_KKT_MINIMUM_AUTO_DIMENSION
+    @test threshold > 0
+
+    setprecision(BigFloat, 256) do
+        below = extended_problem(threshold - 1)
+        @test SDPX.Workspace(below; mixed_precision_kkt=:auto).mixed_precision === nothing
+        # `:on` is not gated on dimension, so it must still be offered here.
+        @test SDPX.Workspace(below; mixed_precision_kkt=:on).mixed_precision !== nothing
+
+        at = extended_problem(threshold)
+        @test SDPX.Workspace(at; mixed_precision_kkt=:auto).mixed_precision !== nothing
+
+        # `:off` declines regardless of size.
+        @test SDPX.Workspace(at; mixed_precision_kkt=:off).mixed_precision === nothing
+    end
+end
+
+@testset "null-space formulation (§12.2)" begin
+    # x = x_particular + Z*z with B'Z = 0 parameterises the feasible set, so any
+    # z gives a point satisfying the equalities exactly.
+    function fixture(m, n; rank_deficient=false, seed=17)
+        rng = StableRNG(seed)
+        B = randn(rng, m, n)
+        rank_deficient && n >= 2 && (B[:, n] .= B[:, 1])   # duplicate a column
+        x_true = randn(rng, m)
+        return B, transpose(B) * x_true
+    end
+
+    @testset "basis is orthogonal to the constraints" begin
+        for (m, n) in ((60, 40), (100, 90))
+            B, b = fixture(m, n)
+            basis = SDPX.build_nullspace_basis(B, b)
+            @test basis.rank == n
+            @test basis.reduced_dimension == m - n
+            @test basis.consistent
+            r = SDPX.nullspace_residual(basis, B, b)
+            # A basis not orthogonal to B would silently violate the equalities
+            # in every reduced solve built on it.
+            @test r.orthogonality < 1e-10
+            @test r.feasibility < 1e-10
+        end
+    end
+
+    @testset "any reduced point satisfies the equalities" begin
+        B, b = fixture(60, 40)
+        basis = SDPX.build_nullspace_basis(B, b)
+        rng = StableRNG(5)
+        for _ in 1:3
+            z = randn(rng, basis.reduced_dimension)
+            x = SDPX.recover_full_solution(basis, z)
+            @test transpose(B) * x ≈ b rtol = 1e-8
+        end
+        @test_throws DimensionMismatch SDPX.recover_full_solution(basis, zeros(1))
+    end
+
+    @testset "rank deficiency is detected, not ignored" begin
+        B, b = fixture(50, 20; rank_deficient=true)
+        basis = SDPX.build_nullspace_basis(B, b)
+        @test basis.rank == 19                     # one duplicated column
+        @test basis.reduced_dimension == 50 - 19
+        r = SDPX.nullspace_residual(basis, B, b)
+        @test r.orthogonality < 1e-10
+    end
+
+    @testset "no equalities gives the identity basis" begin
+        B = zeros(8, 0)
+        basis = SDPX.build_nullspace_basis(B, Float64[])
+        @test basis.reduced_dimension == 8
+        @test basis.Z == Matrix{Float64}(I, 8, 8)
+        @test basis.consistent
+    end
+
+    @testset "selector declines when the reduction is not worth it" begin
+        # Few equalities: Z is nearly a dense m x m matrix and removes almost
+        # nothing, so the formulation costs more than it saves.
+        @test !SDPX.should_use_nullspace(variables=50, equalities=5)
+        @test SDPX.should_use_nullspace(variables=100, equalities=90)
+        @test !SDPX.should_use_nullspace(variables=100, equalities=0)
+        # Never claim a reduction when the equalities outnumber the variables.
+        @test !SDPX.should_use_nullspace(variables=10, equalities=10)
+        # Memory estimate is available before Z is built, and gates the choice.
+        @test SDPX.nullspace_memory_bytes(1000, 900, Float64) == 8 * 1000 * 100
+        @test !SDPX.should_use_nullspace(variables=1000, equalities=900,
+            memory_budget_bytes=1000)
+    end
+end
+
+@testset "allocation ceilings (§19.4)" begin
+    # Ceilings are set from measurement with headroom, not guessed. Their job is
+    # to catch a regression that reintroduces per-iteration allocation into a
+    # hot path — the kind of change that does not fail any correctness test but
+    # quietly costs throughput and GC pressure.
+    function arrow_problem(blocks, shared)
+        m = shared + blocks
+        rng = StableRNG(3)
+        coeff = [Vector{SparseMatrixCSC{Float64,Int}}(undef, m) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            coeff[l][i] = (i <= shared || i == shared + l) ?
+                sparse([1, 2, 2], [1, 1, 2], randn(rng, 3), 2, 2) : spzeros(2, 2)
+        end
+        C = [Matrix{Float64}(2.0I, 2, 2) for _ in 1:blocks]
+        return SDPX.ingest(ones(m), coeff, C, zeros(m, 0), Float64[];
+            sparse=:auto, verbosity=0)
+    end
+
+    function dense_problem(m, side, blocks)
+        rng = StableRNG(4)
+        A = [zeros(m, side, side) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            M = randn(rng, side, side)
+            A[l][i, :, :] = M + M'
+        end
+        C = [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks]
+        return SDPX.ingest(ones(m), A, C, zeros(m, 0), Float64[]; verbosity=0)
+    end
+
+    @testset "Schur assembly is allocation-free once warmed" begin
+        # Measured steady state: 0 B on the arrow path, 192 B dense.
+        for (prob, ceiling) in ((arrow_problem(40, 8), 256), (dense_problem(40, 6, 2), 2048))
+            ws = SDPX.Workspace(prob)
+            X = [Matrix{Float64}(1.0I, k, k) for k in prob.dims.k]
+            Y = [Matrix{Float64}(1.0I, k, k) for k in prob.dims.k]
+            @test SDPX.factor_blocks!(ws, X, Y)
+            SDPX.schur_build!(ws, prob, prob.cons, X, Y)         # warm up
+            GC.gc()
+            allocated = minimum(
+                @allocated(SDPX.schur_build!(ws, prob, prob.cons, X, Y)) for _ in 1:3)
+            @test allocated <= ceiling
+        end
+    end
+
+    @testset "per-iteration allocation stays bounded" begin
+        # Measured ~70 KB/iteration (arrow) and ~129 KB/iteration (dense); the
+        # ceilings allow roughly 2x for machine and version variation while
+        # still catching an order-of-magnitude regression.
+        for (prob, ceiling) in ((arrow_problem(40, 8), 200_000),
+                                (dense_problem(40, 6, 2), 350_000))
+            o = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=12)
+            SDPX.solve!(prob, o)                                  # warm up
+            GC.gc()
+            total = @allocated SDPX.solve!(prob, o)
+            result = SDPX.solve!(prob, o)
+            @test result.iterations > 0
+            @test total / result.iterations <= ceiling
+        end
+    end
+end
+
+@testset "certificate carries solve provenance (§20.3)" begin
+    # §20.3 requires the certificate to record how the answer was produced, not
+    # only what it is: a residual means something different depending on the
+    # regularization applied, whether the factorization ran at reduced
+    # precision, and the width the validation itself used.
+    prob = unbalanced_arrow_problem(blocks=4, shared=2)
+    opts = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=200, diagnostics=true)
+    result = SDPX.solve!(prob, opts)
+    certificate = SDPX.result_certificate(prob, result, opts)
+
+    prov = certificate.provenance
+    @test prov.iterations == result.iterations
+    @test prov.regularizations == result.regularizations
+    @test prov.restarts == result.restarts
+    @test prov.mixed_precision_used isa Bool
+
+    # The validation width bounds how small a residual the certificate can
+    # meaningfully claim. A 1e-30 residual "validated" in Float64 is a
+    # statement about round-off, not about the solution.
+    @test prov.validation_precision_bits == 52          # Float64 mantissa
+
+    setprecision(BigFloat, 256) do
+        wide = SDPX.ingest(BigFloat[2, 3],
+            [reshape(BigFloat[1, 0, 0, 0, 0, 0, 0, 1], 2, 2, 2)],
+            [BigFloat[0 1; 1 0]], reshape(BigFloat[1, 0], 2, 1), BigFloat[1];
+            verbosity=0)
+        wide_opts = SDPX.SolverOptions{BigFloat}(verbosity=0, diagnostics=true)
+        wide_result = SDPX.solve!(wide, wide_opts)
+        wide_certificate = SDPX.result_certificate(wide, wide_result, wide_opts)
+        @test wide_certificate.provenance.validation_precision_bits == 256
+    end
+end
+
+@testset "solve_summary exposes the §21.3 contract" begin
+    # §21.3 says "the exact field types may be refined, but the information
+    # contract should remain stable". Pin the field names so a refactor cannot
+    # quietly drop one — every field below is something a caller needs and would
+    # otherwise have to reach into `diagnostics` or a separate certificate call
+    # to obtain.
+    prob = unbalanced_arrow_problem(blocks=4, shared=2)
+    opts = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=200, diagnostics=true)
+    result = SDPX.solve!(prob, opts)
+    summary = SDPX.solve_summary(prob, result, opts)
+
+    for field in (:status, :objective_value, :dual_objective_value,
+                  :primal_solution, :dual_solution, :primal_residual,
+                  :dual_residual, :relative_gap, :complementarity,
+                  :minimum_psd_eigenvalue, :iterations, :solve_time,
+                  :peak_memory_bytes, :selected_algorithms, :parameter_history,
+                  :timings, :warnings, :certificate)
+        @test hasproperty(summary, field)
+    end
+
+    # The summary must agree with the result it summarises, not recompute
+    # something subtly different.
+    @test summary.status === result.status
+    @test summary.objective_value == result.pObj
+    @test summary.dual_objective_value == result.dObj
+    @test summary.relative_gap == result.gap_rel
+    @test summary.iterations == result.iterations
+    @test summary.primal_solution.x === result.x
+    @test summary.dual_solution.Y === result.Y
+
+    # A converged solve has non-negative complementarity and no PSD violation
+    # (reported as the negated required diagonal shift, so zero means feasible).
+    @test summary.complementarity >= 0
+    @test summary.minimum_psd_eigenvalue <= 0
+    @test summary.certificate.valid isa Bool
+    @test summary.warnings isa Vector{String}
+
+    # Works without diagnostics too, reporting `nothing` rather than throwing.
+    bare = SDPX.solve!(prob, SDPX.SolverOptions{Float64}(verbosity=0, diagnostics=false))
+    bare_summary = SDPX.solve_summary(prob, bare,
+        SDPX.SolverOptions{Float64}(verbosity=0, diagnostics=false))
+    @test bare_summary.peak_memory_bytes === nothing
+    @test bare_summary.selected_algorithms === nothing
+    @test bare_summary.warnings == String[]
+end
+
+@testset "spectrum reports extraction cost separately (§22)" begin
+    # §22 requires extraction time and memory to be reported separately from the
+    # solve. Spectrum reconstruction is an eigendecomposition per block and can
+    # cost more than an interior-point iteration, so folding it into the solve
+    # timings would misattribute it.
+    rng = StableRNG(41)
+    m, blocks, side = 6, 3, 8
+    A = [zeros(m, side, side) for _ in 1:blocks]
+    for l in 1:blocks, i in 1:m
+        M = randn(rng, side, side)
+        A[l][i, :, :] = M + M'
+    end
+    C = [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks]
+    prob = SDPX.ingest(ones(m), A, C, zeros(m, 0), Float64[]; verbosity=0)
+    result = SDPX.solve!(prob, SDPX.SolverOptions{Float64}(verbosity=0, iter_max=100))
+
+    spectrum = SDPX.reconstruct_spectrum(result; allow_uncertified=true)
+    metadata = spectrum.metadata
+
+    @test hasproperty(metadata, :extraction_seconds)
+    @test hasproperty(metadata, :extraction_bytes)
+    @test hasproperty(metadata, :eigenvalues_extracted)
+    @test metadata.extraction_seconds >= 0
+    @test metadata.extraction_bytes >= 0
+    # One eigenvalue per row of every block.
+    @test metadata.eigenvalues_extracted == blocks * side
+    @test length(spectrum) == metadata.eigenvalues_extracted
+
+    # Extraction cost must not be conflated with the solve's own timings.
+    @test !hasproperty(metadata, :total)
+    # And the metadata still records the precision context §22 asks for.
+    @test metadata.result_arithmetic == "Float64"
+    @test metadata.requested_precision === :native
 end

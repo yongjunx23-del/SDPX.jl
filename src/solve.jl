@@ -84,6 +84,75 @@ function _replace_solver_options(
 end
 
 """
+    lp_initial_scale_indicator(prob) -> T
+
+Estimate how far the origin is from the LP constraint hyperplanes, using
+
+`max_i |h_i| / ‖G_i‖∞` and `max_j |b_j| / ‖B_j‖∞`.
+
+Unlike a raw right-hand-side norm, this diagnostic is invariant to positive
+rescaling of an individual constraint. It is used only by the zero-probe
+parameter selector: aggressive LP centering is reliable when the feasible
+set is reasonably close to the origin, while a conservative profile is safer
+for very distant Float64 starts. A nonzero right-hand side with a zero
+coefficient row returns `Inf`; presolve subsequently reports the underlying
+inconsistency.
+"""
+function lp_initial_scale_indicator(prob::SDPProblem{T}) where {T}
+    all(==(1), prob.dims.k) ||
+        throw(ArgumentError(
+            "lp_initial_scale_indicator requires a pure 1x1-cone LP",
+        ))
+    largest = zero(T)
+    if prob.cons isa DenseCons{T}
+        panels = (prob.cons::DenseCons{T}).Av
+        @inbounds for block in eachindex(panels)
+            coefficient = maximum(abs, panels[block]; init=zero(T))
+            rhs = abs(prob.C[block][1, 1])
+            ratio = coefficient > zero(T) ?
+                    rhs / coefficient :
+                    (rhs > zero(T) ? T(Inf) : zero(T))
+            largest = max(largest, ratio)
+        end
+    else
+        cons = prob.cons::SparseCons{T}
+        @inbounds for block in eachindex(cons.Asp)
+            coefficient = zero(T)
+            for variable in cons.active[block]
+                coefficient = max(
+                    coefficient,
+                    abs(cons.Asp[block][variable][1, 1]),
+                )
+            end
+            rhs = abs(prob.C[block][1, 1])
+            ratio = coefficient > zero(T) ?
+                    rhs / coefficient :
+                    (rhs > zero(T) ? T(Inf) : zero(T))
+            largest = max(largest, ratio)
+        end
+    end
+    @inbounds for equality in axes(prob.B, 2)
+        coefficient = maximum(
+            abs,
+            view(prob.B, :, equality);
+            init=zero(T),
+        )
+        rhs = abs(prob.b[equality])
+        ratio = coefficient > zero(T) ?
+                rhs / coefficient :
+                (rhs > zero(T) ? T(Inf) : zero(T))
+        largest = max(largest, ratio)
+    end
+    return largest
+end
+
+# The aggressive LP profile was robust below this row-scale-invariant distance
+# in the deterministic validation suite. Every arithmetic type falls back
+# above it: a wider exponent range prevents overflow, but does not remove the
+# globalization difficulty of a very distant infeasible start.
+const LP_AGGRESSIVE_START_SCALE_LIMIT = 1_000
+
+"""
     recommended_parameters(prob, opts) -> NamedTuple
 
 Choose a zero-probe parameter profile from problem structure and requested
@@ -96,25 +165,42 @@ function recommended_parameters(
 ) where {T}
     cons = prob.cons
     if all(==(1), prob.dims.k)
+        if opts.algorithm === :sdp
+            return (
+                β=opts.β,
+                γ=opts.γ,
+                Ωp=opts.Ωp,
+                Ωd=opts.Ωd,
+                predictor=opts.predictor,
+                parameter_strategy=opts.parameter_strategy,
+                profile=:lp_general_conic,
+            )
+        end
+        initial_scale = lp_initial_scale_indicator(prob)
+        aggressive =
+            isfinite(initial_scale) &&
+            initial_scale <= T(LP_AGGRESSIVE_START_SCALE_LIMIT)
         return (
-            β=opts.β,
-            γ=opts.γ,
+            β=aggressive ? T(1) / T(50) : opts.β,
+            γ=aggressive ? T(99) / T(100) : opts.γ,
             Ωp=opts.Ωp,
             Ωd=opts.Ωd,
             predictor=opts.predictor,
             parameter_strategy=opts.parameter_strategy,
-            profile=:lp_mehrotra,
+            profile=aggressive ?
+                    :lp_mehrotra_fast_start :
+                    :lp_mehrotra_conservative_start,
         )
     end
     if prob.structure.profile ===
        :sparse_coefficients_dense_psd_dense_schur &&
-       prob.dims.m >= 1_000 &&
+        prob.dims.m >= 1_000 &&
        prob.dims.n > 0
         return (
-            β=T(0.1),
-            γ=T(0.85),
+            β=T(1) / T(10),
+            γ=T(17) / T(20),
             Ωp=T(100),
-            Ωd=T(0.001),
+            Ωd=T(1) / T(1_000),
             predictor=:sdpb,
             parameter_strategy=opts.parameter_strategy,
             profile=:large_equality_dense_schur,
@@ -123,20 +209,21 @@ function recommended_parameters(
     if cons isa SparseCons{T} && prob.dims.n == 0 && all(<=(2), prob.dims.k)
         max_active = maximum(length, cons.active; init=0)
         beta, gamma, profile = if max_active <= 6
-            (T(0.1), T(0.85), :small_arrow_2x2)
+            (T(1) / T(10), T(17) / T(20), :small_arrow_2x2)
         elseif max_active <= 14
-            (T(0.1), T(0.8), :medium_arrow_2x2)
+            (T(1) / T(10), T(4) / T(5), :medium_arrow_2x2)
         else
             # Beyond the range the fixed profiles were calibrated on
             # (thresholds top out at 14 active variables per block). The CSDR
             # 80/4/40/100 model has 385, and the old `(0.4, 0.7)` setting did
             # not converge on it at all; a sweep found `(0.01, 0.85)` reaching
             # the correct basin.
-            (T(0.01), T(0.85), :large_arrow_2x2)
+            (T(1) / T(100), T(17) / T(20), :large_arrow_2x2)
         end
-        if T === BigFloat && opts.ϵ_gap < T(1e-10)
-            beta = T(0.1)
-            gamma = min(gamma, T(0.75))
+        if T === BigFloat &&
+           opts.ϵ_gap < T(1) / T(10_000_000_000)
+            beta = T(1) / T(10)
+            gamma = min(gamma, T(3) / T(4))
             profile = :high_accuracy_bigfloat_2x2
         end
         # Scale the initial point to the data instead of pinning it at 10.
@@ -169,11 +256,24 @@ function recommended_parameters(
             profile,
         )
     end
+    # Scale the initial point to the data. `X = Ω·I` has to be commensurate
+    # with `C`, because the initial dual residual is `‖C_l − Ω·I‖`; a fixed
+    # Ω=1 against data of magnitude 1e7 leaves the solve stranded at its
+    # starting residual. Measured on the badly-scaled benchmark generator
+    # (`max‖C_l‖∞ = 1.6e7`): Ω=1 stalls at iteration 15 with `gap_rel = 2.0`
+    # and `dObj = -1.5e12`, while Ω = max‖C_l‖∞ converges to `Optimal` in 19
+    # iterations at `gap_rel = 1.9e-11` with a valid certificate. Equilibration
+    # does not substitute for it — it was measured and left the solve stalled.
+    #
+    # Taking the max with `opts.Ωp` makes this a no-op for data already at unit
+    # scale (where `max‖C_l‖∞ ≈ 1`), so well-scaled models keep their previous
+    # behaviour and a user-supplied larger Ω is still honoured.
+    stats = block_norm_stats(prob)
     return (
         β=opts.β,
         γ=opts.γ,
-        Ωp=opts.Ωp,
-        Ωd=opts.Ωd,
+        Ωp=max(opts.Ωp, stats.maxnorm),
+        Ωd=max(opts.Ωd, stats.maxnorm),
         predictor=opts.predictor,
         parameter_strategy=opts.parameter_strategy,
         profile=:general_fixed,
@@ -427,12 +527,22 @@ function _equilibrate_warm_start(
                     matrix[row, column] /=
                         diagonal[row] * diagonal[column]
                 end
+                # Objective normalisation divides `c` by `objective_scale`,
+                # which scales the dual by its inverse. `unequilibrate`
+                # multiplies `y`/`Y` back, so mapping a warm start *into* the
+                # equilibrated space must divide by the same factor. Omitting it
+                # makes the round-trip asymmetric and returns duals inflated by
+                # exactly `objective_scale`.
+                eq.objective_scale == one(T) ||
+                    (matrix ./= eq.objective_scale)
                 matrix
             end
             for block in eachindex(Y0)
         ]
     end
-    return scaled_x0, scaled_X0, y0, scaled_Y0
+    scaled_y0 = (y0 === nothing || eq.objective_scale == one(T)) ? y0 :
+                _owned_array_copy(T, y0) ./ eq.objective_scale
+    return scaled_x0, scaled_X0, scaled_y0, scaled_Y0
 end
 
 """
@@ -454,25 +564,6 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
         throw(ArgumentError("parameter_strategy must be :fixed or :adaptive"))
-    if opts.parameter_policy === :auto
-        selected = recommended_parameters(prob, opts)
-        opts.verbosity >= 1 && println(
-            "SDPX auto parameters: profile=$(selected.profile), " *
-            "beta=$(Float64(selected.β)), gamma=$(Float64(selected.γ)), " *
-            "omega_p=$(Float64(selected.Ωp)), omega_d=$(Float64(selected.Ωd)), " *
-            "predictor=$(selected.predictor), strategy=$(selected.parameter_strategy)",
-        )
-        opts = _replace_solver_options(
-            opts;
-            β=selected.β,
-            γ=selected.γ,
-            Ωp=selected.Ωp,
-            Ωd=selected.Ωd,
-            predictor=selected.predictor,
-            parameter_strategy=selected.parameter_strategy,
-            parameter_policy=:fixed,
-        )
-    end
     zero(T) < opts.β < one(T) ||
         throw(ArgumentError("β must be strictly between zero and one"))
     zero(T) < opts.γ < one(T) ||
@@ -513,6 +604,34 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     if opts.equilibrate
         solve_prob, eq = equilibrate(prob)
     end
+
+    # Parameter selection must see the problem that will actually be solved.
+    # Equilibration changes the data scale by orders of magnitude, and the
+    # initial point `X = Ω·I` is chosen *from* that scale — picking Ω on the
+    # original problem and then solving the equilibrated one applies an Ω that
+    # can be wrong by the whole equilibration factor. Observed on the
+    # badly-scaled benchmark generator: Ω selected from `max‖C_l‖∞ = 1.6e7` and
+    # applied to an equilibrated problem of unit scale drove the primal residual
+    # to 8.7e+15, where the same solve without equilibration converged.
+    if opts.parameter_policy === :auto
+        selected = recommended_parameters(solve_prob, opts)
+        opts.verbosity >= 1 && println(
+            "SDPX auto parameters: profile=$(selected.profile), " *
+            "beta=$(Float64(selected.β)), gamma=$(Float64(selected.γ)), " *
+            "omega_p=$(Float64(selected.Ωp)), omega_d=$(Float64(selected.Ωd)), " *
+            "predictor=$(selected.predictor), strategy=$(selected.parameter_strategy)",
+        )
+        opts = _replace_solver_options(
+            opts;
+            β=selected.β,
+            γ=selected.γ,
+            Ωp=selected.Ωp,
+            Ωd=selected.Ωd,
+            predictor=selected.predictor,
+            parameter_strategy=selected.parameter_strategy,
+            parameter_policy=:fixed,
+        )
+    end
     if eq !== nothing && isempty(resume)
         x0, X0, y0, Y0 = _equilibrate_warm_start(
             T,
@@ -530,6 +649,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         extended_precision_blas=opts.extended_precision_blas,
         extended_precision_memory_fraction=
             opts.extended_precision_memory_fraction,
+        mixed_precision_kkt=opts.mixed_precision_kkt,
+        mixed_precision_memory_fraction=
+            opts.mixed_precision_memory_fraction,
         thread_count=opts.threads,
     )
     time() >= deadline &&
@@ -731,7 +853,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # with the retained best iterate is both faster and more honest than
         # grinding to `IterLimit`/`MaxRestartsExceeded`.
         if stagnated
-            status = Stalled
+            # Distinguish "the arithmetic ran out" from "the algorithm stopped
+            # making progress". Only the first is fixed by a wider type, and
+            # saying so is the difference between an actionable result and a
+            # bare `Stalled`.
+            status = stagnation.reason === :precision_floor ? InsufficientPrecision : Stalled
             message = stagnation_message(stagnation, opts.ϵ_gap)
             break
         end
@@ -904,7 +1030,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                                  best_merit < initial_merit * T(1e-3) &&
                                  best_merit < T(NEAR_SOLUTION_MERIT)
             if opts.stall_iterations > 0 && made_real_progress
-                status, message = Stalled,
+                status, message = InsufficientPrecision,
                 "Step size collapsed after the solve had already converged by a " *
                 "factor of $(round(Float64(initial_merit / max(best_merit, eps(T))), sigdigits=3)) " *
                 "in the scaled merit; this is precision exhaustion at $(T), not bad " *
@@ -1132,6 +1258,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             rate=stagnation.rate,
             projected_iterations=stagnation.projected,
             window=stagnation.window,
+            mixed_precision_kkt=
+                _mixed_precision_kkt_diagnostics(ws),
         ),
     )
 end
@@ -1383,9 +1511,20 @@ function _solve_pipeline!(
                 "Matrix-valued X0/Y0 warm starts are ignored by the dedicated LP path; " *
                 "provide x0/y0.",
             )
+        lp_options = opts.parameter_policy === :auto ?
+                     _replace_solver_options(
+                         opts;
+                         β=plan.parameters.beta,
+                         γ=plan.parameters.gamma,
+                         Ωp=plan.parameters.omega_p,
+                         Ωd=plan.parameters.omega_d,
+                         predictor=plan.parameters.predictor,
+                         parameter_policy=:fixed,
+                     ) :
+                     opts
         result, redundant_rows, workspace_bytes = solve_lp!(
             reduced,
-            opts,
+            lp_options,
             plan;
             x0=x0,
             y0=reduced_y0,
@@ -1445,6 +1584,22 @@ function _solve_pipeline!(
         push!(
             warnings,
             "Adaptive parameter control detected instability and reverted to the fixed defaults.",
+        )
+    end
+    mixed_kkt = get(
+        result.termination,
+        :mixed_precision_kkt,
+        (available=false,),
+    )
+    if mixed_kkt.available &&
+       (mixed_kkt.fell_back || mixed_kkt.disabled)
+        push!(
+            warnings,
+            "Mixed-precision KKT used the native extended-precision " *
+            "fallback (reason=$(mixed_kkt.reason), attempts=" *
+            "$(mixed_kkt.factor_attempt_count), dynamic_fallbacks=" *
+            "$(mixed_kkt.dynamic_fallback_count), static_rejections=" *
+            "$(mixed_kkt.static_rejection_count)).",
         )
     end
     return _attach_diagnostics(

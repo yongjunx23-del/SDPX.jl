@@ -1095,7 +1095,13 @@ function solve_lp!(
     p_objective = dot(c, x)
     d_objective = dot(h, z) + dot(b, y)
     parameter_controller = AdaptiveIPMController(opts)
-    regularization = max(sqrt(eps(T)), T(1e-12))
+    # Relative regularization floor. The absolute value is scaled by the
+    # Hessian norm each iteration (see below), because a fixed constant is wrong
+    # for the same reason a fixed initial point is: `sqrt(eps(Float64))` is
+    # 1.5e-8 whether the Hessian has entries near one or near 1e7, and in the
+    # latter case it regularizes nothing at all.
+    relative_regularization = max(sqrt(eps(T)), T(1e-12))
+    regularization = relative_regularization
     residual_seconds = 0.0
     gram_seconds = 0.0
     factor_seconds = 0.0
@@ -1175,6 +1181,20 @@ function solve_lp!(
         factor_started = time_ns()
         factor = nothing
         successful = false
+        # §15.4: use the smallest regularization that stabilizes the
+        # factorization. The previous iteration's value decays back toward the
+        # floor instead of persisting — escalation responds to one difficult
+        # iteration, and carrying it forever means a single hard step
+        # permanently over-regularizes every step after it, biasing the
+        # direction long after the difficulty has passed.
+        #
+        # Deliberately NOT scaled by ‖H‖. That was tried and it breaks the LP
+        # path: `H = GᵀDG` with `D = z/s`, whose norm grows without bound as the
+        # barrier parameter goes to zero. Scaling δ by that growth makes δ grow
+        # too, and the solve degrades to `Stalled`/`NumericalBreakdown` instead
+        # of converging. The analogy to norm-scaling the initial point does not
+        # transfer: there the data norm is fixed, here it diverges by design.
+        regularization = max(relative_regularization, regularization / T(10))
         local attempt_regularization = regularization
         for attempt in 1:8
             factor = _lp_factor_kkt!(workspace, B, attempt_regularization)

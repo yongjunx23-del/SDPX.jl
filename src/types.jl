@@ -35,6 +35,20 @@ statuses, not exceptions.
     NumericalBreakdown   # non-finite iterate, or KKT system irreparably singular
     MaxRestartsExceeded  # step-size collapsed and used up opts.max_restarts rescue attempts (§5.2)
     UserStopped          # opts.callback returned true
+    # A solution that satisfies a relaxed multiple of the requested tolerance
+    # but not the tolerance itself. Distinguishing this from `Optimal` is what
+    # lets `Optimal` mean exactly "the requested tolerance was met, verified in
+    # the original coordinates" — see `certify_final_result`.
+    AlmostOptimal
+    # The working precision, not the algorithm, is the binding constraint: the
+    # convergence metrics reached the floor of `T` and stopped improving. The
+    # actionable response is a wider arithmetic type, so this is reported
+    # separately from a generic stall.
+    InsufficientPrecision
+    # The solve produced a result that failed independent validation in the
+    # original coordinates, or the linear algebra failed in a way that is not a
+    # plain breakdown. Never presented as a success.
+    NumericalFailure
 end
 
 """
@@ -116,6 +130,16 @@ Base.@kwdef struct SolverOptions{T}
     parameter_strategy::Symbol = :fixed                 # :fixed | :adaptive; adaptive is benchmark-gated
     extended_precision_blas::Symbol = :off              # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
+    # Opt-in extended-precision KKT acceleration. The Schur complement is
+    # factored in Float64, while residuals and accepted directions remain in
+    # the requested BigFloat or fixed-width extended arithmetic.
+    # Conditioning and predicted-refinement guards reject unsafe systems, and
+    # stalled refinement falls back to the native target-precision
+    # factorization.
+    mixed_precision_kkt::Symbol = :off                  # :off | :auto | :on
+    mixed_precision_condition_limit::Float64 = 1.0e8
+    mixed_precision_refine_max_steps::Int = 32
+    mixed_precision_memory_fraction::Float64 = 0.10
     algorithm::Symbol         = :auto                   # :auto | :lp | :sdp
     presolve::Bool            = true                    # equality-rank and scalar-cone redundancy presolve
     # Zero selects the conservative dimension-scaled machine-epsilon rank

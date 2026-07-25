@@ -33,7 +33,18 @@ Factor the current Schur complement `ws.S` (accumulated by
 """
 function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     ws.arrow === nothing || return factor_arrow_kkt!(ws, opts)
+    if ws.mixed_precision !== nothing &&
+       _try_factor_mixed_kkt!(ws.mixed_precision, ws, prob, opts)
+        return (ok=true, reg_attempts=0, q_pivoted=false)
+    end
+    return _factor_dense_kkt_native!(ws, prob, opts)
+end
 
+function _factor_dense_kkt_native!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
     L, m, n, k = prob.dims
 
     copy_owned!(ws.Sbuf, ws.S)
@@ -479,6 +490,17 @@ function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs
         n == 0 || error("internal error: arrow KKT selected with equality columns")
         return solve_arrow_kkt!(ws, r, dx_out), dy_out
     end
+    if ws.mixed_precision !== nothing &&
+       ws.mixed_precision.active
+        return _solve_mixed_kkt!(
+            ws.mixed_precision,
+            n,
+            r,
+            p_rhs,
+            dx_out,
+            dy_out,
+        )
+    end
 
     copy_owned!(ws.rtil, r)
     ktrsv_lower!(ws.Sbuf, ws.rtil)   # r̃ = L_S⁻¹r
@@ -910,6 +932,10 @@ passes only add rounding noise.
 """
 function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
                            opts::SolverOptions{T}, r::AbstractVector{T}) where {T}
+    if ws.mixed_precision !== nothing &&
+       ws.mixed_precision.active
+        return _refine_mixed_direction!(ws, prob, opts, r)
+    end
     if opts.refine_policy === :fixed
         opts.refine_steps > 0 || return (0, zero(T))
         residual = zero(T)

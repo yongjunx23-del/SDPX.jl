@@ -851,7 +851,16 @@ congruence `E[l]` (Ruiz-style) plus per-variable scale `s`. Use
 struct Equilibration{T}
     E::Vector{Vector{T}}
     s::Vector{T}
+    # Objective normalisation factor (plan §9.2). `c` is divided by this after
+    # the per-variable scaling, which leaves the feasible set and the optimal
+    # `x` untouched — but the dual scales with it, so `unequilibrate` must
+    # multiply `y` and `Y` back by it. Recorded here so that inverse is
+    # possible at all; without it the returned duals are silently wrong by a
+    # constant factor.
+    objective_scale::T
 end
+
+Equilibration{T}(E, s) where {T} = Equilibration{T}(E, s, one(T))
 
 """
     equilibrate(prob::SDPProblem{T}, cons::SparseCons) -> (scaled, Equilibration)
@@ -914,7 +923,17 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
     # (or its objective entry) is O(1).
     s = ones(T, m)
     @inbounds for i in 1:m
-        v = abs(prob.c[i])
+        # Constraint coefficients only. Including `abs(prob.c[i])` here
+        # conflates objective scale with constraint scale: the substitution is
+        # `x̂_i = s_i x_i`, so one `s_i` has to serve both, and whichever of the
+        # two is larger wins. On the badly-scaled benchmark generator `|c_i|`
+        # reaches 1.8e10 while the row-scaled `A_i` is ~1e-4, so `s_i` was set
+        # entirely by the objective and dividing `A_i` by it drove the
+        # constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0` satisfiable
+        # only by enormous `x`. Objective magnitude is a separate concern and is
+        # handled by a single scalar below, which cannot distort the feasible
+        # set the way a per-variable objective scale does.
+        v = zero(T)
         for l in 1:L
             A = Asp2[l][i]
             isempty(nonzeros(A)) && continue
@@ -923,6 +942,15 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
         s[i] = v > 0 ? v : one(T)
     end
     cc = prob.c ./ s
+    # Objective normalisation (plan §9.2). A single positive scalar rescales the
+    # objective without touching the feasible set or the optimal `x`, keeping
+    # `‖c‖∞` near one so the dual residual and the gap are measured on a sane
+    # scale. The factor is recorded in `Equilibration` and undone on the dual in
+    # `unequilibrate`; the primal objective needs no correction because it is
+    # recomputed from the original `prob.c` after unscaling.
+    objective_scale = knrmInf(cc)
+    (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
+    cc ./= objective_scale
     Bc = copy(prob.B)
     @inbounds for i in 1:m, j in 1:n
         Bc[i, j] /= s[i]
@@ -957,7 +985,7 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
         SparseCons{T}(Asp2, active, order, packed2),
         prob.dims, prob.structure,
     )
-    return scaled, Equilibration{T}(E, s)
+    return scaled, Equilibration{T}(E, s, objective_scale)
 end
 
 """
@@ -1014,7 +1042,17 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
 
     s = ones(T, m)
     for i in 1:m
-        v = abs(prob.c[i])
+        # Constraint coefficients only. Including `abs(prob.c[i])` here
+        # conflates objective scale with constraint scale: the substitution is
+        # `x̂_i = s_i x_i`, so one `s_i` has to serve both, and whichever of the
+        # two is larger wins. On the badly-scaled benchmark generator `|c_i|`
+        # reaches 1.8e10 while the row-scaled `A_i` is ~1e-4, so `s_i` was set
+        # entirely by the objective and dividing `A_i` by it drove the
+        # constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0` satisfiable
+        # only by enormous `x`. Objective magnitude is a separate concern and is
+        # handled by a single scalar below, which cannot distort the feasible
+        # set the way a per-variable objective scale does.
+        v = zero(T)
         for l in 1:L
             kl = k[l]
             Ai = reshape(view(Av2[l], :, i), kl, kl)
@@ -1026,6 +1064,11 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
     end
 
     cc = prob.c ./ s
+    # Objective normalisation (plan §9.2), matching the sparse path so the two
+    # equilibration routes produce comparably scaled problems.
+    objective_scale = knrmInf(cc)
+    (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
+    cc ./= objective_scale
     Bc = copy(prob.B)
     for i in 1:m
         @inbounds for j in 1:n
@@ -1048,7 +1091,7 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
         prob.dims,
         prob.structure,
     )
-    return scaled, Equilibration{T}(E, s)
+    return scaled, Equilibration{T}(E, s, objective_scale)
 end
 
 """
@@ -1074,5 +1117,15 @@ function unequilibrate(eq::Equilibration{T}, x̂, X̂, ŷ, Ŷ) where {T}
         X[l] = Xl
         Y[l] = Yl
     end
-    return x, X, ŷ, Y
+    # The objective was divided by `objective_scale`, which scales the dual by
+    # its inverse; multiply back so the returned multipliers belong to the
+    # original problem. The primal `x` is unaffected — rescaling the objective
+    # does not move the argmin.
+    y = eq.objective_scale == one(T) ? ŷ : ŷ .* eq.objective_scale
+    if eq.objective_scale != one(T)
+        for l in 1:L
+            Y[l] .*= eq.objective_scale
+        end
+    end
+    return x, X, y, Y
 end

@@ -136,6 +136,13 @@ function reconstruct_spectrum(
     block_dimensions = Tuple(size(matrix, 1) for matrix in matrices)
     projected = precision === :float64 && T !== Float64
     certified = _spectrum_is_certified(result)
+    # §22: extraction cost is reported separately from the solve. Spectrum
+    # reconstruction is an eigendecomposition per block and can cost more than
+    # an interior-point iteration, so folding it into the solve timings would
+    # misattribute it — a user comparing solve times needs to know which figure
+    # includes post-processing.
+    extraction_started = time()
+    extraction_allocated = Base.gc_bytes()
     records = NamedTuple[]
     for (block, matrix) in pairs(matrices)
         values = _spectrum_eigenvalues(matrix, precision)
@@ -151,6 +158,8 @@ function reconstruct_spectrum(
             )
         end
     end
+    extraction_seconds = time() - extraction_started
+    extraction_bytes = max(Base.gc_bytes() - extraction_allocated, 0)
     eigenvalue_arithmetic = isempty(records) ?
                             (precision === :native ? string(T) : "Float64") :
                             string(typeof(first(records).eigenvalue))
@@ -167,6 +176,9 @@ function reconstruct_spectrum(
         dual_residual=result.d_res,
         result_arithmetic=string(T),
         requested_precision=precision,
+        extraction_seconds=extraction_seconds,
+        extraction_bytes=extraction_bytes,
+        eigenvalues_extracted=length(records),
         eigenvalue_arithmetic=eigenvalue_arithmetic,
         projected=projected,
         warnings=Tuple(warnings),

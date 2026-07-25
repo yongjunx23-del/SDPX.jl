@@ -6,6 +6,7 @@ import ..SDPX: kdot_columns!
 
 include("types.jl")
 include("selector.jl")
+include("calibration.jl")
 include("packing.jl")
 include("gemm.jl")
 include("syrk.jl")

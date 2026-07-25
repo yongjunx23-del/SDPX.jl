@@ -12,9 +12,14 @@ include("ingest.jl")
 include("pipeline.jl")
 include("adaptive_parameters.jl")
 include("stagnation.jl")
+include("kernels/mixed_precision_kkt.jl")
 include("workspace.jl")
 include("schur.jl")
 include("kkt.jl")
+include("kkt_backend.jl")
+include("kkt_sparse_backend.jl")
+include("nullspace.jl")
+include("chordal.jl")
 include("step.jl")
 include("kernels/threaded.jl")
 include("lp_solver.jl")
@@ -30,7 +35,7 @@ export recommended_parameters, StructureAnalysis, analyze_structure, structure_s
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
 export classify_problem, build_execution_plan, SpectrumResult
 export reconstruct_spectrum, export_spectrum
-export result_certificate
+export result_certificate, solve_summary
 export Optimizer
 
 end

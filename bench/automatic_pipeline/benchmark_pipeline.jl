@@ -101,6 +101,15 @@ function measure(
         strategy=string(options.parameter_strategy),
         algorithm=string(result.diagnostics.plan.algorithm),
         gram_kernel=string(result.diagnostics.plan.gram_kernel),
+        parameter_profile=string(
+            result.diagnostics.plan.parameter_profile,
+        ),
+        selected_beta=Float64(
+            result.diagnostics.plan.parameters.beta,
+        ),
+        selected_gamma=Float64(
+            result.diagnostics.plan.parameters.gamma,
+        ),
         median_seconds=median(getfield.(measurements, :seconds)),
         minimum_seconds=minimum(getfield.(measurements, :seconds)),
         allocated_bytes=representative.allocated_bytes,
@@ -195,6 +204,24 @@ function main(arguments)
             expected_objective=medium_optimum,
         ),
     )
+    push!(
+        rows,
+        measure(
+            "medium_lp_dedicated_legacy_parameters",
+            medium_lp,
+            SDPX.SolverOptions{Float64}(;
+                lp_base...,
+                β=0.1,
+                γ=0.9,
+                algorithm=:lp,
+                parameter_policy=:fixed,
+                parameter_strategy=:fixed,
+                threads=1,
+            );
+            repetitions=5,
+            expected_objective=medium_optimum,
+        ),
+    )
     for strategy in (:fixed, :adaptive)
         push!(
             rows,
@@ -212,6 +239,24 @@ function main(arguments)
             ),
         )
     end
+    push!(
+        rows,
+        measure(
+            "large_lp_legacy_1_thread",
+            large_lp,
+            SDPX.SolverOptions{Float64}(;
+                lp_base...,
+                β=0.1,
+                γ=0.9,
+                algorithm=:lp,
+                parameter_policy=:fixed,
+                parameter_strategy=:fixed,
+                threads=1,
+            );
+            repetitions=5,
+            expected_objective=large_optimum,
+        ),
+    )
     for threads in (1, 2, 4, 8)
         threads <= Threads.nthreads() || continue
         push!(

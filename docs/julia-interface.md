@@ -180,6 +180,11 @@ attribute, including `sparse`, `equilibrate`, `predictor`, `refine_steps`,
 selects a calibrated structural profile without a pilot solve; use
 `:fixed` in expert mode to preserve explicitly supplied `beta`, `gamma`, and
 initialization scales.
+For the dedicated LP engine, automatic mode selects the faster
+`beta=1/50, gamma=99/100` profile only when a row-scale-invariant
+initial-distance indicator is at most `1000`; distant starts retain the
+configured conservative values. The selected profile and parameters are
+available in `result.diagnostics.plan`.
 `parameter_strategy=:adaptive` enables guarded per-iteration `beta`/`gamma`
 adaptation and records every selection in `result.parameter_history`. It
 currently remains opt-in because the representative SDP benchmark did not

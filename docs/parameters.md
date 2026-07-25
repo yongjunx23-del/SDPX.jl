@@ -59,6 +59,10 @@ non-finite.
 | `sparse` | `:auto` | Storage selection used during ingestion. `:auto` distinguishes sparse coefficient storage from aggregate PSD and Schur density; `true`/`:sparse` and `false`/`:dense` force a path. |
 | `extended_precision_blas` | `:off` | Extended-precision Schur backend: `:off`, conservative `:auto`, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. |
 | `extended_precision_memory_fraction` | `0.10` | Maximum fraction of currently available memory that the crossover may reserve for packed extended-precision panels. The cap respects host free memory, cgroups, and `SDPX_MEMORY_LIMIT_BYTES`, and conservatively keeps half of reported free memory outside the packing budget. |
+| `mixed_precision_kkt` | `:off` | Opt-in dense KKT acceleration for BigFloat and fixed-width extended types: `:off`, guarded `:auto`, or size-override `:on`. Float64 is never redirected. |
+| `mixed_precision_condition_limit` | `1e8` | Maximum conservative Float64 condition estimate accepted for mixed KKT refinement. |
+| `mixed_precision_refine_max_steps` | `32` | Maximum target-precision correction solves before native extended-precision fallback. |
+| `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of reliably available memory used for persistent Float64 factors and conversion scratch. |
 | `force_gc` | `false` | Retained A/B compatibility field. The main solve path does not currently read it. |
 
 Sparse equilibration rebuilds the derived sparse caches after scaling, so the
@@ -167,3 +171,25 @@ this packing selector. In that case diagnostics report
 `gram_kernel=:fused_arrow_2x2` and
 `gram_kernel_reason=:fused_arrow_specialized`, and no transformed panels or
 pair buffers are allocated.
+
+Dense, non-arrow high-precision problems can separately opt into guarded
+mixed-precision KKT factorization:
+
+```julia
+opts = SolverOptions{Float64x4}(
+    mixed_precision_kkt=:auto,
+)
+```
+
+`:auto` requires at least 256 Schur variables; `:on` removes only that size
+crossover. Both modes retain all memory, finiteness, rank, condition, and
+accuracy guards. The Float64 factor is accepted only when target-precision
+residual refinement is predicted to fit the configured step cap. A relative
+predictor residual above `1e-8` or stalled refinement recomputes the direction
+with the native factorization. Dynamic failures use a two-iteration cooldown
+and disable mixed precision after two failures. Static factor/condition
+rejections use the same cooldown and disable it after three repeated
+rejections. The feature remains off by default pending large full-solve
+validation. `result.termination.mixed_precision_kkt` records whether the path
+was available and active, its final reason, condition/step estimates, attempt
+counts, cooldown, and dynamic/static fallback counts.

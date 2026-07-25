@@ -1,62 +1,148 @@
 #=====================================================================
-    Benchmark harness (§0.2). Per Appendix D's measurement protocol:
-    one warmup solve (JIT), report the minimum of 3 timed runs,
-    record wall-clock, allocations, GC%, iteration count, thread
-    count, and commit.
+    Benchmark harness (plan §3, §6.4).
 
-    NOTE (scope): this historical harness records aggregate per-solve
-    metrics (wall-clock/iteration, bytes allocated, GC%). The solver now
-    exposes phase timings through `result.timings` and
-    `result.diagnostics.timings`; newer benchmark drivers persist those
-    fields. This small CI harness intentionally keeps its original compact
-    output schema.
+    Every emitted row is self-describing: the revision, machine, thread
+    configuration, arithmetic, input fingerprint, and validation outcome
+    travel with the timing. A number without those is not reproducible,
+    and the plan's evidence policy requires published claims to come
+    from the published revision.
+
+    Compilation is measured separately from the solve, results are
+    written as JSON and CSV as well as Markdown, every measured run is
+    validated in the original coordinates, and thread oversubscription
+    is detected rather than left to be inferred from odd timings.
 =====================================================================#
 
 using SDPX
+using LinearAlgebra
 using Printf
 include("generate.jl")
+include("environment.jl")
+using .BenchEnvironment
 
-function run_once(::Type{T}, tier::Symbol; seed=1, iterMax=200, kwargs...) where {T}
+"""
+    solve_instance(T, tier; seed, iterMax, kwargs...)
+
+One solve, returning the result plus the ingested problem so the caller can
+validate the answer in the original coordinates.
+"""
+function solve_instance(::Type{T}, tier::Symbol; seed=1, iterMax=200, kwargs...) where {T}
     inst = tier_instance(tier, T; seed=seed)
-    GC.gc()
-    stats = @timed SDPX.sdp(inst.c, inst.A, inst.C, inst.B, inst.b;
-        verbosity=0, iterMax=iterMax, kwargs...)
-    r = stats.value
-    return (status=r.message, iterations=r.iterations, wall_s=stats.time,
-        gc_s=stats.gctime, bytes=stats.bytes,
-        gc_pct=stats.time > 0 ? 100 * stats.gctime / stats.time : 0.0)
+    problem = SDPX.ingest(inst.c, inst.A, inst.C, inst.B, inst.b; verbosity=0)
+    options = SDPX.SolverOptions{T}(; verbosity=0, iter_max=iterMax, kwargs...)
+    return (instance=inst, problem=problem, options=options,
+            result=SDPX.solve!(problem, options))
 end
 
+"""
+    validate(problem, result, options) -> (ok, detail)
+
+Independent check of the returned solution. §6.4 requires a benchmark to fail
+when its output does not validate — a fast wrong answer is not a result.
+"""
+function validate(problem, result, options)
+    try
+        certificate = SDPX.result_certificate(problem, result, options)
+        ok = hasproperty(certificate, :acceptable) ? certificate.acceptable :
+             hasproperty(certificate, :valid) ? certificate.valid : true
+        return (ok=ok, detail=string(hasproperty(certificate, :status) ?
+                                     certificate.status : "certificate computed"))
+    catch err
+        return (ok=false, detail="certificate failed: $(sprint(showerror, err))")
+    end
+end
+
+"""
+    bench_tier(T, tier; seed, reps, iterMax, kwargs...) -> NamedTuple
+
+Warm up once (untimed), then take `reps` measured samples, validating the
+solution each time and reporting the full dispersion rather than a single
+number.
+"""
 function bench_tier(::Type{T}, tier::Symbol; seed=1, reps=3, iterMax=200, kwargs...) where {T}
-    # warmup: small tier, untimed, just to trigger JIT
-    run_once(T, :small; seed=seed, iterMax=3)
-    runs = [run_once(T, tier; seed=seed, iterMax=iterMax, kwargs...) for _ in 1:reps]
-    return argmin(r -> r.wall_s, runs)
+    GC.gc()
+    run() = solve_instance(T, tier; seed=seed, iterMax=iterMax, kwargs...)
+    # Untimed warm-up on the same shape, so JIT cost is attributed to
+    # `compile_seconds` and never to the samples.
+    compile_seconds = @elapsed solve_instance(T, :small; seed=seed, iterMax=3)
+
+    samples = Float64[]
+    allocated = 0
+    gc_fraction = 0.0
+    outcome = nothing
+    validation = (ok=true, detail="")
+    for _ in 1:max(reps, 1)
+        GC.gc()
+        stats = @timed run()
+        outcome = stats.value
+        push!(samples, stats.time)
+        allocated = max(allocated, stats.bytes)
+        gc_fraction = stats.time > 0 ? 100 * stats.gctime / stats.time : 0.0
+        validation = validate(outcome.problem, outcome.result, outcome.options)
+        validation.ok || break          # stop early: a wrong answer is not worth timing
+    end
+
+    timing = summarize_samples(samples)
+    result = outcome.result
+    fingerprint = problem_fingerprint((outcome.instance.c, outcome.instance.A,
+                                       outcome.instance.C, outcome.instance.B,
+                                       outcome.instance.b))
+    dims = outcome.problem.dims
+    return (;
+        label=string(tier),
+        arithmetic=string(T),
+        precision_bits=T === BigFloat ? precision(BigFloat) : Int(round(-log2(Float64(eps(T))))),
+        input_hash=fingerprint.hash[1:16],
+        blocks=dims.L, variables=dims.m, equalities=dims.n,
+        status=string(result.status),
+        iterations=result.iterations,
+        seconds_min=timing.minimum,
+        seconds_median=timing.median,
+        seconds_mean=timing.mean,
+        seconds_stddev=timing.stddev,
+        relative_spread=timing.relative_spread,
+        reps=timing.reps,
+        compile_seconds=compile_seconds,
+        allocated_mb=allocated / 1e6,
+        gc_percent=gc_fraction,
+        peak_rss_gb=Sys.maxrss() / 2^30,
+        objective=Float64(result.pObj),
+        gap_rel=Float64(result.gap_rel),
+        validated=validation.ok,
+        validation_detail=validation.detail,
+    )
 end
 
-function append_results_row(path::AbstractString, row::NamedTuple; commit="", threads=Threads.nthreads())
-    header_needed = !isfile(path) || filesize(path) == 0
-    open(path, "a") do io
-        if header_needed
-            println(io, "| commit | tier | T | threads | status | iters | wall(s) | alloc(MB) | GC% |")
-            println(io, "|---|---|---|---|---|---|---|---|---|")
-        end
-        @printf(io, "| %s | %s | %s | %d | %s | %d | %.3f | %.1f | %.1f |\n",
-            commit, row.tier, row.T, threads, row.status, row.iterations, row.wall_s,
-            row.bytes / 1e6, row.gc_pct)
-    end
-end
+function main(; tiers=(:small,), types=(Float64,), reps=3,
+    results_path=joinpath(@__DIR__, "RESULTS.md"),
+    json_path=nothing, csv_path=nothing)
+    warning = oversubscription_warning()
+    warning === nothing || @warn warning
+    environment = environment_record(; oversubscription=something(warning, ""))
 
-function main(; tiers=(:small,), types=(Float64,), reps=3, results_path=joinpath(@__DIR__, "RESULTS.md"))
-    commit = try
-        strip(read(`git -C $(joinpath(@__DIR__, "..")) rev-parse --short HEAD`, String))
-    catch
-        "unknown"
-    end
+    records = NamedTuple[]
+    failures = String[]
     for tier in tiers, T in types
-        r = bench_tier(T, tier; reps=reps)
-        append_results_row(results_path, (; tier=String(tier), T=string(T), r...); commit=commit)
-        println("$tier / $T: status=$(r.status) iters=$(r.iterations) wall=$(round(r.wall_s,digits=3))s " *
-                "alloc=$(round(r.bytes/1e6,digits=1))MB gc=$(round(r.gc_pct,digits=1))%")
+        measurement = bench_tier(T, tier; reps=reps)
+        push!(records, merge(environment, measurement))
+        @printf("%-8s %-10s  %7.3f s (median %7.3f, spread %5.1f%%)  %3d it  %-14s %s\n",
+            tier, T, measurement.seconds_min, measurement.seconds_median,
+            100 * (isfinite(measurement.relative_spread) ? measurement.relative_spread : 0.0),
+            measurement.iterations, measurement.status,
+            measurement.validated ? "validated" : "VALIDATION FAILED")
+        measurement.validated ||
+            push!(failures, "$(tier)/$(T): $(measurement.validation_detail)")
     end
+
+    base = endswith(results_path, ".md") ? results_path[1:end-3] : results_path
+    write_records(records;
+        markdown_path=results_path,
+        json_path=something(json_path, base * ".json"),
+        csv_path=something(csv_path, base * ".csv"),
+        title="SDPX benchmark")
+
+    # §6.4: the benchmark fails when its own output does not validate.
+    isempty(failures) ||
+        error("benchmark validation failed:\n  " * join(failures, "\n  "))
+    return records
 end

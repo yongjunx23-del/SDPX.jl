@@ -131,6 +131,24 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "extended_precision_memory_fraction must be finite and between zero and one",
         ))
+    opts.mixed_precision_kkt in (:off, :auto, :on) ||
+        throw(ArgumentError(
+            "mixed_precision_kkt must be :off, :auto, or :on",
+        ))
+    isfinite(opts.mixed_precision_condition_limit) &&
+        opts.mixed_precision_condition_limit >= one(Float64) ||
+        throw(ArgumentError(
+            "mixed_precision_condition_limit must be finite and at least one",
+        ))
+    opts.mixed_precision_refine_max_steps >= 1 ||
+        throw(ArgumentError(
+            "mixed_precision_refine_max_steps must be at least one",
+        ))
+    isfinite(opts.mixed_precision_memory_fraction) &&
+        0.0 <= opts.mixed_precision_memory_fraction <= 1.0 ||
+        throw(ArgumentError(
+            "mixed_precision_memory_fraction must be finite and between zero and one",
+        ))
     opts.max_restarts >= 0 && opts.max_centering >= 0 &&
         opts.stall_iterations >= 0 ||
         throw(ArgumentError(
@@ -274,6 +292,77 @@ function _lp_extended_crossover(
         features;
         mode=opts.extended_precision_blas,
         available_memory_bytes=available_memory_bytes,
+    )
+end
+
+"""
+    physical_core_count() -> Int
+
+Physical cores available, distinct from `Sys.CPU_THREADS`.
+
+Plan §18.4 requires that requested workers, effective workers and actual
+physical cores be reported separately, and that oversubscribed workers are not
+described as core scaling. That distinction cannot be made from
+`Threads.nthreads()` alone: on an SMT machine half the "cores" share execution
+units, and on a heterogeneous machine (performance plus efficiency cores) a
+block-parallel region runs at the speed of its slowest worker.
+
+This is measured, not assumed, and falls back to the logical count when the
+platform does not report it.
+"""
+function physical_core_count()
+    if Sys.isapple()
+        try
+            return parse(Int, strip(read(`sysctl -n hw.physicalcpu`, String)))
+        catch
+        end
+    elseif Sys.islinux()
+        try
+            cores = Set{Tuple{String,String}}()
+            for block in split(read("/proc/cpuinfo", String), "\n\n")
+                package = match(r"physical id\s*:\s*(\d+)", block)
+                core = match(r"core id\s*:\s*(\d+)", block)
+                (package === nothing || core === nothing) && continue
+                push!(cores, (package.captures[1], core.captures[1]))
+            end
+            isempty(cores) || return length(cores)
+        catch
+        end
+    end
+    return Sys.CPU_THREADS
+end
+
+"""
+    worker_report(requested, selected) -> NamedTuple
+
+The three counts §18.4 asks to be kept apart, plus whether the request exceeds
+the hardware. Reporting `oversubscribed` explicitly is the point: a speedup
+measured with more workers than cores is not core scaling, and labelling it as
+such is how misleading scaling numbers get published.
+"""
+function worker_report(requested::Integer, selected::Integer)
+    physical = physical_core_count()
+    # `Sys.CPU_THREADS` is Julia's view, which can be narrowed by affinity,
+    # `JULIA_CPU_THREADS`, or a container limit — on this development machine it
+    # reports 4 against 10 physical cores. Reporting that as "logical cores"
+    # would be actively wrong, so it is labelled for what it is and the OS is
+    # asked separately for the hardware count.
+    logical = physical
+    if Sys.isapple()
+        try
+            logical = parse(Int, strip(read(`sysctl -n hw.logicalcpu`, String)))
+        catch
+        end
+    elseif Sys.islinux()
+        logical = max(Sys.CPU_THREADS, physical)
+    end
+    return (
+        requested_workers=Int(requested),
+        effective_workers=Int(selected),
+        physical_cores=physical,
+        logical_cores=logical,
+        julia_visible_cores=Sys.CPU_THREADS,
+        oversubscribed=selected > physical,
     )
 end
 
@@ -686,6 +775,11 @@ function _process_peak_rss_bytes()
     end
 end
 
+"""Safety margin applied to the workspace estimate so it is an upper bound
+rather than a central guess; see `estimate_sdp_workspace_bytes`."""
+const WORKSPACE_ESTIMATE_MARGIN_NUMERATOR = 3
+const WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR = 2
+
 function estimate_sdp_workspace_bytes(
     prob::SDPProblem{T},
     thread_count::Int,
@@ -713,13 +807,27 @@ function estimate_sdp_workspace_bytes(
                 12k[block]^2 + k[block]^2 * length(active[block])
         end
     end
-    return scalar_bytes *
-           (
-               matrix_elements +
-               vector_elements +
-               state_elements +
-               block_elements
-           )
+    counted = scalar_bytes *
+             (
+                 matrix_elements +
+                 vector_elements +
+                 state_elements +
+                 block_elements
+             )
+    # The term-by-term count above tracks the large arrays but not every
+    # auxiliary buffer, index vector, or per-thread partition, so on its own it
+    # under-predicts. Measured against actual `Workspace` allocation it came in
+    # 1.05x-1.38x low for `Float64` and `Float64x4` across block counts and
+    # thread counts.
+    #
+    # For a memory *budget* that direction is the dangerous one: an estimate
+    # that is too small promises a solve will fit and then it does not, which is
+    # exactly the failure mode this guard exists to prevent on large
+    # high-precision models. The margin below makes the figure an upper bound
+    # over the measured range, at the cost of reserving somewhat more than is
+    # strictly needed.
+    return (counted * WORKSPACE_ESTIMATE_MARGIN_NUMERATOR) ÷
+           WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR
 end
 
 function _attach_diagnostics(

@@ -450,6 +450,7 @@ end
 Recompute the complete cold-path certificate in original model coordinates.
 The returned metrics are suitable for diagnostics and independent post-solve
 checks. This function does not change `result`.
+
 """
 function result_certificate(
     prob::SDPProblem{T},
@@ -618,6 +619,13 @@ function result_certificate(
         gap_limit=opts.ϵ_gap,
         primal_psd=primal_psd,
         dual_psd=dual_psd,
+        # §20.3: how the answer was produced, not just what it is. A residual
+        # means something different depending on how much regularization was
+        # applied to get it, whether the factorization ran at reduced precision,
+        # and at what width the validation itself was performed — so those
+        # travel with the certificate rather than being recoverable only from
+        # separate diagnostics.
+        provenance=solve_provenance(result),
     )
 end
 
@@ -730,4 +738,99 @@ function certify_final_result(
         termination,
     )
     return certified, certificate, downgrade ? failure_message : nothing
+end
+
+"""
+    solve_provenance(result) -> NamedTuple
+
+Provenance fields §20.3 requires alongside the numerical certificate.
+
+`validation_precision_bits` is the width the certificate itself was computed at,
+which bounds how small a residual it can meaningfully report: a claim of
+`1e-30` validated in `Float64` is not a claim about the solution, it is a claim
+about round-off.
+
+`mixed_precision_used` matters because a factorization carried at reduced
+precision and corrected by refinement can reach the same residual by a different
+route, and a reader comparing two certificates should know which happened.
+"""
+function solve_provenance(result::SDPResult{T}) where {T}
+    termination = result.termination
+    mixed = hasproperty(termination, :mixed_precision_kkt) ?
+            termination.mixed_precision_kkt : nothing
+    mixed_used = mixed === nothing ? false :
+                 (hasproperty(mixed, :active) ? mixed.active === true : false)
+    return (
+        regularizations=result.regularizations,
+        restarts=result.restarts,
+        iterations=result.iterations,
+        refinement_steps=hasproperty(termination, :refine_steps) ?
+                         termination.refine_steps : nothing,
+        mixed_precision_used=mixed_used,
+        validation_precision_bits=T === BigFloat ? precision(BigFloat) :
+                                  round(Int, -log2(Float64(eps(T)))),
+        termination_reason=hasproperty(termination, :reason) ?
+                           termination.reason : :none,
+    )
+end
+
+"""
+    solve_summary(prob, result, opts=SolverOptions{T}()) -> NamedTuple
+
+The plan §21.3 information contract in one place.
+
+Every field below is already obtainable, but from three different objects: the
+`SDPResult`, its `diagnostics`, and a separate `result_certificate` call. A user
+who does not know to make that third call silently has no complementarity and no
+PSD verdict. This assembles the documented contract so the information is
+reachable without knowing the internal layout.
+
+Additive by design: it introduces no new computation beyond the certificate and
+changes no existing accessor, so the stable API is unaffected.
+
+`minimum_psd_eigenvalue` is reported as the largest *required diagonal shift*
+across blocks — the amount by which a block would have to be lifted to become
+positive semidefinite. Zero means every block is already PSD. This is used in
+place of a literal eigenvalue because the certificate obtains it from a shifted
+Cholesky, which is far cheaper than an eigendecomposition and answers the same
+question.
+"""
+function solve_summary(prob::SDPProblem{T}, result::SDPResult{T},
+                       opts::SolverOptions{T}=SolverOptions{T}()) where {T}
+    certificate = result_certificate(prob, result, opts)
+    diagnostics = result.diagnostics
+
+    required_shift = zero(Float64)
+    if hasproperty(certificate, :primal_psd) && hasproperty(certificate.primal_psd, :details)
+        for detail in certificate.primal_psd.details
+            required_shift = max(required_shift, Float64(detail.required_shift))
+        end
+    end
+
+    memory = diagnostics === nothing ? nothing : diagnostics.memory
+    timings = result.timings
+    solve_time = timings === nothing ? nothing : get(timings, :total, nothing)
+
+    return (
+        status=result.status,
+        objective_value=result.pObj,
+        dual_objective_value=result.dObj,
+        primal_solution=(x=result.x, X=result.X),
+        dual_solution=(y=result.y, Y=result.Y),
+        primal_residual=result.p_res,
+        dual_residual=result.d_res,
+        relative_gap=result.gap_rel,
+        complementarity=certificate.complementarity,
+        minimum_psd_eigenvalue=-required_shift,
+        iterations=result.iterations,
+        solve_time=solve_time,
+        peak_memory_bytes=memory === nothing ? nothing :
+                          get(memory, :process_peak_rss_bytes, nothing),
+        selected_algorithms=diagnostics === nothing ? nothing :
+                            diagnostics.selected_algorithms,
+        parameter_history=result.parameter_history,
+        timings=timings,
+        warnings=diagnostics === nothing ? String[] : diagnostics.warnings,
+        certificate=certificate,
+    )
 end

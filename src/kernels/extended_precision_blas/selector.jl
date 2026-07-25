@@ -271,9 +271,14 @@ function choose_crossover(
         )
     end
 
-    minimum_columns = family === :fixed_extended ? 32 : 20
-    minimum_work = family === :fixed_extended ? 2.0e5 : 5.0e4
-    minimum_speedup = family === :fixed_extended ? 1.18 : 1.12
+    # Thresholds come from a host calibration when one has been recorded, and
+    # otherwise from the hand-tuned static defaults (§14.3). `load_profile` never
+    # throws and never calibrates implicitly, so this cannot make a solve slower
+    # or less predictable than it was before calibration existed.
+    profile = load_profile(family)
+    minimum_columns = profile.minimum_columns
+    minimum_work = profile.minimum_work
+    minimum_speedup = profile.minimum_speedup
     if family === :fixed_extended &&
        features.sparse_input &&
        features.matrix_dimension <= 2
@@ -282,13 +287,11 @@ function choose_crossover(
     elseif columns < minimum_columns || pairs * rows < minimum_work
         reason = :problem_too_small
         enabled = false
-    elseif features.expected_schur_density <
-           (family === :bigfloat ? 0.05 : 0.20)
+    elseif features.expected_schur_density < profile.minimum_schur_density
         reason = :schur_too_sparse
         enabled = false
     elseif features.sparse_input &&
-           features.average_nnz / max(Float64(rows), 1.0) <
-           (family === :fixed_extended ? 0.42 : 0.62)
+           features.average_nnz / max(Float64(rows), 1.0) < profile.minimum_nnz_ratio
         reason = :sparse_outer_product_cheaper
         enabled = false
     elseif predicted < minimum_speedup

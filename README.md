@@ -375,6 +375,13 @@ SDPX_MEMORY_LIMIT_BYTES=64GiB julia --project=. -t 8 solve_problem.jl
 
 The limit is a planning ceiling, not a request to reserve that amount.
 
+Dense, non-arrow `Float64x4` and `BigFloat` problems can also opt into
+`mixed_precision_kkt=:auto`. It uses Float64 factorization with
+target-precision residuals and iterative refinement, guarded by memory,
+conditioning, rank, and convergence checks. Any failed guard recomputes with
+the native extended-precision factorization. The feature remains off by
+default while large complete-solve validation is still being collected.
+
 ## Threading
 
 Start Julia with `-t N` to enable threaded block factorisation, dense and sparse
@@ -447,3 +454,4 @@ including cases where SDPX does worse — with the configuration for each.
 - [Cluster deployment and execution guide](docs/cluster-workflow.md)
 - [Matched CSDR PSD-dual benchmark](bench/csdr_psd_dual/README.md)
 - [Extended-precision BLAS benchmark report](bench/extended_precision_blas/REPORT.md)
+- [Guarded mixed-precision KKT benchmark](bench/mixed_precision_kkt/RESULTS.md)

@@ -137,6 +137,29 @@ extended BLAS for both Float64x4 and BigFloat. Execution diagnostics report
 `gram_kernel=:fused_arrow_2x2` and
 `gram_kernel_reason=:fused_arrow_specialized`.
 
+## Automatic LP cold-start parameters
+
+The dedicated LP engine uses a deterministic distance diagnostic before the
+first iteration:
+
+```text
+max(max_i |h_i| / ||G_i||_inf, max_j |b_j| / ||B_j||_inf).
+```
+
+This quantity is invariant to positive rescaling of an individual constraint.
+With `parameter_policy=:auto`, an indicator at most `1000` selects
+`beta=1/50, gamma=99/100`; larger or non-finite values retain the configured
+conservative parameters. The guard applies to BigFloat as well as
+fixed-exponent arithmetic: extra precision prevents rounding loss, but does
+not by itself globalize a very distant infeasible start.
+
+On the measured Float64 LPs this reduced iterations from 14 to 10 at
+80-by-400 and from 18 to 14 at 256-by-4,000. A 256-bit BigFloat 32-by-128 LP
+fell from 25 to 15 iterations and was `1.73x` faster. The crossover and
+distant-start sweeps are reported in
+[`PARAMETER_SELECTION.md`](../bench/automatic_pipeline/PARAMETER_SELECTION.md).
+`parameter_policy=:fixed` remains an exact override.
+
 ## Adaptive beta and gamma
 
 `parameter_strategy=:adaptive` enables a guarded controller:

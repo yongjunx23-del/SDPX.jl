@@ -765,6 +765,15 @@ function MOI.get(optimizer::Optimizer, ::MOI.TerminationStatus)
     status == UserStopped && return MOI.INTERRUPTED
     status == Stalled && return MOI.SLOW_PROGRESS
     status == MaxRestartsExceeded && return MOI.SLOW_PROGRESS
+    # A point that met a relaxed multiple of the requested tolerance but not the
+    # tolerance itself. MOI has an exact term for this, and using it keeps
+    # `MOI.OPTIMAL` meaning "the requested tolerance was met".
+    status == AlmostOptimal && return MOI.ALMOST_OPTIMAL
+    # The arithmetic width, not the algorithm, was the binding constraint.
+    # `SLOW_PROGRESS` is the closest honest MOI code: the solve did not fail, it
+    # ran out of precision, and the remedy is a wider type.
+    status == InsufficientPrecision && return MOI.SLOW_PROGRESS
+    status == NumericalFailure && return MOI.NUMERICAL_ERROR
     return MOI.NUMERICAL_ERROR
 end
 
@@ -773,8 +782,12 @@ function MOI.get(optimizer::Optimizer, attribute::MOI.PrimalStatus)
     optimizer.result === nothing && return MOI.NO_SOLUTION
     1 <= attribute.result_index <= MOI.get(optimizer, MOI.ResultCount()) ||
         return MOI.NO_SOLUTION
-    return optimizer.result.status in (Optimal, FeasibleCert) ?
-           MOI.FEASIBLE_POINT : MOI.UNKNOWN_RESULT_STATUS
+    status = optimizer.result.status
+    status in (Optimal, FeasibleCert) && return MOI.FEASIBLE_POINT
+    # Report the weaker-but-honest point status rather than claiming a feasible
+    # point for an iterate that only met a relaxed tolerance.
+    status == AlmostOptimal && return MOI.NEARLY_FEASIBLE_POINT
+    return MOI.UNKNOWN_RESULT_STATUS
 end
 
 MOI.supports(::Optimizer, ::MOI.DualStatus) = true
@@ -782,8 +795,10 @@ function MOI.get(optimizer::Optimizer, attribute::MOI.DualStatus)
     optimizer.result === nothing && return MOI.NO_SOLUTION
     1 <= attribute.result_index <= MOI.get(optimizer, MOI.ResultCount()) ||
         return MOI.NO_SOLUTION
-    return optimizer.result.status == Optimal ?
-           MOI.FEASIBLE_POINT : MOI.UNKNOWN_RESULT_STATUS
+    status = optimizer.result.status
+    status == Optimal && return MOI.FEASIBLE_POINT
+    status == AlmostOptimal && return MOI.NEARLY_FEASIBLE_POINT
+    return MOI.UNKNOWN_RESULT_STATUS
 end
 
 function _check_result(optimizer::Optimizer, attribute)
