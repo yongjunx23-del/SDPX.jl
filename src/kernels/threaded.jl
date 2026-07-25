@@ -83,6 +83,34 @@ function _dense_schur_threading_profitable(
     return work >= minimum_work
 end
 
+"""
+    schur_threading_engaged(ws, prob, cons) -> Bool
+
+Whether the Schur assembly will actually use Julia-level parallelism.
+
+Both [`threaded_schur_build!`](@ref) methods fall back to the serial
+[`schur_build!`](@ref) under several conditions, the important one being
+`length(ws.schur_bins) <= 1`: `_schur_parallel_bins` caps the task-local `m×m`
+accumulators at a fraction of free memory, and for a large `m` that cap is one
+bin regardless of how many threads were requested.
+
+The caller needs this answer *before* setting BLAS width. Serializing BLAS is
+correct only when Julia threads supply the parallelism instead; when the
+assembly has fallen back to a single large `syrk!`, pinning BLAS to one thread
+leaves the phase with no parallelism at all. That combination is not
+hypothetical — it is exactly what the `m = 6119` lattice benchmark hits, where
+eight `m×m` `Float64` replicas would cost 2.4 GB and the cap yields one bin.
+"""
+function schur_threading_engaged(ws::Workspace{T}, prob::SDPProblem{T},
+                                 cons::AbstractCons{T}) where {T}
+    ws.thread_count > 1 || return false
+    prob.dims.L > 1 || return false
+    thread_safe_arithmetic(T) || return false
+    length(ws.schur_bins) > 1 || return false
+    cons isa DenseCons{T} || return true
+    return _dense_schur_threading_profitable(T, prob.dims.m, prob.dims.k)
+end
+
 function use_threaded_block_loops(ws::Workspace{T}, prob::SDPProblem{T}) where {T}
     return ws.thread_count > 1 &&
            prob.dims.L > 1 &&
@@ -499,10 +527,7 @@ count regardless of task completion order.
 """
 function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::DenseCons{T}, X, Y) where {T}
     L, m, n, k = prob.dims
-    nt = ws.thread_count
-    if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T) ||
-       length(ws.schur_bins) <= 1 ||
-       !_dense_schur_threading_profitable(T, m, k)
+    if !schur_threading_engaged(ws, prob, cons)
         return schur_build!(ws, prob, cons, X, Y)
     end
     bins = ws.schur_bins
@@ -569,10 +594,7 @@ into compact global/local/coupling storage; general sparse problems retain
 the deterministic dense reduction required by the generic KKT backend.
 """
 function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::SparseCons{T}, X, Y) where {T}
-    L = prob.dims.L
-    nt = ws.thread_count
-    if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T) ||
-       length(ws.schur_bins) <= 1
+    if !schur_threading_engaged(ws, prob, cons)
         return schur_build!(ws, prob, cons, X, Y)
     end
 

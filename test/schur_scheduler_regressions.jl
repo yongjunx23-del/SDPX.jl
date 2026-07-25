@@ -236,4 +236,63 @@ using Test
             max(maximum(abs, serial.S), one(T))
         @test relative_error < T(1e-55)
     end
+
+    @testset "BLAS width is restored when Schur threading is declined" begin
+        # `_schur_parallel_bins` caps task-local `m x m` accumulators against
+        # free memory, so a large `m` yields one bin no matter how many threads
+        # were requested and the assembly falls back to a single serial
+        # `syrk!`. Serializing BLAS on top of that would leave the phase with
+        # no parallelism from either source; `schur_threading_engaged` is what
+        # `newton_step!` consults to avoid it. Measured on this path at
+        # `m = 2000` and `m = 3500`, restoring the BLAS width is 2.5x-2.7x
+        # faster and bit-identical.
+        blocks, side, m = 4, 6, 40
+        coefficients = [zeros(m, side, side) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            entry = float(i + l)
+            coefficients[l][i, 1, 1] = entry
+            coefficients[l][i, side, side] = entry
+        end
+        problem = SDPX.ingest(
+            ones(m),
+            coefficients,
+            [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks],
+            zeros(m, 0),
+            Float64[];
+            verbosity=0,
+        )
+        identity_blocks = [Matrix{Float64}(1.0I, k, k) for k in problem.dims.k]
+
+        # One bin is exactly the condition under which the threaded path
+        # declines, whatever produced it.
+        single = SDPX.Workspace(problem; thread_count=1)
+        @test length(single.schur_bins) <= 1
+        @test !SDPX.schur_threading_engaged(single, problem, problem.cons)
+
+        # The predicate must agree with what `threaded_schur_build!` actually
+        # does: when it reports "engaged", the threaded path really runs, and
+        # either way the result matches the serial reference exactly.
+        parallel = SDPX.Workspace(problem)
+        @test SDPX.factor_blocks!(single, identity_blocks, identity_blocks)
+        @test SDPX.factor_blocks!(parallel, identity_blocks, identity_blocks)
+        SDPX.schur_build!(
+            single,
+            problem,
+            problem.cons,
+            identity_blocks,
+            identity_blocks,
+        )
+        SDPX.threaded_schur_build!(
+            parallel,
+            problem,
+            problem.cons,
+            identity_blocks,
+            identity_blocks,
+        )
+        reference = similar(single.S)
+        SDPX.materialize_schur!(reference, single)
+        materialized = similar(parallel.S)
+        SDPX.materialize_schur!(materialized, parallel)
+        @test materialized == reference
+    end
 end

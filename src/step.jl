@@ -171,7 +171,13 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
             p_res=p_res, d_res=d_res, reg_attempts=0, q_pivoted=false)
     residual_finished = time_ns()
 
-    _with_blas_threads(parallel_blas) do
+    # Serializing BLAS here is right only when Julia threads replace it. When
+    # the memory cap has reduced the Schur assembly to a single serial
+    # `syrk!`, hand the phase the full BLAS width instead -- otherwise it runs
+    # with no parallelism from either source (see `schur_threading_engaged`).
+    schur_blas = schur_threading_engaged(ws, prob, cons) ? parallel_blas :
+                 LinearAlgebra.BLAS.get_num_threads()
+    _with_blas_threads(schur_blas) do
         threaded_schur_build!(ws, prob, cons, X, Y)
     end
     schur_finished = time_ns()

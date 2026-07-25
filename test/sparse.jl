@@ -79,7 +79,12 @@ end
         @test summary.block_pattern_density > 0.90
         @test summary.schur_density == 1.0
         @test summary.schur_backend == :dense_cholesky
-        workspace = SDPX.Workspace(problem)
+        # `dense_sparse_assembly` trades packed-pair storage against
+        # `schur_nbins * m^2` of task-local accumulators, so the decision moves
+        # with the thread count (and, at large `m`, with free memory). Pin the
+        # thread count: the assertion is about the trade-off being made
+        # correctly for a given budget, not about the ambient machine.
+        workspace = SDPX.Workspace(problem; thread_count=1)
         @test workspace.dense_sparse_assembly
         @test all(isempty(block.Ppanel) for block in workspace.blk)
         @test all(isempty(block.Svals) for block in workspace.blk)
