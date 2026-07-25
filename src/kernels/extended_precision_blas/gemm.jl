@@ -18,10 +18,11 @@ function gemm!(
     size(B, 1) == reduction || throw(DimensionMismatch("gemm! inner dimensions differ"))
     n = size(B, 2)
     size(C) == (m, n) || throw(DimensionMismatch("gemm! output dimensions differ"))
-    row_tile = max(config.column_tile, 1)
+    column_tile = max(config.column_tile, 1)
+    row_tile = column_tile
     reduction_tile = max(config.row_tile, 1)
-    @inbounds for column_block in 1:config.column_tile:n
-        column_stop = min(column_block + config.column_tile - 1, n)
+    @inbounds for column_block in 1:column_tile:n
+        column_stop = min(column_block + column_tile - 1, n)
         for row_block in 1:row_tile:m
             row_stop = min(row_block + row_tile - 1, m)
             for column in column_block:column_stop, row in row_block:row_stop

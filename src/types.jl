@@ -43,8 +43,9 @@ end
 All solver knobs, keyed to the arithmetic type `T` (P8: `T` is now a
 type parameter flowing from the input data, never a mutable global).
 Defaults reproduce the historical behavior of `sdp`/`findFeasible`
-except where noted; `termination = :legacy` is a one-release escape
-hatch back to the old absolute/sign-based gap test (§5.1 legacy note).
+except where noted; `termination = :legacy` is a one-release escape hatch for
+the old absolute/sign-based convention, with modern inclusive boundaries and
+post-solve certification (§5.1 legacy note).
 """
 Base.@kwdef struct SolverOptions{T}
     β::T                    = T(1) / 10          # centering reduction target β·μ
@@ -108,7 +109,7 @@ Base.@kwdef struct SolverOptions{T}
     max_time::Float64         = Inf                  # wall-clock budget, seconds
     checkpoint_every::Int     = 0                     # 0 disables; else write every N iterations
     checkpoint_path::String   = ""
-    convert_inputs::Bool      = false                 # re-round BigFloat inputs to precision_bits at ingest
+    convert_inputs::Bool      = false                 # normalize BigFloat storage precision; cannot recover digits
     force_gc::Bool            = false                  # kept for one release as an A/B knob; default off (P1)
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
@@ -117,7 +118,10 @@ Base.@kwdef struct SolverOptions{T}
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
     algorithm::Symbol         = :auto                   # :auto | :lp | :sdp
     presolve::Bool            = true                    # equality-rank and scalar-cone redundancy presolve
-    presolve_tolerance::T     = sqrt(eps(T))
+    # Zero selects the conservative dimension-scaled machine-epsilon rank
+    # threshold. A larger value explicitly opts into approximate equality
+    # elimination and is still validated in the original arithmetic.
+    presolve_tolerance::T     = zero(T)
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
@@ -193,6 +197,8 @@ end
 SparseBlockCOO{T}() where {T} =
     SparseBlockCOO{T}(Int32[1], Int32[], Int32[], Int32[], T[])
 
+@inline _coo_owned_scalar(value) = value
+
 """
     build_block_coo(blocks, order, k) -> SparseBlockCOO
 
@@ -224,7 +230,7 @@ function build_block_coo(
             row[cursor] = Int32(r)
             col[cursor] = Int32(column)
             lin[cursor] = Int32((column - 1) * k + r)
-            val[cursor] = values[index]
+            val[cursor] = _coo_owned_scalar(values[index])
             cursor += 1
         end
     end
@@ -338,10 +344,12 @@ Base.eltype(::SDPProblem{T}) where {T} = T
     Checkpoint{T}
 
 Serialized solver state for `checkpoint_every`/`resume` (§5.5):
-enough to resume the outer loop exactly (iterate, centering targets,
-iteration/restart counters) without redoing any ingestion. Written
-atomically (`tmp` file + `mv`) so a crash mid-write never leaves a
-corrupt checkpoint on disk.
+an iterate-level warm restart containing the primal/dual variables, centering
+targets, and iteration/restart counters. Adaptive-controller history,
+stagnation windows, phase timers, and best-iterate history are intentionally
+reinitialized, so a resumed adaptive solve is not bit-for-bit equivalent to an
+uninterrupted run. Written atomically (`tmp` file + `mv`) so a crash mid-write
+never leaves a corrupt checkpoint on disk.
 """
 struct Checkpoint{T}
     format_version::Int
@@ -361,10 +369,11 @@ const CHECKPOINT_FORMAT_VERSION = 1
 
 Immutable structural description used by the automatic solve pipeline. A
 model containing only `1×1` PSD blocks is an LP in SDPX's geometric form.
-Larger PSD blocks use the SDP engine. `cone=:socp` is reserved for a future
-native second-order-cone representation; an SOC lifted to a PSD block is
-conservatively classified as SDP because the lift no longer carries enough
-metadata for a safe structural guess.
+An exact PSD-arrow representation of a second-order cone is classified as
+`cone=:socp` and dispatched as `:socp_psd_lift`. This is a structural
+recognition only: the current implementation still solves the semidefinite
+lift, because a native SOCP scaling and Newton system are not implemented.
+Other larger PSD blocks are classified and solved as SDP.
 """
 struct ProblemClassification
     cone::Symbol

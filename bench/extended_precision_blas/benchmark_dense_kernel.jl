@@ -6,15 +6,33 @@ using SDPX
 
 const EPBLAS = SDPX.ExtendedPrecisionBLAS
 
+function csv_field(value)
+    text = string(value)
+    if occursin(',', text) ||
+       occursin('"', text) ||
+       occursin('\n', text) ||
+       occursin('\r', text)
+        return "\"" * replace(text, '"' => "\"\"") * "\""
+    end
+    return text
+end
+
 function append_row(path, row)
     mkpath(dirname(path))
     new_file = !isfile(path) || filesize(path) == 0
     names = propertynames(row)
     open(path, "a") do output
-        new_file && println(output, join(names, ','))
+        new_file &&
+            println(output, join((csv_field(name) for name in names), ','))
         println(
             output,
-            join((getproperty(row, name) for name in names), ','),
+            join(
+                (
+                    csv_field(getproperty(row, name))
+                    for name in names
+                ),
+                ',',
+            ),
         )
     end
 end

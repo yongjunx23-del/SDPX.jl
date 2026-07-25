@@ -15,7 +15,17 @@ THREAD_LIST="${THREAD_LIST:-1 2 4 8}"
 REPS="${REPS:-3}"
 TOL="${TOL:-1e-7}"
 RUN_CLARABEL="${RUN_CLARABEL:-1}"
-AVAILABLE_CPUS="${SLURM_CPUS_PER_TASK:-999999}"
+SCHEDULER_CPUS="${PBS_NP:-${NCPUS:-${SLURM_CPUS_PER_TASK:-}}}"
+if [[ -z "$SCHEDULER_CPUS" ]]; then
+  if command -v nproc >/dev/null 2>&1; then
+    SCHEDULER_CPUS="$(nproc)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    SCHEDULER_CPUS="$(sysctl -n hw.logicalcpu)"
+  else
+    SCHEDULER_CPUS=1
+  fi
+fi
+AVAILABLE_CPUS="$SCHEDULER_CPUS"
 DEPOT_HEAD="${JULIA_DEPOT_HEAD:-$(cd "$REPO/.." && pwd)/.julia-depot}"
 
 mkdir -p "$RUN_DIR" "$DEPOT_HEAD"

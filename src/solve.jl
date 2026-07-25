@@ -13,6 +13,14 @@ function dual_objective(prob::SDPProblem{T}, y, Y) where {T}
     return d
 end
 
+function _finite_iterate(x, X, y, Y, μ)
+    return all(isfinite, x) &&
+           all(isfinite, y) &&
+           all(isfinite, μ) &&
+           all(block -> all(isfinite, block), X) &&
+           all(block -> all(isfinite, block), Y)
+end
+
 function print_header(opts::SolverOptions)
     opts.verbosity >= 1 || return
     println("iter\tprimal obj\tdual obj\tgap\t\tprimal res\tdual res\tprimal step\tdual step\ttime (s)")
@@ -139,13 +147,9 @@ function recommended_parameters(
         # away to 1e13. A sweep confirmed Ω=100 recovers the correct basin on
         # exactly that instance, and Ω tracking `max‖C_l‖∞` reproduces it
         # without hard-coding the case.
-        # The initial point has to dominate the constant term: `X = Ω·I` must be
-        # big enough to contain the solution, and the initial dual residual is
-        # `‖C_l − Ω·I‖`. The profile's old fixed Ω=10 does not converge at all on
-        # the CSDR 80/4/40/100 model, whose `max‖C_l‖∞ = 116.6`. An Ω sweep there
-        # gives gap 8.9e-2 at Ω=100, 7.4e-3 at Ω=300, and 5.1e-2 again at
-        # Ω=1000 — an optimum around 2.6·max‖C_l‖∞, so scale by 3 and keep the
-        # old value as a floor for small-data models.
+        # The final sweep found that matching the largest block norm is a safer
+        # general start than the earlier fitted 3× multiplier. Keep 10 as the
+        # floor for small-data models.
         stats = block_norm_stats(prob)
         omega = max(T(10), T(OMEGA_DATA_MULTIPLIER) * stats.maxnorm)
         return (
@@ -176,6 +180,261 @@ function recommended_parameters(
     )
 end
 
+mutable struct BestIterateWorkspace{T}
+    valid::Bool
+    x::Vector{T}
+    X::Vector{Matrix{T}}
+    y::Vector{T}
+    Y::Vector{Matrix{T}}
+    pObj::T
+    dObj::T
+    gap_rel::T
+    p_res::T
+    d_res::T
+    iter::Int
+end
+
+function BestIterateWorkspace(x, X, y, Y)
+    T = eltype(x)
+    return BestIterateWorkspace{T}(
+        false,
+        alloc_zeros(T, length(x)),
+        [alloc_zeros(T, size(block)...) for block in X],
+        alloc_zeros(T, length(y)),
+        [alloc_zeros(T, size(block)...) for block in Y],
+        zero(T),
+        zero(T),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        0,
+    )
+end
+
+function _store_best_iterate!(
+    best::BestIterateWorkspace{T},
+    x,
+    X,
+    y,
+    Y,
+    pObj::T,
+    dObj::T,
+    gap_rel::T,
+    p_res::T,
+    d_res::T,
+    iter::Int,
+) where {T}
+    copy_owned!(best.x, x)
+    copy_owned!(best.y, y)
+    @inbounds for block in eachindex(X)
+        copy_owned!(best.X[block], X[block])
+        copy_owned!(best.Y[block], Y[block])
+    end
+    best.pObj = pObj
+    best.dObj = dObj
+    best.gap_rel = gap_rel
+    best.p_res = p_res
+    best.d_res = d_res
+    best.iter = iter
+    best.valid = true
+    return best
+end
+
+function _scaled_identity(
+    ::Type{T},
+    scale::T,
+    dimension::Int,
+) where {T}
+    return Matrix{T}(scale * I, dimension, dimension)
+end
+
+function _scaled_identity(
+    ::Type{BigFloat},
+    scale::BigFloat,
+    dimension::Int,
+)
+    matrix = alloc_zeros(BigFloat, dimension, dimension)
+    @inbounds for index in 1:dimension
+        MA.operate_to!(matrix[index, index], copy, scale)
+    end
+    return matrix
+end
+
+"""
+    _tolerance_precision_diagnostic(T, tolerance)
+
+Estimate the significand width needed by a requested tolerance without
+narrowing extended-precision values through `Float64`. The result is used only
+for diagnostics; it never changes solver tolerances.
+"""
+function _tolerance_precision_diagnostic(
+    ::Type{T},
+    tolerance::T,
+) where {T}
+    threshold = T(100) * eps(T)
+    needed_bits = tolerance <= zero(T) ?
+                  typemax(Int) :
+                  _nonnegative_int_saturating(
+                      -log2(tolerance),
+                      RoundUp,
+                  )
+    return (
+        warn=tolerance < threshold,
+        needed_bits=needed_bits,
+        threshold=threshold,
+    )
+end
+
+function _validate_warm_start(
+    prob::SDPProblem;
+    x0=nothing,
+    X0=nothing,
+    y0=nothing,
+    Y0=nothing,
+    resume::AbstractString="",
+    accepted_y_lengths=(prob.dims.n,),
+)
+    supplied = (x0 !== nothing, X0 !== nothing, y0 !== nothing, Y0 !== nothing)
+    !isempty(resume) && any(supplied) &&
+        throw(ArgumentError(
+            "resume cannot be combined with x0, X0, y0, or Y0; " *
+            "the checkpoint already provides the complete iterate",
+        ))
+
+    if x0 !== nothing
+        x0 isa AbstractVector ||
+            throw(ArgumentError("x0 must be a vector"))
+        length(x0) == prob.dims.m ||
+            throw(DimensionMismatch(
+                "x0 has length $(length(x0)); expected $(prob.dims.m)",
+            ))
+    end
+    if y0 !== nothing
+        y0 isa AbstractVector ||
+            throw(ArgumentError("y0 must be a vector"))
+        expected = unique(Int[value for value in accepted_y_lengths])
+        length(y0) in expected ||
+            throw(DimensionMismatch(
+                "y0 has length $(length(y0)); expected " *
+                join(expected, " or "),
+            ))
+    end
+
+    (X0 === nothing) == (Y0 === nothing) ||
+        throw(ArgumentError(
+            "X0 and Y0 must be supplied together for an SDP warm start",
+        ))
+    X0 === nothing && return nothing
+    X0 isa Union{AbstractVector,Tuple} ||
+        throw(ArgumentError("X0 must be a vector or tuple of PSD blocks"))
+    Y0 isa Union{AbstractVector,Tuple} ||
+        throw(ArgumentError("Y0 must be a vector or tuple of PSD blocks"))
+    length(X0) == prob.dims.L ||
+        throw(DimensionMismatch(
+            "X0 contains $(length(X0)) blocks; expected $(prob.dims.L)",
+        ))
+    length(Y0) == prob.dims.L ||
+        throw(DimensionMismatch(
+            "Y0 contains $(length(Y0)) blocks; expected $(prob.dims.L)",
+        ))
+    @inbounds for block in 1:prob.dims.L
+        expected = (prob.dims.k[block], prob.dims.k[block])
+        X0[block] isa AbstractMatrix ||
+            throw(ArgumentError("X0[$block] must be a matrix"))
+        Y0[block] isa AbstractMatrix ||
+            throw(ArgumentError("Y0[$block] must be a matrix"))
+        size(X0[block]) == expected ||
+            throw(DimensionMismatch(
+                "X0[$block] has size $(size(X0[block])); expected $expected",
+            ))
+        size(Y0[block]) == expected ||
+            throw(DimensionMismatch(
+                "Y0[$block] has size $(size(Y0[block])); expected $expected",
+            ))
+    end
+    return nothing
+end
+
+function _sdp_setup_time_limit_result(
+    prob::SDPProblem{T},
+    elapsed::Float64,
+) where {T}
+    return SDPResult{T}(
+        TimeLimit,
+        "Time limit exceeded before SDP iterations began.",
+        alloc_zeros(T, prob.dims.m),
+        [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k],
+        alloc_zeros(T, prob.dims.n),
+        [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k],
+        zero(T),
+        zero(T),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        0,
+        0,
+        0,
+        (total=elapsed,),
+        NamedTuple[],
+        nothing,
+        (reason=:time_limit, stage=:sdp_setup),
+    )
+end
+
+function _equilibrate_warm_start(
+    ::Type{T},
+    eq::Equilibration{T},
+    x0,
+    X0,
+    y0,
+    Y0,
+) where {T}
+    scaled_x0 = if x0 === nothing
+        nothing
+    else
+        values = _owned_array_copy(T, x0)
+        @inbounds for index in eachindex(values, eq.s)
+            values[index] *= eq.s[index]
+        end
+        values
+    end
+    scaled_X0 = if X0 === nothing
+        nothing
+    else
+        [
+            begin
+                matrix = _owned_array_copy(T, X0[block])
+                diagonal = eq.E[block]
+                @inbounds for column in axes(matrix, 2),
+                              row in axes(matrix, 1)
+                    matrix[row, column] *=
+                        diagonal[row] * diagonal[column]
+                end
+                matrix
+            end
+            for block in eachindex(X0)
+        ]
+    end
+    scaled_Y0 = if Y0 === nothing
+        nothing
+    else
+        [
+            begin
+                matrix = _owned_array_copy(T, Y0[block])
+                diagonal = eq.E[block]
+                @inbounds for column in axes(matrix, 2),
+                              row in axes(matrix, 1)
+                    matrix[row, column] /=
+                        diagonal[row] * diagonal[column]
+                end
+                matrix
+            end
+            for block in eachindex(Y0)
+        ]
+    end
+    return scaled_x0, scaled_X0, y0, scaled_Y0
+end
+
 """
     _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
            x0=nothing, X0=nothing, y0=nothing, Y0=nothing, resume="") -> SDPResult{T}
@@ -187,8 +446,10 @@ original. See `compat.jl` for the legacy `sdp`/`findFeasible` API that
 wraps this.
 """
 function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
-    x0=nothing, X0=nothing, y0=nothing, Y0=nothing, resume::AbstractString="") where {T}
+    x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
+    resume::AbstractString="", deadline::Float64=Inf) where {T}
 
+    core_started = time()
     opts.parameter_policy in (:fixed, :auto) ||
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
@@ -228,6 +489,19 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         throw(ArgumentError(
             "extended_precision_memory_fraction must be between zero and one",
         ))
+    _validate_warm_start(
+        prob;
+        x0=x0,
+        X0=X0,
+        y0=y0,
+        Y0=Y0,
+        resume=resume,
+    )
+    time() >= deadline &&
+        return _sdp_setup_time_limit_result(
+            prob,
+            time() - core_started,
+        )
 
     if T === BigFloat
         check_precision_consistency(prob, opts.precision_bits, opts.verbosity)
@@ -239,6 +513,16 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     if opts.equilibrate
         solve_prob, eq = equilibrate(prob)
     end
+    if eq !== nothing && isempty(resume)
+        x0, X0, y0, Y0 = _equilibrate_warm_start(
+            T,
+            eq,
+            x0,
+            X0,
+            y0,
+            Y0,
+        )
+    end
 
     L, m, n, k = solve_prob.dims
     ws = Workspace(
@@ -248,6 +532,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             opts.extended_precision_memory_fraction,
         thread_count=opts.threads,
     )
+    time() >= deadline &&
+        return _sdp_setup_time_limit_result(
+            solve_prob,
+            time() - core_started,
+        )
 
     local x::Vector{T}, y::Vector{T}, X::Vector{Matrix{T}}, Y::Vector{Matrix{T}}, μ::Vector{T}
     local iter::Int, restarts::Int
@@ -255,17 +544,35 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     if !isempty(resume)
         cp = load_checkpoint(resume, T)
         cp.dims == solve_prob.dims || throw(ArgumentError("checkpoint dims $(cp.dims) do not match problem dims $(solve_prob.dims)"))
-        x, X, y, Y, μ, iter, restarts = cp.x, cp.X, cp.y, cp.Y, cp.μ, cp.iter, cp.restarts
+        _validate_warm_start(
+            solve_prob;
+            x0=cp.x,
+            X0=cp.X,
+            y0=cp.y,
+            Y0=cp.Y,
+        )
+        x = _owned_array_copy(T, cp.x)
+        X = [_owned_array_copy(T, block) for block in cp.X]
+        y = _owned_array_copy(T, cp.y)
+        Y = [_owned_array_copy(T, block) for block in cp.Y]
+        μ = _owned_array_copy(T, cp.μ)
+        iter, restarts = cp.iter, cp.restarts
     else
-        x = x0 === nothing ? zeros(T, m) : Vector{T}(x0)
-        y = y0 === nothing ? zeros(T, n) : Vector{T}(y0)
+        x = x0 === nothing ? alloc_zeros(T, m) : _owned_array_copy(T, x0)
+        y = y0 === nothing ? alloc_zeros(T, n) : _owned_array_copy(T, y0)
         if X0 === nothing
             scales = initial_block_scales(solve_prob, opts)
-            X = [Matrix{T}((opts.Ωp * scales[l]) * I, k[l], k[l]) for l in 1:L]
-            Y = [Matrix{T}((opts.Ωd * scales[l]) * I, k[l], k[l]) for l in 1:L]
+            X = [
+                _scaled_identity(T, opts.Ωp * scales[l], k[l])
+                for l in 1:L
+            ]
+            Y = [
+                _scaled_identity(T, opts.Ωd * scales[l], k[l])
+                for l in 1:L
+            ]
         else
-            X = [Matrix{T}(X0[l]) for l in 1:L]
-            Y = [Matrix{T}(Y0[l]) for l in 1:L]
+            X = [_owned_array_copy(T, X0[l]) for l in 1:L]
+            Y = [_owned_array_copy(T, Y0[l]) for l in 1:L]
             (all(l -> isposdef(X[l]), 1:L) && all(l -> isposdef(Y[l]), 1:L)) ||
                 return SDPResult{T}(NumericalBreakdown, "initial X0/Y0 must be positive definite",
                     x, X, y, Y, zero(T), zero(T), T(Inf), T(Inf), T(Inf), 0, 0, 0, nothing)
@@ -279,7 +586,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     centering_attempts = 0
     last_refine_steps = 0
     last_refine_residual = zero(T)
-    t_start = time()
+    t_start = core_started
     parameter_controller = AdaptiveIPMController(opts)
     phase_residual = 0.0
     phase_schur = 0.0
@@ -310,11 +617,12 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # below the type's own working precision — verified during development that
     # asking Float64x2 (eps≈1e-31) for ϵ_gap=1e-25 grinds the line search down to
     # noise and exhausts restarts, exactly the silent-iterMax-burn this catches.
-    needed_bits = -log2(Float64(max(opts.ϵ_gap, eps(Float64))))
-    if opts.verbosity >= 1 && Float64(opts.ϵ_gap) < 100 * Float64(eps(T))
-        @warn "ϵ_gap=$(Float64(opts.ϵ_gap)) needs roughly $(round(Int, needed_bits)) significand bits; " *
-              "T=$T has $(sig_bits(T)). This tolerance may be unreachable — expect possible " *
-              "MaxRestartsExceeded/IterLimit instead of Optimal. Loosen ϵ_gap or use a higher-precision T."
+    precision_diagnostic = _tolerance_precision_diagnostic(T, opts.ϵ_gap)
+    if opts.verbosity >= 1 && precision_diagnostic.warn
+        @warn "ϵ_gap=$(opts.ϵ_gap) needs roughly $(precision_diagnostic.needed_bits) significand bits; " *
+              "T=$T has $(sig_bits(T)). This tolerance may be unreachable; " *
+              "the solver will return a non-optimal status with precision-floor " *
+              "or stagnation diagnostics. Loosen ϵ_gap or use a higher-precision T."
     end
 
     print_header(opts)
@@ -337,7 +645,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # non-`Optimal` exits fall back to it — a converged run already ends on its
     # best point, so this can never change a successful solve.
     best_merit = T(Inf)
-    best_iterate = nothing
+    best_iterate = BestIterateWorkspace(x, X, y, Y)
     stagnation = StagnationDetector{T}(opts.stall_iterations, opts.stall_tolerance)
     initial_merit = T(Inf)   # merit at the first iterate, for progress detection
 
@@ -345,9 +653,28 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         gap = pObj - dObj
         gap_rel = abs(gap) / max(one(T), (abs(pObj) + abs(dObj)) / 2)
         term_ok, gap_ok = if opts.termination === :legacy
-            (p_res < opts.ϵ_primal && d_res < opts.ϵ_dual), (zero(T) < gap < opts.ϵ_gap)
+            (p_res <= opts.ϵ_primal && d_res <= opts.ϵ_dual), (zero(T) <= gap <= opts.ϵ_gap)
         else
-            (p_res / scale_p < opts.ϵ_primal && d_res / scale_d < opts.ϵ_dual), (gap_rel < opts.ϵ_gap)
+            (p_res / scale_p <= opts.ϵ_primal && d_res / scale_d <= opts.ϵ_dual), (gap_rel <= opts.ϵ_gap)
+        end
+        # Residuals between accepted steps are updated from the exact affine
+        # residual recurrence below. Before issuing a success certificate,
+        # recompute them from the current iterate so accumulated roundoff can
+        # never turn an estimate into a false `Optimal` status.
+        if term_ok
+            p_res, d_res = solution_residuals(
+                solve_prob,
+                x,
+                X,
+                y,
+                Y,
+            )
+            term_ok = if opts.termination === :legacy
+                p_res <= opts.ϵ_primal && d_res <= opts.ϵ_dual
+            else
+                p_res / scale_p <= opts.ϵ_primal &&
+                d_res / scale_d <= opts.ϵ_dual
+            end
         end
 
         # Progress is judged by `StagnationDetector` (see `stagnation.jl`): all
@@ -362,11 +689,18 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         isfinite(merit) && !isfinite(initial_merit) && (initial_merit = merit)
         if isfinite(merit) && merit < best_merit
             best_merit = merit
-            best_iterate = (
-                x=copy(x), X=[copy(Xl) for Xl in X],
-                y=copy(y), Y=[copy(Yl) for Yl in Y],
-                pObj=pObj, dObj=dObj, gap_rel=gap_rel,
-                p_res=p_res, d_res=d_res, iter=iter,
+            _store_best_iterate!(
+                best_iterate,
+                x,
+                X,
+                y,
+                Y,
+                pObj,
+                dObj,
+                gap_rel,
+                p_res,
+                d_res,
+                iter,
             )
         end
 
@@ -375,10 +709,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 status, message = Optimal, "Optimal"
                 break
             elseif opts.mode === FEASIBILITY
-                if dObj <= pObj <= 0
+                if pObj < zero(T)
                     status, message = FeasibleCert, "Feasible"
                     break
-                elseif pObj >= dObj >= 0
+                elseif dObj >= zero(T)
                     status, message = InfeasibleCert, "Infeasible"
                     break
                 end
@@ -401,7 +735,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             message = stagnation_message(stagnation, opts.ϵ_gap)
             break
         end
-        if time() - t_start > opts.max_time
+        if time() >= deadline || time() - t_start > opts.max_time
             status, message = TimeLimit, "Time limit ($(opts.max_time)s) exceeded after $iter iterations."
             break
         end
@@ -412,9 +746,19 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             # solve is limited by the accuracy of the linear solve or by the
             # algorithm — a residual at round-off means regularization and extra
             # precision cannot help.
-            cbstate = (iter=iter, pObj=pObj, dObj=dObj, gap=gap, p_res=p_res, d_res=d_res,
-                μ=copy(μ), restarts=restarts,
-                refine_steps=last_refine_steps, refine_residual=last_refine_residual)
+            cbstate = (
+                iter=iter,
+                pObj=_diagnostic_scalar_copy(pObj),
+                dObj=_diagnostic_scalar_copy(dObj),
+                gap=_diagnostic_scalar_copy(gap),
+                p_res=_diagnostic_scalar_copy(p_res),
+                d_res=_diagnostic_scalar_copy(d_res),
+                μ=_owned_array_copy(T, μ),
+                restarts=restarts,
+                refine_steps=last_refine_steps,
+                refine_residual=
+                    _diagnostic_scalar_copy(last_refine_residual),
+            )
             if opts.callback(cbstate) === true
                 status, message = UserStopped, "Stopped by callback after $iter iterations."
                 break
@@ -456,9 +800,18 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             opts.min_step,
             opts.step_rule,
         )
+        selected_step_rule = resolved_step_rule(ws, opts.step_rule)
         backtracking_count =
-            estimate_backtracking_count(tX, iteration_options.γ, opts.step_rule) +
-            estimate_backtracking_count(tY, iteration_options.γ, opts.step_rule)
+            estimate_backtracking_count(
+                tX,
+                iteration_options.γ,
+                selected_step_rule,
+            ) +
+            estimate_backtracking_count(
+                tY,
+                iteration_options.γ,
+                selected_step_rule,
+            )
         phase_line_search += (time_ns() - line_search_started) / 1.0e9
 
         # A step collapsing on a side that is *already feasible* is not a
@@ -506,9 +859,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 d_res_rel_now = d_res / scale_d
                 if gap_rel_now < near_tol * opts.ϵ_gap && p_res_rel_now < near_tol * opts.ϵ_primal &&
                    d_res_rel_now < near_tol * opts.ϵ_dual
-                    status, message = Optimal,
-                    "Optimal (within $(Float64(near_tol))× the requested tolerance — the step collapsed at " *
-                    "the numerical precision floor, not from bad scaling, so restarting would not help)."
+                    status, message = Stalled,
+                    "Step size collapsed within $(Float64(near_tol))×, but not within, " *
+                    "the requested tolerance. Returning the best iterate without an " *
+                    "Optimal certificate; use a wider arithmetic type or loosen the tolerance."
                     break
                 end
             end
@@ -650,6 +1004,14 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         trial_combine!(x, x, tX, ws.dx)
         n > 0 && trial_combine!(y, y, tY, ws.dy)
 
+        if !_finite_iterate(x, X, y, Y, μ)
+            status, message = NumericalBreakdown,
+            "non-finite primal or dual iterate detected" *
+            (dynamic_range_limited(T) ? " ($T's dynamic range exceeded)" : "") *
+            " — rescale (equilibrate=true), loosen Ωp/Ωd/omega_step, or use a wider-range T"
+            break
+        end
+
         complementarity_after = zero(T)
         @inbounds for l in 1:L
             complementarity_after += kdot(X[l], Y[l])
@@ -668,29 +1030,33 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         )
         phase_update += (time_ns() - update_started) / 1.0e9
 
-        # Non-finite guard (§4.2, applied universally — not just for types flagged
-        # dynamic_range_limited): any T can in principle overflow (large Ωp/Ωd times
-        # repeated restart escalation, or a badly-scaled problem), and a NaN that
-        # propagates silently for the rest of the run is exactly the kind of
-        # uninformative outcome §5's "zero silent-iterMax outcomes" criterion rules
-        # out — better to report it the moment it appears.
-        if !(all(isfinite, x) && all(l -> all(isfinite, X[l]), 1:L))
-            status, message = NumericalBreakdown,
-            "non-finite iterate detected" *
-            (dynamic_range_limited(T) ? " ($T's dynamic range exceeded)" : "") *
-            " — rescale (equilibrate=true), loosen Ωp/Ωd/omega_step, or use a wider-range T"
-            break
-        end
-
         pObj = LinearAlgebra.dot(solve_prob.c, x)
         dObj = dual_objective(solve_prob, y, Y)
+        if !isfinite(pObj) || !isfinite(dObj)
+            status, message = NumericalBreakdown,
+            "non-finite primal or dual objective detected"
+            break
+        end
         iter += 1
-        t2 = time()
-        print_iter(opts, iter, pObj, dObj, pObj - dObj, p_res, d_res, tX, tY, t2 - t1)
 
         for l in 1:L
             μ[l] = parameter_controller.beta * kdot(X[l], Y[l]) / k[l]
         end
+        if !all(isfinite, μ)
+            status, message = NumericalBreakdown,
+            "non-finite complementarity target detected"
+            break
+        end
+
+        # Newton feasibility equations are affine:
+        #   P⁺ = (1-tX)P and d⁺ = (1-tY)d.
+        # Carry the residual norms to the accepted iterate without another full
+        # contraction. A direct recomputation still certifies any prospective
+        # `Optimal` status and the final returned point.
+        p_res *= abs(one(T) - tX)
+        d_res *= abs(one(T) - tY)
+        t2 = time()
+        print_iter(opts, iter, pObj, dObj, pObj - dObj, p_res, d_res, tX, tY, t2 - t1)
 
         if opts.checkpoint_every > 0 && !isempty(opts.checkpoint_path) && iter % opts.checkpoint_every == 0
             save_checkpoint(opts.checkpoint_path, T, x, X, y, Y, μ, iter, restarts, solve_prob.dims)
@@ -702,7 +1068,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # the retained point is meaningfully better than the final one, so ordinary
     # `IterLimit` runs that were still improving are reported as-is.
     if status !== Optimal && status !== FeasibleCert && status !== InfeasibleCert &&
-       best_iterate !== nothing
+       best_iterate.valid
         final_merit = max(p_res / scale_p, d_res / scale_d,
             abs(pObj - dObj) / max(one(T), (abs(pObj) + abs(dObj)) / 2))
         if !isfinite(final_merit) || best_merit < final_merit / 2
@@ -725,6 +1091,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         pObj = LinearAlgebra.dot(prob.c, x)
         dObj = dual_objective(prob, y, Y)
     end
+    # Always report certificates in the same (original) coordinates as the
+    # returned iterate, including non-optimal exits and unequilibrated solves.
+    p_res, d_res = solution_residuals(prob, x, X, y, Y)
 
     elapsed = time() - t_start
     timings = opts.timing ? (
@@ -817,11 +1186,10 @@ when paired with `Ω = geomean`.
 `:auto` deliberately does **not** select `:per_block`, because it was measured
 and is worse. The reasoning that motivated it — the initial dual residual on
 block `l` is `‖C_l − Ωd·s_l·I‖`, so a scalar Ωd cannot suit a model whose block
-norms span 7.3e-4 … 116.6 — turns out to be the wrong criterion. What the
-initial point actually has to do is *dominate* the data, not match it: on the
-CSDR 80/4/40/100 model an Ω sweep improves monotonically up to Ω ≈ 2.6·max‖C_l‖∞
-(gap 7.4e-3), while per-block scaling, which shrinks the small blocks to their
-own tiny norms, diverges to pObj = 7e11 and stalls at 13 iterations.
+norms vary widely — turns out to be the wrong criterion. What the initial
+point actually has to do is dominate the data. The final CSDR sweep selected a
+scalar Ω matching the largest block norm, while per-block scaling, which
+shrinks small blocks to their own tiny norms, diverged.
 
 It is kept as an explicit option because the diagnosis may still be right for
 models whose *solution* scales with the block data, but it is not the default
@@ -859,12 +1227,62 @@ function solve!(
     Y0=nothing,
     resume::AbstractString="",
 ) where {T}
-    opts.refine_policy in (:fixed, :adaptive, :auto) ||
-        throw(ArgumentError("refine_policy must be :fixed, :adaptive, or :auto, got $(opts.refine_policy)"))
-    opts.omega_scaling in (:scalar, :per_block, :auto) ||
-        throw(ArgumentError("omega_scaling must be :scalar, :per_block, or :auto, got $(opts.omega_scaling)"))
+    return _solve_pipeline!(
+        prob,
+        opts;
+        x0=x0,
+        X0=X0,
+        y0=y0,
+        Y0=Y0,
+        resume=resume,
+    )
+end
+
+function solve!(
+    prob::SDPProblem{BigFloat},
+    opts::SolverOptions{BigFloat}=SolverOptions{BigFloat}();
+    x0=nothing,
+    X0=nothing,
+    y0=nothing,
+    Y0=nothing,
+    resume::AbstractString="",
+)
+    requested_precision = opts.precision_bits
+    requested_precision > 0 ||
+        throw(ArgumentError("precision_bits must be positive"))
+    run = () -> _solve_pipeline!(
+        prob,
+        opts;
+        x0=x0,
+        X0=X0,
+        y0=y0,
+        Y0=Y0,
+        resume=resume,
+    )
+    return Base.precision(BigFloat) == requested_precision ?
+           run() :
+           setprecision(run, BigFloat, requested_precision)
+end
+
+function _solve_pipeline!(
+    prob::SDPProblem{T},
+    opts::SolverOptions{T}=SolverOptions{T}();
+    x0=nothing,
+    X0=nothing,
+    y0=nothing,
+    Y0=nothing,
+    resume::AbstractString="",
+) where {T}
+    _validate_solver_options(opts)
     pipeline_started = time()
-    plan = build_execution_plan(prob, opts)
+    deadline = isfinite(opts.max_time) ?
+               pipeline_started + opts.max_time :
+               Inf
+    reduced, equality_map, report = presolve_equalities(prob, opts)
+    # Finalize the plan against the model that will actually be factorized.
+    # In particular, equality presolve can change the selected parameter profile
+    # and the diagnostic equality count.
+    plan = build_execution_plan(report.inconsistent ? prob : reduced, opts)
     warnings = String[]
     if opts.threads > Base.Threads.nthreads()
         push!(
@@ -876,19 +1294,40 @@ function solve!(
     if T === BigFloat && opts.threads > 1
         push!(
             warnings,
-            "BigFloat kernels are serial to avoid MPFR aliasing and thread-safety failures.",
+            "BigFloat solver kernels are serial because the current mutable-scalar workspaces require strict ownership and aliasing guarantees.",
         )
     end
-    if plan.classification.cone === :sdp &&
-       all(<=(2), prob.dims.k) &&
-       any(==(2), prob.dims.k)
+    if plan.classification.cone === :socp
         push!(
             warnings,
-            "Second-order-cone lifts are conservatively treated as SDP blocks; " *
-            "native SOCP metadata is not present in SDPProblem.",
+            "Detected exact SOC-arrow PSD structure. The current " *
+            ":socp_psd_lift path solves the semidefinite lift; native SOCP " *
+            "scaling and Newton systems are not implemented.",
         )
     end
-    reduced, equality_map, report = presolve_equalities(prob, opts)
+    _validate_warm_start(
+        prob;
+        x0=x0,
+        X0=X0,
+        y0=y0,
+        Y0=Y0,
+        resume=resume,
+        accepted_y_lengths=(
+            equality_map.original_count,
+            length(equality_map.keep),
+        ),
+    )
+    if time() >= deadline
+        return _time_limit_pipeline_result(
+            prob,
+            report,
+            plan,
+            time() - pipeline_started,
+            warnings,
+            opts.diagnostics,
+            opts.max_time,
+        )
+    end
     report.inconsistent &&
         return _inconsistent_presolve_result(
             prob,
@@ -896,6 +1335,28 @@ function solve!(
             plan,
             opts.diagnostics,
         )
+
+    reduced_y0 = if y0 === nothing
+        nothing
+    else
+        supplied = _owned_array_copy(T, y0)
+        if length(supplied) == equality_map.original_count
+            reduced_y = alloc_zeros(T, length(equality_map.keep))
+            kmul_owned!(
+                reduced_y,
+                equality_map.multiplier_map,
+                supplied,
+            )
+        elseif length(supplied) == length(equality_map.keep)
+            supplied
+        else
+            throw(ArgumentError(
+                "y0 has length $(length(supplied)); expected " *
+                "$(equality_map.original_count) in original equality coordinates " *
+                "or $(length(equality_map.keep)) after presolve",
+            ))
+        end
+    end
 
     if opts.verbosity >= 2
         println(
@@ -922,8 +1383,14 @@ function solve!(
                 "Matrix-valued X0/Y0 warm starts are ignored by the dedicated LP path; " *
                 "provide x0/y0.",
             )
-        result, redundant_rows, workspace_bytes =
-            solve_lp!(reduced, opts, plan; x0=x0, y0=y0)
+        result, redundant_rows, workspace_bytes = solve_lp!(
+            reduced,
+            opts,
+            plan;
+            x0=x0,
+            y0=reduced_y0,
+            deadline=deadline,
+        )
     else
         core_options = _replace_solver_options(
             opts;
@@ -938,9 +1405,10 @@ function solve!(
             core_options;
             x0=x0,
             X0=X0,
-            y0=y0,
+            y0=reduced_y0,
             Y0=Y0,
             resume=resume,
+            deadline=deadline,
         )
         # Keep diagnostics out of the hot path: recursively traversing every
         # sparse coefficient object can cost much more than a warmed solve.
@@ -962,6 +1430,17 @@ function solve!(
         )
     end
     result = _restore_equalities(result, equality_map)
+    result, certificate, certificate_warning = if result.status === TimeLimit
+        (
+            result,
+            (available=false, reason=:time_limit),
+            nothing,
+        )
+    else
+        certify_final_result(prob, result, opts)
+    end
+    certificate_warning === nothing ||
+        push!(warnings, certificate_warning)
     if any(row -> row.fallback, result.parameter_history)
         push!(
             warnings,
@@ -976,6 +1455,8 @@ function solve!(
         warnings,
         workspace_bytes,
         opts.diagnostics,
+        (reason=:none,),
+        certificate,
     )
 end
 
@@ -1003,6 +1484,30 @@ function solve(
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:fixed,
 ) where {T}
+    if T === BigFloat &&
+       precision !== nothing &&
+       Base.precision(BigFloat) != Int(precision)
+        requested_precision = Int(precision)
+        requested_precision > 0 ||
+            throw(ArgumentError("precision must be a positive bit count"))
+        return setprecision(BigFloat, requested_precision) do
+            solve(
+                prob;
+                tolerance=tolerance,
+                maximum_iterations=maximum_iterations,
+                time_limit=time_limit,
+                threads=threads,
+                precision=nothing,
+                verbosity=verbosity,
+                diagnostics=diagnostics,
+                warm_start=warm_start,
+                presolve=presolve,
+                scaling=scaling,
+                algorithm=algorithm,
+                parameter_strategy=parameter_strategy,
+            )
+        end
+    end
     precision_bits = precision === nothing ?
                      (T === BigFloat ? Base.precision(BigFloat) : sig_bits(T)) :
                      Int(precision)
@@ -1072,6 +1577,7 @@ function solve(
 )
     T = _resolve_precision_type(precision, c, A, C, B, b)
     run = function ()
+        api_started = time()
         problem = ingest(
             c,
             A,
@@ -1082,11 +1588,17 @@ function solve(
             sparse=sparse,
             verbosity=verbosity,
         )
+        remaining_time = isfinite(time_limit) ?
+                         max(
+                             0.0,
+                             Float64(time_limit) - (time() - api_started),
+                         ) :
+                         Inf
         return solve(
             problem;
             tolerance=tolerance,
             maximum_iterations=maximum_iterations,
-            time_limit=time_limit,
+            time_limit=remaining_time,
             threads=threads,
             precision=precision_bits,
             verbosity=verbosity,

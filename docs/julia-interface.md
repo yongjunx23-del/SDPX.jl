@@ -30,6 +30,11 @@ arithmetic, removes dependent equalities, scales the model, selects the
 kernel and schedule, and tunes the initialization. `solve!` with an explicit
 `SolverOptions` remains the expert interface.
 
+`time_limit` is end-to-end for solver work: it includes automatic-pipeline
+setup, and `solve(c, A, C, B, b; ...)` also charges raw input ingestion. Native
+warm starts are specified in original input coordinates and are mapped through
+equality presolve and the selected LP/SDP equilibration automatically.
+
 ## Float64 example
 
 ```julia
@@ -160,7 +165,7 @@ Convenience aliases are:
 | `tol_dual` | `ϵ_dual` | dual residual tolerance |
 | `max_iter` | `iter_max` | iteration limit |
 | `max_iterations` | `iter_max` | iteration limit |
-| `time_limit` | `max_time` | wall-clock limit in seconds |
+| `time_limit` | `max_time` | end-to-end pipeline wall-clock limit in seconds |
 | `num_threads` | `threads` | maximum Julia tasks used by one solve |
 | `precision` | `precision_bits` | BigFloat working precision in bits |
 | `verbose` | `verbosity` | output level from 0 to 3 |
@@ -182,6 +187,11 @@ beat the fixed strategy. `extended_precision_blas=:auto` separately enables the 
 Float64x4/BigFloat Schur crossover. Its default is `:off`. Unknown names are
 rejected.
 
+Native SDP checkpoints are iterate-level warm restarts, not full execution
+snapshots. Resume restores the iterate and iteration/restart counters but
+resets adaptive-parameter, stagnation, phase-timing, and best-iterate history.
+The dedicated LP path does not currently support checkpoint resume.
+
 Julia must be started with at least as many threads as a solve may request:
 
 ```bash
@@ -195,8 +205,8 @@ julia -t 4
 - At least one scalar, SOC, or PSD cone constraint is required.
 - Rotated SOC and other nonsymmetric cones still rely on MOI bridges or future
   native support. SOC constraints currently use an exact PSD arrow lift.
-- Sparse equilibration is not implemented. Use `sparse=:auto` with
-  `equilibrate=false`, or select the dense path for equilibration.
+- Sparse and dense coefficient storage both support internal equilibration.
+  Sparse derived caches are rebuilt after scaling.
 - LP unboundedness and general conic infeasibility certificates are not yet
   available in every numerical-breakdown case.
 - The specialized block-arrow factorization currently applies to sparse

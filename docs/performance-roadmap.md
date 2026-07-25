@@ -4,14 +4,15 @@ This roadmap targets SDPs with many scalar decision variables or affine
 constraints, many small PSD blocks, and sparse block coefficients. The matched
 CSDR benchmarks are the primary acceptance tests.
 
-## Implementation status: 2026-07-24
+## Implementation status: 2026-07-25
 
 The first optimization pass completed the problem-specific parts of P1, P2,
 and P4:
 
 - exact active-variable sets are built for every PSD block;
 - sparse contractions and Schur assembly visit only active variables;
-- each sparse block owns a compact transformed panel and upper-pair buffer;
+- general sparse blocks use compact transformed panels and upper-pair buffers,
+  while exact-arrow `2x2` blocks use a fused direct path that allocates neither;
 - sparse PSD blocks are assembled in parallel with deterministic reduction;
 - for sparse problems without explicit equality columns, variables occurring
   in one block are eliminated by an exact block-arrow factorization.
@@ -77,11 +78,13 @@ pre-optimization sparse implementation nevertheless:
 - allocates dense `m × m` partial Schur matrices for each worker, even when
   sparse mode is selected.
 
-The optimized path now uses `I_l` for contractions, compact panels, and pair
-assembly. It detects the exact global/local variable partition, assembles
-compact arrow blocks directly, eliminates local blocks in parallel, and
-factors only the reduced global system. Non-arrow sparse patterns still need a
-general sparse KKT backend.
+The optimized path now uses `I_l` for contractions and compact storage.
+General sparse blocks can use compact panels and pair assembly; exact-arrow
+`2x2` blocks instead compute and scatter directly without either allocation.
+It detects the exact global/local variable partition, assembles compact arrow
+blocks directly, eliminates local blocks in parallel, and factors only the
+reduced global system. Non-arrow sparse patterns still need a general sparse
+KKT backend.
 
 The before/after measurements are:
 
@@ -290,15 +293,18 @@ iterations on the acceptance problem, versus 52 for the historical
 `β=0.01, γ=0.9` profile. This setting is now recorded as a benchmark profile,
 not a universal default. A zero-probe `parameter_policy=:auto` now selects
 three calibrated structural profiles across the 180-to-900-block scale set.
-Exact `2x2` fraction-to-boundary logic is implemented as an optional step
-rule; discrete backtracking remained faster on the measured family.
+Exact `2x2` fraction-to-boundary logic is selected by the default `:auto`
+step rule for small blocks. Later CSDR measurements found it both more robust
+and cheaper than repeated discrete backtracking.
 
 The benchmark needs 52–64 SDPX iterations versus 13–15 Clarabel iterations.
 Linear algebra is the first priority, but algorithmic changes can remove
 another large factor:
 
-- replace fixed centering with an adaptive Mehrotra centering parameter
-  derived from the affine predictor;
+- the guarded adaptive Mehrotra-style centering controller is implemented,
+  records every `β`/`γ` selection, and falls back after instability; it remains
+  opt-in because the representative SDP benchmark was slower than the fixed
+  strategy;
 - generalize exact PSD maximum step lengths beyond the implemented `1x1` and
   `2x2` paths;
 - test Nesterov–Todd scaling against the current direction on ill-scaled
@@ -309,25 +315,28 @@ another large factor:
   relying mainly on restarts;
 - tune defaults from a training set, never from the timed acceptance set.
 
-The fact that default settings fail on the benchmark while
-`β=0.01, Ωp=Ωd=10, predictor=:sdpb` succeeds indicates that the initialization
-and centering policy should become data-adaptive.
+The structural cold-start policy is now data-adaptive: large arrow models use
+`β=0.01, γ=0.85` and choose `Ωp=Ωd` from the PSD-block norm scale. Explicit
+initialization sweeps must use `parameter_policy=:fixed`, because automatic
+mode intentionally overrides `Ωp` and `Ωd`.
 
 ## P6: accuracy and robustness
 
 Bring the sparse path to feature parity with the dense path:
 
-1. Implement sparse equilibration without densifying coefficients.
-2. Use block-aware Ruiz scaling with cone-compatible corrections.
+1. **Implemented:** sparse equilibration without densifying coefficients.
+2. **Implemented:** block-aware Ruiz scaling with cone-compatible corrections.
 3. Make regularization relative to KKT norms and expected pivot signs, not
    only a retry after Cholesky failure.
-4. Iterate refinement until a residual tolerance or stagnation criterion is
-   met; expose achieved linear residuals.
+4. **Implemented:** iterate refinement until a residual tolerance or
+   stagnation criterion is met and expose achieved linear residuals.
 5. Compute refinement residuals in a wider accumulator when practical.
-6. Detect dependent equalities during preprocessing and retain a map to
-   reconstruct dual values.
-7. Report both scaled and original-problem residuals.
-8. Distinguish inaccurate convergence from a full-accuracy optimum.
+6. **Implemented:** detect dependent equalities during preprocessing and
+   retain a map to reconstruct dual values.
+7. **Implemented:** report validation residuals in original problem
+   coordinates after reconstruction.
+8. **Implemented:** downgrade an otherwise successful status when the
+   authoritative post-solve certificate fails its accuracy checks.
 9. Add explicit primal/dual infeasibility certificates before mapping such
    outcomes to public solver statuses.
 
@@ -348,7 +357,7 @@ For mixed precision, a useful experiment is:
 | P3 | Sparse QDLDL/AMD with symbolic reuse | Removes dense `m^3` factorization |
 | P4 | Parallel sparse assembly and block Newton work | Implemented; persistent-worker batching remains |
 | P5 | Automatic predictor/step policy | Structural auto profiles and exact `2x2` step option implemented |
-| P6 | Sparse scaling, regularization, refinement | Improves accuracy and failure behavior |
+| P6 | Sparse scaling, regularization, refinement | Scaling, adaptive refinement, and equality presolve implemented; norm-aware regularization and wider residual accumulation remain |
 
 ## References
 

@@ -29,19 +29,20 @@ function compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T}, x, X, y, Y, �
 
     for l in 1:L
         bw = ws.blk[l]
-        buildP!(bw.P, cons, l, x)
+        buildP_owned!(bw.P, cons, l, x)
         kaxpby!(-one(T), X[l], one(T), bw.P)
         kaxpby!(-one(T), prob.C[l], one(T), bw.P)
     end
 
-    copyto!(ws.d, prob.c)
+    copy_owned!(ws.d, prob.c)
     for l in 1:L
-        accumulate_v!(ws.d, cons, l, Y[l], -one(T))
+        accumulate_v_owned!(ws.d, cons, l, Y[l], -one(T))
     end
-    n > 0 && mul!(ws.d, prob.B, y, -one(T), one(T))
+    n > 0 && kmul_owned!(ws.d, prob.B, y, -one(T), one(T))
 
-    copyto!(ws.p, prob.b)
-    n > 0 && mul!(ws.p, transpose(prob.B), x, -one(T), one(T))
+    copy_owned!(ws.p, prob.b)
+    n > 0 &&
+        kmul_owned!(ws.p, transpose(prob.B), x, -one(T), one(T))
 
     p_res = zero(T)
     @inbounds for l in 1:L
@@ -53,7 +54,7 @@ function compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T}, x, X, y, Y, �
     use_affine = opts.predictor === :sdpb && p_res < opts.ϵ_primal && d_res < opts.ϵ_dual
     for l in 1:L
         bw = ws.blk[l]
-        kmul!(bw.R, X[l], Y[l], -one(T), zero(T))
+        kmul_owned!(bw.R, X[l], Y[l], -one(T), zero(T))
         if !use_affine
             @inbounds for i in 1:k[l]
                 bw.R[i, i] += μ[l]
@@ -68,9 +69,9 @@ function factor_blocks!(ws::Workspace{T}, X, Y) where {T}
     ok = true
     for l in eachindex(X)
         bw = ws.blk[l]
-        copyto!(bw.LX, X[l])
+        copy_owned!(bw.LX, X[l])
         ok &= kchol!(bw.LX)
-        copyto!(bw.MY, Y[l])
+        copy_owned!(bw.MY, Y[l])
         ok &= kchol!(bw.MY)
     end
     return ok
@@ -79,13 +80,13 @@ end
 # Z[l] ← X[l]⁻¹(P[l]Y[l] − R[l]) for every block, then v[i] += ⟨A_i, Z⟩ (sign +1)
 function _predictor_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T}, Y) where {T}
     L = prob.dims.L
-    fill!(ws.v, zero(T))
+    zero_owned!(ws.v)
     for l in 1:L
         bw = ws.blk[l]
-        kmul!(bw.Z, bw.P, Y[l])
-        kaxpby!(-one(T), bw.R, one(T), bw.Z)   # Z = P·Y − R   (bw.Z fresh from mul!, safe to mutate)
+        kmul_owned!(bw.Z, bw.P, Y[l])
+        kaxpby_owned!(-one(T), bw.R, one(T), bw.Z)   # Z = P·Y − R
         kcholsolve!(bw.LX, bw.Z)                # Z = X⁻¹(P·Y − R)
-        accumulate_v!(ws.v, prob.cons, l, bw.Z, one(T))
+        accumulate_v_owned!(ws.v, prob.cons, l, bw.Z, one(T))
     end
     return ws.v
 end
@@ -191,7 +192,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
     end
-    solve_kkt!(ws, n, r, ws.p, ws.dx, ws.dy)
+    _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
     _with_blas_threads(parallel_blas) do
         threaded_direction_blocks!(ws, prob, Y)
     end
@@ -219,7 +220,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
     end
-    solve_kkt!(ws, n, r, ws.p, ws.dx, ws.dy)
+    _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
 
     refine_steps, refine_residual = refine_direction!(ws, prob, opts, r)
 

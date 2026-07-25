@@ -1,4 +1,6 @@
 using SDPX
+using DoubleFloats
+using JLD2
 using Test
 
 @testset "SDPX.jl" begin
@@ -9,4 +11,17 @@ using Test
     include("moi.jl")
     include("threads.jl")
     include("pipeline.jl")
+    include("lp_regressions.jl")
+    include("solver_regressions.jl")
+    include("kkt_regressions.jl")
+    include("result_certificate.jl")
+    include("moi_regressions.jl")
+    include("extended_blas_regressions.jl")
+    include("bigfloat_kernel_regressions.jl")
+    include("bigfloat_ownership_regressions.jl")
+    include("bigfloat_sparse_schur_regressions.jl")
+    include("schur_scheduler_regressions.jl")
+    include("ingest_regressions.jl")
+    include("spectrum_regressions.jl")
+    include("extensions_regressions.jl")
 end

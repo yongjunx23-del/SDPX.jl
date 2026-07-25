@@ -13,7 +13,12 @@ using Printf
 using SDPX
 using SparseArrays
 
-let path = joinpath(@__DIR__, "benchmark_sdpx_float64_solve.jl")
+let path = joinpath(
+        @__DIR__,
+        "..",
+        "lattice_bootstrap",
+        "benchmark_sdpx_float64_solve.jl",
+    )
     source = read(path, String)
     include_string(@__MODULE__, replace(source, r"\nmain\(ARGS\)\s*$" => "\n"), path)
 end

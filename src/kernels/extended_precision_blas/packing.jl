@@ -29,7 +29,7 @@ function prepare_storage!(array::AbstractArray{BigFloat})
     # all entries. Give every destination its own object before mutating it
     # with MutableArithmetics in the allocation-free hot loops.
     @inbounds for index in eachindex(array)
-        array[index] = array[index] + zero(BigFloat)
+        array[index] = MA.mutable_copy(array[index])
     end
     return array
 end
@@ -39,8 +39,7 @@ prepare_triangle_storage!(matrix::AbstractMatrix) = matrix
 function prepare_triangle_storage!(matrix::AbstractMatrix{BigFloat})
     @inbounds for column in axes(matrix, 2)
         for row in column:size(matrix, 1)
-            matrix[row, column] =
-                matrix[row, column] + zero(BigFloat)
+            matrix[row, column] = MA.mutable_copy(matrix[row, column])
         end
     end
     return matrix

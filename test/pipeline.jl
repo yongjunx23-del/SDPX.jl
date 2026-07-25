@@ -51,6 +51,10 @@ end
     @test result.status == SDPX.Optimal
     @test result.pObj ≈ 1.0 atol=1e-7
     @test result.diagnostics.plan.algorithm == :socp_psd_lift
+    @test any(
+        warning -> occursin("SOC-arrow PSD structure", warning),
+        result.diagnostics.warnings,
+    )
     @test PIPELINE_MOI.get(
         optimizer,
         PIPELINE_MOI.ConstraintPrimal(),
@@ -91,6 +95,72 @@ end
         row -> 0.02 <= row.beta <= 0.50 && 0.65 <= row.gamma <= 0.95,
         adaptive.parameter_history,
     )
+
+    controller = SDPX.AdaptiveIPMController(
+        SDPX.SolverOptions{Float64}(
+            β=0.1,
+            γ=0.8,
+            parameter_strategy=:adaptive,
+        ),
+    )
+    for iteration in 6:7
+        SDPX.record_and_update!(
+            controller;
+            iteration,
+            predictor_quality=0.3,
+            complementarity_before=100.0,
+            complementarity_after=101.0,
+            primal_residual=1.0,
+            dual_residual=1.0,
+            primal_step=1.0,
+            dual_step=1e-3,
+            backtracking_count=0,
+        )
+    end
+    @test controller.fallback
+    @test controller.beta == controller.default_beta
+    @test controller.gamma == controller.default_gamma
+    @test last(controller.history).fallback_reason == :stalled_progress
+
+    setprecision(BigFloat, 256) do
+        @test SDPX.estimate_backtracking_count(
+            big"1e-1000",
+            big"0.9",
+            :backtrack,
+        ) > 20_000
+        near_one = one(BigFloat) - big"1e-70"
+        @test SDPX.estimate_backtracking_count(
+            big"0.5",
+            near_one,
+            :backtrack,
+        ) == typemax(Int)
+    end
+    setprecision(BigFloat, 64) do
+        diagnostic = SDPX._tolerance_precision_diagnostic(
+            BigFloat,
+            big"1e-100",
+        )
+        @test diagnostic.warn
+        @test diagnostic.needed_bits >= 332
+    end
+    setprecision(BigFloat, 2048) do
+        diagnostic = SDPX._tolerance_precision_diagnostic(
+            BigFloat,
+            big"1e-1000",
+        )
+        @test diagnostic.warn
+        @test diagnostic.needed_bits >= 3_321
+    end
+
+    timed_out = SDPX.solve(
+        problem;
+        time_limit=0.0,
+        verbosity=0,
+    )
+    @test timed_out.status == SDPX.TimeLimit
+    @test timed_out.iterations == 0
+    @test timed_out.diagnostics.termination.reason == :time_limit
+    @test timed_out.diagnostics.timings.pipeline >= 0.0
 
     inconsistent = analytic_lp_problem(; duplicate_equality=true)
     inconsistent = SDPX.SDPProblem{Float64}(
@@ -182,6 +252,45 @@ function unbalanced_arrow_problem(; blocks::Int=4, shared::Int=2)
         sparse=:auto, verbosity=0)
     @assert prob.cons isa SDPX.SparseCons{Float64}
     return prob
+end
+
+@testset "SDP warm-start validation and end-to-end time limit" begin
+    problem = unbalanced_arrow_problem(blocks=4)
+    options = SDPX.SolverOptions{Float64}(
+        algorithm=:sdp,
+        parameter_policy=:fixed,
+        max_time=0.0,
+        verbosity=0,
+    )
+    native = warm -> SDPX.solve!(problem, options; warm...)
+    simple = warm -> SDPX.solve(
+        problem;
+        algorithm=:sdp,
+        time_limit=0.0,
+        verbosity=0,
+        warm_start=warm,
+    )
+    valid_blocks = [Matrix{Float64}(I, 2, 2) for _ in 1:problem.dims.L]
+
+    for invoke in (native, simple)
+        @test_throws ArgumentError invoke((; X0=valid_blocks))
+        @test_throws ArgumentError invoke((; Y0=valid_blocks))
+        @test_throws DimensionMismatch invoke((; x0=zeros(problem.dims.m + 1)))
+        @test_throws DimensionMismatch invoke((; y0=[0.0]))
+        @test_throws DimensionMismatch invoke(
+            (; X0=valid_blocks[1:1], Y0=valid_blocks),
+        )
+        wrong_shape = [ones(1, 1), valid_blocks[2]]
+        @test_throws DimensionMismatch invoke(
+            (; X0=wrong_shape, Y0=valid_blocks),
+        )
+    end
+
+    timed_out = native((;))
+    @test timed_out.status == SDPX.TimeLimit
+    @test timed_out.iterations == 0
+    @test timed_out.diagnostics.termination.reason == :time_limit
+    @test timed_out.diagnostics.timings.pipeline >= 0.0
 end
 
 @testset "initial-point scaling tracks the block data" begin

@@ -8,10 +8,11 @@ configuration and appends a CSV row.
 
 Note on fairness: `Float64x4` carries ~212 significand bits and `BigFloat` here
 is set to 256, so BigFloat is doing *more* precise arithmetic — it is the
-closest standard pairing, not an exact match. SDPX also forces BigFloat onto
-the serial path (MPFR is not safe to use concurrently across OS threads), so
-the honest single-number comparison is at one thread; extra threads only help
-Float64x4, which is itself a real practical difference worth reporting.
+closest standard pairing, not an exact match. SDPX also keeps BigFloat on the
+serial path because its mutable-scalar solver workspaces rely on strict
+ownership and aliasing invariants. The honest single-number comparison is
+therefore at one thread; extra threads only help Float64x4, which is itself a
+real practical difference worth reporting.
 """
 
 using LinearAlgebra

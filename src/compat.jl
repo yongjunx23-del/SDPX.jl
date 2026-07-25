@@ -65,7 +65,9 @@ an [`SDPProblem`](@ref) via [`ingest`](@ref) and calls [`solve!`](@ref).
 `termination=:relative` is a *behavior change* from the original
 (§N1/§5.1: the old `0 < gap < ϵ_gap` test silently never fires when
 the gap overshoots to a small negative number, which is routine near
-convergence) — pass `termination=:legacy` to get the exact old test.
+convergence) — pass `termination=:legacy` for the legacy-like absolute,
+nonnegative-gap convention. Boundary handling and post-solve certification
+remain the modern robust behavior.
 """
 function sdp(c, A, C, B, b;
     β=0.1, γ=0.9, Ωp=1, Ωd=1,
@@ -79,19 +81,45 @@ function sdp(c, A, C, B, b;
     max_time::Real=Inf, callback=nothing)
 
     T = _infer_legacy_T(c, A, C, B, b)
-    prob = ingest(c, A, C, B, b; T=T, sparse=sparse, verbosity=verbosity)
     precision_bits = T === BigFloat ? _base10_to_bits(prec) : 997
-    legacy_max_restarts = (maxOmega > 0 && OmegaStep > 1) ?
-                           max(1, ceil(Int, log(Float64(maxOmega)) / max(log(Float64(OmegaStep)), 1.0e-10))) : 5
-    opts = SolverOptions{T}(;
-        β=T(β), γ=T(γ), Ωp=T(Ωp), Ωd=T(Ωd),
-        ϵ_gap=T(ϵ_gap), ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
-        iter_max=iterMax, precision_bits=precision_bits, restart=restart,
-        min_step=T(minStep), max_omega=T(maxOmega), omega_step=T(OmegaStep),
-        max_restarts=legacy_max_restarts, mode=OPTIMIZE, verbosity=verbosity, termination=termination,
-        equilibrate=equilibrate, refine_steps=refine_steps, predictor=predictor,
-        max_time=Float64(max_time), callback=callback, parameter_policy=:fixed)
-    return _with_precision(() -> solve!(prob, opts), T, precision_bits)
+    return _with_precision(T, precision_bits) do
+        # Exact Int/Rational inputs must be converted only after entering the
+        # requested BigFloat precision scope. Converting first would impose the
+        # ambient precision as an irreversible accuracy ceiling.
+        prob = ingest(
+            c,
+            A,
+            C,
+            B,
+            b;
+            T=T,
+            sparse=sparse,
+            verbosity=verbosity,
+        )
+        max_omega_t = T(maxOmega)
+        omega_step_t = T(OmegaStep)
+        legacy_max_restarts =
+            max_omega_t > zero(T) && omega_step_t > one(T) ?
+            max(
+                1,
+                _nonnegative_int_saturating(
+                    log(max_omega_t) / log(omega_step_t),
+                    RoundUp,
+                ),
+            ) : 5
+        opts = SolverOptions{T}(;
+            β=T(β), γ=T(γ), Ωp=T(Ωp), Ωd=T(Ωd),
+            ϵ_gap=T(ϵ_gap), ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
+            iter_max=iterMax, precision_bits=precision_bits, restart=restart,
+            min_step=T(minStep), max_omega=max_omega_t,
+            omega_step=omega_step_t, max_restarts=legacy_max_restarts,
+            mode=OPTIMIZE, verbosity=verbosity, termination=termination,
+            equilibrate=equilibrate, refine_steps=refine_steps,
+            predictor=predictor, max_time=Float64(max_time),
+            callback=callback, parameter_policy=:fixed,
+        )
+        return solve!(prob, opts)
+    end
 end
 
 """
@@ -115,14 +143,26 @@ function sdp(c, A, C, B, b, x0, X0, y0, Y0;
     verbosity::Int=1, termination::Symbol=:relative)
 
     T = _infer_legacy_T(c, A, C, B, b)
-    prob = ingest(c, A, C, B, b; T=T, sparse=sparse, verbosity=verbosity)
     precision_bits = T === BigFloat ? _base10_to_bits(prec) : 997
-    opts = SolverOptions{T}(;
-        β=T(β), γ=T(γ), ϵ_gap=T(ϵ_gap), ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
-        iter_max=iterMax, precision_bits=precision_bits, mode=OPTIMIZE, verbosity=verbosity,
-        termination=termination, restart=false, min_step=T(1e-10),
-        parameter_policy=:fixed)
     return _with_precision(T, precision_bits) do
+        prob = ingest(
+            c,
+            A,
+            C,
+            B,
+            b;
+            T=T,
+            sparse=sparse,
+            verbosity=verbosity,
+        )
+        opts = SolverOptions{T}(;
+            β=T(β), γ=T(γ), ϵ_gap=T(ϵ_gap),
+            ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
+            iter_max=iterMax, precision_bits=precision_bits,
+            mode=OPTIMIZE, verbosity=verbosity,
+            termination=termination, restart=false,
+            min_step=T(1e-10), parameter_policy=:fixed,
+        )
         solve!(prob, opts; x0=x0, X0=X0, y0=y0, Y0=Y0)
     end
 end
@@ -181,16 +221,30 @@ function findFeasible(A, C, B, b;
     termination::Symbol=:relative, t_max=nothing)
 
     T = _infer_legacy_T(A, C, B, b)
-    cc, AA, C2, BB, _ = _extend_for_feasibility(A, C, B, b, T, t_max)
-    prob = ingest(cc, AA, C2, BB, b; T=T, sparse=sparse, verbosity=verbosity)
     precision_bits = T === BigFloat ? _base10_to_bits(prec) : 997
-    opts = SolverOptions{T}(;
-        β=T(β), γ=T(γ), Ωp=T(Ωp), Ωd=T(Ωd),
-        ϵ_gap=T(ϵ_gap), ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
-        iter_max=iterMax, precision_bits=precision_bits, restart=restart,
-        min_step=T(minStep), mode=FEASIBILITY, verbosity=verbosity,
-        termination=termination, parameter_policy=:fixed)
-    return _with_precision(() -> solve!(prob, opts), T, precision_bits)
+    return _with_precision(T, precision_bits) do
+        cc, AA, C2, BB, _ =
+            _extend_for_feasibility(A, C, B, b, T, t_max)
+        prob = ingest(
+            cc,
+            AA,
+            C2,
+            BB,
+            b;
+            T=T,
+            sparse=sparse,
+            verbosity=verbosity,
+        )
+        opts = SolverOptions{T}(;
+            β=T(β), γ=T(γ), Ωp=T(Ωp), Ωd=T(Ωd),
+            ϵ_gap=T(ϵ_gap), ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
+            iter_max=iterMax, precision_bits=precision_bits,
+            restart=restart, min_step=T(minStep), mode=FEASIBILITY,
+            verbosity=verbosity, termination=termination,
+            parameter_policy=:fixed,
+        )
+        return solve!(prob, opts)
+    end
 end
 
 """
@@ -211,19 +265,33 @@ function findFeasible(
     termination::Symbol=:relative, t_max=nothing)
 
     T = _infer_legacy_T(A, C, B, b)
-    cc, AA, C2, BB, tmax_val = _extend_for_feasibility(A, C, B, b, T, t_max)
-    prob = ingest(cc, AA, C2, BB, b; T=T, sparse=sparse, verbosity=verbosity)
     precision_bits = T === BigFloat ? _base10_to_bits(prec) : 997
-    t0 = T(x0[1])
-    # extra (L+1)-th block's initial value: t_max − t0, must be > 0 for a valid interior start
-    boundX0 = fill(max(tmax_val - t0, one(T)), 1, 1)
-    X0ext = vcat([Matrix{T}(Xl) for Xl in X0], [boundX0])
-    opts = SolverOptions{T}(;
-        β=T(β), γ=T(γ), ϵ_gap=T(ϵ_gap), ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
-        iter_max=iterMax, precision_bits=precision_bits, mode=FEASIBILITY, verbosity=verbosity,
-        termination=termination, restart=false, min_step=T(1e-10),
-        parameter_policy=:fixed)
     return _with_precision(T, precision_bits) do
+        cc, AA, C2, BB, tmax_val =
+            _extend_for_feasibility(A, C, B, b, T, t_max)
+        prob = ingest(
+            cc,
+            AA,
+            C2,
+            BB,
+            b;
+            T=T,
+            sparse=sparse,
+            verbosity=verbosity,
+        )
+        t0 = T(x0[1])
+        # Extra (L+1)-th block's initial value: t_max − t0, which must
+        # remain positive for a valid interior warm start.
+        boundX0 = fill(max(tmax_val - t0, one(T)), 1, 1)
+        X0ext = vcat([Matrix{T}(Xl) for Xl in X0], [boundX0])
+        opts = SolverOptions{T}(;
+            β=T(β), γ=T(γ), ϵ_gap=T(ϵ_gap),
+            ϵ_primal=T(ϵ_primal), ϵ_dual=T(ϵ_dual),
+            iter_max=iterMax, precision_bits=precision_bits,
+            mode=FEASIBILITY, verbosity=verbosity,
+            termination=termination, restart=false,
+            min_step=T(1e-10), parameter_policy=:fixed,
+        )
         solve!(prob, opts; x0=vcat([t0], T.(x0[2:end])), X0=X0ext, y0=y0, Y0=Y0)
     end
 end

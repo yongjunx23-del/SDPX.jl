@@ -23,20 +23,38 @@ the state of the package rather than a delta against a previous SDPX version.
   construction.
 - Dedicated arrow-structured KKT path for models with shared and per-block local
   variables, and a fused compute-and-scatter Schur kernel for models whose
-  blocks are all 2x2.
+  blocks are all 2x2. The fused path omits both transformed-panel and packed
+  pair storage when neither is consumed.
 - Sparse constraint storage with a flat COO layout and precomputed column-major
   indices.
-- Dedicated linear-programming path for models whose cones are all 1x1.
+- Dedicated linear-programming path for models whose cones are all 1x1,
+  including packed weighted-Hessian assembly and a Cholesky Newton solve for
+  equality-free LPs.
 
 ### Arithmetic and performance
 
 - Generic element type: `Float64`, `BigFloat`, `MultiFloats.Float64xN`, and
   `DoubleFloats.Double64`, the latter three via package extensions.
-- Allocation-free MPFR kernels built on MutableArithmetics.
+- Ownership-aware MPFR kernels built on MutableArithmetics. Solver workspaces
+  keep independently owned `BigFloat` entries and reuse them in matrix
+  products, vector updates, triangular solves, Cholesky factors, Schur/KKT
+  right-hand sides, LP Hessian assembly, and general sparse COO Schur
+  contractions.
 - Multithreaded block factorisation, Schur assembly, and line search, with
-  longest-processing-time scheduling and phase-aware BLAS thread control.
-- `BigFloat` runs multithreaded and is verified bit-identical at 1, 2, 4 and 8
-  threads.
+  longest-processing-time scheduling, a workload crossover for small Float64
+  problems, lower-triangle-only reduction where supported, and phase-aware
+  BLAS thread control.
+- Fixed-width extended arithmetic uses the multicore scheduler. `BigFloat`
+  deliberately remains serial to preserve the validated ownership model and
+  avoid per-worker arbitrary-precision workspace growth.
+- Optional cache-blocked, panel-packed triangular `syrk!`/`gemm!` kernels for
+  fixed-width extended arithmetic and BigFloat. Selection accounts for
+  dimensions, density, thread count, packing cost, expected Schur density, and
+  available memory; the backend remains disabled by default. Exact-arrow
+  `2x2` models bypass this optional packing route for both arithmetic families
+  and use the fused no-panel/no-pair-buffer kernel.
+- Memory planning honors host free memory, Linux cgroup v1/v2 limits, and the
+  optional `SDPX_MEMORY_LIMIT_BYTES` ceiling.
 
 ### Robustness and diagnostics
 
@@ -57,8 +75,23 @@ the state of the package rather than a delta against a previous SDPX version.
   refinement pass increases it.
 - Exact fraction-to-boundary step selection for models with 2x2 blocks, selected
   automatically.
-- Ruiz equilibration for dense and sparse inputs, presolve for dependent
-  equality rows, and checkpoint save/resume.
+- Ruiz equilibration for dense and sparse inputs, arithmetic-type-native
+  presolve for dependent equality columns with consistency checks and dual
+  reconstruction, and checkpoint save/resume. Warm starts are mapped from
+  original coordinates through presolve and equilibration; checkpoints are
+  iterate-level warm restarts that reset adaptive, stagnation, timing, and
+  best-iterate history.
+- Guarded adaptive beta/gamma control driven by affine-predictor quality,
+  observed complementarity reduction, line-search success, backtracking, and
+  feasibility. Per-iteration values and fallback state are recorded;
+  adaptation remains opt-in because the representative SDP benchmark did not
+  improve.
+- Final-result certification in the original problem coordinates, including
+  equality, primal-cone, dual, and PSD checks before an `Optimal` status is
+  retained.
+- Optional spectrum reconstruction and atomic CSV/JSON/JLD2 export after a
+  successful solve. JLD2 stores a versioned `spectrum` payload with
+  `format_version`, `metadata`, and `records`.
 
 ### Interfaces
 
@@ -71,7 +104,15 @@ the state of the package rather than a delta against a previous SDPX version.
 ### Known limitations
 
 - The sparse conformal-bootstrap benchmark bundled in `bench/` does not yet
-  converge to the tolerance a reference solver reaches on the same instance. See
-  `bench/opt2026/REPORT.md` for the current diagnosis and measurements.
-- No solver-to-solver performance claims are made in this release; see
-  [README.md](README.md).
+  converge to the tolerance a reference solver reaches on the same instance.
+  See `bench/csdr_psd_dual/RESULTS.md` for current evidence and
+  `bench/opt2026/REPORT.md` for the historical optimization log.
+- BigFloat execution is serial. Large non-arrow high-precision SDPs still use
+  dense Schur/KKT storage and can exceed practical memory before a full solve
+  is attempted.
+- Equality-constrained LPs still use dense LU, native SOCP scaling and chordal
+  SDP decomposition are not implemented, and distributed Schur
+  factorization is future work.
+- No general solver-to-solver performance claim is made in this release.
+  Narrow, reproducible comparison measurements retain their exact instance,
+  environment, convergence, and caveat labels; see [README.md](README.md).

@@ -182,6 +182,119 @@ function _syrk_triangle_job!(
     return output
 end
 
+const _SYRK_MINIMUM_WEIGHTED_WORK_PER_WORKER = 18_000.0
+
+@inline function _syrk_arithmetic_weight(::Type{T}) where {T}
+    arithmetic_family(T) === :fixed_extended || return 1.0
+    limbs = max(Float64(sizeof(T)) / Float64(sizeof(Float64)), 1.0)
+    # Fixed-width expansion multiplication grows approximately quadratically
+    # with the number of Float64 limbs. Weighting by limbs² lets small
+    # Float64x4 panels amortize task startup while keeping cheaper arithmetic
+    # serial until there is enough actual work.
+    return limbs * limbs
+end
+
+@inline function _syrk_weighted_work(
+    ::Type{T},
+    reduction::Int,
+    columns::Int,
+) where {T}
+    nonnegative_reduction = max(reduction, 0)
+    nonnegative_columns = max(columns, 0)
+    pairs =
+        Float64(nonnegative_columns) *
+        Float64(nonnegative_columns + 1) / 2
+    return Float64(nonnegative_reduction) * pairs *
+           _syrk_arithmetic_weight(T)
+end
+
+"""
+    _syrk_worker_count(T, reduction, columns, jobs, requested_workers)
+
+Return the number of compute tasks used by `syrk!`. The requested count is a
+strict upper bound. Parallelism is enabled only when each selected worker has
+enough arithmetic-weighted reduction work to amortize task startup.
+"""
+function _syrk_worker_count(
+    ::Type{T},
+    reduction::Int,
+    columns::Int,
+    jobs::Int,
+    requested_workers::Int,
+) where {T}
+    arithmetic_family(T) === :fixed_extended || return 1
+    available_workers = min(
+        max(requested_workers, 1),
+        Threads.nthreads(),
+        max(jobs, 1),
+    )
+    available_workers <= 1 && return 1
+    weighted_work = _syrk_weighted_work(T, reduction, columns)
+    work_limited_workers = floor(
+        Int,
+        weighted_work / _SYRK_MINIMUM_WEIGHTED_WORK_PER_WORKER,
+    )
+    return max(1, min(available_workers, work_limited_workers))
+end
+
+function _syrk_job_range!(
+    output::AbstractMatrix{T},
+    panel::AbstractMatrix{T},
+    first_job::Int,
+    last_job::Int,
+    job_stride::Int,
+    block_count::Int,
+    alpha::T,
+    beta::T,
+    config::KernelConfig,
+) where {T}
+    @inbounds for job in first_job:job_stride:last_job
+        _syrk_triangle_job!(
+            output,
+            panel,
+            job,
+            block_count,
+            alpha,
+            beta,
+            config,
+        )
+    end
+    return nothing
+end
+
+function _syrk_parallel!(
+    output::AbstractMatrix{T},
+    panel::AbstractMatrix{T},
+    jobs::Int,
+    block_count::Int,
+    alpha::T,
+    beta::T,
+    config::KernelConfig,
+    worker_count::Int,
+) where {T}
+    # Spawn exactly `worker_count` compute tasks. Unlike `Threads.@threads`,
+    # this never expands a two-worker request to the full Julia thread pool.
+    @sync begin
+        for worker in 1:worker_count
+            # Interleaving tile jobs balances the half-size diagonal tiles
+            # against full off-diagonal tiles without a shared work queue or
+            # synchronization inside the arithmetic loop.
+            Threads.@spawn _syrk_job_range!(
+                output,
+                panel,
+                worker,
+                jobs,
+                worker_count,
+                block_count,
+                alpha,
+                beta,
+                config,
+            )
+        end
+    end
+    return output
+end
+
 """
     syrk!(output, panel, alpha, beta, config, thread_count)
 
@@ -203,34 +316,36 @@ function syrk!(
         throw(DimensionMismatch("syrk! output must be square with one row per panel column"))
     block_count = cld(columns, max(config.column_tile, 1))
     jobs = block_count * (block_count + 1) ÷ 2
-    use_threads =
-        arithmetic_family(T) === :fixed_extended &&
-        min(max(thread_count, 1), Threads.nthreads()) > 1 &&
-        jobs > 1
-    if use_threads
-        Threads.@threads :static for job in 1:jobs
-            _syrk_triangle_job!(
-                output,
-                panel,
-                job,
-                block_count,
-                alpha,
-                beta,
-                config,
-            )
-        end
+    worker_count = _syrk_worker_count(
+        T,
+        size(panel, 1),
+        columns,
+        jobs,
+        thread_count,
+    )
+    if worker_count > 1
+        _syrk_parallel!(
+            output,
+            panel,
+            jobs,
+            block_count,
+            alpha,
+            beta,
+            config,
+            worker_count,
+        )
     else
-        for job in 1:jobs
-            _syrk_triangle_job!(
-                output,
-                panel,
-                job,
-                block_count,
-                alpha,
-                beta,
-                config,
-            )
-        end
+        _syrk_job_range!(
+            output,
+            panel,
+            1,
+            jobs,
+            1,
+            block_count,
+            alpha,
+            beta,
+            config,
+        )
     end
     return output
 end

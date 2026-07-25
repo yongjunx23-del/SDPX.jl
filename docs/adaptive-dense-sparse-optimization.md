@@ -2,6 +2,16 @@
 
 Date: 2026-07-24
 
+> **Status update (2026-07-25).** This document preserves the dated kernel
+> measurements below. Since those measurements, SDPX has added type-native
+> equality presolve with dual reconstruction, original-coordinate result
+> certification, an opt-in adaptive parameter controller, owned BigFloat
+> kernels, a fused exact-arrow path that allocates neither transformed panels
+> nor pair buffers, and a usable-memory-aware scheduler. See the current
+> [extended-precision report](../bench/extended_precision_blas/REPORT.md),
+> [automatic-pipeline report](automatic-optimization-pipeline.md), and
+> [threading results](../bench/threading/RESULTS.md).
+
 ## Executive result
 
 The lattice-bootstrap `Task_Low08` problem is not accurately described by a
@@ -13,7 +23,7 @@ single "sparse" or "dense" label:
 | Variable/block incidence density | 58.57% | Skip absent coefficient matrices |
 | Aggregate PSD upper-pattern density | 99.84% | Keep each primal/dual PSD block dense |
 | Schur upper-pattern density | 84.26% | Assemble and factor a dense Schur complement |
-| Equality matrix rank | 394 of 482 | Presolve 88 redundant equalities in a future revision |
+| Equality matrix rank | 394 of 482 | Type-native presolve removes 88 dependent columns and reconstructs the original dual multiplier layout |
 
 SDPX now detects these structures independently. On this problem,
 `sparse=:auto` chooses the
@@ -51,7 +61,7 @@ PSD matrix or sparse Schur factor.
 
    When coefficients are sparse but the Schur matrix is dense, SDPX streams
    block contributions into task-local dense accumulators. A memory planner
-   caps the number of accumulators to about 15% of physical memory. If
+   caps the number of accumulators against currently usable memory. If
    per-block packed contributions are cheaper, it selects that representation
    instead.
 
@@ -129,6 +139,26 @@ The cases have precision-appropriate sizes, so these rows validate dispatch
 and quantify within-case algorithmic speedup; they are not cross-type
 throughput comparisons.
 
+### Current full-solve Float64 baseline
+
+A subsequent release-candidate run solved the exact `Task_Low08` model after
+reducing the equality system from 482 to 394 independent columns:
+
+| Metric | Value |
+|---|---:|
+| Status | `Optimal` |
+| Iterations | 27 |
+| Solve / total time | 46.8814 s / 47.3922 s |
+| Primal / dual objective | 0.653291393898 / 0.653290938722 |
+| Relative gap | 4.55175e-7 |
+| Primal / dual residual | 2.06455e-10 / 3.68147e-9 |
+| Equality residual | 2.06002e-12 |
+| Minimum primal / dual PSD eigenvalue | -8.77297e-15 / 2.12097e-14 |
+
+This is a complete solver and original-coordinate certificate result, unlike
+the earlier Schur-only timing tables. It is not a solver-to-solver performance
+claim.
+
 ## MOSEK lessons applied
 
 MOSEK's current modeling guidance says that large sparse LMIs should normally
@@ -159,24 +189,19 @@ the exact internals of the latest MOSEK release.
 
 ## Recommended next work
 
-### P0: equality presolve with a reversible dual map
+### P0: equality presolve with a reversible dual map — implemented
 
-This is the most problem-specific next optimization. Detect a numerical basis
-of the columns of `B`, verify that `b` obeys the same dependencies, solve the
-KKT system using only the 394 independent equalities, and map the compact dual
-solution back to 482 entries. Cache the symbolic basis across iterations.
+SDPX now detects a numerical basis of the columns of `B` in the problem's
+arithmetic type, checks that discarded columns and their right-hand sides obey
+the same dependencies, solves with the 394 independent columns, and maps the
+compact dual multipliers back to the original 482-column layout. Ambiguous
+rank decisions retain all equalities, and inconsistent dependencies terminate
+with an infeasibility diagnostic before factorization.
 
-Expected benefits:
-
-- avoid pivoted Cholesky of a rank-deficient `Q` every iteration;
-- reduce `L_S \ B` from 482 to 394 right-hand sides;
-- reduce equality normal-equation and refinement work;
-- make inconsistent redundant equalities fail during presolve with a clear
-  diagnostic rather than later numerical trouble.
-
-This should be opt-out and conservative for high precision. Float64 rank
-decisions must not silently discard a direction that is meaningful in
-BigFloat.
+This avoids narrowing a Float64x4 or BigFloat rank decision through Float64,
+reduces equality right-hand sides and normal-equation work, and preserves the
+public result shape. Symbolic-basis caching across repeated structurally
+identical solves remains future work.
 
 ### P1: lower-triangle tiled Schur assembly
 
@@ -187,10 +212,13 @@ and give each tile a single writer. This should preserve deterministic
 assembly while reducing peak memory, especially for Float64x4 and clusters
 with many threads.
 
-### P2: packed coefficient structures
+### P2: packed coefficient structures — partially implemented
 
-Replace hundreds of thousands of small `SparseMatrixCSC` objects with
-block-level structure-of-arrays storage:
+Flat COO coefficient storage, packed `2x2` coefficients, active-variable
+lists, and lazy shared-pattern groups are implemented. The exact-arrow fused
+kernel consumes coefficient values directly and deliberately creates neither
+transformed panels nor pair buffers. A fully unified block-level
+structure-of-arrays representation is still useful for general sparse blocks:
 
 - variable offsets;
 - packed row/column indices;
@@ -201,15 +229,16 @@ This will reduce pointer chasing, metadata, and garbage-collector pressure.
 Pattern groups can use small batched dense kernels or generated fixed-size
 contractions.
 
-### P3: phase-aware parallelism
+### P3: phase-aware parallelism — implemented, with scheduler work remaining
 
-Sparse assembly benefits from Julia task parallelism; dense Cholesky benefits
-from BLAS threads. A cluster-oriented driver should expose both counts and
-avoid oversubscription. Longer term, use persistent worker teams and NUMA
-first-touch allocation for Schur tiles. Distributed memory is not useful for
-this matrix until Schur assembly and factorization are explicitly
-distributed; merely launching several independent Julia processes will
-duplicate multi-gigabyte workspaces.
+The execution plan now assigns exact Julia worker counts, switches Julia and
+BLAS parallelism by phase, uses work-weighted scheduling, and keeps BigFloat
+serial. The cluster driver exposes both counts so oversubscription can be
+measured rather than assumed. Persistent worker teams, NUMA first-touch
+allocation, affinity reporting, and a concurrent-solve-safe BLAS policy remain
+future work. Distributed memory is not useful for this matrix until Schur
+assembly and factorization are explicitly distributed; merely launching
+several processes for one solve would duplicate multi-gigabyte workspaces.
 
 ### P4: mixed-precision KKT solve
 
@@ -219,18 +248,19 @@ apply high-precision iterative refinement. Fall back to a full target-type
 factor if refinement stagnates. This is the most plausible route to making
 large extended-precision problems practical.
 
-### P5: adaptive interior-point parameters for general PSD blocks
+### P5: adaptive interior-point parameters — implemented, still opt-in
 
-The existing `parameter_policy=:auto` is calibrated for sparse block-arrow
-problems with 2-by-2 PSD blocks. Task_Low08 should instead use a Mehrotra-style
-centering value derived from the affine predictor:
+`parameter_strategy=:adaptive` now chooses beta from affine-predictor quality
+and observed complementarity reduction, adjusts gamma from accepted steps,
+backtracking, and feasibility progress, records both values at every accepted
+iteration, and restores the configured fixed values after unstable behavior.
+Safe bounds always include the selected structural-profile fallback.
 
-`sigma = clamp((mu_aff / mu)^3, sigma_min, sigma_max)`.
-
-Record accepted step lengths, line-search contractions, residual ratios, and
-regularization attempts. Update `gamma` only when repeated contractions show
-that the current value is wasting trials. Keep fixed `beta` and `gamma`
-available for reproducibility.
+The controller remains opt-in. On the representative CSDR SDP, the final fixed
+run needed 19 iterations and 14.37 ms, while adaptive control needed 33
+iterations and 24.05 ms; both passed the final certificate. Fixed parameters
+therefore remain the default until a broader benchmark matrix demonstrates a
+stable runtime or robustness benefit.
 
 ### P6: chordal decomposition only when the aggregate PSD graph is sparse
 
@@ -252,4 +282,6 @@ Then measure 4/8/16 Julia threads with 1/4/8 BLAS threads. Select by total
 iteration time and peak resident memory, not Schur time alone. On a NUMA
 server, bind one solve to one socket first. BigFloat should use one Julia
 thread in the current SDPX implementation; use Float64x4 when roughly
-200-bit precision and a Float64 exponent range are sufficient.
+200-bit precision and a Float64 exponent range are sufficient. Record the
+deployed commit and environment by following the
+[cluster workflow](cluster-workflow.md).

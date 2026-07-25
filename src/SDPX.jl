@@ -19,6 +19,7 @@ include("step.jl")
 include("kernels/threaded.jl")
 include("lp_solver.jl")
 include("solve.jl")
+include("validation.jl")
 include("spectrum.jl")
 include("moi_wrapper.jl")
 include("compat.jl")
@@ -27,7 +28,9 @@ export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
 export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
 export recommended_parameters, StructureAnalysis, analyze_structure, structure_summary
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
-export classify_problem, build_execution_plan, reconstruct_spectrum, export_spectrum
+export classify_problem, build_execution_plan, SpectrumResult
+export reconstruct_spectrum, export_spectrum
+export result_certificate
 export Optimizer
 
 end

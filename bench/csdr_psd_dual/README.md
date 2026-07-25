@@ -51,17 +51,18 @@ interface is:
 sparse=true
 equilibrate=false
 parameter_policy=auto
-Omega_p=Omega_d=10
 predictor=sdpb
 max_restarts=10
 refine_steps=1
 ```
 
 Automatic mode selects `(beta,gamma)=(0.1,0.85)`, `(0.1,0.8)`, or
-`(0.4,0.7)` from the sparse `2x2` incidence structure. The selected profile
-and effective parameters are explicit in the output CSV.
+`(0.01,0.85)` from the sparse `2x2` incidence structure and chooses
+`Omega_p=Omega_d` from the problem scale. The selected profile and effective
+parameters are explicit in the output CSV.
 
-See the completed [2026-07-24 report](results/20260724-float64x4-scaling/REPORT.md).
+See the tracked [benchmark summary](RESULTS.md). Generated run-local reports
+and raw artifacts under `results/` are intentionally ignored.
 
 For the larger dense-versus-sparse comparison:
 
@@ -69,15 +70,11 @@ For the larger dense-versus-sparse comparison:
 ./run_sparse_large.sh
 ```
 
-See the original [larger sparse-mode
-report](results/20260724-sparse-large/REPORT.md) and the
-[incidence/block-arrow optimization
-report](results/20260724T122846Z-sparse-large/REPORT.md).
+The historical larger sparse-mode and incidence/block-arrow results are
+condensed in the [tracked benchmark summary](RESULTS.md#optimization-progression).
 
-For the specialized `1x1`/`2x2` kernels, tuned thread scaling, and
-128/256/512-bit `BigFloat` measurements, see the
-[small-block and BigFloat
-report](results/20260724-small-kernel-bigfloat/REPORT.md).
+For the specialized `1x1`/`2x2` kernels, tuned thread scaling, and BigFloat
+measurements, see the [tracked benchmark summary](RESULTS.md).
 
 For simultaneous scaling of `J`, `K`, `N_a`, and `N_mu`, automatic parameter
 selection, and multi-core cluster guidance, run:
@@ -87,7 +84,7 @@ export CLARABEL_CSDR_ROOT=/path/to/reference/clarabel-double64
 ./run_cluster_scale.sh
 ```
 
-See the [cluster-scale report](results/20260724-cluster-scale/REPORT.md).
+See the [historical cluster-scaling section](RESULTS.md#historical-cluster-scaling).
 
 The precision benchmark can be run independently of Clarabel:
 

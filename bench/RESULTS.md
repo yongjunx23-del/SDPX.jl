@@ -1,6 +1,11 @@
 # Benchmark results
 
-Per Appendix D's measurement protocol: minimum of 3 timed runs after one untimed warmup, `@timed`/`@elapsed`. Commit hash omitted below (this rewrite predates the first commit in this working tree — see the session notes in the PR/commit description instead). Julia 1.12.6, Apple Silicon (aarch64-apple-darwin), macOS.
+The first section preserves early rewrite measurements against upstream base
+commit `51f363b`; it is a historical checkpoint, not the current release
+baseline. Per Appendix D's measurement protocol: minimum of 3 timed runs after
+one untimed warmup, `@timed`/`@elapsed`. Julia 1.12.6, Apple Silicon
+(`aarch64-apple-darwin`), macOS. Current high-precision and pipeline evidence is
+linked below.
 
 ## Old (commit `51f363b`) vs. new, matched instance
 
@@ -11,7 +16,16 @@ Instance: `m=40, k=20, L=3`, dense uniform-random symmetric blocks, no equality 
 | `Float64` | 0.90s → 0.0052s | **174×** | 385.2 MB → 1.2 MB | **321×** |
 | `BigFloat` (997-bit) | 9.7s → 7.2s | **1.34×** | 19454 MB → 2567 MB | **7.6×** |
 
-**Why `BigFloat`'s wall-clock gain is much smaller than `Float64`'s, despite a large allocation reduction:** eliminating array-level allocation (`SS` panels, per-`i` slice copies, redundant LU factorizations, `tr(A.*B)` full matrix products, forced `GC.gc()`) accounts for nearly all of `Float64`'s speedup, since `Float64` arithmetic itself never allocates. For `BigFloat`, that same set of fixes was not enough on its own — profiling this comparison directly is what caught it: `kchol!`/`ktrsm!`/`ktrmm!`/`kmul!` initially routed through Base's generic (allocating) `cholesky!`/`ldiv!`/`rmul!`/`mul!`, which allocate a fresh `BigFloat` on every internal scalar `+`/`-`/`*`/`/`. Rewriting those four kernels directly in terms of the already-allocation-free `kdot!` (Cholesky–Banachiewicz and triangular solves are themselves just sequences of dot products) took the allocation reduction from 1.7× to 7.6× and wall-clock from ~1.0× to 1.34×. What's left is believed to be dominated by genuine MPFR arithmetic cost at 997-bit precision (which scales with precision itself, independent of allocation) plus the residual per-entry allocation at the outer "combine and store" layer, which was deliberately kept non-mutating everywhere for BigFloat-aliasing safety (see `kernels/bigfloat.jl` — `copy(acc)` was tried and found to silently alias in one spot; see below).
+**Why the historical BigFloat gain was much smaller than Float64's, despite a
+large allocation reduction:** removing array-level allocation accounted for
+nearly all of Float64's speedup, because Float64 scalar arithmetic does not
+allocate. Profiling then found that generic Cholesky, triangular solve, and
+matrix multiply created BigFloat temporaries internally. Rewriting those
+kernels around the allocation-free dot product improved the historical
+allocation reduction from 1.7× to 7.6× and runtime from about 1.0× to 1.34×.
+The current owned-destination pass goes further by reusing independent MPFR
+destinations in additional Schur, KKT, and LP kernels; use the current reports
+linked below for present measurements.
 
 ## Against Clarabel.jl (via JuMP), Float64
 
@@ -30,15 +44,31 @@ Measuring rather than assuming caught four real, independently-confirmed defects
 
 1. **The original's sparse-mode Schur formula was mathematically wrong.** `dot(Y·A_i, X⁻¹·A_j)` (two-panel form) does not equal the canonical `tr(Y·A_i·X⁻¹·A_j)`, and isn't even symmetric in `(i,j)` despite the code mirroring it as `S[j,i]=S[i,j]`. Verified numerically; both call sites in the original test suite are commented out, so this was never exercised. Fixed with a verified single-panel form.
 2. **`CholeskyPivoted \` returns `NaN` on rank-deficient systems for `Float64`/LAPACK**, even though the generic `BigFloat` fallback happens to degrade gracefully — a real, type-dependent difference, not a hypothetical one. Fixed with a manual rank-aware solve using the pivot/rank directly.
-3. **`BigFloat`/MPFR is not safe to use truly concurrently across OS threads.** The exact same LPT-scheduled, partial-buffer-accumulating threaded code gave bit-identical results for `Float64` and silently wrong results (off by orders of magnitude, no error) for `BigFloat` on the same problem. All threaded code paths now detect `BigFloat` and fall back to serial, regardless of `-t`.
-4. **`copy(::BigFloat)` is not a deep copy** (`copy(x) === x`) despite `BigFloat` being a mutable struct — caught by a hand-computable 2×2 `ktrmm!` test where every output entry came out equal to the last one computed. Fixed by using non-mutating arithmetic (`acc + zero(BigFloat)`) to force a genuinely fresh object instead.
+3. **The original threaded `BigFloat` implementation violated mutable-scalar ownership.** The same LPT-scheduled, partial-buffer-accumulating code gave bit-identical results for `Float64` and silently wrong results for `BigFloat` because shallow copies and shared destinations were mutated concurrently. SDPX keeps the current BigFloat solver path serial until every parallel workspace has explicit ownership guarantees.
+4. **`copy(::BigFloat)` is not a deep copy** (`copy(x) === x`) despite `BigFloat` being a mutable struct — caught by a hand-computable 2×2 `ktrmm!` test where every output entry came out equal to the last one computed. Fixed with `MutableArithmetics.mutable_copy` and explicitly owned workspace storage.
 
 None of these were hypothetical or design-time guesses — all four were caught by running code and comparing against an independent reference, exactly the discipline Phase 0 exists to enforce.
 
+## Current high-precision update
+
+The allocation-heavy BigFloat baseline above predates the final owned MPFR
+kernel pass. A matched 256-bit complete-solve benchmark changed from
+`4.1976 s` and `894.3 MB` allocated to `3.6867 s` and `588.7 MB`, a 1.14×
+runtime improvement and 34.2% allocation reduction. Kernel-level and sparse
+arrow measurements are tracked in:
+
+- [BigFloat hot kernels](bigfloat_kernels/RESULTS.md)
+- [BigFloat sparse Schur and KKT](bigfloat_sparse_schur/RESULTS.md)
+- [Extended-precision BLAS](extended_precision_blas/REPORT.md)
+
 ## Test suite
 
-188/188 assertions pass across correctness, generic arithmetic, sparse
-dispatch, MathOptInterface, checkpoint, and threaded tests.
+The final local release-candidate matrix passed 1,272/1,272 assertions with
+four Julia threads. The one-thread run passed 1,263 assertions with one
+expected broken multithread-only assertion and no failures. Coverage includes
+correctness, Float64x4, BigFloat ownership, sparse/dense dispatch, LP/SDP
+pipelines, presolve, MathOptInterface, JLD2 and Double64 extensions,
+checkpoints, certificates, spectrum export, and threaded scheduling.
 
 ## Adaptive lattice-bootstrap path
 

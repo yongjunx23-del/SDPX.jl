@@ -21,7 +21,7 @@ which carries **both** the upstream copyright and the SDPX copyright.
 | `src/compat.jl` | `src/functions.jl` (`sdp`, `findFeasible`, `setArithmeticType`, `setSparseMode`, `setMode`) | **Interface derivation.** The public signatures, keyword names, and defaults are kept for source compatibility; the implementations are rewritten and delegate to the new pipeline. The global setters are deprecated shims. |
 | `README.md` | upstream `README.md` | **Structural derivation.** Problem statement, the primal/dual formulation, and the argument tables follow the upstream document. |
 | `test/correctness.jl` (T1/T2 fixtures) | upstream `test/runtests.jl` | The 2×2 toy problem (`A[1,1,1]=1`, `A[2,2,2]=1`, `C[1,2]=C[2,1]=1`, `c=[2,3]`) is upstream's test case, kept so results stay comparable. |
-| `.github/workflows/TagBot.yml` | upstream | Unmodified standard Julia TagBot workflow. |
+| `.github/workflows/TagBot.yml` | upstream | Standard Julia TagBot workflow, adapted to use `GITHUB_TOKEN` only. |
 
 ### Removed rather than kept
 
@@ -48,12 +48,12 @@ function-by-function review is recorded in
 
 Everything else in `src/` is new: `types.jl`, `ingest.jl`, `pipeline.jl`,
 `workspace.jl`, `schur.jl`, `kkt.jl`, `step.jl`, `solve.jl`, `stagnation.jl`,
-`adaptive_parameters.jl`, `lp_solver.jl`, `moi_wrapper.jl`, `spectrum.jl`, all
-of `kernels/`, and all of `ext/` — about 9,000 lines against upstream's two
-source files (`SDPJSolver.jl` plus a 636-line `functions.jl`). Upstream had no
-typed solver state, no MathOptInterface layer, no threading kernels, no sparse
-Schur / arrow KKT path, no extended-precision backends, and no termination
-diagnostics.
+`adaptive_parameters.jl`, `validation.jl`, `lp_solver.jl`, `moi_wrapper.jl`,
+`spectrum.jl`, all of `kernels/` (including
+`kernels/extended_precision_blas/`), and all package extensions. Upstream had
+no typed solver state, no MathOptInterface layer, no threading kernels, no
+sparse Schur / arrow KKT path, no extended-precision backends, no dedicated LP
+engine, and no structured termination or final-certificate diagnostics.
 
 ### Why the upstream copyright is still retained
 

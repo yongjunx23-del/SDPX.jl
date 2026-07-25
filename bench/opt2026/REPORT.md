@@ -8,6 +8,14 @@ All numbers come from running code. Every change below was kept only after it
 measured better; two changes that looked good on paper were measured, found
 worse, and reverted (recorded in "Rejected changes" so they are not retried).
 
+> **Historical optimization log.** The measurements and test counts in this
+> file describe dated intermediate implementations and are preserved for
+> reproducibility. They are not the current release baseline unless repeated
+> in the [extended-precision report](../extended_precision_blas/REPORT.md),
+> [CSDR results](../csdr_psd_dual/RESULTS.md),
+> [automatic-pipeline report](../../docs/automatic-optimization-pipeline.md),
+> or [threading results](../threading/RESULTS.md).
+
 ---
 
 ## 1. What the profile said
@@ -562,8 +570,9 @@ Cholesky sweeps over 4100 blocks with one closed-form root per block.
    core, so the cost is in model construction, not the iteration loop — the
    earlier "missing equality presolve" diagnosis was wrong and is retracted
    (presolve removes the same 88 dependent rows through both paths).
-4. **BigFloat throughput.** Threading is fixed and enabled, but BigFloat remains
-   far slower than `Float64x4`; with precision ruled out as the binding
-   constraint on this model, `Float64x4` is the right default.
+4. **BigFloat throughput.** At this historical checkpoint, fixed-width
+   threading was repaired, while BigFloat remained serial and substantially
+   slower than `Float64x4`. With precision ruled out as the binding constraint
+   on this model, `Float64x4` was the appropriate arithmetic choice.
 
-Test suite: 270 → **386** passing.
+Historical test-suite checkpoint: 270 → **386** passing.

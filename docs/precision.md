@@ -7,21 +7,36 @@ SDPX solves at whatever element type `T` your input arrays (`A`, `C`, `B`, `b`, 
 | Type | Significand | ≈ decimal digits | Notes |
 |---|---|---|---|
 | `Float64` | 53 bits | ~16 | fastest; fine when you don't need more than double precision |
-| `Float64x2` (MultiFloats.jl) | ~106 bits | ~32 | bitstype, zero GC pressure, threads normally |
-| `Float64x4` (MultiFloats.jl) | ~212 bits | ~64 | sweet spot for many EFT/modular-bootstrap runs |
+| `Float64x2` (MultiFloats.jl) | 105 bits | ~31 | bitstype, zero GC pressure, threads normally |
+| `Float64x4` (MultiFloats.jl) | 209 bits | ~62 | sweet spot for many EFT/modular-bootstrap runs |
 | `Double64` (DoubleFloats.jl) | ~106 bits | ~32 | alternative to Float64x2; has `exp`/`log` if ever needed |
-| `Float64x{6}`/`Float64x{8}` (MultiFloats.jl) | ~318/~424 bits | ~96/~127 | near SDPB's common 448-bit band |
-| `BigFloat` | `precision_bits` option (default 997 ≈ 300 decimal digits) | arbitrary | arbitrary precision, but **not thread-safe across OS threads** (see below) and allocates per scalar operation |
+| `Float64x{6}`/`Float64x{8}` (MultiFloats.jl) | 313/417 bits | ~94/~125 | near SDPB's common 448-bit band |
+| `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits); SDPX deliberately keeps mutable-scalar solver kernels serial to preserve ownership and aliasing invariants |
 
 `MultiFloats.jl`/`DoubleFloats.jl` types are enabled automatically once you `using MultiFloats` / `using DoubleFloats` in your session (package extensions) — no other change needed.
 
 ## `BigFloat` precision plumbing
 
-`prec` (legacy, base-10 digits) and `precision_bits` (new API, bits) both control the *working* precision of the solve, via `setprecision`. This is independent of whatever precision your *input data* happens to carry — if you construct `A`/`C`/... at 256 bits and then solve with `precision_bits=997`, the extra 741 bits carry no real information; `solve!` warns about this automatically. Pass `convert_inputs=true` (or `sdp(...; equilibrate=..., convert_inputs=true)`) to re-round the input data to the working precision explicitly.
+`prec` (legacy, base-10 digits) and `precision_bits` (new API, bits) control the
+*working* precision of the solve. The one-call and legacy interfaces also
+convert exact `Int`/`Rational` inputs inside that precision scope. Existing
+`BigFloat` input data still carries the precision at which it was originally
+created: solving 256-bit data at 997 bits cannot recover the missing digits.
+`SolverOptions{BigFloat}(convert_inputs=true)` can normalize every stored
+scalar to the working precision, but it does not create information. To gain
+accuracy, rebuild the source data inside
+`setprecision(BigFloat, precision_bits) do ... end`.
 
 ## Tolerance vs. precision
 
-`ϵ_gap` below roughly `100·eps(T)` is usually unreachable — `solve!` warns up front when this looks like the case, and the failure mode is an honest `MaxRestartsExceeded`/`IterLimit` status rather than a silent spin. As a rule of thumb, reaching a duality gap of `10^-d` needs roughly `d·log2(10) ≈ 3.32·d` significand bits of headroom beyond the noise floor of the linear algebra itself (which is usually a few bits, not the dominant term for well-conditioned problems).
+`ϵ_gap` below roughly `100·eps(T)` is usually unreachable — `solve!` warns up
+front when this looks like the case. If progress reaches the arithmetic floor,
+the solver returns a non-optimal status with structured precision-floor or
+stagnation diagnostics instead of silently spinning. As a rule of thumb,
+reaching a duality gap of `10^-d` needs roughly
+`d·log2(10) ≈ 3.32·d` significand bits of headroom beyond the noise floor of
+the linear algebra itself (which is usually a few bits, not the dominant term
+for well-conditioned problems).
 
 ## Dynamic range
 

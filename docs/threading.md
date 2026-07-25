@@ -1,43 +1,153 @@
-# Threading guide
+# Threading Guide
 
-Start Julia with `-t N` (or `JULIA_NUM_THREADS=N`) to enable threaded block factorization, the Schur build, and the line search. Threading is automatic — no option to turn on; `solve!` inspects `Threads.nthreads()` and the block count `L` itself and falls back to serial code when threading wouldn't help (`nthreads() <= 1` or `L <= 1`).
+## Starting and limiting threads
 
-## Scheduling
+Start Julia with `-t N` or `JULIA_NUM_THREADS=N`. The process thread count is
+an upper bound; `SolverOptions(threads=...)` or the public `threads=...`
+keyword may select fewer threads for one solve:
 
-Blocks are assigned to threads via longest-processing-time (LPT) greedy partitioning, weighted by an estimate of each block's cost (`k[l]^3 + m·k[l]^2/2`), not by contiguous chunking. This matters for bootstrap-shaped problems, where block sizes `k[l]` are heterogeneous — contiguous chunking can leave one thread with all the large blocks and another with all the small ones.
+```bash
+JULIA_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 julia --project=. solve_problem.jl
+```
 
-## The Schur build specifically
+```julia
+result = solve(c, A, C, B, b; threads=4)
+```
 
-Dense and sparse storage use different race-free accumulation strategies:
+The execution plan can reduce that request when the arithmetic or estimated
+work does not justify parallel scheduling.
 
-- Dense blocks accumulate into one private `m×m` buffer per LPT bin. Those
-  buffers are reduced serially in fixed bin order.
-- Sparse blocks transform only their active variables and write compact
-  upper-pair values into a buffer owned by that PSD block. Exact arrow
-  problems assemble directly into compact global, coupling, and local blocks
-  instead of a dense `m x m` matrix.
+| Arithmetic | Solver scheduling policy |
+|---|---|
+| `Float64` | Threaded for sufficiently large block and Schur work; small latency-bound cases remain serial. |
+| `Float64xN`, `Double64` | Threaded when the type is an immutable fixed-width `AbstractFloat`; extended arithmetic crosses over earlier than Float64. |
+| `BigFloat` | Always one solver thread. |
+| Unknown scalar type | Serial unless the kernel layer explicitly marks it safe. |
 
-Neither path uses locks or atomics. Results are deterministic at a fixed
-thread count. Changing the thread count can change dense reduction order and
-therefore the final rounding by a small amount.
+## Scheduling and synchronization
 
-Residual construction, predictor/corrector right-hand sides, direction
-recovery, local arrow factorization, and local arrow solves also use the
-cached LPT schedule. At 180/360/600/900 CSDR blocks, the measured eight-thread
-speedups are `1.11x`, `2.68x`, `3.50x`, and `3.81x`. The smallest case is
-still below the useful parallel granularity; larger cases increasingly
-amortize the barriers.
+PSD blocks are assigned to workers by longest-processing-time (LPT) greedy
+partitioning. The weights estimate factorization and Schur work, so
+heterogeneous bootstrap blocks are balanced by cost rather than by block
+count.
 
-## `BigFloat` does not thread
+The principal threaded paths avoid locks and atomics:
 
-**This is the one thing worth reading carefully if you're solving at `BigFloat`.** All threaded code paths automatically detect `BigFloat` and fall back to fully serial execution, regardless of `-t`. This was not a design choice made in advance — it was found empirically during development: the exact same LPT-scheduled, partial-buffer-accumulating code, applied to the exact same problem, gave bit-identical results for `Float64` and silently *wrong* results (differing from the correct answer by orders of magnitude, no error thrown) for `BigFloat`. The cause is that MPFR (which `BigFloat` is built on) is not safe to call truly concurrently from multiple OS threads in Julia — a lower-level issue than object aliasing (which is handled everywhere else in this codebase via disjoint per-block/per-task buffers).
+- dense blocks accumulate into one private Schur matrix per active LPT bin;
+- sparse blocks transform only active variables and own their compact pair
+  values;
+- exact-arrow problems write disjoint local and coupling blocks, with a small
+  private global-global accumulator per bin;
+- residuals, predictor/corrector right-hand sides, direction recovery, local
+  arrow factorization, and local arrow solves reuse the same cached schedule.
 
-Practically: if you need parallelism at very high precision, `Float64x4`/`Float64x{8}` (via `MultiFloats.jl`) thread normally and are bitstypes with no such restriction — consider one of those instead of `BigFloat` if your precision needs (a few hundred bits) allow it.
+Reductions happen in a fixed bin order. At a fixed thread count the result is
+deterministic. Changing the thread count may change the floating-point
+reduction order and therefore the last few bits.
 
-## What remains serial
+## Schur crossovers
 
-The reduced global arrow factorization remains serial, as does the generic
-dense KKT factorization used for non-arrow problems and explicit equality
-columns. Multi-node distributed factorization is not implemented. For a
-cluster, use Julia threads within one node and distribute independent SDP
-instances across processes or job-array tasks.
+Thread launch and reduction are measurable costs. Dense Schur assembly uses a
+conservative arithmetic-work crossover:
+
+```text
+Float64 estimated Gram work:          at least 4,000,000
+fixed-width extended estimated work:  at least   100,000
+```
+
+The automatic plan also keeps Float64 SDP models with only `1x1`/`2x2`
+blocks and fewer than 1,000 variables serial. These are policy thresholds,
+not universal hardware constants; benchmark changes on the target cluster
+before recalibrating them.
+
+When a block kernel produces only the lower triangle, the reducer also reads,
+initializes, and accumulates only that triangle. Work is split by triangular
+area across column-major ranges. For other fixed-width paths, the established
+full-matrix reducer remains in use where it benchmarks faster.
+
+## BigFloat policy
+
+`BigFloat` deliberately uses the serial owned-storage path even if Julia was
+started with multiple threads. This policy is enforced in the execution plan,
+workspace construction, and low-level scheduling trait.
+
+The reason is solver-specific: a `BigFloat` is mutable, ordinary
+`zeros(BigFloat, ...)`/`fill!` storage can alias the same object, and
+arbitrary-precision task-local matrices grow quickly with worker count. SDPX
+therefore uses independently owned workspace entries plus allocation-reusing
+MPFR scalar kernels, and keeps the currently validated high-precision path
+serial. This is not a blanket statement that the MPFR library can never be
+called concurrently.
+
+Use `Float64x4` or another fixed-width `MultiFloats` type when its precision
+and Float64 exponent range are sufficient and one solve needs multicore
+speedup. For true arbitrary precision, run independent BigFloat instances as
+separate processes or scheduler-array elements.
+
+## Phase-aware BLAS threads
+
+Block-parallel phases issue many small linear-algebra calls. SDPX temporarily
+sets BLAS to one thread there so `Julia workers × BLAS workers` does not
+oversubscribe the node. Dense KKT Cholesky is a single large operation, so the
+solver restores a bounded BLAS width for that phase and restores the caller's
+setting afterward, including on exceptions.
+
+Do not start by assigning both Julia and BLAS every core. Use one core per
+Julia thread, set a realistic process limit, and measure complete iteration
+time. Nested or concurrent solves share the process-global BLAS setting and
+are not a supported way to obtain parallelism; use separate processes.
+
+## Measured scheduler behavior
+
+The latest isolated benchmarks used Julia 1.12.6 on an Apple M4 process
+exposing four hardware threads, with BLAS restricted to one thread. The
+eight-worker rows intentionally oversubscribe that host and are not
+eight-core results.
+
+| Arithmetic and case | 1 worker | Best measured | Speedup |
+|---|---:|---:|---:|
+| Float64 dense, `L/m/k=8/96/6` | 0.199 ms | 0.196 ms at 4 | 1.02x |
+| Float64 dense, `8/512/10` | 6.561 ms | 3.998 ms at 2 | 1.64x |
+| Float64x4 dense, `8/128/8` | 137.318 ms | 33.669 ms at 8 | 4.08x |
+| Float64 sparse arrow, `blocks/shared=512/24` | 0.254 ms | 0.230 ms at 8 | 1.11x |
+| Float64x4 sparse arrow, `256/16` | 5.415 ms | 1.453 ms at 8 | 3.73x |
+
+The small Float64 crossover held the build near its serial 0.20 ms value and
+reduced calling-task allocations to 768 bytes. Maximum relative Schur errors
+were `2.67e-16` for dense Float64, `3.57e-65` for dense Float64x4,
+`1.67e-15` for sparse Float64, and `1.33e-64` for sparse Float64x4.
+
+See [`bench/threading/RESULTS.md`](../bench/threading/RESULTS.md) for the full
+protocol, all 1/2/4/8-worker rows, reduction timings, memory estimates, and
+reproduction commands.
+
+## Memory limits
+
+Dense task-local partials still occupy a full `m × m` matrix per active bin.
+The bin planner caps this storage from current available memory. Available
+memory is the minimum usable value reported by:
+
+1. host free memory;
+2. Linux cgroup v2 (`memory.max`/`memory.current`) or v1 counters;
+3. the optional `SDPX_MEMORY_LIMIT_BYTES` environment ceiling.
+
+Accepted explicit units include `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`,
+`TB`, and `TiB`. SDPX keeps additional headroom and may choose fewer workers
+or reject optional panel packing even when the requested fraction appears to
+fit.
+
+For PBS/Slurm jobs, set the explicit ceiling slightly below the scheduler
+request when the cgroup does not expose a reliable limit. See the
+[cluster workflow](cluster-workflow.md).
+
+## Remaining multicore limits
+
+- The reduced global arrow factorization is serial.
+- Generic non-arrow Schur/KKT factorization is dense and remains the dominant
+  phase on large lattice problems.
+- Dense task-local Schur matrices are not packed; changing their workspace
+  layout could nearly halve partial-storage memory.
+- Worker teams are created per region; persistent teams could remove
+  approximately 20–100 microseconds of repeated launch cost.
+- NUMA first-touch, socket-local scheduling, and distributed factorization
+  have not been validated.

@@ -1,0 +1,179 @@
+using LinearAlgebra
+using Random
+using SDPX
+using Test
+
+function _legacy_arrow_rank_add!(destination, coupling, solved_coupling)
+    local_count, global_count = size(coupling)
+    @inbounds for p in 1:local_count
+        for row in 1:global_count
+            factor = coupling[p, row]
+            iszero(factor) && continue
+            for column in 1:global_count
+                destination[row, column] +=
+                    factor * solved_coupling[p, column]
+            end
+        end
+    end
+    return destination
+end
+
+function _legacy_arrow_rank_sub!(destination, coupling, solved_coupling)
+    local_count, global_count = size(coupling)
+    @inbounds for p in 1:local_count
+        for row in 1:global_count
+            factor = coupling[p, row]
+            iszero(factor) && continue
+            for column in 1:global_count
+                destination[row, column] -=
+                    factor * solved_coupling[p, column]
+            end
+        end
+    end
+    return destination
+end
+
+function _dense_workspace_problem(B::Matrix{Float64})
+    variables = size(B, 1)
+    coefficients = [zeros(Float64, variables, 1, 1)]
+    return SDPX.ingest(
+        zeros(variables),
+        coefficients,
+        [zeros(1, 1)],
+        B,
+        zeros(size(B, 2));
+        sparse=false,
+        verbosity=0,
+    )
+end
+
+@testset "KKT regressions" begin
+    @testset "column-major arrow rank updates" begin
+        rng = MersenneTwister(90210)
+        local_count = 3
+        global_count = 320
+        coupling = randn(rng, local_count, global_count)
+        solved = randn(rng, local_count, global_count)
+        coupling[2, 7:13] .= 0.0
+
+        legacy = zeros(global_count, global_count)
+        optimized = zeros(global_count, global_count)
+        _legacy_arrow_rank_add!(legacy, coupling, solved)
+        SDPX._arrow_rank_add!(optimized, coupling, solved)
+        @test optimized == legacy
+
+        initial = randn(rng, global_count, global_count)
+        expected = copy(initial)
+        _legacy_arrow_rank_sub!(expected, coupling, solved)
+        actual = copy(initial)
+        SDPX._arrow_rank_sub!(actual, coupling, solved)
+        @test actual == expected
+    end
+
+    @testset "adaptive refinement restores last accepted direction" begin
+        problem = _dense_workspace_problem(zeros(2, 0))
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        workspace.S .= Matrix{Float64}(I, 2, 2)
+        fill!(workspace.Sbuf, 0.0)
+        workspace.Sbuf[1, 1] = 0.5
+        workspace.Sbuf[2, 2] = 0.5
+        initial_direction = [0.25, -0.5]
+        copyto!(workspace.dx, initial_direction)
+        rhs = [1.0, -2.0]
+        initial_residual =
+            norm(rhs - workspace.S * initial_direction, Inf)
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            refine_policy=:adaptive,
+            refine_max_steps=3,
+            refine_tol=0.0,
+        )
+
+        steps, residual =
+            SDPX.refine_direction!(workspace, problem, options, rhs)
+        @test steps == 0
+        @test residual == initial_residual
+        @test workspace.dx == initial_direction
+    end
+
+    @testset "allocation-free equality KKT right-hand side" begin
+        B = reshape([1.0, 2.0, -1.0], 3, 1)
+        problem = _dense_workspace_problem(B)
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        schur = [4.0 0.5 -0.2; 0.5 3.0 0.1; -0.2 0.1 2.0]
+        copyto!(workspace.S, schur)
+        options = SDPX.SolverOptions{Float64}(verbosity=0)
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test !factor.q_pivoted
+
+        primal_rhs = [0.4, -0.7, 1.2]
+        equality_rhs = [0.3]
+        dx = zeros(3)
+        dy = zeros(1)
+        SDPX.solve_kkt!(
+            workspace,
+            1,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        reference = [
+            schur -B
+            transpose(B) zeros(1, 1)
+        ] \ [primal_rhs; equality_rhs]
+        @test dx ≈ reference[1:3] rtol=1e-13 atol=1e-13
+        @test dy ≈ reference[4:4] rtol=1e-13 atol=1e-13
+
+        allocated = @allocated SDPX.solve_kkt!(
+            workspace,
+            1,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        @test allocated == 0
+    end
+
+    @testset "pivoted equality solve reuses workspace scratch" begin
+        column = [1.0, -0.5, 2.0]
+        B = hcat(column, column)
+        problem = _dense_workspace_problem(B)
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        schur = [3.0 0.2 0.1; 0.2 2.5 -0.3; 0.1 -0.3 4.0]
+        copyto!(workspace.S, schur)
+        options = SDPX.SolverOptions{Float64}(verbosity=0)
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test factor.q_pivoted
+
+        primal_rhs = [0.2, 0.1, -0.4]
+        equality_rhs = [0.3, 0.3]
+        dx = zeros(3)
+        dy = zeros(2)
+        SDPX.solve_kkt!(
+            workspace,
+            2,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        @test schur * dx - B * dy ≈ primal_rhs rtol=1e-12 atol=1e-12
+        @test transpose(B) * dx ≈ equality_rhs rtol=1e-12 atol=1e-12
+        @test all(isfinite, dx)
+        @test all(isfinite, dy)
+
+        allocated = @allocated SDPX.solve_kkt!(
+            workspace,
+            2,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        @test allocated == 0
+    end
+end

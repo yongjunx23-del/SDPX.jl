@@ -13,8 +13,10 @@ These defaults come from `SolverOptions{T}`. Differences in the legacy
 | `Ωd` | `1` | Initial dual PSD matrices: `Y_l=Ωd*I`. |
 | `predictor` | `:classic` | Predictor rule: `:classic` or `:sdpb`. |
 | `refine_steps` | `1` | Number of iterative-refinement passes for the KKT predictor/corrector solutions. |
-| `step_rule` | `:backtrack` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto` (fraction-to-boundary for blocks up to `2x2`, backtracking otherwise). |
-| `parameter_policy` | `:fixed` | `:fixed` uses the supplied `β`/`γ`; `:auto` selects a calibrated sparse `2x2` profile from the incidence structure. |
+| `step_rule` | `:auto` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto` (fraction-to-boundary for blocks up to `2x2`, backtracking otherwise). |
+| `parameter_policy` | `:auto` | Cold-start structural policy. `:auto` may select calibrated initial `β`, `γ`, `Ωp`, and `Ωd`; `:fixed` preserves the supplied values. |
+| `parameter_strategy` | `:fixed` | Per-iteration policy. `:adaptive` updates `β` and `γ` with guarded fallback and records their history; it remains opt-in because the current SDP benchmark gate did not improve. |
+| `refine_policy` | `:auto` | `:auto`/`:adaptive` stop KKT refinement from its residual; `:fixed` always runs exactly `refine_steps` passes. |
 
 ## Convergence and stopping
 
@@ -23,10 +25,14 @@ These defaults come from `SolverOptions{T}`. Differences in the legacy
 | `ϵ_gap` | `1e-10` | Relative primal-dual gap tolerance. |
 | `ϵ_primal` | `1e-10` | Primal residual tolerance. |
 | `ϵ_dual` | `1e-10` | Dual residual tolerance. |
-| `termination` | `:relative` | Uses scale-normalized stopping tests. `:legacy` restores the old absolute/positive-gap test. |
+| `termination` | `:relative` | Uses scale-normalized stopping tests. `:legacy` provides a legacy-like absolute/nonnegative-gap convention while retaining modern inclusive boundaries and post-solve certification. |
 | `iter_max` | `200` | Maximum outer iterations. The legacy keyword is `iterMax`. |
-| `max_time` | `Inf` | Wall-clock solve limit in seconds. |
+| `max_time` | `Inf` | End-to-end wall-clock limit in seconds. It includes automatic-pipeline setup; the public raw-array one-call interface also includes ingestion. |
 | `callback` | `nothing` | Called after every iteration. Returning `true` stops with `UserStopped`. |
+
+The limit is therefore not only a barrier-iteration budget. Presolve,
+classification, scaling selection, and workspace setup consume it before the
+first iteration.
 
 ## Restarts and numerical safeguards
 
@@ -47,31 +53,41 @@ non-finite.
 | Parameter | Default | Meaning |
 |---|---:|---|
 | `precision_bits` | `997` | Working precision for `BigFloat` only. It does not affect fixed-width `Float64x4`. |
-| `convert_inputs` | `false` | Whether to re-round `BigFloat` inputs to `precision_bits`. |
-| `equilibrate` | `false` | Apply PSD-block diagonal congruence scaling and variable scaling before solving. |
+| `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`. This cannot recover digits already lost when the source was created. |
+| `equilibrate` | `false` | Apply PSD-block diagonal congruence scaling and variable scaling before solving. Dense and sparse coefficient storage are supported. |
+| `scaling` | `:auto` | Pipeline selector: LP geometric scaling for the dedicated LP path; for SDP, Ruiz scaling when `equilibrate=true`, otherwise none. |
 | `sparse` | `:auto` | Storage selection used during ingestion. `:auto` distinguishes sparse coefficient storage from aggregate PSD and Schur density; `true`/`:sparse` and `false`/`:dense` force a path. |
 | `extended_precision_blas` | `:off` | Extended-precision Schur backend: `:off`, conservative `:auto`, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. |
-| `extended_precision_memory_fraction` | `0.10` | Maximum fraction of physical memory that the crossover may reserve for packed extended-precision panels. |
+| `extended_precision_memory_fraction` | `0.10` | Maximum fraction of currently available memory that the crossover may reserve for packed extended-precision panels. The cap respects host free memory, cgroups, and `SDPX_MEMORY_LIMIT_BYTES`, and conservatively keeps half of reported free memory outside the packing budget. |
 | `force_gc` | `false` | Retained A/B compatibility field. The main solve path does not currently read it. |
 
-The current `equilibrate(prob)` implementation accepts dense ingestion only.
-The following combination therefore throws an error instead of automatically
-equilibrating sparse data:
+Sparse equilibration rebuilds the derived sparse caches after scaling, so the
+following combination is supported:
 
 ```julia
 prob = ingest(c, A, C, B, b; sparse=true)
 opts = SolverOptions{T}(equilibrate=true)
 ```
 
+Warm starts are supplied in original input coordinates. SDPX maps `x0`, `X0`,
+and `Y0` through the selected equilibration and maps `y0` through equality
+presolve as needed; callers should not pre-scale them.
+
 ## Output, timing, and checkpoints
 
 | Parameter | Default | Meaning |
 |---|---:|---|
 | `verbosity` | `1` | `0` is silent; values of `1` or higher print iteration information. |
-| `timing` | `false` | Records total elapsed time in the result. Full phase-level timing is not yet implemented. |
-| `checkpoint_every` | `0` | Save every N iterations; `0` disables checkpointing. |
-| `checkpoint_path` | `""` | Checkpoint file path. |
+| `timing` | `false` | Records total and phase-level timing, including residual, Schur, KKT, predictor, corrector, line-search, and update phases. |
+| `checkpoint_every` | `0` | Save an iterate-level warm-restart checkpoint every N iterations; `0` disables checkpointing. |
+| `checkpoint_path` | `""` | Atomic checkpoint destination used by the SDP path. |
 | `mode` | `OPTIMIZE` | `OPTIMIZE` or the internal feasibility mode `FEASIBILITY`. |
+
+Resume restores the primal/dual iterate, centering targets, and
+iteration/restart counters. It intentionally reinitializes adaptive-parameter
+history, stagnation windows, phase timers, and best-iterate history; a resumed
+adaptive solve is therefore not bit-for-bit equivalent to an uninterrupted
+run. Checkpoint resume is not currently supported by the dedicated LP path.
 
 ## Legacy `sdp(...)` defaults
 
@@ -104,8 +120,7 @@ Use automatic selection for the optimized many-`2x2`-block family:
 
 ```julia
 parameter_policy=:auto
-Ωp=10
-Ωd=10
+parameter_strategy=:fixed
 predictor=:sdpb
 max_restarts=10
 refine_steps=1
@@ -113,18 +128,23 @@ sparse=:auto
 equilibrate=false
 ```
 
+With `parameter_policy=:auto`, the arrow profile chooses `Ωp=Ωd` from the
+problem scale (at least 10 and otherwise approximately the maximum
+PSD-block infinity norm). Set `parameter_policy=:fixed` when benchmarking an
+explicit `Ωp`/`Ωd`; otherwise the structural profile intentionally overrides
+those fields.
+
 The zero-probe policy currently selects:
 
 | Maximum active variables per `2x2` block | `β` | `γ` |
 |---:|---:|---:|
 | 1 to 6 | `0.1` | `0.85` |
 | 7 to 14 | `0.1` | `0.8` |
-| 15 or more | `0.4` | `0.7` |
+| 15 or more | `0.01` | `0.85` |
 
 This is an empirical structural policy for the tested sparse block-arrow CSDR
 family, not a universal replacement for fixed parameters. Problems outside
-that shape retain the supplied `β` and `γ`. Sparse ingestion still does not
-support internal equilibration.
+that shape retain the supplied `β` and `γ`.
 
 For `BigFloat` accuracy runs on the same problem, `β=0.1, γ=0.75` was more
 stable at tolerances from `1e-12` through `1e-30`.
@@ -141,4 +161,9 @@ opts = SolverOptions{Float64x4}(
 Automatic mode accounts for arithmetic type, packed dimensions, coefficient
 and active density, expected Schur density, Julia thread count, and the memory
 budget. It retains the sparse outer-product route when packing is not
-predicted to amortize.
+predicted to amortize. Exact-arrow models containing only `2x2` PSD blocks use
+the fused direct kernel instead for both Float64x4 and BigFloat, regardless of
+this packing selector. In that case diagnostics report
+`gram_kernel=:fused_arrow_2x2` and
+`gram_kernel_reason=:fused_arrow_specialized`, and no transformed panels or
+pair buffers are allocated.

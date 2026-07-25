@@ -43,9 +43,50 @@ function accumulate_v!(v::AbstractVector{T}, cons::DenseCons{T}, l::Int, M::Abst
     return v
 end
 
+"""
+    buildP_owned!(P, cons, l, x)
+    accumulate_v_owned!(v, cons, l, M, sign)
+
+Owned-workspace variants of the dense contractions. Public `buildP!` and
+`accumulate_v!` must remain safe when their BigFloat destination aliases a
+shallow copy of problem data; solver workspaces instead contain independent
+entries and can use the allocation-free mutating matrix kernel.
+"""
+function buildP_owned!(
+    P::Matrix{T},
+    cons::DenseCons{T},
+    l::Int,
+    x::AbstractVector{T},
+) where {T}
+    kmul_owned!(vec(P), cons.Av[l], x, one(T), zero(T))
+    return P
+end
+
+function accumulate_v_owned!(
+    v::AbstractVector{T},
+    cons::DenseCons{T},
+    l::Int,
+    M::AbstractMatrix{T},
+    sign::T,
+) where {T}
+    kmul_owned!(v, transpose(cons.Av[l]), vec(M), sign, one(T))
+    return v
+end
+
+buildP_owned!(P, cons, l, x) = buildP!(P, cons, l, x)
+
 # ---- SparseCons contractions ----
 
 function buildP!(P::Matrix{T}, cons::SparseCons{T}, l::Int, x::AbstractVector{T}) where {T}
+    return _buildP_sparse_generic!(P, cons, l, x)
+end
+
+function _buildP_sparse_generic!(
+    P::Matrix{T},
+    cons::SparseCons{T},
+    l::Int,
+    x::AbstractVector{T},
+) where {T}
     fill!(P, zero(T))
     coeffs = cons.packed2[l]
     if size(coeffs, 1) == 3
@@ -79,7 +120,83 @@ function buildP!(P::Matrix{T}, cons::SparseCons{T}, l::Int, x::AbstractVector{T}
     return P
 end
 
+@inline function _independent_bigfloat_2x2(P::Matrix{BigFloat})
+    first = P[1, 1]
+    second = P[2, 1]
+    third = P[1, 2]
+    fourth = P[2, 2]
+    return first !== second &&
+           first !== third &&
+           first !== fourth &&
+           second !== third &&
+           second !== fourth &&
+           third !== fourth
+end
+
+function buildP!(
+    P::Matrix{BigFloat},
+    cons::SparseCons{BigFloat},
+    l::Int,
+    x::AbstractVector{BigFloat},
+)
+    coeffs = cons.packed2[l]
+    size(coeffs, 1) == 3 ||
+        return _buildP_sparse_generic!(P, cons, l, x)
+
+    # Solver and validation workspaces use independent MPFR entries. Retain a
+    # defensive repair for arbitrary `zeros(BigFloat, 2, 2)` inputs, whose
+    # four slots initially alias one mutable object.
+    if _independent_bigfloat_2x2(P)
+        zero_owned!(P)
+    else
+        zero_distinct!(P)
+    end
+
+    @inbounds begin
+        p11 = P[1, 1]
+        p12 = P[1, 2]
+        p22 = P[2, 2]
+        multiplication_buffer = P[2, 1]
+        for (position, variable) in pairs(cons.active[l])
+            coefficient = x[variable]
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                p11,
+                coefficient,
+                coeffs[1, position],
+            )
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                p12,
+                coefficient,
+                coeffs[2, position],
+            )
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                p22,
+                coefficient,
+                coeffs[3, position],
+            )
+        end
+        MA.operate_to!(P[2, 1], copy, p12)
+    end
+    return P
+end
+
 function accumulate_v!(v::AbstractVector{T}, cons::SparseCons{T}, l::Int, M::AbstractMatrix{T}, sign::T) where {T}
+    return _accumulate_v_sparse_generic!(v, cons, l, M, sign)
+end
+
+function _accumulate_v_sparse_generic!(
+    v::AbstractVector{T},
+    cons::SparseCons{T},
+    l::Int,
+    M::AbstractMatrix{T},
+    sign::T,
+) where {T}
     coeffs = cons.packed2[l]
     if size(coeffs, 1) == 3
         offdiag = M[1, 2] + M[2, 1]
@@ -102,6 +219,145 @@ function accumulate_v!(v::AbstractVector{T}, cons::SparseCons{T}, l::Int, M::Abs
             acc += vals[idx] * M[r, c]
         end
         v[i] += sign * acc
+    end
+    return v
+end
+
+function accumulate_v!(
+    v::AbstractVector{BigFloat},
+    cons::SparseCons{BigFloat},
+    l::Int,
+    M::AbstractMatrix{BigFloat},
+    sign::BigFloat,
+)
+    coeffs = cons.packed2[l]
+    size(coeffs, 1) == 3 ||
+        return _accumulate_v_sparse_generic!(v, cons, l, M, sign)
+
+    off_diagonal = BigFloat()
+    value = BigFloat()
+    multiplication_buffer = BigFloat()
+    result = BigFloat()
+    MA.operate_to!(off_diagonal, +, M[1, 2], M[2, 1])
+    sign_is_one = isone(sign)
+
+    @inbounds for (position, variable) in pairs(cons.active[l])
+        MA.operate_to!(value, *, coeffs[1, position], M[1, 1])
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            value,
+            coeffs[2, position],
+            off_diagonal,
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            value,
+            coeffs[3, position],
+            M[2, 2],
+        )
+        sign_is_one || MA.operate!(*, value, sign)
+        MA.operate_to!(result, +, v[variable], value)
+        # The caller may have initialized `v` by shallow-copying BigFloat
+        # problem data. Store an independent result rather than mutating that
+        # possibly shared source object.
+        v[variable] = MA.mutable_copy(result)
+    end
+    return v
+end
+
+"""
+    accumulate_v_owned!(v, cons, l, M, sign)
+
+Workspace-owned variant of [`accumulate_v!`](@ref). The generic fallback keeps
+the usual alias-safe behavior. The BigFloat `2x2` specialization can mutate its
+independent destination entries directly and therefore removes the final
+per-active-variable MPFR copy from the serial solver hot path.
+"""
+accumulate_v_owned!(v, cons, l, M, sign) =
+    accumulate_v!(v, cons, l, M, sign)
+
+function accumulate_v_owned!(
+    v::AbstractVector{BigFloat},
+    cons::SparseCons{BigFloat},
+    l::Int,
+    M::AbstractMatrix{BigFloat},
+    sign::BigFloat,
+)
+    coeffs = cons.packed2[l]
+    size(coeffs, 1) == 3 ||
+        return accumulate_v!(v, cons, l, M, sign)
+
+    multiplication_buffer = BigFloat()
+    operation =
+        isone(sign) ? MA.add_mul :
+        sign == -1 ? MA.sub_mul :
+        nothing
+    if operation === nothing
+        # General signs are not used by the solver, but retain the complete
+        # contraction API rather than silently assuming ±1.
+        value = BigFloat()
+        value_buffer = BigFloat()
+        @inbounds for (position, variable) in pairs(cons.active[l])
+            MA.operate_to!(value, *, coeffs[1, position], M[1, 1])
+            MA.buffered_operate!(
+                value_buffer,
+                MA.add_mul,
+                value,
+                coeffs[2, position],
+                M[1, 2],
+            )
+            MA.buffered_operate!(
+                value_buffer,
+                MA.add_mul,
+                value,
+                coeffs[2, position],
+                M[2, 1],
+            )
+            MA.buffered_operate!(
+                value_buffer,
+                MA.add_mul,
+                value,
+                coeffs[3, position],
+                M[2, 2],
+            )
+            MA.operate!(*, value, sign)
+            MA.operate!(+, v[variable], value)
+        end
+        return v
+    end
+
+    @inbounds for (position, variable) in pairs(cons.active[l])
+        destination = v[variable]
+        MA.buffered_operate!(
+            multiplication_buffer,
+            operation,
+            destination,
+            coeffs[1, position],
+            M[1, 1],
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            operation,
+            destination,
+            coeffs[2, position],
+            M[1, 2],
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            operation,
+            destination,
+            coeffs[2, position],
+            M[2, 1],
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            operation,
+            destination,
+            coeffs[3, position],
+            M[2, 2],
+        )
     end
     return v
 end
@@ -320,6 +576,186 @@ function _two_sided_coo_product!(
     return dest
 end
 
+struct _BigFloatCOOContractionScratch
+    scaled::BigFloat
+    multiplication_buffer::BigFloat
+    dot_accumulator::BigFloat
+    dot_buffer::BigFloat
+end
+
+_coo_contraction_scratch(::Type) = nothing
+_coo_contraction_scratch(::Type{BigFloat}) =
+    _BigFloatCOOContractionScratch(
+        BigFloat(),
+        BigFloat(),
+        BigFloat(),
+        BigFloat(),
+    )
+
+"""
+    _two_sided_coo_product_owned!(dest, left, coo, position, right, scratch)
+
+Owned-workspace form of [`_two_sided_coo_product!`](@ref). The generic
+fallback preserves the existing implementation. The `BigFloat` specialization
+mutates independent workspace entries through MPFR buffers, eliminating the
+per-scalar temporaries in the general sparse Schur path.
+"""
+function _two_sided_coo_product_owned!(
+    dest::AbstractMatrix,
+    left::AbstractMatrix,
+    coo::SparseBlockCOO,
+    position::Int,
+    right::AbstractMatrix,
+    ::Nothing,
+)
+    return _two_sided_coo_product!(dest, left, coo, position, right)
+end
+
+function _two_sided_coo_product_owned!(
+    dest::AbstractMatrix{BigFloat},
+    left::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    right::AbstractMatrix{BigFloat},
+    scratch::_BigFloatCOOContractionScratch,
+)
+    dimension = size(dest, 1)
+    first_entry = coo.ptr[position]
+    last_entry = coo.ptr[position + 1] - Int32(1)
+    if last_entry < first_entry
+        zero_owned!(dest)
+        return dest
+    end
+
+    rows = coo.row
+    columns = coo.col
+    values = coo.val
+    scaled = scratch.scaled
+    multiplication_buffer = scratch.multiplication_buffer
+    @inbounds for entry in first_entry:last_entry
+        row = Int(rows[entry])
+        column = Int(columns[entry])
+        coefficient = values[entry]
+        for output_column in 1:dimension
+            MA.operate_to!(
+                scaled,
+                *,
+                coefficient,
+                right[column, output_column],
+            )
+            if entry == first_entry
+                for output_row in 1:dimension
+                    MA.operate_to!(
+                        dest[output_row, output_column],
+                        *,
+                        left[output_row, row],
+                        scaled,
+                    )
+                end
+            else
+                for output_row in 1:dimension
+                    MA.buffered_operate!(
+                        multiplication_buffer,
+                        MA.add_mul,
+                        dest[output_row, output_column],
+                        left[output_row, row],
+                        scaled,
+                    )
+                end
+            end
+        end
+    end
+    return dest
+end
+
+@inline function _dot_dense_coo_store!(
+    destination::AbstractVector{T},
+    destination_index::Int,
+    matrix::AbstractMatrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    ::Nothing,
+) where {T}
+    destination[destination_index] =
+        _dot_dense_coo(matrix, coo, position)
+    return destination[destination_index]
+end
+
+@inline function _dot_dense_coo_store!(
+    destination::AbstractVector{BigFloat},
+    destination_index::Int,
+    matrix::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    scratch::_BigFloatCOOContractionScratch,
+)
+    accumulator = destination[destination_index]
+    MA.operate!(zero, accumulator)
+    matrix_values = vec(matrix)
+    @inbounds for entry in
+        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
+        MA.buffered_operate!(
+            scratch.dot_buffer,
+            MA.add_mul,
+            accumulator,
+            matrix_values[coo.lin[entry]],
+            coo.val[entry],
+        )
+    end
+    return accumulator
+end
+
+@inline function _dot_dense_coo_value!(
+    matrix::AbstractMatrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    ::Nothing,
+) where {T}
+    return _dot_dense_coo(matrix, coo, position)
+end
+
+@inline function _dot_dense_coo_value!(
+    matrix::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    scratch::_BigFloatCOOContractionScratch,
+)
+    accumulator = scratch.dot_accumulator
+    MA.operate!(zero, accumulator)
+    matrix_values = vec(matrix)
+    @inbounds for entry in
+        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
+        MA.buffered_operate!(
+            scratch.dot_buffer,
+            MA.add_mul,
+            accumulator,
+            matrix_values[coo.lin[entry]],
+            coo.val[entry],
+        )
+    end
+    return accumulator
+end
+
+@inline function _add_owned_entry!(
+    destination::AbstractMatrix{T},
+    row::Int,
+    column::Int,
+    value::T,
+) where {T}
+    destination[row, column] += value
+    return nothing
+end
+
+@inline function _add_owned_entry!(
+    destination::AbstractMatrix{BigFloat},
+    row::Int,
+    column::Int,
+    value::BigFloat,
+)
+    MA.operate!(+, destination[row, column], value)
+    return nothing
+end
+
 schur_ids(cons::SparseCons, l::Int) = cons.schur_order[l]
 
 """
@@ -486,11 +922,26 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
         end
     else
         coo = cons.coo[l]
+        scratch = _coo_contraction_scratch(T)
         @inbounds for p in 1:na
-            _two_sided_coo_product!(bw.W1, Yl, coo, p, bw.W2)
+            _two_sided_coo_product_owned!(
+                bw.W1,
+                Yl,
+                coo,
+                p,
+                bw.W2,
+                scratch,
+            )
             for r in p:na
                 q += 1
-                bw.Svals[q] = _dot_dense_coo(bw.W1, coo, r)
+                _dot_dense_coo_store!(
+                    bw.Svals,
+                    q,
+                    bw.W1,
+                    coo,
+                    r,
+                    scratch,
+                )
             end
         end
     end
@@ -566,20 +1017,39 @@ function sparse_schur_block_scatter!(
         end
     else
         coo = cons.coo[l]
+        scratch = _coo_contraction_scratch(T)
         @inbounds for p in 1:na
             variable_i = ids[p]
-            _two_sided_coo_product!(bw.W1, Yl, coo, p, bw.W2)
+            _two_sided_coo_product_owned!(
+                bw.W1,
+                Yl,
+                coo,
+                p,
+                bw.W2,
+                scratch,
+            )
             for r in p:na
                 variable_j = ids[r]
-                value = _dot_dense_coo(bw.W1, coo, r)
+                value =
+                    _dot_dense_coo_value!(bw.W1, coo, r, scratch)
                 if lower_only
                     row = max(variable_i, variable_j)
                     column = min(variable_i, variable_j)
-                    S[row, column] += value
+                    _add_owned_entry!(S, row, column, value)
                 else
-                    S[variable_i, variable_j] += value
+                    _add_owned_entry!(
+                        S,
+                        variable_i,
+                        variable_j,
+                        value,
+                    )
                     variable_i != variable_j &&
-                        (S[variable_j, variable_i] += value)
+                        _add_owned_entry!(
+                            S,
+                            variable_j,
+                            variable_i,
+                            value,
+                        )
                 end
             end
         end
@@ -613,10 +1083,10 @@ function _reduce_sparse_schur_serial!(ws::Workspace{T}, cons::SparseCons{T}) whe
                 if ws.extended_precision.lower_only
                     row = max(i, j)
                     column = min(i, j)
-                    ws.S[row, column] += val
+                    _add_owned_entry!(ws.S, row, column, val)
                 else
-                    ws.S[i, j] += val
-                    i != j && (ws.S[j, i] += val)
+                    _add_owned_entry!(ws.S, i, j, val)
+                    i != j && _add_owned_entry!(ws.S, j, i, val)
                 end
             end
         end
@@ -708,16 +1178,28 @@ end
 
 function reduce_arrow_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
     arrow = ws.arrow::ArrowWorkspace{T}
-    fill!(arrow.Sgg, zero(T))
-    for l in eachindex(arrow.Dsrc)
-        fill!(arrow.Dsrc[l], zero(T))
-        fill!(arrow.coupling[l], zero(T))
-    end
-
+    _zero_arrow_schur!(arrow)
     @inbounds for l in eachindex(ws.blk)
         scatter_arrow_schur_block!(arrow, ws.blk[l], cons, l, arrow.Sgg)
     end
     return arrow.Sgg
+end
+
+"""
+    _zero_arrow_schur!(arrow)
+
+Reset the compact arrow accumulators while preserving their storage ownership.
+In particular, `fill!(A, zero(BigFloat))` would install one shared mutable MPFR
+object in every slot. The fused BigFloat kernel accumulates directly into those
+objects, so it requires the independent entries created by `alloc_zeros`.
+"""
+function _zero_arrow_schur!(arrow::ArrowWorkspace)
+    zero_owned!(arrow.Sgg)
+    for l in eachindex(arrow.Dsrc)
+        zero_owned!(arrow.Dsrc[l])
+        zero_owned!(arrow.coupling[l])
+    end
+    return arrow
 end
 
 """
@@ -744,6 +1226,26 @@ Contributions still go to the same three destinations as the two-phase path
 so results are unchanged.
 """
 function fused_arrow_schur_block!(
+    arrow::ArrowWorkspace{T},
+    bw::BlockWS{T},
+    cons::SparseCons{T},
+    l::Int,
+    Xl,
+    Yl,
+    Sgg::AbstractMatrix{T},
+) where {T}
+    return _fused_arrow_schur_block_generic!(
+        arrow,
+        bw,
+        cons,
+        l,
+        Xl,
+        Yl,
+        Sgg,
+    )
+end
+
+function _fused_arrow_schur_block_generic!(
     arrow::ArrowWorkspace{T},
     bw::BlockWS{T},
     cons::SparseCons{T},
@@ -806,6 +1308,263 @@ function fused_arrow_schur_block!(
                 lj = lpos[j]
                 arrow.Dsrc[own][li, lj] += value
                 li != lj && (arrow.Dsrc[own][lj, li] += value)
+            end
+        end
+    end
+    return Sgg
+end
+
+@inline function _bigfloat_mul_add2!(
+    output::BigFloat,
+    buffer::BigFloat,
+    first_left::BigFloat,
+    first_right::BigFloat,
+    second_left::BigFloat,
+    second_right::BigFloat,
+)
+    MA.operate_to!(output, *, first_left, first_right)
+    MA.buffered_operate!(
+        buffer,
+        MA.add_mul,
+        output,
+        second_left,
+        second_right,
+    )
+    return output
+end
+
+@inline function _bigfloat_add_contract3!(
+    destination::BigFloat,
+    accumulator::BigFloat,
+    buffer::BigFloat,
+    first_left::BigFloat,
+    first_right::BigFloat,
+    second_left::BigFloat,
+    second_right::BigFloat,
+    third_left::BigFloat,
+    third_right::BigFloat,
+)
+    MA.operate_to!(accumulator, *, first_left, first_right)
+    MA.buffered_operate!(
+        buffer,
+        MA.add_mul,
+        accumulator,
+        second_left,
+        second_right,
+    )
+    MA.buffered_operate!(
+        buffer,
+        MA.add_mul,
+        accumulator,
+        third_left,
+        third_right,
+    )
+    MA.operate!(+, destination, accumulator)
+    return destination
+end
+
+"""
+    fused_arrow_schur_block!(arrow, bw, cons, l, Xl, Yl, Sgg)
+
+Allocation-free MPFR specialization for the `2x2` sparse block-arrow kernel.
+
+The generic scalar expression creates a new `BigFloat` for every multiply and
+addition in every active-variable pair. This specialization reuses the owned
+`W1` and `trialX` entries as MPFR accumulators and mutates the compact arrow
+storage directly. The quadratic pair loop is allocation-free, no scratch
+object aliases a coefficient, factor, or output entry, and BigFloat execution
+remains serial.
+"""
+function fused_arrow_schur_block!(
+    arrow::ArrowWorkspace{BigFloat},
+    bw::BlockWS{BigFloat},
+    cons::SparseCons{BigFloat},
+    l::Int,
+    Xl,
+    Yl,
+    Sgg::AbstractMatrix{BigFloat},
+)
+    ids = schur_ids(cons, l)
+    na = length(ids)
+    na == 0 && return Sgg
+    coeffs = cons.packed2[l]
+    size(coeffs, 1) == 3 ||
+        return _fused_arrow_schur_block_generic!(
+            arrow,
+            bw,
+            cons,
+            l,
+            Xl,
+            Yl,
+            Sgg,
+        )
+
+    # W2 owns independent MPFR entries. Preserve that invariant while forming
+    # X^-1 from the cached Cholesky factor.
+    zero_owned!(bw.W2)
+    @inbounds for diagonal in 1:2
+        MA.operate!(one, bw.W2[diagonal, diagonal])
+    end
+    kcholsolve!(bw.LX, bw.W2)
+
+    @inbounds begin
+        x11 = bw.W2[1, 1]
+        x12 = bw.W2[1, 2]
+        x21 = bw.W2[2, 1]
+        x22 = bw.W2[2, 2]
+        y11 = Yl[1, 1]
+        y12 = Yl[1, 2]
+        y21 = Yl[2, 1]
+        y22 = Yl[2, 2]
+
+        # W1 holds the four entries of Y*A_p. trialX holds the three
+        # contracted entries of Y*A_p*X^-1 plus one shared multiplication
+        # buffer. Schur assembly and line search are sequential phases, and
+        # line search overwrites trialX before reading it, so this reuse does
+        # not extend workspace lifetime or require the fused path's otherwise
+        # unnecessary Ppanel allocation.
+        w11 = bw.W1[1, 1]
+        w21 = bw.W1[2, 1]
+        w12 = bw.W1[1, 2]
+        w22 = bw.W1[2, 2]
+        t11 = bw.trialX[1, 1]
+        t12 = bw.trialX[2, 1]
+        t22 = bw.trialX[1, 2]
+        multiplication_buffer = bw.trialX[2, 2]
+
+        global_position = arrow.global_pos
+        local_position = arrow.local_pos
+        local_owner = arrow.local_owner
+
+        for p in 1:na
+            a11 = coeffs[1, p]
+            a12 = coeffs[2, p]
+            a22 = coeffs[3, p]
+
+            _bigfloat_mul_add2!(
+                w11,
+                multiplication_buffer,
+                y11,
+                a11,
+                y12,
+                a12,
+            )
+            _bigfloat_mul_add2!(
+                w21,
+                multiplication_buffer,
+                y21,
+                a11,
+                y22,
+                a12,
+            )
+            _bigfloat_mul_add2!(
+                w12,
+                multiplication_buffer,
+                y11,
+                a12,
+                y12,
+                a22,
+            )
+            _bigfloat_mul_add2!(
+                w22,
+                multiplication_buffer,
+                y21,
+                a12,
+                y22,
+                a22,
+            )
+
+            _bigfloat_mul_add2!(
+                t11,
+                multiplication_buffer,
+                w11,
+                x11,
+                w12,
+                x21,
+            )
+            MA.operate_to!(t12, *, w11, x12)
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                t12,
+                w12,
+                x22,
+            )
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                t12,
+                w21,
+                x11,
+            )
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                t12,
+                w22,
+                x21,
+            )
+            _bigfloat_mul_add2!(
+                t22,
+                multiplication_buffer,
+                w21,
+                x12,
+                w22,
+                x22,
+            )
+
+            # Y*A_p is no longer needed, so two W1 entries become the
+            # contraction accumulator and its multiplication buffer.
+            value = w11
+            value_buffer = w21
+            variable_i = ids[p]
+            global_i = global_position[variable_i]
+            local_i = local_position[variable_i]
+
+            for r in p:na
+                variable_j = ids[r]
+                global_j = global_position[variable_j]
+                _bigfloat_add_contract3!(
+                    global_i > 0 && global_j > 0 ?
+                        Sgg[global_i, global_j] :
+                    global_i > 0 ?
+                        arrow.coupling[local_owner[variable_j]][
+                            local_position[variable_j],
+                            global_i,
+                        ] :
+                    global_j > 0 ?
+                        arrow.coupling[local_owner[variable_i]][
+                            local_i,
+                            global_j,
+                        ] :
+                        arrow.Dsrc[local_owner[variable_i]][
+                            local_i,
+                            local_position[variable_j],
+                        ],
+                    value,
+                    value_buffer,
+                    t11,
+                    coeffs[1, r],
+                    t12,
+                    coeffs[2, r],
+                    t22,
+                    coeffs[3, r],
+                )
+
+                if global_i > 0 && global_j > 0 && global_i != global_j
+                    MA.operate!(+, Sgg[global_j, global_i], value)
+                elseif global_i == 0 && global_j == 0
+                    local_j = local_position[variable_j]
+                    local_i != local_j &&
+                        MA.operate!(
+                            +,
+                            arrow.Dsrc[local_owner[variable_i]][
+                                local_j,
+                                local_i,
+                            ],
+                            value,
+                        )
+                end
             end
         end
     end
@@ -929,11 +1688,7 @@ function schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::SparseCons{T}
     # far more than the arithmetic it saves.
     if ws.arrow !== nothing && ws.fused_arrow
         arrow = ws.arrow::ArrowWorkspace{T}
-        fill!(arrow.Sgg, zero(T))
-        for l in eachindex(arrow.Dsrc)
-            fill!(arrow.Dsrc[l], zero(T))
-            fill!(arrow.coupling[l], zero(T))
-        end
+        _zero_arrow_schur!(arrow)
         for l in 1:prob.dims.L
             prob.dims.k[l] == 0 && continue
             fused_arrow_schur_block!(

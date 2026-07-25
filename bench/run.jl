@@ -4,15 +4,12 @@
     record wall-clock, allocations, GC%, iteration count, thread
     count, and commit.
 
-    NOTE (scope): this records *aggregate* per-solve metrics
-    (wall-clock/iteration, bytes allocated, GC%) rather than the
-    full per-phase breakdown (residues/Schur/KKT factor/KKT
-    solve/step recovery/line search) the plan's `timing=true` design
-    describes — that would need TimerOutputs instrumentation wired
-    into every hot-path function in step.jl/kkt.jl/schur.jl, which
-    was cut for time. The aggregate numbers are enough to validate
-    the plan's headline claims (allocation count, wall-clock) and are
-    what's reported in RESULTS.md below.
+    NOTE (scope): this historical harness records aggregate per-solve
+    metrics (wall-clock/iteration, bytes allocated, GC%). The solver now
+    exposes phase timings through `result.timings` and
+    `result.diagnostics.timings`; newer benchmark drivers persist those
+    fields. This small CI harness intentionally keeps its original compact
+    output schema.
 =====================================================================#
 
 using SDPX

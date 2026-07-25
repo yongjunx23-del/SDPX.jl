@@ -104,13 +104,14 @@ end
         @test isempty(ws.Spartial)
         @test ws.arrow !== nothing
         @test ws.arrow.global_ids == [1]
+        @test SDPX.build_execution_plan(prob).gram_kernel ==
+              :fused_arrow_2x2
         # This model is an exact-arrow 2x2 case, so the fused compute+scatter
         # path applies and the packed pair buffer is deliberately not allocated
         # (it is 9.08 GB on the 4100-block CSDR model).
         @test ws.fused_arrow
         for l in 1:prob.dims.L
-            na = length(active[l])
-            @test size(ws.blk[l].Ppanel) == (prob.dims.k[l], prob.dims.k[l] * na)
+            @test isempty(ws.blk[l].Ppanel)
             @test isempty(ws.blk[l].Svals)
         end
     end
@@ -447,6 +448,9 @@ end
         end
         for l in 1:prob.dims.L
             na = length(cons.schur_order[l])
+            dimension = prob.dims.k[l]
+            ws.blk[l].Ppanel =
+                zeros(Float64, dimension, dimension * na)
             ws.blk[l].Svals = zeros(Float64, na * (na + 1) ÷ 2)
             SDPX.sparse_schur_block!(ws.blk[l], cons, l, X[l], Y[l])
             SDPX.scatter_arrow_schur_block!(arrow, ws.blk[l], cons, l, arrow.Sgg)

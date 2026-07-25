@@ -63,6 +63,11 @@ end
 kmul!(C, A, B, α, β) = LinearAlgebra.mul!(C, A, B, α, β)
 kmul!(C, A, B) = LinearAlgebra.mul!(C, A, B)
 
+# Owned-storage variants matter only for mutable scalar types. The generic
+# fallback preserves the existing implementation and behavior.
+kmul_owned!(C, A, B, α, β) = kmul!(C, A, B, α, β)
+kmul_owned!(C, A, B) = kmul!(C, A, B)
+
 # ---- ksyrk! : S = α·Pᵀ·P + β·S, P is r×c, S is c×c. Column-wise Gram
 #     matrix (used for Q = B̃ᵀB̃ in kkt.jl); the Schur build's block-
 #     level analogue lives in schur.jl since its contraction is over
@@ -87,6 +92,14 @@ ksyrk!(S::AbstractMatrix{T}, P::AbstractMatrix{T}) where {T} = ksyrk!(S, P, one(
 # ---- ktrsm! : X ← L⁻¹X, L square lower-triangular ----
 
 ktrsm!(L::AbstractMatrix, X) = LinearAlgebra.ldiv!(LowerTriangular(L), X)
+
+# ---- ktrsv_lower!/ktrsv_transpose! : vector triangular solves ----
+
+ktrsv_lower!(L::AbstractMatrix, x::AbstractVector) =
+    LinearAlgebra.ldiv!(LowerTriangular(L), x)
+
+ktrsv_transpose!(L::AbstractMatrix, x::AbstractVector) =
+    LinearAlgebra.ldiv!(UpperTriangular(transpose(L)), x)
 
 # ---- ktrmm! : X ← X·M, M square lower-triangular, right multiply ----
 
@@ -131,6 +144,9 @@ function kaxpby!(α, X::AbstractVector{<:AbstractArray}, β, Y::AbstractVector{<
     end
     return Y
 end
+
+kaxpby_owned!(α, X, β, Y) = kaxpby!(α, X, β, Y)
+copy_owned!(destination, source) = copyto!(destination, source)
 
 # ---- knrmInf : maximum(abs, ·) without splatting (P7) ----
 

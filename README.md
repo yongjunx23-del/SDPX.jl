@@ -19,10 +19,20 @@ more than `Float64`.
 
 - **Arbitrary precision** — `Float64`, `BigFloat`, `MultiFloats.Float64xN`,
   and `DoubleFloats.Double64`, the last three via package extensions.
-- **Multithreaded** block factorisation, Schur assembly, and line search.
+- **Multithreaded fixed-width arithmetic** — `Float64` and
+  `MultiFloats.Float64xN` use cost-aware block scheduling, triangular Schur
+  reduction, and phase-aware BLAS thread control. `BigFloat` deliberately uses
+  one solver thread.
 - **Structure-aware**: sparse constraint storage, a block-arrow KKT path for
   models with shared plus per-block local variables, and a fused kernel for
-  models whose blocks are all 2x2.
+  models whose blocks are all 2x2. The fused path does not allocate the
+  otherwise-large transformed-panel or pair-buffer storage.
+- **Automatic solve planning** — problem classification, equality and LP-row
+  presolve, scaling, arithmetic-aware kernel selection, memory budgeting, and
+  conservative parameter profiles happen before factorization.
+- **High-precision owned-storage kernels** — the `BigFloat` path reuses
+  independently owned MPFR values for matrix products, triangular solves,
+  Cholesky factors, KKT right-hand sides, and LP Hessian assembly.
 - **JuMP / MathOptInterface** wrapper alongside a native typed API.
 - **Diagnostics that explain themselves** — a solve that stops short reports
   *why*, with the measured convergence rate and whether the limit was the
@@ -94,8 +104,8 @@ without notice.
 
 SDPX began as a fork of
 [SDPJSolver.jl](https://github.com/FishboneChiang/SDPJSolver.jl) by Li-Yuan
-Chiang (MIT) and has since been substantially rewritten — roughly 9,000 lines of
-new solver core against upstream's two source files. `src/compat.jl` still
+Chiang (MIT) and has since been substantially rewritten into a modular solver
+core. `src/compat.jl` still
 preserves the upstream `sdp`/`findFeasible` interface for source compatibility,
 so the upstream copyright is retained in [LICENSE](LICENSE) alongside SDPX's.
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) records exactly what is derived
@@ -229,9 +239,17 @@ nearly dense.
 
 `equilibrate`: `true` or `false` (default `false`). Opt-in Ruiz-style diagonal equilibration, useful for badly-scaled bootstrap data.
 
-`termination`: `:relative` (default) or `:legacy`. `:relative` normalizes the gap/residual tests by problem scale, fixing a case where the original absolute test could silently run to `iterMax` when the gap overshot to a small negative number.
+`termination`: `:relative` (default) or `:legacy`. `:relative` normalizes the
+gap/residual tests by problem scale, fixing a case where the original absolute
+test could silently run to `iterMax` when the gap overshot to a small negative
+number. `:legacy` is a legacy-like absolute/nonnegative-gap convention; it
+still retains modern inclusive boundaries and post-solve certification.
 
-The iteration terminates in one of: `Optimal`, `Feasible`/`Infeasible` (for `findFeasible`), `IterLimit`, `TimeLimit`, `MaxRestartsExceeded`, `NumericalBreakdown`, or `UserStopped` (via `callback`) — every run ends in an informative status, never a silent `iterMax` burn.
+The iteration terminates in one of: `Optimal`, `Feasible`/`Infeasible` (for
+`findFeasible`), `Stalled`, `IterLimit`, `TimeLimit`,
+`MaxRestartsExceeded`, `NumericalBreakdown`, or `UserStopped` (via
+`callback`) — every run ends in an informative status, never a silent
+`iterMax` burn.
 
 ## Outputs
 `sdp()`/`findFeasible()` return an `SDPResult`, which keeps the original `Dict`-style access for compatibility:
@@ -253,6 +271,7 @@ result = solve(
     time_limit=60.0,
     threads=4,
     precision=:float64,
+    precision_bits=256, # used only when precision=:bigfloat
     verbosity=1,
     diagnostics=true,
     warm_start=nothing,
@@ -263,6 +282,11 @@ The automatic pipeline performs problem classification, equality and
 redundancy presolve, scaling, kernel and schedule selection, and safe
 parameter-profile selection. Models containing only scalar cones use a
 dedicated LP predictor-corrector engine instead of the PSD matrix path.
+The public `time_limit` covers that pipeline setup, not only barrier
+iterations; the raw-array one-call form above also charges input ingestion
+against the same limit. A supplied `warm_start` is expressed in original input
+coordinates and is mapped through equality presolve and the selected
+equilibration automatically.
 
 The legacy functions are thin wrappers over the expert typed core:
 
@@ -279,9 +303,17 @@ enables bounded feedback control and records its values per iteration; fixed
 parameters remain the default until broader benchmarks show a stable win.
 `SolverOptions` also exposes: `callback` (per-iteration `(state) -> Bool`,
 `true` stops the solve), `checkpoint_every`/`checkpoint_path` (crash-safe
-resume via `resume=path` on `solve!`), `max_time`,
-`predictor=:classic|:sdpb`, and `convert_inputs` (re-round `BigFloat` data to
-`precision_bits`).
+iterate-level warm restart via `resume=path` on the SDP `solve!` path),
+`max_time`,
+`predictor=:classic|:sdpb`, and `convert_inputs` (normalize independent
+`BigFloat` storage to `precision_bits`; this cannot recover digits already
+lost in the source data).
+
+A checkpoint restores the primal/dual iterate, centering targets, and
+iteration/restart counters. Adaptive-controller history, stagnation windows,
+phase-timing history, and best-iterate history restart empty, so a resumed run
+is not a bit-for-bit continuation of an uninterrupted solve. The dedicated LP
+path does not currently support checkpoint resume.
 
 ## JuMP and MathOptInterface
 
@@ -312,7 +344,36 @@ supported forms, options, precision types, and current limitations.
 
 ## Precision backends
 
-Beyond `Float64`/`BigFloat`, `Float64x2`/`Float64x4`/… (via `MultiFloats.jl`) and `Double64` (via `DoubleFloats.jl`) work as drop-in element types once the corresponding package is loaded (`using MultiFloats`). These are fixed-width bitstypes with no MPFR allocation overhead.
+Beyond `Float64`/`BigFloat`, `Float64x2`/`Float64x4`/… (via
+`MultiFloats.jl`) and `Double64` (via `DoubleFloats.jl`) work as drop-in
+element types once the corresponding package is loaded (`using MultiFloats`).
+These are fixed-width bitstypes with no MPFR allocation overhead.
+
+`BigFloat` inputs should be constructed inside the intended
+`setprecision(BigFloat, bits) do ... end` scope. `solve!` establishes
+`precision_bits` for the complete solve, but it cannot recover digits that
+were already rounded away when the input data was created. The current
+`BigFloat` implementation is serial and uses ownership-aware,
+allocation-reusing scalar kernels; requesting more solver threads does not
+parallelize it.
+
+The packed triangular Schur/Gram backend for `Float64x4` and `BigFloat` is
+available through `extended_precision_blas=:auto`, but remains off by default
+until each workload clears a conservative runtime and memory crossover.
+Exact-arrow models with only `2x2` PSD blocks bypass that optional backend for
+both types: the fused direct kernel needs no transformed panel or pair buffer
+and takes precedence even when packed extended BLAS is requested. Diagnostics
+report `gram_kernel=:fused_arrow_2x2` and
+`gram_kernel_reason=:fused_arrow_specialized` for this case.
+Memory planning uses the smallest available signal among host free memory,
+Linux cgroup limits, and the optional `SDPX_MEMORY_LIMIT_BYTES` environment
+limit. For example:
+
+```bash
+SDPX_MEMORY_LIMIT_BYTES=64GiB julia --project=. -t 8 solve_problem.jl
+```
+
+The limit is a planning ceiling, not a request to reserve that amount.
 
 ## Threading
 
@@ -320,21 +381,27 @@ Start Julia with `-t N` to enable threaded block factorisation, dense and sparse
 Schur assembly, residual construction, direction recovery, arrow
 factorisation/solves, and line search.
 
-`BigFloat` threads normally and is verified bit-identical at 1, 2, 4 and 8
-threads. (An earlier version forced it single-threaded on the belief that MPFR
-was not thread-safe. That was wrong: the corruption came from
-`zeros(BigFloat, ...)` aliasing one object across every slot, so in-place
-kernels overwrote whole arrays. MPFR was never the problem.)
+This applies to immutable fixed-width arithmetic. `BigFloat` is deliberately
+kept serial: mutable scalar ownership, allocator pressure, and per-worker
+high-precision workspace growth make the serial owned-storage path the only
+release configuration currently validated. This is a solver policy, not a
+general statement that MPFR can never be called concurrently.
 
 Scaling depends strongly on problem size — small models do not have enough work
-per block to amortise the synchronisation. On the CSDR benchmark family, the
-360/600/900-block cases reach 2.68x/3.50x/3.81x at eight threads, while the
-180-block case does not scale. See the [threading guide](docs/threading.md).
+per block to amortise the synchronisation. Small Float64 Schur builds therefore
+stay serial automatically. On the current scheduler microbenchmarks,
+Float64x4 reached 4.08x on a medium dense Schur case and 3.73x on a medium
+sparse exact-arrow case at eight requested workers; the host exposed four
+hardware threads, so these are scheduler measurements rather than an
+eight-core claim. See the [threading guide](docs/threading.md) and its linked
+raw protocol.
 
 `Float64x4` and `BigFloat` can opt into the blocked triangular Schur backend
 with `extended_precision_blas=:auto`. It is off by default, never redirects
-`Float64`, and keeps sparse outer products where panel packing is not predicted
-to pay for itself.
+`Float64`, keeps BigFloat serial, and retains sparse outer products where panel
+packing is not predicted to pay for itself. The fused exact-arrow `2x2` route
+is a higher-priority specialization and therefore does not allocate those
+panels for either arithmetic type.
 
 ## Benchmarks
 
@@ -358,9 +425,16 @@ including cases where SDPX does worse — with the configuration for each.
 - The package is **experimental**; the API may change before 1.0.
 - The sparse conformal-bootstrap benchmark in `bench/` does not yet converge to
   the tolerance a reference solver reaches on the same instance.
-  `bench/opt2026/REPORT.md` documents the current diagnosis.
+  `bench/csdr_psd_dual/RESULTS.md` records current evidence, while
+  `bench/opt2026/REPORT.md` preserves the historical optimization log.
 - `Float64` is precision-limited on ill-conditioned bootstrap models; use
   `Float64x2`/`Float64x4` when a solve reports `:precision_floor`.
+- Non-arrow SDP problems still use a dense Schur/KKT fallback. Large dense
+  high-precision instances can therefore be limited by quadratic workspace
+  and cubic factorization cost before arithmetic accuracy becomes the issue.
+- BigFloat kernels are serial, and distributed Schur assembly/factorization is
+  not implemented. On a cluster, run independent BigFloat solves as separate
+  jobs or job-array elements.
 
 ## Design and benchmark notes
 
@@ -370,5 +444,6 @@ including cases where SDPX does worse — with the configuration for each.
 - [JuMP and MathOptInterface guide](docs/julia-interface.md)
 - [Julia interface roadmap](docs/julia-interface-plan.md)
 - [Open-source release checklist](docs/open-source-release-checklist.md)
+- [Cluster deployment and execution guide](docs/cluster-workflow.md)
 - [Matched CSDR PSD-dual benchmark](bench/csdr_psd_dual/README.md)
-- [Extended-precision BLAS benchmark report](bench/extended_precision_blas/results/REPORT.md)
+- [Extended-precision BLAS benchmark report](bench/extended_precision_blas/REPORT.md)

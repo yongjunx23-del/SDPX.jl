@@ -10,10 +10,24 @@ _coefficient_eltype(A::AbstractVector{<:AbstractArray{<:Any,3}}) =
 _coefficient_eltype(A::AbstractVector{<:AbstractVector{<:AbstractMatrix}}) =
     mapreduce(block -> mapreduce(eltype, promote_type, block), promote_type, A)
 
+function _require_supported_arithmetic_type(::Type{T}) where {T}
+    T <: AbstractFloat &&
+        return T
+    throw(
+        ArgumentError(
+            "SDPX arithmetic must be a real AbstractFloat type; got $T. " *
+            "Use Float64, BigFloat, a MultiFloats type, or Double64. " *
+            "Integer and Rational inputs are accepted when T is inferred " *
+            "and are converted to floating-point arithmetic.",
+        ),
+    )
+end
+
 function infer_eltype(c, A, C, B, b)
     T = promote_type(eltype(c), eltype(B), eltype(b),
         _coefficient_eltype(A), mapreduce(eltype, promote_type, C))
-    return T <: AbstractFloat ? T : float(T)
+    inferred = T <: AbstractFloat ? T : float(T)
+    return _require_supported_arithmetic_type(inferred)
 end
 
 function _validate_dims(A, C, B, b, m, n, L)
@@ -26,6 +40,19 @@ function _validate_dims(A, C, B, b, m, n, L)
         size(C[l]) == (size(A[l], 2), size(A[l], 2)) ||
             throw(ArgumentError("C[$l] size $(size(C[l])) must match A[$l] block size ($(size(A[l],2)),$(size(A[l],2)))"))
     end
+end
+
+function _require_positive_psd_block_dimensions(k)
+    invalid = findfirst(dimension -> dimension <= 0, k)
+    invalid === nothing && return nothing
+    dimension = k[invalid]
+    throw(
+        ArgumentError(
+            "PSD block dimensions must be positive; block $invalid has " *
+            "dimension $dimension (a $(dimension)×$(dimension) block). " *
+            "Remove vacuous 0×0 blocks before calling ingest.",
+        ),
+    )
 end
 
 _check_finite(x, name) = all(isfinite, x) || throw(ArgumentError("$name contains NaN or Inf"))
@@ -262,36 +289,46 @@ function structure_summary(prob::SDPProblem)
     )
 end
 
-function _rownorm_inf(M::AbstractMatrix)
+function _rownorm_inf(M::AbstractMatrix{T}) where {T}
     k = size(M, 1)
-    v = 0.0
+    v = zero(T)
     @inbounds for c in 1:k, r in 1:k
-        v = max(v, abs(Float64(M[r, c])))
+        v = max(v, abs(M[r, c]))
     end
     return v
 end
 
-function _asymmetry(M::AbstractMatrix)
+function _asymmetry(M::AbstractMatrix{T}) where {T}
     k = size(M, 1)
-    a = 0.0
+    a = zero(T)
     @inbounds for c in 1:k, r in 1:(c-1)
-        a = max(a, abs(Float64(M[r, c] - M[c, r])))
+        a = max(a, abs(M[r, c] - M[c, r]))
     end
     return a
+end
+
+function _symmetry_ratio_display(asymmetry, norm)
+    ratio = asymmetry / norm
+    try
+        return round(Float64(ratio); sigdigits=3)
+    catch
+        return ratio
+    end
 end
 
 function _symmetrize!(M::AbstractMatrix, name, tol, verbosity)
     nrm = _rownorm_inf(M)
     asym = _asymmetry(M)
-    if nrm > 0 && asym / nrm > tol
+    if nrm > zero(nrm) && asym > typeof(nrm)(tol) * nrm
+        ratio = _symmetry_ratio_display(asym, nrm)
         verbosity >= 1 &&
-            @warn "$name is not symmetric (‖A-Aᵀ‖∞/‖A‖∞ ≈ $(round(asym / nrm, sigdigits=3)) > tol=$tol); symmetrizing as (A+Aᵀ)/2"
+            @warn "$name is not symmetric (‖A-Aᵀ‖∞/‖A‖∞ ≈ $ratio > tol=$tol); symmetrizing as (A+Aᵀ)/2"
     end
     k = size(M, 1)
     @inbounds for c in 1:k, r in 1:(c-1)
         avg = (M[r, c] + M[c, r]) / 2
-        M[r, c] = avg
-        M[c, r] = avg
+        _ingest_owned_store!(M, (r, c), avg)
+        _ingest_owned_store!(M, (c, r), avg)
     end
     return M
 end
@@ -299,11 +336,94 @@ end
 function _check_symmetric_only(M::AbstractMatrix, name, tol)
     nrm = _rownorm_inf(M)
     asym = _asymmetry(M)
-    if nrm > 0 && asym / nrm > tol
-        throw(ArgumentError("$name is not symmetric (‖A-Aᵀ‖∞/‖A‖∞ ≈ $(round(asym / nrm, sigdigits=3)) > tol=$tol); " *
+    if nrm > zero(nrm) && asym > typeof(nrm)(tol) * nrm
+        ratio = _symmetry_ratio_display(asym, nrm)
+        throw(ArgumentError("$name is not symmetric (‖A-Aᵀ‖∞/‖A‖∞ ≈ $ratio > tol=$tol); " *
                              "pass symmetrize=true to auto-symmetrize instead of erroring"))
     end
     return M
+end
+
+@inline _ingest_owned_scalar(::Type{T}, value) where {T} = T(value)
+@inline _ingest_owned_scalar(::Type{BigFloat}, value::BigFloat) =
+    MA.mutable_copy(value)
+@inline _ingest_owned_scalar(::Type{BigFloat}, value) = BigFloat(value)
+
+function _ingest_owned_array(
+    ::Type{T},
+    source::AbstractArray,
+) where {T}
+    destination = Array{T}(undef, size(source))
+    copyto!(destination, source)
+    return destination
+end
+
+function _ingest_owned_array(
+    ::Type{BigFloat},
+    source::AbstractArray,
+)
+    destination = Array{BigFloat}(undef, size(source))
+    @inbounds for index in eachindex(destination, source)
+        destination[index] =
+            _ingest_owned_scalar(BigFloat, source[index])
+    end
+    return destination
+end
+
+function _ingest_owned_copyto!(
+    destination::AbstractArray{T},
+    source::AbstractArray,
+) where {T}
+    length(destination) == length(source) ||
+        throw(DimensionMismatch("ingest copy requires matching lengths"))
+    copyto!(destination, source)
+    return destination
+end
+
+function _ingest_owned_copyto!(
+    destination::AbstractArray{BigFloat},
+    source::AbstractArray,
+)
+    length(destination) == length(source) ||
+        throw(DimensionMismatch("ingest copy requires matching lengths"))
+    @inbounds for (destination_index, source_index) in
+                  zip(eachindex(destination), eachindex(source))
+        destination[destination_index] =
+            _ingest_owned_scalar(BigFloat, source[source_index])
+    end
+    return destination
+end
+
+@inline function _ingest_owned_store!(
+    destination::AbstractArray{T},
+    index,
+    value,
+) where {T}
+    destination[index] = _ingest_owned_scalar(T, value)
+    return destination
+end
+
+@inline function _ingest_owned_store!(
+    destination::AbstractArray{T},
+    index::Tuple,
+    value,
+) where {T}
+    destination[index...] = _ingest_owned_scalar(T, value)
+    return destination
+end
+
+function _ingest_owned_sparse(
+    ::Type{T},
+    source::SparseMatrixCSC,
+) where {T}
+    converted = SparseMatrixCSC{T,Int}(source)
+    return SparseMatrixCSC(
+        size(converted, 1),
+        size(converted, 2),
+        copy(converted.colptr),
+        copy(rowvals(converted)),
+        _ingest_owned_array(T, nonzeros(converted)),
+    )
 end
 
 """
@@ -322,7 +442,9 @@ function ingest(c, A::AbstractVector{<:AbstractArray{<:Any,3}}, C, B, b;
     T::Union{Nothing,Type}=nothing, sparse::Union{Bool,Symbol}=:auto,
     validate::Bool=true, symmetrize::Bool=true, sym_tol::Real=1e-8, verbosity::Int=1)
 
-    ET = T === nothing ? infer_eltype(c, A, C, B, b) : T
+    ET = T === nothing ?
+         infer_eltype(c, A, C, B, b) :
+         _require_supported_arithmetic_type(T)
     L = length(A)
     L > 0 || throw(ArgumentError("A must have at least one block"))
     m = size(A[1], 1)
@@ -334,20 +456,19 @@ function ingest(c, A::AbstractVector{<:AbstractArray{<:Any,3}}, C, B, b;
     end
 
     k = [size(Al, 2) for Al in A]
+    _require_positive_psd_block_dimensions(k)
 
-    cc = Vector{ET}(undef, m)
-    copyto!(cc, c)
+    cc = _ingest_owned_array(ET, c)
     Cc = Vector{Matrix{ET}}(undef, L)
-    Bc = Matrix{ET}(B)
-    bc = Vector{ET}(undef, n)
-    copyto!(bc, b)
+    Bc = _ingest_owned_array(ET, B)
+    bc = _ingest_owned_array(ET, b)
 
     validate && _check_finite(cc, "c")
     validate && _check_finite(Bc, "B")
     validate && _check_finite(bc, "b")
 
     for l in 1:L
-        Cl = Matrix{ET}(C[l])
+        Cl = _ingest_owned_array(ET, C[l])
         if validate
             _check_finite(Cl, "C[$l]")
             symmetrize ? _symmetrize!(Cl, "C[$l]", sym_tol, verbosity) : _check_symmetric_only(Cl, "C[$l]", sym_tol)
@@ -381,13 +502,13 @@ function _ingest_dense(A, ET, L, m, k, validate, symmetrize, tol, verbosity)
         tmp = Matrix{ET}(undef, kl, kl)
         for i in 1:m
             @inbounds for c in 1:kl, r in 1:kl
-                tmp[r, c] = ET(Al[i, r, c])
+                _ingest_owned_store!(tmp, (r, c), Al[i, r, c])
             end
             if validate
                 _check_finite(tmp, "A[$l][$i]")
                 symmetrize ? _symmetrize!(tmp, "A[$l][$i]", tol, verbosity) : _check_symmetric_only(tmp, "A[$l][$i]", tol)
             end
-            copyto!(view(M, :, i), tmp)
+            _ingest_owned_copyto!(view(M, :, i), tmp)
         end
         Av[l] = M
     end
@@ -418,8 +539,8 @@ function _ingest_sparse(A, ET, L, m, k, validate, symmetrize, tol, verbosity)
         for i in 1:m
             nonzero = false
             @inbounds for c in 1:kl, r in 1:kl
-                value = ET(Al[i, r, c])
-                tmp[r, c] = value
+                value = Al[i, r, c]
+                _ingest_owned_store!(tmp, (r, c), value)
                 nonzero |= !iszero(value)
             end
             if !nonzero
@@ -430,7 +551,7 @@ function _ingest_sparse(A, ET, L, m, k, validate, symmetrize, tol, verbosity)
                 _check_finite(tmp, "A[$l][$i]")
                 symmetrize ? _symmetrize!(tmp, "A[$l][$i]", tol, verbosity) : _check_symmetric_only(tmp, "A[$l][$i]", tol)
             end
-            blocks[i] = sparse(tmp)
+            blocks[i] = _ingest_owned_sparse(ET, sparse(tmp))
         end
         Asp[l] = blocks
         active[l] = findall(i -> nnz(blocks[i]) > 0, 1:m)
@@ -442,9 +563,9 @@ function _ingest_sparse(A, ET, L, m, k, validate, symmetrize, tol, verbosity)
         if kl == 2
             coeffs = Matrix{ET}(undef, 3, length(active[l]))
             @inbounds for (p, i) in pairs(active[l])
-                coeffs[1, p] = blocks[i][1, 1]
-                coeffs[2, p] = blocks[i][1, 2]
-                coeffs[3, p] = blocks[i][2, 2]
+                _ingest_owned_store!(coeffs, (1, p), blocks[i][1, 1])
+                _ingest_owned_store!(coeffs, (2, p), blocks[i][1, 2])
+                _ingest_owned_store!(coeffs, (3, p), blocks[i][2, 2])
             end
             packed2[l] = coeffs
         else
@@ -455,11 +576,12 @@ function _ingest_sparse(A, ET, L, m, k, validate, symmetrize, tol, verbosity)
 end
 
 function _sparse_asymmetry(M::SparseMatrixCSC)
-    isempty(nonzeros(M)) && return 0.0, 0.0
+    T = eltype(M)
+    isempty(nonzeros(M)) && return zero(T), zero(T)
     nrm = maximum(abs, nonzeros(M); init=zero(eltype(M)))
     difference = M - transpose(M)
     asym = maximum(abs, nonzeros(difference); init=zero(eltype(M)))
-    return Float64(nrm), Float64(asym)
+    return nrm, asym
 end
 
 function _prepare_sparse_matrix(
@@ -471,11 +593,11 @@ function _prepare_sparse_matrix(
     tol,
     verbosity,
 ) where {ET}
-    M = SparseMatrixCSC{ET,Int}(matrix)
+    M = _ingest_owned_sparse(ET, sparse(matrix))
     validate && _check_finite(nonzeros(M), name)
     if validate
         nrm, asym = _sparse_asymmetry(M)
-        if nrm > 0 && asym / nrm > tol
+        if nrm > zero(ET) && asym > ET(tol) * nrm
             if symmetrize
                 verbosity >= 1 && @warn "$name is not symmetric; symmetrizing as (A+Aᵀ)/2"
             else
@@ -488,6 +610,7 @@ function _prepare_sparse_matrix(
     if symmetrize
         M = sparse((M + transpose(M)) / ET(2))
         dropzeros!(M)
+        M = _ingest_owned_sparse(ET, M)
     end
     return M
 end
@@ -505,7 +628,9 @@ function ingest(
     sym_tol::Real=1e-8,
     verbosity::Int=1,
 )
-    ET = T === nothing ? infer_eltype(c, A, C, B, b) : T
+    ET = T === nothing ?
+         infer_eltype(c, A, C, B, b) :
+         _require_supported_arithmetic_type(T)
     L = length(A)
     L > 0 || throw(ArgumentError("A must have at least one block"))
     m = length(A[1])
@@ -513,6 +638,7 @@ function ingest(
     all(length(block) == m for block in A) ||
         throw(ArgumentError("all PSD blocks must contain the same $m coefficient matrices"))
     k = [size(first(block), 1) for block in A]
+    _require_positive_psd_block_dimensions(k)
     for l in 1:L
         all(size(matrix) == (k[l], k[l]) for matrix in A[l]) ||
             throw(ArgumentError("A[$l] contains matrices with inconsistent dimensions"))
@@ -522,10 +648,10 @@ function ingest(
     length(c) == m || throw(ArgumentError("length(c) must equal $m"))
     size(B) == (m, n) || throw(ArgumentError("B must have size ($m,$n)"))
 
-    cc = Vector{ET}(c)
-    Cc = [Matrix{ET}(matrix) for matrix in C]
-    Bc = Matrix{ET}(B)
-    bc = Vector{ET}(b)
+    cc = _ingest_owned_array(ET, c)
+    Cc = [_ingest_owned_array(ET, matrix) for matrix in C]
+    Bc = _ingest_owned_array(ET, B)
+    bc = _ingest_owned_array(ET, b)
     if validate
         _check_finite(cc, "c")
         _check_finite(Bc, "B")
@@ -570,9 +696,21 @@ function ingest(
             if k[l] == 2
                 packed2[l] = Matrix{ET}(undef, 3, length(active[l]))
                 for (position, variable) in pairs(active[l])
-                    packed2[l][1, position] = prepared[l][variable][1, 1]
-                    packed2[l][2, position] = prepared[l][variable][1, 2]
-                    packed2[l][3, position] = prepared[l][variable][2, 2]
+                    _ingest_owned_store!(
+                        packed2[l],
+                        (1, position),
+                        prepared[l][variable][1, 1],
+                    )
+                    _ingest_owned_store!(
+                        packed2[l],
+                        (2, position),
+                        prepared[l][variable][1, 2],
+                    )
+                    _ingest_owned_store!(
+                        packed2[l],
+                        (3, position),
+                        prepared[l][variable][2, 2],
+                    )
                 end
             else
                 packed2[l] = Matrix{ET}(undef, 0, 0)
@@ -584,7 +722,10 @@ function ingest(
         for l in 1:L
             panels[l] = Matrix{ET}(undef, k[l] * k[l], m)
             for i in 1:m
-                copyto!(view(panels[l], :, i), vec(Matrix(prepared[l][i])))
+                _ingest_owned_copyto!(
+                    view(panels[l], :, i),
+                    vec(Matrix(prepared[l][i])),
+                )
             end
         end
         cons = DenseCons{ET}(panels)
@@ -621,9 +762,10 @@ function check_precision_consistency(prob::SDPProblem{BigFloat}, precision_bits:
     if data_bits < precision_bits
         verbosity >= 1 && @warn "Input data was built at as few as $data_bits-bit BigFloat precision, but " *
                                  "precision_bits=$precision_bits was requested for the solve. The extra " *
-                                 "$(precision_bits - data_bits) bits carry no information unless the data is re-rounded " *
-                                 "at the higher precision — pass convert_inputs=true to `ingest`/`sdp` to do that, " *
-                                 "otherwise this is a silent accuracy ceiling on the result."
+                                 "$(precision_bits - data_bits) bits cannot recover information already lost. " *
+                                 "Rebuild the inputs inside `setprecision(BigFloat, precision_bits) do ... end` " *
+                                 "when the source can provide more digits. `SolverOptions(convert_inputs=true)` " *
+                                 "only normalizes stored precision; it does not create information."
     end
     return data_bits
 end
@@ -632,22 +774,67 @@ check_precision_consistency(::SDPProblem, ::Int, ::Int) = typemax(Int)
 """
     reround(prob::SDPProblem{BigFloat}, bits::Int) -> SDPProblem{BigFloat}
 
-Re-round every entry of `prob` to `bits`-bit `BigFloat` precision.
-Used when `convert_inputs=true` so `precision_bits` is not just the
-*working* precision of the solve but actually reflects the data.
+Re-round every entry of `prob` to `bits`-bit `BigFloat` precision when
+`SolverOptions(convert_inputs=true)`. This normalizes mutable scalar storage
+for the solve but cannot recover digits already lost when the inputs were
+created.
 """
 function reround(prob::SDPProblem{BigFloat}, bits::Int)
+    bits > 0 || throw(ArgumentError("bits must be positive"))
+    reround_array = function (source::AbstractArray{BigFloat})
+        destination = Array{BigFloat}(undef, size(source))
+        @inbounds for index in eachindex(destination, source)
+            # `BigFloat(x)` returns `x` itself when `x` is already a
+            # BigFloat. The explicit precision constructor is required both
+            # to change the MPFR significand and to create independent scalar
+            # ownership.
+            destination[index] =
+                BigFloat(source[index]; precision=bits)
+        end
+        return destination
+    end
+    reround_sparse = function (source::SparseMatrixCSC{BigFloat,Int})
+        values = Vector{BigFloat}(undef, nnz(source))
+        @inbounds for index in eachindex(values)
+            values[index] =
+                BigFloat(nonzeros(source)[index]; precision=bits)
+        end
+        return SparseMatrixCSC(
+            size(source, 1),
+            size(source, 2),
+            copy(source.colptr),
+            copy(rowvals(source)),
+            values,
+        )
+    end
     return setprecision(BigFloat, bits) do
         cons = prob.cons
-        newcons = cons isa DenseCons ? DenseCons{BigFloat}([BigFloat.(Av) for Av in cons.Av]) :
-                  SparseCons{BigFloat}(
-                      [[BigFloat.(Ai) for Ai in blocks] for blocks in (cons::SparseCons).Asp],
-                      [copy(ids) for ids in (cons::SparseCons).active],
-                      [copy(ids) for ids in (cons::SparseCons).schur_order],
-                      [BigFloat.(coeffs) for coeffs in (cons::SparseCons).packed2],
-                  )
-        SDPProblem{BigFloat}(BigFloat.(prob.c), [BigFloat.(Cl) for Cl in prob.C],
-            BigFloat.(prob.B), BigFloat.(prob.b), newcons, prob.dims, prob.structure)
+        newcons = if cons isa DenseCons
+            DenseCons{BigFloat}([
+                reround_array(panel)
+                for panel in cons.Av
+            ])
+        else
+            sparse_cons = cons::SparseCons
+            SparseCons{BigFloat}(
+                [
+                    [reround_sparse(matrix) for matrix in blocks]
+                    for blocks in sparse_cons.Asp
+                ],
+                [copy(ids) for ids in sparse_cons.active],
+                [copy(ids) for ids in sparse_cons.schur_order],
+                [reround_array(coeffs) for coeffs in sparse_cons.packed2],
+            )
+        end
+        return SDPProblem{BigFloat}(
+            reround_array(prob.c),
+            [reround_array(matrix) for matrix in prob.C],
+            reround_array(prob.B),
+            reround_array(prob.b),
+            newcons,
+            prob.dims,
+            prob.structure,
+        )
     end
 end
 reround(prob::SDPProblem, ::Int) = prob

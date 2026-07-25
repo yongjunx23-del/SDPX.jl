@@ -129,7 +129,9 @@ end
 function validate_solution(problem, result, full_B, full_b)
     equality_residual = transpose(full_B) * result.x - full_b
     minimum_eigenvalue = Inf
+    minimum_dual_eigenvalue = Inf
     block_minimum_eigenvalues = Float64[]
+    dual_block_minimum_eigenvalues = Float64[]
     cons = problem.cons::SDPX.SparseCons{Float64}
     for block_index in 1:problem.dims.L
         matrix = -copy(problem.C[block_index])
@@ -147,12 +149,22 @@ function validate_solution(problem, result, full_B, full_b)
         block_minimum = eigmin(Symmetric(matrix))
         push!(block_minimum_eigenvalues, block_minimum)
         minimum_eigenvalue = min(minimum_eigenvalue, block_minimum)
+        dual_block_minimum = eigmin(Symmetric(result.Y[block_index]))
+        push!(
+            dual_block_minimum_eigenvalues,
+            dual_block_minimum,
+        )
+        minimum_dual_eigenvalue =
+            min(minimum_dual_eigenvalue, dual_block_minimum)
     end
     return (
         max_absolute_linear_residual=maximum(abs, equality_residual),
         linear_residual_l2_norm=norm(equality_residual),
         minimum_psd_eigenvalue=minimum_eigenvalue,
         psd_block_minimum_eigenvalues=block_minimum_eigenvalues,
+        minimum_dual_psd_eigenvalue=minimum_dual_eigenvalue,
+        dual_psd_block_minimum_eigenvalues=
+            dual_block_minimum_eigenvalues,
     )
 end
 
@@ -273,6 +285,9 @@ function main(arguments)
     result = SDPX.solve!(problem, options)
     solve_finished = time()
     diagnostics = validate_solution(problem, result, data.B, data.b)
+    certificate = result.diagnostics === nothing ?
+                  nothing :
+                  result.diagnostics.selected_algorithms.certificate
     finished = time()
 
     output = Dict{String,Any}(
@@ -322,17 +337,20 @@ function main(arguments)
             "total" => finished - started,
         ),
         "diagnostics" => diagnostics,
+        "certificate" => certificate,
+        "parameter_history" => result.parameter_history,
         "variable_values" => result.x,
     )
     write_json(output_path, output)
     @printf(
-        "SDPX status=%s objective=%.12g solve=%.3fs total=%.3fs eq_res=%.3e min_eig=%.3e\n",
+        "SDPX status=%s objective=%.12g solve=%.3fs total=%.3fs eq_res=%.3e min_primal_eig=%.3e min_dual_eig=%.3e\n",
         result.status,
         result.pObj,
         solve_finished - solve_started,
         finished - started,
         diagnostics.max_absolute_linear_residual,
         diagnostics.minimum_psd_eigenvalue,
+        diagnostics.minimum_dual_psd_eigenvalue,
     )
 end
 

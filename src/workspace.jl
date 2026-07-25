@@ -73,6 +73,7 @@ function _extended_precision_workspace(
     mode::Symbol,
     memory_fraction::Float64,
     thread_count::Int,
+    specialized_fused_arrow::Bool=false,
 ) where {T}
     mode in (:off, :auto, :on) ||
         throw(ArgumentError(
@@ -82,9 +83,13 @@ function _extended_precision_workspace(
         throw(ArgumentError(
             "extended_precision_memory_fraction must be between zero and one",
         ))
-    total_memory = Float64(Sys.total_memory()) * memory_fraction
-    memory_budget = total_memory >= typemax(Int) ?
-                    typemax(Int) : floor(Int, total_memory)
+    free_memory_bytes =
+        ExtendedPrecisionBLAS._system_free_memory_bytes()
+    memory_budget =
+        ExtendedPrecisionBLAS._memory_budget_from_fraction(
+            free_memory_bytes,
+            memory_fraction,
+        )
     family = ExtendedPrecisionBLAS.arithmetic_family(T)
     if mode === :off || family in (:blas, :unsupported)
         disabled_features = ExtendedPrecisionBLAS.CrossoverFeatures(
@@ -102,6 +107,51 @@ function _extended_precision_workspace(
             T,
             disabled_features;
             mode=mode,
+            available_memory_bytes=free_memory_bytes,
+        )
+        plans = [
+            ExtendedBlockPlan(decision, Vector{Int}[])
+            for _ in 1:prob.dims.L
+        ]
+        return ExtendedPrecisionWorkspace(
+            mode,
+            memory_budget,
+            0,
+            plans,
+            false,
+        )
+    end
+    if specialized_fused_arrow
+        # Exact-arrow 2x2 models have a stronger specialization than packed
+        # dense Gram assembly: each transformed coefficient is computed and
+        # scattered directly into its compact arrow destination. Packing a
+        # panel first would only add memory traffic and can be several GiB on
+        # bootstrap instances, so make that bypass explicit in diagnostics.
+        disabled_features = ExtendedPrecisionBLAS.CrossoverFeatures(
+            rows=0,
+            columns=0,
+            matrix_dimension=2,
+            average_nnz=0.0,
+            active_density=0.0,
+            expected_schur_density=prob.structure.schur_density,
+            thread_count=T === BigFloat ? 1 : thread_count,
+            memory_budget_bytes=memory_budget,
+            sparse_input=true,
+        )
+        base = ExtendedPrecisionBLAS.choose_crossover(
+            T,
+            disabled_features;
+            mode=:off,
+            available_memory_bytes=free_memory_bytes,
+        )
+        decision = ExtendedPrecisionBLAS.CrossoverDecision(
+            false,
+            :fused_arrow_specialized,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            base.config,
         )
         plans = [
             ExtendedBlockPlan(decision, Vector{Int}[])
@@ -151,12 +201,13 @@ function _extended_precision_workspace(
             T,
             features;
             mode=mode,
+            available_memory_bytes=free_memory_bytes,
         )
         if sparse_input && decision.enabled
             remaining = max(remaining - decision.packing_bytes, 0)
             packing_bytes += decision.packing_bytes
         end
-        groups = sparse_input ?
+        groups = sparse_input && decision.enabled ?
                  _sparsity_pattern_groups(
                      cons::SparseCons{T},
                      block,
@@ -302,6 +353,8 @@ mutable struct Workspace{T}
     p::Vector{T}
     rhs::Vector{T}
     rtil::Vector{T}
+    q_rhs::Vector{T}       # equality-space KKT right-hand side
+    q_perm::Vector{T}      # pivoted-Q permutation / triangular-solve scratch
     dx::Vector{T}
     dy::Vector{T}
     δx::Vector{T}
@@ -330,10 +383,17 @@ function _schur_parallel_bins(
     requested = max(1, min(thread_count, L))
     m == 0 && return requested
     bytes_per_matrix = Float64(m)^2 * max(sizeof(T), 8)
-    # Cap task-local Schur accumulators to roughly 15% of physical memory.
+    # Cap task-local Schur accumulators to 15% of currently free memory.
     # This avoids making `threads × m² × sizeof(T)` the hidden limiter for
     # MultiFloat and large-cluster jobs.
-    memory_budget = 0.15 * Float64(Sys.total_memory())
+    free_memory_bytes =
+        ExtendedPrecisionBLAS._system_free_memory_bytes()
+    memory_budget = Float64(
+        ExtendedPrecisionBLAS._memory_budget_from_fraction(
+            free_memory_bytes,
+            0.15,
+        ),
+    )
     affordable = max(1, floor(Int, memory_budget / max(bytes_per_matrix, 1)))
     return min(requested, affordable)
 end
@@ -348,16 +408,24 @@ function Workspace(
     selected_threads =
         T === BigFloat ? 1 : min(max(thread_count, 1), Threads.nthreads())
     is_sparse = prob.cons isa SparseCons
+    arrow = ArrowWorkspace(prob, selected_threads)
+    compact_arrow = arrow !== nothing
+    fused_arrow =
+        compact_arrow &&
+        L > 0 &&
+        all(
+            l -> size((prob.cons::SparseCons{T}).packed2[l], 1) == 3,
+            1:L,
+        )
     extended_precision = _extended_precision_workspace(
         prob,
         extended_precision_blas,
         extended_precision_memory_fraction,
         selected_threads,
+        fused_arrow,
     )
     block_nbins = max(1, min(selected_threads, L))
     schur_nbins = _schur_parallel_bins(T, m, L, selected_threads)
-    arrow = ArrowWorkspace(prob, selected_threads)
-    compact_arrow = arrow !== nothing
     dense_sparse_assembly = false
     if is_sparse
         active = (prob.cons::SparseCons{T}).active
@@ -373,12 +441,14 @@ function Workspace(
         # Exact-arrow model whose blocks are all 2x2: the fused compute+scatter
         # kernel applies, and the packed pair buffer (9.08 GB on the 4100-block
         # CSDR model) is not allocated at all.
-        fused_arrow = compact_arrow &&
-                      all(l -> size((prob.cons::SparseCons{T}).packed2[l], 1) == 3, 1:L)
         blk = [
             BlockWS{T}(
                 k[l],
-                k[l] == 2 || extended_precision.block_plans[l].decision.enabled ?
+                !fused_arrow &&
+                (
+                    k[l] == 2 ||
+                    extended_precision.block_plans[l].decision.enabled
+                ) ?
                 length(active[l]) : 0,
                 (dense_sparse_assembly || fused_arrow) ? 0 :
                 length(active[l]) * (length(active[l]) + 1) ÷ 2,
@@ -389,7 +459,6 @@ function Workspace(
                    [alloc_zeros(T, m, m) for _ in 1:schur_nbins] :
                    Matrix{T}[]
     else
-        fused_arrow = false
         blk = [BlockWS{T}(k[l], m) for l in 1:L]
         Spartial = schur_nbins > 1 ?
                    [alloc_zeros(T, m, m) for _ in 1:schur_nbins] :
@@ -417,7 +486,8 @@ function Workspace(
         alloc_zeros(T, m, n),
         alloc_zeros(T, n, n), alloc_zeros(T, n, n), nothing, arrow,
         alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m),
-        alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, n),
+        alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, n),
+        alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n),
         block_bins, schur_bins, [alloc_zeros(T, m) for _ in 1:block_nbins],

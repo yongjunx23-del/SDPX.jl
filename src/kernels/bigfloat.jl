@@ -2,8 +2,10 @@
     BigFloat fast path (§1.5). Plain BigFloat arithmetic allocates a
     fresh MPFR object on every `+`/`*` (P1); MutableArithmetics wraps
     the mutating `mpfr_add`/`mpfr_mul`/`mpfr_fma` C calls as
-    `operate!`/`operate_to!`/`buffered_operate!`, letting kdot!/kaxpby!
-    run at O(1) allocations regardless of array size.
+    `operate!`/`operate_to!`/`buffered_operate!`. This makes `kdot!`
+    allocation-free after its two scratch values are supplied. Alias-safe
+    array outputs still need one independent MPFR object per entry, but avoid
+    all intermediate product and sum objects.
 
     API verified against the installed MutableArithmetics v1.8.0
     source (not assumed from memory): `buffered_operate!(buffer, op,
@@ -31,6 +33,35 @@
 =====================================================================#
 
 import MutableArithmetics as MA
+
+@inline _coo_owned_scalar(value::BigFloat) = MA.mutable_copy(value)
+
+# MutableArithmetics intentionally does not expose in-place division for
+# BigFloat yet. The second triangular pass in `kcholsolve!` owns independent
+# destination objects created by the first pass, so MPFR may safely reuse that
+# storage. Keep this tiny wrapper local to the BigFloat kernel layer; its
+# signature mirrors Julia's own BigFloat `/` implementation.
+@inline function _mpfr_divide!(
+    output::BigFloat,
+    numerator::BigFloat,
+    denominator::BigFloat,
+)
+    ccall(
+        (:mpfr_div, Base.MPFR.libmpfr),
+        Cint,
+        (
+            Ref{BigFloat},
+            Ref{BigFloat},
+            Ref{BigFloat},
+            Base.MPFR.MPFRRoundingMode,
+        ),
+        output,
+        numerator,
+        denominator,
+        Base.MPFR.rounding_raw(BigFloat),
+    )
+    return output
+end
 
 # ---- kdot: simple form (2 O(1) allocations per call: the returned
 #     accumulator plus one scratch buffer) ----
@@ -109,10 +140,58 @@ correct for any input. This kernel is not on the dominant cost path
 scratch they exclusively own).
 """
 function kaxpby!(α::BigFloat, X::AbstractArray{BigFloat}, β::BigFloat, Y::AbstractArray{BigFloat})
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    beta_is_zero = iszero(β)
     @inbounds for i in eachindex(X, Y)
-        Y[i] = α * X[i] + β * Y[i]
+        MA.operate_to!(accumulator, *, α, X[i])
+        if !beta_is_zero
+            MA.operate_to!(multiplication_buffer, *, β, Y[i])
+            MA.operate!(+, accumulator, multiplication_buffer)
+        end
+        # The destination may have been created with `zeros(BigFloat, ...)`
+        # or may alias X. Store one independent MPFR object per entry instead
+        # of mutating Y[i] directly.
+        Y[i] = MA.mutable_copy(accumulator)
     end
     return Y
+end
+
+function kaxpby_owned!(
+    α::BigFloat,
+    X::AbstractArray{BigFloat},
+    β::BigFloat,
+    Y::AbstractArray{BigFloat},
+)
+    multiplication_buffer = BigFloat()
+    alpha_is_one = isone(α)
+    beta_is_zero = iszero(β)
+    @inbounds for index in eachindex(X, Y)
+        if !beta_is_zero
+            MA.operate_to!(multiplication_buffer, *, β, Y[index])
+        end
+        if alpha_is_one
+            MA.operate_to!(Y[index], copy, X[index])
+        else
+            MA.operate_to!(Y[index], *, α, X[index])
+        end
+        if !beta_is_zero
+            MA.operate!(+, Y[index], multiplication_buffer)
+        end
+    end
+    return Y
+end
+
+function copy_owned!(
+    destination::AbstractArray{BigFloat},
+    source::AbstractArray{BigFloat},
+)
+    axes(destination) == axes(source) ||
+        throw(DimensionMismatch("copy_owned! arrays must have matching axes"))
+    @inbounds for index in eachindex(destination, source)
+        MA.operate_to!(destination[index], copy, source[index])
+    end
+    return destination
 end
 
 """
@@ -128,8 +207,9 @@ this so that in-place kernels have a well-defined destination.
 alloc_zeros(::Type{T}, dims::Integer...) where {T} = zeros(T, dims...)
 function alloc_zeros(::Type{BigFloat}, dims::Integer...)
     A = Array{BigFloat}(undef, dims...)
+    zero_value = BigFloat(0)
     @inbounds for i in eachindex(A)
-        A[i] = BigFloat(0)
+        A[i] = MA.mutable_copy(zero_value)
     end
     return A
 end
@@ -142,8 +222,30 @@ Zero `A` while keeping every slot an independent object (see
 """
 zero_distinct!(A::AbstractArray) = fill!(A, zero(eltype(A)))
 function zero_distinct!(A::AbstractArray{BigFloat})
+    zero_value = BigFloat(0)
     @inbounds for i in eachindex(A)
-        A[i] = BigFloat(0)
+        A[i] = MA.mutable_copy(zero_value)
+    end
+    return A
+end
+
+"""
+    zero_owned!(A) -> A
+
+Reset caller-owned workspace storage without replacing its elements.
+
+For `BigFloat`, every entry must already be an initialized, independently
+owned MPFR object at the current working precision, normally from
+[`alloc_zeros`](@ref) or a previous alias-safe kernel store. Unlike
+[`zero_distinct!`](@ref), this function does not repair aliased or
+mixed-precision storage; in exchange, it performs zero heap allocations. Use
+`zero_distinct!` for arbitrary user arrays and `zero_owned!` only for solver
+workspaces whose ownership invariant is known.
+"""
+zero_owned!(A::AbstractArray) = fill!(A, zero(eltype(A)))
+function zero_owned!(A::AbstractArray{BigFloat})
+    @inbounds for value in A
+        MA.operate!(zero, value)
     end
     return A
 end
@@ -165,11 +267,13 @@ function kchol!(A::AbstractMatrix{BigFloat})
     k == 0 && return true
     acc = BigFloat()
     buf = BigFloat()
+    difference = BigFloat()
     @inbounds for j in 1:k
         if j > 1
             Lj = view(A, j, 1:(j-1))
             kdot!(acc, buf, Lj, Lj)
-            djj = A[j, j] - acc   # non-mutating -, fresh object: safe to store
+            MA.operate_to!(difference, -, A[j, j], acc)
+            djj = difference
         else
             djj = A[j, j]
         end
@@ -181,7 +285,8 @@ function kchol!(A::AbstractMatrix{BigFloat})
                 Li = view(A, i, 1:(j-1))
                 Lj = view(A, j, 1:(j-1))
                 kdot!(acc, buf, Li, Lj)
-                num = A[i, j] - acc
+                MA.operate_to!(difference, -, A[i, j], acc)
+                num = difference
             else
                 num = A[i, j]
             end
@@ -202,6 +307,7 @@ function ktrsm!(L::AbstractMatrix{BigFloat}, X::AbstractMatrix{BigFloat})
     p = size(X, 2)
     acc = BigFloat()
     buf = BigFloat()
+    difference = BigFloat()
     @inbounds for c in 1:p
         Xc = view(X, :, c)
         for i in 1:k
@@ -209,7 +315,8 @@ function ktrsm!(L::AbstractMatrix{BigFloat}, X::AbstractMatrix{BigFloat})
                 Li = view(L, i, 1:(i-1))
                 yi = view(Xc, 1:(i-1))
                 kdot!(acc, buf, Li, yi)
-                val = Xc[i] - acc
+                MA.operate_to!(difference, -, Xc[i], acc)
+                val = difference
             else
                 val = Xc[i]
             end
@@ -217,6 +324,63 @@ function ktrsm!(L::AbstractMatrix{BigFloat}, X::AbstractMatrix{BigFloat})
         end
     end
     return X
+end
+
+# ---- ktrsv_lower!/ktrsv_transpose! : alias-safe vector triangular
+#     solves. Each output is stored as a fresh MPFR object, so these helpers
+#     are safe after `copyto!` and for arrays originally created by
+#     `zeros(BigFloat, ...)`. ----
+
+function ktrsv_lower!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    dimension = size(L, 1)
+    dimension == 0 && return rhs
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    difference = BigFloat()
+    @inbounds for row in 1:dimension
+        numerator = rhs[row]
+        if row > 1
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(L, row, 1:(row - 1)),
+                view(rhs, 1:(row - 1)),
+            )
+            MA.operate_to!(difference, -, rhs[row], accumulator)
+            numerator = difference
+        end
+        rhs[row] = numerator / L[row, row]
+    end
+    return rhs
+end
+
+function ktrsv_transpose!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    dimension = size(L, 1)
+    dimension == 0 && return rhs
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    difference = BigFloat()
+    @inbounds for row in dimension:-1:1
+        numerator = rhs[row]
+        if row < dimension
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(L, (row + 1):dimension, row),
+                view(rhs, (row + 1):dimension),
+            )
+            MA.operate_to!(difference, -, rhs[row], accumulator)
+            numerator = difference
+        end
+        rhs[row] = numerator / L[row, row]
+    end
+    return rhs
 end
 
 # ---- ktrmm! : X ← X·M, M square lower-triangular, X square (matches
@@ -235,9 +399,9 @@ end
 #     entry equal to the *last* one computed, i.e. every store ended up
 #     aliasing the same object): `copy(::BigFloat)` is not a deep copy
 #     in Julia — `copy(x) === x` — despite BigFloat being a mutable
-#     struct. `acc + zero(BigFloat)` is the safe substitute: `+` is
-#     non-mutating for BigFloat (confirmed throughout this file) and
-#     always constructs a genuinely fresh MPFR object. ----
+#     struct. `MutableArithmetics.mutable_copy(acc)` is the safe substitute:
+#     it constructs a genuinely independent MPFR object without first
+#     allocating a temporary zero. ----
 
 function ktrmm!(X::AbstractMatrix{BigFloat}, M::AbstractMatrix{BigFloat})
     k = size(M, 1)
@@ -250,10 +414,115 @@ function ktrmm!(X::AbstractMatrix{BigFloat}, M::AbstractMatrix{BigFloat})
         for i in 1:rows
             Xrow = view(X, i, j:k)
             kdot!(acc, buf, Xrow, Mcol)
-            X[i, j] = acc + zero(BigFloat)   # NOT copy(acc) — see note above
+            X[i, j] = MA.mutable_copy(acc)
         end
     end
     return X
+end
+
+# ---- kcholsolve! : M ← (L*L')⁻¹M. Base's generic triangular solves
+#     repeatedly allocate intermediate BigFloat products and differences.
+#     Reusing the dot and subtraction buffers leaves one independent result
+#     object per entry in the forward pass; the backward pass then reuses that
+#     now-independent storage through `_mpfr_divide!`. ----
+
+function kcholsolve!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    dimension = size(L, 1)
+    dimension == 0 && return rhs
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    difference = BigFloat()
+
+    @inbounds for row in 1:dimension
+        numerator = rhs[row]
+        if row > 1
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(L, row, 1:(row - 1)),
+                view(rhs, 1:(row - 1)),
+            )
+            MA.operate_to!(difference, -, rhs[row], accumulator)
+            numerator = difference
+        end
+        rhs[row] = numerator / L[row, row]
+    end
+
+    @inbounds for row in dimension:-1:1
+        numerator = rhs[row]
+        if row < dimension
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(L, (row + 1):dimension, row),
+                view(rhs, (row + 1):dimension),
+            )
+            MA.operate_to!(difference, -, rhs[row], accumulator)
+            numerator = difference
+        end
+        _mpfr_divide!(rhs[row], numerator, L[row, row])
+    end
+    return rhs
+end
+
+function kcholsolve!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+)
+    dimension = size(L, 1)
+    dimension == 0 && return rhs
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    difference = BigFloat()
+
+    @inbounds for column in axes(rhs, 2)
+        rhs_column = view(rhs, :, column)
+        for row in 1:dimension
+            numerator = rhs_column[row]
+            if row > 1
+                kdot!(
+                    accumulator,
+                    multiplication_buffer,
+                    view(L, row, 1:(row - 1)),
+                    view(rhs_column, 1:(row - 1)),
+                )
+                MA.operate_to!(difference, -, rhs_column[row], accumulator)
+                numerator = difference
+            end
+            rhs_column[row] = numerator / L[row, row]
+        end
+
+        for row in dimension:-1:1
+            numerator = rhs_column[row]
+            if row < dimension
+                kdot!(
+                    accumulator,
+                    multiplication_buffer,
+                    view(L, (row + 1):dimension, row),
+                    view(rhs_column, (row + 1):dimension),
+                )
+                MA.operate_to!(difference, -, rhs_column[row], accumulator)
+                numerator = difference
+            end
+            _mpfr_divide!(rhs_column[row], numerator, L[row, row])
+        end
+    end
+    return rhs
+end
+
+"""
+    BigFloatCholeskyFactor(L)
+
+Internal marker for a full-rank BigFloat Cholesky factor produced by
+[`kchol!`](@ref). The KKT layer stores this lightweight wrapper in its
+factorization cache and solves through [`kcholsolve!`](@ref), avoiding Base's
+allocation-heavy generic `Cholesky` solve. `L` is borrowed, not copied.
+"""
+struct BigFloatCholeskyFactor{M<:AbstractMatrix{BigFloat}}
+    L::M
 end
 
 # The determinant-only 2x2 line-search test is excellent for immutable
@@ -290,10 +559,17 @@ function kmul!(C::AbstractVector{BigFloat}, A::AbstractMatrix{BigFloat}, B::Abst
     p = size(A, 1)
     acc = BigFloat()
     buf = BigFloat()
+    alpha_is_one = isone(α)
+    beta_is_zero = iszero(β)
     @inbounds for i in 1:p
         Ai = view(A, i, :)
         kdot!(acc, buf, Ai, B)
-        C[i] = β == 0 ? α * acc : α * acc + β * C[i]
+        alpha_is_one || MA.operate!(*, acc, α)
+        if !beta_is_zero
+            MA.operate_to!(buf, *, β, C[i])
+            MA.operate!(+, acc, buf)
+        end
+        C[i] = MA.mutable_copy(acc)
     end
     return C
 end
@@ -303,12 +579,19 @@ function kmul!(C::AbstractMatrix{BigFloat}, A::AbstractMatrix{BigFloat}, B::Abst
     p, r = size(C, 1), size(C, 2)
     acc = BigFloat()
     buf = BigFloat()
+    alpha_is_one = isone(α)
+    beta_is_zero = iszero(β)
     @inbounds for j in 1:r
         Bj = view(B, :, j)
         for i in 1:p
             Ai = view(A, i, :)
             kdot!(acc, buf, Ai, Bj)
-            C[i, j] = β == 0 ? α * acc : α * acc + β * C[i, j]
+            alpha_is_one || MA.operate!(*, acc, α)
+            if !beta_is_zero
+                MA.operate_to!(buf, *, β, C[i, j])
+                MA.operate!(+, acc, buf)
+            end
+            C[i, j] = MA.mutable_copy(acc)
         end
     end
     return C
@@ -316,3 +599,223 @@ end
 
 kmul!(C::AbstractVecOrMat{BigFloat}, A::AbstractMatrix{BigFloat}, B::AbstractVecOrMat{BigFloat}) =
     kmul!(C, A, B, one(BigFloat), zero(BigFloat))
+
+@inline function _store_owned_bigfloat!(
+    destination::BigFloat,
+    accumulator::BigFloat,
+    multiplication_buffer::BigFloat,
+    α::BigFloat,
+    β::BigFloat,
+    alpha_is_one::Bool,
+    beta_is_zero::Bool,
+)
+    if !beta_is_zero
+        MA.operate_to!(multiplication_buffer, *, β, destination)
+    end
+    if alpha_is_one
+        MA.operate_to!(destination, copy, accumulator)
+    else
+        MA.operate_to!(destination, *, α, accumulator)
+    end
+    if !beta_is_zero
+        MA.operate!(+, destination, multiplication_buffer)
+    end
+    return nothing
+end
+
+function kmul_owned!(
+    C::AbstractVector{BigFloat},
+    A::AbstractMatrix{BigFloat},
+    B::AbstractVector{BigFloat},
+    α::BigFloat,
+    β::BigFloat,
+)
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    alpha_is_one = isone(α)
+    beta_is_zero = iszero(β)
+    @inbounds for row in axes(C, 1)
+        kdot!(
+            accumulator,
+            multiplication_buffer,
+            view(A, row, :),
+            B,
+        )
+        _store_owned_bigfloat!(
+            C[row],
+            accumulator,
+            multiplication_buffer,
+            α,
+            β,
+            alpha_is_one,
+            beta_is_zero,
+        )
+    end
+    return C
+end
+
+function kmul_owned!(
+    C::AbstractMatrix{BigFloat},
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    α::BigFloat,
+    β::BigFloat,
+)
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    alpha_is_one = isone(α)
+    beta_is_zero = iszero(β)
+    @inbounds for column in axes(C, 2)
+        B_column = view(B, :, column)
+        for row in axes(C, 1)
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(A, row, :),
+                B_column,
+            )
+            _store_owned_bigfloat!(
+                C[row, column],
+                accumulator,
+                multiplication_buffer,
+                α,
+                β,
+                alpha_is_one,
+                beta_is_zero,
+            )
+        end
+    end
+    return C
+end
+
+kmul_owned!(
+    C::AbstractVecOrMat{BigFloat},
+    A::AbstractMatrix{BigFloat},
+    B::AbstractVecOrMat{BigFloat},
+) = kmul_owned!(C, A, B, one(BigFloat), zero(BigFloat))
+
+# ---- ksyrk! : S = α*P'*P + β*S. The generic implementation allocates
+#     scratch for every pairwise dot and stores the same mutable BigFloat in
+#     both symmetric positions. This specialization reuses one reduction
+#     buffer and makes the two output entries independent. ----
+
+function ksyrk!(
+    S::AbstractMatrix{BigFloat},
+    panel::AbstractMatrix{BigFloat},
+    α::BigFloat,
+    β::BigFloat,
+)
+    columns = size(panel, 2)
+    size(S) == (columns, columns) ||
+        throw(DimensionMismatch("ksyrk!: S must be c×c for P r×c"))
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    alpha_is_one = isone(α)
+    beta_is_zero = iszero(β)
+
+    @inbounds for column in 1:columns
+        for row in column:columns
+            kdot_columns!(
+                accumulator,
+                multiplication_buffer,
+                panel,
+                row,
+                column,
+                size(panel, 1),
+            )
+            alpha_is_one || MA.operate!(*, accumulator, α)
+            if !beta_is_zero
+                MA.operate_to!(
+                    multiplication_buffer,
+                    *,
+                    β,
+                    S[row, column],
+                )
+                MA.operate!(+, accumulator, multiplication_buffer)
+            end
+            value = MA.mutable_copy(accumulator)
+            S[row, column] = value
+            if row != column
+                S[column, row] = MA.mutable_copy(value)
+            end
+        end
+    end
+    return S
+end
+
+ksyrk!(S::AbstractMatrix{BigFloat}, panel::AbstractMatrix{BigFloat}) =
+    ksyrk!(S, panel, one(BigFloat), zero(BigFloat))
+
+# ---- trial construction and infinity norms. These are called repeatedly by
+#     line search and residual checks, so O(length(A)) scalar allocations are
+#     visible even though each individual operation is small. ----
+
+function trial_combine!(
+    destination::AbstractArray{BigFloat},
+    X::AbstractArray{BigFloat},
+    step::BigFloat,
+    direction::AbstractArray{BigFloat},
+)
+    accumulator = BigFloat()
+    @inbounds for index in eachindex(destination, X, direction)
+        MA.operate_to!(accumulator, *, step, direction[index])
+        MA.operate!(+, accumulator, X[index])
+        destination[index] = MA.mutable_copy(accumulator)
+    end
+    return destination
+end
+
+@inline function _update_bigfloat_abs_maximum!(
+    maximum_value::BigFloat,
+    negative_maximum::BigFloat,
+    value::BigFloat,
+)
+    if signbit(value)
+        if value < negative_maximum
+            MA.operate_to!(negative_maximum, copy, value)
+            MA.operate_to!(maximum_value, -, value)
+        end
+    elseif value > maximum_value
+        MA.operate_to!(maximum_value, copy, value)
+        MA.operate_to!(negative_maximum, -, value)
+    end
+    return nothing
+end
+
+function knrmInf(array::AbstractArray{BigFloat})
+    maximum_value = BigFloat()
+    negative_maximum = BigFloat()
+    MA.operate!(zero, maximum_value)
+    MA.operate!(zero, negative_maximum)
+    @inbounds for value in array
+        if isnan(value)
+            return MA.mutable_copy(value)
+        end
+        _update_bigfloat_abs_maximum!(
+            maximum_value,
+            negative_maximum,
+            value,
+        )
+    end
+    return maximum_value
+end
+
+function knrmInf(blocks::AbstractVector{<:AbstractArray{BigFloat}})
+    maximum_value = BigFloat()
+    negative_maximum = BigFloat()
+    MA.operate!(zero, maximum_value)
+    MA.operate!(zero, negative_maximum)
+    @inbounds for block in blocks
+        for value in block
+            if isnan(value)
+                return MA.mutable_copy(value)
+            end
+            _update_bigfloat_abs_maximum!(
+                maximum_value,
+                negative_maximum,
+                value,
+            )
+        end
+    end
+    return maximum_value
+end

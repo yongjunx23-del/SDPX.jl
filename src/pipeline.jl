@@ -6,9 +6,143 @@
     diagnostics. Numeric Newton kernels remain in their specialized files.
 =====================================================================#
 
-struct EqualityPresolveMap
+"""
+    _owned_array_copy(T, source) -> Array{T}
+
+Convert an array while preserving independent scalar ownership. Ordinary
+`Array{BigFloat}(source)` only copies MPFR object references when `source`
+already contains `BigFloat`s; mutating a destination entry can then corrupt
+the caller's problem data or warm start.
+"""
+_owned_array_copy(::Type{T}, source::AbstractArray) where {T} =
+    Array{T}(source)
+
+function _owned_array_copy(
+    ::Type{BigFloat},
+    source::AbstractArray,
+)
+    destination = alloc_zeros(BigFloat, size(source)...)
+    if eltype(source) === BigFloat
+        copy_owned!(destination, source)
+    else
+        @inbounds for index in eachindex(destination, source)
+            converted = BigFloat(source[index])
+            MA.operate_to!(destination[index], copy, converted)
+        end
+    end
+    return destination
+end
+
+"""Return a callback-safe scalar value that cannot mutate solver state."""
+@inline _diagnostic_scalar_copy(value) = value
+@inline _diagnostic_scalar_copy(value::BigFloat) = MA.mutable_copy(value)
+
+struct EqualityPresolveMap{T}
     original_count::Int
     keep::Vector{Int}
+    multiplier_map::Matrix{T}
+end
+
+function EqualityPresolveMap(
+    original_count::Int,
+    keep::Vector{Int},
+)
+    multiplier_map = zeros(Float64, length(keep), original_count)
+    @inbounds for (row, column) in pairs(keep)
+        multiplier_map[row, column] = 1.0
+    end
+    return EqualityPresolveMap{Float64}(
+        original_count,
+        keep,
+        multiplier_map,
+    )
+end
+
+function _validate_solver_options(opts::SolverOptions{T}) where {T}
+    opts.parameter_policy in (:fixed, :auto) ||
+        throw(ArgumentError("parameter_policy must be :fixed or :auto"))
+    opts.parameter_strategy in (:fixed, :adaptive) ||
+        throw(ArgumentError("parameter_strategy must be :fixed or :adaptive"))
+    zero(T) < opts.β < one(T) ||
+        throw(ArgumentError("β must be strictly between zero and one"))
+    zero(T) < opts.γ < one(T) ||
+        throw(ArgumentError("γ must be strictly between zero and one"))
+    isfinite(opts.Ωp) && opts.Ωp > zero(T) ||
+        throw(ArgumentError("Ωp must be finite and positive"))
+    isfinite(opts.Ωd) && opts.Ωd > zero(T) ||
+        throw(ArgumentError("Ωd must be finite and positive"))
+    isfinite(opts.min_step) && opts.min_step >= zero(T) ||
+        throw(ArgumentError("min_step must be finite and nonnegative"))
+    isfinite(opts.max_omega) && opts.max_omega > zero(T) ||
+        throw(ArgumentError("max_omega must be finite and positive"))
+    isfinite(opts.omega_step) && opts.omega_step > one(T) ||
+        throw(ArgumentError("omega_step must be finite and greater than one"))
+    all(
+        tolerance -> isfinite(tolerance) && tolerance >= zero(T),
+        (opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual),
+    ) || throw(ArgumentError("solver tolerances must be finite and nonnegative"))
+    opts.iter_max >= 0 ||
+        throw(ArgumentError("iter_max must be nonnegative"))
+    opts.max_time >= 0 && !isnan(opts.max_time) ||
+        throw(ArgumentError("max_time must be nonnegative and not NaN"))
+    opts.threads >= 1 ||
+        throw(ArgumentError("threads must be at least one"))
+    opts.verbosity >= 0 ||
+        throw(ArgumentError("verbosity must be nonnegative"))
+    opts.precision_bits > 0 ||
+        throw(ArgumentError("precision_bits must be positive"))
+    isfinite(opts.presolve_tolerance) &&
+        zero(T) <= opts.presolve_tolerance < one(T) ||
+        throw(ArgumentError(
+            "presolve_tolerance must be finite and in [0, 1)",
+        ))
+    opts.termination in (:relative, :legacy) ||
+        throw(ArgumentError("termination must be :relative or :legacy"))
+    opts.algorithm in (:auto, :lp, :sdp) ||
+        throw(ArgumentError("algorithm must be :auto, :lp, or :sdp"))
+    opts.scaling in (:auto, :none, :equilibrate) ||
+        throw(ArgumentError(
+            "scaling must be :auto, :none, or :equilibrate",
+        ))
+    opts.step_rule in (:backtrack, :fraction_to_boundary, :auto) ||
+        throw(ArgumentError(
+            "step_rule must be :backtrack, :fraction_to_boundary, or :auto",
+        ))
+    opts.predictor in (:classic, :sdpb) ||
+        throw(ArgumentError("predictor must be :classic or :sdpb"))
+    opts.refine_policy in (:fixed, :adaptive, :auto) ||
+        throw(ArgumentError(
+            "refine_policy must be :fixed, :adaptive, or :auto",
+        ))
+    opts.refine_steps >= 0 && opts.refine_max_steps >= 0 ||
+        throw(ArgumentError("refinement step limits must be nonnegative"))
+    isfinite(opts.refine_tol) && opts.refine_tol >= zero(T) ||
+        throw(ArgumentError("refine_tol must be finite and nonnegative"))
+    opts.omega_scaling in (:scalar, :per_block, :auto) ||
+        throw(ArgumentError(
+            "omega_scaling must be :scalar, :per_block, or :auto",
+        ))
+    opts.extended_precision_blas in (:off, :auto, :on) ||
+        throw(ArgumentError(
+            "extended_precision_blas must be :off, :auto, or :on",
+        ))
+    isfinite(opts.extended_precision_memory_fraction) &&
+        0.0 <= opts.extended_precision_memory_fraction <= 1.0 ||
+        throw(ArgumentError(
+            "extended_precision_memory_fraction must be finite and between zero and one",
+        ))
+    opts.max_restarts >= 0 && opts.max_centering >= 0 &&
+        opts.stall_iterations >= 0 ||
+        throw(ArgumentError(
+            "restart, centering, and stall limits must be nonnegative",
+        ))
+    isfinite(opts.stall_tolerance) && opts.stall_tolerance >= 0 ||
+        throw(ArgumentError(
+            "stall_tolerance must be finite and nonnegative",
+        ))
+    opts.checkpoint_every >= 0 ||
+        throw(ArgumentError("checkpoint_every must be nonnegative"))
+    return nothing
 end
 
 _arithmetic_class(::Type{Float64}) = :float64
@@ -75,12 +209,72 @@ function classify_problem(prob::SDPProblem{T}) where {T}
     )
 end
 
-function _available_memory_bytes()
-    try
-        return Int(Sys.free_memory())
-    catch
-        return 0
+function _runtime_schur_backend(prob::SDPProblem)
+    if prob.cons isa SparseCons && prob.dims.n == 0
+        frequency = zeros(Int, prob.dims.m)
+        for variables in prob.cons.active, variable in variables
+            frequency[variable] += 1
+        end
+        if all(>(0), frequency) && any(==(1), frequency)
+            return :block_arrow
+        end
     end
+    return prob.structure.schur_density >= 0.15 ?
+           :dense_cholesky :
+           :dense_cholesky_fallback
+end
+
+"""
+    _uses_fused_arrow(prob)
+
+Return whether the runtime can bypass both the dense Schur matrix and packed
+extended-precision panels with the exact-arrow 2x2 compute-and-scatter kernel.
+This duplicates only the inexpensive structural predicate used by
+`ArrowWorkspace`; it does not allocate that workspace during planning.
+"""
+function _uses_fused_arrow(prob::SDPProblem{T}) where {T}
+    prob.dims.n == 0 || return false
+    prob.dims.L > 0 || return false
+    prob.cons isa SparseCons{T} || return false
+    cons = prob.cons::SparseCons{T}
+    all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
+        return false
+    frequency = zeros(Int, prob.dims.m)
+    for variables in cons.active, variable in variables
+        frequency[variable] += 1
+    end
+    return all(>(0), frequency) && any(==(1), frequency)
+end
+
+function _available_memory_bytes()
+    return ExtendedPrecisionBLAS._system_free_memory_bytes()
+end
+
+function _lp_extended_crossover(
+    ::Type{T},
+    classification::ProblemClassification,
+    opts::SolverOptions{T},
+    thread_count::Int,
+    memory_budget_bytes::Int,
+    available_memory_bytes::Int,
+) where {T}
+    features = ExtendedPrecisionBLAS.CrossoverFeatures(
+        rows=classification.cone_rows,
+        columns=classification.variables,
+        matrix_dimension=1,
+        average_nnz=Float64(classification.variables),
+        active_density=classification.coefficient_density,
+        expected_schur_density=classification.expected_schur_density,
+        thread_count=thread_count,
+        memory_budget_bytes=memory_budget_bytes,
+        sparse_input=false,
+    )
+    return ExtendedPrecisionBLAS.choose_crossover(
+        T,
+        features;
+        mode=opts.extended_precision_blas,
+        available_memory_bytes=available_memory_bytes,
+    )
 end
 
 function build_execution_plan(
@@ -129,16 +323,46 @@ function build_execution_plan(
     schedule = selected_threads == 1 ? :serial :
                classification.size === :small ? :static_columns :
                :blocked_dynamic
-    kkt_backend = algorithm === :lp_primal_dual ? :dense_symmetric_indefinite :
-                  prob.structure.schur_backend
+    kkt_backend = algorithm === :lp_primal_dual ?
+                  (
+                      classification.equalities == 0 ?
+                      :positive_definite_cholesky :
+                      :dense_lu
+                  ) :
+                  _runtime_schur_backend(prob)
+    available = _available_memory_bytes()
+    budget = available > 0 ?
+             floor(Int, available * opts.extended_precision_memory_fraction) : 0
     gram_kernel = if algorithm === :lp_primal_dual
-        T === Float64 && selected_threads > 1 &&
-        classification.cone_rows * classification.variables^2 >= 2_000_000 &&
-        LinearAlgebra.BLAS.get_num_threads() == 1 ?
-        :parallel_blas_panels :
-        T === Float64 ? :blas_syrk :
-        T === BigFloat ? :serial_mpfr_outer_product :
-        selected_threads > 1 ? :threaded_blocked_syrk : :blocked_syrk
+        if T === Float64
+            selected_threads > 1 &&
+            classification.cone_rows * classification.variables^2 >= 2_000_000 &&
+            LinearAlgebra.BLAS.get_num_threads() == 1 ?
+            :parallel_blas_panels : :blas_syrk
+        elseif opts.extended_precision_blas !== :off
+            decision = _lp_extended_crossover(
+                T,
+                classification,
+                opts,
+                selected_threads,
+                budget,
+                available,
+            )
+            if decision.enabled
+                selected_threads > 1 ?
+                :threaded_blocked_syrk : :blocked_syrk
+            elseif T === BigFloat
+                :serial_mpfr_weighted_outer_product
+            else
+                :serial_weighted_outer_product
+            end
+        elseif T === BigFloat
+            :serial_mpfr_weighted_outer_product
+        else
+            :serial_weighted_outer_product
+        end
+    elseif _uses_fused_arrow(prob)
+        :fused_arrow_2x2
     elseif T === Float64
         :existing_float64
     elseif opts.extended_precision_blas === :off
@@ -158,9 +382,6 @@ function build_execution_plan(
             profile=:fixed,
         )
     end
-    available = _available_memory_bytes()
-    budget = available > 0 ?
-             floor(Int, available * opts.extended_precision_memory_fraction) : 0
     return ExecutionPlan(
         classification,
         algorithm,
@@ -187,40 +408,188 @@ function _empty_presolve_report(prob::SDPProblem)
     return PresolveReport(n, n, 0, 0, 0, false, collect(1:n), 0.0)
 end
 
-function _equality_rank_indices(B::AbstractMatrix, tolerance::Real)
-    n = size(B, 2)
-    n == 0 && return Int[]
-    BF = Matrix{Float64}(B)
-    factor = qr(BF, ColumnNorm())
-    diagonal_count = min(size(BF)...)
-    diagonal = [abs(factor.R[i, i]) for i in 1:diagonal_count]
-    scale = maximum(diagonal; init=0.0)
-    threshold = max(
-        Float64(tolerance),
-        max(size(BF)...) * eps(Float64),
-    ) * max(scale, 1.0)
-    rank = count(>(threshold), diagonal)
-    return sort!(Vector{Int}(factor.p[1:rank]))
+function _equality_column_scales(B::AbstractMatrix{T}) where {T}
+    scales = Vector{T}(undef, size(B, 2))
+    @inbounds for column in axes(B, 2)
+        scales[column] = maximum(
+            abs,
+            view(B, :, column);
+            init=zero(T),
+        )
+    end
+    return scales
 end
 
-function _equality_consistent(prob::SDPProblem, keep::Vector{Int}, tolerance::Real)
-    n = prob.dims.n
-    length(keep) == n && return true
-    dropped = setdiff(collect(1:n), keep)
-    isempty(dropped) && return true
-    if isempty(keep)
-        return maximum(abs, prob.b[dropped]; init=zero(eltype(prob))) <= tolerance
+function _normalized_equality_columns(
+    B::AbstractMatrix{T},
+    columns::AbstractVector{Int},
+    scales::AbstractVector{T},
+) where {T}
+    normalized = Matrix{T}(undef, size(B, 1), length(columns))
+    @inbounds for (position, column) in pairs(columns)
+        scale = scales[column]
+        iszero(scale) &&
+            throw(ArgumentError("cannot normalize an exactly zero equality column"))
+        for row in axes(B, 1)
+            normalized[row, position] = B[row, column] / scale
+        end
     end
-    Bkeep = Matrix{Float64}(view(prob.B, :, keep))
-    coefficients = qr(Bkeep) \ Matrix{Float64}(view(prob.B, :, dropped))
-    predicted = transpose(coefficients) * Float64.(prob.b[keep])
-    residual = maximum(
-        abs,
-        predicted .- Float64.(prob.b[dropped]);
-        init=0.0,
+    return normalized
+end
+
+function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
+    n = size(B, 2)
+    n == 0 && return Int[]
+    # Equality presolve is part of the numerical algorithm, so its arithmetic
+    # must be at least as wide as the solve arithmetic. Converting an extended
+    # matrix to Float64 can silently erase a direction that is resolvable by
+    # Float64x4 or BigFloat and can overflow otherwise finite high-range data.
+    # Normalize every nonzero equality column independently. Equality
+    # constraints may be rescaled by any positive constant without changing
+    # the feasible set, so rank decisions must not depend on whether a caller
+    # wrote `x = 1` or `1e-30*x = 1e-30`.
+    scales = _equality_column_scales(B)
+    nonzero_columns = findall(!iszero, scales)
+    isempty(nonzero_columns) && return Int[]
+    normalized =
+        _normalized_equality_columns(B, nonzero_columns, scales)
+    factor = qr(normalized, ColumnNorm())
+    diagonal_count = min(size(normalized)...)
+    diagonal = [abs(factor.R[i, i]) for i in 1:diagonal_count]
+    scale = maximum(diagonal; init=zero(T))
+    threshold = max(
+        T(tolerance),
+        T(max(size(normalized)...)) * eps(T),
+    ) * scale
+    rank = count(>(threshold), diagonal)
+    selected = nonzero_columns[factor.p[1:rank]]
+    return sort!(Vector{Int}(selected))
+end
+
+function _equality_elimination_check(
+    prob::SDPProblem{T},
+    keep::Vector{Int},
+    tolerance::Real,
+) where {T}
+    n = prob.dims.n
+    length(keep) == n &&
+        return (elimination_valid=true, consistent=true)
+    dropped = setdiff(collect(1:n), keep)
+    isempty(dropped) &&
+        return (elimination_valid=true, consistent=true)
+
+    scales = _equality_column_scales(prob.B)
+    zero_columns = filter(column -> iszero(scales[column]), dropped)
+    # A structurally zero equality is consistent if and only if its right-hand
+    # side is exactly zero. An absolute tolerance here would turn
+    # `0 = 1e-30` into a false feasible statement.
+    all(column -> iszero(prob.b[column]), zero_columns) ||
+        return (elimination_valid=true, consistent=false)
+
+    dependent_columns =
+        filter(column -> !iszero(scales[column]), dropped)
+    isempty(dependent_columns) &&
+        return (elimination_valid=true, consistent=true)
+    isempty(keep) &&
+        return (elimination_valid=false, consistent=true)
+
+    Bkeep = _normalized_equality_columns(prob.B, keep, scales)
+    Bdropped = _normalized_equality_columns(
+        prob.B,
+        dependent_columns,
+        scales,
     )
-    scale = max(maximum(abs, Float64.(prob.b); init=0.0), 1.0)
-    return residual <= max(Float64(tolerance), 100eps(Float64)) * scale
+    coefficients = try
+        qr(Bkeep) \ Bdropped
+    catch
+        return (elimination_valid=false, consistent=true)
+    end
+    relative_tolerance = max(T(tolerance), T(100) * eps(T))
+
+    # Validate the proposed column relation before using it to make a
+    # feasibility decision. If the numerical relation is ambiguous, retain all
+    # equalities instead of deleting a potentially independent constraint.
+    relation = Bkeep * coefficients
+    relation_residual = maximum(
+        abs,
+        relation .- Bdropped;
+        init=zero(T),
+    )
+    relation_scale = max(
+        maximum(abs, relation; init=zero(T)),
+        maximum(abs, Bdropped; init=zero(T)),
+    )
+    if iszero(relation_scale)
+        iszero(relation_residual) ||
+            return (elimination_valid=false, consistent=true)
+    elseif relation_residual > relative_tolerance * relation_scale
+        return (elimination_valid=false, consistent=true)
+    end
+
+    bkeep = T[
+        prob.b[column] / scales[column]
+        for column in keep
+    ]
+    bdropped = T[
+        prob.b[column] / scales[column]
+        for column in dependent_columns
+    ]
+    predicted = transpose(coefficients) * bkeep
+    @inbounds for column in eachindex(dependent_columns)
+        residual = abs(predicted[column] - bdropped[column])
+        backward_scale = abs(bdropped[column])
+        for row in eachindex(keep)
+            backward_scale +=
+                abs(coefficients[row, column]) * abs(bkeep[row])
+        end
+        if iszero(backward_scale)
+            iszero(residual) ||
+                return (elimination_valid=true, consistent=false)
+        elseif residual > relative_tolerance * backward_scale
+            return (elimination_valid=true, consistent=false)
+        end
+    end
+    return (elimination_valid=true, consistent=true)
+end
+
+function _equality_presolve_map(
+    prob::SDPProblem{T},
+    keep::Vector{Int},
+) where {T}
+    n = prob.dims.n
+    multiplier_map = alloc_zeros(T, length(keep), n)
+    @inbounds for (row, column) in pairs(keep)
+        multiplier_map[row, column] = one(T)
+    end
+    dropped = setdiff(collect(1:n), keep)
+    isempty(dropped) &&
+        return EqualityPresolveMap{T}(n, keep, multiplier_map)
+
+    scales = _equality_column_scales(prob.B)
+    dependent_columns =
+        filter(column -> !iszero(scales[column]), dropped)
+    if !isempty(keep) && !isempty(dependent_columns)
+        Bkeep = _normalized_equality_columns(prob.B, keep, scales)
+        Bdropped = _normalized_equality_columns(
+            prob.B,
+            dependent_columns,
+            scales,
+        )
+        normalized_coefficients = qr(Bkeep) \ Bdropped
+        @inbounds for (dropped_position, dropped_column) in
+                      pairs(dependent_columns)
+            for kept_position in eachindex(keep)
+                multiplier_map[kept_position, dropped_column] =
+                    normalized_coefficients[
+                        kept_position,
+                        dropped_position,
+                    ] *
+                    scales[dropped_column] /
+                    scales[keep[kept_position]]
+            end
+        end
+    end
+    return EqualityPresolveMap{T}(n, keep, multiplier_map)
 end
 
 function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
@@ -228,10 +597,21 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
     n = prob.dims.n
     if !opts.presolve || n == 0
         report = _empty_presolve_report(prob)
-        return prob, EqualityPresolveMap(n, collect(1:n)), report
+        keep = collect(1:n)
+        return prob, _equality_presolve_map(prob, keep), report
     end
     keep = _equality_rank_indices(prob.B, opts.presolve_tolerance)
-    consistent = _equality_consistent(prob, keep, opts.presolve_tolerance)
+    check = _equality_elimination_check(
+        prob,
+        keep,
+        opts.presolve_tolerance,
+    )
+    if !check.elimination_valid
+        # A rank decision that cannot be verified in the original arithmetic
+        # is never used to change the feasible set.
+        keep = collect(1:n)
+    end
+    consistent = check.consistent
     zero_columns = count(
         column -> all(iszero, view(prob.B, :, column)),
         1:n,
@@ -246,9 +626,10 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         keep,
         time() - started,
     )
-    consistent || return prob, EqualityPresolveMap(n, keep), report
+    mapping = _equality_presolve_map(prob, keep)
+    consistent || return prob, mapping, report
     length(keep) == n &&
-        return prob, EqualityPresolveMap(n, keep), report
+        return prob, mapping, report
     dims = (
         L=prob.dims.L,
         m=prob.dims.m,
@@ -258,13 +639,13 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
     reduced = SDPProblem{T}(
         prob.c,
         prob.C,
-        Matrix{T}(view(prob.B, :, keep)),
-        Vector{T}(view(prob.b, keep)),
+        _owned_array_copy(T, view(prob.B, :, keep)),
+        _owned_array_copy(T, view(prob.b, keep)),
         prob.cons,
         dims,
         prob.structure,
     )
-    return reduced, EqualityPresolveMap(n, keep), report
+    return reduced, mapping, report
 end
 
 function _restore_equalities(
@@ -272,8 +653,8 @@ function _restore_equalities(
     mapping::EqualityPresolveMap,
 ) where {T}
     length(mapping.keep) == mapping.original_count && return result
-    y = zeros(T, mapping.original_count)
-    y[mapping.keep] .= result.y
+    y = alloc_zeros(T, mapping.original_count)
+    copy_owned!(view(y, mapping.keep), result.y)
     return SDPResult{T}(
         result.status,
         result.message,
@@ -292,6 +673,7 @@ function _restore_equalities(
         result.timings,
         result.parameter_history,
         result.diagnostics,
+        result.termination,
     )
 end
 
@@ -309,8 +691,7 @@ function estimate_sdp_workspace_bytes(
     thread_count::Int,
 ) where {T}
     L, m, n, k = prob.dims
-    scalar_bytes = isbitstype(T) ? sizeof(T) :
-                   T === BigFloat ? 32 : 16
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     schur_bins = T === BigFloat ? 1 : min(max(thread_count, 1), L)
     matrix_elements =
         2m * m +                 # S and factorization scratch
@@ -318,6 +699,8 @@ function estimate_sdp_workspace_bytes(
         m * n +
         2n * n
     vector_elements = 8m + 6n + L
+    # Current primal/dual state plus the preallocated best-iterate snapshot.
+    state_elements = 2m + 2n + 4sum(dimension -> dimension^2, k; init=0)
     block_elements = 0
     if prob.cons isa DenseCons{T}
         @inbounds for dimension in k
@@ -331,7 +714,12 @@ function estimate_sdp_workspace_bytes(
         end
     end
     return scalar_bytes *
-           (matrix_elements + vector_elements + block_elements)
+           (
+               matrix_elements +
+               vector_elements +
+               state_elements +
+               block_elements
+           )
 end
 
 function _attach_diagnostics(
@@ -343,6 +731,7 @@ function _attach_diagnostics(
     workspace_bytes::Int,
     diagnostics_enabled::Bool,
     termination::NamedTuple=(reason=:none,),
+    certificate::NamedTuple=(available=false,),
 ) where {T}
     diagnostics_enabled || return result
     core_time = result.timings === nothing ? NaN :
@@ -366,6 +755,7 @@ function _attach_diagnostics(
         threads=plan.threads,
         parameter_profile=plan.parameter_profile,
         initial_parameters=plan.parameters,
+        certificate=certificate,
     )
     diagnostics = SolveDiagnostics(
         plan.classification,
@@ -406,14 +796,14 @@ function _inconsistent_presolve_result(
     plan::ExecutionPlan,
     diagnostics_enabled::Bool,
 ) where {T}
-    X = [zeros(T, dimension, dimension) for dimension in prob.dims.k]
-    Y = [zeros(T, dimension, dimension) for dimension in prob.dims.k]
+    X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
+    Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     result = SDPResult{T}(
         InfeasibleCert,
         "Presolve detected inconsistent equality constraints.",
-        zeros(T, prob.dims.m),
+        alloc_zeros(T, prob.dims.m),
         X,
-        zeros(T, prob.dims.n),
+        alloc_zeros(T, prob.dims.n),
         Y,
         zero(T),
         zero(T),
@@ -431,6 +821,52 @@ function _inconsistent_presolve_result(
         report,
         report.elapsed,
         ["The equality system is inconsistent at the configured presolve tolerance."],
+        0,
+        diagnostics_enabled,
+    )
+end
+
+function _time_limit_pipeline_result(
+    prob::SDPProblem{T},
+    report::PresolveReport,
+    plan::ExecutionPlan,
+    elapsed::Float64,
+    warnings::Vector{String},
+    diagnostics_enabled::Bool,
+    max_time::Float64,
+) where {T}
+    X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
+    Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
+    result = SDPResult{T}(
+        TimeLimit,
+        "Time limit ($(max_time)s) exceeded during automatic pipeline setup.",
+        alloc_zeros(T, prob.dims.m),
+        X,
+        alloc_zeros(T, prob.dims.n),
+        Y,
+        zero(T),
+        zero(T),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        0,
+        0,
+        0,
+        (total=elapsed,),
+        NamedTuple[],
+        nothing,
+        (reason=:time_limit, stage=:pipeline_setup),
+    )
+    push!(
+        warnings,
+        "The wall-clock budget expired before numerical iterations began.",
+    )
+    return _attach_diagnostics(
+        result,
+        plan,
+        report,
+        elapsed,
+        warnings,
         0,
         diagnostics_enabled,
     )

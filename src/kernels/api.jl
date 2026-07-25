@@ -1,14 +1,12 @@
 #=====================================================================
-    Kernel API (§1.4). Every linear-algebra operation in the solver
-    goes through these eight functions. `kernels/generic.jl` gives a
-    correct, allocation-light implementation for any T using Base
-    LinearAlgebra; `kernels/bigfloat.jl` overrides the two scalar-
-    reduction primitives (kdot, kaxpby!) with MutableArithmetics-based
-    zero-allocation MPFR kernels, since every other kernel (ksyrk!,
-    ktrsm!, ktrmm!, kchol!) is itself expressed in terms of kdot/axpby
-    in the generic path and so inherits the speedup automatically.
-    Later phases (threaded tiling, CRT/BLAS syrk) swap implementations
-    behind this same seam without touching solver logic.
+    Kernel API (§1.4). Solver linear algebra routes through this seam.
+    `kernels/generic.jl` provides allocation-light Base LinearAlgebra
+    fallbacks for every arithmetic type. `kernels/bigfloat.jl` adds
+    buffered MPFR reductions, factorizations, triangular solves, norms,
+    and explicitly named owned-workspace variants. Extended-precision
+    blocked and threaded kernels can therefore change implementations
+    without duplicating solver logic or weakening the public alias-safe
+    operations.
 =====================================================================#
 
 """
@@ -29,6 +27,16 @@ function kdot end
 function kmul! end
 
 """
+    kmul_owned!(C, A, B, α, β) -> C
+
+Internal workspace variant of [`kmul!`](@ref). The destination entries must
+already be initialized, independently owned at the current working precision,
+and must not alias `A` or `B`. This stronger ownership contract lets mutable
+arithmetic write directly into preallocated high-precision scalar storage.
+"""
+function kmul_owned! end
+
+"""
     ksyrk!(S, P, α=one(eltype(S)), β=one(eltype(S))) -> S
 
 `S = α·Pᵀ·P + β·S` for `P` an `r×c` panel, `S` `c×c`. Used for the
@@ -44,6 +52,21 @@ function ksyrk! end
 `X ← L⁻¹X` for `L` square lower-triangular, in place.
 """
 function ktrsm! end
+
+"""
+    ktrsv_lower!(L, x) -> x
+
+Solve `L*x = b` in place, where `L` is a square lower-triangular factor and
+`x` initially contains `b`.
+"""
+function ktrsv_lower! end
+
+"""
+    ktrsv_transpose!(L, x) -> x
+
+Solve `transpose(L)*x = b` in place using the lower-triangular factor `L`.
+"""
+function ktrsv_transpose! end
 
 """
     ktrmm!(X, M) -> X
@@ -70,6 +93,34 @@ function kchol! end
 containers thereof.
 """
 function kaxpby! end
+
+"""
+    kaxpby_owned!(α, X, β, Y) -> Y
+
+Internal workspace variant of [`kaxpby!`](@ref). Every destination entry must
+already own independent scalar storage at the current working precision;
+arbitrary aliased user arrays must use `kaxpby!`.
+"""
+function kaxpby_owned! end
+
+"""
+    copy_owned!(destination, source) -> destination
+
+Copy values into preallocated workspace storage. For mutable scalar types,
+destination entries must be independently owned at the current working
+precision and must not alias source entries.
+"""
+function copy_owned! end
+
+"""
+    zero_owned!(A) -> A
+
+Reset preallocated workspace storage in place. For mutable scalar types,
+entries must already be initialized and independently owned at the current
+working precision. Use the alias-safe storage initializer for arbitrary user
+arrays.
+"""
+function zero_owned! end
 
 """
     knrmInf(A) -> scalar

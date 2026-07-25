@@ -57,11 +57,34 @@ function _safe_parameter_bounds(::Type{T}, default_beta::T=T(0.02),
     )
 end
 
+function _nonnegative_int_saturating(
+    value,
+    rounding::RoundingMode=RoundNearest,
+)
+    isnan(value) && return 0
+    !isfinite(value) && return value > 0 ? typemax(Int) : 0
+    value <= 0 && return 0
+    upper = try
+        oftype(value, typemax(Int))
+    catch
+        typemax(Int)
+    end
+    value >= upper && return typemax(Int)
+    return try
+        max(0, round(Int, value, rounding))
+    catch
+        typemax(Int)
+    end
+end
+
 function estimate_backtracking_count(step, gamma, step_rule::Symbol)
     step_rule === :backtrack || return 0
     (!isfinite(step) || step <= 0 || step >= 1 || gamma <= 0 || gamma >= 1) &&
         return 0
-    return max(0, round(Int, log(Float64(step)) / log(Float64(gamma))))
+    denominator = log(gamma)
+    iszero(denominator) && return typemax(Int)
+    ratio = log(step) / denominator
+    return _nonnegative_int_saturating(ratio)
 end
 
 function record_and_update!(
@@ -85,6 +108,7 @@ function record_and_update!(
     feasibility_ratio =
         isfinite(previous_feasibility) && previous_feasibility > zero(T) ?
         feasibility / previous_feasibility : one(T)
+    fallback_reason = :none
 
     if controller.strategy === :adaptive && !controller.fallback
         bounds = _safe_parameter_bounds(T, controller.default_beta, controller.default_gamma)
@@ -130,10 +154,43 @@ function record_and_update!(
             bounds.gamma_max,
         )
 
-        unstable = !isfinite(controller.beta) ||
-                   !isfinite(controller.gamma) ||
-                   !isfinite(reduction) ||
-                   (iteration > 3 && reduction > T(2))
+        nonfinite_parameters =
+            !isfinite(controller.beta) ||
+            !isfinite(controller.gamma) ||
+            !isfinite(reduction)
+        complementarity_growth =
+            iteration > 3 && reduction > T(2)
+        feasibility_growth =
+            iteration > 3 && feasibility_ratio > T(3)
+        repeated_tiny_step =
+            iteration > 3 &&
+            primal_step < T(1e-6) &&
+            dual_step < T(1e-6) &&
+            feasibility_ratio >= one(T)
+        # A one-sided cone boundary can stall while the other step remains
+        # large. Requiring *both* steps to be tiny misses that failure mode:
+        # beta drifts toward its upper bound, complementarity stops falling,
+        # and feasibility changes by less than a percent per iteration. Two
+        # consecutive observations are enough to restore the known-safe fixed
+        # profile before the global stagnation detector terminates the solve.
+        stalled_progress =
+            iteration > 5 &&
+            minimum_step < T(0.02) &&
+            feasibility_ratio > T(0.98) &&
+            reduction > T(0.98)
+        unstable =
+            nonfinite_parameters ||
+            complementarity_growth ||
+            feasibility_growth ||
+            repeated_tiny_step ||
+            stalled_progress
+        fallback_reason =
+            nonfinite_parameters ? :nonfinite_parameter :
+            complementarity_growth ? :complementarity_growth :
+            feasibility_growth ? :feasibility_growth :
+            repeated_tiny_step ? :repeated_tiny_step :
+            stalled_progress ? :stalled_progress :
+            :none
         controller.instability_count =
             unstable ? controller.instability_count + 1 :
             max(controller.instability_count - 1, 0)
@@ -141,8 +198,13 @@ function record_and_update!(
             controller.beta = controller.default_beta
             controller.gamma = controller.default_gamma
             controller.fallback = true
+            fallback_reason =
+                fallback_reason === :none ?
+                :repeated_instability : fallback_reason
         end
     end
+    controller.fallback && fallback_reason === :none &&
+        (fallback_reason = :previous_instability)
 
     push!(
         controller.history,
@@ -150,14 +212,21 @@ function record_and_update!(
             iteration=iteration,
             beta=selected_beta,
             gamma=selected_gamma,
+            beta_used=selected_beta,
+            gamma_used=selected_gamma,
             predictor_quality=predictor_quality,
+            complementarity_before=complementarity_before,
+            complementarity_after=complementarity_after,
             complementarity_reduction=reduction,
+            feasibility_ratio=feasibility_ratio,
             primal_step=primal_step,
             dual_step=dual_step,
             backtracking_count=backtracking_count,
             primal_residual=primal_residual,
             dual_residual=dual_residual,
+            instability_count=controller.instability_count,
             fallback=controller.fallback,
+            fallback_reason=fallback_reason,
         ),
     )
     controller.previous_complementarity = complementarity_after

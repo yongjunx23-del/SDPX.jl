@@ -26,8 +26,19 @@ function SDPX.load_checkpoint_jld2(path::AbstractString, ::Type{T}) where {T}
     return cp
 end
 
-function SDPX.save_spectrum_jld2(path::AbstractString, records)
-    JLD2.jldsave(path; spectrum=records)
+function SDPX.save_spectrum_jld2(
+    path::AbstractString,
+    spectrum::SDPX.SpectrumResult,
+)
+    # Store an explicit, versioned payload. SpectrumResult is an AbstractVector
+    # for user convenience, and JLD2 otherwise serializes it as only its array
+    # elements, silently dropping solve-wide metadata.
+    payload = (
+        format_version=1,
+        metadata=spectrum.metadata,
+        records=spectrum.records,
+    )
+    JLD2.jldsave(path; spectrum=payload)
     return path
 end
 

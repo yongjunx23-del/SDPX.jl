@@ -174,6 +174,9 @@ function main(arguments)
         predictor=:sdpb,
         refine_steps=0,
         max_restarts=10,
+        # This benchmark isolates fixed/adaptive iteration policy and Ω.
+        # Automatic structural profiles intentionally override those fields.
+        parameter_policy=:fixed,
     )
 
     rows = NamedTuple[]

@@ -56,16 +56,12 @@ substantial Apache-licensed code is incorporated.
 
 ```toml
 name = "SDPX"
-uuid = "e804a123-63fa-4b55-87b9-d771b4a5c602"
+uuid = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 ```
 
-The UUID came from the upstream package identity. Decide before publishing:
-
-- If SDPX is the official continuation/rename of the same package, keep the
-  UUID only after confirming registry and user migration expectations.
-- If SDPX is a distinct fork intended to coexist with SDPJSolver, generate a
-  new UUID. Julia identifies packages by UUID, so a renamed independent
-  package should not impersonate the upstream package identity.
+SDPX now has a distinct UUID and can coexist with SDPJSolver.jl. Do not replace
+it with the upstream UUID: Julia identifies packages by UUID, and an
+independent renamed package must not impersonate the upstream identity.
 
 Also check that `SDPX` is not confusingly close to an existing registered
 package or trademark. The acronym is compact but not self-explanatory; a more
@@ -122,19 +118,50 @@ Before the first public tag:
 
 ## Current repository-specific actions
 
-Before publication, address these concrete points:
+Current state:
 
-- The Git remote still points to the upstream `SDPJSolver.jl` repository.
-- The README and `THIRD_PARTY_NOTICES.md` now record the SDPJSolver.jl
-  derivation and exact upstream base commit.
-- `Project.toml` preserves the upstream author and UUID but uses the new
-  package name. Add the authors of the new modifications after obtaining
-  their preferred names and contact details.
+- The `origin` remote is the standalone SDPX repository and `upstream` retains
+  the SDPJSolver.jl source repository.
+- The README and `THIRD_PARTY_NOTICES.md` record the derivation and exact
+  upstream base commit.
+- `Project.toml` uses a new UUID and identifies the current maintainer.
 - The original MIT notice is present and must remain.
-- Benchmark and parameter documents are now in English, but the public docs
-  still need a complete user guide and cited algorithm description.
-- Decide whether serialized benchmark inputs belong in Git, Git LFS, a GitHub
-  release, or a Julia artifact.
+- `CONTRIBUTORS.md`, `CONTRIBUTING.md`, `CITATION.cff`, `SECURITY.md`, and
+  `CODE_OF_CONDUCT.md` are present.
+- TagBot uses `GITHUB_TOKEN` only; there is no stale `DOCUMENTER_KEY`
+  dependency.
+- Large serialized benchmark inputs and raw result directories are ignored.
+  Decide before release whether reproducible public instances belong in Git
+  LFS, a GitHub release, a Julia artifact, or an external archive with checksums.
+- Portable, human-readable summaries are tracked outside ignored `results/`
+  directories, including
+  `bench/extended_precision_blas/REPORT.md` and
+  `bench/csdr_psd_dual/RESULTS.md`.
+
+Still required before a public tag:
+
+1. Re-run the complete test matrix from a clean depot on every advertised Julia
+   version and operating system.
+2. Confirm that every committed benchmark summary links to its driver and
+   records hardware, precision, tolerance, warm-up, repetitions, and thread
+   configuration.
+3. Verify that every README and documentation benchmark link resolves to a
+   tracked portable summary, not an ignored or machine-local generated file.
+4. Scan tracked files and Git history for credentials, usernames, private
+   cluster paths, large binaries, and generated outputs.
+5. Decide which internal/experimental names will be included in the 0.1 API
+   stability promise.
+6. Add a Documenter.jl site, doc build CI, and doctests, or explicitly defer
+   public registry submission until those exist.
+7. Run Aqua.jl, JET.jl where practical, and the applicable MOI conformance
+   tests; record justified exceptions.
+8. Configure branch protection, required CI, issue templates, and private
+   vulnerability reporting in the GitHub repository settings.
+9. Verify the cluster checkout is a clean deployment of the release commit,
+   not an untracked working copy; follow
+   [the cluster workflow](cluster-workflow.md).
+10. Register and tag only after the release commit, repository URL, compat
+   bounds, and documentation are final.
 
 ## References
 

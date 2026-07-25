@@ -46,6 +46,7 @@ mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     objective_constant::T
     constraint_info::Dict{Any,AbstractMOIConstraintInfo}
     solve_time::Float64
+    requested_threads::Union{Nothing,Int}
 
     function Optimizer{T}(; kwargs...) where {T<:AbstractFloat}
         optimizer = new{T}(
@@ -57,6 +58,7 @@ mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
             zero(T),
             Dict{Any,AbstractMOIConstraintInfo}(),
             0.0,
+            nothing,
         )
         for (name, value) in kwargs
             _set_raw_option!(optimizer, String(name), value)
@@ -115,6 +117,11 @@ function _set_raw_option!(optimizer::Optimizer, name::String, value)
         return nothing
     end
     symbol = _option_symbol(optimizer.options, name)
+    if symbol === :threads
+        value isa Integer && value > 0 ||
+            throw(ArgumentError("threads must be a positive integer"))
+        optimizer.requested_threads = Int(value)
+    end
     optimizer.options = _replace_option(optimizer.options, symbol, value)
     return nothing
 end
@@ -245,6 +252,25 @@ function _triangle_coordinates(side::Int)
     return coordinates
 end
 
+function _canonical_empty_coefficient!(
+    cache::Dict{Int,SparseMatrixCSC{T,Int}},
+    side::Int,
+) where {T}
+    return get!(cache, side) do
+        spzeros(T, side, side)
+    end
+end
+
+function _empty_coefficient_vector(
+    cache::Dict{Int,SparseMatrixCSC{T,Int}},
+    side::Int,
+    variables::Int,
+) where {T}
+    # Coefficient matrices are read-only after copy-in. Sharing one canonical
+    # empty CSC object avoids three heap arrays for every inactive variable.
+    return fill(_canonical_empty_coefficient!(cache, side), variables)
+end
+
 function _new_constraint_index!(
     counts::Dict{Any,Int},
     ::Type{F},
@@ -259,6 +285,7 @@ end
 function _append_psd_constraint!(
     A::Vector{Vector{SparseMatrixCSC{T,Int}}},
     C::Vector{Matrix{T}},
+    empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
     optimizer::Optimizer{T},
     source,
     index_map,
@@ -329,11 +356,15 @@ function _append_psd_constraint!(
         end
     end
 
-    block_A = [spzeros(T, side, side) for _ in 1:optimizer.num_variables]
+    block_A = _empty_coefficient_vector(
+        empty_cache,
+        side,
+        optimizer.num_variables,
+    )
     for (variable, (rows, columns, values)) in builders
         matrix = sparse(rows, columns, values, side, side)
         dropzeros!(matrix)
-        block_A[variable] = matrix
+        nnz(matrix) > 0 && (block_A[variable] = matrix)
     end
     push!(A, block_A)
     push!(C, block_C)
@@ -379,6 +410,7 @@ end
 function _append_scalar_inequality!(
     A::Vector{Vector{SparseMatrixCSC{T,Int}}},
     C::Vector{Matrix{T}},
+    empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
     optimizer::Optimizer{T},
     source,
     index_map,
@@ -387,12 +419,14 @@ function _append_scalar_inequality!(
 ) where {T,F,S<:MOIScalarInequalitySet{T}}
     set = MOI.get(source, MOI.ConstraintSet(), source_index)
     function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
-    coefficients = zeros(T, optimizer.num_variables)
+    coefficients = Dict{Int,T}()
     constant = zero(T)
     if function_value isa MOI.ScalarAffineFunction{T}
         constant = function_value.constant
         for term in function_value.terms
-            coefficients[index_map[term.variable].value] += term.coefficient
+            variable = index_map[term.variable].value
+            coefficients[variable] =
+                get(coefficients, variable, zero(T)) + term.coefficient
         end
     else
         coefficients[index_map[function_value].value] = one(T)
@@ -404,13 +438,18 @@ function _append_scalar_inequality!(
     else
         bound = set.upper
         direction = -one(T)
-        coefficients .*= -one(T)
         block_C = reshape(T[constant - bound], 1, 1)
     end
-    block_A = [
-        sparse(reshape(T[coefficients[variable]], 1, 1))
-        for variable in 1:optimizer.num_variables
-    ]
+    block_A = _empty_coefficient_vector(
+        empty_cache,
+        1,
+        optimizer.num_variables,
+    )
+    for (variable, coefficient) in coefficients
+        value = direction * coefficient
+        iszero(value) && continue
+        block_A[variable] = sparse([1], [1], T[value], 1, 1)
+    end
     push!(A, block_A)
     push!(C, block_C)
     destination_index = _new_constraint_index!(counts, F, S)
@@ -427,6 +466,7 @@ end
 function _append_soc_constraint!(
     A::Vector{Vector{SparseMatrixCSC{T,Int}}},
     C::Vector{Matrix{T}},
+    empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
     optimizer::Optimizer{T},
     source,
     index_map,
@@ -447,16 +487,16 @@ function _append_soc_constraint!(
         block_constant[1, index] = constants[index]
         block_constant[index, 1] = constants[index]
     end
-    coefficient_blocks = [
-        zeros(T, dimension, dimension)
-        for _ in 1:optimizer.num_variables
-    ]
+    coefficient_blocks = Dict{Int,Matrix{T}}()
+    coefficient_block(variable) = get!(coefficient_blocks, variable) do
+        alloc_zeros(T, dimension, dimension)
+    end
     if function_value isa MOI.VectorAffineFunction{T}
         for term in function_value.terms
             output = term.output_index
             variable = index_map[term.scalar_term.variable].value
             coefficient = term.scalar_term.coefficient
-            matrix = coefficient_blocks[variable]
+            matrix = coefficient_block(variable)
             if output == 1
                 @inbounds for index in 1:dimension
                     matrix[index, index] += coefficient
@@ -469,7 +509,7 @@ function _append_soc_constraint!(
     else
         for (output, variable_index) in pairs(function_value.variables)
             variable = index_map[variable_index].value
-            matrix = coefficient_blocks[variable]
+            matrix = coefficient_block(variable)
             if output == 1
                 @inbounds for index in 1:dimension
                     matrix[index, index] += one(T)
@@ -480,7 +520,17 @@ function _append_soc_constraint!(
             end
         end
     end
-    push!(A, sparse.(coefficient_blocks))
+    block_A = _empty_coefficient_vector(
+        empty_cache,
+        dimension,
+        optimizer.num_variables,
+    )
+    for (variable, coefficient_block) in coefficient_blocks
+        matrix = sparse(coefficient_block)
+        dropzeros!(matrix)
+        nnz(matrix) > 0 && (block_A[variable] = matrix)
+    end
+    push!(A, block_A)
     # SDPX stores sum(A_i*x_i) - C, whereas the lifted matrix above is
     # exactly the affine SOC function.
     push!(C, -block_constant)
@@ -562,12 +612,20 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
     equality_rhs = T[]
     equality_constants = T[]
     counts = Dict{Any,Int}()
+    empty_cache = Dict{Int,SparseMatrixCSC{T,Int}}()
 
     for (F, S) in MOI.get(source, MOI.ListOfConstraintTypesPresent())
         for source_index in MOI.get(source, MOI.ListOfConstraintIndices{F,S}())
             if S <: MOIPSDSet
                 _append_psd_constraint!(
-                    A, C, optimizer, source, index_map, counts, source_index,
+                    A,
+                    C,
+                    empty_cache,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
                 )
             elseif S <: MOI.EqualTo{T}
                 _append_equality_constraint!(
@@ -584,6 +642,7 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
                 _append_scalar_inequality!(
                     A,
                     C,
+                    empty_cache,
                     optimizer,
                     source,
                     index_map,
@@ -594,6 +653,7 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
                 _append_soc_constraint!(
                     A,
                     C,
+                    empty_cache,
                     optimizer,
                     source,
                     index_map,
@@ -605,7 +665,26 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
             end
         end
     end
-    isempty(A) && throw(ArgumentError("SDPX requires at least one PSD constraint"))
+    if isempty(A)
+        # The core representation intentionally keeps L >= 1. A pure-equality
+        # or unconstrained LP therefore receives one internal, always-satisfied
+        # scalar cone row:
+        #
+        #     0*x - (-1) >= 0.
+        #
+        # LP presolve removes this row and reaches its equality-only path. No
+        # MOI constraint index or constraint_info entry is created, so the
+        # implementation detail is invisible through the public model.
+        push!(
+            A,
+            _empty_coefficient_vector(
+                empty_cache,
+                1,
+                optimizer.num_variables,
+            ),
+        )
+        push!(C, reshape(T[-one(T)], 1, 1))
+    end
 
     B = zeros(T, optimizer.num_variables, length(equality_columns))
     for column in eachindex(equality_columns)
@@ -651,8 +730,24 @@ MOI.set(optimizer::Optimizer, ::MOI.ObjectiveSense, sense) =
 MOI.get(optimizer::Optimizer, ::MOI.SolveTimeSec) = optimizer.solve_time
 MOI.get(optimizer::Optimizer, ::MOI.BarrierIterations) =
     optimizer.result === nothing ? 0 : optimizer.result.iterations
-MOI.get(optimizer::Optimizer, ::MOI.ResultCount) =
-    optimizer.result === nothing ? 0 : 1
+
+function _moi_has_iterate(result::SDPResult)
+    return result.status in (
+        Optimal,
+        FeasibleCert,
+        IterLimit,
+        TimeLimit,
+        Stalled,
+        MaxRestartsExceeded,
+        UserStopped,
+    )
+end
+
+function MOI.get(optimizer::Optimizer, ::MOI.ResultCount)
+    optimizer.result === nothing && return 0
+    return _moi_has_iterate(optimizer.result) ? 1 : 0
+end
+
 MOI.get(optimizer::Optimizer, ::MOI.RawStatusString) =
     optimizer.result === nothing ? "optimize! not called" : optimizer.result.message
 
@@ -661,6 +756,9 @@ function MOI.get(optimizer::Optimizer, ::MOI.TerminationStatus)
     optimizer.result === nothing && return MOI.OPTIMIZE_NOT_CALLED
     status = optimizer.result.status
     status == Optimal && return MOI.OPTIMAL
+    # In FEASIBILITY mode every feasible point is globally optimal for the
+    # zero objective represented by MOI.FEASIBILITY_SENSE.
+    status == FeasibleCert && return MOI.OPTIMAL
     status == InfeasibleCert && return MOI.INFEASIBLE
     status == IterLimit && return MOI.ITERATION_LIMIT
     status == TimeLimit && return MOI.TIME_LIMIT
@@ -673,17 +771,19 @@ end
 MOI.supports(::Optimizer, ::MOI.PrimalStatus) = true
 function MOI.get(optimizer::Optimizer, attribute::MOI.PrimalStatus)
     optimizer.result === nothing && return MOI.NO_SOLUTION
-    attribute.result_index == 1 || return MOI.NO_SOLUTION
-    return optimizer.result.status == Optimal ?
-           MOI.FEASIBLE_POINT : MOI.OTHER_RESULT_STATUS
+    1 <= attribute.result_index <= MOI.get(optimizer, MOI.ResultCount()) ||
+        return MOI.NO_SOLUTION
+    return optimizer.result.status in (Optimal, FeasibleCert) ?
+           MOI.FEASIBLE_POINT : MOI.UNKNOWN_RESULT_STATUS
 end
 
 MOI.supports(::Optimizer, ::MOI.DualStatus) = true
 function MOI.get(optimizer::Optimizer, attribute::MOI.DualStatus)
     optimizer.result === nothing && return MOI.NO_SOLUTION
-    attribute.result_index == 1 || return MOI.NO_SOLUTION
+    1 <= attribute.result_index <= MOI.get(optimizer, MOI.ResultCount()) ||
+        return MOI.NO_SOLUTION
     return optimizer.result.status == Optimal ?
-           MOI.FEASIBLE_POINT : MOI.OTHER_RESULT_STATUS
+           MOI.FEASIBLE_POINT : MOI.UNKNOWN_RESULT_STATUS
 end
 
 function _check_result(optimizer::Optimizer, attribute)
@@ -806,8 +906,39 @@ function MOI.set(optimizer::Optimizer, ::MOI.TimeLimitSec, ::Nothing)
     return nothing
 end
 
+MOI.supports(::Optimizer, ::MOI.NumberOfThreads) = true
+MOI.get(optimizer::Optimizer, ::MOI.NumberOfThreads) =
+    optimizer.requested_threads
+function MOI.set(
+    optimizer::Optimizer,
+    ::MOI.NumberOfThreads,
+    value::Int,
+)
+    value > 0 || throw(ArgumentError("number of threads must be positive"))
+    optimizer.requested_threads = value
+    optimizer.options = _replace_option(optimizer.options, :threads, value)
+    return nothing
+end
+function MOI.set(optimizer::Optimizer, ::MOI.NumberOfThreads, ::Nothing)
+    optimizer.requested_threads = nothing
+    optimizer.options = _replace_option(
+        optimizer.options,
+        :threads,
+        Base.Threads.nthreads(),
+    )
+    return nothing
+end
+
 MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
 function MOI.get(optimizer::Optimizer, attribute::MOI.RawOptimizerAttribute)
+    if attribute.name == "tolerance"
+        gap = optimizer.options.ϵ_gap
+        primal = optimizer.options.ϵ_primal
+        dual = optimizer.options.ϵ_dual
+        return gap == primal == dual ?
+               gap :
+               (gap=gap, primal=primal, dual=dual)
+    end
     symbol = _option_symbol(optimizer.options, attribute.name)
     return getfield(optimizer.options, symbol)
 end
