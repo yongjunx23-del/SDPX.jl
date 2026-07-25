@@ -1075,3 +1075,81 @@ end
     @test metadata.result_arithmetic == "Float64"
     @test metadata.requested_precision === :native
 end
+
+@testset "chordal structure detection (§8.3)" begin
+    # Chordal decomposition replaces one k x k PSD constraint with one per
+    # maximal clique. Detection has to answer three things: is the aggregate
+    # sparsity pattern chordal, what are the cliques, and would splitting
+    # actually be cheaper.
+    function banded_problem(k, m; bandwidth=1)
+        coefficients = [Vector{SparseMatrixCSC{Float64,Int}}(undef, m)]
+        for i in 1:m
+            rows, columns, values = Int[], Int[], Float64[]
+            for r in 1:k, c in max(1, r - bandwidth):min(k, r + bandwidth)
+                push!(rows, r); push!(columns, c)
+                push!(values, r == c ? 2.0 : 0.3)
+            end
+            coefficients[1][i] = sparse(rows, columns, values, k, k)
+        end
+        return SDPX.ingest(ones(m), coefficients, [Matrix{Float64}(1.0I, k, k)],
+            zeros(m, 0), Float64[]; sparse=true, verbosity=0)
+    end
+
+    function dense_problem(k, m)
+        rng = StableRNG(51)
+        A = [zeros(m, k, k)]
+        for i in 1:m
+            M = randn(rng, k, k)
+            A[1][i, :, :] = M + M'
+        end
+        return SDPX.ingest(ones(m), A, [Matrix{Float64}(1.0I, k, k)],
+            zeros(m, 0), Float64[]; verbosity=0)
+    end
+
+    @testset "banded patterns decompose into small cliques" begin
+        analysis = SDPX.analyze_chordal_structure(banded_problem(40, 3; bandwidth=1), 1)
+        @test analysis.dimension == 40
+        @test analysis.chordal
+        @test analysis.largest_clique == 2          # tridiagonal: cliques are edges
+        @test length(analysis.cliques) == 39
+        @test analysis.predicted_cost_ratio < 0.01
+        @test analysis.beneficial
+
+        wider = SDPX.analyze_chordal_structure(banded_problem(40, 3; bandwidth=3), 1)
+        @test wider.chordal
+        @test wider.largest_clique == 4
+        @test wider.beneficial
+        # A wider band means larger cliques and therefore less saving.
+        @test wider.predicted_cost_ratio > analysis.predicted_cost_ratio
+    end
+
+    @testset "a dense block is chordal but not worth decomposing" begin
+        # The case the `beneficial` flag exists for: a complete graph is
+        # trivially chordal, so chordality alone must not trigger a
+        # decomposition that splits one k^3 factorization into one k^3 clique.
+        analysis = SDPX.analyze_chordal_structure(dense_problem(20, 3), 1)
+        @test analysis.chordal
+        @test length(analysis.cliques) == 1
+        @test analysis.largest_clique == 20
+        @test analysis.predicted_cost_ratio ≈ 1.0
+        @test !analysis.beneficial
+    end
+
+    @testset "cliques cover the block and respect the sparsity" begin
+        prob = banded_problem(20, 2; bandwidth=2)
+        analysis = SDPX.analyze_chordal_structure(prob, 1)
+        covered = reduce(union, analysis.cliques; init=Int[])
+        @test sort(covered) == collect(1:20)        # every row appears
+        neighbours = SDPX.aggregate_sparsity(prob, 1)
+        # Every clique must be a clique in the aggregate graph, or the
+        # decomposition it implies would be invalid.
+        for clique in analysis.cliques, u in clique, v in clique
+            u == v && continue
+            @test v in neighbours[u]
+        end
+    end
+
+    @testset "summary covers every block" begin
+        @test length(SDPX.chordal_summary(banded_problem(12, 2))) == 1
+    end
+end
