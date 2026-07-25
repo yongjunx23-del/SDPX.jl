@@ -891,7 +891,9 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
         kl = k[l]
         for _ in 1:max(ruiz_iters, 0)
             rn = zeros(T, kl)
-            @inbounds for r in 1:kl, c in 1:kl
+            # Column outermost: `C2[l]` is column-major, and `max` is exact, so
+            # the traversal order changes speed but not the result.
+            @inbounds for c in 1:kl, r in 1:kl
                 rn[r] = max(rn[r], abs(C2[l][r, c]))
             end
             @inbounds for i in cons.active[l]
@@ -952,7 +954,7 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
     (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
     cc ./= objective_scale
     Bc = copy(prob.B)
-    @inbounds for i in 1:m, j in 1:n
+    @inbounds for j in 1:n, i in 1:m
         Bc[i, j] /= s[i]
     end
     @inbounds for l in 1:L, i in 1:m

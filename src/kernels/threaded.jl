@@ -675,7 +675,11 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
                 end
             end
         end
-        @inbounds for partial in arrow.Sredpartial, a in axes(arrow.Sgg, 1), b in axes(arrow.Sgg, 2)
+        # Column index outermost of the two: both arrays are column-major, so
+        # the reverse order strides by the leading dimension on every access.
+        # `partial` stays the outer loop, so each element accumulates in an
+        # unchanged order and the result is bit-identical.
+        @inbounds for partial in arrow.Sredpartial, b in axes(arrow.Sgg, 2), a in axes(arrow.Sgg, 1)
             arrow.Sgg[a, b] += partial[a, b]
         end
         return arrow.Sgg
