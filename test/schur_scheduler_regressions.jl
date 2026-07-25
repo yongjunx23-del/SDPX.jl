@@ -1,6 +1,7 @@
 using LinearAlgebra
 using MultiFloats: Float64x4
 using SDPX
+using SparseArrays
 using Test
 
 @testset "Schur scheduler regressions" begin
@@ -294,5 +295,55 @@ using Test
         materialized = similar(parallel.S)
         SDPX.materialize_schur!(materialized, parallel)
         @test materialized == reference
+    end
+
+    @testset "BLAS width is widened only for the declined dense path" begin
+        # Widening is worth it only when the declined fallback is one large
+        # `syrk!`. With sparse constraints the fallback is many small per-block
+        # operations instead, and BLAS threads cost more than they return:
+        # on Task_Low08 (m = 6119, L = 32) widening took Schur assembly from
+        # 8.26 s to 15.23 s. The gate must therefore look at the constraint
+        # storage, not only at whether threading was declined.
+        blocks, side, m = 3, 5, 30
+        dense_coefficients = [zeros(m, side, side) for _ in 1:blocks]
+        sparse_coefficients =
+            [Vector{SparseMatrixCSC{Float64,Int}}(undef, m) for _ in 1:blocks]
+        for l in 1:blocks, i in 1:m
+            entry = float(i + l)
+            dense_coefficients[l][i, 1, 1] = entry
+            dense_coefficients[l][i, side, side] = entry
+            sparse_coefficients[l][i] =
+                sparse([1, side], [1, side], [entry, entry], side, side)
+        end
+        constants = [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks]
+
+        dense = SDPX.ingest(ones(m), dense_coefficients, constants,
+            zeros(m, 0), Float64[]; sparse=false, verbosity=0)
+        sparse_problem = SDPX.ingest(ones(m), sparse_coefficients, constants,
+            zeros(m, 0), Float64[]; sparse=true, verbosity=0)
+        @test dense.cons isa SDPX.DenseCons{Float64}
+        @test sparse_problem.cons isa SDPX.SparseCons{Float64}
+
+        # `thread_count = 1` forces the decline deterministically, without
+        # depending on how much memory happens to be free.
+        dense_ws = SDPX.Workspace(dense; thread_count=1)
+        sparse_ws = SDPX.Workspace(sparse_problem; thread_count=1)
+        @test !SDPX.schur_threading_engaged(dense_ws, dense, dense.cons)
+        @test !SDPX.schur_threading_engaged(
+            sparse_ws,
+            sparse_problem,
+            sparse_problem.cons,
+        )
+
+        # Declined + dense: take the full width. Declined + sparse: stay
+        # serialized. Engaged: stay serialized regardless of storage.
+        @test SDPX.schur_blas_threads(dense_ws, dense, dense.cons, 1, 8) == 8
+        @test SDPX.schur_blas_threads(
+            sparse_ws,
+            sparse_problem,
+            sparse_problem.cons,
+            1,
+            8,
+        ) == 1
     end
 end

@@ -111,6 +111,43 @@ function schur_threading_engaged(ws::Workspace{T}, prob::SDPProblem{T},
     return _dense_schur_threading_profitable(T, prob.dims.m, prob.dims.k)
 end
 
+"""
+    schur_blas_threads(ws, prob, cons, serialized, ambient) -> Int
+
+BLAS width for the Schur assembly phase.
+
+`serialized` is the width the caller uses for the block-parallel phases (one,
+whenever Julia threads are driving them) and `ambient` is the full width.
+
+Three cases, each measured:
+
+* **Threading engaged.** Julia threads already own the parallelism, so BLAS
+  must stay serialized. Widening it oversubscribes: `m = 2500`, eight blocks,
+  four bins ran 0.0418 / 0.0480 / 0.0537 s at 1 / 2 / 4 BLAS threads.
+
+* **Declined, dense constraints.** The fallback is a single large `syrk!` over
+  the full panel. Serializing BLAS here leaves the phase with no parallelism
+  from either source, which is the worst of both. That syrk threads well on its
+  own -- 0.1480 / 0.0779 / 0.0412 s at 1 / 2 / 4 -- so it gets the full width.
+  Measured on single-block dense problems, where the decline is structural
+  rather than memory-dependent: 2.09x / 2.28x / 2.08x at `m = 1500 / 2500 /
+  3500` on four BLAS threads, bit-identical output.
+
+* **Declined, sparse constraints.** The fallback is many small per-block
+  operations rather than one big one, and BLAS threads cost more in launch and
+  synchronization than the small calls return. Measured on Task_Low08
+  (`m = 6119`, `L = 32`, one bin at every thread count), widening the phase to
+  eight BLAS threads took Schur assembly from 8.26 s to 15.23 s and the whole
+  solve from 16.30 s to 23.46 s. So this case stays serialized too.
+"""
+function schur_blas_threads(ws::Workspace{T}, prob::SDPProblem{T},
+                            cons::AbstractCons{T}, serialized::Int,
+                            ambient::Int) where {T}
+    schur_threading_engaged(ws, prob, cons) && return serialized
+    cons isa DenseCons{T} || return serialized
+    return ambient
+end
+
 function use_threaded_block_loops(ws::Workspace{T}, prob::SDPProblem{T}) where {T}
     return ws.thread_count > 1 &&
            prob.dims.L > 1 &&
