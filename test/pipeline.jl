@@ -1153,3 +1153,41 @@ end
         @test length(SDPX.chordal_summary(banded_problem(12, 2))) == 1
     end
 end
+
+@testset "Schur accumulator capping is visible (§18.4, §19.3)" begin
+    # Per-worker Schur accumulators are full m x m matrices, so their total
+    # scales as threads * m^2 and a memory cap silently reduces the bin count.
+    # On Task_Low08 (m = 6119) eight replicas would cost 2.4 GB, so the cap
+    # collapses assembly to a SINGLE bin at every thread count — which is why
+    # that problem showed no Schur speedup from 1 to 8 threads on a 10-core
+    # machine. §18.4 requires such a selection change be reported, not inferred
+    # from a disappointing measurement.
+    small = SDPX.schur_bin_report(Float64, 200, 32, 8)
+    @test small.requested_bins == 8
+    @test small.selected_bins == 8
+    @test !small.capped
+    @test small.total_bytes == small.would_have_been_bytes
+
+    # A large m must cap, and must report both the actual and the avoided cost.
+    large = SDPX.schur_bin_report(Float64, 6119, 32, 8)
+    @test large.requested_bins == 8
+    @test large.selected_bins < 8
+    @test large.capped
+    @test large.total_bytes < large.would_have_been_bytes
+    @test large.bytes_per_bin == 6119^2 * 8
+    @test large.total_bytes == large.selected_bins * large.bytes_per_bin
+
+    # Bins never exceed the block count: more accumulators than blocks would be
+    # pure waste.
+    @test SDPX.schur_bin_report(Float64, 100, 3, 8).requested_bins == 3
+
+    # Single-threaded never reports capping — there is nothing to reduce.
+    @test !SDPX.schur_bin_report(Float64, 6119, 32, 1).capped
+
+    # Wider arithmetic makes each accumulator larger, so it caps at least as
+    # aggressively as Float64 at the same size.
+    wide = SDPX.schur_bin_report(BigFloat, 2000, 32, 8)
+    narrow = SDPX.schur_bin_report(Float64, 2000, 32, 8)
+    @test wide.bytes_per_bin >= narrow.bytes_per_bin
+    @test wide.selected_bins <= narrow.selected_bins
+end
