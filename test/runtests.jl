@@ -28,5 +28,6 @@ using Test
     include("extensions_regressions.jl")
     include("lp_sparse.jl")
     include("examples.jl")
+    include("nullspace_reduction.jl")
     include("gates.jl")
 end

@@ -189,3 +189,169 @@ function should_use_nullspace(; variables::Integer, equalities::Integer,
         return false
     return nullspace_memory_bytes(variables, equalities, arithmetic) <= memory_budget_bytes
 end
+
+#=====================================================================
+    Reduction to the null-space coordinates (plan §12.2, §12.6)
+=====================================================================#
+
+"""
+    NullSpaceReduction{T}
+
+A problem rewritten in null-space coordinates together with everything needed
+to map a solution back.
+
+`offset` is the constant `cᵀx_p` dropped from the reduced objective. It must be
+added back, or the reported objective is wrong by a value that looks plausible
+and is not.
+"""
+struct NullSpaceReduction{T}
+    problem::SDPProblem{T}
+    basis::NullSpaceBasis{T}
+    offset::T
+end
+
+"""
+    nullspace_reduce(prob; tolerance) -> Union{Nothing,NullSpaceReduction}
+
+Rewrite `prob` in the coordinates `x = x_p + Z·z`, eliminating the equality
+constraints entirely, or return `nothing` when the basis cannot be trusted.
+
+The reduced problem has `rank(B)` fewer variables and no equality rows, so its
+Schur complement is `k × k` rather than `m × m`. Since factorization is cubic,
+that is the whole point: with `k = 0.3 m` the per-iteration factorization drops
+by roughly thirty times.
+
+What it costs is a change of basis on the constraint tensor,
+`Ã_j = Σᵢ Z[i,j] Aᵢ`, which is `O(m · k · Σ_l k_l²)` once. That is why this is
+not always worth doing even when the equalities are numerous — the transform is
+paid up front whether the solve then takes five iterations or fifty. See
+[`should_use_nullspace`](@ref) for the gate.
+
+Returns `nothing` when the equalities are inconsistent or the basis is too
+ill-conditioned to build on, rather than producing a reduced problem whose
+solutions do not correspond to the original's.
+"""
+function nullspace_reduce(prob::SDPProblem{T}; tolerance::Real=0) where {T}
+    L, m, n, k = prob.dims
+    n > 0 || return nothing
+
+    basis = build_nullspace_basis(prob.B, prob.b; tolerance=tolerance)
+    basis.consistent || return nothing
+    basis.quality >= T(NULLSPACE_MINIMUM_QUALITY) || return nothing
+    reduced_dimension = basis.reduced_dimension
+    reduced_dimension > 0 || return nothing
+
+    Z = basis.Z
+    particular = basis.particular
+
+    # `Ã_j = Σᵢ Z[i,j] Aᵢ` and `C̃ = C − Σᵢ x_p[i] Aᵢ`, block by block.
+    coefficients = Vector{Array{T,3}}(undef, L)
+    constants = Vector{Matrix{T}}(undef, L)
+    for block in 1:L
+        dimension = k[block]
+        original = _nullspace_block_slices(prob, block)
+        transformed = zeros(T, reduced_dimension, dimension, dimension)
+        shifted = copy(prob.C[block])
+        @inbounds for variable in 1:m
+            slice = view(original, variable, :, :)
+            weight = particular[variable]
+            iszero(weight) || (shifted .-= weight .* slice)
+            for reduced in 1:reduced_dimension
+                factor = Z[variable, reduced]
+                iszero(factor) && continue
+                view(transformed, reduced, :, :) .+= factor .* slice
+            end
+        end
+        coefficients[block] = transformed
+        constants[block] = shifted
+    end
+
+    objective = transpose(Z) * prob.c
+    offset = dot(prob.c, particular)
+
+    reduced = ingest(
+        objective,
+        coefficients,
+        constants,
+        Matrix{T}(undef, reduced_dimension, 0),
+        T[];
+        sparse=:auto,
+        verbosity=0,
+    )
+    return NullSpaceReduction{T}(reduced, basis, offset)
+end
+
+"""Dense `m × k_l × k_l` view of one block's coefficients, whatever storage the
+problem uses. The reduction is a dense change of basis, so a sparse block is
+materialised here rather than pretending the transform preserves sparsity —
+`Ã_j` is a combination of every `Aᵢ` and is dense in general."""
+function _nullspace_block_slices(prob::SDPProblem{T}, block::Integer) where {T}
+    L, m, n, k = prob.dims
+    dimension = k[block]
+    slices = zeros(T, m, dimension, dimension)
+    cons = prob.cons
+    if cons isa DenseCons{T}
+        panel = (cons::DenseCons{T}).Av[block]
+        @inbounds for variable in 1:m
+            slices[variable, :, :] =
+                reshape(view(panel, :, variable), dimension, dimension)
+        end
+    else
+        blocks = (cons::SparseCons{T}).Asp[block]
+        @inbounds for variable in 1:m
+            matrix = blocks[variable]
+            rows = rowvals(matrix)
+            values = nonzeros(matrix)
+            for column in 1:dimension, index in nzrange(matrix, column)
+                slices[variable, rows[index], column] = values[index]
+            end
+        end
+    end
+    return slices
+end
+
+"""
+    nullspace_expand(reduction, result) -> (x, objective)
+
+Map a reduced solution back to the original coordinates, restoring both the
+variables and the constant the reduced objective dropped.
+"""
+function nullspace_expand(reduction::NullSpaceReduction{T}, z::AbstractVector{T},
+                          reduced_objective::T) where {T}
+    return (
+        x=recover_full_solution(reduction.basis, z),
+        objective=reduced_objective + reduction.offset,
+    )
+end
+
+"""
+    recover_equality_multiplier(prob, X_blocks, Y_blocks, c) -> Vector
+
+Least-squares recovery of the equality multiplier `y` that the reduced problem
+never forms.
+
+Eliminating the equalities removes their multiplier along with them, but the
+final certificate is stated in the *original* problem, where dual feasibility
+reads `c − Σ_l A_l*(Y_l) − B y = 0`. So `y` has to be reconstructed before the
+result can be validated or warm-started, and the defining equation above is
+what reconstructs it: solve `B y ≈ c − Σ_l A_l*(Y_l)` in the least-squares
+sense.
+
+Least squares rather than a solve, because `B` need not have full column rank —
+the same near-dependence the equality presolve exists to handle. When it does
+not, this returns the minimum-norm multiplier, which is the one consistent with
+having dropped the dependent directions.
+"""
+function recover_equality_multiplier(prob::SDPProblem{T}, Y_blocks) where {T}
+    L, m, n, k = prob.dims
+    n == 0 && return T[]
+    residual = copy(prob.c)
+    for block in 1:L
+        slices = _nullspace_block_slices(prob, block)
+        Y = Y_blocks[block]
+        @inbounds for variable in 1:m
+            residual[variable] -= dot(view(slices, variable, :, :), Y)
+        end
+    end
+    return qr(prob.B, ColumnNorm()) \ residual
+end
