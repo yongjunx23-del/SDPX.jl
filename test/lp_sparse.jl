@@ -7,11 +7,9 @@ using Test
 @testset "sparse LP linear system" begin
     @testset "sign convention matches the dense factorization" begin
         # The symmetric augmented form yields `-y` where the dense unsymmetric
-        # form yields `y`, and the two also differ by O(δ) in the multiplier
-        # because the regularization enters the equality block with opposite
-        # sign. Neither difference fails loudly, so both are pinned here
-        # against a direct dense solve of the convention `_lp_populate_kkt!`
-        # implements.
+        # form yields `y`. `lp_sparse_solve!` is the single place that converts,
+        # and getting it wrong is silent, so it is pinned here against a direct
+        # dense solve of the convention `_lp_populate_kkt!` implements.
         rng = MersenneTwister(1)
         variables, equalities, rows = 6, 2, 12
         G = randn(rng, rows, variables)
@@ -21,9 +19,11 @@ using Test
         r1 = randn(rng, variables)
         r2 = randn(rng, equalities)
 
+        # The dense convention, written out: `+δ` on the equality block, which
+        # is what makes it agree with the symmetric form below.
         dense = [
             (H + regularization * I) (-B)
-            transpose(B) (-regularization * I)
+            transpose(B) (regularization * I)
         ]
         expected = dense \ [r1; r2]
 
@@ -42,15 +42,14 @@ using Test
         @test SDPX.lp_sparse_factor!(system, weights, regularization)
         actual = SDPX.lp_sparse_solve!([r1; r2], system)
 
-        # Both blocks agree only to the O(δ) by which the two regularizations
-        # differ -- measured 6.6e-08 on the primal and 4.4e-07 on the
-        # multiplier at δ = 1e-8, against solution components of order 1 and 5
-        # respectively. The tolerances are loose enough to admit that and far
-        # too tight to admit a wrong answer.
+        # The two now solve the same regularized system, so they agree to
+        # conditioning rather than to O(δ). The previous version of this test
+        # asserted the O(δ) gap as though it were expected; it was a sign
+        # mismatch in the equality block.
         @test actual[1:variables] ≈ expected[1:variables] atol = 1e-6
         multiplier = actual[(variables + 1):(variables + equalities)]
         @test multiplier ≈ expected[(variables + 1):(variables + equalities)] atol =
-            1e-5
+            1e-6
         # The sign itself is the part that must be exactly right: a flipped
         # multiplier would still pass a loose tolerance against zero, so
         # compare against the *negated* solution too and require it to be far.
@@ -139,4 +138,51 @@ using Test
         @test abs(result.pObj - result.dObj) /
               max(1.0, abs(result.pObj)) < 1e-7
     end
+
+    @testset "dense and sparse KKT solve the same regularized system" begin
+        # The two backends must not disagree about what problem they are
+        # solving. Before the equality block was aligned, the difference grew
+        # linearly with the regularization -- 2.2e-07 at delta 1e-8 and 0.22 at
+        # 1e-2 -- and the LP loop escalates delta by ten up to eight times on a
+        # hard factorization, so the large end was reachable in ordinary use.
+        rng = MersenneTwister(1)
+        variables, equalities, rows = 8, 3, 16
+        G = randn(rng, rows, variables)
+        H = transpose(G) * G
+        B = randn(rng, variables, equalities)
+        primal_rhs = randn(rng, variables)
+        equality_rhs = randn(rng, equalities)
+
+        for regularization in (1e-8, 1e-6, 1e-4, 1e-2)
+            K = zeros(variables + equalities, variables + equalities)
+            SDPX._lp_populate_kkt!(K, H, B, regularization)
+            dense = lu(K) \ [primal_rhs; equality_rhs]
+
+            system = SDPX.LPSparseSystem{Float64}(
+                sparse(G), sparse(B), spzeros(0, 0),
+                SDPX.SparseLDLBackend(), :sparse_ldl,
+                variables, equalities, false, nothing,
+            )
+            @test SDPX.lp_sparse_factor!(system, ones(rows), regularization)
+            sparse_direction =
+                SDPX.lp_sparse_solve!([primal_rhs; equality_rhs], system)
+
+            # Agreement improves as the system becomes better conditioned,
+            # which is the signature of a shared formulation. A sign mismatch
+            # shows the opposite trend.
+            @test norm(dense - sparse_direction) < 1e-6 * max(1.0, regularization)
+        end
+
+        # State the convention once, so a future edit has something to check
+        # against rather than rediscovering it from a failing solve.
+        K = zeros(variables + equalities, variables + equalities)
+        SDPX._lp_populate_kkt!(K, H, B, 0.25)
+        @test K[1:variables, 1:variables] ≈ H + 0.25I
+        @test K[1:variables, (variables + 1):end] ≈ -B
+        @test K[(variables + 1):end, 1:variables] ≈ transpose(B)
+        # Positive, matching the symmetric quasi-definite form the sparse
+        # backend factors -- not negative.
+        @test K[(variables + 1):end, (variables + 1):end] ≈ 0.25I
+    end
+
 end

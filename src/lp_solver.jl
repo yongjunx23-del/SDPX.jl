@@ -593,8 +593,24 @@ function _lp_populate_kkt!(
         K[row, variables + column] = -B[row, column]
         K[variables + column, row] = B[row, column]
     end
+    # The equality block carries `+δ`, not `−δ`. Both signs regularize the
+    # saddle point, but only this one agrees with the symmetric quasi-definite
+    # form the sparse backend factors (`augmented_kkt`), and the two paths must
+    # solve the same system or the choice of backend changes the answer.
+    #
+    # The disagreement is O(δ) and therefore invisible at the default
+    # regularization and serious once it escalates. Measured against the sparse
+    # solve, the norm of the difference in the combined direction:
+    #
+    #     δ        with −δ      with +δ
+    #     1e-8     2.219e-07    2.451e-08
+    #     1e-4     2.209e-03    3.133e-12
+    #     1e-2     2.214e-01    6.524e-15
+    #
+    # The LP loop escalates δ by ten up to eight times on a hard factorization,
+    # so the −δ column is reachable in ordinary use.
     @inbounds for index in 1:equalities
-        K[variables + index, variables + index] = -regularization
+        K[variables + index, variables + index] = regularization
     end
     return K
 end
@@ -630,11 +646,11 @@ function _lp_populate_kkt!(
             B[row, column],
         )
     end
+    # Same convention as the `Float64` method above; see the note there.
     @inbounds for index in 1:equalities
         MA.operate_to!(
             K[variables + index, variables + index],
-            *,
-            negative_one,
+            copy,
             regularization,
         )
     end
