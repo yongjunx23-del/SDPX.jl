@@ -228,14 +228,37 @@ end
             @test outcome.reg_attempts == 0
         end
 
-        # Singular and indefinite: `cholesky!` fails, the escalation runs, and
-        # the factorization succeeds. One attempt sufficed in every case
-        # measured; the loop allows six as a safety net.
+        # Singular and borderline-indefinite: whatever `cholesky!` decides, the
+        # contract is that a usable factorization comes back. Whether the
+        # escalation had to run for these is a property of the LAPACK build,
+        # not of this solver -- an earlier version of this test asserted at
+        # least one attempt here and passed on macOS/aarch64 while failing on
+        # ubuntu/x86_64, where the borderline matrices factor successfully.
         for smallest in (0.0, -1e-14, -1e-8)
             outcome = factor_with_smallest_eigenvalue(smallest)
             @test outcome.ok
-            @test 1 <= outcome.reg_attempts <= 6
+            @test 0 <= outcome.reg_attempts <= 6
         end
+
+        # Clearly indefinite, but only just: a -1e-6 eigenvalue among
+        # eigenvalues of order one is far above rounding, so every LAPACK
+        # rejects it, and the shift needed to repair it is within the
+        # escalation's reach. That combination is what makes this the case
+        # proving the path is reachable, without depending on how a particular
+        # build treats a borderline matrix.
+        decisive = factor_with_smallest_eigenvalue(-1e-6)
+        @test decisive.ok
+        @test 1 <= decisive.reg_attempts <= 6
+
+        # The escalation is scoped to rounding-level loss of positivity, not to
+        # genuine indefiniteness, and it is worth recording where that ends. It
+        # starts at sqrt(eps) and multiplies by ten at most six times, so the
+        # largest shift it can apply is around 1.5e-2 relative. A matrix that
+        # needs more than that is reported as a failure rather than silently
+        # shifted into something else.
+        hopeless = factor_with_smallest_eigenvalue(-1.0)
+        @test !hopeless.ok
+        @test hopeless.reg_attempts == 6
     end
 
 end

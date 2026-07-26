@@ -772,9 +772,14 @@ end
     @test physical >= 1
     @test physical == SDPX.physical_core_count()       # stable within a run
 
-    modest = SDPX.worker_report(2, 2)
-    @test modest.requested_workers == 2
-    @test modest.effective_workers == 2
+    # A request the machine can actually satisfy is not oversubscription. Sized
+    # from the detected core count rather than hard-coded: CI runners report as
+    # few as one physical core, where asking for two genuinely *is*
+    # oversubscription and the previous fixed `worker_report(2, 2)` was
+    # asserting the opposite of the correct answer.
+    modest = SDPX.worker_report(physical, physical)
+    @test modest.requested_workers == physical
+    @test modest.effective_workers == physical
     @test modest.physical_cores == physical
     @test !modest.oversubscribed
 
