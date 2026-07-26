@@ -263,15 +263,20 @@ adjust PBS resources after measuring the target node:
 | Arithmetic and workload | Reserved PBS cores | Julia threads per solve | BLAS threads | Strategy |
 |---|---:|---:|---:|---|
 | Float64x4 sparse/block-arrow | 8 | sweep 1, 2, 4, 8 | 1 | SDPX Julia block and Schur scheduling |
-| BigFloat | 1 or the site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
+| BigFloat, general native | site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
+| BigFloat, exact singleton-local `2x2` arrow | 8 | sweep 1, 2, 4, 8 | 1 | native block preparation and disjoint reduced-Schur tiles may be parallel; residual/refinement remains serial |
+| BigFloat, experimental mixed arrow | 8 | sweep 1, 2, 4, 8 | 1 | the Float64x4 reduced panel/factorization is parallel; BigFloat residual/refinement remains serial |
 | Task_Low08 Float64 validation | 8 | 8 | 8 | sparse assembly plus dense OpenBLAS KKT factorization |
 | Task_Low08 Float64 performance on dual EPYC 7742 | 32 | 32 | 16 | OpenBLAS with `numactl --interleave=all`; measured, hardware-specific |
 | Small package validation | 8 | 4 for tests, 1 for high-precision smoke | 1 | sequential validation phases |
 
-`BigFloat` uses one solver thread. A site may require a larger PBS allocation,
-but additional reserved cores do not accelerate one BigFloat solve. They may
-be used for explicitly independent processes only after per-process peak
-memory has been measured.
+General native `BigFloat` uses one solver thread. Exact singleton-local `2x2`
+arrows may use additional cores only for ownership-safe reduced-panel
+preparation and disjoint triangular Schur tiles. The opt-in mixed reduced-arrow
+backend may also use those cores for its Float64x4 panel and factorization,
+while exact BigFloat residual and
+refinement work remains serial. It must be benchmarked rather than assumed to
+be faster.
 
 Do not start a Float64x4 block-parallel run with both Julia and BLAS set to the
 full allocation. Keep BLAS and OMP at one thread so the 1/2/4/8 comparison

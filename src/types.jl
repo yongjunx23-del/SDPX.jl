@@ -51,6 +51,9 @@ statuses, not exceptions.
     NumericalFailure
 end
 
+default_extended_precision_blas(::Type) = :off
+default_extended_precision_blas(::Type{BigFloat}) = :auto
+
 """
     SolverOptions{T}
 
@@ -76,6 +79,12 @@ Base.@kwdef struct SolverOptions{T}
     ϵ_dual::T                = T(1e-10)
     iter_max::Int             = 200
     precision_bits::Int       = 997                # BigFloat only; ≈ old prec=300 (base-10)
+    # `:auto` may start a BigFloat solve at a conservatively selected lower
+    # precision and retry at `precision_bits` if certification or convergence
+    # fails. It is opt-in until the staged policy has broader benchmark
+    # coverage. Fixed-width arithmetic always uses its native precision.
+    working_precision_policy::Symbol = :fixed       # :fixed | :auto
+    minimum_working_precision_bits::Int = 192       # BigFloat :auto floor
     restart::Bool             = true
     min_step::T               = T(1e-10)
     max_omega::T              = T(1e50)
@@ -128,7 +137,8 @@ Base.@kwdef struct SolverOptions{T}
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
     parameter_strategy::Symbol = :fixed                 # :fixed | :adaptive; adaptive is benchmark-gated
-    extended_precision_blas::Symbol = :off              # :off | :auto | :on; Float64 is never redirected
+    extended_precision_blas::Symbol =
+        default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
     # Opt-in extended-precision KKT acceleration. The Schur complement is
     # factored in Float64, while residuals and accepted directions remain in
@@ -273,16 +283,43 @@ whose coefficient matrix in block `l` has at least one structural
 nonzero. Sparse Schur construction only transforms and pairs these
 active matrices instead of scanning all `m` variables for every block.
 For `2x2` blocks, `packed2[l]` stores the `(1,1)`, `(1,2)`, and `(2,2)`
-entries as a `3 x |active[l]|` hot-path panel. For other block sizes,
-`coo[l]` holds the same coefficients in [`SparseBlockCOO`](@ref) flat
-form, which is what the Schur pair loop actually reads.
+entries as a `3 x |active[l]|` hot-path panel. `packed2_mask[l]` stores the
+corresponding three-bit structural-nonzero mask, so high-precision Schur
+contractions do not repeatedly call `iszero` in their quadratic active-pair
+loop. For other block sizes, `coo[l]` holds the same coefficients in
+[`SparseBlockCOO`](@ref) flat form, which is what the Schur pair loop actually
+reads.
 """
 struct SparseCons{T} <: AbstractCons{T}
     Asp::Vector{Vector{SparseMatrixCSC{T,Int}}}
     active::Vector{Vector{Int}}
     schur_order::Vector{Vector{Int}}
     packed2::Vector{Matrix{T}}
+    packed2_mask::Vector{Vector{UInt8}}
     coo::Vector{SparseBlockCOO{T}}
+end
+
+@inline function _packed2_nonzero_mask(
+    coefficients::AbstractMatrix,
+    position::Int,
+)
+    mask = UInt8(0)
+    !iszero(coefficients[1, position]) && (mask |= UInt8(0x01))
+    !iszero(coefficients[2, position]) && (mask |= UInt8(0x02))
+    !iszero(coefficients[3, position]) && (mask |= UInt8(0x04))
+    return mask
+end
+
+function _build_packed2_masks(packed2::Vector{Matrix{T}}) where {T}
+    return [
+        size(coefficients, 1) == 3 ?
+        [
+            _packed2_nonzero_mask(coefficients, position)
+            for position in axes(coefficients, 2)
+        ] :
+        UInt8[]
+        for coefficients in packed2
+    ]
 end
 
 # `Asp` stays the source of truth for validation, MOI, equilibration, and
@@ -302,7 +339,15 @@ function SparseCons{T}(
         )
         for l in eachindex(Asp)
     ]
-    return SparseCons{T}(Asp, active, schur_order, packed2, coo)
+    packed2_mask = _build_packed2_masks(packed2)
+    return SparseCons{T}(
+        Asp,
+        active,
+        schur_order,
+        packed2,
+        packed2_mask,
+        coo,
+    )
 end
 
 """

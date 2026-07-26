@@ -10,9 +10,11 @@
     A failed guard or stalled refinement lazily falls back to the native
     extended-precision factorization.
 
-    This path is deliberately disabled by default. It never handles ordinary
-    Float64, block-arrow systems, fixed-count refinement, or rank-deficient
-    equality complements.
+    This dense path is deliberately disabled by default. It never handles
+    ordinary Float64, fixed-count refinement, or rank-deficient equality
+    complements. Singleton-local `2x2` block-arrow systems use their separate
+    Float64x4 reduced-panel preconditioner when the MultiFloats extension is
+    available.
 =====================================================================#
 
 const MIXED_KKT_PREDICTOR_RESIDUAL_LIMIT = 1.0e-8
@@ -48,16 +50,41 @@ mutable struct MixedPrecisionKKTWorkspace
     Qfactor::Any
 end
 
-_mixed_precision_kkt_diagnostics(ws) =
-    ws.mixed_precision === nothing ?
-    (available=false,) :
-    _mixed_precision_kkt_diagnostics(ws.mixed_precision)
+function _mixed_precision_kkt_diagnostics(ws)
+    ws.mixed_precision === nothing ||
+        return _mixed_precision_kkt_diagnostics(ws.mixed_precision)
+    arrow = ws.arrow
+    if arrow !== nothing && arrow.mixed_source_cons !== nothing
+        active = arrow.mixed_reduced_ready
+        fell_back = arrow.mixed_reduced_fallback_count > 0
+        return (
+            available=true,
+            backend=:float64x4_reduced_arrow,
+            mode=arrow.mixed_reduced_mode,
+            active=active,
+            attempted=arrow.mixed_reduced_attempt_count > 0,
+            fell_back=fell_back,
+            disabled=!arrow.mixed_reduced_enabled,
+            reason=arrow.mixed_reduced_reason,
+            factor_attempt_count=arrow.mixed_reduced_attempt_count,
+            dynamic_fallback_count=arrow.mixed_reduced_fallback_count,
+            static_rejection_count=0,
+            cooldown_remaining=0,
+            condition_estimate=NaN,
+            predicted_refinement_steps=0,
+            native_regularization_attempts=0,
+            threads=arrow.mixed_reduced_threads,
+        )
+    end
+    return (available=false,)
+end
 
 function _mixed_precision_kkt_diagnostics(
     mixed::MixedPrecisionKKTWorkspace,
 )
     return (
         available=true,
+        backend=:float64_dense,
         mode=mixed.mode,
         active=mixed.active,
         attempted=mixed.attempted,

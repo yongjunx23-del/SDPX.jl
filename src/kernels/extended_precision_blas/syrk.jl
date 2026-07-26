@@ -222,7 +222,7 @@ function _syrk_worker_count(
     jobs::Int,
     requested_workers::Int,
 ) where {T}
-    arithmetic_family(T) === :fixed_extended || return 1
+    arithmetic_family(T) in (:fixed_extended, :bigfloat) || return 1
     available_workers = min(
         max(requested_workers, 1),
         Threads.nthreads(),
@@ -301,7 +301,9 @@ end
 Compute only the lower triangle of
 `output = alpha * transpose(panel) * panel + beta * output`. Packed
 column panels are consumed in cache-sized tiles. Fixed-width extended types
-parallelize disjoint output tiles; BigFloat is always serial.
+parallelize disjoint output tiles. The BigFloat specialization below may also
+parallelize, but only with one task owning each complete output tile and with
+task-local MPFR scratch.
 """
 function syrk!(
     output::AbstractMatrix{T},
@@ -367,47 +369,122 @@ function _store_bigfloat!(
     return nothing
 end
 
+function _syrk_bigfloat_job_range!(
+    output::AbstractMatrix{BigFloat},
+    panel::AbstractMatrix{BigFloat},
+    first_job::Int,
+    last_job::Int,
+    job_stride::Int,
+    block_count::Int,
+    alpha::BigFloat,
+    beta::BigFloat,
+    config::KernelConfig,
+)
+    accumulator = BigFloat()
+    multiplication_buffer = BigFloat()
+    storage_buffer = BigFloat()
+    tile = max(config.column_tile, 1)
+    reduction = size(panel, 1)
+    @inbounds for job in first_job:job_stride:last_job
+        row_block, column_block =
+            _triangle_block_coordinates(job, block_count)
+        row_start = (row_block - 1) * tile + 1
+        row_stop = min(row_block * tile, size(panel, 2))
+        column_start = (column_block - 1) * tile + 1
+        column_stop = min(column_block * tile, size(panel, 2))
+        for column in column_start:column_stop
+            for row in max(row_start, column):row_stop
+                kdot_columns!(
+                    accumulator,
+                    multiplication_buffer,
+                    panel,
+                    row,
+                    column,
+                    reduction,
+                )
+                _store_bigfloat!(
+                    output[row, column],
+                    accumulator,
+                    alpha,
+                    beta,
+                    storage_buffer,
+                )
+            end
+        end
+    end
+    return nothing
+end
+
 function syrk!(
     output::AbstractMatrix{BigFloat},
     panel::AbstractMatrix{BigFloat},
     alpha::BigFloat,
     beta::BigFloat,
     config::KernelConfig=KernelConfig(),
-    ::Int=1,
+    thread_count::Int=1,
 )
     columns = size(panel, 2)
     size(output) == (columns, columns) ||
         throw(DimensionMismatch("syrk! output must be square with one row per panel column"))
-    accumulator = BigFloat()
-    multiplication_buffer = BigFloat()
-    storage_buffer = BigFloat()
     tile = max(config.column_tile, 1)
-    @inbounds for column_block in 1:tile:columns
-        column_stop = min(column_block + tile - 1, columns)
-        for row_block in column_block:tile:columns
-            row_stop = min(row_block + tile - 1, columns)
-            for column in column_block:column_stop
-                for row in max(row_block, column):row_stop
-                    kdot_columns!(
-                        accumulator,
-                        multiplication_buffer,
-                        panel,
-                        row,
-                        column,
-                        size(panel, 1),
-                    )
-                    _store_bigfloat!(
-                        output[row, column],
-                        accumulator,
-                        alpha,
-                        beta,
-                        storage_buffer,
-                    )
-                end
-            end
+    block_count = cld(columns, tile)
+    jobs = block_count * (block_count + 1) ÷ 2
+    worker_count = _syrk_worker_count(
+        BigFloat,
+        size(panel, 1),
+        columns,
+        jobs,
+        thread_count,
+    )
+    if worker_count > 1
+        # Each job is one complete lower-triangular output tile. Jobs are
+        # disjoint, panel/alpha/beta are read-only, and every task owns its
+        # accumulator, multiplication, and storage buffers. No mutable
+        # BigFloat object is written by more than one task.
+        @sync for worker in 1:worker_count
+            Threads.@spawn _syrk_bigfloat_job_range!(
+                output,
+                panel,
+                worker,
+                jobs,
+                worker_count,
+                block_count,
+                alpha,
+                beta,
+                config,
+            )
         end
+    else
+        _syrk_bigfloat_job_range!(
+            output,
+            panel,
+            1,
+            jobs,
+            1,
+            block_count,
+            alpha,
+            beta,
+            config,
+        )
     end
     return output
+end
+
+function _syrk_bigfloat_selected_workers(
+    panel::AbstractMatrix{BigFloat},
+    config::KernelConfig,
+    thread_count::Int,
+)
+    columns = size(panel, 2)
+    block_count = cld(columns, max(config.column_tile, 1))
+    jobs = block_count * (block_count + 1) ÷ 2
+    return _syrk_worker_count(
+        BigFloat,
+        size(panel, 1),
+        columns,
+        jobs,
+        thread_count,
+    )
 end
 
 function syrk_packed_triangle!(

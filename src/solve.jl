@@ -83,6 +83,21 @@ function _replace_solver_options(
     return SolverOptions{T}(; merge(values, (; kwargs...))...)
 end
 
+function _reround_solver_options(
+    options::SolverOptions{BigFloat},
+    bits::Int;
+    kwargs...,
+)
+    names = fieldnames(typeof(options))
+    values = map(names) do field
+        value = getfield(options, field)
+        value isa BigFloat ?
+        BigFloat(value; precision=bits) : value
+    end
+    typed = NamedTuple{names}(Tuple(values))
+    return SolverOptions{BigFloat}(; merge(typed, (; kwargs...))...)
+end
+
 """
     lp_initial_scale_indicator(prob) -> T
 
@@ -1208,11 +1223,23 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
 
         update_started = time_ns()
         for l in 1:L
-            trial_combine!(X[l], X[l], tX, ws.blk[l].dX)
-            trial_combine!(Y[l], Y[l], tY, ws.blk[l].dY)
+            trial_combine_owned!(
+                X[l],
+                X[l],
+                tX,
+                ws.blk[l].dX,
+                ws.blk[l].W1[1, 1],
+            )
+            trial_combine_owned!(
+                Y[l],
+                Y[l],
+                tY,
+                ws.blk[l].dY,
+                ws.blk[l].W1[1, 1],
+            )
         end
-        trial_combine!(x, x, tX, ws.dx)
-        n > 0 && trial_combine!(y, y, tY, ws.dy)
+        trial_combine_owned!(x, x, tX, ws.dx)
+        n > 0 && trial_combine_owned!(y, y, tY, ws.dy)
 
         if !_finite_iterate(x, X, y, Y, μ)
             status, message = NumericalBreakdown,
@@ -1551,6 +1578,69 @@ function solve!(
     )
 end
 
+"""
+    adaptive_working_precision_bits(problem, options) -> Int
+
+Choose the first precision for an opt-in staged BigFloat solve. The requested
+`precision_bits` remains a hard upper bound and fallback precision. The guard
+combines the smallest requested tolerance with 96 safety bits and a
+dimension-dependent term, rounds upward to a 32-bit boundary, and never drops
+below `minimum_working_precision_bits`.
+
+The deliberately large guard is appropriate for an interior-point Newton
+system: this selector is intended to skip obviously unnecessary MPFR limbs,
+not to estimate the fewest bits with which a problem might happen to solve.
+"""
+function adaptive_working_precision_bits(
+    prob::SDPProblem{BigFloat},
+    opts::SolverOptions{BigFloat},
+)
+    requested = opts.precision_bits
+    opts.working_precision_policy === :auto || return requested
+    tolerances = (opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual)
+    any(iszero, tolerances) && return requested
+    tolerance = min(tolerances...)
+    isfinite(tolerance) && tolerance > zero(BigFloat) ||
+        return requested
+    accuracy_bits = max(0, ceil(Int, -log2(tolerance)))
+    problem_dimension = max(
+        prob.dims.m,
+        prob.dims.n,
+        sum(prob.dims.k),
+        2,
+    )
+    dimension_guard = ceil(Int, log2(problem_dimension))
+    guarded_bits = accuracy_bits + 96 + dimension_guard
+    rounded_bits = 32 * cld(guarded_bits, 32)
+    minimum_bits = min(
+        opts.minimum_working_precision_bits,
+        requested,
+    )
+    return clamp(rounded_bits, minimum_bits, requested)
+end
+
+@inline _working_precision_success(status::SolveStatus) =
+    status in (Optimal, FeasibleCert, InfeasibleCert)
+
+@inline _working_precision_retry(status::SolveStatus) =
+    status in (
+        AlmostOptimal,
+        InsufficientPrecision,
+        Stalled,
+        NumericalBreakdown,
+        NumericalFailure,
+        MaxRestartsExceeded,
+    )
+
+function _record_working_precision!(
+    result::SDPResult,
+    message::String,
+)
+    result.diagnostics === nothing ||
+        push!(result.diagnostics.warnings, message)
+    return result
+end
+
 function solve!(
     prob::SDPProblem{BigFloat},
     opts::SolverOptions{BigFloat}=SolverOptions{BigFloat}();
@@ -1560,21 +1650,94 @@ function solve!(
     Y0=nothing,
     resume::AbstractString="",
 )
+    _validate_solver_options(opts)
     requested_precision = opts.precision_bits
-    requested_precision > 0 ||
-        throw(ArgumentError("precision_bits must be positive"))
-    run = () -> _solve_pipeline!(
-        prob,
+    selected_precision =
+        isempty(resume) ?
+        adaptive_working_precision_bits(prob, opts) :
+        requested_precision
+    started = time()
+
+    function run_at_precision(run_options, bits)
+        run = () -> _solve_pipeline!(
+            prob,
+            run_options;
+            x0=x0,
+            X0=X0,
+            y0=y0,
+            Y0=Y0,
+            resume=resume,
+        )
+        return Base.precision(BigFloat) == bits ?
+               run() :
+               setprecision(run, BigFloat, bits)
+    end
+
+    if selected_precision == requested_precision
+        result = run_at_precision(opts, requested_precision)
+        if opts.working_precision_policy === :auto && !isempty(resume)
+            _record_working_precision!(
+                result,
+                "Adaptive working precision was bypassed while resuming a " *
+                "checkpoint; the requested $(requested_precision)-bit " *
+                "precision was used.",
+            )
+        end
+        return result
+    end
+
+    lower_options = setprecision(BigFloat, selected_precision) do
+        _reround_solver_options(
+            opts,
+            selected_precision;
+            precision_bits=selected_precision,
+            working_precision_policy=:fixed,
+        )
+    end
+    lower_result = run_at_precision(lower_options, selected_precision)
+    if _working_precision_success(lower_result.status)
+        return _record_working_precision!(
+            lower_result,
+            "Adaptive working precision selected $(selected_precision) of " *
+            "$(requested_precision) requested bits; the result passed " *
+            "original-coordinate certification without a retry.",
+        )
+    end
+
+    elapsed = time() - started
+    remaining_time = isfinite(opts.max_time) ?
+                     max(0.0, opts.max_time - elapsed) :
+                     Inf
+    if !_working_precision_retry(lower_result.status) ||
+       remaining_time <= 0
+        return _record_working_precision!(
+            lower_result,
+            "Adaptive working precision selected $(selected_precision) of " *
+            "$(requested_precision) requested bits, but the run ended with " *
+            "$(lower_result.status); the fallback was not eligible or its " *
+            "time budget was exhausted.",
+        )
+    end
+
+    lower_status = lower_result.status
+    lower_result = nothing
+    # A fallback is already an exceptional, expensive path. Release the
+    # lower-precision iterate before allocating the requested-precision
+    # workspace so the retry does not retain two full SDP solutions.
+    GC.gc()
+    fallback_options = _replace_solver_options(
         opts;
-        x0=x0,
-        X0=X0,
-        y0=y0,
-        Y0=Y0,
-        resume=resume,
+        working_precision_policy=:fixed,
+        max_time=remaining_time,
     )
-    return Base.precision(BigFloat) == requested_precision ?
-           run() :
-           setprecision(run, BigFloat, requested_precision)
+    fallback_result =
+        run_at_precision(fallback_options, requested_precision)
+    return _record_working_precision!(
+        fallback_result,
+        "Adaptive working precision first tried $(selected_precision) bits " *
+        "and ended with $(lower_status); SDPX retried at the requested " *
+        "$(requested_precision)-bit precision.",
+    )
 end
 
 function _solve_pipeline!(
@@ -1605,10 +1768,30 @@ function _solve_pipeline!(
         )
     end
     if T === BigFloat && opts.threads > 1
-        push!(
-            warnings,
-            "BigFloat solver kernels are serial because the current mutable-scalar workspaces require strict ownership and aliasing guarantees.",
-        )
+        if plan.schedule === :mixed_arrow_contiguous_blocks
+            push!(
+                warnings,
+                "Native BigFloat kernels remain serial; the guarded " *
+                "Float64x4 reduced-arrow panel may use $(plan.threads) " *
+                "threads, while BigFloat residual and refinement phases " *
+                "preserve strict scalar ownership.",
+            )
+        elseif plan.schedule === :reduced_arrow_contiguous_blocks
+            push!(
+                warnings,
+                "Native BigFloat parallelism is restricted to the " *
+                "ownership-safe reduced-arrow panel and disjoint Schur " *
+                "tiles; residual, direction, and refinement phases remain " *
+                "serial.",
+            )
+        else
+            push!(
+                warnings,
+                "BigFloat solver kernels are serial because the current " *
+                "mutable-scalar workspaces require strict ownership and " *
+                "aliasing guarantees.",
+            )
+        end
     end
     if plan.classification.cone === :socp
         push!(
@@ -1857,6 +2040,8 @@ function solve(
     scaling::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:fixed,
+    working_precision_policy::Symbol=:fixed,
+    minimum_working_precision_bits::Int=192,
 ) where {T}
     if T === BigFloat &&
        precision !== nothing &&
@@ -1879,6 +2064,9 @@ function solve(
                 scaling=scaling,
                 algorithm=algorithm,
                 parameter_strategy=parameter_strategy,
+                working_precision_policy=working_precision_policy,
+                minimum_working_precision_bits=
+                    minimum_working_precision_bits,
             )
         end
     end
@@ -1900,6 +2088,8 @@ function solve(
         scaling=scaling,
         algorithm=algorithm,
         parameter_strategy=parameter_strategy,
+        working_precision_policy=working_precision_policy,
+        minimum_working_precision_bits=minimum_working_precision_bits,
         parameter_policy=:auto,
         timing=true,
     )
@@ -1947,6 +2137,8 @@ function solve(
     scaling::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:fixed,
+    working_precision_policy::Symbol=:fixed,
+    minimum_working_precision_bits::Int=192,
     sparse::Union{Bool,Symbol}=:auto,
 )
     T = _resolve_precision_type(precision, c, A, C, B, b)
@@ -1982,6 +2174,9 @@ function solve(
             scaling=scaling,
             algorithm=algorithm,
             parameter_strategy=parameter_strategy,
+            working_precision_policy=working_precision_policy,
+            minimum_working_precision_bits=
+                minimum_working_precision_bits,
         )
     end
     return T === BigFloat ? setprecision(run, BigFloat, precision_bits) : run()

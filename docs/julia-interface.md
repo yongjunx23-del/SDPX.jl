@@ -30,6 +30,12 @@ arithmetic, removes dependent equalities, scales the model, selects the
 kernel and schedule, and tunes the initialization. `solve!` with an explicit
 `SolverOptions` remains the expert interface.
 
+For a conservative opt-in BigFloat first attempt, add
+`working_precision_policy=:auto` and optionally
+`minimum_working_precision_bits=192`. SDPX records the selected width in
+warnings and retries at the requested `precision_bits` if the lower-width
+result does not pass certification.
+
 `time_limit` is end-to-end for solver work: it includes automatic-pipeline
 setup, and `solve(c, A, C, B, b; ...)` also charges raw input ingestion. Native
 warm starts are specified in original input coordinates and are mapped through
@@ -95,8 +101,9 @@ optimize!(model)
 ```
 
 The same pattern works for other `AbstractFloat` coefficient types supported
-by the native solver. `BigFloat` solves are deliberately serial. Fixed-width
-types such as `Float64x4` can use Julia threads.
+by the native solver. General `BigFloat` phases are deliberately serial; exact
+singleton-local `2x2` arrows may use ownership-safe reduced-Schur workers.
+Fixed-width types such as `Float64x4` can use Julia threads more broadly.
 
 ## Supported model forms
 

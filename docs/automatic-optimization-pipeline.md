@@ -57,8 +57,7 @@ Each worker performs one independent BLAS-3 GEMM into a disjoint output panel.
 There are no partial-matrix reductions, atomics, or locks. BigFloat remains
 serial.
 
-For `Float64xN` and `BigFloat`, the default remains the serial weighted
-outer-product path. Setting `extended_precision_blas=:auto` permits the
+For `Float64xN` and `BigFloat`, `extended_precision_blas=:auto` permits the
 planner to choose the packed blocked triangular `syrk!` path only when its
 predicted benefit exceeds packing cost and it fits the memory budget.
 `extended_precision_blas=:on` is intended for diagnostics and still cannot
@@ -81,7 +80,8 @@ inequalities * variables^2 >= 2,000,000
 Small Float64 SDPs containing only `1x1`/`2x2` blocks and fewer than 1,000
 variables are kept serial because repeated task barriers cost more than the
 block kernels. Fixed-width extended arithmetic retains multicore block
-scheduling. BigFloat is always serial.
+scheduling. General BigFloat models remain serial; exact singleton-local
+`2x2` arrows may use ownership-safe block and Schur-tile parallelism.
 
 ## High-precision ownership and allocation policy
 
@@ -93,8 +93,8 @@ after that ownership invariant has been established.
 
 The dedicated BigFloat layer covers copying, zeroing, fused vector updates,
 matrix products, triangular solves, Cholesky factorization/solve, Schur and KKT
-right-hand sides, weighted LP Hessian/KKT assembly, and the optional serial
-blocked triangular `syrk!`/`gemm!` path. This removes temporary MPFR products
+right-hand sides, weighted LP Hessian/KKT assembly, and blocked triangular
+`syrk!`/`gemm!` paths. This removes temporary MPFR products
 and sums from dominant inner loops without reintroducing aliasing. Input
 conversion, result construction, and operations that must create independent
 output values may still allocate.
@@ -322,8 +322,9 @@ provide a generic symmetric eigensolver for every scalar type.
 5. Presolve currently removes equality dependence and scalar-row redundancy;
    bound propagation, singleton substitution, coefficient strengthening, and
    chordal SDP decomposition remain future work.
-6. BigFloat is serial, and large non-arrow high-precision SDPs still require
-   dense quadratic Schur/KKT storage. No full BigFloat `Task_Low08` solve is
-   claimed by this document.
+6. General BigFloat work is serial, while exact singleton-local `2x2` arrows
+   may use ownership-safe panel preparation and disjoint Schur tiles. Large
+   non-arrow high-precision SDPs still require dense quadratic Schur/KKT
+   storage. No full BigFloat `Task_Low08` solve is claimed by this document.
 7. Nested solves in one process are not supported because BLAS thread count is
    process-global. Use separate processes for concurrent instances.

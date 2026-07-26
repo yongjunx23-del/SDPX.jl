@@ -21,7 +21,7 @@ work does not justify parallel scheduling.
 |---|---|
 | `Float64` | Threaded for sufficiently large block and Schur work; small latency-bound cases remain serial. |
 | `Float64xN`, `Double64` | Threaded when the type is an immutable fixed-width `AbstractFloat`; extended arithmetic crosses over earlier than Float64. |
-| `BigFloat` | Always one solver thread. |
+| `BigFloat` | General native MPFR phases use one solver thread. Exact singleton-local `2x2` arrows may use ownership-safe native block/panel tasks and disjoint Schur-tile workers. |
 | Unknown scalar type | Serial unless the kernel layer explicitly marks it safe. |
 
 ## Scheduling and synchronization
@@ -67,22 +67,39 @@ full-matrix reducer remains in use where it benchmarks faster.
 
 ## BigFloat policy
 
-`BigFloat` deliberately uses the serial owned-storage path even if Julia was
-started with multiple threads. This policy is enforced in the execution plan,
-workspace construction, and low-level scheduling trait.
+Native `BigFloat` uses the serial owned-storage path for general models even if
+Julia was started with multiple threads. Exact singleton-local `2x2` arrow
+models are the only current native exception.
 
 The reason is solver-specific: a `BigFloat` is mutable, ordinary
 `zeros(BigFloat, ...)`/`fill!` storage can alias the same object, and
 arbitrary-precision task-local matrices grow quickly with worker count. SDPX
 therefore uses independently owned workspace entries plus allocation-reusing
-MPFR scalar kernels, and keeps the currently validated high-precision path
-serial. This is not a blanket statement that the MPFR library can never be
-called concurrently.
+MPFR scalar kernels. For the reduced-arrow exception, each preparation task
+owns a disjoint block workspace and two panel rows, and each SYRK task owns a
+complete lower-triangular output tile. Inputs are read-only and no writable
+BigFloat object crosses tasks.
 
 Use `Float64x4` or another fixed-width `MultiFloats` type when its precision
-and Float64 exponent range are sufficient and one solve needs multicore
-speedup. For true arbitrary precision, run independent BigFloat instances as
-separate processes or scheduler-array elements.
+and Float64 exponent range are sufficient and broader solver phases need
+multicore speedup. The experimental `mixed_precision_kkt=:float64x4` mode is
+another path for exact singleton-local `2x2` arrows: it constructs and factors
+the reduced shared system in Float64x4, checks residuals and refines in
+BigFloat, and automatically falls back to native BigFloat if correction is
+unsafe. Only the Float64x4 panel/factorization uses the requested workers; the
+native MPFR phases remain serial. This mode did not deliver a clear
+end-to-end improvement on the medium CSDR benchmark and therefore remains off
+by default.
+
+For general non-arrow arbitrary precision, run independent BigFloat instances
+as separate processes or scheduler-array elements.
+
+On the medium exact-arrow CSDR model at 256 bits, the ownership-safe native
+path measured 205.202 / 191.701 / 110.741 / 86.752 seconds with
+1 / 2 / 4 / 8 Julia threads. The matched one-thread legacy path took
+280.011 seconds. All thread counts produced the same 41-iteration certified
+result. This scaling is specific to the exact reduced-arrow structure; it is
+not evidence for enabling arbitrary threaded MPFR loops.
 
 ## Phase-aware BLAS threads
 

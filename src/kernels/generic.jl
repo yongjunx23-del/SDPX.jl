@@ -241,6 +241,11 @@ function kcholsolve!(LX::AbstractMatrix, M::AbstractMatrix)
     return M
 end
 
+kcholsolve_owned!(LX::AbstractMatrix, M::AbstractVector) =
+    kcholsolve!(LX, M)
+kcholsolve_owned!(LX::AbstractMatrix, M::AbstractMatrix) =
+    kcholsolve!(LX, M)
+
 # ---- trial_combine! : dest ← X + t·dX, via ordinary (non-mutating)
 #     arithmetic and direct assignment — deliberately NOT built from
 #     copyto!+kaxpby!. For mutable-element types (BigFloat) copyto!
@@ -257,6 +262,24 @@ function trial_combine!(dest::AbstractArray{T}, X::AbstractArray{T}, t::T, dX::A
     end
     return dest
 end
+
+# Immutable arithmetic does not distinguish owned from alias-safe array
+# storage. BigFloat specializes this seam so solver-owned MPFR destinations
+# can be reused without constructing one object per entry.
+trial_combine_owned!(
+    dest::AbstractArray{T},
+    X::AbstractArray{T},
+    t::T,
+    dX::AbstractArray{T},
+) where {T} = trial_combine!(dest, X, t, dX)
+
+trial_combine_owned!(
+    dest::AbstractArray{T},
+    X::AbstractArray{T},
+    t::T,
+    dX::AbstractArray{T},
+    ::T,
+) where {T} = trial_combine!(dest, X, t, dX)
 
 """
     trial_isposdef!(scratch, X, t, dX)

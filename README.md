@@ -21,12 +21,13 @@ more than `Float64`.
   and `DoubleFloats.Double64`, the last three via package extensions.
 - **Multithreaded fixed-width arithmetic** — `Float64` and
   `MultiFloats.Float64xN` use cost-aware block scheduling, triangular Schur
-  reduction, and phase-aware BLAS thread control. `BigFloat` deliberately uses
-  one solver thread.
+  reduction, and phase-aware BLAS thread control. Native `BigFloat` kernels
+  deliberately use one solver thread; an opt-in reduced-arrow preconditioner
+  can use Float64x4 workers while retaining BigFloat residual checks.
 - **Structure-aware**: sparse constraint storage, a block-arrow KKT path for
-  models with shared plus per-block local variables, and a fused kernel for
-  models whose blocks are all 2x2. The fused path does not allocate the
-  otherwise-large transformed-panel or pair-buffer storage.
+  models with shared plus per-block local variables, a no-pair-buffer fused
+  kernel for `2x2` blocks, and an optional combined reduced shared panel for
+  exact singleton-local arrows.
 - **Automatic solve planning** — problem classification, equality and LP-row
   presolve, scaling, arithmetic-aware kernel selection, memory budgeting, and
   conservative parameter profiles happen before factorization.
@@ -371,19 +372,27 @@ These are fixed-width bitstypes with no MPFR allocation overhead.
 `BigFloat` inputs should be constructed inside the intended
 `setprecision(BigFloat, bits) do ... end` scope. `solve!` establishes
 `precision_bits` for the complete solve, but it cannot recover digits that
-were already rounded away when the input data was created. The current
-`BigFloat` implementation is serial and uses ownership-aware,
-allocation-reusing scalar kernels; requesting more solver threads does not
-parallelize it.
+were already rounded away when the input data was created. Native `BigFloat`
+assembly and solves are serial and use ownership-aware, allocation-reusing
+scalar kernels. The exception is the opt-in exact singleton-arrow mixed path
+described below: its independent BigFloat block metric preparation and
+Float64x4 reduced panel may use multiple workers, while residual evaluation,
+refinement, and fallback remain in BigFloat.
 
 The packed triangular Schur/Gram backend for `Float64x4` and `BigFloat` is
-available through `extended_precision_blas=:auto`, but remains off by default
-until each workload clears a conservative runtime and memory crossover.
-Exact-arrow models with only `2x2` PSD blocks bypass that optional backend for
-both types: the fused direct kernel needs no transformed panel or pair buffer
-and takes precedence even when packed extended BLAS is requested. Diagnostics
-report `gram_kernel=:fused_arrow_2x2` and
-`gram_kernel_reason=:fused_arrow_specialized` for this case.
+available through `extended_precision_blas=:auto` only when a workload clears
+a conservative runtime and memory crossover. Both types use that conservative
+policy by default; other arithmetic types remain `:off` unless requested.
+Exact singleton-local arrows with only `2x2` PSD blocks have a stronger
+Float64x4 specialization: they eliminate each local coefficient in its
+three-dimensional symmetric-coefficient space, pack two reduced rows per
+block, and form only the lower shared Schur triangle with one blocked SYRK.
+`:auto` selects it only after arithmetic, dimension, active-density,
+shared-Schur-density, thread, packing-cost, and memory checks. Rejected cases
+retain the fused direct kernel and its no-panel/no-pair-buffer storage.
+Diagnostics distinguish the Float64x4
+`:reduced_arrow[_threaded]_multifloatvec4_syrk`, generic reduced-arrow, and
+`:fused_arrow_2x2` paths.
 Memory planning uses the smallest available signal among host free memory,
 Linux cgroup limits, and the optional `SDPX_MEMORY_LIMIT_BYTES` environment
 limit. For example:
@@ -401,33 +410,61 @@ conditioning, rank, and convergence checks. Any failed guard recomputes with
 the native extended-precision factorization. The feature remains off by
 default while large complete-solve validation is still being collected.
 
+For exact singleton-local BigFloat arrows, loading `MultiFloats` adds a
+separate guarded `mixed_precision_kkt=:on` path. It builds the coefficient
+metric and all residuals in BigFloat, forms and factors the reduced shared
+system in Float64x4, applies BigFloat iterative refinement, and automatically
+reconstructs and factors the native BigFloat Schur matrix if a guard fails.
+The exact refinement guard rejects this path on the medium CSDR benchmark and
+safely reconstructs the native factorization, so it is not enabled by default.
+
+BigFloat also has an opt-in staged precision policy:
+
+```julia
+result = solve!(
+    problem,
+    SolverOptions{BigFloat}(
+        precision_bits=256,
+        working_precision_policy=:auto,
+        minimum_working_precision_bits=192,
+    ),
+)
+```
+
+A lower-precision attempt is accepted only after the usual
+original-coordinate certificate; otherwise SDPX retries at the requested
+precision while time remains. The fixed policy remains the default. The
+[native BigFloat report](bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md)
+records the profile, 1/2/4/8 scaling, precision A/B, memory, and validation.
+
 ## Threading
 
 Start Julia with `-t N` to enable threaded block factorisation, dense and sparse
 Schur assembly, residual construction, direction recovery, arrow
 factorisation/solves, and line search.
 
-This applies to immutable fixed-width arithmetic. `BigFloat` is deliberately
-kept serial: mutable scalar ownership, allocator pressure, and per-worker
-high-precision workspace growth make the serial owned-storage path the only
-release configuration currently validated. This is a solver policy, not a
-general statement that MPFR can never be called concurrently.
+This applies generally to immutable fixed-width arithmetic. Most native
+`BigFloat` phases remain serial because mutable scalar ownership, allocator
+pressure, and per-worker high-precision workspace growth make unrestricted
+threading unsafe. Exact singleton-local `2x2` arrows are the validated
+exception: block preparation owns disjoint per-block storage and triangular
+SYRK tasks own disjoint Schur tiles, so those phases may use the requested
+workers without sharing a writable MPFR object.
 
 Scaling depends strongly on problem size — small models do not have enough work
 per block to amortise the synchronisation. Small Float64 Schur builds therefore
-stay serial automatically. On the current scheduler microbenchmarks,
-Float64x4 reached 4.08x on a medium dense Schur case and 3.73x on a medium
-sparse exact-arrow case at eight requested workers; the host exposed four
-hardware threads, so these are scheduler measurements rather than an
-eight-core claim. See the [threading guide](docs/threading.md) and its linked
-raw protocol.
+stay serial automatically. On the cluster medium exact-arrow benchmark, the
+final Float64x4 solve took 51.48 / 31.34 / 19.35 / 11.73 seconds with
+1 / 2 / 4 / 8 Julia threads. See the
+[threading guide](docs/threading.md) and its linked raw protocol.
 
-`Float64x4` and `BigFloat` can opt into the blocked triangular Schur backend
-with `extended_precision_blas=:auto`. It is off by default, never redirects
-`Float64`, keeps BigFloat serial, and retains sparse outer products where panel
-packing is not predicted to pay for itself. The fused exact-arrow `2x2` route
-is a higher-priority specialization and therefore does not allocate those
-panels for either arithmetic type.
+`Float64x4` and `BigFloat` use the conservative
+`extended_precision_blas=:auto` policy by default. The policy never redirects
+`Float64` and retains sparse outer products where panel packing is not
+predicted to pay for itself. Exact singleton-arrow problems use their
+dedicated reduced panel only when its separate structure, memory, density,
+dimension, arithmetic, and thread-count crossover predicts a win; otherwise
+the fused `2x2` route remains active.
 
 ## Benchmarks
 
@@ -458,9 +495,11 @@ including cases where SDPX does worse — with the configuration for each.
 - Non-arrow SDP problems still use a dense Schur/KKT fallback. Large dense
   high-precision instances can therefore be limited by quadratic workspace
   and cubic factorization cost before arithmetic accuracy becomes the issue.
-- BigFloat kernels are serial, and distributed Schur assembly/factorization is
-  not implemented. On a cluster, run independent BigFloat solves as separate
-  jobs or job-array elements.
+- General native BigFloat kernels and distributed Schur
+  assembly/factorization remain serial. The ownership-safe native
+  reduced-arrow Schur path is a narrow shared-memory exception; the guarded
+  reduced-arrow mixed path remains opt-in. On a cluster, use separate jobs or
+  job-array elements for non-arrow native BigFloat solves.
 
 ## Design and benchmark notes
 

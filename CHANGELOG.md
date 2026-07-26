@@ -4,15 +4,16 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] — unreleased
+## [0.2.0] — 2026-07-26
 
 First public release, prepared as a standalone package derived from
 [SDPJSolver.jl](https://github.com/FishboneChiang/SDPJSolver.jl) (MIT,
 Li-Yuan Chiang). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for what
 is derived and what is original.
 
-Because this is the first release under the SDPX name, the list below describes
-the state of the package rather than a delta against a previous SDPX version.
+Because this is the first published release under the SDPX name, the list
+below describes the state of the package rather than a delta against a
+previous published SDPX version.
 
 ### Solver core
 
@@ -25,6 +26,10 @@ the state of the package rather than a delta against a previous SDPX version.
   variables, and a fused compute-and-scatter Schur kernel for models whose
   blocks are all 2x2. The fused path omits both transformed-panel and packed
   pair storage when neither is consumed.
+- Optional direct elimination for singleton-local `2x2` arrows. It forms the
+  reduced shared Schur matrix from one combined two-row-per-block panel and a
+  lower-triangular blocked SYRK, avoiding both pairwise shared contractions and
+  the later sequence of dense local rank updates.
 - Sparse constraint storage with a flat COO layout and precomputed column-major
   indices.
 - Dedicated linear-programming path for models whose cones are all 1x1,
@@ -44,17 +49,37 @@ the state of the package rather than a delta against a previous SDPX version.
   longest-processing-time scheduling, a workload crossover for small Float64
   problems, lower-triangle-only reduction where supported, and phase-aware
   BLAS thread control.
-- Fixed-width extended arithmetic uses the multicore scheduler. `BigFloat`
-  deliberately remains serial to preserve the validated ownership model and
-  avoid per-worker arbitrary-precision workspace growth.
+- Fixed-width extended arithmetic uses the multicore scheduler. General native
+  `BigFloat` kernels remain serial, while exact singleton-local `2x2` arrows
+  may parallelize disjoint block preparation and lower-triangular Schur tiles
+  without sharing writable MPFR objects. An opt-in mixed path builds exact
+  metrics and residuals in BigFloat while a Float64x4 panel/factorization uses
+  multiple workers; failed refinement first falls back to the exact native
+  reduced panel and only then to legacy pairwise assembly.
 - Optional cache-blocked, panel-packed triangular `syrk!`/`gemm!` kernels for
   fixed-width extended arithmetic and BigFloat. Selection accounts for
-  dimensions, density, thread count, packing cost, expected Schur density, and
-  available memory; the backend remains disabled by default. Exact-arrow
-  `2x2` models bypass this optional packing route for both arithmetic families
-  and use the fused no-panel/no-pair-buffer kernel.
+  dimensions, active density, expected shared-Schur density, thread count,
+  packing cost, arithmetic type, and available memory. Float64x4 and BigFloat
+  default to conservative `:auto`; Float64 is never redirected, and rejected
+  cases retain the fused
+  no-panel/no-pair-buffer kernel.
+- Four-lane `MultiFloatVec{4,Float64,4}` lower-triangular SYRK specialization
+  for Float64x4 reduced panels. It preserves each lane's scalar reduction
+  order, uses disjoint output tiles across Julia tasks, and allocates nothing
+  in the arithmetic loop.
+- Precomputed three-bit `2x2` coefficient masks remove repeated structural-zero
+  tests from high-precision contraction loops. Singleton local factors cache
+  their inverse, and all optional reduced paths store and compute only one
+  Schur triangle.
+- On the canonical medium CSDR model, the native 256-bit BigFloat reduced-arrow
+  path lowers solve time from 280.011 seconds to 205.202 / 191.701 / 110.741 /
+  86.752 seconds at 1 / 2 / 4 / 8 Julia threads, with identical 41-iteration
+  objectives and certificates. These measurements are instance- and
+  hardware-specific, not a general solver claim.
 - Memory planning honors host free memory, Linux cgroup v1/v2 limits, and the
-  optional `SDPX_MEMORY_LIMIT_BYTES` ceiling.
+  optional `SDPX_MEMORY_LIMIT_BYTES` ceiling. Workspace estimates include
+  portable object-header/allocator overhead rather than under-reporting small
+  Linux workspaces.
 
 ### Robustness and diagnostics
 
@@ -73,6 +98,14 @@ the state of the package rather than a delta against a previous SDPX version.
   collapses while the residuals and the search direction are both healthy.
 - Adaptive iterative refinement driven by the KKT residual, with rollback if a
   refinement pass increases it.
+- Opt-in staged BigFloat working precision. A conservative tolerance- and
+  dimension-based selector may start below the requested precision, accepts
+  only an independently certified result, and otherwise retries at the
+  requested precision within the remaining time budget.
+- Conservative automatic ownership of refinement work: exact unregularized
+  reduced Float64x4 and native singleton-arrow BigFloat factorizations may
+  omit the explicit residual pass when the outer tolerance is no tighter than
+  `sqrt(eps(T))`; explicit, tight, regularized, and mixed paths retain it.
 - Exact fraction-to-boundary step selection for models with 2x2 blocks, selected
   automatically.
 - Ruiz equilibration for dense and sparse inputs, arithmetic-type-native
@@ -92,6 +125,9 @@ the state of the package rather than a delta against a previous SDPX version.
 - Optional spectrum reconstruction and atomic CSV/JSON/JLD2 export after a
   successful solve. JLD2 stores a versioned `spectrum` payload with
   `format_version`, `metadata`, and `records`.
+- Mixed-precision diagnostics now identify dense Float64 and reduced-arrow
+  Float64x4 backends separately, including attempts, fallback reason, and
+  effective panel thread count.
 
 ### Interfaces
 
@@ -107,9 +143,13 @@ the state of the package rather than a delta against a previous SDPX version.
   converge to the tolerance a reference solver reaches on the same instance.
   See `bench/csdr_psd_dual/RESULTS.md` for current evidence and
   `bench/opt2026/REPORT.md` for the historical optimization log.
-- BigFloat execution is serial. Large non-arrow high-precision SDPs still use
-  dense Schur/KKT storage and can exceed practical memory before a full solve
-  is attempted.
+- General native BigFloat execution is serial. Exact singleton-local `2x2`
+  arrows are a validated exception with exclusive block/panel ownership and
+  disjoint lower-triangular Schur tiles. The opt-in Float64x4 reduced-arrow
+  preconditioner fails the exact refinement guard on the validated medium
+  model and safely falls back to native BigFloat, so it remains off by
+  default. Large non-arrow high-precision SDPs still use dense Schur/KKT
+  storage and can exceed practical memory before a full solve is attempted.
 - Equality-constrained LPs still use dense LU, native SOCP scaling and chordal
   SDP decomposition are not implemented, and distributed Schur
   factorization is future work.

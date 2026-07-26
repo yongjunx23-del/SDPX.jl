@@ -2,7 +2,7 @@
 
 Date: 2026-07-26
 
-Repository: `/Users/xuyongjun/Desktop/project/SDPX/SDPX.jl`
+Repository: the SDPX.jl repository root
 
 ## Purpose
 

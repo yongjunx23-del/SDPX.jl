@@ -91,6 +91,14 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError("verbosity must be nonnegative"))
     opts.precision_bits > 0 ||
         throw(ArgumentError("precision_bits must be positive"))
+    opts.working_precision_policy in (:fixed, :auto) ||
+        throw(ArgumentError(
+            "working_precision_policy must be :fixed or :auto",
+        ))
+    opts.minimum_working_precision_bits > 0 ||
+        throw(ArgumentError(
+            "minimum_working_precision_bits must be positive",
+        ))
     isfinite(opts.presolve_tolerance) &&
         zero(T) <= opts.presolve_tolerance < one(T) ||
         throw(ArgumentError(
@@ -264,6 +272,250 @@ function _uses_fused_arrow(prob::SDPProblem{T}) where {T}
     return all(>(0), frequency) && any(==(1), frequency)
 end
 
+# Optional scalar backends may provide a lower-cost arithmetic for the
+# reduced singleton-arrow factorization. The MultiFloats extension maps
+# BigFloat to Float64x4; core SDPX remains dependency-free when MultiFloats is
+# unavailable.
+mixed_arrow_arithmetic(::Type) = nothing
+
+reduced_arrow_syrk_label(::Type, threaded::Bool) =
+    threaded ? :reduced_arrow_threaded_syrk : :reduced_arrow_syrk
+
+"""
+    _reduced_arrow_crossover(
+        prob, kernel_type, mode, memory_fraction, thread_count;
+        mixed=false, available_memory_bytes=nothing,
+    )
+
+Choose the specialized reduced-panel path for exact singleton-local `2x2`
+arrow systems. Unlike the general sparse-panel selector, this model includes
+the dense rank-one local-variable updates that direct elimination avoids. The
+decision therefore accounts for the actual shared active density, exact
+shared-Schur density when available, panel packing, arithmetic family, worker
+count, and the additional mixed-precision storage.
+"""
+function _reduced_arrow_crossover(
+    prob::SDPProblem{T},
+    ::Type{K},
+    mode::Symbol,
+    memory_fraction::Float64,
+    thread_count::Int;
+    mixed::Bool=false,
+    available_memory_bytes::Union{Nothing,Integer}=nothing,
+) where {T,K}
+    mode in (:off, :auto, :on) ||
+        throw(ArgumentError("reduced-arrow mode must be :off, :auto, or :on"))
+    workers = min(max(thread_count, 1), Threads.nthreads())
+    config = ExtendedPrecisionBLAS._kernel_config(K, workers)
+    disabled(reason::Symbol; packing_bytes::Int=0) =
+        ExtendedPrecisionBLAS.CrossoverDecision(
+            false,
+            reason,
+            1.0,
+            packing_bytes,
+            0.0,
+            0.0,
+            config,
+        )
+    mode === :off && return disabled(:disabled)
+    family = ExtendedPrecisionBLAS.arithmetic_family(K)
+    family in (:fixed_extended, :bigfloat) ||
+        return disabled(:unsupported_arithmetic)
+    _uses_fused_arrow(prob) || return disabled(:incompatible_structure)
+
+    cons = prob.cons::SparseCons{T}
+    L, m = prob.dims.L, prob.dims.m
+    frequency = zeros(Int, m)
+    for variables in cons.active, variable in variables
+        frequency[variable] += 1
+    end
+    global_count = count(>(1), frequency)
+    global_count >= 2 || return disabled(:problem_too_small)
+
+    shared_incidences = 0
+    local_structural_pairs = 0
+    legacy_global_contractions = 0.0
+    for block in 1:L
+        variables = cons.schur_order[block]
+        local_count = count(variable -> frequency[variable] == 1, variables)
+        local_count == 1 || return disabled(:incompatible_structure)
+        shared_positions = Int[]
+        for position in eachindex(variables)
+            frequency[variables[position]] > 1 &&
+                push!(shared_positions, position)
+        end
+        shared_count = length(shared_positions)
+        shared_incidences += shared_count
+        local_structural_pairs += shared_count + 1
+        # The fused reference contracts every left shared coefficient with
+        # each shared coefficient to its right. Its cost is the number of
+        # structurally nonzero packed coefficient entries on the right.
+        for (right_rank, position) in pairs(shared_positions)
+            legacy_global_contractions +=
+                right_rank *
+                count_ones(cons.packed2_mask[block][position])
+        end
+    end
+
+    shared_pairs =
+        Float64(global_count) * Float64(global_count + 1) / 2
+    rows = 2 * L
+    work = Float64(rows) * shared_pairs
+    active_density =
+        Float64(shared_incidences) /
+        max(Float64(L) * Float64(global_count), 1.0)
+    shared_schur_density = if prob.structure.schur_exact
+        shared_upper_nnz = max(
+            prob.structure.schur_upper_nnz - local_structural_pairs,
+            0,
+        )
+        clamp(
+            Float64(shared_upper_nnz) / max(shared_pairs, 1.0),
+            0.0,
+            1.0,
+        )
+    else
+        prob.structure.schur_density
+    end
+
+    kernel_bytes = ExtendedPrecisionBLAS._element_storage_bytes(K)
+    target_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    storage_bytes = if mixed
+        # Converted packed coefficients, the tall panel, Schur/factor copies,
+        # one RHS, and the exact 3x3 BigFloat metric cached per block.
+        mixed_elements =
+            3 * (shared_incidences + L) +
+            rows * global_count +
+            2 * global_count * global_count +
+            global_count
+        Float64(mixed_elements) * kernel_bytes +
+        Float64(9L) * target_bytes
+    else
+        Float64(rows) * Float64(global_count) * kernel_bytes
+    end
+    packing_bytes =
+        storage_bytes >= typemax(Int) ?
+        typemax(Int) : ceil(Int, storage_bytes)
+    available = isnothing(available_memory_bytes) ?
+                ExtendedPrecisionBLAS._system_free_memory_bytes() :
+                Int(available_memory_bytes)
+    memory_budget =
+        ExtendedPrecisionBLAS._memory_budget_from_fraction(
+            available,
+            memory_fraction,
+        )
+    packing_bytes <= memory_budget ||
+        return disabled(:memory_budget; packing_bytes=packing_bytes)
+
+    # Both routes form the same shared contractions. The reduced panel gains
+    # cache reuse and removes one dense rank-one update per local variable;
+    # packing cost grows only with active shared coefficients. Fixed-width
+    # workers improve panel locality modestly, but the estimate deliberately
+    # does not claim ideal thread scaling because the legacy route is threaded
+    # too. Native BigFloat work avoided by the mixed route receives the same
+    # empirically conservative allocation penalty as the general selector.
+    profile = ExtendedPrecisionBLAS.load_profile(family)
+    locality_gain = if family === :bigfloat
+        # Native MPFR tiles are independently owned. Parallelism therefore
+        # scales the direct panel without allocating one full Schur matrix per
+        # worker. Keep the estimate below ideal scaling because the panel pack
+        # and reduced factorization remain partly serial.
+        1.08 * (1.0 + 0.55 * (min(workers, 8) - 1))
+    else
+        1.55 * (1.0 + 0.04 * (min(workers, 8) - 1))
+    end
+    reference_cost =
+        legacy_global_contractions + Float64(L) * shared_pairs
+    direct_cost =
+        work / locality_gain + 6.0 * shared_incidences + 48.0 * L
+    if mixed
+        reference_cost *= 10.0
+        # Exact MPFR metric construction and residual checks remain in target
+        # precision; only Schur assembly/factorization moves to Float64x4.
+        direct_cost +=
+            18.0 * shared_incidences + 128.0 * L
+    end
+    predicted = reference_cost / max(direct_cost, 1.0)
+
+    if mode === :on
+        return ExtendedPrecisionBLAS.CrossoverDecision(
+            true,
+            :forced,
+            predicted,
+            packing_bytes,
+            direct_cost,
+            reference_cost,
+            config,
+        )
+    end
+
+    reason, enabled = if global_count < profile.minimum_columns ||
+                         work < profile.minimum_work
+        (:problem_too_small, false)
+    elseif shared_schur_density < profile.minimum_schur_density
+        (:schur_too_sparse, false)
+    elseif active_density < 0.10
+        (:sparse_outer_product_cheaper, false)
+    elseif predicted < profile.minimum_speedup
+        (:packing_not_amortized, false)
+    else
+        (:predicted_speedup, true)
+    end
+    return ExtendedPrecisionBLAS.CrossoverDecision(
+        enabled,
+        reason,
+        predicted,
+        packing_bytes,
+        direct_cost,
+        reference_cost,
+        config,
+    )
+end
+
+function _reduced_arrow_decision(
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+    available_memory_bytes::Integer,
+) where {T}
+    return _reduced_arrow_crossover(
+        prob,
+        T,
+        opts.extended_precision_blas,
+        opts.extended_precision_memory_fraction,
+        opts.threads;
+        available_memory_bytes=available_memory_bytes,
+    )
+end
+
+function _mixed_reduced_arrow_decision(
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+    available_memory_bytes::Integer,
+) where {T}
+    mixed_type =
+        T === BigFloat ? mixed_arrow_arithmetic(T) : nothing
+    if mixed_type === nothing
+        return ExtendedPrecisionBLAS.CrossoverDecision(
+            false,
+            :unsupported_arithmetic,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            ExtendedPrecisionBLAS.KernelConfig(),
+        )
+    end
+    return _reduced_arrow_crossover(
+        prob,
+        mixed_type,
+        opts.mixed_precision_kkt,
+        opts.mixed_precision_memory_fraction,
+        opts.threads;
+        mixed=true,
+        available_memory_bytes=available_memory_bytes,
+    )
+end
+
 function _available_memory_bytes()
     return ExtendedPrecisionBLAS._system_free_memory_bytes()
 end
@@ -402,6 +654,11 @@ function build_execution_plan(
     opts::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
     classification = classify_problem(prob)
+    available = _available_memory_bytes()
+    reduced_arrow_decision =
+        _reduced_arrow_decision(prob, opts, available)
+    mixed_arrow_decision =
+        _mixed_reduced_arrow_decision(prob, opts, available)
     opts.algorithm in (:auto, :lp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, or :sdp"))
     algorithm = if opts.algorithm === :auto
@@ -430,8 +687,17 @@ function build_execution_plan(
         :none
     end
     requested_threads = max(opts.threads, 1)
-    selected_threads = classification.arithmetic === :bigfloat ? 1 :
-                       min(requested_threads, Base.Threads.nthreads())
+    mixed_arrow_threads =
+        classification.arithmetic === :bigfloat &&
+        mixed_arrow_decision.enabled
+    native_bigfloat_reduced =
+        classification.arithmetic === :bigfloat &&
+        reduced_arrow_decision.enabled
+    selected_threads =
+        classification.arithmetic === :bigfloat &&
+        !mixed_arrow_threads &&
+        !native_bigfloat_reduced ?
+        1 : min(requested_threads, Base.Threads.nthreads())
     if classification.arithmetic === :float64 &&
        classification.cone === :sdp &&
        classification.maximum_block_size <= 2 &&
@@ -440,9 +706,17 @@ function build_execution_plan(
         # deterministic reductions cost more than their scalar kernels.
         selected_threads = 1
     end
-    schedule = selected_threads == 1 ? :serial :
-               classification.size === :small ? :static_columns :
-               :blocked_dynamic
+    schedule = if selected_threads == 1
+        :serial
+    elseif mixed_arrow_threads
+        :mixed_arrow_contiguous_blocks
+    elseif reduced_arrow_decision.enabled
+        :reduced_arrow_contiguous_blocks
+    elseif classification.size === :small
+        :static_columns
+    else
+        :blocked_dynamic
+    end
     kkt_backend = algorithm === :lp_primal_dual ?
                   (
                       classification.equalities == 0 ?
@@ -450,7 +724,6 @@ function build_execution_plan(
                       :dense_lu
                   ) :
                   _runtime_schur_backend(prob)
-    available = _available_memory_bytes()
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
     gram_kernel = if algorithm === :lp_primal_dual
@@ -481,6 +754,10 @@ function build_execution_plan(
         else
             :serial_weighted_outer_product
         end
+    elseif mixed_arrow_decision.enabled
+        :mixed_float64x4_reduced_arrow_syrk
+    elseif reduced_arrow_decision.enabled
+        reduced_arrow_syrk_label(T, selected_threads > 1)
     elseif _uses_fused_arrow(prob)
         :fused_arrow_2x2
     elseif T === Float64
@@ -810,6 +1087,14 @@ end
 rather than a central guess; see `estimate_sdp_workspace_bytes`."""
 const WORKSPACE_ESTIMATE_MARGIN_NUMERATOR = 3
 const WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR = 2
+# Array/object headers and allocator size classes are platform-dependent and
+# are not represented by an element count. Julia 1.12 on 64-bit Linux needed
+# 152 bytes more than the old estimate on a small workspace even after the
+# multiplicative margin. Charge a conservative fixed amount plus one cache
+# line per major per-block workspace object; this is negligible for large
+# models but keeps the documented upper-bound contract portable.
+const WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES = 4096
+const WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES = 1024
 
 """
     dense_workspace_floor_bytes(::Type{T}, m, n, L, thread_count) -> Int
@@ -889,8 +1174,15 @@ function estimate_sdp_workspace_bytes(
     # high-precision models. The margin below makes the figure an upper bound
     # over the measured range, at the cost of reserving somewhat more than is
     # strictly needed.
-    return (counted * WORKSPACE_ESTIMATE_MARGIN_NUMERATOR) ÷
-           WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR
+    element_bound =
+        cld(
+            counted * WORKSPACE_ESTIMATE_MARGIN_NUMERATOR,
+            WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR,
+        )
+    object_overhead =
+        WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES +
+        WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES * L
+    return element_bound + object_overhead
 end
 
 function _attach_diagnostics(

@@ -539,6 +539,30 @@ _solve_arrow_diagonal!(factor, right_hand_side) =
     kcholsolve!(factor, right_hand_side)
 
 function _solve_arrow_diagonal!(
+    factor::AbstractMatrix{T},
+    right_hand_side::AbstractVector{T},
+    singleton_inverse::T,
+) where {T}
+    size(factor, 1) == 1 ||
+        return kcholsolve!(factor, right_hand_side)
+    @inbounds right_hand_side[1] *= singleton_inverse
+    return right_hand_side
+end
+
+function _solve_arrow_diagonal!(
+    factor::AbstractMatrix{T},
+    right_hand_side::AbstractMatrix{T},
+    singleton_inverse::T,
+) where {T}
+    size(factor, 1) == 1 ||
+        return kcholsolve!(factor, right_hand_side)
+    @inbounds for column in axes(right_hand_side, 2)
+        right_hand_side[1, column] *= singleton_inverse
+    end
+    return right_hand_side
+end
+
+function _solve_arrow_diagonal!(
     factor::AbstractMatrix{BigFloat},
     right_hand_side::AbstractVector{BigFloat},
 )
@@ -580,6 +604,107 @@ function _solve_arrow_diagonal!(
     return right_hand_side
 end
 
+function _solve_arrow_diagonal!(
+    factor::AbstractMatrix{BigFloat},
+    right_hand_side::AbstractVector{BigFloat},
+    singleton_inverse::BigFloat,
+)
+    size(factor, 1) == 1 ||
+        return kcholsolve!(factor, right_hand_side)
+    MA.operate!(*, right_hand_side[1], singleton_inverse)
+    return right_hand_side
+end
+
+function _solve_arrow_diagonal!(
+    factor::AbstractMatrix{BigFloat},
+    right_hand_side::AbstractMatrix{BigFloat},
+    singleton_inverse::BigFloat,
+)
+    size(factor, 1) == 1 ||
+        return kcholsolve!(factor, right_hand_side)
+    @inbounds for column in axes(right_hand_side, 2)
+        MA.operate!(
+            *,
+            right_hand_side[1, column],
+            singleton_inverse,
+        )
+    end
+    return right_hand_side
+end
+
+function _cache_arrow_singleton_inverse!(
+    inverses::AbstractVector{T},
+    block::Int,
+    factor::AbstractMatrix{T},
+) where {T}
+    diagonal = factor[1, 1]
+    inverses[block] = one(T) / diagonal / diagonal
+    return inverses[block]
+end
+
+function _cache_arrow_singleton_inverse!(
+    inverses::AbstractVector{BigFloat},
+    block::Int,
+    factor::AbstractMatrix{BigFloat},
+)
+    inverse = inverses[block]
+    MA.operate!(one, inverse)
+    _mpfr_divide!(inverse, inverse, factor[1, 1])
+    _mpfr_divide!(inverse, inverse, factor[1, 1])
+    return inverse
+end
+
+function _scale_arrow_singleton_coupling!(
+    solved_coupling::AbstractMatrix{T},
+    coupling::AbstractMatrix{T},
+    inverse::T,
+) where {T}
+    @inbounds for column in axes(coupling, 2)
+        solved_coupling[1, column] =
+            coupling[1, column] * inverse
+    end
+    return solved_coupling
+end
+
+function _scale_arrow_singleton_coupling!(
+    solved_coupling::AbstractMatrix{BigFloat},
+    coupling::AbstractMatrix{BigFloat},
+    inverse::BigFloat,
+)
+    @inbounds for column in axes(coupling, 2)
+        MA.operate_to!(
+            solved_coupling[1, column],
+            *,
+            coupling[1, column],
+            inverse,
+        )
+    end
+    return solved_coupling
+end
+
+function _prepare_arrow_coupling_solve!(
+    arrow::ArrowWorkspace{T},
+    block::Int,
+) where {T}
+    factor = arrow.Dbuf[block]
+    coupling = arrow.coupling[block]
+    solved_coupling = arrow.W[block]
+    if size(factor, 1) == 1
+        inverse = _cache_arrow_singleton_inverse!(
+            arrow.Dinv,
+            block,
+            factor,
+        )
+        return _scale_arrow_singleton_coupling!(
+            solved_coupling,
+            coupling,
+            inverse,
+        )
+    end
+    copy_owned!(solved_coupling, coupling)
+    return _solve_arrow_diagonal!(factor, solved_coupling)
+end
+
 """
     factor_arrow_kkt!(ws, opts)
 
@@ -589,20 +714,38 @@ block; the remaining factor has dimension equal to the number of
 variables that touch more than one PSD block.
 """
 function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
+    factor_started = time_ns()
     arrow = ws.arrow::ArrowWorkspace{T}
     gids = arrow.global_ids
     ng = length(gids)
     total_attempts = 0
 
-    # Start with the compact S[G,G] assembled directly by the sparse path.
-    copy_owned!(arrow.Sred, arrow.Sgg)
+    # The reduced-panel path has already formed the exact local-variable
+    # Schur complement in `Sred`. The legacy fused path starts from `Sgg` and
+    # applies one rank update per local block below.
+    mixed_reduced = arrow.mixed_reduced_ready
+    direct_reduced = arrow.reduced_panel_ready || mixed_reduced
+    if mixed_reduced && opts.refine_policy === :fixed
+        materialize_mixed_arrow_native_fallback!(
+            ws::Workspace{BigFloat},
+            :fixed_refinement_policy,
+        )
+        return factor_arrow_kkt!(
+            ws::Workspace{BigFloat},
+            opts::SolverOptions{BigFloat},
+        )
+    end
+    direct_reduced || copy_owned!(arrow.Sred, arrow.Sgg)
+    schur_copy_finished = time_ns()
 
     use_threads = ws.thread_count > 1 &&
                   thread_safe_arithmetic(T) &&
                   length(arrow.local_ids) * max(1, ng)^2 >= 10_000
     if use_threads
-        for partial in arrow.Sredpartial
-            zero_owned!(partial)
+        if !direct_reduced
+            for partial in arrow.Sredpartial
+                zero_owned!(partial)
+            end
         end
         fill!(arrow.local_attempts, 0)
         fill!(arrow.local_ok, true)
@@ -637,10 +780,9 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
                     arrow.local_ok[l] = local_ok
                     local_ok || continue
 
-                    Wl = arrow.W[l]
                     Cl = arrow.coupling[l]
-                    copy_owned!(Wl, Cl)
-                    _solve_arrow_diagonal!(D, Wl)
+                    Wl = _prepare_arrow_coupling_solve!(arrow, l)
+                    direct_reduced && continue
                     # partial += Clᵀ·(D⁻¹Cl), as `q` rank-one updates. A BLAS
                     # call is counterproductive when q is commonly one; the
                     # dedicated loop keeps the first matrix index contiguous.
@@ -651,10 +793,12 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         total_attempts = sum(arrow.local_attempts)
         all(arrow.local_ok) ||
             return (ok=false, reg_attempts=total_attempts, q_pivoted=false)
-        @inbounds for partial in arrow.Sredpartial,
-                      column in 1:ng,
-                      row in column:ng
-            arrow.Sred[row, column] -= partial[row, column]
+        if !direct_reduced
+            @inbounds for partial in arrow.Sredpartial,
+                          column in 1:ng,
+                          row in column:ng
+                arrow.Sred[row, column] -= partial[row, column]
+            end
         end
     else
         for l in eachindex(arrow.local_ids)
@@ -688,10 +832,9 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
                     q_pivoted=false,
                 )
 
-            Wl = arrow.W[l]
             Cl = arrow.coupling[l]
-            copy_owned!(Wl, Cl)
-            _solve_arrow_diagonal!(D, Wl)
+            Wl = _prepare_arrow_coupling_solve!(arrow, l)
+            direct_reduced && continue
 
             # Sred -= S[G,U_l]·W_l as cache-contiguous rank-one updates.
             if T === BigFloat
@@ -710,13 +853,64 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         end
     end
 
-    reduced = _factor_with_relative_regularization!(arrow.Sredbuf, arrow.Sred)
+    if direct_reduced && total_attempts > 0
+        if mixed_reduced
+            materialize_mixed_arrow_native_fallback!(
+                ws::Workspace{BigFloat},
+                :local_regularization,
+            )
+        else
+            materialize_reduced_arrow_native_fallback!(ws)
+        end
+        return factor_arrow_kkt!(ws, opts)
+    end
+    local_elimination_finished = time_ns()
+
+    reduced = if mixed_reduced
+        _factor_with_relative_regularization!(
+            arrow.mixed_reduced_factor,
+            arrow.mixed_reduced_schur,
+        )
+    else
+        _factor_with_relative_regularization!(arrow.Sredbuf, arrow.Sred)
+    end
+    if mixed_reduced && !reduced.ok
+        materialize_mixed_arrow_native_fallback!(
+            ws::Workspace{BigFloat},
+            :factorization_failed,
+        )
+        return factor_arrow_kkt!(
+            ws::Workspace{BigFloat},
+            opts::SolverOptions{BigFloat},
+        )
+    end
     total_attempts += reduced.attempts
     reduced.ok || return (ok=false, reg_attempts=total_attempts, q_pivoted=false)
+    shared_factorization_finished = time_ns()
     if opts.verbosity >= 2 && total_attempts > 0
         @info "KKT: block-arrow Schur factors required $total_attempts regularization attempt(s)"
     end
-    return (ok=true, reg_attempts=total_attempts, q_pivoted=false)
+    return (
+        ok=true,
+        reg_attempts=total_attempts,
+        q_pivoted=false,
+        phase_times=(
+            schur_copy=
+                (schur_copy_finished - factor_started) / 1.0e9,
+            schur_factorization=
+                (
+                    shared_factorization_finished -
+                    local_elimination_finished
+                ) / 1.0e9,
+            constraint_triangular_solve=
+                (
+                    local_elimination_finished -
+                    schur_copy_finished
+                ) / 1.0e9,
+            equality_gram=0.0,
+            equality_factorization=0.0,
+        ),
+    )
 end
 
 """
@@ -754,7 +948,7 @@ function _solve_Q!(
     ::AbstractVector{BigFloat},
 )
     copy_owned!(dy_out, rhs)
-    return kcholsolve!(factor.L, dy_out)
+    return kcholsolve_owned!(factor.L, dy_out)
 end
 
 function _solve_Q!(
@@ -1018,6 +1212,36 @@ function _solve_arrow_locals!(
     return dx_out
 end
 
+function _solve_mixed_arrow_shared!(
+    factor::AbstractMatrix{M},
+    mixed_rhs::AbstractVector{M},
+    target_rhs::AbstractVector{BigFloat},
+) where {M}
+    @inbounds for index in eachindex(mixed_rhs, target_rhs)
+        mixed_rhs[index] = M(target_rhs[index])
+    end
+    kcholsolve!(factor, mixed_rhs)
+    @inbounds for index in eachindex(mixed_rhs, target_rhs)
+        converted = BigFloat(mixed_rhs[index])
+        MA.operate_to!(target_rhs[index], copy, converted)
+    end
+    return target_rhs
+end
+
+function _solve_arrow_shared!(
+    arrow::ArrowWorkspace{T},
+) where {T}
+    isempty(arrow.rg) && return arrow.rg
+    if arrow.mixed_reduced_ready
+        return _solve_mixed_arrow_shared!(
+            arrow.mixed_reduced_factor,
+            arrow.mixed_reduced_rhs,
+            arrow.rg::Vector{BigFloat},
+        )
+    end
+    return kcholsolve_owned!(arrow.Sredbuf, arrow.rg)
+end
+
 function solve_arrow_kkt!(
     ws::Workspace{T},
     r::AbstractVector{T},
@@ -1043,7 +1267,11 @@ function solve_arrow_kkt!(
                     q == 0 && continue
                     tl = arrow.tmp[l]
                     _gather_arrow_rhs!(tl, r, ids)
-                    _solve_arrow_diagonal!(arrow.Dbuf[l], tl)
+                    _solve_arrow_diagonal!(
+                        arrow.Dbuf[l],
+                        tl,
+                        arrow.Dinv[l],
+                    )
                     Cl = arrow.coupling[l]
                     @inbounds for a in 1:ng
                         correction = zero(T)
@@ -1071,13 +1299,17 @@ function solve_arrow_kkt!(
             q == 0 && continue
             tl = arrow.tmp[l]
             _gather_arrow_rhs!(tl, r, ids)
-            _solve_arrow_diagonal!(arrow.Dbuf[l], tl)
+            _solve_arrow_diagonal!(
+                arrow.Dbuf[l],
+                tl,
+                arrow.Dinv[l],
+            )
             Cl = arrow.coupling[l]
             _subtract_arrow_rhs!(arrow.rg, Cl, tl)
         end
     end
 
-    ng > 0 && kcholsolve!(arrow.Sredbuf, arrow.rg)
+    ng > 0 && _solve_arrow_shared!(arrow)
     # Public BigFloat calls repair aliased destinations before entering this
     # owned hot path. Solver workspaces are owned already, so resetting in
     # place avoids a second vector of MPFR allocations on every KKT solve.
@@ -1111,6 +1343,339 @@ function solve_arrow_kkt!(
     return dx_out
 end
 
+function _mixed_arrow_schur_mul!(
+    out::AbstractVector{BigFloat},
+    ws::Workspace{BigFloat},
+    cons::SparseCons{BigFloat},
+    x::AbstractVector{BigFloat},
+    alpha::BigFloat,
+    beta::BigFloat,
+)
+    if iszero(beta)
+        zero_owned!(out)
+    elseif !isone(beta)
+        @inbounds for value in out
+            MA.operate!(*, value, beta)
+        end
+    end
+    arrow = ws.arrow::ArrowWorkspace{BigFloat}
+    @inbounds for block in eachindex(arrow.coefficient_metric)
+        coefficients = cons.packed2[block]
+        masks = cons.packed2_mask[block]
+        ids = cons.schur_order[block]
+        metric = arrow.coefficient_metric[block]
+        scratch = ws.blk[block]
+        combined1 = scratch.W1[1, 1]
+        combined2 = scratch.W1[2, 1]
+        combined3 = scratch.W1[1, 2]
+        multiplication_buffer = scratch.W1[2, 2]
+        MA.operate!(zero, combined1)
+        MA.operate!(zero, combined2)
+        MA.operate!(zero, combined3)
+        for position in eachindex(ids)
+            variable_value = x[ids[position]]
+            mask = masks[position]
+            if mask & 0x01 != 0
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    combined1,
+                    coefficients[1, position],
+                    variable_value,
+                )
+            end
+            if mask & 0x02 != 0
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    combined2,
+                    coefficients[2, position],
+                    variable_value,
+                )
+            end
+            if mask & 0x04 != 0
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    combined3,
+                    coefficients[3, position],
+                    variable_value,
+                )
+            end
+        end
+
+        transformed1 = scratch.trialX[1, 1]
+        transformed2 = scratch.trialX[2, 1]
+        transformed3 = scratch.trialX[1, 2]
+        _bigfloat_mul_add2!(
+            transformed1,
+            multiplication_buffer,
+            metric[1, 1],
+            combined1,
+            metric[1, 2],
+            combined2,
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            transformed1,
+            metric[1, 3],
+            combined3,
+        )
+        _bigfloat_mul_add2!(
+            transformed2,
+            multiplication_buffer,
+            metric[2, 1],
+            combined1,
+            metric[2, 2],
+            combined2,
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            transformed2,
+            metric[2, 3],
+            combined3,
+        )
+        _bigfloat_mul_add2!(
+            transformed3,
+            multiplication_buffer,
+            metric[3, 1],
+            combined1,
+            metric[3, 2],
+            combined2,
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            transformed3,
+            metric[3, 3],
+            combined3,
+        )
+
+        contraction = combined1
+        contraction_buffer = combined2
+        for position in eachindex(ids)
+            mask = masks[position]
+            if mask == 0x06
+                _bigfloat_mul_add2!(
+                    contraction,
+                    multiplication_buffer,
+                    transformed2,
+                    coefficients[2, position],
+                    transformed3,
+                    coefficients[3, position],
+                )
+            else
+                first = true
+                if mask & 0x01 != 0
+                    MA.operate_to!(
+                        contraction,
+                        *,
+                        transformed1,
+                        coefficients[1, position],
+                    )
+                    first = false
+                end
+                if mask & 0x02 != 0
+                    if first
+                        MA.operate_to!(
+                            contraction,
+                            *,
+                            transformed2,
+                            coefficients[2, position],
+                        )
+                        first = false
+                    else
+                        MA.buffered_operate!(
+                            multiplication_buffer,
+                            MA.add_mul,
+                            contraction,
+                            transformed2,
+                            coefficients[2, position],
+                        )
+                    end
+                end
+                if mask & 0x04 != 0
+                    if first
+                        MA.operate_to!(
+                            contraction,
+                            *,
+                            transformed3,
+                            coefficients[3, position],
+                        )
+                    else
+                        MA.buffered_operate!(
+                            multiplication_buffer,
+                            MA.add_mul,
+                            contraction,
+                            transformed3,
+                            coefficients[3, position],
+                        )
+                    end
+                end
+            end
+            MA.buffered_operate!(
+                contraction_buffer,
+                MA.add_mul,
+                out[ids[position]],
+                alpha,
+                contraction,
+            )
+        end
+    end
+    return out
+end
+
+function _reduced_arrow_local_products!(
+    out::AbstractVector{T},
+    arrow::ArrowWorkspace{T},
+    x::AbstractVector{T},
+    alpha::T,
+    beta::T,
+    first_block::Int,
+    last_block::Int,
+) where {T}
+    gids = arrow.global_ids
+    ng = length(gids)
+    @inbounds for block in first_block:last_block
+        coupling = arrow.coupling[block]
+        projected = zero(T)
+        for global_position in 1:ng
+            projected +=
+                coupling[1, global_position] *
+                x[gids[global_position]]
+        end
+        arrow.tmp[block][1] = projected
+        local_variable = arrow.local_ids[block][1]
+        value =
+            projected +
+            arrow.Dsrc[block][1, 1] * x[local_variable]
+        out[local_variable] =
+            alpha * value + beta * out[local_variable]
+        # The global rows need
+        #   C' * (x_local + D^-1 * (C * x_global)).
+        # Cache the parenthesized scalar once per block instead of performing
+        # two extended-precision products for every global output.
+        arrow.tmp[block][1] =
+            x[local_variable] +
+            arrow.Dinv[block] * projected
+    end
+    return nothing
+end
+
+function _reduced_arrow_global_products!(
+    out::AbstractVector{T},
+    arrow::ArrowWorkspace{T},
+    x::AbstractVector{T},
+    alpha::T,
+    beta::T,
+    first_global::Int,
+    last_global::Int,
+) where {T}
+    gids = arrow.global_ids
+    ng = length(gids)
+    @inbounds for global_position in first_global:last_global
+        value = zero(T)
+        for other_global in 1:ng
+            reduced_entry =
+                global_position >= other_global ?
+                arrow.Sred[global_position, other_global] :
+                arrow.Sred[other_global, global_position]
+            value += reduced_entry * x[gids[other_global]]
+        end
+        for block in eachindex(arrow.local_ids)
+            coupling =
+                arrow.coupling[block][1, global_position]
+            value += coupling * arrow.tmp[block][1]
+        end
+        variable = gids[global_position]
+        out[variable] =
+            alpha * value + beta * out[variable]
+    end
+    return nothing
+end
+
+function _reduced_arrow_schur_mul!(
+    out::AbstractVector{T},
+    ws::Workspace{T},
+    x::AbstractVector{T},
+    alpha::T,
+    beta::T,
+) where {T}
+    arrow = ws.arrow::ArrowWorkspace{T}
+    block_count = length(arrow.local_ids)
+    global_count = length(arrow.global_ids)
+    workers = min(
+        max(ws.thread_count, 1),
+        Threads.nthreads(),
+        max(block_count, global_count, 1),
+    )
+    use_threads =
+        workers > 1 &&
+        thread_safe_arithmetic(T) &&
+        block_count * max(global_count, 1) >= 20_000
+    if use_threads
+        # Local-variable outputs and projection scratch are disjoint by block.
+        # Contiguous ranges preserve cache locality in the singleton arrays.
+        @sync for worker in 1:workers
+            Threads.@spawn begin
+                first_block =
+                    fld((worker - 1) * block_count, workers) + 1
+                last_block = fld(worker * block_count, workers)
+                _reduced_arrow_local_products!(
+                    out,
+                    arrow,
+                    x,
+                    alpha,
+                    beta,
+                    first_block,
+                    last_block,
+                )
+            end
+        end
+        # Every worker owns complete output entries, so the high-precision
+        # accumulation order within an entry is unchanged and no reduction or
+        # synchronization is required in the arithmetic loop.
+        @sync for worker in 1:workers
+            Threads.@spawn begin
+                first_global =
+                    fld((worker - 1) * global_count, workers) + 1
+                last_global = fld(worker * global_count, workers)
+                _reduced_arrow_global_products!(
+                    out,
+                    arrow,
+                    x,
+                    alpha,
+                    beta,
+                    first_global,
+                    last_global,
+                )
+            end
+        end
+    else
+        _reduced_arrow_local_products!(
+            out,
+            arrow,
+            x,
+            alpha,
+            beta,
+            1,
+            block_count,
+        )
+        _reduced_arrow_global_products!(
+            out,
+            arrow,
+            x,
+            alpha,
+            beta,
+            1,
+            global_count,
+        )
+    end
+    return out
+end
+
 function schur_mul!(
     out::AbstractVector{T},
     ws::Workspace{T},
@@ -1130,6 +1695,25 @@ function schur_mul!(
 
     aw = arrow::ArrowWorkspace{T}
     gids = aw.global_ids
+    if aw.mixed_reduced_ready
+        return _mixed_arrow_schur_mul!(
+            out::AbstractVector{BigFloat},
+            ws::Workspace{BigFloat},
+            aw.mixed_source_cons::SparseCons{BigFloat},
+            x::AbstractVector{BigFloat},
+            α::BigFloat,
+            β::BigFloat,
+        )
+    end
+    if aw.reduced_panel_ready
+        # The direct reduced path intentionally never materializes S[G,G].
+        # Recover its action as
+        #   Sgg*xg = Sred*xg + C'*(D^-1*(C*xg))
+        # using the stored singleton couplings. Fixed-width arithmetic assigns
+        # disjoint local/global output entries to workers; BigFloat retains
+        # the serial ownership-safe path.
+        return _reduced_arrow_schur_mul!(out, ws, x, α, β)
+    end
     @inbounds for (a, i) in pairs(gids)
         value = zero(T)
         for (b, j) in pairs(gids)
@@ -1196,6 +1780,39 @@ function _apply_kkt_correction!(
     _add_direction_correction!(ws.dx, ws.δx)
     n > 0 && _add_direction_correction!(ws.dy, ws.δy)
     return ws
+end
+
+_try_native_mixed_arrow_fallback!(
+    ::Workspace,
+    ::SDPProblem,
+    ::SolverOptions,
+    ::AbstractVector,
+) = false
+
+function _try_native_mixed_arrow_fallback!(
+    ws::Workspace{BigFloat},
+    prob::SDPProblem{BigFloat},
+    opts::SolverOptions{BigFloat},
+    right_hand_side::AbstractVector{BigFloat},
+)
+    arrow = ws.arrow
+    arrow === nothing && return false
+    (arrow::ArrowWorkspace{BigFloat}).mixed_reduced_ready || return false
+    materialize_mixed_arrow_native_fallback!(
+        ws,
+        :refinement_stalled,
+    )
+    factor = factor_arrow_kkt!(ws, opts)
+    factor.ok || return false
+    _solve_kkt_owned!(
+        ws,
+        prob.dims.n,
+        right_hand_side,
+        ws.p,
+        ws.dx,
+        ws.dy,
+    )
+    return true
 end
 
 function _add_direction_correction!(
@@ -1300,6 +1917,15 @@ function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
         if !isfinite(corrected_residual) || corrected_residual > residual
             copy_owned!(ws.dx, ws.dx_best)
             n > 0 && copy_owned!(ws.dy, ws.dy_best)
+            if _try_native_mixed_arrow_fallback!(
+                ws,
+                prob,
+                opts,
+                r,
+            )
+                native_residual = _kkt_direction_residual!(ws, prob, r)
+                return (steps, native_residual)
+            end
             break
         end
 

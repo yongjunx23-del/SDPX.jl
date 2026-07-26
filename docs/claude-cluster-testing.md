@@ -213,21 +213,50 @@ in the candidate release are authoritative.
 
 ### Latest promoted release
 
-The current cluster release includes the dense Task_Low08 work and the medium
-sparse `2x2` block-arrow optimization:
+The v0.2.0 cluster release includes the dense Task_Low08 work and the medium
+sparse `2x2` block-arrow optimization. Resolve the immutable release selected
+by `current` and read its metadata instead of relying on a copied commit:
+
+```bash
+SOURCE="$(readlink -f /public/home/yongjunxu/projects/SDPX.jl/current)"
+RELEASE="$(dirname "$SOURCE")"
+printf 'source: %s\n' "$SOURCE"
+cat "$RELEASE/metadata/validation.txt"
+```
+
+The medium CSDR acceptance campaign recorded:
 
 ```text
-validated benchmark/report commit: 83df6ee6cddb02651fc348b92ab9919c5f742d4f
-solver optimization commit: e952e61423a4d2c2d5645f71d046a36d82769742
-self-contained validation job: 194087.node220
-full package tests: 1964/1964 passed
+exact reduced-Schur validator: 194115.node220
+exact MultiFloatVec SYRK comparison: 194141.node220
+final Float64x4 scaling jobs:
+  194145.node220, 194149.node220, 194150.node220, 194144.node220
+BigFloat diagnostics:
+  194139.node220, 194143.node220, 194148.node220, 194151.node220
+full package test: 194154.node220 (2,027 of 2,027 tests)
+final Task_Low08 Float64 regression: 194155.node220
 medium CSDR Float64x4 status: Optimal
-medium CSDR Float64x4 best time: 33.878550 s (8 Julia threads)
+medium CSDR Float64x4 best time: 11.727777 s (8 Julia threads)
+medium CSDR Float64x4 scaling:
+  51.479394 / 31.342820 / 19.349405 / 11.727777 s
+  at 1 / 2 / 4 / 8 Julia threads
 medium CSDR BigFloat256 status: Optimal
-medium CSDR BigFloat256 time: 328.270295 s (1 Julia thread)
+medium CSDR native BigFloat256 reduced-arrow time:
+  205.202262 / 191.701491 / 110.741381 / 86.752160 s
+  at 1 / 2 / 4 / 8 Julia threads
+medium CSDR native BigFloat192 reduced-arrow time: 80.703301 s at 8 threads
+medium CSDR mixed BigFloat256 diagnostic: 323.897000 s; exact refinement
+  stalled and the solver safely fell back to native BigFloat
 canonical model manifest:
   df62be289368abb162e43cddba72cd13efe79cbf441d1596454a658b4175592b
 ```
+
+The validated Float64x4 default is the exact two-row reduced panel with the
+four-lane `MultiFloatVec{4,Float64,4}` lower-triangular SYRK. Float64x4 and
+BigFloat use `extended_precision_blas=:auto`; Float64 is unchanged. General
+native BigFloat remains serial, while exact singleton-local `2x2` arrows may
+use exclusive block/panel ownership and disjoint Schur tiles. The mixed arrow
+factor remains opt-in.
 
 The release is selected by:
 
@@ -263,8 +292,10 @@ printf 'sparse_job=%s\n' "$SPARSE_JOB"
 ```
 
 It runs Float64x4 sequentially with 1, 2, 4, and 8 Julia threads, always with
-one BLAS thread. It then runs BigFloat at 256-bit precision with one Julia
-thread. Each configuration uses three timed repetitions.
+one BLAS thread. It then runs native BigFloat at 256-bit precision with one
+Julia thread. Each configuration uses three timed repetitions. A separate
+normal-queue job may sweep the experimental mixed reduced-arrow mode over
+1/2/4/8 workers; reserve eight PBS cores even for the smaller widths.
 
 Check completion:
 
@@ -298,7 +329,10 @@ Do not report it as a converged full SDP solve.
 
 ## 6. Resource and arithmetic rules
 
-- Keep BigFloat solver work serial: one Julia thread and one BLAS thread.
+- Keep general native BigFloat solver work serial. Exact singleton-local `2x2`
+  arrows may sweep 1/2/4/8 Julia threads because their native block preparation
+  and triangular Schur tiles have exclusive ownership. In mixed reduced-arrow
+  experiments, the Float64x4 panel and factorization use workers.
 - Use separate PBS jobs for independent BigFloat cases.
 - For Float64x4 scheduler scaling, use 1/2/4/8 Julia threads and one BLAS
   thread; do not enable full Julia and BLAS widths simultaneously.

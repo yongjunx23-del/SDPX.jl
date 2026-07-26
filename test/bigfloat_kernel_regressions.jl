@@ -150,6 +150,31 @@ using Test
             @test matrix == matrix_original
             @test direction == direction_original
             @test !(trial[1] === trial[2])
+
+            owned_trial = SDPX.alloc_zeros(BigFloat, 8, 8)
+            first_storage = owned_trial[1]
+            second_storage = owned_trial[2]
+            trial_scratch = BigFloat()
+            SDPX.trial_combine_owned!(
+                owned_trial,
+                matrix,
+                big"0.125",
+                direction,
+                trial_scratch,
+            )
+            @test owned_trial ≈
+                  matrix .+ big"0.125" .* direction rtol=big"1e-60"
+            @test owned_trial[1] === first_storage
+            @test owned_trial[2] === second_storage
+            @test @allocated(
+                SDPX.trial_combine_owned!(
+                    owned_trial,
+                    matrix,
+                    big"0.125",
+                    direction,
+                    trial_scratch,
+                )
+            ) == 0
         end
 
         @testset "allocation-light infinity norm" begin
@@ -214,6 +239,20 @@ using Test
             SDPX.kcholsolve!(factor, rhs)
             solve_allocations = @allocated SDPX.kcholsolve!(factor, rhs)
             @test solve_allocations <= 128_000
+
+            owned_rhs = deepcopy(rhs)
+            solve_scratch = (BigFloat(), BigFloat(), BigFloat())
+            SDPX.kcholsolve_owned!(
+                factor,
+                owned_rhs,
+                solve_scratch...,
+            )
+            owned_solve_allocations = @allocated SDPX.kcholsolve_owned!(
+                factor,
+                owned_rhs,
+                solve_scratch...,
+            )
+            @test owned_solve_allocations == 0
 
             vector_rhs = BigFloat.(randn(rng, dimension))
             SDPX.ktrsv_lower!(factor, vector_rhs)

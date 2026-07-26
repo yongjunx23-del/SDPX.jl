@@ -12,12 +12,12 @@
     task-local global-global buffers. Both avoid atomics and locks and reduce
     in a deterministic fixed-bin order.
 
-    BigFloat deliberately remains serial. Its allocation-free MPFR scalar
-    kernels reuse mutable scratch objects, while dense task-local Schur
-    accumulators are especially expensive at arbitrary precision. Keeping this
-    path serial avoids aliasing hazards, allocator contention, and large
-    per-worker memory growth. Fixed-width extended types such as Float64x4 are
-    immutable bitstypes and use the parallel scheduler.
+    General BigFloat paths deliberately remain serial. Their allocation-free
+    MPFR scalar kernels reuse mutable scratch objects, while dense task-local
+    Schur accumulators are especially expensive at arbitrary precision. The
+    exact reduced-arrow path bypasses this scheduler only after establishing
+    disjoint block and Schur-tile ownership. Fixed-width extended types such as
+    Float64x4 are immutable bitstypes and use the general parallel scheduler.
 
 =====================================================================#
 
@@ -25,9 +25,9 @@
     thread_safe_arithmetic(::Type{T})
 
 `true` for immutable floating-point arithmetic and `false` for `BigFloat` or
-unknown types. BigFloat is intentionally kept on the serial, allocation-free
-MPFR path; this trait is a second guard in addition to the workspace and
-execution-plan thread limits.
+unknown types. General BigFloat kernels stay on the serial, allocation-free
+MPFR path; the exact reduced-arrow specialization applies its own stricter
+exclusive-ownership checks before creating tasks.
 """
 thread_safe_arithmetic(::Type{BigFloat}) = false
 thread_safe_arithmetic(::Type{<:AbstractFloat}) = true
@@ -239,7 +239,7 @@ function threaded_predictor_corrector_rhs!(
                 bw = ws.blk[l]
                 kmul!(bw.Z, bw.P, Y[l])
                 kaxpby!(-one(T), bw.R, one(T), bw.Z)
-                kcholsolve!(bw.LX, bw.Z)
+                kcholsolve_owned!(bw.LX, bw.Z)
                 accumulate_v!(partial, prob.cons, l, bw.Z, one(T))
             end
         end
@@ -263,7 +263,7 @@ function threaded_direction_blocks!(
             kaxpby!(one(T), bw.P, one(T), bw.dX)
             kmul!(bw.dY, bw.dX, Y[l])
             kaxpby!(one(T), bw.R, -one(T), bw.dY)
-            kcholsolve!(bw.LX, bw.dY)
+            kcholsolve_owned!(bw.LX, bw.dY)
             symmetrize_inplace!(bw.dY)
         end
         return ws
@@ -277,7 +277,7 @@ function threaded_direction_blocks!(
                 kaxpby!(one(T), bw.P, one(T), bw.dX)
                 kmul!(bw.dY, bw.dX, Y[l])
                 kaxpby!(one(T), bw.R, -one(T), bw.dY)
-                kcholsolve!(bw.LX, bw.dY)
+                kcholsolve_owned!(bw.LX, bw.dY)
                 symmetrize_inplace!(bw.dY)
             end
         end
@@ -326,7 +326,7 @@ function threaded_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T},
                 end
                 kmul!(bw.Z, bw.P, Y[l])
                 kaxpby!(-one(T), bw.R, one(T), bw.Z)
-                kcholsolve!(bw.LX, bw.Z)
+                kcholsolve_owned!(bw.LX, bw.Z)
                 accumulate_v!(partial, prob.cons, l, bw.Z, one(T))
             end
         end
@@ -634,6 +634,20 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
     bins = ws.schur_bins
     if ws.arrow !== nothing
         arrow = ws.arrow::ArrowWorkspace{T}
+        if T === BigFloat &&
+           arrow.mixed_reduced_enabled &&
+           mixed_reduced_arrow_schur_build!(
+               ws::Workspace{BigFloat},
+               cons::SparseCons{BigFloat},
+           )
+            return arrow.mixed_reduced_schur
+        end
+        arrow.mixed_reduced_ready = false
+        if arrow.reduced_panel_enabled &&
+           reduced_arrow_schur_build!(ws, cons)
+            return arrow.Sred
+        end
+        arrow.reduced_panel_ready = false
         fill!(arrow.Sgg, zero(T))
         for l in eachindex(arrow.Dsrc)
             fill!(arrow.Dsrc[l], zero(T))

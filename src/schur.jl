@@ -417,6 +417,13 @@ function _mirror_schur_lower!(S::AbstractMatrix)
     return S
 end
 
+function _mirror_schur_lower!(S::AbstractMatrix{BigFloat})
+    @inbounds for column in axes(S, 2), row in (column + 1):size(S, 1)
+        MA.operate_to!(S[column, row], copy, S[row, column])
+    end
+    return S
+end
+
 function _zero_schur_accumulator!(
     S::AbstractMatrix{T},
     ws::Workspace{T},
@@ -1225,6 +1232,1134 @@ function _zero_arrow_schur!(arrow::ArrowWorkspace)
     return arrow
 end
 
+@inline function _symmetric3_entry(
+    h11,
+    h12,
+    h22,
+    h13,
+    h23,
+    h33,
+    row::Int,
+    column::Int,
+)
+    if row == 1
+        return column == 1 ? h11 : column == 2 ? h12 : h13
+    elseif row == 2
+        return column == 1 ? h12 : column == 2 ? h22 : h23
+    end
+    return column == 1 ? h13 : column == 2 ? h23 : h33
+end
+
+"""
+    _rank2_reduced_metric(...)
+
+Eliminate one local coefficient from the symmetric three-dimensional
+coefficient-space metric of a `2x2` PSD block, then return a two-row Gram
+factor of the rank-two reduced metric. This turns each block's dense
+`145x145` pairwise contractions plus a later KKT rank-one update into panel
+packing followed by one solver-level triangular SYRK.
+"""
+@inline function _rank2_reduced_metric(
+    h11,
+    h12,
+    h22,
+    h13,
+    h23,
+    h33,
+    b1,
+    b2,
+    b3,
+)
+    hb1 = h11 * b1 + h12 * b2 + h13 * b3
+    hb2 = h12 * b1 + h22 * b2 + h23 * b3
+    hb3 = h13 * b1 + h23 * b2 + h33 * b3
+    diagonal = b1 * hb1 + b2 * hb2 + b3 * hb3
+    zero_value = zero(diagonal)
+    diagonal > zero_value ||
+        return (
+            false,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            diagonal,
+            hb1,
+            hb2,
+            hb3,
+        )
+
+    inverse_diagonal = one(diagonal) / diagonal
+    r11 = h11 - hb1 * hb1 * inverse_diagonal
+    r12 = h12 - hb1 * hb2 * inverse_diagonal
+    r22 = h22 - hb2 * hb2 * inverse_diagonal
+    r13 = h13 - hb1 * hb3 * inverse_diagonal
+    r23 = h23 - hb2 * hb3 * inverse_diagonal
+    r33 = h33 - hb3 * hb3 * inverse_diagonal
+
+    first_pivot = if r11 >= r22 && r11 >= r33
+        1
+    elseif r22 >= r33
+        2
+    else
+        3
+    end
+    first_diagonal =
+        first_pivot == 1 ? r11 : first_pivot == 2 ? r22 : r33
+    scale = max(abs(r11), abs(r22), abs(r33))
+    scale > zero_value ||
+        return (
+            false,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            diagonal,
+            hb1,
+            hb2,
+            hb3,
+        )
+    tolerance = eps(typeof(diagonal)) * typeof(diagonal)(128) * scale
+    first_diagonal > tolerance ||
+        return (
+            false,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            diagonal,
+            hb1,
+            hb2,
+            hb3,
+        )
+
+    first_root = sqrt(first_diagonal)
+    v11 = _symmetric3_entry(
+        r11,
+        r12,
+        r22,
+        r13,
+        r23,
+        r33,
+        first_pivot,
+        1,
+    ) / first_root
+    v12 = _symmetric3_entry(
+        r11,
+        r12,
+        r22,
+        r13,
+        r23,
+        r33,
+        first_pivot,
+        2,
+    ) / first_root
+    v13 = _symmetric3_entry(
+        r11,
+        r12,
+        r22,
+        r13,
+        r23,
+        r33,
+        first_pivot,
+        3,
+    ) / first_root
+    residual1 = r11 - v11 * v11
+    residual2 = r22 - v12 * v12
+    residual3 = r33 - v13 * v13
+    second_pivot = if first_pivot == 1
+        residual2 >= residual3 ? 2 : 3
+    elseif first_pivot == 2
+        residual1 >= residual3 ? 1 : 3
+    else
+        residual1 >= residual2 ? 1 : 2
+    end
+    second_diagonal =
+        second_pivot == 1 ?
+        residual1 : second_pivot == 2 ? residual2 : residual3
+    second_diagonal > tolerance ||
+        return (
+            false,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            zero_value,
+            diagonal,
+            hb1,
+            hb2,
+            hb3,
+        )
+
+    second_root = sqrt(second_diagonal)
+    first_at_second =
+        second_pivot == 1 ? v11 : second_pivot == 2 ? v12 : v13
+    v21 = (
+        _symmetric3_entry(
+            r11,
+            r12,
+            r22,
+            r13,
+            r23,
+            r33,
+            second_pivot,
+            1,
+        ) - first_at_second * v11
+    ) / second_root
+    v22 = (
+        _symmetric3_entry(
+            r11,
+            r12,
+            r22,
+            r13,
+            r23,
+            r33,
+            second_pivot,
+            2,
+        ) - first_at_second * v12
+    ) / second_root
+    v23 = (
+        _symmetric3_entry(
+            r11,
+            r12,
+            r22,
+            r13,
+            r23,
+            r33,
+            second_pivot,
+            3,
+        ) - first_at_second * v13
+    ) / second_root
+    return (
+        true,
+        v11,
+        v12,
+        v13,
+        v21,
+        v22,
+        v23,
+        diagonal,
+        hb1,
+        hb2,
+        hb3,
+    )
+end
+
+function _pack_reduced_arrow_block!(
+    arrow::ArrowWorkspace{T},
+    bw::BlockWS{T},
+    cons::SparseCons{T},
+    block::Int,
+) where {T}
+    coefficients = cons.packed2[block]
+    masks = cons.packed2_mask[block]
+    ids = cons.schur_order[block]
+    local_position = arrow.local_coefficient_position[block]
+    1 <= local_position <= length(ids) || return false
+    ids[local_position] == arrow.local_ids[block][1] || return false
+    zero_owned!(arrow.Dsrc[block])
+    zero_owned!(arrow.coupling[block])
+    first_row = 2 * block - 1
+    second_row = first_row + 1
+    panel_zero = zero(T)
+    @inbounds for global_position in axes(arrow.reduced_panel, 2)
+        arrow.reduced_panel[first_row, global_position] = panel_zero
+        arrow.reduced_panel[second_row, global_position] = panel_zero
+    end
+
+    fill!(bw.W2, zero(T))
+    @inbounds for diagonal in 1:2
+        bw.W2[diagonal, diagonal] = one(T)
+    end
+    kcholsolve!(bw.LX, bw.W2)
+    @inbounds begin
+        x11 = bw.W2[1, 1]
+        x12 = bw.W2[1, 2]
+        x22 = bw.W2[2, 2]
+        y11 = bw.MY[1, 1] * bw.MY[1, 1]
+        y12 = bw.MY[2, 1] * bw.MY[1, 1]
+        y22 =
+            bw.MY[2, 1] * bw.MY[2, 1] +
+            bw.MY[2, 2] * bw.MY[2, 2]
+
+        h11 = y11 * x11
+        h12 = y12 * x11 + y11 * x12
+        h22 =
+            y12 * x12 + y11 * x22 +
+            y22 * x11 + y12 * x12
+        h13 = y12 * x12
+        h23 = y12 * x22 + y22 * x12
+        h33 = y22 * x22
+
+        reduced = _rank2_reduced_metric(
+            h11,
+            h12,
+            h22,
+            h13,
+            h23,
+            h33,
+            coefficients[1, local_position],
+            coefficients[2, local_position],
+            coefficients[3, local_position],
+        )
+        reduced[1] || return false
+        v11, v12, v13 = reduced[2], reduced[3], reduced[4]
+        v21, v22, v23 = reduced[5], reduced[6], reduced[7]
+        diagonal = reduced[8]
+        hb1, hb2, hb3 = reduced[9], reduced[10], reduced[11]
+        arrow.Dsrc[block][1, 1] = diagonal
+
+        coupling = arrow.coupling[block]
+        for position in eachindex(ids)
+            variable = ids[position]
+            global_position = arrow.global_pos[variable]
+            global_position == 0 && continue
+            a1 = coefficients[1, position]
+            a2 = coefficients[2, position]
+            a3 = coefficients[3, position]
+            if masks[position] == 0x06
+                arrow.reduced_panel[first_row, global_position] =
+                    v12 * a2 + v13 * a3
+                arrow.reduced_panel[second_row, global_position] =
+                    v22 * a2 + v23 * a3
+                coupling[1, global_position] =
+                    hb2 * a2 + hb3 * a3
+            else
+                arrow.reduced_panel[first_row, global_position] =
+                    v11 * a1 + v12 * a2 + v13 * a3
+                arrow.reduced_panel[second_row, global_position] =
+                    v21 * a1 + v22 * a2 + v23 * a3
+                coupling[1, global_position] =
+                    hb1 * a1 + hb2 * a2 + hb3 * a3
+            end
+        end
+    end
+    return true
+end
+
+_pack_reduced_arrow_block_dispatch!(
+    arrow,
+    block_workspace,
+    constraints,
+    block,
+    ::Nothing,
+) = _pack_reduced_arrow_block!(
+    arrow,
+    block_workspace,
+    constraints,
+    block,
+)
+
+"""
+    reduced_arrow_schur_build!(ws, cons)
+
+Construct the already-eliminated shared Schur matrix for singleton-local
+`2x2` arrow problems. Blocks pack two rank-factor rows into one tall panel;
+one blocked triangular SYRK then replaces per-block pairwise contractions and
+the later KKT rank-one eliminations.
+"""
+function reduced_arrow_schur_build!(
+    ws::Workspace{T},
+    cons::SparseCons{T},
+) where {T}
+    arrow = ws.arrow::ArrowWorkspace{T}
+    arrow.reduced_panel_enabled || return false
+    fill!(arrow.local_ok, true)
+
+    block_count = length(arrow.Dsrc)
+    ownership_safe_bigfloat = T === BigFloat
+    workers = (thread_safe_arithmetic(T) || ownership_safe_bigfloat) ?
+              min(
+                  max(ws.thread_count, 1),
+                  Threads.nthreads(),
+                  max(block_count, 1),
+              ) : 1
+    rank_tolerance_factor = ownership_safe_bigfloat ?
+                            T(128) * eps(T) : nothing
+    if workers > 1 && block_count >= 64
+        # Blocks have essentially equal work. Every task owns its block
+        # workspace, metric, local diagonal, coupling, and two panel rows.
+        # Contiguous ownership also avoids false sharing. This is the only
+        # native BigFloat block-parallel path; no writable MPFR object crosses
+        # task boundaries.
+        @sync for worker in 1:workers
+            Threads.@spawn begin
+                first_block = fld((worker - 1) * block_count, workers) + 1
+                last_block = fld(worker * block_count, workers)
+                for block in first_block:last_block
+                    arrow.local_ok[block] =
+                        _pack_reduced_arrow_block_dispatch!(
+                        arrow,
+                        ws.blk[block],
+                        cons,
+                        block,
+                        rank_tolerance_factor,
+                    )
+                end
+            end
+        end
+    else
+        for block in 1:block_count
+            arrow.local_ok[block] =
+                _pack_reduced_arrow_block_dispatch!(
+                arrow,
+                ws.blk[block],
+                cons,
+                block,
+                rank_tolerance_factor,
+            )
+        end
+    end
+    if !all(arrow.local_ok)
+        arrow.reduced_panel_enabled = false
+        arrow.reduced_panel_ready = false
+        return false
+    end
+
+    ExtendedPrecisionBLAS.syrk!(
+        arrow.Sred,
+        arrow.reduced_panel,
+        one(T),
+        zero(T),
+        arrow.reduced_panel_config,
+        ws.thread_count,
+    )
+    arrow.reduced_panel_ready = true
+    return true
+end
+
+function _prepare_mixed_arrow_metric_and_locals!(
+    arrow::ArrowWorkspace{BigFloat},
+    bw::BlockWS{BigFloat},
+    cons::SparseCons{BigFloat},
+    block::Int,
+)
+    coefficients = cons.packed2[block]
+    masks = cons.packed2_mask[block]
+    ids = cons.schur_order[block]
+    local_position = arrow.local_coefficient_position[block]
+    1 <= local_position <= length(ids) || return false
+    ids[local_position] == arrow.local_ids[block][1] || return false
+    zero_owned!(arrow.Dsrc[block])
+    zero_owned!(arrow.coupling[block])
+
+    zero_owned!(bw.W2)
+    @inbounds for diagonal in 1:2
+        MA.operate!(one, bw.W2[diagonal, diagonal])
+    end
+    kcholsolve_owned!(
+        bw.LX,
+        bw.W2,
+        bw.trialX[1, 1],
+        bw.trialX[2, 1],
+        bw.trialX[1, 2],
+    )
+    @inbounds begin
+        x11 = bw.W2[1, 1]
+        x12 = bw.W2[1, 2]
+        x22 = bw.W2[2, 2]
+        l11 = bw.MY[1, 1]
+        l21 = bw.MY[2, 1]
+        l22 = bw.MY[2, 2]
+        y11 = bw.W1[1, 1]
+        y12 = bw.W1[2, 1]
+        y22 = bw.W1[1, 2]
+        multiplication_buffer = bw.W1[2, 2]
+        MA.operate_to!(y11, *, l11, l11)
+        MA.operate_to!(y12, *, l21, l11)
+        _bigfloat_mul_add2!(
+            y22,
+            multiplication_buffer,
+            l21,
+            l21,
+            l22,
+            l22,
+        )
+
+        metric = arrow.coefficient_metric[block]
+        h11 = metric[1, 1]
+        h12 = metric[1, 2]
+        h22 = metric[2, 2]
+        h13 = metric[1, 3]
+        h23 = metric[2, 3]
+        h33 = metric[3, 3]
+        MA.operate_to!(h11, *, y11, x11)
+        _bigfloat_mul_add2!(
+            h12,
+            multiplication_buffer,
+            y12,
+            x11,
+            y11,
+            x12,
+        )
+        _bigfloat_mul_add2!(
+            h22,
+            multiplication_buffer,
+            y12,
+            x12,
+            y11,
+            x22,
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            h22,
+            y22,
+            x11,
+        )
+        MA.buffered_operate!(
+            multiplication_buffer,
+            MA.add_mul,
+            h22,
+            y12,
+            x12,
+        )
+        MA.operate_to!(h13, *, y12, x12)
+        _bigfloat_mul_add2!(
+            h23,
+            multiplication_buffer,
+            y12,
+            x22,
+            y22,
+            x12,
+        )
+        MA.operate_to!(h33, *, y22, x22)
+        MA.operate_to!(metric[2, 1], copy, h12)
+        MA.operate_to!(metric[3, 1], copy, h13)
+        MA.operate_to!(metric[3, 2], copy, h23)
+
+        b1 = coefficients[1, local_position]
+        b2 = coefficients[2, local_position]
+        b3 = coefficients[3, local_position]
+        hb1 = bw.trialX[1, 1]
+        hb2 = bw.trialX[2, 1]
+        hb3 = bw.trialX[1, 2]
+        diagonal = bw.trialX[2, 2]
+        _bigfloat_add_contract3_to!(
+            hb1,
+            multiplication_buffer,
+            h11,
+            b1,
+            h12,
+            b2,
+            h13,
+            b3,
+        )
+        _bigfloat_add_contract3_to!(
+            hb2,
+            multiplication_buffer,
+            h12,
+            b1,
+            h22,
+            b2,
+            h23,
+            b3,
+        )
+        _bigfloat_add_contract3_to!(
+            hb3,
+            multiplication_buffer,
+            h13,
+            b1,
+            h23,
+            b2,
+            h33,
+            b3,
+        )
+        _bigfloat_add_contract3_to!(
+            diagonal,
+            multiplication_buffer,
+            b1,
+            hb1,
+            b2,
+            hb2,
+            b3,
+            hb3,
+        )
+        diagonal > zero(BigFloat) || return false
+        MA.operate_to!(arrow.Dsrc[block][1, 1], copy, diagonal)
+        coupling = arrow.coupling[block]
+        for position in eachindex(ids)
+            variable = ids[position]
+            global_position = arrow.global_pos[variable]
+            global_position == 0 && continue
+            a1 = coefficients[1, position]
+            a2 = coefficients[2, position]
+            a3 = coefficients[3, position]
+            destination = coupling[1, global_position]
+            if masks[position] == 0x06
+                _bigfloat_mul_add2!(
+                    destination,
+                    multiplication_buffer,
+                    hb2,
+                    a2,
+                    hb3,
+                    a3,
+                )
+            else
+                _bigfloat_add_contract3_to!(
+                    destination,
+                    multiplication_buffer,
+                    hb1,
+                    a1,
+                    hb2,
+                    a2,
+                    hb3,
+                    a3,
+                )
+            end
+        end
+    end
+    return true
+end
+
+@inline function _bigfloat_sub_mul_to!(
+    destination::BigFloat,
+    multiplication_buffer::BigFloat,
+    scaled_left::BigFloat,
+    right::BigFloat,
+)
+    MA.buffered_operate!(
+        multiplication_buffer,
+        MA.sub_mul,
+        destination,
+        scaled_left,
+        right,
+    )
+    return destination
+end
+
+@inline function _bigfloat_residual_divide_to!(
+    destination::BigFloat,
+    multiplication_buffer::BigFloat,
+    source::BigFloat,
+    first_at_second::BigFloat,
+    first_entry::BigFloat,
+    root::BigFloat,
+)
+    MA.operate_to!(destination, copy, source)
+    MA.buffered_operate!(
+        multiplication_buffer,
+        MA.sub_mul,
+        destination,
+        first_at_second,
+        first_entry,
+    )
+    _mpfr_divide!(destination, destination, root)
+    return destination
+end
+
+function _pack_native_bigfloat_reduced_arrow_block!(
+    arrow::ArrowWorkspace{BigFloat},
+    block_workspace::BlockWS{BigFloat},
+    constraints::SparseCons{BigFloat},
+    block::Int,
+    rank_tolerance_factor::BigFloat,
+)
+    _prepare_mixed_arrow_metric_and_locals!(
+        arrow,
+        block_workspace,
+        constraints,
+        block,
+    ) || return false
+
+    coefficients = constraints.packed2[block]
+    masks = constraints.packed2_mask[block]
+    ids = constraints.schur_order[block]
+    local_position = arrow.local_coefficient_position[block]
+    metric = arrow.coefficient_metric[block]
+    diagonal = arrow.Dsrc[block][1, 1]
+
+    # `_prepare_mixed_arrow_metric_and_locals!` leaves H*b in trialX.
+    # Eliminate the local coefficient in-place in the private 3x3 metric.
+    # Scaling H*b by inv(b'Hb) first turns each reduced entry into one
+    # allocation-free MPFR fused subtract-multiply.
+    hb1 = block_workspace.trialX[1, 1]
+    hb2 = block_workspace.trialX[2, 1]
+    hb3 = block_workspace.trialX[1, 2]
+    inverse_diagonal = block_workspace.W1[1, 1]
+    scaled_hb1 = block_workspace.W1[2, 1]
+    scaled_hb2 = block_workspace.W1[1, 2]
+    scaled_hb3 = block_workspace.W1[2, 2]
+    multiplication_buffer = block_workspace.W2[2, 2]
+    MA.operate!(one, inverse_diagonal)
+    _mpfr_divide!(inverse_diagonal, inverse_diagonal, diagonal)
+    MA.operate_to!(scaled_hb1, *, hb1, inverse_diagonal)
+    MA.operate_to!(scaled_hb2, *, hb2, inverse_diagonal)
+    MA.operate_to!(scaled_hb3, *, hb3, inverse_diagonal)
+
+    r11 = _bigfloat_sub_mul_to!(
+        metric[1, 1],
+        multiplication_buffer,
+        scaled_hb1,
+        hb1,
+    )
+    r12 = _bigfloat_sub_mul_to!(
+        metric[1, 2],
+        multiplication_buffer,
+        scaled_hb1,
+        hb2,
+    )
+    r22 = _bigfloat_sub_mul_to!(
+        metric[2, 2],
+        multiplication_buffer,
+        scaled_hb2,
+        hb2,
+    )
+    r13 = _bigfloat_sub_mul_to!(
+        metric[1, 3],
+        multiplication_buffer,
+        scaled_hb1,
+        hb3,
+    )
+    r23 = _bigfloat_sub_mul_to!(
+        metric[2, 3],
+        multiplication_buffer,
+        scaled_hb2,
+        hb3,
+    )
+    r33 = _bigfloat_sub_mul_to!(
+        metric[3, 3],
+        multiplication_buffer,
+        scaled_hb3,
+        hb3,
+    )
+    MA.operate_to!(metric[2, 1], copy, r12)
+    MA.operate_to!(metric[3, 1], copy, r13)
+    MA.operate_to!(metric[3, 2], copy, r23)
+
+    first_pivot = if r11 >= r22 && r11 >= r33
+        1
+    elseif r22 >= r33
+        2
+    else
+        3
+    end
+    first_diagonal =
+        first_pivot == 1 ? r11 : first_pivot == 2 ? r22 : r33
+    scale = max(r11, r22, r33)
+    tolerance = block_workspace.W2[1, 2]
+    MA.operate_to!(tolerance, *, rank_tolerance_factor, scale)
+    first_diagonal > tolerance || return false
+
+    # Factor storage is private scratch that remains live until the block's
+    # two output panel rows have been written.
+    v11 = block_workspace.W1[1, 1]
+    v12 = block_workspace.W1[2, 1]
+    v13 = block_workspace.W1[1, 2]
+    v21 = block_workspace.W1[2, 2]
+    v22 = block_workspace.W2[1, 1]
+    v23 = block_workspace.W2[2, 1]
+    root = block_workspace.trialY[2, 2]
+    _mpfr_sqrt!(root, first_diagonal)
+    _mpfr_divide!(
+        v11,
+        _symmetric3_entry(r11, r12, r22, r13, r23, r33, first_pivot, 1),
+        root,
+    )
+    _mpfr_divide!(
+        v12,
+        _symmetric3_entry(r11, r12, r22, r13, r23, r33, first_pivot, 2),
+        root,
+    )
+    _mpfr_divide!(
+        v13,
+        _symmetric3_entry(r11, r12, r22, r13, r23, r33, first_pivot, 3),
+        root,
+    )
+
+    residual1 = block_workspace.trialY[1, 1]
+    residual2 = block_workspace.trialY[2, 1]
+    residual3 = block_workspace.trialY[1, 2]
+    MA.operate_to!(residual1, copy, r11)
+    MA.buffered_operate!(
+        multiplication_buffer,
+        MA.sub_mul,
+        residual1,
+        v11,
+        v11,
+    )
+    MA.operate_to!(residual2, copy, r22)
+    MA.buffered_operate!(
+        multiplication_buffer,
+        MA.sub_mul,
+        residual2,
+        v12,
+        v12,
+    )
+    MA.operate_to!(residual3, copy, r33)
+    MA.buffered_operate!(
+        multiplication_buffer,
+        MA.sub_mul,
+        residual3,
+        v13,
+        v13,
+    )
+    second_pivot = if first_pivot == 1
+        residual2 >= residual3 ? 2 : 3
+    elseif first_pivot == 2
+        residual1 >= residual3 ? 1 : 3
+    else
+        residual1 >= residual2 ? 1 : 2
+    end
+    second_diagonal =
+        second_pivot == 1 ?
+        residual1 : second_pivot == 2 ? residual2 : residual3
+    second_diagonal > tolerance || return false
+    _mpfr_sqrt!(root, second_diagonal)
+    first_at_second =
+        second_pivot == 1 ? v11 : second_pivot == 2 ? v12 : v13
+
+    _bigfloat_residual_divide_to!(
+        v21,
+        multiplication_buffer,
+        _symmetric3_entry(r11, r12, r22, r13, r23, r33, second_pivot, 1),
+        first_at_second,
+        v11,
+        root,
+    )
+    _bigfloat_residual_divide_to!(
+        v22,
+        multiplication_buffer,
+        _symmetric3_entry(r11, r12, r22, r13, r23, r33, second_pivot, 2),
+        first_at_second,
+        v12,
+        root,
+    )
+    _bigfloat_residual_divide_to!(
+        v23,
+        multiplication_buffer,
+        _symmetric3_entry(r11, r12, r22, r13, r23, r33, second_pivot, 3),
+        first_at_second,
+        v13,
+        root,
+    )
+
+    first_row = 2 * block - 1
+    second_row = first_row + 1
+    @inbounds for global_position in axes(arrow.reduced_panel, 2)
+        MA.operate!(zero, arrow.reduced_panel[first_row, global_position])
+        MA.operate!(zero, arrow.reduced_panel[second_row, global_position])
+    end
+    @inbounds for position in eachindex(ids)
+        global_position = arrow.global_pos[ids[position]]
+        global_position == 0 && continue
+        a1 = coefficients[1, position]
+        a2 = coefficients[2, position]
+        a3 = coefficients[3, position]
+        first_destination =
+            arrow.reduced_panel[first_row, global_position]
+        second_destination =
+            arrow.reduced_panel[second_row, global_position]
+        if masks[position] == 0x06
+            _bigfloat_mul_add2!(
+                first_destination,
+                multiplication_buffer,
+                v12,
+                a2,
+                v13,
+                a3,
+            )
+            _bigfloat_mul_add2!(
+                second_destination,
+                multiplication_buffer,
+                v22,
+                a2,
+                v23,
+                a3,
+            )
+        else
+            _bigfloat_add_contract3_to!(
+                first_destination,
+                multiplication_buffer,
+                v11,
+                a1,
+                v12,
+                a2,
+                v13,
+                a3,
+            )
+            _bigfloat_add_contract3_to!(
+                second_destination,
+                multiplication_buffer,
+                v21,
+                a1,
+                v22,
+                a2,
+                v23,
+                a3,
+            )
+        end
+    end
+    1 <= local_position <= length(ids) || return false
+    return true
+end
+
+function _pack_reduced_arrow_block_dispatch!(
+    arrow::ArrowWorkspace{BigFloat},
+    block_workspace::BlockWS{BigFloat},
+    constraints::SparseCons{BigFloat},
+    block::Int,
+    rank_tolerance_factor::BigFloat,
+)
+    return _pack_native_bigfloat_reduced_arrow_block!(
+        arrow,
+        block_workspace,
+        constraints,
+        block,
+        rank_tolerance_factor,
+    )
+end
+
+function _pack_mixed_reduced_arrow_block!(
+    arrow::ArrowWorkspace,
+    cons::SparseCons,
+    block::Int,
+)
+    panel = arrow.mixed_reduced_panel
+    coefficients = arrow.mixed_reduced_coefficients[block]
+    masks = cons.packed2_mask[block]
+    ids = cons.schur_order[block]
+    metric = arrow.coefficient_metric[block]
+    M = eltype(panel)
+    h11 = M(metric[1, 1])
+    h12 = M(metric[1, 2])
+    h22 = M(metric[2, 2])
+    h13 = M(metric[1, 3])
+    h23 = M(metric[2, 3])
+    h33 = M(metric[3, 3])
+    local_position = arrow.local_coefficient_position[block]
+    reduced = _rank2_reduced_metric(
+        h11,
+        h12,
+        h22,
+        h13,
+        h23,
+        h33,
+        coefficients[1, local_position],
+        coefficients[2, local_position],
+        coefficients[3, local_position],
+    )
+    reduced[1] || return false
+    v11, v12, v13 = reduced[2], reduced[3], reduced[4]
+    v21, v22, v23 = reduced[5], reduced[6], reduced[7]
+    first_row = 2 * block - 1
+    second_row = first_row + 1
+    panel_zero = zero(M)
+    @inbounds for global_position in axes(panel, 2)
+        panel[first_row, global_position] = panel_zero
+        panel[second_row, global_position] = panel_zero
+    end
+    @inbounds for position in eachindex(ids)
+        global_position = arrow.global_pos[ids[position]]
+        global_position == 0 && continue
+        a1 = coefficients[1, position]
+        a2 = coefficients[2, position]
+        a3 = coefficients[3, position]
+        if masks[position] == 0x06
+            panel[first_row, global_position] =
+                v12 * a2 + v13 * a3
+            panel[second_row, global_position] =
+                v22 * a2 + v23 * a3
+        else
+            panel[first_row, global_position] =
+                v11 * a1 + v12 * a2 + v13 * a3
+            panel[second_row, global_position] =
+                v21 * a1 + v22 * a2 + v23 * a3
+        end
+    end
+    return true
+end
+
+function mixed_reduced_arrow_schur_build!(
+    ws::Workspace{BigFloat},
+    cons::SparseCons{BigFloat},
+)
+    arrow = ws.arrow::ArrowWorkspace{BigFloat}
+    arrow.mixed_reduced_enabled || return false
+    arrow.mixed_reduced_attempt_count += 1
+    block_count = length(arrow.Dsrc)
+    workers = min(
+        max(arrow.mixed_reduced_threads, 1),
+        Threads.nthreads(),
+        max(block_count, 1),
+    )
+    fill!(arrow.local_ok, true)
+    if workers > 1
+        # This opt-in mixed path is safe to parallelize for the same ownership
+        # reason as the exact native reduced-arrow path: each worker owns
+        # disjoint MPFR metrics, block scratch, local diagonals, couplings,
+        # and panel rows. Contiguous ranges also avoid false sharing.
+        @sync for worker in 1:workers
+            Threads.@spawn begin
+                first_block = fld((worker - 1) * block_count, workers) + 1
+                last_block = fld(worker * block_count, workers)
+                for block in first_block:last_block
+                    prepared = _prepare_mixed_arrow_metric_and_locals!(
+                        arrow,
+                        ws.blk[block],
+                        cons,
+                        block,
+                    )
+                    arrow.local_ok[block] =
+                        prepared && _pack_mixed_reduced_arrow_block!(
+                            arrow,
+                            cons,
+                            block,
+                        )
+                end
+            end
+        end
+    else
+        for block in 1:block_count
+            prepared = _prepare_mixed_arrow_metric_and_locals!(
+                arrow,
+                ws.blk[block],
+                cons,
+                block,
+            )
+            arrow.local_ok[block] =
+                prepared && _pack_mixed_reduced_arrow_block!(
+                    arrow,
+                    cons,
+                    block,
+                )
+        end
+    end
+    if !all(arrow.local_ok)
+        arrow.mixed_reduced_enabled = false
+        arrow.mixed_reduced_ready = false
+        arrow.mixed_reduced_fallback_count += 1
+        arrow.mixed_reduced_reason = :panel_preparation_failed
+        return false
+    end
+
+    M = eltype(arrow.mixed_reduced_panel)
+    config = ExtendedPrecisionBLAS._kernel_config(M, workers)
+    ExtendedPrecisionBLAS.syrk!(
+        arrow.mixed_reduced_schur,
+        arrow.mixed_reduced_panel,
+        one(M),
+        zero(M),
+        config,
+        workers,
+    )
+    arrow.mixed_reduced_ready = true
+    arrow.mixed_reduced_reason = :active
+    return true
+end
+
+function _materialize_mixed_arrow_shared!(
+    ws::Workspace{BigFloat},
+)
+    arrow = ws.arrow::ArrowWorkspace{BigFloat}
+    cons = arrow.mixed_source_cons::SparseCons{BigFloat}
+    zero_owned!(arrow.Sgg)
+    @inbounds for block in eachindex(arrow.coefficient_metric)
+        coefficients = cons.packed2[block]
+        masks = cons.packed2_mask[block]
+        ids = cons.schur_order[block]
+        metric = arrow.coefficient_metric[block]
+        scratch = ws.blk[block]
+        t1 = scratch.W1[1, 1]
+        t2 = scratch.W1[2, 1]
+        t3 = scratch.W1[1, 2]
+        accumulator = scratch.trialX[1, 1]
+        multiplication_buffer = scratch.trialX[2, 1]
+        for left_position in eachindex(ids)
+            left_global = arrow.global_pos[ids[left_position]]
+            left_global == 0 && continue
+            a1 = coefficients[1, left_position]
+            a2 = coefficients[2, left_position]
+            a3 = coefficients[3, left_position]
+            _bigfloat_add_contract3_to!(
+                t1,
+                multiplication_buffer,
+                metric[1, 1],
+                a1,
+                metric[1, 2],
+                a2,
+                metric[1, 3],
+                a3,
+            )
+            _bigfloat_add_contract3_to!(
+                t2,
+                multiplication_buffer,
+                metric[2, 1],
+                a1,
+                metric[2, 2],
+                a2,
+                metric[2, 3],
+                a3,
+            )
+            _bigfloat_add_contract3_to!(
+                t3,
+                multiplication_buffer,
+                metric[3, 1],
+                a1,
+                metric[3, 2],
+                a2,
+                metric[3, 3],
+                a3,
+            )
+            for right_position in left_position:length(ids)
+                right_global =
+                    arrow.global_pos[ids[right_position]]
+                right_global == 0 && continue
+                row = max(left_global, right_global)
+                column = min(left_global, right_global)
+                _bigfloat_add_sparse_contract3!(
+                    arrow.Sgg[row, column],
+                    accumulator,
+                    multiplication_buffer,
+                    masks[right_position],
+                    t1,
+                    coefficients[1, right_position],
+                    t2,
+                    coefficients[2, right_position],
+                    t3,
+                    coefficients[3, right_position],
+                )
+            end
+        end
+    end
+    _mirror_arrow_shared_lower!(arrow.Sgg)
+    return arrow.Sgg
+end
+
+"""
+    materialize_mixed_arrow_native_fallback!(ws)
+
+Fall back from the Float64x4 reduced-arrow preconditioner. If an exact native
+BigFloat reduced panel was admitted by the independent memory/crossover
+policy, rebuild and factor that representation first. Only if the exact panel
+cannot be prepared do we reconstruct the slower pairwise shared Schur block
+from cached three-dimensional coefficient metrics. Local diagonals and
+couplings were already formed in BigFloat and remain valid.
+"""
+function materialize_mixed_arrow_native_fallback!(
+    ws::Workspace{BigFloat},
+    reason::Symbol=:native_fallback,
+)
+    arrow = ws.arrow::ArrowWorkspace{BigFloat}
+    arrow.mixed_reduced_ready = false
+    arrow.mixed_reduced_enabled = false
+    arrow.mixed_reduced_fallback_count += 1
+    arrow.mixed_reduced_reason = reason
+    cons = arrow.mixed_source_cons::SparseCons{BigFloat}
+    if arrow.reduced_panel_enabled &&
+       reduced_arrow_schur_build!(ws, cons)
+        return arrow.Sred
+    end
+    _materialize_mixed_arrow_shared!(ws)
+    return arrow.Sgg
+end
+
 """
     fused_arrow_schur_block!(arrow, bw, cons, l, Xl, Yl, Sgg)
 
@@ -1269,6 +2404,35 @@ function fused_arrow_schur_block!(
     )
 end
 
+@inline function _sparse_contract3(
+    first_left,
+    second_left,
+    third_left,
+    first_right,
+    second_right,
+    third_right,
+    mask::UInt8,
+)
+    if mask == 0x06
+        return second_left * second_right + third_left * third_right
+    elseif mask == 0x05
+        return first_left * first_right + third_left * third_right
+    elseif mask == 0x03
+        return first_left * first_right + second_left * second_right
+    elseif mask == 0x04
+        return third_left * third_right
+    elseif mask == 0x02
+        return second_left * second_right
+    elseif mask == 0x01
+        return first_left * first_right
+    elseif mask == 0x07
+        return first_left * first_right +
+               second_left * second_right +
+               third_left * third_right
+    end
+    return zero(first_left)
+end
+
 function _fused_arrow_schur_block_generic!(
     arrow::ArrowWorkspace{T},
     bw::BlockWS{T},
@@ -1283,6 +2447,7 @@ function _fused_arrow_schur_block_generic!(
     na = length(ids)
     na == 0 && return Sgg
     coeffs = cons.packed2[l]
+    masks = cons.packed2_mask[l]
 
     # X^-1 for this 2x2 block, from the cached Cholesky factor.
     fill!(bw.W2, zero(T))
@@ -1321,18 +2486,20 @@ function _fused_arrow_schur_block_generic!(
             c11 = coeffs[1, r]
             c12 = coeffs[2, r]
             c22 = coeffs[3, r]
-            # Many sparse 2x2 SDP families use diagonal or two-entry
-            # coefficient patterns. Do not pay for multiplication by their
-            # structural zeros in the quadratic active-pair loop.
-            value = if iszero(c11)
-                iszero(c12) ? t22 * c22 : t12 * c12 + t22 * c22
-            elseif iszero(c12)
-                iszero(c22) ? t11 * c11 : t11 * c11 + t22 * c22
-            elseif iszero(c22)
-                t11 * c11 + t12 * c12
-            else
-                t11 * c11 + t12 * c12 + t22 * c22
-            end
+            # The three-bit pattern is computed once during ingestion.  The
+            # medium CSDR model executes this loop about 18 million times per
+            # iteration, and 99.3% of its masks are 0x06.  Avoiding repeated
+            # high-precision `iszero` calls makes this dispatch both cheaper
+            # and highly predictable.
+            value = _sparse_contract3(
+                t11,
+                t12,
+                t22,
+                c11,
+                c12,
+                c22,
+                masks[r],
+            )
             j = ids[r]
             gj = gpos[j]
             if gi > 0 && gj > 0
@@ -1409,6 +2576,34 @@ end
     return output
 end
 
+@inline function _bigfloat_add_contract3_to!(
+    output::BigFloat,
+    buffer::BigFloat,
+    first_left::BigFloat,
+    first_right::BigFloat,
+    second_left::BigFloat,
+    second_right::BigFloat,
+    third_left::BigFloat,
+    third_right::BigFloat,
+)
+    MA.operate_to!(output, *, first_left, first_right)
+    MA.buffered_operate!(
+        buffer,
+        MA.add_mul,
+        output,
+        second_left,
+        second_right,
+    )
+    MA.buffered_operate!(
+        buffer,
+        MA.add_mul,
+        output,
+        third_left,
+        third_right,
+    )
+    return output
+end
+
 @inline function _bigfloat_add_contract3!(
     destination::BigFloat,
     accumulator::BigFloat,
@@ -1443,6 +2638,7 @@ end
     destination::BigFloat,
     accumulator::BigFloat,
     buffer::BigFloat,
+    mask::UInt8,
     first_left::BigFloat,
     first_right::BigFloat,
     second_left::BigFloat,
@@ -1450,16 +2646,12 @@ end
     third_left::BigFloat,
     third_right::BigFloat,
 )
-    # Seed the accumulator from the first nonzero product, then append only
-    # the remaining nonzero products. This preserves their original order.
-    # An all-zero coefficient cannot be active, but handle it defensively.
-    have_value = false
-    if !iszero(first_right)
+    # The mask was derived from the immutable coefficient panel during
+    # ingestion. Seed from the first structural nonzero and preserve the
+    # original product order without three MPFR zero tests per contraction.
+    if mask & 0x01 != 0
         MA.operate_to!(accumulator, *, first_left, first_right)
-        have_value = true
-    end
-    if !iszero(second_right)
-        if have_value
+        if mask & 0x02 != 0
             MA.buffered_operate!(
                 buffer,
                 MA.add_mul,
@@ -1467,13 +2659,8 @@ end
                 second_left,
                 second_right,
             )
-        else
-            MA.operate_to!(accumulator, *, second_left, second_right)
-            have_value = true
         end
-    end
-    if !iszero(third_right)
-        if have_value
+        if mask & 0x04 != 0
             MA.buffered_operate!(
                 buffer,
                 MA.add_mul,
@@ -1481,12 +2668,25 @@ end
                 third_left,
                 third_right,
             )
-        else
-            MA.operate_to!(accumulator, *, third_left, third_right)
-            have_value = true
         end
+    elseif mask & 0x02 != 0
+        MA.operate_to!(accumulator, *, second_left, second_right)
+        if mask & 0x04 != 0
+            MA.buffered_operate!(
+                buffer,
+                MA.add_mul,
+                accumulator,
+                third_left,
+                third_right,
+            )
+        end
+    elseif mask & 0x04 != 0
+        MA.operate_to!(accumulator, *, third_left, third_right)
+    else
+        MA.operate!(zero, accumulator)
+        return destination
     end
-    have_value && MA.operate!(+, destination, accumulator)
+    MA.operate!(+, destination, accumulator)
     return destination
 end
 
@@ -1516,6 +2716,7 @@ function fused_arrow_schur_block!(
     na = length(ids)
     na == 0 && return Sgg
     coeffs = cons.packed2[l]
+    masks = cons.packed2_mask[l]
     size(coeffs, 1) == 3 ||
         return _fused_arrow_schur_block_generic!(
             arrow,
@@ -1534,7 +2735,13 @@ function fused_arrow_schur_block!(
     @inbounds for diagonal in 1:2
         MA.operate!(one, bw.W2[diagonal, diagonal])
     end
-    kcholsolve!(bw.LX, bw.W2)
+    kcholsolve_owned!(
+        bw.LX,
+        bw.W2,
+        bw.trialY[1, 1],
+        bw.trialY[2, 1],
+        bw.trialY[1, 2],
+    )
 
     @inbounds begin
         x11 = bw.W2[1, 1]
@@ -1679,6 +2886,7 @@ function fused_arrow_schur_block!(
                         ],
                     value,
                     value_buffer,
+                    masks[r],
                     t11,
                     coeffs[1, r],
                     t12,
@@ -1809,28 +3017,135 @@ Materialize the current Schur matrix for diagnostics and tests. The optimized
 block-arrow solve stores only `S[G,G]`, `S[U_l,G]`, and `S[U_l,U_l]`; normal
 solves never pay for this dense expansion.
 """
+function _materialize_reduced_arrow_shared!(
+    arrow::ArrowWorkspace{T},
+    thread_count::Int,
+) where {T}
+    panel = arrow.reduced_panel
+    @inbounds for block in eachindex(arrow.Dsrc)
+        scale = inv(sqrt(arrow.Dsrc[block][1, 1]))
+        first_row = 2 * block - 1
+        second_row = first_row + 1
+        coupling = arrow.coupling[block]
+        for global_position in axes(panel, 2)
+            if T === BigFloat
+                MA.operate_to!(
+                    panel[first_row, global_position],
+                    *,
+                    coupling[1, global_position],
+                    scale,
+                )
+                MA.operate!(
+                    zero,
+                    panel[second_row, global_position],
+                )
+            else
+                panel[first_row, global_position] =
+                    coupling[1, global_position] * scale
+                panel[second_row, global_position] = zero(T)
+            end
+        end
+    end
+    ExtendedPrecisionBLAS.syrk!(
+        arrow.Sgg,
+        panel,
+        one(T),
+        zero(T),
+        arrow.reduced_panel_config,
+        thread_count,
+    )
+    @inbounds for column in axes(arrow.Sgg, 2)
+        for row in column:size(arrow.Sgg, 1)
+            arrow.Sgg[row, column] += arrow.Sred[row, column]
+            arrow.Sgg[column, row] = arrow.Sgg[row, column]
+        end
+    end
+    return arrow.Sgg
+end
+
+"""
+    materialize_reduced_arrow_native_fallback!(ws)
+
+Reconstruct the original shared Schur block and permanently return this
+workspace to the fused arrow path. This is required if a singleton local
+factor needs regularization: the directly reduced panel eliminated the exact
+local diagonal, while the fallback factorization must eliminate the
+regularized one to keep the KKT system internally consistent.
+"""
+function materialize_reduced_arrow_native_fallback!(
+    ws::Workspace{T},
+) where {T}
+    arrow = ws.arrow::ArrowWorkspace{T}
+    _materialize_reduced_arrow_shared!(arrow, ws.thread_count)
+    arrow.reduced_panel_ready = false
+    arrow.reduced_panel_enabled = false
+    return arrow.Sgg
+end
+
+@inline function _set_materialized_schur_entry!(
+    destination::AbstractMatrix{T},
+    row::Int,
+    column::Int,
+    value::T,
+) where {T}
+    destination[row, column] = value
+    return nothing
+end
+
+@inline function _set_materialized_schur_entry!(
+    destination::AbstractMatrix{BigFloat},
+    row::Int,
+    column::Int,
+    value::BigFloat,
+)
+    MA.operate_to!(destination[row, column], copy, value)
+    return nothing
+end
+
 function materialize_schur!(dest::AbstractMatrix{T}, ws::Workspace{T}) where {T}
     arrow = ws.arrow
     if arrow === nothing
-        copyto!(dest, ws.S)
+        if T === BigFloat
+            ExtendedPrecisionBLAS.prepare_storage!(dest)
+            copy_owned!(dest, ws.S)
+        else
+            copyto!(dest, ws.S)
+        end
         ws.schur_lower_only &&
             _mirror_schur_lower!(dest)
         return dest
     end
     aw = arrow::ArrowWorkspace{T}
-    fill!(dest, zero(T))
+    if aw.mixed_reduced_ready
+        _materialize_mixed_arrow_shared!(
+            ws::Workspace{BigFloat},
+        )
+    elseif aw.reduced_panel_ready
+        _materialize_reduced_arrow_shared!(aw, ws.thread_count)
+    end
+    if T === BigFloat
+        ExtendedPrecisionBLAS.prepare_storage!(dest)
+        zero_owned!(dest)
+    else
+        fill!(dest, zero(T))
+    end
     @inbounds for (a, i) in pairs(aw.global_ids), (b, j) in pairs(aw.global_ids)
-        dest[i, j] = aw.Sgg[a, b]
+        _set_materialized_schur_entry!(dest, i, j, aw.Sgg[a, b])
     end
     @inbounds for l in eachindex(aw.local_ids)
         ids = aw.local_ids[l]
         for (p, i) in pairs(ids), (q, j) in pairs(ids)
-            dest[i, j] = aw.Dsrc[l][p, q]
+            _set_materialized_schur_entry!(
+                dest,
+                i,
+                j,
+                aw.Dsrc[l][p, q],
+            )
         end
         for (p, i) in pairs(ids), (a, j) in pairs(aw.global_ids)
             value = aw.coupling[l][p, a]
-            dest[i, j] = value
-            dest[j, i] = value
+            _set_materialized_schur_entry!(dest, i, j, value)
+            _set_materialized_schur_entry!(dest, j, i, value)
         end
     end
     return dest
@@ -1870,6 +3185,20 @@ function schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::SparseCons{T}
     # far more than the arithmetic it saves.
     if ws.arrow !== nothing && ws.fused_arrow
         arrow = ws.arrow::ArrowWorkspace{T}
+        if T === BigFloat &&
+           arrow.mixed_reduced_enabled &&
+           mixed_reduced_arrow_schur_build!(
+               ws::Workspace{BigFloat},
+               cons::SparseCons{BigFloat},
+           )
+            return arrow.mixed_reduced_schur
+        end
+        arrow.mixed_reduced_ready = false
+        if arrow.reduced_panel_enabled &&
+           reduced_arrow_schur_build!(ws, cons)
+            return arrow.Sred
+        end
+        arrow.reduced_panel_ready = false
         _zero_arrow_schur!(arrow)
         for l in 1:prob.dims.L
             prob.dims.k[l] == 0 && continue

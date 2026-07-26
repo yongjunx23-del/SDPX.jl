@@ -164,6 +164,80 @@ end
     end
 end
 
+@testset "BigFloat native reduced-arrow Schur" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_arrow_fixture()
+        reference = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            extended_precision_blas=:off,
+        )
+        requested_threads = min(Threads.nthreads(), 4)
+        reduced = SDPX.Workspace(
+            problem;
+            thread_count=requested_threads,
+            extended_precision_blas=:on,
+        )
+        @test reduced.arrow.reduced_panel_enabled
+        @test reduced.thread_count == requested_threads
+        @test SDPX.factor_blocks!(reference, X, Y)
+        @test SDPX.factor_blocks!(reduced, X, Y)
+
+        SDPX.schur_build!(reference, problem, problem.cons, X, Y)
+        SDPX.schur_build!(reduced, problem, problem.cons, X, Y)
+        @test reduced.arrow.reduced_panel_ready
+        reference_schur = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+            problem.dims.m,
+        )
+        reduced_schur = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+            problem.dims.m,
+        )
+        SDPX.materialize_schur!(reference_schur, reference)
+        SDPX.materialize_schur!(reduced_schur, reduced)
+        scale = max(maximum(abs, reference_schur), one(BigFloat))
+        @test maximum(abs, reduced_schur - reference_schur) / scale <=
+              big"1e-70"
+
+        reference_factor = SDPX.factor_arrow_kkt!(
+            reference,
+            SDPX.SolverOptions{BigFloat}(verbosity=0),
+        )
+        reduced_factor = SDPX.factor_arrow_kkt!(
+            reduced,
+            SDPX.SolverOptions{BigFloat}(verbosity=0),
+        )
+        @test reference_factor.ok
+        @test reduced_factor.ok
+        right_hand_side = BigFloat.(1:problem.dims.m) ./ BigFloat(11)
+        reference_solution = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+        )
+        reduced_solution = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+        )
+        SDPX.solve_arrow_kkt!(
+            reference,
+            right_hand_side,
+            reference_solution,
+        )
+        SDPX.solve_arrow_kkt!(
+            reduced,
+            right_hand_side,
+            reduced_solution,
+        )
+        solution_scale =
+            max(maximum(abs, reference_solution), one(BigFloat))
+        @test maximum(abs, reduced_solution - reference_solution) /
+              solution_scale <= big"1e-68"
+    end
+end
+
 @testset "BigFloat packed sparse contractions" begin
     setprecision(BigFloat, 256) do
         problem, _, Y = _bigfloat_arrow_fixture()
@@ -435,6 +509,109 @@ end
     end
 end
 
+@testset "BigFloat singleton-arrow Float64x4 preconditioner" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_arrow_fixture()
+        reference = SDPX.Workspace(problem; thread_count=1)
+        mixed = SDPX.Workspace(
+            problem;
+            thread_count=min(Threads.nthreads(), 4),
+            extended_precision_blas=:on,
+            mixed_precision_kkt=:on,
+        )
+        @test mixed.mixed_precision === nothing
+        @test mixed.arrow.mixed_reduced_enabled
+        @test eltype(mixed.arrow.mixed_reduced_panel) ==
+              SDPX.mixed_arrow_arithmetic(BigFloat)
+        @test SDPX.factor_blocks!(reference, X, Y)
+        @test SDPX.factor_blocks!(mixed, X, Y)
+        SDPX.schur_build!(reference, problem, problem.cons, X, Y)
+        SDPX.schur_build!(mixed, problem, problem.cons, X, Y)
+        @test mixed.arrow.mixed_reduced_ready
+        diagnostics = SDPX._mixed_precision_kkt_diagnostics(mixed)
+        @test diagnostics.available
+        @test diagnostics.backend === :float64x4_reduced_arrow
+        @test diagnostics.active
+        @test diagnostics.attempted
+        @test !diagnostics.fell_back
+        @test diagnostics.threads ==
+              min(Threads.nthreads(), 4)
+        reference_schur =
+            SDPX.alloc_zeros(BigFloat, problem.dims.m, problem.dims.m)
+        mixed_schur = zeros(BigFloat, problem.dims.m, problem.dims.m)
+        SDPX.materialize_schur!(reference_schur, reference)
+        SDPX.materialize_schur!(mixed_schur, mixed)
+        @test maximum(abs, mixed_schur - reference_schur) /
+              max(maximum(abs, reference_schur), one(BigFloat)) <
+              big"1e-65"
+        @test all(
+            left == right ||
+            mixed_schur[left] !== mixed_schur[right]
+            for left in eachindex(mixed_schur),
+                right in eachindex(mixed_schur)
+        )
+
+        options = SDPX.SolverOptions{BigFloat}(verbosity=0)
+        @test SDPX.factor_arrow_kkt!(reference, options).ok
+        @test SDPX.factor_arrow_kkt!(mixed, options).ok
+        vector = BigFloat.(range(
+            BigFloat("0.17"),
+            BigFloat("1.31");
+            length=problem.dims.m,
+        ))
+        reference_product = SDPX.alloc_zeros(BigFloat, problem.dims.m)
+        mixed_product = SDPX.alloc_zeros(BigFloat, problem.dims.m)
+        SDPX.schur_mul!(
+            reference_product,
+            reference,
+            vector,
+            one(BigFloat),
+            zero(BigFloat),
+        )
+        SDPX.schur_mul!(
+            mixed_product,
+            mixed,
+            vector,
+            one(BigFloat),
+            zero(BigFloat),
+        )
+        @test maximum(abs, mixed_product - reference_product) /
+              max(maximum(abs, reference_product), one(BigFloat)) <
+              big"1e-65"
+
+        reference_solution = SDPX.alloc_zeros(BigFloat, problem.dims.m)
+        mixed_solution = SDPX.alloc_zeros(BigFloat, problem.dims.m)
+        SDPX.solve_arrow_kkt!(reference, vector, reference_solution)
+        SDPX.solve_arrow_kkt!(mixed, vector, mixed_solution)
+        @test maximum(abs, mixed_solution - reference_solution) /
+              max(maximum(abs, reference_solution), one(BigFloat)) <
+              big"1e-55"
+
+        SDPX.materialize_mixed_arrow_native_fallback!(
+            mixed,
+            :regression_fallback,
+        )
+        @test !mixed.arrow.mixed_reduced_ready
+        @test !mixed.arrow.mixed_reduced_enabled
+        @test mixed.arrow.reduced_panel_ready
+        @test mixed.arrow.reduced_panel_enabled
+        fallback_product = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+        )
+        SDPX.schur_mul!(
+            fallback_product,
+            mixed,
+            vector,
+            one(BigFloat),
+            zero(BigFloat),
+        )
+        @test maximum(abs, fallback_product - reference_product) /
+              max(maximum(abs, reference_product), one(BigFloat)) <
+              big"1e-65"
+    end
+end
+
 @testset "BigFloat exact-arrow KKT owns its scratch" begin
     setprecision(BigFloat, 256) do
         problem, X, Y = _bigfloat_arrow_fixture()
@@ -454,6 +631,10 @@ end
             problem.dims.m,
         )
         SDPX.materialize_schur!(Schur, workspace)
+        panel = workspace.arrow.reduced_panel
+        if size(panel, 1) >= 4
+            @test panel[2, 1] !== panel[4, 1]
+        end
         Schur = deepcopy(Schur)
         source_global = deepcopy(arrow.Sgg)
         source_local = deepcopy(arrow.Dsrc)

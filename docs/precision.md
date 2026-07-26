@@ -11,7 +11,7 @@ SDPX solves at whatever element type `T` your input arrays (`A`, `C`, `B`, `b`, 
 | `Float64x4` (MultiFloats.jl) | 209 bits | ~62 | sweet spot for many EFT/modular-bootstrap runs |
 | `Double64` (DoubleFloats.jl) | ~106 bits | ~32 | alternative to Float64x2; has `exp`/`log` if ever needed |
 | `Float64x{6}`/`Float64x{8}` (MultiFloats.jl) | 313/417 bits | ~94/~125 | near SDPB's common 448-bit band |
-| `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits); SDPX deliberately keeps mutable-scalar solver kernels serial to preserve ownership and aliasing invariants |
+| `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits); exact singleton-local `2x2` arrows can use an ownership-safe threaded native reduced Schur path |
 
 `MultiFloats.jl`/`DoubleFloats.jl` types are enabled automatically once you `using MultiFloats` / `using DoubleFloats` in your session (package extensions) — no other change needed.
 
@@ -26,6 +26,37 @@ created: solving 256-bit data at 997 bits cannot recover the missing digits.
 scalar to the working precision, but it does not create information. To gain
 accuracy, rebuild the source data inside
 `setprecision(BigFloat, precision_bits) do ... end`.
+
+## Staged working precision
+
+BigFloat callers may opt into a conservative first-attempt precision:
+
+```julia
+options = SolverOptions{BigFloat}(
+    precision_bits=256,
+    working_precision_policy=:auto,
+    minimum_working_precision_bits=192,
+)
+result = solve!(problem, options)
+```
+
+The selector combines the smallest requested tolerance, a 96-bit numerical
+guard, and a dimension term, rounds upward to 32 bits, and clamps the result
+between the configured floor and requested precision. A lower-precision result
+is accepted only if normal original-coordinate certification succeeds.
+Precision exhaustion, stagnation, `AlmostOptimal`, or a numerical failure
+causes a retry at `precision_bits` when time remains. The failed iterate is
+released before allocating the fallback workspace. Checkpoint resume bypasses
+staging and uses the requested precision.
+
+The policy defaults to `:fixed`. On the medium CSDR model, a fixed 192-bit
+input/run reduced runtime from 87.168 to 80.703 seconds with the same 41
+iterations and certified result. The actual staged run, retaining the
+original 256-bit input objects, took 83.933 seconds and selected 192-bit
+workspace arithmetic without a retry. That single-model 1.04x staged gain is
+useful but is not broad enough evidence to reduce precision automatically for
+all users. See the
+[native BigFloat report](../bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md).
 
 ## Guarded mixed-precision KKT solves
 
@@ -42,6 +73,19 @@ the native factorization and recomputes the direction. Repeated rejection is
 cooled down and eventually disabled for that solve. The default remains
 `:off`; see the [mixed-precision KKT benchmark](../bench/mixed_precision_kkt/RESULTS.md)
 for the current promotion evidence and exact thresholds.
+
+Exact singleton-local `2x2` BigFloat arrows have a separate guarded path when
+`MultiFloats` is loaded. With `mixed_precision_kkt=:on`, SDPX constructs the
+three-dimensional coefficient metric, local diagonals, couplings, residuals,
+and refinement corrections in BigFloat. It packs and factors only the reduced
+shared system in Float64x4 and can parallelize independent block preparation
+plus the blocked SYRK. Any panel, factorization, or refinement failure first
+tries the exact native BigFloat reduced panel, then reconstructs the legacy
+pairwise shared Schur matrix only if that exact representation is unavailable.
+The backend is reported as
+`backend=:float64x4_reduced_arrow` in termination diagnostics. It remains off
+by default because the validated medium CSDR run improved KKT time but not
+total BigFloat runtime.
 
 ## Tolerance vs. precision
 

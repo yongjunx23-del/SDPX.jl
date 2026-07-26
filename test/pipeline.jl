@@ -1073,6 +1073,74 @@ end
     end
 end
 
+@testset "BigFloat staged working precision is conservative and certified" begin
+    setprecision(BigFloat, 256) do
+        problem = SDPX.ingest(
+            BigFloat[1],
+            [reshape(BigFloat[1], 1, 1, 1)],
+            [fill(BigFloat(2), 1, 1)],
+            zeros(BigFloat, 1, 0),
+            BigFloat[];
+            sparse=true,
+            verbosity=0,
+        )
+        automatic_options = SDPX.SolverOptions{BigFloat}(
+            ϵ_gap=big"1e-10",
+            ϵ_primal=big"1e-10",
+            ϵ_dual=big"1e-10",
+            precision_bits=256,
+            working_precision_policy=:auto,
+            minimum_working_precision_bits=192,
+            verbosity=0,
+            diagnostics=true,
+        )
+        @test SDPX.adaptive_working_precision_bits(
+            problem,
+            automatic_options,
+        ) == 192
+
+        automatic = SDPX.solve!(problem, automatic_options)
+        fixed = SDPX.solve!(
+            problem,
+            SDPX._replace_solver_options(
+                automatic_options;
+                working_precision_policy=:fixed,
+            ),
+        )
+        @test automatic.status == SDPX.Optimal
+        @test fixed.status == SDPX.Optimal
+        @test isapprox(
+            automatic.pObj,
+            fixed.pObj;
+            rtol=big"1e-40",
+            atol=big"1e-40",
+        )
+        @test any(
+            warning -> occursin(
+                "Adaptive working precision selected 192",
+                warning,
+            ),
+            automatic.diagnostics.warnings,
+        )
+
+        exact_options = SDPX._replace_solver_options(
+            automatic_options;
+            ϵ_gap=zero(BigFloat),
+        )
+        @test SDPX.adaptive_working_precision_bits(
+            problem,
+            exact_options,
+        ) == 256
+        @test_throws ArgumentError SDPX.solve!(
+            problem,
+            SDPX._replace_solver_options(
+                automatic_options;
+                working_precision_policy=:invalid,
+            ),
+        )
+    end
+end
+
 @testset "solve_summary exposes the §21.3 contract" begin
     # §21.3 says "the exact field types may be refined, but the information
     # contract should remain stable". Pin the field names so a refactor cannot

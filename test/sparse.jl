@@ -96,6 +96,19 @@ end
         @test prob.cons isa SDPX.SparseCons{Float64}
         @test prob.cons.active == active
         @test all(size(coeffs, 1) == 3 for coeffs in prob.cons.packed2)
+        for block in eachindex(prob.cons.packed2)
+            coefficients = prob.cons.packed2[block]
+            masks = prob.cons.packed2_mask[block]
+            @test length(masks) == size(coefficients, 2)
+            @test masks == [
+                UInt8(
+                    (!iszero(coefficients[1, position]) ? 0x01 : 0x00) |
+                    (!iszero(coefficients[2, position]) ? 0x02 : 0x00) |
+                    (!iszero(coefficients[3, position]) ? 0x04 : 0x00),
+                )
+                for position in axes(coefficients, 2)
+            ]
+        end
         selected = SDPX.recommended_parameters(
             prob,
             SDPX.SolverOptions{Float64}(parameter_policy=:auto),

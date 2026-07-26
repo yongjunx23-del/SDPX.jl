@@ -63,6 +63,25 @@ import MutableArithmetics as MA
     return output
 end
 
+@inline function _mpfr_sqrt!(
+    output::BigFloat,
+    input::BigFloat,
+)
+    ccall(
+        (:mpfr_sqrt, Base.MPFR.libmpfr),
+        Cint,
+        (
+            Ref{BigFloat},
+            Ref{BigFloat},
+            Base.MPFR.MPFRRoundingMode,
+        ),
+        output,
+        input,
+        Base.MPFR.rounding_raw(BigFloat),
+    )
+    return output
+end
+
 # ---- kdot: simple form (2 O(1) allocations per call: the returned
 #     accumulator plus one scratch buffer) ----
 
@@ -278,8 +297,12 @@ function kchol!(A::AbstractMatrix{BigFloat})
             djj = A[j, j]
         end
         djj <= 0 && return false
-        Ljj = sqrt(djj)            # non-mutating, fresh
-        A[j, j] = Ljj
+        # `A` is solver-owned storage, so reuse its independent MPFR
+        # destination. This preserves the exact `mpfr_sqrt`/`mpfr_div`
+        # rounding of the former expressions without constructing one new
+        # BigFloat object for every factor entry.
+        _mpfr_sqrt!(A[j, j], djj)
+        Ljj = A[j, j]
         for i in (j+1):k
             if j > 1
                 Li = view(A, i, 1:(j-1))
@@ -290,7 +313,7 @@ function kchol!(A::AbstractMatrix{BigFloat})
             else
                 num = A[i, j]
             end
-            A[i, j] = num / Ljj    # non-mutating, fresh
+            _mpfr_divide!(A[i, j], num, Ljj)
         end
     end
     return true
@@ -468,6 +491,64 @@ function kcholsolve!(
     return rhs
 end
 
+function kcholsolve_owned!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractVector{BigFloat},
+    accumulator::BigFloat,
+    multiplication_buffer::BigFloat,
+    difference::BigFloat,
+)
+    dimension = size(L, 1)
+    dimension == 0 && return rhs
+    if dimension == 1
+        _mpfr_divide!(rhs[1], rhs[1], L[1, 1])
+        _mpfr_divide!(rhs[1], rhs[1], L[1, 1])
+        return rhs
+    end
+    @inbounds for row in 1:dimension
+        numerator = rhs[row]
+        if row > 1
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(L, row, 1:(row - 1)),
+                view(rhs, 1:(row - 1)),
+            )
+            MA.operate_to!(difference, -, rhs[row], accumulator)
+            numerator = difference
+        end
+        _mpfr_divide!(rhs[row], numerator, L[row, row])
+    end
+    @inbounds for row in dimension:-1:1
+        numerator = rhs[row]
+        if row < dimension
+            kdot!(
+                accumulator,
+                multiplication_buffer,
+                view(L, (row + 1):dimension, row),
+                view(rhs, (row + 1):dimension),
+            )
+            MA.operate_to!(difference, -, rhs[row], accumulator)
+            numerator = difference
+        end
+        _mpfr_divide!(rhs[row], numerator, L[row, row])
+    end
+    return rhs
+end
+
+function kcholsolve_owned!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    return kcholsolve_owned!(
+        L,
+        rhs,
+        BigFloat(),
+        BigFloat(),
+        BigFloat(),
+    )
+end
+
 function kcholsolve!(
     L::AbstractMatrix{BigFloat},
     rhs::AbstractMatrix{BigFloat},
@@ -513,6 +594,96 @@ function kcholsolve!(
     return rhs
 end
 
+function kcholsolve_owned!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+    accumulator::BigFloat,
+    multiplication_buffer::BigFloat,
+    difference::BigFloat,
+)
+    dimension = size(L, 1)
+    dimension == 0 && return rhs
+    if dimension == 1
+        diagonal = L[1, 1]
+        @inbounds for column in axes(rhs, 2)
+            _mpfr_divide!(
+                rhs[1, column],
+                rhs[1, column],
+                diagonal,
+            )
+            _mpfr_divide!(
+                rhs[1, column],
+                rhs[1, column],
+                diagonal,
+            )
+        end
+        return rhs
+    end
+    @inbounds for column in axes(rhs, 2)
+        rhs_column = view(rhs, :, column)
+        for row in 1:dimension
+            numerator = rhs_column[row]
+            if row > 1
+                kdot!(
+                    accumulator,
+                    multiplication_buffer,
+                    view(L, row, 1:(row - 1)),
+                    view(rhs_column, 1:(row - 1)),
+                )
+                MA.operate_to!(
+                    difference,
+                    -,
+                    rhs_column[row],
+                    accumulator,
+                )
+                numerator = difference
+            end
+            _mpfr_divide!(
+                rhs_column[row],
+                numerator,
+                L[row, row],
+            )
+        end
+        for row in dimension:-1:1
+            numerator = rhs_column[row]
+            if row < dimension
+                kdot!(
+                    accumulator,
+                    multiplication_buffer,
+                    view(L, (row + 1):dimension, row),
+                    view(rhs_column, (row + 1):dimension),
+                )
+                MA.operate_to!(
+                    difference,
+                    -,
+                    rhs_column[row],
+                    accumulator,
+                )
+                numerator = difference
+            end
+            _mpfr_divide!(
+                rhs_column[row],
+                numerator,
+                L[row, row],
+            )
+        end
+    end
+    return rhs
+end
+
+function kcholsolve_owned!(
+    L::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+)
+    return kcholsolve_owned!(
+        L,
+        rhs,
+        BigFloat(),
+        BigFloat(),
+        BigFloat(),
+    )
+end
+
 """
     BigFloatCholeskyFactor(L)
 
@@ -536,7 +707,7 @@ function trial_isposdef!(
     t::BigFloat,
     dX::AbstractMatrix{BigFloat},
 )
-    trial_combine!(scratch, X, t, dX)
+    trial_combine_owned!(scratch, X, t, dX)
     return kchol!(scratch)
 end
 
@@ -763,6 +934,42 @@ function trial_combine!(
         destination[index] = MA.mutable_copy(accumulator)
     end
     return destination
+end
+
+function trial_combine_owned!(
+    destination::AbstractArray{BigFloat},
+    X::AbstractArray{BigFloat},
+    step::BigFloat,
+    direction::AbstractArray{BigFloat},
+    accumulator::BigFloat,
+)
+    @inbounds for index in eachindex(destination, X, direction)
+        MA.operate_to!(accumulator, *, step, direction[index])
+        # MPFR addition permits the output to alias `X[index]`. This matters
+        # for the accepted-step update, where `destination === X`.
+        MA.operate_to!(
+            destination[index],
+            +,
+            X[index],
+            accumulator,
+        )
+    end
+    return destination
+end
+
+function trial_combine_owned!(
+    destination::AbstractArray{BigFloat},
+    X::AbstractArray{BigFloat},
+    step::BigFloat,
+    direction::AbstractArray{BigFloat},
+)
+    return trial_combine_owned!(
+        destination,
+        X,
+        step,
+        direction,
+        BigFloat(),
+    )
 end
 
 @inline function _update_bigfloat_abs_maximum!(

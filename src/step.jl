@@ -85,7 +85,7 @@ function _predictor_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T}, Y) whe
         bw = ws.blk[l]
         kmul_owned!(bw.Z, bw.P, Y[l])
         kaxpby_owned!(-one(T), bw.R, one(T), bw.Z)   # Z = P·Y − R
-        kcholsolve!(bw.LX, bw.Z)                # Z = X⁻¹(P·Y − R)
+        kcholsolve_owned!(bw.LX, bw.Z)          # Z = X⁻¹(P·Y − R)
         accumulate_v_owned!(ws.v, prob.cons, l, bw.Z, one(T))
     end
     return ws.v
@@ -140,6 +140,62 @@ so it cannot slow down a caller who deliberately asked for fewer.
 @inline function _kkt_blas_threads(m::Int)
     available = blas_threads()
     return clamp(m ÷ 256, 1, available)
+end
+
+"""
+    _skip_automatic_refinement(ws, opts, kkt) -> Bool
+
+Return whether the exact reduced-arrow factorization has enough arithmetic
+headroom to omit the explicit KKT-residual pass. The residual multiplication
+is expensive for singleton-arrow models because it reconstructs the action of
+the unmaterialized shared Schur block.
+
+This is deliberately narrow:
+
+- only the `:auto` policy may skip work;
+- fixed-width arithmetic requires direct reduced-arrow assembly;
+- native BigFloat is limited to singleton-local arrow systems;
+- an unregularized factorization is required; and
+- the requested outer tolerance must be no tighter than `sqrt(eps(T))`.
+
+Explicit `:fixed`/`:adaptive` policies, user-supplied refinement tolerances,
+mixed-precision BigFloat, regularized systems, and very tight solves retain
+residual-driven refinement. Final certification in original coordinates
+remains unchanged.
+"""
+function _has_singleton_arrow_blocks(arrow::ArrowWorkspace)
+    @inbounds for ids in arrow.local_ids
+        length(ids) == 1 || return false
+    end
+    return !isempty(arrow.local_ids)
+end
+
+function _skip_automatic_refinement(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+    kkt,
+) where {T}
+    opts.refine_policy === :auto || return false
+    iszero(opts.refine_tol) || return false
+    arrow = ws.arrow
+    arrow === nothing && return false
+    typed_arrow = arrow::ArrowWorkspace{T}
+    arithmetic_is_safe = if T === BigFloat
+        # The native MPFR factorization has far more precision than a typical
+        # outer solve requests. Mixed Float64x4 factors still need the exact
+        # BigFloat residual to decide whether to fall back.
+        !typed_arrow.mixed_reduced_ready &&
+            _has_singleton_arrow_blocks(typed_arrow)
+    else
+        ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended &&
+            typed_arrow.reduced_panel_ready
+    end
+    arithmetic_is_safe || return false
+    kkt.reg_attempts == 0 || return false
+    requested_tolerance =
+        min(opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual)
+    requested_tolerance > zero(T) || return false
+    return requested_tolerance >= sqrt(eps(T))
 end
 
 
@@ -227,8 +283,20 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     affine_complementarity = zero(T)
     @inbounds for l in 1:L
         current_complementarity += kdot(X[l], Y[l])
-        trial_combine!(ws.blk[l].W1, X[l], one(T), ws.blk[l].dX)
-        trial_combine!(ws.blk[l].W2, Y[l], one(T), ws.blk[l].dY)
+        trial_combine_owned!(
+            ws.blk[l].W1,
+            X[l],
+            one(T),
+            ws.blk[l].dX,
+            ws.blk[l].trialX[1, 1],
+        )
+        trial_combine_owned!(
+            ws.blk[l].W2,
+            Y[l],
+            one(T),
+            ws.blk[l].dY,
+            ws.blk[l].trialX[1, 1],
+        )
         affine_complementarity += kdot(ws.blk[l].W1, ws.blk[l].W2)
     end
     predictor_quality = current_complementarity > zero(T) ?
@@ -264,7 +332,10 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
         q_pivoted=false,
     )
 
-    refine_steps, refine_residual = refine_direction!(ws, prob, opts, r)
+    refine_steps, refine_residual =
+        _skip_automatic_refinement(ws, opts, kkt) ?
+        (0, zero(T)) :
+        refine_direction!(ws, prob, opts, r)
     refinement_finished = time_ns()
 
     _with_blas_threads(parallel_blas) do

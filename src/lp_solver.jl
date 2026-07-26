@@ -671,7 +671,7 @@ end
 function _lp_solve_factor!(factor::LPCholeskyFactor, rhs)
     factor.success ||
         throw(LinearAlgebra.PosDefException(1))
-    return kcholsolve!(factor.factor, rhs)
+    return kcholsolve_owned!(factor.factor, rhs)
 end
 
 """
@@ -949,12 +949,12 @@ function _lp_equality_only_result(
                     -one(T),
                     one(T),
                 )
-                kcholsolve!(gram, correction)
+                kcholsolve_owned!(gram, correction)
                 projection = alloc_zeros(T, variables)
                 kmul_owned!(projection, prob.B, correction)
                 kaxpby_owned!(one(T), projection, one(T), x)
                 kmul_owned!(y, transpose(prob.B), prob.c)
-                kcholsolve!(gram, y)
+                kcholsolve_owned!(gram, y)
             else
                 factorization_failed = true
             end

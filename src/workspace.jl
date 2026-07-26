@@ -255,6 +255,7 @@ mutable struct ArrowWorkspace{T}
     Dsrc::Vector{Matrix{T}}     # compact, unfactored S[U_l,U_l]
     coupling::Vector{Matrix{T}} # S[U_l,G]
     Dbuf::Vector{Matrix{T}}     # factored local S[U_l,U_l]
+    Dinv::Vector{T}             # cached inverse for singleton local blocks
     W::Vector{Matrix{T}}        # D_l^-1 * S[U_l,G]
     tmp::Vector{Vector{T}}      # D_l^-1 * r[U_l]
     Sred::Matrix{T}
@@ -264,6 +265,25 @@ mutable struct ArrowWorkspace{T}
     rgpartial::Vector{Vector{T}}
     local_attempts::Vector{Int}
     local_ok::Vector{Bool}
+    local_coefficient_position::Vector{Int}
+    reduced_panel::Matrix{T}
+    reduced_panel_enabled::Bool
+    reduced_panel_ready::Bool
+    reduced_panel_config::ExtendedPrecisionBLAS.KernelConfig
+    mixed_reduced_coefficients::Any
+    mixed_reduced_panel::Any
+    mixed_reduced_schur::Any
+    mixed_reduced_factor::Any
+    mixed_reduced_rhs::Any
+    mixed_source_cons::Any
+    coefficient_metric::Vector{Matrix{T}}
+    mixed_reduced_enabled::Bool
+    mixed_reduced_ready::Bool
+    mixed_reduced_threads::Int
+    mixed_reduced_mode::Symbol
+    mixed_reduced_attempt_count::Int
+    mixed_reduced_fallback_count::Int
+    mixed_reduced_reason::Symbol
 end
 
 function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
@@ -297,6 +317,12 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
         local_pos[i] = p
         local_owner[i] = l
     end
+    local_coefficient_position = zeros(Int, L)
+    for l in 1:L
+        length(local_ids[l]) == 1 || continue
+        local_coefficient_position[l] =
+            searchsortedfirst(cons.schur_order[l], local_ids[l][1])
+    end
     Dsrc = [alloc_zeros(T, length(ids), length(ids)) for ids in local_ids]
     coupling = [alloc_zeros(T, length(ids), ng) for ids in local_ids]
     Dbuf = [alloc_zeros(T, length(ids), length(ids)) for ids in local_ids]
@@ -313,6 +339,7 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
         Dsrc,
         coupling,
         Dbuf,
+        alloc_zeros(T, L),
         W,
         tmp,
         alloc_zeros(T, ng, ng),
@@ -322,6 +349,25 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
         [alloc_zeros(T, ng) for _ in 1:nbins],
         zeros(Int, L),
         ones(Bool, L),
+        local_coefficient_position,
+        alloc_zeros(T, 0, 0),
+        false,
+        false,
+        ExtendedPrecisionBLAS.KernelConfig(),
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        nothing,
+        Matrix{T}[],
+        false,
+        false,
+        1,
+        :off,
+        0,
+        0,
+        :not_requested,
     )
 end
 
@@ -467,7 +513,7 @@ function Workspace(
 ) where {T}
     L, m, n, k = prob.dims
     selected_threads =
-        T === BigFloat ? 1 : min(max(thread_count, 1), Threads.nthreads())
+        min(max(thread_count, 1), Threads.nthreads())
     is_sparse = prob.cons isa SparseCons
     arrow = ArrowWorkspace(prob, selected_threads)
     compact_arrow = arrow !== nothing
@@ -478,6 +524,93 @@ function Workspace(
             l -> size((prob.cons::SparseCons{T}).packed2[l], 1) == 3,
             1:L,
         )
+    arrow_workspace = compact_arrow ? arrow::ArrowWorkspace{T} : nothing
+    available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
+    reduced_arrow_decision =
+        _reduced_arrow_crossover(
+            prob,
+            T,
+            extended_precision_blas,
+            extended_precision_memory_fraction,
+            thread_count;
+            available_memory_bytes=available_memory,
+        )
+    reduced_arrow_panel = reduced_arrow_decision.enabled
+    if T === BigFloat && !reduced_arrow_panel
+        # Native BigFloat remains serial except for the explicitly
+        # ownership-safe reduced-panel path selected below.
+        selected_threads = 1
+    end
+    if reduced_arrow_panel
+        arrow_workspace.reduced_panel =
+            alloc_zeros(T, 2 * L, length(arrow_workspace.global_ids))
+        arrow_workspace.reduced_panel_enabled = true
+        arrow_workspace.reduced_panel_config =
+            reduced_arrow_decision.config
+        if T === BigFloat
+            arrow_workspace.coefficient_metric = [
+                alloc_zeros(T, 3, 3)
+                for _ in 1:L
+            ]
+        end
+    end
+    mixed_type =
+        T === BigFloat && mixed_precision_kkt !== :off ?
+        mixed_arrow_arithmetic(T) : nothing
+    mixed_reduced_decision = if mixed_type === nothing
+        ExtendedPrecisionBLAS.CrossoverDecision(
+            false,
+            :unsupported_arithmetic,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            ExtendedPrecisionBLAS.KernelConfig(),
+        )
+    else
+        _reduced_arrow_crossover(
+            prob,
+            mixed_type,
+            mixed_precision_kkt,
+            mixed_precision_memory_fraction,
+            thread_count;
+            mixed=true,
+            available_memory_bytes=available_memory,
+        )
+    end
+    mixed_reduced_arrow = mixed_reduced_decision.enabled
+    compact_arrow &&
+        (arrow_workspace.mixed_reduced_mode = mixed_precision_kkt)
+    if mixed_reduced_arrow
+        mixed_threads = min(
+            max(thread_count, 1),
+            Threads.nthreads(),
+        )
+        arrow_workspace.mixed_reduced_coefficients = [
+            mixed_type.(coefficients)
+            for coefficients in (prob.cons::SparseCons{T}).packed2
+        ]
+        arrow_workspace.mixed_reduced_panel =
+            alloc_zeros(mixed_type, 2 * L, length(arrow_workspace.global_ids))
+        arrow_workspace.mixed_reduced_schur =
+            alloc_zeros(
+                mixed_type,
+                length(arrow_workspace.global_ids),
+                length(arrow_workspace.global_ids),
+            )
+        arrow_workspace.mixed_reduced_factor =
+            similar(arrow_workspace.mixed_reduced_schur)
+        arrow_workspace.mixed_reduced_rhs =
+            alloc_zeros(mixed_type, length(arrow_workspace.global_ids))
+        arrow_workspace.mixed_source_cons = prob.cons
+        arrow_workspace.coefficient_metric = [
+            alloc_zeros(T, 3, 3)
+            for _ in 1:L
+        ]
+        arrow_workspace.mixed_reduced_enabled = true
+        arrow_workspace.mixed_reduced_threads = mixed_threads
+        arrow_workspace.mixed_reduced_reason = :ready
+    end
     extended_precision = _extended_precision_workspace(
         prob,
         extended_precision_blas,
@@ -485,9 +618,12 @@ function Workspace(
         selected_threads,
         fused_arrow,
     )
+    # Block-arrow systems have their own reduced mixed-precision path. Avoid
+    # allocating the generic dense Float64 KKT copy, which factor_kkt! can
+    # never use when `arrow !== nothing`.
     mixed_precision = _mixed_precision_workspace(
         prob,
-        mixed_precision_kkt,
+        compact_arrow ? :off : mixed_precision_kkt,
         mixed_precision_memory_fraction,
     )
     block_nbins = max(1, min(selected_threads, L))

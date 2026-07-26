@@ -53,13 +53,15 @@ non-finite.
 | Parameter | Default | Meaning |
 |---|---:|---|
 | `precision_bits` | `997` | Working precision for `BigFloat` only. It does not affect fixed-width `Float64x4`. |
+| `working_precision_policy` | `:fixed` | BigFloat policy. `:auto` may start at a conservatively selected lower precision and retries at `precision_bits` unless the first result passes original-coordinate certification. |
+| `minimum_working_precision_bits` | `192` | Lower bound for the opt-in staged BigFloat selector. The requested `precision_bits` remains the upper bound and fallback. |
 | `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`. This cannot recover digits already lost when the source was created. |
 | `equilibrate` | `false` | Apply PSD-block diagonal congruence scaling and variable scaling before solving. Dense and sparse coefficient storage are supported. |
 | `scaling` | `:auto` | Pipeline selector: LP geometric scaling for the dedicated LP path; for SDP, Ruiz scaling when `equilibrate=true`, otherwise none. |
 | `sparse` | `:auto` | Storage selection used during ingestion. `:auto` distinguishes sparse coefficient storage from aggregate PSD and Schur density; `true`/`:sparse` and `false`/`:dense` force a path. |
-| `extended_precision_blas` | `:off` | Extended-precision Schur backend: `:off`, conservative `:auto`, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. |
+| `extended_precision_blas` | type-dependent | Extended-precision Schur backend: conservative `:auto` for `Float64x4` and `BigFloat`, `:off` for other arithmetic types, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. Native BigFloat parallelism is limited to ownership-safe exact reduced-arrow panels and Schur tiles. |
 | `extended_precision_memory_fraction` | `0.10` | Maximum fraction of currently available memory that the crossover may reserve for packed extended-precision panels. The cap respects host free memory, cgroups, and `SDPX_MEMORY_LIMIT_BYTES`, and conservatively keeps half of reported free memory outside the packing budget. |
-| `mixed_precision_kkt` | `:off` | Opt-in dense KKT acceleration for BigFloat and fixed-width extended types: `:off`, guarded `:auto`, or size-override `:on`. Float64 is never redirected. |
+| `mixed_precision_kkt` | `:off` | Opt-in KKT acceleration: dense problems use a guarded Float64 factorization; exact singleton-arrow BigFloat problems can use a guarded Float64x4 reduced shared factorization when MultiFloats is loaded. Float64 is never redirected. |
 | `mixed_precision_condition_limit` | `1e8` | Maximum conservative Float64 condition estimate accepted for mixed KKT refinement. |
 | `mixed_precision_refine_max_steps` | `32` | Maximum target-precision correction solves before native extended-precision fallback. |
 | `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of reliably available memory used for persistent Float64 factors and conversion scratch. |
@@ -171,12 +173,16 @@ opts = SolverOptions{Float64x4}(
 Automatic mode accounts for arithmetic type, packed dimensions, coefficient
 and active density, expected Schur density, Julia thread count, and the memory
 budget. It retains the sparse outer-product route when packing is not
-predicted to amortize. Exact-arrow models containing only `2x2` PSD blocks use
-the fused direct kernel instead for both Float64x4 and BigFloat, regardless of
-this packing selector. In that case diagnostics report
-`gram_kernel=:fused_arrow_2x2` and
-`gram_kernel_reason=:fused_arrow_specialized`, and no transformed panels or
-pair buffers are allocated.
+predicted to amortize. Exact singleton-local `2x2` Float64x4 arrows use a
+dedicated crossover: at least 32 shared columns, at least `2e5`
+two-row-panel pair operations, at least 0.20 expected shared-Schur density, at
+least 0.10 shared active density, at least 1.18 predicted speedup, and a panel
+within the configured memory budget. A host calibration may adjust the
+column, work, shared-Schur-density, and speedup thresholds. Rejected cases
+retain the fused direct kernel and allocate neither transformed panels nor
+pair buffers. Selected diagnostics report
+`gram_kernel=:reduced_arrow_syrk`,
+`:reduced_arrow_threaded_syrk`, or `:fused_arrow_2x2`.
 
 Dense, non-arrow high-precision problems can separately opt into guarded
 mixed-precision KKT factorization:
@@ -199,3 +205,11 @@ rejections. The feature remains off by default pending large full-solve
 validation. `result.termination.mixed_precision_kkt` records whether the path
 was available and active, its final reason, condition/step estimates, attempt
 counts, cooldown, and dynamic/static fallback counts.
+
+For an exact singleton-local BigFloat arrow, loading `MultiFloats` and setting
+`mixed_precision_kkt=:on` instead selects
+`backend=:float64x4_reduced_arrow`. Exact BigFloat coefficient metrics,
+residuals, and refinement are retained; only the reduced shared panel and
+factor use Float64x4. Diagnostics record the panel worker count and native
+fallback reason. This path remains off by default because the medium CSDR
+validation improved the KKT subphase without a clear total-runtime gain.

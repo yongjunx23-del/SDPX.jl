@@ -139,7 +139,7 @@ end
         end
     end
 
-    @testset "Float64 unchanged and BigFloat serial" begin
+    @testset "Float64 unchanged and small BigFloat serial" begin
         float_panel = _regression_panel(Float64, 12, 10)
         float_output = zeros(Float64, 10, 10)
         EXTENDED_BLAS_REGRESSION.syrk!(
@@ -184,6 +184,56 @@ end
             ) < big"1e-50"
             @test output[1, 1] !== output[2, 1]
             @test all(iszero, triu(output, 1))
+        end
+    end
+
+    @testset "BigFloat exclusive-tile threading" begin
+        setprecision(BigFloat, 192) do
+            uninitialized = Matrix{BigFloat}(undef, 3, 3)
+            EXTENDED_BLAS_REGRESSION.prepare_storage!(uninitialized)
+            @test all(iszero, uninitialized)
+            @test uninitialized[1] !== uninitialized[2]
+
+            rows = 96
+            columns = 48
+            panel = _regression_panel(BigFloat, rows, columns)
+            config = EXTENDED_BLAS_REGRESSION.KernelConfig(
+                row_tile=32,
+                column_tile=8,
+                micro_tile=1,
+            )
+            serial = SDPX.alloc_zeros(BigFloat, columns, columns)
+            threaded = SDPX.alloc_zeros(BigFloat, columns, columns)
+            EXTENDED_BLAS_REGRESSION.syrk!(
+                serial,
+                panel,
+                one(BigFloat),
+                zero(BigFloat),
+                config,
+                1,
+            )
+            requested = min(Threads.nthreads(), 4)
+            EXTENDED_BLAS_REGRESSION.syrk!(
+                threaded,
+                panel,
+                one(BigFloat),
+                zero(BigFloat),
+                config,
+                requested,
+            )
+            @test LowerTriangular(threaded) == LowerTriangular(serial)
+            @test all(iszero, triu(threaded, 1))
+            selected =
+                EXTENDED_BLAS_REGRESSION._syrk_bigfloat_selected_workers(
+                    panel,
+                    config,
+                    requested,
+                )
+            @test selected <= requested
+            @test selected <= Threads.nthreads()
+            Threads.nthreads() > 1 && @test selected > 1
+            @test threaded[1, 1] !== threaded[2, 1]
+            @test threaded[2, 1] !== threaded[2, 2]
         end
     end
 
