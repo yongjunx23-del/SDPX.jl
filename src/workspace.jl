@@ -379,7 +379,8 @@ function _schur_parallel_bins(
     ::Type{T},
     m::Int,
     L::Int,
-    thread_count::Int,
+    thread_count::Int;
+    free_memory_bytes::Union{Nothing,Integer}=nothing,
 ) where {T}
     requested = max(1, min(thread_count, L))
     m == 0 && return requested
@@ -387,8 +388,14 @@ function _schur_parallel_bins(
     # Cap task-local Schur accumulators to 15% of currently free memory.
     # This avoids making `threads × m² × sizeof(T)` the hidden limiter for
     # MultiFloat and large-cluster jobs.
-    free_memory_bytes =
-        ExtendedPrecisionBLAS._system_free_memory_bytes()
+    #
+    # `free_memory_bytes` exists so the policy can be exercised at a stated
+    # budget instead of whatever the host happens to have free. Without it the
+    # capping tests assert one thing on a laptop and the opposite on a 256 GB
+    # compute node, which is exactly what happened.
+    free_memory_bytes = free_memory_bytes === nothing ?
+        ExtendedPrecisionBLAS._system_free_memory_bytes() :
+        Int(free_memory_bytes)
     memory_budget = Float64(
         ExtendedPrecisionBLAS._memory_budget_from_fraction(
             free_memory_bytes,

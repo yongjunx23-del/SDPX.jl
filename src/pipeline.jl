@@ -347,9 +347,11 @@ than left to be inferred from a disappointing speedup, and §19.3 asks for an
 informative estimate rather than a silent degradation.
 """
 function schur_bin_report(::Type{T}, m::Integer, L::Integer,
-                          threads::Integer) where {T}
+                          threads::Integer;
+                          free_memory_bytes::Union{Nothing,Integer}=nothing) where {T}
     requested = max(1, min(Int(threads), Int(L)))
-    selected = _schur_parallel_bins(T, Int(m), Int(L), Int(threads))
+    selected = _schur_parallel_bins(T, Int(m), Int(L), Int(threads);
+        free_memory_bytes=free_memory_bytes)
     bytes_each = Int(m)^2 * max(sizeof(T), 8)
     return (
         requested_bins=requested,

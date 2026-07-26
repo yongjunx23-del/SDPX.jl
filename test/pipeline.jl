@@ -1171,14 +1171,22 @@ end
     # that problem showed no Schur speedup from 1 to 8 threads on a 10-core
     # machine. §18.4 requires such a selection change be reported, not inferred
     # from a disappointing measurement.
-    small = SDPX.schur_bin_report(Float64, 200, 32, 8)
+    # A stated budget, not the host's free memory. One 6119-bin costs 285.7 MB
+    # and one 200-bin costs 0.3 MB, and the cap allows 15% of the budget, so
+    # 4 GiB affords eight of the small ones and only two of the large ones on
+    # every machine. Reading the ambient figure instead made this testset
+    # assert one thing on a laptop and the opposite on a 256 GB compute node,
+    # where the cap correctly does not bind and all three "large" assertions
+    # failed.
+    budget = 4 * 1024^3
+    small = SDPX.schur_bin_report(Float64, 200, 32, 8; free_memory_bytes=budget)
     @test small.requested_bins == 8
     @test small.selected_bins == 8
     @test !small.capped
     @test small.total_bytes == small.would_have_been_bytes
 
     # A large m must cap, and must report both the actual and the avoided cost.
-    large = SDPX.schur_bin_report(Float64, 6119, 32, 8)
+    large = SDPX.schur_bin_report(Float64, 6119, 32, 8; free_memory_bytes=budget)
     @test large.requested_bins == 8
     @test large.selected_bins < 8
     @test large.capped
