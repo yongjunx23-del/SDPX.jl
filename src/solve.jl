@@ -234,9 +234,26 @@ function recommended_parameters(
         # away to 1e13. A sweep confirmed Ω=100 recovers the correct basin on
         # exactly that instance, and Ω tracking `max‖C_l‖∞` reproduces it
         # without hard-coding the case.
-        # The final sweep found that matching the largest block norm is a safer
-        # general start than the earlier fitted 3× multiplier. Keep 10 as the
-        # floor for small-data models.
+        # An earlier revision set this multiplier to 1, reasoning that Ω=100
+        # worked on the CSDR instance whose `max‖C_l‖∞` happened to be 116.6,
+        # so "Ω tracks `max‖C_l‖∞`" reproduced it without hard-coding. That was
+        # a coincidence of one instance. A CSDR model with `max‖C_l‖∞ = 35.4`
+        # gets Ω=35 from the same rule and does not converge.
+        #
+        # Swept across three CSDR instances with independently known Clarabel
+        # optima and the dense lattice benchmark, iterations and status:
+        #
+        #   multiplier   s15         s20              s25         Task_Low08
+        #            1   22 Optimal  94 Stalled       81 Optimal  27 Optimal
+        #           10   26 Optimal  36 Optimal       46 Optimal  27 Optimal
+        #          100   29 Optimal  81 Stalled       53 Optimal  27 Optimal
+        #
+        # Ten is the only value that solves all four. Note the behaviour is not
+        # monotone — 100 is worse than 10 on `s20` — so this cannot be inferred
+        # from a single instance in either direction, which is how the previous
+        # value was arrived at. The dense lattice result is unchanged to every
+        # digit, so this is not a trade against it. Keep 10 as the floor for
+        # small-data models.
         stats = block_norm_stats(prob)
         omega = max(T(10), T(OMEGA_DATA_MULTIPLIER) * stats.maxnorm)
         return (
@@ -1286,11 +1303,23 @@ end
 
 """Initial `X = Ω·I` is set to this multiple of `max‖C_l‖∞`.
 
-1, i.e. Ω simply matches the largest block norm. An earlier value of 3 was
-fitted against runs that were terminating prematurely, and re-measuring once
-that was fixed showed 1 is clearly better on the CSDR sparse model: 47
-iterations to gap 3.08e-04, against 35 iterations to 7.08e-03 at 3."""
-const OMEGA_DATA_MULTIPLIER = 1
+Ten. Chosen by sweeping four problems that each have an independently known
+answer — three CSDR instances against Clarabel optima and the dense lattice
+benchmark — rather than by fitting one of them; see the sweep table at the use
+site in `recommended_parameters`.
+
+The two previous values were each fitted to a single instance and each failed
+elsewhere. Three was fitted against runs that were terminating prematurely. One
+replaced it on the reasoning that Ω=100 worked on a CSDR model whose
+`max‖C_l‖∞` was 116.6, so a multiplier of 1 reproduced that value without
+hard-coding it — but a CSDR model with `max‖C_l‖∞ = 35.4` then gets Ω=35 and
+does not converge.
+
+The response surface is not monotone: 100 is worse than 10 on that same
+instance. So no single problem can identify this constant, in either direction,
+and changing it needs the whole sweep re-run rather than one benchmark
+improved."""
+const OMEGA_DATA_MULTIPLIER = 10
 
 """A tolerance-normalised merit below this counts as "near a solution": within
 this factor of the tolerance the user actually asked for."""
