@@ -133,10 +133,14 @@ equilibrate=false
 ```
 
 With `parameter_policy=:auto`, the arrow profile chooses `Ωp=Ωd` from the
-problem scale (at least 10 and otherwise approximately the maximum
-PSD-block infinity norm). Set `parameter_policy=:fixed` when benchmarking an
-explicit `Ωp`/`Ωd`; otherwise the structural profile intentionally overrides
-those fields.
+problem scale. The default large-problem rule is at least 10 and otherwise
+`10·max_l ||C_l||_inf`. A wide arrow with at most 256 active variables per
+block and `max_l ||C_l||_inf <= 10` instead uses the validated
+`5·floor(max_l ||C_l||_inf)` rule, with a floor of 10. The grid quantization
+avoids an observed unstable interval in the medium CSDR case and selects its
+faster validated point. Set `parameter_policy=:fixed` when
+benchmarking an explicit `Ωp`/`Ωd`; otherwise the structural profile
+intentionally overrides those fields.
 
 The zero-probe policy currently selects:
 
@@ -144,14 +148,16 @@ The zero-probe policy currently selects:
 |---:|---:|---:|
 | 1 to 6 | `0.1` | `0.85` |
 | 7 to 14 | `0.1` | `0.8` |
-| 15 or more | `0.01` | `0.85` |
+| 15 to 256 | `0.1` | `0.85` |
+| 257 or more | `0.01` | `0.85` |
 
 This is an empirical structural policy for the tested sparse block-arrow CSDR
 family, not a universal replacement for fixed parameters. Problems outside
 that shape retain the supplied `β` and `γ`.
 
-For `BigFloat` accuracy runs on the same problem, `β=0.1, γ=0.75` was more
-stable at tolerances from `1e-12` through `1e-30`.
+For `BigFloat` accuracy runs below a `1e-10` tolerance, the automatic policy
+keeps `β=0.1` and caps `γ` at `0.75`; at `1e-10`, the structural profile's
+validated `γ=0.85` is retained.
 
 The extended-precision matrix kernels remain opt-in:
 

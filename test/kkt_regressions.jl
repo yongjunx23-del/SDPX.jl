@@ -68,6 +68,34 @@ end
         actual = copy(initial)
         SDPX._arrow_rank_sub!(actual, coupling, solved)
         @test actual == expected
+
+        lower_add = zeros(global_count, global_count)
+        SDPX._arrow_rank_add_lower!(lower_add, coupling, solved)
+        @test LowerTriangular(lower_add) == LowerTriangular(legacy)
+
+        lower_sub = copy(initial)
+        SDPX._arrow_rank_sub_lower!(lower_sub, coupling, solved)
+        @test LowerTriangular(lower_sub) == LowerTriangular(expected)
+
+        setprecision(BigFloat, 256) do
+            big_coupling = BigFloat.(coupling[:, 1:16])
+            big_solved = BigFloat.(solved[:, 1:16])
+            big_full = SDPX.alloc_zeros(BigFloat, 16, 16)
+            big_lower = SDPX.alloc_zeros(BigFloat, 16, 16)
+            SDPX._arrow_rank_add!(
+                big_full,
+                big_coupling,
+                big_solved,
+            )
+            SDPX._arrow_rank_add_lower!(
+                big_lower,
+                big_coupling,
+                big_solved,
+            )
+            @test LowerTriangular(big_lower) ==
+                  LowerTriangular(big_full)
+            @test !(big_lower[1, 1] === big_lower[2, 1])
+        end
     end
 
     @testset "adaptive refinement restores last accepted direction" begin

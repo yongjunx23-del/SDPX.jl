@@ -346,6 +346,56 @@ function _arrow_rank_sub!(
     return destination
 end
 
+"""
+    _arrow_rank_add_lower!(destination, coupling, solved_coupling)
+    _arrow_rank_sub_lower!(destination, coupling, solved_coupling)
+
+Triangular arrow-reduction kernels used before lower Cholesky. The eliminated
+term `coupling' * D^-1 * coupling` is symmetric, and the factorization reads
+only its lower triangle. Avoiding the unused mirrored update nearly halves
+the extended-precision rank-update work when each PSD block owns one local
+variable.
+"""
+function _arrow_rank_lower!(
+    destination::AbstractMatrix{T},
+    coupling::AbstractMatrix{T},
+    solved_coupling::AbstractMatrix{T},
+    ::Val{ADD},
+) where {T,ADD}
+    local_count, global_count = size(coupling)
+    @inbounds for p in 1:local_count
+        for column in 1:global_count
+            solved = solved_coupling[p, column]
+            for row in column:global_count
+                factor = coupling[p, row]
+                iszero(factor) && continue
+                if ADD
+                    destination[row, column] += factor * solved
+                else
+                    destination[row, column] -= factor * solved
+                end
+            end
+        end
+    end
+    return destination
+end
+
+_arrow_rank_add_lower!(destination, coupling, solved_coupling) =
+    _arrow_rank_lower!(
+        destination,
+        coupling,
+        solved_coupling,
+        Val(true),
+    )
+
+_arrow_rank_sub_lower!(destination, coupling, solved_coupling) =
+    _arrow_rank_lower!(
+        destination,
+        coupling,
+        solved_coupling,
+        Val(false),
+    )
+
 function _arrow_rank_add!(
     destination::AbstractMatrix{BigFloat},
     coupling::AbstractMatrix{BigFloat},
@@ -370,6 +420,93 @@ function _arrow_rank_add!(
         end
     end
     return destination
+end
+
+function _arrow_rank_lower!(
+    destination::AbstractMatrix{BigFloat},
+    coupling::AbstractMatrix{BigFloat},
+    solved_coupling::AbstractMatrix{BigFloat},
+    multiplication_buffer::BigFloat,
+    operation,
+)
+    local_count, global_count = size(coupling)
+    @inbounds for p in 1:local_count
+        for column in 1:global_count
+            solved = solved_coupling[p, column]
+            for row in column:global_count
+                factor = coupling[p, row]
+                iszero(factor) && continue
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    operation,
+                    destination[row, column],
+                    factor,
+                    solved,
+                )
+            end
+        end
+    end
+    return destination
+end
+
+function _arrow_rank_add_lower!(
+    destination::AbstractMatrix{BigFloat},
+    coupling::AbstractMatrix{BigFloat},
+    solved_coupling::AbstractMatrix{BigFloat},
+)
+    multiplication_buffer = BigFloat()
+    return _arrow_rank_lower!(
+        destination,
+        coupling,
+        solved_coupling,
+        multiplication_buffer,
+        MA.add_mul,
+    )
+end
+
+function _arrow_rank_add_lower!(
+    destination::AbstractMatrix{BigFloat},
+    coupling::AbstractMatrix{BigFloat},
+    solved_coupling::AbstractMatrix{BigFloat},
+    multiplication_buffer::BigFloat,
+)
+    return _arrow_rank_lower!(
+        destination,
+        coupling,
+        solved_coupling,
+        multiplication_buffer,
+        MA.add_mul,
+    )
+end
+
+function _arrow_rank_sub_lower!(
+    destination::AbstractMatrix{BigFloat},
+    coupling::AbstractMatrix{BigFloat},
+    solved_coupling::AbstractMatrix{BigFloat},
+)
+    multiplication_buffer = BigFloat()
+    return _arrow_rank_lower!(
+        destination,
+        coupling,
+        solved_coupling,
+        multiplication_buffer,
+        MA.sub_mul,
+    )
+end
+
+function _arrow_rank_sub_lower!(
+    destination::AbstractMatrix{BigFloat},
+    coupling::AbstractMatrix{BigFloat},
+    solved_coupling::AbstractMatrix{BigFloat},
+    multiplication_buffer::BigFloat,
+)
+    return _arrow_rank_lower!(
+        destination,
+        coupling,
+        solved_coupling,
+        multiplication_buffer,
+        MA.sub_mul,
+    )
 end
 
 function _arrow_rank_sub!(
@@ -507,14 +644,16 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
                     # partial += Clᵀ·(D⁻¹Cl), as `q` rank-one updates. A BLAS
                     # call is counterproductive when q is commonly one; the
                     # dedicated loop keeps the first matrix index contiguous.
-                    _arrow_rank_add!(partial, Cl, Wl)
+                    _arrow_rank_add_lower!(partial, Cl, Wl)
                 end
             end
         end
         total_attempts = sum(arrow.local_attempts)
         all(arrow.local_ok) ||
             return (ok=false, reg_attempts=total_attempts, q_pivoted=false)
-        @inbounds for partial in arrow.Sredpartial, column in 1:ng, row in 1:ng
+        @inbounds for partial in arrow.Sredpartial,
+                      column in 1:ng,
+                      row in column:ng
             arrow.Sred[row, column] -= partial[row, column]
         end
     else
@@ -555,7 +694,19 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
             _solve_arrow_diagonal!(D, Wl)
 
             # Sred -= S[G,U_l]·W_l as cache-contiguous rank-one updates.
-            _arrow_rank_sub!(arrow.Sred, Cl, Wl)
+            if T === BigFloat
+                # `tmp[l]` is overwritten by the later solve phase. Reuse its
+                # first independently owned MPFR scalar here so factorization
+                # allocates no scratch object per local block.
+                _arrow_rank_sub_lower!(
+                    arrow.Sred,
+                    Cl,
+                    Wl,
+                    arrow.tmp[l][1],
+                )
+            else
+                _arrow_rank_sub_lower!(arrow.Sred, Cl, Wl)
+            end
         end
     end
 

@@ -650,8 +650,11 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
                     prob.dims.k[l] == 0 && continue
                     bw = ws.blk[l]
                     if ws.fused_arrow
-                        # One pass, no packed pair buffer (see schur.jl).
-                        fused_arrow_schur_block!(
+                        # One pass, no packed pair buffer, and only one
+                        # triangular contribution per shared-variable pair.
+                        # The compact shared block is mirrored once after the
+                        # worker reduction below.
+                        fused_arrow_schur_block_lower!(
                             arrow, bw, cons, l, X[l], Y[l], partial,
                         )
                         continue
@@ -675,9 +678,13 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
         # the reverse order strides by the leading dimension on every access.
         # `partial` stays the outer loop, so each element accumulates in an
         # unchanged order and the result is bit-identical.
-        @inbounds for partial in arrow.Sredpartial, b in axes(arrow.Sgg, 2), a in axes(arrow.Sgg, 1)
-            arrow.Sgg[a, b] += partial[a, b]
+        global_count = size(arrow.Sgg, 1)
+        @inbounds for partial in arrow.Sredpartial,
+                      column in 1:global_count,
+                      row in column:global_count
+            arrow.Sgg[row, column] += partial[row, column]
         end
+        _mirror_arrow_shared_lower!(arrow.Sgg)
         return arrow.Sgg
     end
     if ws.dense_sparse_assembly

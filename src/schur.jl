@@ -1265,6 +1265,7 @@ function fused_arrow_schur_block!(
         Xl,
         Yl,
         Sgg,
+        Val(false),
     )
 end
 
@@ -1276,7 +1277,8 @@ function _fused_arrow_schur_block_generic!(
     Xl,
     Yl,
     Sgg::AbstractMatrix{T},
-) where {T}
+    ::Val{LOWER_GLOBAL_ONLY}=Val(false),
+) where {T,LOWER_GLOBAL_ONLY}
     ids = schur_ids(cons, l)
     na = length(ids)
     na == 0 && return Sgg
@@ -1316,12 +1318,32 @@ function _fused_arrow_schur_block_generic!(
         gi = gpos[i]
         li = lpos[i]
         for r in p:na
-            value = t11 * coeffs[1, r] + t12 * coeffs[2, r] + t22 * coeffs[3, r]
+            c11 = coeffs[1, r]
+            c12 = coeffs[2, r]
+            c22 = coeffs[3, r]
+            # Many sparse 2x2 SDP families use diagonal or two-entry
+            # coefficient patterns. Do not pay for multiplication by their
+            # structural zeros in the quadratic active-pair loop.
+            value = if iszero(c11)
+                iszero(c12) ? t22 * c22 : t12 * c12 + t22 * c22
+            elseif iszero(c12)
+                iszero(c22) ? t11 * c11 : t11 * c11 + t22 * c22
+            elseif iszero(c22)
+                t11 * c11 + t12 * c12
+            else
+                t11 * c11 + t12 * c12 + t22 * c22
+            end
             j = ids[r]
             gj = gpos[j]
             if gi > 0 && gj > 0
-                Sgg[gi, gj] += value
-                gi != gj && (Sgg[gj, gi] += value)
+                if LOWER_GLOBAL_ONLY
+                    row = max(gi, gj)
+                    column = min(gi, gj)
+                    Sgg[row, column] += value
+                else
+                    Sgg[gi, gj] += value
+                    gi != gj && (Sgg[gj, gi] += value)
+                end
             elseif gi > 0
                 arrow.coupling[owner[j]][lpos[j], gi] += value
             elseif gj > 0
@@ -1335,6 +1357,37 @@ function _fused_arrow_schur_block_generic!(
         end
     end
     return Sgg
+end
+
+"""
+    fused_arrow_schur_block_lower!(arrow, bw, cons, l, Xl, Yl, Sgg)
+
+Triangular variant of [`fused_arrow_schur_block!`](@ref). Only the lower
+triangle of the shared-variable block is accumulated. Each block therefore
+performs one extended-precision addition per off-diagonal pair instead of two;
+the small shared matrix is mirrored once after all block contributions finish.
+The BigFloat specialization preserves independent MPFR storage while copying
+that triangle.
+"""
+function fused_arrow_schur_block_lower!(
+    arrow::ArrowWorkspace{T},
+    bw::BlockWS{T},
+    cons::SparseCons{T},
+    l::Int,
+    Xl,
+    Yl,
+    Sgg::AbstractMatrix{T},
+) where {T}
+    return _fused_arrow_schur_block_generic!(
+        arrow,
+        bw,
+        cons,
+        l,
+        Xl,
+        Yl,
+        Sgg,
+        Val(true),
+    )
 end
 
 @inline function _bigfloat_mul_add2!(
@@ -1386,6 +1439,57 @@ end
     return destination
 end
 
+@inline function _bigfloat_add_sparse_contract3!(
+    destination::BigFloat,
+    accumulator::BigFloat,
+    buffer::BigFloat,
+    first_left::BigFloat,
+    first_right::BigFloat,
+    second_left::BigFloat,
+    second_right::BigFloat,
+    third_left::BigFloat,
+    third_right::BigFloat,
+)
+    # Seed the accumulator from the first nonzero product, then append only
+    # the remaining nonzero products. This preserves their original order.
+    # An all-zero coefficient cannot be active, but handle it defensively.
+    have_value = false
+    if !iszero(first_right)
+        MA.operate_to!(accumulator, *, first_left, first_right)
+        have_value = true
+    end
+    if !iszero(second_right)
+        if have_value
+            MA.buffered_operate!(
+                buffer,
+                MA.add_mul,
+                accumulator,
+                second_left,
+                second_right,
+            )
+        else
+            MA.operate_to!(accumulator, *, second_left, second_right)
+            have_value = true
+        end
+    end
+    if !iszero(third_right)
+        if have_value
+            MA.buffered_operate!(
+                buffer,
+                MA.add_mul,
+                accumulator,
+                third_left,
+                third_right,
+            )
+        else
+            MA.operate_to!(accumulator, *, third_left, third_right)
+            have_value = true
+        end
+    end
+    have_value && MA.operate!(+, destination, accumulator)
+    return destination
+end
+
 """
     fused_arrow_schur_block!(arrow, bw, cons, l, Xl, Yl, Sgg)
 
@@ -1406,7 +1510,8 @@ function fused_arrow_schur_block!(
     Xl,
     Yl,
     Sgg::AbstractMatrix{BigFloat},
-)
+    ::Val{LOWER_GLOBAL_ONLY}=Val(false),
+) where {LOWER_GLOBAL_ONLY}
     ids = schur_ids(cons, l)
     na = length(ids)
     na == 0 && return Sgg
@@ -1420,6 +1525,7 @@ function fused_arrow_schur_block!(
             Xl,
             Yl,
             Sgg,
+            Val(LOWER_GLOBAL_ONLY),
         )
 
     # W2 owns independent MPFR entries. Preserve that invariant while forming
@@ -1547,9 +1653,16 @@ function fused_arrow_schur_block!(
             for r in p:na
                 variable_j = ids[r]
                 global_j = global_position[variable_j]
-                _bigfloat_add_contract3!(
+                _bigfloat_add_sparse_contract3!(
                     global_i > 0 && global_j > 0 ?
-                        Sgg[global_i, global_j] :
+                        (
+                            LOWER_GLOBAL_ONLY ?
+                            Sgg[
+                                max(global_i, global_j),
+                                min(global_i, global_j),
+                            ] :
+                            Sgg[global_i, global_j]
+                        ) :
                     global_i > 0 ?
                         arrow.coupling[local_owner[variable_j]][
                             local_position[variable_j],
@@ -1574,7 +1687,10 @@ function fused_arrow_schur_block!(
                     coeffs[3, r],
                 )
 
-                if global_i > 0 && global_j > 0 && global_i != global_j
+                if !LOWER_GLOBAL_ONLY &&
+                   global_i > 0 &&
+                   global_j > 0 &&
+                   global_i != global_j
                     MA.operate!(+, Sgg[global_j, global_i], value)
                 elseif global_i == 0 && global_j == 0
                     local_j = local_position[variable_j]
@@ -1592,6 +1708,49 @@ function fused_arrow_schur_block!(
         end
     end
     return Sgg
+end
+
+function fused_arrow_schur_block_lower!(
+    arrow::ArrowWorkspace{BigFloat},
+    bw::BlockWS{BigFloat},
+    cons::SparseCons{BigFloat},
+    l::Int,
+    Xl,
+    Yl,
+    Sgg::AbstractMatrix{BigFloat},
+)
+    return fused_arrow_schur_block!(
+        arrow,
+        bw,
+        cons,
+        l,
+        Xl,
+        Yl,
+        Sgg,
+        Val(true),
+    )
+end
+
+function _mirror_arrow_shared_lower!(matrix::AbstractMatrix)
+    dimension = size(matrix, 1)
+    @inbounds for column in 1:dimension,
+                  row in (column + 1):dimension
+        matrix[column, row] = matrix[row, column]
+    end
+    return matrix
+end
+
+function _mirror_arrow_shared_lower!(matrix::AbstractMatrix{BigFloat})
+    dimension = size(matrix, 1)
+    @inbounds for column in 1:dimension,
+                  row in (column + 1):dimension
+        MA.operate_to!(
+            matrix[column, row],
+            copy,
+            matrix[row, column],
+        )
+    end
+    return matrix
 end
 
 """
@@ -1714,10 +1873,11 @@ function schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::SparseCons{T}
         _zero_arrow_schur!(arrow)
         for l in 1:prob.dims.L
             prob.dims.k[l] == 0 && continue
-            fused_arrow_schur_block!(
+            fused_arrow_schur_block_lower!(
                 arrow, ws.blk[l], cons, l, X[l], Y[l], arrow.Sgg,
             )
         end
+        _mirror_arrow_shared_lower!(arrow.Sgg)
         return arrow.Sgg
     end
     for l in 1:prob.dims.L

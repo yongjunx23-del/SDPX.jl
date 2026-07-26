@@ -212,12 +212,18 @@ function recommended_parameters(
             (T(1) / T(10), T(17) / T(20), :small_arrow_2x2)
         elseif max_active <= 14
             (T(1) / T(10), T(4) / T(5), :medium_arrow_2x2)
+        elseif max_active <= WIDE_ARROW_ACTIVE_LIMIT
+            # The medium J=32/K=4 CSDR dual has 144 shared variables plus
+            # one local variable per block. The old catch-all "large" profile
+            # selected β=0.01 and stalled; β=0.1 converged reliably across the
+            # Ω/γ sweep. Keep the genuinely large 385-active-variable case on
+            # its separately validated low-β profile.
+            (T(1) / T(10), T(17) / T(20), :wide_arrow_2x2)
         else
-            # Beyond the range the fixed profiles were calibrated on
-            # (thresholds top out at 14 active variables per block). The CSDR
-            # 80/4/40/100 model has 385, and the old `(0.4, 0.7)` setting did
-            # not converge on it at all; a sweep found `(0.01, 0.85)` reaching
-            # the correct basin.
+            # Beyond the separately calibrated wide-arrow range. The CSDR
+            # 80/4/40/100 model has 385 active variables per block, and the
+            # old `(0.4, 0.7)` setting did not converge on it at all; a sweep
+            # found `(0.01, 0.85)` reaching the correct basin.
             (T(1) / T(100), T(17) / T(20), :large_arrow_2x2)
         end
         if T === BigFloat &&
@@ -255,7 +261,22 @@ function recommended_parameters(
         # digit, so this is not a trade against it. Keep 10 as the floor for
         # small-data models.
         stats = block_norm_stats(prob)
-        omega = max(T(10), T(OMEGA_DATA_MULTIPLIER) * stats.maxnorm)
+        wide_small_data =
+            profile === :wide_arrow_2x2 &&
+            stats.maxnorm <= T(WIDE_ARROW_SMALL_DATA_NORM_LIMIT)
+        omega = if wide_small_data
+            # The response is sharply non-monotone on the medium canonical
+            # model: Ω=25 and Ω=30 converge, while the unrounded 5*maxnorm
+            # value Ω≈27.56 stalls. The lower grid point Ω=25 needs 41
+            # iterations versus 46 at Ω=30, so quantize down to the faster
+            # validated point while retaining the floor at 10.
+            max(
+                T(10),
+                T(WIDE_ARROW_OMEGA_MULTIPLIER) * floor(stats.maxnorm),
+            )
+        else
+            max(T(10), T(OMEGA_DATA_MULTIPLIER) * stats.maxnorm)
+        end
         return (
             β=beta,
             γ=gamma,
@@ -1414,12 +1435,13 @@ function block_norm_stats(prob::SDPProblem{T}) where {T}
     return (norms=norms, gmean=gmean, maxnorm=hi, spread=hi / lo)
 end
 
-"""Initial `X = Ω·I` is set to this multiple of `max‖C_l‖∞`.
+"""Default multiple of `max‖C_l‖∞` used for `X = Ω·I`.
 
 Ten. Chosen by sweeping four problems that each have an independently known
 answer — three CSDR instances against Clarabel optima and the dense lattice
 benchmark — rather than by fitting one of them; see the sweep table at the use
-site in `recommended_parameters`.
+site in `recommended_parameters`. The separately classified moderate-data
+wide-arrow regime uses [`WIDE_ARROW_OMEGA_MULTIPLIER`](@ref) instead.
 
 The two previous values were each fitted to a single instance and each failed
 elsewhere. Three was fitted against runs that were terminating prematurely. One
@@ -1433,6 +1455,27 @@ instance. So no single problem can identify this constant, in either direction,
 and changing it needs the whole sweep re-run rather than one benchmark
 improved."""
 const OMEGA_DATA_MULTIPLIER = 10
+
+"""Largest active set assigned to the separately calibrated wide-arrow start.
+
+This keeps the 145-active-variable medium CSDR model out of the genuinely
+large 385-active-variable regime while leaving substantial distance from both
+measurements instead of keying on an exact benchmark dimension.
+"""
+const WIDE_ARROW_ACTIVE_LIMIT = 256
+
+"""Use the moderate-data wide-arrow scale only below this block norm."""
+const WIDE_ARROW_SMALL_DATA_NORM_LIMIT = 10
+
+"""Initial-point multiplier for a wide arrow whose block data are below 10.
+
+The fixed J=32/K=4 canonical model converges at Ω=25, 30, 40, and 50, while
+Ω=20, the unrounded `5·maxnorm≈27.6`, and the old automatic Ω≈55 stall.
+The rule rounds `maxnorm` down before applying this multiplier, selecting the
+validated Ω=25 point. It needs 41 iterations versus 46 at Ω=30. The floor at
+10 remains in force.
+"""
+const WIDE_ARROW_OMEGA_MULTIPLIER = 5
 
 """A tolerance-normalised merit below this counts as "near a solution": within
 this factor of the tolerance the user actually asked for."""

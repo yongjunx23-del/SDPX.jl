@@ -298,7 +298,12 @@ end
 `recommended_parameters` has a dedicated profile for — with block constant terms
 spanning four orders of magnitude so the initial-point rules have a real spread
 to react to."""
-function unbalanced_arrow_problem(; blocks::Int=4, shared::Int=2)
+function unbalanced_arrow_problem(;
+    blocks::Int=4,
+    shared::Int=2,
+    constant_scale::Float64=2.0,
+    sparse_mode=:auto,
+)
     m = shared + blocks                      # shared variables plus one local each
     coefficients = [Vector{SparseMatrixCSC{Float64,Int}}(undef, m) for _ in 1:blocks]
     for l in 1:blocks, i in 1:m
@@ -309,9 +314,16 @@ function unbalanced_arrow_problem(; blocks::Int=4, shared::Int=2)
                              sparse([1, 2], [1, 2], [1.0, 1.0], 2, 2) :
                              spzeros(2, 2)
     end
-    C = [Matrix{Float64}((2.0 * 10.0^(l - 1)) * I, 2, 2) for l in 1:blocks]
+    C = [
+        Matrix{Float64}(
+            (constant_scale * 10.0^(l - 1)) * I,
+            2,
+            2,
+        )
+        for l in 1:blocks
+    ]
     prob = SDPX.ingest(ones(m), coefficients, C, zeros(m, 0), Float64[];
-        sparse=:auto, verbosity=0)
+        sparse=sparse_mode, verbosity=0)
     @assert prob.cons isa SDPX.SparseCons{Float64}
     return prob
 end
@@ -376,6 +388,22 @@ end
     opted_in = SDPX.recommended_parameters(prob,
         SDPX.SolverOptions{Float64}(parameter_strategy=:adaptive))
     @test opted_in.parameter_strategy == :adaptive
+
+    wide = unbalanced_arrow_problem(
+        blocks=2,
+        shared=144,
+        constant_scale=0.55,
+        sparse_mode=true,
+    )
+    wide_parameters = SDPX.recommended_parameters(
+        wide,
+        SDPX.SolverOptions{Float64}(),
+    )
+    @test wide_parameters.profile == :wide_arrow_2x2
+    @test wide_parameters.β == 0.1
+    @test wide_parameters.γ == 0.85
+    @test wide_parameters.Ωp == 25.0
+    @test wide_parameters.Ωd == 25.0
 
     ones4 = ones(4)
     # `:auto` must agree with `:scalar`: per-block is opt-in, because it was
