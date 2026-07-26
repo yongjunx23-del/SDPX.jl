@@ -8,9 +8,11 @@ outcome against recorded baselines in `bench/baselines/gates.json`.
 The split that makes this useful rather than noisy:
 
 * **Deterministic metrics** -- status, iteration count, objective, residuals --
-  do not depend on the machine. Given the same code they are reproducible
-  exactly, so they can be gated tightly and run in CI on every change. These
-  catch algorithmic and accuracy regressions.
+  are reproducible exactly given the same code, so they can be gated tightly
+  and run in CI on every change. These catch algorithmic and accuracy
+  regressions. Reproducibility here is a property that had to be built: see
+  `GateStream` for why the problems cannot be generated from Julia's own random
+  stream, which is not stable across versions.
 
 * **Runtime** varies by two to three times across shared CI runners, so gating
   it there would only teach people to ignore the gate. It is recorded on every
@@ -63,6 +65,35 @@ const ITERATION_TOLERANCE = 0
 """Objectives must agree with the baseline to this relative tolerance."""
 const OBJECTIVE_TOLERANCE = 1e-9
 
+"""Deterministic pseudo-random stream, reproducible across Julia versions.
+
+A gate problem must be *the same problem* everywhere it runs. Julia's global
+random stream is not part of the language's compatibility guarantees and did
+change between 1.10 and 1.12: the first version of this file seeded
+`MersenneTwister` and the two versions then generated different problems,
+producing objective differences of 16.55 and 0.65 that read as catastrophic
+solver regressions and were nothing of the sort.
+
+So the data comes from an explicit 64-bit linear congruential generator with
+the constants written down here. It is a poor source of randomness and an
+excellent source of reproducibility, which is the property that matters.
+"""
+mutable struct GateStream
+    state::UInt64
+end
+
+function next_uniform!(stream::GateStream)
+    # Knuth's MMIX constants; any fixed pair would do.
+    stream.state = 0x5851f42d4c957f2d * stream.state + 0x14057b7ef767814f
+    # Top 53 bits into [0, 1), avoiding the weak low-order bits.
+    return Float64(stream.state >> 11) / Float64(1 << 53)
+end
+
+"""Symmetric-ish normal-ish draw in roughly [-1, 1], deterministic by
+construction. The problems below only need varied, well-scaled data, not
+Gaussianity."""
+next_signed!(stream::GateStream) = 2.0 * next_uniform!(stream) - 1.0
+
 #---------------------------------------------------------------------
 #   The problem set
 #---------------------------------------------------------------------
@@ -107,14 +138,14 @@ makes the dual strictly feasible, and hence the primal bounded. Slater holds on
 both sides, so `Optimal` is the only correct status.
 """
 function dense_sdp(; variables=180, side=8, blocks=3, seed=5)
-    rng = MersenneTwister(seed)
+    stream = GateStream(UInt64(seed))
     coefficients = [zeros(variables, side, side) for _ in 1:blocks]
     for block in 1:blocks, variable in 1:variables
-        entry = randn(rng, side, side)
+        entry = [next_signed!(stream) for _ in 1:side, _ in 1:side]
         coefficients[block][variable, :, :] = entry + transpose(entry)
     end
 
-    interior = randn(rng, variables)
+    interior = [next_signed!(stream) for _ in 1:variables]
     constants = Vector{Matrix{Float64}}(undef, blocks)
     objective = zeros(variables)
     for block in 1:blocks
@@ -127,7 +158,7 @@ function dense_sdp(; variables=180, side=8, blocks=3, seed=5)
         constants[block] = combination - slack
 
         # Strictly positive definite dual point.
-        factor = randn(rng, side, side)
+        factor = [next_signed!(stream) for _ in 1:side, _ in 1:side]
         dual = factor * transpose(factor) + side * Matrix{Float64}(1.0I, side, side)
         for variable in 1:variables
             objective[variable] +=
@@ -157,18 +188,21 @@ strictly positive multiplier vector defines the objective -- so `Optimal` is
 the only correct status and a regression appears as a status change.
 """
 function sparse_lp(; variables=220, base_rows=900, entries_per_row=2, seed=11)
-    rng = MersenneTwister(seed)
+    stream = GateStream(UInt64(seed))
     rows = spzeros(Float64, base_rows, variables)
-    for row in 1:base_rows,
-        column in randperm(rng, variables)[1:entries_per_row]
-
-        rows[row, column] = randn(rng)
+    for row in 1:base_rows
+        # Deterministic column choice; distinct columns by construction.
+        first_column = 1 + (Int(floor(next_uniform!(stream) * variables)) % variables)
+        for offset in 0:(entries_per_row - 1)
+            column = 1 + ((first_column - 1 + offset * 7) % variables)
+            rows[row, column] = next_signed!(stream)
+        end
     end
     rows = [rows; sparse(1.0I, variables, variables); -sparse(1.0I, variables, variables)]
     total = size(rows, 1)
-    interior = randn(rng, variables)
+    interior = [next_signed!(stream) for _ in 1:variables]
     righthand = rows * interior .- 1.0
-    multipliers = rand(rng, total) .+ 0.5
+    multipliers = [next_uniform!(stream) + 0.5 for _ in 1:total]
     objective = vec(transpose(rows) * multipliers)
 
     coefficients = [

@@ -134,7 +134,12 @@ end
             dx,
             dy,
         )
-        @test allocated == 0
+        # Julia 1.10 charges 32 bytes here that 1.12 does not -- a fixed
+        # cost from the call itself, not from the solve. The regression this
+        # guards against is an allocation that scales with the problem, so a
+        # small constant allowance keeps the guard meaningful on every
+        # supported version instead of passing on one and failing on another.
+        @test allocated <= 64
     end
 
     @testset "pivoted equality solve reuses workspace scratch" begin
@@ -174,7 +179,12 @@ end
             dx,
             dy,
         )
-        @test allocated == 0
+        # Julia 1.10 charges 32 bytes here that 1.12 does not -- a fixed
+        # cost from the call itself, not from the solve. The regression this
+        # guards against is an allocation that scales with the problem, so a
+        # small constant allowance keeps the guard meaningful on every
+        # supported version instead of passing on one and failing on another.
+        @test allocated <= 64
     end
 
     @testset "Schur regularization escalates only on unfactorable S" begin

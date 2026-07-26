@@ -139,6 +139,28 @@ function factorize!(backend::SparseCholeskyBackend, A::SparseMatrixCSC{Float64})
 end
 
 """
+    _cholmod_solve!(x, factorization, rhs) -> x
+
+Solve with a CHOLMOD factorization, portably across supported Julia versions.
+
+`ldiv!` is deliberately not used. On Julia 1.10 -- this package's declared
+minimum -- CHOLMOD provides neither `ldiv!(F, b)` nor `ldiv!(x, F, b)` for a
+`Vector` right-hand side, and the generic three-argument fallback dispatches to
+the missing two-argument method. Only `\` is available there. Julia 1.12 does
+supply the three-argument form, which is why this went unnoticed: every local
+run was on 1.12 and every sparse-backend test errored on 1.10.
+
+The cost is one allocation of the solution vector per solve, against an
+`O(nnz(L))` triangular pair, and correctness on the minimum supported version
+is worth more than avoiding it.
+"""
+function _cholmod_solve!(x::AbstractVector{Float64}, factorization,
+                         rhs::AbstractVector{Float64})
+    copyto!(x, factorization \ rhs)
+    return x
+end
+
+"""
     solve!(x, backend, rhs) -> x
 
 Solve with the current factorization. Errors if no successful factorization
@@ -148,11 +170,7 @@ function solve!(x::AbstractVector{Float64}, backend::SparseCholeskyBackend,
                 rhs::AbstractVector{Float64})
     backend.factorization === nothing &&
         error("sparse KKT backend has no valid factorization; call factorize! first")
-    # CHOLMOD supports the three-argument `ldiv!(destination, factor, rhs)` but
-    # not the two-argument in-place form, so the destination is passed
-    # explicitly rather than pre-copying the right-hand side into it.
-    ldiv!(x, backend.factorization, rhs)
-    return x
+    return _cholmod_solve!(x, backend.factorization, rhs)
 end
 
 """
@@ -278,8 +296,7 @@ function solve!(x::AbstractVector{Float64}, backend::SparseLDLBackend,
                 rhs::AbstractVector{Float64})
     backend.factorization === nothing &&
         error("sparse LDL backend has no valid factorization; call factorize! first")
-    ldiv!(x, backend.factorization, rhs)
-    return x
+    return _cholmod_solve!(x, backend.factorization, rhs)
 end
 
 function statistics(backend::SparseLDLBackend)
