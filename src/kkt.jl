@@ -13,6 +13,17 @@
     `refine_kkt!` — the residual-correction system).
 =====================================================================#
 
+@inline _elapsed_seconds(started) =
+    (time_ns() - started) / 1.0e9
+
+_empty_kkt_phase_times() = (
+    schur_copy=0.0,
+    schur_factorization=0.0,
+    constraint_triangular_solve=0.0,
+    equality_gram=0.0,
+    equality_factorization=0.0,
+)
+
 """
     factor_kkt!(ws, prob, opts) -> (ok, reg_attempts, q_pivoted)
 
@@ -47,21 +58,47 @@ function _factor_dense_kkt_native!(
 ) where {T}
     L, m, n, k = prob.dims
 
+    phase_schur_copy = 0.0
+    phase_schur_factorization = 0.0
+    phase_constraint_triangular_solve = 0.0
+    phase_equality_gram = 0.0
+    phase_equality_factorization = 0.0
+
+    started = time_ns()
     copy_owned!(ws.Sbuf, ws.S)
+    phase_schur_copy += _elapsed_seconds(started)
+    started = time_ns()
     ok = kchol!(ws.Sbuf)
+    phase_schur_factorization += _elapsed_seconds(started)
     reg_attempts = 0
     reg = zero(T)
     while !ok && reg_attempts < 6
         reg_attempts += 1
         reg = reg_attempts == 1 ? sqrt(eps(T)) : reg * 10
+        started = time_ns()
         copy_owned!(ws.Sbuf, ws.S)
         @inbounds for i in 1:m
             ws.Sbuf[i, i] += reg * max(abs(ws.S[i, i]), one(T))
         end
+        phase_schur_copy += _elapsed_seconds(started)
+        started = time_ns()
         ok = kchol!(ws.Sbuf)
+        phase_schur_factorization += _elapsed_seconds(started)
     end
     if !ok
-        return (ok=false, reg_attempts=reg_attempts, q_pivoted=false)
+        return (
+            ok=false,
+            reg_attempts=reg_attempts,
+            q_pivoted=false,
+            phase_times=(
+                schur_copy=phase_schur_copy,
+                schur_factorization=phase_schur_factorization,
+                constraint_triangular_solve=
+                    phase_constraint_triangular_solve,
+                equality_gram=phase_equality_gram,
+                equality_factorization=phase_equality_factorization,
+            ),
+        )
     end
     if opts.verbosity >= 2 && reg_attempts > 0
         @info "KKT: Schur complement regularized (δ ≈ $(Float64(reg))) after $reg_attempts attempt(s)"
@@ -69,9 +106,15 @@ function _factor_dense_kkt_native!(
 
     q_pivoted = false
     if n > 0
+        started = time_ns()
         copy_owned!(ws.Btil, prob.B)
         ktrsm!(ws.Sbuf, ws.Btil)                     # B̃ = L_S⁻¹B
+        phase_constraint_triangular_solve +=
+            _elapsed_seconds(started)
+        started = time_ns()
         ksyrk!(ws.Q, ws.Btil, one(T), zero(T))        # Q = B̃ᵀB̃
+        phase_equality_gram += _elapsed_seconds(started)
+        started = time_ns()
         copy_owned!(ws.Qbuf, ws.Q)
         if T === BigFloat && kchol!(ws.Qbuf)
             ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
@@ -96,8 +139,22 @@ function _factor_dense_kkt_native!(
                           "(likely redundant/duplicated equality constraints)"
             end
         end
+        phase_equality_factorization +=
+            _elapsed_seconds(started)
     end
-    return (ok=true, reg_attempts=reg_attempts, q_pivoted=q_pivoted)
+    return (
+        ok=true,
+        reg_attempts=reg_attempts,
+        q_pivoted=q_pivoted,
+        phase_times=(
+            schur_copy=phase_schur_copy,
+            schur_factorization=phase_schur_factorization,
+            constraint_triangular_solve=
+                phase_constraint_triangular_solve,
+            equality_gram=phase_equality_gram,
+            equality_factorization=phase_equality_factorization,
+        ),
+    )
 end
 
 function _factor_with_relative_regularization!(
@@ -790,7 +847,7 @@ function schur_mul!(
 ) where {T}
     arrow = ws.arrow
     if arrow === nothing
-        matrix = ws.extended_precision.lower_only ?
+        matrix = ws.schur_lower_only ?
                  Symmetric(ws.S, :L) : ws.S
         # Route through the arithmetic kernel seam. This is identical to mul!
         # for BLAS types, while BigFloat reuses MPFR dot-product buffers

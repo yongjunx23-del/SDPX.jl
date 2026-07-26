@@ -421,8 +421,10 @@ function _zero_schur_accumulator!(
     S::AbstractMatrix{T},
     ws::Workspace{T},
 ) where {T}
-    if T === BigFloat && ws.extended_precision.lower_only
+    if T === BigFloat && ws.schur_lower_only
         ExtendedPrecisionBLAS.zero_triangle!(S)
+    elseif ws.schur_lower_only
+        _zero_schur_lower!(S)
     else
         # `zero_distinct!`, not `fill!`: for BigFloat the latter installs one
         # shared object in every slot, which any in-place kernel would then
@@ -467,9 +469,6 @@ function schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::DenseCons{T},
             _dense_gram_add!(ws.S, transformed)
         end
     end
-    !ws.extended_precision.lower_only &&
-        _dense_gram_lower_only(T) &&
-        _mirror_schur_lower!(ws.S)
     return ws.S
 end
 
@@ -1080,7 +1079,7 @@ function _reduce_sparse_schur_serial!(ws::Workspace{T}, cons::SparseCons{T}) whe
                 j = ids[r]
                 q += 1
                 val = Svals[q]
-                if ws.extended_precision.lower_only
+                if ws.schur_lower_only
                     row = max(i, j)
                     column = min(i, j)
                     _add_owned_entry!(ws.S, row, column, val)
@@ -1129,21 +1128,24 @@ function reduce_sparse_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
     _zero_schur_accumulator!(ws.S, ws)
     m = size(ws.S, 1)
     nt = ws.thread_count
-    # The lower_only layout writes max/min rather than a fixed column, so a
-    # column partition would not be disjoint; keep it serial (it is only used
-    # by the extended-precision BigFloat path, which is single-threaded anyway).
-    if nt <= 1 || m == 0 || !thread_safe_arithmetic(T) ||
-       ws.extended_precision.lower_only
+    if nt <= 1 || m == 0 || !thread_safe_arithmetic(T)
         return _reduce_sparse_schur_serial!(ws, cons)
     end
 
     ntasks = min(nt, m)
     chunk = cld(m, ntasks)
+    use_balanced_boundaries =
+        ws.schur_lower_only &&
+        length(ws.schur_column_boundaries) == ntasks + 1
     S = ws.S
     @sync for task in 1:ntasks
-        first_column = (task - 1) * chunk + 1
+        first_column = use_balanced_boundaries ?
+                       ws.schur_column_boundaries[task] :
+                       (task - 1) * chunk + 1
         first_column > m && continue
-        last_column = min(task * chunk, m)
+        last_column = use_balanced_boundaries ?
+                      ws.schur_column_boundaries[task + 1] - 1 :
+                      min(task * chunk, m)
         Threads.@spawn begin
             @inbounds for l in eachindex(ws.blk)
                 ids = schur_ids(cons, l)
@@ -1153,6 +1155,21 @@ function reduce_sparse_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
                 lo = searchsortedfirst(ids, first_column)
                 hi = searchsortedlast(ids, last_column)
                 lo > hi && continue
+                if ws.schur_lower_only
+                    # For sorted ids and p ≤ r, the lower-triangle destination
+                    # is S[ids[r], ids[p]].  Partitioning by p therefore gives
+                    # each task exclusive output-column ownership and visits
+                    # every packed pair exactly once.
+                    for p in lo:hi
+                        column = ids[p]
+                        base = _packed_pair_base(p, na)
+                        for r in p:na
+                            S[ids[r], column] +=
+                                Svals[base+(r-p+1)]
+                        end
+                    end
+                    continue
+                end
                 # Owned column = ids[r]: take the whole p ≤ r run, which also
                 # covers the diagonal entry exactly once.
                 for r in lo:hi
@@ -1631,7 +1648,7 @@ function materialize_schur!(dest::AbstractMatrix{T}, ws::Workspace{T}) where {T}
     arrow = ws.arrow
     if arrow === nothing
         copyto!(dest, ws.S)
-        ws.extended_precision.lower_only &&
+        ws.schur_lower_only &&
             _mirror_schur_lower!(dest)
         return dest
     end
@@ -1676,7 +1693,7 @@ function schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::SparseCons{T}
                     l,
                     X[l],
                     Y[l],
-                    ws.extended_precision.lower_only,
+                    ws.schur_lower_only,
                 )
             end
         end

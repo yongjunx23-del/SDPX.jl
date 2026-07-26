@@ -341,6 +341,7 @@ mutable struct Workspace{T}
     Spartial::Vector{Matrix{T}}  # per-LPT-bin partial accumulators (§3): avoids a data race on
                                  # ws.S from concurrent blocks, summed serially after the parallel region
     dense_sparse_assembly::Bool  # stream sparse block contributions into dense task-local accumulators
+    schur_lower_only::Bool # dense KKT backends consume only the lower triangle
     fused_arrow::Bool            # exact-arrow 2x2 model: compute+scatter in one pass, no packed pair buffer
     Sbuf::Matrix{T}        # generic-path Cholesky scratch; empty for compact arrow problems
     Btil::Matrix{T}         # m×n = L_S⁻¹B
@@ -367,6 +368,7 @@ mutable struct Workspace{T}
     dy_best::Vector{T}
     block_bins::Vector{Vector{Int}}
     schur_bins::Vector{Vector{Int}}
+    schur_column_boundaries::Vector{Int}
     vpartial::Vector{Vector{T}}
     block_norms::Vector{T}
     block_ok::Vector{Bool}
@@ -404,6 +406,55 @@ function _schur_parallel_bins(
     )
     affordable = max(1, floor(Int, memory_budget / max(bytes_per_matrix, 1)))
     return min(requested, affordable)
+end
+
+"""
+    _sparse_lower_column_boundaries(cons, m, ntasks)
+
+Build contiguous output-column ranges with approximately equal sparse Schur
+pair counts.  In lower-triangle storage, pair `(p,r)`, `p ≤ r`, is written to
+column `ids[p]`; equal-width column chunks are therefore badly imbalanced
+(early columns can own nearly the whole active-set tail).  The active sets are
+fixed for the solve, so compute exact per-column pair counts once in the
+workspace constructor and reuse the boundaries every iteration.
+"""
+function _sparse_lower_column_boundaries(
+    cons::SparseCons,
+    m::Int,
+    ntasks::Int,
+)
+    ntasks = max(1, min(ntasks, max(m, 1)))
+    m == 0 && return ones(Int, ntasks + 1)
+    work = zeros(Int, m)
+    @inbounds for ids in cons.schur_order
+        count = length(ids)
+        for position in eachindex(ids)
+            work[ids[position]] += count - position + 1
+        end
+    end
+    total = sum(work; init=0)
+    boundaries = Vector{Int}(undef, ntasks + 1)
+    boundaries[1] = 1
+    boundaries[end] = m + 1
+    if total == 0
+        chunk = cld(m, ntasks)
+        @inbounds for task in 2:ntasks
+            boundaries[task] = min((task - 1) * chunk + 1, m + 1)
+        end
+        return boundaries
+    end
+    column = 1
+    accumulated = 0
+    @inbounds for task in 2:ntasks
+        target = cld((task - 1) * total, ntasks)
+        while column <= m &&
+              accumulated + work[column] < target
+            accumulated += work[column]
+            column += 1
+        end
+        boundaries[task] = column
+    end
+    return boundaries
 end
 
 function Workspace(
@@ -479,6 +530,13 @@ function Workspace(
                    [alloc_zeros(T, m, m) for _ in 1:schur_nbins] :
                    Matrix{T}[]
     end
+    schur_lower_only =
+        !compact_arrow &&
+        (
+            extended_precision.lower_only ||
+            T === Float32 ||
+            T === Float64
+        )
     block_weights = [Float64(k[l])^3 for l in 1:L]
     schur_weights = if is_sparse
         active = (prob.cons::SparseCons{T}).active
@@ -492,10 +550,19 @@ function Workspace(
     end
     block_bins = lpt_partition(block_weights, block_nbins)
     schur_bins = lpt_partition(schur_weights, schur_nbins)
+    schur_column_boundaries =
+        is_sparse && !compact_arrow && schur_lower_only ?
+        _sparse_lower_column_boundaries(
+            prob.cons::SparseCons{T},
+            m,
+            min(selected_threads, max(m, 1)),
+        ) :
+        Int[]
     workspace = Workspace{T}(blk,
         compact_arrow ? alloc_zeros(T, 0, 0) : alloc_zeros(T, m, m),
         Spartial,
         dense_sparse_assembly,
+        schur_lower_only,
         fused_arrow,
         compact_arrow ? alloc_zeros(T, 0, 0) : alloc_zeros(T, m, m),
         alloc_zeros(T, m, n),
@@ -505,7 +572,8 @@ function Workspace(
         alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n),
-        block_bins, schur_bins, [alloc_zeros(T, m) for _ in 1:block_nbins],
+        block_bins, schur_bins, schur_column_boundaries,
+        [alloc_zeros(T, m) for _ in 1:block_nbins],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         selected_threads)
     if T === BigFloat && extended_precision.lower_only

@@ -140,7 +140,9 @@ end
         ws = SDPX.Workspace(sparse)
         @test SDPX.factor_blocks!(wd, X, Y)
         @test SDPX.factor_blocks!(ws, X, Y)
-        Sd = copy(SDPX.schur_build!(wd, dense, dense.cons, X, Y))
+        SDPX.schur_build!(wd, dense, dense.cons, X, Y)
+        Sd = similar(wd.S)
+        SDPX.materialize_schur!(Sd, wd)
         SDPX.schur_build!(ws, sparse, sparse.cons, X, Y)
         Ss = zeros(size(Sd))
         SDPX.materialize_schur!(Ss, ws)
@@ -289,7 +291,9 @@ end
             wd, ws = SDPX.Workspace(dense), SDPX.Workspace(sparse)
             @test SDPX.factor_blocks!(wd, X, Y)
             @test SDPX.factor_blocks!(ws, X, Y)
-            Sd = copy(SDPX.schur_build!(wd, dense, dense.cons, X, Y))
+            SDPX.schur_build!(wd, dense, dense.cons, X, Y)
+            Sd = similar(wd.S)
+            SDPX.materialize_schur!(Sd, wd)
             SDPX.schur_build!(ws, sparse, sparse.cons, X, Y)
             Ss = zeros(BigFloat, size(Sd))
             SDPX.materialize_schur!(Ss, ws)
@@ -352,6 +356,10 @@ end
                 prob.cons isa SDPX.SparseCons || continue
                 ws = SDPX.Workspace(prob)
                 ws.arrow === nothing || continue   # arrow models use their own reducer
+                @test ws.schur_lower_only
+                @test first(ws.schur_column_boundaries) == 1
+                @test last(ws.schur_column_boundaries) == m + 1
+                @test issorted(ws.schur_column_boundaries)
                 X = [Matrix(3.0I, ks[l], ks[l]) for l in 1:L]
                 Y = [Matrix(2.0I, ks[l], ks[l]) for l in 1:L]
                 SDPX.factor_blocks!(ws, X, Y)
@@ -362,6 +370,9 @@ end
                 SDPX._zero_schur_accumulator!(ws.S, ws)
                 serial = copy(SDPX._reduce_sparse_schur_serial!(ws, prob.cons))
                 @test parallel == serial
+                materialized = similar(ws.S)
+                SDPX.materialize_schur!(materialized, ws)
+                @test issymmetric(materialized)
             end
         end
     end
@@ -404,7 +415,9 @@ end
             @test SDPX.factor_blocks!(ws, X, Y)
             @test SDPX.factor_blocks!(wd, X, Y)
 
-            Sd = copy(SDPX.schur_build!(wd, dn, dn.cons, X, Y))
+            SDPX.schur_build!(wd, dn, dn.cons, X, Y)
+            Sd = similar(wd.S)
+            SDPX.materialize_schur!(Sd, wd)
             SDPX.schur_build!(ws, sp, sp.cons, X, Y)
             Ss = zeros(Float64, size(Sd))
             SDPX.materialize_schur!(Ss, ws)

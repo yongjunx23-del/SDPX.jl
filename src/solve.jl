@@ -577,6 +577,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     resume::AbstractString="", deadline::Float64=Inf) where {T}
 
     core_started = time()
+    core_started_ns = time_ns()
     opts.parameter_policy in (:fixed, :auto) ||
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
@@ -610,17 +611,20 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             prob,
             time() - core_started,
         )
+    validation_finished_ns = time_ns()
 
     if T === BigFloat
         check_precision_consistency(prob, opts.precision_bits, opts.verbosity)
         opts.convert_inputs && (prob = reround(prob, opts.precision_bits))
     end
+    precision_preparation_finished_ns = time_ns()
 
     eq = nothing
     solve_prob = prob
     if opts.equilibrate
         solve_prob, eq = equilibrate(prob)
     end
+    equilibration_finished_ns = time_ns()
 
     # Parameter selection must see the problem that will actually be solved.
     # Equilibration changes the data scale by orders of magnitude, and the
@@ -659,6 +663,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             Y0,
         )
     end
+    parameter_selection_finished_ns = time_ns()
 
     L, m, n, k = solve_prob.dims
     ws = Workspace(
@@ -671,6 +676,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             opts.mixed_precision_memory_fraction,
         thread_count=opts.threads,
     )
+    workspace_finished_ns = time_ns()
     time() >= deadline &&
         return _sdp_setup_time_limit_result(
             solve_prob,
@@ -720,6 +726,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         iter = 0
         restarts = 0
     end
+    initialization_finished_ns = time_ns()
 
     total_reg = 0
     centering_attempts = 0
@@ -732,6 +739,20 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     phase_kkt = 0.0
     phase_predictor = 0.0
     phase_corrector = 0.0
+    phase_kkt_schur_copy = 0.0
+    phase_kkt_schur_factorization = 0.0
+    phase_kkt_constraint_triangular_solve = 0.0
+    phase_kkt_equality_gram = 0.0
+    phase_kkt_equality_factorization = 0.0
+    phase_kkt_other = 0.0
+    phase_predictor_rhs = 0.0
+    phase_predictor_linear_solve = 0.0
+    phase_predictor_direction_recovery = 0.0
+    phase_complementarity_analysis = 0.0
+    phase_corrector_rhs = 0.0
+    phase_corrector_linear_solve = 0.0
+    phase_refinement = 0.0
+    phase_corrector_direction_recovery = 0.0
     phase_line_search = 0.0
     phase_update = 0.0
 
@@ -766,6 +787,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
 
     print_header(opts)
     print_iter(opts, iter, pObj, dObj, pObj - dObj, p_res, d_res)
+    initial_residual_finished_ns = time_ns()
 
     status = NotStarted
     message = ""
@@ -933,6 +955,30 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         phase_kkt += result.phase_times.kkt_factorization
         phase_predictor += result.phase_times.predictor
         phase_corrector += result.phase_times.corrector
+        phase_kkt_schur_copy +=
+            result.phase_times.kkt_schur_copy
+        phase_kkt_schur_factorization +=
+            result.phase_times.kkt_schur_factorization
+        phase_kkt_constraint_triangular_solve +=
+            result.phase_times.kkt_constraint_triangular_solve
+        phase_kkt_equality_gram +=
+            result.phase_times.kkt_equality_gram
+        phase_kkt_equality_factorization +=
+            result.phase_times.kkt_equality_factorization
+        phase_kkt_other += result.phase_times.kkt_other
+        phase_predictor_rhs += result.phase_times.predictor_rhs
+        phase_predictor_linear_solve +=
+            result.phase_times.predictor_linear_solve
+        phase_predictor_direction_recovery +=
+            result.phase_times.predictor_direction_recovery
+        phase_complementarity_analysis +=
+            result.phase_times.complementarity_analysis
+        phase_corrector_rhs += result.phase_times.corrector_rhs
+        phase_corrector_linear_solve +=
+            result.phase_times.corrector_linear_solve
+        phase_refinement += result.phase_times.refinement
+        phase_corrector_direction_recovery +=
+            result.phase_times.corrector_direction_recovery
 
         line_search_started = time_ns()
         tX, tY = threaded_line_search!(
@@ -1229,6 +1275,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         end
     end
 
+    finalization_started_ns = time_ns()
     if eq !== nothing
         x, X, y, Y = unequilibrate(eq, x, X, y, Y)
         pObj = LinearAlgebra.dot(prob.c, x)
@@ -1237,17 +1284,83 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # Always report certificates in the same (original) coordinates as the
     # returned iterate, including non-optimal exits and unequilibrated solves.
     p_res, d_res = solution_residuals(prob, x, X, y, Y)
+    finalization_finished_ns = time_ns()
 
     elapsed = time() - t_start
+    phase_setup_validation =
+        (validation_finished_ns - core_started_ns) / 1.0e9
+    phase_precision_preparation =
+        (precision_preparation_finished_ns - validation_finished_ns) /
+        1.0e9
+    phase_equilibration =
+        (equilibration_finished_ns - precision_preparation_finished_ns) /
+        1.0e9
+    phase_parameter_selection =
+        (parameter_selection_finished_ns - equilibration_finished_ns) /
+        1.0e9
+    phase_workspace_setup =
+        (workspace_finished_ns - parameter_selection_finished_ns) /
+        1.0e9
+    phase_initialization =
+        (initialization_finished_ns - workspace_finished_ns) / 1.0e9
+    phase_initial_residual =
+        (initial_residual_finished_ns - initialization_finished_ns) /
+        1.0e9
+    phase_finalization =
+        (finalization_finished_ns - finalization_started_ns) / 1.0e9
+    accounted = (
+        phase_setup_validation +
+        phase_precision_preparation +
+        phase_equilibration +
+        phase_parameter_selection +
+        phase_workspace_setup +
+        phase_initialization +
+        phase_initial_residual +
+        phase_residual +
+        phase_schur +
+        phase_kkt +
+        phase_predictor +
+        phase_corrector +
+        phase_line_search +
+        phase_update +
+        phase_finalization
+    )
     timings = opts.timing ? (
         total=elapsed,
+        setup_validation=phase_setup_validation,
+        precision_preparation=phase_precision_preparation,
+        equilibration=phase_equilibration,
+        parameter_selection=phase_parameter_selection,
+        workspace_setup=phase_workspace_setup,
+        initialization=phase_initialization,
+        initial_residual=phase_initial_residual,
         residual_and_block_factor=phase_residual,
         schur_assembly=phase_schur,
         kkt_factorization=phase_kkt,
         predictor=phase_predictor,
         corrector=phase_corrector,
+        kkt_schur_copy=phase_kkt_schur_copy,
+        kkt_schur_factorization=phase_kkt_schur_factorization,
+        kkt_constraint_triangular_solve=
+            phase_kkt_constraint_triangular_solve,
+        kkt_equality_gram=phase_kkt_equality_gram,
+        kkt_equality_factorization=
+            phase_kkt_equality_factorization,
+        kkt_other=phase_kkt_other,
+        predictor_rhs=phase_predictor_rhs,
+        predictor_linear_solve=phase_predictor_linear_solve,
+        predictor_direction_recovery=
+            phase_predictor_direction_recovery,
+        complementarity_analysis=phase_complementarity_analysis,
+        corrector_rhs=phase_corrector_rhs,
+        corrector_linear_solve=phase_corrector_linear_solve,
+        refinement=phase_refinement,
+        corrector_direction_recovery=
+            phase_corrector_direction_recovery,
         line_search=phase_line_search,
         update=phase_update,
+        finalization=phase_finalization,
+        other=max(0.0, elapsed - accounted),
     ) : nothing
     gap_rel_final = abs(pObj - dObj) / max(one(T), (abs(pObj) + abs(dObj)) / 2)
 

@@ -569,9 +569,7 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Dens
     end
     bins = ws.schur_bins
     nbins = length(bins)
-    mirror_lower = !ws.extended_precision.lower_only &&
-                   _dense_gram_lower_only(T)
-    lower_only = ws.extended_precision.lower_only || mirror_lower
+    lower_only = ws.schur_lower_only
     for p in 1:nbins
         if lower_only
             _zero_schur_lower!(ws.Spartial[p])
@@ -616,8 +614,6 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Dens
     end
 
     _reduce_schur_partials!(ws, lower_only)
-    mirror_lower &&
-        _mirror_schur_lower!(ws.S)
     return ws.S
 end
 
@@ -711,13 +707,13 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
                             l,
                             X[l],
                             Y[l],
-                            ws.extended_precision.lower_only,
+                            ws.schur_lower_only,
                         )
                     end
                 end
             end
         end
-        _reduce_schur_partials!(ws)
+        _reduce_schur_partials!(ws, ws.schur_lower_only)
         return ws.S
     end
     @sync for bin in bins

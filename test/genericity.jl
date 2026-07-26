@@ -64,6 +64,14 @@ using Test
         L = Matrix(cholesky(A + 10I).L)
         X = copy(B)
         @inferred SDPX.ktrsm!(L, X)
+        panel = rand(17, 6)
+        gram = rand(6, 6)
+        gram = gram + transpose(gram)
+        gram_reference = 1.25 .* (transpose(panel) * panel) .-
+                         0.5 .* gram
+        @inferred SDPX.ksyrk!(gram, panel, 1.25, -0.5)
+        @test gram ≈ gram_reference rtol=2e-15 atol=2e-15
+        @test issymmetric(gram)
         @test (@inferred SDPX.knrmInf(A)) isa Float64
     end
 

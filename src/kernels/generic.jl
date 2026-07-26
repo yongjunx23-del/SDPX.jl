@@ -87,6 +87,29 @@ function ksyrk!(S::AbstractMatrix, P::AbstractMatrix, α, β)
     end
     return S
 end
+
+# `Q = B̃'B̃` is a level-3 BLAS operation for ordinary floating-point
+# arithmetic.  The generic pairwise-dot implementation above launches one
+# level-1 BLAS call per output entry, which is much slower once the equality
+# space is more than a handful of columns (Task_Low08 has 394).  Compute the
+# lower triangle with SYRK, then mirror it to preserve the public `ksyrk!`
+# contract used by diagnostics and callers.
+function ksyrk!(
+    S::StridedMatrix{T},
+    P::StridedMatrix{T},
+    α::T,
+    β::T,
+) where {T<:Union{Float32,Float64}}
+    c = size(P, 2)
+    size(S) == (c, c) ||
+        throw(DimensionMismatch("ksyrk!: S must be c×c for P r×c"))
+    LinearAlgebra.BLAS.syrk!('L', 'T', α, P, β, S)
+    @inbounds for column in axes(S, 2), row in (column + 1):c
+        S[column, row] = S[row, column]
+    end
+    return S
+end
+
 ksyrk!(S::AbstractMatrix{T}, P::AbstractMatrix{T}) where {T} = ksyrk!(S, P, one(T), zero(T))
 
 # ---- ktrsm! : X ← L⁻¹X, L square lower-triangular ----

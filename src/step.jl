@@ -189,6 +189,9 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
         reason="Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
         p_res=p_res, d_res=d_res, reg_attempts=kkt.reg_attempts, q_pivoted=false)
     factor_finished = time_ns()
+    kkt_phases = hasproperty(kkt, :phase_times) ?
+                 kkt.phase_times :
+                 _empty_kkt_phase_times()
 
     # ---- Predictor ----
     _with_blas_threads(parallel_blas) do
@@ -198,6 +201,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
     end
+    predictor_rhs_finished = time_ns()
     predictor_ok = if ws.mixed_precision !== nothing &&
                       ws.mixed_precision.active
         _solve_mixed_kkt_guarded!(ws, prob, opts, r)
@@ -205,6 +209,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
         _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
         true
     end
+    predictor_solve_finished = time_ns()
     predictor_ok || return (
         status=:breakdown,
         reason="Native extended-precision fallback could not factor the Schur complement",
@@ -232,6 +237,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
                             zero(T),
                             T(2),
                         ) : one(T)
+    complementarity_finished = time_ns()
 
     # ---- Corrector ----
     _with_blas_threads(parallel_blas) do
@@ -240,6 +246,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
     end
+    corrector_rhs_finished = time_ns()
     corrector_ok = if ws.mixed_precision !== nothing &&
                       ws.mixed_precision.active
         _solve_mixed_kkt_guarded!(ws, prob, opts, r)
@@ -247,6 +254,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
         _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
         true
     end
+    corrector_solve_finished = time_ns()
     corrector_ok || return (
         status=:breakdown,
         reason="Native extended-precision fallback could not factor the Schur complement",
@@ -257,11 +265,19 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     )
 
     refine_steps, refine_residual = refine_direction!(ws, prob, opts, r)
+    refinement_finished = time_ns()
 
     _with_blas_threads(parallel_blas) do
         threaded_direction_blocks!(ws, prob, Y)
     end
     corrector_finished = time_ns()
+    kkt_total = (factor_finished - schur_finished) / 1.0e9
+    kkt_accounted =
+        kkt_phases.schur_copy +
+        kkt_phases.schur_factorization +
+        kkt_phases.constraint_triangular_solve +
+        kkt_phases.equality_gram +
+        kkt_phases.equality_factorization
 
     return (
         status=:ok,
@@ -281,6 +297,33 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
             kkt_factorization=(factor_finished - schur_finished) / 1.0e9,
             predictor=(predictor_finished - factor_finished) / 1.0e9,
             corrector=(corrector_finished - predictor_finished) / 1.0e9,
+            kkt_schur_copy=kkt_phases.schur_copy,
+            kkt_schur_factorization=kkt_phases.schur_factorization,
+            kkt_constraint_triangular_solve=
+                kkt_phases.constraint_triangular_solve,
+            kkt_equality_gram=kkt_phases.equality_gram,
+            kkt_equality_factorization=
+                kkt_phases.equality_factorization,
+            kkt_other=max(0.0, kkt_total - kkt_accounted),
+            predictor_rhs=
+                (predictor_rhs_finished - factor_finished) / 1.0e9,
+            predictor_linear_solve=
+                (predictor_solve_finished - predictor_rhs_finished) /
+                1.0e9,
+            predictor_direction_recovery=
+                (predictor_finished - predictor_solve_finished) / 1.0e9,
+            complementarity_analysis=
+                (complementarity_finished - predictor_finished) / 1.0e9,
+            corrector_rhs=
+                (corrector_rhs_finished - complementarity_finished) /
+                1.0e9,
+            corrector_linear_solve=
+                (corrector_solve_finished - corrector_rhs_finished) /
+                1.0e9,
+            refinement=
+                (refinement_finished - corrector_solve_finished) / 1.0e9,
+            corrector_direction_recovery=
+                (corrector_finished - refinement_finished) / 1.0e9,
         ),
     )
 end

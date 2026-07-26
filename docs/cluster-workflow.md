@@ -264,7 +264,7 @@ adjust PBS resources after measuring the target node:
 |---|---:|---:|---:|---|
 | Float64x4 sparse/block-arrow | 8 | sweep 1, 2, 4, 8 | 1 | SDPX Julia block and Schur scheduling |
 | BigFloat | 1 or the site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
-| Task_Low08 Float64 validation | 8 | 4 | 4 | reproduce the validated dense-KKT baseline |
+| Task_Low08 Float64 validation | 8 | 8 | 8 | sparse assembly plus dense OpenBLAS KKT factorization |
 | Small package validation | 8 | 4 for tests, 1 for high-precision smoke | 1 | sequential validation phases |
 
 `BigFloat` uses one solver thread. A site may require a larger PBS allocation,

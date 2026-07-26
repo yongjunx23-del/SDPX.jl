@@ -335,6 +335,7 @@ function main(arguments)
             "solve" => solve_finished - solve_started,
             "validation" => finished - solve_finished,
             "total" => finished - started,
+            "solver_phases" => result.timings,
         ),
         "diagnostics" => diagnostics,
         "certificate" => certificate,

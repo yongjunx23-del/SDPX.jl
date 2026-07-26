@@ -19,28 +19,27 @@ The canonical SDPX root is:
 /public/home/yongjunxu/projects/SDPX.jl
 ```
 
-The currently validated release is:
+The promoted release is selected atomically through:
 
 ```text
-commit: cae5e8e17d50ae78f3f0fc207edbbf2c12599f24
-source: /public/home/yongjunxu/projects/SDPX.jl/releases/cae5e8e17d50ae78f3f0fc207edbbf2c12599f24/source
-environment: /public/home/yongjunxu/projects/SDPX.jl/releases/cae5e8e17d50ae78f3f0fc207edbbf2c12599f24/environment
+/public/home/yongjunxu/projects/SDPX.jl/current
 ```
 
 Set reusable shell variables:
 
 ```bash
 BASE=/public/home/yongjunxu/projects/SDPX.jl
-COMMIT=cae5e8e17d50ae78f3f0fc207edbbf2c12599f24
-RELEASE="$BASE/releases/$COMMIT"
-SOURCE="$RELEASE/source"
+SOURCE="$(readlink -f "$BASE/current")"
+RELEASE="$(dirname "$SOURCE")"
+COMMIT="$(cat "$RELEASE/metadata/commit.txt")"
 ENVIRONMENT="$RELEASE/environment"
 JOBDIR="$BASE/jobs/$COMMIT"
 ```
 
-There is intentionally no promoted `current` symlink yet. Always use the
-explicit release path above. Do not edit the release source or environment in
-place. A newer commit must be installed as a new immutable release.
+Resolve `current` once at the start of a campaign and record `COMMIT` in every
+result. Do not edit the release source or environment in place. A newer commit
+must be installed as a new immutable release and pass validation before the
+symlink is repointed.
 
 ## 2. Verify the existing installation
 
@@ -64,15 +63,15 @@ test "$(cat "$RELEASE/metadata/commit.txt")" = "$COMMIT"
 test -d "$SOURCE"
 test -f "$ENVIRONMENT/Project.toml"
 test -f "$ENVIRONMENT/Manifest.toml"
-sha256sum -c "$RELEASE/metadata/environment-sha256.txt"
+(
+  cd "$RELEASE"
+  sha256sum -c metadata/environment.sha256
+)
 ```
 
-Expected environment checksums:
-
-```text
-Project.toml:  71cd08f3e79df590fcfbd42c3120c8e0dd26d0001c60e5032d1104685de8d4e8
-Manifest.toml: a90d8761788ab14a02b9fbaaa24a7daec55a78f233d24b2a230c70bc5dbeabac
-```
+The authoritative environment checksums are stored in
+`$RELEASE/metadata/environment.sha256`; do not copy values from an older
+release.
 
 A lightweight package-load check may run on the login node:
 
@@ -151,7 +150,7 @@ The script performs, in order:
 
 1. `Pkg.test("SDPX"; coverage=false)` with four Julia threads;
 2. analytic Float64x4 and 256-bit BigFloat smoke solves with one thread;
-3. the required Float64 `Task_Low08` solve with four Julia and four
+3. the required Float64 `Task_Low08` solve with eight Julia and eight
    factorization BLAS threads selected internally;
 4. the sparse scheduler correctness benchmark with up to eight Julia threads;
 5. SHA-256 generation for every result artifact.
@@ -186,20 +185,28 @@ Numerical acceptance gates:
 - sparse Schur validation has no meaningful relative error;
 - peak memory remains below the PBS request.
 
-The last successful validation was job `193883.node220`. It passed 1,272
-assertions. Its Float64 `Task_Low08` result was:
+The 2026-07-26 Task_Low08 optimization campaign used baseline job
+`193930.node220`, optimized comparison jobs `193934.node220` and
+`193936.node220`, focused validation job `193935.node220`, and complete
+package-test job `193938.node220` (1,948/1,948 tests passed). Its final
+Float64 result was:
 
 ```text
 status: Optimal
 iterations: 27
 objective: 0.653291393898
-relative gap: 4.55e-7
+relative gap: 4.61e-7
 maximum equality residual: 2.06e-12
-minimum primal PSD eigenvalue: -1.53e-14
+minimum primal PSD eigenvalue: -3.26e-15
 minimum dual PSD eigenvalue: 2.12e-14
-solve time: 86.91 s
-process peak RSS: 3190764 KiB
+best solve time: 37.03 s
+best-run peak RSS: 5.63 GiB
 ```
+
+The latest-release baseline was 51.59 s on the same node. The promoted path is
+1.39x faster. See
+`bench/opt2026/TASK_LOW08_CLUSTER_REPORT_2026-07-26.md` for detailed phase,
+kernel, memory, and numerical comparisons.
 
 Test counts may increase in newer commits; the exit status and tests contained
 in the candidate release are authoritative.
@@ -280,4 +287,3 @@ Do not repoint `current` until every numerical and memory gate passes.
 If a new candidate fails, preserve its release, logs, result artifacts, and
 environment manifest for diagnosis. Do not replace the validated release
 merely because a job was submitted or started.
-
