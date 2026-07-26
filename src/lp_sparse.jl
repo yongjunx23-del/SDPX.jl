@@ -39,7 +39,6 @@ mutable struct LPSparseSystem{T}
     variables::Int
     equalities::Int
     analyzed::Bool
-    factorization::Any
 end
 
 """
@@ -80,7 +79,6 @@ function lp_sparse_candidate(G::SparseMatrixCSC{T,Int}, B::SparseMatrixCSC{T,Int
         variables,
         equalities,
         false,
-        nothing,
     )
 end
 
@@ -97,13 +95,17 @@ K = [ H + δI    B   ]
 which is what [`SparseLDLBackend`](@ref) can factor. With no equality rows this
 degenerates to `H + δI`, which is positive definite.
 
-This is deliberately *not* the sign convention of the dense `_lp_populate_kkt!`,
-which is unsymmetric and therefore needs `lu!`. Solving this form yields `-y`
-where the dense form yields `y`, and the two also differ by `O(δ)` in the
-multiplier because the regularization enters the equality block with the
-opposite sign. Both are legitimate regularizations of the same `δ → 0` system;
-[`lp_sparse_solve!`](@ref) is the single place that converts, so no caller has
-to know.
+This is deliberately *not* the *shape* of the dense `_lp_populate_kkt!`, which
+is unsymmetric and therefore needs `lu!`. Solving this form yields `-y` where
+the dense form yields `y`, and [`lp_sparse_solve!`](@ref) is the single place
+that converts, so no caller has to know.
+
+The two do now solve the **same regularized system**. They previously did not:
+the dense equality block carried `-δ`, which differs from this one by `O(δ)` in
+the multiplier — invisible at the default regularization and worth 0.22 in the
+direction once `δ` reached `1e-2`, which the LP loop's escalation reaches. The
+dense side was changed to match this form rather than the reverse, because this
+one is quasi-definite and that is what makes LDL stable on it.
 """
 function _lp_sparse_assemble(H::SparseMatrixCSC{T,Int}, B::SparseMatrixCSC{T,Int},
                              regularization::T) where {T}
@@ -126,12 +128,12 @@ function lp_sparse_factor!(system::LPSparseSystem{T}, weights::AbstractVector{T}
                            regularization::T) where {T}
     weighted = transpose(system.G) * (Diagonal(weights) * system.G)
     system.K = _lp_sparse_assemble(weighted, system.B, regularization)
-    if !system.analyzed
-        analyze!(system.backend, system.K)
-        system.analyzed = true
-    end
+    # `factorize!` analyses on its own whenever the pattern is new, so calling
+    # `analyze!` first here factored the same matrix twice. That cost a full
+    # extra numeric factorization on the first iteration of every sparse LP
+    # solve, and showed up as `factorizations = 2` after one call.
     ok = factorize!(system.backend, system.K)
-    ok && (system.factorization = system.backend)
+    system.analyzed = ok
     return ok
 end
 

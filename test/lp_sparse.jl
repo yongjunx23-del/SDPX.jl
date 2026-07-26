@@ -37,7 +37,6 @@ using Test
             variables,
             equalities,
             false,
-            nothing,
         )
         @test SDPX.lp_sparse_factor!(system, weights, regularization)
         actual = SDPX.lp_sparse_solve!([r1; r2], system)
@@ -161,7 +160,7 @@ using Test
             system = SDPX.LPSparseSystem{Float64}(
                 sparse(G), sparse(B), spzeros(0, 0),
                 SDPX.SparseLDLBackend(), :sparse_ldl,
-                variables, equalities, false, nothing,
+                variables, equalities, false,
             )
             @test SDPX.lp_sparse_factor!(system, ones(rows), regularization)
             sparse_direction =
@@ -183,6 +182,37 @@ using Test
         # Positive, matching the symmetric quasi-definite form the sparse
         # backend factors -- not negative.
         @test K[(variables + 1):end, (variables + 1):end] ≈ 0.25I
+    end
+
+
+    @testset "the first factorization is not performed twice" begin
+        # `factorize!` analyses on its own when the pattern is new, so an
+        # explicit `analyze!` beforehand factored the same matrix twice --
+        # a full extra numeric factorization on the first iteration of every
+        # sparse LP solve, which showed as factorizations = 2 after one call.
+        rng = MersenneTwister(2)
+        variables, rows = 40, 90
+        G = sprandn(rng, rows, variables, 0.05) + sparse(1.0I, rows, variables)
+        system = SDPX.LPSparseSystem{Float64}(
+            G, spzeros(variables, 0), spzeros(0, 0),
+            SDPX.SparseCholeskyBackend(), :sparse_normal,
+            variables, 0, false,
+        )
+
+        @test SDPX.lp_sparse_factor!(system, ones(rows), 1e-8)
+        first = SDPX.statistics(system.backend)
+        @test first.analyses == 1
+        @test first.factorizations == 1
+
+        # Later calls change only the values, so they must reuse the symbolic
+        # analysis rather than repeating it.
+        for call in 2:4
+            @test SDPX.lp_sparse_factor!(system, ones(rows) .+ 0.1 * call, 1e-8)
+        end
+        later = SDPX.statistics(system.backend)
+        @test later.analyses == 1
+        @test later.factorizations == 4
+        @test later.symbolic_reuse_ratio > 0.7
     end
 
 end
