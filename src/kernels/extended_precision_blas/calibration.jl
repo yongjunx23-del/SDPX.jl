@@ -113,16 +113,48 @@ function load_profile(family::Symbol)
             values[strip(parts[1])] = parse(Float64, strip(parts[2]))
         end
         haskey(values, "minimum_speedup") || return fallback
-        return CalibrationProfile(
+        candidate = CalibrationProfile(
             minimum_columns=round(Int, get(values, "minimum_columns", fallback.minimum_columns)),
             minimum_work=get(values, "minimum_work", fallback.minimum_work),
             minimum_speedup=values["minimum_speedup"],
             minimum_schur_density=get(values, "minimum_schur_density", fallback.minimum_schur_density),
             minimum_nnz_ratio=get(values, "minimum_nnz_ratio", fallback.minimum_nnz_ratio),
             source=:calibrated)
+        return valid_profile(candidate) ? candidate : fallback
     catch
         return fallback
     end
+end
+
+"""
+    valid_profile(profile) -> Bool
+
+Whether a profile's thresholds are meaningful enough to act on.
+
+The cache is a file on disk that a crashed calibration run, an edited config,
+or a half-written flush can leave in any state, and every field here *lowers*
+the bar for enabling a more aggressive kernel. Parsing alone does not protect
+against that: `parse(Float64, "NaN")` succeeds, and every comparison against a
+`NaN` threshold is false, so a `NaN` minimum speedup enables the packed kernel
+unconditionally. Measured before this check existed, a profile with
+`minimum_columns = -5`, `minimum_work = -1.0`, `minimum_speedup = NaN`,
+`minimum_schur_density = 7.5` and `minimum_nnz_ratio = -3.0` loaded intact and
+reported itself as `:calibrated`.
+
+A profile that fails any of these is discarded in favour of the static
+defaults rather than repaired field by field, because a file that is wrong
+about one threshold is not evidence for the others.
+"""
+function valid_profile(profile::CalibrationProfile)
+    profile.minimum_columns >= 2 || return false
+    isfinite(profile.minimum_work) && profile.minimum_work >= 0 || return false
+    # A "speedup" below one is a slowdown; acting on it would enable the
+    # packed kernel precisely where it is predicted to lose.
+    isfinite(profile.minimum_speedup) && profile.minimum_speedup >= 1 || return false
+    for density in (profile.minimum_schur_density, profile.minimum_nnz_ratio)
+        isfinite(density) && 0 <= density <= 1 || return false
+    end
+    return true
 end
 
 """

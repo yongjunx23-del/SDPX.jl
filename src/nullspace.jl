@@ -41,20 +41,60 @@ struct NullSpaceBasis{T}
 end
 
 """
-    nullspace_memory_bytes(variables, equalities, ::Type{T}) -> Int
+    saturating_bytes(elements..., element_bytes) -> Int
 
-Bytes `Z` will occupy, computable *before* materialising it.
+Product of the arguments, clamped to `typemax(Int)` instead of wrapping.
+
+A memory estimate that overflows is worse than no estimate at all: it comes
+back negative, compares as less than any budget, and the guard it feeds then
+approves precisely the allocation it exists to refuse. Measured before this
+was added, `nullspace_memory_bytes(2_000_000_000, 1, Float64)` returned
+-4893488163419103232.
+"""
+function saturating_bytes(factors::Integer...)
+    total = big(1)
+    for factor in factors
+        factor <= 0 && return 0
+        total *= big(factor)
+        total > typemax(Int) && return typemax(Int)
+    end
+    return Int(total)
+end
+
+"""
+    nullspace_memory_bytes(variables, equalities, ::Type{T}; rank=nothing) -> Int
+
+Bytes the basis will occupy, computable *before* materialising it.
 
 §12.2 requires this because the basis is the one object in the formulation that
-can be larger than the problem: with few equalities `Z` is `m × (m − n)`, which
-approaches a dense `m × m` matrix. Checking first avoids allocating a basis only
-to discover it does not fit.
+can be larger than the problem: `Z` is `m × (m − rank(B))`, which approaches a
+dense `m × m` matrix as the equalities become dependent.
 
-Assumes full column rank, i.e. the largest `Z` that could result.
+`rank` is the numerical rank of `B`, which is what actually sets the width. It
+is usually unknown at the point this is called, and **the equality count is not
+a safe substitute for it**: rank can only be lower, which makes `Z` only wider.
+So with `rank` omitted this returns the worst case, `m × m`.
+
+That correction matters. The previous version used `m × (m − equalities)` and
+described it as "the largest `Z` that could result", which is backwards — full
+column rank gives the *smallest* `Z`. Measured on a 100-variable problem with
+80 equality columns of rank 1, it estimated 16,000 bytes against an actual
+79,200, and the gate approved the reduction under a 20,000-byte budget.
+
+The figure also covers only `Z` itself. `build_nullspace_basis` additionally
+forms the full `m × m` orthogonal factor, so the worst case returned here is
+the right order for the peak as well.
 """
-function nullspace_memory_bytes(variables::Integer, equalities::Integer, ::Type{T}) where {T}
-    reduced = max(Int(variables) - Int(equalities), 0)
-    return ExtendedPrecisionBLAS._element_storage_bytes(T) * Int(variables) * reduced
+function nullspace_memory_bytes(variables::Integer, equalities::Integer,
+                                ::Type{T}; rank::Union{Nothing,Integer}=nothing) where {T}
+    variables <= 0 && return 0
+    width = rank === nothing ? Int(variables) :
+            max(Int(variables) - Int(rank), 0)
+    return saturating_bytes(
+        ExtendedPrecisionBLAS._element_storage_bytes(T),
+        Int(variables),
+        width,
+    )
 end
 
 """
@@ -88,7 +128,8 @@ equalities are inconsistent, and a caller must not proceed as though the
 feasible set were non-empty in that case.
 """
 function build_nullspace_basis(B::AbstractMatrix{T}, b::AbstractVector{T};
-                               tolerance::Real=0) where {T}
+                               tolerance::Real=0,
+                               memory_budget_bytes::Integer=typemax(Int)) where {T}
     variables, equalities = size(B)
     if equalities == 0
         # No equalities: every direction is feasible and `Z` is the identity.
@@ -104,6 +145,18 @@ function build_nullspace_basis(B::AbstractMatrix{T}, b::AbstractVector{T};
     rank = count(>(threshold), diagonal)
 
     quality = (rank == 0 || largest == 0) ? zero(T) : diagonal[rank] / largest
+
+    # The budget is enforced here, between knowing the rank and spending the
+    # memory. This is the only point where both facts are available: before the
+    # factorization the rank is unknown and the caller can only be given the
+    # `m × m` worst case, and after the next line the allocation has already
+    # happened. Returning a zero-rank, inconsistent basis signals refusal
+    # without partially mutating anything the caller owns.
+    required = nullspace_memory_bytes(variables, equalities, T; rank=rank)
+    if required > memory_budget_bytes
+        return NullSpaceBasis{T}(zeros(T, variables, 0), zeros(T, variables),
+            rank, 0, quality, false)
+    end
 
     # Trailing columns of the FULL Q span null(Bᵀ). `Matrix(factor.Q)` returns
     # the *thin* factor (`m × min(m,n)`), which omits exactly the columns we
@@ -231,11 +284,16 @@ Returns `nothing` when the equalities are inconsistent or the basis is too
 ill-conditioned to build on, rather than producing a reduced problem whose
 solutions do not correspond to the original's.
 """
-function nullspace_reduce(prob::SDPProblem{T}; tolerance::Real=0) where {T}
+function nullspace_reduce(prob::SDPProblem{T}; tolerance::Real=0,
+                          memory_budget_bytes::Integer=typemax(Int)) where {T}
     L, m, n, k = prob.dims
     n > 0 || return nothing
 
-    basis = build_nullspace_basis(prob.B, prob.b; tolerance=tolerance)
+    # Enforced here as well as offered to the caller: a reduction that silently
+    # trusts an external gate is one bad call site away from allocating a dense
+    # `m × m` basis on a problem that cannot hold one.
+    basis = build_nullspace_basis(prob.B, prob.b; tolerance=tolerance,
+        memory_budget_bytes=memory_budget_bytes)
     basis.consistent || return nothing
     basis.quality >= T(NULLSPACE_MINIMUM_QUALITY) || return nothing
     reduced_dimension = basis.reduced_dimension
@@ -325,7 +383,7 @@ function nullspace_expand(reduction::NullSpaceReduction{T}, z::AbstractVector{T}
 end
 
 """
-    recover_equality_multiplier(prob, X_blocks, Y_blocks, c) -> Vector
+    recover_equality_multiplier(prob, Y_blocks) -> Vector
 
 Least-squares recovery of the equality multiplier `y` that the reduced problem
 never forms.

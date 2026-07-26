@@ -686,6 +686,40 @@ end
                 # A corrupt cache must never break a solve — it falls back silently.
                 write(path, "this is not a calibration file\n@@@@\n")
                 @test EPB.load_profile(family).source === :static
+
+                # A *parseable* cache holding nonsense is the dangerous case:
+                # it loads cleanly and every field lowers the bar for enabling
+                # the packed kernel. NaN is the worst of them, because every
+                # comparison against a NaN threshold is false, so a NaN minimum
+                # speedup enables the kernel unconditionally. Each of these was
+                # accepted before validation existed.
+                for corrupt in (
+                    "minimum_columns = -5\nminimum_speedup = 1.5\n",
+                    "minimum_columns = 1\nminimum_speedup = 1.5\n",
+                    "minimum_speedup = NaN\n",
+                    "minimum_speedup = Inf\n",
+                    "minimum_speedup = 0.1\n",
+                    "minimum_speedup = 1.5\nminimum_work = -1.0\n",
+                    "minimum_speedup = 1.5\nminimum_schur_density = 7.5\n",
+                    "minimum_speedup = 1.5\nminimum_nnz_ratio = -3.0\n",
+                    "minimum_speedup = 1.5\nminimum_schur_density = NaN\n",
+                )
+                    write(path, corrupt)
+                    @test EPB.load_profile(family).source === :static
+                end
+
+                # The validator itself, stated directly.
+                @test EPB.valid_profile(measured)
+                @test !EPB.valid_profile(EPB.CalibrationProfile(
+                    minimum_columns=2, minimum_work=0.0, minimum_speedup=NaN,
+                    minimum_schur_density=0.5, minimum_nnz_ratio=0.5))
+                @test EPB.valid_profile(EPB.CalibrationProfile(
+                    minimum_columns=2, minimum_work=0.0, minimum_speedup=1.0,
+                    minimum_schur_density=0.0, minimum_nnz_ratio=1.0))
+
+                # A valid profile must still round-trip after all that.
+                EPB.save_profile(family, measured)
+                @test EPB.load_profile(family).source === :calibrated
             end
         end
     end
@@ -901,7 +935,14 @@ end
         # Never claim a reduction when the equalities outnumber the variables.
         @test !SDPX.should_use_nullspace(variables=10, equalities=10)
         # Memory estimate is available before Z is built, and gates the choice.
-        @test SDPX.nullspace_memory_bytes(1000, 900, Float64) == 8 * 1000 * 100
+        # Without the rank it must be the worst case `m x m`, not `m x (m - n)`:
+        # the equality count is an upper bound on the rank, so using it as the
+        # rank under-reports whenever the rows are dependent. This assertion
+        # previously encoded the unsafe formula.
+        @test SDPX.nullspace_memory_bytes(1000, 900, Float64) == 8 * 1000 * 1000
+        # Given the rank, it is exact.
+        @test SDPX.nullspace_memory_bytes(1000, 900, Float64; rank=900) ==
+              8 * 1000 * 100
         @test !SDPX.should_use_nullspace(variables=1000, equalities=900,
             memory_budget_bytes=1000)
     end

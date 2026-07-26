@@ -1,5 +1,6 @@
 using LinearAlgebra
 using Random
+using MultiFloats: Float64x4
 using SDPX
 using Test
 
@@ -113,4 +114,75 @@ end
         @test !SDPX.should_use_nullspace(; variables=617, equalities=0)
         @test SDPX.should_use_nullspace(; variables=1000, equalities=800)
     end
+
+    @testset "memory estimate is safe against rank deficiency and overflow" begin
+        # A memory guard that under-reports approves exactly the allocation it
+        # exists to refuse. Both failure modes below were measured on the
+        # previous implementation.
+
+        # Rank deficiency. 80 equality columns of rank 1 leave a 100x99 basis,
+        # not the 100x20 that the column count suggests. The old estimate said
+        # 16,000 bytes against an actual 79,200 and the gate approved a
+        # 20,000-byte budget.
+        rng = MersenneTwister(3)
+        equalities = randn(rng, 100) * transpose(randn(rng, 80))
+        righthand = zeros(80)
+        basis = SDPX.build_nullspace_basis(equalities, righthand)
+        @test basis.rank == 1
+        @test size(basis.Z) == (100, 99)
+        actual = sizeof(Float64) * length(basis.Z)
+
+        # Without the rank, the estimate must be an upper bound, not a guess
+        # derived from the column count.
+        @test SDPX.nullspace_memory_bytes(100, 80, Float64) >= actual
+        # With the rank, it must be exact.
+        @test SDPX.nullspace_memory_bytes(100, 80, Float64; rank=1) == actual
+        # And the gate must refuse the budget it previously approved.
+        @test !SDPX.should_use_nullspace(; variables=100, equalities=80,
+            arithmetic=Float64, memory_budget_bytes=20_000)
+
+        # Overflow. These dimensions are never allocated; the point is that the
+        # arithmetic saturates instead of wrapping to a negative number that
+        # compares as smaller than every budget.
+        for (variables, equality_count) in ((2_000_000_000, 1),
+                                            (3_000_000_000, 1_000_000))
+            estimate = SDPX.nullspace_memory_bytes(variables, equality_count, Float64)
+            @test estimate > 0
+            @test estimate == typemax(Int)
+        end
+        @test SDPX.saturating_bytes(8, 2_000_000_000, 2_000_000_000) == typemax(Int)
+        @test SDPX.saturating_bytes(8, 10, 10) == 800
+
+        # Wider arithmetic needs proportionally more, and must not overflow
+        # into a smaller number than the narrow case.
+        @test SDPX.nullspace_memory_bytes(1000, 500, Float64x4) >
+              SDPX.nullspace_memory_bytes(1000, 500, Float64)
+    end
+
+    @testset "the basis refuses a budget it cannot fit" begin
+        # Enforced inside the builder, between knowing the rank and spending
+        # the memory -- the only point where both facts are available.
+        rng = MersenneTwister(3)
+        equalities = randn(rng, 100) * transpose(randn(rng, 80))
+        righthand = zeros(80)
+
+        refused = SDPX.build_nullspace_basis(equalities, righthand;
+            memory_budget_bytes=20_000)
+        @test refused.reduced_dimension == 0
+        @test !refused.consistent            # callers must not proceed on this
+        @test isempty(refused.Z)             # nothing was allocated
+
+        allowed = SDPX.build_nullspace_basis(equalities, righthand;
+            memory_budget_bytes=1_000_000)
+        @test allowed.reduced_dimension == 99
+        @test allowed.consistent
+
+        # And the reduction refuses rather than trusting an external gate.
+        data = _equality_heavy_sdp(60, 40, 4, 2)
+        problem = SDPX.ingest(data.c, data.A, data.C, data.B, data.b;
+            sparse=:auto, verbosity=0)
+        @test SDPX.nullspace_reduce(problem; memory_budget_bytes=8) === nothing
+        @test SDPX.nullspace_reduce(problem) !== nothing
+    end
+
 end
