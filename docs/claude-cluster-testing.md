@@ -213,21 +213,20 @@ in the candidate release are authoritative.
 
 ### Latest promoted release
 
-The current cluster release was updated after the single-core dense-Schur and
-backend campaign:
+The current cluster release includes the dense Task_Low08 work and the medium
+sparse `2x2` block-arrow optimization:
 
 ```text
-commit: affa8992f0da59b55a10dfe4ae697ef3b2e4a325
-validation job: 193957.node220
-full package tests: 1955/1955 passed
-Task_Low08 status: Optimal
-Task_Low08 objective: 0.653291393897909
-maximum original equality residual: 2.06e-12
-minimum primal PSD eigenvalue: -7.29e-15
-minimum dual PSD eigenvalue: 2.12e-14
-best independent complete solve: 34.787696 s
-best launch profile: 32 Julia threads, 16 OpenBLAS threads,
-                     numactl --interleave=all
+validated benchmark/report commit: 83df6ee6cddb02651fc348b92ab9919c5f742d4f
+solver optimization commit: e952e61423a4d2c2d5645f71d046a36d82769742
+self-contained validation job: 194087.node220
+full package tests: 1964/1964 passed
+medium CSDR Float64x4 status: Optimal
+medium CSDR Float64x4 best time: 33.878550 s (8 Julia threads)
+medium CSDR BigFloat256 status: Optimal
+medium CSDR BigFloat256 time: 328.270295 s (1 Julia thread)
+canonical model manifest:
+  df62be289368abb162e43cddba72cd13efe79cbf441d1596454a658b4175592b
 ```
 
 The release is selected by:
@@ -235,6 +234,18 @@ The release is selected by:
 ```text
 /public/home/yongjunxu/projects/SDPX.jl/current
 ```
+
+The independent medium benchmark and audit are stored at:
+
+```text
+/public/home/yongjunxu/projects/sdpx-benchmarks/csdr-medium-j32-k4
+```
+
+See
+`bench/opt2026/CSDR_MEDIUM_J32_K4_CLUSTER_2026-07-26.md` for the complete
+algorithm, timing, allocation, memory, scaling, and numerical-validation
+report. The latest Task_Low08 results remain documented separately in
+`bench/opt2026/TASK_LOW08_CLUSTER_REPORT_2026-07-26.md`.
 
 OpenBLAS remains the selected Linux backend. Controlled Task_Low08
 comparisons found both MKL 2025.2 and BLISBLAS 0.2 slower on the AMD EPYC 7742
