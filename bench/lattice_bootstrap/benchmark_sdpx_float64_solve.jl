@@ -231,7 +231,7 @@ function main(arguments)
     predictor =
         length(arguments) >= 9 ? Symbol(arguments[9]) : :classic
     max_iter = length(arguments) >= 10 ? parse(Int, arguments[10]) : 100
-    BLAS.set_num_threads(blas_threads)
+    SDPX.set_blas_threads!(blas_threads)
 
     started = time()
     read_timing = @timed read_problem(input_path)
@@ -297,7 +297,7 @@ function main(arguments)
         "sdpx_version" => string(pkgversion(SDPX)),
         "julia_version" => string(VERSION),
         "julia_threads" => Threads.nthreads(),
-        "blas_threads" => BLAS.get_num_threads(),
+        "blas_threads" => SDPX.blas_threads(),
         "status" => string(result.status),
         "message" => result.message,
         "objective" => result.pObj,

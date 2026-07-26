@@ -457,7 +457,7 @@ function build_execution_plan(
         if T === Float64
             selected_threads > 1 &&
             classification.cone_rows * classification.variables^2 >= 2_000_000 &&
-            LinearAlgebra.BLAS.get_num_threads() == 1 ?
+            blas_threads() == 1 ?
             :parallel_blas_panels : :blas_syrk
         elseif opts.extended_precision_blas !== :off
             decision = _lp_extended_crossover(

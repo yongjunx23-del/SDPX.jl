@@ -1004,9 +1004,10 @@ function sparse_schur_block_scatter!(
                 value =
                     v11 * coeffs[1, r] + v12 * coeffs[2, r] + v22 * coeffs[3, r]
                 if lower_only
-                    row = max(variable_i, variable_j)
-                    column = min(variable_i, variable_j)
-                    S[row, column] += value
+                    # `schur_order` is ascending, so r ≥ p implies
+                    # variable_j ≥ variable_i. Avoid min/max in this loop:
+                    # Task_Low08 executes it 2.26e8 times per iteration.
+                    S[variable_j, variable_i] += value
                 else
                     S[variable_i, variable_j] += value
                     variable_i != variable_j &&
@@ -1032,9 +1033,14 @@ function sparse_schur_block_scatter!(
                 value =
                     _dot_dense_coo_value!(bw.W1, coo, r, scratch)
                 if lower_only
-                    row = max(variable_i, variable_j)
-                    column = min(variable_i, variable_j)
-                    _add_owned_entry!(S, row, column, value)
+                    # See the packed 2x2 path above: sorted ids make the lower
+                    # destination known without a comparison.
+                    _add_owned_entry!(
+                        S,
+                        variable_j,
+                        variable_i,
+                        value,
+                    )
                 else
                     _add_owned_entry!(
                         S,
@@ -1080,9 +1086,9 @@ function _reduce_sparse_schur_serial!(ws::Workspace{T}, cons::SparseCons{T}) whe
                 q += 1
                 val = Svals[q]
                 if ws.schur_lower_only
-                    row = max(i, j)
-                    column = min(i, j)
-                    _add_owned_entry!(ws.S, row, column, val)
+                    # `ids` is ascending and r ≥ p, hence this is already the
+                    # lower-triangle destination.
+                    _add_owned_entry!(ws.S, j, i, val)
                 else
                     _add_owned_entry!(ws.S, i, j, val)
                     i != j && _add_owned_entry!(ws.S, j, i, val)

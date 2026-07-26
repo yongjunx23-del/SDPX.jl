@@ -72,7 +72,42 @@ using Test
         @inferred SDPX.ksyrk!(gram, panel, 1.25, -0.5)
         @test gram ≈ gram_reference rtol=2e-15 atol=2e-15
         @test issymmetric(gram)
+        schur_source = rand(7, 7)
+        factor_buffer = fill(NaN, 7, 7)
+        @inferred SDPX._copy_schur_factor_buffer!(
+            factor_buffer,
+            schur_source,
+            true,
+        )
+        @test all(
+            factor_buffer[row, column] ==
+            schur_source[row, column]
+            for column in 1:7 for row in column:7
+        )
+        @test all(
+            isnan(factor_buffer[row, column])
+            for column in 2:7 for row in 1:(column - 1)
+        )
         @test (@inferred SDPX.knrmInf(A)) isa Float64
+    end
+
+    @testset "BLAS backend controller validates its public contract" begin
+        @test SDPX.blas_backend() isa Symbol
+        @test SDPX.blas_threads() >= 1
+        @test_throws ArgumentError SDPX.set_blas_threads!(0)
+    end
+
+    @testset "exact duplicate equality columns are backend-independent" begin
+        @test SDPX._has_exact_duplicate_columns([
+            1.0 1.0
+            -0.0 0.0
+            3.0 3.0
+        ])
+        @test !SDPX._has_exact_duplicate_columns([
+            1.0 1.0
+            2.0 2.0
+            3.0 nextfloat(3.0)
+        ])
     end
 
     @testset "BigFloat mutating kernels preserve inputs and independent outputs" begin

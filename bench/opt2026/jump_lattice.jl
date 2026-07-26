@@ -28,14 +28,14 @@ const INPUT = get(ENV, "LATTICE_INPUT",
 function main()
     tol = parse(Float64, get(ENV, "JUMP_TOL", "1e-6"))
     blas_threads = parse(Int, get(ENV, "JUMP_BLAS", "4"))
-    BLAS.set_num_threads(blas_threads)
+    SDPX.set_blas_threads!(blas_threads)
 
     data = read_problem(INPUT)
     variables = length(data.c)
     L = length(data.A)
     @printf("problem: %d variables, %d equalities, %d PSD blocks\n",
         variables, length(data.b), L)
-    println("threads: julia=", Threads.nthreads(), " blas=", BLAS.get_num_threads())
+    println("threads: julia=", Threads.nthreads(), " blas=", SDPX.blas_threads())
 
     build_started = time()
     model = Model(SDPX.Optimizer{Float64})

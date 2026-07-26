@@ -92,6 +92,27 @@ oversubscribe the node. Dense KKT Cholesky is a single large operation, so the
 solver restores a bounded BLAS width for that phase and restores the caller's
 setting afterward, including on exceptions.
 
+### Apple Accelerate
+
+On macOS, AppleAccelerate.jl can replace OpenBLAS through
+libblastrampoline. Load it explicitly before solving:
+
+```julia
+using SDPX
+using AppleAccelerate
+
+SDPX.set_blas_threads!(1)
+@assert SDPX.blas_backend() == :apple_accelerate
+@assert SDPX.blas_threads() == 1
+```
+
+Use `SDPX.set_blas_threads!`, rather than
+`LinearAlgebra.BLAS.set_num_threads`, when Apple Accelerate is loaded.
+Accelerate uses `BLASSetThreading`; the ordinary libblastrampoline setter does
+not switch it into strict single-threaded mode. AppleAccelerate remains an
+optional dependency because loading it changes the process-wide BLAS/LAPACK
+backend for every Julia package in the process.
+
 Do not start by assigning both Julia and BLAS every core. Use one core per
 Julia thread, set a realistic process limit, and measure complete iteration
 time. Nested or concurrent solves share the process-global BLAS setting and

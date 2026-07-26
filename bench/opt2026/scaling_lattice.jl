@@ -39,7 +39,7 @@ function main()
     tol = parse(Float64, get(ENV, "SCALE_TOL", "1e-6"))
     reps = parse(Int, get(ENV, "SCALE_REPS", "3"))
 
-    BLAS.set_num_threads(blas_threads)
+    SDPX.set_blas_threads!(blas_threads)
     data = read_problem(input)
     ids, rank, _, _ = equality_basis(data.B, data.b)
     problem = SDPX.ingest(

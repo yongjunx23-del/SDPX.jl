@@ -108,13 +108,13 @@ step that takes ~1.5 s/iteration), while the same configuration ran fine on a
 smaller login node where the product stayed near the core count.
 """
 @inline function _with_blas_threads(f, count::Int)
-    previous = LinearAlgebra.BLAS.get_num_threads()
+    previous = blas_threads()
     count == previous && return f()
-    LinearAlgebra.BLAS.set_num_threads(count)
+    set_blas_threads!(count)
     try
         return f()
     finally
-        LinearAlgebra.BLAS.set_num_threads(previous)
+        set_blas_threads!(previous)
     end
 end
 
@@ -138,7 +138,7 @@ and degrades sensibly for other sizes. This only ever lowers the thread count,
 so it cannot slow down a caller who deliberately asked for fewer.
 """
 @inline function _kkt_blas_threads(m::Int)
-    available = LinearAlgebra.BLAS.get_num_threads()
+    available = blas_threads()
     return clamp(m ÷ 256, 1, available)
 end
 
@@ -160,7 +160,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     phase_started = time_ns()
     # Serialize BLAS inside the block-parallel phases; the KKT factorization
     # below re-enables the full width for its single large call.
-    parallel_blas = ws.thread_count > 1 ? 1 : LinearAlgebra.BLAS.get_num_threads()
+    parallel_blas = ws.thread_count > 1 ? 1 : blas_threads()
 
     p_res, d_res, blocks_ok = _with_blas_threads(parallel_blas) do
         threaded_compute_residuals!(ws, prob, x, X, y, Y, μ, opts; factor=true)
@@ -176,7 +176,7 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     # a single large serial `syrk!`, neither source is left, so that case gets
     # the full width back (see `schur_blas_threads` for the measurements).
     schur_blas = schur_blas_threads(ws, prob, cons, parallel_blas,
-        LinearAlgebra.BLAS.get_num_threads())
+        blas_threads())
     _with_blas_threads(schur_blas) do
         threaded_schur_build!(ws, prob, cons, X, Y)
     end

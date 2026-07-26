@@ -558,7 +558,7 @@ function _lp_assemble_hessian!(
     workspace.sparse_system === nothing || return workspace.H
     if T === Float64
         if thread_count > 1 &&
-           LinearAlgebra.BLAS.get_num_threads() == 1 &&
+           blas_threads() == 1 &&
            size(G, 1) * size(G, 2)^2 >= 2_000_000
             return _lp_assemble_hessian_threaded!(
                 workspace,

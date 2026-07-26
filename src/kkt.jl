@@ -24,6 +24,94 @@ _empty_kkt_phase_times() = (
     equality_factorization=0.0,
 )
 
+function _cholesky_has_numerical_rank(
+    factor::LinearAlgebra.Cholesky{T},
+) where {T}
+    dimension = size(factor.factors, 1)
+    dimension == 0 && return true
+    minimum_diagonal = abs(factor.factors[1, 1])
+    maximum_diagonal = minimum_diagonal
+    @inbounds for index in 2:dimension
+        value = abs(factor.factors[index, index])
+        minimum_diagonal = min(minimum_diagonal, value)
+        maximum_diagonal = max(maximum_diagonal, value)
+    end
+    isfinite(minimum_diagonal) &&
+        isfinite(maximum_diagonal) &&
+        maximum_diagonal > zero(T) &&
+        minimum_diagonal >
+        sqrt(T(dimension) * eps(T)) * maximum_diagonal
+end
+
+function _has_exact_duplicate_columns(matrix::AbstractMatrix)
+    row_count, column_count = size(matrix)
+    column_count <= 1 && return false
+
+    # This guard is only used after an unpivoted factor reports a suspicious
+    # diagonal and a zero-tolerance pivoted factor still reports full rank.
+    # Fingerprints make the check O(rows * columns), while the final equality
+    # scan protects against collisions. Normalize signed zero because the
+    # columns are mathematically identical in that case.
+    fingerprints = Vector{UInt}(undef, column_count)
+    @inbounds for column in 1:column_count
+        fingerprint = UInt(0)
+        for row in 1:row_count
+            value = matrix[row, column]
+            fingerprint = hash(iszero(value) ? zero(value) : value, fingerprint)
+        end
+        fingerprints[column] = fingerprint
+    end
+
+    @inbounds for right in 2:column_count
+        for left in 1:(right - 1)
+            fingerprints[left] == fingerprints[right] || continue
+            identical = true
+            for row in 1:row_count
+                if matrix[row, left] != matrix[row, right]
+                    identical = false
+                    break
+                end
+            end
+            identical && return true
+        end
+    end
+    return false
+end
+
+function _copy_schur_factor_buffer!(
+    destination::AbstractMatrix,
+    source::AbstractMatrix,
+    lower_only::Bool,
+)
+    copy_owned!(destination, source)
+    return destination
+end
+
+# LAPACK POTRF reads only the selected lower triangle. Task_Low08 keeps the
+# upper Schur triangle unmaterialized, so copying the full 6119×6119 buffer
+# wastes half the memory traffic before every factorization.
+function _copy_schur_factor_buffer!(
+    destination::StridedMatrix{T},
+    source::StridedMatrix{T},
+    lower_only::Bool,
+) where {T<:Union{Float32,Float64}}
+    if !lower_only
+        copyto!(destination, source)
+        return destination
+    end
+    dimension = size(source, 1)
+    size(source, 2) == dimension ||
+        throw(DimensionMismatch("Schur source must be square"))
+    size(destination) == size(source) ||
+        throw(DimensionMismatch("Schur buffers must have matching dimensions"))
+    @inbounds for column in 1:dimension
+        @simd for row in column:dimension
+            destination[row, column] = source[row, column]
+        end
+    end
+    return destination
+end
+
 """
     factor_kkt!(ws, prob, opts) -> (ok, reg_attempts, q_pivoted)
 
@@ -65,7 +153,11 @@ function _factor_dense_kkt_native!(
     phase_equality_factorization = 0.0
 
     started = time_ns()
-    copy_owned!(ws.Sbuf, ws.S)
+    _copy_schur_factor_buffer!(
+        ws.Sbuf,
+        ws.S,
+        ws.schur_lower_only,
+    )
     phase_schur_copy += _elapsed_seconds(started)
     started = time_ns()
     ok = kchol!(ws.Sbuf)
@@ -76,7 +168,11 @@ function _factor_dense_kkt_native!(
         reg_attempts += 1
         reg = reg_attempts == 1 ? sqrt(eps(T)) : reg * 10
         started = time_ns()
-        copy_owned!(ws.Sbuf, ws.S)
+        _copy_schur_factor_buffer!(
+            ws.Sbuf,
+            ws.S,
+            ws.schur_lower_only,
+        )
         @inbounds for i in 1:m
             ws.Sbuf[i, i] += reg * max(abs(ws.S[i, i]), one(T))
         end
@@ -124,19 +220,45 @@ function _factor_dense_kkt_native!(
                 Symmetric(ws.Qbuf, :L);
                 check=false,
             )
-            if issuccess(Cq)
+            if issuccess(Cq) &&
+               _cholesky_has_numerical_rank(Cq)
                 ws.Qchol = Cq
             else
                 copy_owned!(ws.Qbuf, ws.Q)
-                ws.Qchol = LinearAlgebra.cholesky(
+                pivoted = LinearAlgebra.cholesky(
                     Symmetric(ws.Qbuf, :L),
                     LinearAlgebra.RowMaximum();
                     check=false,
                 )
+                if pivoted.rank == n &&
+                   _has_exact_duplicate_columns(ws.Q)
+                    # Some vendor POTRF implementations accept a tiny positive
+                    # pivot for exactly duplicated equality columns. Apply a
+                    # nonzero tolerance only for this structural case. A
+                    # blanket tolerance incorrectly removes legitimate,
+                    # ill-conditioned Task_Low08 directions near convergence.
+                    maximum_q_diagonal = maximum(
+                        index -> abs(ws.Q[index, index]),
+                        1:n;
+                        init=zero(T),
+                    )
+                    pivoted = LinearAlgebra.cholesky(
+                        Symmetric(ws.Qbuf, :L),
+                        LinearAlgebra.RowMaximum();
+                        tol=T(2) * eps(T) * maximum_q_diagonal,
+                        check=false,
+                    )
+                end
+                ws.Qchol = pivoted
                 q_pivoted = true
-                opts.verbosity >= 1 &&
-                    @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(ws.Qchol.rank) of $n) — using pivoted Cholesky " *
-                          "(likely redundant/duplicated equality constraints)"
+                if opts.verbosity >= 1
+                    if pivoted.rank < n
+                        @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
+                              "(likely redundant/duplicated equality constraints)"
+                    else
+                        @warn "KKT: Q = B̃ᵀB̃ is numerically ill-conditioned — using pivoted Cholesky"
+                    end
+                end
             end
         end
         phase_equality_factorization +=

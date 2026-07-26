@@ -8,6 +8,7 @@ include("kernels/api.jl")
 include("kernels/generic.jl")
 include("kernels/bigfloat.jl")
 include("kernels/extended_precision_blas/ExtendedPrecisionBLAS.jl")
+include("blas_backend.jl")
 include("ingest.jl")
 include("pipeline.jl")
 include("adaptive_parameters.jl")
@@ -37,6 +38,7 @@ export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
 export classify_problem, build_execution_plan, SpectrumResult
 export reconstruct_spectrum, export_spectrum
 export result_certificate, solve_summary
+export blas_backend, blas_threads, set_blas_threads!
 export Optimizer
 
 end

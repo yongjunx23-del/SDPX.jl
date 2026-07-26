@@ -180,7 +180,7 @@ function main(arguments)
         error("Unsupported arithmetic $arithmetic")
     precision_bits = length(arguments) >= 5 ? parse(Int, arguments[5]) : 256
     T === BigFloat && setprecision(BigFloat, precision_bits)
-    BLAS.set_num_threads(blas_threads)
+    SDPX.set_blas_threads!(blas_threads)
 
     load_timing = @timed read_problem(input_path, T)
     data = load_timing.value
@@ -247,7 +247,7 @@ function main(arguments)
         "arithmetic" => string(T),
         "precision_bits" => T === BigFloat ? precision_bits : precision(T),
         "julia_threads" => Threads.nthreads(),
-        "blas_threads" => BLAS.get_num_threads(),
+        "blas_threads" => SDPX.blas_threads(),
         "variables" => problem.dims.m,
         "equalities" => problem.dims.n,
         "psd_blocks" => problem.dims.L,
