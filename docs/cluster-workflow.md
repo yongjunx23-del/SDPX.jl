@@ -265,6 +265,7 @@ adjust PBS resources after measuring the target node:
 | Float64x4 sparse/block-arrow | 8 | sweep 1, 2, 4, 8 | 1 | SDPX Julia block and Schur scheduling |
 | BigFloat | 1 or the site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
 | Task_Low08 Float64 validation | 8 | 8 | 8 | sparse assembly plus dense OpenBLAS KKT factorization |
+| Task_Low08 Float64 performance on dual EPYC 7742 | 32 | 32 | 16 | OpenBLAS with `numactl --interleave=all`; measured, hardware-specific |
 | Small package validation | 8 | 4 for tests, 1 for high-precision smoke | 1 | sequential validation phases |
 
 `BigFloat` uses one solver thread. A site may require a larger PBS allocation,
@@ -275,6 +276,13 @@ memory has been measured.
 Do not start a Float64x4 block-parallel run with both Julia and BLAS set to the
 full allocation. Keep BLAS and OMP at one thread so the 1/2/4/8 comparison
 changes only SDPX's scheduler width.
+
+For dense-Schur Float64 jobs, Julia and BLAS widths are separate tuning
+parameters. Task_Low08 has only 32 PSD blocks, while its `6119 x 6119` dense
+Cholesky remains a level-3 LAPACK operation. The measured dual-EPYC optimum
+used 32 Julia threads, 16 OpenBLAS threads, and interleaved NUMA allocation.
+Using 128 Julia and BLAS threads was slower and used substantially more memory.
+Treat these values as a site profile, not universal solver defaults.
 
 Set a planning ceiling below the PBS memory request:
 

@@ -211,6 +211,35 @@ kernel, memory, and numerical comparisons.
 Test counts may increase in newer commits; the exit status and tests contained
 in the candidate release are authoritative.
 
+### Latest promoted release
+
+The current cluster release was updated after the single-core dense-Schur and
+backend campaign:
+
+```text
+commit: affa8992f0da59b55a10dfe4ae697ef3b2e4a325
+validation job: 193957.node220
+full package tests: 1955/1955 passed
+Task_Low08 status: Optimal
+Task_Low08 objective: 0.653291393897909
+maximum original equality residual: 2.06e-12
+minimum primal PSD eigenvalue: -7.29e-15
+minimum dual PSD eigenvalue: 2.12e-14
+best independent complete solve: 34.787696 s
+best launch profile: 32 Julia threads, 16 OpenBLAS threads,
+                     numactl --interleave=all
+```
+
+The release is selected by:
+
+```text
+/public/home/yongjunxu/projects/SDPX.jl/current
+```
+
+OpenBLAS remains the selected Linux backend. Controlled Task_Low08
+comparisons found both MKL 2025.2 and BLISBLAS 0.2 slower on the AMD EPYC 7742
+nodes. The alternative backends remain isolated benchmark dependencies.
+
 ## 5. Submit the 614 MB high-precision benchmark
 
 Run this only as a PBS job. The script requests eight cores, 64 GiB, and eight

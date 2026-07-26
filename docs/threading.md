@@ -113,6 +113,26 @@ not switch it into strict single-threaded mode. AppleAccelerate remains an
 optional dependency because loading it changes the process-wide BLAS/LAPACK
 backend for every Julia package in the process.
 
+### Linux BLAS backends
+
+Linux deployments can benchmark alternative libblastrampoline backends in a
+release-specific environment. Load the backend before SDPX, then use the same
+backend-aware thread controller:
+
+```julia
+using MKL                 # or: using BLISBLAS
+using SDPX
+
+SDPX.set_blas_threads!(16)
+```
+
+Do not assume that a vendor backend is faster on every CPU. On the cluster's
+dual-socket AMD EPYC 7742 node, equal eight-core, eight-iteration Task_Low08
+jobs took 10.816 seconds with OpenBLAS, 13.018 seconds with MKL, and 21.999
+seconds with BLIS. OpenBLAS therefore remains the selected backend there.
+MKL and BLIS are benchmark-only environment dependencies, not SDPX
+dependencies.
+
 Do not start by assigning both Julia and BLAS every core. Use one core per
 Julia thread, set a realistic process limit, and measure complete iteration
 time. Nested or concurrent solves share the process-global BLAS setting and
