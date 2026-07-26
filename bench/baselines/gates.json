@@ -1,0 +1,30 @@
+{
+  "lp_sparse": {
+    "dual_residual": 5.7234888739765765e-14,
+    "iterations": 13,
+    "objective": -235.43360004662026,
+    "primal_residual": 8.8817841970012523e-16,
+    "relative_gap": 3.7463496838215015e-11,
+    "seconds": 0.39497733299999999,
+    "status": "Optimal"
+  },
+  "sdp_closed_form": {
+    "dual_residual": 3.8191672047105385e-14,
+    "iterations": 19,
+    "objective": 4.8989794857770317,
+    "primal_residual": 0,
+    "reference_error": 4.3004042326279332e-11,
+    "relative_gap": 8.6008809843502876e-11,
+    "seconds": 0.0072836669999999997,
+    "status": "Optimal"
+  },
+  "sdp_dense": {
+    "dual_residual": 1.5898393712632242e-12,
+    "iterations": 12,
+    "objective": 117.75050119145604,
+    "primal_residual": 4.2632564145606011e-14,
+    "relative_gap": 1.0936842059474211e-09,
+    "seconds": 0.020520750000000001,
+    "status": "Optimal"
+  }
+}
