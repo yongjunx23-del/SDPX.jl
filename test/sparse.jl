@@ -25,7 +25,41 @@ function sparse_block_data(::Type{T}=Float64) where {T}
     return c, A, C, B, b, active
 end
 
+function repeated_coo_dot(matrix, coo, repetitions)
+    value = zero(eltype(matrix))
+    @inbounds for _ in 1:repetitions
+        value += SDPX._dot_dense_coo(matrix, coo, 1)
+    end
+    return value
+end
+
 @testset "incidence-aware sparse path" begin
+    @testset "flat COO contraction does not allocate per pair" begin
+        matrix = reshape(collect(1.0:9.0), 3, 3)
+        coo = SDPX.SparseBlockCOO{Float64}(
+            Int32[1, 4],
+            Int32[2, 6, 7],
+            Int32[2, 3, 1],
+            Int32[1, 2, 3],
+            [1.0, 2.0, 3.0],
+        )
+        expected = sum(
+            matrix[coo.row[entry], coo.col[entry]] * coo.val[entry]
+            for entry in 1:3
+        )
+        repetitions = 10_000
+
+        @test SDPX._dot_dense_coo(matrix, coo, 1) == expected
+        @test repeated_coo_dot(matrix, coo, 1) == expected
+        repeated_coo_dot(matrix, coo, repetitions)
+        allocation_bytes =
+            @allocated repeated_coo_dot(matrix, coo, repetitions)
+
+        @test allocation_bytes <= 256
+        @test repeated_coo_dot(matrix, coo, repetitions) ==
+              repetitions * expected
+    end
+
     @testset "automatic structure classification" begin
         c, A, C, B, b, _ = sparse_block_data()
         automatic = SDPX.ingest(c, A, C, B, b; sparse=:auto)

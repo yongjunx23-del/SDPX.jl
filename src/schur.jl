@@ -513,10 +513,12 @@ each entry costs one flat load from `M` rather than a 2-D index computation.
 ) where {T}
     lin = coo.lin
     val = coo.val
-    Mflat = vec(M)
     acc = zero(T)
+    # Keep the linear access on `M` itself. Julia 1.10 does not eliminate the
+    # `vec(M)` wrapper in the large sparse-Schur caller and otherwise allocates
+    # one wrapper for every active-variable pair.
     @inbounds for t in coo.ptr[position]:(coo.ptr[position+1]-Int32(1))
-        acc += Mflat[lin[t]] * val[t]
+        acc += M[lin[t]] * val[t]
     end
     return acc
 end
