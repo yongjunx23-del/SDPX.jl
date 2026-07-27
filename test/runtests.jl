@@ -11,6 +11,7 @@ using Test
     include("moi.jl")
     include("threads.jl")
     include("pipeline.jl")
+    include("adaptive_parameter_policy.jl")
     include("preprocessing_regressions.jl")
     include("lp_regressions.jl")
     include("solver_regressions.jl")

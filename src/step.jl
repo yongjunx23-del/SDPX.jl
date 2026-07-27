@@ -51,7 +51,13 @@ function compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T}, x, X, y, Y, �
     n > 0 && (p_res = max(p_res, knrmInf(ws.p)))
     d_res = knrmInf(ws.d)
 
-    use_affine = opts.predictor === :sdpb && p_res < opts.ϵ_primal && d_res < opts.ϵ_dual
+    use_affine =
+        opts.parameter_strategy === :adaptive ||
+        (
+            opts.predictor === :sdpb &&
+            p_res < opts.ϵ_primal &&
+            d_res < opts.ϵ_dual
+        )
     for l in 1:L
         bw = ws.blk[l]
         kmul_owned!(bw.R, X[l], Y[l], -one(T), zero(T))
@@ -198,6 +204,152 @@ function _skip_automatic_refinement(
     return requested_tolerance >= sqrt(eps(T))
 end
 
+@inline function _cholesky_diagonal_quality(matrix::AbstractMatrix{T}) where {T}
+    isempty(matrix) && return one(T)
+    smallest = T(Inf)
+    largest = zero(T)
+    @inbounds for index in axes(matrix, 1)
+        diagonal = abs(matrix[index, index])
+        smallest = min(smallest, diagonal)
+        largest = max(largest, diagonal)
+    end
+    return largest > zero(T) && isfinite(largest) ?
+           clamp(smallest / largest, zero(T), one(T)) :
+           zero(T)
+end
+
+function _block_factorization_margins(ws::Workspace{T}) where {T}
+    primal = one(T)
+    dual = one(T)
+    @inbounds for block in ws.blk
+        primal = min(primal, _cholesky_diagonal_quality(block.LX))
+        dual = min(dual, _cholesky_diagonal_quality(block.MY))
+    end
+    return primal, dual
+end
+
+function _kkt_factorization_quality(ws::Workspace{T}) where {T}
+    if ws.arrow !== nothing
+        arrow = ws.arrow::ArrowWorkspace{T}
+        return _cholesky_diagonal_quality(arrow.Sredbuf)
+    end
+    return _cholesky_diagonal_quality(ws.Sbuf)
+end
+
+@inline function _relative_regularization_from_attempts(
+    ::Type{T},
+    attempts::Int,
+) where {T}
+    attempts <= 0 && return zero(T)
+    value = sqrt(eps(T))
+    @inbounds for _ in 2:attempts
+        value *= T(10)
+    end
+    return value
+end
+
+function _affine_predictor_diagnostics!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    X,
+    Y,
+) where {T}
+    primal_step, dual_step = threaded_line_search!(
+        ws,
+        X,
+        Y,
+        one(T),
+        zero(T),
+        :fraction_to_boundary,
+    )
+    complementarity = zero(T)
+    affine_complementarity = zero(T)
+    @inbounds for block in 1:prob.dims.L
+        workspace = ws.blk[block]
+        complementarity += kdot(X[block], Y[block])
+        trial_combine_owned!(
+            workspace.W1,
+            X[block],
+            primal_step,
+            workspace.dX,
+            workspace.trialX[1, 1],
+        )
+        trial_combine_owned!(
+            workspace.W2,
+            Y[block],
+            dual_step,
+            workspace.dY,
+            workspace.trialX[1, 1],
+        )
+        affine_complementarity += kdot(workspace.W1, workspace.W2)
+    end
+    cone_dimension = sum(prob.dims.k; init=0)
+    denominator = T(max(cone_dimension, 1))
+    mu = complementarity / denominator
+    mu_aff = max(zero(T), affine_complementarity / denominator)
+    quality = mu > zero(T) ?
+              clamp(mu_aff / mu, zero(T), T(2)) :
+              one(T)
+    return (
+        complementarity=complementarity,
+        affine_complementarity=affine_complementarity,
+        mu=mu,
+        mu_aff=mu_aff,
+        predictor_quality=quality,
+        affine_primal_step=primal_step,
+        affine_dual_step=dual_step,
+    )
+end
+
+function _legacy_predictor_diagnostics!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    X,
+    Y,
+) where {T}
+    current_complementarity = zero(T)
+    affine_complementarity = zero(T)
+    @inbounds for block in 1:prob.dims.L
+        workspace = ws.blk[block]
+        current_complementarity += kdot(X[block], Y[block])
+        trial_combine_owned!(
+            workspace.W1,
+            X[block],
+            one(T),
+            workspace.dX,
+            workspace.trialX[1, 1],
+        )
+        trial_combine_owned!(
+            workspace.W2,
+            Y[block],
+            one(T),
+            workspace.dY,
+            workspace.trialX[1, 1],
+        )
+        affine_complementarity += kdot(workspace.W1, workspace.W2)
+    end
+    cone_dimension = sum(prob.dims.k; init=0)
+    denominator = T(max(cone_dimension, 1))
+    mu = current_complementarity / denominator
+    mu_aff = max(zero(T), affine_complementarity / denominator)
+    quality = current_complementarity > zero(T) ?
+              clamp(
+                  affine_complementarity / current_complementarity,
+                  zero(T),
+                  T(2),
+              ) :
+              one(T)
+    return (
+        complementarity=current_complementarity,
+        affine_complementarity=affine_complementarity,
+        mu=mu,
+        mu_aff=mu_aff,
+        predictor_quality=quality,
+        affine_primal_step=one(T),
+        affine_dual_step=one(T),
+    )
+end
+
 
 """
     newton_step!(ws, prob, opts, x, X, y, Y, μ) -> NamedTuple
@@ -210,7 +362,21 @@ this as [`NumericalBreakdown`](@ref SolveStatus) (non-PD block
 factorization, or a Schur complement that stayed singular even after
 regularization retries).
 """
-function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}, x, X, y, Y, μ) where {T}
+function newton_step!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+    x,
+    X,
+    y,
+    Y,
+    μ;
+    parameter_controller::Union{Nothing,AdaptiveIPMController{T}}=nothing,
+    iteration::Int=0,
+    relative_gap::T=T(Inf),
+    primal_scale::T=one(T),
+    dual_scale::T=one(T),
+) where {T}
     L, m, n, k = prob.dims
     cons = prob.cons
     phase_started = time_ns()
@@ -279,37 +445,127 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
     end
     predictor_finished = time_ns()
 
-    current_complementarity = zero(T)
-    affine_complementarity = zero(T)
-    @inbounds for l in 1:L
-        current_complementarity += kdot(X[l], Y[l])
-        trial_combine_owned!(
-            ws.blk[l].W1,
-            X[l],
-            one(T),
-            ws.blk[l].dX,
-            ws.blk[l].trialX[1, 1],
+    adaptive = parameter_controller !== nothing &&
+               parameter_controller.strategy === :adaptive &&
+               !parameter_controller.fallback
+    predictor_diagnostics = adaptive ?
+                            _affine_predictor_diagnostics!(
+                                ws,
+                                prob,
+                                X,
+                                Y,
+                            ) :
+                            _legacy_predictor_diagnostics!(
+                                ws,
+                                prob,
+                                X,
+                                Y,
+                            )
+    previous_primal_step = parameter_controller === nothing ?
+                           one(T) :
+                           _history_value(
+                               parameter_controller.history,
+                               :primal_step,
+                               one(T),
+                           )
+    previous_dual_step = parameter_controller === nothing ?
+                         one(T) :
+                         _history_value(
+                             parameter_controller.history,
+                             :dual_step,
+                             one(T),
+                         )
+    previous_backtracking = parameter_controller === nothing ?
+                            0 :
+                            _history_value(
+                                parameter_controller.history,
+                                :backtracking_count,
+                                0,
+                            )
+    previous_refinement = parameter_controller === nothing ?
+                          0 :
+                          _history_value(
+                              parameter_controller.history,
+                              :refinement_count,
+                              0,
+                          )
+    current_normalized_feasibility = max(
+        p_res / max(primal_scale, one(T)),
+        d_res / max(dual_scale, one(T)),
+    )
+    previous_achieved_reduction = if parameter_controller === nothing ||
+                                     isempty(parameter_controller.history)
+        one(T)
+    else
+        previous_row = last(parameter_controller.history)
+        previous_normalized_feasibility = max(
+            previous_row.primal_residual / max(primal_scale, one(T)),
+            previous_row.dual_residual / max(dual_scale, one(T)),
+            eps(T),
         )
-        trial_combine_owned!(
-            ws.blk[l].W2,
-            Y[l],
-            one(T),
-            ws.blk[l].dY,
-            ws.blk[l].trialX[1, 1],
-        )
-        affine_complementarity += kdot(ws.blk[l].W1, ws.blk[l].W2)
+        current_normalized_feasibility / previous_normalized_feasibility
     end
-    predictor_quality = current_complementarity > zero(T) ?
-                        clamp(
-                            affine_complementarity / current_complementarity,
-                            zero(T),
-                            T(2),
-                        ) : one(T)
+    primal_margin, dual_margin = _block_factorization_margins(ws)
+    factorization_quality =
+        kkt.q_pivoted ? zero(T) : _kkt_factorization_quality(ws)
+    regularization = _relative_regularization_from_attempts(
+        T,
+        kkt.reg_attempts,
+    )
+    iteration_diagnostics = IterationDiagnostics{T}(
+        iteration=iteration,
+        primal_residual=p_res / max(primal_scale, one(T)),
+        dual_residual=d_res / max(dual_scale, one(T)),
+        relative_gap=relative_gap,
+        mu=predictor_diagnostics.mu,
+        mu_aff=predictor_diagnostics.mu_aff,
+        affine_primal_step=predictor_diagnostics.affine_primal_step,
+        affine_dual_step=predictor_diagnostics.affine_dual_step,
+        previous_primal_step=previous_primal_step,
+        previous_dual_step=previous_dual_step,
+        backtracking_count=previous_backtracking,
+        regularization=regularization,
+        refinement_count=previous_refinement,
+        factorization_quality=factorization_quality,
+        predicted_residual_reduction=max(
+            abs(one(T) - predictor_diagnostics.affine_primal_step),
+            abs(one(T) - predictor_diagnostics.affine_dual_step),
+        ),
+        achieved_residual_reduction=previous_achieved_reduction,
+        primal_psd_margin=primal_margin,
+        dual_psd_margin=dual_margin,
+        precision_floor=at_precision_floor(
+            p_res,
+            d_res,
+            relative_gap,
+            primal_scale,
+            dual_scale,
+        ),
+    )
+    iteration_parameters = if parameter_controller === nothing
+        _fixed_iteration_parameters(FixedParameterPolicy(opts))
+    else
+        select_iteration_parameters!(
+            parameter_controller,
+            iteration_diagnostics,
+        )
+    end
     complementarity_finished = time_ns()
 
     # ---- Corrector ----
     _with_blas_threads(parallel_blas) do
-        threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)
+        if adaptive && !iteration_parameters.fallback
+            threaded_mehrotra_corrector_rhs!(
+                ws,
+                prob,
+                X,
+                Y,
+                iteration_parameters.sigma,
+                predictor_diagnostics.mu,
+            )
+        else
+            threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)
+        end
     end
     @inbounds for i in eachindex(r)
         r[i] = -(ws.d[i] + ws.v[i])
@@ -332,10 +588,19 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
         q_pivoted=false,
     )
 
+    corrector_options = adaptive && !iteration_parameters.fallback ?
+                        _replace_solver_options(
+                            opts;
+                            refine_tol=
+                                iteration_parameters.refinement_tolerance,
+                            refine_max_steps=
+                                iteration_parameters.refinement_max_count,
+                        ) :
+                        opts
     refine_steps, refine_residual =
-        _skip_automatic_refinement(ws, opts, kkt) ?
+        _skip_automatic_refinement(ws, corrector_options, kkt) ?
         (0, zero(T)) :
-        refine_direction!(ws, prob, opts, r)
+        refine_direction!(ws, prob, corrector_options, r)
     refinement_finished = time_ns()
 
     _with_blas_threads(parallel_blas) do
@@ -357,8 +622,18 @@ function newton_step!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions
         d_res=d_res,
         reg_attempts=kkt.reg_attempts,
         q_pivoted=kkt.q_pivoted,
-        predictor_quality=predictor_quality,
-        complementarity=current_complementarity,
+        predictor_quality=predictor_diagnostics.predictor_quality,
+        complementarity=predictor_diagnostics.complementarity,
+        mu=predictor_diagnostics.mu,
+        mu_aff=predictor_diagnostics.mu_aff,
+        affine_primal_step=predictor_diagnostics.affine_primal_step,
+        affine_dual_step=predictor_diagnostics.affine_dual_step,
+        factorization_quality=factorization_quality,
+        primal_psd_margin=primal_margin,
+        dual_psd_margin=dual_margin,
+        regularization=regularization,
+        iteration_diagnostics=iteration_diagnostics,
+        iteration_parameters=iteration_parameters,
         refine_steps=refine_steps,
         refine_residual=refine_residual,
         phase_times=(
@@ -415,8 +690,20 @@ feasible point, the returned `t` reflects that (`< min_step`) so the
 caller can trigger the restart repair (§5.2).
 """
 function line_search!(ws::Workspace{T}, X, Y, γ::T, min_step::T) where {T}
+    return line_search!(ws, X, Y, γ, min_step, one(T), one(T))
+end
+
+function line_search!(
+    ws::Workspace{T},
+    X,
+    Y,
+    backtracking_factor::T,
+    min_step::T,
+    primal_initial_step::T,
+    dual_initial_step::T,
+) where {T}
     L = length(X)
-    tX = one(T)
+    tX = primal_initial_step
     while true
         ok = true
         for l in 1:L
@@ -427,9 +714,9 @@ function line_search!(ws::Workspace{T}, X, Y, γ::T, min_step::T) where {T}
             end
         end
         (ok || tX < min_step) && break
-        tX *= γ
+        tX *= backtracking_factor
     end
-    tY = one(T)
+    tY = dual_initial_step
     while true
         ok = true
         for l in 1:L
@@ -440,12 +727,22 @@ function line_search!(ws::Workspace{T}, X, Y, γ::T, min_step::T) where {T}
             end
         end
         (ok || tY < min_step) && break
-        tY *= γ
+        tY *= backtracking_factor
     end
     return tX, tY
 end
 
 function fraction_to_boundary_search!(ws::Workspace{T}, X, Y, safety::T) where {T}
+    return fraction_to_boundary_search!(ws, X, Y, safety, safety)
+end
+
+function fraction_to_boundary_search!(
+    ws::Workspace{T},
+    X,
+    Y,
+    primal_safety::T,
+    dual_safety::T,
+) where {T}
     boundX = one(T)
     boundY = one(T)
     @inbounds for l in eachindex(X)
@@ -453,7 +750,7 @@ function fraction_to_boundary_search!(ws::Workspace{T}, X, Y, safety::T) where {
         boundX = min(boundX, fraction_to_boundary_bound!(bw.trialX, X[l], bw.dX))
         boundY = min(boundY, fraction_to_boundary_bound!(bw.trialY, Y[l], bw.dY))
     end
-    tX = boundX < one(T) ? safety * boundX : one(T)
-    tY = boundY < one(T) ? safety * boundY : one(T)
+    tX = boundX < one(T) ? primal_safety * boundX : one(T)
+    tY = boundY < one(T) ? dual_safety * boundY : one(T)
     return tX, tY
 end

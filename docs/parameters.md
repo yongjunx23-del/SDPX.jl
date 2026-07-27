@@ -7,15 +7,15 @@ These defaults come from `SolverOptions{T}`. Differences in the legacy
 
 | Parameter | Default | Meaning |
 |---|---:|---|
-| `β` | `0.1` | Centering/complementarity reduction target. Each step targets `β*μ`; smaller values are usually more aggressive. |
-| `γ` | `0.9` | Backtracking reduction factor. An infeasible trial step is reduced as `t ← γ*t`. |
+| `β` | `0.1` | Fixed SDP centering/complementarity reduction target and the safe fallback for adaptive `sigma`. Smaller values are usually more aggressive. |
+| `γ` | `0.9` | Fixed backtracking reduction factor and exact fraction-to-boundary safety. Adaptive mode separates these roles. |
 | `Ωp` | `1` | Initial primal PSD matrices: `X_l=Ωp*I`. |
 | `Ωd` | `1` | Initial dual PSD matrices: `Y_l=Ωd*I`. |
 | `predictor` | `:classic` | Predictor rule: `:classic` or `:sdpb`. |
 | `refine_steps` | `1` | Number of iterative-refinement passes for the KKT predictor/corrector solutions. |
 | `step_rule` | `:auto` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto` (fraction-to-boundary for blocks up to `2x2`, backtracking otherwise). |
 | `parameter_policy` | `:auto` | Cold-start structural policy. `:auto` may select calibrated initial `β`, `γ`, `Ωp`, and `Ωd`; `:fixed` preserves the supplied values. |
-| `parameter_strategy` | `:fixed` | Per-iteration policy. `:adaptive` updates `β` and `γ` with guarded fallback and records their history; it remains opt-in because the current SDP benchmark gate did not improve. |
+| `parameter_strategy` | `:fixed` | Per-iteration policy. `:adaptive` uses a bounded Mehrotra `sigma`, independent primal/dual fractions, adaptive backtracking/refinement, and complete fixed-path fallback. It remains opt-in because Task_Low08 did not improve. |
 | `refine_policy` | `:auto` | `:auto`/`:adaptive` stop KKT refinement from its residual; `:fixed` always runs exactly `refine_steps` passes. |
 
 ## Convergence and stopping
@@ -100,6 +100,10 @@ iteration/restart counters. It intentionally reinitializes adaptive-parameter
 history, stagnation windows, phase timers, and best-iterate history; a resumed
 adaptive solve is therefore not bit-for-bit equivalent to an uninterrupted
 run. Checkpoint resume is not currently supported by the dedicated LP path.
+
+The full Newton-method audit, exact diagnostic fields, controller bounds,
+fallback rules, arithmetic behavior, and fixed-versus-adaptive results are in
+[Adaptive Interior-Point Parameter Policy](adaptive-parameter-policy.md).
 
 ## Legacy `sdp(...)` defaults
 

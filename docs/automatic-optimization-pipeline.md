@@ -160,37 +160,33 @@ distant-start sweeps are reported in
 [`PARAMETER_SELECTION.md`](../bench/automatic_pipeline/PARAMETER_SELECTION.md).
 `parameter_policy=:fixed` remains an exact override.
 
-## Adaptive beta and gamma
+## Adaptive Newton parameters
 
-`parameter_strategy=:adaptive` enables a guarded controller:
-
-- beta uses the affine-predictor complementarity ratio cubed and the observed
-  complementarity reduction squared;
-- gamma responds to accepted primal/dual steps, backtracking count, and
-  feasibility progress;
-- beta uses nominal bounds `[0.02, 0.50]`, expanded only when needed to retain
-  the configured fallback (for example, the large-arrow `β=0.01` profile);
-- gamma uses nominal bounds `[0.65, 0.95]`, likewise expanded only to retain
-  the configured fallback;
-- the first two infeasible-start iterations retain the configured defaults;
-- repeated non-finite or explosive complementarity behavior disables
-  adaptation and restores the configured defaults.
+`parameter_strategy=:adaptive` now selects a bounded Mehrotra `sigma` from
+the affine complementarity ratio, centrality, factor quality, and recent
+progress. It separately selects primal and dual fraction-to-boundary values,
+the backtracking contraction, and the refinement target/cap. The complete
+fixed predictor/corrector path is restored after non-finite diagnostics,
+rank-revealing equality factorization, or unstable progress.
 
 Every accepted iteration is stored in `result.parameter_history`, including
-beta, gamma, predictor quality, complementarity reduction, step sizes,
-backtracking count, residuals, and fallback state.
+`sigma`, `mu`, `mu_aff`, affine and accepted steps, the separate step
+safeguards, residual progress, factor/PSD-margin proxies, regularization,
+refinement, and fallback provenance. See
+[Adaptive Interior-Point Parameter Policy](adaptive-parameter-policy.md) for
+the audit, equations, exact bounds, and arithmetic-specific behavior.
 
-Adaptive parameters remain opt-in. In the final benchmark they matched the
-fixed iteration count and runtime within noise on the analytic LP, but needed
-14 extra iterations on the representative CSDR SDP even after the guarded
-fallback restored convergence.
+Adaptive parameters remain opt-in. They improved the warmed sparse CSDR s15
+case from 19 iterations and 15.749 ms to 15 iterations and 13.260 ms, while
+the representative LP was about 2% slower. Task_Low08 safely fell
+back after a degraded equality factor but was 1.7% slower than fixed in the
+controlled run, so it did not pass the default-promotion gate.
 
 ## Benchmark summary
 
-Host: Apple M4, Julia 1.12.6, a process started with eight Julia workers on a
-four-hardware-thread test allocation, and one BLAS thread. Times are medians of
-five warmed solves. The eight-worker rows are therefore oversubscribed and are
-not eight-core scaling claims.
+Host: Apple M4, Julia 1.12.6, four Julia workers, and one BLAS thread unless a
+row says otherwise. Times are warmed medians. The eight-worker kernel rows
+oversubscribe this host and are not eight-core scaling claims.
 
 ### Dedicated LP path
 
@@ -198,13 +194,12 @@ Dense LP: 80 variables and 400 inequalities.
 
 | Path | Iterations | Runtime | Speedup | Allocations |
 |---|---:|---:|---:|---:|
-| General SDP engine | 16 | 57.23 ms | 1.00x | 18.42 MB |
-| Dedicated LP, fixed | 14 | 15.06 ms | 3.80x | 14.25 MB |
-| Dedicated LP, adaptive | 14 | 15.22 ms | 3.76x | 14.25 MB |
+| General SDP engine | 16 | 57.74 ms | 1.00x | 19.13 MB |
+| Dedicated LP, fixed | 10 | 14.44 ms | 4.00x | 14.34 MB |
+| Dedicated LP, adaptive | 11 | 14.72 ms | 3.92x | 14.34 MB |
 
 All three returned an objective within `6.5e-9` of the constructed optimum.
-The fixed LP dual residual was below `2e-15`; the adaptive result remained
-within tolerance at `5.0e-12`.
+The fixed and adaptive LP dual residuals were below `2.5e-15`.
 
 ### High-precision LP Hessian kernel
 
@@ -243,14 +238,12 @@ Sparse CSDR PSD dual: 371 variables and 360 `2x2` PSD blocks.
 
 | Strategy | Iterations | Runtime | Objective | Relative gap |
 |---|---:|---:|---:|---:|
-| Fixed beta=0.1, gamma=0.8 | 19 | 14.37 ms | 15.5589572374 | 8.07e-9 |
-| Adaptive with fallback | 33 | 24.05 ms | 15.5589576192 | 5.55e-8 |
+| Fixed beta=0.1, gamma=0.8 | 19 | 15.75 ms | 15.5589572374 | 8.05e-9 |
+| Adaptive | 15 | 13.26 ms | 15.5589572055 | 5.08e-9 |
 
-Both results passed the final certificate. The adaptive controller detected
-one-sided cone-boundary stagnation and restored the fixed fallback; without
-that guard this run stalled. Fixed parameters remain the default because the
-guarded adaptive strategy was 67% slower and produced a larger, though still
-valid, relative gap.
+Both results passed the final certificate. This 1.19x sparse-SDP improvement
+is encouraging but is not sufficient for default promotion: the dense
+Task_Low08 gate was slightly slower and required the degraded-factor fallback.
 
 ### Schur scheduling
 

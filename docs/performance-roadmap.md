@@ -301,10 +301,10 @@ The benchmark needs 52–64 SDPX iterations versus 13–15 Clarabel iterations.
 Linear algebra is the first priority, but algorithmic changes can remove
 another large factor:
 
-- the guarded adaptive Mehrotra-style centering controller is implemented,
-  records every `β`/`γ` selection, and falls back after instability; it remains
-  opt-in because the representative SDP benchmark was slower than the fixed
-  strategy;
+- the typed adaptive Mehrotra controller now uses canonical affine
+  complementarity diagnostics, independent step safeguards, and complete
+  fixed-path fallback. It improved the warmed sparse CSDR s15 case by 1.19x
+  but remains opt-in because Task_Low08 was 1.7% slower;
 - generalize exact PSD maximum step lengths beyond the implemented `1x1` and
   `2x2` paths;
 - test Nesterov–Todd scaling against the current direction on ill-scaled

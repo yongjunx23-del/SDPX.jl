@@ -19,6 +19,12 @@ previous published SDPX version.
 
 - Primal-dual interior-point method with the HRVW/KSH/M direction and a
   Mehrotra predictor-corrector.
+- A separate, typed iteration-parameter policy layer with fixed and guarded
+  adaptive implementations. The opt-in adaptive SDP path uses an affine
+  predictor, bounded Mehrotra centering, independent primal/dual step
+  safeguards, refinement selection, per-iteration diagnostics, and complete
+  fixed-path fallback after degraded factors or unstable progress. Fixed mode
+  remains the default after the Task_Low08 promotion gate.
 - SDPB-style Cholesky block elimination of the KKT system, with the Schur
   complement built in symmetric-square form so it is positive definite by
   construction.
@@ -161,11 +167,10 @@ previous published SDPX version.
   original coordinates through presolve and equilibration; checkpoints are
   iterate-level warm restarts that reset adaptive, stagnation, timing, and
   best-iterate history.
-- Guarded adaptive beta/gamma control driven by affine-predictor quality,
-  observed complementarity reduction, line-search success, backtracking, and
-  feasibility. Per-iteration values and fallback state are recorded;
-  adaptation remains opt-in because the representative SDP benchmark did not
-  improve.
+- Guarded adaptive Newton control driven by affine complementarity, factor
+  quality, line-search behavior, and feasibility progress. Per-iteration
+  values and fallback state are recorded; adaptation remains opt-in because
+  the dense Task_Low08 benchmark did not improve.
 - Final-result certification in the original problem coordinates, including
   equality, primal-cone, dual, and PSD checks before an `Optimal` status is
   retained.

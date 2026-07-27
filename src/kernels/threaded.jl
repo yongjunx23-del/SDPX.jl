@@ -195,7 +195,12 @@ function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},
     d_res = knrmInf(ws.d)
 
     use_affine =
-        opts.predictor === :sdpb && p_res < opts.ϵ_primal && d_res < opts.ϵ_dual
+        opts.parameter_strategy === :adaptive ||
+        (
+            opts.predictor === :sdpb &&
+            p_res < opts.ϵ_primal &&
+            d_res < opts.ϵ_dual
+        )
     factor && fill!(ws.block_ok, true)
     @sync for bin in ws.block_bins
         isempty(bin) && continue
@@ -328,6 +333,100 @@ function threaded_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T},
                 kaxpby!(-one(T), bw.R, one(T), bw.Z)
                 kcholsolve_owned!(bw.LX, bw.Z)
                 accumulate_v!(partial, prob.cons, l, bw.Z, one(T))
+            end
+        end
+    end
+    fill!(ws.v, zero(T))
+    for partial in ws.vpartial
+        kaxpby!(one(T), partial, one(T), ws.v)
+    end
+    return ws.v
+end
+
+"""
+    threaded_mehrotra_corrector_rhs!(ws, prob, X, Y, sigma, mu)
+
+Build the canonical Mehrotra SDP corrector right-hand side
+
+`R_l = sigma*mu*I - X_l*Y_l - dX_aff_l*dY_aff_l`
+
+using one global average complementarity `mu`.  This path is used only by the
+opt-in adaptive policy; the fixed policy retains the historical block-local
+corrector exactly.
+"""
+function threaded_mehrotra_corrector_rhs!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    X,
+    Y,
+    sigma::T,
+    mu::T,
+) where {T}
+    target = sigma * mu
+    if !use_threaded_block_loops(ws, prob)
+        for block in 1:prob.dims.L
+            workspace = ws.blk[block]
+            dimension = prob.dims.k[block]
+            dimension == 0 && continue
+            kmul!(
+                workspace.R,
+                X[block],
+                Y[block],
+                -one(T),
+                zero(T),
+            )
+            kmul!(
+                workspace.R,
+                workspace.dX,
+                workspace.dY,
+                -one(T),
+                one(T),
+            )
+            @inbounds for index in 1:dimension
+                workspace.R[index, index] += target
+            end
+        end
+        return _predictor_corrector_rhs!(ws, prob, Y)
+    end
+
+    for partial in ws.vpartial
+        fill!(partial, zero(T))
+    end
+    @sync for (bin_index, bin) in enumerate(ws.block_bins)
+        isempty(bin) && continue
+        Threads.@spawn begin
+            partial = ws.vpartial[bin_index]
+            for block in bin
+                workspace = ws.blk[block]
+                dimension = prob.dims.k[block]
+                dimension == 0 && continue
+                kmul!(
+                    workspace.R,
+                    X[block],
+                    Y[block],
+                    -one(T),
+                    zero(T),
+                )
+                kmul!(
+                    workspace.R,
+                    workspace.dX,
+                    workspace.dY,
+                    -one(T),
+                    one(T),
+                )
+                @inbounds for index in 1:dimension
+                    workspace.R[index, index] += target
+                end
+                kmul!(workspace.Z, workspace.P, Y[block])
+                kaxpby!(-one(T), workspace.R, one(T), workspace.Z)
+                kcholsolve_owned!(workspace.LX, workspace.Z)
+                accumulate_v!(
+                    partial,
+                    prob.cons,
+                    block,
+                    workspace.Z,
+                    one(T),
+                )
             end
         end
     end
@@ -789,13 +888,41 @@ function threaded_line_search!(
     min_step::T,
     step_rule::Symbol=:backtrack,
 ) where {T}
+    return threaded_line_search!(
+        ws,
+        X,
+        Y,
+        γ,
+        γ,
+        γ,
+        min_step,
+        step_rule,
+    )
+end
+
+function threaded_line_search!(
+    ws::Workspace{T},
+    X,
+    Y,
+    primal_fraction_to_boundary::T,
+    dual_fraction_to_boundary::T,
+    backtracking_factor::T,
+    min_step::T,
+    step_rule::Symbol=:backtrack,
+) where {T}
     L = length(X)
     nt = ws.thread_count
     selected_rule = resolved_step_rule(ws, step_rule)
     use_fraction = selected_rule === :fraction_to_boundary
     if use_fraction
         if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T)
-            return fraction_to_boundary_search!(ws, X, Y, γ)
+            return fraction_to_boundary_search!(
+                ws,
+                X,
+                Y,
+                primal_fraction_to_boundary,
+                dual_fraction_to_boundary,
+            )
         end
         bins = ws.block_bins
         boundsX = ones(T, length(bins))
@@ -823,12 +950,24 @@ function threaded_line_search!(
         boundX = minimum(boundsX)
         boundY = minimum(boundsY)
         return (
-            boundX < one(T) ? γ * boundX : one(T),
-            boundY < one(T) ? γ * boundY : one(T),
+            boundX < one(T) ?
+            primal_fraction_to_boundary * boundX :
+            one(T),
+            boundY < one(T) ?
+            dual_fraction_to_boundary * boundY :
+            one(T),
         )
     end
     if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T)
-        return line_search!(ws, X, Y, γ, min_step)
+        return line_search!(
+            ws,
+            X,
+            Y,
+            backtracking_factor,
+            min_step,
+            one(T),
+            one(T),
+        )
     end
     bins = ws.block_bins
 
@@ -848,7 +987,7 @@ function threaded_line_search!(
             end
         end
         (all(okbins) || tX < min_step) && break
-        tX *= γ
+        tX *= backtracking_factor
     end
     tY = one(T)
     while true
@@ -864,7 +1003,7 @@ function threaded_line_search!(
             end
         end
         (all(okbins) || tY < min_step) && break
-        tY *= γ
+        tY *= backtracking_factor
     end
     return tX, tY
 end

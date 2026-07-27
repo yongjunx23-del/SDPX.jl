@@ -250,17 +250,18 @@ large extended-precision problems practical.
 
 ### P5: adaptive interior-point parameters — implemented, still opt-in
 
-`parameter_strategy=:adaptive` now chooses beta from affine-predictor quality
-and observed complementarity reduction, adjusts gamma from accepted steps,
-backtracking, and feasibility progress, records both values at every accepted
-iteration, and restores the configured fixed values after unstable behavior.
-Safe bounds always include the selected structural-profile fallback.
+`parameter_strategy=:adaptive` now uses a separate typed policy component. It
+computes a pure affine predictor, global `mu` and `mu_aff`, a bounded Mehrotra
+`sigma`, independent primal/dual step safeguards, and adaptive refinement
+limits. Non-finite diagnostics, degraded equality factors, or unstable
+progress restore the complete fixed predictor/corrector path.
 
-The controller remains opt-in. On the representative CSDR SDP, the final fixed
-run needed 19 iterations and 14.37 ms, while adaptive control needed 33
-iterations and 24.05 ms; both passed the final certificate. Fixed parameters
-therefore remain the default until a broader benchmark matrix demonstrates a
-stable runtime or robustness benefit.
+The warmed representative CSDR s15 solve improved from 19 iterations and
+15.749 ms to 15 iterations and 13.260 ms, with both solutions certified. A
+controlled Task_Low08 run instead matched the fixed 24 iterations but was
+1.7% slower after a safe iteration-19 fallback. Fixed parameters therefore
+remain the default. The complete audit and benchmark table are in
+[Adaptive Interior-Point Parameter Policy](adaptive-parameter-policy.md).
 
 ### P6: chordal decomposition only when the aggregate PSD graph is sparse
 

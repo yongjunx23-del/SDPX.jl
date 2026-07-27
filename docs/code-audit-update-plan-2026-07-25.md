@@ -560,48 +560,47 @@ large packing, and compare with vendor BLAS thread scheduling.
 
 ## SDP algorithm roadmap
 
-### SDP1: standardize predictor quality
+### SDP1: standardize predictor quality — implemented for adaptive mode
 
-The SDP predictor evaluates complementarity at a full unit affine step rather
-than at affine primal/dual boundary steps.
+Adaptive mode now uses a pure affine predictor, independent primal and dual
+boundary steps, global complementarity over total cone dimension, `mu_aff`,
+and a safeguarded squared/cubic Mehrotra rule. Fixed mode intentionally
+retains the validated historical trajectory. HKM/NT comparisons and optional
+multiple centrality correctors remain research items.
 
-Implement and compare:
+### SDP2: guarded adaptive Newton policy — implemented, still opt-in
 
-- global complementarity over total cone dimension;
-- affine primal and dual boundary steps;
-- `mu_aff` at those steps;
-- guarded Mehrotra `sigma = (mu_aff / mu)^3`;
-- HKM and Nesterov-Todd symmetrization candidates;
-- optional multiple centrality correctors that reuse one factorization.
-
-### SDP2: guarded adaptive beta/gamma — implemented, still opt-in
-
-The controller now derives beta from affine-predictor quality and observed
-complementarity reduction, adjusts gamma from accepted steps, backtracking,
-and feasibility, and falls back to the configured fixed values after
-non-finite or explosive behavior. Its accepted-iteration history records:
+The separate typed policy now selects bounded `sigma`, independent
+primal/dual fraction-to-boundary values, backtracking, and refinement limits.
+It restores the complete fixed predictor/corrector path after non-finite
+diagnostics, degraded equality factors, or unstable progress. Its
+accepted-iteration history records:
 
 ```text
-beta_used
-gamma_used
+sigma
+primal_fraction_to_boundary
+dual_fraction_to_boundary
+backtracking_factor
 affine_primal_step
 affine_dual_step
-mu_before
-mu_affine
-mu_after
+mu
+mu_aff
 residuals_before
 residuals_after
-line_search_trials
 regularization
-refinement_backward_error
+refinement_count
+factorization_quality
+primal_psd_margin
+dual_psd_margin
 fallback_reason
 ```
 
-Adaptive control remains off by default. It matched fixed control within noise
-on the representative LP but regressed the CSDR SDP from 19 iterations and
-14.37 ms to 33 iterations and 24.05 ms. Promotion still requires a stable
-runtime or robustness improvement without certificate regression across the
-acceptance matrix.
+Adaptive control remains off by default. It was about 2% slower on the
+representative LP and improved the warmed CSDR s15 solve by 1.19x, but was
+1.7% slower on Task_Low08 after a safe degraded-factor fallback. Promotion
+still requires a stable runtime or robustness improvement without certificate
+regression across the acceptance matrix. See
+[`adaptive-parameter-policy.md`](adaptive-parameter-policy.md).
 
 ### SDP3: improve regularization and refinement
 

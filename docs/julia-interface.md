@@ -192,10 +192,13 @@ For the dedicated LP engine, automatic mode selects the faster
 initial-distance indicator is at most `1000`; distant starts retain the
 configured conservative values. The selected profile and parameters are
 available in `result.diagnostics.plan`.
-`parameter_strategy=:adaptive` enables guarded per-iteration `beta`/`gamma`
-adaptation and records every selection in `result.parameter_history`. It
-currently remains opt-in because the representative SDP benchmark did not
-beat the fixed strategy. `extended_precision_blas=:auto` separately enables the conservative packed
+`parameter_strategy=:adaptive` enables the bounded Mehrotra controller,
+independent primal/dual step safeguards, adaptive refinement limits, and
+complete fixed-path fallback. Every selection and diagnostic is recorded in
+`result.parameter_history`. It remains opt-in because the Task_Low08
+promotion benchmark did not beat fixed mode. See
+[`adaptive-parameter-policy.md`](adaptive-parameter-policy.md).
+`extended_precision_blas=:auto` separately enables the conservative packed
 Float64x4/BigFloat Schur crossover. Its default is `:off`. Unknown names are
 rejected.
 

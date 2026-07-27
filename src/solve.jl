@@ -1014,6 +1014,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             y,
             Y,
             μ,
+            parameter_controller=parameter_controller,
+            iteration=iter + 1,
+            relative_gap=gap_rel,
+            primal_scale=scale_p,
+            dual_scale=scale_d,
         )
         if result.status === :breakdown
             status, message = NumericalBreakdown, result.reason
@@ -1055,11 +1060,14 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             result.phase_times.corrector_direction_recovery
 
         line_search_started = time_ns()
+        selected_parameters = result.iteration_parameters
         tX, tY = threaded_line_search!(
             ws,
             X,
             Y,
-            iteration_options.γ,
+            selected_parameters.primal_fraction_to_boundary,
+            selected_parameters.dual_fraction_to_boundary,
+            selected_parameters.backtracking_factor,
             opts.min_step,
             opts.step_rule,
         )
@@ -1067,12 +1075,12 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         backtracking_count =
             estimate_backtracking_count(
                 tX,
-                iteration_options.γ,
+                selected_parameters.backtracking_factor,
                 selected_step_rule,
             ) +
             estimate_backtracking_count(
                 tY,
-                iteration_options.γ,
+                selected_parameters.backtracking_factor,
                 selected_step_rule,
             )
         phase_line_search += (time_ns() - line_search_started) / 1.0e9
@@ -1302,6 +1310,19 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             primal_step=tX,
             dual_step=tY,
             backtracking_count=backtracking_count,
+            affine_primal_step=result.affine_primal_step,
+            affine_dual_step=result.affine_dual_step,
+            mu_before=result.mu,
+            mu_affine=result.mu_aff,
+            relative_gap=gap_rel,
+            regularization=result.regularization,
+            refinement_count=result.refine_steps,
+            refinement_residual=result.refine_residual,
+            factorization_quality=result.factorization_quality,
+            primal_psd_margin=result.primal_psd_margin,
+            dual_psd_margin=result.dual_psd_margin,
+            precision_floor=result.iteration_diagnostics.precision_floor,
+            selected_parameters=selected_parameters,
         )
         phase_update += (time_ns() - update_started) / 1.0e9
 
@@ -1314,8 +1335,22 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         end
         iter += 1
 
-        for l in 1:L
-            μ[l] = parameter_controller.beta * kdot(X[l], Y[l]) / k[l]
+        if parameter_controller.strategy === :adaptive &&
+           !parameter_controller.fallback
+            total_complementarity =
+                sum(l -> kdot(X[l], Y[l]), 1:L; init=zero(T))
+            global_mu =
+                total_complementarity / T(max(sum(k; init=0), 1))
+            for l in 1:L
+                μ[l] = parameter_controller.beta * global_mu
+            end
+        else
+            for l in 1:L
+                μ[l] =
+                    parameter_controller.beta *
+                    kdot(X[l], Y[l]) /
+                    k[l]
+            end
         end
         if !all(isfinite, μ)
             status, message = NumericalBreakdown,

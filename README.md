@@ -331,8 +331,10 @@ result = solve!(prob, opts)                         # -> SDPResult{T}
 
 Low-level `beta`, `gamma`, `omega_p`, and `omega_d` settings remain available
 through `SolverOptions` for expert use. `parameter_strategy=:adaptive`
-enables bounded feedback control and records its values per iteration; fixed
-parameters remain the default until broader benchmarks show a stable win.
+enables a typed, bounded Mehrotra controller with independent primal/dual
+fractions, refinement selection, and complete fixed-path fallback. It records
+its diagnostics and selected values per iteration. Fixed parameters remain the
+default because the current Task_Low08 gate did not show a runtime win.
 `SolverOptions` also exposes: `callback` (per-iteration `(state) -> Bool`,
 `true` stops the solve), `checkpoint_every`/`checkpoint_path` (crash-safe
 iterate-level warm restart via `resume=path` on the SDP `solve!` path),
@@ -531,6 +533,7 @@ memory gates, and full numerical certificates.
 ## Design and benchmark notes
 
 - [Solver parameter reference](docs/parameters.md)
+- [Adaptive interior-point parameter policy](docs/adaptive-parameter-policy.md)
 - [Adaptive dense/sparse optimization and Task_Low08 results](docs/adaptive-dense-sparse-optimization.md)
 - [Performance and accuracy roadmap](docs/performance-roadmap.md)
 - [JuMP and MathOptInterface guide](docs/julia-interface.md)

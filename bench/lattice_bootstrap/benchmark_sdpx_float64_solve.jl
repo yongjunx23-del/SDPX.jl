@@ -218,7 +218,8 @@ function main(arguments)
     length(arguments) >= 2 || error(
         "usage: benchmark_sdpx_float64_solve.jl INPUT OUTPUT " *
         "[BLAS_THREADS] [MAX_TIME_SECONDS] [BETA] [GAMMA] " *
-        "[OMEGA_P] [OMEGA_D] [classic|sdpb] [MAX_ITER] [TOLERANCE]",
+        "[OMEGA_P] [OMEGA_D] [classic|sdpb] [MAX_ITER] [TOLERANCE] " *
+        "[fixed|adaptive] [backtrack|fraction_to_boundary|auto]",
     )
     input_path = abspath(arguments[1])
     output_path = abspath(arguments[2])
@@ -231,6 +232,10 @@ function main(arguments)
     predictor =
         length(arguments) >= 9 ? Symbol(arguments[9]) : :classic
     max_iter = length(arguments) >= 10 ? parse(Int, arguments[10]) : 100
+    parameter_strategy =
+        length(arguments) >= 12 ? Symbol(arguments[12]) : :fixed
+    step_rule =
+        length(arguments) >= 13 ? Symbol(arguments[13]) : :backtrack
     SDPX.set_blas_threads!(blas_threads)
 
     started = time()
@@ -277,8 +282,9 @@ function main(arguments)
         max_restarts=5,
         sparse=:auto,
         parameter_policy=:fixed,
+        parameter_strategy=parameter_strategy,
         predictor=predictor,
-        step_rule=:backtrack,
+        step_rule=step_rule,
         refine_steps=1,
     )
     solve_started = time()
@@ -325,6 +331,7 @@ function main(arguments)
             "tolerance_primal" => options.ϵ_primal,
             "tolerance_dual" => options.ϵ_dual,
             "predictor" => options.predictor,
+            "parameter_strategy" => options.parameter_strategy,
             "step_rule" => options.step_rule,
             "refine_steps" => options.refine_steps,
         ),

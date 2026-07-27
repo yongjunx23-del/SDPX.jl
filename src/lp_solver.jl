@@ -1332,31 +1332,74 @@ function solve_lp!(
         end
         mu_affine /= inequalities
         predictor_quality = clamp(mu_affine / mu, zero(T), one(T))
-        sigma = if opts.parameter_strategy === :adaptive
-            bounds = _safe_parameter_bounds(
-                T,
-                parameter_controller.default_beta,
-                parameter_controller.default_gamma,
-            )
-            affine_candidate = clamp(
-                predictor_quality^3,
-                bounds.beta_min,
-                bounds.beta_max,
-            )
-            # Retain the previous iteration's observed complementarity
-            # feedback while incorporating the current affine predictor.
-            # The former pure assignment to predictor_quality^3 discarded the
-            # controller update at the start of every iteration.
-            clamp(
-                T(0.50) * parameter_controller.beta +
-                T(0.50) * affine_candidate,
-                bounds.beta_min,
-                bounds.beta_max,
-            )
-        else
-            opts.β
-        end
-        parameter_controller.beta = sigma
+        previous_primal_step = _history_value(
+            parameter_controller.history,
+            :primal_step,
+            one(T),
+        )
+        previous_dual_step = _history_value(
+            parameter_controller.history,
+            :dual_step,
+            one(T),
+        )
+        previous_backtracking = _history_value(
+            parameter_controller.history,
+            :backtracking_count,
+            0,
+        )
+        previous_refinement = _history_value(
+            parameter_controller.history,
+            :refinement_count,
+            0,
+        )
+        previous_achieved_reduction = _history_value(
+            parameter_controller.history,
+            :achieved_residual_reduction,
+            one(T),
+        )
+        primal_margin = minimum(s; init=one(T)) /
+                        max(maximum(s; init=one(T)), one(T))
+        dual_margin = minimum(z; init=one(T)) /
+                      max(maximum(z; init=one(T)), one(T))
+        factorization_quality =
+            attempt_regularization <= relative_regularization ?
+            one(T) :
+            relative_regularization / attempt_regularization
+        iteration_diagnostics = IterationDiagnostics{T}(
+            iteration=iterations + 1,
+            primal_residual=p_residual / primal_scale,
+            dual_residual=d_residual / dual_scale,
+            relative_gap=gap_relative,
+            mu=mu,
+            mu_aff=mu_affine,
+            affine_primal_step=alpha_primal_affine,
+            affine_dual_step=alpha_dual_affine,
+            previous_primal_step=previous_primal_step,
+            previous_dual_step=previous_dual_step,
+            backtracking_count=previous_backtracking,
+            regularization=attempt_regularization,
+            refinement_count=previous_refinement,
+            factorization_quality=factorization_quality,
+            predicted_residual_reduction=max(
+                abs(one(T) - alpha_primal_affine),
+                abs(one(T) - alpha_dual_affine),
+            ),
+            achieved_residual_reduction=previous_achieved_reduction,
+            primal_psd_margin=primal_margin,
+            dual_psd_margin=dual_margin,
+            precision_floor=at_precision_floor(
+                p_residual,
+                d_residual,
+                gap_relative,
+                primal_scale,
+                dual_scale,
+            ),
+        )
+        iteration_parameters = select_iteration_parameters!(
+            parameter_controller,
+            iteration_diagnostics,
+        )
+        sigma = iteration_parameters.sigma
         @inbounds for row in eachindex(s)
             workspace.target[row] =
                 sigma * mu - s[row] * z[row] -
@@ -1390,9 +1433,16 @@ function solve_lp!(
             workspace.dx,
             workspace.target,
         )
-        fraction = parameter_controller.gamma
-        alpha_primal = _fraction_to_boundary(s, workspace.ds, fraction)
-        alpha_dual = _fraction_to_boundary(z, workspace.dz, fraction)
+        alpha_primal = _fraction_to_boundary(
+            s,
+            workspace.ds,
+            iteration_parameters.primal_fraction_to_boundary,
+        )
+        alpha_dual = _fraction_to_boundary(
+            z,
+            workspace.dz,
+            iteration_parameters.dual_fraction_to_boundary,
+        )
         direction_seconds += (time_ns() - direction_started) / 1.0e9
         update_started = time_ns()
         complementarity_before = gap
@@ -1412,6 +1462,18 @@ function solve_lp!(
             primal_step=alpha_primal,
             dual_step=alpha_dual,
             backtracking_count=0,
+            affine_primal_step=alpha_primal_affine,
+            affine_dual_step=alpha_dual_affine,
+            mu_before=mu,
+            mu_affine=mu_affine,
+            relative_gap=gap_relative,
+            regularization=attempt_regularization,
+            refinement_count=0,
+            factorization_quality=factorization_quality,
+            primal_psd_margin=primal_margin,
+            dual_psd_margin=dual_margin,
+            precision_floor=iteration_diagnostics.precision_floor,
+            selected_parameters=iteration_parameters,
         )
         update_seconds += (time_ns() - update_started) / 1.0e9
 
