@@ -4,6 +4,51 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-07-27
+
+Correctness, honesty-of-reporting, and cleanup release driven by the
+2026-07-26 maintainer review (docs/maintainer-review-2026-07-26.md, which
+closes with the full implementation and deferral record).
+
+### Fixed
+
+- All 25 fallback exception handlers now rethrow `InterruptException`,
+  `OutOfMemoryError`, and `StackOverflowError` instead of absorbing them; a
+  source-walking test keeps new bare `catch` blocks out of `src/`.
+- `selected_algorithms` in diagnostics reports the KKT backend and Gram
+  kernel that actually executed (the LP path selects its sparse Newton
+  system at runtime, after the plan is frozen); the plan remains visible
+  under `planned`.
+- The dedicated LP path applies the same BigFloat precision-consistency
+  check (and optional input rerounding) as the SDP core; previously a
+  128-bit-input LP inside a 256-bit solve proceeded without a warning.
+- `dense_workspace_floor_bytes` and `estimate_sdp_workspace_bytes` use
+  saturating arithmetic; native-Int products could wrap negative at
+  synthetic dimensions and pass every memory-budget comparison.
+
+### Changed
+
+- `solve_summary` publishes the shifted-Cholesky PSD bound as
+  `psd_shift_lower_bound`; `minimum_psd_eigenvalue` remains as a deprecated
+  alias with the same value (it was never an eigenvalue) and will be removed
+  at 1.0.
+- `Workspace.Qchol` and `LPWorkspace.sparse_system` are typed unions instead
+  of `Any`, removing two dynamic dispatches per iteration.
+- Example 03 generates its data from an explicit deterministic stream, so
+  the routing decision it asserts is identical on every Julia version.
+
+### Documentation
+
+- Known limitations now state the one-solve-per-process contract (BLAS
+  thread width is process-global), the `ingest(validate=false)` contract,
+  and the experimental opt-in status of the null-space reduction and
+  chordal detection (tested, not reachable from `solve`, with the measured
+  reason recorded).
+
+### Removed
+
+- Three unreferenced internal functions (dead code, no behavioral change).
+
 ## [0.2.0] — 2026-07-27
 
 First public release, prepared as a standalone package derived from

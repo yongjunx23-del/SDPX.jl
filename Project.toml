@@ -1,7 +1,7 @@
 name = "SDPX"
 uuid = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
-version = "0.2.0"
+version = "0.2.1"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
