@@ -91,7 +91,8 @@ nothing measured here suggests it would.
 function analyze!(backend::SparseCholeskyBackend, A::SparseMatrixCSC{Float64})
     factor = try
         cholesky(Symmetric(A, :L); check=false)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         nothing
     end
     if factor === nothing || !issuccess(factor)
@@ -125,7 +126,8 @@ function factorize!(backend::SparseCholeskyBackend, A::SparseMatrixCSC{Float64})
     reusable || return analyze!(backend, A)
     try
         cholesky!(backend.factorization, Symmetric(A, :L); check=false)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         # A pattern-compatible refactorization can still fail numerically (loss
         # of definiteness). Fall back to a fresh analysis rather than leaving a
         # stale factor in place.
@@ -253,7 +255,8 @@ Compute and cache the symbolic factorization for `K`'s pattern.
 function analyze!(backend::SparseLDLBackend, K::SparseMatrixCSC{Float64})
     factor = try
         ldlt(Symmetric(K, :L); check=false)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         nothing
     end
     if factor === nothing || !issuccess(factor)
@@ -284,7 +287,8 @@ function factorize!(backend::SparseLDLBackend, K::SparseMatrixCSC{Float64})
     reusable || return analyze!(backend, K)
     try
         ldlt!(backend.factorization, Symmetric(K, :L); check=false)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return analyze!(backend, K)
     end
     issuccess(backend.factorization) || return analyze!(backend, K)

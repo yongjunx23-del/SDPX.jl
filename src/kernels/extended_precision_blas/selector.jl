@@ -14,7 +14,8 @@ function _parse_memory_bytes(value::AbstractString)
     matched === nothing && return nothing
     magnitude = try
         parse(Float64, matched.captures[1])
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return nothing
     end
     isfinite(magnitude) && magnitude >= 0 || return nothing
@@ -46,13 +47,15 @@ function _read_memory_counter(path::AbstractString)
     isfile(path) || return nothing
     text = try
         strip(read(path, String))
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return nothing
     end
     text == "max" && return nothing
     value = try
         parse(Int128, text)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return nothing
     end
     value < 0 && return nothing
@@ -89,7 +92,8 @@ function _configured_memory_available_bytes()
     limit === nothing && return nothing
     peak_rss = try
         Int(Sys.maxrss())
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         0
     end
     return max(limit - max(peak_rss, 0), 0)
@@ -98,7 +102,8 @@ end
 function _system_free_memory_bytes()
     host_free = try
         _nonnegative_saturating_int(Sys.free_memory())
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         0
     end
     candidates = Int[]

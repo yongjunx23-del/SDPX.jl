@@ -62,14 +62,16 @@ function hardware_signature()
         try
             model = strip(read(`sysctl -n machdep.cpu.brand_string`, String))
             cores = parse(Int, strip(read(`sysctl -n hw.physicalcpu`, String)))
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
         end
     elseif Sys.islinux()
         try
             info = read("/proc/cpuinfo", String)
             m = match(r"model name\s*:\s*(.+)", info)
             m === nothing || (model = strip(m.captures[1]))
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
         end
     end
     cleaned = replace(model, r"[^A-Za-z0-9]+" => "_")
@@ -86,7 +88,8 @@ function calibration_directory()
     isempty(override) || return override
     return try
         joinpath(first(DEPOT_PATH), "scratchspaces", "SDPX", "calibration")
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         joinpath(tempdir(), "SDPX-calibration")
     end
 end
@@ -121,7 +124,8 @@ function load_profile(family::Symbol)
             minimum_nnz_ratio=get(values, "minimum_nnz_ratio", fallback.minimum_nnz_ratio),
             source=:calibrated)
         return valid_profile(candidate) ? candidate : fallback
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return fallback
     end
 end
@@ -176,7 +180,8 @@ function save_profile(family::Symbol, profile::CalibrationProfile)
             println(io, "minimum_nnz_ratio = ", profile.minimum_nnz_ratio)
         end
         return path
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return nothing
     end
 end

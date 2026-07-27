@@ -31,5 +31,6 @@ using Test
     include("lp_sparse.jl")
     include("examples.jl")
     include("nullspace_reduction.jl")
+    include("error_handling.jl")
     include("gates.jl")
 end

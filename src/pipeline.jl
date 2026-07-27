@@ -587,7 +587,8 @@ function physical_core_count()
     if Sys.isapple()
         try
             return parse(Int, strip(read(`sysctl -n hw.physicalcpu`, String)))
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
         end
     elseif Sys.islinux()
         try
@@ -599,7 +600,8 @@ function physical_core_count()
                 push!(cores, (package.captures[1], core.captures[1]))
             end
             isempty(cores) || return length(cores)
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
         end
     end
     return Sys.CPU_THREADS
@@ -655,7 +657,8 @@ function worker_report(requested::Integer, selected::Integer)
     if Sys.isapple()
         try
             logical = parse(Int, strip(read(`sysctl -n hw.logicalcpu`, String)))
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
         end
     elseif Sys.islinux()
         logical = max(Sys.CPU_THREADS, physical)
@@ -949,7 +952,8 @@ function _equality_elimination_check(
     )
     coefficients = try
         qr(Bkeep) \ Bdropped
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return (
             elimination_valid=false,
             consistent=true,
@@ -1198,7 +1202,8 @@ function _process_peak_rss_bytes()
     # Sys.maxrss() is bytes on Linux and macOS in supported Julia releases.
     try
         return Int(Sys.maxrss())
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return 0
     end
 end

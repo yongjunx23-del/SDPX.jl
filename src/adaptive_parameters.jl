@@ -447,13 +447,15 @@ function _nonnegative_int_saturating(
     value <= 0 && return 0
     upper = try
         oftype(value, typemax(Int))
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         typemax(Int)
     end
     value >= upper && return typemax(Int)
     return try
         max(0, round(Int, value, rounding))
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         typemax(Int)
     end
 end

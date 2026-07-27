@@ -127,7 +127,8 @@ function _preprocess_precision_bits(::Type{T}) where {T}
     T === BigFloat && return precision(BigFloat)
     try
         return precision(T)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return 8sizeof(T)
     end
 end
@@ -148,7 +149,8 @@ end
 @inline function _gc_bytes()
     try
         return Int(Base.gc_bytes())
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return 0
     end
 end

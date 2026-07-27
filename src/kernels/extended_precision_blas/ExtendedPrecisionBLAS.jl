@@ -3,6 +3,7 @@ module ExtendedPrecisionBLAS
 using Base.Threads
 import MutableArithmetics as MA
 import ..SDPX: kdot_columns!
+import ..SDPX: _recoverable
 
 include("types.jl")
 include("selector.jl")

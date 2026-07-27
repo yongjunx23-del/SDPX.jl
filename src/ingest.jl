@@ -325,7 +325,8 @@ function _symmetry_ratio_display(asymmetry, norm)
     ratio = asymmetry / norm
     try
         return round(Float64(ratio); sigdigits=3)
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         return ratio
     end
 end

@@ -310,7 +310,8 @@ function _triangular_condition_estimate(
             LinearAlgebra.LAPACK.trcon!('O', 'L', 'N', factor.factors),
             LinearAlgebra.LAPACK.trcon!('I', 'L', 'N', factor.factors),
         )
-    catch
+    catch exception
+        _recoverable(exception) || rethrow()
         (0.0, 0.0)
     end
     estimate =

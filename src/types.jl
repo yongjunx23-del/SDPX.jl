@@ -6,6 +6,30 @@
     instead of dynamically dispatching on a global `T::Type`.
 =====================================================================#
 
+"""
+    _recoverable(exception) -> Bool
+
+Whether an exception may be absorbed by a local fallback handler.
+
+The solver uses try/catch in many places where failure has a sensible local
+answer — a factorization that may be singular, a `sysctl` that may not exist,
+a cache file that may be corrupt. Those handlers were originally written as
+bare `catch`, and a bare `catch` in Julia absorbs *everything*: an
+`InterruptException` raised during a long factorization was converted into
+"this matrix is singular" and the solve continued; an `OutOfMemoryError`
+became indistinguishable from a numerical failure. On solves that run for
+minutes to hours, losing Ctrl-C is not a corner case.
+
+Every handler therefore asks this predicate first and rethrows what it must
+not swallow: user interrupts, resource exhaustion, and stack overflow.
+"""
+@inline function _recoverable(exception)
+    exception isa InterruptException && return false
+    exception isa OutOfMemoryError && return false
+    exception isa StackOverflowError && return false
+    return true
+end
+
 
 """
     SolveMode
