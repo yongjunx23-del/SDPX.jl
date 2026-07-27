@@ -224,6 +224,35 @@ end
         @test zero_report.inconsistent
     end
 
+    @testset "equality QR noise is not an infeasibility certificate" begin
+        basis = [
+            1.2121525073987145 -0.14315880251828644 -0.43067736819260855 1.8709720259547575
+            1.6975218172680966 -0.3909996780068005 -0.1315993623122421 0.510171259811711
+            0.7258127628732313 -2.3324850588573947 -0.027261661645331836 -0.08577377158096056
+            0.527444069518352 -0.6031252568651467 -1.0066244948415388 -0.6311225004484745
+            -0.7273670518160774 -1.334151654468518 -1.0036466199598113 -0.9697989382005757
+            -0.6025669969756947 -1.0247555674479374 0.4889382279996364 -0.30515141629858866
+            -0.04352146347374282 0.512286927290132 1.1503983534774938 2.1057123411919507
+            0.857157362313881 -0.913398164790425 1.5944013899608869 1.6917227184874668
+        ]
+        equalities = hcat(basis, basis[:, 2])
+        problem = SDPX.ingest(
+            zeros(8),
+            [ones(8, 1, 1)],
+            [zeros(1, 1)],
+            equalities,
+            [1.0, 0.0, 0.0, 0.0, 0.0];
+            verbosity=0,
+        )
+        reduced, _, report = SDPX.presolve_equalities(
+            problem,
+            SDPX.SolverOptions{Float64}(verbosity=0),
+        )
+        @test reduced.dims.n == 4
+        @test report.removed_dependent_equalities == 1
+        @test !report.inconsistent
+    end
+
     @testset "preingested BigFloat solve honors requested precision" begin
         setprecision(BigFloat, 128) do
             data = regression_sdp_data(BigFloat)

@@ -47,7 +47,8 @@ function aggregate_sparsity(prob::SDPProblem{T}, block::Integer) where {T}
 
     cons = prob.cons
     if cons isa SparseCons{T}
-        for matrix in cons.Asp[block]
+        for variable in cons.active[block]
+            matrix = cons.Asp[block][variable]
             rows = rowvals(matrix)
             values = nonzeros(matrix)
             for column in 1:size(matrix, 2), index in nzrange(matrix, column)

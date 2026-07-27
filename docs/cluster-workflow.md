@@ -255,6 +255,32 @@ $SDPX_REMOTE_BASE/data/task-low08/5763deada4260e152c73a38c41a4d8d9a5bb3903a099ae
 
 Set `TASK_LOW08_INPUT` to that verified path before submitting validation.
 
+## Preprocessing and model classification
+
+Leave `presolve=:auto`, `scaling=:auto`, `formulation=:auto`, and
+`chordal_decomposition=:auto` for ordinary cluster runs. The typed
+preprocessing report is available at:
+
+```julia
+report = result.diagnostics.presolve.preprocessing
+```
+
+Record its input/output dimensions, extracted-bound counts, fixed-variable
+count, exact equality cleanup, formulation estimate, chordal decision,
+elapsed time, allocation, and warnings with the benchmark result.
+
+Task_Low08 should report no scalar bounds, equality reduction from 482 to 394,
+and rejected chordal analysis because the aggregate PSD pattern is 99.84%
+dense. The medium `J/K/Na/Nmu = 32/4/16/100` CSDR model should report no
+structural change. Treat any different classification as an input or release
+regression before comparing solve times.
+
+Sparse equilibration copies only active coefficient matrices and shares one
+read-only empty CSC object per block. Keep the scaled-problem checksum in an
+A/B result when changing this code. On the canonical medium model the
+validated Float64x4 medians were 1.241 seconds and 685.8 MB before the change,
+and 0.633 seconds and 269.7 MB after it.
+
 ## Thread and memory policy
 
 Use one process per solve. The following is a conservative starting policy;

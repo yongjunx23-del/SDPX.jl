@@ -21,6 +21,7 @@ include("kkt_backend.jl")
 include("kkt_sparse_backend.jl")
 include("nullspace.jl")
 include("chordal.jl")
+include("preprocessing.jl")
 include("step.jl")
 include("kernels/threaded.jl")
 include("lp_sparse.jl")
@@ -35,6 +36,11 @@ export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
 export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
 export recommended_parameters, StructureAnalysis, analyze_structure, structure_summary
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
+export AbstractPreprocessStage, PreprocessContext, PreprocessPlan
+export PreprocessReport, PreprocessStageReport, ReconstructionMap, PreprocessedProblem
+export BoundExtractionStage, FixedVariableEliminationStage
+export StructuralCleanupStage, FormulationAnalysisStage, ChordalAnalysisStage
+export preprocess
 export classify_problem, build_execution_plan, SpectrumResult
 export reconstruct_spectrum, export_spectrum
 export result_certificate, solve_summary

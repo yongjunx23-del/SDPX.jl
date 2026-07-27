@@ -101,14 +101,17 @@ function _extract_lp_rows(prob::SDPProblem{T}) where {T}
             )
         end
     else
-        blocks = (prob.cons::SparseCons{T}).Asp
-        @inbounds for row in 1:L, variable in 1:m
-            _lp_copy_scalar!(
-                G,
-                row,
-                variable,
-                blocks[row][variable][1, 1],
-            )
+        sparse_cons = prob.cons::SparseCons{T}
+        blocks = sparse_cons.Asp
+        @inbounds for row in 1:L
+            for variable in sparse_cons.active[row]
+                _lp_copy_scalar!(
+                    G,
+                    row,
+                    variable,
+                    blocks[row][variable][1, 1],
+                )
+            end
         end
     end
     h = alloc_zeros(T, L)
@@ -1086,7 +1089,7 @@ function solve_lp!(
     _validate_lp_options(opts)
     G_original, h_original = _extract_lp_rows(prob)
     tolerance = max(opts.presolve_tolerance, T(10) * eps(T))
-    keep, removed, row_infeasible = opts.presolve ?
+    keep, removed, row_infeasible = _presolve_enabled(opts) ?
         _presolve_lp_rows(G_original, h_original, tolerance) :
         (collect(axes(G_original, 1)), 0, false)
     row_infeasible &&

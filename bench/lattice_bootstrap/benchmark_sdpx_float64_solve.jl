@@ -355,4 +355,4 @@ function main(arguments)
     )
 end
 
-main(ARGS)
+(abspath(PROGRAM_FILE) == @__FILE__) && main(ARGS)

@@ -43,6 +43,11 @@ struct EqualityPresolveMap{T}
     multiplier_map::Matrix{T}
 end
 
+@inline _presolve_enabled(opts::SolverOptions) =
+    opts.presolve === true ||
+    opts.presolve === :on ||
+    opts.presolve === :auto
+
 function EqualityPresolveMap(
     original_count::Int,
     keep::Vector{Int},
@@ -59,6 +64,11 @@ function EqualityPresolveMap(
 end
 
 function _validate_solver_options(opts::SolverOptions{T}) where {T}
+    opts.presolve isa Bool ||
+        opts.presolve in (:auto, :off, :on) ||
+        throw(ArgumentError(
+            "presolve must be false/:off, true/:on, or :auto",
+        ))
     opts.parameter_policy in (:fixed, :auto) ||
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
@@ -111,6 +121,14 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
     opts.scaling in (:auto, :none, :equilibrate) ||
         throw(ArgumentError(
             "scaling must be :auto, :none, or :equilibrate",
+        ))
+    opts.formulation in (:auto, :primal, :dual) ||
+        throw(ArgumentError(
+            "formulation must be :auto, :primal, or :dual",
+        ))
+    opts.chordal_decomposition in (:auto, :off, :on) ||
+        throw(ArgumentError(
+            "chordal_decomposition must be :auto, :off, or :on",
         ))
     opts.step_rule in (:backtrack, :fraction_to_boundary, :auto) ||
         throw(ArgumentError(
@@ -203,8 +221,11 @@ function _is_soc_arrow_block(prob::SDPProblem{T}, block::Int) where {T}
             ) || return false
         end
     else
-        matrices = (prob.cons::SparseCons{T}).Asp[block]
-        all(_is_soc_arrow_matrix, matrices) || return false
+        sparse_cons = prob.cons::SparseCons{T}
+        matrices = sparse_cons.Asp[block]
+        for variable in sparse_cons.active[block]
+            _is_soc_arrow_matrix(matrices[variable]) || return false
+        end
     end
     return true
 end
@@ -870,10 +891,22 @@ function _equality_elimination_check(
 ) where {T}
     n = prob.dims.n
     length(keep) == n &&
-        return (elimination_valid=true, consistent=true)
+        return (
+            elimination_valid=true,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=Int[],
+            scales=nothing,
+        )
     dropped = setdiff(collect(1:n), keep)
     isempty(dropped) &&
-        return (elimination_valid=true, consistent=true)
+        return (
+            elimination_valid=true,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=Int[],
+            scales=nothing,
+        )
 
     scales = _equality_column_scales(prob.B)
     zero_columns = filter(column -> iszero(scales[column]), dropped)
@@ -881,14 +914,32 @@ function _equality_elimination_check(
     # side is exactly zero. An absolute tolerance here would turn
     # `0 = 1e-30` into a false feasible statement.
     all(column -> iszero(prob.b[column]), zero_columns) ||
-        return (elimination_valid=true, consistent=false)
+        return (
+            elimination_valid=true,
+            consistent=false,
+            coefficients=nothing,
+            dependent_columns=Int[],
+            scales=scales,
+        )
 
     dependent_columns =
         filter(column -> !iszero(scales[column]), dropped)
     isempty(dependent_columns) &&
-        return (elimination_valid=true, consistent=true)
+        return (
+            elimination_valid=true,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=Int[],
+            scales=scales,
+        )
     isempty(keep) &&
-        return (elimination_valid=false, consistent=true)
+        return (
+            elimination_valid=false,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=dependent_columns,
+            scales=scales,
+        )
 
     Bkeep = _normalized_equality_columns(prob.B, keep, scales)
     Bdropped = _normalized_equality_columns(
@@ -899,7 +950,13 @@ function _equality_elimination_check(
     coefficients = try
         qr(Bkeep) \ Bdropped
     catch
-        return (elimination_valid=false, consistent=true)
+        return (
+            elimination_valid=false,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=dependent_columns,
+            scales=scales,
+        )
     end
     relative_tolerance = max(T(tolerance), T(100) * eps(T))
 
@@ -918,9 +975,21 @@ function _equality_elimination_check(
     )
     if iszero(relation_scale)
         iszero(relation_residual) ||
-            return (elimination_valid=false, consistent=true)
+            return (
+                elimination_valid=false,
+                consistent=true,
+                coefficients=nothing,
+                dependent_columns=dependent_columns,
+                scales=scales,
+            )
     elseif relation_residual > relative_tolerance * relation_scale
-        return (elimination_valid=false, consistent=true)
+        return (
+            elimination_valid=false,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=dependent_columns,
+            scales=scales,
+        )
     end
 
     bkeep = T[
@@ -932,6 +1001,10 @@ function _equality_elimination_check(
         for column in dependent_columns
     ]
     predicted = transpose(coefficients) * bkeep
+    global_rhs_scale = max(
+        maximum(abs, bkeep; init=zero(T)),
+        maximum(abs, bdropped; init=zero(T)),
+    )
     @inbounds for column in eachindex(dependent_columns)
         residual = abs(predicted[column] - bdropped[column])
         backward_scale = abs(bdropped[column])
@@ -939,19 +1012,53 @@ function _equality_elimination_check(
             backward_scale +=
                 abs(coefficients[row, column]) * abs(bkeep[row])
         end
-        if iszero(backward_scale)
+        certification_scale = max(backward_scale, global_rhs_scale)
+        if iszero(certification_scale)
             iszero(residual) ||
-                return (elimination_valid=true, consistent=false)
-        elseif residual > relative_tolerance * backward_scale
-            return (elimination_valid=true, consistent=false)
+                return (
+                    elimination_valid=false,
+                    consistent=true,
+                    coefficients=nothing,
+                    dependent_columns=dependent_columns,
+                    scales=scales,
+                )
+        elseif residual > relative_tolerance * certification_scale
+            # Only an exact column relation can turn an RHS mismatch into an
+            # infeasibility certificate. For a numerically reconstructed
+            # relation, retain the original equalities instead of confusing
+            # factorization roundoff with a proof that the model is empty.
+            iszero(relation_residual) &&
+                return (
+                    elimination_valid=true,
+                    consistent=false,
+                    coefficients=coefficients,
+                    dependent_columns=dependent_columns,
+                    scales=scales,
+                )
+            return (
+                elimination_valid=false,
+                consistent=true,
+                coefficients=nothing,
+                dependent_columns=dependent_columns,
+                scales=scales,
+            )
         end
     end
-    return (elimination_valid=true, consistent=true)
+    return (
+        elimination_valid=true,
+        consistent=true,
+        coefficients=coefficients,
+        dependent_columns=dependent_columns,
+        scales=scales,
+    )
 end
 
 function _equality_presolve_map(
     prob::SDPProblem{T},
     keep::Vector{Int},
+    coefficients=nothing,
+    dependent_columns::Vector{Int}=Int[],
+    scales=nothing,
 ) where {T}
     n = prob.dims.n
     multiplier_map = alloc_zeros(T, length(keep), n)
@@ -962,17 +1069,22 @@ function _equality_presolve_map(
     isempty(dropped) &&
         return EqualityPresolveMap{T}(n, keep, multiplier_map)
 
-    scales = _equality_column_scales(prob.B)
-    dependent_columns =
-        filter(column -> !iszero(scales[column]), dropped)
+    scales === nothing && (scales = _equality_column_scales(prob.B))
+    isempty(dependent_columns) &&
+        (dependent_columns =
+            filter(column -> !iszero(scales[column]), dropped))
     if !isempty(keep) && !isempty(dependent_columns)
-        Bkeep = _normalized_equality_columns(prob.B, keep, scales)
-        Bdropped = _normalized_equality_columns(
-            prob.B,
-            dependent_columns,
-            scales,
-        )
-        normalized_coefficients = qr(Bkeep) \ Bdropped
+        normalized_coefficients = if coefficients === nothing
+            Bkeep = _normalized_equality_columns(prob.B, keep, scales)
+            Bdropped = _normalized_equality_columns(
+                prob.B,
+                dependent_columns,
+                scales,
+            )
+            qr(Bkeep) \ Bdropped
+        else
+            coefficients
+        end
         @inbounds for (dropped_position, dropped_column) in
                       pairs(dependent_columns)
             for kept_position in eachindex(keep)
@@ -992,7 +1104,9 @@ end
 function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     started = time()
     n = prob.dims.n
-    if !opts.presolve || n == 0
+    if !_presolve_enabled(opts) ||
+       !opts.presolve_dependent_equalities ||
+       n == 0
         report = _empty_presolve_report(prob)
         keep = collect(1:n)
         return prob, _equality_presolve_map(prob, keep), report
@@ -1023,7 +1137,13 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         keep,
         time() - started,
     )
-    mapping = _equality_presolve_map(prob, keep)
+    mapping = _equality_presolve_map(
+        prob,
+        keep,
+        check.coefficients,
+        check.dependent_columns,
+        check.scales,
+    )
     consistent || return prob, mapping, report
     length(keep) == n &&
         return prob, mapping, report

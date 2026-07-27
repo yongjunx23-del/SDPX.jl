@@ -312,6 +312,14 @@ against the same limit. A supplied `warm_start` is expressed in original input
 coordinates and is mapped through equality presolve and the selected
 equilibration automatically.
 
+The frontend also includes conservative typed preprocessing for scalar bounds,
+exactly fixed variables, and structural equality cleanup. It preserves
+`Float64`, `Float64x4`, and BigFloat arithmetic, maps warm starts through the
+reduction, and certifies the returned solution in the original coordinates.
+Primal/dual formulation changes and chordal decomposition remain
+analysis-only. See [conservative preprocessing](docs/preprocessing.md) for the
+stage interfaces, options, reports, and target-model behavior.
+
 The legacy functions are thin wrappers over the expert typed core:
 
 ```julia

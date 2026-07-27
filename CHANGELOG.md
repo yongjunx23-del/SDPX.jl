@@ -107,6 +107,29 @@ previous published SDPX version.
 
 ### Robustness and diagnostics
 
+- Added a conservative typed preprocessing pipeline with exact scalar-bound
+  extraction and merging, exact fixed-variable elimination, exact
+  zero/duplicate/proportional equality cleanup, original-coordinate warm-start
+  and solution reconstruction, analysis-only formulation/chordal cost
+  estimates, and per-stage timing/allocation diagnostics.
+- Fixed equality-presolve certification so QR roundoff in a reconstructed zero
+  right-hand side is not misreported as a proof of infeasibility. Exact zero
+  and exact proportional contradictions remain certified; ambiguous numerical
+  relations retain the original equality system.
+- Added compact single-variable scalar coefficient storage for MOI bounds and
+  intervals. Sparse ingestion, classification, scaling, precision
+  preparation, LP extraction, chordal analysis, and null-space materialization
+  now traverse active incidences rather than an `L × m` grid.
+- Sparse equilibration now copies and scales only active coefficient matrices,
+  reusing one read-only empty CSC matrix per block. On the canonical medium
+  CSDR model this reduced median equilibration time from 1.241 to 0.633 seconds
+  and cumulative allocation from 685.8 to 269.7 MB with an identical scaled
+  checksum.
+- Equality presolve reuses its verified normalized dependency coefficients
+  when building the reconstruction map instead of factorizing the retained
+  equality matrix a second time.
+- Added MOI support for scalar and variable `Interval` constraints, including
+  primal and signed dual reconstruction.
 - Automatic stagnation detection over a rolling window of the primal residual,
   dual residual, relative duality gap, and complementarity, each normalised by
   the tolerance requested for it, so the rule scales with both the requested

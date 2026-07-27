@@ -1793,7 +1793,15 @@ function _solve_pipeline!(
     deadline = isfinite(opts.max_time) ?
                pipeline_started + opts.max_time :
                Inf
-    reduced, equality_map, report = presolve_equalities(prob, opts)
+    preprocessed = preprocess(prob, opts)
+    reduced, equality_map, equality_report =
+        presolve_equalities(preprocessed.problem, opts)
+    report = _merge_presolve_reports(
+        preprocessed,
+        equality_map,
+        equality_report,
+        reduced,
+    )
     # Finalize the plan against the model that will actually be factorized.
     # In particular, equality presolve can change the selected parameter profile
     # and the diagnostic equality count.
@@ -1848,6 +1856,7 @@ function _solve_pipeline!(
         Y0=Y0,
         resume=resume,
         accepted_y_lengths=(
+            preprocessed.reconstruction.original_equalities,
             equality_map.original_count,
             length(equality_map.keep),
         ),
@@ -1871,10 +1880,18 @@ function _solve_pipeline!(
             opts.diagnostics,
         )
 
-    reduced_y0 = if y0 === nothing
+    preprocessed_warm_start = _transform_preprocess_warm_start(
+        preprocessed.reconstruction;
+        x0=x0,
+        X0=X0,
+        y0=y0,
+        Y0=Y0,
+    )
+
+    reduced_y0 = if preprocessed_warm_start.y0 === nothing
         nothing
     else
-        supplied = _owned_array_copy(T, y0)
+        supplied = preprocessed_warm_start.y0
         if length(supplied) == equality_map.original_count
             reduced_y = alloc_zeros(T, length(equality_map.keep))
             kmul_owned!(
@@ -1933,7 +1950,7 @@ function _solve_pipeline!(
             reduced,
             lp_options,
             plan;
-            x0=x0,
+            x0=preprocessed_warm_start.x0,
             y0=reduced_y0,
             deadline=deadline,
         )
@@ -1983,10 +2000,10 @@ function _solve_pipeline!(
         result = _solve_sdp_core!(
             reduced,
             core_options;
-            x0=x0,
-            X0=X0,
+            x0=preprocessed_warm_start.x0,
+            X0=preprocessed_warm_start.X0,
             y0=reduced_y0,
-            Y0=Y0,
+            Y0=preprocessed_warm_start.Y0,
             resume=resume,
             deadline=deadline,
         )
@@ -2007,9 +2024,15 @@ function _solve_pipeline!(
             report.inconsistent,
             report.equality_keep,
             report.elapsed,
+            report.preprocessing,
         )
     end
     result = _restore_equalities(result, equality_map)
+    result = reconstruct(
+        preprocessed.reconstruction,
+        prob,
+        result,
+    )
     result, certificate, certificate_warning = if result.status === TimeLimit
         (
             result,
@@ -2075,8 +2098,15 @@ function solve(
     verbosity::Int=1,
     diagnostics::Bool=true,
     warm_start=nothing,
-    presolve::Bool=true,
+    presolve::Union{Bool,Symbol}=:auto,
+    presolve_bounds::Bool=true,
+    presolve_fixed_variables::Bool=true,
+    presolve_zero_constraints::Bool=true,
+    presolve_duplicate_constraints::Bool=true,
+    presolve_dependent_equalities::Bool=true,
     scaling::Symbol=:auto,
+    formulation::Symbol=:auto,
+    chordal_decomposition::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:fixed,
     working_precision_policy::Symbol=:fixed,
@@ -2100,7 +2130,16 @@ function solve(
                 diagnostics=diagnostics,
                 warm_start=warm_start,
                 presolve=presolve,
+                presolve_bounds=presolve_bounds,
+                presolve_fixed_variables=presolve_fixed_variables,
+                presolve_zero_constraints=presolve_zero_constraints,
+                presolve_duplicate_constraints=
+                    presolve_duplicate_constraints,
+                presolve_dependent_equalities=
+                    presolve_dependent_equalities,
                 scaling=scaling,
+                formulation=formulation,
+                chordal_decomposition=chordal_decomposition,
                 algorithm=algorithm,
                 parameter_strategy=parameter_strategy,
                 working_precision_policy=working_precision_policy,
@@ -2124,7 +2163,14 @@ function solve(
         verbosity=verbosity,
         diagnostics=diagnostics,
         presolve=presolve,
+        presolve_bounds=presolve_bounds,
+        presolve_fixed_variables=presolve_fixed_variables,
+        presolve_zero_constraints=presolve_zero_constraints,
+        presolve_duplicate_constraints=presolve_duplicate_constraints,
+        presolve_dependent_equalities=presolve_dependent_equalities,
         scaling=scaling,
+        formulation=formulation,
+        chordal_decomposition=chordal_decomposition,
         algorithm=algorithm,
         parameter_strategy=parameter_strategy,
         working_precision_policy=working_precision_policy,
@@ -2172,8 +2218,15 @@ function solve(
     verbosity::Int=1,
     diagnostics::Bool=true,
     warm_start=nothing,
-    presolve::Bool=true,
+    presolve::Union{Bool,Symbol}=:auto,
+    presolve_bounds::Bool=true,
+    presolve_fixed_variables::Bool=true,
+    presolve_zero_constraints::Bool=true,
+    presolve_duplicate_constraints::Bool=true,
+    presolve_dependent_equalities::Bool=true,
     scaling::Symbol=:auto,
+    formulation::Symbol=:auto,
+    chordal_decomposition::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:fixed,
     working_precision_policy::Symbol=:fixed,
@@ -2210,7 +2263,16 @@ function solve(
             diagnostics=diagnostics,
             warm_start=warm_start,
             presolve=presolve,
+            presolve_bounds=presolve_bounds,
+            presolve_fixed_variables=presolve_fixed_variables,
+            presolve_zero_constraints=presolve_zero_constraints,
+            presolve_duplicate_constraints=
+                presolve_duplicate_constraints,
+            presolve_dependent_equalities=
+                presolve_dependent_equalities,
             scaling=scaling,
+            formulation=formulation,
+            chordal_decomposition=chordal_decomposition,
             algorithm=algorithm,
             parameter_strategy=parameter_strategy,
             working_precision_policy=working_precision_policy,

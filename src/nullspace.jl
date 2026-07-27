@@ -355,8 +355,9 @@ function _nullspace_block_slices(prob::SDPProblem{T}, block::Integer) where {T}
                 reshape(view(panel, :, variable), dimension, dimension)
         end
     else
-        blocks = (cons::SparseCons{T}).Asp[block]
-        @inbounds for variable in 1:m
+        sparse_cons = cons::SparseCons{T}
+        blocks = sparse_cons.Asp[block]
+        @inbounds for variable in sparse_cons.active[block]
             matrix = blocks[variable]
             rows = rowvals(matrix)
             values = nonzeros(matrix)

@@ -240,6 +240,20 @@ function _analyze_matrix_coefficients(A, m::Int, n::Int, k::Vector{Int}, request
     pattern_nnz = zeros(Int, L)
     for l in 1:L
         dimension = k[l]
+        if A[l] isa CompactScalarCoefficientVector
+            block = A[l]::CompactScalarCoefficientVector
+            coefficient = block.coefficient[1, 1]
+            if !iszero(coefficient)
+                active[l] = [block.active_variable]
+                coefficient_nnz[l] = 1
+                pattern_nnz[l] = 1
+            else
+                active[l] = Int[]
+                coefficient_nnz[l] = 0
+                pattern_nnz[l] = 0
+            end
+            continue
+        end
         pattern = BitSet()
         for variable in 1:m
             matrix = A[l][variable]
@@ -664,8 +678,26 @@ function ingest(
         end
     end
 
-    prepared = Vector{Vector{SparseMatrixCSC{ET,Int}}}(undef, L)
+    prepared = Vector{SparseCoefficientVector{ET}}(undef, L)
     for l in 1:L
+        if A[l] isa CompactScalarCoefficientVector
+            source = A[l]::CompactScalarCoefficientVector
+            coefficient = _ingest_owned_scalar(
+                ET,
+                source.coefficient[1, 1],
+            )
+            validate &&
+                isfinite(coefficient) ||
+                !validate ||
+                throw(ArgumentError("A[$l] contains NaN or Inf"))
+            prepared[l] = CompactScalarCoefficientVector(
+                ET,
+                m,
+                source.active_variable,
+                coefficient,
+            )
+            continue
+        end
         # As in `_ingest_sparse`: share one canonical empty matrix per block
         # instead of allocating a distinct three-array `SparseMatrixCSC` for
         # every structurally empty coefficient slot. Read-only after ingest.
@@ -750,8 +782,19 @@ function min_precision_bits(prob::SDPProblem{BigFloat})
             b = min(b, minimum(precision, Av; init=typemax(Int)))
         end
     else
-        for blocks in (cons::SparseCons).Asp, Ai in blocks
-            b = min(b, minimum(precision, nonzeros(Ai); init=typemax(Int)))
+        sparse_cons = cons::SparseCons
+        for block in eachindex(sparse_cons.Asp)
+            for variable in sparse_cons.active[block]
+                matrix = sparse_cons.Asp[block][variable]
+                b = min(
+                    b,
+                    minimum(
+                        precision,
+                        nonzeros(matrix);
+                        init=typemax(Int),
+                    ),
+                )
+            end
         end
     end
     return b
@@ -816,11 +859,32 @@ function reround(prob::SDPProblem{BigFloat}, bits::Int)
             ])
         else
             sparse_cons = cons::SparseCons
+            blocks = Vector{SparseCoefficientVector{BigFloat}}(
+                undef,
+                length(sparse_cons.Asp),
+            )
+            @inbounds for block in eachindex(blocks)
+                source = sparse_cons.Asp[block]
+                if source isa CompactScalarCoefficientVector{BigFloat}
+                    compact =
+                        source::CompactScalarCoefficientVector{BigFloat}
+                    blocks[block] = CompactScalarCoefficientVector(
+                        BigFloat,
+                        prob.dims.m,
+                        compact.active_variable,
+                        BigFloat(
+                            compact.coefficient[1, 1];
+                            precision=bits,
+                        ),
+                    )
+                else
+                    blocks[block] = [
+                        reround_sparse(matrix) for matrix in source
+                    ]
+                end
+            end
             SparseCons{BigFloat}(
-                [
-                    [reround_sparse(matrix) for matrix in blocks]
-                    for blocks in sparse_cons.Asp
-                ],
+                blocks,
                 [copy(ids) for ids in sparse_cons.active],
                 [copy(ids) for ids in sparse_cons.schur_order],
                 [reround_array(coeffs) for coeffs in sparse_cons.packed2],
@@ -883,7 +947,30 @@ sparse coefficient entries in place, then `SparseCons` is rebuilt so the packed
 """
 function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3) where {T}
     L, m, n, k = prob.dims
-    Asp2 = [[copy(A) for A in cons.Asp[l]] for l in 1:L]
+    Asp2 = Vector{SparseCoefficientVector{T}}(undef, L)
+    @inbounds for block in 1:L
+        source = cons.Asp[block]
+        if source isa CompactScalarCoefficientVector{T}
+            compact = source::CompactScalarCoefficientVector{T}
+            Asp2[block] = CompactScalarCoefficientVector(
+                T,
+                m,
+                compact.active_variable,
+                _ingest_owned_scalar(T, compact.coefficient[1, 1]),
+            )
+        else
+            # Only structurally active matrices are ever mutated below.
+            # Reuse one read-only empty matrix for inactive slots instead of
+            # allocating and copying O(L*m) empty CSC objects.
+            dimension = k[block]
+            empty_matrix = spzeros(T, dimension, dimension)
+            destination = fill(empty_matrix, m)
+            for variable in cons.active[block]
+                destination[variable] = copy(source[variable])
+            end
+            Asp2[block] = destination
+        end
+    end
     C2 = [copy(c) for c in prob.C]
     E = [ones(T, k[l]) for l in 1:L]
 
@@ -924,24 +1011,29 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
     # Per-variable scale: x_i is rescaled so the largest coefficient touching it
     # (or its objective entry) is O(1).
     s = ones(T, m)
-    @inbounds for i in 1:m
-        # Constraint coefficients only. Including `abs(prob.c[i])` here
-        # conflates objective scale with constraint scale: the substitution is
-        # `x̂_i = s_i x_i`, so one `s_i` has to serve both, and whichever of the
-        # two is larger wins. On the badly-scaled benchmark generator `|c_i|`
-        # reaches 1.8e10 while the row-scaled `A_i` is ~1e-4, so `s_i` was set
-        # entirely by the objective and dividing `A_i` by it drove the
-        # constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0` satisfiable
-        # only by enormous `x`. Objective magnitude is a separate concern and is
-        # handled by a single scalar below, which cannot distort the feasible
-        # set the way a per-variable objective scale does.
-        v = zero(T)
-        for l in 1:L
+    # Constraint coefficients only. Including `abs(prob.c[i])` here
+    # conflates objective scale with constraint scale: the substitution is
+    # `x̂_i = s_i x_i`, so one `s_i` has to serve both, and whichever of the
+    # two is larger wins. On the badly-scaled benchmark generator `|c_i|`
+    # reaches 1.8e10 while the row-scaled `A_i` is ~1e-4, so `s_i` was set
+    # entirely by the objective and dividing `A_i` by it drove the
+    # constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0` satisfiable
+    # only by enormous `x`. Objective magnitude is a separate concern and is
+    # handled by a single scalar below, which cannot distort the feasible
+    # set the way a per-variable objective scale does.
+    maxima = alloc_zeros(T, m)
+    @inbounds for l in 1:L
+        for i in cons.active[l]
             A = Asp2[l][i]
             isempty(nonzeros(A)) && continue
-            v = max(v, maximum(abs, nonzeros(A)))
+            maxima[i] = max(
+                maxima[i],
+                maximum(abs, nonzeros(A)),
+            )
         end
-        s[i] = v > 0 ? v : one(T)
+    end
+    @inbounds for i in 1:m
+        s[i] = maxima[i] > zero(T) ? maxima[i] : one(T)
     end
     cc = prob.c ./ s
     # Objective normalisation (plan §9.2). A single positive scalar rescales the
@@ -957,17 +1049,19 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
     @inbounds for j in 1:n, i in 1:m
         Bc[i, j] /= s[i]
     end
-    @inbounds for l in 1:L, i in 1:m
-        A = Asp2[l][i]
-        vals = nonzeros(A)
-        si = s[i]
-        for idx in eachindex(vals)
-            vals[idx] /= si
+    @inbounds for l in 1:L
+        for i in cons.active[l]
+            A = Asp2[l][i]
+            vals = nonzeros(A)
+            si = s[i]
+            for idx in eachindex(vals)
+                vals[idx] /= si
+            end
         end
     end
 
     # Rebuild so `packed2` and `coo` are regenerated from the scaled entries.
-    active = [findall(i -> nnz(Asp2[l][i]) > 0, 1:m) for l in 1:L]
+    active = [copy(indices) for indices in cons.active]
     order = [copy(active[l]) for l in 1:L]
     packed2 = Vector{Matrix{T}}(undef, L)
     for l in 1:L

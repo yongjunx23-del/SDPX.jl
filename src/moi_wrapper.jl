@@ -32,6 +32,13 @@ struct MOIScalarInequalityConstraintInfo{T} <: AbstractMOIConstraintInfo
     direction::T
 end
 
+struct MOIScalarIntervalConstraintInfo{T} <: AbstractMOIConstraintInfo
+    lower_block::Int
+    upper_block::Int
+    lower::T
+    upper::T
+end
+
 struct MOISOCConstraintInfo <: AbstractMOIConstraintInfo
     block::Int
     dimension::Int
@@ -187,12 +194,33 @@ function MOI.supports_constraint(
 end
 
 const MOIScalarInequalitySet{T} = Union{MOI.GreaterThan{T},MOI.LessThan{T}}
+const MOIScalarBoundSet{T} = Union{
+    MOI.GreaterThan{T},
+    MOI.LessThan{T},
+    MOI.Interval{T},
+}
 
 function MOI.supports_constraint(
     ::Optimizer{T},
     ::Type{MOI.ScalarAffineFunction{T}},
     ::Type{S},
 ) where {T,S<:MOIScalarInequalitySet{T}}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.ScalarAffineFunction{T}},
+    ::Type{MOI.Interval{T}},
+) where {T}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.VariableIndex},
+    ::Type{MOI.Interval{T}},
+) where {T}
     return true
 end
 
@@ -283,7 +311,7 @@ function _new_constraint_index!(
 end
 
 function _append_psd_constraint!(
-    A::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    A::Vector{SparseCoefficientVector{T}},
     C::Vector{Matrix{T}},
     empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
     optimizer::Optimizer{T},
@@ -408,7 +436,7 @@ function _append_equality_constraint!(
 end
 
 function _append_scalar_inequality!(
-    A::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    A::Vector{SparseCoefficientVector{T}},
     C::Vector{Matrix{T}},
     empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
     optimizer::Optimizer{T},
@@ -440,15 +468,29 @@ function _append_scalar_inequality!(
         direction = -one(T)
         block_C = reshape(T[constant - bound], 1, 1)
     end
-    block_A = _empty_coefficient_vector(
-        empty_cache,
-        1,
-        optimizer.num_variables,
-    )
-    for (variable, coefficient) in coefficients
-        value = direction * coefficient
-        iszero(value) && continue
-        block_A[variable] = sparse([1], [1], T[value], 1, 1)
+    nonzeros = [
+        (variable, direction * coefficient)
+        for (variable, coefficient) in coefficients
+        if !iszero(direction * coefficient)
+    ]
+    block_A = if length(nonzeros) == 1
+        variable, value = only(nonzeros)
+        CompactScalarCoefficientVector(
+            T,
+            optimizer.num_variables,
+            variable,
+            value,
+        )
+    else
+        matrices = _empty_coefficient_vector(
+            empty_cache,
+            1,
+            optimizer.num_variables,
+        )
+        for (variable, value) in nonzeros
+            matrices[variable] = sparse([1], [1], T[value], 1, 1)
+        end
+        matrices
     end
     push!(A, block_A)
     push!(C, block_C)
@@ -463,8 +505,79 @@ function _append_scalar_inequality!(
     return nothing
 end
 
+function _append_scalar_interval!(
+    A::Vector{SparseCoefficientVector{T}},
+    C::Vector{Matrix{T}},
+    empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,MOI.Interval{T}},
+) where {T,F}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    coefficients = Dict{Int,T}()
+    constant = zero(T)
+    if function_value isa MOI.ScalarAffineFunction{T}
+        constant = function_value.constant
+        for term in function_value.terms
+            variable = index_map[term.variable].value
+            coefficients[variable] =
+                get(coefficients, variable, zero(T)) + term.coefficient
+        end
+    else
+        coefficients[index_map[function_value].value] = one(T)
+    end
+
+    function append_block!(direction::T, block_constant::T)
+        nonzeros = [
+            (variable, direction * coefficient)
+            for (variable, coefficient) in coefficients
+            if !iszero(direction * coefficient)
+        ]
+        block_A = if length(nonzeros) == 1
+            variable, value = only(nonzeros)
+            CompactScalarCoefficientVector(
+                T,
+                optimizer.num_variables,
+                variable,
+                value,
+            )
+        else
+            matrices = _empty_coefficient_vector(
+                empty_cache,
+                1,
+                optimizer.num_variables,
+            )
+            for (variable, value) in nonzeros
+                matrices[variable] =
+                    sparse([1], [1], T[value], 1, 1)
+            end
+            matrices
+        end
+        push!(A, block_A)
+        push!(C, reshape(T[block_constant], 1, 1))
+        return length(A)
+    end
+
+    lower_block = append_block!(one(T), set.lower - constant)
+    upper_block = append_block!(-one(T), constant - set.upper)
+    destination_index =
+        _new_constraint_index!(counts, F, MOI.Interval{T})
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIScalarIntervalConstraintInfo{T}(
+            lower_block,
+            upper_block,
+            set.lower,
+            set.upper,
+        )
+    return nothing
+end
+
 function _append_soc_constraint!(
-    A::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    A::Vector{SparseCoefficientVector{T}},
     C::Vector{Matrix{T}},
     empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
     optimizer::Optimizer{T},
@@ -606,7 +719,7 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
         index_map[variable] = MOI.VariableIndex(i)
     end
 
-    A = Vector{SparseMatrixCSC{T,Int}}[]
+    A = SparseCoefficientVector{T}[]
     C = Matrix{T}[]
     equality_columns = Vector{T}[]
     equality_rhs = T[]
@@ -640,6 +753,17 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
                 )
             elseif S <: MOIScalarInequalitySet{T}
                 _append_scalar_inequality!(
+                    A,
+                    C,
+                    empty_cache,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif S <: MOI.Interval{T}
+                _append_scalar_interval!(
                     A,
                     C,
                     empty_cache,
@@ -865,6 +989,9 @@ function MOI.get(
     if info isa MOIScalarInequalityConstraintInfo
         return info.bound + info.direction * result.X[info.block][1, 1]
     end
+    if info isa MOIScalarIntervalConstraintInfo
+        return info.lower + result.X[info.lower_block][1, 1]
+    end
     if info isa MOISOCConstraintInfo
         matrix = result.X[info.block]
         return vcat(matrix[1, 1], Vector(view(matrix, 2:info.dimension, 1)))
@@ -886,6 +1013,10 @@ function MOI.get(
     end
     if info isa MOIScalarInequalityConstraintInfo
         return info.direction * result.Y[info.block][1, 1]
+    end
+    if info isa MOIScalarIntervalConstraintInfo
+        return result.Y[info.lower_block][1, 1] -
+               result.Y[info.upper_block][1, 1]
     end
     if info isa MOISOCConstraintInfo
         matrix = result.Y[info.block]

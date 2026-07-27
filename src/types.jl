@@ -153,12 +153,19 @@ Base.@kwdef struct SolverOptions{T}
     mixed_precision_refine_max_steps::Int = 32
     mixed_precision_memory_fraction::Float64 = 0.10
     algorithm::Symbol         = :auto                   # :auto | :lp | :sdp
-    presolve::Bool            = true                    # equality-rank and scalar-cone redundancy presolve
+    presolve::Union{Bool,Symbol} = :auto                 # false/:off | true/:on | :auto
+    presolve_bounds::Bool     = true                    # merge exact scalar variable bounds
+    presolve_fixed_variables::Bool = true               # eliminate only exactly fixed variables
+    presolve_zero_constraints::Bool = true              # remove exact zero equalities
+    presolve_duplicate_constraints::Bool = true         # remove collision-checked exact duplicates
+    presolve_dependent_equalities::Bool = true           # arithmetic-aware verified rank reduction
     # Zero selects the conservative dimension-scaled machine-epsilon rank
     # threshold. A larger value explicitly opts into approximate equality
     # elimination and is still validated in the original arithmetic.
     presolve_tolerance::T     = zero(T)
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
+    formulation::Symbol       = :auto                   # :auto | :primal | :dual (dual is analysis-only)
+    chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
     expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
@@ -241,7 +248,7 @@ SparseBlockCOO{T}() where {T} =
 Pack `blocks[order]` into flat coordinate form.
 """
 function build_block_coo(
-    blocks::Vector{SparseMatrixCSC{T,Int}},
+    blocks::AbstractVector{SparseMatrixCSC{T,Int}},
     order::Vector{Int},
     k::Int,
 ) where {T}
@@ -275,6 +282,58 @@ function build_block_coo(
 end
 
 """
+    CompactScalarCoefficientVector{T}
+
+Read-only `AbstractVector` representation of a scalar PSD block that touches
+exactly one variable. It behaves like the historical length-`m` vector of
+sparse matrices without allocating `m` references per bound. This is important
+for MOI models with thousands of box constraints, where the old `L × m`
+reference grid was quadratic before the solver performed any arithmetic.
+"""
+struct CompactScalarCoefficientVector{T} <:
+       AbstractVector{SparseMatrixCSC{T,Int}}
+    variables::Int
+    active_variable::Int
+    coefficient::SparseMatrixCSC{T,Int}
+    empty::SparseMatrixCSC{T,Int}
+end
+
+function CompactScalarCoefficientVector(
+    ::Type{T},
+    variables::Int,
+    active_variable::Int,
+    coefficient::T,
+) where {T}
+    1 <= active_variable <= variables ||
+        throw(BoundsError(1:variables, active_variable))
+    matrix = sparse([1], [1], T[coefficient], 1, 1)
+    return CompactScalarCoefficientVector{T}(
+        variables,
+        active_variable,
+        matrix,
+        spzeros(T, 1, 1),
+    )
+end
+
+Base.IndexStyle(::Type{<:CompactScalarCoefficientVector}) = IndexLinear()
+Base.size(vector::CompactScalarCoefficientVector) = (vector.variables,)
+Base.length(vector::CompactScalarCoefficientVector) = vector.variables
+@inline function Base.getindex(
+    vector::CompactScalarCoefficientVector,
+    index::Int,
+)
+    @boundscheck checkbounds(vector, index)
+    return index == vector.active_variable ?
+           vector.coefficient :
+           vector.empty
+end
+
+const SparseCoefficientVector{T} = Union{
+    Vector{SparseMatrixCSC{T,Int}},
+    CompactScalarCoefficientVector{T},
+}
+
+"""
     SparseCons{T}
 
 `Asp[l][i]` is a `k[l]×k[l]` sparse matrix. Used when `sparse=true`;
@@ -293,7 +352,7 @@ loop. For other block sizes, `coo[l]` holds the same coefficients in
 reads.
 """
 struct SparseCons{T} <: AbstractCons{T}
-    Asp::Vector{Vector{SparseMatrixCSC{T,Int}}}
+    Asp::Vector{SparseCoefficientVector{T}}
     active::Vector{Vector{Int}}
     schur_order::Vector{Vector{Int}}
     packed2::Vector{Matrix{T}}
@@ -328,11 +387,16 @@ end
 # every non-hot path; `coo` is a derived cache, so the four-argument
 # constructor keeps working unchanged at every existing call site.
 function SparseCons{T}(
-    Asp::Vector{Vector{SparseMatrixCSC{T,Int}}},
+    source_blocks::AbstractVector{
+        <:AbstractVector{SparseMatrixCSC{T,Int}}
+    },
     active::Vector{Vector{Int}},
     schur_order::Vector{Vector{Int}},
     packed2::Vector{Matrix{T}},
 ) where {T}
+    Asp = SparseCoefficientVector{T}[
+        block for block in source_blocks
+    ]
     coo = [
         build_block_coo(
             Asp[l],
@@ -459,6 +523,92 @@ struct ProblemClassification
     expected_schur_density::Float64
 end
 
+"""Compact dimensions and structural nonzero counts at a preprocessing boundary."""
+struct PreprocessSize
+    variables::Int
+    equalities::Int
+    psd_blocks::Int
+    psd_triangle_dimension::Int
+    coefficient_nonzeros::Int
+    equality_nonzeros::Int
+    predicted_schur_dimension::Int
+    predicted_kkt_dimension::Int
+end
+
+"""Diagnostics for one conservative preprocessing stage."""
+struct PreprocessStageReport
+    name::Symbol
+    enabled::Bool
+    changed::Bool
+    reason::String
+    input::PreprocessSize
+    output::PreprocessSize
+    elapsed::Float64
+    allocated_bytes::Int
+    peak_temporary_bytes::Int
+    warnings::Vector{String}
+end
+
+"""Analysis-only comparison of the current primal form and a possible dual form."""
+struct FormulationCostEstimate
+    primal_variables::Int
+    primal_equalities::Int
+    primal_psd_triangle_dimension::Int
+    primal_schur_dimension::Int
+    primal_kkt_dimension::Int
+    primal_dense_factor_bytes::Int
+    dual_variables::Int
+    dual_equalities::Int
+    dual_psd_triangle_dimension::Int
+    dual_schur_dimension::Int
+    dual_kkt_dimension::Int
+    dual_dense_factor_bytes::Int
+    selected::Symbol
+    rejection_reason::String
+end
+
+"""Aggregate, analysis-only chordal cost estimate for all PSD blocks."""
+struct ChordalCostEstimate
+    analyzed::Bool
+    original_triangle_storage::Int
+    decomposed_triangle_storage::Int
+    maximal_cliques::Int
+    maximum_clique_size::Int
+    overlap_equalities::Int
+    beneficial_blocks::Int
+    selected::Bool
+    rejection_reason::String
+end
+
+"""Structured report returned by [`preprocess`](@ref)."""
+struct PreprocessReport
+    enabled::Bool
+    changed::Bool
+    arithmetic::String
+    precision_bits::Int
+    input::PreprocessSize
+    output::PreprocessSize
+    extracted_lower_bounds::Int
+    extracted_upper_bounds::Int
+    merged_bound_constraints::Int
+    inconsistent_intervals::Int
+    fixed_variables_eliminated::Int
+    zero_equalities_removed::Int
+    duplicate_equalities_removed::Int
+    proportional_equalities_removed::Int
+    near_duplicate_equalities::Int
+    equality_rank_before::Int
+    equality_rank_after::Int
+    dependent_equality_residual::Float64
+    formulation::FormulationCostEstimate
+    chordal::ChordalCostEstimate
+    stages::Vector{PreprocessStageReport}
+    elapsed::Float64
+    allocated_bytes::Int
+    peak_temporary_bytes::Int
+    warnings::Vector{String}
+end
+
 """
     PresolveReport
 
@@ -476,7 +626,31 @@ struct PresolveReport
     inconsistent::Bool
     equality_keep::Vector{Int}
     elapsed::Float64
+    preprocessing::Union{Nothing,PreprocessReport}
 end
+
+# Source compatibility for the original positional report constructor. The
+# richer preprocessing report is attached by the staged frontend pipeline.
+PresolveReport(
+    original_equalities::Int,
+    reduced_equalities::Int,
+    removed_dependent_equalities::Int,
+    removed_zero_equalities::Int,
+    removed_redundant_constraints::Int,
+    inconsistent::Bool,
+    equality_keep::Vector{Int},
+    elapsed::Float64,
+) = PresolveReport(
+    original_equalities,
+    reduced_equalities,
+    removed_dependent_equalities,
+    removed_zero_equalities,
+    removed_redundant_constraints,
+    inconsistent,
+    equality_keep,
+    elapsed,
+    nothing,
+)
 
 """
     ExecutionPlan
