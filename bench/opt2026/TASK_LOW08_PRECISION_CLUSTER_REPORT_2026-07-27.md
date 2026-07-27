@@ -569,6 +569,7 @@ Tests:
 
 Benchmarks:
 
+- `bench/extended_precision_blas/small_solve_validation.jl`
 - `bench/lattice_bootstrap/benchmark_task_low08_matched_mosek.py`
 - `bench/lattice_bootstrap/benchmark_task_low08_matched_sdpx.jl`
 - `bench/opt2026/benchmark_task_low08_extended_solve.jl`

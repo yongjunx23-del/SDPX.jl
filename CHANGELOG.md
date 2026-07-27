@@ -89,6 +89,8 @@ previous published SDPX version.
 - Float64-to-BigFloat mixed-solve copies now write directly into reusable MPFR
   destinations with `mpfr_set_d`, eliminating one temporary BigFloat object
   per vector entry without changing rounding or scalar ownership.
+- Extended-precision smoke CSV output uses stable arithmetic aliases, avoiding
+  an unquoted comma in MultiFloats' concrete type name.
 - Precomputed three-bit `2x2` coefficient masks remove repeated structural-zero
   tests from high-precision contraction loops. Singleton local factors cache
   their inverse, and all optional reduced paths store and compute only one

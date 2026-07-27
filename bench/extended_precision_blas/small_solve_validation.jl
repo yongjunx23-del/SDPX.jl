@@ -56,7 +56,7 @@ function validate(::Type{T}, mode::Symbol, output::String) where {T}
     result = measurement.value
     expected = T(2) * sqrt(T(6))
     row = (
-        arithmetic=string(T),
+        arithmetic=T === Float64x4 ? "Float64x4" : "BigFloat",
         precision_bits=T === BigFloat ? precision(BigFloat) : precision(T),
         mode=mode,
         status=result.status,
