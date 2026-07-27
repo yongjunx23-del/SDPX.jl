@@ -62,6 +62,23 @@ function saturating_bytes(factors::Integer...)
 end
 
 """
+    saturating_sum_bytes(terms...) -> Int
+
+Sum of already-saturated byte counts, clamped to `typemax(Int)`. The companion
+to [`saturating_bytes`](@ref): products saturate individually, but a sum of
+several near-limit products can still wrap, and a wrapped total defeats the
+same budget comparisons.
+"""
+function saturating_sum_bytes(terms::Integer...)
+    total = big(0)
+    for term in terms
+        total += big(max(term, 0))
+        total > typemax(Int) && return typemax(Int)
+    end
+    return Int(total)
+end
+
+"""
     nullspace_memory_bytes(variables, equalities, ::Type{T}; rank=nothing) -> Int
 
 Bytes the basis will occupy, computable *before* materialising it.

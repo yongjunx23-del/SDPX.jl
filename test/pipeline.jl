@@ -1439,6 +1439,20 @@ end
         # Wider arithmetic needs more, not the same.
         @test SDPX.dense_workspace_floor_bytes(Float64x4, 500, 0, 8, 1) >
               SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 1)
+
+        # Overflow saturates instead of wrapping. A wrapped estimate is
+        # negative, compares as smaller than every budget, and approves
+        # exactly the allocation the pre-flight exists to refuse -- measured
+        # before the fix, m = 4e9 returned -6763251095801167872. These
+        # dimensions are never allocated; only the arithmetic is exercised.
+        for (m, n) in ((4_000_000_000, 0), (2_000_000_000, 1_000_000))
+            floor_bytes = SDPX.dense_workspace_floor_bytes(Float64, m, n, 32, 8)
+            @test floor_bytes > 0
+            @test floor_bytes == typemax(Int)
+        end
+        @test SDPX.saturating_sum_bytes(typemax(Int), 1) == typemax(Int)
+        @test SDPX.saturating_sum_bytes(3, 4) == 7
+
     end
 
 end

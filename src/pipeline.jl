@@ -1245,12 +1245,16 @@ function dense_workspace_floor_bytes(::Type{T}, m::Integer, n::Integer,
                                      L::Integer, thread_count::Integer) where {T}
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     schur_bins = T === BigFloat ? 1 : min(max(Int(thread_count), 1), max(Int(L), 1))
-    elements =
-        2 * Int(m) * Int(m) +
-        schur_bins * Int(m) * Int(m) +
-        Int(m) * Int(n) +
-        2 * Int(n) * Int(n)
-    return scalar_bytes * elements
+    # Saturating, not native Int: this figure feeds a memory pre-flight, and a
+    # product that wraps negative compares as smaller than every budget --
+    # approving exactly the allocation the check exists to refuse. Measured
+    # before the fix, m = 4e9 returned -6763251095801167872.
+    return saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, Int(m), Int(m)),
+        saturating_bytes(schur_bins, scalar_bytes, Int(m), Int(m)),
+        saturating_bytes(scalar_bytes, Int(m), Int(n)),
+        saturating_bytes(2, scalar_bytes, Int(n), Int(n)),
+    )
 end
 
 function estimate_sdp_workspace_bytes(
@@ -1280,13 +1284,14 @@ function estimate_sdp_workspace_bytes(
                 12k[block]^2 + k[block]^2 * length(active[block])
         end
     end
-    counted = scalar_bytes *
-             (
-                 matrix_elements +
-                 vector_elements +
-                 state_elements +
-                 block_elements
-             )
+    # Same saturating discipline as `dense_workspace_floor_bytes`: an
+    # estimate that wraps negative silently passes every budget comparison.
+    counted = saturating_sum_bytes(
+        saturating_bytes(scalar_bytes, matrix_elements),
+        saturating_bytes(scalar_bytes, vector_elements),
+        saturating_bytes(scalar_bytes, state_elements),
+        saturating_bytes(scalar_bytes, block_elements),
+    )
     # The term-by-term count above tracks the large arrays but not every
     # auxiliary buffer, index vector, or per-thread partition, so on its own it
     # under-predicts. Measured against actual `Workspace` allocation it came in
@@ -1299,6 +1304,8 @@ function estimate_sdp_workspace_bytes(
     # high-precision models. The margin below makes the figure an upper bound
     # over the measured range, at the cost of reserving somewhat more than is
     # strictly needed.
+    counted >= typemax(Int) ÷ WORKSPACE_ESTIMATE_MARGIN_NUMERATOR &&
+        return typemax(Int)
     element_bound =
         cld(
             counted * WORKSPACE_ESTIMATE_MARGIN_NUMERATOR,
@@ -1307,7 +1314,7 @@ function estimate_sdp_workspace_bytes(
     object_overhead =
         WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES +
         WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES * L
-    return element_bound + object_overhead
+    return saturating_sum_bytes(element_bound, object_overhead)
 end
 
 function _attach_diagnostics(
