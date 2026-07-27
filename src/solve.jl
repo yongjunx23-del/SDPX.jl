@@ -1512,6 +1512,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             total_refinement_steps=total_refine_steps,
             mixed_precision_kkt=
                 _mixed_precision_kkt_diagnostics(ws),
+            executed=(
+                kkt=ws.arrow !== nothing ? :block_arrow : :dense_cholesky,
+            ),
         ),
     )
 end

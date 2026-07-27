@@ -1334,11 +1334,19 @@ function _attach_diagnostics(
         process_peak_rss_bytes=_process_peak_rss_bytes(),
         memory_budget_bytes=plan.memory_budget_bytes,
     )
+    # `kkt`/`gram` report what actually executed whenever the solve path
+    # said so (`result.termination.executed`), falling back to the plan
+    # otherwise. The plan stays visible under `planned`. Before this split
+    # the record was the plan alone, and the LP path -- which selects its
+    # sparse Newton system at runtime, after the plan is frozen -- reported
+    # a dense LU and a BLAS Gram kernel for solves that executed neither.
+    executed = get(result.termination, :executed, NamedTuple())
     selected = (
         solver=plan.algorithm,
         scaling=plan.scaling,
-        kkt=plan.kkt_backend,
-        gram=plan.gram_kernel,
+        kkt=get(executed, :kkt, plan.kkt_backend),
+        gram=get(executed, :gram, plan.gram_kernel),
+        planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),
         scheduling=plan.schedule,
         threads=plan.threads,
         parameter_profile=plan.parameter_profile,

@@ -1549,6 +1549,21 @@ function solve_lp!(
         ),
         parameter_controller.history,
         nothing,
+        (
+            reason=:none,
+            # What actually ran, as opposed to what the pre-presolve plan
+            # chose. The sparse Newton system is selected at runtime, after
+            # presolve and scaling have settled `G`, so the plan cannot know
+            # it -- and diagnostics built from the plan reported a dense LU
+            # and a BLAS Gram kernel for solves that executed neither.
+            executed=(
+                kkt=workspace.sparse_system === nothing ?
+                    (equalities > 0 ? :dense_lu : :positive_definite_cholesky) :
+                    (workspace.sparse_system::LPSparseSystem{T}).formulation,
+                gram=workspace.sparse_system === nothing ?
+                     plan.gram_kernel : :sparse_gram,
+            ),
+        ),
     )
     return result, removed, _lp_workspace_bytes(workspace)
 end

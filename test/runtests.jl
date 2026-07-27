@@ -32,5 +32,6 @@ using Test
     include("examples.jl")
     include("nullspace_reduction.jl")
     include("error_handling.jl")
+    include("executed_diagnostics.jl")
     include("gates.jl")
 end
