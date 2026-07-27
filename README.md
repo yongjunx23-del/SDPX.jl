@@ -100,6 +100,16 @@ julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()
 julia --project=examples examples/01_basic_sdp.jl
 ```
 
+## Mathematica
+
+[`mathematica/SDPXLink.wl`](mathematica/README.md) calls SDPX from
+Mathematica through a command-line bridge: the problem is exported as JSON
+(schema in [`docs/bridge-schema.md`](docs/bridge-schema.md)), Julia runs
+`bin/sdpx_solve.jl`, and the result is imported back — with numbers as
+strings above `Float64`, so a 256-bit `BigFloat` solve round-trips ~30
+correct digits. `SDPXOptimize[c, A, C]` returns an `Association` with the
+solution, residuals, and the independent certificate.
+
 ## Public API
 
 The package is pre-1.0 and marked experimental, but these are the entry points

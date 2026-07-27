@@ -4,6 +4,20 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- A language-independent command-line bridge (`bin/sdpx_solve.jl`, JSON
+  schema v1 in `docs/bridge-schema.md`): numbers travel as strings above
+  `Float64`, failures produce a structured result file, and a Mathematica
+  package (`mathematica/SDPXLink.wl`) provides `SDPXOptimize` on top of it
+  via `RunProcess`. Verified end-to-end from Mathematica 14.1: Float64 and
+  256-bit BigFloat round trips (~30 correct digits), structured failures for
+  invalid input, unknown precision, and a missing Julia executable, and
+  temporary-file cleanup on every path. The documented upgrade path to a
+  persistent server or LibraryLink keeps this schema as the contract.
+
 ## [0.2.1] — 2026-07-27
 
 Correctness, honesty-of-reporting, and cleanup release driven by the

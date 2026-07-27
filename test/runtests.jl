@@ -33,5 +33,6 @@ using Test
     include("nullspace_reduction.jl")
     include("error_handling.jl")
     include("executed_diagnostics.jl")
+    include("cli_bridge.jl")
     include("gates.jl")
 end
