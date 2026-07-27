@@ -62,10 +62,16 @@ non-finite.
 | `extended_precision_blas` | type-dependent | Extended-precision Schur backend: conservative `:auto` for `Float64x4` and `BigFloat`, `:off` for other arithmetic types, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. Native BigFloat parallelism is limited to ownership-safe exact reduced-arrow panels and Schur tiles. |
 | `extended_precision_memory_fraction` | `0.10` | Maximum fraction of currently available memory that the crossover may reserve for packed extended-precision panels. The cap respects host free memory, cgroups, and `SDPX_MEMORY_LIMIT_BYTES`, and conservatively keeps half of reported free memory outside the packing budget. |
 | `mixed_precision_kkt` | `:off` | Opt-in KKT acceleration: dense problems use a guarded Float64 factorization; exact singleton-arrow BigFloat problems can use a guarded Float64x4 reduced shared factorization when MultiFloats is loaded. Float64 is never redirected. |
-| `mixed_precision_condition_limit` | `1e8` | Maximum conservative Float64 condition estimate accepted for mixed KKT refinement. |
+| `mixed_precision_condition_limit` | type-dependent | Maximum conservative Float64 condition estimate accepted for mixed KKT refinement: `1e14` for `Float64x4`, `1e8` otherwise. The predicted correction budget and measured target-precision contraction remain authoritative guards. |
 | `mixed_precision_refine_max_steps` | `32` | Maximum target-precision correction solves before native extended-precision fallback. |
 | `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of reliably available memory used for persistent Float64 factors and conversion scratch. |
 | `force_gc` | `false` | Retained A/B compatibility field. The main solve path does not currently read it. |
+
+Unless `refine_tol` is explicitly positive, dense mixed-precision refinement
+uses `max(64 * eps(T), min(ϵ_gap, ϵ_primal, ϵ_dual)^2)`. This remains much
+tighter than the requested certificate without requiring every unused bit of
+the target arithmetic. Predictor solves have a separate `1e-8` relative
+residual guard and may perform bounded corrections before falling back.
 
 Sparse equilibration rebuilds the derived sparse caches after scaling, so the
 following combination is supported:
@@ -193,18 +199,22 @@ opts = SolverOptions{Float64x4}(
 )
 ```
 
-`:auto` requires at least 256 Schur variables; `:on` removes only that size
-crossover. Both modes retain all memory, finiteness, rank, condition, and
-accuracy guards. The Float64 factor is accepted only when target-precision
-residual refinement is predicted to fit the configured step cap. A relative
-predictor residual above `1e-8` or stalled refinement recomputes the direction
-with the native factorization. Dynamic failures use a two-iteration cooldown
-and disable mixed precision after two failures. Static factor/condition
-rejections use the same cooldown and disable it after three repeated
-rejections. The feature remains off by default pending large full-solve
-validation. `result.termination.mixed_precision_kkt` records whether the path
-was available and active, its final reason, condition/step estimates, attempt
-counts, cooldown, and dynamic/static fallback counts.
+`:auto` requires at least 256 Schur variables and retains the memory,
+finiteness, rank, condition, predicted-correction-count, and accuracy guards.
+For fixed-width extended arithmetic, explicit `:on` removes the size cutoff
+and makes the conservative condition and predicted-step estimates diagnostic:
+the measured target-precision residual decrease is the acceptance test.
+BigFloat keeps the static condition cutoff in both modes. A relative predictor
+residual above `1e-8` that cannot be reduced monotonically, or stalled
+corrector refinement, recomputes the direction with the native factorization.
+Dynamic failures use a two-iteration cooldown and disable mixed precision
+after two failures. Static factor/condition rejections use the same cooldown
+and disable it after three repeated rejections. The feature remains off by
+default pending broader full-solve validation.
+`result.termination.mixed_precision_kkt` records whether the path was
+available and active, its final reason, condition/step estimates, measured
+predictor corrections, attempt counts, cooldown, and dynamic/static fallback
+counts.
 
 For an exact singleton-local BigFloat arrow, loading `MultiFloats` and setting
 `mixed_precision_kkt=:on` instead selects

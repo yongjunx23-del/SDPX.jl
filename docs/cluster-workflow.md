@@ -267,7 +267,9 @@ adjust PBS resources after measuring the target node:
 | BigFloat, exact singleton-local `2x2` arrow | 8 | sweep 1, 2, 4, 8 | 1 | native block preparation and disjoint reduced-Schur tiles may be parallel; residual/refinement remains serial |
 | BigFloat, experimental mixed arrow | 8 | sweep 1, 2, 4, 8 | 1 | the Float64x4 reduced panel/factorization is parallel; BigFloat residual/refinement remains serial |
 | Task_Low08 Float64 validation | 8 | 8 | 8 | sparse assembly plus dense OpenBLAS KKT factorization |
-| Task_Low08 Float64 performance on dual EPYC 7742 | 32 | 32 | 16 | OpenBLAS with `numactl --interleave=all`; measured, hardware-specific |
+| Task_Low08 Float64 performance on dual EPYC 7742 | 16 | 16 | 16 | OpenBLAS with `numactl --interleave=all`; measured, hardware-specific |
+| Task_Low08 Float64x4 mixed KKT | 16 | 16 | 1 | lower-only sparse Schur plus owned-row refinement; request at least 64 GiB |
+| Task_Low08 native BigFloat, 256 bit | 1 | 1 | 1 | request at least 128 GiB; the measured 95.720 GiB estimate is unsafe in a 64 GiB job |
 | Small package validation | 8 | 4 for tests, 1 for high-precision smoke | 1 | sequential validation phases |
 
 General native `BigFloat` uses one solver thread. Exact singleton-local `2x2`
@@ -282,11 +284,24 @@ Do not start a Float64x4 block-parallel run with both Julia and BLAS set to the
 full allocation. Keep BLAS and OMP at one thread so the 1/2/4/8 comparison
 changes only SDPX's scheduler width.
 
+For dense Task_Low08 Float64x4 runs, `mixed_precision_kkt=:on` is an expert
+configuration: Float64 factorization is accepted only while target-precision
+predictor and corrector residual corrections decrease monotonically. If those
+corrections fail, the solver may allocate a guarded `Float64x2` factor
+workspace (0.596 GiB for Task_Low08), rebuild it from the current Schur
+matrix, and accept each solve only after a `Float64x4` residual check. Native
+`Float64x4` factorization remains the final fallback. Keep
+`extended_precision_blas=:auto`, Julia at 16 threads, and BLAS at one thread.
+The 16-thread conservative planner estimate is 43.339 GiB and the measured
+process peak is approximately 21 GiB; do not use 32 task-local Schur workers
+in a 64 GiB request because the estimate rises to 70.120 GiB.
+
 For dense-Schur Float64 jobs, Julia and BLAS widths are separate tuning
 parameters. Task_Low08 has only 32 PSD blocks, while its `6119 x 6119` dense
 Cholesky remains a level-3 LAPACK operation. The measured dual-EPYC optimum
-used 32 Julia threads, 16 OpenBLAS threads, and interleaved NUMA allocation.
-Using 128 Julia and BLAS threads was slower and used substantially more memory.
+used 16 Julia threads, 16 OpenBLAS threads, and interleaved NUMA allocation.
+Thirty-two Julia threads were within 1%, while 64--128 were slower and 128
+used substantially more memory.
 Treat these values as a site profile, not universal solver defaults.
 
 Set a planning ceiling below the PBS memory request:
@@ -441,7 +456,10 @@ The candidate may be promoted only when:
 - Task_Low08 has relative gap, primal residual, and dual residual at most
   `1e-6`;
 - Task_Low08 maximum equality residual is at most `1e-9`;
-- Task_Low08 minimum primal and dual PSD eigenvalues are at least `-1e-10`;
+- the original-coordinate certificate reports `primal_psd.ok` and
+  `dual_psd.ok`; record raw minimum eigenvalues as diagnostics, but do not
+  replace the solver's scale-aware `tolerance * max(norm(block, Inf), 1)` PSD
+  allowance with a fixed absolute threshold;
 - the sparse scheduler benchmark reports no meaningful Schur error and no
   unexpected thread or memory selection;
 - no phase exceeds its memory request or reports an ownership/aliasing

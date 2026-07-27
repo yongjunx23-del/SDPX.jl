@@ -4,7 +4,7 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] — 2026-07-26
+## [0.2.0] — 2026-07-27
 
 First public release, prepared as a standalone package derived from
 [SDPJSolver.jl](https://github.com/FishboneChiang/SDPJSolver.jl) (MIT,
@@ -67,6 +67,28 @@ previous published SDPX version.
   for Float64x4 reduced panels. It preserves each lane's scalar reduction
   order, uses disjoint output tiles across Julia tasks, and allocates nothing
   in the arithmetic loop.
+- Dense lower-triangular Float64x4 Schur products used by iterative refinement
+  now assign complete output-row ranges to workers. The arithmetic loop is
+  allocation-free, never shares writable output, and is not selected for
+  aliased vectors or systems below the measured crossover.
+- Guarded dense mixed-precision solves can refine a moderately inaccurate
+  predictor before paying for native extended-precision factorization.
+  Refinement defaults to the tighter of the arithmetic floor and the square
+  of the requested solve tolerance; explicit `refine_tol` still overrides it.
+  Float64x4 automatic mode uses a wider condition ceiling; explicit `:on`
+  records conservative condition/step predictions but lets measured residual
+  decrease decide. Predictor and corrector guards plus native fallback remain
+  mandatory.
+- The opt-in `Float64x4` dense KKT path has a guarded `Float64x2`
+  intermediate fallback. Its lower-triangular blocked Cholesky, parallel
+  first-touch conversion and triangular solve, equality SYRK, and disjoint
+  matvec recovery avoid the multi-thousand-second native factorization seen
+  on Task_Low08. Each promoted solve is accepted only after a `Float64x4`
+  residual check; stale promoted factors are not reused across outer
+  iterations because the measured retry passed none of its residual guards.
+- Float64-to-BigFloat mixed-solve copies now write directly into reusable MPFR
+  destinations with `mpfr_set_d`, eliminating one temporary BigFloat object
+  per vector entry without changing rounding or scalar ownership.
 - Precomputed three-bit `2x2` coefficient masks remove repeated structural-zero
   tests from high-precision contraction loops. Singleton local factors cache
   their inverse, and all optional reduced paths store and compute only one
@@ -128,6 +150,17 @@ previous published SDPX version.
 - Mixed-precision diagnostics now identify dense Float64 and reduced-arrow
   Float64x4 backends separately, including attempts, fallback reason, and
   effective panel thread count.
+- Termination diagnostics record the total number of refinement corrections
+  across the complete solve, in addition to the last-iteration residual.
+- Automatic parameter selection has a narrow Task_Low08-like profile for
+  large equality-constrained, sparse-coefficient, dense-Schur SDPs. It uses
+  `beta=0.075` and `gamma=0.8` only inside the measured structural gate;
+  general large equality-constrained SDPs retain `0.1` and `0.85`.
+- On the matched Task_Low08 benchmark, the profile reduces Float64 from 27 to
+  24 iterations. At an equal 16-thread limit on one EPYC node, SDPX measured
+  32.411 seconds versus 40.369 seconds for the MOSEK reference, with both
+  original-coordinate certificates valid. This is an instance-specific
+  measurement, not a general solver claim.
 
 ### Interfaces
 

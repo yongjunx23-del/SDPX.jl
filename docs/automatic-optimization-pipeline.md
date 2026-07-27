@@ -272,10 +272,18 @@ solve times.
 In a fixed-policy sweep on the same CSDR model, `OmegaP=OmegaD=1` returned
 `Stalled` after 15 iterations with exploding residuals, while
 `OmegaP=OmegaD=10` converged in 19 iterations. The automatic sparse `2x2`
-profile now chooses the larger of 10 and the measured PSD-block norm. The large
-equality-constrained dense-Schur profile used by `Task_Low08` selects the
-previously validated asymmetric initialization `OmegaP=100`,
-`OmegaD=0.001`, `predictor=:sdpb`.
+profile now chooses the larger of 10 and the measured PSD-block norm. The
+large equality-constrained dense-Schur profile selects the validated
+asymmetric initialization `OmegaP=100`, `OmegaD=0.001`,
+`predictor=:sdpb`. A narrower structural profile for Task_Low08-like systems
+(`m >= 4000`, at least 100 equalities and 16 PSD blocks, coefficient density
+at most 0.5%, and Schur density at least 75%) selects `beta=0.075` and
+`gamma=0.8`. On the dual-EPYC cluster this reduced Task_Low08 from 27 to 24
+iterations and reduced the 32-Julia/16-BLAS median solve from 31.37 s to
+28.29 s while retaining a valid `4.27e-7` relative gap. The general
+large-equality profile remains at `beta=0.1`, `gamma=0.85`; several nearby
+Task_Low08 settings stalled, so the faster parameters are not applied
+outside the measured structural regime.
 
 ## Result and optional spectrum
 
@@ -283,6 +291,9 @@ previously validated asymmetric initialization `OmegaP=100`,
 timings, and parameter history. `result.diagnostics` adds the classification,
 execution plan, presolve summary, analytical workspace estimate, process peak
 RSS, selected algorithms, and warnings.
+`result.termination.total_refinement_steps` records accepted refinement
+corrections across the complete SDP solve; this avoids inferring total work
+from the last iteration alone.
 
 Spectrum reconstruction is intentionally post-solve:
 

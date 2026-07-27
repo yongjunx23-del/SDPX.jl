@@ -8,17 +8,18 @@ SDPX provides an extended-precision kernel module under
 `src/kernels/extended_precision_blas/` with in-place triangular `syrk!`,
 blocked `gemm!`, cache blocking, panel packing, fixed-width multithreading,
 and serial ownership-safe BigFloat kernels. The established Float64 numerical
-path is unchanged. Extended-precision BLAS remains disabled by default:
+path is unchanged. Float64x4 and BigFloat use conservative automatic
+selection by default:
 
 ```julia
-extended_precision_blas = :off
+extended_precision_blas = :auto
 ```
 
-Use `:auto` to enable the conservative measured crossover:
+Use `:off` to force the established sparse outer-product path:
 
 ```julia
 SolverOptions{T}(
-    extended_precision_blas=:auto,
+    extended_precision_blas=:off,
     extended_precision_memory_fraction=0.10,
 )
 ```
@@ -56,7 +57,7 @@ matrix.
 
 | Rule | Fixed-width extended | BigFloat |
 |---|---:|---:|
-| Default mode | `:off` | `:off` |
+| Default mode | `:auto` | `:auto` |
 | Minimum active columns | 32 | 20 |
 | Minimum pair-row work | 200,000 | 50,000 |
 | Minimum expected Schur density | 0.20 | 0.05 |
@@ -146,31 +147,52 @@ The required Float64 gate passed before extended-precision experiments:
 | Metric | Value |
 |---|---:|
 | Status | `Optimal` |
-| Iterations | 27 |
-| Solve time | 46.8813519478 s |
-| Total time | 47.3922419548 s |
-| Primal objective | 0.6532913938979635 |
-| Dual objective | 0.6532909387224990 |
-| Relative gap | `4.5517546454e-7` |
-| Recomputed primal residual | `2.0645529730e-10` |
-| Recomputed dual residual | `3.6814693516e-9` |
-| Maximum equality residual | `2.0600188222e-12` |
-| Minimum primal PSD eigenvalue | `-8.7729658678e-15` |
-| Minimum dual PSD eigenvalue | `2.1209654298e-14` |
+| Julia / BLAS threads | 16 / 16 |
+| Iterations | 24 |
+| Median solve time | 27.400998 s |
+| Primal objective | 0.6532912858860604 |
+| Dual objective | 0.6532908587043673 |
+| Relative gap | `4.27181693e-7` |
+| Recomputed primal residual | `2.73189471e-9` |
+| Recomputed dual residual | `1.14351315e-10` |
+| Maximum equality residual | `2.73155942e-11` |
+| Minimum primal PSD eigenvalue | `-1.57405773e-9` |
+| Minimum dual PSD eigenvalue | `4.06997424e-14` |
 | Equality presolve | 482 → 394 |
 | Post-solve certificate | passed |
 
 Task_Low08 has sparse individual coefficient matrices but a dense aggregate
 Schur structure. Automatic extended packing is rejected because densifying
 the coefficient contractions costs more than the sparse outer-product path.
-A full Float64x4 or BigFloat solve is not claimed: generic factorization of
-the dense `6119 × 6119` high-precision Schur matrix remains the dominant
-unresolved cost.
+The retained lower-triangle Float64x4 Schur path is 1.12--1.20× faster over
+1/2/4/8/16 threads with zero sampled error. The owned-row refinement product
+reduces a same-node three-iteration solve from 128.506 to 72.993 seconds and
+refinement from 45.957 to 9.422 seconds without changing any recorded iterate
+metric.
+
+When Float64 correction stops meeting the target-precision residual guard,
+the opt-in dense KKT hierarchy can now promote its preconditioner to
+`Float64x2` before native `Float64x4`. On the controlled 39-iteration
+Task_Low08 trajectory, parallel first-touch conversion, blocked Cholesky,
+disjoint `L^-1 B`, triangular equality SYRK, and disjoint recovery products
+reduced ten promoted factor stages from 737.022 to 151.993 seconds. Total
+solve time fell from 1,759.502 to 1,368.566 seconds, and both runs produced
+the same objectives, residuals, gap, and PSD checks. The retained full
+hierarchy returned `Optimal` in 55 iterations and 2,241.803 seconds, used
+20.934 GiB peak RSS, did not enter native Float64x4 factorization, and passed
+the independent objective, residual, gap, equality, and PSD checks.
+
+A full native BigFloat solve is not claimed: the conservative
+256-bit workspace estimate is 95.720 GiB, above the tested 64 GiB job limit.
+The complete campaign, including the matched MOSEK reference and memory gate,
+is documented in
+[`TASK_LOW08_PRECISION_CLUSTER_REPORT_2026-07-27.md`](../opt2026/TASK_LOW08_PRECISION_CLUSTER_REPORT_2026-07-27.md).
 
 ## Remaining bottlenecks
 
 1. Equality-constrained dense SDPs such as Task_Low08 remain dominated by
-   dense Schur storage and factorization.
+   dense Schur storage. The guarded Float64x2 promotion avoids most native
+   Float64x4 Cholesky work, but a native fallback remains serial.
 2. Per-task `m²` Schur accumulators limit useful lattice parallelism under a
    memory budget; tiled or NUMA-aware triangular reductions remain valuable.
 3. Large non-arrow BigFloat SDPs still have quadratic dense KKT storage and

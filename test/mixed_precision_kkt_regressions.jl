@@ -1,5 +1,5 @@
 using LinearAlgebra
-using MultiFloats: Float64x4
+using MultiFloats: Float64x2, Float64x4
 using Random
 using SDPX
 using Test
@@ -32,6 +32,25 @@ function mixed_kkt_problem(
 end
 
 @testset "mixed-precision BigFloat KKT" begin
+    @testset "Float64 copies reuse owned MPFR storage" begin
+        source = [1.25, -3.5, nextfloat(0.0), Inf, NaN]
+        destination = SDPX.alloc_zeros(BigFloat, length(source))
+        identities = objectid.(destination)
+
+        SDPX._copy_extended_owned!(destination, source)
+
+        @test all(isequal.(Float64.(destination), source))
+        @test objectid.(destination) == identities
+        GC.gc()
+        SDPX._copy_extended_owned!(destination, source)
+        @test @allocated(SDPX._copy_extended_owned!(destination, source)) == 0
+    end
+
+    @test SDPX.SolverOptions{BigFloat}().mixed_precision_condition_limit ==
+          1.0e8
+    @test SDPX.SolverOptions{Float64x4}().mixed_precision_condition_limit ==
+          1.0e14
+
     setprecision(BigFloat, 256) do
         variables = 18
         equalities = 3
@@ -50,6 +69,7 @@ end
             mixed_precision_condition_limit=1.0e10,
             mixed_precision_refine_max_steps=16,
             mixed_precision_memory_fraction=1.0,
+            refine_tol=big"1e-70",
         )
         workspace = SDPX.Workspace(
             problem;
@@ -207,11 +227,31 @@ end
         @test SDPX.factor_kkt!(workspace, problem, options).ok
         @test workspace.mixed_precision.active
 
+        # A moderately inaccurate low-precision solve should be corrected to
+        # the predictor guard before paying for a native factorization.
+        tiny_distortion = 1.0 + 1.0e-6
+        workspace.mixed_precision.S64[1, 1] *= tiny_distortion
+        rhs = BigFloat.(1:8)
+        SDPX.copy_owned!(workspace.p, BigFloat[])
+        @test SDPX._solve_mixed_kkt_guarded!(
+            workspace,
+            problem,
+            options,
+            rhs,
+        )
+        @test workspace.mixed_precision.active
+        @test workspace.mixed_precision.predictor_refinement_steps > 0
+        @test SDPX._mixed_kkt_relative_residual(
+            workspace,
+            problem,
+            rhs,
+        ) <= BigFloat(SDPX.MIXED_KKT_PREDICTOR_RESIDUAL_LIMIT)
+        workspace.mixed_precision.S64[1, 1] /= tiny_distortion
+
         # Deliberately corrupt the low-precision factor only. The BigFloat
         # Schur source remains intact, so the predictor residual guard must
         # detect the bad direction and activate the native fallback.
         workspace.mixed_precision.S64[1, 1] *= 4.0
-        rhs = BigFloat.(1:8)
         SDPX.copy_owned!(workspace.p, BigFloat[])
         @test SDPX._solve_mixed_kkt_guarded!(
             workspace,
@@ -278,8 +318,58 @@ end
 
     @testset "Float64x4 uses the same guarded refinement path" begin
         T = Float64x4
+        factor_rng = MersenneTwister(8921)
+        factor_source =
+            Float64x2.(randn(factor_rng, 130, 130))
+        factor_matrix =
+            factor_source * transpose(factor_source) +
+            Float64x2(2) *
+            Matrix{Float64x2}(I, 130, 130)
+        factor_buffer = copy(factor_matrix)
+        blocked_factor =
+            SDPX._blocked_intermediate_cholesky!(
+                factor_buffer,
+                min(4, Threads.nthreads()),
+            )
+        @test blocked_factor !== nothing
+        blocked_lower =
+            Matrix(LowerTriangular(blocked_factor.L))
+        @test maximum(
+            abs,
+            blocked_lower * transpose(blocked_lower) -
+            factor_matrix,
+        ) / maximum(abs, factor_matrix) <= Float64x2(1e-29)
+        triangular_rhs =
+            Float64x2.(randn(factor_rng, 130, 20))
+        triangular_expected =
+            LowerTriangular(blocked_factor.L) \
+            triangular_rhs
+        triangular_actual = copy(triangular_rhs)
+        SDPX._intermediate_trsm!(
+            blocked_factor.L,
+            triangular_actual,
+            min(4, Threads.nthreads()),
+        )
+        @test maximum(
+            abs,
+            triangular_actual - triangular_expected,
+        ) <= Float64x2(1e-29)
+
         variables = 18
         equalities = 2
+        nearly_singular = Matrix{T}(I, 4, 4)
+        nearly_singular[1, 2] = one(T)
+        nearly_singular[2, 1] = one(T)
+        nearly_singular[2, 2] = one(T) + T(1e-30)
+        preconditioner = zeros(Float64, 4, 4)
+        regularized = SDPX._factor_float64_preconditioner!(
+            preconditioner,
+            nearly_singular,
+        )
+        @test regularized.factor !== nothing
+        @test regularized.attempts > 0
+        @test regularized.reason === :success
+
         problem = mixed_kkt_problem(T, variables, equalities)
         rng = MersenneTwister(12881)
         random_matrix = T.(randn(rng, variables, variables))
@@ -294,6 +384,7 @@ end
             mixed_precision_condition_limit=1.0e10,
             mixed_precision_refine_max_steps=16,
             mixed_precision_memory_fraction=1.0,
+            refine_tol=T(1e-54),
         )
         workspace = SDPX.Workspace(
             problem;
@@ -302,9 +393,100 @@ end
             thread_count=1,
         )
         @test workspace.mixed_precision !== nothing
+        default_tolerance_options = SDPX.SolverOptions{T}(
+            ϵ_gap=T(1e-12),
+            ϵ_primal=T(1e-12),
+            ϵ_dual=T(1e-12),
+        )
+        @test SDPX._mixed_refinement_relative_tolerance(
+            default_tolerance_options,
+        ) == T(1e-12) * T(1e-12)
+        measured_options = SDPX.SolverOptions{T}(
+            verbosity=0,
+            mixed_precision_kkt=:on,
+            mixed_precision_condition_limit=1.0,
+            mixed_precision_refine_max_steps=16,
+            mixed_precision_memory_fraction=1.0,
+        )
+        SDPX.copy_owned!(workspace.S, schur)
+        @test SDPX.factor_kkt!(
+            workspace,
+            problem,
+            measured_options,
+        ).ok
+        @test workspace.mixed_precision.active
+        @test workspace.mixed_precision.condition_estimate > 1.0
+        @test hasproperty(
+            SDPX._mixed_precision_kkt_diagnostics(workspace),
+            :float64_regularization_attempts,
+        )
+        @test SDPX.mixed_intermediate_arithmetic(T) === Float64x2
+        @test SDPX._try_factor_intermediate_kkt!(
+            workspace.mixed_precision,
+            workspace,
+            problem,
+            options,
+        )
+        @test workspace.mixed_precision.intermediate_active
+        @test workspace.mixed_precision.intermediate_factor_attempts == 1
+        SDPX.copy_owned!(workspace.p, equality_rhs)
+        helper_ok, helper_steps, helper_residual =
+            SDPX._refine_with_active_intermediate!(
+                workspace,
+                problem,
+                options,
+                primal_rhs,
+                T(1e-52),
+            )
+        @test helper_ok
+        @test helper_steps >= 0
+        @test helper_residual <= T(1e-52)
+        SDPX.solve_kkt!(
+            workspace,
+            equalities,
+            primal_rhs,
+            equality_rhs,
+            workspace.dx,
+            workspace.dy,
+        )
+        intermediate_steps, intermediate_residual =
+            SDPX.refine_direction!(
+                workspace,
+                problem,
+                options,
+                primal_rhs,
+            )
+        @test intermediate_steps >= 0
+        @test intermediate_residual <= T(1e-52)
+        @test maximum(
+            abs,
+            schur * workspace.dx -
+            problem.B * workspace.dy -
+            primal_rhs,
+        ) <= T(1e-52)
         SDPX.copy_owned!(workspace.S, schur)
         @test SDPX.factor_kkt!(workspace, problem, options).ok
         @test workspace.mixed_precision.active
+        SDPX.copy_owned!(workspace.p, equality_rhs)
+        tiny_distortion = 1.0 + 1.0e-6
+        workspace.mixed_precision.S64[1, 1] *= tiny_distortion
+        @test SDPX._solve_mixed_kkt_guarded!(
+            workspace,
+            problem,
+            options,
+            primal_rhs,
+        )
+        @test workspace.mixed_precision.active
+        @test workspace.mixed_precision.predictor_refinement_steps > 0
+        @test SDPX._mixed_kkt_relative_residual(
+            workspace,
+            problem,
+            primal_rhs,
+        ) <= T(SDPX.MIXED_KKT_PREDICTOR_RESIDUAL_LIMIT)
+        workspace.mixed_precision.S64[1, 1] /= tiny_distortion
+
+        SDPX.copy_owned!(workspace.S, schur)
+        @test SDPX.factor_kkt!(workspace, problem, options).ok
         SDPX.copy_owned!(workspace.p, equality_rhs)
         SDPX.solve_kkt!(
             workspace,

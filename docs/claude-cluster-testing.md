@@ -1,7 +1,7 @@
 # SDPX Cluster Installation and Test Handoff
 
 This document is a self-contained handoff for an independent Claude session.
-It describes the SDPX installation that was verified on 2026-07-26 and the
+It describes the SDPX installation that was verified on 2026-07-27 and the
 commands needed to reproduce its validation. Use English in all new logs,
 scripts, result summaries, and code changes.
 
@@ -135,7 +135,7 @@ The validated PBS script requests eight cores, 32 GiB, and two hours from the
 
 ```bash
 cd "$JOBDIR"
-VALIDATION_JOB="$(qsub validate-v2.pbs)"
+VALIDATION_JOB="$(qsub validate-cluster-release.pbs)"
 printf 'validation_job=%s\n' "$VALIDATION_JOB"
 ```
 
@@ -181,7 +181,9 @@ Numerical acceptance gates:
 - `abs(objective - 0.653291393898) <= 1e-6`;
 - relative gap, primal residual, and dual residual are at most `1e-6`;
 - maximum equality residual is at most `1e-9`;
-- minimum primal and dual PSD eigenvalues are at least `-1e-10`;
+- the original-coordinate primal and dual PSD checks pass their
+  problem-scaled tolerance; record the raw minimum eigenvalues as diagnostics
+  rather than replacing the scale-aware check with a fixed absolute cutoff;
 - sparse Schur validation has no meaningful relative error;
 - peak memory remains below the PBS request.
 
@@ -210,6 +212,47 @@ kernel, memory, and numerical comparisons.
 
 Test counts may increase in newer commits; the exit status and tests contained
 in the candidate release are authoritative.
+
+### 2026-07-27 Task_Low08 precision campaign
+
+The current v0.2.0 candidate adds a narrowly gated automatic Task_Low08
+parameter profile, a lower-only threaded Float64x4 refinement product, and a
+guarded Float64 → Float64x2 → Float64x4 dense-KKT hierarchy. The full local
+package suite passed 2,107 of 2,107 assertions.
+
+The fair same-node Float64 reference used the same 394-column equality basis,
+`1e-6` tolerance, warm-up, timing boundaries, and thread limits. At one
+thread, MOSEK / SDPX solver medians were 75.783 / 88.123 seconds. At 16
+threads, they were 40.369 / 32.411 seconds; SDPX was 19.7% faster in solver
+time and used 6.19 rather than 12.66 GB peak RSS. The measured SDPX
+complete-solve optimum was 16 Julia plus 16 OpenBLAS threads with interleaved
+NUMA allocation.
+
+The full Float64x4 run used 16 Julia threads, one BLAS thread,
+`extended_precision_blas=:auto`, `mixed_precision_kkt=:on`, and a 64 GiB
+request:
+
+```text
+status: Optimal
+iterations: 55
+solve time: 2241.803 s
+relative gap: 7.08808e-13
+primal / dual residual: 8.95078e-20 / 5.48435e-17
+maximum equality violation: 2.43274e-17
+minimum primal / dual PSD eigenvalue: -1.10118e-11 / -3.98301e-14
+peak RSS: 20.934 GiB
+native Float64x4 fallback: not entered
+```
+
+Do not submit a native 256-bit BigFloat Task_Low08 solve in a 64 GiB job. The
+conservative workspace estimate is 95.720 GiB before operating-system
+headroom; request at least 128 GiB. Use the medium CSDR exact-arrow model for
+routine BigFloat regression, where the retained 256-bit eight-thread solve is
+approximately 87 seconds and certificate-equivalent to the legacy path.
+
+See
+`bench/opt2026/TASK_LOW08_PRECISION_CLUSTER_REPORT_2026-07-27.md` for the
+complete timing tables, rejected experiments, crossovers, and raw job IDs.
 
 ### Latest promoted release
 

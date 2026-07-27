@@ -82,6 +82,29 @@ end
     return output
 end
 
+# Convert a binary64 value into an already-owned MPFR destination. Calling
+# `BigFloat(value)` in a dense mixed-precision solve creates a temporary MPFR
+# object for every vector entry and right-hand side; `mpfr_set_d` performs the
+# same correctly rounded conversion directly into reusable solver storage.
+@inline function _mpfr_set_float64!(
+    output::BigFloat,
+    input::Float64,
+)
+    ccall(
+        (:mpfr_set_d, Base.MPFR.libmpfr),
+        Cint,
+        (
+            Ref{BigFloat},
+            Cdouble,
+            Base.MPFR.MPFRRoundingMode,
+        ),
+        output,
+        input,
+        Base.MPFR.rounding_raw(BigFloat),
+    )
+    return output
+end
+
 # ---- kdot: simple form (2 O(1) allocations per call: the returned
 #     accumulator plus one scratch buffer) ----
 

@@ -437,6 +437,40 @@ end
         end
     end
 
+    @testset "owned-row Float64x4 symmetric matvec" begin
+        T = Float64x4
+        dimension = 71
+        lower = fill(T(-10_000), dimension, dimension)
+        @inbounds for column in 1:dimension, row in column:dimension
+            lower[row, column] =
+                T(sin(0.013 * row + 0.019 * column))
+        end
+        input = T.(1:dimension) ./ T(31)
+        output = fill(T(2), dimension)
+        reference =
+            T(3) .* output +
+            T(2) .* (Symmetric(lower, :L) * input)
+        SDPX._threaded_fixed_extended_symmetric_mul!(
+            output,
+            lower,
+            input,
+            T(2),
+            T(3),
+            min(4, Threads.nthreads()),
+        )
+        @test maximum(abs, output - reference) < T(1e-52)
+        @test_throws ArgumentError begin
+            SDPX._threaded_fixed_extended_symmetric_mul!(
+                input,
+                lower,
+                input,
+                one(T),
+                zero(T),
+                min(4, Threads.nthreads()),
+            )
+        end
+    end
+
     @testset "crossover policy" begin
         sparse_features = EPBLAS.CrossoverFeatures(
             rows=1024,

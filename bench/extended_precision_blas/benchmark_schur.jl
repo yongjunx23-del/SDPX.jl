@@ -183,8 +183,19 @@ function sampled_schur_error(
     workspace::SDPX.Workspace{T},
     samples::Int,
 ) where {T}
-    materialized = zeros(T, problem.dims.m, problem.dims.m)
-    SDPX.materialize_schur!(materialized, workspace)
+    arrow = workspace.arrow
+    if arrow !== nothing
+        if arrow.mixed_reduced_ready
+            SDPX._materialize_mixed_arrow_shared!(
+                workspace::SDPX.Workspace{BigFloat},
+            )
+        elseif arrow.reduced_panel_ready
+            SDPX._materialize_reduced_arrow_shared!(
+                arrow,
+                workspace.thread_count,
+            )
+        end
+    end
     state = UInt64(0x9e3779b97f4a7c15)
     maximum_relative_error = 0.0
     maximum_absolute_error = 0.0
@@ -213,7 +224,33 @@ function sampled_schur_error(
                 )
             end
         end
-        actual = materialized[first, second]
+        actual = if arrow === nothing
+            workspace.schur_lower_only ?
+            workspace.S[max(first, second), min(first, second)] :
+            workspace.S[first, second]
+        else
+            first_global = arrow.global_pos[first]
+            second_global = arrow.global_pos[second]
+            if first_global > 0 && second_global > 0
+                arrow.Sgg[first_global, second_global]
+            elseif first_global > 0
+                owner = arrow.local_owner[second]
+                position = arrow.local_pos[second]
+                arrow.coupling[owner][position, first_global]
+            elseif second_global > 0
+                owner = arrow.local_owner[first]
+                position = arrow.local_pos[first]
+                arrow.coupling[owner][position, second_global]
+            elseif arrow.local_owner[first] == arrow.local_owner[second]
+                owner = arrow.local_owner[first]
+                arrow.Dsrc[owner][
+                    arrow.local_pos[first],
+                    arrow.local_pos[second],
+                ]
+            else
+                zero(T)
+            end
+        end
         absolute_error = Float64(abs(actual - expected))
         relative_error =
             Float64(abs(actual - expected) / max(abs(expected), one(T)))

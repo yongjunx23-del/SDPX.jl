@@ -132,9 +132,25 @@ Factor the current Schur complement `ws.S` (accumulated by
 """
 function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     ws.arrow === nothing || return factor_arrow_kkt!(ws, opts)
-    if ws.mixed_precision !== nothing &&
-       _try_factor_mixed_kkt!(ws.mixed_precision, ws, prob, opts)
-        return (ok=true, reg_attempts=0, q_pivoted=false)
+    if ws.mixed_precision !== nothing
+        if _try_factor_mixed_kkt!(
+            ws.mixed_precision,
+            ws,
+            prob,
+            opts,
+        )
+            return (ok=true, reg_attempts=0, q_pivoted=false)
+        end
+        opts.verbosity >= 1 && @warn(
+            "Mixed-precision KKT factorization rejected; using the native target-precision factorization.",
+            reason = ws.mixed_precision.reason,
+            condition_estimate=
+                ws.mixed_precision.condition_estimate,
+            predicted_refinement_steps=
+                ws.mixed_precision.predicted_refinement_steps,
+            float64_regularization_attempts=
+                ws.mixed_precision.float64_regularization_attempts,
+        )
     end
     return _factor_dense_kkt_native!(ws, prob, opts)
 end
@@ -1676,6 +1692,90 @@ function _reduced_arrow_schur_mul!(
     return out
 end
 
+@inline function _fixed_extended_symmetric_mul_range!(
+    out::AbstractVector{T},
+    lower::AbstractMatrix{T},
+    x::AbstractVector{T},
+    alpha::T,
+    beta::T,
+    first_row::Int,
+    last_row::Int,
+) where {T}
+    dimension = size(lower, 1)
+    @inbounds for row in first_row:last_row
+        value = zero(T)
+        for column in 1:row
+            value += lower[row, column] * x[column]
+        end
+        for column in (row + 1):dimension
+            value += lower[column, row] * x[column]
+        end
+        out[row] = alpha * value + beta * out[row]
+    end
+    return out
+end
+
+"""
+    _threaded_fixed_extended_symmetric_mul!(out, lower, x, alpha, beta, threads)
+
+Matrix-vector product using only the stored lower triangle. Every worker owns
+complete output rows, so immutable fixed-width extended arithmetic can execute
+without atomics, reductions, or writable aliasing between tasks. This is used
+by mixed-precision refinement, where repeated serial `Float64x4` Schur
+products otherwise dominate after the Float64 factorization has accelerated
+the dense KKT solve.
+"""
+function _threaded_fixed_extended_symmetric_mul!(
+    out::AbstractVector{T},
+    lower::AbstractMatrix{T},
+    x::AbstractVector{T},
+    alpha::T,
+    beta::T,
+    thread_count::Int,
+) where {T}
+    dimension = size(lower, 1)
+    size(lower, 2) == dimension ||
+        throw(DimensionMismatch("symmetric matrix must be square"))
+    length(out) == dimension ||
+        throw(DimensionMismatch("output length must match matrix size"))
+    length(x) == dimension ||
+        throw(DimensionMismatch("input length must match matrix size"))
+    out === x &&
+        throw(ArgumentError("threaded symmetric multiplication does not support aliased input and output"))
+    workers = min(
+        max(thread_count, 1),
+        Threads.nthreads(),
+        max(1, cld(dimension, 256)),
+    )
+    if workers <= 1
+        return _fixed_extended_symmetric_mul_range!(
+            out,
+            lower,
+            x,
+            alpha,
+            beta,
+            1,
+            dimension,
+        )
+    end
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            first_row = fld((worker - 1) * dimension, workers) + 1
+            last_row = fld(worker * dimension, workers)
+            _fixed_extended_symmetric_mul_range!(
+                out,
+                lower,
+                x,
+                alpha,
+                beta,
+                first_row,
+                last_row,
+            )
+        end
+    end
+    return out
+end
+
 function schur_mul!(
     out::AbstractVector{T},
     ws::Workspace{T},
@@ -1685,6 +1785,20 @@ function schur_mul!(
 ) where {T}
     arrow = ws.arrow
     if arrow === nothing
+        if ws.schur_lower_only &&
+           ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended &&
+           ws.thread_count > 1 &&
+           out !== x &&
+           size(ws.S, 1) >= 1_024
+            return _threaded_fixed_extended_symmetric_mul!(
+                out,
+                ws.S,
+                x,
+                α,
+                β,
+                ws.thread_count,
+            )
+        end
         matrix = ws.schur_lower_only ?
                  Symmetric(ws.S, :L) : ws.S
         # Route through the arithmetic kernel seam. This is identical to mul!

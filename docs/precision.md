@@ -67,12 +67,25 @@ the requested arithmetic. Ordinary Float64 is never redirected.
 
 This is a guarded accelerator rather than a change in the numerical contract:
 loss of positive definiteness or rank during Float64 conversion, a conservative
-condition estimate above `1e8`, an excessive predicted correction count,
-non-finite conversion, or failed target-precision refinement switches back to
-the native factorization and recomputes the direction. Repeated rejection is
-cooled down and eventually disabled for that solve. The default remains
-`:off`; see the [mixed-precision KKT benchmark](../bench/mixed_precision_kkt/RESULTS.md)
-for the current promotion evidence and exact thresholds.
+condition estimate above `1e8` (`1e14` for Float64x4 automatic mode), an
+excessive predicted correction count, non-finite conversion, or failed
+target-precision refinement switches back to the native factorization and
+recomputes the direction. Explicit `:on` for fixed-width arithmetic is a
+measured expert mode: condition and predicted-step estimates remain visible,
+but monotone target-precision residual correction makes the acceptance
+decision. For `Float64x4`, a failed Float64 correction may promote the
+preconditioner to `Float64x2` before paying for native `Float64x4`
+factorization. That rung uses a blocked lower-triangular Cholesky, disjoint
+output tiles, parallel `L^-1 B`, and a one-triangle equality SYRK. The factor
+is rebuilt from the current Schur matrix rather than reused across outer
+iterations; the measured stale-factor retry added work and passed none of its
+Task_Low08 residual guards. Each promoted solve is checked in `Float64x4`
+before acceptance, and failure falls back to native arithmetic. Its workspace
+is allocated lazily and must pass the configured memory gate. BigFloat and
+`:auto` retain the static cutoffs. Repeated rejection is cooled down and
+eventually disabled for that solve. The default remains `:off`; see the
+[mixed-precision KKT benchmark](../bench/mixed_precision_kkt/RESULTS.md) for
+the current promotion evidence and exact thresholds.
 
 Exact singleton-local `2x2` BigFloat arrows have a separate guarded path when
 `MultiFloats` is loaded. With `mixed_precision_kkt=:on`, SDPX constructs the

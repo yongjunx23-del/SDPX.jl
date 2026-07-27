@@ -53,6 +53,7 @@ end
 
 default_extended_precision_blas(::Type) = :off
 default_extended_precision_blas(::Type{BigFloat}) = :auto
+default_mixed_precision_condition_limit(::Type) = 1.0e8
 
 """
     SolverOptions{T}
@@ -147,7 +148,8 @@ Base.@kwdef struct SolverOptions{T}
     # stalled refinement falls back to the native target-precision
     # factorization.
     mixed_precision_kkt::Symbol = :off                  # :off | :auto | :on
-    mixed_precision_condition_limit::Float64 = 1.0e8
+    mixed_precision_condition_limit::Float64 =
+        default_mixed_precision_condition_limit(T)
     mixed_precision_refine_max_steps::Int = 32
     mixed_precision_memory_fraction::Float64 = 0.10
     algorithm::Symbol         = :auto                   # :auto | :lp | :sdp

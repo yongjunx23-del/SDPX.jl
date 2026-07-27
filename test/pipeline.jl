@@ -64,6 +64,28 @@ end
 end
 
 @testset "Automatic pipeline and dedicated LP path" begin
+    @test SDPX._large_lattice_dense_schur_profile(
+        6_119,
+        394,
+        32,
+        0.0010204,
+        0.842601,
+    )
+    @test !SDPX._large_lattice_dense_schur_profile(
+        3_999,
+        394,
+        32,
+        0.0010204,
+        0.842601,
+    )
+    @test !SDPX._large_lattice_dense_schur_profile(
+        6_119,
+        394,
+        32,
+        0.01,
+        0.842601,
+    )
+
     problem = analytic_lp_problem(; duplicate_equality=true)
     classification = SDPX.classify_problem(problem)
     @test classification.cone == :lp
@@ -1151,6 +1173,29 @@ end
     opts = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=200, diagnostics=true)
     result = SDPX.solve!(prob, opts)
     summary = SDPX.solve_summary(prob, result, opts)
+
+    @test hasproperty(result.termination, :total_refinement_steps)
+    @test result.termination.total_refinement_steps >= 0
+    callback_states = NamedTuple[]
+    callback_result = SDPX.solve!(
+        prob,
+        SDPX.SolverOptions{Float64}(
+            ϵ_gap=1e-7,
+            ϵ_primal=1e-7,
+            ϵ_dual=1e-7,
+            verbosity=0,
+            callback=state -> begin
+                push!(callback_states, state)
+                false
+            end,
+        ),
+    )
+    @test callback_result.status != SDPX.UserStopped
+    @test !isempty(callback_states)
+    @test all(
+        hasproperty(last(callback_states), field) for
+        field in (:gap_rel, :complementarity, :termination_merit)
+    )
 
     for field in (:status, :objective_value, :dual_objective_value,
                   :primal_solution, :dual_solution, :primal_residual,

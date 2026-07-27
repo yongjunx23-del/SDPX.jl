@@ -21,9 +21,9 @@ more than `Float64`.
   and `DoubleFloats.Double64`, the last three via package extensions.
 - **Multithreaded fixed-width arithmetic** — `Float64` and
   `MultiFloats.Float64xN` use cost-aware block scheduling, triangular Schur
-  reduction, and phase-aware BLAS thread control. Native `BigFloat` kernels
-  deliberately use one solver thread; an opt-in reduced-arrow preconditioner
-  can use Float64x4 workers while retaining BigFloat residual checks.
+  reduction, and phase-aware BLAS thread control. General native `BigFloat`
+  kernels deliberately use one solver thread; exact singleton-local `2x2`
+  arrows may use ownership-safe native block and Schur-tile workers.
 - **Structure-aware**: sparse constraint storage, a block-arrow KKT path for
   models with shared plus per-block local variables, a no-pair-buffer fused
   kernel for `2x2` blocks, and an optional combined reduced shared panel for
@@ -34,6 +34,10 @@ more than `Float64`.
 - **High-precision owned-storage kernels** — the `BigFloat` path reuses
   independently owned MPFR values for matrix products, triangular solves,
   Cholesky factors, KKT right-hand sides, and LP Hessian assembly.
+- **Guarded mixed KKT hierarchy** — an opt-in dense `Float64x4` solve can use
+  Float64 first, promote to a cache-blocked `Float64x2` preconditioner when
+  needed, and retain native `Float64x4` as the final fallback. Every promoted
+  solve must pass a target-precision residual check.
 - **JuMP / MathOptInterface** wrapper alongside a native typed API.
 - **Diagnostics that explain themselves** — a solve that stops short reports
   *why*, with the measured convergence rate and whether the limit was the
@@ -372,12 +376,11 @@ These are fixed-width bitstypes with no MPFR allocation overhead.
 `BigFloat` inputs should be constructed inside the intended
 `setprecision(BigFloat, bits) do ... end` scope. `solve!` establishes
 `precision_bits` for the complete solve, but it cannot recover digits that
-were already rounded away when the input data was created. Native `BigFloat`
-assembly and solves are serial and use ownership-aware, allocation-reusing
-scalar kernels. The exception is the opt-in exact singleton-arrow mixed path
-described below: its independent BigFloat block metric preparation and
-Float64x4 reduced panel may use multiple workers, while residual evaluation,
-refinement, and fallback remain in BigFloat.
+were already rounded away when the input data was created. General native
+`BigFloat` assembly and solves are serial and use ownership-aware,
+allocation-reusing scalar kernels. Exact singleton-local `2x2` arrows are the
+native exception: independent block preparation and complete lower-triangular
+Schur tiles may run concurrently without sharing writable MPFR objects.
 
 The packed triangular Schur/Gram backend for `Float64x4` and `BigFloat` is
 available through `extended_precision_blas=:auto` only when a workload clears
@@ -393,6 +396,10 @@ retain the fused direct kernel and its no-panel/no-pair-buffer storage.
 Diagnostics distinguish the Float64x4
 `:reduced_arrow[_threaded]_multifloatvec4_syrk`, generic reduced-arrow, and
 `:fused_arrow_2x2` paths.
+For dense non-arrow Float64x4 systems that store only the lower Schur
+triangle, repeated refinement products use disjoint output-row ownership once
+the Schur dimension reaches 1,024. Aliased input/output vectors and smaller
+systems retain the established multiplication path.
 Memory planning uses the smallest available signal among host free memory,
 Linux cgroup limits, and the optional `SDPX_MEMORY_LIMIT_BYTES` environment
 limit. For example:
@@ -408,7 +415,15 @@ Dense, non-arrow `Float64x4` and `BigFloat` problems can also opt into
 target-precision residuals and iterative refinement, guarded by memory,
 conditioning, rank, and convergence checks. Any failed guard recomputes with
 the native extended-precision factorization. The feature remains off by
-default while large complete-solve validation is still being collected.
+default. Mixed refinement targets the tighter of the arithmetic floor and
+the square of the requested solver tolerance, so a moderately conditioned
+Float64 preconditioner is not rejected merely because it cannot reproduce
+unused Float64x4 or BigFloat digits. The predictor is corrected only to its
+separate safety guard; stalled or worsening corrections still trigger the
+native fallback. For fixed-width arithmetic, explicit `:on` is a measured
+expert mode: conservative condition and predicted-step estimates remain in
+diagnostics, while actual target-precision residual reduction decides whether
+to continue. `:auto` and BigFloat retain the static condition cutoff.
 
 For exact singleton-local BigFloat arrows, loading `MultiFloats` adds a
 separate guarded `mixed_precision_kkt=:on` path. It builds the coefficient
@@ -482,6 +497,10 @@ solver.** Cross-solver comparisons depend on the problem, tolerance, precision,
 thread count, and hardware, and the benchmarks here are not broad enough to
 support a general statement. `bench/opt2026/REPORT.md` records measurements —
 including cases where SDPX does worse — with the configuration for each.
+The narrowly scoped
+[`Task_Low08` cluster report](bench/opt2026/TASK_LOW08_PRECISION_CLUSTER_REPORT_2026-07-27.md)
+adds same-node MOSEK comparisons, 1--128-thread SDPX scaling, extended-precision
+memory gates, and full numerical certificates.
 
 ## Known limitations
 

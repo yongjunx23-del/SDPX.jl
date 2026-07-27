@@ -65,6 +65,23 @@ initializes, and accumulates only that triangle. Work is split by triangular
 area across column-major ranges. For other fixed-width paths, the established
 full-matrix reducer remains in use where it benchmarks faster.
 
+Dense non-arrow Float64x4 refinement repeatedly applies the symmetric Schur
+matrix after a lower-only build. For dimensions of at least 1,024 and more
+than one requested worker, SDPX partitions complete output-row ranges among
+at most `ceil(dimension / 256)` workers. Each task reads the stored triangle
+and owns every scalar it writes; no task-local matrix or reduction is needed.
+The scalar hot loop allocates zero bytes. Aliased input/output vectors fall
+back to the established multiplication path.
+
+The opt-in dense `Float64x4` mixed KKT fallback uses `Float64x2` only after
+the Float64 residual guard fails. Conversion and first-touch initialization
+own disjoint linear ranges; blocked Cholesky panel solves own disjoint rows;
+trailing and equality SYRK tasks own complete lower-triangular tiles; and
+`L^-1 B` plus recovery products own disjoint right-hand-side columns or
+output ranges. This path respects `SolverOptions.threads`, leaves BLAS at one
+thread, and allocates its 0.596 GiB Task_Low08 workspace lazily. Native
+`Float64x4` remains the final serial fallback.
+
 ## BigFloat policy
 
 Native `BigFloat` uses the serial owned-storage path for general models even if
@@ -201,8 +218,9 @@ request when the cgroup does not expose a reliable limit. See the
 ## Remaining multicore limits
 
 - The reduced global arrow factorization is serial.
-- Generic non-arrow Schur/KKT factorization is dense and remains the dominant
-  phase on large lattice problems.
+- Generic non-arrow Schur/KKT factorization is dense and remains a dominant
+  phase on large lattice problems. The Float64x4 refinement matvec is
+  threaded, but native extended-precision dense Cholesky is still serial.
 - Dense task-local Schur matrices are not packed; changing their workspace
   layout could nearly halve partial-storage memory.
 - Worker teams are created per region; persistent teams could remove
