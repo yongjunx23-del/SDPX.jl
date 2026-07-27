@@ -788,12 +788,20 @@ reachable without knowing the internal layout.
 Additive by design: it introduces no new computation beyond the certificate and
 changes no existing accessor, so the stable API is unaffected.
 
-`minimum_psd_eigenvalue` is reported as the largest *required diagonal shift*
+`psd_shift_lower_bound` is the negated largest *required diagonal shift*
 across blocks — the amount by which a block would have to be lifted to become
-positive semidefinite. Zero means every block is already PSD. This is used in
-place of a literal eigenvalue because the certificate obtains it from a shifted
-Cholesky, which is far cheaper than an eigendecomposition and answers the same
-question.
+positive semidefinite. If shifting by `s` makes the block PSD then
+`λ_min ≥ −s`, so the value is a true lower bound on the minimum PSD-block
+eigenvalue, obtained from a shifted Cholesky at a fraction of the cost of an
+eigendecomposition. Zero means every block passed unshifted.
+
+It is **not** the minimum eigenvalue itself, and for well-conditioned solutions
+it is far from it: a comfortably positive definite block reports `-0.0` here,
+not its actual smallest eigenvalue. The field was previously published as
+`minimum_psd_eigenvalue`, a name that asserts exactly the thing the value is
+not; that name is retained as a deprecated alias carrying the same value so
+existing consumers keep working, and will be removed at 1.0. Anything needing
+literal eigenvalues should use spectrum extraction.
 """
 function solve_summary(prob::SDPProblem{T}, result::SDPResult{T},
                        opts::SolverOptions{T}=SolverOptions{T}()) where {T}
@@ -821,6 +829,8 @@ function solve_summary(prob::SDPProblem{T}, result::SDPResult{T},
         dual_residual=result.d_res,
         relative_gap=result.gap_rel,
         complementarity=certificate.complementarity,
+        psd_shift_lower_bound=-required_shift,
+        # Deprecated alias -- same value, misleading name; see the docstring.
         minimum_psd_eigenvalue=-required_shift,
         iterations=result.iterations,
         solve_time=solve_time,

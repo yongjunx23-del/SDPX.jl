@@ -1200,7 +1200,8 @@ end
     for field in (:status, :objective_value, :dual_objective_value,
                   :primal_solution, :dual_solution, :primal_residual,
                   :dual_residual, :relative_gap, :complementarity,
-                  :minimum_psd_eigenvalue, :iterations, :solve_time,
+                  :psd_shift_lower_bound, :minimum_psd_eigenvalue,
+                  :iterations, :solve_time,
                   :peak_memory_bytes, :selected_algorithms, :parameter_history,
                   :timings, :warnings, :certificate)
         @test hasproperty(summary, field)
@@ -1219,7 +1220,12 @@ end
     # A converged solve has non-negative complementarity and no PSD violation
     # (reported as the negated required diagonal shift, so zero means feasible).
     @test summary.complementarity >= 0
-    @test summary.minimum_psd_eigenvalue <= 0
+    # A shift lower bound is nonpositive by construction (zero when every
+    # block passes unshifted) -- which is precisely why the old name
+    # `minimum_psd_eigenvalue` was wrong: a PD solution's true minimum
+    # eigenvalue is strictly positive. The alias must carry the same value.
+    @test summary.psd_shift_lower_bound <= 0
+    @test summary.minimum_psd_eigenvalue == summary.psd_shift_lower_bound
     @test summary.certificate.valid isa Bool
     @test summary.warnings isa Vector{String}
 
