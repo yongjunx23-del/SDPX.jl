@@ -15,7 +15,6 @@
 
 using LinearAlgebra
 using Printf
-using Random
 using SDPX
 using SparseArrays
 
@@ -26,20 +25,41 @@ first and the right-hand side is set to put every slack at 1, then a strictly
 positive multiplier vector defines the objective. That makes `Optimal` the
 only correct answer, so a regression shows up as a status change rather than
 as a slightly different number.
+
+The data comes from an explicit linear congruential generator rather than
+`MersenneTwister`. This example asserts a *routing decision* -- which
+factorization the selector chooses -- and Julia's random stream is not stable
+across versions, so seeded `randn` builds a slightly different problem on
+each Julia release. The margin is wide today; an explicit generator makes the
+example the same program everywhere, permanently.
 """
+next_uniform(state::UInt64) =
+    (0x5851f42d4c957f2d * state + 0x14057b7ef767814f,)[1]
+draw(state) = (s = next_uniform(state); (s, 2.0 * (s >> 11) / (1 << 53) - 1.0))
+
 function sparse_lp(; variables, base_rows, entries_per_row, seed=11)
-    rng = MersenneTwister(seed)
+    state = UInt64(seed)
     rows = spzeros(Float64, base_rows, variables)
-    for row in 1:base_rows, column in randperm(rng, variables)[1:entries_per_row]
-        rows[row, column] = randn(rng)
+    for row in 1:base_rows, _ in 1:entries_per_row
+        state = next_uniform(state)
+        column = 1 + Int(rem(state >> 11, UInt64(variables)))
+        state, value = draw(state)
+        rows[row, column] = value
     end
     # Box rows keep the program bounded.
     rows = [rows; sparse(1.0I, variables, variables); -sparse(1.0I, variables, variables)]
     total = size(rows, 1)
 
-    interior = randn(rng, variables)
+    interior = zeros(variables)
+    for index in 1:variables
+        state, interior[index] = draw(state)
+    end
     righthand = rows * interior .- 1.0
-    multipliers = rand(rng, total) .+ 0.5
+    multipliers = zeros(total)
+    for index in 1:total
+        state, value = draw(state)
+        multipliers[index] = abs(value) + 0.5
+    end
     objective = vec(transpose(rows) * multipliers)
 
     coefficients = [
