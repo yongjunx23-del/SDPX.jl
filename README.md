@@ -529,6 +529,22 @@ memory gates, and full numerical certificates.
   reduced-arrow Schur path is a narrow shared-memory exception; the guarded
   reduced-arrow mixed path remains opt-in. On a cluster, use separate jobs or
   job-array elements for non-arrow native BigFloat solves.
+- **One solve per process.** The solver adjusts the process-global BLAS thread
+  count around its phases, so two concurrent `solve` calls in one Julia
+  process can interleave those adjustments and oversubscribe or finish with a
+  stale setting. Run concurrent solves in separate processes (the pattern the
+  cluster scripts already use).
+- `ingest(...; validate=false)` skips finiteness checking entirely: NaN or Inf
+  coefficients enter the solver unchecked and surface only as a non-finite
+  iterate many iterations later. It exists for benchmark drivers that validate
+  inputs by checksum; leave validation on otherwise.
+- The null-space reduction (`src/nullspace.jl`) and chordal detection
+  (`src/chordal.jl`) are **experimental, opt-in building blocks** — tested,
+  but not reachable from `solve`. No benchmark in this repository qualifies
+  for the null-space formulation (CSDR models carry no equality rows; the
+  lattice benchmark constrains 6% of variables against a 50% threshold), so
+  wiring it into the automatic pipeline is deferred until a qualifying model
+  family exists to gate it against.
 
 ## Design and benchmark notes
 

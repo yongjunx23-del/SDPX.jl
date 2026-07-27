@@ -1,4 +1,10 @@
 #=====================================================================
+    EXPERIMENTAL / OPT-IN — not reachable from `solve`.
+
+    Tested building blocks, deliberately not wired into the automatic
+    pipeline: no benchmark in this repository qualifies (see the Known
+    limitations section of the README). Call the functions here directly.
+
     Chordal structure detection (plan §8.3, P2)
 
     A PSD constraint on a `k x k` block costs `O(k^3)` to factorize. When

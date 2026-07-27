@@ -1,4 +1,10 @@
 #=====================================================================
+    EXPERIMENTAL / OPT-IN — not reachable from `solve`.
+
+    Tested building blocks, deliberately not wired into the automatic
+    pipeline: no benchmark in this repository qualifies (see the Known
+    limitations section of the README). Call the functions here directly.
+
     Null-space formulation (plan §12.2)
 
     With `m` variables and `n` equality constraints `Bᵀx = b`, the
