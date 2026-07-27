@@ -200,22 +200,6 @@ function _single_scalar_coefficient(
     return variable, coefficient
 end
 
-function _single_equality_coefficient(
-    prob::SDPProblem{T},
-    equality::Int,
-) where {T}
-    variable = 0
-    coefficient = zero(T)
-    @inbounds for row in axes(prob.B, 1)
-        value = prob.B[row, equality]
-        iszero(value) && continue
-        variable == 0 || return nothing
-        variable = row
-        coefficient = value
-    end
-    variable == 0 && return nothing
-    return variable, coefficient
-end
 
 function analyze(
     ::BoundExtractionStage,

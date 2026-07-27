@@ -481,16 +481,6 @@ end
 
 # ---- Schur build: sparse (single-panel SS_i = Y·A_i·X⁻¹, cached factor) ----
 
-function _dot_dense_sparse(M::AbstractMatrix{T}, A::SparseMatrixCSC{T}) where {T}
-    rows = rowvals(A)
-    vals = nonzeros(A)
-    acc = zero(T)
-    @inbounds for c in 1:size(A, 2), idx in nzrange(A, c)
-        r = rows[idx]
-        acc += M[r, c] * vals[idx]
-    end
-    return acc
-end
 
 """
     _dot_dense_coo(M, coo, position)
@@ -2604,35 +2594,6 @@ end
     return output
 end
 
-@inline function _bigfloat_add_contract3!(
-    destination::BigFloat,
-    accumulator::BigFloat,
-    buffer::BigFloat,
-    first_left::BigFloat,
-    first_right::BigFloat,
-    second_left::BigFloat,
-    second_right::BigFloat,
-    third_left::BigFloat,
-    third_right::BigFloat,
-)
-    MA.operate_to!(accumulator, *, first_left, first_right)
-    MA.buffered_operate!(
-        buffer,
-        MA.add_mul,
-        accumulator,
-        second_left,
-        second_right,
-    )
-    MA.buffered_operate!(
-        buffer,
-        MA.add_mul,
-        accumulator,
-        third_left,
-        third_right,
-    )
-    MA.operate!(+, destination, accumulator)
-    return destination
-end
 
 @inline function _bigfloat_add_sparse_contract3!(
     destination::BigFloat,
