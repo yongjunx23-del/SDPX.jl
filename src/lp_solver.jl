@@ -45,7 +45,9 @@ mutable struct LPWorkspace{T}
     weights::Vector{T}
     # Set after construction, once presolve and scaling have settled `G`.
     # `nothing` keeps the dense factorization (see `_lp_sparse_system`).
-    sparse_system::Any
+    # Typed union rather than Any: the field is consulted in the per-iteration
+    # factor/solve path, where an Any load is a dynamic dispatch.
+    sparse_system::Union{Nothing,LPSparseSystem{T}}
 end
 
 function LPWorkspace(

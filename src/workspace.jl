@@ -393,7 +393,14 @@ mutable struct Workspace{T}
     Btil::Matrix{T}         # m×n = L_S⁻¹B
     Q::Matrix{T}              # n×n = B̃ᵀB̃, accumulator
     Qbuf::Matrix{T}            # scratch copy of Q fed to cholesky!/cholesky(...)
-    Qchol::Any                  # ::Union{Nothing,Cholesky,CholeskyPivoted} — set by factor_kkt!
+    # Set by factor_kkt!. The concrete union, not Any: _solve_Q! is called
+    # twice per iteration (predictor and corrector), and an Any field makes
+    # every one of those calls a dynamic dispatch. The BigFloat member wraps
+    # the kernel-owned factor; the two LinearAlgebra members cover the plain
+    # and rank-revealing dense paths.
+    Qchol::Union{Nothing,LinearAlgebra.Cholesky{T,Matrix{T}},
+                 LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
+                 BigFloatCholeskyFactor{Matrix{BigFloat}}}
     arrow::Union{Nothing,ArrowWorkspace{T}}
     v::Vector{T}
     d::Vector{T}
