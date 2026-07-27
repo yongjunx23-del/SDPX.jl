@@ -195,4 +195,37 @@ end
             @test output[2] !== output[3]
         end
     end
+
+    @testset "LP path applies BigFloat precision consistency (review P2.7)" begin
+        # The SDP core warns when BigFloat inputs carry fewer bits than the
+        # requested working precision; the dedicated LP path used to bypass
+        # that entirely, so a 128-bit-input LP inside a 256-bit solve
+        # proceeded without a word. Both paths must protect equally.
+        low_bits = 128
+        objective = setprecision(() -> BigFloat.([1.0, 2.0]), low_bits)
+        setprecision(BigFloat, 256) do
+            variables = 2
+            rows = BigFloat[1 0; 0 1; -1 0; 0 -1]
+            blocks = [zeros(BigFloat, variables, 1, 1) for _ in 1:4]
+            for row in 1:4, column in 1:variables
+                blocks[row][column, 1, 1] = rows[row, column]
+            end
+            righthand = BigFloat[-1, -1, -3, -3]
+            constants = [reshape([righthand[row]], 1, 1) for row in 1:4]
+            problem = SDPX.ingest(objective, blocks, constants,
+                zeros(BigFloat, variables, 0), BigFloat[]; verbosity=0)
+
+            options = SDPX.SolverOptions{BigFloat}(
+                ϵ_gap=BigFloat(1e-30), ϵ_primal=BigFloat(1e-30),
+                ϵ_dual=BigFloat(1e-30), verbosity=1, precision_bits=256)
+            result = @test_logs (:warn, r"128-bit BigFloat precision") match_mode = :any begin
+                SDPX.solve!(problem, options)
+            end
+            @test result.status == SDPX.Optimal
+
+            # The check reports; it must not mutate what the user handed in.
+            @test precision(objective[1]) == low_bits
+        end
+    end
+
 end

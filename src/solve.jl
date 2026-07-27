@@ -1973,6 +1973,15 @@ function _solve_pipeline!(
                 "Matrix-valued X0/Y0 warm starts are ignored by the dedicated LP path; " *
                 "provide x0/y0.",
             )
+        # The same precision hygiene the SDP core performs (solve.jl,
+        # `_solve_sdp_core!`): warn when BigFloat inputs carry fewer bits than
+        # the requested working precision, and normalize stored precision when
+        # asked. The dedicated LP path used to bypass both, so a 128-bit-input
+        # LP inside a 256-bit solve proceeded without a word. (Review P2.7.)
+        if T === BigFloat
+            check_precision_consistency(reduced, opts.precision_bits, opts.verbosity)
+            opts.convert_inputs && (reduced = reround(reduced, opts.precision_bits))
+        end
         lp_options = opts.parameter_policy === :auto ?
                      _replace_solver_options(
                          opts;
