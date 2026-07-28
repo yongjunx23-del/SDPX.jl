@@ -1257,6 +1257,57 @@ function dense_workspace_floor_bytes(::Type{T}, m::Integer, n::Integer,
     )
 end
 
+"""
+    arrow_workspace_floor_bytes(::Type{T}, prob, thread_count) -> Int
+
+Lower bound on the workspace for the **block-arrow** KKT route.
+
+The arrow route never forms the dense `m x m` Schur complement, so
+[`dense_workspace_floor_bytes`](@ref) does not describe it — not even
+approximately. On the CSDR 200/2/10/400 model (m = 40,453 with 53 shared
+variables) the dense floor reports 3,218 GiB while the solve runs in about
+5 GiB, and a memory warning that overstates the requirement by three orders
+of magnitude is worse than none: it tells users to abandon runs that fit
+comfortably.
+
+What the route actually allocates scales with the *shared* dimension and the
+per-block local dimensions, not with `m`: the compact global Schur `Sgg` and
+the reduced `Sred`/`Sredbuf` are `ng x ng`, and each block carries its own
+local block and an `nl x ng` coupling panel.
+
+Returns `0` when the arrow decomposition is not available, which the caller
+must read as "no estimate", never as "needs nothing".
+"""
+function arrow_workspace_floor_bytes(::Type{T}, prob::SDPProblem{T},
+                                     thread_count::Integer) where {T}
+    prob.cons isa SparseCons{T} || return 0
+    prob.dims.n == 0 || return 0
+    m = prob.dims.m
+    frequency = zeros(Int, m)
+    for variables in (prob.cons::SparseCons{T}).active, variable in variables
+        frequency[variable] += 1
+    end
+    (all(>(0), frequency) && any(==(1), frequency)) || return 0
+
+    # Shared variables touch more than one block; local variables exactly one.
+    shared = count(>(1), frequency)
+    locals = m - shared
+    scalar = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    blocks = max(prob.dims.L, 1)
+    return saturating_sum_bytes(
+        # Sgg, Sred, Sredbuf: three shared-dimension matrices.
+        saturating_bytes(3, scalar, shared, shared),
+        # Per-block local blocks and their factors, plus the local solve
+        # scratch: local dimensions are tiny (one per block on arrow models),
+        # so this is bounded by the total local count rather than by L*m.
+        saturating_bytes(4, scalar, locals, 1),
+        # Coupling and W panels: one `nl x ng` pair per block.
+        saturating_bytes(2, scalar, locals, max(shared, 1)),
+        # Task-local reduced accumulators.
+        saturating_bytes(max(Int(thread_count), 1), scalar, shared, shared),
+    )
+end
+
 function estimate_sdp_workspace_bytes(
     prob::SDPProblem{T},
     thread_count::Int,

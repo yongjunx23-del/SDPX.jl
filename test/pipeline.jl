@@ -1455,4 +1455,45 @@ end
 
     end
 
+    @testset "memory estimates follow the KKT route, not a dense upper bound" begin
+        # The block-arrow route never forms the dense m x m Schur complement,
+        # so the dense floor does not describe it. On the CSDR 200/2/10/400
+        # model (m = 40,453 with 53 shared variables) the dense figure is
+        # 3,218 GiB for a solve that runs in about 5 GiB -- a warning wrong by
+        # three orders of magnitude, which drives users off runs that fit.
+        blocks, shared = 2000, 53
+        variables = shared + blocks
+        coefficients = Vector{Vector{SparseMatrixCSC{Float64,Int}}}(undef, blocks)
+        for block in 1:blocks
+            slots = [spzeros(2, 2) for _ in 1:variables]
+            for s in 1:shared
+                slots[s] = sparse([1, 2], [1, 2], [1.0 / (s + block), 0.5], 2, 2)
+            end
+            # One local variable per block: the arrow structure.
+            slots[shared + block] = sparse([1], [1], [1.0], 2, 2)
+            coefficients[block] = slots
+        end
+        constants = [Matrix(sparse([1, 2], [1, 2], [-1.0, -1.0], 2, 2))
+                     for _ in 1:blocks]
+        problem = SDPX.ingest(ones(variables), coefficients, constants,
+            zeros(variables, 0), Float64[]; sparse=true, verbosity=0)
+
+        arrow = SDPX.arrow_workspace_floor_bytes(Float64, problem, 8)
+        dense = SDPX.dense_workspace_floor_bytes(Float64, variables, 0, blocks, 8)
+        @test arrow > 0                      # the decomposition was recognised
+        @test arrow < dense ÷ 50             # measured ratio here is ~168x
+        # It scales with the shared dimension, not with m: doubling the block
+        # count must not square the estimate the way the dense figure does.
+        @test arrow < 16 * variables * shared * sizeof(Float64)
+
+        # A problem with no arrow structure gets no arrow estimate, and the
+        # caller must read 0 as "no estimate" rather than "needs nothing".
+        dense_problem = SDPX.ingest(
+            ones(4),
+            [zeros(4, 2, 2)],
+            [Matrix{Float64}(1.0I, 2, 2)],
+            zeros(4, 0), Float64[]; sparse=false, verbosity=0)
+        @test SDPX.arrow_workspace_floor_bytes(Float64, dense_problem, 4) == 0
+    end
+
 end
