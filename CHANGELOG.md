@@ -25,6 +25,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   temporary-file cleanup on every path. The documented upgrade path to a
   persistent server or LibraryLink keeps this schema as the contract.
 
+### Fixed
+
+- Objective equilibration now applies its scale correction only to the
+  internal gap acceptance threshold. This prevents an internally accepted
+  scaled gap from failing the requested tolerance after reconstruction in
+  original coordinates, without feeding an artificially strict threshold
+  into adaptive parameter control or stagnation detection.
+- Full affine-residual certification is deferred until both feasibility and
+  the relevant objective/gap condition can pass. Large SDP solves no longer
+  rebuild all original-coordinate residuals on every feasible-but-not-yet-
+  optimal iteration; the independent final certificate remains mandatory.
+
+### Changed
+
+- Accepted-step updates, finite-value checks, complementarity targets, dual
+  objective evaluation, and best-iterate copies now use exclusive block
+  ownership for immutable arithmetic on SDP models with at least 256 blocks.
+  Per-block scalars are reduced in block order, and mutable `BigFloat` retains
+  the safe serial path while still benefiting from fused scans.
+- On the 40,400-block CSDR `J/K/Na/Nmu = 200/2/10/400` benchmark
+  (Float64x4, adaptive parameters, Ruiz equilibration, 64 Julia threads, one
+  BLAS thread, AMD EPYC 7742), the corrected solver reached `Optimal` in 70
+  iterations with original-coordinate gap `4.00e-11`. Solve time fell from
+  142.88 to 109.92 seconds and solve allocations from 5.55 to 4.11 GB, despite
+  the previous run stopping nine iterations earlier and failing its requested
+  original-coordinate gap. The serial update phase fell from 8.95 to 0.81
+  seconds. See
+  `bench/opt2026/CSDR_J200_GAP_AND_BLOCK_PASSES_2026-07-28.md`.
+
 ## [0.2.1] — 2026-07-27
 
 Correctness, honesty-of-reporting, and cleanup release driven by the
