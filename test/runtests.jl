@@ -35,5 +35,6 @@ using Test
     include("executed_diagnostics.jl")
     include("cli_bridge.jl")
     include("aqua.jl")
+    include("shadowing_guard.jl")
     include("gates.jl")
 end

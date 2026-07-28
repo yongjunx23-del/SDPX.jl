@@ -4,7 +4,47 @@ import MutableArithmetics as MA
 using SparseArrays
 using Test
 
-@testset "large Schur structure estimation uses deterministic sampling" begin
+@testset "Schur structure estimation: both branches, and the v0.2.1 scope bug" begin
+    # v0.2.1 (444b994) failed with `UndefVarError: count not defined in local
+    # scope` for every model with more than 10,000 variables: the small-m
+    # branch's `count = 0` made `count` a function-wide local, so the large-m
+    # branch's call to Base.count hit an unassigned local instead. The small
+    # branch always worked, which is exactly why the bug survived to a
+    # release -- nothing in the suite crossed the 10,000-variable boundary.
+
+    # Small branch: exact, and checked against a brute-force reference on a
+    # pattern with real structure (chained pairwise overlaps).
+    small_active = [[1, 2], [2, 3], [5, 6]]
+    reference(active, m) = begin
+        blocks_of(v) = [l for (l, vars) in pairs(active) if v in vars]
+        n = 0
+        for column in 1:m, row in 1:column
+            n += !isempty(intersect(blocks_of(row), blocks_of(column)))
+        end
+        n
+    end
+    estimated, upper_slots, exact =
+        SDPX._estimate_schur_structure(small_active, 6, 3)
+    @test exact
+    @test upper_slots == 21
+    @test estimated == reference(small_active, 6)
+
+    # The boundary itself: 10_000 takes the exact branch, 10_001 the sampled
+    # one. At v0.2.1 the second call was the crash.
+    boundary_active = [[1], [2]]
+    exact_side = SDPX._estimate_schur_structure(boundary_active, 10_000, 2)
+    sampled_side = SDPX._estimate_schur_structure(boundary_active, 10_001, 2)
+    @test exact_side[3] === true
+    @test sampled_side[3] === false
+
+    # Sparse large model: only variables 1 and 2 are active, in different
+    # blocks, so no pair overlaps and only two diagonal entries count. The
+    # sampler cannot add hits (there are none to find), so the estimate is
+    # deterministic -- a sharper check than the dense case, where every
+    # sample hits and the estimator cannot be wrong.
+    @test sampled_side[1] == 2
+
+    # Dense large model: every pair overlaps, the estimate must saturate.
     variable_count = 10_001
     active = [collect(1:variable_count)]
     estimated, upper_slots, exact =
