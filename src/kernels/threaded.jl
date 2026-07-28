@@ -290,6 +290,182 @@ function threaded_direction_blocks!(
     return ws
 end
 
+"""
+    threaded_update_blocks!(ws, X, Y, primal_step, dual_step)
+        -> (complementarity, finite)
+
+Apply the accepted primal and dual block directions, then compute the
+post-update complementarity and finite-value flag in the same pass.
+
+Large structured SDP models can contain tens of thousands of tiny PSD blocks.
+Updating those blocks serially, scanning them again for non-finite values, and
+then evaluating their complementarity twice consumed more time than Schur
+assembly on the `J=200, K=2, Na=10, Nmu=400` CSDR benchmark. Each worker here
+owns complete source and destination blocks. It writes the per-block scalar
+result to the already allocated `block_norms`/`block_ok` workspaces, and the
+caller reduces those arrays in block order, so no output scalar is shared
+between threads and no hot-loop allocation is introduced.
+
+Mutable `BigFloat` values retain the serial path through
+[`thread_safe_arithmetic`](@ref).
+"""
+function threaded_update_blocks!(
+    ws::Workspace{T},
+    X,
+    Y,
+    primal_step::T,
+    dual_step::T,
+) where {T}
+    threaded =
+        ws.thread_count > 1 &&
+        length(X) > 1 &&
+        thread_safe_arithmetic(T) &&
+        sum(length, ws.block_bins; init=0) >= 256
+
+    if threaded
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                @inbounds for block in bin
+                    workspace = ws.blk[block]
+                    trial_combine_owned!(
+                        X[block],
+                        X[block],
+                        primal_step,
+                        workspace.dX,
+                        workspace.W1[1, 1],
+                    )
+                    trial_combine_owned!(
+                        Y[block],
+                        Y[block],
+                        dual_step,
+                        workspace.dY,
+                        workspace.W1[1, 1],
+                    )
+                    ws.block_norms[block] = kdot(X[block], Y[block])
+                    ws.block_ok[block] =
+                        all(isfinite, X[block]) && all(isfinite, Y[block])
+                end
+            end
+        end
+    else
+        @inbounds for block in eachindex(X)
+            workspace = ws.blk[block]
+            trial_combine_owned!(
+                X[block],
+                X[block],
+                primal_step,
+                workspace.dX,
+                workspace.W1[1, 1],
+            )
+            trial_combine_owned!(
+                Y[block],
+                Y[block],
+                dual_step,
+                workspace.dY,
+                workspace.W1[1, 1],
+            )
+            ws.block_norms[block] = kdot(X[block], Y[block])
+            ws.block_ok[block] =
+                all(isfinite, X[block]) && all(isfinite, Y[block])
+        end
+    end
+
+    complementarity = zero(T)
+    @inbounds for block in eachindex(X)
+        complementarity += ws.block_norms[block]
+    end
+    return complementarity, all(ws.block_ok)
+end
+
+"""
+    threaded_update_mu!(ws, μ, beta, dimensions, complementarity, adaptive)
+
+Refresh block complementarity targets from the scalar products cached by
+[`threaded_update_blocks!`](@ref). The adaptive controller uses one global
+target; the fixed controller retains its historical block-local targets.
+"""
+function threaded_update_mu!(
+    ws::Workspace{T},
+    μ,
+    beta::T,
+    dimensions,
+    complementarity::T,
+    adaptive::Bool,
+) where {T}
+    global_target = adaptive ?
+                    beta * complementarity /
+                    T(max(sum(dimensions; init=0), 1)) :
+                    zero(T)
+    threaded =
+        ws.thread_count > 1 &&
+        length(μ) > 1 &&
+        thread_safe_arithmetic(T) &&
+        sum(length, ws.block_bins; init=0) >= 256
+
+    if threaded
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                @inbounds for block in bin
+                    μ[block] = adaptive ?
+                               global_target :
+                               beta * ws.block_norms[block] /
+                               dimensions[block]
+                end
+            end
+        end
+    else
+        @inbounds for block in eachindex(μ)
+            μ[block] = adaptive ?
+                       global_target :
+                       beta * ws.block_norms[block] / dimensions[block]
+        end
+    end
+    return μ
+end
+
+"""
+    threaded_dual_objective(ws, prob, y, Y)
+
+Evaluate the block-separable dual objective with exclusive block ownership.
+Per-block contributions are reduced in their original order, preserving the
+serial summation order and therefore the numerical result.
+"""
+function threaded_dual_objective(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    y,
+    Y,
+) where {T}
+    threaded =
+        ws.thread_count > 1 &&
+        prob.dims.L > 1 &&
+        thread_safe_arithmetic(T) &&
+        sum(length, ws.block_bins; init=0) >= 256
+    if threaded
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                @inbounds for block in bin
+                    ws.block_norms[block] = kdot(prob.C[block], Y[block])
+                end
+            end
+        end
+    else
+        @inbounds for block in 1:prob.dims.L
+            ws.block_norms[block] = kdot(prob.C[block], Y[block])
+        end
+    end
+    objective = zero(T)
+    @inbounds for block in 1:prob.dims.L
+        objective += ws.block_norms[block]
+    end
+    prob.dims.n > 0 &&
+        (objective += LinearAlgebra.dot(prob.b, y))
+    return objective
+end
+
 function threaded_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T},
     opts::SolverOptions{T}, X, Y, μ) where {T}
     if !use_threaded_block_loops(ws, prob)
