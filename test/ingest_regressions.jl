@@ -4,6 +4,16 @@ import MutableArithmetics as MA
 using SparseArrays
 using Test
 
+@testset "large Schur structure estimation uses deterministic sampling" begin
+    variable_count = 10_001
+    active = [collect(1:variable_count)]
+    estimated, upper_slots, exact =
+        SDPX._estimate_schur_structure(active, variable_count, 1)
+    @test estimated == upper_slots
+    @test upper_slots == variable_count * (variable_count + 1) ÷ 2
+    @test !exact
+end
+
 @testset "ingest rejects unsupported arithmetic types" begin
     function arithmetic_error(f)
         try

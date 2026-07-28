@@ -74,11 +74,11 @@ function _estimate_schur_structure(active::Vector{Vector{Int}}, m::Int, L::Int)
         1:words,
     )
     if m <= 10_000
-        count = 0
+        overlap_count = 0
         @inbounds for column in 1:m, row in 1:column
-            count += has_overlap(row, column)
+            overlap_count += has_overlap(row, column)
         end
-        return count, upper_slots, true
+        return overlap_count, upper_slots, true
     end
 
     # Deterministic sampling avoids an O(m^2) analysis pass on very large
