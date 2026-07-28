@@ -13,14 +13,6 @@ function dual_objective(prob::SDPProblem{T}, y, Y) where {T}
     return d
 end
 
-function _finite_iterate(x, X, y, Y, μ)
-    return all(isfinite, x) &&
-           all(isfinite, y) &&
-           all(isfinite, μ) &&
-           all(block -> all(isfinite, block), X) &&
-           all(block -> all(isfinite, block), Y)
-end
-
 function print_header(opts::SolverOptions)
     opts.verbosity >= 1 || return
     println("iter\tprimal obj\tdual obj\tgap\t\tprimal res\tdual res\tprimal step\tdual step\ttime (s)")
@@ -398,6 +390,7 @@ end
 
 function _store_best_iterate!(
     best::BestIterateWorkspace{T},
+    ws::Workspace{T},
     x,
     X,
     y,
@@ -411,9 +404,26 @@ function _store_best_iterate!(
 ) where {T}
     copy_owned!(best.x, x)
     copy_owned!(best.y, y)
-    @inbounds for block in eachindex(X)
-        copy_owned!(best.X[block], X[block])
-        copy_owned!(best.Y[block], Y[block])
+    threaded =
+        ws.thread_count > 1 &&
+        length(X) > 1 &&
+        thread_safe_arithmetic(T) &&
+        sum(length, ws.block_bins; init=0) >= 256
+    if threaded
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                @inbounds for block in bin
+                    copy_owned!(best.X[block], X[block])
+                    copy_owned!(best.Y[block], Y[block])
+                end
+            end
+        end
+    else
+        @inbounds for block in eachindex(X)
+            copy_owned!(best.X[block], X[block])
+            copy_owned!(best.Y[block], Y[block])
+        end
     end
     best.pObj = pObj
     best.dObj = dObj
@@ -694,6 +704,27 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     end
     equilibration_finished_ns = time_ns()
 
+    termination_gap_tolerance = opts.ϵ_gap
+    if eq !== nothing && eq.objective_scale > one(T)
+        # Objective equilibration divides both primal and dual objectives by
+        # `objective_scale`. When the original optimum is close to zero, both
+        # relative-gap denominators are one, so an internally accepted gap is
+        # multiplied by that scale after `unequilibrate`. This used to let the
+        # core report `Optimal` before the original-coordinate certificate was
+        # accurate enough (J200/K2: 1e-10 internally became 7.7e-9 on return).
+        #
+        # The ratio between original and scaled relative gaps is never larger
+        # than max(1, objective_scale), including nonzero large objectives.
+        # Tighten only the acceptance threshold. Feeding the stricter value
+        # into stagnation and adaptive-control heuristics can make a flat early
+        # gap dominate their progress merit and stop a solve that later
+        # recovers (observed on J200/K2 at iteration 18). The controller should
+        # continue to interpret the accuracy requested by the user; only a
+        # prospective success must satisfy the conservative scaled threshold.
+        termination_gap_tolerance =
+            opts.ϵ_gap / eq.objective_scale
+    end
+
     # Parameter selection must see the problem that will actually be solved.
     # Equilibration changes the data scale by orders of magnitude, and the
     # initial point `X = Ω·I` is chosen *from* that scale — picking Ω on the
@@ -824,6 +855,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     phase_corrector_direction_recovery = 0.0
     phase_line_search = 0.0
     phase_update = 0.0
+    phase_best_iterate = 0.0
+    phase_objective_and_targets = 0.0
 
     pObj = LinearAlgebra.dot(solve_prob.c, x)
     dObj = dual_objective(solve_prob, y, Y)
@@ -878,20 +911,38 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     best_iterate = BestIterateWorkspace(x, X, y, Y)
     stagnation = StagnationDetector{T}(opts.stall_iterations, opts.stall_tolerance)
     initial_merit = T(Inf)   # merit at the first iterate, for progress detection
+    current_complementarity =
+        sum(block -> kdot(X[block], Y[block]), 1:L; init=zero(T))
 
     while true
         gap = pObj - dObj
         gap_rel = abs(gap) / max(one(T), (abs(pObj) + abs(dObj)) / 2)
         term_ok, gap_ok = if opts.termination === :legacy
-            (p_res <= opts.ϵ_primal && d_res <= opts.ϵ_dual), (zero(T) <= gap <= opts.ϵ_gap)
+            (p_res <= opts.ϵ_primal && d_res <= opts.ϵ_dual),
+            (zero(T) <= gap <= termination_gap_tolerance)
         else
-            (p_res / scale_p <= opts.ϵ_primal && d_res / scale_d <= opts.ϵ_dual), (gap_rel <= opts.ϵ_gap)
+            (p_res / scale_p <= opts.ϵ_primal &&
+             d_res / scale_d <= opts.ϵ_dual),
+            (gap_rel <= termination_gap_tolerance)
         end
         # Residuals between accepted steps are updated from the exact affine
         # residual recurrence below. Before issuing a success certificate,
         # recompute them from the current iterate so accumulated roundoff can
         # never turn an estimate into a false `Optimal` status.
-        if term_ok
+        #
+        # Do not perform this full original-coordinate block scan merely
+        # because feasibility is already inside tolerance. On large CSDR
+        # models feasibility can arrive dozens of iterations before the gap;
+        # the old `if term_ok` therefore rebuilt every residual on each of
+        # those iterations even though an optimal certificate was impossible.
+        certificate_candidate = if opts.mode === OPTIMIZE
+            term_ok && gap_ok
+        elseif opts.mode === FEASIBILITY
+            term_ok && (pObj < zero(T) || dObj >= zero(T))
+        else
+            term_ok
+        end
+        if certificate_candidate
             p_res, d_res = solution_residuals(
                 solve_prob,
                 x,
@@ -910,7 +961,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # Progress is judged by `StagnationDetector` (see `stagnation.jl`): all
         # four convergence metrics, each normalised by the tolerance requested
         # for it, tracked over a rolling window. `merit <= 1` means converged.
-        complementarity = sum(l -> kdot(X[l], Y[l]), 1:L; init=zero(T))
+        # The accepted-step update already computed this scalar while it owned
+        # each block. Reusing it avoids another complete block scan at the top
+        # of every iteration. Restarts refresh the cache after rescaling.
+        complementarity = current_complementarity
         objective_scale = max(abs(pObj), abs(dObj))
         merit = stagnation_merit(stagnation, opts, p_res, d_res, gap_rel,
             complementarity, scale_p, scale_d, objective_scale)
@@ -919,8 +973,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         isfinite(merit) && !isfinite(initial_merit) && (initial_merit = merit)
         if isfinite(merit) && merit < best_merit
             best_merit = merit
+            best_iterate_started = time_ns()
             _store_best_iterate!(
                 best_iterate,
+                ws,
                 x,
                 X,
                 y,
@@ -932,6 +988,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 d_res,
                 iter,
             )
+            phase_best_iterate +=
+                (time_ns() - best_iterate_started) / 1.0e9
         end
 
         if term_ok
@@ -1243,8 +1301,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                         Y[l] .*= effective_omega_step
                     end
                 end
+                current_complementarity = zero(T)
                 for l in 1:L
-                    μ[l] = opts.β * kdot(X[l], Y[l]) / k[l]
+                    block_complementarity = kdot(X[l], Y[l])
+                    current_complementarity += block_complementarity
+                    μ[l] = opts.β * block_complementarity / k[l]
                 end
                 opts.verbosity >= 1 &&
                     println("Step size too small! Restart $restarts/$(opts.max_restarts): rescaling the collapsed side(s) by ×$(Float64(opts.omega_step)).")
@@ -1268,26 +1329,22 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         end
 
         update_started = time_ns()
-        for l in 1:L
-            trial_combine_owned!(
-                X[l],
-                X[l],
-                tX,
-                ws.blk[l].dX,
-                ws.blk[l].W1[1, 1],
-            )
-            trial_combine_owned!(
-                Y[l],
-                Y[l],
-                tY,
-                ws.blk[l].dY,
-                ws.blk[l].W1[1, 1],
-            )
-        end
+        complementarity_after, finite_blocks = threaded_update_blocks!(
+            ws,
+            X,
+            Y,
+            tX,
+            tY,
+        )
         trial_combine_owned!(x, x, tX, ws.dx)
         n > 0 && trial_combine_owned!(y, y, tY, ws.dy)
 
-        if !_finite_iterate(x, X, y, Y, μ)
+        if !(
+            finite_blocks &&
+            all(isfinite, x) &&
+            all(isfinite, y) &&
+            all(isfinite, μ)
+        )
             status, message = NumericalBreakdown,
             "non-finite primal or dual iterate detected" *
             (dynamic_range_limited(T) ? " ($T's dynamic range exceeded)" : "") *
@@ -1295,10 +1352,6 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             break
         end
 
-        complementarity_after = zero(T)
-        @inbounds for l in 1:L
-            complementarity_after += kdot(X[l], Y[l])
-        end
         record_and_update!(
             parameter_controller;
             iteration=iter + 1,
@@ -1325,38 +1378,37 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             selected_parameters=selected_parameters,
         )
         phase_update += (time_ns() - update_started) / 1.0e9
+        current_complementarity = complementarity_after
 
-        pObj = LinearAlgebra.dot(solve_prob.c, x)
-        dObj = dual_objective(solve_prob, y, Y)
-        if !isfinite(pObj) || !isfinite(dObj)
-            status, message = NumericalBreakdown,
-            "non-finite primal or dual objective detected"
-            break
-        end
-        iter += 1
-
-        if parameter_controller.strategy === :adaptive &&
-           !parameter_controller.fallback
-            total_complementarity =
-                sum(l -> kdot(X[l], Y[l]), 1:L; init=zero(T))
-            global_mu =
-                total_complementarity / T(max(sum(k; init=0), 1))
-            for l in 1:L
-                μ[l] = parameter_controller.beta * global_mu
-            end
-        else
-            for l in 1:L
-                μ[l] =
-                    parameter_controller.beta *
-                    kdot(X[l], Y[l]) /
-                    k[l]
-            end
-        end
+        # `threaded_update_blocks!` cached every post-step `dot(X_l, Y_l)` in
+        # `ws.block_norms`. Consume those values before the dual-objective
+        # evaluation reuses the same scratch vector for `dot(C_l, Y_l)`.
+        objective_and_targets_started = time_ns()
+        threaded_update_mu!(
+            ws,
+            μ,
+            parameter_controller.beta,
+            k,
+            complementarity_after,
+            parameter_controller.strategy === :adaptive &&
+            !parameter_controller.fallback,
+        )
         if !all(isfinite, μ)
             status, message = NumericalBreakdown,
             "non-finite complementarity target detected"
             break
         end
+
+        pObj = LinearAlgebra.dot(solve_prob.c, x)
+        dObj = threaded_dual_objective(ws, solve_prob, y, Y)
+        if !isfinite(pObj) || !isfinite(dObj)
+            status, message = NumericalBreakdown,
+            "non-finite primal or dual objective detected"
+            break
+        end
+        phase_objective_and_targets +=
+            (time_ns() - objective_and_targets_started) / 1.0e9
+        iter += 1
 
         # Newton feasibility equations are affine:
         #   P⁺ = (1-tX)P and d⁺ = (1-tY)d.
@@ -1444,6 +1496,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         phase_corrector +
         phase_line_search +
         phase_update +
+        phase_best_iterate +
+        phase_objective_and_targets +
         phase_finalization
     )
     timings = opts.timing ? (
@@ -1480,6 +1534,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             phase_corrector_direction_recovery,
         line_search=phase_line_search,
         update=phase_update,
+        best_iterate=phase_best_iterate,
+        objective_and_targets=phase_objective_and_targets,
         finalization=phase_finalization,
         other=max(0.0, elapsed - accounted),
     ) : nothing
