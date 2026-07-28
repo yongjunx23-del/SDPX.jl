@@ -77,6 +77,47 @@ end
         end
     end
 
+    @testset "objective equilibration preserves the requested original gap" begin
+        # The optimum is zero while objective normalization is 1e6. Before the
+        # private scaled-gap tolerance was adjusted by that factor, the core
+        # stopped with an apparently accurate 1e-8 scaled gap, which became an
+        # original-coordinate gap of about 1e-3 and was downgraded by the final
+        # certificate from Optimal to Stalled.
+        coefficients = zeros(Float64, 1, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[1, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [1e6],
+            [coefficients],
+            [zeros(2, 2)],
+            zeros(1, 0),
+            Float64[];
+            sparse=true,
+            verbosity=0,
+        )
+        tolerance = 1e-8
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            parameter_policy=:fixed,
+            parameter_strategy=:fixed,
+            presolve=false,
+            scaling=:equilibrate,
+            ϵ_gap=tolerance,
+            ϵ_primal=tolerance,
+            ϵ_dual=tolerance,
+            Ωp=10.0,
+            Ωd=10.0,
+            iter_max=200,
+            verbosity=0,
+        )
+        result = SDPX.solve!(problem, options)
+        certificate = SDPX.result_certificate(problem, result, options)
+        @test result.status == SDPX.Optimal
+        @test result.gap_rel <= tolerance
+        @test certificate.valid
+        @test certificate.gap_relative <= tolerance
+    end
+
     @testset "Optimal is never relaxed by three orders of magnitude" begin
         data = regression_sdp_data(Float64)
         problem = SDPX.ingest(
