@@ -17,6 +17,11 @@ the caller's problem data or warm start.
 _owned_array_copy(::Type{T}, source::AbstractArray) where {T} =
     Array{T}(source)
 
+_owned_array_copy(::Type{T}, source::SparseMatrixCSC) where {T} =
+    _ingest_owned_sparse(T, source)
+_owned_array_copy(::Type{BigFloat}, source::SparseMatrixCSC) =
+    _ingest_owned_sparse(BigFloat, source)
+
 function _owned_array_copy(
     ::Type{BigFloat},
     source::AbstractArray,
@@ -31,6 +36,24 @@ function _owned_array_copy(
         end
     end
     return destination
+end
+
+function _owned_equality_slice(
+    ::Type{T},
+    matrix::SparseMatrixCSC,
+    rows,
+    columns,
+) where {T}
+    return _ingest_owned_sparse(T, matrix[rows, columns])
+end
+
+function _owned_equality_slice(
+    ::Type{T},
+    matrix::AbstractMatrix,
+    rows,
+    columns,
+) where {T}
+    return _owned_array_copy(T, view(matrix, rows, columns))
 end
 
 """Return a callback-safe scalar value that cannot mutate solver state."""
@@ -257,6 +280,9 @@ function classify_problem(prob::SDPProblem{T}) where {T}
 end
 
 function _runtime_schur_backend(prob::SDPProblem)
+    if _use_sparse_schur_sdp(prob)
+        return :sparse_schur_cholesky
+    end
     if prob.cons isa SparseCons && prob.dims.n == 0
         frequency = zeros(Int, prob.dims.m)
         for variables in prob.cons.active, variable in variables
@@ -841,6 +867,21 @@ function _equality_column_scales(B::AbstractMatrix{T}) where {T}
     return scales
 end
 
+function _equality_column_scales(
+    B::SparseMatrixCSC{T,Int},
+) where {T}
+    scales = zeros(T, size(B, 2))
+    values = nonzeros(B)
+    @inbounds for column in axes(B, 2)
+        value = zero(T)
+        for stored in nzrange(B, column)
+            value = max(value, abs(values[stored]))
+        end
+        scales[column] = value
+    end
+    return scales
+end
+
 function _normalized_equality_columns(
     B::AbstractMatrix{T},
     columns::AbstractVector{Int},
@@ -856,6 +897,64 @@ function _normalized_equality_columns(
         end
     end
     return normalized
+end
+
+function _normalized_equality_columns(
+    B::SparseMatrixCSC{Float64,Int},
+    columns::AbstractVector{Int},
+    scales::AbstractVector{Float64},
+)
+    normalized = _ingest_owned_sparse(Float64, B[:, columns])
+    values = nonzeros(normalized)
+    @inbounds for position in axes(normalized, 2)
+        scale = scales[columns[position]]
+        iszero(scale) &&
+            throw(ArgumentError("cannot normalize an exactly zero equality column"))
+        for stored in nzrange(normalized, position)
+            values[stored] /= scale
+        end
+    end
+    return normalized
+end
+
+function _equality_rank_indices(
+    B::SparseMatrixCSC{Float64,Int},
+    tolerance::Real,
+)
+    n = size(B, 2)
+    n == 0 && return Int[]
+    scales = _equality_column_scales(B)
+    nonzero_columns = findall(!iszero, scales)
+    isempty(nonzero_columns) && return Int[]
+    normalized =
+        _normalized_equality_columns(B, nonzero_columns, scales)
+    factor = qr(normalized)
+    diagonal_count = min(size(factor.R)...)
+    diagonal = [
+        abs(factor.R[index, index])
+        for index in 1:diagonal_count
+    ]
+    scale = maximum(diagonal; init=0.0)
+    threshold = max(
+        Float64(tolerance),
+        Float64(max(size(normalized)...)) * eps(Float64),
+    ) * scale
+    rank_estimate = count(>(threshold), diagonal)
+    selected = nonzero_columns[factor.pcol[1:rank_estimate]]
+    return sort!(Vector{Int}(selected))
+end
+
+function _equality_rank_indices(
+    B::SparseMatrixCSC{T,Int},
+    tolerance::Real,
+) where {T}
+    # SuiteSparse SPQR is Float64-only. Densifying a genuinely large
+    # Float64x4/BigFloat equality operator merely to run a generic pivoted QR
+    # can exceed memory before the solve starts. Retaining all columns is the
+    # conservative, correctness-preserving fallback; exact zero, duplicate,
+    # and proportional constraints have already been handled structurally.
+    length(B) > 5_000_000 && return collect(1:size(B, 2))
+    return _equality_rank_indices(Matrix(B), tolerance)
 end
 
 function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
@@ -951,7 +1050,13 @@ function _equality_elimination_check(
         scales,
     )
     coefficients = try
-        qr(Bkeep) \ Bdropped
+        factor = Bkeep isa SparseMatrixCSC ? qr(Bkeep) :
+                 qr(Bkeep, ColumnNorm())
+        factor \ (
+            Bdropped isa SparseMatrixCSC ?
+            Matrix(Bdropped) :
+            Bdropped
+        )
     catch exception
         _recoverable(exception) || rethrow()
         return (
@@ -1127,10 +1232,12 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         keep = collect(1:n)
     end
     consistent = check.consistent
-    zero_columns = count(
-        column -> all(iszero, view(prob.B, :, column)),
-        1:n,
-    )
+    zero_columns = prob.B isa SparseMatrixCSC ?
+                   count(column -> isempty(nzrange(prob.B, column)), 1:n) :
+                   count(
+                       column -> all(iszero, view(prob.B, :, column)),
+                       1:n,
+                   )
     report = PresolveReport(
         n,
         length(keep),
@@ -1160,7 +1267,7 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
     reduced = SDPProblem{T}(
         prob.c,
         prob.C,
-        _owned_array_copy(T, view(prob.B, :, keep)),
+        _owned_equality_slice(T, prob.B, :, keep),
         _owned_array_copy(T, view(prob.b, keep)),
         prob.cons,
         dims,
@@ -1314,6 +1421,46 @@ function estimate_sdp_workspace_bytes(
 ) where {T}
     L, m, n, k = prob.dims
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    if _use_sparse_schur_sdp(prob)
+        cons = prob.cons::SparseCons{Float64}
+        packed_pairs = sum(
+            ids -> length(ids) * (length(ids) + 1) ÷ 2,
+            cons.active;
+            init=0,
+        )
+        schur_nonzeros = prob.structure.schur_upper_nnz
+        csc_bytes = saturating_sum_bytes(
+            saturating_bytes(8, schur_nonzeros),
+            saturating_bytes(4, schur_nonzeros + m + 1),
+        )
+        # The selector guarantees that a completely filled lower Cholesky
+        # factor still fits Int32. Use that worst case instead of guessing a
+        # fill ratio from the input density.
+        dense_factor_nonzeros = m * (m + 1) ÷ 2
+        factor_bytes = saturating_bytes(12, dense_factor_nonzeros)
+        packed_bytes = saturating_bytes(8, packed_pairs)
+        equality_solve_bytes = saturating_bytes(2, 8, m, n)
+        equality_gram_bytes = saturating_bytes(2, 8, n, n)
+        vector_bytes = saturating_bytes(
+            8,
+            12m + 8n + max(thread_count, 1) * m,
+        )
+        state_bytes = saturating_bytes(
+            8,
+            2m + 2n + 4sum(dimension -> dimension^2, k; init=0),
+        )
+        return saturating_sum_bytes(
+            csc_bytes,
+            factor_bytes,
+            packed_bytes,
+            equality_solve_bytes,
+            equality_gram_bytes,
+            vector_bytes,
+            state_bytes,
+            WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES +
+            WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES * L,
+        )
+    end
     schur_bins = T === BigFloat ? 1 : min(max(thread_count, 1), L)
     matrix_elements =
         2m * m +                 # S and factorization scratch
@@ -1382,11 +1529,20 @@ function _attach_diagnostics(
     diagnostics_enabled || return result
     core_time = result.timings === nothing ? NaN :
                 get(result.timings, :total, NaN)
-    timings = (
-        presolve=report.elapsed,
-        core=core_time,
-        pipeline=pipeline_time,
-    )
+    timings = result.timings === nothing ?
+              (
+                  presolve=report.elapsed,
+                  core=core_time,
+                  pipeline=pipeline_time,
+              ) :
+              merge(
+                  result.timings,
+                  (
+                      presolve=report.elapsed,
+                      core=core_time,
+                      pipeline=pipeline_time,
+                  ),
+              )
     memory = (
         workspace_bytes=workspace_bytes,
         process_peak_rss_bytes=_process_peak_rss_bytes(),

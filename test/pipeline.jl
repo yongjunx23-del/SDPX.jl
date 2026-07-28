@@ -701,8 +701,11 @@ end
     r = SDPX.solve!(prob, opts)
     certificate = SDPX.result_certificate(prob, r, opts)
 
-    @test r.p_res ≈ certificate.primal_affine_residual rtol = 1e-10
-    @test r.d_res ≈ certificate.dual_affine_residual rtol = 1e-10
+    # Public residuals include cone violations as well as affine residuals.
+    # Final slack reconstruction can move a discrepancy from the affine term
+    # to the equivalent PSD term, so compare the complete certificate metric.
+    @test r.p_res ≈ certificate.primal_residual rtol = 1e-10
+    @test r.d_res ≈ certificate.dual_residual rtol = 1e-10
     expected_gap = abs(r.pObj - r.dObj) / max(1, (abs(r.pObj) + abs(r.dObj)) / 2)
     @test r.gap_rel ≈ expected_gap rtol = 1e-10
 end

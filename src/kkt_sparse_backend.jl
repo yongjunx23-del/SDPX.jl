@@ -140,6 +140,26 @@ function factorize!(backend::SparseCholeskyBackend, A::SparseMatrixCSC{Float64})
     return true
 end
 
+function factorize_static_pattern!(
+    backend::SparseCholeskyBackend,
+    A::SparseMatrixCSC{Float64},
+)
+    backend.factorization === nothing && return analyze!(backend, A)
+    try
+        cholesky!(
+            backend.factorization,
+            Symmetric(A, :L);
+            check=false,
+        )
+    catch exception
+        _recoverable(exception) || rethrow()
+        return analyze!(backend, A)
+    end
+    issuccess(backend.factorization) || return analyze!(backend, A)
+    backend.factorizations += 1
+    return true
+end
+
 """
     _cholmod_solve!(x, factorization, rhs) -> x
 
@@ -285,6 +305,31 @@ function factorize!(backend::SparseLDLBackend, K::SparseMatrixCSC{Float64})
                backend.dimension == size(K, 1) &&
                backend.pattern == pattern_fingerprint(K)
     reusable || return analyze!(backend, K)
+    try
+        ldlt!(backend.factorization, Symmetric(K, :L); check=false)
+    catch exception
+        _recoverable(exception) || rethrow()
+        return analyze!(backend, K)
+    end
+    issuccess(backend.factorization) || return analyze!(backend, K)
+    backend.factorizations += 1
+    return true
+end
+
+"""
+    factorize_static_pattern!(backend, K) -> Bool
+
+Refactor a matrix whose CSC object and sparsity pattern are owned by a solver
+workspace and therefore cannot change. This avoids hashing every `rowval`
+entry on each IPM iteration; that check alone streams more than 500 MB for the
+B3 Schur pattern. Public callers with arbitrary matrices should keep using
+`factorize!`, which verifies the pattern.
+"""
+function factorize_static_pattern!(
+    backend::SparseLDLBackend,
+    K::SparseMatrixCSC{Float64},
+)
+    backend.factorization === nothing && return analyze!(backend, K)
     try
         ldlt!(backend.factorization, Symmetric(K, :L); check=false)
     catch exception

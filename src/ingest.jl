@@ -454,14 +454,21 @@ function _ingest_owned_sparse(
     source::SparseMatrixCSC,
 ) where {T}
     converted = SparseMatrixCSC{T,Int}(source)
-    return SparseMatrixCSC(
+    destination = SparseMatrixCSC(
         size(converted, 1),
         size(converted, 2),
         copy(converted.colptr),
         copy(rowvals(converted)),
         _ingest_owned_array(T, nonzeros(converted)),
     )
+    dropzeros!(destination)
+    return destination
 end
+
+_ingest_owned_array(::Type{T}, source::SparseMatrixCSC) where {T} =
+    _ingest_owned_sparse(T, source)
+_ingest_owned_array(::Type{BigFloat}, source::SparseMatrixCSC) =
+    _ingest_owned_sparse(BigFloat, source)
 
 """
     ingest(c, A, C, B, b; T=nothing, sparse=:auto, validate=true,
@@ -831,7 +838,9 @@ function min_precision_bits(prob::SDPProblem{BigFloat})
     for Cl in prob.C
         b = min(b, minimum(precision, Cl; init=typemax(Int)))
     end
-    b = min(b, minimum(precision, prob.B; init=typemax(Int)))
+    equality_values =
+        prob.B isa SparseMatrixCSC ? nonzeros(prob.B) : prob.B
+    b = min(b, minimum(precision, equality_values; init=typemax(Int)))
     b = min(b, minimum(precision, prob.b; init=typemax(Int)))
     cons = prob.cons
     if cons isa DenseCons
@@ -960,6 +969,8 @@ function reround(prob::SDPProblem{BigFloat}, bits::Int)
         return SDPProblem{BigFloat}(
             reround_array(prob.c),
             [reround_array(matrix) for matrix in prob.C],
+            prob.B isa SparseMatrixCSC ?
+            reround_sparse(prob.B) :
             reround_array(prob.B),
             reround_array(prob.b),
             newcons,
@@ -989,6 +1000,30 @@ struct Equilibration{T}
     # possible at all; without it the returned duals are silently wrong by a
     # constant factor.
     objective_scale::T
+end
+
+function _scale_equality_rows!(
+    matrix::Matrix{T},
+    scales::AbstractVector{T},
+) where {T}
+    @inbounds for column in axes(matrix, 2), row in axes(matrix, 1)
+        matrix[row, column] /= scales[row]
+    end
+    return matrix
+end
+
+function _scale_equality_rows!(
+    matrix::SparseMatrixCSC{T,Int},
+    scales::AbstractVector{T},
+) where {T}
+    rows = rowvals(matrix)
+    values = nonzeros(matrix)
+    @inbounds for column in axes(matrix, 2)
+        for stored in nzrange(matrix, column)
+            values[stored] /= scales[rows[stored]]
+        end
+    end
+    return matrix
 end
 
 Equilibration{T}(E, s) where {T} = Equilibration{T}(E, s, one(T))
@@ -1122,9 +1157,7 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
     (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
     cc ./= objective_scale
     Bc = copy(prob.B)
-    @inbounds for j in 1:n, i in 1:m
-        Bc[i, j] /= s[i]
-    end
+    _scale_equality_rows!(Bc, s)
     @inbounds for l in 1:L
         for i in cons.active[l]
             A = Asp2[l][i]
@@ -1242,11 +1275,7 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
     (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
     cc ./= objective_scale
     Bc = copy(prob.B)
-    for i in 1:m
-        @inbounds for j in 1:n
-            Bc[i, j] /= s[i]
-        end
-    end
+    _scale_equality_rows!(Bc, s)
     for l in 1:L
         for i in 1:m
             Ai = reshape(view(Av2[l], :, i), k[l], k[l])

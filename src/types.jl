@@ -159,7 +159,11 @@ Base.@kwdef struct SolverOptions{T}
     checkpoint_every::Int     = 0                     # 0 disables; else write every N iterations
     checkpoint_path::String   = ""
     convert_inputs::Bool      = false                 # normalize BigFloat storage precision; cannot recover digits
-    force_gc::Bool            = false                  # kept for one release as an A/B knob; default off (P1)
+    # Explicitly collect after each accepted iteration. On glibc Linux this
+    # also trims free allocator pages; useful for very large sparse solves whose
+    # factor/RHS workspaces otherwise leave a high retained RSS. Default off
+    # because ordinary solves are faster with Julia's automatic GC schedule.
+    force_gc::Bool            = false
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
     parameter_strategy::Symbol = :fixed                 # :fixed | :adaptive; adaptive is benchmark-gated
@@ -561,7 +565,10 @@ the one-time-converted internal layout everything else operates on.
 struct SDPProblem{T}
     c::Vector{T}
     C::Vector{Matrix{T}}
-    B::Matrix{T}
+    # Equality systems in bootstrap SDPs are often extremely sparse. Keeping
+    # them sparse avoids turning an 88k-nonzero matrix into several gigabytes
+    # of dense storage before presolve has even started.
+    B::Union{Matrix{T},SparseMatrixCSC{T,Int}}
     b::Vector{T}
     cons::AbstractCons{T}
     dims::NamedTuple{(:L, :m, :n, :k),Tuple{Int,Int,Int,Vector{Int}}}

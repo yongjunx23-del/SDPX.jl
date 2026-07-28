@@ -1097,6 +1097,72 @@ function _reduce_sparse_schur_serial!(ws::Workspace{T}, cons::SparseCons{T}) whe
 end
 
 """
+    reduce_sparse_schur_csc!(ws, cons)
+
+Accumulate block-local packed Schur triangles directly into the fixed lower
+CSC pattern used by the sparse Schur SDP backend. Output columns are
+owned exclusively by workers. Each block suffix and destination column are
+sorted, so a linear merge locates entries without a giant pair-to-CSC lookup
+table (317 million candidate pairs on B3).
+"""
+function reduce_sparse_schur_csc!(
+    ws::Workspace{Float64},
+    cons::SparseCons{Float64},
+)
+    sparse_workspace =
+        ws.sparse_kkt::SparseSchurSDPWorkspace
+    matrix = sparse_workspace.matrix
+    memberships = sparse_workspace.memberships
+    counts = sparse_workspace.schur_counts
+    m = length(counts)
+    ntasks = min(max(ws.thread_count, 1), max(m, 1))
+    balanced =
+        length(ws.schur_column_boundaries) == ntasks + 1
+    chunk = cld(m, ntasks)
+
+    @sync for task in 1:ntasks
+        first_column = balanced ?
+                       ws.schur_column_boundaries[task] :
+                       (task - 1) * chunk + 1
+        first_column > m && continue
+        last_column = balanced ?
+                      ws.schur_column_boundaries[task + 1] - 1 :
+                      min(task * chunk, m)
+        Threads.@spawn begin
+            @inbounds for column in first_column:last_column
+                first = Int(matrix.colptr[column])
+                last = first + Int(counts[column]) - 1
+                for destination in first:last
+                    matrix.nzval[destination] = 0.0
+                end
+                for (block32, position32) in memberships[column]
+                    block = Int(block32)
+                    position = Int(position32)
+                    ids = cons.schur_order[block]
+                    count = length(ids)
+                    values = ws.blk[block].Svals
+                    source_base = _packed_pair_base(position, count)
+                    destination = first
+                    for source_position in position:count
+                        row = ids[source_position]
+                        while matrix.rowval[destination] < row
+                            destination += 1
+                        end
+                        matrix.rowval[destination] == row ||
+                            error("internal sparse Schur CSC pattern mismatch")
+                        matrix.nzval[destination] +=
+                            values[source_base + (source_position - position + 1)]
+                    end
+                end
+                sparse_workspace.primal_diagonal_values[column] =
+                    matrix.nzval[first]
+            end
+        end
+    end
+    return matrix
+end
+
+"""
     reduce_sparse_schur!(ws, cons)
 
 Scatter every block's packed upper-triangle contribution into the dense Schur
@@ -1128,6 +1194,12 @@ block order within one task.
 """
 function reduce_sparse_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
     ws.arrow === nothing || return reduce_arrow_schur!(ws, cons)
+    if T === Float64 && ws.sparse_kkt !== nothing
+        return reduce_sparse_schur_csc!(
+            ws::Workspace{Float64},
+            cons::SparseCons{Float64},
+        )
+    end
     _zero_schur_accumulator!(ws.S, ws)
     m = size(ws.S, 1)
     nt = ws.thread_count

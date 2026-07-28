@@ -4,6 +4,73 @@ import MutableArithmetics as MA
 using SparseArrays
 using Test
 
+@testset "sparse equality matrices stay sparse through preprocessing" begin
+    variables = 6
+    coefficients = [zeros(variables, 1, 1)]
+    coefficients[1][:, 1, 1] .= 1.0
+    constants = [fill(-1.0, 1, 1)]
+    equality = sparse(
+        [1, 2, 1, 2],
+        [1, 2, 3, 3],
+        [1.0, 1.0, 1.0, 1.0],
+        variables,
+        3,
+    )
+    rhs = [0.25, 0.5, 0.75]
+    problem = ingest(
+        ones(variables),
+        coefficients,
+        constants,
+        equality,
+        rhs;
+        verbosity=0,
+    )
+    @test problem.B isa SparseMatrixCSC{Float64,Int}
+    @test nnz(problem.B) == nnz(equality)
+    nonzeros(equality)[1] = 99.0
+    @test nonzeros(problem.B)[1] == 1.0
+
+    options = SolverOptions{Float64}(
+        presolve=:auto,
+        scaling=:equilibrate,
+        verbosity=0,
+    )
+    reduced, _, report = SDPX.presolve_equalities(problem, options)
+    @test report.removed_dependent_equalities == 1
+    @test reduced.dims.n == 2
+    @test reduced.B isa SparseMatrixCSC{Float64,Int}
+
+    scaled, _ = SDPX.equilibrate(reduced)
+    @test scaled.B isa SparseMatrixCSC{Float64,Int}
+    @test nnz(scaled.B) == nnz(reduced.B)
+
+    setprecision(BigFloat, 80) do
+        big_equality = sparse(BigFloat.(Matrix(reduced.B)))
+        big_problem = ingest(
+            BigFloat.(problem.c),
+            [BigFloat.(coefficients[1])],
+            [BigFloat.(constants[1])],
+            big_equality,
+            BigFloat.(reduced.b);
+            verbosity=0,
+        )
+        rerounded = SDPX.reround(big_problem, 160)
+        @test rerounded.B isa SparseMatrixCSC{BigFloat,Int}
+        @test all(value -> precision(value) == 160, nonzeros(rerounded.B))
+        @test all(
+            left !== right
+            for (index, left) in pairs(nonzeros(rerounded.B))
+            for right in nonzeros(rerounded.B)[(index + 1):end]
+        )
+        large_sparse_equalities =
+            spzeros(BigFloat, 5_001, 1_000)
+        @test SDPX._equality_rank_indices(
+            large_sparse_equalities,
+            0.0,
+        ) == collect(1:1_000)
+    end
+end
+
 @testset "active-only sparse coefficient vectors avoid empty L-by-m storage" begin
     variables = 1_000
     active = [1, 17, variables]

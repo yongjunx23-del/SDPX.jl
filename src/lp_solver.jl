@@ -1118,7 +1118,10 @@ function solve_lp!(
 
     G = _owned_array_copy(T, view(G_original, keep, :))
     h = _owned_array_copy(T, view(h_original, keep))
-    B = _owned_array_copy(T, prob.B)
+    # The LP workspace currently uses dense row/column scaling and dense KKT
+    # buffers. Keep that established path even when the SDP frontend retained
+    # a sparse equality matrix.
+    B = _owned_array_copy(T, Matrix(prob.B))
     b = _owned_array_copy(T, prob.b)
     c = _owned_array_copy(T, prob.c)
     scaling = _scale_lp!(

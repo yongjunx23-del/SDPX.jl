@@ -8,6 +8,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A guarded equality-aware sparse Schur backend for large Float64 SDPs. It
+  assembles only the lower CSC triangle with exclusive column ownership,
+  reuses CHOLMOD's symbolic Cholesky analysis, solves all equality columns as
+  one dense multi-right-hand-side operation, and factors the smaller equality
+  normal matrix with the existing rank-revealing fallback. The route is
+  selected only for sparse coefficient/equality storage, at least 10,000
+  primal variables, predicted Schur density at most 10%, and an Int32-safe
+  worst-case Schur factor.
+- Sparse equality matrices now remain sparse through ingest, structural
+  cleanup, equality slicing, Ruiz equilibration, and BigFloat rerounding.
+  Float64 dependent-equality presolve uses SuiteSparse SPQR; large
+  extended-precision sparse equality systems retain all numerically ambiguous
+  columns instead of densifying them.
+- The sparse SDP backend now caches a required equality-pivoting decision,
+  factors the pivoted equality buffer in place, and reports factor nonzeros,
+  symbolic reuse, regularization, and refinement counts in diagnostics.
+- Equality elimination in the sparse SDP backend now applies a diagonal
+  congruence to `Q = B' * S^-1 * B` before factorization and maps the Newton
+  multiplier back afterward. This exact coordinate transformation avoids an
+  unnecessary rank-revealing factorization on the B3 no-box model and reduces
+  its equality-factor phase from 5.93 to 1.09 seconds.
+- `force_gc=true` is functional again: it performs a full collection after
+  every accepted iteration and, on glibc Linux, trims released allocator
+  pages. The default remains off; the option is intended for very large sparse
+  factor and multi-right-hand-side workloads where releasing retained
+  allocator pages matters more than collection overhead. It does not guarantee
+  a lower factorization-local peak RSS.
 - `ActiveSparseCoefficientVector`, an active-only input representation for
   PSD blocks that touch a small subset of global variables. It retains the
   existing sparse-matrix vector interface while avoiding an `L × m` grid of
@@ -36,9 +63,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the relevant objective/gap condition can pass. Large SDP solves no longer
   rebuild all original-coordinate residuals on every feasible-but-not-yet-
   optimal iteration; the independent final certificate remains mandatory.
+- Final primal SDP slacks are rebuilt from the returned `x` and the original
+  affine data before certification. This removes congruence-amplified internal
+  slack residuals without changing the iterate or objective, and makes the
+  returned `X` exactly represent the original-coordinate PSD matrices.
+- A pivoted but full-rank equality-normal factor no longer forces the adaptive
+  parameter controller to fall back to fixed parameters. The sparse KKT result
+  now distinguishes the factorization algorithm from an actual numerical rank
+  loss; this matters on B3, where pivoting starts several iterations before
+  the reported rank first drops.
+- Sparse Schur factor quality is measured from the regularized diagonal that
+  was actually factorized, rather than the unregularized diagonal. A valid
+  equality-controlled zero diagonal therefore no longer disables adaptive
+  parameters on the first iteration; residual refinement and actual equality
+  rank loss remain the safety checks.
 
 ### Changed
 
+- On the 61,603-variable B3 no-box smoke case, the new sparse Schur route
+  removed 328 dependent equalities, reduced first-iteration peak RSS from
+  about 89.5 GB to 41.1 GB, and completed the first Newton iteration in
+  103.02 seconds on the controlled node155 run, versus roughly 162--200
+  seconds per iteration in the former dense run. Full trajectories,
+  certificate status, and rejected alternatives are recorded in the
+  [B3 report](bench/lattice_bootstrap/B3_NO_BOX_MOSEK_SDPX_REPORT.md); a
+  non-optimal iterate is never reported there as a bound.
+- Automatic refinement on the regularized sparse Float64 SDP route now keeps
+  two guard digits beyond the requested certificate instead of always
+  targeting 64 machine ulps. Explicit `refine_tol` values still override the
+  policy, and original-coordinate final certification is unchanged.
 - Accepted-step updates, finite-value checks, complementarity targets, dual
   objective evaluation, and best-iterate copies now use exclusive block
   ownership for immutable arithmetic on SDP models with at least 256 blocks.

@@ -233,6 +233,11 @@ function _kkt_factorization_quality(ws::Workspace{T}) where {T}
         arrow = ws.arrow::ArrowWorkspace{T}
         return _cholesky_diagonal_quality(arrow.Sredbuf)
     end
+    if T === Float64 && ws.sparse_kkt !== nothing
+        sparse_workspace =
+            ws.sparse_kkt::SparseSchurSDPWorkspace
+        return T(sparse_workspace.factorization_quality)
+    end
     return _cholesky_diagonal_quality(ws.Sbuf)
 end
 
@@ -506,8 +511,18 @@ function newton_step!(
         current_normalized_feasibility / previous_normalized_feasibility
     end
     primal_margin, dual_margin = _block_factorization_margins(ws)
+    # Pivoting is an algorithmic choice, not itself evidence that the equality
+    # normal matrix lost rank.  LAPACK can reject an unpivoted factor because
+    # of a tiny leading pivot while the rank-revealing factor still reports
+    # every equality direction.  Treating every pivoted factor as degraded
+    # made the adaptive controller fall back to fixed parameters prematurely
+    # on B3.  New backends report the actual rank verdict explicitly; older
+    # backends retain the conservative historical interpretation.
+    q_rank_deficient = hasproperty(kkt, :q_rank_deficient) ?
+                       kkt.q_rank_deficient :
+                       kkt.q_pivoted
     factorization_quality =
-        kkt.q_pivoted ? zero(T) : _kkt_factorization_quality(ws)
+        q_rank_deficient ? zero(T) : _kkt_factorization_quality(ws)
     regularization = _relative_regularization_from_attempts(
         T,
         kkt.reg_attempts,

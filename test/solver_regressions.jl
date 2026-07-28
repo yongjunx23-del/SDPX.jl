@@ -77,6 +77,42 @@ end
         end
     end
 
+    @testset "final primal slacks are reconstructed from original data" begin
+        coefficients = zeros(Float64, 1, 2, 2)
+        coefficients[1, 1, 1] = 1e-8
+        coefficients[1, 2, 2] = 1e8
+        problem = SDPX.ingest(
+            [1.0],
+            [coefficients],
+            [zeros(2, 2)],
+            zeros(1, 0),
+            Float64[];
+            sparse=true,
+            verbosity=0,
+        )
+        result = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                parameter_policy=:fixed,
+                scaling=:equilibrate,
+                iter_max=0,
+                stall_iterations=0,
+                verbosity=0,
+            );
+            x0=[2.0],
+            # A valid positive-definite warm slack need not be exactly affine.
+            # The returned slack must nevertheless describe the returned x in
+            # original coordinates.
+            X0=[Matrix(1.0I, 2, 2)],
+            y0=Float64[],
+            Y0=[Matrix(1.0I, 2, 2)],
+        )
+        expected = [2e-8 0.0; 0.0 2e8]
+        @test result.X[1] == expected
+        @test result.p_res == 0.0
+    end
+
     @testset "objective equilibration preserves the requested original gap" begin
         # The optimum is zero while objective normalization is 1e6. Before the
         # private scaled-gap tolerance was adjusted by that factor, the core

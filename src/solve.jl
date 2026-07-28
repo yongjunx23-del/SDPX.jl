@@ -17,6 +17,7 @@ function print_header(opts::SolverOptions)
     opts.verbosity >= 1 || return
     println("iter\tprimal obj\tdual obj\tgap\t\tprimal res\tdual res\tprimal step\tdual step\ttime (s)")
     println("="^131)
+    flush(stdout)
 end
 
 function print_iter(opts::SolverOptions{T}, iter, pObj, dObj, gap, p_res, d_res, tX=nothing, tY=nothing, dt=nothing) where {T}
@@ -27,6 +28,29 @@ function print_iter(opts::SolverOptions{T}, iter, pObj, dObj, gap, p_res, d_res,
     else
         @printf "%d\t%.5E\t%.5E\t%.5E\t%.5E\t%.5E\t%.5E\t%.5E\t%.5E\n" iter pf df gf pr dr Float64(tX) Float64(tY) dt
     end
+    flush(stdout)
+end
+
+"""
+    _release_iteration_memory!()
+
+Run an explicit full collection and, on glibc-based Linux systems, return free
+allocator pages to the operating system. This is intentionally reachable only
+through `SolverOptions.force_gc`: large sparse factorizations and dense
+multi-right-hand-side solves can leave several GiB in allocator arenas after
+an iteration, while ordinary solves are faster when Julia chooses its own GC
+schedule.
+"""
+function _release_iteration_memory!()
+    GC.gc(true)
+    if Sys.islinux()
+        try
+            ccall(:malloc_trim, Cint, (Csize_t,), 0)
+        catch exception
+            _recoverable(exception) || rethrow()
+        end
+    end
+    return nothing
 end
 
 # ---- checkpointing (§5.5) ----
@@ -1423,6 +1447,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         if opts.checkpoint_every > 0 && !isempty(opts.checkpoint_path) && iter % opts.checkpoint_every == 0
             save_checkpoint(opts.checkpoint_path, T, x, X, y, Y, μ, iter, restarts, solve_prob.dims)
         end
+        opts.force_gc && _release_iteration_memory!()
     end
 
     # On a non-optimal exit, hand back the best point actually visited rather
@@ -1453,6 +1478,28 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         x, X, y, Y = unequilibrate(eq, x, X, y, Y)
         pObj = LinearAlgebra.dot(prob.c, x)
         dObj = dual_objective(prob, y, Y)
+    end
+    # `X` is an affine slack, not an independent model variable:
+    #
+    #     X_l = sum_i A_i^(l) * x_i - C_l.
+    #
+    # Reconstruct it from the original data before certification. A tiny
+    # residual in equilibrated coordinates can be amplified substantially by
+    # the inverse block congruence, even when the returned `x` defines a
+    # numerically sound original-coordinate PSD matrix. Reusing that amplified
+    # workspace slack would therefore report a misleading primal residual.
+    # Rebuilding changes neither `x` nor the objective or iteration trajectory;
+    # it makes the returned slack satisfy the original affine definition
+    # exactly, after which the PSD certificate tests the matrix that `x`
+    # actually defines.
+    @inbounds for block in eachindex(X)
+        buildP_owned!(X[block], prob.cons, block, x)
+        kaxpby_owned!(
+            -one(T),
+            prob.C[block],
+            one(T),
+            X[block],
+        )
     end
     # Always report certificates in the same (original) coordinates as the
     # returned iterate, including non-optimal exits and unequilibrated solves.
@@ -1568,8 +1615,32 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             total_refinement_steps=total_refine_steps,
             mixed_precision_kkt=
                 _mixed_precision_kkt_diagnostics(ws),
+            sparse_schur_backend=
+                ws.sparse_kkt === nothing ? nothing :
+                let sparse_workspace =
+                        ws.sparse_kkt::SparseSchurSDPWorkspace,
+                    backend = sparse_workspace.backend
+                    backend === nothing ||
+                    backend.factorization === nothing ?
+                    (available=false,) :
+                    merge(
+                            statistics(backend),
+                            (
+                                available=true,
+                                factor_nonzeros=
+                                    nnz(backend.factorization),
+                                regularization=
+                                    sparse_workspace.regularization,
+                                equality_requires_pivoting=
+                                    sparse_workspace.equality_requires_pivoting,
+                            ),
+                        )
+                end,
             executed=(
-                kkt=ws.arrow !== nothing ? :block_arrow : :dense_cholesky,
+                kkt=ws.arrow !== nothing ? :block_arrow :
+                    ws.sparse_kkt !== nothing ?
+                    :sparse_schur_cholesky :
+                    :dense_cholesky,
             ),
         ),
     )
@@ -2008,6 +2079,7 @@ function _solve_pipeline!(
         println(
             "SDPX execution plan: cone=$(plan.classification.cone), " *
             "solver=$(plan.algorithm), scaling=$(plan.scaling), " *
+            "kkt=$(plan.kkt_backend), " *
             "kernel=$(plan.gram_kernel), scheduling=$(plan.schedule), " *
             "threads=$(plan.threads)",
         )
@@ -2083,6 +2155,11 @@ function _solve_pipeline!(
         let route = plan.kkt_backend,
             floor_bytes = route === :block_arrow ?
                           arrow_workspace_floor_bytes(T, reduced, plan.threads) :
+                          route === :sparse_schur_cholesky ?
+                          estimate_sdp_workspace_bytes(
+                              reduced,
+                              plan.threads,
+                          ) :
                           dense_workspace_floor_bytes(
                               T,
                               reduced.dims.m,
@@ -2095,7 +2172,12 @@ function _solve_pipeline!(
             if floor_bytes > 0 && available > 0 && floor_bytes > available
                 push!(
                     warnings,
-                    "The $(route === :block_arrow ? "block-arrow" : "dense") " *
+                    "The $(
+                        route === :block_arrow ? "block-arrow" :
+                        route === :sparse_schur_cholesky ?
+                        "sparse Schur" :
+                        "dense"
+                    ) " *
                     "workspace needs at least " *
                     "$(round(floor_bytes / 2^30; digits=2)) GiB but only " *
                     "$(round(available / 2^30; digits=2)) GiB is available; " *
@@ -2212,6 +2294,7 @@ function solve(
     precision::Union{Nothing,Integer}=nothing,
     verbosity::Int=1,
     diagnostics::Bool=true,
+    timing::Bool=true,
     warm_start=nothing,
     presolve::Union{Bool,Symbol}=:auto,
     presolve_bounds::Bool=true,
@@ -2243,6 +2326,7 @@ function solve(
                 precision=nothing,
                 verbosity=verbosity,
                 diagnostics=diagnostics,
+                timing=timing,
                 warm_start=warm_start,
                 presolve=presolve,
                 presolve_bounds=presolve_bounds,
@@ -2277,6 +2361,7 @@ function solve(
         precision_bits=precision_bits,
         verbosity=verbosity,
         diagnostics=diagnostics,
+        timing=timing,
         presolve=presolve,
         presolve_bounds=presolve_bounds,
         presolve_fixed_variables=presolve_fixed_variables,
@@ -2291,7 +2376,6 @@ function solve(
         working_precision_policy=working_precision_policy,
         minimum_working_precision_bits=minimum_working_precision_bits,
         parameter_policy=:auto,
-        timing=true,
     )
     if warm_start === nothing
         return solve!(prob, options)
@@ -2332,6 +2416,7 @@ function solve(
     precision_bits::Int=256,
     verbosity::Int=1,
     diagnostics::Bool=true,
+    timing::Bool=true,
     warm_start=nothing,
     presolve::Union{Bool,Symbol}=:auto,
     presolve_bounds::Bool=true,
@@ -2376,6 +2461,7 @@ function solve(
             precision=precision_bits,
             verbosity=verbosity,
             diagnostics=diagnostics,
+            timing=timing,
             warm_start=warm_start,
             presolve=presolve,
             presolve_bounds=presolve_bounds,

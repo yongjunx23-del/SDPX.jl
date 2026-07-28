@@ -402,6 +402,7 @@ mutable struct Workspace{T}
                  LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
                  BigFloatCholeskyFactor{Matrix{BigFloat}}}
     arrow::Union{Nothing,ArrowWorkspace{T}}
+    sparse_kkt::Any
     v::Vector{T}
     d::Vector{T}
     p::Vector{T}
@@ -428,6 +429,226 @@ mutable struct Workspace{T}
     extended_precision::ExtendedPrecisionWorkspace
     mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
     thread_count::Int
+end
+
+"""
+    SparseSchurSDPWorkspace
+
+Storage for a large Float64 SDP whose Schur complement is structurally sparse
+but has equality constraints. The lower triangle of `S` is held directly in
+one CSC matrix. `memberships[i]` identifies every PSD block containing
+variable `i` and its position in that block's sorted active set. That compact
+incidence map lets Schur assembly merge block contributions into the fixed CSC
+pattern without a dense matrix or a pair-to-nonzero lookup table.
+
+The `backend` field is intentionally `Any`: `SparseCholeskyBackend` is included
+after `Workspace` because the general KKT backend API itself refers to
+`Workspace`. It is assigned exactly once and used only at the coarse
+factor/solve boundary, so this does not put dynamic dispatch in a scalar hot
+loop.
+"""
+mutable struct SparseSchurSDPWorkspace
+    # This SPD factor has order `m`, not `m+n` as the rejected augmented LDL
+    # route did. The selector proves that even a fully dense lower factor fits
+    # in Int32 before choosing the smaller/faster CHOLMOD index width.
+    matrix::SparseMatrixCSC{Float64,Int32}
+    memberships::Vector{Vector{Tuple{Int32,Int32}}}
+    schur_counts::Vector{Int32}
+    primal_diagonal_positions::Vector{Int32}
+    primal_diagonal_values::Vector{Float64}
+    constraint_rhs::Matrix{Float64}
+    equality_scaling::Vector{Float64}
+    backend::Any
+    equality_requires_pivoting::Bool
+    regularization::Float64
+    factorization_quality::Float64
+end
+
+const SPARSE_SCHUR_SDP_MINIMUM_VARIABLES = 10_000
+const SPARSE_SCHUR_SDP_MAXIMUM_DENSITY = 0.10
+
+function _use_sparse_schur_sdp(prob::SDPProblem{T}) where {T}
+    T === Float64 || return false
+    sizeof(Int) >= 8 || return false
+    prob.cons isa SparseCons{Float64} || return false
+    prob.B isa SparseMatrixCSC{Float64,Int} || return false
+    prob.dims.n > 0 || return false
+    prob.dims.m >= SPARSE_SCHUR_SDP_MINIMUM_VARIABLES || return false
+    prob.structure.schur_density <= SPARSE_SCHUR_SDP_MAXIMUM_DENSITY ||
+        return false
+    dense_factor_nonzeros =
+        Int128(prob.dims.m) * Int128(prob.dims.m + 1) ÷ 2
+    return dense_factor_nonzeros < typemax(Int32)
+end
+
+function _sparse_sdp_memberships(cons::SparseCons{Float64}, m::Int)
+    memberships = [Tuple{Int32,Int32}[] for _ in 1:m]
+    @inbounds for block in eachindex(cons.schur_order)
+        ids = cons.schur_order[block]
+        for position in eachindex(ids)
+            push!(
+                memberships[ids[position]],
+                (Int32(block), Int32(position)),
+            )
+        end
+    end
+    return memberships
+end
+
+function _sparse_sdp_pattern_counts!(
+    counts::Vector{Int32},
+    memberships::Vector{Vector{Tuple{Int32,Int32}}},
+    cons::SparseCons{Float64},
+    thread_count::Int,
+)
+    m = length(counts)
+    workers = min(max(thread_count, 1), max(m, 1))
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            marker = zeros(Int32, m)
+            first_column = fld((worker - 1) * m, workers) + 1
+            last_column = fld(worker * m, workers)
+            @inbounds for column in first_column:last_column
+                tag = Int32(column)
+                marker[column] = tag
+                count = 1
+                for (block32, position32) in memberships[column]
+                    ids = cons.schur_order[Int(block32)]
+                    for position in Int(position32):length(ids)
+                        row = ids[position]
+                        if marker[row] != tag
+                            marker[row] = tag
+                            count += 1
+                        end
+                    end
+                end
+                count <= typemax(Int32) ||
+                    throw(OverflowError("sparse Schur column exceeds Int32"))
+                counts[column] = Int32(count)
+            end
+        end
+    end
+    return counts
+end
+
+function _sparse_sdp_fill_pattern!(
+    rowval::Vector{Int32},
+    colptr::Vector{Int32},
+    schur_counts::Vector{Int32},
+    memberships::Vector{Vector{Tuple{Int32,Int32}}},
+    cons::SparseCons{Float64},
+    thread_count::Int,
+)
+    m = length(schur_counts)
+    workers = min(max(thread_count, 1), max(m, 1))
+    @sync for worker in 1:workers
+        Threads.@spawn begin
+            marker = zeros(Int32, m)
+            rows = Int32[]
+            first_column = fld((worker - 1) * m, workers) + 1
+            last_column = fld(worker * m, workers)
+            @inbounds for column in first_column:last_column
+                empty!(rows)
+                tag = Int32(column)
+                marker[column] = tag
+                push!(rows, Int32(column))
+                for (block32, position32) in memberships[column]
+                    ids = cons.schur_order[Int(block32)]
+                    for position in Int(position32):length(ids)
+                        row = ids[position]
+                        if marker[row] != tag
+                            marker[row] = tag
+                            push!(rows, Int32(row))
+                        end
+                    end
+                end
+                sort!(rows)
+                length(rows) == Int(schur_counts[column]) ||
+                    error("internal sparse Schur pattern count mismatch")
+                copyto!(
+                    rowval,
+                    Int(colptr[column]),
+                    rows,
+                    1,
+                    length(rows),
+                )
+            end
+        end
+    end
+    return rowval
+end
+
+function _sparse_schur_sdp_workspace(
+    prob::SDPProblem{Float64},
+    thread_count::Int,
+)
+    cons = prob.cons::SparseCons{Float64}
+    B = prob.B::SparseMatrixCSC{Float64,Int}
+    m, n = prob.dims.m, prob.dims.n
+    memberships = _sparse_sdp_memberships(cons, m)
+    schur_counts = zeros(Int32, m)
+    _sparse_sdp_pattern_counts!(
+        schur_counts,
+        memberships,
+        cons,
+        thread_count,
+    )
+
+    colptr = Vector{Int32}(undef, m + 1)
+    colptr[1] = Int32(1)
+    @inbounds for column in 1:m
+        column_nonzeros = Int(schur_counts[column])
+        next_pointer = Int64(colptr[column]) + column_nonzeros
+        next_pointer <= typemax(Int32) ||
+            throw(OverflowError("sparse Schur CSC exceeds Int32 capacity"))
+        colptr[column + 1] = Int32(next_pointer)
+    end
+
+    nonzeros_count = Int(colptr[end]) - 1
+    rowval = Vector{Int32}(undef, nonzeros_count)
+    nzval = zeros(Float64, nonzeros_count)
+    _sparse_sdp_fill_pattern!(
+        rowval,
+        colptr,
+        schur_counts,
+        memberships,
+        cons,
+        thread_count,
+    )
+
+    primal_diagonal_positions = Vector{Int32}(undef, m)
+    @inbounds for column in 1:m
+        first = Int(colptr[column])
+        primal_diagonal_positions[column] = Int32(first)
+        rowval[first] == column ||
+            error("internal sparse Schur pattern is missing its diagonal")
+    end
+
+    matrix = SparseMatrixCSC{Float64,Int32}(
+        m,
+        m,
+        colptr,
+        rowval,
+        nzval,
+    )
+    return SparseSchurSDPWorkspace(
+        matrix,
+        memberships,
+        schur_counts,
+        primal_diagonal_positions,
+        zeros(Float64, m),
+        Matrix(B),
+        ones(Float64, n),
+        nothing,
+        false,
+        # The unshifted B3 Schur factorization was measured and rejected: it
+        # fails, adds about 9.8 seconds before the same shifted factorization,
+        # and does not change the direction. Start with the smallest
+        # successful standard relative shift and retain it on later
+        # iterations.
+        sqrt(eps(Float64)),
+        1.0,
+    )
 end
 
 function _schur_parallel_bins(
@@ -524,6 +745,7 @@ function Workspace(
     is_sparse = prob.cons isa SparseCons
     arrow = ArrowWorkspace(prob, selected_threads)
     compact_arrow = arrow !== nothing
+    sparse_schur = !compact_arrow && _use_sparse_schur_sdp(prob)
     fused_arrow =
         compact_arrow &&
         L > 0 &&
@@ -630,7 +852,7 @@ function Workspace(
     # never use when `arrow !== nothing`.
     mixed_precision = _mixed_precision_workspace(
         prob,
-        compact_arrow ? :off : mixed_precision_kkt,
+        (compact_arrow || sparse_schur) ? :off : mixed_precision_kkt,
         mixed_precision_memory_fraction,
     )
     block_nbins = max(1, min(selected_threads, L))
@@ -644,6 +866,7 @@ function Workspace(
             init=0,
         )
         dense_sparse_assembly =
+            !sparse_schur &&
             !compact_arrow &&
             prob.structure.schur_backend === :dense_cholesky &&
             total_packed_pairs > schur_nbins * m * m
@@ -676,6 +899,7 @@ function Workspace(
     schur_lower_only =
         !compact_arrow &&
         (
+            sparse_schur ||
             extended_precision.lower_only ||
             T === Float32 ||
             T === Float64
@@ -701,22 +925,41 @@ function Workspace(
             min(selected_threads, max(m, 1)),
         ) :
         Int[]
+    sparse_kkt_workspace =
+        sparse_schur ?
+        _sparse_schur_sdp_workspace(
+            prob::SDPProblem{Float64},
+            selected_threads,
+        ) :
+        nothing
+    vector_partial_count =
+        sparse_schur ?
+        min(selected_threads, max(m, 1)) :
+        block_nbins
     workspace = Workspace{T}(blk,
-        compact_arrow ? alloc_zeros(T, 0, 0) : alloc_zeros(T, m, m),
+        (compact_arrow || sparse_schur) ?
+        alloc_zeros(T, 0, 0) :
+        alloc_zeros(T, m, m),
         Spartial,
         dense_sparse_assembly,
         schur_lower_only,
         fused_arrow,
-        compact_arrow ? alloc_zeros(T, 0, 0) : alloc_zeros(T, m, m),
+        (compact_arrow || sparse_schur) ?
+        alloc_zeros(T, 0, 0) :
+        alloc_zeros(T, m, m),
         alloc_zeros(T, m, n),
-        alloc_zeros(T, n, n), alloc_zeros(T, n, n), nothing, arrow,
+        alloc_zeros(T, n, n),
+        alloc_zeros(T, n, n),
+        nothing,
+        arrow,
+        sparse_kkt_workspace,
         alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m),
         alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n),
         block_bins, schur_bins, schur_column_boundaries,
-        [alloc_zeros(T, m) for _ in 1:block_nbins],
+        [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         selected_threads)
     if T === BigFloat && extended_precision.lower_only

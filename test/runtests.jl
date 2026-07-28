@@ -17,6 +17,7 @@ using Test
     include("solver_regressions.jl")
     include("kkt_regressions.jl")
     include("kkt_sparse_backend.jl")
+    include("sparse_sdp_kkt.jl")
     include("mixed_precision_kkt_regressions.jl")
     include("result_certificate.jl")
     include("moi_regressions.jl")

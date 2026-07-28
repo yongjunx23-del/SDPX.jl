@@ -27,7 +27,10 @@ more than `Float64`.
 - **Structure-aware**: sparse constraint storage, a block-arrow KKT path for
   models with shared plus per-block local variables, a no-pair-buffer fused
   kernel for `2x2` blocks, and an optional combined reduced shared panel for
-  exact singleton-local arrows.
+  exact singleton-local arrows. Large Float64 SDPs with sparse equality
+  operators and a sufficiently sparse Schur pattern can instead use a
+  lower-triangle CSC Schur matrix, symbolic-reuse sparse Cholesky, and a dense
+  multi-right-hand-side equality elimination.
 - **Automatic solve planning** — problem classification, equality and LP-row
   presolve, scaling, arithmetic-aware kernel selection, memory budgeting, and
   conservative parameter profiles happen before factorization.
@@ -252,7 +255,7 @@ The default arithmetic type is `BigFloat`, which supports arbitrary precision. T
 
 `C`: $L$-element `Vector{Matrix{T}}`
 
-`B`: $m$ x $n$ `Matrix{T}`
+`B`: $m$ x $n$ `Matrix{T}` or `SparseMatrixCSC{T,Int}`
 
 `b`: $n$-element `Vector{T}`
 
@@ -267,9 +270,10 @@ The default arithmetic type is `BigFloat`, which supports arbitrary precision. T
 `sparse`: `:auto` (default), `true`/`:sparse`, or `false`/`:dense`.
 Automatic mode measures coefficient density, aggregate PSD-block pattern
 density, and Schur structural density separately. This distinction lets SDPX
-keep sparse coefficient matrices while using a dense PSD kernel and dense
-Cholesky when, as in lattice-bootstrap models, the latter structures are
-nearly dense.
+keep sparse coefficient and equality matrices while choosing the KKT backend
+from the predicted Schur structure. Dense lattice-bootstrap Schur matrices
+retain dense Cholesky; sufficiently large Float64 systems at or below the
+guarded 10% Schur-density crossover can use sparse Schur Cholesky.
 
 `equilibrate`: `true` or `false` (default `false`). Opt-in Ruiz-style diagonal equilibration, useful for badly-scaled bootstrap data.
 
@@ -550,9 +554,11 @@ memory gates, and full numerical certificates.
   `bench/opt2026/REPORT.md` preserves the historical optimization log.
 - `Float64` is precision-limited on ill-conditioned bootstrap models; use
   `Float64x2`/`Float64x4` when a solve reports `:precision_floor`.
-- Non-arrow SDP problems still use a dense Schur/KKT fallback. Large dense
-  high-precision instances can therefore be limited by quadratic workspace
-  and cubic factorization cost before arithmetic accuracy becomes the issue.
+- Non-arrow extended-precision SDP problems and Float64 problems outside the
+  guarded sparse-Schur crossover still use a dense Schur/KKT fallback. Large
+  dense instances can therefore be limited by quadratic workspace and cubic
+  factorization cost before arithmetic accuracy becomes the issue. The sparse
+  equality-aware path is currently Float64-only.
 - General native BigFloat kernels and distributed Schur
   assembly/factorization remain serial. The ownership-safe native
   reduced-arrow Schur path is a narrow shared-memory exception; the guarded

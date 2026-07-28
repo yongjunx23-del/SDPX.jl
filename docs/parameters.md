@@ -65,13 +65,21 @@ non-finite.
 | `mixed_precision_condition_limit` | type-dependent | Maximum conservative Float64 condition estimate accepted for mixed KKT refinement: `1e14` for `Float64x4`, `1e8` otherwise. The predicted correction budget and measured target-precision contraction remain authoritative guards. |
 | `mixed_precision_refine_max_steps` | `32` | Maximum target-precision correction solves before native extended-precision fallback. |
 | `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of reliably available memory used for persistent Float64 factors and conversion scratch. |
-| `force_gc` | `false` | Retained A/B compatibility field. The main solve path does not currently read it. |
+| `force_gc` | `false` | Run a full collection after each accepted iteration; on glibc Linux, also return free allocator pages to the OS. This can reduce retained allocator RSS for very large sparse factorizations and multi-RHS solves, but it cannot reduce the live factorization-local high-water mark and adds synchronization and collection time. |
 
 Unless `refine_tol` is explicitly positive, dense mixed-precision refinement
 uses `max(64 * eps(T), min(ϵ_gap, ϵ_primal, ϵ_dual)^2)`. This remains much
 tighter than the requested certificate without requiring every unused bit of
 the target arithmetic. Predictor solves have a separate `1e-8` relative
 residual guard and may perform bounded corrections before falling back.
+
+Native KKT refinement normally targets `64 * eps(T)`. The large regularized
+sparse Float64 SDP route instead uses
+`max(64 * eps(Float64), min(ϵ_gap, ϵ_primal, ϵ_dual) / 100)`, retaining two
+guard digits beyond the requested certificate. This avoids repeated
+multi-gigabyte sparse residual products for digits that cannot affect the
+requested result. A positive user-supplied `refine_tol` always takes
+precedence.
 
 Sparse equilibration rebuilds the derived sparse caches after scaling, so the
 following combination is supported:

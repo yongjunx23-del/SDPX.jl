@@ -132,6 +132,13 @@ Factor the current Schur complement `ws.S` (accumulated by
 """
 function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     ws.arrow === nothing || return factor_arrow_kkt!(ws, opts)
+    if T === Float64 && ws.sparse_kkt !== nothing
+        return _factor_sparse_schur_sdp!(
+            ws::Workspace{Float64},
+            prob::SDPProblem{Float64},
+            opts::SolverOptions{Float64},
+        )
+    end
     if ws.mixed_precision !== nothing
         if _try_factor_mixed_kkt!(
             ws.mixed_precision,
@@ -153,6 +160,212 @@ function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{
         )
     end
     return _factor_dense_kkt_native!(ws, prob, opts)
+end
+
+function _sparse_factor_matrix_solve!(
+    destination::Matrix{Float64},
+    backend,
+    rhs::Matrix{Float64},
+)
+    factorization = backend.factorization
+    try
+        # Julia 1.12 provides the allocation-free CHOLMOD Int32 multi-RHS
+        # method. Some older supported Julia releases reach a generic
+        # three-argument fallback that throws a MethodError internally.
+        ldiv!(destination, factorization, rhs)
+    catch exception
+        if exception isa MethodError
+            copyto!(destination, factorization \ rhs)
+        else
+            rethrow()
+        end
+    end
+    return destination
+end
+
+function _factor_sparse_schur_sdp!(
+    ws::Workspace{Float64},
+    prob::SDPProblem{Float64},
+    opts::SolverOptions{Float64},
+)
+    sparse_workspace =
+        ws.sparse_kkt::SparseSchurSDPWorkspace
+    backend = sparse_workspace.backend
+    if backend === nothing
+        backend = SparseCholeskyBackend()
+        sparse_workspace.backend = backend
+    end
+    matrix = sparse_workspace.matrix
+    primal_positions = sparse_workspace.primal_diagonal_positions
+    diagonal_values = sparse_workspace.primal_diagonal_values
+
+    factorization_started = time_ns()
+    ok = false
+    # Once an unregularized factorization has failed, retain the smallest
+    # successful shift on later IPM iterations. Retrying the known-bad zero
+    # shift invalidates CHOLMOD's factor and forces a fresh symbolic analysis.
+    regularization = sparse_workspace.regularization
+    reg_attempts = regularization > 0.0 ? 1 : 0
+    while true
+        @inbounds for index in eachindex(primal_positions)
+            diagonal = diagonal_values[index]
+            matrix.nzval[Int(primal_positions[index])] =
+                diagonal +
+                regularization * max(abs(diagonal), 1.0)
+        end
+        ok = factorize_static_pattern!(backend, matrix)
+
+        # Keep the workspace matrix equal to the mathematical, unregularized
+        # Schur/KKT operator. The factor owns its numeric copy and refinement
+        # therefore measures the original equations rather than the perturbed
+        # system.
+        @inbounds for index in eachindex(primal_positions)
+            matrix.nzval[Int(primal_positions[index])] =
+                diagonal_values[index]
+        end
+        ok && break
+        reg_attempts >= 6 && break
+        reg_attempts += 1
+        regularization =
+            reg_attempts == 1 ? sqrt(eps(Float64)) :
+            10.0 * regularization
+    end
+    factorization_seconds = _elapsed_seconds(factorization_started)
+    sparse_workspace.regularization = regularization
+    ok || return (
+        ok=false,
+        reg_attempts=reg_attempts,
+        q_pivoted=false,
+        phase_times=(
+            schur_copy=0.0,
+            schur_factorization=factorization_seconds,
+            constraint_triangular_solve=0.0,
+            equality_gram=0.0,
+            equality_factorization=0.0,
+        ),
+    )
+
+    smallest = Inf
+    largest = 0.0
+    @inbounds for value in diagonal_values
+        magnitude = abs(value)
+        effective =
+            magnitude +
+            regularization * max(magnitude, 1.0)
+        smallest = min(smallest, effective)
+        largest = max(largest, effective)
+    end
+    # Report the quality of the matrix that was actually factorized. A zero
+    # diagonal in the unregularized Schur operator is common when a direction
+    # is controlled jointly by equalities; after a successful regularized
+    # factorization it is not evidence of a failed Newton system. Reporting
+    # zero here made the adaptive controller permanently fall back on the first
+    # B3 iteration even though residual-controlled refinement succeeded.
+    # Genuine equality rank loss is reported separately below and still maps
+    # to zero quality in the step layer.
+    sparse_workspace.factorization_quality =
+        isfinite(smallest) && largest > 0.0 ?
+        clamp(smallest / largest, 0.0, 1.0) :
+        0.0
+
+    if opts.verbosity >= 2 && ok && reg_attempts > 0
+        @info(
+            "Sparse Schur SDP factor regularized",
+            regularization,
+            attempts=reg_attempts,
+        )
+    end
+
+    constraint_started = time_ns()
+    _sparse_factor_matrix_solve!(
+        ws.Btil,
+        backend,
+        sparse_workspace.constraint_rhs,
+    )
+    constraint_seconds = _elapsed_seconds(constraint_started)
+
+    gram_started = time_ns()
+    mul!(ws.Q, transpose(prob.B), ws.Btil)
+    equality_scaling = sparse_workspace.equality_scaling
+    maximum_diagonal = 0.0
+    @inbounds for index in eachindex(equality_scaling)
+        maximum_diagonal =
+            max(maximum_diagonal, abs(ws.Q[index, index]))
+    end
+    diagonal_floor =
+        eps(Float64) * max(maximum_diagonal, 1.0)
+    @inbounds for index in eachindex(equality_scaling)
+        equality_scaling[index] = inv(
+            sqrt(max(abs(ws.Q[index, index]), diagonal_floor)),
+        )
+    end
+    # Congruence scaling is an exact coordinate change:
+    #   Q*dy = q,  dy = D*z  =>  (D*Q*D)z = D*q.
+    # It normalizes the equality Gram diagonal before Cholesky without
+    # changing the Newton direction returned in original coordinates.
+    @inbounds for column in axes(ws.Q, 2)
+        column_scale = equality_scaling[column]
+        for row in column:size(ws.Q, 1)
+            ws.Q[row, column] *=
+                equality_scaling[row] * column_scale
+        end
+    end
+    gram_seconds = _elapsed_seconds(gram_started)
+
+    equality_factor_started = time_ns()
+    q_pivoted = sparse_workspace.equality_requires_pivoting
+    if !q_pivoted
+        copy_owned!(ws.Qbuf, ws.Q)
+        equality_factor = LinearAlgebra.cholesky!(
+            Symmetric(ws.Qbuf, :L);
+            check=false,
+        )
+        if issuccess(equality_factor) &&
+           _cholesky_has_numerical_rank(equality_factor)
+            ws.Qchol = equality_factor
+        else
+            q_pivoted = true
+            sparse_workspace.equality_requires_pivoting = true
+        end
+    end
+    if q_pivoted
+        copy_owned!(ws.Qbuf, ws.Q)
+        # Factor the existing equality buffer in place. The allocating form
+        # copied roughly 754 MiB per B3 iteration (9708^2 Float64 entries),
+        # making RSS climb until a full GC even though the previous factor was
+        # already dead. Once an equality system has required pivoting, skip
+        # the known-to-be-rejected unpivoted trial on subsequent iterations.
+        pivoted = LinearAlgebra.cholesky!(
+            Symmetric(ws.Qbuf, :L),
+            LinearAlgebra.RowMaximum();
+            check=false,
+        )
+        ws.Qchol = pivoted
+        opts.verbosity >= 1 && @warn(
+            "Sparse Schur SDP equality normal matrix required pivoted Cholesky",
+            rank=pivoted.rank,
+            equalities=prob.dims.n,
+        )
+    end
+    q_rank_deficient =
+        q_pivoted &&
+        ws.Qchol isa LinearAlgebra.CholeskyPivoted &&
+        ws.Qchol.rank < prob.dims.n
+    equality_factor_seconds =
+        _elapsed_seconds(equality_factor_started)
+    return (
+        ok=ok,
+        reg_attempts=reg_attempts,
+        q_pivoted=q_pivoted,
+        q_rank_deficient=q_rank_deficient,
+        phase_times=(
+            schur_copy=0.0,
+            schur_factorization=factorization_seconds,
+            constraint_triangular_solve=constraint_seconds,
+            equality_gram=gram_seconds,
+            equality_factorization=equality_factor_seconds,
+        ),
+    )
 end
 
 function _factor_dense_kkt_native!(
@@ -1041,6 +1254,38 @@ function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs
             dy_out,
         )
     end
+    if T === Float64 && ws.sparse_kkt !== nothing
+        sparse_workspace =
+            ws.sparse_kkt::SparseSchurSDPWorkspace
+        m = length(dx_out)
+        n == length(dy_out) ||
+            throw(DimensionMismatch("sparse Schur SDP equality dimension mismatch"))
+        solve!(
+            ws.rtil,
+            sparse_workspace.backend,
+            r,
+        )
+        copy_owned!(ws.q_rhs, p_rhs)
+        kmul_owned!(
+            ws.q_rhs,
+            transpose(sparse_workspace.constraint_rhs),
+            ws.rtil,
+            -one(T),
+            one(T),
+        )
+        @inbounds for index in eachindex(ws.q_rhs)
+            ws.q_rhs[index] *=
+                sparse_workspace.equality_scaling[index]
+        end
+        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
+        @inbounds for index in eachindex(dy_out)
+            dy_out[index] *=
+                sparse_workspace.equality_scaling[index]
+        end
+        kmul_owned!(dx_out, ws.Btil, dy_out)
+        kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)
+        return dx_out, dy_out
+    end
 
     copy_owned!(ws.rtil, r)
     ktrsv_lower!(ws.Sbuf, ws.rtil)   # r̃ = L_S⁻¹r
@@ -1785,6 +2030,56 @@ function schur_mul!(
 ) where {T}
     arrow = ws.arrow
     if arrow === nothing
+        if T === Float64 && ws.sparse_kkt !== nothing
+            sparse_workspace =
+                ws.sparse_kkt::SparseSchurSDPWorkspace
+            matrix = sparse_workspace.matrix
+            counts = sparse_workspace.schur_counts
+            m = length(counts)
+            length(out) == m && length(x) == m ||
+                throw(DimensionMismatch("sparse Schur-vector dimensions do not match"))
+            workers = min(
+                ws.thread_count,
+                length(ws.vpartial),
+                max(m, 1),
+            )
+            balanced =
+                length(ws.schur_column_boundaries) == workers + 1
+            chunk = cld(m, workers)
+            @sync for worker in 1:workers
+                partial = ws.vpartial[worker]
+                first_column = balanced ?
+                               ws.schur_column_boundaries[worker] :
+                               (worker - 1) * chunk + 1
+                first_column > m && continue
+                last_column = balanced ?
+                              ws.schur_column_boundaries[worker + 1] - 1 :
+                              min(worker * chunk, m)
+                Threads.@spawn begin
+                    fill!(partial, 0.0)
+                    @inbounds for column in first_column:last_column
+                        first = Int(matrix.colptr[column])
+                        last = first + Int(counts[column]) - 1
+                        column_value = x[column]
+                        for position in first:last
+                            row = Int(matrix.rowval[position])
+                            value = matrix.nzval[position]
+                            partial[row] += value * column_value
+                            row != column &&
+                                (partial[column] += value * x[row])
+                        end
+                    end
+                end
+            end
+            @inbounds for index in eachindex(out)
+                value = 0.0
+                for worker in 1:workers
+                    value += ws.vpartial[worker][index]
+                end
+                out[index] = α * value + β * out[index]
+            end
+            return out
+        end
         if ws.schur_lower_only &&
            ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended &&
            ws.thread_count > 1 &&
@@ -1866,6 +2161,26 @@ const REFINE_MIN_DECREASE = 0.5
 
 """Default refinement target, in ulps of the working precision."""
 const REFINE_DEFAULT_TOL_ULPS = 64
+
+function _automatic_refinement_relative_tolerance(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+) where {T}
+    roundoff_floor = T(REFINE_DEFAULT_TOL_ULPS) * eps(T)
+    if T === Float64 && ws.sparse_kkt !== nothing
+        # A regularized sparse factor solves a nearby system, so insisting on
+        # an O(eps) residual for every Newton direction can spend all eight
+        # refinement passes removing digits that the outer 1e-8 solve never
+        # consumes. Keep two guard digits beyond the requested certificate.
+        # Tighter user-specified `refine_tol` values still take precedence,
+        # and final residual/PSD certification is unchanged.
+        requested = min(opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual)
+        if requested > zero(T) && isfinite(requested)
+            return max(roundoff_floor, requested / T(100))
+        end
+    end
+    return roundoff_floor
+end
 
 function _kkt_direction_residual!(
     ws::Workspace{T},
@@ -2011,7 +2326,9 @@ function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
     cap > 0 || return (0, zero(T))
 
     scale = max(knrmInf(r), one(T))
-    reltol = opts.refine_tol > zero(T) ? opts.refine_tol : T(REFINE_DEFAULT_TOL_ULPS) * eps(T)
+    reltol = opts.refine_tol > zero(T) ?
+             opts.refine_tol :
+             _automatic_refinement_relative_tolerance(ws, opts)
     abstol = reltol * scale
     steps = 0
     n = prob.dims.n

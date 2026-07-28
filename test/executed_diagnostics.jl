@@ -73,5 +73,22 @@ using Test
         result = SDPX.solve(problem; tolerance=1e-8, verbosity=0, diagnostics=true)
         @test result.status == SDPX.Optimal
         @test result.diagnostics.selected_algorithms.kkt === :dense_cholesky
+        @test hasproperty(
+            result.diagnostics.timings,
+            :schur_assembly,
+        )
+
+        untimed = SDPX.solve(
+            problem;
+            tolerance=1e-8,
+            verbosity=0,
+            diagnostics=true,
+            timing=false,
+        )
+        @test untimed.timings === nothing
+        @test !hasproperty(
+            untimed.diagnostics.timings,
+            :schur_assembly,
+        )
     end
 end

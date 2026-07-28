@@ -564,9 +564,11 @@ function _problem_with_reduction(
     keep_equalities::Vector{Int},
 ) where {T}
     c = _owned_array_copy(T, view(prob.c, keep_variables))
-    B = _owned_array_copy(
+    B = _owned_equality_slice(
         T,
-        view(prob.B, keep_variables, keep_equalities),
+        prob.B,
+        keep_variables,
+        keep_equalities,
     )
     b = _owned_array_copy(T, view(prob.b, keep_equalities))
     @inbounds for (position, variable) in pairs(fixed_variables)
@@ -727,6 +729,19 @@ function _equal_equality_columns(
     second::Int,
 )
     prob.b[first] == prob.b[second] || return false
+    if prob.B isa SparseMatrixCSC
+        matrix = prob.B
+        first_range = nzrange(matrix, first)
+        second_range = nzrange(matrix, second)
+        length(first_range) == length(second_range) || return false
+        rows = rowvals(matrix)
+        values = nonzeros(matrix)
+        @inbounds for (left, right) in zip(first_range, second_range)
+            rows[left] == rows[right] || return false
+            values[left] == values[right] || return false
+        end
+        return true
+    end
     @inbounds for row in axes(prob.B, 1)
         prob.B[row, first] == prob.B[row, second] || return false
     end
@@ -738,6 +753,48 @@ function _proportional_equality_columns(
     first::Int,
     second::Int,
 ) where {T}
+    if prob.B isa SparseMatrixCSC
+        matrix = prob.B
+        first_range = nzrange(matrix, first)
+        second_range = nzrange(matrix, second)
+        if isempty(first_range) || isempty(second_range)
+            both_empty = isempty(first_range) && isempty(second_range)
+            return (
+                lhs=both_empty,
+                rhs=both_empty && prob.b[first] == prob.b[second],
+                scale=zero(T),
+            )
+        end
+        length(first_range) == length(second_range) ||
+            return (lhs=false, rhs=false, scale=zero(T))
+        rows = rowvals(matrix)
+        values = nonzeros(matrix)
+        first_entry = first_range[begin]
+        second_entry = second_range[begin]
+        rows[first_entry] == rows[second_entry] ||
+            return (lhs=false, rhs=false, scale=zero(T))
+        a = values[first_entry]
+        b = values[second_entry]
+        @inbounds for (left, right) in zip(first_range, second_range)
+            rows[left] == rows[right] ||
+                return (lhs=false, rhs=false, scale=zero(T))
+            left_value = values[left] * b
+            right_value = values[right] * a
+            isfinite(left_value) && isfinite(right_value) ||
+                return (lhs=false, rhs=false, scale=zero(T))
+            left_value == right_value ||
+                return (lhs=false, rhs=false, scale=zero(T))
+        end
+        left_rhs = prob.b[first] * b
+        right_rhs = prob.b[second] * a
+        isfinite(left_rhs) && isfinite(right_rhs) ||
+            return (lhs=false, rhs=false, scale=zero(T))
+        return (
+            lhs=true,
+            rhs=left_rhs == right_rhs,
+            scale=b / a,
+        )
+    end
     pivot = findfirst(
         row -> !iszero(prob.B[row, first]) ||
                !iszero(prob.B[row, second]),
@@ -774,6 +831,13 @@ end
 
 function _equality_pattern_hash(prob::SDPProblem, equality::Int)
     value = hash(:sdpx_equality_pattern)
+    if prob.B isa SparseMatrixCSC
+        rows = rowvals(prob.B)
+        @inbounds for stored in nzrange(prob.B, equality)
+            value = hash(rows[stored], value)
+        end
+        return value
+    end
     @inbounds for row in axes(prob.B, 1)
         iszero(prob.B[row, equality]) || (value = hash(row, value))
     end
@@ -785,6 +849,47 @@ function _near_proportional_equality_columns(
     first::Int,
     second::Int,
 ) where {T}
+    if prob.B isa SparseMatrixCSC
+        matrix = prob.B
+        first_range = nzrange(matrix, first)
+        second_range = nzrange(matrix, second)
+        isempty(first_range) && return false
+        length(first_range) == length(second_range) || return false
+        rows = rowvals(matrix)
+        values = nonzeros(matrix)
+        first_entry = first_range[begin]
+        second_entry = second_range[begin]
+        rows[first_entry] == rows[second_entry] || return false
+        scale = values[second_entry] / values[first_entry]
+        isfinite(scale) || return false
+        lhs_residual = zero(T)
+        lhs_scale = one(T)
+        @inbounds for (left, right) in zip(first_range, second_range)
+            rows[left] == rows[right] || return false
+            first_value = values[left]
+            second_value = values[right]
+            lhs_residual = max(
+                lhs_residual,
+                abs(second_value - scale * first_value),
+            )
+            lhs_scale = max(
+                lhs_scale,
+                abs(second_value),
+                abs(scale * first_value),
+            )
+        end
+        rhs_residual = abs(prob.b[second] - scale * prob.b[first])
+        rhs_scale = max(
+            one(T),
+            abs(prob.b[second]),
+            abs(scale * prob.b[first]),
+        )
+        threshold =
+            sqrt(eps(T)) * T(max(prob.dims.m, prob.dims.n, 1))
+        return lhs_residual <= threshold * lhs_scale &&
+               rhs_residual <= threshold * rhs_scale &&
+               (!iszero(lhs_residual) || !iszero(rhs_residual))
+    end
     pivot = findfirst(
         row -> !iszero(prob.B[row, first]),
         axes(prob.B, 1),
@@ -839,12 +944,17 @@ function analyze(
 
     if opts.presolve_zero_constraints
         @inbounds for equality in 1:n
-            all_zero = true
-            for row in axes(prob.B, 1)
-                if !iszero(prob.B[row, equality])
-                    all_zero = false
-                    break
+            all_zero = if prob.B isa SparseMatrixCSC
+                isempty(nzrange(prob.B, equality))
+            else
+                value = true
+                for row in axes(prob.B, 1)
+                    if !iszero(prob.B[row, equality])
+                        value = false
+                        break
+                    end
                 end
+                value
             end
             all_zero || continue
             if iszero(prob.b[equality])
@@ -973,7 +1083,7 @@ function _replace_equalities(
     prob = context.problem
     keep = plan.keep_equalities
     length(keep) == prob.dims.n && return context
-    B = _owned_array_copy(T, view(prob.B, :, keep))
+    B = _owned_equality_slice(T, prob.B, :, keep)
     b = _owned_array_copy(T, view(prob.b, keep))
     dimensions = prob.dims.k
     requested = prob.structure.selected_storage
