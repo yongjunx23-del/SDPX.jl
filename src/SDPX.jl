@@ -34,6 +34,7 @@ include("compat.jl")
 
 export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
 export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
+export ActiveSparseCoefficientVector
 export recommended_parameters, StructureAnalysis, analyze_structure, structure_summary
 export AbstractParameterPolicy, FixedParameterPolicy, AdaptiveParameterPolicy
 export IterationDiagnostics, IterationParameters, select_parameters

@@ -451,6 +451,26 @@ function _reduced_sparse_cons(
                 active_variable,
                 compact.coefficient[1, 1],
             )
+        elseif source isa ActiveSparseCoefficientVector{T}
+            compact = source::ActiveSparseCoefficientVector{T}
+            active_variables = Int[]
+            coefficients = SparseMatrixCSC{T,Int}[]
+            sizehint!(active_variables, length(compact.active_variables))
+            sizehint!(coefficients, length(compact.coefficients))
+            for (position, original_variable) in
+                pairs(compact.active_variables)
+                variable = reduced_index[original_variable]
+                variable > 0 || continue
+                push!(active_variables, variable)
+                push!(coefficients, compact.coefficients[position])
+            end
+            Asp[new_block] = ActiveSparseCoefficientVector(
+                T,
+                length(keep_variables),
+                active_variables,
+                coefficients,
+                prob.dims.k[block],
+            )
         else
             Asp[new_block] = [
                 source[variable] for variable in keep_variables

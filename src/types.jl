@@ -353,9 +353,79 @@ Base.length(vector::CompactScalarCoefficientVector) = vector.variables
            vector.empty
 end
 
+"""
+    ActiveSparseCoefficientVector{T}
+
+Read-only sparse coefficient block that stores only structurally active
+variables. It preserves the historical `AbstractVector{SparseMatrixCSC}`
+interface without allocating an `m`-entry reference vector for every PSD
+block. This is important for very large block-arrow SDPs: a model with
+40,400 blocks and 40,453 variables otherwise needs more than 1.6 billion
+mostly-empty references before numerical work begins.
+
+`active_variables` must be strictly increasing. `getindex` uses binary search;
+hot `2x2` kernels consume `SparseCons.active` and `packed2` directly, so this
+lookup is confined to setup, validation, and other non-dominant paths.
+"""
+struct ActiveSparseCoefficientVector{T} <:
+       AbstractVector{SparseMatrixCSC{T,Int}}
+    variables::Int
+    active_variables::Vector{Int}
+    coefficients::Vector{SparseMatrixCSC{T,Int}}
+    empty::SparseMatrixCSC{T,Int}
+end
+
+function ActiveSparseCoefficientVector(
+    ::Type{T},
+    variables::Int,
+    active_variables::AbstractVector{<:Integer},
+    coefficients::AbstractVector{<:SparseMatrixCSC{T,Int}},
+    dimension::Int,
+) where {T}
+    variables >= 0 || throw(ArgumentError("variables must be nonnegative"))
+    dimension > 0 || throw(ArgumentError("dimension must be positive"))
+    length(active_variables) == length(coefficients) ||
+        throw(DimensionMismatch(
+            "active variable and coefficient counts must match",
+        ))
+    ids = Int.(active_variables)
+    all(position -> ids[position - 1] < ids[position], 2:length(ids)) ||
+        throw(ArgumentError(
+            "active variables must be sorted and unique",
+        ))
+    all(variable -> 1 <= variable <= variables, ids) ||
+        throw(BoundsError(1:variables, ids))
+    all(matrix -> size(matrix) == (dimension, dimension), coefficients) ||
+        throw(DimensionMismatch(
+            "all active coefficients must be $dimension×$dimension",
+        ))
+    return ActiveSparseCoefficientVector{T}(
+        variables,
+        ids,
+        SparseMatrixCSC{T,Int}[matrix for matrix in coefficients],
+        spzeros(T, dimension, dimension),
+    )
+end
+
+Base.IndexStyle(::Type{<:ActiveSparseCoefficientVector}) = IndexLinear()
+Base.size(vector::ActiveSparseCoefficientVector) = (vector.variables,)
+Base.length(vector::ActiveSparseCoefficientVector) = vector.variables
+@inline function Base.getindex(
+    vector::ActiveSparseCoefficientVector,
+    index::Int,
+)
+    @boundscheck checkbounds(vector, index)
+    position = searchsortedfirst(vector.active_variables, index)
+    return position <= length(vector.active_variables) &&
+           @inbounds(vector.active_variables[position]) == index ?
+           @inbounds(vector.coefficients[position]) :
+           vector.empty
+end
+
 const SparseCoefficientVector{T} = Union{
     Vector{SparseMatrixCSC{T,Int}},
     CompactScalarCoefficientVector{T},
+    ActiveSparseCoefficientVector{T},
 }
 
 """

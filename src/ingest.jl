@@ -254,6 +254,28 @@ function _analyze_matrix_coefficients(A, m::Int, n::Int, k::Vector{Int}, request
             end
             continue
         end
+        if A[l] isa ActiveSparseCoefficientVector
+            block = A[l]::ActiveSparseCoefficientVector
+            pattern = BitSet()
+            for matrix in block.coefficients
+                positions = BitSet()
+                rows = rowvals(matrix)
+                @inbounds for column in 1:size(matrix, 2),
+                              index in nzrange(matrix, column)
+                    iszero(nonzeros(matrix)[index]) && continue
+                    row = rows[index]
+                    upper_row, upper_column = minmax(row, column)
+                    output =
+                        upper_column * (upper_column - 1) ÷ 2 + upper_row
+                    push!(positions, output)
+                end
+                coefficient_nnz[l] += length(positions)
+                union!(pattern, positions)
+            end
+            active[l] = copy(block.active_variables)
+            pattern_nnz[l] = length(pattern)
+            continue
+        end
         pattern = BitSet()
         for variable in 1:m
             matrix = A[l][variable]
@@ -699,6 +721,35 @@ function ingest(
             )
             continue
         end
+        if A[l] isa ActiveSparseCoefficientVector
+            source = A[l]::ActiveSparseCoefficientVector
+            active_variables = Int[]
+            coefficients = SparseMatrixCSC{ET,Int}[]
+            sizehint!(active_variables, length(source.active_variables))
+            sizehint!(coefficients, length(source.coefficients))
+            @inbounds for position in eachindex(source.coefficients)
+                coefficient = _prepare_sparse_matrix(
+                    source.coefficients[position],
+                    ET,
+                    "A[$l][$(source.active_variables[position])]",
+                    validate,
+                    symmetrize,
+                    sym_tol,
+                    verbosity,
+                )
+                nnz(coefficient) == 0 && continue
+                push!(active_variables, source.active_variables[position])
+                push!(coefficients, coefficient)
+            end
+            prepared[l] = ActiveSparseCoefficientVector(
+                ET,
+                m,
+                active_variables,
+                coefficients,
+                k[l],
+            )
+            continue
+        end
         # As in `_ingest_sparse`: share one canonical empty matrix per block
         # instead of allocating a distinct three-array `SparseMatrixCSC` for
         # every structurally empty coefficient slot. Read-only after ingest.
@@ -719,7 +770,12 @@ function ingest(
     end
     structure = _analyze_matrix_coefficients(prepared, m, n, k, sparse)
     if structure.selected_storage === :sparse
-        active = [findall(i -> nnz(prepared[l][i]) > 0, 1:m) for l in 1:L]
+        active = [
+            prepared[l] isa ActiveSparseCoefficientVector ?
+            copy((prepared[l]::ActiveSparseCoefficientVector).active_variables) :
+            findall(i -> nnz(prepared[l][i]) > 0, 1:m)
+            for l in 1:L
+        ]
         order = [
             copy(active[l])   # ascending; see `_ingest_sparse` for why
             for l in 1:L
@@ -878,6 +934,16 @@ function reround(prob::SDPProblem{BigFloat}, bits::Int)
                             precision=bits,
                         ),
                     )
+                elseif source isa ActiveSparseCoefficientVector{BigFloat}
+                    compact =
+                        source::ActiveSparseCoefficientVector{BigFloat}
+                    blocks[block] = ActiveSparseCoefficientVector(
+                        BigFloat,
+                        prob.dims.m,
+                        compact.active_variables,
+                        [reround_sparse(matrix) for matrix in compact.coefficients],
+                        size(compact.empty, 1),
+                    )
                 else
                     blocks[block] = [
                         reround_sparse(matrix) for matrix in source
@@ -958,6 +1024,15 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
                 m,
                 compact.active_variable,
                 _ingest_owned_scalar(T, compact.coefficient[1, 1]),
+            )
+        elseif source isa ActiveSparseCoefficientVector{T}
+            compact = source::ActiveSparseCoefficientVector{T}
+            Asp2[block] = ActiveSparseCoefficientVector(
+                T,
+                m,
+                compact.active_variables,
+                [copy(matrix) for matrix in compact.coefficients],
+                k[block],
             )
         else
             # Only structurally active matrices are ever mutated below.

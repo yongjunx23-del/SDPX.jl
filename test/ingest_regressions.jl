@@ -4,6 +4,114 @@ import MutableArithmetics as MA
 using SparseArrays
 using Test
 
+@testset "active-only sparse coefficient vectors avoid empty L-by-m storage" begin
+    variables = 1_000
+    active = [1, 17, variables]
+    coefficients = [
+        sparse([1, 2], [1, 2], [1.0, 0.5], 2, 2),
+        sparse([1, 1, 2], [1, 2, 2], [0.25, 0.1, 0.75], 2, 2),
+        sparse([1, 2], [1, 2], [0.4, 1.2], 2, 2),
+    ]
+    compact = ActiveSparseCoefficientVector(
+        Float64,
+        variables,
+        active,
+        coefficients,
+        2,
+    )
+    @test length(compact) == variables
+    @test compact[17] === coefficients[2]
+    @test nnz(compact[18]) == 0
+    @test Base.summarysize(compact) <
+          Base.summarysize(fill(spzeros(2, 2), variables)) ÷ 4
+
+    empty_matrix = spzeros(2, 2)
+    expanded = fill(empty_matrix, variables)
+    for (position, variable) in pairs(active)
+        expanded[variable] = coefficients[position]
+    end
+    c = zeros(variables)
+    c[1] = 1
+    C = [zeros(2, 2)]
+    B = zeros(variables, 0)
+    b = Float64[]
+    compact_problem = ingest(
+        c,
+        [compact],
+        C,
+        B,
+        b;
+        sparse=true,
+        verbosity=0,
+    )
+    expanded_problem = ingest(
+        c,
+        [expanded],
+        C,
+        B,
+        b;
+        sparse=true,
+        verbosity=0,
+    )
+    @test compact_problem.cons.Asp[1] isa
+          ActiveSparseCoefficientVector{Float64}
+    @test compact_problem.cons.active == expanded_problem.cons.active
+    @test compact_problem.cons.packed2 == expanded_problem.cons.packed2
+    @test all(
+        field -> getfield(compact_problem.structure, field) ==
+                 getfield(expanded_problem.structure, field),
+        fieldnames(StructureAnalysis),
+    )
+
+    input = collect(range(-1.0, 1.0; length=variables))
+    compact_matrix = zeros(2, 2)
+    expanded_matrix = zeros(2, 2)
+    SDPX.buildP!(compact_matrix, compact_problem.cons, 1, input)
+    SDPX.buildP!(expanded_matrix, expanded_problem.cons, 1, input)
+    @test compact_matrix == expanded_matrix
+
+    equilibrated, _ = SDPX.equilibrate(
+        compact_problem,
+        compact_problem.cons;
+        ruiz_iters=1,
+    )
+    @test equilibrated.cons.Asp[1] isa
+          ActiveSparseCoefficientVector{Float64}
+    reduced_cons = SDPX._reduced_sparse_cons(
+        compact_problem,
+        [1],
+        active,
+    )
+    @test reduced_cons.Asp[1] isa ActiveSparseCoefficientVector{Float64}
+    @test reduced_cons.active == [[1, 2, 3]]
+
+    widened_source = ActiveSparseCoefficientVector(
+        BigFloat,
+        variables,
+        active,
+        [
+            sparse(BigFloat.(Matrix(matrix)))
+            for matrix in coefficients
+        ],
+        2,
+    )
+    widened_problem = setprecision(BigFloat, 64) do
+        ingest(
+            BigFloat.(c),
+            [widened_source],
+            [zeros(BigFloat, 2, 2)],
+            zeros(BigFloat, variables, 0),
+            BigFloat[];
+            sparse=true,
+            verbosity=0,
+        )
+    end
+    rerounded = SDPX.reround(widened_problem, 160)
+    @test rerounded.cons.Asp[1] isa
+          ActiveSparseCoefficientVector{BigFloat}
+    @test SDPX.min_precision_bits(rerounded) == 160
+end
+
 @testset "Schur structure estimation: both branches, and the v0.2.1 scope bug" begin
     # v0.2.1 (444b994) failed with `UndefVarError: count not defined in local
     # scope` for every model with more than 10,000 variables: the small-m
