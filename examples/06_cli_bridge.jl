@@ -71,11 +71,25 @@ function run_bridge_round_trip()
     return nothing
 end
 
-# The bridge has its own environment (bin/Project.toml, carrying JSON). When
-# it has not been instantiated — a fresh clone, or CI without the setup step —
-# skip rather than fail: this file is also executed by the test suite, where
-# `exit()` would kill the harness, so the skip is a plain branch.
-if isfile(joinpath(BRIDGE_ROOT, "bin", "Manifest.toml"))
+"""Whether the bridge environment is usable from *this* Julia.
+
+Two ways it may not be: never instantiated (fresh clone, CI without the setup
+step), or instantiated by a different Julia minor version — a Manifest resolved
+under 1.12 cannot be loaded by a 1.10 subprocess, which surfaced as the spawned
+CLI dying at `using JSON` when the test suite ran under 1.10. Skipping is
+honest in both cases; this file is also executed by the test suite, where
+`exit()` would kill the harness, so the skip is a plain branch.
+"""
+function bridge_environment_ready()
+    manifest = joinpath(BRIDGE_ROOT, "bin", "Manifest.toml")
+    isfile(manifest) || return false
+    matched = match(r"julia_version\s*=\s*\"(\d+)\.(\d+)", read(manifest, String))
+    matched === nothing && return false
+    return parse(Int, matched[1]) == VERSION.major &&
+           parse(Int, matched[2]) == VERSION.minor
+end
+
+if bridge_environment_ready()
     run_bridge_round_trip()
 else
     println("bridge environment not set up; run")
