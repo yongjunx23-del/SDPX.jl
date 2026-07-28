@@ -2016,19 +2016,31 @@ function _solve_pipeline!(
         #
         # Uses the O(1) floor rather than the full estimate, which walks every
         # coefficient and would cost more than the solve it precedes.
-        let floor_bytes = dense_workspace_floor_bytes(
-                T,
-                reduced.dims.m,
-                reduced.dims.n,
-                reduced.dims.L,
-                plan.threads,
-            ),
+        #
+        # The estimate must match the KKT route the plan actually chose. The
+        # dense floor is an `m x m` figure; the block-arrow route never forms
+        # that matrix, and applying the dense model to it overstated the CSDR
+        # 200/2/10/400 requirement as 3,218 GiB for a solve that runs in about
+        # 5 GiB. A warning wrong by three orders of magnitude drives users off
+        # runs that fit, so each route is estimated on its own terms and a
+        # route with no estimate stays silent.
+        let route = plan.kkt_backend,
+            floor_bytes = route === :block_arrow ?
+                          arrow_workspace_floor_bytes(T, reduced, plan.threads) :
+                          dense_workspace_floor_bytes(
+                              T,
+                              reduced.dims.m,
+                              reduced.dims.n,
+                              reduced.dims.L,
+                              plan.threads,
+                          ),
             available = _available_memory_bytes()
 
-            if available > 0 && floor_bytes > available
+            if floor_bytes > 0 && available > 0 && floor_bytes > available
                 push!(
                     warnings,
-                    "The dense workspace needs at least " *
+                    "The $(route === :block_arrow ? "block-arrow" : "dense") " *
+                    "workspace needs at least " *
                     "$(round(floor_bytes / 2^30; digits=2)) GiB but only " *
                     "$(round(available / 2^30; digits=2)) GiB is available; " *
                     "the solve may exhaust memory. Reduce the thread count or " *
