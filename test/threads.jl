@@ -74,4 +74,99 @@ end
         @test prob["pObj"] isa BigFloat
         SDPX.setArithmeticType(BigFloat)  # restore the documented default
     end
+
+    @testset "block update reductions preserve serial arithmetic" begin
+        T = Float64
+        block_count = 300
+        variable_count = 2
+        A = [zeros(T, 2, 2, variable_count) for _ in 1:block_count]
+        C = [Matrix{T}(I, 2, 2) for _ in 1:block_count]
+        for block in 1:block_count
+            A[block][1, 1, 1] = T(block) / block_count
+            A[block][2, 2, 2] = T(block_count - block + 1) / block_count
+        end
+        c = T[1, 2]
+        B = Matrix{T}(undef, variable_count, 0)
+        b = T[]
+        problem = SDPX.ingest(c, A, C, B, b)
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=min(4, Threads.nthreads()),
+        )
+        X = [T[2 0.1; 0.1 3] for _ in 1:block_count]
+        Y = [T[4 -0.2; -0.2 5] for _ in 1:block_count]
+        for block in 1:block_count
+            workspace.blk[block].dX .= T[0.01 0.002; 0.002 -0.01]
+            workspace.blk[block].dY .= T[-0.02 0.003; 0.003 0.02]
+        end
+        primal_step = T(0.7)
+        dual_step = T(0.6)
+        expected_X = [
+            X[block] + primal_step * workspace.blk[block].dX
+            for block in 1:block_count
+        ]
+        expected_Y = [
+            Y[block] + dual_step * workspace.blk[block].dY
+            for block in 1:block_count
+        ]
+        expected_complementarity = sum(
+            block -> dot(expected_X[block], expected_Y[block]),
+            1:block_count;
+            init=zero(T),
+        )
+
+        complementarity, finite = SDPX.threaded_update_blocks!(
+            workspace,
+            X,
+            Y,
+            primal_step,
+            dual_step,
+        )
+        @test finite
+        @test X == expected_X
+        @test Y == expected_Y
+        @test complementarity == expected_complementarity
+
+        μ = zeros(T, block_count)
+        SDPX.threaded_update_mu!(
+            workspace,
+            μ,
+            T(0.1),
+            problem.dims.k,
+            complementarity,
+            false,
+        )
+        @test μ == [
+            T(0.1) * dot(X[block], Y[block]) / problem.dims.k[block]
+            for block in 1:block_count
+        ]
+
+        expected_dual = SDPX.dual_objective(problem, T[], Y)
+        @test SDPX.threaded_dual_objective(
+            workspace,
+            problem,
+            T[],
+            Y,
+        ) == expected_dual
+
+        best = SDPX.BestIterateWorkspace(T[1, 2], X, T[], Y)
+        SDPX._store_best_iterate!(
+            best,
+            workspace,
+            T[1, 2],
+            X,
+            T[],
+            Y,
+            T(3),
+            T(2),
+            T(1),
+            T(0),
+            T(0),
+            4,
+        )
+        @test best.valid
+        @test best.X == X
+        @test best.Y == Y
+        @test best.iter == 4
+    end
 end
