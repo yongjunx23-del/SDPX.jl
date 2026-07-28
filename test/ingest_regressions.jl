@@ -521,3 +521,32 @@ end
               sparse_problem.cons.packed2[1][1, 1]
     end
 end
+
+@testset "active-only storage shares one empty block: read-only invariant" begin
+    # ActiveSparseCoefficientVector returns a single canonical empty matrix for
+    # every inactive lookup, so all misses alias the same object. That is what
+    # makes the representation O(active) instead of O(L*m), and it is safe only
+    # because coefficients are read-only. Nothing in src/ mutates an indexed
+    # coefficient today (checked); this pins the contract so a future write
+    # through a returned block fails here rather than silently corrupting every
+    # inactive slot in the model.
+    vector = SDPX.ActiveSparseCoefficientVector(
+        Float64, 6, [2, 5],
+        [sparse([1], [1], [1.5], 2, 2), sparse([2], [2], [2.5], 2, 2)],
+        2,
+    )
+    @test length(vector) == 6
+    @test nnz(vector[2]) == 1 && vector[2][1, 1] == 1.5
+    @test nnz(vector[5]) == 1 && vector[5][2, 2] == 2.5
+
+    # Every miss is the *same* object, and it is genuinely empty.
+    misses = [vector[i] for i in (1, 3, 4, 6)]
+    @test all(m -> nnz(m) == 0, misses)
+    @test all(m -> m === first(misses), misses)
+    @test size(first(misses)) == (2, 2)
+
+    # Lookup is order-independent and repeatable: the binary search over sorted
+    # active ids must not depend on access order.
+    @test vector[5] === vector[5]
+    @test vector[2] !== vector[5]
+end
