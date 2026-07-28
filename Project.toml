@@ -25,18 +25,25 @@ SDPXMultiFloatsExt = "MultiFloats"
 
 [compat]
 AppleAccelerate = "0.7"
+Aqua = "0.8"
 DoubleFloats = "1"
 JLD2 = "0.4, 0.5, 0.6"
+JSON = "0.21"
+JuMP = "1"
 LinearAlgebra = "1"
 MathOptInterface = "1.38"
 MultiFloats = "3"
 MutableArithmetics = "1"
 Printf = "1"
+Random = "1"
 Serialization = "1"
 SparseArrays = "1"
+StableRNGs = "1"
+Test = "1"
 julia = "1.10"
 
 [extras]
+Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
@@ -47,4 +54,4 @@ StableRNGs = "860ef19b-820b-49d6-a774-d7a799459cd3"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
-test = ["DoubleFloats", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "StableRNGs", "Test"]
+test = ["Aqua", "DoubleFloats", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "StableRNGs", "Test"]

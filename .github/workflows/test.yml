@@ -109,3 +109,16 @@ jobs:
             echo "Manifest.toml must not be committed for a package"; exit 1
           fi
           echo "No oversized or generated files committed"
+
+  docs:
+    name: Documentation build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - name: Build the Documenter site
+        run: |
+          julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+          julia --project=docs docs/make.jl

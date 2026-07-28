@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
+
+[compat]
+Documenter = "1"
