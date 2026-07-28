@@ -339,6 +339,25 @@ opts = SolverOptions{Float64}(β=0.1, verbosity=1, equilibrate=true, refine_step
 result = solve!(prob, opts)                         # -> SDPResult{T}
 ```
 
+For very large block-arrow inputs where each PSD block touches only a small
+subset of the global variables, callers can avoid allocating an `L × m`
+mostly-empty reference grid:
+
+```julia
+block = ActiveSparseCoefficientVector(
+    Float64x4,
+    m,
+    active_variable_ids,       # sorted global indices
+    active_sparse_matrices,
+    block_dimension,
+)
+prob = ingest(c, [block, ...], C, B, b; sparse=true)
+```
+
+The representation is read-only and preserves the historical
+`AbstractVector{SparseMatrixCSC}` interface. Existing dense and expanded
+sparse inputs behave unchanged.
+
 Low-level `beta`, `gamma`, `omega_p`, and `omega_d` settings remain available
 through `SolverOptions` for expert use. `parameter_strategy=:adaptive`
 enables a typed, bounded Mehrotra controller with independent primal/dual

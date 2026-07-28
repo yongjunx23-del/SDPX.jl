@@ -44,6 +44,9 @@ PSD matrix or sparse Schur factor.
    Vector-of-sparse-matrix input no longer passes through a dense
    `m × k × k` representation. The MathOptInterface wrapper now constructs the
    same sparse-native form directly from affine terms.
+   `ActiveSparseCoefficientVector` additionally stores only the sorted active
+   variable ids and matrices for a block, avoiding the otherwise quadratic
+   empty-reference grid in models with many blocks and variables.
 
 3. **Sparse two-sided PSD transforms**
 

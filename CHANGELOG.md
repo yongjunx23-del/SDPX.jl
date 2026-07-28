@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `ActiveSparseCoefficientVector`, an active-only input representation for
+  PSD blocks that touch a small subset of global variables. It retains the
+  existing sparse-matrix vector interface while avoiding an `L × m` grid of
+  empty references. On the 40,400-block / 40,453-variable CSDR acceptance
+  case, matched Float64x4 ingestion allocations fell from 233.2 GB to
+  12.8 GB and peak RSS from 136.8 GiB to 4.9 GiB; solver iterations,
+  objectives, residuals, and PSD margins were unchanged.
 - A language-independent command-line bridge (`bin/sdpx_solve.jl`, JSON
   schema v1 in `docs/bridge-schema.md`): numbers travel as strings above
   `Float64`, failures produce a structured result file, and a Mathematica
