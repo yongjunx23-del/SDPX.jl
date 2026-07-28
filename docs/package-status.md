@@ -65,3 +65,18 @@ When the time comes:
 4. Infeasibility detection (the one algorithmic gap vs mature solvers; needs
    its own design cycle — see maintainer review §3.2).
 5. Registry registration, once the API has had one quiet cycle.
+
+## Deployment note: test dependencies and offline environments (2026-07-28)
+
+Adding `Aqua` and `JSON` to the test target broke `Pkg.test` on the cluster,
+which runs with `JULIA_PKG_OFFLINE=true` against a shared depot. The failure
+is at environment resolution — `Unsatisfiable requirements detected for
+package Aqua` — before any test file executes, so it cannot be worked around
+inside the tests.
+
+The fix belongs in the release setup, not in the package: each cluster
+release's `setup-release.sh` must `Pkg.add` the full test target, and it now
+includes `Aqua` and `JSON` alongside MultiFloats/DoubleFloats/JLD2/JuMP/
+StableRNGs. Any new test dependency must be added there in the same commit,
+or offline validation of the next release fails on a package that has
+nothing to do with the numerics.
