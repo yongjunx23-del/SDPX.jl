@@ -30,11 +30,11 @@ arithmetic, removes dependent equalities, scales the model, selects the
 kernel and schedule, and tunes the initialization. `solve!` with an explicit
 `SolverOptions` remains the expert interface.
 
-For a conservative opt-in BigFloat first attempt, add
-`working_precision_policy=:auto` and optionally
-`minimum_working_precision_bits=192`. SDPX records the selected width in
-warnings and retries at the requested `precision_bits` if the lower-width
-result does not pass certification.
+BigFloat uses `working_precision_policy=:auto` by default. Optionally set
+`minimum_working_precision_bits=192`; use
+`working_precision_policy=:fixed` only when a fixed MPFR width is required.
+SDPX records the selected width and retries at `precision_bits` if the
+lower-width result does not pass certification.
 
 `time_limit` is end-to-end for solver work: it includes automatic-pipeline
 setup, and `solve(c, A, C, B, b; ...)` also charges raw input ingestion. Native
@@ -192,15 +192,14 @@ For the dedicated LP engine, automatic mode selects the faster
 initial-distance indicator is at most `1000`; distant starts retain the
 configured conservative values. The selected profile and parameters are
 available in `result.diagnostics.plan`.
-`parameter_strategy=:adaptive` enables the bounded Mehrotra controller,
+`parameter_strategy=:adaptive` (the default) enables the bounded Mehrotra controller,
 independent primal/dual step safeguards, adaptive refinement limits, and
 complete fixed-path fallback. Every selection and diagnostic is recorded in
-`result.parameter_history`. It remains opt-in because the Task_Low08
-promotion benchmark did not beat fixed mode. See
+`result.parameter_history`. Use `:fixed` as an expert compatibility override. See
 [`adaptive-parameter-policy.md`](adaptive-parameter-policy.md).
 `extended_precision_blas=:auto` separately enables the conservative packed
-Float64x4/BigFloat Schur crossover. Its default is `:off`. Unknown names are
-rejected.
+Float64x4/BigFloat Schur crossover for eligible extended types. Unknown names
+are rejected.
 
 Native SDP checkpoints are iterate-level warm restarts, not full execution
 snapshots. Resume restores the iterate and iteration/restart counters but

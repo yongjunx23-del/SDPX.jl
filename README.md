@@ -32,12 +32,21 @@ more than `Float64`.
   lower-triangle CSC Schur matrix, symbolic-reuse sparse Cholesky, and a dense
   multi-right-hand-side equality elimination.
 - **Automatic solve planning** — problem classification, equality and LP-row
-  presolve, scaling, arithmetic-aware kernel selection, memory budgeting, and
-  conservative parameter profiles happen before factorization.
+  presolve, adaptive-pass Ruiz scaling, arithmetic-aware kernel selection,
+  memory budgeting, guarded Mehrotra iteration control, and conservative
+  parameter profiles happen before factorization.
+- **Rank-aware equality solves** — eligible dense systems switch from normal
+  equations to rank-revealing QR when factor diagnostics justify its cost.
+  Large systems retain the fast Gram path under conservative dimension and
+  memory crossovers, with numerical rank exposed in diagnostics. Exactly
+  block-diagonal sparse Schur systems apply their local factors directly to
+  the equality panel; wider immutable arithmetic uses an automatically gated
+  blocked triangular SYRK instead of pairwise column contractions.
 - **High-precision owned-storage kernels** — the `BigFloat` path reuses
   independently owned MPFR values for matrix products, triangular solves,
   Cholesky factors, KKT right-hand sides, and LP Hessian assembly.
-- **Guarded mixed KKT hierarchy** — an opt-in dense `Float64x4` solve can use
+- **Guarded mixed KKT hierarchy** — an automatically selected dense
+  `Float64x4` solve can use
   Float64 first, promote to a cache-blocked `Float64x2` preconditioner when
   needed, and retain native `Float64x4` as the final fallback. Every promoted
   solve must pass a target-precision residual check.
@@ -275,7 +284,9 @@ from the predicted Schur structure. Dense lattice-bootstrap Schur matrices
 retain dense Cholesky; sufficiently large Float64 systems at or below the
 guarded 10% Schur-density crossover can use sparse Schur Cholesky.
 
-`equilibrate`: `true` or `false` (default `false`). Opt-in Ruiz-style diagonal equilibration, useful for badly-scaled bootstrap data.
+`equilibrate`: legacy compatibility flag. The public `scaling=:auto` default
+applies adaptive-pass Ruiz equilibration to SDP models; use `scaling=:none`
+only as an expert override.
 
 `termination`: `:relative` (default) or `:legacy`. `:relative` normalizes the
 gap/residual tests by problem scale, fixing a case where the original absolute
@@ -317,8 +328,9 @@ result = solve(
 ```
 
 The automatic pipeline performs problem classification, equality and
-redundancy presolve, scaling, kernel and schedule selection, and safe
-parameter-profile selection. Models containing only scalar cones use a
+redundancy presolve, adaptive Ruiz scaling, kernel and schedule selection,
+safe parameter-profile selection, and guarded per-iteration adaptation.
+Models containing only scalar cones use a
 dedicated LP predictor-corrector engine instead of the PSD matrix path.
 The public `time_limit` covers that pipeline setup, not only barrier
 iterations; the raw-array one-call form above also charges input ingestion
@@ -366,8 +378,9 @@ Low-level `beta`, `gamma`, `omega_p`, and `omega_d` settings remain available
 through `SolverOptions` for expert use. `parameter_strategy=:adaptive`
 enables a typed, bounded Mehrotra controller with independent primal/dual
 fractions, refinement selection, and complete fixed-path fallback. It records
-its diagnostics and selected values per iteration. Fixed parameters remain the
-default because the current Task_Low08 gate did not show a runtime win.
+its diagnostics and selected values per iteration. The adaptive strategy is
+the public default; `:fixed` is retained for historical trajectory
+reproduction and controlled A/B benchmarks.
 `SolverOptions` also exposes: `callback` (per-iteration `(state) -> Bool`,
 `true` stops the solve), `checkpoint_every`/`checkpoint_path` (crash-safe
 iterate-level warm restart via `resume=path` on the SDP `solve!` path),
@@ -453,12 +466,12 @@ SDPX_MEMORY_LIMIT_BYTES=64GiB julia --project=. -t 8 solve_problem.jl
 
 The limit is a planning ceiling, not a request to reserve that amount.
 
-Dense, non-arrow `Float64x4` and `BigFloat` problems can also opt into
-`mixed_precision_kkt=:auto`. It uses Float64 factorization with
+Dense, non-arrow `Float64x4` and `BigFloat` problems use
+`mixed_precision_kkt=:auto` by default. It may select Float64 factorization with
 target-precision residuals and iterative refinement, guarded by memory,
 conditioning, rank, and convergence checks. Any failed guard recomputes with
-the native extended-precision factorization. The feature remains off by
-default. Mixed refinement targets the tighter of the arithmetic floor and
+the native extended-precision factorization. Mixed refinement targets the
+tighter of the arithmetic floor and
 the square of the requested solver tolerance, so a moderately conditioned
 Float64 preconditioner is not rejected merely because it cannot reproduce
 unused Float64x4 or BigFloat digits. The predictor is corrected only to its
@@ -476,7 +489,7 @@ reconstructs and factors the native BigFloat Schur matrix if a guard fails.
 The exact refinement guard rejects this path on the medium CSDR benchmark and
 safely reconstructs the native factorization, so it is not enabled by default.
 
-BigFloat also has an opt-in staged precision policy:
+BigFloat also uses a staged precision policy by default:
 
 ```julia
 result = solve!(
@@ -491,7 +504,8 @@ result = solve!(
 
 A lower-precision attempt is accepted only after the usual
 original-coordinate certificate; otherwise SDPX retries at the requested
-precision while time remains. The fixed policy remains the default. The
+precision while time remains. Use `working_precision_policy=:fixed` for one
+requested-precision attempt. The
 [native BigFloat report](bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md)
 records the profile, 1/2/4/8 scaling, precision A/B, memory, and validation.
 
@@ -562,8 +576,8 @@ memory gates, and full numerical certificates.
 - General native BigFloat kernels and distributed Schur
   assembly/factorization remain serial. The ownership-safe native
   reduced-arrow Schur path is a narrow shared-memory exception; the guarded
-  reduced-arrow mixed path remains opt-in. On a cluster, use separate jobs or
-  job-array elements for non-arrow native BigFloat solves.
+  reduced-arrow mixed path is conservatively auto-gated. On a cluster, use
+  separate jobs or job-array elements for non-arrow native BigFloat solves.
 - **One solve per process.** The solver adjusts the process-global BLAS thread
   count around its phases, so two concurrent `solve` calls in one Julia
   process can interleave those adjustments and oversubscribe or finish with a

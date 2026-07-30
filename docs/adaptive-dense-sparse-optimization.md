@@ -5,7 +5,7 @@ Date: 2026-07-24
 > **Status update (2026-07-25).** This document preserves the dated kernel
 > measurements below. Since those measurements, SDPX has added type-native
 > equality presolve with dual reconstruction, original-coordinate result
-> certification, an opt-in adaptive parameter controller, owned BigFloat
+> certification, a guarded adaptive parameter controller, owned BigFloat
 > kernels, a fused exact-arrow path that allocates neither transformed panels
 > nor pair buffers, and a usable-memory-aware scheduler. See the current
 > [extended-precision report](../bench/extended_precision_blas/REPORT.md),
@@ -251,7 +251,7 @@ apply high-precision iterative refinement. Fall back to a full target-type
 factor if refinement stagnates. This is the most plausible route to making
 large extended-precision problems practical.
 
-### P5: adaptive interior-point parameters — implemented, still opt-in
+### P5: adaptive interior-point parameters — implemented and guarded by default
 
 `parameter_strategy=:adaptive` now uses a separate typed policy component. It
 computes a pure affine predictor, global `mu` and `mu_aff`, a bounded Mehrotra
@@ -262,8 +262,9 @@ progress restore the complete fixed predictor/corrector path.
 The warmed representative CSDR s15 solve improved from 19 iterations and
 15.749 ms to 15 iterations and 13.260 ms, with both solutions certified. A
 controlled Task_Low08 run instead matched the fixed 24 iterations but was
-1.7% slower after a safe iteration-19 fallback. Fixed parameters therefore
-remain the default. The complete audit and benchmark table are in
+1.7% slower after a safe iteration-19 fallback. The current default therefore
+adds a state-based cold-start guard and retains complete fixed-policy fallback.
+The complete audit and benchmark table are in
 [Adaptive Interior-Point Parameter Policy](adaptive-parameter-policy.md).
 
 ### P6: chordal decomposition only when the aggregate PSD graph is sparse

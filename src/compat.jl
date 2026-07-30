@@ -117,6 +117,10 @@ function sdp(c, A, C, B, b;
             equilibrate=equilibrate, refine_steps=refine_steps,
             predictor=predictor, max_time=Float64(max_time),
             callback=callback, parameter_policy=:fixed,
+            parameter_strategy=:fixed,
+            working_precision_policy=:fixed,
+            scaling=equilibrate ? :equilibrate : :none,
+            mixed_precision_kkt=:off,
         )
         return solve!(prob, opts)
     end
@@ -162,6 +166,10 @@ function sdp(c, A, C, B, b, x0, X0, y0, Y0;
             mode=OPTIMIZE, verbosity=verbosity,
             termination=termination, restart=false,
             min_step=T(1e-10), parameter_policy=:fixed,
+            parameter_strategy=:fixed,
+            working_precision_policy=:fixed,
+            scaling=:none,
+            mixed_precision_kkt=:off,
         )
         solve!(prob, opts; x0=x0, X0=X0, y0=y0, Y0=Y0)
     end
@@ -242,6 +250,10 @@ function findFeasible(A, C, B, b;
             restart=restart, min_step=T(minStep), mode=FEASIBILITY,
             verbosity=verbosity, termination=termination,
             parameter_policy=:fixed,
+            parameter_strategy=:fixed,
+            working_precision_policy=:fixed,
+            scaling=:none,
+            mixed_precision_kkt=:off,
         )
         return solve!(prob, opts)
     end
@@ -291,6 +303,10 @@ function findFeasible(
             mode=FEASIBILITY, verbosity=verbosity,
             termination=termination, restart=false,
             min_step=T(1e-10), parameter_policy=:fixed,
+            parameter_strategy=:fixed,
+            working_precision_policy=:fixed,
+            scaling=:none,
+            mixed_precision_kkt=:off,
         )
         solve!(prob, opts; x0=vcat([t0], T.(x0[2:end])), X0=X0ext, y0=y0, Y0=Y0)
     end

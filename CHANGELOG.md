@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Exactly block-diagonal sparse SDP systems with equality constraints now use
+  the local block-arrow factors directly instead of materializing the full
+  Schur matrix. The transformed equality system retains fast Gram-Cholesky
+  when stable and automatically switches eligible ill-conditioned systems to
+  rank-revealing Householder QR.
+- `Float64x4` and other fixed-width extended equality Gram matrices can use
+  the existing allocation-free blocked triangular SYRK with disjoint output
+  tile ownership. The equality-specific crossover rejects panels below 32
+  columns or 250,000 scalar contractions in automatic mode; Float64 retains
+  its unchanged vendor-BLAS SYRK path.
+- Equality diagnostics now report the executed factorization, numerical rank,
+  factor quality, rank-deficiency verdict, and Gram kernel. Uncertified
+  terminal states explicitly warn that iterate objectives are not valid
+  physical bounds.
+- Public SDP defaults now use guarded adaptive Newton control, adaptive-pass
+  Ruiz scaling, automatic equality-factor selection, automatic
+  extended/mixed-precision kernels, and staged BigFloat working precision.
+  Historical fixed behavior remains available through expert overrides and
+  the legacy compatibility interface.
 - A guarded equality-aware sparse Schur backend for large Float64 SDPs. It
   assembles only the lower CSC triangle with exclusive column ownership,
   reuses CHOLMOD's symbolic Cholesky analysis, solves all equality columns as

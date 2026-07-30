@@ -402,14 +402,13 @@ end
     rp = SDPX.recommended_parameters(prob, SDPX.SolverOptions{Float64}())
     @test rp.Ωp ≈ SDPX.OMEGA_DATA_MULTIPLIER * stats.maxnorm
     @test rp.Ωd == rp.Ωp
-    # No profile turns the adaptive beta/gamma controller on by itself: the
-    # measurement that once justified it was taken while the solve terminated
-    # prematurely, and it reverses once that is fixed. The user's setting is
-    # passed through untouched.
-    @test rp.parameter_strategy == :fixed
-    opted_in = SDPX.recommended_parameters(prob,
-        SDPX.SolverOptions{Float64}(parameter_strategy=:adaptive))
-    @test opted_in.parameter_strategy == :adaptive
+    # The public API now uses the guarded adaptive policy by default. A
+    # cold-start safeguard preserves the fixed controller until normalized
+    # feasibility and complementarity enter a reliable range.
+    @test rp.parameter_strategy == :adaptive
+    opted_out = SDPX.recommended_parameters(prob,
+        SDPX.SolverOptions{Float64}(parameter_strategy=:fixed))
+    @test opted_out.parameter_strategy == :fixed
 
     wide = unbalanced_arrow_problem(
         blocks=2,
@@ -831,10 +830,10 @@ end
     a = backends_for(arrow)
     @test a.actual isa SDPX.ArrowBackend
     @test SDPX.backend_name(a.actual) === :block_arrow
-    # The arrow reduction eliminates local blocks against a reduced shared
-    # system with no room for equality rows, which is why the solve path
-    # asserts n == 0 on it.
-    @test !SDPX.supports_equalities(a.actual)
+    # The backend also supports equalities for the exactly block-diagonal
+    # all-local specialization; ArrowWorkspace rejects incompatible
+    # shared-variable/equality structures before backend selection.
+    @test SDPX.supports_equalities(a.actual)
     @test string(a.planned) == string(SDPX.backend_name(a.actual))
 
     # `analyze` reports structure that is fixed for the whole solve, and is the

@@ -1,4 +1,5 @@
 using LinearAlgebra
+using MultiFloats: Float64x4
 using Random
 using SDPX
 using Test
@@ -170,6 +171,178 @@ end
         @test allocated <= 64
     end
 
+    @testset "block-diagonal sparse Schur with equality QR" begin
+        variables = 4
+        coefficients = [
+            zeros(Float64, variables, 2, 2),
+            zeros(Float64, variables, 2, 2),
+        ]
+        coefficients[1][1, :, :] .=
+            [0.0 1.0; 1.0 0.0]
+        coefficients[1][2, :, :] .=
+            [1.0 0.0; 0.0 -1.0]
+        coefficients[2][3, :, :] .=
+            [0.0 1.0; 1.0 0.0]
+        coefficients[2][4, :, :] .=
+            [1.0 0.0; 0.0 -1.0]
+        B = [
+            1.0 0.2
+            -0.5 0.7
+            0.3 -0.4
+            0.8 1.1
+        ]
+        C = [zeros(2, 2), zeros(2, 2)]
+        c = zeros(variables)
+        b = zeros(2)
+        sparse_problem = SDPX.ingest(
+            c,
+            coefficients,
+            C,
+            B,
+            b;
+            sparse=true,
+            verbosity=0,
+        )
+        dense_problem = SDPX.ingest(
+            c,
+            coefficients,
+            C,
+            B,
+            b;
+            sparse=false,
+            verbosity=0,
+        )
+        sparse_workspace = SDPX.Workspace(
+            sparse_problem;
+            equality_solver=:qr,
+            thread_count=1,
+        )
+        dense_workspace = SDPX.Workspace(
+            dense_problem;
+            equality_solver=:qr,
+            thread_count=1,
+        )
+        @test sparse_workspace.arrow !== nothing
+        @test isempty(sparse_workspace.arrow.global_ids)
+        @test isempty(sparse_workspace.S)
+
+        X = [
+            [2.0 0.1; 0.1 1.5],
+            [1.8 -0.2; -0.2 2.2],
+        ]
+        Y = [
+            [1.4 0.2; 0.2 1.9],
+            [2.1 -0.1; -0.1 1.6],
+        ]
+        @test SDPX.factor_blocks!(
+            sparse_workspace,
+            X,
+            Y,
+        )
+        @test SDPX.factor_blocks!(
+            dense_workspace,
+            X,
+            Y,
+        )
+        SDPX.schur_build!(
+            sparse_workspace,
+            sparse_problem,
+            sparse_problem.cons,
+            X,
+            Y,
+        )
+        SDPX.schur_build!(
+            dense_workspace,
+            dense_problem,
+            dense_problem.cons,
+            X,
+            Y,
+        )
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:qr,
+        )
+        sparse_factor = SDPX.factor_kkt!(
+            sparse_workspace,
+            sparse_problem,
+            options,
+        )
+        dense_factor = SDPX.factor_kkt!(
+            dense_workspace,
+            dense_problem,
+            options,
+        )
+        @test sparse_factor.ok
+        @test dense_factor.ok
+        @test sparse_factor.equality_solver ==
+              :rank_revealing_qr
+
+        primal_rhs = [0.4, -0.7, 1.2, -0.3]
+        equality_rhs = [0.3, -0.2]
+        sparse_dx, sparse_dy = zeros(4), zeros(2)
+        dense_dx, dense_dy = zeros(4), zeros(2)
+        SDPX.solve_kkt!(
+            sparse_workspace,
+            2,
+            primal_rhs,
+            equality_rhs,
+            sparse_dx,
+            sparse_dy,
+        )
+        SDPX.solve_kkt!(
+            dense_workspace,
+            2,
+            primal_rhs,
+            equality_rhs,
+            dense_dx,
+            dense_dy,
+        )
+        @test sparse_dx ≈ dense_dx rtol=1e-12 atol=1e-12
+        @test sparse_dy ≈ dense_dy rtol=1e-12 atol=1e-12
+        @test transpose(B) * sparse_dx ≈
+              equality_rhs rtol=1e-12 atol=1e-12
+
+        duplicate_problem = SDPX.ingest(
+            c,
+            coefficients,
+            C,
+            hcat(B[:, 1], B[:, 1]),
+            b;
+            sparse=true,
+            verbosity=0,
+        )
+        duplicate_workspace = SDPX.Workspace(
+            duplicate_problem;
+            equality_solver=:auto,
+            thread_count=1,
+        )
+        @test SDPX.factor_blocks!(
+            duplicate_workspace,
+            X,
+            Y,
+        )
+        SDPX.schur_build!(
+            duplicate_workspace,
+            duplicate_problem,
+            duplicate_problem.cons,
+            X,
+            Y,
+        )
+        duplicate_options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:auto,
+        )
+        duplicate_factor = SDPX.factor_kkt!(
+            duplicate_workspace,
+            duplicate_problem,
+            duplicate_options,
+        )
+        @test duplicate_factor.ok
+        @test duplicate_factor.q_rank_deficient
+        @test duplicate_factor.equality_solver ==
+              :rank_revealing_qr
+    end
+
     @testset "pivoted equality solve reuses workspace scratch" begin
         column = [1.0, -0.5, 2.0]
         B = hcat(column, column)
@@ -181,6 +354,14 @@ end
         factor = SDPX.factor_kkt!(workspace, problem, options)
         @test factor.ok
         @test factor.q_pivoted
+        @test factor.equality_solver == :rank_revealing_qr
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
+        equality_diagnostics =
+            SDPX._equality_factor_diagnostics(workspace, 2)
+        @test equality_diagnostics.method == :rank_revealing_qr
+        @test equality_diagnostics.rank == 1
+        @test equality_diagnostics.rank_deficient
+        @test equality_diagnostics.gram_kernel == :blas_syrk
 
         primal_rhs = [0.2, 0.1, -0.4]
         equality_rhs = [0.3, 0.3]
@@ -213,6 +394,96 @@ end
         # small constant allowance keeps the guard meaningful on every
         # supported version instead of passing on one and failing on another.
         @test allocated <= 64
+    end
+
+    @testset "rank-revealing QR avoids squared equality conditioning" begin
+        rng = MersenneTwister(771)
+        rows = 24
+        base = randn(rng, rows, 3)
+        nearly_dependent = base[:, 1] + 1e-12 * randn(rng, rows)
+        B = hcat(base, nearly_dependent)
+        problem = _dense_workspace_problem(B)
+        workspace = SDPX.Workspace(
+            problem;
+            equality_solver=:qr,
+            thread_count=1,
+        )
+        schur = Matrix(Diagonal(range(1.0, 2.0; length=rows)))
+        copyto!(workspace.S, schur)
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:qr,
+        )
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test factor.equality_solver == :rank_revealing_qr
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
+        @test workspace.equality_gram_kernel ==
+              :not_formed_qr
+
+        primal_rhs = randn(rng, rows)
+        seed_direction = randn(rng, rows)
+        equality_rhs = transpose(B) * seed_direction
+        dx = zeros(rows)
+        dy = zeros(size(B, 2))
+        SDPX.solve_kkt!(
+            workspace,
+            size(B, 2),
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        @test schur * dx - B * dy ≈ primal_rhs rtol=1e-8 atol=1e-8
+        @test transpose(B) * dx ≈ equality_rhs rtol=1e-8 atol=1e-8
+        @test all(isfinite, dx)
+        @test all(isfinite, dy)
+    end
+
+    @testset "rank-revealing equality QR supports extended arithmetic" begin
+        rng = MersenneTwister(772)
+        for T in (Float64x4, BigFloat)
+            setprecision(BigFloat, 256) do
+                B = T.(randn(rng, 12, 5))
+                options = SDPX.SolverOptions{T}(
+                    verbosity=0,
+                    equality_solver=:qr,
+                )
+                factor = SDPX._factor_equality_qr(B, options)
+                rhs = T.(randn(rng, 5))
+                direction = SDPX.alloc_zeros(T, 5)
+                scratch = SDPX.alloc_zeros(T, 5)
+                SDPX._solve_Q!(direction, factor, rhs, scratch)
+                relative_residual =
+                    norm(transpose(B) * (B * direction) - rhs) /
+                    norm(rhs)
+                @test factor.rank == 5
+                @test relative_residual <= T(1_000) * eps(T)
+                if T === BigFloat
+                    @test length(unique(objectid.(direction))) ==
+                          length(direction)
+                    @test length(unique(objectid.(scratch))) ==
+                          length(scratch)
+                end
+            end
+        end
+    end
+
+    @testset "equality Gram crossover rejects tiny panels" begin
+        panel = zeros(Float64x4, 48, 18)
+        options = SDPX.SolverOptions{Float64x4}(
+            verbosity=0,
+            extended_precision_blas=:auto,
+            threads=4,
+        )
+        decision =
+            SDPX._equality_gram_crossover(panel, options, 4)
+        @test !decision.enabled
+        @test decision.reason in (
+            :equality_gram_too_small,
+            :problem_too_small,
+            :memory_budget,
+        )
     end
 
     @testset "Schur regularization escalates only on unfactorable S" begin

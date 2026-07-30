@@ -2,7 +2,7 @@
 
 This document records the implementation audit, controller design, safety
 rules, and benchmark gate for SDPX's iteration-level parameter selection. The
-adaptive policy is opt-in:
+guarded adaptive policy is the public default:
 
 ```julia
 options = SolverOptions{Float64}(
@@ -10,8 +10,11 @@ options = SolverOptions{Float64}(
 )
 ```
 
-The default remains `parameter_strategy=:fixed`. Automatic cold-start
-selection through `parameter_policy=:auto` is a separate feature.
+Use `parameter_strategy=:fixed` only for reproducibility with the historical
+trajectory. Automatic cold-start selection through `parameter_policy=:auto`
+is a separate structural policy. The adaptive controller itself returns fixed
+parameters while the normalized cold-start merit is at least one, and it
+permanently falls back after repeated instability.
 
 ## Audit of the existing Newton method
 
@@ -210,14 +213,13 @@ not be interpreted as a high-confidence throughput measurement.
 | Task_Low08 | adaptive + fallback | 24 | 41.604 s | `7.29e-7` | `1.65e-10` | `1.96e-9` | Optimal |
 
 The sparse CSDR case improved by 1.19x and four iterations. The LP was about
-2% slower and needed one additional iteration. Task_Low08 detected a degraded equality factor at
-iteration 19, restored the fixed path, and produced a valid PSD certificate,
-but did not improve runtime. The default therefore remains fixed.
-
-Promotion to the default requires repeated warmed wins across representative
-LP, sparse SDP, dense SDP, Float64, Float64x4, and BigFloat cases, with no
-regression in status, original-coordinate residuals, relative gap, or PSD
-certificate.
+2% slower and needed one additional iteration. Task_Low08 detected a degraded
+equality factor at iteration 19, restored the fixed path, and produced a valid
+PSD certificate, but did not improve runtime. The adaptive policy is now the
+public default because it adds the required state-aware safeguards and has a
+tested fixed-policy fallback; `parameter_strategy=:fixed` remains available
+for historical trajectory reproduction. Runtime claims still require repeated
+warmed comparisons with identical numerical certificates.
 
 ## Remaining limitations
 

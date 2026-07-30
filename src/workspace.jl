@@ -238,12 +238,17 @@ end
 """
     ArrowWorkspace{T}
 
-Factorization storage for sparse problems with no explicit `Bᵀx=b`
-equalities. Variables that touch more than one PSD block are placed in
-`global_ids`; variables that touch exactly one block are grouped in
-`local_ids[l]`. The Schur matrix then has an exact block-arrow structure.
-Each local diagonal block is eliminated independently and only the
-reduced global system is factored.
+Factorization storage for sparse block-arrow problems. Variables that touch
+more than one PSD block are placed in `global_ids`; variables that touch
+exactly one block are grouped in `local_ids[l]`. The Schur matrix then has an
+exact block-arrow structure. Each local diagonal block is eliminated
+independently and only the reduced global system is factored.
+
+Explicit `Bᵀx=b` equalities are also supported when every variable is local.
+That important special case has an exactly block-diagonal Schur matrix: the
+local Cholesky factors are applied directly to `B`, and only the much smaller
+equality system is factored. This is the structure used by large primal
+crossing-symmetric models with many independent 2×2 PSD cells.
 """
 mutable struct ArrowWorkspace{T}
     global_ids::Vector{Int}
@@ -287,8 +292,11 @@ mutable struct ArrowWorkspace{T}
 end
 
 function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
-    prob.dims.n == 0 || return nothing
     prob.cons isa SparseCons{T} || return nothing
+    # Mutable MPFR values need a separate ownership-aware implementation for
+    # the block-diagonal equality path. Keep native BigFloat on the existing
+    # serial sparse/dense backend until that implementation is available.
+    prob.dims.n > 0 && T === BigFloat && return nothing
     cons = prob.cons::SparseCons{T}
     L, m = prob.dims.L, prob.dims.m
     frequency = zeros(Int, m)
@@ -302,6 +310,10 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
     all(>(0), frequency) || return nothing
     global_ids = findall(>(1), frequency)
     length(global_ids) < m || return nothing
+    # Equalities coupled to shared arrow variables require a joint
+    # arrow-plus-equality reduction. The all-local specialization below is
+    # exact; other structures retain the general KKT backend.
+    prob.dims.n > 0 && !isempty(global_ids) && return nothing
     local_ids = [Int[] for _ in 1:L]
     for i in 1:m
         frequency[i] == 1 && push!(local_ids[owner[i]], i)
@@ -400,7 +412,8 @@ mutable struct Workspace{T}
     # and rank-revealing dense paths.
     Qchol::Union{Nothing,LinearAlgebra.Cholesky{T,Matrix{T}},
                  LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
-                 BigFloatCholeskyFactor{Matrix{BigFloat}}}
+                 BigFloatCholeskyFactor{Matrix{BigFloat}},
+                 EqualityQRFactor{T}}
     arrow::Union{Nothing,ArrowWorkspace{T}}
     sparse_kkt::Any
     v::Vector{T}
@@ -428,6 +441,7 @@ mutable struct Workspace{T}
     block_ok::Vector{Bool}
     extended_precision::ExtendedPrecisionWorkspace
     mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
+    equality_gram_kernel::Symbol
     thread_count::Int
 end
 
@@ -737,6 +751,7 @@ function Workspace(
     extended_precision_memory_fraction::Float64=0.10,
     mixed_precision_kkt::Symbol=:off,
     mixed_precision_memory_fraction::Float64=0.10,
+    equality_solver::Symbol=:auto,
     thread_count::Int=Threads.nthreads(),
 ) where {T}
     L, m, n, k = prob.dims
@@ -745,7 +760,10 @@ function Workspace(
     is_sparse = prob.cons isa SparseCons
     arrow = ArrowWorkspace(prob, selected_threads)
     compact_arrow = arrow !== nothing
-    sparse_schur = !compact_arrow && _use_sparse_schur_sdp(prob)
+    sparse_schur =
+        !compact_arrow &&
+        equality_solver !== :qr &&
+        _use_sparse_schur_sdp(prob)
     fused_arrow =
         compact_arrow &&
         L > 0 &&
@@ -961,7 +979,7 @@ function Workspace(
         block_bins, schur_bins, schur_column_boundaries,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
-        selected_threads)
+        :not_run, selected_threads)
     if T === BigFloat && extended_precision.lower_only
         ExtendedPrecisionBLAS.prepare_triangle_storage!(workspace.S)
         for partial in workspace.Spartial

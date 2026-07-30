@@ -28,8 +28,9 @@ equality block is rank deficient. The general-purpose path."""
 struct DenseCholeskyBackend <: KKTBackend end
 
 """Exact block-arrow elimination for models with shared plus per-block local
-variables. Requires `n == 0`; it eliminates the local blocks and solves the
-reduced shared system."""
+variables. It eliminates the local blocks and solves the reduced shared
+system. Equality columns are supported for the exactly block-diagonal,
+all-local specialization."""
 struct ArrowBackend <: KKTBackend end
 
 """Factorization carried at reduced precision with the residual corrected at
@@ -87,13 +88,12 @@ backend_name(::LPLUBackend) = :dense_lu
 """
     supports_equalities(backend) -> Bool
 
-Whether the backend can handle `n > 0` equality columns. The arrow reduction
-cannot: it eliminates local blocks against a reduced shared system that has no
-place for equality rows, which is why `_solve_kkt_owned!` asserts `n == 0` on
-that path.
+Whether the backend can handle `n > 0` equality columns. Arrow workspaces are
+constructed with equalities only for the exactly block-diagonal all-local
+specialization, so any selected arrow backend supports its problem.
 """
 supports_equalities(::KKTBackend) = true
-supports_equalities(::ArrowBackend) = false
+supports_equalities(::ArrowBackend) = true
 
 """
     analyze(backend, prob) -> NamedTuple

@@ -526,9 +526,9 @@ Build the canonical Mehrotra SDP corrector right-hand side
 
 `R_l = sigma*mu*I - X_l*Y_l - dX_aff_l*dY_aff_l`
 
-using one global average complementarity `mu`.  This path is used only by the
-opt-in adaptive policy; the fixed policy retains the historical block-local
-corrector exactly.
+using one global average complementarity `mu`. This path is used by the
+default adaptive policy; the expert `:fixed` policy retains the historical
+block-local corrector exactly.
 """
 function threaded_mehrotra_corrector_rhs!(
     ws::Workspace{T},

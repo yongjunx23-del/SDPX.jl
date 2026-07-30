@@ -219,7 +219,8 @@ function main(arguments)
         "usage: benchmark_sdpx_float64_solve.jl INPUT OUTPUT " *
         "[BLAS_THREADS] [MAX_TIME_SECONDS] [BETA] [GAMMA] " *
         "[OMEGA_P] [OMEGA_D] [classic|sdpb] [MAX_ITER] [TOLERANCE] " *
-        "[fixed|adaptive] [backtrack|fraction_to_boundary|auto]",
+        "[fixed|adaptive] [backtrack|fraction_to_boundary|auto] " *
+        "[fixed|auto parameter policy]",
     )
     input_path = abspath(arguments[1])
     output_path = abspath(arguments[2])
@@ -236,6 +237,8 @@ function main(arguments)
         length(arguments) >= 12 ? Symbol(arguments[12]) : :fixed
     step_rule =
         length(arguments) >= 13 ? Symbol(arguments[13]) : :backtrack
+    parameter_policy =
+        length(arguments) >= 14 ? Symbol(arguments[14]) : :fixed
     SDPX.set_blas_threads!(blas_threads)
 
     started = time()
@@ -281,7 +284,7 @@ function main(arguments)
         restart=true,
         max_restarts=5,
         sparse=:auto,
-        parameter_policy=:fixed,
+        parameter_policy=parameter_policy,
         parameter_strategy=parameter_strategy,
         predictor=predictor,
         step_rule=step_rule,
@@ -332,6 +335,7 @@ function main(arguments)
             "tolerance_dual" => options.ϵ_dual,
             "predictor" => options.predictor,
             "parameter_strategy" => options.parameter_strategy,
+            "parameter_policy" => options.parameter_policy,
             "step_rule" => options.step_rule,
             "refine_steps" => options.refine_steps,
         ),

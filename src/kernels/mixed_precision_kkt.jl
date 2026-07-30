@@ -1,5 +1,5 @@
 #=====================================================================
-    Opt-in mixed-precision KKT factorization for dense extended-precision
+    Guarded mixed-precision KKT factorization for dense extended-precision
     SDPs (`BigFloat` and fixed-width types such as `Float64x4`).
 
     The expensive Schur and equality-complement factorizations are carried
@@ -12,11 +12,12 @@
     target-precision residuals; failure at that rung lazily falls back to the
     native extended-precision factorization.
 
-    This dense path is deliberately disabled by default. It never handles
-    ordinary Float64, fixed-count refinement, or rank-deficient equality
-    complements. Singleton-local `2x2` block-arrow systems use their separate
-    Float64x4 reduced-panel preconditioner when the MultiFloats extension is
-    available.
+    Automatic mode is the default for BigFloat and fixed-width extended
+    arithmetic, but the crossover and numerical guards reject it unless a
+    clear benefit is predicted. It never handles ordinary Float64,
+    fixed-count refinement, or rank-deficient equality complements.
+    Singleton-local `2x2` block-arrow systems use their separate Float64x4
+    reduced-panel preconditioner when the MultiFloats extension is available.
 =====================================================================#
 
 const MIXED_KKT_PREDICTOR_RESIDUAL_LIMIT = 1.0e-8

@@ -377,7 +377,89 @@ function recommended_parameters(
         Ωd=max(opts.Ωd, stats.maxnorm),
         predictor=opts.predictor,
         parameter_strategy=opts.parameter_strategy,
-        profile=:general_fixed,
+        profile=:general_adaptive,
+    )
+end
+
+"""
+    _equality_factor_diagnostics(workspace, equality_count)
+
+Return the equality-system method and numerical-rank verdict from the last
+Newton factorization. This is intentionally O(n), allocation-free, and kept
+out of the iteration hot path. A stopped solve can therefore distinguish an
+uncertified objective caused by equality rank loss from ordinary slow
+convergence.
+"""
+function _equality_factor_diagnostics(
+    workspace::Workspace{T},
+    equality_count::Int,
+) where {T}
+    equality_count == 0 &&
+        return (
+            available=true,
+            method=:none,
+            rank=0,
+            dimension=0,
+            rank_deficient=false,
+            quality=one(T),
+            gram_kernel=:none,
+        )
+    factor = workspace.Qchol
+    factor === nothing &&
+        return (
+            available=false,
+            method=:unavailable,
+            rank=0,
+            dimension=equality_count,
+            rank_deficient=false,
+            quality=zero(T),
+            gram_kernel=workspace.equality_gram_kernel,
+        )
+    if factor isa EqualityQRFactor{T}
+        qr_factor = factor::EqualityQRFactor{T}
+        return (
+            available=true,
+            method=:rank_revealing_qr,
+            rank=qr_factor.rank,
+            dimension=equality_count,
+            rank_deficient=qr_factor.rank < equality_count,
+            quality=qr_factor.quality,
+            gram_kernel=workspace.equality_gram_kernel,
+        )
+    elseif factor isa LinearAlgebra.CholeskyPivoted
+        rank = factor.rank
+        return (
+            available=true,
+            method=:pivoted_normal_equations,
+            rank=rank,
+            dimension=equality_count,
+            rank_deficient=rank < equality_count,
+            quality=rank < equality_count ?
+                    zero(T) :
+                    _cholesky_diagonal_quality(
+                        view(factor.L, 1:rank, 1:rank),
+                    ),
+            gram_kernel=workspace.equality_gram_kernel,
+        )
+    elseif factor isa BigFloatCholeskyFactor
+        return (
+            available=true,
+            method=:normal_equations,
+            rank=equality_count,
+            dimension=equality_count,
+            rank_deficient=false,
+            quality=_cholesky_diagonal_quality(factor.L),
+            gram_kernel=workspace.equality_gram_kernel,
+        )
+    end
+    return (
+        available=true,
+        method=:normal_equations,
+        rank=equality_count,
+        dimension=equality_count,
+        rank_deficient=false,
+        quality=_cholesky_diagonal_quality(factor.factors),
+        gram_kernel=workspace.equality_gram_kernel,
     )
 end
 
@@ -797,6 +879,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         mixed_precision_kkt=opts.mixed_precision_kkt,
         mixed_precision_memory_fraction=
             opts.mixed_precision_memory_fraction,
+        equality_solver=opts.equality_solver,
         thread_count=opts.threads,
     )
     workspace_finished_ns = time_ns()
@@ -1150,7 +1233,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             selected_parameters.primal_fraction_to_boundary,
             selected_parameters.dual_fraction_to_boundary,
             selected_parameters.backtracking_factor,
-            opts.min_step,
+            selected_parameters.minimum_step,
             opts.step_rule,
         )
         selected_step_rule = resolved_step_rule(ws, opts.step_rule)
@@ -1180,9 +1263,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # Only a stuck side that still has work to do is a real collapse.
         primal_feasible = p_res / scale_p <= opts.ϵ_primal
         dual_feasible = d_res / scale_d <= opts.ϵ_dual
-        x_stuck = tX < opts.min_step
-        y_stuck = tY < opts.min_step
-        if x_stuck && primal_feasible && !(y_stuck && !dual_feasible)
+        x_stuck = tX < selected_parameters.minimum_step
+        y_stuck = tY < selected_parameters.minimum_step
+        if x_stuck && primal_feasible && !y_stuck
             tX = zero(T)          # freeze a converged primal, keep going
             x_stuck = false
         end
@@ -1191,6 +1274,32 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             y_stuck = false
         end
         if x_stuck || y_stuck
+            # A lower-precision preconditioner can pass the
+            # target-arithmetic residual guard yet produce a direction too
+            # inaccurate to preserve a useful cone-interior step. Retry from
+            # the unchanged iterate with the native factorization before
+            # recentering, rescaling, or declaring a stall.
+            if x_stuck &&
+               y_stuck &&
+               ws.mixed_precision !== nothing
+                mixed =
+                    ws.mixed_precision::MixedPrecisionKKTWorkspace
+                if mixed.active
+                    mixed.active = false
+                    mixed.intermediate_active = false
+                    mixed.fell_back = true
+                    mixed.disabled = true
+                    mixed.cooldown_remaining = 0
+                    mixed.dynamic_fallback_count += 1
+                    mixed.reason = :outer_step_collapse
+                    opts.verbosity >= 1 && println(
+                        "Both cone steps collapsed with a mixed KKT " *
+                        "preconditioner; retrying from the unchanged " *
+                        "iterate with native $(T) factorization.",
+                    )
+                    continue
+                end
+            end
             # Before treating this as a scaling problem worth restarting, check
             # whether we're actually at the IPM's numerical convergence tail: gap
             # and residuals already close to the requested tolerance, with the
@@ -1224,7 +1333,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             # ×omega_step would (BigFloat/Float64 have enough range that opts.max_omega
             # already bounds this sensibly; fixed-width types need a tighter, type-aware cap).
             effective_omega_step = dynamic_range_limited(T) ?
-                                    min(opts.omega_step, sqrt(floatmax(T))) : opts.omega_step
+                                    min(
+                                        selected_parameters.restart_scale,
+                                        sqrt(floatmax(T)),
+                                    ) :
+                                    selected_parameters.restart_scale
             # A restart exists to repair a badly *scaled* starting point: it
             # multiplies the collapsed side by `omega_step` (1e5 by default) and
             # re-centres. That is the right response early, when the iterate is
@@ -1329,10 +1442,13 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 for l in 1:L
                     block_complementarity = kdot(X[l], Y[l])
                     current_complementarity += block_complementarity
-                    μ[l] = opts.β * block_complementarity / k[l]
+                    μ[l] =
+                        parameter_controller.beta *
+                        block_complementarity /
+                        k[l]
                 end
                 opts.verbosity >= 1 &&
-                    println("Step size too small! Restart $restarts/$(opts.max_restarts): rescaling the collapsed side(s) by ×$(Float64(opts.omega_step)).")
+                    println("Step size too small! Restart $restarts/$(opts.max_restarts): rescaling the collapsed side(s) by ×$(Float64(effective_omega_step)).")
                 continue
             elseif opts.restart && restarts < opts.max_restarts
                 # Both collapsed sides are already feasible, so there is nothing
@@ -1587,6 +1703,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         other=max(0.0, elapsed - accounted),
     ) : nothing
     gap_rel_final = abs(pObj - dObj) / max(one(T), (abs(pObj) + abs(dObj)) / 2)
+    equality_diagnostics =
+        _equality_factor_diagnostics(ws, solve_prob.dims.n)
 
     return SDPResult{T}(
         status,
@@ -1613,6 +1731,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             projected_iterations=stagnation.projected,
             window=stagnation.window,
             total_refinement_steps=total_refine_steps,
+            equilibration=(
+                enabled=eq !== nothing,
+                adaptive=true,
+                passes=eq === nothing ? Int[] : copy(eq.ruiz_passes),
+            ),
             mixed_precision_kkt=
                 _mixed_precision_kkt_diagnostics(ws),
             sparse_schur_backend=
@@ -1636,11 +1759,13 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                             ),
                         )
                 end,
+            equality_system=equality_diagnostics,
             executed=(
                 kkt=ws.arrow !== nothing ? :block_arrow :
                     ws.sparse_kkt !== nothing ?
                     :sparse_schur_cholesky :
                     :dense_cholesky,
+                equality=equality_diagnostics.method,
             ),
         ),
     )
@@ -1785,7 +1910,7 @@ end
 """
     adaptive_working_precision_bits(problem, options) -> Int
 
-Choose the first precision for an opt-in staged BigFloat solve. The requested
+Choose the first precision for a staged BigFloat solve. The requested
 `precision_bits` remains a hard upper bound and fallback precision. The guard
 combines the smallest requested tolerance with 96 safety bits and a
 dimension-dependent term, rounds upward to a 32-bit boundary, and never drops
@@ -2241,6 +2366,31 @@ function _solve_pipeline!(
     end
     certificate_warning === nothing ||
         push!(warnings, certificate_warning)
+    equality_diagnostics = get(
+        result.termination,
+        :equality_system,
+        (available=false,),
+    )
+    if equality_diagnostics.available &&
+       equality_diagnostics.rank_deficient
+        push!(
+            warnings,
+            "The final equality Newton system has numerical rank " *
+            "$(equality_diagnostics.rank) of " *
+            "$(equality_diagnostics.dimension) under " *
+            "$(equality_diagnostics.method). Treat a stopped objective as " *
+            "uncertified and reduce the equality basis or use a wider " *
+            "arithmetic type.",
+        )
+    end
+    if !(result.status in (Optimal, FeasibleCert, InfeasibleCert))
+        push!(
+            warnings,
+            "The reported primal and dual objectives belong to the best " *
+            "available iterate; status $(result.status) does not certify " *
+            "either value as an optimum or rigorous bound.",
+        )
+    end
     if any(row -> row.fallback, result.parameter_history)
         push!(
             warnings,
@@ -2306,8 +2456,8 @@ function solve(
     formulation::Symbol=:auto,
     chordal_decomposition::Symbol=:auto,
     algorithm::Symbol=:auto,
-    parameter_strategy::Symbol=:fixed,
-    working_precision_policy::Symbol=:fixed,
+    parameter_strategy::Symbol=:adaptive,
+    working_precision_policy::Symbol=:auto,
     minimum_working_precision_bits::Int=192,
 ) where {T}
     if T === BigFloat &&
@@ -2428,8 +2578,8 @@ function solve(
     formulation::Symbol=:auto,
     chordal_decomposition::Symbol=:auto,
     algorithm::Symbol=:auto,
-    parameter_strategy::Symbol=:fixed,
-    working_precision_policy::Symbol=:fixed,
+    parameter_strategy::Symbol=:adaptive,
+    working_precision_policy::Symbol=:auto,
     minimum_working_precision_bits::Int=192,
     sparse::Union{Bool,Symbol}=:auto,
 )

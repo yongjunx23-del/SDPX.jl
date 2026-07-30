@@ -5,7 +5,8 @@
     implementations.  It consumes typed iteration diagnostics and returns one
     bounded set of parameters.  The fixed policy reproduces the historical
     trajectory.  The adaptive policy is a guarded Mehrotra-style controller and
-    remains opt-in until it passes the solver-wide promotion benchmarks.
+    is the public default, with cold-start and instability fallbacks that
+    reproduce the fixed policy whenever the measured state is unreliable.
 =====================================================================#
 
 abstract type AbstractParameterPolicy end
@@ -26,12 +27,14 @@ struct FixedParameterPolicy{T} <: AbstractParameterPolicy
     dual_regularization::T
     refinement_tolerance::T
     refinement_max_count::Int
+    minimum_step::T
+    restart_scale::T
 end
 
 """
     AdaptiveParameterPolicy{T}
 
-Safe bounds and controller settings for the opt-in adaptive policy.  All
+Safe bounds and controller settings for the guarded adaptive policy.  All
 numeric constants are converted to the solver arithmetic once, at policy
 construction; selection never narrows a `MultiFloat` or `BigFloat` diagnostic
 through `Float64`.
@@ -99,6 +102,8 @@ Base.@kwdef struct IterationParameters{T}
     dual_regularization::T = zero(T)
     refinement_tolerance::T = zero(T)
     refinement_max_count::Int = 0
+    minimum_step::T
+    restart_scale::T
     centrality_target::T = sigma
     fallback::Bool = false
     fallback_reason::Symbol = :none
@@ -120,6 +125,8 @@ function FixedParameterPolicy(opts::SolverOptions{T}) where {T}
         zero(T),
         tolerance,
         maximum_count,
+        opts.min_step,
+        opts.omega_step,
     )
 end
 
@@ -160,6 +167,8 @@ function _fixed_iteration_parameters(
         dual_regularization=policy.dual_regularization,
         refinement_tolerance=policy.refinement_tolerance,
         refinement_max_count=policy.refinement_max_count,
+        minimum_step=policy.minimum_step,
+        restart_scale=policy.restart_scale,
         centrality_target=policy.sigma,
         fallback=fallback,
         fallback_reason=fallback_reason,
@@ -269,6 +278,23 @@ function select_parameters(
         )
     end
 
+    # Do not react aggressively to an infeasible cold start. At that stage the
+    # affine complementarity ratio is dominated by scaling rather than central
+    # path quality, so a Mehrotra power rule can select a misleadingly strong
+    # corrector. The distant-start LP regression (`x >= 2000` from a unit
+    # initial point) diverged under that behavior while the conservative
+    # profile converged. Selecting the profile values is itself state-based:
+    # adaptation begins automatically once feasibility or the gap enters the
+    # central-path regime.
+    cold_merit = max(
+        diagnostics.primal_residual,
+        diagnostics.dual_residual,
+        diagnostics.relative_gap,
+    )
+    if cold_merit >= one(T)
+        return _fixed_iteration_parameters(policy.fallback)
+    end
+
     ratio = clamp(
         diagnostics.mu_aff / diagnostics.mu,
         zero(T),
@@ -364,6 +390,33 @@ function select_parameters(
         diagnostics.refinement_count > 0 ?
         policy.fallback.refinement_max_count :
         min(policy.fallback.refinement_max_count, 2)
+    requested = policy.requested_tolerance > zero(T) ?
+                policy.requested_tolerance :
+                sqrt(eps(T))
+    precision_step_floor = max(
+        T(100) * eps(T),
+        min(policy.fallback.minimum_step, requested / T(100)),
+    )
+    minimum_step =
+        diagnostics.factorization_quality < sqrt(eps(T)) ||
+        diagnostics.backtracking_count >= 8 ?
+        policy.fallback.minimum_step :
+        precision_step_floor
+    feasibility_min = max(
+        min(diagnostics.primal_residual, diagnostics.dual_residual),
+        requested,
+    )
+    feasibility_ratio =
+        max(diagnostics.primal_residual, diagnostics.dual_residual) /
+        feasibility_min
+    restart_scale_candidate =
+        feasibility_ratio > T(1_000_000) ? T(1_000) :
+        feasibility_ratio > T(1_000) ? T(100) : T(10)
+    restart_scale = clamp(
+        restart_scale_candidate,
+        T(10),
+        policy.fallback.restart_scale,
+    )
 
     return IterationParameters{T}(
         sigma=sigma,
@@ -374,6 +427,8 @@ function select_parameters(
         dual_regularization=regularization,
         refinement_tolerance=refinement_tolerance,
         refinement_max_count=refinement_max_count,
+        minimum_step=minimum_step,
+        restart_scale=restart_scale,
         centrality_target=sigma,
     )
 end
@@ -485,6 +540,8 @@ function select_iteration_parameters!(
                          zero(T),
                          controller.parameters.refinement_tolerance,
                          controller.parameters.refinement_max_count,
+                         controller.parameters.minimum_step,
+                         controller.parameters.restart_scale,
                      );
                      fallback=true,
                      fallback_reason=:previous_instability,
@@ -688,6 +745,10 @@ function record_and_update!(
                 selected_parameters.refinement_tolerance,
             selected_refinement_max_count=
                 selected_parameters.refinement_max_count,
+            selected_minimum_step=
+                selected_parameters.minimum_step,
+            selected_restart_scale=
+                selected_parameters.restart_scale,
             predictor_quality=predictor_quality,
             mu=mu_before,
             mu_aff=mu_affine,

@@ -15,7 +15,7 @@ These defaults come from `SolverOptions{T}`. Differences in the legacy
 | `refine_steps` | `1` | Number of iterative-refinement passes for the KKT predictor/corrector solutions. |
 | `step_rule` | `:auto` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto` (fraction-to-boundary for blocks up to `2x2`, backtracking otherwise). |
 | `parameter_policy` | `:auto` | Cold-start structural policy. `:auto` may select calibrated initial `β`, `γ`, `Ωp`, and `Ωd`; `:fixed` preserves the supplied values. |
-| `parameter_strategy` | `:fixed` | Per-iteration policy. `:adaptive` uses a bounded Mehrotra `sigma`, independent primal/dual fractions, adaptive backtracking/refinement, and complete fixed-path fallback. It remains opt-in because Task_Low08 did not improve. |
+| `parameter_strategy` | `:adaptive` | Guarded per-iteration Mehrotra policy: bounded `sigma`, independent primal/dual fractions, adaptive backtracking, refinement, minimum-step and restart scales. It automatically uses the fixed fallback when cold-start or stability diagnostics are unreliable. |
 | `refine_policy` | `:auto` | `:auto`/`:adaptive` stop KKT refinement from its residual; `:fixed` always runs exactly `refine_steps` passes. |
 
 ## Convergence and stopping
@@ -53,15 +53,16 @@ non-finite.
 | Parameter | Default | Meaning |
 |---|---:|---|
 | `precision_bits` | `997` | Working precision for `BigFloat` only. It does not affect fixed-width `Float64x4`. |
-| `working_precision_policy` | `:fixed` | BigFloat policy. `:auto` may start at a conservatively selected lower precision and retries at `precision_bits` unless the first result passes original-coordinate certification. |
-| `minimum_working_precision_bits` | `192` | Lower bound for the opt-in staged BigFloat selector. The requested `precision_bits` remains the upper bound and fallback. |
+| `working_precision_policy` | `:auto` | BigFloat policy. It may start at a conservatively selected lower precision and retries at `precision_bits` unless the first result passes original-coordinate certification. |
+| `minimum_working_precision_bits` | `192` | Lower bound for the staged BigFloat selector. The requested `precision_bits` remains the upper bound and fallback. |
 | `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`. This cannot recover digits already lost when the source was created. |
-| `equilibrate` | `false` | Apply PSD-block diagonal congruence scaling and variable scaling before solving. Dense and sparse coefficient storage are supported. |
-| `scaling` | `:auto` | Pipeline selector: LP geometric scaling for the dedicated LP path; for SDP, Ruiz scaling when `equilibrate=true`, otherwise none. |
+| `equilibrate` | `false` | Expert compatibility flag for the core. Public `scaling=:auto` takes precedence and applies the selected pipeline scaling. |
+| `scaling` | `:auto` | LP geometric scaling for the dedicated LP path and adaptive-pass Ruiz congruence/variable scaling for SDP. Use `:none` only as an expert override. |
 | `sparse` | `:auto` | Storage selection used during ingestion. `:auto` distinguishes sparse coefficient storage from aggregate PSD and Schur density; `true`/`:sparse` and `false`/`:dense` force a path. |
 | `extended_precision_blas` | type-dependent | Extended-precision Schur backend: conservative `:auto` for `Float64x4` and `BigFloat`, `:off` for other arithmetic types, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. Native BigFloat parallelism is limited to ownership-safe exact reduced-arrow panels and Schur tiles. |
 | `extended_precision_memory_fraction` | `0.10` | Maximum fraction of currently available memory that the crossover may reserve for packed extended-precision panels. The cap respects host free memory, cgroups, and `SDPX_MEMORY_LIMIT_BYTES`, and conservatively keeps half of reported free memory outside the packing budget. |
-| `mixed_precision_kkt` | `:off` | Opt-in KKT acceleration: dense problems use a guarded Float64 factorization; exact singleton-arrow BigFloat problems can use a guarded Float64x4 reduced shared factorization when MultiFloats is loaded. Float64 is never redirected. |
+| `mixed_precision_kkt` | type-dependent | `:auto` for `BigFloat` and fixed-width extended arithmetic, `:off` for Float64. Dense problems may use a guarded Float64 factorization; exact singleton-arrow BigFloat problems may use a guarded Float64x4 reduced factorization when MultiFloats is loaded. Every rejection falls back to native arithmetic. |
+| `equality_solver` | `:auto` | Uses normal equations while they are stable and switches eligible dense equality systems to rank-revealing QR when factor diagnostics fail. Exactly block-diagonal sparse systems transform `B` with local factors and automatically use blocked triangular extended-precision SYRK when worthwhile. `:normal_equations` and `:qr` are expert overrides. Large systems are protected by dimension and memory crossovers. |
 | `mixed_precision_condition_limit` | type-dependent | Maximum conservative Float64 condition estimate accepted for mixed KKT refinement: `1e14` for `Float64x4`, `1e8` otherwise. The predicted correction budget and measured target-precision contraction remain authoritative guards. |
 | `mixed_precision_refine_max_steps` | `32` | Maximum target-precision correction solves before native extended-precision fallback. |
 | `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of reliably available memory used for persistent Float64 factors and conversion scratch. |
@@ -179,7 +180,8 @@ For `BigFloat` accuracy runs below a `1e-10` tolerance, the automatic policy
 keeps `β=0.1` and caps `γ` at `0.75`; at `1e-10`, the structural profile's
 validated `γ=0.85` is retained.
 
-The extended-precision matrix kernels remain opt-in:
+Extended-precision matrix kernels use a conservative automatic crossover by
+default for `Float64x4`, other wider immutable arithmetic, and `BigFloat`:
 
 ```julia
 opts = SolverOptions{Float64x4}(
@@ -202,7 +204,7 @@ pair buffers. Selected diagnostics report
 `gram_kernel=:reduced_arrow_syrk`,
 `:reduced_arrow_threaded_syrk`, or `:fused_arrow_2x2`.
 
-Dense, non-arrow high-precision problems can separately opt into guarded
+Dense, non-arrow high-precision problems can separately override the guarded
 mixed-precision KKT factorization:
 
 ```julia

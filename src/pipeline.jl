@@ -96,6 +96,10 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
         throw(ArgumentError("parameter_strategy must be :fixed or :adaptive"))
+    opts.equality_solver in (:auto, :normal_equations, :qr) ||
+        throw(ArgumentError(
+            "equality_solver must be :auto, :normal_equations, or :qr",
+        ))
     zero(T) < opts.β < one(T) ||
         throw(ArgumentError("β must be strictly between zero and one"))
     zero(T) < opts.γ < one(T) ||
@@ -283,12 +287,16 @@ function _runtime_schur_backend(prob::SDPProblem)
     if _use_sparse_schur_sdp(prob)
         return :sparse_schur_cholesky
     end
-    if prob.cons isa SparseCons && prob.dims.n == 0
+    if prob.cons isa SparseCons
         frequency = zeros(Int, prob.dims.m)
         for variables in prob.cons.active, variable in variables
             frequency[variable] += 1
         end
-        if all(>(0), frequency) && any(==(1), frequency)
+        has_arrow = all(>(0), frequency) && any(==(1), frequency)
+        equality_compatible =
+            prob.dims.n == 0 || all(==(1), frequency)
+        if has_arrow && equality_compatible &&
+           !(prob.dims.n > 0 && eltype(prob.c) === BigFloat)
             return :block_arrow
         end
     end
@@ -306,9 +314,9 @@ This duplicates only the inexpensive structural predicate used by
 `ArrowWorkspace`; it does not allocate that workspace during planning.
 """
 function _uses_fused_arrow(prob::SDPProblem{T}) where {T}
-    prob.dims.n == 0 || return false
     prob.dims.L > 0 || return false
     prob.cons isa SparseCons{T} || return false
+    prob.dims.n > 0 && T === BigFloat && return false
     cons = prob.cons::SparseCons{T}
     all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
         return false
@@ -316,7 +324,10 @@ function _uses_fused_arrow(prob::SDPProblem{T}) where {T}
     for variables in cons.active, variable in variables
         frequency[variable] += 1
     end
-    return all(>(0), frequency) && any(==(1), frequency)
+    has_arrow = all(>(0), frequency) && any(==(1), frequency)
+    equality_compatible =
+        prob.dims.n == 0 || all(==(1), frequency)
+    return has_arrow && equality_compatible
 end
 
 # Optional scalar backends may provide a lower-cost arithmetic for the
@@ -729,8 +740,7 @@ function build_execution_plan(
     opts.scaling in (:auto, :none, :equilibrate) ||
         throw(ArgumentError("scaling must be :auto, :none, or :equilibrate"))
     scaling = if opts.scaling === :auto
-        algorithm === :lp_primal_dual ? :lp_geometric :
-        opts.equilibrate ? :sdp_ruiz : :none
+        algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
     elseif opts.scaling === :equilibrate
         algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
     else
@@ -900,11 +910,11 @@ function _normalized_equality_columns(
 end
 
 function _normalized_equality_columns(
-    B::SparseMatrixCSC{Float64,Int},
+    B::SparseMatrixCSC{T,Int},
     columns::AbstractVector{Int},
-    scales::AbstractVector{Float64},
-)
-    normalized = _ingest_owned_sparse(Float64, B[:, columns])
+    scales::AbstractVector{T},
+) where {T}
+    normalized = _ingest_owned_sparse(T, B[:, columns])
     values = nonzeros(normalized)
     @inbounds for position in axes(normalized, 2)
         scale = scales[columns[position]]
@@ -948,13 +958,43 @@ function _equality_rank_indices(
     B::SparseMatrixCSC{T,Int},
     tolerance::Real,
 ) where {T}
-    # SuiteSparse SPQR is Float64-only. Densifying a genuinely large
-    # Float64x4/BigFloat equality operator merely to run a generic pivoted QR
-    # can exceed memory before the solve starts. Retaining all columns is the
-    # conservative, correctness-preserving fallback; exact zero, duplicate,
-    # and proportional constraints have already been handled structurally.
-    length(B) > 5_000_000 && return collect(1:size(B, 2))
-    return _equality_rank_indices(Matrix(B), tolerance)
+    # SuiteSparse SPQR is Float64-only. For a large extended-precision sparse
+    # operator, use a column-normalized Float64 copy only to *propose* a basis;
+    # `_equality_elimination_check` below certifies every proposed relation in
+    # the original arithmetic before changing the model. This avoids the old
+    # all-or-nothing choice between densifying `B` and skipping numerical rank
+    # presolve entirely.
+    size(B, 2) <= 2_048 || return collect(1:size(B, 2))
+    nnz(B) <= 100_000_000 || return collect(1:size(B, 2))
+    scales = _equality_column_scales(B)
+    nonzero_columns = findall(!iszero, scales)
+    isempty(nonzero_columns) && return Int[]
+    normalized =
+        _normalized_equality_columns(B, nonzero_columns, scales)
+    normalized_float = _ingest_owned_sparse(Float64, normalized)
+    all(isfinite, nonzeros(normalized_float)) ||
+        return collect(1:size(B, 2))
+    factor = qr(normalized_float)
+    diagonal_count = min(size(factor.R)...)
+    diagonal = [
+        abs(factor.R[index, index])
+        for index in 1:diagonal_count
+    ]
+    scale = maximum(diagonal; init=0.0)
+    converted_tolerance = try
+        Float64(tolerance)
+    catch exception
+        _recoverable(exception) || rethrow()
+        0.0
+    end
+    threshold = max(
+        converted_tolerance,
+        Float64(max(size(normalized_float)...)) * eps(Float64),
+    ) * scale
+    rank_estimate = count(>(threshold), diagonal)
+    selected =
+        nonzero_columns[factor.pcol[1:rank_estimate]]
+    return sort!(Vector{Int}(selected))
 end
 
 function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
@@ -1050,13 +1090,25 @@ function _equality_elimination_check(
         scales,
     )
     coefficients = try
-        factor = Bkeep isa SparseMatrixCSC ? qr(Bkeep) :
-                 qr(Bkeep, ColumnNorm())
-        factor \ (
-            Bdropped isa SparseMatrixCSC ?
-            Matrix(Bdropped) :
-            Bdropped
-        )
+        if Bkeep isa SparseMatrixCSC && T !== Float64
+            Bkeep_float =
+                _ingest_owned_sparse(Float64, Bkeep)
+            Bdropped_float =
+                _ingest_owned_sparse(Float64, Bdropped)
+            factor = qr(Bkeep_float)
+            _owned_array_copy(
+                T,
+                factor \ Matrix(Bdropped_float),
+            )
+        else
+            factor = Bkeep isa SparseMatrixCSC ? qr(Bkeep) :
+                     qr(Bkeep, ColumnNorm())
+            factor \ (
+                Bdropped isa SparseMatrixCSC ?
+                Matrix(Bdropped) :
+                Bdropped
+            )
+        end
     catch exception
         _recoverable(exception) || rethrow()
         return (
@@ -1560,6 +1612,7 @@ function _attach_diagnostics(
         scaling=plan.scaling,
         kkt=get(executed, :kkt, plan.kkt_backend),
         gram=get(executed, :gram, plan.gram_kernel),
+        equality=get(executed, :equality, :not_executed),
         planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),
         scheduling=plan.schedule,
         threads=plan.threads,

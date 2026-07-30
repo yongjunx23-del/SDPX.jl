@@ -14,7 +14,7 @@ The pipeline performs:
 4. automatic scaling and equilibration selection;
 5. solver, Gram/Schur kernel, KKT backend, thread schedule, and memory-budget
    selection;
-6. optional adaptive interior-point parameter control;
+6. guarded adaptive interior-point parameter control with a fixed fallback;
 7. phase timing, workspace estimation, warnings, and result reconstruction.
 
 Pure `1x1` cone models are solved by a dedicated scalar Mehrotra
@@ -176,11 +176,11 @@ refinement, and fallback provenance. See
 [Adaptive Interior-Point Parameter Policy](adaptive-parameter-policy.md) for
 the audit, equations, exact bounds, and arithmetic-specific behavior.
 
-Adaptive parameters remain opt-in. They improved the warmed sparse CSDR s15
-case from 19 iterations and 15.749 ms to 15 iterations and 13.260 ms, while
-the representative LP was about 2% slower. Task_Low08 safely fell
-back after a degraded equality factor but was 1.7% slower than fixed in the
-controlled run, so it did not pass the default-promotion gate.
+The guarded adaptive policy is now the default. The original promotion run
+showed a 1.7% Task_Low08 overhead, so the controller now holds the validated
+fixed values during an unreliable cold start and falls back on equality-rank,
+factor-quality, or repeated-progress failures. This keeps automatic control
+without treating an unstable affine predictor as tuning evidence.
 
 ## Benchmark summary
 

@@ -167,6 +167,7 @@ end
         options = SDPX.SolverOptions{Float64}(
             algorithm=:sdp,
             parameter_policy=:fixed,
+            parameter_strategy=:fixed,
             presolve=false,
             ϵ_gap=1e-2,
             ϵ_primal=1e-2,
@@ -330,7 +331,7 @@ end
         @test !report.inconsistent
     end
 
-    @testset "preingested BigFloat solve honors requested precision" begin
+    @testset "preingested BigFloat solve honors the precision policy" begin
         setprecision(BigFloat, 128) do
             data = regression_sdp_data(BigFloat)
             problem = SDPX.ingest(
@@ -365,8 +366,23 @@ end
                     parameter_policy=:fixed,
                 ),
             )
-            @test precision(direct.pObj) == 224
-            @test all(value -> precision(value) == 224, direct.x)
+            @test precision(direct.pObj) == 192
+            @test all(value -> precision(value) == 192, direct.x)
+            fixed = SDPX.solve!(
+                problem,
+                SDPX.SolverOptions{BigFloat}(
+                    precision_bits=224,
+                    working_precision_policy=:fixed,
+                    iter_max=1,
+                    verbosity=0,
+                    diagnostics=false,
+                    algorithm=:sdp,
+                    presolve=false,
+                    parameter_policy=:fixed,
+                ),
+            )
+            @test precision(fixed.pObj) == 224
+            @test all(value -> precision(value) == 224, fixed.x)
         end
     end
 

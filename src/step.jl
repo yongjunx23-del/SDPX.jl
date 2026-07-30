@@ -231,6 +231,40 @@ end
 function _kkt_factorization_quality(ws::Workspace{T}) where {T}
     if ws.arrow !== nothing
         arrow = ws.arrow::ArrowWorkspace{T}
+        if size(ws.Btil, 2) > 0 &&
+           isempty(arrow.global_ids)
+            quality = one(T)
+            @inbounds for factor in arrow.Dbuf
+                isempty(factor) && continue
+                quality = min(
+                    quality,
+                    _cholesky_diagonal_quality(factor),
+                )
+            end
+            equality_quality = if ws.Qchol isa EqualityQRFactor{T}
+                (ws.Qchol::EqualityQRFactor{T}).quality
+            elseif ws.Qchol isa LinearAlgebra.CholeskyPivoted
+                factor = ws.Qchol
+                factor.rank < size(ws.Btil, 2) ?
+                zero(T) :
+                _cholesky_diagonal_quality(
+                    view(
+                        factor.L,
+                        1:factor.rank,
+                        1:factor.rank,
+                    ),
+                )
+            elseif ws.Qchol isa BigFloatCholeskyFactor
+                _cholesky_diagonal_quality(ws.Qchol.L)
+            elseif ws.Qchol === nothing
+                zero(T)
+            else
+                _cholesky_diagonal_quality(
+                    ws.Qchol.factors,
+                )
+            end
+            return min(quality, equality_quality)
+        end
         return _cholesky_diagonal_quality(arrow.Sredbuf)
     end
     if T === Float64 && ws.sparse_kkt !== nothing
@@ -238,7 +272,46 @@ function _kkt_factorization_quality(ws::Workspace{T}) where {T}
             ws.sparse_kkt::SparseSchurSDPWorkspace
         return T(sparse_workspace.factorization_quality)
     end
-    return _cholesky_diagonal_quality(ws.Sbuf)
+    if ws.mixed_precision !== nothing
+        mixed =
+            ws.mixed_precision::MixedPrecisionKKTWorkspace
+        if mixed.active
+            factor_workspace =
+                mixed.intermediate_active ?
+                mixed.intermediate :
+                mixed
+            schur_factor = factor_workspace.Sfactor
+            schur_quality =
+                schur_factor === nothing ?
+                one(T) :
+                T(
+                    _cholesky_diagonal_quality(
+                        schur_factor.L,
+                    ),
+                )
+            equality_factor = factor_workspace.Qfactor
+            equality_quality =
+                equality_factor === nothing ?
+                one(T) :
+                T(
+                    _cholesky_diagonal_quality(
+                        equality_factor.L,
+                    ),
+                )
+            return min(
+                schur_quality,
+                equality_quality,
+            )
+        end
+    end
+    schur_quality = _cholesky_diagonal_quality(ws.Sbuf)
+    if ws.Qchol isa EqualityQRFactor{T}
+        return min(
+            schur_quality,
+            (ws.Qchol::EqualityQRFactor{T}).quality,
+        )
+    end
+    return schur_quality
 end
 
 @inline function _relative_regularization_from_attempts(

@@ -49,21 +49,21 @@ causes a retry at `precision_bits` when time remains. The failed iterate is
 released before allocating the fallback workspace. Checkpoint resume bypasses
 staging and uses the requested precision.
 
-The policy defaults to `:fixed`. On the medium CSDR model, a fixed 192-bit
-input/run reduced runtime from 87.168 to 80.703 seconds with the same 41
-iterations and certified result. The actual staged run, retaining the
-original 256-bit input objects, took 83.933 seconds and selected 192-bit
-workspace arithmetic without a retry. That single-model 1.04x staged gain is
-useful but is not broad enough evidence to reduce precision automatically for
-all users. See the
+The policy defaults to `:auto`, with original-coordinate certification and an
+automatic retry at `precision_bits`; `:fixed` remains the expert override. On
+the medium CSDR model, a fixed 192-bit input/run reduced runtime from 87.168 to
+80.703 seconds with the same 41 iterations and certified result. The staged
+run, retaining the original 256-bit input objects, took 83.933 seconds and
+selected 192-bit workspace arithmetic without a retry. See the
 [native BigFloat report](../bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md).
 
 ## Guarded mixed-precision KKT solves
 
-Dense, non-arrow `BigFloat` and fixed-width extended-precision problems may
-opt into `mixed_precision_kkt=:auto`. SDPX then factors the Schur and equality
-complements in Float64 but computes residuals and accumulates corrections in
-the requested arithmetic. Ordinary Float64 is never redirected.
+Dense, non-arrow `BigFloat` and fixed-width extended-precision problems use
+`mixed_precision_kkt=:auto` by default. SDPX attempts the lower-precision
+factor only when the crossover and conditioning guards permit it, then
+computes residuals and accumulates corrections in the requested arithmetic.
+Ordinary Float64 is never redirected.
 
 This is a guarded accelerator rather than a change in the numerical contract:
 loss of positive definiteness or rank during Float64 conversion, a conservative

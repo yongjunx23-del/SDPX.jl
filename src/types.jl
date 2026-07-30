@@ -76,9 +76,33 @@ statuses, not exceptions.
     NumericalFailure
 end
 
-default_extended_precision_blas(::Type) = :off
+default_extended_precision_blas(::Type{T}) where {T} =
+    isbitstype(T) && sizeof(T) > sizeof(Float64) ? :auto : :off
 default_extended_precision_blas(::Type{BigFloat}) = :auto
 default_mixed_precision_condition_limit(::Type) = 1.0e8
+default_mixed_precision_kkt(::Type{T}) where {T} =
+    (
+        T === BigFloat ||
+        (isbitstype(T) && sizeof(T) > sizeof(Float64))
+    ) ? :auto : :off
+
+"""
+    EqualityQRFactor{T}
+
+Rank-revealing Householder QR factor used by the guarded equality fallback.
+Only the packed reflector matrix, reflector coefficients, column permutation,
+and numerical-rank diagnostics are retained. The Newton solve only needs the
+leading triangular `R` block; keeping the reflectors makes the representation
+compatible with later residual-based extensions without another workspace
+change.
+"""
+struct EqualityQRFactor{T}
+    factors::Matrix{T}
+    coefficients::Vector{T}
+    permutation::Vector{Int}
+    rank::Int
+    quality::T
+end
 
 """
     SolverOptions{T}
@@ -107,9 +131,8 @@ Base.@kwdef struct SolverOptions{T}
     precision_bits::Int       = 997                # BigFloat only; ≈ old prec=300 (base-10)
     # `:auto` may start a BigFloat solve at a conservatively selected lower
     # precision and retry at `precision_bits` if certification or convergence
-    # fails. It is opt-in until the staged policy has broader benchmark
-    # coverage. Fixed-width arithmetic always uses its native precision.
-    working_precision_policy::Symbol = :fixed       # :fixed | :auto
+    # fails. Fixed-width arithmetic always uses its native precision.
+    working_precision_policy::Symbol = :auto        # :fixed | :auto
     minimum_working_precision_bits::Int = 192       # BigFloat :auto floor
     restart::Bool             = true
     min_step::T               = T(1e-10)
@@ -154,7 +177,7 @@ Base.@kwdef struct SolverOptions{T}
     refine_policy::Symbol     = :auto
     refine_max_steps::Int     = 8                    # cap for the adaptive policy only
     refine_tol::T             = zero(T)              # 0 ⇒ REFINE_DEFAULT_TOL_ULPS·eps(T)
-    equilibrate::Bool         = false                # §5.3 opt-in Ruiz + row scaling
+    equilibrate::Bool         = false                # core compatibility flag; scaling=:auto selects Ruiz
     max_time::Float64         = Inf                  # wall-clock budget, seconds
     checkpoint_every::Int     = 0                     # 0 disables; else write every N iterations
     checkpoint_path::String   = ""
@@ -166,7 +189,11 @@ Base.@kwdef struct SolverOptions{T}
     force_gc::Bool            = false
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
-    parameter_strategy::Symbol = :fixed                 # :fixed | :adaptive; adaptive is benchmark-gated
+    parameter_strategy::Symbol = :adaptive              # :fixed | :adaptive
+    # Equality elimination starts with the fast normal-equation path and
+    # switches to rank-revealing QR only when factor diagnostics justify its
+    # cost. `:normal_equations` and `:qr` are expert-mode overrides.
+    equality_solver::Symbol    = :auto                   # :auto | :normal_equations | :qr
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
@@ -176,7 +203,8 @@ Base.@kwdef struct SolverOptions{T}
     # Conditioning and predicted-refinement guards reject unsafe systems, and
     # stalled refinement falls back to the native target-precision
     # factorization.
-    mixed_precision_kkt::Symbol = :off                  # :off | :auto | :on
+    mixed_precision_kkt::Symbol =
+        default_mixed_precision_kkt(T)                  # :off | :auto | :on
     mixed_precision_condition_limit::Float64 =
         default_mixed_precision_condition_limit(T)
     mixed_precision_refine_max_steps::Int = 32

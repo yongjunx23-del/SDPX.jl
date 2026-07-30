@@ -269,6 +269,26 @@ end
         @test source_cons.Asp[1][1][1, 1] == 2.0
     end
 
+    @testset "Ruiz equilibration selects a bounded pass count" begin
+        coefficients = [zeros(Float64, 2, 2, 2)]
+        coefficients[1][1, :, :] .= [1.0 0.0; 0.0 1.0e-8]
+        coefficients[1][2, :, :] .= [0.0 1.0e4; 1.0e4 1.0]
+        problem = SDPX.ingest(
+            [1.0, -2.0],
+            coefficients,
+            [[1.0e-6 0.0; 0.0 1.0e6]],
+            zeros(2, 0),
+            Float64[];
+            sparse=false,
+            verbosity=0,
+        )
+        _, adaptive = SDPX.equilibrate(problem)
+        _, one_pass = SDPX.equilibrate(problem; ruiz_iters=1)
+        @test length(adaptive.ruiz_passes) == problem.dims.L
+        @test all(pass -> 2 <= pass <= 8, adaptive.ruiz_passes)
+        @test one_pass.ruiz_passes == ones(Int, problem.dims.L)
+    end
+
     @testset "MOI Interval survives preprocessing and reconstruction" begin
         source = PRE_MOI.Utilities.Model{Float64}()
         variables = PRE_MOI.add_variables(source, 2)

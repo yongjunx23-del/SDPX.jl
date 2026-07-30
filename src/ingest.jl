@@ -2,7 +2,7 @@
     Ingestion (§1.2): one-time conversion from the user-facing input
     format (`A::Vector{Array{T,3}}`, unchanged since v0.1) into the
     internal `SDPProblem` layout, plus validation (§N3/§5.7) and
-    opt-in equilibration (§5.3).
+    pipeline-selected equilibration (§5.3).
 =====================================================================#
 
 _coefficient_eltype(A::AbstractVector{<:AbstractArray{<:Any,3}}) =
@@ -981,7 +981,7 @@ function reround(prob::SDPProblem{BigFloat}, bits::Int)
 end
 reround(prob::SDPProblem, ::Int) = prob
 
-# --- Equilibration (§5.3, opt-in) ---
+# --- Equilibration (§5.3; automatic for SDP unless explicitly disabled) ---
 
 """
     Equilibration{T}
@@ -1000,6 +1000,42 @@ struct Equilibration{T}
     # possible at all; without it the returned duals are silently wrong by a
     # constant factor.
     objective_scale::T
+    ruiz_passes::Vector{Int}
+end
+
+function _ruiz_control(::Type{T}, ruiz_iters) where {T}
+    if ruiz_iters === :auto
+        return (
+            minimum_iterations=2,
+            maximum_iterations=8,
+            log_tolerance=T(1) / T(20),
+            adaptive=true,
+        )
+    end
+    ruiz_iters isa Integer ||
+        throw(ArgumentError("ruiz_iters must be a nonnegative integer or :auto"))
+    ruiz_iters >= 0 ||
+        throw(ArgumentError("ruiz_iters must be nonnegative"))
+    return (
+        minimum_iterations=Int(ruiz_iters),
+        maximum_iterations=Int(ruiz_iters),
+        log_tolerance=zero(T),
+        adaptive=false,
+    )
+end
+
+function _ruiz_converged(
+    row_norms::AbstractVector{T},
+    tolerance::T,
+) where {T}
+    largest_log_deviation = zero(T)
+    @inbounds for norm_value in row_norms
+        norm_value > zero(T) || continue
+        isfinite(norm_value) || return false
+        largest_log_deviation =
+            max(largest_log_deviation, abs(log(norm_value)))
+    end
+    return largest_log_deviation <= tolerance
 end
 
 function _scale_equality_rows!(
@@ -1026,7 +1062,10 @@ function _scale_equality_rows!(
     return matrix
 end
 
-Equilibration{T}(E, s) where {T} = Equilibration{T}(E, s, one(T))
+Equilibration{T}(E, s, objective_scale) where {T} =
+    Equilibration{T}(E, s, objective_scale, zeros(Int, length(E)))
+Equilibration{T}(E, s) where {T} =
+    Equilibration{T}(E, s, one(T), zeros(Int, length(E)))
 
 """
     equilibrate(prob::SDPProblem{T}, cons::SparseCons) -> (scaled, Equilibration)
@@ -1047,8 +1086,13 @@ it preserves the PSD cone exactly and inverts exactly via
 sparse coefficient entries in place, then `SparseCons` is rebuilt so the packed
 `2x2` panels and the flat COO layout stay consistent with it.
 """
-function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3) where {T}
+function equilibrate(
+    prob::SDPProblem{T},
+    cons::SparseCons{T};
+    ruiz_iters::Union{Integer,Symbol}=:auto,
+) where {T}
     L, m, n, k = prob.dims
+    ruiz = _ruiz_control(T, ruiz_iters)
     Asp2 = Vector{SparseCoefficientVector{T}}(undef, L)
     @inbounds for block in 1:L
         source = cons.Asp[block]
@@ -1084,11 +1128,13 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
     end
     C2 = [copy(c) for c in prob.C]
     E = [ones(T, k[l]) for l in 1:L]
+    ruiz_passes = zeros(Int, L)
 
     for l in 1:L
         kl = k[l]
-        for _ in 1:max(ruiz_iters, 0)
-            rn = zeros(T, kl)
+        for iteration in 1:ruiz.maximum_iterations
+            ruiz_passes[l] = iteration
+            rn = alloc_zeros(T, kl)
             # Column outermost: `C2[l]` is column-major, and `max` is exact, so
             # the traversal order changes speed but not the result.
             @inbounds for c in 1:kl, r in 1:kl
@@ -1103,6 +1149,10 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
                     rn[r] = max(rn[r], abs(vals[idx]))
                 end
             end
+            converged =
+                ruiz.adaptive &&
+                iteration >= ruiz.minimum_iterations &&
+                _ruiz_converged(rn, ruiz.log_tolerance)
             e = [rn[r] > 0 ? inv(sqrt(rn[r])) : one(T) for r in 1:kl]
             @inbounds for c in 1:kl, r in 1:kl
                 C2[l][r, c] *= e[r] * e[c]
@@ -1116,6 +1166,7 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
                 end
             end
             E[l] .*= e
+            converged && break
         end
     end
 
@@ -1190,34 +1241,48 @@ function equilibrate(prob::SDPProblem{T}, cons::SparseCons{T}; ruiz_iters::Int=3
         SparseCons{T}(Asp2, active, order, packed2),
         prob.dims, prob.structure,
     )
-    return scaled, Equilibration{T}(E, s, objective_scale)
+    return scaled, Equilibration{T}(
+        E,
+        s,
+        objective_scale,
+        ruiz_passes,
+    )
 end
 
 """
-    equilibrate(prob::SDPProblem{T}; ruiz_iters=3) -> (scaled_prob, Equilibration)
+    equilibrate(prob::SDPProblem{T}; ruiz_iters=:auto) -> (scaled_prob, Equilibration)
 
-Two-level scaling (§5.3): `ruiz_iters` rounds of per-block symmetric
-row/column equilibration (`Â^{(l)} ← E_l Â^{(l)} E_l`, `E_l` from
+Two-level scaling (§5.3): adaptive per-block symmetric row/column
+equilibration (`Â^{(l)} ← E_l Â^{(l)} E_l`, `E_l` from
 row-∞-norms, applied to `C` and every `A_i`), then one round of
-per-variable scaling `s_i = max(maxₗ‖A_i^{(l)}‖∞, |c_i|)`. Both are
+per-variable scaling `s_i = maxₗ‖A_i^{(l)}‖∞`. Objective scaling is handled
+separately by one positive scalar so it cannot distort the feasible set. Both are
 diagonal congruences so they preserve the PSD cone exactly and are
 exactly invertible via [`unequilibrate`](@ref). Dispatches to the sparse
-implementation for `SparseCons` input.
+implementation for `SparseCons` input. `ruiz_iters=:auto` stops after
+the row norms stabilize, with conservative minimum and maximum pass counts;
+an integer retains an exact expert-mode pass count.
 """
-function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
+function equilibrate(
+    prob::SDPProblem{T};
+    ruiz_iters::Union{Integer,Symbol}=:auto,
+) where {T}
     cons = prob.cons
     cons isa SparseCons && return equilibrate(prob, cons; ruiz_iters=ruiz_iters)
     cons isa DenseCons || throw(ArgumentError("equilibrate=true requires dense or sparse constraints"))
     L, m, n, k = prob.dims
+    ruiz = _ruiz_control(T, ruiz_iters)
 
     Av2 = [copy(a) for a in cons.Av]
     C2 = [copy(c) for c in prob.C]
     E = [ones(T, k[l]) for l in 1:L]
+    ruiz_passes = zeros(Int, L)
 
     for l in 1:L
         kl = k[l]
-        for _ in 1:max(ruiz_iters, 0)
-            rn = zeros(T, kl)
+        for iteration in 1:ruiz.maximum_iterations
+            ruiz_passes[l] = iteration
+            rn = alloc_zeros(T, kl)
             @inbounds for r in 1:kl
                 v = abs(C2[l][r, r])
                 for c in 1:kl
@@ -1231,6 +1296,10 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
                 end
                 rn[r] = v
             end
+            converged =
+                ruiz.adaptive &&
+                iteration >= ruiz.minimum_iterations &&
+                _ruiz_converged(rn, ruiz.log_tolerance)
             e = [rn[r] > 0 ? 1 / sqrt(rn[r]) : one(T) for r in 1:kl]
             @inbounds for c in 1:kl, r in 1:kl
                 C2[l][r, c] *= e[r] * e[c]
@@ -1242,6 +1311,7 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
                 end
             end
             E[l] .*= e
+            converged && break
         end
     end
 
@@ -1292,7 +1362,12 @@ function equilibrate(prob::SDPProblem{T}; ruiz_iters::Int=3) where {T}
         prob.dims,
         prob.structure,
     )
-    return scaled, Equilibration{T}(E, s, objective_scale)
+    return scaled, Equilibration{T}(
+        E,
+        s,
+        objective_scale,
+        ruiz_passes,
+    )
 end
 
 """
