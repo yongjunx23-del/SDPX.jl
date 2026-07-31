@@ -3,12 +3,12 @@ using Test
 # The §25 acceptance gates, run as part of the suite so a change that alters
 # solver behaviour cannot land unnoticed.
 #
-# Only the deterministic half is checked here: status, iteration count,
-# objective, and residuals are reproducible exactly given the same code, so
-# they gate cleanly on any machine. Runtime is measured but not gated -- shared
-# CI runners vary by two to three times, and a gate that fires on noise is a
-# gate people learn to ignore. Use `julia --project=. bench/gates.jl
-# --check-runtime` on a quiet machine for that half.
+# Only the numerical half is checked here: status, iteration count, objective,
+# and residuals are reproducible within the tight cross-platform tolerances in
+# `bench/gates.jl`. Runtime is measured but not gated -- shared CI runners vary
+# by two to three times, and a gate that fires on noise is a gate people learn
+# to ignore. Use `julia --project=. bench/gates.jl --check-runtime` on a quiet
+# machine for that half.
 #
 # When a change legitimately alters these numbers -- including improving them
 # -- re-record with `julia --project=. bench/gates.jl --record` and commit the
@@ -22,6 +22,37 @@ using Test
 
     baselines = Gates.read_json(Gates.baseline_path())
     @test !isempty(baselines)
+
+    @testset "cross-platform terminal noise" begin
+        baseline = baselines["sdp_closed_form"]
+        platform_noise = copy(baseline)
+        platform_noise["iterations"] = baseline["iterations"] + 1
+        platform_noise["dual_residual"] = 2.354e-11
+        @test isempty(Gates.compare(
+            "sdp_closed_form",
+            platform_noise,
+            baseline;
+            check_runtime=false,
+        ))
+
+        iteration_regression = copy(platform_noise)
+        iteration_regression["iterations"] = baseline["iterations"] + 2
+        @test any(failure -> occursin("iterations", failure), Gates.compare(
+            "sdp_closed_form",
+            iteration_regression,
+            baseline;
+            check_runtime=false,
+        ))
+
+        accuracy_regression = copy(platform_noise)
+        accuracy_regression["dual_residual"] = 2e-10
+        @test any(failure -> occursin("dual_residual", failure), Gates.compare(
+            "sdp_closed_form",
+            accuracy_regression,
+            baseline;
+            check_runtime=false,
+        ))
+    end
 
     for problem in Gates.problem_set()
         @testset "$(problem.name)" begin
