@@ -1,12 +1,14 @@
 #!/usr/bin/env julia
 
 """
-Compare Task_Low08 fixed and adaptive centering trajectories in one process.
+Compare controlled Task_Low08 solver configurations in one process.
 
 The model is read, rank-reduced, and ingested once. A one-iteration solve then
 warms every major Float64 SDP kernel before the measured configurations run on
-the same node. This isolates the effect of `adaptive_sigma_max` from input,
-presolve, compilation, and node-to-node variation.
+the same node. By default this isolates `adaptive_sigma_max`; the
+`SDPX_SCALING_MODES`, `SDPX_SIGMA_CAPS`, and `SDPX_SOLVER_THREADS` environment
+variables select ordered scaling, cap, or solver-thread sweeps without moving
+input, presolve, compilation, or validation boundaries.
 """
 
 using LinearAlgebra
@@ -30,6 +32,8 @@ function comparison_options(
     tolerance::Float64,
     maximum_iterations::Int,
     maximum_time::Float64,
+    scaling::Symbol=:auto,
+    solver_threads::Int=Threads.nthreads(),
 )
     return SDPX.SolverOptions{Float64}(
         β=0.1,
@@ -49,10 +53,11 @@ function comparison_options(
         parameter_policy=:auto,
         parameter_strategy=strategy,
         adaptive_sigma_max=sigma_max,
+        scaling=scaling,
         predictor=:classic,
         step_rule=:auto,
         refine_steps=1,
-        threads=Threads.nthreads(),
+        threads=solver_threads,
     )
 end
 
@@ -108,6 +113,8 @@ function measured_run(
         "total_backtracking_count" => total_backtracks,
         "requested_adaptive_sigma_max" => options.adaptive_sigma_max,
         "parameter_strategy" => string(options.parameter_strategy),
+        "requested_scaling" => string(options.scaling),
+        "requested_solver_threads" => options.threads,
         "timings" => result.timings,
         "validation" => validation,
         "certificate_valid" =>
@@ -146,6 +153,11 @@ function compare_main(arguments)
         verbosity=0,
     )
     problem = ingest_timing.value
+    active_variables_per_block = if problem.cons isa SDPX.SparseCons
+        length.((problem.cons::SDPX.SparseCons).active)
+    else
+        fill(problem.dims.m, problem.dims.L)
+    end
 
     @printf(
         "Task_Low08 variables=%d equalities=%d->%d blocks=%d Julia_threads=%d BLAS_threads=%d\n",
@@ -158,35 +170,83 @@ function compare_main(arguments)
     )
 
     # Compile the complete first-iteration path before collecting measurements.
-    warmup = comparison_options(:adaptive, 0.15, tolerance, 1, maximum_time)
+    warmup = comparison_options(
+        :adaptive,
+        0.15,
+        tolerance,
+        1,
+        maximum_time,
+        :auto,
+        Threads.nthreads(),
+    )
     SDPX.solve!(problem, warmup)
 
-    configurations = if haskey(ENV, "SDPX_SIGMA_CAPS")
+    configurations = if haskey(ENV, "SDPX_SOLVER_THREADS")
+        solver_threads = parse.(Int, split(ENV["SDPX_SOLVER_THREADS"], ','))
+        [
+            (
+                "adaptive_threads_$(threads)_run_$(index)",
+                :adaptive,
+                0.0,
+                :auto,
+                threads,
+            )
+            for (index, threads) in enumerate(solver_threads)
+        ]
+    elseif haskey(ENV, "SDPX_SCALING_MODES")
+        modes = Symbol.(split(ENV["SDPX_SCALING_MODES"], ','))
+        [
+            (
+                "adaptive_scaling_$(mode)_run_$(index)",
+                :adaptive,
+                0.0,
+                mode,
+                Threads.nthreads(),
+            )
+            for (index, mode) in enumerate(modes)
+        ]
+    elseif haskey(ENV, "SDPX_SIGMA_CAPS")
         caps = parse.(Float64, split(ENV["SDPX_SIGMA_CAPS"], ','))
         [
             (
                 @sprintf("adaptive_cap_%.3f_run_%d", cap, index),
                 :adaptive,
                 cap,
+                :auto,
+                Threads.nthreads(),
             )
             for (index, cap) in enumerate(caps)
         ]
     else
         [
-            ("adaptive_cap_0.15", :adaptive, 0.15),
-            ("adaptive_cap_0.20", :adaptive, 0.20),
-            ("fixed_profile", :fixed, 0.0),
-            ("adaptive_uncapped_0.50", :adaptive, 0.50),
+            (
+                "adaptive_cap_0.15", :adaptive, 0.15, :auto,
+                Threads.nthreads(),
+            ),
+            (
+                "adaptive_cap_0.20", :adaptive, 0.20, :auto,
+                Threads.nthreads(),
+            ),
+            (
+                "fixed_profile", :fixed, 0.0, :auto,
+                Threads.nthreads(),
+            ),
+            (
+                "adaptive_uncapped_0.50", :adaptive, 0.50, :auto,
+                Threads.nthreads(),
+            ),
         ]
     end
     runs = Any[]
-    for (label, strategy, sigma_max) in configurations
+    for (label, strategy, sigma_max, scaling, solver_threads) in configurations
         options = comparison_options(
             strategy,
             sigma_max,
             tolerance,
             100,
             maximum_time,
+            scaling,
+            solver_threads,
         )
         push!(
             runs,
@@ -206,6 +266,8 @@ function compare_main(arguments)
         "equality_rank" => equality_rank,
         "equality_rank_tolerance" => rank_tolerance,
         "equality_dependency_residual" => dependency_residual,
+        "block_dimensions" => problem.dims.k,
+        "active_variables_per_block" => active_variables_per_block,
         "peak_rss_bytes" => Sys.maxrss(),
         "runs" => runs,
     )

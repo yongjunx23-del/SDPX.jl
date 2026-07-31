@@ -665,6 +665,35 @@ function _sparse_schur_sdp_workspace(
     )
 end
 
+"""
+    _schur_accumulator_memory_fraction(T, m, L, thread_count, free_memory)
+
+Select the memory share available to task-local dense Schur accumulators.
+Large Float64 Schur systems with enough blocks and workers can usefully spend
+25% of an ample scheduler-aware budget on assembly parallelism. Smaller
+systems and extended-precision arithmetic retain the historical 15% cap.
+
+The large-system rule is deliberately narrow. On Task_Low08 (`m = 6119`, 32
+blocks/workers, 28 GiB explicit ceiling), 25% reduced median Schur assembly
+from 8.140 to 6.701 seconds and the stable solve from 27.449 to 25.965 seconds.
+Raising the cap again to 35% was not stable and is intentionally rejected.
+"""
+@inline function _schur_accumulator_memory_fraction(
+    ::Type{T},
+    m::Int,
+    L::Int,
+    thread_count::Int,
+    free_memory_bytes::Int,
+) where {T}
+    large_float64_schur =
+        T === Float64 &&
+        m >= 4096 &&
+        L >= 16 &&
+        thread_count >= 16 &&
+        free_memory_bytes >= 16 * 1024^3
+    return large_float64_schur ? 0.25 : 0.15
+end
+
 function _schur_parallel_bins(
     ::Type{T},
     m::Int,
@@ -675,7 +704,8 @@ function _schur_parallel_bins(
     requested = max(1, min(thread_count, L))
     m == 0 && return requested
     bytes_per_matrix = Float64(m)^2 * max(sizeof(T), 8)
-    # Cap task-local Schur accumulators to 15% of currently free memory.
+    # Cap task-local Schur accumulators to an arithmetic- and size-aware share
+    # of currently free memory.
     # This avoids making `threads × m² × sizeof(T)` the hidden limiter for
     # MultiFloat and large-cluster jobs.
     #
@@ -686,10 +716,17 @@ function _schur_parallel_bins(
     free_memory_bytes = free_memory_bytes === nothing ?
         ExtendedPrecisionBLAS._system_free_memory_bytes() :
         Int(free_memory_bytes)
+    memory_fraction = _schur_accumulator_memory_fraction(
+        T,
+        m,
+        L,
+        thread_count,
+        free_memory_bytes,
+    )
     memory_budget = Float64(
         ExtendedPrecisionBLAS._memory_budget_from_fraction(
             free_memory_bytes,
-            0.15,
+            memory_fraction,
         ),
     )
     affordable = max(1, floor(Int, memory_budget / max(bytes_per_matrix, 1)))

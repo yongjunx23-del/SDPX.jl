@@ -653,27 +653,44 @@ end
     schur_bin_report(::Type{T}, m, L, threads) -> NamedTuple
 
 Whether the per-worker Schur accumulators were capped below the requested
-worker count, and what that cost.
+worker count, which automatic memory fraction was selected, and what that
+cost.
 
 The accumulators are full `m x m` matrices, one per bin, so their total scales
-as `threads * m^2`. `_schur_parallel_bins` caps them at a fraction of free
-memory, which silently trades parallelism for memory: at `m = 2000` with eight
-threads the bin count drops to four, halving assembly concurrency. §18.4 asks
-that a change in algorithm selection between thread counts be reported rather
-than left to be inferred from a disappointing speedup, and §19.3 asks for an
-informative estimate rather than a silent degradation.
+as `threads * m^2`. `_schur_parallel_bins` caps them at an automatically
+selected fraction of free memory, which trades parallelism for memory.
+Section 18.4 asks that a change in algorithm selection between thread counts
+be reported rather than inferred from disappointing scaling, and section 19.3
+asks for an informative estimate rather than a silent degradation.
 """
 function schur_bin_report(::Type{T}, m::Integer, L::Integer,
                           threads::Integer;
                           free_memory_bytes::Union{Nothing,Integer}=nothing) where {T}
     requested = max(1, min(Int(threads), Int(L)))
+    available = free_memory_bytes === nothing ?
+        ExtendedPrecisionBLAS._system_free_memory_bytes() :
+        Int(free_memory_bytes)
     selected = _schur_parallel_bins(T, Int(m), Int(L), Int(threads);
-        free_memory_bytes=free_memory_bytes)
+        free_memory_bytes=available)
+    memory_fraction = _schur_accumulator_memory_fraction(
+        T,
+        Int(m),
+        Int(L),
+        Int(threads),
+        available,
+    )
+    memory_budget_bytes =
+        ExtendedPrecisionBLAS._memory_budget_from_fraction(
+            available,
+            memory_fraction,
+        )
     bytes_each = Int(m)^2 * max(sizeof(T), 8)
     return (
         requested_bins=requested,
         selected_bins=selected,
         capped=selected < requested,
+        memory_fraction=memory_fraction,
+        memory_budget_bytes=memory_budget_bytes,
         bytes_per_bin=bytes_each,
         total_bytes=selected * bytes_each,
         would_have_been_bytes=requested * bytes_each,

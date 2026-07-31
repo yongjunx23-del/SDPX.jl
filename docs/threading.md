@@ -45,6 +45,45 @@ Reductions happen in a fixed bin order. At a fixed thread count the result is
 deterministic. Changing the thread count may change the floating-point
 reduction order and therefore the last few bits.
 
+## Block-local crossovers
+
+Residual construction, block Cholesky, predictor/corrector right-hand sides,
+and direction recovery use the cached LPT schedule when either the historical
+256-block threshold is met or estimated cubic block work is large enough:
+
+```text
+Float64-family sum(k[l]^3):          at least 1,000,000
+fixed-width extended sum(k[l]^3):   at least   100,000
+```
+
+This dimension-aware route matters for dense lattice SDPs that have a small
+number of moderately large blocks. Task_Low08 has 32 blocks of dimensions
+23--74 and `sum(k[l]^3) = 3,977,757`; the former count-only policy therefore
+left all block-local phases serial. On one node125 run with 16 OpenBLAS
+threads, the retained scheduler measured median solve times of 36.708 /
+32.158 / 29.780 / 27.424 seconds at 4 / 8 / 16 / 32 Julia workers. All runs
+used 28 iterations and 119 backtracking contractions and passed the same
+original-coordinate certificate. A direct old/new same-node A/B at 32 workers
+improved median solve time from 32.062 to 28.438 seconds (11.3%).
+
+Task-local dense Schur accumulators remain memory-capped. The default share is
+15% of scheduler-aware available memory. A deliberately narrow `Float64`
+policy raises it to 25% only when all of these conditions hold:
+
+```text
+Schur dimension:       at least 4,096
+PSD block count:       at least 16
+requested workers:     at least 16
+available memory:      at least 16 GiB
+```
+
+On Task_Low08 with a 28 GiB explicit ceiling this selects 25 of the 32
+possible bins. A same-node controlled run reduced median Schur assembly from
+8.140 to 6.701 seconds and the stable solve from 27.449 to 25.965 seconds.
+Increasing the share to 35% produced only a noisy 1.7% median change, made the
+stable second repetition 2.1% slower, and raised peak RSS by 0.44%; it was
+rejected. Fixed-width extended and BigFloat arithmetic retain the 15% rule.
+
 ## Schur crossovers
 
 Thread launch and reduction are measurable costs. Dense Schur assembly uses a

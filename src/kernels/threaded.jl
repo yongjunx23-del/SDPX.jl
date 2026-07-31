@@ -148,11 +148,51 @@ function schur_blas_threads(ws::Workspace{T}, prob::SDPProblem{T},
     return ambient
 end
 
+"""
+    _block_loop_threading_profitable(T, block_dimensions, workers)
+
+Select Julia task parallelism for the block-local residual, Cholesky,
+predictor, and corrector kernels.  Counting blocks alone misses dense lattice
+models: Task_Low08 has only 32 blocks, but their dimensions are 23--74 and the
+block-local phases account for several seconds per solve.  Preserve the
+historical many-small-block crossover and additionally admit a smaller number
+of blocks when their cubic factorization/multiply work is large enough.
+
+The thresholds are intentionally conservative.  Float64 needs roughly one
+million cubic-work units before task launch is considered; fixed-width
+extended arithmetic crosses over earlier because every scalar operation is
+more expensive.  Mutable BigFloat remains excluded by
+[`thread_safe_arithmetic`](@ref), irrespective of this estimate.
+"""
+function _block_loop_threading_profitable(
+    ::Type{T},
+    block_dimensions,
+    workers::Int,
+) where {T}
+    workers > 1 || return false
+    block_count = length(block_dimensions)
+    block_count > 1 || return false
+    block_count >= 256 && return true
+
+    cubic_work = sum(
+        dimension -> Float64(dimension)^3,
+        block_dimensions;
+        init=0.0,
+    )
+    family = ExtendedPrecisionBLAS.arithmetic_family(T)
+    minimum_work = family === :fixed_extended ? 1.0e5 : 1.0e6
+    return cubic_work >= minimum_work
+end
+
 function use_threaded_block_loops(ws::Workspace{T}, prob::SDPProblem{T}) where {T}
     return ws.thread_count > 1 &&
            prob.dims.L > 1 &&
            thread_safe_arithmetic(T) &&
-           sum(length, ws.block_bins; init=0) >= 256
+           _block_loop_threading_profitable(
+               T,
+               prob.dims.k,
+               ws.thread_count,
+           )
 end
 
 function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},

@@ -562,10 +562,23 @@ workers without sharing a writable MPFR object.
 
 Scaling depends strongly on problem size — small models do not have enough work
 per block to amortise the synchronisation. Small Float64 Schur builds therefore
-stay serial automatically. On the cluster medium exact-arrow benchmark, the
+stay serial automatically. Block-local residual, factorization, predictor, and
+corrector work uses both block count and estimated cubic work, so models such
+as Task_Low08 with only 32 but moderately large PSD blocks still use safe
+disjoint-block parallelism. A same-node 32-Julia-thread / 16-BLAS-thread A/B
+reduced its median adaptive solve from 32.062 to 28.438 seconds without
+changing the iteration trajectory or certificate. On the cluster medium
+exact-arrow benchmark, the
 final Float64x4 solve took 51.48 / 31.34 / 19.35 / 11.73 seconds with
 1 / 2 / 4 / 8 Julia threads. See the
 [threading guide](docs/threading.md) and its linked raw protocol.
+
+Dense Schur accumulation is also memory-aware. The generic per-solve limit is
+15% of available memory. Large `Float64` systems may use 25% only when they
+have at least 4,096 variables, 16 PSD blocks, 16 requested workers, and an
+explicitly visible budget of at least 16 GiB. This narrow Task_Low08-calibrated
+rule reduced median Schur assembly from 8.140 to 6.701 seconds; MultiFloat,
+BigFloat, smaller problems, and memory-constrained jobs retain 15%.
 
 `Float64x4` and `BigFloat` use the conservative
 `extended_precision_blas=:auto` policy by default. The policy never redirects

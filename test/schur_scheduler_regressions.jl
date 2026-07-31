@@ -23,6 +23,39 @@ using Test
         )
     end
 
+    @testset "block-loop crossover accounts for block dimensions" begin
+        @test !SDPX._block_loop_threading_profitable(
+            Float64,
+            fill(8, 32),
+            8,
+        )
+        @test SDPX._block_loop_threading_profitable(
+            Float64,
+            [
+                52, 23, 34, 40, 70, 33, 37, 26,
+                44, 74, 73, 67, 58, 64, 41, 37,
+                34, 38, 43, 34, 34, 43, 51, 23,
+                34, 40, 70, 33, 37, 26, 44, 74,
+            ],
+            8,
+        )
+        @test SDPX._block_loop_threading_profitable(
+            Float64,
+            fill(2, 256),
+            8,
+        )
+        @test SDPX._block_loop_threading_profitable(
+            Float64x4,
+            fill(24, 8),
+            4,
+        )
+        @test !SDPX._block_loop_threading_profitable(
+            Float64,
+            fill(64, 8),
+            1,
+        )
+    end
+
     @testset "partial reduction preserves requested storage triangle" begin
         for T in (Float64, Float64x4)
             dimension = 11

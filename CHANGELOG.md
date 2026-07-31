@@ -8,6 +8,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Block-local residual, Cholesky, predictor, and corrector scheduling now uses
+  an arithmetic-aware cubic-work crossover in addition to the historical
+  256-block threshold. This activates safe disjoint-block parallelism for
+  Task_Low08's 32 medium-to-large PSD blocks; a same-node 32-Julia-thread /
+  16-BLAS-thread A/B reduced median solve time from 32.062 to 28.438 seconds
+  (11.3%) with unchanged iterations, backtracking trajectory, and certificate.
+- Large dense `Float64` Schur assembly can use up to 25% of an ample
+  scheduler-aware memory budget for task-local accumulators. The crossover is
+  restricted to systems with at least 4,096 variables, 16 blocks, 16 workers,
+  and 16 GiB available; extended precision and smaller systems retain the 15%
+  cap. On Task_Low08 this reduced median Schur time from 8.140 to 6.701 seconds
+  and the stable solve from 27.449 to 25.965 seconds. A 35% policy was rejected
+  because its small median gain was not stable and used more peak memory.
+  `schur_bin_report` exposes the selected fraction and effective byte budget.
 - The adaptive controller now has an inspectable expert
   `adaptive_sigma_max` guard. Zero delegates to structural selection. The
   `large_lattice_dense_schur` profile selects 0.20 after a same-node

@@ -1400,11 +1400,11 @@ end
 @testset "Schur accumulator capping is visible (§18.4, §19.3)" begin
     # Per-worker Schur accumulators are full m x m matrices, so their total
     # scales as threads * m^2 and a memory cap silently reduces the bin count.
-    # On Task_Low08 (m = 6119) eight replicas would cost 2.4 GB, so the cap
-    # collapses assembly to a SINGLE bin at every thread count — which is why
-    # that problem showed no Schur speedup from 1 to 8 threads on a 10-core
-    # machine. §18.4 requires such a selection change be reported, not inferred
-    # from a disappointing measurement.
+    # On Task_Low08 (m = 6119), each replica costs about 286 MiB. The generic
+    # 15% cap therefore limits parallelism on memory-constrained hosts. A
+    # narrowly calibrated large-Float64 rule may use 25% when at least 16 GiB
+    # is explicitly available; extended precision retains 15%. Section 18.4
+    # requires such a selection change be reported, not inferred from timing.
     # A stated budget, not the host's free memory. One 6119-bin costs 285.7 MB
     # and one 200-bin costs 0.3 MB, and the cap allows 15% of the budget, so
     # 4 GiB affords eight of the small ones and only two of the large ones on
@@ -1413,6 +1413,56 @@ end
     # where the cap correctly does not bind and all three "large" assertions
     # failed.
     budget = 4 * 1024^3
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64,
+        6119,
+        32,
+        32,
+        28 * 1024^3,
+    ) == 0.25
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64,
+        6119,
+        32,
+        32,
+        15 * 1024^3,
+    ) == 0.15
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64x4,
+        6119,
+        32,
+        32,
+        28 * 1024^3,
+    ) == 0.15
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64,
+        4095,
+        32,
+        32,
+        28 * 1024^3,
+    ) == 0.15
+    task_large_budget = SDPX.schur_bin_report(
+        Float64,
+        6119,
+        32,
+        32;
+        free_memory_bytes=28 * 1024^3,
+    )
+    @test task_large_budget.selected_bins == 25
+    @test task_large_budget.capped
+    @test task_large_budget.memory_fraction == 0.25
+    @test task_large_budget.memory_budget_bytes == 7 * 1024^3
+    task_small_budget = SDPX.schur_bin_report(
+        Float64,
+        6119,
+        32,
+        32;
+        free_memory_bytes=15 * 1024^3,
+    )
+    @test task_small_budget.selected_bins == 8
+    @test task_small_budget.capped
+    @test task_small_budget.memory_fraction == 0.15
+    @test task_small_budget.memory_budget_bytes == floor(Int, 0.15 * 15 * 1024^3)
     small = SDPX.schur_bin_report(Float64, 200, 32, 8; free_memory_bytes=budget)
     @test small.requested_bins == 8
     @test small.selected_bins == 8
