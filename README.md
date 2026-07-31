@@ -137,11 +137,17 @@ intended for users, and changes to them will be noted in
 
 | Experimental | Caveat |
 |---|---|
-| `analyze_structure`, `structure_summary`, `classify_problem`, `build_execution_plan` | introspection; shapes may change |
-| `recommended_parameters` | heuristic profiles, actively being recalibrated |
+| `SDPX.Experimental` | namespace for advanced preprocessing, parameter policies, introspection, and backend controls |
+| `SDPX.infeasibility_diagnosis` | normalized optimize-mode ray checks; schema may change |
+| `SDPX.Experimental.recommended_parameters` | heuristic profiles, actively being recalibrated |
 | `reconstruct_spectrum`, `export_spectrum` | bootstrap-specific helpers |
 | `sdp`, `findFeasible` | legacy interface inherited from SDPJSolver.jl |
 | `setArithmeticType`, `setSparseMode`, `setMode` | deprecated global setters; use `SolverOptions` |
+
+Version 0.3 retains the historical top-level experimental exports for one
+deprecation cycle. They are scheduled to stop being exported in 0.4; use
+`SDPX.Experimental.name` now. Legacy SDPJSolver-style exports retain their
+longer 1.0 compatibility window. `SDPX.api_surface()` returns the exact policy.
 
 Anything not listed, and anything prefixed with `_`, is internal and may change
 without notice.
@@ -355,6 +361,20 @@ opts = SolverOptions{Float64}(β=0.1, verbosity=1, equilibrate=true, refine_step
 result = solve!(prob, opts)                         # -> SDPResult{T}
 ```
 
+The same expert options can be constructed without Unicode input:
+
+```julia
+opts = SolverOptions(
+    Float64;
+    tolerance=1e-9,
+    maximum_iterations=300,
+    time_limit=120.0,
+    beta=0.1,
+    gamma=0.9,
+    verbosity=0,
+)
+```
+
 For very large block-arrow inputs where each PSD block touches only a small
 subset of the global variables, callers can avoid allocating an `L × m`
 mostly-empty reference grid:
@@ -394,6 +414,16 @@ iteration/restart counters. Adaptive-controller history, stagnation windows,
 phase-timing history, and best-iterate history restart empty, so a resumed run
 is not a bit-for-bit continuation of an uninterrupted solve. The dedicated LP
 path does not currently support checkpoint resume.
+
+Eligible failed optimize-mode runs check whether the returned iterate defines
+a normalized homogeneous ray, regardless of whether verbose diagnostics are
+enabled. The report is stored at
+`result.termination.infeasibility_diagnosis` and can be recomputed with
+`SDPX.infeasibility_diagnosis(prob, result, opts)`. A ray that passes the
+independent original-coordinate checks upgrades the result to
+`PrimalInfeasible` or `DualInfeasible`; an undetermined candidate leaves the
+original stopped status unchanged. The generator is currently direct
+primal-dual rather than a full HSD `tau`/`kappa` iteration.
 
 ## JuMP and MathOptInterface
 
@@ -562,6 +592,11 @@ memory gates, and full numerical certificates.
 ## Known limitations
 
 - The package is **experimental**; the API may change before 1.0.
+- Optimize mode reports formal `PrimalInfeasible` and `DualInfeasible`
+  statuses when an independently normalized homogeneous ray passes the
+  original-coordinate certificate. The current direct primal-dual iteration
+  does not yet carry HSD `τ` and `κ`, so it may fail to generate a ray for an
+  infeasible model and return an ordinary stopped status instead.
 - The sparse conformal-bootstrap benchmark in `bench/` does not yet converge to
   the tolerance a reference solver reaches on the same instance.
   `bench/csdr_psd_dual/RESULTS.md` records current evidence, while

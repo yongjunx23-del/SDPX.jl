@@ -1,0 +1,40 @@
+name: Bug report
+description: Report an incorrect result, failure, performance regression, or usability issue.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe what happened and what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Include a small Julia program or a link to reproducible input.
+      render: julia
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Solver result and diagnostics
+      description: Include status, termination diagnostics, residuals, objective, and warnings.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SDPX version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Julia version, OS, CPU, arithmetic type, Julia/BLAS thread counts, and relevant options.
+    validations:
+      required: true

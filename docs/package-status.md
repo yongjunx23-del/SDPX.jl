@@ -1,6 +1,6 @@
 # Package status, design decisions, and next steps
 
-Date: 2026-07-28. Version: v0.2.1 + packaging pass.
+Date: 2026-07-31. Version: v0.3.0.
 
 ## What "production-quality Julia package" means here, and where SDPX stands
 
@@ -9,11 +9,11 @@ Date: 2026-07-28. Version: v0.2.1 + packaging pass.
 | `Pkg.add(url=...)` / `Pkg.develop` install | works; verified in a clean temporary depot |
 | `using SDPX` loads without extras | yes; MultiFloats/DoubleFloats/JLD2/AppleAccelerate are weakdeps with extensions |
 | Stable small API | `solve`/`solve!`/`ingest`/`SolverOptions`/`SDPResult` + MOI `Optimizer`; README labels stable-intent vs experimental |
-| JuMP/MOI | full wrapper, tested (87 MOI regression assertions + `MOI.Test` coverage) |
+| JuMP/MOI | full wrapper, tested by dedicated mapping/conversion regressions and `MOI.Test` coverage |
 | Precisions | Float64 / Float64x2 / Float64x4 / Double64 / BigFloat, one algorithm through the kernel layer |
-| Tests | ≈1,900 assertions incl. examples-as-tests, acceptance gates, Aqua; green on Julia 1.10 and 1.12 |
+| Tests | examples-as-tests, acceptance gates, Aqua, and numerical regressions; the live total and pass/fail state are reported by CI rather than copied into documentation |
 | Quality gates | Aqua full pass: no piracy, no ambiguities, no unbound params, exports defined, deps/compat complete |
-| Docs | Documenter site (`docs/make.jl`: Home + API reference) building in CI; deep design notes as markdown in `docs/` |
+| Docs | multi-page Documenter manual building in CI and deploying from `main`; deep measured decision records remain as markdown in `docs/` |
 | Versioning | SemVer, tagged releases (v0.2.0, v0.2.1), Keep-a-Changelog |
 | CI | Linux/macOS/Windows × Julia 1.10/1 × 1/4 threads + package-quality + benchmark smoke + docs build |
 | Error handling | typed argument errors at ingest; structured solver statuses; interrupts/OOM rethrown everywhere (v0.2.1) |
@@ -37,8 +37,10 @@ Date: 2026-07-28. Version: v0.2.1 + packaging pass.
 
 ## Known limitations (also in README)
 
-- Experimental pre-1.0 API; no infeasibility certificates in optimize mode
-  (an infeasible SDP reports `Stalled`/`IterLimit`, not a certificate);
+- Experimental pre-1.0 API; optimize-mode homogeneous rays now produce formal
+  statuses only after independent validation, but the direct primal-dual
+  Newton system does not yet carry HSD `τ` and `κ` and therefore does not
+  reliably generate a ray for every infeasible model;
   `Float64` precision-floor on ill-conditioned bootstrap models (by design —
   use `Float64xN`); dense Schur/KKT fallback for non-arrow structure; serial
   general BigFloat kernels.
@@ -56,15 +58,15 @@ When the time comes:
 
 ## Recommended next steps, in order
 
-1. **Docs deploy**: add a `DOCUMENTER_KEY` repository secret (owner action;
-   `DocumenterTools.genkeys()`), after which `docs/make.jl` deploys to
-   gh-pages automatically — the guard is already in place.
-2. **CompatHelper workflow** for automatic dependency compat PRs.
-3. Decide the 1.0 API questions recorded in the maintainer review
-   (`SolverOptions` grouping, camelCase legacy retirement).
-4. Infeasibility detection (the one algorithmic gap vs mature solvers; needs
-   its own design cycle — see maintainer review §3.2).
-5. Registry registration, once the API has had one quiet cycle.
+1. Add an HSD certificate generator behind the v0.3 certificate-validation
+   boundary and compare its feasible-problem overhead before enabling it by
+   default.
+2. Stop exporting the v0.3 deprecated experimental names in v0.4; keep them
+   available as qualified bindings and keep legacy camelCase names through the
+   documented 1.0 window.
+3. Continue the staged solver split by extracting initialization, iteration
+   control, and pipeline orchestration from `solver/interior_point.jl`.
+4. Registry registration, once the API has had one quiet cycle.
 
 ## Deployment note: test dependencies and offline environments (2026-07-28)
 

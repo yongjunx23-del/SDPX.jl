@@ -22,12 +22,26 @@ result_certificate
 recommended_parameters
 ```
 
-Additional introspection entry points (experimental; result shapes may
-change): `structure_summary` and `analyze_structure` report the detected
-problem structure, `classify_problem` the cone/storage classification, and
-`build_execution_plan` the pre-solve execution plan. Their docstrings live on
-the internal bindings; see the repository's `docs/` design notes for the
-concepts.
+The optimize-mode ray diagnostic is intentionally outside the stable-intent
+export surface while its result schema is still experimental:
+
+```@docs
+SDPX.infeasibility_diagnosis
+```
+
+Validated optimize-mode rays produce the formal `PrimalInfeasible` or
+`DualInfeasible` members of `SolveStatus`. The direct primal-dual iteration is
+not yet a full homogeneous self-dual embedding; the certificate metadata says
+which generator was used.
+
+Additional introspection entry points live under `SDPX.Experimental`
+(experimental; result shapes may change):
+`SDPX.Experimental.structure_summary` and
+`SDPX.Experimental.analyze_structure` report the detected problem structure,
+`SDPX.Experimental.classify_problem` the cone/storage classification, and
+`SDPX.Experimental.build_execution_plan` the pre-solve execution plan.
+The historical top-level exports are deprecated in 0.3 and scheduled to stop
+being exported in 0.4.
 
 ## Spectrum helpers
 

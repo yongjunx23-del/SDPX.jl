@@ -31,6 +31,7 @@ include("validation.jl")
 include("spectrum.jl")
 include("moi_wrapper.jl")
 include("compat.jl")
+include("public_api.jl")
 
 export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
 export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
@@ -49,5 +50,6 @@ export reconstruct_spectrum, export_spectrum
 export result_certificate, solve_summary
 export blas_backend, blas_threads, set_blas_threads!
 export Optimizer
+export Experimental
 
 end

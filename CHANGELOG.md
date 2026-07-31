@@ -6,8 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-31
+
 ### Added
 
+- Optimize mode now has distinct `PrimalInfeasible` and `DualInfeasible`
+  statuses. SDPX promotes a failed iterate only after a normalized homogeneous
+  ray passes independent affine, PSD, objective-sign, and finite-value checks
+  in original coordinates. The result, certificate API, and MathOptInterface
+  statuses expose the validated ray. The certificate boundary is compatible
+  with a future homogeneous self-dual iteration but does not claim that the
+  current Newton system carries HSD `τ` and `κ` variables.
+- Equality-only LPs now return their analytic normalized null-space ray when
+  the objective is unbounded, replacing the previous numerical-error status
+  with a validated `DualInfeasible` certificate.
+- `SDPX.Experimental` provides namespaced access to advanced preprocessing,
+  parameter-policy, inspection, and backend controls. Their historical
+  top-level exports remain for the 0.3 deprecation cycle and are scheduled to
+  stop being exported in 0.4; legacy SDPJSolver-style exports retain their 1.0
+  compatibility window. `SDPX.api_surface()` publishes this policy for release
+  tooling and downstream audits.
+- The solver implementation now sits behind `src/solve.jl` as a small include
+  manifest, beginning the staged decomposition of the former monolithic file
+  without reordering numerical methods in the 0.3 release.
+- GitHub Actions coverage upload uses Codecov OIDC with a failing upload gate,
+  and pull requests from repository branches deploy Documenter previews. This
+  makes the first real coverage upload and documentation deployment
+  independently observable in CI.
+- Failed optimization runs can now perform conservative homogeneous-ray
+  diagnostics. A normalized dual ray can diagnose primal infeasibility; a
+  normalized primal ray can diagnose dual infeasibility or primal
+  unboundedness. In 0.3 these checks also back formal statuses when independent
+  validation succeeds.
+- `SolverOptions(T; ...)` accepts ASCII aliases such as `tolerance`,
+  `maximum_iterations`, `time_limit`, `beta`, `gamma`,
+  `primal_initial_scale`, and `dual_initial_scale`, while preserving the
+  existing typed Unicode constructor.
 - Exactly block-diagonal sparse SDP systems with equality constraints now use
   the local block-arrow factors directly instead of materializing the full
   Schur matrix. The transformed equality system retains fast Gram-Cholesky
@@ -73,6 +107,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Structural presolve contradictions now carry an explicit proof reason and a
+  valid independent diagnostics certificate instead of an unqualified
+  `InfeasibleCert` with `reason=:none`.
+- The precision-floor regression fixture now pins its shared variables. Its
+  former version had a genuine negative-objective recession direction and was
+  therefore a dual-infeasible model, which the new ray detector correctly
+  exposed.
+- Allocation regression gates now compare three warmed steady-state solves and
+  retain the minimum, matching the Schur-kernel gate. This excludes one-time
+  thread-pool/task-local initialization without loosening the byte ceilings.
 - Objective equilibration now applies its scale correction only to the
   internal gap acceptance threshold. This prevents an internally accepted
   scaled gap from failing the requested tolerance after reconstruction in
@@ -99,6 +143,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Documenter site now includes quick-start, precision, automatic-pipeline,
+  parameter, diagnostics, JuMP, and development guides. Auxiliary Julia
+  environments carry explicit compatibility bounds, and CI checks release
+  metadata consistency, uploads coverage, and can deploy documentation with
+  the repository `GITHUB_TOKEN`.
+- Acceptance baselines now reflect the guarded adaptive default: the
+  closed-form SDP drops from 19 to 9 iterations and the dense gate from 10 to
+  9, while both retain `Optimal` status and tighter relative gaps.
 - On the 61,603-variable B3 no-box smoke case, the new sparse Schur route
   removed 328 dependent equalities, reduced first-iteration peak RSS from
   about 89.5 GB to 41.1 GB, and completed the first Newton iteration in

@@ -57,6 +57,377 @@ function solution_residuals(
     return p_res, knrmInf(dual_residual)
 end
 
+@inline _diagnostic_norm(values, ::Type{T}) where {T} =
+    isempty(values) ? zero(T) : knrmInf(values)
+
+function _normalized_copy(values::AbstractArray{T}, scale::T) where {T}
+    normalized = similar(values)
+    @inbounds for index in eachindex(values)
+        normalized[index] = values[index] / scale
+    end
+    return normalized
+end
+
+function _ray_diagnostic_tolerance(
+    opts::SolverOptions{T},
+) where {T}
+    requested = max(opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual)
+    # A loose solve tolerance must not turn a weak search direction into an
+    # infeasibility claim. Conversely, asking for accuracy below the arithmetic
+    # floor must not make the diagnostic impossible by construction.
+    return max(T(128) * eps(T), min(requested, T(1e-8)))
+end
+
+"""
+    infeasibility_diagnosis(prob, result, options=SolverOptions{T}())
+
+Check whether the iterate stored in a failed optimization result also defines a
+numerically validated homogeneous ray.
+
+The dual ray test looks for `Y >= 0`, `A'Y + B*y = 0`, and
+`sum(C_l .* Y_l) + b'y > 0`, which is a witness of primal infeasibility. The
+primal ray test looks for `A(x) >= 0`, `B'x = 0`, and `c'x < 0`, which is a
+witness of dual infeasibility or primal unboundedness.
+
+Both candidates are normalized before validation. The test is deliberately
+stricter than a loose requested solve tolerance and never changes
+`result.status` by itself. The solve pipeline may promote a failed optimize-mode
+run only after this independent check succeeds. `kind=:undetermined` means only
+that the returned iterate is not a verified ray; it does not establish
+feasibility.
+"""
+function infeasibility_diagnosis(
+    prob::SDPProblem{T},
+    result::SDPResult{T},
+    opts::SolverOptions{T}=SolverOptions{T}(),
+) where {T}
+    L, m, n, k = prob.dims
+    tolerance = _ray_diagnostic_tolerance(opts)
+    unavailable_psd = (
+        ok=false,
+        failing_blocks=Int[],
+        details=NamedTuple[],
+    )
+
+    dual_shape_ok =
+        length(result.y) == n &&
+        length(result.Y) == L &&
+        all(block -> size(result.Y[block]) == (k[block], k[block]), 1:L)
+    dual_scale = dual_shape_ok ?
+                 max(
+                     _diagnostic_norm(result.y, T),
+                     L == 0 ? zero(T) :
+                     maximum(block -> knrmInf(result.Y[block]), 1:L),
+                 ) : zero(T)
+    dual_candidate_available =
+        dual_shape_ok && isfinite(dual_scale) && dual_scale > zero(T)
+
+    primal_infeasibility = if dual_candidate_available
+        ray_y = _normalized_copy(result.y, dual_scale)
+        ray_Y = [
+            _normalized_copy(result.Y[block], dual_scale)
+            for block in 1:L
+        ]
+        stationarity = alloc_zeros(T, m)
+        for block in 1:L
+            accumulate_v_owned!(
+                stationarity,
+                prob.cons,
+                block,
+                ray_Y[block],
+                one(T),
+            )
+        end
+        n > 0 &&
+            kmul_owned!(stationarity, prob.B, ray_y, one(T), one(T))
+        residual = _diagnostic_norm(stationarity, T)
+        psd = _blocks_psd_certificate(ray_Y, tolerance)
+        objective = dual_objective(prob, ray_y, ray_Y)
+        finite =
+            isfinite(residual) &&
+            isfinite(objective) &&
+            all(isfinite, ray_y) &&
+            all(block -> all(isfinite, block), ray_Y)
+        (
+            available=true,
+            valid=finite &&
+                  psd.ok &&
+                  residual <= tolerance &&
+                  objective > tolerance,
+            ray=:dual,
+            input_scale=dual_scale,
+            stationarity_residual=residual,
+            objective=objective,
+            objective_margin=objective,
+            psd=psd,
+            finite=finite,
+        )
+    else
+        (
+            available=false,
+            valid=false,
+            ray=:dual,
+            input_scale=dual_scale,
+            stationarity_residual=T(Inf),
+            objective=zero(T),
+            objective_margin=zero(T),
+            psd=unavailable_psd,
+            finite=false,
+        )
+    end
+
+    primal_shape_ok = length(result.x) == m
+    primal_scale = primal_shape_ok ?
+                   _diagnostic_norm(result.x, T) : zero(T)
+    primal_candidate_available =
+        primal_shape_ok && isfinite(primal_scale) && primal_scale > zero(T)
+
+    dual_infeasibility = if primal_candidate_available
+        ray_x = _normalized_copy(result.x, primal_scale)
+        homogeneous_slacks = Vector{Matrix{T}}(undef, L)
+        for block in 1:L
+            homogeneous_slacks[block] =
+                alloc_zeros(T, k[block], k[block])
+            buildP_owned!(
+                homogeneous_slacks[block],
+                prob.cons,
+                block,
+                ray_x,
+            )
+        end
+        equality_residual = alloc_zeros(T, n)
+        n > 0 && kmul_owned!(
+            equality_residual,
+            transpose(prob.B),
+            ray_x,
+            one(T),
+            zero(T),
+        )
+        residual = _diagnostic_norm(equality_residual, T)
+        psd = _blocks_psd_certificate(
+            homogeneous_slacks,
+            tolerance,
+        )
+        objective = LinearAlgebra.dot(prob.c, ray_x)
+        margin = -objective
+        finite =
+            isfinite(residual) &&
+            isfinite(objective) &&
+            all(isfinite, ray_x) &&
+            all(block -> all(isfinite, block), homogeneous_slacks)
+        (
+            available=true,
+            valid=finite &&
+                  psd.ok &&
+                  residual <= tolerance &&
+                  margin > tolerance,
+            ray=:primal,
+            input_scale=primal_scale,
+            equality_residual=residual,
+            objective=objective,
+            objective_margin=margin,
+            psd=psd,
+            finite=finite,
+        )
+    else
+        (
+            available=false,
+            valid=false,
+            ray=:primal,
+            input_scale=primal_scale,
+            equality_residual=T(Inf),
+            objective=zero(T),
+            objective_margin=zero(T),
+            psd=unavailable_psd,
+            finite=false,
+        )
+    end
+
+    kind = if primal_infeasibility.valid
+        :primal_infeasible
+    elseif dual_infeasibility.valid
+        :dual_infeasible_or_primal_unbounded
+    else
+        :undetermined
+    end
+    return (
+        available=true,
+        kind=kind,
+        tolerance=tolerance,
+        method=:normalized_homogeneous_ray,
+        # The certificate equations are the τ=0 homogeneous limits used by
+        # HSD methods, but the current Newton iteration does not yet carry τ
+        # and κ. Keep that distinction machine-readable so diagnostics never
+        # overstate the algorithm that generated the ray candidate.
+        embedding=:direct_primal_dual,
+        primal_infeasibility=primal_infeasibility,
+        dual_infeasibility=dual_infeasibility,
+    )
+end
+
+function _with_infeasibility_diagnosis(
+    result::SDPResult{T},
+    diagnosis::NamedTuple,
+) where {T}
+    return SDPResult{T}(
+        result.status,
+        result.message,
+        result.x,
+        result.X,
+        result.y,
+        result.Y,
+        result.pObj,
+        result.dObj,
+        result.gap_rel,
+        result.p_res,
+        result.d_res,
+        result.iterations,
+        result.restarts,
+        result.regularizations,
+        result.timings,
+        result.parameter_history,
+        result.diagnostics,
+        merge(
+            result.termination,
+            (infeasibility_diagnosis=diagnosis,),
+        ),
+    )
+end
+
+function _homogeneous_primal_slacks(
+    prob::SDPProblem{T},
+    ray_x::AbstractVector{T},
+) where {T}
+    slacks = Vector{Matrix{T}}(undef, prob.dims.L)
+    @inbounds for block in 1:prob.dims.L
+        slacks[block] =
+            alloc_zeros(T, prob.dims.k[block], prob.dims.k[block])
+        buildP_owned!(slacks[block], prob.cons, block, ray_x)
+    end
+    return slacks
+end
+
+"""
+    certify_optimize_infeasibility(problem, result, options)
+
+Attempt to turn a failed optimize-mode iterate into a formal homogeneous-ray
+certificate. The returned status changes only when the normalized ray passes
+[`infeasibility_diagnosis`](@ref) in original problem coordinates.
+
+This is an HSD-compatible certificate boundary, not yet an HSD Newton
+iteration: the current solver does not carry the embedding variables `τ` and
+`κ`. The `termination` record therefore identifies the generator as
+`:direct_primal_dual` so downstream tools can distinguish a verified ray from a
+ray generated by a future homogeneous self-dual embedding.
+"""
+function certify_optimize_infeasibility(
+    prob::SDPProblem{T},
+    result::SDPResult{T},
+    opts::SolverOptions{T},
+) where {T}
+    diagnosis = infeasibility_diagnosis(prob, result, opts)
+    diagnosed = _with_infeasibility_diagnosis(result, diagnosis)
+    opts.mode === OPTIMIZE || return diagnosed, diagnosis, nothing
+
+    status = diagnosed.status
+    status in (
+        Stalled,
+        IterLimit,
+        NumericalBreakdown,
+        MaxRestartsExceeded,
+        InsufficientPrecision,
+        NumericalFailure,
+    ) || return diagnosed, diagnosis, nothing
+
+    if diagnosis.kind === :primal_infeasible
+        scale = diagnosis.primal_infeasibility.input_scale
+        ray_y = _normalized_copy(diagnosed.y, scale)
+        ray_Y = [
+            _normalized_copy(diagnosed.Y[block], scale)
+            for block in eachindex(diagnosed.Y)
+        ]
+        termination = merge(
+            diagnosed.termination,
+            (
+                reason=:primal_infeasibility_certificate,
+                previous_status=status,
+                certificate_method=:normalized_homogeneous_ray,
+                certificate_generator=:direct_primal_dual,
+                homogeneous_self_dual_embedding=false,
+            ),
+        )
+        promoted = SDPResult{T}(
+            PrimalInfeasible,
+            "Primal infeasible (validated homogeneous dual ray)",
+            diagnosed.x,
+            diagnosed.X,
+            ray_y,
+            ray_Y,
+            diagnosed.pObj,
+            dual_objective(prob, ray_y, ray_Y),
+            diagnosed.gap_rel,
+            diagnosed.p_res,
+            diagnosis.primal_infeasibility.stationarity_residual,
+            diagnosed.iterations,
+            diagnosed.restarts,
+            diagnosed.regularizations,
+            diagnosed.timings,
+            diagnosed.parameter_history,
+            diagnosed.diagnostics,
+            termination,
+        )
+        return (
+            promoted,
+            diagnosis,
+            "A normalized dual ray passed the primal-infeasibility " *
+            "certificate checks in original coordinates.",
+        )
+    elseif diagnosis.kind ===
+           :dual_infeasible_or_primal_unbounded
+        scale = diagnosis.dual_infeasibility.input_scale
+        ray_x = _normalized_copy(diagnosed.x, scale)
+        ray_X = _homogeneous_primal_slacks(prob, ray_x)
+        termination = merge(
+            diagnosed.termination,
+            (
+                reason=:dual_infeasibility_certificate,
+                previous_status=status,
+                certificate_method=:normalized_homogeneous_ray,
+                certificate_generator=:direct_primal_dual,
+                homogeneous_self_dual_embedding=false,
+            ),
+        )
+        promoted = SDPResult{T}(
+            DualInfeasible,
+            "Dual infeasible or primal unbounded " *
+            "(validated homogeneous primal ray)",
+            ray_x,
+            ray_X,
+            diagnosed.y,
+            diagnosed.Y,
+            LinearAlgebra.dot(prob.c, ray_x),
+            diagnosed.dObj,
+            diagnosed.gap_rel,
+            diagnosis.dual_infeasibility.equality_residual,
+            diagnosed.d_res,
+            diagnosed.iterations,
+            diagnosed.restarts,
+            diagnosed.regularizations,
+            diagnosed.timings,
+            diagnosed.parameter_history,
+            diagnosed.diagnostics,
+            termination,
+        )
+        return (
+            promoted,
+            diagnosis,
+            "A normalized primal ray passed the dual-infeasibility " *
+            "certificate checks in original coordinates.",
+        )
+    end
+    return diagnosed, diagnosis, nothing
+end
+
 @inline function _componentwise_backward_errors(
     residual::T,
     nominal_scale::T,
@@ -537,13 +908,24 @@ function result_certificate(
 
     structural_infeasibility =
         result.status === InfeasibleCert &&
-        result.termination.reason === :lp_zero_row_infeasible
+        result.termination.reason in (
+            :lp_zero_row_infeasible,
+            :structural_presolve_infeasibility,
+        )
+    optimize_infeasibility =
+        result.status in (PrimalInfeasible, DualInfeasible) ?
+        infeasibility_diagnosis(prob, result, opts) :
+        (available=false, kind=:not_applicable)
     certificate_kind = if structural_infeasibility
         :structural_infeasibility
+    elseif result.status === PrimalInfeasible
+        :primal_infeasibility
+    elseif result.status === DualInfeasible
+        :dual_infeasibility
     elseif result.status === FeasibleCert
         :primal_feasibility
     elseif result.status === InfeasibleCert
-        :dual_infeasibility
+        :auxiliary_dual_infeasibility
     else
         :optimality
     end
@@ -552,6 +934,18 @@ function result_certificate(
         # The exact zero-row contradiction is its own presolve witness:
         # `0'x >= h` with `h > 0`. It does not require an iterate-based dual
         # certificate and is recorded explicitly in `result.termination`.
+    elseif certificate_kind === :primal_infeasibility
+        opts.mode === OPTIMIZE ||
+            push!(failures, :certificate_mode)
+        optimize_infeasibility.available &&
+        optimize_infeasibility.primal_infeasibility.valid ||
+            push!(failures, :primal_infeasibility_ray)
+    elseif certificate_kind === :dual_infeasibility
+        opts.mode === OPTIMIZE ||
+            push!(failures, :certificate_mode)
+        optimize_infeasibility.available &&
+        optimize_infeasibility.dual_infeasibility.valid ||
+            push!(failures, :dual_infeasibility_ray)
     elseif certificate_kind === :primal_feasibility
         opts.mode === FEASIBILITY ||
             push!(failures, :certificate_mode)
@@ -563,7 +957,7 @@ function result_certificate(
         primal_psd.ok || push!(failures, :primal_psd)
         p_objective < zero(T) ||
             push!(failures, :feasible_certificate_sign)
-    elseif certificate_kind === :dual_infeasibility
+    elseif certificate_kind === :auxiliary_dual_infeasibility
         opts.mode === FEASIBILITY ||
             push!(failures, :certificate_mode)
         dual_finite || push!(failures, :nonfinite_dual)
@@ -584,10 +978,15 @@ function result_certificate(
         primal_psd.ok || push!(failures, :primal_psd)
         dual_psd.ok || push!(failures, :dual_psd)
     end
+    public_certificate_kind =
+        certificate_kind === :auxiliary_dual_infeasibility ?
+        :dual_infeasibility :
+        certificate_kind
     return (
         available=true,
         valid=isempty(failures),
-        kind=certificate_kind,
+        kind=public_certificate_kind,
+        validation_kind=certificate_kind,
         failures=failures,
         primal_objective=p_objective,
         dual_objective=d_objective,
@@ -619,6 +1018,7 @@ function result_certificate(
         gap_limit=opts.ϵ_gap,
         primal_psd=primal_psd,
         dual_psd=dual_psd,
+        infeasibility=optimize_infeasibility,
         # §20.3: how the answer was produced, not just what it is. A residual
         # means something different depending on how much regularization was
         # applied to get it, whether the factorization ran at reduced precision,
@@ -639,6 +1039,10 @@ function _certificate_failure_message(certificate)
         push!(parts, "the dual certificate is non-finite")
     :certificate_mode in certificate.failures &&
         push!(parts, "the feasibility certificate was returned outside feasibility mode")
+    :primal_infeasibility_ray in certificate.failures &&
+        push!(parts, "the normalized dual ray failed independent primal-infeasibility validation")
+    :dual_infeasibility_ray in certificate.failures &&
+        push!(parts, "the normalized primal ray failed independent dual-infeasibility validation")
     :primal_residual in certificate.failures && push!(
         parts,
         "scaled primal residual $(certificate.primal_residual_scaled) " *
@@ -703,6 +1107,8 @@ function certify_final_result(
         Optimal,
         FeasibleCert,
         InfeasibleCert,
+        PrimalInfeasible,
+        DualInfeasible,
     )
     downgrade = authoritative_status && !certificate.valid
     status = downgrade ? Stalled : result.status
@@ -842,5 +1248,10 @@ function solve_summary(prob::SDPProblem{T}, result::SDPResult{T},
         timings=timings,
         warnings=diagnostics === nothing ? String[] : diagnostics.warnings,
         certificate=certificate,
+        infeasibility_diagnosis=get(
+            result.termination,
+            :infeasibility_diagnosis,
+            (available=false, reason=:not_evaluated),
+        ),
     )
 end

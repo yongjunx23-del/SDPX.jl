@@ -30,11 +30,9 @@ iterate is never presented as an optimum.
 
 ## Common model
 
-The deterministic Julia artifact is:
-
-```text
-/public/home/yongjunxu/projects/lattice-b3-sdpx/runs/194382.node220/b3.b3julia
-```
+The deterministic Julia artifact is generated locally from the repository's
+benchmark scripts. Machine-specific paths and scheduler identifiers are
+intentionally omitted from this public report.
 
 Both solvers receive the same mathematical model:
 
@@ -55,34 +53,11 @@ diagnostics. The MOSEK export record confirms
 
 ## Reproduction and source integrity
 
-Cluster scripts:
-
-- `cluster/b3_generate_32.pbs`: generate the native Julia artifact;
-- `cluster/b3_sdpx_no_bounds_32.pbs`: solve one SDPX direction;
-- `cluster/b3_mosek_no_bounds_32.pbs`: export the same artifact and solve it
-  through CVXPY/MOSEK;
-- `cluster/small_mosek_manifest_no_bounds_32.pbs`: validate the manifest
-  adapter on a small model.
-
-Run minimum and maximum directions in separate processes. A completed
-SuiteSparse factorization and its dense multi-right-hand-side workspace can
-otherwise overlap the next direction's high-water mark.
-
-```bash
-cd /public/home/yongjunxu/projects/lattice-b3-sdpx
-
-qsub cluster/b3_generate_32.pbs
-
-qsub -N b3-sdpx-min \
-  -v SOURCE_RUN=/public/home/yongjunxu/projects/lattice-b3-sdpx/runs/194382.node220,DIRECTION=min,PARAMETER_STRATEGY=adaptive,FORCE_GC=false \
-  cluster/b3_sdpx_no_bounds_32.pbs
-
-qsub -N b3-sdpx-max \
-  -v SOURCE_RUN=/public/home/yongjunxu/projects/lattice-b3-sdpx/runs/194382.node220,DIRECTION=max,PARAMETER_STRATEGY=adaptive,FORCE_GC=false \
-  cluster/b3_sdpx_no_bounds_32.pbs
-
-qsub cluster/b3_mosek_no_bounds_32.pbs
-```
+Generate the native Julia artifact, then run the minimum and maximum
+directions in separate processes. A completed SuiteSparse factorization and
+its dense multi-right-hand-side workspace can otherwise overlap the next
+direction's high-water mark. Scheduler scripts and machine-specific launch
+commands are maintained outside the public repository.
 
 The SDPX launcher records SHA256 hashes of the principal KKT, step, and
 pipeline source files. It also asserts that `pathof(SDPX)` resolves to the
@@ -93,28 +68,10 @@ package image compiled through an older `current` symlink target even though
 silent mixture of new files and old compiled methods. This adds JIT work to the
 first iteration but makes the benchmark auditable.
 
-Reference jobs:
-
-| Purpose | PBS job |
-|---|---|
-| Native Julia generation | `194382.node220` |
-| Historical dense SDPX | `194394.node220` |
-| MOSEK adapter validation | `194404.node220` |
-| Full MOSEK no-bounds run | `194405.node220` |
-| First sparse-SDP attempt | `194508.node220` |
-| Controlled sparse one-iteration runs | `194510`, `194516`, `194517` |
-| Earlier fixed/adaptive 16-iteration runs | `194520`, `194521` |
-| Forced-GC four-iteration check | `194522` |
-| Equality-rank audit | `194524` |
-| Stale-package-image diagnostic | `194527` |
-| Source-verified adaptive one-iteration run | `194530.node220` |
-| Source-verified adaptive run, 16-iteration cap | `194531.node220` |
-
 ## MOSEK Float64 reference
 
 Environment:
 
-- node: `node8`;
 - CPU: AMD EPYC 7742;
 - requested cores: 32;
 - CVXPY 1.9.2;
@@ -237,7 +194,7 @@ Only actual rank loss forces factorization quality to zero. Sparse Schur
 quality is measured from the regularized diagonal that was actually
 factorized, not from a structurally zero unregularized diagonal.
 
-The source-verified first iteration (`194530.node220`) produced:
+The source-verified first iteration produced:
 
 | Diagnostic | Value |
 |---|---:|
@@ -269,15 +226,15 @@ They are diagnostic comparisons, not converged solves.
 
 | Configuration | Presolve | Core | Schur assembly | KKT total | Equality factor | Equality solve | Refinement | Solve total | Peak RSS |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Initial sparse route (`194510`) | 145.94 s | 133.04 s | 4.18 s | 55.96 s | 6.26 s | 25.40 s | 56.86 s | 312.37 s | 37.7 GB |
-| Without Q congruence (`194516`) | 145.33 s | 111.91 s | 4.60 s | 55.16 s | 5.93 s | 25.15 s | 36.69 s | 291.46 s | 41.0 GB |
-| With Q congruence (`194517`) | 138.28 s | 103.02 s | 3.91 s | 48.94 s | 1.09 s | 23.99 s | 34.91 s | 275.94 s | 41.1 GB |
-| Source-verified adaptive/JIT (`194530`) | 144.26 s | 149.64 s | 3.87 s | 73.26 s | 1.21 s | 40.90 s | 56.06 s | 305.07 s | 40.5 GB |
+| Initial sparse route | 145.94 s | 133.04 s | 4.18 s | 55.96 s | 6.26 s | 25.40 s | 56.86 s | 312.37 s | 37.7 GB |
+| Without Q congruence | 145.33 s | 111.91 s | 4.60 s | 55.16 s | 5.93 s | 25.15 s | 36.69 s | 291.46 s | 41.0 GB |
+| With Q congruence | 138.28 s | 103.02 s | 3.91 s | 48.94 s | 1.09 s | 23.99 s | 34.91 s | 275.94 s | 41.1 GB |
+| Source-verified adaptive/JIT | 144.26 s | 149.64 s | 3.87 s | 73.26 s | 1.21 s | 40.90 s | 56.06 s | 305.07 s | 40.5 GB |
 
 The source-verified run includes fresh JIT work because compiled modules were
 disabled. Its numerical trajectory also differs from the fixed one-iteration
 diagnostics, so it should be used to validate code identity and controller
-behavior, not as a clean microbenchmark against `194517`.
+behavior, not as a clean microbenchmark against the congruence-enabled run.
 
 The sparse route is about 1.6--1.9 times faster per controlled iteration than
 the historical dense route's approximately 162--200 seconds, while avoiding
@@ -291,11 +248,11 @@ adaptive controller:
 
 | Strategy | Status | Iterations | Primal candidate | Dual candidate | Relative gap | Equality residual | Minimum PSD eigenvalue | Solve time | Peak RSS |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Earlier adaptive (`194520`) | `Stalled` | 15 | 0.6505624709 | 0.5478210296 | 1.027e-1 | 9.88e-7 | -3.50e-8 | 1,693.64 s | 136.9 GB |
-| Fixed (`194521`) | `Stalled` | 15 | 0.6539552882 | 0.4618268141 | 1.921e-1 | 2.08e-6 | -3.30e-8 | 1,996.81 s | 136.8 GB |
-| Stale-image adaptive diagnostic (`194527`) | `Stalled` | 16 | 0.6505624343 | -4.725e6 | 2 | 9.88e-7 | -1.03e-7 | 2,615.36 s | 184.0 GB |
+| Earlier adaptive | `Stalled` | 15 | 0.6505624709 | 0.5478210296 | 1.027e-1 | 9.88e-7 | -3.50e-8 | 1,693.64 s | 136.9 GB |
+| Fixed | `Stalled` | 15 | 0.6539552882 | 0.4618268141 | 1.921e-1 | 2.08e-6 | -3.30e-8 | 1,996.81 s | 136.8 GB |
+| Stale-image adaptive diagnostic | `Stalled` | 16 | 0.6505624343 | -4.725e6 | 2 | 9.88e-7 | -1.03e-7 | 2,615.36 s | 184.0 GB |
 
-The first sparse attempt (`194508`) also is not a successful result. Its
+The first sparse attempt also is not a successful result. Its
 minimum direction stopped with an equality residual of 3.12e-5 and a minimum
 PSD eigenvalue of -2.15e-7; the process then failed before the maximum
 direction with an OpenBLAS `dsyrk` allocation error at an approximately
@@ -345,7 +302,7 @@ default.
 ## Current bottleneck
 
 The optimized sparse backend has moved the bottleneck away from Schur
-assembly. In the fixed 15-iteration profiling run (`194521`):
+assembly. In the fixed 15-iteration profiling run:
 
 | Phase | Time | Share of core time |
 |---|---:|---:|

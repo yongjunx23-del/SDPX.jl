@@ -864,6 +864,8 @@ function _moi_has_iterate(result::SDPResult)
         Stalled,
         MaxRestartsExceeded,
         UserStopped,
+        PrimalInfeasible,
+        DualInfeasible,
     )
 end
 
@@ -884,6 +886,8 @@ function MOI.get(optimizer::Optimizer, ::MOI.TerminationStatus)
     # zero objective represented by MOI.FEASIBILITY_SENSE.
     status == FeasibleCert && return MOI.OPTIMAL
     status == InfeasibleCert && return MOI.INFEASIBLE
+    status == PrimalInfeasible && return MOI.INFEASIBLE
+    status == DualInfeasible && return MOI.DUAL_INFEASIBLE
     status == IterLimit && return MOI.ITERATION_LIMIT
     status == TimeLimit && return MOI.TIME_LIMIT
     status == UserStopped && return MOI.INTERRUPTED
@@ -908,6 +912,8 @@ function MOI.get(optimizer::Optimizer, attribute::MOI.PrimalStatus)
         return MOI.NO_SOLUTION
     status = optimizer.result.status
     status in (Optimal, FeasibleCert) && return MOI.FEASIBLE_POINT
+    status == DualInfeasible && return MOI.INFEASIBILITY_CERTIFICATE
+    status == PrimalInfeasible && return MOI.NO_SOLUTION
     # Report the weaker-but-honest point status rather than claiming a feasible
     # point for an iterate that only met a relaxed tolerance.
     status == AlmostOptimal && return MOI.NEARLY_FEASIBLE_POINT
@@ -921,6 +927,8 @@ function MOI.get(optimizer::Optimizer, attribute::MOI.DualStatus)
         return MOI.NO_SOLUTION
     status = optimizer.result.status
     status == Optimal && return MOI.FEASIBLE_POINT
+    status == PrimalInfeasible && return MOI.INFEASIBILITY_CERTIFICATE
+    status == DualInfeasible && return MOI.NO_SOLUTION
     status == AlmostOptimal && return MOI.NEARLY_FEASIBLE_POINT
     return MOI.UNKNOWN_RESULT_STATUS
 end
@@ -939,12 +947,14 @@ MOI.supports(::Optimizer, ::MOI.ConstraintDual) = true
 
 function MOI.get(optimizer::Optimizer, attribute::MOI.ObjectiveValue)
     result = _check_result(optimizer, attribute)
+    result.status === PrimalInfeasible && return NaN
     value = optimizer.sense == MOI.MAX_SENSE ? -result.pObj : result.pObj
     return value + optimizer.objective_constant
 end
 
 function MOI.get(optimizer::Optimizer, attribute::MOI.DualObjectiveValue)
     result = _check_result(optimizer, attribute)
+    result.status === DualInfeasible && return NaN
     value = optimizer.sense == MOI.MAX_SENSE ? -result.dObj : result.dObj
     return value + optimizer.objective_constant
 end

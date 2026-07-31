@@ -110,6 +110,8 @@ end
             SDPX.Stalled,
             SDPX.NumericalBreakdown,
             SDPX.InfeasibleCert,
+            SDPX.PrimalInfeasible,
+            SDPX.DualInfeasible,
         )
             result = spectrum_test_result(Float64; status=status)
             @test_throws ArgumentError SDPX.reconstruct_spectrum(result)

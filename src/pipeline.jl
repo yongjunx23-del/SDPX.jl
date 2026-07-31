@@ -1657,13 +1657,13 @@ function _inconsistent_presolve_result(
     prob::SDPProblem{T},
     report::PresolveReport,
     plan::ExecutionPlan,
-    diagnostics_enabled::Bool,
+    opts::SolverOptions{T},
 ) where {T}
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     result = SDPResult{T}(
         InfeasibleCert,
-        "Presolve detected inconsistent equality constraints.",
+        "Presolve detected a structural constraint contradiction.",
         alloc_zeros(T, prob.dims.m),
         X,
         alloc_zeros(T, prob.dims.n),
@@ -1677,15 +1677,28 @@ function _inconsistent_presolve_result(
         0,
         0,
         (total=report.elapsed,),
+        NamedTuple[],
+        nothing,
+        (
+            reason=:structural_presolve_infeasibility,
+            certificate_method=:presolve_contradiction,
+            certificate_generator=:analytic_presolve,
+        ),
     )
+    certificate = result_certificate(prob, result, opts)
     return _attach_diagnostics(
         result,
         plan,
         report,
         report.elapsed,
-        ["The equality system is inconsistent at the configured presolve tolerance."],
+        [
+            "Presolve produced a structural infeasibility proof at the " *
+            "configured tolerance.",
+        ],
         0,
-        diagnostics_enabled,
+        opts.diagnostics,
+        (reason=:none,),
+        certificate,
     )
 end
 
