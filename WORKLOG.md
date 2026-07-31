@@ -277,3 +277,27 @@ final automatic-pipeline change. `git diff --check` also passed.
 A typed BigFloat smoke check confirmed that an explicit 0.20 cap remains a
 `BigFloat` at the active MPFR precision. The controller introduces no Float64
 round-trip for BigFloat or MultiFloat diagnostics.
+
+### Automatic fixed-profile scaling validation — job 195512
+
+The final source was installed in the isolated cluster candidate and run with
+`parameter_policy=:fixed` and `scaling=:auto`. The automatic selector reproduced
+the explicitly unscaled reference trajectory exactly:
+
+- PBS exit status 0; completion marker and checksummed artifacts present;
+- status `Optimal` in 24 iterations;
+- primal / dual objective `0.6532912859301279` / `0.6532908586918761`;
+- relative gap `4.2723825e-7`;
+- primal / dual residual `1.0990980e-10` / `1.1374410e-10`;
+- maximum equality residual `1.0990986e-10`;
+- minimum primal / dual PSD eigenvalue `-1.5744484e-9` / `4.0699682e-14`;
+- valid original-coordinate optimality certificate;
+- solver / end-to-end time 52.585 / 54.539 seconds in a cold process that
+  also precompiled the changed package;
+- peak RSS 3,924,684 KiB (about 3.74 GiB).
+
+The numerical values and iteration history match job 195509, so the automatic
+pipeline is selecting the intended no-scaling compatibility path for the
+large-lattice fixed policy. This closes the fixed-policy regression without
+changing the default adaptive path. Production was not promoted during the
+experiment; all runs used the isolated candidate installation.
