@@ -37,7 +37,7 @@ using Test
             )
             # Report the specific drift rather than a bare `false`, so a
             # failure says which metric moved and by how much.
-            @test isempty(failures) || failures == String[]
+            @test failures == String[]
 
             # The closed-form problem is the one case with an independently
             # known answer, so check against that too and not only against the
