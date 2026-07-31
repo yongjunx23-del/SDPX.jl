@@ -198,6 +198,29 @@ const LP_AGGRESSIVE_START_SCALE_LIMIT = 1_000
 end
 
 """
+    recommended_adaptive_sigma_max(profile, beta, requested)
+
+Return the expert override when it is positive, otherwise select the guarded
+automatic centering cap for a structural parameter profile. The large dense
+lattice profile has a separately validated low-beta trajectory; allowing the
+generic controller to jump from `0.075` to `0.5` caused 27 backtracking trials
+and an additional Task_Low08 iteration. A controlled same-node sweep selected
+`0.2`: it retained the 28-iteration trajectory, minimized backtracking among
+the accurate capped runs, and improved the PSD certificate. Retain the generic
+`0.5` cap elsewhere.
+"""
+@inline function recommended_adaptive_sigma_max(
+    profile::Symbol,
+    beta::T,
+    requested::T,
+) where {T}
+    requested > zero(T) && return max(requested, beta)
+    return profile === :large_lattice_dense_schur ?
+           max(T(1) / T(5), beta) :
+           max(T(1) / T(2), beta)
+end
+
+"""
     recommended_parameters(prob, opts) -> NamedTuple
 
 Choose a zero-probe parameter profile from problem structure and requested
@@ -841,11 +864,19 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # to 8.7e+15, where the same solve without equilibration converged.
     if opts.parameter_policy === :auto
         selected = recommended_parameters(solve_prob, opts)
+        adaptive_sigma_max = selected.parameter_strategy === :adaptive ?
+                             recommended_adaptive_sigma_max(
+                                 selected.profile,
+                                 selected.β,
+                                 opts.adaptive_sigma_max,
+                             ) :
+                             zero(T)
         opts.verbosity >= 1 && println(
             "SDPX auto parameters: profile=$(selected.profile), " *
             "beta=$(Float64(selected.β)), gamma=$(Float64(selected.γ)), " *
             "omega_p=$(Float64(selected.Ωp)), omega_d=$(Float64(selected.Ωd)), " *
-            "predictor=$(selected.predictor), strategy=$(selected.parameter_strategy)",
+            "predictor=$(selected.predictor), strategy=$(selected.parameter_strategy), " *
+            "adaptive_sigma_max=$(Float64(adaptive_sigma_max))",
         )
         opts = _replace_solver_options(
             opts;
@@ -855,6 +886,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             Ωd=selected.Ωd,
             predictor=selected.predictor,
             parameter_strategy=selected.parameter_strategy,
+            adaptive_sigma_max,
             parameter_policy=:fixed,
         )
     end

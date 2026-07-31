@@ -400,7 +400,14 @@ enables a typed, bounded Mehrotra controller with independent primal/dual
 fractions, refinement selection, and complete fixed-path fallback. It records
 its diagnostics and selected values per iteration. The adaptive strategy is
 the public default; `:fixed` is retained for historical trajectory
-reproduction and controlled A/B benchmarks.
+reproduction and controlled A/B benchmarks. The expert
+`adaptive_sigma_max=0` default delegates the centering cap to the structural
+policy; Task_Low08-like dense-Schur lattice systems use the separately
+validated 0.20 cap while other profiles retain the generic 0.50 bound.
+For the large-lattice profile, `scaling=:auto` also preserves the original
+coordinates when `parameter_strategy=:fixed`, because the historical fixed
+0.075/0.8 trajectory was calibrated without Ruiz scaling. Adaptive mode keeps
+the default Ruiz pipeline.
 `SolverOptions` also exposes: `callback` (per-iteration `(state) -> Bool`,
 `true` stops the solve), `checkpoint_every`/`checkpoint_path` (crash-safe
 iterate-level warm restart via `resume=path` on the SDP `solve!` path),

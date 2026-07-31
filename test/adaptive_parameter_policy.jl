@@ -107,6 +107,91 @@ end
               long_step.primal_fraction_to_boundary
     end
 
+    @testset "structural sigma cap prevents over-centering" begin
+        options = SDPX.SolverOptions{Float64}(
+            β=0.075,
+            γ=0.8,
+            adaptive_sigma_max=0.15,
+            parameter_strategy=:adaptive,
+            verbosity=0,
+        )
+        policy = SDPX.AdaptiveParameterPolicy(options)
+        diagnostics = SDPX.IterationDiagnostics{Float64}(
+            iteration=6,
+            primal_residual=0.70,
+            dual_residual=0.006,
+            relative_gap=0.52,
+            mu=0.00152,
+            mu_aff=0.00142,
+            affine_primal_step=0.019,
+            affine_dual_step=0.135,
+            previous_primal_step=0.512,
+            previous_dual_step=0.640,
+            backtracking_count=5,
+        )
+        history = [(sigma=0.272, unstable=false)]
+        selected = SDPX.select_parameters(policy, diagnostics, history)
+        @test selected.sigma == 0.15
+        @test policy.sigma_max == 0.15
+
+        @test SDPX.recommended_adaptive_sigma_max(
+            :large_lattice_dense_schur,
+            0.075,
+            0.0,
+        ) == 0.2
+        @test SDPX.recommended_adaptive_sigma_max(
+            :general_adaptive,
+            0.1,
+            0.0,
+        ) == 0.5
+        @test SDPX.recommended_adaptive_sigma_max(
+            :large_lattice_dense_schur,
+            0.075,
+            0.2,
+        ) == 0.2
+        @test SDPX.AdaptiveParameterPolicy(
+            SDPX.SolverOptions{Float64}(
+                β=0.2,
+                adaptive_sigma_max=0.1,
+                verbosity=0,
+            ),
+        ).sigma_max == 0.2
+        @test_throws ArgumentError SDPX._validate_solver_options(
+            SDPX.SolverOptions{Float64}(
+                adaptive_sigma_max=-0.1,
+                verbosity=0,
+            ),
+        )
+        plan = SDPX.build_execution_plan(
+            policy_toy_sdp(Float64),
+            SDPX.SolverOptions{Float64}(
+                adaptive_sigma_max=0.2,
+                verbosity=0,
+            ),
+        )
+        @test plan.parameters.adaptive_sigma_max == 0.2
+        @test SDPX.automatic_scaling_policy(
+            :sdp_primal_dual,
+            :large_lattice_dense_schur,
+            :fixed,
+        ) == :none
+        @test SDPX.automatic_scaling_policy(
+            :sdp_primal_dual,
+            :large_lattice_dense_schur,
+            :adaptive,
+        ) == :sdp_ruiz
+        @test SDPX.automatic_scaling_policy(
+            :sdp_primal_dual,
+            :general_adaptive,
+            :fixed,
+        ) == :sdp_ruiz
+        @test SDPX.automatic_scaling_policy(
+            :lp_primal_dual,
+            :large_lattice_dense_schur,
+            :fixed,
+        ) == :lp_geometric
+    end
+
     @testset "non-finite diagnostics fall back explicitly" begin
         options = SDPX.SolverOptions{Float64}(
             β=0.075,

@@ -155,8 +155,10 @@ MultiFloat diagnostics are never narrowed through Float64.
 - `sigma` is based on `(mu_aff/mu)^p`, with `p=3` after a good affine step and
   `p=2` after a short step.
 - The candidate is blended as 80% current estimate and 20% previous `sigma`.
-- `sigma` is bounded by `[0.02, 0.50]`, expanded only as necessary to include
-  the configured fixed fallback.
+- `sigma` is normally bounded by `[0.02, 0.50]`, expanded only as necessary to
+  include the configured fixed fallback. The calibrated
+  `large_lattice_dense_schur` profile uses 0.20 as its upper bound; the expert
+  `adaptive_sigma_max` option can reproduce or override this selection.
 - Short affine steps, residual growth, frequent backtracking, or poor factors
   impose centrality floors of `0.08` or `0.20`.
 - The primal and dual fraction-to-boundary values are selected independently
@@ -220,6 +222,35 @@ public default because it adds the required state-aware safeguards and has a
 tested fixed-policy fallback; `parameter_strategy=:fixed` remains available
 for historical trajectory reproduction. Runtime claims still require repeated
 warmed comparisons with identical numerical certificates.
+
+### Task_Low08 structural-cap follow-up
+
+A subsequent cluster sweep used one AMD EPYC node, a 32-core reservation, 16
+Julia threads, 16 OpenBLAS threads, a complete one-iteration warm-up, and
+identical original-coordinate validation for every point.
+
+| Sigma cap | Iterations | Solve time | Backtracks | Relative gap | Minimum primal PSD eigenvalue | Certificate |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.10 | 28 | 32.114 s | 127 | `4.24e-7` | `-1.71e-7` | valid |
+| 0.15 | 28 | 32.246 s | 134 | `5.10e-7` | `-5.90e-10` | valid |
+| 0.20 | 28 | 29.928 / 32.418 s | 119 | `2.18e-7` | `-7.13e-11` | valid |
+| 0.25 | 29 | 32.421 s | 153 | `2.98e-7` | `-3.36e-11` | valid |
+| 0.30 | 29 | 33.689 s | 157 | `3.73e-7` | `-1.76e-9` | valid |
+| 0.40 | 29 | 32.653 s | 148 | `5.67e-7` | `2.75e-10` | valid |
+| Generic 0.50 | 29 | 35.287 s | 174 | `9.85e-7` | `-6.58e-11` | valid |
+
+The 0.20 cap is retained because it is the largest value that removes an
+iteration, minimizes backtracking in the sweep, and avoids the much weaker
+PSD margin at 0.10. The repeated timing spread is reported rather than
+selecting the fastest sample. No global bound was changed.
+
+The older 24-iteration fixed row above is an original-coordinate trajectory.
+A fresh current-source diagnostic reproduced it with `scaling=:none` and a
+valid `4.27e-7` gap certificate. Combining the same fixed 0.075/0.8 values
+with the newer automatic Ruiz pipeline stalled at iteration 23 and did not
+produce a certificate. Consequently `scaling=:auto` now preserves original
+coordinates only for `large_lattice_dense_schur + parameter_strategy=:fixed`;
+adaptive lattice solves continue to select Ruiz.
 
 ## Remaining limitations
 

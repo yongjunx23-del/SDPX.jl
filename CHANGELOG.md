@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The adaptive controller now has an inspectable expert
+  `adaptive_sigma_max` guard. Zero delegates to structural selection. The
+  `large_lattice_dense_schur` profile selects 0.20 after a same-node
+  Task_Low08 sweep: 28 instead of 29 Newton iterations, 119 instead of 174
+  backtracking contractions, and a tighter valid original-coordinate
+  certificate. Other profiles retain the generic 0.50 bound.
+- Added a warmed, same-process Task_Low08 adaptive-cap benchmark so parameter
+  experiments share input, presolve, compilation, node, and validation
+  boundaries.
+- Automatic scaling now preserves original coordinates when the calibrated
+  `large_lattice_dense_schur` profile is paired with the expert fixed
+  parameter strategy. That combination restores its validated 24-iteration
+  trajectory; adaptive lattice solves continue to use Ruiz scaling.
+
 ## [0.3.0] — 2026-07-31
 
 ### Added

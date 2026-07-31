@@ -137,10 +137,14 @@ function AdaptiveParameterPolicy(opts::SolverOptions{T}) where {T}
         T(REFINE_DEFAULT_TOL_ULPS) * eps(T),
         requested > zero(T) ? requested * requested : zero(T),
     )
+    general_sigma_max = max(T(1) / T(2), fixed.sigma)
+    sigma_max = opts.adaptive_sigma_max > zero(T) ?
+                max(opts.adaptive_sigma_max, fixed.sigma) :
+                general_sigma_max
     return AdaptiveParameterPolicy{T}(
         fixed,
         min(T(1) / T(50), fixed.sigma),
-        max(T(1) / T(2), fixed.sigma),
+        sigma_max,
         min(T(4) / T(5), fixed.primal_fraction_to_boundary),
         max(T(99) / T(100), fixed.primal_fraction_to_boundary),
         min(T(11) / T(20), fixed.backtracking_factor),

@@ -197,6 +197,10 @@ Base.@kwdef struct SolverOptions{T}
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
     parameter_strategy::Symbol = :adaptive              # :fixed | :adaptive
+    # Expert override for the adaptive Mehrotra centering cap. Zero delegates
+    # to the automatic structural policy. A positive value is still raised to
+    # at least the fixed fallback beta so recovery always remains representable.
+    adaptive_sigma_max::T      = zero(T)
     # Equality elimination starts with the fast normal-equation path and
     # switches to rank-revealing QR only when factor diagnostics justify its
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.

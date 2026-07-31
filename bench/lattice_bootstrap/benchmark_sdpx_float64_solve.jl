@@ -220,7 +220,7 @@ function main(arguments)
         "[BLAS_THREADS] [MAX_TIME_SECONDS] [BETA] [GAMMA] " *
         "[OMEGA_P] [OMEGA_D] [classic|sdpb] [MAX_ITER] [TOLERANCE] " *
         "[fixed|adaptive] [backtrack|fraction_to_boundary|auto] " *
-        "[fixed|auto parameter policy]",
+        "[fixed|auto parameter policy] [auto|none|equilibrate scaling]",
     )
     input_path = abspath(arguments[1])
     output_path = abspath(arguments[2])
@@ -239,6 +239,7 @@ function main(arguments)
         length(arguments) >= 13 ? Symbol(arguments[13]) : :backtrack
     parameter_policy =
         length(arguments) >= 14 ? Symbol(arguments[14]) : :fixed
+    scaling = length(arguments) >= 15 ? Symbol(arguments[15]) : :auto
     SDPX.set_blas_threads!(blas_threads)
 
     started = time()
@@ -286,6 +287,7 @@ function main(arguments)
         sparse=:auto,
         parameter_policy=parameter_policy,
         parameter_strategy=parameter_strategy,
+        scaling=scaling,
         predictor=predictor,
         step_rule=step_rule,
         refine_steps=1,
@@ -336,6 +338,8 @@ function main(arguments)
             "predictor" => options.predictor,
             "parameter_strategy" => options.parameter_strategy,
             "parameter_policy" => options.parameter_policy,
+            "adaptive_sigma_max" => options.adaptive_sigma_max,
+            "scaling" => options.scaling,
             "step_rule" => options.step_rule,
             "refine_steps" => options.refine_steps,
         ),

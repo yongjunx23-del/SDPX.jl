@@ -96,6 +96,11 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
         throw(ArgumentError("parameter_strategy must be :fixed or :adaptive"))
+    isfinite(opts.adaptive_sigma_max) &&
+        zero(T) <= opts.adaptive_sigma_max < one(T) ||
+        throw(ArgumentError(
+            "adaptive_sigma_max must be zero (automatic) or lie in (0, 1)",
+        ))
     opts.equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError(
             "equality_solver must be :auto, :normal_equations, or :qr",
@@ -710,6 +715,26 @@ function worker_report(requested::Integer, selected::Integer)
     )
 end
 
+"""
+    automatic_scaling_policy(algorithm, parameter_profile, strategy)
+
+Select the scaling stage without probing numerical values. The historical
+large-lattice fixed profile was calibrated in the original coordinates and
+stalls when combined with automatic Ruiz scaling; the adaptive profile is
+calibrated with Ruiz. Explicit `scaling=:none` or `:equilibrate` choices bypass
+this policy in [`build_execution_plan`](@ref).
+"""
+@inline function automatic_scaling_policy(
+    algorithm::Symbol,
+    parameter_profile::Symbol,
+    parameter_strategy::Symbol,
+)
+    algorithm === :lp_primal_dual && return :lp_geometric
+    parameter_profile === :large_lattice_dense_schur &&
+        parameter_strategy === :fixed && return :none
+    return :sdp_ruiz
+end
+
 function build_execution_plan(
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
@@ -737,10 +762,40 @@ function build_execution_plan(
         classification.cone === :socp ? :socp_psd_lift :
         :sdp_primal_dual
     end
+    selected = if opts.parameter_policy === :auto
+        recommended_parameters(prob, opts)
+    else
+        (
+            β=opts.β,
+            γ=opts.γ,
+            Ωp=opts.Ωp,
+            Ωd=opts.Ωd,
+            predictor=opts.predictor,
+            profile=:fixed,
+        )
+    end
     opts.scaling in (:auto, :none, :equilibrate) ||
         throw(ArgumentError("scaling must be :auto, :none, or :equilibrate"))
+    scaling_profile = if selected.profile === :fixed &&
+                         prob.structure.profile ===
+                         :sparse_coefficients_dense_psd_dense_schur &&
+                         _large_lattice_dense_schur_profile(
+                             prob.dims.m,
+                             prob.dims.n,
+                             prob.dims.L,
+                             prob.structure.coefficient_density,
+                             prob.structure.schur_density,
+                         )
+        :large_lattice_dense_schur
+    else
+        selected.profile
+    end
     scaling = if opts.scaling === :auto
-        algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
+        automatic_scaling_policy(
+            algorithm,
+            scaling_profile,
+            opts.parameter_strategy,
+        )
     elseif opts.scaling === :equilibrate
         algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
     else
@@ -827,18 +882,13 @@ function build_execution_plan(
     else
         :automatic_extended_precision
     end
-    selected = if opts.parameter_policy === :auto
-        recommended_parameters(prob, opts)
-    else
-        (
-            β=opts.β,
-            γ=opts.γ,
-            Ωp=opts.Ωp,
-            Ωd=opts.Ωd,
-            predictor=opts.predictor,
-            profile=:fixed,
-        )
-    end
+    adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
+                         recommended_adaptive_sigma_max(
+                             selected.profile,
+                             selected.β,
+                             opts.adaptive_sigma_max,
+                         ) :
+                         zero(T)
     return ExecutionPlan(
         classification,
         algorithm,
@@ -856,6 +906,7 @@ function build_execution_plan(
             omega_d=selected.Ωd,
             predictor=selected.predictor,
             strategy=opts.parameter_strategy,
+            adaptive_sigma_max,
         ),
     )
 end
