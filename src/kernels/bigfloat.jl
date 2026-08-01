@@ -888,6 +888,118 @@ kmul_owned!(
     B::AbstractVecOrMat{BigFloat},
 ) = kmul_owned!(C, A, B, one(BigFloat), zero(BigFloat))
 
+"""
+    _sparse_bigfloat_gemv_owned!(destination, matrix, vector)
+
+Compute `destination = matrix * vector` directly from CSC nonzeros. Output
+rows receive contributions in ascending matrix-column order, matching the
+dense owned kernel's reduction order while avoiding structural-zero MPFR
+products. The routine is serial because different CSC columns may update the
+same row.
+"""
+function _sparse_bigfloat_gemv_owned!(
+    destination::AbstractVector{BigFloat},
+    matrix::SparseMatrixCSC{BigFloat,Ti},
+    vector::AbstractVector{BigFloat},
+) where {Ti<:Integer}
+    size(matrix, 1) == length(destination) ||
+        throw(DimensionMismatch("sparse BigFloat GEMV output mismatch"))
+    size(matrix, 2) == length(vector) ||
+        throw(DimensionMismatch("sparse BigFloat GEMV input mismatch"))
+    zero_owned!(destination)
+    rows = rowvals(matrix)
+    values = nonzeros(matrix)
+    multiplication_buffer = BigFloat()
+    @inbounds for column in axes(matrix, 2)
+        scalar = vector[column]
+        for position in nzrange(matrix, column)
+            row = rows[position]
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.add_mul,
+                destination[row],
+                destination[row],
+                values[position],
+                scalar,
+            )
+        end
+    end
+    return destination
+end
+
+function _sparse_bigfloat_transpose_workers(
+    matrix::SparseMatrixCSC{BigFloat,Ti},
+    requested_workers::Int,
+) where {Ti<:Integer}
+    useful_workers = max(1, nnz(matrix) ÷ 18_000)
+    return min(
+        max(requested_workers, 1),
+        Threads.nthreads(),
+        max(size(matrix, 2), 1),
+        useful_workers,
+    )
+end
+
+"""
+    _sparse_bigfloat_transpose_gemv_owned!(
+        destination, matrix, vector, requested_workers)
+
+Compute `destination = matrix' * vector` with complete CSC columns assigned
+to workers. A worker owns every destination scalar it writes and uses private
+MPFR accumulation buffers; row indices within each column retain their serial
+order. Small matrices stay serial through a nonzero-work crossover.
+"""
+function _sparse_bigfloat_transpose_gemv_owned!(
+    destination::AbstractVector{BigFloat},
+    matrix::SparseMatrixCSC{BigFloat,Ti},
+    vector::AbstractVector{BigFloat},
+    requested_workers::Int,
+) where {Ti<:Integer}
+    size(matrix, 2) == length(destination) ||
+        throw(DimensionMismatch(
+            "sparse BigFloat transpose GEMV output mismatch",
+        ))
+    size(matrix, 1) == length(vector) ||
+        throw(DimensionMismatch(
+            "sparse BigFloat transpose GEMV input mismatch",
+        ))
+    workers = _sparse_bigfloat_transpose_workers(
+        matrix,
+        requested_workers,
+    )
+    rows = rowvals(matrix)
+    values = nonzeros(matrix)
+    chunk = cld(length(destination), workers)
+    @sync for worker in 1:workers
+        first_column = (worker - 1) * chunk + 1
+        first_column > length(destination) && continue
+        last_column = min(worker * chunk, length(destination))
+        Threads.@spawn begin
+            accumulator = BigFloat()
+            multiplication_buffer = BigFloat()
+            @inbounds for column in first_column:last_column
+                MA.operate!(zero, accumulator)
+                for position in nzrange(matrix, column)
+                    MA.buffered_operate!(
+                        multiplication_buffer,
+                        MA.add_mul,
+                        accumulator,
+                        accumulator,
+                        values[position],
+                        vector[rows[position]],
+                    )
+                end
+                MA.operate_to!(
+                    destination[column],
+                    copy,
+                    accumulator,
+                )
+            end
+        end
+    end
+    return destination
+end
+
 # ---- ksyrk! : S = α*P'*P + β*S. The generic implementation allocates
 #     scratch for every pairwise dot and stores the same mutable BigFloat in
 #     both symmetric positions. This specialization reuses one reduction

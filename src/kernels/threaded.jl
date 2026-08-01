@@ -195,8 +195,186 @@ function use_threaded_block_loops(ws::Workspace{T}, prob::SDPProblem{T}) where {
            )
 end
 
+"""
+    use_owned_bigfloat_block_loops(ws, prob) -> Bool
+
+Select the narrow BigFloat block scheduler used by the exact all-local
+equality-arrow path. Every Schur variable belongs to exactly one PSD block,
+so a worker that owns a complete block also owns every `d`/`v` destination
+that block updates. Block workspaces and status slots are disjoint, while
+`x`, `X`, `Y`, coefficients, and scalar targets are read-only. This is not a
+general permission to thread mutable BigFloat arithmetic.
+"""
+function use_owned_bigfloat_residual_path(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
+    T === BigFloat || return false
+    prob.dims.L >= 256 || return false
+    arrow = ws.arrow
+    arrow === nothing && return false
+    return _has_owned_bigfloat_equality_arrow(ws, arrow)
+end
+
+function use_owned_bigfloat_block_loops(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
+    ws.thread_count > 1 || return false
+    return use_owned_bigfloat_residual_path(ws, prob)
+end
+
+function _owned_bigfloat_compute_residuals!(
+    ws::Workspace{BigFloat},
+    prob::SDPProblem{BigFloat},
+    x,
+    X,
+    y,
+    Y,
+    μ,
+    opts::SolverOptions{BigFloat};
+    factor::Bool=false,
+)
+    cons = prob.cons
+    L, _, n, k = prob.dims
+    copy_owned!(ws.d, prob.c)
+    @sync for bin in ws.block_bins
+        isempty(bin) && continue
+        Threads.@spawn begin
+            for block in bin
+                workspace = ws.blk[block]
+                buildP_owned!(workspace.P, cons, block, x)
+                kaxpby_owned!(
+                    -one(BigFloat),
+                    X[block],
+                    one(BigFloat),
+                    workspace.P,
+                )
+                kaxpby_owned!(
+                    -one(BigFloat),
+                    prob.C[block],
+                    one(BigFloat),
+                    workspace.P,
+                )
+                MA.operate_to!(
+                    ws.block_norms[block],
+                    copy,
+                    knrmInf(workspace.P),
+                )
+                # The all-local predicate guarantees that no other block
+                # writes any active destination touched here.
+                accumulate_v_owned!(
+                    ws.d,
+                    cons,
+                    block,
+                    Y[block],
+                    -one(BigFloat),
+                )
+            end
+        end
+    end
+
+    if n > 0 && prob.B isa SparseMatrixCSC{BigFloat}
+        equality = prob.B::SparseMatrixCSC{BigFloat}
+        _sparse_bigfloat_gemv_owned!(ws.rtil, equality, y)
+        kaxpby_owned!(
+            -one(BigFloat),
+            ws.rtil,
+            one(BigFloat),
+            ws.d,
+        )
+        _sparse_bigfloat_transpose_gemv_owned!(
+            ws.q_rhs,
+            equality,
+            x,
+            ws.thread_count,
+        )
+        copy_owned!(ws.p, prob.b)
+        kaxpby_owned!(
+            -one(BigFloat),
+            ws.q_rhs,
+            one(BigFloat),
+            ws.p,
+        )
+    else
+        n > 0 && kmul_owned!(
+            ws.d,
+            prob.B,
+            y,
+            -one(BigFloat),
+            one(BigFloat),
+        )
+        copy_owned!(ws.p, prob.b)
+        n > 0 && kmul_owned!(
+            ws.p,
+            transpose(prob.B),
+            x,
+            -one(BigFloat),
+            one(BigFloat),
+        )
+    end
+    primal_residual = maximum(ws.block_norms; init=zero(BigFloat))
+    n > 0 &&
+        (primal_residual = max(primal_residual, knrmInf(ws.p)))
+    dual_residual = knrmInf(ws.d)
+    use_affine =
+        opts.parameter_strategy === :adaptive ||
+        (
+            opts.predictor === :sdpb &&
+            primal_residual < opts.ϵ_primal &&
+            dual_residual < opts.ϵ_dual
+        )
+
+    factor && fill!(ws.block_ok, true)
+    @sync for bin in ws.block_bins
+        isempty(bin) && continue
+        Threads.@spawn begin
+            for block in bin
+                workspace = ws.blk[block]
+                kmul_owned!(
+                    workspace.R,
+                    X[block],
+                    Y[block],
+                    -one(BigFloat),
+                    zero(BigFloat),
+                )
+                if !use_affine
+                    @inbounds for index in 1:k[block]
+                        workspace.R[index, index] += μ[block]
+                    end
+                end
+                if factor
+                    copy_owned!(workspace.LX, X[block])
+                    primal_ok = kchol!(workspace.LX)
+                    copy_owned!(workspace.MY, Y[block])
+                    dual_ok = kchol!(workspace.MY)
+                    ws.block_ok[block] = primal_ok && dual_ok
+                end
+            end
+        end
+    end
+    return (
+        primal_residual,
+        dual_residual,
+        !factor || all(ws.block_ok),
+    )
+end
+
 function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},
     x, X, y, Y, μ, opts::SolverOptions{T}; factor::Bool=false) where {T}
+    if use_owned_bigfloat_residual_path(ws, prob)
+        return _owned_bigfloat_compute_residuals!(
+            ws,
+            prob,
+            x,
+            X,
+            y,
+            Y,
+            μ,
+            opts;
+            factor=factor,
+        )
+    end
     if !use_threaded_block_loops(ws, prob)
         p_res, d_res = compute_residuals!(ws, prob, x, X, y, Y, μ, opts)
         blocks_ok = !factor || factor_blocks!(ws, X, Y)
@@ -266,11 +444,46 @@ function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},
     return p_res, d_res, (!factor || all(ws.block_ok))
 end
 
+function _owned_bigfloat_predictor_corrector_rhs!(
+    ws::Workspace{BigFloat},
+    prob::SDPProblem{BigFloat},
+    Y,
+)
+    zero_owned!(ws.v)
+    @sync for bin in ws.block_bins
+        isempty(bin) && continue
+        Threads.@spawn begin
+            for block in bin
+                workspace = ws.blk[block]
+                kmul_owned!(workspace.Z, workspace.P, Y[block])
+                kaxpby_owned!(
+                    -one(BigFloat),
+                    workspace.R,
+                    one(BigFloat),
+                    workspace.Z,
+                )
+                kcholsolve_owned!(workspace.LX, workspace.Z)
+                # Each all-local variable is owned by this block only.
+                accumulate_v_owned!(
+                    ws.v,
+                    prob.cons,
+                    block,
+                    workspace.Z,
+                    one(BigFloat),
+                )
+            end
+        end
+    end
+    return ws.v
+end
+
 function threaded_predictor_corrector_rhs!(
     ws::Workspace{T},
     prob::SDPProblem{T},
     Y,
 ) where {T}
+    use_owned_bigfloat_block_loops(ws, prob) &&
+        return _owned_bigfloat_predictor_corrector_rhs!(ws, prob, Y)
     use_threaded_block_loops(ws, prob) ||
         return _predictor_corrector_rhs!(ws, prob, Y)
     for partial in ws.vpartial
@@ -301,6 +514,42 @@ function threaded_direction_blocks!(
     prob::SDPProblem{T},
     Y,
 ) where {T}
+    if use_owned_bigfloat_block_loops(ws, prob)
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                for block in bin
+                    workspace = ws.blk[block]
+                    buildP_owned!(
+                        workspace.dX,
+                        prob.cons,
+                        block,
+                        ws.dx,
+                    )
+                    kaxpby_owned!(
+                        one(BigFloat),
+                        workspace.P,
+                        one(BigFloat),
+                        workspace.dX,
+                    )
+                    kmul_owned!(
+                        workspace.dY,
+                        workspace.dX,
+                        Y[block],
+                    )
+                    kaxpby_owned!(
+                        one(BigFloat),
+                        workspace.R,
+                        -one(BigFloat),
+                        workspace.dY,
+                    )
+                    kcholsolve_owned!(workspace.LX, workspace.dY)
+                    symmetrize_inplace!(workspace.dY)
+                end
+            end
+        end
+        return ws
+    end
     if !use_threaded_block_loops(ws, prob)
         for l in 1:prob.dims.L
             bw = ws.blk[l]
@@ -579,6 +828,36 @@ function threaded_mehrotra_corrector_rhs!(
     mu::T,
 ) where {T}
     target = sigma * mu
+    if use_owned_bigfloat_block_loops(ws, prob)
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                for block in bin
+                    workspace = ws.blk[block]
+                    dimension = prob.dims.k[block]
+                    dimension == 0 && continue
+                    kmul_owned!(
+                        workspace.R,
+                        X[block],
+                        Y[block],
+                        -one(BigFloat),
+                        zero(BigFloat),
+                    )
+                    kmul_owned!(
+                        workspace.R,
+                        workspace.dX,
+                        workspace.dY,
+                        -one(BigFloat),
+                        one(BigFloat),
+                    )
+                    @inbounds for index in 1:dimension
+                        workspace.R[index, index] += target
+                    end
+                end
+            end
+        end
+        return _owned_bigfloat_predictor_corrector_rhs!(ws, prob, Y)
+    end
     if !use_threaded_block_loops(ws, prob)
         for block in 1:prob.dims.L
             workspace = ws.blk[block]

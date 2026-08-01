@@ -769,3 +769,75 @@ already accurate to roughly the BigFloat512 floor, but `refine_policy =
 :adaptive` still evaluates the expensive exact KKT residual every iteration.
 The next controlled A/B extends the existing conservative `:auto` refinement
 skip from singleton arrows to the new exact all-local equality specialization.
+
+The first version of that extension (job 195896, commit `06ee004`) produced a
+useful negative control. It was numerically identical and again passed every
+certificate, but solve time was 739.26 seconds and refinement still consumed
+152.34 seconds. Telemetry showed only eight accepted correction steps across
+157 iterations: almost all of the time was spent measuring a residual that
+was already below the useful target. The adaptive controller had inserted an
+iteration-local refinement tolerance before `_skip_automatic_refinement` ran;
+the latter mistook this internal value for an explicit user override and
+declined the skip. Commit `f6f5f12` moves the skip decision before controller
+overrides while preserving all existing safety gates. A same-node rerun is in
+progress; the ineffective `06ee004` policy wiring will not be retained as the
+final implementation.
+
+The corrected same-node run (job 195898, commit `f6f5f12`) retained the
+optimization. Refinement fell from 152.34 to 0.034 seconds and the reported
+accepted correction count fell from eight to zero. Solver time decreased from
+739.26 to 589.84 seconds (20.2%, 1.25x), while internal timed phases decreased
+from 593.88 to 451.66 seconds. End-to-end process time decreased from 833.66
+to 680.95 seconds (18.3%). `/usr/bin/time` peak RSS increased from 3,888,916
+to 4,020,652 KiB (3.4%), within the 5% acceptance gate and opposite in sign to
+`Sys.maxrss`, so it is treated as run-to-run variation rather than a retained
+memory cost.
+
+The candidate needed 158 instead of 157 iterations but reached a tighter
+`3.45e-14` gap. Its physical objective was
+`21.0253439247613726121335648342943317108`; original-grid residual was
+`3.90e-63`, off-grid relative residual `1.75050e-11`, minimum PSD eigenvalue
+`3.00e-35`, and disk violation zero. The strict validator accepted the result
+and the job produced `PASSED` plus a complete SHA-256 manifest. The objective
+shift is smaller than the certified primal-dual envelopes. The conservative
+automatic skip is therefore retained.
+
+With refinement removed, residual/local-block factorization is the largest
+single timed phase (160.02 seconds), followed by KKT factorization (131.57
+seconds). The next experiment assigns complete BigFloat block workspaces and
+their unique all-local variable destinations to workers. Sparse equality
+products iterate CSC nonzeros directly; transpose products assign complete
+columns to workers. No mutable BigFloat destination is shared.
+
+### A4 owned BigFloat block scheduling — local preflight
+
+The next candidate implements a deliberately narrow scheduler for native
+BigFloat problems that satisfy the already validated all-local 2x2 equality
+arrow predicate. Complete PSD blocks are assigned to workers, which gives each
+task exclusive ownership of its `P`, `R`, `LX`, `MY`, `Z`, `dX`, and `dY`
+matrices and every all-local vector destination that it updates. Sparse
+equality products now iterate CSC nonzeros directly: `B*y` remains serial
+because columns may share output rows, while `B'*x` assigns complete output
+columns to workers. Every MPFR accumulator and multiplication buffer is
+private to its worker.
+
+On the Apple M4 local preflight at BigFloat512 with 3,400 variables, 144
+equalities, and 1,700 independent 2x2 blocks, median phase times were:
+
+| Julia threads | Residual + block factor (s) | Predictor RHS (s) | Direction recovery (s) | Corrector RHS (s) |
+|---:|---:|---:|---:|---:|
+| 1 | 0.02003 | 0.00553 | 0.00726 | 0.00980 |
+| 2 | 0.01349 | 0.00281 | 0.00324 | 0.00530 |
+| 4 | 0.01243 | 0.00234 | 0.00257 | 0.00461 |
+| 8 | 0.01101 | 0.00172 | 0.00189 | 0.00298 |
+
+The historical generic one-thread residual path took 0.12672 seconds on the
+same fixture. Direct sparse equality traversal therefore accounts for a 6.3x
+one-thread reduction, while block scheduling improves the complete residual
+phase by 11.5x relative to that baseline at eight threads. Predictor,
+direction, and corrector phases scale by 3.2x, 3.8x, and 3.3x respectively.
+All serial/parallel matrices and vectors compared exactly. The focused
+BigFloat regression file passes its existing cases plus 2,057 assertions for
+the new scheduler, and the two related extended-precision BLAS files pass all
+113 assertions. The next acceptance gate is a same-model 64/128-core J40
+BigFloat512 cluster solve with the full physical certificate.

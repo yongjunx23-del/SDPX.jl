@@ -936,6 +936,126 @@ end
     end
 end
 
+@testset "Owned BigFloat all-local block scheduling" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_block_diagonal_equality_fixture(
+            block_count=256,
+            equality_count=16,
+        )
+        requested_threads = min(Threads.nthreads(), 4)
+        serial = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        parallel = SDPX.Workspace(
+            problem;
+            thread_count=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        options = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            threads=requested_threads,
+            parameter_strategy=:adaptive,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        @test SDPX.use_owned_bigfloat_block_loops(parallel, problem) ==
+              (requested_threads > 1)
+        @test SDPX.use_owned_bigfloat_residual_path(serial, problem)
+
+        x = BigFloat.(range(
+            BigFloat("-0.1"),
+            BigFloat("0.2");
+            length=problem.dims.m,
+        ))
+        y = BigFloat.(range(
+            BigFloat("-0.05"),
+            BigFloat("0.08");
+            length=problem.dims.n,
+        ))
+        mu = [BigFloat("0.3") for _ in 1:problem.dims.L]
+        serial_residuals = SDPX.compute_residuals!(
+            serial,
+            problem,
+            x,
+            X,
+            y,
+            Y,
+            mu,
+            options,
+        )
+        serial_ok = SDPX.factor_blocks!(serial, X, Y)
+        parallel_residuals = SDPX.threaded_compute_residuals!(
+            parallel,
+            problem,
+            x,
+            X,
+            y,
+            Y,
+            mu,
+            options;
+            factor=true,
+        )
+        @test serial_ok
+        @test parallel_residuals == (serial_residuals..., true)
+        @test parallel.d == serial.d
+        @test parallel.p == serial.p
+        @test parallel.block_norms == [
+            SDPX.knrmInf(serial.blk[block].P)
+            for block in 1:problem.dims.L
+        ]
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].P == serial.blk[block].P
+            @test parallel.blk[block].R == serial.blk[block].R
+            @test parallel.blk[block].LX == serial.blk[block].LX
+            @test parallel.blk[block].MY == serial.blk[block].MY
+        end
+
+        serial_rhs = SDPX._predictor_corrector_rhs!(serial, problem, Y)
+        parallel_rhs = SDPX.threaded_predictor_corrector_rhs!(
+            parallel,
+            problem,
+            Y,
+        )
+        @test parallel_rhs == serial_rhs
+        SDPX.copy_owned!(serial.dx, x)
+        SDPX.copy_owned!(parallel.dx, x)
+        SDPX.threaded_direction_blocks!(serial, problem, Y)
+        SDPX.threaded_direction_blocks!(parallel, problem, Y)
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].dX == serial.blk[block].dX
+            @test parallel.blk[block].dY == serial.blk[block].dY
+        end
+
+        sigma = BigFloat("0.2")
+        average_mu = BigFloat("0.15")
+        serial_corrector = SDPX.threaded_mehrotra_corrector_rhs!(
+            serial,
+            problem,
+            X,
+            Y,
+            sigma,
+            average_mu,
+        )
+        parallel_corrector = SDPX.threaded_mehrotra_corrector_rhs!(
+            parallel,
+            problem,
+            X,
+            Y,
+            sigma,
+            average_mu,
+        )
+        @test parallel_corrector == serial_corrector
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].R == serial.blk[block].R
+            @test parallel.blk[block].Z == serial.blk[block].Z
+        end
+    end
+end
+
 @testset "BigFloat rank-deficient block-diagonal equalities" begin
     setprecision(BigFloat, 256) do
         problem, X, Y = _bigfloat_block_diagonal_equality_fixture(
