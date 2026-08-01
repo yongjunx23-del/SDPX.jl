@@ -1028,6 +1028,19 @@ end
         for block in 1:problem.dims.L
             @test parallel.blk[block].dX == serial.blk[block].dX
             @test parallel.blk[block].dY == serial.blk[block].dY
+            @test length(unique(objectid.(parallel.blk[block].dY))) == 4
+        end
+
+        # Allocation-free direction recovery reuses dY on every iteration.
+        # A previous symmetrization implementation aliased its two mutable
+        # off-diagonal BigFloat entries, which corrupted the second reuse but
+        # was invisible in one-shot tests.
+        SDPX.threaded_direction_blocks!(serial, problem, Y)
+        SDPX.threaded_direction_blocks!(parallel, problem, Y)
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].dX == serial.blk[block].dX
+            @test parallel.blk[block].dY == serial.blk[block].dY
+            @test length(unique(objectid.(parallel.blk[block].dY))) == 4
         end
 
         sigma = BigFloat("0.2")

@@ -841,3 +841,36 @@ BigFloat regression file passes its existing cases plus 2,057 assertions for
 the new scheduler, and the two related extended-precision BLAS files pass all
 113 assertions. The next acceptance gate is a same-model 64/128-core J40
 BigFloat512 cluster solve with the full physical certificate.
+
+### A4 J40 rejection and MPFR alias root cause — jobs 195901--195903
+
+Two 128-core attempts (jobs 195901 and 195902) were assigned to node135 and
+terminated by PBS before the script started. Both accounting records report
+`exit_status=-9`, zero CPU time, zero RSS, and no output file. This is a node
+or MOM startup failure rather than a solver result, so repeated submission to
+that node was stopped. The 64-core fallback ran normally on node143.
+
+The first real candidate, commit `62dff7f`, was rejected. It reached iteration
+2, then produced an unhealthy direction, exhausted ten restart repairs, and
+returned `MaxRestartsExceeded`; the physical validator correctly rejected the
+zero best iterate. This was a useful long-trajectory gate: 4,712 local tests
+passed, including 2,057 one-shot serial/parallel equality checks, but they did
+not reuse the direction buffer across iterations.
+
+The root cause was mutable-object aliasing in the generic
+`symmetrize_inplace!`. Assigning the same `avg::BigFloat` to both symmetric
+positions made the two off-diagonal entries refer to one MPFR object. The
+historical allocating `kmul!` replaced every output object on the next
+iteration and accidentally repaired the alias. The new allocation-free
+`kmul_owned!` correctly reused its destinations, exposing the latent bug: a
+write to one off-diagonal entry silently changed the other during the next
+matrix traversal. This explains why iteration 1 was plausible and iteration
+2 diverged.
+
+A BigFloat specialization now averages into private scratch, mutates two
+already independent destinations in place, and defensively repairs an
+arbitrary pre-aliased pair with independent copies. The scheduler regression
+now runs direction recovery twice and requires all four 2x2 entries to have
+unique object identities after each pass. The focused suite passes 3,081
+assertions. The corrected candidate must repeat the full J40 certificate gate;
+no result from `62dff7f` is accepted or promoted.

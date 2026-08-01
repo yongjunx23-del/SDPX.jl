@@ -63,6 +63,27 @@ import MutableArithmetics as MA
     return output
 end
 
+@inline function _mpfr_divide_by_two!(
+    output::BigFloat,
+    input::BigFloat,
+)
+    ccall(
+        (:mpfr_div_2ui, Base.MPFR.libmpfr),
+        Cint,
+        (
+            Ref{BigFloat},
+            Ref{BigFloat},
+            Culong,
+            Base.MPFR.MPFRRoundingMode,
+        ),
+        output,
+        input,
+        Culong(1),
+        Base.MPFR.rounding_raw(BigFloat),
+    )
+    return output
+end
+
 @inline function _mpfr_sqrt!(
     output::BigFloat,
     input::BigFloat,
@@ -290,6 +311,36 @@ function zero_owned!(A::AbstractArray{BigFloat})
         MA.operate!(zero, value)
     end
     return A
+end
+
+"""
+    symmetrize_inplace!(matrix::AbstractMatrix{BigFloat})
+
+Average the two off-diagonal entries while preserving independent MPFR
+storage. The generic assignment-based implementation stores the same mutable
+`BigFloat` object in both symmetric positions. A later allocation-free kernel
+then mutates those destinations independently and can silently corrupt its
+own input/output traversal. Solver workspaces start with distinct entries, so
+the hot path only mutates the existing destinations. The defensive alias
+branch repairs arbitrary pre-aliased matrices with two independent copies.
+"""
+function symmetrize_inplace!(matrix::AbstractMatrix{BigFloat})
+    dimension = size(matrix, 1)
+    accumulator = BigFloat()
+    @inbounds for column in 1:dimension, row in 1:(column - 1)
+        upper = matrix[row, column]
+        lower = matrix[column, row]
+        MA.operate_to!(accumulator, +, upper, lower)
+        if upper === lower
+            _mpfr_divide_by_two!(accumulator, accumulator)
+            matrix[row, column] = MA.mutable_copy(accumulator)
+            matrix[column, row] = MA.mutable_copy(accumulator)
+        else
+            _mpfr_divide_by_two!(upper, accumulator)
+            MA.operate_to!(lower, copy, upper)
+        end
+    end
+    return matrix
 end
 
 # ---- kchol! : in-place lower Cholesky via Cholesky–Banachiewicz.
