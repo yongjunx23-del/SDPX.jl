@@ -978,3 +978,47 @@ The dual-objective and target-update experiments were rejected and restored to
 their serial implementations. Their scalar work is too small to amortize task
 launches. Only the three consistently faster phases remain in the candidate.
 The complete four-thread local suite then passed all 5,747 tests in 3m56.7s.
+
+### A6 J40 acceptance — job 196046
+
+Commit `27f4751` was installed as an immutable release and run on the same
+node156 geometry as the preceding accepted candidate: 64 Julia threads, one
+BLAS thread, BigFloat512, and interleaved NUMA allocation. The job passed in
+158 iterations and reproduced the complete objective, residual, gap, PSD, and
+off-grid certificate bit-for-bit. Solver time fell from 423.7045 to 368.7039
+seconds (13.0% lower), and measured internal time fell from 281.2693 to
+229.7291 seconds (18.3% lower). Complementarity analysis fell from 42.5873 to
+19.4535 seconds (2.19x), fraction-to-boundary line search from 17.8919 to
+4.5867 seconds (3.90x), and accepted updates from 4.9455 to 0.8688 seconds
+(5.69x). KKT also varied down from 131.4683 to 121.5944 seconds on the same
+node; this secondary change is not attributed to the block controller.
+
+`/usr/bin/time` reported 457.82 seconds end to end and 3,907,204 KiB peak RSS.
+The peak is 11.4% above job 195930 despite no persistent matrix addition, so
+it is recorded as a possible runtime/GC variation rather than claimed as a
+memory improvement. PBS exited zero, `PASSED` exists, and all six artifact
+hashes verify. Production `current` remains unchanged.
+
+### A7 Reusing BigFloat Cholesky reciprocals
+
+The remaining KKT profile spends 37.7163 seconds applying thousands of 2x2
+local Cholesky factors to 170 equality columns and 23.2830 seconds factoring
+the 170x170 equality normal matrix. Two conservative reciprocal-reuse
+prototypes were therefore evaluated:
+
+- Each 2x2/3x3 local factor caches its diagonal reciprocals in otherwise
+  unused upper-triangular factor slots plus the existing per-block `Dinv`
+  scalar. At the actual two-variable-per-block J40 geometry, the equality
+  panel transform fell from 29.945 to 21.669 ms on eight M4 threads (1.38x).
+  The cached result differs from direct MPFR division by only `7.75e-156`
+  relative at 512 bits.
+- For Cholesky factors of order at least 16, one reciprocal per column replaces
+  repeated divisions below the diagonal. A 170x170 BigFloat512 factor fell
+  from 64.052 to 61.456 ms (1.04x); relative factor difference was
+  `9.66e-155` and reconstruction residual `9.88e-154`.
+
+Focused BigFloat kernel, ownership, sparse-arrow, 2x2 cache, 3x3 cache, KKT,
+and repeated-scheduler tests all pass. The projected gain is dominated by the
+local equality transform (roughly ten seconds per full J40 solve); a complete
+suite and immutable J40 certificate are required before retention.
+The complete local suite passed all 5,831 tests in 3m58.1s.
