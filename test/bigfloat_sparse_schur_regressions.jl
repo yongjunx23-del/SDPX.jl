@@ -964,7 +964,6 @@ end
         )
         @test SDPX.use_owned_bigfloat_block_loops(parallel, problem) ==
               (requested_threads > 1)
-        @test SDPX.use_owned_bigfloat_residual_path(serial, problem)
 
         x = BigFloat.(range(
             BigFloat("-0.1"),
@@ -1003,10 +1002,6 @@ end
         @test parallel_residuals == (serial_residuals..., true)
         @test parallel.d == serial.d
         @test parallel.p == serial.p
-        @test parallel.block_norms == [
-            SDPX.knrmInf(serial.blk[block].P)
-            for block in 1:problem.dims.L
-        ]
         for block in 1:problem.dims.L
             @test parallel.blk[block].P == serial.blk[block].P
             @test parallel.blk[block].R == serial.blk[block].R

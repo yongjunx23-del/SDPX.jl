@@ -874,3 +874,21 @@ now runs direction recovery twice and requires all four 2x2 entries to have
 unique object identities after each pass. The focused suite passes 3,081
 assertions. The corrected candidate must repeat the full J40 certificate gate;
 no result from `62dff7f` is accepted or promoted.
+
+The alias-corrected follow-up `b3fb80f` also failed the full gate, although it
+no longer collapsed. It reached 220 iterations in 535.30 seconds and returned
+`IterLimit`; the best iterate had physical objective
+`21.025343924720055`, relative gap `3.96e-12`, valid PSD/off-grid quantities,
+but a large original dual residual and therefore a rejected status. Comparing
+iteration logs with the accepted `f6f5f12` baseline localized the divergence:
+iterations 1 and 2 have the same printed objectives, primal residuals, and
+steps, while at iteration 3 only the candidate's dual residual jumps from the
+BigFloat floor to `1.01997` and then grows. This implicates the combined
+residual/block-factor specialization rather than the KKT factorization or
+adaptive controller.
+
+The next isolation candidate restores the validated serial residual and block
+factorization path while retaining the ownership-fixed block-parallel
+predictor, direction, and corrector phases. The rejected residual kernel
+remains unreachable while the exact subcomponent is diagnosed; it will be
+removed or repaired before final release.
