@@ -345,6 +345,92 @@ end
     return value
 end
 
+function _predictor_complementarity_diagnostics!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    X,
+    Y,
+    primal_step::T,
+    dual_step::T,
+) where {T}
+    complementarity = zero(T)
+    affine_complementarity = zero(T)
+    if use_owned_bigfloat_block_loops(ws, prob)
+        # Two waves reuse the one scalar slot per block. Each MPFR accumulator
+        # and multiplication scratch belongs to its complete block, and the
+        # final sums retain the historical block order exactly.
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                @inbounds for block in bin
+                    workspace = ws.blk[block]
+                    kdot!(
+                        ws.block_norms[block],
+                        workspace.trialX[1, 1],
+                        X[block],
+                        Y[block],
+                    )
+                end
+            end
+        end
+        @inbounds for block in 1:prob.dims.L
+            complementarity += ws.block_norms[block]
+        end
+        @sync for bin in ws.block_bins
+            isempty(bin) && continue
+            Threads.@spawn begin
+                @inbounds for block in bin
+                    workspace = ws.blk[block]
+                    trial_combine_owned!(
+                        workspace.W1,
+                        X[block],
+                        primal_step,
+                        workspace.dX,
+                        workspace.trialX[1, 1],
+                    )
+                    trial_combine_owned!(
+                        workspace.W2,
+                        Y[block],
+                        dual_step,
+                        workspace.dY,
+                        workspace.trialX[1, 1],
+                    )
+                    kdot!(
+                        ws.block_norms[block],
+                        workspace.trialX[1, 1],
+                        workspace.W1,
+                        workspace.W2,
+                    )
+                end
+            end
+        end
+        @inbounds for block in 1:prob.dims.L
+            affine_complementarity += ws.block_norms[block]
+        end
+    else
+        @inbounds for block in 1:prob.dims.L
+            workspace = ws.blk[block]
+            complementarity += kdot(X[block], Y[block])
+            trial_combine_owned!(
+                workspace.W1,
+                X[block],
+                primal_step,
+                workspace.dX,
+                workspace.trialX[1, 1],
+            )
+            trial_combine_owned!(
+                workspace.W2,
+                Y[block],
+                dual_step,
+                workspace.dY,
+                workspace.trialX[1, 1],
+            )
+            affine_complementarity += kdot(workspace.W1, workspace.W2)
+        end
+    end
+    return complementarity, affine_complementarity
+end
+
 function _affine_predictor_diagnostics!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -359,27 +445,15 @@ function _affine_predictor_diagnostics!(
         zero(T),
         :fraction_to_boundary,
     )
-    complementarity = zero(T)
-    affine_complementarity = zero(T)
-    @inbounds for block in 1:prob.dims.L
-        workspace = ws.blk[block]
-        complementarity += kdot(X[block], Y[block])
-        trial_combine_owned!(
-            workspace.W1,
-            X[block],
+    complementarity, affine_complementarity =
+        _predictor_complementarity_diagnostics!(
+            ws,
+            prob,
+            X,
+            Y,
             primal_step,
-            workspace.dX,
-            workspace.trialX[1, 1],
-        )
-        trial_combine_owned!(
-            workspace.W2,
-            Y[block],
             dual_step,
-            workspace.dY,
-            workspace.trialX[1, 1],
         )
-        affine_complementarity += kdot(workspace.W1, workspace.W2)
-    end
     cone_dimension = sum(prob.dims.k; init=0)
     denominator = T(max(cone_dimension, 1))
     mu = complementarity / denominator
@@ -404,27 +478,16 @@ function _legacy_predictor_diagnostics!(
     X,
     Y,
 ) where {T}
-    current_complementarity = zero(T)
-    affine_complementarity = zero(T)
-    @inbounds for block in 1:prob.dims.L
-        workspace = ws.blk[block]
-        current_complementarity += kdot(X[block], Y[block])
-        trial_combine_owned!(
-            workspace.W1,
-            X[block],
-            one(T),
-            workspace.dX,
-            workspace.trialX[1, 1],
+    unit_step = one(T)
+    current_complementarity, affine_complementarity =
+        _predictor_complementarity_diagnostics!(
+            ws,
+            prob,
+            X,
+            Y,
+            unit_step,
+            unit_step,
         )
-        trial_combine_owned!(
-            workspace.W2,
-            Y[block],
-            one(T),
-            workspace.dY,
-            workspace.trialX[1, 1],
-        )
-        affine_complementarity += kdot(workspace.W1, workspace.W2)
-    end
     cone_dimension = sum(prob.dims.k; init=0)
     denominator = T(max(cone_dimension, 1))
     mu = current_complementarity / denominator

@@ -905,3 +905,76 @@ accumulator. New direct sparse forward and transpose tests require exact
 agreement with the established owned dense kernel and unique MPFR
 destinations. The corrected fast residual path is re-enabled only for a new
 immutable candidate and must pass J40 from scratch.
+
+The isolation run itself (job 195915, commit `a3b9e2d`) completed successfully
+on node58 and establishes the independent value of the remaining block
+scheduler. It reproduced the accepted baseline exactly: 158 iterations,
+physical objective
+`21.0253439247613726121335648342943317107892849925173565643`, relative gap
+`3.45084e-14`, original linear residual `3.89952e-63`, off-grid relative
+residual `1.75050e-11`, minimum PSD eigenvalue `3.00255e-35`, and zero disk
+violation. Solver time was 560.14 seconds versus 589.84 seconds for
+`f6f5f12`, a 5.0% reduction. Predictor plus corrector time fell from 111.79
+to 65.00 seconds, while the restored serial residual/block factor phase
+remained dominant at 165.45 seconds. Peak RSS was 3,632,936 KiB. `PASSED`,
+all expected artifacts, and every SHA-256 verification succeeded.
+
+### A5 Corrected sparse residual accepted — job 195930
+
+Commit `6fa4526c` repaired the sparse BigFloat CSC forward and transpose GEMV
+recurrences, added direct exactness and MPFR-object-ownership regressions, and
+re-enabled the all-local residual path. The complete local suite passed 5,739
+tests before the immutable cluster candidate was installed.
+
+The BigFloat512 J40 certificate run (job 195930 on node156, 64 Julia threads)
+passed every gate in 158 iterations. It reproduced the accepted reference
+bit-for-bit: objective
+`21.0253439247613726121335648342943317107892849925173565642655547851283405741418584401534504196441654763365346531515530664755637606224505556451889536532886632`,
+relative gap `3.45084e-14`, primal residual `1.39838e-153`, dual residual
+`9.42437e-134`, original linear residual `3.89952e-63`, off-grid relative
+residual `1.75050e-11`, minimum PSD eigenvalue `3.00255e-35`, and zero disk
+violation. `PASSED`, every artifact, and every SHA-256 verification succeeded.
+
+Solver time fell from 589.8396 to 423.7045 seconds (1.392x, 28.2% lower),
+while measured internal time fell from 451.6624 to 281.2693 seconds (37.7%
+lower). Residual plus block factorization fell from 160.0222 to 31.6752
+seconds (5.05x, 80.2% lower). KKT remained the largest phase at 131.4683
+seconds: 67.6314 seconds for equality Gram construction, 41.0518 seconds for
+triangular work, and 22.7716 seconds for the equality factorization. Predictor
+and corrector took 11.9450 and 55.6010 seconds; complementarity analysis took
+42.5873 seconds and line search 17.8919 seconds. Peak RSS was 3,508,312 KiB
+under `/usr/bin/time`, 12.7% below the accepted pre-scheduler baseline. This
+candidate is retained. The next experiment targets complementarity diagnostics,
+fraction-to-boundary search, and accepted-step updates using the same strict
+complete-block ownership rule.
+
+### A6 Owned predictor diagnostics and line-search preflight
+
+The next candidate extends complete-block ownership to affine/legacy
+complementarity diagnostics, fraction-to-boundary evaluation, and accepted
+block updates. Per-block MPFR dot products write into independently allocated
+`block_norms` slots, and every global sum retains the original block order.
+The fraction-to-boundary scheduler uses separate primal and dual waves. An
+initial test exposed a subtle mutable-reference hazard: `min` returned one of
+the `block_norms` BigFloat objects, so the dual wave overwrote the saved primal
+bound. Copying that one scalar between waves fixed the issue. The regression
+now compares serial and parallel affine diagnostics, legacy diagnostics, step
+lengths, updated matrices, complementarity, targets, and objectives exactly.
+All 3,088 assertions in the owned scheduling test pass, as do all other
+focused BigFloat tests.
+
+At the J40 block count (1,700 2x2 blocks) and BigFloat512 on the Apple M4, an
+eight-thread median microbenchmark measured:
+
+| Phase | Serial (ms) | 8 threads (ms) | Speedup |
+|---|---:|---:|---:|
+| Adaptive predictor diagnostics | 5.904 | 2.358 | 2.50x |
+| Fraction-to-boundary search | 3.580 | 1.271 | 2.82x |
+| Accepted block update | 1.659 | 0.772 | 2.15x |
+| Dual objective | 0.326 | 0.328 | 0.99x |
+| Adaptive target update | 0.00096 | 0.0263 | 0.04x |
+
+The dual-objective and target-update experiments were rejected and restored to
+their serial implementations. Their scalar work is too small to amortize task
+launches. Only the three consistently faster phases remain in the candidate.
+The complete four-thread local suite then passed all 5,747 tests in 3m56.7s.

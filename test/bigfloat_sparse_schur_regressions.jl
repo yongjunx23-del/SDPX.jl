@@ -1059,6 +1059,111 @@ end
             @test length(unique(objectid.(parallel.blk[block].dY))) == 4
         end
 
+        serial_affine = SDPX._affine_predictor_diagnostics!(
+            serial,
+            problem,
+            X,
+            Y,
+        )
+        parallel_affine = SDPX._affine_predictor_diagnostics!(
+            parallel,
+            problem,
+            X,
+            Y,
+        )
+        @test parallel_affine == serial_affine
+        serial_legacy = SDPX._legacy_predictor_diagnostics!(
+            serial,
+            problem,
+            X,
+            Y,
+        )
+        parallel_legacy = SDPX._legacy_predictor_diagnostics!(
+            parallel,
+            problem,
+            X,
+            Y,
+        )
+        @test parallel_legacy == serial_legacy
+
+        primal_fraction = BigFloat("0.97")
+        dual_fraction = BigFloat("0.96")
+        serial_steps = SDPX.threaded_line_search!(
+            serial,
+            X,
+            Y,
+            primal_fraction,
+            dual_fraction,
+            BigFloat("0.85"),
+            zero(BigFloat),
+            :fraction_to_boundary,
+        )
+        parallel_steps = SDPX.threaded_line_search!(
+            parallel,
+            X,
+            Y,
+            primal_fraction,
+            dual_fraction,
+            BigFloat("0.85"),
+            zero(BigFloat),
+            :fraction_to_boundary,
+        )
+        @test parallel_steps == serial_steps
+
+        serial_objective = SDPX.threaded_dual_objective(
+            serial,
+            problem,
+            y,
+            Y,
+        )
+        parallel_objective = SDPX.threaded_dual_objective(
+            parallel,
+            problem,
+            y,
+            Y,
+        )
+        @test parallel_objective == serial_objective
+
+        serial_X = deepcopy(X)
+        serial_Y = deepcopy(Y)
+        parallel_X = deepcopy(X)
+        parallel_Y = deepcopy(Y)
+        serial_update = SDPX.threaded_update_blocks!(
+            serial,
+            serial_X,
+            serial_Y,
+            serial_steps...,
+        )
+        parallel_update = SDPX.threaded_update_blocks!(
+            parallel,
+            parallel_X,
+            parallel_Y,
+            parallel_steps...,
+        )
+        @test parallel_update == serial_update
+        @test parallel_X == serial_X
+        @test parallel_Y == serial_Y
+
+        serial_mu = [BigFloat("0.3") for _ in 1:problem.dims.L]
+        parallel_mu = [BigFloat("0.3") for _ in 1:problem.dims.L]
+        SDPX.threaded_update_mu!(
+            serial,
+            serial_mu,
+            BigFloat("0.1"),
+            problem.dims.k,
+            serial_update[1],
+            true,
+        )
+        SDPX.threaded_update_mu!(
+            parallel,
+            parallel_mu,
+            BigFloat("0.1"),
+            problem.dims.k,
+            parallel_update[1],
+            true,
+        )
+        @test parallel_mu == serial_mu
+
         sigma = BigFloat("0.2")
         average_mu = BigFloat("0.15")
         serial_corrector = SDPX.threaded_mehrotra_corrector_rhs!(

@@ -216,16 +216,32 @@ function use_owned_bigfloat_residual_path(
     return _has_owned_bigfloat_equality_arrow(ws, arrow)
 end
 
+"""
+    use_owned_bigfloat_block_storage(ws, block_count=length(ws.blk)) -> Bool
+
+Whether complete PSD blocks and their scalar result slots may be scheduled in
+parallel for mutable `BigFloat` arithmetic. This deliberately recognizes only
+the all-local equality-arrow representation: a task owns every mutable matrix
+and Schur-variable destination associated with each assigned block. General
+BigFloat models remain serial.
+"""
+function use_owned_bigfloat_block_storage(
+    ws::Workspace{T},
+    block_count::Int=length(ws.blk),
+) where {T}
+    ws.thread_count > 1 || return false
+    T === BigFloat || return false
+    block_count >= 256 || return false
+    arrow = ws.arrow
+    arrow === nothing && return false
+    return _has_owned_bigfloat_equality_arrow(ws, arrow)
+end
+
 function use_owned_bigfloat_block_loops(
     ws::Workspace{T},
     prob::SDPProblem{T},
 ) where {T}
-    ws.thread_count > 1 || return false
-    T === BigFloat || return false
-    prob.dims.L >= 256 || return false
-    arrow = ws.arrow
-    arrow === nothing && return false
-    return _has_owned_bigfloat_equality_arrow(ws, arrow)
+    return use_owned_bigfloat_block_storage(ws, prob.dims.L)
 end
 
 function _owned_bigfloat_compute_residuals!(
@@ -609,11 +625,13 @@ function threaded_update_blocks!(
     primal_step::T,
     dual_step::T,
 ) where {T}
-    threaded =
+    owned_bigfloat = use_owned_bigfloat_block_storage(ws, length(X))
+    threaded = owned_bigfloat || (
         ws.thread_count > 1 &&
         length(X) > 1 &&
         thread_safe_arithmetic(T) &&
         sum(length, ws.block_bins; init=0) >= 256
+    )
 
     if threaded
         @sync for bin in ws.block_bins
@@ -635,7 +653,16 @@ function threaded_update_blocks!(
                         workspace.dY,
                         workspace.W1[1, 1],
                     )
-                    ws.block_norms[block] = kdot(X[block], Y[block])
+                    if owned_bigfloat
+                        kdot!(
+                            ws.block_norms[block],
+                            workspace.W1[1, 1],
+                            X[block],
+                            Y[block],
+                        )
+                    else
+                        ws.block_norms[block] = kdot(X[block], Y[block])
+                    end
                     ws.block_ok[block] =
                         all(isfinite, X[block]) && all(isfinite, Y[block])
                 end
@@ -1414,7 +1441,9 @@ function threaded_line_search!(
     selected_rule = resolved_step_rule(ws, step_rule)
     use_fraction = selected_rule === :fraction_to_boundary
     if use_fraction
-        if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T)
+        owned_bigfloat = use_owned_bigfloat_block_storage(ws, L)
+        if nt <= 1 || L <= 1 ||
+           (!thread_safe_arithmetic(T) && !owned_bigfloat)
             return fraction_to_boundary_search!(
                 ws,
                 X,
@@ -1424,6 +1453,75 @@ function threaded_line_search!(
             )
         end
         bins = ws.block_bins
+        if owned_bigfloat
+            # `block_norms[p]` is the sole MPFR output owned by bin p. Run the
+            # two sides in separate waves so no temporary BigFloat arrays are
+            # allocated and no mutable scalar can be written by two tasks.
+            @sync for (position, bin) in enumerate(bins)
+                isempty(bin) && continue
+                Threads.@spawn begin
+                    local_bound = one(BigFloat)
+                    for block in bin
+                        workspace = ws.blk[block]
+                        local_bound = min(
+                            local_bound,
+                            fraction_to_boundary_bound!(
+                                workspace.trialX,
+                                X[block],
+                                workspace.dX,
+                            ),
+                        )
+                    end
+                    MA.operate_to!(
+                        ws.block_norms[position],
+                        copy,
+                        local_bound,
+                    )
+                end
+            end
+            boundX = one(BigFloat)
+            @inbounds for position in eachindex(bins)
+                boundX = min(boundX, ws.block_norms[position])
+            end
+            # `min` returns one of its mutable BigFloat operands. Preserve the
+            # primal bound before the dual wave reuses those scalar slots.
+            boundX = MA.mutable_copy(boundX)
+
+            @sync for (position, bin) in enumerate(bins)
+                isempty(bin) && continue
+                Threads.@spawn begin
+                    local_bound = one(BigFloat)
+                    for block in bin
+                        workspace = ws.blk[block]
+                        local_bound = min(
+                            local_bound,
+                            fraction_to_boundary_bound!(
+                                workspace.trialY,
+                                Y[block],
+                                workspace.dY,
+                            ),
+                        )
+                    end
+                    MA.operate_to!(
+                        ws.block_norms[position],
+                        copy,
+                        local_bound,
+                    )
+                end
+            end
+            boundY = one(BigFloat)
+            @inbounds for position in eachindex(bins)
+                boundY = min(boundY, ws.block_norms[position])
+            end
+            return (
+                boundX < one(BigFloat) ?
+                primal_fraction_to_boundary * boundX :
+                one(BigFloat),
+                boundY < one(BigFloat) ?
+                dual_fraction_to_boundary * boundY :
+                one(BigFloat),
+            )
+        end
         boundsX = ones(T, length(bins))
         boundsY = ones(T, length(bins))
         @sync for (p, bin) in enumerate(bins)
