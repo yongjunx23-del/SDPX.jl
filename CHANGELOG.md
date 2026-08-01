@@ -15,6 +15,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   tiles. Larger or shared-variable BigFloat models retain the established
   serial general KKT route. New full-rank and duplicated-column regressions
   validate KKT residuals, object ownership, rank detection, and QR fallback.
+- BigFloat block-diagonal equality solves now parallelize the two dense GEMV
+  operations by assigning complete, disjoint output ranges to workers. Each
+  worker owns its MPFR destinations and reduction buffers, while an
+  arithmetic-work crossover keeps small panels serial. The reduction order
+  within every output is unchanged and regression tests require bit-for-bit
+  agreement with the serial kernel.
 - Block-local residual, Cholesky, predictor, and corrector scheduling now uses
   an arithmetic-aware cubic-work crossover in addition to the historical
   256-block threshold. This activates safe disjoint-block parallelism for

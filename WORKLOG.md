@@ -628,3 +628,74 @@ the complete package target again: 2,623/2,623 tests in 3m54.1s. The final
 cluster run therefore confirms both the retained performance behavior and the
 original-coordinate numerical gates. Production remained unchanged; only the
 isolated candidate was exercised.
+
+## 2026-08-01 — Native BigFloat equality-arrow scaling
+
+### A2/A3 baseline and 128-core calibration — job 195760
+
+The ownership-safe BigFloat block-diagonal equality route from commit
+`152b0c18f48df0b382b1a75f620199be24075e37` was installed as an immutable
+candidate and benchmarked on node178, a dual-socket AMD EPYC 7742 node with
+128 physical cores and eight NUMA domains. The job requested one 128-core
+normal-queue node, 220 GiB, disabled nested BLAS/OMP threading, and used
+`numactl --interleave=all`. Production `current` was not changed.
+
+At 512 bits, the representative 3,400-variable / 144-equality system retained
+the same `6.07e-153` relative KKT residual at every thread point. Gram time
+fell from 4.154 seconds at one worker to 0.105 seconds at 128 workers (39.6x),
+and complete factorization fell from 4.357 to 0.273 seconds (16.0x). The old
+serial BigFloat GEMV path made the complete solve regress from 0.242 to 0.355
+seconds as the requested thread count increased.
+
+The full J80/Na20-shaped 16,400-variable / 230-equality system also retained
+one `5.64e-152` residual at all thread points:
+
+| Workers | Factor (s) | Equality Gram (s) | KKT solve (s) |
+|---:|---:|---:|---:|
+| 1 | 60.093 | 58.618 | 1.790 |
+| 8 | 10.077 | 9.549 | 1.799 |
+| 32 | 3.342 | 2.646 | 2.078 |
+| 64 | 2.044 | 1.476 | 2.072 |
+| 128 | 1.932 | 1.339 | 2.132 |
+
+This is a 43.8x Gram speedup and a 31.1x complete-factor speedup at 128
+workers. The process peak was 5,267,016 KiB, well below the 220 GiB request.
+The complete result directory contains a `PASSED` marker and SHA-256 manifest.
+
+The tile sweep showed that the static tile 8 remains reasonable but is not
+optimal on this Zen 2 node. At 128 workers, tile 6 had a 0.114-second median
+versus 0.128 seconds for tile 8; at 64 workers the medians were 0.186 and
+0.190 seconds. At one worker tile 12 was best. Apple M4 calibration favored
+tile 4 at four to eight workers, so no cross-platform hard-coded tile change
+was retained. A host-calibrated tile field remains a bounded follow-up.
+
+### Ownership-safe BigFloat equality GEMV
+
+Profiling identified the two dense equality matrix-vector products in every
+predictor/corrector KKT solve as the reason solve time did not scale. A new
+internal BigFloat GEMV partitions complete output ranges among workers. Each
+worker owns every MPFR destination it writes and has private accumulator and
+multiplication buffers; each dot product keeps the serial reduction order.
+The worker count is capped by an 18,000 multiply-add work threshold so small
+panels stay serial.
+
+A 512-bit local 3,400-by-144 KKT benchmark reduced solve time from 0.0775
+seconds at one worker to 0.0190 seconds at eight workers (4.1x). Every thread
+point retained the `6.07e-153` residual. Direct tests of both `B*x` and
+`B'*x` are bit-for-bit equal to `kmul_owned!` and verify unique destination
+object identities.
+
+An attempted allocation reduction reused one MPFR multiplication buffer
+across multiple local 2x2 triangular solves inside a parallel task. Although
+small isolated checks sometimes matched, repeated 3,400-variable runs
+produced relative KKT errors around `1e-3`. The proposal was rejected and
+fully removed. The retained GEMV shares no mutable BigFloat object and leaves
+the already validated per-block triangular scratch policy unchanged.
+
+The focused BigFloat sparse regression file passes all 123 assertions. A
+complete package run passed 2,650 numerical, API, and quality assertions; the
+only failure was Aqua's subprocess-based persistent-task check because its
+temporary wrapper could not reach `pkg.julialang.org` in the sandbox. No
+ordinary test failed, and the same Aqua gate had passed in the preceding
+network-enabled full run. The next gate is a same-node cluster A/B of the
+retained GEMV followed by the immutable J40 CSDR model.

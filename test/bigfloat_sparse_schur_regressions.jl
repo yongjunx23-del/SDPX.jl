@@ -849,6 +849,61 @@ end
     end
 end
 
+@testset "Owned BigFloat equality GEMV" begin
+    setprecision(BigFloat, 256) do
+        rows = 512
+        columns = 192
+        requested_threads = min(Threads.nthreads(), 4)
+        panel = Matrix{BigFloat}(undef, rows, columns)
+        @inbounds for column in 1:columns, row in 1:rows
+            panel[row, column] = BigFloat(
+                mod(17row + 29column, 257) - 128,
+            ) / BigFloat(257)
+        end
+        column_vector = BigFloat.(range(
+            BigFloat("-0.4"),
+            BigFloat("0.7");
+            length=columns,
+        ))
+        row_vector = BigFloat.(range(
+            BigFloat("-0.8"),
+            BigFloat("0.2");
+            length=rows,
+        ))
+
+        row_reference = SDPX.alloc_zeros(BigFloat, rows)
+        row_candidate = SDPX.alloc_zeros(BigFloat, rows)
+        SDPX.kmul_owned!(row_reference, panel, column_vector)
+        SDPX._arrow_equality_gemv!(
+            row_candidate,
+            panel,
+            column_vector,
+            requested_threads,
+        )
+        @test row_candidate == row_reference
+        @test length(unique(objectid.(row_candidate))) == rows
+
+        column_reference = SDPX.alloc_zeros(BigFloat, columns)
+        column_candidate = SDPX.alloc_zeros(BigFloat, columns)
+        SDPX.kmul_owned!(column_reference, transpose(panel), row_vector)
+        SDPX._arrow_equality_gemv!(
+            column_candidate,
+            transpose(panel),
+            row_vector,
+            requested_threads,
+        )
+        @test column_candidate == column_reference
+        @test length(unique(objectid.(column_candidate))) == columns
+
+        expected_workers = requested_threads > 1 ? requested_threads : 1
+        @test SDPX._bigfloat_gemv_worker_count(
+            rows,
+            columns,
+            requested_threads,
+        ) == expected_workers
+    end
+end
+
 @testset "BigFloat rank-deficient block-diagonal equalities" begin
     setprecision(BigFloat, 256) do
         problem, X, Y = _bigfloat_block_diagonal_equality_fixture(

@@ -474,6 +474,92 @@ end
     thread_safe_arithmetic(T)
 @inline _arrow_equality_row_thread_safe(::Type{BigFloat}) = true
 
+const _BIGFLOAT_GEMV_MINIMUM_WORK_PER_WORKER = 18_000
+
+function _bigfloat_gemv_worker_count(
+    output_length::Int,
+    reduction_length::Int,
+    requested_workers::Int,
+)
+    work = Int128(max(output_length, 0)) *
+           Int128(max(reduction_length, 0))
+    work_limited = Int(min(
+        work ÷ _BIGFLOAT_GEMV_MINIMUM_WORK_PER_WORKER,
+        typemax(Int),
+    ))
+    return max(
+        1,
+        min(
+            max(requested_workers, 1),
+            Threads.nthreads(),
+            max(output_length, 1),
+            max(work_limited, 1),
+        ),
+    )
+end
+
+"""
+Multiply a dense BigFloat matrix by a vector using disjoint output chunks.
+
+Every worker owns complete destination scalars and private MPFR reduction
+buffers.  The reduction order within each output is unchanged, so this path
+is bit-for-bit identical to `kmul_owned!`.  A work crossover prevents the
+predictor/corrector solves from spawning one task per requested core for a
+small equality panel.
+"""
+function _arrow_equality_gemv!(
+    destination::AbstractVector{T},
+    matrix::AbstractMatrix{T},
+    vector::AbstractVector{T},
+    ::Int,
+) where {T}
+    return kmul_owned!(destination, matrix, vector)
+end
+
+function _arrow_equality_gemv!(
+    destination::AbstractVector{BigFloat},
+    matrix::AbstractMatrix{BigFloat},
+    vector::AbstractVector{BigFloat},
+    requested_workers::Int,
+)
+    size(matrix, 1) == length(destination) ||
+        throw(DimensionMismatch("BigFloat equality GEMV output mismatch"))
+    size(matrix, 2) == length(vector) ||
+        throw(DimensionMismatch("BigFloat equality GEMV input mismatch"))
+    workers = _bigfloat_gemv_worker_count(
+        length(destination),
+        length(vector),
+        requested_workers,
+    )
+    workers == 1 &&
+        return kmul_owned!(destination, matrix, vector)
+
+    chunk = cld(length(destination), workers)
+    @sync for worker in 1:workers
+        first_output = (worker - 1) * chunk + 1
+        first_output > length(destination) && continue
+        last_output = min(worker * chunk, length(destination))
+        Threads.@spawn begin
+            accumulator = BigFloat()
+            multiplication_buffer = BigFloat()
+            @inbounds for output in first_output:last_output
+                kdot!(
+                    accumulator,
+                    multiplication_buffer,
+                    view(matrix, output, :),
+                    vector,
+                )
+                MA.operate_to!(
+                    destination[output],
+                    copy,
+                    accumulator,
+                )
+            end
+        end
+    end
+    return destination
+end
+
 function _factor_arrow_equality_system!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -2017,10 +2103,11 @@ function solve_block_diagonal_equality_kkt!(
         end
     end
 
-    kmul_owned!(
+    _arrow_equality_gemv!(
         ws.q_rhs,
         transpose(ws.Btil),
         ws.rtil,
+        ws.thread_count,
     )
     kaxpby_owned!(
         one(T),
@@ -2030,7 +2117,12 @@ function solve_block_diagonal_equality_kkt!(
     )
     _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
 
-    kmul_owned!(dx_out, ws.Btil, dy_out)
+    _arrow_equality_gemv!(
+        dx_out,
+        ws.Btil,
+        dy_out,
+        ws.thread_count,
+    )
     kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)
     if use_threads
         @sync for bin in ws.block_bins

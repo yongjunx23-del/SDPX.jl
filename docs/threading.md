@@ -139,6 +139,14 @@ complete lower-triangular output tile. Inputs are read-only and no writable
 BigFloat object crosses tasks. The equality specialization likewise assigns
 complete local row blocks during forward/back substitution and complete lower
 Gram tiles during `Btil' * Btil`; it never allocates one full Gram per worker.
+The two equality matrix-vector products in each KKT solve also partition
+complete output ranges. Every dot product keeps the serial reduction order,
+and a work crossover caps the task count when the panel cannot amortize
+startup. On a 512-bit 16,400-by-230 synthetic CSDR-shaped system, the equality
+Gram scaled from 58.618 seconds at one worker to 1.339 seconds at 128 workers
+on a dual-socket EPYC 7742 node while retaining a `5.64e-152` relative KKT
+residual. Use `numactl --interleave=all` on that eight-NUMA-domain node and
+keep BLAS/OMP at one thread for this MPFR path.
 
 Use `Float64x4` or another fixed-width `MultiFloats` type when its precision
 and Float64 exponent range are sufficient and broader solver phases need
