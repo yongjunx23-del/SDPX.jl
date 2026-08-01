@@ -243,7 +243,8 @@ function main(arguments)
         println("status=$status")
         println("physical_objective=$objective")
         println("relative_gap=$(result.gap_rel)")
-        println("validation_accepted=$(validation[\"accepted\"])")
+        validation_accepted = validation["accepted"]
+        println("validation_accepted=$validation_accepted")
     end
 end
 

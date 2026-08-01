@@ -696,6 +696,35 @@ The focused BigFloat sparse regression file passes all 123 assertions. A
 complete package run passed 2,650 numerical, API, and quality assertions; the
 only failure was Aqua's subprocess-based persistent-task check because its
 temporary wrapper could not reach `pkg.julialang.org` in the sandbox. No
-ordinary test failed, and the same Aqua gate had passed in the preceding
-network-enabled full run. The next gate is a same-node cluster A/B of the
+ordinary test failed. A subsequent isolated, network-enabled run of Aqua
+0.8.16's `test_persistent_tasks(SDPX)` completed successfully with exit code
+zero, confirming that the sandbox failure was an infrastructure issue rather
+than a persistent-task regression. The next gate is a cluster A/B of the
 retained GEMV followed by the immutable J40 CSDR model.
+
+### A3 equality-GEMV cluster validation — job 195853
+
+Commit `d4ba4f2b6a1e2b6222605d2883b4121113f5f051` was installed as a second
+immutable candidate and tested at BigFloat512 on node141 (AMD EPYC 7742),
+using 64 physical cores, one BLAS thread, and interleaved NUMA allocation.
+The production symlink remained unchanged.  The node also hosted an unrelated
+job on the other half of the machine, so factor/Gram differences against the
+node178 baseline are treated as secondary evidence; the GEMV improvement is
+large enough to remain unambiguous.
+
+| Geometry | Workers | Factor (s) | Equality Gram (s) | KKT solve (s) | Relative KKT residual |
+|---|---:|---:|---:|---:|---:|
+| 3,400 x 144 | 1 | 4.805 | 4.462 | 0.2513 | `6.068377e-153` |
+| 3,400 x 144 | 64 | 0.262 | 0.129 | 0.02432 | `6.068377e-153` |
+| 16,400 x 230 | 1 | 55.079 | 53.213 | 1.8663 | `5.637828e-152` |
+| 16,400 x 230 | 64 | 2.021 | 1.468 | 0.07641 | `5.637828e-152` |
+
+Against the pre-GEMV 64-worker measurements, KKT solve time improved from
+0.3080 to 0.02432 seconds (12.7x) for 3,400 x 144 and from 2.0715 to 0.07641
+seconds (27.1x) for 16,400 x 230.  One-worker time stayed within node-to-node
+variation.  Every requested worker point from 1/2/4/8/16/32/64 retained the
+same residual, and the complete job exited zero with a `PASSED` marker and
+SHA-256 manifest.  Peak RSS was 4,481,652 KiB, although it is not directly
+comparable to the earlier job that also exercised 128-worker configurations.
+The change is retained.  The next gate is the strict real-model J40 CSDR
+BigFloat512 solve and off-grid physical validation.
