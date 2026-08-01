@@ -695,6 +695,13 @@ function newton_step!(
         q_pivoted=false,
     )
 
+    # Test the public policy before the adaptive controller injects its
+    # iteration-local tolerance. That injected value is automatic state, not
+    # a user override, and must not disable the conservative exact-factor
+    # fast path. Explicit `opts.refine_tol` and non-`:auto` policies still
+    # retain residual-driven refinement.
+    skip_automatic_refinement =
+        _skip_automatic_refinement(ws, opts, kkt)
     corrector_options = adaptive && !iteration_parameters.fallback ?
                         _replace_solver_options(
                             opts;
@@ -705,7 +712,7 @@ function newton_step!(
                         ) :
                         opts
     refine_steps, refine_residual =
-        _skip_automatic_refinement(ws, corrector_options, kkt) ?
+        skip_automatic_refinement ?
         (0, zero(T)) :
         refine_direction!(ws, prob, corrector_options, r)
     refinement_finished = time_ns()
