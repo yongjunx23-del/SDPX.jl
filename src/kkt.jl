@@ -582,17 +582,21 @@ function _factor_arrow_equality_system!(
         _arrow_equality_row_thread_safe(T) &&
         prob.dims.m * n >= 10_000
     if use_threads
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = T === BigFloat ?
+                     _owned_bigfloat_block_task_count(ws) :
+                     length(ws.block_bins)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    ids = arrow.local_ids[block]
-                    isempty(ids) && continue
-                    _arrow_lower_solve_rows!(
-                        ws.Btil,
-                        arrow.Dbuf[block],
-                        ids,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        ids = arrow.local_ids[block]
+                        isempty(ids) && continue
+                        _arrow_lower_solve_rows!(
+                            ws.Btil,
+                            arrow.Dbuf[block],
+                            ids,
+                        )
+                    end
                 end
             end
         end
@@ -2076,18 +2080,22 @@ function solve_block_diagonal_equality_kkt!(
         ws.thread_count > 1 &&
         _arrow_equality_row_thread_safe(T) &&
         length(ws.rtil) >= 2_000
+    task_count = T === BigFloat ?
+                 _owned_bigfloat_block_task_count(ws) :
+                 length(ws.block_bins)
     if use_threads
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    ids = arrow.local_ids[block]
-                    isempty(ids) && continue
-                    _arrow_lower_solve_rows!(
-                        ws.rtil,
-                        arrow.Dbuf[block],
-                        ids,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        ids = arrow.local_ids[block]
+                        isempty(ids) && continue
+                        _arrow_lower_solve_rows!(
+                            ws.rtil,
+                            arrow.Dbuf[block],
+                            ids,
+                        )
+                    end
                 end
             end
         end
@@ -2107,7 +2115,7 @@ function solve_block_diagonal_equality_kkt!(
         ws.q_rhs,
         transpose(ws.Btil),
         ws.rtil,
-        ws.thread_count,
+        task_count,
     )
     kaxpby_owned!(
         one(T),
@@ -2121,21 +2129,22 @@ function solve_block_diagonal_equality_kkt!(
         dx_out,
         ws.Btil,
         dy_out,
-        ws.thread_count,
+        task_count,
     )
     kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)
     if use_threads
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    ids = arrow.local_ids[block]
-                    isempty(ids) && continue
-                    _arrow_transpose_solve_rows!(
-                        dx_out,
-                        arrow.Dbuf[block],
-                        ids,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        ids = arrow.local_ids[block]
+                        isempty(ids) && continue
+                        _arrow_transpose_solve_rows!(
+                            dx_out,
+                            arrow.Dbuf[block],
+                            ids,
+                        )
+                    end
                 end
             end
         end

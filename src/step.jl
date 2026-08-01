@@ -359,48 +359,51 @@ function _predictor_complementarity_diagnostics!(
         # Two waves reuse the one scalar slot per block. Each MPFR accumulator
         # and multiplication scratch belongs to its complete block, and the
         # final sums retain the historical block order exactly.
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = _owned_bigfloat_block_task_count(ws)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                @inbounds for block in bin
-                    workspace = ws.blk[block]
-                    kdot!(
-                        ws.block_norms[block],
-                        workspace.trialX[1, 1],
-                        X[block],
-                        Y[block],
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    @inbounds for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        kdot!(
+                            ws.block_norms[block],
+                            workspace.trialX[1, 1],
+                            X[block],
+                            Y[block],
+                        )
+                    end
                 end
             end
         end
         @inbounds for block in 1:prob.dims.L
             complementarity += ws.block_norms[block]
         end
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                @inbounds for block in bin
-                    workspace = ws.blk[block]
-                    trial_combine_owned!(
-                        workspace.W1,
-                        X[block],
-                        primal_step,
-                        workspace.dX,
-                        workspace.trialX[1, 1],
-                    )
-                    trial_combine_owned!(
-                        workspace.W2,
-                        Y[block],
-                        dual_step,
-                        workspace.dY,
-                        workspace.trialX[1, 1],
-                    )
-                    kdot!(
-                        ws.block_norms[block],
-                        workspace.trialX[1, 1],
-                        workspace.W1,
-                        workspace.W2,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    @inbounds for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        trial_combine_owned!(
+                            workspace.W1,
+                            X[block],
+                            primal_step,
+                            workspace.dX,
+                            workspace.trialX[1, 1],
+                        )
+                        trial_combine_owned!(
+                            workspace.W2,
+                            Y[block],
+                            dual_step,
+                            workspace.dY,
+                            workspace.trialX[1, 1],
+                        )
+                        kdot!(
+                            ws.block_norms[block],
+                            workspace.trialX[1, 1],
+                            workspace.W1,
+                            workspace.W2,
+                        )
+                    end
                 end
             end
         end

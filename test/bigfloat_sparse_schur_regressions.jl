@@ -957,6 +957,10 @@ end
 end
 
 @testset "Owned BigFloat all-local block scheduling" begin
+    @test SDPX._owned_bigfloat_block_task_count(0) == 1
+    @test SDPX._owned_bigfloat_block_task_count(1) == 1
+    @test SDPX._owned_bigfloat_block_task_count(64) == 64
+    @test SDPX._owned_bigfloat_block_task_count(128) == 64
     setprecision(BigFloat, 256) do
         problem, X, Y = _bigfloat_block_diagonal_equality_fixture(
             block_count=256,

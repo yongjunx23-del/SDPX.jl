@@ -237,6 +237,22 @@ function use_owned_bigfloat_block_storage(
     return _has_owned_bigfloat_equality_arrow(ws, arrow)
 end
 
+# Tiny 2x2 MPFR block kernels stop scaling before the tiled equality Gram.
+# On a dual-socket 128-core EPYC node, using all 128 tasks made these phases
+# 2--8x slower even though the disjoint Gram tiles continued to improve. Keep
+# the wide Gram scheduler, but merge precomputed block bins into at most 64
+# task streams. A task still owns complete blocks, and all scalar reductions
+# retain block order, so this changes scheduling only—not arithmetic order.
+const _OWNED_BIGFLOAT_BLOCK_TASK_CAP = 64
+
+@inline function _owned_bigfloat_block_task_count(bin_count::Int)
+    return max(1, min(bin_count, _OWNED_BIGFLOAT_BLOCK_TASK_CAP))
+end
+
+@inline function _owned_bigfloat_block_task_count(ws::Workspace)
+    return _owned_bigfloat_block_task_count(length(ws.block_bins))
+end
+
 function use_owned_bigfloat_block_loops(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -257,39 +273,41 @@ function _owned_bigfloat_compute_residuals!(
 )
     cons = prob.cons
     L, _, n, k = prob.dims
+    task_count = _owned_bigfloat_block_task_count(ws)
     copy_owned!(ws.d, prob.c)
-    @sync for bin in ws.block_bins
-        isempty(bin) && continue
+    @sync for task_index in 1:task_count
         Threads.@spawn begin
-            for block in bin
-                workspace = ws.blk[block]
-                buildP_owned!(workspace.P, cons, block, x)
-                kaxpby_owned!(
-                    -one(BigFloat),
-                    X[block],
-                    one(BigFloat),
-                    workspace.P,
-                )
-                kaxpby_owned!(
-                    -one(BigFloat),
-                    prob.C[block],
-                    one(BigFloat),
-                    workspace.P,
-                )
-                MA.operate_to!(
-                    ws.block_norms[block],
-                    copy,
-                    knrmInf(workspace.P),
-                )
-                # The all-local predicate guarantees that no other block
-                # writes any active destination touched here.
-                accumulate_v_owned!(
-                    ws.d,
-                    cons,
-                    block,
-                    Y[block],
-                    -one(BigFloat),
-                )
+            for bin_index in task_index:task_count:length(ws.block_bins)
+                for block in ws.block_bins[bin_index]
+                    workspace = ws.blk[block]
+                    buildP_owned!(workspace.P, cons, block, x)
+                    kaxpby_owned!(
+                        -one(BigFloat),
+                        X[block],
+                        one(BigFloat),
+                        workspace.P,
+                    )
+                    kaxpby_owned!(
+                        -one(BigFloat),
+                        prob.C[block],
+                        one(BigFloat),
+                        workspace.P,
+                    )
+                    MA.operate_to!(
+                        ws.block_norms[block],
+                        copy,
+                        knrmInf(workspace.P),
+                    )
+                    # The all-local predicate guarantees that no other block
+                    # writes any active destination touched here.
+                    accumulate_v_owned!(
+                        ws.d,
+                        cons,
+                        block,
+                        Y[block],
+                        -one(BigFloat),
+                    )
+                end
             end
         end
     end
@@ -307,7 +325,7 @@ function _owned_bigfloat_compute_residuals!(
             ws.q_rhs,
             equality,
             x,
-            ws.thread_count,
+            task_count,
         )
         copy_owned!(ws.p, prob.b)
         kaxpby_owned!(
@@ -346,29 +364,30 @@ function _owned_bigfloat_compute_residuals!(
         )
 
     factor && fill!(ws.block_ok, true)
-    @sync for bin in ws.block_bins
-        isempty(bin) && continue
+    @sync for task_index in 1:task_count
         Threads.@spawn begin
-            for block in bin
-                workspace = ws.blk[block]
-                kmul_owned!(
-                    workspace.R,
-                    X[block],
-                    Y[block],
-                    -one(BigFloat),
-                    zero(BigFloat),
-                )
-                if !use_affine
-                    @inbounds for index in 1:k[block]
-                        workspace.R[index, index] += μ[block]
+            for bin_index in task_index:task_count:length(ws.block_bins)
+                for block in ws.block_bins[bin_index]
+                    workspace = ws.blk[block]
+                    kmul_owned!(
+                        workspace.R,
+                        X[block],
+                        Y[block],
+                        -one(BigFloat),
+                        zero(BigFloat),
+                    )
+                    if !use_affine
+                        @inbounds for index in 1:k[block]
+                            workspace.R[index, index] += μ[block]
+                        end
                     end
-                end
-                if factor
-                    copy_owned!(workspace.LX, X[block])
-                    primal_ok = kchol!(workspace.LX)
-                    copy_owned!(workspace.MY, Y[block])
-                    dual_ok = kchol!(workspace.MY)
-                    ws.block_ok[block] = primal_ok && dual_ok
+                    if factor
+                        copy_owned!(workspace.LX, X[block])
+                        primal_ok = kchol!(workspace.LX)
+                        copy_owned!(workspace.MY, Y[block])
+                        dual_ok = kchol!(workspace.MY)
+                        ws.block_ok[block] = primal_ok && dual_ok
+                    end
                 end
             end
         end
@@ -470,27 +489,29 @@ function _owned_bigfloat_predictor_corrector_rhs!(
     Y,
 )
     zero_owned!(ws.v)
-    @sync for bin in ws.block_bins
-        isempty(bin) && continue
+    task_count = _owned_bigfloat_block_task_count(ws)
+    @sync for task_index in 1:task_count
         Threads.@spawn begin
-            for block in bin
-                workspace = ws.blk[block]
-                kmul_owned!(workspace.Z, workspace.P, Y[block])
-                kaxpby_owned!(
-                    -one(BigFloat),
-                    workspace.R,
-                    one(BigFloat),
-                    workspace.Z,
-                )
-                kcholsolve_owned!(workspace.LX, workspace.Z)
-                # Each all-local variable is owned by this block only.
-                accumulate_v_owned!(
-                    ws.v,
-                    prob.cons,
-                    block,
-                    workspace.Z,
-                    one(BigFloat),
-                )
+            for bin_index in task_index:task_count:length(ws.block_bins)
+                for block in ws.block_bins[bin_index]
+                    workspace = ws.blk[block]
+                    kmul_owned!(workspace.Z, workspace.P, Y[block])
+                    kaxpby_owned!(
+                        -one(BigFloat),
+                        workspace.R,
+                        one(BigFloat),
+                        workspace.Z,
+                    )
+                    kcholsolve_owned!(workspace.LX, workspace.Z)
+                    # Each all-local variable is owned by this block only.
+                    accumulate_v_owned!(
+                        ws.v,
+                        prob.cons,
+                        block,
+                        workspace.Z,
+                        one(BigFloat),
+                    )
+                end
             end
         end
     end
@@ -535,36 +556,38 @@ function threaded_direction_blocks!(
     Y,
 ) where {T}
     if use_owned_bigfloat_block_loops(ws, prob)
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = _owned_bigfloat_block_task_count(ws)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    workspace = ws.blk[block]
-                    buildP_owned!(
-                        workspace.dX,
-                        prob.cons,
-                        block,
-                        ws.dx,
-                    )
-                    kaxpby_owned!(
-                        one(BigFloat),
-                        workspace.P,
-                        one(BigFloat),
-                        workspace.dX,
-                    )
-                    kmul_owned!(
-                        workspace.dY,
-                        workspace.dX,
-                        Y[block],
-                    )
-                    kaxpby_owned!(
-                        one(BigFloat),
-                        workspace.R,
-                        -one(BigFloat),
-                        workspace.dY,
-                    )
-                    kcholsolve_owned!(workspace.LX, workspace.dY)
-                    symmetrize_inplace!(workspace.dY)
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        buildP_owned!(
+                            workspace.dX,
+                            prob.cons,
+                            block,
+                            ws.dx,
+                        )
+                        kaxpby_owned!(
+                            one(BigFloat),
+                            workspace.P,
+                            one(BigFloat),
+                            workspace.dX,
+                        )
+                        kmul_owned!(
+                            workspace.dY,
+                            workspace.dX,
+                            Y[block],
+                        )
+                        kaxpby_owned!(
+                            one(BigFloat),
+                            workspace.R,
+                            -one(BigFloat),
+                            workspace.dY,
+                        )
+                        kcholsolve_owned!(workspace.LX, workspace.dY)
+                        symmetrize_inplace!(workspace.dY)
+                    end
                 end
             end
         end
@@ -634,37 +657,41 @@ function threaded_update_blocks!(
     )
 
     if threaded
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = owned_bigfloat ?
+                     _owned_bigfloat_block_task_count(ws) :
+                     length(ws.block_bins)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                @inbounds for block in bin
-                    workspace = ws.blk[block]
-                    trial_combine_owned!(
-                        X[block],
-                        X[block],
-                        primal_step,
-                        workspace.dX,
-                        workspace.W1[1, 1],
-                    )
-                    trial_combine_owned!(
-                        Y[block],
-                        Y[block],
-                        dual_step,
-                        workspace.dY,
-                        workspace.W1[1, 1],
-                    )
-                    if owned_bigfloat
-                        kdot!(
-                            ws.block_norms[block],
-                            workspace.W1[1, 1],
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    @inbounds for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        trial_combine_owned!(
                             X[block],
-                            Y[block],
+                            X[block],
+                            primal_step,
+                            workspace.dX,
+                            workspace.W1[1, 1],
                         )
-                    else
-                        ws.block_norms[block] = kdot(X[block], Y[block])
+                        trial_combine_owned!(
+                            Y[block],
+                            Y[block],
+                            dual_step,
+                            workspace.dY,
+                            workspace.W1[1, 1],
+                        )
+                        if owned_bigfloat
+                            kdot!(
+                                ws.block_norms[block],
+                                workspace.W1[1, 1],
+                                X[block],
+                                Y[block],
+                            )
+                        else
+                            ws.block_norms[block] = kdot(X[block], Y[block])
+                        end
+                        ws.block_ok[block] =
+                            all(isfinite, X[block]) && all(isfinite, Y[block])
                     end
-                    ws.block_ok[block] =
-                        all(isfinite, X[block]) && all(isfinite, Y[block])
                 end
             end
         end
@@ -860,29 +887,31 @@ function threaded_mehrotra_corrector_rhs!(
 ) where {T}
     target = sigma * mu
     if use_owned_bigfloat_block_loops(ws, prob)
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = _owned_bigfloat_block_task_count(ws)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    workspace = ws.blk[block]
-                    dimension = prob.dims.k[block]
-                    dimension == 0 && continue
-                    kmul_owned!(
-                        workspace.R,
-                        X[block],
-                        Y[block],
-                        -one(BigFloat),
-                        zero(BigFloat),
-                    )
-                    kmul_owned!(
-                        workspace.R,
-                        workspace.dX,
-                        workspace.dY,
-                        -one(BigFloat),
-                        one(BigFloat),
-                    )
-                    @inbounds for index in 1:dimension
-                        workspace.R[index, index] += target
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        dimension = prob.dims.k[block]
+                        dimension == 0 && continue
+                        kmul_owned!(
+                            workspace.R,
+                            X[block],
+                            Y[block],
+                            -one(BigFloat),
+                            zero(BigFloat),
+                        )
+                        kmul_owned!(
+                            workspace.R,
+                            workspace.dX,
+                            workspace.dY,
+                            -one(BigFloat),
+                            one(BigFloat),
+                        )
+                        @inbounds for index in 1:dimension
+                            workspace.R[index, index] += target
+                        end
                     end
                 end
             end
@@ -1454,64 +1483,67 @@ function threaded_line_search!(
         end
         bins = ws.block_bins
         if owned_bigfloat
-            # `block_norms[p]` is the sole MPFR output owned by bin p. Run the
+            # `block_norms[p]` is the sole MPFR output owned by task p. Run the
             # two sides in separate waves so no temporary BigFloat arrays are
             # allocated and no mutable scalar can be written by two tasks.
-            @sync for (position, bin) in enumerate(bins)
-                isempty(bin) && continue
+            task_count = _owned_bigfloat_block_task_count(ws)
+            @sync for task_index in 1:task_count
                 Threads.@spawn begin
                     local_bound = one(BigFloat)
-                    for block in bin
-                        workspace = ws.blk[block]
-                        local_bound = min(
-                            local_bound,
-                            fraction_to_boundary_bound!(
-                                workspace.trialX,
-                                X[block],
-                                workspace.dX,
-                            ),
-                        )
+                    for bin_index in task_index:task_count:length(bins)
+                        for block in bins[bin_index]
+                            workspace = ws.blk[block]
+                            local_bound = min(
+                                local_bound,
+                                fraction_to_boundary_bound!(
+                                    workspace.trialX,
+                                    X[block],
+                                    workspace.dX,
+                                ),
+                            )
+                        end
                     end
                     MA.operate_to!(
-                        ws.block_norms[position],
+                        ws.block_norms[task_index],
                         copy,
                         local_bound,
                     )
                 end
             end
             boundX = one(BigFloat)
-            @inbounds for position in eachindex(bins)
-                boundX = min(boundX, ws.block_norms[position])
+            @inbounds for task_index in 1:task_count
+                boundX = min(boundX, ws.block_norms[task_index])
             end
             # `min` returns one of its mutable BigFloat operands. Preserve the
             # primal bound before the dual wave reuses those scalar slots.
             boundX = MA.mutable_copy(boundX)
 
-            @sync for (position, bin) in enumerate(bins)
-                isempty(bin) && continue
+            @sync for task_index in 1:task_count
                 Threads.@spawn begin
                     local_bound = one(BigFloat)
-                    for block in bin
-                        workspace = ws.blk[block]
-                        local_bound = min(
-                            local_bound,
-                            fraction_to_boundary_bound!(
-                                workspace.trialY,
-                                Y[block],
-                                workspace.dY,
-                            ),
-                        )
+                    for bin_index in task_index:task_count:length(bins)
+                        for block in bins[bin_index]
+                            workspace = ws.blk[block]
+                            local_bound = min(
+                                local_bound,
+                                fraction_to_boundary_bound!(
+                                    workspace.trialY,
+                                    Y[block],
+                                    workspace.dY,
+                                ),
+                            )
+                        end
                     end
                     MA.operate_to!(
-                        ws.block_norms[position],
+                        ws.block_norms[task_index],
                         copy,
                         local_bound,
                     )
                 end
             end
             boundY = one(BigFloat)
-            @inbounds for position in eachindex(bins)
-                boundY = min(boundY, ws.block_norms[position])
+            @inbounds for task_index in 1:task_count
+                boundY = min(boundY, ws.block_norms[task_index])
             end
             return (
                 boundX < one(BigFloat) ?

@@ -1040,3 +1040,47 @@ and absent end-to-end speedup violate the retention criteria. Both reciprocal
 paths and their tests were reverted. This negative result confirms that MPFR
 division replacement must be evaluated at full-solver trajectory level rather
 than inferred from isolated kernels.
+
+### A8 128-core scaling and phase-aware BigFloat task cap
+
+The restored A6 code was installed as immutable commit `d6b2198`. Job 196080
+ran the same J40 BigFloat512 model on all 128 physical cores of node150, with
+one BLAS thread and interleaved NUMA allocation. It reproduced the complete
+158-iteration objective, gap, residuals, PSD margin, off-grid residual, and
+disk certificate bit-for-bit; all hashes passed. Numerical determinism is
+therefore preserved at 128 workers.
+
+The unmodified scheduler did not scale as a complete solver:
+
+| Phase | 64 workers, job 196046 (s) | 128 workers, job 196080 (s) |
+|---|---:|---:|
+| Solver | 368.704 | 495.811 |
+| Internal total | 229.729 | 356.574 |
+| KKT factorization | 121.594 | 110.009 |
+| Equality Gram | 60.580 | 43.446 |
+| Equality factorization | 23.283 | 19.794 |
+| Constraint triangular | 37.716 | 46.755 |
+| Residual and block factor | 31.282 | 47.694 |
+| Predictor | 11.042 | 41.885 |
+| Corrector | 31.817 | 100.628 |
+| Complementarity analysis | 19.453 | 49.665 |
+| Fraction-to-boundary line search | 4.587 | 18.934 |
+| Accepted update | 0.869 | 7.992 |
+
+The tiled equality Gram still benefits from the second socket, but the many
+tiny 2x2 MPFR block tasks and equality GEMV/triangular tasks suffer launch,
+synchronization, and NUMA costs. Solver time is 34.5% higher at 128 workers;
+peak RSS also rises from 3,907,204 to 4,346,976 KiB. Using every requested
+worker uniformly is therefore rejected.
+
+The next candidate keeps the disjoint equality Gram at the full requested
+width but automatically merges ownership-safe block bins into at most 64 task
+streams. It applies the cap only to native BigFloat all-local equality
+residual, predictor/corrector, direction recovery, complementarity, line
+search, accepted updates, equality GEMV, and local triangular work. The 1--64
+worker path and all other arithmetic types are unchanged. Every per-block
+result remains exclusive, and global sums retain block order. Focused
+BigFloat sparse/ownership tests passed 3,092 assertions; the complete suite
+passed all 5,751 tests in 5m40.7s. A new immutable 128-core J40 run is required
+to determine whether the hybrid schedule retains the 128-core Gram gain while
+recovering the 64-core block-phase performance.
