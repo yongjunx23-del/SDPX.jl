@@ -392,69 +392,6 @@ function _arrow_lower_solve_rows!(
     return destination
 end
 
-# A 2x2 or 3x3 all-local block has enough unused upper-triangular factor slots
-# plus its otherwise unused `Dinv` scalar to cache one reciprocal for each
-# Cholesky diagonal without growing the workspace. Equality preparation applies
-# the same factor to hundreds of right-hand sides, so replacing those repeated
-# MPFR divisions with multiplies is worthwhile. General arrow solves retain
-# their established representation and do not consume this cache.
-function _cache_arrow_small_diagonal_reciprocals!(
-    factor::AbstractMatrix{BigFloat},
-    last_inverse::BigFloat,
-)
-    dimension = size(factor, 1)
-    size(factor, 2) == dimension || return false
-    dimension in (2, 3) || return false
-    first_inverse = factor[1, 2]
-    MA.operate!(one, first_inverse)
-    _mpfr_divide!(first_inverse, first_inverse, factor[1, 1])
-    if dimension == 3
-        second_inverse = factor[1, 3]
-        MA.operate!(one, second_inverse)
-        _mpfr_divide!(second_inverse, second_inverse, factor[2, 2])
-    end
-    MA.operate!(one, last_inverse)
-    _mpfr_divide!(
-        last_inverse,
-        last_inverse,
-        factor[dimension, dimension],
-    )
-    return true
-end
-
-_arrow_lower_solve_rows_cached!(destination, factor, ids, last_inverse) =
-    _arrow_lower_solve_rows!(destination, factor, ids)
-
-function _arrow_lower_solve_rows_cached!(
-    destination::AbstractMatrix{BigFloat},
-    factor::AbstractMatrix{BigFloat},
-    ids::AbstractVector{Int},
-    last_inverse::BigFloat,
-)
-    dimension = length(ids)
-    dimension in (2, 3) && size(factor) == (dimension, dimension) ||
-        return _arrow_lower_solve_rows!(destination, factor, ids)
-    multiplication_buffer = BigFloat()
-    @inbounds for column in axes(destination, 2)
-        for row in 1:dimension
-            value = destination[ids[row], column]
-            for inner in 1:(row - 1)
-                MA.buffered_operate!(
-                    multiplication_buffer,
-                    MA.sub_mul,
-                    value,
-                    factor[row, inner],
-                    destination[ids[inner], column],
-                )
-            end
-            inverse = row == dimension ?
-                      last_inverse : factor[1, row + 1]
-            MA.operate!(*, value, inverse)
-        end
-    end
-    return destination
-end
-
 function _arrow_lower_solve_rows!(
     destination::AbstractVector{T},
     factor::AbstractMatrix{T},
@@ -494,34 +431,6 @@ function _arrow_lower_solve_rows!(
     return destination
 end
 
-function _arrow_lower_solve_rows_cached!(
-    destination::AbstractVector{BigFloat},
-    factor::AbstractMatrix{BigFloat},
-    ids::AbstractVector{Int},
-    last_inverse::BigFloat,
-)
-    dimension = length(ids)
-    dimension in (2, 3) && size(factor) == (dimension, dimension) ||
-        return _arrow_lower_solve_rows!(destination, factor, ids)
-    multiplication_buffer = BigFloat()
-    @inbounds for row in 1:dimension
-        value = destination[ids[row]]
-        for inner in 1:(row - 1)
-            MA.buffered_operate!(
-                multiplication_buffer,
-                MA.sub_mul,
-                value,
-                factor[row, inner],
-                destination[ids[inner]],
-            )
-        end
-        inverse = row == dimension ?
-                  last_inverse : factor[1, row + 1]
-        MA.operate!(*, value, inverse)
-    end
-    return destination
-end
-
 function _arrow_transpose_solve_rows!(
     destination::AbstractVector{T},
     factor::AbstractMatrix{T},
@@ -535,42 +444,6 @@ function _arrow_transpose_solve_rows!(
                 destination[ids[inner]]
         end
         destination[ids[row]] = value / factor[row, row]
-    end
-    return destination
-end
-
-_arrow_transpose_solve_rows_cached!(
-    destination,
-    factor,
-    ids,
-    last_inverse,
-) =
-    _arrow_transpose_solve_rows!(destination, factor, ids)
-
-function _arrow_transpose_solve_rows_cached!(
-    destination::AbstractVector{BigFloat},
-    factor::AbstractMatrix{BigFloat},
-    ids::AbstractVector{Int},
-    last_inverse::BigFloat,
-)
-    dimension = length(ids)
-    dimension in (2, 3) && size(factor) == (dimension, dimension) ||
-        return _arrow_transpose_solve_rows!(destination, factor, ids)
-    multiplication_buffer = BigFloat()
-    @inbounds for row in dimension:-1:1
-        value = destination[ids[row]]
-        for inner in (row + 1):dimension
-            MA.buffered_operate!(
-                multiplication_buffer,
-                MA.sub_mul,
-                value,
-                factor[inner, row],
-                destination[ids[inner]],
-            )
-        end
-        inverse = row == dimension ?
-                  last_inverse : factor[1, row + 1]
-        MA.operate!(*, value, inverse)
     end
     return destination
 end
@@ -715,11 +588,10 @@ function _factor_arrow_equality_system!(
                 for block in bin
                     ids = arrow.local_ids[block]
                     isempty(ids) && continue
-                    _arrow_lower_solve_rows_cached!(
+                    _arrow_lower_solve_rows!(
                         ws.Btil,
                         arrow.Dbuf[block],
                         ids,
-                        arrow.Dinv[block],
                     )
                 end
             end
@@ -728,11 +600,10 @@ function _factor_arrow_equality_system!(
         for block in eachindex(arrow.local_ids)
             ids = arrow.local_ids[block]
             isempty(ids) && continue
-            _arrow_lower_solve_rows_cached!(
+            _arrow_lower_solve_rows!(
                 ws.Btil,
                 arrow.Dbuf[block],
                 ids,
-                arrow.Dinv[block],
             )
         end
     end
@@ -1807,16 +1678,6 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         end
     end
 
-    if T === BigFloat && isempty(gids)
-        @inbounds for block in eachindex(arrow.local_ids)
-            length(arrow.local_ids[block]) in (2, 3) || continue
-            _cache_arrow_small_diagonal_reciprocals!(
-                arrow.Dbuf[block]::Matrix{BigFloat},
-                arrow.Dinv[block]::BigFloat,
-            )
-        end
-    end
-
     if direct_reduced && total_attempts > 0
         if mixed_reduced
             materialize_mixed_arrow_native_fallback!(
@@ -2222,11 +2083,10 @@ function solve_block_diagonal_equality_kkt!(
                 for block in bin
                     ids = arrow.local_ids[block]
                     isempty(ids) && continue
-                    _arrow_lower_solve_rows_cached!(
+                    _arrow_lower_solve_rows!(
                         ws.rtil,
                         arrow.Dbuf[block],
                         ids,
-                        arrow.Dinv[block],
                     )
                 end
             end
@@ -2235,11 +2095,10 @@ function solve_block_diagonal_equality_kkt!(
         for block in eachindex(arrow.local_ids)
             ids = arrow.local_ids[block]
             isempty(ids) && continue
-            _arrow_lower_solve_rows_cached!(
+            _arrow_lower_solve_rows!(
                 ws.rtil,
                 arrow.Dbuf[block],
                 ids,
-                arrow.Dinv[block],
             )
         end
     end
@@ -2272,11 +2131,10 @@ function solve_block_diagonal_equality_kkt!(
                 for block in bin
                     ids = arrow.local_ids[block]
                     isempty(ids) && continue
-                    _arrow_transpose_solve_rows_cached!(
+                    _arrow_transpose_solve_rows!(
                         dx_out,
                         arrow.Dbuf[block],
                         ids,
-                        arrow.Dinv[block],
                     )
                 end
             end
@@ -2285,11 +2143,10 @@ function solve_block_diagonal_equality_kkt!(
         for block in eachindex(arrow.local_ids)
             ids = arrow.local_ids[block]
             isempty(ids) && continue
-            _arrow_transpose_solve_rows_cached!(
+            _arrow_transpose_solve_rows!(
                 dx_out,
                 arrow.Dbuf[block],
                 ids,
-                arrow.Dinv[block],
             )
         end
     end

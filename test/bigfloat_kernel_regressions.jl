@@ -103,21 +103,6 @@ using Test
 
             marker = SDPX.BigFloatCholeskyFactor(factor)
             @test marker.L === factor
-
-            # Dimensions at or above the reciprocal-reuse crossover compute
-            # one inverse diagonal per column. Certify the resulting factor,
-            # not just the small direct-division path above.
-            large_dimension = 24
-            large_generator =
-                BigFloat.(randn(rng, large_dimension, large_dimension))
-            large_matrix =
-                large_generator * transpose(large_generator) +
-                BigFloat(large_dimension) * I
-            large_factor = deepcopy(large_matrix)
-            @test SDPX.kchol!(large_factor)
-            large_lower = Matrix(LowerTriangular(large_factor))
-            @test large_lower * transpose(large_lower) ≈
-                  large_matrix rtol=big"1e-60"
         end
 
         @testset "alias-safe vector updates and trial construction" begin

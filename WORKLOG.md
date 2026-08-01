@@ -999,26 +999,44 @@ it is recorded as a possible runtime/GC variation rather than claimed as a
 memory improvement. PBS exited zero, `PASSED` exists, and all six artifact
 hashes verify. Production `current` remains unchanged.
 
-### A7 Reusing BigFloat Cholesky reciprocals
+### A7 Reusing BigFloat Cholesky reciprocals — rejected
 
 The remaining KKT profile spends 37.7163 seconds applying thousands of 2x2
 local Cholesky factors to 170 equality columns and 23.2830 seconds factoring
 the 170x170 equality normal matrix. Two conservative reciprocal-reuse
 prototypes were therefore evaluated:
 
-- Each 2x2/3x3 local factor caches its diagonal reciprocals in otherwise
+- Each 2x2/3x3 local factor cached its diagonal reciprocals in otherwise
   unused upper-triangular factor slots plus the existing per-block `Dinv`
   scalar. At the actual two-variable-per-block J40 geometry, the equality
   panel transform fell from 29.945 to 21.669 ms on eight M4 threads (1.38x).
-  The cached result differs from direct MPFR division by only `7.75e-156`
+  The cached result differed from direct MPFR division by `7.75e-156`
   relative at 512 bits.
-- For Cholesky factors of order at least 16, one reciprocal per column replaces
+- For Cholesky factors of order at least 16, one reciprocal per column replaced
   repeated divisions below the diagonal. A 170x170 BigFloat512 factor fell
   from 64.052 to 61.456 ms (1.04x); relative factor difference was
   `9.66e-155` and reconstruction residual `9.88e-154`.
 
-Focused BigFloat kernel, ownership, sparse-arrow, 2x2 cache, 3x3 cache, KKT,
-and repeated-scheduler tests all pass. The projected gain is dominated by the
-local equality transform (roughly ten seconds per full J40 solve); a complete
-suite and immutable J40 certificate are required before retention.
-The complete local suite passed all 5,831 tests in 3m58.1s.
+Focused tests passed, as did all 5,831 local tests in 3m58.1s. The immutable
+cluster gate was job 196053 on the same node156, with the same 64 Julia
+threads, one BLAS thread, BigFloat512 arithmetic, model, and validation.
+All hashes and physical gates passed, but the candidate was not retained:
+
+| Metric | Accepted A6 | Reciprocal A7 | Change |
+|---|---:|---:|---:|
+| Iterations | 158 | 157 | -1 |
+| Solver time (s) | 368.704 | 370.705 | +0.5% |
+| Internal time (s) | 229.729 | 235.201 | +2.4% |
+| Constraint triangular (s) | 37.716 | 37.000 | -1.9% |
+| Equality factor (s) | 23.283 | 21.744 | -6.6% |
+| Equality Gram (s) | 60.580 | 67.151 | +10.8% |
+| Relative gap | `3.45084e-14` | `1.88989e-13` | 5.48x worse |
+| Peak RSS, `/usr/bin/time` (KiB) | 3,907,204 | 3,955,072 | +1.2% |
+
+The final physical objective moved from the bit-for-bit reference
+`21.02534392476137261213...` to `21.02534392475973711279...`. Although that
+solution was still physically accepted, the changed trajectory, weaker gap,
+and absent end-to-end speedup violate the retention criteria. Both reciprocal
+paths and their tests were reverted. This negative result confirms that MPFR
+division replacement must be evaluated at full-solver trajectory level rather
+than inferred from isolated kernels.

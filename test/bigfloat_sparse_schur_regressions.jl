@@ -57,11 +57,8 @@ function _bigfloat_block_diagonal_equality_fixture(
     block_count::Int=24,
     equality_count::Int=48,
     rank_deficient::Bool=false,
-    local_variable_count::Int=3,
 )
-    local_variable_count in (2, 3) ||
-        throw(ArgumentError("local_variable_count must be 2 or 3"))
-    variable_count = local_variable_count * block_count
+    variable_count = 3 * block_count
     equality_count <= variable_count ||
         throw(ArgumentError("equalities cannot exceed variables"))
     coefficients = [
@@ -69,15 +66,11 @@ function _bigfloat_block_diagonal_equality_fixture(
         for _ in 1:block_count
     ]
     for block in 1:block_count
-        first = local_variable_count * (block - 1) + 1
+        first = 3 * block - 2
         coefficients[block][first, 1, 1] = one(BigFloat)
-        if local_variable_count == 3
-            coefficients[block][first + 1, 1, 2] = one(BigFloat)
-            coefficients[block][first + 1, 2, 1] = one(BigFloat)
-            coefficients[block][first + 2, 2, 2] = one(BigFloat)
-        else
-            coefficients[block][first + 1, 2, 2] = one(BigFloat)
-        end
+        coefficients[block][first + 1, 1, 2] = one(BigFloat)
+        coefficients[block][first + 1, 2, 1] = one(BigFloat)
+        coefficients[block][first + 2, 2, 2] = one(BigFloat)
     end
     equality = SDPX.alloc_zeros(
         BigFloat,
@@ -799,28 +792,6 @@ end
         factorization = SDPX.factor_kkt!(workspace, problem, options)
         @test factorization.ok
         @test !factorization.q_rank_deficient
-        reference_panel = SDPX.alloc_zeros(
-            BigFloat,
-            problem.dims.m,
-            problem.dims.n,
-        )
-        SDPX.copy_owned!(reference_panel, problem.B)
-        for block in 1:problem.dims.L
-            ids = workspace.arrow.local_ids[block]
-            factor = workspace.arrow.Dbuf[block]
-            SDPX._arrow_lower_solve_rows!(
-                reference_panel,
-                factor,
-                ids,
-            )
-            @test factor[1, 2] == one(BigFloat) / factor[1, 1]
-            @test factor[1, 3] == one(BigFloat) / factor[2, 2]
-            @test workspace.arrow.Dinv[block] ==
-                  one(BigFloat) / factor[3, 3]
-        end
-        panel_scale = max(maximum(abs, reference_panel), one(BigFloat))
-        @test maximum(abs, workspace.Btil - reference_panel) /
-              panel_scale <= big"1e-70"
         automatic_refinement = SDPX.SolverOptions{BigFloat}(
             verbosity=0,
             threads=requested_threads,
@@ -982,80 +953,6 @@ end
             columns,
             requested_threads,
         ) == expected_workers
-    end
-end
-
-@testset "BigFloat cached small arrow solves" begin
-    setprecision(BigFloat, 256) do
-        factor = BigFloat[
-            2 0
-            1 / 7 3 / 2
-        ]
-        last_inverse = BigFloat()
-        @test SDPX._cache_arrow_small_diagonal_reciprocals!(
-            factor,
-            last_inverse,
-        )
-        @test factor[1, 2] == one(BigFloat) / factor[1, 1]
-        @test last_inverse == one(BigFloat) / factor[2, 2]
-
-        ids = [1, 2]
-        panel = BigFloat[
-            1 / 11 2 / 13 3 / 17
-            -2 / 19 4 / 23 5 / 29
-        ]
-        panel_reference = deepcopy(panel)
-        panel_candidate = deepcopy(panel)
-        SDPX._arrow_lower_solve_rows!(
-            panel_reference,
-            factor,
-            ids,
-        )
-        SDPX._arrow_lower_solve_rows_cached!(
-            panel_candidate,
-            factor,
-            ids,
-            last_inverse,
-        )
-        panel_scale = max(maximum(abs, panel_reference), one(BigFloat))
-        @test maximum(abs, panel_candidate - panel_reference) /
-              panel_scale <= big"1e-70"
-
-        vector = BigFloat[2 / 31, -3 / 37]
-        lower_reference = deepcopy(vector)
-        lower_candidate = deepcopy(vector)
-        SDPX._arrow_lower_solve_rows!(
-            lower_reference,
-            factor,
-            ids,
-        )
-        SDPX._arrow_lower_solve_rows_cached!(
-            lower_candidate,
-            factor,
-            ids,
-            last_inverse,
-        )
-        @test maximum(abs, lower_candidate - lower_reference) <=
-              big"1e-70"
-
-        transpose_reference = deepcopy(vector)
-        transpose_candidate = deepcopy(vector)
-        SDPX._arrow_transpose_solve_rows!(
-            transpose_reference,
-            factor,
-            ids,
-        )
-        SDPX._arrow_transpose_solve_rows_cached!(
-            transpose_candidate,
-            factor,
-            ids,
-            last_inverse,
-        )
-        @test maximum(abs, transpose_candidate - transpose_reference) <=
-              big"1e-70"
-        @test length(unique(objectid.(panel_candidate))) == length(panel)
-        @test length(unique(objectid.(lower_candidate))) == length(vector)
-        @test length(unique(objectid.(transpose_candidate))) == length(vector)
     end
 end
 

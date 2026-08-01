@@ -353,12 +353,7 @@ end
 #     rather than assumed. Only the O(k) sqrt/divide calls per column
 #     allocate (non-mutating, so always safe to store into A directly,
 #     per this file's aliasing discipline); the O(k²)/O(k³) inner
-#     products go through kdot!, which doesn't. For sufficiently large
-#     factors, one reciprocal is computed per column and reused below the
-#     diagonal. This replaces O(k²) MPFR divisions with O(k) divisions plus
-#     O(k²) multiplies; tiny factors keep direct division. ----
-
-const _BIGFLOAT_CHOLESKY_RECIPROCAL_MIN_DIMENSION = 16
+#     products go through kdot!, which doesn't. ----
 
 function kchol!(A::AbstractMatrix{BigFloat})
     k = size(A, 1)
@@ -366,9 +361,6 @@ function kchol!(A::AbstractMatrix{BigFloat})
     acc = BigFloat()
     buf = BigFloat()
     difference = BigFloat()
-    reciprocal = BigFloat()
-    reuse_reciprocal =
-        k >= _BIGFLOAT_CHOLESKY_RECIPROCAL_MIN_DIMENSION
     @inbounds for j in 1:k
         if j > 1
             Lj = view(A, j, 1:(j-1))
@@ -385,11 +377,6 @@ function kchol!(A::AbstractMatrix{BigFloat})
         # BigFloat object for every factor entry.
         _mpfr_sqrt!(A[j, j], djj)
         Ljj = A[j, j]
-        multiply_by_reciprocal = reuse_reciprocal && k - j >= 2
-        if multiply_by_reciprocal
-            MA.operate!(one, reciprocal)
-            _mpfr_divide!(reciprocal, reciprocal, Ljj)
-        end
         for i in (j+1):k
             if j > 1
                 Li = view(A, i, 1:(j-1))
@@ -400,11 +387,7 @@ function kchol!(A::AbstractMatrix{BigFloat})
             else
                 num = A[i, j]
             end
-            if multiply_by_reciprocal
-                MA.operate_to!(A[i, j], *, num, reciprocal)
-            else
-                _mpfr_divide!(A[i, j], num, Ljj)
-            end
+            _mpfr_divide!(A[i, j], num, Ljj)
         end
     end
     return true
