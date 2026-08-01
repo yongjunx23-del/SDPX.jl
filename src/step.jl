@@ -160,7 +160,8 @@ This is deliberately narrow:
 
 - only the `:auto` policy may skip work;
 - fixed-width arithmetic requires direct reduced-arrow assembly;
-- native BigFloat is limited to singleton-local arrow systems;
+- native BigFloat is limited to exact singleton-local arrows or the
+  all-local block-diagonal equality specialization;
 - an unregularized factorization is required; and
 - the requested outer tolerance must be no tighter than `sqrt(eps(T))`.
 
@@ -176,6 +177,17 @@ function _has_singleton_arrow_blocks(arrow::ArrowWorkspace)
     return !isempty(arrow.local_ids)
 end
 
+function _has_owned_bigfloat_equality_arrow(
+    ws::Workspace{BigFloat},
+    arrow::ArrowWorkspace{BigFloat},
+)
+    arrow.mixed_reduced_ready && return false
+    isempty(arrow.global_ids) || return false
+    size(ws.Btil, 2) > 0 || return false
+    isempty(arrow.local_ids) && return false
+    return sum(length, arrow.local_ids) == length(ws.rtil)
+end
+
 function _skip_automatic_refinement(
     ws::Workspace{T},
     opts::SolverOptions{T},
@@ -188,10 +200,17 @@ function _skip_automatic_refinement(
     typed_arrow = arrow::ArrowWorkspace{T}
     arithmetic_is_safe = if T === BigFloat
         # The native MPFR factorization has far more precision than a typical
-        # outer solve requests. Mixed Float64x4 factors still need the exact
-        # BigFloat residual to decide whether to fall back.
-        !typed_arrow.mixed_reduced_ready &&
-            _has_singleton_arrow_blocks(typed_arrow)
+        # outer solve requests. The all-local equality specialization is also
+        # exact: every local block and equality factor is native BigFloat.
+        # Mixed Float64x4 factors still need the exact BigFloat residual to
+        # decide whether to fall back.
+        !typed_arrow.mixed_reduced_ready && (
+            _has_singleton_arrow_blocks(typed_arrow) ||
+            _has_owned_bigfloat_equality_arrow(
+                ws,
+                typed_arrow,
+            )
+        )
     else
         ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended &&
             typed_arrow.reduced_panel_ready

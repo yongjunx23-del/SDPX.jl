@@ -2159,6 +2159,14 @@ function _solve_pipeline!(
                 "tiles; residual, direction, and refinement phases remain " *
                 "serial.",
             )
+        elseif plan.schedule === :owned_bigfloat_equality_tiles
+            push!(
+                warnings,
+                "Native BigFloat uses exclusive local-block ownership and " *
+                "disjoint equality Gram/GEMV tiles across " *
+                "$(plan.threads) threads. Other scalar phases retain their " *
+                "ownership-safe scheduling and may scale less strongly.",
+            )
         else
             push!(
                 warnings,

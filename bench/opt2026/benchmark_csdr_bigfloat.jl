@@ -151,7 +151,7 @@ function main(arguments)
             timing=true,
             parameter_policy=:auto,
             parameter_strategy=:adaptive,
-            refine_policy=:adaptive,
+            refine_policy=:auto,
             equilibrate=true,
             scaling=:auto,
             stall_iterations=0,
@@ -208,6 +208,8 @@ function main(arguments)
             "iterations" => result.iterations,
             "restarts" => result.restarts,
             "regularizations" => result.regularizations,
+            "total_refinement_steps" =>
+                result.termination.total_refinement_steps,
             "solver_seconds" => solver_seconds,
             "elimination_seconds" => elimination_seconds,
             "conversion_seconds" => conversion_seconds,

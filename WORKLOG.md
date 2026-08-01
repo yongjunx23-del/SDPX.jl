@@ -728,3 +728,44 @@ SHA-256 manifest.  Peak RSS was 4,481,652 KiB, although it is not directly
 comparable to the earlier job that also exercised 128-worker configurations.
 The change is retained.  The next gate is the strict real-model J40 CSDR
 BigFloat512 solve and off-grid physical validation.
+
+### A3 real J40 BigFloat512 baseline — job 195874
+
+The first submitted driver (job 195869) stopped before model loading because
+an escaped dictionary key inside a Julia string interpolation did not parse.
+The driver was corrected, parsed locally and on the cluster, committed as
+`28f928249f72f315118a36e28ca4626b33117e9a`, and installed as a new immutable
+candidate. No solver code or numerical state ran in the failed job.
+
+The corrected 64-worker run used the certified J40, Na20, Nmu200,
+twice-subtraction maximum model. It solved the exact rounded Float64x4 model
+with native BigFloat512 arithmetic, adaptive IPM parameters, Ruiz
+equilibration, the owned block-diagonal arrow path, and normal-equation
+equalities. It completed in 157 iterations with no restart or regularization:
+
+- solver / end-to-end wall time: 734.47 / 825.81 seconds;
+- `/usr/bin/time` peak RSS: 3,764,096 KiB (3.59 GiB);
+- physical objective: `21.0253439247597371127872626908378907964`;
+- relative gap: `1.88989002973937e-13`;
+- primal / dual residual: `1.13e-153` / `1.99e-133`;
+- maximum original linear residual: `3.90e-63`;
+- maximum off-grid relative residual: `1.75049e-11`;
+- minimum PSD eigenvalue: `1.76019e-34`;
+- maximum disk violation: exactly zero.
+
+The strict physical validator accepted the result. The objective differs from
+the existing certified Float64x4 value by about `4.47e-12` (relative
+`2.13e-13`), consistent with the two primal-dual gaps. The result directory
+contains `PASSED`, complete timing and validation files, the solution, and a
+SHA-256 manifest.
+
+The new Gram/GEMV kernels changed the end-to-end bottleneck. Of the 593.46
+seconds attributed to internal phases, residual plus local-block
+factorization used 155.63 seconds (26.2%), explicit KKT refinement used 150.22
+seconds (25.3%), and KKT factorization used 130.29 seconds (22.0%). Equality
+Gram is now 66.28 seconds (11.2%); the equality triangular preparation and
+factorization add 41.68 and 22.31 seconds. The native unregularized factor is
+already accurate to roughly the BigFloat512 floor, but `refine_policy =
+:adaptive` still evaluates the expensive exact KKT residual every iteration.
+The next controlled A/B extends the existing conservative `:auto` refinement
+skip from singleton arrows to the new exact all-local equality specialization.

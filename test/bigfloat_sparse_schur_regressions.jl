@@ -792,6 +792,38 @@ end
         factorization = SDPX.factor_kkt!(workspace, problem, options)
         @test factorization.ok
         @test !factorization.q_rank_deficient
+        automatic_refinement = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            threads=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+            refine_policy=:auto,
+            ϵ_gap=big"1e-10",
+            ϵ_primal=big"1e-10",
+            ϵ_dual=big"1e-10",
+        )
+        @test SDPX._has_owned_bigfloat_equality_arrow(
+            workspace,
+            workspace.arrow,
+        )
+        @test SDPX._skip_automatic_refinement(
+            workspace,
+            automatic_refinement,
+            factorization,
+        )
+        @test !SDPX._skip_automatic_refinement(
+            workspace,
+            SDPX._replace_solver_options(
+                automatic_refinement;
+                refine_policy=:adaptive,
+            ),
+            factorization,
+        )
+        @test !SDPX._skip_automatic_refinement(
+            workspace,
+            automatic_refinement,
+            merge(factorization, (reg_attempts=1,)),
+        )
         expected_gram = transpose(workspace.Btil) * workspace.Btil
         gram_scale = max(maximum(abs, expected_gram), one(BigFloat))
         @test maximum(abs, LowerTriangular(workspace.Q) -
