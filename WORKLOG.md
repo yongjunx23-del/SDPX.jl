@@ -892,3 +892,16 @@ factorization path while retaining the ownership-fixed block-parallel
 predictor, direction, and corrector phases. The rejected residual kernel
 remains unreachable while the exact subcomponent is diagnosed; it will be
 removed or repaired before final release.
+
+Direct review then found the exact residual defect. Both new CSC `B*y` and
+`B'*x` kernels called `MutableArithmetics.buffered_operate!` with the
+destination both as the accumulator and as an extra multiplicand. The API
+already treats its first post-operation argument as the mutable accumulator,
+so the duplicate argument implemented the wrong recurrence; the transpose
+case stayed identically zero from a zero start. The existing equality-GEMV
+regression used a dense panel and therefore never dispatched to these
+CSC-only helpers. Both calls now pass only `(value, scalar)` after the
+accumulator. New direct sparse forward and transpose tests require exact
+agreement with the established owned dense kernel and unique MPFR
+destinations. The corrected fast residual path is re-enabled only for a new
+immutable candidate and must pass J40 from scratch.

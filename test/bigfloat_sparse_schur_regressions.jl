@@ -927,6 +927,26 @@ end
         @test column_candidate == column_reference
         @test length(unique(objectid.(column_candidate))) == columns
 
+        sparse_panel = sparse(panel)
+        sparse_row_candidate = SDPX.alloc_zeros(BigFloat, rows)
+        SDPX._sparse_bigfloat_gemv_owned!(
+            sparse_row_candidate,
+            sparse_panel,
+            column_vector,
+        )
+        @test sparse_row_candidate == row_reference
+        @test length(unique(objectid.(sparse_row_candidate))) == rows
+
+        sparse_column_candidate = SDPX.alloc_zeros(BigFloat, columns)
+        SDPX._sparse_bigfloat_transpose_gemv_owned!(
+            sparse_column_candidate,
+            sparse_panel,
+            row_vector,
+            requested_threads,
+        )
+        @test sparse_column_candidate == column_reference
+        @test length(unique(objectid.(sparse_column_candidate))) == columns
+
         expected_workers = requested_threads > 1 ? requested_threads : 1
         @test SDPX._bigfloat_gemv_worker_count(
             rows,
@@ -964,6 +984,7 @@ end
         )
         @test SDPX.use_owned_bigfloat_block_loops(parallel, problem) ==
               (requested_threads > 1)
+        @test SDPX.use_owned_bigfloat_residual_path(serial, problem)
 
         x = BigFloat.(range(
             BigFloat("-0.1"),

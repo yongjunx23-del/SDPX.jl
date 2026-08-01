@@ -969,7 +969,6 @@ function _sparse_bigfloat_gemv_owned!(
                 multiplication_buffer,
                 MA.add_mul,
                 destination[row],
-                destination[row],
                 values[position],
                 scalar,
             )
@@ -1034,7 +1033,6 @@ function _sparse_bigfloat_transpose_gemv_owned!(
                     MA.buffered_operate!(
                         multiplication_buffer,
                         MA.add_mul,
-                        accumulator,
                         accumulator,
                         values[position],
                         vector[rows[position]],

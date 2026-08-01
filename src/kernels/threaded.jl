@@ -366,6 +366,19 @@ end
 
 function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},
     x, X, y, Y, μ, opts::SolverOptions{T}; factor::Bool=false) where {T}
+    if use_owned_bigfloat_residual_path(ws, prob)
+        return _owned_bigfloat_compute_residuals!(
+            ws,
+            prob,
+            x,
+            X,
+            y,
+            Y,
+            μ,
+            opts;
+            factor=factor,
+        )
+    end
     if !use_threaded_block_loops(ws, prob)
         p_res, d_res = compute_residuals!(ws, prob, x, X, y, Y, μ, opts)
         blocks_ok = !factor || factor_blocks!(ws, X, Y)
