@@ -1084,3 +1084,136 @@ BigFloat sparse/ownership tests passed 3,092 assertions; the complete suite
 passed all 5,751 tests in 5m40.7s. A new immutable 128-core J40 run is required
 to determine whether the hybrid schedule retains the 128-core Gram gain while
 recovering the 64-core block-phase performance.
+
+Job 196243 performed that gate on node146. It passed all hashes and reproduced
+the complete objective and physical certificate bit-for-bit in 158 iterations.
+The hybrid schedule improved 128-core solver time from 495.811 to 425.880
+seconds (14.1%) and internal time from 356.574 to 286.429 seconds (19.7%).
+The major phase changes were:
+
+| Phase | Uniform 128 (s) | Hybrid 128 (s) | Change |
+|---|---:|---:|---:|
+| KKT factorization | 110.009 | 107.601 | -2.2% |
+| Equality Gram | 43.446 | 41.672 | -4.1% |
+| Residual and block factor | 47.694 | 39.929 | -16.3% |
+| Predictor | 41.885 | 26.852 | -35.9% |
+| Corrector | 100.628 | 68.341 | -32.1% |
+| Complementarity analysis | 49.665 | 35.754 | -28.0% |
+| Fraction-to-boundary line search | 18.934 | 10.605 | -44.0% |
+| Accepted update | 7.992 | 4.272 | -46.5% |
+
+Peak RSS fell from 4,346,976 to 4,058,792 KiB (6.6%). The hybrid candidate is
+retained because it provides a clear improvement for over-wide requests and
+leaves every 1--64 worker route unchanged. It is still 15.5% slower than the
+64-worker solver result, so 64 remains the provisional recommendation for
+this J40 geometry. A 96-worker crossover run is the final scaling check.
+
+Job 196263 completed that check on node113. It again reproduced every
+high-precision and physical certificate field bit-for-bit. Solver time was
+398.303 seconds, internal time 265.944 seconds, and `/usr/bin/time` peak RSS
+4,147,008 KiB. This is 6.5% faster than hybrid 128 but still 8.0% slower than
+64 workers. The measured crossover is therefore unambiguous for J40:
+
+| Requested workers | Fine-grained task cap | Solver (s) | Internal (s) | Equality Gram (s) | Peak RSS (KiB) |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 64 | 368.704 | 229.729 | 60.580 | 3,907,204 |
+| 96 | 64 | 398.303 | 265.944 | 56.632 | 4,147,008 |
+| 128, uniform baseline | 128 | 495.811 | 356.574 | 43.446 | 4,346,976 |
+| 128, retained hybrid | 64 | 425.880 | 286.429 | 41.672 | 4,058,792 |
+
+Recommend 64 Julia threads, one BLAS thread, and `numactl --interleave=all`
+for this model. Wider allocations remain supported and safer with the retained
+cap, but should be used only after a larger equality panel demonstrates enough
+Gram savings to offset cross-socket scheduling costs.
+
+### A8 final Task_Low08 Float64 regression — job 196277
+
+The final cross-problem gate used the immutable `c9d6514` release and the
+archived Task_Low08 input with every input and output hash checked. An initial
+32-core reservation (job 196272) terminated on its execution host before the
+PBS payload started: it recorded zero payload CPU, zero payload RSS, no driver
+output, and no solver artifact. It is classified as infrastructure rather than
+a candidate regression. The only retry, job 196277 on node58, reserved 64
+cores and ran the established performance configuration with 16 Julia threads,
+16 OpenBLAS threads, adaptive parameters, automatic scaling, and automatic
+step and parameter policies.
+
+The retry passed. It returned `Optimal` in 28 iterations with no restart or
+regularization. The primal and dual objectives were `0.6532912655025964` and
+`0.6532910479425099`; relative gap was `2.1756008650175573e-7`, primal
+residual `3.315879792964438e-10`, and dual residual
+`9.534220635210033e-12`. Equality presolve reduced 482 rows to rank 394 with
+dependency residual `3.309223593712139e-16`. The maximum original equality
+violation was `3.315879792964438e-10`, minimum primal PSD eigenvalue
+`-7.12597888558375e-11`, and minimum dual PSD eigenvalue
+`1.9753595193928247e-15`. The aggregate certificate is available and valid,
+both PSD gates passed, and its failure list is empty.
+
+Solver time was 33.846 seconds and driver total time was 35.585 seconds.
+`/usr/bin/time` measured 94.80 seconds including input, startup, and full
+validation, with 4,469,000 KiB peak RSS. The principal timed solver phases
+were:
+
+| Phase | Time (s) |
+|---|---:|
+| Schur assembly | 7.540 |
+| KKT total | 9.512 |
+| Schur factorization | 5.929 |
+| Constraint triangular solve | 1.445 |
+| Equality factorization | 0.987 |
+| Predictor | 1.555 |
+| Corrector | 2.660 |
+| Refinement | 0.406 |
+| Equilibration | 0.245 |
+
+PBS exited zero, the `PASSED` marker exists, and the recorded SHA-256 manifest
+verifies. This closes the required Task_Low08 regression without changing its
+Float64 route.
+
+### A8 BigFloat1024 support gate — job 196296
+
+The retained 64-worker candidate was also run at a fixed 1,024-bit working
+precision on the same immutable J40 mathematical model. Job 196296 used node141,
+64 Julia threads, one BLAS thread, interleaved NUMA allocation, and 64 GiB. It
+returned `Optimal` in 157 iterations without restart, regularization,
+refinement, or fallback. PBS exited zero, the `PASSED` marker exists, and all
+six recorded artifacts verify against their SHA-256 manifest.
+
+The 1,024-bit solve took 553.959 seconds, with 360.413 seconds attributed to
+instrumented solver phases. `/usr/bin/time` measured 644.37 seconds end to end
+and 4,268,480 KiB peak RSS. The dominant phases were KKT/equality work:
+
+| Phase | BigFloat512, 64 workers (s) | BigFloat1024, 64 workers (s) |
+|---|---:|---:|
+| Solver | 368.704 | 553.959 |
+| Instrumented total | 229.729 | 360.413 |
+| KKT factorization | 121.594 | 207.640 |
+| Equality Gram | 60.580 | 115.491 |
+| Equality factorization | 23.283 | 42.838 |
+| Constraint triangular solve | 37.716 | 49.298 |
+| Residual and block factor | 31.282 | 51.048 |
+| Predictor | 11.042 | 15.102 |
+| Corrector | 31.817 | 46.024 |
+
+The two precision runs used different nodes, so the ratios are orientation
+rather than a same-node speed claim. The phase ranking is nevertheless clear:
+the equality Gram and native BigFloat Cholesky are the first 1,024-bit targets.
+
+The physical certificate passed: original linear residual
+`3.8995196507e-63`, off-grid relative residual `1.7504886435e-11`, minimum PSD
+eigenvalue `1.7601915718e-34`, and zero disk violation. The primal and dual
+solver residuals were `9.6515590158e-308` and `2.7038636179e-287`. The final
+physical objective was
+`21.02534392475973711278726269083789079642679721718820330510155065579...`
+with relative gap `1.8898900297e-13`.
+
+This trajectory is valid but not an accuracy improvement over the 512-bit
+reference, whose relative gap was `3.4508398259e-14` and whose physical
+objective was `21.02534392476137261213...`. The input coefficients were
+precomputed at BigFloat1024 and rounded once to Float64x4 before either solve;
+increasing the solver precision cannot restore discarded coefficient digits.
+The adaptive path also terminates from measured tolerances rather than trying
+to consume every available mantissa bit. BigFloat1024 is therefore confirmed
+as supported, but 512 bits remains the recommended fixed precision for this
+rounded model. No default precision or termination rule is changed from this
+single valid trajectory.

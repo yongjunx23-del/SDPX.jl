@@ -21,6 +21,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arithmetic-work crossover keeps small panels serial. The reduction order
   within every output is unchanged and regression tests require bit-for-bit
   agreement with the serial kernel.
+- All-local BigFloat equality solves now use phase-aware scheduling above 64
+  requested workers. Fine-grained block, local triangular, equality GEMV,
+  predictor/corrector, line-search, and update work is merged into at most 64
+  ownership-safe task streams, while the tiled lower equality Gram retains the
+  full requested width. On the certified J40 BigFloat512 case this reduced the
+  128-worker solver from 495.811 to 425.880 seconds and peak RSS by 6.6%, with
+  a bit-for-bit identical 158-iteration certificate. The measured 64-worker
+  configuration remains faster than both 96 and 128 workers and is the
+  recommended width for that model.
+- The final immutable-candidate Task_Low08 Float64 regression remained
+  `Optimal` with a valid original-coordinate certificate: 28 iterations,
+  33.846 seconds solver time, `2.176e-7` relative gap, `3.316e-10` primal
+  residual, and `9.534e-12` dual residual. The Float64 solve route is
+  unchanged by the BigFloat scheduling work.
+- A fixed BigFloat1024 J40 support gate passed its physical certificate in 157
+  iterations with no restart, regularization, refinement, or fallback. It took
+  553.959 seconds at 64 workers and did not improve the terminating gap over
+  BigFloat512 on the once-rounded Float64x4 input, so the documented
+  model-specific recommendation remains 512 bits.
 - Block-local residual, Cholesky, predictor, and corrector scheduling now uses
   an arithmetic-aware cubic-work crossover in addition to the historical
   256-block threshold. This activates safe disjoint-block parallelism for

@@ -142,11 +142,32 @@ Gram tiles during `Btil' * Btil`; it never allocates one full Gram per worker.
 The two equality matrix-vector products in each KKT solve also partition
 complete output ranges. Every dot product keeps the serial reduction order,
 and a work crossover caps the task count when the panel cannot amortize
-startup. On a 512-bit 16,400-by-230 synthetic CSDR-shaped system, the equality
+startup. Fine-grained all-local block, triangular, GEMV, predictor/corrector,
+line-search, and update phases are additionally capped at 64 ownership tasks;
+the disjoint equality Gram tiles may use the full requested width. On a
+512-bit 16,400-by-230 synthetic CSDR-shaped system, the equality
 Gram scaled from 58.618 seconds at one worker to 1.339 seconds at 128 workers
 on a dual-socket EPYC 7742 node while retaining a `5.64e-152` relative KKT
 residual. Use `numactl --interleave=all` on that eight-NUMA-domain node and
 keep BLAS/OMP at one thread for this MPFR path.
+
+The cap comes from an end-to-end certificate run, not the synthetic Gram
+alone. On the J40 BigFloat512 model, a uniform 128-worker schedule took
+495.811 seconds, versus 368.704 seconds at 64 workers. The phase-aware cap
+reduced the 128-worker time to 425.880 seconds and peak RSS by 6.6%, while
+reproducing the 158-iteration objective, gap, residuals, PSD margin, off-grid
+residual, and disk certificate bit-for-bit. Because 64 remains 15.5% faster,
+a 96-worker check was also run; it took 398.303 seconds, still 8.0% slower than
+64. Use 64 as the starting point for this geometry and test wider allocations
+only when the equality panel is materially larger.
+
+The 64-worker path was separately validated at a fixed 1,024-bit precision.
+It passed the J40 physical certificate in 157 iterations and took 553.959
+seconds, with 4,268,480 KiB peak RSS. Equality Gram (115.491 seconds) and the
+170-by-170 equality factorization (42.838 seconds) became the main
+precision-scaling costs. The corresponding 512-bit solve remained faster at
+368.704 seconds and had a tighter terminating relative gap on this once-rounded
+`Float64x4` input, so 512 bits remains the recommended model-specific setting.
 
 Use `Float64x4` or another fixed-width `MultiFloats` type when its precision
 and Float64 exponent range are sufficient and broader solver phases need

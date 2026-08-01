@@ -23,7 +23,8 @@ more than `Float64`.
   `MultiFloats.Float64xN` use cost-aware block scheduling, triangular Schur
   reduction, and phase-aware BLAS thread control. General native `BigFloat`
   kernels deliberately use one solver thread; exact singleton-local `2x2`
-  arrows may use ownership-safe native block and Schur-tile workers.
+  arrows and all-local `2x2` equality cells may use ownership-safe native
+  block, triangular, GEMV, and Schur/Gram-tile workers.
 - **Structure-aware**: sparse constraint storage, a block-arrow KKT path for
   models with shared plus per-block local variables, a no-pair-buffer fused
   kernel for `2x2` blocks, and an optional combined reduced shared panel for
@@ -477,6 +478,13 @@ equalities are the native exceptions. Their independent block work and
 complete lower-triangular Schur or equality-Gram tiles may run concurrently
 without sharing writable MPFR objects.
 
+For all-local equality cells, fine-grained block, triangular, GEMV,
+predictor/corrector, line-search, and update phases use at most 64 ownership
+tasks. The equality Gram may still use a wider requested allocation because
+its lower-triangular tiles contain enough work to scale across a second
+socket. This phase-aware cap is numerical-order preserving: block results are
+exclusive and global reductions remain in block order.
+
 The packed triangular Schur/Gram backend for `Float64x4` and `BigFloat` is
 available through `extended_precision_blas=:auto` only when a workload clears
 a conservative runtime and memory crossover. Both types use that conservative
@@ -555,13 +563,30 @@ Schur assembly, residual construction, direction recovery, arrow
 factorisation/solves, and line search.
 
 This applies generally to immutable fixed-width arithmetic. Most native
-Most native `BigFloat` phases remain serial because mutable scalar ownership, allocator
+`BigFloat` phases remain serial because mutable scalar ownership, allocator
 pressure, and per-worker high-precision workspace growth make unrestricted
 threading unsafe. Exact singleton-local `2x2` arrows and all-local 2x2 cell
 systems with explicit equalities are the validated exceptions: block work owns
 disjoint storage, and triangular SYRK tasks own disjoint Schur or equality-Gram
 tiles, so those phases may use the requested workers without sharing a
 writable MPFR object.
+
+On the certified J40 BigFloat512 CSDR model, a uniform 128-worker schedule was
+34.5% slower than 64 workers even though equality Gram time improved. Capping
+the fine-grained phases at 64 tasks reduced the 128-worker solver from 495.81
+to 425.88 seconds and peak RSS from 4,346,976 to 4,058,792 KiB, with a
+bit-for-bit identical certificate. The 64-worker solve remains faster at
+368.70 seconds; a 96-worker crossover took 398.30 seconds. Therefore 64 is the
+recommended width for this geometry, and wider runs should be reserved for
+larger equality panels after measurement.
+
+A fixed 1,024-bit run of the same J40 model also passed its complete physical
+certificate in 157 iterations. It took 553.96 seconds at 64 workers versus
+368.70 seconds for 512 bits, while its relative gap (`1.89e-13`) was not tighter
+than the 512-bit result (`3.45e-14`). Because the archived coefficients were
+rounded once to `Float64x4`, extra solver precision cannot recover input digits.
+Use 512 bits for this model unless a tighter, genuinely higher-precision input
+or certificate requirement justifies the additional cost.
 
 Scaling depends strongly on problem size — small models do not have enough work
 per block to amortise the synchronisation. Small Float64 Schur builds therefore

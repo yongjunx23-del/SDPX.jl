@@ -291,7 +291,7 @@ adjust PBS resources after measuring the target node:
 | Float64x4 sparse/block-arrow | 8 | sweep 1, 2, 4, 8 | 1 | SDPX Julia block and Schur scheduling |
 | BigFloat, general native | site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
 | BigFloat, exact singleton-local `2x2` arrow | 8 | sweep 1, 2, 4, 8 | 1 | native block preparation and disjoint reduced-Schur tiles may be parallel; residual/refinement remains serial |
-| BigFloat, all-local `2x2` cells plus equalities | measured node allocation | sweep 1, 2, 4, 8, then higher only while scaling | 1 | disjoint local row work plus tiled lower equality Gram; avoid nested BLAS threading |
+| BigFloat, all-local `2x2` cells plus equalities | measured node allocation | sweep through 64; use 96/128 only for a larger measured panel | 1 | block/GEMV/triangular tasks cap at 64; tiled lower equality Gram may use the full width |
 | BigFloat, experimental mixed arrow | 8 | sweep 1, 2, 4, 8 | 1 | the Float64x4 reduced panel/factorization is parallel; BigFloat residual/refinement remains serial |
 | Task_Low08 Float64 validation | 8 | 8 | 8 | sparse assembly plus dense OpenBLAS KKT factorization |
 | Task_Low08 Float64 performance on dual EPYC 7742 | 16 | 16 | 16 | OpenBLAS with `numactl --interleave=all`; measured, hardware-specific |
@@ -301,11 +301,25 @@ adjust PBS resources after measuring the target node:
 
 General native `BigFloat` uses one solver thread. Exact singleton-local `2x2`
 arrows and all-local 2x2 equality-cell systems may use additional cores only
-for ownership-safe block work and disjoint triangular Schur or Gram tiles. The opt-in mixed reduced-arrow
+for ownership-safe block work and disjoint triangular Schur or Gram tiles.
+For the all-local equality path, fine-grained MPFR phases automatically use at
+most 64 ownership tasks while the equality Gram may use a wider requested
+allocation. On the certified J40 BigFloat512 model, 64 workers took 368.704
+seconds; uniform 128 workers took 495.811 seconds, and phase-capped 128 workers
+took 425.880 seconds with the exact same certificate. A 96-worker crossover
+took 398.303 seconds, so start at 64 workers for this geometry. The opt-in
+mixed reduced-arrow
 backend may also use those cores for its Float64x4 panel and factorization,
-while exact BigFloat residual and
-refinement work remains serial. It must be benchmarked rather than assumed to
-be faster.
+while exact BigFloat residual and refinement work remains serial. It must be
+benchmarked rather than assumed to be faster.
+
+The fixed BigFloat1024 support gate (job 196296) also passed at 64 workers:
+157 iterations, 553.959 seconds solver time, 4,268,480 KiB peak RSS, valid
+physical certificate, and no restart, regularization, refinement, or fallback.
+It was slower and did not terminate with a tighter relative gap than the
+512-bit run because this archived model is rounded once to Float64x4. Retain
+512 bits for routine runs of this input; use 1,024 bits only when the input and
+requested certificate actually carry enough precision to justify it.
 
 Do not start a Float64x4 block-parallel run with both Julia and BLAS set to the
 full allocation. Keep BLAS and OMP at one thread so the 1/2/4/8 comparison
@@ -500,6 +514,17 @@ later commit may legitimately change the count.
 The Float64 Task_Low08 gate must pass before any extended-precision lattice
 run. A successful small BigFloat solve or Schur benchmark is not evidence that
 a full BigFloat Task_Low08 solve fits memory or has completed.
+
+The final `c9d6514` cross-problem gate (job 196277, node58) used 16 Julia and
+16 OpenBLAS threads inside a 64-core reservation. It returned `Optimal` in 28
+iterations: primal/dual objectives `0.6532912655025964` /
+`0.6532910479425099`, relative gap `2.176e-7`, primal/dual residuals
+`3.316e-10` / `9.534e-12`, and maximum original equality residual
+`3.316e-10`. The original-coordinate certificate was valid; minimum primal
+and dual PSD eigenvalues were `-7.126e-11` and `1.975e-15`. Solver and driver
+times were 33.846 and 35.585 seconds, and `/usr/bin/time` recorded 4,469,000
+KiB peak RSS. This measurement is a correctness gate for the BigFloat
+scheduler change; it is not a replacement for the warmed backend comparison.
 
 ## Sparse 1/2/4/8 and BigFloat benchmark job
 

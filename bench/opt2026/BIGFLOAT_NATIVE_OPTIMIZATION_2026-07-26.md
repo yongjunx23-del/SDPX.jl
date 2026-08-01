@@ -342,3 +342,52 @@ KKT is only 4.7%. The next useful work is therefore:
 
 No remaining change has an obvious low-risk benefit comparable to the retained
 reduced-arrow implementation.
+
+## 2026-08-01 all-local equality addendum
+
+SDPX 0.3.0 now recognizes a second exact BigFloat structure: block-diagonal
+`2x2` cells whose Schur variables are all local and are coupled by explicit
+equalities. It factors each local cell once, applies the equality panel through
+ownership-safe triangular solves, forms only the lower equality Gram with
+disjoint tiles, and solves the resulting 170-by-170 normal system. Sparse CSC
+residual GEMV, block residual/factor work, predictor/corrector recovery,
+fraction-to-boundary diagnostics, and accepted updates use disjoint mutable
+MPFR destinations. Global reductions retain block order.
+
+End-to-end measurements on the certified J40 BigFloat512 model showed that
+uniform 128-way scheduling was counterproductive. A retained phase-aware
+controller therefore limits fine-grained MPFR work to 64 task streams while
+allowing the larger equality Gram to use the requested width:
+
+| Requested workers | Fine-phase cap | Solver (s) | Internal (s) | Equality Gram (s) | Peak RSS (KiB) |
+|---:|---:|---:|---:|---:|---:|
+| 64 | 64 | 368.704 | 229.729 | 60.580 | 3,907,204 |
+| 96 | 64 | 398.303 | 265.944 | 56.632 | 4,147,008 |
+| 128, old uniform schedule | 128 | 495.811 | 356.574 | 43.446 | 4,346,976 |
+| 128, retained phase cap | 64 | 425.880 | 286.429 | 41.672 | 4,058,792 |
+
+The capped 128-worker route is 14.1% faster and uses 6.6% less peak RSS than
+the uniform 128-worker route, with a bit-for-bit identical 158-iteration
+certificate. The 64-worker configuration is still fastest and is recommended
+for this geometry. Wider allocations should be tested only on materially
+larger equality panels.
+
+A fixed 1,024-bit, 64-worker support run passed in 157 iterations with no
+restart, regularization, refinement, or fallback. Solver time was 553.959
+seconds, internal time 360.413 seconds, and peak RSS 4,268,480 KiB. Equality
+Gram, equality factorization, and constraint triangular work took 115.491,
+42.838, and 49.298 seconds. The physical certificate had original linear
+residual `3.900e-63`, off-grid relative residual `1.750e-11`, minimum PSD
+eigenvalue `1.760e-34`, and zero disk violation. Its relative gap
+`1.890e-13` was not tighter than the 512-bit result `3.451e-14`; both solve the
+same coefficient set rounded once to Float64x4. This confirms BigFloat1024
+support but does not justify changing the model-specific 512-bit default.
+
+The complete local release-candidate suite passed 5,751 tests. The final
+Task_Low08 Float64 guard also passed with a valid original-coordinate
+certificate in 28 iterations and 33.846 seconds solver time. The remaining
+high-precision bottleneck is the exact equality normal system, especially
+Gram construction and native BigFloat Cholesky at 1,024 bits. Reciprocal
+caching improved isolated kernels but changed the adaptive trajectory, made
+the relative gap 5.48 times weaker, and did not improve end-to-end time, so it
+was reverted. No further untested high-risk kernel is enabled by default.
