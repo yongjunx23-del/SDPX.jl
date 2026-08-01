@@ -304,9 +304,9 @@ Factor the current Schur complement `ws.S` (accumulated by
   convergence), retries with escalating relative diagonal
   regularization `S + δ·diag(|S_ii|)` (§2.2) up to 6 attempts.
 - If `cholesky!` on `Q` fails (rank-deficient `B`, e.g. duplicated
-  equality rows — §T3), falls back to *pivoted* Cholesky
-  (`RowMaximum()`), which detects the rank and gives a consistent
-  least-norm solve for `dy` instead of crashing (verified against
+  equality rows — §T3), automatic mode uses rank-revealing QR. Forced
+  normal-equation mode retains pivoted Cholesky (`RowMaximum()`), which detects
+  the rank and gives a consistent least-norm solve for `dy` (verified against
   Julia's `CholeskyPivoted \\` behavior on a synthetic rank-deficient
   case during development — it drops the dependent direction cleanly
   rather than producing `NaN`/throwing).
@@ -649,6 +649,26 @@ function _factor_arrow_equality_system!(
             if issuccess(factor) &&
                _cholesky_has_numerical_rank(factor)
                 ws.Qchol = factor
+            elseif opts.equality_solver === :auto &&
+                   _equality_qr_allowed(ws.Btil, opts)
+                # Automatic mode ultimately selected QR after a failed
+                # normal-equation factor anyway. Go there directly: generic
+                # pivoted BigFloat Cholesky is unavailable on Julia 1.10, and
+                # its rank was used only for the diagnostic message.
+                qr_factor = _factor_equality_qr(ws.Btil, opts)
+                ws.Qchol = qr_factor
+                q_pivoted = true
+                q_rank_deficient = qr_factor.rank < n
+                if opts.verbosity >= 1
+                    @warn(
+                        "Block-diagonal equality solve switched " *
+                        "from normal equations to rank-revealing QR",
+                        reason=:normal_equation_rank_loss,
+                        qr_rank=qr_factor.rank,
+                        equalities=n,
+                        qr_quality=qr_factor.quality,
+                    )
+                end
             else
                 copy_owned!(ws.Qbuf, ws.Q)
                 pivoted = LinearAlgebra.cholesky(
@@ -673,23 +693,7 @@ function _factor_arrow_equality_system!(
                 ws.Qchol = pivoted
                 q_pivoted = true
                 q_rank_deficient = pivoted.rank < n
-                if opts.equality_solver === :auto &&
-                   _equality_qr_allowed(ws.Btil, opts)
-                    qr_factor =
-                        _factor_equality_qr(ws.Btil, opts)
-                    ws.Qchol = qr_factor
-                    q_rank_deficient = qr_factor.rank < n
-                    if opts.verbosity >= 1
-                        @warn(
-                            "Block-diagonal equality solve switched " *
-                            "from normal equations to rank-revealing QR",
-                            normal_equation_rank=pivoted.rank,
-                            qr_rank=qr_factor.rank,
-                            equalities=n,
-                            qr_quality=qr_factor.quality,
-                        )
-                    end
-                elseif opts.verbosity >= 1
+                if opts.verbosity >= 1
                     if pivoted.rank < n
                         @warn(
                             "Block-diagonal equality system is " *
@@ -1032,6 +1036,26 @@ function _factor_dense_kkt_native!(
                 if issuccess(Cq) &&
                    _cholesky_has_numerical_rank(Cq)
                     ws.Qchol = Cq
+                elseif opts.equality_solver === :auto &&
+                       _equality_qr_allowed(ws.Btil, opts)
+                    # Avoid the redundant pivoted-normal-equation probe. It
+                    # is not implemented for generic BigFloat matrices on
+                    # Julia 1.10, while QR is the selected automatic backend
+                    # for this exact rank-loss condition on every version.
+                    qr_factor = _factor_equality_qr(ws.Btil, opts)
+                    ws.Qchol = qr_factor
+                    q_pivoted = true
+                    q_rank_deficient = qr_factor.rank < n
+                    if opts.verbosity >= 1
+                        @warn(
+                            "KKT equality solve switched from normal " *
+                            "equations to rank-revealing QR",
+                            reason=:normal_equation_rank_loss,
+                            qr_rank=qr_factor.rank,
+                            equalities=n,
+                            qr_quality=qr_factor.quality,
+                        )
+                    end
                 else
                     copy_owned!(ws.Qbuf, ws.Q)
                     pivoted = LinearAlgebra.cholesky(
@@ -1060,22 +1084,7 @@ function _factor_dense_kkt_native!(
                     ws.Qchol = pivoted
                     q_pivoted = true
                     q_rank_deficient = pivoted.rank < n
-                    if opts.equality_solver === :auto &&
-                       _equality_qr_allowed(ws.Btil, opts)
-                        qr_factor = _factor_equality_qr(ws.Btil, opts)
-                        ws.Qchol = qr_factor
-                        q_rank_deficient = qr_factor.rank < n
-                        if opts.verbosity >= 1
-                            @warn(
-                                "KKT equality solve switched from normal " *
-                                "equations to rank-revealing QR",
-                                normal_equation_rank=pivoted.rank,
-                                qr_rank=qr_factor.rank,
-                                equalities=n,
-                                qr_quality=qr_factor.quality,
-                            )
-                        end
-                    elseif opts.verbosity >= 1
+                    if opts.verbosity >= 1
                         if pivoted.rank < n
                             @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
                                   "(likely redundant/duplicated equality constraints)"

@@ -383,8 +383,11 @@ eigenvalue `1.760e-34`, and zero disk violation. Its relative gap
 same coefficient set rounded once to Float64x4. This confirms BigFloat1024
 support but does not justify changing the model-specific 512-bit default.
 
-The complete local release-candidate suite passed 5,751 tests. The final
-Task_Low08 Float64 guard also passed with a valid original-coordinate
+The complete local release-candidate suite passed 5,752 tests after a Julia
+1.10 compatibility fix made automatic rank-loss handling go directly to the
+existing rank-revealing QR backend instead of probing unavailable generic
+BigFloat pivoted Cholesky. The final Task_Low08 Float64 guard also passed with
+a valid original-coordinate
 certificate in 28 iterations and 33.846 seconds solver time. The remaining
 high-precision bottleneck is the exact equality normal system, especially
 Gram construction and native BigFloat Cholesky at 1,024 bits. Reciprocal

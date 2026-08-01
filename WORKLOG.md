@@ -1217,3 +1217,33 @@ to consume every available mantissa bit. BigFloat1024 is therefore confirmed
 as supported, but 512 bits remains the recommended fixed precision for this
 rounded model. No default precision or termination rule is changed from this
 single valid trajectory.
+
+### A9 Julia 1.10 rank-deficient equality compatibility
+
+After commit `dcb84c4` was published to PR #3, every Julia 1.x, macOS,
+Windows, documentation, quality, and benchmark-smoke check passed. Both Julia
+1.10 Linux jobs failed at the new rank-deficient all-local BigFloat equality
+test. The one- and four-thread logs had the same exception:
+
+```text
+ArgumentError: generic pivoted Cholesky factorization is not implemented yet
+```
+
+The normal-equation Cholesky had already reported insufficient numerical rank.
+Automatic mode then computed a pivoted Cholesky only to obtain a diagnostic
+rank before unconditionally selecting the existing rank-revealing QR factor.
+Julia 1.10 has no generic `BigFloat` implementation for that redundant probe;
+newer Julia versions do.
+
+The fix sends automatic mode directly to rank-revealing QR after the rejected
+normal-equation factor. The same change is applied to both the all-local arrow
+and general dense KKT routes. It preserves explicit
+`equality_solver=:normal_equations` semantics, removes one unnecessary
+factorization, and does not touch a full-rank solve such as J40. Diagnostics
+now record `reason=:normal_equation_rank_loss` with the QR rank and quality.
+
+The BigFloat sparse/ownership plus general correctness suites passed at one and
+four threads, including 3,092 exact ownership assertions and eight
+rank-deficient equality assertions per run. The complete four-thread suite
+then passed all 5,752 tests in 4m38.4s on Julia 1.12.6. The authoritative
+Julia 1.10 validation remains the refreshed GitHub Actions matrix.

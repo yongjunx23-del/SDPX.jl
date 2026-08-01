@@ -68,6 +68,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parameter strategy. That combination restores its validated 24-iteration
   trajectory; adaptive lattice solves continue to use Ruiz scaling.
 
+### Fixed
+
+- Automatic rank-deficient equality handling now switches directly from a
+  rejected normal-equation factor to the existing rank-revealing QR backend.
+  This avoids an unnecessary pivoted-Cholesky probe and restores BigFloat
+  compatibility with Julia 1.10, whose standard library does not implement
+  generic pivoted Cholesky. Forced normal-equation mode retains its explicit
+  pivoted-Cholesky behavior.
+
 ## [0.3.0] — 2026-07-31
 
 ### Added

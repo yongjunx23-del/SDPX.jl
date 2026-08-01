@@ -1225,6 +1225,7 @@ end
         @test factorization.ok
         @test factorization.q_rank_deficient
         @test factorization.equality_solver === :rank_revealing_qr
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{BigFloat}
         diagnostics =
             SDPX._equality_factor_diagnostics(workspace, problem.dims.n)
         @test diagnostics.rank == problem.dims.n - 1
