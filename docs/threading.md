@@ -21,7 +21,7 @@ work does not justify parallel scheduling.
 |---|---|
 | `Float64` | Threaded for sufficiently large block and Schur work; small latency-bound cases remain serial. |
 | `Float64xN`, `Double64` | Threaded when the type is an immutable fixed-width `AbstractFloat`; extended arithmetic crosses over earlier than Float64. |
-| `BigFloat` | General native MPFR phases use one solver thread. Exact singleton-local `2x2` arrows may use ownership-safe native block/panel tasks and disjoint Schur-tile workers. |
+| `BigFloat` | General native MPFR phases use one solver thread. Exact singleton-local `2x2` arrows and all-local 2x2 cell systems with explicit equalities may use ownership-safe block tasks and disjoint Schur/Gram-tile workers. |
 | Unknown scalar type | Serial unless the kernel layer explicitly marks it safe. |
 
 ## Scheduling and synchronization
@@ -125,7 +125,9 @@ thread, and allocates its 0.596 GiB Task_Low08 workspace lazily. Native
 
 Native `BigFloat` uses the serial owned-storage path for general models even if
 Julia was started with multiple threads. Exact singleton-local `2x2` arrow
-models are the only current native exception.
+models and block-diagonal 2x2 cell models whose Schur variables are all local
+and whose only global coupling is through explicit equalities are the current
+native exceptions.
 
 The reason is solver-specific: a `BigFloat` is mutable, ordinary
 `zeros(BigFloat, ...)`/`fill!` storage can alias the same object, and
@@ -134,7 +136,9 @@ therefore uses independently owned workspace entries plus allocation-reusing
 MPFR scalar kernels. For the reduced-arrow exception, each preparation task
 owns a disjoint block workspace and two panel rows, and each SYRK task owns a
 complete lower-triangular output tile. Inputs are read-only and no writable
-BigFloat object crosses tasks.
+BigFloat object crosses tasks. The equality specialization likewise assigns
+complete local row blocks during forward/back substitution and complete lower
+Gram tiles during `Btil' * Btil`; it never allocates one full Gram per worker.
 
 Use `Float64x4` or another fixed-width `MultiFloats` type when its precision
 and Float64 exponent range are sufficient and broader solver phases need

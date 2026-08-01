@@ -291,6 +291,7 @@ adjust PBS resources after measuring the target node:
 | Float64x4 sparse/block-arrow | 8 | sweep 1, 2, 4, 8 | 1 | SDPX Julia block and Schur scheduling |
 | BigFloat, general native | site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
 | BigFloat, exact singleton-local `2x2` arrow | 8 | sweep 1, 2, 4, 8 | 1 | native block preparation and disjoint reduced-Schur tiles may be parallel; residual/refinement remains serial |
+| BigFloat, all-local `2x2` cells plus equalities | measured node allocation | sweep 1, 2, 4, 8, then higher only while scaling | 1 | disjoint local row work plus tiled lower equality Gram; avoid nested BLAS threading |
 | BigFloat, experimental mixed arrow | 8 | sweep 1, 2, 4, 8 | 1 | the Float64x4 reduced panel/factorization is parallel; BigFloat residual/refinement remains serial |
 | Task_Low08 Float64 validation | 8 | 8 | 8 | sparse assembly plus dense OpenBLAS KKT factorization |
 | Task_Low08 Float64 performance on dual EPYC 7742 | 16 | 16 | 16 | OpenBLAS with `numactl --interleave=all`; measured, hardware-specific |
@@ -299,8 +300,8 @@ adjust PBS resources after measuring the target node:
 | Small package validation | 8 | 4 for tests, 1 for high-precision smoke | 1 | sequential validation phases |
 
 General native `BigFloat` uses one solver thread. Exact singleton-local `2x2`
-arrows may use additional cores only for ownership-safe reduced-panel
-preparation and disjoint triangular Schur tiles. The opt-in mixed reduced-arrow
+arrows and all-local 2x2 equality-cell systems may use additional cores only
+for ownership-safe block work and disjoint triangular Schur or Gram tiles. The opt-in mixed reduced-arrow
 backend may also use those cores for its Float64x4 panel and factorization,
 while exact BigFloat residual and
 refinement work remains serial. It must be benchmarked rather than assumed to

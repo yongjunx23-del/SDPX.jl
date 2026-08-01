@@ -102,7 +102,8 @@ optimize!(model)
 
 The same pattern works for other `AbstractFloat` coefficient types supported
 by the native solver. General `BigFloat` phases are deliberately serial; exact
-singleton-local `2x2` arrows may use ownership-safe reduced-Schur workers.
+singleton-local `2x2` arrows and all-local 2x2 cell models with explicit
+equalities may use ownership-safe reduced-Schur or equality-Gram workers.
 Fixed-width types such as `Float64x4` can use Julia threads more broadly.
 
 ## Supported model forms

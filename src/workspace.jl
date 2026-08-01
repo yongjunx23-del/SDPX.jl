@@ -293,11 +293,15 @@ end
 
 function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
     prob.cons isa SparseCons{T} || return nothing
-    # Mutable MPFR values need a separate ownership-aware implementation for
-    # the block-diagonal equality path. Keep native BigFloat on the existing
-    # serial sparse/dense backend until that implementation is available.
-    prob.dims.n > 0 && T === BigFloat && return nothing
     cons = prob.cons::SparseCons{T}
+    # The ownership-safe BigFloat equality implementation currently targets
+    # the independent 2x2 cells used by the primal CSDR formulation.  Keep
+    # larger blocks on the established general KKT route until their local
+    # factor/update storage has received the same ownership audit.
+    if prob.dims.n > 0 && T === BigFloat
+        all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
+            return nothing
+    end
     L, m = prob.dims.L, prob.dims.m
     frequency = zeros(Int, m)
     owner = zeros(Int, m)
@@ -809,6 +813,11 @@ function Workspace(
             1:L,
         )
     arrow_workspace = compact_arrow ? arrow::ArrowWorkspace{T} : nothing
+    owned_bigfloat_arrow_equalities =
+        T === BigFloat &&
+        prob.dims.n > 0 &&
+        fused_arrow &&
+        isempty(arrow_workspace.global_ids)
     available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
     reduced_arrow_decision =
         _reduced_arrow_crossover(
@@ -820,9 +829,11 @@ function Workspace(
             available_memory_bytes=available_memory,
         )
     reduced_arrow_panel = reduced_arrow_decision.enabled
-    if T === BigFloat && !reduced_arrow_panel
-        # Native BigFloat remains serial except for the explicitly
-        # ownership-safe reduced-panel path selected below.
+    if T === BigFloat &&
+       !reduced_arrow_panel &&
+       !owned_bigfloat_arrow_equalities
+        # Native BigFloat remains serial except for explicitly
+        # ownership-safe reduced panels and block-diagonal equality systems.
         selected_threads = 1
     end
     if reduced_arrow_panel
@@ -990,7 +1001,7 @@ function Workspace(
     vector_partial_count =
         sparse_schur ?
         min(selected_threads, max(m, 1)) :
-        block_nbins
+        T === BigFloat ? 1 : block_nbins
     workspace = Workspace{T}(blk,
         (compact_arrow || sparse_schur) ?
         alloc_zeros(T, 0, 0) :

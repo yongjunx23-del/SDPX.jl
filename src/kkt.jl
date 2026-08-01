@@ -240,6 +240,15 @@ function _build_equality_gram!(
         ws.thread_count,
     )
     if decision.enabled
+        selected_workers = if T === BigFloat
+            ExtendedPrecisionBLAS._syrk_bigfloat_selected_workers(
+                ws.Btil,
+                decision.config,
+                ws.thread_count,
+            )
+        else
+            ws.thread_count
+        end
         ExtendedPrecisionBLAS.syrk!(
             ws.Q,
             ws.Btil,
@@ -249,7 +258,7 @@ function _build_equality_gram!(
             ws.thread_count,
         )
         ws.equality_gram_kernel =
-            ws.thread_count > 1 ?
+            selected_workers > 1 ?
             :threaded_blocked_triangular_syrk :
             :blocked_triangular_syrk
     else
@@ -354,6 +363,35 @@ function _arrow_lower_solve_rows!(
     return destination
 end
 
+# The equality-arrow workspace owns every MPFR object in `destination`, and
+# different blocks contain disjoint row ids.  Mutating those objects in place
+# both removes the scalar temporaries in the generic `/` loop and makes it safe
+# to assign whole blocks to different tasks.  `multiplication_buffer` is local
+# to one call/task and the Cholesky factor is read-only.
+function _arrow_lower_solve_rows!(
+    destination::AbstractMatrix{BigFloat},
+    factor::AbstractMatrix{BigFloat},
+    ids::AbstractVector{Int},
+)
+    multiplication_buffer = BigFloat()
+    @inbounds for column in axes(destination, 2)
+        for row in eachindex(ids)
+            value = destination[ids[row], column]
+            for inner in 1:(row - 1)
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.sub_mul,
+                    value,
+                    factor[row, inner],
+                    destination[ids[inner], column],
+                )
+            end
+            _mpfr_divide!(value, value, factor[row, row])
+        end
+    end
+    return destination
+end
+
 function _arrow_lower_solve_rows!(
     destination::AbstractVector{T},
     factor::AbstractMatrix{T},
@@ -367,6 +405,28 @@ function _arrow_lower_solve_rows!(
                 destination[ids[inner]]
         end
         destination[ids[row]] = value / factor[row, row]
+    end
+    return destination
+end
+
+function _arrow_lower_solve_rows!(
+    destination::AbstractVector{BigFloat},
+    factor::AbstractMatrix{BigFloat},
+    ids::AbstractVector{Int},
+)
+    multiplication_buffer = BigFloat()
+    @inbounds for row in eachindex(ids)
+        value = destination[ids[row]]
+        for inner in 1:(row - 1)
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.sub_mul,
+                value,
+                factor[row, inner],
+                destination[ids[inner]],
+            )
+        end
+        _mpfr_divide!(value, value, factor[row, row])
     end
     return destination
 end
@@ -388,6 +448,32 @@ function _arrow_transpose_solve_rows!(
     return destination
 end
 
+function _arrow_transpose_solve_rows!(
+    destination::AbstractVector{BigFloat},
+    factor::AbstractMatrix{BigFloat},
+    ids::AbstractVector{Int},
+)
+    multiplication_buffer = BigFloat()
+    @inbounds for row in reverse(eachindex(ids))
+        value = destination[ids[row]]
+        for inner in (row + 1):length(ids)
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.sub_mul,
+                value,
+                factor[inner, row],
+                destination[ids[inner]],
+            )
+        end
+        _mpfr_divide!(value, value, factor[row, row])
+    end
+    return destination
+end
+
+@inline _arrow_equality_row_thread_safe(::Type{T}) where {T} =
+    thread_safe_arithmetic(T)
+@inline _arrow_equality_row_thread_safe(::Type{BigFloat}) = true
+
 function _factor_arrow_equality_system!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -407,7 +493,7 @@ function _factor_arrow_equality_system!(
     copy_owned!(ws.Btil, prob.B)
     use_threads =
         ws.thread_count > 1 &&
-        thread_safe_arithmetic(T) &&
+        _arrow_equality_row_thread_safe(T) &&
         prob.dims.m * n >= 10_000
     if use_threads
         @sync for bin in ws.block_bins
@@ -1902,7 +1988,7 @@ function solve_block_diagonal_equality_kkt!(
     copy_owned!(ws.rtil, r)
     use_threads =
         ws.thread_count > 1 &&
-        thread_safe_arithmetic(T) &&
+        _arrow_equality_row_thread_safe(T) &&
         length(ws.rtil) >= 2_000
     if use_threads
         @sync for bin in ws.block_bins

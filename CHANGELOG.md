@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- BigFloat sparse SDPs with explicit equalities now use an ownership-safe
+  block-diagonal arrow KKT path when every Schur variable belongs to exactly
+  one 2x2 PSD block. Local factors and equality triangular solves own disjoint
+  row blocks, while the equality Gram uses disjoint lower-triangular MPFR
+  tiles. Larger or shared-variable BigFloat models retain the established
+  serial general KKT route. New full-rank and duplicated-column regressions
+  validate KKT residuals, object ownership, rank detection, and QR fallback.
 - Block-local residual, Cholesky, predictor, and corrector scheduling now uses
   an arithmetic-aware cubic-work crossover in addition to the historical
   256-block threshold. This activates safe disjoint-block parallelism for

@@ -471,9 +471,11 @@ These are fixed-width bitstypes with no MPFR allocation overhead.
 `precision_bits` for the complete solve, but it cannot recover digits that
 were already rounded away when the input data was created. General native
 `BigFloat` assembly and solves are serial and use ownership-aware,
-allocation-reusing scalar kernels. Exact singleton-local `2x2` arrows are the
-native exception: independent block preparation and complete lower-triangular
-Schur tiles may run concurrently without sharing writable MPFR objects.
+allocation-reusing scalar kernels. Exact singleton-local `2x2` arrows and
+block-diagonal `2x2` cell systems with all-local Schur variables plus explicit
+equalities are the native exceptions. Their independent block work and
+complete lower-triangular Schur or equality-Gram tiles may run concurrently
+without sharing writable MPFR objects.
 
 The packed triangular Schur/Gram backend for `Float64x4` and `BigFloat` is
 available through `extended_precision_blas=:auto` only when a workload clears
@@ -553,12 +555,13 @@ Schur assembly, residual construction, direction recovery, arrow
 factorisation/solves, and line search.
 
 This applies generally to immutable fixed-width arithmetic. Most native
-`BigFloat` phases remain serial because mutable scalar ownership, allocator
+Most native `BigFloat` phases remain serial because mutable scalar ownership, allocator
 pressure, and per-worker high-precision workspace growth make unrestricted
-threading unsafe. Exact singleton-local `2x2` arrows are the validated
-exception: block preparation owns disjoint per-block storage and triangular
-SYRK tasks own disjoint Schur tiles, so those phases may use the requested
-workers without sharing a writable MPFR object.
+threading unsafe. Exact singleton-local `2x2` arrows and all-local 2x2 cell
+systems with explicit equalities are the validated exceptions: block work owns
+disjoint storage, and triangular SYRK tasks own disjoint Schur or equality-Gram
+tiles, so those phases may use the requested workers without sharing a
+writable MPFR object.
 
 Scaling depends strongly on problem size — small models do not have enough work
 per block to amortise the synchronisation. Small Float64 Schur builds therefore

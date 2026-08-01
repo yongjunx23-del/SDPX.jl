@@ -11,7 +11,7 @@ SDPX solves at whatever element type `T` your input arrays (`A`, `C`, `B`, `b`, 
 | `Float64x4` (MultiFloats.jl) | 209 bits | ~62 | sweet spot for many EFT/modular-bootstrap runs |
 | `Double64` (DoubleFloats.jl) | ~106 bits | ~32 | alternative to Float64x2; has `exp`/`log` if ever needed |
 | `Float64x{6}`/`Float64x{8}` (MultiFloats.jl) | 313/417 bits | ~94/~125 | near SDPB's common 448-bit band |
-| `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits); exact singleton-local `2x2` arrows can use an ownership-safe threaded native reduced Schur path |
+| `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits); exact singleton-local `2x2` arrows and all-local 2x2 equality-cell systems can use ownership-safe threaded native Schur/Gram paths |
 
 `MultiFloats.jl`/`DoubleFloats.jl` types are enabled automatically once you `using MultiFloats` / `using DoubleFloats` in your session (package extensions) — no other change needed.
 

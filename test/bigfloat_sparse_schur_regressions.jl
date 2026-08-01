@@ -52,6 +52,70 @@ function _bigfloat_arrow_fixture()
     return problem, X, Y
 end
 
+function _bigfloat_block_diagonal_equality_fixture(
+    ;
+    block_count::Int=24,
+    equality_count::Int=48,
+    rank_deficient::Bool=false,
+)
+    variable_count = 3 * block_count
+    equality_count <= variable_count ||
+        throw(ArgumentError("equalities cannot exceed variables"))
+    coefficients = [
+        zeros(BigFloat, variable_count, 2, 2)
+        for _ in 1:block_count
+    ]
+    for block in 1:block_count
+        first = 3 * block - 2
+        coefficients[block][first, 1, 1] = one(BigFloat)
+        coefficients[block][first + 1, 1, 2] = one(BigFloat)
+        coefficients[block][first + 1, 2, 1] = one(BigFloat)
+        coefficients[block][first + 2, 2, 2] = one(BigFloat)
+    end
+    equality = SDPX.alloc_zeros(
+        BigFloat,
+        variable_count,
+        equality_count,
+    )
+    for column in 1:equality_count
+        equality[column, column] = one(BigFloat)
+        for row in (equality_count + 1):variable_count
+            numerator = mod(17 * row + 11 * column, 29) - 14
+            equality[row, column] =
+                BigFloat(numerator) / BigFloat(257)
+        end
+    end
+    if rank_deficient && equality_count >= 2
+        for row in 1:variable_count
+            equality[row, equality_count] = BigFloat(equality[row, 1])
+        end
+    end
+    problem = SDPX.ingest(
+        ones(BigFloat, variable_count),
+        coefficients,
+        [zeros(BigFloat, 2, 2) for _ in 1:block_count],
+        equality,
+        zeros(BigFloat, equality_count);
+        sparse=true,
+        verbosity=0,
+    )
+    X = [
+        BigFloat[
+            2 + block / 100 1 / 31
+            1 / 31 3 / 2 + block / 200
+        ]
+        for block in 1:block_count
+    ]
+    Y = [
+        BigFloat[
+            7 / 5 + block / 150 1 / 37
+            1 / 37 19 / 10 + block / 250
+        ]
+        for block in 1:block_count
+    ]
+    return problem, X, Y
+end
+
 function _reference_fused_arrow_build!(workspace, problem, X, Y)
     arrow = workspace.arrow
     SDPX._zero_arrow_schur!(arrow)
@@ -679,5 +743,146 @@ end
                 @test solution[variable] !== arrow.tmp[block][position]
             end
         end
+    end
+end
+
+@testset "BigFloat block-diagonal equality arrow KKT" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_block_diagonal_equality_fixture()
+        requested_threads = min(Threads.nthreads(), 4)
+        options = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            threads=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        plan = SDPX.build_execution_plan(problem, options)
+        @test plan.kkt_backend === :block_arrow
+        @test plan.threads == requested_threads
+        @test plan.schedule === (
+            requested_threads > 1 ?
+            :owned_bigfloat_equality_tiles : :serial
+        )
+
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        @test workspace.arrow !== nothing
+        @test workspace.fused_arrow
+        @test isempty(workspace.arrow.global_ids)
+        @test workspace.thread_count == requested_threads
+        @test length(workspace.vpartial) == 1
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(
+            workspace,
+            problem,
+            problem.cons,
+            X,
+            Y,
+        )
+        schur = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+            problem.dims.m,
+        )
+        SDPX.materialize_schur!(schur, workspace)
+        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        @test factorization.ok
+        @test !factorization.q_rank_deficient
+        expected_gram = transpose(workspace.Btil) * workspace.Btil
+        gram_scale = max(maximum(abs, expected_gram), one(BigFloat))
+        @test maximum(abs, LowerTriangular(workspace.Q) -
+                           LowerTriangular(expected_gram)) /
+              gram_scale <= big"1e-70"
+        selected_gram_workers =
+            SDPX.ExtendedPrecisionBLAS._syrk_bigfloat_selected_workers(
+                workspace.Btil,
+                SDPX._equality_gram_crossover(
+                    workspace.Btil,
+                    options,
+                    requested_threads,
+                ).config,
+                requested_threads,
+            )
+        @test workspace.equality_gram_kernel === (
+            selected_gram_workers > 1 ?
+            :threaded_blocked_triangular_syrk :
+            :blocked_triangular_syrk
+        )
+
+        primal_rhs = BigFloat.(range(
+            BigFloat("-0.7"),
+            BigFloat("1.1");
+            length=problem.dims.m,
+        ))
+        equality_rhs = BigFloat.(range(
+            BigFloat("-0.2"),
+            BigFloat("0.3");
+            length=problem.dims.n,
+        ))
+        dx = zeros(BigFloat, problem.dims.m)
+        dy = zeros(BigFloat, problem.dims.n)
+        SDPX.solve_kkt!(
+            workspace,
+            problem.dims.n,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        first_residual = schur * dx - problem.B * dy - primal_rhs
+        second_residual = transpose(problem.B) * dx - equality_rhs
+        scale = max(
+            maximum(abs, primal_rhs),
+            maximum(abs, equality_rhs),
+            one(BigFloat),
+        )
+        @test max(
+            maximum(abs, first_residual),
+            maximum(abs, second_residual),
+        ) / scale <= big"1e-65"
+        @test length(unique(objectid.(dx))) == length(dx)
+        @test length(unique(objectid.(dy))) == length(dy)
+    end
+end
+
+@testset "BigFloat rank-deficient block-diagonal equalities" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_block_diagonal_equality_fixture(
+            block_count=6,
+            equality_count=4,
+            rank_deficient=true,
+        )
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=min(Threads.nthreads(), 4),
+            extended_precision_blas=:on,
+            equality_solver=:auto,
+        )
+        @test workspace.arrow !== nothing
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(
+            workspace,
+            problem,
+            problem.cons,
+            X,
+            Y,
+        )
+        options = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            extended_precision_blas=:on,
+            equality_solver=:auto,
+        )
+        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        @test factorization.ok
+        @test factorization.q_rank_deficient
+        @test factorization.equality_solver === :rank_revealing_qr
+        diagnostics =
+            SDPX._equality_factor_diagnostics(workspace, problem.dims.n)
+        @test diagnostics.rank == problem.dims.n - 1
+        @test diagnostics.rank_deficient
     end
 end

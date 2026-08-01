@@ -288,6 +288,33 @@ function classify_problem(prob::SDPProblem{T}) where {T}
     )
 end
 
+"""
+    _supports_owned_bigfloat_arrow_equalities(prob)
+
+Return whether a BigFloat problem with explicit equalities can use the
+ownership-safe block-diagonal arrow KKT implementation.  The specialization is
+deliberately narrow: every Schur variable must belong to exactly one PSD block
+and every block must be 2x2.  Those conditions give each task exclusive
+ownership of its local factor and leave the equality Gram as the only shared
+matrix; its lower-triangular tiles are also assigned exclusively.
+"""
+function _supports_owned_bigfloat_arrow_equalities(
+    prob::SDPProblem{T},
+) where {T}
+    T === BigFloat || return false
+    prob.dims.n > 0 || return false
+    prob.dims.L > 0 || return false
+    prob.cons isa SparseCons{BigFloat} || return false
+    cons = prob.cons::SparseCons{BigFloat}
+    all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
+        return false
+    frequency = zeros(Int, prob.dims.m)
+    for variables in cons.active, variable in variables
+        frequency[variable] += 1
+    end
+    return all(==(1), frequency)
+end
+
 function _runtime_schur_backend(prob::SDPProblem)
     if _use_sparse_schur_sdp(prob)
         return :sparse_schur_cholesky
@@ -300,8 +327,11 @@ function _runtime_schur_backend(prob::SDPProblem)
         has_arrow = all(>(0), frequency) && any(==(1), frequency)
         equality_compatible =
             prob.dims.n == 0 || all(==(1), frequency)
+        bigfloat_equality_supported =
+            !(prob.dims.n > 0 && eltype(prob.c) === BigFloat) ||
+            _supports_owned_bigfloat_arrow_equalities(prob)
         if has_arrow && equality_compatible &&
-           !(prob.dims.n > 0 && eltype(prob.c) === BigFloat)
+           bigfloat_equality_supported
             return :block_arrow
         end
     end
@@ -321,7 +351,6 @@ This duplicates only the inexpensive structural predicate used by
 function _uses_fused_arrow(prob::SDPProblem{T}) where {T}
     prob.dims.L > 0 || return false
     prob.cons isa SparseCons{T} || return false
-    prob.dims.n > 0 && T === BigFloat && return false
     cons = prob.cons::SparseCons{T}
     all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
         return false
@@ -825,10 +854,14 @@ function build_execution_plan(
     native_bigfloat_reduced =
         classification.arithmetic === :bigfloat &&
         reduced_arrow_decision.enabled
+    owned_bigfloat_arrow_equalities =
+        classification.arithmetic === :bigfloat &&
+        _supports_owned_bigfloat_arrow_equalities(prob)
     selected_threads =
         classification.arithmetic === :bigfloat &&
         !mixed_arrow_threads &&
-        !native_bigfloat_reduced ?
+        !native_bigfloat_reduced &&
+        !owned_bigfloat_arrow_equalities ?
         1 : min(requested_threads, Base.Threads.nthreads())
     if classification.arithmetic === :float64 &&
        classification.cone === :sdp &&
@@ -840,6 +873,8 @@ function build_execution_plan(
     end
     schedule = if selected_threads == 1
         :serial
+    elseif owned_bigfloat_arrow_equalities
+        :owned_bigfloat_equality_tiles
     elseif mixed_arrow_threads
         :mixed_arrow_contiguous_blocks
     elseif reduced_arrow_decision.enabled

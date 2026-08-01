@@ -218,6 +218,75 @@ passed. A prior direct `test/runtests.jl` attempt did not enter the tests
 because that entry point omits `[extras]`; `Pkg.test()` correctly constructed
 the isolated test environment and is the authoritative result.
 
+## 2026-08-01 — Ownership-safe BigFloat block-diagonal equality KKT
+
+### Audit
+
+The CSDR handoff correctly identified one remaining integration blocker, but
+the low-level kernel situation was better than the handoff snapshot implied.
+`ExtendedPrecisionBLAS.syrk!` already had an ownership-safe BigFloat
+specialization with disjoint lower-triangular output tiles and task-local MPFR
+scratch. The actual blockers were:
+
+- `ArrowWorkspace` rejected every BigFloat problem with explicit equalities;
+- the execution planner forced ordinary BigFloat equality problems to one
+  thread;
+- the arrow equality forward/back substitutions used allocating scalar
+  arithmetic and disabled BigFloat task parallelism;
+- equality-Gram telemetry labeled a requested multi-thread call as threaded
+  even when the crossover selected one worker.
+
+### Retained implementation
+
+Enabled the new route only when all of the following are proven:
+
+1. arithmetic is `BigFloat`;
+2. explicit equality columns are present;
+3. coefficients use sparse storage;
+4. every PSD block is 2x2;
+5. every Schur variable occurs in exactly one PSD block.
+
+This is the independent-cell structure of the primal CSDR model. Shared-arrow
+variables or larger PSD blocks still fall back to the established general KKT
+path. The execution plan reports `:owned_bigfloat_equality_tiles`, and the
+workspace retains the requested Julia thread count while keeping only one
+generic vector partial to avoid `threads * m` BigFloat memory growth.
+
+The equality forward and transpose solves now mutate independently owned MPFR
+destinations with `MA.sub_mul` and `_mpfr_divide!`. Each task owns complete,
+disjoint row blocks and a private multiplication buffer. The equality Gram
+continues to assign complete lower-triangular tiles exclusively; diagnostics
+now use the kernel's actual selected worker count.
+
+### Local correctness gate
+
+Targeted four-thread tests passed:
+
+| Test group | Passed |
+|---|---:|
+| Existing BigFloat sparse/arrow regressions | 95 |
+| New full-rank block-diagonal equality KKT | 16 |
+| New rank-deficient equality fallback | 7 |
+
+The new full-rank test compares the lower Gram triangle with an independent
+`Btil' * Btil` reference, checks both KKT equations to `1e-65` relative error,
+and verifies distinct object identities in every result slot. The duplicated
+equality-column fixture correctly switches to rank-revealing QR and reports
+rank `n - 1`. No Float64 route was changed.
+
+The first isolated test command omitted the `MultiFloats` test dependency and
+therefore could not exercise the existing mixed-arrow fixture; rerunning with
+the package test dependency loaded passed. This was a harness issue, not a
+numerical regression.
+
+### Next experiment
+
+Measure serial owned-arrow versus tiled-parallel Gram on the same synthetic
+512-bit problem, then run the immutable CSDR artifact on one 128-core PBS
+allocation with 1/2/4/8/16/32/64/128 solver-thread points. Retain automatic
+parallelism only if the end-to-end median improves without changing the KKT
+residual, rank decision, objective, or physical certificate.
+
 A later direct `test/pipeline.jl` invocation likewise reached its first
 `StableRNG` use without the imports normally established by `runtests.jl` and
 errored there. All preceding pipeline assertions passed, and the same file had

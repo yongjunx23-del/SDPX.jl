@@ -19,6 +19,17 @@ function parse_cli(arguments)
         repetitions=parse(Int, get(values, "repetitions", "3")),
         precision_bits=parse(Int, get(values, "precision-bits", "256")),
         tiles=parse.(Int, split(get(values, "tiles", "4,6,8,12,16,24"), ',')),
+        kernel_threads=parse.(
+            Int,
+            split(
+                get(
+                    values,
+                    "kernel-threads",
+                    string(Threads.nthreads()),
+                ),
+                ',',
+            ),
+        ),
     )
 end
 
@@ -40,41 +51,56 @@ function main(arguments)
             cli.columns,
             cli.columns,
         )
-        for tile in cli.tiles
-            config = EPBLAS.KernelConfig(
-                row_tile=24,
-                column_tile=tile,
-                micro_tile=1,
-            )
-            EPBLAS.zero_triangle!(output)
-            EPBLAS.syrk!(
-                output,
-                panel,
-                one(BigFloat),
-                zero(BigFloat),
-                config,
+        for requested_threads in cli.kernel_threads
+            kernel_threads = min(
+                max(requested_threads, 1),
                 Threads.nthreads(),
             )
-            elapsed = Float64[]
-            allocated = Int[]
-            for _ in 1:cli.repetitions
+            for tile in cli.tiles
+                config = EPBLAS.KernelConfig(
+                    row_tile=24,
+                    column_tile=tile,
+                    micro_tile=1,
+                )
+                selected_workers =
+                    EPBLAS._syrk_bigfloat_selected_workers(
+                        panel,
+                        config,
+                        kernel_threads,
+                    )
                 EPBLAS.zero_triangle!(output)
-                measurement = @timed EPBLAS.syrk!(
+                EPBLAS.syrk!(
                     output,
                     panel,
                     one(BigFloat),
                     zero(BigFloat),
                     config,
-                    Threads.nthreads(),
+                    kernel_threads,
                 )
-                push!(elapsed, measurement.time)
-                push!(allocated, measurement.bytes)
+                elapsed = Float64[]
+                allocated = Int[]
+                for _ in 1:cli.repetitions
+                    EPBLAS.zero_triangle!(output)
+                    measurement = @timed EPBLAS.syrk!(
+                        output,
+                        panel,
+                        one(BigFloat),
+                        zero(BigFloat),
+                        config,
+                        kernel_threads,
+                    )
+                    push!(elapsed, measurement.time)
+                    push!(allocated, measurement.bytes)
+                end
+                println(
+                    "tile=$tile requested_threads=$requested_threads " *
+                    "selected_workers=$selected_workers " *
+                    "julia_threads=$(Threads.nthreads()) " *
+                    "best_seconds=$(minimum(elapsed)) " *
+                    "median_seconds=$(sort(elapsed)[cld(length(elapsed), 2)]) " *
+                    "minimum_allocated_bytes=$(minimum(allocated))",
+                )
             end
-            println(
-                "tile=$tile threads=$(Threads.nthreads()) " *
-                "best_seconds=$(minimum(elapsed)) median_seconds=$(sort(elapsed)[cld(length(elapsed), 2)]) " *
-                "minimum_allocated_bytes=$(minimum(allocated))",
-            )
         end
     end
 end
