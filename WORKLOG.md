@@ -1247,3 +1247,45 @@ four threads, including 3,092 exact ownership assertions and eight
 rank-deficient equality assertions per run. The complete four-thread suite
 then passed all 5,752 tests in 4m38.4s on Julia 1.12.6. The authoritative
 Julia 1.10 validation remains the refreshed GitHub Actions matrix.
+
+### A10 publication, CI, and immutable cluster staging
+
+The Julia 1.10 compatibility fix was committed locally as
+`ac22a53cf4686bd921ef60d5c2a244b0fd92341b`. Git's HTTPS transport repeatedly
+stalled before uploading, so the same six-file tree was published atomically
+through GitHub's Git-data API as PR #3 head
+`0a71efed779617f5bd57af3359efc7523c9f0188`. Both commits have tree
+`f83014ccbb97f2f5ca8234a7b44d184601d9c7b6`; only the commit metadata differs.
+
+GitHub Actions run 30709269815 passed every required job: Julia 1.10 Linux at
+one and four threads, current Julia Linux at one and four threads, current
+Julia macOS and Windows at four threads, package quality, documentation,
+benchmark smoke, and documentation deployment. This confirms that automatic
+rank-deficient BigFloat equality fallback no longer calls unsupported generic
+pivoted Cholesky on Julia 1.10.
+
+The exact published tree was staged as an immutable cluster release at:
+
+```text
+/public/home/yongjunxu/projects/SDPX.jl/releases/0a71efed779617f5bd57af3359efc7523c9f0188
+```
+
+The source archive SHA-256 is
+`c1929eca65aa2bef9a29fafd087a1bf92df27d5657880f3cbb533281a17c5587`.
+Its pinned environment was copied from the previously validated release and
+only the SDPX source path was changed. Precompilation and a package-load smoke
+test passed with SDPX 0.3.0, MultiFloats, and JLD2; the smoke test also verified
+that a 128-worker all-local BigFloat request produces the retained 64-stream
+fine-grained task cap.
+
+The Codex and Claude `sdpx-cluster` skills were synchronized. Their site
+reference now distinguishes the promoted v0.2.1 release from the staged v0.3.0
+candidate and records the validated J40 BigFloat512 64/96/128 scaling,
+BigFloat1024 support gate, Task_Low08 regression, phase-aware scheduler, and
+recommended 64-Julia/one-BLAS-thread launch configuration.
+
+Production `current` still resolves to
+`ef1642272c17af63a468ca1adedc7c8735a95157/source`. It was intentionally not
+changed because the preceding cluster-regression safety constraint required it
+to remain fixed. Promotion therefore requires an explicit authorization; no
+solver, queue, or unrelated job state was changed during staging.
