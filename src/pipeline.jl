@@ -423,6 +423,17 @@ function _reduced_arrow_crossover(
     end
     global_count = count(>(1), frequency)
     global_count >= 2 || return disabled(:problem_too_small)
+    workers = reduced_arrow_worker_count(
+        K,
+        workers,
+        L,
+        global_count,
+    )
+    config = ExtendedPrecisionBLAS._reduced_arrow_kernel_config(
+        K,
+        workers,
+        global_count,
+    )
 
     shared_incidences = 0
     local_structural_pairs = 0
@@ -1719,6 +1730,24 @@ function _attach_diagnostics(
         planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),
         scheduling=plan.schedule,
         threads=plan.threads,
+        effective_threads=get(executed, :effective_threads, plan.threads),
+        fine_grained_block_tasks=get(
+            executed,
+            :fine_grained_block_tasks,
+            plan.threads,
+        ),
+        fine_grained_block_partition=get(
+            executed,
+            :fine_grained_block_partition,
+            :lpt,
+        ),
+        schur_threads=get(executed, :schur_threads, plan.threads),
+        factor_threads=get(executed, :factor_threads, nothing),
+        arrow_linear_solve=get(
+            executed,
+            :arrow_linear_solve,
+            nothing,
+        ),
         parameter_profile=plan.parameter_profile,
         initial_parameters=plan.parameters,
         certificate=certificate,

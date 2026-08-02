@@ -1798,6 +1798,40 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                     :sparse_schur_cholesky :
                     :dense_cholesky,
                 equality=equality_diagnostics.method,
+                effective_threads=ws.thread_count,
+                fine_grained_block_tasks=length(ws.block_bins),
+                fine_grained_block_partition=
+                    fine_grained_block_partition(
+                        T,
+                        ws.arrow !== nothing &&
+                        (ws.arrow::ArrowWorkspace{T}).reduced_panel_enabled,
+                        prob.dims.k,
+                        length(ws.block_bins),
+                    ),
+                schur_threads=
+                    ws.arrow !== nothing &&
+                    (ws.arrow::ArrowWorkspace{T}).reduced_panel_enabled ?
+                    reduced_arrow_worker_count(
+                        T,
+                        ws.thread_count,
+                        length(ws.blk),
+                        length((ws.arrow::ArrowWorkspace{T}).global_ids),
+                    ) :
+                    ws.thread_count,
+                factor_threads=
+                    ws.arrow !== nothing &&
+                    (ws.arrow::ArrowWorkspace{T}).reduced_panel_enabled ?
+                    reduced_arrow_factor_worker_count(
+                        T,
+                        ws.thread_count,
+                        length((ws.arrow::ArrowWorkspace{T}).global_ids),
+                    ) : nothing,
+                arrow_linear_solve=
+                    ws.arrow !== nothing &&
+                    (ws.arrow::ArrowWorkspace{T}).reduced_panel_enabled ?
+                    reduced_arrow_simd_solve(T) ?
+                    :multifloatvec4_simd_singleton :
+                    :scalar_singleton : nothing,
             ),
         ),
     )

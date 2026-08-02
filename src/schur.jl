@@ -1513,26 +1513,45 @@ packing followed by one solver-level triangular SYRK.
     )
 end
 
+"""
+    cache_reduced_arrow_local_factor!(arrow, block, diagonal)
+
+Optionally cache a singleton local factor and its inverse before the packed
+reduced-panel build leaves the block's hot data. Arithmetic extensions may
+return `(true, inverse)` when they have populated `Dbuf` and `Dinv`; the
+generic path preserves the established later factorization.
+"""
+cache_reduced_arrow_local_factor!(
+    ::ArrowWorkspace{T},
+    ::Int,
+    ::T,
+) where {T} = (false, zero(T))
+
 function _pack_reduced_arrow_block!(
     arrow::ArrowWorkspace{T},
     bw::BlockWS{T},
     cons::SparseCons{T},
     block::Int,
 ) where {T}
+    arrow.local_factor_ready[block] = false
     coefficients = cons.packed2[block]
     masks = cons.packed2_mask[block]
     ids = cons.schur_order[block]
     local_position = arrow.local_coefficient_position[block]
     1 <= local_position <= length(ids) || return false
     ids[local_position] == arrow.local_ids[block][1] || return false
-    zero_owned!(arrow.Dsrc[block])
-    zero_owned!(arrow.coupling[block])
     first_row = 2 * block - 1
     second_row = first_row + 1
-    panel_zero = zero(T)
-    @inbounds for global_position in axes(arrow.reduced_panel, 2)
-        arrow.reduced_panel[first_row, global_position] = panel_zero
-        arrow.reduced_panel[second_row, global_position] = panel_zero
+    shared_count = size(arrow.reduced_panel, 2)
+    full_shared_coverage = length(ids) == shared_count + 1
+    if !full_shared_coverage
+        zero_owned!(arrow.coupling[block])
+        zero_owned!(arrow.W[block])
+        panel_zero = zero(T)
+        @inbounds for global_position in axes(arrow.reduced_panel, 2)
+            arrow.reduced_panel[first_row, global_position] = panel_zero
+            arrow.reduced_panel[second_row, global_position] = panel_zero
+        end
     end
 
     fill!(bw.W2, zero(T))
@@ -1576,8 +1595,16 @@ function _pack_reduced_arrow_block!(
         diagonal = reduced[8]
         hb1, hb2, hb3 = reduced[9], reduced[10], reduced[11]
         arrow.Dsrc[block][1, 1] = diagonal
+        local_factor_ready, local_inverse =
+            cache_reduced_arrow_local_factor!(
+                arrow,
+                block,
+                diagonal,
+            )
+        arrow.local_factor_ready[block] = local_factor_ready
 
         coupling = arrow.coupling[block]
+        solved_coupling = arrow.W[block]
         for position in eachindex(ids)
             variable = ids[position]
             global_position = arrow.global_pos[variable]
@@ -1585,20 +1612,25 @@ function _pack_reduced_arrow_block!(
             a1 = coefficients[1, position]
             a2 = coefficients[2, position]
             a3 = coefficients[3, position]
+            coupling_value = zero(T)
             if masks[position] == 0x06
                 arrow.reduced_panel[first_row, global_position] =
                     v12 * a2 + v13 * a3
                 arrow.reduced_panel[second_row, global_position] =
                     v22 * a2 + v23 * a3
-                coupling[1, global_position] =
-                    hb2 * a2 + hb3 * a3
+                coupling_value = hb2 * a2 + hb3 * a3
             else
                 arrow.reduced_panel[first_row, global_position] =
                     v11 * a1 + v12 * a2 + v13 * a3
                 arrow.reduced_panel[second_row, global_position] =
                     v21 * a1 + v22 * a2 + v23 * a3
-                coupling[1, global_position] =
+                coupling_value =
                     hb1 * a1 + hb2 * a2 + hb3 * a3
+            end
+            coupling[1, global_position] = coupling_value
+            if local_factor_ready
+                solved_coupling[1, global_position] =
+                    coupling_value * local_inverse
             end
         end
     end
@@ -1633,6 +1665,8 @@ function reduced_arrow_schur_build!(
     arrow = ws.arrow::ArrowWorkspace{T}
     arrow.reduced_panel_enabled || return false
     fill!(arrow.local_ok, true)
+    fill!(arrow.local_factor_ready, false)
+    arrow.reduced_local_factors_ready = false
 
     block_count = length(arrow.Dsrc)
     ownership_safe_bigfloat = T === BigFloat
@@ -1642,6 +1676,12 @@ function reduced_arrow_schur_build!(
                   Threads.nthreads(),
                   max(block_count, 1),
               ) : 1
+    workers = reduced_arrow_worker_count(
+        T,
+        workers,
+        block_count,
+        size(arrow.reduced_panel, 2),
+    )
     rank_tolerance_factor = ownership_safe_bigfloat ?
                             T(128) * eps(T) : nothing
     if workers > 1 && block_count >= 64
@@ -1681,6 +1721,7 @@ function reduced_arrow_schur_build!(
     if !all(arrow.local_ok)
         arrow.reduced_panel_enabled = false
         arrow.reduced_panel_ready = false
+        arrow.reduced_local_factors_ready = false
         return false
     end
 
@@ -1690,8 +1731,10 @@ function reduced_arrow_schur_build!(
         one(T),
         zero(T),
         arrow.reduced_panel_config,
-        ws.thread_count,
+        workers,
     )
+    arrow.reduced_local_factors_ready =
+        all(arrow.local_factor_ready)
     arrow.reduced_panel_ready = true
     return true
 end
@@ -2302,7 +2345,11 @@ function mixed_reduced_arrow_schur_build!(
     end
 
     M = eltype(arrow.mixed_reduced_panel)
-    config = ExtendedPrecisionBLAS._kernel_config(M, workers)
+    config = ExtendedPrecisionBLAS._reduced_arrow_kernel_config(
+        M,
+        workers,
+        size(arrow.mixed_reduced_panel, 2),
+    )
     ExtendedPrecisionBLAS.syrk!(
         arrow.mixed_reduced_schur,
         arrow.mixed_reduced_panel,
@@ -3111,6 +3158,7 @@ function materialize_reduced_arrow_native_fallback!(
     arrow = ws.arrow::ArrowWorkspace{T}
     _materialize_reduced_arrow_shared!(arrow, ws.thread_count)
     arrow.reduced_panel_ready = false
+    arrow.reduced_local_factors_ready = false
     arrow.reduced_panel_enabled = false
     return arrow.Sgg
 end
@@ -3232,6 +3280,7 @@ function schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::SparseCons{T}
             return arrow.Sred
         end
         arrow.reduced_panel_ready = false
+        arrow.reduced_local_factors_ready = false
         _zero_arrow_schur!(arrow)
         for l in 1:prob.dims.L
             prob.dims.k[l] == 0 && continue

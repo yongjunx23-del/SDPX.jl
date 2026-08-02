@@ -55,6 +55,25 @@ function lpt_partition(weights::Vector{<:Real}, nbins::Int)
     return bins
 end
 
+"""
+    contiguous_partition(item_count, nbins) -> Vector{Vector{Int}}
+
+Partition an ordered block vector into nearly equal contiguous ranges. This
+is useful only when per-block work is uniform; heterogeneous problems should
+continue to use [`lpt_partition`](@ref).
+"""
+function contiguous_partition(item_count::Int, nbins::Int)
+    item_count >= 0 || throw(ArgumentError("item count must be nonnegative"))
+    nbins > 0 || throw(ArgumentError("bin count must be positive"))
+    bins = Vector{Vector{Int}}(undef, nbins)
+    for bin in 1:nbins
+        first_item = fld((bin - 1) * item_count, nbins) + 1
+        last_item = fld(bin * item_count, nbins)
+        bins[bin] = collect(first_item:last_item)
+    end
+    return bins
+end
+
 block_weight(k::Int, m::Int) = Float64(k)^3 + Float64(m) * Float64(k)^2 / 2
 
 """
@@ -1302,6 +1321,8 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
             return arrow.Sred
         end
         arrow.reduced_panel_ready = false
+        arrow.reduced_local_factors_ready = false
+        ensure_arrow_schur_partials!(arrow, length(bins))
         fill!(arrow.Sgg, zero(T))
         for l in eachindex(arrow.Dsrc)
             fill!(arrow.Dsrc[l], zero(T))

@@ -89,3 +89,12 @@ function _kernel_config(::Type{T}, threads::Int) where {T}
     end
     return KernelConfig()
 end
+
+_kernel_config(::Type{T}, threads::Int, columns::Int) where {T} =
+    _kernel_config(T, threads)
+
+_reduced_arrow_kernel_config(
+    ::Type{T},
+    threads::Int,
+    columns::Int,
+) where {T} = _kernel_config(T, threads, columns)

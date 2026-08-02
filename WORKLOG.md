@@ -1289,3 +1289,1221 @@ Production `current` still resolves to
 changed because the preceding cluster-regression safety constraint required it
 to remain fixed. Promotion therefore requires an explicit authorization; no
 solver, queue, or unrelated job state was changed during staging.
+
+## 2026-08-02 — Float64x4 parallel scaling audit
+
+### P1 immutable baseline and measured resource use — job 196495
+
+The medium CSDR J32/K4/Na16/Nmu100 model was benchmarked from the immutable
+GitHub PR tree `f861593e6413e9ab487b2018d5caedb341122bd1` on one node with 128
+allocated cores. The run used one BLAS thread, interleaved NUMA allocation,
+one warm-up solve, and three measured fixed-trajectory solves at each Julia
+thread count. Every measured solve returned `Optimal` in 41 iterations. The
+relative gap was `9.210e-11`, the dual residual was `3.257e-14`, the minimum
+PSD eigenvalue was `2.508e-18`, and cross-thread objective differences were
+below `6.1e-38` relative to the one-thread result.
+
+| Julia threads | Median solve (s) | Speedup | Schur (s) | KKT (s) | Peak RSS (GiB) | Process CPU (%) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 50.078 | 1.00 | 28.638 | 1.704 | 2.27 | 94 |
+| 2 | 28.314 | 1.77 | 14.588 | 2.763 | 2.17 | 137 |
+| 4 | 16.845 | 2.97 | 7.428 | 2.737 | 2.23 | 171 |
+| 8 | 10.241 | 4.89 | 3.895 | 2.200 | 2.15 | 202 |
+| 16 | 6.487 | 7.72 | 2.076 | 1.504 | 2.24 | 240 |
+| 32 | 6.286 | 7.97 | 1.940 | 1.497 | 2.34 | 324 |
+| 64 | 8.767 | 5.71 | 1.811 | 1.728 | 2.57 | 713 |
+| 128 | 45.572 | 1.10 | 4.460 | 3.657 | 3.45 | 2,017 |
+
+The process-level CPU percentage includes warm-up, compilation, model loading,
+validation, and serialization, so it is not a solver-only utilization metric.
+Per-thread sampling nevertheless confirmed that requested Julia workers were
+created and became active: the maximum active compute-thread counts were 1,
+3, 5, 9, 17, 33, and 65 for requests through 64. At 128, Julia's default GC
+team temporarily made 256 OS threads active. BLAS remained at one thread in
+all cases. NUMA sampling showed roughly even memory placement across all eight
+nodes under interleaving.
+
+The scaling limit is not an unfulfilled core allocation. The 3,400-by-144
+reduced panel has only 78 triangular jobs with the existing twelve-column
+tile, while residual, recovery, line-search, and update phases launch many
+short per-block tasks. At 64 and 128 threads, task synchronization, GC helper
+threads, and cross-NUMA traffic dominate the saved arithmetic. The retained
+design candidate therefore keeps all requested workers for panel/SYRK work but
+caps only short Float64x4 block phases at 32 task streams. It also records both
+effective widths in solve diagnostics.
+
+### P2 reduced-SYRK geometry experiment — job 196511
+
+An allocation-free direct kernel calibration used a deterministic
+3,400-by-144 Float64x4 panel and compared column tiles 4, 6, 8, 12, 16, and 24.
+Every triangle was exactly equal to the one-thread twelve-column reference.
+At 64 threads the median kernel times for tiles 8 and 12 were 0.02354 and
+0.03244 seconds, respectively: tile 8 was 27.4% faster because it exposed 171
+rather than 78 triangular jobs. At 32 threads the difference was only 1.5%,
+and at 128 threads the additional task/NUMA overhead made tile 12 faster.
+Six-column tiles were consistently poor because they leave unfavorable SIMD
+tails.
+
+The conservative candidate selects the eight-column tile only for 48--95
+Float64x4 workers when the default tile would expose fewer than two jobs per
+worker. Smaller teams, wider panels, and 96 or more workers retain the existing
+configuration. Job 196511 is also measuring a launch-only control using exact
+compute-thread counts, one GC mark thread, one BLAS thread, and compact NUMA
+placement. No kernel selection or solver code is changed in that control.
+
+### P3 Float64x4 reduced-factor screening
+
+The 144-by-144 shared factorization becomes serially dominant once Schur and
+block phases reach their scaling limit. A local eight-thread screening test
+compared the current generic Cholesky with the package's existing blocked
+fixed-precision factorization on a deterministic SPD Float64x4 matrix of the
+same order. Copies were outside the timed region and seven post-warm-up samples
+were collected.
+
+| Factorization | Median (ms) | Speedup |
+|---|---:|---:|
+| Current native | 11.379 | 1.00 |
+| Blocked, 1 worker | 10.152 | 1.12 |
+| Blocked, 2 workers | 6.989 | 1.63 |
+| Blocked, 4 workers | 6.778 | 1.68 |
+| Blocked, 8 workers | 6.451 | 1.76 |
+
+The native and blocked reconstruction errors were `9.758e-64` and
+`9.781e-64`; their lower factors differed by only `3.248e-65` relatively.
+This is promising but not yet a retained solver change: the screening machine
+is not the cluster EPYC node, and the test matrix is representative in size
+rather than the actual iteration matrix. The next same-node compute job will
+repeat this geometry test before any reduced-factor integration is attempted.
+
+### P4 launch, GC, and NUMA control — job 196511
+
+The unchanged `f861593` solver completed the launch-only control on node60.
+All artifact hashes passed, all 24 measured solves returned `Optimal` in 41
+iterations, BLAS remained single-threaded, and every numerical bound matched
+the original baseline: maximum relative objective variation `5.66e-38`, gap
+`9.210e-11`, dual residual `3.257e-14`, and minimum PSD eigenvalue
+`2.508e-18`. Julia was launched with exactly the requested compute pool, no
+interactive pool, and one GC mark thread. CPUs and memory were limited to the
+active NUMA subset through 64 threads; 128 threads used all eight nodes.
+
+| Threads | Median solve (s) | Schur (s) | KKT (s) | Allocated (MiB) | Process CPU | Process peak RSS (GiB) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 48.696 | 28.339 | 1.657 | 89.6 | 98% | 2.24 |
+| 2 | 25.937 | 14.411 | 1.500 | 88.3 | 135% | 2.26 |
+| 4 | 14.323 | 7.265 | 1.410 | 90.5 | 167% | 2.23 |
+| 8 | 8.581 | 3.708 | 1.377 | 94.8 | 190% | 2.32 |
+| 16 | 5.819 | 1.972 | 1.383 | 103.6 | 209% | 2.33 |
+| 32 | 5.017 | 1.416 | 1.396 | 120.8 | 231% | 2.67 |
+| 64 | 6.926 | 1.780 | 1.692 | 155.9 | 391% | 2.91 |
+| 128 | 45.959 | 4.500 | 3.603 | 223.6 | 1,801% | 3.35 |
+
+`/usr/bin/time` process CPU covers loading, compilation, warm-up, three solves,
+validation, and serialization. It demonstrates that allocating a wide pool is
+not the same as using it efficiently: the 64-thread process averaged only 3.91
+cores over its lifetime, while the 128-thread process averaged 18.01 cores and
+incurred 46.4 million voluntary plus 2.09 million involuntary context
+switches. The exact pool removed the extra 64/128 GC workers, but did not cure
+the solver's 128-task oversubscription. At 64 threads, local elimination and
+line search were 4.0x and 4.9x slower than at 32; at 128 they were 71x and
+218x slower. This supports phase-specific task widths rather than a global
+thread count.
+
+### P5 EPYC reduced-factor test and A/B harness correction — jobs 196521/196523
+
+Job 196521 ran the Cholesky screening on the same node60 EPYC 7742 before the
+full solver harness stopped. The 144-by-144 native factor median was 31.967 ms.
+The blocked factor took 24.836 ms with one worker (1.29x faster), but parallel
+widths were noisy and slower: 40.543 ms at two, 34.436 ms at four, 26.362 ms at
+eight, and about 28.5 ms at 16--128. Reconstruction errors remained
+`9.758e-64` native and `9.781e-64` blocked, with a `3.248e-65` relative factor
+difference. The retained next experiment is therefore a serial blocked
+factor, not fine-grained parallel Cholesky, for this small shared system.
+
+The solve A/B in job 196521 did not execute. Its copied runner resolved
+`model_io.jl` relative to the campaign subdirectory rather than the benchmark
+script directory and exited before loading a model. No result was accepted
+from that failed harness. The runner was placed beside its unchanged helpers,
+the original runner remained untouched, and corrected 128-core normal-queue
+job 196523 was submitted with the same immutable baseline and candidate.
+
+### P6 serial blocked-Cholesky crossover screening
+
+A second local screening sweep varied both matrix order and panel size. The
+blocked implementation stayed serial because job 196521 had already rejected
+fine-grained parallel factorization on the target EPYC. Five post-warm-up
+samples were collected for each deterministic SPD Float64x4 matrix. The best
+observed panels were deliberately small:
+
+| Order | Best panel | Native (ms) | Blocked (ms) | Speedup |
+|---:|---:|---:|---:|---:|
+| 64 | 16 | 1.021 | 0.949 | 1.08 |
+| 96 | 16 | 3.466 | 2.784 | 1.25 |
+| 128 | 16 | 8.093 | 6.063 | 1.33 |
+| 144 | 16 | 11.523 | 8.362 | 1.38 |
+| 160 | 24 | 17.630 | 11.188 | 1.58 |
+| 192 | 16 | 31.230 | 18.425 | 1.69 |
+| 256 | 24 | 67.779 | 41.806 | 1.62 |
+
+Every reconstruction error remained near `1e-63`. This sweep is not yet a
+cluster crossover rule: native medians at 160--256 showed some local jitter,
+and the EPYC cache hierarchy differs. The same sweep script was staged for a
+compute-node confirmation before choosing a conservative dimension and panel
+threshold.
+
+### P7 same-node phase-aware A/B and effective-worker correction — job 196523
+
+The immutable baseline and phase-aware candidate ran back-to-back on node60
+with exact compute pools, one GC mark thread, one BLAS thread, controlled NUMA
+placement, one warm-up, and three measured solves. Artifact hashes passed and
+all 18 solves returned `Optimal` in 41 iterations. The maximum relative gap
+was `9.211e-11`, maximum dual residual was `3.258e-14`, and every reported
+minimum PSD eigenvalue was positive (`2.508e-18`). The candidate's objectives
+and certificates agreed with the baseline to the available Float64x4 output
+precision.
+
+| Threads | Baseline median (s) | Candidate median (s) | Baseline Schur (s) | Candidate Schur (s) | Effective block/SYRK tasks |
+|---:|---:|---:|---:|---:|---:|
+| 32 | 5.332 | 5.345 | 1.606 | 1.622 | 32 / 32 |
+| 64 | 6.822 | 6.878 | 1.791 | 1.353 | 32 / 64 |
+| 128 | 45.303 | 15.635 | 4.387 | 3.087 | 32 / 64 reported |
+
+At 64 threads the eight-column triangular tile reduced the measured Schur
+time by 24.5%, allocations by about 3.3%, and process voluntary context
+switches from 1.19 million to 1.01 million. End-to-end time was 0.8% slower,
+which is within the run-to-run phase noise and is not accepted as a standalone
+solver speedup. At 128 threads, limiting short block phases reduced total time
+by 2.90x and preserved the exact solve trajectory, but it remained much slower
+than the 32-thread configuration.
+
+Interval-level `pidstat` data confirmed that the requested pools existed and
+became active. The 64-thread candidate reached 64 simultaneously active Julia
+workers and 2,080% interval CPU, but averaged only 343% CPU across loading,
+warm-up, solves, validation, and output. It used 3.01 GiB peak RSS and one BLAS
+thread. The wide pool is therefore genuinely allocated and briefly used, but
+the solver geometry cannot sustain it: the 144-column triangle, serial shared
+factor, and synchronization between short phases limit useful parallelism.
+
+Inspection after the 128-thread run found an instrumentation/execution
+discrepancy: `schur_threads=64` was selected and reported, and panel packing
+used 64 tasks, but the final exact SYRK still received `ws.thread_count` (128)
+instead of the selected worker count. This explains why its Schur phase still
+took about three seconds. The call now receives the actual selected `workers`,
+so diagnostics and execution agree. Focused extended-BLAS (67 assertions) and
+thread-safety (38 assertions) suites pass after the correction.
+
+The next same-node job, `196530.node220`, compares the corrected candidate
+against the phase-aware baseline with five measured solves per point. It also
+validates a serial sixteen-column blocked Float64x4 Cholesky for 128--192 order
+reduced systems and records interval CPU use, active worker counts, process
+RSS, affinity, NUMA placement, wall time, and context switches automatically.
+
+### P8 serial blocked reduced factor and zero-allocation hot path — job 196530
+
+The EPYC crossover sweep confirmed that the serial sixteen-column blocked
+factor is faster throughout the tested fixed-precision range. All lower-factor
+reconstruction errors remained between `5.8e-64` and `1.1e-63`.
+
+| Order | Native (ms) | Blocked-16 (ms) | Speedup |
+|---:|---:|---:|---:|
+| 64 | 2.871 | 2.100 | 1.37 |
+| 96 | 9.547 | 5.852 | 1.63 |
+| 128 | 22.487 | 12.431 | 1.81 |
+| 144 | 31.947 | 16.902 | 1.89 |
+| 160 | 43.731 | 22.465 | 1.95 |
+| 192 | 75.468 | 36.717 | 2.06 |
+| 256 | 178.666 | 80.899 | 2.21 |
+
+The retained crossover is deliberately narrower than the whole measured
+range: Float64x4 reduced-arrow systems of order 128--256 use the serial
+blocked factor, while smaller and larger systems keep the native method. This
+leaves latency-dominated tiny systems alone and avoids extrapolating beyond
+the measured cache regime. A Boolean internal kernel now lets the direct
+reduced path avoid constructing the mixed-precision factor wrapper; the hot
+factor call allocates zero bytes locally (versus 16 bytes in the first
+candidate). The wrapper-returning interface remains unchanged for existing
+mixed-precision callers.
+
+Job 196530 compared the phase-aware baseline and factor candidate five times
+at each width. All 30 solve results were `Optimal` in 41 iterations. The
+maximum relative gap was `9.211e-11`, the maximum dual residual was
+`3.258e-14`, and all minimum PSD eigenvalues were `2.508e-18`. The changed
+factor summation order moved the reported objective only at roughly the 38th
+relative decimal digit and did not change any certificate decision.
+
+| Requested threads | Baseline solve median (s) | Factor candidate median (s) | Speedup | Baseline factor (s) | Candidate factor (s) |
+|---:|---:|---:|---:|---:|---:|
+| 32 | 5.352 | 5.149 | 1.039 | 1.357 | 0.742 |
+| 64 | 6.748 | 6.504 | 1.037 | 1.613 | 0.953 |
+| 128 | 15.533 | 15.609 | 0.995 | 1.398 | 0.852 |
+
+At 32 and 64 threads the factor phase improved by 45.3% and 40.9%, producing
+repeatable end-to-end gains of 3.8% and 3.6%. At 128 threads, both factor and
+Schur became faster and voluntary context switches fell from 20.6 million to
+19.0 million, but residual, predictor, corrector, line-search, and update
+overhead erased the savings. The candidate averaged 11.6 active cores over
+its full process lifetime, briefly reached all 128 workers, used one BLAS
+thread, and peaked at 3.69 GiB RSS. This is further evidence that 128 requested
+threads are inappropriate for a 144-column reduced system; the 32-thread
+launch remains the fastest validated configuration.
+
+The actual-worker correction made execution agree with the reported
+`schur_threads=64`, but did not cure wide-pool task migration: the 128-thread
+Schur median remained near three seconds, versus about 1.6 seconds in the
+32-thread pool. It is retained as a truthful resource bound, not claimed as an
+end-to-end speedup. The next experiment restores 64 fine-grained tasks for a
+64-thread request, where narrowing to 32 was neutral, and separately tests
+NUMA interleaving and Julia's exclusive thread affinity.
+
+### P9 task width, SIMD reuse, affinity, and NUMA controls — job 196534
+
+Job 196534 completed on the same 128-core node60 EPYC 7742 with PBS exit
+status zero, a `PASSED` marker, and valid SHA-256 checksums for all 38 measured
+solutions. Every solve returned `Optimal` in 41 iterations. The maximum
+relative gap was `9.211e-11`, maximum dual residual was `3.258e-14`, and the
+minimum reported PSD eigenvalue was `2.508e-18`. Across every configuration,
+the recorded primal objective varied by only `1.01e-40` in absolute terms
+(`1.58e-29` relative to the small objective), far below any certificate gate.
+
+The first A/B restored 64 fine-grained block tasks for a 64-thread request
+while keeping the reduced Schur at 64 tasks. Seven post-warm-up solves gave:
+
+| 64-thread configuration | Solve median (s) | Schur (s) | Reduced factor (s) | Residual (s) | Predictor (s) | Corrector (s) |
+|---|---:|---:|---:|---:|---:|---:|
+| 32 fine tasks | 6.654 | 1.417 | 0.955 | 0.572 | 0.977 | 1.208 |
+| 64 fine tasks | 5.981 | 1.374 | 0.857 | 0.469 | 0.865 | 0.943 |
+
+Restoring the full 64 tasks improved the end-to-end solve by 10.1%. The
+benefit appears in every short block-local phase, so the earlier 64-to-32 cap
+was removed. The cap remains at 96 or more requested workers, where the
+128-thread A/B has already demonstrated a synchronization collapse. The
+additional task partials increased solve allocation from 150.7 to 164.3 MiB,
+but process peak RSS fell slightly within run noise (3.03 to 2.97 GiB).
+
+An exact direct-kernel screen then compared the existing four-output-row SIMD
+microkernel with a two-accumulator eight-row kernel. Both retained the scalar
+reduction order in every lane and produced an exactly equal lower triangle.
+
+| Workers / column tile | Vec4 median (s) | Vec8 median (s) | Vec8 speedup |
+|---:|---:|---:|---:|
+| 1 / 12 | 0.61118 | 0.55182 | 1.108x |
+| 32 / 12 | 0.05526 | 0.05185 | 1.066x |
+| 64 / 8 | 0.04035 | 0.03419 | 1.180x |
+
+The vec8 kernel reuses one broadcast multiplier across two independent
+`MultiFloatVec` accumulators. It does not change per-lane summation order,
+output ownership, or hot-loop allocation. It is retained for a solver-level
+A/B in the next compute job.
+
+NUMA interleaving was not beneficial. Binding 64 cores and allocations to
+NUMA nodes 0--3 solved in 5.981 seconds, while forced interleaving over those
+nodes took 6.304 seconds (5.4% slower). `numastat` confirmed that interleaving
+did distribute about 2.9 GiB evenly across the four nodes; the ordinary bound
+run concentrated memory on nodes 0 and 1, but locality still won. Interleaving
+is therefore rejected for this workload.
+
+Julia's exclusive worker affinity was the largest launch-level improvement.
+With otherwise identical code and memory binding it reduced the 64-thread
+median from 5.981 to 4.791 seconds (19.9%). Per-thread samples showed that 56
+of 62 observed workers migrated without exclusive affinity, visiting 9.32
+CPUs each on average and up to 27. With `JULIA_EXCLUSIVE=1`, no sampled worker
+migrated: each stayed on one CPU. Voluntary context switches fell from 2.45
+million to 0.72 million, and process peak RSS remained about 2.97 GiB. The
+process had 65 OS threads, reached 64 active Julia workers, and BLAS stayed at
+one thread, so the speedup is genuine affinity/cache behavior rather than an
+unrequested BLAS team.
+
+Exclusive affinity also improved the 128-thread median from 15.595 to 12.645
+seconds, but that remains 2.64 times slower than 64 exclusive threads. The
+128-thread run reached all 128 workers yet averaged only about 12.4 cores over
+the complete process and incurred 18.7 million voluntary context switches.
+The 144-column reduced triangle and short 1,700-block phases cannot sustain a
+128-worker team. This point is retained as a measured scaling limit, not a
+recommended launch configuration.
+
+Normal-queue job 196535 now brackets the vec8 reference around independent
+seven-run tests of contiguous versus LPT block ownership at 32 and 64
+exclusive threads. It also compares 48 versus 64 fine-grained tasks at 64
+threads. The contiguous policy is restricted to uniform reduced-arrow
+Float64x4 systems; heterogeneous and Float64 problems retain LPT. It will be
+removed unless the same-node solve A/B shows a reproducible benefit.
+
+### P10 measured locality crossover — job 196535
+
+Job 196535 completed with PBS exit status zero, a `PASSED` marker, and valid
+checksums for all 40 measured solutions. Every configuration remained
+`Optimal` in 41 iterations; maximum relative gap was `9.211e-11`, maximum
+dual residual was `3.258e-14`, and every minimum PSD eigenvalue was
+`2.508e-18`. The primal objective span across all scheduler variants was
+`3.23e-40` (`5.07e-29` relative), and no validation gate changed.
+
+All processes used exclusive Julia affinity, one BLAS thread, exact compute
+pools, and socket-local memory binding. The 64-thread LPT reference was run
+both before and after the candidates; its combined twelve-solve median removes
+most node drift.
+
+| Pool / fine tasks / partition | Solve median (s) | Schur (s) | Factor (s) | Allocated (MiB) | Peak memory (GiB) |
+|---|---:|---:|---:|---:|---:|
+| 32 / 32 / LPT | 5.010 | 1.795 | 0.676 | 128.9 | 2.84 |
+| 32 / 32 / contiguous | **4.555** | **1.504** | 0.678 | 128.9 | **2.75** |
+| 64 / 64 / LPT, bracketed | 4.789 | 1.258 | 0.658 | 164.3 | 2.88--2.95 |
+| 64 / 64 / contiguous | 4.866 | 1.254 | 0.658 | 164.2 | 2.91 |
+| 64 / 48 / contiguous | 4.939 | 1.243 | 0.659 | 157.8 | 2.87 |
+
+Contiguous ownership improves the 32-task solve by 9.1%, reduces process peak
+memory by about 75 MiB, and lowers both voluntary and involuntary context
+switches. The blocks are uniform `2x2` cells, so no LPT balance is lost and
+each task traverses adjacent block objects and coefficient storage.
+
+At 64 tasks the finer Schur time is already saturated. Contiguous ownership
+was 1.6% slower than the bracketed LPT reference, and lowering the fine phase
+to 48 tasks was 3.1% slower: both lost time in residual, predictor, and
+corrector phases despite slightly faster Schur assembly. These alternatives
+are rejected. The retained automatic rule therefore selects contiguous bins
+only for uniform Float64x4 reduced-arrow systems with at least 256 blocks and
+at most 32 actual fine-grained tasks. Wider teams retain LPT. The generic
+Float64 path and heterogeneous block systems remain unchanged.
+
+The next isolated candidate skips panel and coupling clears only when a block
+contains exactly one local variable plus every shared variable. Such a block
+overwrites every destination unconditionally; partial shared coverage keeps
+the original clear. Sentinel-based full- and partial-coverage regressions
+pass. Job 196536 measures whether removing roughly one GiB of redundant
+Float64x4 writes per solve has a stable end-to-end benefit.
+
+### P11 full-coverage clear-elision screen and warm-up audit — job 196536
+
+Job 196536 completed on node60 with PBS exit status zero, a `PASSED` marker,
+and valid checksums for all 33 measured solutions. Every result was `Optimal`
+in 41 iterations. The maximum relative gap was `9.211e-11`, maximum primal
+and dual residuals were `2.31e-62` and `3.258e-14`, and the minimum PSD
+eigenvalue was `2.508e-18`. The primal objective span was `2.31e-40`, so the
+candidate did not change a certificate decision or meaningful result digit.
+
+The initial seven-run medians appeared favorable:
+
+| Pool | Clear baseline (s) | Clear-elision candidate (s) | Apparent gain | Baseline Schur (s) | Candidate Schur (s) |
+|---:|---:|---:|---:|---:|---:|
+| 32 | 4.928 | 4.741 | 3.8% | 1.719 | 1.516 |
+| 64 | 4.865 | 4.663 | 4.1% | 1.252 | 1.247 |
+
+The bracketed 64-thread repeat showed why this is not yet sufficient evidence.
+With one warm-up, the first two measured baseline solves contained about
+0.25 seconds of uninstrumented compilation or GC latency. Later baseline
+samples converged to 4.645--4.701 seconds, the same range as the candidate's
+4.639--4.697 seconds. The repeated baseline had the same two-sample transient
+before settling, while its Schur median remained 1.254 seconds. The measured
+64-thread kernel effect is therefore neutral, and the apparent end-to-end
+gain is a protocol artifact at that width.
+
+Resource telemetry remained internally consistent: the 32-thread processes
+created 33 OS threads, pinned one Julia worker to each requested CPU, reached
+32 simultaneously active workers, kept BLAS at one thread, and peaked at
+2.75--2.85 GiB RSS. The 64-thread processes reached all 64 workers, averaged
+about 5.3 CPU cores over complete process lifetime, and peaked near 2.9 GiB.
+
+The first confirmation attempt exposed a campaign-driver defect before its
+output was used: `--warmup` was parsed as the Boolean expression
+`parse(Int, value) == 1`, so requesting three warm-ups silently disabled them.
+Job 196537 was cancelled after its first compilation-contaminated row. The
+versioned v2 runner now accepts a nonnegative integer and logs every warm-up.
+Job 196538 then failed in six CPU-seconds because the versioned runner had
+been staged away from its relative `model_io.jl` dependency; no model or solve
+ran. Both original files remain unchanged, and the corrected versioned runner
+now sits beside the loader.
+
+Normal-queue job 196539 repeats only the fastest 32-thread point with three
+verified full-model warm-ups, five measured solves, and alternating
+baseline/candidate/baseline/candidate process order. The source snapshots are
+immutable and differ in the hot path only by full-coverage clear elision. The
+change will be retained only if this stricter same-node confirmation produces
+a stable gain.
+
+A separate local screen tested static Julia-thread ownership for the
+3,400-by-144 reduced SYRK. The lower triangle was bit-for-bit identical, but
+the current dynamic task mapping took 106.406 ms versus 106.419 ms for the
+static mapping (0.9999x), with essentially identical timing ranges. Static
+mapping is therefore rejected without a cluster experiment or source change.
+
+Job 196539 completed with PBS exit status zero, a `PASSED` marker, and valid
+checksums for all 20 measured solution files. Each of the four source
+processes executed three full-model warm-ups before five recorded solves. The
+two baseline process medians were 4.631 and 4.627 seconds; the two
+clear-elision medians were 4.389 and 4.580 seconds, so both alternating pairs
+improved in the same direction despite the node's Schur timing spread.
+
+| Combined ten-sample metric | Clear baseline | Clear elision | Improvement |
+|---|---:|---:|---:|
+| Solve time | 4.629 s | 4.442 s | 4.05% |
+| Schur time | 1.542 s | 1.411 s | 8.46% |
+| Reduced factor | 0.678 s | 0.678 s | neutral |
+| Solve allocation | 128.85 MiB | 128.85 MiB | neutral |
+| Per-solve peak memory | 3.105 GiB | 3.113 GiB | within noise |
+
+Every solve was `Optimal` in 41 iterations. The primal objective was identical
+across all rows to all 77 printed decimal digits; maximum relative gap was
+`9.211e-11`, maximum dual residual was `3.258e-14`, and minimum PSD
+eigenvalue was `2.508e-18`. Each process created 33 OS threads, pinned one
+Julia worker per requested CPU, reached all 32 active workers, and used one
+BLAS thread. Mean whole-process CPU use was 3.16--3.22 cores because model
+loading, compilation, the serial reduced factor, and synchronization-bound
+phases cannot occupy the full team continuously. Process peak RSS was
+3.10--3.11 GiB.
+
+Full-coverage clear elision is therefore retained. Partial shared coverage
+continues to clear both panel rows and the coupling row, and sentinel-based
+regressions cover both cases. The complete local package suite passes all
+5,791 assertions in 3 minutes 57 seconds on eight Julia threads.
+
+### P12 cached panel reciprocals and SIMD panel rows — local screen
+
+The retained blocked Float64x4 Cholesky still divided every panel and
+trailing-panel entry by the same pivot. A controlled Apple M4 microbenchmark
+replaced those repeated extended-precision divisions with one reciprocal per
+pivot and multiplication thereafter. Median factorization results, with 24
+alternating measurements per implementation, were:
+
+| Order | Repeated division (ms) | Cached reciprocal (ms) | Speedup |
+|---:|---:|---:|---:|
+| 128 | 5.857 | 5.169 | 1.133x |
+| 144 | 8.056 | 7.186 | 1.121x |
+| 192 | 17.639 | 16.133 | 1.093x |
+| 256 | 39.733 | 37.033 | 1.073x |
+
+Both methods had the same Float64-visible reconstruction error
+(`9.6e-17`--`1.2e-16`). Low limbs need not be bit-identical because one
+rounded reciprocal is reused, so solver-level certificates remain the
+retention gate. The implementation stores reciprocals in the undefined upper
+triangle of the in-place lower factor. This avoids a per-factor allocation;
+threaded row owners only read that scratch after the serial panel factor has
+completed. The zero-allocation factor regression and the 77 extended-BLAS
+regressions pass, and the independent extended-precision BLAS suite passes
+all 72 assertions. A same-node full-model A/B is required before retention.
+
+Vectorizing independent panel rows in one or two four-lane
+`MultiFloatVec{4,Float64,4}` groups improved the reciprocal version further.
+Against the original repeated-division implementation, the final local
+one-worker medians were 4.280, 6.036, 14.067, and 33.347 milliseconds at
+orders 128, 144, 192, and 256: speedups of 1.368x, 1.332x, 1.253x, and
+1.191x. Every SIMD lane preserves the scalar reduction order. The strict
+Float64x4 reconstruction regression remains below `1e-60`, the lower-factor
+hot path still allocates zero bytes, and both focused suites pass.
+
+The SIMD balance also makes bounded trailing-update parallelism plausible.
+One warmed Apple run at order 144 measured 6.05, 3.87, 3.24, and 2.64
+milliseconds for 1/2/4/8 requested workers. A shorter standalone launch was
+less stable and measured 5.98, 3.58, and 4.37 milliseconds at 1/2/4 exclusive
+workers. This variation makes a local hard-coded optimum unsafe. The
+experimental controller therefore exposes the executed factor width,
+restricts the 128--256 range to at most eight workers, and leaves all other
+dimensions and arithmetic types serial. A cluster micro-sweep and alternating
+full-model A/B will decide whether the cap should be one, two, four, or eight.
+
+A final local variant changed each panel solve from row-group-major traversal
+to column-major traversal while preserving row ownership and SIMD arithmetic.
+The measured speedups were only 1.002x, 1.006x, 1.003x, and 1.002x at
+1/2/4/8 workers. This is below the retention threshold and would duplicate a
+large specialized loop, so the variant is rejected without a source change.
+
+Reducing the threaded panel-solve row grain from 64 to 32 improved the local
+eight-worker factor from 2.658 to 2.607 milliseconds (1.020x). Because this
+would save only about 0.3% of the measured full solve even if it transferred
+perfectly, it is also rejected pending stronger cluster evidence; the current
+64-row threshold remains unchanged.
+
+After adding the bounded factor-width selector and executed diagnostics, the
+complete eight-thread local package suite passes all 5,797 assertions in
+3 minutes 57 seconds.
+
+### P13 final Float64x4 scaling and resource audit — job 196540
+
+Normal-queue job 196540 completed on node60 with PBS exit status zero and a
+`PASSED` marker. All ten CSV files and 68 measured solution files pass their
+recorded SHA-256 checksums. Each process used one BLAS thread, an exact Julia
+compute pool, one GC mark thread, no interactive threads, exclusive worker
+affinity, and explicit NUMA placement. Three complete model warm-ups preceded
+every seven-run point; the 128-worker point used five measured solves.
+
+| Julia workers | Solve median (s) | Speedup | Efficiency | Schur (s) | Factor (s) | Allocation (MiB) | Process peak RSS (GiB) | Whole-process mean cores | Maximum active workers |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 44.293 | 1.00x | 100.0% | 24.532 | 0.656 | 89.5 | 2.380 | 1.00 | 1 |
+| 2 | 23.382 | 1.89x | 94.7% | 12.532 | 0.656 | 96.1 | 2.303 | 1.52 | 2 |
+| 4 | 12.969 | 3.42x | 85.4% | 6.601 | 0.657 | 98.4 | 2.346 | 2.11 | 4 |
+| 8 | 7.526 | 5.88x | 73.6% | 3.358 | 0.659 | 102.7 | 2.546 | 2.62 | 8 |
+| 16 | 4.880 | 9.08x | 56.7% | 1.746 | 0.671 | 111.5 | 2.834 | 3.01 | 16 |
+| 32 | 4.709 | 9.41x | 29.4% | 1.591 | 0.676 | 128.9 | 3.120 | 3.62 | 32 |
+| 64 | **4.614** | **9.60x** | 15.0% | **1.244** | 0.658 | 164.3 | 3.227 | 6.09 | 64 |
+| 128 | 12.444 | 3.56x | 2.8% | 2.334 | 0.657 | 205.0 | 3.324 | 13.53 | 128 |
+
+The 128-worker process genuinely created 129 OS threads, pinned one Julia
+worker per CPU, reached all 128 workers, and used one BLAS thread. It still
+averaged only 13.53 cores over its complete lifetime, peaked at 44.18 CPU
+cores in a sampled interval, and incurred 24.89 million voluntary context
+switches. Allocation rose to 205 MiB per solve. The 144-column triangle and
+short phases therefore cannot amortize that width; the result is a measured
+synchronization/NUMA limit rather than unused scheduler allocation.
+
+All 54 scaling rows were `Optimal` in 41 iterations. The primal-objective
+span was `1.46e-39`, maximum relative gap was `9.211e-11`, maximum primal and
+dual residuals were `2.61e-62` and `3.258e-14`, and the minimum PSD
+eigenvalue was `2.508e-18`. The requested arithmetic was Float64x4 (209
+reported bits) at every point.
+
+The repeat 32-worker process had a 4.508-second median; combining the two
+seven-run 32-worker processes gives 4.549 seconds. The immutable pre-
+optimization baseline at 32 workers took 4.939 seconds, while its reduced
+factor took 1.362 seconds versus 0.677 seconds in the retained candidate. The
+campaign confirms a 7.9% cumulative solve reduction and a 50.3% factor
+reduction relative to that baseline, although the earlier alternating P11
+experiment remains the cleaner isolation of clear elision.
+
+The remaining pre-P12 factor is independent of solver width and consumes
+0.66--0.68 seconds. Job 196541 therefore runs a same-node micro-sweep and four
+alternating full-model processes to decide the cached-reciprocal, SIMD-row,
+and bounded factor-team candidate.
+
+### P14 cached/SIMD/bounded factor retention -- job 196541
+
+Normal-queue job 196541 completed on node57 with PBS exit status zero, a
+`PASSED` marker, and valid SHA-256 checksums for four CSV files and all 20
+measured solutions. The immutable source comparison changed only the
+lower-only blocked factor, its worker selector, and executed diagnostics; no
+Schur assembly formula, model input, tolerance, or iteration policy changed.
+Every process used three full-model warm-ups followed by five measurements,
+and the order was baseline/candidate/baseline/candidate.
+
+The isolated order-144 factor sweep established the architecture-specific
+crossover before the full solve:
+
+| Factor configuration | Effective workers | Median (ms) | Allocation/call | Float64-visible relative error |
+|---|---:|---:|---:|---:|
+| Previous blocked factor | 1 | 15.891 | 0 B | `1.218e-16` |
+| Cached reciprocal + SIMD rows | 1 | 10.253 | 0 B | `1.218e-16` |
+| New factor, request 2 | 2 | 14.228 | 15,008 B | `1.218e-16` |
+| New factor, request 4 | 4 | 9.396 | 22,864 B | `1.218e-16` |
+| New factor, request 8 | 8 | **6.890** | 35,184 B | `1.218e-16` |
+| New factor, request 16/32 | capped at 8 | 6.889/6.888 | 35,184 B | `1.218e-16` |
+
+The two-worker point is slower than the new serial kernel on this EPYC node,
+but four and eight workers are beneficial. Eight is the measured optimum and
+requests above eight reproduce it, so the automatic selector retains a hard
+eight-worker maximum only for 128--256 order Float64x4 reduced-arrow factors.
+Other dimensions and arithmetic types retain their established path. The
+strict Float64x4 reconstruction error remained about `1.01e-63`; the looser
+Float64 projection shown in the table is unchanged. The temporary task
+allocation is bounded and accounts for the full-model allocation delta.
+
+| Five-run process median | Previous factor A | New factor B | Previous factor A2 | New factor B2 |
+|---|---:|---:|---:|---:|
+| Solve (s) | 4.710 | **3.422** | 4.793 | **3.418** |
+| Schur (s) | 1.606 | 1.145 | 1.676 | 1.147 |
+| Factor (s) | 0.672 | **0.139** | 0.671 | **0.140** |
+| Allocation (MiB/solve) | 128.85 | 130.23 | 128.85 | 130.23 |
+| Process peak RSS (GiB) | 3.009 | 3.013 | 3.120 | 2.779 |
+
+Combining ten samples per implementation gives a 4.768-to-3.420 second solve
+reduction (28.3%) and a 0.671-to-0.140 second factor reduction (79.2%). The
+candidate's factor width was reported as eight on every row. Several other
+phases also ran faster during both alternating candidate processes; those
+co-movements are reported rather than attributed to the factor formula. The
+isolated factor measurement and the 0.53-second full-solve factor reduction
+alone are sufficient for retention.
+
+All 20 solves were `Optimal` in 41 iterations. The cross-source primal
+objective span was `8.44e-40`; maximum relative gap was `9.211e-11`, maximum
+dual residual was `3.258e-14`, and minimum PSD eigenvalue was `2.508e-18`.
+The reciprocal/SIMD reduction order changes only sub-leading Float64x4 limbs
+and did not change a status, tolerance gate, or certificate.
+
+Resource records confirm that each process created 33 OS threads, pinned one
+Julia compute worker to each CPU 0--31 under exclusive affinity, reached all
+32 active workers, and kept every BLAS backend at one thread. Whole-process
+CPU averaged 3.14--3.28 cores because model loading and many short phases are
+serial or synchronization limited; the candidate reached about 22 sampled
+cores versus 17 for the previous factor. NUMA policy bound allocation to
+nodes 0 and 1, with first-touch placement concentrated on node 0. Candidate
+process peak RSS was 2.80--3.01 GiB versus 3.01--3.12 GiB for the baseline.
+Voluntary context switches increased from roughly 215 thousand to 294
+thousand due to the bounded factor tasks, but the factor and total runtime
+improvements substantially outweigh that overhead.
+
+The candidate is retained. The next controlled experiment, job 196542,
+compares the true 128-worker path against a transparent 64-worker whole-solver
+cap for this narrow 1,700-block/144-shared-variable geometry. It includes 64-
+worker controls so the cap is retained only if it removes the measured 128-
+worker synchronization and NUMA collapse without harming the genuine 64-
+worker optimum.
+
+### P15 rejected first whole-solver cap -- job 196542
+
+Job 196542 completed on node60 with all six processes returning zero, a
+`PASSED` marker, and valid SHA-256 checksums for six CSV files and 30 measured
+solutions. Every solve remained `Optimal` in 41 iterations. Across all rows,
+the primal-objective span was `1.40e-40`, maximum relative gap was
+`9.211e-11`, maximum dual residual was `3.258e-14`, and the minimum PSD
+eigenvalue was `2.508e-18`. The candidate is rejected solely for performance,
+not correctness.
+
+The first implementation changed `Workspace.thread_count` from 128 to the
+64-worker reduced-SYRK cap before constructing all per-phase schedules. This
+saved task-local storage but accidentally asked the fine-grained selector to
+interpret the already-capped width as a genuine 64-worker request. The
+previous 128-worker path intentionally used 32 short-phase bins; the candidate
+expanded them to 64 and changed their uniform-block partition away from the
+validated 32-bin contiguous schedule.
+
+| Combined ten-sample 128-worker metric | Previous factor source | First global cap | Change |
+|---|---:|---:|---:|
+| Solve (s) | 11.997 | 18.261 | **52.2% slower** |
+| Schur (s) | 2.249 | 2.273 | neutral |
+| Factor (s) | 0.738 | 0.750 | neutral |
+| Residual (s) | 1.114 | 1.840 | 65.2% slower |
+| Predictor (s) | 2.040 | 3.575 | 75.2% slower |
+| Corrector (s) | 2.235 | 3.739 | 67.3% slower |
+| Allocation (MiB/solve) | 206.39 | 179.15 | 13.2% lower |
+| Peak result RSS median (GiB) | 3.430 | 3.257 | 5.0% lower |
+
+The genuine 64-worker controls were effectively neutral: 3.725 seconds for
+the source baseline and 3.640 seconds for the candidate, with overlapping
+3.61--3.81 second ranges and nearly identical phase timings. The extra shared-
+variable frequency scan does not materially penalize a non-capped solve.
+
+Resource telemetry confirms that the regression was real work rather than an
+idle allocation. Both 128-worker variants created 129 OS threads, pinned one
+worker per CPU, reached all 128 workers, and used one BLAS thread. The first
+cap averaged about 21.0 process cores versus 15.2 for the source baseline, but
+voluntary context switches rose from roughly 27.4 million to 48.6 million and
+wall time rose from 4:41 to 5:30 per process. More active threads therefore
+made the synchronization-bound phases slower.
+
+The first cap is rejected. The corrected selector keeps two widths: the
+original requested pool chooses the phase-aware bin count, while the reduced
+solver width is a hard upper bound on actual tasks and task-local storage. For
+128 requested/64 effective workers this restores 32 contiguous fine-grained
+bins. Focused tests pass 87/87, including a regression for this composed
+crossover. Normal-queue job 196543 repeats the same alternating 128/64 A/B on
+the corrected immutable source.
+
+### P16 paired-column Float64x4 SYRK micro-tile -- rejected local screen
+
+The retained eight-output SYRK micro-kernel computes two independent
+four-lane row groups for one Gram column. A local experiment instead computed
+one four-lane row group for two adjacent columns, reusing the four panel
+streams across both multipliers. Every output retained its original reduction
+order and the focused extended-BLAS suite passed all 87 assertions.
+
+On the 3,400-by-144 reduced-panel geometry, separate warmed Apple M4 screens
+measured 0.3542/0.1052/0.0692 seconds for the retained kernel and
+0.3522/0.1030/0.0683 seconds for the paired-column candidate at 1/4/8 workers.
+The apparent gains were only 0.6%, 2.1%, and 1.3%, respectively, below the
+retention threshold for a substantially more complicated triangular edge
+path and not established by an alternating comparison. Extended arithmetic,
+rather than panel bandwidth, dominates this kernel. The experiment is
+rejected and the source was restored to the simpler retained implementation.
+
+### P17 corrected whole-solver cap retained -- job 196543
+
+Normal-queue job 196543 completed on node61 with PBS exit state `C`, zero
+exit status from every child process, a `PASSED` marker, and valid SHA-256
+checksums for six CSV files and all 30 measured solutions. The corrected
+candidate retains the 32 contiguous short-phase bins selected from the
+original 128-worker request while limiting effective workspace and arrow
+width to 64. The process order was baseline/candidate at 128 workers, a
+baseline/candidate 64-worker control, then candidate/baseline at 128 workers.
+Every process performed three complete warm-ups before five recorded solves.
+
+| Pair median | 128 baseline (s) | 128 capped (s) | Change |
+|---|---:|---:|---:|
+| Forward order | 12.267 | 11.862 | 3.30% faster |
+| Reverse order | 11.848 | 11.506 | 2.89% faster |
+| Combined ten samples | 12.216 | 11.839 | 3.09% faster |
+
+The genuine 64-worker control was neutral: 3.6305 seconds for the source and
+3.6308 seconds for the candidate. Combined 128-worker phase medians changed
+from 2.267 to 2.233 seconds for Schur, 1.119 to 1.105 seconds for residuals,
+2.062 to 2.016 seconds for predictor work, and 2.271 to 2.208 seconds for
+corrector work. The factor was unchanged at 0.743 seconds because this source
+still requested its eight factor tasks from the 128-thread Julia pool.
+
+Solve allocation fell from a combined 216.41 MB to 166.54 MB (23.0%), while
+the median result peak changed from 3.518 to 3.503 GB. The two candidate
+processes averaged 15.2--15.3 CPU cores, reached 128 active Julia workers,
+and incurred 27.4--27.5 million voluntary context switches. The cap controls
+solver work and task-local storage; it cannot shrink the Julia runtime's
+already-created 128-thread pool. That distinction is now exposed as requested
+versus effective thread diagnostics.
+
+All 30 solves were `Optimal` in 41 iterations. There were only two printed
+primal-objective strings, corresponding to the expected 64- versus 128-worker
+reduction order; their difference is about `1.40e-40`. Maximum relative gap
+was `9.211e-11`, maximum primal and dual residuals were `2.205e-62` and
+`3.257e-14`, and the minimum PSD eigenvalue was `2.508e-18`. The corrected
+whole-solver cap is retained because both alternating pairs improve, the
+64-worker control is unchanged, allocation falls materially, and no numerical
+gate changes.
+
+### P18 Julia-pool sensitivity of factor and SYRK -- jobs 196544/196545
+
+Two chained 128-core normal-queue jobs isolated the effect of the Julia pool
+size from the number of numerical tasks. Both completed with `PASSED` markers
+and valid checksums. All factor reconstructions had the same
+`1.218e-16` Float64-visible relative error; every SYRK lower triangle was
+bit-identical to the serial reference.
+
+For the order-144 Float64x4 reduced factor, 51-run medians in milliseconds
+were:
+
+| Julia pool | Serial | 4 factor tasks | 8 factor tasks | Best |
+|---:|---:|---:|---:|---:|
+| 32 | 10.266 | 8.869 | **6.556** | 8 tasks |
+| 64 | 10.243 | 8.441 | **6.118** | 8 tasks |
+| 96 | **10.248** | 12.031 | 13.946 | serial |
+| 128 | **10.239** | 14.855 | 19.029 | serial |
+
+The work is identical, but small spawned teams migrate across a much wider
+scheduler and NUMA domain at 96--128 runtime threads. The 128-pool process
+incurred 773,346 voluntary context switches versus 66,720 in the 32-pool
+process. This result motivated a complete-solver A/B before changing the
+factor selector; isolated kernel timing was not accepted as sufficient.
+
+The 3,400-by-144 SYRK sweep reached its best median at the full useful width
+within each pool: 0.02205 seconds with 32 tasks in a 32-thread pool, 0.01383
+seconds with 64 tasks in a 64-thread pool, 0.02529 seconds with 64 tasks in a
+96-thread pool, and 0.03030 seconds with 64 tasks in a 128-thread pool. The
+existing 64-task wide-pool cap is therefore correct; reducing it to 32 or 48
+would lose useful tile parallelism. The two-fold 64-pool to 128-pool slowdown
+with the same 64 tasks confirms that runtime-pool scheduling and cross-NUMA
+wake-up overhead, not missing Schur task count, is the remaining wide-pool
+bottleneck.
+
+### P19 pool-aware serial factor -- rejected by full-solver A/B
+
+Normal-queue job 196546 compared the retained eight-task factor against a
+candidate that selected the serial SIMD factor when the Julia pool contained
+96 or more workers. It completed on node60 with a `PASSED` marker, valid
+checksums, and 20 `Optimal` 41-iteration solves. Each implementation ran in
+both forward and reverse order after three complete warm-ups.
+
+The candidate reduced combined median factor time from 0.742 to 0.425 seconds
+and KKT time from 1.142 to 0.831 seconds. Nevertheless, combined median solve
+time increased from 11.749 to 11.803 seconds (0.46% slower). The forward pair
+was 0.23% slower and the reverse pair was 2.54% slower, so there was no
+reproducible end-to-end benefit. Residual, Schur, predictor, corrector, line
+search, and update phases collectively lost more time than the factor saved.
+Allocation changed only from 173.62 to 172.18 MiB per solve.
+
+All numerical gates were unchanged: maximum relative gap was `9.211e-11`,
+maximum primal and dual residuals were `2.205e-62` and `3.257e-14`, and the
+minimum PSD eigenvalue was `2.508e-18`. Resource telemetry showed 129 OS
+threads and one BLAS thread in both variants. Average process use fell from
+about 15.0 CPU cores to 13.7--14.2 cores and voluntary context switches fell
+from roughly 27.5 million to 25.0 million, but neither translated into lower
+wall time. The pool-aware serial factor is therefore rejected and the
+validated at-most-eight-task selector is restored for every Julia pool.
+
+### P20 128-worker sleep-policy full-solver A/B -- job 196548
+
+Job 196548 ran the retained corrected-cap source on node53 with an exact
+128-thread Julia pool, one BLAS thread, exclusive CPU affinity, and memory
+interleaved across all eight NUMA nodes. The only changed process-start
+setting was `JULIA_THREAD_SLEEP_THRESHOLD`: unset for the Julia default and
+`infinite` for permanently awake workers. Each policy ran in forward and
+reverse order after three full warm-ups, with five recorded solves per
+process. PBS exited zero, the job emitted `PASSED`, and all four CSVs plus 20
+solution files passed their SHA-256 checks.
+
+| Combined ten-sample metric | Default sleep | Never sleep | Change |
+|---|---:|---:|---:|
+| Solve (s) | 11.890 | 3.550 | **70.1% lower** |
+| End-to-end measured row (s) | 14.332 | 5.784 | 59.6% lower |
+| Residual (s) | 1.126 | 0.271 | 76.0% lower |
+| Schur (s) | 2.260 | 0.600 | 73.5% lower |
+| KKT (s) | 1.150 | 0.182 | 84.1% lower |
+| Reduced factor (s) | 0.748 | 0.147 | 80.4% lower |
+| Predictor (s) | 2.060 | 0.483 | 76.5% lower |
+| Corrector (s) | 2.230 | 0.667 | 70.1% lower |
+| Line search (s) | 0.402 | 0.029 | 92.8% lower |
+| Update (s) | 0.408 | 0.034 | 91.7% lower |
+| Allocation (MiB/solve) | 158.83 | 152.07 | 4.3% lower |
+| Result peak memory (GiB) | 3.175 | 3.281 | 3.3% higher |
+
+The two never-sleep process medians were 3.762 and 3.384 seconds, versus
+11.586 and 12.021 seconds for the bracketing default controls. The speedup is
+therefore not a favorable single ordering. Every row was `Optimal` in 41
+iterations, and the printed primal objective, dual objective, relative gap,
+primal residual, dual residual, and minimum PSD eigenvalue were bit-for-bit
+identical across all 20 rows. The common maximum relative gap was
+`9.210e-11`, the dual residual was `3.257e-14`, and the minimum PSD eigenvalue
+was `2.508e-18`.
+
+Resource telemetry explains the wide-pool collapse. Both modes created 129
+OS threads, pinned the 128 Julia compute threads to CPUs 0--127, reached all
+128 workers, and kept BLAS at one thread. The default processes averaged
+14.09/15.24 CPU-core equivalents and incurred 27.48/27.36 million voluntary
+context switches. Never-sleep averaged 113.21/113.16 cores, its median sample
+used about 127.2 cores, and voluntary switches fell to 128/129 thousand.
+Involuntary switches rose from roughly 0.58 million to 1.57 million. Process
+wall time fell from 4:59/4:41 to 3:53/3:50; process peak RSS was comparable.
+
+This setting is not made a library default: Julia reads it before startup,
+and continuous spinning consumes the whole reserved node even during serial
+or compilation work. It establishes a measured speed ceiling and proves that
+worker wake-up/sleep and scheduler synchronization, rather than missing
+Float64x4 arithmetic parallelism, dominate the 128-pool default. The next
+experiment searches finite spin thresholds for the same kernel speed with
+less idle CPU consumption.
+
+### P21 finite Julia sleep-threshold kernel sweep -- job 196549
+
+Job 196549 completed on node60 with PBS exit zero, a `PASSED` marker, and
+valid checksums for all sixteen factor/SYRK CSVs. It swept 100 microseconds,
+1, 10, 100, and 1,000 milliseconds between bracketing default controls and
+the never-sleep ceiling. Every 3,400-by-144 SYRK lower triangle was exact;
+every order-144 factor had the same `1.218e-16` Float64-visible reconstruction
+error.
+
+| Sleep policy | 64-task SYRK (ms) | 8-task factor (ms) | SYRK process CPU | Factor process CPU |
+|---|---:|---:|---:|---:|
+| Default, first/repeat | 35.21 / 32.38 | 19.13 / 19.41 | 12.53 / 12.90 cores | 8.33 / 8.80 cores |
+| 100 microseconds | 28.56 | 18.89 | 12.43 cores | 8.79 cores |
+| 1 millisecond | 23.18 | 3.96 | 9.18 cores | 9.33 cores |
+| 10 milliseconds | 11.63 | 3.28 | 18.19 cores | 8.65 cores |
+| 100 milliseconds | **11.39** | **3.23** | 30.93 cores | 12.30 cores |
+| 1 second | 11.55 | 3.49 | 63.23 cores | 28.10 cores |
+| Never sleep | 11.56 | 3.36 | 109.54 cores | 112.58 cores |
+
+Ten milliseconds reaches the useful 64-task SYRK and factor plateaus with
+substantially less process CPU than permanent spinning. One hundred
+milliseconds is the fastest isolated point but uses more spin. Both advance
+to a complete-solver, repeated-order comparison; shorter thresholds and one
+second are rejected at the kernel screen.
+
+### P22 finite-threshold full solver -- job 196550
+
+Job 196550 completed on node57 with PBS exit zero, `PASSED`, valid checksums,
+and 35 `Optimal` 41-iteration solutions. The run identities exposed a driver
+labeling issue before analysis: the shell pattern `ms10*` preceded `ms100*`,
+so both nominal labels received the recorded value `10000000` nanoseconds.
+The four finite processes are therefore four independent 10-millisecond
+repeats, not a 10/100-millisecond comparison. The script order was corrected;
+no result is assigned to an unrecorded policy, and the redundant repetitions
+make the 10-millisecond conclusion stronger.
+
+| Combined metric | Default, 10 rows | 10 ms, 20 rows | Never sleep, 5 rows |
+|---|---:|---:|---:|
+| Solve (s) | 11.635 | **3.409** | 3.375 |
+| End-to-end measured row (s) | 13.958 | **5.600** | 5.615 |
+| Residual (s) | 1.093 | 0.277 | 0.277 |
+| Schur (s) | 2.199 | 0.610 | 0.587 |
+| KKT (s) | 1.134 | 0.194 | 0.186 |
+| Reduced factor (s) | 0.737 | 0.150 | 0.149 |
+| Predictor (s) | 1.990 | 0.489 | 0.481 |
+| Corrector (s) | 2.192 | 0.672 | 0.677 |
+| Line search (s) | 0.401 | 0.028 | 0.029 |
+| Update (s) | 0.407 | 0.034 | 0.034 |
+| Allocation (MiB/solve) | 165.58 | 152.07 | 152.07 |
+| Result peak memory (GiB) | 3.363 | 3.305 | 3.303 |
+
+The 10-millisecond policy is 70.7% faster than Julia's default and only 1.0%
+slower than never-sleep in solver time. Its end-to-end measured-row median is
+slightly lower than never-sleep, allocation is 8.2% below default, and peak
+memory is 1.7% lower. All objective and certificate strings are identical
+across all 35 rows: relative gap `9.210e-11`, primal residual `2.205e-62`,
+dual residual `3.257e-14`, and minimum PSD eigenvalue `2.508e-18`.
+
+Every process created 129 OS threads, pinned 128 Julia workers to CPUs 0--127,
+kept BLAS at one thread, and interleaved memory over NUMA nodes 0--7. The two
+default controls averaged 15.16/15.19 CPU-core equivalents and incurred
+27.53/27.49 million voluntary context switches. The four 10-millisecond
+processes averaged only 12.44--12.61 cores over their complete lifetimes,
+reached 124--126 cores during parallel bursts, and incurred 108--115 thousand
+voluntary switches. Never-sleep averaged 113.09 cores and incurred 125
+thousand voluntary switches. Thus 10 milliseconds removes the wake-up storm
+without burning the whole node during serial work.
+
+`JULIA_THREAD_SLEEP_THRESHOLD=10000000` is retained as the hardware-specific
+cluster launch recommendation, not as package state: Julia consumes the
+setting before SDPX is loaded. The final exact-pool sweep compares this policy
+with Julia's default at 1--128 threads to select the smallest and fastest
+resource request.
+
+### P23 complete local regression after the retained selector revert
+
+The standard package test command ran on Julia 1.12.6 with four Julia threads
+and a writable isolated depot layered over the installed package cache. It
+passed 5,803/5,803 checks in 5 minutes 10.9 seconds, including Aqua, public API
+and extension checks, native BigFloat ownership regressions, Float64x4 Schur
+and factor tests, diagnostics, certificates, and solver cases. Repeated macOS
+`sysctl` permission messages came only from the sandboxed memory probe and did
+not fail a check. The earlier focused runs also passed 87/87 extended-BLAS,
+72/72 extended-precision-BLAS, and 18/18 executed-diagnostic assertions.
+
+### P24 lazy reduced-arrow Schur partials and post-change regression
+
+The direct reduced-panel path never consumes the legacy task-local
+`Sredpartial` matrices: it forms the reduced shared triangle directly and the
+later local-factor loop only prepares the local coupling solves.  Workspace
+construction nevertheless allocated one dense `ng`-by-`ng` Float64x4 matrix
+per selected worker in case the direct kernel later fell back.  For the
+medium CSDR geometry (`ng = 144`), each unused matrix occupies 663,552 bytes;
+48 copies occupy 30.375 MiB and 64 copies occupy 40.5 MiB before allocator
+overhead.
+
+`ArrowWorkspace` now accepts an explicit partial count and may omit the full
+Schur partials.  Direct reduced workspaces retain only the small RHS partials;
+`ensure_arrow_schur_partials!` allocates independent full matrices if the
+structure-specific build declines the problem or if the factorization enters
+the legacy fused path.  The fallback is outside the successful direct hot
+path.  Construction also uses the already selected fine-grained bin count,
+so a 96/128-thread request does not recreate 64 redundant RHS buffers after
+the narrow-arrow scheduler selects 32 bins.
+
+New tests verify that direct workspaces start without full Schur partials,
+that lazy fallback matrices are independent, that full shared coverage safely
+skips clearing the packed panel, and that incomplete shared coverage clears
+sentinel data before rebuilding the exact reduced Schur matrix.  The focused
+extended-precision test group passed 76/76 assertions.  The complete package
+suite then passed 5,807/5,807 checks on Julia 1.12.6 with four Julia threads in
+5 minutes 12.1 seconds.  The cluster candidate is isolated at
+`/public/home/yongjunxu/projects/SDPX.jl/experiments/float64x4-lazypartial-d9c287af-clean`;
+production remains unchanged pending the repeated complete-solver A/B.
+
+### P25 exact-pool Float64x4 scaling and resource audit -- job 196551
+
+Normal-queue job 196551 completed on node60 (dual-socket AMD EPYC 7742,
+128 CPUs, eight NUMA domains) with PBS exit zero, a `PASSED` marker, valid
+SHA-256 checks for 22 CSV files and 110 solution files, and no
+error marker in any solver log.  The job reserved one complete 128-core,
+128-GiB node.  Every process used an exact Julia compute pool
+(`--threads=N,0`), one GC mark thread, no interactive or sweep pool, one BLAS
+thread, `JULIA_EXCLUSIVE=1`, and three complete warm-ups followed by five
+recorded solves.  Runs through 16 workers were bound within NUMA node 0,
+32 workers used CPUs 0--31 with memory nodes 0--1, 48/64 workers used CPUs
+0--47/63 with memory nodes 0--3, and 96/128 workers used CPUs 0--127 with
+memory interleaved over nodes 0--7.
+
+| Julia workers | Default sleep (s) | 10 ms sleep (s) | 10 ms speedup vs 1 | Maximum active workers |
+|---:|---:|---:|---:|---:|
+| 1 | 44.112 | -- | 1.00x | 1 |
+| 2 | 22.938 | 22.954 | 1.92x | 2 |
+| 4 | 12.458 | 12.450 | 3.54x | 4 |
+| 8 | 6.975 | 6.946 | 6.35x | 8 |
+| 16 | 4.318 | 4.275 | 10.32x | 16 |
+| 32 | 3.448 | 3.267 | 13.50x | 32 |
+| 48 | 3.325 | **2.967** | **14.87x** | 48 |
+| 64 | 3.824 | 3.074 | 14.35x | 64 |
+| 96 | 8.910 | 3.540 | 12.46x | 96 |
+| 128 | 12.061 | 3.403 | 12.96x | 128 |
+
+The independent default 32-worker controls were 3.451, 3.448, and 3.437
+seconds.  The two 10-millisecond 32-worker controls were 3.267 and 3.292
+seconds.  Thus the wake-policy result is not a favorable single process, and
+the campaign's fastest 48-worker point is 9.2% below the first 10-millisecond
+32-worker result and 3.5% below 64 workers.  The 48-worker median phase split
+was 0.222 seconds residual, 0.741 Schur, 0.160 KKT including 0.122 factor,
+0.371 predictor, 0.513 corrector, 0.013 line search, and 0.020 update.  It
+allocated 148.46 MiB per solve and reached 3.144 GiB process peak RSS.
+
+Resource sampling confirms that the requested pools were genuinely active.
+The 48-worker 10-millisecond process reached 45.38 CPU-core equivalents in a
+sample and all 48 workers; the 96-worker process reached 94.87 cores and all
+96 workers; the 128-worker process reached 125.78 cores and all 128 workers.
+BLAS reported one worker in every CSV, and all BLAS/OMP environment limits
+were one, so no nested BLAS pool explains the measurements.  Whole-process
+mean use was lower (5.25, 9.42, and 12.39 cores respectively) because it also
+includes package/model loading, compilation, serialization, and serial
+regions around the repeated solves.
+
+The wide-pool loss is synchronization, not an idle allocation.  At 96 workers
+Julia's default sleep policy incurred 17,416,887 voluntary context switches
+and took 8.910 seconds; the finite threshold reduced those to 86,666 and
+3.540 seconds.  At 128 workers the corresponding counts were 27,383,741 and
+111,341, with solve times of 12.061 and 3.403 seconds.  Even after eliminating
+the wake-up storm, both pools lose to 48 because the 144-column shared
+triangle has saturated and the wider runtime spans more NUMA domains.
+
+All 110 recorded solves returned `Optimal` in 41 iterations.  Only expected
+last-limb reduction-order differences occurred across pool widths.  In
+Float64 projection the primal objective was
+`6.3668480614993285e-12`, the dual objective was
+`-8.5733398394969845e-11`, maximum relative gap was `9.2100e-11`, maximum
+primal and dual residuals were `2.8562e-62` and `3.2572e-14`, and the minimum
+PSD eigenvalue was `2.5085e-18`.  The retained launch recommendation for this
+node and geometry is therefore a 128-core allocation, an exact 48-worker
+Julia pool, one BLAS worker, local CPU binding across CPUs 0--47, memory bound
+to NUMA nodes 0--3, and `JULIA_THREAD_SLEEP_THRESHOLD=10000000`.  The sleep
+threshold remains an explicit cluster launch setting rather than package
+state because Julia consumes it before SDPX loads.
+
+### P26 fused Float64x4 singleton-local preparation -- candidate
+
+At the retained 48-worker point, KKT local elimination still consumed a
+median 36.95 milliseconds over 41 iterations.  The direct 2x2 reduced-panel
+pack had already computed each singleton local diagonal and coupling row, but
+`factor_arrow_kkt!` later launched another block pass to copy the diagonal,
+take the same square root, cache its inverse, and form `D^-1*C`.
+
+The candidate adds an arithmetic-extension hook that caches these values
+while the block's coupling row is hot.  Only Float64x4 implements it.  It
+stores `sqrt(D)`, computes the inverse in the historical
+`one / sqrt(D) / sqrt(D)` order, and writes `D^-1*C` with the same scalar
+multiplication as the old pass.  A per-block readiness vector and one
+aggregate flag allow the KKT factor to skip the redundant pass only after
+every direct-panel block succeeded.  Float64, BigFloat, mixed precision,
+partial structure, regularization, and materialized fallback paths keep the
+established factorization and explicitly clear the readiness state.
+
+Focused tests check every cached factor, inverse, and solved coupling entry,
+including a partial-coverage solve that catches stale uncoupled entries.  The
+extended-precision BLAS group passed 95/95 assertions and the extended BLAS
+regression group passed 87/87; the complete package suite passed 5,823/5,823
+checks before the final three partial-coverage assertions were added.  This
+candidate is not retained yet; it
+must remove the measured local-elimination time and improve repeated full
+solves at the final 48-worker scheduling configuration without changing the
+objective or certificate.
+
+### P27 lazy reduced-arrow partials retained -- job 196555
+
+Normal-queue job 196555 completed on node26 with PBS exit zero and a
+`PASSED` marker.  SHA-256 verification covered all eight CSVs and forty
+solution files.  Baseline and candidate each ran in forward and reverse order
+at the measured 48-worker optimum and in a 128-thread capped-pool control;
+every process used the 10-millisecond sleep threshold, one BLAS worker, three
+complete warm-ups, and five recorded solves.
+
+| Metric | 48 baseline | 48 lazy | Change | 128 baseline | 128 lazy | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| Solve (s) | 2.982 | **2.940** | **-1.39%** | 3.480 | **3.351** | **-3.69%** |
+| Measured-row wall (s) | 4.860 | **4.692** | -3.47% | 5.752 | **5.601** | -2.63% |
+| Workspace setup (ms) | 15.284 | **12.842** | -16.0% | 21.078 | **15.275** | -27.5% |
+| Solve allocation (MiB) | 148.458 | **118.079** | -20.5% | 152.072 | **111.421** | -26.7% |
+| Process peak RSS (GiB) | 3.166 | **3.028** | -4.36% | 3.360 | **3.243** | -3.48% |
+
+Both candidate process medians were stable: 2.942/2.939 seconds at 48
+workers and 3.342/3.361 seconds in the 128-thread pool.  Resource telemetry
+reached every requested Julia worker (48 or 128), kept BLAS at one, and did
+not trade memory for hidden oversubscription.  Within each pool width, all
+twenty baseline/candidate result tuples were string-identical: `Optimal`, 41
+iterations, equal primal/dual objectives, equal relative gap and residuals,
+and equal minimum PSD eigenvalue.  The lazy full-Schur partial allocation is
+therefore retained: it provides reproducible full-solver speedup and removes
+the expected 30.375/40.5 MiB of unused raw Float64x4 matrix storage at the two
+tested workspace widths.
+
+### P28 block locality and longer worker-spin controls rejected -- job 196556
+
+Normal-queue job 196556 ran on the same dual-EPYC node class with a complete
+128-core reservation, an exact 48-worker Julia pool, one BLAS worker, CPUs
+0--47, memory bound to NUMA nodes 0--3, and three warm-ups plus five measured
+solves per process.  Forward and reverse brackets independently compared LPT
+and contiguous ownership of the short block-local phases at 10- and
+100-millisecond Julia sleep thresholds.  The job exited zero, wrote `PASSED`,
+and verified all eight CSVs and forty solution files by SHA-256.
+
+| Fine block partition | Worker spin | Samples | Solve (s) | Row wall (s) | Mean process cores | Peak RSS (GiB) |
+|---|---:|---:|---:|---:|---:|---:|
+| LPT | 10 ms | 10 | 2.9727 | 4.8185 | 5.07 | 2.871 |
+| contiguous | 10 ms | 10 | 2.9572 | 4.7824 | 5.16 | 2.928 |
+| LPT | 100 ms | 10 | 2.9584 | 4.7815 | 5.71 | 2.837 |
+| contiguous | 100 ms | 10 | 2.9581 | 4.8153 | 5.66 | 2.881 |
+
+Contiguous ownership's 0.52% advantage at 10 milliseconds disappeared at
+100 milliseconds, while the longer spin policy provided no solve benefit and
+increased mean whole-process CPU consumption by about 11%.  All configurations
+reached all 48 workers and kept BLAS at one.  Every solve returned `Optimal`
+in 41 iterations with equivalent objectives, residuals, gap, and PSD
+certificate.  Neither change clears the retention threshold; the established
+LPT partition and 10-millisecond cluster launch policy remain selected.
+
+### P29 fused singleton-local factor preparation retained -- job 196580
+
+Job 196580 isolated the P26 candidate against the retained lazy-partial
+baseline on node57.  It reserved 128 cores but launched exactly 48 pinned
+Julia workers and one BLAS worker.  Baseline/candidate and reverse
+candidate/baseline processes each performed three full warm-ups followed by
+seven measured solves.  PBS exit status was zero, `PASSED` was present, and
+all four CSVs plus 28 serialized solutions passed SHA-256 verification.
+
+| Metric | Baseline, 14 solves | Fused preparation, 14 solves | Change |
+|---|---:|---:|---:|
+| Solver time (s) | 2.92683 | **2.90423** | **-0.77%** |
+| Measured-row wall (s) | 4.63878 | **4.60665** | **-0.69%** |
+| KKT time (s) | 0.16143 | **0.12338** | **-23.6%** |
+| Local elimination (ms) | 36.93 | **0.016** | **-99.96%** |
+| Solve allocation (MiB) | 118.077 | **117.310** | **-0.65%** |
+| Process peak RSS (GiB) | 2.933 | **2.885** | **-1.6%** |
+
+The two independent candidate medians were 2.90327 and 2.90518 seconds;
+the corresponding baselines were 2.92747 and 2.92382 seconds.  About 14
+milliseconds of local work moved into the cache-hot Schur pack, but the
+separate 37-millisecond local factor pass disappeared, giving the stable net
+gain.  Every process reached all 48 requested workers, used one BLAS thread,
+and returned the same 41-iteration optimal certificate.  The change is
+therefore retained.
+
+### P30 Float64x4 singleton-arrow SIMD solve retained -- job 196582
+
+After P29, predictor and corrector linear solves still use repeated
+singleton-local block-arrow RHS accumulation and local recovery.  The next
+candidate opts in only `MultiFloats.Float64x4` reduced panels.  It updates up
+to eight independent shared RHS entries in two four-lane `MultiFloatVec`
+groups, and recovers four independent local variables in four lanes.  Each
+lane retains the historical block/global reduction order, every task owns its
+partial vector and local destinations exclusively, and generic Float64,
+BigFloat, mixed-precision, and non-reduced paths remain on their existing
+loops.
+
+Direct tests require bit-for-bit agreement with the same threaded reduction
+schedule and zero hot-loop allocations.  The widened threaded fixture covers
+64 local blocks and 32 shared variables; the complete extended-precision
+group passes 104/104 assertions with either one or four Julia threads.  The
+extended-BLAS and generic KKT groups pass 87/87 and 74/74.
+
+Job 196582 then used the same node57, 128-core reservation, exact 48-worker
+pool, one BLAS worker, 10-millisecond sleep policy, CPU/NUMA placement, and
+three-warm-up/seven-measurement reverse bracket as P29.  It exited zero with
+`PASSED`; all four CSVs and 28 solutions passed their SHA-256 manifest.
+
+| Metric | P29 baseline, 14 solves | SIMD solve, 14 solves | Change |
+|---|---:|---:|---:|
+| Solver time (s) | 2.91341 | **2.89516** | **-0.63%** |
+| Predictor linear solve (s) | 0.13520 | **0.12606** | **-6.76%** |
+| Corrector linear solve (s) | 0.13209 | **0.12036** | **-8.88%** |
+| Solve allocation (MiB) | 117.312 | 117.369 | +0.05% |
+| Process peak RSS (GiB) | 2.955 | 2.957 | +0.07% |
+
+Both candidate process medians improved (2.89059 and 2.89973 seconds versus
+2.91246 and 2.91437 seconds for the two baselines).  The measured-row wall
+median moved from 4.62596 to 4.63999 seconds (+0.30%) because of untimed
+loading/build variation; the solver-only gain and both targeted subphases are
+stable.  Mean whole-process CPU use was 5.81/5.84 cores, both variants reached
+all 48 workers, BLAS remained one, and memory was unchanged.  All 28 rows have
+one exact certificate signature and all serialized solutions have one hash:
+41 iterations, `Optimal`, relative gap `9.21002e-11`, dual residual
+`3.25712e-14`, and minimum PSD eigenvalue `2.50847e-18`.  The SIMD solve is
+therefore retained.
+
+### P31 eight-block recovery grouping rejected by isolated screen
+
+The remaining obvious microkernel variation grouped eight independent local
+recoveries as two four-lane accumulators, reusing each shared-value broadcast.
+A deterministic 1,700-block / 144-shared-variable fixture reproduced the 48
+LPT-bin geometry, alternated 21 post-warm-up samples per implementation, and
+required exact output equality plus zero allocations.  The retained four-
+block kernel took 2.7258 milliseconds; the eight-block kernel took 2.7541
+milliseconds and was 1.0% slower.  Register pressure and eight independent
+weight streams offset the saved loop overhead.  The eight-block variation is
+rejected without a full-solver run.
+
+### P32 complete local regression after the retained Float64x4 changes
+
+The final local Julia 1.12.6 regression executed with four compute threads.
+All 5,834 solver, numerical-certificate, allocation, API, extension, and
+thread-safety assertions passed.  The only failing assertion was Aqua's
+persistent-task probe: its isolated temporary Julia environment attempted to
+download the package registry, while the macOS execution sandbox intentionally
+blocked DNS.  The subprocess then lacked its generated source and completion
+log.  This is an environment-only failure rather than a package or numerical
+regression.  The immutable cluster release must repeat the complete suite in
+the preinstalled offline environment, where the Aqua probe is a hard release
+gate.

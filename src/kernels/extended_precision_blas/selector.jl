@@ -175,7 +175,7 @@ function choose_crossover(
 ) where {T}
     mode in (:off, :auto, :on) ||
         throw(ArgumentError("extended-precision BLAS mode must be :off, :auto, or :on"))
-    config = _kernel_config(T, features.thread_count)
+    config = _kernel_config(T, features.thread_count, features.columns)
     family = arithmetic_family(T)
     mode === :off &&
         return CrossoverDecision(false, :disabled, 1.0, 0, 0.0, 0.0, config)

@@ -8,6 +8,77 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Float64x4 reduced-arrow backend now uses phase-specific worker counts,
+  an eight-output-row SIMD Schur microkernel, a measured narrow-triangle tile
+  crossover, and a sixteen-column blocked factor with cached pivot
+  reciprocals, SIMD panel rows, and at most eight trailing-update workers for
+  128--256 order shared systems. Uniform `2x2` systems use contiguous block
+  ownership only through 32 fine-grained tasks; wider and heterogeneous
+  systems retain LPT.
+  On the 1,700-block / 144-shared-variable medium CSDR model, contiguous
+  ownership reduced the same-node 32-worker median from 5.010 to 4.555
+  seconds, while the rejected 64-worker contiguous schedule was 1.6% slower
+  than LPT. A later alternating 32-worker factor A/B reduced factor time from
+  0.671 to 0.140 seconds and solve time from 4.768 to 3.420 seconds, with the
+  same 41 iterations and valid certificate. Executed diagnostics expose
+  effective, block-task, Schur, and factor worker counts. The Float64 path is
+  unchanged.
+- Narrow Float64x4 reduced-arrow models now cap a 96+ requested solver width
+  at 64 workers while retaining the 32-bin contiguous schedule selected from
+  the original request. On the 1,700-block / 144-shared-variable model, an
+  alternating 128-thread A/B reduced solve time by 3.1% and per-solve
+  allocation by 23.0%, with a neutral genuine 64-thread control. A first cap
+  that accidentally expanded short phases to 64 bins was rejected and is not
+  present.
+- Cluster guidance now records Julia worker-sleep behavior as a major
+  Float64x4 wide-pool crossover. On the same 128-core EPYC node,
+  `JULIA_THREAD_SLEEP_THRESHOLD=10000000` reduced the combined full-solver
+  median from 11.635 to 3.409 seconds, matched the never-sleep speed ceiling
+  within 1.0%, reduced allocation by 8.2%, and preserved bit-for-bit printed
+  objectives and certificates. Unlike permanent spinning, the 10 ms policy
+  averaged about 12.5 CPU cores over the complete process while still
+  reaching 124--126 cores during parallel bursts. This is a documented,
+  hardware-specific process-start recommendation, not package-global state.
+- Direct reduced-arrow workspaces now allocate full task-local Schur partial
+  matrices only if the structure-specific panel build falls back. The normal
+  direct Float64x4 path retains only small right-hand-side partials. A
+  forward/reverse, same-node medium CSDR A/B reduced the 48-worker solve from
+  2.982 to 2.940 seconds, per-solve allocation from 148.46 to 118.08 MiB, and
+  process peak RSS from 3.166 to 3.028 GiB. In a 128-thread capped-pool
+  control it reduced solve time from 3.480 to 3.351 seconds and allocation
+  from 152.07 to 111.42 MiB. Lazy fallback matrices remain independent, and
+  every baseline/candidate objective and certificate was identical at a fixed
+  pool width.
+- The Float64x4 direct 2x2 reduced-panel pack now caches each positive
+  singleton-local factor, inverse, and solved coupling while the block data is
+  hot, eliminating a later local-factor pass. A 14-solve reverse-bracketed
+  medium CSDR comparison reduced KKT time by 23.6% and total solve time by
+  0.77%, while also lowering allocation and peak RSS. Regularized, partial,
+  Float64, BigFloat, mixed-precision, and fallback routes keep the established
+  factorization.
+- Float64x4 singleton-arrow linear solves now use allocation-free
+  `MultiFloatVec` kernels for disjoint RHS entries and local-variable
+  recovery. Every lane retains the threaded baseline's reduction order and
+  every output remains task-exclusive. On the medium CSDR case, predictor and
+  corrector linear-solve medians improved by 6.76% and 8.88%, producing a
+  further reproducible 0.63% full-solver gain. All 28 baseline/candidate runs
+  shared one exact 41-iteration certificate and one serialized solution hash.
+  Executed diagnostics report the selected arrow linear-solve kernel.
+- A complete 1/2/4/8/16/32/48/64/96/128-worker Float64x4 audit found the
+  48-worker point fastest on the dual-EPYC 1,700-block / 144-shared-variable
+  profile: 2.967 seconds versus 44.112 seconds at one worker (14.87x). Every
+  requested pool became active and BLAS stayed at one thread. Wider pools
+  lose to synchronization and NUMA traffic even after the 10-millisecond
+  Julia wake policy removes tens of millions of context switches. Cluster
+  guidance now distinguishes the 128-core scheduler reservation from the
+  exact 48-worker runtime pool.
+- Reduced-arrow blocks that contain every shared variable now skip redundant
+  panel and coupling clears because every destination is overwritten. Partial
+  coverage retains the clear path and has a sentinel regression. In an
+  alternating, three-warm-up 32-worker A/B on the medium CSDR model, ten
+  samples per variant reduced median Schur time from 1.542 to 1.411 seconds
+  and solve time from 4.629 to 4.442 seconds, with identical 41-iteration
+  objectives and certificates.
 - BigFloat sparse SDPs with explicit equalities now use an ownership-safe
   block-diagonal arrow KKT path when every Schur variable belongs to exactly
   one 2x2 PSD block. Local factors and equality triangular solves own disjoint

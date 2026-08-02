@@ -266,14 +266,17 @@ mutable struct ArrowWorkspace{T}
     Sred::Matrix{T}
     Sredbuf::Matrix{T}          # factored reduced global Schur matrix
     rg::Vector{T}
+    # Task-local Schur updates; lazily allocated for direct reduced panels.
     Sredpartial::Vector{Matrix{T}}
     rgpartial::Vector{Vector{T}}
     local_attempts::Vector{Int}
     local_ok::Vector{Bool}
+    local_factor_ready::Vector{Bool}
     local_coefficient_position::Vector{Int}
     reduced_panel::Matrix{T}
     reduced_panel_enabled::Bool
     reduced_panel_ready::Bool
+    reduced_local_factors_ready::Bool
     reduced_panel_config::ExtendedPrecisionBLAS.KernelConfig
     mixed_reduced_coefficients::Any
     mixed_reduced_panel::Any
@@ -291,7 +294,11 @@ mutable struct ArrowWorkspace{T}
     mixed_reduced_reason::Symbol
 end
 
-function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
+function ArrowWorkspace(
+    prob::SDPProblem{T},
+    partial_count::Int;
+    allocate_schur_partials::Bool=true,
+) where {T}
     prob.cons isa SparseCons{T} || return nothing
     cons = prob.cons::SparseCons{T}
     # The ownership-safe BigFloat equality implementation currently targets
@@ -344,7 +351,10 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
     Dbuf = [alloc_zeros(T, length(ids), length(ids)) for ids in local_ids]
     W = [alloc_zeros(T, length(ids), ng) for ids in local_ids]
     tmp = [alloc_zeros(T, length(ids)) for ids in local_ids]
-    nbins = T === BigFloat ? 1 : max(1, min(thread_count, L))
+    nbins = T === BigFloat ? 1 : max(1, min(partial_count, L))
+    schur_partials = allocate_schur_partials ?
+                     [alloc_zeros(T, ng, ng) for _ in 1:nbins] :
+                     Matrix{T}[]
     return ArrowWorkspace{T}(
         global_ids,
         local_ids,
@@ -361,12 +371,14 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
         alloc_zeros(T, ng, ng),
         alloc_zeros(T, ng, ng),
         alloc_zeros(T, ng),
-        [alloc_zeros(T, ng, ng) for _ in 1:nbins],
+        schur_partials,
         [alloc_zeros(T, ng) for _ in 1:nbins],
         zeros(Int, L),
         ones(Bool, L),
+        zeros(Bool, L),
         local_coefficient_position,
         alloc_zeros(T, 0, 0),
+        false,
         false,
         false,
         ExtendedPrecisionBLAS.KernelConfig(),
@@ -385,6 +397,24 @@ function ArrowWorkspace(prob::SDPProblem{T}, thread_count::Int) where {T}
         0,
         :not_requested,
     )
+end
+
+function ensure_arrow_schur_partials!(
+    arrow::ArrowWorkspace{T},
+    count::Int,
+) where {T}
+    count = max(count, 1)
+    current = length(arrow.Sredpartial)
+    current >= count && return arrow.Sredpartial
+    global_count = length(arrow.global_ids)
+    sizehint!(arrow.Sredpartial, count)
+    for _ in (current + 1):count
+        push!(
+            arrow.Sredpartial,
+            alloc_zeros(T, global_count, global_count),
+        )
+    end
+    return arrow.Sredpartial
 end
 
 """
@@ -796,10 +826,61 @@ function Workspace(
     thread_count::Int=Threads.nthreads(),
 ) where {T}
     L, m, n, k = prob.dims
-    selected_threads =
+    requested_threads =
         min(max(thread_count, 1), Threads.nthreads())
+    selected_threads = requested_threads
     is_sparse = prob.cons isa SparseCons
-    arrow = ArrowWorkspace(prob, selected_threads)
+    available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
+    reduced_arrow_decision =
+        _reduced_arrow_crossover(
+            prob,
+            T,
+            extended_precision_blas,
+            extended_precision_memory_fraction,
+            thread_count;
+            available_memory_bytes=available_memory,
+        )
+    reduced_arrow_panel = reduced_arrow_decision.enabled
+    if reduced_arrow_panel
+        frequency = zeros(Int, m)
+        for variables in (prob.cons::SparseCons{T}).active
+            for variable in variables
+                frequency[variable] += 1
+            end
+        end
+        selected_threads = min(
+            selected_threads,
+            reduced_arrow_solver_worker_count(
+                T,
+                selected_threads,
+                L,
+                count(>(1), frequency),
+            ),
+        )
+    end
+
+    reduced_block_nbins = max(
+        1,
+        min(
+            fine_grained_block_bins(
+                T,
+                requested_threads,
+                reduced_arrow_panel,
+                L,
+            ),
+            selected_threads,
+            L,
+        ),
+    )
+    # Construct per-worker arrow buffers only after the reduced geometry has
+    # selected its effective whole-solver width. Direct reduced panels never
+    # consume the full Schur partial matrices; keep only the small RHS
+    # partials and allocate Schur partials lazily if the kernel falls back.
+    arrow = ArrowWorkspace(
+        prob,
+        reduced_arrow_panel ? reduced_block_nbins : selected_threads;
+        allocate_schur_partials=!reduced_arrow_panel,
+    )
     compact_arrow = arrow !== nothing
     sparse_schur =
         !compact_arrow &&
@@ -818,17 +899,6 @@ function Workspace(
         prob.dims.n > 0 &&
         fused_arrow &&
         isempty(arrow_workspace.global_ids)
-    available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
-    reduced_arrow_decision =
-        _reduced_arrow_crossover(
-            prob,
-            T,
-            extended_precision_blas,
-            extended_precision_memory_fraction,
-            thread_count;
-            available_memory_bytes=available_memory,
-        )
-    reduced_arrow_panel = reduced_arrow_decision.enabled
     if T === BigFloat &&
        !reduced_arrow_panel &&
        !owned_bigfloat_arrow_equalities
@@ -921,7 +991,23 @@ function Workspace(
         (compact_arrow || sparse_schur) ? :off : mixed_precision_kkt,
         mixed_precision_memory_fraction,
     )
-    block_nbins = max(1, min(selected_threads, L))
+    block_nbins = max(
+        1,
+        min(
+            # Preserve the phase-aware interpretation of the original pool.
+            # A whole-solver oversubscription cap must not turn the measured
+            # 32-bin narrow-arrow schedule back into 64 fine-grained tasks.
+            # `selected_threads` remains a hard upper bound on actual work.
+            fine_grained_block_bins(
+                T,
+                requested_threads,
+                reduced_arrow_panel,
+                L,
+            ),
+            selected_threads,
+            L,
+        ),
+    )
     schur_nbins = _schur_parallel_bins(T, m, L, selected_threads)
     dense_sparse_assembly = false
     if is_sparse
@@ -981,7 +1067,20 @@ function Workspace(
     else
         [Float64(k[l])^3 + Float64(m) * Float64(k[l])^2 / 2 for l in 1:L]
     end
-    block_bins = lpt_partition(block_weights, block_nbins)
+    block_partition = fine_grained_block_partition(
+        T,
+        reduced_arrow_panel,
+        k,
+        block_nbins,
+    )
+    block_partition in (:lpt, :contiguous) || throw(
+        ArgumentError(
+            "fine-grained block partition must be :lpt or :contiguous",
+        ),
+    )
+    block_bins = block_partition === :contiguous ?
+                 contiguous_partition(L, block_nbins) :
+                 lpt_partition(block_weights, block_nbins)
     schur_bins = lpt_partition(schur_weights, schur_nbins)
     schur_column_boundaries =
         is_sparse && !compact_arrow && schur_lower_only ?

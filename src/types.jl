@@ -94,6 +94,85 @@ default_mixed_precision_kkt(::Type{T}) where {T} =
     ) ? :auto : :off
 
 """
+    fine_grained_block_bins(T, requested, reduced_arrow_panel, block_count)
+
+Return the number of LPT bins used by short per-block solver phases. The
+default preserves the requested width. Arithmetic extensions may apply a
+measured, structure-aware cap without limiting the coarser Schur/SYRK kernels,
+which have a different parallel crossover.
+"""
+fine_grained_block_bins(
+    ::Type,
+    requested::Int,
+    reduced_arrow_panel::Bool,
+    block_count::Int,
+) = max(requested, 1)
+
+"""
+    fine_grained_block_partition(
+        T, reduced_arrow_panel, block_dimensions, bin_count,
+    )
+
+Choose the static partition used by short block-local solver phases. The
+default LPT partition preserves load balance for heterogeneous PSD blocks.
+Arithmetic extensions may select contiguous ownership for measured uniform
+block-arrow geometries where cache and NUMA locality dominate imbalance.
+"""
+fine_grained_block_partition(
+    ::Type,
+    reduced_arrow_panel::Bool,
+    block_dimensions,
+    bin_count::Int,
+) = :lpt
+
+"""
+    reduced_arrow_worker_count(T, requested, block_count, columns)
+
+Return the effective worker width for reduced-arrow panel packing and SYRK.
+The default preserves the requested width; fixed-width arithmetic extensions
+may cap demonstrably oversubscribed geometries without changing the number of
+Julia threads available to other solver phases.
+"""
+reduced_arrow_worker_count(
+    ::Type,
+    requested::Int,
+    block_count::Int,
+    columns::Int,
+) = max(requested, 1)
+
+"""
+    reduced_arrow_factor_worker_count(T, requested, dimension)
+
+Return the effective worker width for a reduced-arrow Schur factorization.
+The generic factor is serial. Arithmetic extensions may opt into a measured,
+bounded panel-factor team for dimensions where coarse trailing updates exceed
+task-launch overhead.
+"""
+reduced_arrow_factor_worker_count(
+    ::Type,
+    requested::Int,
+    dimension::Int,
+) = 1
+
+"""
+    reduced_arrow_solver_worker_count(
+        T, requested, block_count, shared_columns,
+    )
+
+Return the effective whole-solver worker width for a reduced-arrow problem.
+The default respects the request. Arithmetic extensions may cap a measured
+oversubscribed geometry so every solver phase and workspace uses the same
+transparent limit rather than leaving synchronization-heavy regions wider
+than Schur assembly.
+"""
+reduced_arrow_solver_worker_count(
+    ::Type,
+    requested::Int,
+    block_count::Int,
+    shared_columns::Int,
+) = max(requested, 1)
+
+"""
     EqualityQRFactor{T}
 
 Rank-revealing Householder QR factor used by the guarded equality fallback.

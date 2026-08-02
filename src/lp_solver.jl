@@ -539,7 +539,11 @@ function _lp_assemble_hessian_extended!(
     thread_count::Int,
 ) where {T}
     panel = _lp_pack_weighted!(workspace, G)
-    config = ExtendedPrecisionBLAS._kernel_config(T, thread_count)
+    config = ExtendedPrecisionBLAS._kernel_config(
+        T,
+        thread_count,
+        size(panel, 2),
+    )
     ExtendedPrecisionBLAS.syrk!(
         workspace.H,
         panel,

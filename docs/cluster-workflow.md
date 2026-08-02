@@ -289,6 +289,7 @@ adjust PBS resources after measuring the target node:
 | Arithmetic and workload | Reserved PBS cores | Julia threads per solve | BLAS threads | Strategy |
 |---|---:|---:|---:|---|
 | Float64x4 sparse/block-arrow | 8 | sweep 1, 2, 4, 8 | 1 | SDPX Julia block and Schur scheduling |
+| Medium Float64x4 CSDR, 1,700 uniform `2x2` blocks / 144 shared variables | 128 site-specific placement reservation | 48 (re-sweep 32/48/64 after material geometry changes) | 1 | exact Julia compute pool, 10 ms worker-sleep threshold, CPUs 0--47 and NUMA nodes 0--3; do not count the unused reservation as speedup |
 | BigFloat, general native | site's minimum allocation | 1 | 1 | one serial solve; use separate jobs for independent cases |
 | BigFloat, exact singleton-local `2x2` arrow | 8 | sweep 1, 2, 4, 8 | 1 | native block preparation and disjoint reduced-Schur tiles may be parallel; residual/refinement remains serial |
 | BigFloat, all-local `2x2` cells plus equalities | measured node allocation | sweep through 64; use 96/128 only for a larger measured panel | 1 | block/GEMV/triangular tasks cap at 64; tiled lower equality Gram may use the full width |
@@ -324,6 +325,43 @@ requested certificate actually carry enough precision to justify it.
 Do not start a Float64x4 block-parallel run with both Julia and BLAS set to the
 full allocation. Keep BLAS and OMP at one thread so the 1/2/4/8 comparison
 changes only SDPX's scheduler width.
+
+For the canonical medium CSDR geometry, use an exact compute pool and pin it
+explicitly. The validated node60 launch shape is:
+
+```bash
+export JULIA_EXCLUSIVE=1
+export JULIA_THREAD_SLEEP_THRESHOLD=10000000
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+numactl --physcpubind=0-47 --membind=0-3 \
+  julia --threads=48,0 --gcthreads=1,0 --project=. solve_medium.jl
+```
+
+The final exact-pool sweep measured 44.112 / 22.954 / 12.450 / 6.946 / 4.275 /
+3.286 / 2.967 / 3.074 / 3.540 / 3.403 seconds at 1 / 2 / 4 / 8 / 16 / 32 /
+48 / 64 / 96 / 128 workers. Every requested worker was observed active and
+BLAS remained at one thread. The 48-worker process reached 45.38 sampled CPU
+cores, placed about 3,009 MiB across local NUMA nodes 0--3, and was 14.87x
+faster than one worker. Wider pools lost time to barriers, worker wake-up, and
+NUMA traffic. At 64 workers, forced NUMA interleaving was 5.4% slower than
+bound local allocation. Reserve 128 cores only when required by this site's
+placement policy; create the measured 48-worker runtime pool for this
+144-column system. Re-run the 32/48/64 bracket when the shared dimension or
+block count changes materially.
+
+`JULIA_THREAD_SLEEP_THRESHOLD` is consumed before Julia starts. The measured
+10-millisecond value removed the wide-pool wake-up collapse without the full
+CPU consumption of permanent spinning. It is a site profile for exclusive
+jobs, not a package default. Record process CPU time, active-worker samples,
+BLAS width, RSS, affinity, NUMA placement, and wall time in every new sweep.
+
+Use full-model warm-ups for source-to-source comparisons. On a fresh
+Float64x4 process the first solve can spend about 32 seconds compiling while
+the steady solve is below five seconds. The medium campaign uses three
+warm-ups and at least five measured solves per process, alternates source
+order, and reports the combined median. Benchmark drivers must parse the
+warm-up count as a nonnegative integer; treating it as a Boolean can silently
+disable warm-up when a value greater than one is requested.
 
 For dense Task_Low08 Float64x4 runs, `mixed_precision_kkt=:on` is an expert
 configuration: Float64 factorization is accepted only while target-precision

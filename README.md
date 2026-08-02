@@ -595,11 +595,17 @@ corrector work uses both block count and estimated cubic work, so models such
 as Task_Low08 with only 32 but moderately large PSD blocks still use safe
 disjoint-block parallelism. A same-node 32-Julia-thread / 16-BLAS-thread A/B
 reduced its median adaptive solve from 32.062 to 28.438 seconds without
-changing the iteration trajectory or certificate. On the cluster medium
-exact-arrow benchmark, the
-final Float64x4 solve took 51.48 / 31.34 / 19.35 / 11.73 seconds with
-1 / 2 / 4 / 8 Julia threads. See the
-[threading guide](docs/threading.md) and its linked raw protocol.
+changing the iteration trajectory or certificate. On the 1,700-block /
+144-shared-variable medium CSDR model, a resource-instrumented Float64x4 sweep
+measured 44.112 / 22.954 / 12.450 / 6.946 / 4.275 / 3.286 / 2.967 / 3.074 /
+3.540 / 3.403 seconds with 1 / 2 / 4 / 8 / 16 / 32 / 48 / 64 / 96 / 128
+Julia workers and one BLAS thread. All requested pools were observed active;
+48 workers were fastest (14.87x over one worker), while wider pools lost to
+synchronization and NUMA traffic. The retained cache-hot local factor and SIMD
+arrow-solve changes later reduced the controlled 48-worker median to 2.895
+seconds with the same 41-iteration certificate. See the
+[threading guide](docs/threading.md) for exact affinity, sleep-policy, memory,
+and validation details.
 
 Dense Schur accumulation is also memory-aware. The generic per-solve limit is
 15% of available memory. Large `Float64` systems may use 25% only when they

@@ -1117,21 +1117,34 @@ function _factor_dense_kkt_native!(
     )
 end
 
+"""
+    reduced_arrow_cholesky!(matrix, thread_count) -> success
+
+Factor the lower triangle of a reduced block-arrow Schur matrix in place.
+The generic method preserves the existing Cholesky path. Arithmetic
+extensions may select a measured structure-specific kernel without affecting
+the Float64 solver.
+"""
+reduced_arrow_cholesky!(matrix::Matrix, ::Int) = kchol!(matrix)
+
 function _factor_with_relative_regularization!(
     dest::Matrix{T},
     source::AbstractMatrix{T},
+    thread_count::Int=1,
 ) where {T}
     n = size(dest, 1)
     n == 0 && return (ok=true, attempts=0)
     copy_owned!(dest, source)
-    kchol!(dest) && return (ok=true, attempts=0)
+    reduced_arrow_cholesky!(dest, thread_count) &&
+        return (ok=true, attempts=0)
     reg = sqrt(eps(T))
     for attempt in 1:6
         copy_owned!(dest, source)
         @inbounds for i in 1:n
             dest[i, i] += reg * max(abs(source[i, i]), one(T))
         end
-        kchol!(dest) && return (ok=true, attempts=attempt)
+        reduced_arrow_cholesky!(dest, thread_count) &&
+            return (ok=true, attempts=attempt)
         reg *= 10
     end
     return (ok=false, attempts=6)
@@ -1579,8 +1592,20 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
     use_threads = ws.thread_count > 1 &&
                   thread_safe_arithmetic(T) &&
                   length(arrow.local_ids) * max(1, ng)^2 >= 10_000
-    if use_threads
+    prepared_direct_locals =
+        arrow.reduced_panel_ready &&
+        arrow.reduced_local_factors_ready
+    if prepared_direct_locals
+        # The Float64x4 panel pack cached the singleton local factors and
+        # D^-1*C rows with the same operation order as the historical pass.
+        # Other arithmetic and every fallback keep the factorization below.
+        total_attempts = 0
+    elseif use_threads
         if !direct_reduced
+            ensure_arrow_schur_partials!(
+                arrow,
+                length(ws.block_bins),
+            )
             for partial in arrow.Sredpartial
                 zero_owned!(partial)
             end
@@ -1590,7 +1615,8 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         @sync for (bin_index, bin) in enumerate(ws.block_bins)
             isempty(bin) && continue
             Threads.@spawn begin
-                partial = arrow.Sredpartial[bin_index]
+                partial = direct_reduced ?
+                          arrow.Sred : arrow.Sredpartial[bin_index]
                 for l in bin
                     ids = arrow.local_ids[l]
                     q = length(ids)
@@ -1708,9 +1734,14 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         _factor_with_relative_regularization!(
             arrow.mixed_reduced_factor,
             arrow.mixed_reduced_schur,
+            ws.thread_count,
         )
     else
-        _factor_with_relative_regularization!(arrow.Sredbuf, arrow.Sred)
+        _factor_with_relative_regularization!(
+            arrow.Sredbuf,
+            arrow.Sred,
+            ws.thread_count,
+        )
     end
     if mixed_reduced && !reduced.ok
         materialize_mixed_arrow_native_fallback!(
@@ -2231,6 +2262,33 @@ function _gather_arrow_rhs!(
     return destination
 end
 
+"""
+    reduced_arrow_simd_solve(::Type) -> Bool
+
+Return whether an arithmetic extension provides allocation-free SIMD kernels
+for singleton-local reduced-arrow RHS accumulation and local recovery. The
+generic solver remains unchanged unless an extension opts in explicitly.
+"""
+reduced_arrow_simd_solve(::Type) = false
+
+function accumulate_reduced_arrow_rhs!(
+    partial::AbstractVector{T},
+    coupling::AbstractMatrix{T},
+    local_rhs::T,
+) where {T}
+    @inbounds for global_position in eachindex(partial)
+        partial[global_position] +=
+            coupling[1, global_position] * local_rhs
+    end
+    return partial
+end
+
+recover_reduced_arrow_locals!(
+    ::AbstractVector,
+    ::ArrowWorkspace,
+    ::AbstractVector{Int},
+) = false
+
 function _scatter_arrow_solution!(
     destination::AbstractVector{T},
     source::AbstractVector{T},
@@ -2380,6 +2438,8 @@ function solve_arrow_kkt!(
     use_threads = ws.thread_count > 1 &&
                   thread_safe_arithmetic(T) &&
                   length(arrow.local_ids) * max(1, ng) >= 2_000
+    simd_singletons =
+        arrow.reduced_panel_ready && reduced_arrow_simd_solve(T)
     if use_threads
         for partial in arrow.rgpartial
             zero_distinct!(partial)
@@ -2400,12 +2460,20 @@ function solve_arrow_kkt!(
                         arrow.Dinv[l],
                     )
                     Cl = arrow.coupling[l]
-                    @inbounds for a in 1:ng
-                        correction = zero(T)
-                        for p in 1:q
-                            correction += Cl[p, a] * tl[p]
+                    if simd_singletons && q == 1
+                        accumulate_reduced_arrow_rhs!(
+                            partial,
+                            Cl,
+                            tl[1],
+                        )
+                    else
+                        @inbounds for a in 1:ng
+                            correction = zero(T)
+                            for p in 1:q
+                                correction += Cl[p, a] * tl[p]
+                            end
+                            partial[a] += correction
                         end
-                        partial[a] += correction
                     end
                 end
             end
@@ -2448,18 +2516,27 @@ function solve_arrow_kkt!(
         @sync for bin in ws.block_bins
             isempty(bin) && continue
             Threads.@spawn begin
-                for l in bin
-                    ids = arrow.local_ids[l]
-                    q = length(ids)
-                    q == 0 && continue
-                    tl = arrow.tmp[l]
-                    Wl = arrow.W[l]
-                    @inbounds for p in 1:q
-                        value = tl[p]
-                        for a in 1:ng
-                            value -= Wl[p, a] * arrow.rg[a]
+                recovered =
+                    simd_singletons &&
+                    recover_reduced_arrow_locals!(
+                        dx_out,
+                        arrow,
+                        bin,
+                    )
+                if !recovered
+                    for l in bin
+                        ids = arrow.local_ids[l]
+                        q = length(ids)
+                        q == 0 && continue
+                        tl = arrow.tmp[l]
+                        Wl = arrow.W[l]
+                        @inbounds for p in 1:q
+                            value = tl[p]
+                            for a in 1:ng
+                                value -= Wl[p, a] * arrow.rg[a]
+                            end
+                            dx_out[ids[p]] = value
                         end
-                        dx_out[ids[p]] = value
                     end
                 end
             end

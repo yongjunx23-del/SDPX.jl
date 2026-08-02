@@ -1,5 +1,6 @@
 using LinearAlgebra
 using MultiFloats: Float64x2, Float64x4
+using Random
 using SDPX
 using Test
 
@@ -19,6 +20,262 @@ function _regression_panel(
 end
 
 @testset "extended BLAS regressions" begin
+    @testset "Float64x4 fine-grained phase cap" begin
+        @test SDPX.fine_grained_block_bins(
+            Float64x4,
+            1,
+            true,
+            1_700,
+        ) == 1
+        @test SDPX.fine_grained_block_bins(
+            Float64x4,
+            32,
+            true,
+            1_700,
+        ) == 32
+        @test SDPX.fine_grained_block_bins(
+            Float64x4,
+            64,
+            true,
+            1_700,
+        ) == 64
+        @test SDPX.fine_grained_block_bins(
+            Float64x4,
+            128,
+            true,
+            1_700,
+        ) == 32
+        @test SDPX.fine_grained_block_bins(
+            Float64x4,
+            64,
+            false,
+            1_700,
+        ) == 64
+        @test SDPX.fine_grained_block_bins(
+            Float64x4,
+            64,
+            true,
+            128,
+        ) == 64
+        @test SDPX.fine_grained_block_bins(
+            Float64,
+            128,
+            true,
+            1_700,
+        ) == 128
+        @test SDPX.fine_grained_block_bins(
+            BigFloat,
+            128,
+            true,
+            1_700,
+        ) == 128
+        @test SDPX.reduced_arrow_worker_count(
+            Float64x4,
+            64,
+            1_700,
+            144,
+        ) == 64
+        @test SDPX.reduced_arrow_worker_count(
+            Float64x4,
+            128,
+            1_700,
+            144,
+        ) == 64
+        @test SDPX.reduced_arrow_worker_count(
+            Float64x4,
+            128,
+            128,
+            144,
+        ) == 128
+        @test SDPX.reduced_arrow_worker_count(
+            Float64x4,
+            128,
+            1_700,
+            300,
+        ) == 128
+        @test SDPX.reduced_arrow_worker_count(
+            Float64,
+            128,
+            1_700,
+            144,
+        ) == 128
+        @test SDPX.reduced_arrow_factor_worker_count(
+            Float64x4,
+            1,
+            144,
+        ) == 1
+        @test SDPX.reduced_arrow_factor_worker_count(
+            Float64x4,
+            2,
+            144,
+        ) == min(2, Threads.nthreads())
+        @test SDPX.reduced_arrow_factor_worker_count(
+            Float64x4,
+            32,
+            144,
+        ) == min(8, Threads.nthreads())
+        @test SDPX.reduced_arrow_factor_worker_count(
+            Float64x4,
+            32,
+            64,
+        ) == 1
+        @test SDPX.reduced_arrow_factor_worker_count(
+            Float64,
+            32,
+            144,
+        ) == 1
+        @test SDPX.reduced_arrow_solver_worker_count(
+            Float64x4,
+            64,
+            1_700,
+            144,
+        ) == 64
+        @test SDPX.reduced_arrow_solver_worker_count(
+            Float64x4,
+            128,
+            1_700,
+            144,
+        ) == 64
+        @test SDPX.reduced_arrow_solver_worker_count(
+            Float64x4,
+            128,
+            1_700,
+            300,
+        ) == 128
+        @test SDPX.reduced_arrow_solver_worker_count(
+            Float64,
+            128,
+            1_700,
+            144,
+        ) == 128
+        # A whole-solver 128-to-64 cap must retain the phase-aware 32-bin
+        # schedule selected from the original request. Re-selecting from the
+        # effective width would expand short phases back to 64 tasks.
+        @test min(
+            SDPX.fine_grained_block_bins(
+                Float64x4,
+                128,
+                true,
+                1_700,
+            ),
+            SDPX.reduced_arrow_solver_worker_count(
+                Float64x4,
+                128,
+                1_700,
+                144,
+            ),
+        ) == 32
+        @test SDPX.fine_grained_block_partition(
+            Float64x4,
+            true,
+            fill(2, 1_700),
+            32,
+        ) == :contiguous
+        @test SDPX.fine_grained_block_partition(
+            Float64x4,
+            true,
+            fill(2, 1_700),
+            48,
+        ) == :lpt
+        @test SDPX.fine_grained_block_partition(
+            Float64x4,
+            true,
+            [2, 3, 2],
+            3,
+        ) == :lpt
+        @test SDPX.fine_grained_block_partition(
+            Float64x4,
+            false,
+            fill(2, 1_700),
+            32,
+        ) == :lpt
+        @test SDPX.fine_grained_block_partition(
+            Float64,
+            true,
+            fill(2, 1_700),
+            32,
+        ) == :lpt
+        @test SDPX.contiguous_partition(7, 3) == [
+            [1, 2],
+            [3, 4],
+            [5, 6, 7],
+        ]
+    end
+
+    @testset "Float64x4 high-thread tile pressure" begin
+        @test EXTENDED_BLAS_REGRESSION._reduced_arrow_kernel_config(
+            Float64x4,
+            32,
+            144,
+        ).column_tile == 12
+        @test EXTENDED_BLAS_REGRESSION._reduced_arrow_kernel_config(
+            Float64x4,
+            64,
+            144,
+        ).column_tile == 8
+        @test EXTENDED_BLAS_REGRESSION._reduced_arrow_kernel_config(
+            Float64x4,
+            64,
+            300,
+        ).column_tile == 12
+        @test EXTENDED_BLAS_REGRESSION._reduced_arrow_kernel_config(
+            Float64x4,
+            128,
+            144,
+        ).column_tile == 12
+        @test EXTENDED_BLAS_REGRESSION._reduced_arrow_kernel_config(
+            Float64,
+            64,
+            144,
+        ).column_tile == 16
+        @test EXTENDED_BLAS_REGRESSION._kernel_config(
+            Float64x4,
+            64,
+            144,
+        ).column_tile == 12
+    end
+
+    @testset "Float64x4 reduced-arrow factor crossover" begin
+        factor_rng = MersenneTwister(0x5d0f4)
+        source = Float64x4.(randn(factor_rng, 144, 144))
+        positive_definite =
+            source * transpose(source) +
+            Float64x4(2) * Matrix{Float64x4}(I, 144, 144)
+        factor = copy(positive_definite)
+        @test SDPX.reduced_arrow_cholesky!(
+            factor,
+            min(8, Threads.nthreads()),
+        )
+        allocation_factor = copy(positive_definite)
+        SDPX.reduced_arrow_cholesky!(allocation_factor, 1)
+        copyto!(allocation_factor, positive_definite)
+        @test @allocated(
+            SDPX.reduced_arrow_cholesky!(allocation_factor, 1),
+        ) == 0
+        lower = Matrix(LowerTriangular(factor))
+        @test maximum(
+            abs,
+            lower * transpose(lower) - positive_definite,
+        ) / maximum(abs, positive_definite) <= Float64x4(1e-60)
+
+        outside_source = Float64x4.(randn(factor_rng, 64, 64))
+        outside_positive_definite =
+            outside_source * transpose(outside_source) +
+            Float64x4(2) * Matrix{Float64x4}(I, 64, 64)
+        outside_factor = copy(outside_positive_definite)
+        @test SDPX.reduced_arrow_cholesky!(outside_factor, 8)
+        outside_lower = Matrix(LowerTriangular(outside_factor))
+        @test maximum(
+            abs,
+            outside_lower * transpose(outside_lower) -
+            outside_positive_definite,
+        ) / maximum(abs, outside_positive_definite) <= Float64x4(1e-60)
+
+        indefinite = Matrix{Float64x4}(I, 144, 144)
+        indefinite[144, 144] = -one(Float64x4)
+        @test !SDPX.reduced_arrow_cholesky!(indefinite, 8)
+    end
+
     @testset "requested worker limit and work threshold" begin
         config = EXTENDED_BLAS_REGRESSION.KernelConfig(
             row_tile=32,
