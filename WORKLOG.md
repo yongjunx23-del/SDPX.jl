@@ -2507,3 +2507,44 @@ log.  This is an environment-only failure rather than a package or numerical
 regression.  The immutable cluster release must repeat the complete suite in
 the preinstalled offline environment, where the Aqua probe is a hard release
 gate.
+
+### P33 finite-support LP audit and reduced-system candidate
+
+The finite-energy-support handoff was reduced to its exact numerical core:
+`min/max c'rho` subject to `B'rho=b, rho>=0`.  The primary exported model has
+2,002 variables and 31 equalities; 1,001-by-17 and 91-by-17 models are controls.
+The primary endpoint is non-strictly feasible and its unscaled moment rows span
+about 52 decimal orders of magnitude, so both degeneracy and scale-aware
+certification are required.
+
+The audit found that the dedicated LP engine still expanded the identity cone
+map and, for extended precision, built and factored a 2,033-by-2,033 dense KKT.
+For a permutation-diagonal positive cone map, exact block elimination instead
+gives the 31-by-31 positive-definite system
+
+```text
+D       = diag(g_i^2 z_i/s_i) + delta*I
+Q       = B' inv(D) B + delta*I
+Q dy    = ry - B' inv(D) rx
+dx      = inv(D) (rx + B dy).
+```
+
+A candidate implementation now recognizes only this exact structure, avoids
+the dense cone/Hessian/KKT allocations, assembles one lower triangle, and
+reuses the Cholesky for predictor and corrector.  Float64 uses BLAS SYRK;
+Float64x4 and BigFloat use disjoint packed-panel rows and disjoint output tiles.
+The BigFloat pack uses owned MPFR destinations and in-place MPFR division and
+square root.  Failed structure checks preserve the established LP route.
+The same audit found that the LP regularization floor was clamped to `1e-12`
+for every arithmetic type.  Binary64 keeps its established floor; fixed-width
+and MPFR arithmetic now start at `max(eps(T)^(3/4), 1e-60)` and retain the
+existing factor-failure escalation.  This is still awaiting the cluster A/B.
+
+The cluster benchmark driver, PBS matrix, independent componentwise equality
+audit, and full optimization proposal are recorded under
+`bench/finite_support_lp/` and `docs/finite-support-lp-optimization.md`.
+No numerical result is recorded yet: two SSH attempts to the cluster alias
+timed out at the TCP connection layer on 2026-08-02.  In accordance with the
+request, no substitute solve or benchmark was run on the local Mac.  The next
+step is an immutable cluster syntax/unit gate, followed by 91-by-17,
+1,001-by-17, and 2,002-by-31 A/B runs for Float64, Float64x4, and BigFloat256.

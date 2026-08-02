@@ -1742,6 +1742,7 @@ function _attach_diagnostics(
             :lpt,
         ),
         schur_threads=get(executed, :schur_threads, plan.threads),
+        lp_pack_threads=get(executed, :lp_pack_threads, nothing),
         factor_threads=get(executed, :factor_threads, nothing),
         arrow_linear_solve=get(
             executed,

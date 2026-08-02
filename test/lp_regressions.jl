@@ -127,6 +127,109 @@ end
     end
 end
 
+@testset "reduced nonnegative standard-form LP system" begin
+    @test SDPX._lp_regularization_floor(Float64) == sqrt(eps(Float64))
+    @test SDPX._lp_regularization_floor(Float64x4) < Float64x4(1e-30)
+    setprecision(BigFloat, 256) do
+        @test SDPX._lp_regularization_floor(BigFloat) < big"1e-50"
+    end
+
+    function reduced_factor_matches_full_kkt(::Type{T}) where {T}
+        variables, equalities = 8, 3
+        variable_for_row = [2, 1, 4, 3, 6, 5, 8, 7]
+        row_for_variable = invperm(variable_for_row)
+        values = T.(1:8) ./ T(7)
+        G = SDPX.LPDiagonalMatrix(
+            values,
+            variable_for_row,
+            row_for_variable,
+        )
+        B = reshape(T.(1:(variables * equalities)), variables, equalities) ./ T(31)
+        weights = T.(2:(variables + 1)) ./ T(13)
+        regularization = T(1) / T(10_000)
+        workspace = SDPX.LPWorkspace(
+            T,
+            variables,
+            variables,
+            equalities;
+            packed_hessian=false,
+            reduced_standard_form=true,
+        )
+        workspace.standard_system = SDPX.LPStandardFormSystem(
+            G,
+            B,
+            min(Threads.nthreads(), 4),
+            :threaded_blocked_syrk,
+        )
+        workspace.weights .= weights
+
+        factor = SDPX._lp_factor_kkt!(workspace, B, regularization)
+        @test factor isa SDPX.LPReducedFactor{T}
+        @test issuccess(factor)
+        rhs = T.(1:(variables + equalities)) ./ T(17)
+        actual = copy(rhs)
+        SDPX._lp_solve_factor!(factor, actual)
+
+        H = SDPX.alloc_zeros(T, variables, variables)
+        @inbounds for variable in 1:variables
+            row = row_for_variable[variable]
+            H[variable, variable] =
+                weights[row] * values[row] * values[row]
+        end
+        K = SDPX.alloc_zeros(T, variables + equalities, variables + equalities)
+        SDPX._lp_populate_kkt!(K, H, B, regularization)
+        expected = K \ rhs
+        relative_error = maximum(abs, actual - expected) /
+                         max(one(T), maximum(abs, expected))
+        tolerance = T === Float64 ? T(2e-11) :
+                    T === Float64x4 ? T(1e-48) : T(1e-65)
+        @test relative_error <= tolerance
+        @test isempty(workspace.H)
+        @test isempty(workspace.K)
+    end
+
+    reduced_factor_matches_full_kkt(Float64)
+    reduced_factor_matches_full_kkt(Float64x4)
+    setprecision(BigFloat, 256) do
+        reduced_factor_matches_full_kkt(BigFloat)
+    end
+
+    variables = 3
+    blocks = [
+        SDPX.CompactScalarCoefficientVector(
+            Float64,
+            variables,
+            variable,
+            1.0,
+        )
+        for variable in 1:variables
+    ]
+    problem = SDPX.ingest(
+        [1.0, 2.0, 3.0],
+        blocks,
+        [zeros(1, 1) for _ in 1:variables],
+        ones(variables, 1),
+        [1.0];
+        sparse=true,
+        verbosity=0,
+    )
+    diagonal = SDPX._extract_lp_diagonal_nonnegative(problem)
+    @test diagonal isa SDPX.LPDiagonalMatrix{Float64}
+    result = SDPX.solve(
+        problem;
+        tolerance=1e-8,
+        maximum_iterations=200,
+        verbosity=0,
+        diagnostics=true,
+    )
+    @test result.status == SDPX.Optimal
+    @test result.pObj ≈ 1.0 atol=1e-7
+    @test result.diagnostics.selected_algorithms.kkt ===
+          :diagonal_reduced_cholesky
+    @test result.diagnostics.selected_algorithms.gram ===
+          :reduced_equality_syrk
+end
+
 @testset "LP presolve regressions" begin
     @testset "opposite inequalities are never merged" begin
         for T in (Float64, BigFloat)

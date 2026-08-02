@@ -21,6 +21,58 @@ struct LPScaling{T}
     equality::Vector{T}
 end
 
+"""
+    LPDiagonalMatrix{T}
+
+Permutation-diagonal representation of the scalar cone map in a standard-form
+nonnegative LP.  Row `r` contains exactly one positive coefficient,
+`values[r]`, in column `variable_for_row[r]`.  Keeping this structure explicit
+avoids materializing the quadratic `G = I` matrix used by the generic LP path.
+"""
+struct LPDiagonalMatrix{T} <: AbstractMatrix{T}
+    values::Vector{T}
+    variable_for_row::Vector{Int}
+    row_for_variable::Vector{Int}
+end
+
+Base.size(matrix::LPDiagonalMatrix) =
+    (length(matrix.variable_for_row), length(matrix.row_for_variable))
+
+@inline function Base.getindex(
+    matrix::LPDiagonalMatrix{T},
+    row::Int,
+    column::Int,
+) where {T}
+    @boundscheck checkbounds(matrix, row, column)
+    return matrix.variable_for_row[row] == column ?
+           matrix.values[row] : zero(T)
+end
+
+"""
+    LPStandardFormSystem{T}
+
+Reduced Newton system for `Gx = s`, `G` permutation diagonal, and `B'x = b`.
+The primal diagonal is eliminated analytically, leaving only the equality
+Schur complement `B' * inv(D) * B`.  Every array is solver-owned; output-tile
+parallelism therefore remains safe for mutable `BigFloat` elements.
+"""
+mutable struct LPStandardFormSystem{T}
+    row_for_variable::Vector{Int}
+    diagonal_coefficient::Vector{T}
+    diagonal_hessian::Vector{T}
+    inverse_diagonal::Vector{T}
+    inverse_sqrt::Vector{T}
+    weighted_B::Matrix{T}
+    reduced_schur::Matrix{T}
+    primal_work::Vector{T}
+    reduced_rhs::Vector{T}
+    B::Matrix{T}
+    threads::Int
+    kernel::Symbol
+    packing_workers::Int
+    schur_workers::Int
+end
+
 mutable struct LPWorkspace{T}
     H::Matrix{T}
     K::Matrix{T}
@@ -43,6 +95,10 @@ mutable struct LPWorkspace{T}
     complementarity::Vector{T}
     target::Vector{T}
     weights::Vector{T}
+    # Non-`nothing` only for `rho >= 0, B'rho=b` and positive diagonal
+    # rescalings/permutations thereof.  This route never allocates dense
+    # variable-by-variable Hessian or KKT storage.
+    standard_system::Union{Nothing,LPStandardFormSystem{T}}
     # Set after construction, once presolve and scaling have settled `G`.
     # `nothing` keeps the dense factorization (see `_lp_sparse_system`).
     # Typed union rather than Any: the field is consulted in the per-iteration
@@ -56,15 +112,20 @@ function LPWorkspace(
     variables::Int,
     equalities::Int;
     packed_hessian::Bool=true,
+    reduced_standard_form::Bool=false,
 ) where {T}
     system_size = variables + equalities
     return LPWorkspace{T}(
+        reduced_standard_form ?
+        alloc_zeros(T, 0, 0) :
         alloc_zeros(T, variables, variables),
+        reduced_standard_form ?
+        alloc_zeros(T, 0, 0) :
         alloc_zeros(T, system_size, system_size),
-        packed_hessian ?
+        packed_hessian && !reduced_standard_form ?
         alloc_zeros(T, inequalities, variables) :
         alloc_zeros(T, 0, 0),
-        packed_hessian ?
+        packed_hessian && !reduced_standard_form ?
         alloc_zeros(T, inequalities) :
         alloc_zeros(T, 0),
         alloc_zeros(T, system_size),
@@ -85,7 +146,55 @@ function LPWorkspace(
         alloc_zeros(T, inequalities),
         alloc_zeros(T, inequalities),
         nothing,
+        nothing,
     )
+end
+
+function _extract_lp_diagonal_nonnegative(
+    prob::SDPProblem{T},
+) where {T}
+    L, variables, _, block_sizes = prob.dims
+    L == variables || return nothing
+    all(==(1), block_sizes) || return nothing
+    all(block -> iszero(block[1, 1]), prob.C) || return nothing
+
+    variable_for_row = zeros(Int, L)
+    row_for_variable = zeros(Int, variables)
+    values = alloc_zeros(T, L)
+    cons = prob.cons
+    if cons isa SparseCons{T}
+        sparse_cons = cons::SparseCons{T}
+        @inbounds for row in 1:L
+            active = sparse_cons.active[row]
+            length(active) == 1 || return nothing
+            variable = only(active)
+            coefficient = sparse_cons.Asp[row][variable][1, 1]
+            coefficient > zero(T) || return nothing
+            iszero(row_for_variable[variable]) || return nothing
+            variable_for_row[row] = variable
+            row_for_variable[variable] = row
+            _lp_copy_scalar!(values, row, coefficient)
+        end
+    else
+        panels = (cons::DenseCons{T}).Av
+        @inbounds for row in 1:L
+            active_variable = 0
+            for variable in 1:variables
+                coefficient = panels[row][1, variable]
+                iszero(coefficient) && continue
+                iszero(active_variable) || return nothing
+                coefficient > zero(T) || return nothing
+                active_variable = variable
+                _lp_copy_scalar!(values, row, coefficient)
+            end
+            iszero(active_variable) && return nothing
+            iszero(row_for_variable[active_variable]) || return nothing
+            variable_for_row[row] = active_variable
+            row_for_variable[active_variable] = row
+        end
+    end
+    all(value -> !iszero(value), row_for_variable) || return nothing
+    return LPDiagonalMatrix(values, variable_for_row, row_for_variable)
 end
 
 function _extract_lp_rows(prob::SDPProblem{T}) where {T}
@@ -121,6 +230,102 @@ function _extract_lp_rows(prob::SDPProblem{T}) where {T}
         _lp_copy_scalar!(h, row, prob.C[row][1, 1])
     end
     return G, h
+end
+
+function _lp_owned_copy(matrix::LPDiagonalMatrix{T}) where {T}
+    values = alloc_zeros(T, length(matrix.values))
+    copy_owned!(values, matrix.values)
+    return LPDiagonalMatrix(
+        values,
+        copy(matrix.variable_for_row),
+        copy(matrix.row_for_variable),
+    )
+end
+
+_lp_owned_copy(matrix::Matrix{T}) where {T} = _owned_array_copy(T, matrix)
+
+function _lp_mul_G!(destination, G, vector, alpha, beta)
+    return kmul_owned!(destination, G, vector, alpha, beta)
+end
+
+function _lp_mul_Gt!(destination, G, vector, alpha, beta)
+    return kmul_owned!(destination, transpose(G), vector, alpha, beta)
+end
+
+function _lp_mul_G!(
+    destination::AbstractVector{T},
+    G::LPDiagonalMatrix{T},
+    vector::AbstractVector{T},
+    alpha::T,
+    beta::T,
+) where {T}
+    @inbounds for row in eachindex(G.variable_for_row)
+        variable = G.variable_for_row[row]
+        destination[row] =
+            alpha * G.values[row] * vector[variable] + beta * destination[row]
+    end
+    return destination
+end
+
+function _lp_mul_Gt!(
+    destination::AbstractVector{T},
+    G::LPDiagonalMatrix{T},
+    vector::AbstractVector{T},
+    alpha::T,
+    beta::T,
+) where {T}
+    @inbounds for variable in eachindex(G.row_for_variable)
+        row = G.row_for_variable[variable]
+        destination[variable] =
+            alpha * G.values[row] * vector[row] + beta * destination[variable]
+    end
+    return destination
+end
+
+function _lp_mul_G!(
+    destination::AbstractVector{BigFloat},
+    G::LPDiagonalMatrix{BigFloat},
+    vector::AbstractVector{BigFloat},
+    alpha::BigFloat,
+    beta::BigFloat,
+)
+    product = BigFloat()
+    old_value = BigFloat()
+    @inbounds for row in eachindex(G.variable_for_row)
+        variable = G.variable_for_row[row]
+        MA.operate_to!(product, *, G.values[row], vector[variable])
+        MA.operate!(*, product, alpha)
+        if iszero(beta)
+            MA.operate_to!(destination[row], copy, product)
+        else
+            MA.operate_to!(old_value, *, beta, destination[row])
+            MA.operate_to!(destination[row], +, product, old_value)
+        end
+    end
+    return destination
+end
+
+function _lp_mul_Gt!(
+    destination::AbstractVector{BigFloat},
+    G::LPDiagonalMatrix{BigFloat},
+    vector::AbstractVector{BigFloat},
+    alpha::BigFloat,
+    beta::BigFloat,
+)
+    product = BigFloat()
+    old_value = BigFloat()
+    @inbounds for variable in eachindex(G.row_for_variable)
+        row = G.row_for_variable[variable]
+        MA.operate_to!(product, *, G.values[row], vector[row])
+        MA.operate!(*, product, alpha)
+        if iszero(beta)
+            MA.operate_to!(destination[variable], copy, product)
+        else
+            MA.operate_to!(old_value, *, beta, destination[variable])
+            MA.operate_to!(destination[variable], +, product, old_value)
+        end
+    end
+    return destination
 end
 
 """
@@ -305,6 +510,53 @@ function _scale_lp!(
     return LPScaling(variable_scale, inequality_scale, equality_scale)
 end
 
+function _scale_lp!(
+    G::LPDiagonalMatrix{T},
+    h::Vector{T},
+    B::Matrix{T},
+    b::Vector{T},
+    c::Vector{T},
+    enabled::Bool,
+) where {T}
+    inequalities, variables = size(G)
+    equalities = size(B, 2)
+    variable_scale = ones(T, variables)
+    inequality_scale = ones(T, inequalities)
+    equality_scale = ones(T, equalities)
+    enabled || return LPScaling(variable_scale, inequality_scale, equality_scale)
+
+    # The row maximum of a permutation-diagonal map is its sole coefficient.
+    # Scaling it directly is O(m), rather than walking a mostly-zero m×m panel.
+    @inbounds for row in 1:inequalities
+        magnitude = max(abs(G.values[row]), abs(h[row]))
+        inequality_scale[row] = magnitude > zero(T) ? inv(magnitude) : one(T)
+        G.values[row] *= inequality_scale[row]
+        h[row] *= inequality_scale[row]
+    end
+    @inbounds for column in 1:equalities
+        magnitude = max(
+            maximum(abs, view(B, :, column); init=zero(T)),
+            abs(b[column]),
+        )
+        equality_scale[column] = magnitude > zero(T) ? inv(magnitude) : one(T)
+        B[:, column] .*= equality_scale[column]
+        b[column] *= equality_scale[column]
+    end
+    @inbounds for variable in 1:variables
+        row = G.row_for_variable[variable]
+        magnitude = max(
+            abs(c[variable]),
+            abs(G.values[row]),
+            maximum(abs, view(B, variable, :); init=zero(T)),
+        )
+        variable_scale[variable] = magnitude > zero(T) ? inv(magnitude) : one(T)
+        G.values[row] *= variable_scale[variable]
+        B[variable, :] .*= variable_scale[variable]
+        c[variable] *= variable_scale[variable]
+    end
+    return LPScaling(variable_scale, inequality_scale, equality_scale)
+end
+
 function _lp_residuals!(
     workspace::LPWorkspace{T},
     G,
@@ -317,7 +569,7 @@ function _lp_residuals!(
     y,
     z,
 ) where {T}
-    kmul_owned!(workspace.rp, G, x)
+    _lp_mul_G!(workspace.rp, G, x, one(T), zero(T))
     workspace.rp .-= h
     workspace.rp .-= s
     if !isempty(y)
@@ -325,7 +577,7 @@ function _lp_residuals!(
         workspace.re .-= b
     end
     copy_owned!(workspace.rd, c)
-    kmul_owned!(workspace.rd, transpose(G), z, -one(T), one(T))
+    _lp_mul_Gt!(workspace.rd, G, z, -one(T), one(T))
     !isempty(y) &&
         kmul_owned!(workspace.rd, B, y, -one(T), one(T))
     return nothing
@@ -345,7 +597,7 @@ function _lp_residuals!(
 )
     negative_one = -one(BigFloat)
     one_big = one(BigFloat)
-    kmul_owned!(workspace.rp, G, x)
+    _lp_mul_G!(workspace.rp, G, x, one_big, zero(BigFloat))
     kaxpby_owned!(negative_one, h, one_big, workspace.rp)
     kaxpby_owned!(negative_one, s, one_big, workspace.rp)
     if !isempty(y)
@@ -353,13 +605,7 @@ function _lp_residuals!(
         kaxpby_owned!(negative_one, b, one_big, workspace.re)
     end
     copy_owned!(workspace.rd, c)
-    kmul_owned!(
-        workspace.rd,
-        transpose(G),
-        z,
-        negative_one,
-        one_big,
-    )
+    _lp_mul_Gt!(workspace.rd, G, z, negative_one, one_big)
     !isempty(y) &&
         kmul_owned!(workspace.rd, B, y, negative_one, one_big)
     return nothing
@@ -557,10 +803,13 @@ end
 
 function _lp_assemble_hessian!(
     workspace::LPWorkspace{T},
-    G::Matrix{T},
+    G::AbstractMatrix{T},
     thread_count::Int,
     kernel::Symbol,
 ) where {T}
+    # The standard-form route eliminates its diagonal primal block inside
+    # `_lp_factor_kkt!`, after the trial regularization is known.
+    workspace.standard_system === nothing || return workspace.H
     # The sparse path forms its own `GᵀDG` directly in sparse arithmetic, so
     # the dense `m×m` product here would be pure waste -- and at the sizes that
     # select the sparse path it is the more expensive of the two.
@@ -581,6 +830,226 @@ function _lp_assemble_hessian!(
         return _lp_assemble_hessian_extended!(workspace, G, thread_count)
     end
     return _lp_assemble_hessian_serial!(workspace.H, G, workspace.weights)
+end
+
+function LPStandardFormSystem(
+    G::LPDiagonalMatrix{T},
+    B::Matrix{T},
+    thread_count::Int,
+    kernel::Symbol,
+) where {T}
+    variables = size(G, 2)
+    equalities = size(B, 2)
+    diagonal_coefficient = alloc_zeros(T, variables)
+    @inbounds for variable in 1:variables
+        _lp_copy_scalar!(
+            diagonal_coefficient,
+            variable,
+            G.values[G.row_for_variable[variable]],
+        )
+    end
+    return LPStandardFormSystem{T}(
+        copy(G.row_for_variable),
+        diagonal_coefficient,
+        alloc_zeros(T, variables),
+        alloc_zeros(T, variables),
+        alloc_zeros(T, variables),
+        alloc_zeros(T, variables, equalities),
+        alloc_zeros(T, equalities, equalities),
+        alloc_zeros(T, variables),
+        alloc_zeros(T, equalities),
+        B,
+        max(thread_count, 1),
+        kernel,
+        1,
+        1,
+    )
+end
+
+function _lp_standard_pack_range!(
+    system::LPStandardFormSystem{T},
+    weights::Vector{T},
+    regularization::T,
+    first_variable::Int,
+    last_variable::Int,
+) where {T}
+    @inbounds for variable in first_variable:last_variable
+        row = system.row_for_variable[variable]
+        coefficient = system.diagonal_coefficient[variable]
+        diagonal = weights[row] * coefficient * coefficient + regularization
+        system.diagonal_hessian[variable] = diagonal
+        inverse_diagonal = inv(diagonal)
+        system.inverse_diagonal[variable] = inverse_diagonal
+        inverse_sqrt = sqrt(inverse_diagonal)
+        system.inverse_sqrt[variable] = inverse_sqrt
+        for equality in axes(system.B, 2)
+            system.weighted_B[variable, equality] =
+                inverse_sqrt * system.B[variable, equality]
+        end
+    end
+    return system
+end
+
+function _lp_standard_pack_range!(
+    system::LPStandardFormSystem{BigFloat},
+    weights::Vector{BigFloat},
+    regularization::BigFloat,
+    first_variable::Int,
+    last_variable::Int,
+)
+    one_big = one(BigFloat)
+    @inbounds for variable in first_variable:last_variable
+        row = system.row_for_variable[variable]
+        coefficient = system.diagonal_coefficient[variable]
+        diagonal = system.diagonal_hessian[variable]
+        MA.operate_to!(diagonal, *, coefficient, coefficient)
+        MA.operate!(*, diagonal, weights[row])
+        MA.operate!(+, diagonal, regularization)
+        _mpfr_divide!(
+            system.inverse_diagonal[variable],
+            one_big,
+            diagonal,
+        )
+        _mpfr_sqrt!(
+            system.inverse_sqrt[variable],
+            system.inverse_diagonal[variable],
+        )
+        inverse_sqrt = system.inverse_sqrt[variable]
+        for equality in axes(system.B, 2)
+            MA.operate_to!(
+                system.weighted_B[variable, equality],
+                *,
+                inverse_sqrt,
+                system.B[variable, equality],
+            )
+        end
+    end
+    return system
+end
+
+function _lp_standard_pack_workers(
+    ::Type{T},
+    system::LPStandardFormSystem{T},
+) where {T}
+    T === Float64 && return 1
+    variables, equalities = size(system.weighted_B)
+    work = variables * max(equalities, 1)
+    work >= 24_000 || return 1
+    return min(system.threads, Threads.nthreads(), variables)
+end
+
+function _lp_pack_standard_panel!(
+    system::LPStandardFormSystem{T},
+    weights::Vector{T},
+    regularization::T,
+) where {T}
+    variables = length(system.diagonal_coefficient)
+    workers = _lp_standard_pack_workers(T, system)
+    system.packing_workers = workers
+    if workers == 1
+        _lp_standard_pack_range!(
+            system,
+            weights,
+            regularization,
+            1,
+            variables,
+        )
+    else
+        chunk = cld(variables, workers)
+        @sync for worker in 1:workers
+            first_variable = (worker - 1) * chunk + 1
+            last_variable = min(worker * chunk, variables)
+            first_variable <= last_variable || continue
+            Threads.@spawn _lp_standard_pack_range!(
+                system,
+                weights,
+                regularization,
+                first_variable,
+                last_variable,
+            )
+        end
+    end
+    return system.weighted_B
+end
+
+function _lp_assemble_reduced_schur!(
+    system::LPStandardFormSystem{T},
+    weights::Vector{T},
+    regularization::T,
+) where {T}
+    panel = _lp_pack_standard_panel!(system, weights, regularization)
+    Q = system.reduced_schur
+    equalities = size(Q, 1)
+    iszero(equalities) && return Q
+    if T === Float64
+        system.schur_workers = max(blas_threads(), 1)
+        LinearAlgebra.BLAS.syrk!('L', 'T', one(T), panel, zero(T), Q)
+    elseif ExtendedPrecisionBLAS.arithmetic_family(T) in (:fixed_extended, :bigfloat)
+        config = ExtendedPrecisionBLAS._kernel_config(
+            T,
+            system.threads,
+            equalities,
+        )
+        block_count = cld(equalities, max(config.column_tile, 1))
+        jobs = block_count * (block_count + 1) ÷ 2
+        system.schur_workers = ExtendedPrecisionBLAS._syrk_worker_count(
+            T,
+            size(panel, 1),
+            equalities,
+            jobs,
+            system.threads,
+        )
+        ExtendedPrecisionBLAS.syrk!(
+            Q,
+            panel,
+            one(T),
+            zero(T),
+            config,
+            system.threads,
+        )
+    else
+        ksyrk!(Q, panel, one(T), zero(T))
+    end
+    @inbounds for equality in 1:equalities
+        Q[equality, equality] += regularization
+    end
+    return Q
+end
+
+function _lp_assemble_reduced_schur!(
+    system::LPStandardFormSystem{BigFloat},
+    weights::Vector{BigFloat},
+    regularization::BigFloat,
+)
+    panel = _lp_pack_standard_panel!(system, weights, regularization)
+    Q = system.reduced_schur
+    isempty(Q) && return Q
+    config = ExtendedPrecisionBLAS._kernel_config(
+        BigFloat,
+        system.threads,
+        size(Q, 1),
+    )
+    block_count = cld(size(Q, 1), max(config.column_tile, 1))
+    jobs = block_count * (block_count + 1) ÷ 2
+    system.schur_workers = ExtendedPrecisionBLAS._syrk_worker_count(
+        BigFloat,
+        size(panel, 1),
+        size(Q, 1),
+        jobs,
+        system.threads,
+    )
+    ExtendedPrecisionBLAS.syrk!(
+        Q,
+        panel,
+        one(BigFloat),
+        zero(BigFloat),
+        config,
+        system.threads,
+    )
+    @inbounds for equality in axes(Q, 1)
+        MA.operate!(+, Q[equality, equality], regularization)
+    end
+    return Q
 end
 
 function _lp_populate_kkt!(
@@ -673,6 +1142,15 @@ end
 
 LinearAlgebra.issuccess(factor::LPCholeskyFactor) = factor.success
 
+struct LPReducedFactor{T}
+    system::LPStandardFormSystem{T}
+    success::Bool
+    assembly_seconds::Float64
+    factorization_seconds::Float64
+end
+
+LinearAlgebra.issuccess(factor::LPReducedFactor) = factor.success
+
 function _lp_solve_factor!(factor, rhs)
     return ldiv!(factor, rhs)
 end
@@ -681,6 +1159,97 @@ function _lp_solve_factor!(factor::LPCholeskyFactor, rhs)
     factor.success ||
         throw(LinearAlgebra.PosDefException(1))
     return kcholsolve_owned!(factor.factor, rhs)
+end
+
+function _lp_solve_factor!(factor::LPReducedFactor{T}, rhs) where {T}
+    factor.success || throw(LinearAlgebra.PosDefException(1))
+    system = factor.system
+    variables = length(system.inverse_diagonal)
+    equalities = length(system.reduced_rhs)
+    primal_rhs = view(rhs, 1:variables)
+    dual_direction = view(rhs, (variables + 1):(variables + equalities))
+
+    @inbounds for variable in 1:variables
+        system.primal_work[variable] =
+            system.inverse_diagonal[variable] * primal_rhs[variable]
+    end
+    if iszero(equalities)
+        copy_owned!(primal_rhs, system.primal_work)
+        return rhs
+    end
+    copy_owned!(system.reduced_rhs, dual_direction)
+    kmul_owned!(
+        system.reduced_rhs,
+        transpose(system.B),
+        system.primal_work,
+        -one(T),
+        one(T),
+    )
+    copy_owned!(dual_direction, system.reduced_rhs)
+    kcholsolve_owned!(system.reduced_schur, dual_direction)
+
+    # Recover dx = inv(D) * rx + inv(D) * B * dy.  The first term was
+    # retained in `primal_work`, so `primal_rhs` can be overwritten in place.
+    kmul_owned!(primal_rhs, system.B, dual_direction)
+    @inbounds for variable in 1:variables
+        primal_rhs[variable] =
+            system.primal_work[variable] +
+            system.inverse_diagonal[variable] * primal_rhs[variable]
+    end
+    return rhs
+end
+
+function _lp_solve_factor!(
+    factor::LPReducedFactor{BigFloat},
+    rhs,
+)
+    factor.success || throw(LinearAlgebra.PosDefException(1))
+    system = factor.system
+    variables = length(system.inverse_diagonal)
+    equalities = length(system.reduced_rhs)
+    primal_rhs = view(rhs, 1:variables)
+    dual_direction = view(rhs, (variables + 1):(variables + equalities))
+
+    @inbounds for variable in 1:variables
+        MA.operate_to!(
+            system.primal_work[variable],
+            *,
+            system.inverse_diagonal[variable],
+            primal_rhs[variable],
+        )
+    end
+    if iszero(equalities)
+        copy_owned!(primal_rhs, system.primal_work)
+        return rhs
+    end
+    copy_owned!(system.reduced_rhs, dual_direction)
+    kmul_owned!(
+        system.reduced_rhs,
+        transpose(system.B),
+        system.primal_work,
+        -one(BigFloat),
+        one(BigFloat),
+    )
+    copy_owned!(dual_direction, system.reduced_rhs)
+    kcholsolve_owned!(system.reduced_schur, dual_direction)
+    kmul_owned!(primal_rhs, system.B, dual_direction)
+
+    product = BigFloat()
+    @inbounds for variable in 1:variables
+        MA.operate_to!(
+            product,
+            *,
+            system.inverse_diagonal[variable],
+            primal_rhs[variable],
+        )
+        MA.operate_to!(
+            primal_rhs[variable],
+            +,
+            system.primal_work[variable],
+            product,
+        )
+    end
+    return rhs
 end
 
 """
@@ -707,6 +1276,26 @@ function _lp_factor_kkt!(
     B::Matrix{T},
     regularization::T,
 ) where {T}
+    reduced = workspace.standard_system
+    if reduced isa LPStandardFormSystem{T}
+        assembly_started = time_ns()
+        _lp_assemble_reduced_schur!(
+            reduced,
+            workspace.weights,
+            regularization,
+        )
+        assembly_seconds = (time_ns() - assembly_started) / 1.0e9
+        factor_started = time_ns()
+        success = isempty(reduced.reduced_schur) ||
+                  kchol!(reduced.reduced_schur)
+        factorization_seconds = (time_ns() - factor_started) / 1.0e9
+        return LPReducedFactor{T}(
+            reduced,
+            success,
+            assembly_seconds,
+            factorization_seconds,
+        )
+    end
     system = workspace.sparse_system
     if system isa LPSparseSystem{T}
         return LPSparseFactor{T}(
@@ -751,9 +1340,9 @@ function _lp_direction_rhs!(
     _lp_negate!(
         view(workspace.rhs, 1:variables),
     )
-    kmul_owned!(
+    _lp_mul_Gt!(
         view(workspace.rhs, 1:variables),
-        transpose(G),
+        G,
         workspace.complementarity,
         one(T),
         one(T),
@@ -797,7 +1386,7 @@ function _lp_complete_direction!(
     dx,
     target,
 )
-    kmul_owned!(ds, G, dx)
+    _lp_mul_G!(ds, G, dx, one(eltype(ds)), zero(eltype(ds)))
     ds .+= rp
     @inbounds for row in eachindex(s)
         dz[row] = (target[row] - z[row] * ds[row]) / s[row]
@@ -815,7 +1404,7 @@ function _lp_complete_direction!(
     dx,
     target,
 )
-    kmul_owned!(ds, G, dx)
+    _lp_mul_G!(ds, G, dx, one(BigFloat), zero(BigFloat))
     kaxpby_owned!(
         one(BigFloat),
         rp,
@@ -865,6 +1454,17 @@ function _lp_workspace_bytes(workspace::LPWorkspace)
     for field in fieldnames(typeof(workspace))
         value = getfield(workspace, field)
         value isa Array && (total += Base.summarysize(value))
+    end
+    system = workspace.standard_system
+    if system !== nothing
+        # `B` belongs to the scaled model data and is already counted outside
+        # the Newton workspace.  Count only storage introduced by the reduced
+        # standard-form backend.
+        for field in fieldnames(typeof(system))
+            field === :B && continue
+            value = getfield(system, field)
+            value isa Array && (total += Base.summarysize(value))
+        end
     end
     return total
 end
@@ -919,6 +1519,21 @@ function _lp_time_limit_result(
         nothing,
         (reason=:time_limit, stage=:lp_setup),
     )
+end
+
+@inline _lp_regularization_floor(::Type{Float64}) =
+    max(sqrt(eps(Float64)), 1.0e-12)
+@inline _lp_regularization_floor(::Type{Float32}) =
+    max(sqrt(eps(Float32)), Float32(1.0e-12))
+
+function _lp_regularization_floor(::Type{T}) where {T}
+    # `1e-12` was historically harmless for binary64 (whose sqrt(eps) is
+    # larger) but became the effective accuracy ceiling for Float64x4 and
+    # BigFloat.  eps^(3/4) stays well above arithmetic noise while preserving
+    # useful extended-precision digits.  Factorization failure still triggers
+    # the established tenfold escalation.
+    arithmetic_floor = sqrt(eps(T) * sqrt(eps(T)))
+    return max(arithmetic_floor, T(1e-60))
 end
 
 function _lp_equality_only_result(
@@ -1123,11 +1738,22 @@ function solve_lp!(
                           started + opts.max_time :
                           Inf)
     _validate_lp_options(opts)
-    G_original, h_original = _extract_lp_rows(prob)
+    diagonal_original = _extract_lp_diagonal_nonnegative(prob)
+    G_original, h_original = if diagonal_original === nothing
+        _extract_lp_rows(prob)
+    else
+        (
+            diagonal_original,
+            alloc_zeros(T, size(diagonal_original, 1)),
+        )
+    end
     tolerance = max(opts.presolve_tolerance, T(10) * eps(T))
-    keep, removed, row_infeasible = _presolve_enabled(opts) ?
-        _presolve_lp_rows(G_original, h_original, tolerance) :
+    keep, removed, row_infeasible = if diagonal_original === nothing &&
+                                       _presolve_enabled(opts)
+        _presolve_lp_rows(G_original, h_original, tolerance)
+    else
         (collect(axes(G_original, 1)), 0, false)
+    end
     row_infeasible &&
         return _lp_infeasible_rows_result(
             prob,
@@ -1150,7 +1776,11 @@ function solve_lp!(
             deadline=effective_deadline,
         )
 
-    G = _owned_array_copy(T, view(G_original, keep, :))
+    G = if G_original isa LPDiagonalMatrix{T}
+        _lp_owned_copy(G_original)
+    else
+        _owned_array_copy(T, view(G_original, keep, :))
+    end
     h = _owned_array_copy(T, view(h_original, keep))
     # The LP workspace currently uses dense row/column scaling and dense KKT
     # buffers. Keep that established path even when the SDP frontend retained
@@ -1181,16 +1811,26 @@ function solve_lp!(
         variables,
         equalities;
         packed_hessian=packed_hessian,
+        reduced_standard_form=G isa LPDiagonalMatrix{T},
     )
-    # Decided once, on the `G` the iteration will actually use. A `nothing`
-    # here keeps every downstream call on the dense path unchanged.
-    workspace.sparse_system = _lp_sparse_system(prob, G, B)
+    if G isa LPDiagonalMatrix{T}
+        workspace.standard_system = LPStandardFormSystem(
+            G,
+            B,
+            plan.threads,
+            plan.gram_kernel,
+        )
+    else
+        # Decided once, on the `G` the iteration will actually use. A `nothing`
+        # here keeps every downstream call on the dense path unchanged.
+        workspace.sparse_system = _lp_sparse_system(prob, G, B)
+    end
     x = x0 === nothing ? alloc_zeros(T, variables) :
         _owned_array_copy(T, x0) ./ scaling.variable
     y = y0 === nothing ? alloc_zeros(T, equalities) :
         _owned_array_copy(T, y0) ./ scaling.equality
     s = alloc_zeros(T, inequalities)
-    kmul_owned!(s, G, x)
+    _lp_mul_G!(s, G, x, one(T), zero(T))
     s .-= h
     @inbounds for row in eachindex(s)
         s[row] = max(s[row], one(T))
@@ -1209,12 +1849,11 @@ function solve_lp!(
     p_objective = dot(c, x)
     d_objective = dot(h, z) + dot(b, y)
     parameter_controller = AdaptiveIPMController(opts)
-    # Relative regularization floor. The absolute value is scaled by the
-    # Hessian norm each iteration (see below), because a fixed constant is wrong
-    # for the same reason a fixed initial point is: `sqrt(eps(Float64))` is
-    # 1.5e-8 whether the Hessian has entries near one or near 1e7, and in the
-    # latter case it regularizes nothing at all.
-    relative_regularization = max(sqrt(eps(T)), T(1e-12))
+    # Arithmetic-aware absolute floor. It is deliberately not scaled by the
+    # barrier Hessian, whose norm diverges near the cone boundary; see the
+    # factorization note below. Extended arithmetic uses a much smaller floor
+    # than binary64 and escalates only after an actual factorization failure.
+    relative_regularization = _lp_regularization_floor(T)
     regularization = relative_regularization
     residual_seconds = 0.0
     gram_seconds = 0.0
@@ -1224,7 +1863,8 @@ function solve_lp!(
 
     opts.verbosity >= 1 && println(
         "SDPX dedicated LP: $(variables) variables, $(inequalities) inequalities, " *
-        "$(equalities) equalities, kernel=$(plan.gram_kernel), threads=$(plan.threads)",
+        "$(equalities) equalities, kernel=$(plan.gram_kernel), threads=$(plan.threads), " *
+        "standard_form=$(workspace.standard_system !== nothing)",
     )
 
     while true
@@ -1295,6 +1935,7 @@ function solve_lp!(
         factor_started = time_ns()
         factor = nothing
         successful = false
+        reduced_assembly_seconds = 0.0
         # §15.4: use the smallest regularization that stabilizes the
         # factorization. The previous iteration's value decays back toward the
         # floor instead of persisting — escalation responds to one difficult
@@ -1312,6 +1953,8 @@ function solve_lp!(
         local attempt_regularization = regularization
         for attempt in 1:8
             factor = _lp_factor_kkt!(workspace, B, attempt_regularization)
+            factor isa LPReducedFactor &&
+                (reduced_assembly_seconds += factor.assembly_seconds)
             if issuccess(factor)
                 successful = true
                 regularizations += attempt - 1
@@ -1325,7 +1968,9 @@ function solve_lp!(
             message = "The LP KKT system remained singular after regularization."
             break
         end
-        factor_seconds += (time_ns() - factor_started) / 1.0e9
+        factor_elapsed = (time_ns() - factor_started) / 1.0e9
+        gram_seconds += reduced_assembly_seconds
+        factor_seconds += max(factor_elapsed - reduced_assembly_seconds, 0.0)
 
         direction_started = time_ns()
         copy_owned!(workspace.target, workspace.complementarity)
@@ -1528,7 +2173,15 @@ function solve_lp!(
     y_original = scaling.equality .* y
     slack_original_reduced = s ./ scaling.inequality
     dual_original_reduced = scaling.inequality .* z
-    slack_original = G_original * x_original - h_original
+    slack_original = alloc_zeros(T, size(G_original, 1))
+    _lp_mul_G!(
+        slack_original,
+        G_original,
+        x_original,
+        one(T),
+        zero(T),
+    )
+    slack_original .-= h_original
     dual_original = alloc_zeros(T, size(G_original, 1))
     copy_owned!(view(dual_original, keep), dual_original_reduced)
     X = [reshape(T[slack_original[row]], 1, 1) for row in axes(G_original, 1)]
@@ -1553,9 +2206,24 @@ function solve_lp!(
         primal_reconstruction_residual,
         equality_residual,
     )
+    stationarity_original = _owned_array_copy(T, prob.c)
+    _lp_mul_Gt!(
+        stationarity_original,
+        G_original,
+        dual_original,
+        -one(T),
+        one(T),
+    )
+    !isempty(y_original) && kmul_owned!(
+        stationarity_original,
+        prob.B,
+        y_original,
+        -one(T),
+        one(T),
+    )
     dual_residual_original = maximum(
         abs,
-        prob.c - transpose(G_original) * dual_original - prob.B * y_original;
+        stationarity_original;
         init=zero(T),
     )
     gap_relative_original =
@@ -1596,11 +2264,27 @@ function solve_lp!(
             # it -- and diagnostics built from the plan reported a dense LU
             # and a BLAS Gram kernel for solves that executed neither.
             executed=(
-                kkt=workspace.sparse_system === nothing ?
+                kkt=workspace.standard_system !== nothing ?
+                    :diagonal_reduced_cholesky :
+                    workspace.sparse_system === nothing ?
                     (equalities > 0 ? :dense_lu : :positive_definite_cholesky) :
                     (workspace.sparse_system::LPSparseSystem{T}).formulation,
-                gram=workspace.sparse_system === nothing ?
+                gram=workspace.standard_system !== nothing ?
+                     :reduced_equality_syrk :
+                     workspace.sparse_system === nothing ?
                      plan.gram_kernel : :sparse_gram,
+                effective_threads=workspace.standard_system === nothing ?
+                    plan.threads :
+                    max(
+                        workspace.standard_system.packing_workers,
+                        workspace.standard_system.schur_workers,
+                    ),
+                schur_threads=workspace.standard_system === nothing ?
+                    plan.threads : workspace.standard_system.schur_workers,
+                factor_threads=workspace.standard_system === nothing ?
+                    nothing : 1,
+                lp_pack_threads=workspace.standard_system === nothing ?
+                    nothing : workspace.standard_system.packing_workers,
             ),
         ),
     )
