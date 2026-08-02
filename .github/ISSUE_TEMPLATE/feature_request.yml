@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a solver, interface, documentation, or performance improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What problem would this solve, and for which model family or user?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Numerical or performance evidence
+      description: For algorithmic changes, include references, expected safeguards, and a benchmark plan.

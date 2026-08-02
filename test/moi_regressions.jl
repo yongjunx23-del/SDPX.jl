@@ -109,6 +109,23 @@ end
             MOI.ObjectiveValue(),
         )
 
+        optimizer.result = moi_regression_result(SDPX.PrimalInfeasible)
+        @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.INFEASIBLE
+        @test MOI.get(optimizer, MOI.ResultCount()) == 1
+        @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.NO_SOLUTION
+        @test MOI.get(optimizer, MOI.DualStatus()) ==
+              MOI.INFEASIBILITY_CERTIFICATE
+        @test isnan(MOI.get(optimizer, MOI.ObjectiveValue()))
+
+        optimizer.result = moi_regression_result(SDPX.DualInfeasible)
+        @test MOI.get(optimizer, MOI.TerminationStatus()) ==
+              MOI.DUAL_INFEASIBLE
+        @test MOI.get(optimizer, MOI.ResultCount()) == 1
+        @test MOI.get(optimizer, MOI.PrimalStatus()) ==
+              MOI.INFEASIBILITY_CERTIFICATE
+        @test MOI.get(optimizer, MOI.DualStatus()) == MOI.NO_SOLUTION
+        @test isnan(MOI.get(optimizer, MOI.DualObjectiveValue()))
+
         optimizer.result = moi_regression_result(SDPX.NumericalBreakdown)
         @test MOI.get(optimizer, MOI.ResultCount()) == 0
         @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.NO_SOLUTION
@@ -253,24 +270,16 @@ end
         @test MOI.get(
             unbounded_optimizer,
             MOI.TerminationStatus(),
-        ) != MOI.OPTIMAL
-        @test MOI.get(
-            unbounded_optimizer,
-            MOI.TerminationStatus(),
-        ) == MOI.NUMERICAL_ERROR
-        @test occursin(
-            "unbounded below",
-            MOI.get(unbounded_optimizer, MOI.RawStatusString()),
-        )
-        @test MOI.get(unbounded_optimizer, MOI.ResultCount()) == 0
+        ) == MOI.DUAL_INFEASIBLE
+        @test MOI.get(unbounded_optimizer, MOI.ResultCount()) == 1
         @test MOI.get(
             unbounded_optimizer,
             MOI.PrimalStatus(),
-        ) == MOI.NO_SOLUTION
-        @test_throws MOI.ResultIndexBoundsError MOI.get(
+        ) == MOI.INFEASIBILITY_CERTIFICATE
+        @test MOI.get(
             unbounded_optimizer,
             MOI.ObjectiveValue(),
-        )
+        ) < 0.0
         @test bounded_map[bounded_variable] == MOI.VariableIndex(1)
         @test unbounded_map[unbounded_variable] == MOI.VariableIndex(1)
     end

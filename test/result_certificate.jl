@@ -165,6 +165,49 @@ end
         @test warning === nothing
     end
 
+    @testset "optimize-mode infeasibility statuses require a valid ray" begin
+        problem = scalar_certificate_problem(Float64)
+        options = SDPX.SolverOptions{Float64}(
+            ϵ_gap=1e-8,
+            ϵ_primal=1e-8,
+            ϵ_dual=1e-8,
+            verbosity=0,
+        )
+
+        forged_primal = scalar_certificate_result(
+            Float64;
+            status=SDPX.PrimalInfeasible,
+            dual=0.0,
+        )
+        downgraded, certificate, warning =
+            SDPX.certify_final_result(
+                problem,
+                forged_primal,
+                options,
+            )
+        @test downgraded.status === SDPX.Stalled
+        @test !certificate.valid
+        @test :primal_infeasibility_ray in certificate.failures
+        @test warning !== nothing
+
+        forged_dual = scalar_certificate_result(
+            Float64;
+            status=SDPX.DualInfeasible,
+            primal=0.0,
+            slack=0.0,
+        )
+        downgraded, certificate, warning =
+            SDPX.certify_final_result(
+                problem,
+                forged_dual,
+                options,
+            )
+        @test downgraded.status === SDPX.Stalled
+        @test !certificate.valid
+        @test :dual_infeasibility_ray in certificate.failures
+        @test warning !== nothing
+    end
+
     @testset "mixed componentwise backward errors are scale invariant" begin
         primal_problem = SDPX.ingest(
             [0.0],

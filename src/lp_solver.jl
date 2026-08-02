@@ -539,7 +539,11 @@ function _lp_assemble_hessian_extended!(
     thread_count::Int,
 ) where {T}
     panel = _lp_pack_weighted!(workspace, G)
-    config = ExtendedPrecisionBLAS._kernel_config(T, thread_count)
+    config = ExtendedPrecisionBLAS._kernel_config(
+        T,
+        thread_count,
+        size(panel, 2),
+    )
     ExtendedPrecisionBLAS.syrk!(
         workspace.H,
         panel,
@@ -993,11 +997,8 @@ function _lp_equality_only_result(
         init=zero(T),
     )
     primal_residual = max(primal_cone_residual, equality_residual)
-    dual_residual = maximum(
-        abs,
-        prob.c - prob.B * y;
-        init=zero(T),
-    )
+    dual_stationarity = prob.c - prob.B * y
+    dual_residual = maximum(abs, dual_stationarity; init=zero(T))
     primal_scale = one(T) + max(
         maximum(abs, h_original; init=zero(T)),
         maximum(abs, prob.b; init=zero(T)),
@@ -1025,9 +1026,41 @@ function _lp_equality_only_result(
         (Optimal, "Optimal")
     else
         (
-            NumericalBreakdown,
-            "The equality-only LP objective is unbounded below. SDPX does not " *
-            "yet expose an unboundedness-certificate status.",
+            DualInfeasible,
+            "The equality-only LP objective is unbounded below; " *
+            "dual infeasible or primal unbounded " *
+            "(validated equality-nullspace ray).",
+        )
+    end
+
+    termination = (reason=:none,)
+    if status === DualInfeasible
+        # `y` is the least-squares projection of `c` onto range(B), so
+        # `d = B*y-c` lies in null(B') and satisfies c'd = -||d||² < 0.
+        # Normalize it before returning the MOI primal certificate. The
+        # presolved inequality set is empty, hence every original LP row has
+        # zero homogeneous action (up to the same validation tolerance).
+        ray_scale = maximum(abs, dual_stationarity; init=zero(T))
+        ray_scale > zero(T) ||
+            throw(ArgumentError(
+                "equality-only LP unboundedness requires a nonzero ray",
+            ))
+        @inbounds for index in eachindex(x, dual_stationarity)
+            x[index] = -dual_stationarity[index] / ray_scale
+        end
+        slack = G_original * x
+        equality_residual = equalities == 0 ? zero(T) :
+                            maximum(
+            abs,
+            transpose(prob.B) * x;
+            init=zero(T),
+        )
+        primal_residual = equality_residual
+        termination = (
+            reason=:dual_infeasibility_certificate,
+            certificate_method=:equality_nullspace_ray,
+            certificate_generator=:analytic_presolve,
+            homogeneous_self_dual_embedding=false,
         )
     end
 
@@ -1070,6 +1103,7 @@ function _lp_equality_only_result(
         ),
         NamedTuple[],
         nothing,
+        termination,
     )
     return result, removed, workspace_bytes
 end

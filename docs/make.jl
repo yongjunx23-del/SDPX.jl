@@ -2,8 +2,6 @@
 #   julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
 #   julia --project=docs docs/make.jl
 #
-# CI builds this without deploying; `deploydocs` activates once the repository
-# has a DOCUMENTER_KEY secret (see docs/package-status.md, next steps).
 using Documenter
 using SDPX
 
@@ -16,14 +14,29 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Getting started" => [
+            "Quick start" => "quickstart.md",
+            "Precision" => "precision.md",
+            "JuMP and MOI" => "jump.md",
+        ],
+        "Solver workflow" => [
+            "Automatic pipeline" => "pipeline.md",
+            "Parameters" => "parameters.md",
+            "Diagnostics and certificates" => "diagnostics.md",
+        ],
         "API reference" => "api.md",
+        "Experimental internals" => "internals.md",
+        "Development" => "development.md",
     ],
-    # The wider docstrings are written for the source; only exported names are
-    # required on pages.
     checkdocs=:exports,
-    warnonly=[:missing_docs, :cross_references],
+    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS],
 )
 
-if get(ENV, "CI", "false") == "true" && haskey(ENV, "DOCUMENTER_KEY")
-    deploydocs(; repo="github.com/yongjunx23-del/SDPX.jl", devbranch="main")
+if get(ENV, "CI", "false") == "true"
+    deploydocs(
+        ;
+        repo="github.com/yongjunx23-del/SDPX.jl.git",
+        devbranch="main",
+        push_preview=true,
+    )
 end

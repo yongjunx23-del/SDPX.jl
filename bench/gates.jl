@@ -7,12 +7,15 @@ outcome against recorded baselines in `bench/baselines/gates.json`.
 
 The split that makes this useful rather than noisy:
 
-* **Deterministic metrics** -- status, iteration count, objective, residuals --
-  are reproducible exactly given the same code, so they can be gated tightly
-  and run in CI on every change. These catch algorithmic and accuracy
-  regressions. Reproducibility here is a property that had to be built: see
-  `GateStream` for why the problems cannot be generated from Julia's own random
-  stream, which is not stable across versions.
+* **Numerical metrics** -- status, iteration count, objective, residuals --
+  are reproducible to tight tolerances given the same code, so they can run in
+  CI on every change. A one-iteration terminal difference and residual changes
+  below the requested accuracy are allowed because libm, BLAS, and Julia
+  versions can perturb the final accepted step. These checks still catch
+  algorithmic and accuracy regressions. Reproducible problem data is a property
+  that had to be built: see `GateStream` for why the problems cannot be
+  generated from Julia's own random stream, which is not stable across
+  versions.
 
 * **Runtime** varies by two to three times across shared CI runners, so gating
   it there would only teach people to ignore the gate. It is recorded on every
@@ -54,16 +57,24 @@ is not.
 """
 const RUNTIME_TOLERANCE = 1.40
 
-"""Iteration counts must match the baseline exactly.
+"""Maximum terminal iteration drift allowed across supported platforms.
 
-They are deterministic given the same code, so any change at all is a real
-change in the algorithm's behaviour and worth a human looking at it -- even an
-improvement, which should be recorded rather than silently absorbed.
+One iteration is enough to absorb a final-step difference caused by Julia,
+libm, or BLAS versions. Larger changes still flag algorithmic drift.
 """
-const ITERATION_TOLERANCE = 0
+const ITERATION_TOLERANCE = 1
 
 """Objectives must agree with the baseline to this relative tolerance."""
 const OBJECTIVE_TOLERANCE = 1e-9
+
+"""Absolute floor for residual and gap comparisons.
+
+The gate problems request accuracies no tighter than `1e-10`. Residuals below
+that level are successful terminal noise, not a meaningful regression, even
+when they differ by more than a fixed ratio from a near-machine-epsilon
+baseline.
+"""
+const ACCURACY_ABSOLUTE_FLOOR = 1e-10
 
 """Deterministic pseudo-random stream, reproducible across Julia versions.
 
@@ -298,7 +309,7 @@ function compare(name, measured, baseline; check_runtime::Bool=false)
 
     # Residuals and gap may improve freely; only a material worsening fails.
     for key in ("relative_gap", "primal_residual", "dual_residual")
-        limit = max(10 * baseline[key], 1e-14)
+        limit = max(10 * baseline[key], ACCURACY_ABSOLUTE_FLOOR)
         measured[key] <= limit || push!(
             failures,
             @sprintf("%s: %s worsened %.3e -> %.3e", name, key, baseline[key], measured[key]),

@@ -160,7 +160,8 @@ This is deliberately narrow:
 
 - only the `:auto` policy may skip work;
 - fixed-width arithmetic requires direct reduced-arrow assembly;
-- native BigFloat is limited to singleton-local arrow systems;
+- native BigFloat is limited to exact singleton-local arrows or the
+  all-local block-diagonal equality specialization;
 - an unregularized factorization is required; and
 - the requested outer tolerance must be no tighter than `sqrt(eps(T))`.
 
@@ -176,6 +177,17 @@ function _has_singleton_arrow_blocks(arrow::ArrowWorkspace)
     return !isempty(arrow.local_ids)
 end
 
+function _has_owned_bigfloat_equality_arrow(
+    ws::Workspace{BigFloat},
+    arrow::ArrowWorkspace{BigFloat},
+)
+    arrow.mixed_reduced_ready && return false
+    isempty(arrow.global_ids) || return false
+    size(ws.Btil, 2) > 0 || return false
+    isempty(arrow.local_ids) && return false
+    return sum(length, arrow.local_ids) == length(ws.rtil)
+end
+
 function _skip_automatic_refinement(
     ws::Workspace{T},
     opts::SolverOptions{T},
@@ -188,10 +200,17 @@ function _skip_automatic_refinement(
     typed_arrow = arrow::ArrowWorkspace{T}
     arithmetic_is_safe = if T === BigFloat
         # The native MPFR factorization has far more precision than a typical
-        # outer solve requests. Mixed Float64x4 factors still need the exact
-        # BigFloat residual to decide whether to fall back.
-        !typed_arrow.mixed_reduced_ready &&
-            _has_singleton_arrow_blocks(typed_arrow)
+        # outer solve requests. The all-local equality specialization is also
+        # exact: every local block and equality factor is native BigFloat.
+        # Mixed Float64x4 factors still need the exact BigFloat residual to
+        # decide whether to fall back.
+        !typed_arrow.mixed_reduced_ready && (
+            _has_singleton_arrow_blocks(typed_arrow) ||
+            _has_owned_bigfloat_equality_arrow(
+                ws,
+                typed_arrow,
+            )
+        )
     else
         ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended &&
             typed_arrow.reduced_panel_ready
@@ -326,6 +345,95 @@ end
     return value
 end
 
+function _predictor_complementarity_diagnostics!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    X,
+    Y,
+    primal_step::T,
+    dual_step::T,
+) where {T}
+    complementarity = zero(T)
+    affine_complementarity = zero(T)
+    if use_owned_bigfloat_block_loops(ws, prob)
+        # Two waves reuse the one scalar slot per block. Each MPFR accumulator
+        # and multiplication scratch belongs to its complete block, and the
+        # final sums retain the historical block order exactly.
+        task_count = _owned_bigfloat_block_task_count(ws)
+        @sync for task_index in 1:task_count
+            Threads.@spawn begin
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    @inbounds for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        kdot!(
+                            ws.block_norms[block],
+                            workspace.trialX[1, 1],
+                            X[block],
+                            Y[block],
+                        )
+                    end
+                end
+            end
+        end
+        @inbounds for block in 1:prob.dims.L
+            complementarity += ws.block_norms[block]
+        end
+        @sync for task_index in 1:task_count
+            Threads.@spawn begin
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    @inbounds for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        trial_combine_owned!(
+                            workspace.W1,
+                            X[block],
+                            primal_step,
+                            workspace.dX,
+                            workspace.trialX[1, 1],
+                        )
+                        trial_combine_owned!(
+                            workspace.W2,
+                            Y[block],
+                            dual_step,
+                            workspace.dY,
+                            workspace.trialX[1, 1],
+                        )
+                        kdot!(
+                            ws.block_norms[block],
+                            workspace.trialX[1, 1],
+                            workspace.W1,
+                            workspace.W2,
+                        )
+                    end
+                end
+            end
+        end
+        @inbounds for block in 1:prob.dims.L
+            affine_complementarity += ws.block_norms[block]
+        end
+    else
+        @inbounds for block in 1:prob.dims.L
+            workspace = ws.blk[block]
+            complementarity += kdot(X[block], Y[block])
+            trial_combine_owned!(
+                workspace.W1,
+                X[block],
+                primal_step,
+                workspace.dX,
+                workspace.trialX[1, 1],
+            )
+            trial_combine_owned!(
+                workspace.W2,
+                Y[block],
+                dual_step,
+                workspace.dY,
+                workspace.trialX[1, 1],
+            )
+            affine_complementarity += kdot(workspace.W1, workspace.W2)
+        end
+    end
+    return complementarity, affine_complementarity
+end
+
 function _affine_predictor_diagnostics!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -340,27 +448,15 @@ function _affine_predictor_diagnostics!(
         zero(T),
         :fraction_to_boundary,
     )
-    complementarity = zero(T)
-    affine_complementarity = zero(T)
-    @inbounds for block in 1:prob.dims.L
-        workspace = ws.blk[block]
-        complementarity += kdot(X[block], Y[block])
-        trial_combine_owned!(
-            workspace.W1,
-            X[block],
+    complementarity, affine_complementarity =
+        _predictor_complementarity_diagnostics!(
+            ws,
+            prob,
+            X,
+            Y,
             primal_step,
-            workspace.dX,
-            workspace.trialX[1, 1],
-        )
-        trial_combine_owned!(
-            workspace.W2,
-            Y[block],
             dual_step,
-            workspace.dY,
-            workspace.trialX[1, 1],
         )
-        affine_complementarity += kdot(workspace.W1, workspace.W2)
-    end
     cone_dimension = sum(prob.dims.k; init=0)
     denominator = T(max(cone_dimension, 1))
     mu = complementarity / denominator
@@ -385,27 +481,16 @@ function _legacy_predictor_diagnostics!(
     X,
     Y,
 ) where {T}
-    current_complementarity = zero(T)
-    affine_complementarity = zero(T)
-    @inbounds for block in 1:prob.dims.L
-        workspace = ws.blk[block]
-        current_complementarity += kdot(X[block], Y[block])
-        trial_combine_owned!(
-            workspace.W1,
-            X[block],
-            one(T),
-            workspace.dX,
-            workspace.trialX[1, 1],
+    unit_step = one(T)
+    current_complementarity, affine_complementarity =
+        _predictor_complementarity_diagnostics!(
+            ws,
+            prob,
+            X,
+            Y,
+            unit_step,
+            unit_step,
         )
-        trial_combine_owned!(
-            workspace.W2,
-            Y[block],
-            one(T),
-            workspace.dY,
-            workspace.trialX[1, 1],
-        )
-        affine_complementarity += kdot(workspace.W1, workspace.W2)
-    end
     cone_dimension = sum(prob.dims.k; init=0)
     denominator = T(max(cone_dimension, 1))
     mu = current_complementarity / denominator
@@ -676,6 +761,13 @@ function newton_step!(
         q_pivoted=false,
     )
 
+    # Test the public policy before the adaptive controller injects its
+    # iteration-local tolerance. That injected value is automatic state, not
+    # a user override, and must not disable the conservative exact-factor
+    # fast path. Explicit `opts.refine_tol` and non-`:auto` policies still
+    # retain residual-driven refinement.
+    skip_automatic_refinement =
+        _skip_automatic_refinement(ws, opts, kkt)
     corrector_options = adaptive && !iteration_parameters.fallback ?
                         _replace_solver_options(
                             opts;
@@ -686,7 +778,7 @@ function newton_step!(
                         ) :
                         opts
     refine_steps, refine_residual =
-        _skip_automatic_refinement(ws, corrector_options, kkt) ?
+        skip_automatic_refinement ?
         (0, zero(T)) :
         refine_direction!(ws, prob, corrector_options, r)
     refinement_finished = time_ns()

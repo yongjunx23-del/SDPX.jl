@@ -325,6 +325,7 @@ function unbalanced_arrow_problem(;
     shared::Int=2,
     constant_scale::Float64=2.0,
     sparse_mode=:auto,
+    fix_shared::Bool=false,
 )
     m = shared + blocks                      # shared variables plus one local each
     coefficients = [Vector{SparseMatrixCSC{Float64,Int}}(undef, m) for _ in 1:blocks]
@@ -344,7 +345,11 @@ function unbalanced_arrow_problem(;
         )
         for l in 1:blocks
     ]
-    prob = SDPX.ingest(ones(m), coefficients, C, zeros(m, 0), Float64[];
+    B = fix_shared ?
+        [Matrix{Float64}(I, shared, shared); zeros(blocks, shared)] :
+        zeros(m, 0)
+    b = fix_shared ? zeros(shared) : Float64[]
+    prob = SDPX.ingest(ones(m), coefficients, C, B, b;
         sparse=sparse_mode, verbosity=0)
     @assert prob.cons isa SDPX.SparseCons{Float64}
     return prob
@@ -583,7 +588,15 @@ end
     # say so, rather than returning a bare `Stalled` that gives the user nothing
     # to act on. This is the distinction the stagnation detector's
     # `:precision_floor` verdict exists to make.
-    prob = unbalanced_arrow_problem(blocks=6, shared=3)
+    # Without these equalities the fixture has the recession direction
+    # d_shared=(1,0,0), d_local=(-1,...,-1), whose objective is negative.
+    # Pinning the shared variables makes this a bounded precision-floor test
+    # rather than an accidental dual-infeasibility test.
+    prob = unbalanced_arrow_problem(
+        blocks=6,
+        shared=3,
+        fix_shared=true,
+    )
     impossible = 1e-25          # far below eps(Float64)
     r = SDPX.solve!(prob, SDPX.SolverOptions{Float64}(
         ϵ_gap=impossible, ϵ_primal=impossible, ϵ_dual=impossible,
@@ -1025,8 +1038,24 @@ end
             M = randn(rng, side, side)
             A[l][i, :, :] = M + M'
         end
-        C = [Matrix{Float64}(1.0I, side, side) for _ in 1:blocks]
-        return SDPX.ingest(ones(m), A, C, zeros(m, 0), Float64[]; verbosity=0)
+        # Make the allocation fixture strictly feasible on both sides. The old
+        # `c=1, C=I` random model was generally unbounded, entered restart
+        # rescue at iteration eight, and charged cold restart workspace to the
+        # "per-iteration" allocation gate.
+        dual = Matrix{Float64}(1.0I, side, side)
+        C = [-copy(dual) for _ in 1:blocks]
+        objective = zeros(m)
+        for l in 1:blocks, i in 1:m
+            objective[i] += dot(A[l][i, :, :], dual)
+        end
+        return SDPX.ingest(
+            objective,
+            A,
+            C,
+            zeros(m, 0),
+            Float64[];
+            verbosity=0,
+        )
     end
 
     @testset "Schur assembly is allocation-free once warmed" begin
@@ -1056,8 +1085,22 @@ end
             o = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=12)
             SDPX.solve!(prob, o)                                  # warm up
             GC.gc()
-            total = @allocated SDPX.solve!(prob, o)
-            result = SDPX.solve!(prob, o)
+            # Thread pools and task-local scheduler state may initialize on
+            # the first measured call even after method compilation is warm.
+            # Use the same steady-state minimum-of-three protocol as the Schur
+            # gate above so the ceiling measures solver allocation rather than
+            # one-time runtime setup.
+            totals = Int[]
+            results = SDPX.SDPResult{Float64}[]
+            for _ in 1:3
+                result = Ref{SDPX.SDPResult{Float64}}()
+                total = @allocated result[] = SDPX.solve!(prob, o)
+                push!(totals, total)
+                push!(results, result[])
+            end
+            best = argmin(totals)
+            total = totals[best]
+            result = results[best]
             @test result.iterations > 0
             @test total / result.iterations <= ceiling
         end
@@ -1205,7 +1248,8 @@ end
                   :psd_shift_lower_bound, :minimum_psd_eigenvalue,
                   :iterations, :solve_time,
                   :peak_memory_bytes, :selected_algorithms, :parameter_history,
-                  :timings, :warnings, :certificate)
+                  :timings, :warnings, :certificate,
+                  :infeasibility_diagnosis)
         @test hasproperty(summary, field)
     end
 
@@ -1356,11 +1400,11 @@ end
 @testset "Schur accumulator capping is visible (§18.4, §19.3)" begin
     # Per-worker Schur accumulators are full m x m matrices, so their total
     # scales as threads * m^2 and a memory cap silently reduces the bin count.
-    # On Task_Low08 (m = 6119) eight replicas would cost 2.4 GB, so the cap
-    # collapses assembly to a SINGLE bin at every thread count — which is why
-    # that problem showed no Schur speedup from 1 to 8 threads on a 10-core
-    # machine. §18.4 requires such a selection change be reported, not inferred
-    # from a disappointing measurement.
+    # On Task_Low08 (m = 6119), each replica costs about 286 MiB. The generic
+    # 15% cap therefore limits parallelism on memory-constrained hosts. A
+    # narrowly calibrated large-Float64 rule may use 25% when at least 16 GiB
+    # is explicitly available; extended precision retains 15%. Section 18.4
+    # requires such a selection change be reported, not inferred from timing.
     # A stated budget, not the host's free memory. One 6119-bin costs 285.7 MB
     # and one 200-bin costs 0.3 MB, and the cap allows 15% of the budget, so
     # 4 GiB affords eight of the small ones and only two of the large ones on
@@ -1369,6 +1413,56 @@ end
     # where the cap correctly does not bind and all three "large" assertions
     # failed.
     budget = 4 * 1024^3
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64,
+        6119,
+        32,
+        32,
+        28 * 1024^3,
+    ) == 0.25
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64,
+        6119,
+        32,
+        32,
+        15 * 1024^3,
+    ) == 0.15
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64x4,
+        6119,
+        32,
+        32,
+        28 * 1024^3,
+    ) == 0.15
+    @test SDPX._schur_accumulator_memory_fraction(
+        Float64,
+        4095,
+        32,
+        32,
+        28 * 1024^3,
+    ) == 0.15
+    task_large_budget = SDPX.schur_bin_report(
+        Float64,
+        6119,
+        32,
+        32;
+        free_memory_bytes=28 * 1024^3,
+    )
+    @test task_large_budget.selected_bins == 25
+    @test task_large_budget.capped
+    @test task_large_budget.memory_fraction == 0.25
+    @test task_large_budget.memory_budget_bytes == 7 * 1024^3
+    task_small_budget = SDPX.schur_bin_report(
+        Float64,
+        6119,
+        32,
+        32;
+        free_memory_bytes=15 * 1024^3,
+    )
+    @test task_small_budget.selected_bins == 8
+    @test task_small_budget.capped
+    @test task_small_budget.memory_fraction == 0.15
+    @test task_small_budget.memory_budget_bytes == floor(Int, 0.15 * 15 * 1024^3)
     small = SDPX.schur_bin_report(Float64, 200, 32, 8; free_memory_bytes=budget)
     @test small.requested_bins == 8
     @test small.selected_bins == 8

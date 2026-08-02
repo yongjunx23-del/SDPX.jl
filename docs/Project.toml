@@ -4,3 +4,5 @@ SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 
 [compat]
 Documenter = "1"
+SDPX = "0.2, 0.3"
+julia = "1.10"

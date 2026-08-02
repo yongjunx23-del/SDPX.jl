@@ -16,6 +16,7 @@ These defaults come from `SolverOptions{T}`. Differences in the legacy
 | `step_rule` | `:auto` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto` (fraction-to-boundary for blocks up to `2x2`, backtracking otherwise). |
 | `parameter_policy` | `:auto` | Cold-start structural policy. `:auto` may select calibrated initial `β`, `γ`, `Ωp`, and `Ωd`; `:fixed` preserves the supplied values. |
 | `parameter_strategy` | `:adaptive` | Guarded per-iteration Mehrotra policy: bounded `sigma`, independent primal/dual fractions, adaptive backtracking, refinement, minimum-step and restart scales. It automatically uses the fixed fallback when cold-start or stability diagnostics are unreliable. |
+| `adaptive_sigma_max` | `0` | Expert adaptive-centering cap. Zero selects by structure: 0.20 for the calibrated `large_lattice_dense_schur` profile and the generic 0.50 bound otherwise. A positive override is never allowed below the fixed fallback `β`. |
 | `refine_policy` | `:auto` | `:auto`/`:adaptive` stop KKT refinement from its residual; `:fixed` always runs exactly `refine_steps` passes. |
 
 ## Convergence and stopping
@@ -57,7 +58,7 @@ non-finite.
 | `minimum_working_precision_bits` | `192` | Lower bound for the staged BigFloat selector. The requested `precision_bits` remains the upper bound and fallback. |
 | `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`. This cannot recover digits already lost when the source was created. |
 | `equilibrate` | `false` | Expert compatibility flag for the core. Public `scaling=:auto` takes precedence and applies the selected pipeline scaling. |
-| `scaling` | `:auto` | LP geometric scaling for the dedicated LP path and adaptive-pass Ruiz congruence/variable scaling for SDP. Use `:none` only as an expert override. |
+| `scaling` | `:auto` | LP geometric scaling for the dedicated LP path and adaptive-pass Ruiz congruence/variable scaling for SDP. The calibrated `large_lattice_dense_schur` profile keeps original coordinates when paired with `parameter_strategy=:fixed`; its historical fixed parameters stall under Ruiz. Explicit `:none` and `:equilibrate` remain expert overrides. |
 | `sparse` | `:auto` | Storage selection used during ingestion. `:auto` distinguishes sparse coefficient storage from aggregate PSD and Schur density; `true`/`:sparse` and `false`/`:dense` force a path. |
 | `extended_precision_blas` | type-dependent | Extended-precision Schur backend: conservative `:auto` for `Float64x4` and `BigFloat`, `:off` for other arithmetic types, or diagnostic `:on`. Float32/Float64 always retain their existing BLAS route. Native BigFloat parallelism is limited to ownership-safe exact reduced-arrow panels and Schur tiles. |
 | `extended_precision_memory_fraction` | `0.10` | Maximum fraction of currently available memory that the crossover may reserve for packed extended-precision panels. The cap respects host free memory, cgroups, and `SDPX_MEMORY_LIMIT_BYTES`, and conservatively keeps half of reported free memory outside the packing budget. |

@@ -6,8 +6,184 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- The Float64x4 reduced-arrow backend now uses phase-specific worker counts,
+  an eight-output-row SIMD Schur microkernel, a measured narrow-triangle tile
+  crossover, and a sixteen-column blocked factor with cached pivot
+  reciprocals, SIMD panel rows, and at most eight trailing-update workers for
+  128--256 order shared systems. Uniform `2x2` systems use contiguous block
+  ownership only through 32 fine-grained tasks; wider and heterogeneous
+  systems retain LPT.
+  On the 1,700-block / 144-shared-variable medium CSDR model, contiguous
+  ownership reduced the same-node 32-worker median from 5.010 to 4.555
+  seconds, while the rejected 64-worker contiguous schedule was 1.6% slower
+  than LPT. A later alternating 32-worker factor A/B reduced factor time from
+  0.671 to 0.140 seconds and solve time from 4.768 to 3.420 seconds, with the
+  same 41 iterations and valid certificate. Executed diagnostics expose
+  effective, block-task, Schur, and factor worker counts. The Float64 path is
+  unchanged.
+- Narrow Float64x4 reduced-arrow models now cap a 96+ requested solver width
+  at 64 workers while retaining the 32-bin contiguous schedule selected from
+  the original request. On the 1,700-block / 144-shared-variable model, an
+  alternating 128-thread A/B reduced solve time by 3.1% and per-solve
+  allocation by 23.0%, with a neutral genuine 64-thread control. A first cap
+  that accidentally expanded short phases to 64 bins was rejected and is not
+  present.
+- Cluster guidance now records Julia worker-sleep behavior as a major
+  Float64x4 wide-pool crossover. On the same 128-core EPYC node,
+  `JULIA_THREAD_SLEEP_THRESHOLD=10000000` reduced the combined full-solver
+  median from 11.635 to 3.409 seconds, matched the never-sleep speed ceiling
+  within 1.0%, reduced allocation by 8.2%, and preserved bit-for-bit printed
+  objectives and certificates. Unlike permanent spinning, the 10 ms policy
+  averaged about 12.5 CPU cores over the complete process while still
+  reaching 124--126 cores during parallel bursts. This is a documented,
+  hardware-specific process-start recommendation, not package-global state.
+- Direct reduced-arrow workspaces now allocate full task-local Schur partial
+  matrices only if the structure-specific panel build falls back. The normal
+  direct Float64x4 path retains only small right-hand-side partials. A
+  forward/reverse, same-node medium CSDR A/B reduced the 48-worker solve from
+  2.982 to 2.940 seconds, per-solve allocation from 148.46 to 118.08 MiB, and
+  process peak RSS from 3.166 to 3.028 GiB. In a 128-thread capped-pool
+  control it reduced solve time from 3.480 to 3.351 seconds and allocation
+  from 152.07 to 111.42 MiB. Lazy fallback matrices remain independent, and
+  every baseline/candidate objective and certificate was identical at a fixed
+  pool width.
+- The Float64x4 direct 2x2 reduced-panel pack now caches each positive
+  singleton-local factor, inverse, and solved coupling while the block data is
+  hot, eliminating a later local-factor pass. A 14-solve reverse-bracketed
+  medium CSDR comparison reduced KKT time by 23.6% and total solve time by
+  0.77%, while also lowering allocation and peak RSS. Regularized, partial,
+  Float64, BigFloat, mixed-precision, and fallback routes keep the established
+  factorization.
+- Float64x4 singleton-arrow linear solves now use allocation-free
+  `MultiFloatVec` kernels for disjoint RHS entries and local-variable
+  recovery. Every lane retains the threaded baseline's reduction order and
+  every output remains task-exclusive. On the medium CSDR case, predictor and
+  corrector linear-solve medians improved by 6.76% and 8.88%, producing a
+  further reproducible 0.63% full-solver gain. All 28 baseline/candidate runs
+  shared one exact 41-iteration certificate and one serialized solution hash.
+  Executed diagnostics report the selected arrow linear-solve kernel.
+- A complete 1/2/4/8/16/32/48/64/96/128-worker Float64x4 audit found the
+  48-worker point fastest on the dual-EPYC 1,700-block / 144-shared-variable
+  profile: 2.967 seconds versus 44.112 seconds at one worker (14.87x). Every
+  requested pool became active and BLAS stayed at one thread. Wider pools
+  lose to synchronization and NUMA traffic even after the 10-millisecond
+  Julia wake policy removes tens of millions of context switches. Cluster
+  guidance now distinguishes the 128-core scheduler reservation from the
+  exact 48-worker runtime pool.
+- Reduced-arrow blocks that contain every shared variable now skip redundant
+  panel and coupling clears because every destination is overwritten. Partial
+  coverage retains the clear path and has a sentinel regression. In an
+  alternating, three-warm-up 32-worker A/B on the medium CSDR model, ten
+  samples per variant reduced median Schur time from 1.542 to 1.411 seconds
+  and solve time from 4.629 to 4.442 seconds, with identical 41-iteration
+  objectives and certificates.
+- BigFloat sparse SDPs with explicit equalities now use an ownership-safe
+  block-diagonal arrow KKT path when every Schur variable belongs to exactly
+  one 2x2 PSD block. Local factors and equality triangular solves own disjoint
+  row blocks, while the equality Gram uses disjoint lower-triangular MPFR
+  tiles. Larger or shared-variable BigFloat models retain the established
+  serial general KKT route. New full-rank and duplicated-column regressions
+  validate KKT residuals, object ownership, rank detection, and QR fallback.
+- BigFloat block-diagonal equality solves now parallelize the two dense GEMV
+  operations by assigning complete, disjoint output ranges to workers. Each
+  worker owns its MPFR destinations and reduction buffers, while an
+  arithmetic-work crossover keeps small panels serial. The reduction order
+  within every output is unchanged and regression tests require bit-for-bit
+  agreement with the serial kernel.
+- All-local BigFloat equality solves now use phase-aware scheduling above 64
+  requested workers. Fine-grained block, local triangular, equality GEMV,
+  predictor/corrector, line-search, and update work is merged into at most 64
+  ownership-safe task streams, while the tiled lower equality Gram retains the
+  full requested width. On the certified J40 BigFloat512 case this reduced the
+  128-worker solver from 495.811 to 425.880 seconds and peak RSS by 6.6%, with
+  a bit-for-bit identical 158-iteration certificate. The measured 64-worker
+  configuration remains faster than both 96 and 128 workers and is the
+  recommended width for that model.
+- The final immutable-candidate Task_Low08 Float64 regression remained
+  `Optimal` with a valid original-coordinate certificate: 28 iterations,
+  33.846 seconds solver time, `2.176e-7` relative gap, `3.316e-10` primal
+  residual, and `9.534e-12` dual residual. The Float64 solve route is
+  unchanged by the BigFloat scheduling work.
+- A fixed BigFloat1024 J40 support gate passed its physical certificate in 157
+  iterations with no restart, regularization, refinement, or fallback. It took
+  553.959 seconds at 64 workers and did not improve the terminating gap over
+  BigFloat512 on the once-rounded Float64x4 input, so the documented
+  model-specific recommendation remains 512 bits.
+- Block-local residual, Cholesky, predictor, and corrector scheduling now uses
+  an arithmetic-aware cubic-work crossover in addition to the historical
+  256-block threshold. This activates safe disjoint-block parallelism for
+  Task_Low08's 32 medium-to-large PSD blocks; a same-node 32-Julia-thread /
+  16-BLAS-thread A/B reduced median solve time from 32.062 to 28.438 seconds
+  (11.3%) with unchanged iterations, backtracking trajectory, and certificate.
+- Large dense `Float64` Schur assembly can use up to 25% of an ample
+  scheduler-aware memory budget for task-local accumulators. The crossover is
+  restricted to systems with at least 4,096 variables, 16 blocks, 16 workers,
+  and 16 GiB available; extended precision and smaller systems retain the 15%
+  cap. On Task_Low08 this reduced median Schur time from 8.140 to 6.701 seconds
+  and the stable solve from 27.449 to 25.965 seconds. A 35% policy was rejected
+  because its small median gain was not stable and used more peak memory.
+  `schur_bin_report` exposes the selected fraction and effective byte budget.
+- The adaptive controller now has an inspectable expert
+  `adaptive_sigma_max` guard. Zero delegates to structural selection. The
+  `large_lattice_dense_schur` profile selects 0.20 after a same-node
+  Task_Low08 sweep: 28 instead of 29 Newton iterations, 119 instead of 174
+  backtracking contractions, and a tighter valid original-coordinate
+  certificate. Other profiles retain the generic 0.50 bound.
+- Added a warmed, same-process Task_Low08 adaptive-cap benchmark so parameter
+  experiments share input, presolve, compilation, node, and validation
+  boundaries.
+- Automatic scaling now preserves original coordinates when the calibrated
+  `large_lattice_dense_schur` profile is paired with the expert fixed
+  parameter strategy. That combination restores its validated 24-iteration
+  trajectory; adaptive lattice solves continue to use Ruiz scaling.
+
+### Fixed
+
+- Automatic rank-deficient equality handling now switches directly from a
+  rejected normal-equation factor to the existing rank-revealing QR backend.
+  This avoids an unnecessary pivoted-Cholesky probe and restores BigFloat
+  compatibility with Julia 1.10, whose standard library does not implement
+  generic pivoted Cholesky. Forced normal-equation mode retains its explicit
+  pivoted-Cholesky behavior.
+
+## [0.3.0] — 2026-07-31
+
 ### Added
 
+- Optimize mode now has distinct `PrimalInfeasible` and `DualInfeasible`
+  statuses. SDPX promotes a failed iterate only after a normalized homogeneous
+  ray passes independent affine, PSD, objective-sign, and finite-value checks
+  in original coordinates. The result, certificate API, and MathOptInterface
+  statuses expose the validated ray. The certificate boundary is compatible
+  with a future homogeneous self-dual iteration but does not claim that the
+  current Newton system carries HSD `τ` and `κ` variables.
+- Equality-only LPs now return their analytic normalized null-space ray when
+  the objective is unbounded, replacing the previous numerical-error status
+  with a validated `DualInfeasible` certificate.
+- `SDPX.Experimental` provides namespaced access to advanced preprocessing,
+  parameter-policy, inspection, and backend controls. Their historical
+  top-level exports remain for the 0.3 deprecation cycle and are scheduled to
+  stop being exported in 0.4; legacy SDPJSolver-style exports retain their 1.0
+  compatibility window. `SDPX.api_surface()` publishes this policy for release
+  tooling and downstream audits.
+- The solver implementation now sits behind `src/solve.jl` as a small include
+  manifest, beginning the staged decomposition of the former monolithic file
+  without reordering numerical methods in the 0.3 release.
+- GitHub Actions coverage upload uses Codecov OIDC with a failing upload gate,
+  and pull requests from repository branches deploy Documenter previews. This
+  makes the first real coverage upload and documentation deployment
+  independently observable in CI.
+- Failed optimization runs can now perform conservative homogeneous-ray
+  diagnostics. A normalized dual ray can diagnose primal infeasibility; a
+  normalized primal ray can diagnose dual infeasibility or primal
+  unboundedness. In 0.3 these checks also back formal statuses when independent
+  validation succeeds.
+- `SolverOptions(T; ...)` accepts ASCII aliases such as `tolerance`,
+  `maximum_iterations`, `time_limit`, `beta`, `gamma`,
+  `primal_initial_scale`, and `dual_initial_scale`, while preserving the
+  existing typed Unicode constructor.
 - Exactly block-diagonal sparse SDP systems with equality constraints now use
   the local block-arrow factors directly instead of materializing the full
   Schur matrix. The transformed equality system retains fast Gram-Cholesky
@@ -73,6 +249,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Structural presolve contradictions now carry an explicit proof reason and a
+  valid independent diagnostics certificate instead of an unqualified
+  `InfeasibleCert` with `reason=:none`.
+- The precision-floor regression fixture now pins its shared variables. Its
+  former version had a genuine negative-objective recession direction and was
+  therefore a dual-infeasible model, which the new ray detector correctly
+  exposed.
+- Allocation regression gates now compare three warmed steady-state solves and
+  retain the minimum, matching the Schur-kernel gate. This excludes one-time
+  thread-pool/task-local initialization without loosening the byte ceilings.
 - Objective equilibration now applies its scale correction only to the
   internal gap acceptance threshold. This prevents an internally accepted
   scaled gap from failing the requested tolerance after reconstruction in
@@ -99,6 +285,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The Documenter site now includes quick-start, precision, automatic-pipeline,
+  parameter, diagnostics, JuMP, and development guides. Auxiliary Julia
+  environments carry explicit compatibility bounds, and CI checks release
+  metadata consistency, uploads coverage, and can deploy documentation with
+  the repository `GITHUB_TOKEN`.
+- Acceptance baselines now reflect the guarded adaptive default: the
+  closed-form SDP drops from 19 to 9 iterations and the dense gate from 10 to
+  9, while both retain `Optimal` status and tighter relative gaps.
 - On the 61,603-variable B3 no-box smoke case, the new sparse Schur route
   removed 328 dependent equalities, reduced first-iteration peak RSS from
   about 89.5 GB to 41.1 GB, and completed the first Newton iteration in

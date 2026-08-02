@@ -74,6 +74,13 @@ statuses, not exceptions.
     # original coordinates, or the linear algebra failed in a way that is not a
     # plain breakdown. Never presented as a success.
     NumericalFailure
+    # Optimize-mode certificates. These are deliberately distinct from the
+    # historical `InfeasibleCert`, which belongs to the auxiliary
+    # `findFeasible` formulation. A status is promoted to either value only
+    # after an independently normalized homogeneous ray passes the original-
+    # coordinate affine, cone, sign, and finite-value checks.
+    PrimalInfeasible
+    DualInfeasible
 end
 
 default_extended_precision_blas(::Type{T}) where {T} =
@@ -85,6 +92,85 @@ default_mixed_precision_kkt(::Type{T}) where {T} =
         T === BigFloat ||
         (isbitstype(T) && sizeof(T) > sizeof(Float64))
     ) ? :auto : :off
+
+"""
+    fine_grained_block_bins(T, requested, reduced_arrow_panel, block_count)
+
+Return the number of LPT bins used by short per-block solver phases. The
+default preserves the requested width. Arithmetic extensions may apply a
+measured, structure-aware cap without limiting the coarser Schur/SYRK kernels,
+which have a different parallel crossover.
+"""
+fine_grained_block_bins(
+    ::Type,
+    requested::Int,
+    reduced_arrow_panel::Bool,
+    block_count::Int,
+) = max(requested, 1)
+
+"""
+    fine_grained_block_partition(
+        T, reduced_arrow_panel, block_dimensions, bin_count,
+    )
+
+Choose the static partition used by short block-local solver phases. The
+default LPT partition preserves load balance for heterogeneous PSD blocks.
+Arithmetic extensions may select contiguous ownership for measured uniform
+block-arrow geometries where cache and NUMA locality dominate imbalance.
+"""
+fine_grained_block_partition(
+    ::Type,
+    reduced_arrow_panel::Bool,
+    block_dimensions,
+    bin_count::Int,
+) = :lpt
+
+"""
+    reduced_arrow_worker_count(T, requested, block_count, columns)
+
+Return the effective worker width for reduced-arrow panel packing and SYRK.
+The default preserves the requested width; fixed-width arithmetic extensions
+may cap demonstrably oversubscribed geometries without changing the number of
+Julia threads available to other solver phases.
+"""
+reduced_arrow_worker_count(
+    ::Type,
+    requested::Int,
+    block_count::Int,
+    columns::Int,
+) = max(requested, 1)
+
+"""
+    reduced_arrow_factor_worker_count(T, requested, dimension)
+
+Return the effective worker width for a reduced-arrow Schur factorization.
+The generic factor is serial. Arithmetic extensions may opt into a measured,
+bounded panel-factor team for dimensions where coarse trailing updates exceed
+task-launch overhead.
+"""
+reduced_arrow_factor_worker_count(
+    ::Type,
+    requested::Int,
+    dimension::Int,
+) = 1
+
+"""
+    reduced_arrow_solver_worker_count(
+        T, requested, block_count, shared_columns,
+    )
+
+Return the effective whole-solver worker width for a reduced-arrow problem.
+The default respects the request. Arithmetic extensions may cap a measured
+oversubscribed geometry so every solver phase and workspace uses the same
+transparent limit rather than leaving synchronization-heavy regions wider
+than Schur assembly.
+"""
+reduced_arrow_solver_worker_count(
+    ::Type,
+    requested::Int,
+    block_count::Int,
+    shared_columns::Int,
+) = max(requested, 1)
 
 """
     EqualityQRFactor{T}
@@ -190,6 +276,10 @@ Base.@kwdef struct SolverOptions{T}
     sparse::Union{Bool,Symbol} = :auto                  # false/:dense | true/:sparse | :auto
     parameter_policy::Symbol  = :auto                   # :fixed | :auto
     parameter_strategy::Symbol = :adaptive              # :fixed | :adaptive
+    # Expert override for the adaptive Mehrotra centering cap. Zero delegates
+    # to the automatic structural policy. A positive value is still raised to
+    # at least the fixed fallback beta so recovery always remains representable.
+    adaptive_sigma_max::T      = zero(T)
     # Equality elimination starts with the fast normal-equation path and
     # switches to rank-revealing QR only when factor diagnostics justify its
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.
@@ -226,6 +316,93 @@ Base.@kwdef struct SolverOptions{T}
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
     expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
+end
+
+"""
+    SolverOptions(T; tolerance=nothing,
+                  gap_tolerance=nothing,
+                  primal_tolerance=nothing,
+                  dual_tolerance=nothing,
+                  maximum_iterations=nothing,
+                  time_limit=nothing,
+                  beta=nothing,
+                  gamma=nothing,
+                  primal_initial_scale=nothing,
+                  dual_initial_scale=nothing,
+                  kwargs...)
+
+Construct [`SolverOptions{T}`](@ref) using ASCII keyword aliases for the
+Unicode fields. Omitting an alias preserves the ordinary `SolverOptions{T}`
+default. A common `tolerance` sets all three stopping tolerances; a
+problem-specific tolerance overrides that common value.
+
+The parameterized constructor remains available for expert code:
+`SolverOptions{BigFloat}(β=big"0.1", ϵ_gap=big"1e-30")`.
+"""
+function SolverOptions(
+    ::Type{T};
+    tolerance=nothing,
+    gap_tolerance=nothing,
+    primal_tolerance=nothing,
+    dual_tolerance=nothing,
+    maximum_iterations=nothing,
+    time_limit=nothing,
+    beta=nothing,
+    gamma=nothing,
+    primal_initial_scale=nothing,
+    dual_initial_scale=nothing,
+    kwargs...,
+) where {T}
+    values = (; kwargs...)
+
+    function add_alias(values, internal::Symbol, public::Symbol, value)
+        value === nothing && return values
+        haskey(values, internal) && throw(ArgumentError(
+            "specify either `$public` or `$internal`, not both",
+        ))
+        converted = if internal === :iter_max
+            Int(value)
+        elseif internal === :max_time
+            Float64(value)
+        else
+            T(value)
+        end
+        return merge(values, NamedTuple{(internal,)}((converted,)))
+    end
+
+    common_tolerance = tolerance
+    gap_value = gap_tolerance === nothing ?
+                common_tolerance : gap_tolerance
+    primal_value = primal_tolerance === nothing ?
+                   common_tolerance : primal_tolerance
+    dual_value = dual_tolerance === nothing ?
+                 common_tolerance : dual_tolerance
+
+    values = add_alias(values, :ϵ_gap, :gap_tolerance, gap_value)
+    values = add_alias(values, :ϵ_primal, :primal_tolerance, primal_value)
+    values = add_alias(values, :ϵ_dual, :dual_tolerance, dual_value)
+    values = add_alias(
+        values,
+        :iter_max,
+        :maximum_iterations,
+        maximum_iterations,
+    )
+    values = add_alias(values, :max_time, :time_limit, time_limit)
+    values = add_alias(values, :β, :beta, beta)
+    values = add_alias(values, :γ, :gamma, gamma)
+    values = add_alias(
+        values,
+        :Ωp,
+        :primal_initial_scale,
+        primal_initial_scale,
+    )
+    values = add_alias(
+        values,
+        :Ωd,
+        :dual_initial_scale,
+        dual_initial_scale,
+    )
+    return SolverOptions{T}(; values...)
 end
 
 # --- Constraint representation (Phase 1.6): one newton_step! kernel is
@@ -835,8 +1012,8 @@ SolveDiagnostics(classification, plan, presolve, timings, memory,
     SDPResult{T}
 
 Typed replacement for the old `Dict{String,Any}` return value (A1).
-`result["x"]`, `result["status"]`, etc. keep working via
-[`Base.getindex`](@ref) below, so existing callers are unaffected;
+`result["x"]`, `result["status"]`, etc. keep working through the compatibility
+`Base.getindex` methods below, so existing callers are unaffected;
 new code should prefer the typed fields.
 """
 struct SDPResult{T}

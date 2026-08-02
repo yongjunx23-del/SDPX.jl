@@ -23,7 +23,8 @@ more than `Float64`.
   `MultiFloats.Float64xN` use cost-aware block scheduling, triangular Schur
   reduction, and phase-aware BLAS thread control. General native `BigFloat`
   kernels deliberately use one solver thread; exact singleton-local `2x2`
-  arrows may use ownership-safe native block and Schur-tile workers.
+  arrows and all-local `2x2` equality cells may use ownership-safe native
+  block, triangular, GEMV, and Schur/Gram-tile workers.
 - **Structure-aware**: sparse constraint storage, a block-arrow KKT path for
   models with shared plus per-block local variables, a no-pair-buffer fused
   kernel for `2x2` blocks, and an optional combined reduced shared panel for
@@ -137,11 +138,17 @@ intended for users, and changes to them will be noted in
 
 | Experimental | Caveat |
 |---|---|
-| `analyze_structure`, `structure_summary`, `classify_problem`, `build_execution_plan` | introspection; shapes may change |
-| `recommended_parameters` | heuristic profiles, actively being recalibrated |
+| `SDPX.Experimental` | namespace for advanced preprocessing, parameter policies, introspection, and backend controls |
+| `SDPX.infeasibility_diagnosis` | normalized optimize-mode ray checks; schema may change |
+| `SDPX.Experimental.recommended_parameters` | heuristic profiles, actively being recalibrated |
 | `reconstruct_spectrum`, `export_spectrum` | bootstrap-specific helpers |
 | `sdp`, `findFeasible` | legacy interface inherited from SDPJSolver.jl |
 | `setArithmeticType`, `setSparseMode`, `setMode` | deprecated global setters; use `SolverOptions` |
+
+Version 0.3 retains the historical top-level experimental exports for one
+deprecation cycle. They are scheduled to stop being exported in 0.4; use
+`SDPX.Experimental.name` now. Legacy SDPJSolver-style exports retain their
+longer 1.0 compatibility window. `SDPX.api_surface()` returns the exact policy.
 
 Anything not listed, and anything prefixed with `_`, is internal and may change
 without notice.
@@ -355,6 +362,20 @@ opts = SolverOptions{Float64}(β=0.1, verbosity=1, equilibrate=true, refine_step
 result = solve!(prob, opts)                         # -> SDPResult{T}
 ```
 
+The same expert options can be constructed without Unicode input:
+
+```julia
+opts = SolverOptions(
+    Float64;
+    tolerance=1e-9,
+    maximum_iterations=300,
+    time_limit=120.0,
+    beta=0.1,
+    gamma=0.9,
+    verbosity=0,
+)
+```
+
 For very large block-arrow inputs where each PSD block touches only a small
 subset of the global variables, callers can avoid allocating an `L × m`
 mostly-empty reference grid:
@@ -380,7 +401,14 @@ enables a typed, bounded Mehrotra controller with independent primal/dual
 fractions, refinement selection, and complete fixed-path fallback. It records
 its diagnostics and selected values per iteration. The adaptive strategy is
 the public default; `:fixed` is retained for historical trajectory
-reproduction and controlled A/B benchmarks.
+reproduction and controlled A/B benchmarks. The expert
+`adaptive_sigma_max=0` default delegates the centering cap to the structural
+policy; Task_Low08-like dense-Schur lattice systems use the separately
+validated 0.20 cap while other profiles retain the generic 0.50 bound.
+For the large-lattice profile, `scaling=:auto` also preserves the original
+coordinates when `parameter_strategy=:fixed`, because the historical fixed
+0.075/0.8 trajectory was calibrated without Ruiz scaling. Adaptive mode keeps
+the default Ruiz pipeline.
 `SolverOptions` also exposes: `callback` (per-iteration `(state) -> Bool`,
 `true` stops the solve), `checkpoint_every`/`checkpoint_path` (crash-safe
 iterate-level warm restart via `resume=path` on the SDP `solve!` path),
@@ -394,6 +422,16 @@ iteration/restart counters. Adaptive-controller history, stagnation windows,
 phase-timing history, and best-iterate history restart empty, so a resumed run
 is not a bit-for-bit continuation of an uninterrupted solve. The dedicated LP
 path does not currently support checkpoint resume.
+
+Eligible failed optimize-mode runs check whether the returned iterate defines
+a normalized homogeneous ray, regardless of whether verbose diagnostics are
+enabled. The report is stored at
+`result.termination.infeasibility_diagnosis` and can be recomputed with
+`SDPX.infeasibility_diagnosis(prob, result, opts)`. A ray that passes the
+independent original-coordinate checks upgrades the result to
+`PrimalInfeasible` or `DualInfeasible`; an undetermined candidate leaves the
+original stopped status unchanged. The generator is currently direct
+primal-dual rather than a full HSD `tau`/`kappa` iteration.
 
 ## JuMP and MathOptInterface
 
@@ -434,9 +472,18 @@ These are fixed-width bitstypes with no MPFR allocation overhead.
 `precision_bits` for the complete solve, but it cannot recover digits that
 were already rounded away when the input data was created. General native
 `BigFloat` assembly and solves are serial and use ownership-aware,
-allocation-reusing scalar kernels. Exact singleton-local `2x2` arrows are the
-native exception: independent block preparation and complete lower-triangular
-Schur tiles may run concurrently without sharing writable MPFR objects.
+allocation-reusing scalar kernels. Exact singleton-local `2x2` arrows and
+block-diagonal `2x2` cell systems with all-local Schur variables plus explicit
+equalities are the native exceptions. Their independent block work and
+complete lower-triangular Schur or equality-Gram tiles may run concurrently
+without sharing writable MPFR objects.
+
+For all-local equality cells, fine-grained block, triangular, GEMV,
+predictor/corrector, line-search, and update phases use at most 64 ownership
+tasks. The equality Gram may still use a wider requested allocation because
+its lower-triangular tiles contain enough work to scale across a second
+socket. This phase-aware cap is numerical-order preserving: block results are
+exclusive and global reductions remain in block order.
 
 The packed triangular Schur/Gram backend for `Float64x4` and `BigFloat` is
 available through `extended_precision_blas=:auto` only when a workload clears
@@ -518,17 +565,54 @@ factorisation/solves, and line search.
 This applies generally to immutable fixed-width arithmetic. Most native
 `BigFloat` phases remain serial because mutable scalar ownership, allocator
 pressure, and per-worker high-precision workspace growth make unrestricted
-threading unsafe. Exact singleton-local `2x2` arrows are the validated
-exception: block preparation owns disjoint per-block storage and triangular
-SYRK tasks own disjoint Schur tiles, so those phases may use the requested
-workers without sharing a writable MPFR object.
+threading unsafe. Exact singleton-local `2x2` arrows and all-local 2x2 cell
+systems with explicit equalities are the validated exceptions: block work owns
+disjoint storage, and triangular SYRK tasks own disjoint Schur or equality-Gram
+tiles, so those phases may use the requested workers without sharing a
+writable MPFR object.
+
+On the certified J40 BigFloat512 CSDR model, a uniform 128-worker schedule was
+34.5% slower than 64 workers even though equality Gram time improved. Capping
+the fine-grained phases at 64 tasks reduced the 128-worker solver from 495.81
+to 425.88 seconds and peak RSS from 4,346,976 to 4,058,792 KiB, with a
+bit-for-bit identical certificate. The 64-worker solve remains faster at
+368.70 seconds; a 96-worker crossover took 398.30 seconds. Therefore 64 is the
+recommended width for this geometry, and wider runs should be reserved for
+larger equality panels after measurement.
+
+A fixed 1,024-bit run of the same J40 model also passed its complete physical
+certificate in 157 iterations. It took 553.96 seconds at 64 workers versus
+368.70 seconds for 512 bits, while its relative gap (`1.89e-13`) was not tighter
+than the 512-bit result (`3.45e-14`). Because the archived coefficients were
+rounded once to `Float64x4`, extra solver precision cannot recover input digits.
+Use 512 bits for this model unless a tighter, genuinely higher-precision input
+or certificate requirement justifies the additional cost.
 
 Scaling depends strongly on problem size — small models do not have enough work
 per block to amortise the synchronisation. Small Float64 Schur builds therefore
-stay serial automatically. On the cluster medium exact-arrow benchmark, the
-final Float64x4 solve took 51.48 / 31.34 / 19.35 / 11.73 seconds with
-1 / 2 / 4 / 8 Julia threads. See the
-[threading guide](docs/threading.md) and its linked raw protocol.
+stay serial automatically. Block-local residual, factorization, predictor, and
+corrector work uses both block count and estimated cubic work, so models such
+as Task_Low08 with only 32 but moderately large PSD blocks still use safe
+disjoint-block parallelism. A same-node 32-Julia-thread / 16-BLAS-thread A/B
+reduced its median adaptive solve from 32.062 to 28.438 seconds without
+changing the iteration trajectory or certificate. On the 1,700-block /
+144-shared-variable medium CSDR model, a resource-instrumented Float64x4 sweep
+measured 44.112 / 22.954 / 12.450 / 6.946 / 4.275 / 3.286 / 2.967 / 3.074 /
+3.540 / 3.403 seconds with 1 / 2 / 4 / 8 / 16 / 32 / 48 / 64 / 96 / 128
+Julia workers and one BLAS thread. All requested pools were observed active;
+48 workers were fastest (14.87x over one worker), while wider pools lost to
+synchronization and NUMA traffic. The retained cache-hot local factor and SIMD
+arrow-solve changes later reduced the controlled 48-worker median to 2.895
+seconds with the same 41-iteration certificate. See the
+[threading guide](docs/threading.md) for exact affinity, sleep-policy, memory,
+and validation details.
+
+Dense Schur accumulation is also memory-aware. The generic per-solve limit is
+15% of available memory. Large `Float64` systems may use 25% only when they
+have at least 4,096 variables, 16 PSD blocks, 16 requested workers, and an
+explicitly visible budget of at least 16 GiB. This narrow Task_Low08-calibrated
+rule reduced median Schur assembly from 8.140 to 6.701 seconds; MultiFloat,
+BigFloat, smaller problems, and memory-constrained jobs retain 15%.
 
 `Float64x4` and `BigFloat` use the conservative
 `extended_precision_blas=:auto` policy by default. The policy never redirects
@@ -562,6 +646,11 @@ memory gates, and full numerical certificates.
 ## Known limitations
 
 - The package is **experimental**; the API may change before 1.0.
+- Optimize mode reports formal `PrimalInfeasible` and `DualInfeasible`
+  statuses when an independently normalized homogeneous ray passes the
+  original-coordinate certificate. The current direct primal-dual iteration
+  does not yet carry HSD `τ` and `κ`, so it may fail to generate a ray for an
+  infeasible model and return an ordinary stopped status instead.
 - The sparse conformal-bootstrap benchmark in `bench/` does not yet converge to
   the tolerance a reference solver reaches on the same instance.
   `bench/csdr_psd_dual/RESULTS.md` records current evidence, while

@@ -550,6 +550,20 @@ function _factor_intermediate_panel!(
         end
         diagonal > zero(U) || return false
         pivot = sqrt(diagonal)
+        inverse_pivot = inv(pivot)
+        if last < size(matrix, 1)
+            # Only the lower triangle is defined by this factorization. Cache
+            # the panel reciprocals in disjoint upper-triangle scratch so the
+            # following triangular solve remains allocation-free. The first
+            # pivot uses the first cell immediately to the right of the panel;
+            # every later pivot uses its upper-triangle slot in the first
+            # panel row.
+            if column == first
+                matrix[first, last + 1] = inverse_pivot
+            else
+                matrix[first, column] = inverse_pivot
+            end
+        end
         matrix[column, column] = pivot
         for row in (column + 1):last
             value = matrix[row, column]
@@ -558,7 +572,7 @@ function _factor_intermediate_panel!(
                     matrix[row, index] *
                     matrix[column, index]
             end
-            matrix[row, column] = value / pivot
+            matrix[row, column] = value * inverse_pivot
         end
     end
     return true
@@ -579,8 +593,10 @@ function _solve_intermediate_panel_rows!(
                     matrix[row, index] *
                     matrix[column, index]
             end
-            matrix[row, column] =
-                value / matrix[column, column]
+            inverse_pivot = column == panel_first ?
+                matrix[panel_first, panel_last + 1] :
+                matrix[panel_first, column]
+            matrix[row, column] = value * inverse_pivot
         end
     end
     return nothing
@@ -627,12 +643,13 @@ function _solve_intermediate_panel!(
     return matrix
 end
 
-function _blocked_intermediate_cholesky!(
+function _blocked_cholesky_lower!(
     matrix::Matrix{U},
     thread_count::Int,
+    panel_size::Int,
 ) where {U}
     dimension = size(matrix, 1)
-    panel_size = 64
+    panel_size > 0 || throw(ArgumentError("panel size must be positive"))
     config = ExtendedPrecisionBLAS.KernelConfig(
         row_tile=64,
         column_tile=16,
@@ -645,7 +662,7 @@ function _blocked_intermediate_cholesky!(
             matrix,
             panel_first,
             panel_last,
-        ) || return nothing
+        ) || return false
         _solve_intermediate_panel!(
             matrix,
             panel_first,
@@ -674,8 +691,27 @@ function _blocked_intermediate_cholesky!(
             thread_count,
         )
     end
+    return true
+end
+
+function _blocked_intermediate_cholesky!(
+    matrix::Matrix{U},
+    thread_count::Int,
+    panel_size::Int,
+) where {U}
+    _blocked_cholesky_lower!(
+        matrix,
+        thread_count,
+        panel_size,
+    ) || return nothing
     return IntermediateCholeskyFactor(matrix)
 end
+
+_blocked_intermediate_cholesky!(
+    matrix::Matrix{U},
+    thread_count::Int,
+) where {U} =
+    _blocked_intermediate_cholesky!(matrix, thread_count, 64)
 
 function _intermediate_trsm!(
     lower_factor::AbstractMatrix{U},

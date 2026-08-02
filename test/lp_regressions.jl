@@ -196,9 +196,16 @@ end
             [-1.0],
         )
         unbounded_result = SDPX.solve(unbounded; verbosity=0)
-        @test unbounded_result.status == SDPX.NumericalBreakdown
+        @test unbounded_result.status == SDPX.DualInfeasible
         @test unbounded_result.status != SDPX.InfeasibleCert
         @test occursin("unbounded below", unbounded_result.message)
+        certificate = SDPX.result_certificate(
+            unbounded,
+            unbounded_result,
+            SDPX.SolverOptions{Float64}(verbosity=0),
+        )
+        @test certificate.valid
+        @test certificate.kind === :dual_infeasibility
     end
 
     @testset "reported primal residual checks the original cone" begin

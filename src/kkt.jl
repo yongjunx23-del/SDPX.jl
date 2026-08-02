@@ -240,6 +240,15 @@ function _build_equality_gram!(
         ws.thread_count,
     )
     if decision.enabled
+        selected_workers = if T === BigFloat
+            ExtendedPrecisionBLAS._syrk_bigfloat_selected_workers(
+                ws.Btil,
+                decision.config,
+                ws.thread_count,
+            )
+        else
+            ws.thread_count
+        end
         ExtendedPrecisionBLAS.syrk!(
             ws.Q,
             ws.Btil,
@@ -249,7 +258,7 @@ function _build_equality_gram!(
             ws.thread_count,
         )
         ws.equality_gram_kernel =
-            ws.thread_count > 1 ?
+            selected_workers > 1 ?
             :threaded_blocked_triangular_syrk :
             :blocked_triangular_syrk
     else
@@ -295,9 +304,9 @@ Factor the current Schur complement `ws.S` (accumulated by
   convergence), retries with escalating relative diagonal
   regularization `S + δ·diag(|S_ii|)` (§2.2) up to 6 attempts.
 - If `cholesky!` on `Q` fails (rank-deficient `B`, e.g. duplicated
-  equality rows — §T3), falls back to *pivoted* Cholesky
-  (`RowMaximum()`), which detects the rank and gives a consistent
-  least-norm solve for `dy` instead of crashing (verified against
+  equality rows — §T3), automatic mode uses rank-revealing QR. Forced
+  normal-equation mode retains pivoted Cholesky (`RowMaximum()`), which detects
+  the rank and gives a consistent least-norm solve for `dy` (verified against
   Julia's `CholeskyPivoted \\` behavior on a synthetic rank-deficient
   case during development — it drops the dependent direction cleanly
   rather than producing `NaN`/throwing).
@@ -354,6 +363,35 @@ function _arrow_lower_solve_rows!(
     return destination
 end
 
+# The equality-arrow workspace owns every MPFR object in `destination`, and
+# different blocks contain disjoint row ids.  Mutating those objects in place
+# both removes the scalar temporaries in the generic `/` loop and makes it safe
+# to assign whole blocks to different tasks.  `multiplication_buffer` is local
+# to one call/task and the Cholesky factor is read-only.
+function _arrow_lower_solve_rows!(
+    destination::AbstractMatrix{BigFloat},
+    factor::AbstractMatrix{BigFloat},
+    ids::AbstractVector{Int},
+)
+    multiplication_buffer = BigFloat()
+    @inbounds for column in axes(destination, 2)
+        for row in eachindex(ids)
+            value = destination[ids[row], column]
+            for inner in 1:(row - 1)
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.sub_mul,
+                    value,
+                    factor[row, inner],
+                    destination[ids[inner], column],
+                )
+            end
+            _mpfr_divide!(value, value, factor[row, row])
+        end
+    end
+    return destination
+end
+
 function _arrow_lower_solve_rows!(
     destination::AbstractVector{T},
     factor::AbstractMatrix{T},
@@ -371,6 +409,28 @@ function _arrow_lower_solve_rows!(
     return destination
 end
 
+function _arrow_lower_solve_rows!(
+    destination::AbstractVector{BigFloat},
+    factor::AbstractMatrix{BigFloat},
+    ids::AbstractVector{Int},
+)
+    multiplication_buffer = BigFloat()
+    @inbounds for row in eachindex(ids)
+        value = destination[ids[row]]
+        for inner in 1:(row - 1)
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.sub_mul,
+                value,
+                factor[row, inner],
+                destination[ids[inner]],
+            )
+        end
+        _mpfr_divide!(value, value, factor[row, row])
+    end
+    return destination
+end
+
 function _arrow_transpose_solve_rows!(
     destination::AbstractVector{T},
     factor::AbstractMatrix{T},
@@ -384,6 +444,118 @@ function _arrow_transpose_solve_rows!(
                 destination[ids[inner]]
         end
         destination[ids[row]] = value / factor[row, row]
+    end
+    return destination
+end
+
+function _arrow_transpose_solve_rows!(
+    destination::AbstractVector{BigFloat},
+    factor::AbstractMatrix{BigFloat},
+    ids::AbstractVector{Int},
+)
+    multiplication_buffer = BigFloat()
+    @inbounds for row in reverse(eachindex(ids))
+        value = destination[ids[row]]
+        for inner in (row + 1):length(ids)
+            MA.buffered_operate!(
+                multiplication_buffer,
+                MA.sub_mul,
+                value,
+                factor[inner, row],
+                destination[ids[inner]],
+            )
+        end
+        _mpfr_divide!(value, value, factor[row, row])
+    end
+    return destination
+end
+
+@inline _arrow_equality_row_thread_safe(::Type{T}) where {T} =
+    thread_safe_arithmetic(T)
+@inline _arrow_equality_row_thread_safe(::Type{BigFloat}) = true
+
+const _BIGFLOAT_GEMV_MINIMUM_WORK_PER_WORKER = 18_000
+
+function _bigfloat_gemv_worker_count(
+    output_length::Int,
+    reduction_length::Int,
+    requested_workers::Int,
+)
+    work = Int128(max(output_length, 0)) *
+           Int128(max(reduction_length, 0))
+    work_limited = Int(min(
+        work ÷ _BIGFLOAT_GEMV_MINIMUM_WORK_PER_WORKER,
+        typemax(Int),
+    ))
+    return max(
+        1,
+        min(
+            max(requested_workers, 1),
+            Threads.nthreads(),
+            max(output_length, 1),
+            max(work_limited, 1),
+        ),
+    )
+end
+
+"""
+Multiply a dense BigFloat matrix by a vector using disjoint output chunks.
+
+Every worker owns complete destination scalars and private MPFR reduction
+buffers.  The reduction order within each output is unchanged, so this path
+is bit-for-bit identical to `kmul_owned!`.  A work crossover prevents the
+predictor/corrector solves from spawning one task per requested core for a
+small equality panel.
+"""
+function _arrow_equality_gemv!(
+    destination::AbstractVector{T},
+    matrix::AbstractMatrix{T},
+    vector::AbstractVector{T},
+    ::Int,
+) where {T}
+    return kmul_owned!(destination, matrix, vector)
+end
+
+function _arrow_equality_gemv!(
+    destination::AbstractVector{BigFloat},
+    matrix::AbstractMatrix{BigFloat},
+    vector::AbstractVector{BigFloat},
+    requested_workers::Int,
+)
+    size(matrix, 1) == length(destination) ||
+        throw(DimensionMismatch("BigFloat equality GEMV output mismatch"))
+    size(matrix, 2) == length(vector) ||
+        throw(DimensionMismatch("BigFloat equality GEMV input mismatch"))
+    workers = _bigfloat_gemv_worker_count(
+        length(destination),
+        length(vector),
+        requested_workers,
+    )
+    workers == 1 &&
+        return kmul_owned!(destination, matrix, vector)
+
+    chunk = cld(length(destination), workers)
+    @sync for worker in 1:workers
+        first_output = (worker - 1) * chunk + 1
+        first_output > length(destination) && continue
+        last_output = min(worker * chunk, length(destination))
+        Threads.@spawn begin
+            accumulator = BigFloat()
+            multiplication_buffer = BigFloat()
+            @inbounds for output in first_output:last_output
+                kdot!(
+                    accumulator,
+                    multiplication_buffer,
+                    view(matrix, output, :),
+                    vector,
+                )
+                MA.operate_to!(
+                    destination[output],
+                    copy,
+                    accumulator,
+                )
+            end
+        end
     end
     return destination
 end
@@ -407,20 +579,24 @@ function _factor_arrow_equality_system!(
     copy_owned!(ws.Btil, prob.B)
     use_threads =
         ws.thread_count > 1 &&
-        thread_safe_arithmetic(T) &&
+        _arrow_equality_row_thread_safe(T) &&
         prob.dims.m * n >= 10_000
     if use_threads
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = T === BigFloat ?
+                     _owned_bigfloat_block_task_count(ws) :
+                     length(ws.block_bins)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    ids = arrow.local_ids[block]
-                    isempty(ids) && continue
-                    _arrow_lower_solve_rows!(
-                        ws.Btil,
-                        arrow.Dbuf[block],
-                        ids,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        ids = arrow.local_ids[block]
+                        isempty(ids) && continue
+                        _arrow_lower_solve_rows!(
+                            ws.Btil,
+                            arrow.Dbuf[block],
+                            ids,
+                        )
+                    end
                 end
             end
         end
@@ -473,6 +649,26 @@ function _factor_arrow_equality_system!(
             if issuccess(factor) &&
                _cholesky_has_numerical_rank(factor)
                 ws.Qchol = factor
+            elseif opts.equality_solver === :auto &&
+                   _equality_qr_allowed(ws.Btil, opts)
+                # Automatic mode ultimately selected QR after a failed
+                # normal-equation factor anyway. Go there directly: generic
+                # pivoted BigFloat Cholesky is unavailable on Julia 1.10, and
+                # its rank was used only for the diagnostic message.
+                qr_factor = _factor_equality_qr(ws.Btil, opts)
+                ws.Qchol = qr_factor
+                q_pivoted = true
+                q_rank_deficient = qr_factor.rank < n
+                if opts.verbosity >= 1
+                    @warn(
+                        "Block-diagonal equality solve switched " *
+                        "from normal equations to rank-revealing QR",
+                        reason=:normal_equation_rank_loss,
+                        qr_rank=qr_factor.rank,
+                        equalities=n,
+                        qr_quality=qr_factor.quality,
+                    )
+                end
             else
                 copy_owned!(ws.Qbuf, ws.Q)
                 pivoted = LinearAlgebra.cholesky(
@@ -497,23 +693,7 @@ function _factor_arrow_equality_system!(
                 ws.Qchol = pivoted
                 q_pivoted = true
                 q_rank_deficient = pivoted.rank < n
-                if opts.equality_solver === :auto &&
-                   _equality_qr_allowed(ws.Btil, opts)
-                    qr_factor =
-                        _factor_equality_qr(ws.Btil, opts)
-                    ws.Qchol = qr_factor
-                    q_rank_deficient = qr_factor.rank < n
-                    if opts.verbosity >= 1
-                        @warn(
-                            "Block-diagonal equality solve switched " *
-                            "from normal equations to rank-revealing QR",
-                            normal_equation_rank=pivoted.rank,
-                            qr_rank=qr_factor.rank,
-                            equalities=n,
-                            qr_quality=qr_factor.quality,
-                        )
-                    end
-                elseif opts.verbosity >= 1
+                if opts.verbosity >= 1
                     if pivoted.rank < n
                         @warn(
                             "Block-diagonal equality system is " *
@@ -856,6 +1036,26 @@ function _factor_dense_kkt_native!(
                 if issuccess(Cq) &&
                    _cholesky_has_numerical_rank(Cq)
                     ws.Qchol = Cq
+                elseif opts.equality_solver === :auto &&
+                       _equality_qr_allowed(ws.Btil, opts)
+                    # Avoid the redundant pivoted-normal-equation probe. It
+                    # is not implemented for generic BigFloat matrices on
+                    # Julia 1.10, while QR is the selected automatic backend
+                    # for this exact rank-loss condition on every version.
+                    qr_factor = _factor_equality_qr(ws.Btil, opts)
+                    ws.Qchol = qr_factor
+                    q_pivoted = true
+                    q_rank_deficient = qr_factor.rank < n
+                    if opts.verbosity >= 1
+                        @warn(
+                            "KKT equality solve switched from normal " *
+                            "equations to rank-revealing QR",
+                            reason=:normal_equation_rank_loss,
+                            qr_rank=qr_factor.rank,
+                            equalities=n,
+                            qr_quality=qr_factor.quality,
+                        )
+                    end
                 else
                     copy_owned!(ws.Qbuf, ws.Q)
                     pivoted = LinearAlgebra.cholesky(
@@ -884,22 +1084,7 @@ function _factor_dense_kkt_native!(
                     ws.Qchol = pivoted
                     q_pivoted = true
                     q_rank_deficient = pivoted.rank < n
-                    if opts.equality_solver === :auto &&
-                       _equality_qr_allowed(ws.Btil, opts)
-                        qr_factor = _factor_equality_qr(ws.Btil, opts)
-                        ws.Qchol = qr_factor
-                        q_rank_deficient = qr_factor.rank < n
-                        if opts.verbosity >= 1
-                            @warn(
-                                "KKT equality solve switched from normal " *
-                                "equations to rank-revealing QR",
-                                normal_equation_rank=pivoted.rank,
-                                qr_rank=qr_factor.rank,
-                                equalities=n,
-                                qr_quality=qr_factor.quality,
-                            )
-                        end
-                    elseif opts.verbosity >= 1
+                    if opts.verbosity >= 1
                         if pivoted.rank < n
                             @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
                                   "(likely redundant/duplicated equality constraints)"
@@ -932,21 +1117,34 @@ function _factor_dense_kkt_native!(
     )
 end
 
+"""
+    reduced_arrow_cholesky!(matrix, thread_count) -> success
+
+Factor the lower triangle of a reduced block-arrow Schur matrix in place.
+The generic method preserves the existing Cholesky path. Arithmetic
+extensions may select a measured structure-specific kernel without affecting
+the Float64 solver.
+"""
+reduced_arrow_cholesky!(matrix::Matrix, ::Int) = kchol!(matrix)
+
 function _factor_with_relative_regularization!(
     dest::Matrix{T},
     source::AbstractMatrix{T},
+    thread_count::Int=1,
 ) where {T}
     n = size(dest, 1)
     n == 0 && return (ok=true, attempts=0)
     copy_owned!(dest, source)
-    kchol!(dest) && return (ok=true, attempts=0)
+    reduced_arrow_cholesky!(dest, thread_count) &&
+        return (ok=true, attempts=0)
     reg = sqrt(eps(T))
     for attempt in 1:6
         copy_owned!(dest, source)
         @inbounds for i in 1:n
             dest[i, i] += reg * max(abs(source[i, i]), one(T))
         end
-        kchol!(dest) && return (ok=true, attempts=attempt)
+        reduced_arrow_cholesky!(dest, thread_count) &&
+            return (ok=true, attempts=attempt)
         reg *= 10
     end
     return (ok=false, attempts=6)
@@ -1394,8 +1592,20 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
     use_threads = ws.thread_count > 1 &&
                   thread_safe_arithmetic(T) &&
                   length(arrow.local_ids) * max(1, ng)^2 >= 10_000
-    if use_threads
+    prepared_direct_locals =
+        arrow.reduced_panel_ready &&
+        arrow.reduced_local_factors_ready
+    if prepared_direct_locals
+        # The Float64x4 panel pack cached the singleton local factors and
+        # D^-1*C rows with the same operation order as the historical pass.
+        # Other arithmetic and every fallback keep the factorization below.
+        total_attempts = 0
+    elseif use_threads
         if !direct_reduced
+            ensure_arrow_schur_partials!(
+                arrow,
+                length(ws.block_bins),
+            )
             for partial in arrow.Sredpartial
                 zero_owned!(partial)
             end
@@ -1405,7 +1615,8 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         @sync for (bin_index, bin) in enumerate(ws.block_bins)
             isempty(bin) && continue
             Threads.@spawn begin
-                partial = arrow.Sredpartial[bin_index]
+                partial = direct_reduced ?
+                          arrow.Sred : arrow.Sredpartial[bin_index]
                 for l in bin
                     ids = arrow.local_ids[l]
                     q = length(ids)
@@ -1523,9 +1734,14 @@ function factor_arrow_kkt!(ws::Workspace{T}, opts::SolverOptions{T}) where {T}
         _factor_with_relative_regularization!(
             arrow.mixed_reduced_factor,
             arrow.mixed_reduced_schur,
+            ws.thread_count,
         )
     else
-        _factor_with_relative_regularization!(arrow.Sredbuf, arrow.Sred)
+        _factor_with_relative_regularization!(
+            arrow.Sredbuf,
+            arrow.Sred,
+            ws.thread_count,
+        )
     end
     if mixed_reduced && !reduced.ok
         materialize_mixed_arrow_native_fallback!(
@@ -1902,20 +2118,24 @@ function solve_block_diagonal_equality_kkt!(
     copy_owned!(ws.rtil, r)
     use_threads =
         ws.thread_count > 1 &&
-        thread_safe_arithmetic(T) &&
+        _arrow_equality_row_thread_safe(T) &&
         length(ws.rtil) >= 2_000
+    task_count = T === BigFloat ?
+                 _owned_bigfloat_block_task_count(ws) :
+                 length(ws.block_bins)
     if use_threads
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    ids = arrow.local_ids[block]
-                    isempty(ids) && continue
-                    _arrow_lower_solve_rows!(
-                        ws.rtil,
-                        arrow.Dbuf[block],
-                        ids,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        ids = arrow.local_ids[block]
+                        isempty(ids) && continue
+                        _arrow_lower_solve_rows!(
+                            ws.rtil,
+                            arrow.Dbuf[block],
+                            ids,
+                        )
+                    end
                 end
             end
         end
@@ -1931,10 +2151,11 @@ function solve_block_diagonal_equality_kkt!(
         end
     end
 
-    kmul_owned!(
+    _arrow_equality_gemv!(
         ws.q_rhs,
         transpose(ws.Btil),
         ws.rtil,
+        task_count,
     )
     kaxpby_owned!(
         one(T),
@@ -1944,20 +2165,26 @@ function solve_block_diagonal_equality_kkt!(
     )
     _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
 
-    kmul_owned!(dx_out, ws.Btil, dy_out)
+    _arrow_equality_gemv!(
+        dx_out,
+        ws.Btil,
+        dy_out,
+        task_count,
+    )
     kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)
     if use_threads
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                for block in bin
-                    ids = arrow.local_ids[block]
-                    isempty(ids) && continue
-                    _arrow_transpose_solve_rows!(
-                        dx_out,
-                        arrow.Dbuf[block],
-                        ids,
-                    )
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        ids = arrow.local_ids[block]
+                        isempty(ids) && continue
+                        _arrow_transpose_solve_rows!(
+                            dx_out,
+                            arrow.Dbuf[block],
+                            ids,
+                        )
+                    end
                 end
             end
         end
@@ -2034,6 +2261,33 @@ function _gather_arrow_rhs!(
     end
     return destination
 end
+
+"""
+    reduced_arrow_simd_solve(::Type) -> Bool
+
+Return whether an arithmetic extension provides allocation-free SIMD kernels
+for singleton-local reduced-arrow RHS accumulation and local recovery. The
+generic solver remains unchanged unless an extension opts in explicitly.
+"""
+reduced_arrow_simd_solve(::Type) = false
+
+function accumulate_reduced_arrow_rhs!(
+    partial::AbstractVector{T},
+    coupling::AbstractMatrix{T},
+    local_rhs::T,
+) where {T}
+    @inbounds for global_position in eachindex(partial)
+        partial[global_position] +=
+            coupling[1, global_position] * local_rhs
+    end
+    return partial
+end
+
+recover_reduced_arrow_locals!(
+    ::AbstractVector,
+    ::ArrowWorkspace,
+    ::AbstractVector{Int},
+) = false
 
 function _scatter_arrow_solution!(
     destination::AbstractVector{T},
@@ -2184,6 +2438,8 @@ function solve_arrow_kkt!(
     use_threads = ws.thread_count > 1 &&
                   thread_safe_arithmetic(T) &&
                   length(arrow.local_ids) * max(1, ng) >= 2_000
+    simd_singletons =
+        arrow.reduced_panel_ready && reduced_arrow_simd_solve(T)
     if use_threads
         for partial in arrow.rgpartial
             zero_distinct!(partial)
@@ -2204,12 +2460,20 @@ function solve_arrow_kkt!(
                         arrow.Dinv[l],
                     )
                     Cl = arrow.coupling[l]
-                    @inbounds for a in 1:ng
-                        correction = zero(T)
-                        for p in 1:q
-                            correction += Cl[p, a] * tl[p]
+                    if simd_singletons && q == 1
+                        accumulate_reduced_arrow_rhs!(
+                            partial,
+                            Cl,
+                            tl[1],
+                        )
+                    else
+                        @inbounds for a in 1:ng
+                            correction = zero(T)
+                            for p in 1:q
+                                correction += Cl[p, a] * tl[p]
+                            end
+                            partial[a] += correction
                         end
-                        partial[a] += correction
                     end
                 end
             end
@@ -2252,18 +2516,27 @@ function solve_arrow_kkt!(
         @sync for bin in ws.block_bins
             isempty(bin) && continue
             Threads.@spawn begin
-                for l in bin
-                    ids = arrow.local_ids[l]
-                    q = length(ids)
-                    q == 0 && continue
-                    tl = arrow.tmp[l]
-                    Wl = arrow.W[l]
-                    @inbounds for p in 1:q
-                        value = tl[p]
-                        for a in 1:ng
-                            value -= Wl[p, a] * arrow.rg[a]
+                recovered =
+                    simd_singletons &&
+                    recover_reduced_arrow_locals!(
+                        dx_out,
+                        arrow,
+                        bin,
+                    )
+                if !recovered
+                    for l in bin
+                        ids = arrow.local_ids[l]
+                        q = length(ids)
+                        q == 0 && continue
+                        tl = arrow.tmp[l]
+                        Wl = arrow.W[l]
+                        @inbounds for p in 1:q
+                            value = tl[p]
+                            for a in 1:ng
+                                value -= Wl[p, a] * arrow.rg[a]
+                            end
+                            dx_out[ids[p]] = value
                         end
-                        dx_out[ids[p]] = value
                     end
                 end
             end

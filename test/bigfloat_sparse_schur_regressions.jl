@@ -52,6 +52,70 @@ function _bigfloat_arrow_fixture()
     return problem, X, Y
 end
 
+function _bigfloat_block_diagonal_equality_fixture(
+    ;
+    block_count::Int=24,
+    equality_count::Int=48,
+    rank_deficient::Bool=false,
+)
+    variable_count = 3 * block_count
+    equality_count <= variable_count ||
+        throw(ArgumentError("equalities cannot exceed variables"))
+    coefficients = [
+        zeros(BigFloat, variable_count, 2, 2)
+        for _ in 1:block_count
+    ]
+    for block in 1:block_count
+        first = 3 * block - 2
+        coefficients[block][first, 1, 1] = one(BigFloat)
+        coefficients[block][first + 1, 1, 2] = one(BigFloat)
+        coefficients[block][first + 1, 2, 1] = one(BigFloat)
+        coefficients[block][first + 2, 2, 2] = one(BigFloat)
+    end
+    equality = SDPX.alloc_zeros(
+        BigFloat,
+        variable_count,
+        equality_count,
+    )
+    for column in 1:equality_count
+        equality[column, column] = one(BigFloat)
+        for row in (equality_count + 1):variable_count
+            numerator = mod(17 * row + 11 * column, 29) - 14
+            equality[row, column] =
+                BigFloat(numerator) / BigFloat(257)
+        end
+    end
+    if rank_deficient && equality_count >= 2
+        for row in 1:variable_count
+            equality[row, equality_count] = BigFloat(equality[row, 1])
+        end
+    end
+    problem = SDPX.ingest(
+        ones(BigFloat, variable_count),
+        coefficients,
+        [zeros(BigFloat, 2, 2) for _ in 1:block_count],
+        equality,
+        zeros(BigFloat, equality_count);
+        sparse=true,
+        verbosity=0,
+    )
+    X = [
+        BigFloat[
+            2 + block / 100 1 / 31
+            1 / 31 3 / 2 + block / 200
+        ]
+        for block in 1:block_count
+    ]
+    Y = [
+        BigFloat[
+            7 / 5 + block / 150 1 / 37
+            1 / 37 19 / 10 + block / 250
+        ]
+        for block in 1:block_count
+    ]
+    return problem, X, Y
+end
+
 function _reference_fused_arrow_build!(workspace, problem, X, Y)
     arrow = workspace.arrow
     SDPX._zero_arrow_schur!(arrow)
@@ -679,5 +743,492 @@ end
                 @test solution[variable] !== arrow.tmp[block][position]
             end
         end
+    end
+end
+
+@testset "BigFloat block-diagonal equality arrow KKT" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_block_diagonal_equality_fixture()
+        requested_threads = min(Threads.nthreads(), 4)
+        options = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            threads=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        plan = SDPX.build_execution_plan(problem, options)
+        @test plan.kkt_backend === :block_arrow
+        @test plan.threads == requested_threads
+        @test plan.schedule === (
+            requested_threads > 1 ?
+            :owned_bigfloat_equality_tiles : :serial
+        )
+
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        @test workspace.arrow !== nothing
+        @test workspace.fused_arrow
+        @test isempty(workspace.arrow.global_ids)
+        @test workspace.thread_count == requested_threads
+        @test length(workspace.vpartial) == 1
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(
+            workspace,
+            problem,
+            problem.cons,
+            X,
+            Y,
+        )
+        schur = SDPX.alloc_zeros(
+            BigFloat,
+            problem.dims.m,
+            problem.dims.m,
+        )
+        SDPX.materialize_schur!(schur, workspace)
+        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        @test factorization.ok
+        @test !factorization.q_rank_deficient
+        automatic_refinement = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            threads=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+            refine_policy=:auto,
+            ϵ_gap=big"1e-10",
+            ϵ_primal=big"1e-10",
+            ϵ_dual=big"1e-10",
+        )
+        @test SDPX._has_owned_bigfloat_equality_arrow(
+            workspace,
+            workspace.arrow,
+        )
+        @test SDPX._skip_automatic_refinement(
+            workspace,
+            automatic_refinement,
+            factorization,
+        )
+        @test !SDPX._skip_automatic_refinement(
+            workspace,
+            SDPX._replace_solver_options(
+                automatic_refinement;
+                refine_policy=:adaptive,
+            ),
+            factorization,
+        )
+        @test !SDPX._skip_automatic_refinement(
+            workspace,
+            automatic_refinement,
+            merge(factorization, (reg_attempts=1,)),
+        )
+        expected_gram = transpose(workspace.Btil) * workspace.Btil
+        gram_scale = max(maximum(abs, expected_gram), one(BigFloat))
+        @test maximum(abs, LowerTriangular(workspace.Q) -
+                           LowerTriangular(expected_gram)) /
+              gram_scale <= big"1e-70"
+        selected_gram_workers =
+            SDPX.ExtendedPrecisionBLAS._syrk_bigfloat_selected_workers(
+                workspace.Btil,
+                SDPX._equality_gram_crossover(
+                    workspace.Btil,
+                    options,
+                    requested_threads,
+                ).config,
+                requested_threads,
+            )
+        @test workspace.equality_gram_kernel === (
+            selected_gram_workers > 1 ?
+            :threaded_blocked_triangular_syrk :
+            :blocked_triangular_syrk
+        )
+
+        primal_rhs = BigFloat.(range(
+            BigFloat("-0.7"),
+            BigFloat("1.1");
+            length=problem.dims.m,
+        ))
+        equality_rhs = BigFloat.(range(
+            BigFloat("-0.2"),
+            BigFloat("0.3");
+            length=problem.dims.n,
+        ))
+        dx = zeros(BigFloat, problem.dims.m)
+        dy = zeros(BigFloat, problem.dims.n)
+        SDPX.solve_kkt!(
+            workspace,
+            problem.dims.n,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        first_residual = schur * dx - problem.B * dy - primal_rhs
+        second_residual = transpose(problem.B) * dx - equality_rhs
+        scale = max(
+            maximum(abs, primal_rhs),
+            maximum(abs, equality_rhs),
+            one(BigFloat),
+        )
+        @test max(
+            maximum(abs, first_residual),
+            maximum(abs, second_residual),
+        ) / scale <= big"1e-65"
+        @test length(unique(objectid.(dx))) == length(dx)
+        @test length(unique(objectid.(dy))) == length(dy)
+    end
+end
+
+@testset "Owned BigFloat equality GEMV" begin
+    setprecision(BigFloat, 256) do
+        rows = 512
+        columns = 192
+        requested_threads = min(Threads.nthreads(), 4)
+        panel = Matrix{BigFloat}(undef, rows, columns)
+        @inbounds for column in 1:columns, row in 1:rows
+            panel[row, column] = BigFloat(
+                mod(17row + 29column, 257) - 128,
+            ) / BigFloat(257)
+        end
+        column_vector = BigFloat.(range(
+            BigFloat("-0.4"),
+            BigFloat("0.7");
+            length=columns,
+        ))
+        row_vector = BigFloat.(range(
+            BigFloat("-0.8"),
+            BigFloat("0.2");
+            length=rows,
+        ))
+
+        row_reference = SDPX.alloc_zeros(BigFloat, rows)
+        row_candidate = SDPX.alloc_zeros(BigFloat, rows)
+        SDPX.kmul_owned!(row_reference, panel, column_vector)
+        SDPX._arrow_equality_gemv!(
+            row_candidate,
+            panel,
+            column_vector,
+            requested_threads,
+        )
+        @test row_candidate == row_reference
+        @test length(unique(objectid.(row_candidate))) == rows
+
+        column_reference = SDPX.alloc_zeros(BigFloat, columns)
+        column_candidate = SDPX.alloc_zeros(BigFloat, columns)
+        SDPX.kmul_owned!(column_reference, transpose(panel), row_vector)
+        SDPX._arrow_equality_gemv!(
+            column_candidate,
+            transpose(panel),
+            row_vector,
+            requested_threads,
+        )
+        @test column_candidate == column_reference
+        @test length(unique(objectid.(column_candidate))) == columns
+
+        sparse_panel = sparse(panel)
+        sparse_row_candidate = SDPX.alloc_zeros(BigFloat, rows)
+        SDPX._sparse_bigfloat_gemv_owned!(
+            sparse_row_candidate,
+            sparse_panel,
+            column_vector,
+        )
+        @test sparse_row_candidate == row_reference
+        @test length(unique(objectid.(sparse_row_candidate))) == rows
+
+        sparse_column_candidate = SDPX.alloc_zeros(BigFloat, columns)
+        SDPX._sparse_bigfloat_transpose_gemv_owned!(
+            sparse_column_candidate,
+            sparse_panel,
+            row_vector,
+            requested_threads,
+        )
+        @test sparse_column_candidate == column_reference
+        @test length(unique(objectid.(sparse_column_candidate))) == columns
+
+        expected_workers = requested_threads > 1 ? requested_threads : 1
+        @test SDPX._bigfloat_gemv_worker_count(
+            rows,
+            columns,
+            requested_threads,
+        ) == expected_workers
+    end
+end
+
+@testset "Owned BigFloat all-local block scheduling" begin
+    @test SDPX._owned_bigfloat_block_task_count(0) == 1
+    @test SDPX._owned_bigfloat_block_task_count(1) == 1
+    @test SDPX._owned_bigfloat_block_task_count(64) == 64
+    @test SDPX._owned_bigfloat_block_task_count(128) == 64
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_block_diagonal_equality_fixture(
+            block_count=256,
+            equality_count=16,
+        )
+        requested_threads = min(Threads.nthreads(), 4)
+        serial = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        parallel = SDPX.Workspace(
+            problem;
+            thread_count=requested_threads,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        options = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            threads=requested_threads,
+            parameter_strategy=:adaptive,
+            extended_precision_blas=:on,
+            equality_solver=:normal_equations,
+        )
+        @test SDPX.use_owned_bigfloat_block_loops(parallel, problem) ==
+              (requested_threads > 1)
+        @test SDPX.use_owned_bigfloat_residual_path(serial, problem)
+
+        x = BigFloat.(range(
+            BigFloat("-0.1"),
+            BigFloat("0.2");
+            length=problem.dims.m,
+        ))
+        y = BigFloat.(range(
+            BigFloat("-0.05"),
+            BigFloat("0.08");
+            length=problem.dims.n,
+        ))
+        mu = [BigFloat("0.3") for _ in 1:problem.dims.L]
+        serial_residuals = SDPX.compute_residuals!(
+            serial,
+            problem,
+            x,
+            X,
+            y,
+            Y,
+            mu,
+            options,
+        )
+        serial_ok = SDPX.factor_blocks!(serial, X, Y)
+        parallel_residuals = SDPX.threaded_compute_residuals!(
+            parallel,
+            problem,
+            x,
+            X,
+            y,
+            Y,
+            mu,
+            options;
+            factor=true,
+        )
+        @test serial_ok
+        @test parallel_residuals == (serial_residuals..., true)
+        @test parallel.d == serial.d
+        @test parallel.p == serial.p
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].P == serial.blk[block].P
+            @test parallel.blk[block].R == serial.blk[block].R
+            @test parallel.blk[block].LX == serial.blk[block].LX
+            @test parallel.blk[block].MY == serial.blk[block].MY
+        end
+
+        serial_rhs = SDPX._predictor_corrector_rhs!(serial, problem, Y)
+        parallel_rhs = SDPX.threaded_predictor_corrector_rhs!(
+            parallel,
+            problem,
+            Y,
+        )
+        @test parallel_rhs == serial_rhs
+        SDPX.copy_owned!(serial.dx, x)
+        SDPX.copy_owned!(parallel.dx, x)
+        SDPX.threaded_direction_blocks!(serial, problem, Y)
+        SDPX.threaded_direction_blocks!(parallel, problem, Y)
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].dX == serial.blk[block].dX
+            @test parallel.blk[block].dY == serial.blk[block].dY
+            @test length(unique(objectid.(parallel.blk[block].dY))) == 4
+        end
+
+        # Allocation-free direction recovery reuses dY on every iteration.
+        # A previous symmetrization implementation aliased its two mutable
+        # off-diagonal BigFloat entries, which corrupted the second reuse but
+        # was invisible in one-shot tests.
+        SDPX.threaded_direction_blocks!(serial, problem, Y)
+        SDPX.threaded_direction_blocks!(parallel, problem, Y)
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].dX == serial.blk[block].dX
+            @test parallel.blk[block].dY == serial.blk[block].dY
+            @test length(unique(objectid.(parallel.blk[block].dY))) == 4
+        end
+
+        serial_affine = SDPX._affine_predictor_diagnostics!(
+            serial,
+            problem,
+            X,
+            Y,
+        )
+        parallel_affine = SDPX._affine_predictor_diagnostics!(
+            parallel,
+            problem,
+            X,
+            Y,
+        )
+        @test parallel_affine == serial_affine
+        serial_legacy = SDPX._legacy_predictor_diagnostics!(
+            serial,
+            problem,
+            X,
+            Y,
+        )
+        parallel_legacy = SDPX._legacy_predictor_diagnostics!(
+            parallel,
+            problem,
+            X,
+            Y,
+        )
+        @test parallel_legacy == serial_legacy
+
+        primal_fraction = BigFloat("0.97")
+        dual_fraction = BigFloat("0.96")
+        serial_steps = SDPX.threaded_line_search!(
+            serial,
+            X,
+            Y,
+            primal_fraction,
+            dual_fraction,
+            BigFloat("0.85"),
+            zero(BigFloat),
+            :fraction_to_boundary,
+        )
+        parallel_steps = SDPX.threaded_line_search!(
+            parallel,
+            X,
+            Y,
+            primal_fraction,
+            dual_fraction,
+            BigFloat("0.85"),
+            zero(BigFloat),
+            :fraction_to_boundary,
+        )
+        @test parallel_steps == serial_steps
+
+        serial_objective = SDPX.threaded_dual_objective(
+            serial,
+            problem,
+            y,
+            Y,
+        )
+        parallel_objective = SDPX.threaded_dual_objective(
+            parallel,
+            problem,
+            y,
+            Y,
+        )
+        @test parallel_objective == serial_objective
+
+        serial_X = deepcopy(X)
+        serial_Y = deepcopy(Y)
+        parallel_X = deepcopy(X)
+        parallel_Y = deepcopy(Y)
+        serial_update = SDPX.threaded_update_blocks!(
+            serial,
+            serial_X,
+            serial_Y,
+            serial_steps...,
+        )
+        parallel_update = SDPX.threaded_update_blocks!(
+            parallel,
+            parallel_X,
+            parallel_Y,
+            parallel_steps...,
+        )
+        @test parallel_update == serial_update
+        @test parallel_X == serial_X
+        @test parallel_Y == serial_Y
+
+        serial_mu = [BigFloat("0.3") for _ in 1:problem.dims.L]
+        parallel_mu = [BigFloat("0.3") for _ in 1:problem.dims.L]
+        SDPX.threaded_update_mu!(
+            serial,
+            serial_mu,
+            BigFloat("0.1"),
+            problem.dims.k,
+            serial_update[1],
+            true,
+        )
+        SDPX.threaded_update_mu!(
+            parallel,
+            parallel_mu,
+            BigFloat("0.1"),
+            problem.dims.k,
+            parallel_update[1],
+            true,
+        )
+        @test parallel_mu == serial_mu
+
+        sigma = BigFloat("0.2")
+        average_mu = BigFloat("0.15")
+        serial_corrector = SDPX.threaded_mehrotra_corrector_rhs!(
+            serial,
+            problem,
+            X,
+            Y,
+            sigma,
+            average_mu,
+        )
+        parallel_corrector = SDPX.threaded_mehrotra_corrector_rhs!(
+            parallel,
+            problem,
+            X,
+            Y,
+            sigma,
+            average_mu,
+        )
+        @test parallel_corrector == serial_corrector
+        for block in 1:problem.dims.L
+            @test parallel.blk[block].R == serial.blk[block].R
+            @test parallel.blk[block].Z == serial.blk[block].Z
+        end
+    end
+end
+
+@testset "BigFloat rank-deficient block-diagonal equalities" begin
+    setprecision(BigFloat, 256) do
+        problem, X, Y = _bigfloat_block_diagonal_equality_fixture(
+            block_count=6,
+            equality_count=4,
+            rank_deficient=true,
+        )
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=min(Threads.nthreads(), 4),
+            extended_precision_blas=:on,
+            equality_solver=:auto,
+        )
+        @test workspace.arrow !== nothing
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(
+            workspace,
+            problem,
+            problem.cons,
+            X,
+            Y,
+        )
+        options = SDPX.SolverOptions{BigFloat}(
+            verbosity=0,
+            extended_precision_blas=:on,
+            equality_solver=:auto,
+        )
+        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        @test factorization.ok
+        @test factorization.q_rank_deficient
+        @test factorization.equality_solver === :rank_revealing_qr
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{BigFloat}
+        diagnostics =
+            SDPX._equality_factor_diagnostics(workspace, problem.dims.n)
+        @test diagnostics.rank == problem.dims.n - 1
+        @test diagnostics.rank_deficient
     end
 end

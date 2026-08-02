@@ -72,7 +72,13 @@ using Test
             Matrix{Float64}(undef, 2, 0), Float64[]; verbosity=0)
         result = SDPX.solve(problem; tolerance=1e-8, verbosity=0, diagnostics=true)
         @test result.status == SDPX.Optimal
-        @test result.diagnostics.selected_algorithms.kkt === :dense_cholesky
+        selected = result.diagnostics.selected_algorithms
+        @test selected.kkt === :dense_cholesky
+        @test selected.effective_threads == selected.threads
+        @test selected.fine_grained_block_tasks == 1
+        @test selected.fine_grained_block_partition == :lpt
+        @test selected.schur_threads == selected.threads
+        @test selected.factor_threads === nothing
         @test hasproperty(
             result.diagnostics.timings,
             :schur_assembly,

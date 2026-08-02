@@ -96,6 +96,11 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
         throw(ArgumentError("parameter_strategy must be :fixed or :adaptive"))
+    isfinite(opts.adaptive_sigma_max) &&
+        zero(T) <= opts.adaptive_sigma_max < one(T) ||
+        throw(ArgumentError(
+            "adaptive_sigma_max must be zero (automatic) or lie in (0, 1)",
+        ))
     opts.equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError(
             "equality_solver must be :auto, :normal_equations, or :qr",
@@ -283,6 +288,33 @@ function classify_problem(prob::SDPProblem{T}) where {T}
     )
 end
 
+"""
+    _supports_owned_bigfloat_arrow_equalities(prob)
+
+Return whether a BigFloat problem with explicit equalities can use the
+ownership-safe block-diagonal arrow KKT implementation.  The specialization is
+deliberately narrow: every Schur variable must belong to exactly one PSD block
+and every block must be 2x2.  Those conditions give each task exclusive
+ownership of its local factor and leave the equality Gram as the only shared
+matrix; its lower-triangular tiles are also assigned exclusively.
+"""
+function _supports_owned_bigfloat_arrow_equalities(
+    prob::SDPProblem{T},
+) where {T}
+    T === BigFloat || return false
+    prob.dims.n > 0 || return false
+    prob.dims.L > 0 || return false
+    prob.cons isa SparseCons{BigFloat} || return false
+    cons = prob.cons::SparseCons{BigFloat}
+    all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
+        return false
+    frequency = zeros(Int, prob.dims.m)
+    for variables in cons.active, variable in variables
+        frequency[variable] += 1
+    end
+    return all(==(1), frequency)
+end
+
 function _runtime_schur_backend(prob::SDPProblem)
     if _use_sparse_schur_sdp(prob)
         return :sparse_schur_cholesky
@@ -295,8 +327,11 @@ function _runtime_schur_backend(prob::SDPProblem)
         has_arrow = all(>(0), frequency) && any(==(1), frequency)
         equality_compatible =
             prob.dims.n == 0 || all(==(1), frequency)
+        bigfloat_equality_supported =
+            !(prob.dims.n > 0 && eltype(prob.c) === BigFloat) ||
+            _supports_owned_bigfloat_arrow_equalities(prob)
         if has_arrow && equality_compatible &&
-           !(prob.dims.n > 0 && eltype(prob.c) === BigFloat)
+           bigfloat_equality_supported
             return :block_arrow
         end
     end
@@ -316,7 +351,6 @@ This duplicates only the inexpensive structural predicate used by
 function _uses_fused_arrow(prob::SDPProblem{T}) where {T}
     prob.dims.L > 0 || return false
     prob.cons isa SparseCons{T} || return false
-    prob.dims.n > 0 && T === BigFloat && return false
     cons = prob.cons::SparseCons{T}
     all(l -> size(cons.packed2[l], 1) == 3, 1:prob.dims.L) ||
         return false
@@ -389,6 +423,17 @@ function _reduced_arrow_crossover(
     end
     global_count = count(>(1), frequency)
     global_count >= 2 || return disabled(:problem_too_small)
+    workers = reduced_arrow_worker_count(
+        K,
+        workers,
+        L,
+        global_count,
+    )
+    config = ExtendedPrecisionBLAS._reduced_arrow_kernel_config(
+        K,
+        workers,
+        global_count,
+    )
 
     shared_incidences = 0
     local_structural_pairs = 0
@@ -648,27 +693,44 @@ end
     schur_bin_report(::Type{T}, m, L, threads) -> NamedTuple
 
 Whether the per-worker Schur accumulators were capped below the requested
-worker count, and what that cost.
+worker count, which automatic memory fraction was selected, and what that
+cost.
 
 The accumulators are full `m x m` matrices, one per bin, so their total scales
-as `threads * m^2`. `_schur_parallel_bins` caps them at a fraction of free
-memory, which silently trades parallelism for memory: at `m = 2000` with eight
-threads the bin count drops to four, halving assembly concurrency. §18.4 asks
-that a change in algorithm selection between thread counts be reported rather
-than left to be inferred from a disappointing speedup, and §19.3 asks for an
-informative estimate rather than a silent degradation.
+as `threads * m^2`. `_schur_parallel_bins` caps them at an automatically
+selected fraction of free memory, which trades parallelism for memory.
+Section 18.4 asks that a change in algorithm selection between thread counts
+be reported rather than inferred from disappointing scaling, and section 19.3
+asks for an informative estimate rather than a silent degradation.
 """
 function schur_bin_report(::Type{T}, m::Integer, L::Integer,
                           threads::Integer;
                           free_memory_bytes::Union{Nothing,Integer}=nothing) where {T}
     requested = max(1, min(Int(threads), Int(L)))
+    available = free_memory_bytes === nothing ?
+        ExtendedPrecisionBLAS._system_free_memory_bytes() :
+        Int(free_memory_bytes)
     selected = _schur_parallel_bins(T, Int(m), Int(L), Int(threads);
-        free_memory_bytes=free_memory_bytes)
+        free_memory_bytes=available)
+    memory_fraction = _schur_accumulator_memory_fraction(
+        T,
+        Int(m),
+        Int(L),
+        Int(threads),
+        available,
+    )
+    memory_budget_bytes =
+        ExtendedPrecisionBLAS._memory_budget_from_fraction(
+            available,
+            memory_fraction,
+        )
     bytes_each = Int(m)^2 * max(sizeof(T), 8)
     return (
         requested_bins=requested,
         selected_bins=selected,
         capped=selected < requested,
+        memory_fraction=memory_fraction,
+        memory_budget_bytes=memory_budget_bytes,
         bytes_per_bin=bytes_each,
         total_bytes=selected * bytes_each,
         would_have_been_bytes=requested * bytes_each,
@@ -710,6 +772,26 @@ function worker_report(requested::Integer, selected::Integer)
     )
 end
 
+"""
+    automatic_scaling_policy(algorithm, parameter_profile, strategy)
+
+Select the scaling stage without probing numerical values. The historical
+large-lattice fixed profile was calibrated in the original coordinates and
+stalls when combined with automatic Ruiz scaling; the adaptive profile is
+calibrated with Ruiz. Explicit `scaling=:none` or `:equilibrate` choices bypass
+this policy in [`build_execution_plan`](@ref).
+"""
+@inline function automatic_scaling_policy(
+    algorithm::Symbol,
+    parameter_profile::Symbol,
+    parameter_strategy::Symbol,
+)
+    algorithm === :lp_primal_dual && return :lp_geometric
+    parameter_profile === :large_lattice_dense_schur &&
+        parameter_strategy === :fixed && return :none
+    return :sdp_ruiz
+end
+
 function build_execution_plan(
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
@@ -737,10 +819,40 @@ function build_execution_plan(
         classification.cone === :socp ? :socp_psd_lift :
         :sdp_primal_dual
     end
+    selected = if opts.parameter_policy === :auto
+        recommended_parameters(prob, opts)
+    else
+        (
+            β=opts.β,
+            γ=opts.γ,
+            Ωp=opts.Ωp,
+            Ωd=opts.Ωd,
+            predictor=opts.predictor,
+            profile=:fixed,
+        )
+    end
     opts.scaling in (:auto, :none, :equilibrate) ||
         throw(ArgumentError("scaling must be :auto, :none, or :equilibrate"))
+    scaling_profile = if selected.profile === :fixed &&
+                         prob.structure.profile ===
+                         :sparse_coefficients_dense_psd_dense_schur &&
+                         _large_lattice_dense_schur_profile(
+                             prob.dims.m,
+                             prob.dims.n,
+                             prob.dims.L,
+                             prob.structure.coefficient_density,
+                             prob.structure.schur_density,
+                         )
+        :large_lattice_dense_schur
+    else
+        selected.profile
+    end
     scaling = if opts.scaling === :auto
-        algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
+        automatic_scaling_policy(
+            algorithm,
+            scaling_profile,
+            opts.parameter_strategy,
+        )
     elseif opts.scaling === :equilibrate
         algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
     else
@@ -753,10 +865,14 @@ function build_execution_plan(
     native_bigfloat_reduced =
         classification.arithmetic === :bigfloat &&
         reduced_arrow_decision.enabled
+    owned_bigfloat_arrow_equalities =
+        classification.arithmetic === :bigfloat &&
+        _supports_owned_bigfloat_arrow_equalities(prob)
     selected_threads =
         classification.arithmetic === :bigfloat &&
         !mixed_arrow_threads &&
-        !native_bigfloat_reduced ?
+        !native_bigfloat_reduced &&
+        !owned_bigfloat_arrow_equalities ?
         1 : min(requested_threads, Base.Threads.nthreads())
     if classification.arithmetic === :float64 &&
        classification.cone === :sdp &&
@@ -768,6 +884,8 @@ function build_execution_plan(
     end
     schedule = if selected_threads == 1
         :serial
+    elseif owned_bigfloat_arrow_equalities
+        :owned_bigfloat_equality_tiles
     elseif mixed_arrow_threads
         :mixed_arrow_contiguous_blocks
     elseif reduced_arrow_decision.enabled
@@ -827,18 +945,13 @@ function build_execution_plan(
     else
         :automatic_extended_precision
     end
-    selected = if opts.parameter_policy === :auto
-        recommended_parameters(prob, opts)
-    else
-        (
-            β=opts.β,
-            γ=opts.γ,
-            Ωp=opts.Ωp,
-            Ωd=opts.Ωd,
-            predictor=opts.predictor,
-            profile=:fixed,
-        )
-    end
+    adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
+                         recommended_adaptive_sigma_max(
+                             selected.profile,
+                             selected.β,
+                             opts.adaptive_sigma_max,
+                         ) :
+                         zero(T)
     return ExecutionPlan(
         classification,
         algorithm,
@@ -856,6 +969,7 @@ function build_execution_plan(
             omega_d=selected.Ωd,
             predictor=selected.predictor,
             strategy=opts.parameter_strategy,
+            adaptive_sigma_max,
         ),
     )
 end
@@ -1616,6 +1730,24 @@ function _attach_diagnostics(
         planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),
         scheduling=plan.schedule,
         threads=plan.threads,
+        effective_threads=get(executed, :effective_threads, plan.threads),
+        fine_grained_block_tasks=get(
+            executed,
+            :fine_grained_block_tasks,
+            plan.threads,
+        ),
+        fine_grained_block_partition=get(
+            executed,
+            :fine_grained_block_partition,
+            :lpt,
+        ),
+        schur_threads=get(executed, :schur_threads, plan.threads),
+        factor_threads=get(executed, :factor_threads, nothing),
+        arrow_linear_solve=get(
+            executed,
+            :arrow_linear_solve,
+            nothing,
+        ),
         parameter_profile=plan.parameter_profile,
         initial_parameters=plan.parameters,
         certificate=certificate,
@@ -1657,13 +1789,13 @@ function _inconsistent_presolve_result(
     prob::SDPProblem{T},
     report::PresolveReport,
     plan::ExecutionPlan,
-    diagnostics_enabled::Bool,
+    opts::SolverOptions{T},
 ) where {T}
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     result = SDPResult{T}(
         InfeasibleCert,
-        "Presolve detected inconsistent equality constraints.",
+        "Presolve detected a structural constraint contradiction.",
         alloc_zeros(T, prob.dims.m),
         X,
         alloc_zeros(T, prob.dims.n),
@@ -1677,15 +1809,28 @@ function _inconsistent_presolve_result(
         0,
         0,
         (total=report.elapsed,),
+        NamedTuple[],
+        nothing,
+        (
+            reason=:structural_presolve_infeasibility,
+            certificate_method=:presolve_contradiction,
+            certificate_generator=:analytic_presolve,
+        ),
     )
+    certificate = result_certificate(prob, result, opts)
     return _attach_diagnostics(
         result,
         plan,
         report,
         report.elapsed,
-        ["The equality system is inconsistent at the configured presolve tolerance."],
+        [
+            "Presolve produced a structural infeasibility proof at the " *
+            "configured tolerance.",
+        ],
         0,
-        diagnostics_enabled,
+        opts.diagnostics,
+        (reason=:none,),
+        certificate,
     )
 end
 

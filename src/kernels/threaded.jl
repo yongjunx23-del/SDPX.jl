@@ -55,6 +55,25 @@ function lpt_partition(weights::Vector{<:Real}, nbins::Int)
     return bins
 end
 
+"""
+    contiguous_partition(item_count, nbins) -> Vector{Vector{Int}}
+
+Partition an ordered block vector into nearly equal contiguous ranges. This
+is useful only when per-block work is uniform; heterogeneous problems should
+continue to use [`lpt_partition`](@ref).
+"""
+function contiguous_partition(item_count::Int, nbins::Int)
+    item_count >= 0 || throw(ArgumentError("item count must be nonnegative"))
+    nbins > 0 || throw(ArgumentError("bin count must be positive"))
+    bins = Vector{Vector{Int}}(undef, nbins)
+    for bin in 1:nbins
+        first_item = fld((bin - 1) * item_count, nbins) + 1
+        last_item = fld(bin * item_count, nbins)
+        bins[bin] = collect(first_item:last_item)
+    end
+    return bins
+end
+
 block_weight(k::Int, m::Int) = Float64(k)^3 + Float64(m) * Float64(k)^2 / 2
 
 """
@@ -148,15 +167,272 @@ function schur_blas_threads(ws::Workspace{T}, prob::SDPProblem{T},
     return ambient
 end
 
+"""
+    _block_loop_threading_profitable(T, block_dimensions, workers)
+
+Select Julia task parallelism for the block-local residual, Cholesky,
+predictor, and corrector kernels.  Counting blocks alone misses dense lattice
+models: Task_Low08 has only 32 blocks, but their dimensions are 23--74 and the
+block-local phases account for several seconds per solve.  Preserve the
+historical many-small-block crossover and additionally admit a smaller number
+of blocks when their cubic factorization/multiply work is large enough.
+
+The thresholds are intentionally conservative.  Float64 needs roughly one
+million cubic-work units before task launch is considered; fixed-width
+extended arithmetic crosses over earlier because every scalar operation is
+more expensive.  Mutable BigFloat remains excluded by
+[`thread_safe_arithmetic`](@ref), irrespective of this estimate.
+"""
+function _block_loop_threading_profitable(
+    ::Type{T},
+    block_dimensions,
+    workers::Int,
+) where {T}
+    workers > 1 || return false
+    block_count = length(block_dimensions)
+    block_count > 1 || return false
+    block_count >= 256 && return true
+
+    cubic_work = sum(
+        dimension -> Float64(dimension)^3,
+        block_dimensions;
+        init=0.0,
+    )
+    family = ExtendedPrecisionBLAS.arithmetic_family(T)
+    minimum_work = family === :fixed_extended ? 1.0e5 : 1.0e6
+    return cubic_work >= minimum_work
+end
+
 function use_threaded_block_loops(ws::Workspace{T}, prob::SDPProblem{T}) where {T}
     return ws.thread_count > 1 &&
            prob.dims.L > 1 &&
            thread_safe_arithmetic(T) &&
-           sum(length, ws.block_bins; init=0) >= 256
+           _block_loop_threading_profitable(
+               T,
+               prob.dims.k,
+               ws.thread_count,
+           )
+end
+
+"""
+    use_owned_bigfloat_block_loops(ws, prob) -> Bool
+
+Select the narrow BigFloat block scheduler used by the exact all-local
+equality-arrow path. Every Schur variable belongs to exactly one PSD block,
+so a worker that owns a complete block also owns every `d`/`v` destination
+that block updates. Block workspaces and status slots are disjoint, while
+`x`, `X`, `Y`, coefficients, and scalar targets are read-only. This is not a
+general permission to thread mutable BigFloat arithmetic.
+"""
+function use_owned_bigfloat_residual_path(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
+    T === BigFloat || return false
+    prob.dims.L >= 256 || return false
+    arrow = ws.arrow
+    arrow === nothing && return false
+    return _has_owned_bigfloat_equality_arrow(ws, arrow)
+end
+
+"""
+    use_owned_bigfloat_block_storage(ws, block_count=length(ws.blk)) -> Bool
+
+Whether complete PSD blocks and their scalar result slots may be scheduled in
+parallel for mutable `BigFloat` arithmetic. This deliberately recognizes only
+the all-local equality-arrow representation: a task owns every mutable matrix
+and Schur-variable destination associated with each assigned block. General
+BigFloat models remain serial.
+"""
+function use_owned_bigfloat_block_storage(
+    ws::Workspace{T},
+    block_count::Int=length(ws.blk),
+) where {T}
+    ws.thread_count > 1 || return false
+    T === BigFloat || return false
+    block_count >= 256 || return false
+    arrow = ws.arrow
+    arrow === nothing && return false
+    return _has_owned_bigfloat_equality_arrow(ws, arrow)
+end
+
+# Tiny 2x2 MPFR block kernels stop scaling before the tiled equality Gram.
+# On a dual-socket 128-core EPYC node, using all 128 tasks made these phases
+# 2--8x slower even though the disjoint Gram tiles continued to improve. Keep
+# the wide Gram scheduler, but merge precomputed block bins into at most 64
+# task streams. A task still owns complete blocks, and all scalar reductions
+# retain block order, so this changes scheduling only—not arithmetic order.
+const _OWNED_BIGFLOAT_BLOCK_TASK_CAP = 64
+
+@inline function _owned_bigfloat_block_task_count(bin_count::Int)
+    return max(1, min(bin_count, _OWNED_BIGFLOAT_BLOCK_TASK_CAP))
+end
+
+@inline function _owned_bigfloat_block_task_count(ws::Workspace)
+    return _owned_bigfloat_block_task_count(length(ws.block_bins))
+end
+
+function use_owned_bigfloat_block_loops(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
+    return use_owned_bigfloat_block_storage(ws, prob.dims.L)
+end
+
+function _owned_bigfloat_compute_residuals!(
+    ws::Workspace{BigFloat},
+    prob::SDPProblem{BigFloat},
+    x,
+    X,
+    y,
+    Y,
+    μ,
+    opts::SolverOptions{BigFloat};
+    factor::Bool=false,
+)
+    cons = prob.cons
+    L, _, n, k = prob.dims
+    task_count = _owned_bigfloat_block_task_count(ws)
+    copy_owned!(ws.d, prob.c)
+    @sync for task_index in 1:task_count
+        Threads.@spawn begin
+            for bin_index in task_index:task_count:length(ws.block_bins)
+                for block in ws.block_bins[bin_index]
+                    workspace = ws.blk[block]
+                    buildP_owned!(workspace.P, cons, block, x)
+                    kaxpby_owned!(
+                        -one(BigFloat),
+                        X[block],
+                        one(BigFloat),
+                        workspace.P,
+                    )
+                    kaxpby_owned!(
+                        -one(BigFloat),
+                        prob.C[block],
+                        one(BigFloat),
+                        workspace.P,
+                    )
+                    MA.operate_to!(
+                        ws.block_norms[block],
+                        copy,
+                        knrmInf(workspace.P),
+                    )
+                    # The all-local predicate guarantees that no other block
+                    # writes any active destination touched here.
+                    accumulate_v_owned!(
+                        ws.d,
+                        cons,
+                        block,
+                        Y[block],
+                        -one(BigFloat),
+                    )
+                end
+            end
+        end
+    end
+
+    if n > 0 && prob.B isa SparseMatrixCSC{BigFloat}
+        equality = prob.B::SparseMatrixCSC{BigFloat}
+        _sparse_bigfloat_gemv_owned!(ws.rtil, equality, y)
+        kaxpby_owned!(
+            -one(BigFloat),
+            ws.rtil,
+            one(BigFloat),
+            ws.d,
+        )
+        _sparse_bigfloat_transpose_gemv_owned!(
+            ws.q_rhs,
+            equality,
+            x,
+            task_count,
+        )
+        copy_owned!(ws.p, prob.b)
+        kaxpby_owned!(
+            -one(BigFloat),
+            ws.q_rhs,
+            one(BigFloat),
+            ws.p,
+        )
+    else
+        n > 0 && kmul_owned!(
+            ws.d,
+            prob.B,
+            y,
+            -one(BigFloat),
+            one(BigFloat),
+        )
+        copy_owned!(ws.p, prob.b)
+        n > 0 && kmul_owned!(
+            ws.p,
+            transpose(prob.B),
+            x,
+            -one(BigFloat),
+            one(BigFloat),
+        )
+    end
+    primal_residual = maximum(ws.block_norms; init=zero(BigFloat))
+    n > 0 &&
+        (primal_residual = max(primal_residual, knrmInf(ws.p)))
+    dual_residual = knrmInf(ws.d)
+    use_affine =
+        opts.parameter_strategy === :adaptive ||
+        (
+            opts.predictor === :sdpb &&
+            primal_residual < opts.ϵ_primal &&
+            dual_residual < opts.ϵ_dual
+        )
+
+    factor && fill!(ws.block_ok, true)
+    @sync for task_index in 1:task_count
+        Threads.@spawn begin
+            for bin_index in task_index:task_count:length(ws.block_bins)
+                for block in ws.block_bins[bin_index]
+                    workspace = ws.blk[block]
+                    kmul_owned!(
+                        workspace.R,
+                        X[block],
+                        Y[block],
+                        -one(BigFloat),
+                        zero(BigFloat),
+                    )
+                    if !use_affine
+                        @inbounds for index in 1:k[block]
+                            workspace.R[index, index] += μ[block]
+                        end
+                    end
+                    if factor
+                        copy_owned!(workspace.LX, X[block])
+                        primal_ok = kchol!(workspace.LX)
+                        copy_owned!(workspace.MY, Y[block])
+                        dual_ok = kchol!(workspace.MY)
+                        ws.block_ok[block] = primal_ok && dual_ok
+                    end
+                end
+            end
+        end
+    end
+    return (
+        primal_residual,
+        dual_residual,
+        !factor || all(ws.block_ok),
+    )
 end
 
 function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},
     x, X, y, Y, μ, opts::SolverOptions{T}; factor::Bool=false) where {T}
+    if use_owned_bigfloat_residual_path(ws, prob)
+        return _owned_bigfloat_compute_residuals!(
+            ws,
+            prob,
+            x,
+            X,
+            y,
+            Y,
+            μ,
+            opts;
+            factor=factor,
+        )
+    end
     if !use_threaded_block_loops(ws, prob)
         p_res, d_res = compute_residuals!(ws, prob, x, X, y, Y, μ, opts)
         blocks_ok = !factor || factor_blocks!(ws, X, Y)
@@ -226,11 +502,48 @@ function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},
     return p_res, d_res, (!factor || all(ws.block_ok))
 end
 
+function _owned_bigfloat_predictor_corrector_rhs!(
+    ws::Workspace{BigFloat},
+    prob::SDPProblem{BigFloat},
+    Y,
+)
+    zero_owned!(ws.v)
+    task_count = _owned_bigfloat_block_task_count(ws)
+    @sync for task_index in 1:task_count
+        Threads.@spawn begin
+            for bin_index in task_index:task_count:length(ws.block_bins)
+                for block in ws.block_bins[bin_index]
+                    workspace = ws.blk[block]
+                    kmul_owned!(workspace.Z, workspace.P, Y[block])
+                    kaxpby_owned!(
+                        -one(BigFloat),
+                        workspace.R,
+                        one(BigFloat),
+                        workspace.Z,
+                    )
+                    kcholsolve_owned!(workspace.LX, workspace.Z)
+                    # Each all-local variable is owned by this block only.
+                    accumulate_v_owned!(
+                        ws.v,
+                        prob.cons,
+                        block,
+                        workspace.Z,
+                        one(BigFloat),
+                    )
+                end
+            end
+        end
+    end
+    return ws.v
+end
+
 function threaded_predictor_corrector_rhs!(
     ws::Workspace{T},
     prob::SDPProblem{T},
     Y,
 ) where {T}
+    use_owned_bigfloat_block_loops(ws, prob) &&
+        return _owned_bigfloat_predictor_corrector_rhs!(ws, prob, Y)
     use_threaded_block_loops(ws, prob) ||
         return _predictor_corrector_rhs!(ws, prob, Y)
     for partial in ws.vpartial
@@ -261,6 +574,44 @@ function threaded_direction_blocks!(
     prob::SDPProblem{T},
     Y,
 ) where {T}
+    if use_owned_bigfloat_block_loops(ws, prob)
+        task_count = _owned_bigfloat_block_task_count(ws)
+        @sync for task_index in 1:task_count
+            Threads.@spawn begin
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        buildP_owned!(
+                            workspace.dX,
+                            prob.cons,
+                            block,
+                            ws.dx,
+                        )
+                        kaxpby_owned!(
+                            one(BigFloat),
+                            workspace.P,
+                            one(BigFloat),
+                            workspace.dX,
+                        )
+                        kmul_owned!(
+                            workspace.dY,
+                            workspace.dX,
+                            Y[block],
+                        )
+                        kaxpby_owned!(
+                            one(BigFloat),
+                            workspace.R,
+                            -one(BigFloat),
+                            workspace.dY,
+                        )
+                        kcholsolve_owned!(workspace.LX, workspace.dY)
+                        symmetrize_inplace!(workspace.dY)
+                    end
+                end
+            end
+        end
+        return ws
+    end
     if !use_threaded_block_loops(ws, prob)
         for l in 1:prob.dims.L
             bw = ws.blk[l]
@@ -316,35 +667,50 @@ function threaded_update_blocks!(
     primal_step::T,
     dual_step::T,
 ) where {T}
-    threaded =
+    owned_bigfloat = use_owned_bigfloat_block_storage(ws, length(X))
+    threaded = owned_bigfloat || (
         ws.thread_count > 1 &&
         length(X) > 1 &&
         thread_safe_arithmetic(T) &&
         sum(length, ws.block_bins; init=0) >= 256
+    )
 
     if threaded
-        @sync for bin in ws.block_bins
-            isempty(bin) && continue
+        task_count = owned_bigfloat ?
+                     _owned_bigfloat_block_task_count(ws) :
+                     length(ws.block_bins)
+        @sync for task_index in 1:task_count
             Threads.@spawn begin
-                @inbounds for block in bin
-                    workspace = ws.blk[block]
-                    trial_combine_owned!(
-                        X[block],
-                        X[block],
-                        primal_step,
-                        workspace.dX,
-                        workspace.W1[1, 1],
-                    )
-                    trial_combine_owned!(
-                        Y[block],
-                        Y[block],
-                        dual_step,
-                        workspace.dY,
-                        workspace.W1[1, 1],
-                    )
-                    ws.block_norms[block] = kdot(X[block], Y[block])
-                    ws.block_ok[block] =
-                        all(isfinite, X[block]) && all(isfinite, Y[block])
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    @inbounds for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        trial_combine_owned!(
+                            X[block],
+                            X[block],
+                            primal_step,
+                            workspace.dX,
+                            workspace.W1[1, 1],
+                        )
+                        trial_combine_owned!(
+                            Y[block],
+                            Y[block],
+                            dual_step,
+                            workspace.dY,
+                            workspace.W1[1, 1],
+                        )
+                        if owned_bigfloat
+                            kdot!(
+                                ws.block_norms[block],
+                                workspace.W1[1, 1],
+                                X[block],
+                                Y[block],
+                            )
+                        else
+                            ws.block_norms[block] = kdot(X[block], Y[block])
+                        end
+                        ws.block_ok[block] =
+                            all(isfinite, X[block]) && all(isfinite, Y[block])
+                    end
                 end
             end
         end
@@ -539,6 +905,38 @@ function threaded_mehrotra_corrector_rhs!(
     mu::T,
 ) where {T}
     target = sigma * mu
+    if use_owned_bigfloat_block_loops(ws, prob)
+        task_count = _owned_bigfloat_block_task_count(ws)
+        @sync for task_index in 1:task_count
+            Threads.@spawn begin
+                for bin_index in task_index:task_count:length(ws.block_bins)
+                    for block in ws.block_bins[bin_index]
+                        workspace = ws.blk[block]
+                        dimension = prob.dims.k[block]
+                        dimension == 0 && continue
+                        kmul_owned!(
+                            workspace.R,
+                            X[block],
+                            Y[block],
+                            -one(BigFloat),
+                            zero(BigFloat),
+                        )
+                        kmul_owned!(
+                            workspace.R,
+                            workspace.dX,
+                            workspace.dY,
+                            -one(BigFloat),
+                            one(BigFloat),
+                        )
+                        @inbounds for index in 1:dimension
+                            workspace.R[index, index] += target
+                        end
+                    end
+                end
+            end
+        end
+        return _owned_bigfloat_predictor_corrector_rhs!(ws, prob, Y)
+    end
     if !use_threaded_block_loops(ws, prob)
         for block in 1:prob.dims.L
             workspace = ws.blk[block]
@@ -923,6 +1321,8 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Spar
             return arrow.Sred
         end
         arrow.reduced_panel_ready = false
+        arrow.reduced_local_factors_ready = false
+        ensure_arrow_schur_partials!(arrow, length(bins))
         fill!(arrow.Sgg, zero(T))
         for l in eachindex(arrow.Dsrc)
             fill!(arrow.Dsrc[l], zero(T))
@@ -1091,7 +1491,9 @@ function threaded_line_search!(
     selected_rule = resolved_step_rule(ws, step_rule)
     use_fraction = selected_rule === :fraction_to_boundary
     if use_fraction
-        if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T)
+        owned_bigfloat = use_owned_bigfloat_block_storage(ws, L)
+        if nt <= 1 || L <= 1 ||
+           (!thread_safe_arithmetic(T) && !owned_bigfloat)
             return fraction_to_boundary_search!(
                 ws,
                 X,
@@ -1101,6 +1503,78 @@ function threaded_line_search!(
             )
         end
         bins = ws.block_bins
+        if owned_bigfloat
+            # `block_norms[p]` is the sole MPFR output owned by task p. Run the
+            # two sides in separate waves so no temporary BigFloat arrays are
+            # allocated and no mutable scalar can be written by two tasks.
+            task_count = _owned_bigfloat_block_task_count(ws)
+            @sync for task_index in 1:task_count
+                Threads.@spawn begin
+                    local_bound = one(BigFloat)
+                    for bin_index in task_index:task_count:length(bins)
+                        for block in bins[bin_index]
+                            workspace = ws.blk[block]
+                            local_bound = min(
+                                local_bound,
+                                fraction_to_boundary_bound!(
+                                    workspace.trialX,
+                                    X[block],
+                                    workspace.dX,
+                                ),
+                            )
+                        end
+                    end
+                    MA.operate_to!(
+                        ws.block_norms[task_index],
+                        copy,
+                        local_bound,
+                    )
+                end
+            end
+            boundX = one(BigFloat)
+            @inbounds for task_index in 1:task_count
+                boundX = min(boundX, ws.block_norms[task_index])
+            end
+            # `min` returns one of its mutable BigFloat operands. Preserve the
+            # primal bound before the dual wave reuses those scalar slots.
+            boundX = MA.mutable_copy(boundX)
+
+            @sync for task_index in 1:task_count
+                Threads.@spawn begin
+                    local_bound = one(BigFloat)
+                    for bin_index in task_index:task_count:length(bins)
+                        for block in bins[bin_index]
+                            workspace = ws.blk[block]
+                            local_bound = min(
+                                local_bound,
+                                fraction_to_boundary_bound!(
+                                    workspace.trialY,
+                                    Y[block],
+                                    workspace.dY,
+                                ),
+                            )
+                        end
+                    end
+                    MA.operate_to!(
+                        ws.block_norms[task_index],
+                        copy,
+                        local_bound,
+                    )
+                end
+            end
+            boundY = one(BigFloat)
+            @inbounds for task_index in 1:task_count
+                boundY = min(boundY, ws.block_norms[task_index])
+            end
+            return (
+                boundX < one(BigFloat) ?
+                primal_fraction_to_boundary * boundX :
+                one(BigFloat),
+                boundY < one(BigFloat) ?
+                dual_fraction_to_boundary * boundY :
+                one(BigFloat),
+            )
+        end
         boundsX = ones(T, length(bins))
         boundsY = ones(T, length(bins))
         @sync for (p, bin) in enumerate(bins)

@@ -66,13 +66,11 @@ function test_T2(::Type{T}; tol=1e-6) where {T}
 end
 
 # ---------------------------------------------------------------
-# T3 — T2 with the equality row duplicated (n=2, rank 1). Exercises
-# the pivoted-Cholesky fallback for a rank-deficient Q = B̃ᵀB̃ (§2.2).
-# A real bug was found here during development: LAPACK's
-# CholeskyPivoted \\ returns NaN on a rank-deficient system for
-# Float64 (unlike the generic BigFloat fallback, which happens to
-# degrade gracefully) — solve_kkt! now handles this explicitly
-# (kkt.jl:_solve_Q!), so this is asserted, not @test_broken.
+# T3 — T2 with the equality row duplicated (n=2, rank 1). Exercises the
+# rank-revealing QR fallback for a rank-deficient Q = B̃ᵀB̃ (§2.2). Older
+# Julia versions do not implement generic pivoted BigFloat Cholesky, and
+# LAPACK's Float64 CholeskyPivoted solve can return NaN on this system. The
+# automatic policy therefore uses QR for both arithmetic families.
 # ---------------------------------------------------------------
 function test_T3(::Type{T}; tol=1e-6) where {T}
     c, A, C, _, _ = t2_data(T)
