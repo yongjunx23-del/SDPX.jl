@@ -164,6 +164,7 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     certificate = SDPX.result_certificate(problem, result, options)
     validation_seconds = (time_ns() - validation_started) / 1.0e9
     selected = result.diagnostics.selected_algorithms
+    executed = result.termination.executed
 
     print_value("arithmetic", T === BigFloat ? "BigFloat256" : string(T))
     print_value("precision_bits", T === BigFloat ? precision(BigFloat) : 8 * sizeof(T))
@@ -198,12 +199,28 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     print_value("minimum_scalar_psd", validation.minimum_scalar_psd)
     print_value("objective_recomputed", validation.objective_recomputed)
     print_value("certificate_valid", certificate.valid)
-    print_value("executed_kkt", selected.kkt)
-    print_value("executed_gram", selected.gram)
-    print_value("effective_threads", selected.effective_threads)
-    print_value("schur_threads", selected.schur_threads)
-    print_value("lp_pack_threads", selected.lp_pack_threads)
-    print_value("factor_threads", selected.factor_threads)
+    # `selected_algorithms` is the pre-solve plan.  Dedicated LP dispatch is
+    # finalized after presolve/scaling, so the plan may deliberately retain a
+    # conservative generic label even when the reduced diagonal route ran.
+    # Report both labels; benchmark consumers must use the executed fields for
+    # kernel comparisons.
+    print_value("planned_kkt", selected.kkt)
+    print_value("planned_gram", selected.gram)
+    print_value("planned_effective_threads", selected.effective_threads)
+    print_value("planned_schur_threads", selected.schur_threads)
+    print_value("planned_lp_pack_threads", selected.lp_pack_threads)
+    print_value("planned_factor_threads", selected.factor_threads)
+    for (label, field) in (
+        ("executed_kkt", :kkt),
+        ("executed_gram", :gram),
+        ("effective_threads", :effective_threads),
+        ("schur_threads", :schur_threads),
+        ("lp_pack_threads", :lp_pack_threads),
+        ("factor_threads", :factor_threads),
+    )
+        hasproperty(executed, field) &&
+            print_value(label, getproperty(executed, field))
+    end
     print_value("warnings", join(result.diagnostics.warnings, " | "))
     for name in (
         :total,
