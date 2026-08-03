@@ -1854,6 +1854,18 @@ function solve_lp!(
     # factorization note below. Extended arithmetic uses a much smaller floor
     # than binary64 and escalates only after an actual factorization failure.
     relative_regularization = _lp_regularization_floor(T)
+    if T === BigFloat
+        # MPFR can resolve a much smaller pivot than this ill-conditioned
+        # moment LP can usefully distinguish.  A floor tied to the requested
+        # certificate tolerance prevents the reduced equality solve from
+        # producing enormous cancelling multipliers while retaining the
+        # requested digits (for 1e-40 tolerances this is 1e-52).  The
+        # arithmetic floor remains the lower bound for tighter requests.
+        relative_regularization = max(
+            relative_regularization,
+            opts.ϵ_gap * BigFloat("1e-12"),
+        )
+    end
     regularization = relative_regularization
     residual_seconds = 0.0
     gram_seconds = 0.0
