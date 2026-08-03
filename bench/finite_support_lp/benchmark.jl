@@ -207,12 +207,12 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     # conservative generic label even when the reduced diagonal route ran.
     # Report both labels; benchmark consumers must use the executed fields for
     # kernel comparisons.
-    print_value("planned_kkt", selected.kkt)
-    print_value("planned_gram", selected.gram)
-    print_value("planned_effective_threads", selected.effective_threads)
-    print_value("planned_schur_threads", selected.schur_threads)
-    print_value("planned_lp_pack_threads", selected.lp_pack_threads)
-    print_value("planned_factor_threads", selected.factor_threads)
+    print_value("planned_kkt", get(selected, :kkt, :unknown))
+    print_value("planned_gram", get(selected, :gram, :unknown))
+    print_value("planned_effective_threads", get(selected, :effective_threads, nothing))
+    print_value("planned_schur_threads", get(selected, :schur_threads, nothing))
+    print_value("planned_lp_pack_threads", get(selected, :lp_pack_threads, nothing))
+    print_value("planned_factor_threads", get(selected, :factor_threads, nothing))
     for (label, field) in (
         ("executed_kkt", :kkt),
         ("executed_gram", :gram),
