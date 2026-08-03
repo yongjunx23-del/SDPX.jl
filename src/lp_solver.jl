@@ -1839,6 +1839,20 @@ function solve_lp!(
     @inbounds for row in eachindex(z)
         z[row] = one(T)
     end
+    # The endpoint models in the finite-support family are deliberately
+    # degenerate: after feasibility is reached, an ill-conditioned equality
+    # multiplier can make a later iterate worse than an earlier one. Keep one
+    # owned snapshot of the best feasible/gap pair so an IterLimit or time
+    # limit never returns a numerically regressed iterate.  Snapshots reuse
+    # their storage, including MPFR scalars, and are copied only when the
+    # lexicographic merit improves.
+    best_x = alloc_zeros(T, variables)
+    best_s = alloc_zeros(T, inequalities)
+    best_y = alloc_zeros(T, equalities)
+    best_z = alloc_zeros(T, inequalities)
+    best_feasibility = T(Inf)
+    best_gap_relative = T(Inf)
+    best_valid = false
 
     status = NotStarted
     message = ""
@@ -1902,6 +1916,27 @@ function solve_lp!(
             maximum(abs, b; init=zero(T)),
         )
         dual_scale = one(T) + maximum(abs, c; init=zero(T))
+        feasibility_merit = max(
+            p_residual / primal_scale,
+            d_residual / dual_scale,
+        )
+        feasibility_tie = max(
+            T(1e-12),
+            abs(best_feasibility) * T(1e-12),
+        )
+        improves_best = !best_valid ||
+                        feasibility_merit < best_feasibility - feasibility_tie ||
+                        (abs(feasibility_merit - best_feasibility) <= feasibility_tie &&
+                         gap_relative < best_gap_relative)
+        if improves_best
+            copy_owned!(best_x, x)
+            copy_owned!(best_s, s)
+            copy_owned!(best_y, y)
+            copy_owned!(best_z, z)
+            best_feasibility = feasibility_merit
+            best_gap_relative = gap_relative
+            best_valid = true
+        end
         if p_residual / primal_scale <= opts.ϵ_primal &&
            d_residual / dual_scale <= opts.ϵ_dual &&
            gap_relative <= opts.ϵ_gap
@@ -2186,10 +2221,14 @@ function solve_lp!(
 
     # Return the original, unscaled model coordinates and preserve the public
     # 1×1-block result shape expected by MOI and the legacy dictionary API.
-    x_original = scaling.variable .* x
-    y_original = scaling.equality .* y
-    slack_original_reduced = s ./ scaling.inequality
-    dual_original_reduced = scaling.inequality .* z
+    x_work = best_valid ? best_x : x
+    y_work = best_valid ? best_y : y
+    s_work = best_valid ? best_s : s
+    z_work = best_valid ? best_z : z
+    x_original = scaling.variable .* x_work
+    y_original = scaling.equality .* y_work
+    slack_original_reduced = s_work ./ scaling.inequality
+    dual_original_reduced = scaling.inequality .* z_work
     slack_original = alloc_zeros(T, size(G_original, 1))
     _lp_mul_G!(
         slack_original,
