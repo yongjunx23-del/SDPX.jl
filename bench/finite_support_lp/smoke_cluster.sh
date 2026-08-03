@@ -25,6 +25,29 @@ export SDPX_WARMUP=1
 export SDPX_MAX_ITERATIONS="${SDPX_MAX_ITERATIONS:-120}"
 export SDPX_TIME_LIMIT="${SDPX_TIME_LIMIT:-300}"
 
+if [ "${SDPX_MINIMAL_ENV:-0}" = "1" ]; then
+  # The site image contains the solver's runtime dependencies but may not have
+  # optional test-only packages from the full release environment.  Build a
+  # job-local project that keeps only SDPX and MultiFloats while reusing the
+  # checked-in manifest entries for their transitive dependencies.
+  minimal_environment="$SDPX_RESULT_DIR/environment"
+  mkdir -p "$minimal_environment"
+  cp "$SDPX_ENVIRONMENT/Manifest.toml" "$minimal_environment/Manifest.toml"
+  sed -i '/^path = /c\\path = "'"$SDPX_SOURCE"'"' "$minimal_environment/Manifest.toml"
+  sed -i '/\[\[deps.MathOptInterface\]\]/,/^\[\[/{s/7b57dbe5d2c988a0c7a0ea977045e844e3d0b263/9f23c8c1667bd0b0e611110aaf80aa91c1bdf274/; s/version = "1.51.2"/version = "1.51.1"/}' "$minimal_environment/Manifest.toml"
+  sed -i '/\[\[deps.ForwardDiff\]\]/,/^\[\[/{s/73d5084cae45f9d0857776ad78cf303fec09eb02/2c5d0b0e12088cde2cf84afb2784415b1ea3dfee/; s/version = "1.4.3"/version = "1.4.1"/}' "$minimal_environment/Manifest.toml"
+  cat > "$minimal_environment/Project.toml" <<EOF
+name = "SDPXFiniteSupportLP"
+uuid = "d9b6ef2d-0d78-4a4f-9d2f-9fd0c4a8bf0c"
+version = "0.1.0"
+
+[deps]
+SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
+MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+EOF
+  export SDPX_ENVIRONMENT="$minimal_environment"
+fi
+
 if [ "${SDPX_INSTANTIATE:-0}" = "1" ]; then
   # Keep package installation isolated from the shared cluster depot.  This is
   # useful when the locked manifest is newer than the preloaded site image.
