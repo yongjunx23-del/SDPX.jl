@@ -25,6 +25,18 @@ export SDPX_WARMUP=1
 export SDPX_MAX_ITERATIONS="${SDPX_MAX_ITERATIONS:-120}"
 export SDPX_TIME_LIMIT="${SDPX_TIME_LIMIT:-300}"
 
+if [ "${SDPX_INSTANTIATE:-0}" = "1" ]; then
+  # Keep package installation isolated from the shared cluster depot.  This is
+  # useful when the locked manifest is newer than the preloaded site image.
+  mkdir -p "$SDPX_RESULT_DIR/depot"
+  export JULIA_DEPOT_PATH="$SDPX_RESULT_DIR/depot:$JULIA_DEPOT_PATH"
+  unset JULIA_PKG_OFFLINE
+  "$JULIA_BIN" --project="$SDPX_ENVIRONMENT" --startup-file=no \
+    -e 'using Pkg; Pkg.instantiate()' \
+    > "$SDPX_RESULT_DIR/instantiate.log" 2>&1
+  export JULIA_PKG_OFFLINE=true
+fi
+
 {
   printf 'pbs_job_id=%s\n' "$PBS_JOBID"
   printf 'host=%s\n' "$(hostname)"
