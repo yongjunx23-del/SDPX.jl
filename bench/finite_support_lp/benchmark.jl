@@ -163,11 +163,13 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     validation = independent_validation(result, objective, B, rhs)
     certificate = SDPX.result_certificate(problem, result, options)
     validation_seconds = (time_ns() - validation_started) / 1.0e9
-    selected = result.diagnostics.selected_algorithms
-    executed = hasproperty(result.termination, :executed) ?
-               result.termination.executed :
-               result.diagnostics === nothing ?
-               NamedTuple() : result.diagnostics.selected_algorithms
+    diagnostics = hasproperty(result, :diagnostics) ? result.diagnostics : nothing
+    selected = diagnostics !== nothing &&
+               hasproperty(diagnostics, :selected_algorithms) ?
+               diagnostics.selected_algorithms : NamedTuple()
+    termination = hasproperty(result, :termination) ? result.termination : NamedTuple()
+    executed = hasproperty(termination, :executed) ?
+               termination.executed : selected
 
     print_value("arithmetic", T === BigFloat ? "BigFloat256" : string(T))
     print_value("precision_bits", T === BigFloat ? precision(BigFloat) : 8 * sizeof(T))
@@ -183,7 +185,11 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     print_value("validation_seconds", validation_seconds)
     print_value("allocated_bytes", allocated)
     print_value("peak_rss_bytes", Sys.maxrss())
-    print_value("workspace_bytes", result.diagnostics.memory.workspace_bytes)
+    print_value(
+        "workspace_bytes",
+        diagnostics !== nothing && hasproperty(diagnostics, :memory) ?
+        diagnostics.memory.workspace_bytes : 0,
+    )
     print_value(
         "removed_dependent_equalities",
         result.diagnostics.presolve.removed_dependent_equalities,
@@ -224,7 +230,11 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
         hasproperty(executed, field) &&
             print_value(label, getproperty(executed, field))
     end
-    print_value("warnings", join(result.diagnostics.warnings, " | "))
+    print_value(
+        "warnings",
+        diagnostics !== nothing && hasproperty(diagnostics, :warnings) ?
+        join(diagnostics.warnings, " | ") : "",
+    )
     for name in (
         :total,
         :lp_core,
