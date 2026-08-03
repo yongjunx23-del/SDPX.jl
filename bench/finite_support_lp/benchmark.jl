@@ -129,10 +129,13 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     end
     maximum_iterations = parse(Int, get(ENV, "SDPX_MAX_ITERATIONS", "600"))
     time_limit = parse(Float64, get(ENV, "SDPX_TIME_LIMIT", "1800"))
+    parameter_strategy = Symbol(get(ENV, "SDPX_PARAMETER_STRATEGY", "adaptive"))
+    parameter_strategy in (:adaptive, :fixed) ||
+        error("SDPX_PARAMETER_STRATEGY must be adaptive or fixed")
     options = SDPX.SolverOptions{T}(
         algorithm=:lp,
         parameter_policy=:auto,
-        parameter_strategy=:adaptive,
+        parameter_strategy=parameter_strategy,
         presolve=true,
         scaling=:equilibrate,
         sparse=:auto,
