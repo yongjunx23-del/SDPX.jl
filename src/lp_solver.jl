@@ -1843,9 +1843,9 @@ function solve_lp!(
     # degenerate: after feasibility is reached, an ill-conditioned equality
     # multiplier can make a later iterate worse than an earlier one. Keep one
     # owned snapshot of the best feasible/gap pair so an IterLimit or time
-    # limit never returns a numerically regressed iterate.  Snapshots reuse
+    # limit never returns a numerically regressed iterate. Snapshots reuse
     # their storage, including MPFR scalars, and are copied only when the
-    # lexicographic merit improves.
+    # duality-gap merit improves (with feasibility as a tie-breaker).
     best_x = alloc_zeros(T, variables)
     best_s = alloc_zeros(T, inequalities)
     best_y = alloc_zeros(T, equalities)
@@ -1920,14 +1920,15 @@ function solve_lp!(
             p_residual / primal_scale,
             d_residual / dual_scale,
         )
-        feasibility_tie = max(
+        gap_tie = max(
             T(1e-12),
-            abs(best_feasibility) * T(1e-12),
+            abs(best_gap_relative) * T(1e-6),
         )
+        feasibility_tie = max(T(1e-12), abs(best_feasibility) * T(1e-6))
         improves_best = !best_valid ||
-                        feasibility_merit < best_feasibility - feasibility_tie ||
-                        (abs(feasibility_merit - best_feasibility) <= feasibility_tie &&
-                         gap_relative < best_gap_relative)
+                        gap_relative < best_gap_relative - gap_tie ||
+                        (abs(gap_relative - best_gap_relative) <= gap_tie &&
+                         feasibility_merit < best_feasibility - feasibility_tie)
         if improves_best
             copy_owned!(best_x, x)
             copy_owned!(best_s, s)
