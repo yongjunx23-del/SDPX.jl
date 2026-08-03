@@ -50,10 +50,11 @@ for arithmetic in Float64 Float64x4 BigFloat256; do
   run_one "$arithmetic"
 done
 
-# Run only the focused reduced-LP regression test on the compute node.
+# Run only the focused reduced-LP regression test on the compute node.  Including
+# the file directly avoids invoking the full package test suite at this gate.
 SDPX_BLAS_THREADS=1 "$JULIA_BIN" --project="$SDPX_ENVIRONMENT" \
   --startup-file=no -t 2 -e \
-  'using Pkg; Pkg.test("SDPX"; test_args=["lp_regressions.jl"], coverage=false)' \
+  "using SDPX; include(\"$SDPX_SOURCE/test/lp_regressions.jl\")" \
   > "$SDPX_RESULT_DIR/lp_regressions.log" 2>&1
 
 sha256sum "$SDPX_RESULT_DIR"/*.log > "$SDPX_RESULT_DIR/SHA256SUMS"
