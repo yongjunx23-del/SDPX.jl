@@ -2665,6 +2665,11 @@ own their storage and are copied only when the merit improves.  A 128-core
 normal-queue job on node147 ran Float64, Float64x4, and BigFloat256 with one
 Julia thread each, adaptive parameters, a warm-up solve, and 600 iterations.
 
+The first batch wrapper exited before Julia because its result-directory path
+had a typo; PBS reported zero CPU time and no solver output.  The path was
+corrected, the wrapper was resubmitted, and the successful measurements below
+come only from the corrected job.
+
 * Float64: 0.18234 s total (0.17525 s timed core), 9.02 MB allocated,
   1.355 GB peak RSS, gap `8.4422e-2`, normalized equality `1.0000`, and the
   same endpoint/iteration-limit behavior as the preceding run.
