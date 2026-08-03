@@ -2548,3 +2548,42 @@ timed out at the TCP connection layer on 2026-08-02.  In accordance with the
 request, no substitute solve or benchmark was run on the local Mac.  The next
 step is an immutable cluster syntax/unit gate, followed by 91-by-17,
 1,001-by-17, and 2,002-by-31 A/B runs for Float64, Float64x4, and BigFloat256.
+
+### P34 cluster smoke gate and executed-kernel audit
+
+The immutable candidate release `3ac5bcc836f31c434ef666b67bebf113ef4dfd73`
+was run on a normal-queue compute node (`node93`, eight allocated CPUs; Julia
+was intentionally started with one thread for the smoke gate).  The focused
+LP regression file passed all 81 assertions: high-precision Hessian 10/10,
+reduced standard-form system 26/26, and LP presolve 45/45.  The job exited
+with status 0 and used about 1.69 GiB peak RSS.
+
+The first smoke report appeared to show dense LU and pairwise extended
+precision kernels for Float64x4/BigFloat.  A compute-node type trace showed
+that both types do enter `LPDiagonalMatrix` and the reduced Cholesky route.  The
+discrepancy was in the benchmark driver: `result.diagnostics.selected_algorithms`
+is the conservative pre-solve plan, whereas the actual post-scaling dispatch
+is recorded in `result.termination.executed`.  A tiny Float64x4 and BigFloat
+solve confirmed `kkt=:diagonal_reduced_cholesky` and
+`gram=:reduced_equality_syrk`.  The driver was corrected to report both planned
+and executed labels; the executed labels are now the authoritative fields for
+kernel comparisons.  No solver algorithm change was made for this finding.
+
+The initial smoke numerical certificates remain false on the deliberately
+degenerate endpoint (the control has a raw equality residual around `1e24` in
+Float64 and the requested extended tolerances are stricter than the attainable
+scaled residual).  Independent normalized equality and objective values remain
+the required comparison gates; a full benchmark will report both raw and
+normalized residuals.
+
+### P35 certificate downgrade provenance fix
+
+The first rerun of the corrected driver exposed a real diagnostics bug: when
+`certify_final_result` downgraded an `Optimal` status to `Stalled`, it replaced
+the entire termination record with only the certificate failure.  The solve
+itself had completed the reduced LP route, but the benchmark then could not
+read `termination.executed` for extended arithmetic and aborted.  The
+certificate downgrade now merges its reason/failure fields into the existing
+termination record, retaining executed-kernel, equality-system, refinement,
+and fallback provenance.  The next smoke gate must verify this on all three
+arithmetic modes before the full matrix is submitted.

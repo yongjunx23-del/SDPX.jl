@@ -1118,11 +1118,21 @@ function certify_final_result(
     message = downgrade ?
               result.message * ". " * failure_message :
               result.message
-    termination = downgrade ? (
-        reason=:final_certificate_failed,
-        failures=copy(certificate.failures),
-        previous=result.termination.reason,
-    ) : result.termination
+    # Preserve the execution provenance when a valid-looking status is
+    # downgraded by final certification.  In particular, LP and sparse SDP
+    # dispatch records (`executed`, equality-system diagnostics, refinement
+    # counters, and fallback events) are produced before certification;
+    # replacing the entire NamedTuple here silently erased them and made
+    # benchmark reports claim that the conservative plan had run.
+    termination = downgrade ?
+                  merge(
+                      result.termination,
+                      (
+                          reason=:final_certificate_failed,
+                          failures=copy(certificate.failures),
+                          previous=result.termination.reason,
+                      ),
+                  ) : result.termination
     certified = SDPResult{T}(
         status,
         message,
