@@ -164,7 +164,10 @@ function run_benchmark(::Type{T}, model_path, direction, requested_threads) wher
     certificate = SDPX.result_certificate(problem, result, options)
     validation_seconds = (time_ns() - validation_started) / 1.0e9
     selected = result.diagnostics.selected_algorithms
-    executed = result.termination.executed
+    executed = hasproperty(result.termination, :executed) ?
+               result.termination.executed :
+               result.diagnostics === nothing ?
+               NamedTuple() : result.diagnostics.selected_algorithms
 
     print_value("arithmetic", T === BigFloat ? "BigFloat256" : string(T))
     print_value("precision_bits", T === BigFloat ? precision(BigFloat) : 8 * sizeof(T))

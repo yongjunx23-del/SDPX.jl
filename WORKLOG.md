@@ -2587,3 +2587,22 @@ certificate downgrade now merges its reason/failure fields into the existing
 termination record, retaining executed-kernel, equality-system, refinement,
 and fallback provenance.  The next smoke gate must verify this on all three
 arithmetic modes before the full matrix is submitted.
+
+### P36 provenance-fix smoke gate
+
+Release `120d8585b697e15a86c0969f4c8e94a30fd5abea` ran on a normal-queue
+128-core node (`node137`; Julia itself used one thread for the control models).
+The job completed with exit status 0, peak RSS about 1.52 GiB, and the focused
+LP suite passed 81/81 assertions.  All three logs now report the actual
+`diagonal_reduced_cholesky` / `reduced_equality_syrk` route, including the
+certificate-failure downgrade case.
+
+For the 91-by-17 control (one timed solve after one warm-up): Float64 took
+0.00548 s with 553,032 allocated bytes; Float64x4 took 0.06214 s with
+1,862,888 bytes; BigFloat256 took 0.22297 s with 48,704,360 bytes.  Their
+independent normalized equality residuals were `1.0`, `1.01924e-13`, and
+`4.68436e-23`, respectively; these deliberately degenerate endpoint runs are
+not certificates at the requested tolerances.  The objective values remain
+near one and the nonnegative/PSD scalar checks are valid within each
+arithmetic's reported residual.  This gate is retained; the full primary and
+secondary matrix is now safe to submit with the corrected reporting.
