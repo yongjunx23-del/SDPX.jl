@@ -2201,6 +2201,13 @@ function _solve_pipeline!(
                 "$(plan.threads) threads. Other scalar phases retain their " *
                 "ownership-safe scheduling and may scale less strongly.",
             )
+        elseif plan.schedule === :lp_bigfloat_panels
+            push!(
+                warnings,
+                "Native BigFloat LP assembly uses exclusive panel-row and " *
+                "Schur-tile ownership across $(plan.threads) threads; " *
+                "predictor, residual, and refinement phases remain serial.",
+            )
         else
             push!(
                 warnings,

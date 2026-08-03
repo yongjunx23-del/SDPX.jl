@@ -651,6 +651,37 @@ function _lp_extended_crossover(
 end
 
 """
+    _lp_bigfloat_thread_limit(classification, algorithm) -> Int
+
+The dedicated standard-form LP path owns disjoint BigFloat panel rows and
+Schur tiles, so it can safely use Julia threads.  Other BigFloat paths still
+use the conservative serial default because their mutable MPFR storage is not
+partitioned at this planning seam.  Keep the crossover based on the actual
+panel work rather than enabling threads for small LPs where task barriers
+dominate.
+"""
+@inline function _lp_bigfloat_thread_limit(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+)
+    algorithm === :lp_primal_dual || return 1
+    classification.arithmetic === :bigfloat || return 1
+    classification.equalities > 0 || return 1
+    work = Int128(classification.variables) *
+           Int128(max(classification.equalities, 1))
+    # The panel and Schur tile loops are safely threadable, but the remaining
+    # BigFloat predictor/residual reductions become synchronization-bound on
+    # this LP family.  These conservative bands are based on the cluster
+    # crossover sweep: 8 workers is best for 250k--1M scalar panel entries;
+    # only a substantially larger panel is allowed to use 16.  No default
+    # path is opened at 32+ workers, where MPFR task overhead dominates.
+    work < 250_000 && return 1
+    work < 1_000_000 && return 8
+    work < 4_000_000 && return 16
+    return 32
+end
+
+"""
     physical_core_count() -> Int
 
 Physical cores available, distinct from `Sys.CPU_THREADS`.
@@ -868,12 +899,20 @@ function build_execution_plan(
     owned_bigfloat_arrow_equalities =
         classification.arithmetic === :bigfloat &&
         _supports_owned_bigfloat_arrow_equalities(prob)
+    lp_bigfloat_thread_limit = _lp_bigfloat_thread_limit(
+        classification,
+        algorithm,
+    )
     selected_threads =
         classification.arithmetic === :bigfloat &&
         !mixed_arrow_threads &&
         !native_bigfloat_reduced &&
         !owned_bigfloat_arrow_equalities ?
-        1 : min(requested_threads, Base.Threads.nthreads())
+        min(
+            requested_threads,
+            Base.Threads.nthreads(),
+            lp_bigfloat_thread_limit,
+        ) : min(requested_threads, Base.Threads.nthreads())
     if classification.arithmetic === :float64 &&
        classification.cone === :sdp &&
        classification.maximum_block_size <= 2 &&
@@ -884,6 +923,8 @@ function build_execution_plan(
     end
     schedule = if selected_threads == 1
         :serial
+    elseif lp_bigfloat_thread_limit > 1
+        :lp_bigfloat_panels
     elseif owned_bigfloat_arrow_equalities
         :owned_bigfloat_equality_tiles
     elseif mixed_arrow_threads

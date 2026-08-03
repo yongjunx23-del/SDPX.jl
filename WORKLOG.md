@@ -2698,3 +2698,91 @@ system 26/26, and LP presolve regressions 45/45 (81/81 total).  The test job
 used about 1.06 GiB resident memory and completed in 84 seconds including
 Julia startup and compilation.  The production `current` symlink was not
 modified.
+
+### P42 Chapter 3 finite-energy LP cluster route and precision/thread sweep
+
+The isolated Chapter 3 project at
+`/public/home/yongjunxu/projects/chapter3-sdpx-lp` was compared with the
+older release path.  The old path selected a serial weighted outer-product
+Gram build and dense LU (`serial_weighted_outer_product`, `dense_lu`): a
+20-iteration, 408-variable/16-equality pilot took 213.17 s end-to-end, with
+about 77.34 s of steady LP core per boundary.  Candidate release `29bbfe1`
+selected the reduced LP route (`reduced_equality_syrk`,
+`diagonal_reduced_cholesky`) and completed the same pilot in 62.15 s including
+startup; steady core was 0.141/0.100 s per boundary.  Objective, residual, and
+minimum-weight fields were recorded independently; the 20-iteration pilot is
+an iteration-limit diagnostic, not a certificate.
+
+The isolated Chapter 3 driver now accepts explicit
+`--precision=float64|float64x4|bigfloat256` and `--threads=N` controls.  A
+small smoke job passed all three arithmetic paths.  Float64x4 and native
+BigFloat256 agreed to the displayed high-precision digits, while Float64
+showed the expected lower-precision early-iterate differences.
+
+On the 1,584-variable/47-equality, 20-iteration pilot, Float64x4 steady
+minimum-boundary LP core was 1.428/1.234/0.982/0.995/0.905/0.961 s at
+1/2/4/8/16/32 requested threads.  The solver used reduced SYRK and diagonal
+Cholesky throughout; its scheduler capped Schur workers at 10 for the 16- and
+32-thread cases.  Numerical fields were identical across thread counts
+(relative gap 3.1573e-3 for the minimum boundary and 6.3700e-4 for the
+maximum at 20 iterations), with peak RSS 1.62--1.83 GiB.  The reproducible
+best point is 16 Julia threads; 32 threads regressed slightly because
+predictor/residual work and synchronization dominate after SYRK.  A larger
+model sweep is queued before changing any solver default.
+
+### P43 native BigFloat panel threading for the Chapter 3 LP
+
+The production-sized Chapter 3 case (`n_mu=300`, `j_max=40`, `k_max=8`,
+12,300 variables, 47 independent equalities, 20 iterations) was profiled on
+node147 with construction precision 512 bits and a 256-bit native BigFloat
+solve.  The serial candidate spent about 24.9--25.3 s of each boundary core
+in weighted-panel/SYRK assembly; factorization was below 0.1 s.  The existing
+planner nevertheless forced every native BigFloat solve serial.
+
+The isolated release
+`ch3-lp-bigfloat-threads-c1178eb` enables threads only for the dedicated
+standard-form LP when each panel row and Schur tile has exclusive ownership.
+The original serial path remains the fallback for all other BigFloat models.
+On the same node, 20-iteration results were numerically identical at every
+thread count: the maximum-boundary audited objective was
+`-0.869841951302534453889472977476090943666931850166807968...`, the minimum
+was `0.411369163632267446781178158004261889897083760098...`, the relative gaps
+were `1.0354244890832694e-3` and `2.4805867005840241e-2`, and the 256-bit
+dual residuals remained below `7e-45`/`2e-42`.
+
+| requested threads | effective | LP core (s) | SYRK/panel (s) | end-to-end (s) | CPU | peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1 | 40.94 | 24.94 | 161.58 | 99% | 2.19 GiB |
+| 2 | 2 | 36.63 | 18.95 | 155.23 | 124% | 2.10 GiB |
+| 4 | 4 | 31.50 | 11.39 | 146.58 | 149% | 2.35 GiB |
+| 8 | 8 | 26.90 | 6.73 | 145.30 | 190% | 2.22 GiB |
+| 16 | 16 | 25.69 | 4.57 | 153.04 | 267% | 2.39 GiB |
+| 32 | 32 | 26.85 | 3.48 | 157.08 | 492% | 2.35 GiB |
+| 64 | 64 | 26.25 | 3.84 | 162.71 | 882% | 2.65 GiB |
+
+The stable end-to-end crossover is 8 threads (10.1% faster than serial);
+larger requests waste synchronization and memory even when SYRK alone keeps
+getting faster.  The planner now uses work bands of 1/8/16/32 workers at
+250k/1M/4M panel-entry thresholds, with this case selecting 8.  A validation
+run requesting 128 threads reported `effective_threads=8`, `lp_pack_threads=8`,
+and `schur_threads=8`, with identical certificates.  Its wall time was 229.5
+s and CPU utilization 1,797% because the Julia process itself was launched
+with a 128-thread pool; the recommended launch for this LP is therefore
+`--threads=8` (the internal selector cannot shrink Julia's already-created
+pool).  A small 256-bit smoke test after the schedule/diagnostic edit passed
+with exit status 0 and selected the serial branch below the 250k crossover.
+
+Conclusion: retain the ownership-safe LP BigFloat threading and conservative
+automatic crossover in the isolated candidate; do not promote a 128-thread
+launch for this problem.  The remaining high-priority optimization is to
+remove full-pool overhead in pre-solve/certificate stages when callers start
+Julia with far more threads than the selected LP worker count.
+
+### P44 candidate regression gate
+
+The corrected, fully instantiated candidate environment passed the focused LP
+suite on node147: high-precision Hessian regressions 10/10, reduced
+standard-form LP regressions 26/26, and LP presolve regressions 45/45 (81/81
+total, PBS exit status 0).  The first attempt used the Chapter 3 environment,
+which intentionally omits MathOptInterface; that harness failure was not a
+solver failure and was not counted as a regression.
