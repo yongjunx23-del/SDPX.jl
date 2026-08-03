@@ -2606,3 +2606,42 @@ not certificates at the requested tolerances.  The objective values remain
 near one and the nonnegative/PSD scalar checks are valid within each
 arithmetic's reported residual.  This gate is retained; the full primary and
 secondary matrix is now safe to submit with the corrected reporting.
+
+### P37 true-primary cluster A/B and scheduler diagnosis
+
+The first full “primary” sweep had used the 1,001-by-17 control. A corrected
+run used the actual 2,002-by-31 `all_spins_fixed_y_mu12_1_min.txt` model. The
+unchanged production Float64 path ran on node147 with 128 reserved CPUs and
+used one, four, and eight BLAS threads. Solver times were 40.590 s, 19.132 s,
+and 15.489 s; the dominant stages were Gram assembly (23.098 s, 11.334 s,
+7.939 s) and dense KKT factorization (16.126 s, 6.264 s, 5.800 s). All three
+runs reached the same 120-iteration limit and had the expected degenerate
+endpoint certificate failure (`relative_gap` 0.01784, 0.01736, 0.01800 and
+normalized equality residual approximately one).
+
+Two unconstrained 128-core candidate allocations were killed by PBS with
+SIGKILL before the shell wrote startup metadata (nodes 134 and 71). A minimal
+probe reproduced the same scheduler/node behavior. Targeting the healthy
+node147 allocation allowed the candidate to complete; production `current`
+was never modified.
+
+### P38 reduced LP kernel on the true primary
+
+The candidate’s exact permutation-diagonal reduction selected
+`diagonal_reduced_cholesky` and `reduced_equality_syrk` for all arithmetic
+modes. With the same node and one warm-up, Float64 at 120 iterations took
+0.04453 s (0.03625 s timed core, 8.32 MB allocations), versus 40.590 s for
+the dense baseline; its gap was 0.01705, slightly better than the baseline
+gap. The Float64x4 run took 6.235 s (6.001 s core, 22.70 MB allocations) and
+reduced the normalized equality residual to 2.27e-12. Increasing Float64x4
+threads was not beneficial for this 31-equality Schur: 24.22 s at two threads,
+26.58 s at four, and 24.26 s at eight for the deliberately 600-iteration
+stress run; the panel scheduler selected six workers at eight threads.
+
+Native BigFloat256 was substantially more accurate in equality feasibility
+but produced very large dual multipliers on this ill-conditioned endpoint
+(`relative_gap` about 2 and dual objective 6.36e4 at 120 iterations), even
+with the fixed parameter policy. This is a numerical robustness issue, not a
+kernel-speed result, so BigFloat promotion is blocked pending the
+regularization experiment. The 600-iteration stress run took 102.05 s core,
+allocated 7.67 GB, and was not accepted as a certificate.

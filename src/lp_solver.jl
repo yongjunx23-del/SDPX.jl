@@ -1859,11 +1859,16 @@ function solve_lp!(
         # moment LP can usefully distinguish.  A floor tied to the requested
         # certificate tolerance prevents the reduced equality solve from
         # producing enormous cancelling multipliers while retaining the
-        # requested digits (for 1e-40 tolerances this is 1e-52).  The
-        # arithmetic floor remains the lower bound for tighter requests.
+        # requested digits (for 1e-40 tolerances this is 1e-48).  Cap the
+        # tolerance-derived term so a very loose request cannot over-
+        # regularize, while the arithmetic floor remains the lower bound for
+        # tighter requests.
         relative_regularization = max(
             relative_regularization,
-            opts.ϵ_gap * BigFloat("1e-12"),
+            min(
+                BigFloat("1e-48"),
+                opts.ϵ_gap * BigFloat("1e-8"),
+            ),
         )
     end
     regularization = relative_regularization
