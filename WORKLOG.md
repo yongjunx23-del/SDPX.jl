@@ -2645,3 +2645,51 @@ with the fixed parameter policy. This is a numerical robustness issue, not a
 kernel-speed result, so BigFloat promotion is blocked pending the
 regularization experiment. The 600-iteration stress run took 102.05 s core,
 allocated 7.67 GB, and was not accepted as a certificate.
+
+### P39 tolerance-aware BigFloat regularization and snapshot selection
+
+The tolerance-aware native BigFloat regularization floor was tested on the
+true 2,002-variable/31-equality endpoint.  A `1e-52` floor reduced the
+120-iteration BigFloat relative gap from approximately `2` to `0.1699`; the
+conservative `min(1e-48, 1e-8*ϵ_gap)` cap then reduced it to `5.35e-5` with a
+normalized equality residual of `1.40e-12`.  Without an iterate snapshot, the
+600-iteration run drifted back to a gap of `5.62e-4`, so returning the last
+iterate was not robust on this degenerate endpoint.
+
+### P40 gap-first best-iterate validation on the primary LP
+
+Release `29bbfe164dc5540c8913850e0241c270f0e23cc` changes the LP snapshot
+policy to minimize relative duality gap first, with normalized feasibility as
+a tie-breaker.  The policy remains bounded and allocation-safe: snapshots
+own their storage and are copied only when the merit improves.  A 128-core
+normal-queue job on node147 ran Float64, Float64x4, and BigFloat256 with one
+Julia thread each, adaptive parameters, a warm-up solve, and 600 iterations.
+
+* Float64: 0.18234 s total (0.17525 s timed core), 9.02 MB allocated,
+  1.355 GB peak RSS, gap `8.4422e-2`, normalized equality `1.0000`, and the
+  same endpoint/iteration-limit behavior as the preceding run.
+* Float64x4: 32.956 s total/core, 24.998 MB allocated, 1.833 GB peak RSS,
+  gap `3.50969e-15`, normalized equality `6.12289e-18`, with objective
+  values both within `4e-15` of one.  This is a large improvement over the
+  previous late-iterate gap of about `4e-5`.
+* BigFloat256: 102.129 s total/core, 7.676 GB allocated, 1.596 GB peak RSS,
+  gap `3.50964e-15`, normalized equality `6.12290e-18`, with both objective
+  values within `4e-15` of one.  The snapshot copies add allocation traffic
+  but do not increase peak RSS; they prevent the late-iteration drift.
+
+The endpoint intentionally stops at the iteration limit and therefore does
+not produce a formal optimality certificate at the requested tolerance.  The
+independent normalized residual, objective agreement, and nonnegative/PSD
+checks are the meaningful gates for this degenerate model.  The scheduler
+started the job on node147 with all 128 CPUs reserved; Julia and BLAS were
+explicitly single-threaded, so the reported solve times are single-core
+measurements rather than inflated allocations.
+
+### P41 latest-code focused regression gate
+
+The latest release passed `test/lp_regressions.jl` on node147 with exit status
+zero: high-precision LP Hessian regressions 10/10, reduced standard-form
+system 26/26, and LP presolve regressions 45/45 (81/81 total).  The test job
+used about 1.06 GiB resident memory and completed in 84 seconds including
+Julia startup and compilation.  The production `current` symlink was not
+modified.
