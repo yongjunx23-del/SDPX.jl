@@ -167,7 +167,12 @@ end
         @test factor isa SDPX.LPReducedFactor{T}
         @test issuccess(factor)
         rhs = T.(1:(variables + equalities)) ./ T(17)
-        actual = copy(rhs)
+        # `copy(::Vector{BigFloat})` aliases the mutable MPFR objects.  The
+        # reduced solve is intentionally in-place, so the reference RHS must
+        # be independently owned or the direct solve below would see the
+        # already-mutated right-hand side.
+        actual = SDPX._owned_array_copy(T, rhs)
+        rhs_reference = SDPX._owned_array_copy(T, rhs)
         SDPX._lp_solve_factor!(factor, actual)
 
         H = SDPX.alloc_zeros(T, variables, variables)
@@ -178,12 +183,13 @@ end
         end
         K = SDPX.alloc_zeros(T, variables + equalities, variables + equalities)
         SDPX._lp_populate_kkt!(K, H, B, regularization)
-        expected = K \ rhs
+        expected = K \ rhs_reference
         relative_error = maximum(abs, actual - expected) /
                          max(one(T), maximum(abs, expected))
         tolerance = T === Float64 ? T(2e-11) :
                     T === Float64x4 ? T(1e-48) : T(1e-65)
         @test relative_error <= tolerance
+        @test rhs == rhs_reference
         @test isempty(workspace.H)
         @test isempty(workspace.K)
     end
