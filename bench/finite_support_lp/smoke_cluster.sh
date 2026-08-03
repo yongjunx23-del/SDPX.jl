@@ -16,6 +16,7 @@ set -euo pipefail
 
 mkdir -p "$SDPX_RESULT_DIR"
 export JULIA_PKG_OFFLINE=true
+export JULIA_DEPOT_PATH="${SDPX_DEPOT_PATH:-/public/home/yongjunxu/tools/julia-depot}"
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
