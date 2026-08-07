@@ -4,8 +4,10 @@ This benchmark measures the cost and numerical result of two ways to express
 the same conic problem:
 
 - `native`: construct SDPX block arrays directly and call `SDPX.solve!`;
-- `convex`: construct a DCP model with Convex.jl and call
-  `Convex.solve!(problem, SDPX.Optimizer)`.
+- `convex`: construct a DCP model with Convex.jl using SDPX's native triangle
+  PSD factory and call `SDPX.solve_convex!`;
+- `convex_square`: retain the historical full-square Convex PSD variable and
+  MOI symmetry bridge for compatibility comparisons.
 
 The three deterministic examples cover a nonnegative simplex LP, a minimum
 Euclidean-norm SOCP, and a MaxCut-style SDP relaxation. Each process runs only
@@ -52,6 +54,12 @@ for case in lp socp sdp; do
     --case=$case --frontend=convex --arithmetic=Float64 \
     --repetitions=5 --threads=1 --output=/tmp/${case}_convex.csv
 done
+
+# SDP-only compatibility comparison.
+julia -t 1 --project=bench/convex_frontend \
+  bench/convex_frontend/benchmark.jl \
+  --case=sdp --frontend=convex_square --arithmetic=Float64 \
+  --repetitions=5 --threads=1 --output=/tmp/sdp_convex_square.csv
 ```
 
 Use a separate process for each arithmetic type. `Float64x4` and
@@ -59,13 +67,11 @@ Use a separate process for each arithmetic type. `Float64x4` and
 should first be established with Float64. Set `SDPX_BLAS_THREADS` explicitly
 and avoid nested Julia/BLAS oversubscription.
 
-Convex emits square PSD cones. MathOptInterface's standard square-to-triangle
-bridge enforces symmetry and converts them to the triangle representation
-accepted by SDPX. Symbolically symmetric expressions, including ordinary
-`Convex.Semidefinite` variables, follow the intended bridge path. A native
-upper-triangle model avoids the full-matrix variables, symmetry equalities, and
-bridge/copy work. The benchmark therefore reports model construction
-separately rather than presenting only a single solve time.
+The default Convex SDP path constructs a symmetric expression from only the
+upper-triangle variables. `convex_square` measures the old
+`Convex.Semidefinite` path, where MathOptInterface's square-to-triangle bridge
+enforces symmetry and converts the cone. The benchmark reports model
+construction separately so this representation cost remains visible.
 
 `process_peak_rss_raw` is the process high-water mark and therefore includes
 package loading, compilation, and warm-up. The deterministic SDP weights are

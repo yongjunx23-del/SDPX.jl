@@ -12,22 +12,17 @@ using SDPX
 
 x = Convex.Variable(2)
 problem = Convex.minimize(2x[1] + x[2], [x >= 0, sum(x) == 1])
-solver = MOI.OptimizerWithAttributes(
-    SDPX.Optimizer,
-    "tolerance" => 1e-8,
-    MOI.NumberOfThreads() => 4,
-)
-Convex.solve!(problem, solver; silent=true)
+SDPX.solve_convex!(problem; tolerance=1e-8, threads=4)
 
 @assert Convex.termination_status(problem) == MOI.OPTIMAL
 println(problem.optval)
 println(Convex.evaluate(x))
 ```
 
-Qualify `Convex.solve!` because SDPX also exports `solve!`. Affine LP forms,
-Euclidean-norm/SOC forms, and real PSD forms are supported. Convex emits square
-PSD cones; the standard MOI bridge adds required symmetry equations and
-converts them to SDPX's triangle representation.
+Affine LP forms, Euclidean-norm/SOC forms, and real PSD forms are supported.
+For new PSD models, `SDPX.convex_semidefinite(n)` creates a symmetric Convex
+expression backed by only `n(n+1)/2` variables. The original square form remains
+available as `SDPX.convex_semidefinite(n; representation=:square)`.
 
 For extended precision, both ends must use the same coefficient type:
 
@@ -43,7 +38,12 @@ problem = Convex.minimize(
     [x >= zero(T), sum(x) == one(T)];
     numeric_type=T,
 )
-Convex.solve!(problem, SDPX.Optimizer{T}; silent=true)
+SDPX.solve_convex!(
+    problem;
+    numeric_type=T,
+    tolerance=T(1e-18),
+    threads=4,
+)
 ```
 
 Atoms requiring exponential, power, or other unsupported cones cannot yet be

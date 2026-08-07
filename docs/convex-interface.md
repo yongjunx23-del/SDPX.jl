@@ -1,8 +1,9 @@
 # Convex.jl interface guide
 
-SDPX can solve Convex.jl models through its MathOptInterface optimizer. This
-integration does not add Convex as a runtime dependency of SDPX: install and
-load Convex only in applications that use the DCP frontend.
+SDPX can solve Convex.jl models through its MathOptInterface optimizer. Convex
+is an optional package extension rather than a mandatory runtime dependency.
+Loading both packages enables a compact solver factory, one-call solve helper,
+and a native upper-triangle PSD-variable factory.
 
 ## Installation and first solve
 
@@ -12,7 +13,7 @@ Pkg.add("Convex")
 Pkg.add(url="https://github.com/yongjunx23-del/SDPX.jl")
 ```
 
-Both packages define `solve!`, so import Convex and qualify the call:
+The high-level SDPX helper avoids the `solve!` name shared by both packages:
 
 ```julia
 import Convex
@@ -27,14 +28,13 @@ problem = Convex.minimize(
     [nonnegative, normalization],
 )
 
-solver = MOI.OptimizerWithAttributes(
-    SDPX.Optimizer,
-    "tolerance" => 1e-8,
-    "max_iterations" => 300,
-    MOI.TimeLimitSec() => 60.0,
-    MOI.NumberOfThreads() => 4,
+SDPX.solve_convex!(
+    problem;
+    tolerance=1e-8,
+    maximum_iterations=300,
+    time_limit=60.0,
+    threads=4,
 )
-Convex.solve!(problem, solver; silent=true)
 
 @assert Convex.termination_status(problem) == MOI.OPTIMAL
 println("objective = ", problem.optval)
@@ -61,13 +61,37 @@ Atoms that require exponential, power, geometric-mean, relative-entropy, or
 other unsupported cones are not accepted. Complex Hermitian PSD modeling is
 also outside the current real-SDP interface.
 
-Convex represents PSD expressions with `PositiveSemidefiniteConeSquare`. MOI's
-standard square bridge enforces missing symmetry equations and passes one
-triangle to SDPX. Construct high-precision PSD expressions symbolically
-symmetrically when possible; the upstream bridge uses approximate coefficient
-tests to avoid redundant symmetry rows. Ordinary `Convex.Semidefinite`
-variables are symbolically consistent. A native SDPX upper-triangle model
-avoids the full square variable representation and its symmetry/copy overhead.
+## Native triangle PSD variables
+
+Use `SDPX.convex_semidefinite(n)` for new models. It owns only
+`n(n+1)/2` scalar variables, constructs the symmetric Convex expression by
+reusing each off-diagonal entry, and attaches the PSD constraint automatically:
+
+```julia
+X = SDPX.convex_semidefinite(20)  # triangle is the default
+problem = Convex.minimize(Convex.tr(X), [X[1, 2] == 1])
+SDPX.solve_convex!(problem; tolerance=1e-8, threads=4)
+```
+
+Existing `Convex.Semidefinite(n)` models remain supported. The explicit
+compatibility spelling is:
+
+```julia
+X = SDPX.convex_semidefinite(20; representation=:square)
+```
+
+The square representation owns `n^2` variables. MOI's standard bridge then
+adds symmetry equalities and converts it to a triangle cone. The native helper
+therefore reduces source variables by nearly two and avoids those symmetry
+rows without changing the resulting symmetric matrix.
+
+When the PSD dual is needed, request the attached constraint explicitly:
+
+```julia
+psd = SDPX.convex_semidefinite(20; return_metadata=true)
+X = psd.matrix
+# After solving: psd.constraint.dual
+```
 
 ## Float64x4
 
@@ -88,12 +112,12 @@ problem = Convex.minimize(
     [sum(x) == one(T)];
     numeric_type=T,
 )
-solver = MOI.OptimizerWithAttributes(
-    SDPX.Optimizer{T},
-    "tolerance" => T(1e-18),
-    MOI.NumberOfThreads() => 4,
+SDPX.solve_convex!(
+    problem;
+    numeric_type=T,
+    tolerance=T(1e-18),
+    threads=4,
 )
-Convex.solve!(problem, solver; silent=true)
 ```
 
 ## BigFloat
@@ -109,20 +133,20 @@ using SDPX
 
 setprecision(BigFloat, 256) do
     x = Convex.Variable(2)
-    X = Convex.Semidefinite(2)
+    X = SDPX.convex_semidefinite(2)
     problem = Convex.minimize(
         Convex.tr(X),
         [X[1, 2] == one(BigFloat)];
         numeric_type=BigFloat,
     )
-    solver = MOI.OptimizerWithAttributes(
-        SDPX.Optimizer{BigFloat},
-        "tolerance" => parse(BigFloat, "1e-24"),
-        "precision" => 256,
-        "working_precision_policy" => :fixed,
-        MOI.NumberOfThreads() => 1,
+    SDPX.solve_convex!(
+        problem;
+        numeric_type=BigFloat,
+        tolerance=parse(BigFloat, "1e-24"),
+        precision_bits=256,
+        working_precision_policy=:fixed,
+        threads=1,
     )
-    Convex.solve!(problem, solver; silent=true)
 end
 ```
 

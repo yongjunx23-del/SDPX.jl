@@ -6,16 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-08-07
+
 ### Added
 
-- Convex.jl 0.16 is now an explicitly tested modeling frontend through the
-  existing MathOptInterface optimizer. Float64 LP/SOCP/SDP and typed
-  Float64x4/BigFloat regressions cover canonicalization, square-PSD bridging,
-  result recovery, and solver attributes. A matched benchmark separates
-  native construction, Convex canonicalization, SDPX solver time, validation,
-  allocation, and peak RSS for deterministic LP, SOCP, and SDP examples.
+- Convex.jl 0.16 is now an optional package extension with `solve_convex!`, a
+  typed `convex_optimizer` factory, and `convex_semidefinite`. New PSD models
+  default to an upper-triangle representation with `n(n+1)/2` variables;
+  `representation=:square` and ordinary `Convex.Semidefinite` preserve the
+  historical interface. Float64, Float64x4, and BigFloat regressions cover LP,
+  SOCP, SDP, dual recovery, and both PSD representations.
+- `linear_program` and `solve_lp` provide a direct `G*x >= h`,
+  `Aeq*x = beq` frontend backed by active-only scalar rows.
 
 ### Changed
+
+- MOI scalar inequalities now retain only active coefficients, and equality
+  copy-in builds one sparse triplet matrix instead of dense column
+  temporaries. On a 512-variable, 1,024-inequality, 64-equality construction
+  benchmark, median copy time fell from about 35.5 ms to 11.1 ms and
+  allocation from 116.0 MB to 23.0 MB.
+- The matched Convex benchmark now compares native SDPX, the default Convex
+  triangle representation, and the legacy Convex square representation. On
+  the stable side-6 Float64 SDP, triangle modeling reduced the core dimension
+  from 36 variables/21 equalities to 21 variables/6 equalities and reduced
+  warmed end-to-end time from 8.66 ms to 8.45 ms with equivalent certificates.
 
 - The Float64x4 reduced-arrow backend now uses phase-specific worker counts,
   an eight-output-row SIMD Schur microkernel, a measured narrow-triangle tile

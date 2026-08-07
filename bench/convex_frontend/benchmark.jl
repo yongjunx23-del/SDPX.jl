@@ -69,29 +69,6 @@ function solver_options(::Type{T}, tolerance::T, threads::Int) where {T}
     )
 end
 
-function convex_optimizer(::Type{T}, tolerance::T, threads::Int) where {T}
-    attributes = Any[
-        MOI.RawOptimizerAttribute("tolerance") => tolerance,
-        MOI.RawOptimizerAttribute("max_iterations") => 400,
-        MOI.RawOptimizerAttribute("time_limit") => 1800.0,
-        MOI.RawOptimizerAttribute("sparse") => :auto,
-        MOI.RawOptimizerAttribute("parameter_policy") => :auto,
-        MOI.RawOptimizerAttribute("parameter_strategy") => :adaptive,
-        MOI.RawOptimizerAttribute("diagnostics") => true,
-        MOI.RawOptimizerAttribute("timing") => true,
-        MOI.NumberOfThreads() => threads,
-        MOI.Silent() => true,
-    ]
-    if T === BigFloat
-        push!(
-            attributes,
-            MOI.RawOptimizerAttribute("precision") => precision(BigFloat),
-            MOI.RawOptimizerAttribute("working_precision_policy") => :fixed,
-        )
-    end
-    return MOI.OptimizerWithAttributes(SDPX.Optimizer{T}, attributes...)
-end
-
 function lp_data(::Type{T}, variables::Int) where {T}
     variables >= 2 || error("LP size must be at least 2")
     denominator = T(variables - 1)
@@ -233,8 +210,15 @@ function build_convex_socp(::Type{T}, data) where {T}
     return (problem=problem, variable=x, data=data)
 end
 
-function build_convex_sdp(::Type{T}, data) where {T}
-    X = Convex.Semidefinite(data.side)
+function build_convex_sdp(
+    ::Type{T},
+    data,
+    representation::Symbol,
+) where {T}
+    X = SDPX.convex_semidefinite(
+        data.side;
+        representation=representation,
+    )
     problem = Convex.maximize(
         Convex.tr(data.weight * X),
         [LinearAlgebra.diag(X) == fill(one(T), data.side)];
@@ -243,10 +227,16 @@ function build_convex_sdp(::Type{T}, data) where {T}
     return (problem=problem, variable=X, data=data)
 end
 
-function build_convex(::Type{T}, case::Symbol, data) where {T}
+function build_convex(
+    ::Type{T},
+    case::Symbol,
+    data,
+    frontend::Symbol,
+) where {T}
     case === :lp && return build_convex_lp(T, data)
     case === :socp && return build_convex_socp(T, data)
-    return build_convex_sdp(T, data)
+    representation = frontend === :convex_square ? :square : :triangle
+    return build_convex_sdp(T, data, representation)
 end
 
 minimum_eigenvalue(matrix) = eigmin(Symmetric(matrix))
@@ -343,15 +333,26 @@ end
 function run_sample(::Type{T}, case, frontend, data, options, tolerance, threads) where {T}
     build_stats = frontend === :native ?
                   @timed(build_native(T, case, data)) :
-                  @timed(build_convex(T, case, data))
+                  @timed(build_convex(T, case, data, frontend))
     payload = build_stats.value
     solve_stats = if frontend === :native
         @timed SDPX.solve!(payload.problem, options)
     else
-        @timed Convex.solve!(
-            payload.problem,
-            convex_optimizer(T, tolerance, threads);
+        @timed SDPX.solve_convex!(
+            payload.problem;
+            numeric_type=T,
             silent=true,
+            tolerance=tolerance,
+            maximum_iterations=400,
+            time_limit=1800.0,
+            threads=threads,
+            sparse=:auto,
+            parameter_policy=:auto,
+            parameter_strategy=:adaptive,
+            diagnostics=true,
+            timing=true,
+            precision_bits=T === BigFloat ? precision(BigFloat) : nothing,
+            working_precision_policy=:fixed,
         )
     end
     validation_stats = frontend === :native ?
@@ -411,7 +412,9 @@ end
 
 function benchmark(::Type{T}, config) where {T}
     config.case in (:lp, :socp, :sdp) || error("case must be lp, socp, or sdp")
-    config.frontend in (:native, :convex) || error("frontend must be native or convex")
+    config.frontend in (:native, :convex, :convex_square) || error(
+        "frontend must be native, convex, or convex_square",
+    )
     config.threads <= Threads.nthreads() || error(
         "requested $(config.threads) solver threads, but Julia has $(Threads.nthreads())",
     )

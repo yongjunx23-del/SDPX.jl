@@ -73,6 +73,8 @@ const _STABLE_TOP_LEVEL_EXPORTS = (
     :solve,
     :solve!,
     :ingest,
+    :linear_program,
+    :solve_lp,
     :SDPProblem,
     :SolverOptions,
     :SDPResult,
@@ -86,6 +88,9 @@ const _STABLE_TOP_LEVEL_EXPORTS = (
     :result_certificate,
     :solve_summary,
     :Optimizer,
+    :convex_optimizer,
+    :convex_semidefinite,
+    :solve_convex!,
     :Experimental,
 )
 

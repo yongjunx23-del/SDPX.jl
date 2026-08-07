@@ -1,6 +1,6 @@
 # Package status, design decisions, and next steps
 
-Date: 2026-07-31. Version: v0.3.0.
+Date: 2026-08-07. Version: v0.3.1.
 
 ## What "production-quality Julia package" means here, and where SDPX stands
 
@@ -8,8 +8,8 @@ Date: 2026-07-31. Version: v0.3.0.
 | --- | --- |
 | `Pkg.add(url=...)` / `Pkg.develop` install | works; verified in a clean temporary depot |
 | `using SDPX` loads without extras | yes; MultiFloats/DoubleFloats/JLD2/AppleAccelerate are weakdeps with extensions |
-| Stable small API | `solve`/`solve!`/`ingest`/`SolverOptions`/`SDPResult` + MOI `Optimizer`; README labels stable-intent vs experimental |
-| JuMP/Convex/MOI | full wrapper, dedicated mapping/conversion regressions, Convex LP/SOCP/SDP tests, and `MOI.Test` coverage |
+| Stable small API | `solve`/`solve!`/`ingest`/`linear_program`/`solve_lp`/`SolverOptions`/`SDPResult` + MOI `Optimizer`; README labels stable-intent vs experimental |
+| JuMP/Convex/MOI | full wrapper, typed Convex helper API, packed-triangle PSD modeling by default, dedicated mapping/conversion regressions, Convex LP/SOCP/SDP tests, and `MOI.Test` coverage |
 | Precisions | Float64 / Float64x2 / Float64x4 / Double64 / BigFloat, one algorithm through the kernel layer |
 | Tests | examples-as-tests, acceptance gates, Aqua, and numerical regressions; the live total and pass/fail state are reported by CI rather than copied into documentation |
 | Quality gates | Aqua full pass: no piracy, no ambiguities, no unbound params, exports defined, deps/compat complete |

@@ -44,6 +44,20 @@ struct MOISOCConstraintInfo <: AbstractMOIConstraintInfo
     dimension::Int
 end
 
+"""
+    Optimizer{T}(; kwargs...)
+    Optimizer(; kwargs...)
+
+Create SDPX's non-incremental MathOptInterface optimizer. The untyped
+constructor uses `Float64`; select `Optimizer{Float64x4}` or
+`Optimizer{BigFloat}` for extended precision. JuMP and Convex.jl normally
+wrap this optimizer in an MOI cache and copy the completed model into SDPX in
+one pass.
+
+Common raw keywords include `tolerance`, `max_iterations`, `time_limit`,
+`threads`, `precision`, `verbosity`, and `sparse`. For Convex.jl,
+[`convex_optimizer`](@ref) provides a more explicit typed factory.
+"""
 mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     options::SolverOptions{T}
     problem::Union{Nothing,SDPProblem{T}}
@@ -404,9 +418,10 @@ function _append_psd_constraint!(
 end
 
 function _append_equality_constraint!(
-    columns::Vector{Vector{T}},
+    matrix_rows::Vector{Int},
+    matrix_columns::Vector{Int},
+    matrix_values::Vector{T},
     rhs::Vector{T},
-    constants::Vector{T},
     optimizer::Optimizer{T},
     source,
     index_map,
@@ -415,24 +430,60 @@ function _append_equality_constraint!(
 ) where {T,F}
     set = MOI.get(source, MOI.ConstraintSet(), source_index)
     function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
-    coefficients = zeros(T, optimizer.num_variables)
+    column = length(rhs) + 1
     constant = zero(T)
     if function_value isa MOI.ScalarAffineFunction{T}
         constant = function_value.constant
         for term in function_value.terms
-            coefficients[index_map[term.variable].value] += term.coefficient
+            iszero(term.coefficient) && continue
+            push!(matrix_rows, index_map[term.variable].value)
+            push!(matrix_columns, column)
+            push!(matrix_values, term.coefficient)
         end
     else
-        coefficients[index_map[function_value].value] = one(T)
+        push!(matrix_rows, index_map[function_value].value)
+        push!(matrix_columns, column)
+        push!(matrix_values, one(T))
     end
-    push!(columns, coefficients)
     push!(rhs, set.value - constant)
-    push!(constants, constant)
     destination_index = _new_constraint_index!(counts, F, MOI.EqualTo{T})
     index_map[source_index] = destination_index
     optimizer.constraint_info[destination_index] =
         MOIEqualityConstraintInfo{T}(length(rhs), constant)
     return nothing
+end
+
+function _scalar_coefficient_vector(
+    ::Type{T},
+    variables::Int,
+    coefficients::Dict{Int,T},
+    direction::T,
+) where {T}
+    active = Tuple{Int,T}[]
+    sizehint!(active, length(coefficients))
+    for (variable, coefficient) in coefficients
+        value = direction * coefficient
+        iszero(value) || push!(active, (variable, value))
+    end
+    sort!(active; by=first)
+    if length(active) == 1
+        variable, value = only(active)
+        return CompactScalarCoefficientVector(T, variables, variable, value)
+    end
+    active_variables = Vector{Int}(undef, length(active))
+    active_coefficients = Vector{SparseMatrixCSC{T,Int}}(undef, length(active))
+    @inbounds for position in eachindex(active)
+        variable, value = active[position]
+        active_variables[position] = variable
+        active_coefficients[position] = sparse([1], [1], T[value], 1, 1)
+    end
+    return ActiveSparseCoefficientVector(
+        T,
+        variables,
+        active_variables,
+        active_coefficients,
+        1,
+    )
 end
 
 function _append_scalar_inequality!(
@@ -468,30 +519,12 @@ function _append_scalar_inequality!(
         direction = -one(T)
         block_C = reshape(T[constant - bound], 1, 1)
     end
-    nonzeros = [
-        (variable, direction * coefficient)
-        for (variable, coefficient) in coefficients
-        if !iszero(direction * coefficient)
-    ]
-    block_A = if length(nonzeros) == 1
-        variable, value = only(nonzeros)
-        CompactScalarCoefficientVector(
-            T,
-            optimizer.num_variables,
-            variable,
-            value,
-        )
-    else
-        matrices = _empty_coefficient_vector(
-            empty_cache,
-            1,
-            optimizer.num_variables,
-        )
-        for (variable, value) in nonzeros
-            matrices[variable] = sparse([1], [1], T[value], 1, 1)
-        end
-        matrices
-    end
+    block_A = _scalar_coefficient_vector(
+        T,
+        optimizer.num_variables,
+        coefficients,
+        direction,
+    )
     push!(A, block_A)
     push!(C, block_C)
     destination_index = _new_constraint_index!(counts, F, S)
@@ -531,31 +564,12 @@ function _append_scalar_interval!(
     end
 
     function append_block!(direction::T, block_constant::T)
-        nonzeros = [
-            (variable, direction * coefficient)
-            for (variable, coefficient) in coefficients
-            if !iszero(direction * coefficient)
-        ]
-        block_A = if length(nonzeros) == 1
-            variable, value = only(nonzeros)
-            CompactScalarCoefficientVector(
-                T,
-                optimizer.num_variables,
-                variable,
-                value,
-            )
-        else
-            matrices = _empty_coefficient_vector(
-                empty_cache,
-                1,
-                optimizer.num_variables,
-            )
-            for (variable, value) in nonzeros
-                matrices[variable] =
-                    sparse([1], [1], T[value], 1, 1)
-            end
-            matrices
-        end
+        block_A = _scalar_coefficient_vector(
+            T,
+            optimizer.num_variables,
+            coefficients,
+            direction,
+        )
         push!(A, block_A)
         push!(C, reshape(T[block_constant], 1, 1))
         return length(A)
@@ -721,9 +735,10 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
 
     A = SparseCoefficientVector{T}[]
     C = Matrix{T}[]
-    equality_columns = Vector{T}[]
+    equality_rows = Int[]
+    equality_columns = Int[]
+    equality_values = T[]
     equality_rhs = T[]
-    equality_constants = T[]
     counts = Dict{Any,Int}()
     empty_cache = Dict{Int,SparseMatrixCSC{T,Int}}()
 
@@ -742,9 +757,10 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
                 )
             elseif S <: MOI.EqualTo{T}
                 _append_equality_constraint!(
+                    equality_rows,
                     equality_columns,
+                    equality_values,
                     equality_rhs,
-                    equality_constants,
                     optimizer,
                     source,
                     index_map,
@@ -810,10 +826,17 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
         push!(C, reshape(T[-one(T)], 1, 1))
     end
 
-    B = zeros(T, optimizer.num_variables, length(equality_columns))
-    for column in eachindex(equality_columns)
-        copyto!(view(B, :, column), equality_columns[column])
-    end
+    equality_count = length(equality_rhs)
+    sparse_B = sparse(
+        equality_rows,
+        equality_columns,
+        equality_values,
+        optimizer.num_variables,
+        equality_count,
+    )
+    equality_slots = optimizer.num_variables * equality_count
+    B = equality_slots > 0 && nnz(sparse_B) * 4 > equality_slots ?
+        Matrix(sparse_B) : sparse_B
     c, objective_constant, sense = _objective_data(optimizer, source, index_map)
     optimizer.sense = sense
     optimizer.objective_constant = objective_constant

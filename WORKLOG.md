@@ -2892,3 +2892,50 @@ formal certificates at identical tolerance on this platform, and is now the
 benchmark default.  The harness also records primal/dual objectives,
 relative gap, primal/dual residuals, and uses the requested tolerance rather
 than the previous loose `1e-6` external Convex gate.
+
+## 2026-08-07 — Native LP and Convex triangle frontend
+
+### Retained changes
+
+- Added `linear_program` and `solve_lp`, which accept standard LP matrices and
+  construct active-only scalar cone rows. Sparse rows are traversed after one
+  CSC transpose, so setup is proportional to stored coefficients.
+- MOI multi-variable scalar inequalities now use
+  `ActiveSparseCoefficientVector`; equality functions are accumulated once as
+  sparse triplets and densified only above a 25% structural density crossover.
+- Added an optional Convex extension with `convex_optimizer`, `solve_convex!`,
+  and `convex_semidefinite`. The PSD helper defaults to triangle variables and
+  retains `representation=:square`. A single sparse unpack map replaced an
+  initially tested hcat/vcat expression tree because the tree added measurable
+  canonicalization overhead.
+
+### Model-copy benchmark
+
+The deterministic local model has 512 variables, 1,024 four-active
+inequalities, and 64 four-active equalities. Five warmed `MOI.copy_to` samples
+were measured before and after the change.
+
+| implementation | median time | allocated bytes |
+|---|---:|---:|
+| expanded rows + dense equality temporaries | 35.5 ms | 116,001,920 |
+| active rows + sparse equality triplets | 11.1 ms | 23,026,064 |
+
+This is a 3.2x construction speedup and a 5.0x allocation reduction.
+
+### Convex PSD representation benchmark
+
+Five warmed Float64 samples used one Julia, solver, and BLAS thread on the
+same Apple host. All variants solved the deterministic side-6 SDP in 11
+iterations and passed the `1e-8` certificate gate.
+
+| frontend | core dimensions `(variables, equalities)` | core | end-to-end | total allocation |
+|---|---:|---:|---:|---:|
+| native SDPX | (21, 6) | 5.204 ms | 5.294 ms | 1,394,496 B |
+| Convex native triangle | (21, 6) | 5.317 ms | 8.447 ms | 2,102,720 B |
+| Convex legacy square | (36, 21) | 5.437 ms | 8.663 ms | 2,181,496 B |
+
+The default triangle path is 2.5% faster end to end than the compatible square
+path at this small stable size and avoids its quadratic symmetry expansion.
+The objectives differ only within the independently accepted Float64 solve
+tolerance. Focused validation passed 9 native-LP, 97 MOI, 72 API-surface, and
+74 Convex assertions before the full package gate.

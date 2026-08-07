@@ -1,7 +1,100 @@
 using SDPX
 using LinearAlgebra
 using MultiFloats: Float64x4
+using SparseArrays
 using Test
+
+@testset "native LP frontend" begin
+    G = sparse(
+        [1, 2, 3, 3],
+        [1, 2, 1, 2],
+        [1.0, 1.0, 1.0, 1.0],
+        3,
+        2,
+    )
+    Aeq = sparse([1, 1], [1, 2], [1.0, 1.0], 1, 2)
+    problem = SDPX.linear_program(
+        [1.0, 2.0],
+        G,
+        [1.0, 1.0, 3.0];
+        Aeq=Aeq,
+        beq=[3.0],
+        sparse=true,
+        verbosity=0,
+    )
+    @test problem.dims == (L=3, m=2, n=1, k=[1, 1, 1])
+    @test problem.B isa SparseMatrixCSC{Float64,Int}
+    @test problem.cons.Asp[1] isa
+          SDPX.CompactScalarCoefficientVector{Float64}
+    @test problem.cons.Asp[3] isa
+          SDPX.ActiveSparseCoefficientVector{Float64}
+    result = SDPX.solve(
+        problem;
+        tolerance=1e-8,
+        threads=1,
+        verbosity=0,
+    )
+    @test result.status == SDPX.Optimal
+    @test result.x ≈ [2.0, 1.0] rtol=1e-7
+    @test result.pObj ≈ 4.0 rtol=1e-7
+
+    one_call = SDPX.solve_lp(
+        [1.0, 2.0],
+        G,
+        [1.0, 1.0, 3.0];
+        Aeq=Aeq,
+        beq=[3.0],
+        sparse=true,
+        tolerance=1e-8,
+        threads=1,
+        verbosity=0,
+    )
+    @test one_call.status == SDPX.Optimal
+    @test one_call.x ≈ result.x rtol=1e-7
+
+    @testset "typed one-call frontend — $T" for
+        (T, tolerance, rtol) in (
+            (Float64x4, Float64x4(1e-10), Float64x4(1e-8)),
+        )
+        typed = SDPX.solve_lp(
+            T[1, 2],
+            sparse([1, 2, 3, 3], [1, 2, 1, 2], T[1, 1, 1, 1], 3, 2),
+            T[1, 1, 3];
+            Aeq=sparse([1, 1], [1, 2], T[1, 1], 1, 2),
+            beq=T[3],
+            T=T,
+            sparse=true,
+            tolerance=tolerance,
+            threads=1,
+            verbosity=0,
+        )
+        @test typed.status == SDPX.Optimal
+        @test eltype(typed.x) == T
+        @test typed.x ≈ T[2, 1] rtol=rtol
+    end
+
+    setprecision(BigFloat, 128) do
+        T = BigFloat
+        typed = SDPX.solve_lp(
+            T[1, 2],
+            sparse([1, 2, 3, 3], [1, 2, 1, 2], T[1, 1, 1, 1], 3, 2),
+            T[1, 1, 3];
+            Aeq=sparse([1, 1], [1, 2], T[1, 1], 1, 2),
+            beq=T[3],
+            T=T,
+            sparse=true,
+            tolerance=parse(T, "1e-12"),
+            precision=128,
+            working_precision_policy=:fixed,
+            threads=1,
+            verbosity=0,
+        )
+        @test typed.status == SDPX.Optimal
+        @test eltype(typed.x) == BigFloat
+        @test precision(first(typed.x)) == 128
+        @test typed.x ≈ BigFloat[2, 1] rtol=big"1e-10"
+    end
+end
 
 function lp_regression_problem(
     c::Vector{T},

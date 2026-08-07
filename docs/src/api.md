@@ -9,6 +9,8 @@ prefixed with `_`, is internal and may change without notice.
 solve
 solve!
 ingest
+linear_program
+solve_lp
 SolverOptions
 SDPResult
 SolveStatus
@@ -64,6 +66,13 @@ See the repository's `docs/julia-interface.md` for the full JuMP guide,
 including `GenericModel{Float64x4}` for extended precision.
 See `docs/convex-interface.md` for Convex atom coverage, typed models, and
 frontend-overhead benchmarks.
+
+```@docs
+Optimizer
+convex_optimizer
+convex_semidefinite
+solve_convex!
+```
 
 ## Legacy interface
 

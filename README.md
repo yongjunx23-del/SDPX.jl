@@ -377,6 +377,27 @@ opts = SolverOptions(
 )
 ```
 
+Linear programs have a compact native frontend. It accepts ordinary LP rows
+directly and stores only active coefficients:
+
+```julia
+G = [1.0 0.0; 0.0 1.0; 1.0 1.0]
+problem = linear_program(
+    [1.0, 2.0], G, [1.0, 1.0, 3.0];
+    Aeq=[1.0 1.0], beq=[3.0],
+)
+result = solve(problem; tolerance=1e-8, threads=4)
+
+# One-call equivalent:
+result = solve_lp(
+    [1.0, 2.0], G, [1.0, 1.0, 3.0];
+    Aeq=[1.0 1.0], beq=[3.0], tolerance=1e-8,
+)
+```
+
+The convention is `G*x >= h` and `Aeq*x = beq`. Existing scalar-block
+`ingest` calls remain fully supported.
+
 For very large block-arrow inputs where each PSD block touches only a small
 subset of the global variables, callers can avoid allocating an `L × m`
 mostly-empty reference grid:
@@ -463,12 +484,12 @@ supported forms, options, precision types, and current limitations.
 
 ## Convex.jl
 
-Convex.jl can use the same `SDPX.Optimizer` through MathOptInterface. Qualify
-`Convex.solve!` because both packages provide a function named `solve!`:
+Convex.jl support is loaded as an optional extension. The high-level helper
+keeps solver configuration concise, while `convex_semidefinite` defaults to an
+SDPX-native upper-triangle representation:
 
 ```julia
 import Convex
-import MathOptInterface as MOI
 using SDPX
 
 x = Convex.Variable(2)
@@ -476,17 +497,20 @@ problem = Convex.minimize(
     2x[1] + x[2],
     [x >= 0, sum(x) == 1],
 )
-solver = MOI.OptimizerWithAttributes(
-    SDPX.Optimizer,
-    "tolerance" => 1e-8,
-    MOI.NumberOfThreads() => 4,
-)
-Convex.solve!(problem, solver; silent=true)
+SDPX.solve_convex!(problem; tolerance=1e-8, threads=4)
+
+X = SDPX.convex_semidefinite(3)
+sdp = Convex.minimize(Convex.tr(X), [X[1, 2] == 1])
+SDPX.solve_convex!(sdp; tolerance=1e-8, threads=4)
 
 problem.status
 problem.optval
 Convex.evaluate(x)
 ```
+
+Use `convex_semidefinite(n; representation=:square)` or the original
+`Convex.Semidefinite(n)` for compatibility. The native default uses
+`n(n+1)/2` variables and avoids bridge-generated symmetry equalities.
 
 Convex automatically caches the completed model and applies MOI bridges for
 SDPX's non-incremental interface. Its affine, second-order-cone, and real PSD

@@ -31,6 +31,7 @@ function moi_sparse_conversion_model(variables::Int)
         [
             MOI.ScalarAffineTerm(2.0, x[1]),
             MOI.ScalarAffineTerm(-1.0, x[1]),
+            MOI.ScalarAffineTerm(0.5, x[2]),
             MOI.ScalarAffineTerm(0.0, x[5]),
         ],
         0.0,
@@ -186,10 +187,16 @@ end
         MOI.copy_to(optimizer, model)
         cons = optimizer.problem.cons
         @test cons isa SDPX.SparseCons{Float64}
-        @test any(==([1]), cons.active)
+        @test any(==([1, 2]), cons.active)
         @test any(==([2, 3]), cons.active)
         @test any(==([1, 64]), cons.active)
-        @test sum(length, cons.active) == 5
+        @test sum(length, cons.active) == 6
+        @test any(
+            block -> block isa
+                     SDPX.ActiveSparseCoefficientVector{Float64},
+            cons.Asp,
+        )
+        @test optimizer.problem.B isa SparseMatrixCSC{Float64,Int}
 
         for block in eachindex(cons.Asp)
             inactive = setdiff(1:optimizer.num_variables, cons.active[block])

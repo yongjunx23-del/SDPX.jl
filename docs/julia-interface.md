@@ -30,6 +30,27 @@ arithmetic, removes dependent equalities, scales the model, selects the
 kernel and schedule, and tunes the initialization. `solve!` with an explicit
 `SolverOptions` remains the expert interface.
 
+### Native LP frontend
+
+LP callers do not need to manufacture one `1×1` PSD block per inequality:
+
+```julia
+problem = SDPX.linear_program(
+    c,
+    G,
+    h;
+    Aeq=Aeq,
+    beq=beq,
+    sparse=:auto,
+)
+result = SDPX.solve(problem; tolerance=1e-8, threads=4)
+```
+
+This represents `G*x >= h` and `Aeq*x = beq`. Sparse inputs are traversed in
+`O(nnz)` setup work, each inequality retains only its active variables, and
+sparse equalities remain sparse until the dedicated LP engine chooses its
+runtime formulation. `SDPX.solve_lp(c, G, h; ...)` is the one-call form.
+
 BigFloat uses `working_precision_policy=:auto` by default. Optionally set
 `minimum_working_precision_bits=192`; use
 `working_precision_policy=:fixed` only when a fixed MPFR width is required.

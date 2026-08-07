@@ -89,7 +89,68 @@ function minimum_eigenvalue_2x2(matrix::AbstractMatrix{T}) where {T}
     return (a + d - sqrt((a - d)^2 + T(4) * b^2)) / T(2)
 end
 
+function solve_triangle_convex_sdp(
+    ::Type{T},
+    tolerance::T;
+    representation::Symbol=:triangle,
+) where {T<:AbstractFloat}
+    psd = SDPX.convex_semidefinite(
+        2;
+        representation=representation,
+        return_metadata=true,
+    )
+    X = psd.matrix
+    problem = Convex.minimize(
+        Convex.tr(X),
+        [X[1, 2] == one(T)];
+        numeric_type=T,
+    )
+    SDPX.solve_convex!(
+        problem;
+        numeric_type=T,
+        tolerance=tolerance,
+        maximum_iterations=200,
+        threads=1,
+        verbosity=0,
+    )
+    return problem, X, psd
+end
+
 @testset "Convex.jl frontend" begin
+    @testset "SDPX Convex API defaults to native triangle variables" begin
+        triangle_problem, triangle_X, triangle_psd =
+            solve_triangle_convex_sdp(Float64, 1e-8)
+        square_problem, square_X, square_psd = solve_triangle_convex_sdp(
+            Float64,
+            1e-8;
+            representation=:square,
+        )
+        @test Convex.termination_status(triangle_problem) ==
+              CONVEX_MOI.OPTIMAL
+        @test Convex.termination_status(square_problem) ==
+              CONVEX_MOI.OPTIMAL
+        @test triangle_problem.optval ≈ 2.0 rtol=1e-7
+        @test square_problem.optval ≈ triangle_problem.optval rtol=1e-7
+        @test Matrix(Convex.evaluate(triangle_X)) ≈
+              Matrix(Convex.evaluate(square_X)) rtol=1e-7
+        triangle_raw = CONVEX_MOI.get(
+            triangle_problem.model,
+            CONVEX_MOI.RawSolver(),
+        )
+        square_raw = CONVEX_MOI.get(
+            square_problem.model,
+            CONVEX_MOI.RawSolver(),
+        )
+        @test length(triangle_raw.x) == 3
+        @test length(square_raw.x) == 4
+        @test triangle_psd.constraint.dual !== nothing
+        @test square_psd.constraint.dual !== nothing
+        @test_throws ArgumentError SDPX.convex_semidefinite(
+            2;
+            representation=:invalid,
+        )
+    end
+
     @testset "LP canonicalization and result recovery — $T" for
         (T, tolerance, rtol) in (
             (Float64, 1e-9, 1e-7),
