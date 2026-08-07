@@ -2840,3 +2840,16 @@ All six smoke certificates passed.  The native/Convex SDP objectives were
 Float64 validation gate.  These numbers are functional smoke data, not the
 final performance comparison; repeat medians on one cluster node are required
 before drawing a speed conclusion.
+
+The first cluster gate (`199298.node220`, node56) passed 5,865 assertions but
+errored in the Float64 square-PSD integration case before benchmarks started.
+A focused 3-by-3 diagnostic showed a hardware-stable numerical crossover:
+the `1e-9` request ended in `NumericalBreakdown` after an accurate gap but a
+`4.10e-7` dual residual, while `1e-8` and `1e-7` were `Optimal` in every run.
+At `1e-8` the objective was `2.000000001600999`, the gap was `1.60e-9`, and
+the dual residual was `2.13e-33`.  The frontend regression now uses the
+package's standard Float64 `1e-8` integration tolerance and checks termination
+before attempting variable recovery.  This does not weaken solver accuracy
+tests: native Float64 and extended-precision tolerance stress remain in their
+dedicated suites.  The failed gate produced no benchmark CSV and was excluded
+from performance results.
