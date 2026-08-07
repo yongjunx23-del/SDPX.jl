@@ -847,6 +847,13 @@ function MOI.get(::Optimizer, ::MOI.SolverVersion)
     return version === nothing ? "unknown" : string(version)
 end
 MOI.get(optimizer::Optimizer, ::MOI.RawSolver) = optimizer.result
+# A CachingOptimizer maps model-attribute values back through its source index
+# map. `SDPResult` contains no MOI variable or constraint indices, so it must
+# pass through unchanged. Convex.jl automatically inserts this cache because
+# SDPX is non-incremental; without the attribute-specific method,
+# `MOI.get(problem.model, MOI.RawSolver())` fails after an otherwise successful
+# Convex solve.
+MOI.Utilities.map_indices(::Any, ::MOI.RawSolver, result::SDPResult) = result
 MOI.get(optimizer::Optimizer, ::MOI.NumberOfVariables) = optimizer.num_variables
 MOI.get(optimizer::Optimizer, ::MOI.ObjectiveSense) = optimizer.sense
 MOI.set(optimizer::Optimizer, ::MOI.ObjectiveSense, sense) =

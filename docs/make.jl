@@ -18,6 +18,7 @@ makedocs(;
             "Quick start" => "quickstart.md",
             "Precision" => "precision.md",
             "JuMP and MOI" => "jump.md",
+            "Convex.jl" => "convex.md",
         ],
         "Solver workflow" => [
             "Automatic pipeline" => "pipeline.md",

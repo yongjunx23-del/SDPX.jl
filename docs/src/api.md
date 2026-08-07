@@ -52,7 +52,8 @@ export_spectrum
 
 ## MathOptInterface
 
-`SDPX.Optimizer` implements MathOptInterface, so SDPX can be used from JuMP:
+`SDPX.Optimizer` implements MathOptInterface, so SDPX can be used from JuMP
+or as the solver for a Convex.jl DCP model:
 
 ```julia
 using JuMP, LinearAlgebra, SDPX
@@ -61,6 +62,8 @@ model = Model(() -> SDPX.Optimizer(sparse=:auto, verbosity=0))
 
 See the repository's `docs/julia-interface.md` for the full JuMP guide,
 including `GenericModel{Float64x4}` for extended precision.
+See `docs/convex-interface.md` for Convex atom coverage, typed models, and
+frontend-overhead benchmarks.
 
 ## Legacy interface
 

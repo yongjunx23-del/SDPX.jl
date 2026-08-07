@@ -24,6 +24,7 @@ julia --project=examples examples/01_basic_sdp.jl
 | [`03_sparse_lp.jl`](03_sparse_lp.jl) | The dedicated LP path, and how it decides between a sparse and a dense factorization |
 | [`04_certificates.jl`](04_certificates.jl) | Verifying a solution independently, including a solve the certificate refuses to accept |
 | [`05_jump.jl`](05_jump.jl) | The same problem through JuMP, via MathOptInterface |
+| [`07_convex.jl`](07_convex.jl) | LP, SOCP, and SDP modeling through Convex.jl |
 
 ## What `02` is really about
 

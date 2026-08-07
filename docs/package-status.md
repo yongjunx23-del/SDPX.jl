@@ -9,7 +9,7 @@ Date: 2026-07-31. Version: v0.3.0.
 | `Pkg.add(url=...)` / `Pkg.develop` install | works; verified in a clean temporary depot |
 | `using SDPX` loads without extras | yes; MultiFloats/DoubleFloats/JLD2/AppleAccelerate are weakdeps with extensions |
 | Stable small API | `solve`/`solve!`/`ingest`/`SolverOptions`/`SDPResult` + MOI `Optimizer`; README labels stable-intent vs experimental |
-| JuMP/MOI | full wrapper, tested by dedicated mapping/conversion regressions and `MOI.Test` coverage |
+| JuMP/Convex/MOI | full wrapper, dedicated mapping/conversion regressions, Convex LP/SOCP/SDP tests, and `MOI.Test` coverage |
 | Precisions | Float64 / Float64x2 / Float64x4 / Double64 / BigFloat, one algorithm through the kernel layer |
 | Tests | examples-as-tests, acceptance gates, Aqua, and numerical regressions; the live total and pass/fail state are reported by CI rather than copied into documentation |
 | Quality gates | Aqua full pass: no piracy, no ambiguities, no unbound params, exports defined, deps/compat complete |
@@ -78,7 +78,8 @@ inside the tests.
 
 The fix belongs in the release setup, not in the package: each cluster
 release's `setup-release.sh` must `Pkg.add` the full test target, and it now
-includes `Aqua` and `JSON` alongside MultiFloats/DoubleFloats/JLD2/JuMP/
-StableRNGs. Any new test dependency must be added there in the same commit,
+includes `Aqua`, `Convex`, and `JSON` alongside
+MultiFloats/DoubleFloats/JLD2/JuMP/StableRNGs. Any new test dependency must be
+added there in the same commit,
 or offline validation of the next release fails on a package that has
 nothing to do with the numerics.

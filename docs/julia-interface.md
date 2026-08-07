@@ -230,3 +230,7 @@ julia -t 4
 
 The native `SDPProblem` API remains preferable when bootstrap code already has
 final block arrays and wants to avoid modeling-layer conversion.
+
+Convex.jl uses this same MOI optimizer through its DCP canonicalization layer.
+See the [Convex.jl interface guide](convex-interface.md) for supported atom
+families, typed examples, result access, and the measured benchmark boundary.

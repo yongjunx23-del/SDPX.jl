@@ -24,6 +24,7 @@ using Test
     include("options_interface.jl")
     include("public_api.jl")
     include("moi_regressions.jl")
+    include("convex_regressions.jl")
     include("extended_blas_regressions.jl")
     include("bigfloat_kernel_regressions.jl")
     include("bigfloat_ownership_regressions.jl")

@@ -2786,3 +2786,57 @@ standard-form LP regressions 26/26, and LP presolve regressions 45/45 (81/81
 total, PBS exit status 0).  The first attempt used the Chapter 3 environment,
 which intentionally omits MathOptInterface; that harness failure was not a
 solver failure and was not counted as a regression.
+
+### P45 Convex.jl frontend integration and native/Convex benchmark harness
+
+Convex 0.16.6 was audited against the existing non-incremental MOI optimizer.
+No runtime extension is required: Convex's typed context instantiates
+`SDPX.Optimizer{T}`, adds an MOI cache, and applies the standard bridges before
+copying the completed conic model.  Formal test-only compatibility, examples,
+documentation, and an isolated native-versus-Convex benchmark now cover affine
+LP, SOCP, and real PSD models in Float64, Float64x4, and BigFloat.  Extended
+arithmetic requires both `numeric_type=T` on the Convex problem and an
+`SDPX.Optimizer{T}` factory.  Convex warm starts remain unsupported because
+SDPX does not yet implement `MOI.VariablePrimalStart`.
+
+The audit found one frontend integration bug: querying `MOI.RawSolver()`
+through Convex's caching optimizer tried to remap an `SDPResult` as though it
+contained MOI indices.  `SDPResult` is now passed through unchanged for that
+attribute.  The focused frontend matrix passed 66/66 tests, including primal
+and dual recovery and an analytic PSD check that does not downcast extended
+arithmetic.
+
+The full suite initially exposed nine existing dedicated-LP failures.  The LP
+loop had reached `Optimal`, but result construction unconditionally replaced
+the certified current iterate with a stale merit snapshot.  The stale result
+was then correctly rejected by final certificate validation.  Returning the
+current iterate after a successful termination, while retaining snapshots for
+interrupted or unsuccessful exits, fixed the issue without changing any
+tolerance.  Reproductions after the fix returned gaps of about `7.07e-9` for
+the distant Float64 case, `3.2e-21` for Double64, and `2.56e-36` for a
+BigFloat-256 case.  The complete local gate passed 5862 tests with one expected
+broken test and zero failures in 5m46.5s.  The documentation build also passed.
+
+Tiny one-repetition Mac smoke measurements validated timing boundaries before
+the cluster comparison.  At these deliberately small sizes the SDPX core time
+was similar through both frontends, while Convex canonicalization, bridging,
+copy, and result recovery dominated end-to-end time.  The harness reports
+build, frontend overhead, core solver, validation, allocations, process peak
+RSS, core dimensions, objective, equality violation, and cone margin
+separately.  Its SDP case also exposes the expected representation difference:
+the native triangle has fewer variables and no square-cone symmetry rows.
+
+| smoke case | frontend | core (s) | frontend overhead (s) | end-to-end (s) |
+|---|---|---:|---:|---:|
+| LP, 16 variables | native | 0.000767 | 0 | 0.000914 |
+| LP, 16 variables | Convex | 0.000574 | 0.006127 | 0.006788 |
+| SOCP, dimension 4 | native | 0.003585 | 0 | 0.003667 |
+| SOCP, dimension 4 | Convex | 0.004632 | 0.022714 | 0.027559 |
+| SDP, side 4 | native | 0.004213 | 0 | 0.004277 |
+| SDP, side 4 | Convex | 0.004449 | 0.004077 | 0.008616 |
+
+All six smoke certificates passed.  The native/Convex SDP objectives were
+`2.83897400116` and `2.83897399202`; the small difference is within the
+Float64 validation gate.  These numbers are functional smoke data, not the
+final performance comparison; repeat medians on one cluster node are required
+before drawing a speed conclusion.

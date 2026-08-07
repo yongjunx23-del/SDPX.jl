@@ -42,6 +42,7 @@ test suite, so they do not go stale.
 
 - [Quick start](quickstart.md) — native-array and typed problem workflows.
 - [Precision](precision.md) — choosing Float64, Float64x4, or BigFloat.
+- [Convex.jl](convex.md) — DCP modeling through the SDPX MOI optimizer.
 - [Automatic pipeline](pipeline.md) — presolve, scaling, and kernel selection.
 - [Diagnostics and certificates](diagnostics.md) — interpreting a result.
 - [API reference](api.md) — the stable-intent entry points.

@@ -51,7 +51,8 @@ more than `Float64`.
   Float64 first, promote to a cache-blocked `Float64x2` preconditioner when
   needed, and retain native `Float64x4` as the final fallback. Every promoted
   solve must pass a target-precision residual check.
-- **JuMP / MathOptInterface** wrapper alongside a native typed API.
+- **JuMP, Convex.jl, and MathOptInterface** modeling support alongside a
+  native typed API.
 - **Diagnostics that explain themselves** — a solve that stops short reports
   *why*, with the measured convergence rate and whether the limit was the
   arithmetic precision.
@@ -459,6 +460,42 @@ precision such as `Float64x4`. The interface defaults to `sparse=:auto` and
 builds sparse coefficient matrices directly from MOI terms.
 See the [JuMP and MathOptInterface guide](docs/julia-interface.md) for the
 supported forms, options, precision types, and current limitations.
+
+## Convex.jl
+
+Convex.jl can use the same `SDPX.Optimizer` through MathOptInterface. Qualify
+`Convex.solve!` because both packages provide a function named `solve!`:
+
+```julia
+import Convex
+import MathOptInterface as MOI
+using SDPX
+
+x = Convex.Variable(2)
+problem = Convex.minimize(
+    2x[1] + x[2],
+    [x >= 0, sum(x) == 1],
+)
+solver = MOI.OptimizerWithAttributes(
+    SDPX.Optimizer,
+    "tolerance" => 1e-8,
+    MOI.NumberOfThreads() => 4,
+)
+Convex.solve!(problem, solver; silent=true)
+
+problem.status
+problem.optval
+Convex.evaluate(x)
+```
+
+Convex automatically caches the completed model and applies MOI bridges for
+SDPX's non-incremental interface. Its affine, second-order-cone, and real PSD
+canonicalizations are supported; atoms requiring exponential, power, or other
+unsupported cones are not. For `Float64x4` or `BigFloat`, set both
+`numeric_type=T` on the Convex problem and use `SDPX.Optimizer{T}`.
+
+See the [Convex.jl interface guide](docs/convex-interface.md) and the
+[matched native-versus-Convex benchmark](bench/convex_frontend/README.md).
 
 ## Precision backends
 

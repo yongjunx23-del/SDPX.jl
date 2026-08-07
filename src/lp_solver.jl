@@ -2222,10 +2222,17 @@ function solve_lp!(
 
     # Return the original, unscaled model coordinates and preserve the public
     # 1×1-block result shape expected by MOI and the legacy dictionary API.
-    x_work = best_valid ? best_x : x
-    y_work = best_valid ? best_y : y
-    s_work = best_valid ? best_s : s
-    z_work = best_valid ? best_z : z
+    # A successful termination is certified by the *current* iterate above.
+    # Replacing it with an older merit snapshot can silently discard several
+    # digits of complementarity (especially for BigFloat and Double64) and
+    # cause the final original-coordinate certificate to downgrade an
+    # otherwise optimal solve to `Stalled`.  The snapshot is only a recovery
+    # mechanism for an interrupted or unsuccessful solve.
+    use_best_snapshot = best_valid && status != Optimal
+    x_work = use_best_snapshot ? best_x : x
+    y_work = use_best_snapshot ? best_y : y
+    s_work = use_best_snapshot ? best_s : s
+    z_work = use_best_snapshot ? best_z : z
     x_original = scaling.variable .* x_work
     y_original = scaling.equality .* y_work
     slack_original_reduced = s_work ./ scaling.inequality

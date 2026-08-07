@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Convex.jl 0.16 is now an explicitly tested modeling frontend through the
+  existing MathOptInterface optimizer. Float64 LP/SOCP/SDP and typed
+  Float64x4/BigFloat regressions cover canonicalization, square-PSD bridging,
+  result recovery, and solver attributes. A matched benchmark separates
+  native construction, Convex canonicalization, SDPX solver time, validation,
+  allocation, and peak RSS for deterministic LP, SOCP, and SDP examples.
+
 ### Changed
 
 - The Float64x4 reduced-arrow backend now uses phase-specific worker counts,
@@ -140,6 +149,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trajectory; adaptive lattice solves continue to use Ruiz scaling.
 
 ### Fixed
+
+- `MOI.RawSolver()` now passes `SDPResult` unchanged through the caching
+  optimizer automatically inserted by Convex.jl. Previously, reading the raw
+  result after a successful Convex solve failed because MOI attempted to remap
+  indices in an index-free result object.
 
 - Automatic rank-deficient equality handling now switches directly from a
   rejected normal-equation factor to the existing rank-revealing QR backend.
