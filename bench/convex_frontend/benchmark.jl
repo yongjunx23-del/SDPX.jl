@@ -42,7 +42,7 @@ function arithmetic_type(name)
     error("arithmetic must be Float64, Float64x4, or BigFloat256")
 end
 
-default_size(case::Symbol) = case === :lp ? 512 : case === :socp ? 24 : 12
+default_size(case::Symbol) = case === :lp ? 512 : case === :socp ? 24 : 6
 
 function benchmark_tolerance(::Type{T}) where {T}
     T === Float64 && return T(1e-8)
@@ -277,6 +277,11 @@ function native_validation(case::Symbol, payload, result, options, tolerance)
         status=string(result.status),
         iterations=result.iterations,
         objective=objective,
+        primal_objective=result.pObj,
+        dual_objective=result.dObj,
+        relative_gap=result.gap_rel,
+        primal_residual=result.p_res,
+        dual_residual=result.d_res,
         equality_violation=equality,
         cone_margin=margin,
         certificate_valid=certificate.valid,
@@ -311,16 +316,19 @@ function convex_validation(case::Symbol, payload, tolerance)
         )
         margin = minimum_eigenvalue(matrix)
     end
-    T = typeof(tolerance)
-    floor = T === Float64 ? T(1e-6) : T(1e-12)
-    gate = max(floor, T(100) * tolerance)
-    valid = Convex.termination_status(problem) == MOI.OPTIMAL &&
-            equality <= gate && margin >= -gate
     raw = MOI.get(problem.model, MOI.RawSolver())
+    gate = tolerance
+    valid = Convex.termination_status(problem) == MOI.OPTIMAL &&
+            raw.status == SDPX.Optimal && equality <= gate && margin >= -gate
     return (
         status=string(Convex.termination_status(problem)),
         iterations=MOI.get(problem.model, MOI.BarrierIterations()),
         objective=objective,
+        primal_objective=raw.pObj,
+        dual_objective=raw.dObj,
+        relative_gap=raw.gap_rel,
+        primal_residual=raw.p_res,
+        dual_residual=raw.d_res,
         equality_violation=equality,
         cone_margin=margin,
         certificate_valid=valid,
@@ -478,6 +486,11 @@ function benchmark(::Type{T}, config) where {T}
         status=validation.status,
         iterations=validation.iterations,
         objective=validation.objective,
+        primal_objective=validation.primal_objective,
+        dual_objective=validation.dual_objective,
+        relative_gap=validation.relative_gap,
+        primal_residual=validation.primal_residual,
+        dual_residual=validation.dual_residual,
         equality_violation=validation.equality_violation,
         cone_margin=validation.cone_margin,
         validation_gate=validation.validation_gate,

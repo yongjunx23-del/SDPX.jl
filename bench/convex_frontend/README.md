@@ -11,6 +11,8 @@ The three deterministic examples cover a nonnegative simplex LP, a minimum
 Euclidean-norm SOCP, and a MaxCut-style SDP relaxation. Each process runs only
 one frontend so its peak RSS remains attributable to that frontend. Data
 generation and Julia compilation are separated from the warmed repetitions.
+The default sizes are 512 LP variables, SOCP dimension 24, and SDP side 6;
+override any of them with `--size=N`.
 
 The reported boundaries are:
 
@@ -21,6 +23,11 @@ The reported boundaries are:
 - `core_solver`: the SDPX optimizer time reported through MOI;
 - `validation`: independent objective, equality, and cone checks;
 - `end_to_end`: build plus frontend solve plus validation.
+
+Both frontends use the same requested validation tolerance. The CSV also
+records the solver's primal and dual objectives, relative gap, primal and dual
+residuals, and certificate decision; a non-optimal or uncertified run exits
+with an error after preserving its CSV for diagnosis.
 
 Install the isolated environment without changing the package environment:
 

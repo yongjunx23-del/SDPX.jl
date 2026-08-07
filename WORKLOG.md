@@ -2853,3 +2853,42 @@ before attempting variable recovery.  This does not weaken solver accuracy
 tests: native Float64 and extended-precision tolerance stress remain in their
 dedicated suites.  The failed gate produced no benchmark CSV and was excluded
 from performance results.
+
+The corrected candidate then passed the complete node56 package gate: 5,873
+tests passed, one existing test remained intentionally broken, and no test
+failed (`15m38.1s` test time; `16m06.9s` including the outer `Pkg.test`
+process; 2.92 GiB process peak RSS).  Production `current` remained on
+`68286ef` throughout.
+
+Matched Float64 measurements used one Julia, solver, and BLAS thread on the
+same AMD EPYC 7742 node.  LP and SOCP are five-sample medians; the certified
+SDP side-6 crossover is a three-sample median.  All rows used a requested
+`1e-8` tolerance and passed their independent equality/cone checks.
+
+| case | frontend | core (ms) | frontend overhead (ms) | end-to-end (ms) | total allocation (MiB) | iterations |
+|---|---|---:|---:|---:|---:|---:|
+| LP, 512 variables | native | 2.425 | 0 | 6.009 | 2.91 | 11 |
+| LP, 512 variables | Convex | 2.344 | 12.044 | 14.798 | 4.86 | 11 |
+| SOCP, dimension 24 | native | 7.542 | 0 | 7.833 | 1.53 | 10 |
+| SOCP, dimension 24 | Convex | 6.938 | 5.231 | 12.063 | 2.15 | 11 |
+| SDP, side 6 | native | 6.040 | 0 | 6.214 | 1.34 | 11 |
+| SDP, side 6 | Convex | 5.936 | 5.474 | 11.496 | 2.17 | 11 |
+
+The core solve times agree within normal short-run noise.  End-to-end Convex
+overhead is material for these small models: 2.46x for LP, 1.54x for SOCP,
+and 1.85x for SDP.  Numerical agreement is strong: LP objectives are exactly
+equal in the recorded precision, SOCP objectives differ by `1.80e-10`, and
+SDP objectives differ by `2.06e-10`; equality violations are at most
+`3.11e-15`, and every cone margin is above `-1e-8`.
+
+The square-PSD representation is the important structural distinction.  At
+side 6, native triangle modeling produces 21 variables and 6 equalities;
+Convex/MOI square bridging produces 36 variables and 21 equalities.  A side-8
+experiment made this 36/8 versus 64/36 and returned an accurate point through
+Convex but only `SLOW_PROGRESS`, so it was rejected as a certified timing row.
+The original side-12 default also stalled through the native route.  Side 6
+is therefore the largest tested model for which both routes produce stable
+formal certificates at identical tolerance on this platform, and is now the
+benchmark default.  The harness also records primal/dual objectives,
+relative gap, primal/dual residuals, and uses the requested tolerance rather
+than the previous loose `1e-6` external Convex gate.
