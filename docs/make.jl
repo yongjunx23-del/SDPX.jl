@@ -19,6 +19,7 @@ makedocs(;
             "Precision" => "precision.md",
             "JuMP and MOI" => "jump.md",
             "Convex.jl" => "convex.md",
+            "SOC and fixed trace" => "soc-fixed-trace.md",
         ],
         "Solver workflow" => [
             "Automatic pipeline" => "pipeline.md",

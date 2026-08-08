@@ -35,6 +35,10 @@ bench/**/__pycache__/
 # site-specific module environments; the portable drivers they invoke are the
 # reproducible part and are kept.
 *.pbs
+# The fixed-trace campaign scripts are portable templates: every site-specific
+# path is supplied through environment variables, so keep them with the
+# reproducible benchmark harness.
+!bench/soc_fixed_trace/*.pbs
 *.o[0-9]*
 *.e[0-9]*
 

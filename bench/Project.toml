@@ -9,7 +9,7 @@ TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 [compat]
 AppleAccelerate = "0.7"
 MultiFloats = "3"
-SDPX = "0.2, 0.3"
+SDPX = "0.2, 0.3, 0.4"
 SHA = "0.7"
 StableRNGs = "1"
 TimerOutputs = "0.5"

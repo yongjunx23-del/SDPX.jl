@@ -1,0 +1,47 @@
+#!/bin/bash
+#PBS -N sdpx_v04_tests
+#PBS -l nodes=1:ppn=32
+#PBS -l mem=32gb
+#PBS -l walltime=03:00:00
+#PBS -j oe
+
+set -euo pipefail
+[[ -n "${PBS_JOBID:-}" || "${ALLOW_INTERACTIVE:-0}" == 1 ]] || {
+    echo "submit this regression on a PBS compute node" >&2
+    exit 2
+}
+: "${SDPX_CANDIDATE:?set candidate source}"
+: "${OUTPUT_ROOT:?set isolated output root}"
+JULIA=${CSDR_JULIA:-julia}
+SHARED_DEPOT=${SDPX_SHARED_DEPOT:-${JULIA_DEPOT_PATH:-}}
+if [[ -n "${SDPX_COMPILER_PROFILE:-}" ]]; then
+    source "${SDPX_COMPILER_PROFILE}"
+fi
+mkdir -p "${OUTPUT_ROOT}"
+JOB_DEPOT="${SDPX_JOB_DEPOT:-${OUTPUT_ROOT}/.julia-depot}"
+mkdir -p "${JOB_DEPOT}"
+export JULIA_PROJECT="${SDPX_CANDIDATE}"
+export JULIA_LOAD_PATH="@:@stdlib"
+export JULIA_DEPOT_PATH="${JOB_DEPOT}${SHARED_DEPOT:+:${SHARED_DEPOT}}"
+export JULIA_PKG_OFFLINE=true
+export JULIA_NUM_THREADS=4
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+ALLOCATED=${PBS_NP:-32}
+(( 4 <= ALLOCATED )) || { echo "test threads exceed allocated slots" >&2; exit 2; }
+
+{
+    echo "job_id=${PBS_JOBID:-interactive}"
+    echo "node=$(hostname)"
+    echo "requested_slots=${PBS_NP:-unknown}"
+    echo "julia_threads=4"
+    echo "blas_threads=1"
+    echo "job_depot=${JOB_DEPOT}"
+    grep '^Cpus_allowed_list' /proc/self/status || true
+} > "${OUTPUT_ROOT}/resources.txt"
+
+/usr/bin/time -v -o "${OUTPUT_ROOT}/full-test.time" \
+    "${JULIA}" --startup-file=no --project="${SDPX_CANDIDATE}" -t 4 \
+    -e 'using Pkg; Pkg.test(; coverage=false)' \
+    > "${OUTPUT_ROOT}/full-test.log" 2>&1
+
+echo PASSED > "${OUTPUT_ROOT}/PASSED"

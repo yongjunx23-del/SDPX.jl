@@ -165,6 +165,12 @@ complete lower-triangular output tile. Inputs are read-only and no writable
 BigFloat object crosses tasks. The equality specialization likewise assigns
 complete local row blocks during forward/back substitution and complete lower
 Gram tiles during `Btil' * Btil`; it never allocates one full Gram per worker.
+
+The current fixed-trace release campaign intentionally stops at 32 workers
+(J40: 1/2/4/8/16/32; J80: 8/16/32, BLAS=1). The wider measurements below are
+archived scaling evidence from earlier campaigns, not current template
+defaults or recommendations.
+
 The two equality matrix-vector products in each KKT solve also partition
 complete output ranges. Every dot product keeps the serial reduction order,
 and a work crossover caps the task count when the panel cannot amortize
@@ -184,8 +190,8 @@ reduced the 128-worker time to 425.880 seconds and peak RSS by 6.6%, while
 reproducing the 158-iteration objective, gap, residuals, PSD margin, off-grid
 residual, and disk certificate bit-for-bit. Because 64 remains 15.5% faster,
 a 96-worker check was also run; it took 398.303 seconds, still 8.0% slower than
-64. Use 64 as the starting point for this geometry and test wider allocations
-only when the equality panel is materially larger.
+64. Those results motivated measuring rather than assuming the widest
+allocation; current fixed-trace templates do not request more than 32 workers.
 
 The 64-worker path was separately validated at a fixed 1,024-bit precision.
 It passed the J40 physical certificate in 157 iterations and took 553.959

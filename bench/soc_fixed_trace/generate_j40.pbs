@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#PBS -N sdpx_gen_j40
+#PBS -l nodes=1:ppn=16
+#PBS -l mem=32gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+set -euo pipefail
+: "${SDPX_SOURCE:?set SDPX_SOURCE to the isolated candidate source}"
+: "${CSDR_RELEASE:?set the immutable CSDR release}"
+: "${SDPX_SHARED_ENV:?set an instantiated Julia environment}"
+: "${SDPX_SHARED_DEPOT:?set the read-only shared Julia depot}"
+: "${JULIA_BIN:?set the Julia executable}"
+CANDIDATE="$SDPX_SOURCE"
+HERE="$CANDIDATE/bench/soc_fixed_trace"
+SHARED_ENV="$SDPX_SHARED_ENV"
+OUTPUT="${CSDR_OUTPUT:?set CSDR_OUTPUT to a new immutable output directory}"
+test ! -e "$OUTPUT"
+mkdir -p "$OUTPUT"
+JOB_DEPOT="${SDPX_JOB_DEPOT:-$OUTPUT/.julia-depot}"
+mkdir -p "$JOB_DEPOT"
+export JULIA_NUM_THREADS=16
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1
+# Put the instantiated shared project first.  If the candidate is first,
+# Julia sees SDPX's weak MultiFloats entry before the shared manifest and can
+# incorrectly report that MultiFloats is not installed.
+export JULIA_LOAD_PATH="$SHARED_ENV:$CANDIDATE:$CSDR_RELEASE:@stdlib"
+export JULIA_DEPOT_PATH="$JOB_DEPOT:$SDPX_SHARED_DEPOT"
+export JULIA_PKG_OFFLINE=true
+
+{
+    echo "node=$(hostname)"
+    echo "job=${PBS_JOBID:-unknown}"
+    echo "julia_threads=$JULIA_NUM_THREADS"
+    grep '^Cpus_allowed_list' /proc/self/status || true
+    command -v numactl >/dev/null 2>&1 && numactl --show || true
+} > "$OUTPUT/resources.txt"
+
+/usr/bin/time -v -o "$OUTPUT/generate.time" \
+    "$JULIA_BIN" --project="$SHARED_ENV" --startup-file=no \
+    --compiled-modules=existing -t 16 \
+    "$CSDR_RELEASE/scripts/generate_model.jl" \
+    "$HERE/configs/j40.toml" "$OUTPUT" \
+    > "$OUTPUT/generate.log" 2>&1
+sha256sum "$OUTPUT/model.bin" > "$OUTPUT/model.sha256"
+touch "$OUTPUT/PASSED"

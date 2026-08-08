@@ -11,6 +11,9 @@ include("kernels/extended_precision_blas/ExtendedPrecisionBLAS.jl")
 include("blas_backend.jl")
 include("ingest.jl")
 include("lp_api.jl")
+include("soc.jl")
+include("soc_q3_kernels.jl")
+include("soc_native_q3.jl")
 include("pipeline.jl")
 include("adaptive_parameters.jl")
 include("stagnation.jl")
@@ -28,6 +31,7 @@ include("kernels/threaded.jl")
 include("lp_sparse.jl")
 include("lp_solver.jl")
 include("solve.jl")
+include("prepared.jl")
 include("validation.jl")
 include("spectrum.jl")
 include("moi_wrapper.jl")
@@ -38,20 +42,12 @@ include("public_api.jl")
 export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
 export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
 export linear_program, solve_lp
+export SOCConstraint, ConicProblem, ConicResult
+export second_order_program, solve_socp
+export PreparedSolver, prepare
 export ActiveSparseCoefficientVector
-export recommended_parameters, StructureAnalysis, analyze_structure, structure_summary
-export AbstractParameterPolicy, FixedParameterPolicy, AdaptiveParameterPolicy
-export IterationDiagnostics, IterationParameters, select_parameters
-export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
-export AbstractPreprocessStage, PreprocessContext, PreprocessPlan
-export PreprocessReport, PreprocessStageReport, ReconstructionMap, PreprocessedProblem
-export BoundExtractionStage, FixedVariableEliminationStage
-export StructuralCleanupStage, FormulationAnalysisStage, ChordalAnalysisStage
-export preprocess
-export classify_problem, build_execution_plan, SpectrumResult
 export reconstruct_spectrum, export_spectrum
 export result_certificate, solve_summary
-export blas_backend, blas_threads, set_blas_threads!
 export Optimizer
 export convex_optimizer, convex_semidefinite, solve_convex!
 export Experimental

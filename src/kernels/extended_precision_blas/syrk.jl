@@ -487,6 +487,145 @@ function _syrk_bigfloat_selected_workers(
     )
 end
 
+@inline function _packed_lower_index(
+    dimension::Int,
+    row::Int,
+    column::Int,
+)
+    return (column - 1) * (2 * dimension - column + 2) ÷ 2 +
+           (row - column + 1)
+end
+
+@inline function _store_packed_value!(
+    output::AbstractVector{T},
+    dimension::Int,
+    row::Int,
+    column::Int,
+    accumulator::T,
+    alpha::T,
+    beta::T,
+) where {T}
+    index = _packed_lower_index(dimension, row, column)
+    output[index] = alpha * accumulator + beta * output[index]
+    return nothing
+end
+
+function _syrk_packed_triangle_rows!(
+    output::AbstractVector{T},
+    panel::AbstractMatrix{T},
+    reduction_first::Int,
+    reduction_last::Int,
+    alpha::T,
+    beta::T,
+    config::KernelConfig,
+) where {T}
+    columns = size(panel, 2)
+    length(output) == columns * (columns + 1) ÷ 2 ||
+        throw(DimensionMismatch("packed triangular output has the wrong length"))
+    1 <= reduction_first <= reduction_last <= size(panel, 1) ||
+        throw(BoundsError(panel, reduction_first:reduction_last))
+    tile = max(config.column_tile, 1)
+    reduction_tile = max(config.row_tile, 1)
+    block_count = cld(columns, tile)
+    jobs = block_count * (block_count + 1) ÷ 2
+    reduction = reduction_last
+    @inbounds for job in 1:jobs
+        row_block, column_block =
+            _triangle_block_coordinates(job, block_count)
+        row_start = (row_block - 1) * tile + 1
+        row_stop = min(row_block * tile, columns)
+        column_start = (column_block - 1) * tile + 1
+        column_stop = min(column_block * tile, columns)
+        if row_block == column_block || config.micro_tile < 2
+            for column in column_start:column_stop
+                for row in max(row_start, column):row_stop
+                    accumulator = zero(T)
+                    for reduction_start in reduction_first:reduction_tile:reduction
+                        reduction_stop = min(
+                            reduction_start + reduction_tile - 1,
+                            reduction,
+                        )
+                        for index in reduction_start:reduction_stop
+                            accumulator +=
+                                panel[index, row] * panel[index, column]
+                        end
+                    end
+                    _store_packed_value!(
+                        output,
+                        columns,
+                        row,
+                        column,
+                        accumulator,
+                        alpha,
+                        beta,
+                    )
+                end
+            end
+            continue
+        end
+
+        # An off-diagonal tile is entirely below the diagonal, so a 2x2
+        # micro-kernel can reuse each panel load across four packed outputs.
+        row = row_start
+        while row <= row_stop
+            row2 = row + 1
+            column = column_start
+            while column <= column_stop
+                column2 = column + 1
+                if row2 <= row_stop && column2 <= column_stop
+                    c11 = zero(T)
+                    c21 = zero(T)
+                    c12 = zero(T)
+                    c22 = zero(T)
+                    for reduction_start in reduction_first:reduction_tile:reduction
+                        reduction_stop = min(
+                            reduction_start + reduction_tile - 1,
+                            reduction,
+                        )
+                        for index in reduction_start:reduction_stop
+                            a1 = panel[index, row]
+                            a2 = panel[index, row2]
+                            b1 = panel[index, column]
+                            b2 = panel[index, column2]
+                            c11 += a1 * b1
+                            c21 += a2 * b1
+                            c12 += a1 * b2
+                            c22 += a2 * b2
+                        end
+                    end
+                    _store_packed_value!(output, columns, row, column, c11, alpha, beta)
+                    _store_packed_value!(output, columns, row2, column, c21, alpha, beta)
+                    _store_packed_value!(output, columns, row, column2, c12, alpha, beta)
+                    _store_packed_value!(output, columns, row2, column2, c22, alpha, beta)
+                else
+                    for output_column in column:min(column2, column_stop)
+                        for output_row in row:min(row2, row_stop)
+                            accumulator = zero(T)
+                            for index in reduction_first:reduction
+                                accumulator +=
+                                    panel[index, output_row] *
+                                    panel[index, output_column]
+                            end
+                            _store_packed_value!(
+                                output,
+                                columns,
+                                output_row,
+                                output_column,
+                                accumulator,
+                                alpha,
+                                beta,
+                            )
+                        end
+                    end
+                end
+                column += 2
+            end
+            row += 2
+        end
+    end
+    return output
+end
+
 function syrk_packed_triangle!(
     output::AbstractVector{T},
     panel::AbstractMatrix{T},
@@ -494,39 +633,31 @@ function syrk_packed_triangle!(
     beta::T,
     config::KernelConfig=KernelConfig(),
 ) where {T}
-    columns = size(panel, 2)
-    length(output) == columns * (columns + 1) ÷ 2 ||
-        throw(DimensionMismatch("packed triangular output has the wrong length"))
-    reduction_tile = max(config.row_tile, 1)
-    output_index = 0
-    @inbounds for column in 1:columns
-        for row in column:columns
-            output_index += 1
-            accumulator = zero(T)
-            for reduction_start in 1:reduction_tile:size(panel, 1)
-                reduction_stop =
-                    min(reduction_start + reduction_tile - 1, size(panel, 1))
-                for index in reduction_start:reduction_stop
-                    accumulator += panel[index, row] * panel[index, column]
-                end
-            end
-            output[output_index] =
-                alpha * accumulator + beta * output[output_index]
-        end
-    end
-    return output
+    return _syrk_packed_triangle_rows!(
+        output,
+        panel,
+        1,
+        size(panel, 1),
+        alpha,
+        beta,
+        config,
+    )
 end
 
-function syrk_packed_triangle!(
+function _syrk_packed_triangle_rows!(
     output::AbstractVector{BigFloat},
     panel::AbstractMatrix{BigFloat},
+    reduction_first::Int,
+    reduction_last::Int,
     alpha::BigFloat,
     beta::BigFloat,
-    config::KernelConfig=KernelConfig(),
+    config::KernelConfig,
 )
     columns = size(panel, 2)
     length(output) == columns * (columns + 1) ÷ 2 ||
         throw(DimensionMismatch("packed triangular output has the wrong length"))
+    1 <= reduction_first <= reduction_last <= size(panel, 1) ||
+        throw(BoundsError(panel, reduction_first:reduction_last))
     accumulator = BigFloat()
     multiplication_buffer = BigFloat()
     storage_buffer = BigFloat()
@@ -534,14 +665,16 @@ function syrk_packed_triangle!(
     @inbounds for column in 1:columns
         for row in column:columns
             output_index += 1
-            kdot_columns!(
-                accumulator,
-                multiplication_buffer,
-                panel,
-                row,
-                column,
-                size(panel, 1),
-            )
+            MA.operate!(zero, accumulator)
+            for index in reduction_first:reduction_last
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    accumulator,
+                    panel[index, row],
+                    panel[index, column],
+                )
+            end
             _store_bigfloat!(
                 output[output_index],
                 accumulator,
@@ -552,6 +685,25 @@ function syrk_packed_triangle!(
         end
     end
     return output
+end
+
+
+function syrk_packed_triangle!(
+    output::AbstractVector{BigFloat},
+    panel::AbstractMatrix{BigFloat},
+    alpha::BigFloat,
+    beta::BigFloat,
+    config::KernelConfig=KernelConfig(),
+)
+    return _syrk_packed_triangle_rows!(
+        output,
+        panel,
+        1,
+        size(panel, 1),
+        alpha,
+        beta,
+        config,
+    )
 end
 
 function syrk_scatter_triangle!(

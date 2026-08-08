@@ -25,6 +25,7 @@ julia --project=examples examples/01_basic_sdp.jl
 | [`04_certificates.jl`](04_certificates.jl) | Verifying a solution independently, including a solve the certificate refuses to accept |
 | [`05_jump.jl`](05_jump.jl) | The same problem through JuMP, via MathOptInterface |
 | [`07_convex.jl`](07_convex.jl) | LP, SOCP, and SDP modeling through Convex.jl, including SDPX's packed-triangle PSD frontend |
+| [`08_soc_fixed_trace.jl`](08_soc_fixed_trace.jl) | Direct Lorentz modeling and the native constant-trace Q3 fast path |
 
 ## What `02` is really about
 

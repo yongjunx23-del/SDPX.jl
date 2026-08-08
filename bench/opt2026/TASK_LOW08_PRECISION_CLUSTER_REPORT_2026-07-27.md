@@ -582,7 +582,6 @@ Documentation:
 - `README.md`
 - `CHANGELOG.md`
 - `docs/automatic-optimization-pipeline.md`
-- `docs/claude-cluster-testing.md`
 - `docs/cluster-workflow.md`
 - `docs/parameters.md`
 - `docs/precision.md`

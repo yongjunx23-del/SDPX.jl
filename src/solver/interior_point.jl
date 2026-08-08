@@ -1793,6 +1793,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 end,
             equality_system=equality_diagnostics,
             executed=(
+                solver=:sdp,
                 kkt=ws.arrow !== nothing ? :block_arrow :
                     ws.sparse_kkt !== nothing ?
                     :sparse_schur_cholesky :
@@ -2218,12 +2219,36 @@ function _solve_pipeline!(
         end
     end
     if plan.classification.cone === :socp
-        push!(
-            warnings,
-            "Detected exact SOC-arrow PSD structure. The current " *
-            ":socp_psd_lift path solves the semidefinite lift; native SOCP " *
-            "scaling and Newton systems are not implemented.",
-        )
+        if plan.algorithm === :socp_fixed_trace_q3
+            push!(
+                warnings,
+                "Selected the compact fixed-trace Q3 backend. Cone state, " *
+                "local Newton metrics, and boundary steps remain in Lorentz " *
+                "coordinates; PSD matrices are materialized only for the " *
+                "final compatibility certificate.",
+            )
+        elseif plan.algorithm === :socp_psd2
+            push!(
+                warnings,
+                "Detected Lorentz-compatible 2x2 structure. SDPX is using " *
+                "the exact Q3-to-S_+^2 isomorphism and specialized scalar " *
+                "2x2 kernels; the general-dimensional Lorentz NT backend " *
+                "remains experimental.",
+            )
+        elseif plan.classification.maximum_block_size <= 2
+            push!(
+                warnings,
+                "The model is exactly Q3/S_+^2 representable, but " *
+                "algorithm=:sdp selected the semidefinite reference path.",
+            )
+        else
+            push!(
+                warnings,
+                "Detected exact SOC-arrow PSD structure. General-dimensional " *
+                "cones still use the semidefinite lift because the compact " *
+                "Lorentz NT backend has not passed its promotion gates.",
+            )
+        end
     end
     _validate_warm_start(
         prob;
@@ -2341,6 +2366,129 @@ function _solve_pipeline!(
             y0=reduced_y0,
             deadline=deadline,
         )
+    elseif plan.algorithm === :socp_fixed_trace_q3
+        workspace_bytes = estimate_fixed_trace_q3_workspace_bytes(
+            T,
+            reduced,
+            plan.threads;
+            q3_gram_strategy=opts.q3_gram_strategy,
+        )
+        available = _available_memory_bytes()
+        if available > 0 && workspace_bytes > available
+            push!(
+                warnings,
+                "The compact Q3 workspace needs approximately " *
+                "$(round(workspace_bytes / 2^30; digits=2)) GiB but only " *
+                "$(round(available / 2^30; digits=2)) GiB is available.",
+            )
+        end
+        reduced_rejection = _fixed_trace_q3_rejection(reduced)
+        unsupported_start =
+            preprocessed_warm_start.x0 !== nothing ||
+            preprocessed_warm_start.X0 !== nothing ||
+            reduced_y0 !== nothing ||
+            preprocessed_warm_start.Y0 !== nothing ||
+            !isempty(resume)
+        q3_options = _replace_solver_options(
+            opts;
+            algorithm=:socp,
+            presolve=false,
+            scaling=:none,
+            equilibrate=false,
+            threads=plan.threads,
+        )
+        native_result = if reduced_rejection !== :eligible
+            push!(
+                warnings,
+                "Presolve changed the fixed-trace Q3 structure " *
+                "(reason=$reduced_rejection); this solve used the exact " *
+                "PSD2 fallback.",
+            )
+            nothing
+        elseif unsupported_start
+            push!(
+                warnings,
+                "The first native fixed-trace Q3 implementation does not " *
+                "consume matrix warm starts or checkpoints; this solve used " *
+                "the exact PSD2 fallback.",
+            )
+            nothing
+        else
+            _solve_fixed_trace_q3_core!(
+                reduced,
+                q3_options;
+                deadline=deadline,
+            )
+        end
+        native_certificate = if native_result !== nothing &&
+                                native_result.status === Optimal
+            result_certificate(reduced, native_result, q3_options)
+        else
+            nothing
+        end
+        native_certificate_valid = native_certificate === nothing ||
+                                   native_certificate.valid
+        if !native_certificate_valid
+            push!(
+                warnings,
+                "Native fixed-trace Q3 failed its reduced original-coordinate " *
+                "certificate ($(native_certificate.failures)); SDPX will use " *
+                "the PSD2 reference fallback.",
+            )
+        end
+        fallback = native_result === nothing ||
+                   !(native_result.status in (Optimal, TimeLimit, UserStopped)) ||
+                   !native_certificate_valid
+        if fallback && native_result === nothing && time() >= deadline
+            return _time_limit_pipeline_result(
+                prob,
+                report,
+                plan,
+                time() - pipeline_started,
+                warnings,
+                opts.diagnostics,
+                opts.max_time,
+            )
+        end
+        if fallback && time() < deadline
+            reason = native_result === nothing ?
+                     (
+                         reduced_rejection === :eligible ?
+                         :unsupported_start : reduced_rejection
+                     ) : native_result.status
+            push!(
+                warnings,
+                "Native fixed-trace Q3 did not produce a promoted result " *
+                "(reason=$reason); SDPX reran the unchanged PSD2 reference " *
+                "path for numerical safety.",
+            )
+            native_result = nothing
+            T === BigFloat && GC.gc()
+            fallback_options = _replace_solver_options(
+                opts;
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equilibrate=false,
+                threads=plan.threads,
+            )
+            result = _solve_sdp_core!(
+                reduced,
+                fallback_options;
+                x0=preprocessed_warm_start.x0,
+                X0=preprocessed_warm_start.X0,
+                y0=reduced_y0,
+                Y0=preprocessed_warm_start.Y0,
+                resume=resume,
+                deadline=deadline,
+            )
+            workspace_bytes = max(
+                workspace_bytes,
+                estimate_sdp_workspace_bytes(reduced, plan.threads),
+            )
+        else
+            result = native_result
+        end
     else
         # Pre-flight against the memory actually available. Nothing compared
         # the workspace size against anything before this, so a model too large

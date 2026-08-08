@@ -187,6 +187,10 @@ end
         MOI.copy_to(optimizer, model)
         cons = optimizer.problem.cons
         @test cons isa SDPX.SparseCons{Float64}
+        # A three-dimensional Lorentz cone is exactly isomorphic to S_+^2;
+        # it must not be expanded to the historical 3x3 arrow lift.
+        @test count(==(2), optimizer.problem.dims.k) == 2
+        @test maximum(optimizer.problem.dims.k) == 2
         @test any(==([1, 2]), cons.active)
         @test any(==([2, 3]), cons.active)
         @test any(==([1, 64]), cons.active)

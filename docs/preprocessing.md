@@ -10,7 +10,7 @@ of the reduction logic depends on JuMP.
 The public entry point is:
 
 ```julia
-prepared = preprocess(problem, options)
+prepared = SDPX.Experimental.preprocess(problem, options)
 ```
 
 `prepared` contains the transformed problem, a typed `PreprocessPlan`, a
@@ -99,6 +99,21 @@ scaling = :auto                 # :auto, :none, or :equilibrate
 formulation = :auto             # analysis only for :dual
 chordal_decomposition = :auto   # analysis only
 ```
+
+Exact zero, duplicate, and proportional equalities are always verified in the
+problem arithmetic before they are removed. Near-proportional detection is a
+diagnostic only: it never changes the model or reconstruction map. Its work is
+bounded to eight equivalent passes over the retained equality matrix. If a
+large dense system would exceed that budget, SDPX records an explicit warning
+and skips only the approximate diagnostic; exact cleanup and the subsequent
+target-arithmetic rank presolve remain enabled.
+
+This bound is material on the fixed-trace J80 benchmark (32,800 PSD2 blocks,
+65,600 variables, and 350 supplied equalities). All 350 equalities are retained
+after strict cleanup, but the former diagnostic-only near-proportional scan
+took 224.42 seconds. The bounded implementation reduced exact-cleanup time to
+0.0735 seconds and total preprocessing from 224.75 to 0.395 seconds on the same
+node without changing the model, objective, or certificate.
 
 Use `result.diagnostics.presolve.preprocessing` to inspect stage timings,
 allocations, dimension changes, bound counts, equality cleanup, formulation

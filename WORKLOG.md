@@ -19,7 +19,7 @@ when the benchmark explicitly reports it.
 ### Cluster regression baseline
 
 The immutable candidate at
-`/public/home/yongjunxu/projects/SDPX.jl/releases/b3b726dad6309e8647f01181d10bf08e78becd88`
+`<cluster-root>/SDPX.jl/releases/b3b726dad6309e8647f01181d10bf08e78becd88`
 passed job `194948.node220` on a 32-core reservation. The validation commands
 used eight Julia and eight BLAS threads for Task_Low08.
 
@@ -412,7 +412,7 @@ The first replacement, job `195530.node220`, also exited before loading SDPX:
 compute nodes cannot resolve GitHub, so an online `Pkg.instantiate()` is not a
 valid cluster-deployment mechanism. Inspection of the earlier successful job
 scripts found the intended offline environment at
-`/public/home/yongjunxu/projects/SDPX.jl/depot`, initialized by
+`<cluster-root>/SDPX.jl/depot`, initialized by
 `hpc_julia_clarabel_env.sh`. The corrected job uses that depot with
 `JULIA_PKG_OFFLINE=true`, exactly matching jobs 195492--195512. This second
 failure likewise contains no solver timing or numerical result.
@@ -1267,7 +1267,7 @@ pivoted Cholesky on Julia 1.10.
 The exact published tree was staged as an immutable cluster release at:
 
 ```text
-/public/home/yongjunxu/projects/SDPX.jl/releases/0a71efed779617f5bd57af3359efc7523c9f0188
+<cluster-root>/SDPX.jl/releases/0a71efed779617f5bd57af3359efc7523c9f0188
 ```
 
 The source archive SHA-256 is
@@ -2264,7 +2264,7 @@ sentinel data before rebuilding the exact reduced Schur matrix.  The focused
 extended-precision test group passed 76/76 assertions.  The complete package
 suite then passed 5,807/5,807 checks on Julia 1.12.6 with four Julia threads in
 5 minutes 12.1 seconds.  The cluster candidate is isolated at
-`/public/home/yongjunxu/projects/SDPX.jl/experiments/float64x4-lazypartial-d9c287af-clean`;
+`<cluster-root>/SDPX.jl/experiments/float64x4-lazypartial-d9c287af-clean`;
 production remains unchanged pending the repeated complete-solver A/B.
 
 ### P25 exact-pool Float64x4 scaling and resource audit -- job 196551
@@ -2542,7 +2542,8 @@ existing factor-failure escalation.  This is still awaiting the cluster A/B.
 
 The cluster benchmark driver, PBS matrix, independent componentwise equality
 audit, and full optimization proposal are recorded under
-`bench/finite_support_lp/` and `docs/finite-support-lp-optimization.md`.
+`bench/finite_support_lp/`; the retired design note is preserved in Git
+history rather than the published documentation set.
 No numerical result is recorded yet: two SSH attempts to the cluster alias
 timed out at the TCP connection layer on 2026-08-02.  In accordance with the
 request, no substitute solve or benchmark was run on the local Mac.  The next
@@ -2702,7 +2703,7 @@ modified.
 ### P42 Chapter 3 finite-energy LP cluster route and precision/thread sweep
 
 The isolated Chapter 3 project at
-`/public/home/yongjunxu/projects/chapter3-sdpx-lp` was compared with the
+`<cluster-root>/chapter3-sdpx-lp` was compared with the
 older release path.  The old path selected a serial weighted outer-product
 Gram build and dense LU (`serial_weighted_outer_product`, `dense_lu`): a
 20-iteration, 408-variable/16-equality pilot took 213.17 s end-to-end, with
@@ -2939,3 +2940,2363 @@ path at this small stable size and avoids its quadratic symmetry expansion.
 The objectives differ only within the independently accepted Float64 solve
 tolerance. Focused validation passed 9 native-LP, 97 MOI, 72 API-surface, and
 74 Convex assertions before the full package gate.
+
+## 2026-08-07 — Fixed-trace and compact SOC foundation
+
+### Audit conclusion
+
+Every real symmetric `2x2` PSD block is linearly isomorphic to a three-entry
+Lorentz cone. With a fixed trace, the scalar/head coordinate is constant; the
+CSDR block `[[q,r],[r,2-q]]` is exactly the unit disk
+`(q-1)^2+r^2 <= 1`. The existing solver already contains specialized scalar
+`2x2` Cholesky, line-search, sparse contraction, and reduced-arrow kernels, so
+an unvalidated wholesale replacement would be high risk. The exact Q3/PSD2
+selector is retained after its cluster gates; a general-dimensional Lorentz
+Newton backend remains unpromoted.
+
+### Retained first-stage implementation
+
+- Added compact SOC problem/result types and public construction/solve entry
+  points. Q3 uses its exact two-by-two PSD isomorphism; other dimensions keep
+  the exact PSD-arrow reference.
+- Added Lorentz Jordan product, inverse, determinant/interior, and exact
+  quadratic fraction-to-boundary primitives.
+- Added conservative direct and equality-implied fixed-trace analysis. It
+  classifies negative trace as infeasible, zero trace as a forced-zero block,
+  positive `2x2` blocks as SOC candidates, and larger fixed-trace blocks as
+  traceless-SDP candidates.
+- Sparse `2x2` solve setup records in transient `BlockWS` storage which blocks
+  have entirely traceless coefficient matrices. Dominant Schur and arrow
+  contractions use the two independent coefficient coordinates while the
+  persistent serialized model layout remains unchanged.
+- Added a sequential `PreparedSolver` boundary that reuses ingested constraint
+  storage across a few objectives and can warm start from a successful prior
+  result. It is explicitly non-reentrant.
+
+### Validation status
+
+Local work was limited to source loading and formatting checks. Three PBS
+compute-node jobs (`199414`, `199415`, `199416`) were submitted in `sugon` for
+Float64, Float64x4, and 256-bit BigFloat correctness and certificate checks.
+No production symlink was changed.
+
+### Cluster validation update
+
+The corrected compact frontend and fixed-trace analysis passed 26/26 focused
+tests for Float64, Float64x4, and 256-bit BigFloat on PBS compute nodes
+(`199426`--`199428`). Analytic `min(t)` with `(t,3,4) in Q3` returned
+`Optimal` in all arithmetic types. Objective error was `8.53e-9`, `1.71e-14`,
+and `1.50e-24`, respectively.
+
+A second same-node representation gate (`199431`--`199433`) compared the
+exact two-by-two Q3 isomorphism with the historical three-by-three arrow. The
+median single-thread solver times were:
+
+| arithmetic | exact PSD2 | arrow3 | speedup | PSD2 certificate |
+|---|---:|---:|---:|---|
+| Float64 | 0.004240 s | 0.010089 s | 2.38x | valid |
+| Float64x4 | 0.013332 s | 0.042241 s | 3.17x | valid |
+| BigFloat-256 | 0.019872 s | 0.514442 s | 25.9x | valid |
+
+The BigFloat arrow3 reference stalled and failed its final certificate, while
+the exact PSD2 representation was `Optimal`. The fixed-trace hot flag was then
+moved from persistent `SparseCons` storage to transient `BlockWS`; this keeps
+old serialized CSDR models and checkpoints layout-compatible. Native and mixed
+BigFloat reduced-panel packing now contracts the two independent traceless
+coordinates and preserves exclusive MPFR ownership.
+
+### Real CSDR spectral-primal gates
+
+The immutable `J=8, Na=8, Nmu=40, Nx=3` spectral-primal payloads were read
+directly from the prior campaign, confirming backward compatibility of the
+serialized `SparseCons` model. Production 0.3.1 and the candidate ran
+sequentially on the same node with 16 Julia/solver threads, one BLAS thread,
+one warm-up, and three measured solves.
+
+For `zero_c00_min`, both versions were `Optimal` in 21 iterations. The
+production median was 1.666438 s and the candidate median was 1.060194 s, a
+1.57x speedup. For the harder `zero_c10_c11` direction, both versions were
+`Optimal` in 108 iterations with bit-identical printed objectives
+`-2.429066649954053...e-11`, relative gap `3.03858e-13`, and certificate
+metrics. Median wall time improved from 4.891804 s to 4.791984 s. The isolated
+Schur phase improved from 0.034755 s to 0.032619 s (6.1%); equality Gram and
+factorization dominated the remaining time. Process peak RSS decreased from
+1,567,420,416 to 1,543,401,472 bytes in that matched run.
+
+The second direction's candidate certificate had primal/dual residuals
+`3.16e-63` and `5.69e-49`; minimum reconstructed two-by-two primal/dual cone
+margins were `-7.80e-24` and `1.74e-15`. The tiny negative primal margin is
+well inside the requested original-coordinate tolerance. No production path
+or symlink was changed.
+
+### Thread scaling and dense-SDP regression
+
+The same `zero_c00_min` CSDR smoke model was run sequentially on one PBS
+compute node with one BLAS thread. Every run returned the same objective and
+certificate; only the Julia/solver thread count changed.
+
+| Julia threads | median solver time | speedup vs 1 thread |
+|---:|---:|---:|
+| 1 | 1.648903 s | 1.00x |
+| 2 | 1.627795 s | 1.01x |
+| 4 | 1.418084 s | 1.16x |
+| 8 | 1.140819 s | 1.45x |
+| 16 | 1.089007 s | 1.51x |
+
+The last 8-to-16-thread step improved only 4.8%. This small problem contains
+parallel bursts but is dominated by short serial phases, compilation, and
+model loading; eight threads are the practical smoke-test recommendation.
+Larger production models still need an independent thread crossover.
+
+The final Float64 `Task_Low08` regression ran on `node180` with 16 Julia and
+16 BLAS threads under interleaved NUMA placement. It returned `Optimal` in 28
+iterations with a valid original-coordinate certificate. Solver and
+end-to-end times were 43.656 s and 45.414 s; peak process RSS was 4,494,412
+KiB. The primal/dual objectives were `0.6532912655025964` and
+`0.6532910479425099`, relative gap `2.176e-7`, primal residual `3.316e-10`,
+and dual residual `9.534e-12`. The diagnostic minimum primal/dual eigenvalues
+were `-7.126e-11` and `1.975e-15`, both accepted by the scale-aware
+certificate. Phase totals identify Schur assembly (10.209 s), Schur
+factorization (9.496 s), and total KKT factorization (13.875 s) as the main
+remaining dense-SDP costs. The fixed-trace equality scan crossover avoided a
+new dense relation-analysis cost on this large model.
+
+### Release-gate corrections
+
+The first full v0.4 candidate gate passed 5,942 assertions and failed one
+pre-existing LP termination-reason assertion. The new generic fixed-trace
+stage correctly found the negative fixed trace of a contradictory scalar
+row, but it returned the generic `structural_presolve_infeasibility` reason
+before the dedicated LP presolve could return `lp_zero_row_infeasible`.
+The final implementation retains fixed-trace infeasibility detection for a
+direct `preprocess` call and maps a negative fixed scalar block back to the
+specific LP zero-row reason at the solve boundary. A focused compute-node
+rerun passed 97 LP, 53 SOC/fixed-trace, and 6 public-API assertions.
+
+The release audit also added an explicit symmetry check to the SOC-arrow
+classifier. This protects callers that intentionally disable ingest
+validation from misclassifying a nonsymmetric arrow as a Lorentz cone.
+Independent docs/examples/benchmark/CLI environments now admit SDPX 0.4,
+all advanced API examples use the `SDPX.Experimental` namespace, and a clean
+Documenter build completed successfully. The final full package regression
+ran as PBS job `199463.node220` and passed all 5,945 assertions in 15m55.2s.
+The complete process took 16m44.3s, exited zero, and reached 2,711,188 KiB
+peak RSS (`/usr/bin/time`; PBS recorded 3,025,684 KiB). Production remains
+unchanged.
+
+## 2026-08-08 — Native fixed-trace Q3 development
+
+### Geometry and preprocessing audit
+
+The new benchmark geometry is deliberately larger than the historical J40
+case recorded above.  The development case `J=40, Na=20, Nmu=200, Nx=3` has
+4,200 fixed-trace two-by-two PSD cells, 8,400 reduced spectral variables, and
+170 equalities.  The high-core case `J=80, Na=40, Nmu=800, Nx=3` has 32,800
+cells, 65,600 variables, and 350 equalities.  In particular, the latter panel
+is `65,600 x 350`; it is not the smaller historical J80/Na20 panel.
+
+Fixed-trace analysis originally allocated and cleared an `m`-entry dense
+trace vector for every block.  That is an O(Lm) preprocessing path: about
+2.15 billion writes for the J80 benchmark before the first Newton step.  The
+retained implementation now scans only each sparse block's active coefficient
+list, recognizes packed traceless PSD2 coefficients directly, and allocates a
+dense relation vector only for a genuinely small equality-implied trace
+solve.  Direct fixed traces retain an empty relation vector.  The focused
+fixed-trace regression passed all 53 assertions after this change.
+
+### Compact scalar kernels and rejected barrier prototype
+
+An allocation-conscious Q3 kernel module now implements the exact map
+
+`(x0,x1,x2) -> [[x0+x1,x2],[x2,x0-x1]]`
+
+together with determinant/margin tests, stable cone fraction-to-boundary,
+full nonsymmetric products, inverse-left multiplication, fixed-trace Schur
+metrics, predictor contractions, direction recovery, and second-order
+corrector residuals.  Float64 and BigFloat256 comparisons against explicit
+two-by-two matrix algebra pass 474/474 assertions.  Warm Float64 fraction,
+Schur, and corrector calls allocate zero bytes.
+
+A compact primal log-barrier prototype produced accurate Float64x4 and
+BigFloat256 answers but required roughly 109 outer iterations at `1e-20`.
+It was rejected and removed because it would not improve complete CSDR solve
+time; its measured result remains recorded here as a negative experiment.
+
+### Native compact Mehrotra engine
+
+A narrow native engine now accepts only exactly certified sparse fixed-trace
+PSD2 products with two nonsingular, block-local traceless coordinates per
+cell.  It stores primal and dual cone states in three Q3 coordinates, stores
+only two spectral directions per cell, uses closed-form local Schur metrics
+and exact Q3 cone steps, and materializes PSD matrices only at the final
+compatibility/certificate boundary.  It preserves the established two-row
+local equality elimination and triangular equality Gram; fixed trace does not
+justify an incorrect two-to-one row reduction.
+
+The first predictor comparison against the unchanged matrix SDP workspace
+found a sign error in dual-direction recovery.  The local Schur block,
+residual, and primal direction agreed exactly, but the Q3 dual direction was
+the negative of SDPX's Newton convention.  The corrected formula is
+`dY = sym(X^-1 * (R - dX*Y))`.  A boundary disk then converged in six native
+iterations, while a two-cell equality-constrained problem converged in six
+iterations at `1e-20` in both Float64x4 and BigFloat256.  The latter returned
+relative gap about `1.39e-22`; its primal and dual residuals were at or below
+`1e-72` for Float64x4 and `1e-77` for BigFloat256.
+
+The integrated SOC/fixed-trace suite passes 84/84 assertions, and the scalar
+kernel suite passes 474/474.  The native engine performs an independent
+reduced original-coordinate certificate gate before promotion; an
+ineligible post-presolve model, unsupported warm start/checkpoint, numerical
+failure, or certificate failure reruns the unchanged PSD2 path when time
+remains.  `algorithm=:auto` deliberately continues to select the validated
+PSD2 reference until the PBS J40/J80 performance and reliability gates are
+complete.
+
+### Equality-Gram scheduling experiment
+
+The first compact backend reused the existing disjoint output-tile SYRK.  On
+the `65,600 x 350` J80 panel each tile worker traverses all 65,600 rows, which
+can reread a column panel many times and limit NUMA scaling.  An alternative
+expert/automatic strategy now gives every worker a contiguous row bin and a
+private packed lower triangle.  Each bin is accumulated without shared writes,
+then merged in a deterministic binary tree and copied into the solver-owned
+lower triangle.  BigFloat reduction mutates only independently owned MPFR
+destinations.  A local four-core `2048 x 100` Float64x4 microbenchmark measured
+0.0356 s for output tiles and 0.0734 s for row bins after enabling the packed
+2x2 micro-kernel.  This rejected automatic row-bin promotion: `:auto` retains
+output tiles, while the forced experiment remains subject to the configured
+memory fraction.
+
+The new `q3_gram_strategy=:output_tiles|:row_bins|:auto` expert control exists
+solely to obtain matched J40/J80 evidence; `:auto` is conservative.  Local
+four-thread regressions exercise the packed row-bin path and retain the exact
+objective and certificate.  After this addition the scalar Q3 suite passed
+474/474 assertions, the integrated fixed-trace/SOC suite passed 101/101, and
+the related pipeline, KKT, and BigFloat ownership suites remained green.  Real
+performance claims are deferred to PBS compute-node measurements.
+
+### Cluster staging
+
+Candidate `q3-fixed-trace-e9559eb8f4ca` was uploaded to an isolated cluster
+path without changing the production symlink.  The first model-generation
+jobs are `199489.node220` (J40, node57, 16 cores, 32 GiB) and
+`199490.node220` (J80, node58, 16 cores, 64 GiB).  Both use the pinned CSDR
+release, Float64x4 source construction, single-threaded BLAS, immutable output
+directories, and model SHA-256 manifests.  They were still queued at the time
+of the initial entry.  The nodes reported `free` but were actually substantially
+occupied, so the two queued jobs were moved to idle node1/node7.  Both then
+failed in under three seconds before model construction: PBS had copied the
+script away from its repository-relative files and the release-local Project
+lacked MultiFloats.  The retained fix requires an explicit `SDPX_SOURCE` and
+uses the instantiated shared Julia project/depot; the failed directories remain
+as audit evidence and new attempts use new immutable output directories.
+
+The second generation attempt (`199491.node220` and `199492.node220`) also
+failed before numerical work.  Its active project and depot were correct, but
+the stacked load path placed the SDPX candidate first.  Because SDPX declares
+MultiFloats as a weak dependency, that project entry shadowed the instantiated
+shared manifest and Julia reported that MultiFloats was not installed.  A
+login-node load-only reproduction isolated the ordering bug.  The verified
+stack is now `shared environment -> SDPX candidate -> CSDR release -> stdlib`;
+it loads MultiFloats from the pinned shared depot, SDPX from the candidate,
+CSDRBootstrap from the immutable release, and activates the SDPX MultiFloats
+extension.  Generator and solver launchers use this ordering and pass the CSDR
+release explicitly to the deserializer.  No failed attempt changed production.
+
+The corrected generation jobs `199493.node220` and `199494.node220` completed
+on node1/node7 with exit status zero. J40 took 26.74 seconds in the generator
+and produced a 43 MiB payload with SHA-256
+`eb9072b252e32d39f00bef78f81c5cd9269c6f65a1d02150b7cf02a694fd46cd`.
+J80 took 381.20 seconds and produced a 633 MiB payload with SHA-256
+`bbad609457787dc72e92997b91cfc24cebb372e00d28c2f6d66ec1546c735020`;
+its peak RSS was 3,927,132 KiB. Although each generator exposed 16 Julia
+threads inside a 32-slot allocation, J80 averaged only 1.56 active CPU cores.
+This serial source-model construction is reported separately and is excluded
+from every solver-time comparison.
+
+Before timing, the harness was hardened against false SOCP claims: a row is
+accepted only when the solve is Optimal, the plan is `:socp_fixed_trace_q3`,
+the executed KKT is `:q3_block_diagonal_equality`, the original-coordinate
+certificate passes, and any forced Gram strategy actually executed. It also
+requires the exact model hash, native eligibility, fixed BigFloat256 precision,
+the pinned CSDR release, and the requested candidate source. The manifest now
+records a serialized reduced-model hash, release/source/Julia-manifest hashes,
+effective memory, actual CPU use, context switches, and NUMA residency. A new
+preflight-only mode performs conversion and memory estimation without entering
+a Newton iteration.
+
+The final backend audit found two correctness gates before the first campaign.
+A boundary iterate that already met all tolerances could be discarded when the
+unused next Newton factor lost a positive pivot; residual certification now
+precedes that failure classification, with a deterministic regression. The Q3
+primal residual now uses the exact matrix infinity norm
+`abs(p0)+abs(p1)+abs(p2)` and the same data scaling as the public certificate.
+BigFloat local panel and triangular solves also now reuse destination-owned
+MPFR objects plus one task-local MutableArithmetics scratch value, eliminating
+per-panel-entry division temporaries.
+
+### J40/J80 fixed-trace preflight and harness corrections
+
+The first Float64x4 preflight pair (`199501.node220` and `199502.node220`)
+failed before numerical work because Julia 1.12 would not call the dynamically
+included release reducer from an older compiled world.  The retained loader
+uses `Base.invokelatest` for both the release binding and the exact
+low-energy-elimination function.  Corrected J40 job `199504.node220` then
+passed with the declared reduced geometry: 4,200 PSD2 blocks, 8,400 variables,
+and 170 equalities.  Its Q3 workspace estimate was 54,965,608 bytes, process
+peak RSS was 2,400,198,656 bytes, model loading/reduction took 12.13 seconds,
+and the native eligibility scan took 0.070 seconds.  Focused job
+`199503.node220` simultaneously passed 97 LP, 105 SOC/fixed-trace, and six
+public-API assertions.
+
+The corresponding J80 Float64x4 preflight `199511.node220` passed on 64
+threads with exactly 32,800 blocks, 65,600 variables, and 350 equalities.  It
+estimated 800,369,696 bytes for the compact Q3 workspace; complete payload
+loading, release-pinned reduction, hashing, conversion, and inspection peaked
+at 7,475,322,880 bytes.  Hashing the 633 MiB input took 6.72 seconds and model
+loading/reduction took 51.91 seconds, while native eligibility itself took
+0.095 seconds.  The planned 64 GiB Float64x4 allocation is therefore safe;
+the originally submitted 256 GiB request was cancelled while still queued and
+replaced by the measured 64 GiB request.
+
+Two first J40 timing pilots (`199507`/`199508`) exposed that PBS parses commas
+inside `qsub -v` as new variables; the paired launcher now accepts the safe
+tokens `sdp-socp` and `socp-sdp`.  The corrected launchers then reached the
+timing boundary and exposed a second harness-only incompatibility: Julia 1.12
+removed the undocumented `Base.cputime()` function.  No Newton iteration was
+timed in either failed pilot.  Process CPU accounting now uses POSIX
+`clock()`, which accumulates CPU time across all Julia threads and permits the
+reported active-core and utilization checks.
+
+J80 BigFloat256 preflight job `199519.node220` converted the immutable
+Float64x4 payload inside a fixed 256-bit precision scope and passed the same
+32,800/65,600/350 geometry and native-Q3 eligibility gates.  Deterministic
+conversion took 24.12 seconds.  The conservative compact workspace estimate
+was 4,201,801,504 bytes; the load/reduction/conversion process itself peaked
+at 7,509,975,040 bytes (`/usr/bin/time`: 7,333,960 KiB).  Their conservative
+sum remains far below the planned 128 GiB allocation, so a future full J80
+BigFloat256 solve is not rejected by memory preflight.  The preflight consumed
+991.9 process CPU seconds over 256.7 wall seconds (3.86 average active cores),
+showing that source conversion is only weakly parallel and must remain outside
+solver-time comparisons.
+
+The first valid J40 Float64x4 single-thread SDP row completed in 536.425
+seconds and 166 iterations.  It returned `Optimal`, objective
+`-21.0253439247550203`, relative gap `6.38e-13`, and a valid original-
+coordinate certificate.  Equality Gram construction consumed 315.79 seconds
+(59% of solver wall time), constraint triangular solves 56.55 seconds, and
+equality factorization 8.73 seconds.  This establishes that fixed-trace cone
+algebra alone cannot deliver a large complete-solve speedup: equality-panel
+construction/Gram and its downstream solves must also scale.  The paired
+second process on node15 later received SIGBUS while executing release-side
+model elimination, before a SOCP solve; that row is rejected as a runtime/
+node anomaly and will be repeated elsewhere.
+
+A direct no-fallback J40 Q3 diagnostic isolated the first native failure in
+7.36 seconds.  The core completed one update, then reported a non-interior
+cone state at block 202; the public solver had correctly discarded this state
+and rerun PSD2.  The accepted first-step history exposed the mechanism: the
+bounded fraction-to-boundary helper returned one for a dual full step.  That
+value was ambiguous between a safely interior endpoint and an endpoint exactly
+on the closed cone boundary, while the old caller skipped its 0.99 safety
+factor whenever the value was one.  The retained fix tracks strict full-step
+interiority separately for every worker and applies the safety factor when the
+endpoint is only semidefinite.  A dedicated Q3 regression covers this exact
+boundary endpoint.
+
+### Native Q3 parallel closure race and repair
+
+The strict-endpoint candidate still failed the direct J40 Float64x4
+diagnostic (`199526.node220`) after one update. It reported block 5 as a
+non-interior dual state even though the saved head (`0.893259`) and determinant
+(`0.161784`) were both strictly positive. A deterministic four-block Float64
+regression reproduced the same contradiction with four workers, while the
+identical one-worker solve reached `Optimal` in six iterations with a valid
+certificate. This separated the failure from CSDR data, MultiFloat arithmetic,
+and the equality Gram kernel.
+
+A phase-by-phase one-worker/four-worker differential run found divergence in
+the local `2x2` metric before the first Gram construction. The cause was Julia
+closure capture: the spawned assembly kernels used local names `x0:x2` and
+`y0:y2`, while the enclosing failure-diagnostic branch assigned the same names.
+Julia boxed those function-local variables, so every spawned task raced on the
+same six scalar bindings despite owning disjoint output blocks. The parallel
+step-bound reduction independently reused its task-local accumulator names in
+the enclosing scope and had the same defect.
+
+The retained repair gives the diagnostic and task accumulators distinct names,
+so every spawned kernel owns its scalar temporaries as well as its output
+range. After the change, one and four workers were bit-for-bit identical after
+local metric construction, Gram/KKT factorization, predictor and corrector
+directions, fraction-to-boundary, and all eight inspected updates. The public
+four-worker minimal solve again returned `Optimal` in six iterations with a
+valid certificate. The scalar Q3 suite passed 480/480 assertions and the
+integrated SOC/fixed-trace suite passed 105/105 locally. Candidate
+`q3-fixed-trace-72e335c04cf8` and its failed focused regression
+`199525.node220` predate this race repair and remain rejected audit artifacts;
+a new immutable candidate is required before repeating J40 timing.
+
+The unaffected one-worker control from the preceding candidate
+(`199527.node220`) completed the full J40 Float64x4 native solve in 490.850
+seconds and 174 iterations. It returned `Optimal`, objective
+`-21.0253439247582131`, relative certificate gap `3.73e-13`, and a valid
+original-coordinate certificate. Its dominant phases were equality Gram
+construction (334.13 seconds), local residual/metric factorization (32.95
+seconds), constraint triangular solves (51.76 seconds), and the 170-by-170
+equality factorization (9.22 seconds). Against the validated 536.425-second
+one-worker SDP2 row, compact Q3 is only 1.09 times faster and therefore does
+not satisfy the automatic-promotion threshold.
+
+Race-fixed candidate `q3-fixed-trace-db9b5d8fd891` then completed the direct
+J40 Float64x4 eight-worker diagnostic (`199530.node220`) in 134.093 seconds
+with the identical 174 iterations, objective, and certificate. The executed
+backend was `q3_block_diagonal_equality` with the output-tile triangular Gram;
+no PSD fallback occurred. This is a 3.66-times strong-scaling speedup over the
+one-worker Q3 row. Equality Gram time fell from 334.13 to 48.60 seconds
+(6.88 times), while local metric work remained 33.50 seconds and the serial
+equality factorization took 11.67 seconds. Solver CPU time was 608.28 seconds,
+or 4.54 mean active cores out of eight requested, so additional scaling work
+must target the remaining serial/local phases rather than the already-scaling
+Gram alone. Process peak RSS was 1,301,384 KiB.
+
+The first focused PBS rerun for that candidate failed before loading SDPX:
+the script selected the intentionally unversioned `bench/Manifest.toml`, which
+was not part of the immutable upload. No numerical test ran. The portable
+launcher now reuses the pinned shared cluster environment, places the candidate
+package next on `JULIA_LOAD_PATH`, and asserts `pathof(SDPX)` before including
+tests. Locally, the integrated SOC suite now passes 111/111 assertions,
+including deterministic multithreaded BigFloat256 Q3 execution.
+
+### Residual GEMV scaling and isolated cluster compilation caches
+
+The eight-worker J40 profile showed that the equality Gram already scaled by
+6.88 times, but the combined residual/local-metric phase stayed essentially
+flat at 33.50 seconds. Two dense residual products, `B*y` and `B' * x`, still
+used the serial generic matrix-vector path for `Float64x4` and `BigFloat`.
+The retained Q3-only helper partitions complete output rows among fixed tasks,
+preserves the established summation order within every dot product, and never
+shares a mutable `BigFloat` destination or MPFR scratch object between tasks.
+Float32 and Float64 continue to use their unchanged BLAS path.
+
+On a local J40-shaped `8,400 x 170` Float64x4 panel, the two residual products
+were bit-for-bit identical to the owned serial kernel. Median elapsed time fell
+from 0.05778 seconds to 0.03917, 0.02768, and 0.02019 seconds with 2, 4, and 8
+workers, respectively (1.48, 2.09, and 2.86 times speedup). New phase counters
+separate `q3_residual_gemv` from `q3_local_metric_factor`, so the cluster run
+can determine whether this microkernel saves at least five percent of the full
+solve. The direct Float64x4/BigFloat256 regression covers a `200 x 200` panel,
+uninitialized MPFR output slots, deterministic results, and alias-safe
+reference storage. The scalar Q3 suite passes 480/480 assertions and the
+integrated SOC/fixed-trace suite passes 113/113 with four Julia threads.
+
+Paired job `199531.node220` and focused regression `199534.node220` terminated
+with SIGBUS in Julia compilation/release loading before a numerical solve.
+Their logs showed concurrent `.ji.pidfile` activity in the shared depot from
+several immutable candidates that have the same package UUID and version but
+different source trees. Every retained PBS launcher now prepends a job-private
+compiled depot under its result directory and keeps the shared read-mostly
+depot second for installed packages and artifacts. This removes cross-candidate
+cache writes without copying the full package store. The two failed jobs are
+environmental failures and provide no benchmark row.
+
+The first optional Float64 reference jobs (`199535.node220` and
+`199536.node220`) also stopped before solver setup: Julia serialization needs
+the concrete CSDRBootstrap payload types loaded before `deserialize`, not
+after inspecting the payload. The direct-Q3 reference harness now includes the
+pinned release in `Main` first and then delegates one load/reduction to the
+shared fixed-trace loader. It records the source and reduced-model hashes,
+requires exact Q3 eligibility, separates frontend/setup/solver/validation
+times, and maps external SOC primal/dual iterates back to PSD2 for SDPX's
+original-coordinate certificate. Clarabel uses one vector `Zeros` equality;
+MosekTools uses equivalent scalar `EqualTo` rows because their current MOI
+wrappers accept different equality encodings. No tolerance or model relaxation
+is introduced by this frontend-only difference.
+
+Focused cluster regression `199538.node220` then passed on node165 with the
+job-private depot: 97 LP assertions, 113 compact-SOC/fixed-trace assertions,
+and six public-API assertions, with no failures. PBS wall time was 3 minutes
+44 seconds and reported peak memory was 1,465,004 KiB. A 16-block synthetic
+Float64x4 native-Q3 benchmark also returned `Optimal` in five iterations with
+an original-coordinate certificate; a deliberately forced Gram strategy on
+the equality-free synthetic case was correctly rejected because no Gram
+kernel actually executed.
+
+The first paired rerun `199539.node220` exited in six seconds before Julia
+startup because the portable `run_pair.sh` defaulted to an unqualified
+`julia`, which is not on compute-node PATH. It now uses the same pinned Julia
+1.12.6 executable as the other launchers while retaining an explicit override.
+Clarabel reference `199540.node220` loaded the exact J40 payload and direct Q3
+model but returned `SLOW_PROGRESS` at `1e-8`; the fail-closed harness rejected
+it rather than presenting an uncertified reference. MOSEK reference
+`199541.node220` did not start because the cluster environment contains
+MosekTools but no Mosek.jl package or license installation. A filesystem audit
+found no existing user-owned MOSEK installation, so no MOSEK timing is claimed.
+
+A final harness audit closed several paths that could otherwise produce
+mislabelled large runs. Tuple payload coefficients now use a concrete
+`Vector{Array{T,3}}` accepted by `ingest`; pre-existing BigFloat tuple/model
+objects are rejected instead of silently retaining an unknown MPFR precision.
+Legacy same-arithmetic SparseCons blocks are repacked onto their active support
+before hashing, avoiding more than two billion retained references at J80.
+Geometry, model hash, exact fixed-trace/Q3 eligibility, executed backend, Gram
+strategy, and a 70%-of-effective-free-memory workspace gate are mandatory for
+every serialized timed run. Provenance hashes now cover the numerical source
+and fixed-trace benchmark drivers/launchers, and the optional reference asserts
+that `pathof(SDPX)` belongs to the requested immutable candidate. MOSEK and
+Clarabel now share recorded iteration/time/thread controls and use a fresh
+optimizer for each measured repetition.
+
+### J40 paired result and fixed-extended equality factorization
+
+Paired job `199545.node220` completed on node58 with eight Julia/solver
+threads and one BLAS thread. Both modes used the same hash-pinned J40 model,
+requested tolerance, adaptive policy, and original-coordinate certificate.
+The native Q3 run returned `Optimal` in 174 iterations with primal objective
+`-21.025343924758213146...`, relative certificate gap `3.73e-13`, and a valid
+certificate. Its solver time was 107.081 seconds and end-to-end time was
+117.076 seconds. The PSD2 reference returned `Optimal` in 166 iterations with
+primal objective `-21.025343924755020299...`, a valid certificate, solver time
+210.915 seconds, and end-to-end time 220.834 seconds. Thus the compact Q3 path
+was 1.97 times faster in the solver and 1.89 times faster end to end on this
+controlled pair. This is the first complete-pair result above the 1.5-times
+promotion threshold, but more repetitions are still required to establish the
+coefficient of variation before `:auto` may select Q3.
+
+The residual-GEMV change explains a material part of the improvement over the
+earlier 134.09-second Q3 run: the new eight-thread residual phase took 9.059
+seconds and the separately measured local metric phase 1.684 seconds, compared
+with 33.497 seconds when both were reported together. Equality Gram remained
+the largest Q3 phase at 47.288 seconds. Equality Cholesky still took 11.789
+seconds and reported one active factor thread; average whole-process CPU usage
+was 5.52 cores of the requested eight.
+
+A local 170-by-170 Float64x4 experiment then compared the existing scalar
+Cholesky with the already available 24-column blocked kernel. The blocked
+median was 0.01029, 0.00695, 0.00579, and 0.00484 seconds at 1, 2, 4, and 8
+threads. It reconstructed the input with relative infinity error
+`1.78e-63`, and its lower factor was bitwise identical at one and eight
+threads. Earlier measurements put the generic factor at 0.02076 seconds, so
+the eight-thread blocked kernel is about 4.3 times faster. A conservative Q3
+selector now uses this kernel only for fixed-width extended arithmetic and
+equality dimension at least 128, with panel size 24. Float64 retains LAPACK;
+native BigFloat retains the MPFR kernel. Executed factor kernel and thread
+count are recorded, and a failed blocked factor retries the previous generic
+factor from the untouched Gram matrix.
+
+The optional direct-Q3 Clarabel 0.11.1 run on the raw J40 model was rejected:
+it stopped after one iteration with zero step and `SLOW_PROGRESS`, despite
+equilibration, rather than producing a certificate. Its model had 8,400
+variables, 170 zero-cone rows, 4,200 Q3 cones, and 1,222,200 nonzeros. The
+cluster environment still lacks Mosek.jl and a MOSEK license installation, so
+no MOSEK timing is claimed. These are reference-solver/environment outcomes,
+not SDPX numerical rows.
+
+Candidate `q3-fixed-trace-18136b04e1b6` contains the blocked equality factor
+selector and passed its compute-node focused gate in job `199551.node220`: 97
+LP assertions, 121 SOC/fixed-trace assertions, and six public-API assertions,
+with no failures. Three-run J40 Float64x4 scaling points then executed the
+native Q3 backend and the blocked factor on every applicable repetition. All
+18 runs at 1/2/4/8/16/32 threads returned `Optimal`, used 174 iterations,
+passed the original-coordinate certificate, and produced numerically identical
+objectives and PSD margins.
+
+| Julia/Q3 threads | Solver median (s) | End-to-end median (s) | Equality Gram median (s) | Equality factor median (s) | Mean active cores | End-to-end CV |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 475.957 | 485.461 | 333.189 | 2.927 | 1.00 | 0.17% |
+| 2 | 289.561 | 298.937 | 170.997 | 1.984 | 1.89 | 1.25% |
+| 4 | 163.375 | 172.957 | 90.575 | 1.352 | 3.50 | 0.22% |
+| 8 | 95.444 | 105.018 | 49.280 | 1.105 | 6.00 | 0.67% |
+| 16 | 53.238 | 63.074 | 26.726 | 0.849 | 10.26 | 1.22% |
+| 32 | 34.165 | 43.850 | 15.368 | 0.817 | 16.04 | 2.92% |
+
+Relative to one thread, solver-phase speedups are 1.64, 2.91, 4.99, 8.94, and
+13.93 times at 2/4/8/16/32 threads. Parallel efficiency consequently declines
+from 82% at two threads to 44% at 32, while measured active-core usage reaches
+only about 16 cores at the 32-thread request. The 8-thread candidate improves
+the preceding same-model run from 107.081 to
+95.444 seconds in solver phases (12.2%) and from 117.076 to 105.018 seconds
+end to end (11.5%). Equality factorization fell from 11.789 to 1.105 seconds,
+accounting for the measured improvement without changing iteration count or
+the certificate. From 8 to 16 threads the solver speedup is 1.79 times; from
+16 to 32 it is 1.56 times. Mean active-core utilization declines from about
+75% of the requested eight to 50% of the requested 32, so higher thread counts
+remain experiments rather than automatic defaults. Some 2/4- and 16/32-thread
+jobs shared node58 on disjoint scheduler slots, and are retained as exploratory
+scaling points; the eventual best configuration needs an isolated repetition.
+
+Two follow-up J40-shaped local kernel experiments were rejected rather than
+added to the candidate. Replacing the two panel divisions with precomputed
+reciprocal multiplications improved the isolated transform by 1.49, 1.30, and
+1.09 times at 1/2/4 threads but was 2.4% slower at eight threads; the relative
+result difference was `2.53e-64`. The high-thread path is already limited by
+panel traffic, so this does not satisfy the complete-solve five-percent gate.
+A column-owned Float64x4 GEMV preserved the result bit for bit and was about
+1.20 times faster at 2/4/8 threads, but 1.82 times slower at one thread. Four-
+and eight-row accumulator microkernels were slower at every tested thread
+count. Because only part of the 9.1-second residual and 16.8-second KKT-solve
+phases uses the strided orientation, the measured Amdahl benefit is below the
+retention threshold on J40. The column-owned variant remains a J80-only NUMA
+experiment; it is not enabled in solver code.
+
+### BigFloat256 Q3 Gram profile and output-tile selector
+
+The first complete J40 BigFloat256 native-Q3 run (`199547.node220`, four
+requested solver threads) returned `Optimal` in 174 iterations and passed the
+original-coordinate certificate. Solver phases took 1,818.215 seconds and
+end-to-end time was 1,917.509 seconds. The primal objective was
+`-21.025343924758213146233748041163...` and the relative certificate gap was
+`3.73e-13`, consistent with the Float64x4 result. Peak process RSS was about
+2.71 GiB, but the solve generated about 106.8 GiB of allocation traffic.
+
+Profiling exposed one dominant selector error rather than an MPFR conversion
+cost. Equality Gram construction took 1,585.792 seconds, 87.2% of all solver
+phases, and diagnostics reported `pairwise_gram`; whole-process utilization
+averaged only 1.25 of four requested cores. Model conversion took 1.411
+seconds and reduced-model hashing 3.963 seconds, so neither is a worthwhile
+target at this scale. The generic crossover assumes only 1.08 reuse for
+BigFloat and assigns it no parallel gain, predicting 1.08 times speedup below
+its 1.12 acceptance threshold. That model is inappropriate for native Q3:
+the transformed equality panel already exists and the BigFloat triangular
+SYRK assigns complete output tiles and private MPFR scratch to workers.
+
+The compute-node microbenchmark `199560.node220` used the J40 equality-panel
+shape, `8,400 x 170`, at BigFloat256 and four Julia threads. After warm-up,
+pairwise Gram took 9.605 seconds, output tiles took 3.250 seconds, and four
+private row bins plus deterministic merge took 3.327 seconds. Output tiles
+were therefore 2.96 times faster; both alternatives agreed with the pairwise
+lower triangle to the printed precision. The process used 669,156 KiB peak
+RSS. Smaller local checks found 1.00, 2.06, and 3.40 times output-tile speedup
+at one, two, and four workers on a 1,024-by-64 panel; a 512-by-48 check was
+bit-for-bit identical and 3.21--3.29 times faster at four workers.
+
+Follow-up compute-node jobs used the same J40-shaped panel. At one thread
+(`199562.node220`), pairwise/output-tile/row-bin times were
+8.651/8.568/8.761 seconds, so output tiles were only 1.01 times faster. At two
+threads (`199563.node220`) they were 8.649/5.959/6.122 seconds, a 1.45-times
+output-tile speedup. All reported lower-triangle relative errors were zero.
+Row bins were 3--4% slower than output tiles at both two and four threads, so
+they remain a forced experiment rather than an automatic choice. Automatic
+BigFloat selection therefore requires at least two effective Gram workers;
+the one-worker path stays pairwise.
+
+The Q3 selector now honors an explicit `q3_gram_strategy=:output_tiles` even
+when the generic packing model rejects it. In automatic mode, BigFloat uses
+output tiles only when at least two workers are selected, the equality
+dimension is at least 32, and triangular work is at least 250,000 scalar
+contractions. Small panels retain pairwise Gram. Diagnostics now report the
+actual Gram worker count and selection reason. A focused test uses a
+400-by-40 BigFloat256 panel to verify automatic selection and exact lower-
+triangle agreement, and a complete native solve verifies the forced strategy,
+objective, iteration count, and certificate. The combined SOC/fixed-trace
+suite passes 131/131 assertions with four Julia threads, including an explicit
+check that `extended_precision_blas=:off` still disables the automatic Q3
+override.
+
+### Complete J40 BigFloat256 output-tile solve
+
+Job `199571.node220` completed on node102 with four Julia/Q3 workers and one
+BLAS worker.  The automatic selector executed
+`threaded_output_tile_triangular_syrk` with four Gram workers and reported
+`q3_bigfloat_parallel_output_tiles`; no PSD2 fallback occurred.  The result
+was `Optimal` after 174 iterations and passed the original-coordinate
+certificate.  The primal and dual objectives were
+`-21.025343924758213146...` and `-21.025343924766050272...`, respectively,
+with relative gap `3.7275e-13`, normalized primal/dual residuals
+`9.651e-77`/`9.932e-32`, equality backward error `2.734e-79`, and reconstructed
+primal/dual PSD2 margins `-1.355e-33`/`2.786e-17`.  These values agree with the
+old pairwise-Gram run.
+
+| J40 BigFloat256, four workers | Pairwise Gram | Output tiles | Speedup |
+| --- | ---: | ---: | ---: |
+| Solver phases | 1,818.215 s | 838.745 s | 2.17x |
+| End to end | 1,917.509 s | 940.127 s | 2.04x |
+| Equality Gram | 1,585.792 s | 581.201 s | 2.73x |
+| Peak process RSS | 2.90 GB | 2.34 GB | 19.5% lower |
+
+The timed process averaged 3.30 active cores, or 82.5% of the four requested
+workers, compared with about 1.25 active cores for the serial pairwise
+baseline.  Allocation traffic changed only from 114.64 to 114.16 GB, so the
+wall-time and RSS improvements come from disjoint output ownership rather than
+weakened validation or reduced arithmetic.  Schur assembly is still 680.477
+seconds (81.1% of the solver); equality Gram alone is 581.201 seconds (69.3%).
+The next retained experiment is therefore an eight-worker complete solve,
+followed by higher widths only while measured Gram and complete-solve scaling
+remain useful.
+
+### Stable J40 Float64x4 SDP2 versus native Q3 comparison
+
+Job `199573.node220` completed three timed SDP2 reference solves on node104
+with eight solver workers and one BLAS worker.  All three returned `Optimal`,
+took 166 iterations, passed the original-coordinate certificate, and produced
+identical objectives.  The primal objective was
+`-21.025343924755020298714...`; the corresponding three-run native Q3 result
+used 174 iterations and differed by only `1.52e-13` relative to the objective
+scale.  Every Q3 repetition also passed the certificate.
+
+| J40 Float64x4, eight workers | SDP2 median | Native Q3 median | SDP2 / Q3 |
+| --- | ---: | ---: | ---: |
+| Solver phases | 187.627 s (CV 0.80%) | 95.444 s (CV 0.72%) | 1.97x |
+| End to end | 196.935 s (CV 0.68%) | 105.018 s (CV 0.67%) | 1.88x |
+| Equality Gram | 46.534 s | 49.280 s | 0.94x |
+| Equality factorization | 12.274 s | 1.105 s | 11.11x |
+| Residual and local block factor | 27.802 s | 9.477 s | 2.93x |
+| Predictor | 22.690 s | 10.619 s | 2.14x |
+| Corrector | 55.627 s | 9.488 s | 5.86x |
+| Refinement | 30.424 s | 0.000 s | -- |
+| Mean active cores | 3.17 | 6.00 | 1.89x |
+| Allocation traffic | 532.94 MB | 463.31 MB | 13.1% lower |
+
+This isolates where the compact formulation wins.  Its equality Gram has the
+same `8,400 x 170` geometry and is slightly slower in this comparison; fixed
+trace cannot legally reduce its two transformed rows per cell to one.  The
+speedup instead comes from closed-form cone-local algebra, the blocked
+extended-precision equality factor, cheaper direction recovery, and avoiding
+the PSD2 refinement work.  Q3 also keeps twice as much of the requested CPU
+capacity active.
+
+Peak process RSS is dominated by compilation and the common serialized model:
+the separate three-run jobs reported 2.46 GB for Q3 and 2.30 GB for SDP2, but
+the controlled same-allocation pair reported 2.25 GB for Q3 versus 2.43 GB for
+SDP2.  Its solver workspace estimates were 55.0 MB for Q3 versus 34.0 GB for
+the deliberately conservative SDP campaign estimate.  Allocation traffic and
+the paired RSS therefore support the no-memory-regression gate; process-level
+RSS from different candidate compilation jobs is not treated as a solver
+workspace measurement.  The speed and CV gates are now satisfied at eight
+workers.  A same-allocation one-worker pair is required before changing the
+automatic algorithm selector.
+
+### J40 BigFloat256 scaling from four to eight workers
+
+Job `199575.node220` completed on node165 with eight Julia/Q3 workers and one
+BLAS worker.  It again selected `output_tiles`, used eight disjoint Gram jobs,
+returned `Optimal` in 174 iterations, and passed the original-coordinate
+certificate.  Its primal/dual objectives, `3.7275e-13` relative gap, residuals,
+and reconstructed PSD2 margins were identical to both the four-worker output-
+tile run and the old pairwise baseline.
+
+| J40 BigFloat256 | 4 workers | 8 workers | 4-to-8 speedup |
+| --- | ---: | ---: | ---: |
+| Solver phases | 838.745 s | 485.913 s | 1.73x |
+| End to end | 940.127 s | 584.476 s | 1.61x |
+| Equality Gram | 581.201 s | 300.528 s | 1.93x |
+| Complete Schur | 680.477 s | 370.552 s | 1.84x |
+| Mean active cores | 3.30 | 5.63 | 1.71x |
+| Peak process RSS | 2.34 GB | 2.51 GB | 7.2% higher |
+
+Equality Gram achieved 96.7% parallel efficiency from four to eight workers,
+and complete Schur achieved 91.8%.  Relative to the original four-worker
+pairwise run, the eight-worker solver is 3.74 times faster and end to end is
+3.27 times faster while peak RSS remains 13.7% lower.  The eight-worker run
+allocated 114.17 GB over its lifetime, effectively unchanged from the
+four-worker output-tile run; its modest RSS increase is the cost of additional
+task stacks and MPFR scratch, not replicated output matrices.  Gram remains
+61.8% of the solver and Schur 76.3%, so a sixteen-worker complete solve is the
+next useful scaling point.  Wider BigFloat runs are justified only if that
+point retains material complete-solve scaling.
+
+### J40 BigFloat256 scaling from eight to sixteen workers
+
+Job `199577.node220` completed on node8 with sixteen Q3 workers and one BLAS
+worker.  Automatic selection used sixteen disjoint output-tile Gram workers.
+The solve again returned `Optimal` after 174 iterations, passed the independent
+certificate, and reproduced the four- and eight-worker objective, gap,
+residuals, and PSD2 margins.
+
+| J40 BigFloat256 | 8 workers | 16 workers | 8-to-16 speedup |
+| --- | ---: | ---: | ---: |
+| Solver phases | 485.913 s | 312.057 s | 1.56x |
+| End to end | 584.476 s | 424.661 s | 1.38x |
+| Equality Gram | 300.528 s | 167.539 s | 1.79x |
+| Complete Schur | 370.552 s | 221.209 s | 1.68x |
+| Mean active cores | 5.63 | 9.03 | 1.61x |
+| Peak process RSS | 2.51 GB | 2.51 GB | effectively unchanged |
+
+Gram retained 89.7% parallel efficiency and complete Schur 83.8% from eight
+to sixteen workers.  Relative to the old four-worker pairwise run, solver
+phases are 5.83 times faster and end to end is 4.50 times faster, with peak RSS
+still 13.5% lower.  Lifetime allocation traffic remains essentially fixed at
+114.19 GB.  Parallel efficiency of the complete solve is now falling because
+predictor, local solves, and residual work do not scale as strongly, but Gram
+still consumes 53.7% of solver time.  One thirty-two-worker confirmation is
+therefore justified; wider BigFloat J40 runs require a material gain at that
+point.
+
+### J40 BigFloat256 thirty-two-worker confirmation
+
+Job `199578.node220` completed on node15 with thirty-two Q3 workers and one
+BLAS worker.  The automatic output-tile path used thirty-two Gram workers,
+returned `Optimal` in 174 iterations, passed the original-coordinate
+certificate, and reproduced every reported numerical quantity from the
+four/eight/sixteen-worker solves.
+
+| J40 BigFloat256 | 16 workers | 32 workers | 16-to-32 speedup |
+| --- | ---: | ---: | ---: |
+| Solver phases | 312.057 s | 216.944 s | 1.44x |
+| End to end | 424.661 s | 346.028 s | 1.23x |
+| Equality Gram | 167.539 s | 88.698 s | 1.89x |
+| Complete Schur | 221.209 s | 138.748 s | 1.59x |
+| Mean active cores | 9.03 | 15.34 | 1.70x |
+| Peak process RSS | 2.51 GB | 2.97 GB | 18.1% higher |
+
+Equality Gram still achieved 94.4% parallel efficiency from sixteen to
+thirty-two workers and remains 40.9% of solver time.  The whole solve is less
+efficient because the equality constraint solve, predictor, local residual
+work, and serial BigFloat equality factor now account for a larger fraction.
+Relative to the old four-worker pairwise run, solver phases are 8.38 times
+faster and end to end is 5.53 times faster, while allocation traffic is still
+essentially unchanged.  RSS has now risen 2.1% above that old baseline.
+Thirty-two workers are therefore the conservative recommendation.  One final
+sixty-four-worker experiment is permitted only as a crossover check: it must
+improve end to end materially without an unacceptable RSS increase to replace
+the thirty-two-worker recommendation.
+
+### Same-allocation one-worker Float64x4 promotion gate
+
+Paired job `199576.node220` ran native Q3 followed by the SDP2 reference in
+separate Julia processes on node7 with one solver/BLAS worker.  Both modes used
+the same model hash, tolerance, adaptive controller, scaling state, and
+original-coordinate certificate.  Both returned `Optimal`; Q3 used 174
+iterations and SDP2 used 166.
+
+| J40 Float64x4, one worker | Native Q3 | SDP2 | Q3 improvement |
+| --- | ---: | ---: | ---: |
+| Solver phases | 512.567 s | 561.581 s | 9.6% |
+| End to end | 523.575 s | 572.001 s | 9.2% |
+| Allocation traffic | 700.75 MB | 1,994.03 MB | 64.9% lower |
+| Peak process RSS | 2.395 GB | 2.452 GB | 2.3% lower |
+| Mean active cores | 0.999 | 0.999 | equivalent |
+
+The objectives agree to `1.52e-13` relative scale and both certificates are
+valid.  Q3 therefore satisfies the no-single-worker-regression gate rather
+than relying only on its 1.97-times eight-worker median speedup.  Together
+with the sub-one-percent three-run coefficients of variation and the
+same-allocation memory reduction, this supports a conservative automatic Q3
+selector for large exact fixed-trace Float64x4 models.  Float64 and BigFloat
+remain separate policy decisions until they have equivalent formulation-level
+reference evidence.
+
+The retained automatic policy encodes that evidence rather than recognizing
+all mathematically eligible blocks as a performance win. It requires sparse
+fixed-width arithmetic with at least four Float64 limbs, 4,096 blocks, 8,192
+variables, and 128 equalities, in addition to the exact native-Q3 structural
+certificate. Float64, BigFloat, smaller problems, explicit equilibration, and
+unsupported structures continue to select PSD2 automatically. Explicit
+`algorithm=:socp` remains the expert override. Dimension-boundary regressions
+and the complete SOC/fixed-trace suite pass 138/138 assertions with four Julia
+threads.
+
+### J40 BigFloat256 sixty-four-worker crossover and thread cap
+
+Job `199580.node220` completed on node19 with sixty-four Q3 workers and one
+BLAS worker.  It used sixty-four output-tile Gram workers, returned `Optimal`
+after 174 iterations, passed the original-coordinate certificate, and exactly
+matched every numerical quantity in the 4/8/16/32-worker runs.
+
+| J40 BigFloat256 | 32 workers | 64 workers | 32-to-64 speedup |
+| --- | ---: | ---: | ---: |
+| Solver phases | 216.944 s | 170.960 s | 1.27x |
+| End to end | 346.028 s | 297.381 s | 1.16x |
+| Equality Gram | 88.698 s | 54.265 s | 1.63x |
+| Complete Schur | 138.748 s | 98.478 s | 1.41x |
+| Mean active cores | 15.34 | 25.03 | 1.63x |
+| Peak process RSS | 2.97 GB | 2.91 GB | 1.9% lower |
+
+Relative to the original four-worker pairwise run, sixty-four workers are
+10.64 times faster in solver phases and 6.43 times faster end to end.  RSS is
+essentially equal to that old baseline and allocation traffic remains nearly
+constant.  The final doubling has only 63.4% solver and 58.2% end-to-end
+parallel efficiency, while voluntary/involuntary context switches rise to
+about 2.01 million/0.59 million.  Equality Gram is now 31.7% of solver time;
+constraint solves, predictor work, and serial equality factorization limit the
+rest.  The measured J40 latency cap is therefore 64 workers.  Thirty-two is
+the more efficient throughput choice, and 128 workers are reserved for the
+larger J80 panel rather than tested on J40.
+
+### J40 BigFloat256 PSD2 reference and formulation-fairness audit
+
+The memory preflight for the legacy PSD2 formulation completed in job
+`199581.node220`. It estimated a conservative 648.0 MB equality-arrow workspace
+against 249.1 GB available memory, while the preflight process itself peaked at
+about 2.41 GB. The complete 64-worker reference solve then ran as job
+`199582.node220`. It returned `Optimal` after 166 iterations and passed the
+original-coordinate certificate. The primal and dual objectives were
+`-21.025343924759423761...` and `-21.025343924764005096...`, the relative gap
+was `2.1790e-13`, the normalized primal/dual residuals were
+`6.044e-77`/`2.206e-55`, and the primal/dual PSD margins were
+`2.050e-34`/`1.888e-17`.
+
+| J40 BigFloat256, 64 requested workers | PSD2 reference | Native Q3 |
+| --- | ---: | ---: |
+| Solver phases | 1,832.769 s | 170.960 s |
+| End to end | 1,960.859 s | 297.381 s |
+| Equality Gram | 1,654.373 s | 54.265 s |
+| Iterations | 166 | 174 |
+| Mean active cores | 4.18 | 25.03 |
+| Peak process RSS | 3.139 GB | 2.909 GB |
+
+The raw ratios are 10.72x in solver phases and 6.59x end to end, with a
+`5.76e-14` relative primal-objective difference and valid certificates on both
+sides. They are not yet accepted as the formulation-level performance result:
+the PSD2 equality Gram used the old serial pairwise selector and consumed 90.3%
+of its solver time, whereas Q3 used the new ownership-safe output-tile kernel.
+That selector asymmetry is repairable and would exaggerate the benefit of the
+compact formulation.
+
+The next candidate therefore applies the measured BigFloat equality-panel
+crossover to the generic block-arrow PSD2 path as well. A panel already stored
+in `Btil` pays no sparse packing cost, so automatic mode now enables disjoint
+output tiles when the equality dimension is at least 32, triangular work is at
+least 250,000 scalar contractions, and at least two output workers are
+available. One-worker and small-panel cases remain pairwise, and
+`extended_precision_blas=:off` remains an absolute override. The focused
+regression constructs a 400-by-40 BigFloat256 panel, verifies the threaded
+kernel label, and requires exact lower-triangle equality with the pairwise
+reference. The complete SOC/fixed-trace suite passes 143/143 assertions after
+this change. A new complete PSD2 run is required before the selector is retained
+or the Q3-versus-SDP speed ratio is reported as final.
+
+### Candidate e52fb812 focused cluster gate
+
+The candidate carrying the generic BigFloat equality-Gram crossover was frozen
+at `<cluster-root>/SDPX.jl/candidates/q3-fixed-trace-e52fb812f7c9/source`.
+Local and remote hashes matched for the package metadata, Q3/selector sources,
+benchmark driver, regression tests, and this work log before the tree was made
+read-only. Focused PBS job `199593.node220` ran on node104 and exited zero with a
+`PASSED` marker. It passed 246 assertions: 97 LP tests, 143 compact SOC and
+fixed-trace tests, and 6 public-API tests. The four-thread test process took
+217.07 seconds wall time, peaked at 1,501,396 KiB RSS, and loaded the candidate
+path explicitly rather than the production symlink.
+
+### First J80 Float64x4 64-worker attempt and diagnostic retention
+
+The first complete J80 attempt, job `199574.node220` on node103, reached the
+configured 7,200-second solver limit and returned `TimeLimit`; it is therefore
+not a valid benchmark row and supplies no objective or certificate claim. The
+whole process elapsed 2:04:18 including loading and compilation, used
+168,124.5 user seconds plus 1,348.0 system seconds (22.72 mean active cores),
+and peaked at 7,849,700 KiB RSS. It also incurred 17.59 million voluntary and
+10.14 million involuntary context switches. This is direct evidence that the
+J80 workload is large enough for high-core experiments, but the requested 64
+workers were only about 35.5% utilized on average and the current solver did not
+finish within two hours.
+
+The strict benchmark gate correctly exited nonzero, but it raised before
+writing the result row, losing the partial iteration/phase diagnostics needed
+to decide the next optimization. The harness now builds and writes the timed
+row and manifest first, including `benchmark_valid`, `execution_valid`, and the
+validation error, then exits nonzero for a non-`Optimal` status or invalid
+certificate. A synthetic one-iteration regression exits one while preserving
+an `IterLimit` row and both TOML artifacts; the normal five-iteration synthetic
+solve remains `Optimal` and exits zero. Warm-up failures remain fail-fast.
+
+### Rejected native-BigFloat blocked equality factorization
+
+An isolated 256-bit factorization experiment tested the 170-by-170 equality
+matrix size used by J40. The first driver attempt was invalid and was discarded:
+it used Julia's shallow `copy(Matrix{BigFloat})`, so MPFR in-place operations
+aliased and corrupted the nominally read-only source matrix. The corrected
+`199597.node220` driver used `alloc_zeros` plus `copy_owned!` for every matrix
+and vector copy. The generic and blocked factors were then deterministic, their
+factor and solve residuals were approximately `1e-77`, and the blocked result
+differed from the generic lower factor only at approximately `5e-77`.
+
+| BigFloat256 equality Cholesky, n=170 | Time | Generic / blocked |
+| --- | ---: | ---: |
+| Generic `kchol!` | 0.0859 s | 1.00x |
+| Blocked, 1 worker | 0.1646 s | 0.52x |
+| Blocked, 2 workers | 0.2323 s | 0.37x |
+| Blocked, 4 workers | 0.1313 s | 0.65x |
+| Blocked, 8 workers | 0.1198 s | 0.72x |
+| Blocked, 16 workers | 0.1189 s | 0.72x |
+| Blocked, 32 workers | 0.1431 s | 0.60x |
+
+The blocked kernel is 38--63% slower at every tested width. The generic native
+BigFloat factorization therefore remains selected; no solver code changed. The
+experiment also confirms that benchmark code must never use shallow array copies
+around mutation-capable MPFR kernels.
+
+### Formulation-fair J40 BigFloat256 PSD2 rerun
+
+Job `199598.node220` ran the generic PSD2 block-arrow formulation on node107
+with the retained BigFloat output-tile equality-Gram selector, 64 Julia/solver
+workers, and one BLAS worker. It returned `Optimal` after 166 iterations and
+passed the original-coordinate certificate. The primal/dual objectives were
+`-21.025343924759423761...` and `-21.025343924764005096...`, the relative gap
+was `2.1790e-13`, the normalized primal/dual residuals were
+`6.044e-77`/`2.206e-55`, and both reconstructed PSD margins were positive.
+
+| J40 BigFloat256, 64 requested workers | Fair PSD2 | Native Q3 | PSD2 / Q3 |
+| --- | ---: | ---: | ---: |
+| Timed solver phases | 235.833 s | 170.960 s | 1.38x |
+| `solve!` wall time | 356.099 s | 290.853 s | 1.22x |
+| End to end | 363.374 s | 297.381 s | 1.22x |
+| Equality Gram | 80.018 s | 54.265 s | 1.47x |
+| Iterations | 166 | 174 | 0.95x |
+| Mean active cores | 23.79 | 25.03 | 0.95x |
+| Peak process RSS | 2.929 GB | 2.909 GB | 1.01x |
+| Allocated bytes | 73.135 GB | 114.284 GB | 0.64x |
+
+The generic selector reduced the PSD2 equality-Gram phase from 1,654.373 to
+80.018 seconds (20.68x) and the timed solver phases from 1,832.769 to 235.833
+seconds (7.77x), without changing the 166-iteration numerical result. This is
+a stable, correctness-preserving improvement and removes the earlier
+formulation-fairness blocker. Compact Q3 remains faster, but its accepted
+BigFloat256 advantage is now 1.22x by `solve!`/end-to-end wall time and 1.38x
+by the sum of instrumented solver phases, not the misleading 6--11x raw ratio
+against a serial PSD2 Gram. Q3 spends fewer seconds in equality Gram despite
+eight more iterations, while PSD2 allocates substantially fewer total bytes;
+peak RSS is essentially equal. One-run, cross-node noise still requires a
+repeat before treating the precise ratio as final, but the formulation result
+and the generic BigFloat selector both clear the five-percent retention gate.
+
+Same-node node107 repeat `199604.node220` reproduced the exact 166-iteration
+objectives, residuals, gap, and PSD margins. It measured 227.068 seconds in
+instrumented phases, 346.594 seconds in `solve!`, 353.817 seconds end to end,
+and 72.229 seconds in equality Gram. Across the two node107 runs, the medians
+are 231.450/351.346/358.595/76.124 seconds respectively. Solver-wall and
+end-to-end CVs are 1.91% and 1.88%; the individually shorter Gram phase is
+noisier at 7.24% CV but the complete solve is reproducible. Peak process RSS
+fell from 2.929 to 2.655 GB in the repeat. The generic BigFloat output-tile
+selector is therefore retained; its complete-solve speedup over the historical
+serial-Gram PSD2 run is not a favorable single-run artifact.
+
+### J80 Float64x4 64-worker retained diagnostic row
+
+Job `199599.node220` reran the J80 native-Q3 formulation on node109 with the
+new failure-preserving benchmark harness, the default Julia thread pool, 64
+solver workers, and one BLAS worker. The configured solve limit was 900
+seconds. The solve returned `TimeLimit` after 170 iterations and the harness
+correctly wrote the complete row and manifest before exiting nonzero. This is
+diagnostic evidence only: `benchmark_valid=false`, and no objective is accepted
+as a solved CSDR result.
+
+| J80 Float64x4 default pool, 64 requested workers | Measurement |
+| --- | ---: |
+| `solve!` wall time | 905.975 s |
+| End to end around the timed solve | 917.763 s |
+| Instrumented solver phases | 650.541 s |
+| Equality Gram | 486.260 s |
+| Complete Schur assembly | 568.488 s |
+| Residual/block factorization | 26.826 s |
+| KKT constraint triangular solves | 55.401 s |
+| Mean active cores | 31.29 |
+| Peak process RSS | 7.993 GB |
+| Voluntary/involuntary switches during `solve!` | 220,466 / 34,603 |
+
+The equality Gram is 74.7% of instrumented solver time and 85.5% of Schur
+assembly, so it is the primary arithmetic bottleneck. Mean utilization is
+48.9% of the 64 requested workers, materially better than the first two-hour
+attempt but still leaves half the allocation idle on average. The terminal
+iterate already has primal/dual normalized residuals of `1.99e-61` and
+`8.29e-33`; the rejected certificate is caused by the `1.997e-5` relative gap.
+Thus the J80 difficulty combines expensive Gram construction with slow late
+complementarity reduction rather than primal or equality infeasibility.
+
+The complete process took 19:45 because model loading, precompilation, setup,
+validation, and failure reporting are outside the 900-second `solve!` limit.
+The solver returned only at an iteration boundary (5.98 seconds beyond the
+nominal limit), which is acceptable for this iteration cost but should remain
+visible in time-limit documentation. A same-node exact-pool control was
+submitted as job `199603.node220` with 64 default threads, zero interactive
+threads, one GC thread, `JULIA_EXCLUSIVE=1`, and otherwise identical solver
+and model settings. The weighted-contiguous SYRK experiment remains blocked
+until that no-code control is complete.
+
+### Native-Q3 adaptive-control audit and terminal-limit correctness
+
+A line-by-line audit found no sign, factor-of-two, complementarity, cone-root,
+or residual-scaling error in the compact HKM/Mehrotra equations. The affine
+predictor uses `R=-XY`, the corrector uses
+`R=sigma*mu*I-XY-dX_aff*dY_aff`, primal and dual fraction-to-boundary roots
+are exact for Q3, and `mu=dot(qx,qy)` is exactly `tr(XY)/2` for a PSD2 block.
+The J80 terminal residual/gap split is therefore a genuine complementarity
+tail, not a certificate normalization artifact.
+
+The audit did expose an interface gap: the native Q3 loop currently applies
+automatic cold-start `OmegaP/OmegaD` only. It does not call the general
+`AdaptiveIPMController`; `beta`, `gamma`, `parameter_strategy`, and
+`adaptive_sigma_max` do not affect its iteration controller. Q3 instead uses
+the local Mehrotra rule `clamp((mu_aff/mu)^3, 1e-6, 0.9)` and a fixed 0.99
+fraction. The benchmark harness now records compact first/last/min/max history
+for sigma, mu, affine and accepted steps, backtracking, and fallbacks. A local
+synthetic Q3 smoke returned `Optimal` in five iterations and verified all new
+history fields in both report and manifest. The full 151-assertion SOC suite
+passed locally with four Julia threads.
+
+One independent correctness issue was fixed immediately. If the last allowed
+Q3 update satisfied every tolerance, the loop exited on `iter_max` before the
+next top-of-loop residual assembly and mislabeled the certified point
+`IterLimit`; the analogous case existed at the time boundary. The finalization
+path now reuses the original-coordinate residuals it already computes and
+promotes an `IterLimit`/`TimeLimit` point to `Optimal` only when primal, dual,
+and gap tolerances all pass. A regression sets the iteration cap exactly to
+the known convergence update, requires the terminal-boundary message, and
+passes the independent certificate.
+
+Two algorithm experiments remain evidence-gated rather than enabled. First,
+Q3 initializes the primal head to `OmegaP*data_scale` even though fixed trace
+makes the exact interior head `layout.head`; using that exact head removes an
+artificial affine residual and saved one iteration on small audited examples.
+Second, the standard Mehrotra sigma upper bound is one rather than the current
+0.9. The safer order is to measure the J40 `Omega=1/2/5/10/20` histories, then
+test exact-head initialization, and only then test the sigma cap. None becomes
+default without the five-percent complete-solve and certificate gates.
+
+### J80 exact Julia-pool control and invalid first omega sweep
+
+The no-code exact-pool control `199603.node220` completed on the same node109
+as the default-pool J80 run. It used 64 default Julia threads, no interactive
+thread, one GC thread, `JULIA_EXCLUSIVE=1`, the 10 ms thread sleep threshold,
+one BLAS thread, the same immutable model and candidate, and the same 900-second
+solver limit. It returned `TimeLimit` after 257 iterations, so this row remains
+diagnostic and is not an accepted solved benchmark. The certificate failed only
+the duality-gap gate: the relative gap fell to `7.428e-8`, while normalized
+primal and dual residuals were `1.178e-61` and `9.421e-18`.
+
+| J80 Float64x4, 64 requested workers | Default pool | Exact pool |
+| --- | ---: | ---: |
+| Iterations in approximately 905 s | 170 | 257 |
+| Relative gap at time limit | `1.997e-5` | `7.428e-8` |
+| Mean active cores | 31.29 | 36.18 |
+| Equality Gram, total | 486.260 s | 492.956 s |
+| Equality Gram per iteration | 2.860 s | 1.918 s |
+| Schur assembly per iteration | 3.344 s | 2.271 s |
+| Process peak RSS | 7.993 GB | 7.717 GB |
+
+The exact pool improved completed iterations by 51.2% and equality-Gram
+throughput by 49.1% without a solver-code change. It reduced the gap by about
+269x, but it did not solve the model to `1e-12`; the late-complementarity issue
+is therefore still algorithmic. Mean utilization improved only from 31.29 to
+36.18 active cores, so the remaining high-core scaling bottleneck is real. The
+exact pool is the required launcher configuration for subsequent J80 kernel
+experiments, but this single time-limited control is not used as an accuracy or
+final speed benchmark.
+
+The first J40 `OmegaP=OmegaD=1/2/5/10/20` sweep, job `199606.node220`, did not
+enter the solver. Every process failed the same benchmark-driver geometry check
+because it referenced the nonexistent `problem.dims.kmax` field. No numerical
+row from that allocation is retained. The driver now checks
+`maximum(problem.dims.k)` and was resubmitted from its verified SHA-256
+`f5e162eeda8d4e99fe94d0b966f992abda3bd9a48410a6f99cd25a0fc0b36770`.
+
+### Rejected J80 weighted-contiguous output-tile schedule
+
+Job `199612.node220` isolated the equality-Gram kernel on the real J80
+`65,600 x 350` Float64x4 panel with 64 exact-pool workers, one BLAS thread,
+physical CPUs 0--63, memory nodes 0--3, and two repetitions in each of four
+fresh Julia processes. The order was interleaved, weighted, weighted,
+interleaved. All four lower triangles had the identical SHA-256
+`7bd61f5afc6e708856b3f9fc07721aebda2273cf6eec1076a13a3f4d038c6b89`,
+so the alternative ownership schedule was numerically exact.
+
+| J80 Float64x4 equality Gram | Process median | Within-process CV |
+| --- | ---: | ---: |
+| Interleaved first | 6.175 s | 0.30% |
+| Weighted first | 6.306 s | 0.04% |
+| Weighted second | 6.883 s | 2.24% |
+| Interleaved second | 6.385 s | 0.04% |
+
+Across all four repetitions per strategy, the aggregate medians were 6.286 s
+for the established interleaved scheduler and 6.541 s for weighted contiguous
+ownership. Weighted ownership was 4.1% slower. Its indivisible tile ranges also
+left a measured theoretical work spread of about 1.28x at 64 workers. The
+experiment therefore failed the five-percent improvement gate in the wrong
+direction. The weighted scheduler, selector, diagnostics, and unit-only test
+were removed; the established interleaved output-tile scheduler remains the
+default. Peak RSS was essentially unchanged at approximately 7.47 GB.
+
+### Experimental fixed-extended column-owned GEMV
+
+After rejecting weighted SYRK ownership, the next measured J80 phases outside
+the Gram were rectangular products with `B` or `Btil`. The established
+row-owned kernel gives each output to one task, which is race-free but reads a
+column-major `m x n` panel with a stride of `m` inside every dot product. An
+experimental fixed-extended-only kernel retains exclusive row ownership and
+the same ascending-column accumulation order, but loops over columns outside
+the owned row interval. It therefore streams each panel slice contiguously.
+BigFloat and Float64 remain on their existing paths.
+
+A local four-thread Float64x4 preflight on an `8,192 x 64` panel measured
+4.829 ms for the row-major traversal and 3.312 ms for the column-streaming
+traversal, a 1.46x kernel speedup. Every output was bitwise identical. The SOC
+residual form measured 5.062 ms versus 3.687 ms (1.37x) with the same exact
+result. The SOC
+suite, including a direct long-panel GEMV and residual comparison, passed
+197/197; the scalar Q3 kernels passed 480/480 and the KKT regressions passed
+74/74. This is only a local preflight, not retention evidence. The change
+remains experimental pending an isolated real-J80 panel A/B and a complete
+solve showing that task launches and NUMA placement do not erase the gain.
+
+The follow-up correctness audit found one internal edge case: the
+column-owned residual helper clears its output before consuming the
+right-hand side, so directly aliasing those two vectors would destroy the
+right-hand side. Solver workspaces are disjoint, but the dispatcher now
+explicitly falls back to the established row-owned implementation when the
+buffers may alias, while a direct call to the specialized helper rejects the
+unsupported alias. A regression verifies both the alias-safe dispatcher and
+the fail-fast helper. The selector also requires at least 20,000 panel
+contractions per selected worker. This retains J40 through 64 workers and J80
+through 128 workers, while avoiding the J40 128-worker launch regime with only
+about 11,000 contractions per task. The focused SOC suite passed 202/202 on
+four local threads after these changes. After adding the executed
+`forward_gemv_kernel` diagnostic, the same suite passed 205/205. Real J80
+cluster timing is still the retention gate. An additional trajectory
+regression confirms that `OmegaP=1` and `OmegaP=100` produce identical native
+Q3 iterates when `OmegaD` is held fixed; the focused suite now passes 211/211.
+
+### Native-SOC reference implementation audit
+
+The Clarabel and ECOS native SOC implementations were audited from their
+official source trees before considering a larger algorithm change. Both use
+the Lorentz residual `x0^2 - ||x_tail||^2`, Nesterov--Todd primal-dual scaling,
+and a scaling Hessian of the form
+`eta^2 * (2*w*w' - diag(1,-I))`. For Q3 this is only six packed triangular
+entries and the Hessian-vector product needs one dot product plus vector
+updates. Clarabel deliberately reserves the rank-two sparse expansion for
+larger SOCs; adding two extension variables to every three-dimensional CSDR
+cone would increase KKT dimension and likely fill rather than help it.
+
+The transferable implementation lessons are therefore: keep Q3 state and its
+six scaling values contiguous, freeze the global KKT sparsity pattern and
+numeric index maps once, update only numeric values per iteration, use
+sign-aware regularization and improving-only iterative refinement, and make
+any cone-parallel reductions deterministic. The current SDPX Q3 engine is an
+HKM-equivalent fixed-trace implementation, so NT scaling is the main
+algorithmic experiment after the exact-head and data-layout measurements. It
+will not be introduced during the current kernel A/B because that would mix
+iteration-count and per-iteration effects.
+
+The standalone Q3 layer now contains the corresponding NT construction
+without changing the solver path. It computes owned `(w, lambda)` state,
+`eta`, the six-entry packed Q3 scaling Hessian, and an allocation-free
+Hessian-vector product. The implementation rescales Lorentz residual checks to
+avoid avoidable overflow, rejects non-interior or aliased inputs before
+writing, and keeps BigFloat outputs independently owned. Explicit identities
+`H_s*z = s` and `lambda = W*z`, random interior points, central rays spanning
+large magnitude ratios, in-place Hessian application, and Float64 allocation
+gates pass for Float64, Float64x4, and BigFloat256. The complete scalar kernel
+suite passes 1,251/1,251 assertions. These kernels remain unconnected to the
+Newton/KKT engine until a controlled HKM-versus-NT solve benchmark is possible.
+
+### Experimental fused equality-panel transform
+
+The established Q3 equality setup first copies the complete `B` panel into
+`Btil` serially and then transforms two rows per cone in parallel. A standalone
+fixed-extended kernel now permits a controlled A/B in which each worker reads
+its immutable source rows and writes the transformed destination directly. It
+preserves the two divisions and subtraction order exactly, removes the serial
+copy, and can distribute first touch across NUMA nodes. Its conservative
+selector accepts only the adjacent `(2l-1,2l)` CSDR row layout and sufficient
+work per worker; it is not connected to solve dispatch yet.
+
+On the local four-core J40-shaped `8,400 x 170` Float64x4 panel, ten alternating
+passes produced bitwise-identical output. Median copy-plus-transform time was
+47.933 ms versus 46.696 ms fused, only a 1.027x improvement (CV 0.87%/1.16%).
+This fails the five-percent local retention gate, so no production selector was
+changed. The standalone function remains only long enough to test whether the
+much larger J80 panel gains materially from distributed NUMA first touch; it
+will be removed if that cluster test also fails.
+
+### Reused local-pivot reciprocals and fused panel candidate
+
+The first fused-panel measurement was dominated by the two triangular
+divisions per panel entry, so it understated the value of removing the serial
+copy. Each Q3 local Cholesky pivot is reused for every equality column and in
+both predictor/corrector triangular solves. A controlled four-worker local
+microbenchmark therefore compared the established division expressions with
+one reciprocal per pivot followed by multiplication.
+
+| Arithmetic / panel | Direct divisions | Reciprocal multiply | Speedup |
+| --- | ---: | ---: | ---: |
+| Float64x4, `8,400 x 170` | 47.683 ms | 12.760 ms | 3.74x |
+| BigFloat256, `2,048 x 64` | 3.825 ms | 1.982 ms | 1.93x |
+
+The Float64x4 relative transform difference was `2.68e-65`; the BigFloat256
+difference was `6.13e-78`. Both are below the respective rounding scale, and
+the direct Float64 path remains unchanged. The workspace now stores two owned
+reciprocals per cone. BigFloat computes them by mutating disjoint MPFR slots,
+and every subsequent panel/forward/transpose solve mutates only its owned
+destination. Small Float64, Float64x4, and BigFloat native-Q3 solves retain
+their analytic objectives and independent certificates.
+
+Once reciprocal multiplication removed most local arithmetic, the J40-shaped
+Float64x4 copy-plus-transform median was 16.608 ms while a fused source-read,
+destination-write transform was 12.760 ms, a further 1.30x phase speedup. The
+conservative adjacent-row selector is therefore connected for fixed-width
+extended arithmetic only; broader row layouts, Float64, and BigFloat retain
+copy-then-transform. Executed diagnostics report both `local_pivot_kernel` and
+`equality_panel_transform`. The complete SOC suite passes 257/257 assertions,
+including reciprocal ownership, original division agreement, exact fused
+output, analytic objectives, residuals, and PSD/SOC certificates. This remains
+a candidate until the real J40/J80 same-node solve gate confirms at least a
+five-percent complete-solve gain; production and the cluster current symlink
+are unchanged.
+
+### Native-Q3 dual cold-start sensitivity preflight
+
+The exact fixed-trace primal head makes `OmegaP` intentionally inactive, but
+the dual head still uses `OmegaD`. A deterministic product-of-disks smoke with
+64 Q3 cells/eight dense equalities (Float64x4, tolerance `1e-18`) and a second
+32-cell/six-equality case (BigFloat256, tolerance `1e-24`) swept
+`OmegaD=0.001/0.01/0.1/1/10/100`. Every row was `Optimal` with a valid original
+certificate.
+
+| Arithmetic | `0.001` | `0.01` | `0.1` | `1` | `10` | `100` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Float64x4 iterations | 25 | **21** | 21 | 23 | 21 | 26 |
+| BigFloat256 iterations | 35 | **28** | 30 | 33 | 28 | 29 |
+
+This is not representative enough to change the automatic policy, but it
+confirms that the existing `OmegaD=0.001` calibration can be a poor Q3 cold
+start even after the primal-head correction. The real J40 sweep remains the
+promotion gate; the intended next comparison is `0.001/0.01/0.1/1/10` with
+identical model hash, exact thread pool, and full sigma/step history. No default
+parameter was changed from this local preflight.
+
+### Final ownership and fallback-diagnostic audit
+
+A fresh mutable-arithmetic audit found that the Q3 compatibility boundary and
+two scalar conversion kernels assigned the same BigFloat object to both
+off-diagonal entries of a symmetric matrix. Values were numerically correct,
+but mutating one triangle during later export or validation could silently
+change the other. Materialized primal/dual matrices, Q3-to-symmetric
+conversion, and full direction recovery now create two independently owned
+MPFR values. The Schur-metric mutator also rejects output/coefficient aliasing,
+and the BigFloat equality GEMV initializes previously unassigned destination
+slots before worker launch. Dedicated object-identity and fresh-destination
+regressions cover these cases.
+
+The global `extended_precision_blas=:off` switch now remains authoritative
+even when a conflicting Q3 output-tile or row-bin strategy is requested.
+Zero-equality native solves report `gram=:none`, and Q3-to-PSD2 fallback results
+report the solver that actually executed (`:sdp`) while preserving the planned
+Q3 algorithm separately. After these fixes, the combined focused suites pass
+1,251 scalar-Q3 assertions and 257 native-SOC assertions on four local threads.
+
+### Complete local regression after the Q3 equality-kernel changes
+
+The complete package test suite was run from a clean temporary test environment
+with four Julia threads after the reciprocal-pivot, fused equality-panel,
+BigFloat ownership, GEMV initialization, and executed-backend diagnostic fixes.
+It passed **7,401/7,401 assertions** in **21 minutes 53.7 seconds**. This includes
+the focused Q3 scalar, native SOC, KKT, MOI/Convex, LP, checkpoint, precision,
+and public-interface regressions. The run used the package's declared test
+dependencies rather than a reduced include-only smoke environment.
+
+This result closes the local correctness gate. It does not close the performance
+gate: the reciprocal/fused and column-owned kernels remain candidates until
+same-node J40/J80 cluster runs demonstrate reproducible complete-solve gains
+with unchanged original-coordinate objectives, residuals, gaps, and PSD/SOC
+certificates. No production symlink or published release was changed.
+
+The benchmark source-tree fingerprint after this gate and the J80 launcher
+retention below is
+`6da04947620b6c54d21adac9e59f272555d2aa8435afe58ddc1cd9e70e8d3bd1`.
+
+### J80 exact-pool launcher retention
+
+The earlier node109 control already established a reproducible launcher-level
+improvement: the exact `N,0` Julia pool with one GC worker and exclusive CPU
+affinity increased the number of completed J80 iterations in the same
+approximately 900-second limit from 170 to 257, and reduced equality-Gram time
+per iteration from 2.860 to 1.918 seconds. The J80 SDP, SOCP, and 128-core PBS
+templates now select this policy by default while retaining an explicit
+override. J40 and general launchers remain unchanged. This is a scheduling
+default, not a new accepted solved J80 benchmark; both compared rows ended at
+the time limit, and the exact-pool row still failed only the duality-gap gate.
+
+The documentation build was also run after the launcher and Q3 documentation
+updates. Documenter completed doctests, template expansion, cross-reference
+checking, inventory generation, and HTML rendering successfully for version
+0.4.0.
+
+### Rejected cached direct cone inverse experiment
+
+The Q3 predictor, corrector, and direction-recovery phases reuse the same three
+entries of each primal cone inverse. An experiment cached those entries once
+per assembly for Float64x4 and BigFloat while preserving Float64's established
+direct-division path.
+
+A J40-sized four-use scalar-kernel A/B produced bitwise-identical final values:
+
+| Arithmetic | Direct divisions | Cached direct inverse | Kernel speedup |
+| --- | ---: | ---: | ---: |
+| Float64x4 | 3.826 ms | 1.739 ms | 2.20x |
+| BigFloat256 | 28.244 ms | 17.505 ms | 1.61x |
+
+The experimental branch passed 278/278 focused SOC assertions and 7,422/7,422
+complete package assertions. BigFloat ownership checks found no MPFR aliasing.
+The microkernel improvement is nevertheless confined to a small fraction of
+the measured J40/J80 runtime; equality Gram and convergence dominate. Per the
+renewed requirement to stop low-impact work, the complete-solve ABBA job was
+terminated before a candidate timing row was accepted, and the cache, its
+`3L` storage, diagnostics, and tests were removed from the working candidate.
+The restored direct path passes 257/257 focused SOC assertions.
+
+Candidate source
+`<cluster-root>/SDPX.jl/candidates/q3-fixed-trace-417f5198081c/source`
+was verified on the cluster with source fingerprint
+`417f5198081c7c125b7029b0fe0429a01f1ec306591b9ae5626b325b3eefd270`
+and made read-only. Compute-node focused regression job `199640.node220`
+finished on node155 with exit status zero and a `PASSED` marker: 381/381 LP,
+SOC, and public-API assertions passed in 3 minutes 57.2 seconds with peak RSS
+1,500,812 KiB. It is retained only as a read-only experimental artifact, not a
+release candidate. Job `199641.node220` completed one certified no-cache
+baseline row (191 iterations, 109.269 seconds solve wall, 100.238 seconds in
+instrumented phases, 67.753 seconds in equality Gram) and was then stopped.
+The companion OmegaD job `199642.node220` was also stopped before numerical
+output so the main investigation can concentrate on convergence and the
+dominant Gram/KKT path.
+
+### J40 native-Q3 dual-scale sweep
+
+Compute-node job `199643.node220` ran an exact-pool Float64x4 sweep on the
+canonical J40 model (`4,200` fixed-trace PSD2/Q3 blocks, `8,400` variables,
+`170` equalities; model SHA-256
+`eb9072b252e32d39f00bef78f81c5cd9269c6f65a1d02150b7cf02a694fd46cd`).
+Every row used eight Julia/solver threads, one BLAS thread, tolerance `1e-12`,
+the exact fixed primal head, and the same source fingerprint
+`6da04947620b6c54d21adac9e59f272555d2aa8435afe58ddc1cd9e70e8d3bd1`.
+All seven rows returned `Optimal` through the native Q3 KKT, passed the
+original-coordinate certificate, and agreed on the physical objective.
+
+| `OmegaD` | Iterations | Core phases (s) | Equality Gram (s) | Schur (s) | Relative gap |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.01 | 188 | 78.350 | 48.312 | 59.887 | `7.31e-14` |
+| 0.1 | 186 | 77.540 | 47.843 | 59.145 | `7.54e-13` |
+| 0.5 | 182 | 76.214 | 46.789 | 58.125 | `4.99e-13` |
+| 1 | 175 | 73.389 | 45.039 | 55.853 | `8.71e-13` |
+| 2 | 191 | 79.634 | 49.086 | 60.952 | `9.46e-13` |
+| 5 | 172 | 72.480 | 44.250 | 55.148 | `9.94e-13` |
+| 10 | **168** | **70.726** | **43.220** | **53.680** | `9.83e-14` |
+
+The best measured point reduces iterations by 12.0% and instrumented core
+time by 11.2% relative to the automatic `OmegaD=2` trajectory. The response is
+not monotone, however, so this single-model grid is evidence for a Q3-specific
+initializer, not a justification for hard-coding `10`. Fresh-process elapsed
+times include roughly constant compilation overhead and are therefore not the
+retention metric; a same-allocation warm A/B remains required.
+
+### J40 feasible-start geometry diagnostic
+
+Read-only compute-node job `199646.node220` evaluated initialization geometry
+without changing the solver. The current `x=0` is already exactly equality
+feasible because `b=0`. Moving every block variable to its disk center would
+instead create equality residual `845.056` in infinity norm, so that candidate
+was rejected without a full solve. The minimum-tail exact equality correction
+also leaves the cone: its maximum tail/head ratio is `1.9483` and its minimum
+PSD margin is `-0.9483`.
+
+The dual side has a useful exact construction. A Float64 weighted least-squares
+solve of the fixed `170 x 170` equality system, followed by target-arithmetic
+local recovery, gives maximum dual-tail norm `0.45084` and stationarity
+residual `1.46e-11` in the diagnostic arithmetic. Common determinant slacks
+`0.1` and `1` give initial complementarity `0.1215` and `1.0034`, respectively.
+The next controlled experiment therefore keeps `x=0`, tests a strictly
+interior radial primal tail that reduces the affine cone residual, and tests
+the weighted dual-feasible start. It does not retain the rejected disk-center
+or infeasible exact-equality candidates.
+
+### J40 initialization A/B and rejected feasible-start variants
+
+The first runtime-override attempt (`199658.node220`) was discarded: Julia's
+world-age rules left the original initializer active, which was detected
+because the purported radial row reproduced the baseline bit for bit and
+reported the unchanged unit cone residual.  The job was cancelled, the driver
+was corrected by installing the experimental method before compiling its
+entry point, and no result from that invalid attempt was used.
+
+Corrected exact-pool job `199660.node220` then ran all four rows on node19 with
+eight Julia/solver threads, one BLAS thread, source fingerprint
+`6da04947620b6c54d21adac9e59f272555d2aa8435afe58ddc1cd9e70e8d3bd1`,
+and the canonical J40 model hash.  Every row executed the native Q3 KKT,
+returned `Optimal`, and passed the original-coordinate certificate.
+
+| Initializer | Iterations | `solve!` (s) | Core phases (s) | Equality Gram (s) | Peak RSS (GiB) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| cold, `OmegaD=10` | 168 | 80.718 | 70.795 | 43.352 | 1.84 |
+| radial primal tail `0.9`, `OmegaD=10` | 157 | 76.850 | 66.844 | 40.484 | 2.15 |
+| weighted dual, determinant slack `0.1` | 192 | 89.893 | 79.901 | 49.395 | 2.13 |
+| radial plus weighted dual | 174 | 106.612 | 96.657 | 61.178 | 2.14 |
+
+The radial start was genuinely active: its original cone mismatch fell from
+`1.0` to `0.1`.  It reduced iterations by 6.5% and core phases by 5.6%, but
+improved `solve!` wall time by only 4.8% while increasing peak RSS by about
+17%.  It therefore fails the complete-solve and memory retention gates; no
+tail-fraction sweep or solver change is justified.  The exactly stationary
+weighted dual start was worse, increasing iterations by 14.3%, and its
+combination with the radial start was also slower.  Both weighted variants are
+rejected.  The cold `OmegaD=10` trajectory remains the only initialization
+candidate clearing the requested ten-percent core-time threshold, pending its
+BigFloat256 and J80 checks.
+
+### Structural pivot: native Nesterov--Todd direction for fixed-trace Q3
+
+The parameter and initializer sweep above is now closed. No tuned `OmegaD`,
+sigma cap, radial start, or low-precision continuation is being promoted. The
+next candidate instead uses the fixed-trace geometry itself: every eligible
+real PSD2 block is represented as one Lorentz vector, and the native Q3
+predictor/corrector can select a Nesterov--Todd (NT) scaled search direction.
+The established matrix/HKM direction remains the default reference and the
+per-solve fallback.
+
+The NT implementation computes a single scaling point per cone and uses the
+closed Q3 inverse metric
+
+`K = (W'W)^(-1) = eta^(-2) * (2 J*w*w'*J - J)`.
+
+It preserves the existing block-local variable elimination and the shared
+equality Gram/KKT system. Predictor recovery uses `Y + K*P`; the corrector
+uses the exact Lorentz Jordan shift
+`(W^(-1)dX_aff) circ (W*dY_aff) - sigma*mu*e` and solves the Jordan linear
+system `L_lambda*u = d_s`. It does not approximate that solve with an
+element-wise cone inverse. The final PSD2 matrices are reconstructed only at
+the compatibility/certificate boundary.
+
+All NT storage is independently owned for BigFloat. Invalid scaling,
+nonpositive local metrics, or direction recovery restart the same unmodified
+iterate through a fresh HKM assembly; a later native-Q3 failure still retains
+the established PSD2 fallback. Execution diagnostics record requested and
+executed directions and the exact fallback reason. The benchmark gate rejects
+any nominal NT row that actually used HKM or PSD2.
+
+Local verification on four Julia threads passed:
+
+- 1,724/1,724 scalar-Q3 assertions for Float64, Float64x4, and BigFloat256,
+  including `W`, `W^(-1)`, `H_s^(-1)`, Jordan-solve, alias, ownership, and
+  zero-allocation checks;
+- 386/386 native-SOC assertions, including exact scaled Newton residuals for
+  predictor and corrector directions in all three arithmetic families;
+- small analytic boundary solves at Float64, Float64x4 (`1e-18`), and
+  BigFloat256 (`1e-30`), all `Optimal`, certificate-valid, and without
+  direction fallback.
+
+The immutable cluster candidate has source/benchmark/test fingerprint
+`d38b3f9114815aba932e4142059ef3427928e9308b5ace5d5fcfccc635b87943`
+at
+`<cluster-root>/SDPX.jl/candidates/q3-nt-d38b3f911481/source`.
+Production remains unchanged. The cluster retention sequence is a focused
+compute-node regression, followed by same-node J40 `HKM -> NT -> NT -> HKM`
+comparisons at identical model hash, tolerance, thread pool, BLAS width, and
+timing boundary. J80 is deferred until J40 establishes both numerical
+reliability and a complete-solve benefit.
+
+### J40 NT/HKM ABBA result: NT rejected for this CSDR trajectory
+
+Cluster job `199664.node220` first passed the focused compute-node gate on
+node155: 489/489 LP, SOC, and public-API assertions, including 386 native-SOC
+assertions, completed with exit status zero and a `PASSED` marker. Production
+remained unchanged. The first performance submission landed on known-faulty
+node70 and was killed before the script or benchmark started; it produced no
+measurement and is excluded.
+
+Replacement job `199666.node220` ran on idle node101 (AMD EPYC 7742) in one
+32-slot allocation. Each numerical process used the exact eight-thread Julia
+pool, one GC worker, one BLAS thread, the same J40 model SHA-256, tolerance
+`1e-12`, automatic Gram selection, and one warm-up. The order was
+`HKM -> NT -> NT -> HKM`.
+
+| Direction | Iterations | `solve!` median (s) | Core median (s) | Gram median (s) | E2E median (s) | Mean active cores |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| HKM | 191 | **82.361** | **73.635** | **49.006** | **83.199** | 7.162 |
+| NT | 225 | 96.232 | 87.171 | 57.694 | 97.078 | 7.272 |
+
+The two HKM solve times were 82.397 and 82.325 seconds; the two NT times were
+96.124 and 96.339 seconds. Thus the order-reversed result is highly
+reproducible, but NT is 16.84% slower in timed solve, 18.38% slower in core
+phases, and 16.68% slower end to end. Per-iteration Gram cost is essentially
+unchanged, so the regression is predominantly the 17.8% increase in Newton
+iterations plus the extra scaled corrector work. NT used about 4.1% less peak
+RSS, which is not enough to offset the runtime loss.
+
+All four rows returned `Optimal`, used the native
+`q3_block_diagonal_equality` KKT and `output_tiles` Gram, passed their
+original-coordinate certificates, and reported no direction or PSD2
+fallback. HKM and NT physical objectives agree to much better than the
+`1e-10` relative comparison gate; primal/dual/equality residuals and PSD2
+margins pass. Therefore NT is numerically valid but fails the performance
+retention gate. It remains an explicit research/reference direction and will
+not be selected automatically. No NT parameter tuning or J80 NT campaign is
+justified.
+
+The measured bottleneck after rejection remains equality Gram construction:
+49.006 seconds, or 66.6% of HKM core phases. The next structural experiment
+must reduce the number or width of fixed-trace equality-Gram evaluations; a
+small local-cone microkernel cannot meet the complete-solve gate.
+
+### Boundary support-function reduction: measured and rejected
+
+A second structural experiment tested whether the fixed-trace disk could be
+eliminated at the boundary.  At a rank-one primal block, the support-function
+Jacobian is rank one, so an idealized equality panel has one row per cone
+instead of the two rows required by the interior Q3 Newton system.  This is an
+exact boundary identity, but it is not a uniformly nonsingular interior-point
+coordinate system.
+
+Read-only job `199668.node220` reconstructed the converged J40 HKM result in
+support coordinates.  The support reconstruction agreed with the objective to
+`5.86e-13` relative error and its equality residual was `1.45e-11`.  The
+rank-one Gram kernel itself took `0.127` seconds, about half the ordinary
+per-iteration Gram time.  However, its Float64 projection was numerically
+singular at roughly the `1e16` condition scale, and the dual-tail norms ranged
+from `8.39e-9` to `1.46e18`.  A trajectory scan in job `199669.node220` showed
+that the support residual was still `9.10e-1`, `4.55e-1`, and `1.11e-3` after
+10, 40, and 80 ordinary HKM steps respectively; the boundary system becomes
+useful only very late, exactly when its conditioning is worst.
+
+The guarded semismooth crossover in `199670.node220` therefore failed its
+complete-solve gate.  Starting after 80 HKM iterations reduced the support
+residual from `1.11e-3` to `1.15e-4`, but line-search steps collapsed to below
+`1e-6` and failed after 16 support iterations.  Starting after 120 HKM
+iterations still left `8.77e-6` after 20 support iterations.  Neither path
+produced a final certificate.  No damping or crossover tuning is justified;
+the support-function/rank-one path is rejected and is not present in the
+repository.
+
+### Revised fixed-trace CSDR plan: implementation audit
+
+The requested plan was compared line by line with the current candidate.
+
+- Compact fixed-trace Q3 state, exact Lorentz fraction-to-boundary, a
+  Mehrotra/HKM predictor-corrector, PSD2 reconstruction, original-coordinate
+  certification, and PSD2 fallback are complete.  NT scaling is also complete
+  and tested, but the J40 ABBA result above proves that it must remain an
+  explicit research direction rather than the production default.
+- Strict equality reduction is already implemented before native Q3.  Exact
+  zero/duplicate/proportional cleanup is followed by an arithmetic-aware rank
+  proposal; every proposed dependency and its right-hand side is checked in
+  the solve arithmetic, and the equality multiplier is mapped back before the
+  original-coordinate certificate.  J40 retains all 170 columns, so there is
+  no rank reduction to exploit on that instance.  J80 remains to be measured.
+- Float64x4 triangular output-tile SYRK, static ownership, the blocked equality
+  Cholesky, BigFloat output tiles, Q3 block mapping, compact active-support
+  storage, and immutable J40/J80 benchmark provenance are complete.
+- Exact equality-row template grouping has not been implemented because no
+  J40/J80 measurement yet proves repeated proportional templates.  It will be
+  attempted only if a target-arithmetic structural scan shows a materially
+  smaller number of two-row templates than cone blocks.
+- `PreparedSolver` currently reuses the ingested problem and previous result,
+  but it does not yet cache a reduced Q3 workspace.  This is useful for future
+  objective scans, not the first priority for the single large solve.
+- Guarded Float64x4 construction/factorization of a BigFloat equality Gram is
+  still experimental work.  It will not be enabled without target-precision
+  residual/refinement and final certificate gates.
+
+The experimental campaign is now capped at 32 solver threads.  Parameter,
+initializer, 64/96/128-core, row-bin, support-function, and NT trajectory
+sweeps are closed.  The next decision is driven by measured equality-rank
+presolve cost, exact template counts, and the J80 32-thread profile.
+
+### Current 32-thread baseline and J80 memory preflight
+
+Job `199683.node220` established the current J40 Float64x4/HKM baseline on
+node103 with 32 Julia/solver threads, one GC worker, one BLAS thread, one
+warm-up, and three timed solves.  All rows used the native
+`q3_block_diagonal_equality` KKT and output-tile Gram, returned `Optimal`, and
+passed the original-coordinate certificate with identical objectives,
+residuals, gap, and PSD2 margins.
+
+| Metric | Timed values | Median | CV |
+| --- | --- | ---: | ---: |
+| `solve!` | 32.491, 32.475, 32.577 s | 32.491 s | 0.17% |
+| core phases | 23.702, 23.668, 23.749 s | 23.702 s | 0.17% |
+| equality Gram | 14.496, 14.473, 14.532 s | 14.496 s | 0.21% |
+| end to end | 33.338, 33.215, 33.314 s | 33.314 s | 0.20% |
+
+Every run used 191 iterations.  Equality Gram is 61.2% of core time, while the
+170-by-170 equality factorization is only 0.625 seconds per complete solve.
+The process averaged 22.68 active cores out of 32, used 2.91 GB peak RSS, and
+reported no regularization or fallback.  Relative to the matched eight-thread
+HKM median, 32 threads improve `solve!` by 2.54x and Gram by 3.38x; 32 remains
+worthwhile for J40 latency even though total CPU utilization is about 71%.
+
+J80 preflight job `199684.node220` passed on node102 with the immutable model
+hash and reduced geometry 32,800 blocks, 65,600 variables, and 350 equalities.
+The estimated compact Q3 workspace is 810,863,712 bytes and the whole
+load/convert/preflight process peaked at 7.93 GB RSS, so a 64 GB allocation has
+ample headroom.  The serialized model is 663 MB.  NUMA telemetry showed about
+5.65 GB of 6.45 GB resident data on node 0 immediately after serial loading;
+the complete J80 test must therefore compare the default placement with a
+basic interleaved/parallel-first-touch control before attributing scaling loss
+to the Gram arithmetic alone.
+
+### J80 equality-structure audit and retained preprocessing fast path
+
+Read-only structure job `199685.node220` measured the exact J80 equality
+system before any new transformation.  The 65,600-by-350 matrix has
+19,319,200 nonzeros (84.14% density).  Arithmetic-aware equality presolve
+retained all 350 columns; there was no rank reduction.  Its 65,600 rows formed
+65,600 distinct exact proportional templates, and the 32,800 ordered two-row
+block templates were also all distinct.  A deterministic sampled full-rank
+proposal took 11.43 seconds, versus 5.38 seconds for the existing complete
+target-arithmetic rank presolve, and did not certify a shortcut.  Rank
+sampling and equality-support grouping are therefore rejected for this
+benchmark.
+
+Stage-level profiling job `199686.node220` then isolated a separate setup
+bottleneck.  Of 224.75 seconds in `preprocess`, exact equality cleanup consumed
+224.42 seconds even though it removed no equality.  The cause was the
+diagnostic-only near-proportional scan: columns with the same dense support
+were compared pairwise in Float64x4, producing O(m*n^2) work.  Exact zero,
+duplicate, and proportional cleanup was not the source of a useful model
+reduction.
+
+The retained implementation caches every equality support signature in one
+matrix pass and reuses those collision-checked buckets.  Exact cleanup still
+validates complete target-arithmetic values before removing anything.
+Near-proportional detection remains diagnostic-only and now has a fail-closed
+budget of eight equivalent equality-matrix passes; exceeding the budget emits
+an explicit warning and leaves the exact cleanup and model unchanged.
+Work estimates use saturating arithmetic, dense pivot scans are charged, and
+nonfinite candidate arithmetic is rejected from the diagnostic.
+
+The first immutable A/B candidate, source fingerprint
+`89694b25700dc91727c6552c795f16f2407dd9dae691176f3938c3a68993108e`,
+ran as job `199687.node220` on the same node103 and same J80 model hash:
+
+| J80 Float64x4 preprocessing | Baseline | Bounded diagnostic | Speedup |
+| --- | ---: | ---: | ---: |
+| Complete `preprocess` | 224.754 s | 0.395 s | 568.7x |
+| Exact-constraint-cleanup stage | 224.424 s | 0.0735 s | 3053x |
+| Whole profiler process | 315.81 s | 80.39 s | 3.93x |
+| Peak RSS | 7,245,096 KiB | 7,196,584 KiB | 1.01x |
+
+Both runs retained exactly 350 equalities and passed their immutable source,
+model, and process-exit gates.  The candidate writes one warning explaining
+that only the bounded near-proportional diagnostic was skipped.  This is a
+large, reproducible end-to-end setup improvement with no numerical model
+change and is retained for the final regression and solve campaign.
+
+The complete-solve gate was then run as job `199690.node220` on node103 with
+the exact 32-thread Julia pool, one GC worker, one BLAS thread, one warm-up,
+and three cold J40 Float64x4/HKM-Q3 measurements.  All three rows returned
+`Optimal`, executed the native Q3 block-diagonal-equality KKT and output-tile
+Gram, completed in 191 iterations, and passed the original-coordinate
+certificate.  Printed primal/dual objectives, gap, residuals, equality error,
+and reconstructed PSD2 margins are identical to the pre-change baseline.
+
+| J40 Float64x4, 32 workers | Baseline | Bounded diagnostic | Change |
+| --- | ---: | ---: | ---: |
+| `solve!` median | 32.491 s | 25.302 s | **22.1% faster** |
+| End-to-end median | 33.314 s | 26.047 s | **21.8% faster** |
+| Instrumented core median | 23.702 s | 23.580 s | 0.5% faster |
+| Equality Gram median | 14.496 s | 14.442 s | 0.4% faster |
+| Mean active cores | 22.68 | 28.72 | 26.6% higher |
+| Peak process RSS | 2.906 GB | 2.890 GB | 0.6% lower |
+
+The three candidate `solve!` times were 25.3024, 25.1835, and 25.3021 seconds
+(CV 0.27%); end-to-end CV was 0.46%.  Candidate preprocessing itself was
+0.255 seconds.  The essentially unchanged core/Gram times prove that the gain
+is removal of wasted setup work rather than a trajectory or timing-boundary
+change.  This clears the five-percent complete-solve, CV, memory, objective,
+and certificate retention gates.
+
+The retained source then passed two independent focused gates. PBS job
+`199691.node220` ran on node104 with four Julia threads, one BLAS thread, and
+16 reserved slots; it finished in 3:59 wall time with scheduler exit status
+zero and about 1.48 GiB peak scheduler RSS. The job executes both
+`preprocessing_regressions.jl` and `soc_regressions.jl` and writes `PASSED`
+only after both return successfully. A separate local Julia 1.12.6 process
+with an isolated writable depot passed 90 preprocessing, 1,724 scalar-Q3, 386
+native-SOC, and 74 KKT assertions (2,274 total). The only messages were
+expected sandbox `sysctl` warnings; the process exit status was zero.
+
+### Same-node J40 PSD2 versus native HKM-Q3 at 32 threads
+
+PBS job `199692.node220` ran the immutable bounded-preprocessing candidate on
+node103 in `sdp-socp` order. Each formulation used the same J40 model/hash,
+`Float64x4`, `scaling=:none`, tolerance `1e-12`, an exact 32-thread Julia pool,
+one GC worker, one BLAS thread, one warm-up, and three timed solves. The job
+finished with PBS exit zero and a `PASSED` marker. Every row was `Optimal`,
+certificate-valid, and benchmark-valid; PSD2 executed `block_arrow`, while Q3
+executed `q3_block_diagonal_equality` with HKM and output-tile Gram.
+
+| J40 Float64x4 median | Optimized PSD2 | Native HKM-Q3 | PSD2 / Q3 |
+| --- | ---: | ---: | ---: |
+| iterations | 166 | 191 | 0.87x |
+| `solve!` | 135.465 s | 25.454 s | **5.32x** |
+| end to end | 136.213 s | 26.204 s | **5.20x** |
+| instrumented core | 134.377 s | 23.710 s | **5.67x** |
+| equality Gram | 12.847 s | 14.481 s | 0.89x |
+| mean active cores | 7.83 | 28.72 | 3.67x |
+| utilization of 32-thread request | 24.5% | 89.8% | 3.67x |
+| `/usr/bin/time` peak RSS | 2,425,472 KiB | 2,572,088 KiB | 0.94x |
+
+The PSD2 and Q3 solve CVs were 0.11% and 0.94%; end-to-end CVs were 0.16%
+and 0.70%. Their primal objectives differ by about `4.7e-12` absolute
+(`2.2e-13` relative), comfortably inside the `1e-9` gate. Both relative gaps
+are below `1e-12`; equality errors are around `5e-67`; both reconstructed
+primal/dual PSD2 margins are positive. Q3's compact workspace estimate is
+56.3 MB versus the conservative 115.2 GB SDP estimate and its per-solve
+allocation is lower (519 MB versus 721 MB). Whole-process RSS was 6.0% higher
+for the second subprocess, so reverse-order job `199694.node220` was submitted
+on the same node before interpreting that small process-level difference.
+
+The equality Gram itself is not faster in Q3: Q3 performs more iterations and
+spends 14.48 rather than 12.85 seconds there. The 5.3x complete-solve gain is
+therefore the intended fixed-trace structural benefit: compact Lorentz local
+algebra removes PSD2 matrix factor/contraction work and exposes enough regular
+work to keep the requested pool active.
+
+Reverse-order job `199694.node220` also finished with PBS exit zero and a
+`PASSED` marker. Across all six timed rows per formulation, PSD2 and Q3 solve
+medians were 135.102 and 25.706 seconds, respectively (5.26x); end-to-end
+medians gave 5.14x. Combined CVs were 0.29% and 0.88%. The first/second-process
+RSS pairs were 2.484/2.533 GB for PSD2 and 2.634/2.609 GB for Q3, so order does
+not explain the roughly 3--6% process-level difference. Q3 nevertheless owns a
+far smaller solver workspace and allocates less per solve; the absolute process
+RSS remains below 2.7 GB and inside the non-material memory gate.
+
+The phase waterfall explains the speedup. PSD2 spent median 54.46 seconds in
+corrector work, 30.32 seconds in refinement, 29.33 seconds in residual/block
+factorization, and about 20.96 seconds in each predictor/corrector linear solve.
+Q3 spent 17.30 seconds in total Schur assembly, of which 14.48 seconds was the
+equality Gram; its remaining major phases were only 3.50 seconds of KKT solves
+and 2.65/2.06 seconds of predictor/corrector work. Equality Gram is therefore
+the next Q3 bottleneck, while further 170-by-170 factor tuning is not valuable.
+
+### J40 BigFloat256 formulation gate at 32 threads
+
+PBS job `199695.node220` ran the same immutable J40 model on node103 in
+Q3-then-PSD2 order. Both isolated processes used 256-bit BigFloat arithmetic,
+the exact 32-thread Julia pool, one GC worker, one BLAS thread,
+`scaling=:none`, tolerance `1e-12`, one warm-up, and three timed solves. Both
+`/usr/bin/time` processes exited zero. Every timed row was `Optimal`,
+certificate-valid, and benchmark-valid; Q3 executed HKM with the compact
+block-diagonal-equality KKT and output-tile Gram, with no direction or PSD2
+fallback.
+
+| J40 BigFloat256 median | Optimized PSD2 | Native HKM-Q3 | Q3 / PSD2 |
+| --- | ---: | ---: | ---: |
+| iterations | 166 | 191 | 1.15x |
+| `solve!` | 184.993 s | 197.066 s | **1.065x slower** |
+| end to end | 189.537 s | 201.488 s | **1.063x slower** |
+| instrumented phases | 179.637 s | 186.998 s | 1.041x slower |
+| equality Gram | 91.867 s | 100.562 s | 1.095x slower |
+| mean active cores | 17.51 | 18.03 | 1.03x |
+| process peak RSS | 2.703 GB | 2.890 GB | 1.069x |
+| allocated bytes / solve | 29.09 GB | 77.48 GB | 2.66x |
+
+Solve CV was 1.35% for PSD2 and 1.09% for Q3; end-to-end CV was also below
+1.4% for both. The primal objectives differ by about `9.1e-12` absolute
+(`4.3e-13` relative), both relative gaps are below `1e-12`, equality backward
+errors are about `1e-79`, and all reconstructed primal/dual PSD2 margins are
+positive. Thus the numerical comparison is valid, but Q3 does not clear the
+five-percent BigFloat performance or memory gates. The existing policy is
+confirmed: BigFloat remains on optimized PSD2 under `algorithm=:auto`; native
+Q3 remains an explicit reference/research option. The fixed-trace Q3 benefit
+is strongly arithmetic-dependent: it is 5.26x faster for J40 Float64x4, but
+its extra iterations and higher BigFloat allocation outweigh the compact cone
+algebra at 256 bits.
+
+### Final harness and example hygiene before the release candidate
+
+An independent read-only release audit passed package loading, a generic SOC
+smoke, a native fixed-trace Q3 smoke, 328 focused native-SOC assertions, 1,724
+scalar-Q3 assertions, Julia parsing, shell syntax, and `git diff --check`. It
+identified three non-numerical inconsistencies, all corrected before freezing
+the final candidate: the direct J40/J80 driver now enforces the campaign's
+32-thread cap; successful single-mode launchers write an explicit `PASSED`
+file; and portable launchers no longer embed the maintainer's private cluster
+paths, instead accepting Julia/environment/depot/release locations through
+environment variables. The general SDPX solver remains unrestricted by this
+benchmark-only thread policy.
+
+`examples/08_soc_fixed_trace.jl` was added to the examples-as-tests set. It
+solves a direct Lorentz norm problem, then an explicit constant-trace unit-disk
+PSD2 model and asserts that the latter executed
+`:q3_block_diagonal_equality`, returned `Optimal`, and passed the independent
+certificate. The standalone run exited zero with objectives
+`5.0000000170575625` and `-0.9999999996296093`.
+
+### Recycled equality-PCG prototype: deterministic J40 rejection
+
+The proposed matrix-free equality experiment was implemented behind the
+explicit `q3_equality_solver=:recycled_pcg` option, with direct Gram remaining
+the default and final fallback.  Its operator applies the current
+`Btil' * (Btil * v)` in the target arithmetic type, while the most recent
+exact target-arithmetic Gram Cholesky is used only as a preconditioner.  The
+predictor and corrector form one transaction: failure of either target KKT
+residual gate rebuilds the current exact Gram and recomputes both directions
+before any outer iterate is updated.  Three consecutive fallback iterations
+lock the remainder of the solve to the direct path.  Focused Float64,
+Float64x4, and BigFloat256 tests, including BigFloat storage-ownership checks,
+passed (420 assertions after the final diagnostic fixes).
+
+PBS job `199698.node220` ran on node103 with the immutable prototype candidate,
+the pinned J40 model/hash, Float64x4, tolerance `1e-12`, 32 Julia/solver
+threads, one GC thread, one BLAS thread, and one warm-up per isolated process.
+The planned A/B/B/A order was stopped after both recycled arms completed,
+because they produced the same decisive failure mode; the redundant final
+direct process was cancelled and 32 slots released.  The first direct arm was
+`Optimal` and certificate-valid in 191 iterations, with timed solve/core/Gram
+times of 25.696/23.582/14.396 seconds, mean 28.269 active cores, and 2,863,304
+KiB process peak RSS.
+
+Both recycled replicates were also `Optimal` and produced the same objective,
+gap, equality residual, and positive reconstructed PSD2 margins as direct, but
+the equality experiment did not recycle successfully:
+
+| J40 Float64x4 | PCG replicate 1 | PCG replicate 2 |
+| --- | ---: | ---: |
+| PCG attempts / accepted inner solves | 5 / 2 | 5 / 2 |
+| fallback iterations | 3 | 3 |
+| accumulated PCG iterations | 17 | 17 |
+| final pre-lock residual | 0.1257786763 | 0.1257786763 |
+| direct lock | yes | yes |
+| exact Gram builds / skipped builds | 192 / 0 | 192 / 0 |
+| timed solve | 26.070 s | 25.787 s |
+| instrumented core | 24.245 s | 23.650 s |
+| equality Gram | 14.490 s | 14.337 s |
+| mean active cores | 28.276 | 28.312 |
+
+Thus the previous factor is not a sufficiently close preconditioner for even
+the early J40 HKM metric changes under the target-precision gate.  The bounded
+five-iteration PCG budget saved no Gram at all, and increasing its iteration
+budget or weakening the residual is precisely the unproductive parameter
+tuning excluded by the experiment plan.  The direction is rejected before
+J80 and will not be enabled automatically or retained in the release
+candidate.
+
+The audit also found two measurement issues while the prototype was live.
+PCG successes were initially counted after the Krylov residual but before the
+complete transformed-KKT residual; success accounting now occurs only after
+the latter passes.  The Q3 workspace preflight now includes the four
+equality-sized Krylov vectors plus the variable-sized matrix-free panel.  The
+benchmark execution gate now reads the actual equality solver rather than its
+requested label, so a run locked back to direct cannot be marked as a valid
+recycled-PCG benchmark.  These fixes passed the 420 focused SOC regressions.
+
+### Float64x4 off-diagonal 4-by-2 equality-Gram microkernel
+
+After rejecting recycled PCG, profiling returned to the dominant operation
+that is still exact and unavoidable: the triangular Float64x4
+`Btil' * Btil` contraction. The retained experiment pairs two columns in each
+off-diagonal output tile and updates four output rows at once. At every
+reduction index it loads one four-lane row vector and two broadcast column
+values, then advances two independent four-lane accumulators. Reduction
+indices remain strictly ascending for every output, diagonal tiles and odd
+tails retain the previous implementation, and output ownership is unchanged.
+Consequently the optimized lower triangle is bit-for-bit identical to the
+scalar-order reference rather than merely tolerance-equivalent.
+
+Focused regression added odd dimensions and tile tails at `(11,4)` and
+`(13,5)`, checks every lower-triangle value exactly, and verifies that the
+upper triangle remains untouched. The complete extended-precision BLAS
+focused file passed 108/108 assertions.
+
+The first cleaned deployment candidate contained 284 tracked/unignored files;
+local and remote ordered file digests both equaled
+`48f13cf9175fd273af4c0921001a1d039a40f1bb1e7ffa3f9714f7d4a7453edf`.
+It was frozen at `candidates/v0.4.0-syrk4x2-5d43218617bc/source`, but the
+packager had deliberately omitted ignored files and therefore also omitted
+the root and environment `Manifest.toml` lock files. J40 scaling jobs
+`199711.node220` and `199712.node220` each completed their old arm, then the
+new-source subprocess failed during package loading because MOI could not be
+resolved without the root manifest. This is a deployment-only failure before
+model loading, not numerical or performance evidence. The incomplete
+candidate is retained read-only for audit but is rejected for further solver
+jobs. A replacement must include all four lock files and pass file-for-file
+verification before the affected jobs are rerun. Production throughout still
+points to release `46b8b9733d89f8a5eea4231e6e88249692b64057`.
+
+The corrected replacement is
+`candidates/v0.4.0-syrk4x2-8eeaefa925ef/source`. It contains the 284
+tracked/unignored files plus the root, benchmark, Convex-frontend, and docs
+manifests (288 files total). Local and remote ordered file digests are both
+`8eeaefa925ef211f67dfad0290e1302d16518f4d8be82c28cedd049d4ccd6e5a`;
+all four lock files are nonempty, a lightweight Julia 1.12.6 package load
+returned zero, and the source was then made read-only. Full and scaling jobs
+use only this manifest-complete replacement.
+
+For complete-solve timing, the earlier `v0.4.0-bench-r3` baseline was found to
+differ from the replacement in both the extension and a native-Q3 failure
+branch. That branch is not exercised by successful J40 HKM solves, and it
+cannot affect the direct Gram microbench, but it would make a full-solve A/B
+less clean than necessary. A strict control was therefore created by copying
+the 288-file replacement and substituting only the previous
+`ext/SDPXMultiFloatsExt.jl`. Its source tree is otherwise byte-identical, it
+is read-only, and its ordered digest is
+`f3144c35213ab5574d15d39e38eb7ea4f9d4f59f5999c427a51293eb1c4ed08e`.
+Complete-solve acceptance uses this strict control rather than the older
+multi-difference candidate.
+
+PBS job `199708.node220` provided the first valid same-node J40 kernel A/B on
+node103. It used the exact J40 model/hash, a `8400-by-170` transformed panel,
+32 Julia workers, one BLAS thread, one warm-up, and five calls in each
+old/new/new/old arm. Attempt `199706` was cancelled before measurement when
+the scheduler co-located it with the long J80 run, and attempt `199707` failed
+before loading the model because the private harness used invalid Julia 1.12
+tuple interpolation; neither is numerical evidence.
+
+| J40 32-thread Gram kernel | old arm 1 | old arm 2 | new arm 1 | new arm 2 |
+| --- | ---: | ---: | ---: | ---: |
+| median seconds | 0.073526 | 0.073698 | 0.067462 | 0.067362 |
+| within-arm CV | 1.00% | 1.17% | 0.97% | 0.61% |
+| effective cores | 30.664 | 30.610 | 30.684 | 30.659 |
+
+The median-of-arms improvement is about **8.4%**. All four arms produced the
+same lower-triangle SHA-256
+`2334bb9722d9c5b0c41c86e08d3e73030b601b59a40ba1c2fcaf1a6e712b4c0c`;
+there was no material RSS increase. This clears the isolated-kernel gate but
+does not by itself authorize retention. A same-node full J40 native-Q3 A/B
+and the larger J80 panel A/B remain required to show a measurable complete
+solve benefit and exclude cache/order artifacts.
+
+Corrected manifest-complete scaling jobs `199713.node220` (node4, eight
+allocated/eight Julia workers) and `199714.node220` (node7, sixteen
+allocated/sixteen Julia workers) both completed with scheduler exit zero and
+`PASSED`. They repeated the old/new/new/old J40 kernel comparison with nine
+timed calls per arm. The lower-triangle hash remained exactly
+`2334bb9722d9c5b0c41c86e08d3e73030b601b59a40ba1c2fcaf1a6e712b4c0c`
+for every arm.
+
+| J40 kernel scaling | old median of arms | new median of arms | reduction |
+| --- | ---: | ---: | ---: |
+| 8 workers | 0.264571 s | 0.242873 s | **8.20%** |
+| 16 workers | 0.192680 s | 0.178737 s | **7.24%** |
+| 32 workers | 0.073612 s | 0.067412 s | **8.42%** |
+
+At eight workers both kernels used about 7.95 active cores. At sixteen the
+kernel used only about 11.5--11.8 active cores, whereas the 32-worker isolated
+run used about 30.6; this nonmonotone placement/scheduling behavior is why the
+release selector must use measured complete-solve curves rather than assuming
+that the nominal thread count predicts utilization. Process RSS varied by
+ordinary compilation/order noise and did not increase systematically for the
+new kernel. Thus the improvement reproduces at every requested J40 thread
+count while preserving exact arithmetic output.
+
+PBS job `199709.node220` completed the corresponding J80 old/new/new/old
+kernel comparison on node103 with scheduler exit zero and a `PASSED` marker.
+All arms used the exact `65600-by-350` panel, 32 Julia workers, one BLAS
+thread, one warm-up, and five timed calls. Every old and new call produced the
+same lower-triangle SHA-256
+`681a2c248f0a69cd6f5a5fddbc79acae33b11b6ec3ca37e84ecb3e67067dca27`.
+
+| J80 32-thread Gram kernel | old arm 1 | old arm 2 | new arm 1 | new arm 2 |
+| --- | ---: | ---: | ---: | ---: |
+| median seconds | 2.760024 | 2.521486 | 1.980615 | 1.994238 |
+| within-arm CV | 3.27% | 5.40% | 0.28% | 1.12% |
+| effective cores | 27.979 | 29.543 | 30.475 | 30.397 |
+| peak RSS (KiB) | 7,136,880 | 7,225,488 | 7,143,608 | 7,133,296 |
+
+The old kernel exhibits a measurable order/load effect, so the decision does
+not rely on its more favorable first arm. Comparing the second new arm to the
+faster second old arm still gives a **20.9%** reduction; median-of-arm medians
+gives 2.640755 versus 1.987427 seconds, or **24.7%**. New-arm CV is below
+1.2%, effective utilization rises to about 30.4 of 32 cores, and RSS is not
+materially higher. The J80 panel therefore independently clears the kernel
+retention gate. A complete J40 solve A/B is still required because only that
+test includes the nonlinear trajectory, objectives, residuals, gap, SOC/PSD
+certificates, and end-to-end timing.
+
+### Target-residual-gated Float64x2 equality shadow preflight
+
+After recycled PCG failed, the next structural experiment used a fresh
+low-cost factor every outer iteration rather than reusing an obsolete target
+factor. PBS job `199719.node220` ran on node4 with exactly 16 allocated/Julia
+workers and one BLAS thread. It used the current J40 Float64x4 Q3 state and
+the actual first predictor and corrector equality right-hand sides. The
+`8400-by-170` target panel was converted in 1,024-row chunks, accumulated into
+a Float64x2 lower-triangle Gram, and factored in Float64x2. No shadow panel was
+retained. Every acceptance residual was recomputed as
+`Btil'*(Btil*x)` in Float64x4.
+
+The native Float64x4 Gram/factor took 0.163480/0.021805 seconds. Three shadow
+builds had median 0.028500 seconds (CV 7.34%, about 15.8 effective cores), and
+the shadow factor took 0.005292 seconds. The initial shadow solutions already
+had target-operator relative residuals `8.71e-29` and `1.19e-27` for the
+predictor/corrector. One target refinement reduced them to `6.65e-49` and
+`7.58e-48`; two reached `1.02e-62` and `1.14e-61`. Warm target-operator
+applications cost about 0.0126 seconds per RHS. The final solutions differ
+from the direct-Gram solutions by only `9.4e-54` and `2.0e-53` relative.
+Peak process RSS was 1,335,592 KiB.
+
+Thus a residual gate with no correction would reduce equality build/factor
+plus two verification products from roughly 0.185 to 0.059 seconds; even two
+refinement corrections to near-Float64x4 arithmetic limits project about
+0.109 seconds, a 41% reduction. This is preflight evidence only: it does not
+yet prove nonlinear trajectory or certificate reliability. It clears the J40
+gate for the same actual-RHS experiment on J80 (`199720.node220`); solver
+integration remains disabled until that result and transactional fallback
+tests pass.
+
+The J80 follow-up `199720.node220` completed on node103 with scheduler exit
+zero and `PASSED`, using exactly 32 allocated/Julia workers and one BLAS
+thread. On the `65600-by-350` panel, the current Float64x4 Gram/factor took
+2.727507/0.023223 seconds. Three 1,024-row streaming Float64x2 shadow builds
+had median 0.427191 seconds and CV 0.97%, with 31.8--31.9 effective cores;
+the shadow factor took 0.045811 seconds. Peak RSS was 7,231,212 KiB, which is
+essentially the same as the direct J80 kernel processes because only one small
+chunk is retained.
+
+The actual predictor/corrector shadow solutions began at target-operator
+residuals `2.17e-27` and `1.04e-26`; one refinement reached `5.36e-44` and
+`4.08e-44`, and two reached `1.90e-61` and `7.41e-61`. Warm target-operator
+products cost about 0.099 seconds per RHS. With two conservative correction
+passes for both Newton right-hand sides, projected per-iteration equality
+cost is about `0.427 + 0.046 + 6*0.099 = 1.067` seconds versus 2.751 seconds
+for the target Gram/factor, a **61%** reduction. At the requested `1e-12`
+outer tolerance, even the unrefined shadow solutions already exceed the
+needed residual by fourteen digits; nevertheless implementation acceptance
+will retain target-arithmetic residual checks and at least one guarded
+correction opportunity.
+
+Both J40 and J80 therefore support integrating an expert-only transactional
+`Float64x2 -> Float64x4` equality path. Integration must build a fresh shadow
+factor for the current `Btil`, certify predictor and corrector before any IPM
+update, and rebuild/recompute both with the exact target Gram on nonfinite
+conversion, nonpositive factorization, insufficient residual contraction, or
+either RHS gate failure. No automatic/default selection is authorized by
+these preflights alone.
+
+### Strict full-solve retention gate for the Float64x4 4-by-2 SYRK kernel
+
+PBS job `199718.node220` completed on node9 with scheduler exit zero and an
+explicit `PASSED` marker.  It used the manifest-complete strict control and
+candidate trees, the exact J40 model/hash, 32 Julia/solver workers, one BLAS
+thread, one warm-up per process, and an old/new/new/old ordering.  All four
+rows executed native fixed-trace HKM-Q3 with the output-tile Gram and no
+fallback.  Each returned `Optimal` after 191 iterations with valid execution,
+benchmark, and original-coordinate certificates.
+
+The primal and dual objectives, relative gap, primal/dual/equality residuals,
+and reconstructed PSD2 margins were bit-for-bit identical across all four
+processes.  In particular, the primal objective was
+`-21.0253439247503263337953061827573472424515723866581163695625404356`,
+the relative gap was `9.45653417936792e-13`, the equality backward error was
+`5.10810430998658e-67`, and both reconstructed primal and dual PSD2 margins
+were positive.
+
+| J40 full solve, 32 workers | strict control median | 4-by-2 candidate median | reduction |
+| --- | ---: | ---: | ---: |
+| equality Gram | 14.463329 s | 13.321284 s | **7.90%** |
+| Schur assembly | 17.252378 s | 16.284591 s | **5.61%** |
+| native core phase total | 23.727391 s | 22.824172 s | **3.81%** |
+| timed solve wall | 25.652054 s | 24.550100 s | **4.30%** |
+| solve plus validation | 26.513257 s | 25.410440 s | **4.16%** |
+
+Within-arm CV was below 1% for all of these primary timings.  Mean active
+cores were 28.44 for the control and 28.26 for the candidate (no material
+utilization loss).  Candidate peak RSS across its two arms was 2.965 GB,
+slightly below the control maximum of 2.974 GB.  The complete-solve gain is
+smaller than the isolated Gram gain, as predicted by Amdahl's law, but it is
+stable, order-controlled, numerically exact, and measurable.  Together with
+the 7--8% J40 kernel gains at 8/16/32 workers and the conservative 20.9% J80
+kernel gain, this clears retention for the 4-by-2 Float64x4 off-diagonal
+microkernel.  It does not change the selected algorithm or authorize any
+mixed-precision/default-policy change.
+
+Jobs `199710`, `199711`, `199712`, `199716`, and `199717` were deployment-only
+failures before a model solve (respectively incomplete frozen manifests,
+missing exported Julia path, or an unsuitable candidate-local project
+environment).  Job `199715` was explicitly superseded before measurement.
+None supplied numerical evidence and none is included in the A/B result.
+
+### BigFloat256-to-Float64x4 shadow-Gram preflight
+
+PBS job `199721.node220` completed on node101 with scheduler exit zero and a
+`PASSED` marker.  It used J40, 32 Julia workers, one BLAS thread, BigFloat at
+exactly 256 bits, and the same actual first predictor/corrector equality
+right-hand sides as the direct target factor.  A 1,024-row scratch panel was
+converted to Float64x4 and accumulated into a Float64x4 shadow Gram; every
+acceptance residual was recomputed by the BigFloat256 matrix-free target
+operator.
+
+Numerical quality was excellent: the unrefined predictor/corrector target
+residuals were `1.37e-61` and `2.91e-60`; one correction reduced them to
+`2.14e-75` and `6.67e-74`.  Relative errors against the direct BigFloat
+solutions were about `1.0e-65` and `1.8e-65`.  This easily clears both the
+`1e-12` and `1e-20` residual gates.
+
+Performance, however, failed.  The native BigFloat256 Gram/factor took
+0.547722/0.101544 seconds, while the streaming Float64x4 shadow build/factor
+took 0.992702/0.054286 seconds.  Shadow-build CV was 20.3% and effective CPU
+use only 4.4--5.8 cores out of 32 because serial conversion and nine small
+SYRK launches dominated.  Peak RSS was 1,389,632 KiB.  Therefore the
+1,024-row BigFloat shadow design is rejected despite its accuracy.  One
+bounded larger-chunk experiment is justified to separate launch/conversion
+overhead from the arithmetic idea; absent a clear total build/factor gain,
+BigFloat256 remains on its native target-precision Gram.
+
+Job `199722.node220` tested a single 8,400-row scratch panel but retained the
+serial conversion.  It also passed numerically, yet shadow build/factor was
+0.957423/0.054599 seconds versus 0.549417/0.101942 seconds for the target
+path.  Effective use fell to 3.2--3.7 cores and CV remained 18.8%.  This
+isolated the dominant cost as BigFloat-to-Float64x4 conversion, not chunked
+SYRK accumulation.
+
+Job `199723.node220` therefore made exactly one structural change: the same
+single scratch panel was converted by 32 statically column-owned tasks before
+the same output-tile SYRK.  The job completed on node103 with exit zero and
+`PASSED`; all residual and direct-solution comparisons were unchanged.  The
+shadow build median fell to 0.207798 seconds and its best arm to 0.144733
+seconds, with effective use up to 25.15 cores.  Shadow factorization was
+0.054769 seconds, while target BigFloat Gram/factor was 0.534798/0.091054
+seconds.  Two target-operator checks cost about 0.037 seconds total, so the
+median unrefined shadow transaction is roughly 0.300 seconds versus 0.626
+seconds direct, a projected **52% equality-path reduction**.  Peak RSS was
+1,445,548 KiB, not materially above the other preflights.
+
+The parallel build still had 58.8% three-sample CV (0.145/0.208/0.440 s), so
+this is not retention evidence.  It does reverse the previous BigFloat
+NO-GO: parallel conversion is a necessary part of any later BigFloat256
+mixed-refine prototype.  Float64x4 integration and complete J40/J80 gates
+remain first; only after they pass should BigFloat use a bounded parallel
+chunk size and full-solve A/B.  Native BigFloat Gram remains the default and
+unconditional fallback.
+
+### Expert Float64x2-to-Float64x4 equality refinement candidate
+
+The measured J40/J80 preflights were integrated as an explicit
+`q3_equality_solver=:mixed_refine` research path; `:direct` remains the
+default.  Each native-Q3 iteration first transforms the current equality
+panel in Float64x4, then streams at most 1,024 rows at a time into an owned
+Float64x2 scratch panel.  Output-tile triangular SYRK constructs a fresh
+shadow Gram and Float64x2 Cholesky factor.  Predictor and corrector solutions
+are accepted only after target-Float64x4 applications of
+`Btil'*(Btil*x)` pass the existing refinement tolerance.  Up to three
+corrections are allowed, and each must reduce the target residual by at least
+a factor of two.
+
+The transaction is fail closed.  A nonfinite conversion, shadow-factor
+failure, weak residual contraction, or either RHS failure permanently locks
+that solve to the direct Float64x4 Gram.  No primal/dual IPM state is updated
+before both directions succeed; the unchanged iterate rebuilds the current
+target factor and recomputes predictor and corrector.  A stale pending marker
+is explicitly cleared as soon as the direct rebuild begins, so a later
+unrelated direct KKT failure cannot be misclassified as a mixed fallback.
+Unsupported arithmetic, including BigFloat256 at this stage, executes the
+ordinary direct path.  The benchmark rejects unsupported mixed requests
+rather than spending a full solve merely to report that fallback.
+
+The compact-Q3 memory estimator now includes both Float64x2 Gram/factor
+matrices, the bounded conversion panel, and the Float64x4 target residual
+buffers.  Benchmark reporting treats type/module/function objects as scalar
+provenance strings; this fixes a post-solve stack overflow when flattening the
+recorded `Float64x2` shadow type.  SDP rows reject Q3-only controls, while the
+paired SDP/SOCP launcher forwards those controls only to its SOCP leg.
+
+Local verification after these audit fixes passed 424 native-SOC assertions
+at four Julia threads, 1,724 scalar-Q3 kernel assertions, and six dedicated
+benchmark-report/option regressions.  Static Julia parsing, shell syntax, and
+`git diff --check` also passed.  This is implementation evidence only: the
+expert path is not retained or automatically selected until strict same-node
+J40 direct/mixed A/B and then J80 complete-solve gates pass.  Production
+remains unchanged.
+
+### Rejected J80 NUMA comparison attempt
+
+The older direct-path NUMA job `199696.node220` terminated after only its
+default-placement arm, so it is not an A/B result.  On node104 it requested
+32 Julia workers and one BLAS worker, used the exact J80 model/hash, and
+reached the 10,800-second per-solve limit after 359 reported iterations.  The
+preserved row was `TimeLimit`, failed the duality-gap certificate at
+`1.4638e-10` versus the requested `1e-12`, and was therefore correctly marked
+invalid.  The final execution provenance was the SDP `block_arrow` backend
+despite a planned native-Q3 backend, so it also cannot be used as native-Q3
+performance evidence.  The process used about 34.1 GB peak RSS and averaged
+about 10.03 active cores (31.3% of the requested pool); `/usr/bin/time`
+reported 108,779 user seconds over 3:05:03 elapsed.
+
+Because the first arm exited nonzero, the wrapper did not start the
+interleaved-placement arm.  No NUMA conclusion is drawn and the job is not
+included in any direct/mixed acceptance ratio.  It does reinforce two gates
+already imposed on the new harness: a requested native-Q3 benchmark must
+verify the actually executed KKT backend, and a failed certificate must stop
+the campaign rather than be interpreted as a timing sample.
+
+### Rejected Float64x2 equality refinement complete-solve path
+
+The implementation candidate was frozen read-only at
+`candidates/v0.4.1-mixedrefine-b78db9e15dcf-v2/source`: 313 files, all four
+manifests present, and local/remote ordered digest
+`b78db9e15dcf2b1a3477873a2afce9b6395cd1b8d2fab836f5ddad14da631954`.
+The first archive attempt without macOS metadata suppression created
+AppleDouble `._*` files and failed the remote count/digest gate before Julia
+loaded; it is a deployment-only rejected artifact.  The v2 archive was first
+re-extracted locally, then verified again remotely and made read-only.
+
+PBS job `199724.node220` ran strict direct/mixed/mixed/direct J40 arms on
+otherwise idle node9.  Every arm used the same immutable candidate and model
+hash, 32 exclusive Julia workers, one BLAS worker, HKM-Q3, no scaling, and a
+`1e-12` target.  All four rows were `Optimal`, used
+`q3_block_diagonal_equality`, passed execution/benchmark/original-coordinate
+certificates, and had zero fallback.  Direct took 191 iterations; mixed took
+190.  The mixed objective differed from direct by only `4.7393e-13` relative
+and its certified gap was tighter (`1.7321e-13` versus `9.4565e-13`).  RSS was
+essentially unchanged.
+
+Performance failed decisively:
+
+| J40 32-worker A/B median | direct | Float64x2 mixed | mixed/direct |
+| --- | ---: | ---: | ---: |
+| timed solve | 24.328 s | 35.298 s | 1.451 |
+| native core | 22.564 s | 33.592 s | 1.489 |
+| solve + validation | 25.199 s | 36.187 s | 1.436 |
+| active cores | 28.38 | 25.45 | 0.897 |
+
+Direct target Gram/factor consumed 13.251/0.612 seconds.  Mixed avoided those
+phases, but fresh shadow preparation consumed 23.250 seconds and target
+residual checks another 2.667 seconds.  All 380 mixed RHS attempts passed
+without a single refinement correction, proving that convergence/refinement
+was not the cost: construction of the Float64x2 shadow itself was slower than
+the retained raw-limb Float64x4 Gram.  Within-arm primary timing CV was below
+1.4%, so this is not order noise.
+
+Job `199726.node220` then tested the only plausible low-risk rescue: larger
+conversion/SYRK chunks on the same real J40 transformed panel, 32 workers,
+two warm-ups and five repeats.  Median complete shadow prepare times were
+about 0.0948/0.0950/0.1582/0.1040 seconds for 1,024/4,096/8,192/8,400 rows.
+All factors were finite with positive pivots; grouping changed the Float64x2
+Gram only at roughly `1e-28` relative and Cholesky reconstruction stayed near
+machine accuracy.  None beats the approximately 0.073-second direct
+Float64x4 Gram-plus-factor cost, even before target-residual products.
+Job `199725` was a deployment-only failure caused by a malformed chunk-list
+environment value and supplied no data.
+
+Therefore the Float64x2-to-Float64x4 mixed-refinement implementation is
+rejected before J80 complete-solve testing and will be removed from the
+source, options, benchmark interface, and tests.  The preflight and full-solve
+evidence supersede the optimistic arithmetic projection.  The robust report
+flattening, Q3-option labeling gates, and already retained 4-by-2 Float64x4
+SYRK kernel remain independently useful.  BigFloat256 mixed refinement is
+also deferred: it has higher conversion cost and cannot be justified after
+the lower-cost Float64x4 target case failed.  Production remains unchanged.
+
+### Rejected Float64x4 4-by-4 equality-Gram microkernel
+
+The next bounded experiment doubled the retained off-diagonal register tile
+from four rows by two columns to four rows by four columns.  It kept the same
+ascending reduction order for every output, left diagonal and tail paths
+unchanged, and produced the same J40 lower-triangle SHA-256
+`2334bb9722d9c5b0c41c86e08d3e73030b601b59a40ba1c2fcaf1a6e712b4c0c`.
+The strict control and candidate contained 289 files and differed only in the
+reduced-arrow `micro_tile=2` versus `micro_tile=4` selector.  Their independently
+verified ordered digests were
+`ad6e6e78c59f4a77530e84985a758981d5021f3606003a429b22765c16af3102`
+and
+`973dbcb24795bd52eac1cb6d046ee9a7616f32391b68289fb8b435662a64f41f`.
+
+Jobs `199729`--`199731` and the 8/16-worker portions of
+`199732`--`199733` exited before model loading because the private PBS wrappers
+first omitted exported model metadata and then the exported thread count.
+They are deployment-only failures and contain no timing evidence.  Valid
+control/candidate/candidate/control runs were `199735.node220` (node4, eight
+workers), `199736.node220` (node7, sixteen workers), and `199734.node220`
+(node9, thirty-two workers).  Each used one BLAS worker, two warm-ups and nine
+timed calls per arm.  All jobs exited zero with `PASSED` markers.
+
+| J40 Float64x4 Gram | 4-by-2 control | 4-by-4 candidate | reduction |
+| --- | ---: | ---: | ---: |
+| 8 workers | 0.244122 s | 0.240766 s | 1.37% |
+| 16 workers | 0.178244 s | 0.175796 s | 1.37% |
+| 32 workers | 0.067441 s | 0.066753 s | 1.02% |
+
+Every arm had the same output hash.  Eight- and thirty-two-worker within-arm
+CVs were below 0.7%; the noisier sixteen-worker arms remained below 4.2%.
+Effective-core counts were essentially unchanged, and RSS showed only process
+startup/order variation rather than a systematic increase.  The gain is
+stable but far below the five-percent kernel retention threshold, so no full
+solve or J80 campaign is warranted.  The 4-by-4 code and selector are removed;
+the already validated 4-by-2 kernel remains the release path.

@@ -713,6 +713,52 @@ end
         end
     end
 
+    @testset "Float64x4 off-diagonal 4x2 syrk microkernel" begin
+        T = Float64x4
+        alpha = T(5) / T(9)
+        beta = -T(2) / T(11)
+        reduction = 7
+        for (columns, tile) in ((11, 4), (13, 5))
+            panel = T.(reshape(1:(reduction * columns), reduction, columns)) /
+                    T(37)
+            initial = fill(T(3) / T(7), columns, columns)
+            output = copy(initial)
+            config = EPBLAS.KernelConfig(
+                row_tile=4,
+                column_tile=tile,
+                micro_tile=2,
+            )
+            EPBLAS.syrk!(
+                output,
+                panel,
+                alpha,
+                beta,
+                config,
+                min(Threads.nthreads(), 4),
+            )
+
+            reference = copy(initial)
+            @inbounds for column in 1:columns
+                for row in column:columns
+                    accumulator = zero(T)
+                    for index in 1:reduction
+                        accumulator += panel[index, row] * panel[index, column]
+                    end
+                    reference[row, column] =
+                        alpha * accumulator + beta * reference[row, column]
+                end
+            end
+            @test all(
+                output[row, column] == reference[row, column]
+                for column in 1:columns for row in column:columns
+            )
+            @test all(
+                output[row, column] == initial[row, column]
+                for column in 1:columns for row in 1:(column - 1)
+            )
+        end
+    end
+
     @testset "owned-row Float64x4 symmetric matvec" begin
         T = Float64x4
         dimension = 71

@@ -43,6 +43,27 @@ function accumulate_v!(v::AbstractVector{T}, cons::DenseCons{T}, l::Int, M::Abst
     return v
 end
 
+@inline function _bigfloat_add_traceless_contract2!(
+    destination::BigFloat,
+    accumulator::BigFloat,
+    buffer::BigFloat,
+    diagonal_difference::BigFloat,
+    first_right::BigFloat,
+    off_diagonal_left::BigFloat,
+    second_right::BigFloat,
+)
+    MA.operate_to!(accumulator, *, diagonal_difference, first_right)
+    MA.buffered_operate!(
+        buffer,
+        MA.add_mul,
+        accumulator,
+        off_diagonal_left,
+        second_right,
+    )
+    MA.operate!(+, destination, accumulator)
+    return destination
+end
+
 """
     buildP_owned!(P, cons, l, x)
     accumulate_v_owned!(v, cons, l, M, sign)
@@ -883,10 +904,11 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
     kcholsolve!(bw.LX, bw.W2)
 
     if size(coeffs, 1) == 3
+        traceless = bw.traceless2
         @inbounds for p in eachindex(ids)
             a11 = coeffs[1, p]
             a12 = coeffs[2, p]
-            a22 = coeffs[3, p]
+            a22 = traceless ? -a11 : coeffs[3, p]
             bw.W1[1, 1] = Yl[1, 1] * a11 + Yl[1, 2] * a12
             bw.W1[2, 1] = Yl[2, 1] * a11 + Yl[2, 2] * a12
             bw.W1[1, 2] = Yl[1, 1] * a12 + Yl[1, 2] * a22
@@ -905,14 +927,26 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
         # symmetric off-diagonal sum `Vi[1,2]+Vi[2,1]` on every pair is a large
         # fraction of the work. The inner loop is now three multiply-adds over
         # contiguous columns of `coeffs`, which vectorizes.
+        traceless = bw.traceless2
         @inbounds for p in 1:na
             base = (p - 1) * kl
             v11 = bw.Ppanel[1, base+1]
             v12 = bw.Ppanel[1, base+2] + bw.Ppanel[2, base+1]
             v22 = bw.Ppanel[2, base+2]
-            @simd for r in p:na
-                bw.Svals[q+r-p+1] =
-                    v11 * coeffs[1, r] + v12 * coeffs[2, r] + v22 * coeffs[3, r]
+            if traceless
+                diagonal_difference = v11 - v22
+                @simd for r in p:na
+                    bw.Svals[q+r-p+1] =
+                        diagonal_difference * coeffs[1, r] +
+                        v12 * coeffs[2, r]
+                end
+            else
+                @simd for r in p:na
+                    bw.Svals[q+r-p+1] =
+                        v11 * coeffs[1, r] +
+                        v12 * coeffs[2, r] +
+                        v22 * coeffs[3, r]
+                end
             end
             q += na - p + 1
         end
@@ -977,10 +1011,11 @@ function sparse_schur_block_scatter!(
 
     if size(coeffs, 1) == 3
         # 2x2 blocks retain the packed hot path; their panel is tiny.
+        traceless = bw.traceless2
         @inbounds for p in eachindex(ids)
             a11 = coeffs[1, p]
             a12 = coeffs[2, p]
-            a22 = coeffs[3, p]
+            a22 = traceless ? -a11 : coeffs[3, p]
             bw.W1[1, 1] = Yl[1, 1] * a11 + Yl[1, 2] * a12
             bw.W1[2, 1] = Yl[2, 1] * a11 + Yl[2, 2] * a12
             bw.W1[1, 2] = Yl[1, 1] * a12 + Yl[1, 2] * a22
@@ -996,10 +1031,14 @@ function sparse_schur_block_scatter!(
             v11 = bw.Ppanel[1, base+1]
             v12 = bw.Ppanel[1, base+2] + bw.Ppanel[2, base+1]
             v22 = bw.Ppanel[2, base+2]
+            diagonal_difference = v11 - v22
             for r in p:na
                 variable_j = ids[r]
-                value =
-                    v11 * coeffs[1, r] + v12 * coeffs[2, r] + v22 * coeffs[3, r]
+                value = traceless ?
+                        diagonal_difference * coeffs[1, r] +
+                        v12 * coeffs[2, r] :
+                        v11 * coeffs[1, r] + v12 * coeffs[2, r] +
+                        v22 * coeffs[3, r]
                 if lower_only
                     # `schur_order` is ascending, so r ≥ p implies
                     # variable_j ≥ variable_i. Avoid min/max in this loop:
@@ -1536,6 +1575,7 @@ function _pack_reduced_arrow_block!(
     arrow.local_factor_ready[block] = false
     coefficients = cons.packed2[block]
     masks = cons.packed2_mask[block]
+    traceless = bw.traceless2
     ids = cons.schur_order[block]
     local_position = arrow.local_coefficient_position[block]
     1 <= local_position <= length(ids) || return false
@@ -1594,6 +1634,9 @@ function _pack_reduced_arrow_block!(
         v21, v22, v23 = reduced[5], reduced[6], reduced[7]
         diagonal = reduced[8]
         hb1, hb2, hb3 = reduced[9], reduced[10], reduced[11]
+        v1_difference = v11 - v13
+        v2_difference = v21 - v23
+        hb_difference = hb1 - hb3
         arrow.Dsrc[block][1, 1] = diagonal
         local_factor_ready, local_inverse =
             cache_reduced_arrow_local_factor!(
@@ -1613,7 +1656,13 @@ function _pack_reduced_arrow_block!(
             a2 = coefficients[2, position]
             a3 = coefficients[3, position]
             coupling_value = zero(T)
-            if masks[position] == 0x06
+            if traceless
+                arrow.reduced_panel[first_row, global_position] =
+                    v1_difference * a1 + v12 * a2
+                arrow.reduced_panel[second_row, global_position] =
+                    v2_difference * a1 + v22 * a2
+                coupling_value = hb_difference * a1 + hb2 * a2
+            elseif masks[position] == 0x06
                 arrow.reduced_panel[first_row, global_position] =
                     v12 * a2 + v13 * a3
                 arrow.reduced_panel[second_row, global_position] =
@@ -1747,6 +1796,7 @@ function _prepare_mixed_arrow_metric_and_locals!(
 )
     coefficients = cons.packed2[block]
     masks = cons.packed2_mask[block]
+    traceless = bw.traceless2
     ids = cons.schur_order[block]
     local_position = arrow.local_coefficient_position[block]
     1 <= local_position <= length(ids) || return false
@@ -1889,6 +1939,8 @@ function _prepare_mixed_arrow_metric_and_locals!(
         diagonal > zero(BigFloat) || return false
         MA.operate_to!(arrow.Dsrc[block][1, 1], copy, diagonal)
         coupling = arrow.coupling[block]
+        hb1_minus_hb3 = bw.trialY[1, 1]
+        traceless && MA.operate_to!(hb1_minus_hb3, -, hb1, hb3)
         for position in eachindex(ids)
             variable = ids[position]
             global_position = arrow.global_pos[variable]
@@ -1897,7 +1949,16 @@ function _prepare_mixed_arrow_metric_and_locals!(
             a2 = coefficients[2, position]
             a3 = coefficients[3, position]
             destination = coupling[1, global_position]
-            if masks[position] == 0x06
+            if traceless
+                _bigfloat_mul_add2!(
+                    destination,
+                    multiplication_buffer,
+                    hb1_minus_hb3,
+                    a1,
+                    hb2,
+                    a2,
+                )
+            elseif masks[position] == 0x06
                 _bigfloat_mul_add2!(
                     destination,
                     multiplication_buffer,
@@ -1975,6 +2036,7 @@ function _pack_native_bigfloat_reduced_arrow_block!(
 
     coefficients = constraints.packed2[block]
     masks = constraints.packed2_mask[block]
+    traceless = block_workspace.traceless2
     ids = constraints.schur_order[block]
     local_position = arrow.local_coefficient_position[block]
     metric = arrow.coefficient_metric[block]
@@ -2147,6 +2209,12 @@ function _pack_native_bigfloat_reduced_arrow_block!(
 
     first_row = 2 * block - 1
     second_row = first_row + 1
+    first_difference = block_workspace.trialY[1, 1]
+    second_difference = block_workspace.trialY[2, 1]
+    if traceless
+        MA.operate_to!(first_difference, -, v11, v13)
+        MA.operate_to!(second_difference, -, v21, v23)
+    end
     @inbounds for global_position in axes(arrow.reduced_panel, 2)
         MA.operate!(zero, arrow.reduced_panel[first_row, global_position])
         MA.operate!(zero, arrow.reduced_panel[second_row, global_position])
@@ -2161,7 +2229,24 @@ function _pack_native_bigfloat_reduced_arrow_block!(
             arrow.reduced_panel[first_row, global_position]
         second_destination =
             arrow.reduced_panel[second_row, global_position]
-        if masks[position] == 0x06
+        if traceless
+            _bigfloat_mul_add2!(
+                first_destination,
+                multiplication_buffer,
+                first_difference,
+                a1,
+                v12,
+                a2,
+            )
+            _bigfloat_mul_add2!(
+                second_destination,
+                multiplication_buffer,
+                second_difference,
+                a1,
+                v22,
+                a2,
+            )
+        elseif masks[position] == 0x06
             _bigfloat_mul_add2!(
                 first_destination,
                 multiplication_buffer,
@@ -2223,12 +2308,14 @@ end
 
 function _pack_mixed_reduced_arrow_block!(
     arrow::ArrowWorkspace,
+    block_workspace::BlockWS,
     cons::SparseCons,
     block::Int,
 )
     panel = arrow.mixed_reduced_panel
     coefficients = arrow.mixed_reduced_coefficients[block]
     masks = cons.packed2_mask[block]
+    traceless = block_workspace.traceless2
     ids = cons.schur_order[block]
     metric = arrow.coefficient_metric[block]
     M = eltype(panel)
@@ -2253,6 +2340,8 @@ function _pack_mixed_reduced_arrow_block!(
     reduced[1] || return false
     v11, v12, v13 = reduced[2], reduced[3], reduced[4]
     v21, v22, v23 = reduced[5], reduced[6], reduced[7]
+    v1_difference = v11 - v13
+    v2_difference = v21 - v23
     first_row = 2 * block - 1
     second_row = first_row + 1
     panel_zero = zero(M)
@@ -2266,7 +2355,12 @@ function _pack_mixed_reduced_arrow_block!(
         a1 = coefficients[1, position]
         a2 = coefficients[2, position]
         a3 = coefficients[3, position]
-        if masks[position] == 0x06
+        if traceless
+            panel[first_row, global_position] =
+                v1_difference * a1 + v12 * a2
+            panel[second_row, global_position] =
+                v2_difference * a1 + v22 * a2
+        elseif masks[position] == 0x06
             panel[first_row, global_position] =
                 v12 * a2 + v13 * a3
             panel[second_row, global_position] =
@@ -2314,6 +2408,7 @@ function mixed_reduced_arrow_schur_build!(
                     arrow.local_ok[block] =
                         prepared && _pack_mixed_reduced_arrow_block!(
                             arrow,
+                            ws.blk[block],
                             cons,
                             block,
                         )
@@ -2331,6 +2426,7 @@ function mixed_reduced_arrow_schur_build!(
             arrow.local_ok[block] =
                 prepared && _pack_mixed_reduced_arrow_block!(
                     arrow,
+                    ws.blk[block],
                     cons,
                     block,
                 )
@@ -2375,65 +2471,110 @@ function _materialize_mixed_arrow_shared!(
         ids = cons.schur_order[block]
         metric = arrow.coefficient_metric[block]
         scratch = ws.blk[block]
+        traceless = scratch.traceless2
         t1 = scratch.W1[1, 1]
         t2 = scratch.W1[2, 1]
         t3 = scratch.W1[1, 2]
         accumulator = scratch.trialX[1, 1]
         multiplication_buffer = scratch.trialX[2, 1]
+        diagonal_difference = scratch.trialX[1, 2]
         for left_position in eachindex(ids)
             left_global = arrow.global_pos[ids[left_position]]
             left_global == 0 && continue
             a1 = coefficients[1, left_position]
             a2 = coefficients[2, left_position]
             a3 = coefficients[3, left_position]
-            _bigfloat_add_contract3_to!(
-                t1,
-                multiplication_buffer,
-                metric[1, 1],
-                a1,
-                metric[1, 2],
-                a2,
-                metric[1, 3],
-                a3,
-            )
-            _bigfloat_add_contract3_to!(
-                t2,
-                multiplication_buffer,
-                metric[2, 1],
-                a1,
-                metric[2, 2],
-                a2,
-                metric[2, 3],
-                a3,
-            )
-            _bigfloat_add_contract3_to!(
-                t3,
-                multiplication_buffer,
-                metric[3, 1],
-                a1,
-                metric[3, 2],
-                a2,
-                metric[3, 3],
-                a3,
-            )
+            if traceless
+                MA.operate_to!(t1, -, metric[1, 1], metric[1, 3])
+                MA.operate_to!(t2, -, metric[2, 1], metric[2, 3])
+                MA.operate_to!(t3, -, metric[3, 1], metric[3, 3])
+                MA.operate!(*, t1, a1)
+                MA.operate!(*, t2, a1)
+                MA.operate!(*, t3, a1)
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    t1,
+                    metric[1, 2],
+                    a2,
+                )
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    t2,
+                    metric[2, 2],
+                    a2,
+                )
+                MA.buffered_operate!(
+                    multiplication_buffer,
+                    MA.add_mul,
+                    t3,
+                    metric[3, 2],
+                    a2,
+                )
+            else
+                _bigfloat_add_contract3_to!(
+                    t1,
+                    multiplication_buffer,
+                    metric[1, 1],
+                    a1,
+                    metric[1, 2],
+                    a2,
+                    metric[1, 3],
+                    a3,
+                )
+                _bigfloat_add_contract3_to!(
+                    t2,
+                    multiplication_buffer,
+                    metric[2, 1],
+                    a1,
+                    metric[2, 2],
+                    a2,
+                    metric[2, 3],
+                    a3,
+                )
+                _bigfloat_add_contract3_to!(
+                    t3,
+                    multiplication_buffer,
+                    metric[3, 1],
+                    a1,
+                    metric[3, 2],
+                    a2,
+                    metric[3, 3],
+                    a3,
+                )
+            end
+            traceless && MA.operate_to!(diagonal_difference, -, t1, t3)
             for right_position in left_position:length(ids)
                 right_global =
                     arrow.global_pos[ids[right_position]]
                 right_global == 0 && continue
                 row = max(left_global, right_global)
                 column = min(left_global, right_global)
-                _bigfloat_add_sparse_contract3!(
-                    arrow.Sgg[row, column],
-                    accumulator,
-                    multiplication_buffer,
-                    masks[right_position],
-                    t1,
-                    coefficients[1, right_position],
-                    t2,
-                    coefficients[2, right_position],
-                    t3,
-                    coefficients[3, right_position],
-                )
+                if traceless
+                    _bigfloat_add_traceless_contract2!(
+                        arrow.Sgg[row, column],
+                        accumulator,
+                        multiplication_buffer,
+                        diagonal_difference,
+                        coefficients[1, right_position],
+                        t2,
+                        coefficients[2, right_position],
+                    )
+                else
+                    _bigfloat_add_sparse_contract3!(
+                        arrow.Sgg[row, column],
+                        accumulator,
+                        multiplication_buffer,
+                        masks[right_position],
+                        t1,
+                        coefficients[1, right_position],
+                        t2,
+                        coefficients[2, right_position],
+                        t3,
+                        coefficients[3, right_position],
+                    )
+                end
             end
         end
     end
@@ -2557,6 +2698,7 @@ function _fused_arrow_schur_block_generic!(
     na == 0 && return Sgg
     coeffs = cons.packed2[l]
     masks = cons.packed2_mask[l]
+    traceless = bw.traceless2
 
     # X^-1 for this 2x2 block, from the cached Cholesky factor.
     fill!(bw.W2, zero(T))
@@ -2577,7 +2719,7 @@ function _fused_arrow_schur_block_generic!(
     @inbounds for p in 1:na
         a11 = coeffs[1, p]
         a12 = coeffs[2, p]
-        a22 = coeffs[3, p]
+        a22 = traceless ? -a11 : coeffs[3, p]
         # W = Y*A_p, then V = W*X^-1, then pack V into the three scalars the
         # contraction against A_r needs.
         w11 = y11 * a11 + y12 * a12
@@ -2600,15 +2742,17 @@ function _fused_arrow_schur_block_generic!(
             # iteration, and 99.3% of its masks are 0x06.  Avoiding repeated
             # high-precision `iszero` calls makes this dispatch both cheaper
             # and highly predictable.
-            value = _sparse_contract3(
-                t11,
-                t12,
-                t22,
-                c11,
-                c12,
-                c22,
-                masks[r],
-            )
+            value = traceless ?
+                    (t11 - t22) * c11 + t12 * c12 :
+                    _sparse_contract3(
+                        t11,
+                        t12,
+                        t22,
+                        c11,
+                        c12,
+                        c22,
+                        masks[r],
+                    )
             j = ids[r]
             gj = gpos[j]
             if gi > 0 && gj > 0
@@ -2797,6 +2941,7 @@ function fused_arrow_schur_block!(
     na == 0 && return Sgg
     coeffs = cons.packed2[l]
     masks = cons.packed2_mask[l]
+    traceless = bw.traceless2
     size(coeffs, 1) == 3 ||
         return _fused_arrow_schur_block_generic!(
             arrow,
@@ -2928,6 +3073,7 @@ function fused_arrow_schur_block!(
                 w22,
                 x22,
             )
+            traceless && MA.operate_to!(w22, -, t11, t22)
 
             # Y*A_p is no longer needed, so two W1 entries become the
             # contraction accumulator and its multiplication buffer.
@@ -2940,8 +3086,7 @@ function fused_arrow_schur_block!(
             for r in p:na
                 variable_j = ids[r]
                 global_j = global_position[variable_j]
-                _bigfloat_add_sparse_contract3!(
-                    global_i > 0 && global_j > 0 ?
+                destination = global_i > 0 && global_j > 0 ?
                         (
                             LOWER_GLOBAL_ONLY ?
                             Sgg[
@@ -2963,17 +3108,31 @@ function fused_arrow_schur_block!(
                         arrow.Dsrc[local_owner[variable_i]][
                             local_i,
                             local_position[variable_j],
-                        ],
-                    value,
-                    value_buffer,
-                    masks[r],
-                    t11,
-                    coeffs[1, r],
-                    t12,
-                    coeffs[2, r],
-                    t22,
-                    coeffs[3, r],
-                )
+                        ]
+                if traceless
+                    _bigfloat_add_traceless_contract2!(
+                        destination,
+                        value,
+                        value_buffer,
+                        w22,
+                        coeffs[1, r],
+                        t12,
+                        coeffs[2, r],
+                    )
+                else
+                    _bigfloat_add_sparse_contract3!(
+                        destination,
+                        value,
+                        value_buffer,
+                        masks[r],
+                        t11,
+                        coeffs[1, r],
+                        t12,
+                        coeffs[2, r],
+                        t22,
+                        coeffs[3, r],
+                    )
+                end
 
                 if !LOWER_GLOBAL_ONLY &&
                    global_i > 0 &&

@@ -203,6 +203,40 @@ function _equality_gram_crossover(
         Int128(size(panel, 2)) *
         Int128(size(panel, 2) + 1) ÷ 2
     equality_work = Int128(size(panel, 1)) * pairs
+    # A dense equality panel is already present in the block-arrow workspace,
+    # so BigFloat does not pay the sparse packing cost assumed by the generic
+    # selector.  The same disjoint MPFR output-tile kernel used by native Q3
+    # was exact on the J40 8,400 x 170 panel and scaled by 1.45x/2.96x at two
+    # and four workers.  Apply that measured crossover to the PSD2 reference as
+    # well; otherwise a repairable selector asymmetry would exaggerate the
+    # formulation-level Q3 speedup.  One-worker and small-panel paths retain
+    # pairwise accumulation, and the explicit :off control remains absolute.
+    if T === BigFloat &&
+       opts.extended_precision_blas === :auto &&
+       size(panel, 2) >= 32 &&
+       equality_work >= Int128(250_000)
+        tile = max(decision.config.column_tile, 1)
+        block_count = cld(size(panel, 2), tile)
+        jobs = block_count * (block_count + 1) ÷ 2
+        output_workers = ExtendedPrecisionBLAS._syrk_worker_count(
+            T,
+            size(panel, 1),
+            size(panel, 2),
+            jobs,
+            thread_count,
+        )
+        if output_workers > 1 && !decision.enabled
+            return ExtendedPrecisionBLAS.CrossoverDecision(
+                true,
+                :bigfloat_parallel_equality_output_tiles,
+                decision.estimated_speedup,
+                decision.packing_bytes,
+                decision.dense_cost,
+                decision.reference_cost,
+                decision.config,
+            )
+        end
+    end
     if opts.extended_precision_blas === :auto &&
        decision.enabled &&
        (
@@ -222,49 +256,64 @@ function _equality_gram_crossover(
     return decision
 end
 
-function _build_equality_gram!(
-    ws::Workspace{T},
+function _build_equality_gram_matrix!(
+    Q::AbstractMatrix{T},
+    Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
+    thread_count::Int,
 ) where {T}
     # Preserve the established Float32/Float64 path exactly, including its
     # vendor BLAS SYRK call. Do not even run the extended crossover or query
     # system memory on ordinary floating-point solves.
     if T <: Union{Float32,Float64}
-        ksyrk!(ws.Q, ws.Btil, one(T), zero(T))
-        ws.equality_gram_kernel = :blas_syrk
-        return nothing
+        ksyrk!(Q, Btil, one(T), zero(T))
+        return nothing, :blas_syrk
     end
     decision = _equality_gram_crossover(
-        ws.Btil,
+        Btil,
         opts,
-        ws.thread_count,
+        thread_count,
     )
     if decision.enabled
         selected_workers = if T === BigFloat
             ExtendedPrecisionBLAS._syrk_bigfloat_selected_workers(
-                ws.Btil,
+                Btil,
                 decision.config,
-                ws.thread_count,
+                thread_count,
             )
         else
-            ws.thread_count
+            thread_count
         end
         ExtendedPrecisionBLAS.syrk!(
-            ws.Q,
-            ws.Btil,
+            Q,
+            Btil,
             one(T),
             zero(T),
             decision.config,
-            ws.thread_count,
+            thread_count,
         )
-        ws.equality_gram_kernel =
+        label =
             selected_workers > 1 ?
             :threaded_blocked_triangular_syrk :
             :blocked_triangular_syrk
     else
-        ksyrk!(ws.Q, ws.Btil, one(T), zero(T))
-        ws.equality_gram_kernel = :pairwise_gram
+        ksyrk!(Q, Btil, one(T), zero(T))
+        label = :pairwise_gram
     end
+    return decision, label
+end
+
+function _build_equality_gram!(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+) where {T}
+    decision, label = _build_equality_gram_matrix!(
+        ws.Q,
+        ws.Btil,
+        opts,
+        ws.thread_count,
+    )
+    ws.equality_gram_kernel = label
     return decision
 end
 
@@ -526,6 +575,14 @@ function _arrow_equality_gemv!(
         throw(DimensionMismatch("BigFloat equality GEMV output mismatch"))
     size(matrix, 2) == length(vector) ||
         throw(DimensionMismatch("BigFloat equality GEMV input mismatch"))
+    # Owned solver workspaces arrive preinitialized, but keep this internal
+    # kernel robust for fresh `similar(Vector{BigFloat})` destinations too.
+    # Every newly created object belongs to one output slot before any worker
+    # starts, so the threaded phase still has exclusive MPFR ownership.
+    @inbounds for output in eachindex(destination)
+        isassigned(destination, output) ||
+            (destination[output] = BigFloat())
+    end
     workers = _bigfloat_gemv_worker_count(
         length(destination),
         length(vector),

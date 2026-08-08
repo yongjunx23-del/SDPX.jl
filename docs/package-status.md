@@ -1,6 +1,6 @@
 # Package status, design decisions, and next steps
 
-Date: 2026-08-07. Version: v0.3.1.
+Date: 2026-08-08. Version: v0.4.0 candidate.
 
 ## What "production-quality Julia package" means here, and where SDPX stands
 
@@ -8,8 +8,8 @@ Date: 2026-08-07. Version: v0.3.1.
 | --- | --- |
 | `Pkg.add(url=...)` / `Pkg.develop` install | works; verified in a clean temporary depot |
 | `using SDPX` loads without extras | yes; MultiFloats/DoubleFloats/JLD2/AppleAccelerate are weakdeps with extensions |
-| Stable small API | `solve`/`solve!`/`ingest`/`linear_program`/`solve_lp`/`SolverOptions`/`SDPResult` + MOI `Optimizer`; README labels stable-intent vs experimental |
-| JuMP/Convex/MOI | full wrapper, typed Convex helper API, packed-triangle PSD modeling by default, dedicated mapping/conversion regressions, Convex LP/SOCP/SDP tests, and `MOI.Test` coverage |
+| Stable small API | `solve`/`solve!`/`ingest`, LP and SOC constructors, `prepare`, result/options types, and MOI `Optimizer`; advanced controls moved to `SDPX.Experimental` in v0.4 |
+| JuMP/Convex/MOI | full wrapper, typed Convex helper API, packed-triangle PSD modeling by default, dedicated mapping/conversion regressions, and typed Convex LP/SOCP/SDP tests |
 | Precisions | Float64 / Float64x2 / Float64x4 / Double64 / BigFloat, one algorithm through the kernel layer |
 | Tests | examples-as-tests, acceptance gates, Aqua, and numerical regressions; the live total and pass/fail state are reported by CI rather than copied into documentation |
 | Quality gates | Aqua full pass: no piracy, no ambiguities, no unbound params, exports defined, deps/compat complete |
@@ -43,7 +43,13 @@ Date: 2026-08-07. Version: v0.3.1.
   reliably generate a ray for every infeasible model;
   `Float64` precision-floor on ill-conditioned bootstrap models (by design —
   use `Float64xN`); dense Schur/KKT fallback for non-arrow structure; serial
-  general BigFloat kernels.
+  general BigFloat kernels. Strict local fixed-trace Q3 products have a compact
+  Mehrotra/HKM backend. A Q3-specific NT direction is available as an explicit
+  research option, but its J40 solve gate was slower than HKM and it is not
+  selected automatically. Automatic selection is restricted to the validated
+  large sparse Float64x4-width gate; Float64, BigFloat, smaller products, and
+  general-dimensional SOC blocks retain the exact PSD-arrow reference unless
+  the compact backend is explicitly requested.
 
 ## Registry readiness
 
@@ -58,15 +64,16 @@ When the time comes:
 
 ## Recommended next steps, in order
 
-1. Add an HSD certificate generator behind the v0.3 certificate-validation
+1. Add an HSD certificate generator behind the certificate-validation
    boundary and compare its feasible-problem overhead before enabling it by
    default.
-2. Stop exporting the v0.3 deprecated experimental names in v0.4; keep them
-   available as qualified bindings and keep legacy camelCase names through the
-   documented 1.0 window.
-3. Continue the staged solver split by extracting initialization, iteration
+2. Implement and gate the compact general-dimensional Lorentz Newton backend;
+   retain the exact PSD-arrow route as its numerical reference and fallback.
+3. Add certificate-preserving zero-trace elimination and larger-block
+   traceless-basis reduction after dual reconstruction is specified.
+4. Continue the staged solver split by extracting initialization, iteration
    control, and pipeline orchestration from `solver/interior_point.jl`.
-4. Registry registration, once the API has had one quiet cycle.
+5. Registry registration, once the API has had one quiet cycle.
 
 ## Deployment note: test dependencies and offline environments (2026-07-28)
 

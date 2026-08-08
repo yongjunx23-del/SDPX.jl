@@ -603,11 +603,12 @@ end
 """
     EPBLAS._syrk_triangle_job!(..., ::Matrix{Float64x4}, ...)
 
-Compute up to eight independent lower-triangular Gram entries as two four-lane
-SIMD groups. Both groups reuse the same broadcast multiplier. Each lane
-accumulates reduction terms in exactly the same order as the scalar kernel, so
-this changes neither rounding nor the stored triangle. Output tiles remain
-disjoint across Julia tasks, and the hot loop allocates no memory.
+Compute eight independent lower-triangular Gram entries in an off-diagonal
+4-row x 2-column microkernel. Each reduction step loads four row values and
+two broadcast column values into two four-lane accumulators. Every lane
+accumulates reduction terms in exactly the same order as the scalar kernel,
+while diagonal tiles and all tails retain the established path. Output tiles
+remain disjoint across Julia tasks, and the hot loop allocates no memory.
 """
 function EPBLAS._syrk_triangle_job!(
     output::AbstractMatrix{Float64x4},
@@ -627,7 +628,91 @@ function EPBLAS._syrk_triangle_job!(
     column_stop = min(column_block * tile, size(panel, 2))
     reduction = size(panel, 1)
 
-    @inbounds for column in column_start:column_stop
+    if row_block > column_block
+        # Off-diagonal tiles own complete row/column rectangles. Pairing two
+        # columns keeps the row load hot while each broadcast multiplier feeds
+        # one independent accumulator; reduction indices remain ascending for
+        # bitwise-consistent MultiFloat rounding.
+        @inbounds begin
+            column = column_start
+            while column + 1 <= column_stop
+                row = row_start
+                while row + 3 <= row_stop
+                    first_accumulator = zero(Float64x4Vec4)
+                    second_accumulator = zero(Float64x4Vec4)
+                    for index in 1:reduction
+                        values = Float64x4Vec4(
+                            panel[index, row],
+                            panel[index, row + 1],
+                            panel[index, row + 2],
+                            panel[index, row + 3],
+                        )
+                        first_accumulator += values *
+                            Float64x4Vec4(panel[index, column])
+                        second_accumulator += values *
+                            Float64x4Vec4(panel[index, column + 1])
+                    end
+                    for lane in 1:4
+                        EPBLAS._store_value!(
+                            output,
+                            row + lane - 1,
+                            column,
+                            first_accumulator[lane],
+                            alpha,
+                            beta,
+                        )
+                        EPBLAS._store_value!(
+                            output,
+                            row + lane - 1,
+                            column + 1,
+                            second_accumulator[lane],
+                            alpha,
+                            beta,
+                        )
+                    end
+                    row += 4
+                end
+                # Keep the scalar reduction order for a short row tail.
+                while row <= row_stop
+                    first_accumulator = zero(Float64x4)
+                    second_accumulator = zero(Float64x4)
+                    for index in 1:reduction
+                        first_accumulator +=
+                            panel[index, row] * panel[index, column]
+                        second_accumulator +=
+                            panel[index, row] * panel[index, column + 1]
+                    end
+                    EPBLAS._store_value!(
+                        output,
+                        row,
+                        column,
+                        first_accumulator,
+                        alpha,
+                        beta,
+                    )
+                    EPBLAS._store_value!(
+                        output,
+                        row,
+                        column + 1,
+                        second_accumulator,
+                        alpha,
+                        beta,
+                    )
+                    row += 1
+                end
+                column += 2
+            end
+        end
+    end
+
+    # The diagonal tile and an odd off-diagonal column keep the established
+    # one-column implementation below. For paired off-diagonal columns only
+    # the unpaired final column reaches this path.
+    scalar_column_start = row_block > column_block ?
+                          column_start +
+                          2 * ((column_stop - column_start + 1) ÷ 2) :
+                          column_start
+    @inbounds for column in scalar_column_start:column_stop
         row = max(row_start, column)
         while row + 7 <= row_stop
             first_accumulator = zero(Float64x4Vec4)
