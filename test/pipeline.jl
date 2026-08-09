@@ -3,6 +3,7 @@ using SparseArrays
 using MathOptInterface
 using MultiFloats: Float64x4
 using SDPX
+using StableRNGs
 using Test
 
 const PIPELINE_MOI = MathOptInterface
@@ -51,9 +52,9 @@ end
     result = PIPELINE_MOI.get(optimizer, PIPELINE_MOI.RawSolver())
     @test result.status == SDPX.Optimal
     @test result.pObj ≈ 1.0 atol=1e-7
-    @test result.diagnostics.plan.algorithm == :socp_psd_lift
+    @test result.diagnostics.plan.algorithm == :socp_psd2
     @test any(
-        warning -> occursin("SOC-arrow PSD structure", warning),
+        warning -> occursin("Lorentz-compatible 2x2 structure", warning),
         result.diagnostics.warnings,
     )
     @test PIPELINE_MOI.get(
@@ -1581,6 +1582,38 @@ end
         # It scales with the shared dimension, not with m: doubling the block
         # count must not square the estimate the way the dense figure does.
         @test arrow < 16 * variables * shared * sizeof(Float64)
+
+        # The all-local equality-arrow route stores an m-by-n transformed
+        # panel and two n-by-n Gram buffers. It must return a real lower bound,
+        # not the historical zero that made memory preflight vacuous.
+        local_blocks = 4
+        local_variables = 2local_blocks
+        local_coefficients = Vector{Vector{SparseMatrixCSC{Float64,Int}}}(
+            undef,
+            local_blocks,
+        )
+        for block in 1:local_blocks
+            slots = [spzeros(2, 2) for _ in 1:local_variables]
+            first_variable = 2block - 1
+            slots[first_variable] = sparse([1, 2], [1, 2], [1.0, -1.0], 2, 2)
+            slots[first_variable + 1] = sparse([1, 2], [2, 1], [1.0, 1.0], 2, 2)
+            local_coefficients[block] = slots
+        end
+        equality_problem = SDPX.ingest(
+            ones(local_variables),
+            local_coefficients,
+            [Matrix{Float64}(-I, 2, 2) for _ in 1:local_blocks],
+            ones(local_variables, 2),
+            zeros(2);
+            sparse=true,
+            verbosity=0,
+        )
+        equality_arrow = SDPX.arrow_workspace_floor_bytes(
+            Float64,
+            equality_problem,
+            4,
+        )
+        @test equality_arrow >= local_variables * 2 * sizeof(Float64)
 
         # A problem with no arrow structure gets no arrow estimate, and the
         # caller must read 0 as "no estimate" rather than "needs nothing".

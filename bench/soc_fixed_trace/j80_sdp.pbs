@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#PBS -N sdpx_j80_sdp
+#PBS -l nodes=1:ppn=32
+#PBS -l mem=128gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+# J80 is intentionally isolated in its own allocation. The validated campaign
+# is capped at 32 workers; use a separate job for each lower thread count.
+set -euo pipefail
+: "${SDPX_SOURCE:?set SDPX_SOURCE to the isolated candidate source}"
+HERE="$SDPX_SOURCE/bench/soc_fixed_trace"
+export SDPX_CASE=J80
+export SDPX_MODE=sdp
+export SDPX_ARITHMETIC="${SDPX_ARITHMETIC:-Float64x4}"
+export SDPX_THREADS="${SDPX_THREADS:-32}"
+export SDPX_THREAD_POLICY="${SDPX_THREAD_POLICY:-exclusive}"
+export SDPX_SCALING="${SDPX_SCALING:-none}"
+exec "$HERE/run_fixed_trace.sh"

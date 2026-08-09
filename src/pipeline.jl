@@ -148,8 +148,8 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         ))
     opts.termination in (:relative, :legacy) ||
         throw(ArgumentError("termination must be :relative or :legacy"))
-    opts.algorithm in (:auto, :lp, :sdp) ||
-        throw(ArgumentError("algorithm must be :auto, :lp, or :sdp"))
+    opts.algorithm in (:auto, :lp, :socp, :sdp) ||
+        throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
     opts.scaling in (:auto, :none, :equilibrate) ||
         throw(ArgumentError(
             "scaling must be :auto, :none, or :equilibrate",
@@ -184,6 +184,12 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "extended_precision_blas must be :off, :auto, or :on",
         ))
+    opts.q3_gram_strategy in (:auto, :output_tiles, :row_bins) ||
+        throw(ArgumentError(
+            "q3_gram_strategy must be :auto, :output_tiles, or :row_bins",
+        ))
+    opts.q3_direction in (:hkm, :nt) ||
+        throw(ArgumentError("q3_direction must be :hkm or :nt"))
     isfinite(opts.extended_precision_memory_fraction) &&
         0.0 <= opts.extended_precision_memory_fraction <= 1.0 ||
         throw(ArgumentError(
@@ -234,6 +240,7 @@ function _is_soc_arrow_matrix(matrix::AbstractMatrix)
     diagonal = matrix[1, 1]
     @inbounds for index in 2:dimension
         matrix[index, index] == diagonal || return false
+        matrix[1, index] == matrix[index, 1] || return false
     end
     @inbounds for column in 2:dimension, row in 2:dimension
         row == column && continue
@@ -265,11 +272,18 @@ end
 function classify_problem(prob::SDPProblem{T}) where {T}
     L, m, n, k = prob.dims
     scalar_blocks = all(==(1), k)
-    soc_lift = !scalar_blocks &&
-               all(
-                   block -> k[block] == 1 ||
-                            _is_soc_arrow_block(prob, block),
-                   1:L,
+    # Every real symmetric 2x2 PSD cone is exactly Lorentz Q3 under
+    # (a,b,c) -> (a+c,a-c,2b). This is not limited to matrices that already
+    # happen to use the historical arrow representation.
+    psd2_product = !scalar_blocks && all(<=(2), k)
+    soc_lift = psd2_product ||
+               (
+                   !scalar_blocks &&
+                   all(
+                       block -> k[block] == 1 ||
+                                _is_soc_arrow_block(prob, block),
+                       1:L,
+                   )
                )
     cone = scalar_blocks ? :lp : soc_lift ? :socp : :sdp
     scale = max(m, n, sum(k), 1)
@@ -818,9 +832,59 @@ this policy in [`build_execution_plan`](@ref).
     parameter_strategy::Symbol,
 )
     algorithm === :lp_primal_dual && return :lp_geometric
+    # A diagonal PSD congruence generally destroys exact tracelessness. The
+    # native fixed-trace compiler performs its own per-block disk
+    # normalization and must therefore run in the verified original basis.
+    algorithm === :socp_fixed_trace_q3 && return :none
     parameter_profile === :large_lattice_dense_schur &&
         parameter_strategy === :fixed && return :none
     return :sdp_ruiz
+end
+
+# Automatic native-Q3 promotion is intentionally narrower than structural
+# eligibility.  The J40 controlled campaign is the first formulation-level
+# gate that passed all of: a 1.97x eight-worker solver speedup, sub-one-percent
+# run-to-run CV, a 9.6% one-worker improvement, identical certificates, and
+# lower same-allocation memory.  Do not extrapolate that result to Float64,
+# BigFloat, small models, or cheaper fixed-width expansions without equivalent
+# evidence.  The dimension helper keeps this measured policy independently
+# testable without constructing a multi-gigabyte benchmark in the unit suite.
+const _AUTO_Q3_MIN_BLOCKS = 4_096
+const _AUTO_Q3_MIN_VARIABLES = 8_192
+const _AUTO_Q3_MIN_EQUALITIES = 128
+const _AUTO_Q3_MIN_STORAGE_BYTES = 4 * sizeof(Float64)
+
+@inline function _auto_fixed_trace_q3_dimensions(
+    arithmetic::Symbol,
+    storage::Symbol,
+    element_storage_bytes::Int,
+    blocks::Int,
+    variables::Int,
+    equalities::Int,
+)
+    return arithmetic === :fixed_extended &&
+           storage === :sparse &&
+           element_storage_bytes >= _AUTO_Q3_MIN_STORAGE_BYTES &&
+           blocks >= _AUTO_Q3_MIN_BLOCKS &&
+           variables >= _AUTO_Q3_MIN_VARIABLES &&
+           equalities >= _AUTO_Q3_MIN_EQUALITIES
+end
+
+@inline function _auto_fixed_trace_q3_policy(
+    prob::SDPProblem{T},
+    classification::ProblemClassification,
+) where {T}
+    ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended ||
+        return false
+    L, m, n, _ = prob.dims
+    return _auto_fixed_trace_q3_dimensions(
+        classification.arithmetic,
+        classification.storage,
+        sizeof(T),
+        L,
+        m,
+        n,
+    )
 end
 
 function build_execution_plan(
@@ -833,12 +897,22 @@ function build_execution_plan(
         _reduced_arrow_decision(prob, opts, available)
     mixed_arrow_decision =
         _mixed_reduced_arrow_decision(prob, opts, available)
-    opts.algorithm in (:auto, :lp, :sdp) ||
-        throw(ArgumentError("algorithm must be :auto, :lp, or :sdp"))
+    opts.algorithm in (:auto, :lp, :socp, :sdp) ||
+        throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
+    soc_algorithm = classification.maximum_block_size <= 2 ?
+                    :socp_psd2 : :socp_psd_lift
+    native_fixed_trace_q3 =
+        opts.mode === OPTIMIZE &&
+        opts.scaling !== :equilibrate &&
+        _fixed_trace_q3_eligible(prob)
+    automatic_fixed_trace_q3 =
+        native_fixed_trace_q3 &&
+        _auto_fixed_trace_q3_policy(prob, classification)
     algorithm = if opts.algorithm === :auto
         classification.cone === :lp && opts.mode === OPTIMIZE ?
         :lp_primal_dual :
-        classification.cone === :socp ? :socp_psd_lift :
+        automatic_fixed_trace_q3 ? :socp_fixed_trace_q3 :
+        classification.cone === :socp ? soc_algorithm :
         :sdp_primal_dual
     elseif opts.algorithm === :lp
         classification.cone === :lp ||
@@ -846,8 +920,14 @@ function build_execution_plan(
         opts.mode === OPTIMIZE ||
             throw(ArgumentError("algorithm=:lp currently supports optimization mode only"))
         :lp_primal_dual
+    elseif opts.algorithm === :socp
+        classification.cone === :socp || throw(ArgumentError(
+            "algorithm=:socp requires Lorentz-compatible cone blocks",
+        ))
+        native_fixed_trace_q3 ? :socp_fixed_trace_q3 : soc_algorithm
     else
-        classification.cone === :socp ? :socp_psd_lift :
+        # `algorithm=:sdp` is the stable reference/rollback path even when
+        # the model is exactly SOC-representable.
         :sdp_primal_dual
     end
     selected = if opts.parameter_policy === :auto
@@ -904,6 +984,8 @@ function build_execution_plan(
         algorithm,
     )
     selected_threads =
+        algorithm === :socp_fixed_trace_q3 ?
+        min(requested_threads, Base.Threads.nthreads()) :
         classification.arithmetic === :bigfloat &&
         !mixed_arrow_threads &&
         !native_bigfloat_reduced &&
@@ -923,6 +1005,10 @@ function build_execution_plan(
     end
     schedule = if selected_threads == 1
         :serial
+    elseif algorithm === :socp_fixed_trace_q3
+        classification.arithmetic === :bigfloat ?
+        :owned_q3_blocks_and_gram_tiles :
+        :q3_contiguous_blocks
     elseif lp_bigfloat_thread_limit > 1
         :lp_bigfloat_panels
     elseif owned_bigfloat_arrow_equalities
@@ -936,7 +1022,9 @@ function build_execution_plan(
     else
         :blocked_dynamic
     end
-    kkt_backend = algorithm === :lp_primal_dual ?
+    kkt_backend = algorithm === :socp_fixed_trace_q3 ?
+                  :q3_block_diagonal_equality :
+                  algorithm === :lp_primal_dual ?
                   (
                       classification.equalities == 0 ?
                       :positive_definite_cholesky :
@@ -945,7 +1033,10 @@ function build_execution_plan(
                   _runtime_schur_backend(prob)
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
-    gram_kernel = if algorithm === :lp_primal_dual
+    gram_kernel = if algorithm === :socp_fixed_trace_q3
+        T <: Union{Float32,Float64} ?
+        :blas_triangular_syrk : :automatic_q3_triangular_syrk
+    elseif algorithm === :lp_primal_dual
         if T === Float64
             selected_threads > 1 &&
             classification.cone_rows * classification.variables^2 >= 2_000_000 &&
@@ -1595,18 +1686,50 @@ must read as "no estimate", never as "needs nothing".
 function arrow_workspace_floor_bytes(::Type{T}, prob::SDPProblem{T},
                                      thread_count::Integer) where {T}
     prob.cons isa SparseCons{T} || return 0
-    prob.dims.n == 0 || return 0
     m = prob.dims.m
+    n = prob.dims.n
     frequency = zeros(Int, m)
     for variables in (prob.cons::SparseCons{T}).active, variable in variables
         frequency[variable] += 1
     end
     (all(>(0), frequency) && any(==(1), frequency)) || return 0
 
+    scalar = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    if n > 0
+        # The implemented equality-arrow route is the all-local case. Its
+        # dominant storage is Btil (m x n), two equality-Gram triangles, and
+        # the independent local factors; it never allocates an m x m Schur
+        # matrix. A zero return here used to make the benchmark's mandatory
+        # memory gate approve J40/J80 as a zero-byte SDP workspace.
+        all(==(1), frequency) || return 0
+        cons = prob.cons::SparseCons{T}
+        local_squares = sum(
+            variables -> length(variables)^2,
+            cons.active;
+            init=0,
+        )
+        block_squares = sum(
+            dimension -> dimension^2,
+            prob.dims.k;
+            init=0,
+        )
+        vector_partial_count = T === BigFloat ? 1 :
+                               min(max(Int(thread_count), 1), prob.dims.L)
+        return saturating_sum_bytes(
+            saturating_bytes(scalar, m, n),
+            saturating_bytes(2, scalar, n, n),
+            saturating_bytes(2, scalar, local_squares),
+            saturating_bytes(scalar, 12m + 8n + prob.dims.L),
+            saturating_bytes(vector_partial_count, scalar, m),
+            saturating_bytes(16, scalar, block_squares),
+            WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES +
+            WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES * prob.dims.L,
+        )
+    end
+
     # Shared variables touch more than one block; local variables exactly one.
     shared = count(>(1), frequency)
     locals = m - shared
-    scalar = ExtendedPrecisionBLAS._element_storage_bytes(T)
     blocks = max(prob.dims.L, 1)
     return saturating_sum_bytes(
         # Sgg, Sred, Sredbuf: three shared-dimension matrices.
@@ -1763,7 +1886,7 @@ function _attach_diagnostics(
     # a dense LU and a BLAS Gram kernel for solves that executed neither.
     executed = get(result.termination, :executed, NamedTuple())
     selected = (
-        solver=plan.algorithm,
+        solver=get(executed, :solver, plan.algorithm),
         scaling=plan.scaling,
         kkt=get(executed, :kkt, plan.kkt_backend),
         gram=get(executed, :gram, plan.gram_kernel),
@@ -1833,6 +1956,14 @@ function _inconsistent_presolve_result(
     plan::ExecutionPlan,
     opts::SolverOptions{T},
 ) where {T}
+    # A negative fixed scalar block is exactly the dedicated LP zero-row
+    # contradiction. Preserve that established, more specific termination
+    # reason even though the generic fixed-trace stage now detects it first.
+    lp_zero_row = plan.classification.cone === :lp &&
+                  !isempty(analyze_fixed_trace(prob).infeasible_blocks)
+    termination_reason = lp_zero_row ?
+                         :lp_zero_row_infeasible :
+                         :structural_presolve_infeasibility
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     result = SDPResult{T}(
@@ -1854,7 +1985,7 @@ function _inconsistent_presolve_result(
         NamedTuple[],
         nothing,
         (
-            reason=:structural_presolve_infeasibility,
+            reason=termination_reason,
             certificate_method=:presolve_contradiction,
             certificate_generator=:analytic_presolve,
         ),

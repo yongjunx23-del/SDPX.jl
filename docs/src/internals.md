@@ -2,9 +2,8 @@
 
 These names support inspection, custom preprocessing, and solver research.
 Use them through `SDPX.Experimental`; their result layouts may change before
-1.0. Their historical top-level exports remain during the 0.3 deprecation
-cycle and are scheduled to stop being exported in 0.4. Qualified
-`SDPX.name` access remains available.
+1.0. Their historical top-level exports completed the deprecation cycle in
+0.4. Qualified `SDPX.name` access remains available for compatibility.
 
 ```@docs
 SDPX.Experimental

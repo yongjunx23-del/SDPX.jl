@@ -25,13 +25,21 @@ Performance changes must state the model, arithmetic, tolerances, hardware,
 thread configuration, warm-up, timing boundary, numerical result, and repeated
 runtime statistic. BigFloat threads may only own disjoint mutable storage.
 
-See
-[CONTRIBUTING.md](https://github.com/yongjunx23-del/SDPX.jl/blob/main/CONTRIBUTING.md)
-for the review standard and
-[THIRD_PARTY_NOTICES.md](https://github.com/yongjunx23-del/SDPX.jl/blob/main/THIRD_PARTY_NOTICES.md)
-for provenance requirements.
+See [CONTRIBUTING.md](https://github.com/yongjunx23-del/SDPX.jl/blob/main/CONTRIBUTING.md)
+for the review standard, [THIRD_PARTY_NOTICES.md](https://github.com/yongjunx23-del/SDPX.jl/blob/main/THIRD_PARTY_NOTICES.md)
+for provenance, and [WORKLOG.md](https://github.com/yongjunx23-del/SDPX.jl/blob/main/WORKLOG.md)
+for implementation and measurement history.
 
-The current high-risk work is staged in two design records:
-
-- [Optimize-mode infeasibility certificates and HSD migration](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/hsd-infeasibility-design.md)
-- [Staged solver-file decomposition](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/solve-refactor-plan.md)
+Operational references are kept as focused documents: the
+[bridge schema](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/bridge-schema.md),
+[cluster workflow](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/cluster-workflow.md),
+[Julia/MOI interface](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/julia-interface.md),
+[Convex interface](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/convex-interface.md),
+[parameters](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/parameters.md),
+[precision](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/precision.md),
+[preprocessing](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/preprocessing.md),
+[threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/threading.md),
+and [automatic pipeline](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/automatic-optimization-pipeline.md)
+guides.  The [adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md)
+and [benchmark results](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/RESULTS.md)
+record current operating evidence.

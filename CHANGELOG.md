@@ -4,7 +4,107 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] — 2026-08-09
+
+### Added
+
+- A compact `SOCConstraint`/`ConicProblem`/`ConicResult` frontend with
+  `second_order_program` and `solve_socp`. `Q3` uses the exact two-by-two PSD
+  isomorphism; other dimensions retain the general PSD-arrow reference.
+- Conservative direct and equality-implied fixed-trace analysis, including
+  negative/zero-trace classification and exact `2x2` SOC candidates.
+- An explicit compact fixed-trace Q3 Mehrotra/HKM backend for exact sparse
+  two-local-variable PSD2 cells, with ownership-safe Float64x4/BigFloat
+  scheduling, triangular equality Gram strategies, PSD2 fallback, and an
+  independent original-coordinate certificate gate.
+- A reproducible J40/J80 CSDR benchmark harness with immutable model/reduced
+  hashes, memory-only preflight, actual CPU/NUMA/resource telemetry, and strict
+  requested-versus-executed backend validation.
+- A tested direct-SOC/fixed-trace example that contrasts the stable Lorentz
+  frontend with the narrow native Q3 fast path and verifies its reconstructed
+  original-coordinate certificate.
+- `PreparedSolver` for sequential reuse of ingested constraint data and an
+  optional previous-solution warm start across a few objective directions.
+- Ownership-safe Q3 Nesterov--Todd scaling primitives and an explicit
+  `q3_direction=:nt` solve path for Float64, Float64x4, and BigFloat256. A
+  same-node J40 ABBA gate remained certificate-valid but needed 225 instead of
+  191 iterations and was 16.8% slower than HKM, so NT remains research-only
+  and HKM remains the production default.
+
+### Changed
+
+- The announced experimental-export deprecation is complete: advanced
+  inspection, preprocessing, parameter-policy, and backend controls remain
+  available as qualified `SDPX.name` bindings and under `SDPX.Experimental`,
+  but no longer enter user modules through `using SDPX`.
+- The independent docs, examples, benchmark, Convex benchmark, and CLI
+  environments now accept SDPX 0.4, so release documentation and examples can
+  resolve against this package version.
+- Sparse `2x2` solve setup caches blocks whose affine coefficients are all
+  traceless without changing the serialized model layout. Schur, fused-arrow,
+  native BigFloat reduced-panel, and mixed Float64x4 panel kernels use a
+  two-coordinate contraction and avoid redundant diagonal arithmetic.
+- MOI/Convex dimension-three SOC constraints compile directly to exact
+  two-by-two PSD blocks instead of three-by-three arrows. Same-node PBS
+  medians improved by 2.38x for Float64 and 3.17x for Float64x4 in the first
+  representation gate; the BigFloat-256 compact case was 25.9x faster and
+  certified while the old arrow stalled.
+- The fixed-trace CSDR spectral-primal smoke solve improved from 1.666 s to
+  1.060 s (1.57x) at identical 21 iterations in the first same-node A/B.
+- Native fixed-trace BigFloat Q3 equality Grams now select ownership-safe
+  output tiles when at least two workers and a conservative large-panel work
+  threshold are available. On the J40 `8,400 x 170` panel, four threads reduced
+  one Gram from 9.605 s to 3.250 s (2.96x) with an identical lower triangle.
+  Executed diagnostics include the actual Gram thread count and selector reason.
+- Automatic algorithm selection now promotes only validated large sparse
+  fixed-trace problems at least as wide as Float64x4 to native Q3. On J40,
+  three eight-worker runs reduced median solver time from 187.627 to 95.444 s
+  (1.97x, both CVs below 0.8%); a same-allocation one-worker pair was 9.6%
+  faster, with equivalent certificates and lower allocation/RSS. Float64,
+  BigFloat, smaller models, and unsupported structures keep the PSD2 default.
+  The final alternating 32-thread/BLAS-1 J40 gate gave 5.26x median solver and
+  5.14x end-to-end speedups over optimized PSD2 across six valid rows per
+  formulation, while increasing mean active cores from 7.83 to 28.73. A
+  matched BigFloat256 gate deliberately did not promote Q3: its 197.07-second
+  median was 6.5% slower than PSD2's 184.99 seconds and allocated 2.66x more,
+  despite equivalent high-precision certificates.
+- The J40/J80 benchmark harness now writes timed non-`Optimal` and invalid-
+  certificate rows before returning a nonzero exit, preserving partial phase,
+  resource, and validation diagnostics from expensive limited runs.
+- Fixed-trace benchmark rows now retain compact adaptive-history summaries for
+  centering, complementarity, affine and accepted steps, backtracking, and
+  fallback events, making iteration-count regressions directly diagnosable.
+- Native Q3 high-precision local solves cache one owned reciprocal per
+  Cholesky pivot and reuse it for the equality panel and predictor/corrector
+  solves. The Float64 path retains direct division. Adjacent-row Float64x4
+  CSDR layouts also fuse the equality-panel copy and transform; executed
+  diagnostics report both selected kernels.
+- Near-proportional equality detection is now a bounded diagnostic rather than
+  an unbounded quadratic preprocessing scan. Exact zero, duplicate,
+  proportional, and target-arithmetic rank checks are unchanged. On J80 all
+  350 equalities were retained while exact-cleanup time fell from 224.42 to
+  0.0735 seconds and total preprocessing from 224.75 to 0.395 seconds. The
+  corresponding J40 32-thread complete-solve gate improved median solver and
+  end-to-end time by 22.1% and 21.8% with identical 191-iteration objectives,
+  residuals, gaps, SOC/PSD margins, and certificates.
+- The retained Float64x4 equality-Gram kernel now updates four output rows by
+  two columns for off-diagonal tiles while preserving each output's scalar
+  accumulation order. It reduced isolated J40 Gram time by 7.2--8.4% across
+  8/16/32 workers and J80 Gram time by at least 20.9% at 32 workers, with
+  identical lower-triangle hashes. A strict full J40 solve reduced Gram time
+  by 7.9% and complete solver/end-to-end time by 4.3%/4.2% with unchanged
+  objective, 191 iterations, residuals, gap, and certificate. A four-column
+  variant was rejected after only 1.0--1.4% J40 kernel gains.
+- Fixed-trace release benchmark templates are capped at 32 Julia/solver
+  threads with BLAS fixed to one thread. J40 uses 1/2/4/8/16/32 and J80 uses
+  8/16/32; wider historical experiments are retained only as archived data.
+  The direct benchmark CLI enforces the same campaign cap, successful
+  launchers write an explicit `PASSED` marker, and site-specific Julia,
+  environment, depot, and CSDR paths are supplied through environment
+  variables instead of being embedded in the public scripts.
+- User documentation is consolidated around the Documenter manual and a
+  shorter README. Obsolete internal review, audit, and roadmap documents were
+  removed; detailed implementation history remains in `WORKLOG.md` and Git.
 
 ## [0.3.1] — 2026-08-07
 
@@ -352,8 +452,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [0.2.1] — 2026-07-27
 
 Correctness, honesty-of-reporting, and cleanup release driven by the
-2026-07-26 maintainer review (docs/maintainer-review-2026-07-26.md, which
-closes with the full implementation and deferral record).
+2026-07-26 maintainer review, whose full implementation and deferral record is
+preserved in Git history.
 
 ### Fixed
 

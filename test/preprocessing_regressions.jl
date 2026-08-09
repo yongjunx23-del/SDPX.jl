@@ -134,20 +134,56 @@ end
     end
 
     @testset "zero, duplicate, and exact proportional equalities" begin
-        problem = cleanup_problem(Float64)
-        reduced = SDPX.preprocess(
-            problem,
-            SDPX.SolverOptions{Float64}(
-                verbosity=0,
-                presolve_fixed_variables=false,
-                chordal_decomposition=:off,
-            ),
-        )
-        @test reduced.problem.dims.n == 2
-        @test reduced.report.zero_equalities_removed == 1
-        @test reduced.report.duplicate_equalities_removed == 1
-        @test reduced.report.proportional_equalities_removed == 1
-        @test !reduced.inconsistent
+        for T in (Float64, Float64x4)
+            problem = cleanup_problem(T)
+            reduced = SDPX.preprocess(
+                problem,
+                SDPX.SolverOptions{T}(
+                    verbosity=0,
+                    presolve_fixed_variables=false,
+                    chordal_decomposition=:off,
+                ),
+            )
+            @test reduced.problem.dims.n == 2
+            @test reduced.report.zero_equalities_removed == 1
+            @test reduced.report.duplicate_equalities_removed == 1
+            @test reduced.report.proportional_equalities_removed == 1
+            @test !reduced.inconsistent
+        end
+
+        setprecision(BigFloat, 192) do
+            problem = cleanup_problem(BigFloat)
+            original_B = deepcopy(problem.B)
+            original_b = deepcopy(problem.b)
+            reduced = SDPX.preprocess(
+                problem,
+                SDPX.SolverOptions{BigFloat}(
+                    verbosity=0,
+                    precision_bits=192,
+                    presolve_fixed_variables=false,
+                    chordal_decomposition=:off,
+                ),
+            )
+            @test reduced.problem.dims.n == 2
+            @test reduced.report.zero_equalities_removed == 1
+            @test reduced.report.duplicate_equalities_removed == 1
+            @test reduced.report.proportional_equalities_removed == 1
+            @test problem.B == original_B
+            @test problem.b == original_b
+            @test all(
+                isassigned(
+                    reduced.reconstruction.equality_multiplier_map,
+                    index,
+                )
+                for index in eachindex(
+                    reduced.reconstruction.equality_multiplier_map,
+                )
+            )
+            multiplier_map =
+                reduced.reconstruction.equality_multiplier_map
+            @test length(unique(objectid.(multiplier_map))) ==
+                  length(multiplier_map)
+        end
 
         inconsistent = cleanup_problem(Float64; inconsistent_zero=true)
         diagnosis = SDPX.preprocess(
@@ -176,6 +212,53 @@ end
         )
         @test reduced.report.near_duplicate_equalities >= 1
         @test 2 in reduced.reconstruction.reduced_to_original_equalities
+    end
+
+    @testset "large near-duplicate diagnostics have bounded work" begin
+        variables = 16
+        equalities = 20
+        coefficients = [[
+            sparse([1], [1], [1.0], 1, 1)
+            for _ in 1:variables
+        ]]
+        B = Matrix{Float64}(undef, variables, equalities)
+        @inbounds for equality in 1:equalities, variable in 1:variables
+            B[variable, equality] =
+                variable + equality / (variable + equality + 1)
+        end
+        b = collect(Float64, 1:equalities)
+        B[:, equalities - 1] .= B[:, 1]
+        b[equalities - 1] = b[1]
+        B[:, equalities] .= 2 .* B[:, 2]
+        b[equalities] = 2 * b[2]
+        problem = SDPX.ingest(
+            ones(variables),
+            coefficients,
+            [zeros(1, 1)],
+            B,
+            b;
+            sparse=true,
+            verbosity=0,
+        )
+        reduced = SDPX.preprocess(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                verbosity=0,
+                presolve_fixed_variables=false,
+                chordal_decomposition=:off,
+            ),
+        )
+        @test reduced.problem.dims.n == equalities - 2
+        @test reduced.report.duplicate_equalities_removed == 1
+        @test reduced.report.proportional_equalities_removed == 1
+        @test reduced.report.near_duplicate_equalities == 0
+        @test any(
+            warning -> occursin(
+                "Near-proportional equality diagnostics were skipped",
+                warning,
+            ),
+            reduced.report.warnings,
+        )
     end
 
     @testset "disabled stages leave the problem unchanged" begin

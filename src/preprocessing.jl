@@ -20,6 +20,12 @@ struct ChordalAnalysisStage <: AbstractPreprocessStage end
 const _BOUND_LOWER = UInt8(0x01)
 const _BOUND_UPPER = UInt8(0x02)
 
+# Near-proportional equalities are diagnostics only: they never alter the
+# model or reconstruction map.  Bound their aggregate scan cost relative to
+# one pass over the retained equality matrix so a dense high-precision model
+# cannot spend O(m*n^2) time on a non-transforming report.
+const _NEAR_EQUALITY_DIAGNOSTIC_MAX_MATRIX_PASSES = 8
+
 """One scalar PSD block certified to contain a single variable bound."""
 struct BoundCandidate{T}
     block::Int
@@ -829,19 +835,73 @@ function _proportional_equality_columns(
     )
 end
 
-function _equality_pattern_hash(prob::SDPProblem, equality::Int)
+function _equality_pattern_summary(prob::SDPProblem, equality::Int)
     value = hash(:sdpx_equality_pattern)
     if prob.B isa SparseMatrixCSC
         rows = rowvals(prob.B)
+        count = 0
         @inbounds for stored in nzrange(prob.B, equality)
             value = hash(rows[stored], value)
+            count += 1
         end
-        return value
+        return (
+            signature=value,
+            nonzeros=count,
+            comparison_length=count,
+        )
     end
+    count = 0
     @inbounds for row in axes(prob.B, 1)
-        iszero(prob.B[row, equality]) || (value = hash(row, value))
+        if !iszero(prob.B[row, equality])
+            value = hash(row, value)
+            count += 1
+        end
     end
-    return value
+    return (
+        signature=value,
+        nonzeros=count,
+        # The dense near-proportional diagnostic first locates its pivot and
+        # then scans the full column. Charge two passes in the fail-closed
+        # work estimate.
+        comparison_length=
+            size(prob.B, 1) > typemax(Int) ÷ 2 ?
+            typemax(Int) : 2 * size(prob.B, 1),
+    )
+end
+
+_equality_pattern_hash(prob::SDPProblem, equality::Int) =
+    _equality_pattern_summary(prob, equality).signature
+
+@inline function _saturating_u128_add(left::UInt128, right::UInt128)
+    return right > typemax(UInt128) - left ? typemax(UInt128) : left + right
+end
+
+@inline function _saturating_u128_mul(left::UInt128, right::UInt128)
+    (iszero(left) || iszero(right)) && return UInt128(0)
+    return left > typemax(UInt128) ÷ right ?
+           typemax(UInt128) : left * right
+end
+
+function _near_equality_diagnostic_work(
+    pattern_buckets::Dict{UInt,Vector{Int}},
+    comparison_lengths::Vector{Int},
+)
+    work = UInt128(0)
+    for bucket in values(pattern_buckets)
+        length(bucket) >= 2 || continue
+        largest = maximum(
+            equality -> comparison_lengths[equality],
+            bucket;
+            init=0,
+        )
+        count = UInt128(length(bucket))
+        comparisons =
+            _saturating_u128_mul(count, count - UInt128(1)) ÷ UInt128(2)
+        bucket_work =
+            _saturating_u128_mul(comparisons, UInt128(largest))
+        work = _saturating_u128_add(work, bucket_work)
+    end
+    return work
 end
 
 function _near_proportional_equality_columns(
@@ -868,22 +928,30 @@ function _near_proportional_equality_columns(
             rows[left] == rows[right] || return false
             first_value = values[left]
             second_value = values[right]
+            scaled_first = scale * first_value
+            isfinite(first_value) && isfinite(second_value) &&
+                isfinite(scaled_first) || return false
             lhs_residual = max(
                 lhs_residual,
-                abs(second_value - scale * first_value),
+                abs(second_value - scaled_first),
             )
             lhs_scale = max(
                 lhs_scale,
                 abs(second_value),
-                abs(scale * first_value),
+                abs(scaled_first),
             )
+            isfinite(lhs_residual) && isfinite(lhs_scale) || return false
         end
-        rhs_residual = abs(prob.b[second] - scale * prob.b[first])
+        scaled_rhs = scale * prob.b[first]
+        isfinite(prob.b[first]) && isfinite(prob.b[second]) &&
+            isfinite(scaled_rhs) || return false
+        rhs_residual = abs(prob.b[second] - scaled_rhs)
         rhs_scale = max(
             one(T),
             abs(prob.b[second]),
-            abs(scale * prob.b[first]),
+            abs(scaled_rhs),
         )
+        isfinite(rhs_residual) && isfinite(rhs_scale) || return false
         threshold =
             sqrt(eps(T)) * T(max(prob.dims.m, prob.dims.n, 1))
         return lhs_residual <= threshold * lhs_scale &&
@@ -902,22 +970,30 @@ function _near_proportional_equality_columns(
     @inbounds for row in axes(prob.B, 1)
         first_value = prob.B[row, first]
         second_value = prob.B[row, second]
+        scaled_first = scale * first_value
+        isfinite(first_value) && isfinite(second_value) &&
+            isfinite(scaled_first) || return false
         lhs_residual = max(
             lhs_residual,
-            abs(second_value - scale * first_value),
+            abs(second_value - scaled_first),
         )
         lhs_scale = max(
             lhs_scale,
             abs(second_value),
-            abs(scale * first_value),
+            abs(scaled_first),
         )
+        isfinite(lhs_residual) && isfinite(lhs_scale) || return false
     end
-    rhs_residual = abs(prob.b[second] - scale * prob.b[first])
+    scaled_rhs = scale * prob.b[first]
+    isfinite(prob.b[first]) && isfinite(prob.b[second]) &&
+        isfinite(scaled_rhs) || return false
+    rhs_residual = abs(prob.b[second] - scaled_rhs)
     rhs_scale = max(
         one(T),
         abs(prob.b[second]),
-        abs(scale * prob.b[first]),
+        abs(scaled_rhs),
     )
+    isfinite(rhs_residual) && isfinite(rhs_scale) || return false
     threshold =
         sqrt(eps(T)) * T(max(prob.dims.m, prob.dims.n, 1))
     return lhs_residual <= threshold * lhs_scale &&
@@ -941,10 +1017,24 @@ function analyze(
     warnings = String[]
     representative = zeros(Int, n)
     representative_scale = alloc_zeros(eltype(prob), n)
+    pattern_signatures = Vector{UInt}(undef, n)
+    pattern_nonzeros = zeros(Int, n)
+    comparison_lengths = zeros(Int, n)
+
+    if opts.presolve_duplicate_constraints
+        @inbounds for equality in 1:n
+            summary = _equality_pattern_summary(prob, equality)
+            pattern_signatures[equality] = summary.signature
+            pattern_nonzeros[equality] = summary.nonzeros
+            comparison_lengths[equality] = summary.comparison_length
+        end
+    end
 
     if opts.presolve_zero_constraints
         @inbounds for equality in 1:n
-            all_zero = if prob.B isa SparseMatrixCSC
+            all_zero = if opts.presolve_duplicate_constraints
+                iszero(pattern_nonzeros[equality])
+            elseif prob.B isa SparseMatrixCSC
                 isempty(nzrange(prob.B, equality))
             else
                 value = true
@@ -972,7 +1062,7 @@ function analyze(
             keep[equality] || continue
             signature = hash(
                 prob.b[equality],
-                _equality_pattern_hash(prob, equality),
+                pattern_signatures[equality],
             )
             bucket = get!(buckets, signature, Int[])
             duplicate = findfirst(
@@ -996,7 +1086,7 @@ function analyze(
         pattern_buckets = Dict{UInt,Vector{Int}}()
         @inbounds for equality in 1:n
             keep[equality] || continue
-            signature = _equality_pattern_hash(prob, equality)
+            signature = pattern_signatures[equality]
             bucket = get!(pattern_buckets, signature, Int[])
             removed = false
             for candidate in bucket
@@ -1022,21 +1112,55 @@ function analyze(
 
         # Approximate relations are diagnostics only. Restrict comparisons to
         # equal structural patterns, use the original arithmetic, and never
-        # feed this count back into the keep mask.
-        near_buckets = Dict{UInt,Vector{Int}}()
-        @inbounds for equality in 1:n
-            keep[equality] || continue
-            signature = _equality_pattern_hash(prob, equality)
-            bucket = get!(near_buckets, signature, Int[])
-            any(
-                candidate -> _near_proportional_equality_columns(
-                    prob,
-                    candidate,
-                    equality,
-                ),
-                bucket,
-            ) && (near_duplicates += 1)
-            push!(bucket, equality)
+        # feed this count back into the keep mask. Reuse the exact-cleanup
+        # buckets and bound the diagnostic to a fixed number of equivalent
+        # equality-matrix passes. Large dense CSDR matrices otherwise turn
+        # this non-transforming report into an O(m*n^2) preprocessing phase.
+        near_work = _near_equality_diagnostic_work(
+            pattern_buckets,
+            comparison_lengths,
+        )
+        retained_equalities = sum(length, values(pattern_buckets); init=0)
+        retained_matrix_work = if prob.B isa SparseMatrixCSC
+            sum(
+                equality -> UInt128(comparison_lengths[equality]),
+                Iterators.flatten(values(pattern_buckets));
+                init=UInt128(0),
+            )
+        else
+            _saturating_u128_mul(
+                UInt128(size(prob.B, 1)),
+                UInt128(retained_equalities),
+            )
+        end
+        near_budget = _saturating_u128_mul(
+            UInt128(_NEAR_EQUALITY_DIAGNOSTIC_MAX_MATRIX_PASSES),
+            max(retained_matrix_work, UInt128(1)),
+        )
+        if near_work <= near_budget
+            for bucket in values(pattern_buckets)
+                @inbounds for position in 2:length(bucket)
+                    equality = bucket[position]
+                    any(
+                        candidate -> _near_proportional_equality_columns(
+                            prob,
+                            candidate,
+                            equality,
+                        ),
+                        @view(bucket[1:(position - 1)]),
+                    ) && (near_duplicates += 1)
+                end
+            end
+        else
+            push!(
+                warnings,
+                "Near-proportional equality diagnostics were skipped after " *
+                "the collision-safe work estimate exceeded " *
+                "$(_NEAR_EQUALITY_DIAGNOSTIC_MAX_MATRIX_PASSES) complete " *
+                "matrix passes (estimated entries $near_work, budget " *
+                "$near_budget). Exact zero, duplicate, and proportional " *
+                "cleanup remained enabled.",
+            )
         end
     end
 
@@ -1497,6 +1621,38 @@ function preprocess(
     )
     append!(warnings, cleanup_plan.warnings)
 
+    fixed_trace_started = time()
+    fixed_trace_allocated = _gc_bytes()
+    fixed_trace_analysis = analyze_fixed_trace(context.problem)
+    fixed_trace_size = _preprocess_size(context.problem)
+    fixed_trace_reason = if !isempty(fixed_trace_analysis.infeasible_blocks)
+        "Negative fixed trace proves PSD infeasibility in blocks " *
+        string(fixed_trace_analysis.infeasible_blocks) * "."
+    elseif fixed_trace_analysis.fixed_blocks == 0
+        "No direct or equality-implied fixed PSD-block trace was verified."
+    else
+        "Verified $(fixed_trace_analysis.fixed_blocks) fixed-trace blocks: " *
+        "$(fixed_trace_analysis.soc_blocks) exact 2x2 SOC candidates, " *
+        "$(fixed_trace_analysis.traceless_sdp_blocks) larger traceless-SDP " *
+        "candidates, and $(fixed_trace_analysis.zero_blocks) zero-trace blocks."
+    end
+    push!(
+        stages,
+        _stage_report(
+            :fixed_trace_analysis,
+            true,
+            false,
+            fixed_trace_reason,
+            fixed_trace_size,
+            fixed_trace_size,
+            time() - fixed_trace_started,
+            max(_gc_bytes() - fixed_trace_allocated, 0),
+        ),
+    )
+    if !isempty(fixed_trace_analysis.infeasible_blocks)
+        push!(warnings, fixed_trace_reason)
+    end
+
     scaling_size = _preprocess_size(context.problem)
     push!(
         stages,
@@ -1552,7 +1708,8 @@ function preprocess(
 
     inconsistent =
         bound_plan.inconsistent_intervals > 0 ||
-        cleanup_plan.inconsistent
+        cleanup_plan.inconsistent ||
+        !isempty(fixed_trace_analysis.infeasible_blocks)
     output_size = _preprocess_size(context.problem)
     changed =
         input_size.variables != output_size.variables ||

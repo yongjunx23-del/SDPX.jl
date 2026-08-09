@@ -135,7 +135,7 @@ end
     @test all(
         field -> getfield(compact_problem.structure, field) ==
                  getfield(expanded_problem.structure, field),
-        fieldnames(StructureAnalysis),
+        fieldnames(SDPX.StructureAnalysis),
     )
 
     input = collect(range(-1.0, 1.0; length=variables))

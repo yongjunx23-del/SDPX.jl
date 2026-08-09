@@ -87,6 +87,20 @@ The adaptive SDP path now uses the same canonical sequence:
 and `Omega_d` from problem structure. It runs before the iteration-level
 policy. `parameter_policy=:fixed` preserves user values exactly.
 
+The native fixed-trace Q3 backend is presently a documented exception. It has
+its own compact Mehrotra affine-ratio `sigma` rule and exact Q3 boundary step;
+the general `AdaptiveIPMController`, including `adaptive_sigma_max`, controls
+the SDP and dedicated LP paths but is not yet wired into Q3. Q3 still records
+its actual `sigma`, complementarity, affine steps, and accepted steps in
+`result.parameter_history`; in that backend the compatibility fields `beta`
+and `gamma` alias the locally selected `sigma` and the fixed 0.99 boundary
+safety, not the ignored `SolverOptions.beta` and `SolverOptions.gamma` values.
+`result.termination.executed.parameter_controller` identifies this policy
+explicitly. Fixed trace also makes the native primal cone head exact, so Q3
+does not use `OmegaP`; `OmegaD` remains its dual cold-start scale. Cluster
+history sweeps, rather than the option label alone, gate any future unification
+of these controllers.
+
 ## Existing numerical safeguards
 
 - Dense and reduced-arrow Schur factors first try an unregularized Cholesky.

@@ -19,9 +19,10 @@ The pipeline performs:
 
 Pure `1x1` cone models are solved by a dedicated scalar Mehrotra
 predictor-corrector LP engine. Standard scalar inequalities supplied through
-JuMP/MOI are converted directly to that representation. SOC constraints are
-recognized and currently use an exact PSD arrow lift. General PSD blocks use
-the existing SDP engine, so its Float64 numerical path is unchanged.
+JuMP/MOI are converted directly to that representation. General SOC constraints
+use an exact PSD arrow lift. Exactly certified local fixed-trace PSD2 cells can
+instead use the native compact Q3 backend described below. General PSD blocks
+use the existing SDP engine, so its Float64 numerical path is unchanged.
 
 ## Presolve
 
@@ -321,8 +322,12 @@ provide a generic symmetric eigensolver for every scalar type.
 3. LP panel GEMM computes full output panels. A lower-triangle-only blocked
    BLAS-3 kernel would reduce arithmetic further while retaining multicore
    scaling.
-4. The native SOCP path currently uses an exact PSD lift. A dedicated
-   Nesterov-Todd SOC scaling kernel would reduce memory and factorization work.
+4. Strict local fixed-trace Q3 products have a compact Mehrotra/HKM backend.
+   A Q3-specific Nesterov--Todd direction exists as the explicit research
+   option `q3_direction=:nt`, but J40 solve-level gates were slower than HKM,
+   so it is not selected automatically. General-dimensional SOCP paths retain
+   the exact PSD lift, and a general-dimensional native NT backend remains
+   future work.
 5. Presolve currently removes equality dependence and scalar-row redundancy;
    bound propagation, singleton substitution, coefficient strengthening, and
    chordal SDP decomposition remain future work.

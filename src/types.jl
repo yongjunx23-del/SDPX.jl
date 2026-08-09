@@ -287,6 +287,15 @@ Base.@kwdef struct SolverOptions{T}
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
+    # Expert selector for the native fixed-trace Q3 equality Gram. Output-tile
+    # ownership uses no replicated Gram storage; row bins keep a packed lower
+    # triangle per worker and trade bounded memory for better cache/NUMA reuse.
+    q3_gram_strategy::Symbol = :auto                    # :auto | :output_tiles | :row_bins
+    # Search-direction scaling for the compact fixed-trace Q3 backend.  HKM is
+    # the established reference path; NT is the symmetric Lorentz-cone
+    # Nesterov--Todd direction.  NT remains an explicit opt-in until the J40
+    # and J80 certificate/performance gates have both passed.
+    q3_direction::Symbol = :hkm                         # :hkm | :nt
     # Opt-in extended-precision KKT acceleration. The Schur complement is
     # factored in Float64, while residuals and accepted directions remain in
     # the requested BigFloat or fixed-width extended arithmetic.
@@ -299,7 +308,7 @@ Base.@kwdef struct SolverOptions{T}
         default_mixed_precision_condition_limit(T)
     mixed_precision_refine_max_steps::Int = 32
     mixed_precision_memory_fraction::Float64 = 0.10
-    algorithm::Symbol         = :auto                   # :auto | :lp | :sdp
+    algorithm::Symbol         = :auto                   # :auto | :lp | :socp | :sdp
     presolve::Union{Bool,Symbol} = :auto                 # false/:off | true/:on | :auto
     presolve_bounds::Bool     = true                    # merge exact scalar variable bounds
     presolve_fixed_variables::Bool = true               # eliminate only exactly fixed variables
@@ -651,7 +660,9 @@ For `2x2` blocks, `packed2[l]` stores the `(1,1)`, `(1,2)`, and `(2,2)`
 entries as a `3 x |active[l]|` hot-path panel. `packed2_mask[l]` stores the
 corresponding three-bit structural-nonzero mask, so high-precision Schur
 contractions do not repeatedly call `iszero` in their quadratic active-pair
-loop. For other block sizes, `coo[l]` holds the same coefficients in
+loop. Constant-trace metadata is derived into the transient block workspace
+at solve setup, preserving the serialized `SparseCons` layout. For other block
+sizes, `coo[l]` holds the same coefficients in
 [`SparseBlockCOO`](@ref) flat form, which is what the Schur pair loop actually
 reads.
 """
@@ -811,10 +822,9 @@ const CHECKPOINT_FORMAT_VERSION = 1
 
 Immutable structural description used by the automatic solve pipeline. A
 model containing only `1×1` PSD blocks is an LP in SDPX's geometric form.
-An exact PSD-arrow representation of a second-order cone is classified as
-`cone=:socp` and dispatched as `:socp_psd_lift`. This is a structural
-recognition only: the current implementation still solves the semidefinite
-lift, because a native SOCP scaling and Newton system are not implemented.
+Lorentz-compatible blocks are classified as `cone=:socp`. Blocks of side at
+most two use the exact `Q3 <-> S_+^2` isomorphism and specialized scalar
+kernels; larger arrow representations retain the semidefinite-lift fallback.
 Other larger PSD blocks are classified and solved as SDP.
 """
 struct ProblemClassification

@@ -240,7 +240,9 @@ julia -t 4
   the finalized SDPX representation to be rebuilt.
 - At least one scalar, SOC, or PSD cone constraint is required.
 - Rotated SOC and other nonsymmetric cones still rely on MOI bridges or future
-  native support. SOC constraints currently use an exact PSD arrow lift.
+  native support. General SOC constraints use an exact PSD arrow lift. Strict
+  local fixed-trace Q3 products may use the compact backend when explicitly
+  requested with `algorithm=:socp`.
 - Sparse and dense coefficient storage both support internal equilibration.
   Sparse derived caches are rebuilt after scaling.
 - LP unboundedness and general conic infeasibility certificates are not yet

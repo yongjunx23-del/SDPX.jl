@@ -36,8 +36,8 @@ PSD matrix or sparse Schur factor.
 1. **Automatic structure analysis**
 
    Ingestion measures coefficient, incidence, aggregate block-pattern, and
-   Schur-pattern density. `structure_summary(problem)` exposes the selected
-   plan. The user may still force `:sparse` or `:dense`.
+   Schur-pattern density. `SDPX.Experimental.structure_summary(problem)`
+   exposes the selected plan. The user may still force `:sparse` or `:dense`.
 
 2. **Sparse-native Julia and MOI ingestion**
 

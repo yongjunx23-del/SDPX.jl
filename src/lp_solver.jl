@@ -2328,6 +2328,7 @@ function solve_lp!(
             # it -- and diagnostics built from the plan reported a dense LU
             # and a BLAS Gram kernel for solves that executed neither.
             executed=(
+                solver=:lp_primal_dual,
                 kkt=workspace.standard_system !== nothing ?
                     :diagonal_reduced_cholesky :
                     workspace.sparse_system === nothing ?

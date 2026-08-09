@@ -2,10 +2,9 @@
     SDPX.Experimental
 
 Namespaced access to advanced inspection, preprocessing, parameter-policy, and
-backend controls. In SDPX 0.3 these bindings are aliases of their historical
-top-level definitions. The top-level exports remain available for one
-deprecation cycle and are scheduled to stop being exported in SDPX 0.4; their
-qualified `SDPX.name` bindings remain available throughout the pre-1.0 line.
+backend controls. SDPX 0.4 completed the announced export deprecation: these
+bindings remain available as `SDPX.Experimental.name` and qualified
+`SDPX.name`, but `using SDPX` no longer imports them into user modules.
 
 Depending on this namespace makes advanced usage explicit and keeps future
 `using SDPX` sessions focused on the small solver interface.
@@ -48,6 +47,9 @@ const preprocess = SDPX.preprocess
 const classify_problem = SDPX.classify_problem
 const build_execution_plan = SDPX.build_execution_plan
 const SpectrumResult = SDPX.SpectrumResult
+const FixedTraceBlock = SDPX.FixedTraceBlock
+const FixedTraceAnalysis = SDPX.FixedTraceAnalysis
+const analyze_fixed_trace = SDPX.analyze_fixed_trace
 
 const blas_backend = SDPX.blas_backend
 const blas_threads = SDPX.blas_threads
@@ -65,6 +67,7 @@ export PreprocessedProblem, BoundExtractionStage
 export FixedVariableEliminationStage, StructuralCleanupStage
 export FormulationAnalysisStage, ChordalAnalysisStage, preprocess
 export classify_problem, build_execution_plan, SpectrumResult
+export FixedTraceBlock, FixedTraceAnalysis, analyze_fixed_trace
 export blas_backend, blas_threads, set_blas_threads!
 
 end
@@ -75,6 +78,13 @@ const _STABLE_TOP_LEVEL_EXPORTS = (
     :ingest,
     :linear_program,
     :solve_lp,
+    :SOCConstraint,
+    :ConicProblem,
+    :ConicResult,
+    :second_order_program,
+    :solve_socp,
+    :PreparedSolver,
+    :prepare,
     :SDPProblem,
     :SolverOptions,
     :SDPResult,
@@ -102,41 +112,7 @@ const _LEGACY_TOP_LEVEL_EXPORTS = (
     :setMode,
 )
 
-const _DEPRECATED_EXPERIMENTAL_EXPORTS = (
-    :recommended_parameters,
-    :StructureAnalysis,
-    :analyze_structure,
-    :structure_summary,
-    :AbstractParameterPolicy,
-    :FixedParameterPolicy,
-    :AdaptiveParameterPolicy,
-    :IterationDiagnostics,
-    :IterationParameters,
-    :select_parameters,
-    :ProblemClassification,
-    :PresolveReport,
-    :ExecutionPlan,
-    :SolveDiagnostics,
-    :AbstractPreprocessStage,
-    :PreprocessContext,
-    :PreprocessPlan,
-    :PreprocessReport,
-    :PreprocessStageReport,
-    :ReconstructionMap,
-    :PreprocessedProblem,
-    :BoundExtractionStage,
-    :FixedVariableEliminationStage,
-    :StructuralCleanupStage,
-    :FormulationAnalysisStage,
-    :ChordalAnalysisStage,
-    :preprocess,
-    :classify_problem,
-    :build_execution_plan,
-    :SpectrumResult,
-    :blas_backend,
-    :blas_threads,
-    :set_blas_threads!,
-)
+const _DEPRECATED_EXPERIMENTAL_EXPORTS = ()
 
 """
     SDPX.api_surface()

@@ -11,6 +11,13 @@ solve!
 ingest
 linear_program
 solve_lp
+SOCConstraint
+ConicProblem
+ConicResult
+second_order_program
+solve_socp
+PreparedSolver
+prepare
 SolverOptions
 SDPResult
 SolveStatus
@@ -21,7 +28,7 @@ SolveStatus
 ```@docs
 solve_summary
 result_certificate
-recommended_parameters
+SDPX.Experimental.recommended_parameters
 ```
 
 The optimize-mode ray diagnostic is intentionally outside the stable-intent
@@ -42,8 +49,11 @@ Additional introspection entry points live under `SDPX.Experimental`
 `SDPX.Experimental.analyze_structure` report the detected problem structure,
 `SDPX.Experimental.classify_problem` the cone/storage classification, and
 `SDPX.Experimental.build_execution_plan` the pre-solve execution plan.
-The historical top-level exports are deprecated in 0.3 and scheduled to stop
-being exported in 0.4.
+`SDPX.Experimental.analyze_fixed_trace` conservatively detects direct and
+equality-implied constant-trace PSD blocks.
+The historical top-level experimental exports completed their deprecation
+cycle in 0.4. Qualified `SDPX.name` bindings remain available, while new code
+should use `SDPX.Experimental.name`.
 
 ## Spectrum helpers
 

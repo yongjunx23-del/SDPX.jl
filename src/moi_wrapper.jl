@@ -42,7 +42,11 @@ end
 struct MOISOCConstraintInfo <: AbstractMOIConstraintInfo
     block::Int
     dimension::Int
+    representation::Symbol
 end
+
+MOISOCConstraintInfo(block::Int, dimension::Int) =
+    MOISOCConstraintInfo(block, dimension, :arrow)
 
 """
     Optimizer{T}(; kwargs...)
@@ -607,16 +611,25 @@ function _append_soc_constraint!(
         throw(DimensionMismatch("SOC function dimension does not match its set"))
     constants = function_value isa MOI.VectorAffineFunction{T} ?
                 function_value.constants : zeros(T, dimension)
-    block_constant = zeros(T, dimension, dimension)
-    block_constant[1, 1] = constants[1]
-    @inbounds for index in 2:dimension
-        block_constant[index, index] = constants[1]
-        block_constant[1, index] = constants[index]
-        block_constant[index, 1] = constants[index]
+    representation = dimension == 3 ? :psd2_isomorphism : :arrow
+    side = representation === :psd2_isomorphism ? 2 : dimension
+    block_constant = zeros(T, side, side)
+    if representation === :psd2_isomorphism
+        block_constant[1, 1] = constants[1] + constants[2]
+        block_constant[2, 2] = constants[1] - constants[2]
+        block_constant[1, 2] = constants[3]
+        block_constant[2, 1] = constants[3]
+    else
+        block_constant[1, 1] = constants[1]
+        @inbounds for index in 2:dimension
+            block_constant[index, index] = constants[1]
+            block_constant[1, index] = constants[index]
+            block_constant[index, 1] = constants[index]
+        end
     end
     coefficient_blocks = Dict{Int,Matrix{T}}()
     coefficient_block(variable) = get!(coefficient_blocks, variable) do
-        alloc_zeros(T, dimension, dimension)
+        alloc_zeros(T, side, side)
     end
     if function_value isa MOI.VectorAffineFunction{T}
         for term in function_value.terms
@@ -624,7 +637,18 @@ function _append_soc_constraint!(
             variable = index_map[term.scalar_term.variable].value
             coefficient = term.scalar_term.coefficient
             matrix = coefficient_block(variable)
-            if output == 1
+            if representation === :psd2_isomorphism
+                if output == 1
+                    matrix[1, 1] += coefficient
+                    matrix[2, 2] += coefficient
+                elseif output == 2
+                    matrix[1, 1] += coefficient
+                    matrix[2, 2] -= coefficient
+                else
+                    matrix[1, 2] += coefficient
+                    matrix[2, 1] += coefficient
+                end
+            elseif output == 1
                 @inbounds for index in 1:dimension
                     matrix[index, index] += coefficient
                 end
@@ -637,7 +661,18 @@ function _append_soc_constraint!(
         for (output, variable_index) in pairs(function_value.variables)
             variable = index_map[variable_index].value
             matrix = coefficient_block(variable)
-            if output == 1
+            if representation === :psd2_isomorphism
+                if output == 1
+                    matrix[1, 1] += one(T)
+                    matrix[2, 2] += one(T)
+                elseif output == 2
+                    matrix[1, 1] += one(T)
+                    matrix[2, 2] -= one(T)
+                else
+                    matrix[1, 2] += one(T)
+                    matrix[2, 1] += one(T)
+                end
+            elseif output == 1
                 @inbounds for index in 1:dimension
                     matrix[index, index] += one(T)
                 end
@@ -649,7 +684,7 @@ function _append_soc_constraint!(
     end
     block_A = _empty_coefficient_vector(
         empty_cache,
-        dimension,
+        side,
         optimizer.num_variables,
     )
     for (variable, coefficient_block) in coefficient_blocks
@@ -665,7 +700,7 @@ function _append_soc_constraint!(
         _new_constraint_index!(counts, F, MOI.SecondOrderCone)
     index_map[source_index] = destination_index
     optimizer.constraint_info[destination_index] =
-        MOISOCConstraintInfo(length(A), dimension)
+        MOISOCConstraintInfo(length(A), dimension, representation)
     return nothing
 end
 
@@ -1034,6 +1069,14 @@ function MOI.get(
     end
     if info isa MOISOCConstraintInfo
         matrix = result.X[info.block]
+        if info.representation === :psd2_isomorphism
+            two = one(eltype(matrix)) + one(eltype(matrix))
+            return [
+                (matrix[1, 1] + matrix[2, 2]) / two,
+                (matrix[1, 1] - matrix[2, 2]) / two,
+                (matrix[1, 2] + matrix[2, 1]) / two,
+            ]
+        end
         return vcat(matrix[1, 1], Vector(view(matrix, 2:info.dimension, 1)))
     end
     equality = info::MOIEqualityConstraintInfo
@@ -1060,6 +1103,13 @@ function MOI.get(
     end
     if info isa MOISOCConstraintInfo
         matrix = result.Y[info.block]
+        if info.representation === :psd2_isomorphism
+            return [
+                matrix[1, 1] + matrix[2, 2],
+                matrix[1, 1] - matrix[2, 2],
+                matrix[1, 2] + matrix[2, 1],
+            ]
+        end
         dual = Vector{eltype(matrix)}(undef, info.dimension)
         dual[1] = tr(matrix)
         @inbounds for index in 2:info.dimension

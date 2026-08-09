@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#PBS -N sdpx_j40_socp
+#PBS -l nodes=1:ppn=32
+#PBS -l mem=64gb
+#PBS -l walltime=12:00:00
+#PBS -j oe
+
+# Native SOC measurements use the same immutable model and hash as j40_sdp.
+set -euo pipefail
+: "${SDPX_SOURCE:?set SDPX_SOURCE to the isolated candidate source}"
+HERE="$SDPX_SOURCE/bench/soc_fixed_trace"
+export SDPX_CASE=J40
+export SDPX_MODE=socp
+export SDPX_ARITHMETIC="${SDPX_ARITHMETIC:-Float64x4}"
+export SDPX_THREADS="${SDPX_THREADS:-32}"
+export SDPX_THREAD_POLICY="${SDPX_THREAD_POLICY:-exclusive}"
+export SDPX_SCALING=none
+exec "$HERE/run_fixed_trace.sh"

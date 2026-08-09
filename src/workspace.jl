@@ -17,6 +17,9 @@ predictor/corrector/line-search steps write into.
 """
 mutable struct BlockWS{T}
     k::Int
+    # Derived per-solve cache. Keeping this out of `SparseCons` preserves the
+    # serialized model/checkpoint layout used by existing cluster workflows.
+    traceless2::Bool
     LX::Matrix{T}        # Cholesky factor of X[l] (lower), in place each iteration
     MY::Matrix{T}        # Cholesky factor of Y[l] (lower)
     Ppanel::Matrix{T}    # k × (k·m): dense path — block i = P_i = L_X⁻¹ A_i M_Y (§2.3);
@@ -229,10 +232,28 @@ function _extended_precision_workspace(
     )
 end
 
-function BlockWS{T}(k::Int, panel_variables::Int, sparse_pairs::Int=0) where {T}
+function BlockWS{T}(
+    k::Int,
+    panel_variables::Int,
+    sparse_pairs::Int=0,
+    traceless2::Bool=false,
+) where {T}
     z() = alloc_zeros(T, k, k)
-    return BlockWS{T}(k, z(), z(), alloc_zeros(T, k, k * panel_variables), alloc_zeros(T, sparse_pairs),
+    return BlockWS{T}(k, traceless2, z(), z(), alloc_zeros(T, k, k * panel_variables), alloc_zeros(T, sparse_pairs),
         z(), z(), z(), z(), z(), z(), z(), z(), z())
+end
+
+@inline function _packed2_block_is_traceless(
+    cons::SparseCons,
+    block::Int,
+)
+    coefficients = cons.packed2[block]
+    size(coefficients, 1) == 3 || return false
+    @inbounds for position in axes(coefficients, 2)
+        iszero(coefficients[1, position] + coefficients[3, position]) ||
+            return false
+    end
+    return true
 end
 
 """
@@ -1025,6 +1046,7 @@ function Workspace(
         # Exact-arrow model whose blocks are all 2x2: the fused compute+scatter
         # kernel applies, and the packed pair buffer (9.08 GB on the 4100-block
         # CSDR model) is not allocated at all.
+        sparse_cons = prob.cons::SparseCons{T}
         blk = [
             BlockWS{T}(
                 k[l],
@@ -1036,6 +1058,7 @@ function Workspace(
                 length(active[l]) : 0,
                 (dense_sparse_assembly || fused_arrow) ? 0 :
                 length(active[l]) * (length(active[l]) + 1) ÷ 2,
+                _packed2_block_is_traceless(sparse_cons, l),
             )
             for l in 1:L
         ]

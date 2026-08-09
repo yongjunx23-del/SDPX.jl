@@ -40,9 +40,9 @@ front ends that construct an `SDPProblem` and delegate to the new solver
 pipeline. The deprecated setter names contain no numerical algorithm.
 
 The release CI checks both the removed filenames and the former numerical
-function definitions so they cannot be reintroduced accidentally. The complete
-function-by-function review is recorded in
-[docs/upstream-code-audit.md](docs/upstream-code-audit.md).
+function definitions so they cannot be reintroduced accidentally. The
+function-by-function migration review remains available in the repository's
+Git history; this notice records the maintained release boundary.
 
 ### What is original to SDPX
 
