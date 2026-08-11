@@ -171,11 +171,31 @@ function _sdp_weak_infeasible_2x2(::Type{T}; delta="1e-12", kwargs...) where {T}
                    oracle="delta>0: x*=1/delta; delta=0 weakly infeasible")
 end
 
+"""
+    _typed_affine_psd_matrix(model, t, A)
+
+Build `A - t*I` as a `Matrix{GenericAffExpr{T,typeof(t)}}` in the model's
+target arithmetic.  Explicitly typing the matrix avoids the `Matrix{Any}` that
+a ternary literal produces when it mixes a `VariableRef` with numeric
+constants.
+"""
+function _typed_affine_psd_matrix(model, t, A::AbstractMatrix{T}) where {T}
+    V = typeof(t)
+    n = size(A, 1)
+    M = Matrix{JuMP.GenericAffExpr{T,V}}(undef, n, n)
+    for i in 1:n, j in 1:n
+        entry = JuMP.GenericAffExpr{T,V}(A[i, j])
+        i == j && JuMP.add_to_expression!(entry, -one(T), t)
+        M[i, j] = entry
+    end
+    return M
+end
+
 function _sdp_hilbert(::Type{T}; n=10, kwargs...) where {T}
     model = _model(T; kwargs...)
     @variable(model, t)
     H = [one(T) / T(i + j - 1) for i=1:n, j=1:n]
-    M = @expression(model, [i=1:n, j=1:n], H[i,j] - (i == j ? t : zero(T)))
+    M = _typed_affine_psd_matrix(model, t, H)
     @constraint(model, Symmetric(M) in PSDCone())
     @objective(model, Max, t)
     # Float64 has a native symmetric eigensolver. Generic types such as
@@ -235,7 +255,7 @@ function _sdp_small_eigenvalue(::Type{T}; n=8, epsilon="1e-16", seed=71, kwargs.
     A = (A + transpose(A)) / 2
     model = _model(T; kwargs...)
     @variable(model, t)
-    M = @expression(model, [i=1:n, j=1:n], A[i,j] - (i == j ? t : zero(T)))
+    M = _typed_affine_psd_matrix(model, t, A)
     @constraint(model, Symmetric(M) in PSDCone())
     @objective(model, Max, t)
     return model, (case=:sdp_small_eigenvalue, expected_status=:optimal,

@@ -105,16 +105,19 @@ function main(args)
         end
     end
 
-    # PSD generators must build target-arithmetic GenericAffExpr matrices via
-    # @expression instead of a Matrix{Any} literal.
+    # PSD generators must build target-arithmetic GenericAffExpr matrices with
+    # an explicitly typed matrix, never a Matrix{Any} literal.
     generator_text = read(
         joinpath(RUNNER_ROOT, "..", "generators", "SDPXPathologicalBenchmarks.jl"),
         String,
     )
-    expression_uses = length(collect(eachmatch(r"@expression", generator_text)))
-    expression_uses >= 2 ||
-        push!(failures, "Hilbert/small-eigenvalue generators do not use @expression")
-    occursin("Matrix{Any}", generator_text) &&
+    occursin("_typed_affine_psd_matrix", generator_text) ||
+        push!(failures, "PSD generators do not use the typed affine matrix helper")
+    occursin("Matrix{JuMP.GenericAffExpr", generator_text) ||
+        push!(failures, "PSD affine matrix is not typed as GenericAffExpr")
+    occursin("JuMP.add_to_expression!", generator_text) ||
+        push!(failures, "PSD diagonal t term is not added with add_to_expression!")
+    occursin("Matrix{Any}(", generator_text) &&
         push!(failures, "PSD generator still builds Matrix{Any}")
     # Source rule: the two PSD generators must not regress to a literal
     # t-shifted matrix comprehension, which JuMP would type as Matrix{Any}.

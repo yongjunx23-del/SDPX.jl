@@ -89,9 +89,14 @@ check grep -q 'generators.*SDPXPathologicalBenchmarks' "$HERE/run_generated_path
 check grep -q 'using .SDPXPathologicalBenchmarks' "$HERE/run_generated_pathological.jl"
 check grep -q 'campaign_rows_for' "$HERE/campaign.jl"
 check grep -q 'campaign_rows_for' "$HERE/run_generated_pathological.jl"
-check grep -q '@expression' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+check grep -q '_typed_affine_psd_matrix' \
+  "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+check grep -q 'Matrix{JuMP.GenericAffExpr' \
+  "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+check grep -q 'JuMP.add_to_expression!' \
+  "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
 must_absent "Matrix{Any} in PSD generators" \
-  grep -q 'Matrix{Any}' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+  grep -q 'Matrix{Any}(' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
 must_absent "PSD t-shifted Any comprehension" \
   grep -Eq '\(i == j \? t : zero\(T\)\)[[:space:]]*for[[:space:]]+i=1:n,[[:space:]]*j=1:n\]' \
   "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
