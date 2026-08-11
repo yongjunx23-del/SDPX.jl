@@ -1,0 +1,13 @@
+name = "MultiFloatLinearAlgebra"
+uuid = "7c7c0f3f-4e8c-4d5f-a001-sdpxmfla0001"
+version = "0.1.0"
+
+authors = ["SDPX contributors"]
+
+[deps]
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+
+[compat]
+julia = "1.10"
+MultiFloats = "3"
