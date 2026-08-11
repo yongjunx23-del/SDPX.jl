@@ -2,6 +2,47 @@ using LinearAlgebra
 using SDPX
 using Test
 
+@testset "adaptive backtracking rejects unresolved cone pivots" begin
+    threshold = sqrt(eps(Float64))
+    direction = zeros(2, 2)
+    scratch = zeros(2, 2)
+    fragile = Matrix(Diagonal([1.0, (threshold / 2)^2]))
+    safe = Matrix(Diagonal([1.0, (2threshold)^2]))
+
+    @test SDPX.trial_isposdef!(scratch, fragile, 1.0, direction)
+    @test !SDPX.trial_has_cholesky_margin!(
+        scratch,
+        fragile,
+        1.0,
+        direction,
+        threshold,
+    )
+    @test SDPX.trial_has_cholesky_margin!(
+        scratch,
+        safe,
+        1.0,
+        direction,
+        threshold,
+    )
+    @test SDPX.trial_has_cholesky_margin!(
+        scratch,
+        fragile,
+        1.0,
+        direction,
+        0.0,
+    )
+
+    nonfinite = copy(safe)
+    nonfinite[2, 2] = NaN
+    @test !SDPX.trial_has_cholesky_margin!(
+        scratch,
+        nonfinite,
+        1.0,
+        direction,
+        threshold,
+    )
+end
+
 function regression_sdp_data(::Type{T}) where {T}
     coefficients = zeros(T, 2, 2, 2)
     coefficients[1, 1, 1] = one(T)

@@ -1463,6 +1463,7 @@ function threaded_line_search!(
     γ::T,
     min_step::T,
     step_rule::Symbol=:backtrack,
+    minimum_cholesky_ratio::T=zero(T),
 ) where {T}
     return threaded_line_search!(
         ws,
@@ -1473,6 +1474,7 @@ function threaded_line_search!(
         γ,
         min_step,
         step_rule,
+        minimum_cholesky_ratio,
     )
 end
 
@@ -1485,6 +1487,7 @@ function threaded_line_search!(
     backtracking_factor::T,
     min_step::T,
     step_rule::Symbol=:backtrack,
+    minimum_cholesky_ratio::T=zero(T),
 ) where {T}
     L = length(X)
     nt = ws.thread_count
@@ -1617,6 +1620,7 @@ function threaded_line_search!(
             min_step,
             one(T),
             one(T),
+            minimum_cholesky_ratio,
         )
     end
     bins = ws.block_bins
@@ -1631,7 +1635,13 @@ function threaded_line_search!(
             Threads.@spawn begin
                 for l in bin
                     bw = ws.blk[l]
-                    trial_isposdef!(bw.trialX, X[l], tX, bw.dX) ||
+                    trial_has_cholesky_margin!(
+                        bw.trialX,
+                        X[l],
+                        tX,
+                        bw.dX,
+                        minimum_cholesky_ratio,
+                    ) ||
                         (okbins[p] = false)
                 end
             end
@@ -1647,7 +1657,13 @@ function threaded_line_search!(
             Threads.@spawn begin
                 for l in bin
                     bw = ws.blk[l]
-                    trial_isposdef!(bw.trialY, Y[l], tY, bw.dY) ||
+                    trial_has_cholesky_margin!(
+                        bw.trialY,
+                        Y[l],
+                        tY,
+                        bw.dY,
+                        minimum_cholesky_ratio,
+                    ) ||
                         (okbins[p] = false)
                 end
             end

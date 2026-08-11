@@ -870,7 +870,16 @@ feasible point, the returned `t` reflects that (`< min_step`) so the
 caller can trigger the restart repair (§5.2).
 """
 function line_search!(ws::Workspace{T}, X, Y, γ::T, min_step::T) where {T}
-    return line_search!(ws, X, Y, γ, min_step, one(T), one(T))
+    return line_search!(
+        ws,
+        X,
+        Y,
+        γ,
+        min_step,
+        one(T),
+        one(T),
+        zero(T),
+    )
 end
 
 function line_search!(
@@ -881,6 +890,7 @@ function line_search!(
     min_step::T,
     primal_initial_step::T,
     dual_initial_step::T,
+    minimum_cholesky_ratio::T=zero(T),
 ) where {T}
     L = length(X)
     tX = primal_initial_step
@@ -888,7 +898,13 @@ function line_search!(
         ok = true
         for l in 1:L
             bw = ws.blk[l]
-            if !trial_isposdef!(bw.trialX, X[l], tX, bw.dX)
+            if !trial_has_cholesky_margin!(
+                bw.trialX,
+                X[l],
+                tX,
+                bw.dX,
+                minimum_cholesky_ratio,
+            )
                 ok = false
                 break
             end
@@ -901,7 +917,13 @@ function line_search!(
         ok = true
         for l in 1:L
             bw = ws.blk[l]
-            if !trial_isposdef!(bw.trialY, Y[l], tY, bw.dY)
+            if !trial_has_cholesky_margin!(
+                bw.trialY,
+                Y[l],
+                tY,
+                bw.dY,
+                minimum_cholesky_ratio,
+            )
                 ok = false
                 break
             end

@@ -1267,6 +1267,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             selected_parameters.backtracking_factor,
             selected_parameters.minimum_step,
             opts.step_rule,
+            opts.parameter_strategy === :adaptive ? sqrt(eps(T)) : zero(T),
         )
         selected_step_rule = resolved_step_rule(ws, opts.step_rule)
         backtracking_count =
