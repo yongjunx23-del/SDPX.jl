@@ -73,7 +73,11 @@ present.
 - route: planned backend equals executed, or the difference is an explicitly
   authorized LP deferred resolution (`post_presolve`,
   `analytic_equality_only`, `resolved_no_iteration`, `not_resolved`) or a
-  non-`none` fallback reason;
+  non-`none` fallback reason. Archive baselines that predate the
+  `planned_backend`/`executed_backend` fields (reported as
+  `not_available`/`not_executed`) pass only when the legacy actual
+  `solver_algorithm`, `kkt_backend`, and `gram_kernel` fields are real and no
+  unexpected fallback is recorded;
 - status: certificate-aware normalized status equals the analytic expectation;
   the weak-infeasible `delta=0` case may be honestly `unresolved` but a raw
   Optimal without a certificate is always rejected;

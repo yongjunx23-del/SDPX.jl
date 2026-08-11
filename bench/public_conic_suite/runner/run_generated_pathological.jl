@@ -459,7 +459,8 @@ function _formulation_labels(algorithm, lp_formulation)
 end
 
 function _candidate_metadata(source::String)
-    commit = _capture(`git -C $source rev-parse HEAD`)
+    # The cluster git does not support `git -C`; run from the source directory.
+    commit = _capture(cd(`git rev-parse HEAD 2>/dev/null`, source))
     commit_file = "git:HEAD"
     if isempty(commit)
         commit_file = joinpath(dirname(source), "metadata", "source_commit.txt")
@@ -702,7 +703,23 @@ function run_case(ctx::RunContext, T, case_cfg, case_index, repetition,
         "resolved_no_iteration",
         "not_resolved",
     )
-    if planned_backend_text == executed_backend_text
+    legacy_route = planned_backend_text == "not_available" &&
+                   executed_backend_text == "not_executed"
+    if legacy_route
+        # Archive baselines predate the planned/executed backend fields.  Derive
+        # route provenance from the actual legacy diagnostics instead of
+        # weakening the strict current-candidate route gate.
+        legacy_actual = (solver_algorithm, kkt_backend, gram_kernel)
+        legacy_actual_ok = all(legacy_actual) do field
+            text = string(field)
+            !isempty(text) &&
+            text != "not_available" &&
+            text != "not_executed" &&
+            text != "none"
+        end
+        legacy_fallback_ok = !fallback && fallback_text == "none"
+        gate_route = legacy_actual_ok && legacy_fallback_ok
+    elseif planned_backend_text == executed_backend_text
         gate_route = true
     elseif planned_backend_text == "lp_deferred" &&
            route_authorized_resolution
