@@ -70,6 +70,32 @@ call `ingest` once and reuse the resulting typed `SDPProblem` or `PreparedSolver
 The complete runnable set is in [`examples/`](examples/).  It is exercised by
 the test suite; setup and commands are in [`examples/README.md`](examples/README.md).
 
+
+## Command-line frontend
+
+The v0.4.1 development snapshot adds a small SDPB-style command-line policy
+layer.  All ordinary options default to `auto`; backend-specific IPM/KKT
+parameters stay internal.  After one-time setup:
+
+```bash
+julia bin/setup_cli.jl
+./bin/sdpx problem.json
+```
+
+A high-precision run can be written in the familiar form:
+
+```bash
+./bin/sdpx problem.json result.json \
+  --precision=840 \
+  --dualityGapThreshold=1e-80 \
+  --primalErrorThreshold=1e-80 \
+  --dualErrorThreshold=1e-80
+```
+
+An integer precision is a BigFloat **bit count**.  The result JSON records both
+`resolved_options` and the executed automatic `plan`, so `auto` is inspectable.
+See [`docs/cli.md`](docs/cli.md).
+
 ## Public API
 
 These are the stable-intent entry points.  The package remains experimental,
@@ -83,7 +109,8 @@ changelog.
 | `linear_program`, `solve_lp` | Build or solve a native LP |
 | `second_order_program`, `solve_socp` | Build or solve LP plus Lorentz-cone models |
 | `prepare`, `PreparedSolver` | Reuse an ingested model across objective directions |
-| `SolverOptions` | Typed solver controls and expert overrides |
+| `SolveOptions` | Small all-auto user policy for LP/SOCP/SDP solves |
+| `SolverOptions` | Fully resolved typed controls and expert overrides |
 | `SDPResult`, `SolveStatus` | Structured result, status, residuals, and timings |
 | `solve_summary`, `result_certificate` | Public summary and independent validation |
 | `Optimizer` | MathOptInterface optimizer for JuMP and other MOI clients |

@@ -50,6 +50,9 @@ const SpectrumResult = SDPX.SpectrumResult
 const FixedTraceBlock = SDPX.FixedTraceBlock
 const FixedTraceAnalysis = SDPX.FixedTraceAnalysis
 const analyze_fixed_trace = SDPX.analyze_fixed_trace
+const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
+const resolve_solve_options = SDPX.resolve_solve_options
+const auto_tolerance = SDPX.auto_tolerance
 
 const blas_backend = SDPX.blas_backend
 const blas_threads = SDPX.blas_threads
@@ -68,6 +71,7 @@ export FixedVariableEliminationStage, StructuralCleanupStage
 export FormulationAnalysisStage, ChordalAnalysisStage, preprocess
 export classify_problem, build_execution_plan, SpectrumResult
 export FixedTraceBlock, FixedTraceAnalysis, analyze_fixed_trace
+export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
 
 end
@@ -87,6 +91,7 @@ const _STABLE_TOP_LEVEL_EXPORTS = (
     :prepare,
     :SDPProblem,
     :SolverOptions,
+    :SolveOptions,
     :SDPResult,
     :SolveStatus,
     :SolveMode,

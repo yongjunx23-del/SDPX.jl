@@ -28,7 +28,7 @@ precision are rounded, not lost silently at 53 bits.
 ```jsonc
 {
   "sdpx_schema": 1,                  // required, exactly 1
-  "precision": "Float64",            // "Float64" | "Float64x2" | "Float64x4" | "BigFloat"
+  "precision": "auto",               // auto | Float64 | Float64x2/x3/x4 | BigFloat
   "objective": [2.0, 3.0],           // c, length m
   "blocks": [                        // one per PSD block: Σᵢ xᵢ Aᵢ − C ⪰ 0
     {
@@ -44,12 +44,18 @@ precision are rounded, not lost silently at 53 bits.
     "rows": [1], "cols": [1], "values": [1.0], "rhs": [0.5]
   },
   "settings": {
-    "tolerance": "1e-8",             // ϵ_gap = ϵ_primal = ϵ_dual
-    "maximum_iterations": 200,
-    "time_limit": 600.0,             // seconds; omit for none
-    "threads": 1,
-    "verbosity": 0,
-    "precision_bits": 256,           // BigFloat only
+    "dualityGapThreshold": "auto",   // or e.g. "1e-80"
+    "primalErrorThreshold": "auto",
+    "dualErrorThreshold": "auto",
+    "maximumIterations": "auto",
+    "maxRuntime": "auto",
+    "threads": "auto",
+    "verbosity": "auto",
+    "precision_bits": "auto",        // BigFloat only; CLI --precision=N sets this
+    "algorithm": "auto",
+    "presolve": "auto",
+    "scaling": "auto",
+    "sparse": "auto",
     "return_matrices": false,        // include X/Y blocks in the result
     "certificate": true              // include the independent certificate
   }
@@ -106,3 +112,24 @@ same schema — are:
    blocks; the schema then only describes the *layout*, not the bytes.
 
 Consumers that stick to the file contract above will not notice the change.
+
+## All-auto policy and SDPB-style CLI
+
+Schema-v1 remains backward compatible with the original `tolerance`,
+`maximum_iterations` and `time_limit` keys.  New code should prefer the
+independent threshold names above.  Missing policy fields resolve through the
+same `SolveOptions` midend used by the Julia API.
+
+The friendly wrapper `bin/sdpx.jl` accepts:
+
+```bash
+sdpx problem.json result.json \
+  --precision=840 \
+  --dualityGapThreshold=1e-80 \
+  --primalErrorThreshold=1e-80 \
+  --dualErrorThreshold=1e-80
+```
+
+The response additionally contains `resolved_options` and a compact `plan`
+record (`algorithm`, storage/classification, KKT backend, Gram kernel, schedule
+and threads).

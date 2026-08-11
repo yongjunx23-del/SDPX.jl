@@ -18,6 +18,7 @@ second_order_program
 solve_socp
 PreparedSolver
 prepare
+SolveOptions
 SolverOptions
 SDPResult
 SolveStatus
@@ -51,6 +52,8 @@ Additional introspection entry points live under `SDPX.Experimental`
 `SDPX.Experimental.build_execution_plan` the pre-solve execution plan.
 `SDPX.Experimental.analyze_fixed_trace` conservatively detects direct and
 equality-implied constant-trace PSD blocks.
+`SDPX.Experimental.resolve_solve_options` shows how the small all-auto
+`SolveOptions` policy is lowered to the resolved numerical configuration.
 The historical top-level experimental exports completed their deprecation
 cycle in 0.4. Qualified `SDPX.name` bindings remain available, while new code
 should use `SDPX.Experimental.name`.

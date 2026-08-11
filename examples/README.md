@@ -48,3 +48,16 @@ stalls short of your tolerance, not before.
 These numbers are from one small, well-conditioned problem. Real bootstrap
 programs exhaust `Float64` far earlier, which is the case the solver is built
 for; the mechanism is the same, the crossover is not.
+
+## v0.4.1 development CLI
+
+After `julia bin/setup_cli.jl`, the included JSON fixtures can be used directly:
+
+```bash
+./bin/sdpx examples/cli_problem.json
+./bin/sdpx examples/cli_problem_high_precision.json \
+  --precision=840 \
+  --dualityGapThreshold=1e-80 \
+  --primalErrorThreshold=1e-80 \
+  --dualErrorThreshold=1e-80
+```

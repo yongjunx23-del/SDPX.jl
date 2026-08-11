@@ -1,0 +1,37 @@
+{
+  "sdpx_schema": 1,
+  "precision": "BigFloat",
+  "objective": ["2.0", "3.0"],
+  "blocks": [
+    {
+      "dimension": 2,
+      "constant": {
+        "rows": [1, 2],
+        "cols": [2, 1],
+        "values": ["1.0", "1.0"]
+      },
+      "coefficients": [
+        {
+          "variable": 1,
+          "rows": [1],
+          "cols": [1],
+          "values": ["1.0"]
+        },
+        {
+          "variable": 2,
+          "rows": [2],
+          "cols": [2],
+          "values": ["1.0"]
+        }
+      ]
+    }
+  ],
+  "settings": {
+    "precision_bits": 840,
+    "dualityGapThreshold": "1e-80",
+    "primalErrorThreshold": "1e-80",
+    "dualErrorThreshold": "1e-80",
+    "threads": "auto",
+    "certificate": "auto"
+  }
+}

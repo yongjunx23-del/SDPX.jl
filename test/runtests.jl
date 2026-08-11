@@ -25,6 +25,8 @@ using Test
     include("result_certificate.jl")
     include("infeasibility_diagnostics.jl")
     include("options_interface.jl")
+    include("frontend_auto_options.jl")
+    include("v041_architecture_regressions.jl")
     include("public_api.jl")
     include("moi_regressions.jl")
     include("convex_regressions.jl")

@@ -448,20 +448,61 @@ function _equality_backward_errors(
 ) where {T}
     prob.dims.n == 0 &&
         return (mixed=zero(T), strict=zero(T))
+    return _equality_backward_errors(prob.B, prob.b, x)
+end
+
+function _equality_backward_errors(
+    B::Matrix{T},
+    b::AbstractVector{T},
+    x::AbstractVector{T},
+) where {T}
     mixed_error = zero(T)
     strict_error = zero(T)
-    @inbounds for column in axes(prob.B, 2)
+    @inbounds for column in axes(B, 2)
         lhs = zero(T)
-        nominal_scale = abs(prob.b[column])
-        realized_scale = abs(prob.b[column])
-        for row in axes(prob.B, 1)
-            coefficient = prob.B[row, column]
+        nominal_scale = abs(b[column])
+        realized_scale = abs(b[column])
+        for row in axes(B, 1)
+            coefficient = B[row, column]
             value = x[row]
             lhs += coefficient * value
             nominal_scale += abs(coefficient)
             realized_scale += abs(coefficient) * abs(value)
         end
-        residual = abs(lhs - prob.b[column])
+        residual = abs(lhs - b[column])
+        errors = _componentwise_backward_errors(
+            residual,
+            nominal_scale,
+            realized_scale,
+        )
+        mixed_error = max(mixed_error, errors.mixed)
+        strict_error = max(strict_error, errors.strict)
+    end
+    return (mixed=mixed_error, strict=strict_error)
+end
+
+function _equality_backward_errors(
+    B::SparseMatrixCSC{T,Ti},
+    b::AbstractVector{T},
+    x::AbstractVector{T},
+) where {T,Ti<:Integer}
+    mixed_error = zero(T)
+    strict_error = zero(T)
+    rows = rowvals(B)
+    values = nonzeros(B)
+    @inbounds for column in axes(B, 2)
+        lhs = zero(T)
+        nominal_scale = abs(b[column])
+        realized_scale = abs(b[column])
+        for stored in nzrange(B, column)
+            row = rows[stored]
+            coefficient = values[stored]
+            value = x[row]
+            lhs += coefficient * value
+            nominal_scale += abs(coefficient)
+            realized_scale += abs(coefficient) * abs(value)
+        end
+        residual = abs(lhs - b[column])
         errors = _componentwise_backward_errors(
             residual,
             nominal_scale,
@@ -548,6 +589,43 @@ function _primal_block_backward_errors(
     return (mixed=mixed_error, strict=strict_error)
 end
 
+function _accumulate_equality_dual_scales!(
+    nominal_scale::AbstractVector{T},
+    realized_scale::AbstractVector{T},
+    B::Matrix{T},
+    y::AbstractVector{T},
+) where {T}
+    @inbounds for column in axes(B, 2)
+        weight = abs(y[column])
+        for row in axes(B, 1)
+            coefficient = abs(B[row, column])
+            nominal_scale[row] += coefficient
+            realized_scale[row] += coefficient * weight
+        end
+    end
+    return nothing
+end
+
+function _accumulate_equality_dual_scales!(
+    nominal_scale::AbstractVector{T},
+    realized_scale::AbstractVector{T},
+    B::SparseMatrixCSC{T,Ti},
+    y::AbstractVector{T},
+) where {T,Ti<:Integer}
+    rows = rowvals(B)
+    values = nonzeros(B)
+    @inbounds for column in axes(B, 2)
+        weight = abs(y[column])
+        for stored in nzrange(B, column)
+            row = rows[stored]
+            coefficient = abs(values[stored])
+            nominal_scale[row] += coefficient
+            realized_scale[row] += coefficient * weight
+        end
+    end
+    return nothing
+end
+
 function _dual_backward_errors(
     prob::SDPProblem{T},
     y::AbstractVector{T},
@@ -596,14 +674,9 @@ function _dual_backward_errors(
     end
     if prob.dims.n > 0
         kmul_owned!(residual, prob.B, y, -one(T), one(T))
-        @inbounds for column in axes(prob.B, 2)
-            weight = abs(y[column])
-            for row in axes(prob.B, 1)
-                coefficient = abs(prob.B[row, column])
-                nominal_scale[row] += coefficient
-                realized_scale[row] += coefficient * weight
-            end
-        end
+        _accumulate_equality_dual_scales!(
+            nominal_scale, realized_scale, prob.B, y,
+        )
     end
     mixed_error = zero(T)
     strict_error = zero(T)

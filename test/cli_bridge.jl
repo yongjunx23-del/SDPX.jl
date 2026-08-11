@@ -130,3 +130,36 @@ _bridge_problem() = JSON.parse(JSON.json(BRIDGE_PROBLEM))   # deep copy via roun
         @test length(response["X"][1]) == 4          # 2x2, flattened
     end
 end
+
+include(joinpath(@__DIR__, "..", "bin", "sdpx.jl"))
+using .SDPXUserCLI
+
+@testset "SDPB-style user CLI policy" begin
+    parsed = SDPXUserCLI.parse_cli([
+        "model.json",
+        "result.json",
+        "--precision=840",
+        "--dualityGapThreshold=1e-80",
+        "--primalErrorThreshold=1e-80",
+        "--dualErrorThreshold=1e-80",
+        "--threads=auto",
+    ])
+    @test !parsed.help
+    @test parsed.positional == ["model.json", "result.json"]
+    @test parsed.options["precision"] == "840"
+
+    spec = _bridge_problem()
+    delete!(spec, "precision")
+    spec["settings"] = Dict{String,Any}()
+    SDPXUserCLI._overlay!(spec, parsed.options)
+    @test spec["precision"] == "BigFloat"
+    @test spec["settings"]["precision_bits"] == 840
+    @test spec["settings"]["dualityGapThreshold"] == "1e-80"
+    @test spec["settings"]["primalErrorThreshold"] == "1e-80"
+    @test spec["settings"]["dualErrorThreshold"] == "1e-80"
+    @test spec["settings"]["threads"] == "auto"
+
+    auto = SDPXUserCLI.parse_cli(["model.json"])
+    @test !haskey(auto.options, "precision")
+    @test SDPXUserCLI._default_output("model.json") == "model.result.json"
+end

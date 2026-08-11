@@ -37,20 +37,31 @@ using SDPX
 const SCHEMA_VERSION = 1
 
 const PRECISIONS = Dict{String,DataType}()
+const _PRECISIONS_READY = Ref(false)
 
-function __init__()
+function _ensure_precisions!()
+    _PRECISIONS_READY[] && return PRECISIONS
     PRECISIONS["Float64"] = Float64
     # Extended types register lazily so the bridge works without the
     # extensions installed; requesting one without its package is a
-    # structured error, not a MethodError.
+    # structured error, not a MethodError. This helper is called from both
+    # `__init__` and `solve_specification`, so include-based tests/embedders do
+    # not depend on package-loader `__init__` semantics.
     try
         @eval using MultiFloats
         @eval PRECISIONS["Float64x2"] = MultiFloats.Float64x2
+        @eval PRECISIONS["Float64x3"] = MultiFloats.Float64x3
         @eval PRECISIONS["Float64x4"] = MultiFloats.Float64x4
     catch exception
         exception isa InterruptException && rethrow()
     end
     PRECISIONS["BigFloat"] = BigFloat
+    _PRECISIONS_READY[] = true
+    return PRECISIONS
+end
+
+function __init__()
+    _ensure_precisions!()
     return
 end
 
@@ -67,6 +78,10 @@ _number(::Type{T}, value) where {T} =
 """Render one number for the result file. `string` on BigFloat and MultiFloat
 values round-trips every bit; scientific text is what every consumer parses."""
 _render(value) = string(value)
+
+_json_safe(value::Symbol) = string(value)
+_json_safe(value::AbstractFloat) = isfinite(value) ? value : string(value)
+_json_safe(value) = value
 
 function _coo_matrix(::Type{T}, entry, dimension::Int, label::String) where {T}
     matrix = zeros(T, dimension, dimension)
@@ -131,42 +146,155 @@ function _build_problem(::Type{T}, spec) where {T}
     return objective, coefficients, constants, B, rhs
 end
 
+function _setting(settings, names...; default=:auto)
+    for name in names
+        haskey(settings, name) && return settings[name]
+    end
+    return default
+end
+
 function _solver_options(::Type{T}, settings) where {T}
-    tolerance = _number(T, get(settings, "tolerance", "1e-8"))
-    return SDPX.SolverOptions{T}(
-        ϵ_gap=tolerance,
-        ϵ_primal=tolerance,
-        ϵ_dual=tolerance,
-        iter_max=Int(get(settings, "maximum_iterations", 200)),
-        max_time=Float64(get(settings, "time_limit", Inf)),
-        threads=Int(get(settings, "threads", 1)),
-        verbosity=Int(get(settings, "verbosity", 0)),
-        precision_bits=Int(get(settings, "precision_bits", 256)),
+    common = _setting(settings, "tolerance"; default=:auto)
+    gap = _setting(
+        settings,
+        "dualityGapThreshold", "duality_gap_threshold", "gap_tolerance";
+        default=common,
+    )
+    primal = _setting(
+        settings,
+        "primalErrorThreshold", "primal_error_threshold", "primal_tolerance";
+        default=common,
+    )
+    dual = _setting(
+        settings,
+        "dualErrorThreshold", "dual_error_threshold", "dual_tolerance";
+        default=common,
+    )
+    precision_request = _setting(settings, "precision_bits"; default=:auto)
+    frontend = SDPX.SolveOptions(
+        precision=precision_request,
+        duality_gap_threshold=gap,
+        primal_error_threshold=primal,
+        dual_error_threshold=dual,
+        maximum_iterations=_setting(
+            settings, "maximumIterations", "maximum_iterations"; default=:auto,
+        ),
+        max_runtime=_setting(
+            settings, "maxRuntime", "time_limit"; default=:auto,
+        ),
+        threads=_setting(settings, "threads"; default=:auto),
+        verbosity=_setting(settings, "verbosity"; default=:auto),
+        presolve=_setting(settings, "presolve"; default=:auto),
+        scaling=_setting(settings, "scaling"; default=:auto),
+        algorithm=_setting(settings, "algorithm"; default=:auto),
+        sparse=_setting(settings, "sparse"; default=:auto),
+        formulation=_setting(settings, "formulation"; default=:auto),
+        chordal_decomposition=_setting(
+            settings, "chordalDecomposition", "chordal_decomposition"; default=:auto,
+        ),
+        equality_solver=_setting(
+            settings, "equalitySolver", "equality_solver"; default=:auto,
+        ),
+        working_precision_policy=_setting(
+            settings, "workingPrecisionPolicy", "working_precision_policy"; default=:auto,
+        ),
+        diagnostics=_setting(settings, "diagnostics"; default=:auto),
+        timing=_setting(settings, "timing"; default=:auto),
+        certification=_setting(settings, "certificate", "certification"; default=:auto),
+    )
+    return SDPX.Experimental.resolve_solve_options(T, frontend)
+end
+
+function _precision_name_and_bits(spec, settings)
+    raw = get(spec, "precision", "auto")
+    bits = _setting(settings, "precision_bits"; default=:auto)
+    if raw isa Integer
+        raw > 0 || error("precision bit count must be positive")
+        return "BigFloat", Int(raw)
+    end
+    name = String(raw)
+    lower = lowercase(strip(name))
+    if lower == "auto"
+        if bits isa Integer && bits > 53
+            return "BigFloat", Int(bits)
+        elseif bits isa AbstractString && lowercase(strip(bits)) != "auto"
+            parsed = parse(Int, bits)
+            parsed > 53 && return "BigFloat", parsed
+        end
+        return "Float64", 53
+    end
+    aliases = Dict(
+        "float64" => "Float64",
+        "float64x2" => "Float64x2",
+        "float64x3" => "Float64x3",
+        "float64x4" => "Float64x4",
+        "bigfloat" => "BigFloat",
+    )
+    canonical = get(aliases, lower, name)
+    resolved_bits = if canonical == "BigFloat"
+        if bits === :auto || (bits isa AbstractString && lowercase(strip(bits)) == "auto")
+            256
+        else
+            Int(bits isa Integer ? bits : parse(Int, bits))
+        end
+    else
+        0
+    end
+    return canonical, resolved_bits
+end
+
+function _plan_response(result)
+    diagnostics = result.diagnostics
+    diagnostics === nothing && return nothing
+    plan = diagnostics.plan
+    classification = plan.classification
+    return Dict{String,Any}(
+        "cone" => string(classification.cone),
+        "storage" => string(classification.storage),
+        "arithmetic" => string(classification.arithmetic),
+        "size" => string(classification.size),
+        "variables" => classification.variables,
+        "equalities" => classification.equalities,
+        "cone_rows" => classification.cone_rows,
+        "maximum_block_size" => classification.maximum_block_size,
+        "algorithm" => string(plan.algorithm),
+        "scaling" => string(plan.scaling),
+        "kkt_backend" => string(plan.kkt_backend),
+        "gram_kernel" => string(plan.gram_kernel),
+        "schedule" => string(plan.schedule),
+        "threads" => plan.threads,
+        "parameter_profile" => string(plan.parameter_profile),
+        "memory_budget_bytes" => plan.memory_budget_bytes,
     )
 end
 
 function solve_specification(spec)
+    _ensure_precisions!()
     Int(get(spec, "sdpx_schema", 0)) == SCHEMA_VERSION ||
         error("unsupported or missing \"sdpx_schema\" (this bridge speaks version $SCHEMA_VERSION)")
-    name = String(get(spec, "precision", "Float64"))
+    settings = get(spec, "settings", Dict{String,Any}())
+    name, requested_bits = _precision_name_and_bits(spec, settings)
     haskey(PRECISIONS, name) ||
         error("unknown precision \"$name\"; available: $(sort!(collect(keys(PRECISIONS)))) " *
-              "(Float64x2/Float64x4 need the MultiFloats package in the bridge environment)")
+              "(Float64x2/Float64x3/Float64x4 need MultiFloats in the bridge environment)")
     T = PRECISIONS[name]
-    settings = get(spec, "settings", Dict{String,Any}())
+    if T === BigFloat
+        settings["precision_bits"] = requested_bits
+    end
 
     run_solve = function ()
         c, A, C, B, b = _build_problem(T, spec)
         problem = SDPX.ingest(c, A, C, B, b; verbosity=0)
-        options = _solver_options(T, settings)
-        result = SDPX.solve!(problem, options)
-        return problem, options, result
+        resolved = _solver_options(T, settings)
+        result = SDPX.solve!(problem, resolved.core)
+        return problem, resolved, result
     end
     # BigFloat data must be *parsed* at the working precision, not converted
     # to it afterwards; setprecision therefore wraps the whole build+solve.
-    problem, options, result = T === BigFloat ?
+    problem, resolved, result = T === BigFloat ?
         setprecision(run_solve, BigFloat, Int(get(settings, "precision_bits", 256))) :
         run_solve()
+    options = resolved.core
 
     response = Dict{String,Any}(
         "sdpx_schema" => SCHEMA_VERSION,
@@ -184,13 +312,16 @@ function solve_specification(spec)
         "iterations" => result.iterations,
         "x" => [_render(v) for v in result.x],
         "y" => [_render(v) for v in result.y],
+        "resolved_options" => Dict(string(k) => _json_safe(v) for (k, v) in pairs(resolved.summary)),
     )
+    plan_response = _plan_response(result)
+    plan_response === nothing || (response["plan"] = plan_response)
     if get(settings, "return_matrices", false) == true
         response["X"] = [[_render(v) for v in vec(block)] for block in result.X]
         response["Y"] = [[_render(v) for v in vec(block)] for block in result.Y]
         response["block_dimensions"] = [size(block, 1) for block in result.X]
     end
-    if get(settings, "certificate", true) == true
+    if resolved.certification
         certificate = SDPX.result_certificate(problem, result, options)
         response["certificate"] = Dict{String,Any}(
             "valid" => certificate.valid,

@@ -4,6 +4,29 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — unreleased
+
+### Added
+
+- A small all-auto `SolveOptions` frontend policy separated from the fully
+  resolved expert `SolverOptions{T}` numerical configuration.
+- An SDPB-style command-line frontend with integer BigFloat bit precision and
+  independent duality-gap, primal-error, and dual-error thresholds.
+- CLI result provenance for resolved frontend options and the automatic
+  `ExecutionPlan`.
+- The public LP/SOCP/SDP benchmark starter suite under
+  `bench/public_conic_suite/` as the acceptance layer for continued solver
+  reorganization.
+- Development and architecture notes for the frontend/midend/backend migration.
+
+### Development policy
+
+- Ordinary user controls default to `auto`; microkernel, KKT and predictor
+  details remain expert/internal options.
+- The existing numerical backends are preserved in this snapshot; canonical
+  LP/SOC/PSD IR, native general SOCP, end-to-end sparse LP, and equality-memory
+  rework are staged follow-up tasks guarded by the benchmark suite.
+
 ## [0.4.0] — 2026-08-09
 
 ### Added

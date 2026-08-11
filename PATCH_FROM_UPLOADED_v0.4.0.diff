@@ -1,0 +1,4513 @@
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/CHANGELOG.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/CHANGELOG.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/CHANGELOG.md	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/CHANGELOG.md	2026-08-11 09:58:51.473093720 +0000
+@@ -4,6 +4,29 @@
+ [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
+ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
++## [0.4.1] — unreleased
++
++### Added
++
++- A small all-auto `SolveOptions` frontend policy separated from the fully
++  resolved expert `SolverOptions{T}` numerical configuration.
++- An SDPB-style command-line frontend with integer BigFloat bit precision and
++  independent duality-gap, primal-error, and dual-error thresholds.
++- CLI result provenance for resolved frontend options and the automatic
++  `ExecutionPlan`.
++- The public LP/SOCP/SDP benchmark starter suite under
++  `bench/public_conic_suite/` as the acceptance layer for continued solver
++  reorganization.
++- Development and architecture notes for the frontend/midend/backend migration.
++
++### Development policy
++
++- Ordinary user controls default to `auto`; microkernel, KKT and predictor
++  details remain expert/internal options.
++- The existing numerical backends are preserved in this snapshot; canonical
++  LP/SOC/PSD IR, native general SOCP, end-to-end sparse LP, and equality-memory
++  rework are staged follow-up tasks guarded by the benchmark suite.
++
+ ## [0.4.0] — 2026-08-09
+ 
+ ### Added
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/DEVELOPMENT_v0.4.1.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/DEVELOPMENT_v0.4.1.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/DEVELOPMENT_v0.4.1.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/DEVELOPMENT_v0.4.1.md	2026-08-11 09:56:37.787342636 +0000
+@@ -0,0 +1,181 @@
++# SDPX.jl v0.4.1 development baseline
++
++This archive is a **development snapshot**, not a claim that v0.4.1 has been
++released or benchmark-certified.  It starts from the uploaded v0.4.0 tree and
++adds the benchmark suite plus the first frontend/midend boundary needed for the
++LP/SOCP/SDP reorganization.
++
++## Product goal
++
++SDPX should present one small interface:
++
++```text
++model -> canonical cone semantics -> automatic plan -> native backend -> certificate
++```
++
++Users should normally write `solve(problem)` / `solve(problem, SolveOptions())`
++or invoke `sdpx problem.json`.  All ordinary policy settings default to
++`auto`.  Expert IPM/KKT/kernel parameters remain below this boundary.
++
++The target workload is not "SDP with LP/SOC adapters".  It is a conic solver
++with three first-class families:
++
++- LP / nonnegative orthant;
++- SOCP / Lorentz cones;
++- SDP / PSD cones.
++
++The bundled `bench/public_conic_suite` is the acceptance layer for this work.
++
++## What is already changed in this snapshot
++
++1. `SolveOptions` is a small all-auto public policy object.
++2. `resolve_solve_options` is a distinct midend lowering step to the existing
++   `SolverOptions{T}` core.
++3. `bin/sdpx.jl` provides an SDPB-style frontend, including integer bit
++   precision and independent primal/dual/gap thresholds.
++4. CLI responses expose `resolved_options` and the actual `ExecutionPlan`.
++5. The supplied public LP/SOCP/SDP benchmark suite is copied verbatim under
++   `bench/public_conic_suite/`.
++6. Existing numerical backends are intentionally preserved.  This snapshot is
++   an architecture bridge, not an untested big-bang rewrite.
++
++## Required development order
++
++### P0 — make the new boundary authoritative
++
++- [ ] Run the full existing test suite on Julia 1.10+.
++- [ ] Run `test/frontend_auto_options.jl` and CLI bridge tests.
++- [ ] Ensure `ExecutionPlan` is the only structural backend decision source.
++- [ ] Remove deterministic plan/workspace mismatches (notably sparse Schur vs
++      `equality_solver=:qr`).
++- [ ] Route Newton factor/solve/refine through a real backend interface rather
++      than repeated `ws.arrow/ws.sparse_kkt/ws.mixed_precision` branching.
++- [ ] Specialize sparse certificate backward-error loops to CSC `nzrange`
++      instead of O(m*n) logical scans.
++
++**Gate:** all historical tests green; smoke benchmark green; no certified
++regression relative to v0.4.0.
++
++### P1 — canonical LP/SOC/PSD semantic IR
++
++Do not start by moving every file.  First define an internal semantic model
++that retains cone type through the midend:
++
++```text
++CanonicalConicProblem
++  objective
++  equalities
++  linear_cones
++  lorentz_cones
++  psd_cones
++  metadata / reconstruction map
++```
++
++Required invariants:
++
++- sparse LP input must never densify implicitly;
++- MOI SOC input remains SOC until the formulation planner explicitly selects a
++  PSD-arrow fallback;
++- PSD blocks retain block structure and sparse coefficient information;
++- canonicalization is lossless and has a reconstruction map.
++
++**Benchmark gates:** Netlib smoke, generated LP pathologies, generated SOC
++near-tangent cases, moderate SDP smoke.
++
++### P1 — LP end-to-end sparse
++
++Current optimized LP factorization is not sufficient for the largest benchmark
++families if frontend/presolve data are densified first.
++
++Implement:
++
++```text
++MPS/MOI sparse input
++ -> sparse LP IR
++ -> sparse presolve + scaling
++ -> fixed-pattern sparse KKT
++ -> numeric nzval updates
++ -> certificate
++```
++
++Use modern20 and Network-LP25 as memory gates.  Any code path allocating dense
++`nvar*nvar`, `nrow*nvar`, or equivalent accidental dense storage is a failure.
++
++### P1 — general native SOCP backend
++
++Treat the current PSD arrow lift as a correctness/reference formulation, not
++the long-term default backend.
++
++Refactor existing Lorentz and Q3 work into:
++
++```text
++SOC backend
++  generic Lorentz cone algebra
++  Q3 specialized batched kernel
++  native SOC scaling
++  native SOC assembly
++```
++
++`Q3` becomes an implementation specialization, not a separate public solver.
++
++**Benchmark gates:** generated many-tiny-cones, near-tangent, near-infeasible,
++then CBLIB core12.  Always record whether the executed formulation was native
++SOC or PSD arrow lift.
++
++### P1/P2 — SDP equality memory architecture
++
++Large sparse SDP has already moved the Schur complement to sparse storage, but
++retained equality elimination can still allocate dense `Btil`, `Q`, `Qbuf`
++and related buffers.  Investigate panelized solves / matrix-free equality
++products before further low-single-digit Gram microkernel work.
++
++**Benchmark gates:** G48mc/G55mc/G60mc, checker, cphil12/theta123, mater/ros,
++reimer5, fap09 plus the existing lattice B3 workload.
++
++### P2 — precision escalation and independent validation
++
++The new frontend already has arithmetic-aware auto stopping thresholds.  The
++next step is a benchmarked precision policy, not blind escalation:
++
++```text
++Float64 -> Float64x2 -> Float64x4 -> BigFloat
++```
++
++Escalate only for a diagnosed numerical reason and keep the whole history in
++`result.diagnostics`.
++
++Add a slow reference validator for release/strict runs that does not reuse the
++same hot contraction/factor kernels as the solver.
++
++**Benchmark gates:** all pathological precision families and weak-infeasible
++SDP suites.
++
++## Architecture rule for every new PR
++
++A feature belongs to exactly one of these layers:
++
++```text
++frontend: parse/model/API semantics
++midend:   canonicalize/analyze/presolve/scale/formulate/plan
++backend:  cone algebra/system assembly/factorization/refinement
++validate: original-coordinate authoritative certificate
++```
++
++A backend is not allowed to reinterpret user model semantics.  A frontend is
++not allowed to choose KKT kernels.  A midend transform must record how to
++reconstruct the original coordinates.
++
++## Performance evidence rule
++
++Every optimization PR must identify the benchmark class it targets and report:
++
++- median/min solve time on the same hardware;
++- setup / presolve / assembly / factor / refine / certify times when present;
++- peak RSS and persistent workspace;
++- executed plan/formulation;
++- residuals, gap and cone violation;
++- certificate status;
++- arithmetic and precision.
++
++Do not merge a micro-optimization that makes the relevant end-to-end benchmark
++slower even if an isolated kernel is faster.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/PACKAGE_MANIFEST.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/PACKAGE_MANIFEST.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/PACKAGE_MANIFEST.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/PACKAGE_MANIFEST.md	2026-08-11 10:10:51.904766061 +0000
+@@ -0,0 +1,52 @@
++# SDPX v0.4.1-dev auto-conic package manifest
++
++This tree is intended as a **direct continuation point** for SDPX development.
++It is based on the uploaded SDPX v0.4.0 source archive and includes the
++uploaded public LP/SOCP/SDP benchmark starter kit.
++
++## What is ready now
++
++- SDPB-style command line frontend: `bin/sdpx`.
++- Small public `SolveOptions`, with every policy defaulting to `:auto`.
++- Independent `dualityGapThreshold`, `primalErrorThreshold`, and
++  `dualErrorThreshold` controls.
++- Integer `--precision=BITS` support for BigFloat CLI ingestion/solve scopes.
++- Requested/resolved option provenance and execution-plan reporting.
++- Supplied public conic benchmark suite under `bench/public_conic_suite/`.
++- Development-gate mapping for LP, SOCP, SDP and pathological/high-precision
++  tests.
++- P0 fix: explicit equality QR is reflected in sparse-Schur execution planning.
++- P0 fix: sparse equality certificate accumulation traverses CSC nonzeros rather
++  than all logical matrix entries.
++
++## Intentionally not rewritten yet
++
++- Existing v0.4.0 numerical solver core remains the production core.
++- General SOCP still uses the existing PSD-arrow route except for existing
++  specialized/native paths; the general native Lorentz backend is the next
++  backend milestone.
++- LP preprocessing is not yet end-to-end sparse.
++- `KKTBackend` is not yet the sole production factor/solve/refine dispatch
++  boundary.
++- CLI schema v1 is the current JSON bridge; native MPS/CBF/SDPA command-line
++  loaders are a follow-up milestone.
++
++These are deliberate migration boundaries so numerical equivalence can be
++checked against the bundled benchmark suite before replacing the old paths.
++
++## First verification on your development machine
++
++```bash
++./scripts/dev_v041_smoke.sh
++```
++
++Then read `START_HERE_v0.4.1.md` and `DEVELOPMENT_v0.4.1.md`.
++
++## Assembly provenance
++
++- Uploaded SDPX source archive SHA256:
++  `7fa890daaf4b3f824a9c66ee31458a5a2a6f01345ba7b03e6618fb7fb6f661eb`
++- Uploaded benchmark archive SHA256:
++  `e763644f5397b7a72ccb69f8d429e9b879562dd876c58f2a4940a60e9e17cd80`
++- The assembly environment did not contain Julia, so Julia tests were not
++  executed here. Static shell/JSON/TOML checks were performed.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/PROMPT_V041_CONIC_REFACTOR.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/PROMPT_V041_CONIC_REFACTOR.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/PROMPT_V041_CONIC_REFACTOR.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/PROMPT_V041_CONIC_REFACTOR.md	2026-08-11 09:58:27.128803056 +0000
+@@ -0,0 +1,166 @@
++# Development prompt — continue SDPX.jl from the v0.4.1-dev conic baseline
++
++You are continuing development of **SDPX.jl** from this exact repository
++snapshot.  Do not restart from an older architecture and do not replace the
++existing solver with an unrelated implementation.
++
++## Read first
++
++1. `DEVELOPMENT_v0.4.1.md`
++2. `docs/architecture-v041.md`
++3. `docs/cli.md`
++4. `bench/public_conic_suite/README.md`
++5. `bench/public_conic_suite/PROMPT_SDPX_BENCHMARK_INTEGRATION.md`
++6. `src/frontend/solve_options.jl`
++7. `src/midend/resolve_options.jl`
++8. `src/pipeline.jl`, `src/workspace.jl`, `src/step.jl`
++9. `src/kkt_backend.jl`, `src/kkt_sparse_backend.jl`, `src/kkt.jl`
++10. `src/lp_api.jl`, `src/lp_solver.jl`, `src/soc.jl`, `src/soc_native_q3.jl`
++11. `src/validation.jl`
++
++## Product contract
++
++The ordinary user interface is intentionally small.  All ordinary policy
++settings default to `auto`.  Do not expose new centering, Gram, KKT, mixed
++precision, or microkernel knobs through `SolveOptions` or the CLI unless there
++is a concrete user-level reason.
++
++The long-term semantic model has three first-class cone families:
++
++```text
++Linear / nonnegative orthant
++Lorentz / SOC
++PSD / SDP
++```
++
++LP must not be architecturally treated as "just 1x1 SDP" and general SOCP must
++not be permanently treated as "PSD arrow lift".  Exact lifts remain valid
++fallback/reference formulations chosen by the midend planner.
++
++## First task: stabilize this snapshot before larger refactoring
++
++Run and fix:
++
++```bash
++julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
++julia bin/setup_cli.jl
++./bin/sdpx --help
++```
++
++Then explicitly test the high-precision frontend:
++
++```bash
++./bin/sdpx <tiny-schema-v1-problem.json> result.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
++
++If the code in this development snapshot has a syntax/API issue, repair it
++without discarding the frontend/midend boundary.
++
++## P0 implementation order
++
++### 1. Make ExecutionPlan authoritative
++
++Audit every deterministic backend/formulation choice made after
++`build_execution_plan`.  The plan must include every option that can change the
++actual storage/KKT route, including `equality_solver`.  Workspace construction
++must implement the plan, not independently reinterpret the problem.
++
++Runtime numerical fallback is allowed only if diagnostics record:
++
++```text
++planned_backend
++executed_backend
++fallback_reason
++```
++
++Add tests that deliberately exercise `equality_solver=:qr`, sparse/dense
++selection and mixed-precision fallback.
++
++### 2. Make KKTBackend a real production boundary
++
++The Newton step must call one backend interface for factor/solve/refine.
++Remove repeated top-level branching on `ws.arrow`, `ws.sparse_kkt`,
++`ws.mixed_precision` from `step.jl` once equivalent backend state owns those
++choices.  Do not change numerical formulas in the same PR unless required for
++correctness.
++
++### 3. Fix sparse certification cold paths
++
++Specialize equality/dual backward-error loops for `SparseMatrixCSC` using
++`nzrange`, `rowvals`, and `nonzeros`.  Preserve the exact mathematical
++certificate.  Add dense-vs-sparse differential tests.
++
++### 4. Establish benchmark smoke runner
++
++Integrate the generated pathological smoke set and manageable external cases.
++Every row must record the executed formulation, resolved frontend options,
++ExecutionPlan, certificate status and timing.  A raw `Optimal` status without a
++valid certificate is an accuracy failure.
++
++## P1: canonical conic IR
++
++Only after P0 tests and smoke benchmarks are green, introduce the semantic IR.
++Keep the migration incremental and adapter-based.
++
++Required properties:
++
++- LP coefficients/equalities can remain sparse from import through presolve;
++- SOC cone boundaries survive MOI/CBF import as Lorentz cones;
++- PSD block sparsity survives canonicalization;
++- every transformation has an original-coordinate reconstruction map;
++- the planner, not the frontend, chooses native vs lifted formulation.
++
++Do not move every source file in one PR.  Introduce interfaces first, migrate
++one frontend/backend at a time, and keep old tests green.
++
++## Benchmark-driven priorities
++
++### LP
++
++Use Netlib for correctness, modern20 and Network-LP25 for sparse memory and
++factorization.  Treat any accidental dense matrix proportional to
++`variables*constraints` or `variables^2` as a blocker.
++
++### SOCP
++
++Use generated near-tangent / near-infeasible / many-tiny-cone families first,
++then CBLIB core12.  Implement general native Lorentz algebra before claiming a
++native SOCP backend.  Q3 is a specialized kernel inside that backend.
++
++### SDP
++
++Use G48mc/G55mc/G60mc/checker for sparse Schur, cphil/theta for tall systems,
++mater/ros for many blocks, reimer/fap for memory.  Continue to keep the
++existing lattice/CSDR benchmarks because they expose high-precision equality
++and many-small-block behavior that public suites do not replace.
++
++## Numerical reliability rules
++
++- Original-coordinate certification is authoritative.
++- Preserve arithmetic type throughout the solve.
++- Do not convert high-precision input through Float64.
++- Precision escalation must have an explicit diagnosed reason and be recorded.
++- Keep sparse Cholesky/LDL fallbacks guarded by residual/conditioning checks.
++- Before release, add a slow reference validator that does not reuse all of the
++  same hot solver kernels.
++
++## Definition of done for each optimization PR
++
++Report on the same hardware:
++
++- exact git SHA and problem SHA;
++- arithmetic and precision bits;
++- Julia and BLAS thread counts;
++- requested and resolved auto options;
++- planned and executed backend/formulation;
++- median/min end-to-end time;
++- assembly/factor/refine/certify phase times where available;
++- persistent workspace and peak RSS;
++- primal/dual residual, gap, cone violation;
++- certificate validity.
++
++Do not merge an isolated-kernel win that loses the relevant end-to-end gate.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/Project.toml /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/Project.toml
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/Project.toml	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/Project.toml	2026-08-11 10:06:12.306237174 +0000
+@@ -1,7 +1,7 @@
+ name = "SDPX"
+ uuid = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
+ authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
+-version = "0.4.0"
++version = "0.4.1-DEV"
+ 
+ [deps]
+ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/README.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/README.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/README.md	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/README.md	2026-08-11 09:57:18.208249725 +0000
+@@ -70,6 +70,32 @@
+ The complete runnable set is in [`examples/`](examples/).  It is exercised by
+ the test suite; setup and commands are in [`examples/README.md`](examples/README.md).
+ 
++
++## Command-line frontend
++
++The v0.4.1 development snapshot adds a small SDPB-style command-line policy
++layer.  All ordinary options default to `auto`; backend-specific IPM/KKT
++parameters stay internal.  After one-time setup:
++
++```bash
++julia bin/setup_cli.jl
++./bin/sdpx problem.json
++```
++
++A high-precision run can be written in the familiar form:
++
++```bash
++./bin/sdpx problem.json result.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
++
++An integer precision is a BigFloat **bit count**.  The result JSON records both
++`resolved_options` and the executed automatic `plan`, so `auto` is inspectable.
++See [`docs/cli.md`](docs/cli.md).
++
+ ## Public API
+ 
+ These are the stable-intent entry points.  The package remains experimental,
+@@ -83,7 +109,8 @@
+ | `linear_program`, `solve_lp` | Build or solve a native LP |
+ | `second_order_program`, `solve_socp` | Build or solve LP plus Lorentz-cone models |
+ | `prepare`, `PreparedSolver` | Reuse an ingested model across objective directions |
+-| `SolverOptions` | Typed solver controls and expert overrides |
++| `SolveOptions` | Small all-auto user policy for LP/SOCP/SDP solves |
++| `SolverOptions` | Fully resolved typed controls and expert overrides |
+ | `SDPResult`, `SolveStatus` | Structured result, status, residuals, and timings |
+ | `solve_summary`, `result_certificate` | Public summary and independent validation |
+ | `Optimizer` | MathOptInterface optimizer for JuMP and other MOI clients |
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/SNAPSHOT_NOTES.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/SNAPSHOT_NOTES.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/SNAPSHOT_NOTES.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/SNAPSHOT_NOTES.md	2026-08-11 10:06:14.893812429 +0000
+@@ -0,0 +1,52 @@
++# Snapshot notes
++
++This package was assembled from the two user-supplied archives on 2026-08-11.
++
++## Inputs
++
++```text
++SDPX.jl-main (1).zip
++SHA-256 7fa890daaf4b3f824a9c66ee31458a5a2a6f01345ba7b03e6618fb7fb6f661eb
++
++SDPX_benchmark_suite_20260811(1).zip
++SHA-256 e763644f5397b7a72ccb69f8d429e9b879562dd876c58f2a4940a60e9e17cd80
++```
++
++## Runtime-validation status
++
++The assembly environment used to prepare this snapshot does **not** contain a
++Julia executable.  The new Julia files were therefore reviewed statically,
++shell wrappers were checked with `bash -n`, JSON fixtures were parsed, and
++source delimiters were sanity-checked, but the Julia test suite could not be
++executed here.
++
++The first action on a development machine should therefore be:
++
++```bash
++./scripts/dev_v041_smoke.sh
++```
++
++or, for a more controlled start:
++
++```bash
++julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
++julia bin/setup_cli.jl
++./bin/sdpx --help
++```
++
++Any syntax/API issue found by that first Julia run should be fixed as a small
++bootstrap commit while preserving the new frontend/midend boundary described
++in `DEVELOPMENT_v0.4.1.md`.
++
++## Final auto-conic packaging additions
++
++The packaged development baseline also contains two low-risk P0 code fixes:
++
++- explicit `equality_solver=:qr` is reflected during Schur backend planning so
++  memory preflight does not advertise the sparse-Schur route that the current
++  workspace will disable;
++- sparse equality backward-error/certificate scale accumulation uses CSC
++  `nzrange` traversal instead of scanning every logical B entry.
++
++A lazy precision-registry guard was also added to the CLI bridge so direct
++`include`/embedding does not rely on package-loader `__init__` behavior.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/START_HERE_v0.4.1.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/START_HERE_v0.4.1.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/START_HERE_v0.4.1.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/START_HERE_v0.4.1.md	2026-08-11 10:06:14.893812429 +0000
+@@ -0,0 +1,67 @@
++# SDPX v0.4.1-dev: start here
++
++This archive is a **development baseline**, not a claim that v0.4.1 has passed
++release validation. It preserves the uploaded v0.4.0 numerical core and adds a
++small all-auto frontend/midend boundary plus the supplied LP/SOCP/SDP benchmark
++suite.
++
++## 1. First commands
++
++```bash
++julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
++julia bin/setup_cli.jl
++./bin/sdpx --help
++```
++
++High precision in the SDPB-style frontend:
++
++```bash
++./bin/sdpx examples/cli_problem_high_precision.json out.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
++
++Omit every flag for the ordinary path: all public policies are `auto`.
++
++## 2. Read in this order
++
++1. `DEVELOPMENT_v0.4.1.md`
++2. `docs/architecture-v041.md`
++3. `docs/cli.md`
++4. `PROMPT_V041_CONIC_REFACTOR.md`
++5. `bench/public_conic_suite/configs/development_gates.toml`
++6. `bench/public_conic_suite/PROMPT_SDPX_BENCHMARK_INTEGRATION.md`
++
++## 3. Architectural contract
++
++```text
++Frontend: arrays / JuMP-MOI / CLI / future SDPA-CBF-MPS loaders
++    -> semantic LP / Lorentz-SOC / PSD cones
++Midend: analyze -> presolve -> scale -> formulation -> ExecutionPlan
++Backend: native LP / native SOC / native SDP -> KKT -> factor -> refine
++Validation: original-coordinate authoritative certificate
++```
++
++`SolveOptions()` is the small public policy object and defaults entirely to
++`:auto`. `SolverOptions{T}` remains the expert/resolved numerical contract.
++Do not add backend microkernel knobs to `SolveOptions`.
++
++## 4. P0 coding order
++
++1. Finish making `ExecutionPlan` authoritative. This snapshot fixes the known
++   explicit-QR vs sparse-Schur planning mismatch; continue auditing other
++   deterministic choices made after planning.
++2. Make `KKTBackend` the actual factor/solve/refine production boundary.
++3. Keep sparse certification O(nnz). This snapshot adds CSC-specialized
++   equality backward-error accumulation; benchmark it on large retained B.
++4. Wire the public benchmark smoke tier into one normalized result runner.
++5. Only after those gates are green, migrate to a canonical conic IR and
++   end-to-end sparse LP / general native SOCP.
++
++## 5. Important validation note
++
++The environment used to assemble this archive did not contain Julia, so Julia
++unit/integration tests could not be executed here. Shell/JSON/static checks were
++performed. Run the commands in section 1 before making numerical changes.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/V041_DEV_CHANGES.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/V041_DEV_CHANGES.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/V041_DEV_CHANGES.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/V041_DEV_CHANGES.md	2026-08-11 10:01:45.486602086 +0000
+@@ -0,0 +1,51 @@
++# v0.4.1-dev change map
++
++This is the shortest map of where to start coding.
++
++## New frontend
++
++- `src/frontend/solve_options.jl` — small public all-auto `SolveOptions`.
++- `src/frontend/high_level_solve.jl` — bridge from `SolveOptions` to existing
++  SDP/LP/SOC solve paths.
++- `bin/sdpx.jl` — SDPB-style user CLI.
++- `bin/sdpx` — shell entry point.
++- `bin/setup_cli.jl` — one-time CLI environment setup.
++
++## New midend boundary
++
++- `src/midend/resolve_options.jl` — resolves the all-auto policy to concrete
++  `SolverOptions{T}` while leaving structural backend selection to the existing
++  `ExecutionPlan`.
++
++## Backend
++
++No large numerical backend rewrite is hidden in this archive.  Existing LP,
++Q3/SOC, SDP, Schur, KKT and validation implementations are preserved so the
++next commits can establish equivalence gates before migration.
++
++The exact P0 backend tasks are in `DEVELOPMENT_v0.4.1.md` and
++`PROMPT_V041_CONIC_REFACTOR.md`.
++
++## Benchmark
++
++- `bench/public_conic_suite/` — complete supplied benchmark starter kit.
++- `bench/public_conic_suite/INTEGRATION_STATUS.md` — what is and is not wired
++  into SDPX yet.
++
++## Tests/examples/docs
++
++- `test/frontend_auto_options.jl`
++- additional SDPB-style parser assertions in `test/cli_bridge.jl`
++- `examples/cli_problem.json`
++- `examples/cli_problem_high_precision.json`
++- `docs/cli.md`
++- `docs/architecture-v041.md`
++- `scripts/dev_v041_smoke.sh`
++
++## First command on a machine with Julia
++
++```bash
++./scripts/dev_v041_smoke.sh
++```
++
++The preparation environment did not have Julia; see `SNAPSHOT_NOTES.md`.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/.gitignore.example /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/.gitignore.example
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/.gitignore.example	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/.gitignore.example	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,6 @@
++# Public conic benchmark data/results
++data/external/
++data/download_lock.toml
++data/generated/*.csv
++results/
++*.log
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/INTEGRATION_STATUS.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/INTEGRATION_STATUS.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/INTEGRATION_STATUS.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/INTEGRATION_STATUS.md	2026-08-11 09:56:37.789972812 +0000
+@@ -0,0 +1,23 @@
++# Integration status in the SDPX v0.4.1 development snapshot
++
++The supplied suite is copied into the repository unchanged so its provenance,
++manifests and generators can act as a stable acceptance layer.
++
++Implemented in this snapshot:
++
++- suite present under the intended repository path;
++- all-auto frontend policy and SDPB-style precision/tolerance CLI;
++- development plan that assigns benchmark families to frontend/midend/backend
++  milestones.
++
++Not yet implemented (next development tasks):
++
++- SDPA sparse file loader for the external SDP cases;
++- CBF loader preserving native Lorentz semantics;
++- MPS/Netlib loader feeding the native sparse LP path;
++- one unified external-suite runner and normalized result record;
++- external reference solver adapters;
++- pinned same-hardware baseline results.
++
++Do not treat the presence of the manifest as evidence that these external cases
++have been executed by this snapshot.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/PACKAGE_INVENTORY.json /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/PACKAGE_INVENTORY.json
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/PACKAGE_INVENTORY.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/PACKAGE_INVENTORY.json	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,112 @@
++[
++  {
++    "path": ".gitignore.example",
++    "bytes": 113,
++    "sha256": "3c40caacb59d6dddfc80baa99b3bf78ac68bee44368ad1164ebe99d3e837ff5f"
++  },
++  {
++    "path": "PROMPT_SDPX_BENCHMARK_INTEGRATION.md",
++    "bytes": 12313,
++    "sha256": "7afb4e589433b3be8cacd2aa4176d52a47c9f1b38e5400ad17b66369fed226b9"
++  },
++  {
++    "path": "Project.toml",
++    "bytes": 228,
++    "sha256": "ad83813713b8c5958d6048d5496b924f53bbc86b2f78ee6c4f5ca1b2e128ba07"
++  },
++  {
++    "path": "README.md",
++    "bytes": 3503,
++    "sha256": "126340ac974d9affbc1e4bb5368fa125dbf7e13e2853edeafc65e3b469fe1840"
++  },
++  {
++    "path": "RESULT_SCHEMA.md",
++    "bytes": 1552,
++    "sha256": "c9ae6fcaaddd59ecb84f8b8e8b1a25d0d297fb2b48912063b75ee3475fab9a33"
++  },
++  {
++    "path": "SOURCES_AND_PROVENANCE.md",
++    "bytes": 1605,
++    "sha256": "a2b9a14c1b6de381189564483bb7b79f48addb968cab97f6835f63d78079135c"
++  },
++  {
++    "path": "configs/tiers.toml",
++    "bytes": 1168,
++    "sha256": "ae3d96c81fcbceafaa090c7514957594546d94edde2e3ebadfa3678c7cd5517a"
++  },
++  {
++    "path": "data/external/.gitkeep",
++    "bytes": 0,
++    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++  },
++  {
++    "path": "data/generated/.gitkeep",
++    "bytes": 0,
++    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
++  },
++  {
++    "path": "generators/SDPXPathologicalBenchmarks.jl",
++    "bytes": 8954,
++    "sha256": "1000d5c4da433d65c30bcfe398b8feb029e08731bece66b9d7ef60465c785a2a"
++  },
++  {
++    "path": "manifests/README.md",
++    "bytes": 765,
++    "sha256": "802857397eba4746eb8644346926ab8c0343642a8acebc185d16a1f48fbea756"
++  },
++  {
++    "path": "manifests/downloads.toml",
++    "bytes": 10150,
++    "sha256": "4326e5f8953f1a764dbf4e8621f86667e5db4c06c7b93fa5dc3fe7bbd55a02ce"
++  },
++  {
++    "path": "manifests/lp_netlib_core20.csv",
++    "bytes": 2818,
++    "sha256": "937e1b118cc664ac47d6a2ad8599493a0acbf09abb208987c6e18157578e3444"
++  },
++  {
++    "path": "manifests/pathological_suites.toml",
++    "bytes": 2888,
++    "sha256": "62bf4e079ce49d6c19ad093142e37e7fe01834bff54de249d3f248cb2385c6a7"
++  },
++  {
++    "path": "references/mittelmann_infeasible_sdp_8x100_2025-09-21.csv",
++    "bytes": 662,
++    "sha256": "0fd4852c6f911ce46e9e82446cc9148f210c8f68f8679efa92ed5d71156dacc9"
++  },
++  {
++    "path": "references/mittelmann_lp_modern20_2026.csv",
++    "bytes": 1576,
++    "sha256": "75f518d756a77653b4234ef7d5b197b539bcf67bcd212ff8732da6ad78eaef01"
++  },
++  {
++    "path": "references/mittelmann_network_lp25_2026-07-01.csv",
++    "bytes": 1207,
++    "sha256": "c0fbe015aed78523d93a05ad7873d3730a79522adb12696107dee44db7223163"
++  },
++  {
++    "path": "references/mittelmann_sdp_core30_2026-04-25.csv",
++    "bytes": 2974,
++    "sha256": "fad96a75d580f48104745ac3a0147277f9624b6edfa5cc8eaf46d896dfe62db8"
++  },
++  {
++    "path": "references/mittelmann_socp_full18_2026-08-10.csv",
++    "bytes": 1568,
++    "sha256": "2d86f89aae8e3ecbb71952b0bab016e83d769db2e7a0d66bdce4eab596e05d60"
++  },
++  {
++    "path": "scripts/download_external.jl",
++    "bytes": 2511,
++    "sha256": "68303fe916f5012b09171f315536d948c48206fc7e4be8425c937e29f398d1bf"
++  },
++  {
++    "path": "scripts/run_pathological.jl",
++    "bytes": 3291,
++    "sha256": "0d7da12bda86f11a00c9583c61ff88e903c2403446ab716d52c8fa83c962a369"
++  },
++  {
++    "path": "scripts/setup_benchmark_env.jl",
++    "bytes": 749,
++    "sha256": "8863dd858a284cc7ebd9625098e078f23ee795f6715e23663046ec9c59bfdda5"
++  }
++]
+\ No newline at end of file
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/PROMPT_SDPX_BENCHMARK_INTEGRATION.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/PROMPT_SDPX_BENCHMARK_INTEGRATION.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/PROMPT_SDPX_BENCHMARK_INTEGRATION.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/PROMPT_SDPX_BENCHMARK_INTEGRATION.md	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,353 @@
++# Prompt: integrate and use the public LP/SOCP/SDP benchmark suite in SDPX.jl
++
++You are continuing development of **SDPX.jl**, not SDPB. Work in the existing
++repository and preserve its current architecture, public API, numerical
++semantics, and existing benchmark coverage.
++
++## Repository context you must inspect first
++
++Before modifying code, inspect at least:
++
++- `Project.toml`
++- `src/SDPX.jl`
++- `src/public_api.jl`
++- `src/moi_wrapper.jl`
++- `docs/julia-interface.md`
++- `bench/automatic_pipeline/benchmark_pipeline.jl`
++- `bench/automatic_pipeline/benchmark_high_precision_lp.jl`
++- `bench/bigfloat_sparse_schur/`
++- `bench/mixed_precision_kkt/`
++- `bench/soc_fixed_trace/`
++- `bench/preprocessing/`
++- any newer benchmark or solver backend files added since this prompt was written.
++
++Do not create a second diagnostics architecture if the current
++`result.diagnostics` / plan / memory / presolve / timing machinery can be
++extended. Reuse `SDPX.ingest`, `SDPX.solve!`, `SDPX.linear_program`,
++`SDPX.solve_lp`, and the MOI/JuMP wrapper where appropriate.
++
++## Goal
++
++Integrate the supplied `public_conic_suite` as a durable benchmark layer for
++continued SDPX.jl optimization. It must measure three distinct workloads:
++
++1. **LP** — dedicated LP path, sparse KKT/Hessian, presolve, scaling,
++   refinement, feasibility/optimality behavior.
++2. **SOCP** — general SOC frontend and, separately, any genuinely native SOC
++   path. Never hide a PSD arrow lift under a "native SOCP" label.
++3. **SDP** — sparse/dense, few-block/many-block, tall/wide KKT, memory-heavy,
++   numerically difficult, infeasible and weakly infeasible cases.
++
++In addition, use the generated pathological families to measure effective
++precision and numerical reliability across Float64, fixed-width extended
++precision (especially Float64x2/x3/x4 when supported), and BigFloat.
++
++## Non-negotiable benchmark rules
++
++### Correctness before speed
++A solver run is not counted as solved merely because it returns `OPTIMAL`.
++Certify it with the strongest available checks:
++- primal residual;
++- dual residual;
++- relative gap;
++- cone violation;
++- for SDP, PSD/eigenvalue violation and DIMACS-style measures where the
++  formulation permits;
++- expected analytic objective when provided;
++- infeasibility/unbounded certificates when available.
++
++If certification fails, record the run as an accuracy failure even when the
++solver status says solved.
++
++### Fair timing
++- Compare solvers on the same machine.
++- Record CPU, RAM, OS, Julia version, BLAS vendor, BLAS threads, Julia threads,
++  solver threads, git SHA and problem SHA-256.
++- Warm up before timed repetitions.
++- Report median and minimum time, not a single noisy run.
++- Separate parse/setup/presolve/assembly/factorization/solve/certification when
++  the instrumentation exists.
++- External Mittelmann seconds in `references/` are orientation data only.
++  Never compute or publish an SDPX speedup against those cross-machine times.
++
++### Preserve formulations
++For every run record `formulation`, for example:
++- `lp_native`
++- `soc_moi_arrow_lift`
++- `soc_native_fixed_trace`
++- `sdp_native`
++- `sdp_moi`
++
++Do not compare two solvers under materially different mathematical
++formulations without explicitly labeling that fact.
++
++### No giant binaries in git
++Keep external benchmark data under an ignored cache directory such as
++`bench/public_conic_suite/data/external/`. Pin downloaded inputs with SHA-256
++in a lock/manifest file. Commit manifests, generators, parsers and selected
++tiny fixtures only.
++
++## Phase 1 — import and provenance
++
++Implement a benchmark loader layer under the suite directory, not in the core
++solver unless functionality is genuinely reusable.
++
++Support, in priority order:
++
++1. SDPA sparse files used by the SDP suite.
++2. CBF files from CBLIB for SOCP.
++3. MPS/Netlib LP data.
++
++Prefer current MathOptInterface/JuMP file-format support when it is correct for
++the pinned SDPX/MOI versions. If a format is unsupported or loses cone
++semantics, implement a benchmark-only adapter. Do not guess format APIs: inspect
++the installed MathOptInterface version and add tests.
++
++For every imported problem record:
++- source URL/source family;
++- local path;
++- SHA-256;
++- original format;
++- parsed dimensions;
++- cone counts/block sizes;
++- nnz;
++- objective sense;
++- whether the imported formulation exactly matches the reference formulation.
++
++For the three SDP core entries whose direct file is not pinned in
++`downloads.toml` (`torusg3-15`, `biomedP`, and any generator-only case), resolve
++the original public source. Do not silently replace them with a similarly named
++problem.
++
++## Phase 2 — unified runner
++
++Create one runner capable of selecting:
++
++```text
++--suite=lp|socp|sdp|pathological
++--tier=smoke|nightly|release
++--precision=float64|float64x2|float64x3|float64x4|bigfloat
++--precision-bits=N
++--threads=N
++--blas-threads=N
++--repetitions=N
++--warmup=N
++--time-limit=S
++--output=PATH
++```
++
++Use SDPX's existing options/automatic pipeline rather than duplicating solver
++configuration.
++
++Output machine-readable CSV plus TOML or JSON. At minimum use the fields in
++`RESULT_SCHEMA.md`.
++
++Create a single normalized classification for:
++- certified_optimal
++- certified_feasible
++- certified_infeasible
++- certified_unbounded
++- inaccurate
++- numerical_failure
++- time_limit
++- memory_limit
++- unsupported
++- unknown
++
++Keep the raw SDPX/MOI status as a separate field.
++
++## Phase 3 — external reference solvers
++
++Reference adapters are optional at runtime and must not become hard
++dependencies of SDPX.
++
++Recommended local comparison set:
++- LP: HiGHS; optionally MOSEK/COPT if installed.
++- SOCP: Clarabel and/or MOSEK/COPT if installed.
++- SDP: CSDP/SDPA and optionally MOSEK/COPT.
++- high precision SDP: SDPA-GMP or another independently verified
++  arbitrary-precision reference where practical.
++
++If a solver is absent, mark `not_installed`; do not fail the entire campaign.
++
++Match tolerances as closely as solver semantics allow and record the actual
++settings. Do not tune competitors to fail.
++
++## Phase 4 — implement benchmark tiers
++
++### smoke
++Purpose: PR correctness/regression, short runtime.
++- small Netlib LP cases;
++- moderate SDP cases from `configs/tiers.toml`;
++- generated LP/SOCP/SDP boundary cases;
++- Float64 by default, one extended-precision sentinel if CI budget permits.
++
++### nightly
++Purpose: performance and numerical regression.
++- all SDP core30;
++- SOCP core12, subject to machine/data availability;
++- Netlib core20 + modern LP core20;
++- all pathological families at a selected parameter ladder;
++- Float64, Float64x4 and BigFloat256 sentinel campaigns.
++
++### release
++Purpose: solver-release evidence.
++- full public Mittelmann SDP selection available to the project;
++- all 18 current SOCP cases;
++- all public LPfeas/LPopt cases that can legally and reproducibly be obtained;
++- Network-LP25;
++- Pataki/Mittelmann 8×100 infeasible SDP families;
++- full precision ladders through BigFloat512/1024 where useful;
++- same-hardware competitor runs.
++
++Do not make multi-hour release workloads ordinary CI requirements.
++
++## Phase 5 — pathological precision campaign
++
++Use `manifests/pathological_suites.toml` and
++`generators/SDPXPathologicalBenchmarks.jl`.
++
++### LP
++1. near-dependent equality basis;
++2. row/column scaling over many decades;
++3. tiny infeasibility margins;
++4. Klee-Minty-like triangular scaling family;
++5. optionally add deterministic sparse network LPs with known primal/dual
++   solutions.
++
++### SOCP
++1. near-tangent analytic family:
++   `min s` subject to `||(1,eps)||₂ <= 1+s`,
++   with exact `s*=sqrt(1+eps²)-1`;
++2. near-infeasible boundary family:
++   `||(1,eps)||₂ <= 1`;
++3. many-tiny-cones scaling family.
++
++### SDP
++1. `[[x,1],[1,delta]] >= 0`: `x*=1/delta` for `delta>0`,
++   weakly infeasible at `delta=0`;
++2. Hilbert minimum-eigenvalue SDP;
++3. positive diagonal congruence scaling;
++4. deterministic matrices with prescribed tiny minimum eigenvalue;
++5. Pataki/Mittelmann strong/weak infeasibility families.
++
++For each family, plot or tabulate the largest problem severity for which each
++arithmetic type still certifies the correct result. The important output is not
++just time; report a **precision frontier**:
++- smallest epsilon/delta resolved;
++- largest dynamic range survived;
++- first false feasible/infeasible status;
++- residual/gap at failure;
++- number of precision escalations/refinement steps.
++
++## Phase 6 — profiling and optimization loop
++
++After the baseline is reproducible, classify each slow/failing case by actual
++profile evidence. Candidate bottleneck classes include:
++
++- frontend/import/canonicalization;
++- equality presolve/rank detection;
++- equilibration;
++- Schur/Hessian assembly;
++- sparse symbolic factorization;
++- sparse numeric factorization;
++- dense BLAS kernel;
++- many-small-block cone algebra;
++- SOC cone algebra / arrow-lift overhead;
++- iterative refinement;
++- regularization/restart logic;
++- allocation/GC;
++- memory bandwidth / peak workspace;
++- termination/certification.
++
++For each optimization:
++1. identify the benchmark subset that motivates it;
++2. capture before numbers;
++3. change one subsystem at a time;
++4. run smoke + targeted subset;
++5. reject changes that improve time but worsen certified accuracy;
++6. run nightly before considering the change complete;
++7. record after numbers and profile deltas.
++
++Avoid global parameter tuning that merely overfits the selected 30 SDP cases.
++Any new automatic heuristic should be justified by structural features and
++validated out-of-sample.
++
++## Phase 7 — regression gates
++
++Implement accuracy gates first.
++
++Examples:
++- previously certified case may not become inaccurate/unknown;
++- objective error may not increase beyond tolerance budget;
++- residual/gap/cone violation may not regress by a large multiplicative factor;
++- weak-infeasible cases must not be relabeled as confidently feasible;
++- precision escalation must remain deterministic under the same inputs.
++
++Performance gates should tolerate noise. Prefer:
++- median of repeated runs;
++- geometric mean across a workload class;
++- per-class thresholds;
++- only flag meaningful regressions (for example >10–15% after repeated
++  confirmation), rather than failing on single-run jitter.
++
++Never combine LP, SOCP and SDP into one opaque overall score. Report separate
++scores for:
++- LP;
++- SOCP general frontend;
++- SOCP native special path;
++- SDP sparse/few-block;
++- SDP many-block;
++- SDP dense/memory-heavy;
++- pathological/high precision.
++
++## Phase 8 — reports
++
++Generate:
++
++1. `summary.csv` — one row per problem/solver/configuration.
++2. `failures.csv` — all uncertified/failing cases with reason.
++3. `precision_frontier.csv` — pathological threshold results.
++4. `performance_by_class.csv` — shifted/geometric means by workload class.
++5. `benchmark_manifest.toml` — machine/config/git/data hashes.
++6. a concise Markdown report with:
++   - correctness count;
++   - runtime distributions;
++   - memory;
++   - top regressions/improvements;
++   - precision frontier;
++   - recommended next optimization target.
++
++## Acceptance criteria
++
++The integration is complete only when:
++
++- existing SDPX tests still pass;
++- existing benchmark scripts are not broken;
++- smoke tier runs from a clean checkout after benchmark-environment setup;
++- downloaded data are hash-pinned and ignored by git;
++- generated pathological cases reproduce their analytic classifications;
++- the runner distinguishes raw status from certified status;
++- LP/SOCP/SDP results are reported separately;
++- general SOC arrow-lift and native SOC paths are not conflated;
++- at least Float64 and one extended/high-precision campaign work;
++- the benchmark report can identify whether a regression is speed, memory,
++  accuracy, status detection, or precision-frontier related.
++
++## First concrete task
++
++Do not start by optimizing the solver.
++
++First:
++1. inspect the current repository and summarize what existing benchmark
++   infrastructure can be reused;
++2. add the suite without large binaries;
++3. implement the smallest end-to-end `smoke` path;
++4. run it and fix import/certification issues;
++5. produce the first baseline report;
++6. only then recommend the highest-leverage SDPX optimization based on measured
++   bottlenecks.
++
++When reporting progress, show exact files changed, exact commands run,
++certification results, and measured before/after numbers. Do not claim a
++performance improvement without same-machine measurements.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/Project.toml /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/Project.toml
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/Project.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/Project.toml	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,11 @@
++name = "SDPXBenchmarkSuite"
++uuid = "ca8e15f0-fbe7-4d97-a7fb-c08af741e1e8"
++version = "0.1.0"
++
++[deps]
++SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
++JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
++
++[compat]
++julia = "1.10"
++JuMP = "1"
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/README.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/README.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/README.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/README.md	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,102 @@
++# SDPX.jl Public Conic Benchmark Suite — 2026-08-11
++
++A benchmark starter kit for continued SDPX.jl development.
++
++## What is inside
++
++- **30 curated SDP cases** with 2026-04-25 Mittelmann reference metadata.
++- **12 core / 18 full SOCP cases** from the 2026-08-10 Mittelmann CBLIB campaign.
++- **40 LP core cases**: 20 Netlib regression cases + 20 modern large LP cases.
++- **25 large Network-LP stress cases**.
++- **8 × 100 infeasible/weak-infeasible SDP family reference counts**.
++- Parameterized **high-precision/pathological generators** for LP, SOCP and SDP.
++- A download manifest and Julia downloader that records local SHA-256 digests.
++- CI/nightly/release tier definitions.
++- A complete development prompt in `PROMPT_SDPX_BENCHMARK_INTEGRATION.md`.
++
++## Why public binaries are not embedded
++
++The selected CBLIB SOCP files alone include several files of hundreds of MB.
++Committing them would bloat SDPX.jl and make CI brittle. Instead:
++
++1. the archive carries exact public filenames/URLs where a stable direct URL is known;
++2. `scripts/download_external.jl` retrieves them into `data/external/`;
++3. every downloaded file is hashed into `data/download_lock.toml`;
++4. generated pathological cases are defined completely in source and require no binary download.
++
++This is better suited to a long-lived solver repository.
++
++## Suggested repository location
++
++Copy this whole directory to:
++
++```text
++SDPX.jl/
++└── bench/
++    └── public_conic_suite/
++```
++
++Keep SDPX's existing benchmark directories. This suite is an additional
++**standardized workload layer**, not a replacement for application-specific
++CSDR/lattice-bootstrap/mixed-precision benchmarks.
++
++## First setup
++
++From the copied suite directory:
++
++```bash
++julia scripts/setup_benchmark_env.jl
++```
++
++Then generate a small pathological campaign:
++
++```bash
++julia --project=. scripts/run_pathological.jl --precision=float64
++julia --project=. scripts/run_pathological.jl --precision=float64x4
++julia --project=. scripts/run_pathological.jl --precision=bigfloat256
++julia --project=. scripts/run_pathological.jl --precision=bigfloat512
++```
++
++Download only the manageable SDP core first:
++
++```bash
++julia scripts/download_external.jl --suite=sdp --tier=core
++```
++
++CBLIB core is large. Download deliberately, e.g. first two files:
++
++```bash
++julia scripts/download_external.jl --suite=socp --tier=core --limit=2
++```
++
++## Integration order
++
++1. **Import + certification before speed.**
++2. Make `smoke` green on Float64.
++3. Add Float64x4/BigFloat precision ladders.
++4. Add external solver adapters on the *same hardware*.
++5. Establish a pinned baseline JSON/CSV.
++6. Only then optimize KKT/Schur/scaling/cone kernels.
++7. Every optimization PR must report both performance delta and certification delta.
++
++## Important SDPX-specific note
++
++General MOI SOC constraints currently pass through SDPX's supported conic
++frontend and may use a PSD arrow lift, while specialized fixed-trace Q3 models
++have a native SOCP path. Do **not** mix those formulations in one timing score.
++Record a `formulation` field and benchmark:
++- general SOC frontend / arrow-lift behavior;
++- native fixed-trace SOC backend;
++separately.
++
++Likewise, LP benchmarking should use the dedicated LP frontend when possible so
++that the benchmark actually exercises the optimized LP path instead of
++manufacturing 1×1 PSD blocks.
++
++## Files to read first
++
++1. `PROMPT_SDPX_BENCHMARK_INTEGRATION.md`
++2. `configs/tiers.toml`
++3. `RESULT_SCHEMA.md`
++4. `manifests/pathological_suites.toml`
++5. `references/*.csv`
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/RESULT_SCHEMA.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/RESULT_SCHEMA.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/RESULT_SCHEMA.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/RESULT_SCHEMA.md	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,37 @@
++# Unified result schema
++
++Every solver run should eventually emit at least the following fields. Reuse
++SDPX's existing diagnostics rather than creating a competing diagnostics stack.
++
++## Identity / provenance
++- `suite`, `problem`, `problem_sha256`, `formulation`
++- `sdpx_git_sha`, `julia_version`, `os`, `cpu_model`
++- `arithmetic`, `precision_bits`
++- `julia_threads`, `blas_threads`, `solver_threads`
++- `solver_name`, `solver_version`
++- `tolerance_primal`, `tolerance_dual`, `tolerance_gap`
++
++## Correctness
++- `status`
++- `objective_primal`, `objective_dual`
++- `relative_gap`
++- `primal_residual`, `dual_residual`
++- `primal_cone_violation`, `dual_cone_violation`
++- for SDP: six DIMACS-style error measures where the imported formulation permits it
++- `minimum_psd_eigenvalue` or normalized PSD violation
++- `certificate_type`, `certificate_residual` when available
++- `reference_objective`, `objective_error`
++
++## Performance
++- `setup_seconds`, `solve_seconds`, `total_seconds`
++- `iterations`
++- `factorization_seconds`, `schur_assembly_seconds`, `refinement_seconds` when available
++- `allocated_bytes`, `workspace_bytes`, `process_peak_rss_bytes`
++- `regularization`, `refinement_steps`, `restarts`
++- selected algorithm/kernel/profile from `result.diagnostics.plan`
++
++## Benchmark policy
++A run is not "solved" based only on a solver status string. Certification must
++check residuals/gap/cone violations against the campaign tolerance. External
++Mittelmann times are orientation data only and must never be used to claim an
++SDPX speedup across different machines.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/SOURCES_AND_PROVENANCE.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/SOURCES_AND_PROVENANCE.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/SOURCES_AND_PROVENANCE.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/SOURCES_AND_PROVENANCE.md	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,32 @@
++# Sources and provenance
++
++This archive intentionally stores **manifests and generators**, not multi-GB
++copies of public benchmark binaries.
++
++Public source pages used to construct the manifests:
++
++- Hans Mittelmann benchmark index: https://plato.asu.edu/bench.html
++- Sparse/other SDP benchmark (25 Apr 2026): https://plato.asu.edu/ftp/sparse_sdp.html
++- SDP data directory: https://plato.asu.edu/ftp/sdp/
++- Infeasible SDP benchmark (21 Sep 2025): https://plato.asu.edu/ftp/sdp_inf.html
++- Large SOCP benchmark (10 Aug 2026): https://plato.asu.edu/ftp/socp.html
++- LPfeas benchmark (10 Aug 2026): https://plato.asu.edu/ftp/lpfeas.html
++- LPopt benchmark (1 Jul 2026): https://plato.asu.edu/ftp/lpopt.html
++- Large Network-LP benchmark (1 Jul 2026): https://plato.asu.edu/ftp/network.html
++- CBLIB: https://cblib.zib.de/
++- CBLIB file directory: https://cblib.zib.de/download/all/
++- Netlib LP data: https://netlib.org/lp/data/
++
++CBLIB explicitly permits redistribution of its data subject to its license
++conditions; nevertheless, this package leaves the large files at the official
++source and downloads them on demand. Other datasets must retain their own
++upstream licensing/provenance requirements.
++
++Reference runtime columns are copied as *orientation metadata* from the named
++Mittelmann tables. Flags:
++- `a`: at least one DIMACS error exceeds 1e-4 in the SDP table.
++- `f`: failure; in the SDP table this means at least one DIMACS error exceeds 1e-2.
++- `m`: memory limit exceeded.
++- `t`: time limit exceeded (LP/SOCP tables as applicable).
++
++Do not compare those seconds directly to SDPX timings on another machine.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/configs/development_gates.toml /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/configs/development_gates.toml
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/configs/development_gates.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/configs/development_gates.toml	2026-08-11 10:06:25.987259654 +0000
+@@ -0,0 +1,37 @@
++version = 1
++purpose = "Map the public conic suite to SDPX frontend/midend/backend development gates."
++
++[frontend]
++policy = ["all_auto_options", "sdpb_style_cli_precision_thresholds", "exact_numeric_string_parsing"]
++smoke = ["lp_netlib_smoke", "pathological_lp", "pathological_socp", "pathological_sdp"]
++required_fields = ["requested_options", "resolved_options", "formulation", "certificate"]
++
++[midend]
++policy = ["execution_plan_authoritative", "no_hidden_deterministic_route_change", "original_coordinate_reconstruction"]
++smoke = ["lp.near_dependent_equalities", "lp.row_scaling", "socp.near_tangent", "sdp.congruence_scaling"]
++nightly = ["sdp_core30", "socp_core12", "lp_modern20"]
++
++[backend.lp]
++correctness = ["netlib_core20", "lp.near_dependent_equalities", "lp.infeasible_margin"]
++performance = ["mittelmann_modern20", "network_lp25"]
++blockers = ["implicit_dense_G", "implicit_dense_Aeq", "dense_nvar_squared_workspace"]
++
++[backend.socp]
++correctness = ["socp.near_tangent", "socp.near_infeasible"]
++performance = ["socp.many_tiny_cones", "mittelmann_socp_core12"]
++formulations = ["soc_native", "soc_psd_arrow_reference"]
++rule = "Never label PSD-arrow timing as native SOCP."
++
++[backend.sdp]
++correctness = ["sdp.small_eigenvalue", "sdp.hilbert_min_eigenvalue", "sdp.weak_infeasible_2x2"]
++sparse_schur = ["G48mc", "G55mc", "G60mc", "checker"]
++tall_kkt = ["cphil12", "theta123"]
++many_blocks = ["mater-6", "ros_2000"]
++memory = ["reimer5", "fap09"]
++
++[numerical_reliability]
++precision_ladder = ["Float64", "Float64x2", "Float64x3", "Float64x4", "BigFloat128", "BigFloat256", "BigFloat512", "BigFloat1024"]
++required = ["certificate_valid", "primal_residual", "dual_residual", "relative_gap", "cone_violation", "precision_bits"]
++
++[merge_gate]
++rule = "No optimization merges on kernel timing alone: the targeted end-to-end benchmark must not regress certification or median wall time."
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/configs/tiers.toml /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/configs/tiers.toml
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/configs/tiers.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/configs/tiers.toml	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,38 @@
++[smoke]
++description = "PR/CI: generated analytic cases + small external cases; correctness first."
++sdp_external = ["biggs", "cnhil10", "hand", "yalsdp", "neu2"]
++lp_netlib = ["afiro", "blend", "sc50a", "sc105", "adlittle", "kb2"]
++socp_external = []
++generated = ["lp.near_dependent_equalities", "lp.infeasible_margin", "socp.near_tangent", "sdp.weak_infeasible_2x2"]
++repetitions = 1
++
++[nightly]
++description = "Core solver regression campaign."
++sdp_external = "core30"
++lp_netlib = "core20"
++lp_modern = "modern20"
++socp_external = "core12"
++generated = "all"
++repetitions = 3
++
++[release]
++description = "Publication/release campaign: full public suites, reference solvers, precision ladders."
++sdp_external = "mittelmann75_plus_core30"
++sdp_infeasible = "8x100"
++lp_netlib = "core20_plus_full_available"
++lp_modern = "all_public_mittelmann"
++lp_network = "network25"
++socp_external = "mittelmann18"
++generated = "all_all_precisions"
++repetitions = 5
++
++[fairness]
++warmup = 1
++blas_threads_default = 1
++record_julia_threads = true
++record_blas_threads = true
++record_cpu_model = true
++record_memory = true
++record_git_sha = true
++record_problem_sha256 = true
++cross_machine_speedup_claims = false
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/generators/SDPXPathologicalBenchmarks.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/generators/SDPXPathologicalBenchmarks.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/generators/SDPXPathologicalBenchmarks.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/generators/SDPXPathologicalBenchmarks.jl	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,232 @@
++module SDPXPathologicalBenchmarks
++
++using LinearAlgebra
++using Random
++using JuMP
++using SDPX
++
++export build_case, available_cases, typed
++
++const CASES = (
++    :lp_near_dependent,
++    :lp_row_scaling,
++    :lp_infeasible_margin,
++    :lp_klee_minty,
++    :socp_near_tangent,
++    :socp_near_infeasible,
++    :socp_many_tiny,
++    :sdp_weak_infeasible_2x2,
++    :sdp_hilbert,
++    :sdp_congruence_scaling,
++    :sdp_small_eigenvalue,
++)
++
++available_cases() = CASES
++
++typed(::Type{T}, x::T) where {T} = x
++typed(::Type{T}, x::Real) where {T} = T(x)
++typed(::Type{BigFloat}, x::AbstractString) = parse(BigFloat, x)
++typed(::Type{T}, x::AbstractString) where {T} = T(parse(BigFloat, x))
++
++function _model(::Type{T}; tol=nothing, max_iter=500, threads=1) where {T}
++    τ = tol === nothing ? typed(T, "1e-8") : typed(T, tol)
++    return GenericModel{T}(
++        () -> SDPX.Optimizer{T}(
++            sparse=:auto,
++            verbosity=0,
++            tol_gap=τ,
++            tol_primal=τ,
++            tol_dual=τ,
++            max_iterations=max_iter,
++            threads=threads,
++        ),
++    )
++end
++
++"""
++KKT-consistent LP with a nearly dependent equality basis.
++The equality matrix is I except row 2 = row 1 + eps*e2.
++x*=1 is feasible and c=Aeq' y makes the objective constant over the equality set.
++"""
++function _lp_near_dependent(::Type{T}; n=16, epsilon="1e-12", kwargs...) where {T}
++    n >= 2 || error("n must be >=2")
++    eps = typed(T, epsilon)
++    model = _model(T; kwargs...)
++    @variable(model, x[1:n] >= zero(T))
++    A = Matrix{T}(I, n, n)
++    fill!(view(A, 2, :), zero(T))
++    A[2, 1] = one(T)
++    A[2, 2] = eps
++    xstar = ones(T, n)
++    b = A * xstar
++    y = T.(1:n) ./ T(n)
++    c = transpose(A) * y
++    @constraint(model, [i=1:n], sum(A[i,j] * x[j] for j=1:n) == b[i])
++    @objective(model, Min, sum(c[j] * x[j] for j=1:n))
++    expected = dot(c, xstar)
++    return model, (case=:lp_near_dependent, expected_status=:optimal,
++                   expected_objective=expected, epsilon=eps, n=n,
++                   oracle="KKT-consistent exact construction")
++end
++
++function _lp_row_scaling(::Type{T}; n=16, decades=16, kwargs...) where {T}
++    model = _model(T; kwargs...)
++    @variable(model, x[1:n] >= zero(T))
++    exponents = range(-decades, decades; length=n)
++    scales = [typed(T, string(BigFloat(10)^BigFloat(e))) for e in exponents]
++    xstar = ones(T, n)
++    y = [isodd(i) ? one(T) : -one(T) for i=1:n]
++    c = scales .* y
++    @constraint(model, [i=1:n], scales[i] * x[i] == scales[i])
++    @objective(model, Min, sum(c[i] * x[i] for i=1:n))
++    expected = dot(c, xstar)
++    return model, (case=:lp_row_scaling, expected_status=:optimal,
++                   expected_objective=expected, decades=decades, n=n,
++                   oracle="equivalent diagonally scaled LP")
++end
++
++function _lp_infeasible_margin(::Type{T}; epsilon="1e-16", kwargs...) where {T}
++    eps = typed(T, epsilon)
++    model = _model(T; kwargs...)
++    @variable(model, x)
++    @constraint(model, x >= zero(T))
++    @constraint(model, x <= -eps)
++    @objective(model, Min, zero(T) * x)
++    return model, (case=:lp_infeasible_margin, expected_status=:infeasible,
++                   expected_objective=nothing, epsilon=eps,
++                   oracle="x>=0 and x<=-epsilon")
++end
++
++function _lp_klee_minty(::Type{T}; n=8, epsilon="1e-2", kwargs...) where {T}
++    eps = typed(T, epsilon)
++    model = _model(T; kwargs...)
++    @variable(model, x[1:n] >= zero(T))
++    # A numerically scaled Klee-Minty-like triangular family.
++    for i in 1:n
++        @constraint(model,
++            sum((eps^(i-j)) * x[j] for j in 1:i-1) + x[i] <= one(T))
++    end
++    @objective(model, Max, x[n])
++    return model, (case=:lp_klee_minty, expected_status=:optimal,
++                   expected_objective=nothing, epsilon=eps, n=n,
++                   oracle="benchmark family; certify independently")
++end
++
++function _socp_near_tangent(::Type{T}; epsilon="1e-8", kwargs...) where {T}
++    eps = typed(T, epsilon)
++    model = _model(T; kwargs...)
++    @variable(model, s)
++    @constraint(model, [one(T) + s, one(T), eps] in SecondOrderCone())
++    @objective(model, Min, s)
++    expected = sqrt(one(T) + eps^2) - one(T)
++    return model, (case=:socp_near_tangent, expected_status=:optimal,
++                   expected_objective=expected, epsilon=eps,
++                   oracle="sqrt(1+epsilon^2)-1")
++end
++
++function _socp_near_infeasible(::Type{T}; epsilon="1e-8", kwargs...) where {T}
++    eps = typed(T, epsilon)
++    model = _model(T; kwargs...)
++    @variable(model, x)
++    @constraint(model, x == zero(T))
++    @constraint(model, [one(T) + x, one(T), eps] in SecondOrderCone())
++    @objective(model, Min, zero(T) * x)
++    return model, (case=:socp_near_infeasible, expected_status=:infeasible,
++                   expected_objective=nothing, epsilon=eps,
++                   oracle="norm((1,epsilon))>1 for epsilon>0")
++end
++
++function _socp_many_tiny(::Type{T}; ncones=1000, epsilon="1e-4", kwargs...) where {T}
++    eps = typed(T, epsilon)
++    model = _model(T; kwargs...)
++    @variable(model, t[1:ncones])
++    for i in 1:ncones
++        @constraint(model, [t[i], one(T), eps] in SecondOrderCone())
++    end
++    @objective(model, Min, sum(t))
++    expected = T(ncones) * sqrt(one(T) + eps^2)
++    return model, (case=:socp_many_tiny, expected_status=:optimal,
++                   expected_objective=expected, epsilon=eps, ncones=ncones,
++                   oracle="separable SOCs")
++end
++
++function _sdp_weak_infeasible_2x2(::Type{T}; delta="1e-12", kwargs...) where {T}
++    δ = typed(T, delta)
++    model = _model(T; kwargs...)
++    @variable(model, x)
++    M = [x one(T); one(T) δ]
++    @constraint(model, Symmetric(M) in PSDCone())
++    @objective(model, Min, x)
++    if iszero(δ)
++        expected_status = :weakly_infeasible
++        expected = nothing
++    else
++        expected_status = :optimal
++        expected = inv(δ)
++    end
++    return model, (case=:sdp_weak_infeasible_2x2, expected_status=expected_status,
++                   expected_objective=expected, delta=δ,
++                   oracle="delta>0: x*=1/delta; delta=0 weakly infeasible")
++end
++
++function _sdp_hilbert(::Type{T}; n=10, kwargs...) where {T}
++    model = _model(T; kwargs...)
++    @variable(model, t)
++    H = [one(T) / T(i + j - 1) for i=1:n, j=1:n]
++    M = [H[i,j] - (i == j ? t : zero(T)) for i=1:n, j=1:n]
++    @constraint(model, Symmetric(M) in PSDCone())
++    @objective(model, Max, t)
++    # The true oracle should be recomputed at >=512 bits for large n.
++    expected = eigmin(Symmetric(H))
++    return model, (case=:sdp_hilbert, expected_status=:optimal,
++                   expected_objective=expected, n=n,
++                   oracle="lambda_min(H_n); recompute with high precision")
++end
++
++function _sdp_congruence_scaling(::Type{T}; decades=16, kwargs...) where {T}
++    s = typed(T, string(BigFloat(10)^decades))
++    model = _model(T; kwargs...)
++    @variable(model, x)
++    # Base M=[x 1;1 1], min x has x*=1. D*M*D is congruent for positive D.
++    M = [x s; s s^2]
++    @constraint(model, Symmetric(M) in PSDCone())
++    @objective(model, Min, x)
++    return model, (case=:sdp_congruence_scaling, expected_status=:optimal,
++                   expected_objective=one(T), decades=decades,
++                   oracle="positive diagonal congruence; x*=1")
++end
++
++function _sdp_small_eigenvalue(::Type{T}; n=8, epsilon="1e-16", seed=71, kwargs...) where {T}
++    eps = typed(T, epsilon)
++    rng = MersenneTwister(seed)
++    Qf = Matrix(qr(randn(rng, n, n)).Q)
++    Q = T.(Qf)
++    lambdas = ones(T, n)
++    lambdas[end] = eps
++    A = Q * Diagonal(lambdas) * transpose(Q)
++    model = _model(T; kwargs...)
++    @variable(model, t)
++    M = [A[i,j] - (i == j ? t : zero(T)) for i=1:n, j=1:n]
++    @constraint(model, Symmetric(M) in PSDCone())
++    @objective(model, Max, t)
++    return model, (case=:sdp_small_eigenvalue, expected_status=:optimal,
++                   expected_objective=eps, epsilon=eps, n=n, seed=seed,
++                   oracle="constructed smallest eigenvalue epsilon; Q generated deterministically")
++end
++
++function build_case(name::Symbol, ::Type{T}; kwargs...) where {T}
++    name === :lp_near_dependent && return _lp_near_dependent(T; kwargs...)
++    name === :lp_row_scaling && return _lp_row_scaling(T; kwargs...)
++    name === :lp_infeasible_margin && return _lp_infeasible_margin(T; kwargs...)
++    name === :lp_klee_minty && return _lp_klee_minty(T; kwargs...)
++    name === :socp_near_tangent && return _socp_near_tangent(T; kwargs...)
++    name === :socp_near_infeasible && return _socp_near_infeasible(T; kwargs...)
++    name === :socp_many_tiny && return _socp_many_tiny(T; kwargs...)
++    name === :sdp_weak_infeasible_2x2 && return _sdp_weak_infeasible_2x2(T; kwargs...)
++    name === :sdp_hilbert && return _sdp_hilbert(T; kwargs...)
++    name === :sdp_congruence_scaling && return _sdp_congruence_scaling(T; kwargs...)
++    name === :sdp_small_eigenvalue && return _sdp_small_eigenvalue(T; kwargs...)
++    error("unknown case $name; choices=$(collect(CASES))")
++end
++
++end # module
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/README.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/README.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/README.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/README.md	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,13 @@
++# Manifest notes
++
++- `downloads.toml`: direct public URLs where pinned reliably.
++- `pathological_suites.toml`: parameter grids for generated numerical stress tests.
++- `lp_netlib_core20.csv`: classic LP regression set.
++- `../references/mittelmann_lp_modern20_2026.csv`: modern large LP reference subset.
++- `../references/mittelmann_network_lp25_2026-07-01.csv`: network LP stress set.
++- `../references/mittelmann_sdp_core30_2026-04-25.csv`: curated SDP core.
++- `../references/mittelmann_socp_full18_2026-08-10.csv`: SOCP full 18, with `core12`.
++- `../references/mittelmann_infeasible_sdp_8x100_2025-09-21.csv`: reported infeasibility counts.
++
++Reference timing/status strings must stay strings because flags such as `f`,
++`m`, `t`, and `a` are semantically meaningful.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/downloads.toml /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/downloads.toml
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/downloads.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/downloads.toml	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,433 @@
++# External benchmark download manifest.
++# Large binaries are intentionally not embedded in this archive.
++# The downloader records SHA-256 after retrieval so local benchmark campaigns can be pinned.
++
++[[sdp]]
++name = "biggs"
++tier = "core"
++filename = "biggs.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/biggs.dat-s.gz"
++
++[[sdp]]
++name = "cnhil10"
++tier = "core"
++filename = "cnhil10.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/cnhil10.dat-s.gz"
++
++[[sdp]]
++name = "hand"
++tier = "core"
++filename = "hand.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/hand.dat-s.gz"
++
++[[sdp]]
++name = "yalsdp"
++tier = "core"
++filename = "yalsdp.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/yalsdp.dat-s.gz"
++
++[[sdp]]
++name = "sensor_1000"
++tier = "core"
++filename = "sensor_1000.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/sensor_1000.dat-s.gz"
++
++[[sdp]]
++name = "G48mc"
++tier = "core"
++filename = "G48mc.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/G48mc.dat-s.gz"
++
++[[sdp]]
++name = "G55mc"
++tier = "core"
++filename = "G55mc.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/G55mc.dat-s.gz"
++
++[[sdp]]
++name = "G60mc"
++tier = "core"
++filename = "G60mc.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/G60mc.dat-s.gz"
++
++[[sdp]]
++name = "checker"
++tier = "core"
++filename = "checker.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/checker.dat-s.gz"
++
++[[sdp]]
++name = "ice_2.0"
++tier = "core"
++filename = "ice_2.0.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/ice_2.0.dat-s.gz"
++
++[[sdp]]
++name = "r1_2000"
++tier = "core"
++filename = "rendl1_2000_1e-6.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/rendl1_2000_1e-6.dat-s.gz"
++
++[[sdp]]
++name = "t_texture"
++tier = "core"
++filename = "tiger_texture.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/tiger_texture.dat-s.gz"
++
++[[sdp]]
++name = "G40_mb"
++tier = "core"
++filename = "G40_mb.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/G40_mb.dat-s.gz"
++
++[[sdp]]
++name = "G48_mb"
++tier = "core"
++filename = "G48_mb.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/G48_mb.dat-s.gz"
++
++[[sdp]]
++name = "G60_mb"
++tier = "core"
++filename = "G60_mb.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/G60_mb.dat-s.gz"
++
++[[sdp]]
++name = "foot"
++tier = "core"
++filename = "foot.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/foot.dat-s.gz"
++
++[[sdp_special]]
++name = "torusg3-15"
++tier = "core"
++source_family = "dimacs"
++url = ""
++note = "Resolve from DIMACS/source page during integration; do not silently substitute a different formulation."
++
++[[sdp_special]]
++name = "biomedP"
++tier = "core"
++source_family = "dimacs"
++url = ""
++note = "Resolve from DIMACS/source page during integration; do not silently substitute a different formulation."
++
++[[sdp]]
++name = "prob_2_4_0"
++tier = "core"
++filename = "prob_2_4_0.m"
++url = "https://plato.asu.edu/ftp/sdp/prob_2_4_0.m"
++
++[[sdp]]
++name = "broyden25"
++tier = "core"
++filename = "broyden25.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/broyden25.dat-s.gz"
++
++[[sdp]]
++name = "cphil12"
++tier = "core"
++filename = "cphil12.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/cphil12.dat-s.gz"
++
++[[sdp]]
++name = "theta102"
++tier = "core"
++filename = "theta102.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/theta102.dat-s.gz"
++
++[[sdp]]
++name = "theta123"
++tier = "core"
++filename = "theta123.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/theta123.dat-s.gz"
++
++[[sdp]]
++name = "mater-6"
++tier = "core"
++filename = "mater-6.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/mater-6.dat-s.gz"
++
++[[sdp]]
++name = "ros_2000"
++tier = "core"
++filename = "ros_2000.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/ros_2000.dat-s.gz"
++
++[[sdp]]
++name = "reimer5"
++tier = "core"
++filename = "reimer5.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/reimer5.dat-s.gz"
++
++[[sdp]]
++name = "dia_patch"
++tier = "core"
++filename = "diamond_patch.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/diamond_patch.dat-s.gz"
++
++[[sdp]]
++name = "swissroll"
++tier = "core"
++filename = "swissroll.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/swissroll.dat-s.gz"
++
++[[sdp]]
++name = "fap09"
++tier = "core"
++filename = "fap09.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/fap09.dat-s.gz"
++
++[[sdp]]
++name = "neu2"
++tier = "core"
++filename = "neu2.dat-s.gz"
++url = "https://plato.asu.edu/ftp/sdp/neu2.dat-s.gz"
++
++[[socp]]
++name = "beam7"
++tier = "core"
++filename = "beam7.cbf.gz"
++url = "https://cblib.zib.de/download/all/beam7.cbf.gz"
++
++[[socp]]
++name = "beam30"
++tier = "core"
++filename = "beam30.cbf.gz"
++url = "https://cblib.zib.de/download/all/beam30.cbf.gz"
++
++[[socp]]
++name = "chainsing-50000-1"
++tier = "core"
++filename = "chainsing-50000-1.cbf.gz"
++url = "https://cblib.zib.de/download/all/chainsing-50000-1.cbf.gz"
++
++[[socp]]
++name = "chainsing-50000-2"
++tier = "core"
++filename = "chainsing-50000-2.cbf.gz"
++url = "https://cblib.zib.de/download/all/chainsing-50000-2.cbf.gz"
++
++[[socp]]
++name = "chainsing-50000-3"
++tier = "full"
++filename = "chainsing-50000-3.cbf.gz"
++url = "https://cblib.zib.de/download/all/chainsing-50000-3.cbf.gz"
++
++[[socp]]
++name = "db-joint-soerensen"
++tier = "core"
++filename = "db-joint-soerensen.cbf.gz"
++url = "https://cblib.zib.de/download/all/db-joint-soerensen.cbf.gz"
++
++[[socp]]
++name = "db-plate-yield-line"
++tier = "core"
++filename = "db-plate-yield-line.cbf.gz"
++url = "https://cblib.zib.de/download/all/db-plate-yield-line.cbf.gz"
++
++[[socp]]
++name = "dsNRL"
++tier = "core"
++filename = "2013_dsNRL.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_dsNRL.cbf.gz"
++
++[[socp]]
++name = "firL1"
++tier = "core"
++filename = "2013_firL1.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL1.cbf.gz"
++
++[[socp]]
++name = "firL1Linfalph"
++tier = "core"
++filename = "2013_firL1Linfalph.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL1Linfalph.cbf.gz"
++
++[[socp]]
++name = "firL1Linfeps"
++tier = "full"
++filename = "2013_firL1Linfeps.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL1Linfeps.cbf.gz"
++
++[[socp]]
++name = "firL2L1alph"
++tier = "full"
++filename = "2013_firL2L1alph.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL2L1alph.cbf.gz"
++
++[[socp]]
++name = "firL2L1eps"
++tier = "full"
++filename = "2013_firL2L1eps.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL2L1eps.cbf.gz"
++
++[[socp]]
++name = "firL2Linfalph"
++tier = "core"
++filename = "2013_firL2Linfalph.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL2Linfalph.cbf.gz"
++
++[[socp]]
++name = "firL2Linfeps"
++tier = "full"
++filename = "2013_firL2Linfeps.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL2Linfeps.cbf.gz"
++
++[[socp]]
++name = "firL2a"
++tier = "full"
++filename = "2013_firL2a.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firL2a.cbf.gz"
++
++[[socp]]
++name = "firLinf"
++tier = "core"
++filename = "2013_firLinf.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_firLinf.cbf.gz"
++
++[[socp]]
++name = "wbNRL"
++tier = "core"
++filename = "2013_wbNRL.cbf.gz"
++url = "https://cblib.zib.de/download/all/2013_wbNRL.cbf.gz"
++
++[[lp_netlib]]
++name = "afiro"
++tier = "core"
++filename = "afiro"
++url = "https://netlib.org/lp/data/afiro"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "adlittle"
++tier = "core"
++filename = "adlittle"
++url = "https://netlib.org/lp/data/adlittle"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "blend"
++tier = "core"
++filename = "blend"
++url = "https://netlib.org/lp/data/blend"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "sc50a"
++tier = "core"
++filename = "sc50a"
++url = "https://netlib.org/lp/data/sc50a"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "sc50b"
++tier = "core"
++filename = "sc50b"
++url = "https://netlib.org/lp/data/sc50b"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "sc105"
++tier = "core"
++filename = "sc105"
++url = "https://netlib.org/lp/data/sc105"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "sc205"
++tier = "core"
++filename = "sc205"
++url = "https://netlib.org/lp/data/sc205"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "kb2"
++tier = "core"
++filename = "kb2"
++url = "https://netlib.org/lp/data/kb2"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "share1b"
++tier = "core"
++filename = "share1b"
++url = "https://netlib.org/lp/data/share1b"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "share2b"
++tier = "core"
++filename = "share2b"
++url = "https://netlib.org/lp/data/share2b"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "recipe"
++tier = "core"
++filename = "recipe"
++url = "https://netlib.org/lp/data/recipe"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "ship04l"
++tier = "core"
++filename = "ship04l"
++url = "https://netlib.org/lp/data/ship04l"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "ship04s"
++tier = "core"
++filename = "ship04s"
++url = "https://netlib.org/lp/data/ship04s"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "ship08l"
++tier = "core"
++filename = "ship08l"
++url = "https://netlib.org/lp/data/ship08l"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "ship12s"
++tier = "core"
++filename = "ship12s"
++url = "https://netlib.org/lp/data/ship12s"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "fit1d"
++tier = "core"
++filename = "fit1d"
++url = "https://netlib.org/lp/data/fit1d"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "fit2d"
++tier = "core"
++filename = "fit2d"
++url = "https://netlib.org/lp/data/fit2d"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "pilot4"
++tier = "core"
++filename = "pilot4"
++url = "https://netlib.org/lp/data/pilot4"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "pilot87"
++tier = "core"
++filename = "pilot87"
++url = "https://netlib.org/lp/data/pilot87"
++note = "Netlib compact encoding may need emps before MPS import."
++
++[[lp_netlib]]
++name = "pilotnov"
++tier = "core"
++filename = "pilotnov"
++url = "https://netlib.org/lp/data/pilotnov"
++note = "Netlib compact encoding may need emps before MPS import."
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/lp_netlib_core20.csv /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/lp_netlib_core20.csv
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/lp_netlib_core20.csv	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/lp_netlib_core20.csv	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,21 @@
++name,test_purpose,source,download_url,note
++afiro,tiny correctness,Netlib LP,https://netlib.org/lp/data/afiro,Netlib compact encoding may require emps expansion before MPS import
++adlittle,small classic sparse,Netlib LP,https://netlib.org/lp/data/adlittle,Netlib compact encoding may require emps expansion before MPS import
++blend,small sparse,Netlib LP,https://netlib.org/lp/data/blend,Netlib compact encoding may require emps expansion before MPS import
++sc50a,small degeneracy,Netlib LP,https://netlib.org/lp/data/sc50a,Netlib compact encoding may require emps expansion before MPS import
++sc50b,small degeneracy,Netlib LP,https://netlib.org/lp/data/sc50b,Netlib compact encoding may require emps expansion before MPS import
++sc105,sparse scaling,Netlib LP,https://netlib.org/lp/data/sc105,Netlib compact encoding may require emps expansion before MPS import
++sc205,larger sparse scaling,Netlib LP,https://netlib.org/lp/data/sc205,Netlib compact encoding may require emps expansion before MPS import
++kb2,numerical behavior,Netlib LP,https://netlib.org/lp/data/kb2,Netlib compact encoding may require emps expansion before MPS import
++share1b,medium sparse,Netlib LP,https://netlib.org/lp/data/share1b,Netlib compact encoding may require emps expansion before MPS import
++share2b,degeneracy,Netlib LP,https://netlib.org/lp/data/share2b,Netlib compact encoding may require emps expansion before MPS import
++recipe,medium classic,Netlib LP,https://netlib.org/lp/data/recipe,Netlib compact encoding may require emps expansion before MPS import
++ship04l,transport/sparse,Netlib LP,https://netlib.org/lp/data/ship04l,Netlib compact encoding may require emps expansion before MPS import
++ship04s,transport/scaling contrast,Netlib LP,https://netlib.org/lp/data/ship04s,Netlib compact encoding may require emps expansion before MPS import
++ship08l,larger sparse factorization,Netlib LP,https://netlib.org/lp/data/ship08l,Netlib compact encoding may require emps expansion before MPS import
++ship12s,medium-large classic,Netlib LP,https://netlib.org/lp/data/ship12s,Netlib compact encoding may require emps expansion before MPS import
++fit1d,wide LP,Netlib LP,https://netlib.org/lp/data/fit1d,Netlib compact encoding may require emps expansion before MPS import
++fit2d,very wide LP,Netlib LP,https://netlib.org/lp/data/fit2d,Netlib compact encoding may require emps expansion before MPS import
++pilot4,industrial classic,Netlib LP,https://netlib.org/lp/data/pilot4,Netlib compact encoding may require emps expansion before MPS import
++pilot87,industrial larger,Netlib LP,https://netlib.org/lp/data/pilot87,Netlib compact encoding may require emps expansion before MPS import
++pilotnov,industrial degeneracy,Netlib LP,https://netlib.org/lp/data/pilotnov,Netlib compact encoding may require emps expansion before MPS import
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/pathological_suites.toml /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/pathological_suites.toml
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/manifests/pathological_suites.toml	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/manifests/pathological_suites.toml	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,68 @@
++version = 1
++purpose = "Analytic or high-precision-reference stress tests for scaling, conditioning, degeneracy, weak infeasibility, and precision ladders."
++
++[precision]
++float64 = true
++float64x2 = true
++float64x3 = true
++float64x4 = true
++bigfloat_bits = [128, 256, 512, 1024]
++
++[lp.near_dependent_equalities]
++n = [8, 16, 32, 64]
++epsilon = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64"]
++ground_truth = "KKT-consistent construction with x*=1 and exact objective c'x*."
++tests = ["equality_presolve", "KKT_conditioning", "regularization", "iterative_refinement"]
++
++[lp.row_scaling]
++n = [16, 64]
++decades = [2, 4, 8, 12, 16, 24, 32, 48, 64]
++ground_truth = "Equivalent LP with invariant optimizer/objective."
++tests = ["equilibration", "residual_invariance", "termination"]
++
++[lp.infeasible_margin]
++epsilon = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64", "1e-100"]
++ground_truth = "x>=0 and x<=-epsilon is infeasible for every epsilon>0."
++tests = ["infeasibility_status", "false_feasible_rate", "certificate_quality"]
++
++[lp.klee_minty]
++n = [4, 8, 16, 32, 64]
++epsilon = ["1e-2"]
++tests = ["scaling", "algorithm_path", "simplex_fallback_if_added"]
++
++[socp.near_tangent]
++epsilon = ["1e-2", "1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64"]
++ground_truth = "min s s.t. ||(1,epsilon)||_2 <= 1+s; s*=sqrt(1+epsilon^2)-1."
++tests = ["effective_precision", "cone_residual", "objective_accuracy"]
++
++[socp.near_infeasible]
++epsilon = ["1e-2", "1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32"]
++ground_truth = "||(1,epsilon)||_2 <= 1 is infeasible for every epsilon>0; violation≈epsilon^2/2."
++tests = ["status", "near_boundary", "false_feasible_rate"]
++
++[socp.many_tiny_cones]
++ncones = [10, 100, 1000, 10000, 100000]
++epsilon = ["1e-4", "1e-8"]
++ground_truth = "Separable SOCs: min sum(t_i), t_i>=sqrt(1+epsilon^2)."
++tests = ["cone_count_scaling", "assembly", "threading", "memory"]
++
++[sdp.weak_infeasible_2x2]
++delta = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-50", "1e-100", "0"]
++ground_truth = "min x s.t. [[x,1],[1,delta]] PSD. For delta>0 x*=1/delta; delta=0 is weakly infeasible."
++tests = ["weak_infeasibility", "dynamic_range", "precision_escalation"]
++
++[sdp.hilbert_min_eigenvalue]
++n = [6, 8, 10, 12, 16, 20, 24]
++ground_truth = "max t s.t. H_n-tI PSD; t*=lambda_min(H_n). Use >=512-bit oracle for larger n."
++tests = ["ill_conditioned_PSD", "eigenvalue_accuracy", "precision"]
++
++[sdp.congruence_scaling]
++decades = [2, 4, 8, 12, 16, 24, 32, 48]
++ground_truth = "Congruence transformation D*M(x)*D preserves PSD feasibility and objective."
++tests = ["PSD_scaling", "equilibration", "residual_invariance"]
++
++[sdp.small_eigenvalue]
++n = [4, 8, 16, 32]
++epsilon = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64"]
++ground_truth = "max t s.t. Q*diag(lambda)*Q'-tI PSD; t*=epsilon."
++tests = ["rank_detection", "near_singularity", "complementarity", "precision"]
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_infeasible_sdp_8x100_2025-09-21.csv /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_infeasible_sdp_8x100_2025-09-21.csv
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_infeasible_sdp_8x100_2025-09-21.csv	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_infeasible_sdp_8x100_2025-09-21.csv	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,9 @@
++family,CSDP_reported_infeasible,MOSEK_reported_infeasible,SDPA_reported_infeasible,SDPT3_reported_infeasible,SeDuMi_reported_infeasible,PENSDP_reported_infeasible,SDPLR_reported_infeasible,COPT_reported_infeasible,class
++infeasible_clean_10_10,76,17,100,10,87,0,64,99,strong/clean
++infeasible_clean_20_10,100,99,100,100,100,0,92,100,strong/clean
++infeasible_messy_10_10,3,2,100,4,24,0,95,56,strong/messy
++infeasible_messy_20_10,96,82,100,96,100,0,98,100,strong/messy
++weak_clean_10_10,0,86*,100,0,0,0,4,0,weak/clean
++weak_clean_20_10,0,2*,100,0,0,0,67,0,weak/clean
++weak_messy_10_10,0,0,100,0,0,0,24,0,weak/messy
++weak_messy_20_10,0,0,100,0,0,0,49,0,weak/messy
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_lp_modern20_2026.csv /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_lp_modern20_2026.csv
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_lp_modern20_2026.csv	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_lp_modern20_2026.csv	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,21 @@
++name,rows,columns,nonzeros,LPfeas_COPT_s,LPfeas_MOSEK_s,LPfeas_HiGHS_s,LPopt_COPT_s,LPopt_MOSEK_s,LPopt_HiGHS_s,test_purpose
++L1_sixm,986069,428032,4280320,2,1,98,2,5,99,large sparse feasibility/optimality
++Linf_520c,93326,69004,566193,3,6,1063,4,65,872,large sparse; solver spread
++a2864,22117,200787,20078717,1,1,202,55,451,3466,wide + dense nnz
++bdry2,376500,250998,1500003,6,15,t,59,f,t,robustness/time-limit discriminator
++cont1,160793,40398,399991,1,1,6,2,1435,413,tall sparse
++cont11,160793,80396,439989,1,1,14,5,f,510,tall sparse; MOSEK LPopt fail
++datt256,11077,262144,1503732,1,2,7,3,174,t,very wide LP
++dlr1,1735470,9121907,18365107,28,126,218,41,159,t,very large rows/cols
++fhnw-bin1,772872,1141653,8611326,19,46,529,26,870,2076,million-scale sparse
++pds-100,156244,505360,1390539,13,18,63,15,21,72,PDS family
++rail02,95791,270869,756228,17,30,69,18,33,81,rail structured LP
++rail4284,4284,1092610,12372358,12,9,96,12,13,115,extremely wide rail LP
++s82,87878,1690631,7022608,30,34,261,33,39,431,wide sparse
++stat96v2,29089,957432,2852184,5,23,198,13,8931,616,solver divergence/conditioning
++storm_1000,528186,1259121,4228817,10,19,270,11,23,188,stochastic LP
++Dual2_5000,30000600,33050602,93001800,325,f,t,341,t,t,extreme dimension/memory
++thk_48,6366377,8609262,27802878,4313,5600,t,4957,t,205,extreme large sparse
++L2CTA3D,210000,10000000,30000000,371,2186,m,779,2744,587,10M columns; memory/backend
++dlr2,7132926,38868107,78091589,251,3596,4475,375,3831,t,extreme columns/nnz
++set-cover,10000,1102008,20442268,61,131,397,74,150,11338,wide set-cover relaxation
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_network_lp25_2026-07-01.csv /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_network_lp25_2026-07-01.csv
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_network_lp25_2026-07-01.csv	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_network_lp25_2026-07-01.csv	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,26 @@
++name,nodes,arcs,MOSEK_s,CLP_s,QSOPT_s,SOPLEX_s,COPT_s,HiGHS_s
++16_n14,16381,261873,11,5,14,33,3,18
++i_n13,8181,739733,23,4,20,41,2,19
++lo10,23728,383578,208,5,14,531,2,4
++long15,32767,753676,421,2,141,189,1,15
++netlarge1,45774,7238591,343,52,t,t,7,51
++netlarge2,39893,1158027,727,25,2634,t,2,9
++netlarge3,38502,4489009,850,150,t,t,4,29
++netlarge6,8000,15000000,355,304,t,t,7,57
++square15,32760,753512,434,2,122,217,1,15
++wide15,32767,753676,424,2,142,190,1,15
++goto14_256_1,16384,4194304,327,60,316,1240,24,419
++goto14_256_2,16384,4194304,319,59,312,1152,25,428
++goto14_256_3,16384,4194304,380,69,344,1439,29,400
++goto14_256_4,16384,4194304,285,56,279,810,22,388
++goto14_256_5,16384,4194304,331,59,325,899,23,406
++goto16_64_1,65536,4194304,412,203,815,2756,78,505
++goto16_64_2,65536,4194304,475,191,766,2697,70,491
++goto16_64_3,65536,4194304,494,201,808,2787,75,504
++goto16_64_4,65536,4194304,512,211,832,2820,82,540
++goto16_64_5,65536,4194304,491,209,812,2837,82,517
++goto32_512_1,131072,16777216,t,1344,t,t,479,t
++goto32_512_2,131072,16777216,t,1279,t,t,440,t
++goto32_512_3,131072,16777216,t,1594,t,t,548,t
++goto32_512_4,131072,16777216,t,1424,t,t,495,t
++goto32_512_5,131072,16777216,3441,1294,t,t,486,t
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_sdp_core30_2026-04-25.csv /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_sdp_core30_2026-04-25.csv
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_sdp_core30_2026-04-25.csv	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_sdp_core30_2026-04-25.csv	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,31 @@
++name,variables,constraints,nonzeros,blocks,test_purpose,COPT_s,CSDP_s,MOSEK_s,SDPA_s,external_filename,source_family
++biggs,703,1819,14431,49,small many-block; termination/robustness,2,3,1,f,biggs.dat-s.gz,plato_sdp
++cnhil10,221,5005,24310,2,constraints >> variables; KKT shape,3,7,7,33,cnhil10.dat-s.gz,plato_sdp
++hand,1297,1297,841752,2,square moderately dense SDP,6,12,143,6,hand.dat-s.gz,plato_sdp
++yalsdp,301,5051,1005250,4,"few variables, many dense constraints",10,16,6,28,yalsdp.dat-s.gz,plato_sdp
++sensor_1000,6529,5549,23482,2,large very sparse SDP,71,97,34,29,sensor_1000.dat-s.gz,plato_sdp
++G48mc,3001,3000,3000,2,extremely sparse graph SDP,6,25,79,29,G48mc.dat-s.gz,plato_sdp
++G55mc,5001,5000,5000,2,extremely sparse scaling,39,109,757,166,G55mc.dat-s.gz,plato_sdp
++G60mc,7001,7000,7000,2,large extremely sparse scaling,171,5153,7064,506,G60mc.dat-s.gz,plato_sdp
++checker,3971,3971,3970,2,~1 nonzero per constraint,38,93,544,92,checker.dat-s.gz,plato_sdp
++ice_2.0,8114,8113,8113,2,large extremely sparse,269,707,6301,812,ice_2.0.dat-s.gz,plato_sdp
++r1_2000,2001,2001,2003000,2,dense-kernel contrast,11,26,434,19,rendl1_2000_1e-6.dat-s.gz,plato_sdp
++t_texture,1802,1802,9002,2,accuracy/termination discriminator,32,f,133,10a,tiger_texture.dat-s.gz,plato_sdp
++G40_mb,2001,2001,2003000,2,dense MB family,13,60,152,13,G40_mb.dat-s.gz,plato_sdp
++G48_mb,3001,3001,9000000,2,dense scaling,16,746,215,43,G48_mb.dat-s.gz,plato_sdp
++G60_mb,7001,7001,24510500,2,large dense SDP,169,4867,7129,506,G60_mb.dat-s.gz,plato_sdp
++foot,2209,2209,2440944,2,dense two-block SDP,20a,108,420,30,foot.dat-s.gz,plato_sdp
++torusg3-15,3376,3375,1139060,2,DIMACS graph SDP,15,40,235,77,,dimacs
++biomedP,6515,6515,21225869,2,large dense graph SDP,161,f,4367a,565,,dimacs
++prob_2_4_0,401,200,16040000,2,"few constraints, extremely dense matrices",15,58,f,34a,prob_2_4_0.m,plato_generator
++broyden25,2281,15971,137921,20,constraints >> variables; multi-block,14,113,11,46,broyden25.dat-s.gz,plato_sdp
++cphil12,364,12376,66429,2,very tall KKT,15,15,23,861a,cphil12.dat-s.gz,plato_sdp
++theta102,501,37467,37966,2,many constraints; theta graph,8,753,1133,973,theta102.dat-s.gz,plato_sdp
++theta123,601,90020,90619,2,extreme constraint count,7,9091,5798,f,theta123.dat-s.gz,plato_sdp
++mater-6,20463,56311,690149,4969,many-small-block core case,8,324,13,11,mater-6.dat-s.gz,plato_sdp
++ros_2000,11993,19988,39969,2000,many-block decomposition,2,193,3,2,ros_2000.dat-s.gz,plato_sdp
++reimer5,102607,6187,719806,2,very many primal variables,17,211,15,101a,reimer5.dat-s.gz,plato_sdp
++dia_patch,5478,5478,30120,2,robustness discriminator,3034a,f,3272,f,diamond_patch.dat-s.gz,plato_sdp
++swissroll,801,3380,330537,2,pathological/accuracy stress; all three legacy refs fail,34a,f,f,f,swissroll.dat-s.gz,plato_sdp
++fap09,28050,30276,458000000,2,huge nnz / memory bandwidth,65,2671a,1353,1073,fap09.dat-s.gz,plato_sdp
++neu2,255,3003,31880,2,small but numerically difficult,5,f,13,f,neu2.dat-s.gz,plato_sdp
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_socp_full18_2026-08-10.csv /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_socp_full18_2026-08-10.csv
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/references/mittelmann_socp_full18_2026-08-10.csv	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/references/mittelmann_socp_full18_2026-08-10.csv	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,19 @@
++name,rows,columns,nonzeros,soc_constraints,MOSEK_s,ECOS_s,KNITRO_s,COPT_s,cuOpt_s,external_filename,core12
++beam7,277988,113209,15229465,7,17,206,61,18,7,beam7.cbf.gz,true
++beam30,282549,118007,64074520,30,99,2465,150,84,35,beam30.cbf.gz,true
++chainsing-50000-1,499982,649976,899966,149994,3,f,3,3,2,chainsing-50000-1.cbf.gz,true
++chainsing-50000-2,399988,499985,749975,99997,4,f,3,3,3,chainsing-50000-2.cbf.gz,true
++chainsing-50000-3,299992,349991,599981,49999,3,f,2,2,2,chainsing-50000-3.cbf.gz,false
++db-joint-soerensen,1978142,1915709,6035916,145680,29,f,f,46,31,db-joint-soerensen.cbf.gz,true
++db-plate-yield-line,502278,550846,1545386,73446,6,f,9,5,3,db-plate-yield-line.cbf.gz,true
++dsNRL,1616,61822,66668564,20504,56,f,780,27,17,2013_dsNRL.cbf.gz,true
++firL1,20902,59706,39787428,19902,16,1305,115,9,8,2013_firL1.cbf.gz,true
++firL1Linfalph,20903,119412,79574856,39804,56,2847,287,23,20,2013_firL1Linfalph.cbf.gz,true
++firL1Linfeps,30085,59173,9873426,19724,26,2531,93,13,2,2013_firL1Linfeps.cbf.gz,false
++firL2L1alph,30268,49612,9985771,9923,6,202,35,5,2,2013_firL2L1alph.cbf.gz,false
++firL2L1eps,20903,60708,40288929,19903,14,797,107,9,8,2013_firL2L1eps.cbf.gz,false
++firL2Linfalph,2002,91783,121660011,29928,27,f,174,25,47,2013_firL2Linfalph.cbf.gz,true
++firL2Linfeps,24655,59636,19108570,11928,25,687,123,14,f,2013_firL2Linfeps.cbf.gz,false
++firL2a,10001,10002,50015001,1,3,945,85,4,7,2013_firL2a.cbf.gz,false
++firLinf,2001,59856,79771354,19952,95,3479,1200,27,23,2013_firLinf.cbf.gz,true
++wbNRL,1042,40450,39138234,9,9,1333,126,7,8,2013_wbNRL.cbf.gz,true
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/scripts/download_external.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/scripts/download_external.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/scripts/download_external.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/scripts/download_external.jl	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,79 @@
++#!/usr/bin/env julia
++using Downloads
++using SHA
++using TOML
++using Dates
++
++const ROOT = normpath(joinpath(@__DIR__, ".."))
++const MANIFEST = TOML.parsefile(joinpath(ROOT, "manifests", "downloads.toml"))
++
++function parse_args(args)
++    suite = "all"
++    tier = "core"
++    limit = typemax(Int)
++    for a in args
++        startswith(a, "--suite=") && (suite = split(a, "="; limit=2)[2])
++        startswith(a, "--tier=") && (tier = split(a, "="; limit=2)[2])
++        startswith(a, "--limit=") && (limit = parse(Int, split(a, "="; limit=2)[2]))
++    end
++    return suite, tier, limit
++end
++
++sha256_file(path) = open(path, "r") do io
++    bytes2hex(SHA.sha256(io))
++end
++
++function eligible(table, suite, tier)
++    suite == "all" || table == suite || return false
++    return true
++end
++
++function main(args)
++    suite, tier, limit = parse_args(args)
++    targets = NamedTuple[]
++    tables = suite == "all" ? ("sdp", "socp", "lp_netlib") : (suite,)
++    for table in tables
++        haskey(MANIFEST, table) || continue
++        for item in MANIFEST[table]
++            item_tier = get(item, "tier", "core")
++            tier == "full" || item_tier == "core" || continue
++            isempty(get(item, "url", "")) && continue
++            push!(targets, (suite=table, item=item))
++        end
++    end
++    targets = first(targets, min(length(targets), limit))
++    isempty(targets) && error("No downloadable entries matched suite=$suite tier=$tier")
++
++    lock = Dict{String,Any}(
++        "generated_at_utc" => string(Dates.now(Dates.UTC)),
++        "entries" => Any[],
++    )
++    for target in targets
++        item = target.item
++        destdir = joinpath(ROOT, "data", "external", target.suite)
++        mkpath(destdir)
++        filename = get(item, "filename", item["name"])
++        dest = joinpath(destdir, filename)
++        if !isfile(dest)
++            @info "Downloading" name=item["name"] url=item["url"] dest
++            Downloads.download(item["url"], dest)
++        else
++            @info "Using cached file" dest
++        end
++        digest = sha256_file(dest)
++        push!(lock["entries"], Dict(
++            "suite" => target.suite,
++            "name" => item["name"],
++            "url" => item["url"],
++            "path" => relpath(dest, ROOT),
++            "bytes" => filesize(dest),
++            "sha256" => digest,
++        ))
++    end
++    open(joinpath(ROOT, "data", "download_lock.toml"), "w") do io
++        TOML.print(io, lock)
++    end
++    println("Pinned $(length(lock["entries"])) downloads in data/download_lock.toml")
++end
++
++main(ARGS)
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/scripts/run_pathological.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/scripts/run_pathological.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/scripts/run_pathological.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/scripts/run_pathological.jl	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,100 @@
++#!/usr/bin/env julia
++using Dates
++using JuMP
++using SDPX
++using LinearAlgebra
++
++const ROOT = normpath(joinpath(@__DIR__, ".."))
++include(joinpath(ROOT, "generators", "SDPXPathologicalBenchmarks.jl"))
++using .SDPXPathologicalBenchmarks
++
++function parse_cli(args)
++    values = Dict{String,String}()
++    for a in args
++        startswith(a, "--") || continue
++        k, v = split(a[3:end], "="; limit=2)
++        values[k] = v
++    end
++    return values
++end
++
++function csv_escape(x)
++    s = string(x)
++    return occursin(r"[,\n\"]", s) ? "\"" * replace(s, "\"" => "\"\"") * "\"" : s
++end
++
++function run_one(::Type{T}, case::Symbol, kwargs; tol, threads) where {T}
++    model, meta = build_case(case, T; kwargs..., tol=tol, threads=threads)
++    GC.gc()
++    wall = @elapsed optimize!(model)
++    status = termination_status(model)
++    objective = try objective_value(model) catch; missing end
++    solve_seconds = try solve_time(model) catch; wall end
++    expected = get(meta, :expected_objective, nothing)
++    abs_error = if objective === missing || expected === nothing
++        missing
++    else
++        abs(objective - expected)
++    end
++    return (
++        timestamp_utc=Dates.now(Dates.UTC),
++        arithmetic=string(T),
++        precision_bits=precision(T),
++        case=case,
++        status=status,
++        objective=objective,
++        expected_objective=expected,
++        absolute_objective_error=abs_error,
++        solve_seconds=solve_seconds,
++        wall_seconds=wall,
++        metadata=repr(meta),
++    )
++end
++
++function default_cases(::Type{T}, tol, threads) where {T}
++    rows = NamedTuple[]
++    for eps in ("1e-8", "1e-16", "1e-32")
++        push!(rows, run_one(T, :lp_near_dependent, (; n=16, epsilon=eps); tol, threads))
++        push!(rows, run_one(T, :socp_near_tangent, (; epsilon=eps); tol, threads))
++        push!(rows, run_one(T, :sdp_weak_infeasible_2x2, (; delta=eps); tol, threads))
++        push!(rows, run_one(T, :sdp_small_eigenvalue, (; n=8, epsilon=eps); tol, threads))
++    end
++    push!(rows, run_one(T, :sdp_weak_infeasible_2x2, (; delta="0"); tol, threads))
++    return rows
++end
++
++function write_csv(path, rows)
++    mkpath(dirname(path))
++    fields = propertynames(first(rows))
++    open(path, "w") do io
++        println(io, join(fields, ","))
++        for row in rows
++            println(io, join((csv_escape(getfield(row, f)) for f in fields), ","))
++        end
++    end
++end
++
++function main(args)
++    cfg = parse_cli(args)
++    arithmetic = lowercase(get(cfg, "precision", "float64"))
++    threads = parse(Int, get(cfg, "threads", "1"))
++    output = get(cfg, "output", joinpath(ROOT, "data", "generated", "pathological-$arithmetic.csv"))
++
++    if arithmetic == "float64"
++        rows = default_cases(Float64, 1e-8, threads)
++    elseif arithmetic == "float64x4"
++        @eval using MultiFloats: Float64x4
++        rows = default_cases(Float64x4, Float64x4(1e-24), threads)
++    elseif startswith(arithmetic, "bigfloat")
++        bits = parse(Int, replace(arithmetic, "bigfloat" => ""))
++        rows = setprecision(BigFloat, bits) do
++            default_cases(BigFloat, parse(BigFloat, "1e-40"), 1)
++        end
++    else
++        error("precision must be float64, float64x4, or bigfloat<bits>")
++    end
++    write_csv(output, rows)
++    println("Wrote $output ($(length(rows)) cases)")
++end
++
++main(ARGS)
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/scripts/setup_benchmark_env.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/scripts/setup_benchmark_env.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bench/public_conic_suite/scripts/setup_benchmark_env.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bench/public_conic_suite/scripts/setup_benchmark_env.jl	2026-08-11 09:26:48.000000000 +0000
+@@ -0,0 +1,23 @@
++#!/usr/bin/env julia
++using Pkg
++
++suite_root = normpath(joinpath(@__DIR__, ".."))
++repo_root = normpath(joinpath(suite_root, "..", ".."))
++Pkg.activate(suite_root)
++
++if isfile(joinpath(repo_root, "Project.toml")) &&
++   occursin("name = \"SDPX\"", read(joinpath(repo_root, "Project.toml"), String))
++    @info "Developing local SDPX" repo_root
++    Pkg.develop(path=repo_root)
++else
++    @warn "SDPX repository root was not detected two levels above the suite. Move this folder under SDPX.jl/bench/ or run Pkg.develop(path=\"/path/to/SDPX.jl\") manually."
++end
++
++for pkg in ("JuMP", "MultiFloats")
++    try
++        Pkg.add(pkg)
++    catch err
++        @warn "Could not add benchmark dependency" pkg exception=(err, catch_backtrace())
++    end
++end
++Pkg.instantiate()
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/sdpx /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/sdpx
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/sdpx	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/sdpx	2026-08-11 09:53:40.482458860 +0000
+@@ -0,0 +1,13 @@
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++if ! command -v julia >/dev/null 2>&1; then
++  echo "SDPX: Julia is not on PATH" >&2
++  exit 127
++fi
++if [[ ! -f "$ROOT/bin/Manifest.toml" ]]; then
++  echo "SDPX CLI environment is not instantiated." >&2
++  echo "Run: julia '$ROOT/bin/setup_cli.jl'" >&2
++  exit 2
++fi
++exec julia --project="$ROOT/bin" "$ROOT/bin/sdpx.jl" "$@"
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/sdpx.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/sdpx.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/sdpx.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/sdpx.jl	2026-08-11 09:55:02.767899219 +0000
+@@ -0,0 +1,256 @@
++#!/usr/bin/env julia
++# User-facing SDPX command line.
++#
++# The numerical bridge remains in sdpx_solve.jl.  This file deliberately owns
++# only command-line policy: SDPB-style option names, all-auto defaults, help,
++# input/output paths and a compact human-readable summary.
++
++isdefined(Main, :SDPXSolveCLI) || include(joinpath(@__DIR__, "sdpx_solve.jl"))
++
++module SDPXUserCLI
++using ..SDPXSolveCLI
++using JSON
++
++const HELP = raw"""
++SDPX — LP / SOCP / SDP solver frontend
++
++Usage:
++  sdpx <problem.json> [result.json] [options]
++  sdpx [options] <problem.json>
++
++High-precision example (SDPB-style):
++  sdpx problem.json result.json \
++      --precision=840 \
++      --dualityGapThreshold=1e-80 \
++      --primalErrorThreshold=1e-80 \
++      --dualErrorThreshold=1e-80
++
++All user-facing policies default to auto.  Backend-specific IPM/KKT/kernel
++parameters are intentionally not part of this interface; inspect the returned
++`plan` and `resolved_options` fields to see what SDPX selected.
++
++Core options:
++  --precision=auto|BITS|float64|float64x2|float64x3|float64x4|bigfloat
++      Integer BITS selects BigFloat and parses the model at that bit precision.
++
++  --dualityGapThreshold=auto|VALUE
++  --primalErrorThreshold=auto|VALUE
++  --dualErrorThreshold=auto|VALUE
++      Independent stopping/certification targets.  Numeric text is preserved
++      as text until it is parsed in the selected arithmetic.
++
++  --maxIterations=auto|N
++  --maxRuntime=auto|SECONDS
++  --threads=auto|N
++  --verbosity=auto|0|1|2|3
++
++Automatic pipeline controls:
++  --algorithm=auto|lp|socp|sdp
++  --presolve=auto|on|off
++  --scaling=auto|none|equilibrate
++  --sparse=auto|on|off
++  --formulation=auto|primal|dual
++  --chordalDecomposition=auto|on|off
++  --equalitySolver=auto|normal_equations|qr
++  --workingPrecisionPolicy=auto|fixed
++  --certificate=auto|on|off
++
++Output:
++  --output=PATH       Result JSON path (otherwise second positional argument or
++                      <problem>.result.json).
++  --quiet             Do not print the solve summary.
++  --help, -h          Show this help.
++
++Input format in this development snapshot:
++  JSON bridge schema v1 (`docs/bridge-schema.md`).  The bundled public conic
++  benchmark suite under `bench/public_conic_suite/` is the development gate
++  for the next native SDPA/CBF/MPS loader phase.
++"""
++
++const VALUE_OPTIONS = Set([
++    "precision",
++    "dualityGapThreshold",
++    "primalErrorThreshold",
++    "dualErrorThreshold",
++    "maxIterations",
++    "maxRuntime",
++    "threads",
++    "verbosity",
++    "algorithm",
++    "presolve",
++    "scaling",
++    "sparse",
++    "formulation",
++    "chordalDecomposition",
++    "equalitySolver",
++    "workingPrecisionPolicy",
++    "certificate",
++    "output",
++])
++
++function _take_option(arguments, index)
++    token = arguments[index]
++    startswith(token, "--") || error("internal CLI parser error")
++    body = token[3:end]
++    if occursin('=', body)
++        key, value = split(body, '='; limit=2)
++        return key, value, index + 1
++    end
++    key = body
++    key in ("help", "quiet") && return key, "true", index + 1
++    key in VALUE_OPTIONS || error("unknown option --$key")
++    index < length(arguments) || error("--$key requires a value")
++    return key, arguments[index + 1], index + 2
++end
++
++function parse_cli(arguments)
++    options = Dict{String,String}()
++    positional = String[]
++    index = 1
++    while index <= length(arguments)
++        token = arguments[index]
++        if token == "-h"
++            options["help"] = "true"
++            index += 1
++        elseif startswith(token, "--")
++            key, value, index = _take_option(arguments, index)
++            options[key] = value
++        else
++            push!(positional, token)
++            index += 1
++        end
++    end
++    get(options, "help", "false") == "true" && return (; help=true, options, positional)
++    isempty(positional) && error("missing problem path; use --help for usage")
++    length(positional) <= 2 || error("expected at most two positional paths")
++    return (; help=false, options, positional)
++end
++
++function _canonical_switch(value::AbstractString, label::AbstractString)
++    normalized = lowercase(strip(value))
++    normalized in ("auto", "on", "off") ||
++        error("--$label must be auto, on, or off")
++    return normalized
++end
++
++function _overlay!(spec, cli_options)
++    settings = get!(spec, "settings", Dict{String,Any}())
++
++    if haskey(cli_options, "precision")
++        raw = strip(cli_options["precision"])
++        lower = lowercase(raw)
++        if lower == "auto"
++            spec["precision"] = "auto"
++            settings["precision_bits"] = "auto"
++        elseif all(isdigit, raw)
++            bits = parse(Int, raw)
++            bits > 0 || error("--precision must be positive")
++            spec["precision"] = "BigFloat"
++            settings["precision_bits"] = bits
++        elseif lower in ("float64", "float64x2", "float64x3", "float64x4", "bigfloat")
++            spec["precision"] = lower
++            lower == "bigfloat" || (settings["precision_bits"] = "auto")
++        else
++            error("unsupported --precision=$raw")
++        end
++    end
++
++    for key in ("dualityGapThreshold", "primalErrorThreshold", "dualErrorThreshold")
++        haskey(cli_options, key) || continue
++        settings[key] = cli_options[key]  # keep numeric text exact
++    end
++
++    haskey(cli_options, "maxIterations") &&
++        (settings["maximumIterations"] = cli_options["maxIterations"])
++    haskey(cli_options, "maxRuntime") &&
++        (settings["maxRuntime"] = cli_options["maxRuntime"])
++    haskey(cli_options, "threads") &&
++        (settings["threads"] = cli_options["threads"])
++    haskey(cli_options, "verbosity") &&
++        (settings["verbosity"] = cli_options["verbosity"])
++
++    for key in ("algorithm", "scaling", "formulation", "equalitySolver", "workingPrecisionPolicy")
++        haskey(cli_options, key) && (settings[key] = lowercase(strip(cli_options[key])))
++    end
++    for key in ("presolve", "sparse", "chordalDecomposition", "certificate")
++        haskey(cli_options, key) && (settings[key] = _canonical_switch(cli_options[key], key))
++    end
++    return spec
++end
++
++function _default_output(input_path)
++    base, _ = splitext(input_path)
++    return base * ".result.json"
++end
++
++function _write_response(path, response)
++    open(path, "w") do io
++        JSON.print(io, response)
++    end
++end
++
++function _print_summary(response, output_path)
++    if get(response, "success", false) != true
++        println(stderr, "SDPX error: ", get(response, "error", "unknown error"))
++        println(stderr, "result: ", output_path)
++        return
++    end
++    println("SDPX status:           ", response["status"])
++    precision_suffix = haskey(response, "resolved_options") ?
++        string(" / ", response["resolved_options"]["precision_bits"], " bits") : ""
++    println("precision:             ", response["precision"], precision_suffix)
++    println("objective:             ", response["objective"])
++    println("duality gap:           ", response["relative_gap"])
++    println("primal error:          ", response["primal_residual"])
++    println("dual error:            ", response["dual_residual"])
++    println("iterations:            ", response["iterations"])
++    if haskey(response, "plan")
++        plan = response["plan"]
++        println("auto plan:             ", plan["algorithm"], " / ",
++                plan["kkt_backend"], " / ", plan["gram_kernel"])
++    end
++    if haskey(response, "certificate")
++        println("certificate:           ", response["certificate"]["valid"] ? "valid" : "FAILED")
++    end
++    println("result:                ", output_path)
++end
++
++function main(arguments=ARGS)
++    parsed = try
++        parse_cli(arguments)
++    catch exception
++        exception isa InterruptException && rethrow()
++        println(stderr, "error: ", sprint(showerror, exception))
++        println(stderr, "use --help for usage")
++        return 2
++    end
++    if parsed.help
++        print(HELP)
++        return 0
++    end
++
++    input_path = parsed.positional[1]
++    output_path = get(
++        parsed.options,
++        "output",
++        length(parsed.positional) == 2 ? parsed.positional[2] : _default_output(input_path),
++    )
++    response, code = try
++        isfile(input_path) || error("input file not found: $input_path")
++        spec = JSON.parsefile(input_path)
++        _overlay!(spec, parsed.options)
++        SDPXSolveCLI.solve_specification(spec), 0
++    catch exception
++        exception isa InterruptException && rethrow()
++        SDPXSolveCLI.failure_response(sprint(showerror, exception)), 1
++    end
++    _write_response(output_path, response)
++    get(parsed.options, "quiet", "false") == "true" || _print_summary(response, output_path)
++    return code
++end
++
++end # module SDPXUserCLI
++
++if abspath(PROGRAM_FILE) == (@__FILE__)
++    exit(SDPXUserCLI.main())
++end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/sdpx_solve.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/sdpx_solve.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/sdpx_solve.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/sdpx_solve.jl	2026-08-11 10:06:12.922105788 +0000
+@@ -37,20 +37,31 @@
+ const SCHEMA_VERSION = 1
+ 
+ const PRECISIONS = Dict{String,DataType}()
++const _PRECISIONS_READY = Ref(false)
+ 
+-function __init__()
++function _ensure_precisions!()
++    _PRECISIONS_READY[] && return PRECISIONS
+     PRECISIONS["Float64"] = Float64
+     # Extended types register lazily so the bridge works without the
+     # extensions installed; requesting one without its package is a
+-    # structured error, not a MethodError.
++    # structured error, not a MethodError. This helper is called from both
++    # `__init__` and `solve_specification`, so include-based tests/embedders do
++    # not depend on package-loader `__init__` semantics.
+     try
+         @eval using MultiFloats
+         @eval PRECISIONS["Float64x2"] = MultiFloats.Float64x2
++        @eval PRECISIONS["Float64x3"] = MultiFloats.Float64x3
+         @eval PRECISIONS["Float64x4"] = MultiFloats.Float64x4
+     catch exception
+         exception isa InterruptException && rethrow()
+     end
+     PRECISIONS["BigFloat"] = BigFloat
++    _PRECISIONS_READY[] = true
++    return PRECISIONS
++end
++
++function __init__()
++    _ensure_precisions!()
+     return
+ end
+ 
+@@ -68,6 +79,10 @@
+ values round-trips every bit; scientific text is what every consumer parses."""
+ _render(value) = string(value)
+ 
++_json_safe(value::Symbol) = string(value)
++_json_safe(value::AbstractFloat) = isfinite(value) ? value : string(value)
++_json_safe(value) = value
++
+ function _coo_matrix(::Type{T}, entry, dimension::Int, label::String) where {T}
+     matrix = zeros(T, dimension, dimension)
+     rows = get(entry, "rows", Any[])
+@@ -131,42 +146,155 @@
+     return objective, coefficients, constants, B, rhs
+ end
+ 
++function _setting(settings, names...; default=:auto)
++    for name in names
++        haskey(settings, name) && return settings[name]
++    end
++    return default
++end
++
+ function _solver_options(::Type{T}, settings) where {T}
+-    tolerance = _number(T, get(settings, "tolerance", "1e-8"))
+-    return SDPX.SolverOptions{T}(
+-        ϵ_gap=tolerance,
+-        ϵ_primal=tolerance,
+-        ϵ_dual=tolerance,
+-        iter_max=Int(get(settings, "maximum_iterations", 200)),
+-        max_time=Float64(get(settings, "time_limit", Inf)),
+-        threads=Int(get(settings, "threads", 1)),
+-        verbosity=Int(get(settings, "verbosity", 0)),
+-        precision_bits=Int(get(settings, "precision_bits", 256)),
++    common = _setting(settings, "tolerance"; default=:auto)
++    gap = _setting(
++        settings,
++        "dualityGapThreshold", "duality_gap_threshold", "gap_tolerance";
++        default=common,
++    )
++    primal = _setting(
++        settings,
++        "primalErrorThreshold", "primal_error_threshold", "primal_tolerance";
++        default=common,
++    )
++    dual = _setting(
++        settings,
++        "dualErrorThreshold", "dual_error_threshold", "dual_tolerance";
++        default=common,
++    )
++    precision_request = _setting(settings, "precision_bits"; default=:auto)
++    frontend = SDPX.SolveOptions(
++        precision=precision_request,
++        duality_gap_threshold=gap,
++        primal_error_threshold=primal,
++        dual_error_threshold=dual,
++        maximum_iterations=_setting(
++            settings, "maximumIterations", "maximum_iterations"; default=:auto,
++        ),
++        max_runtime=_setting(
++            settings, "maxRuntime", "time_limit"; default=:auto,
++        ),
++        threads=_setting(settings, "threads"; default=:auto),
++        verbosity=_setting(settings, "verbosity"; default=:auto),
++        presolve=_setting(settings, "presolve"; default=:auto),
++        scaling=_setting(settings, "scaling"; default=:auto),
++        algorithm=_setting(settings, "algorithm"; default=:auto),
++        sparse=_setting(settings, "sparse"; default=:auto),
++        formulation=_setting(settings, "formulation"; default=:auto),
++        chordal_decomposition=_setting(
++            settings, "chordalDecomposition", "chordal_decomposition"; default=:auto,
++        ),
++        equality_solver=_setting(
++            settings, "equalitySolver", "equality_solver"; default=:auto,
++        ),
++        working_precision_policy=_setting(
++            settings, "workingPrecisionPolicy", "working_precision_policy"; default=:auto,
++        ),
++        diagnostics=_setting(settings, "diagnostics"; default=:auto),
++        timing=_setting(settings, "timing"; default=:auto),
++        certification=_setting(settings, "certificate", "certification"; default=:auto),
++    )
++    return SDPX.Experimental.resolve_solve_options(T, frontend)
++end
++
++function _precision_name_and_bits(spec, settings)
++    raw = get(spec, "precision", "auto")
++    bits = _setting(settings, "precision_bits"; default=:auto)
++    if raw isa Integer
++        raw > 0 || error("precision bit count must be positive")
++        return "BigFloat", Int(raw)
++    end
++    name = String(raw)
++    lower = lowercase(strip(name))
++    if lower == "auto"
++        if bits isa Integer && bits > 53
++            return "BigFloat", Int(bits)
++        elseif bits isa AbstractString && lowercase(strip(bits)) != "auto"
++            parsed = parse(Int, bits)
++            parsed > 53 && return "BigFloat", parsed
++        end
++        return "Float64", 53
++    end
++    aliases = Dict(
++        "float64" => "Float64",
++        "float64x2" => "Float64x2",
++        "float64x3" => "Float64x3",
++        "float64x4" => "Float64x4",
++        "bigfloat" => "BigFloat",
++    )
++    canonical = get(aliases, lower, name)
++    resolved_bits = if canonical == "BigFloat"
++        if bits === :auto || (bits isa AbstractString && lowercase(strip(bits)) == "auto")
++            256
++        else
++            Int(bits isa Integer ? bits : parse(Int, bits))
++        end
++    else
++        0
++    end
++    return canonical, resolved_bits
++end
++
++function _plan_response(result)
++    diagnostics = result.diagnostics
++    diagnostics === nothing && return nothing
++    plan = diagnostics.plan
++    classification = plan.classification
++    return Dict{String,Any}(
++        "cone" => string(classification.cone),
++        "storage" => string(classification.storage),
++        "arithmetic" => string(classification.arithmetic),
++        "size" => string(classification.size),
++        "variables" => classification.variables,
++        "equalities" => classification.equalities,
++        "cone_rows" => classification.cone_rows,
++        "maximum_block_size" => classification.maximum_block_size,
++        "algorithm" => string(plan.algorithm),
++        "scaling" => string(plan.scaling),
++        "kkt_backend" => string(plan.kkt_backend),
++        "gram_kernel" => string(plan.gram_kernel),
++        "schedule" => string(plan.schedule),
++        "threads" => plan.threads,
++        "parameter_profile" => string(plan.parameter_profile),
++        "memory_budget_bytes" => plan.memory_budget_bytes,
+     )
+ end
+ 
+ function solve_specification(spec)
++    _ensure_precisions!()
+     Int(get(spec, "sdpx_schema", 0)) == SCHEMA_VERSION ||
+         error("unsupported or missing \"sdpx_schema\" (this bridge speaks version $SCHEMA_VERSION)")
+-    name = String(get(spec, "precision", "Float64"))
++    settings = get(spec, "settings", Dict{String,Any}())
++    name, requested_bits = _precision_name_and_bits(spec, settings)
+     haskey(PRECISIONS, name) ||
+         error("unknown precision \"$name\"; available: $(sort!(collect(keys(PRECISIONS)))) " *
+-              "(Float64x2/Float64x4 need the MultiFloats package in the bridge environment)")
++              "(Float64x2/Float64x3/Float64x4 need MultiFloats in the bridge environment)")
+     T = PRECISIONS[name]
+-    settings = get(spec, "settings", Dict{String,Any}())
++    if T === BigFloat
++        settings["precision_bits"] = requested_bits
++    end
+ 
+     run_solve = function ()
+         c, A, C, B, b = _build_problem(T, spec)
+         problem = SDPX.ingest(c, A, C, B, b; verbosity=0)
+-        options = _solver_options(T, settings)
+-        result = SDPX.solve!(problem, options)
+-        return problem, options, result
++        resolved = _solver_options(T, settings)
++        result = SDPX.solve!(problem, resolved.core)
++        return problem, resolved, result
+     end
+     # BigFloat data must be *parsed* at the working precision, not converted
+     # to it afterwards; setprecision therefore wraps the whole build+solve.
+-    problem, options, result = T === BigFloat ?
++    problem, resolved, result = T === BigFloat ?
+         setprecision(run_solve, BigFloat, Int(get(settings, "precision_bits", 256))) :
+         run_solve()
++    options = resolved.core
+ 
+     response = Dict{String,Any}(
+         "sdpx_schema" => SCHEMA_VERSION,
+@@ -184,13 +312,16 @@
+         "iterations" => result.iterations,
+         "x" => [_render(v) for v in result.x],
+         "y" => [_render(v) for v in result.y],
++        "resolved_options" => Dict(string(k) => _json_safe(v) for (k, v) in pairs(resolved.summary)),
+     )
++    plan_response = _plan_response(result)
++    plan_response === nothing || (response["plan"] = plan_response)
+     if get(settings, "return_matrices", false) == true
+         response["X"] = [[_render(v) for v in vec(block)] for block in result.X]
+         response["Y"] = [[_render(v) for v in vec(block)] for block in result.Y]
+         response["block_dimensions"] = [size(block, 1) for block in result.X]
+     end
+-    if get(settings, "certificate", true) == true
++    if resolved.certification
+         certificate = SDPX.result_certificate(problem, result, options)
+         response["certificate"] = Dict{String,Any}(
+             "valid" => certificate.valid,
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/setup_cli.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/setup_cli.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/bin/setup_cli.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/bin/setup_cli.jl	2026-08-11 09:53:40.485229928 +0000
+@@ -0,0 +1,8 @@
++#!/usr/bin/env julia
++using Pkg
++root = normpath(joinpath(@__DIR__, ".."))
++Pkg.activate(@__DIR__)
++Pkg.develop(PackageSpec(path=root))
++Pkg.instantiate()
++println("SDPX CLI ready. Example:")
++println("  $(joinpath(@__DIR__, "sdpx")) --help")
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/architecture-v041.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/architecture-v041.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/architecture-v041.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/architecture-v041.md	2026-08-11 09:56:37.788483111 +0000
+@@ -0,0 +1,75 @@
++# LP / SOCP / SDP architecture boundary for v0.4.1 -> v0.5
++
++## Target
++
++```text
++                 Frontend
++ Julia arrays / JuMP-MOI / CLI / file loaders
++                       |
++                       v
++             Canonical cone semantics
++          Linear | Lorentz | PositiveSemidefinite
++                       |
++                       v
++                  Midend
++ analyze -> presolve -> scale -> formulate -> plan
++                       |
++                  ExecutionPlan
++                       |
++            +----------+----------+
++            |          |          |
++            v          v          v
++           LP         SOCP        SDP
++          kernel     kernel      kernel
++            \          |          /
++             +---------+---------+
++                       v
++             system assembly / KKT
++                       v
++        factorization -> refinement
++                       v
++          original-coordinate certificate
++```
++
++## Current-to-target mapping
++
++The current tree is kept running while code migrates behind stable boundaries.
++
++| Current code | Target responsibility |
++|---|---|
++| `ingest.jl`, `lp_api.jl`, `soc.jl`, `moi_wrapper.jl` | frontend/canonicalization |
++| `preprocessing.jl`, `pipeline.jl`, `adaptive_parameters.jl` | midend |
++| `lp_solver.jl`, `soc_native_q3.jl`, `schur.jl`, `step.jl` | cone/system backend |
++| `kkt*.jl`, mixed-precision kernels | linear-system backend |
++| `validation.jl` | authoritative certificate |
++
++The new files `frontend/solve_options.jl` and `midend/resolve_options.jl` are the
++first deliberate boundary.  Do not duplicate that policy elsewhere.
++
++## Public vs expert options
++
++Public policy (`SolveOptions`) stays small and defaults entirely to `auto`.
++Resolved expert state (`SolverOptions{T}`) may remain large because it is an
++internal numerical contract.  New microkernel knobs should default to internal
++policy and should not be added to `SolveOptions` without a user-level need.
++
++## Planner ownership
++
++`ExecutionPlan` must become authoritative.  Deterministic choices made after
++plan construction are architecture bugs.  Runtime numerical fallback is
++allowed, but it must be recorded as:
++
++```text
++planned_backend
++executed_backend
++fallback_reason
++```
++
++and the original-coordinate certificate remains the final status authority.
++
++## Cone formulation ownership
++
++SOC -> PSD is a **formulation transform**, not a frontend fact.  Native SOC and
++arrow specialized Q3 implementations therefore share the same Lorentz semantic
++IR.  The planner may choose an exact PSD-arrow reference route when necessary,
++but diagnostics and benchmarks must label that formulation explicitly.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/bridge-schema.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/bridge-schema.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/bridge-schema.md	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/bridge-schema.md	2026-08-11 09:57:18.208410746 +0000
+@@ -28,7 +28,7 @@
+ ```jsonc
+ {
+   "sdpx_schema": 1,                  // required, exactly 1
+-  "precision": "Float64",            // "Float64" | "Float64x2" | "Float64x4" | "BigFloat"
++  "precision": "auto",               // auto | Float64 | Float64x2/x3/x4 | BigFloat
+   "objective": [2.0, 3.0],           // c, length m
+   "blocks": [                        // one per PSD block: Σᵢ xᵢ Aᵢ − C ⪰ 0
+     {
+@@ -44,12 +44,18 @@
+     "rows": [1], "cols": [1], "values": [1.0], "rhs": [0.5]
+   },
+   "settings": {
+-    "tolerance": "1e-8",             // ϵ_gap = ϵ_primal = ϵ_dual
+-    "maximum_iterations": 200,
+-    "time_limit": 600.0,             // seconds; omit for none
+-    "threads": 1,
+-    "verbosity": 0,
+-    "precision_bits": 256,           // BigFloat only
++    "dualityGapThreshold": "auto",   // or e.g. "1e-80"
++    "primalErrorThreshold": "auto",
++    "dualErrorThreshold": "auto",
++    "maximumIterations": "auto",
++    "maxRuntime": "auto",
++    "threads": "auto",
++    "verbosity": "auto",
++    "precision_bits": "auto",        // BigFloat only; CLI --precision=N sets this
++    "algorithm": "auto",
++    "presolve": "auto",
++    "scaling": "auto",
++    "sparse": "auto",
+     "return_matrices": false,        // include X/Y blocks in the result
+     "certificate": true              // include the independent certificate
+   }
+@@ -106,3 +112,24 @@
+    blocks; the schema then only describes the *layout*, not the bytes.
+ 
+ Consumers that stick to the file contract above will not notice the change.
++
++## All-auto policy and SDPB-style CLI
++
++Schema-v1 remains backward compatible with the original `tolerance`,
++`maximum_iterations` and `time_limit` keys.  New code should prefer the
++independent threshold names above.  Missing policy fields resolve through the
++same `SolveOptions` midend used by the Julia API.
++
++The friendly wrapper `bin/sdpx.jl` accepts:
++
++```bash
++sdpx problem.json result.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
++
++The response additionally contains `resolved_options` and a compact `plan`
++record (`algorithm`, storage/classification, KKT backend, Gram kernel, schedule
++and threads).
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/cli.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/cli.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/cli.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/cli.md	2026-08-11 09:56:37.783933122 +0000
+@@ -0,0 +1,100 @@
++# SDPX command-line frontend (v0.4.1 development)
++
++The v0.4.1 development frontend intentionally resembles the small set of
++high-value options used in SDPB workflows while keeping SDPX's LP/SOCP/SDP
++automatic pipeline in control.
++
++## Setup
++
++From the repository root:
++
++```bash
++julia bin/setup_cli.jl
++./bin/sdpx --help
++```
++
++`bin/setup_cli.jl` creates the isolated CLI environment and develops the local
++checkout into it.  The solver core still has no JSON dependency.
++
++## Normal use: everything automatic
++
++```bash
++./bin/sdpx problem.json
++```
++
++The result is written to `problem.result.json`.  The output contains both
++`resolved_options` and `plan`, so `auto` is inspectable rather than opaque.
++
++## SDPB-style high precision
++
++```bash
++./bin/sdpx problem.json result.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
++
++An integer `--precision=N` means BigFloat with `N` **bits**, matching the
++meaning users normally expect from SDPB's precision flag.  High-precision
++coefficients in the JSON input should be strings so that they are parsed only
++after the BigFloat precision scope has been established.
++
++The three stopping thresholds are independent.  If any is omitted or set to
++`auto`, the frontend selects a conservative target using roughly one third of
++the available decimal precision, with a Float64 floor of `1e-8`.  For example,
++840 bits resolves to approximately `1e-84`.  This is only a stopping-policy
++heuristic; final success remains governed by original-coordinate
++certification.
++
++## Automatic controls
++
++The ordinary frontend exposes policies, not low-level IPM constants:
++
++```text
++--algorithm=auto|lp|socp|sdp
++--presolve=auto|on|off
++--scaling=auto|none|equilibrate
++--sparse=auto|on|off
++--formulation=auto|primal|dual
++--chordalDecomposition=auto|on|off
++--equalitySolver=auto|normal_equations|qr
++--workingPrecisionPolicy=auto|fixed
++--threads=auto|N
++--certificate=auto|on|off
++```
++
++Parameters such as centering constants, Q3 Gram strategies, mixed-precision
++condition limits and refinement micro-policy remain expert/internal controls.
++They should not become command-line flags unless a benchmarked scientific
++workflow proves that users need to override them.
++
++## Julia frontend
++
++The same policy boundary is available without the CLI:
++
++```julia
++using SDPX
++
++options = SolveOptions()  # every field is :auto
++result = solve(problem, options)
++```
++
++High-precision policy can be explicit:
++
++```julia
++options = SolveOptions(
++    precision=840,
++    duality_gap_threshold="1e-80",
++    primal_error_threshold="1e-80",
++    dual_error_threshold="1e-80",
++)
++```
++
++For an already-ingested problem, its arithmetic has already been chosen.  A
++request for 840 bits therefore requires that the problem itself was created as
++BigFloat at the desired precision.  The CLI does not have this issue because
++it parses the model inside the requested precision scope.
++
++`SolverOptions{T}` remains available as the expert resolved interface and is
++not removed in v0.4.1.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/make.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/make.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/make.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/make.jl	2026-08-11 09:56:54.626486702 +0000
+@@ -16,6 +16,7 @@
+         "Home" => "index.md",
+         "Getting started" => [
+             "Quick start" => "quickstart.md",
++            "Command line" => "cli.md",
+             "Precision" => "precision.md",
+             "JuMP and MOI" => "jump.md",
+             "Convex.jl" => "convex.md",
+@@ -28,6 +29,7 @@
+         ],
+         "API reference" => "api.md",
+         "Experimental internals" => "internals.md",
++        "Architecture v0.4.1 -> v0.5" => "architecture-v041.md",
+         "Development" => "development.md",
+     ],
+     checkdocs=:exports,
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/src/api.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/src/api.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/src/api.md	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/src/api.md	2026-08-11 10:00:06.938710756 +0000
+@@ -18,6 +18,7 @@
+ solve_socp
+ PreparedSolver
+ prepare
++SolveOptions
+ SolverOptions
+ SDPResult
+ SolveStatus
+@@ -51,6 +52,8 @@
+ `SDPX.Experimental.build_execution_plan` the pre-solve execution plan.
+ `SDPX.Experimental.analyze_fixed_trace` conservatively detects direct and
+ equality-implied constant-trace PSD blocks.
++`SDPX.Experimental.resolve_solve_options` shows how the small all-auto
++`SolveOptions` policy is lowered to the resolved numerical configuration.
+ The historical top-level experimental exports completed their deprecation
+ cycle in 0.4. Qualified `SDPX.name` bindings remain available, while new code
+ should use `SDPX.Experimental.name`.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/src/architecture-v041.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/src/architecture-v041.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/src/architecture-v041.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/src/architecture-v041.md	2026-08-11 09:56:53.634969958 +0000
+@@ -0,0 +1,75 @@
++# LP / SOCP / SDP architecture boundary for v0.4.1 -> v0.5
++
++## Target
++
++```text
++                 Frontend
++ Julia arrays / JuMP-MOI / CLI / file loaders
++                       |
++                       v
++             Canonical cone semantics
++          Linear | Lorentz | PositiveSemidefinite
++                       |
++                       v
++                  Midend
++ analyze -> presolve -> scale -> formulate -> plan
++                       |
++                  ExecutionPlan
++                       |
++            +----------+----------+
++            |          |          |
++            v          v          v
++           LP         SOCP        SDP
++          kernel     kernel      kernel
++            \          |          /
++             +---------+---------+
++                       v
++             system assembly / KKT
++                       v
++        factorization -> refinement
++                       v
++          original-coordinate certificate
++```
++
++## Current-to-target mapping
++
++The current tree is kept running while code migrates behind stable boundaries.
++
++| Current code | Target responsibility |
++|---|---|
++| `ingest.jl`, `lp_api.jl`, `soc.jl`, `moi_wrapper.jl` | frontend/canonicalization |
++| `preprocessing.jl`, `pipeline.jl`, `adaptive_parameters.jl` | midend |
++| `lp_solver.jl`, `soc_native_q3.jl`, `schur.jl`, `step.jl` | cone/system backend |
++| `kkt*.jl`, mixed-precision kernels | linear-system backend |
++| `validation.jl` | authoritative certificate |
++
++The new files `frontend/solve_options.jl` and `midend/resolve_options.jl` are the
++first deliberate boundary.  Do not duplicate that policy elsewhere.
++
++## Public vs expert options
++
++Public policy (`SolveOptions`) stays small and defaults entirely to `auto`.
++Resolved expert state (`SolverOptions{T}`) may remain large because it is an
++internal numerical contract.  New microkernel knobs should default to internal
++policy and should not be added to `SolveOptions` without a user-level need.
++
++## Planner ownership
++
++`ExecutionPlan` must become authoritative.  Deterministic choices made after
++plan construction are architecture bugs.  Runtime numerical fallback is
++allowed, but it must be recorded as:
++
++```text
++planned_backend
++executed_backend
++fallback_reason
++```
++
++and the original-coordinate certificate remains the final status authority.
++
++## Cone formulation ownership
++
++SOC -> PSD is a **formulation transform**, not a frontend fact.  Native SOC and
++arrow specialized Q3 implementations therefore share the same Lorentz semantic
++IR.  The planner may choose an exact PSD-arrow reference route when necessary,
++but diagnostics and benchmarks must label that formulation explicitly.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/src/cli.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/src/cli.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/docs/src/cli.md	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/docs/src/cli.md	2026-08-11 09:56:53.633436914 +0000
+@@ -0,0 +1,100 @@
++# SDPX command-line frontend (v0.4.1 development)
++
++The v0.4.1 development frontend intentionally resembles the small set of
++high-value options used in SDPB workflows while keeping SDPX's LP/SOCP/SDP
++automatic pipeline in control.
++
++## Setup
++
++From the repository root:
++
++```bash
++julia bin/setup_cli.jl
++./bin/sdpx --help
++```
++
++`bin/setup_cli.jl` creates the isolated CLI environment and develops the local
++checkout into it.  The solver core still has no JSON dependency.
++
++## Normal use: everything automatic
++
++```bash
++./bin/sdpx problem.json
++```
++
++The result is written to `problem.result.json`.  The output contains both
++`resolved_options` and `plan`, so `auto` is inspectable rather than opaque.
++
++## SDPB-style high precision
++
++```bash
++./bin/sdpx problem.json result.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
++
++An integer `--precision=N` means BigFloat with `N` **bits**, matching the
++meaning users normally expect from SDPB's precision flag.  High-precision
++coefficients in the JSON input should be strings so that they are parsed only
++after the BigFloat precision scope has been established.
++
++The three stopping thresholds are independent.  If any is omitted or set to
++`auto`, the frontend selects a conservative target using roughly one third of
++the available decimal precision, with a Float64 floor of `1e-8`.  For example,
++840 bits resolves to approximately `1e-84`.  This is only a stopping-policy
++heuristic; final success remains governed by original-coordinate
++certification.
++
++## Automatic controls
++
++The ordinary frontend exposes policies, not low-level IPM constants:
++
++```text
++--algorithm=auto|lp|socp|sdp
++--presolve=auto|on|off
++--scaling=auto|none|equilibrate
++--sparse=auto|on|off
++--formulation=auto|primal|dual
++--chordalDecomposition=auto|on|off
++--equalitySolver=auto|normal_equations|qr
++--workingPrecisionPolicy=auto|fixed
++--threads=auto|N
++--certificate=auto|on|off
++```
++
++Parameters such as centering constants, Q3 Gram strategies, mixed-precision
++condition limits and refinement micro-policy remain expert/internal controls.
++They should not become command-line flags unless a benchmarked scientific
++workflow proves that users need to override them.
++
++## Julia frontend
++
++The same policy boundary is available without the CLI:
++
++```julia
++using SDPX
++
++options = SolveOptions()  # every field is :auto
++result = solve(problem, options)
++```
++
++High-precision policy can be explicit:
++
++```julia
++options = SolveOptions(
++    precision=840,
++    duality_gap_threshold="1e-80",
++    primal_error_threshold="1e-80",
++    dual_error_threshold="1e-80",
++)
++```
++
++For an already-ingested problem, its arithmetic has already been chosen.  A
++request for 840 bits therefore requires that the problem itself was created as
++BigFloat at the desired precision.  The CLI does not have this issue because
++it parses the model inside the requested precision scope.
++
++`SolverOptions{T}` remains available as the expert resolved interface and is
++not removed in v0.4.1.
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/examples/README.md /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/examples/README.md
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/examples/README.md	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/examples/README.md	2026-08-11 09:59:08.757150788 +0000
+@@ -48,3 +48,16 @@
+ These numbers are from one small, well-conditioned problem. Real bootstrap
+ programs exhaust `Float64` far earlier, which is the case the solver is built
+ for; the mechanism is the same, the crossover is not.
++
++## v0.4.1 development CLI
++
++After `julia bin/setup_cli.jl`, the included JSON fixtures can be used directly:
++
++```bash
++./bin/sdpx examples/cli_problem.json
++./bin/sdpx examples/cli_problem_high_precision.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80
++```
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/examples/cli_problem.json /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/examples/cli_problem.json
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/examples/cli_problem.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/examples/cli_problem.json	2026-08-11 09:59:08.756108701 +0000
+@@ -0,0 +1,40 @@
++{
++  "sdpx_schema": 1,
++  "precision": "auto",
++  "objective": [2.0, 3.0],
++  "blocks": [
++    {
++      "dimension": 2,
++      "constant": {
++        "rows": [1, 2],
++        "cols": [2, 1],
++        "values": [1.0, 1.0]
++      },
++      "coefficients": [
++        {
++          "variable": 1,
++          "rows": [1],
++          "cols": [1],
++          "values": [1.0]
++        },
++        {
++          "variable": 2,
++          "rows": [2],
++          "cols": [2],
++          "values": [1.0]
++        }
++      ]
++    }
++  ],
++  "settings": {
++    "dualityGapThreshold": "auto",
++    "primalErrorThreshold": "auto",
++    "dualErrorThreshold": "auto",
++    "threads": "auto",
++    "algorithm": "auto",
++    "presolve": "auto",
++    "scaling": "auto",
++    "sparse": "auto",
++    "certificate": "auto"
++  }
++}
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/examples/cli_problem_high_precision.json /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/examples/cli_problem_high_precision.json
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/examples/cli_problem_high_precision.json	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/examples/cli_problem_high_precision.json	2026-08-11 09:59:08.757150788 +0000
+@@ -0,0 +1,37 @@
++{
++  "sdpx_schema": 1,
++  "precision": "BigFloat",
++  "objective": ["2.0", "3.0"],
++  "blocks": [
++    {
++      "dimension": 2,
++      "constant": {
++        "rows": [1, 2],
++        "cols": [2, 1],
++        "values": ["1.0", "1.0"]
++      },
++      "coefficients": [
++        {
++          "variable": 1,
++          "rows": [1],
++          "cols": [1],
++          "values": ["1.0"]
++        },
++        {
++          "variable": 2,
++          "rows": [2],
++          "cols": [2],
++          "values": ["1.0"]
++        }
++      ]
++    }
++  ],
++  "settings": {
++    "precision_bits": 840,
++    "dualityGapThreshold": "1e-80",
++    "primalErrorThreshold": "1e-80",
++    "dualErrorThreshold": "1e-80",
++    "threads": "auto",
++    "certificate": "auto"
++  }
++}
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/scripts/dev_v041_smoke.sh /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/scripts/dev_v041_smoke.sh
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/scripts/dev_v041_smoke.sh	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/scripts/dev_v041_smoke.sh	2026-08-11 09:59:33.004194103 +0000
+@@ -0,0 +1,21 @@
++#!/usr/bin/env bash
++set -euo pipefail
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++cd "$ROOT"
++
++julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
++julia bin/setup_cli.jl
++./bin/sdpx examples/cli_problem.json --quiet
++./bin/sdpx examples/cli_problem_high_precision.json \
++  --precision=840 \
++  --dualityGapThreshold=1e-80 \
++  --primalErrorThreshold=1e-80 \
++  --dualErrorThreshold=1e-80 \
++  --quiet
++
++julia bench/public_conic_suite/scripts/setup_benchmark_env.jl
++julia --project=bench/public_conic_suite \
++  bench/public_conic_suite/scripts/run_pathological.jl \
++  --precision=float64 --threads=1
++
++echo "v0.4.1 development smoke completed"
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/SDPX.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/SDPX.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/SDPX.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/SDPX.jl	2026-08-11 09:52:06.898474910 +0000
+@@ -4,6 +4,8 @@
+ using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
+ 
+ include("types.jl")
++include("frontend/solve_options.jl")
++include("midend/resolve_options.jl")
+ include("kernels/api.jl")
+ include("kernels/generic.jl")
+ include("kernels/bigfloat.jl")
+@@ -37,10 +39,11 @@
+ include("moi_wrapper.jl")
+ include("convex_api.jl")
+ include("compat.jl")
++include("frontend/high_level_solve.jl")
+ include("public_api.jl")
+ 
+ export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
+-export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
++export solve, solve!, ingest, SDPProblem, SolverOptions, SolveOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
+ export linear_program, solve_lp
+ export SOCConstraint, ConicProblem, ConicResult
+ export second_order_program, solve_socp
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/frontend/high_level_solve.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/frontend/high_level_solve.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/frontend/high_level_solve.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/frontend/high_level_solve.jl	2026-08-11 10:01:07.072950121 +0000
+@@ -0,0 +1,90 @@
++@inline function _frontend_requested_bigfloat_bits(options::SolveOptions)
++    value = options.precision
++    if value isa Integer
++        return Int(value)
++    elseif value isa AbstractString && !isempty(strip(value)) && all(isdigit, strip(value))
++        return parse(Int, strip(value))
++    end
++    return nothing
++end
++
++function _solve_sdp_with_frontend(problem::SDPProblem{T}, options::SolveOptions) where {T}
++    resolved = resolve_solve_options(T, options)
++    return solve!(problem, resolved.core)
++end
++
++"""
++    solve(problem, options::SolveOptions)
++
++Solve an already-ingested LP/SDP model through the small all-auto frontend.
++The returned numerical result is unchanged; the resolved structural choices
++remain available through `result.diagnostics.plan`.
++
++For `SDPProblem{BigFloat}`, an integer `options.precision` changes the working
++precision scope for the solve.  It cannot recreate digits that were already
++rounded when the problem was constructed; construct high-precision input in
++the requested precision scope or use the CLI, which parses input there.
++"""
++function solve(problem::SDPProblem{T}, options::SolveOptions) where {T}
++    if T === BigFloat
++        bits = _frontend_requested_bigfloat_bits(options)
++        if bits !== nothing && Base.precision(BigFloat) != bits
++            bits > 0 || throw(ArgumentError("precision must be positive"))
++            return setprecision(BigFloat, bits) do
++                _solve_sdp_with_frontend(problem, options)
++            end
++        end
++    end
++    return _solve_sdp_with_frontend(problem, options)
++end
++
++"""Solve a compact SOC model through the all-auto frontend policy."""
++function solve_socp(problem::ConicProblem{T}, options::SolveOptions) where {T}
++    run = function ()
++        resolved = resolve_solve_options(T, options)
++        lifted = _soc_psd_lift(problem; sparse=resolved.core.sparse,
++                               verbosity=resolved.core.verbosity)
++        result = solve!(lifted, resolved.core)
++        return _conic_result(problem, result)
++    end
++    if T === BigFloat
++        bits = _frontend_requested_bigfloat_bits(options)
++        if bits !== nothing && Base.precision(BigFloat) != bits
++            bits > 0 || throw(ArgumentError("precision must be positive"))
++            return setprecision(run, BigFloat, bits)
++        end
++    end
++    return run()
++end
++
++solve(problem::ConicProblem, options::SolveOptions) = solve_socp(problem, options)
++
++"""
++    solve_lp(c, G, h, options::SolveOptions; Aeq=nothing, beq=nothing, ...)
++
++Convenience overload for the native LP frontend.  If an explicit high
++precision is required, pass `T=BigFloat` while constructing the LP (or use the
++CLI, which parses the input directly at the requested precision).
++"""
++function solve_lp(
++    c::AbstractVector,
++    G::AbstractMatrix,
++    h::AbstractVector,
++    options::SolveOptions;
++    Aeq=nothing,
++    beq=nothing,
++    T::Union{Nothing,Type}=nothing,
++    sparse::Union{Bool,Symbol}=:auto,
++    validate::Bool=true,
++)
++    problem = linear_program(
++        c, G, h;
++        Aeq=Aeq,
++        beq=beq,
++        T=T,
++        sparse=sparse,
++        validate=validate,
++        verbosity=0,
++    )
++    return solve(problem, options)
++end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/frontend/solve_options.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/frontend/solve_options.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/frontend/solve_options.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/frontend/solve_options.jl	2026-08-11 09:51:51.147936350 +0000
+@@ -0,0 +1,45 @@
++"""
++    SolveOptions(; kwargs...)
++
++Small, policy-oriented user interface for SDPX solves.
++
++Every field defaults to `:auto`.  `SolveOptions` is intentionally separate
++from [`SolverOptions`](@ref): `SolverOptions` remains the fully resolved,
++expert interior-point configuration, while `SolveOptions` is the stable
++frontend contract intended for ordinary users, CLI tools, JuMP adapters and
++benchmark runners.
++
++The important consequence is that new backend tuning knobs do not have to
++become public API.  The midend resolves this policy object once, records the
++resolved choices in diagnostics, and hands a concrete `SolverOptions{T}` to
++the numerical backend.
++
++`precision` accepts `:auto`, a fixed arithmetic symbol (`:float64`,
++`:float64x2`, `:float64x3`, `:float64x4`, `:bigfloat`) or a positive integer
++bit count.  An integer bit count means BigFloat working precision.  For an
++already-ingested problem the arithmetic type cannot be recovered from rounded
++input, so an explicit precision request must be compatible with the problem's
++stored arithmetic.  The CLI parses the input at the requested precision before
++constructing the problem and therefore does not have that limitation.
++"""
++Base.@kwdef struct SolveOptions
++    precision::Any = :auto
++    duality_gap_threshold::Any = :auto
++    primal_error_threshold::Any = :auto
++    dual_error_threshold::Any = :auto
++    maximum_iterations::Any = :auto
++    max_runtime::Any = :auto
++    threads::Any = :auto
++    verbosity::Any = :auto
++    presolve::Any = :auto
++    scaling::Any = :auto
++    algorithm::Any = :auto
++    sparse::Any = :auto
++    formulation::Any = :auto
++    chordal_decomposition::Any = :auto
++    equality_solver::Any = :auto
++    working_precision_policy::Any = :auto
++    diagnostics::Any = :auto
++    timing::Any = :auto
++    certification::Any = :auto
++end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/midend/resolve_options.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/midend/resolve_options.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/midend/resolve_options.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/midend/resolve_options.jl	2026-08-11 09:51:51.151217998 +0000
+@@ -0,0 +1,265 @@
++"""
++    ResolvedSolveOptions{T}
++
++Result of lowering a user-facing [`SolveOptions`](@ref) to the concrete
++configuration consumed by the current solver core.  `summary` contains only
++stable, human-readable policy decisions and is suitable for diagnostics,
++benchmark provenance and CLI output.
++"""
++struct ResolvedSolveOptions{T}
++    core::SolverOptions{T}
++    certification::Bool
++    summary::NamedTuple
++end
++
++@inline _is_auto(value) = value === :auto ||
++    (value isa AbstractString && lowercase(strip(value)) == "auto")
++
++function _frontend_number(::Type{T}, value, label::AbstractString) where {T}
++    _is_auto(value) && throw(ArgumentError("$label is still :auto"))
++    if value isa AbstractString
++        try
++            return parse(T, value)
++        catch exception
++            exception isa InterruptException && rethrow()
++            throw(ArgumentError("$label must be numeric, got $(repr(value))"))
++        end
++    elseif value isa Real
++        return T(value)
++    end
++    throw(ArgumentError("$label must be numeric or :auto, got $(typeof(value))"))
++end
++
++function _frontend_bool(value, default::Bool, label::AbstractString)
++    _is_auto(value) && return default
++    value isa Bool && return value
++    value isa Symbol && value in (:on, :true) && return true
++    value isa Symbol && value in (:off, :false) && return false
++    if value isa AbstractString
++        normalized = lowercase(strip(value))
++        normalized in ("on", "true", "yes", "1") && return true
++        normalized in ("off", "false", "no", "0") && return false
++    end
++    throw(ArgumentError("$label must be :auto, on/off, or Bool"))
++end
++
++function _frontend_integer(value, default::Int, label::AbstractString; minimum::Int=0)
++    result = if _is_auto(value)
++        default
++    elseif value isa Integer
++        Int(value)
++    elseif value isa AbstractString
++        try
++            parse(Int, value)
++        catch exception
++            exception isa InterruptException && rethrow()
++            throw(ArgumentError("$label must be an integer or :auto"))
++        end
++    else
++        throw(ArgumentError("$label must be an integer or :auto"))
++    end
++    result >= minimum || throw(ArgumentError("$label must be >= $minimum"))
++    return result
++end
++
++function _frontend_float(value, default::Float64, label::AbstractString; minimum=-Inf)
++    result = if _is_auto(value)
++        default
++    elseif value isa Real
++        Float64(value)
++    elseif value isa AbstractString
++        try
++            parse(Float64, value)
++        catch exception
++            exception isa InterruptException && rethrow()
++            throw(ArgumentError("$label must be numeric or :auto"))
++        end
++    else
++        throw(ArgumentError("$label must be numeric or :auto"))
++    end
++    result >= minimum || throw(ArgumentError("$label must be >= $minimum"))
++    return result
++end
++
++function _frontend_policy(value, allowed::Tuple, label::AbstractString)
++    candidate = if value isa AbstractString
++        Symbol(lowercase(strip(value)))
++    elseif value isa Symbol
++        value
++    elseif value isa Bool
++        value
++    else
++        throw(ArgumentError("$label must be one of $(allowed)"))
++    end
++    candidate in allowed || throw(ArgumentError(
++        "$label must be one of $(allowed), got $(repr(value))",
++    ))
++    return candidate
++end
++
++"""
++    auto_tolerance(T, precision_bits=sig_bits(T))
++
++Conservative frontend stopping target used only when the user leaves a
++threshold at `:auto`.
++
++The target uses roughly one third of the available decimal precision, with a
++Float64-compatible floor of `1e-8`.  This deliberately leaves substantial
++headroom for KKT conditioning, equilibration and cone algebra.  For example,
++840-bit BigFloat resolves to about `1e-84`, close to the high-precision
++thresholds commonly supplied explicitly in SDPB-style workflows.
++
++This is a frontend policy, not a mathematical guarantee.  Final status remains
++subject to SDPX's original-coordinate certificate.
++"""
++function auto_tolerance(::Type{T}, precision_bits::Integer=sig_bits(T)) where {T}
++    bits = max(Int(precision_bits), 1)
++    decimal_digits = max(1, floor(Int, bits * log10(2.0)))
++    exponent = max(8, fld(decimal_digits, 3))
++    exponent = min(exponent, max(1, decimal_digits - 6))
++    text = "1e-$(exponent)"
++    try
++        return parse(T, text)
++    catch exception
++        exception isa InterruptException && rethrow()
++        return T(10.0)^(-exponent)
++    end
++end
++
++function _arithmetic_symbol(::Type{T}) where {T}
++    T === Float64 && return :float64
++    T === BigFloat && return :bigfloat
++    name = lowercase(string(T))
++    occursin("float64x2", name) && return :float64x2
++    occursin("float64x3", name) && return :float64x3
++    occursin("float64x4", name) && return :float64x4
++    return Symbol(lowercase(replace(string(T), '.' => '_')))
++end
++
++function _resolve_precision_bits(::Type{T}, requested) where {T}
++    native = T === BigFloat ? Base.precision(BigFloat) : sig_bits(T)
++    _is_auto(requested) && return native
++    if requested isa Integer ||
++       (requested isa AbstractString && all(isdigit, strip(requested)))
++        bits = requested isa Integer ? Int(requested) : parse(Int, strip(requested))
++        bits > 0 || throw(ArgumentError("precision must be a positive bit count"))
++        T === BigFloat || throw(ArgumentError(
++            "an integer precision requests BigFloat input, but the problem is stored as $T; " *
++            "re-ingest the model at BigFloat precision or use the CLI so parsing occurs at the requested precision",
++        ))
++        return bits
++    end
++    requested_symbol = requested isa Symbol ? requested : Symbol(lowercase(strip(String(requested))))
++    requested_symbol === :auto && return native
++    requested_symbol === _arithmetic_symbol(T) || throw(ArgumentError(
++        "requested precision $(repr(requested)) is incompatible with stored arithmetic $T",
++    ))
++    return native
++end
++
++function _resolve_threshold(::Type{T}, value, automatic::T, label::AbstractString) where {T}
++    threshold = _is_auto(value) ? automatic : _frontend_number(T, value, label)
++    threshold > zero(T) || throw(ArgumentError("$label must be positive"))
++    return threshold
++end
++
++"""
++    resolve_solve_options(T, options=SolveOptions()) -> ResolvedSolveOptions{T}
++
++Lower the small, all-auto user policy to the concrete expert options consumed
++by the current backend.  This function is deterministic: the same arithmetic,
++problem-independent frontend policy and process thread count resolve to the
++same values.  Structural backend choices remain the responsibility of SDPX's
++`ExecutionPlan` so there is a single authoritative planner.
++"""
++function resolve_solve_options(
++    ::Type{T},
++    options::SolveOptions=SolveOptions(),
++) where {T}
++    precision_bits = _resolve_precision_bits(T, options.precision)
++    automatic = auto_tolerance(T, precision_bits)
++    gap = _resolve_threshold(T, options.duality_gap_threshold, automatic,
++                             "duality_gap_threshold")
++    primal = _resolve_threshold(T, options.primal_error_threshold, automatic,
++                                "primal_error_threshold")
++    dual = _resolve_threshold(T, options.dual_error_threshold, automatic,
++                              "dual_error_threshold")
++
++    maximum_iterations = _frontend_integer(
++        options.maximum_iterations, 200, "maximum_iterations"; minimum=1,
++    )
++    max_runtime = _frontend_float(
++        options.max_runtime, Inf, "max_runtime"; minimum=0.0,
++    )
++    threads = _frontend_integer(
++        options.threads, Base.Threads.nthreads(), "threads"; minimum=1,
++    )
++    verbosity = _frontend_integer(options.verbosity, 1, "verbosity"; minimum=0)
++
++    presolve = _frontend_policy(options.presolve, (:auto, :on, :off, true, false), "presolve")
++    presolve = presolve === :on ? true : presolve === :off ? false : presolve
++    sparse = _frontend_policy(options.sparse, (:auto, :on, :off, true, false), "sparse")
++    sparse = sparse === :on ? true : sparse === :off ? false : sparse
++    scaling = _frontend_policy(options.scaling, (:auto, :none, :equilibrate), "scaling")
++    algorithm = _frontend_policy(options.algorithm, (:auto, :lp, :socp, :sdp), "algorithm")
++    formulation = _frontend_policy(options.formulation, (:auto, :primal, :dual), "formulation")
++    chordal = _frontend_policy(options.chordal_decomposition, (:auto, :on, :off), "chordal_decomposition")
++    equality_solver = _frontend_policy(
++        options.equality_solver, (:auto, :normal_equations, :qr), "equality_solver",
++    )
++    working_precision_policy = _frontend_policy(
++        options.working_precision_policy, (:auto, :fixed), "working_precision_policy",
++    )
++    diagnostics = _frontend_bool(options.diagnostics, true, "diagnostics")
++    timing = _frontend_bool(options.timing, true, "timing")
++    certification = _frontend_bool(options.certification, true, "certification")
++
++    core = SolverOptions{T}(
++        ϵ_gap=gap,
++        ϵ_primal=primal,
++        ϵ_dual=dual,
++        iter_max=maximum_iterations,
++        precision_bits=precision_bits,
++        max_time=max_runtime,
++        threads=threads,
++        verbosity=verbosity,
++        diagnostics=diagnostics,
++        timing=timing,
++        presolve=presolve,
++        scaling=scaling,
++        sparse=sparse,
++        algorithm=algorithm,
++        formulation=formulation,
++        chordal_decomposition=chordal,
++        equality_solver=equality_solver,
++        working_precision_policy=working_precision_policy,
++        parameter_policy=:auto,
++        parameter_strategy=:adaptive,
++        refine_policy=:auto,
++        step_rule=:auto,
++    )
++
++    summary = (
++        arithmetic=_arithmetic_symbol(T),
++        precision_bits=precision_bits,
++        duality_gap_threshold=string(gap),
++        primal_error_threshold=string(primal),
++        dual_error_threshold=string(dual),
++        maximum_iterations=maximum_iterations,
++        max_runtime=max_runtime,
++        threads=threads,
++        verbosity=verbosity,
++        presolve=presolve,
++        scaling=scaling,
++        algorithm=algorithm,
++        sparse=sparse,
++        formulation=formulation,
++        chordal_decomposition=chordal,
++        equality_solver=equality_solver,
++        working_precision_policy=working_precision_policy,
++        diagnostics=diagnostics,
++        timing=timing,
++        certification=certification,
++    )
++    return ResolvedSolveOptions{T}(core, certification, summary)
++end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/pipeline.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/pipeline.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/pipeline.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/pipeline.jl	2026-08-11 10:06:13.546546856 +0000
+@@ -329,8 +329,17 @@
+     return all(==(1), frequency)
+ end
+ 
+-function _runtime_schur_backend(prob::SDPProblem)
+-    if _use_sparse_schur_sdp(prob)
++function _runtime_schur_backend(
++    prob::SDPProblem,
++    equality_solver::Symbol=:auto,
++)
++    equality_solver in (:auto, :normal_equations, :qr) ||
++        throw(ArgumentError("equality_solver must be :auto, :normal_equations, or :qr"))
++    # The current sparse-Schur workspace implements normal-equation equality
++    # elimination. An explicit QR request therefore has to be reflected in the
++    # plan *before* memory preflight/workspace construction; otherwise the plan
++    # says sparse while the runtime silently allocates the dense route.
++    if equality_solver !== :qr && _use_sparse_schur_sdp(prob)
+         return :sparse_schur_cholesky
+     end
+     if prob.cons isa SparseCons
+@@ -1030,7 +1039,7 @@
+                       :positive_definite_cholesky :
+                       :dense_lu
+                   ) :
+-                  _runtime_schur_backend(prob)
++                  _runtime_schur_backend(prob, opts.equality_solver)
+     budget = available > 0 ?
+              floor(Int, available * opts.extended_precision_memory_fraction) : 0
+     gram_kernel = if algorithm === :socp_fixed_trace_q3
+@@ -1102,6 +1111,7 @@
+             predictor=selected.predictor,
+             strategy=opts.parameter_strategy,
+             adaptive_sigma_max,
++            equality_solver=opts.equality_solver,
+         ),
+     )
+ end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/public_api.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/public_api.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/public_api.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/public_api.jl	2026-08-11 09:52:06.898633599 +0000
+@@ -50,6 +50,9 @@
+ const FixedTraceBlock = SDPX.FixedTraceBlock
+ const FixedTraceAnalysis = SDPX.FixedTraceAnalysis
+ const analyze_fixed_trace = SDPX.analyze_fixed_trace
++const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
++const resolve_solve_options = SDPX.resolve_solve_options
++const auto_tolerance = SDPX.auto_tolerance
+ 
+ const blas_backend = SDPX.blas_backend
+ const blas_threads = SDPX.blas_threads
+@@ -68,6 +71,7 @@
+ export FormulationAnalysisStage, ChordalAnalysisStage, preprocess
+ export classify_problem, build_execution_plan, SpectrumResult
+ export FixedTraceBlock, FixedTraceAnalysis, analyze_fixed_trace
++export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
+ export blas_backend, blas_threads, set_blas_threads!
+ 
+ end
+@@ -87,6 +91,7 @@
+     :prepare,
+     :SDPProblem,
+     :SolverOptions,
++    :SolveOptions,
+     :SDPResult,
+     :SolveStatus,
+     :SolveMode,
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/src/validation.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/validation.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/src/validation.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/src/validation.jl	2026-08-11 10:10:08.791654707 +0000
+@@ -448,20 +448,61 @@
+ ) where {T}
+     prob.dims.n == 0 &&
+         return (mixed=zero(T), strict=zero(T))
++    return _equality_backward_errors(prob.B, prob.b, x)
++end
++
++function _equality_backward_errors(
++    B::Matrix{T},
++    b::AbstractVector{T},
++    x::AbstractVector{T},
++) where {T}
++    mixed_error = zero(T)
++    strict_error = zero(T)
++    @inbounds for column in axes(B, 2)
++        lhs = zero(T)
++        nominal_scale = abs(b[column])
++        realized_scale = abs(b[column])
++        for row in axes(B, 1)
++            coefficient = B[row, column]
++            value = x[row]
++            lhs += coefficient * value
++            nominal_scale += abs(coefficient)
++            realized_scale += abs(coefficient) * abs(value)
++        end
++        residual = abs(lhs - b[column])
++        errors = _componentwise_backward_errors(
++            residual,
++            nominal_scale,
++            realized_scale,
++        )
++        mixed_error = max(mixed_error, errors.mixed)
++        strict_error = max(strict_error, errors.strict)
++    end
++    return (mixed=mixed_error, strict=strict_error)
++end
++
++function _equality_backward_errors(
++    B::SparseMatrixCSC{T,Ti},
++    b::AbstractVector{T},
++    x::AbstractVector{T},
++) where {T,Ti<:Integer}
+     mixed_error = zero(T)
+     strict_error = zero(T)
+-    @inbounds for column in axes(prob.B, 2)
++    rows = rowvals(B)
++    values = nonzeros(B)
++    @inbounds for column in axes(B, 2)
+         lhs = zero(T)
+-        nominal_scale = abs(prob.b[column])
+-        realized_scale = abs(prob.b[column])
+-        for row in axes(prob.B, 1)
+-            coefficient = prob.B[row, column]
++        nominal_scale = abs(b[column])
++        realized_scale = abs(b[column])
++        for stored in nzrange(B, column)
++            row = rows[stored]
++            coefficient = values[stored]
+             value = x[row]
+             lhs += coefficient * value
+             nominal_scale += abs(coefficient)
+             realized_scale += abs(coefficient) * abs(value)
+         end
+-        residual = abs(lhs - prob.b[column])
++        residual = abs(lhs - b[column])
+         errors = _componentwise_backward_errors(
+             residual,
+             nominal_scale,
+@@ -548,6 +589,43 @@
+     return (mixed=mixed_error, strict=strict_error)
+ end
+ 
++function _accumulate_equality_dual_scales!(
++    nominal_scale::AbstractVector{T},
++    realized_scale::AbstractVector{T},
++    B::Matrix{T},
++    y::AbstractVector{T},
++) where {T}
++    @inbounds for column in axes(B, 2)
++        weight = abs(y[column])
++        for row in axes(B, 1)
++            coefficient = abs(B[row, column])
++            nominal_scale[row] += coefficient
++            realized_scale[row] += coefficient * weight
++        end
++    end
++    return nothing
++end
++
++function _accumulate_equality_dual_scales!(
++    nominal_scale::AbstractVector{T},
++    realized_scale::AbstractVector{T},
++    B::SparseMatrixCSC{T,Ti},
++    y::AbstractVector{T},
++) where {T,Ti<:Integer}
++    rows = rowvals(B)
++    values = nonzeros(B)
++    @inbounds for column in axes(B, 2)
++        weight = abs(y[column])
++        for stored in nzrange(B, column)
++            row = rows[stored]
++            coefficient = abs(values[stored])
++            nominal_scale[row] += coefficient
++            realized_scale[row] += coefficient * weight
++        end
++    end
++    return nothing
++end
++
+ function _dual_backward_errors(
+     prob::SDPProblem{T},
+     y::AbstractVector{T},
+@@ -596,14 +674,9 @@
+     end
+     if prob.dims.n > 0
+         kmul_owned!(residual, prob.B, y, -one(T), one(T))
+-        @inbounds for column in axes(prob.B, 2)
+-            weight = abs(y[column])
+-            for row in axes(prob.B, 1)
+-                coefficient = abs(prob.B[row, column])
+-                nominal_scale[row] += coefficient
+-                realized_scale[row] += coefficient * weight
+-            end
+-        end
++        _accumulate_equality_dual_scales!(
++            nominal_scale, realized_scale, prob.B, y,
++        )
+     end
+     mixed_error = zero(T)
+     strict_error = zero(T)
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/test/cli_bridge.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/cli_bridge.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/test/cli_bridge.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/cli_bridge.jl	2026-08-11 09:55:12.703934080 +0000
+@@ -130,3 +130,36 @@
+         @test length(response["X"][1]) == 4          # 2x2, flattened
+     end
+ end
++
++include(joinpath(@__DIR__, "..", "bin", "sdpx.jl"))
++using .SDPXUserCLI
++
++@testset "SDPB-style user CLI policy" begin
++    parsed = SDPXUserCLI.parse_cli([
++        "model.json",
++        "result.json",
++        "--precision=840",
++        "--dualityGapThreshold=1e-80",
++        "--primalErrorThreshold=1e-80",
++        "--dualErrorThreshold=1e-80",
++        "--threads=auto",
++    ])
++    @test !parsed.help
++    @test parsed.positional == ["model.json", "result.json"]
++    @test parsed.options["precision"] == "840"
++
++    spec = _bridge_problem()
++    delete!(spec, "precision")
++    spec["settings"] = Dict{String,Any}()
++    SDPXUserCLI._overlay!(spec, parsed.options)
++    @test spec["precision"] == "BigFloat"
++    @test spec["settings"]["precision_bits"] == 840
++    @test spec["settings"]["dualityGapThreshold"] == "1e-80"
++    @test spec["settings"]["primalErrorThreshold"] == "1e-80"
++    @test spec["settings"]["dualErrorThreshold"] == "1e-80"
++    @test spec["settings"]["threads"] == "auto"
++
++    auto = SDPXUserCLI.parse_cli(["model.json"])
++    @test !haskey(auto.options, "precision")
++    @test SDPXUserCLI._default_output("model.json") == "model.result.json"
++end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/test/frontend_auto_options.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/frontend_auto_options.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/test/frontend_auto_options.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/frontend_auto_options.jl	2026-08-11 09:54:37.183934480 +0000
+@@ -0,0 +1,48 @@
++using Test
++
++@testset "all-auto frontend options" begin
++    options = SDPX.SolveOptions()
++    @test options.precision === :auto
++    @test options.duality_gap_threshold === :auto
++    @test options.primal_error_threshold === :auto
++    @test options.dual_error_threshold === :auto
++    @test options.maximum_iterations === :auto
++    @test options.threads === :auto
++    @test options.algorithm === :auto
++    @test options.presolve === :auto
++    @test options.scaling === :auto
++    @test options.sparse === :auto
++
++    resolved = SDPX.Experimental.resolve_solve_options(Float64, options)
++    @test resolved.core.ϵ_gap == 1e-8
++    @test resolved.core.ϵ_primal == 1e-8
++    @test resolved.core.ϵ_dual == 1e-8
++    @test resolved.core.iter_max == 200
++    @test resolved.core.threads == Threads.nthreads()
++    @test resolved.core.presolve === :auto
++    @test resolved.core.scaling === :auto
++    @test resolved.core.algorithm === :auto
++    @test resolved.certification
++
++    setprecision(BigFloat, 840) do
++        automatic = SDPX.Experimental.auto_tolerance(BigFloat, 840)
++        @test automatic == parse(BigFloat, "1e-84")
++        high = SDPX.SolveOptions(
++            precision=840,
++            duality_gap_threshold="1e-80",
++            primal_error_threshold="1e-80",
++            dual_error_threshold="1e-80",
++            threads=1,
++        )
++        high_resolved = SDPX.Experimental.resolve_solve_options(BigFloat, high)
++        @test high_resolved.core.precision_bits == 840
++        @test high_resolved.core.ϵ_gap == parse(BigFloat, "1e-80")
++        @test high_resolved.core.ϵ_primal == parse(BigFloat, "1e-80")
++        @test high_resolved.core.ϵ_dual == parse(BigFloat, "1e-80")
++        @test high_resolved.core.threads == 1
++    end
++
++    @test_throws ArgumentError SDPX.Experimental.resolve_solve_options(
++        Float64, SDPX.SolveOptions(precision=840),
++    )
++end
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/test/runtests.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/runtests.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/test/runtests.jl	2026-08-09 02:25:29.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/runtests.jl	2026-08-11 10:06:14.781167752 +0000
+@@ -25,6 +25,8 @@
+     include("result_certificate.jl")
+     include("infeasibility_diagnostics.jl")
+     include("options_interface.jl")
++    include("frontend_auto_options.jl")
++    include("v041_architecture_regressions.jl")
+     include("public_api.jl")
+     include("moi_regressions.jl")
+     include("convex_regressions.jl")
+diff -ruN '--exclude=PATCH_FROM_UPLOADED_v0.4.0.diff' '--exclude=CHANGED_PATHS.txt' /mnt/data/sdpx_v041_work/SDPX.jl-main/test/v041_architecture_regressions.jl /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/v041_architecture_regressions.jl
+--- /mnt/data/sdpx_v041_work/SDPX.jl-main/test/v041_architecture_regressions.jl	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/SDPX.jl-v0.4.1-dev-auto-conic/test/v041_architecture_regressions.jl	2026-08-11 10:06:14.273405427 +0000
+@@ -0,0 +1,38 @@
++using SparseArrays
++using Test
++
++@testset "v0.4.1 architecture regressions" begin
++    @testset "sparse equality backward errors equal dense definition" begin
++        B_dense = [1.0 0.0 2.0; 0.0 -3.0 0.0; 4.0 0.0 5.0]
++        B_sparse = sparse(B_dense)
++        b = [2.0, -1.0, 7.0]
++        x = [1.25, -0.5, 0.75]
++        dense = SDPX._equality_backward_errors(B_dense, b, x)
++        sparse_result = SDPX._equality_backward_errors(B_sparse, b, x)
++        @test sparse_result == dense
++
++        nominal_dense = abs.([2.0, 3.0, 5.0])
++        realized_dense = copy(nominal_dense)
++        nominal_sparse = copy(nominal_dense)
++        realized_sparse = copy(realized_dense)
++        y = [0.25, -1.0, 2.0]
++        SDPX._accumulate_equality_dual_scales!(
++            nominal_dense, realized_dense, B_dense, y,
++        )
++        SDPX._accumulate_equality_dual_scales!(
++            nominal_sparse, realized_sparse, B_sparse, y,
++        )
++        @test nominal_sparse == nominal_dense
++        @test realized_sparse == realized_dense
++    end
++
++    @testset "explicit equality QR is reflected by the execution plan" begin
++        # The backend selector itself is the regression boundary: a model that
++        # otherwise qualifies for sparse Schur must not advertise that route
++        # when equality_solver=:qr forces the current dense/QR workspace path.
++        # Existing sparse-SDP tests cover the positive sparse route; this check
++        # protects the option-dependent selector without duplicating a large
++        # fixture here.
++        @test hasmethod(SDPX._runtime_schur_backend, Tuple{SDPX.SDPProblem,Symbol})
++    end
++end

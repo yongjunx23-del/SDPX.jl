@@ -16,6 +16,7 @@ makedocs(;
         "Home" => "index.md",
         "Getting started" => [
             "Quick start" => "quickstart.md",
+            "Command line" => "cli.md",
             "Precision" => "precision.md",
             "JuMP and MOI" => "jump.md",
             "Convex.jl" => "convex.md",
@@ -28,6 +29,7 @@ makedocs(;
         ],
         "API reference" => "api.md",
         "Experimental internals" => "internals.md",
+        "Architecture v0.4.1 -> v0.5" => "architecture-v041.md",
         "Development" => "development.md",
     ],
     checkdocs=:exports,

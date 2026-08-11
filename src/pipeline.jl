@@ -329,8 +329,17 @@ function _supports_owned_bigfloat_arrow_equalities(
     return all(==(1), frequency)
 end
 
-function _runtime_schur_backend(prob::SDPProblem)
-    if _use_sparse_schur_sdp(prob)
+function _runtime_schur_backend(
+    prob::SDPProblem,
+    equality_solver::Symbol=:auto,
+)
+    equality_solver in (:auto, :normal_equations, :qr) ||
+        throw(ArgumentError("equality_solver must be :auto, :normal_equations, or :qr"))
+    # The current sparse-Schur workspace implements normal-equation equality
+    # elimination. An explicit QR request therefore has to be reflected in the
+    # plan *before* memory preflight/workspace construction; otherwise the plan
+    # says sparse while the runtime silently allocates the dense route.
+    if equality_solver !== :qr && _use_sparse_schur_sdp(prob)
         return :sparse_schur_cholesky
     end
     if prob.cons isa SparseCons
@@ -1030,7 +1039,7 @@ function build_execution_plan(
                       :positive_definite_cholesky :
                       :dense_lu
                   ) :
-                  _runtime_schur_backend(prob)
+                  _runtime_schur_backend(prob, opts.equality_solver)
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
     gram_kernel = if algorithm === :socp_fixed_trace_q3
@@ -1102,6 +1111,7 @@ function build_execution_plan(
             predictor=selected.predictor,
             strategy=opts.parameter_strategy,
             adaptive_sigma_max,
+            equality_solver=opts.equality_solver,
         ),
     )
 end

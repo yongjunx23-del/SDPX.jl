@@ -4,6 +4,8 @@ using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SparseArrays, Seria
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("types.jl")
+include("frontend/solve_options.jl")
+include("midend/resolve_options.jl")
 include("kernels/api.jl")
 include("kernels/generic.jl")
 include("kernels/bigfloat.jl")
@@ -37,10 +39,11 @@ include("spectrum.jl")
 include("moi_wrapper.jl")
 include("convex_api.jl")
 include("compat.jl")
+include("frontend/high_level_solve.jl")
 include("public_api.jl")
 
 export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
-export solve, solve!, ingest, SDPProblem, SolverOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
+export solve, solve!, ingest, SDPProblem, SolverOptions, SolveOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
 export linear_program, solve_lp
 export SOCConstraint, ConicProblem, ConicResult
 export second_order_program, solve_socp
