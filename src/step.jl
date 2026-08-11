@@ -345,6 +345,18 @@ end
     return value
 end
 
+@inline function _same_normalized_complementarity(
+    value::T,
+    dimension::Int,
+    reference_value::T,
+    reference_dimension::Int,
+) where {T}
+    # Equal dimensions make normalized equality equivalent to raw equality;
+    # avoid a division for the overwhelmingly common uniform-block case.
+    dimension == reference_dimension && return value == reference_value
+    return value / T(dimension) == reference_value / T(reference_dimension)
+end
+
 function _predictor_complementarity_diagnostics!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -360,7 +372,8 @@ function _predictor_complementarity_diagnostics!(
     # Exact equality is intentional: no tolerance may classify heterogeneous
     # blocks as uniform and suppress their local target.
     uniform_complementarity = detect_uniformity
-    uniform_reference = nothing
+    uniform_reference_value = nothing
+    uniform_reference_dimension = 0
     if use_owned_bigfloat_block_loops(ws, prob)
         # Two waves reuse the one scalar slot per block. Each MPFR accumulator
         # and multiplication scratch belongs to its complete block, and the
@@ -391,10 +404,15 @@ function _predictor_complementarity_diagnostics!(
                     uniform_complementarity = false
                     continue
                 end
-                normalized = value / T(dimension)
-                if uniform_reference === nothing
-                    uniform_reference = normalized
-                elseif !(normalized == uniform_reference)
+                if uniform_reference_value === nothing
+                    uniform_reference_value = value
+                    uniform_reference_dimension = dimension
+                elseif !_same_normalized_complementarity(
+                    value,
+                    dimension,
+                    uniform_reference_value,
+                    uniform_reference_dimension,
+                )
                     uniform_complementarity = false
                 end
             end
@@ -454,13 +472,16 @@ function _predictor_complementarity_diagnostics!(
             if dimension > 0
                 if !isfinite(value)
                     uniform_complementarity = false
-                else
-                    normalized = value / T(dimension)
-                    if uniform_reference === nothing
-                        uniform_reference = normalized
-                    elseif !(normalized == uniform_reference)
-                        uniform_complementarity = false
-                    end
+                elseif uniform_reference_value === nothing
+                    uniform_reference_value = value
+                    uniform_reference_dimension = dimension
+                elseif !_same_normalized_complementarity(
+                    value,
+                    dimension,
+                    uniform_reference_value,
+                    uniform_reference_dimension,
+                )
+                    uniform_complementarity = false
                 end
             end
             trial_combine_owned!(

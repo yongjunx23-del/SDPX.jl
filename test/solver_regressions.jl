@@ -80,6 +80,34 @@ end
 @testset "adaptive predictor caches exact block complementarity uniformity" begin
     for T in (Float64, Float64x4, BigFloat)
         setprecision(BigFloat, 256) do
+            base = T(7) / T(20)
+            same_dimension_reference = base * T(2)
+            mixed_dimension_value = base * T(4)
+            @test SDPX._same_normalized_complementarity(
+                same_dimension_reference,
+                2,
+                same_dimension_reference,
+                2,
+            )
+            @test !SDPX._same_normalized_complementarity(
+                nextfloat(same_dimension_reference),
+                2,
+                same_dimension_reference,
+                2,
+            )
+            @test SDPX._same_normalized_complementarity(
+                mixed_dimension_value,
+                4,
+                same_dimension_reference,
+                2,
+            )
+            @test !SDPX._same_normalized_complementarity(
+                nextfloat(mixed_dimension_value),
+                4,
+                same_dimension_reference,
+                2,
+            )
+
             slab_one = SDPX.alloc_zeros(T, 2, 2, 2)
             slab_one[1, 1, 1] = one(T)
             slab_two = SDPX.alloc_zeros(T, 2, 2, 2)
