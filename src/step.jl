@@ -352,9 +352,15 @@ function _predictor_complementarity_diagnostics!(
     Y,
     primal_step::T,
     dual_step::T,
+    ;
+    detect_uniformity::Bool=true,
 ) where {T}
     complementarity = zero(T)
     affine_complementarity = zero(T)
+    # Exact equality is intentional: no tolerance may classify heterogeneous
+    # blocks as uniform and suppress their local target.
+    uniform_complementarity = detect_uniformity
+    uniform_reference = nothing
     if use_owned_bigfloat_block_loops(ws, prob)
         # Two waves reuse the one scalar slot per block. Each MPFR accumulator
         # and multiplication scratch belongs to its complete block, and the
@@ -375,8 +381,27 @@ function _predictor_complementarity_diagnostics!(
                 end
             end
         end
-        @inbounds for block in 1:prob.dims.L
-            complementarity += ws.block_norms[block]
+        if detect_uniformity
+            @inbounds for block in 1:prob.dims.L
+                value = ws.block_norms[block]
+                complementarity += value
+                dimension = prob.dims.k[block]
+                dimension == 0 && continue
+                if !isfinite(value)
+                    uniform_complementarity = false
+                    continue
+                end
+                normalized = value / T(dimension)
+                if uniform_reference === nothing
+                    uniform_reference = normalized
+                elseif !(normalized == uniform_reference)
+                    uniform_complementarity = false
+                end
+            end
+        else
+            @inbounds for block in 1:prob.dims.L
+                complementarity += ws.block_norms[block]
+            end
         end
         @sync for task_index in 1:task_count
             Threads.@spawn begin
@@ -410,7 +435,53 @@ function _predictor_complementarity_diagnostics!(
         @inbounds for block in 1:prob.dims.L
             affine_complementarity += ws.block_norms[block]
         end
+    elseif detect_uniformity
+        @inbounds for block in 1:prob.dims.L
+            workspace = ws.blk[block]
+            if T === BigFloat
+                kdot!(
+                    ws.block_norms[block],
+                    workspace.trialX[1, 1],
+                    X[block],
+                    Y[block],
+                )
+                value = ws.block_norms[block]
+            else
+                value = kdot(X[block], Y[block])
+            end
+            complementarity += value
+            dimension = prob.dims.k[block]
+            if dimension > 0
+                if !isfinite(value)
+                    uniform_complementarity = false
+                else
+                    normalized = value / T(dimension)
+                    if uniform_reference === nothing
+                        uniform_reference = normalized
+                    elseif !(normalized == uniform_reference)
+                        uniform_complementarity = false
+                    end
+                end
+            end
+            trial_combine_owned!(
+                workspace.W1,
+                X[block],
+                primal_step,
+                workspace.dX,
+                workspace.trialX[1, 1],
+            )
+            trial_combine_owned!(
+                workspace.W2,
+                Y[block],
+                dual_step,
+                workspace.dY,
+                workspace.trialX[1, 1],
+            )
+            affine_complementarity += kdot(workspace.W1, workspace.W2)
+        end
     else
+        # Preserve the historical legacy/fixed loop exactly. The uniformity
+        # decision is consumed only by the adaptive path.
         @inbounds for block in 1:prob.dims.L
             workspace = ws.blk[block]
             complementarity += kdot(X[block], Y[block])
@@ -431,7 +502,11 @@ function _predictor_complementarity_diagnostics!(
             affine_complementarity += kdot(workspace.W1, workspace.W2)
         end
     end
-    return complementarity, affine_complementarity
+    return (
+        complementarity,
+        affine_complementarity,
+        uniform_complementarity,
+    )
 end
 
 function _affine_predictor_diagnostics!(
@@ -448,7 +523,7 @@ function _affine_predictor_diagnostics!(
         zero(T),
         :fraction_to_boundary,
     )
-    complementarity, affine_complementarity =
+    complementarity, affine_complementarity, uniform_complementarity =
         _predictor_complementarity_diagnostics!(
             ws,
             prob,
@@ -472,6 +547,7 @@ function _affine_predictor_diagnostics!(
         predictor_quality=quality,
         affine_primal_step=primal_step,
         affine_dual_step=dual_step,
+        uniform_complementarity=uniform_complementarity,
     )
 end
 
@@ -482,7 +558,7 @@ function _legacy_predictor_diagnostics!(
     Y,
 ) where {T}
     unit_step = one(T)
-    current_complementarity, affine_complementarity =
+    current_complementarity, affine_complementarity, _ =
         _predictor_complementarity_diagnostics!(
             ws,
             prob,
@@ -490,6 +566,7 @@ function _legacy_predictor_diagnostics!(
             Y,
             unit_step,
             unit_step,
+            detect_uniformity=false,
         )
     cone_dimension = sum(prob.dims.k; init=0)
     denominator = T(max(cone_dimension, 1))
@@ -510,6 +587,7 @@ function _legacy_predictor_diagnostics!(
         predictor_quality=quality,
         affine_primal_step=one(T),
         affine_dual_step=one(T),
+        uniform_complementarity=false,
     )
 end
 
@@ -736,7 +814,8 @@ function newton_step!(
                 Y,
                 iteration_parameters.sigma,
                 predictor_diagnostics.mu,
-                block_local_target=true,
+                block_local_target=
+                    !predictor_diagnostics.uniform_complementarity,
             )
         else
             threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)

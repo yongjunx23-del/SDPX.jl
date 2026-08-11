@@ -1,4 +1,5 @@
 using LinearAlgebra
+using MultiFloats: Float64x4
 using SDPX
 using Test
 
@@ -71,6 +72,83 @@ end
             if T === BigFloat
                 @test objectid(local_target) != objectid(X[1, 1])
                 @test objectid(local_target) != objectid(Y[1, 1])
+            end
+        end
+    end
+end
+
+@testset "adaptive predictor caches exact block complementarity uniformity" begin
+    for T in (Float64, Float64x4, BigFloat)
+        setprecision(BigFloat, 256) do
+            slab_one = SDPX.alloc_zeros(T, 2, 2, 2)
+            slab_one[1, 1, 1] = one(T)
+            slab_two = SDPX.alloc_zeros(T, 2, 2, 2)
+            slab_two[2, 2, 2] = one(T)
+            constant = T[0 1; 1 0]
+            problem = SDPX.ingest(
+                T[1, 1],
+                [slab_one, slab_two],
+                [constant, constant],
+                zeros(T, 2, 0),
+                T[];
+                T=T,
+                sparse=false,
+                verbosity=0,
+            )
+            workspace = SDPX.Workspace(problem; thread_count=1)
+            value = T(7) / T(20)
+            if T !== BigFloat
+                sentinel = T(123)
+                fill!(workspace.block_norms, sentinel)
+            end
+            uniform_X = [
+                Matrix(value * I, 2, 2),
+                Matrix(value * I, 2, 2),
+            ]
+            uniform_Y = [
+                Matrix(one(T) * I, 2, 2),
+                Matrix(one(T) * I, 2, 2),
+            ]
+            uniform = SDPX._affine_predictor_diagnostics!(
+                workspace,
+                problem,
+                uniform_X,
+                uniform_Y,
+            )
+            @test uniform.uniform_complementarity === true
+            if T !== BigFloat
+                @test all(x -> x == sentinel, workspace.block_norms)
+            end
+            if T === BigFloat
+                @test objectid(workspace.block_norms[1]) !=
+                      objectid(workspace.block_norms[2])
+            end
+
+            heterogeneous_X = [
+                uniform_X[1],
+                Matrix(nextfloat(value) * I, 2, 2),
+            ]
+            heterogeneous = SDPX._affine_predictor_diagnostics!(
+                workspace,
+                problem,
+                heterogeneous_X,
+                uniform_Y,
+            )
+            @test heterogeneous.uniform_complementarity === false
+            if T !== BigFloat
+                @test all(x -> x == sentinel, workspace.block_norms)
+                legacy_workspace = SDPX.Workspace(problem; thread_count=1)
+                fill!(legacy_workspace.block_norms, sentinel)
+                SDPX._legacy_predictor_diagnostics!(
+                    legacy_workspace,
+                    problem,
+                    uniform_X,
+                    uniform_Y,
+                )
+                @test all(
+                    x -> x == sentinel,
+                    legacy_workspace.block_norms,
+                )
             end
         end
     end
