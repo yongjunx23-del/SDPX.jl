@@ -1,0 +1,53 @@
+name: MultiFloat Arithmetic Research
+
+on:
+  push:
+    branches:
+      - agent/multifloat-linear-algebra
+    paths:
+      - 'experimental/MultiFloatArithmetic/**'
+      - '.github/workflows/multifloat-arithmetic.yml'
+  pull_request:
+    paths:
+      - 'experimental/MultiFloatArithmetic/**'
+      - '.github/workflows/multifloat-arithmetic.yml'
+  workflow_dispatch:
+
+jobs:
+  correctness:
+    name: Julia ${{ matrix.julia-version }} correctness
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ['1.10', '1']
+    defaults:
+      run:
+        working-directory: experimental/MultiFloatArithmetic
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+      - uses: julia-actions/cache@v2
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Test
+        run: julia --project=. -e 'using Pkg; Pkg.test(; coverage=false)'
+
+  smoke-benchmark:
+    name: Lightweight FMA smoke benchmark
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: experimental/MultiFloatArithmetic
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+      - name: Instantiate
+        run: julia --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Run smoke benchmark
+        run: julia --project=. benchmark/smoke.jl
