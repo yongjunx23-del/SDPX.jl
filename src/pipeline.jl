@@ -624,6 +624,17 @@ function _mixed_reduced_arrow_decision(
     opts::SolverOptions{T},
     available_memory_bytes::Integer,
 ) where {T}
+    if opts.refine_policy === :fixed
+        return ExtendedPrecisionBLAS.CrossoverDecision(
+            false,
+            :fixed_refinement_policy,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            ExtendedPrecisionBLAS.KernelConfig(),
+        )
+    end
     mixed_type =
         T === BigFloat ? mixed_arrow_arithmetic(T) : nothing
     if mixed_type === nothing
@@ -996,7 +1007,8 @@ function build_execution_plan(
     generic_mixed_applicable =
         algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
         kkt_backend in (:dense_cholesky, :dense_cholesky_fallback)
-    generic_mixed_decision = generic_mixed_applicable ?
+    generic_mixed_decision = generic_mixed_applicable &&
+                             opts.refine_policy !== :fixed ?
         _mixed_precision_workspace_decision(
             prob,
             opts.mixed_precision_kkt,
@@ -1004,7 +1016,8 @@ function build_execution_plan(
             available_memory_bytes=available,
         ) : (
             enabled=false,
-            reason=:not_applicable,
+            reason=generic_mixed_applicable ?
+                   :fixed_refinement_policy : :not_applicable,
             required_bytes=0,
             memory_limit_bytes=0,
         )
@@ -1061,7 +1074,7 @@ function build_execution_plan(
             Base.Threads.nthreads(),
             lp_bigfloat_thread_limit,
         ) : min(requested_threads, Base.Threads.nthreads())
-    if reduced_arrow_enabled
+    if reduced_arrow_enabled || mixed_reduced_arrow_enabled
         frequency = zeros(Int, prob.dims.m)
         for variables in (prob.cons::SparseCons{T}).active
             for variable in variables
@@ -1071,7 +1084,7 @@ function build_execution_plan(
         selected_threads = min(
             selected_threads,
             reduced_arrow_solver_worker_count(
-                T,
+                mixed_reduced_arrow_enabled ? mixed_arrow_arithmetic(T) : T,
                 selected_threads,
                 prob.dims.L,
                 count(>(1), frequency),

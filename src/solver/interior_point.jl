@@ -427,6 +427,29 @@ function _equality_factor_diagnostics(
             quality=one(T),
             gram_kernel=:none,
         )
+    mixed = workspace.mixed_precision
+    if mixed !== nothing && mixed.active
+        factor = mixed.intermediate_active ?
+                 mixed.intermediate.Qfactor : mixed.Qfactor
+        if factor !== nothing
+            lower = factor isa IntermediateCholeskyFactor ?
+                    factor.L : factor.factors
+            return (
+                available=true,
+                method=mixed.intermediate_active ?
+                       :mixed_intermediate_normal_equations :
+                       :mixed_float64_normal_equations,
+                rank=equality_count,
+                dimension=equality_count,
+                rank_deficient=false,
+                quality=_ingest_owned_scalar(
+                    T,
+                    _cholesky_diagonal_quality(lower),
+                ),
+                gram_kernel=workspace.equality_gram_kernel,
+            )
+        end
+    end
     factor = workspace.Qchol
     factor === nothing &&
         return (

@@ -401,6 +401,10 @@ end
         @test unbounded_result.status == SDPX.DualInfeasible
         @test unbounded_result.status != SDPX.InfeasibleCert
         @test occursin("unbounded below", unbounded_result.message)
+        @test unbounded_result.termination.reason ==
+              :dual_infeasibility_certificate
+        @test unbounded_result.termination.executed.backend_resolution ===
+              :analytic_equality_only
         certificate = SDPX.result_certificate(
             unbounded,
             unbounded_result,
@@ -457,12 +461,48 @@ end
             reshape([0.0], 1, 1),
             [1.0],
         )
-        result = SDPX.solve(problem; verbosity=0)
+        result = SDPX.solve(
+            problem;
+            diagnostics=true,
+            verbosity=0,
+        )
         @test result.status == SDPX.InfeasibleCert
         @test result.termination.reason == :lp_zero_row_infeasible
         certificate =
             result.diagnostics.selected_algorithms.certificate
         @test certificate.kind == :structural_infeasibility
         @test certificate.valid
+        selected = result.diagnostics.selected_algorithms
+        @test selected.planned_backend === :lp_deferred
+        @test selected.executed_backend === :not_executed
+        @test selected.kkt === :not_executed
+        @test selected.backend_resolution === :not_resolved
+        @test selected.lp_formulation === :not_resolved
+        @test selected.gram === :not_executed
+    end
+
+    @testset "equality-only LP keeps analytic provenance" begin
+        c = [1.0]
+        B = reshape([1.0], 1, 1)
+        problem = lp_regression_problem(
+            c,
+            Matrix{Float64}(undef, 0, 1),
+            Float64[];
+            B=B,
+            b=[1.0],
+        )
+        result = SDPX.solve(
+            problem;
+            diagnostics=true,
+            verbosity=0,
+        )
+        @test result.status == SDPX.Optimal
+        selected = result.diagnostics.selected_algorithms
+        @test selected.planned_backend === :lp_deferred
+        @test selected.executed_backend === :not_executed
+        @test selected.kkt === :not_executed
+        @test selected.backend_resolution === :analytic_equality_only
+        @test selected.lp_formulation === :equality_only
+        @test selected.gram === :not_executed
     end
 end

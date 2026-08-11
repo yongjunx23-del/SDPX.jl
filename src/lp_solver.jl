@@ -1628,7 +1628,19 @@ function _lp_infeasible_rows_result(
         (total=0.0,),
         NamedTuple[],
         nothing,
-        (reason=:lp_zero_row_infeasible,),
+        (
+            reason=:lp_zero_row_infeasible,
+            executed=(
+                solver=:lp_primal_dual,
+                kkt=:not_executed,
+                planned_backend=:lp_deferred,
+                executed_backend=:not_executed,
+                fallback_reason=:none,
+                backend_resolution=:not_resolved,
+                lp_formulation=:not_resolved,
+                gram=:not_executed,
+            ),
+        ),
     )
 end
 
@@ -1654,7 +1666,20 @@ function _lp_time_limit_result(
         (total=elapsed,),
         NamedTuple[],
         nothing,
-        (reason=:time_limit, stage=:lp_setup),
+        (
+            reason=:time_limit,
+            stage=:lp_setup,
+            executed=(
+                solver=:lp_primal_dual,
+                kkt=:not_executed,
+                planned_backend=:lp_deferred,
+                executed_backend=:not_executed,
+                fallback_reason=:none,
+                backend_resolution=:not_resolved,
+                lp_formulation=:not_resolved,
+                gram=:not_executed,
+            ),
+        ),
     )
 end
 
@@ -1785,7 +1810,19 @@ function _lp_equality_only_result(
         )
     end
 
-    termination = (reason=:none,)
+    termination = (
+        reason=:none,
+        executed=(
+            solver=:lp_primal_dual,
+            kkt=:not_executed,
+            planned_backend=:lp_deferred,
+            executed_backend=:not_executed,
+            fallback_reason=:none,
+            backend_resolution=:analytic_equality_only,
+            lp_formulation=:equality_only,
+            gram=:not_executed,
+        ),
+    )
     if status === DualInfeasible
         # `y` is the least-squares projection of `c` onto range(B), so
         # `d = B*y-c` lies in null(B') and satisfies c'd = -||d||² < 0.
@@ -1808,11 +1845,14 @@ function _lp_equality_only_result(
             init=zero(T),
         )
         primal_residual = equality_residual
-        termination = (
-            reason=:dual_infeasibility_certificate,
-            certificate_method=:equality_nullspace_ray,
-            certificate_generator=:analytic_presolve,
-            homogeneous_self_dual_embedding=false,
+        termination = merge(
+            termination,
+            (
+                reason=:dual_infeasibility_certificate,
+                certificate_method=:equality_nullspace_ray,
+                certificate_generator=:analytic_presolve,
+                homogeneous_self_dual_embedding=false,
+            ),
         )
     end
 
@@ -2035,6 +2075,7 @@ function solve_lp!(
     factor_seconds = 0.0
     direction_seconds = 0.0
     update_seconds = 0.0
+    backend_execution_attempted = false
 
     opts.verbosity >= 1 && println(
         "SDPX dedicated LP: $(variables) variables, $(inequalities) inequalities, " *
@@ -2148,6 +2189,7 @@ function solve_lp!(
         # transfer: there the data norm is fixed, here it diverges by design.
         regularization = max(relative_regularization, regularization / T(10))
         local attempt_regularization = regularization
+        backend_execution_attempted = true
         for attempt in 1:8
             factor = factorize!(
                 workspace.backend::KKTBackend,
@@ -2486,13 +2528,16 @@ function solve_lp!(
             # and a BLAS Gram kernel for solves that executed neither.
             executed=(
                 solver=:lp_primal_dual,
-                kkt=_lp_executed_backend(workspace, equalities),
+                kkt=backend_execution_attempted ?
+                    _lp_executed_backend(workspace, equalities) :
+                    :not_executed,
                 planned_backend=:lp_deferred,
-                executed_backend=backend_name(
-                    workspace.backend::KKTBackend,
-                ),
+                executed_backend=backend_execution_attempted ?
+                    backend_name(workspace.backend::KKTBackend) :
+                    :not_executed,
                 fallback_reason=:none,
-                backend_resolution=:post_presolve,
+                backend_resolution=backend_execution_attempted ?
+                    :post_presolve : :resolved_no_iteration,
                 lp_formulation=_lp_executed_backend(
                     workspace,
                     equalities,

@@ -87,6 +87,14 @@ end
         @test workspace.mixed_precision.active
         @test workspace.mixed_precision.reason === :active
         @test isfinite(workspace.mixed_precision.condition_estimate)
+        equality_diagnostics =
+            SDPX._equality_factor_diagnostics(workspace, equalities)
+        @test equality_diagnostics.available
+        @test equality_diagnostics.method ===
+              :mixed_float64_normal_equations
+        @test equality_diagnostics.rank == equalities
+        @test !equality_diagnostics.rank_deficient
+        @test equality_diagnostics.quality > zero(BigFloat)
 
         SDPX.copy_owned!(workspace.p, equality_rhs)
         @test SDPX.solve_direction!(

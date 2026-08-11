@@ -573,6 +573,34 @@ end
     end
 end
 
+@testset "BigFloat mixed reduced arrow without native panel" begin
+    setprecision(BigFloat, 256) do
+        problem, _, _ = _bigfloat_arrow_fixture()
+        requested_threads = max(Threads.nthreads(), 16)
+        plan = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{BigFloat}(
+                algorithm=:sdp,
+                scaling=:none,
+                presolve=false,
+                extended_precision_blas=:off,
+                mixed_precision_kkt=:on,
+                threads=requested_threads,
+            ),
+        )
+        @test plan.backend_config.route === :block_arrow
+        @test !plan.backend_config.reduced_arrow
+        @test plan.backend_config.mixed_reduced_arrow
+        @test plan.threads <= requested_threads
+        @test plan.threads <= Threads.nthreads()
+        workspace = SDPX.Workspace(problem; execution_plan=plan)
+        @test workspace.arrow.mixed_reduced_enabled
+        @test workspace.thread_count == plan.threads
+        @test workspace.arrow.mixed_reduced_threads == plan.threads
+        @test workspace.arrow.mixed_reduced_threads <= Threads.nthreads()
+    end
+end
+
 @testset "BigFloat singleton-arrow Float64x4 preconditioner" begin
     setprecision(BigFloat, 256) do
         problem, X, Y = _bigfloat_arrow_fixture()

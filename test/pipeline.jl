@@ -948,6 +948,20 @@ end
         @test at_workspace.mixed_precision !== nothing
         @test SDPX.select_backend(at_workspace) isa SDPX.MixedPrecisionBackend
 
+        fixed_plan = SDPX.build_execution_plan(
+            at,
+            SDPX.SolverOptions{BigFloat}(
+                mixed_precision_kkt=:on,
+                refine_policy=:fixed,
+            ),
+        )
+        @test fixed_plan.backend_config.mixed_precision_mode === :off
+        @test SDPX.planned_backend_name(fixed_plan) === :dense_cholesky
+        @test fixed_plan.parameters.generic_mixed_precision_decision.reason ===
+              :fixed_refinement_policy
+        @test SDPX.Workspace(at; execution_plan=fixed_plan).mixed_precision ===
+              nothing
+
         # `:off` declines regardless of size.
         @test SDPX.Workspace(at; mixed_precision_kkt=:off).mixed_precision === nothing
     end

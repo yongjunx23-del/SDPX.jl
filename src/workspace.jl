@@ -989,9 +989,11 @@ function Workspace(
         isempty(arrow_workspace.global_ids)
     if T === BigFloat &&
        !reduced_arrow_panel &&
+       !config.mixed_reduced_arrow &&
        !owned_bigfloat_arrow_equalities
-        # Native BigFloat remains serial except for explicitly
-        # ownership-safe reduced panels and block-diagonal equality systems.
+        # Native BigFloat remains serial except for explicitly ownership-safe
+        # reduced panels, mixed Float64x4 reduced panels, and block-diagonal
+        # equality systems.
         selected_threads == 1 || throw(ArgumentError(
             "execution plan selected $(selected_threads) threads for a " *
             "serial native BigFloat workspace",
@@ -1029,7 +1031,7 @@ function Workspace(
             mixed_type,
             planned_mixed_precision_kkt,
             planned_mixed_precision_memory_fraction,
-            requested_threads;
+            selected_threads;
             mixed=true,
             available_memory_bytes=available_memory,
         )
@@ -1048,8 +1050,10 @@ function Workspace(
     compact_arrow &&
         (arrow_workspace.mixed_reduced_mode = planned_mixed_precision_kkt)
     if mixed_reduced_arrow
+        # The plan has already applied whole-solver worker caps, so the
+        # Float64x4 panel must not be widened back to the caller's request.
         mixed_threads = min(
-            max(requested_threads, 1),
+            max(selected_threads, 1),
             Threads.nthreads(),
         )
         arrow_workspace.mixed_reduced_coefficients = [

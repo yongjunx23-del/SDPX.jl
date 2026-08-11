@@ -72,6 +72,24 @@ using Test
         @test selected.backend_resolution === :post_presolve
         @test selected.lp_formulation === :positive_definite_cholesky
         @test selected.planned == (kkt=selected.kkt, gram=selected.gram)
+
+        no_iteration = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                iter_max=0,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        no_iteration_selected = no_iteration.diagnostics.selected_algorithms
+        @test no_iteration.status == SDPX.IterLimit
+        @test no_iteration_selected.planned_backend === :lp_deferred
+        @test no_iteration_selected.executed_backend === :not_executed
+        @test no_iteration_selected.kkt === :not_executed
+        @test no_iteration_selected.backend_resolution ===
+              :resolved_no_iteration
+        @test no_iteration_selected.lp_formulation ===
+              :positive_definite_cholesky
     end
 
     @testset "SDP core reports its executed KKT backend" begin

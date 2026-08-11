@@ -62,7 +62,11 @@ using Test
             constants,
             zeros(variables, 0),
             Float64[];
-            sparse=:auto,
+            # This test exercises the sparse block-arrow route itself.  The
+            # tiny fixture is intentionally below the automatic sparse-ingest
+            # crossover, so leaving this at `:auto` silently builds DenseCons
+            # and tests the dense planner instead.
+            sparse=true,
             verbosity=0,
         )
         options = SDPX.SolverOptions{Float64}(
