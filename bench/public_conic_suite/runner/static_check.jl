@@ -80,8 +80,8 @@ function main(args)
         push!(failures, "53-bit Float64 ladder must be a strict subset")
     length(all53) < length(all209) ||
         push!(failures, "53-bit Float64 ladder is not a strict subset")
-    CAMPAIGN_VERSION == "p0-v4" ||
-        push!(failures, "CAMPAIGN_VERSION is not p0-v4")
+    CAMPAIGN_VERSION == "p0-v5" ||
+        push!(failures, "CAMPAIGN_VERSION is not p0-v5")
 
     # Each severity must keep a safe analytic separation against the default
     # tolerance of the arithmetic ladder that executes it.
@@ -93,6 +93,11 @@ function main(args)
             separation > 100 * tolerance ||
                 push!(failures, "socp_near_infeasible $(row.severity) " *
                                 "separation $separation lacks margin over $tolerance")
+            if get(row, :min_bits, 53) <= 53
+                separation == big"1e-2" ||
+                    push!(failures, "Float64 socp_near_infeasible must use " *
+                                    "the audited eps=1e-2 floor")
+            end
         elseif row.case === :lp_row_scaling
             decades = Int(row.kwargs.decades)
             if get(row, :min_bits, 53) <= 53

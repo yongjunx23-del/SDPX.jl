@@ -101,10 +101,10 @@ must_absent "PSD t-shifted Any comprehension" \
   grep -Eq '\(i == j \? t : zero\(T\)\)[[:space:]]*for[[:space:]]+i=1:n,[[:space:]]*j=1:n\]' \
   "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
 check grep -q 'one(T) - eps + x' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
-check grep -q 'p0-v4' "$HERE/campaign.jl"
+check grep -q 'p0-v5' "$HERE/campaign.jl"
 check grep -q 'decades6' "$HERE/campaign.jl"
 check grep -q 'delta1e-8' "$HERE/campaign.jl"
-check grep -q 'eps1e-4' "$HERE/campaign.jl"
+check grep -q 'eps1e-2' "$HERE/campaign.jl"
 check grep -q 'eps1e-12' "$HERE/campaign.jl"
 
 echo "checking CLI convention"

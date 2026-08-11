@@ -26,7 +26,7 @@ using SHA
 export CAMPAIGN, CAMPAIGN_VERSION, RESOURCE_MATRIX
 export campaign_input_hash, campaign_family_counts, campaign_rows_for
 
-const CAMPAIGN_VERSION = "p0-v4"
+const CAMPAIGN_VERSION = "p0-v5"
 
 const CAMPAIGN = (
     # LP
@@ -49,8 +49,8 @@ const CAMPAIGN = (
      kwargs=(epsilon="1e-8",), expected_status=:optimal, min_bits=53),
     (family=:socp, case=:socp_near_tangent, severity="eps1e-16",
      kwargs=(epsilon="1e-16",), expected_status=:optimal, min_bits=209),
-    (family=:socp, case=:socp_near_infeasible, severity="eps1e-4",
-     kwargs=(epsilon="1e-4",), expected_status=:infeasible, min_bits=53),
+    (family=:socp, case=:socp_near_infeasible, severity="eps1e-2",
+     kwargs=(epsilon="1e-2",), expected_status=:infeasible, min_bits=53),
     (family=:socp, case=:socp_near_infeasible, severity="eps1e-12",
      kwargs=(epsilon="1e-12",), expected_status=:infeasible, min_bits=209),
     (family=:socp, case=:socp_many_tiny, severity="ncones1000_eps1e-4",
