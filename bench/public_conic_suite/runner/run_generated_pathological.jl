@@ -460,7 +460,11 @@ end
 
 function _candidate_metadata(source::String)
     # The cluster git does not support `git -C`; run from the source directory.
-    commit = _capture(cd(`git rev-parse HEAD 2>/dev/null`, source))
+    commit = if ispath(joinpath(source, ".git"))
+        _capture(cd(`git rev-parse HEAD`, source))
+    else
+        ""
+    end
     commit_file = "git:HEAD"
     if isempty(commit)
         commit_file = joinpath(dirname(source), "metadata", "source_commit.txt")
