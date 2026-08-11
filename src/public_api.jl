@@ -50,6 +50,21 @@ const SpectrumResult = SDPX.SpectrumResult
 const FixedTraceBlock = SDPX.FixedTraceBlock
 const FixedTraceAnalysis = SDPX.FixedTraceAnalysis
 const analyze_fixed_trace = SDPX.analyze_fixed_trace
+const AbstractCanonicalCone = SDPX.AbstractCanonicalCone
+const AbstractCanonicalLinearCone = SDPX.AbstractCanonicalLinearCone
+const AbstractCanonicalLorentzCone = SDPX.AbstractCanonicalLorentzCone
+const AbstractCanonicalPSDCone = SDPX.AbstractCanonicalPSDCone
+const CanonicalLinearCone = SDPX.CanonicalLinearCone
+const CanonicalLorentzCone = SDPX.CanonicalLorentzCone
+const CanonicalPSDCone = SDPX.CanonicalPSDCone
+const AbstractCanonicalEqualities = SDPX.AbstractCanonicalEqualities
+const CanonicalEqualities = SDPX.CanonicalEqualities
+const CanonicalIdentityReconstructionMap =
+    SDPX.CanonicalIdentityReconstructionMap
+const CanonicalReconstructionMap = SDPX.CanonicalReconstructionMap
+const CanonicalConicProblem = SDPX.CanonicalConicProblem
+const canonicalize = SDPX.canonicalize
+const reconstruct_identity = SDPX.reconstruct_identity
 const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
 const resolve_solve_options = SDPX.resolve_solve_options
 const auto_tolerance = SDPX.auto_tolerance
@@ -71,6 +86,12 @@ export FixedVariableEliminationStage, StructuralCleanupStage
 export FormulationAnalysisStage, ChordalAnalysisStage, preprocess
 export classify_problem, build_execution_plan, SpectrumResult
 export FixedTraceBlock, FixedTraceAnalysis, analyze_fixed_trace
+export AbstractCanonicalCone, CanonicalLinearCone, CanonicalLorentzCone
+export AbstractCanonicalLinearCone, AbstractCanonicalLorentzCone
+export AbstractCanonicalPSDCone, CanonicalPSDCone
+export AbstractCanonicalEqualities, CanonicalEqualities
+export CanonicalIdentityReconstructionMap, CanonicalReconstructionMap
+export CanonicalConicProblem, canonicalize, reconstruct_identity
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
 
