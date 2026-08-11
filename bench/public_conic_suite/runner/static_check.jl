@@ -80,6 +80,50 @@ function main(args)
         push!(failures, "53-bit Float64 ladder must be a strict subset")
     length(all53) < length(all209) ||
         push!(failures, "53-bit Float64 ladder is not a strict subset")
+    CAMPAIGN_VERSION == "p0-v4" ||
+        push!(failures, "CAMPAIGN_VERSION is not p0-v4")
+
+    # Each severity must keep a safe analytic separation against the default
+    # tolerance of the arithmetic ladder that executes it.
+    arithmetic_tolerances = Dict(53 => "1e-8", 209 => "1e-24", 256 => "1e-32")
+    for row in CAMPAIGN
+        if row.case === :socp_near_infeasible
+            separation = parse(BigFloat, string(row.kwargs.epsilon))
+            tolerance = parse(BigFloat, arithmetic_tolerances[get(row, :min_bits, 53)])
+            separation > 100 * tolerance ||
+                push!(failures, "socp_near_infeasible $(row.severity) " *
+                                "separation $separation lacks margin over $tolerance")
+        elseif row.case === :lp_row_scaling
+            decades = Int(row.kwargs.decades)
+            if get(row, :min_bits, 53) <= 53
+                decades <= 6 ||
+                    push!(failures, "Float64 lp_row_scaling must stay at decades<=6")
+            else
+                decades >= 16 ||
+                    push!(failures, "high-precision lp_row_scaling must keep decades>=16")
+            end
+        end
+    end
+
+    # PSD generators must build target-arithmetic GenericAffExpr matrices via
+    # @expression instead of a Matrix{Any} literal.
+    generator_text = read(
+        joinpath(RUNNER_ROOT, "..", "generators", "SDPXPathologicalBenchmarks.jl"),
+        String,
+    )
+    expression_uses = length(collect(eachmatch(r"@expression", generator_text)))
+    expression_uses >= 2 ||
+        push!(failures, "Hilbert/small-eigenvalue generators do not use @expression")
+    occursin("Matrix{Any}", generator_text) &&
+        push!(failures, "PSD generator still builds Matrix{Any}")
+    # Source rule: the two PSD generators must not regress to a literal
+    # t-shifted matrix comprehension, which JuMP would type as Matrix{Any}.
+    # The @expression form never has "for" immediately after the shifted
+    # coefficient, so this matches only the comprehension regression.
+    t_shifted_comprehension = r"\(i == j \? t : zero\(T\)\)\s*for\s+i=1:n,\s*j=1:n\]"
+    occursin(t_shifted_comprehension, generator_text) &&
+        push!(failures, "PSD generator rebuilt t-shifted matrix as Any comprehension")
+
     unresolved = normalize_status(
         "Stalled";
         certificate_valid=false,

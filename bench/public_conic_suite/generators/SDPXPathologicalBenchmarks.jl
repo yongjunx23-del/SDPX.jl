@@ -129,11 +129,13 @@ function _socp_near_infeasible(::Type{T}; epsilon="1e-8", kwargs...) where {T}
     model = _model(T; kwargs...)
     @variable(model, x)
     @constraint(model, x == zero(T))
-    @constraint(model, [one(T) + x, one(T), eps] in SecondOrderCone())
+    # First coordinate is 1-eps at x=0 while the remaining norm is 1, so the
+    # analytic cone separation is exactly eps (linear, not eps^2/2).
+    @constraint(model, [one(T) - eps + x, one(T), zero(T)] in SecondOrderCone())
     @objective(model, Min, zero(T) * x)
     return model, (case=:socp_near_infeasible, expected_status=:infeasible,
                    expected_objective=nothing, epsilon=eps,
-                   oracle="norm((1,epsilon))>1 for epsilon>0")
+                   oracle="linear SOC separation eps: 1-eps < norm((1,0))")
 end
 
 function _socp_many_tiny(::Type{T}; ncones=1000, epsilon="1e-4", kwargs...) where {T}
@@ -173,7 +175,7 @@ function _sdp_hilbert(::Type{T}; n=10, kwargs...) where {T}
     model = _model(T; kwargs...)
     @variable(model, t)
     H = [one(T) / T(i + j - 1) for i=1:n, j=1:n]
-    M = [H[i,j] - (i == j ? t : zero(T)) for i=1:n, j=1:n]
+    M = @expression(model, [i=1:n, j=1:n], H[i,j] - (i == j ? t : zero(T)))
     @constraint(model, Symmetric(M) in PSDCone())
     @objective(model, Max, t)
     # Float64 has a native symmetric eigensolver. Generic types such as
@@ -233,7 +235,7 @@ function _sdp_small_eigenvalue(::Type{T}; n=8, epsilon="1e-16", seed=71, kwargs.
     A = (A + transpose(A)) / 2
     model = _model(T; kwargs...)
     @variable(model, t)
-    M = [A[i,j] - (i == j ? t : zero(T)) for i=1:n, j=1:n]
+    M = @expression(model, [i=1:n, j=1:n], A[i,j] - (i == j ? t : zero(T)))
     @constraint(model, Symmetric(M) in PSDCone())
     @objective(model, Max, t)
     return model, (case=:sdp_small_eigenvalue, expected_status=:optimal,

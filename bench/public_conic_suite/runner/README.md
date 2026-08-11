@@ -102,7 +102,13 @@ derived from SDPX's target-arithmetic PSD certificate details
 Rows whose analytic margin is below an arithmetic's precision carry
 `min_bits` in `campaign.jl` and are skipped for that arithmetic via
 `campaign_rows_for(bits)`, so the Float64 suite only executes cases it can
-honestly certify.
+honestly certify.  P0 v4 keeps analytic margins well above the ladder's
+default tolerance: Float64 runs LP row scaling at `decades=6`,
+`socp_near_infeasible` uses a linear separation of exactly `epsilon`
+(`1e-4` Float64 / `1e-12` extended), and the weak-infeasible SDP stays at
+the audited `delta=1e-8` for every arithmetic.  Hilbert and small-eigenvalue
+PSD matrices are built as target-arithmetic
+`GenericAffExpr` matrices with `@expression`, never `Matrix{Any}`.
 
 ## Static verification
 

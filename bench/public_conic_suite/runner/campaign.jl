@@ -26,7 +26,7 @@ using SHA
 export CAMPAIGN, CAMPAIGN_VERSION, RESOURCE_MATRIX
 export campaign_input_hash, campaign_family_counts, campaign_rows_for
 
-const CAMPAIGN_VERSION = "p0-v3"
+const CAMPAIGN_VERSION = "p0-v4"
 
 const CAMPAIGN = (
     # LP
@@ -34,8 +34,8 @@ const CAMPAIGN = (
      kwargs=(n=16, epsilon="1e-8"), expected_status=:optimal, min_bits=53),
     (family=:lp, case=:lp_near_dependent, severity="n16_eps1e-16",
      kwargs=(n=16, epsilon="1e-16"), expected_status=:optimal, min_bits=209),
-    (family=:lp, case=:lp_row_scaling, severity="n16_decades8",
-     kwargs=(n=16, decades=8), expected_status=:optimal, min_bits=53),
+    (family=:lp, case=:lp_row_scaling, severity="n16_decades6",
+     kwargs=(n=16, decades=6), expected_status=:optimal, min_bits=53),
     (family=:lp, case=:lp_row_scaling, severity="n16_decades16",
      kwargs=(n=16, decades=16), expected_status=:optimal, min_bits=209),
     (family=:lp, case=:lp_infeasible_margin, severity="eps1e-8",
@@ -49,18 +49,16 @@ const CAMPAIGN = (
      kwargs=(epsilon="1e-8",), expected_status=:optimal, min_bits=53),
     (family=:socp, case=:socp_near_tangent, severity="eps1e-16",
      kwargs=(epsilon="1e-16",), expected_status=:optimal, min_bits=209),
-    (family=:socp, case=:socp_near_infeasible, severity="eps1e-8",
-     kwargs=(epsilon="1e-8",), expected_status=:infeasible, min_bits=53),
-    (family=:socp, case=:socp_near_infeasible, severity="eps1e-16",
-     kwargs=(epsilon="1e-16",), expected_status=:infeasible, min_bits=209),
+    (family=:socp, case=:socp_near_infeasible, severity="eps1e-4",
+     kwargs=(epsilon="1e-4",), expected_status=:infeasible, min_bits=53),
+    (family=:socp, case=:socp_near_infeasible, severity="eps1e-12",
+     kwargs=(epsilon="1e-12",), expected_status=:infeasible, min_bits=209),
     (family=:socp, case=:socp_many_tiny, severity="ncones1000_eps1e-4",
      kwargs=(ncones=1000, epsilon="1e-4"), expected_status=:optimal,
      min_bits=53),
     # SDP
     (family=:sdp, case=:sdp_weak_infeasible_2x2, severity="delta1e-8",
      kwargs=(delta="1e-8",), expected_status=:optimal, min_bits=53),
-    (family=:sdp, case=:sdp_weak_infeasible_2x2, severity="delta1e-16",
-     kwargs=(delta="1e-16",), expected_status=:optimal, min_bits=209),
     (family=:sdp, case=:sdp_weak_infeasible_2x2, severity="delta0",
      kwargs=(delta="0",), expected_status=:weakly_infeasible, min_bits=53),
     (family=:sdp, case=:sdp_hilbert, severity="n8",

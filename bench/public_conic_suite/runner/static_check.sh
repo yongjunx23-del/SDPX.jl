@@ -89,6 +89,18 @@ check grep -q 'generators.*SDPXPathologicalBenchmarks' "$HERE/run_generated_path
 check grep -q 'using .SDPXPathologicalBenchmarks' "$HERE/run_generated_pathological.jl"
 check grep -q 'campaign_rows_for' "$HERE/campaign.jl"
 check grep -q 'campaign_rows_for' "$HERE/run_generated_pathological.jl"
+check grep -q '@expression' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+must_absent "Matrix{Any} in PSD generators" \
+  grep -q 'Matrix{Any}' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+must_absent "PSD t-shifted Any comprehension" \
+  grep -Eq '\(i == j \? t : zero\(T\)\)[[:space:]]*for[[:space:]]+i=1:n,[[:space:]]*j=1:n\]' \
+  "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+check grep -q 'one(T) - eps + x' "$HERE/../generators/SDPXPathologicalBenchmarks.jl"
+check grep -q 'p0-v4' "$HERE/campaign.jl"
+check grep -q 'decades6' "$HERE/campaign.jl"
+check grep -q 'delta1e-8' "$HERE/campaign.jl"
+check grep -q 'eps1e-4' "$HERE/campaign.jl"
+check grep -q 'eps1e-12' "$HERE/campaign.jl"
 
 echo "checking CLI convention"
 check grep -q 'values\["--" \* name\]' "$HERE/run_generated_pathological.jl"
