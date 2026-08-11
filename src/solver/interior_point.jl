@@ -781,7 +781,8 @@ wraps this.
 """
 function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
     x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
-    resume::AbstractString="", deadline::Float64=Inf) where {T}
+    resume::AbstractString="", deadline::Float64=Inf,
+    execution_plan::Union{Nothing,ExecutionPlan}=nothing) where {T}
 
     core_started = time()
     core_started_ns = time_ns()
@@ -913,6 +914,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             opts.mixed_precision_memory_fraction,
         equality_solver=opts.equality_solver,
         thread_count=opts.threads,
+        execution_plan=execution_plan,
     )
     workspace_finished_ns = time_ns()
     time() >= deadline &&
@@ -2482,6 +2484,10 @@ function _solve_pipeline!(
                 Y0=preprocessed_warm_start.Y0,
                 resume=resume,
                 deadline=deadline,
+                execution_plan=build_execution_plan(
+                    reduced,
+                    fallback_options,
+                ),
             )
             workspace_bytes = max(
                 workspace_bytes,
@@ -2564,6 +2570,7 @@ function _solve_pipeline!(
             Y0=preprocessed_warm_start.Y0,
             resume=resume,
             deadline=deadline,
+            execution_plan=plan,
         )
         # Keep diagnostics out of the hot path: recursively traversing every
         # sparse coefficient object can cost much more than a warmed solve.

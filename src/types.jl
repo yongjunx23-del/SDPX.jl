@@ -970,6 +970,27 @@ PresolveReport(
 )
 
 """
+    BackendConfiguration
+
+Immutable description of the linear-system route selected by the planner.
+`route` is the native structural backend, while the two reduced-arrow flags
+and `mixed_precision_mode` describe optional implementations of that route.
+`fallback_chain` contains the only structural fallbacks the runtime may use.
+The dedicated LP path resolves its backend after row presolve and scaling, so
+it is represented by `deferred=true` without changing the established LP
+selection formulas.
+"""
+struct BackendConfiguration
+    route::Symbol
+    equality_solver::Symbol
+    reduced_arrow::Bool
+    mixed_reduced_arrow::Bool
+    mixed_precision_mode::Symbol
+    fallback_chain::Tuple{Vararg{Symbol}}
+    deferred::Bool
+end
+
+"""
     ExecutionPlan
 
 Algorithms selected before a solve. This is deliberately descriptive: it is
@@ -981,12 +1002,55 @@ struct ExecutionPlan
     algorithm::Symbol
     scaling::Symbol
     kkt_backend::Symbol
+    backend_config::BackendConfiguration
     gram_kernel::Symbol
     schedule::Symbol
     threads::Int
     parameter_profile::Symbol
     memory_budget_bytes::Int
     parameters::NamedTuple
+end
+
+# Source compatibility for the pre-`backend_config` positional form.  The
+# compatibility route is intentionally conservative: callers constructing an
+# `ExecutionPlan` directly get the same backend named by `kkt_backend`, while
+# plans built by `build_execution_plan` carry the complete configuration.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    equality_solver = get(parameters, :equality_solver, :auto)
+    deferred = algorithm === :lp_primal_dual
+    config = BackendConfiguration(
+        kkt_backend,
+        equality_solver,
+        false,
+        false,
+        :off,
+        (),
+        deferred,
+    )
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        config,
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
 end
 
 """

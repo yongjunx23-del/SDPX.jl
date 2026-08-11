@@ -845,11 +845,47 @@ function Workspace(
     mixed_precision_memory_fraction::Float64=0.10,
     equality_solver::Symbol=:auto,
     thread_count::Int=Threads.nthreads(),
+    execution_plan::Union{Nothing,ExecutionPlan}=nothing,
 ) where {T}
     L, m, n, k = prob.dims
-    requested_threads =
-        min(max(thread_count, 1), Threads.nthreads())
-    selected_threads = requested_threads
+    plan = if execution_plan === nothing
+        workspace_options = SolverOptions{T}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            extended_precision_blas=extended_precision_blas,
+            extended_precision_memory_fraction=
+                extended_precision_memory_fraction,
+            mixed_precision_kkt=mixed_precision_kkt,
+            mixed_precision_memory_fraction=
+                mixed_precision_memory_fraction,
+            equality_solver=equality_solver,
+            threads=thread_count,
+        )
+        build_execution_plan(prob, workspace_options)
+    else
+        execution_plan
+    end
+    plan.algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) ||
+        throw(ArgumentError(
+            "Workspace requires an SDP/PSD-lift execution plan, got $(plan.algorithm)",
+        ))
+    config = plan.backend_config
+    config.route == plan.kkt_backend ||
+        throw(ArgumentError(
+            "execution plan backend configuration $(config.route) does not match " *
+            "kkt_backend $(plan.kkt_backend)",
+        ))
+    config.deferred && throw(ArgumentError(
+        "deferred LP backend configurations cannot construct an SDP Workspace",
+    ))
+    config.equality_solver == equality_solver ||
+        throw(ArgumentError(
+            "execution plan equality solver $(config.equality_solver) does not " *
+            "match workspace request $equality_solver",
+        ))
+    requested_threads = plan.threads
+    selected_threads = plan.threads
     is_sparse = prob.cons isa SparseCons
     available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
     reduced_arrow_decision =
@@ -861,7 +897,12 @@ function Workspace(
             thread_count;
             available_memory_bytes=available_memory,
         )
-    reduced_arrow_panel = reduced_arrow_decision.enabled
+    reduced_arrow_panel = config.reduced_arrow
+    reduced_arrow_panel && !reduced_arrow_decision.enabled &&
+        throw(ArgumentError(
+            "execution plan selected reduced-arrow storage but the workspace " *
+            "crossover no longer supports it",
+        ))
     if reduced_arrow_panel
         frequency = zeros(Int, m)
         for variables in (prob.cons::SparseCons{T}).active
@@ -897,16 +938,29 @@ function Workspace(
     # selected its effective whole-solver width. Direct reduced panels never
     # consume the full Schur partial matrices; keep only the small RHS
     # partials and allocate Schur partials lazily if the kernel falls back.
-    arrow = ArrowWorkspace(
+    compact_arrow = config.route === :block_arrow
+    arrow = compact_arrow ? ArrowWorkspace(
         prob,
         reduced_arrow_panel ? reduced_block_nbins : selected_threads;
         allocate_schur_partials=!reduced_arrow_panel,
-    )
-    compact_arrow = arrow !== nothing
-    sparse_schur =
-        !compact_arrow &&
-        equality_solver !== :qr &&
-        _use_sparse_schur_sdp(prob)
+    ) : nothing
+    compact_arrow && arrow === nothing &&
+        throw(ArgumentError(
+            "execution plan selected block-arrow, but the reduced problem is incompatible",
+        ))
+    sparse_schur = config.route === :sparse_schur_cholesky
+    sparse_schur && !_use_sparse_schur_sdp(prob) &&
+        throw(ArgumentError(
+            "execution plan selected sparse Schur, but the reduced problem is incompatible",
+        ))
+    config.route in (
+        :block_arrow,
+        :sparse_schur_cholesky,
+        :dense_cholesky,
+        :dense_cholesky_fallback,
+    ) || throw(ArgumentError(
+        "unsupported SDP workspace backend route $(config.route)",
+    ))
     fused_arrow =
         compact_arrow &&
         L > 0 &&
@@ -964,7 +1018,12 @@ function Workspace(
             available_memory_bytes=available_memory,
         )
     end
-    mixed_reduced_arrow = mixed_reduced_decision.enabled
+    mixed_reduced_arrow = config.mixed_reduced_arrow
+    mixed_reduced_arrow && !mixed_reduced_decision.enabled &&
+        throw(ArgumentError(
+            "execution plan selected mixed reduced-arrow storage but the " *
+            "workspace crossover no longer supports it",
+        ))
     compact_arrow &&
         (arrow_workspace.mixed_reduced_mode = mixed_precision_kkt)
     if mixed_reduced_arrow
@@ -1009,7 +1068,7 @@ function Workspace(
     # never use when `arrow !== nothing`.
     mixed_precision = _mixed_precision_workspace(
         prob,
-        (compact_arrow || sparse_schur) ? :off : mixed_precision_kkt,
+        (compact_arrow || sparse_schur) ? :off : config.mixed_precision_mode,
         mixed_precision_memory_fraction,
     )
     block_nbins = max(

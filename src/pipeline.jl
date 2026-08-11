@@ -978,13 +978,48 @@ function build_execution_plan(
     else
         :none
     end
+    kkt_backend = algorithm === :socp_fixed_trace_q3 ?
+                  :q3_block_diagonal_equality :
+                  algorithm === :lp_primal_dual ?
+                  (
+                      classification.equalities == 0 ?
+                      :positive_definite_cholesky :
+                      :dense_lu
+                  ) :
+                  _runtime_schur_backend(prob, opts.equality_solver)
+    reduced_arrow_enabled =
+        kkt_backend === :block_arrow && reduced_arrow_decision.enabled
+    mixed_reduced_arrow_enabled =
+        kkt_backend === :block_arrow && mixed_arrow_decision.enabled
+    mixed_precision_mode =
+        kkt_backend in (:dense_cholesky, :dense_cholesky_fallback) ?
+        opts.mixed_precision_kkt : :off
+    backend_fallback_chain = if algorithm === :socp_fixed_trace_q3
+        (:dense_cholesky,)
+    elseif mixed_reduced_arrow_enabled
+        (:block_arrow,)
+    elseif mixed_precision_mode !== :off
+        (:dense_cholesky,)
+    else
+        ()
+    end
+    backend_config = BackendConfiguration(
+        kkt_backend,
+        opts.equality_solver,
+        reduced_arrow_enabled,
+        mixed_reduced_arrow_enabled,
+        mixed_precision_mode,
+        backend_fallback_chain,
+        algorithm === :lp_primal_dual,
+    )
+
     requested_threads = max(opts.threads, 1)
     mixed_arrow_threads =
         classification.arithmetic === :bigfloat &&
-        mixed_arrow_decision.enabled
+        mixed_reduced_arrow_enabled
     native_bigfloat_reduced =
         classification.arithmetic === :bigfloat &&
-        reduced_arrow_decision.enabled
+        reduced_arrow_enabled
     owned_bigfloat_arrow_equalities =
         classification.arithmetic === :bigfloat &&
         _supports_owned_bigfloat_arrow_equalities(prob)
@@ -1024,22 +1059,13 @@ function build_execution_plan(
         :owned_bigfloat_equality_tiles
     elseif mixed_arrow_threads
         :mixed_arrow_contiguous_blocks
-    elseif reduced_arrow_decision.enabled
+    elseif reduced_arrow_enabled
         :reduced_arrow_contiguous_blocks
     elseif classification.size === :small
         :static_columns
     else
         :blocked_dynamic
     end
-    kkt_backend = algorithm === :socp_fixed_trace_q3 ?
-                  :q3_block_diagonal_equality :
-                  algorithm === :lp_primal_dual ?
-                  (
-                      classification.equalities == 0 ?
-                      :positive_definite_cholesky :
-                      :dense_lu
-                  ) :
-                  _runtime_schur_backend(prob, opts.equality_solver)
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
     gram_kernel = if algorithm === :socp_fixed_trace_q3
@@ -1073,9 +1099,9 @@ function build_execution_plan(
         else
             :serial_weighted_outer_product
         end
-    elseif mixed_arrow_decision.enabled
+    elseif mixed_reduced_arrow_enabled
         :mixed_float64x4_reduced_arrow_syrk
-    elseif reduced_arrow_decision.enabled
+    elseif reduced_arrow_enabled
         reduced_arrow_syrk_label(T, selected_threads > 1)
     elseif _uses_fused_arrow(prob)
         :fused_arrow_2x2
@@ -1098,6 +1124,7 @@ function build_execution_plan(
         algorithm,
         scaling,
         kkt_backend,
+        backend_config,
         gram_kernel,
         schedule,
         selected_threads,
