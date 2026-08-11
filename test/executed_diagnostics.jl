@@ -90,6 +90,7 @@ using Test
               :resolved_no_iteration
         @test no_iteration_selected.lp_formulation ===
               :positive_definite_cholesky
+        @test no_iteration_selected.gram === :not_executed
     end
 
     @testset "SDP core reports its executed KKT backend" begin

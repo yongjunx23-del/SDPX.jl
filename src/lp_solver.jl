@@ -2542,10 +2542,13 @@ function solve_lp!(
                     workspace,
                     equalities,
                 ),
-                gram=workspace.standard_system !== nothing ?
-                     :reduced_equality_syrk :
-                     workspace.sparse_system === nothing ?
-                     plan.gram_kernel : :sparse_gram,
+                gram=backend_execution_attempted ?
+                    (
+                        workspace.standard_system !== nothing ?
+                        :reduced_equality_syrk :
+                        workspace.sparse_system === nothing ?
+                        plan.gram_kernel : :sparse_gram
+                    ) : :not_executed,
                 effective_threads=workspace.standard_system === nothing ?
                     plan.threads :
                     max(
