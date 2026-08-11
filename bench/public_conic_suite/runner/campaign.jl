@@ -11,7 +11,7 @@ and can compute offline.
 
 `min_bits` marks cases whose analytic margin is below the precision of an
 arithmetic type.  Float64 (53 bits) skips those cases so the suite remains
-passable; Float64x4 (215 bits) and BigFloat>=256 run the full matrix.  The
+passable; Float64x4 (209 bits) and BigFloat>=256 run the full matrix.  The
 column is advisory only: the runner filters with `campaign_rows_for(bits)`.
 
 Cluster resource contract:
@@ -26,33 +26,33 @@ using SHA
 export CAMPAIGN, CAMPAIGN_VERSION, RESOURCE_MATRIX
 export campaign_input_hash, campaign_family_counts, campaign_rows_for
 
-const CAMPAIGN_VERSION = "p0-v2"
+const CAMPAIGN_VERSION = "p0-v3"
 
 const CAMPAIGN = (
     # LP
     (family=:lp, case=:lp_near_dependent, severity="n16_eps1e-8",
      kwargs=(n=16, epsilon="1e-8"), expected_status=:optimal, min_bits=53),
     (family=:lp, case=:lp_near_dependent, severity="n16_eps1e-16",
-     kwargs=(n=16, epsilon="1e-16"), expected_status=:optimal, min_bits=215),
+     kwargs=(n=16, epsilon="1e-16"), expected_status=:optimal, min_bits=209),
     (family=:lp, case=:lp_row_scaling, severity="n16_decades8",
      kwargs=(n=16, decades=8), expected_status=:optimal, min_bits=53),
     (family=:lp, case=:lp_row_scaling, severity="n16_decades16",
-     kwargs=(n=16, decades=16), expected_status=:optimal, min_bits=215),
+     kwargs=(n=16, decades=16), expected_status=:optimal, min_bits=209),
     (family=:lp, case=:lp_infeasible_margin, severity="eps1e-8",
      kwargs=(epsilon="1e-8",), expected_status=:infeasible, min_bits=53),
     (family=:lp, case=:lp_infeasible_margin, severity="eps1e-16",
-     kwargs=(epsilon="1e-16",), expected_status=:infeasible, min_bits=215),
+     kwargs=(epsilon="1e-16",), expected_status=:infeasible, min_bits=209),
     (family=:lp, case=:lp_klee_minty, severity="n8_eps1e-2",
      kwargs=(n=8, epsilon="1e-2"), expected_status=:optimal, min_bits=53),
     # SOCP
     (family=:socp, case=:socp_near_tangent, severity="eps1e-8",
      kwargs=(epsilon="1e-8",), expected_status=:optimal, min_bits=53),
     (family=:socp, case=:socp_near_tangent, severity="eps1e-16",
-     kwargs=(epsilon="1e-16",), expected_status=:optimal, min_bits=215),
+     kwargs=(epsilon="1e-16",), expected_status=:optimal, min_bits=209),
     (family=:socp, case=:socp_near_infeasible, severity="eps1e-8",
      kwargs=(epsilon="1e-8",), expected_status=:infeasible, min_bits=53),
     (family=:socp, case=:socp_near_infeasible, severity="eps1e-16",
-     kwargs=(epsilon="1e-16",), expected_status=:infeasible, min_bits=215),
+     kwargs=(epsilon="1e-16",), expected_status=:infeasible, min_bits=209),
     (family=:socp, case=:socp_many_tiny, severity="ncones1000_eps1e-4",
      kwargs=(ncones=1000, epsilon="1e-4"), expected_status=:optimal,
      min_bits=53),
@@ -60,7 +60,7 @@ const CAMPAIGN = (
     (family=:sdp, case=:sdp_weak_infeasible_2x2, severity="delta1e-8",
      kwargs=(delta="1e-8",), expected_status=:optimal, min_bits=53),
     (family=:sdp, case=:sdp_weak_infeasible_2x2, severity="delta1e-16",
-     kwargs=(delta="1e-16",), expected_status=:optimal, min_bits=215),
+     kwargs=(delta="1e-16",), expected_status=:optimal, min_bits=209),
     (family=:sdp, case=:sdp_weak_infeasible_2x2, severity="delta0",
      kwargs=(delta="0",), expected_status=:weakly_infeasible, min_bits=53),
     (family=:sdp, case=:sdp_hilbert, severity="n8",
@@ -68,11 +68,11 @@ const CAMPAIGN = (
     (family=:sdp, case=:sdp_congruence_scaling, severity="decades8",
      kwargs=(decades=8,), expected_status=:optimal, min_bits=53),
     (family=:sdp, case=:sdp_congruence_scaling, severity="decades16",
-     kwargs=(decades=16,), expected_status=:optimal, min_bits=215),
+     kwargs=(decades=16,), expected_status=:optimal, min_bits=209),
     (family=:sdp, case=:sdp_small_eigenvalue, severity="n8_eps1e-8",
      kwargs=(n=8, epsilon="1e-8"), expected_status=:optimal, min_bits=53),
     (family=:sdp, case=:sdp_small_eigenvalue, severity="n8_eps1e-16",
-     kwargs=(n=8, epsilon="1e-16"), expected_status=:optimal, min_bits=215),
+     kwargs=(n=8, epsilon="1e-16"), expected_status=:optimal, min_bits=209),
 )
 
 const RESOURCE_MATRIX = (

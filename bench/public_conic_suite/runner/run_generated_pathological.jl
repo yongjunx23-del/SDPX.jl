@@ -21,6 +21,7 @@ identity, resource, status, objective, and certificate gates; otherwise a
 
 using Dates
 using LinearAlgebra
+import MathOptInterface as MOI
 using Printf
 using SHA
 
@@ -292,7 +293,7 @@ end
 
 function _arithmetic_bits(spec)
     spec == "float64" && return 53
-    spec == "float64x4" && return try Int(precision(Float64x4)) catch; 215 end
+    spec == "float64x4" && return try Int(precision(Float64x4)) catch; 209 end
     startswith(spec, "bigfloat") && return parse(Int, spec[9:end])
     error("unsupported arithmetic: $spec")
 end
@@ -346,6 +347,18 @@ function _solver_from_model(model)
         end
     end
     return nothing
+end
+
+function _objective_sense(model, solver)
+    if solver !== nothing && hasproperty(solver, :sense)
+        sense = getproperty(solver, :sense)
+        sense == MOI.MAX_SENSE && return "max"
+        sense == MOI.MIN_SENSE && return "min"
+    end
+    text = lowercase(_try_string(() -> MOI.get(model, MOI.ObjectiveSense())))
+    occursin("max", text) && return "max"
+    occursin("min", text) && return "min"
+    return ""
 end
 
 function _int_value(value)
@@ -584,8 +597,11 @@ function run_case(ctx::RunContext, T, case_cfg, case_index, repetition,
     end
 
     raw_status = result === nothing ? "" : _try_string(() -> result.status)
-    objective_primal = result === nothing ? missing : result.pObj
-    objective_dual = result === nothing ? missing : result.dObj
+    objective_sense = model === nothing ? "" : _objective_sense(model, solver)
+    objective_primal = result === nothing ?
+                       missing : natural_objective(result.pObj, objective_sense)
+    objective_dual = result === nothing ?
+                     missing : natural_objective(result.dObj, objective_sense)
     relative_gap = result === nothing ? missing : result.gap_rel
     expected_objective = _get_field(meta, :expected_objective, nothing)
     has_expected = expected_objective !== nothing &&

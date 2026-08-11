@@ -176,11 +176,17 @@ function _sdp_hilbert(::Type{T}; n=10, kwargs...) where {T}
     M = [H[i,j] - (i == j ? t : zero(T)) for i=1:n, j=1:n]
     @constraint(model, Symmetric(M) in PSDCone())
     @objective(model, Max, t)
-    # The true oracle should be recomputed at >=512 bits for large n.
-    expected = eigmin(Symmetric(H))
+    # Float64 has a native symmetric eigensolver. Generic types such as
+    # Float64x4/BigFloat may not; keep the model unchanged and fall back to a
+    # clearly audited no-objective-oracle path there. The certificate gate is
+    # still enforced independently by the runner.
+    expected = T === Float64 ? eigmin(Symmetric(H)) : nothing
+    oracle = T === Float64 ?
+             "lambda_min(H_n); recompute with high precision" :
+             "no target-arithmetic eigen oracle for $T; certificate gate only"
     return model, (case=:sdp_hilbert, expected_status=:optimal,
                    expected_objective=expected, n=n,
-                   oracle="lambda_min(H_n); recompute with high precision")
+                   oracle=oracle)
 end
 
 function _sdp_congruence_scaling(::Type{T}; decades=16, kwargs...) where {T}
@@ -196,14 +202,35 @@ function _sdp_congruence_scaling(::Type{T}; decades=16, kwargs...) where {T}
                    oracle="positive diagonal congruence; x*=1")
 end
 
+"""
+Deterministic dense orthogonal matrix in the target arithmetic, built as a
+product of rational Householder reflections.  No Float64 staging or QR is
+involved, so the construction does not bake a Float64 orthogonal-error floor
+into the small-eigenvalue oracle.
+"""
+function _rational_householder_q(::Type{T}, n::Integer, seed::Integer) where {T}
+    n >= 2 || error("n must be >= 2")
+    rng = MersenneTwister(seed)
+    Q = Matrix{T}(I, n, n)
+    for _ in 1:2
+        v = Vector{T}(undef, n)
+        for j in 1:n
+            v[j] = T(rand(rng, 1:20))
+        end
+        vv = dot(v, v)
+        H = Matrix{T}(I, n, n) .- (T(2) / vv) .* (v * transpose(v))
+        Q = Q * H
+    end
+    return Q
+end
+
 function _sdp_small_eigenvalue(::Type{T}; n=8, epsilon="1e-16", seed=71, kwargs...) where {T}
     eps = typed(T, epsilon)
-    rng = MersenneTwister(seed)
-    Qf = Matrix(qr(randn(rng, n, n)).Q)
-    Q = T.(Qf)
+    Q = _rational_householder_q(T, n, seed)
     lambdas = ones(T, n)
     lambdas[end] = eps
     A = Q * Diagonal(lambdas) * transpose(Q)
+    A = (A + transpose(A)) / 2
     model = _model(T; kwargs...)
     @variable(model, t)
     M = [A[i,j] - (i == j ? t : zero(T)) for i=1:n, j=1:n]
@@ -211,7 +238,7 @@ function _sdp_small_eigenvalue(::Type{T}; n=8, epsilon="1e-16", seed=71, kwargs.
     @objective(model, Max, t)
     return model, (case=:sdp_small_eigenvalue, expected_status=:optimal,
                    expected_objective=eps, epsilon=eps, n=n, seed=seed,
-                   oracle="constructed smallest eigenvalue epsilon; Q generated deterministically")
+                   oracle="constructed smallest eigenvalue epsilon via target-arithmetic rational Householder Q")
 end
 
 function build_case(name::Symbol, ::Type{T}; kwargs...) where {T}

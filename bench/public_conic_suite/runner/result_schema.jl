@@ -18,7 +18,8 @@ source/environment/input hashes.
 export RESULT_COLUMNS, REQUIRED_COLUMNS
 export csv_escape, write_csv, write_manifest, write_markdown_report
 export write_success_marker, write_failure_marker, safe_string
-export normalize_status, expected_normalized_status, check_columns
+export normalize_status, expected_normalized_status, check_columns,
+       natural_objective
 
 const RESULT_COLUMNS = (
     :run_id,
@@ -297,6 +298,21 @@ function expected_normalized_status(expected::Symbol)
     expected === :weakly_infeasible && return "unresolved_or_certified_infeasible"
     expected === :unbounded && return "certified_unbounded"
     return "unknown"
+end
+
+"""
+    natural_objective(internal, sense) -> value
+
+Convert an internal solver objective into the model's natural coordinates.
+SDPX solves a minimized internal problem; for `max` models the internal
+objective must be negated before comparison with the generator's oracle.  The
+value keeps its target arithmetic type.
+"""
+function natural_objective(internal, sense::AbstractString)
+    internal === nothing && return missing
+    internal === missing && return missing
+    lowercase(strip(sense)) == "max" && return -internal
+    return internal
 end
 
 """Validate a row shape against the canonical column contract."""

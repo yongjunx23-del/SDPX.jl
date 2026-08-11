@@ -155,6 +155,12 @@ check grep -q 'unresolved_or_certified_infeasible' "$HERE/result_schema.jl"
 check grep -q 'HONEST_UNRESOLVED' "$HERE/result_schema.jl"
 check grep -q 'allow_unresolved && normalized_raw in HONEST_UNRESOLVED' \
   "$HERE/result_schema.jl"
+check grep -q 'natural_objective' "$HERE/result_schema.jl"
+check grep -q 'natural_objective(result.pObj' \
+  "$HERE/run_generated_pathological.jl"
+check grep -q 'MOI.MAX_SENSE' "$HERE/run_generated_pathological.jl"
+check grep -q 'lp_klee_minty.*sdp_hilbert.*sdp_small_eigenvalue' \
+  "$HERE/static_check.jl"
 check grep -q 'gate_route = true' "$HERE/run_generated_pathological.jl"
 check grep -q 'resolved_no_iteration' "$HERE/run_generated_pathological.jl"
 check grep -q 'executed_backend_text == "not_executed"' \

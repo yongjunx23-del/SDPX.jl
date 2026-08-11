@@ -55,7 +55,7 @@ function main(args)
     end
     length(fingerprints) == length(CAMPAIGN) ||
         push!(failures, "campaign input fingerprints are not unique")
-    for bits in (53, 215, 256)
+    for bits in (53, 209, 256)
         selected = campaign_rows_for(bits)
         isempty(selected) &&
             push!(failures, "campaign_rows_for($bits) is empty")
@@ -69,6 +69,17 @@ function main(args)
                 push!(failures, "campaign_rows_for($bits) lacks $family")
         end
     end
+    all209 = campaign_rows_for(209)
+    all256 = campaign_rows_for(256)
+    all53 = campaign_rows_for(53)
+    length(all209) == length(CAMPAIGN) ||
+        push!(failures, "209-bit Float64x4 ladder does not select all rows")
+    length(all256) == length(CAMPAIGN) ||
+        push!(failures, "256-bit BigFloat ladder does not select all rows")
+    length(all53) < length(CAMPAIGN) ||
+        push!(failures, "53-bit Float64 ladder must be a strict subset")
+    length(all53) < length(all209) ||
+        push!(failures, "53-bit Float64 ladder is not a strict subset")
     unresolved = normalize_status(
         "Stalled";
         certificate_valid=false,
@@ -114,6 +125,23 @@ function main(args)
     )
     false_optimal == "inaccurate" ||
         push!(failures, "false Optimal was upgraded to unresolved")
+    max_flip = natural_objective(5.0, "max")
+    max_flip == -5.0 ||
+        push!(failures, "natural_objective did not negate max objective")
+    min_keep = natural_objective(5.0, "min")
+    min_keep == 5.0 ||
+        push!(failures, "natural_objective changed min objective")
+    unknown_keep = natural_objective(5.0, "")
+    unknown_keep == 5.0 ||
+        push!(failures, "natural_objective changed unknown sense")
+    missing_keep = natural_objective(missing, "max")
+    missing_keep === missing ||
+        push!(failures, "natural_objective did not preserve missing")
+    max_cases = ("lp_klee_minty", "sdp_hilbert", "sdp_small_eigenvalue")
+    for case in max_cases
+        any(row -> string(row.case) == case, CAMPAIGN) ||
+            push!(failures, "campaign is missing max-sense case $case")
+    end
     @printf("schema columns=%d required=%d campaign=%d\n",
             length(RESULT_COLUMNS), length(REQUIRED_COLUMNS), length(CAMPAIGN))
     @printf("families=%s fingerprints=%d\n", string(counts), length(fingerprints))
