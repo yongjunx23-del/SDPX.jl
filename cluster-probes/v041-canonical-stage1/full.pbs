@@ -52,6 +52,7 @@ export SDPX_CANDIDATE="$CANDIDATE_SOURCE"
 
 CANDIDATE_HASH_ACTUAL="$(
   cd "$CANDIDATE_SOURCE"
+  export LC_ALL=C
   find . -type f -not -path './.git' -not -path './.git/*' -print0 \
     | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
 )"
@@ -65,6 +66,8 @@ fi
   echo "hostname=$ACTUAL_NODE"
   echo "expected_node=$NODE_NAME"
   echo "started=$(date -Iseconds)"
+  echo "inherited_lc_all=${LC_ALL:-unset}"
+  echo "effective_lc_all=C"
   echo "candidate_source=$CANDIDATE_SOURCE"
   echo "candidate_source_realpath=$(realpath "$CANDIDATE_SOURCE")"
   echo "candidate_env=$CANDIDATE_ENV"

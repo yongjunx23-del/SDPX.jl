@@ -33,10 +33,12 @@ node name or hash value is hardcoded.
 | `BOOTSTRAP_LOG` | bootstrap (optional) | bootstrap log path; default `$BOOTSTRAP_ENV/bootstrap.log` |
 
 The PBS scripts compute the candidate source-tree hash with this exact
-command, so compute the expected value the same way:
+command, so compute the expected value the same way.  The whole subshell pins
+`LC_ALL=C` so `find`/`sort` use byte collation regardless of the inherited PBS
+locale (an inherited `en_US.utf8` locale changes the aggregate hash):
 
 ```bash
-(cd "$CANDIDATE_SOURCE" && find . -type f -not -path './.git' -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+(cd "$CANDIDATE_SOURCE" && export LC_ALL=C && find . -type f -not -path './.git' -not -path './.git/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
 ```
 
 ## Order
