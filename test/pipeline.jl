@@ -925,12 +925,28 @@ end
 
     setprecision(BigFloat, 256) do
         below = extended_problem(threshold - 1)
+        below_plan = SDPX.build_execution_plan(
+            below,
+            SDPX.SolverOptions{BigFloat}(mixed_precision_kkt=:auto),
+        )
+        @test below_plan.backend_config.mixed_precision_mode === :off
+        @test SDPX.planned_backend_name(below_plan) === :dense_cholesky
+        @test below_plan.parameters.generic_mixed_precision_decision.reason ===
+              :below_auto_dimension
         @test SDPX.Workspace(below; mixed_precision_kkt=:auto).mixed_precision === nothing
         # `:on` is not gated on dimension, so it must still be offered here.
         @test SDPX.Workspace(below; mixed_precision_kkt=:on).mixed_precision !== nothing
 
         at = extended_problem(threshold)
-        @test SDPX.Workspace(at; mixed_precision_kkt=:auto).mixed_precision !== nothing
+        at_plan = SDPX.build_execution_plan(
+            at,
+            SDPX.SolverOptions{BigFloat}(mixed_precision_kkt=:auto),
+        )
+        @test at_plan.backend_config.mixed_precision_mode === :auto
+        @test SDPX.planned_backend_name(at_plan) === :mixed_precision
+        at_workspace = SDPX.Workspace(at; execution_plan=at_plan)
+        @test at_workspace.mixed_precision !== nothing
+        @test SDPX.select_backend(at_workspace) isa SDPX.MixedPrecisionBackend
 
         # `:off` declines regardless of size.
         @test SDPX.Workspace(at; mixed_precision_kkt=:off).mixed_precision === nothing

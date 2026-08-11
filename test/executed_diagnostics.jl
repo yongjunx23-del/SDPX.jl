@@ -39,6 +39,11 @@ using Test
         # say so, and must not claim a Gram kernel that never assembled.
         @test selected.kkt === :sparse_normal
         @test selected.gram === :sparse_gram
+        @test selected.planned_backend === :lp_deferred
+        @test selected.executed_backend === :sparse_cholesky
+        @test selected.fallback_reason === :none
+        @test selected.backend_resolution === :post_presolve
+        @test selected.lp_formulation === :sparse_normal
         # The plan stays visible under its own name rather than silently
         # replaced, so a plan/executed divergence is observable, not hidden.
         @test selected.planned.kkt !== :sparse_normal
@@ -61,6 +66,11 @@ using Test
         @test result.status == SDPX.Optimal
         @test selected.kkt === :positive_definite_cholesky
         @test selected.gram === :blas_syrk
+        @test selected.planned_backend === :lp_deferred
+        @test selected.executed_backend === :positive_definite_cholesky
+        @test selected.fallback_reason === :none
+        @test selected.backend_resolution === :post_presolve
+        @test selected.lp_formulation === :positive_definite_cholesky
         @test selected.planned == (kkt=selected.kkt, gram=selected.gram)
     end
 
@@ -74,6 +84,11 @@ using Test
         @test result.status == SDPX.Optimal
         selected = result.diagnostics.selected_algorithms
         @test selected.kkt === :dense_cholesky
+        @test selected.planned_backend === :dense_cholesky
+        @test selected.executed_backend === :dense_cholesky
+        @test selected.fallback_reason === :none
+        @test selected.backend_resolution === :planned
+        @test selected.lp_formulation === :not_applicable
         @test selected.effective_threads == selected.threads
         @test selected.fine_grained_block_tasks == 1
         @test selected.fine_grained_block_partition == :lpt

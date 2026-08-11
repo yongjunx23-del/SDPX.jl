@@ -104,6 +104,11 @@ mutable struct LPWorkspace{T}
     # Typed union rather than Any: the field is consulted in the per-iteration
     # factor/solve path, where an Any load is a dynamic dispatch.
     sparse_system::Union{Nothing,LPSparseSystem{T}}
+    # Resolved exactly once after row presolve/scaling and then used for every
+    # factor/solve in the LP loop.  This preserves the established LP route
+    # formulas while making the deferred plan decision explicit.
+    backend::Union{Nothing,KKTBackend}
+    backend_formulation::Symbol
 end
 
 function LPWorkspace(
@@ -147,6 +152,8 @@ function LPWorkspace(
         alloc_zeros(T, inequalities),
         nothing,
         nothing,
+        nothing,
+        :not_resolved,
     )
 end
 
@@ -1278,48 +1285,178 @@ function _lp_factor_kkt!(
 ) where {T}
     reduced = workspace.standard_system
     if reduced isa LPStandardFormSystem{T}
-        assembly_started = time_ns()
-        _lp_assemble_reduced_schur!(
-            reduced,
-            workspace.weights,
-            regularization,
-        )
-        assembly_seconds = (time_ns() - assembly_started) / 1.0e9
-        factor_started = time_ns()
-        success = isempty(reduced.reduced_schur) ||
-                  kchol!(reduced.reduced_schur)
-        factorization_seconds = (time_ns() - factor_started) / 1.0e9
-        return LPReducedFactor{T}(
-            reduced,
-            success,
-            assembly_seconds,
-            factorization_seconds,
-        )
+        return _lp_factor_reduced!(workspace, regularization)
     end
     system = workspace.sparse_system
     if system isa LPSparseSystem{T}
-        return LPSparseFactor{T}(
-            system,
-            lp_sparse_factor!(system, workspace.weights, regularization),
-        )
+        return _lp_factor_sparse!(workspace, regularization)
     end
+    return isempty(B) ?
+           _lp_factor_dense_cholesky!(workspace, B, regularization) :
+           _lp_factor_dense_lu!(workspace, B, regularization)
+end
+
+function _lp_factor_reduced!(
+    workspace::LPWorkspace{T},
+    regularization::T,
+) where {T}
+    reduced = workspace.standard_system::LPStandardFormSystem{T}
+    assembly_started = time_ns()
+    _lp_assemble_reduced_schur!(
+        reduced,
+        workspace.weights,
+        regularization,
+    )
+    assembly_seconds = (time_ns() - assembly_started) / 1.0e9
+    factor_started = time_ns()
+    success = isempty(reduced.reduced_schur) ||
+              kchol!(reduced.reduced_schur)
+    factorization_seconds = (time_ns() - factor_started) / 1.0e9
+    return LPReducedFactor{T}(
+        reduced,
+        success,
+        assembly_seconds,
+        factorization_seconds,
+    )
+end
+
+function _lp_factor_sparse!(
+    workspace::LPWorkspace{T},
+    regularization::T,
+) where {T}
+    system = workspace.sparse_system::LPSparseSystem{T}
+    return LPSparseFactor{T}(
+        system,
+        lp_sparse_factor!(system, workspace.weights, regularization),
+    )
+end
+
+function _lp_factor_dense_cholesky!(
+    workspace::LPWorkspace{T},
+    B::Matrix{T},
+    regularization::T,
+) where {T}
     _lp_populate_kkt!(
         workspace.K,
         workspace.H,
         B,
         regularization,
     )
-    if isempty(B)
-        # With no equality rows the Newton system is the regularized positive
-        # definite Hessian. LU performs roughly twice the work and ignores the
-        # symmetry; the kernel Cholesky route also avoids Base's allocating
-        # generic factorization for BigFloat.
-        return LPCholeskyFactor(
-            workspace.K,
-            kchol!(workspace.K),
-        )
-    end
+    isempty(B) || error("LP Cholesky backend requires no equality rows")
+    # With no equality rows the Newton system is the regularized positive
+    # definite Hessian. LU performs roughly twice the work and ignores the
+    # symmetry; the kernel Cholesky route also avoids Base's allocating
+    # generic factorization for BigFloat.
+    return LPCholeskyFactor(
+        workspace.K,
+        kchol!(workspace.K),
+    )
+end
+
+function _lp_factor_dense_lu!(
+    workspace::LPWorkspace{T},
+    B::Matrix{T},
+    regularization::T,
+) where {T}
+    isempty(B) && error("LP LU backend requires equality rows")
+    _lp_populate_kkt!(
+        workspace.K,
+        workspace.H,
+        B,
+        regularization,
+    )
     return lu!(workspace.K; check=false)
+end
+
+function _assert_lp_backend(
+    workspace::LPWorkspace,
+    backend::KKTBackend,
+)
+    workspace.backend === backend || error(
+        "LP backend $(typeof(backend)) does not match the resolved " *
+        "backend $(typeof(workspace.backend))",
+    )
+    return backend
+end
+
+function factorize!(
+    backend::LPReducedCholeskyBackend,
+    workspace::LPWorkspace{T},
+    B::Matrix{T},
+    regularization::T,
+) where {T}
+    _assert_lp_backend(workspace, backend)
+    return _lp_factor_reduced!(workspace, regularization)
+end
+
+function factorize!(
+    backend::Union{SparseCholeskyBackend,SparseLDLBackend},
+    workspace::LPWorkspace{T},
+    B::Matrix{T},
+    regularization::T,
+) where {T}
+    _assert_lp_backend(workspace, backend)
+    return _lp_factor_sparse!(workspace, regularization)
+end
+
+function factorize!(
+    backend::LPCholeskyBackend,
+    workspace::LPWorkspace{T},
+    B::Matrix{T},
+    regularization::T,
+) where {T}
+    _assert_lp_backend(workspace, backend)
+    return _lp_factor_dense_cholesky!(workspace, B, regularization)
+end
+function factorize!(
+    backend::LPLUBackend,
+    workspace::LPWorkspace{T},
+    B::Matrix{T},
+    regularization::T,
+) where {T}
+    _assert_lp_backend(workspace, backend)
+    return _lp_factor_dense_lu!(workspace, B, regularization)
+end
+
+solve!(::LPReducedCholeskyBackend, factor::LPReducedFactor, rhs) =
+    _lp_solve_factor!(factor, rhs)
+solve!(::Union{SparseCholeskyBackend,SparseLDLBackend},
+    factor::LPSparseFactor, rhs) = _lp_solve_factor!(factor, rhs)
+solve!(::LPCholeskyBackend, factor::LPCholeskyFactor, rhs) =
+    _lp_solve_factor!(factor, rhs)
+solve!(::LPLUBackend, factor::LinearAlgebra.LU, rhs) =
+    _lp_solve_factor!(factor, rhs)
+
+function _resolve_lp_backend!(
+    workspace::LPWorkspace{T},
+    equalities::Int,
+) where {T}
+    workspace.backend === nothing ||
+        error("LP KKT backend was resolved more than once")
+    workspace.backend = if workspace.standard_system !== nothing
+        workspace.backend_formulation = :diagonal_reduced_cholesky
+        LPReducedCholeskyBackend()
+    elseif workspace.sparse_system !== nothing
+        system = workspace.sparse_system::LPSparseSystem{T}
+        workspace.backend_formulation = system.formulation
+        system.backend
+    else
+        workspace.backend_formulation = equalities > 0 ?
+                                        :dense_lu :
+                                        :positive_definite_cholesky
+        select_lp_backend(equalities)
+    end
+    return workspace.backend::KKTBackend
+end
+
+function _lp_executed_backend(
+    workspace::LPWorkspace{T},
+    ::Int,
+) where {T}
+    workspace.backend_formulation === :not_resolved && error(
+        "LP backend formulation was not resolved",
+    )
+    return workspace.backend_formulation
 end
 
 function _lp_direction_rhs!(
@@ -1732,6 +1869,12 @@ function solve_lp!(
     deadline::Float64=Inf,
 ) where {T}
     started = time()
+    plan.algorithm === :lp_primal_dual || throw(ArgumentError(
+        "solve_lp! requires an lp_primal_dual execution plan",
+    ))
+    plan.backend_config.deferred || throw(ArgumentError(
+        "solve_lp! requires a deferred LP backend configuration",
+    ))
     effective_deadline = isfinite(deadline) ?
                          deadline :
                          (isfinite(opts.max_time) ?
@@ -1825,6 +1968,7 @@ function solve_lp!(
         # here keeps every downstream call on the dense path unchanged.
         workspace.sparse_system = _lp_sparse_system(prob, G, B)
     end
+    _resolve_lp_backend!(workspace, equalities)
     x = x0 === nothing ? alloc_zeros(T, variables) :
         _owned_array_copy(T, x0) ./ scaling.variable
     y = y0 === nothing ? alloc_zeros(T, equalities) :
@@ -2005,7 +2149,12 @@ function solve_lp!(
         regularization = max(relative_regularization, regularization / T(10))
         local attempt_regularization = regularization
         for attempt in 1:8
-            factor = _lp_factor_kkt!(workspace, B, attempt_regularization)
+            factor = factorize!(
+                workspace.backend::KKTBackend,
+                workspace,
+                B,
+                attempt_regularization,
+            )
             factor isa LPReducedFactor &&
                 (reduced_assembly_seconds += factor.assembly_seconds)
             if issuccess(factor)
@@ -2037,7 +2186,11 @@ function solve_lp!(
             affine_target,
         )
         copy_owned!(workspace.affine_rhs, workspace.rhs)
-        _lp_solve_factor!(factor, workspace.affine_rhs)
+        solve!(
+            workspace.backend::KKTBackend,
+            factor,
+            workspace.affine_rhs,
+        )
         copy_owned!(
             workspace.dx_aff,
             view(workspace.affine_rhs, 1:variables),
@@ -2151,7 +2304,11 @@ function solve_lp!(
             workspace.target,
         )
         copy_owned!(workspace.correction_rhs, workspace.rhs)
-        _lp_solve_factor!(factor, workspace.correction_rhs)
+        solve!(
+            workspace.backend::KKTBackend,
+            factor,
+            workspace.correction_rhs,
+        )
         copy_owned!(
             workspace.dx,
             view(workspace.correction_rhs, 1:variables),
@@ -2329,11 +2486,17 @@ function solve_lp!(
             # and a BLAS Gram kernel for solves that executed neither.
             executed=(
                 solver=:lp_primal_dual,
-                kkt=workspace.standard_system !== nothing ?
-                    :diagonal_reduced_cholesky :
-                    workspace.sparse_system === nothing ?
-                    (equalities > 0 ? :dense_lu : :positive_definite_cholesky) :
-                    (workspace.sparse_system::LPSparseSystem{T}).formulation,
+                kkt=_lp_executed_backend(workspace, equalities),
+                planned_backend=:lp_deferred,
+                executed_backend=backend_name(
+                    workspace.backend::KKTBackend,
+                ),
+                fallback_reason=:none,
+                backend_resolution=:post_presolve,
+                lp_formulation=_lp_executed_backend(
+                    workspace,
+                    equalities,
+                ),
                 gram=workspace.standard_system !== nothing ?
                      :reduced_equality_syrk :
                      workspace.sparse_system === nothing ?

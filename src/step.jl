@@ -567,8 +567,9 @@ function newton_step!(
     end
     schur_finished = time_ns()
 
+    backend = select_backend(ws)
     kkt = _with_blas_threads(_kkt_blas_threads(m)) do
-        factor_kkt!(ws, prob, opts)
+        factorize!(backend, ws, prob, opts)
     end
     kkt.ok || return (status=:breakdown,
         reason="Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
@@ -587,13 +588,13 @@ function newton_step!(
         r[i] = -(ws.d[i] + ws.v[i])
     end
     predictor_rhs_finished = time_ns()
-    predictor_ok = if ws.mixed_precision !== nothing &&
-                      ws.mixed_precision.active
-        _solve_mixed_kkt_guarded!(ws, prob, opts, r)
-    else
-        _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
-        true
-    end
+    predictor_ok = solve_direction!(
+        backend,
+        ws,
+        prob,
+        opts,
+        r,
+    )
     predictor_solve_finished = time_ns()
     predictor_ok || return (
         status=:breakdown,
@@ -745,13 +746,13 @@ function newton_step!(
         r[i] = -(ws.d[i] + ws.v[i])
     end
     corrector_rhs_finished = time_ns()
-    corrector_ok = if ws.mixed_precision !== nothing &&
-                      ws.mixed_precision.active
-        _solve_mixed_kkt_guarded!(ws, prob, opts, r)
-    else
-        _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
-        true
-    end
+    corrector_ok = solve_direction!(
+        backend,
+        ws,
+        prob,
+        opts,
+        r,
+    )
     corrector_solve_finished = time_ns()
     corrector_ok || return (
         status=:breakdown,
@@ -781,7 +782,13 @@ function newton_step!(
     refine_steps, refine_residual =
         skip_automatic_refinement ?
         (0, zero(T)) :
-        refine_direction!(ws, prob, corrector_options, r)
+        refine!(
+            backend,
+            ws,
+            prob,
+            corrector_options,
+            r,
+        )
     refinement_finished = time_ns()
 
     _with_blas_threads(parallel_blas) do

@@ -498,6 +498,16 @@ mutable struct Workspace{T}
     mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
     equality_gram_kernel::Symbol
     thread_count::Int
+    backend_config::BackendConfiguration
+    # KKTBackend is included after Workspace because its methods accept a
+    # Workspace.  The value stored here is nevertheless one concrete backend
+    # instance selected once from `backend_config`; `Any` only breaks that
+    # include-order cycle and is never re-used for structural selection.
+    backend::Any
+    executed_backend::Symbol
+    # Last non-`:none` fallback observed during this solve.  It is deliberately
+    # cumulative so a later successful retry cannot erase fallback provenance.
+    backend_fallback_reason::Symbol
 end
 
 """
@@ -879,47 +889,50 @@ function Workspace(
     config.deferred && throw(ArgumentError(
         "deferred LP backend configurations cannot construct an SDP Workspace",
     ))
-    config.equality_solver == equality_solver ||
-        throw(ArgumentError(
-            "execution plan equality solver $(config.equality_solver) does not " *
-            "match workspace request $equality_solver",
-        ))
+    # Once a plan is supplied, its resolved options are the sole source of
+    # route-affecting configuration.  The keywords remain for the legacy
+    # `Workspace(prob; ...)` API, where they are used to build this plan.
+    planned_extended_precision_blas = get(
+        plan.parameters,
+        :extended_precision_blas,
+        extended_precision_blas,
+    )
+    planned_extended_precision_memory_fraction = get(
+        plan.parameters,
+        :extended_precision_memory_fraction,
+        extended_precision_memory_fraction,
+    )
+    planned_mixed_precision_kkt = config.mixed_precision_mode
+    planned_mixed_precision_memory_fraction = get(
+        plan.parameters,
+        :mixed_precision_memory_fraction,
+        mixed_precision_memory_fraction,
+    )
     requested_threads = plan.threads
     selected_threads = plan.threads
     is_sparse = prob.cons isa SparseCons
     available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
-    reduced_arrow_decision =
+    reduced_arrow_decision = if hasproperty(
+        plan.parameters,
+        :reduced_arrow_decision,
+    )
+        plan.parameters.reduced_arrow_decision
+    else
         _reduced_arrow_crossover(
             prob,
             T,
-            extended_precision_blas,
-            extended_precision_memory_fraction,
-            thread_count;
+            planned_extended_precision_blas,
+            planned_extended_precision_memory_fraction,
+            requested_threads;
             available_memory_bytes=available_memory,
         )
+    end
     reduced_arrow_panel = config.reduced_arrow
     reduced_arrow_panel && !reduced_arrow_decision.enabled &&
         throw(ArgumentError(
             "execution plan selected reduced-arrow storage but the workspace " *
             "crossover no longer supports it",
         ))
-    if reduced_arrow_panel
-        frequency = zeros(Int, m)
-        for variables in (prob.cons::SparseCons{T}).active
-            for variable in variables
-                frequency[variable] += 1
-            end
-        end
-        selected_threads = min(
-            selected_threads,
-            reduced_arrow_solver_worker_count(
-                T,
-                selected_threads,
-                L,
-                count(>(1), frequency),
-            ),
-        )
-    end
 
     reduced_block_nbins = max(
         1,
@@ -979,7 +992,10 @@ function Workspace(
        !owned_bigfloat_arrow_equalities
         # Native BigFloat remains serial except for explicitly
         # ownership-safe reduced panels and block-diagonal equality systems.
-        selected_threads = 1
+        selected_threads == 1 || throw(ArgumentError(
+            "execution plan selected $(selected_threads) threads for a " *
+            "serial native BigFloat workspace",
+        ))
     end
     if reduced_arrow_panel
         arrow_workspace.reduced_panel =
@@ -995,9 +1011,9 @@ function Workspace(
         end
     end
     mixed_type =
-        T === BigFloat && mixed_precision_kkt !== :off ?
+        T === BigFloat && planned_mixed_precision_kkt !== :off ?
         mixed_arrow_arithmetic(T) : nothing
-    mixed_reduced_decision = if mixed_type === nothing
+    computed_mixed_reduced_decision = if mixed_type === nothing
         ExtendedPrecisionBLAS.CrossoverDecision(
             false,
             :unsupported_arithmetic,
@@ -1011,13 +1027,18 @@ function Workspace(
         _reduced_arrow_crossover(
             prob,
             mixed_type,
-            mixed_precision_kkt,
-            mixed_precision_memory_fraction,
-            thread_count;
+            planned_mixed_precision_kkt,
+            planned_mixed_precision_memory_fraction,
+            requested_threads;
             mixed=true,
             available_memory_bytes=available_memory,
         )
     end
+    mixed_reduced_decision = hasproperty(
+        plan.parameters,
+        :mixed_reduced_arrow_decision,
+    ) ? plan.parameters.mixed_reduced_arrow_decision :
+        computed_mixed_reduced_decision
     mixed_reduced_arrow = config.mixed_reduced_arrow
     mixed_reduced_arrow && !mixed_reduced_decision.enabled &&
         throw(ArgumentError(
@@ -1025,10 +1046,10 @@ function Workspace(
             "workspace crossover no longer supports it",
         ))
     compact_arrow &&
-        (arrow_workspace.mixed_reduced_mode = mixed_precision_kkt)
+        (arrow_workspace.mixed_reduced_mode = planned_mixed_precision_kkt)
     if mixed_reduced_arrow
         mixed_threads = min(
-            max(thread_count, 1),
+            max(requested_threads, 1),
             Threads.nthreads(),
         )
         arrow_workspace.mixed_reduced_coefficients = [
@@ -1058,18 +1079,27 @@ function Workspace(
     end
     extended_precision = _extended_precision_workspace(
         prob,
-        extended_precision_blas,
-        extended_precision_memory_fraction,
+        planned_extended_precision_blas,
+        planned_extended_precision_memory_fraction,
         selected_threads,
         fused_arrow,
     )
     # Block-arrow systems have their own reduced mixed-precision path. Avoid
     # allocating the generic dense Float64 KKT copy, which factor_kkt! can
     # never use when `arrow !== nothing`.
-    mixed_precision = _mixed_precision_workspace(
+    generic_mixed_decision = get(
+        plan.parameters,
+        :generic_mixed_precision_decision,
+        nothing,
+    )
+    generic_mixed_mode = compact_arrow || sparse_schur ?
+                         :off : config.mixed_precision_mode
+    mixed_precision = generic_mixed_mode === :off ? nothing :
+                      _mixed_precision_workspace(
         prob,
-        (compact_arrow || sparse_schur) ? :off : config.mixed_precision_mode,
-        mixed_precision_memory_fraction,
+        generic_mixed_mode,
+        planned_mixed_precision_memory_fraction;
+        decision=generic_mixed_decision,
     )
     block_nbins = max(
         1,
@@ -1208,7 +1238,11 @@ function Workspace(
         block_bins, schur_bins, schur_column_boundaries,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
-        :not_run, selected_threads)
+        :not_run, selected_threads, config, nothing, :not_executed, :none)
+    workspace.backend = _backend_from_configuration(workspace, config)
+    generic_mixed_mode !== :off &&
+        workspace.mixed_precision === nothing &&
+        error("execution plan selected mixed precision without a workspace")
     if T === BigFloat && extended_precision.lower_only
         ExtendedPrecisionBLAS.prepare_triangle_storage!(workspace.S)
         for partial in workspace.Spartial

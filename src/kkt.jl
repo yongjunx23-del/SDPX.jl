@@ -2075,64 +2075,94 @@ writing into caller-supplied `dx_out`/`dy_out` — so the same
 factorization serves the predictor, the corrector, and (via
 [`refine_kkt!`](@ref)) the refinement correction without recomputation.
 """
-function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs::AbstractVector{T},
-    dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T}
-    if ws.arrow !== nothing
-        n == 0 &&
-            return solve_arrow_kkt!(ws, r, dx_out), dy_out
-        return solve_block_diagonal_equality_kkt!(
-            ws,
-            n,
-            r,
-            p_rhs,
-            dx_out,
-            dy_out,
-        )
-    end
-    if ws.mixed_precision !== nothing &&
-       ws.mixed_precision.active
-        return _solve_mixed_kkt!(
-            ws.mixed_precision,
-            n,
-            r,
-            p_rhs,
-            dx_out,
-            dy_out,
-        )
-    end
-    if T === Float64 && ws.sparse_kkt !== nothing
-        sparse_workspace =
-            ws.sparse_kkt::SparseSchurSDPWorkspace
-        m = length(dx_out)
-        n == length(dy_out) ||
-            throw(DimensionMismatch("sparse Schur SDP equality dimension mismatch"))
-        solve!(
-            ws.rtil,
-            sparse_workspace.backend,
-            r,
-        )
-        copy_owned!(ws.q_rhs, p_rhs)
-        kmul_owned!(
-            ws.q_rhs,
-            transpose(sparse_workspace.constraint_rhs),
-            ws.rtil,
-            -one(T),
-            one(T),
-        )
-        @inbounds for index in eachindex(ws.q_rhs)
-            ws.q_rhs[index] *=
-                sparse_workspace.equality_scaling[index]
-        end
-        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
-        @inbounds for index in eachindex(dy_out)
-            dy_out[index] *=
-                sparse_workspace.equality_scaling[index]
-        end
-        kmul_owned!(dx_out, ws.Btil, dy_out)
-        kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)
-        return dx_out, dy_out
-    end
+function _solve_arrow_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    ws.arrow === nothing && error("block-arrow backend has no ArrowWorkspace")
+    n == 0 && return solve_arrow_kkt!(ws, r, dx_out), dy_out
+    return solve_block_diagonal_equality_kkt!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+end
 
+function _solve_mixed_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    mixed = ws.mixed_precision
+    mixed === nothing && error("mixed-precision backend has no workspace")
+    mixed.active || error("mixed-precision factor is not active")
+    return _solve_mixed_kkt!(
+        mixed,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+end
+
+function _solve_sparse_schur_kkt_owned!(
+    ws::Workspace{Float64},
+    n::Int,
+    r::AbstractVector{Float64},
+    p_rhs::AbstractVector{Float64},
+    dx_out::AbstractVector{Float64},
+    dy_out::AbstractVector{Float64},
+)
+    sparse_workspace =
+        ws.sparse_kkt::SparseSchurSDPWorkspace
+    n == length(dy_out) ||
+        throw(DimensionMismatch("sparse Schur SDP equality dimension mismatch"))
+    solve!(
+        ws.rtil,
+        sparse_workspace.backend,
+        r,
+    )
+    copy_owned!(ws.q_rhs, p_rhs)
+    kmul_owned!(
+        ws.q_rhs,
+        transpose(sparse_workspace.constraint_rhs),
+        ws.rtil,
+        -1.0,
+        1.0,
+    )
+    @inbounds for index in eachindex(ws.q_rhs)
+        ws.q_rhs[index] *=
+            sparse_workspace.equality_scaling[index]
+    end
+    _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
+    @inbounds for index in eachindex(dy_out)
+        dy_out[index] *=
+            sparse_workspace.equality_scaling[index]
+    end
+    kmul_owned!(dx_out, ws.Btil, dy_out)
+    kaxpby_owned!(1.0, ws.rtil, 1.0, dx_out)
+    return dx_out, dy_out
+end
+
+function _solve_dense_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
     copy_owned!(ws.rtil, r)
     ktrsv_lower!(ws.Sbuf, ws.rtil)   # r̃ = L_S⁻¹r
 
@@ -2149,6 +2179,47 @@ function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs
         ktrsv_transpose!(ws.Sbuf, dx_out)
     end
     return dx_out, dy_out
+end
+
+function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T}
+    ws.arrow === nothing || return _solve_arrow_kkt_owned!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+    if ws.mixed_precision !== nothing &&
+       ws.mixed_precision.active
+        return _solve_mixed_kkt_owned!(
+            ws,
+            n,
+            r,
+            p_rhs,
+            dx_out,
+            dy_out,
+        )
+    end
+    if T === Float64 && ws.sparse_kkt !== nothing
+        return _solve_sparse_schur_kkt_owned!(
+            ws::Workspace{Float64},
+            n,
+            r::AbstractVector{Float64},
+            p_rhs::AbstractVector{Float64},
+            dx_out::AbstractVector{Float64},
+            dy_out::AbstractVector{Float64},
+        )
+    end
+    return _solve_dense_kkt_owned!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
 end
 
 function solve_block_diagonal_equality_kkt!(
@@ -3204,8 +3275,43 @@ function _apply_kkt_correction!(
     ws::Workspace{T},
     prob::SDPProblem{T},
 ) where {T}
+    return _apply_kkt_correction!(nothing, ws, prob)
+end
+
+function _solve_refinement_correction!(
+    ::Nothing,
+    ws::Workspace{T},
+    n::Int,
+    primal_rhs::AbstractVector{T},
+    equality_rhs::AbstractVector{T},
+    primal_direction::AbstractVector{T},
+    equality_direction::AbstractVector{T},
+) where {T}
+    return _solve_kkt_owned!(
+        ws,
+        n,
+        primal_rhs,
+        equality_rhs,
+        primal_direction,
+        equality_direction,
+    )
+end
+
+function _apply_kkt_correction!(
+    backend,
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
     n = prob.dims.n
-    _solve_kkt_owned!(ws, n, ws.ρr, ws.ρp, ws.δx, ws.δy)
+    _solve_refinement_correction!(
+        backend,
+        ws,
+        n,
+        ws.ρr,
+        ws.ρp,
+        ws.δx,
+        ws.δy,
+    )
     _add_direction_correction!(ws.dx, ws.δx)
     n > 0 && _add_direction_correction!(ws.dy, ws.δy)
     return ws
@@ -3277,12 +3383,17 @@ Returns the ∞-norm of the residual this pass corrected, which is what
 """
 function refine_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, r::AbstractVector{T};
                      tol::T=zero(T)) where {T}
+    return refine_kkt!(nothing, ws, prob, r; tol=tol)
+end
+
+function refine_kkt!(backend, ws::Workspace{T}, prob::SDPProblem{T}, r::AbstractVector{T};
+                     tol::T=zero(T)) where {T}
     residual = _kkt_direction_residual!(ws, prob, r)
     # The residual is measured *before* the correction, so a caller that passes
     # `tol` can skip the correction solve entirely when the direction is already
     # accurate — that is where the adaptive policy saves a full KKT solve.
     residual <= tol && return (residual, false)
-    _apply_kkt_correction!(ws, prob)
+    _apply_kkt_correction!(backend, ws, prob)
     return (residual, true)
 end
 
@@ -3312,11 +3423,16 @@ function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
        ws.mixed_precision.active
         return _refine_mixed_direction!(ws, prob, opts, r)
     end
+    return _refine_native_direction!(nothing, ws, prob, opts, r)
+end
+
+function _refine_native_direction!(backend, ws::Workspace{T}, prob::SDPProblem{T},
+                                   opts::SolverOptions{T}, r::AbstractVector{T}) where {T}
     if opts.refine_policy === :fixed
         opts.refine_steps > 0 || return (0, zero(T))
         residual = zero(T)
         for _ in 1:opts.refine_steps
-            residual, _ = refine_kkt!(ws, prob, r)
+            residual, _ = refine_kkt!(backend, ws, prob, r)
         end
         return (opts.refine_steps, residual)
     end
@@ -3343,7 +3459,7 @@ function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
         # already-worsened direction instead of the last accepted one.
         copy_owned!(ws.dx_best, ws.dx)
         n > 0 && copy_owned!(ws.dy_best, ws.dy)
-        _apply_kkt_correction!(ws, prob)
+        _apply_kkt_correction!(backend, ws, prob)
         corrected_residual = _kkt_direction_residual!(ws, prob, r)
         if !isfinite(corrected_residual) || corrected_residual > residual
             copy_owned!(ws.dx, ws.dx_best)

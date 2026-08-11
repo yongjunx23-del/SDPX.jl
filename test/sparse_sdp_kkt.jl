@@ -61,6 +61,16 @@ using Test
     sparse_workspace = SDPX.Workspace(problem; thread_count=1)
     sparse_workspace.sparse_kkt =
         SDPX._sparse_schur_sdp_workspace(problem, 1)
+    sparse_workspace.backend_config = SDPX.BackendConfiguration(
+        :sparse_schur_cholesky,
+        :auto,
+        false,
+        false,
+        :off,
+        (),
+        false,
+    )
+    sparse_workspace.backend = SDPX.SparseSchurBackend()
     sparse_workspace.dense_sparse_assembly = false
     for block in 1:block_count
         active_count = length(problem.cons.schur_order[block])
@@ -92,7 +102,10 @@ using Test
     @test actual_schur == expected_schur
 
     options = SolverOptions{Float64}(verbosity=0)
-    factor = SDPX._factor_sparse_schur_sdp!(
+    sparse_backend = SDPX.select_backend(sparse_workspace)
+    @test sparse_backend isa SDPX.SparseSchurBackend
+    factor = SDPX.factorize!(
+        sparse_backend,
         sparse_workspace,
         problem,
         options,
@@ -107,7 +120,8 @@ using Test
 
     primal_rhs = collect(range(0.2, 1.1; length=variables))
     equality_rhs = [0.3, -0.2]
-    SDPX._solve_kkt_owned!(
+    SDPX.solve!(
+        sparse_backend,
         sparse_workspace,
         2,
         primal_rhs,
@@ -116,7 +130,8 @@ using Test
         sparse_workspace.dy,
     )
     sparse_workspace.p .= equality_rhs
-    refinement = SDPX.refine_direction!(
+    refinement = SDPX.refine!(
+        sparse_backend,
         sparse_workspace,
         problem,
         SolverOptions{Float64}(
@@ -151,7 +166,8 @@ using Test
     # Numeric refactorization must reuse the analysis; hashing the 139-million
     # entry B3 pattern on every iteration would itself be a material cost.
     storage.equality_requires_pivoting = true
-    second_factor = SDPX._factor_sparse_schur_sdp!(
+    second_factor = SDPX.factorize!(
+        sparse_backend,
         sparse_workspace,
         problem,
         options,

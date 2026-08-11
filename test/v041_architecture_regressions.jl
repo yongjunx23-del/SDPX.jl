@@ -81,6 +81,37 @@ using Test
         )
         @test arrow_workspace.arrow !== nothing
         @test arrow_workspace.sparse_kkt === nothing
+        @test SDPX.select_backend(arrow_workspace) isa SDPX.ArrowBackend
+        @test SDPX.planned_backend_name(arrow_workspace) === :block_arrow
+
+        # A supplied plan is self-contained: callers do not have to repeat
+        # route-affecting keywords at Workspace construction.  The backend
+        # rejects a mismatched solve option later instead of silently changing
+        # the equality route.
+        qr_options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            scaling=:none,
+            presolve=false,
+            equality_solver=:qr,
+            threads=1,
+        )
+        qr_plan = SDPX.build_execution_plan(problem, qr_options)
+        qr_workspace = SDPX.Workspace(
+            problem;
+            execution_plan=qr_plan,
+        )
+        @test qr_workspace.backend_config.equality_solver === :qr
+        @test SDPX.select_backend(qr_workspace) isa SDPX.ArrowBackend
+        @test_throws ErrorException SDPX._assert_planned_backend!(
+            qr_workspace,
+            SDPX.select_backend(qr_workspace),
+            options,
+        )
+        @test SDPX._assert_planned_backend!(
+            qr_workspace,
+            SDPX.select_backend(qr_workspace),
+            qr_options,
+        ) === SDPX.select_backend(qr_workspace)
 
         dense_config = SDPX.BackendConfiguration(
             :dense_cholesky,
@@ -112,6 +143,12 @@ using Test
         @test dense_workspace.arrow === nothing
         @test dense_workspace.sparse_kkt === nothing
         @test size(dense_workspace.S) == (variables, variables)
+        @test SDPX.select_backend(dense_workspace) isa SDPX.DenseCholeskyBackend
+        @test_throws ErrorException SDPX._assert_planned_backend!(
+            dense_workspace,
+            SDPX.ArrowBackend(),
+            options,
+        )
 
         inconsistent_config = SDPX.BackendConfiguration(
             :block_arrow,
@@ -152,5 +189,27 @@ using Test
         lp_plan = SDPX.build_execution_plan(lp, SDPX.SolverOptions{Float64}())
         @test lp_plan.scaling === :lp_geometric
         @test lp_plan.backend_config.deferred
+
+        lp_workspace = SDPX.LPWorkspace(
+            Float64,
+            1,
+            2,
+            0;
+            packed_hessian=false,
+        )
+        lp_backend = SDPX._resolve_lp_backend!(lp_workspace, 0)
+        @test lp_backend isa SDPX.LPCholeskyBackend
+        @test lp_workspace.backend_formulation ===
+              :positive_definite_cholesky
+        @test_throws ErrorException SDPX.factorize!(
+            SDPX.LPLUBackend(),
+            lp_workspace,
+            zeros(2, 0),
+            sqrt(eps(Float64)),
+        )
+        @test_throws ErrorException SDPX._resolve_lp_backend!(
+            lp_workspace,
+            0,
+        )
     end
 end

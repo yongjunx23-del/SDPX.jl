@@ -335,13 +335,10 @@ function _runtime_schur_backend(
 )
     equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError("equality_solver must be :auto, :normal_equations, or :qr"))
-    # The current sparse-Schur workspace implements normal-equation equality
-    # elimination. An explicit QR request therefore has to be reflected in the
-    # plan *before* memory preflight/workspace construction; otherwise the plan
-    # says sparse while the runtime silently allocates the dense route.
-    if equality_solver !== :qr && _use_sparse_schur_sdp(prob)
-        return :sparse_schur_cholesky
-    end
+    # Preserve the historical Workspace precedence.  Exact block-arrow
+    # structure is a mathematical reduction, while sparse Schur is an
+    # implementation of the general system, so Arrow wins when both gates
+    # happen to apply.
     if prob.cons isa SparseCons
         frequency = zeros(Int, prob.dims.m)
         for variables in prob.cons.active, variable in variables
@@ -358,9 +355,18 @@ function _runtime_schur_backend(
             return :block_arrow
         end
     end
-    return prob.structure.schur_density >= 0.15 ?
-           :dense_cholesky :
-           :dense_cholesky_fallback
+    # The current sparse-Schur workspace implements normal-equation equality
+    # elimination. An explicit QR request therefore has to be reflected in the
+    # plan *before* memory preflight/workspace construction; otherwise the plan
+    # says sparse while the runtime silently allocates the dense route.
+    if equality_solver !== :qr && _use_sparse_schur_sdp(prob)
+        return :sparse_schur_cholesky
+    end
+    # Both remaining density regimes execute the same dense Cholesky backend.
+    # The old `:dense_cholesky_fallback` label described why sparse structure
+    # was not used, not a distinct runtime implementation, and therefore made
+    # planned/executed parity impossible to state precisely.
+    return :dense_cholesky
 end
 
 """
@@ -987,12 +993,28 @@ function build_execution_plan(
                       :dense_lu
                   ) :
                   _runtime_schur_backend(prob, opts.equality_solver)
+    generic_mixed_applicable =
+        algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
+        kkt_backend in (:dense_cholesky, :dense_cholesky_fallback)
+    generic_mixed_decision = generic_mixed_applicable ?
+        _mixed_precision_workspace_decision(
+            prob,
+            opts.mixed_precision_kkt,
+            opts.mixed_precision_memory_fraction;
+            available_memory_bytes=available,
+        ) : (
+            enabled=false,
+            reason=:not_applicable,
+            required_bytes=0,
+            memory_limit_bytes=0,
+        )
     reduced_arrow_enabled =
         kkt_backend === :block_arrow && reduced_arrow_decision.enabled
     mixed_reduced_arrow_enabled =
         kkt_backend === :block_arrow && mixed_arrow_decision.enabled
+    generic_mixed_enabled = generic_mixed_decision.enabled
     mixed_precision_mode =
-        kkt_backend in (:dense_cholesky, :dense_cholesky_fallback) ?
+        generic_mixed_enabled || mixed_reduced_arrow_enabled ?
         opts.mixed_precision_kkt : :off
     backend_fallback_chain = if algorithm === :socp_fixed_trace_q3
         (:dense_cholesky,)
@@ -1039,6 +1061,23 @@ function build_execution_plan(
             Base.Threads.nthreads(),
             lp_bigfloat_thread_limit,
         ) : min(requested_threads, Base.Threads.nthreads())
+    if reduced_arrow_enabled
+        frequency = zeros(Int, prob.dims.m)
+        for variables in (prob.cons::SparseCons{T}).active
+            for variable in variables
+                frequency[variable] += 1
+            end
+        end
+        selected_threads = min(
+            selected_threads,
+            reduced_arrow_solver_worker_count(
+                T,
+                selected_threads,
+                prob.dims.L,
+                count(>(1), frequency),
+            ),
+        )
+    end
     if classification.arithmetic === :float64 &&
        classification.cone === :sdp &&
        classification.maximum_block_size <= 2 &&
@@ -1139,8 +1178,27 @@ function build_execution_plan(
             strategy=opts.parameter_strategy,
             adaptive_sigma_max,
             equality_solver=opts.equality_solver,
+            extended_precision_blas=opts.extended_precision_blas,
+            extended_precision_memory_fraction=
+                opts.extended_precision_memory_fraction,
+            mixed_precision_kkt=opts.mixed_precision_kkt,
+            mixed_precision_memory_fraction=
+                opts.mixed_precision_memory_fraction,
+            reduced_arrow_decision,
+            mixed_reduced_arrow_decision=mixed_arrow_decision,
+            generic_mixed_precision_decision=generic_mixed_decision,
         ),
     )
+end
+
+function planned_backend_name(plan::ExecutionPlan)
+    config = plan.backend_config
+    config.deferred && return :lp_deferred
+    config.mixed_reduced_arrow && return :mixed_reduced_arrow
+    config.route === :dense_cholesky &&
+        config.mixed_precision_mode !== :off &&
+        return :mixed_precision
+    return config.route
 end
 
 function _empty_presolve_report(prob::SDPProblem)
@@ -1926,6 +1984,31 @@ function _attach_diagnostics(
         solver=get(executed, :solver, plan.algorithm),
         scaling=plan.scaling,
         kkt=get(executed, :kkt, plan.kkt_backend),
+        planned_backend=get(
+            executed,
+            :planned_backend,
+            planned_backend_name(plan),
+        ),
+        executed_backend=get(
+            executed,
+            :executed_backend,
+            :not_executed,
+        ),
+        fallback_reason=get(
+            executed,
+            :fallback_reason,
+            :none,
+        ),
+        backend_resolution=get(
+            executed,
+            :backend_resolution,
+            :planned,
+        ),
+        lp_formulation=get(
+            executed,
+            :lp_formulation,
+            :not_applicable,
+        ),
         gram=get(executed, :gram, plan.gram_kernel),
         equality=get(executed, :equality, :not_executed),
         planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),

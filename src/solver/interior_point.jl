@@ -1797,10 +1797,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             equality_system=equality_diagnostics,
             executed=(
                 solver=:sdp,
-                kkt=ws.arrow !== nothing ? :block_arrow :
-                    ws.sparse_kkt !== nothing ?
-                    :sparse_schur_cholesky :
-                    :dense_cholesky,
+                kkt=ws.executed_backend,
+                planned_backend=planned_backend_name(ws),
+                executed_backend=ws.executed_backend,
+                fallback_reason=ws.backend_fallback_reason,
                 equality=equality_diagnostics.method,
                 effective_threads=ws.thread_count,
                 fine_grained_block_tasks=length(ws.block_bins),
