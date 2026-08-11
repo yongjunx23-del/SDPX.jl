@@ -735,6 +735,7 @@ function newton_step!(
                 Y,
                 iteration_parameters.sigma,
                 predictor_diagnostics.mu,
+                block_local_target=true,
             )
         else
             threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)

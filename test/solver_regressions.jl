@@ -43,6 +43,39 @@ using Test
     )
 end
 
+@testset "adaptive Mehrotra block-local target stays in solver arithmetic" begin
+    for T in (Float64, BigFloat)
+        setprecision(BigFloat, 256) do
+            sigma = T(1) / T(5)
+            global_mu = T(3) / T(20)
+            X = Matrix(Diagonal(T[2, 4]))
+            Y = Matrix(Diagonal(T[3, 5]))
+            global_target = SDPX._mehrotra_corrector_target(
+                sigma,
+                global_mu,
+                X,
+                Y,
+                2,
+                false,
+            )
+            local_target = SDPX._mehrotra_corrector_target(
+                sigma,
+                global_mu,
+                X,
+                Y,
+                2,
+                true,
+            )
+            @test global_target == sigma * global_mu
+            @test local_target == sigma * T(13)
+            if T === BigFloat
+                @test objectid(local_target) != objectid(X[1, 1])
+                @test objectid(local_target) != objectid(Y[1, 1])
+            end
+        end
+    end
+end
+
 function regression_sdp_data(::Type{T}) where {T}
     coefficients = zeros(T, 2, 2, 2)
     coefficients[1, 1, 1] = one(T)
