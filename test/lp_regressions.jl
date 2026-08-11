@@ -486,8 +486,8 @@ end
         B = reshape([1.0], 1, 1)
         problem = lp_regression_problem(
             c,
-            Matrix{Float64}(undef, 0, 1),
-            Float64[];
+            reshape([0.0], 1, 1),
+            [-1.0];
             B=B,
             b=[1.0],
         )

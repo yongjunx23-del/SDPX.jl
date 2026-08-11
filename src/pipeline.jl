@@ -2121,6 +2121,17 @@ function _inconsistent_presolve_result(
             reason=termination_reason,
             certificate_method=:presolve_contradiction,
             certificate_generator=:analytic_presolve,
+            executed=(
+                solver=plan.algorithm,
+                kkt=:not_executed,
+                planned_backend=planned_backend_name(plan),
+                executed_backend=:not_executed,
+                fallback_reason=:none,
+                backend_resolution=:not_resolved,
+                lp_formulation=plan.algorithm === :lp_primal_dual ?
+                               :not_resolved : :not_applicable,
+                gram=:not_executed,
+            ),
         ),
     )
     certificate = result_certificate(prob, result, opts)
