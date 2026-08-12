@@ -131,7 +131,9 @@ append_time_summary() {
   user="$(awk '/User time/ {print $4}' "$OUTPUT_ROOT/process.time.txt")"
   sys="$(awk '/System time/ {print $4}' "$OUTPUT_ROOT/process.time.txt")"
   wall="$(awk -F': ' '/Elapsed \(wall clock\) time/ {print $2}' "$OUTPUT_ROOT/process.time.txt" | awk -F: '{ if (NF == 3) { h=$1; m=$2; s=$3 } else { h=0; m=$1; s=$2 }; gsub(/[^0-9.]/, "", s); printf "%.3f", h*3600 + m*60 + s }')"
-  cpu="$(awk -v u="$user" -v s="$sys" -v w="$wall" 'BEGIN { printf "%.3f", w > 0 ? (u+s)/w : 0 }')"
+  # Keep the branch explicit: some cluster awk implementations parse the
+  # ternary expression as a redirection when it appears next to `printf`.
+  cpu="$(awk -v u="$user" -v s="$sys" -v w="$wall" 'BEGIN { if (w > 0) { printf "%.3f", (u+s)/w } else { printf "0.000" } }')"
   {
     echo "rss_kib=${rss:-unavailable}"
     echo "user_cpu_seconds=${user:-unavailable}"

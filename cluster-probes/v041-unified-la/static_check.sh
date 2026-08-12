@@ -56,6 +56,10 @@ for job in focused kernel_ab solver_ab bigfloat_generic_probe; do
   check grep -qF 'runtime_contract=ok' "$HERE/$job.pbs"
   check grep -qF 'SUCCESS' "$HERE/$job.pbs"
 done
+for job in kernel_ab solver_ab bigfloat_generic_probe; do
+  check grep -qF 'if (w > 0) { printf "%.3f", (u+s)/w } else { printf "0.000" }' "$HERE/$job.pbs"
+  check_not grep -qF 'printf "%.3f", w > 0 ? (u+s)/w : 0' "$HERE/$job.pbs"
+done
 check grep -qF 'RUNTIME_CONTRACT julia=4 plan=4 blas=1' "$HERE/focused.pbs"
 check grep -qF 'KERNEL_AB ' "$HERE/kernel_ab.pbs"
 check grep -qF 'SOLVER_AB ' "$HERE/solver_ab.pbs"
