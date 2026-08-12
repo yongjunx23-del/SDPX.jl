@@ -78,8 +78,13 @@ function plan_la_backend(
     # structural route, while an explicit request is rejected rather than
     # silently changing the requested backend in the diagnostic plan.
     if route ∉ (:dense_cholesky, :dense_cholesky_fallback)
-        requested in (:auto, :legacy) && return
-            _legacy_la_backend_configuration(T, requested, :route_not_migrated)
+        if requested in (:auto, :legacy)
+            return _legacy_la_backend_configuration(
+                T,
+                requested,
+                :route_not_migrated,
+            )
+        end
         throw(ArgumentError(
             "LA backend $(requested) is not available on non-dense route $(route)",
         ))

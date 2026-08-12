@@ -30,6 +30,7 @@ using MultiFloats: Float64x4
         Float64;
         route=:block_arrow,
     )
+    @test block_arrow isa SDPX.Experimental.LABackendConfiguration
     @test block_arrow.selected === :legacy
     @test block_arrow.fallback_reason === :route_not_migrated
     @test SDPX.Experimental.plan_la_backend(
@@ -158,6 +159,10 @@ using MultiFloats: Float64x4
     @test SDPX.la_backend_provider(legacy) === :sdpx_legacy_la
     @test SDPX.la_backend_ownership(legacy) === :owned_mutable_scalars
     @test isbitstype(typeof(legacy.provider))
+    @test isempty(fieldnames(typeof(legacy.provider)))
+    @test SDPX.Experimental.legacy_la_provider_ownership(
+        legacy.provider,
+    ) === :owned_mutable_scalars
     @test SDPX.Experimental.legacy_la_provider_arithmetic(
         legacy.provider,
     ) === :bigfloat
@@ -165,6 +170,10 @@ using MultiFloats: Float64x4
         :float64,
         :requested_legacy,
         legacy.provider,
+    )
+    @test_throws ArgumentError SDPX.Experimental.SDPXLegacyLAProvider(
+        :bigfloat,
+        :unknown_ownership,
     )
     @test SDPX.legacy_la_provider_capabilities(legacy.provider) ===
           SDPX.SDPX_LEGACY_LA_CAPABILITIES

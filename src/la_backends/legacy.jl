@@ -27,21 +27,22 @@ const SDPX_LEGACY_LA_CAPABILITIES = (
 )
 
 """Stateless payload for the bundled legacy arithmetic implementation."""
-struct SDPXLegacyLAProvider{A}
-    ownership::Symbol
-end
+struct SDPXLegacyLAProvider{A,O} end
 
 SDPXLegacyLAProvider(
     arithmetic::Symbol,
     ownership::Symbol=:legacy,
-) = SDPXLegacyLAProvider{arithmetic}(ownership)
+) = begin
+    ownership in (:legacy, :immutable_scalars, :owned_mutable_scalars) ||
+        throw(ArgumentError("unknown legacy LA ownership contract $(ownership)"))
+    SDPXLegacyLAProvider{arithmetic,ownership}()
+end
 
 legacy_la_provider_identity(::SDPXLegacyLAProvider) = :sdpx_legacy_la
-legacy_la_provider_arithmetic(::SDPXLegacyLAProvider{A}) where {A} = A
+legacy_la_provider_arithmetic(::SDPXLegacyLAProvider{A,O}) where {A,O} = A
 legacy_la_provider_capabilities(::SDPXLegacyLAProvider) =
     SDPX_LEGACY_LA_CAPABILITIES
-legacy_la_provider_ownership(provider::SDPXLegacyLAProvider) =
-    provider.ownership
+legacy_la_provider_ownership(::SDPXLegacyLAProvider{A,O}) where {A,O} = O
 legacy_la_provider_supports(
     provider::SDPXLegacyLAProvider,
     operation::Symbol,
