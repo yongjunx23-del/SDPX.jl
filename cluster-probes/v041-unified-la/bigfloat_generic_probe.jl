@@ -398,6 +398,9 @@ function _full_solve(requested::Symbol)
     verification.planned_la_backend == requested || error(
         "planned backend for $requested was $(verification.planned_la_backend)",
     )
+    verification.executed_la_backend == requested || error(
+        "executed backend for $requested was $(verification.executed_la_backend)",
+    )
     expected_planned_fallback = requested === :legacy ? :requested_legacy : :none
     verification.planned_la_fallback_reason === expected_planned_fallback || error(
         "planned LA fallback for $requested was $(verification.planned_la_fallback_reason), " *
