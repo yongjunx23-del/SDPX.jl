@@ -1222,6 +1222,17 @@ function build_execution_plan(
     else
         :automatic_extended_precision
     end
+    # Linear-algebra arithmetic is resolved once, after structural planning,
+    # and carried by the immutable plan into Workspace.  BigFloat remains on
+    # the ownership-safe legacy kernels; fixed-width arithmetic uses an
+    # optional provider when one is registered.
+    la_config = plan_la_backend(
+        T;
+        requested=:auto,
+        route=backend_config.mixed_precision_mode !== :off ?
+              :mixed_precision : kkt_backend,
+        threads=selected_threads,
+    )
     adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
                          recommended_adaptive_sigma_max(
                              selected.profile,
@@ -1235,6 +1246,7 @@ function build_execution_plan(
         scaling,
         kkt_backend,
         backend_config,
+        la_config,
         gram_kernel,
         schedule,
         selected_threads,
@@ -2146,6 +2158,12 @@ function _attach_diagnostics(
             :fallback_reason,
             :none,
         ),
+        la_backend=get(executed, :la_backend, :not_executed),
+        la_fallback_reason=get(executed, :la_fallback_reason, :none),
+        planned_la_backend=plan.la_config.selected,
+        planned_la_fallback_reason=plan.la_config.fallback_reason,
+        la_provider=plan.la_config.provider,
+        la_ownership=plan.la_config.ownership,
         backend_resolution=get(
             executed,
             :backend_resolution,
@@ -2158,7 +2176,11 @@ function _attach_diagnostics(
         ),
         gram=get(executed, :gram, plan.gram_kernel),
         equality=get(executed, :equality, :not_executed),
-        planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),
+        planned=(
+            kkt=plan.kkt_backend,
+            gram=plan.gram_kernel,
+            la=plan.la_config.selected,
+        ),
         scheduling=plan.schedule,
         threads=plan.threads,
         effective_threads=get(executed, :effective_threads, plan.threads),

@@ -508,6 +508,11 @@ mutable struct Workspace{T}
     # Last non-`:none` fallback observed during this solve.  It is deliberately
     # cumulative so a later successful retry cannot erase fallback provenance.
     backend_fallback_reason::Symbol
+    # Arithmetic backend is resolved once from ExecutionPlan and never inferred
+    # again by numerical kernels.  The final two fields are solve provenance.
+    la_backend::AbstractLABackend
+    executed_la_backend::Symbol
+    la_fallback_reason::Symbol
 end
 
 """
@@ -858,7 +863,8 @@ function Workspace(
     execution_plan::Union{Nothing,ExecutionPlan}=nothing,
 ) where {T}
     L, m, n, k = prob.dims
-    plan = if execution_plan === nothing
+    plan_supplied = execution_plan !== nothing
+    plan = if !plan_supplied
         workspace_options = SolverOptions{T}(
             algorithm=:sdp,
             presolve=false,
@@ -875,6 +881,23 @@ function Workspace(
         build_execution_plan(AutoPlanner(), prob, workspace_options)
     else
         execution_plan
+    end
+    if !plan_supplied
+        # Historical direct Workspace construction remains on the legacy
+        # arithmetic seam; only an explicit ExecutionPlan opts into Standard.
+        plan = ExecutionPlan(
+            plan.classification,
+            plan.algorithm,
+            plan.scaling,
+            plan.kkt_backend,
+            plan.backend_config,
+            plan.gram_kernel,
+            plan.schedule,
+            plan.threads,
+            plan.parameter_profile,
+            plan.memory_budget_bytes,
+            plan.parameters,
+        )
     end
     plan.algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) ||
         throw(ArgumentError(
@@ -1217,6 +1240,7 @@ function Workspace(
         sparse_schur ?
         min(selected_threads, max(m, 1)) :
         T === BigFloat ? 1 : block_nbins
+    la_backend = instantiate_la_backend(plan.la_config, T, selected_threads)
     workspace = Workspace{T}(blk,
         (compact_arrow || sparse_schur) ?
         alloc_zeros(T, 0, 0) :
@@ -1242,7 +1266,8 @@ function Workspace(
         block_bins, schur_bins, schur_column_boundaries,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
-        :not_run, selected_threads, config, nothing, :not_executed, :none)
+        :not_run, selected_threads, config, nothing, :not_executed, :none,
+        la_backend, :not_executed, :none)
     workspace.backend = _backend_from_configuration(workspace, config)
     generic_mixed_mode !== :off &&
         workspace.mixed_precision === nothing &&

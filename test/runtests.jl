@@ -4,6 +4,7 @@ using JLD2
 using Test
 
 @testset "SDPX.jl" begin
+    include("la_backend_regressions.jl")
     include("correctness.jl")
     include("genericity.jl")
     include("extended_precision_blas.jl")

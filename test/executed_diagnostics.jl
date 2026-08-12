@@ -71,7 +71,8 @@ using Test
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :post_presolve
         @test selected.lp_formulation === :positive_definite_cholesky
-        @test selected.planned == (kkt=selected.kkt, gram=selected.gram)
+        @test selected.planned.kkt === selected.kkt
+        @test selected.planned.gram === selected.gram
 
         no_iteration = SDPX.solve!(
             problem,
@@ -91,6 +92,7 @@ using Test
         @test no_iteration_selected.lp_formulation ===
               :positive_definite_cholesky
         @test no_iteration_selected.gram === :not_executed
+        @test no_iteration_selected.la_backend === :not_executed
     end
 
     @testset "SDP core reports its executed KKT backend" begin
@@ -112,6 +114,11 @@ using Test
         @test selected.kkt === :dense_cholesky
         @test selected.planned_backend === :dense_cholesky
         @test selected.executed_backend === :dense_cholesky
+        @test selected.planned_la_backend === :standard
+        @test selected.la_backend === :standard
+        @test selected.la_provider === :none
+        @test selected.la_ownership === :standard
+        @test selected.la_fallback_reason === :none
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :planned
         @test selected.lp_formulation === :not_applicable

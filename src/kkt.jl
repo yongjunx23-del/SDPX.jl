@@ -261,12 +261,15 @@ function _build_equality_gram_matrix!(
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
     thread_count::Int,
+    la_backend::Union{Nothing,AbstractLABackend}=nothing,
 ) where {T}
     # Preserve the established Float32/Float64 path exactly, including its
     # vendor BLAS SYRK call. Do not even run the extended crossover or query
     # system memory on ordinary floating-point solves.
     if T <: Union{Float32,Float64}
-        ksyrk!(Q, Btil, one(T), zero(T))
+        la_backend === nothing ?
+        ksyrk!(Q, Btil, one(T), zero(T)) :
+        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
         return nothing, :blas_syrk
     end
     decision = _equality_gram_crossover(
@@ -312,6 +315,7 @@ function _build_equality_gram!(
         ws.Btil,
         opts,
         ws.thread_count,
+        ws.arrow === nothing ? ws.la_backend : nothing,
     )
     ws.equality_gram_kernel = label
     return decision
@@ -998,6 +1002,7 @@ function _factor_dense_kkt_native!(
     opts::SolverOptions{T},
 ) where {T}
     L, m, n, k = prob.dims
+    _record_la_execution!(ws)
 
     phase_schur_copy = 0.0
     phase_schur_factorization = 0.0
@@ -1013,7 +1018,7 @@ function _factor_dense_kkt_native!(
     )
     phase_schur_copy += _elapsed_seconds(started)
     started = time_ns()
-    ok = kchol!(ws.Sbuf)
+    ok = la_chol!(ws.la_backend, ws.Sbuf)
     phase_schur_factorization += _elapsed_seconds(started)
     reg_attempts = 0
     reg = zero(T)
@@ -1031,7 +1036,7 @@ function _factor_dense_kkt_native!(
         end
         phase_schur_copy += _elapsed_seconds(started)
         started = time_ns()
-        ok = kchol!(ws.Sbuf)
+        ok = la_chol!(ws.la_backend, ws.Sbuf)
         phase_schur_factorization += _elapsed_seconds(started)
     end
     if !ok
@@ -1058,7 +1063,7 @@ function _factor_dense_kkt_native!(
     if n > 0
         started = time_ns()
         copy_owned!(ws.Btil, prob.B)
-        ktrsm!(ws.Sbuf, ws.Btil)                     # B̃ = L_S⁻¹B
+        la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)    # B̃ = L_S⁻¹B
         phase_constraint_triangular_solve +=
             _elapsed_seconds(started)
         direct_qr =
@@ -1085,6 +1090,10 @@ function _factor_dense_kkt_native!(
             if T === BigFloat && kchol!(ws.Qbuf)
                 ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
             else
+                # The Q factor handle/rank diagnostics remain on the existing
+                # compatibility path in this first LA migration.  In
+                # particular, QR/pivoted factors are not representable by the
+                # current Workspace union and must not be silently replaced.
                 T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
                 Cq = LinearAlgebra.cholesky!(
                     Symmetric(ws.Qbuf, :L);
@@ -2164,19 +2173,19 @@ function _solve_dense_kkt_owned!(
     dy_out::AbstractVector{T},
 ) where {T}
     copy_owned!(ws.rtil, r)
-    ktrsv_lower!(ws.Sbuf, ws.rtil)   # r̃ = L_S⁻¹r
+    la_trsv_lower!(ws.la_backend, ws.Sbuf, ws.rtil) # r̃ = L_S⁻¹r
 
     if n > 0
-        kmul_owned!(ws.q_rhs, transpose(ws.Btil), ws.rtil)       # q_rhs = B̃ᵀr̃
-        kaxpby_owned!(one(T), p_rhs, -one(T), ws.q_rhs)          # q_rhs = p − B̃ᵀr̃
+        la_mul_owned!(ws.la_backend, ws.q_rhs, transpose(ws.Btil), ws.rtil) # q_rhs = B̃ᵀr̃
+        la_axpby_owned!(ws.la_backend, one(T), p_rhs, -one(T), ws.q_rhs)    # q_rhs = p − B̃ᵀr̃
         _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)        # dy = Q⁻¹(p − B̃ᵀr̃)
 
-        kmul_owned!(dx_out, ws.Btil, dy_out)                     # dx_out = B̃·dy
-        kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)           # dx_out = r̃ + B̃·dy
-        ktrsv_transpose!(ws.Sbuf, dx_out)                        # dx = L_S⁻ᵀ(r̃ + B̃·dy)
+        la_mul_owned!(ws.la_backend, dx_out, ws.Btil, dy_out)     # dx_out = B̃·dy
+        la_axpby_owned!(ws.la_backend, one(T), ws.rtil, one(T), dx_out) # dx_out = r̃ + B̃·dy
+        la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)       # dx = L_S⁻ᵀ(r̃ + B̃·dy)
     else
         copy_owned!(dx_out, ws.rtil)
-        ktrsv_transpose!(ws.Sbuf, dx_out)
+        la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)
     end
     return dx_out, dy_out
 end

@@ -93,6 +93,50 @@ default_mixed_precision_kkt(::Type{T}) where {T} =
         (isbitstype(T) && sizeof(T) > sizeof(Float64))
     ) ? :auto : :off
 
+# ---------------------------------------------------------------------------
+# Linear-algebra backend description
+#
+# The configuration is deliberately non-parametric and immutable.  It is part
+# of an ExecutionPlan (and is therefore serialized in diagnostics/checkpoints)
+# rather than inferred again by a Workspace.  `provider` is an optional
+# symbols supplied by an arithmetic extension; concrete setup payloads live
+# only in the instantiated MultiFloatLABackend, never in the plan.
+# ---------------------------------------------------------------------------
+
+abstract type AbstractLABackend end
+
+struct StandardLABackend <: AbstractLABackend
+    arithmetic::Symbol
+end
+
+struct LegacyLABackend <: AbstractLABackend
+    arithmetic::Symbol
+    reason::Symbol
+end
+
+struct MultiFloatLABackend <: AbstractLABackend
+    arithmetic::Symbol
+    provider::Any
+end
+
+struct LABackendConfiguration
+    arithmetic::Symbol
+    requested::Symbol
+    selected::Symbol
+    provider::Symbol
+    capabilities::Tuple{Vararg{Symbol}}
+    fallback_chain::Tuple{Vararg{Symbol}}
+    fallback_reason::Symbol
+    ownership::Symbol
+end
+
+"""Conservative configuration used by historical positional plan builders."""
+function _compat_la_backend_configuration(arithmetic::Symbol)
+    return LABackendConfiguration(
+        arithmetic, :legacy, :legacy, :none, (), (), :compatibility, :legacy,
+    )
+end
+
 """
     fine_grained_block_bins(T, requested, reduced_arrow_panel, block_count)
 
@@ -1003,12 +1047,44 @@ struct ExecutionPlan
     scaling::Symbol
     kkt_backend::Symbol
     backend_config::BackendConfiguration
+    la_config::LABackendConfiguration
     gram_kernel::Symbol
     schedule::Symbol
     threads::Int
     parameter_profile::Symbol
     memory_budget_bytes::Int
     parameters::NamedTuple
+end
+
+# Compatibility constructor for the v0.4.1-dev 11-field plan.  New planner
+# code supplies `la_config` explicitly; old callers retain the legacy path.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        _compat_la_backend_configuration(classification.arithmetic),
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
 end
 
 # Source compatibility for the pre-`backend_config` positional form.  The
@@ -1044,6 +1120,7 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         config,
+        _compat_la_backend_configuration(classification.arithmetic),
         gram_kernel,
         schedule,
         threads,

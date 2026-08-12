@@ -28,6 +28,29 @@ const select_parameters = SDPX.select_parameters
 const ProblemClassification = SDPX.ProblemClassification
 const PresolveReport = SDPX.PresolveReport
 const ExecutionPlan = SDPX.ExecutionPlan
+const AbstractLABackend = SDPX.AbstractLABackend
+const StandardLABackend = SDPX.StandardLABackend
+const LegacyLABackend = SDPX.LegacyLABackend
+const MultiFloatLABackend = SDPX.MultiFloatLABackend
+const LABackendConfiguration = SDPX.LABackendConfiguration
+const plan_la_backend = SDPX.plan_la_backend
+const instantiate_la_backend = SDPX.instantiate_la_backend
+const la_provider_descriptor = SDPX.la_provider_descriptor
+const instantiate_multifloat_la_backend = SDPX.instantiate_multifloat_la_backend
+const la_dot = SDPX.la_dot
+const la_norminf = SDPX.la_norminf
+const la_mul! = SDPX.la_mul!
+const la_mul_owned! = SDPX.la_mul_owned!
+const la_syrk! = SDPX.la_syrk!
+const la_chol! = SDPX.la_chol!
+const la_trsm! = SDPX.la_trsm!
+const la_trsv_lower! = SDPX.la_trsv_lower!
+const la_trsv_transpose! = SDPX.la_trsv_transpose!
+const la_factor! = SDPX.la_factor!
+const la_solve! = SDPX.la_solve!
+const la_refine! = SDPX.la_refine!
+const la_axpby! = SDPX.la_axpby!
+const la_axpby_owned! = SDPX.la_axpby_owned!
 const SolveDiagnostics = SDPX.SolveDiagnostics
 
 const AbstractPreprocessStage = SDPX.AbstractPreprocessStage
@@ -100,6 +123,14 @@ export AbstractParameterPolicy, FixedParameterPolicy
 export AdaptiveParameterPolicy, IterationDiagnostics, IterationParameters
 export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
+export AbstractLABackend, StandardLABackend, LegacyLABackend
+export MultiFloatLABackend, LABackendConfiguration, plan_la_backend
+export instantiate_la_backend, la_provider_descriptor
+export instantiate_multifloat_la_backend
+export la_dot, la_norminf, la_mul!, la_mul_owned!, la_syrk!, la_chol!
+export la_trsm!, la_trsv_lower!, la_trsv_transpose!
+export la_factor!, la_solve!, la_refine!
+export la_axpby!, la_axpby_owned!
 export AbstractPreprocessStage, PreprocessContext, PreprocessPlan
 export PreprocessReport, PreprocessStageReport, ReconstructionMap
 export PreprocessedProblem, BoundExtractionStage
