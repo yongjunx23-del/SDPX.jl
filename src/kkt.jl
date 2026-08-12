@@ -47,6 +47,15 @@ function _cholesky_has_numerical_rank(matrix::AbstractMatrix{T}) where {T}
         sqrt(T(dimension) * eps(T)) * maximum_diagonal
 end
 
+function _legacy_factor_has_numerical_rank(
+    factor::LegacyLACholeskyFactor{T},
+) where {T}
+    T === BigFloat && return true
+    return _cholesky_has_numerical_rank(
+        la_factor_handle_matrix(factor),
+    )
+end
+
 function _has_exact_duplicate_columns(matrix::AbstractMatrix)
     row_count, column_count = size(matrix)
     column_count <= 1 && return false
@@ -725,7 +734,8 @@ function _factor_arrow_equality_system!(
         else
             nothing
         end
-        if legacy_factor !== nothing
+        if legacy_factor !== nothing &&
+           _legacy_factor_has_numerical_rank(legacy_factor)
             ws.Qchol = legacy_factor
         elseif legacy_provider_factor
             # `kchol!` may have partially overwritten the factor buffer
@@ -1162,7 +1172,10 @@ function _factor_dense_kkt_native!(
             factor_matrix = equality_factor === nothing ? nothing :
                             la_factor_handle_matrix(equality_factor)
             if equality_factor isa BigFloatCholeskyFactor ||
-               equality_factor isa LegacyLACholeskyFactor ||
+               (
+                   equality_factor isa LegacyLACholeskyFactor &&
+                   _legacy_factor_has_numerical_rank(equality_factor)
+               ) ||
                (equality_factor !== nothing &&
                 _cholesky_has_numerical_rank(factor_matrix))
                 ws.Qchol = equality_factor
