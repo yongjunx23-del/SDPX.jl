@@ -124,12 +124,14 @@ using Test
         @test result.termination.executed.parameter_profile ===
               selected.parameter_profile
         @test !isempty(result.parameter_history)
-        @test selected.executed_parameters.beta ==
-              first(result.parameter_history).beta
-        @test selected.executed_parameters.gamma ==
-              first(result.parameter_history).gamma
-        @test selected.initial_parameters.beta ==
-              selected.executed_parameters.beta
+        # The history contains iteration-local adaptive choices, whereas
+        # `executed_parameters` records the initial post-equilibration profile.
+        @test selected.executed_parameters ==
+              result.termination.executed.executed_parameters
+        for name in keys(selected.executed_parameters)
+            @test getproperty(selected.initial_parameters, name) ==
+                  getproperty(selected.executed_parameters, name)
+        end
         @test selected.planned_parameters == result.diagnostics.plan.parameters
         @test selected.effective_threads == selected.threads
         @test selected.fine_grained_block_tasks == 1
