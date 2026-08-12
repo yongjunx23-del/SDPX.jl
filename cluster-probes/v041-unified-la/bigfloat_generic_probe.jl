@@ -353,7 +353,16 @@ function _full_solve(requested::Symbol)
         certificate_valid=certificate.valid,
         executed_la_backend=get(selected, :la_backend, :not_executed),
         planned_la_backend=get(selected, :planned_la_backend, :not_executed),
-        fallback_reason=get(selected, :la_fallback_reason, :not_recorded),
+        planned_la_fallback_reason=get(
+            selected,
+            :planned_la_fallback_reason,
+            :not_recorded,
+        ),
+        runtime_la_fallback_reason=get(
+            selected,
+            :la_fallback_reason,
+            :not_recorded,
+        ),
         all_finite=all(
             isfinite,
             (result.pObj, result.dObj, result.gap_rel, result.p_res, result.d_res),
@@ -383,8 +392,20 @@ function _full_solve(requested::Symbol)
     verification.planned_la_backend == requested || error(
         "planned backend for $requested was $(verification.planned_la_backend)",
     )
-    verification.fallback_reason === :none || error(
-        "full solve for $requested fell back: $(verification.fallback_reason)",
+    expected_planned_fallback = requested === :legacy ? :requested_legacy : :none
+    verification.planned_la_fallback_reason === expected_planned_fallback || error(
+        "planned LA fallback for $requested was $(verification.planned_la_fallback_reason), " *
+        "expected $(expected_planned_fallback)",
+    )
+    # `requested_legacy` is the intentional plan provenance emitted when the
+    # legacy backend is explicitly requested.  It is not a runtime fallback.
+    # Any other non-`:none` value means the solve changed route or failed over
+    # during execution and remains a hard gate failure.
+    allowed_runtime_fallbacks = requested === :legacy ?
+        (:none, :requested_legacy) : (:none,)
+    verification.runtime_la_fallback_reason in allowed_runtime_fallbacks || error(
+        "full solve for $requested had an unauthorized runtime LA fallback: " *
+        "$(verification.runtime_la_fallback_reason)",
     )
     return verification
 end
