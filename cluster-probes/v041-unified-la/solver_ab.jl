@@ -95,6 +95,14 @@ function _multifloat_route(multifloat_backend)
            :sdpx_provider : :direct_upstream
 end
 
+# `collect(named_tuple)` yields only values, so destructuring its elements as
+# `(key, value)` is invalid when the values mix Symbols, numbers and Booleans.
+# Materialize pairs explicitly and sort by a stringified key for a stable,
+# type-safe audit line.
+function _sorted_summary(record)
+    return sort!(collect(pairs(record)); by=pair -> string(first(pair)))
+end
+
 function _mfla_factor!(backend, A, route::Symbol)
     if route === :sdpx_provider
         provider = backend.provider
@@ -322,14 +330,14 @@ function main()
     println(
         "SOLVER_AB kkt_standard=",
         join(
-            ["$(key)=$(value)" for (key, value) in sort(collect(standard); by=first)],
+            ["$(key)=$(value)" for (key, value) in _sorted_summary(standard)],
             ",",
         ),
     )
     println(
         "SOLVER_AB kkt_multifloat=",
         join(
-            ["$(key)=$(value)" for (key, value) in sort(collect(multifloat); by=first)],
+            ["$(key)=$(value)" for (key, value) in _sorted_summary(multifloat)],
             ",",
         ),
     )
@@ -350,14 +358,14 @@ function main()
         println(
             "SOLVER_AB full_solve_standard=",
             join(
-                ["$(key)=$(value)" for (key, value) in sort(collect(std_full); by=first)],
+                ["$(key)=$(value)" for (key, value) in _sorted_summary(std_full)],
                 ",",
             ),
         )
         println(
             "SOLVER_AB full_solve_multifloat=",
             join(
-                ["$(key)=$(value)" for (key, value) in sort(collect(mf_full); by=first)],
+                ["$(key)=$(value)" for (key, value) in _sorted_summary(mf_full)],
                 ",",
             ),
         )
