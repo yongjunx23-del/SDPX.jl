@@ -872,7 +872,7 @@ function Workspace(
             equality_solver=equality_solver,
             threads=thread_count,
         )
-        build_execution_plan(prob, workspace_options)
+        build_execution_plan(AutoPlanner(), prob, workspace_options)
     else
         execution_plan
     end

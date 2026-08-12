@@ -120,3 +120,25 @@ end
     @test_throws ArgumentError PlannerAPI.StructuralPlanningIntent(threads=0)
     @test_throws ArgumentError PlannerAPI.StructuralPlanningIntent(threads="not-an-int")
 end
+
+@testset "AutoPlanner preserves existing execution-plan decisions" begin
+    problem, _ = _planner_features(Float64, false)
+    lifted = SDPX._soc_psd_lift(problem; verbosity=0)
+    options = SDPX.SolverOptions{Float64}(
+        algorithm=:socp,
+        scaling=:none,
+        presolve=false,
+        verbosity=0,
+    )
+    legacy = SDPX.build_execution_plan(lifted, options)
+    planned = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, options)
+    @test legacy.algorithm === :socp_psd2
+    @test legacy.scaling === :none
+    @test planned == legacy
+    resolved = SDPX.Experimental.resolve_solve_options(
+        Float64,
+        SDPX.SolveOptions(algorithm=:socp, scaling=:none, presolve=false),
+    )
+    @test SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved) ==
+          SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved.core)
+end

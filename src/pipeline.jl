@@ -913,7 +913,16 @@ end
     )
 end
 
+"""
+    build_execution_plan(::AutoPlanner, prob, opts)
+
+Resolve the existing execution-plan policy through the midend planner
+boundary.  `AutoPlanner` is intentionally stateless for now: this method
+contains the established decision formulas unchanged and only makes the
+planning entry explicit.
+"""
 function build_execution_plan(
+    ::AutoPlanner,
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
@@ -1202,6 +1211,23 @@ function build_execution_plan(
             generic_mixed_precision_decision=generic_mixed_decision,
         ),
     )
+end
+
+"""Compatibility delegate for the historical two-argument entry point."""
+function build_execution_plan(
+    prob::SDPProblem{T},
+    opts::SolverOptions{T}=SolverOptions{T}(),
+) where {T}
+    return build_execution_plan(AutoPlanner(), prob, opts)
+end
+
+"""Lower resolved frontend options without introducing a second planner."""
+function build_execution_plan(
+    planner::AutoPlanner,
+    prob::SDPProblem{T},
+    resolved::ResolvedSolveOptions{T},
+) where {T}
+    return build_execution_plan(planner, prob, resolved.core)
 end
 
 function planned_backend_name(plan::ExecutionPlan)

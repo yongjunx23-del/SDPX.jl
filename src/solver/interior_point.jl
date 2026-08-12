@@ -2194,7 +2194,11 @@ function _solve_pipeline!(
     # Finalize the plan against the model that will actually be factorized.
     # In particular, equality presolve can change the selected parameter profile
     # and the diagnostic equality count.
-    plan = build_execution_plan(report.inconsistent ? prob : reduced, opts)
+    plan = build_execution_plan(
+        AutoPlanner(),
+        report.inconsistent ? prob : reduced,
+        opts,
+    )
     warnings = String[]
     if opts.threads > Base.Threads.nthreads()
         push!(
@@ -2508,6 +2512,7 @@ function _solve_pipeline!(
                 resume=resume,
                 deadline=deadline,
                 execution_plan=build_execution_plan(
+                    AutoPlanner(),
                     reduced,
                     fallback_options,
                 ),
