@@ -32,8 +32,26 @@ set -euo pipefail
 ARITHMETIC="${ARITHMETIC:-float64,float64x4}"
 CASE_FILTER="${CASE_FILTER:-lp_row_scaling,socp_many_tiny,sdp_hilbert}"
 # Repetition 1 is the per-case JIT warmup and is excluded from timing by the
-# analyzer; repetitions 2-4 are the timed set.
-REPETITIONS="${REPETITIONS:-4}"
+# analyzer.  Timed repetitions 2..N are grouped into TIMED_BATCHES consecutive
+# batches of TIMING_BATCH_SIZE runs; each batch sum is one timing sample.
+# Default: 1 + 10*3 = 31 repetitions.
+TIMING_BATCH_SIZE="${TIMING_BATCH_SIZE:-10}"
+TIMED_BATCHES="${TIMED_BATCHES:-3}"
+if [ -n "${REPETITIONS:-}" ]; then
+  case "$REPETITIONS" in
+    ''|*[!0-9]*)
+      echo "REPETITIONS must be a positive integer, got: $REPETITIONS" >&2
+      exit 1
+      ;;
+  esac
+  EXPECTED_REPETITIONS=$((1 + TIMING_BATCH_SIZE * TIMED_BATCHES))
+  if [ "$REPETITIONS" -ne "$EXPECTED_REPETITIONS" ]; then
+    echo "REPETITIONS=$REPETITIONS does not equal 1 + TIMING_BATCH_SIZE*TIMED_BATCHES=$EXPECTED_REPETITIONS" >&2
+    exit 1
+  fi
+else
+  REPETITIONS=$((1 + TIMING_BATCH_SIZE * TIMED_BATCHES))
+fi
 WARMUP="${WARMUP:-true}"
 TIME_LIMIT="${TIME_LIMIT:-900}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-300}"
@@ -191,6 +209,8 @@ fi
   echo "arithmetic=$ARITHMETIC"
   echo "case_filter=$CASE_FILTER"
   echo "repetitions=$REPETITIONS"
+  echo "timing_batch_size=$TIMING_BATCH_SIZE"
+  echo "timed_batches=$TIMED_BATCHES"
   echo "warmup=$WARMUP"
   echo "time_limit=$TIME_LIMIT"
   echo "max_iterations=$MAX_ITERATIONS"
@@ -218,6 +238,8 @@ fi
   printf 'arithmetic=%s\n' "$ARITHMETIC"
   printf 'case_filter=%s\n' "$CASE_FILTER"
   printf 'repetitions=%s\n' "$REPETITIONS"
+  printf 'timing_batch_size=%s\n' "$TIMING_BATCH_SIZE"
+  printf 'timed_batches=%s\n' "$TIMED_BATCHES"
   printf 'warmup=%s\n' "$WARMUP"
   printf 'resource_class=regular\n'
   printf 'julia_threads=4\n'

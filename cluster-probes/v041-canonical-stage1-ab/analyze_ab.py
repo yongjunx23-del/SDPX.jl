@@ -20,12 +20,16 @@ Fails unless:
   (--no-strict-iterations is diagnosis-only for iterations);
 - numeric objective/residual/certificate endpoints agree within arithmetic
   bounds;
-- per (arithmetic, family) candidate median total_seconds is at most 10% above
-  baseline and both arm CVs are below 5%.
+- per (arithmetic, family) candidate median batch sum is at most 10% above
+  baseline and both arm CVs are below 5%.  Timed repetitions 2..N are
+  aggregated in consecutive batches of TIMING_BATCH_SIZE; each batch value is
+  the sum of its repetitions.
 
-`analyze_ab.py --self-test` runs three synthetic CSV scenarios without touching
+`analyze_ab.py --self-test` runs synthetic CSV scenarios without touching
 Julia: a clean PASS, a PASS where full-tree and subset hashes differ, and a
-FAIL exercising input/config/certificate/timing gates.
+FAIL exercising input/config/certificate/timing gates, plus a fractional
+refinement-steps failure.  The synthetic fixture uses batch_size=2,
+timed_batches=3, repetitions=7.
 """
 
 import argparse
@@ -122,6 +126,11 @@ FALLBACK_ENDPOINT = (1.0e-6, 1.0e-4)
 
 TIMING_RATIO_LIMIT = 1.10
 CV_LIMIT = 0.05
+DEFAULT_TIMING_BATCH_SIZE = 10
+DEFAULT_TIMED_BATCHES = 3
+SELF_TEST_TIMING_BATCH_SIZE = 2
+SELF_TEST_TIMED_BATCHES = 3
+SELF_TEST_REPETITIONS = 7
 
 
 def _parse_float(value):
@@ -247,6 +256,32 @@ def analyze_root(root, opts):
         repetitions = int(config["repetitions"])
     except (KeyError, ValueError) as err:
         raise SystemExit(f"arms.conf repetitions invalid: {err}") from err
+    try:
+        timing_batch_size = int(config["timing_batch_size"])
+        timed_batches = int(config["timed_batches"])
+    except (KeyError, ValueError) as err:
+        raise SystemExit(
+            "arms.conf timing_batch_size/timed_batches invalid: "
+            f"{err}",
+        ) from err
+    if timing_batch_size < 1 or timed_batches < 1:
+        raise SystemExit(
+            "arms.conf timing_batch_size/timed_batches must be positive",
+        )
+    if repetitions != 1 + timing_batch_size * timed_batches:
+        raise SystemExit(
+            "arms.conf repetitions must equal "
+            "1 + timing_batch_size*timed_batches: "
+            f"repetitions={repetitions} batch={timing_batch_size} "
+            f"batches={timed_batches}",
+        )
+    timed_reps = list(range(2, repetitions + 1))
+    batch_edges = [
+        timed_reps[i * timing_batch_size:(i + 1) * timing_batch_size]
+        for i in range(timed_batches)
+    ]
+    if any(not batch for batch in batch_edges):
+        raise SystemExit("internal batch construction produced an empty batch")
 
     baseline = _read_rows(root / "baseline" / "results.csv")
     candidate = _read_rows(root / "candidate" / "results.csv")
@@ -399,9 +434,20 @@ def analyze_root(root, opts):
                 continue
             family_key = (key[0], key[1])
             case_key = (key[0], key[1], key[2])
-            totals.setdefault(family_key, {}).setdefault(key[4], 0.0)
-            totals[family_key][key[4]] += total
-            case_totals.setdefault(case_key, {})[key[4]] = total
+            batch_index = None
+            for index, reps in enumerate(batch_edges, start=1):
+                if key[4] in reps:
+                    batch_index = index
+                    break
+            if batch_index is None:
+                failures.append(
+                    f"{arm} {key}: repetition {key[4]} outside timed batches",
+                )
+                continue
+            totals.setdefault(family_key, {}).setdefault(batch_index, 0.0)
+            totals[family_key][batch_index] += total
+            case_totals.setdefault(case_key, {}).setdefault(batch_index, 0.0)
+            case_totals[case_key][batch_index] += total
 
     report_rows = []
     family_keys = sorted(set(family_totals_b) | set(family_totals_c))
@@ -411,9 +457,9 @@ def analyze_root(root, opts):
                             ("candidate", family_totals_c)):
             by_rep = totals.get(category)
             if by_rep is None or \
-               sorted(by_rep) != list(range(2, repetitions + 1)):
+               sorted(by_rep) != list(range(1, timed_batches + 1)):
                 failures.append(
-                    f"{arm} timing repetitions missing for {category}: "
+                    f"{arm} timing batches missing for {category}: "
                     f"{sorted(by_rep) if by_rep else []}",
                 )
                 incomplete = True
@@ -421,8 +467,8 @@ def analyze_root(root, opts):
             continue
         by_rep_b = family_totals_b[category]
         by_rep_c = family_totals_c[category]
-        values_b = [by_rep_b[r] for r in range(2, repetitions + 1)]
-        values_c = [by_rep_c[r] for r in range(2, repetitions + 1)]
+        values_b = [by_rep_b[b] for b in range(1, timed_batches + 1)]
+        values_c = [by_rep_c[b] for b in range(1, timed_batches + 1)]
         summary_b = _summarize(values_b)
         summary_c = _summarize(values_c)
         if summary_b is None or summary_c is None:
@@ -451,12 +497,12 @@ def analyze_root(root, opts):
             continue
         by_rep_b = case_totals_b[category]
         by_rep_c = case_totals_c[category]
-        if sorted(by_rep_b) != list(range(2, repetitions + 1)) or \
-           sorted(by_rep_c) != list(range(2, repetitions + 1)):
-            failures.append(f"case timing repetitions missing for {category}")
+        if sorted(by_rep_b) != list(range(1, timed_batches + 1)) or \
+           sorted(by_rep_c) != list(range(1, timed_batches + 1)):
+            failures.append(f"case timing batches missing for {category}")
             continue
-        values_b = [by_rep_b[r] for r in range(2, repetitions + 1)]
-        values_c = [by_rep_c[r] for r in range(2, repetitions + 1)]
+        values_b = [by_rep_b[b] for b in range(1, timed_batches + 1)]
+        values_c = [by_rep_c[b] for b in range(1, timed_batches + 1)]
         summary_b = _summarize(values_b)
         summary_c = _summarize(values_c)
         if summary_b is None or summary_c is None:
@@ -482,6 +528,8 @@ def analyze_root(root, opts):
         "baseline_source_path": config.get("baseline_source", ""),
         "candidate_source_path": config.get("candidate_source", ""),
         "runner_source_path": config.get("runner_source", ""),
+        "timing_batch_size": config.get("timing_batch_size", ""),
+        "timed_batches": config.get("timed_batches", ""),
     }
     with (root / "ab_provenance.txt").open("w") as stream:
         for key in sorted(provenance):
@@ -533,8 +581,11 @@ def _write_synthetic_run(
     tree_differs,
     baseline_steps="0.0",
     candidate_steps="0",
+    timing_batch_size=SELF_TEST_TIMING_BATCH_SIZE,
+    timed_batches=SELF_TEST_TIMED_BATCHES,
 ):
     """Write a self-contained synthetic A/B result without Julia."""
+    repetitions = 1 + timing_batch_size * timed_batches
     root = pathlib.Path(root)
     for arm in ("baseline", "candidate"):
         (root / arm).mkdir(parents=True)
@@ -557,7 +608,9 @@ def _write_synthetic_run(
     subset_baseline = "f" * 64
     subset_candidate = "e" * 64
     arms_conf = (
-        "repetitions=4\n"
+        f"repetitions={repetitions}\n"
+        f"timing_batch_size={timing_batch_size}\n"
+        f"timed_batches={timed_batches}\n"
         "arithmetic=float64\n"
         "case_filter=lp_row_scaling,sdp_hilbert\n"
         f"baseline_source=/synthetic/baseline\n"
@@ -675,8 +728,8 @@ def _write_synthetic_run(
             # Repetition 1 is an intentionally abnormal per-case warmup time;
             # the analyzer must discard it from timing while still checking
             # its correctness/config/certificate/workspace fields.
-            "lp": ("lp_row_scaling", [1000.0, 10.0, 10.2, 10.1]),
-            "sdp": ("sdp_hilbert", [500.0, 5.0, 5.1, 5.05]),
+            "lp": ("lp_row_scaling", [1000.0, 10.0, 10.2, 10.1, 10.3, 10.0, 10.2]),
+            "sdp": ("sdp_hilbert", [500.0, 5.0, 5.1, 5.05, 5.0, 5.1, 5.05]),
         }
         for family, (problem, times) in families.items():
             for rep, total in enumerate(times, start=1):

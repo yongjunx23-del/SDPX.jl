@@ -86,7 +86,7 @@ vars="$vars,AB_RUNNER_ROOT=$AB_RUNNER_ROOT"
 # Optional scalar overrides are forwarded only when set; comma-containing
 # values (ARITHMETIC/CASE_FILTER) stay on the PBS defaults to avoid -v
 # splitting them.
-for var in REPETITIONS WARMUP TIME_LIMIT MAX_ITERATIONS; do
+for var in REPETITIONS TIMING_BATCH_SIZE TIMED_BATCHES WARMUP TIME_LIMIT MAX_ITERATIONS; do
   if [ -n "${!var:-}" ]; then
     vars="$vars,$var=${!var}"
   fi

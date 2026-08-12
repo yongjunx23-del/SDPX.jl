@@ -59,7 +59,9 @@ Optional job variables with stable defaults:
 |---|---|
 | `ARITHMETIC` | `float64,float64x4` |
 | `CASE_FILTER` | `lp_row_scaling,socp_many_tiny,sdp_hilbert` |
-| `REPETITIONS` | `4` (rep 1 is per-case warmup; reps 2-4 are timed) |
+| `TIMING_BATCH_SIZE` | `10` (timed runs per batch) |
+| `TIMED_BATCHES` | `3` (batch timing samples) |
+| `REPETITIONS` | derived `1 + 10*3 = 31` (rep 1 warmup; reps 2-31 timed); explicit values must equal `1 + TIMING_BATCH_SIZE*TIMED_BATCHES` or the job fails closed |
 | `WARMUP` | `true` |
 | `TIME_LIMIT` | `900` |
 | `MAX_ITERATIONS` | `300` |
@@ -104,22 +106,25 @@ the same host in the same PBS job.
 
 ## Warmup and timed repetitions
 
-Each arm runs `--warmup=true --repetitions=4`.  The harness-level warmup covers
-the first campaign row per arithmetic, but case-specific JIT can still land in
-each case's first repetition, so repetition 1 is defined as that case's
-warmup and is discarded from timing.  Repetitions 2-4 are the three timed rows;
-the analyzer uses their median and CV.  Repetition 1 is still fully checked
+Each arm runs `--warmup=true` with the derived `REPETITIONS`.  The
+harness-level warmup covers the first campaign row per arithmetic, but
+case-specific JIT can still land in each case's first repetition, so
+repetition 1 is defined as that case's warmup and is discarded from timing.
+Timed repetitions `2..N` are grouped into `TIMED_BATCHES` consecutive batches
+of `TIMING_BATCH_SIZE` runs; each batch sum is one timing sample.  The
+analyzer uses the batch medians and CVs.  Repetition 1 is still fully checked
 for correctness, config, status, certificate, route, endpoint, and workspace
-equality; only timing excludes it.
+equality; only timing excludes it.  Explicit `REPETITIONS` must equal
+`1 + TIMING_BATCH_SIZE*TIMED_BATCHES`; the PBS job fails closed otherwise.
 
 ## Case matrix
 
 With `CASE_FILTER=lp_row_scaling,socp_many_tiny,sdp_hilbert`:
 
-- Float64: `lp_row_scaling` (n16 decades6), `socp_many_tiny`, `sdp_hilbert` -> 3 cases x 4 reps (timed 2-4)
-- Float64x4: the above plus `lp_row_scaling` (n16 decades16) -> 4 cases x 4 reps (timed 2-4)
+- Float64: `lp_row_scaling` (n16 decades6), `socp_many_tiny`, `sdp_hilbert` -> 3 cases x 31 reps (timed batches 3 x 10)
+- Float64x4: the above plus `lp_row_scaling` (n16 decades16) -> 4 cases x 31 reps (timed batches 3 x 10)
 
-28 rows per arm total (7 case x 4 repetitions).  Every row is generated offline from
+217 rows per arm total (7 cases x 31 repetitions).  Every row is generated offline from
 `bench/public_conic_suite/generators/SDPXPathologicalBenchmarks.jl`; input
 hashes (`input_sha256`) must match exactly across arms.
 
@@ -148,11 +153,11 @@ After both arms finish, the PBS also appends
 
 - every runner row passes `gate_pass` in both arms and both arm `SUCCESS`
   markers exist;
-- row matrices are identical, each case group has exactly `1..4`
+- row matrices are identical, each case group has exactly `1..N`
   repetitions, and `input_sha256` and all config/thread/node fields match per
   row across arms;
-- correctness, status, certificate, route, endpoint, and workspace equality
-  cover all four rows, including the discarded warmup row;
+- correctness, status, certificate, route, endpoint, iteration, and workspace
+  equality cover all N rows, including the discarded warmup row;
 - status, certificate, route, and fallback fields match exactly per row
   (`normalized_status`, `certificate_valid`, `certificate_type`,
   `planned_backend`, `executed_backend`, `fallback`, `fallback_reason`, ...);
@@ -166,9 +171,9 @@ After both arms finish, the PBS also appends
   override with `--endpoint-atol`/`--endpoint-rtol`);
 - iteration counters are identical (`--no-strict-iterations` is a
   diagnosis-only escape hatch);
-- per `(arithmetic, family)` candidate median `total_seconds` is at most 10%
-  above baseline (`ratio <= 1.10`) and both arm CVs are below 5%, where medians
-  and CVs use only repetitions 2-4.
+- per `(arithmetic, family)` candidate median batch sum is at most 10% above
+  baseline (`ratio <= 1.10`) and both arm CVs are below 5%; medians and CVs
+  use only the `TIMED_BATCHES` batch sums from repetitions 2..N.
 
 The analysis gate never accepts a run where the runner itself failed
 certificate, status, objective, resource, identity, or route gates.
