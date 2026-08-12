@@ -59,11 +59,19 @@ function plan_la_backend(
         :syrk,
         :mul_owned,
     )
-    route in (:dense_cholesky, :dense_cholesky_fallback) ||
-        return LABackendConfiguration(
+    # The first LA migration only owns dense Cholesky routes.  Historical
+    # automatic/legacy callers retain the old implementation on every other
+    # structural route, while an explicit request is rejected rather than
+    # silently changing the requested backend in the diagnostic plan.
+    if route ∉ (:dense_cholesky, :dense_cholesky_fallback)
+        requested in (:auto, :legacy) && return LABackendConfiguration(
             arithmetic, requested, :legacy, :none, (), (), :route_not_migrated,
             :legacy,
         )
+        throw(ArgumentError(
+            "LA backend $(requested) is not available on non-dense route $(route)",
+        ))
+    end
     if requested === :legacy
         return LABackendConfiguration(
             arithmetic, :legacy, :legacy, :none, (), (), :requested_legacy,

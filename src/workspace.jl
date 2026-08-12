@@ -855,6 +855,45 @@ function _sparse_lower_column_boundaries(
     return boundaries
 end
 
+"""Normalize a pre-LA positional plan without weakening modern-plan checks.
+
+The v0.4.1-dev positional constructors encode the classification arithmetic
+symbol in their compatibility LA descriptor.  Fixed-width arithmetic has a
+distinct LA symbol (for example `Float64x4` versus `:fixed_extended`), so a
+supplied historical plan must be rewritten deterministically before the
+modern exact arithmetic guard runs.  Only the explicitly marked compatibility
+legacy descriptor is eligible; all modern plans are returned unchanged.
+"""
+function _normalize_compatibility_execution_plan(
+    plan::ExecutionPlan,
+    ::Type{T},
+) where {T}
+    family_matches = plan.classification.arithmetic in
+                     (_arithmetic_class(T), :generic)
+    if plan.la_config.selected === :legacy &&
+       plan.la_config.fallback_reason === :compatibility &&
+       family_matches
+        compatibility_la = _compat_la_backend_configuration(
+            _la_arithmetic_symbol(T),
+        )
+        return ExecutionPlan(
+            plan.classification,
+            plan.algorithm,
+            plan.scaling,
+            plan.kkt_backend,
+            plan.backend_config,
+            compatibility_la,
+            plan.gram_kernel,
+            plan.schedule,
+            plan.threads,
+            plan.parameter_profile,
+            plan.memory_budget_bytes,
+            plan.parameters,
+        )
+    end
+    return plan
+end
+
 function Workspace(
     prob::SDPProblem{T};
     extended_precision_blas::Symbol=:off,
@@ -906,6 +945,7 @@ function Workspace(
             plan.parameters,
         )
     end
+    plan_supplied && (plan = _normalize_compatibility_execution_plan(plan, T))
     plan.algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) ||
         throw(ArgumentError(
             "Workspace requires an SDP/PSD-lift execution plan, got $(plan.algorithm)",
