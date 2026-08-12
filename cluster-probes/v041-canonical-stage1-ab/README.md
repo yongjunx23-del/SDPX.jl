@@ -26,10 +26,12 @@ per-category solve times of generated LP/SOCP/SDP cases unchanged.
 
 | File | Purpose |
 |---|---|
-| `stage1_ab.pbs` | one PBS job: identity checks, baseline arm, candidate arm, analysis gate |
-| `analyze_ab.py` | machine-checkable cross-arm gate; writes `ab_report.csv` and `ab_provenance.txt`; `--self-test` runs synthetic CSV scenarios |
+| `stage1_ab.pbs` | one PBS job: identity checks, baseline arm, candidate arm, analysis gate; `SCREEN_MODE=true` selects the lean single-family screen |
+| `analyze_ab.py` | machine-checkable cross-arm gate; writes `ab_report.csv` and `ab_provenance.txt`; `--screen` relaxes CV to the development band; `--self-test` runs synthetic CSV scenarios |
 | `aggregate_ab.py` | multi-node aggregate gate over completed A/B result roots; reports per-node family ratios and fails unless all settings/identity gates and aggregated ratios pass |
 | `submit_stage1_ab.sh` | dry-run by default; `--submit` pins the job to `NODE_NAME` |
+| `submit_screen_parallel.sh` | dry-run by default; submits three single-family screen jobs on three explicit nodes with shared identity variables |
+| `screen_summarize.py` | concise gate over three disjoint screen result roots; writes `screen_summary.csv`/`screen_summary.txt`; `--self-test` runs synthetic scenarios |
 | `static_check.sh` | local bash/Python static checks only |
 
 ## Environment variables
@@ -235,6 +237,80 @@ artifacts; otherwise rerun both orders.
 timing-only root `FAILED` roots and an order-balanced FAIL from a non-timing
 root `FAILED`.
 
+## Development parallel screen
+
+The lean development-stage screen triages a candidate across all three
+families in parallel: LP, SOCP, and SDP each run on its own healthy pinned
+node, and each node's PBS job runs baseline and candidate sequentially inside
+the same job (same-node paired A/B).  It is a screening tool, not a release
+confirmation: it intentionally uses the analyzer's `--screen` CV policy and
+requires no order-balanced repeats.
+
+Submit with three explicit nodes and shared identity variables:
+
+```bash
+export BASELINE_SOURCE=... BASELINE_SOURCE_SHA256=... BASELINE_SOURCE_COMMIT=...
+export BASELINE_ENV=... CANDIDATE_SOURCE=... CANDIDATE_SOURCE_SHA256=...
+export CANDIDATE_SOURCE_COMMIT=... CANDIDATE_ENV=... RUNNER_SOURCE=...
+export RUNNER_SOURCE_SHA256=... SDPX_SITE_ENV=... SDPX_DEPOT_PATH=...
+export AB_RUNNER_ROOT=... RESULT_ROOT_PREFIX=/public/.../screen-20260812
+bash cluster-probes/v041-canonical-stage1-ab/submit_screen_parallel.sh \
+  NODE_LP NODE_SOCP NODE_SDP        # dry-run
+bash cluster-probes/v041-canonical-stage1-ab/submit_screen_parallel.sh \
+  NODE_LP NODE_SOCP NODE_SDP --submit
+```
+
+The helper requires three distinct nodes, derives
+`RESULT_ROOT_PREFIX/lp`, `/socp`, and `/sdp`, and refuses to reuse any result
+root.  Each job runs with `SCREEN_MODE=true`, `CASE_FILTER` limited to one of
+`lp_row_scaling`, `socp_many_tiny`, `sdp_hilbert`, and the default screen
+timing scheme warmup 1 + 3 batches x 5 (16 repetitions).  Float64 and
+Float64x4 remain on the PBS-side default `float64,float64x4`; do not forward
+comma-containing values through `-v`.
+
+After all three jobs finish, summarize and gate the disjoint family roots:
+
+```bash
+python3 cluster-probes/v041-canonical-stage1-ab/screen_summarize.py \
+  "$RESULT_ROOT_PREFIX/lp" "$RESULT_ROOT_PREFIX/socp" "$RESULT_ROOT_PREFIX/sdp"
+```
+
+`screen_summarize.py` requires each root's `screen_mode=true`, explicit
+`AB_GATE_PASS`, baseline/candidate arm `SUCCESS`, no FAILED markers, identity
+and thread settings identical across roots, exactly
+`{lp, socp, sdp} x {float64, float64x4}` family coverage, ratio <= 1.10, and
+`max_endpoint_norm=0`/`max_iteration_delta=0`.  Within-arm worst batch CV is
+reported per family: < 5% passes, 5%-20% is a warning (does not fail the
+screen), and >= 20% fails.  It writes `screen_summary.csv` and
+`screen_summary.txt` (use `--output-dir` to place them elsewhere).
+
+Result roots produced before `SCREEN_MODE` was recorded are rejected by
+default.  The explicit `--legacy-screen-evidence` flag accepts them only when
+all other immutable identity, 16-repetition timing, thread, dual-arm SUCCESS,
+exact endpoint/iteration, and `AB_GATE_PASS` evidence is present; accepted
+legacy roots are always reported with a provenance warning.
+Pre-SCREEN_MODE roots lack `screen_mode=true`; `--legacy-screen-evidence`
+accepts them only when all other screen gates still pass and records the
+acceptance as a warning.  New screen roots must always carry
+`screen_mode=true`.
+
+### Development screen vs release confirmation
+
+The screen is a first-pass parallel triage; its CV band is deliberately wider
+and it does not control for arm order.  A candidate only graduates to release
+confirmation after the screen is clean, and release confirmation must then use
+the strict default path:
+
+- same pinned node, sequential baseline/candidate pair per job;
+- two orders per node (`baseline_first` and `candidate_first`), three or more
+  nodes, combined geometrically;
+- warmup 1 + 3 batches x 10 (31 repetitions), both within-arm CVs < 5%;
+- `aggregate_ab.py --ordered` one-sided 95% upper bound <= 1.10.
+
+Never claim a candidate as confirmed from a screen root alone; the screen only
+decides whether the more expensive order-balanced confirmation is worth
+running.
+
 ## Single-token CASE_FILTER
 
 `submit_stage1_ab.sh` forwards `CASE_FILTER` only when it is a single token
@@ -258,3 +334,10 @@ export NODE_NAME=... BASELINE_SOURCE=... # and all other variables above
 bash cluster-probes/v041-canonical-stage1-ab/submit_stage1_ab.sh        # dry-run
 bash cluster-probes/v041-canonical-stage1-ab/submit_stage1_ab.sh --submit
 ```
+
+For the parallel development screen, use `submit_screen_parallel.sh` as shown
+above and summarize with `screen_summarize.py`.  `screen_summarize.py
+--self-test` and the extended `analyze_ab.py --self-test`/`aggregate_ab.py
+--self-test` cover the synthetic pass, CV warning band, hard CV failure,
+ratio/endpoint/identity/thread/coverage failures, and order-balanced release
+evidence without Julia.

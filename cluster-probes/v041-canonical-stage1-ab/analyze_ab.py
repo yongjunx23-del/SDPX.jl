@@ -25,11 +25,21 @@ Fails unless:
   aggregated in consecutive batches of TIMING_BATCH_SIZE; each batch value is
   the sum of its repetitions.
 
+`--screen` is the lean development-stage mode used by the parallel three-node
+screen (`SCREEN_MODE=true` in stage1_ab.pbs).  It keeps every correctness,
+identity, endpoint, and iteration gate, but treats within-arm batch CV as a
+warning in [0.05, 0.20) instead of a failure, hard-fails at CV >= 0.20 and
+ratio > 1.10, and additionally requires exact endpoint/iteration equality
+(max_endpoint_norm == 0 and max_iteration_delta == 0).  The release A/B
+default keeps the strict CV < 0.05 behavior and tolerance-based endpoint
+comparison.
+
 `analyze_ab.py --self-test` runs synthetic CSV scenarios without touching
 Julia: a clean PASS, a PASS where full-tree and subset hashes differ, and a
 FAIL exercising input/config/certificate/timing gates, plus a fractional
-refinement-steps failure.  The synthetic fixture uses batch_size=2,
-timed_batches=3, repetitions=7.
+refinement-steps failure and `--screen` scenarios covering the CV warning
+band, hard CV failure, and exact endpoint/iteration failure.  The synthetic
+fixture uses batch_size=2, timed_batches=3, repetitions=7.
 """
 
 import argparse
@@ -126,6 +136,7 @@ FALLBACK_ENDPOINT = (1.0e-6, 1.0e-4)
 
 TIMING_RATIO_LIMIT = 1.10
 CV_LIMIT = 0.05
+SCREEN_CV_HARD_LIMIT = 0.20
 DEFAULT_TIMING_BATCH_SIZE = 10
 DEFAULT_TIMED_BATCHES = 3
 SELF_TEST_TIMING_BATCH_SIZE = 2
@@ -402,6 +413,13 @@ def analyze_root(root, opts):
                     f"(baseline={b.get(column)!r} candidate={c.get(column)!r})",
                 )
 
+    if opts.screen and (max_endpoint_norm != 0.0 or max_iteration_delta != 0):
+        failures.append(
+            "screen gate requires exact endpoint/iteration equality: "
+            f"max_endpoint_norm={max_endpoint_norm:.9g} "
+            f"max_iteration_delta={max_iteration_delta}",
+        )
+
     subset_hashes = {}
     for arm, by_key in (("baseline", baseline), ("candidate", candidate)):
         values = sorted({
@@ -477,16 +495,32 @@ def analyze_root(root, opts):
         median_b, mean_b, _, cv_b = summary_b
         median_c, mean_c, _, cv_c = summary_c
         ratio = median_c / median_b if median_b else math.inf
-        gate_ok = ratio <= TIMING_RATIO_LIMIT and cv_b < CV_LIMIT and \
-                  cv_c < CV_LIMIT
+        ratio_ok = ratio <= TIMING_RATIO_LIMIT
+        gate_label = "pass"
+        if opts.screen:
+            cv_fail = cv_b >= SCREEN_CV_HARD_LIMIT or \
+                      cv_c >= SCREEN_CV_HARD_LIMIT
+            cv_warn = (not cv_fail) and \
+                      (cv_b >= CV_LIMIT or cv_c >= CV_LIMIT)
+            gate_ok = ratio_ok and not cv_fail
+            if cv_warn:
+                gate_label = "warn"
+                print(
+                    f"WARN timing variance for {category}: "
+                    f"baseline_cv={cv_b:.6f} candidate_cv={cv_c:.6f} "
+                    f"(screen CV band {CV_LIMIT:g}..{SCREEN_CV_HARD_LIMIT:g})",
+                )
+        else:
+            gate_ok = ratio_ok and cv_b < CV_LIMIT and cv_c < CV_LIMIT
         if not gate_ok:
+            gate_label = "fail"
             failures.append(
                 f"timing gate failed for {category}: ratio={ratio:.6f} "
                 f"baseline_cv={cv_b:.6f} candidate_cv={cv_c:.6f}",
             )
         report_rows.append(
             ("family", category[0], category[1], "", median_b, median_c,
-             ratio, cv_b, cv_c, "pass" if gate_ok else "fail"),
+             ratio, cv_b, cv_c, gate_label),
         )
 
     case_keys = sorted(set(case_totals_b) | set(case_totals_c))
@@ -583,8 +617,13 @@ def _write_synthetic_run(
     candidate_steps="0",
     timing_batch_size=SELF_TEST_TIMING_BATCH_SIZE,
     timed_batches=SELF_TEST_TIMED_BATCHES,
+    timing_pattern=None,
 ):
-    """Write a self-contained synthetic A/B result without Julia."""
+    """Write a self-contained synthetic A/B result without Julia.
+
+    timing_pattern, when given, deterministically scales timed repetitions
+    (rep >= 2) of both arms so self-tests can exercise the screen CV bands.
+    """
     repetitions = 1 + timing_batch_size * timed_batches
     root = pathlib.Path(root)
     for arm in ("baseline", "candidate"):
@@ -737,6 +776,9 @@ def _write_synthetic_run(
                 if corrupt:
                     candidate_total = total * 1.5
                 value = candidate_total if arm == "candidate" else total
+                if timing_pattern is not None and rep >= 2:
+                    multiplier = timing_pattern[(rep - 2) % len(timing_pattern)]
+                    value = value * multiplier
                 refinement_steps = (
                     baseline_steps if arm == "baseline" else candidate_steps
                 )
@@ -772,6 +814,7 @@ def _self_test():
             endpoint_atol=None,
             endpoint_rtol=None,
             no_strict_iterations=False,
+            screen=False,
         )
         ok = True
         for (name, corrupt, tree_differs, baseline_steps, candidate_steps), expected in zip(scenarios, wanted):
@@ -818,6 +861,82 @@ def _self_test():
             f"exit={code} expected={expected} {status}",
         )
 
+        screen_opts = SimpleNamespace(
+            endpoint_atol=None,
+            endpoint_rtol=None,
+            no_strict_iterations=False,
+            screen=True,
+        )
+
+        screen_pass = tmp / "screen_pass"
+        _write_synthetic_run(
+            screen_pass,
+            corrupt=False,
+            tree_differs=False,
+        )
+        code = analyze_root(screen_pass, screen_opts)
+        expected = 0
+        status = "PASS" if code == expected else "FAIL"
+        if code != expected:
+            ok = False
+        print(f"SELF_TEST screen_pass: exit={code} expected={expected} {status}")
+
+        screen_warn = tmp / "screen_warn_cv"
+        _write_synthetic_run(
+            screen_warn,
+            corrupt=False,
+            tree_differs=False,
+            timing_pattern=[1.0, 1.2, 0.8, 1.2, 0.8, 1.0],
+        )
+        code = analyze_root(screen_warn, screen_opts)
+        expected = 0
+        status = "PASS" if code == expected else "FAIL"
+        if code != expected:
+            ok = False
+        print(f"SELF_TEST screen_warn_cv: exit={code} expected={expected} {status}")
+
+        screen_cv_fail = tmp / "screen_cv_fail"
+        _write_synthetic_run(
+            screen_cv_fail,
+            corrupt=False,
+            tree_differs=False,
+            timing_pattern=[1.0, 1.5, 0.5, 1.5, 0.5, 1.0],
+        )
+        code = analyze_root(screen_cv_fail, screen_opts)
+        expected = 1
+        status = "PASS" if code == expected else "FAIL"
+        if code != expected:
+            ok = False
+        print(f"SELF_TEST screen_cv_fail: exit={code} expected={expected} {status}")
+
+        screen_endpoint = tmp / "screen_endpoint_delta"
+        _write_synthetic_run(
+            screen_endpoint,
+            corrupt=False,
+            tree_differs=False,
+        )
+        with (screen_endpoint / "candidate" / "results.csv").open(
+            "r+",
+            newline="",
+        ) as stream:
+            rows = list(csv.DictReader(stream))
+            stream.seek(0)
+            writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+            writer.writeheader()
+            for row in rows:
+                if row["family"] == "lp" and row["repetition"] == "2":
+                    row["objective_primal"] = "1.0000001"
+                writer.writerow(row)
+        code = analyze_root(screen_endpoint, screen_opts)
+        expected = 1
+        status = "PASS" if code == expected else "FAIL"
+        if code != expected:
+            ok = False
+        print(
+            f"SELF_TEST screen_endpoint_delta: "
+            f"exit={code} expected={expected} {status}",
+        )
+
         if ok:
             print("SELF_TEST_PASS")
             return 0
@@ -833,6 +952,7 @@ def main():
     parser.add_argument("--endpoint-atol", type=float)
     parser.add_argument("--endpoint-rtol", type=float)
     parser.add_argument("--no-strict-iterations", action="store_true")
+    parser.add_argument("--screen", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     from types import SimpleNamespace
@@ -841,6 +961,7 @@ def main():
         endpoint_atol=args.endpoint_atol,
         endpoint_rtol=args.endpoint_rtol,
         no_strict_iterations=args.no_strict_iterations,
+        screen=args.screen,
     )
     if args.self_test:
         return _self_test()
