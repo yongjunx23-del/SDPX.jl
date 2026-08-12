@@ -1,13 +1,13 @@
 """
     CanonicalConicProblem
 
-Lossless semantic view of a compact `ConicProblem`.  This stage deliberately
-does not formulate or lift a problem: an SOC remains a Lorentz cone, while the
-linear and PSD families are represented by empty, typed collections until
-their frontends are migrated.
+Lossless semantic view of compact `ConicProblem` and ingested `SDPProblem`
+frontends. This stage deliberately does not formulate or lift a problem: an
+SOC remains a Lorentz cone, and an SDP exposes PSD blocks through borrowed
+coefficient/offset views.
 
-All array fields are borrowed from the already-ingested `ConicProblem` and
-must be treated as read-only.  In particular, `canonicalize` does not densify
+All array fields are borrowed from the already-ingested frontend problem and
+must be treated as read-only. In particular, `canonicalize` does not densify
 sparse matrices, change their arithmetic type, or materialize a PSD arrow.
 """
 
@@ -17,18 +17,82 @@ abstract type AbstractCanonicalLinearCone{T} <: AbstractCanonicalCone{T} end
 abstract type AbstractCanonicalLorentzCone{T} <: AbstractCanonicalCone{T} end
 abstract type AbstractCanonicalPSDCone{T} <: AbstractCanonicalCone{T} end
 
+"""
+    CanonicalDensePanelCoefficients
+
+Read-only coefficient vector backed by a flattened dense PSD panel.  The
+`i`th coefficient is a reshape of a view into `panel`, so canonicalization of
+an `SDPProblem` does not materialize a second `Vector{Matrix}`.
+"""
+struct CanonicalDensePanelCoefficients{T,M<:AbstractMatrix{T}} <:
+       AbstractVector{AbstractMatrix{T}}
+    panel::M
+    dimension::Int
+end
+
+Base.IndexStyle(::Type{<:CanonicalDensePanelCoefficients}) = IndexLinear()
+Base.size(coefficients::CanonicalDensePanelCoefficients) =
+    (size(coefficients.panel, 2),)
+Base.length(coefficients::CanonicalDensePanelCoefficients) =
+    size(coefficients.panel, 2)
+Base.eltype(::Type{CanonicalDensePanelCoefficients{T,M}}) where {T,M} =
+    AbstractMatrix{T}
+
+@inline function Base.getindex(
+    coefficients::CanonicalDensePanelCoefficients{T},
+    index::Int,
+) where {T}
+    @boundscheck checkbounds(coefficients, index)
+    k = coefficients.dimension
+    size(coefficients.panel, 1) == k * k || throw(DimensionMismatch(
+        "dense PSD panel row count is not a square",
+    ))
+    return reshape(view(coefficients.panel, :, index), k, k)
+end
+
+"""Read-only lazy negative view used for SDP affine PSD offsets."""
+struct CanonicalNegatedMatrixView{T,M<:AbstractMatrix{T}} <:
+       AbstractMatrix{T}
+    parent_matrix::M
+end
+
+CanonicalNegatedMatrixView(matrix::M) where {M<:AbstractMatrix} =
+    CanonicalNegatedMatrixView{eltype(matrix),M}(matrix)
+
+Base.IndexStyle(::Type{<:CanonicalNegatedMatrixView}) = IndexCartesian()
+Base.size(view::CanonicalNegatedMatrixView) = size(view.parent_matrix)
+Base.axes(view::CanonicalNegatedMatrixView) = axes(view.parent_matrix)
+Base.parent(view::CanonicalNegatedMatrixView) = view.parent_matrix
+
+@inline function Base.getindex(
+    view::CanonicalNegatedMatrixView{T},
+    row::Int,
+    column::Int,
+) where {T}
+    @boundscheck checkbounds(view.parent_matrix, row, column)
+    return -view.parent_matrix[row, column]
+end
+
+@inline function Base.getindex(
+    view::CanonicalNegatedMatrixView{T},
+    index::Int,
+) where {T}
+    @boundscheck checkbounds(view.parent_matrix, index)
+    return -view.parent_matrix[index]
+end
+
 """Semantic boundary for a nonnegative/linear cone block."""
 struct CanonicalLinearCone{T,M<:AbstractMatrix{T},V<:AbstractVector{T}} <:
        AbstractCanonicalLinearCone{T}
     A::M
-    b::V
+    offset::V
 end
 
 """Semantic boundary for a Lorentz (second-order) cone block."""
 struct CanonicalLorentzCone{T,M<:AbstractMatrix{T},V<:AbstractVector{T}} <:
        AbstractCanonicalLorentzCone{T}
     A::M
-    b::V
+    offset::V
 end
 
 """Semantic boundary for a positive-semidefinite cone block."""
@@ -39,7 +103,7 @@ struct CanonicalPSDCone{
 } <:
        AbstractCanonicalPSDCone{T}
     coefficients::C
-    constant::M
+    offset::M
 end
 
 """Row-oriented affine equalities `A * x = b`."""
@@ -68,10 +132,11 @@ end
 """
     CanonicalConicProblem{T}
 
-The semantic cone families are intentionally separate.  `ConicProblem`
-contains only Lorentz blocks, so canonicalization leaves `linear_cones` and
+The semantic cone families are intentionally separate. `ConicProblem` contains
+only Lorentz blocks, so its canonicalization leaves `linear_cones` and
 `psd_cones` empty rather than representing either family as an implicit PSD
-lift.
+lift. `SDPProblem` canonicalization below exposes PSD blocks as a zero-copy
+semantic view.
 """
 struct CanonicalConicProblem{T}
     objective::Vector{T}
@@ -153,6 +218,59 @@ function canonicalize(problem::ConicProblem{T}) where {T}
         AbstractCanonicalLinearCone{T}[],
         lorentz_cones,
         AbstractCanonicalPSDCone{T}[],
+        metadata,
+        reconstruction,
+    )
+end
+
+"""Build a zero-copy canonical PSD view of an ingested SDP problem.
+
+The internal SDP convention is `Σ Aᵢ xᵢ - C ⪰ 0`; the canonical convention
+is `Σ Aᵢ xᵢ + offset ⪰ 0`, hence the lazy negative offset view.
+"""
+function canonicalize(problem::SDPProblem{T}) where {T}
+    variables = problem.dims.m
+    equality_matrix = transpose(problem.B)
+    psd_cones = Vector{AbstractCanonicalPSDCone{T}}(undef, problem.dims.L)
+    storage = problem.cons isa DenseCons{T} ? :dense_panels : :sparse_coefficients
+    @inbounds for block in 1:problem.dims.L
+        dimension = problem.dims.k[block]
+        coefficients = if problem.cons isa DenseCons{T}
+            panel = (problem.cons::DenseCons{T}).Av[block]
+            CanonicalDensePanelCoefficients{T,typeof(panel)}(panel, dimension)
+        elseif problem.cons isa SparseCons{T}
+            (problem.cons::SparseCons{T}).Asp[block]
+        else
+            throw(ArgumentError(
+                "unsupported SDP constraint storage $(typeof(problem.cons))",
+            ))
+        end
+        offset = CanonicalNegatedMatrixView(problem.C[block])
+        psd_cones[block] = CanonicalPSDCone{T,typeof(coefficients),typeof(offset)}(
+            coefficients,
+            offset,
+        )
+    end
+    metadata = (
+        source=:SDPProblem,
+        formulation=:canonical_psd,
+        objective_sense=:min,
+        variables=variables,
+        equality_rows=size(problem.B, 2),
+        cone_order=fill(:psd, problem.dims.L),
+        arithmetic=T,
+        storage=storage,
+    )
+    reconstruction = CanonicalIdentityReconstructionMap(1:variables, UnitRange{Int}[])
+    return CanonicalConicProblem{T}(
+        problem.c,
+        CanonicalEqualities{T,typeof(equality_matrix),typeof(problem.b)}(
+            equality_matrix,
+            problem.b,
+        ),
+        AbstractCanonicalLinearCone{T}[],
+        AbstractCanonicalLorentzCone{T}[],
+        psd_cones,
         metadata,
         reconstruction,
     )

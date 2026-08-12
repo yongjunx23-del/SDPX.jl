@@ -82,10 +82,10 @@ end
         T[1 0; 0 0],
         sparse(T[0 0; 0 1]),
     ]
-    constant = sparse(T[2 0; 0 2])
-    psd = FeatureAPI.CanonicalPSDCone{T,typeof(coefficients),typeof(constant)}(
+    offset = sparse(T[2 0; 0 2])
+    psd = FeatureAPI.CanonicalPSDCone{T,typeof(coefficients),typeof(offset)}(
         coefficients,
-        constant,
+        offset,
     )
     canonical = FeatureAPI.CanonicalConicProblem{T}(
         T[1, 2],
@@ -106,7 +106,27 @@ end
     @test features.psd_cones[1].active_variables == 2
     @test features.psd_cones[1].dense_coefficients == 1
     @test features.psd_cones[1].sparse_csc_coefficients == 1
-    @test features.psd_cones[1].constant.storage === :sparse_csc
+    @test features.psd_cones[1].offset.storage === :sparse_csc
+end
+
+@testset "ProblemFeatures view storage and transpose facts" begin
+    T = BigFloat
+    setprecision(BigFloat, 256) do
+        parent_matrix = sparse(T[1 0; 0 2])
+        negated = FeatureAPI.CanonicalNegatedMatrixView(parent_matrix)
+        transpose_view = transpose(parent_matrix)
+        _, negated_active = SDPX._canonical_matrix_facts(negated, "negated")
+        facts, transpose_active = SDPX._canonical_matrix_facts(transpose_view, "transpose")
+        @test facts.storage === :sparse_csc_transpose_view
+        @test facts.stored_entries == nnz(parent_matrix)
+        @test facts.nonzero_values == nnz(parent_matrix)
+        @test transpose_active == 2
+        negated_facts, _ = SDPX._canonical_matrix_facts(negated, "negated")
+        @test negated_facts.storage === :negated_sparse_csc_view
+        @test negated_facts.stored_entries == nnz(parent_matrix)
+        @test negated_active == 2
+        @test eltype(negated) === BigFloat
+    end
 end
 
 @testset "ProblemFeatures dimensions fail closed" begin

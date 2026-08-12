@@ -29,7 +29,7 @@ struct CanonicalPSDConeFacts
     dense_coefficients::Int
     sparse_csc_coefficients::Int
     other_coefficients::Int
-    constant::CanonicalMatrixFacts
+    offset::CanonicalMatrixFacts
 end
 
 """
@@ -51,6 +51,15 @@ Base.eltype(::ProblemFeatures{T}) where {T} = T
 
 @inline _canonical_storage(::SparseMatrixCSC) = :sparse_csc
 @inline _canonical_storage(::Matrix) = :dense_matrix
+@inline _canonical_storage(::Base.ReshapedArray) = :dense_panel_matrix_view
+@inline _canonical_storage(::LinearAlgebra.Transpose{<:Any,<:SparseMatrixCSC}) =
+    :sparse_csc_transpose_view
+@inline _canonical_storage(::LinearAlgebra.Transpose{<:Any,<:Matrix}) =
+    :dense_transpose_view
+@inline _canonical_storage(view::CanonicalNegatedMatrixView{<:Any,<:SparseMatrixCSC}) =
+    :negated_sparse_csc_view
+@inline _canonical_storage(view::CanonicalNegatedMatrixView{<:Any,<:Matrix}) =
+    :negated_dense_matrix_view
 @inline _canonical_storage(::AbstractMatrix) = :other
 
 @inline function _checked_feature_add(left::Int, right::Int, label::AbstractString)
@@ -63,15 +72,21 @@ Base.eltype(::ProblemFeatures{T}) where {T} = T
 end
 
 function _canonical_matrix_facts(matrix::AbstractMatrix{T}, label::AbstractString) where {T}
-    stored_entries = matrix isa SparseMatrixCSC ? nnz(matrix) : length(matrix)
+    sparse_transpose = matrix isa LinearAlgebra.Transpose{<:Any,<:SparseMatrixCSC}
+    negated_sparse = matrix isa CanonicalNegatedMatrixView{<:Any,<:SparseMatrixCSC}
+    sparse_parent = sparse_transpose ? parent(matrix) :
+                    negated_sparse ? parent(matrix) : nothing
+    stored_entries = matrix isa SparseMatrixCSC || sparse_transpose || negated_sparse ?
+                     nnz(sparse_parent === nothing ? matrix : sparse_parent) : length(matrix)
     nonzero_values = 0
     active_columns = 0
-    if matrix isa SparseMatrixCSC
-        stored_values = nonzeros(matrix)
-        @inbounds for column in axes(matrix, 2)
+    if matrix isa SparseMatrixCSC || negated_sparse
+        sparse_matrix = matrix isa SparseMatrixCSC ? matrix : sparse_parent
+        stored_values = nonzeros(sparse_matrix)
+        @inbounds for column in axes(sparse_matrix, 2)
             column_active = false
-            for pointer in nzrange(matrix, column)
-                value = stored_values[pointer]
+            for pointer in nzrange(sparse_matrix, column)
+                value = negated_sparse ? -stored_values[pointer] : stored_values[pointer]
                 isfinite(value) || throw(ArgumentError("$label contains a non-finite value"))
                 if !iszero(value)
                     nonzero_values = _checked_feature_add(
@@ -84,6 +99,26 @@ function _canonical_matrix_facts(matrix::AbstractMatrix{T}, label::AbstractStrin
             end
             column_active && (active_columns += 1)
         end
+    elseif sparse_transpose
+        # A transpose view of CSC storage is scanned through the parent once.
+        # Marking parent rows gives active logical columns without densifying.
+        parent_matrix = sparse_parent
+        active = Set{Int}()
+        stored_values = nonzeros(parent_matrix)
+        rows = rowvals(parent_matrix)
+        @inbounds for pointer in eachindex(stored_values)
+            value = stored_values[pointer]
+            isfinite(value) || throw(ArgumentError("$label contains a non-finite value"))
+            if !iszero(value)
+                nonzero_values = _checked_feature_add(
+                    nonzero_values,
+                    1,
+                    "$label nonzero count",
+                )
+                push!(active, rows[pointer])
+            end
+        end
+        active_columns = length(active)
     else
         @inbounds for column in axes(matrix, 2)
             column_active = false
@@ -133,11 +168,11 @@ function _canonical_affine_cone_facts(
     size(cone.A, 2) == variables || throw(DimensionMismatch(
         "$label has $(size(cone.A, 2)) columns; expected $variables",
     ))
-    size(cone.A, 1) == length(cone.b) || throw(DimensionMismatch(
-        "$label offset length $(length(cone.b)) does not match $(size(cone.A, 1)) rows",
+    size(cone.A, 1) == length(cone.offset) || throw(DimensionMismatch(
+        "$label offset length $(length(cone.offset)) does not match $(size(cone.A, 1)) rows",
     ))
     size(cone.A, 1) > 0 || throw(DimensionMismatch("$label must have positive dimension"))
-    _check_finite_vector(cone.b, "$label offset")
+    _check_finite_vector(cone.offset, "$label offset")
     matrix, active_columns = _canonical_matrix_facts(cone.A, "$label matrix")
     return CanonicalAffineConeFacts(
         size(cone.A, 1),
@@ -150,14 +185,14 @@ function _canonical_psd_cone_facts(
     variables::Int,
     label::AbstractString,
 ) where {T}
-    size(cone.constant, 1) == size(cone.constant, 2) ||
-        throw(DimensionMismatch("$label constant must be square"))
-    dimension = size(cone.constant, 1)
+    size(cone.offset, 1) == size(cone.offset, 2) ||
+        throw(DimensionMismatch("$label offset must be square"))
+    dimension = size(cone.offset, 1)
     dimension > 0 || throw(DimensionMismatch("$label must have positive dimension"))
     length(cone.coefficients) == variables || throw(DimensionMismatch(
         "$label has $(length(cone.coefficients)) coefficient matrices; expected $variables",
     ))
-    constant, _ = _canonical_matrix_facts(cone.constant, "$label constant")
+    offset, _ = _canonical_matrix_facts(cone.offset, "$label offset")
     stored_entries = 0
     nonzero_values = 0
     active_variables = 0
@@ -183,9 +218,14 @@ function _canonical_psd_cone_facts(
             "$label coefficient nonzero count",
         )
         active_columns > 0 && (active_variables += 1)
-        if facts.storage === :dense_matrix
+        coefficient_storage = facts.storage
+        if cone.coefficients isa CanonicalDensePanelCoefficients
+            coefficient_storage = :dense_panel_matrix_view
+        end
+        if coefficient_storage === :dense_matrix ||
+           coefficient_storage === :dense_panel_matrix_view
             dense_coefficients += 1
-        elseif facts.storage === :sparse_csc
+        elseif coefficient_storage === :sparse_csc
             sparse_csc_coefficients += 1
         else
             other_coefficients += 1
@@ -200,7 +240,7 @@ function _canonical_psd_cone_facts(
         dense_coefficients,
         sparse_csc_coefficients,
         other_coefficients,
-        constant,
+        offset,
     )
 end
 

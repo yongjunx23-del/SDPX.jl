@@ -57,6 +57,8 @@ const AbstractCanonicalPSDCone = SDPX.AbstractCanonicalPSDCone
 const CanonicalLinearCone = SDPX.CanonicalLinearCone
 const CanonicalLorentzCone = SDPX.CanonicalLorentzCone
 const CanonicalPSDCone = SDPX.CanonicalPSDCone
+const CanonicalDensePanelCoefficients = SDPX.CanonicalDensePanelCoefficients
+const CanonicalNegatedMatrixView = SDPX.CanonicalNegatedMatrixView
 const AbstractCanonicalEqualities = SDPX.AbstractCanonicalEqualities
 const CanonicalEqualities = SDPX.CanonicalEqualities
 const CanonicalIdentityReconstructionMap =
@@ -101,6 +103,7 @@ export FixedTraceBlock, FixedTraceAnalysis, analyze_fixed_trace
 export AbstractCanonicalCone, CanonicalLinearCone, CanonicalLorentzCone
 export AbstractCanonicalLinearCone, AbstractCanonicalLorentzCone
 export AbstractCanonicalPSDCone, CanonicalPSDCone
+export CanonicalDensePanelCoefficients, CanonicalNegatedMatrixView
 export AbstractCanonicalEqualities, CanonicalEqualities
 export CanonicalIdentityReconstructionMap, CanonicalReconstructionMap
 export CanonicalConicProblem, canonicalize, reconstruct_identity
