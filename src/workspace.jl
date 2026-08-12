@@ -856,14 +856,38 @@ function _sparse_lower_column_boundaries(
     return boundaries
 end
 
-@inline function _planned_or_computed_mixed_reduced_decision(
+@inline function _planned_or_computed_decision(
     parameters::NamedTuple,
+    key::Symbol,
     compute::F,
 ) where {F}
-    hasproperty(parameters, :mixed_reduced_arrow_decision) &&
-        return parameters.mixed_reduced_arrow_decision
+    hasproperty(parameters, key) && return getproperty(parameters, key)
     return compute()
 end
+
+@inline _planned_or_computed_mixed_reduced_decision(
+    parameters::NamedTuple,
+    compute::F,
+) where {F} = _planned_or_computed_decision(
+    parameters,
+    :mixed_reduced_arrow_decision,
+    compute,
+)
+
+function _lazy_memory_supplier(supply::F) where {F}
+    cache = Ref{Union{Nothing,Int}}(nothing)
+    return () -> begin
+        value = cache[]
+        value === nothing || return value
+        resolved = supply()
+        cache[] = resolved
+        return resolved
+    end
+end
+
+@inline _arrow_crossover_needs_memory(parameters::NamedTuple) =
+    !hasproperty(parameters, :reduced_arrow_decision) ||
+    !hasproperty(parameters, :mixed_reduced_arrow_decision)
 
 """Normalize a pre-LA positional plan without weakening modern-plan checks.
 
@@ -1001,22 +1025,22 @@ function Workspace(
     requested_threads = plan.threads
     selected_threads = plan.threads
     is_sparse = prob.cons isa SparseCons
-    available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
-    reduced_arrow_decision = if hasproperty(
+    available_memory = _lazy_memory_supplier(
+        ExtendedPrecisionBLAS._system_free_memory_bytes,
+    )
+    _arrow_crossover_needs_memory(plan.parameters) && available_memory()
+    reduced_arrow_decision = _planned_or_computed_decision(
         plan.parameters,
         :reduced_arrow_decision,
-    )
-        plan.parameters.reduced_arrow_decision
-    else
-        _reduced_arrow_crossover(
+        () -> _reduced_arrow_crossover(
             prob,
             T,
             planned_extended_precision_blas,
             planned_extended_precision_memory_fraction,
             requested_threads;
-            available_memory_bytes=available_memory,
-        )
-    end
+            available_memory_bytes=available_memory(),
+        ),
+    )
     reduced_arrow_panel = config.reduced_arrow
     reduced_arrow_panel && !reduced_arrow_decision.enabled &&
         throw(ArgumentError(
@@ -1126,7 +1150,7 @@ function Workspace(
                     planned_mixed_precision_memory_fraction,
                     selected_threads;
                     mixed=true,
-                    available_memory_bytes=available_memory,
+                    available_memory_bytes=available_memory(),
                 )
             end,
         )

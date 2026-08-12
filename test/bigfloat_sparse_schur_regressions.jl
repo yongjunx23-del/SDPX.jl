@@ -574,27 +574,68 @@ end
 end
 
 @testset "BigFloat mixed reduced arrow without native panel" begin
-    stored_called = Ref(false)
-    stored_decision = SDPX._planned_or_computed_mixed_reduced_decision(
-        (mixed_reduced_arrow_decision=:stored,),
-        () -> begin
-            stored_called[] = true
-            :computed
-        end,
-    )
-    @test stored_decision === :stored
-    @test !stored_called[]
+    # Each scenario uses a fresh supplier so the prewarm count is proven
+    # independently of any earlier cache warming.
+    function probe(value=4096)
+        count = Ref(0)
+        memory = SDPX._lazy_memory_supplier() do
+            count[] += 1
+            value
+        end
+        return memory, count
+    end
 
-    missing_called = Ref(false)
-    missing_decision = SDPX._planned_or_computed_mixed_reduced_decision(
+    # A: both stored -> no probe and both compute thunks short-circuit.
+    memory_a, count_a = probe()
+    @test !SDPX._arrow_crossover_needs_memory((
+        reduced_arrow_decision=:r,
+        mixed_reduced_arrow_decision=:m,
+    ))
+    @test SDPX._planned_or_computed_decision(
+        (reduced_arrow_decision=:r,),
+        :reduced_arrow_decision,
+        () -> memory_a(),
+    ) === :r
+    @test SDPX._planned_or_computed_mixed_reduced_decision(
+        (mixed_reduced_arrow_decision=:m,),
+        () -> memory_a(),
+    ) === :m
+    @test count_a[] == 0
+
+    # B: stored reduced + missing mixed -> prewarm once, mixed helper shares it.
+    memory_b, count_b = probe()
+    @test SDPX._arrow_crossover_needs_memory((
+        reduced_arrow_decision=:r,
+    ))
+    memory_b()
+    @test count_b[] == 1
+    @test SDPX._planned_or_computed_mixed_reduced_decision(
+        (reduced_arrow_decision=:r,),
+        () -> memory_b(),
+    ) == 4096
+    @test count_b[] == 1
+
+    # C: both missing -> cold prewarm once, both helpers share it.
+    memory_c, count_c = probe()
+    @test SDPX._arrow_crossover_needs_memory(NamedTuple())
+    memory_c()
+    @test count_c[] == 1
+    @test SDPX._planned_or_computed_decision(
         NamedTuple(),
-        () -> begin
-            missing_called[] = true
-            :computed
-        end,
-    )
-    @test missing_decision === :computed
-    @test missing_called[]
+        :reduced_arrow_decision,
+        () -> memory_c(),
+    ) == 4096
+    @test SDPX._planned_or_computed_mixed_reduced_decision(
+        NamedTuple(),
+        () -> memory_c(),
+    ) == 4096
+    @test count_c[] == 1
+
+    # D: zero-valued probe still caches and counts once.
+    memory_d, count_d = probe(0)
+    @test memory_d() == 0
+    @test memory_d() == 0
+    @test count_d[] == 1
 
     setprecision(BigFloat, 256) do
         problem, _, _ = _bigfloat_arrow_fixture()
