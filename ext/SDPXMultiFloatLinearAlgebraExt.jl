@@ -124,11 +124,12 @@ function _provider_cholesky_factor!(
 ) where {MF}
     # Factor setup is the single fail-closed gate for non-finite input.  The
     # hot GEMM/SYRK/TRSM paths below intentionally do not rescan all elements.
-    all(isfinite, A) || throw(ArgumentError(
+    SDPX._all_finite_lower(A) || throw(ArgumentError(
         "MFLA cholesky received non-finite input; refusing to run",
     ))
     factor = cholesky!(A; check=false, config=provider.config)
     mfla_issuccess(factor) || return nothing
+    SDPX._all_finite_lower(factor.factors) || return nothing
     return _ProviderCholesky{MF}(factor, provider.config)
 end
 

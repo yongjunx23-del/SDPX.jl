@@ -255,6 +255,23 @@ end
         @test_throws ArgumentError SDPX.la_chol!(backend, A)
     end
 
+    @testset "provider factor finite guard follows lower authority" begin
+        T = Float64x4
+        backend = _expect_provider(T)
+        n = 4
+        R = T.(randn(n, n))
+        source = transpose(R) * R + T(8) .* Matrix{T}(I, n, n)
+        stale_upper = copy(source)
+        for column in 1:n, row in 1:(column - 1)
+            stale_upper[row, column] = T(NaN)
+        end
+        @test SDPX.la_cholesky_factor!(backend, stale_upper) !== nothing
+
+        bad_lower = copy(source)
+        bad_lower[2, 1] = T(NaN)
+        @test_throws ArgumentError SDPX.la_cholesky_factor!(backend, bad_lower)
+    end
+
     @testset "legacy default trajectory stays unchanged" begin
         T = Float64x4
         config = LA.plan_la_backend(
