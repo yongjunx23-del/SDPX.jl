@@ -73,6 +73,153 @@ Base.parent(view::CanonicalNegatedMatrixView) = view.parent_matrix
     return -view.parent_matrix[row, column]
 end
 
+"""
+    CanonicalScalarBlockRowsView
+
+Read-only logical `L×m` view of scalar PSD blocks.  The view borrows the
+ingested `DenseCons`/`SparseCons` storage and exposes the `(l, i)` entry of
+block `l`'s coefficient for variable `i` (the sole `[1, 1]` entry).  In
+particular, construction does not materialize an `L×m` matrix.
+"""
+struct CanonicalScalarBlockRowsView{T,C<:AbstractCons{T}} <: AbstractMatrix{T}
+    cons::C
+    rows::Int
+    columns::Int
+end
+
+Base.IndexStyle(::Type{<:CanonicalScalarBlockRowsView}) = IndexCartesian()
+Base.size(view::CanonicalScalarBlockRowsView) = (view.rows, view.columns)
+Base.axes(view::CanonicalScalarBlockRowsView) = (Base.OneTo(view.rows), Base.OneTo(view.columns))
+Base.parent(view::CanonicalScalarBlockRowsView) = view.cons
+
+function CanonicalScalarBlockRowsView(
+    cons::C,
+    rows::Int,
+    columns::Int,
+) where {T,C<:AbstractCons{T}}
+    rows >= 0 || throw(ArgumentError("scalar block row count must be nonnegative"))
+    columns >= 0 || throw(ArgumentError("scalar block column count must be nonnegative"))
+    if cons isa DenseCons{T}
+        panels = (cons::DenseCons{T}).Av
+        length(panels) == rows || throw(DimensionMismatch(
+            "dense scalar block count $(length(panels)) does not match $rows",
+        ))
+        for panel in panels
+            size(panel) == (1, columns) || throw(DimensionMismatch(
+                "dense scalar block panel has size $(size(panel)); expected (1, $columns)",
+            ))
+        end
+    elseif cons isa SparseCons{T}
+        sparse = cons::SparseCons{T}
+        length(sparse.Asp) == rows || throw(DimensionMismatch(
+            "sparse scalar block count $(length(sparse.Asp)) does not match $rows",
+        ))
+        length(sparse.active) == rows || throw(DimensionMismatch(
+            "sparse scalar active-block count $(length(sparse.active)) does not match $rows",
+        ))
+        for block in sparse.Asp
+            if block isa Vector{SparseMatrixCSC{T,Int}}
+                length(block) == columns || throw(DimensionMismatch(
+                    "sparse scalar block has $(length(block)) variables; expected $columns",
+                ))
+            elseif block isa CompactScalarCoefficientVector{T}
+                block.variables == columns || throw(DimensionMismatch(
+                    "compact scalar block has $(block.variables) variables; expected $columns",
+                ))
+            elseif block isa ActiveSparseCoefficientVector{T}
+                block.variables == columns || throw(DimensionMismatch(
+                    "active sparse scalar block has $(block.variables) variables; expected $columns",
+                ))
+            else
+                throw(ArgumentError("unsupported sparse scalar coefficient storage $(typeof(block))"))
+            end
+        end
+    else
+        throw(ArgumentError("unsupported scalar coefficient storage $(typeof(cons))"))
+    end
+    return CanonicalScalarBlockRowsView{T,C}(cons, rows, columns)
+end
+
+@inline function _canonical_scalar_sparse_entry(
+    block::Vector{SparseMatrixCSC{T,Int}},
+    variable::Int,
+) where {T}
+    return block[variable][1, 1]
+end
+
+@inline function _canonical_scalar_sparse_entry(
+    block::CompactScalarCoefficientVector{T},
+    variable::Int,
+) where {T}
+    return variable == block.active_variable ? block.coefficient[1, 1] : zero(T)
+end
+
+@inline function _canonical_scalar_sparse_entry(
+    block::ActiveSparseCoefficientVector{T},
+    variable::Int,
+) where {T}
+    position = searchsortedfirst(block.active_variables, variable)
+    return position <= length(block.active_variables) &&
+           @inbounds(block.active_variables[position]) == variable ?
+           @inbounds(block.coefficients[position][1, 1]) : zero(T)
+end
+
+@inline function Base.getindex(
+    view::CanonicalScalarBlockRowsView{T,<:DenseCons{T}},
+    row::Int,
+    column::Int,
+) where {T}
+    @boundscheck checkbounds(view, row, column)
+    panel = @inbounds(view.cons.Av[row])
+    return @inbounds panel[1, column]
+end
+
+@inline function Base.getindex(
+    view::CanonicalScalarBlockRowsView{T,<:SparseCons{T}},
+    row::Int,
+    column::Int,
+) where {T}
+    @boundscheck checkbounds(view, row, column)
+    block = @inbounds(view.cons.Asp[row])
+    return _canonical_scalar_sparse_entry(block, column)
+end
+
+@inline function Base.getindex(view::CanonicalScalarBlockRowsView, index::Int)
+    @boundscheck checkbounds(view, index)
+    row = mod1(index, view.rows)
+    column = (index - 1) ÷ view.rows + 1
+    return view[row, column]
+end
+
+"""Read-only lazy scalar offset vector backed by `SDPProblem.C`."""
+struct CanonicalNegatedScalarOffsetsView{T,C<:AbstractVector{<:AbstractMatrix{T}}} <:
+       AbstractVector{T}
+    parent_blocks::C
+end
+
+CanonicalNegatedScalarOffsetsView(blocks::C) where {
+    T,
+    C<:AbstractVector{<:AbstractMatrix{T}},
+} = CanonicalNegatedScalarOffsetsView{T,C}(blocks)
+
+Base.IndexStyle(::Type{<:CanonicalNegatedScalarOffsetsView}) = IndexLinear()
+Base.size(view::CanonicalNegatedScalarOffsetsView) = (length(view.parent_blocks),)
+Base.length(view::CanonicalNegatedScalarOffsetsView) = length(view.parent_blocks)
+Base.axes(view::CanonicalNegatedScalarOffsetsView) = axes(view.parent_blocks)
+Base.parent(view::CanonicalNegatedScalarOffsetsView) = view.parent_blocks
+
+@inline function Base.getindex(
+    view::CanonicalNegatedScalarOffsetsView{T},
+    index::Int,
+) where {T}
+    @boundscheck checkbounds(view.parent_blocks, index)
+    block = @inbounds(view.parent_blocks[index])
+    size(block) == (1, 1) || throw(DimensionMismatch(
+        "scalar PSD offset block has size $(size(block)); expected (1, 1)",
+    ))
+    return -@inbounds(block[1, 1])
+end
+
 @inline function Base.getindex(
     view::CanonicalNegatedMatrixView{T},
     index::Int,
@@ -231,6 +378,50 @@ is `Σ Aᵢ xᵢ + offset ⪰ 0`, hence the lazy negative offset view.
 function canonicalize(problem::SDPProblem{T}) where {T}
     variables = problem.dims.m
     equality_matrix = transpose(problem.B)
+    scalar_blocks = problem.dims.L > 0 && all(==(1), problem.dims.k)
+    if scalar_blocks
+        storage = problem.cons isa DenseCons{T} ? :dense_panels :
+                  problem.cons isa SparseCons{T} ? :sparse_coefficients :
+                  throw(ArgumentError(
+                      "unsupported SDP constraint storage $(typeof(problem.cons))",
+                  ))
+        rows = CanonicalScalarBlockRowsView(
+            problem.cons,
+            problem.dims.L,
+            variables,
+        )
+        offsets = CanonicalNegatedScalarOffsetsView(problem.C)
+        linear_cone = CanonicalLinearCone{T,typeof(rows),typeof(offsets)}(
+            rows,
+            offsets,
+        )
+        metadata = (
+            source=:SDPProblem,
+            formulation=:canonical_linear,
+            objective_sense=:min,
+            variables=variables,
+            equality_rows=size(problem.B, 2),
+            cone_order=[:linear],
+            arithmetic=T,
+            storage=storage,
+        )
+        reconstruction = CanonicalIdentityReconstructionMap(
+            1:variables,
+            UnitRange{Int}[],
+        )
+        return CanonicalConicProblem{T}(
+            problem.c,
+            CanonicalEqualities{T,typeof(equality_matrix),typeof(problem.b)}(
+                equality_matrix,
+                problem.b,
+            ),
+            AbstractCanonicalLinearCone{T}[linear_cone],
+            AbstractCanonicalLorentzCone{T}[],
+            AbstractCanonicalPSDCone{T}[],
+            metadata,
+            reconstruction,
+        )
+    end
     psd_cones = Vector{AbstractCanonicalPSDCone{T}}(undef, problem.dims.L)
     storage = problem.cons isa DenseCons{T} ? :dense_panels : :sparse_coefficients
     @inbounds for block in 1:problem.dims.L

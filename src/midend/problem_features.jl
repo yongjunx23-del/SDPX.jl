@@ -60,6 +60,10 @@ Base.eltype(::ProblemFeatures{T}) where {T} = T
     :negated_sparse_csc_view
 @inline _canonical_storage(view::CanonicalNegatedMatrixView{<:Any,<:Matrix}) =
     :negated_dense_matrix_view
+@inline _canonical_storage(::CanonicalScalarBlockRowsView{<:Any,<:DenseCons}) =
+    :dense_scalar_block_rows_view
+@inline _canonical_storage(::CanonicalScalarBlockRowsView{<:Any,<:SparseCons}) =
+    :sparse_scalar_block_rows_view
 @inline _canonical_storage(::AbstractMatrix) = :other
 
 @inline function _checked_feature_add(left::Int, right::Int, label::AbstractString)
@@ -147,11 +151,232 @@ function _canonical_matrix_facts(matrix::AbstractMatrix{T}, label::AbstractStrin
     return facts, active_columns
 end
 
+function _canonical_scalar_rows_dense_facts(
+    view::CanonicalScalarBlockRowsView{T,<:DenseCons{T}},
+    label::AbstractString,
+) where {T}
+    panels = view.cons.Av
+    length(panels) == view.rows || throw(DimensionMismatch(
+        "$label dense block count does not match logical rows",
+    ))
+    nonzero_values = 0
+    active = BitSet()
+    stored_entries = 0
+    for (row, panel) in pairs(panels)
+        size(panel) == (1, view.columns) || throw(DimensionMismatch(
+            "$label dense block $row has size $(size(panel)); expected (1, $(view.columns))",
+        ))
+        stored_entries = _checked_feature_add(
+            stored_entries,
+            length(panel),
+            "$label stored count",
+        )
+        @inbounds for column in axes(panel, 2)
+            value = panel[1, column]
+            isfinite(value) || throw(ArgumentError(
+                "$label block $row contains a non-finite value",
+            ))
+            if !iszero(value)
+                nonzero_values = _checked_feature_add(
+                    nonzero_values,
+                    1,
+                    "$label nonzero count",
+                )
+                push!(active, column)
+            end
+        end
+    end
+    return CanonicalMatrixFacts(
+        view.rows,
+        view.columns,
+        stored_entries,
+        nonzero_values,
+        :dense_scalar_block_rows_view,
+    ), length(active)
+end
+
+function _canonical_scalar_matrix_facts(
+    matrix::SparseMatrixCSC{T,Int},
+    label::AbstractString,
+) where {T}
+    size(matrix) == (1, 1) || throw(DimensionMismatch(
+        "$label sparse scalar coefficient has size $(size(matrix)); expected (1, 1)",
+    ))
+    values = nonzeros(matrix)
+    nonzero_values = 0
+    @inbounds for value in values
+        isfinite(value) || throw(ArgumentError("$label contains a non-finite value"))
+        !iszero(value) && (nonzero_values += 1)
+    end
+    return nnz(matrix), nonzero_values
+end
+
+function _canonical_scalar_rows_sparse_facts(
+    view::CanonicalScalarBlockRowsView{T,<:SparseCons{T}},
+    label::AbstractString,
+) where {T}
+    cons = view.cons
+    length(cons.Asp) == view.rows || throw(DimensionMismatch(
+        "$label sparse block count does not match logical rows",
+    ))
+    length(cons.active) == view.rows || throw(DimensionMismatch(
+        "$label sparse active-block count does not match logical rows",
+    ))
+    stored_entries = 0
+    nonzero_values = 0
+    active_columns = BitSet()
+    for row in 1:view.rows
+        block = cons.Asp[row]
+        ids = cons.active[row]
+        previous = 0
+        for variable in ids
+            1 <= variable <= view.columns || throw(BoundsError(1:view.columns, variable))
+            variable > previous || throw(ArgumentError(
+                "$label active variables must be sorted and unique",
+            ))
+            previous = variable
+        end
+        structural_ids = Int[]
+        if block isa Vector{SparseMatrixCSC{T,Int}}
+            length(block) == view.columns || throw(DimensionMismatch(
+                "$label sparse block $row has $(length(block)) variables; expected $(view.columns)",
+            ))
+            for variable in ids
+                stored, nonzero = _canonical_scalar_matrix_facts(
+                    @inbounds(block[variable]),
+                    "$label block $row variable $variable",
+                )
+                stored_entries = _checked_feature_add(
+                    stored_entries,
+                    stored,
+                    "$label stored count",
+                )
+                nonzero_values = _checked_feature_add(
+                    nonzero_values,
+                    nonzero,
+                    "$label nonzero count",
+                )
+                # `active` is structural (`nnz > 0`), so an explicitly stored
+                # zero still belongs to the active-id cache.  Numeric
+                # activity is tracked separately in `active_columns`.
+                stored > 0 && push!(structural_ids, variable)
+                nonzero > 0 && push!(active_columns, variable)
+            end
+        elseif block isa CompactScalarCoefficientVector{T}
+            block.variables == view.columns || throw(DimensionMismatch(
+                "$label compact scalar block $row has $(block.variables) variables; expected $(view.columns)",
+            ))
+            1 <= block.active_variable <= view.columns ||
+                throw(BoundsError(1:view.columns, block.active_variable))
+            size(block.empty) == (1, 1) || throw(DimensionMismatch(
+                "$label compact scalar block $row empty state has size $(size(block.empty)); expected (1, 1)",
+            ))
+            empty_stored, empty_nonzero = _canonical_scalar_matrix_facts(
+                block.empty,
+                "$label block $row empty state",
+            )
+            empty_nonzero == 0 || throw(ArgumentError(
+                "$label compact scalar block $row empty state must be zero",
+            ))
+            stored, nonzero = _canonical_scalar_matrix_facts(
+                block.coefficient,
+                "$label block $row active coefficient",
+            )
+            stored_entries = _checked_feature_add(stored_entries, stored, "$label stored count")
+            nonzero_values = _checked_feature_add(nonzero_values, nonzero, "$label nonzero count")
+            # Compact storage participates in `cons.active` through its CSC
+            # stored structure, just like the ordinary vector representation.
+            stored > 0 && push!(structural_ids, block.active_variable)
+            nonzero > 0 && push!(active_columns, block.active_variable)
+        elseif block isa ActiveSparseCoefficientVector{T}
+            block.variables == view.columns || throw(DimensionMismatch(
+                "$label active sparse block $row has $(block.variables) variables; expected $(view.columns)",
+            ))
+            length(block.active_variables) == length(block.coefficients) || throw(DimensionMismatch(
+                "$label active sparse block $row active ids and coefficients must match",
+            ))
+            previous_active = 0
+            for (position, variable) in pairs(block.active_variables)
+                1 <= variable <= view.columns || throw(BoundsError(1:view.columns, variable))
+                variable > previous_active || throw(ArgumentError(
+                    "$label active sparse block $row ids must be sorted and unique",
+                ))
+                previous_active = variable
+                stored, nonzero = _canonical_scalar_matrix_facts(
+                    @inbounds(block.coefficients[position]),
+                    "$label block $row variable $variable",
+                )
+                stored_entries = _checked_feature_add(stored_entries, stored, "$label stored count")
+                nonzero_values = _checked_feature_add(nonzero_values, nonzero, "$label nonzero count")
+                # ActiveSparseCoefficientVector owns the structural id list;
+                # preserve that contract even for an empty coefficient.  The
+                # numeric feature count remains based on `nonzero` below.
+                push!(structural_ids, variable)
+                nonzero > 0 && push!(active_columns, variable)
+            end
+            size(block.empty) == (1, 1) || throw(DimensionMismatch(
+                "$label active sparse block $row empty state has size $(size(block.empty)); expected (1, 1)",
+            ))
+            empty_stored, empty_nonzero = _canonical_scalar_matrix_facts(
+                block.empty,
+                "$label active sparse block $row empty state",
+            )
+            empty_nonzero == 0 || throw(ArgumentError(
+                "$label active sparse block $row empty state must be zero",
+            ))
+        else
+            throw(ArgumentError("$label unsupported sparse block storage $(typeof(block))"))
+        end
+        ids == structural_ids || throw(ArgumentError(
+            "$label active ids do not match structurally stored scalar coefficients in block $row",
+        ))
+    end
+    return CanonicalMatrixFacts(
+        view.rows,
+        view.columns,
+        stored_entries,
+        nonzero_values,
+        :sparse_scalar_block_rows_view,
+    ), length(active_columns)
+end
+
+_canonical_matrix_facts(
+    view::CanonicalScalarBlockRowsView{T,<:DenseCons{T}},
+    label::AbstractString,
+) where {T} = _canonical_scalar_rows_dense_facts(view, label)
+
+_canonical_matrix_facts(
+    view::CanonicalScalarBlockRowsView{T,<:SparseCons{T}},
+    label::AbstractString,
+) where {T} = _canonical_scalar_rows_sparse_facts(view, label)
+
 function _check_finite_vector(vector::AbstractVector, label::AbstractString)
     nonzero_values = 0
     for value in vector
         isfinite(value) || throw(ArgumentError("$label contains a non-finite value"))
         iszero(value) || (nonzero_values = _checked_feature_add(
+            nonzero_values,
+            1,
+            "$label nonzero count",
+        ))
+    end
+    return nonzero_values
+end
+
+function _check_finite_vector(
+    vector::CanonicalNegatedScalarOffsetsView{T},
+    label::AbstractString,
+) where {T}
+    nonzero_values = 0
+    for (index, block) in pairs(vector.parent_blocks)
+        size(block) == (1, 1) || throw(DimensionMismatch(
+            "$label block $index has size $(size(block)); expected (1, 1)",
+        ))
+        value = block[1, 1]
+        isfinite(value) || throw(ArgumentError(
+            "$label block $index contains a non-finite value",
+        ))
+        !iszero(value) && (nonzero_values = _checked_feature_add(
             nonzero_values,
             1,
             "$label nonzero count",

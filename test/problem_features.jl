@@ -282,3 +282,73 @@ end
         nonfinite_canonical,
     )
 end
+
+@testset "scalar sparse rows feature ownership and finite validation" begin
+    setprecision(BigFloat, 256) do
+        T = BigFloat
+        c = T[1, 2]
+        G = sparse(T[
+            3 0
+            0 4
+            5 0
+        ])
+        h = T[7, 8, 9]
+        problem = SDPX.linear_program(c, G, h; T=T, sparse=true, verbosity=0)
+        canonical = FeatureAPI.canonicalize(problem)
+        cone = canonical.linear_cones[1]
+        @test cone.A isa FeatureAPI.CanonicalScalarBlockRowsView
+        @test cone.offset isa FeatureAPI.CanonicalNegatedScalarOffsetsView
+        @test parent(cone.A) === problem.cons
+        @test parent(cone.offset) === problem.C
+        @test cone.A[1, 1] == T(3)
+        @test cone.A[2, 2] == T(4)
+        @test cone.A[3, 1] == T(5)
+        @test cone.offset[1] == -h[1]
+        features = FeatureAPI.extract_problem_features(canonical)
+        facts = features.linear_cones[1].map
+        @test facts.matrix.rows == 3
+        @test facts.matrix.columns == 2
+        @test facts.matrix.storage === :sparse_scalar_block_rows_view
+        @test facts.matrix.nonzero_values == 3
+        @test facts.matrix.stored_entries == 3
+        @test facts.active_columns == 2
+
+        # Structural CSC storage may retain an explicit zero.  It contributes
+        # to stored entries but not numeric nonzeros or active columns.
+        explicit_zero = SparseMatrixCSC{T,Int}(
+            1,
+            1,
+            [1, 2],
+            [1],
+            T[0],
+        )
+        zero_block = SparseMatrixCSC{T,Int}[
+            explicit_zero,
+            spzeros(T, 1, 1),
+        ]
+        zero_cons = SDPX.SparseCons{T}(
+            [zero_block],
+            [[1]],
+            [[1]],
+            [zeros(T, 0, 0)],
+        )
+        zero_view = FeatureAPI.CanonicalScalarBlockRowsView(zero_cons, 1, 2)
+        zero_facts, zero_active = SDPX._canonical_matrix_facts(
+            zero_view,
+            "explicit zero scalar rows",
+        )
+        @test zero_facts.stored_entries == 1
+        @test zero_facts.nonzero_values == 0
+        @test zero_active == 0
+
+        bad = sparse(T[
+            Inf 0
+            0 4
+            5 0
+        ])
+        bad_problem = SDPX.linear_program(c, bad, h; T=T, sparse=true, validate=false, verbosity=0)
+        @test_throws ArgumentError FeatureAPI.extract_problem_features(
+            FeatureAPI.canonicalize(bad_problem),
+        )
+    end
+end

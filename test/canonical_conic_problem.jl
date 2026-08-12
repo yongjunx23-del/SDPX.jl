@@ -204,3 +204,37 @@ end
         @test features.psd_cones[1].offset.storage === :negated_dense_matrix_view
     end
 end
+
+@testset "scalar SDP canonicalizes as one linear cone" begin
+    c = [1.0, -2.0]
+    G = [2.0 0.0; 0.0 3.0]
+    h = [4.0, 5.0]
+    Aeq = [1.0 2.0]
+    beq = [6.0]
+    problem = SDPX.linear_program(
+        c,
+        G,
+        h;
+        Aeq=Aeq,
+        beq=beq,
+        sparse=false,
+        verbosity=0,
+    )
+    canonical = Canonical.canonicalize(problem)
+    @test canonical.objective === problem.c
+    @test length(canonical.linear_cones) == 1
+    @test isempty(canonical.lorentz_cones)
+    @test isempty(canonical.psd_cones)
+    cone = canonical.linear_cones[1]
+    @test size(cone.A) == (2, 2)
+    @test cone.A[1, 1] == G[1, 1]
+    @test cone.A[2, 2] == G[2, 2]
+    @test cone.offset[1] == -h[1]
+    @test cone.offset[2] == -h[2]
+    @test cone.offset isa Canonical.CanonicalNegatedScalarOffsetsView
+    @test parent(cone.offset) === problem.C
+    @test canonical.equalities.A == Aeq
+    @test canonical.equalities.b === problem.b
+    @test canonical.metadata.formulation === :canonical_linear
+    @test canonical.metadata.cone_order == [:linear]
+end
