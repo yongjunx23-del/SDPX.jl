@@ -209,6 +209,44 @@ end
     resolved_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved)
     core_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved.core)
     @test stable_route(resolved_plan) == stable_route(core_plan)
+
+    route = PlannerAPI.resolve_execution_route(
+        SDPX.AutoPlanner(),
+        lifted,
+        options,
+    )
+    @test route.problem === lifted
+    @test route.options === options
+    @test route.classification.cone === :socp
+    @test route.classification.variables == lifted.dims.m
+    @test route.classification.equalities == lifted.dims.n
+    @test route.algorithm === :socp_psd2
+    @test route.provenance === :value_level_mature_formula
+    routed_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, route)
+    @test stable_route(routed_plan) == stable_route(planned)
+    @test routed_plan.parameters.execution_route_provenance ===
+          :value_level_mature_formula
+    lp = SDPX.ingest(
+        [1.0],
+        [reshape([1.0], 1, 1, 1)],
+        [fill(1.0, 1, 1)],
+        zeros(1, 0),
+        Float64[];
+        verbosity=0,
+    )
+    @test_throws ArgumentError SDPX.build_execution_plan(
+        SDPX.AutoPlanner(),
+        lp,
+        route,
+    )
+    feasibility = SDPX.SolverOptions{Float64}(
+        mode=SDPX.FEASIBILITY,
+        presolve=false,
+    )
+    feasibility_route = PlannerAPI.resolve_execution_route(
+        SDPX.AutoPlanner(), lp, feasibility,
+    )
+    @test feasibility_route.algorithm === :sdp_primal_dual
 end
 
 @testset "Exact structural planner resolves only provable routes" begin

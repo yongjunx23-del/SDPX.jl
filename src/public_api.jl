@@ -76,6 +76,7 @@ const CanonicalPSDConeFacts = SDPX.CanonicalPSDConeFacts
 const ProblemFeatures = SDPX.ProblemFeatures
 const extract_problem_features = SDPX.extract_problem_features
 const AutoPlanner = SDPX.AutoPlanner
+const resolve_execution_route = SDPX.resolve_execution_route
 const StructuralPlanningIntent = SDPX.StructuralPlanningIntent
 const AutoPlannerSnapshot = SDPX.AutoPlannerSnapshot
 const planner_snapshot = SDPX.planner_snapshot
@@ -117,7 +118,8 @@ export CanonicalConicProblem, canonicalize, reconstruct_identity
 export CanonicalMatrixFacts, CanonicalAffineMapFacts, CanonicalAffineConeFacts
 export CanonicalPSDConeFacts, ProblemFeatures
 export extract_problem_features
-export AutoPlanner, StructuralPlanningIntent, AutoPlannerSnapshot
+export AutoPlanner, resolve_execution_route
+export StructuralPlanningIntent, AutoPlannerSnapshot
 export planner_snapshot, unresolved_options, planner_summary
 export PlanningDecision, ResolvedAutoPlannerSnapshot
 export resolve_planner_snapshot, resolved_planner_summary

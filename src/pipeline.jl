@@ -914,24 +914,18 @@ end
 end
 
 """
-    build_execution_plan(::AutoPlanner, prob, opts)
+    resolve_execution_route(::AutoPlanner, prob, opts)
 
-Resolve the existing execution-plan policy through the midend planner
-boundary.  `AutoPlanner` is intentionally stateless for now: this method
-contains the established decision formulas unchanged and only makes the
-planning entry explicit.
+Resolve the post-presolve value-level execution route.  This is the only
+place that chooses the mature algorithm formula; scaling, parameters, and
+resource-dependent backend choices remain late-bound below.
 """
-function build_execution_plan(
+function resolve_execution_route(
     ::AutoPlanner,
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
     classification = classify_problem(prob)
-    available = _available_memory_bytes()
-    reduced_arrow_decision =
-        _reduced_arrow_decision(prob, opts, available)
-    mixed_arrow_decision =
-        _mixed_reduced_arrow_decision(prob, opts, available)
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
     soc_algorithm = classification.maximum_block_size <= 2 ?
@@ -965,6 +959,61 @@ function build_execution_plan(
         # the model is exactly SOC-representable.
         :sdp_primal_dual
     end
+    return ResolvedExecutionRoute(
+        prob,
+        opts,
+        classification,
+        algorithm,
+        :value_level_mature_formula,
+        _EXECUTION_ROUTE_TOKEN,
+    )
+end
+
+function _validate_execution_route(
+    route::ResolvedExecutionRoute{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    route.problem === prob || throw(ArgumentError(
+        "resolved execution route belongs to a different problem",
+    ))
+    route.options === opts || throw(ArgumentError(
+        "resolved execution route belongs to different solver options",
+    ))
+    route.provenance === :value_level_mature_formula || throw(ArgumentError(
+        "resolved execution route has unknown provenance",
+    ))
+    route.algorithm in (
+        :lp_primal_dual,
+        :socp_psd2,
+        :socp_psd_lift,
+        :socp_fixed_trace_q3,
+        :sdp_primal_dual,
+    ) || throw(ArgumentError("resolved execution route has invalid algorithm"))
+    return nothing
+end
+
+"""
+    build_execution_plan(::AutoPlanner, prob, route)
+
+Consume a route resolved after equality presolve.  The remaining code is the
+existing late-bound plan construction and deliberately keeps its scaling,
+parameter, memory, backend, and scheduling semantics unchanged.
+"""
+function build_execution_plan(
+    ::AutoPlanner,
+    prob::SDPProblem{T},
+    route::ResolvedExecutionRoute{T},
+) where {T}
+    opts = route.options
+    _validate_execution_route(route, prob, opts)
+    classification = route.classification
+    algorithm = route.algorithm
+    available = _available_memory_bytes()
+    reduced_arrow_decision =
+        _reduced_arrow_decision(prob, opts, available)
+    mixed_arrow_decision =
+        _mixed_reduced_arrow_decision(prob, opts, available)
     selected = if opts.parameter_policy === :auto
         recommended_parameters(prob, opts)
     else
@@ -1206,6 +1255,7 @@ function build_execution_plan(
             mixed_precision_kkt=opts.mixed_precision_kkt,
             mixed_precision_memory_fraction=
                 opts.mixed_precision_memory_fraction,
+            execution_route_provenance=route.provenance,
             reduced_arrow_decision,
             mixed_reduced_arrow_decision=mixed_arrow_decision,
             generic_mixed_precision_decision=generic_mixed_decision,
@@ -1218,7 +1268,22 @@ function build_execution_plan(
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
-    return build_execution_plan(AutoPlanner(), prob, opts)
+    return build_execution_plan(AutoPlanner(), prob, resolve_execution_route(
+        AutoPlanner(), prob, opts,
+    ))
+end
+
+"""Compatibility delegate for the historical planner/options entry point."""
+function build_execution_plan(
+    planner::AutoPlanner,
+    prob::SDPProblem{T},
+    opts::SolverOptions{T}=SolverOptions{T}(),
+) where {T}
+    return build_execution_plan(
+        planner,
+        prob,
+        resolve_execution_route(planner, prob, opts),
+    )
 end
 
 """Lower resolved frontend options without introducing a second planner."""

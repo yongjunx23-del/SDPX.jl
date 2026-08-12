@@ -2194,10 +2194,16 @@ function _solve_pipeline!(
     # Finalize the plan against the model that will actually be factorized.
     # In particular, equality presolve can change the selected parameter profile
     # and the diagnostic equality count.
+    planning_problem = report.inconsistent ? prob : reduced
+    execution_route = resolve_execution_route(
+        AutoPlanner(),
+        planning_problem,
+        opts,
+    )
     plan = build_execution_plan(
         AutoPlanner(),
-        report.inconsistent ? prob : reduced,
-        opts,
+        planning_problem,
+        execution_route,
     )
     warnings = String[]
     if opts.threads > Base.Threads.nthreads()
@@ -2502,6 +2508,11 @@ function _solve_pipeline!(
                 equilibrate=false,
                 threads=plan.threads,
             )
+            fallback_route = resolve_execution_route(
+                AutoPlanner(),
+                reduced,
+                fallback_options,
+            )
             result = _solve_sdp_core!(
                 reduced,
                 fallback_options;
@@ -2514,7 +2525,7 @@ function _solve_pipeline!(
                 execution_plan=build_execution_plan(
                     AutoPlanner(),
                     reduced,
-                    fallback_options,
+                    fallback_route,
                 ),
             )
             workspace_bytes = max(
