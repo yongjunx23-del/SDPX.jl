@@ -1,0 +1,295 @@
+#!/bin/bash
+#PBS -N sdpx_canonical_stage1_ab
+#PBS -q sugon
+#PBS -l nodes=1:ppn=5
+#PBS -l mem=24gb
+#PBS -l walltime=08:00:00
+#PBS -j oe
+
+# Canonical Stage-1 unchanged-hot-path A/B: rc1 baseline (302dca8) then
+# candidate (d6daf70) in fixed order on one pinned node.  Both arms use the
+# same runner/campaign/config; only --source and the Julia project differ.
+# This job runs offline on a compute node; instantiate/precompile must happen
+# on a login node first.
+set -euo pipefail
+
+: "${NODE_NAME:?set NODE_NAME to the healthy pinned compute node}"
+: "${BASELINE_SOURCE:?set BASELINE_SOURCE to the immutable rc1 baseline checkout}"
+: "${BASELINE_SOURCE_SHA256:?set BASELINE_SOURCE_SHA256 to the expected source-tree SHA-256}"
+: "${BASELINE_SOURCE_COMMIT:?set BASELINE_SOURCE_COMMIT to the baseline commit}"
+: "${BASELINE_ENV:?set BASELINE_ENV to the baseline Julia environment}"
+: "${CANDIDATE_SOURCE:?set CANDIDATE_SOURCE to the immutable Stage-1 candidate checkout}"
+: "${CANDIDATE_SOURCE_SHA256:?set CANDIDATE_SOURCE_SHA256 to the expected source-tree SHA-256}"
+: "${CANDIDATE_SOURCE_COMMIT:?set CANDIDATE_SOURCE_COMMIT to the candidate commit}"
+: "${CANDIDATE_ENV:?set CANDIDATE_ENV to the candidate Julia environment}"
+: "${RUNNER_SOURCE:?set RUNNER_SOURCE to the fixed bench/public_conic_suite tree}"
+: "${RUNNER_SOURCE_SHA256:?set RUNNER_SOURCE_SHA256 to the expected runner-tree SHA-256}"
+: "${SDPX_SITE_ENV:?set SDPX_SITE_ENV to the site environment script}"
+: "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH to the offline Julia depot}"
+: "${RESULT_ROOT:?set RESULT_ROOT to a fresh result root}"
+
+ARITHMETIC="${ARITHMETIC:-float64,float64x4}"
+CASE_FILTER="${CASE_FILTER:-lp_row_scaling,socp_many_tiny,sdp_hilbert}"
+# Repetition 1 is the per-case JIT warmup and is excluded from timing by the
+# analyzer; repetitions 2-4 are the timed set.
+REPETITIONS="${REPETITIONS:-4}"
+WARMUP="${WARMUP:-true}"
+TIME_LIMIT="${TIME_LIMIT:-900}"
+MAX_ITERATIONS="${MAX_ITERATIONS:-300}"
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+ACTUAL_NODE="$(hostname)"
+if [ "$ACTUAL_NODE" != "$NODE_NAME" ]; then
+  echo "NODE_NAME guard failed: actual=$ACTUAL_NODE expected=$NODE_NAME" >&2
+  exit 1
+fi
+if [ -e "$RESULT_ROOT" ]; then
+  echo "RESULT_ROOT already exists; refusing to mutate an existing result path: $RESULT_ROOT" >&2
+  exit 1
+fi
+mkdir -p "$RESULT_ROOT"
+
+write_failed() {
+  : > "$RESULT_ROOT/FAILED" 2>/dev/null || true
+}
+trap write_failed EXIT
+
+source "$SDPX_SITE_ENV"
+: "${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}"
+
+for root in "$BASELINE_SOURCE" "$CANDIDATE_SOURCE" "$RUNNER_SOURCE"; do
+  if [ ! -d "$root" ]; then
+    echo "source directory missing: $root" >&2
+    exit 1
+  fi
+done
+for root in "$BASELINE_SOURCE" "$CANDIDATE_SOURCE"; do
+  if [ ! -f "$root/src/SDPX.jl" ]; then
+    echo "missing src/SDPX.jl in $root" >&2
+    exit 1
+  fi
+done
+for env in "$BASELINE_ENV" "$CANDIDATE_ENV"; do
+  if [ ! -f "$env/Project.toml" ]; then
+    echo "missing Project.toml in env $env" >&2
+    exit 1
+  fi
+done
+if [ ! -f "$RUNNER_SOURCE/runner/run_generated_pathological.jl" ]; then
+  echo "missing runner in $RUNNER_SOURCE" >&2
+  exit 1
+fi
+if [ "$BASELINE_SOURCE" = "$CANDIDATE_SOURCE" ]; then
+  echo "BASELINE_SOURCE and CANDIDATE_SOURCE must differ" >&2
+  exit 1
+fi
+if [ "$BASELINE_ENV" = "$CANDIDATE_ENV" ]; then
+  echo "BASELINE_ENV and CANDIDATE_ENV must differ" >&2
+  exit 1
+fi
+for root in "$BASELINE_SOURCE" "$CANDIDATE_SOURCE"; do
+  metadata="$(dirname "$root")/metadata"
+  if [ ! -f "$metadata/archive_sha256.txt" ]; then
+    echo "missing $metadata/archive_sha256.txt; the runner identity gate requires it" >&2
+    exit 1
+  fi
+  if [ ! -d "$root/.git" ] && [ ! -f "$metadata/source_commit.txt" ]; then
+    echo "missing $metadata/source_commit.txt (no .git in $root)" >&2
+    exit 1
+  fi
+done
+
+tree_hash() {
+  local root="$1"
+  (
+    cd "$root" || exit 1
+    export LC_ALL=C
+    find . -type f -not -path './.git' -not -path './.git/*' -print0 \
+      | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  )
+}
+
+tree_commit() {
+  local root="$1"
+  local commit=""
+  if [ -d "$root/.git" ]; then
+    commit="$(cd "$root" && git rev-parse HEAD 2>/dev/null || true)"
+  fi
+  if [ -z "$commit" ] && [ -f "$(dirname "$root")/metadata/source_commit.txt" ]; then
+    commit="$(tr -d '[:space:]' < "$(dirname "$root")/metadata/source_commit.txt")"
+  fi
+  printf '%s' "$commit"
+}
+
+BASELINE_HASH="$(tree_hash "$BASELINE_SOURCE")"
+CANDIDATE_HASH="$(tree_hash "$CANDIDATE_SOURCE")"
+RUNNER_HASH="$(tree_hash "$RUNNER_SOURCE")"
+if [ "$BASELINE_HASH" != "$BASELINE_SOURCE_SHA256" ]; then
+  echo "baseline source SHA-256 mismatch: actual=$BASELINE_HASH expected=$BASELINE_SOURCE_SHA256" >&2
+  exit 1
+fi
+if [ "$CANDIDATE_HASH" != "$CANDIDATE_SOURCE_SHA256" ]; then
+  echo "candidate source SHA-256 mismatch: actual=$CANDIDATE_HASH expected=$CANDIDATE_SOURCE_SHA256" >&2
+  exit 1
+fi
+if [ "$RUNNER_HASH" != "$RUNNER_SOURCE_SHA256" ]; then
+  echo "runner source SHA-256 mismatch: actual=$RUNNER_HASH expected=$RUNNER_SOURCE_SHA256" >&2
+  exit 1
+fi
+
+BASELINE_COMMIT="$(tree_commit "$BASELINE_SOURCE")"
+CANDIDATE_COMMIT="$(tree_commit "$CANDIDATE_SOURCE")"
+if [ "$BASELINE_COMMIT" != "$BASELINE_SOURCE_COMMIT" ]; then
+  echo "baseline commit mismatch: actual=$BASELINE_COMMIT expected=$BASELINE_SOURCE_COMMIT" >&2
+  exit 1
+fi
+if [ "$CANDIDATE_COMMIT" != "$CANDIDATE_SOURCE_COMMIT" ]; then
+  echo "candidate commit mismatch: actual=$CANDIDATE_COMMIT expected=$CANDIDATE_SOURCE_COMMIT" >&2
+  exit 1
+fi
+
+BASELINE_ARCHIVE="$(tr -d '[:space:]' < "$(dirname "$BASELINE_SOURCE")/metadata/archive_sha256.txt")"
+CANDIDATE_ARCHIVE="$(tr -d '[:space:]' < "$(dirname "$CANDIDATE_SOURCE")/metadata/archive_sha256.txt")"
+if [ -z "$BASELINE_ARCHIVE" ] || [ -z "$CANDIDATE_ARCHIVE" ]; then
+  echo "metadata/archive_sha256.txt must be non-empty for both sources" >&2
+  exit 1
+fi
+
+{
+  echo "pbs_job_id=${PBS_JOBID:-unknown}"
+  echo "hostname=$ACTUAL_NODE"
+  echo "expected_node=$NODE_NAME"
+  echo "started=$(date -Iseconds)"
+  echo "baseline_source=$BASELINE_SOURCE"
+  echo "baseline_source_realpath=$(realpath "$BASELINE_SOURCE")"
+  echo "baseline_tree_sha256=$BASELINE_HASH"
+  echo "baseline_tree_sha256_expected=$BASELINE_SOURCE_SHA256"
+  echo "baseline_source_commit=$BASELINE_COMMIT"
+  echo "baseline_archive_sha256=$BASELINE_ARCHIVE"
+  echo "baseline_env=$BASELINE_ENV"
+  echo "candidate_source=$CANDIDATE_SOURCE"
+  echo "candidate_source_realpath=$(realpath "$CANDIDATE_SOURCE")"
+  echo "candidate_tree_sha256=$CANDIDATE_HASH"
+  echo "candidate_tree_sha256_expected=$CANDIDATE_SOURCE_SHA256"
+  echo "candidate_source_commit=$CANDIDATE_COMMIT"
+  echo "candidate_archive_sha256=$CANDIDATE_ARCHIVE"
+  echo "candidate_env=$CANDIDATE_ENV"
+  echo "runner_source=$RUNNER_SOURCE"
+  echo "runner_tree_sha256=$RUNNER_HASH"
+  echo "runner_tree_sha256_expected=$RUNNER_SOURCE_SHA256"
+  echo "julia_bin=$JULIA_BIN"
+  echo "julia_version=$("$JULIA_BIN" --version 2>/dev/null | head -n 1)"
+  echo "arithmetic=$ARITHMETIC"
+  echo "case_filter=$CASE_FILTER"
+  echo "repetitions=$REPETITIONS"
+  echo "warmup=$WARMUP"
+  echo "time_limit=$TIME_LIMIT"
+  echo "max_iterations=$MAX_ITERATIONS"
+  echo "julia_threads=4"
+  echo "solver_threads=4"
+  echo "blas_threads=1"
+  echo "pbs_ppn=${PBS_NP:-5}"
+  lscpu | grep -E 'Model name|Socket|NUMA|CPU\(s\)' || true
+} > "$RESULT_ROOT/environment.txt"
+
+{
+  printf 'baseline_source=%s\n' "$BASELINE_SOURCE"
+  printf 'baseline_commit=%s\n' "$BASELINE_COMMIT"
+  printf 'baseline_tree_sha256=%s\n' "$BASELINE_HASH"
+  printf 'baseline_archive_sha=%s\n' "$BASELINE_ARCHIVE"
+  printf 'candidate_source=%s\n' "$CANDIDATE_SOURCE"
+  printf 'candidate_commit=%s\n' "$CANDIDATE_COMMIT"
+  printf 'candidate_tree_sha256=%s\n' "$CANDIDATE_HASH"
+  printf 'candidate_archive_sha=%s\n' "$CANDIDATE_ARCHIVE"
+  printf 'runner_source=%s\n' "$RUNNER_SOURCE"
+  printf 'runner_tree_sha256=%s\n' "$RUNNER_HASH"
+  printf 'arithmetic=%s\n' "$ARITHMETIC"
+  printf 'case_filter=%s\n' "$CASE_FILTER"
+  printf 'repetitions=%s\n' "$REPETITIONS"
+  printf 'warmup=%s\n' "$WARMUP"
+  printf 'resource_class=regular\n'
+  printf 'julia_threads=4\n'
+  printf 'solver_threads=4\n'
+  printf 'blas_threads=1\n'
+  printf 'ppn=%s\n' "${PBS_NP:-5}"
+  printf 'time_limit=%s\n' "$TIME_LIMIT"
+  printf 'max_iterations=%s\n' "$MAX_ITERATIONS"
+} > "$RESULT_ROOT/arms.conf"
+
+export JULIA_PKG_OFFLINE=true
+export JULIA_DEPOT_PATH="$SDPX_DEPOT_PATH"
+export JULIA_NUM_THREADS=4
+export SDPX_SOLVER_THREADS=4
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
+
+run_arm() {
+  local arm="$1"
+  local source="$2"
+  local environment="$3"
+  local output="$RESULT_ROOT/$arm"
+  if [ -e "$output" ]; then
+    echo "$arm output already exists; refusing to overwrite: $output" >&2
+    return 1
+  fi
+  mkdir -p "$output"
+  /usr/bin/time -v -o "$RESULT_ROOT/$arm.process.time.txt" \
+    "$JULIA_BIN" \
+    --project="$environment" \
+    --startup-file=no \
+    -t 4 \
+    "$RUNNER_SOURCE/runner/run_generated_pathological.jl" \
+    --source="$source" \
+    --output="$output" \
+    --resource-class=regular \
+    --arithmetic="$ARITHMETIC" \
+    --case-filter="$CASE_FILTER" \
+    --repetitions="$REPETITIONS" \
+    --warmup="$WARMUP" \
+    --time-limit="$TIME_LIMIT" \
+    --max-iterations="$MAX_ITERATIONS" \
+    > "$RESULT_ROOT/$arm.runner.log" 2>&1
+}
+
+baseline_status=0
+run_arm baseline "$BASELINE_SOURCE" "$BASELINE_ENV" || baseline_status=$?
+echo "baseline_runner_exit=$baseline_status" >> "$RESULT_ROOT/environment.txt"
+
+candidate_status=0
+run_arm candidate "$CANDIDATE_SOURCE" "$CANDIDATE_ENV" || candidate_status=$?
+echo "candidate_runner_exit=$candidate_status" >> "$RESULT_ROOT/environment.txt"
+
+# The runner records a subset source hash (src/bench/Project/Manifest,
+# path+NUL+bytes) in results.csv.  It is distinct from the PBS full-tree hash
+# above; record it for provenance and identity but never compare the two.
+subset_hash() {
+  python3 -c 'import csv,sys
+rows=list(csv.DictReader(open(sys.argv[1], newline="")))
+values=sorted({(row.get("source_sha256") or "").strip() for row in rows})
+assert len(values) == 1 and values[0], "source_sha256 must be non-empty and unique per arm"
+print(values[0])' "$1"
+}
+
+BASELINE_SUBSET="$(subset_hash "$RESULT_ROOT/baseline/results.csv")"
+CANDIDATE_SUBSET="$(subset_hash "$RESULT_ROOT/candidate/results.csv")"
+{
+  echo "baseline_source_sha256_subset=$BASELINE_SUBSET"
+  echo "candidate_source_sha256_subset=$CANDIDATE_SUBSET"
+} >> "$RESULT_ROOT/environment.txt"
+
+if ! python3 "$HERE/analyze_ab.py" "$RESULT_ROOT" 2>&1 | tee "$RESULT_ROOT/analyze.log"; then
+  echo "AB analysis gate failed; see $RESULT_ROOT/analyze.log" >&2
+  echo "ab_gate=fail" >> "$RESULT_ROOT/environment.txt"
+  exit 1
+fi
+echo "ab_gate=pass" >> "$RESULT_ROOT/environment.txt"
+
+{
+  echo "finished=$(date -Iseconds)"
+  echo "status=PASSED"
+} >> "$RESULT_ROOT/environment.txt"
+date -Iseconds > "$RESULT_ROOT/SUCCESS"
+trap - EXIT
