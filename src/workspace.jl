@@ -856,6 +856,15 @@ function _sparse_lower_column_boundaries(
     return boundaries
 end
 
+@inline function _planned_or_computed_mixed_reduced_decision(
+    parameters::NamedTuple,
+    compute::F,
+) where {F}
+    hasproperty(parameters, :mixed_reduced_arrow_decision) &&
+        return parameters.mixed_reduced_arrow_decision
+    return compute()
+end
+
 """Normalize a pre-LA positional plan without weakening modern-plan checks.
 
 The v0.4.1-dev positional constructors encode the classification arithmetic
@@ -1096,32 +1105,31 @@ function Workspace(
     mixed_type =
         T === BigFloat && planned_mixed_precision_kkt !== :off ?
         mixed_arrow_arithmetic(T) : nothing
-    computed_mixed_reduced_decision = if mixed_type === nothing
-        ExtendedPrecisionBLAS.CrossoverDecision(
-            false,
-            :unsupported_arithmetic,
-            1.0,
-            0,
-            0.0,
-            0.0,
-            ExtendedPrecisionBLAS.KernelConfig(),
+    mixed_reduced_decision =
+        _planned_or_computed_mixed_reduced_decision(
+            plan.parameters,
+            () -> if mixed_type === nothing
+                ExtendedPrecisionBLAS.CrossoverDecision(
+                    false,
+                    :unsupported_arithmetic,
+                    1.0,
+                    0,
+                    0.0,
+                    0.0,
+                    ExtendedPrecisionBLAS.KernelConfig(),
+                )
+            else
+                _reduced_arrow_crossover(
+                    prob,
+                    mixed_type,
+                    planned_mixed_precision_kkt,
+                    planned_mixed_precision_memory_fraction,
+                    selected_threads;
+                    mixed=true,
+                    available_memory_bytes=available_memory,
+                )
+            end,
         )
-    else
-        _reduced_arrow_crossover(
-            prob,
-            mixed_type,
-            planned_mixed_precision_kkt,
-            planned_mixed_precision_memory_fraction,
-            selected_threads;
-            mixed=true,
-            available_memory_bytes=available_memory,
-        )
-    end
-    mixed_reduced_decision = hasproperty(
-        plan.parameters,
-        :mixed_reduced_arrow_decision,
-    ) ? plan.parameters.mixed_reduced_arrow_decision :
-        computed_mixed_reduced_decision
     mixed_reduced_arrow = config.mixed_reduced_arrow
     mixed_reduced_arrow && !mixed_reduced_decision.enabled &&
         throw(ArgumentError(

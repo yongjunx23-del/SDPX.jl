@@ -574,6 +574,28 @@ end
 end
 
 @testset "BigFloat mixed reduced arrow without native panel" begin
+    stored_called = Ref(false)
+    stored_decision = SDPX._planned_or_computed_mixed_reduced_decision(
+        (mixed_reduced_arrow_decision=:stored,),
+        () -> begin
+            stored_called[] = true
+            :computed
+        end,
+    )
+    @test stored_decision === :stored
+    @test !stored_called[]
+
+    missing_called = Ref(false)
+    missing_decision = SDPX._planned_or_computed_mixed_reduced_decision(
+        NamedTuple(),
+        () -> begin
+            missing_called[] = true
+            :computed
+        end,
+    )
+    @test missing_decision === :computed
+    @test missing_called[]
+
     setprecision(BigFloat, 256) do
         problem, _, _ = _bigfloat_arrow_fixture()
         requested_threads = max(Threads.nthreads(), 16)
