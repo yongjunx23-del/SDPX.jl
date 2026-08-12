@@ -174,6 +174,13 @@ echo "checking authorized peripheral comment and expectation updates"
 check grep -qF 'config.provider === :generic_linear_algebra' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
 check grep -qF 'config.ownership === :owned_mutable_scalars' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
 check_not grep -qF 'config.provider === :none' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'rhs = T.(randn(5))' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'q = T.(randn(4))' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'dy = T.(randn(4))' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'transpose(A) * rhs' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'A * dy' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'lower * transpose(lower)' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'transpose(P) * P' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
 for comment_file in "$HERE/kernel_ab.jl" "$HERE/solver_ab.jl" "$HERE/bigfloat_generic_probe.jl" \
                     "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl" \
                     "$(dirname "$HERE")/../ext/SDPXMultiFloatLinearAlgebraExt.jl"; do
