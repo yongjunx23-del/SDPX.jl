@@ -199,36 +199,106 @@ function _canonical_psd_cone_facts(
     dense_coefficients = 0
     sparse_csc_coefficients = 0
     other_coefficients = 0
-    for (index, coefficient) in pairs(cone.coefficients)
-        size(coefficient) == (dimension, dimension) || throw(DimensionMismatch(
-            "$label coefficient $index has size $(size(coefficient)); expected ($dimension, $dimension)",
+    coefficients = cone.coefficients
+    if coefficients isa ActiveSparseCoefficientVector{T}
+        coefficients.variables == variables || throw(DimensionMismatch(
+            "$label active coefficient logical variable count $(coefficients.variables) does not match $variables",
         ))
-        facts, active_columns = _canonical_matrix_facts(
-            coefficient,
-            "$label coefficient $index",
-        )
-        stored_entries = _checked_feature_add(
-            stored_entries,
-            facts.stored_entries,
-            "$label coefficient stored count",
-        )
-        nonzero_values = _checked_feature_add(
-            nonzero_values,
-            facts.nonzero_values,
-            "$label coefficient nonzero count",
-        )
-        active_columns > 0 && (active_variables += 1)
-        coefficient_storage = facts.storage
-        if cone.coefficients isa CanonicalDensePanelCoefficients
-            coefficient_storage = :dense_panel_matrix_view
+        length(coefficients.active_variables) == length(coefficients.coefficients) ||
+            throw(DimensionMismatch(
+                "$label active variable and coefficient counts must match",
+            ))
+        size(coefficients.empty) == (dimension, dimension) ||
+            throw(DimensionMismatch(
+                "$label empty coefficient has size $(size(coefficients.empty)); expected ($dimension, $dimension)",
+            ))
+        empty_facts, _ = _canonical_matrix_facts(coefficients.empty, "$label empty coefficient")
+        empty_facts.nonzero_values == 0 || throw(ArgumentError(
+            "$label empty coefficient contains nonzero values",
+        ))
+        previous = 0
+        for position in eachindex(coefficients.active_variables)
+            variable = coefficients.active_variables[position]
+            1 <= variable <= variables || throw(BoundsError(1:variables, variable))
+            variable > previous || throw(ArgumentError(
+                "$label active variables must be sorted and unique",
+            ))
+            previous = variable
+            coefficient = coefficients.coefficients[position]
+            size(coefficient) == (dimension, dimension) || throw(DimensionMismatch(
+                "$label coefficient $variable has size $(size(coefficient)); expected ($dimension, $dimension)",
+            ))
+            facts, _ = _canonical_matrix_facts(
+                coefficient,
+                "$label coefficient $variable",
+            )
+            stored_entries = _checked_feature_add(
+                stored_entries,
+                facts.stored_entries,
+                "$label coefficient stored count",
+            )
+            nonzero_values = _checked_feature_add(
+                nonzero_values,
+                facts.nonzero_values,
+                "$label coefficient nonzero count",
+            )
+            facts.nonzero_values > 0 && (active_variables += 1)
         end
-        if coefficient_storage === :dense_matrix ||
-           coefficient_storage === :dense_panel_matrix_view
-            dense_coefficients += 1
-        elseif coefficient_storage === :sparse_csc
-            sparse_csc_coefficients += 1
-        else
-            other_coefficients += 1
+        sparse_csc_coefficients = variables
+    elseif coefficients isa CompactScalarCoefficientVector{T}
+        coefficients.variables == variables || throw(DimensionMismatch(
+            "$label compact coefficient logical variable count $(coefficients.variables) does not match $variables",
+        ))
+        1 <= coefficients.active_variable <= variables ||
+            throw(BoundsError(1:variables, coefficients.active_variable))
+        for (index, coefficient) in ((:active, coefficients.coefficient), (:empty, coefficients.empty))
+            size(coefficient) == (dimension, dimension) || throw(DimensionMismatch(
+                "$label $index coefficient has size $(size(coefficient)); expected ($dimension, $dimension)",
+            ))
+            facts, _ = _canonical_matrix_facts(coefficient, "$label $index coefficient")
+            if index === :empty
+                facts.nonzero_values == 0 || throw(ArgumentError(
+                    "$label empty coefficient contains nonzero values",
+                ))
+            else
+                stored_entries = facts.stored_entries
+                nonzero_values = facts.nonzero_values
+                facts.nonzero_values > 0 && (active_variables = 1)
+            end
+        end
+        sparse_csc_coefficients = variables
+    else
+        for (index, coefficient) in pairs(coefficients)
+            size(coefficient) == (dimension, dimension) || throw(DimensionMismatch(
+                "$label coefficient $index has size $(size(coefficient)); expected ($dimension, $dimension)",
+            ))
+            facts, active_columns = _canonical_matrix_facts(
+                coefficient,
+                "$label coefficient $index",
+            )
+            stored_entries = _checked_feature_add(
+                stored_entries,
+                facts.stored_entries,
+                "$label coefficient stored count",
+            )
+            nonzero_values = _checked_feature_add(
+                nonzero_values,
+                facts.nonzero_values,
+                "$label coefficient nonzero count",
+            )
+            active_columns > 0 && (active_variables += 1)
+            coefficient_storage = facts.storage
+            if coefficients isa CanonicalDensePanelCoefficients
+                coefficient_storage = :dense_panel_matrix_view
+            end
+            if coefficient_storage === :dense_matrix ||
+               coefficient_storage === :dense_panel_matrix_view
+                dense_coefficients += 1
+            elseif coefficient_storage === :sparse_csc
+                sparse_csc_coefficients += 1
+            else
+                other_coefficients += 1
+            end
         end
     end
     return CanonicalPSDConeFacts(

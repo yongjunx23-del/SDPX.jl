@@ -129,6 +129,96 @@ end
     end
 end
 
+@testset "ProblemFeatures active sparse coefficient views" begin
+    setprecision(BigFloat, 256) do
+        T = BigFloat
+        variables = 16
+        owned = BigFloat("3.25")
+        first = sparse([1], [1], BigFloat[owned], 2, 2)
+        second = spzeros(T, 2, 2)
+        active = SDPX.ActiveSparseCoefficientVector(
+            T,
+            variables,
+            [2, 15],
+            [first, second],
+            2,
+        )
+        offset = T[2 0; 0 2]
+        psd = FeatureAPI.CanonicalPSDCone{
+            T,
+            typeof(active),
+            typeof(offset),
+        }(active, offset)
+        equalities = FeatureAPI.CanonicalEqualities{
+            T,
+            Matrix{T},
+            Vector{T},
+        }(zeros(T, 0, variables), T[])
+        canonical = FeatureAPI.CanonicalConicProblem{T}(
+            zeros(T, variables),
+            equalities,
+            FeatureAPI.AbstractCanonicalLinearCone{T}[],
+            FeatureAPI.AbstractCanonicalLorentzCone{T}[],
+            FeatureAPI.AbstractCanonicalPSDCone{T}[psd],
+            (source=:active_feature_test,),
+            FeatureAPI.CanonicalIdentityReconstructionMap(1:variables, UnitRange{Int}[]),
+        )
+        features = FeatureAPI.extract_problem_features(canonical)
+        facts = features.psd_cones[1]
+        @test facts.coefficient_matrices == variables
+        @test facts.sparse_csc_coefficients == variables
+        @test facts.dense_coefficients == 0
+        @test facts.other_coefficients == 0
+        @test facts.coefficient_stored_entries == 1
+        @test facts.coefficient_nonzero_values == 1
+        @test facts.active_variables == 1
+        @test active.coefficients[1] === first
+        @test active.coefficients[1][1, 1] == owned
+        @test eltype(active.coefficients[1]) === BigFloat
+
+        compact = SDPX.CompactScalarCoefficientVector(T, variables, 7, BigFloat("4.5"))
+        compact_offset = T[2;;]
+        compact_psd = FeatureAPI.CanonicalPSDCone{
+            T,
+            typeof(compact),
+            typeof(compact_offset),
+        }(compact, compact_offset)
+        compact_problem = FeatureAPI.CanonicalConicProblem{T}(
+            zeros(T, variables),
+            equalities,
+            FeatureAPI.AbstractCanonicalLinearCone{T}[],
+            FeatureAPI.AbstractCanonicalLorentzCone{T}[],
+            FeatureAPI.AbstractCanonicalPSDCone{T}[compact_psd],
+            (source=:compact_feature_test,),
+            FeatureAPI.CanonicalIdentityReconstructionMap(1:variables, UnitRange{Int}[]),
+        )
+        compact_facts = FeatureAPI.extract_problem_features(compact_problem).psd_cones[1]
+        @test compact_facts.coefficient_matrices == variables
+        @test compact_facts.sparse_csc_coefficients == variables
+        @test compact_facts.coefficient_stored_entries == 1
+        @test compact_facts.coefficient_nonzero_values == 1
+        @test compact_facts.active_variables == 1
+
+        bad = sparse([1], [1], BigFloat[Inf], 2, 2)
+        bad_active = SDPX.ActiveSparseCoefficientVector(T, variables, [2], [bad], 2)
+        bad_psd = FeatureAPI.CanonicalPSDCone{
+            T,
+            typeof(bad_active),
+            typeof(offset),
+        }(bad_active, offset)
+        bad_problem = FeatureAPI.CanonicalConicProblem{T}(
+            zeros(T, variables),
+            equalities,
+            FeatureAPI.AbstractCanonicalLinearCone{T}[],
+            FeatureAPI.AbstractCanonicalLorentzCone{T}[],
+            FeatureAPI.AbstractCanonicalPSDCone{T}[bad_psd],
+            (source=:bad_active_feature_test,),
+            FeatureAPI.CanonicalIdentityReconstructionMap(1:variables, UnitRange{Int}[]),
+        )
+        @test_throws ArgumentError FeatureAPI.extract_problem_features(bad_problem)
+    end
+end
+
 @testset "ProblemFeatures dimensions fail closed" begin
     T = Float64
     equalities = FeatureAPI.CanonicalEqualities{T,Matrix{T},Vector{T}}(
