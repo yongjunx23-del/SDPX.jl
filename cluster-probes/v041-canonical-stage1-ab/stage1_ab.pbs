@@ -27,6 +27,7 @@ set -euo pipefail
 : "${SDPX_SITE_ENV:?set SDPX_SITE_ENV to the site environment script}"
 : "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH to the offline Julia depot}"
 : "${RESULT_ROOT:?set RESULT_ROOT to a fresh result root}"
+: "${AB_RUNNER_ROOT:?set AB_RUNNER_ROOT to the local probe/runner directory}"
 
 ARITHMETIC="${ARITHMETIC:-float64,float64x4}"
 CASE_FILTER="${CASE_FILTER:-lp_row_scaling,socp_many_tiny,sdp_hilbert}"
@@ -36,8 +37,6 @@ REPETITIONS="${REPETITIONS:-4}"
 WARMUP="${WARMUP:-true}"
 TIME_LIMIT="${TIME_LIMIT:-900}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-300}"
-
-HERE="$(cd "$(dirname "$0")" && pwd)"
 
 ACTUAL_NODE="$(hostname)"
 if [ "$ACTUAL_NODE" != "$NODE_NAME" ]; then
@@ -57,6 +56,12 @@ trap write_failed EXIT
 
 source "$SDPX_SITE_ENV"
 : "${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}"
+
+AB_RUNNER_ROOT="$(cd "$AB_RUNNER_ROOT" && pwd)"
+if [ ! -f "$AB_RUNNER_ROOT/analyze_ab.py" ]; then
+  echo "AB_RUNNER_ROOT has no analyze_ab.py: $AB_RUNNER_ROOT" >&2
+  exit 1
+fi
 
 for root in "$BASELINE_SOURCE" "$CANDIDATE_SOURCE" "$RUNNER_SOURCE"; do
   if [ ! -d "$root" ]; then
@@ -175,6 +180,9 @@ fi
   echo "candidate_source_commit=$CANDIDATE_COMMIT"
   echo "candidate_archive_sha256=$CANDIDATE_ARCHIVE"
   echo "candidate_env=$CANDIDATE_ENV"
+  echo "ab_runner_root=$AB_RUNNER_ROOT"
+  echo "ab_runner_root_realpath=$(realpath "$AB_RUNNER_ROOT")"
+  echo "ab_runner_sha256=$(sha256sum "$AB_RUNNER_ROOT/analyze_ab.py" | awk '{print $1}')"
   echo "runner_source=$RUNNER_SOURCE"
   echo "runner_tree_sha256=$RUNNER_HASH"
   echo "runner_tree_sha256_expected=$RUNNER_SOURCE_SHA256"
@@ -204,6 +212,9 @@ fi
   printf 'candidate_archive_sha=%s\n' "$CANDIDATE_ARCHIVE"
   printf 'runner_source=%s\n' "$RUNNER_SOURCE"
   printf 'runner_tree_sha256=%s\n' "$RUNNER_HASH"
+  printf 'ab_runner_root=%s\n' "$AB_RUNNER_ROOT"
+  printf 'ab_runner_root_realpath=%s\n' "$(realpath "$AB_RUNNER_ROOT")"
+  printf 'ab_runner_sha256=%s\n' "$(sha256sum "$AB_RUNNER_ROOT/analyze_ab.py" | awk '{print $1}')"
   printf 'arithmetic=%s\n' "$ARITHMETIC"
   printf 'case_filter=%s\n' "$CASE_FILTER"
   printf 'repetitions=%s\n' "$REPETITIONS"
@@ -280,7 +291,7 @@ CANDIDATE_SUBSET="$(subset_hash "$RESULT_ROOT/candidate/results.csv")"
   echo "candidate_source_sha256_subset=$CANDIDATE_SUBSET"
 } >> "$RESULT_ROOT/environment.txt"
 
-if ! python3 "$HERE/analyze_ab.py" "$RESULT_ROOT" 2>&1 | tee "$RESULT_ROOT/analyze.log"; then
+if ! python3 "$AB_RUNNER_ROOT/analyze_ab.py" "$RESULT_ROOT" 2>&1 | tee "$RESULT_ROOT/analyze.log"; then
   echo "AB analysis gate failed; see $RESULT_ROOT/analyze.log" >&2
   echo "ab_gate=fail" >> "$RESULT_ROOT/environment.txt"
   exit 1

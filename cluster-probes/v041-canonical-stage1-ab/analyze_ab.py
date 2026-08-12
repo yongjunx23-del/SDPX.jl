@@ -138,9 +138,15 @@ def _parse_int(value):
     text = str(value).strip()
     if not text:
         return None
+    # CSV writers may emit integer-valued decimals (e.g. refinement_steps
+    # "0.0").  Accept only finite values that are exactly integer-valued; the
+    # strict equality gate still applies after parsing.
     try:
-        return int(text)
-    except ValueError:
+        number = float(text)
+        if not math.isfinite(number) or not number.is_integer():
+            return None
+        return int(number)
+    except (ValueError, OverflowError):
         return None
 
 
@@ -520,7 +526,14 @@ def analyze_root(root, opts):
     return 0
 
 
-def _write_synthetic_run(root, *, corrupt, tree_differs):
+def _write_synthetic_run(
+    root,
+    *,
+    corrupt,
+    tree_differs,
+    baseline_steps="0.0",
+    candidate_steps="0",
+):
     """Write a self-contained synthetic A/B result without Julia."""
     root = pathlib.Path(root)
     for arm in ("baseline", "candidate"):
@@ -568,7 +581,7 @@ def _write_synthetic_run(root, *, corrupt, tree_differs):
     )
     (root / "arms.conf").write_text(arms_conf)
 
-    def row(arm, family, problem, rep, total):
+    def row(arm, family, problem, rep, total, refinement_steps="0"):
         git_sha = "9" * 40 if arm == "baseline" else "8" * 40
         archive = "c" * 64 if arm == "baseline" else "d" * 64
         subset = subset_baseline if arm == "baseline" else subset_candidate
@@ -631,7 +644,7 @@ def _write_synthetic_run(root, *, corrupt, tree_differs):
             "iterations": "10",
             "restarts": "0",
             "regularizations": "0",
-            "refinement_steps": "0",
+            "refinement_steps": refinement_steps,
             "workspace_bytes": "4096",
             "objective_primal": "1.0",
             "objective_dual": "1.0",
@@ -671,7 +684,17 @@ def _write_synthetic_run(root, *, corrupt, tree_differs):
                 if corrupt:
                     candidate_total = total * 1.5
                 value = candidate_total if arm == "candidate" else total
-                rows.append(row(arm, family, problem, rep, value))
+                refinement_steps = (
+                    baseline_steps if arm == "baseline" else candidate_steps
+                )
+                rows.append(row(
+                    arm,
+                    family,
+                    problem,
+                    rep,
+                    value,
+                    refinement_steps=refinement_steps,
+                ))
         with (root / arm / "results.csv").open("w", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=sorted(rows[0]))
             writer.writeheader()
@@ -687,9 +710,9 @@ def _self_test():
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="stage1_ab_selftest_"))
     try:
         scenarios = (
-            ("pass", False, False),
-            ("tree_subset_ok", False, True),
-            ("fail_gates", True, False),
+            ("pass", False, False, "0.0", "0"),
+            ("tree_subset_ok", False, True, "0.0", "0"),
+            ("fail_gates", True, False, "0.0", "0"),
         )
         wanted = (0, 0, 1)
         opts = SimpleNamespace(
@@ -698,14 +721,50 @@ def _self_test():
             no_strict_iterations=False,
         )
         ok = True
-        for (name, corrupt, tree_differs), expected in zip(scenarios, wanted):
+        for (name, corrupt, tree_differs, baseline_steps, candidate_steps), expected in zip(scenarios, wanted):
             root = tmp / name
-            _write_synthetic_run(root, corrupt=corrupt, tree_differs=tree_differs)
+            _write_synthetic_run(
+                root,
+                corrupt=corrupt,
+                tree_differs=tree_differs,
+                baseline_steps=baseline_steps,
+                candidate_steps=candidate_steps,
+            )
             code = analyze_root(root, opts)
             status = "PASS" if code == expected else "FAIL"
             if code != expected:
                 ok = False
             print(f"SELF_TEST {name}: exit={code} expected={expected} {status}")
+
+        fractional_root = tmp / "fractional_refinement_steps"
+        _write_synthetic_run(
+            fractional_root,
+            corrupt=False,
+            tree_differs=False,
+            baseline_steps="0",
+            candidate_steps="0",
+        )
+        with (fractional_root / "candidate" / "results.csv").open(
+            "r+",
+            newline="",
+        ) as stream:
+            rows = list(csv.DictReader(stream))
+            stream.seek(0)
+            writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
+            writer.writeheader()
+            for row in rows:
+                row["refinement_steps"] = "0.5"
+                writer.writerow(row)
+        code = analyze_root(fractional_root, opts)
+        expected = 1
+        status = "PASS" if code == expected else "FAIL"
+        if code != expected:
+            ok = False
+        print(
+            f"SELF_TEST fractional_refinement_steps: "
+            f"exit={code} expected={expected} {status}",
+        )
+
         if ok:
             print("SELF_TEST_PASS")
             return 0

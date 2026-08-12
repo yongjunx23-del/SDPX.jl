@@ -51,6 +51,7 @@ Required at submit time:
 | `SDPX_SITE_ENV` | site env script exporting `JULIA_BIN` |
 | `SDPX_DEPOT_PATH` | shared offline Julia depot |
 | `RESULT_ROOT` | fresh result root outside both sources |
+| `AB_RUNNER_ROOT` | local probe/runner directory containing `analyze_ab.py` (shared filesystem path reachable from the compute node) |
 
 Optional job variables with stable defaults:
 
@@ -128,6 +129,7 @@ hashes (`input_sha256`) must match exactly across arms.
 
 - `environment.txt` - node, job, paths, expected/actual hashes and commits, threads, Julia version, CPU, start/finish
 - `arms.conf` - machine-readable arm/config record consumed by `analyze_ab.py`
+- `AB_RUNNER_ROOT`, its realpath, and `analyze_ab.py` SHA-256 recorded in `environment.txt` and `arms.conf`
 - `baseline/` and `candidate/` - each with `results.csv`, `failures.csv`, `benchmark_manifest.toml`, `report.md`, `runner.log`, and `SUCCESS`/`FAILED`
 - `baseline.process.time.txt`, `candidate.process.time.txt` - `/usr/bin/time -v`, including peak RSS
 - `baseline.runner.log`, `candidate.runner.log`
@@ -170,6 +172,12 @@ After both arms finish, the PBS also appends
 
 The analysis gate never accepts a run where the runner itself failed
 certificate, status, objective, resource, identity, or route gates.
+
+PBS copies the submitted script to the mom spool, so `$0` cannot locate the
+analyzer; `stage1_ab.pbs` therefore requires `AB_RUNNER_ROOT` and runs
+`$AB_RUNNER_ROOT/analyze_ab.py`.  The submit helper forwards it and validates
+that the file exists.  `environment.txt` and `arms.conf` record its realpath
+and SHA-256 for provenance.
 
 `analyze_ab.py --self-test` verifies the analyzer itself against synthetic
 CSVs without Julia: a clean PASS, a PASS where full-tree and subset hashes

@@ -17,9 +17,10 @@ set -euo pipefail
 : "${SDPX_SITE_ENV:?set SDPX_SITE_ENV}"
 : "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH}"
 : "${RESULT_ROOT:?set RESULT_ROOT to a fresh result root outside both sources}"
+: "${AB_RUNNER_ROOT:?set AB_RUNNER_ROOT to the local probe/runner directory}"
 
 for var in BASELINE_SOURCE CANDIDATE_SOURCE RUNNER_SOURCE \
-           BASELINE_ENV CANDIDATE_ENV SDPX_SITE_ENV; do
+           BASELINE_ENV CANDIDATE_ENV SDPX_SITE_ENV AB_RUNNER_ROOT; do
   value="${!var}"
   [ -e "$value" ] || {
     echo "$var does not exist: $value" >&2
@@ -34,17 +35,22 @@ done
 BASELINE_SOURCE="$(cd "$BASELINE_SOURCE" && pwd)"
 CANDIDATE_SOURCE="$(cd "$CANDIDATE_SOURCE" && pwd)"
 RUNNER_SOURCE="$(cd "$RUNNER_SOURCE" && pwd)"
+AB_RUNNER_ROOT="$(cd "$AB_RUNNER_ROOT" && pwd)"
 BASELINE_ENV="$(cd "$BASELINE_ENV" && pwd)"
 CANDIDATE_ENV="$(cd "$CANDIDATE_ENV" && pwd)"
 SDPX_SITE_ENV="$(cd "$(dirname "$SDPX_SITE_ENV")" && pwd)/$(basename "$SDPX_SITE_ENV")"
 RESULT_ROOT="$(cd "$(dirname "$RESULT_ROOT")" 2>/dev/null && pwd)/$(basename "$RESULT_ROOT")"
 
 case "$RESULT_ROOT" in
-  "$BASELINE_SOURCE"|"$BASELINE_SOURCE"/*|"$CANDIDATE_SOURCE"|"$CANDIDATE_SOURCE"/*)
+  "$BASELINE_SOURCE"|"$BASELINE_SOURCE"/*|"$CANDIDATE_SOURCE"|"$CANDIDATE_SOURCE"/*|"$AB_RUNNER_ROOT"|"$AB_RUNNER_ROOT"/*)
     echo "RESULT_ROOT must not live inside either source: $RESULT_ROOT" >&2
     exit 1
     ;;
 esac
+[ -f "$AB_RUNNER_ROOT/analyze_ab.py" ] || {
+  echo "AB_RUNNER_ROOT has no analyze_ab.py: $AB_RUNNER_ROOT" >&2
+  exit 1
+}
 if [ -e "$RESULT_ROOT" ]; then
   echo "RESULT_ROOT already exists; refusing to reuse: $RESULT_ROOT" >&2
   exit 1
@@ -76,6 +82,7 @@ vars="$vars,RUNNER_SOURCE_SHA256=$RUNNER_SOURCE_SHA256"
 vars="$vars,SDPX_SITE_ENV=$SDPX_SITE_ENV"
 vars="$vars,SDPX_DEPOT_PATH=$SDPX_DEPOT_PATH"
 vars="$vars,RESULT_ROOT=$RESULT_ROOT"
+vars="$vars,AB_RUNNER_ROOT=$AB_RUNNER_ROOT"
 # Optional scalar overrides are forwarded only when set; comma-containing
 # values (ARITHMETIC/CASE_FILTER) stay on the PBS defaults to avoid -v
 # splitting them.
