@@ -140,7 +140,7 @@ end
         scaling=plan.scaling,
         kkt_backend=plan.kkt_backend,
         backend_config=plan.backend_config,
-        arithmetic=plan.arithmetic,
+        gram_kernel=plan.gram_kernel,
         schedule=plan.schedule,
         threads=plan.threads,
         parameter_profile=plan.parameter_profile,
