@@ -19,6 +19,9 @@ using MultiFloats: Float64x4
     )
     @test fixed.selected === :standard
     @test fixed.provider === :generic_linear_algebra
+    auto_fixed = SDPX.Experimental.plan_la_backend(Float64x4)
+    @test auto_fixed.selected === :standard
+    @test auto_fixed.provider === :generic_linear_algebra
 
     # Non-dense routes stay on the historical backend for automatic/legacy
     # planning.  An explicit migrated backend must fail closed instead of
@@ -117,4 +120,20 @@ using MultiFloats: Float64x4
     solved = [1.0, 2.0]
     SDPX.la_cholesky_solve!(factored, solved)
     @test all(isfinite, solved)
+
+    generic = SDPX.Experimental.StandardLABackend(
+        :bigfloat,
+        :generic_linear_algebra,
+        :owned_mutable_scalars,
+    )
+    for value in (BigFloat(NaN), BigFloat(Inf))
+        bad = BigFloat[4 1; 1 3]
+        bad[1, 1] = value
+        @test SDPX.la_cholesky_factor!(generic, bad) === nothing
+        bad = BigFloat[4 1; 1 3]
+        bad[1, 1] = value
+        @test !SDPX.la_chol!(generic, bad)
+    end
+    @test SDPX.la_cholesky_factor!(generic, BigFloat[-1 0; 0 1]) === nothing
+    @test !SDPX.la_chol!(generic, BigFloat[-1 0; 0 1])
 end

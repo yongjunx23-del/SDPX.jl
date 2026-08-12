@@ -31,6 +31,7 @@ import MultiFloatLinearAlgebra:
     syrk!,
     trsm!,
     cholesky!,
+    issuccess as mfla_issuccess,
     KernelConfig,
     GemmWorkspace,
     MFCholesky
@@ -127,7 +128,7 @@ function _provider_cholesky_factor!(
         "MFLA cholesky received non-finite input; refusing to run",
     ))
     factor = cholesky!(A; check=false, config=provider.config)
-    issuccess(factor) || return nothing
+    mfla_issuccess(factor) || return nothing
     return _ProviderCholesky{MF}(factor, provider.config)
 end
 

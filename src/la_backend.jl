@@ -13,6 +13,20 @@ la_provider_descriptor(::Type{T}, ::Int=1) where {T} = (
     capabilities=(),
 )
 
+"""Whether an optional extension recognizes `T` as a MultiFloat family."""
+is_multifloat_arithmetic(::Type) = false
+
+"""Check the authoritative lower triangle without inspecting stale upper data."""
+function _all_finite_lower(A::AbstractMatrix)
+    rows, columns = size(A)
+    @inbounds for column in 1:min(rows, columns)
+        for row in column:rows
+            isfinite(A[row, column]) || return false
+        end
+    end
+    return true
+end
+
 """Optional setup hook; an extension returns its concrete provider payload."""
 instantiate_multifloat_la_backend(
     ::Type{T},
@@ -80,7 +94,7 @@ function plan_la_backend(
     elseif requested === :standard || requested === :fixed_extended ||
            (requested === :auto &&
             (arithmetic in (:float32, :float64, :bigfloat) ||
-             startswith(String(arithmetic), "float64x")))
+             is_multifloat_arithmetic(T)))
         provider = arithmetic in (:float32, :float64) ? :blas_lapack :
                    :generic_linear_algebra
         ownership = arithmetic in (:float32, :float64) ? :immutable_scalars :
@@ -159,12 +173,21 @@ function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
 end
 
 """Expose the standard generic factor handle without changing legacy routes."""
-function la_cholesky_factor!(::StandardLABackend, A::AbstractMatrix)
+@inline _standard_requires_finite_guard(backend::StandardLABackend) =
+    backend.arithmetic ∉ (:float32, :float64)
+
+function la_cholesky_factor!(backend::StandardLABackend, A::AbstractMatrix)
+    if _standard_requires_finite_guard(backend)
+        _all_finite_lower(A) || return nothing
+    end
     factor = LinearAlgebra.cholesky!(Symmetric(A, :L); check=false)
-    return issuccess(factor) ?
-           StandardLACholeskyFactor{eltype(A),typeof(factor)}(
-               factor, factor.factors,
-           ) : nothing
+    issuccess(factor) || return nothing
+    if _standard_requires_finite_guard(backend)
+        _all_finite_lower(factor.factors) || return nothing
+    end
+    return StandardLACholeskyFactor{eltype(A),typeof(factor)}(
+        factor, factor.factors,
+    )
 end
 
 function la_cholesky_factor!(::LegacyLABackend, A::AbstractMatrix{BigFloat})
@@ -261,9 +284,16 @@ la_syrk!(::LegacyLABackend, S, P, α, β) = ksyrk!(S, P, α, β)
 la_syrk!(backend::MultiFloatLABackend, S, P, α, β) =
     _la_provider_call(backend, :syrk!, S, P, α, β)
 
-function la_chol!(::StandardLABackend, A)
+function la_chol!(backend::StandardLABackend, A)
+    if _standard_requires_finite_guard(backend)
+        _all_finite_lower(A) || return false
+    end
     factor = LinearAlgebra.cholesky!(Symmetric(A, :L); check=false)
-    return issuccess(factor)
+    issuccess(factor) || return false
+    if _standard_requires_finite_guard(backend)
+        _all_finite_lower(factor.factors) || return false
+    end
+    return true
 end
 la_chol!(::LegacyLABackend, A) = kchol!(A)
 la_chol!(backend::MultiFloatLABackend, A) = _la_provider_call(backend, :chol!, A)

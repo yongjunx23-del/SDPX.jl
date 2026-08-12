@@ -17,6 +17,8 @@ module SDPXMultiFloatsExt
 using SDPX
 using MultiFloats: Float64x2, Float64x4, MultiFloat, MultiFloatVec
 
+SDPX.is_multifloat_arithmetic(::Type{<:MultiFloat}) = true
+
 # MultiFloat inherits Float64's ~10±308 exponent range and collapses ±Inf to
 # NaN (no dedicated infinity bit pattern) — solve! runs the non-finite-iterate
 # guard and caps restart escalation for these types (see solve.jl).
