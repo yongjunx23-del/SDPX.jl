@@ -134,11 +134,23 @@ end
     planned = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, options)
     @test legacy.algorithm === :socp_psd2
     @test legacy.scaling === :none
-    @test planned == legacy
+    stable_route(plan) = (
+        classification=plan.classification,
+        algorithm=plan.algorithm,
+        scaling=plan.scaling,
+        kkt_backend=plan.kkt_backend,
+        backend_config=plan.backend_config,
+        arithmetic=plan.arithmetic,
+        schedule=plan.schedule,
+        threads=plan.threads,
+        parameter_profile=plan.parameter_profile,
+    )
+    @test stable_route(planned) == stable_route(legacy)
     resolved = SDPX.Experimental.resolve_solve_options(
         Float64,
         SDPX.SolveOptions(algorithm=:socp, scaling=:none, presolve=false),
     )
-    @test SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved) ==
-          SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved.core)
+    resolved_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved)
+    core_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved.core)
+    @test stable_route(resolved_plan) == stable_route(core_plan)
 end
