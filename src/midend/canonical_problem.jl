@@ -56,9 +56,6 @@ struct CanonicalNegatedMatrixView{T,M<:AbstractMatrix{T}} <:
     parent_matrix::M
 end
 
-CanonicalNegatedMatrixView(matrix::M) where {M<:AbstractMatrix} =
-    CanonicalNegatedMatrixView{eltype(matrix),M}(matrix)
-
 Base.IndexStyle(::Type{<:CanonicalNegatedMatrixView}) = IndexCartesian()
 Base.size(view::CanonicalNegatedMatrixView) = size(view.parent_matrix)
 Base.axes(view::CanonicalNegatedMatrixView) = axes(view.parent_matrix)
@@ -85,6 +82,15 @@ struct CanonicalScalarBlockRowsView{T,C<:AbstractCons{T}} <: AbstractMatrix{T}
     cons::C
     rows::Int
     columns::Int
+
+    function CanonicalScalarBlockRowsView{T,C}(
+        cons::C,
+        rows::Int,
+        columns::Int,
+    ) where {T,C<:AbstractCons{T}}
+        _validate_canonical_scalar_block_rows(cons, rows, columns)
+        return new{T,C}(cons, rows, columns)
+    end
 end
 
 Base.IndexStyle(::Type{<:CanonicalScalarBlockRowsView}) = IndexCartesian()
@@ -92,7 +98,7 @@ Base.size(view::CanonicalScalarBlockRowsView) = (view.rows, view.columns)
 Base.axes(view::CanonicalScalarBlockRowsView) = (Base.OneTo(view.rows), Base.OneTo(view.columns))
 Base.parent(view::CanonicalScalarBlockRowsView) = view.cons
 
-function CanonicalScalarBlockRowsView(
+function _validate_canonical_scalar_block_rows(
     cons::C,
     rows::Int,
     columns::Int,
@@ -137,7 +143,27 @@ function CanonicalScalarBlockRowsView(
     else
         throw(ArgumentError("unsupported scalar coefficient storage $(typeof(cons))"))
     end
-    return CanonicalScalarBlockRowsView{T,C}(cons, rows, columns)
+    return nothing
+end
+
+# The generated outer constructor accepts any `C<:AbstractCons{T}`.  Keep the
+# validated public path narrower than that generated method so loading this
+# file never overwrites it; supported storage types dispatch here and invoke
+# the validating typed inner constructor above.
+function CanonicalScalarBlockRowsView(
+    cons::DenseCons{T},
+    rows::Int,
+    columns::Int,
+) where {T}
+    return CanonicalScalarBlockRowsView{T,typeof(cons)}(cons, rows, columns)
+end
+
+function CanonicalScalarBlockRowsView(
+    cons::SparseCons{T},
+    rows::Int,
+    columns::Int,
+) where {T}
+    return CanonicalScalarBlockRowsView{T,typeof(cons)}(cons, rows, columns)
 end
 
 @inline function _canonical_scalar_sparse_entry(
@@ -196,11 +222,6 @@ struct CanonicalNegatedScalarOffsetsView{T,C<:AbstractVector{<:AbstractMatrix{T}
        AbstractVector{T}
     parent_blocks::C
 end
-
-CanonicalNegatedScalarOffsetsView(blocks::C) where {
-    T,
-    C<:AbstractVector{<:AbstractMatrix{T}},
-} = CanonicalNegatedScalarOffsetsView{T,C}(blocks)
 
 Base.IndexStyle(::Type{<:CanonicalNegatedScalarOffsetsView}) = IndexLinear()
 Base.size(view::CanonicalNegatedScalarOffsetsView) = (length(view.parent_blocks),)
