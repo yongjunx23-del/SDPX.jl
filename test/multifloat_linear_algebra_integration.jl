@@ -54,6 +54,25 @@ function _max_relative_error(A, B)
     end
 end
 
+function _max_relative_error_lower(A, B)
+    return setprecision(BigFloat, 512) do
+        numerator = BigFloat(0)
+        denominator = BigFloat(0)
+        dimension = size(A, 1)
+        for column in 1:dimension, row in column:dimension
+            numerator = max(
+                numerator,
+                abs(BigFloat(A[row, column]) - BigFloat(B[row, column])),
+            )
+            denominator = max(
+                denominator,
+                abs(BigFloat(B[row, column])),
+            )
+        end
+        numerator / max(denominator, BigFloat(1))
+    end
+end
+
 @testset "MultiFloatLinearAlgebra extension integration" begin
     @testset "auto selection ignores provider presence" begin
         for T in (Float64x2, Float64x3, Float64x4)
@@ -127,8 +146,8 @@ end
             SDPX.la_trsv_transpose!(backend, L, actual)
             @test _max_relative_error(actual, reference) < T(1e-14)
 
-            S = T.(randn(n, n))
-            S = S + transpose(S)
+            R = T.(randn(n, n))
+            S = transpose(R) * R
             S += T(8) .* Matrix{T}(I, n, n)
             A = copy(S)
             @test SDPX.la_chol!(backend, A)
@@ -136,6 +155,15 @@ end
             lower = LowerTriangular(A)
             reconstruction = lower * transpose(lower)
             @test _max_relative_error(reconstruction, S) < T(1e-13)
+
+            R2 = T.(randn(n, n))
+            S2 = transpose(R2) * R2
+            S2 += T(8) .* Matrix{T}(I, n, n)
+            A2 = copy(S2)
+            @test SDPX.la_chol!(backend, A2)
+            lower2 = LowerTriangular(A2)
+            reconstruction2 = lower2 * transpose(lower2)
+            @test _max_relative_error(reconstruction2, S2) < T(1e-13)
         end
     end
 
@@ -155,12 +183,13 @@ end
             for column in 1:columns, row in column:columns
                 @test output[row, column] == reference[row, column]
             end
-            # MFLA syrk! is lower-only; compare only the authoritative triangle.
-            lower_reference = copy(reference)
-            for column in 1:columns, row in 1:(column - 1)
-                lower_reference[row, column] = zero(T)
-            end
-            @test _max_relative_error(output, lower_reference) < T(1e-13)
+            # MFLA syrk! is lower-only: the upper triangle must keep the
+            # original input.  Assert the lower-triangle reference error
+            # without clearing the upper triangle.
+            @test _max_relative_error_lower(output, reference) < T(1e-13)
+            @test output[1, 2] == S[1, 2]
+            @test output[1, 3] == S[1, 3]
+            @test output[2, 3] == S[2, 3]
 
             A = T.(randn(5, 4))
             B = T.(randn(4, 6))
@@ -194,8 +223,8 @@ end
         T = Float64x4
         backend = _expect_provider(T)
         n = 6
-        A = T.(randn(n, n))
-        A = A + transpose(A)
+        R = T.(randn(n, n))
+        A = transpose(R) * R
         A += T(8) .* Matrix{T}(I, n, n)
         factor = SDPX.la_cholesky_factor!(backend, copy(A))
         @test factor !== nothing

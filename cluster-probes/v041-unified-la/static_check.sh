@@ -181,6 +181,10 @@ check grep -qF 'transpose(A) * rhs' "$(dirname "$HERE")/../test/multifloat_linea
 check grep -qF 'A * dy' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
 check grep -qF 'lower * transpose(lower)' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
 check grep -qF 'transpose(P) * P' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF '_max_relative_error_lower' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check grep -qF 'transpose(R) * R' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check_not grep -qF 'lower_reference' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
+check_not grep -qF 'S = T.(randn(n, n))' "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl"
 for comment_file in "$HERE/kernel_ab.jl" "$HERE/solver_ab.jl" "$HERE/bigfloat_generic_probe.jl" \
                     "$(dirname "$HERE")/../test/multifloat_linear_algebra_integration.jl" \
                     "$(dirname "$HERE")/../ext/SDPXMultiFloatLinearAlgebraExt.jl"; do
