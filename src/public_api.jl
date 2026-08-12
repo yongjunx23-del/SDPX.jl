@@ -71,6 +71,12 @@ const CanonicalAffineConeFacts = SDPX.CanonicalAffineConeFacts
 const CanonicalPSDConeFacts = SDPX.CanonicalPSDConeFacts
 const ProblemFeatures = SDPX.ProblemFeatures
 const extract_problem_features = SDPX.extract_problem_features
+const AutoPlanner = SDPX.AutoPlanner
+const StructuralPlanningIntent = SDPX.StructuralPlanningIntent
+const AutoPlannerSnapshot = SDPX.AutoPlannerSnapshot
+const planner_snapshot = SDPX.planner_snapshot
+const unresolved_options = SDPX.unresolved_options
+const planner_summary = SDPX.planner_summary
 const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
 const resolve_solve_options = SDPX.resolve_solve_options
 const auto_tolerance = SDPX.auto_tolerance
@@ -101,6 +107,8 @@ export CanonicalConicProblem, canonicalize, reconstruct_identity
 export CanonicalMatrixFacts, CanonicalAffineMapFacts, CanonicalAffineConeFacts
 export CanonicalPSDConeFacts, ProblemFeatures
 export extract_problem_features
+export AutoPlanner, StructuralPlanningIntent, AutoPlannerSnapshot
+export planner_snapshot, unresolved_options, planner_summary
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
 
