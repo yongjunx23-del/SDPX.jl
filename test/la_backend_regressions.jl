@@ -157,6 +157,11 @@ using MultiFloats: Float64x4
     SDPX.la_cholesky_solve!(legacy_float_factor, legacy_float_rhs)
     @test all(isfinite, legacy_float_rhs)
     @test SDPX.la_backend_provider(legacy_float) === :sdpx_legacy_la
+    rank_loss_float = SDPX.Experimental.LegacyLACholeskyFactor(
+        legacy_float.provider,
+        [1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0e-12],
+    )
+    @test !SDPX._legacy_factor_has_numerical_rank(rank_loss_float)
 
     factored = SDPX.la_cholesky_factor!(backend, [4.0 1.0; 1.0 3.0])
     @test factored isa SDPX.Experimental.StandardLACholeskyFactor
