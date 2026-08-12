@@ -16,6 +16,7 @@ set -euo pipefail
 : "${CANDIDATE_ENV:?set CANDIDATE_ENV to the pre-instantiated Julia environment}"
 : "${SDPX_SITE_ENV:?set SDPX_SITE_ENV to the site environment script}"
 : "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH to the offline Julia depot}"
+: "${CAMPAIGN_ID:?set CAMPAIGN_ID to the shared campaign identifier}"
 : "${FULL_OUTPUT_ROOT:?set FULL_OUTPUT_ROOT to a fresh, distinct result directory}"
 
 ACTUAL_NODE="$(hostname)"
@@ -62,6 +63,7 @@ if [ "$CANDIDATE_HASH_ACTUAL" != "$CANDIDATE_SOURCE_SHA256" ]; then
 fi
 
 {
+  echo "campaign_id=$CAMPAIGN_ID"
   echo "pbs_job_id=${PBS_JOBID:-unknown}"
   echo "hostname=$ACTUAL_NODE"
   echo "expected_node=$NODE_NAME"
