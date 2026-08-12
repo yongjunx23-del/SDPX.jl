@@ -136,4 +136,16 @@ using MultiFloats: Float64x4
     end
     @test SDPX.la_cholesky_factor!(generic, BigFloat[-1 0; 0 1]) === nothing
     @test !SDPX.la_chol!(generic, BigFloat[-1 0; 0 1])
+
+    legacy = SDPX.Experimental.LegacyLABackend(:bigfloat, :requested_legacy)
+    for value in (BigFloat(NaN), BigFloat(Inf))
+        bad = BigFloat[4 1; 1 3]
+        bad[1, 1] = value
+        @test SDPX.la_cholesky_factor!(legacy, bad) === nothing
+        bad = BigFloat[4 1; 1 3]
+        bad[1, 1] = value
+        @test !SDPX.la_chol!(legacy, bad)
+    end
+    @test SDPX.la_cholesky_factor!(legacy, BigFloat[-1 0; 0 1]) === nothing
+    @test !SDPX.la_chol!(legacy, BigFloat[-1 0; 0 1])
 end

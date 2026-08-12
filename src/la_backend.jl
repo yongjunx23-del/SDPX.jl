@@ -191,7 +191,9 @@ function la_cholesky_factor!(backend::StandardLABackend, A::AbstractMatrix)
 end
 
 function la_cholesky_factor!(::LegacyLABackend, A::AbstractMatrix{BigFloat})
+    _all_finite_lower(A) || return nothing
     kchol!(A) || return nothing
+    _all_finite_lower(A) || return nothing
     return BigFloatCholeskyFactor(A)
 end
 
@@ -293,6 +295,12 @@ function la_chol!(backend::StandardLABackend, A)
     if _standard_requires_finite_guard(backend)
         _all_finite_lower(factor.factors) || return false
     end
+    return true
+end
+function la_chol!(::LegacyLABackend, A::AbstractMatrix{BigFloat})
+    _all_finite_lower(A) || return false
+    kchol!(A) || return false
+    _all_finite_lower(A) || return false
     return true
 end
 la_chol!(::LegacyLABackend, A) = kchol!(A)
