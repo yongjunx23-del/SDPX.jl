@@ -886,7 +886,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # badly-scaled benchmark generator: Ω selected from `max‖C_l‖∞ = 1.6e7` and
     # applied to an equilibrated problem of unit scale drove the primal residual
     # to 8.7e+15, where the same solve without equilibration converged.
-    if opts.parameter_policy === :auto
+    parameter_source = opts.parameter_policy === :auto ?
+                       (eq === nothing ? :solve_problem : :post_equilibration) :
+                       :options
+    executed_parameters = if opts.parameter_policy === :auto
         selected = recommended_parameters(solve_prob, opts)
         adaptive_sigma_max = selected.parameter_strategy === :adaptive ?
                              recommended_adaptive_sigma_max(
@@ -912,6 +915,27 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             parameter_strategy=selected.parameter_strategy,
             adaptive_sigma_max,
             parameter_policy=:fixed,
+        )
+        (
+            beta=selected.β,
+            gamma=selected.γ,
+            omega_p=selected.Ωp,
+            omega_d=selected.Ωd,
+            predictor=selected.predictor,
+            strategy=selected.parameter_strategy,
+            adaptive_sigma_max,
+            profile=selected.profile,
+        )
+    else
+        (
+            beta=opts.β,
+            gamma=opts.γ,
+            omega_p=opts.Ωp,
+            omega_d=opts.Ωd,
+            predictor=opts.predictor,
+            strategy=opts.parameter_strategy,
+            adaptive_sigma_max=opts.adaptive_sigma_max,
+            profile=:fixed,
         )
     end
     if eq !== nothing && isempty(resume)
@@ -1820,6 +1844,18 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             equality_system=equality_diagnostics,
             executed=(
                 solver=:sdp,
+                parameter_profile=executed_parameters.profile,
+                executed_parameters=(
+                    beta=executed_parameters.beta,
+                    gamma=executed_parameters.gamma,
+                    omega_p=executed_parameters.omega_p,
+                    omega_d=executed_parameters.omega_d,
+                    predictor=executed_parameters.predictor,
+                    strategy=executed_parameters.strategy,
+                    adaptive_sigma_max=
+                        executed_parameters.adaptive_sigma_max,
+                ),
+                parameter_source,
                 kkt=ws.executed_backend,
                 planned_backend=planned_backend_name(ws),
                 executed_backend=ws.executed_backend,

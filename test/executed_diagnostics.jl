@@ -99,7 +99,14 @@ using Test
         coefficients[2, 2, 2] = 1.0
         problem = SDPX.ingest([2.0, 3.0], [coefficients], [[0.0 1.0; 1.0 0.0]],
             Matrix{Float64}(undef, 2, 0), Float64[]; verbosity=0)
-        result = SDPX.solve(problem; tolerance=1e-8, verbosity=0, diagnostics=true)
+        result = SDPX.solve(
+            problem;
+            tolerance=1e-8,
+            verbosity=0,
+            diagnostics=true,
+            algorithm=:sdp,
+            scaling=:equilibrate,
+        )
         @test result.status == SDPX.Optimal
         selected = result.diagnostics.selected_algorithms
         @test selected.kkt === :dense_cholesky
@@ -108,6 +115,22 @@ using Test
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :planned
         @test selected.lp_formulation === :not_applicable
+        @test selected.parameter_source === :post_equilibration
+        @test selected.parameter_profile === :general_adaptive
+        @test selected.planned_parameter_profile ===
+              result.diagnostics.plan.parameter_profile
+        @test result.termination.executed.parameter_source ===
+              :post_equilibration
+        @test result.termination.executed.parameter_profile ===
+              selected.parameter_profile
+        @test !isempty(result.parameter_history)
+        @test selected.executed_parameters.beta ==
+              first(result.parameter_history).beta
+        @test selected.executed_parameters.gamma ==
+              first(result.parameter_history).gamma
+        @test selected.initial_parameters.beta ==
+              selected.executed_parameters.beta
+        @test selected.planned_parameters == result.diagnostics.plan.parameters
         @test selected.effective_threads == selected.threads
         @test selected.fine_grained_block_tasks == 1
         @test selected.fine_grained_block_partition == :lpt
@@ -130,5 +153,43 @@ using Test
             untimed.diagnostics.timings,
             :schur_assembly,
         )
+
+        fixed = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                scaling=:none,
+                parameter_policy=:fixed,
+                parameter_strategy=:fixed,
+                β=0.23,
+                γ=0.73,
+                Ωp=3.0,
+                Ωd=4.0,
+                predictor=:sdpb,
+                adaptive_sigma_max=0.41,
+                iter_max=0,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        @test fixed.status == SDPX.IterLimit
+        fixed_selected = fixed.diagnostics.selected_algorithms
+        @test fixed_selected.parameter_source === :options
+        @test fixed_selected.parameter_profile === :fixed
+        @test fixed.termination.executed.parameter_source === :options
+        @test fixed.termination.executed.parameter_profile === :fixed
+        @test fixed_selected.executed_parameters == (
+            beta=0.23,
+            gamma=0.73,
+            omega_p=3.0,
+            omega_d=4.0,
+            predictor=:sdpb,
+            strategy=:fixed,
+            adaptive_sigma_max=0.41,
+        )
+        @test fixed_selected.initial_parameters.beta == 0.23
+        @test fixed_selected.initial_parameters.gamma == 0.73
+        @test fixed_selected.planned_parameters ==
+              fixed.diagnostics.plan.parameters
     end
 end

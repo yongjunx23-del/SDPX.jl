@@ -2084,6 +2084,49 @@ function _attach_diagnostics(
     # sparse Newton system at runtime, after the plan is frozen -- reported
     # a dense LU and a BLAS Gram kernel for solves that executed neither.
     executed = get(result.termination, :executed, NamedTuple())
+    executed_parameter_profile = get(
+        executed,
+        :parameter_profile,
+        plan.parameter_profile,
+    )
+    executed_parameters = get(
+        executed,
+        :executed_parameters,
+        plan.parameters,
+    )
+    actual_initial_parameters = merge(
+        plan.parameters,
+        (
+            beta=get(executed_parameters, :beta, plan.parameters.beta),
+            gamma=get(executed_parameters, :gamma, plan.parameters.gamma),
+            omega_p=get(
+                executed_parameters,
+                :omega_p,
+                plan.parameters.omega_p,
+            ),
+            omega_d=get(
+                executed_parameters,
+                :omega_d,
+                plan.parameters.omega_d,
+            ),
+            predictor=get(
+                executed_parameters,
+                :predictor,
+                plan.parameters.predictor,
+            ),
+            strategy=get(
+                executed_parameters,
+                :strategy,
+                plan.parameters.strategy,
+            ),
+            adaptive_sigma_max=get(
+                executed_parameters,
+                :adaptive_sigma_max,
+                plan.parameters.adaptive_sigma_max,
+            ),
+        ),
+    )
+    parameter_source = get(executed, :parameter_source, :plan)
     selected = (
         solver=get(executed, :solver, plan.algorithm),
         scaling=plan.scaling,
@@ -2137,8 +2180,16 @@ function _attach_diagnostics(
             :arrow_linear_solve,
             nothing,
         ),
-        parameter_profile=plan.parameter_profile,
-        initial_parameters=plan.parameters,
+        # `parameter_profile`/`initial_parameters` describe the parameters
+        # that actually reached the core when that provenance is available.
+        # Keep the pre-equilibration planner choice separately named so a
+        # post-Ruiz auto selection cannot be mistaken for the plan.
+        parameter_profile=executed_parameter_profile,
+        initial_parameters=actual_initial_parameters,
+        parameter_source,
+        executed_parameters,
+        planned_parameter_profile=plan.parameter_profile,
+        planned_parameters=plan.parameters,
         certificate=certificate,
     )
     diagnostics = SolveDiagnostics(
