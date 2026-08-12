@@ -1,7 +1,7 @@
 # v041-canonical-stage1 cluster probes
 
-Cluster-only Stage-1 validation for `CanonicalConicProblem`, `ProblemFeatures`,
-and the pure `AutoPlanner` inspection snapshot.  The PBS jobs run
+Cluster-only Stage-1 validation for the canonical midend and the production
+`AutoPlanner` planning boundary.  The PBS jobs run
 offline on compute nodes; package setup happens once on a login node.  Nothing
 here submits jobs or runs Julia locally.  Every path, the expected node, and
 the expected candidate hash are supplied through environment variables; no
@@ -12,9 +12,12 @@ node name or hash value is hardcoded.
 - `bootstrap_login_env.sh` - login-node only: `Pkg.instantiate()` and
   `Pkg.precompile()` for the independent Julia environment.
 - `focused.pbs` - `ppn=5`, Julia/solver `4` threads, BLAS/OMP/MKL `1`;
-  validates node, candidate identity and hash, then runs
-  `canonical_conic_problem.jl`, `problem_features.jl`, `auto_planner.jl`,
+  validates node, candidate identity and hash, then runs the compact
+  production-planning gate: `auto_planner.jl`, `pipeline.jl`,
+  `v041_architecture_regressions.jl`, `executed_diagnostics.jl`,
   `soc_regressions.jl`, `public_api.jl`, and `frontend_auto_options.jl`.
+  Canonical/feature-only tests are not repeated in the focused list because this milestone
+  does not modify those files; the full-suite boundary still covers them.
 - `full.pbs` - same resource contract; `Pkg.test("SDPX"; coverage=false)`
   into a separate result directory.
 
