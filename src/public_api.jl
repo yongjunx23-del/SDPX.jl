@@ -81,6 +81,10 @@ const AutoPlannerSnapshot = SDPX.AutoPlannerSnapshot
 const planner_snapshot = SDPX.planner_snapshot
 const unresolved_options = SDPX.unresolved_options
 const planner_summary = SDPX.planner_summary
+const PlanningDecision = SDPX.PlanningDecision
+const ResolvedAutoPlannerSnapshot = SDPX.ResolvedAutoPlannerSnapshot
+const resolve_planner_snapshot = SDPX.resolve_planner_snapshot
+const resolved_planner_summary = SDPX.resolved_planner_summary
 const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
 const resolve_solve_options = SDPX.resolve_solve_options
 const auto_tolerance = SDPX.auto_tolerance
@@ -115,6 +119,8 @@ export CanonicalPSDConeFacts, ProblemFeatures
 export extract_problem_features
 export AutoPlanner, StructuralPlanningIntent, AutoPlannerSnapshot
 export planner_snapshot, unresolved_options, planner_summary
+export PlanningDecision, ResolvedAutoPlannerSnapshot
+export resolve_planner_snapshot, resolved_planner_summary
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
 

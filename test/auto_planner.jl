@@ -4,6 +4,62 @@ using MultiFloats: Float64x4
 
 const PlannerAPI = SDPX.Experimental
 
+function _synthetic_features(
+    ::Type{T};
+    scalar=0,
+    lorentz=Int[],
+    psd=Int[],
+    variables=3,
+) where {T}
+    matrix = PlannerAPI.CanonicalMatrixFacts(0, variables, 0, 0, :dense_matrix)
+    equality = PlannerAPI.CanonicalAffineMapFacts(matrix, 0)
+    linear = [
+        PlannerAPI.CanonicalAffineConeFacts(
+            1,
+            PlannerAPI.CanonicalAffineMapFacts(matrix, 0),
+        ) for _ in 1:scalar
+    ]
+    lorentz_facts = [
+        PlannerAPI.CanonicalAffineConeFacts(
+            dimension,
+            PlannerAPI.CanonicalAffineMapFacts(matrix, 0),
+        ) for dimension in lorentz
+    ]
+    psd_facts = [
+        PlannerAPI.CanonicalPSDConeFacts(
+            dimension,
+            variables,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            PlannerAPI.CanonicalMatrixFacts(
+                dimension,
+                dimension,
+                0,
+                0,
+                :dense_matrix,
+            ),
+        ) for dimension in psd
+    ]
+    return PlannerAPI.ProblemFeatures{T}(
+        variables,
+        0,
+        equality,
+        linear,
+        lorentz_facts,
+        psd_facts,
+    )
+end
+
+_snapshot(features, options=SDPX.SolveOptions()) = PlannerAPI.planner_snapshot(
+    PlannerAPI.AutoPlanner(),
+    features,
+    options,
+)
+
 function _planner_features(::Type{T}, sparse_storage::Bool) where {T}
     objective = T[1, 0]
     equality = T[1 0]
@@ -153,4 +209,69 @@ end
     resolved_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved)
     core_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved.core)
     @test stable_route(resolved_plan) == stable_route(core_plan)
+end
+
+@testset "Exact structural planner resolves only provable routes" begin
+    scalar = _snapshot(_synthetic_features(Float64; scalar=1))
+    scalar_result = PlannerAPI.resolve_planner_snapshot(scalar)
+    @test scalar_result.snapshot === scalar
+    @test scalar_result.algorithm.value === :lp_primal_dual
+    @test scalar_result.algorithm.status === :resolved
+    @test scalar_result.scaling.value === :lp_geometric
+
+    lorentz4 = _snapshot(_synthetic_features(Float64; lorentz=[4]))
+    lorentz_result = PlannerAPI.resolve_planner_snapshot(lorentz4)
+    @test lorentz_result.algorithm.value === :socp_psd_lift
+    @test lorentz_result.scaling.value === :sdp_ruiz
+
+    mixed_q3 = _snapshot(_synthetic_features(Float64; scalar=1, psd=[2]))
+    mixed_result = PlannerAPI.resolve_planner_snapshot(mixed_q3)
+    @test mixed_result.algorithm.status === :resolved
+    @test mixed_result.algorithm.value === :socp_psd2
+    @test mixed_result.scaling.value === :sdp_ruiz
+
+    q3 = _synthetic_features(Float64; psd=[2])
+    q3_default = PlannerAPI.resolve_planner_snapshot(_snapshot(q3))
+    @test q3_default.algorithm.status === :deferred
+    q3_equilibrated = PlannerAPI.resolve_planner_snapshot(_snapshot(
+        q3,
+        SDPX.SolveOptions(scaling=:equilibrate),
+    ))
+    @test q3_equilibrated.algorithm.value === :socp_psd2
+    @test q3_equilibrated.scaling.value === :sdp_ruiz
+
+    explicit_sdp = PlannerAPI.resolve_planner_snapshot(_snapshot(
+        _synthetic_features(Float64; scalar=1, psd=[7]),
+        SDPX.SolveOptions(algorithm=:sdp, scaling=:none),
+    ))
+    @test explicit_sdp.algorithm.value === :sdp_primal_dual
+    @test explicit_sdp.scaling.value === :none
+
+    explicit_lp_bad = PlannerAPI.resolve_planner_snapshot(_snapshot(
+        _synthetic_features(Float64; psd=[2]),
+        SDPX.SolveOptions(algorithm=:lp),
+    ))
+    @test explicit_lp_bad.algorithm.status === :deferred
+    @test explicit_lp_bad.algorithm.reason === :explicit_lp_incompatible
+end
+
+@testset "Exact planner summary is deterministic and invariant-checked" begin
+    snapshot = _snapshot(_synthetic_features(Float64; scalar=1))
+    result = PlannerAPI.resolve_planner_snapshot(PlannerAPI.AutoPlanner(), snapshot)
+    first = PlannerAPI.resolved_planner_summary(result)
+    second = PlannerAPI.resolved_planner_summary(result)
+    @test first == second
+    @test first.policy === :exact_structural_v1
+    @test first.algorithm == (
+        status=:resolved,
+        value=:lp_primal_dual,
+        provenance=:features,
+        reason=:pure_scalar_linear,
+    )
+    @test result.snapshot.features === snapshot.features
+    @test result.snapshot.intent === snapshot.intent
+    @test result.algorithm.value !== nothing
+    @test result.scaling.value !== nothing
+    @test_throws ArgumentError PlannerAPI.PlanningDecision(nothing, :resolved, :test, :bad)
+    @test_throws ArgumentError PlannerAPI.PlanningDecision(:lp_primal_dual, :deferred, :test, :bad)
 end
