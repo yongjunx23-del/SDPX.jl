@@ -49,6 +49,7 @@ for job in focused kernel_ab solver_ab bigfloat_generic_probe; do
   check grep -qF 'CAMPAIGN_ID:?set CAMPAIGN_ID' "$HERE/$job.pbs"
   if [ "$job" != "bigfloat_generic_probe" ]; then
     check grep -qF 'MFLA_COMMIT:?set MFLA_COMMIT' "$HERE/$job.pbs"
+    check grep -qF '$(dirname "$MFLA_SOURCE")/COMMIT' "$HERE/$job.pbs"
   fi
   check grep -qF 'PBS_NP contract failed' "$HERE/$job.pbs"
   check grep -qF 'JULIA_NUM_THREADS contract failed' "$HERE/$job.pbs"

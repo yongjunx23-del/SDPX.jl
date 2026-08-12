@@ -83,7 +83,11 @@ CANDIDATE_HASH_ACTUAL="$(
   echo "candidate source SHA-256 mismatch" >&2
   exit 1
 }
-MFLA_COMMIT_ACTUAL="$(git -C "$MFLA_SOURCE" rev-parse HEAD 2>/dev/null || true)"
+MFLA_COMMIT_ACTUAL="$(
+  git -C "$MFLA_SOURCE" rev-parse HEAD 2>/dev/null ||
+  tr -d '[:space:]' < "$(dirname "$MFLA_SOURCE")/COMMIT" 2>/dev/null ||
+  true
+)"
 [ "$MFLA_COMMIT_ACTUAL" = "$MFLA_COMMIT" ] || {
   echo "MFLA commit mismatch" >&2
   exit 1

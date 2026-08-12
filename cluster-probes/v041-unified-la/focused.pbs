@@ -89,7 +89,11 @@ if [ "$CANDIDATE_HASH_ACTUAL" != "$CANDIDATE_SOURCE_SHA256" ]; then
   exit 1
 fi
 
-MFLA_COMMIT_ACTUAL="$(git -C "$MFLA_SOURCE" rev-parse HEAD 2>/dev/null || true)"
+MFLA_COMMIT_ACTUAL="$(
+  git -C "$MFLA_SOURCE" rev-parse HEAD 2>/dev/null ||
+  tr -d '[:space:]' < "$(dirname "$MFLA_SOURCE")/COMMIT" 2>/dev/null ||
+  true
+)"
 if [ "$MFLA_COMMIT_ACTUAL" != "$MFLA_COMMIT" ]; then
   echo "MFLA commit mismatch: actual=$MFLA_COMMIT_ACTUAL expected=$MFLA_COMMIT" >&2
   exit 1
