@@ -6,7 +6,7 @@
 #PBS -l walltime=04:00:00
 #PBS -j oe
 
-# CanonicalConicProblem/ProblemFeatures focused validation.
+# CanonicalConicProblem/ProblemFeatures/AutoPlanner focused validation.
 # PBS ppn=5; Julia threads 4; solver threads 4; BLAS/OMP/MKL threads 1.
 # All paths and the expected source hash come from the environment.
 set -euo pipefail
@@ -107,6 +107,7 @@ fi
     files = [
       "canonical_conic_problem.jl",
       "problem_features.jl",
+      "auto_planner.jl",
       "soc_regressions.jl",
       "public_api.jl",
       "frontend_auto_options.jl",
