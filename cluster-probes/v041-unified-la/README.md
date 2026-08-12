@@ -25,6 +25,14 @@ uuid    642d9d30-8e28-45ca-9d81-256429ea358f
 - `focused.pbs` - `ppn=5`, Julia/solver 4 threads, BLAS/OMP/MKL/BLIS 1;
   validates node, candidate identity, MFLA identity/commit, runtime contract,
   then includes `test/multifloat_linear_algebra_integration.jl`.
+- `kernel_ab.pbs` - same runtime contract; runs the generic-vs-MFLA
+  microbenchmark (`kernel_ab.jl`) with warmup 2 and 10 timed repeats for
+  GEMM, SYRK, TRSM, and factor + repeated solve, and records median, residual,
+  finite, RSS, and CPU utilization.
+- `solver_ab.pbs` - same runtime contract; runs the small dense-KKT A/B
+  (`solver_ab.jl`) for generic (`requested=:standard`) and MFLA
+  (`requested=:multifloat`) backends and compares status, objective,
+  certificate, and iteration count.
 - `static_check.sh` - local shell/static checks only.
 
 ## Environment variables
@@ -50,3 +58,7 @@ threads == 4, BLAS/OMP/MKL/BLIS == 1, `pathof(SDPX)` matches the candidate,
 matches, and `plan_la_backend(Float64x4; requested=:multifloat)` selects the
 provider.  The `SUCCESS` marker is written only after the integration test
 file and all identity/marker checks pass.
+
+The kernel and solver A/B probes additionally require
+`plan_la_backend(Float64x4; requested=:auto)` to select `:standard`, so the
+provider descriptor never changes the automatic route.

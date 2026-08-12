@@ -1,0 +1,129 @@
+#!/bin/bash
+#PBS -N sdpx_unified_la_solver_ab
+#PBS -q sugon
+#PBS -l nodes=1:ppn=5
+#PBS -l mem=24gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+
+# v041-unified-la small dense-KKT generic-vs-MFLA A/B.
+set -euo pipefail
+
+: "${NODE_NAME:?set NODE_NAME to the pinned compute node}"
+: "${CANDIDATE_SOURCE:?set CANDIDATE_SOURCE to the immutable candidate source}"
+: "${CANDIDATE_SOURCE_SHA256:?set CANDIDATE_SOURCE_SHA256 to the expected source-tree SHA-256}"
+: "${CANDIDATE_ENV:?set CANDIDATE_ENV to the pre-instantiated Julia environment}"
+: "${MFLA_SOURCE:?set MFLA_SOURCE to the read-only pinned MFLA source}"
+: "${MFLA_COMMIT:?set MFLA_COMMIT to the expected MFLA commit}"
+: "${SDPX_SITE_ENV:?set SDPX_SITE_ENV to the site environment script}"
+: "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH to the offline Julia depot}"
+: "${CAMPAIGN_ID:?set CAMPAIGN_ID to the shared campaign identifier}"
+: "${OUTPUT_ROOT:?set OUTPUT_ROOT to a fresh result directory}"
+
+ACTUAL_NODE="$(hostname)"
+[ "$ACTUAL_NODE" = "$NODE_NAME" ] || {
+  echo "NODE_NAME guard failed" >&2
+  exit 1
+}
+if [ -e "$OUTPUT_ROOT" ]; then
+  echo "OUTPUT_ROOT already exists; refusing to mutate an existing result path: $OUTPUT_ROOT" >&2
+  exit 1
+fi
+mkdir -p "$OUTPUT_ROOT"
+
+write_failed() {
+  printf 'status = "FAILED"\n' > "$OUTPUT_ROOT/FAILED" 2>/dev/null || true
+}
+trap write_failed EXIT
+
+source "$SDPX_SITE_ENV"
+: "${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}"
+test -d "$CANDIDATE_SOURCE"
+test -d "$MFLA_SOURCE"
+test -f "$CANDIDATE_ENV/Project.toml"
+
+export JULIA_PKG_OFFLINE=true
+export JULIA_DEPOT_PATH="$SDPX_DEPOT_PATH"
+export JULIA_NUM_THREADS=4
+export SDPX_SOLVER_THREADS=4
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
+export SDPX_CANDIDATE="$CANDIDATE_SOURCE"
+export MFLA_CANDIDATE="$MFLA_SOURCE"
+
+[ "$JULIA_NUM_THREADS" = "4" ] || {
+  echo "JULIA_NUM_THREADS contract failed: $JULIA_NUM_THREADS" >&2
+  exit 1
+}
+[ "$SDPX_SOLVER_THREADS" = "4" ] || {
+  echo "SDPX_SOLVER_THREADS contract failed: $SDPX_SOLVER_THREADS" >&2
+  exit 1
+}
+[ "${PBS_NP:-unset}" = "5" ] || {
+  echo "PBS_NP contract failed: ${PBS_NP:-unset}" >&2
+  exit 1
+}
+for var in OPENBLAS_NUM_THREADS OMP_NUM_THREADS MKL_NUM_THREADS BLIS_NUM_THREADS; do
+  [ "${!var}" = "1" ] || {
+    echo "$var contract failed: ${!var}" >&2
+    exit 1
+  }
+done
+
+CANDIDATE_HASH_ACTUAL="$(
+  cd "$CANDIDATE_SOURCE"
+  export LC_ALL=C
+  find . -type f -not -path './.git' -not -path './.git/*' -print0 \
+    | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+)"
+[ "$CANDIDATE_HASH_ACTUAL" = "$CANDIDATE_SOURCE_SHA256" ] || {
+  echo "candidate source SHA-256 mismatch" >&2
+  exit 1
+}
+MFLA_COMMIT_ACTUAL="$(git -C "$MFLA_SOURCE" rev-parse HEAD 2>/dev/null || true)"
+[ "$MFLA_COMMIT_ACTUAL" = "$MFLA_COMMIT" ] || {
+  echo "MFLA commit mismatch" >&2
+  exit 1
+}
+
+{
+  echo "campaign_id=$CAMPAIGN_ID"
+  echo "pbs_job_id=${PBS_JOBID:-unknown}"
+  echo "hostname=$ACTUAL_NODE"
+  echo "expected_node=$NODE_NAME"
+  echo "started=$(date -Iseconds)"
+  echo "candidate_source=$CANDIDATE_SOURCE"
+  echo "candidate_source_realpath=$(realpath "$CANDIDATE_SOURCE")"
+  echo "mfla_source=$MFLA_SOURCE"
+  echo "mfla_commit=$MFLA_COMMIT_ACTUAL"
+  echo "julia_bin=$JULIA_BIN"
+  echo "julia_version=$("$JULIA_BIN" --version 2>/dev/null | head -n 1)"
+  echo "candidate_source_sha256=$CANDIDATE_HASH_ACTUAL"
+  echo "julia_threads=$JULIA_NUM_THREADS"
+  echo "solver_threads=$SDPX_SOLVER_THREADS"
+  echo "blas_threads=$OPENBLAS_NUM_THREADS"
+  echo "pbs_ppn=${PBS_NP:-5}"
+  lscpu | grep -E 'Model name|Socket|NUMA|CPU\(s\)' || true
+} > "$OUTPUT_ROOT/environment.txt"
+
+/usr/bin/time -v -o "$OUTPUT_ROOT/process.time.txt" \
+  "$JULIA_BIN" \
+  --project="$CANDIDATE_ENV" \
+  --startup-file=no \
+  -t 4 \
+  "$CANDIDATE_SOURCE/cluster-probes/v041-unified-la/solver_ab.jl" \
+  > "$OUTPUT_ROOT/solver_ab.log" 2>&1
+
+grep -qF 'SOLVER_AB ' "$OUTPUT_ROOT/solver_ab.log" || {
+  echo "solver A/B produced no SOLVER_AB rows" >&2
+  exit 1
+}
+{
+  echo "runtime_contract=ok"
+  echo "finished=$(date -Iseconds)"
+  echo "status=PASSED"
+} >> "$OUTPUT_ROOT/environment.txt"
+date -Iseconds > "$OUTPUT_ROOT/SUCCESS"
+trap - EXIT

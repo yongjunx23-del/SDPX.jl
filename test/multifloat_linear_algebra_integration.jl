@@ -55,6 +55,22 @@ function _max_relative_error(A, B)
 end
 
 @testset "MultiFloatLinearAlgebra extension integration" begin
+    @testset "auto selection ignores provider presence" begin
+        for T in (Float64x2, Float64x3, Float64x4)
+            config = LA.plan_la_backend(
+                T;
+                requested=:auto,
+                route=:dense_cholesky,
+                threads=2,
+            )
+            @test config.selected === :standard
+            @test config.requested === :auto
+            @test config.provider === :none
+            backend = LA.instantiate_la_backend(config, T, 2)
+            @test backend isa LA.StandardLABackend
+        end
+    end
+
     @testset "provider planning requires true MFLA capabilities" begin
         for T in (Float64x2, Float64x3, Float64x4)
             config = LA.plan_la_backend(
