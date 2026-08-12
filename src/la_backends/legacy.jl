@@ -65,6 +65,7 @@ function _legacy_la_backend_configuration(
     ::Type{T},
     requested::Symbol,
     reason::Symbol,
+    equality_solver::Symbol=:auto,
 ) where {T}
     return LABackendConfiguration(
         _la_arithmetic_symbol(T),
@@ -72,7 +73,7 @@ function _legacy_la_backend_configuration(
         :legacy,
         :sdpx_legacy_la,
         SDPX_LEGACY_LA_CAPABILITIES,
-        (),
+        equality_solver === :auto ? (:rank_revealing_qr,) : (),
         reason,
         _legacy_la_ownership(T),
     )

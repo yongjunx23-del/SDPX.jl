@@ -185,6 +185,7 @@ while IFS= read -r line; do
     "src/SDPX.jl"|"src/types.jl"|"src/la_backend.jl"|\
     "src/la_backends/legacy.jl"|"src/kkt.jl"|\
     "src/solver/interior_point.jl"|"src/public_api.jl"|\
+    "src/pipeline.jl"|"src/workspace.jl"|\
     "test/la_backend_regressions.jl") ;;
     *)
       echo "FAIL: out-of-scope change: $line"

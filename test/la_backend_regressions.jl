@@ -33,6 +33,22 @@ using MultiFloats: Float64x4
     @test block_arrow isa SDPX.Experimental.LABackendConfiguration
     @test block_arrow.selected === :legacy
     @test block_arrow.fallback_reason === :route_not_migrated
+    @test block_arrow.fallback_chain === (:rank_revealing_qr,)
+    @test SDPX.Experimental.plan_la_backend(
+        Float64;
+        route=:block_arrow,
+        equality_solver=:normal_equations,
+    ).fallback_chain === ()
+    @test SDPX.Experimental.plan_la_backend(
+        Float64;
+        route=:block_arrow,
+        equality_solver=:qr,
+    ).fallback_chain === ()
+    @test_throws ArgumentError SDPX.Experimental.plan_la_backend(
+        Float64;
+        route=:block_arrow,
+        equality_solver=:bogus,
+    )
     @test SDPX.Experimental.plan_la_backend(
         Float64;
         route=:block_arrow,
@@ -45,6 +61,16 @@ using MultiFloats: Float64x4
             requested=request,
         )
     end
+    dense_legacy = SDPX.Experimental.plan_la_backend(
+        Float64;
+        requested=:legacy,
+    )
+    @test dense_legacy.fallback_chain === (:rank_revealing_qr,)
+    @test SDPX.Experimental.plan_la_backend(
+        Float64;
+        requested=:legacy,
+        equality_solver=:normal_equations,
+    ).fallback_chain === ()
 
     # Positional plans from the pre-LA API carry the classification symbol
     # (`:fixed_extended`) rather than the concrete Float64x4 LA symbol.  The

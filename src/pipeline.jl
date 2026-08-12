@@ -1235,6 +1235,7 @@ function build_execution_plan(
         route=backend_config.mixed_precision_mode !== :off ?
               :mixed_precision : kkt_backend,
         threads=selected_threads,
+        equality_solver=opts.equality_solver,
     )
     adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
                          recommended_adaptive_sigma_max(

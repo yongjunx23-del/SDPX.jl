@@ -150,10 +150,15 @@ struct LABackendConfiguration
 end
 
 """Conservative configuration used by historical positional plan builders."""
-function _compat_la_backend_configuration(arithmetic::Symbol)
+function _compat_la_backend_configuration(
+    arithmetic::Symbol,
+    equality_solver::Symbol=:auto,
+)
     return LABackendConfiguration(
         arithmetic, :legacy, :legacy, :sdpx_legacy_la,
-        SDPX_LEGACY_LA_CAPABILITIES, (), :compatibility,
+        SDPX_LEGACY_LA_CAPABILITIES,
+        equality_solver === :auto ? (:rank_revealing_qr,) : (),
+        :compatibility,
         _legacy_la_symbol_ownership(arithmetic),
     )
 end
@@ -1117,7 +1122,10 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         backend_config,
-        _compat_la_backend_configuration(classification.arithmetic),
+        _compat_la_backend_configuration(
+            classification.arithmetic,
+            backend_config.equality_solver,
+        ),
         gram_kernel,
         schedule,
         threads,
@@ -1160,7 +1168,10 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         config,
-        _compat_la_backend_configuration(classification.arithmetic),
+        _compat_la_backend_configuration(
+            classification.arithmetic,
+            equality_solver,
+        ),
         gram_kernel,
         schedule,
         threads,

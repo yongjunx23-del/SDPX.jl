@@ -130,6 +130,15 @@ function _equality_qr_allowed(
            estimated_extra_bytes <= max(256 * 2^20, fld(available, 8))
 end
 
+function _la_equality_qr_fallback_allowed(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+) where {T}
+    :rank_revealing_qr in ws.la_fallback_chain || return false
+    opts.equality_solver === :auto || return false
+    return _equality_qr_allowed(ws.Btil, opts)
+end
+
 function _factor_equality_qr(
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
@@ -720,24 +729,42 @@ function _factor_arrow_equality_system!(
             ws.Qchol = legacy_factor
         elseif legacy_provider_factor
             # `kchol!` may have partially overwritten the factor buffer
-            # buffer before reporting failure. Restore the authoritative Gram
-            # matrix before the only allowed solver-level fallback.
+            # before reporting failure. Restore the authoritative Gram matrix
+            # before the only plan-authorized solver-level fallback.
             copy_owned!(ws.Qbuf, ws.Q)
             ws.la_fallback_reason = :la_equality_factor_failed
-            equality_finished = time_ns()
-            return (
-                ok=false,
-                q_pivoted=false,
-                q_rank_deficient=false,
-                equality_solver=:normal_equations,
-                phase_times=(
-                    constraint_triangular_solve=
-                        (constraint_finished - constraint_started) / 1.0e9,
-                    equality_gram=gram_seconds,
-                    equality_factorization=
-                        (equality_finished - factor_started) / 1.0e9,
-                ),
-            )
+            if _la_equality_qr_fallback_allowed(ws, opts)
+                qr_factor = _factor_equality_qr(ws.Btil, opts)
+                ws.Qchol = qr_factor
+                q_pivoted = true
+                q_rank_deficient = qr_factor.rank < n
+                if opts.verbosity >= 1
+                    @warn(
+                        "Block-diagonal equality solve switched " *
+                        "from legacy normal equations to " *
+                        "rank-revealing QR",
+                        reason=:normal_equation_rank_loss,
+                        qr_rank=qr_factor.rank,
+                        equalities=n,
+                        qr_quality=qr_factor.quality,
+                    )
+                end
+            else
+                equality_finished = time_ns()
+                return (
+                    ok=false,
+                    q_pivoted=false,
+                    q_rank_deficient=false,
+                    equality_solver=:normal_equations,
+                    phase_times=(
+                        constraint_triangular_solve=
+                            (constraint_finished - constraint_started) / 1.0e9,
+                        equality_gram=gram_seconds,
+                        equality_factorization=
+                            (equality_finished - factor_started) / 1.0e9,
+                    ),
+                )
+            end
         else
             T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
             factor = LinearAlgebra.cholesky!(
@@ -1169,27 +1196,43 @@ function _factor_dense_kkt_native!(
                     # A provider failure is not permission to execute a
                     # StandardLA factor while continuing to report LegacyLA.
                     # Restore the possibly partially-mutated buffer, then
-                    # fail closed: the LegacyLA plan has no arithmetic
-                    # fallback chain.
+                    # use only the plan-authorized rank-revealing QR policy.
                     copy_owned!(ws.Qbuf, ws.Q)
                     ws.la_fallback_reason = :la_equality_factor_failed
-                    phase_equality_factorization +=
-                        _elapsed_seconds(started)
-                    return (
-                        ok=false,
-                        reg_attempts=reg_attempts,
-                        q_pivoted=false,
-                        phase_times=(
-                            schur_copy=phase_schur_copy,
-                            schur_factorization=
-                                phase_schur_factorization,
-                            constraint_triangular_solve=
-                                phase_constraint_triangular_solve,
-                            equality_gram=phase_equality_gram,
-                            equality_factorization=
-                                phase_equality_factorization,
-                        ),
-                    )
+                    if _la_equality_qr_fallback_allowed(ws, opts)
+                        qr_factor = _factor_equality_qr(ws.Btil, opts)
+                        ws.Qchol = qr_factor
+                        q_pivoted = true
+                        q_rank_deficient = qr_factor.rank < n
+                        if opts.verbosity >= 1
+                            @warn(
+                                "KKT equality solve switched from legacy " *
+                                "normal equations to rank-revealing QR",
+                                reason=:normal_equation_rank_loss,
+                                qr_rank=qr_factor.rank,
+                                equalities=n,
+                                qr_quality=qr_factor.quality,
+                            )
+                        end
+                    else
+                        phase_equality_factorization +=
+                            _elapsed_seconds(started)
+                        return (
+                            ok=false,
+                            reg_attempts=reg_attempts,
+                            q_pivoted=false,
+                            phase_times=(
+                                schur_copy=phase_schur_copy,
+                                schur_factorization=
+                                    phase_schur_factorization,
+                                constraint_triangular_solve=
+                                    phase_constraint_triangular_solve,
+                                equality_gram=phase_equality_gram,
+                                equality_factorization=
+                                    phase_equality_factorization,
+                            ),
+                        )
+                    end
                 else
                     copy_owned!(ws.Qbuf, ws.Q)
                     Cq = LinearAlgebra.cholesky!(

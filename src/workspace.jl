@@ -516,6 +516,7 @@ mutable struct Workspace{T}
     executed_la_provider::Symbol
     executed_la_ownership::Symbol
     la_fallback_reason::Symbol
+    la_fallback_chain::Tuple{Vararg{Symbol}}
 end
 
 """
@@ -875,6 +876,7 @@ function _normalize_compatibility_execution_plan(
        family_matches
         compatibility_la = _compat_la_backend_configuration(
             _la_arithmetic_symbol(T),
+            plan.backend_config.equality_solver,
         )
         return ExecutionPlan(
             plan.classification,
@@ -929,6 +931,7 @@ function Workspace(
         # arithmetic seam; only an explicit ExecutionPlan opts into Standard.
         compatibility_la = _compat_la_backend_configuration(
             _la_arithmetic_symbol(T),
+            equality_solver,
         )
         plan = ExecutionPlan(
             plan.classification,
@@ -1322,7 +1325,8 @@ function Workspace(
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         :not_run, selected_threads, config, nothing, :not_executed, :none,
-        la_backend, :not_executed, :not_executed, :not_executed, :none)
+        la_backend, :not_executed, :not_executed, :not_executed, :none,
+        plan.la_config.fallback_chain)
     workspace.backend = _backend_from_configuration(workspace, config)
     generic_mixed_mode !== :off &&
         workspace.mixed_precision === nothing &&

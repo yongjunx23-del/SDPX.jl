@@ -58,9 +58,14 @@ function plan_la_backend(
     requested::Symbol=:auto,
     route::Symbol=:dense_cholesky,
     threads::Int=1,
+    equality_solver::Symbol=:auto,
 ) where {T}
     requested in (:auto, :legacy, :standard, :multifloat, :fixed_extended) ||
         throw(ArgumentError("unknown LA backend request $(requested)"))
+    equality_solver in (:auto, :normal_equations, :qr) ||
+        throw(ArgumentError(
+            "unknown LA equality solver $(equality_solver)",
+        ))
     arithmetic = _la_arithmetic_symbol(T)
     descriptor = la_provider_descriptor(T, threads)
     required = (
@@ -83,6 +88,7 @@ function plan_la_backend(
                 T,
                 requested,
                 :route_not_migrated,
+                equality_solver,
             )
         end
         throw(ArgumentError(
@@ -90,7 +96,12 @@ function plan_la_backend(
         ))
     end
     if requested === :legacy
-        return _legacy_la_backend_configuration(T, :legacy, :requested_legacy)
+        return _legacy_la_backend_configuration(
+            T,
+            :legacy,
+            :requested_legacy,
+            equality_solver,
+        )
     elseif requested === :standard || requested === :fixed_extended ||
            (requested === :auto &&
             (arithmetic in (:float32, :float64, :bigfloat) ||
@@ -119,12 +130,18 @@ function plan_la_backend(
     end
     # BigFloat auto remains on generic LinearAlgebra in dense routes; explicit
     # legacy is the ownership-safe opt-out for callers that require it.
-    requested === :auto && return LABackendConfiguration(
-        arithmetic, requested, :legacy, :sdpx_legacy_la,
-        SDPX_LEGACY_LA_CAPABILITIES, (), :unsupported_arithmetic,
-        _legacy_la_ownership(T),
+    requested === :auto && return _legacy_la_backend_configuration(
+        T,
+        requested,
+        :unsupported_arithmetic,
+        equality_solver,
     )
-    return _legacy_la_backend_configuration(T, requested, :bigfloat_ownership)
+    return _legacy_la_backend_configuration(
+        T,
+        requested,
+        :bigfloat_ownership,
+        equality_solver,
+    )
 end
 
 function instantiate_la_backend(

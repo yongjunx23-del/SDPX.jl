@@ -4,6 +4,11 @@ Cluster-only validation for the bundled `SDPXLegacyLA` provider and the legacy
 LA diagnostics contract. The probe lives in the legacy tree so it can be
 reviewed and run independently of solver/core numerical changes.
 
+The probe's commit-scope allowlist also covers the plan-authorized
+`rank_revealing_qr` equality fallback: `src/pipeline.jl`, `src/workspace.jl`,
+and the existing KKT/types/LA files are part of the same Legacy LA backend
+change, while unrelated solver files remain rejected.
+
 ## Files
 
 - `legacy_provider_regression.pbs` - focused regression runner. `ppn=5`,
