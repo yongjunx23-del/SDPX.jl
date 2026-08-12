@@ -83,11 +83,20 @@ vars="$vars,SDPX_SITE_ENV=$SDPX_SITE_ENV"
 vars="$vars,SDPX_DEPOT_PATH=$SDPX_DEPOT_PATH"
 vars="$vars,RESULT_ROOT=$RESULT_ROOT"
 vars="$vars,AB_RUNNER_ROOT=$AB_RUNNER_ROOT"
-# Optional scalar overrides are forwarded only when set; comma-containing
-# values (ARITHMETIC/CASE_FILTER) stay on the PBS defaults to avoid -v
-# splitting them.
-for var in REPETITIONS TIMING_BATCH_SIZE TIMED_BATCHES WARMUP TIME_LIMIT MAX_ITERATIONS; do
+# Optional scalar overrides are forwarded only when set.  ARITHMETIC stays on
+# its comma-containing PBS default to avoid -v splitting.  CASE_FILTER is
+# forwarded only when it is a single token (e.g. socp_many_tiny), so
+# comma-containing defaults stay on the PBS side.
+for var in REPETITIONS TIMING_BATCH_SIZE TIMED_BATCHES WARMUP TIME_LIMIT MAX_ITERATIONS CASE_FILTER ARM_ORDER; do
   if [ -n "${!var:-}" ]; then
+    if [ "$var" = "CASE_FILTER" ] || [ "$var" = "ARM_ORDER" ]; then
+      case "${!var}" in
+        *[,=[:space:]]*)
+          echo "$var must be a single token (no comma/space): ${!var}" >&2
+          exit 1
+          ;;
+      esac
+    fi
     vars="$vars,$var=${!var}"
   fi
 done

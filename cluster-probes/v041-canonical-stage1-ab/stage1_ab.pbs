@@ -6,9 +6,10 @@
 #PBS -l walltime=08:00:00
 #PBS -j oe
 
-# Canonical Stage-1 unchanged-hot-path A/B: rc1 baseline (302dca8) then
-# candidate (d6daf70) in fixed order on one pinned node.  Both arms use the
-# same runner/campaign/config; only --source and the Julia project differ.
+# Canonical Stage-1 unchanged-hot-path A/B: rc1 baseline (302dca8) and
+# candidate (d6daf70) in the ARM_ORDER sequence on one pinned node.  Both arms
+# use the same runner/campaign/config; only --source and the Julia project
+# differ.
 # This job runs offline on a compute node; instantiate/precompile must happen
 # on a login node first.
 set -euo pipefail
@@ -55,6 +56,14 @@ fi
 WARMUP="${WARMUP:-true}"
 TIME_LIMIT="${TIME_LIMIT:-900}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-300}"
+ARM_ORDER="${ARM_ORDER:-baseline_first}"
+case "$ARM_ORDER" in
+  baseline_first|candidate_first) ;;
+  *)
+    echo "ARM_ORDER must be baseline_first or candidate_first, got: $ARM_ORDER" >&2
+    exit 1
+    ;;
+esac
 
 ACTUAL_NODE="$(hostname)"
 if [ "$ACTUAL_NODE" != "$NODE_NAME" ]; then
@@ -214,6 +223,7 @@ fi
   echo "warmup=$WARMUP"
   echo "time_limit=$TIME_LIMIT"
   echo "max_iterations=$MAX_ITERATIONS"
+  echo "arm_order=$ARM_ORDER"
   echo "julia_threads=4"
   echo "solver_threads=4"
   echo "blas_threads=1"
@@ -248,6 +258,7 @@ fi
   printf 'ppn=%s\n' "${PBS_NP:-5}"
   printf 'time_limit=%s\n' "$TIME_LIMIT"
   printf 'max_iterations=%s\n' "$MAX_ITERATIONS"
+  printf 'arm_order=%s\n' "$ARM_ORDER"
 } > "$RESULT_ROOT/arms.conf"
 
 export JULIA_PKG_OFFLINE=true
@@ -288,11 +299,15 @@ run_arm() {
 }
 
 baseline_status=0
-run_arm baseline "$BASELINE_SOURCE" "$BASELINE_ENV" || baseline_status=$?
-echo "baseline_runner_exit=$baseline_status" >> "$RESULT_ROOT/environment.txt"
-
 candidate_status=0
-run_arm candidate "$CANDIDATE_SOURCE" "$CANDIDATE_ENV" || candidate_status=$?
+if [ "$ARM_ORDER" = "baseline_first" ]; then
+  run_arm baseline "$BASELINE_SOURCE" "$BASELINE_ENV" || baseline_status=$?
+  run_arm candidate "$CANDIDATE_SOURCE" "$CANDIDATE_ENV" || candidate_status=$?
+else
+  run_arm candidate "$CANDIDATE_SOURCE" "$CANDIDATE_ENV" || candidate_status=$?
+  run_arm baseline "$BASELINE_SOURCE" "$BASELINE_ENV" || baseline_status=$?
+fi
+echo "baseline_runner_exit=$baseline_status" >> "$RESULT_ROOT/environment.txt"
 echo "candidate_runner_exit=$candidate_status" >> "$RESULT_ROOT/environment.txt"
 
 # The runner records a subset source hash (src/bench/Project/Manifest,

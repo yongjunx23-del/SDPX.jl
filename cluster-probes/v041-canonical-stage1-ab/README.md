@@ -28,6 +28,7 @@ per-category solve times of generated LP/SOCP/SDP cases unchanged.
 |---|---|
 | `stage1_ab.pbs` | one PBS job: identity checks, baseline arm, candidate arm, analysis gate |
 | `analyze_ab.py` | machine-checkable cross-arm gate; writes `ab_report.csv` and `ab_provenance.txt`; `--self-test` runs synthetic CSV scenarios |
+| `aggregate_ab.py` | multi-node aggregate gate over completed A/B result roots; reports per-node family ratios and fails unless all settings/identity gates and aggregated ratios pass |
 | `submit_stage1_ab.sh` | dry-run by default; `--submit` pins the job to `NODE_NAME` |
 | `static_check.sh` | local bash/Python static checks only |
 
@@ -65,6 +66,7 @@ Optional job variables with stable defaults:
 | `WARMUP` | `true` |
 | `TIME_LIMIT` | `900` |
 | `MAX_ITERATIONS` | `300` |
+| `ARM_ORDER` | `baseline_first` (default) or `candidate_first`; forwarded by the submit helper as a single token |
 
 ## Immutable candidate layout
 
@@ -187,6 +189,59 @@ and SHA-256 for provenance.
 `analyze_ab.py --self-test` verifies the analyzer itself against synthetic
 CSVs without Julia: a clean PASS, a PASS where full-tree and subset hashes
 differ, and a FAIL exercising input/config/certificate/timing gates.
+
+## Multi-node aggregate
+
+After multiple completed result roots exist, run:
+
+```bash
+python3 cluster-probes/v041-canonical-stage1-ab/aggregate_ab.py RESULT_ROOT_1 RESULT_ROOT_2 ...
+```
+
+Each root must contain `arms.conf`, `analyze.log`, `ab_report.csv`, and
+`baseline/`/`candidate/` result CSVs, plus root `SUCCESS` (root `FAILED` is
+rejected).  The aggregate tool requires every root's local analyzer gate to
+have passed via an explicit, non-truncated `AB_GATE_PASS` line in
+`analyze.log`, and requires all roots to agree on commits, tree hashes, archive
+hashes, `ab_runner_sha256`, arithmetic, case filter, batch/repetition settings,
+resource/thread config, and runner source.  It reports each node's per-family
+ratio and worst within-arm CV (`max(baseline_cv, candidate_cv)`), plus the
+aggregate median/min/max ratio and node count; every family ratio must be
+<= 1.10 with worst within-arm CV < 0.05, and the aggregated median ratio must
+be <= 1.10.  `aggregate_ab.py --self-test` covers a clean pass, a missing pass
+marker, and a provenance mismatch.  It is Python 3.6 compatible and performs no
+Julia/Pkg/SSH/qsub work.
+
+### Order-balanced screening
+
+`aggregate_ab.py --ordered` accepts two completed result roots per node, one
+`baseline_first` and one `candidate_first` (paired by `hostname`/`expected_node`
+from `environment.txt`).  Real timing-only roots may have root `FAILED` and no
+root `SUCCESS` because the analyzer exits 1; this is accepted only when both
+arm `SUCCESS` markers exist, no arm `FAILED` exists, `analyze.log` has no
+non-timing FAIL lines, and `max_endpoint_norm=0` and `max_iteration_delta=0`
+each appear exactly once.  Both root markers absent/present or a root `FAILED`
+with non-timing failures are rejected.  Each node's two order ratios are
+combined geometrically (`sqrt(r_baseline_first * r_candidate_first)`); the
+combined ratio must be <= 1.10, the aggregate geometric median <= 1.10, and
+the one-sided 95% log-space t upper bound (df=n-1) <= 1.10 for n>=3.
+Within-arm batch CV is reported, warned at >= 0.05, and hard-fails at >= 0.20.
+Roots that predate `arm_order` require the explicit
+`--legacy-baseline-first` flag and are accepted only when fixed
+analyzer/runner provenance is present and baseline artifacts precede candidate
+artifacts; otherwise rerun both orders.
+
+`aggregate_ab.py --self-test` also covers a three-host order-balanced PASS with
+timing-only root `FAILED` roots and an order-balanced FAIL from a non-timing
+root `FAILED`.
+
+## Single-token CASE_FILTER
+
+`submit_stage1_ab.sh` forwards `CASE_FILTER` only when it is a single token
+(e.g. `CASE_FILTER=socp_many_tiny`) so SOCP-only runs are possible; a value
+containing a comma, equals sign, or whitespace is rejected at submit time.
+Comma-containing `ARITHMETIC` defaults remain on the PBS side and are not
+forwarded.
 
 ## Static verification
 
