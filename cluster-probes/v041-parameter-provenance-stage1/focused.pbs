@@ -1,0 +1,193 @@
+#!/bin/bash
+#PBS -N sdpx_parameter_provenance_stage1_focused
+#PBS -q sugon
+#PBS -l nodes=1:ppn=5
+#PBS -l mem=24gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+
+# Parameter-provenance Stage-1 focused validation.
+# PBS ppn=5; Julia threads 4; solver threads 4; BLAS/OMP/MKL/BLIS threads 1.
+# All paths and the expected source hash come from the environment.
+set -euo pipefail
+
+: "${NODE_NAME:?set NODE_NAME to the pinned compute node}"
+: "${CANDIDATE_SOURCE:?set CANDIDATE_SOURCE to the immutable candidate source}"
+: "${CANDIDATE_SOURCE_SHA256:?set CANDIDATE_SOURCE_SHA256 to the expected source-tree SHA-256}"
+: "${CANDIDATE_ENV:?set CANDIDATE_ENV to the pre-instantiated Julia environment}"
+: "${SDPX_SITE_ENV:?set SDPX_SITE_ENV to the site environment script}"
+: "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH to the offline Julia depot}"
+: "${CAMPAIGN_ID:?set CAMPAIGN_ID to the shared campaign identifier}"
+: "${OUTPUT_ROOT:?set OUTPUT_ROOT to a fresh result directory}"
+
+ACTUAL_NODE="$(hostname)"
+if [ "$ACTUAL_NODE" != "$NODE_NAME" ]; then
+  echo "NODE_NAME guard failed: actual=$ACTUAL_NODE expected=$NODE_NAME" >&2
+  exit 1
+fi
+if [ -e "$OUTPUT_ROOT" ]; then
+  echo "OUTPUT_ROOT already exists; refusing to mutate an existing result path: $OUTPUT_ROOT" >&2
+  exit 1
+fi
+mkdir -p "$OUTPUT_ROOT"
+
+write_failed() {
+  printf 'status = "FAILED"\n' > "$OUTPUT_ROOT/FAILED" 2>/dev/null || true
+}
+trap write_failed EXIT
+
+source "$SDPX_SITE_ENV"
+: "${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}"
+test -d "$CANDIDATE_SOURCE"
+test -f "$CANDIDATE_SOURCE/src/SDPX.jl"
+test -f "$CANDIDATE_ENV/Project.toml"
+
+export JULIA_PKG_OFFLINE=true
+export JULIA_DEPOT_PATH="$SDPX_DEPOT_PATH"
+export JULIA_NUM_THREADS=4
+export SDPX_SOLVER_THREADS=4
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
+export SDPX_CANDIDATE="$CANDIDATE_SOURCE"
+
+# Fail-closed runtime contract.  Every condition must hold before any test
+# work, and runtime_contract=ok is recorded only after the Julia process
+# confirms the same contract and the markers are verified.
+[ "$JULIA_NUM_THREADS" = "4" ] || {
+  echo "JULIA_NUM_THREADS contract failed: $JULIA_NUM_THREADS" >&2
+  exit 1
+}
+[ "$SDPX_SOLVER_THREADS" = "4" ] || {
+  echo "SDPX_SOLVER_THREADS contract failed: $SDPX_SOLVER_THREADS" >&2
+  exit 1
+}
+[ "${PBS_NP:-unset}" = "5" ] || {
+  echo "PBS_NP contract failed: ${PBS_NP:-unset}" >&2
+  exit 1
+}
+for var in OPENBLAS_NUM_THREADS OMP_NUM_THREADS MKL_NUM_THREADS BLIS_NUM_THREADS; do
+  value="${!var}"
+  [ "$value" = "1" ] || {
+    echo "$var contract failed: $value" >&2
+    exit 1
+  }
+done
+
+CANDIDATE_HASH_ACTUAL="$(
+  cd "$CANDIDATE_SOURCE"
+  export LC_ALL=C
+  find . -type f -not -path './.git' -not -path './.git/*' -print0 \
+    | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+)"
+if [ "$CANDIDATE_HASH_ACTUAL" != "$CANDIDATE_SOURCE_SHA256" ]; then
+  echo "candidate source SHA-256 mismatch: actual=$CANDIDATE_HASH_ACTUAL expected=$CANDIDATE_SOURCE_SHA256" >&2
+  exit 1
+fi
+
+{
+  echo "campaign_id=$CAMPAIGN_ID"
+  echo "pbs_job_id=${PBS_JOBID:-unknown}"
+  echo "hostname=$ACTUAL_NODE"
+  echo "expected_node=$NODE_NAME"
+  echo "started=$(date -Iseconds)"
+  echo "inherited_lc_all=${LC_ALL:-unset}"
+  echo "effective_lc_all=C"
+  echo "candidate_source=$CANDIDATE_SOURCE"
+  echo "candidate_source_realpath=$(realpath "$CANDIDATE_SOURCE")"
+  echo "candidate_env=$CANDIDATE_ENV"
+  echo "julia_bin=$JULIA_BIN"
+  echo "julia_version=$("$JULIA_BIN" --version 2>/dev/null | head -n 1)"
+  echo "candidate_source_sha256=$CANDIDATE_HASH_ACTUAL"
+  echo "candidate_source_sha256_expected=$CANDIDATE_SOURCE_SHA256"
+  echo "source_commit=$(tr -d '[:space:]' < "$(dirname "$CANDIDATE_SOURCE")/metadata/source_commit.txt" 2>/dev/null || true)"
+  echo "archive_sha256=$(tr -d '[:space:]' < "$(dirname "$CANDIDATE_SOURCE")/metadata/archive_sha256.txt" 2>/dev/null || tr -d '[:space:]' < "$(dirname "$CANDIDATE_SOURCE")/metadata/archive_sha.txt" 2>/dev/null || true)"
+  echo "julia_threads=$JULIA_NUM_THREADS"
+  echo "solver_threads=$SDPX_SOLVER_THREADS"
+  echo "blas_threads=$OPENBLAS_NUM_THREADS"
+  echo "pbs_ppn=${PBS_NP:-5}"
+  lscpu | grep -E 'Model name|Socket|NUMA|CPU\(s\)' || true
+} > "$OUTPUT_ROOT/environment.txt"
+
+/usr/bin/time -v -o "$OUTPUT_ROOT/process.time.txt" \
+  "$JULIA_BIN" \
+  --project="$CANDIDATE_ENV" \
+  --startup-file=no \
+  -t 4 \
+  -e '
+    using SDPX, Test, LinearAlgebra
+    expected_root = realpath(ENV["SDPX_CANDIDATE"])
+    expected_src = realpath(joinpath(expected_root, "src", "SDPX.jl"))
+    actual_src = realpath(pathof(SDPX))
+    actual_root = realpath(joinpath(dirname(actual_src), ".."))
+    println("CANDIDATE_PATHOF ", actual_src)
+    println("CANDIDATE_ROOT ", actual_root)
+    println("JULIA_NTHREADS ", Threads.nthreads())
+    println("BLAS_THREADS ", LinearAlgebra.BLAS.get_num_threads())
+    if actual_src != expected_src || actual_root != expected_root
+      error("loaded SDPX from $(actual_src) (root $(actual_root)); expected $(expected_src) (root $(expected_root))")
+    end
+    Threads.nthreads() == 4 || error("Julia thread mismatch: $(Threads.nthreads())")
+    LinearAlgebra.BLAS.get_num_threads() == 1 || error(
+      "BLAS thread mismatch: $(LinearAlgebra.BLAS.get_num_threads())",
+    )
+    for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "BLIS_NUM_THREADS")
+      value = get(ENV, var, "")
+      value == "1" || error("$var must be 1, got $(repr(value))")
+    end
+    coefficients = zeros(2, 2, 2)
+    coefficients[1, 1, 1] = 1.0
+    coefficients[2, 2, 2] = 2.0
+    problem = SDPX.ingest([2.0, 3.0], [coefficients], [[0.0 1.0; 1.0 0.0]],
+      Matrix{Float64}(undef, 2, 0), Float64[]; verbosity=0)
+    plan = SDPX.build_execution_plan(problem)
+    println("PLAN_THREADS ", plan.threads)
+    plan.threads == 4 || error("default plan thread mismatch: $(plan.threads)")
+    println("RUNTIME_CONTRACT julia=$(Threads.nthreads()) plan=$(plan.threads) blas=$(LinearAlgebra.BLAS.get_num_threads())")
+    files = [
+      "executed_diagnostics.jl",
+      "auto_planner.jl",
+    ]
+    failures = String[]
+    for file in files
+      path = joinpath(expected_root, "test", file)
+      println("FOCUSED_BEGIN ", file)
+      try
+        include(path)
+        println("FOCUSED_END ", file)
+      catch err
+        println("FOCUSED_FAILED ", file)
+        Base.showerror(stdout, err)
+        println()
+        push!(failures, file)
+      end
+    end
+    if !isempty(failures)
+      error("focused tests failed: ", join(failures, ", "))
+    end
+  ' > "$OUTPUT_ROOT/test.log" 2>&1
+
+verify_focused_markers() {
+  test -s "$OUTPUT_ROOT/test.log" || return 1
+  for file in executed_diagnostics.jl auto_planner.jl; do
+    grep -qF "FOCUSED_BEGIN $file" "$OUTPUT_ROOT/test.log" || return 1
+    grep -qF "FOCUSED_END $file" "$OUTPUT_ROOT/test.log" || return 1
+  done
+  if grep -qF 'FOCUSED_FAILED' "$OUTPUT_ROOT/test.log"; then
+    return 1
+  fi
+  return 0
+}
+verify_focused_markers || {
+  echo "focused marker verification failed; SUCCESS not written" >&2
+  exit 1
+}
+
+{
+  echo "runtime_contract=ok"
+  echo "finished=$(date -Iseconds)"
+  echo "status=PASSED"
+} >> "$OUTPUT_ROOT/environment.txt"
+date -Iseconds > "$OUTPUT_ROOT/SUCCESS"
+trap - EXIT
