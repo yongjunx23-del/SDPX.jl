@@ -33,10 +33,15 @@ const StandardLABackend = SDPX.StandardLABackend
 const LegacyLABackend = SDPX.LegacyLABackend
 const MultiFloatLABackend = SDPX.MultiFloatLABackend
 const LABackendConfiguration = SDPX.LABackendConfiguration
+const AbstractLACholeskyFactor = SDPX.AbstractLACholeskyFactor
+const StandardLACholeskyFactor = SDPX.StandardLACholeskyFactor
+const ProviderLACholeskyFactor = SDPX.ProviderLACholeskyFactor
 const plan_la_backend = SDPX.plan_la_backend
 const instantiate_la_backend = SDPX.instantiate_la_backend
 const la_provider_descriptor = SDPX.la_provider_descriptor
 const instantiate_multifloat_la_backend = SDPX.instantiate_multifloat_la_backend
+const la_cholesky_factor! = SDPX.la_cholesky_factor!
+const la_cholesky_solve! = SDPX.la_cholesky_solve!
 const la_dot = SDPX.la_dot
 const la_norminf = SDPX.la_norminf
 const la_mul! = SDPX.la_mul!
@@ -125,8 +130,10 @@ export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
 export AbstractLABackend, StandardLABackend, LegacyLABackend
 export MultiFloatLABackend, LABackendConfiguration, plan_la_backend
+export AbstractLACholeskyFactor, StandardLACholeskyFactor, ProviderLACholeskyFactor
 export instantiate_la_backend, la_provider_descriptor
 export instantiate_multifloat_la_backend
+export la_cholesky_factor!, la_cholesky_solve!
 export la_dot, la_norminf, la_mul!, la_mul_owned!, la_syrk!, la_chol!
 export la_trsm!, la_trsv_lower!, la_trsv_transpose!
 export la_factor!, la_solve!, la_refine!

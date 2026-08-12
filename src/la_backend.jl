@@ -51,12 +51,13 @@ function plan_la_backend(
     descriptor = la_provider_descriptor(T, threads)
     required = (
         :chol,
+        :cholesky_factor!,
+        :solve,
         :trsm,
         :trsv_lower,
         :trsv_transpose,
         :syrk,
         :mul_owned,
-        :axpby_owned,
     )
     route in (:dense_cholesky, :dense_cholesky_fallback) ||
         return LABackendConfiguration(
@@ -68,14 +69,19 @@ function plan_la_backend(
             arithmetic, :legacy, :legacy, :none, (), (), :requested_legacy,
             :legacy,
         )
-    elseif requested === :standard ||
-           (requested === :auto && arithmetic in (:float32, :float64))
+    elseif requested === :standard || requested === :fixed_extended ||
+           (requested === :auto &&
+            (arithmetic in (:float32, :float64, :bigfloat) ||
+             startswith(String(arithmetic), "float64x")))
+        provider = arithmetic in (:float32, :float64) ? :blas_lapack :
+                   :generic_linear_algebra
+        ownership = arithmetic in (:float32, :float64) ? :immutable_scalars :
+                    :owned_mutable_scalars
         return LABackendConfiguration(
-            arithmetic, requested, :standard, :none,
-            required, (:legacy,), :none, :standard,
+            arithmetic, requested, :standard, provider,
+            required, (:legacy,), :none, ownership,
         )
-    elseif requested in (:multifloat, :fixed_extended) ||
-           (requested === :auto && arithmetic !== :bigfloat)
+    elseif requested === :multifloat
         if descriptor.available && all(cap -> cap in descriptor.capabilities, required)
             return LABackendConfiguration(
                 arithmetic, requested, :multifloat, descriptor.provider,
@@ -83,14 +89,18 @@ function plan_la_backend(
                 :provider_owned,
             )
         end
-        return LABackendConfiguration(
-            arithmetic, requested, :legacy, :none, (), (),
-            descriptor.available ? :incomplete_provider_capabilities :
-            :missing_provider, :legacy,
-        )
+        reason = descriptor.available ? :incomplete_provider_capabilities :
+                 :missing_provider
+        throw(ArgumentError(
+            "requested MultiFloat LA provider unavailable: $(reason)",
+        ))
     end
-    # BigFloat ownership remains with the existing MPFR-aware kernels.  This
-    # is intentional until generic LinearAlgebra ownership is audited.
+    # BigFloat auto remains on generic LinearAlgebra in dense routes; explicit
+    # legacy is the ownership-safe opt-out for callers that require it.
+    requested === :auto && return LABackendConfiguration(
+        arithmetic, requested, :legacy, :none,
+        (), (), :unsupported_arithmetic, :legacy,
+    )
     return LABackendConfiguration(
         arithmetic, requested, :legacy, :none, (), (), :bigfloat_ownership,
         :legacy,
@@ -102,19 +112,77 @@ function instantiate_la_backend(
     ::Type{T},
     threads::Int=1,
 ) where {T}
-    config.selected === :standard &&
-        return StandardLABackend(config.arithmetic)
+    config.arithmetic == _la_arithmetic_symbol(T) || throw(ArgumentError(
+        "LA plan arithmetic $(config.arithmetic) does not match $(T)",
+    ))
+    if config.selected === :standard
+        ownership = config.arithmetic in (:float32, :float64) ?
+                     :immutable_scalars : :owned_mutable_scalars
+        return StandardLABackend(config.arithmetic, config.provider, ownership)
+    end
     if config.selected === :multifloat
         payload = instantiate_multifloat_la_backend(T, config, threads)
-        payload === nothing ||
-            return MultiFloatLABackend(config.arithmetic, payload)
+        payload === nothing && throw(ArgumentError(
+            "planned MultiFloat LA provider $(config.provider) did not instantiate",
+        ))
+        return MultiFloatLABackend(config.arithmetic, payload)
     end
-    reason = config.selected === :multifloat ?
-             :missing_provider :
-             config.fallback_reason === :none ? :legacy_selected :
+    config.selected === :legacy || throw(ArgumentError(
+        "unknown planned LA backend $(config.selected)",
+    ))
+    reason = config.fallback_reason === :none ? :legacy_selected :
              config.fallback_reason
     return LegacyLABackend(config.arithmetic, reason)
 end
+
+function la_cholesky_factor!(backend::MultiFloatLABackend, A)
+    payload = _la_provider_call(backend, :cholesky_factor!, A)
+    payload === nothing && return nothing
+    hasproperty(payload, :factors) || throw(ArgumentError(
+        "MultiFloat Cholesky provider handle must expose factors",
+    ))
+    factors = getproperty(payload, :factors)
+    factors isa AbstractMatrix{eltype(A)} || throw(ArgumentError(
+        "MultiFloat Cholesky provider factors must be an $(eltype(A)) matrix",
+    ))
+    return ProviderLACholeskyFactor{eltype(A),typeof(payload),typeof(factors)}(
+        payload, factors,
+    )
+end
+
+"""Expose the standard generic factor handle without changing legacy routes."""
+function la_cholesky_factor!(::StandardLABackend, A)
+    factor = LinearAlgebra.cholesky!(Symmetric(A, :L); check=false)
+    return issuccess(factor) ?
+           StandardLACholeskyFactor{eltype(A),typeof(factor)}(
+               factor, factor.factors,
+           ) : nothing
+end
+
+function la_cholesky_factor!(::LegacyLABackend, A::AbstractMatrix{BigFloat})
+    kchol!(A) || return nothing
+    return BigFloatCholeskyFactor(A)
+end
+
+la_cholesky_factor!(::AbstractLABackend, ::AbstractArray) = nothing
+
+la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
+la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
+la_factor_handle_matrix(factor::BigFloatCholeskyFactor) = factor.L
+
+function la_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
+    provider = factor.provider
+    hasproperty(provider, :solve!) ||
+        throw(ArgumentError("provider Cholesky handle lacks solve!"))
+    getproperty(provider, :solve!)(rhs)
+    return rhs
+end
+la_cholesky_solve!(factor::LinearAlgebra.Cholesky, rhs) =
+    (LinearAlgebra.ldiv!(factor, rhs); rhs)
+la_cholesky_solve!(factor::StandardLACholeskyFactor, rhs) =
+    (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
+la_cholesky_solve!(factor::BigFloatCholeskyFactor, rhs) =
+    (kcholsolve_owned!(factor.L, rhs); rhs)
 
 la_backend_name(::StandardLABackend) = :standard
 la_backend_name(::LegacyLABackend) = :legacy
@@ -122,10 +190,19 @@ la_backend_name(::MultiFloatLABackend) = :multifloat
 la_backend_reason(::StandardLABackend) = :none
 la_backend_reason(backend::LegacyLABackend) = backend.reason
 la_backend_reason(::MultiFloatLABackend) = :none
+la_backend_provider(backend::StandardLABackend) = backend.provider
+la_backend_provider(::LegacyLABackend) = :legacy_kernels
+la_backend_provider(::MultiFloatLABackend) = :multifloat_linear_algebra
+la_backend_ownership(backend::StandardLABackend) = backend.mode
+la_backend_ownership(::LegacyLABackend) = :legacy
+la_backend_ownership(::MultiFloatLABackend) = :provider_owned
 
 function _record_la_execution!(ws)
     ws.executed_la_backend = la_backend_name(ws.la_backend)
-    ws.la_fallback_reason = la_backend_reason(ws.la_backend)
+    ws.executed_la_provider = la_backend_provider(ws.la_backend)
+    ws.executed_la_ownership = la_backend_ownership(ws.la_backend)
+    ws.la_fallback_reason === :none &&
+        (ws.la_fallback_reason = la_backend_reason(ws.la_backend))
     return ws.la_backend
 end
 
@@ -138,7 +215,8 @@ end
 
 @inline la_norminf(::StandardLABackend, x) = isempty(x) ? zero(eltype(x)) : maximum(abs, x)
 @inline la_norminf(::LegacyLABackend, x) = knrmInf(x)
-la_norminf(backend::MultiFloatLABackend, x) = _la_provider_call(backend, :norminf, x)
+la_norminf(::MultiFloatLABackend, x) =
+    isempty(x) ? zero(eltype(x)) : maximum(abs, x)
 
 function la_mul!(::StandardLABackend, C, A, B, α, β)
     return LinearAlgebra.mul!(C, A, B, α, β)
@@ -147,9 +225,9 @@ la_mul!(::StandardLABackend, C, A, B) = LinearAlgebra.mul!(C, A, B)
 la_mul!(::LegacyLABackend, C, A, B, α, β) = kmul!(C, A, B, α, β)
 la_mul!(::LegacyLABackend, C, A, B) = kmul!(C, A, B)
 la_mul!(backend::MultiFloatLABackend, C, A, B, α, β) =
-    _la_provider_call(backend, :mul!, C, A, B, α, β)
+    la_mul_owned!(backend, C, A, B, α, β)
 la_mul!(backend::MultiFloatLABackend, C, A, B) =
-    _la_provider_call(backend, :mul!, C, A, B)
+    la_mul_owned!(backend, C, A, B)
 la_mul_owned!(backend::StandardLABackend, C, A, B, α, β) =
     la_mul!(backend, C, A, B, α, β)
 la_mul_owned!(backend::StandardLABackend, C, A, B) = la_mul!(backend, C, A, B)
@@ -217,13 +295,17 @@ function la_axpby!(::StandardLABackend, α, X, β, Y)
     return Y
 end
 la_axpby!(::LegacyLABackend, α, X, β, Y) = kaxpby!(α, X, β, Y)
-la_axpby!(backend::MultiFloatLABackend, α, X, β, Y) =
-    _la_provider_call(backend, :axpby!, α, X, β, Y)
+function la_axpby!(::MultiFloatLABackend, α, X, β, Y)
+    @inbounds for index in eachindex(X, Y)
+        Y[index] = α * X[index] + β * Y[index]
+    end
+    return Y
+end
 la_axpby_owned!(backend::StandardLABackend, α, X, β, Y) =
     la_axpby!(backend, α, X, β, Y)
 la_axpby_owned!(::LegacyLABackend, α, X, β, Y) = kaxpby_owned!(α, X, β, Y)
 la_axpby_owned!(backend::MultiFloatLABackend, α, X, β, Y) =
-    _la_provider_call(backend, :axpby_owned!, α, X, β, Y)
+    la_axpby!(backend, α, X, β, Y)
 
 function _la_provider_call(backend::MultiFloatLABackend, operation::Symbol, args...)
     provider = backend.provider

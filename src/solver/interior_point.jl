@@ -497,6 +497,16 @@ function _equality_factor_diagnostics(
             quality=_cholesky_diagonal_quality(factor.L),
             gram_kernel=workspace.equality_gram_kernel,
         )
+    elseif factor isa AbstractLACholeskyFactor{T}
+        return (
+            available=true,
+            method=:la_backend_normal_equations,
+            rank=equality_count,
+            dimension=equality_count,
+            rank_deficient=false,
+            quality=_cholesky_diagonal_quality(factor.factors),
+            gram_kernel=workspace.equality_gram_kernel,
+        )
     end
     return (
         available=true,
@@ -1861,6 +1871,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 executed_backend=ws.executed_backend,
                 fallback_reason=ws.backend_fallback_reason,
                 la_backend=ws.executed_la_backend,
+                la_provider=ws.executed_la_provider,
+                la_ownership=ws.executed_la_ownership,
                 la_fallback_reason=ws.la_fallback_reason,
                 equality=equality_diagnostics.method,
                 effective_threads=ws.thread_count,

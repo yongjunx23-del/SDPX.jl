@@ -468,7 +468,8 @@ mutable struct Workspace{T}
     Qchol::Union{Nothing,LinearAlgebra.Cholesky{T,Matrix{T}},
                  LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
                  BigFloatCholeskyFactor{Matrix{BigFloat}},
-                 EqualityQRFactor{T}}
+                 EqualityQRFactor{T},
+                 AbstractLACholeskyFactor{T}}
     arrow::Union{Nothing,ArrowWorkspace{T}}
     sparse_kkt::Any
     v::Vector{T}
@@ -512,6 +513,8 @@ mutable struct Workspace{T}
     # again by numerical kernels.  The final two fields are solve provenance.
     la_backend::AbstractLABackend
     executed_la_backend::Symbol
+    executed_la_provider::Symbol
+    executed_la_ownership::Symbol
     la_fallback_reason::Symbol
 end
 
@@ -885,12 +888,16 @@ function Workspace(
     if !plan_supplied
         # Historical direct Workspace construction remains on the legacy
         # arithmetic seam; only an explicit ExecutionPlan opts into Standard.
+        compatibility_la = _compat_la_backend_configuration(
+            _la_arithmetic_symbol(T),
+        )
         plan = ExecutionPlan(
             plan.classification,
             plan.algorithm,
             plan.scaling,
             plan.kkt_backend,
             plan.backend_config,
+            compatibility_la,
             plan.gram_kernel,
             plan.schedule,
             plan.threads,
@@ -912,6 +919,14 @@ function Workspace(
     config.deferred && throw(ArgumentError(
         "deferred LP backend configurations cannot construct an SDP Workspace",
     ))
+    expected_la = _la_arithmetic_symbol(T)
+    plan.la_config.arithmetic == expected_la || throw(ArgumentError(
+        "execution plan LA arithmetic $(plan.la_config.arithmetic) does not match $(expected_la)",
+    ))
+    plan.classification.arithmetic in (_arithmetic_class(T), :generic) ||
+        throw(ArgumentError(
+            "execution plan arithmetic family $(plan.classification.arithmetic) does not match $(T)",
+        ))
     # Once a plan is supplied, its resolved options are the sole source of
     # route-affecting configuration.  The keywords remain for the legacy
     # `Workspace(prob; ...)` API, where they are used to build this plan.
@@ -1267,7 +1282,7 @@ function Workspace(
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         :not_run, selected_threads, config, nothing, :not_executed, :none,
-        la_backend, :not_executed, :none)
+        la_backend, :not_executed, :not_executed, :not_executed, :none)
     workspace.backend = _backend_from_configuration(workspace, config)
     generic_mixed_mode !== :off &&
         workspace.mixed_precision === nothing &&

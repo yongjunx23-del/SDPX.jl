@@ -38,6 +38,7 @@ Base.@kwdef struct SolveOptions
     formulation::Any = :auto
     chordal_decomposition::Any = :auto
     equality_solver::Any = :auto
+    linear_algebra_backend::Any = :auto
     working_precision_policy::Any = :auto
     diagnostics::Any = :auto
     timing::Any = :auto

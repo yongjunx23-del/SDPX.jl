@@ -207,6 +207,11 @@ function resolve_solve_options(
     equality_solver = _frontend_policy(
         options.equality_solver, (:auto, :normal_equations, :qr), "equality_solver",
     )
+    linear_algebra_backend = _frontend_policy(
+        options.linear_algebra_backend,
+        (:auto, :standard, :multifloat, :legacy),
+        "linear_algebra_backend",
+    )
     working_precision_policy = _frontend_policy(
         options.working_precision_policy, (:auto, :fixed), "working_precision_policy",
     )
@@ -232,6 +237,7 @@ function resolve_solve_options(
         formulation=formulation,
         chordal_decomposition=chordal,
         equality_solver=equality_solver,
+        linear_algebra_backend=linear_algebra_backend,
         working_precision_policy=working_precision_policy,
         parameter_policy=:auto,
         parameter_strategy=:adaptive,
@@ -256,6 +262,7 @@ function resolve_solve_options(
         formulation=formulation,
         chordal_decomposition=chordal,
         equality_solver=equality_solver,
+        linear_algebra_backend=linear_algebra_backend,
         working_precision_policy=working_precision_policy,
         diagnostics=diagnostics,
         timing=timing,

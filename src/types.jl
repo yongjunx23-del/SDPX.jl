@@ -107,6 +107,16 @@ abstract type AbstractLABackend end
 
 struct StandardLABackend <: AbstractLABackend
     arithmetic::Symbol
+    provider::Symbol
+    mode::Symbol
+end
+
+StandardLABackend(arithmetic::Symbol) = begin
+    provider = arithmetic in (:float32, :float64) ? :blas_lapack :
+               :generic_linear_algebra
+    ownership = arithmetic in (:float32, :float64) ? :immutable_scalars :
+                 :owned_mutable_scalars
+    StandardLABackend(arithmetic, provider, ownership)
 end
 
 struct LegacyLABackend <: AbstractLABackend
@@ -114,9 +124,9 @@ struct LegacyLABackend <: AbstractLABackend
     reason::Symbol
 end
 
-struct MultiFloatLABackend <: AbstractLABackend
+struct MultiFloatLABackend{P} <: AbstractLABackend
     arithmetic::Symbol
-    provider::Any
+    provider::P
 end
 
 struct LABackendConfiguration
@@ -234,6 +244,22 @@ struct EqualityQRFactor{T}
     quality::T
 end
 
+"""Abstract marker for an unpivoted equality Gram Cholesky handle."""
+abstract type AbstractLACholeskyFactor{T} end
+
+"""Standard generic factor handle wrapping Julia's Cholesky object."""
+struct StandardLACholeskyFactor{T,F<:LinearAlgebra.Cholesky{T}} <:
+       AbstractLACholeskyFactor{T}
+    factor::F
+    factors::Matrix{T}
+end
+
+"""Provider-owned factor payload supplied by an optional arithmetic extension."""
+struct ProviderLACholeskyFactor{T,P,M<:AbstractMatrix{T}} <: AbstractLACholeskyFactor{T}
+    provider::P
+    factors::M
+end
+
 """
     SolverOptions{T}
 
@@ -328,6 +354,9 @@ Base.@kwdef struct SolverOptions{T}
     # switches to rank-revealing QR only when factor diagnostics justify its
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.
     equality_solver::Symbol    = :auto                   # :auto | :normal_equations | :qr
+    # Dense linear-algebra implementation. `:auto` selects Julia standard
+    # generic/BLAS-LAPACK; `:multifloat` is an explicit optional-provider A/B.
+    linear_algebra_backend::Symbol = :auto              # :auto | :standard | :multifloat | :legacy
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels

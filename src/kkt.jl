@@ -27,12 +27,16 @@ _empty_kkt_phase_times() = (
 function _cholesky_has_numerical_rank(
     factor::LinearAlgebra.Cholesky{T},
 ) where {T}
-    dimension = size(factor.factors, 1)
+    return _cholesky_has_numerical_rank(factor.factors)
+end
+
+function _cholesky_has_numerical_rank(matrix::AbstractMatrix{T}) where {T}
+    dimension = size(matrix, 1)
     dimension == 0 && return true
-    minimum_diagonal = abs(factor.factors[1, 1])
+    minimum_diagonal = abs(matrix[1, 1])
     maximum_diagonal = minimum_diagonal
     @inbounds for index in 2:dimension
-        value = abs(factor.factors[index, index])
+        value = abs(matrix[index, index])
         minimum_diagonal = min(minimum_diagonal, value)
         maximum_diagonal = max(maximum_diagonal, value)
     end
@@ -263,10 +267,15 @@ function _build_equality_gram_matrix!(
     thread_count::Int,
     la_backend::Union{Nothing,AbstractLABackend}=nothing,
 ) where {T}
-    # Preserve the established Float32/Float64 path exactly, including its
-    # vendor BLAS SYRK call. Do not even run the extended crossover or query
-    # system memory on ordinary floating-point solves.
-    if T <: Union{Float32,Float64}
+    # A planned Standard/MultiFloat backend owns dense Gram formation for all
+    # arithmetic families; Legacy retains the established crossover path.
+    if la_backend isa StandardLABackend
+        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
+        return nothing, T <: Union{Float32,Float64} ? :blas_syrk : :generic_syrk
+    elseif la_backend isa MultiFloatLABackend
+        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
+        return nothing, :multifloat_syrk
+    elseif T <: Union{Float32,Float64}
         la_backend === nothing ?
         ksyrk!(Q, Btil, one(T), zero(T)) :
         la_syrk!(la_backend, Q, Btil, one(T), zero(T))
@@ -699,7 +708,8 @@ function _factor_arrow_equality_system!(
         factor_started = gram_finished
 
         copy_owned!(ws.Qbuf, ws.Q)
-        if T === BigFloat && kchol!(ws.Qbuf)
+        if T === BigFloat && ws.la_backend isa LegacyLABackend &&
+           kchol!(ws.Qbuf)
             ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
         else
             T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
@@ -1087,27 +1097,33 @@ function _factor_dense_kkt_native!(
             phase_equality_gram += _elapsed_seconds(started)
             started = time_ns()
             copy_owned!(ws.Qbuf, ws.Q)
-            if T === BigFloat && kchol!(ws.Qbuf)
-                ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
+            # The standard and BigFloat generic dense routes retain the exact
+            # existing LinearAlgebra/MPFR Q path. Only an explicitly planned
+            # MultiFloat provider owns a new factor handle; on provider
+            # failure, only the explicitly authorized QR fallback is used.
+            equality_factor = if T === BigFloat &&
+                                 ws.la_backend isa LegacyLABackend
+                la_cholesky_factor!(ws.la_backend, ws.Qbuf)
             else
-                # The Q factor handle/rank diagnostics remain on the existing
-                # compatibility path in this first LA migration.  In
-                # particular, QR/pivoted factors are not representable by the
-                # current Workspace union and must not be silently replaced.
-                T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
-                Cq = LinearAlgebra.cholesky!(
-                    Symmetric(ws.Qbuf, :L);
-                    check=false,
-                )
-                if issuccess(Cq) &&
-                   _cholesky_has_numerical_rank(Cq)
-                    ws.Qchol = Cq
-                elseif opts.equality_solver === :auto &&
-                       _equality_qr_allowed(ws.Btil, opts)
-                    # Avoid the redundant pivoted-normal-equation probe. It
-                    # is not implemented for generic BigFloat matrices on
-                    # Julia 1.10, while QR is the selected automatic backend
-                    # for this exact rank-loss condition on every version.
+                la_cholesky_factor!(ws.la_backend, ws.Qbuf)
+            end
+            factor_matrix = equality_factor === nothing ? nothing :
+                            la_factor_handle_matrix(equality_factor)
+            if equality_factor !== nothing &&
+               _cholesky_has_numerical_rank(factor_matrix)
+                ws.Qchol = equality_factor
+            else
+                if ws.la_backend isa MultiFloatLABackend
+                    # Provider failure is an explicit A/B numerical failure;
+                    # do not silently claim a provider result after generic
+                    # factorization. Existing QR/pivot policy remains the
+                    # authorized fallback and is recorded below.
+                    ws.la_fallback_reason = :la_equality_factor_failed
+                    opts.equality_solver === :auto &&
+                        _equality_qr_allowed(ws.Btil, opts) ||
+                        throw(ArgumentError(
+                            "MultiFloat equality Cholesky failed and QR fallback is not authorized",
+                        ))
                     qr_factor = _factor_equality_qr(ws.Btil, opts)
                     ws.Qchol = qr_factor
                     q_pivoted = true
@@ -1124,38 +1140,68 @@ function _factor_dense_kkt_native!(
                     end
                 else
                     copy_owned!(ws.Qbuf, ws.Q)
-                    pivoted = LinearAlgebra.cholesky(
-                        Symmetric(ws.Qbuf, :L),
-                        LinearAlgebra.RowMaximum();
+                    Cq = LinearAlgebra.cholesky!(
+                        Symmetric(ws.Qbuf, :L);
                         check=false,
                     )
-                    if pivoted.rank == n &&
-                       _has_exact_duplicate_columns(ws.Btil)
-                        # Some vendor POTRF implementations accept a tiny
-                        # positive pivot for exactly duplicated equality
-                        # columns. Apply a nonzero tolerance only for this
-                        # structural case.
-                        maximum_q_diagonal = maximum(
-                            index -> abs(ws.Q[index, index]),
-                            1:n;
-                            init=zero(T),
-                        )
+                    if issuccess(Cq) &&
+                       _cholesky_has_numerical_rank(Cq)
+                        ws.Qchol = Cq
+                    elseif opts.equality_solver === :auto &&
+                           _equality_qr_allowed(ws.Btil, opts)
+                        # Avoid the redundant pivoted-normal-equation probe. It
+                        # is not implemented for generic BigFloat matrices on
+                        # Julia 1.10, while QR is the selected automatic backend
+                        # for this exact rank-loss condition on every version.
+                        qr_factor = _factor_equality_qr(ws.Btil, opts)
+                        ws.Qchol = qr_factor
+                        q_pivoted = true
+                        q_rank_deficient = qr_factor.rank < n
+                        if opts.verbosity >= 1
+                            @warn(
+                                "KKT equality solve switched from normal " *
+                                "equations to rank-revealing QR",
+                                reason=:normal_equation_rank_loss,
+                                qr_rank=qr_factor.rank,
+                                equalities=n,
+                                qr_quality=qr_factor.quality,
+                            )
+                        end
+                    else
+                        copy_owned!(ws.Qbuf, ws.Q)
                         pivoted = LinearAlgebra.cholesky(
                             Symmetric(ws.Qbuf, :L),
                             LinearAlgebra.RowMaximum();
-                            tol=T(2) * eps(T) * maximum_q_diagonal,
                             check=false,
                         )
-                    end
-                    ws.Qchol = pivoted
-                    q_pivoted = true
-                    q_rank_deficient = pivoted.rank < n
-                    if opts.verbosity >= 1
-                        if pivoted.rank < n
-                            @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
-                                  "(likely redundant/duplicated equality constraints)"
-                        else
-                            @warn "KKT: Q = B̃ᵀB̃ is numerically ill-conditioned — using pivoted Cholesky"
+                        if pivoted.rank == n &&
+                           _has_exact_duplicate_columns(ws.Btil)
+                            # Some vendor POTRF implementations accept a tiny
+                            # positive pivot for exactly duplicated equality
+                            # columns. Apply a nonzero tolerance only for this
+                            # structural case.
+                            maximum_q_diagonal = maximum(
+                                index -> abs(ws.Q[index, index]),
+                                1:n;
+                                init=zero(T),
+                            )
+                            pivoted = LinearAlgebra.cholesky(
+                                Symmetric(ws.Qbuf, :L),
+                                LinearAlgebra.RowMaximum();
+                                tol=T(2) * eps(T) * maximum_q_diagonal,
+                                check=false,
+                            )
+                        end
+                        ws.Qchol = pivoted
+                        q_pivoted = true
+                        q_rank_deficient = pivoted.rank < n
+                        if opts.verbosity >= 1
+                            if pivoted.rank < n
+                                @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
+                                      "(likely redundant/duplicated equality constraints)"
+                            else
+                                @warn "KKT: Q = B̃ᵀB̃ is numerically ill-conditioned — using pivoted Cholesky"
+                            end
                         end
                     end
                 end
@@ -1907,6 +1953,16 @@ function _solve_Q!(
     copy_owned!(dy_out, rhs)
     LinearAlgebra.ldiv!(Qchol, dy_out)
     return dy_out
+end
+
+function _solve_Q!(
+    dy_out::AbstractVector{T},
+    factor::AbstractLACholeskyFactor{T},
+    rhs::AbstractVector{T},
+    ::AbstractVector{T},
+) where {T}
+    copy_owned!(dy_out, rhs)
+    return la_cholesky_solve!(factor, dy_out)
 end
 
 function _solve_Q!(

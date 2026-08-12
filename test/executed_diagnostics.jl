@@ -116,8 +116,10 @@ using Test
         @test selected.executed_backend === :dense_cholesky
         @test selected.planned_la_backend === :standard
         @test selected.la_backend === :standard
-        @test selected.la_provider === :none
-        @test selected.la_ownership === :standard
+        @test selected.la_provider === :blas_lapack
+        @test selected.la_ownership === :immutable_scalars
+        @test selected.la_executed_provider === :blas_lapack
+        @test selected.la_executed_ownership === :immutable_scalars
         @test selected.la_fallback_reason === :none
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :planned

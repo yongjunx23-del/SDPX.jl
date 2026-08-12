@@ -105,6 +105,10 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "equality_solver must be :auto, :normal_equations, or :qr",
         ))
+    opts.linear_algebra_backend in (:auto, :standard, :multifloat, :legacy) ||
+        throw(ArgumentError(
+            "linear_algebra_backend must be :auto, :standard, :multifloat, or :legacy",
+        ))
     zero(T) < opts.β < one(T) ||
         throw(ArgumentError("β must be strictly between zero and one"))
     zero(T) < opts.γ < one(T) ||
@@ -1223,12 +1227,11 @@ function build_execution_plan(
         :automatic_extended_precision
     end
     # Linear-algebra arithmetic is resolved once, after structural planning,
-    # and carried by the immutable plan into Workspace.  BigFloat remains on
-    # the ownership-safe legacy kernels; fixed-width arithmetic uses an
-    # optional provider when one is registered.
+    # and carried by the immutable plan into Workspace.  Standard routes use
+    # Julia generic or BLAS/LAPACK kernels; MFLA is an explicit provider A/B.
     la_config = plan_la_backend(
         T;
-        requested=:auto,
+        requested=opts.linear_algebra_backend,
         route=backend_config.mixed_precision_mode !== :off ?
               :mixed_precision : kkt_backend,
         threads=selected_threads,
@@ -1261,6 +1264,7 @@ function build_execution_plan(
             strategy=opts.parameter_strategy,
             adaptive_sigma_max,
             equality_solver=opts.equality_solver,
+            linear_algebra_backend=opts.linear_algebra_backend,
             extended_precision_blas=opts.extended_precision_blas,
             extended_precision_memory_fraction=
                 opts.extended_precision_memory_fraction,
@@ -2159,11 +2163,15 @@ function _attach_diagnostics(
             :none,
         ),
         la_backend=get(executed, :la_backend, :not_executed),
+        la_executed_provider=get(executed, :la_provider, :not_executed),
+        la_executed_ownership=get(executed, :la_ownership, :not_executed),
         la_fallback_reason=get(executed, :la_fallback_reason, :none),
         planned_la_backend=plan.la_config.selected,
         planned_la_fallback_reason=plan.la_config.fallback_reason,
         la_provider=plan.la_config.provider,
         la_ownership=plan.la_config.ownership,
+        planned_la_provider=plan.la_config.provider,
+        planned_la_ownership=plan.la_config.ownership,
         backend_resolution=get(
             executed,
             :backend_resolution,
@@ -2179,7 +2187,6 @@ function _attach_diagnostics(
         planned=(
             kkt=plan.kkt_backend,
             gram=plan.gram_kernel,
-            la=plan.la_config.selected,
         ),
         scheduling=plan.schedule,
         threads=plan.threads,
