@@ -78,19 +78,14 @@ function plan_la_backend(
     # structural route, while an explicit request is rejected rather than
     # silently changing the requested backend in the diagnostic plan.
     if route ∉ (:dense_cholesky, :dense_cholesky_fallback)
-        requested in (:auto, :legacy) && return LABackendConfiguration(
-            arithmetic, requested, :legacy, :none, (), (), :route_not_migrated,
-            :legacy,
-        )
+        requested in (:auto, :legacy) && return
+            _legacy_la_backend_configuration(T, requested, :route_not_migrated)
         throw(ArgumentError(
             "LA backend $(requested) is not available on non-dense route $(route)",
         ))
     end
     if requested === :legacy
-        return LABackendConfiguration(
-            arithmetic, :legacy, :legacy, :none, (), (), :requested_legacy,
-            :legacy,
-        )
+        return _legacy_la_backend_configuration(T, :legacy, :requested_legacy)
     elseif requested === :standard || requested === :fixed_extended ||
            (requested === :auto &&
             (arithmetic in (:float32, :float64, :bigfloat) ||
@@ -120,13 +115,11 @@ function plan_la_backend(
     # BigFloat auto remains on generic LinearAlgebra in dense routes; explicit
     # legacy is the ownership-safe opt-out for callers that require it.
     requested === :auto && return LABackendConfiguration(
-        arithmetic, requested, :legacy, :none,
-        (), (), :unsupported_arithmetic, :legacy,
+        arithmetic, requested, :legacy, :sdpx_legacy_la,
+        SDPX_LEGACY_LA_CAPABILITIES, (), :unsupported_arithmetic,
+        _legacy_la_ownership(T),
     )
-    return LABackendConfiguration(
-        arithmetic, requested, :legacy, :none, (), (), :bigfloat_ownership,
-        :legacy,
-    )
+    return _legacy_la_backend_configuration(T, requested, :bigfloat_ownership)
 end
 
 function instantiate_la_backend(
@@ -154,7 +147,13 @@ function instantiate_la_backend(
     ))
     reason = config.fallback_reason === :none ? :legacy_selected :
              config.fallback_reason
-    return LegacyLABackend(config.arithmetic, reason)
+    provider = SDPXLegacyLAProvider(config.arithmetic, config.ownership)
+    legacy_la_provider_identity(provider) === config.provider ||
+        throw(ArgumentError(
+            "planned legacy LA provider $(config.provider) does not match " *
+            "bundled provider $(legacy_la_provider_identity(provider))",
+        ))
+    return LegacyLABackend(config.arithmetic, reason, provider)
 end
 
 function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
@@ -190,17 +189,26 @@ function la_cholesky_factor!(backend::StandardLABackend, A::AbstractMatrix)
     )
 end
 
-function la_cholesky_factor!(::LegacyLABackend, A::AbstractMatrix{BigFloat})
+function la_cholesky_factor!(backend::LegacyLABackend, A::AbstractMatrix)
     _all_finite_lower(A) || return nothing
-    kchol!(A) || return nothing
+    _sdpx_legacy_la_call(
+        backend.provider,
+        Val(:cholesky_factor!),
+        A,
+    ) || return nothing
     _all_finite_lower(A) || return nothing
-    return BigFloatCholeskyFactor(A)
+    return LegacyLACholeskyFactor{
+        eltype(A),
+        typeof(backend.provider),
+        typeof(A),
+    }(backend.provider, A)
 end
 
 la_cholesky_factor!(::AbstractLABackend, ::AbstractArray) = nothing
 
 la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
+la_factor_handle_matrix(factor::LegacyLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::BigFloatCholeskyFactor) = factor.L
 
 function la_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
@@ -214,6 +222,13 @@ la_cholesky_solve!(factor::LinearAlgebra.Cholesky, rhs) =
     (LinearAlgebra.ldiv!(factor, rhs); rhs)
 la_cholesky_solve!(factor::StandardLACholeskyFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
+la_cholesky_solve!(factor::LegacyLACholeskyFactor, rhs) =
+    (_sdpx_legacy_la_call(
+        factor.provider,
+        Val(:solve),
+        factor.factors,
+        rhs,
+    ); rhs)
 la_cholesky_solve!(factor::BigFloatCholeskyFactor, rhs) =
     (kcholsolve_owned!(factor.L, rhs); rhs)
 
@@ -224,10 +239,12 @@ la_backend_reason(::StandardLABackend) = :none
 la_backend_reason(backend::LegacyLABackend) = backend.reason
 la_backend_reason(::MultiFloatLABackend) = :none
 la_backend_provider(backend::StandardLABackend) = backend.provider
-la_backend_provider(::LegacyLABackend) = :legacy_kernels
+la_backend_provider(backend::LegacyLABackend) =
+    legacy_la_provider_identity(backend.provider)
 la_backend_provider(::MultiFloatLABackend) = :multifloat_linear_algebra
 la_backend_ownership(backend::StandardLABackend) = backend.mode
-la_backend_ownership(::LegacyLABackend) = :legacy
+la_backend_ownership(backend::LegacyLABackend) =
+    legacy_la_provider_ownership(backend.provider)
 la_backend_ownership(::MultiFloatLABackend) = :provider_owned
 
 function _record_la_execution!(ws)
@@ -240,14 +257,16 @@ function _record_la_execution!(ws)
 end
 
 @inline la_dot(::StandardLABackend, x, y) = LinearAlgebra.dot(x, y)
-@inline la_dot(::LegacyLABackend, x, y) = kdot(x, y)
+@inline la_dot(backend::LegacyLABackend, x, y) =
+    _sdpx_legacy_la_call(backend.provider, Val(:dot), x, y)
 
 function la_dot(backend::MultiFloatLABackend, x, y)
     return _la_provider_call(backend, :dot, x, y)
 end
 
 @inline la_norminf(::StandardLABackend, x) = isempty(x) ? zero(eltype(x)) : maximum(abs, x)
-@inline la_norminf(::LegacyLABackend, x) = knrmInf(x)
+@inline la_norminf(backend::LegacyLABackend, x) =
+    _sdpx_legacy_la_call(backend.provider, Val(:norminf), x)
 la_norminf(::MultiFloatLABackend, x) =
     isempty(x) ? zero(eltype(x)) : maximum(abs, x)
 
@@ -255,8 +274,10 @@ function la_mul!(::StandardLABackend, C, A, B, α, β)
     return LinearAlgebra.mul!(C, A, B, α, β)
 end
 la_mul!(::StandardLABackend, C, A, B) = LinearAlgebra.mul!(C, A, B)
-la_mul!(::LegacyLABackend, C, A, B, α, β) = kmul!(C, A, B, α, β)
-la_mul!(::LegacyLABackend, C, A, B) = kmul!(C, A, B)
+la_mul!(backend::LegacyLABackend, C, A, B, α, β) =
+    _sdpx_legacy_la_call(backend.provider, Val(:mul), C, A, B, α, β)
+la_mul!(backend::LegacyLABackend, C, A, B) =
+    _sdpx_legacy_la_call(backend.provider, Val(:mul), C, A, B)
 la_mul!(backend::MultiFloatLABackend, C, A, B, α, β) =
     la_mul_owned!(backend, C, A, B, α, β)
 la_mul!(backend::MultiFloatLABackend, C, A, B) =
@@ -264,8 +285,18 @@ la_mul!(backend::MultiFloatLABackend, C, A, B) =
 la_mul_owned!(backend::StandardLABackend, C, A, B, α, β) =
     la_mul!(backend, C, A, B, α, β)
 la_mul_owned!(backend::StandardLABackend, C, A, B) = la_mul!(backend, C, A, B)
-la_mul_owned!(backend::LegacyLABackend, C, A, B, α, β) = kmul_owned!(C, A, B, α, β)
-la_mul_owned!(backend::LegacyLABackend, C, A, B) = kmul_owned!(C, A, B)
+la_mul_owned!(backend::LegacyLABackend, C, A, B, α, β) =
+    _sdpx_legacy_la_call(
+        backend.provider,
+        Val(:mul_owned),
+        C,
+        A,
+        B,
+        α,
+        β,
+    )
+la_mul_owned!(backend::LegacyLABackend, C, A, B) =
+    _sdpx_legacy_la_call(backend.provider, Val(:mul_owned), C, A, B)
 la_mul_owned!(backend::MultiFloatLABackend, C, A, B, α, β) =
     _la_provider_call(backend, :mul_owned!, C, A, B, α, β)
 la_mul_owned!(backend::MultiFloatLABackend, C, A, B) =
@@ -282,7 +313,8 @@ function la_syrk!(::StandardLABackend, S, P, α, β)
     end
     return LinearAlgebra.mul!(S, transpose(P), P, α, β)
 end
-la_syrk!(::LegacyLABackend, S, P, α, β) = ksyrk!(S, P, α, β)
+la_syrk!(backend::LegacyLABackend, S, P, α, β) =
+    _sdpx_legacy_la_call(backend.provider, Val(:syrk), S, P, α, β)
 la_syrk!(backend::MultiFloatLABackend, S, P, α, β) =
     _la_provider_call(backend, :syrk!, S, P, α, β)
 
@@ -297,27 +329,31 @@ function la_chol!(backend::StandardLABackend, A)
     end
     return true
 end
-function la_chol!(::LegacyLABackend, A::AbstractMatrix{BigFloat})
+function la_chol!(backend::LegacyLABackend, A::AbstractMatrix{BigFloat})
     _all_finite_lower(A) || return false
-    kchol!(A) || return false
+    _sdpx_legacy_la_call(backend.provider, Val(:chol), A) || return false
     _all_finite_lower(A) || return false
     return true
 end
-la_chol!(::LegacyLABackend, A) = kchol!(A)
+la_chol!(backend::LegacyLABackend, A) =
+    _sdpx_legacy_la_call(backend.provider, Val(:chol), A)
 la_chol!(backend::MultiFloatLABackend, A) = _la_provider_call(backend, :chol!, A)
 
 la_trsm!(::StandardLABackend, L, X) = LinearAlgebra.ldiv!(LowerTriangular(L), X)
-la_trsm!(::LegacyLABackend, L, X) = ktrsm!(L, X)
+la_trsm!(backend::LegacyLABackend, L, X) =
+    _sdpx_legacy_la_call(backend.provider, Val(:trsm), L, X)
 la_trsm!(backend::MultiFloatLABackend, L, X) = _la_provider_call(backend, :trsm!, L, X)
 
 la_trsv_lower!(::StandardLABackend, L, x) = LinearAlgebra.ldiv!(LowerTriangular(L), x)
-la_trsv_lower!(::LegacyLABackend, L, x) = ktrsv_lower!(L, x)
+la_trsv_lower!(backend::LegacyLABackend, L, x) =
+    _sdpx_legacy_la_call(backend.provider, Val(:trsv_lower), L, x)
 la_trsv_lower!(backend::MultiFloatLABackend, L, x) =
     _la_provider_call(backend, :trsv_lower!, L, x)
 
 la_trsv_transpose!(::StandardLABackend, L, x) =
     LinearAlgebra.ldiv!(UpperTriangular(transpose(L)), x)
-la_trsv_transpose!(::LegacyLABackend, L, x) = ktrsv_transpose!(L, x)
+la_trsv_transpose!(backend::LegacyLABackend, L, x) =
+    _sdpx_legacy_la_call(backend.provider, Val(:trsv_transpose), L, x)
 la_trsv_transpose!(backend::MultiFloatLABackend, L, x) =
     _la_provider_call(backend, :trsv_transpose!, L, x)
 
@@ -340,7 +376,8 @@ function la_axpby!(::StandardLABackend, α, X, β, Y)
     end
     return Y
 end
-la_axpby!(::LegacyLABackend, α, X, β, Y) = kaxpby!(α, X, β, Y)
+la_axpby!(backend::LegacyLABackend, α, X, β, Y) =
+    _sdpx_legacy_la_call(backend.provider, Val(:axpby), α, X, β, Y)
 function la_axpby!(::MultiFloatLABackend, α, X, β, Y)
     @inbounds for index in eachindex(X, Y)
         Y[index] = α * X[index] + β * Y[index]
@@ -349,7 +386,15 @@ function la_axpby!(::MultiFloatLABackend, α, X, β, Y)
 end
 la_axpby_owned!(backend::StandardLABackend, α, X, β, Y) =
     la_axpby!(backend, α, X, β, Y)
-la_axpby_owned!(::LegacyLABackend, α, X, β, Y) = kaxpby_owned!(α, X, β, Y)
+la_axpby_owned!(backend::LegacyLABackend, α, X, β, Y) =
+    _sdpx_legacy_la_call(
+        backend.provider,
+        Val(:axpby_owned),
+        α,
+        X,
+        β,
+        Y,
+    )
 la_axpby_owned!(backend::MultiFloatLABackend, α, X, β, Y) =
     la_axpby!(backend, α, X, β, Y)
 

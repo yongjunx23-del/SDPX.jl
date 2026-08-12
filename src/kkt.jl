@@ -708,9 +708,36 @@ function _factor_arrow_equality_system!(
         factor_started = gram_finished
 
         copy_owned!(ws.Qbuf, ws.Q)
-        if T === BigFloat && ws.la_backend isa LegacyLABackend &&
-           kchol!(ws.Qbuf)
-            ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
+        legacy_provider_factor =
+            ws.la_backend isa LegacyLABackend
+        legacy_factor = if legacy_provider_factor
+            _record_la_execution!(ws)
+            la_cholesky_factor!(ws.la_backend, ws.Qbuf)
+        else
+            nothing
+        end
+        if legacy_factor !== nothing
+            ws.Qchol = legacy_factor
+        elseif legacy_provider_factor
+            # `kchol!` may have partially overwritten the factor buffer
+            # buffer before reporting failure. Restore the authoritative Gram
+            # matrix before the only allowed solver-level fallback.
+            copy_owned!(ws.Qbuf, ws.Q)
+            ws.la_fallback_reason = :la_equality_factor_failed
+            equality_finished = time_ns()
+            return (
+                ok=false,
+                q_pivoted=false,
+                q_rank_deficient=false,
+                equality_solver=:normal_equations,
+                phase_times=(
+                    constraint_triangular_solve=
+                        (constraint_finished - constraint_started) / 1.0e9,
+                    equality_gram=gram_seconds,
+                    equality_factorization=
+                        (equality_finished - factor_started) / 1.0e9,
+                ),
+            )
         else
             T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
             factor = LinearAlgebra.cholesky!(
@@ -785,6 +812,7 @@ function _factor_arrow_equality_system!(
     end
     equality_finished = time_ns()
     return (
+        ok=true,
         q_pivoted=q_pivoted,
         q_rank_deficient=q_rank_deficient,
         equality_solver=
@@ -1097,19 +1125,17 @@ function _factor_dense_kkt_native!(
             phase_equality_gram += _elapsed_seconds(started)
             started = time_ns()
             copy_owned!(ws.Qbuf, ws.Q)
-            # The standard and BigFloat generic dense routes retain the exact
-            # existing LinearAlgebra/MPFR Q path. Only an explicitly planned
-            # MultiFloat provider owns a new factor handle; on provider
-            # failure, only the explicitly authorized QR fallback is used.
-            equality_factor = if T === BigFloat &&
-                                 ws.la_backend isa LegacyLABackend
+            # Every selected LA backend owns its factor handle on migrated
+            # dense routes. No backend may silently execute another provider
+            # while retaining its planned identity.
+            legacy_provider_factor =
+                ws.la_backend isa LegacyLABackend
+            equality_factor =
                 la_cholesky_factor!(ws.la_backend, ws.Qbuf)
-            else
-                la_cholesky_factor!(ws.la_backend, ws.Qbuf)
-            end
             factor_matrix = equality_factor === nothing ? nothing :
                             la_factor_handle_matrix(equality_factor)
             if equality_factor isa BigFloatCholeskyFactor ||
+               equality_factor isa LegacyLACholeskyFactor ||
                (equality_factor !== nothing &&
                 _cholesky_has_numerical_rank(factor_matrix))
                 ws.Qchol = equality_factor
@@ -1139,6 +1165,31 @@ function _factor_dense_kkt_native!(
                             qr_quality=qr_factor.quality,
                         )
                     end
+                elseif legacy_provider_factor
+                    # A provider failure is not permission to execute a
+                    # StandardLA factor while continuing to report LegacyLA.
+                    # Restore the possibly partially-mutated buffer, then
+                    # fail closed: the LegacyLA plan has no arithmetic
+                    # fallback chain.
+                    copy_owned!(ws.Qbuf, ws.Q)
+                    ws.la_fallback_reason = :la_equality_factor_failed
+                    phase_equality_factorization +=
+                        _elapsed_seconds(started)
+                    return (
+                        ok=false,
+                        reg_attempts=reg_attempts,
+                        q_pivoted=false,
+                        phase_times=(
+                            schur_copy=phase_schur_copy,
+                            schur_factorization=
+                                phase_schur_factorization,
+                            constraint_triangular_solve=
+                                phase_constraint_triangular_solve,
+                            equality_gram=phase_equality_gram,
+                            equality_factorization=
+                                phase_equality_factorization,
+                        ),
+                    )
                 else
                     copy_owned!(ws.Qbuf, ws.Q)
                     Cq = LinearAlgebra.cholesky!(
@@ -1906,6 +1957,13 @@ function factor_arrow_kkt!(
 
     equality =
         _factor_arrow_equality_system!(ws, prob, opts)
+    equality.ok || return (
+        ok=false,
+        reg_attempts=local_factor.reg_attempts,
+        q_pivoted=false,
+        q_rank_deficient=false,
+        phase_times=_empty_kkt_phase_times(),
+    )
     local_phases = local_factor.phase_times
     equality_phases = equality.phase_times
     return (

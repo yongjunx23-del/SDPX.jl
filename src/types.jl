@@ -119,9 +119,18 @@ StandardLABackend(arithmetic::Symbol) = begin
     StandardLABackend(arithmetic, provider, ownership)
 end
 
-struct LegacyLABackend <: AbstractLABackend
+struct LegacyLABackend{P} <: AbstractLABackend
     arithmetic::Symbol
     reason::Symbol
+    provider::P
+
+    function LegacyLABackend{P}(
+        arithmetic::Symbol,
+        reason::Symbol,
+        provider::P,
+    ) where {P}
+        return new{P}(arithmetic, reason, provider)
+    end
 end
 
 struct MultiFloatLABackend{P} <: AbstractLABackend
@@ -143,7 +152,9 @@ end
 """Conservative configuration used by historical positional plan builders."""
 function _compat_la_backend_configuration(arithmetic::Symbol)
     return LABackendConfiguration(
-        arithmetic, :legacy, :legacy, :none, (), (), :compatibility, :legacy,
+        arithmetic, :legacy, :legacy, :sdpx_legacy_la,
+        SDPX_LEGACY_LA_CAPABILITIES, (), :compatibility,
+        _legacy_la_symbol_ownership(arithmetic),
     )
 end
 

@@ -115,6 +115,22 @@ using MultiFloats: Float64x4
     SDPX.la_trsv_lower!(backend, A, rhs)
     @test all(isfinite, rhs)
 
+    legacy_float = SDPX.Experimental.LegacyLABackend(
+        :float64,
+        :compatibility,
+    )
+    legacy_float_matrix = [4.0 1.0; 1.0 3.0]
+    legacy_float_factor = SDPX.la_cholesky_factor!(
+        legacy_float,
+        legacy_float_matrix,
+    )
+    @test legacy_float_factor isa
+          SDPX.Experimental.LegacyLACholeskyFactor{Float64}
+    legacy_float_rhs = [1.0, 2.0]
+    SDPX.la_cholesky_solve!(legacy_float_factor, legacy_float_rhs)
+    @test all(isfinite, legacy_float_rhs)
+    @test SDPX.la_backend_provider(legacy_float) === :sdpx_legacy_la
+
     factored = SDPX.la_cholesky_factor!(backend, [4.0 1.0; 1.0 3.0])
     @test factored isa SDPX.Experimental.StandardLACholeskyFactor
     solved = [1.0, 2.0]
@@ -138,6 +154,34 @@ using MultiFloats: Float64x4
     @test !SDPX.la_chol!(generic, BigFloat[-1 0; 0 1])
 
     legacy = SDPX.Experimental.LegacyLABackend(:bigfloat, :requested_legacy)
+    @test legacy.provider isa SDPX.Experimental.SDPXLegacyLAProvider
+    @test SDPX.la_backend_provider(legacy) === :sdpx_legacy_la
+    @test SDPX.la_backend_ownership(legacy) === :owned_mutable_scalars
+    @test isbitstype(typeof(legacy.provider))
+    @test SDPX.Experimental.legacy_la_provider_arithmetic(
+        legacy.provider,
+    ) === :bigfloat
+    @test_throws ArgumentError SDPX.Experimental.LegacyLABackend(
+        :float64,
+        :requested_legacy,
+        legacy.provider,
+    )
+    @test SDPX.legacy_la_provider_capabilities(legacy.provider) ===
+          SDPX.SDPX_LEGACY_LA_CAPABILITIES
+    @test all(
+        operation -> operation in SDPX.legacy_la_provider_capabilities(
+            legacy.provider,
+        ),
+        (:dot, :mul_owned, :syrk, :chol, :solve, :trsm),
+    )
+    @test SDPX.Experimental.legacy_la_provider_supports(
+        legacy.provider,
+        :cholesky_factor!,
+    )
+    @test !SDPX.Experimental.legacy_la_provider_supports(
+        legacy.provider,
+        :eigen,
+    )
     for value in (BigFloat(NaN), BigFloat(Inf))
         bad = BigFloat[4 1; 1 3]
         bad[1, 1] = value
@@ -148,4 +192,39 @@ using MultiFloats: Float64x4
     end
     @test SDPX.la_cholesky_factor!(legacy, BigFloat[-1 0; 0 1]) === nothing
     @test !SDPX.la_chol!(legacy, BigFloat[-1 0; 0 1])
+
+    setprecision(BigFloat, 256) do
+        source = BigFloat[4 1; 1 3]
+        provider_matrix = SDPX.alloc_zeros(BigFloat, 2, 2)
+        direct_matrix = SDPX.alloc_zeros(BigFloat, 2, 2)
+        SDPX.copy_owned!(provider_matrix, source)
+        SDPX.copy_owned!(direct_matrix, source)
+        provider_factor = SDPX.la_cholesky_factor!(legacy, provider_matrix)
+        @test provider_factor isa SDPX.Experimental.LegacyLACholeskyFactor
+        @test provider_factor.provider === legacy.provider
+        @test provider_factor.factors === provider_matrix
+        @test SDPX.kchol!(direct_matrix)
+        @test provider_matrix == direct_matrix
+        provider_rhs = SDPX.alloc_zeros(BigFloat, 2)
+        direct_rhs = SDPX.alloc_zeros(BigFloat, 2)
+        SDPX.copy_owned!(provider_rhs, BigFloat[1, 2])
+        SDPX.copy_owned!(direct_rhs, BigFloat[1, 2])
+        SDPX.la_cholesky_solve!(provider_factor, provider_rhs)
+        SDPX.kcholsolve_owned!(direct_matrix, direct_rhs)
+        @test provider_rhs == direct_rhs
+        @test provider_rhs[1] !== provider_rhs[2]
+
+        stale_upper = SDPX.alloc_zeros(BigFloat, 2, 2)
+        SDPX.copy_owned!(stale_upper, source)
+        stale_upper[1, 2] = BigFloat(NaN)
+        @test SDPX.la_cholesky_factor!(legacy, stale_upper) !== nothing
+
+        # A failed legacy factor may partially overwrite the lower triangle,
+        # but it must never retry through StandardLA inside the provider.
+        failed = SDPX.alloc_zeros(BigFloat, 2, 2)
+        SDPX.copy_owned!(failed, BigFloat[-1 0; 0 1])
+        @test SDPX.la_cholesky_factor!(legacy, failed) === nothing
+        @test SDPX.la_backend_provider(legacy) === :sdpx_legacy_la
+        @test SDPX.la_backend_reason(legacy) === :requested_legacy
+    end
 end
