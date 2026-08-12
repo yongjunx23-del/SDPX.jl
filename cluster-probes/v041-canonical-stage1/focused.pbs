@@ -6,7 +6,7 @@
 #PBS -l walltime=04:00:00
 #PBS -j oe
 
-# Stage-1 CanonicalConicProblem focused validation.
+# CanonicalConicProblem/ProblemFeatures focused validation.
 # PBS ppn=5; Julia threads 4; solver threads 4; BLAS/OMP/MKL threads 1.
 # All paths and the expected source hash come from the environment.
 set -euo pipefail
@@ -106,6 +106,7 @@ fi
     Threads.nthreads() == 4 || error("Julia thread mismatch: $(Threads.nthreads())")
     files = [
       "canonical_conic_problem.jl",
+      "problem_features.jl",
       "soc_regressions.jl",
       "public_api.jl",
       "frontend_auto_options.jl",
