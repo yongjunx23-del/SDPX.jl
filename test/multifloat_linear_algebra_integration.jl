@@ -1,4 +1,4 @@
-#=====================================================================
+#=
     MultiFloatLinearAlgebra optional-extension integration tests.
 
     These tests are NOT part of the ordinary Pkg.test target: the MFLA
@@ -6,7 +6,7 @@
     cluster environment (see cluster-probes/v041-unified-la).  The file is
     included by the PBS focused probe with MultiFloatLinearAlgebra already
     loaded.
-#=====================================================================#
+=#
 using SDPX
 using Test
 using LinearAlgebra
@@ -65,7 +65,8 @@ end
             )
             @test config.selected === :standard
             @test config.requested === :auto
-            @test config.provider === :none
+            @test config.provider === :generic_linear_algebra
+            @test config.ownership === :owned_mutable_scalars
             backend = LA.instantiate_la_backend(config, T, 2)
             @test backend isa LA.StandardLABackend
         end

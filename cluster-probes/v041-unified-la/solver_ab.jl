@@ -1,4 +1,4 @@
-#=====================================================================
+#=
     Small dense-KKT and full-solve solver-level A/B: generic vs MFLA.
 
     The KKT direction verification always runs.  The same SPD system and
@@ -18,7 +18,7 @@
     option is landed, it prints an explicit `full_solve=SKIPPED` marker;
     the PBS layer treats that as FAILED so a missing expert option can
     never be mistaken for a passed solver-level gate.
-#=====================================================================#
+=#
 using SDPX
 using LinearAlgebra
 using Random

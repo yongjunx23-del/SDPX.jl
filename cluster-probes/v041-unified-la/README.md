@@ -45,6 +45,19 @@ uuid    642d9d30-8e28-45ca-9d81-256429ea358f
   and iterations are validated from real solve results.  Until then the
   probe prints `full_solve=SKIPPED` and the PBS layer fails closed; no
   certificate is fabricated.
+- `bigfloat_generic_probe.pbs` - cluster-only BigFloat generic-vs-legacy
+  probe (`bigfloat_generic_probe.jl`) at one Julia/solver thread and one
+  BLAS thread.  Working precision is 256 bits and every numerical reference
+  is computed at 512 bits.  It compares the Standard generic backend
+  (`linear_algebra_backend=:standard`) with the Legacy exact dense
+  production kernels (`linear_algebra_backend=:legacy`) on SDPX-owned
+  BigFloat storage (`SDPX.alloc_zeros` / `SDPX.copy_owned!`), and checks
+  owned-slot non-aliasing, source immutability, determinism, finiteness,
+  NaN/Inf/indefinite fail-closed behavior, kernel residuals, and a real
+  small dense SDPX solve validating status, objective, gap,
+  original-coordinate certificate, iterations, diagnostics and fallback
+  status.  Warmup 1, timed 3, with `/usr/bin/time` RSS and CPU
+  utilization recorded.
 - `static_check.sh` - local shell/static checks only.
 
 ## Environment variables
@@ -80,6 +93,13 @@ uses the explicit provider: through the instantiated
 directly while the planner API has not landed
 (`mfla_route=direct_upstream`).
 
+The BigFloat probe uses `linear_algebra_backend=:standard` and `:legacy`
+through the public frontend.  For BigFloat, auto/standard planning is
+expected to select provider `:generic_linear_algebra` with ownership
+`:owned_mutable_scalars`; the probe records the plan and requires the
+original-coordinate `SDPX.result_certificate(prob, result, opts)` result to
+be valid with no fallback.
+
 Each A/B PBS job asserts the actual `pathof(SDPX)`, the actual MFLA root and
 pinned commit, the candidate source-tree SHA-256, and Julia/BLAS thread
 counts, then records `rss_kib`, `user_cpu_seconds`, `system_cpu_seconds`,
@@ -108,3 +128,7 @@ qsub -v NODE_NAME=node_b,OUTPUT_ROOT=.../solver_ab, \
 Do not run both memory-bandwidth-heavy jobs on the same node.  Do not submit
 either job before the corresponding candidate source hash and MFLA checkout
 have been verified.
+
+`bigfloat_generic_probe.pbs` is a separate one-core job and may run
+concurrently on a healthy idle node; it does not compete with the four-thread
+A/B jobs for memory bandwidth.

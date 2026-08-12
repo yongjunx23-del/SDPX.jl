@@ -1,4 +1,4 @@
-#=====================================================================
+#=
     SDPX <-> MultiFloatLinearAlgebra optional extension.
 
     Upstream contract:
@@ -15,7 +15,7 @@
     The extension is loaded only when both MultiFloats and
     MultiFloatLinearAlgebra are installed, which lets the provider name the
     concrete MultiFloat element type without loading order ambiguity.
-#=====================================================================#
+=#
 module SDPXMultiFloatLinearAlgebraExt
 
 using SDPX

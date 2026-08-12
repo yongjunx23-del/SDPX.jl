@@ -1,4 +1,4 @@
-#=====================================================================
+#=
     Generic LinearAlgebra vs MultiFloatLinearAlgebra kernel A/B.
 
     Deterministic microbenchmark for GEMM, SYRK, TRSM, and factor +
@@ -23,7 +23,7 @@
 
     Auto planning is recorded for audit but never changes the explicit
     `:standard` / `:multifloat` arms.
-#=====================================================================#
+=#
 using SDPX
 using LinearAlgebra
 using Random
