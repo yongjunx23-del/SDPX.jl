@@ -65,6 +65,12 @@ const CanonicalReconstructionMap = SDPX.CanonicalReconstructionMap
 const CanonicalConicProblem = SDPX.CanonicalConicProblem
 const canonicalize = SDPX.canonicalize
 const reconstruct_identity = SDPX.reconstruct_identity
+const CanonicalMatrixFacts = SDPX.CanonicalMatrixFacts
+const CanonicalAffineMapFacts = SDPX.CanonicalAffineMapFacts
+const CanonicalAffineConeFacts = SDPX.CanonicalAffineConeFacts
+const CanonicalPSDConeFacts = SDPX.CanonicalPSDConeFacts
+const ProblemFeatures = SDPX.ProblemFeatures
+const extract_problem_features = SDPX.extract_problem_features
 const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
 const resolve_solve_options = SDPX.resolve_solve_options
 const auto_tolerance = SDPX.auto_tolerance
@@ -92,6 +98,9 @@ export AbstractCanonicalPSDCone, CanonicalPSDCone
 export AbstractCanonicalEqualities, CanonicalEqualities
 export CanonicalIdentityReconstructionMap, CanonicalReconstructionMap
 export CanonicalConicProblem, canonicalize, reconstruct_identity
+export CanonicalMatrixFacts, CanonicalAffineMapFacts, CanonicalAffineConeFacts
+export CanonicalPSDConeFacts, ProblemFeatures
+export extract_problem_features
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
 

@@ -16,6 +16,7 @@ using Test
     include("lp_regressions.jl")
     include("soc_regressions.jl")
     include("canonical_conic_problem.jl")
+    include("problem_features.jl")
     include("fixed_trace_benchmark_regressions.jl")
     include("soc_q3_kernel_regressions.jl")
     include("solver_regressions.jl")
