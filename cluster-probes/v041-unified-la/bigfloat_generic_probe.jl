@@ -39,8 +39,8 @@ const REFERENCE_BITS = 512
 const WARMUP = 1
 const TIMED = 3
 const N = 24
-const RESIDUAL_TOL = BigFloat("1e-12")
-const SOLVE_TOL = BigFloat("1e-12")
+const RESIDUAL_TOL = BigFloat("1e-40")
+const SOLVE_TOL = BigFloat("1e-30")
 
 function _identity_checks!()
     expected_root = realpath(ENV["SDPX_CANDIDATE"])
@@ -197,10 +197,19 @@ function _assert_residual(metrics, label)
 end
 
 function _assert_owned_independent!(destination, source, label)
-    for index in eachindex(destination, source)
-        destination[index] === source[index] && error(
-            "$label slot aliases source at $index",
-        )
+    destination_slots = collect(destination)
+    source_slots = collect(source)
+    for left in eachindex(destination_slots)
+        for right in (left + 1):length(destination_slots)
+            destination_slots[left] === destination_slots[right] && error(
+                "$label destination slots $left and $right alias",
+            )
+        end
+        for right in eachindex(source_slots)
+            destination_slots[left] === source_slots[right] && error(
+                "$label destination slot $left aliases source slot $right",
+            )
+        end
     end
     return true
 end
@@ -344,7 +353,7 @@ function _full_solve(requested::Symbol)
         certificate_valid=certificate.valid,
         executed_la_backend=get(selected, :la_backend, :not_executed),
         planned_la_backend=get(selected, :planned_la_backend, :not_executed),
-        fallback_reason=get(selected, :fallback_reason, :not_recorded),
+        fallback_reason=get(selected, :la_fallback_reason, :not_recorded),
         all_finite=all(
             isfinite,
             (result.pObj, result.dObj, result.gap_rel, result.p_res, result.d_res),
@@ -405,6 +414,16 @@ function main()
         rhs0 = _random_owned_vector(N)
         X0 = _random_owned(N, N)
 
+        A_snapshot = _owned_copy(A0)
+        B_snapshot = _owned_copy(B0)
+        C_snapshot = _owned_copy(C0)
+        P_snapshot = _owned_copy(P0)
+        S_snapshot = _owned_copy(S0)
+        L_snapshot = _owned_copy(L0)
+        X_snapshot = _owned_copy(X0)
+        rhs_snapshot = _owned_copy(rhs0)
+        SPD_snapshot = _owned_copy(SPD0)
+
         C = _owned_copy(C0)
         S = _owned_copy(S0)
         X = _owned_copy(X0)
@@ -458,14 +477,12 @@ function main()
         factor_standard = _benchmark(factor_reset!, factor_standard!)
         factor_legacy = _benchmark(factor_reset!, factor_legacy!)
 
-        C_snapshot = _owned_copy(C0)
-        S_snapshot = _owned_copy(S0)
-        X_snapshot = _owned_copy(X0)
-        rhs_snapshot = _owned_copy(rhs0)
-        SPD_snapshot = _owned_copy(SPD0)
-
+        _assert_source_unchanged!(A0, A_snapshot, "gemm left source")
+        _assert_source_unchanged!(B0, B_snapshot, "gemm right source")
         _assert_source_unchanged!(C0, C_snapshot, "gemm source")
+        _assert_source_unchanged!(P0, P_snapshot, "syrk panel source")
         _assert_source_unchanged!(S0, S_snapshot, "syrk source")
+        _assert_source_unchanged!(L0, L_snapshot, "trsm factor source")
         _assert_source_unchanged!(X0, X_snapshot, "trsm source")
         _assert_source_unchanged!(rhs0, rhs_snapshot, "rhs source")
         _assert_source_unchanged!(SPD0, SPD_snapshot, "SPD source")

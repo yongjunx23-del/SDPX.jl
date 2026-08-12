@@ -254,6 +254,9 @@ function _full_solve_verification(requested::Symbol, tolerance::T)
         certificate_valid=certificate.valid,
         executed_la_backend=get(selected, :la_backend, :not_executed),
         planned_la_backend=get(selected, :planned_la_backend, :not_executed),
+        executed_la_provider=get(selected, :la_executed_provider, :not_executed),
+        planned_la_provider=get(selected, :planned_la_provider, :not_executed),
+        fallback_reason=get(selected, :la_fallback_reason, :not_recorded),
         all_finite=all(
             isfinite,
             (result.pObj, result.dObj, result.gap_rel, result.p_res, result.d_res),
@@ -279,6 +282,23 @@ function _full_solve_verification(requested::Symbol, tolerance::T)
     )
     verification.certificate_valid || error(
         "full solve for $requested has an invalid certificate",
+    )
+    verification.planned_la_backend == requested || error(
+        "planned backend for $requested was $(verification.planned_la_backend)",
+    )
+    verification.executed_la_backend == requested || error(
+        "executed backend for $requested was $(verification.executed_la_backend)",
+    )
+    expected_provider = requested === :standard ? :generic_linear_algebra :
+                        :multifloat_linear_algebra
+    verification.planned_la_provider == expected_provider || error(
+        "planned provider for $requested was $(verification.planned_la_provider)",
+    )
+    verification.executed_la_provider == expected_provider || error(
+        "executed provider for $requested was $(verification.executed_la_provider)",
+    )
+    verification.fallback_reason === :none || error(
+        "full solve for $requested fell back: $(verification.fallback_reason)",
     )
     return verification
 end
