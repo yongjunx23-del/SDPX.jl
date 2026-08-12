@@ -198,7 +198,9 @@ def _summarize(values):
     if not values:
         return None
     median = statistics.median(values)
-    mean = statistics.fmean(values)
+    # `statistics.fmean` is Python 3.8+ only; some cluster login Pythons are
+    # older, so compute the arithmetic mean compatibly.
+    mean = sum(values) / len(values)
     stdev = statistics.stdev(values) if len(values) > 1 else 0.0
     cv = stdev / mean if mean else math.inf
     return median, mean, stdev, cv
