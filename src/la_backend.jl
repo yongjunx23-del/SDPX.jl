@@ -1,10 +1,10 @@
-#=====================================================================
+#=
     SDPX linear-algebra backend
 
 The structural planner remains in `pipeline.jl`; this file is the small
 arithmetic seam used by dense KKT primitives.  Legacy kernels are deliberately
 left intact for BigFloat, LP, Q3, sparse and all non-migrated paths.
-=====================================================================#
+=#
 
 """Optional arithmetic-provider hook; extensions overload this method."""
 la_provider_descriptor(::Type{T}, ::Int=1) where {T} = (

@@ -1,10 +1,10 @@
-#=====================================================================
+#=
     Core types: options, problem data, constraint representations,
     solve status/result. No mutable global state anywhere in this
     file (P8) — the element type T is a type parameter throughout,
     so every downstream function specializes and compiles concretely
     instead of dynamically dispatching on a global `T::Type`.
-=====================================================================#
+=#
 
 """
     _recoverable(exception) -> Bool

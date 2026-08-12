@@ -1,4 +1,4 @@
-#=====================================================================
+#=
     KKT block elimination (§2.2) and iterative refinement (§2.5).
 
         [ S  −B ] [dx]   [ r ]        S := Σ_l S[l]  (m×m, SPD)
@@ -11,7 +11,7 @@
     iteration (P2): `factor_kkt!` runs once, `solve_kkt!` runs once
     per right-hand side (predictor r, corrector r, and — via
     `refine_kkt!` — the residual-correction system).
-=====================================================================#
+=#
 
 @inline _elapsed_seconds(started) =
     (time_ns() - started) / 1.0e9
@@ -1109,8 +1109,9 @@ function _factor_dense_kkt_native!(
             end
             factor_matrix = equality_factor === nothing ? nothing :
                             la_factor_handle_matrix(equality_factor)
-            if equality_factor !== nothing &&
-               _cholesky_has_numerical_rank(factor_matrix)
+            if equality_factor isa BigFloatCholeskyFactor ||
+               (equality_factor !== nothing &&
+                _cholesky_has_numerical_rank(factor_matrix))
                 ws.Qchol = equality_factor
             else
                 if ws.la_backend isa MultiFloatLABackend
