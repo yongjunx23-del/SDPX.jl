@@ -86,6 +86,12 @@ function _backend(requested::Symbol)
     return LA.instantiate_la_backend(_plan(requested), T, 1)
 end
 
+# `collect(named_tuple)` returns values only.  Preserve field names while
+# producing deterministic, type-safe audit summaries for mixed-status records.
+function _sorted_summary(record)
+    return sort!(collect(pairs(record)); by=pair -> string(first(pair)))
+end
+
 function _random_owned(rows::Int, cols::Int)
     A = SDPX.alloc_zeros(T, rows, cols)
     for index in eachindex(A)
@@ -638,14 +644,14 @@ function main()
         println(
             "BIGFLOAT_AB full_solve_standard=",
             join(
-                ["$(key)=$(value)" for (key, value) in sort(collect(std_full); by=first)],
+                ["$(key)=$(value)" for (key, value) in _sorted_summary(std_full)],
                 ",",
             ),
         )
         println(
             "BIGFLOAT_AB full_solve_legacy=",
             join(
-                ["$(key)=$(value)" for (key, value) in sort(collect(legacy_full); by=first)],
+                ["$(key)=$(value)" for (key, value) in _sorted_summary(legacy_full)],
                 ",",
             ),
         )
