@@ -13,13 +13,30 @@ node name or hash value is hardcoded.
   `Pkg.precompile()` for the independent Julia environment.
 - `focused.pbs` - `ppn=5`, Julia/solver `4` threads, BLAS/OMP/MKL `1`;
   validates node, candidate identity and hash, then runs the compact
-  production-planning gate: `auto_planner.jl`, `pipeline.jl`,
-  `v041_architecture_regressions.jl`, `executed_diagnostics.jl`,
-  `soc_regressions.jl`, `public_api.jl`, and `frontend_auto_options.jl`.
-  Canonical/feature-only tests are not repeated in the focused list because this milestone
-  does not modify those files; the full-suite boundary still covers them.
+  `canonicalize(SDPProblem)` gate over the focused manifest below.  SOC and
+  frontend-option regressions stay in the full-suite boundary for this
+  milestone.
 - `full.pbs` - same resource contract; `Pkg.test("SDPX"; coverage=false)`
   into a separate result directory.
+
+## Focused manifest
+
+`focused.pbs` includes the following test files in this exact order; keep this
+list and the `files` array in `focused.pbs` in sync:
+
+```text
+canonical_conic_problem.jl
+problem_features.jl
+auto_planner.jl
+pipeline.jl
+v041_architecture_regressions.jl
+executed_diagnostics.jl
+public_api.jl
+```
+
+Each file is included directly (`FOCUSED_BEGIN`/`FOCUSED_END` markers), so a
+per-file failure is visible in `test.log` and the job fails closed only after
+recording every failing file.
 
 ## Environment variables
 
