@@ -92,6 +92,21 @@ using MultiFloats: Float64x4
 
     A = [4.0 1.0; 1.0 3.0]
     backend = SDPX.Experimental.StandardLABackend(:float64)
+    # Keep the dense-matrix signatures concrete enough that the generic
+    # AbstractLABackend/AbstractArray fallback cannot become ambiguous for
+    # Float64, BigFloat, or an optional MultiFloat provider.
+    @test hasmethod(
+        SDPX.la_cholesky_factor!,
+        Tuple{SDPX.Experimental.StandardLABackend,Matrix{Float64}},
+    )
+    @test hasmethod(
+        SDPX.la_cholesky_factor!,
+        Tuple{SDPX.Experimental.StandardLABackend,Matrix{BigFloat}},
+    )
+    @test hasmethod(
+        SDPX.la_cholesky_factor!,
+        Tuple{SDPX.Experimental.MultiFloatLABackend{Any},Matrix{Float64x4}},
+    )
     @test SDPX.la_chol!(backend, A)
     rhs = [1.0, 2.0]
     SDPX.la_trsv_lower!(backend, A, rhs)

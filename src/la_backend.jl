@@ -143,7 +143,7 @@ function instantiate_la_backend(
     return LegacyLABackend(config.arithmetic, reason)
 end
 
-function la_cholesky_factor!(backend::MultiFloatLABackend, A)
+function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
     payload = _la_provider_call(backend, :cholesky_factor!, A)
     payload === nothing && return nothing
     hasproperty(payload, :factors) || throw(ArgumentError(
@@ -159,7 +159,7 @@ function la_cholesky_factor!(backend::MultiFloatLABackend, A)
 end
 
 """Expose the standard generic factor handle without changing legacy routes."""
-function la_cholesky_factor!(::StandardLABackend, A)
+function la_cholesky_factor!(::StandardLABackend, A::AbstractMatrix)
     factor = LinearAlgebra.cholesky!(Symmetric(A, :L); check=false)
     return issuccess(factor) ?
            StandardLACholeskyFactor{eltype(A),typeof(factor)}(
