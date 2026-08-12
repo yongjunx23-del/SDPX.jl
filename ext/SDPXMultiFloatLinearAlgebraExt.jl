@@ -55,6 +55,16 @@ struct _Provider{MF<:MultiFloat}
     workspace::GemmWorkspace{MF}
 end
 
+"""Callable adapter exposing both owned GEMM/GEMV arities."""
+struct _ProviderMulOwned{P}
+    provider::P
+end
+
+(_mul::_ProviderMulOwned)(C, A, B, α, β) =
+    _provider_mul_owned!(_mul.provider, C, A, B, α, β)
+(_mul::_ProviderMulOwned)(C, A, B) =
+    _provider_mul_owned!(_mul.provider, C, A, B)
+
 """
     _ProviderCholesky{MF}
 
@@ -97,8 +107,7 @@ function Base.getproperty(provider::_Provider, name::Symbol)
         return (L, x) -> _provider_trsv_transpose!(provider, L, x)
     name === :syrk! &&
         return (S, P, α, β) -> _provider_syrk!(provider, S, P, α, β)
-    name === :mul_owned! &&
-        return (C, A, B, α, β) -> _provider_mul_owned!(provider, C, A, B, α, β)
+    name === :mul_owned! && return _ProviderMulOwned(provider)
     name === :dot && return (x, y) -> _provider_dot(provider, x, y)
     name in (:config, :workspace) && return getfield(provider, name)
     throw(ArgumentError("MFLA provider does not implement $(name)"))

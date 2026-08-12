@@ -198,6 +198,10 @@ end
             SDPX.la_mul_owned!(backend, C, A, B, α, β)
             @test _max_relative_error(C, expected) < T(1e-13)
 
+            C_three = zeros(T, 5, 6)
+            SDPX.la_mul_owned!(backend, C_three, A, B)
+            @test _max_relative_error(C_three, A * B) < T(1e-13)
+
             # KKT uses both `transpose(Btil) * rtil` (matching a 4x5 times
             # length-5 product) and `Btil * dy` (matching a 5x4 times
             # length-4 product).  Keep those exact shapes here.
@@ -206,6 +210,9 @@ end
             expected_q = α .* (transpose(A) * rhs) .+ β .* q
             SDPX.la_mul_owned!(backend, q, transpose(A), rhs, α, β)
             @test _max_relative_error(q, expected_q) < T(1e-13)
+            q_three = zeros(T, 4)
+            SDPX.la_mul_owned!(backend, q_three, transpose(A), rhs)
+            @test _max_relative_error(q_three, transpose(A) * rhs) < T(1e-13)
 
             dy = T.(randn(4))
             dx = T.(randn(5))
