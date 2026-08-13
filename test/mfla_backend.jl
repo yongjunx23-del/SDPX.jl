@@ -543,4 +543,152 @@ if _MFLA_LOADED
         )
     end
 
+    @testset "MFLA Float64x4 end-to-end smoke" begin
+        T = Float64x4
+
+        function _multifloat_options(::Type{T}, algorithm::Symbol) where {T}
+            return SDPX.SolveOptions(
+                verbosity=0,
+                diagnostics=true,
+                timing=false,
+                algorithm=algorithm,
+                duality_gap_threshold=T(1e-10),
+                primal_error_threshold=T(1e-10),
+                dual_error_threshold=T(1e-10),
+                linear_algebra_backend=:multifloat,
+            )
+        end
+
+        function _assert_multifloat_execution(selected)
+            @test selected.planned_la_backend === :multifloat
+            @test selected.la_backend === :multifloat
+            @test selected.planned_la_provider ===
+                  :multifloat_linear_algebra
+            @test selected.la_executed_provider ===
+                  :multifloat_linear_algebra
+            @test selected.planned_la_fallback_reason === :none
+            @test selected.la_fallback_reason === :none
+            @test selected.backend_resolution === :planned
+            @test selected.certificate.valid
+        end
+
+        @testset "tiny SDP" begin
+            k = 3
+            m = k * (k + 1) ÷ 2
+            c = zeros(T, m)
+            c[1] = -one(T)
+            A = zeros(T, m, k, k)
+            A[1, 1, 1] = one(T)
+            A[2, 2, 2] = one(T)
+            A[3, 3, 3] = one(T)
+            A[4, 1, 2] = one(T)
+            A[4, 2, 1] = one(T)
+            A[5, 1, 3] = one(T)
+            A[5, 3, 1] = one(T)
+            A[6, 2, 3] = one(T)
+            A[6, 3, 2] = one(T)
+            B = zeros(T, m, 1)
+            B[1, 1] = one(T)
+            B[2, 1] = one(T)
+            B[3, 1] = one(T)
+            problem = SDPX.ingest(
+                c,
+                [A],
+                [zeros(T, k, k)],
+                B,
+                T[3];
+                T=T,
+                sparse=false,
+                verbosity=0,
+            )
+            result = SDPX.solve(
+                problem,
+                _multifloat_options(T, :sdp),
+            )
+            @test result.status == SDPX.Optimal
+            @test isapprox(Float64(result.pObj), -3.0; atol=1e-6)
+            @test isapprox(Float64(result.dObj), -3.0; atol=1e-6)
+            @test result.p_res <= T(1e-6)
+            @test result.d_res <= T(1e-6)
+            _assert_multifloat_execution(
+                result.diagnostics.selected_algorithms,
+            )
+        end
+
+        @testset "tiny SOCP" begin
+            problem = SDPX.second_order_program(
+                T[1, 0, 0],
+                Matrix{T}(I, 3, 3),
+                zeros(T, 3);
+                Aeq=T[0 1 0; 0 0 1],
+                beq=T[3, 4],
+            )
+            result = SDPX.solve_socp(
+                problem,
+                _multifloat_options(T, :socp),
+            )
+            @test result.status == SDPX.Optimal
+            @test isapprox(Float64(result.pObj), 5.0; atol=1e-6)
+            @test isapprox(Float64(result.dObj), 5.0; atol=1e-6)
+            @test result.p_res <= T(1e-6)
+            @test result.d_res <= T(1e-6)
+            _assert_multifloat_execution(
+                result.diagnostics.selected_algorithms,
+            )
+        end
+
+        @testset "LP is not migrated to MFLA" begin
+            problem = SDPX.linear_program(
+                T[1, 2],
+                Matrix{T}(I, 2, 2),
+                T[3, 4];
+                T=T,
+                sparse=false,
+            )
+            legacy_plan = SDPX.build_execution_plan(
+                problem,
+                SDPX.SolverOptions{T}(
+                    algorithm=:lp,
+                    linear_algebra_backend=:auto,
+                    verbosity=0,
+                ),
+            )
+            @test legacy_plan.algorithm === :lp_primal_dual
+            @test legacy_plan.la_config.selected === :legacy
+            @test legacy_plan.la_config.provider === :sdpx_legacy_la
+            @test legacy_plan.la_config.fallback_reason ===
+                  :route_not_migrated
+
+            @test_throws ArgumentError SDPX.build_execution_plan(
+                problem,
+                SDPX.SolverOptions{T}(
+                    algorithm=:lp,
+                    linear_algebra_backend=:multifloat,
+                    verbosity=0,
+                ),
+            )
+
+            result = SDPX.solve(
+                problem,
+                SDPX.SolveOptions(
+                    verbosity=0,
+                    diagnostics=true,
+                    algorithm=:lp,
+                    duality_gap_threshold=T(1e-10),
+                    primal_error_threshold=T(1e-10),
+                    dual_error_threshold=T(1e-10),
+                    linear_algebra_backend=:legacy,
+                ),
+            )
+            @test result.status == SDPX.Optimal
+            @test isapprox(Float64(result.pObj), 11.0; atol=1e-6)
+            selected = result.diagnostics.selected_algorithms
+            @test selected.planned_la_backend === :legacy
+            @test selected.planned_la_provider === :sdpx_legacy_la
+            @test selected.planned_la_fallback_reason ===
+                  :route_not_migrated
+            @test selected.certificate.valid
+        end
+    end
+
 end
