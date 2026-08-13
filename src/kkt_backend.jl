@@ -80,14 +80,19 @@ function select_backend(ws::Workspace)
     return ws.backend::KKTBackend
 end
 
-function _backend_from_configuration(ws::Workspace, formulation::Symbol)
-    formulation === :block_arrow && return ArrowBackend()
-    formulation === :sparse_normal_equations && return SparseSchurBackend()
-    formulation === :dense_normal_equations &&
+function _backend_from_configuration(
+    ws::Workspace,
+    formulation_plan::FormulationPlan,
+)
+    formulation = formulation_plan.formulation
+    formulation isa BlockArrowElimination && return ArrowBackend()
+    formulation isa SparseNormalEquations && return SparseSchurBackend()
+    formulation isa DenseNormalEquations &&
         return ws.backend_config.mixed_precision_mode !== :off ?
                MixedPrecisionBackend() : DenseCholeskyBackend()
     throw(ArgumentError(
-        "unsupported Workspace KKT formulation $(formulation)",
+        "unsupported Workspace KKT formulation " *
+        "$(formulation_symbol(formulation_plan))",
     ))
 end
 

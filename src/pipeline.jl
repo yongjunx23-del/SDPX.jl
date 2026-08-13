@@ -337,6 +337,24 @@ function _runtime_schur_backend(
     prob::SDPProblem,
     equality_solver::Symbol=:auto,
 )
+    return kkt_backend_from_formulation(
+        _runtime_schur_formulation(prob, equality_solver),
+        :sdp_primal_dual,
+        prob.dims.n,
+    )
+end
+
+"""
+    _runtime_schur_formulation(prob, equality_solver) -> FormulationPlan
+
+Choose the mathematical SDP Schur formulation from structure alone. Backend
+selection occurs afterward through `kkt_backend_from_formulation`, so LA
+provider capabilities cannot reverse-select the mathematical system.
+"""
+function _runtime_schur_formulation(
+    prob::SDPProblem,
+    equality_solver::Symbol=:auto,
+)
     equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError("equality_solver must be :auto, :normal_equations, or :qr"))
     # Preserve the historical Workspace precedence.  Exact block-arrow
@@ -356,7 +374,11 @@ function _runtime_schur_backend(
             _supports_owned_bigfloat_arrow_equalities(prob)
         if has_arrow && equality_compatible &&
            bigfloat_equality_supported
-            return :block_arrow
+            return FormulationPlan(
+                BlockArrowElimination(),
+                :exact_singleton_local_structure,
+                :structural_planner,
+            )
         end
     end
     # The current sparse-Schur workspace implements normal-equation equality
@@ -364,13 +386,22 @@ function _runtime_schur_backend(
     # plan *before* memory preflight/workspace construction; otherwise the plan
     # says sparse while the runtime silently allocates the dense route.
     if equality_solver !== :qr && _use_sparse_schur_sdp(prob)
-        return :sparse_schur_cholesky
+        return FormulationPlan(
+            SparseNormalEquations(),
+            :sparse_schur_structure,
+            :structural_planner,
+        )
     end
     # Both remaining density regimes execute the same dense Cholesky backend.
     # The old `:dense_cholesky_fallback` label described why sparse structure
     # was not used, not a distinct runtime implementation, and therefore made
     # planned/executed parity impossible to state precisely.
-    return :dense_cholesky
+    return FormulationPlan(
+        DenseNormalEquations(),
+        equality_solver === :qr ?
+        :equality_rrqr_requires_dense_route : :general_dense_route,
+        :structural_planner,
+    )
 end
 
 """
@@ -932,6 +963,10 @@ function resolve_execution_route(
     classification = classify_problem(prob)
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
+    opts.formulation === :dual && throw(ArgumentError(
+        "formulation=:dual is analysis-only in SDPX v0.5; no typed " *
+        "dual transform or reconstruction path is implemented",
+    ))
     soc_algorithm = classification.maximum_block_size <= 2 ?
                     :socp_psd2 : :socp_psd_lift
     native_fixed_trace_q3 =
@@ -1057,16 +1092,25 @@ function build_execution_plan(
     else
         :none
     end
-    kkt_backend = algorithm === :socp_fixed_trace_q3 ?
-                  :q3_block_diagonal_equality :
-                  algorithm === :lp_primal_dual ?
-                  (
-                      classification.equalities == 0 ?
-                      :positive_definite_cholesky :
-                      :dense_lu
-                  ) :
-                  _runtime_schur_backend(prob, opts.equality_solver)
-    kkt_formulation = kkt_formulation_from_backend(kkt_backend)
+    formulation_plan = if algorithm in (
+        :sdp_primal_dual,
+        :socp_psd2,
+        :socp_psd_lift,
+    )
+        _runtime_schur_formulation(prob, opts.equality_solver)
+    else
+        FormulationPlan(
+            NoKKTFormulation(),
+            algorithm === :lp_primal_dual ?
+            :dedicated_lp_system : :native_q3_system,
+            :structural_planner,
+        )
+    end
+    kkt_backend = kkt_backend_from_formulation(
+        formulation_plan,
+        algorithm,
+        classification.equalities,
+    )
     generic_mixed_applicable =
         algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
         kkt_backend in (:dense_cholesky, :dense_cholesky_fallback)
@@ -1251,7 +1295,7 @@ function build_execution_plan(
         scaling,
         kkt_backend,
         backend_config,
-        kkt_formulation,
+        formulation_plan,
         la_config,
         gram_kernel,
         schedule,
@@ -1267,6 +1311,7 @@ function build_execution_plan(
             strategy=opts.parameter_strategy,
             adaptive_sigma_max,
             equality_solver=opts.equality_solver,
+            formulation=opts.formulation,
             linear_algebra_backend=opts.linear_algebra_backend,
             extended_precision_blas=opts.extended_precision_blas,
             extended_precision_memory_fraction=

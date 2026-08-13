@@ -96,7 +96,7 @@ presolve_zero_constraints = true
 presolve_duplicate_constraints = true
 presolve_dependent_equalities = true
 scaling = :auto                 # :auto, :none, or :equilibrate
-formulation = :auto             # analysis only for :dual
+formulation = :auto             # explicit :dual fails until transform exists
 chordal_decomposition = :auto   # analysis only
 ```
 

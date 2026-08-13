@@ -64,6 +64,9 @@ The ordinary frontend exposes policies, not low-level IPM constants:
 --certificate=auto|on|off
 ```
 
+In v0.5, `--formulation=dual` is reserved for a future typed dual transform
+and fails closed; `auto` and `primal` execute the current primal formulations.
+
 Parameters such as centering constants, Q3 Gram strategies, mixed-precision
 condition limits and refinement micro-policy remain expert/internal controls.
 They should not become command-line flags unless a benchmarked scientific

@@ -28,6 +28,14 @@ const select_parameters = SDPX.select_parameters
 const ProblemClassification = SDPX.ProblemClassification
 const PresolveReport = SDPX.PresolveReport
 const ExecutionPlan = SDPX.ExecutionPlan
+const AbstractKKTFormulation = SDPX.AbstractKKTFormulation
+const DenseNormalEquations = SDPX.DenseNormalEquations
+const SparseNormalEquations = SDPX.SparseNormalEquations
+const BlockArrowElimination = SDPX.BlockArrowElimination
+const NoKKTFormulation = SDPX.NoKKTFormulation
+const FormulationPlan = SDPX.FormulationPlan
+const formulation_symbol = SDPX.formulation_symbol
+const kkt_backend_from_formulation = SDPX.kkt_backend_from_formulation
 const AbstractLABackend = SDPX.AbstractLABackend
 const StandardLABackend = SDPX.StandardLABackend
 const LegacyLABackend = SDPX.LegacyLABackend
@@ -156,6 +164,10 @@ export AbstractParameterPolicy, FixedParameterPolicy
 export AdaptiveParameterPolicy, IterationDiagnostics, IterationParameters
 export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
+export AbstractKKTFormulation, DenseNormalEquations
+export SparseNormalEquations, BlockArrowElimination, NoKKTFormulation
+export FormulationPlan, formulation_symbol
+export kkt_backend_from_formulation
 export PreparedStructure, SolveState, PreprocessTransform
 export StructureFingerprint, PreparedStructureMismatch
 export structure_fingerprint, transform_objective, transform_rhs

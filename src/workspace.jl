@@ -916,6 +916,7 @@ function _normalize_compatibility_execution_plan(
             plan.scaling,
             plan.kkt_backend,
             plan.backend_config,
+            plan.formulation_plan,
             compatibility_la,
             plan.gram_kernel,
             plan.schedule,
@@ -971,6 +972,7 @@ function Workspace(
             plan.scaling,
             plan.kkt_backend,
             plan.backend_config,
+            plan.formulation_plan,
             compatibility_la,
             plan.gram_kernel,
             plan.schedule,
@@ -991,12 +993,18 @@ function Workspace(
             "execution plan backend configuration $(config.route) does not match " *
             "kkt_backend $(plan.kkt_backend)",
         ))
-    formulation = plan.kkt_formulation
+    formulation_plan = plan.formulation_plan
+    formulation = formulation_symbol(formulation_plan)
     formulation in KKT_FORMULATION_ROUTES || throw(ArgumentError(
         "execution plan KKT formulation $(formulation) cannot construct an " *
         "SDP Workspace",
     ))
-    formulation === kkt_formulation_from_backend(plan.kkt_backend) ||
+    kkt_backend_matches_formulation(
+        plan.kkt_backend,
+        formulation_plan,
+        plan.algorithm,
+        plan.classification.equalities,
+    ) ||
         throw(ArgumentError(
             "execution plan KKT formulation $(formulation) does not match " *
             "kkt_backend $(plan.kkt_backend)",
@@ -1368,7 +1376,10 @@ function Workspace(
         :not_run, selected_threads, config, nothing, :not_executed, :none,
         la_backend, :not_executed, :not_executed, :not_executed, :none,
         plan.la_config.fallback_chain)
-    workspace.backend = _backend_from_configuration(workspace, formulation)
+    workspace.backend = _backend_from_configuration(
+        workspace,
+        formulation_plan,
+    )
     generic_mixed_mode !== :off &&
         workspace.mixed_precision === nothing &&
         error("execution plan selected mixed precision without a workspace")

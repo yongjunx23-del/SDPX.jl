@@ -652,7 +652,9 @@ Base.@kwdef struct SolverOptions{T}
     # elimination and is still validated in the original arithmetic.
     presolve_tolerance::T     = zero(T)
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
-    formulation::Symbol       = :auto                   # :auto | :primal | :dual (dual is analysis-only)
+    # :dual has an analysis estimate but no production transform; an explicit
+    # request fails before backend/provider planning.
+    formulation::Symbol       = :auto                   # :auto | :primal | :dual
     chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
@@ -1341,6 +1343,103 @@ const KKT_FORMULATION_ROUTES = (
     :block_arrow,
 )
 
+"""Typed mathematical KKT formulation, independent of its implementation."""
+abstract type AbstractKKTFormulation end
+
+struct DenseNormalEquations <: AbstractKKTFormulation end
+struct SparseNormalEquations <: AbstractKKTFormulation end
+struct BlockArrowElimination <: AbstractKKTFormulation end
+struct NoKKTFormulation <: AbstractKKTFormulation end
+
+"""Compatibility marker retained only so malformed old plans fail in setup."""
+struct UnsupportedKKTFormulation <: AbstractKKTFormulation
+    name::Symbol
+end
+
+"""
+    FormulationPlan
+
+Planner-owned mathematical formulation. `reason` explains the structural
+choice and `provenance` names the planner layer that made it. LA provider and
+factorization capabilities are deliberately absent.
+"""
+struct FormulationPlan{F<:AbstractKKTFormulation}
+    formulation::F
+    reason::Symbol
+    provenance::Symbol
+end
+
+formulation_symbol(::DenseNormalEquations) = :dense_normal_equations
+formulation_symbol(::SparseNormalEquations) = :sparse_normal_equations
+formulation_symbol(::BlockArrowElimination) = :block_arrow
+formulation_symbol(::NoKKTFormulation) = :not_applicable
+formulation_symbol(formulation::UnsupportedKKTFormulation) = formulation.name
+formulation_symbol(plan::FormulationPlan) =
+    formulation_symbol(plan.formulation)
+
+function FormulationPlan(
+    formulation::Symbol;
+    reason::Symbol=:compatibility,
+    provenance::Symbol=:compatibility,
+)
+    typed = formulation === :dense_normal_equations ?
+            DenseNormalEquations() :
+            formulation === :sparse_normal_equations ?
+            SparseNormalEquations() :
+            formulation === :block_arrow ?
+            BlockArrowElimination() :
+            formulation === :not_applicable ?
+            NoKKTFormulation() : UnsupportedKKTFormulation(formulation)
+    return FormulationPlan(typed, reason, provenance)
+end
+
+"""Map a typed formulation to its current implementation after planning."""
+function kkt_backend_from_formulation(
+    plan::FormulationPlan,
+    algorithm::Symbol,
+    equalities::Integer,
+)
+    formulation = plan.formulation
+    sdp_algorithms = (:sdp_primal_dual, :socp_psd2, :socp_psd_lift)
+    if formulation isa Union{
+        DenseNormalEquations,
+        SparseNormalEquations,
+        BlockArrowElimination,
+    }
+        algorithm in sdp_algorithms || throw(ArgumentError(
+            "SDP KKT formulation $(formulation_symbol(plan)) is incompatible " *
+            "with algorithm $(algorithm)",
+        ))
+    end
+    formulation isa DenseNormalEquations && return :dense_cholesky
+    formulation isa SparseNormalEquations && return :sparse_schur_cholesky
+    formulation isa BlockArrowElimination && return :block_arrow
+    if formulation isa NoKKTFormulation
+        algorithm === :socp_fixed_trace_q3 &&
+            return :q3_block_diagonal_equality
+        algorithm === :lp_primal_dual &&
+            return equalities == 0 ?
+                   :positive_definite_cholesky : :dense_lu
+    end
+    throw(ArgumentError(
+        "KKT formulation $(formulation_symbol(plan)) does not implement " *
+        "algorithm $(algorithm)",
+    ))
+end
+
+"""Compatibility equality for backend aliases implementing one formulation."""
+function kkt_backend_matches_formulation(
+    backend::Symbol,
+    plan::FormulationPlan,
+    algorithm::Symbol,
+    equalities::Integer,
+)
+    planned = kkt_backend_from_formulation(plan, algorithm, equalities)
+    backend === planned && return true
+    return planned === :dense_cholesky &&
+           backend === :dense_cholesky_fallback
+end
+
 """
     kkt_formulation_from_backend(kkt_backend) -> Symbol
 
@@ -1358,6 +1457,13 @@ function kkt_formulation_from_backend(kkt_backend::Symbol)
     return :not_applicable
 end
 
+"""Compatibility-only inverse mapping for historical positional plans."""
+formulation_plan_from_backend(kkt_backend::Symbol) = FormulationPlan(
+    kkt_formulation_from_backend(kkt_backend);
+    reason=:backend_compatibility,
+    provenance=:compatibility_constructor,
+)
+
 """
     ExecutionPlan
 
@@ -1365,13 +1471,13 @@ Algorithms selected before a solve. This is deliberately descriptive: it is
 returned to callers in diagnostics so automatic decisions are inspectable and
 reproducible.
 """
-struct ExecutionPlan
+struct ExecutionPlan{F<:AbstractKKTFormulation}
     classification::ProblemClassification
     algorithm::Symbol
     scaling::Symbol
     kkt_backend::Symbol
     backend_config::BackendConfiguration
-    kkt_formulation::Symbol
+    formulation_plan::FormulationPlan{F}
     la_config::LABackendConfiguration
     gram_kernel::Symbol
     schedule::Symbol
@@ -1379,6 +1485,57 @@ struct ExecutionPlan
     parameter_profile::Symbol
     memory_budget_bytes::Int
     parameters::NamedTuple
+end
+
+
+function Base.getproperty(plan::ExecutionPlan, name::Symbol)
+    name === :kkt_formulation &&
+        return formulation_symbol(getfield(plan, :formulation_plan))
+    return getfield(plan, name)
+end
+
+function Base.propertynames(plan::ExecutionPlan, private::Bool=false)
+    names = fieldnames(typeof(plan))
+    return (names..., :kkt_formulation)
+end
+
+# Source compatibility for the former 13-field constructor. Modern planner
+# code passes a typed FormulationPlan directly; historical callers may still
+# pass the formulation Symbol in the same position.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    kkt_formulation::Symbol,
+    la_config::LABackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        FormulationPlan(
+            kkt_formulation;
+            reason=:explicit_descriptor,
+            provenance=:compatibility_constructor,
+        ),
+        la_config,
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
 end
 
 # Compatibility constructor for the v0.4.1-dev 11-field plan.  New planner
@@ -1402,7 +1559,7 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         backend_config,
-        kkt_formulation_from_backend(kkt_backend),
+        formulation_plan_from_backend(kkt_backend),
         _compat_la_backend_configuration(
             classification.arithmetic,
             backend_config.equality_solver,
@@ -1439,7 +1596,7 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         backend_config,
-        kkt_formulation_from_backend(kkt_backend),
+        formulation_plan_from_backend(kkt_backend),
         la_config,
         gram_kernel,
         schedule,
@@ -1483,7 +1640,7 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         config,
-        kkt_formulation_from_backend(kkt_backend),
+        formulation_plan_from_backend(kkt_backend),
         _compat_la_backend_configuration(
             classification.arithmetic,
             equality_solver,

@@ -51,14 +51,18 @@ kernels, reduced LP systems, mixed-precision KKT logic, and structured
 refinement are solver algorithms rather than duplicate provider LA. They must
 not be removed merely because they currently select `LegacyLABackend`.
 
-## Formulation gap to close after provider modernization
+## Formulation boundary after provider modernization
 
-There is no authoritative typed `FormulationPlan` yet. Production planning
-still selects a KKT backend and derives `kkt_formulation` from it; LP defers the
-actual linear-system formulation further. `SolveOptions.formulation=:dual`
-currently changes analysis metadata only, not execution. Until a typed dual
-transform and original-coordinate reconstruction exist, an explicit dual
-request must fail closed rather than silently execute the primal route.
+`ExecutionPlan` now owns a typed `FormulationPlan`: dense normal equations,
+sparse normal equations, block-arrow elimination, or a dedicated non-SDP
+system marker for LP/Q3. The structural planner selects that formulation first
+and only then maps it to the current backend implementation. Historical
+positional plans retain a compatibility-only backend-to-formulation mapping.
+
+`SolveOptions.formulation=:dual` remains analysis-only because no typed dual
+transform and original-coordinate reconstruction exists. An explicit dual
+request therefore fails closed before backend/provider planning instead of
+silently executing the primal route.
 
 The staged target is therefore:
 

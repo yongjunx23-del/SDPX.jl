@@ -55,6 +55,103 @@ function v05_mismatched_la_config(provider::Symbol, arithmetic::Symbol)
 end
 
 @testset "v0.5 core invariants" begin
+    @testset "typed formulation precedes backend planning" begin
+        dense_problem, _ = v05_scalar_certificate_fixture()
+        dense_plan = SDPX.Experimental.build_execution_plan(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test dense_plan.formulation_plan isa
+              SDPX.Experimental.FormulationPlan{
+                  SDPX.Experimental.DenseNormalEquations,
+              }
+        @test dense_plan.formulation_plan.provenance === :structural_planner
+        @test dense_plan.kkt_formulation === :dense_normal_equations
+        @test SDPX.kkt_backend_from_formulation(
+            dense_plan.formulation_plan,
+            dense_plan.algorithm,
+            dense_plan.classification.equalities,
+        ) === dense_plan.kkt_backend
+        @test SDPX.kkt_backend_matches_formulation(
+            :dense_cholesky_fallback,
+            dense_plan.formulation_plan,
+            dense_plan.algorithm,
+            dense_plan.classification.equalities,
+        )
+        fallback_backend_config = SDPX.BackendConfiguration(
+            :dense_cholesky_fallback,
+            dense_plan.backend_config.equality_solver,
+            dense_plan.backend_config.reduced_arrow,
+            dense_plan.backend_config.mixed_reduced_arrow,
+            dense_plan.backend_config.mixed_precision_mode,
+            dense_plan.backend_config.fallback_chain,
+            dense_plan.backend_config.deferred,
+        )
+        historical_fallback_plan = SDPX.ExecutionPlan(
+            dense_plan.classification,
+            dense_plan.algorithm,
+            dense_plan.scaling,
+            :dense_cholesky_fallback,
+            fallback_backend_config,
+            :dense_normal_equations,
+            dense_plan.la_config,
+            dense_plan.gram_kernel,
+            dense_plan.schedule,
+            dense_plan.threads,
+            dense_plan.parameter_profile,
+            dense_plan.memory_budget_bytes,
+            dense_plan.parameters,
+        )
+        historical_workspace = SDPX.Workspace(
+            dense_problem;
+            execution_plan=historical_fallback_plan,
+        )
+        @test SDPX.select_backend(historical_workspace) isa
+              SDPX.DenseCholeskyBackend
+        @test_throws ArgumentError SDPX.kkt_backend_from_formulation(
+            dense_plan.formulation_plan,
+            :lp_primal_dual,
+            dense_plan.classification.equalities,
+        )
+
+        lp_plan = SDPX.Experimental.build_execution_plan(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:lp,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test lp_plan.formulation_plan.formulation isa
+              SDPX.Experimental.NoKKTFormulation
+        @test lp_plan.kkt_formulation === :not_applicable
+        @test SDPX.kkt_backend_from_formulation(
+            lp_plan.formulation_plan,
+            lp_plan.algorithm,
+            lp_plan.classification.equalities,
+        ) === lp_plan.kkt_backend
+
+        # Dualization has analysis metadata but no production transform. It
+        # must fail before backend/provider planning instead of silently
+        # executing the primal route.
+        @test_throws ArgumentError SDPX.Experimental.build_execution_plan(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                formulation=:dual,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+    end
+
     @testset "standard auto equality QR plan authorization" begin
         config = SDPX.Experimental.plan_la_backend(
             Float64;
