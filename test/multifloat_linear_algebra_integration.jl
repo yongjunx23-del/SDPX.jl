@@ -241,7 +241,7 @@ end
         reference = copy(rhs)
         LinearAlgebra.ldiv!(cholesky(Symmetric(A, :L)), reference)
         actual = copy(rhs)
-        SDPX.la_cholesky_solve!(factor, actual)
+        SDPX.la_factor_solve!(factor, actual)
         @test _max_relative_error(actual, reference) < T(1e-13)
 
         # axpby stays implemented by SDPX core and must produce the numeric

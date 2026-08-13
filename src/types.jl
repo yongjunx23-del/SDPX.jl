@@ -371,13 +371,29 @@ abstract type AbstractLACholeskyFactor{T} <: AbstractLAFactorization{T} end
 """Abstract marker for provider-neutral QR factor handles."""
 abstract type AbstractLAQRFactor{T} <: AbstractLAFactorization{T} end
 
-struct EqualityQRFactor{T} <: AbstractLAQRFactor{T}
+struct EqualityQRFactor{T,P} <: AbstractLAQRFactor{T}
+    provider::P
     factors::Matrix{T}
     coefficients::Vector{T}
     permutation::Vector{Int}
     rank::Int
     quality::T
 end
+
+EqualityQRFactor{T}(
+    factors::Matrix{T},
+    coefficients::Vector{T},
+    permutation::Vector{Int},
+    rank::Int,
+    quality::T,
+) where {T} = EqualityQRFactor{T,Symbol}(
+    :compatibility,
+    factors,
+    coefficients,
+    permutation,
+    rank,
+    quality,
+)
 
 """Standard generic factor handle wrapping Julia's Cholesky object."""
 struct StandardLACholeskyFactor{T,F<:LinearAlgebra.Cholesky{T}} <:
@@ -399,15 +415,16 @@ struct StandardLALUFactor{T,F<:LinearAlgebra.Factorization{T}} <:
 end
 
 """Standard generic QR handle; `pivoted` records rank-revealing selection."""
-struct StandardLAQRFactor{T,F<:LinearAlgebra.Factorization{T}} <:
+struct StandardLAQRFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
        AbstractLAQRFactor{T}
+    provider::P
     factor::F
     pivoted::Bool
 end
 
 la_factor_provider(::AbstractLAQRFactor) = nothing
-la_factor_provider(::EqualityQRFactor) = :equality_fallback
-la_factor_provider(::StandardLAQRFactor) = :standard
+la_factor_provider(factor::EqualityQRFactor) = factor.provider
+la_factor_provider(factor::StandardLAQRFactor) = factor.provider
 
 la_factor_rank(::AbstractLAQRFactor) = nothing
 la_factor_rank(factor::EqualityQRFactor) = factor.rank

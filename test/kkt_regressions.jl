@@ -610,7 +610,13 @@ end
                     verbosity=0,
                     equality_solver=:qr,
                 )
-                factor = SDPX._factor_equality_qr(B, options)
+                factor = SDPX._factor_equality_qr(
+                    SDPX.Experimental.StandardLABackend(
+                        SDPX._la_arithmetic_symbol(T),
+                    ),
+                    B,
+                    options,
+                )
                 rhs = T.(randn(rng, 5))
                 direction = SDPX.alloc_zeros(T, 5)
                 scratch = SDPX.alloc_zeros(T, 5)

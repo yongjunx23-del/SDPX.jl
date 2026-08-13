@@ -70,7 +70,7 @@ end
 
 const ROUTED_LEGACY_OPERATIONS = (
     "la_cholesky_factor!",
-    "la_cholesky_solve!",
+    "la_factor_solve!",
     "la_dot",
     "la_norminf",
     "la_mul!",
@@ -101,7 +101,7 @@ end
 function _is_legacy_dispatch_signature(call_expression)
     _contains_symbol(call_expression, :LegacyLABackend) && return true
     name = String(call_expression.args[1])
-    return name == "la_cholesky_solve!" &&
+    return name == "la_factor_solve!" &&
            _contains_symbol(call_expression, :LegacyLACholeskyFactor)
 end
 
@@ -283,7 +283,7 @@ function main()
     float_factor isa SDPX.Experimental.LegacyLACholeskyFactor{Float64} ||
         error("Float64 compatibility factor bypassed SDPXLegacyLAProvider")
     float_rhs = [1.0, 2.0]
-    SDPX.la_cholesky_solve!(float_factor, float_rhs)
+    SDPX.la_factor_solve!(float_factor, float_rhs)
     all(isfinite, float_rhs) || error(
         "Float64 compatibility provider solve produced non-finite values",
     )

@@ -49,7 +49,6 @@ const instantiate_la_backend = SDPX.instantiate_la_backend
 const la_provider_descriptor = SDPX.la_provider_descriptor
 const instantiate_multifloat_la_backend = SDPX.instantiate_multifloat_la_backend
 const la_cholesky_factor! = SDPX.la_cholesky_factor!
-const la_cholesky_solve! = SDPX.la_cholesky_solve!
 const la_lu_factor! = SDPX.la_lu_factor!
 const la_qr_factor! = SDPX.la_qr_factor!
 const la_factor_solve! = SDPX.la_factor_solve!
@@ -165,7 +164,7 @@ export AbstractLACholeskyFactor, StandardLACholeskyFactor
 export ProviderLACholeskyFactor, LegacyLACholeskyFactor
 export instantiate_la_backend, la_provider_descriptor
 export instantiate_multifloat_la_backend
-export la_cholesky_factor!, la_cholesky_solve!
+export la_cholesky_factor!
 export la_lu_factor!, la_qr_factor!, la_factor_solve!
 export validate_la_backend_configuration
 export la_dot, la_norminf, la_mul!, la_mul_owned!, la_syrk!, la_chol!

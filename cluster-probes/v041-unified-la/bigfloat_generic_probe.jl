@@ -495,13 +495,13 @@ function main()
         factor_standard!() = begin
             factor = LA.la_cholesky_factor!(standard_backend, Awork)
             factor === nothing && error("standard factor failed")
-            LA.la_cholesky_solve!(factor, rhs)
+            LA.la_factor_solve!(factor, rhs)
             rhs
         end
         factor_legacy!() = begin
             factor = LA.la_cholesky_factor!(legacy_backend, Awork)
             factor === nothing && error("legacy factor failed")
-            LA.la_cholesky_solve!(factor, rhs)
+            LA.la_factor_solve!(factor, rhs)
             rhs
         end
         factor_standard = _benchmark(factor_reset!, factor_standard!)

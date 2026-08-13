@@ -94,6 +94,7 @@ using Test
         qr_buffer = SDPX._owned_array_copy(T, source)
         qr_factor = LA.la_qr_factor!(backend, qr_buffer; pivoted=true)
         @test qr_factor isa SDPX.AbstractLAQRFactor
+        @test SDPX.la_factor_provider(qr_factor) === backend.provider
         @test SDPX.la_factor_rank(qr_factor) == size(source, 2)
         @test SDPX.la_factor_permutation(qr_factor) isa Vector{Int}
         LA.la_factor_solve!(qr_factor, qr_rhs)
@@ -105,5 +106,12 @@ using Test
         Float64,
     )
     @test_throws ArgumentError LA.la_lu_factor!(legacy, [1.0 0.0; 0.0 1.0])
-    @test_throws ArgumentError LA.la_qr_factor!(legacy, [1.0 0.0; 0.0 1.0])
+    legacy_qr = LA.la_qr_factor!(
+        legacy,
+        [1.0 0.0; 0.0 1.0];
+        pivoted=true,
+        relative_tolerance=eps(Float64),
+    )
+    @test legacy_qr isa SDPX.EqualityQRFactor{Float64}
+    @test SDPX.la_factor_provider(legacy_qr) === legacy.provider
 end

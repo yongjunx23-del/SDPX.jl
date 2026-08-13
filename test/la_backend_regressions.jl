@@ -160,7 +160,7 @@ using MultiFloats: Float64x4
     @test legacy_float_factor isa
           SDPX.Experimental.LegacyLACholeskyFactor{Float64}
     legacy_float_rhs = [1.0, 2.0]
-    SDPX.la_cholesky_solve!(legacy_float_factor, legacy_float_rhs)
+    SDPX.la_factor_solve!(legacy_float_factor, legacy_float_rhs)
     @test all(isfinite, legacy_float_rhs)
     @test SDPX.la_backend_provider(legacy_float) === :sdpx_legacy_la
     rank_loss_float = SDPX.Experimental.LegacyLACholeskyFactor(
@@ -172,7 +172,7 @@ using MultiFloats: Float64x4
     factored = SDPX.la_cholesky_factor!(backend, [4.0 1.0; 1.0 3.0])
     @test factored isa SDPX.Experimental.StandardLACholeskyFactor
     solved = [1.0, 2.0]
-    SDPX.la_cholesky_solve!(factored, solved)
+    SDPX.la_factor_solve!(factored, solved)
     @test all(isfinite, solved)
 
     generic = SDPX.Experimental.StandardLABackend(
@@ -255,7 +255,7 @@ using MultiFloats: Float64x4
         direct_rhs = SDPX.alloc_zeros(BigFloat, 2)
         SDPX.copy_owned!(provider_rhs, BigFloat[1, 2])
         SDPX.copy_owned!(direct_rhs, BigFloat[1, 2])
-        SDPX.la_cholesky_solve!(provider_factor, provider_rhs)
+        SDPX.la_factor_solve!(provider_factor, provider_rhs)
         SDPX.kcholsolve_owned!(direct_matrix, direct_rhs)
         @test provider_rhs == direct_rhs
         @test provider_rhs[1] !== provider_rhs[2]

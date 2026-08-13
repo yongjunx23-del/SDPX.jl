@@ -117,7 +117,7 @@ function _factor_solve(requested::Symbol, SPD0, rhs0)
     rhs = _owned_copy(rhs0)
     factor = LA.la_cholesky_factor!(backend, A)
     factor === nothing && error("$requested factor failed")
-    LA.la_cholesky_solve!(factor, rhs)
+    LA.la_factor_solve!(factor, rhs)
     return rhs
 end
 

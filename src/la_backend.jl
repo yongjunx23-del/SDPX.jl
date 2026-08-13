@@ -450,6 +450,7 @@ function la_qr_factor!(
     backend::StandardLABackend,
     A::AbstractMatrix;
     pivoted::Bool=false,
+    relative_tolerance=nothing,
 )
     capabilities = standard_la_provider_capabilities(eltype(A))
     needed = pivoted ? :rank_revealing_qr : :qr
@@ -459,45 +460,197 @@ function la_qr_factor!(
     factor = pivoted ?
         LinearAlgebra.qr!(A, LinearAlgebra.ColumnNorm()) :
         LinearAlgebra.qr!(A)
-    return StandardLAQRFactor{eltype(A),typeof(factor)}(factor, pivoted)
+    if pivoted && relative_tolerance !== nothing
+        return _equality_qr_factor_handle(
+            backend.provider,
+            factor,
+            relative_tolerance,
+        )
+    end
+    return StandardLAQRFactor{
+        eltype(A),
+        typeof(backend.provider),
+        typeof(factor),
+    }(backend.provider, factor, pivoted)
 end
-la_qr_factor!(::AbstractLABackend, ::AbstractMatrix; pivoted::Bool=false) =
+function la_qr_factor!(
+    backend::LegacyLABackend,
+    A::AbstractMatrix;
+    pivoted::Bool=false,
+    relative_tolerance=nothing,
+)
+    legacy_la_provider_supports(
+        backend.provider,
+        pivoted ? :rank_revealing_qr : :qr,
+    ) || throw(ArgumentError(
+        "bundled legacy LA provider does not support QR factorization",
+    ))
+    payload = _sdpx_legacy_la_qr!(
+        backend.provider,
+        A;
+        pivoted=pivoted,
+    )
+    if pivoted && relative_tolerance !== nothing
+        return _equality_qr_factor_handle(
+            payload.provider,
+            payload.factor,
+            relative_tolerance,
+        )
+    end
+    return StandardLAQRFactor{
+        eltype(A),
+        typeof(payload.provider),
+        typeof(payload.factor),
+    }(
+        payload.provider,
+        payload.factor,
+        pivoted,
+    )
+end
+la_qr_factor!(
+    ::AbstractLABackend,
+    ::AbstractMatrix;
+    pivoted::Bool=false,
+    relative_tolerance=nothing,
+) =
     throw(ArgumentError(
         "selected LA provider does not support QR factorization",
     ))
+
+function _equality_qr_factor_handle(
+    provider,
+    factor,
+    relative_tolerance,
+)
+    T = eltype(factor.factors)
+    diagonal_count = min(size(factor.factors)...)
+    largest = zero(T)
+    @inbounds for index in 1:diagonal_count
+        largest = max(largest, abs(factor.factors[index, index]))
+    end
+    threshold = T(relative_tolerance) * largest
+    rank = 0
+    smallest = largest
+    @inbounds for index in 1:diagonal_count
+        diagonal = abs(factor.factors[index, index])
+        diagonal > threshold || break
+        rank += 1
+        smallest = min(smallest, diagonal)
+    end
+    quality = rank > 0 && largest > zero(T) ?
+              clamp(smallest / largest, zero(T), one(T)) : zero(T)
+    return EqualityQRFactor{T,typeof(provider)}(
+        provider,
+        factor.factors,
+        factor.τ,
+        Vector{Int}(factor.jpvt),
+        rank,
+        quality,
+    )
+end
 
 la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::LegacyLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::BigFloatCholeskyFactor) = factor.L
 
-function la_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
+function _provider_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
     provider = factor.provider
     hasproperty(provider, :solve!) ||
         throw(ArgumentError("provider Cholesky handle lacks solve!"))
     getproperty(provider, :solve!)(rhs)
     return rhs
 end
-la_cholesky_solve!(factor::LinearAlgebra.Cholesky, rhs) =
-    (LinearAlgebra.ldiv!(factor, rhs); rhs)
-la_cholesky_solve!(factor::StandardLACholeskyFactor, rhs) =
+la_factor_solve!(factor::ProviderLACholeskyFactor, rhs) =
+    _provider_cholesky_solve!(factor, rhs)
+la_factor_solve!(factor::StandardLACholeskyFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
-la_cholesky_solve!(factor::LegacyLACholeskyFactor, rhs) =
+la_factor_solve!(factor::LegacyLACholeskyFactor, rhs) =
     (_sdpx_legacy_la_call(
         factor.provider,
         Val(:solve),
         factor.factors,
         rhs,
     ); rhs)
-la_cholesky_solve!(factor::BigFloatCholeskyFactor, rhs) =
+la_factor_solve!(factor::BigFloatCholeskyFactor, rhs) =
     (kcholsolve_owned!(factor.L, rhs); rhs)
-
-la_factor_solve!(factor::AbstractLACholeskyFactor, rhs) =
-    la_cholesky_solve!(factor, rhs)
 la_factor_solve!(factor::StandardLALUFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
 la_factor_solve!(factor::StandardLAQRFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
+
+function la_factor_solve!(
+    factor::EqualityQRFactor{T},
+    rhs::AbstractVector{T},
+    permuted::AbstractVector{T},
+) where {T}
+    rank = factor.rank
+    permutation = factor.permutation
+    packed = factor.factors
+    zero_owned!(permuted)
+    @inbounds for index in 1:rank
+        permuted[index] = rhs[permutation[index]]
+    end
+    @inbounds for row in 1:rank
+        value = permuted[row]
+        for column in 1:(row - 1)
+            value -= packed[column, row] * permuted[column]
+        end
+        permuted[row] = value / packed[row, row]
+    end
+    @inbounds for row in rank:-1:1
+        value = permuted[row]
+        for column in (row + 1):rank
+            value -= packed[row, column] * permuted[column]
+        end
+        permuted[row] = value / packed[row, row]
+    end
+    zero_owned!(rhs)
+    @inbounds for index in 1:rank
+        rhs[permutation[index]] = permuted[index]
+    end
+    return rhs
+end
+
+function la_factor_solve!(
+    factor::EqualityQRFactor{BigFloat},
+    rhs::AbstractVector{BigFloat},
+    permuted::AbstractVector{BigFloat},
+)
+    rank = factor.rank
+    permutation = factor.permutation
+    packed = factor.factors
+    zero_owned!(permuted)
+    accumulator = BigFloat()
+    product = BigFloat()
+    difference = BigFloat()
+    @inbounds for index in 1:rank
+        MA.operate_to!(permuted[index], copy, rhs[permutation[index]])
+    end
+    @inbounds for row in 1:rank
+        MA.operate_to!(accumulator, copy, permuted[row])
+        for column in 1:(row - 1)
+            MA.operate_to!(product, *, packed[column, row], permuted[column])
+            MA.operate_to!(difference, -, accumulator, product)
+            MA.operate_to!(accumulator, copy, difference)
+        end
+        _mpfr_divide!(permuted[row], accumulator, packed[row, row])
+    end
+    @inbounds for row in rank:-1:1
+        MA.operate_to!(accumulator, copy, permuted[row])
+        for column in (row + 1):rank
+            MA.operate_to!(product, *, packed[row, column], permuted[column])
+            MA.operate_to!(difference, -, accumulator, product)
+            MA.operate_to!(accumulator, copy, difference)
+        end
+        _mpfr_divide!(permuted[row], accumulator, packed[row, row])
+    end
+    zero_owned!(rhs)
+    @inbounds for index in 1:rank
+        MA.operate_to!(rhs[permutation[index]], copy, permuted[index])
+    end
+    return rhs
+end
 
 la_backend_name(::StandardLABackend) = :standard
 la_backend_name(::LegacyLABackend) = :legacy

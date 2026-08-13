@@ -149,6 +149,7 @@ function _la_equality_qr_fallback_allowed(
 end
 
 function _factor_equality_qr(
+    backend::AbstractLABackend,
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
 ) where {T}
@@ -158,32 +159,12 @@ function _factor_equality_qr(
             "dimension or memory crossover; use equality_solver=" *
             ":normal_equations or reduce the equality basis first",
         ))
-    factor = qr(Btil, ColumnNorm())
-    diagonal_count = min(size(Btil)...)
-    largest = zero(T)
-    @inbounds for index in 1:diagonal_count
-        largest = max(largest, abs(factor.factors[index, index]))
-    end
-    threshold =
-        _equality_qr_relative_tolerance(Btil, opts) * largest
-    rank = 0
-    smallest = largest
-    @inbounds for index in 1:diagonal_count
-        diagonal = abs(factor.factors[index, index])
-        diagonal > threshold || break
-        rank += 1
-        smallest = min(smallest, diagonal)
-    end
-    quality =
-        rank > 0 && largest > zero(T) ?
-        clamp(smallest / largest, zero(T), one(T)) :
-        zero(T)
-    return EqualityQRFactor{T}(
-        factor.factors,
-        factor.τ,
-        Vector{Int}(factor.jpvt),
-        rank,
-        quality,
+    buffer = _owned_array_copy(T, Btil)
+    return la_qr_factor!(
+        backend,
+        buffer;
+        pivoted=true,
+        relative_tolerance=_equality_qr_relative_tolerance(Btil, opts),
     )
 end
 
@@ -713,7 +694,7 @@ function _factor_arrow_equality_system!(
         )
     if direct_qr
         ws.equality_gram_kernel = :not_formed_qr
-        qr_factor = _factor_equality_qr(ws.Btil, opts)
+        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
         ws.Qchol = qr_factor
         q_pivoted = true
         q_rank_deficient = qr_factor.rank < n
@@ -744,7 +725,7 @@ function _factor_arrow_equality_system!(
             copy_owned!(ws.Qbuf, ws.Q)
             ws.la_fallback_reason = :la_equality_factor_failed
             if _la_equality_qr_fallback_allowed(ws, opts)
-                qr_factor = _factor_equality_qr(ws.Btil, opts)
+                qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                 ws.Qchol = qr_factor
                 q_pivoted = true
                 q_rank_deficient = qr_factor.rank < n
@@ -790,7 +771,7 @@ function _factor_arrow_equality_system!(
                 # normal-equation factor anyway. Go there directly: generic
                 # pivoted BigFloat Cholesky is unavailable on Julia 1.10, and
                 # its rank was used only for the diagnostic message.
-                qr_factor = _factor_equality_qr(ws.Btil, opts)
+                qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                 ws.Qchol = qr_factor
                 q_pivoted = true
                 q_rank_deficient = qr_factor.rank < n
@@ -1150,7 +1131,7 @@ function _factor_dense_kkt_native!(
         if direct_qr
             ws.equality_gram_kernel = :not_formed_qr
             started = time_ns()
-            qr_factor = _factor_equality_qr(ws.Btil, opts)
+            qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
             ws.Qchol = qr_factor
             q_pivoted = true
             q_rank_deficient = qr_factor.rank < n
@@ -1190,7 +1171,7 @@ function _factor_dense_kkt_native!(
                         throw(ArgumentError(
                             "MultiFloat equality Cholesky failed and QR fallback is not authorized",
                         ))
-                    qr_factor = _factor_equality_qr(ws.Btil, opts)
+                    qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                     ws.Qchol = qr_factor
                     q_pivoted = true
                     q_rank_deficient = qr_factor.rank < n
@@ -1212,7 +1193,7 @@ function _factor_dense_kkt_native!(
                     copy_owned!(ws.Qbuf, ws.Q)
                     ws.la_fallback_reason = :la_equality_factor_failed
                     if _la_equality_qr_fallback_allowed(ws, opts)
-                        qr_factor = _factor_equality_qr(ws.Btil, opts)
+                        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                         ws.Qchol = qr_factor
                         q_pivoted = true
                         q_rank_deficient = qr_factor.rank < n
@@ -1260,7 +1241,7 @@ function _factor_dense_kkt_native!(
                         # Julia 1.10, while QR is the selected automatic backend
                         # for this exact rank-loss condition on every version.
                         ws.la_fallback_reason = :la_equality_factor_failed
-                        qr_factor = _factor_equality_qr(ws.Btil, opts)
+                        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                         ws.Qchol = qr_factor
                         q_pivoted = true
                         q_rank_deficient = qr_factor.rank < n
@@ -2076,7 +2057,7 @@ function _solve_Q!(
     ::AbstractVector{T},
 ) where {T}
     copy_owned!(dy_out, rhs)
-    return la_cholesky_solve!(factor, dy_out)
+    return la_factor_solve!(factor, dy_out)
 end
 
 function _solve_Q!(
@@ -2143,39 +2124,8 @@ function _solve_Q!(
     rhs::AbstractVector{T},
     permuted::AbstractVector{T},
 ) where {T}
-    rank = factor.rank
-    permutation = factor.permutation
-    packed = factor.factors
-    zero_owned!(permuted)
-    @inbounds for index in 1:rank
-        permuted[index] = rhs[permutation[index]]
-    end
-
-    # If B̃[:,p] = Q*R, then
-    #     (B̃'B̃) dy = q
-    # becomes R'R*dy[p] = q[p]. Solve the leading rank-revealing block
-    # directly, leaving dependent coordinates at zero. This avoids forming
-    # the normal equations in the fallback path and therefore avoids squaring
-    # the condition number a second time during the solve.
-    @inbounds for row in 1:rank
-        value = permuted[row]
-        for column in 1:(row - 1)
-            value -= packed[column, row] * permuted[column]
-        end
-        permuted[row] = value / packed[row, row]
-    end
-    @inbounds for row in rank:-1:1
-        value = permuted[row]
-        for column in (row + 1):rank
-            value -= packed[row, column] * permuted[column]
-        end
-        permuted[row] = value / packed[row, row]
-    end
-    zero_owned!(dy_out)
-    @inbounds for index in 1:rank
-        dy_out[permutation[index]] = permuted[index]
-    end
-    return dy_out
+    copy_owned!(dy_out, rhs)
+    return la_factor_solve!(factor, dy_out, permuted)
 end
 
 function _solve_Q!(
@@ -2184,65 +2134,8 @@ function _solve_Q!(
     rhs::AbstractVector{BigFloat},
     permuted::AbstractVector{BigFloat},
 )
-    rank = factor.rank
-    permutation = factor.permutation
-    packed = factor.factors
-    zero_owned!(permuted)
-    accumulator = BigFloat()
-    product = BigFloat()
-    difference = BigFloat()
-    @inbounds for index in 1:rank
-        MA.operate_to!(
-            permuted[index],
-            copy,
-            rhs[permutation[index]],
-        )
-    end
-    @inbounds for row in 1:rank
-        MA.operate_to!(accumulator, copy, permuted[row])
-        for column in 1:(row - 1)
-            MA.operate_to!(
-                product,
-                *,
-                packed[column, row],
-                permuted[column],
-            )
-            MA.operate_to!(difference, -, accumulator, product)
-            MA.operate_to!(accumulator, copy, difference)
-        end
-        _mpfr_divide!(
-            permuted[row],
-            accumulator,
-            packed[row, row],
-        )
-    end
-    @inbounds for row in rank:-1:1
-        MA.operate_to!(accumulator, copy, permuted[row])
-        for column in (row + 1):rank
-            MA.operate_to!(
-                product,
-                *,
-                packed[row, column],
-                permuted[column],
-            )
-            MA.operate_to!(difference, -, accumulator, product)
-            MA.operate_to!(accumulator, copy, difference)
-        end
-        _mpfr_divide!(
-            permuted[row],
-            accumulator,
-            packed[row, row],
-        )
-    end
-    zero_owned!(dy_out)
-    @inbounds for index in 1:rank
-        MA.operate_to!(
-            dy_out[permutation[index]],
-            copy,
-            permuted[index],
-        )
-    end
-    return dy_out
+    copy_owned!(dy_out, rhs)
+    return la_factor_solve!(factor, dy_out, permuted)
 end
 
 """
