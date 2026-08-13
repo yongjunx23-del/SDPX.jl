@@ -74,7 +74,7 @@ function _max_relative_error_lower(A, B)
 end
 
 @testset "MultiFloatLinearAlgebra extension integration" begin
-    @testset "auto selection ignores provider presence" begin
+    @testset "auto selects the complete MFLA provider" begin
         for T in (Float64x2, Float64x3, Float64x4)
             config = LA.plan_la_backend(
                 T;
@@ -82,12 +82,12 @@ end
                 route=:dense_cholesky,
                 threads=2,
             )
-            @test config.selected === :standard
+            @test config.selected === :multifloat
             @test config.requested === :auto
-            @test config.provider === :generic_linear_algebra
-            @test config.ownership === :owned_mutable_scalars
+            @test config.provider === :multifloat_linear_algebra
+            @test config.ownership === :provider_owned
             backend = LA.instantiate_la_backend(config, T, 2)
-            @test backend isa LA.StandardLABackend
+            @test backend isa LA.MultiFloatLABackend
         end
     end
 
