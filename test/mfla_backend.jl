@@ -202,6 +202,23 @@ if _MFLA_LOADED
             @test automatic.fallback_chain == (:rank_revealing_qr,)
             @test :lu ∉ automatic.required_capabilities
             @test :pivoted_symmetric_ldlt ∉ automatic.required_capabilities
+
+            augmented = LA.plan_la_backend(
+                T;
+                requested=:multifloat,
+                route=:dense_augmented_ldlt,
+                equality_solver=:normal_equations,
+                threads=1,
+            )
+            @test augmented.selected === :multifloat
+            @test augmented.fallback_chain == ()
+            @test augmented.required_capabilities == (
+                :pivoted_symmetric_ldlt,
+                :factor_solve,
+                :multi_rhs,
+            )
+            @test :pivoted_symmetric_ldlt in augmented.capabilities
+            @test :multi_rhs in augmented.capabilities
         end
     end
 
@@ -653,6 +670,81 @@ if _MFLA_LOADED
             )
         end
 
+        @testset "explicit dense augmented SDP" begin
+            coefficients = zeros(T, 3, 3, 3)
+            @inbounds for index in 1:3
+                coefficients[index, index, index] = one(T)
+            end
+            problem = SDPX.ingest(
+                ones(T, 3),
+                [coefficients],
+                [zeros(T, 3, 3)],
+                T[1 0; 0 1; 1 -1],
+                T[1, 1];
+                sparse=false,
+                verbosity=0,
+            )
+            options = SDPX.SolverOptions{T}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                sparse=false,
+                formulation=:augmented,
+                equality_solver=:normal_equations,
+                linear_algebra_backend=:multifloat,
+                threads=1,
+                verbosity=0,
+                diagnostics=true,
+                timing=true,
+                iter_max=100,
+                ϵ_gap=T(1e-10),
+                ϵ_primal=T(1e-10),
+                ϵ_dual=T(1e-10),
+            )
+            result = SDPX.solve!(problem, options)
+            @test result.status == SDPX.Optimal
+            @test isapprox(Float64(result.pObj), 2.0; atol=1e-8)
+            selected = result.diagnostics.selected_algorithms
+            @test selected.requested_kkt_formulation === :augmented
+            @test selected.planned_kkt_formulation === :dense_augmented_kkt
+            @test selected.executed_kkt_formulation === :dense_augmented_kkt
+            @test selected.planned_factorization === :pivoted_symmetric_ldlt
+            @test selected.executed_factorization === :pivoted_symmetric_ldlt
+            @test selected.planned_regularization === :schur_diagonal_retry
+            @test selected.executed_regularization == zero(T)
+            @test selected.la_backend === :multifloat
+            @test selected.la_executed_provider ===
+                  :multifloat_linear_algebra
+            @test selected.la_fallback_reason === :none
+            @test result.termination.augmented_kkt.inertia ==
+                  (positive=3, negative=2, zero=0)
+            @test selected.certificate.valid
+
+            dependent = SDPX.ingest(
+                ones(T, 3),
+                [coefficients],
+                [zeros(T, 3, 3)],
+                T[1 2; 0 0; 1 2],
+                T[1, 2];
+                sparse=false,
+                verbosity=0,
+            )
+            rejected = SDPX.solve!(dependent, options)
+            @test rejected.status != SDPX.Optimal
+            @test rejected.diagnostics.selected_algorithms.la_fallback_reason ===
+                  :la_factor_failed
+            @test !rejected.termination.augmented_kkt.available
+            @test !rejected.termination.augmented_kkt.rank_deficient
+            @test rejected.termination.augmented_kkt.inertia === nothing
+            reduced_options = SDPX._replace_solver_options(
+                options;
+                presolve=true,
+            )
+            reduced = SDPX.solve!(dependent, reduced_options)
+            @test reduced.status == SDPX.Optimal
+            @test reduced.diagnostics.selected_algorithms.certificate.valid
+        end
+
         @testset "tiny SOCP" begin
             problem = SDPX.second_order_program(
                 T[1, 0, 0],
@@ -673,6 +765,34 @@ if _MFLA_LOADED
             _assert_multifloat_execution(
                 result.diagnostics.selected_algorithms,
             )
+
+            augmented_options = SDPX.SolveOptions(
+                verbosity=0,
+                diagnostics=true,
+                timing=false,
+                algorithm=:socp,
+                presolve=false,
+                sparse=false,
+                scaling=:none,
+                formulation=:augmented,
+                equality_solver=:normal_equations,
+                duality_gap_threshold=T(1e-10),
+                primal_error_threshold=T(1e-10),
+                dual_error_threshold=T(1e-10),
+                linear_algebra_backend=:multifloat,
+            )
+            augmented = SDPX.solve_socp(problem, augmented_options)
+            @test augmented.status == SDPX.Optimal
+            @test isapprox(Float64(augmented.pObj), 5.0; atol=1e-6)
+            augmented_selected =
+                augmented.diagnostics.selected_algorithms
+            @test augmented_selected.executed_kkt_formulation ===
+                  :dense_augmented_kkt
+            @test augmented_selected.executed_factorization ===
+                  :pivoted_symmetric_ldlt
+            @test augmented_selected.la_backend === :multifloat
+            @test augmented_selected.la_fallback_reason === :none
+            @test augmented_selected.certificate.valid
         end
 
         @testset "tiny dense LP uses MFLA" begin

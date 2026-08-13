@@ -111,7 +111,7 @@ function _legacy_la_backend_configuration(
             :rank_revealing_qr,
         ) ? (:rank_revealing_qr,) : ()
     end
-    return LABackendConfiguration(
+    config = LABackendConfiguration(
         _la_arithmetic_symbol(T),
         requested,
         :legacy,
@@ -124,6 +124,7 @@ function _legacy_la_backend_configuration(
         reason,
         _legacy_la_ownership(T),
     )
+    return validate_la_backend_configuration(config, T)
 end
 
 # The two-argument constructor is part of the Experimental compatibility API.

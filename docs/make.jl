@@ -29,6 +29,8 @@ makedocs(;
         ],
         "API reference" => "api.md",
         "Experimental internals" => "internals.md",
+        "Dense augmented KKT" => "augmented-kkt.md",
+        "Round 3 augmented A/B" => "round3-augmented-kkt-results.md",
         "Architecture v0.4.1 -> v0.5" => "architecture-v041.md",
         "Development" => "development.md",
     ],

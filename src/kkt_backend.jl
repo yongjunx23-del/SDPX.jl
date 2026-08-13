@@ -27,6 +27,9 @@ abstract type KKTBackend end
 equality block is rank deficient. The general-purpose path."""
 struct DenseCholeskyBackend <: KKTBackend end
 
+"""Explicit dense `[S -B; -B' 0]` route factored by provider pivoted LDLT."""
+struct DenseAugmentedKKTBackend <: KKTBackend end
+
 """Exact block-arrow elimination for models with shared plus per-block local
 variables. It eliminates the local blocks and solves the reduced shared
 system. Equality columns are supported for the exactly block-diagonal,
@@ -87,6 +90,7 @@ function _backend_from_configuration(
     formulation = formulation_plan.formulation
     formulation isa BlockArrowElimination && return ArrowBackend()
     formulation isa SparseNormalEquations && return SparseSchurBackend()
+    formulation isa DenseAugmentedKKT && return DenseAugmentedKKTBackend()
     formulation isa DenseNormalEquations &&
         return ws.backend_config.mixed_precision_mode !== :off ?
                MixedPrecisionBackend() : DenseCholeskyBackend()
@@ -115,6 +119,7 @@ end
 Stable identifier for diagnostics and tests.
 """
 backend_name(::DenseCholeskyBackend) = :dense_cholesky
+backend_name(::DenseAugmentedKKTBackend) = :dense_augmented_ldlt
 backend_name(::ArrowBackend) = :block_arrow
 backend_name(::MixedPrecisionBackend) = :mixed_precision
 backend_name(::SparseSchurBackend) = :sparse_schur_cholesky
@@ -216,6 +221,18 @@ function factorize!(
 end
 
 function factorize!(
+    backend::DenseAugmentedKKTBackend,
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    _assert_planned_backend!(ws, backend, opts)
+    _record_backend_execution!(ws, backend)
+    _record_la_execution!(ws)
+    return factor_dense_augmented_kkt!(ws, prob, opts)
+end
+
+function factorize!(
     backend::ArrowBackend,
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -297,6 +314,11 @@ solve!(::DenseCholeskyBackend, ws::Workspace{T}, n::Int,
     dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T} =
     _solve_dense_kkt_owned!(ws, n, r, p_rhs, dx_out, dy_out)
 
+solve!(::DenseAugmentedKKTBackend, ws::Workspace{T}, n::Int,
+    r::AbstractVector{T}, p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T} =
+    solve_dense_augmented_kkt!(ws, n, r, p_rhs, dx_out, dy_out)
+
 solve!(::ArrowBackend, ws::Workspace{T}, n::Int,
     r::AbstractVector{T}, p_rhs::AbstractVector{T},
     dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T} =
@@ -353,7 +375,7 @@ target-arithmetic guard and native fallback; the other backends reuse the
 already-selected workspace implementation without another structural choice.
 """
 function solve_direction!(
-    backend::Union{DenseCholeskyBackend,ArrowBackend,SparseSchurBackend},
+    backend::Union{DenseCholeskyBackend,DenseAugmentedKKTBackend,ArrowBackend,SparseSchurBackend},
     ws::Workspace{T},
     prob::SDPProblem{T},
     opts::SolverOptions{T},
@@ -418,7 +440,7 @@ function _solve_refinement_correction!(
 end
 
 function refine!(
-    backend::Union{DenseCholeskyBackend,SparseSchurBackend},
+    backend::Union{DenseCholeskyBackend,DenseAugmentedKKTBackend,SparseSchurBackend},
     ws::Workspace{T},
     prob::SDPProblem{T},
     opts::SolverOptions{T},

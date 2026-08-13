@@ -202,7 +202,11 @@ function resolve_solve_options(
     sparse = sparse === :on ? true : sparse === :off ? false : sparse
     scaling = _frontend_policy(options.scaling, (:auto, :none, :equilibrate), "scaling")
     algorithm = _frontend_policy(options.algorithm, (:auto, :lp, :socp, :sdp), "algorithm")
-    formulation = _frontend_policy(options.formulation, (:auto, :primal, :dual), "formulation")
+    formulation = _frontend_policy(
+        options.formulation,
+        (:auto, :primal, :dual, :augmented),
+        "formulation",
+    )
     chordal = _frontend_policy(options.chordal_decomposition, (:auto, :on, :off), "chordal_decomposition")
     equality_solver = _frontend_policy(
         options.equality_solver, (:auto, :normal_equations, :qr), "equality_solver",

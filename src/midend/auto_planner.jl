@@ -147,7 +147,11 @@ function StructuralPlanningIntent(
             "sparse";
             boolean_result=true,
         ),
-        _planning_policy(formulation, (:primal, :dual), "formulation"),
+        _planning_policy(
+            formulation,
+            (:primal, :dual, :augmented),
+            "formulation",
+        ),
         _planning_policy(
             chordal_decomposition,
             (:on, :off),

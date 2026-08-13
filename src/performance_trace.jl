@@ -107,6 +107,20 @@ function _setup_facts(result::SDPResult)
         solver=_project_field(selected, :solver),
         scaling=_project_field(selected, :scaling),
         kkt=_project_field(selected, :kkt),
+        requested_kkt_formulation=
+            _project_field(selected, :requested_kkt_formulation),
+        planned_kkt_formulation=
+            _project_field(selected, :planned_kkt_formulation),
+        executed_kkt_formulation=
+            _project_field(selected, :executed_kkt_formulation),
+        planned_factorization=
+            _project_field(selected, :planned_factorization),
+        executed_factorization=
+            _project_field(selected, :executed_factorization),
+        planned_regularization=
+            _project_field(selected, :planned_regularization),
+        executed_regularization=
+            _project_field(selected, :executed_regularization),
         gram=_project_field(selected, :gram),
         equality=_project_field(selected, :equality),
         planned_backend=_project_field(selected, :planned_backend),

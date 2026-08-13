@@ -30,6 +30,7 @@ const PresolveReport = SDPX.PresolveReport
 const ExecutionPlan = SDPX.ExecutionPlan
 const AbstractKKTFormulation = SDPX.AbstractKKTFormulation
 const DenseNormalEquations = SDPX.DenseNormalEquations
+const DenseAugmentedKKT = SDPX.DenseAugmentedKKT
 const SparseNormalEquations = SDPX.SparseNormalEquations
 const BlockArrowElimination = SDPX.BlockArrowElimination
 const NoKKTFormulation = SDPX.NoKKTFormulation
@@ -57,6 +58,7 @@ const LegacyLACholeskyFactor = SDPX.LegacyLACholeskyFactor
 const StandardLALUFactor = SDPX.StandardLALUFactor
 const ProviderLALUFactor = SDPX.ProviderLALUFactor
 const LegacyLALUFactor = SDPX.LegacyLALUFactor
+const ProviderLALDLTFactor = SDPX.ProviderLALDLTFactor
 const plan_la_backend = SDPX.plan_la_backend
 const instantiate_la_backend = SDPX.instantiate_la_backend
 const la_provider_descriptor = SDPX.la_provider_descriptor
@@ -66,6 +68,13 @@ const la_cholesky_factor! = SDPX.la_cholesky_factor!
 const la_lu_factor! = SDPX.la_lu_factor!
 const la_qr_factor! = SDPX.la_qr_factor!
 const la_factor_solve! = SDPX.la_factor_solve!
+const la_ldlt_factor! = SDPX.la_ldlt_factor!
+const la_ldlt_factor_solve! = SDPX.la_ldlt_factor_solve!
+const la_ldlt_inertia = SDPX.la_ldlt_inertia
+const la_ldlt_permutation = SDPX.la_ldlt_permutation
+const la_ldlt_blocks = SDPX.la_ldlt_blocks
+const la_factor_diagnostics = SDPX.la_factor_diagnostics
+const la_factor_precision = SDPX.la_factor_precision
 const la_provider_supports = SDPX.la_provider_supports
 const validate_la_backend_configuration =
     SDPX.validate_la_backend_configuration
@@ -165,7 +174,8 @@ export AdaptiveParameterPolicy, IterationDiagnostics, IterationParameters
 export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
 export AbstractKKTFormulation, DenseNormalEquations
-export SparseNormalEquations, BlockArrowElimination, NoKKTFormulation
+export DenseAugmentedKKT, SparseNormalEquations
+export BlockArrowElimination, NoKKTFormulation
 export FormulationPlan, formulation_symbol
 export kkt_backend_from_formulation
 export PreparedStructure, SolveState, PreprocessTransform
@@ -183,11 +193,15 @@ export AbstractLAFactorization
 export AbstractLACholeskyFactor, StandardLACholeskyFactor
 export ProviderLACholeskyFactor, LegacyLACholeskyFactor
 export StandardLALUFactor, ProviderLALUFactor, LegacyLALUFactor
+export ProviderLALDLTFactor
 export instantiate_la_backend, la_provider_descriptor
 export instantiate_multifloat_la_backend
 export instantiate_bfla_la_backend
 export la_cholesky_factor!
 export la_lu_factor!, la_qr_factor!, la_factor_solve!
+export la_ldlt_factor!, la_ldlt_factor_solve!
+export la_ldlt_inertia, la_ldlt_permutation, la_ldlt_blocks
+export la_factor_diagnostics, la_factor_precision
 export validate_la_backend_configuration
 export la_dot, la_norminf, la_mul!, la_mul_owned!, la_syrk!, la_chol!
 export la_trsm!, la_trsv_lower!, la_trsv_transpose!

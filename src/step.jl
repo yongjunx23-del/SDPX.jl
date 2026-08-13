@@ -248,6 +248,13 @@ function _block_factorization_margins(ws::Workspace{T}) where {T}
 end
 
 function _kkt_factorization_quality(ws::Workspace{T}) where {T}
+    if ws.augmented !== nothing
+        factor = (ws.augmented::DenseAugmentedKKTWorkspace{T}).factor
+        factor === nothing && return zero(T)
+        # Pivot diagnostics are recorded as facts.  No unproven scalar quality
+        # proxy is allowed to alter the adaptive policy in Round 3.
+        return one(T)
+    end
     if ws.arrow !== nothing
         arrow = ws.arrow::ArrowWorkspace{T}
         if size(ws.Btil, 2) > 0 &&
@@ -669,7 +676,9 @@ function newton_step!(
         factorize!(backend, ws, prob, opts)
     end
     kkt.ok || return (status=:breakdown,
-        reason="Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
+        reason=backend isa DenseAugmentedKKTBackend ?
+            "pivoted LDLT factorization of the dense augmented KKT system failed after $(kkt.reg_attempts) SDPX regularization attempt(s)" :
+            "Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
         p_res=p_res, d_res=d_res, reg_attempts=kkt.reg_attempts, q_pivoted=false)
     factor_finished = time_ns()
     kkt_phases = hasproperty(kkt, :phase_times) ?

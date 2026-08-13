@@ -475,6 +475,45 @@ struct ProviderLALDLTFactor{T,P,M<:AbstractMatrix{T}} <:
     factors::M
 end
 
+LinearAlgebra.issuccess(::ProviderLALDLTFactor) = true
+
+"""
+    DenseAugmentedKKTWorkspace{T}
+
+Owned storage for the explicit symmetric-indefinite Newton system.  The
+unknown ordering is `[dx; dy]`; only the lower triangle of `matrix` is
+authoritative.  The provider may borrow `factor_buffer` for the lifetime of
+`factor`, while SDPX retains the unfactored matrix for residual evaluation.
+"""
+mutable struct DenseAugmentedKKTWorkspace{T}
+    matrix::Matrix{T}
+    factor_buffer::Matrix{T}
+    rhs::Vector{T}
+    solution::Vector{T}
+    residual::Vector{T}
+    factor::Union{Nothing,ProviderLALDLTFactor{T}}
+    regularization::T
+    factor_diagnostics::Any
+    inertia::Any
+    rank_deficient::Bool
+end
+
+function DenseAugmentedKKTWorkspace(::Type{T}, m::Int, n::Int) where {T}
+    dimension = m + n
+    return DenseAugmentedKKTWorkspace{T}(
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        nothing,
+        zero(T),
+        nothing,
+        nothing,
+        false,
+    )
+end
+
 la_factor_provider(::AbstractLAQRFactor) = nothing
 la_factor_provider(factor::EqualityQRFactor) = factor.provider
 la_factor_provider(factor::StandardLAQRFactor) = factor.provider
@@ -654,7 +693,7 @@ Base.@kwdef struct SolverOptions{T}
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
     # :dual has an analysis estimate but no production transform; an explicit
     # request fails before backend/provider planning.
-    formulation::Symbol       = :auto                   # :auto | :primal | :dual
+    formulation::Symbol       = :auto                   # :auto | :primal | :dual | :augmented
     chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
@@ -1339,6 +1378,7 @@ active.
 """
 const KKT_FORMULATION_ROUTES = (
     :dense_normal_equations,
+    :dense_augmented_kkt,
     :sparse_normal_equations,
     :block_arrow,
 )
@@ -1347,6 +1387,8 @@ const KKT_FORMULATION_ROUTES = (
 abstract type AbstractKKTFormulation end
 
 struct DenseNormalEquations <: AbstractKKTFormulation end
+"""Explicit dense symmetric-indefinite Newton system, factored by pivoted LDLT."""
+struct DenseAugmentedKKT <: AbstractKKTFormulation end
 struct SparseNormalEquations <: AbstractKKTFormulation end
 struct BlockArrowElimination <: AbstractKKTFormulation end
 struct NoKKTFormulation <: AbstractKKTFormulation end
@@ -1370,6 +1412,7 @@ struct FormulationPlan{F<:AbstractKKTFormulation}
 end
 
 formulation_symbol(::DenseNormalEquations) = :dense_normal_equations
+formulation_symbol(::DenseAugmentedKKT) = :dense_augmented_kkt
 formulation_symbol(::SparseNormalEquations) = :sparse_normal_equations
 formulation_symbol(::BlockArrowElimination) = :block_arrow
 formulation_symbol(::NoKKTFormulation) = :not_applicable
@@ -1384,6 +1427,8 @@ function FormulationPlan(
 )
     typed = formulation === :dense_normal_equations ?
             DenseNormalEquations() :
+            formulation === :dense_augmented_kkt ?
+            DenseAugmentedKKT() :
             formulation === :sparse_normal_equations ?
             SparseNormalEquations() :
             formulation === :block_arrow ?
@@ -1403,6 +1448,7 @@ function kkt_backend_from_formulation(
     sdp_algorithms = (:sdp_primal_dual, :socp_psd2, :socp_psd_lift)
     if formulation isa Union{
         DenseNormalEquations,
+        DenseAugmentedKKT,
         SparseNormalEquations,
         BlockArrowElimination,
     }
@@ -1412,6 +1458,7 @@ function kkt_backend_from_formulation(
         ))
     end
     formulation isa DenseNormalEquations && return :dense_cholesky
+    formulation isa DenseAugmentedKKT && return :dense_augmented_ldlt
     formulation isa SparseNormalEquations && return :sparse_schur_cholesky
     formulation isa BlockArrowElimination && return :block_arrow
     if formulation isa NoKKTFormulation
@@ -1454,6 +1501,7 @@ function kkt_formulation_from_backend(kkt_backend::Symbol)
     kkt_backend === :sparse_schur_cholesky && return :sparse_normal_equations
     kkt_backend in (:dense_cholesky, :dense_cholesky_fallback) &&
         return :dense_normal_equations
+    kkt_backend === :dense_augmented_ldlt && return :dense_augmented_kkt
     return :not_applicable
 end
 

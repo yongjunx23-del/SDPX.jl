@@ -81,8 +81,8 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         @test !plan.capability_model.qr
         @test plan.capability_model.rank_revealing_qr
 
-        # LDLT is advertised as a provider fact, but no production
-        # ExecutionPlan route requires it today.
+        # LDLT is a provider fact used only by the explicit dense augmented
+        # formulation; automatic normal equations remain unchanged.
         @test plan.capability_model.pivoted_symmetric_ldlt
         @test !plan.capability_model.iterative_refinement
         @test plan.capability_model.higher_precision_residual
@@ -95,6 +95,19 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
               upstream.rank_revealing_qr
         @test plan.capability_model.pivoted_symmetric_ldlt == upstream.ldlt
         @test :pivoted_symmetric_ldlt ∉ plan.required_capabilities
+        augmented_plan = LA.plan_la_backend(
+            BigFloat;
+            requested=:bfla,
+            route=:dense_augmented_ldlt,
+            equality_solver=:normal_equations,
+            threads=1,
+        )
+        @test augmented_plan.fallback_chain == ()
+        @test augmented_plan.required_capabilities == (
+            :pivoted_symmetric_ldlt,
+            :factor_solve,
+            :multi_rhs,
+        )
         backend = LA.instantiate_la_backend(plan, BigFloat)
         @test SDPX.la_backend_owns_equality_gram(backend)
         @test SDPX.la_equality_gram_kernel(backend, BigFloat) ===
@@ -597,6 +610,67 @@ if _BFLA_LOADED
                 )
                 _assert_bfla_execution(plan, bfla)
                 _compare_trusted_reference(bfla, reference)
+            end
+
+
+            @testset "explicit dense augmented SDP" begin
+                coefficients = SDPX.alloc_zeros(BigFloat, 3, 3, 3)
+                @inbounds for index in 1:3
+                    coefficients[index, index, index] = one(BigFloat)
+                end
+                B = SDPX.alloc_zeros(BigFloat, 3, 2)
+                B[1, 1] = one(BigFloat)
+                B[3, 1] = one(BigFloat)
+                B[2, 2] = one(BigFloat)
+                B[3, 2] = -one(BigFloat)
+                problem = SDPX.ingest(
+                    SDPX._owned_array_copy(BigFloat, BigFloat[1, 1, 1]),
+                    [coefficients],
+                    [SDPX.alloc_zeros(BigFloat, 3, 3)],
+                    B,
+                    SDPX._owned_array_copy(BigFloat, BigFloat[1, 1]);
+                    sparse=false,
+                    verbosity=0,
+                )
+                options = SDPX.SolverOptions{BigFloat}(
+                    algorithm=:sdp,
+                    presolve=false,
+                    scaling=:none,
+                    sparse=false,
+                    formulation=:augmented,
+                    equality_solver=:normal_equations,
+                    linear_algebra_backend=:bfla,
+                    threads=1,
+                    verbosity=0,
+                    diagnostics=true,
+                    timing=true,
+                    iter_max=100,
+                    precision_bits=256,
+                    working_precision_policy=:fixed,
+                    ϵ_gap=big"1e-30",
+                    ϵ_primal=big"1e-30",
+                    ϵ_dual=big"1e-30",
+                )
+                result = SDPX.solve!(problem, options)
+                @test result.status == SDPX.Optimal
+                @test isapprox(result.pObj, BigFloat(2); atol=big"1e-25")
+                selected = result.diagnostics.selected_algorithms
+                @test selected.requested_kkt_formulation === :augmented
+                @test selected.planned_kkt_formulation === :dense_augmented_kkt
+                @test selected.executed_kkt_formulation === :dense_augmented_kkt
+                @test selected.planned_factorization ===
+                      :pivoted_symmetric_ldlt
+                @test selected.executed_factorization ===
+                      :pivoted_symmetric_ldlt
+                @test selected.planned_regularization ===
+                      :schur_diagonal_retry
+                @test selected.executed_regularization == zero(BigFloat)
+                @test selected.la_backend === :bfla
+                @test selected.la_executed_provider ===
+                      :bigfloat_linear_algebra
+                @test selected.la_fallback_reason === :none
+                @test result.termination.augmented_kkt.inertia == (3, 2, 0)
+                @test selected.certificate.valid
             end
 
             @testset "BFLA LU internal seam" begin

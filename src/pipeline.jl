@@ -158,9 +158,9 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "scaling must be :auto, :none, or :equilibrate",
         ))
-    opts.formulation in (:auto, :primal, :dual) ||
+    opts.formulation in (:auto, :primal, :dual, :augmented) ||
         throw(ArgumentError(
-            "formulation must be :auto, :primal, or :dual",
+            "formulation must be :auto, :primal, :dual, or :augmented",
         ))
     opts.chordal_decomposition in (:auto, :off, :on) ||
         throw(ArgumentError(
@@ -967,9 +967,15 @@ function resolve_execution_route(
         "formulation=:dual is analysis-only in SDPX v0.5; no typed " *
         "dual transform or reconstruction path is implemented",
     ))
+    opts.formulation === :augmented &&
+        !(classification.cone in (:sdp, :socp)) &&
+        throw(ArgumentError(
+            "formulation=:augmented is supported only by the dense SDP/PSD-lift route",
+        ))
     soc_algorithm = classification.maximum_block_size <= 2 ?
                     :socp_psd2 : :socp_psd_lift
     native_fixed_trace_q3 =
+        opts.formulation !== :augmented &&
         opts.mode === OPTIMIZE &&
         opts.scaling !== :equilibrate &&
         _fixed_trace_q3_eligible(prob)
@@ -997,6 +1003,13 @@ function resolve_execution_route(
         # `algorithm=:sdp` is the stable reference/rollback path even when
         # the model is exactly SOC-representable.
         :sdp_primal_dual
+    end
+    if opts.formulation === :augmented &&
+       !(algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift))
+        throw(ArgumentError(
+            "formulation=:augmented requires the dense SDP/PSD-lift solver; " *
+            "dedicated LP and native Q3 routes are unsupported",
+        ))
     end
     return ResolvedExecutionRoute(
         prob,
@@ -1097,7 +1110,29 @@ function build_execution_plan(
         :socp_psd2,
         :socp_psd_lift,
     )
-        _runtime_schur_formulation(prob, opts.equality_solver)
+        structural_formulation =
+            _runtime_schur_formulation(prob, opts.equality_solver)
+        if opts.formulation === :augmented
+            prob.dims.m > 0 || throw(ArgumentError(
+                "formulation=:augmented requires at least one primal Newton variable",
+            ))
+            structural_formulation.formulation isa DenseNormalEquations ||
+                throw(ArgumentError(
+                    "formulation=:augmented requires the general dense KKT route; " *
+                    "sparse and block-arrow routes are not implemented",
+                ))
+            opts.equality_solver === :qr && throw(ArgumentError(
+                "formulation=:augmented does not use equality_solver=:qr; " *
+                "dependent equalities must be removed by presolve",
+            ))
+            FormulationPlan(
+                DenseAugmentedKKT(),
+                :explicit_dense_augmented_request,
+                :user_option,
+            )
+        else
+            structural_formulation
+        end
     else
         FormulationPlan(
             NoKKTFormulation(),
@@ -1312,6 +1347,14 @@ function build_execution_plan(
             adaptive_sigma_max,
             equality_solver=opts.equality_solver,
             formulation=opts.formulation,
+            planned_factorization=
+                formulation_plan.formulation isa DenseAugmentedKKT ?
+                :pivoted_symmetric_ldlt :
+                formulation_plan.formulation isa DenseNormalEquations ?
+                :cholesky : :specialized,
+            planned_regularization=
+                formulation_plan.formulation isa DenseAugmentedKKT ?
+                :schur_diagonal_retry : :existing_route_policy,
             linear_algebra_backend=opts.linear_algebra_backend,
             extended_precision_blas=opts.extended_precision_blas,
             extended_precision_memory_fraction=
@@ -2197,6 +2240,36 @@ function _attach_diagnostics(
             planned_backend_name(plan),
         ),
         planned_kkt_formulation=plan.kkt_formulation,
+        requested_kkt_formulation=get(
+            plan.parameters,
+            :formulation,
+            :auto,
+        ),
+        executed_kkt_formulation=get(
+            executed,
+            :kkt_formulation,
+            :not_executed,
+        ),
+        planned_factorization=get(
+            plan.parameters,
+            :planned_factorization,
+            :not_applicable,
+        ),
+        executed_factorization=get(
+            executed,
+            :la_factorization,
+            :not_executed,
+        ),
+        planned_regularization=get(
+            plan.parameters,
+            :planned_regularization,
+            :not_recorded,
+        ),
+        executed_regularization=get(
+            executed,
+            :la_regularization,
+            nothing,
+        ),
         executed_backend=get(
             executed,
             :executed_backend,
@@ -2212,6 +2285,7 @@ function _attach_diagnostics(
         la_executed_ownership=get(executed, :la_ownership, :not_executed),
         la_fallback_reason=get(executed, :la_fallback_reason, :none),
         la_factorization=get(executed, :la_factorization, :not_executed),
+        factor_diagnostics=get(executed, :factor_diagnostics, nothing),
         planned_la_backend=plan.la_config.selected,
         planned_la_fallback_reason=plan.la_config.fallback_reason,
         la_provider=plan.la_config.provider,

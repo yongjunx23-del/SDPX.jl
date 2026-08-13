@@ -427,6 +427,43 @@ function _equality_factor_diagnostics(
             quality=one(T),
             gram_kernel=:none,
         )
+    if workspace.augmented !== nothing
+        augmented = workspace.augmented::DenseAugmentedKKTWorkspace{T}
+        factor = augmented.factor
+        factor === nothing && return let inertia = augmented.inertia,
+            zero_count = inertia === nothing ? equality_count : Int(inertia[3]),
+            numerical_rank = max(equality_count - zero_count, 0)
+            (
+                available=inertia !== nothing,
+                factor_available=false,
+                method=:augmented_ldlt,
+                rank=numerical_rank,
+                dimension=equality_count,
+                rank_deficient=augmented.rank_deficient,
+                quality=zero(T),
+                gram_kernel=:not_formed_augmented,
+                inertia,
+                factor_diagnostics=augmented.factor_diagnostics,
+                regularization=augmented.regularization,
+            )
+        end
+        inertia = la_ldlt_inertia(factor)
+        numerical_rank = max(equality_count - Int(inertia[3]), 0)
+        return (
+            available=true,
+            method=:augmented_ldlt,
+            rank=numerical_rank,
+            dimension=equality_count,
+            rank_deficient=numerical_rank < equality_count,
+            quality=one(T),
+            gram_kernel=:not_formed_augmented,
+            inertia,
+            pivot_blocks=la_ldlt_blocks(factor),
+            permutation=la_ldlt_permutation(factor),
+            factor_diagnostics=augmented.factor_diagnostics,
+            regularization=augmented.regularization,
+        )
+    end
     mixed = workspace.mixed_precision
     if mixed !== nothing && mixed.active
         factor = mixed.intermediate_active ?
@@ -1853,6 +1890,37 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                         )
                 end,
             equality_system=equality_diagnostics,
+            augmented_kkt=
+                ws.augmented === nothing ?
+                (available=false,) :
+                let augmented =
+                        ws.augmented::DenseAugmentedKKTWorkspace{T},
+                    factor = augmented.factor
+                    factor === nothing ?
+                    (
+                        available=false,
+                        factorization=:pivoted_symmetric_ldlt,
+                        regularization=augmented.regularization,
+                        rank_deficient=augmented.rank_deficient,
+                        inertia=augmented.inertia,
+                        factor_diagnostics=augmented.factor_diagnostics,
+                    ) :
+                    (
+                        available=true,
+                        dimension=size(augmented.matrix, 1),
+                        factorization=:pivoted_symmetric_ldlt,
+                        factor_kind=la_factor_kind(factor),
+                        factor_provider=la_factor_provider_identity(
+                            la_factor_provider(factor),
+                        ),
+                        factor_precision=la_factor_precision(factor),
+                        inertia=la_ldlt_inertia(factor),
+                        pivot_blocks=la_ldlt_blocks(factor),
+                        permutation=la_ldlt_permutation(factor),
+                        factor_diagnostics=augmented.factor_diagnostics,
+                        regularization=augmented.regularization,
+                    )
+                end,
             executed=(
                 solver=:sdp,
                 parameter_profile=executed_parameters.profile,
@@ -1870,11 +1938,35 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 kkt=ws.executed_backend,
                 planned_backend=planned_backend_name(ws),
                 executed_backend=ws.executed_backend,
+                kkt_formulation=kkt_formulation_from_backend(
+                    ws.executed_backend,
+                ),
                 fallback_reason=ws.backend_fallback_reason,
                 la_backend=ws.executed_la_backend,
                 la_provider=ws.executed_la_provider,
                 la_ownership=ws.executed_la_ownership,
                 la_fallback_reason=ws.la_fallback_reason,
+                la_factorization=if ws.augmented !== nothing
+                    :pivoted_symmetric_ldlt
+                elseif ws.executed_backend === :dense_cholesky
+                    :cholesky
+                elseif ws.executed_backend === :mixed_precision
+                    :mixed_precision_cholesky
+                elseif ws.executed_backend === :sparse_schur_cholesky
+                    :sparse_cholesky
+                elseif ws.executed_backend === :block_arrow
+                    :block_cholesky
+                else
+                    :not_executed
+                end,
+                la_regularization=
+                    ws.augmented === nothing ?
+                    nothing :
+                    (ws.augmented::DenseAugmentedKKTWorkspace{T}).regularization,
+                factor_diagnostics=
+                    ws.augmented === nothing ?
+                    nothing :
+                    (ws.augmented::DenseAugmentedKKTWorkspace{T}).factor_diagnostics,
                 equality=equality_diagnostics.method,
                 effective_threads=ws.thread_count,
                 fine_grained_block_tasks=length(ws.block_bins),

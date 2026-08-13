@@ -184,6 +184,8 @@ SDPX.la_provider_factor_matrix(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_matrix(factor)
 SDPX.la_provider_factor_precision(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_precision(factor)
+SDPX.la_provider_factor_diagnostics(factor::BFLA.BFLALDLTFactor) =
+    BFLA.factor_diagnostics(factor)
 
 function SDPX.la_provider_factor_solve!(
     factor::BFLA.BFLALDLTFactor,

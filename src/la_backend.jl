@@ -39,6 +39,12 @@ const _LP_DENSE_EQUALITY_REQUIRED = (
     :factor_solve,
 )
 
+const _DENSE_AUGMENTED_REQUIRED = (
+    :pivoted_symmetric_ldlt,
+    :factor_solve,
+    :multi_rhs,
+)
+
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
     # SDPX's explicit equality QR route is column-pivoted and rank revealing;
     # it is not a request for a general unpivoted QR implementation.
@@ -73,6 +79,11 @@ function _la_route_requirements(
     route === :dense_lu && return (
         operations=(:lu, :solve),
         capabilities=_LP_DENSE_EQUALITY_REQUIRED,
+        fallback=nothing,
+    )
+    route === :dense_augmented_ldlt && return (
+        operations=(:pivoted_symmetric_ldlt, :solve),
+        capabilities=_DENSE_AUGMENTED_REQUIRED,
         fallback=nothing,
     )
     return nothing
@@ -1047,10 +1058,9 @@ end
     la_ldlt_factor!(backend, A) -> Union{Nothing,ProviderLALDLTFactor}
 
 Factor a symmetric (possibly indefinite) matrix through the selected provider.
-This is an internal provider seam: no production ExecutionPlan currently
-routes dense KKT factorization through LDLT, so `:pivoted_symmetric_ldlt` is
-advertised only as a capability and is never added to a required operation
-set by the planner.
+This is the provider-neutral factor seam used by the explicit dense augmented
+KKT route.  The planner requires `:pivoted_symmetric_ldlt`, `:factor_solve`,
+and `:multi_rhs` before a backend may be instantiated for that formulation.
 """
 function la_ldlt_factor!(
     backend::BFLALABackend,
@@ -1168,6 +1178,12 @@ la_ldlt_permutation(factor::ProviderLALDLTFactor) =
 
 la_ldlt_blocks(factor::ProviderLALDLTFactor) =
     la_provider_ldlt_blocks(factor.provider)
+
+la_factor_diagnostics(factor::ProviderLALDLTFactor) =
+    la_provider_factor_diagnostics(factor.provider)
+
+la_factor_precision(factor::ProviderLALDLTFactor) =
+    la_provider_factor_precision(factor.provider)
 
 la_factor_kind(::ProviderLALDLTFactor) = :ldlt
 la_factor_handle_matrix(factor::ProviderLALDLTFactor) = factor.factors

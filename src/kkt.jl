@@ -4,6 +4,12 @@
         [ S  −B ] [dx]   [ r ]        S := Σ_l S[l]  (m×m, SPD)
         [ Bᵀ  0 ] [dy] = [ p ]        B ∈ ℝ^{m×n},  n ≪ m
 
+    The explicit dense augmented formulation negates only the equality row
+    and factors the mathematically equivalent symmetric system
+
+        [ S   −B ] [dx]   [ r ]
+        [−Bᵀ   0 ] [dy] = [−p ].
+
     L_S = chol(S).L ; B̃ = L_S⁻¹B ; Q = B̃ᵀB̃ = BᵀS⁻¹B ; r̃ = L_S⁻¹r
     Q·dy = p − B̃ᵀr̃   (Cholesky of Q) ; dx = L_S⁻ᵀ(r̃ + B̃·dy)
 
@@ -3325,6 +3331,9 @@ function _kkt_direction_residual!(
     prob::SDPProblem{T},
     r::AbstractVector{T},
 ) where {T}
+    if ws.augmented !== nothing
+        return _augmented_kkt_direction_residual!(ws, r)
+    end
     n = prob.dims.n
     copy_owned!(ws.ρr, r)
     schur_mul!(ws.ρr, ws, ws.dx, -one(T), one(T))        # ρr = r − S·dx
@@ -3335,6 +3344,32 @@ function _kkt_direction_residual!(
     end
     residual = knrmInf(ws.ρr)
     n > 0 && (residual = max(residual, knrmInf(ws.ρp)))
+    return residual
+end
+
+function _augmented_kkt_direction_residual!(
+    ws::Workspace{T},
+    r::AbstractVector{T},
+) where {T}
+    workspace = _augmented_workspace(ws)
+    residual = reduced_augmented_kkt_residual!(
+        workspace,
+        r,
+        ws.p,
+        ws.dx,
+        ws.dy,
+    )
+    m = length(ws.dx)
+    copy_owned!(ws.ρr, view(workspace.residual, 1:m))
+    @inbounds for equality in eachindex(ws.dy)
+        _augmented_store_negative!(
+            ws.ρp,
+            equality,
+            workspace.residual[m + equality],
+        )
+    end
+    # Correction solves use the original nonsymmetric convention
+    # [ρr; ρp]. The augmented RHS builder applies the equality-row minus.
     return residual
 end
 

@@ -4,6 +4,7 @@ using Test
 const QUICK_TESTS = (
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
+    "dense_augmented_kkt.jl",
     "bfla_backend.jl",
     "mfla_backend.jl",
     "canonical_conic_problem.jl",
@@ -23,6 +24,7 @@ const QUICK_TESTS = (
 const FULL_TESTS = (
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
+    "dense_augmented_kkt.jl",
     "bfla_backend.jl",
     "mfla_backend.jl",
     "correctness.jl",

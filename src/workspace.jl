@@ -469,6 +469,7 @@ mutable struct Workspace{T}
                  LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
                  EqualityQRFactor{T},
                  AbstractLACholeskyFactor{T}}
+    augmented::Union{Nothing,DenseAugmentedKKTWorkspace{T}}
     arrow::Union{Nothing,ArrowWorkspace{T}}
     sparse_kkt::Any
     v::Vector{T}
@@ -1102,6 +1103,7 @@ function Workspace(
         :sparse_schur_cholesky,
         :dense_cholesky,
         :dense_cholesky_fallback,
+        :dense_augmented_ldlt,
     ) || throw(ArgumentError(
         "unsupported SDP workspace backend route $(config.route)",
     ))
@@ -1363,6 +1365,8 @@ function Workspace(
         alloc_zeros(T, n, n),
         alloc_zeros(T, n, n),
         nothing,
+        formulation_plan.formulation isa DenseAugmentedKKT ?
+        DenseAugmentedKKTWorkspace(T, m, n) : nothing,
         arrow,
         sparse_kkt_workspace,
         alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m),

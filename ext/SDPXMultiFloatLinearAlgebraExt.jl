@@ -60,6 +60,7 @@ import MultiFloatLinearAlgebra:
     issuccess as mfla_issuccess,
     factor_kind,
     factor_matrix,
+    factor_precision,
     factor_diagnostics,
     factor_permutation
 
@@ -139,6 +140,7 @@ const _DESCRIPTOR_CAPABILITIES = (
     :rank_revealing_qr,
     :lu,
     :pivoted_symmetric_ldlt,
+    :multi_rhs,
     :refinement_correction,
     :mixed_precision_residual,
 )
@@ -616,6 +618,10 @@ end
 
 function SDPX.la_provider_factor_diagnostics(payload::_LDLTPayload)
     return factor_diagnostics(payload.factor)
+end
+
+function SDPX.la_provider_factor_precision(payload::_LDLTPayload)
+    return factor_precision(payload.factor)
 end
 
 function SDPX.la_provider_factor_solve!(payload::_LDLTPayload, rhs)
