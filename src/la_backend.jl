@@ -110,15 +110,22 @@ function plan_la_backend(
                    :generic_linear_algebra
         ownership = arithmetic in (:float32, :float64) ? :immutable_scalars :
                     :owned_mutable_scalars
+        # Provider selection is final at planning time.  Runtime has no
+        # Standard-to-Legacy provider switch; only the equality algorithm may
+        # use the explicitly authorized rank-revealing QR fallback.
+        fallback_chain = equality_solver === :auto ?
+            (:rank_revealing_qr,) : ()
         return LABackendConfiguration(
             arithmetic, requested, :standard, provider,
-            required, (:legacy,), :none, ownership,
+            required, fallback_chain, :none, ownership,
         )
     elseif requested === :multifloat
         if descriptor.available && all(cap -> cap in descriptor.capabilities, required)
+            fallback_chain = equality_solver === :auto ?
+                (:rank_revealing_qr,) : ()
             return LABackendConfiguration(
                 arithmetic, requested, :multifloat, descriptor.provider,
-                descriptor.capabilities, (:legacy,), :none,
+                descriptor.capabilities, fallback_chain, :none,
                 :provider_owned,
             )
         end

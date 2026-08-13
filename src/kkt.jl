@@ -1186,8 +1186,7 @@ function _factor_dense_kkt_native!(
                     # factorization. Existing QR/pivot policy remains the
                     # authorized fallback and is recorded below.
                     ws.la_fallback_reason = :la_equality_factor_failed
-                    opts.equality_solver === :auto &&
-                        _equality_qr_allowed(ws.Btil, opts) ||
+                    _la_equality_qr_fallback_allowed(ws, opts) ||
                         throw(ArgumentError(
                             "MultiFloat equality Cholesky failed and QR fallback is not authorized",
                         ))
@@ -1255,12 +1254,12 @@ function _factor_dense_kkt_native!(
                     if issuccess(Cq) &&
                        _cholesky_has_numerical_rank(Cq)
                         ws.Qchol = Cq
-                    elseif opts.equality_solver === :auto &&
-                           _equality_qr_allowed(ws.Btil, opts)
+                    elseif _la_equality_qr_fallback_allowed(ws, opts)
                         # Avoid the redundant pivoted-normal-equation probe. It
                         # is not implemented for generic BigFloat matrices on
                         # Julia 1.10, while QR is the selected automatic backend
                         # for this exact rank-loss condition on every version.
+                        ws.la_fallback_reason = :la_equality_factor_failed
                         qr_factor = _factor_equality_qr(ws.Btil, opts)
                         ws.Qchol = qr_factor
                         q_pivoted = true

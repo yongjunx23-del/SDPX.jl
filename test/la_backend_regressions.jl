@@ -4,12 +4,18 @@ using MultiFloats: Float64x4
     f64 = SDPX.Experimental.plan_la_backend(Float64)
     @test f64.selected === :standard
     @test f64.provider === :blas_lapack
+    @test f64.fallback_chain === (:rank_revealing_qr,)
+    @test SDPX.Experimental.plan_la_backend(
+        Float64;
+        equality_solver=:normal_equations,
+    ).fallback_chain === ()
     @test SDPX.Experimental.instantiate_la_backend(f64, Float64) isa
           SDPX.Experimental.StandardLABackend
 
     bf = SDPX.Experimental.plan_la_backend(BigFloat)
     @test bf.selected === :standard
     @test bf.provider === :generic_linear_algebra
+    @test bf.fallback_chain === (:rank_revealing_qr,)
     @test SDPX.Experimental.instantiate_la_backend(bf, BigFloat) isa
           SDPX.Experimental.StandardLABackend
 
