@@ -29,6 +29,7 @@ const _DENSE_CHOLESKY_REQUIRED = (
 )
 
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
+    equality_solver === :qr && return (_DENSE_CHOLESKY_REQUIRED..., :qr)
     return _DENSE_CHOLESKY_REQUIRED
 end
 
@@ -112,12 +113,18 @@ function validate_la_backend_configuration(
     ::Type{T},
 ) where {T}
     validate_la_backend_configuration(config)
-    generic = standard_la_provider_capabilities(T)
-    if :rank_revealing_qr in config.fallback_chain ||
-       :qr in config.required_capabilities
-        la_provider_supports(generic, :rank_revealing_qr) ||
+    if :rank_revealing_qr in config.fallback_chain
+        la_provider_supports(config.capability_model, :rank_revealing_qr) ||
             throw(ArgumentError(
-                "rank-revealing QR is unsupported for arithmetic $(T)",
+                "planned LA provider $(config.provider) lacks rank-revealing QR " *
+                "for equality fallback",
+            ))
+    end
+    if :qr in config.required_capabilities
+        la_provider_supports(config.capability_model, :qr) ||
+            throw(ArgumentError(
+                "planned LA provider $(config.provider) lacks QR capability " *
+                "required by equality_solver=:qr",
             ))
     end
     return config
@@ -257,7 +264,12 @@ function plan_la_backend(
                descriptor_capabilities,
                required_capabilities,
            ))
-            fallback_chain = equality_solver === :auto ?
+            fallback_chain =
+                equality_solver === :auto &&
+                la_provider_supports(
+                    descriptor_capabilities,
+                    :rank_revealing_qr,
+                ) ?
                 (:rank_revealing_qr,) : ()
             config = LABackendConfiguration(
                 arithmetic, requested, :multifloat, descriptor.provider,

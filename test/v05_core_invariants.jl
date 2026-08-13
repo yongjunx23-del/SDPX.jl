@@ -129,6 +129,28 @@ end
         )
     end
 
+    @testset "QR validation follows provider capability model" begin
+        no_qr = SDPX.Experimental.LABackendConfiguration(
+            :float64,
+            :standard,
+            :standard,
+            :generic_linear_algebra,
+            (:cholesky,),
+            SDPX.Experimental.LAProviderCapabilities(cholesky=true),
+            (:cholesky,),
+            :julia_blas_lapack,
+            (:rank_revealing_qr,),
+            :none,
+            :immutable_scalars,
+        )
+        @test_throws ArgumentError (
+            SDPX.Experimental.validate_la_backend_configuration(
+                no_qr,
+                Float64,
+            )
+        )
+    end
+
     @testset "certification=false returns certification_disabled" begin
         problem, invalid = v05_scalar_certificate_fixture()
         options = SDPX.SolverOptions{Float64}(
