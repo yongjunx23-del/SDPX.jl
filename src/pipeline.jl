@@ -2166,6 +2166,7 @@ function _attach_diagnostics(
         la_executed_provider=get(executed, :la_provider, :not_executed),
         la_executed_ownership=get(executed, :la_ownership, :not_executed),
         la_fallback_reason=get(executed, :la_fallback_reason, :none),
+        la_factorization=get(executed, :la_factorization, :not_executed),
         planned_la_backend=plan.la_config.selected,
         planned_la_fallback_reason=plan.la_config.fallback_reason,
         la_provider=plan.la_config.provider,

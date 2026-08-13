@@ -41,10 +41,14 @@ const MultiFloatLABackend = SDPX.MultiFloatLABackend
 const BFLALABackend = SDPX.BFLALABackend
 const LABackendConfiguration = SDPX.LABackendConfiguration
 const LAProviderCapabilities = SDPX.LAProviderCapabilities
+const AbstractLAFactorization = SDPX.AbstractLAFactorization
 const AbstractLACholeskyFactor = SDPX.AbstractLACholeskyFactor
 const StandardLACholeskyFactor = SDPX.StandardLACholeskyFactor
 const ProviderLACholeskyFactor = SDPX.ProviderLACholeskyFactor
 const LegacyLACholeskyFactor = SDPX.LegacyLACholeskyFactor
+const StandardLALUFactor = SDPX.StandardLALUFactor
+const ProviderLALUFactor = SDPX.ProviderLALUFactor
+const LegacyLALUFactor = SDPX.LegacyLALUFactor
 const plan_la_backend = SDPX.plan_la_backend
 const instantiate_la_backend = SDPX.instantiate_la_backend
 const la_provider_descriptor = SDPX.la_provider_descriptor
@@ -163,8 +167,10 @@ export plan_la_backend
 export legacy_la_provider_identity, legacy_la_provider_capabilities
 export legacy_la_provider_arithmetic, legacy_la_provider_ownership
 export legacy_la_provider_supports
+export AbstractLAFactorization
 export AbstractLACholeskyFactor, StandardLACholeskyFactor
 export ProviderLACholeskyFactor, LegacyLACholeskyFactor
+export StandardLALUFactor, ProviderLALUFactor, LegacyLALUFactor
 export instantiate_la_backend, la_provider_descriptor
 export instantiate_multifloat_la_backend
 export instantiate_bfla_la_backend

@@ -73,7 +73,7 @@ mutable struct LPStandardFormSystem{T}
     schur_workers::Int
 end
 
-mutable struct LPWorkspace{T}
+mutable struct LPWorkspace{T,LB<:AbstractLABackend}
     H::Matrix{T}
     K::Matrix{T}
     weighted_G::Matrix{T}
@@ -109,6 +109,15 @@ mutable struct LPWorkspace{T}
     # formulas while making the deferred plan decision explicit.
     backend::Union{Nothing,KKTBackend}
     backend_formulation::Symbol
+    # Instantiated exactly once from ExecutionPlan.la_config. Ordinary dense
+    # LP factor/solve calls consume this concrete backend; reduced and sparse
+    # LP structures deliberately retain their specialized implementations.
+    la_backend::LB
+    executed_la_backend::Symbol
+    executed_la_provider::Symbol
+    executed_la_ownership::Symbol
+    la_fallback_reason::Symbol
+    executed_la_factorization::Symbol
 end
 
 function LPWorkspace(
@@ -118,9 +127,14 @@ function LPWorkspace(
     equalities::Int;
     packed_hessian::Bool=true,
     reduced_standard_form::Bool=false,
+    la_backend::AbstractLABackend=LegacyLABackend(
+        _la_arithmetic_symbol(T),
+        :compatibility,
+    ),
 ) where {T}
     system_size = variables + equalities
-    return LPWorkspace{T}(
+    LB = typeof(la_backend)
+    return LPWorkspace{T,LB}(
         reduced_standard_form ?
         alloc_zeros(T, 0, 0) :
         alloc_zeros(T, variables, variables),
@@ -154,6 +168,12 @@ function LPWorkspace(
         nothing,
         nothing,
         :not_resolved,
+        la_backend,
+        :not_executed,
+        :not_executed,
+        :not_executed,
+        :none,
+        :not_executed,
     )
 end
 
@@ -1142,13 +1162,6 @@ function _lp_populate_kkt!(
     return K
 end
 
-struct LPCholeskyFactor{T}
-    factor::Matrix{T}
-    success::Bool
-end
-
-LinearAlgebra.issuccess(factor::LPCholeskyFactor) = factor.success
-
 struct LPReducedFactor{T}
     system::LPStandardFormSystem{T}
     success::Bool
@@ -1162,11 +1175,8 @@ function _lp_solve_factor!(factor, rhs)
     return ldiv!(factor, rhs)
 end
 
-function _lp_solve_factor!(factor::LPCholeskyFactor, rhs)
-    factor.success ||
-        throw(LinearAlgebra.PosDefException(1))
-    return kcholsolve_owned!(factor.factor, rhs)
-end
+_lp_solve_factor!(factor::AbstractLAFactorization, rhs) =
+    la_factor_solve!(factor, rhs)
 
 function _lp_solve_factor!(factor::LPReducedFactor{T}, rhs) where {T}
     factor.success || throw(LinearAlgebra.PosDefException(1))
@@ -1344,13 +1354,16 @@ function _lp_factor_dense_cholesky!(
     )
     isempty(B) || error("LP Cholesky backend requires no equality rows")
     # With no equality rows the Newton system is the regularized positive
-    # definite Hessian. LU performs roughly twice the work and ignores the
-    # symmetry; the kernel Cholesky route also avoids Base's allocating
-    # generic factorization for BigFloat.
-    return LPCholeskyFactor(
-        workspace.K,
-        kchol!(workspace.K),
-    )
+    # definite Hessian. The plan-selected LA provider owns only the ordinary
+    # dense factor/solve; LP still owns assembly and regularization.
+    _record_la_execution!(workspace)
+    workspace.executed_la_factorization = :cholesky
+    factor = la_cholesky_factor!(workspace.la_backend, workspace.K)
+    if factor === nothing
+        workspace.la_fallback_reason = :la_factor_failed
+        return nothing
+    end
+    return factor
 end
 
 function _lp_factor_dense_lu!(
@@ -1365,7 +1378,14 @@ function _lp_factor_dense_lu!(
         B,
         regularization,
     )
-    return lu!(workspace.K; check=false)
+    _record_la_execution!(workspace)
+    workspace.executed_la_factorization = :lu
+    factor = la_lu_factor!(workspace.la_backend, workspace.K)
+    if factor === nothing
+        workspace.la_fallback_reason = :la_factor_failed
+        return nothing
+    end
+    return factor
 end
 
 function _assert_lp_backend(
@@ -1422,10 +1442,18 @@ solve!(::LPReducedCholeskyBackend, factor::LPReducedFactor, rhs) =
     _lp_solve_factor!(factor, rhs)
 solve!(::Union{SparseCholeskyBackend,SparseLDLBackend},
     factor::LPSparseFactor, rhs) = _lp_solve_factor!(factor, rhs)
-solve!(::LPCholeskyBackend, factor::LPCholeskyFactor, rhs) =
-    _lp_solve_factor!(factor, rhs)
-solve!(::LPLUBackend, factor::LinearAlgebra.LU, rhs) =
-    _lp_solve_factor!(factor, rhs)
+solve!(::LPCholeskyBackend, factor::AbstractLACholeskyFactor, rhs) =
+    la_factor_solve!(factor, rhs)
+solve!(
+    ::LPLUBackend,
+    factor::Union{
+        StandardLALUFactor,
+        ProviderLALUFactor,
+        LegacyLALUFactor,
+    },
+    rhs,
+) =
+    la_factor_solve!(factor, rhs)
 
 function _resolve_lp_backend!(
     workspace::LPWorkspace{T},
@@ -1995,6 +2023,7 @@ function solve_lp!(
         equalities;
         packed_hessian=packed_hessian,
         reduced_standard_form=G isa LPDiagonalMatrix{T},
+        la_backend=instantiate_la_backend(plan.la_config, T, plan.threads),
     )
     if G isa LPDiagonalMatrix{T}
         workspace.standard_system = LPStandardFormSystem(
@@ -2199,7 +2228,7 @@ function solve_lp!(
             )
             factor isa LPReducedFactor &&
                 (reduced_assembly_seconds += factor.assembly_seconds)
-            if issuccess(factor)
+            if factor !== nothing && issuccess(factor)
                 successful = true
                 regularizations += attempt - 1
                 regularization = attempt_regularization
@@ -2561,6 +2590,18 @@ function solve_lp!(
                     nothing : 1,
                 lp_pack_threads=workspace.standard_system === nothing ?
                     nothing : workspace.standard_system.packing_workers,
+                la_backend=backend_execution_attempted &&
+                    workspace.executed_la_backend !== :not_executed ?
+                    workspace.executed_la_backend : :not_executed,
+                la_provider=backend_execution_attempted &&
+                    workspace.executed_la_provider !== :not_executed ?
+                    workspace.executed_la_provider : :not_executed,
+                la_ownership=backend_execution_attempted &&
+                    workspace.executed_la_ownership !== :not_executed ?
+                    workspace.executed_la_ownership : :not_executed,
+                la_fallback_reason=workspace.la_fallback_reason,
+                la_factorization=backend_execution_attempted ?
+                    workspace.executed_la_factorization : :not_executed,
             ),
         ),
     )
