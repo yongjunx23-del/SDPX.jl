@@ -11,10 +11,12 @@ already present in the plan.
 
 The migrated ordinary dense path uses MFLA for dot, GEMV/GEMM, lower SYRK,
 TRSV/TRSM, Cholesky factorization, vector/multiple-RHS solves, and equality
-rank-revealing QR. RRQR retains an independent `MFWorkspace` with every live
-factor payload. The same lifetime rule is used by the internal LU and pivoted
-LDLT seams: two concurrently live borrowed factors never share an
-`MFWorkspace`.
+rank-revealing QR. The provider owns one reusable `MFWorkspace` for sequential
+factorizations. MFLA factors snapshot their LU/LDLT/RRQR metadata, so workspace
+reuse or growth does not invalidate live factors; only the destructively
+factorized matrix remains borrowed. Concurrent factorization must still use
+distinct solver/provider workspaces. Packed GEMM calls may share the provider
+workspace because MFLA serializes that scratch internally.
 
 MFLA also supplies ordinary residuals, normwise backward error, explicit
 `x2 -> x3`, `x2 -> x4`, and `x3 -> x4` residuals, plus exactly one requested

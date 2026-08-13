@@ -11,8 +11,11 @@
     comment; the extension verifies the API surface through load-time
     capability facts instead of a hard-coded upstream commit.
 
-    The provider payload is immutable and carries only a KernelConfig and a
-    reusable GemmWorkspace.  The capability model is derived directly from
+    The provider payload is immutable and carries a KernelConfig plus one
+    reusable MFWorkspace. Factor calls reuse it sequentially; MFLA factors
+    own metadata snapshots, so live factors survive later reuse and growth.
+    Packed GEMM calls may share the same workspace because MFLA serializes its
+    GEMM buffers. The capability model is derived directly from
     MultiFloatLinearAlgebra.capabilities(T): the extension never hard-codes a
     capability list, never benchmarks, never calibrates, and never selects a
     fallback.  axpby and norminf are intentionally not MFLA operations; SDPX
@@ -34,7 +37,6 @@ import MultiFloats: MultiFloat
 import MultiFloatLinearAlgebra:
     capabilities as mfla_capabilities,
     KernelConfig,
-    GemmWorkspace,
     MFWorkspace,
     MFCholesky,
     MFLU,
@@ -143,19 +145,17 @@ const _DESCRIPTOR_CAPABILITIES = (
 
 struct _Provider{MF<:MultiFloat}
     config::KernelConfig
-    # Caller-owned reusable packed-panel buffers.  MFLA allocates one buffer
-    # per worker internally, so this is safe across MFLA's own threaded
-    # regions, but it must not be shared between two concurrent SDPX tasks
-    # mutating the same backend.  SDPX constructs one backend per Workspace
-    # and never mutates one Workspace from multiple tasks, which preserves
-    # that invariant without a lock in the hot path.
-    gemm_workspace::GemmWorkspace{MF}
+    # One SDPX Workspace owns one provider and invokes its factorizations
+    # sequentially. MFLA snapshots factor metadata before returning, so later
+    # reuse or growth leaves existing factors valid. Concurrent factorization
+    # must use distinct providers; only packed GEMM scratch is serialized-safe.
+    workspace::MFWorkspace{MF}
 end
 
 _Provider(::Type{MF}; threads::Int=1) where {MF<:MultiFloat} =
     _Provider{MF}(
         KernelConfig(thread_count=max(threads, 1)),
-        GemmWorkspace(MF; thread_count=max(threads, 1)),
+        MFWorkspace(MF; thread_count=max(threads, 1)),
     )
 
 """Callable adapter exposing both owned GEMM/GEMV arities."""
@@ -182,7 +182,7 @@ struct _CholeskyHandle{MF<:MultiFloat,F<:MFCholesky{MF}}
 end
 
 Base.hasproperty(::_Provider, name::Symbol) =
-    name in _PROVIDER_OPERATIONS || name in (:config, :gemm_workspace)
+    name in _PROVIDER_OPERATIONS || name in (:config, :workspace)
 
 function Base.getproperty(provider::_Provider, name::Symbol)
     name === :chol! && return A -> _provider_chol!(provider, A)
@@ -197,7 +197,7 @@ function Base.getproperty(provider::_Provider, name::Symbol)
         return (S, P, α, β) -> _provider_syrk!(provider, S, P, α, β)
     name === :mul_owned! && return _ProviderMulOwned(provider)
     name === :dot && return (x, y) -> mfdot(x, y)
-    name in (:config, :gemm_workspace) && return getfield(provider, name)
+    name in (:config, :workspace) && return getfield(provider, name)
     throw(ArgumentError("MFLA provider does not implement $(name)"))
 end
 
@@ -344,7 +344,7 @@ function _provider_mul_owned!(
         α,
         β;
         config=provider.config,
-        workspace=provider.gemm_workspace,
+        workspace=provider.workspace,
     )
     return C
 end
@@ -435,7 +435,7 @@ function SDPX.la_mfla_residual!(
         b;
         uplo=uplo,
         config=provider.config,
-        workspace=provider.gemm_workspace,
+        workspace=provider.workspace,
     )
     return residual
 end
@@ -502,18 +502,13 @@ SDPX.la_factor_provider_identity(::_CholeskyHandle) =
 """
     _QRPayload{MF}
 
-    Opaque equality-RRQR payload.  The wrapped `MFQR` borrows its `tau` and
-    permutation storage from the payload-owned `workspace`, so its lease stays
-    valid for exactly as long as this payload is alive and no other factor is
-    started from that workspace.  Keeping both the factor and the workspace in
-    the payload preserves that lifetime through SDPX's `EqualityQRFactor`
-    wrapper.  SDPX reads only the packed `factors` matrix and the column
-    permutation to solve the semantic R'R equality system; it never interprets
-    MFLA's private Householder coefficients.
+    Opaque equality-RRQR payload. MFLA owns the reflector and permutation
+    metadata snapshot; the factor may outlive later provider-workspace reuse.
+    SDPX reads only public packed-factor and permutation accessors to solve the
+    semantic R'R equality system.
 """
 struct _QRPayload{MF<:MultiFloat,M<:AbstractMatrix{MF}}
     factor::MFQR{MF}
-    workspace::MFWorkspace{MF}
     factors::M
     jpvt::Vector{Int}
 end
@@ -525,18 +520,10 @@ function SDPX.la_mfla_qr_factor!(
     provider::_Provider{MF},
     A::AbstractMatrix{MF},
 ) where {MF}
-    # A fresh MFWorkspace per factorization keeps the returned MFQR lease-aware
-    # and isolated: the factor borrows qr_tau/qr_permutation views from this
-    # workspace, and no other live factor shares it.  Keeping both the factor
-    # (which holds the lease) and the workspace in the payload preserves that
-    # lifetime through SDPX's EqualityQRFactor wrapper.  rrqr! takes no
-    # KernelConfig; threading policy stays inside the package.
-    workspace = MFWorkspace(MF)
-    factor = rrqr!(A; check=false, workspace=workspace)
+    factor = rrqr!(A; check=false, workspace=provider.workspace)
     mfla_issuccess(factor) || return nothing
     return _QRPayload{MF,typeof(factor_matrix(factor))}(
         factor,
-        workspace,
         factor_matrix(factor),
         factor_permutation(factor),
     )
@@ -545,30 +532,22 @@ end
 """
     _LUPayload{MF}
 
-Opaque LU payload.  The wrapped `MFLU` borrows its pivot metadata from the
-payload-owned `workspace`, so the lease stays valid exactly as long as this
-payload is alive and no other factorization reuses that workspace.  SDPX reads
-only the packed `factors` matrix through the core `la_mfla_lu_*` hooks and
-never interprets MFLA's private fields.
+Opaque LU payload. MFLA owns its pivot snapshot; SDPX retains the factor and
+uses only public factor/solve APIs while the provider workspace is reused.
 """
 struct _LUPayload{MF<:MultiFloat,F<:MFLU{MF}}
     factor::F
-    workspace::MFWorkspace{MF}
     config::KernelConfig
 end
 
 """
     _LDLTPayload{MF}
 
-Opaque pivoted symmetric-indefinite LDLT payload.  The wrapped `MFLDLT` borrows
-its `dsub`, `pivots`, and `blocks` metadata from the payload-owned `workspace`,
-so the lease stays valid exactly as long as this payload is alive and no other
-factorization reuses that workspace.  SDPX reads only public accessors through
-the core `la_mfla_ldlt_*` hooks.
+Opaque pivoted symmetric-indefinite LDLT payload. MFLA owns its `dsub`, pivot,
+and block metadata snapshots. SDPX reads only public accessors.
 """
 struct _LDLTPayload{MF<:MultiFloat,F<:MFLDLT{MF}}
     factor::F
-    workspace::MFWorkspace{MF}
     config::KernelConfig
 end
 
@@ -584,12 +563,14 @@ function SDPX.la_mfla_lu_factor!(
     size(A, 1) == size(A, 2) || throw(DimensionMismatch(
         "MFLA LU requires a square matrix",
     ))
-    # A fresh MFWorkspace per factorization isolates the borrowed pivot
-    # metadata from every other live factor; no two factors share a workspace.
-    workspace = MFWorkspace(MF; thread_count=provider.config.thread_count)
-    factor = lu!(A; check=false, config=provider.config, workspace=workspace)
+    factor = lu!(
+        A;
+        check=false,
+        config=provider.config,
+        workspace=provider.workspace,
+    )
     mfla_issuccess(factor) || return nothing
-    return _LUPayload{MF,typeof(factor)}(factor, workspace, provider.config)
+    return _LUPayload{MF,typeof(factor)}(factor, provider.config)
 end
 
 function SDPX.la_mfla_lu_factor_matrix(payload::_LUPayload)
@@ -613,12 +594,14 @@ function SDPX.la_mfla_ldlt_factor!(
         "MFLA LDLT requires a square matrix",
     ))
     SDPX._all_finite_lower(A) || return nothing
-    # A fresh MFWorkspace per factorization isolates the borrowed dsub/pivots/
-    # blocks metadata from every other live factor.
-    workspace = MFWorkspace(MF; thread_count=provider.config.thread_count)
-    factor = ldlt!(A; check=false, config=provider.config, workspace=workspace)
+    factor = ldlt!(
+        A;
+        check=false,
+        config=provider.config,
+        workspace=provider.workspace,
+    )
     mfla_issuccess(factor) || return nothing
-    return _LDLTPayload{MF,typeof(factor)}(factor, workspace, provider.config)
+    return _LDLTPayload{MF,typeof(factor)}(factor, provider.config)
 end
 
 function SDPX.la_mfla_ldlt_factor_matrix(payload::_LDLTPayload)

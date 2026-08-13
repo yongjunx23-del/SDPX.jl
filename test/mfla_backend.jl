@@ -120,6 +120,11 @@ if _MFLA_LOADED
             descriptor = LA.la_provider_descriptor(T, 1)
             @test descriptor.available
             @test descriptor.provider === :multifloat_linear_algebra
+            upstream = MultiFloatLinearAlgebra.capabilities(T)
+            @test upstream.reusable_workspace
+            @test upstream.factor_metadata_ownership === :factor_owned
+            @test upstream.shared_gemm_workspace_concurrency === :serialized_safe
+            @test !upstream.concurrent_factor_workspace
             config = LA.plan_la_backend(
                 T;
                 requested=:multifloat,
@@ -250,8 +255,8 @@ if _MFLA_LOADED
             relative_tolerance=T(1e-30),
         )
         @test factor isa SDPX.EqualityQRFactor{T}
-        # The equality handle retains the opaque _QRPayload (which owns the
-        # lease-bearing MFQR factor and its workspace), not the backend payload.
+        # The equality handle retains the opaque provider factor payload, not
+        # the reusable backend workspace itself.
         @test SDPX.la_factor_provider(factor) !== backend.provider
         @test SDPX.la_factor_provider_identity(
             SDPX.la_factor_provider(factor),
@@ -323,7 +328,7 @@ if _MFLA_LOADED
         )
     end
 
-    @testset "MFLA equality RRQR workspace factor lifetime separation" begin
+    @testset "MFLA equality RRQR survives workspace reuse" begin
         T = Float64x4
         backend = _expect_multifloat_backend(T)
         rng = MersenneTwister(0x9191)
@@ -354,8 +359,8 @@ if _MFLA_LOADED
         @test SDPX.la_factor_rank(first) == size(A, 2)
         @test SDPX.la_factor_rank(second) == size(A, 2)
 
-        # Each factor owns an independent workspace lease, so both must remain
-        # valid after the second factorization starts its own workspace.
+        # MFLA snapshots factor metadata, so both factors remain valid after
+        # the provider workspace has been reused by the second factorization.
         for factor in (first, second)
             rhs = T.(randn(rng, size(A, 2)))
             direction = SDPX.alloc_zeros(T, size(A, 2))
@@ -393,20 +398,35 @@ if _MFLA_LOADED
         end
     end
 
-    @testset "MFLA LU two live factor leases" begin
+    @testset "MFLA LU factors survive workspace growth and reuse" begin
         T = Float64x4
         backend = _expect_multifloat_backend(T)
         A = T[4 1; 2 3]
         rhs = T[1, 2]
         first = SDPX.la_lu_factor!(backend, copy(A))
-        second = SDPX.la_lu_factor!(backend, copy(A))
+        ext = Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt)
+        capacity_before = MultiFloatLinearAlgebra.workspace_capacity(
+            backend.provider.workspace,
+        ).factor
+        wider = Matrix{T}(I, 7, 7) + T(0.05) .* ones(T, 7, 7)
+        second = SDPX.la_lu_factor!(backend, copy(wider))
+        capacity_after = MultiFloatLinearAlgebra.workspace_capacity(
+            backend.provider.workspace,
+        ).factor
         @test first !== nothing
         @test second !== nothing
-        for factor in (first, second)
+        @test capacity_after >= 7
+        @test capacity_after >= capacity_before
+        @test ext !== nothing
+        for factor in (first,)
             solution = copy(rhs)
             SDPX.la_factor_solve!(factor, solution)
             @test _max_abs(A * solution, rhs) < T(1e-25)
         end
+        wider_rhs = ones(T, 7)
+        wider_solution = copy(wider_rhs)
+        SDPX.la_factor_solve!(second, wider_solution)
+        @test _max_abs(wider * wider_solution, wider_rhs) < T(1e-25)
     end
 
     @testset "MFLA pivoted LDLT internal seam" begin
@@ -450,7 +470,7 @@ if _MFLA_LOADED
         end
     end
 
-    @testset "MFLA LDLT two live factor leases" begin
+    @testset "MFLA LDLT two live factors after workspace reuse" begin
         T = Float64x4
         backend = _expect_multifloat_backend(T)
         A0 = T[0 1; 1 0]

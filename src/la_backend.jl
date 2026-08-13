@@ -925,9 +925,9 @@ function la_qr_factor!(
     ))
     payload = la_mfla_qr_factor!(backend.provider, A)
     payload === nothing && return nothing
-    # Preserve the opaque _QRPayload as the factor's provider so the
-    # lease-bearing MFQR factor and its MFWorkspace stay alive together; the
-    # backend provider payload does not own that lease.
+    # Preserve the opaque provider factor payload. The provider owns any
+    # reusable scratch, while the returned factor owns its metadata and keeps
+    # the destructively factorized matrix alive through this handle.
     return _equality_qr_factor_handle(
         payload,
         payload.factors,
