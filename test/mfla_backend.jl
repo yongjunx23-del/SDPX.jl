@@ -103,8 +103,6 @@ end
 end
 
 if _MFLA_LOADED
-    const MFLA = MultiFloatLinearAlgebra
-
     @testset "MFLA capability and planning" begin
         LA = SDPX.Experimental
         for T in _MFLA_TYPES
@@ -124,6 +122,8 @@ if _MFLA_LOADED
             @test :mul_owned in config.capabilities
             for capability in (
                 :cholesky,
+                :lu,
+                :pivoted_symmetric_ldlt,
                 :factor_solve,
                 :multi_rhs,
                 :threading,
@@ -137,9 +137,7 @@ if _MFLA_LOADED
                 @test capability in config.capability_model
             end
             for absent in (
-                :lu,
                 :qr,
-                :pivoted_symmetric_ldlt,
                 :iterative_refinement,
                 :higher_precision_residual,
                 :sparse_factorization,
@@ -162,6 +160,8 @@ if _MFLA_LOADED
             @test normal.selected === :multifloat
             @test normal.fallback_chain == ()
             @test :rank_revealing_qr ∉ normal.required_capabilities
+            @test :lu ∉ normal.required_capabilities
+            @test :pivoted_symmetric_ldlt ∉ normal.required_capabilities
             equality = LA.plan_la_backend(
                 T;
                 requested=:multifloat,
@@ -171,6 +171,16 @@ if _MFLA_LOADED
             @test equality.selected === :multifloat
             @test :rank_revealing_qr in equality.required_capabilities
             @test :qr ∉ equality.required_capabilities
+            @test equality.fallback_chain == ()
+            automatic = LA.plan_la_backend(
+                T;
+                requested=:multifloat,
+                route=:dense_cholesky,
+                equality_solver=:auto,
+            )
+            @test automatic.fallback_chain == (:rank_revealing_qr,)
+            @test :lu ∉ automatic.required_capabilities
+            @test :pivoted_symmetric_ldlt ∉ automatic.required_capabilities
         end
     end
 
@@ -330,14 +340,116 @@ if _MFLA_LOADED
 
         # Each factor owns an independent workspace lease, so both must remain
         # valid after the second factorization starts its own workspace.
-        @test MFLA.issuccess(SDPX.la_factor_provider(first).factor)
-        @test MFLA.issuccess(SDPX.la_factor_provider(second).factor)
         for factor in (first, second)
             rhs = T.(randn(rng, size(A, 2)))
             direction = SDPX.alloc_zeros(T, size(A, 2))
             scratch = SDPX.alloc_zeros(T, size(A, 2))
             SDPX._solve_Q!(direction, factor, rhs, scratch)
             @test all(isfinite, direction)
+            relative_residual =
+                norm(transpose(A) * (A * direction) - rhs) / norm(rhs)
+            @test relative_residual <= T(1_000) * eps(T)
+        end
+    end
+
+    @testset "MFLA LU internal seam" begin
+        for T in _MFLA_TYPES
+            backend = _expect_multifloat_backend(T)
+            A = T[4 1; 2 3]
+            factor = SDPX.la_lu_factor!(backend, copy(A))
+            @test factor isa SDPX.ProviderLALUFactor{T}
+            @test SDPX.la_factor_kind(factor) === :lu
+            @test SDPX.la_factor_handle_matrix(factor) isa Matrix{T}
+            @test SDPX.la_factor_provider_identity(
+                SDPX.la_factor_provider(factor),
+            ) === :multifloat_linear_algebra
+
+            rhs_vector = T[1, 2]
+            solution = copy(rhs_vector)
+            SDPX.la_factor_solve!(factor, solution)
+            @test _max_abs(A * solution, rhs_vector) < T(1e-25)
+
+            rhs_matrix = T[1 2; 3 4]
+            solution_matrix = copy(rhs_matrix)
+            SDPX.la_factor_solve!(factor, solution_matrix)
+            @test _max_abs(A * solution_matrix, rhs_matrix) < T(1e-25)
+        end
+    end
+
+    @testset "MFLA LU two live factor leases" begin
+        T = Float64x4
+        backend = _expect_multifloat_backend(T)
+        A = T[4 1; 2 3]
+        rhs = T[1, 2]
+        first = SDPX.la_lu_factor!(backend, copy(A))
+        second = SDPX.la_lu_factor!(backend, copy(A))
+        @test first !== nothing
+        @test second !== nothing
+        for factor in (first, second)
+            solution = copy(rhs)
+            SDPX.la_factor_solve!(factor, solution)
+            @test _max_abs(A * solution, rhs) < T(1e-25)
+        end
+    end
+
+    @testset "MFLA pivoted LDLT internal seam" begin
+        for T in _MFLA_TYPES
+            backend = _expect_multifloat_backend(T)
+            A0 = T[0 1; 1 0]
+            factor = SDPX.la_ldlt_factor!(backend, copy(A0))
+            @test factor isa SDPX.ProviderLALDLTFactor{T}
+            @test SDPX.la_factor_kind(factor) === :ldlt
+            @test SDPX.la_factor_handle_matrix(factor) isa Matrix{T}
+            @test SDPX.la_factor_provider_identity(
+                SDPX.la_factor_provider(factor),
+            ) === :multifloat_linear_algebra
+            @test SDPX.la_ldlt_inertia(factor) ==
+                  (positive=1, negative=1, zero=0)
+            @test SDPX.la_ldlt_blocks(factor) == [2]
+            permutation = SDPX.la_ldlt_permutation(factor)
+            @test sort(permutation) == [1, 2]
+
+            rhs_vector = T[1, 2]
+            solution = copy(rhs_vector)
+            SDPX.la_ldlt_factor_solve!(factor, solution)
+            @test _max_abs(A0 * solution, rhs_vector) < T(1e-25)
+
+            rhs_matrix = T[1 2; 3 4]
+            solution_matrix = copy(rhs_matrix)
+            SDPX.la_ldlt_factor_solve!(factor, solution_matrix)
+            @test _max_abs(A0 * solution_matrix, rhs_matrix) < T(1e-25)
+
+            # Only the lower triangle is authoritative; a poisoned upper
+            # triangle cannot change the result.
+            poisoned = T[0 T(NaN); 1 0]
+            poisoned_factor = SDPX.la_ldlt_factor!(backend, copy(poisoned))
+            @test poisoned_factor !== nothing
+            poisoned_solution = copy(rhs_vector)
+            SDPX.la_ldlt_factor_solve!(poisoned_factor, poisoned_solution)
+            @test _max_abs(A0 * poisoned_solution, rhs_vector) < T(1e-25)
+
+            bad_lower = T[0 1; T(NaN) 0]
+            @test SDPX.la_ldlt_factor!(backend, copy(bad_lower)) === nothing
+        end
+    end
+
+    @testset "MFLA LDLT two live factor leases" begin
+        T = Float64x4
+        backend = _expect_multifloat_backend(T)
+        A0 = T[0 1; 1 0]
+        rhs = T[1, 2]
+        first = SDPX.la_ldlt_factor!(backend, copy(A0))
+        second = SDPX.la_ldlt_factor!(backend, copy(A0))
+        @test first !== nothing
+        @test second !== nothing
+        @test SDPX.la_ldlt_inertia(first) ==
+              (positive=1, negative=1, zero=0)
+        @test SDPX.la_ldlt_inertia(second) ==
+              (positive=1, negative=1, zero=0)
+        for factor in (first, second)
+            solution = copy(rhs)
+            SDPX.la_ldlt_factor_solve!(factor, solution)
+            @test _max_abs(A0 * solution, rhs) < T(1e-25)
         end
     end
 
