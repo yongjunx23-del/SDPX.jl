@@ -427,6 +427,13 @@ struct StandardLALUFactor{T,F<:LinearAlgebra.Factorization{T}} <:
     factor::F
 end
 
+"""Provider-owned dense LU factor handle (e.g. MultiFloatLinearAlgebra)."""
+struct ProviderLALUFactor{T,P,M<:AbstractMatrix{T}} <:
+       AbstractLAFactorization{T}
+    provider::P
+    factors::M
+end
+
 """Standard generic QR handle; `pivoted` records rank-revealing selection."""
 struct StandardLAQRFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
        AbstractLAQRFactor{T}
@@ -445,6 +452,7 @@ end
 la_factor_provider(::AbstractLAQRFactor) = nothing
 la_factor_provider(factor::EqualityQRFactor) = factor.provider
 la_factor_provider(factor::StandardLAQRFactor) = factor.provider
+la_factor_provider(factor::ProviderLALUFactor) = factor.provider
 la_factor_provider(factor::ProviderLALDLTFactor) = factor.provider
 
 la_factor_rank(::AbstractLAQRFactor) = nothing

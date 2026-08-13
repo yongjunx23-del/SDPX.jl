@@ -33,6 +33,8 @@ import MultiFloatLinearAlgebra:
     GemmWorkspace,
     MFWorkspace,
     MFCholesky,
+    MFLU,
+    MFLDLT,
     MFQR,
     mfdot,
     gemv!,
@@ -41,11 +43,14 @@ import MultiFloatLinearAlgebra:
     trsm!,
     trsv!,
     cholesky!,
+    lu!,
+    ldlt!,
     rrqr!,
     ldiv!,
     issuccess as mfla_issuccess,
     factor_kind,
     factor_matrix,
+    factor_diagnostics,
     factor_permutation
 
 # SDPX's MultiFloat provider targets the x2/x3/x4 limbs used by its dense
@@ -66,19 +71,18 @@ false so validation and instantiation fail closed.
 """
 function _capability_model(::Type{MF}) where {MF<:MultiFloat}
     c = mfla_capabilities(MF)
-    # Part 1 of the SDPX provider seam implements only the dense Cholesky
-    # route and its ordinary dense kernels.  MFLA does provide LU/LDLT/RRQR and
-    # mixed-precision residuals, but SDPX core has no MultiFloat adapter method
-    # for them yet, so advertising those facts would let `equality_solver=:qr`
-    # plan a route that throws at runtime.  They are masked until the Part 2
-    # adapters land; a capability must never be advertised without a working
-    # dispatch.
+    # Advertise only operations SDPX core actually dispatches through a
+    # working MultiFloat adapter.  LU and pivoted LDLT now have internal
+    # provider seams; a capability must never be advertised without a working
+    # dispatch, so both are mapped directly from the MFLA facts.  Unpivoted QR
+    # and a full refinement loop are still not exposed by SDPX core, so they
+    # remain false and any route needing them fails closed.
     return SDPX.LAProviderCapabilities(
         cholesky=c.cholesky,
-        lu=false,
+        lu=c.lu,
         qr=false,
         rank_revealing_qr=c.rrqr,
-        pivoted_symmetric_ldlt=false,
+        pivoted_symmetric_ldlt=c.ldlt,
         factor_solve=c.cholesky,
         multi_rhs=c.multi_rhs,
         # MFLA provides a single correction primitive, not a full refinement
@@ -439,6 +443,161 @@ function SDPX.la_mfla_qr_factor!(
         workspace,
         factor_matrix(factor),
         factor_permutation(factor),
+    )
+end
+
+"""
+    _LUPayload{MF}
+
+Opaque LU payload.  The wrapped `MFLU` borrows its pivot metadata from the
+payload-owned `workspace`, so the lease stays valid exactly as long as this
+payload is alive and no other factorization reuses that workspace.  SDPX reads
+only the packed `factors` matrix through the core `la_mfla_lu_*` hooks and
+never interprets MFLA's private fields.
+"""
+struct _LUPayload{MF<:MultiFloat,F<:MFLU{MF}}
+    factor::F
+    workspace::MFWorkspace{MF}
+    config::KernelConfig
+end
+
+"""
+    _LDLTPayload{MF}
+
+Opaque pivoted symmetric-indefinite LDLT payload.  The wrapped `MFLDLT` borrows
+its `dsub`, `pivots`, and `blocks` metadata from the payload-owned `workspace`,
+so the lease stays valid exactly as long as this payload is alive and no other
+factorization reuses that workspace.  SDPX reads only public accessors through
+the core `la_mfla_ldlt_*` hooks.
+"""
+struct _LDLTPayload{MF<:MultiFloat,F<:MFLDLT{MF}}
+    factor::F
+    workspace::MFWorkspace{MF}
+    config::KernelConfig
+end
+
+SDPX.la_factor_provider_identity(::_LUPayload) =
+    :multifloat_linear_algebra
+SDPX.la_factor_provider_identity(::_LDLTPayload) =
+    :multifloat_linear_algebra
+
+function SDPX.la_mfla_lu_factor!(
+    provider::_Provider{MF},
+    A::AbstractMatrix{MF},
+) where {MF}
+    size(A, 1) == size(A, 2) || throw(DimensionMismatch(
+        "MFLA LU requires a square matrix",
+    ))
+    # A fresh MFWorkspace per factorization isolates the borrowed pivot
+    # metadata from every other live factor; no two factors share a workspace.
+    workspace = MFWorkspace(MF; thread_count=provider.config.thread_count)
+    factor = lu!(A; check=false, config=provider.config, workspace=workspace)
+    mfla_issuccess(factor) || return nothing
+    return _LUPayload{MF,typeof(factor)}(factor, workspace, provider.config)
+end
+
+function SDPX.la_mfla_lu_factor_matrix(payload::_LUPayload)
+    return factor_matrix(payload.factor)
+end
+
+function SDPX.la_mfla_lu_diagnostics(payload::_LUPayload)
+    return factor_diagnostics(payload.factor)
+end
+
+function SDPX.la_mfla_lu_solve!(payload::_LUPayload, rhs)
+    ldiv!(rhs, payload.factor; config=payload.config)
+    return rhs
+end
+
+function SDPX.la_mfla_ldlt_factor!(
+    provider::_Provider{MF},
+    A::AbstractMatrix{MF},
+) where {MF}
+    size(A, 1) == size(A, 2) || throw(DimensionMismatch(
+        "MFLA LDLT requires a square matrix",
+    ))
+    SDPX._all_finite_lower(A) || return nothing
+    # A fresh MFWorkspace per factorization isolates the borrowed dsub/pivots/
+    # blocks metadata from every other live factor.
+    workspace = MFWorkspace(MF; thread_count=provider.config.thread_count)
+    factor = ldlt!(A; check=false, config=provider.config, workspace=workspace)
+    mfla_issuccess(factor) || return nothing
+    return _LDLTPayload{MF,typeof(factor)}(factor, workspace, provider.config)
+end
+
+function SDPX.la_mfla_ldlt_factor_matrix(payload::_LDLTPayload)
+    return factor_matrix(payload.factor)
+end
+
+function SDPX.la_mfla_ldlt_diagnostics(payload::_LDLTPayload)
+    return factor_diagnostics(payload.factor)
+end
+
+function SDPX.la_mfla_ldlt_solve!(payload::_LDLTPayload, rhs)
+    ldiv!(rhs, payload.factor; config=payload.config)
+    return rhs
+end
+
+"""Compact MFLA's length-n block grammar into SDPX pivot-block sizes."""
+function _compact_ldlt_blocks(raw::AbstractVector{UInt8}, n::Int)
+    blocks = Int[]
+    k = 1
+    @inbounds while k <= n
+        marker = raw[k]
+        if marker == UInt8(1)
+            push!(blocks, 1)
+            k += 1
+        elseif marker == UInt8(2) && k < n && raw[k + 1] == UInt8(0)
+            push!(blocks, 2)
+            k += 2
+        else
+            throw(ArgumentError(
+                "MFLA LDLT returned an invalid pivot-block grammar",
+            ))
+        end
+    end
+    return blocks
+end
+
+"""Reconstruct the final row permutation from MFLA's stepwise pivot swaps."""
+function _final_ldlt_permutation(
+    raw_blocks::AbstractVector{UInt8},
+    pivots::AbstractVector{Int},
+    n::Int,
+)
+    perm = collect(1:n)
+    k = 1
+    @inbounds while k <= n
+        marker = raw_blocks[k]
+        if marker == UInt8(1)
+            pivot = pivots[k]
+            perm[k], perm[pivot] = perm[pivot], perm[k]
+            k += 1
+        elseif marker == UInt8(2) && k < n && raw_blocks[k + 1] == UInt8(0)
+            pivot = pivots[k]
+            perm[k + 1], perm[pivot] = perm[pivot], perm[k + 1]
+            k += 2
+        else
+            throw(ArgumentError(
+                "MFLA LDLT returned an invalid pivot-block grammar",
+            ))
+        end
+    end
+    return perm
+end
+
+function SDPX.la_mfla_ldlt_blocks(payload::_LDLTPayload)
+    diagnostics = factor_diagnostics(payload.factor)
+    return _compact_ldlt_blocks(diagnostics.blocks, length(diagnostics.blocks))
+end
+
+function SDPX.la_mfla_ldlt_permutation(payload::_LDLTPayload)
+    diagnostics = factor_diagnostics(payload.factor)
+    n = length(diagnostics.blocks)
+    return _final_ldlt_permutation(
+        diagnostics.blocks,
+        diagnostics.pivots,
+        n,
     )
 end
 
