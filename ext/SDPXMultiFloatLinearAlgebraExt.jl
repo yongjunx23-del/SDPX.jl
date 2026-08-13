@@ -42,6 +42,10 @@ import MultiFloatLinearAlgebra:
     syrk!,
     trsm!,
     trsv!,
+    residual!,
+    residual_mixed!,
+    normwise_backward_error,
+    refinement_correction!,
     cholesky!,
     lu!,
     ldlt!,
@@ -72,11 +76,12 @@ false so validation and instantiation fail closed.
 function _capability_model(::Type{MF}) where {MF<:MultiFloat}
     c = mfla_capabilities(MF)
     # Advertise only operations SDPX core actually dispatches through a
-    # working MultiFloat adapter.  LU and pivoted LDLT now have internal
-    # provider seams; a capability must never be advertised without a working
-    # dispatch, so both are mapped directly from the MFLA facts.  Unpivoted QR
-    # and a full refinement loop are still not exposed by SDPX core, so they
-    # remain false and any route needing them fails closed.
+    # working MultiFloat adapter.  LU, pivoted LDLT, residuals, and the
+    # one-step correction now have internal provider seams; a capability must
+    # never be advertised without a working dispatch, so each is mapped
+    # directly from the MFLA facts.  Unpivoted QR and a full refinement loop
+    # are still not exposed by SDPX core, so they remain false and any route
+    # needing them fails closed.
     return SDPX.LAProviderCapabilities(
         cholesky=c.cholesky,
         lu=c.lu,
@@ -87,8 +92,8 @@ function _capability_model(::Type{MF}) where {MF<:MultiFloat}
         multi_rhs=c.multi_rhs,
         # MFLA provides a single correction primitive, not a full refinement
         # loop; SDPX owns the structured refinement policy.
-        iterative_refinement=false,
-        higher_precision_residual=false,
+        iterative_refinement=c.refinement_correction,
+        higher_precision_residual=c.mixed_precision_residual,
         sparse_factorization=false,
         threading=c.threading,
         dot=c.dot,
@@ -127,6 +132,8 @@ const _DESCRIPTOR_CAPABILITIES = (
     :rank_revealing_qr,
     :lu,
     :pivoted_symmetric_ldlt,
+    :iterative_refinement,
+    :higher_precision_residual,
 )
 
 struct _Provider{MF<:MultiFloat}
@@ -403,6 +410,77 @@ function _provider_solve!(handle::_CholeskyHandle, rhs)
     return rhs
 end
 
+function SDPX.la_mfla_residual!(
+    provider::_Provider{MF},
+    trans,
+    A,
+    x,
+    b,
+    residual,
+    uplo::Symbol=:general,
+) where {MF}
+    trans in (:N, :NoTrans) || throw(ArgumentError(
+        "MFLA residual maps only trans=:N/:NoTrans to the same-precision " *
+        "public residual!",
+    ))
+    residual!(
+        residual,
+        A,
+        x,
+        b;
+        uplo=uplo,
+        config=provider.config,
+        workspace=provider.gemm_workspace,
+    )
+    return residual
+end
+
+function SDPX.la_mfla_normwise_backward_error(
+    provider::_Provider{MF},
+    trans,
+    A,
+    x,
+    b,
+    residual,
+    uplo::Symbol=:general,
+) where {MF}
+    trans in (:N, :NoTrans) || throw(ArgumentError(
+        "MFLA backward error maps only trans=:N/:NoTrans to the public " *
+        "normwise_backward_error",
+    ))
+    return normwise_backward_error(A, x, b, residual; uplo=uplo)
+end
+
+function SDPX.la_mfla_mixed_residual!(
+    provider::_Provider{MF},
+    A,
+    x,
+    b,
+    residual,
+    uplo::Symbol=:general,
+) where {MF}
+    residual_mixed!(residual, A, x, b; uplo=uplo, config=provider.config)
+    return residual
+end
+
+"""One MFLA `refinement_correction!`; no loop, stopping rule, or fallback."""
+function SDPX.la_mfla_refine_once!(
+    factor::_CholeskyHandle{MF},
+    A,
+    x,
+    b,
+    residual,
+    correction,
+) where {MF}
+    refinement_correction!(
+        correction,
+        factor.factor,
+        residual;
+        config=factor.config,
+    )
+    return correction
+end
+
 SDPX.la_factor_provider_identity(::_CholeskyHandle) =
     :multifloat_linear_algebra
 
@@ -539,6 +617,40 @@ end
 function SDPX.la_mfla_ldlt_solve!(payload::_LDLTPayload, rhs)
     ldiv!(rhs, payload.factor; config=payload.config)
     return rhs
+end
+
+function SDPX.la_mfla_refine_once!(
+    factor::_LUPayload{MF},
+    A,
+    x,
+    b,
+    residual,
+    correction,
+) where {MF}
+    refinement_correction!(
+        correction,
+        factor.factor,
+        residual;
+        config=factor.config,
+    )
+    return correction
+end
+
+function SDPX.la_mfla_refine_once!(
+    factor::_LDLTPayload{MF},
+    A,
+    x,
+    b,
+    residual,
+    correction,
+) where {MF}
+    refinement_correction!(
+        correction,
+        factor.factor,
+        residual;
+        config=factor.config,
+    )
+    return correction
 end
 
 """Compact MFLA's length-n block grammar into SDPX pivot-block sizes."""

@@ -1078,6 +1078,107 @@ la_normwise_backward_error(
     backend.provider, trans, A, x, b, residual,
 )
 
+la_residual!(
+    backend::MultiFloatLABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+) = la_residual!(
+    backend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+    :general,
+)
+
+function la_residual!(
+    backend::MultiFloatLABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+    uplo::Symbol,
+)
+    trans in (:N, :NoTrans) || throw(ArgumentError(
+        "MultiFloat residual maps only trans=:N/:NoTrans to the general " *
+        "same-precision kernel",
+    ))
+    return la_mfla_residual!(
+        backend.provider,
+        trans,
+        A,
+        x,
+        b,
+        residual,
+        uplo,
+    )
+end
+
+la_normwise_backward_error(
+    backend::MultiFloatLABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+) = la_normwise_backward_error(
+    backend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+    :general,
+)
+
+function la_normwise_backward_error(
+    backend::MultiFloatLABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+    uplo::Symbol,
+)
+    trans in (:N, :NoTrans) || throw(ArgumentError(
+        "MultiFloat backward error maps only trans=:N/:NoTrans to the " *
+        "same-precision kernel",
+    ))
+    return la_mfla_normwise_backward_error(
+        backend.provider,
+        trans,
+        A,
+        x,
+        b,
+        residual,
+        uplo,
+    )
+end
+
+"""Higher-limb mixed-precision residual through an optional provider."""
+function la_mixed_residual!(
+    backend::MultiFloatLABackend,
+    A,
+    x,
+    b,
+    residual,
+    uplo::Symbol=:general,
+)
+    return la_mfla_mixed_residual!(
+        backend.provider,
+        A,
+        x,
+        b,
+        residual,
+        uplo,
+    )
+end
+
 function la_higher_precision_residual!(
     backend::BFLALABackend,
     trans,
@@ -1117,10 +1218,65 @@ function la_refine_once!(
     )
 end
 
+function la_refine_once!(
+    factor::ProviderLACholeskyFactor,
+    A,
+    x,
+    b,
+    residual,
+    correction,
+)
+    la_factor_provider_identity(factor.provider) ===
+        :multifloat_linear_algebra || throw(ArgumentError(
+            "provider Cholesky handle does not support MFLA one-step refinement",
+        ))
+    return la_mfla_refine_once!(
+        factor.provider, A, x, b, residual, correction,
+    )
+end
+
+function la_refine_once!(
+    factor::ProviderLALUFactor,
+    A,
+    x,
+    b,
+    residual,
+    correction,
+)
+    la_factor_provider_identity(factor.provider) ===
+        :multifloat_linear_algebra || throw(ArgumentError(
+            "provider LU handle does not support MFLA one-step refinement",
+        ))
+    return la_mfla_refine_once!(
+        factor.provider, A, x, b, residual, correction,
+    )
+end
+
+function la_refine_once!(
+    factor::ProviderLALDLTFactor,
+    A,
+    x,
+    b,
+    residual,
+    correction,
+)
+    la_factor_provider_identity(factor.provider) ===
+        :multifloat_linear_algebra || throw(ArgumentError(
+            "provider LDLT handle does not support MFLA one-step refinement",
+        ))
+    return la_mfla_refine_once!(
+        factor.provider, A, x, b, residual, correction,
+    )
+end
+
 la_residual!(::AbstractLABackend, args...) =
     throw(ArgumentError("selected LA provider does not expose dense residuals"))
 la_normwise_backward_error(::AbstractLABackend, args...) =
     throw(ArgumentError("selected LA provider does not expose backward error"))
+la_mixed_residual!(::AbstractLABackend, args...) =
+    throw(ArgumentError(
+        "selected LA provider does not expose mixed-precision residuals",
+    ))
 la_higher_precision_residual!(::AbstractLABackend, args...; kwargs...) =
     throw(ArgumentError(
         "selected LA provider does not expose higher-precision residuals",
@@ -1470,6 +1626,14 @@ la_bfla_higher_precision_residual!(::Any, args...; kwargs...) =
     throw(ArgumentError("BFLA higher-precision residual unavailable"))
 la_bfla_refine_once!(::Any, args...) =
     throw(ArgumentError("BFLA one-step refinement unavailable"))
+la_mfla_residual!(::Any, args...) =
+    throw(ArgumentError("MultiFloat residual unavailable"))
+la_mfla_normwise_backward_error(::Any, args...) =
+    throw(ArgumentError("MultiFloat backward error unavailable"))
+la_mfla_mixed_residual!(::Any, args...) =
+    throw(ArgumentError("MultiFloat mixed-precision residual unavailable"))
+la_mfla_refine_once!(::Any, args...) =
+    throw(ArgumentError("MultiFloat one-step refinement unavailable"))
 la_mfla_qr_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("MultiFloat pivoted QR unavailable"))
 la_mfla_lu_factor!(::Any, ::AbstractMatrix) =
