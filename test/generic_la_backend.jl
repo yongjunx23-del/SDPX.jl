@@ -105,7 +105,11 @@ using Test
         LA.plan_la_backend(Float64; requested=:legacy),
         Float64,
     )
-    @test_throws ArgumentError LA.la_lu_factor!(legacy, [1.0 0.0; 0.0 1.0])
+    legacy_lu = LA.la_lu_factor!(legacy, [2.0 1.0; 1.0 2.0])
+    @test legacy_lu isa SDPX.LegacyLALUFactor{Float64}
+    legacy_rhs = [1.0, 0.0]
+    LA.la_factor_solve!(legacy_lu, legacy_rhs)
+    @test [2.0 1.0; 1.0 2.0] * legacy_rhs ≈ [1.0, 0.0]
     legacy_qr = LA.la_qr_factor!(
         legacy,
         [1.0 0.0; 0.0 1.0];

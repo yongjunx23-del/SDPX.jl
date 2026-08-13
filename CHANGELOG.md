@@ -24,6 +24,18 @@ separate v0.4.1 release.
   `bench/public_conic_suite/` as the acceptance layer for continued solver
   reorganization.
 - Development and architecture notes for the frontend/midend/backend migration.
+- Optional BigFloatLinearAlgebra (BFLA) and MultiFloatLinearAlgebra (MFLA)
+  providers now share provider-neutral dense factor handles for Cholesky,
+  equality rank-revealing QR, pivoted symmetric LDLT, and LU, with explicit
+  installed-provider smoke coverage in `test/provider_smoke.jl`.
+- GenericLinearAlgebra remains an explicit reference route for `:standard`
+  requests on BigFloat and extended arithmetic; MFLA/BFLA selection is final
+  at planning time and no runtime provider fallback is installed.
+- Provider smoke is intentionally outside the ordinary `Pkg.test` target
+  because MFLA is unregistered; `scripts/dev_v05_provider_smoke.sh` builds a
+  temporary environment from the real installed/local MFLA and BFLA checkouts
+  (`SDPX_MFLA_PROJECT` / `SDPX_BFLA_PROJECT`) and runs tiny Float64x4/BigFloat
+  LP and SDP solves without cloning either provider.
 
 ### Development policy
 

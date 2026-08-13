@@ -38,4 +38,9 @@ end
     @test isdefined(SDPX.Experimental, :la_lu_factor!)
     @test isdefined(SDPX.Experimental, :la_qr_factor!)
     @test isdefined(SDPX.Experimental, :la_factor_solve!)
+    @test SDPX.Experimental.AbstractLAFactorization ===
+          SDPX.AbstractLAFactorization
+    @test SDPX.Experimental.StandardLALUFactor === SDPX.StandardLALUFactor
+    @test SDPX.Experimental.ProviderLALUFactor === SDPX.ProviderLALUFactor
+    @test SDPX.Experimental.LegacyLALUFactor === SDPX.LegacyLALUFactor
 end

@@ -23,3 +23,23 @@ CI runs the quick profile across its Julia, platform, and thread matrix, then
 runs one full profile on the current Julia/Ubuntu/four-thread configuration.
 The full profile preserves the prior test-file order and coverage; the quick
 profile only changes which files run by default.
+
+## Explicit provider smoke
+
+`test/provider_smoke.jl` is intentionally not part of `runtests.jl` or the
+`Pkg.test` targets: `MultiFloatLinearAlgebra` is unregistered and
+`BigFloatLinearAlgebra` is developed locally, so the default test environment
+never clones or resolves them. Run it against the real installed/local
+providers with:
+
+```sh
+SDPX_MFLA_PROJECT=/path/to/MultiFloatLinearAlgebra \
+SDPX_BFLA_PROJECT=/path/to/BigFloatLinearAlgebra \
+scripts/dev_v05_provider_smoke.sh
+```
+
+Without explicit variables the runner defaults to the sibling checkouts
+`../../MFLA` and `../../BFLA` next to the shared SDPX worktrees. It builds a
+temporary environment with `Pkg.develop` (no clone), verifies MFLA/BFLA
+planning and factor identities, then runs tiny Float64x4/BigFloat LP and SDP
+solves through the installed MFLA and BFLA providers.

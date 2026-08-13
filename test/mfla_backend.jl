@@ -60,41 +60,54 @@ end
     if !_MFLA_LOADED
         @testset "fail closed without optional package" begin
             for T in _MFLA_TYPES
-                @test_throws ArgumentError LA.plan_la_backend(
-                    T;
-                    requested=:multifloat,
-                    route=:dense_cholesky,
+                for route in (
+                    :dense_cholesky,
+                    :positive_definite_cholesky,
+                    :dense_lu,
                 )
+                    @test_throws ArgumentError LA.plan_la_backend(
+                        T;
+                        requested=:multifloat,
+                        route=route,
+                    )
+                end
             end
-            @test_throws ArgumentError LA.plan_la_backend(
-                Float64;
-                requested=:multifloat,
-                route=:dense_cholesky,
-            )
-            @test_throws ArgumentError LA.plan_la_backend(
-                BigFloat;
-                requested=:multifloat,
-                route=:dense_cholesky,
-            )
+            for T in (Float64, BigFloat)
+                for route in (
+                    :dense_cholesky,
+                    :positive_definite_cholesky,
+                    :dense_lu,
+                )
+                    @test_throws ArgumentError LA.plan_la_backend(
+                        T;
+                        requested=:multifloat,
+                        route=route,
+                    )
+                end
+            end
         end
     end
 
     @testset "standard and legacy remain stable reference routes" begin
-        for T in _MFLA_TYPES
+        for T in _MFLA_TYPES, route in (
+            :dense_cholesky,
+            :positive_definite_cholesky,
+            :dense_lu,
+        )
             @test LA.plan_la_backend(
                 T;
                 requested=:standard,
-                route=:dense_cholesky,
+                route=route,
             ).selected === :standard
             @test LA.plan_la_backend(
                 T;
                 requested=:legacy,
-                route=:dense_cholesky,
+                route=route,
             ).selected === :legacy
             @test LA.plan_la_backend(
                 T;
                 requested=:auto,
-                route=:dense_cholesky,
+                route=route,
             ).selected === (_MFLA_LOADED ? :multifloat : :standard)
         end
     end
@@ -366,6 +379,7 @@ if _MFLA_LOADED
             @test SDPX.la_factor_provider_identity(
                 SDPX.la_factor_provider(factor),
             ) === :multifloat_linear_algebra
+            @test SDPX.la_factor_provider(factor) !== backend.provider
 
             rhs_vector = T[1, 2]
             solution = copy(rhs_vector)
@@ -637,57 +651,69 @@ if _MFLA_LOADED
             )
         end
 
-        @testset "LP is not migrated to MFLA" begin
-            problem = SDPX.linear_program(
-                T[1, 2],
-                Matrix{T}(I, 2, 2),
-                T[3, 4];
-                T=T,
-                sparse=false,
+        @testset "tiny dense LP uses MFLA" begin
+            for (with_equality, expected_kkt, expected_factor) in (
+                (false, :positive_definite_cholesky, :cholesky),
+                (true, :dense_lu, :lu),
             )
-            legacy_plan = SDPX.build_execution_plan(
-                problem,
-                SDPX.SolverOptions{T}(
-                    algorithm=:lp,
-                    linear_algebra_backend=:auto,
-                    verbosity=0,
-                ),
-            )
-            @test legacy_plan.algorithm === :lp_primal_dual
-            @test legacy_plan.la_config.selected === :legacy
-            @test legacy_plan.la_config.provider === :sdpx_legacy_la
-            @test legacy_plan.la_config.fallback_reason ===
-                  :route_not_migrated
-
-            @test_throws ArgumentError SDPX.build_execution_plan(
-                problem,
-                SDPX.SolverOptions{T}(
-                    algorithm=:lp,
-                    linear_algebra_backend=:multifloat,
-                    verbosity=0,
-                ),
-            )
-
-            result = SDPX.solve(
-                problem,
-                SDPX.SolveOptions(
+                problem = SDPX.linear_program(
+                    T[1, 2],
+                    T[1 0; 0 1; 1 1],
+                    T[1, 1, 3];
+                    Aeq=with_equality ? T[1 1] : nothing,
+                    beq=with_equality ? T[3] : nothing,
+                    T=T,
+                    sparse=false,
+                )
+                options = SDPX.SolverOptions{T}(
                     verbosity=0,
                     diagnostics=true,
+                    timing=false,
                     algorithm=:lp,
-                    duality_gap_threshold=T(1e-10),
-                    primal_error_threshold=T(1e-10),
-                    dual_error_threshold=T(1e-10),
-                    linear_algebra_backend=:legacy,
+                    presolve=false,
+                    scaling=:none,
+                    ϵ_gap=T(1e-10),
+                    ϵ_primal=T(1e-10),
+                    ϵ_dual=T(1e-10),
+                    linear_algebra_backend=:multifloat,
+                )
+                plan = SDPX.build_execution_plan(problem, options)
+                @test plan.kkt_backend === expected_kkt
+                @test plan.la_config.selected === :multifloat
+                @test plan.la_config.provider ===
+                      :multifloat_linear_algebra
+                @test expected_factor in
+                      plan.la_config.required_capabilities
+                result = SDPX.solve!(problem, options)
+                @test result.status == SDPX.Optimal
+                @test isapprox(Float64(result.pObj), 4.0; atol=1e-6)
+                selected = result.diagnostics.selected_algorithms
+                @test selected.kkt === expected_kkt
+                @test selected.lp_formulation === expected_kkt
+                @test selected.la_backend === :multifloat
+                @test selected.la_executed_provider ===
+                      :multifloat_linear_algebra
+                @test selected.la_factorization === expected_factor
+                @test selected.planned_la_backend === :multifloat
+            end
+
+            auto_plan = SDPX.build_execution_plan(
+                SDPX.linear_program(
+                    T[1, 2],
+                    T[1 0; 0 1; 1 1],
+                    T[1, 1, 3];
+                    T=T,
+                    sparse=false,
+                ),
+                SDPX.SolverOptions{T}(
+                    verbosity=0,
+                    algorithm=:lp,
+                    presolve=false,
+                    scaling=:none,
+                    linear_algebra_backend=:auto,
                 ),
             )
-            @test result.status == SDPX.Optimal
-            @test isapprox(Float64(result.pObj), 11.0; atol=1e-6)
-            selected = result.diagnostics.selected_algorithms
-            @test selected.planned_la_backend === :legacy
-            @test selected.planned_la_provider === :sdpx_legacy_la
-            @test selected.planned_la_fallback_reason ===
-                  :route_not_migrated
-            @test selected.certificate.valid
+            @test auto_plan.la_config.selected === :multifloat
         end
     end
 

@@ -21,16 +21,25 @@ end
             BigFloat;
             requested=:bfla,
         )
+        for route in (:positive_definite_cholesky, :dense_lu)
+            @test_throws ArgumentError LA.plan_la_backend(
+                BigFloat;
+                requested=:bfla,
+                route=route,
+            )
+        end
     end
     @test_throws ArgumentError LA.plan_la_backend(
         Float64;
         requested=:bfla,
     )
-    @test_throws ArgumentError LA.plan_la_backend(
-        BigFloat;
-        requested=:bfla,
-        route=:block_arrow,
-    )
+    for route in (:block_arrow, :q3_block_diagonal_equality)
+        @test_throws ArgumentError LA.plan_la_backend(
+            BigFloat;
+            requested=:bfla,
+            route=route,
+        )
+    end
 
     # Optional-provider presence may only affect BigFloat automatic planning;
     # explicit standard and legacy policies remain stable reference/rollback
@@ -43,6 +52,18 @@ end
         BigFloat;
         requested=:legacy,
     ).selected === :legacy
+    for route in (:positive_definite_cholesky, :dense_lu)
+        @test LA.plan_la_backend(
+            BigFloat;
+            requested=:standard,
+            route=route,
+        ).selected === :standard
+        @test LA.plan_la_backend(
+            BigFloat;
+            requested=:legacy,
+            route=route,
+        ).selected === :legacy
+    end
 end
 
 bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
@@ -412,22 +433,36 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
     end
 end
 
-@testset "BFLA rejects non-migrated LP route" begin
+@testset "BFLA dense LP route and non-migrated routes" begin
     setprecision(BigFloat, 256) do
-        problem = SDPX.linear_program(
-            BigFloat[1, 2],
-            BigFloat[1 0; 0 1],
-            BigFloat[3, 4];
-            T=BigFloat,
-        )
-        options = SDPX.SolverOptions{BigFloat}(
-            algorithm=:lp,
-            presolve=false,
-            scaling=:none,
-            linear_algebra_backend=:bfla,
-            verbosity=0,
-        )
-        @test_throws ArgumentError SDPX.build_execution_plan(problem, options)
+        LA = SDPX.Experimental
+        if bfla_extension === nothing
+            problem = SDPX.linear_program(
+                BigFloat[1, 2],
+                BigFloat[1 0; 0 1; 1 1],
+                BigFloat[1, 1, 3];
+                T=BigFloat,
+                sparse=false,
+            )
+            options = SDPX.SolverOptions{BigFloat}(
+                algorithm=:lp,
+                presolve=false,
+                scaling=:none,
+                linear_algebra_backend=:bfla,
+                verbosity=0,
+            )
+            @test_throws ArgumentError SDPX.build_execution_plan(
+                problem,
+                options,
+            )
+        end
+        for route in (:block_arrow, :q3_block_diagonal_equality)
+            @test_throws ArgumentError LA.plan_la_backend(
+                BigFloat;
+                requested=:bfla,
+                route=route,
+            )
+        end
     end
 end
 
@@ -514,6 +549,88 @@ if _BFLA_LOADED
                 )
                 _assert_bfla_execution(plan, bfla)
                 _compare_trusted_reference(bfla, reference)
+            end
+
+            @testset "BFLA LU internal seam" begin
+                LA = SDPX.Experimental
+                backend = LA.instantiate_la_backend(
+                    LA.plan_la_backend(BigFloat; requested=:bfla),
+                    BigFloat,
+                )
+                A = BigFloat[4 1; 2 3]
+                factor = SDPX.la_lu_factor!(
+                    backend,
+                    SDPX._owned_array_copy(BigFloat, A),
+                )
+                @test factor isa SDPX.ProviderLALUFactor{BigFloat}
+                @test SDPX.la_factor_kind(factor) === :lu
+                @test SDPX.la_factor_provider(factor) !== backend.provider
+                @test SDPX.la_factor_provider_identity(
+                    SDPX.la_factor_provider(factor),
+                ) === :bigfloat_linear_algebra
+
+                rhs_vector = SDPX._owned_array_copy(
+                    BigFloat,
+                    BigFloat[1, 2],
+                )
+                solution = SDPX._owned_array_copy(BigFloat, rhs_vector)
+                SDPX.la_factor_solve!(factor, solution)
+                @test A * solution ≈ rhs_vector rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
+
+                rhs_matrix = SDPX._owned_array_copy(
+                    BigFloat,
+                    BigFloat[1 2; 3 4],
+                )
+                solution_matrix = SDPX._owned_array_copy(
+                    BigFloat,
+                    rhs_matrix,
+                )
+                SDPX.la_factor_solve!(factor, solution_matrix)
+                @test A * solution_matrix ≈ rhs_matrix rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
+            end
+
+            @testset "tiny dense LP planned and executed with BFLA" begin
+                for (with_equality, expected_kkt, expected_factor) in (
+                    (false, :positive_definite_cholesky, :cholesky),
+                    (true, :dense_lu, :lu),
+                )
+                    problem = SDPX.linear_program(
+                        BigFloat[1, 2],
+                        BigFloat[1 0; 0 1; 1 1],
+                        BigFloat[1, 1, 3];
+                        Aeq=with_equality ? BigFloat[1 1] : nothing,
+                        beq=with_equality ? BigFloat[3] : nothing,
+                        T=BigFloat,
+                        sparse=false,
+                    )
+                    options = SDPX.SolverOptions{BigFloat}(
+                        algorithm=:lp,
+                        presolve=false,
+                        scaling=:none,
+                        linear_algebra_backend=:bfla,
+                        verbosity=0,
+                        diagnostics=true,
+                    )
+                    plan = SDPX.build_execution_plan(problem, options)
+                    @test plan.kkt_backend === expected_kkt
+                    @test plan.la_config.selected === :bfla
+                    @test plan.la_config.provider === :bigfloat_linear_algebra
+                    @test plan.la_config.fallback_chain === ()
+                    @test expected_factor in
+                          plan.la_config.required_capabilities
+                    result = SDPX.solve!(problem, options)
+                    @test result.status == SDPX.Optimal
+                    @test result.pObj ≈ big"4.0" rtol=big"1e-8"
+                    selected = result.diagnostics.selected_algorithms
+                    @test selected.kkt === expected_kkt
+                    @test selected.lp_formulation === expected_kkt
+                    @test selected.la_backend === :bfla
+                    @test selected.la_executed_provider ===
+                          :bigfloat_linear_algebra
+                    @test selected.la_factorization === expected_factor
+                    @test selected.planned_la_backend === :bfla
+                    @test selected.backend_resolution === :post_presolve
+                end
             end
 
         end

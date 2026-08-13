@@ -188,4 +188,98 @@ end
             )
         end
     end
+
+    @testset "dense LP routes use the migrated provider seam" begin
+        LA = SDPX.Experimental
+        pd = LA.plan_la_backend(
+            Float64;
+            route=:positive_definite_cholesky,
+        )
+        @test pd.selected === :standard
+        @test pd.provider === :blas_lapack
+        @test :cholesky in pd.required_capabilities
+        @test :lu ∉ pd.required_capabilities
+        @test pd.fallback_chain === ()
+        @test pd.fallback_reason === :none
+
+        lu = LA.plan_la_backend(Float64; route=:dense_lu)
+        @test lu.selected === :standard
+        @test lu.provider === :blas_lapack
+        @test :lu in lu.required_capabilities
+        @test :cholesky ∉ lu.required_capabilities
+        @test lu.fallback_chain === ()
+        @test lu.fallback_reason === :none
+
+        for route in (:positive_definite_cholesky, :dense_lu)
+            legacy = LA.plan_la_backend(
+                Float64;
+                route=route,
+                requested=:legacy,
+            )
+            @test legacy.selected === :legacy
+            @test legacy.provider === :sdpx_legacy_la
+            @test legacy.fallback_reason === :requested_legacy
+        end
+    end
+
+    @testset "specialized LP-adjacent routes remain non-migrated" begin
+        LA = SDPX.Experimental
+        for route in (:block_arrow, :q3_block_diagonal_equality)
+            automatic = LA.plan_la_backend(Float64; route=route)
+            @test automatic.selected === :legacy
+            @test automatic.provider === :sdpx_legacy_la
+            @test automatic.fallback_reason === :route_not_migrated
+            legacy = LA.plan_la_backend(
+                Float64;
+                route=route,
+                requested=:legacy,
+            )
+            @test legacy.selected === :legacy
+            @test legacy.fallback_reason === :route_not_migrated
+            @test_throws ArgumentError LA.plan_la_backend(
+                Float64;
+                route=route,
+                requested=:standard,
+            )
+        end
+    end
+
+    @testset "dense LP provider requests fail closed" begin
+        LA = SDPX.Experimental
+        if Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt) === nothing
+            for route in (:positive_definite_cholesky, :dense_lu)
+                @test_throws ArgumentError LA.plan_la_backend(
+                    BigFloat;
+                    requested=:bfla,
+                    route=route,
+                )
+            end
+        end
+        if Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt) === nothing
+            @test_throws ArgumentError LA.plan_la_backend(
+                Float64;
+                requested=:multifloat,
+                route=:dense_lu,
+            )
+        end
+
+        # A provider that claims the dense-LP route without the required LU
+        # capability must be rejected during validation, never executed.
+        incomplete = SDPX.Experimental.LABackendConfiguration(
+            :float64,
+            :standard,
+            :standard,
+            :blas_lapack,
+            (:cholesky,),
+            SDPX.Experimental.LAProviderCapabilities(cholesky=true),
+            (:lu, :factor_solve),
+            :julia_blas_lapack,
+            (),
+            :none,
+            :immutable_scalars,
+        )
+        @test_throws ArgumentError (
+            SDPX.Experimental.validate_la_backend_configuration(incomplete)
+        )
+    end
 end
