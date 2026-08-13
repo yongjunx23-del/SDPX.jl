@@ -20,6 +20,7 @@ flamegraph*.svg
 # and are far too large to distribute — the serialized problem instances alone
 # run to gigabytes.
 bench/**/results/
+bench/**/out/
 bench/**/*.bin
 bench/**/*.log
 bench/**/*.out
