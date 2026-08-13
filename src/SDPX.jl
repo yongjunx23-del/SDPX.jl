@@ -1,6 +1,6 @@
 module SDPX
 
-using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SparseArrays, Serialization
+using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, Serialization
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("types.jl")

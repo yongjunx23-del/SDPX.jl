@@ -33,6 +33,7 @@ using Test
     include("frontend_auto_options.jl")
     include("v041_architecture_regressions.jl")
     include("public_api.jl")
+    include("prepared_structure.jl")
     include("moi_regressions.jl")
     include("convex_regressions.jl")
     include("extended_blas_regressions.jl")

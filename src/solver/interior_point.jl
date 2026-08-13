@@ -2048,6 +2048,7 @@ function solve!(
     y0=nothing,
     Y0=nothing,
     resume::AbstractString="",
+    _prepared_data=nothing,
 ) where {T}
     return _solve_pipeline!(
         prob,
@@ -2057,6 +2058,7 @@ function solve!(
         y0=y0,
         Y0=Y0,
         resume=resume,
+        _prepared_data=_prepared_data,
     )
 end
 
@@ -2137,6 +2139,7 @@ function solve!(
     y0=nothing,
     Y0=nothing,
     resume::AbstractString="",
+    _prepared_data=nothing,
 )
     _validate_solver_options(opts)
     requested_precision = opts.precision_bits
@@ -2147,6 +2150,10 @@ function solve!(
     started = time()
 
     function run_at_precision(run_options, bits)
+        reusable_prepared_data =
+            _prepared_data !== nothing &&
+            get(_prepared_data, :precision_bits, 0) == bits ?
+            _prepared_data : nothing
         run = () -> _solve_pipeline!(
             prob,
             run_options;
@@ -2155,6 +2162,7 @@ function solve!(
             y0=y0,
             Y0=Y0,
             resume=resume,
+            _prepared_data=reusable_prepared_data,
         )
         return Base.precision(BigFloat) == bits ?
                run() :
@@ -2242,15 +2250,33 @@ function _solve_pipeline!(
     y0=nothing,
     Y0=nothing,
     resume::AbstractString="",
+    _prepared_data=nothing,
 ) where {T}
     _validate_solver_options(opts)
     pipeline_started = time()
     deadline = isfinite(opts.max_time) ?
                pipeline_started + opts.max_time :
                Inf
-    preprocessed = preprocess(prob, opts)
-    reduced, equality_map, equality_report =
+    if _prepared_data !== nothing
+        get(_prepared_data, :precision_bits, 0) == _preprocess_precision_bits(T) ||
+            throw(PreparedStructureMismatch(
+                :arithmetic_precision_changed,
+                "prepared preprocessing data was built at a different " *
+                "arithmetic precision",
+            ))
+    end
+    preprocessed = _prepared_data === nothing ?
+                   preprocess(prob, opts) :
+                   _prepared_data.preprocessed
+    reduced, equality_map, equality_report = if _prepared_data === nothing
         presolve_equalities(preprocessed.problem, opts)
+    else
+        (
+            _prepared_data.reduced,
+            _prepared_data.equality_map,
+            _prepared_data.equality_report,
+        )
+    end
     report = _merge_presolve_reports(
         preprocessed,
         equality_map,

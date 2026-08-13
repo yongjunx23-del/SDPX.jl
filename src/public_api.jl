@@ -71,6 +71,14 @@ const la_refine! = SDPX.la_refine!
 const la_axpby! = SDPX.la_axpby!
 const la_axpby_owned! = SDPX.la_axpby_owned!
 const SolveDiagnostics = SDPX.SolveDiagnostics
+const PreparedStructure = SDPX.PreparedStructure
+const SolveState = SDPX.SolveState
+const PreprocessTransform = SDPX.PreprocessTransform
+const StructureFingerprint = SDPX.StructureFingerprint
+const PreparedStructureMismatch = SDPX.PreparedStructureMismatch
+const structure_fingerprint = SDPX.structure_fingerprint
+const transform_objective = SDPX.transform_objective
+const transform_rhs = SDPX.transform_rhs
 
 const AbstractPreprocessStage = SDPX.AbstractPreprocessStage
 const PreprocessContext = SDPX.PreprocessContext
@@ -142,6 +150,9 @@ export AbstractParameterPolicy, FixedParameterPolicy
 export AdaptiveParameterPolicy, IterationDiagnostics, IterationParameters
 export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
+export PreparedStructure, SolveState, PreprocessTransform
+export StructureFingerprint, PreparedStructureMismatch
+export structure_fingerprint, transform_objective, transform_rhs
 export AbstractLABackend, StandardLABackend, LegacyLABackend
 export SDPXLegacyLAProvider, MultiFloatLABackend, LABackendConfiguration
 export LAProviderCapabilities, la_provider_supports
