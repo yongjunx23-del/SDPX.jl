@@ -132,13 +132,13 @@ if _MFLA_LOADED
                 :mul_owned,
                 :syrk,
                 :triangular_solve,
+                :rank_revealing_qr,
             )
                 @test capability in config.capability_model
             end
             for absent in (
                 :lu,
                 :qr,
-                :rank_revealing_qr,
                 :pivoted_symmetric_ldlt,
                 :iterative_refinement,
                 :higher_precision_residual,
@@ -161,12 +161,16 @@ if _MFLA_LOADED
             )
             @test normal.selected === :multifloat
             @test normal.fallback_chain == ()
-            @test_throws ArgumentError LA.plan_la_backend(
+            @test :rank_revealing_qr ∉ normal.required_capabilities
+            equality = LA.plan_la_backend(
                 T;
                 requested=:multifloat,
                 route=:dense_cholesky,
                 equality_solver=:qr,
             )
+            @test equality.selected === :multifloat
+            @test :rank_revealing_qr in equality.required_capabilities
+            @test :qr ∉ equality.required_capabilities
         end
     end
 
@@ -203,6 +207,115 @@ if _MFLA_LOADED
                 bad_lower,
             )
         end
+    end
+
+    @testset "MFLA equality RRQR SDPX seam" begin
+        rng = MersenneTwister(0x7171)
+        T = Float64x4
+        backend = _expect_multifloat_backend(T)
+
+        # Exact full-rank: packed factors stay provider-owned and SDPX wraps
+        # the provider payload with the equality handle.
+        M = T.(randn(rng, 6, 4))
+        factor = SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, M);
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        )
+        @test factor isa SDPX.EqualityQRFactor{T}
+        @test SDPX.la_factor_provider(factor) === backend.provider
+        @test SDPX.la_factor_rank(factor) == size(M, 2)
+        @test sort(SDPX.la_factor_permutation(factor)) == collect(1:4)
+        @test SDPX.la_factor_packed_factors(factor) isa Matrix{T}
+        @test SDPX.la_factor_quality(factor) > zero(T)
+
+        rhs = T.(randn(rng, size(M, 2)))
+        direction = SDPX.alloc_zeros(T, size(M, 2))
+        scratch = SDPX.alloc_zeros(T, size(M, 2))
+        SDPX._solve_Q!(direction, factor, rhs, scratch)
+        relative_residual =
+            norm(transpose(M) * (M * direction) - rhs) / norm(rhs)
+        @test relative_residual <= T(1_000) * eps(T)
+
+        # Rank deficiency is a successful factorization; SDPX owns the
+        # relative rank policy, not MFLA.
+        Bdeficient = T[
+            1 2 3
+            2 4 6
+            3 6 9
+            4 8 12
+            1 1 1
+        ]
+        deficient = SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, Bdeficient);
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        )
+        @test SDPX.la_factor_rank(deficient) == 2
+
+        # Scaling the same near-dependent geometry must not change the
+        # selected relative rank.
+        Bnear = T[
+            1 0
+            0 T(1e-40)
+            0 0
+        ]
+        near = SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, Bnear);
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        )
+        near_scaled = SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, T(1e20) .* Bnear);
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        )
+        @test SDPX.la_factor_rank(near) == 1
+        @test SDPX.la_factor_rank(near_scaled) == 1
+        @test sort(SDPX.la_factor_permutation(near)) == [1, 2]
+        @test sort(SDPX.la_factor_permutation(near_scaled)) == [1, 2]
+
+        # Fail closed: no unpivoted or untoleranced equality QR request.
+        @test_throws ArgumentError SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, M);
+            pivoted=false,
+        )
+        @test_throws ArgumentError SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, M);
+            pivoted=true,
+        )
+    end
+
+    @testset "MFLA equality RRQR workspace factor lifetime separation" begin
+        T = Float64x4
+        backend = _expect_multifloat_backend(T)
+        rng = MersenneTwister(0x9191)
+        A = T.(randn(rng, 8, 3))
+
+        first = SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, A);
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        )
+        second = SDPX.la_qr_factor!(
+            backend,
+            SDPX._owned_array_copy(T, A);
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        )
+        @test first !== nothing
+        @test second !== nothing
+        @test SDPX.la_factor_provider(first) === backend.provider
+        @test SDPX.la_factor_provider(second) === backend.provider
+        @test SDPX.la_factor_rank(first) == size(A, 2)
+        @test SDPX.la_factor_rank(second) == size(A, 2)
     end
 
 end
