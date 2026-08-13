@@ -1,4 +1,5 @@
 using Test
+using TOML
 
 include(joinpath(@__DIR__, "..", "benchmark", "SDPXBenchmarkRegistry.jl"))
 using .SDPXBenchmarkRegistry
@@ -94,13 +95,29 @@ end
     @test isempty(local_result.rows[1].semantic_failures)
     @test isfile(local_result.paths.toml)
     @test isfile(local_result.paths.tsv)
+
+    clean_document = TOML.parsefile(local_result.paths.toml)
+    dirty_document = deepcopy(clean_document)
+    for row in clean_document["result"]
+        row["source_dirty"] = false
+    end
+    for row in dirty_document["result"]
+        row["source_dirty"] = true
+    end
+    clean_output = tempname() * ".toml"
+    dirty_output = tempname() * ".toml"
+    open(clean_output, "w") do io
+        TOML.print(io, clean_document; sorted=true)
+    end
+    open(dirty_output, "w") do io
+        TOML.print(io, dirty_document; sorted=true)
+    end
     @test_throws ArgumentError compare_result_files(
-        local_result.paths.toml,
-        local_result.paths.toml,
+        dirty_output,
+        dirty_output,
     )
     @test length(compare_result_files(
-        local_result.paths.toml,
-        local_result.paths.toml;
-        allow_dirty=true,
+        clean_output,
+        clean_output,
     )) == 1
 end
