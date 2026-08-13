@@ -693,7 +693,7 @@ Base.@kwdef struct SolverOptions{T}
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
     # :dual has an analysis estimate but no production transform; an explicit
     # request fails before backend/provider planning.
-    formulation::Symbol       = :auto                   # :auto | :primal | :dual | :augmented
+    formulation::Symbol       = :auto                   # :auto | :primal | :normal_equations | :dual | :augmented
     chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings

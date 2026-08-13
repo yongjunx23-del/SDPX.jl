@@ -2387,6 +2387,7 @@ function _solve_pipeline!(
         AutoPlanner(),
         planning_problem,
         opts,
+        equality_evidence=equality_map.planning_evidence,
     )
     pipeline_structural_analysis_seconds +=
         (time_ns() - structural_analysis_started) / 1.0e9
@@ -2722,6 +2723,7 @@ function _solve_pipeline!(
                 AutoPlanner(),
                 reduced,
                 fallback_options,
+                equality_evidence=equality_map.planning_evidence,
             )
             pipeline_structural_analysis_seconds +=
                 (time_ns() - fallback_structural_analysis_started) / 1.0e9
@@ -2782,7 +2784,14 @@ function _solve_pipeline!(
                               reduced,
                               plan.threads,
                           ) :
-                          dense_workspace_floor_bytes(
+                          route === :dense_augmented_ldlt ?
+                          dense_augmented_workspace_floor_bytes(
+                              T,
+                              reduced.dims.m,
+                              reduced.dims.n,
+                              reduced.dims.L,
+                              plan.threads,
+                          ) : dense_workspace_floor_bytes(
                               T,
                               reduced.dims.m,
                               reduced.dims.n,
@@ -2829,10 +2838,14 @@ function _solve_pipeline!(
         )
         # Keep diagnostics out of the hot path: recursively traversing every
         # sparse coefficient object can cost much more than a warmed solve.
-        workspace_bytes = estimate_sdp_workspace_bytes(
-            reduced,
-            plan.threads,
-        )
+        workspace_bytes = plan.kkt_backend === :dense_augmented_ldlt ?
+                          estimate_dense_augmented_workspace_bytes(
+                              reduced,
+                              plan.threads,
+                          ) : estimate_sdp_workspace_bytes(
+                              reduced,
+                              plan.threads,
+                          )
     end
     if redundant_rows > 0
         report = PresolveReport(

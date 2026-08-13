@@ -56,13 +56,18 @@ The ordinary frontend exposes policies, not low-level IPM constants:
 --presolve=auto|on|off
 --scaling=auto|none|equilibrate
 --sparse=auto|on|off
---formulation=auto|primal|dual
+--formulation=auto|primal|normal_equations|augmented|dual
 --chordalDecomposition=auto|on|off
 --equalitySolver=auto|normal_equations|qr
 --workingPrecisionPolicy=auto|fixed
 --threads=auto|N
 --certificate=auto|on|off
 ```
+
+In v0.5, `auto` uses the static formulation planner for eligible dense systems.
+`normal_equations` and `augmented` are expert overrides; `primal` preserves the
+historical primal orientation without disabling sparse or block-arrow routes.
+`dual` is reserved for a future typed dual transform and fails closed.
 
 Parameters such as centering constants, Q3 Gram strategies, mixed-precision
 condition limits and refinement micro-policy remain expert/internal controls.

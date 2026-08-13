@@ -33,6 +33,50 @@ struct CanonicalPSDConeFacts
 end
 
 """
+    DenseFormulationFeatures{T}
+
+Cheap facts used to compare the two implemented dense SDP formulations.
+They describe the mathematical input only: no provider, precision policy,
+fallback, or selected formulation is stored here.
+"""
+struct DenseFormulationFeatures{T}
+    variables::Int
+    equalities::Int
+    equality_density::Float64
+    equality_scale_spread::T
+    normal_dimension::Int
+    augmented_dimension::Int
+    augmented_square_ratio::Float64
+end
+
+"""
+    EqualityPlanningEvidence
+
+Post-presolve evidence produced by the equality basis analysis already needed
+for correctness. It is kept separate from `ProblemFeatures`: an RRQR result is
+not an input fact, and the formulation planner must never run a second RRQR to
+manufacture it.
+"""
+struct EqualityPlanningEvidence
+    available::Bool
+    basis_verified::Bool
+    rank_before::Int
+    rank_after::Int
+    relative_rrqr_quality::Float64
+    reason::Symbol
+end
+
+EqualityPlanningEvidence(equalities::Int; reason::Symbol=:not_computed) =
+    EqualityPlanningEvidence(
+        false,
+        false,
+        equalities,
+        equalities,
+        NaN,
+        reason,
+    )
+
+"""
     ProblemFeatures{T}
 
 Pure facts extracted from a `CanonicalConicProblem{T}`.  No field chooses a
@@ -45,9 +89,174 @@ struct ProblemFeatures{T}
     linear_cones::Vector{CanonicalAffineConeFacts}
     lorentz_cones::Vector{CanonicalAffineConeFacts}
     psd_cones::Vector{CanonicalPSDConeFacts}
+    dense_formulation::DenseFormulationFeatures{T}
 end
 
 Base.eltype(::ProblemFeatures{T}) where {T} = T
+
+function _default_dense_formulation_features(
+    ::Type{T},
+    variables::Int,
+    equalities::CanonicalAffineMapFacts,
+) where {T}
+    equality_count = equalities.matrix.rows
+    denominator = equalities.matrix.rows * equalities.matrix.columns
+    density = denominator == 0 ? 0.0 :
+              equalities.matrix.nonzero_values / denominator
+    augmented = variables + equality_count
+    square_ratio = variables == 0 ? Inf :
+                   Float64(augmented)^2 / Float64(variables)^2
+    return DenseFormulationFeatures{T}(
+        variables,
+        equality_count,
+        density,
+        one(T),
+        variables,
+        augmented,
+        square_ratio,
+    )
+end
+
+# Source compatibility for the original six-field facts constructor used by
+# inspection tests and downstream tools. Exact scale facts are populated by
+# `extract_problem_features`; synthetic callers get the neutral spread 1.
+function ProblemFeatures{T}(
+    variables::Int,
+    objective_nonzero_values::Int,
+    equalities::CanonicalAffineMapFacts,
+    linear_cones::Vector{CanonicalAffineConeFacts},
+    lorentz_cones::Vector{CanonicalAffineConeFacts},
+    psd_cones::Vector{CanonicalPSDConeFacts},
+) where {T}
+    return ProblemFeatures{T}(
+        variables,
+        objective_nonzero_values,
+        equalities,
+        linear_cones,
+        lorentz_cones,
+        psd_cones,
+        _default_dense_formulation_features(T, variables, equalities),
+    )
+end
+
+@inline function _finite_abs(value, label::AbstractString)
+    isfinite(value) || throw(ArgumentError("$label contains a non-finite value"))
+    return abs(value)
+end
+
+function _equality_row_scale_spread(
+    matrix::AbstractMatrix{T},
+    label::AbstractString,
+) where {T}
+    minimum_nonzero = nothing
+    maximum_scale = zero(T)
+    @inbounds for row in axes(matrix, 1)
+        scale = zero(T)
+        for column in axes(matrix, 2)
+            scale = max(scale, _finite_abs(matrix[row, column], label))
+        end
+        if !iszero(scale)
+            minimum_nonzero = minimum_nonzero === nothing ? scale :
+                              min(minimum_nonzero, scale)
+            maximum_scale = max(maximum_scale, scale)
+        end
+    end
+    minimum_nonzero === nothing && return one(T)
+    return maximum_scale / minimum_nonzero
+end
+
+function _equality_row_scale_spread(
+    matrix::SparseMatrixCSC{T,Int},
+    label::AbstractString,
+) where {T}
+    row_scales = zeros(T, size(matrix, 1))
+    rows = rowvals(matrix)
+    values = nonzeros(matrix)
+    @inbounds for pointer in eachindex(values)
+        row = rows[pointer]
+        row_scales[row] = max(
+            row_scales[row],
+            _finite_abs(values[pointer], label),
+        )
+    end
+    minimum_nonzero = nothing
+    maximum_scale = zero(T)
+    @inbounds for scale in row_scales
+        if !iszero(scale)
+            minimum_nonzero = minimum_nonzero === nothing ? scale :
+                              min(minimum_nonzero, scale)
+            maximum_scale = max(maximum_scale, scale)
+        end
+    end
+    minimum_nonzero === nothing && return one(T)
+    return maximum_scale / minimum_nonzero
+end
+
+function _equality_row_scale_spread(
+    matrix::LinearAlgebra.Transpose{T,<:SparseMatrixCSC{T,Int}},
+    label::AbstractString,
+) where {T}
+    parent_matrix = parent(matrix)
+    values = nonzeros(parent_matrix)
+    minimum_nonzero = nothing
+    maximum_scale = zero(T)
+    @inbounds for column in axes(parent_matrix, 2)
+        scale = zero(T)
+        for pointer in nzrange(parent_matrix, column)
+            scale = max(scale, _finite_abs(values[pointer], label))
+        end
+        if !iszero(scale)
+            minimum_nonzero = minimum_nonzero === nothing ? scale :
+                              min(minimum_nonzero, scale)
+            maximum_scale = max(maximum_scale, scale)
+        end
+    end
+    minimum_nonzero === nothing && return one(T)
+    return maximum_scale / minimum_nonzero
+end
+
+function _dense_formulation_features(
+    ::Type{T},
+    variables::Int,
+    equalities::CanonicalAffineMapFacts,
+    equality_matrix::AbstractMatrix{T},
+) where {T}
+    equality_count = equalities.matrix.rows
+    denominator = equalities.matrix.rows * equalities.matrix.columns
+    density = denominator == 0 ? 0.0 :
+              equalities.matrix.nonzero_values / denominator
+    augmented = variables + equality_count
+    square_ratio = variables == 0 ? Inf :
+                   Float64(augmented)^2 / Float64(variables)^2
+    return DenseFormulationFeatures{T}(
+        variables,
+        equality_count,
+        density,
+        _equality_row_scale_spread(
+            equality_matrix,
+            "canonical equality matrix",
+        ),
+        variables,
+        augmented,
+        square_ratio,
+    )
+end
+
+function dense_formulation_features(problem::SDPProblem{T}) where {T}
+    equality_matrix = transpose(problem.B)
+    equality_facts = CanonicalAffineMapFacts(
+        _canonical_matrix_facts(
+            equality_matrix,
+            "canonical equality matrix",
+        )...,
+    )
+    return _dense_formulation_features(
+        T,
+        problem.dims.m,
+        equality_facts,
+        equality_matrix,
+    )
+end
 
 @inline _canonical_storage(::SparseMatrixCSC) = :sparse_csc
 @inline _canonical_storage(::Matrix) = :dense_matrix
@@ -600,12 +809,22 @@ function extract_problem_features(problem::CanonicalConicProblem{T}) where {T}
             "canonical PSD block $index",
         ))
     end
+    equality_facts = CanonicalAffineMapFacts(
+        equality_matrix,
+        equality_active_columns,
+    )
     return ProblemFeatures{T}(
         variables,
         objective_nonzero_values,
-        CanonicalAffineMapFacts(equality_matrix, equality_active_columns),
+        equality_facts,
         linear_cones,
         lorentz_cones,
         psd_cones,
+        _dense_formulation_features(
+            T,
+            variables,
+            equality_facts,
+            equalities.A,
+        ),
     )
 end

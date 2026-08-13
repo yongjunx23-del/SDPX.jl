@@ -184,7 +184,7 @@ end
         @test norm(recovered_equality, Inf) <= 500eps(Float64)
     end
 
-    @testset "formulation precedes provider and auto is unchanged" begin
+    @testset "formulation precedes provider and conservative auto stays normal" begin
         problem = _augmented_test_problem(Float64; equalities=2)
         auto = SDPX.build_execution_plan(
             problem,

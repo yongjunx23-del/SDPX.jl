@@ -91,3 +91,22 @@ Start Dense Normal Equations vs Augmented KKT + LDLT work with:
 These provide well-conditioned control, equality-heavy, rank-deficient,
 conditioning, scaling, near-singular Schur and structured cases without a
 large workload.
+
+## Round 4 formulation planner scoreboard
+
+The Round 4 scoreboard is a small correctness-first A/B over the dense cases
+that informed the initial static formulation policy:
+
+```sh
+SDPX_ROUND4_OUT=/tmp/sdpx-round4.toml \
+  julia --project=. benchmark/round4_formulation_scoreboard.jl
+```
+
+Each case is solved with `:auto`, explicit `:normal_equations`, and explicit
+`:augmented` using the same arithmetic, provider, tolerances, and one warmup.
+Original-coordinate certificate validity is the first gate. Residual quality
+and iteration count classify only pairs that also match the registry or
+analytic reference objective within a scale-aware tolerance. Wall time is
+recorded but never selects the winner from this single-sample local run.
+Planned and executed formulations must match and any runtime fallback is an
+error.

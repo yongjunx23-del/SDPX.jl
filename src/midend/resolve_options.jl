@@ -204,7 +204,7 @@ function resolve_solve_options(
     algorithm = _frontend_policy(options.algorithm, (:auto, :lp, :socp, :sdp), "algorithm")
     formulation = _frontend_policy(
         options.formulation,
-        (:auto, :primal, :dual, :augmented),
+        (:auto, :primal, :normal_equations, :dual, :augmented),
         "formulation",
     )
     chordal = _frontend_policy(options.chordal_decomposition, (:auto, :on, :off), "chordal_decomposition")

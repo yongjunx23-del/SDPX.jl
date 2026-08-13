@@ -3,6 +3,19 @@ using Test
 include(joinpath(@__DIR__, "..", "benchmark", "SDPXBenchmarkRegistry.jl"))
 using .SDPXBenchmarkRegistry
 
+include(joinpath(
+    @__DIR__, "..", "benchmark", "round4_scoreboard_contracts.jl",
+))
+
+@testset "Round 4 scoreboard correctness gates" begin
+    @test _round4_objective_valid(6.0 + 1.0e-9, 6.0, 1.0e-8, 1.0e-8)
+    @test !_round4_objective_valid(6.1, 6.0, 1.0e-8, 1.0e-8)
+    @test _round4_severe_false_negative(false, true, false)
+    @test _round4_severe_false_negative(false, false, true)
+    @test !_round4_severe_false_negative(true, true, true)
+    @test !_round4_severe_false_negative(false, false, false)
+end
+
 @testset "Round 2 benchmark registry contracts" begin
     registry = benchmark_registry()
     @test length(registry) >= 60

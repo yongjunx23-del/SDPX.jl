@@ -54,6 +54,153 @@ function _synthetic_features(
     )
 end
 
+
+function _formulation_features(
+    ::Type{T};
+    variables=6,
+    equalities=5,
+    spread=one(T),
+) where {T}
+    matrix = PlannerAPI.CanonicalMatrixFacts(
+        equalities,
+        variables,
+        equalities * variables,
+        equalities * variables,
+        :dense_matrix,
+    )
+    equality = PlannerAPI.CanonicalAffineMapFacts(matrix, variables)
+    return PlannerAPI.ProblemFeatures{T}(
+        variables,
+        variables,
+        equality,
+        PlannerAPI.CanonicalAffineConeFacts[],
+        PlannerAPI.CanonicalAffineConeFacts[],
+        PlannerAPI.CanonicalPSDConeFacts[],
+        PlannerAPI.DenseFormulationFeatures{T}(
+            variables,
+            equalities,
+            1.0,
+            spread,
+            variables,
+            variables + equalities,
+            Float64(variables + equalities)^2 / Float64(variables)^2,
+        ),
+    )
+end
+
+function _formulation_feasibility(;
+    normal_backend=true,
+    augmented_backend=true,
+    normal_memory=true,
+    augmented_memory=true,
+)
+    return PlannerAPI.FormulationFeasibility(
+        normal_backend,
+        augmented_backend,
+        normal_memory,
+        augmented_memory,
+        1_000,
+        2_000,
+    )
+end
+
+@testset "Automatic formulation decision is pure and conservative" begin
+    features = _formulation_features(Float64)
+    verified = PlannerAPI.EqualityPlanningEvidence(
+        true,
+        true,
+        5,
+        5,
+        0.5,
+        :verified_retained_basis,
+    )
+    easy = PlannerAPI.plan_formulation(
+        features,
+        :auto,
+        verified,
+        _formulation_feasibility(),
+    )
+    @test easy.preferred === :dense_normal_equations
+    @test easy.selected === :dense_normal_equations
+    @test easy.reason === :default_dense_normal_equations
+    @test length(easy.candidates) == 2
+
+    scaled = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=1.0e8),
+        :auto,
+        verified,
+        _formulation_feasibility(),
+    )
+    @test scaled.preferred === :dense_augmented_kkt
+    @test scaled.selected === :dense_augmented_kkt
+    @test scaled.reason === :large_equality_scale_spread
+
+    poor_quality = PlannerAPI.EqualityPlanningEvidence(
+        true,
+        true,
+        5,
+        5,
+        1.0e-8,
+        :verified_retained_basis,
+    )
+    conditioned = PlannerAPI.plan_formulation(
+        features,
+        :auto,
+        poor_quality,
+        _formulation_feasibility(),
+    )
+    @test conditioned.selected === :dense_augmented_kkt
+    @test conditioned.reason === :poor_equality_quality
+
+    unavailable = PlannerAPI.EqualityPlanningEvidence(5)
+    conservative = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=1.0e12),
+        :auto,
+        unavailable,
+        _formulation_feasibility(),
+    )
+    @test conservative.selected === :dense_normal_equations
+    @test conservative.reason === :equality_quality_unavailable
+
+    backend_filtered = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=1.0e8),
+        :auto,
+        verified,
+        _formulation_feasibility(augmented_backend=false),
+    )
+    @test backend_filtered.preferred === :dense_augmented_kkt
+    @test backend_filtered.selected === :dense_normal_equations
+    @test backend_filtered.reason ===
+          :augmented_backend_capability_unavailable
+
+    memory_filtered = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=1.0e8),
+        :auto,
+        verified,
+        _formulation_feasibility(augmented_memory=false),
+    )
+    @test memory_filtered.selected === :dense_normal_equations
+    @test memory_filtered.reason === :augmented_memory_unavailable
+
+    forced_normal = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=1.0e12),
+        :normal_equations,
+        verified,
+        _formulation_feasibility(),
+    )
+    @test forced_normal.selected === :dense_normal_equations
+    @test forced_normal.reason === :user_forced_normal
+
+    forced_augmented = PlannerAPI.plan_formulation(
+        features,
+        :augmented,
+        verified,
+        _formulation_feasibility(),
+    )
+    @test forced_augmented.selected === :dense_augmented_kkt
+    @test forced_augmented.reason === :user_forced_augmented
+end
+
 _snapshot(features, options=SDPX.SolveOptions()) = PlannerAPI.planner_snapshot(
     PlannerAPI.AutoPlanner(),
     features,

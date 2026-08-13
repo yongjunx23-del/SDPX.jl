@@ -24,10 +24,11 @@ factor correction. SDPX still decides whether to request a promoted residual,
 whether to accept a correction, and whether to repeat refinement. Structured
 KKT residuals, cone mappings, stopping policy, and certification stay in SDPX.
 
-LU and LDLT are provider capabilities and tested internal seams. They are not
-automatically chosen: SDPX has not introduced a new augmented-KKT formulation
-solely because MFLA exposes LDLT. Enabling that production route requires an
-explicit formulation in the Midend/ExecutionPlan first.
+LU and LDLT are provider capabilities and tested internal seams. The
+mathematical formulation is still chosen first: an explicit augmented request,
+or the provider-neutral Round 4 static planner, may require LDLT; only then may
+backend planning select MFLA. MFLA availability never causes an augmented
+choice by itself.
 
 ## Deliberate remaining routes
 

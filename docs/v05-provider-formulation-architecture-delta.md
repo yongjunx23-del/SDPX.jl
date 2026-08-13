@@ -76,5 +76,6 @@ The staged target is therefore:
 `CanonicalProblem -> ProblemFeatures -> FormulationPlan -> required LA capabilities -> ExecutionPlan`.
 
 Provider availability may satisfy a selected formulation, but must never
-select the mathematical formulation itself. Augmented KKT and automatic LDLT
-fallback remain out of scope for this round.
+select the mathematical formulation itself. Round 4 adds a provider-neutral
+static choice between dense normal equations and dense augmented KKT. It does
+not add automatic LDLT fallback after execution begins.

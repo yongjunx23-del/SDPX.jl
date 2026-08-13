@@ -324,15 +324,18 @@ end
 function main(args=ARGS)
     extended = "--extended" in args
     rows = NamedTuple[]
-    for case in CASES, formulation in (:auto, :augmented)
+    # Since Round 4, `:auto` is a real planner decision rather than the
+    # historical normal-equations alias. Keep this Round 3 script an explicit
+    # formulation A/B so its provenance remains honest.
+    for case in CASES, formulation in (:normal_equations, :augmented)
         push!(rows, _run_one(case, MultiFloats.Float64x3, :multifloat, formulation))
     end
     if extended
-        for case in CASES[1:2], formulation in (:auto, :augmented)
+        for case in CASES[1:2], formulation in (:normal_equations, :augmented)
             push!(rows, _run_one(case, MultiFloats.Float64x4, :multifloat, formulation))
         end
         setprecision(BigFloat, 256) do
-            for case in CASES[1:2], formulation in (:auto, :augmented)
+            for case in CASES[1:2], formulation in (:normal_equations, :augmented)
                 push!(rows, _run_one(case, BigFloat, :bfla, formulation))
             end
         end

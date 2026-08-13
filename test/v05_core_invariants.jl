@@ -1,4 +1,5 @@
 using SDPX
+using LinearAlgebra
 using Test
 
 # Tiny deterministic fixtures for the certification handoff.  No solve is
@@ -70,8 +71,16 @@ end
               SDPX.Experimental.FormulationPlan{
                   SDPX.Experimental.DenseNormalEquations,
               }
-        @test dense_plan.formulation_plan.provenance === :structural_planner
+        @test dense_plan.formulation_plan.provenance ===
+              :automatic_formulation_planner
         @test dense_plan.kkt_formulation === :dense_normal_equations
+        @test dense_plan.parameters.formulation_decision.requested === :auto
+        @test dense_plan.parameters.formulation_decision.selected ===
+              :dense_normal_equations
+        @test dense_plan.parameters.formulation_decision.reason in (
+            :default_dense_normal_equations,
+            :equality_quality_unavailable,
+        )
         @test SDPX.kkt_backend_from_formulation(
             dense_plan.formulation_plan,
             dense_plan.algorithm,
@@ -150,6 +159,136 @@ end
                 threads=1,
             ),
         )
+
+        explicit_normal = SDPX.Experimental.build_execution_plan(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                formulation=:normal_equations,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test explicit_normal.kkt_formulation === :dense_normal_equations
+        @test explicit_normal.parameters.formulation_decision.reason ===
+              :user_forced_normal
+
+        explicit_primal = SDPX.Experimental.build_execution_plan(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                formulation=:primal,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test explicit_primal.kkt_formulation === :dense_normal_equations
+        @test explicit_primal.parameters.formulation_decision.reason ===
+              :user_forced_normal
+
+        # The historical :primal option fixes orientation only. It must not
+        # erase an exact structural block-arrow choice introduced before the
+        # dense formulation planner.
+        arrow_coefficients = [
+            reshape([1.0, 0.0], 2, 1, 1),
+            reshape([0.0, 1.0], 2, 1, 1),
+        ]
+        arrow_problem = SDPX.ingest(
+            [1.0, 1.0],
+            arrow_coefficients,
+            [zeros(1, 1), zeros(1, 1)],
+            zeros(2, 0),
+            Float64[];
+            sparse=true,
+            verbosity=0,
+        )
+        primal_arrow = SDPX.Experimental.build_execution_plan(
+            arrow_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                formulation=:primal,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test primal_arrow.formulation_plan.formulation isa
+              SDPX.Experimental.BlockArrowElimination
+        @test isempty(primal_arrow.parameters.formulation_decision.candidates)
+
+        explicit_qr = SDPX.Experimental.build_execution_plan(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                formulation=:auto,
+                equality_solver=:qr,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test explicit_qr.kkt_formulation === :dense_normal_equations
+        @test explicit_qr.parameters.formulation_decision.candidates[2].reason ===
+              :augmented_incompatible_equality_solver
+
+        @test SDPX.dense_augmented_workspace_floor_bytes(
+            Float64,
+            6,
+            5,
+            1,
+            1,
+        ) > SDPX.dense_workspace_floor_bytes(Float64, 6, 5, 1, 1)
+        @test SDPX.estimate_dense_augmented_workspace_bytes(
+            dense_problem,
+            1,
+        ) > SDPX.estimate_dense_workspace_bytes(dense_problem, 1)
+        @test SDPX.estimate_dense_workspace_bytes(dense_problem, 1) >=
+              SDPX.estimate_sdp_workspace_bytes(dense_problem, 1)
+
+        lp_problem = SDPX.ingest(
+            [1.0],
+            [reshape([1.0], 1, 1, 1)],
+            [zeros(1, 1)],
+            zeros(1, 0),
+            Float64[];
+            sparse=false,
+            verbosity=0,
+        )
+        @test_throws ArgumentError SDPX.Experimental.build_execution_plan(
+            lp_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:lp,
+                formulation=:normal_equations,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+
+        conic = SDPX.second_order_program(
+            [1.0, 0.0, 0.0],
+            [SDPX.SOCConstraint(
+                Matrix{Float64}(LinearAlgebra.I, 3, 3),
+                zeros(3);
+                T=Float64,
+            )];
+            T=Float64,
+        )
+        normal_soc = SDPX.Experimental.build_execution_plan(
+            SDPX._soc_psd_lift(conic; verbosity=0),
+            SDPX.SolverOptions{Float64}(
+                algorithm=:socp,
+                formulation=:normal_equations,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test normal_soc.algorithm !== :socp_fixed_trace_q3
+        @test normal_soc.kkt_formulation === :dense_normal_equations
+
     end
 
     @testset "standard auto equality QR plan authorization" begin

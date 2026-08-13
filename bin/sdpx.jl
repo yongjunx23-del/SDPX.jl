@@ -49,7 +49,7 @@ Automatic pipeline controls:
   --presolve=auto|on|off
   --scaling=auto|none|equilibrate
   --sparse=auto|on|off
-  --formulation=auto|primal|dual
+  --formulation=auto|primal|normal_equations|augmented|dual
   --chordalDecomposition=auto|on|off
   --equalitySolver=auto|normal_equations|qr
   --workingPrecisionPolicy=auto|fixed

@@ -81,8 +81,8 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         @test !plan.capability_model.qr
         @test plan.capability_model.rank_revealing_qr
 
-        # LDLT is a provider fact used only by the explicit dense augmented
-        # formulation; automatic normal equations remain unchanged.
+        # LDLT is a provider fact consumed only after an explicit or static
+        # provider-neutral dense augmented formulation choice.
         @test plan.capability_model.pivoted_symmetric_ldlt
         @test !plan.capability_model.iterative_refinement
         @test plan.capability_model.higher_precision_residual

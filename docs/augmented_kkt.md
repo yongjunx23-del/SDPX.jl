@@ -2,9 +2,11 @@
 
 This note fixes the exact Round 3 mathematical contract. It is derived from
 SDPX's current Newton code, not from a generic textbook saddle-point matrix.
-The route is experimental and is selected only by `formulation=:augmented`.
-`formulation=:auto` continues to select the established normal-equation,
-sparse, arrow, LP, or native Q3 route.
+The route is selected explicitly by `formulation=:augmented`, or by the
+Round 4 static formulation planner when `formulation=:auto` finds strong
+pre-solve equality risk and the LDLT route is feasible. See
+[`Formulation planner`](formulation-planner.md). Sparse, arrow, LP, and native
+Q3 routes are unchanged.
 
 ## Current Newton equations
 
@@ -134,5 +136,6 @@ Dependent equalities remain the responsibility of equality presolve/RRQR;
 LDLT pivoting must not silently replace rank preprocessing. A successful LDLT
 factor reporting zero inertia is rejected as rank deficient, and the route
 fails closed when presolve has not produced an independent equality basis.
-There is no QR, provider, precision, or normal-equation retry. No evidence from
-this round changes the `:auto` formulation planner.
+There is no QR, provider, precision, or normal-equation retry. Round 4 uses
+this implementation unchanged: it adds only a static pre-execution choice and
+no runtime formulation retry.

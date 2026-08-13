@@ -146,6 +146,9 @@ const CanonicalMatrixFacts = SDPX.CanonicalMatrixFacts
 const CanonicalAffineMapFacts = SDPX.CanonicalAffineMapFacts
 const CanonicalAffineConeFacts = SDPX.CanonicalAffineConeFacts
 const CanonicalPSDConeFacts = SDPX.CanonicalPSDConeFacts
+const DenseFormulationFeatures = SDPX.DenseFormulationFeatures
+const dense_formulation_features = SDPX.dense_formulation_features
+const EqualityPlanningEvidence = SDPX.EqualityPlanningEvidence
 const ProblemFeatures = SDPX.ProblemFeatures
 const extract_problem_features = SDPX.extract_problem_features
 const AutoPlanner = SDPX.AutoPlanner
@@ -159,6 +162,11 @@ const PlanningDecision = SDPX.PlanningDecision
 const ResolvedAutoPlannerSnapshot = SDPX.ResolvedAutoPlannerSnapshot
 const resolve_planner_snapshot = SDPX.resolve_planner_snapshot
 const resolved_planner_summary = SDPX.resolved_planner_summary
+const FormulationCandidate = SDPX.FormulationCandidate
+const FormulationFeasibility = SDPX.FormulationFeasibility
+const FormulationDecision = SDPX.FormulationDecision
+const plan_formulation = SDPX.plan_formulation
+const formulation_decision_summary = SDPX.formulation_decision_summary
 const ResolvedSolveOptions = SDPX.ResolvedSolveOptions
 const resolve_solve_options = SDPX.resolve_solve_options
 const auto_tolerance = SDPX.auto_tolerance
@@ -222,13 +230,17 @@ export AbstractCanonicalEqualities, CanonicalEqualities
 export CanonicalIdentityReconstructionMap, CanonicalReconstructionMap
 export CanonicalConicProblem, canonicalize, reconstruct_identity
 export CanonicalMatrixFacts, CanonicalAffineMapFacts, CanonicalAffineConeFacts
-export CanonicalPSDConeFacts, ProblemFeatures
+export CanonicalPSDConeFacts, DenseFormulationFeatures
+export dense_formulation_features
+export EqualityPlanningEvidence, ProblemFeatures
 export extract_problem_features
 export AutoPlanner, resolve_execution_route
 export StructuralPlanningIntent, AutoPlannerSnapshot
 export planner_snapshot, unresolved_options, planner_summary
 export PlanningDecision, ResolvedAutoPlannerSnapshot
 export resolve_planner_snapshot, resolved_planner_summary
+export FormulationCandidate, FormulationFeasibility, FormulationDecision
+export plan_formulation, formulation_decision_summary
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
 export PerformanceTrace, performance_trace, unavailable, isavailable

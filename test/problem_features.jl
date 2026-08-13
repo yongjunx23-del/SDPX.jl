@@ -1,4 +1,5 @@
 using MultiFloats: Float64x4
+using LinearAlgebra
 using SparseArrays
 using Test
 
@@ -38,6 +39,13 @@ end
                 @test features.equalities.matrix.storage ===
                     (sparse_storage ? :sparse_csc : :dense_matrix)
                 @test features.equalities.matrix.nonzero_values == 2
+                @test features.dense_formulation.variables == 3
+                @test features.dense_formulation.equalities == 2
+                @test features.dense_formulation.equality_density == 1 / 3
+                @test features.dense_formulation.equality_scale_spread == T(2)
+                @test features.dense_formulation.normal_dimension == 3
+                @test features.dense_formulation.augmented_dimension == 5
+                @test features.dense_formulation.augmented_square_ratio ≈ 25 / 9
                 @test features.equalities.matrix.stored_entries ==
                     (sparse_storage ? nnz(problem.Aeq) : length(problem.Aeq))
                 @test isempty(features.linear_cones)
@@ -54,6 +62,27 @@ end
                     @test canonical.equalities.b[1] === problem.beq[1]
                 end
             end
+        end
+    end
+end
+
+
+@testset "ProblemFeatures formulation scale proxies are cheap and stable" begin
+    for T in (Float64, Float64x4, BigFloat)
+        setprecision(BigFloat, 256) do
+            equality = T[1 0 0; 0 T(1e8) 0]
+            problem = SDPX.second_order_program(
+                T[1, 0, 0],
+                [SDPX.SOCConstraint(Matrix{T}(I, 3, 3), zeros(T, 3); T=T)];
+                Aeq=equality,
+                beq=T[1, T(1e8)],
+                T=T,
+            )
+            features = FeatureAPI.extract_problem_features(
+                FeatureAPI.canonicalize(problem),
+            )
+            @test features.dense_formulation.equality_scale_spread == T(1e8)
+            @test features.dense_formulation.equality_density == 1 / 3
         end
     end
 end

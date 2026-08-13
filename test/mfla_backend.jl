@@ -745,6 +745,52 @@ if _MFLA_LOADED
             @test reduced.diagnostics.selected_algorithms.certificate.valid
         end
 
+        @testset "automatic formulation uses verified equality evidence" begin
+            coefficients = zeros(T, 3, 3, 3)
+            @inbounds for index in 1:3
+                coefficients[index, index, index] = one(T)
+            end
+            problem = SDPX.ingest(
+                ones(T, 3),
+                [coefficients],
+                [zeros(T, 3, 3)],
+                T[1 0; 0 1e8; 1 -1e8],
+                T[1, 1e8];
+                sparse=false,
+                verbosity=0,
+            )
+            options = SDPX.SolverOptions{T}(
+                algorithm=:sdp,
+                presolve=true,
+                scaling=:none,
+                sparse=false,
+                formulation=:auto,
+                equality_solver=:normal_equations,
+                linear_algebra_backend=:multifloat,
+                threads=1,
+                verbosity=0,
+                diagnostics=true,
+                timing=true,
+                iter_max=100,
+                ϵ_gap=T(1e-10),
+                ϵ_primal=T(1e-10),
+                ϵ_dual=T(1e-10),
+            )
+            result = SDPX.solve!(problem, options)
+            @test result.status == SDPX.Optimal
+            selected = result.diagnostics.selected_algorithms
+            decision = selected.formulation_decision
+            @test decision.requested === :auto
+            @test decision.preferred === :dense_augmented_kkt
+            @test decision.selected === :dense_augmented_kkt
+            @test decision.reason === :large_equality_scale_spread
+            @test decision.equality_evidence.available
+            @test decision.equality_evidence.basis_verified
+            @test selected.planned_kkt_formulation === :dense_augmented_kkt
+            @test selected.executed_kkt_formulation === :dense_augmented_kkt
+            @test selected.la_fallback_reason === :none
+        end
+
         @testset "tiny SOCP" begin
             problem = SDPX.second_order_program(
                 T[1, 0, 0],

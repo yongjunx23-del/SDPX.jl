@@ -64,6 +64,21 @@ struct EqualityPresolveMap{T}
     original_count::Int
     keep::Vector{Int}
     multiplier_map::Matrix{T}
+    planning_evidence::EqualityPlanningEvidence
+end
+
+
+function EqualityPresolveMap{T}(
+    original_count::Int,
+    keep::Vector{Int},
+    multiplier_map::Matrix{T},
+) where {T}
+    return EqualityPresolveMap{T}(
+        original_count,
+        keep,
+        multiplier_map,
+        EqualityPlanningEvidence(original_count; reason=:compatibility),
+    )
 end
 
 @inline _presolve_enabled(opts::SolverOptions) =
@@ -83,6 +98,7 @@ function EqualityPresolveMap(
         original_count,
         keep,
         multiplier_map,
+        EqualityPlanningEvidence(original_count; reason=:compatibility),
     )
 end
 
@@ -158,9 +174,9 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "scaling must be :auto, :none, or :equilibrate",
         ))
-    opts.formulation in (:auto, :primal, :dual, :augmented) ||
+    opts.formulation in (:auto, :primal, :normal_equations, :dual, :augmented) ||
         throw(ArgumentError(
-            "formulation must be :auto, :primal, :dual, or :augmented",
+            "formulation must be :auto, :primal, :normal_equations, :dual, or :augmented",
         ))
     opts.chordal_decomposition in (:auto, :off, :on) ||
         throw(ArgumentError(
@@ -959,6 +975,9 @@ function resolve_execution_route(
     ::AutoPlanner,
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
+    ;
+    equality_evidence::EqualityPlanningEvidence=
+        _equality_evidence_without_rrqr(prob, :not_computed),
 ) where {T}
     classification = classify_problem(prob)
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
@@ -975,7 +994,7 @@ function resolve_execution_route(
     soc_algorithm = classification.maximum_block_size <= 2 ?
                     :socp_psd2 : :socp_psd_lift
     native_fixed_trace_q3 =
-        opts.formulation !== :augmented &&
+        !(opts.formulation in (:augmented, :normal_equations)) &&
         opts.mode === OPTIMIZE &&
         opts.scaling !== :equilibrate &&
         _fixed_trace_q3_eligible(prob)
@@ -1011,10 +1030,18 @@ function resolve_execution_route(
             "dedicated LP and native Q3 routes are unsupported",
         ))
     end
+    if opts.formulation === :normal_equations &&
+       algorithm === :lp_primal_dual
+        throw(ArgumentError(
+            "formulation=:normal_equations requires the dense SDP/PSD-lift " *
+            "solver; the dedicated LP route has its own Newton system",
+        ))
+    end
     return ResolvedExecutionRoute(
         prob,
         opts,
         classification,
+        equality_evidence,
         algorithm,
         :value_level_mature_formula,
         _EXECUTION_ROUTE_TOKEN,
@@ -1043,6 +1070,71 @@ function _validate_execution_route(
         :sdp_primal_dual,
     ) || throw(ArgumentError("resolved execution route has invalid algorithm"))
     return nothing
+end
+
+function _formulation_backend_feasible(
+    ::Type{T},
+    opts::SolverOptions,
+    route::Symbol,
+) where {T}
+    try
+        plan_la_backend(
+            T;
+            requested=opts.linear_algebra_backend,
+            route,
+            threads=max(opts.threads, 1),
+            equality_solver=opts.equality_solver,
+        )
+        return true
+    catch exception
+        exception isa InterruptException && rethrow()
+        exception isa ArgumentError || rethrow()
+        return false
+    end
+end
+
+function _dense_formulation_feasibility(
+    ::Type{T},
+    prob::SDPProblem,
+    opts::SolverOptions,
+    available_memory::Int,
+) where {T}
+    normal_bytes = estimate_dense_workspace_bytes(
+        prob,
+        max(opts.threads, 1),
+    )
+    augmented_bytes = estimate_dense_augmented_workspace_bytes(
+        prob,
+        max(opts.threads, 1),
+    )
+    return FormulationFeasibility(
+        _formulation_backend_feasible(T, opts, :dense_cholesky),
+        opts.equality_solver !== :qr &&
+            _formulation_backend_feasible(T, opts, :dense_augmented_ldlt),
+        available_memory <= 0 || normal_bytes <= available_memory,
+        available_memory <= 0 || augmented_bytes <= available_memory,
+        normal_bytes,
+        augmented_bytes,
+        opts.equality_solver === :qr ?
+        :augmented_incompatible_equality_solver :
+        :augmented_backend_capability_unavailable,
+    )
+end
+
+function _execution_route_equality_evidence(
+    features::DenseFormulationFeatures,
+    evidence::EqualityPlanningEvidence,
+)
+    features.equalities == evidence.rank_after &&
+        return evidence
+    return EqualityPlanningEvidence(
+        false,
+        false,
+        features.equalities,
+        features.equalities,
+        NaN,
+        :planning_problem_differs_from_equality_basis,
+    )
 end
 
 """
@@ -1105,6 +1197,7 @@ function build_execution_plan(
     else
         :none
     end
+    formulation_decision = nothing
     formulation_plan = if algorithm in (
         :sdp_primal_dual,
         :socp_psd2,
@@ -1112,7 +1205,44 @@ function build_execution_plan(
     )
         structural_formulation =
             _runtime_schur_formulation(prob, opts.equality_solver)
-        if opts.formulation === :augmented
+        dense_features = opts.formulation === :normal_equations ||
+                         structural_formulation.formulation isa
+                         DenseNormalEquations ?
+                         dense_formulation_features(prob) : nothing
+        equality_evidence = dense_features === nothing ?
+                            route.equality_evidence :
+                            _execution_route_equality_evidence(
+                                dense_features,
+                                route.equality_evidence,
+                            )
+        feasibility = nothing
+        if opts.formulation === :normal_equations ||
+           (opts.formulation === :primal &&
+            structural_formulation.formulation isa DenseNormalEquations)
+            feasibility = _dense_formulation_feasibility(
+                T,
+                prob,
+                opts,
+                available,
+            )
+            decision = plan_formulation(
+                dense_features,
+                opts.formulation,
+                equality_evidence,
+                feasibility,
+            )
+            formulation_decision = decision
+            FormulationPlan(
+                DenseNormalEquations(),
+                decision.reason,
+                :explicit_formulation_policy,
+            )
+        elseif opts.formulation === :primal
+            # `:primal` predates the dense formulation A/B. Preserve its
+            # historical meaning: it fixes primal orientation but does not
+            # disable exact block-arrow or sparse-normal structural routes.
+            structural_formulation
+        elseif opts.formulation === :augmented
             prob.dims.m > 0 || throw(ArgumentError(
                 "formulation=:augmented requires at least one primal Newton variable",
             ))
@@ -1125,10 +1255,44 @@ function build_execution_plan(
                 "formulation=:augmented does not use equality_solver=:qr; " *
                 "dependent equalities must be removed by presolve",
             ))
+            feasibility = _dense_formulation_feasibility(
+                T,
+                prob,
+                opts,
+                available,
+            )
+            decision = plan_formulation(
+                dense_features,
+                :augmented,
+                equality_evidence,
+                feasibility,
+            )
+            formulation_decision = decision
             FormulationPlan(
                 DenseAugmentedKKT(),
-                :explicit_dense_augmented_request,
-                :user_option,
+                decision.reason,
+                :explicit_formulation_policy,
+            )
+        elseif opts.formulation === :auto &&
+               structural_formulation.formulation isa DenseNormalEquations
+            feasibility = _dense_formulation_feasibility(
+                T,
+                prob,
+                opts,
+                available,
+            )
+            decision = plan_formulation(
+                dense_features,
+                :auto,
+                equality_evidence,
+                feasibility,
+            )
+            formulation_decision = decision
+            FormulationPlan(
+                decision.selected === :dense_augmented_kkt ?
+                DenseAugmentedKKT() : DenseNormalEquations(),
+                decision.reason,
+                :automatic_formulation_planner,
             )
         else
             structural_formulation
@@ -1347,6 +1511,14 @@ function build_execution_plan(
             adaptive_sigma_max,
             equality_solver=opts.equality_solver,
             formulation=opts.formulation,
+            formulation_decision=formulation_decision === nothing ?
+                (
+                    requested=opts.formulation,
+                    preferred=formulation_symbol(formulation_plan),
+                    selected=formulation_symbol(formulation_plan),
+                    reason=formulation_plan.reason,
+                    candidates=(),
+                ) : formulation_decision_summary(formulation_decision),
             planned_factorization=
                 formulation_plan.formulation isa DenseAugmentedKKT ?
                 :pivoted_symmetric_ldlt :
@@ -1411,6 +1583,21 @@ function _empty_presolve_report(prob::SDPProblem)
     return PresolveReport(n, n, 0, 0, 0, false, collect(1:n), 0.0)
 end
 
+@inline function _equality_evidence_without_rrqr(
+    prob::SDPProblem,
+    reason::Symbol,
+)
+    n = prob.dims.n
+    return EqualityPlanningEvidence(
+        false,
+        n == 0,
+        n,
+        n,
+        NaN,
+        reason,
+    )
+end
+
 function _equality_column_scales(B::AbstractMatrix{T}) where {T}
     scales = Vector{T}(undef, size(B, 2))
     @inbounds for column in axes(B, 2)
@@ -1473,15 +1660,29 @@ function _normalized_equality_columns(
     return normalized
 end
 
-function _equality_rank_indices(
+@inline function _rrqr_relative_quality(diagonal, rank::Int)
+    rank == 0 && return 1.0
+    leading = view(diagonal, 1:rank)
+    largest = maximum(leading)
+    iszero(largest) && return 0.0
+    value = minimum(leading) / largest
+    return try
+        Float64(value)
+    catch exception
+        exception isa InterruptException && rethrow()
+        0.0
+    end
+end
+
+function _equality_rank_analysis(
     B::SparseMatrixCSC{Float64,Int},
     tolerance::Real,
 )
     n = size(B, 2)
-    n == 0 && return Int[]
+    n == 0 && return (keep=Int[], quality=1.0, available=true)
     scales = _equality_column_scales(B)
     nonzero_columns = findall(!iszero, scales)
-    isempty(nonzero_columns) && return Int[]
+    isempty(nonzero_columns) && return (keep=Int[], quality=1.0, available=true)
     normalized =
         _normalized_equality_columns(B, nonzero_columns, scales)
     factor = qr(normalized)
@@ -1497,10 +1698,14 @@ function _equality_rank_indices(
     ) * scale
     rank_estimate = count(>(threshold), diagonal)
     selected = nonzero_columns[factor.pcol[1:rank_estimate]]
-    return sort!(Vector{Int}(selected))
+    return (
+        keep=sort!(Vector{Int}(selected)),
+        quality=_rrqr_relative_quality(diagonal, rank_estimate),
+        available=true,
+    )
 end
 
-function _equality_rank_indices(
+function _equality_rank_analysis(
     B::SparseMatrixCSC{T,Int},
     tolerance::Real,
 ) where {T}
@@ -1510,16 +1715,21 @@ function _equality_rank_indices(
     # the original arithmetic before changing the model. This avoids the old
     # all-or-nothing choice between densifying `B` and skipping numerical rank
     # presolve entirely.
-    size(B, 2) <= 2_048 || return collect(1:size(B, 2))
-    nnz(B) <= 100_000_000 || return collect(1:size(B, 2))
+    size(B, 2) <= 2_048 || return (
+        keep=collect(1:size(B, 2)), quality=NaN, available=false,
+    )
+    nnz(B) <= 100_000_000 || return (
+        keep=collect(1:size(B, 2)), quality=NaN, available=false,
+    )
     scales = _equality_column_scales(B)
     nonzero_columns = findall(!iszero, scales)
-    isempty(nonzero_columns) && return Int[]
+    isempty(nonzero_columns) && return (keep=Int[], quality=1.0, available=true)
     normalized =
         _normalized_equality_columns(B, nonzero_columns, scales)
     normalized_float = _ingest_owned_sparse(Float64, normalized)
-    all(isfinite, nonzeros(normalized_float)) ||
-        return collect(1:size(B, 2))
+    all(isfinite, nonzeros(normalized_float)) || return (
+        keep=collect(1:size(B, 2)), quality=NaN, available=false,
+    )
     factor = qr(normalized_float)
     diagonal_count = min(size(factor.R)...)
     diagonal = [
@@ -1540,12 +1750,16 @@ function _equality_rank_indices(
     rank_estimate = count(>(threshold), diagonal)
     selected =
         nonzero_columns[factor.pcol[1:rank_estimate]]
-    return sort!(Vector{Int}(selected))
+    return (
+        keep=sort!(Vector{Int}(selected)),
+        quality=_rrqr_relative_quality(diagonal, rank_estimate),
+        available=true,
+    )
 end
 
-function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
+function _equality_rank_analysis(B::AbstractMatrix{T}, tolerance::Real) where {T}
     n = size(B, 2)
-    n == 0 && return Int[]
+    n == 0 && return (keep=Int[], quality=1.0, available=true)
     # Equality presolve is part of the numerical algorithm, so its arithmetic
     # must be at least as wide as the solve arithmetic. Converting an extended
     # matrix to Float64 can silently erase a direction that is resolvable by
@@ -1556,7 +1770,7 @@ function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
     # wrote `x = 1` or `1e-30*x = 1e-30`.
     scales = _equality_column_scales(B)
     nonzero_columns = findall(!iszero, scales)
-    isempty(nonzero_columns) && return Int[]
+    isempty(nonzero_columns) && return (keep=Int[], quality=1.0, available=true)
     normalized =
         _normalized_equality_columns(B, nonzero_columns, scales)
     factor = qr(normalized, ColumnNorm())
@@ -1569,8 +1783,15 @@ function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
     ) * scale
     rank = count(>(threshold), diagonal)
     selected = nonzero_columns[factor.p[1:rank]]
-    return sort!(Vector{Int}(selected))
+    return (
+        keep=sort!(Vector{Int}(selected)),
+        quality=_rrqr_relative_quality(diagonal, rank),
+        available=true,
+    )
 end
+
+_equality_rank_indices(B::AbstractMatrix, tolerance::Real) =
+    _equality_rank_analysis(B, tolerance).keep
 
 function _equality_elimination_check(
     prob::SDPProblem{T},
@@ -1766,6 +1987,8 @@ function _equality_presolve_map(
     coefficients=nothing,
     dependent_columns::Vector{Int}=Int[],
     scales=nothing,
+    planning_evidence::EqualityPlanningEvidence=
+        EqualityPlanningEvidence(prob.dims.n; reason=:not_computed),
 ) where {T}
     n = prob.dims.n
     multiplier_map = alloc_zeros(T, length(keep), n)
@@ -1774,7 +1997,12 @@ function _equality_presolve_map(
     end
     dropped = setdiff(collect(1:n), keep)
     isempty(dropped) &&
-        return EqualityPresolveMap{T}(n, keep, multiplier_map)
+        return EqualityPresolveMap{T}(
+            n,
+            keep,
+            multiplier_map,
+            planning_evidence,
+        )
 
     scales === nothing && (scales = _equality_column_scales(prob.B))
     isempty(dependent_columns) &&
@@ -1805,7 +2033,12 @@ function _equality_presolve_map(
             end
         end
     end
-    return EqualityPresolveMap{T}(n, keep, multiplier_map)
+    return EqualityPresolveMap{T}(
+        n,
+        keep,
+        multiplier_map,
+        planning_evidence,
+    )
 end
 
 function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
@@ -1816,9 +2049,21 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
        n == 0
         report = _empty_presolve_report(prob)
         keep = collect(1:n)
-        return prob, _equality_presolve_map(prob, keep), report
+        evidence = _equality_evidence_without_rrqr(
+            prob,
+            n == 0 ? :no_equalities : :equality_presolve_disabled,
+        )
+        return prob, _equality_presolve_map(
+            prob,
+            keep,
+            nothing,
+            Int[],
+            nothing,
+            evidence,
+        ), report
     end
-    keep = _equality_rank_indices(prob.B, opts.presolve_tolerance)
+    analysis = _equality_rank_analysis(prob.B, opts.presolve_tolerance)
+    keep = analysis.keep
     check = _equality_elimination_check(
         prob,
         keep,
@@ -1830,6 +2075,16 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         keep = collect(1:n)
     end
     consistent = check.consistent
+    planning_evidence = EqualityPlanningEvidence(
+        analysis.available,
+        analysis.available && check.elimination_valid && consistent,
+        n,
+        length(keep),
+        analysis.quality,
+        !analysis.available ? :rrqr_unavailable :
+        !check.elimination_valid ? :basis_relation_unverified :
+        !consistent ? :inconsistent_equalities : :verified_retained_basis,
+    )
     zero_columns = prob.B isa SparseMatrixCSC ?
                    count(column -> isempty(nzrange(prob.B, column)), 1:n) :
                    count(
@@ -1852,6 +2107,7 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         check.coefficients,
         check.dependent_columns,
         check.scales,
+        planning_evidence,
     )
     consistent || return prob, mapping, report
     length(keep) == n &&
@@ -1926,6 +2182,84 @@ const WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR = 2
 const WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES = 4096
 const WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES = 1024
 
+@inline function _workspace_estimate_with_margin(
+    counted::Int,
+    blocks::Int,
+    fixed_overhead::Int=WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES,
+)
+    counted >= typemax(Int) ÷ WORKSPACE_ESTIMATE_MARGIN_NUMERATOR &&
+        return typemax(Int)
+    element_bound = cld(
+        counted * WORKSPACE_ESTIMATE_MARGIN_NUMERATOR,
+        WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR,
+    )
+    object_overhead = saturating_sum_bytes(
+        fixed_overhead,
+        saturating_bytes(
+            WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES,
+            blocks,
+        ),
+    )
+    return saturating_sum_bytes(element_bound, object_overhead)
+end
+
+"""
+    estimate_dense_workspace_bytes(prob, thread_count)
+
+Dimension-only conservative estimate for a general dense Workspace. Unlike
+`estimate_sdp_workspace_bytes`, it never walks coefficient storage: every
+block is charged as if every variable were active. This makes it suitable for
+pre-execution candidate filtering without taxing LP, sparse, arrow, or Q3
+routes with a full model scan.
+"""
+function estimate_dense_workspace_bytes(
+    prob::SDPProblem{T},
+    thread_count::Int,
+) where {T}
+    L, m, n, k = prob.dims
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    schur_bins = T === BigFloat ? 1 : min(max(thread_count, 1), L)
+    block_squares = sum(dimension -> dimension^2, k; init=0)
+    counted = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, m, m),
+        saturating_bytes(schur_bins, scalar_bytes, m, m),
+        saturating_bytes(scalar_bytes, m, n),
+        saturating_bytes(2, scalar_bytes, n, n),
+        saturating_bytes(8, scalar_bytes, m),
+        saturating_bytes(6, scalar_bytes, n),
+        saturating_bytes(scalar_bytes, L),
+        saturating_bytes(2, scalar_bytes, m),
+        saturating_bytes(2, scalar_bytes, n),
+        saturating_bytes(4, scalar_bytes, block_squares),
+        # Dense storage is the safe upper envelope for the implemented block
+        # workspaces: a sparse block can activate at most all m variables.
+        saturating_bytes(12, scalar_bytes, block_squares),
+        saturating_bytes(scalar_bytes, m, block_squares),
+    )
+    return _workspace_estimate_with_margin(counted, L)
+end
+
+"""
+    estimate_dense_augmented_workspace_bytes(prob, thread_count)
+
+Conservative dense estimate plus the two `(m+n)^2` matrices, three vectors,
+and object overhead owned by `DenseAugmentedKKTWorkspace`.
+"""
+function estimate_dense_augmented_workspace_bytes(
+    prob::SDPProblem{T},
+    thread_count::Int,
+) where {T}
+    base = estimate_dense_workspace_bytes(prob, thread_count)
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    dimension = saturating_sum_bytes(prob.dims.m, prob.dims.n)
+    counted = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, dimension, dimension),
+        saturating_bytes(3, scalar_bytes, dimension),
+    )
+    augmented = _workspace_estimate_with_margin(counted, 0)
+    return saturating_sum_bytes(base, augmented)
+end
+
 """
     dense_workspace_floor_bytes(::Type{T}, m, n, L, thread_count) -> Int
 
@@ -1960,6 +2294,30 @@ function dense_workspace_floor_bytes(::Type{T}, m::Integer, n::Integer,
         saturating_bytes(scalar_bytes, Int(m), Int(n)),
         saturating_bytes(2, scalar_bytes, Int(n), Int(n)),
     )
+end
+
+"""
+    dense_augmented_workspace_floor_bytes(T, m, n, L, thread_count)
+
+Dimension-only lower bound for the implemented dense augmented route. The
+ordinary dense Workspace remains allocated, so this adds its explicit
+`DenseAugmentedKKTWorkspace`: two `(m+n)^2` matrices and three vectors.
+"""
+function dense_augmented_workspace_floor_bytes(
+    ::Type{T},
+    m::Integer,
+    n::Integer,
+    L::Integer,
+    thread_count::Integer,
+) where {T}
+    base = dense_workspace_floor_bytes(T, m, n, L, thread_count)
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    dimension = saturating_sum_bytes(Int(m), Int(n))
+    augmented = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, dimension, dimension),
+        saturating_bytes(3, scalar_bytes, dimension),
+    )
+    return saturating_sum_bytes(base, augmented)
 end
 
 """
@@ -2244,6 +2602,17 @@ function _attach_diagnostics(
             plan.parameters,
             :formulation,
             :auto,
+        ),
+        formulation_decision=get(
+            plan.parameters,
+            :formulation_decision,
+            (
+                requested=:auto,
+                preferred=plan.kkt_formulation,
+                selected=plan.kkt_formulation,
+                reason=plan.formulation_plan.reason,
+                candidates=(),
+            ),
         ),
         executed_kkt_formulation=get(
             executed,
