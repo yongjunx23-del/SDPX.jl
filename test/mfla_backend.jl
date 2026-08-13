@@ -224,7 +224,12 @@ if _MFLA_LOADED
             relative_tolerance=T(1e-30),
         )
         @test factor isa SDPX.EqualityQRFactor{T}
-        @test SDPX.la_factor_provider(factor) === backend.provider
+        # The equality handle retains the opaque _QRPayload (which owns the
+        # lease-bearing MFQR factor and its workspace), not the backend payload.
+        @test SDPX.la_factor_provider(factor) !== backend.provider
+        @test SDPX.la_factor_provider_identity(
+            SDPX.la_factor_provider(factor),
+        ) === :multifloat_linear_algebra
         @test SDPX.la_factor_rank(factor) == size(M, 2)
         @test sort(SDPX.la_factor_permutation(factor)) == collect(1:4)
         @test SDPX.la_factor_packed_factors(factor) isa Matrix{T}
@@ -312,10 +317,28 @@ if _MFLA_LOADED
         )
         @test first !== nothing
         @test second !== nothing
-        @test SDPX.la_factor_provider(first) === backend.provider
-        @test SDPX.la_factor_provider(second) === backend.provider
+        @test SDPX.la_factor_provider(first) !== backend.provider
+        @test SDPX.la_factor_provider(second) !== backend.provider
+        @test SDPX.la_factor_provider_identity(
+            SDPX.la_factor_provider(first),
+        ) === :multifloat_linear_algebra
+        @test SDPX.la_factor_provider_identity(
+            SDPX.la_factor_provider(second),
+        ) === :multifloat_linear_algebra
         @test SDPX.la_factor_rank(first) == size(A, 2)
         @test SDPX.la_factor_rank(second) == size(A, 2)
+
+        # Each factor owns an independent workspace lease, so both must remain
+        # valid after the second factorization starts its own workspace.
+        @test MFLA.issuccess(SDPX.la_factor_provider(first).factor)
+        @test MFLA.issuccess(SDPX.la_factor_provider(second).factor)
+        for factor in (first, second)
+            rhs = T.(randn(rng, size(A, 2)))
+            direction = SDPX.alloc_zeros(T, size(A, 2))
+            scratch = SDPX.alloc_zeros(T, size(A, 2))
+            SDPX._solve_Q!(direction, factor, rhs, scratch)
+            @test all(isfinite, direction)
+        end
     end
 
 end
