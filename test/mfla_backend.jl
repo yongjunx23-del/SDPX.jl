@@ -5,10 +5,8 @@
     environment (see cluster-probes/v041-unified-la).  This file is therefore
     extension-gated: without MFLA loaded it only verifies that explicit
     :multifloat requests fail closed while :auto / :standard / :legacy remain
-    stable.  With MFLA loaded it covers planning (advanced capabilities stay
-    false until the core adapters land) and Cholesky multi-RHS and ownership.
-    RRQR, LDLT, LU, workspace lifetime, mixed residual, and end-to-end
-    coverage follows the core adapter work.
+    stable.  With MFLA loaded it covers planning, dense factors, residuals,
+    and factor-lifetime ownership with deliberately small matrices.
 =#
 using SDPX
 using Test
@@ -133,13 +131,14 @@ if _MFLA_LOADED
                 :syrk,
                 :triangular_solve,
                 :rank_revealing_qr,
+                :iterative_refinement,
             )
                 @test capability in config.capability_model
             end
+            @test (:higher_precision_residual in config.capability_model) ==
+                  (T !== Float64x4)
             for absent in (
                 :qr,
-                :iterative_refinement,
-                :higher_precision_residual,
                 :sparse_factorization,
                 :norminf,
                 :axpby,
@@ -451,6 +450,80 @@ if _MFLA_LOADED
             SDPX.la_ldlt_factor_solve!(factor, solution)
             @test _max_abs(A0 * solution, rhs) < T(1e-25)
         end
+    end
+
+    @testset "MFLA residuals and one requested correction" begin
+        for T in _MFLA_TYPES
+            backend = _expect_multifloat_backend(T)
+            A = T[4 1; 1 3]
+            exact = T[1, 2]
+            rhs = A * exact
+            approximate = exact .+ T[1e-8, -1e-8]
+            residual = zeros(T, 2)
+            SDPX.la_residual!(
+                backend, :N, A, approximate, rhs, residual,
+            )
+            @test _max_abs(residual, rhs - A * approximate) <= T(32) * eps(T)
+            before = SDPX.la_normwise_backward_error(
+                backend, :N, A, approximate, rhs, residual,
+            )
+            @test isfinite(before)
+            @test before > zero(T)
+            @test_throws ArgumentError SDPX.la_residual!(
+                backend, :T, A, approximate, rhs, residual,
+            )
+
+            factors = (
+                SDPX.la_cholesky_factor!(backend, copy(A)),
+                SDPX.la_lu_factor!(backend, copy(A)),
+                SDPX.la_ldlt_factor!(backend, copy(A)),
+            )
+            for factor in factors
+                correction = zeros(T, 2)
+                SDPX.la_refine_once!(
+                    factor,
+                    A,
+                    approximate,
+                    rhs,
+                    residual,
+                    correction,
+                )
+                corrected = approximate + correction
+                corrected_residual = rhs - A * corrected
+                @test maximum(abs, corrected_residual) < maximum(abs, residual)
+            end
+        end
+    end
+
+    @testset "MFLA explicit mixed-limb residual pairs" begin
+        for (Source, Residual) in (
+            (Float64x2, Float64x3),
+            (Float64x2, Float64x4),
+            (Float64x3, Float64x4),
+        )
+            backend = _expect_multifloat_backend(Source)
+            A = Source[2 1; 1 3]
+            x = Source[1, 2]
+            rhs = A * x
+            residual = zeros(Residual, 2)
+            SDPX.la_mixed_residual!(backend, A, x, rhs, residual)
+            @test residual == zeros(Residual, 2)
+        end
+
+        source_backend = _expect_multifloat_backend(Float64x2)
+        A2 = Float64x2[2 1; 1 3]
+        x2 = Float64x2[1, 2]
+        b2 = A2 * x2
+        @test_throws ArgumentError SDPX.la_mixed_residual!(
+            source_backend, A2, x2, b2, zeros(Float64x2, 2),
+        )
+        high_backend = _expect_multifloat_backend(Float64x4)
+        A4 = Float64x4[2 1; 1 3]
+        x4 = Float64x4[1, 2]
+        b4 = A4 * x4
+        @test_throws ArgumentError SDPX.la_mixed_residual!(
+            high_backend, A4, x4, b4, zeros(Float64x3, 2),
+        )
     end
 
 end
