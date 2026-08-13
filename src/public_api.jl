@@ -79,6 +79,10 @@ const PreparedStructureMismatch = SDPX.PreparedStructureMismatch
 const structure_fingerprint = SDPX.structure_fingerprint
 const transform_objective = SDPX.transform_objective
 const transform_rhs = SDPX.transform_rhs
+const PerformanceTrace = SDPX.PerformanceTrace
+const performance_trace = SDPX.performance_trace
+const unavailable = SDPX.unavailable
+const isavailable = SDPX.isavailable
 
 const AbstractPreprocessStage = SDPX.AbstractPreprocessStage
 const PreprocessContext = SDPX.PreprocessContext
@@ -196,6 +200,7 @@ export PlanningDecision, ResolvedAutoPlannerSnapshot
 export resolve_planner_snapshot, resolved_planner_summary
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
 export blas_backend, blas_threads, set_blas_threads!
+export PerformanceTrace, performance_trace, unavailable, isavailable
 
 end
 

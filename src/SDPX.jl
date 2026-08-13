@@ -45,6 +45,7 @@ include("moi_wrapper.jl")
 include("convex_api.jl")
 include("compat.jl")
 include("frontend/high_level_solve.jl")
+include("performance_trace.jl")
 include("public_api.jl")
 
 export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
