@@ -31,7 +31,9 @@ import MultiFloatLinearAlgebra:
     capabilities as mfla_capabilities,
     KernelConfig,
     GemmWorkspace,
+    MFWorkspace,
     MFCholesky,
+    MFQR,
     mfdot,
     gemv!,
     gemm!,
@@ -39,10 +41,12 @@ import MultiFloatLinearAlgebra:
     trsm!,
     trsv!,
     cholesky!,
+    rrqr!,
     ldiv!,
     issuccess as mfla_issuccess,
     factor_kind,
-    factor_matrix
+    factor_matrix,
+    factor_permutation
 
 # SDPX's MultiFloat provider targets the x2/x3/x4 limbs used by its dense
 # arithmetic paths.  N == 1 is a Float64-wrapped degenerate form that the
@@ -73,7 +77,7 @@ function _capability_model(::Type{MF}) where {MF<:MultiFloat}
         cholesky=c.cholesky,
         lu=false,
         qr=false,
-        rank_revealing_qr=false,
+        rank_revealing_qr=c.rrqr,
         pivoted_symmetric_ldlt=false,
         factor_solve=c.cholesky,
         multi_rhs=c.multi_rhs,
@@ -394,6 +398,49 @@ end
 
 SDPX.la_factor_provider_identity(::_CholeskyHandle) =
     :multifloat_linear_algebra
+
+"""
+    _QRPayload{MF}
+
+    Opaque equality-RRQR payload.  The wrapped `MFQR` borrows its `tau` and
+    permutation storage from the payload-owned `workspace`, so its lease stays
+    valid for exactly as long as this payload is alive and no other factor is
+    started from that workspace.  Keeping both the factor and the workspace in
+    the payload preserves that lifetime through SDPX's `EqualityQRFactor`
+    wrapper.  SDPX reads only the packed `factors` matrix and the column
+    permutation to solve the semantic R'R equality system; it never interprets
+    MFLA's private Householder coefficients.
+"""
+struct _QRPayload{MF<:MultiFloat,M<:AbstractMatrix{MF}}
+    factor::MFQR{MF}
+    workspace::MFWorkspace{MF}
+    factors::M
+    jpvt::Vector{Int}
+end
+
+SDPX.la_factor_provider_identity(::_QRPayload) =
+    :multifloat_linear_algebra
+
+function SDPX.la_mfla_qr_factor!(
+    provider::_Provider{MF},
+    A::AbstractMatrix{MF},
+) where {MF}
+    # A fresh MFWorkspace per factorization keeps the returned MFQR lease-aware
+    # and isolated: the factor borrows qr_tau/qr_permutation views from this
+    # workspace, and no other live factor shares it.  Keeping both the factor
+    # (which holds the lease) and the workspace in the payload preserves that
+    # lifetime through SDPX's EqualityQRFactor wrapper.  rrqr! takes no
+    # KernelConfig; threading policy stays inside the package.
+    workspace = MFWorkspace(MF)
+    factor = rrqr!(A; check=false, workspace=workspace)
+    mfla_issuccess(factor) || return nothing
+    return _QRPayload{MF,typeof(factor_matrix(factor))}(
+        factor,
+        workspace,
+        factor_matrix(factor),
+        factor_permutation(factor),
+    )
+end
 
 function SDPX.la_provider_descriptor(
     ::Type{MF},

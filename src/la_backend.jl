@@ -739,6 +739,35 @@ function la_qr_factor!(
         relative_tolerance,
     )
 end
+function la_qr_factor!(
+    backend::MultiFloatLABackend,
+    A::AbstractMatrix;
+    pivoted::Bool=false,
+    relative_tolerance=nothing,
+)
+    capabilities = la_provider_capability_model(backend.provider)
+    needed = pivoted ? :rank_revealing_qr : :qr
+    la_provider_supports(capabilities, needed) || throw(ArgumentError(
+        "MultiFloat LA provider does not support $(needed)",
+    ))
+    # The MultiFloat adapter exposes only the equality RRQR contract; it is a
+    # pivoted rank-revealing QR, not a general unpivoted QR or least-squares
+    # provider, so unpivoted or untoleranced requests fail closed.
+    pivoted || throw(ArgumentError(
+        "MultiFloat QR adapter is equality-RRQR-only; request pivoted=true",
+    ))
+    relative_tolerance === nothing && throw(ArgumentError(
+        "MultiFloat equality QR requires an SDPX relative tolerance",
+    ))
+    payload = la_mfla_qr_factor!(backend.provider, A)
+    return _equality_qr_factor_handle(
+        backend.provider,
+        payload.factors,
+        eltype(A)[],
+        payload.jpvt,
+        relative_tolerance,
+    )
+end
 la_qr_factor!(
     ::AbstractLABackend,
     ::AbstractMatrix;
@@ -1316,6 +1345,8 @@ la_bfla_higher_precision_residual!(::Any, args...; kwargs...) =
     throw(ArgumentError("BFLA higher-precision residual unavailable"))
 la_bfla_refine_once!(::Any, args...) =
     throw(ArgumentError("BFLA one-step refinement unavailable"))
+la_mfla_qr_factor!(::Any, ::AbstractMatrix) =
+    throw(ArgumentError("MultiFloat pivoted QR unavailable"))
 
 function _la_provider_call(backend::MultiFloatLABackend, operation::Symbol, args...)
     provider = backend.provider
