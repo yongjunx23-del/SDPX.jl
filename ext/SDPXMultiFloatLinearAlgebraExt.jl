@@ -124,6 +124,9 @@ const _DESCRIPTOR_CAPABILITIES = (
     :syrk,
     :mul_owned,
     :dot,
+    :rank_revealing_qr,
+    :lu,
+    :pivoted_symmetric_ldlt,
 )
 
 struct _Provider{MF<:MultiFloat}

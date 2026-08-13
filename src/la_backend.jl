@@ -792,6 +792,7 @@ function la_qr_factor!(
         "MultiFloat equality QR requires an SDPX relative tolerance",
     ))
     payload = la_mfla_qr_factor!(backend.provider, A)
+    payload === nothing && return nothing
     # Preserve the opaque _QRPayload as the factor's provider so the
     # lease-bearing MFQR factor and its MFWorkspace stay alive together; the
     # backend provider payload does not own that lease.
