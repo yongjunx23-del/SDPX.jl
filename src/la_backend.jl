@@ -151,6 +151,13 @@ instantiate_multifloat_la_backend(
     ::Int=1,
 ) where {T} = nothing
 
+"""Optional setup hook implemented by the BigFloatLinearAlgebra extension."""
+instantiate_bfla_la_backend(
+    ::Type{T},
+    ::LABackendConfiguration,
+    ::Int=1,
+) where {T} = nothing
+
 function _la_arithmetic_symbol(::Type{Float32})
     return :float32
 end
@@ -177,7 +184,7 @@ function plan_la_backend(
     threads::Int=1,
     equality_solver::Symbol=:auto,
 ) where {T}
-    requested in (:auto, :legacy, :standard, :multifloat, :fixed_extended) ||
+    requested in (:auto, :legacy, :standard, :bfla, :multifloat, :fixed_extended) ||
         throw(ArgumentError("unknown LA backend request $(requested)"))
     equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError(
@@ -221,6 +228,10 @@ function plan_la_backend(
             "LA backend $(requested) is not available on non-dense route $(route)",
         ))
     end
+    requested === :bfla && descriptor.provider !== :bigfloat_linear_algebra &&
+        throw(ArgumentError(
+            "requested BFLA provider unavailable: missing_provider",
+        ))
     if requested === :legacy
         return _legacy_la_backend_configuration(
             T,
@@ -228,6 +239,46 @@ function plan_la_backend(
             :requested_legacy,
             equality_solver,
         )
+    elseif requested === :bfla ||
+           (
+               requested === :auto &&
+               T === BigFloat &&
+               descriptor.available &&
+               descriptor.provider === :bigfloat_linear_algebra
+           )
+        T === BigFloat || throw(ArgumentError(
+            "BFLA is available only for BigFloat arithmetic",
+        ))
+        descriptor_capabilities = descriptor.available ?
+            _descriptor_capability_model(descriptor) :
+            LAProviderCapabilities()
+        descriptor.available &&
+        descriptor.provider === :bigfloat_linear_algebra ||
+            throw(ArgumentError(
+                "requested BFLA provider unavailable: missing_provider",
+            ))
+        isempty(_missing_la_capabilities(
+            descriptor_capabilities,
+            required_capabilities,
+        )) || throw(ArgumentError(
+            "requested BFLA provider unavailable: incomplete_provider_capabilities",
+        ))
+        fallback_chain = equality_solver === :auto &&
+            la_provider_supports(
+                descriptor_capabilities,
+                :rank_revealing_qr,
+            ) ? (:rank_revealing_qr,) : ()
+        config = LABackendConfiguration(
+            arithmetic, requested, :bfla, descriptor.provider,
+            descriptor.capabilities,
+            descriptor_capabilities,
+            required_capabilities,
+            :bfla_native,
+            fallback_chain,
+            :none,
+            :provider_owned,
+        )
+        return validate_la_backend_configuration(config, T)
     elseif requested === :standard || requested === :fixed_extended ||
            (requested === :auto &&
             (arithmetic in (:float32, :float64, :bigfloat) ||
@@ -329,6 +380,18 @@ function instantiate_la_backend(
         _assert_la_backend_capabilities(backend, config, T)
         return backend
     end
+    if config.selected === :bfla
+        T === BigFloat || throw(ArgumentError(
+            "planned BFLA backend requires BigFloat arithmetic",
+        ))
+        payload = instantiate_bfla_la_backend(T, config, threads)
+        payload === nothing && throw(ArgumentError(
+            "planned BFLA provider $(config.provider) did not instantiate",
+        ))
+        backend = BFLALABackend(config.arithmetic, payload)
+        _assert_la_backend_capabilities(backend, config, T)
+        return backend
+    end
     config.selected === :legacy || throw(ArgumentError(
         "unknown planned LA backend $(config.selected)",
     ))
@@ -350,6 +413,8 @@ la_backend_capabilities(backend::StandardLABackend) =
 la_backend_capabilities(::LegacyLABackend) =
     SDPX_LEGACY_LA_CAPABILITY_MODEL
 la_backend_capabilities(backend::MultiFloatLABackend) =
+    la_provider_capability_model(backend.provider)
+la_backend_capabilities(backend::BFLALABackend) =
     la_provider_capability_model(backend.provider)
 
 function _assert_la_backend_capabilities(
@@ -390,6 +455,25 @@ function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
         payload, factors,
     )
 end
+
+function la_cholesky_factor!(backend::BFLALABackend, A::AbstractMatrix{BigFloat})
+    payload = la_bfla_cholesky_factor!(backend.provider, A)
+    payload === nothing && return nothing
+    factors = la_bfla_factor_matrix(payload)
+    factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
+        "BFLA Cholesky provider factors must be a BigFloat matrix",
+    ))
+    return ProviderLACholeskyFactor{BigFloat,typeof(payload),typeof(factors)}(
+        payload, factors,
+    )
+end
+
+la_bfla_cholesky_factor!(::Any, ::AbstractMatrix{BigFloat}) =
+    throw(ArgumentError("BFLA provider does not implement Cholesky"))
+la_bfla_factor_matrix(::Any) =
+    throw(ArgumentError("BFLA factor handle does not expose storage"))
+la_bfla_factor_solve!(::Any, rhs) =
+    throw(ArgumentError("BFLA factor handle does not implement solve"))
 
 """Expose the standard generic factor handle without changing legacy routes."""
 @inline _standard_requires_finite_guard(backend::StandardLABackend) =
@@ -556,6 +640,10 @@ la_factor_handle_matrix(factor::BigFloatCholeskyFactor) = factor.L
 
 function _provider_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
     provider = factor.provider
+    if la_factor_provider_identity(provider) === :bigfloat_linear_algebra
+        la_bfla_factor_solve!(provider, rhs)
+        return rhs
+    end
     hasproperty(provider, :solve!) ||
         throw(ArgumentError("provider Cholesky handle lacks solve!"))
     getproperty(provider, :solve!)(rhs)
@@ -655,17 +743,24 @@ end
 la_backend_name(::StandardLABackend) = :standard
 la_backend_name(::LegacyLABackend) = :legacy
 la_backend_name(::MultiFloatLABackend) = :multifloat
+la_backend_name(::BFLALABackend) = :bfla
 la_backend_reason(::StandardLABackend) = :none
 la_backend_reason(backend::LegacyLABackend) = backend.reason
 la_backend_reason(::MultiFloatLABackend) = :none
+la_backend_reason(::BFLALABackend) = :none
 la_backend_provider(backend::StandardLABackend) = backend.provider
 la_backend_provider(backend::LegacyLABackend) =
     legacy_la_provider_identity(backend.provider)
 la_backend_provider(::MultiFloatLABackend) = :multifloat_linear_algebra
+la_backend_provider(backend::BFLALABackend) =
+    la_factor_provider_identity(backend.provider)
 la_backend_ownership(backend::StandardLABackend) = backend.mode
 la_backend_ownership(backend::LegacyLABackend) =
     legacy_la_provider_ownership(backend.provider)
 la_backend_ownership(::MultiFloatLABackend) = :provider_owned
+la_backend_ownership(::BFLALABackend) = :provider_owned
+
+la_factor_provider_identity(::Any) = :unknown
 
 function _record_la_execution!(ws)
     ws.executed_la_backend = la_backend_name(ws.la_backend)
@@ -683,12 +778,16 @@ end
 function la_dot(backend::MultiFloatLABackend, x, y)
     return _la_provider_call(backend, :dot, x, y)
 end
+la_dot(backend::BFLALABackend, x, y) =
+    la_bfla_dot(backend.provider, x, y)
 
 @inline la_norminf(::StandardLABackend, x) = isempty(x) ? zero(eltype(x)) : maximum(abs, x)
 @inline la_norminf(backend::LegacyLABackend, x) =
     _sdpx_legacy_la_call(backend.provider, Val(:norminf), x)
 la_norminf(::MultiFloatLABackend, x) =
     isempty(x) ? zero(eltype(x)) : maximum(abs, x)
+la_norminf(backend::BFLALABackend, x) =
+    isempty(x) ? zero(eltype(x)) : la_bfla_norminf(backend.provider, x)
 
 function la_mul!(::StandardLABackend, C, A, B, α, β)
     return LinearAlgebra.mul!(C, A, B, α, β)
@@ -701,6 +800,10 @@ la_mul!(backend::LegacyLABackend, C, A, B) =
 la_mul!(backend::MultiFloatLABackend, C, A, B, α, β) =
     la_mul_owned!(backend, C, A, B, α, β)
 la_mul!(backend::MultiFloatLABackend, C, A, B) =
+    la_mul_owned!(backend, C, A, B)
+la_mul!(backend::BFLALABackend, C, A, B, α, β) =
+    la_mul_owned!(backend, C, A, B, α, β)
+la_mul!(backend::BFLALABackend, C, A, B) =
     la_mul_owned!(backend, C, A, B)
 la_mul_owned!(backend::StandardLABackend, C, A, B, α, β) =
     la_mul!(backend, C, A, B, α, β)
@@ -721,6 +824,17 @@ la_mul_owned!(backend::MultiFloatLABackend, C, A, B, α, β) =
     _la_provider_call(backend, :mul_owned!, C, A, B, α, β)
 la_mul_owned!(backend::MultiFloatLABackend, C, A, B) =
     _la_provider_call(backend, :mul_owned!, C, A, B)
+la_mul_owned!(backend::BFLALABackend, C, A, B, α, β) =
+    la_bfla_mul_owned!(backend.provider, C, A, B, α, β)
+la_mul_owned!(backend::BFLALABackend, C, A, B) =
+    la_bfla_mul_owned!(
+        backend.provider,
+        C,
+        A,
+        B,
+        one(eltype(C)),
+        zero(eltype(C)),
+    )
 
 function la_syrk!(::StandardLABackend, S, P, α, β)
     if eltype(S) <: Union{Float32,Float64} &&
@@ -737,6 +851,8 @@ la_syrk!(backend::LegacyLABackend, S, P, α, β) =
     _sdpx_legacy_la_call(backend.provider, Val(:syrk), S, P, α, β)
 la_syrk!(backend::MultiFloatLABackend, S, P, α, β) =
     _la_provider_call(backend, :syrk!, S, P, α, β)
+la_syrk!(backend::BFLALABackend, S, P, α, β) =
+    la_bfla_syrk!(backend.provider, S, P, α, β)
 
 function la_chol!(backend::StandardLABackend, A)
     if _standard_requires_finite_guard(backend)
@@ -758,17 +874,23 @@ end
 la_chol!(backend::LegacyLABackend, A) =
     _sdpx_legacy_la_call(backend.provider, Val(:chol), A)
 la_chol!(backend::MultiFloatLABackend, A) = _la_provider_call(backend, :chol!, A)
+la_chol!(backend::BFLALABackend, A::AbstractMatrix{BigFloat}) =
+    la_bfla_chol!(backend.provider, A)
 
 la_trsm!(::StandardLABackend, L, X) = LinearAlgebra.ldiv!(LowerTriangular(L), X)
 la_trsm!(backend::LegacyLABackend, L, X) =
     _sdpx_legacy_la_call(backend.provider, Val(:trsm), L, X)
 la_trsm!(backend::MultiFloatLABackend, L, X) = _la_provider_call(backend, :trsm!, L, X)
+la_trsm!(backend::BFLALABackend, L, X) =
+    la_bfla_trsm!(backend.provider, L, X)
 
 la_trsv_lower!(::StandardLABackend, L, x) = LinearAlgebra.ldiv!(LowerTriangular(L), x)
 la_trsv_lower!(backend::LegacyLABackend, L, x) =
     _sdpx_legacy_la_call(backend.provider, Val(:trsv_lower), L, x)
 la_trsv_lower!(backend::MultiFloatLABackend, L, x) =
     _la_provider_call(backend, :trsv_lower!, L, x)
+la_trsv_lower!(backend::BFLALABackend, L, x) =
+    la_bfla_trsv_lower!(backend.provider, L, x)
 
 la_trsv_transpose!(::StandardLABackend, L, x) =
     LinearAlgebra.ldiv!(UpperTriangular(transpose(L)), x)
@@ -776,6 +898,8 @@ la_trsv_transpose!(backend::LegacyLABackend, L, x) =
     _sdpx_legacy_la_call(backend.provider, Val(:trsv_transpose), L, x)
 la_trsv_transpose!(backend::MultiFloatLABackend, L, x) =
     _la_provider_call(backend, :trsv_transpose!, L, x)
+la_trsv_transpose!(backend::BFLALABackend, L, x) =
+    la_bfla_trsv_transpose!(backend.provider, L, x)
 
 function la_axpby!(::StandardLABackend, α, X, β, Y)
     @inbounds for index in eachindex(X, Y)
@@ -804,6 +928,22 @@ la_axpby_owned!(backend::LegacyLABackend, α, X, β, Y) =
     )
 la_axpby_owned!(backend::MultiFloatLABackend, α, X, β, Y) =
     la_axpby!(backend, α, X, β, Y)
+la_axpby!(backend::BFLALABackend, α, X, β, Y) =
+    la_bfla_axpby!(backend.provider, α, X, β, Y)
+la_axpby_owned!(backend::BFLALABackend, α, X, β, Y) =
+    la_bfla_axpby!(backend.provider, α, X, β, Y)
+
+# Optional-provider operation hooks.  Core never catches an extension error
+# and retries another provider; unsupported calls fail closed.
+la_bfla_dot(::Any, args...) = throw(ArgumentError("BFLA dot unavailable"))
+la_bfla_norminf(::Any, args...) = throw(ArgumentError("BFLA norminf unavailable"))
+la_bfla_mul_owned!(::Any, args...) = throw(ArgumentError("BFLA mul unavailable"))
+la_bfla_syrk!(::Any, args...) = throw(ArgumentError("BFLA syrk unavailable"))
+la_bfla_chol!(::Any, args...) = throw(ArgumentError("BFLA Cholesky unavailable"))
+la_bfla_trsm!(::Any, args...) = throw(ArgumentError("BFLA TRSM unavailable"))
+la_bfla_trsv_lower!(::Any, args...) = throw(ArgumentError("BFLA TRSV unavailable"))
+la_bfla_trsv_transpose!(::Any, args...) = throw(ArgumentError("BFLA transpose TRSV unavailable"))
+la_bfla_axpby!(::Any, args...) = throw(ArgumentError("BFLA AXPBY unavailable"))
 
 function _la_provider_call(backend::MultiFloatLABackend, operation::Symbol, args...)
     provider = backend.provider

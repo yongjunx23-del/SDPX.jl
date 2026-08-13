@@ -217,6 +217,12 @@ struct MultiFloatLABackend{P} <: AbstractLABackend
     provider::P
 end
 
+"""Optional native BigFloat provider instantiated by the BFLA extension."""
+struct BFLALABackend{P} <: AbstractLABackend
+    arithmetic::Symbol
+    provider::P
+end
+
 struct LABackendConfiguration
     arithmetic::Symbol
     requested::Symbol
@@ -555,9 +561,9 @@ Base.@kwdef struct SolverOptions{T}
     # switches to rank-revealing QR only when factor diagnostics justify its
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.
     equality_solver::Symbol    = :auto                   # :auto | :normal_equations | :qr
-    # Dense linear-algebra implementation. `:auto` selects Julia standard
-    # generic/BLAS-LAPACK; `:multifloat` is an explicit optional-provider A/B.
-    linear_algebra_backend::Symbol = :auto              # :auto | :standard | :multifloat | :legacy
+    # Dense linear-algebra implementation. `:bfla` and `:multifloat` are
+    # explicit optional providers; `:auto` remains environment-independent.
+    linear_algebra_backend::Symbol = :auto              # :auto | :standard | :bfla | :multifloat | :legacy
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels

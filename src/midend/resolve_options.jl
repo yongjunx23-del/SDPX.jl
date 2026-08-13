@@ -209,7 +209,7 @@ function resolve_solve_options(
     )
     linear_algebra_backend = _frontend_policy(
         options.linear_algebra_backend,
-        (:auto, :standard, :multifloat, :legacy),
+        (:auto, :standard, :bfla, :multifloat, :legacy),
         "linear_algebra_backend",
     )
     working_precision_policy = _frontend_policy(

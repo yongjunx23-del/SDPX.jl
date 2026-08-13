@@ -38,6 +38,7 @@ const legacy_la_provider_capabilities = SDPX.legacy_la_provider_capabilities
 const legacy_la_provider_ownership = SDPX.legacy_la_provider_ownership
 const legacy_la_provider_supports = SDPX.legacy_la_provider_supports
 const MultiFloatLABackend = SDPX.MultiFloatLABackend
+const BFLALABackend = SDPX.BFLALABackend
 const LABackendConfiguration = SDPX.LABackendConfiguration
 const LAProviderCapabilities = SDPX.LAProviderCapabilities
 const AbstractLACholeskyFactor = SDPX.AbstractLACholeskyFactor
@@ -48,6 +49,7 @@ const plan_la_backend = SDPX.plan_la_backend
 const instantiate_la_backend = SDPX.instantiate_la_backend
 const la_provider_descriptor = SDPX.la_provider_descriptor
 const instantiate_multifloat_la_backend = SDPX.instantiate_multifloat_la_backend
+const instantiate_bfla_la_backend = SDPX.instantiate_bfla_la_backend
 const la_cholesky_factor! = SDPX.la_cholesky_factor!
 const la_lu_factor! = SDPX.la_lu_factor!
 const la_qr_factor! = SDPX.la_qr_factor!
@@ -154,7 +156,8 @@ export PreparedStructure, SolveState, PreprocessTransform
 export StructureFingerprint, PreparedStructureMismatch
 export structure_fingerprint, transform_objective, transform_rhs
 export AbstractLABackend, StandardLABackend, LegacyLABackend
-export SDPXLegacyLAProvider, MultiFloatLABackend, LABackendConfiguration
+export SDPXLegacyLAProvider, MultiFloatLABackend, BFLALABackend
+export LABackendConfiguration
 export LAProviderCapabilities, la_provider_supports
 export plan_la_backend
 export legacy_la_provider_identity, legacy_la_provider_capabilities
@@ -164,6 +167,7 @@ export AbstractLACholeskyFactor, StandardLACholeskyFactor
 export ProviderLACholeskyFactor, LegacyLACholeskyFactor
 export instantiate_la_backend, la_provider_descriptor
 export instantiate_multifloat_la_backend
+export instantiate_bfla_la_backend
 export la_cholesky_factor!
 export la_lu_factor!, la_qr_factor!, la_factor_solve!
 export validate_la_backend_configuration

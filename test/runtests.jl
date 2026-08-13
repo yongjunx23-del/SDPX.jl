@@ -4,6 +4,7 @@ using Test
 const QUICK_TESTS = (
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
+    "bfla_backend.jl",
     "canonical_conic_problem.jl",
     "problem_features.jl",
     "auto_planner.jl",
@@ -20,6 +21,7 @@ const QUICK_TESTS = (
 const FULL_TESTS = (
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
+    "bfla_backend.jl",
     "correctness.jl",
     "genericity.jl",
     "extended_precision_blas.jl",

@@ -105,9 +105,9 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "equality_solver must be :auto, :normal_equations, or :qr",
         ))
-    opts.linear_algebra_backend in (:auto, :standard, :multifloat, :legacy) ||
+    opts.linear_algebra_backend in (:auto, :standard, :bfla, :multifloat, :legacy) ||
         throw(ArgumentError(
-            "linear_algebra_backend must be :auto, :standard, :multifloat, or :legacy",
+            "linear_algebra_backend must be :auto, :standard, :bfla, :multifloat, or :legacy",
         ))
     zero(T) < opts.β < one(T) ||
         throw(ArgumentError("β must be strictly between zero and one"))

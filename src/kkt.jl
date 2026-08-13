@@ -274,6 +274,9 @@ function _build_equality_gram_matrix!(
     elseif la_backend isa MultiFloatLABackend
         la_syrk!(la_backend, Q, Btil, one(T), zero(T))
         return nothing, :multifloat_syrk
+    elseif la_backend isa BFLALABackend
+        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
+        return nothing, :bfla_native_syrk
     elseif T <: Union{Float32,Float64}
         la_backend === nothing ?
         ksyrk!(Q, Btil, one(T), zero(T)) :
@@ -1157,11 +1160,16 @@ function _factor_dense_kkt_native!(
                    equality_factor isa LegacyLACholeskyFactor &&
                    _legacy_factor_has_numerical_rank(equality_factor)
                ) ||
+               (
+                   equality_factor isa ProviderLACholeskyFactor{BigFloat} &&
+                   ws.la_backend isa BFLALABackend
+               ) ||
                (equality_factor !== nothing &&
                 _cholesky_has_numerical_rank(factor_matrix))
                 ws.Qchol = equality_factor
             else
-                if ws.la_backend isa MultiFloatLABackend
+                if ws.la_backend isa MultiFloatLABackend ||
+                   ws.la_backend isa BFLALABackend
                     # Provider failure is an explicit A/B numerical failure;
                     # do not silently claim a provider result after generic
                     # factorization. Existing QR/pivot policy remains the
@@ -1169,7 +1177,7 @@ function _factor_dense_kkt_native!(
                     ws.la_fallback_reason = :la_equality_factor_failed
                     _la_equality_qr_fallback_allowed(ws, opts) ||
                         throw(ArgumentError(
-                            "MultiFloat equality Cholesky failed and QR fallback is not authorized",
+                            "provider equality Cholesky failed and QR fallback is not authorized",
                         ))
                     qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                     ws.Qchol = qr_factor
