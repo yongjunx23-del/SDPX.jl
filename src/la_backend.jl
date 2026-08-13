@@ -1618,14 +1618,7 @@ la_mul_owned!(backend::MultiFloatLABackend, C, A, B) =
 la_mul_owned!(backend::BFLALABackend, C, A, B, α, β) =
     la_bfla_mul_owned!(backend.provider, C, A, B, α, β)
 la_mul_owned!(backend::BFLALABackend, C, A, B) =
-    la_bfla_mul_owned!(
-        backend.provider,
-        C,
-        A,
-        B,
-        one(eltype(C)),
-        zero(eltype(C)),
-    )
+    la_bfla_mul_owned!(backend.provider, C, A, B)
 
 function la_syrk!(::StandardLABackend, S, P, α, β)
     if eltype(S) <: Union{Float32,Float64} &&

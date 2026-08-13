@@ -30,7 +30,7 @@ _Provider(threads::Int) = _Provider(
     ),
 )
 
-const _CAPABILITIES = SDPX.LAProviderCapabilities(
+const _ADAPTED_CAPABILITIES = SDPX.LAProviderCapabilities(
     cholesky=true,
     lu=true,
     # The adapter exposes BFLA's column-pivoted equality RRQR contract, not a
@@ -40,7 +40,10 @@ const _CAPABILITIES = SDPX.LAProviderCapabilities(
     pivoted_symmetric_ldlt=true,
     factor_solve=true,
     multi_rhs=true,
-    iterative_refinement=true,
+    # BFLA supports a one-step primitive for every factor kind, but SDPX has
+    # wired it only for Cholesky handles. This provider-wide fact therefore
+    # remains false until the semantic factor interface is complete.
+    iterative_refinement=false,
     higher_precision_residual=true,
     threading=true,
     dot=true,
@@ -52,16 +55,51 @@ const _CAPABILITIES = SDPX.LAProviderCapabilities(
     axpby=true,
 )
 
-function SDPX.la_provider_descriptor(::Type{BigFloat}, ::Int=1)
-    return (
-        available=true,
-        provider=:bigfloat_linear_algebra,
-        capabilities=SDPX.la_capability_symbols(_CAPABILITIES),
-        capability_model=_CAPABILITIES,
+"""Intersect upstream BFLA facts with semantic seams implemented here."""
+function _capability_model(provider::_Provider)
+    upstream = BFLA.capabilities(provider.backend)
+    adapted = _ADAPTED_CAPABILITIES
+    return SDPX.LAProviderCapabilities(
+        cholesky=adapted.cholesky && upstream.cholesky,
+        lu=adapted.lu && upstream.lu,
+        qr=adapted.qr && upstream.unpivoted_qr,
+        rank_revealing_qr=
+            adapted.rank_revealing_qr && upstream.rank_revealing_qr,
+        pivoted_symmetric_ldlt=
+            adapted.pivoted_symmetric_ldlt && upstream.ldlt,
+        factor_solve=adapted.factor_solve && upstream.factor_solve,
+        multi_rhs=adapted.multi_rhs && upstream.multi_rhs,
+        iterative_refinement=
+            adapted.iterative_refinement && upstream.refinement,
+        higher_precision_residual=
+            adapted.higher_precision_residual &&
+            upstream.higher_precision_residual,
+        threading=adapted.threading && upstream.threading,
+        # BFLA's capability record does not yet enumerate these public level-1
+        # and dense-operation APIs. Their SDPX adapters remain the authority.
+        dot=adapted.dot,
+        norminf=adapted.norminf,
+        mul=adapted.mul && upstream.gemm && upstream.gemv,
+        mul_owned=adapted.mul_owned && upstream.gemm && upstream.gemv,
+        syrk=adapted.syrk && upstream.syrk,
+        triangular_solve=
+            adapted.triangular_solve && upstream.trsm && upstream.trsv,
+        axpby=adapted.axpby,
     )
 end
 
-SDPX.la_provider_capability_model(::_Provider) = _CAPABILITIES
+function SDPX.la_provider_descriptor(::Type{BigFloat}, threads::Int=1)
+    capabilities = _capability_model(_Provider(threads))
+    return (
+        available=true,
+        provider=:bigfloat_linear_algebra,
+        capabilities=SDPX.la_capability_symbols(capabilities),
+        capability_model=capabilities,
+    )
+end
+
+SDPX.la_provider_capability_model(provider::_Provider) =
+    _capability_model(provider)
 SDPX.la_factor_provider_identity(::_Provider) = :bigfloat_linear_algebra
 
 function SDPX.instantiate_bfla_la_backend(
@@ -121,9 +159,10 @@ function SDPX.la_bfla_qr_factor!(
     provider::_Provider,
     A::AbstractMatrix{BigFloat},
 )
-    # BFLA's default `tol=nothing` is an exact-zero absolute tolerance at the
-    # operand precision, so the factorization is complete.  SDPX re-derives
-    # the numerical rank from its own relative tolerance afterwards.
+    # BFLA performs the complete column-pivoted factorization and records its
+    # own default relative rank diagnostic. SDPX deliberately ignores that
+    # rank decision and re-evaluates the packed R diagonal with the explicit
+    # equality tolerance carried by its ExecutionPlan.
     factor = BFLA.qr!(provider.backend, A)
     return _QRPayload(
         BFLA.factor_matrix(factor),
@@ -275,6 +314,24 @@ end
 
 function SDPX.la_bfla_mul_owned!(
     provider::_Provider,
+    C::Union{AbstractMatrix{BigFloat},AbstractVector{BigFloat}},
+    A::AbstractMatrix{BigFloat},
+    B::Union{AbstractMatrix{BigFloat},AbstractVector{BigFloat}},
+)
+    source = !isempty(C) ? C : !isempty(A) ? A : B
+    bits = isempty(source) ? precision(BigFloat) : precision(first(source))
+    return SDPX.la_bfla_mul_owned!(
+        provider,
+        C,
+        A,
+        B,
+        BigFloat(1; precision=bits),
+        BigFloat(0; precision=bits),
+    )
+end
+
+function SDPX.la_bfla_mul_owned!(
+    provider::_Provider,
     y::AbstractVector{BigFloat},
     A::AbstractMatrix{BigFloat},
     x::AbstractVector{BigFloat},
@@ -329,13 +386,16 @@ function SDPX.la_bfla_syrk!(
 end
 
 function SDPX.la_bfla_trsm!(provider::_Provider, L, X)
+    source = !isempty(L) ? L : X
+    bits = isempty(source) ? precision(BigFloat) : precision(first(source))
+    alpha = BigFloat(1; precision=bits)
     BFLA.trsm!(
         provider.backend,
         BFLA.LeftSide,
         BFLA.Lower,
         BFLA.NoTrans,
         BFLA.NonUnitDiagonal,
-        one(BigFloat),
+        alpha,
         L,
         X;
         config=provider.config,

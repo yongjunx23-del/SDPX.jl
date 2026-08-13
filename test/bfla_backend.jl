@@ -84,8 +84,16 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         # LDLT is advertised as a provider fact, but no production
         # ExecutionPlan route requires it today.
         @test plan.capability_model.pivoted_symmetric_ldlt
-        @test plan.capability_model.iterative_refinement
+        @test !plan.capability_model.iterative_refinement
         @test plan.capability_model.higher_precision_residual
+        upstream = bfla_extension.BFLA.capabilities(
+            bfla_extension.BFLA.NativeBackend(),
+        )
+        @test plan.capability_model.cholesky == upstream.cholesky
+        @test plan.capability_model.lu == upstream.lu
+        @test plan.capability_model.rank_revealing_qr ==
+              upstream.rank_revealing_qr
+        @test plan.capability_model.pivoted_symmetric_ldlt == upstream.ldlt
         @test :pivoted_symmetric_ldlt ∉ plan.required_capabilities
         backend = LA.instantiate_la_backend(plan, BigFloat)
         @test !SDPX.la_backend_capabilities(backend).qr
@@ -119,8 +127,9 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
             @test length(unique(objectid.(direction))) == length(direction)
             @test length(unique(objectid.(scratch))) == length(scratch)
 
-            # BFLA ranks with an exact-zero absolute tolerance; SDPX re-ranks
-            # with its own relative tolerance.
+            # BFLA records its own default relative-rank diagnostic. SDPX does
+            # not consume that policy and re-ranks packed R using the explicit
+            # equality tolerance carried by its plan.
             Bdeficient = BigFloat[
                 1 2 3
                 2 4 6
@@ -160,6 +169,39 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
             @test SDPX.la_factor_rank(near) == 1
             @test SDPX.la_factor_rank(near_scaled) == 1
             @test sort(SDPX.la_factor_permutation(near)) == [1, 2]
+
+            # Scalar defaults must follow operand precision, not the ambient
+            # MPFR context. Both the 3-argument mul and triangular solve are
+            # provider operations and may not silently switch implementations.
+            setprecision(BigFloat, 64) do
+                precision_matrix = bfla_extension.BFLA.owned_zeros(
+                    BigFloat, 2, 2; precision_bits=256,
+                )
+                precision_matrix[1, 1] = BigFloat(2; precision=256)
+                precision_matrix[2, 1] = BigFloat(1; precision=256)
+                precision_matrix[2, 2] = BigFloat(3; precision=256)
+                product = bfla_extension.BFLA.owned_zeros(
+                    BigFloat, 2, 2; precision_bits=256,
+                )
+                SDPX.la_mul_owned!(
+                    backend, product, precision_matrix, precision_matrix,
+                )
+                @test all(precision(value) == 256 for value in product)
+
+                triangular = bfla_extension.BFLA.owned_copy(
+                    precision_matrix; precision_bits=256,
+                )
+                rhs_precision = bfla_extension.BFLA.owned_zeros(
+                    BigFloat, 2, 1; precision_bits=256,
+                )
+                rhs_precision[1, 1] = BigFloat(1; precision=256)
+                rhs_precision[2, 1] = BigFloat(2; precision=256)
+                expected_rhs = bfla_extension.BFLA.owned_copy(
+                    rhs_precision; precision_bits=256,
+                )
+                SDPX.la_trsm!(backend, triangular, rhs_precision)
+                @test triangular * rhs_precision ≈ expected_rhs
+            end
 
             # Fail closed rather than inventing an unpivoted or untoleranced
             # QR contract; the BFLA adapter is equality-RRQR-only.
@@ -635,6 +677,7 @@ if _BFLA_LOADED
 
         end
     end
+
 else
     @testset "BFLA end-to-end BigFloat dense route (skipped)" begin
         @test_skip "BigFloatLinearAlgebra extension not loaded"
