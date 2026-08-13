@@ -436,6 +436,30 @@ struct ProviderLALUFactor{T,P,M<:AbstractMatrix{T}} <:
     factors::M
 end
 
+"""Bundled-provider LU handle used by explicit Legacy dense LP plans."""
+struct LegacyLALUFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
+       AbstractLAFactorization{T}
+    provider::P
+    factor::F
+end
+
+"""
+Successful-factor status for the provider-neutral handles.
+
+Only handles that can wrap an unsuccessful factorization delegate to the
+underlying `LinearAlgebra` object; provider-owned and borrowed-legacy handles
+are constructed exclusively after their factor kernels have reported success,
+so they are success by construction.
+"""
+LinearAlgebra.issuccess(factor::StandardLACholeskyFactor) =
+    LinearAlgebra.issuccess(factor.factor)
+LinearAlgebra.issuccess(::ProviderLACholeskyFactor) = true
+LinearAlgebra.issuccess(factor::StandardLALUFactor) =
+    LinearAlgebra.issuccess(factor.factor)
+LinearAlgebra.issuccess(::ProviderLALUFactor) = true
+LinearAlgebra.issuccess(factor::LegacyLALUFactor) =
+    LinearAlgebra.issuccess(factor.factor)
+
 """Standard generic QR handle; `pivoted` records rank-revealing selection."""
 struct StandardLAQRFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
        AbstractLAQRFactor{T}
@@ -455,6 +479,7 @@ la_factor_provider(::AbstractLAQRFactor) = nothing
 la_factor_provider(factor::EqualityQRFactor) = factor.provider
 la_factor_provider(factor::StandardLAQRFactor) = factor.provider
 la_factor_provider(factor::ProviderLALUFactor) = factor.provider
+la_factor_provider(factor::LegacyLALUFactor) = factor.provider
 la_factor_provider(factor::ProviderLALDLTFactor) = factor.provider
 
 la_factor_rank(::AbstractLAQRFactor) = nothing

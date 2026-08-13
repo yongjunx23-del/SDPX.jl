@@ -2,8 +2,9 @@
     SDPX linear-algebra backend
 
 The structural planner remains in `pipeline.jl`; this file is the small
-arithmetic seam used by dense KKT primitives.  Legacy kernels are deliberately
-left intact for BigFloat, LP, Q3, sparse and all non-migrated paths.
+arithmetic seam used by ordinary dense KKT primitives. Legacy kernels remain
+for Q3, sparse, arrow, reduced, mixed-precision, and other explicitly
+non-migrated paths.
 =#
 
 """Optional arithmetic-provider hook; extensions overload this method."""
@@ -28,12 +29,53 @@ const _DENSE_CHOLESKY_REQUIRED = (
     :mul_owned,
 )
 
+const _LP_POSITIVE_DEFINITE_REQUIRED = (
+    :cholesky,
+    :factor_solve,
+)
+
+const _LP_DENSE_EQUALITY_REQUIRED = (
+    :lu,
+    :factor_solve,
+)
+
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
     # SDPX's explicit equality QR route is column-pivoted and rank revealing;
     # it is not a request for a general unpivoted QR implementation.
     equality_solver === :qr &&
         return (_DENSE_CHOLESKY_REQUIRED..., :rank_revealing_qr)
     return _DENSE_CHOLESKY_REQUIRED
+end
+
+function _la_route_requirements(
+    route::Symbol,
+    equality_solver::Symbol,
+)
+    route in (:dense_cholesky, :dense_cholesky_fallback) && return (
+        operations=(
+            :chol,
+            :cholesky_factor!,
+            :solve,
+            :trsm,
+            :trsv_lower,
+            :trsv_transpose,
+            :syrk,
+            :mul_owned,
+        ),
+        capabilities=_dense_cholesky_required_capabilities(equality_solver),
+        fallback=equality_solver === :auto ? :rank_revealing_qr : nothing,
+    )
+    route === :positive_definite_cholesky && return (
+        operations=(:cholesky_factor!, :solve),
+        capabilities=_LP_POSITIVE_DEFINITE_REQUIRED,
+        fallback=nothing,
+    )
+    route === :dense_lu && return (
+        operations=(:lu, :solve),
+        capabilities=_LP_DENSE_EQUALITY_REQUIRED,
+        fallback=nothing,
+    )
+    return nothing
 end
 
 function standard_la_provider_capabilities(::Type{T}) where {T}
@@ -196,6 +238,42 @@ function _validate_bfla_lower_operand(
     return precision_bits
 end
 
+"""
+Validate the caller-owned dense square matrix before an in-place BFLA LU
+factorization.  Unlike the symmetric Cholesky/LDLT seam, every entry of the LU
+operand is authoritative, so finiteness, uniform precision, and independent
+MPFR entry ownership are checked across the full matrix.
+"""
+function _validate_bfla_dense_operand(
+    A::AbstractMatrix{BigFloat},
+    operation::AbstractString,
+)
+    size(A, 1) == size(A, 2) || throw(ArgumentError(
+        "$(operation) requires a square matrix",
+    ))
+    seen = IdDict{BigFloat,Nothing}()
+    precision_bits = nothing
+    @inbounds for column in axes(A, 2), row in axes(A, 1)
+        value = A[row, column]
+        isfinite(value) || throw(ArgumentError(
+            "$(operation) input contains non-finite authoritative storage",
+        ))
+        bits = precision(value)
+        if precision_bits === nothing
+            precision_bits = bits
+        elseif bits != precision_bits
+            throw(ArgumentError(
+                "$(operation) input has mixed BigFloat precision",
+            ))
+        end
+        haskey(seen, value) && throw(ArgumentError(
+            "$(operation) requires independently-owned entries",
+        ))
+        seen[value] = nothing
+    end
+    return precision_bits
+end
+
 """Optional setup hook; an extension returns its concrete provider payload."""
 instantiate_multifloat_la_backend(
     ::Type{T},
@@ -244,42 +322,34 @@ function plan_la_backend(
         ))
     arithmetic = _la_arithmetic_symbol(T)
     generic_capabilities = standard_la_provider_capabilities(T)
-    if equality_solver === :qr
+    if equality_solver === :qr &&
+       route in (:dense_cholesky, :dense_cholesky_fallback)
         la_provider_supports(generic_capabilities, :rank_revealing_qr) ||
             throw(ArgumentError(
                 "equality_solver=:qr is unsupported for arithmetic $(T)",
             ))
     end
     descriptor = la_provider_descriptor(T, threads)
-    required_operations = (
-        :chol,
-        :cholesky_factor!,
-        :solve,
-        :trsm,
-        :trsv_lower,
-        :trsv_transpose,
-        :syrk,
-        :mul_owned,
-    )
-    required_capabilities =
-        _dense_cholesky_required_capabilities(equality_solver)
-    # The first LA migration only owns dense Cholesky routes.  Historical
-    # automatic/legacy callers retain the old implementation on every other
-    # structural route, while an explicit request is rejected rather than
-    # silently changing the requested backend in the diagnostic plan.
-    if route ∉ (:dense_cholesky, :dense_cholesky_fallback)
+    requirements = _la_route_requirements(route, equality_solver)
+    # Ordinary dense SDP and LP factors use the provider seam. Specialized
+    # routes retain their established implementation; explicit requests fail
+    # during planning instead of being silently reselected at execution.
+    if requirements === nothing
         if requested in (:auto, :legacy)
             return _legacy_la_backend_configuration(
                 T,
                 requested,
                 :route_not_migrated,
                 equality_solver,
+                route,
             )
         end
         throw(ArgumentError(
             "LA backend $(requested) is not available on non-dense route $(route)",
         ))
     end
+    required_operations = requirements.operations
+    required_capabilities = requirements.capabilities
     requested === :bfla && descriptor.provider !== :bigfloat_linear_algebra &&
         throw(ArgumentError(
             "requested BFLA provider unavailable: missing_provider",
@@ -290,6 +360,7 @@ function plan_la_backend(
             :legacy,
             :requested_legacy,
             equality_solver,
+            route,
         )
     elseif requested === :bfla ||
            (
@@ -315,7 +386,7 @@ function plan_la_backend(
         )) || throw(ArgumentError(
             "requested BFLA provider unavailable: incomplete_provider_capabilities",
         ))
-        fallback_chain = equality_solver === :auto &&
+        fallback_chain = requirements.fallback === :rank_revealing_qr &&
             la_provider_supports(
                 descriptor_capabilities,
                 :rank_revealing_qr,
@@ -342,7 +413,7 @@ function plan_la_backend(
                required_capabilities,
            ))
             fallback_chain =
-                equality_solver === :auto &&
+                requirements.fallback === :rank_revealing_qr &&
                 la_provider_supports(
                     descriptor_capabilities,
                     :rank_revealing_qr,
@@ -371,7 +442,7 @@ function plan_la_backend(
         # Provider selection is final at planning time.  Runtime has no
         # Standard-to-Legacy provider switch; only the equality algorithm may
         # use the explicitly authorized rank-revealing QR fallback.
-        fallback_chain = equality_solver === :auto ?
+        fallback_chain = requirements.fallback === :rank_revealing_qr ?
             (:rank_revealing_qr,) : ()
         capabilities = generic_capabilities
         config = LABackendConfiguration(
@@ -397,7 +468,7 @@ function plan_la_backend(
                required_capabilities,
            ))
             fallback_chain =
-                equality_solver === :auto &&
+                requirements.fallback === :rank_revealing_qr &&
                 la_provider_supports(
                     descriptor_capabilities,
                     :rank_revealing_qr,
@@ -428,12 +499,14 @@ function plan_la_backend(
         requested,
         :unsupported_arithmetic,
         equality_solver,
+        route,
     )
     return _legacy_la_backend_configuration(
         T,
         requested,
         :bigfloat_ownership,
         equality_solver,
+        route,
     )
 end
 
@@ -631,6 +704,10 @@ la_cholesky_factor!(::AbstractLABackend, ::AbstractArray) = nothing
 
 """Factor a dense matrix with generic LU through the selected provider."""
 function la_lu_factor!(backend::StandardLABackend, A::AbstractMatrix)
+    size(A, 1) == size(A, 2) || throw(ArgumentError(
+        "Standard LU requires a square matrix",
+    ))
+    all(isfinite, A) || return nothing
     capabilities = standard_la_provider_capabilities(eltype(A))
     la_provider_supports(capabilities, :lu) || throw(ArgumentError(
         "LA provider $(backend.provider) does not support LU",
@@ -640,7 +717,29 @@ function la_lu_factor!(backend::StandardLABackend, A::AbstractMatrix)
     return StandardLALUFactor{eltype(A),typeof(factor)}(factor)
 end
 
+function la_lu_factor!(backend::LegacyLABackend, A::AbstractMatrix)
+    size(A, 1) == size(A, 2) || throw(ArgumentError(
+        "Legacy LU requires a square matrix",
+    ))
+    all(isfinite, A) || return nothing
+    factor = _sdpx_legacy_la_call(
+        backend.provider,
+        Val(:lu_factor!),
+        A,
+    )
+    LinearAlgebra.issuccess(factor) || return nothing
+    return LegacyLALUFactor{
+        eltype(A),
+        typeof(backend.provider),
+        typeof(factor),
+    }(backend.provider, factor)
+end
+
 function la_lu_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
+    size(A, 1) == size(A, 2) || throw(ArgumentError(
+        "MultiFloat LU requires a square matrix",
+    ))
+    all(isfinite, A) || return nothing
     payload = la_mfla_lu_factor!(backend.provider, A)
     payload === nothing && return nothing
     la_factor_provider_identity(payload) === :multifloat_linear_algebra ||
@@ -668,6 +767,39 @@ function la_lu_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
     ))
     return ProviderLALUFactor{eltype(A),typeof(payload),typeof(factors)}(
         payload, factors,
+    )
+end
+
+function la_lu_factor!(
+    backend::BFLALABackend,
+    A::AbstractMatrix{BigFloat},
+)
+    input_precision = _validate_bfla_dense_operand(A, "BFLA LU")
+    input_precision === nothing && return nothing
+    payload = la_bfla_lu_factor!(backend.provider, A)
+    payload === nothing && return nothing
+    la_factor_provider_identity(payload) === :bigfloat_linear_algebra ||
+        throw(ArgumentError("BFLA LU provider returned a foreign factor payload"))
+    factors = la_bfla_lu_factor_matrix(payload)
+    factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
+        "BFLA LU provider factors must be a BigFloat matrix",
+    ))
+    size(factors) == size(A) || throw(ArgumentError(
+        "BFLA LU provider returned factors with dimensions $(size(factors)) " *
+        "for input $(size(A))",
+    ))
+    all(isfinite, factors) || throw(ArgumentError(
+        "BFLA LU provider returned non-finite factor storage",
+    ))
+    la_bfla_lu_factor_precision(payload) == input_precision ||
+        throw(ArgumentError("BFLA LU provider factor precision does not match input"))
+    diagnostics = la_bfla_lu_diagnostics(payload)
+    diagnostics isa NamedTuple || throw(ArgumentError(
+        "BFLA LU provider returned no factor diagnostics",
+    ))
+    return ProviderLALUFactor{BigFloat,typeof(payload),typeof(factors)}(
+        payload,
+        factors,
     )
 end
 
@@ -1305,12 +1437,22 @@ la_factor_solve!(factor::LegacyLACholeskyFactor, rhs) =
     ); rhs)
 la_factor_solve!(factor::StandardLALUFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
+la_factor_solve!(factor::LegacyLALUFactor, rhs) =
+    (_sdpx_legacy_la_call(
+        factor.provider,
+        Val(:lu_solve),
+        factor.factor,
+        rhs,
+    ); rhs)
 function la_factor_solve!(factor::ProviderLALUFactor, rhs)
     identity = la_factor_provider_identity(factor.provider)
-    identity === :multifloat_linear_algebra || throw(ArgumentError(
-        "LU provider handle does not implement solve",
-    ))
-    la_mfla_lu_solve!(factor.provider, rhs)
+    if identity === :multifloat_linear_algebra
+        la_mfla_lu_solve!(factor.provider, rhs)
+    elseif identity === :bigfloat_linear_algebra
+        la_bfla_lu_solve!(factor.provider, rhs)
+    else
+        throw(ArgumentError("LU provider handle does not implement solve"))
+    end
     return rhs
 end
 la_factor_solve!(factor::StandardLAQRFactor, rhs) =
@@ -1597,6 +1739,16 @@ la_bfla_trsv_transpose!(::Any, args...) = throw(ArgumentError("BFLA transpose TR
 la_bfla_axpby!(::Any, args...) = throw(ArgumentError("BFLA AXPBY unavailable"))
 la_bfla_qr_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("BFLA pivoted QR unavailable"))
+la_bfla_lu_factor!(::Any, ::AbstractMatrix) =
+    throw(ArgumentError("BFLA LU unavailable"))
+la_bfla_lu_factor_matrix(::Any) =
+    throw(ArgumentError("BFLA LU factor handle does not expose storage"))
+la_bfla_lu_factor_precision(::Any) =
+    throw(ArgumentError("BFLA LU factor handle does not expose precision"))
+la_bfla_lu_diagnostics(::Any) =
+    throw(ArgumentError("BFLA LU factor handle does not expose diagnostics"))
+la_bfla_lu_solve!(::Any, rhs) =
+    throw(ArgumentError("BFLA LU factor handle does not implement solve"))
 la_bfla_ldlt_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("BFLA LDLT unavailable"))
 la_bfla_ldlt_factor_matrix(::Any) =

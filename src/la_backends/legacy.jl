@@ -26,10 +26,12 @@ const SDPX_LEGACY_LA_CAPABILITIES = (
     :axpby_owned,
     :qr,
     :rank_revealing_qr,
+    :lu,
 )
 
 const SDPX_LEGACY_LA_CAPABILITY_MODEL = LAProviderCapabilities(
     cholesky=true,
+    lu=true,
     factor_solve=true,
     multi_rhs=true,
     iterative_refinement=true,
@@ -87,17 +89,28 @@ function _legacy_la_backend_configuration(
     requested::Symbol,
     reason::Symbol,
     equality_solver::Symbol=:auto,
+    route::Symbol=:dense_cholesky,
 ) where {T}
+    requirements = _la_route_requirements(route, equality_solver)
+    required_capabilities = requirements === nothing ? () :
+                            requirements.capabilities
     # The bundled provider advertises a real Julia LinearAlgebra QR kernel.
-    # Automatic equality planning may therefore authorize RRQR; the explicit
-    # `equality_solver=:qr` requirement wiring stays in the planner.
-    fallback_chain =
+    # Automatic equality planning may therefore authorize RRQR, but only when
+    # the route itself requests that fallback; migrated dense LP routes have no
+    # equality fallback and must not inherit the dense-SDP authorization.
+    fallback_chain = if requirements === nothing
         equality_solver === :auto &&
         la_provider_supports(
             SDPX_LEGACY_LA_CAPABILITY_MODEL,
             :rank_revealing_qr,
-        ) ?
-        (:rank_revealing_qr,) : ()
+        ) ? (:rank_revealing_qr,) : ()
+    else
+        requirements.fallback === :rank_revealing_qr &&
+        la_provider_supports(
+            SDPX_LEGACY_LA_CAPABILITY_MODEL,
+            :rank_revealing_qr,
+        ) ? (:rank_revealing_qr,) : ()
+    end
     return LABackendConfiguration(
         _la_arithmetic_symbol(T),
         requested,
@@ -105,7 +118,7 @@ function _legacy_la_backend_configuration(
         :sdpx_legacy_la,
         SDPX_LEGACY_LA_CAPABILITIES,
         SDPX_LEGACY_LA_CAPABILITY_MODEL,
-        _dense_cholesky_required_capabilities(equality_solver),
+        required_capabilities,
         :bundled_sdpx_legacy,
         fallback_chain,
         reason,
@@ -146,6 +159,8 @@ struct LegacyLACholeskyFactor{
     provider::P
     factors::M
 end
+
+LinearAlgebra.issuccess(::LegacyLACholeskyFactor) = true
 
 """
     _sdpx_legacy_la_qr!(provider, A; pivoted=true)
@@ -266,6 +281,17 @@ end
     β,
     Y,
 ) = kaxpby_owned!(α, X, β, Y)
+@inline _sdpx_legacy_la_call(
+    ::SDPXLegacyLAProvider,
+    ::Val{:lu_factor!},
+    A,
+) = LinearAlgebra.lu!(A; check=false)
+@inline _sdpx_legacy_la_call(
+    ::SDPXLegacyLAProvider,
+    ::Val{:lu_solve},
+    factor,
+    rhs,
+) = LinearAlgebra.ldiv!(factor, rhs)
 
 function _sdpx_legacy_la_call(
     ::SDPXLegacyLAProvider,

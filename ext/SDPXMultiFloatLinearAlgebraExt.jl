@@ -1,11 +1,15 @@
 #=
     SDPX <-> MultiFloatLinearAlgebra optional extension.
 
-    Upstream contract (MFLA HEAD ac77ffb):
+    Upstream contract (installed/developed MFLA checkout):
       MultiFloatLinearAlgebra uuid 642d9d30-8e28-45ca-9d81-256429ea358f
       public API: mfdot, gemv!, gemm!, syrk!, trsm!, trsv!, cholesky!,
                   lu!, ldlt!, rrqr!, ldiv!, issuccess, factor_kind,
                   factor_matrix, factor_permutation, capabilities
+
+    The exact checkout is pinned by the provider environment, never by this
+    comment; the extension verifies the API surface through load-time
+    capability facts instead of a hard-coded upstream commit.
 
     The provider payload is immutable and carries only a KernelConfig and a
     reusable GemmWorkspace.  The capability model is derived directly from
@@ -88,7 +92,7 @@ function _capability_model(::Type{MF}) where {MF<:MultiFloat}
         qr=false,
         rank_revealing_qr=c.rrqr,
         pivoted_symmetric_ldlt=c.ldlt,
-        factor_solve=c.cholesky,
+        factor_solve=c.cholesky || c.lu,
         multi_rhs=c.multi_rhs,
         # These are deliberately distinct from a provider-owned refinement
         # loop or implicit precision policy: SDPX requests one correction or

@@ -32,6 +32,7 @@ _Provider(threads::Int) = _Provider(
 
 const _CAPABILITIES = SDPX.LAProviderCapabilities(
     cholesky=true,
+    lu=true,
     # The adapter exposes BFLA's column-pivoted equality RRQR contract, not a
     # general unpivoted QR/least-squares operation.
     qr=false,
@@ -84,6 +85,28 @@ function SDPX.la_bfla_cholesky_factor!(
         config=provider.config,
     )
     return BFLA.issuccess(factor) ? factor : nothing
+end
+
+function SDPX.la_bfla_lu_factor!(
+    provider::_Provider,
+    A::AbstractMatrix{BigFloat},
+)
+    factor = BFLA.lu!(provider.backend, A; check=false)
+    return BFLA.issuccess(factor) ? factor : nothing
+end
+
+SDPX.la_factor_provider_identity(::BFLA.BFLALUFactor) =
+    :bigfloat_linear_algebra
+SDPX.la_bfla_lu_factor_matrix(factor::BFLA.BFLALUFactor) =
+    BFLA.factor_matrix(factor)
+SDPX.la_bfla_lu_factor_precision(factor::BFLA.BFLALUFactor) =
+    BFLA.factor_precision(factor)
+SDPX.la_bfla_lu_diagnostics(factor::BFLA.BFLALUFactor) =
+    BFLA.factor_diagnostics(factor)
+
+function SDPX.la_bfla_lu_solve!(factor::BFLA.BFLALUFactor, rhs)
+    BFLA.solve!(factor, rhs)
+    return rhs
 end
 
 # SDPX's equality fallback only consumes the provider-produced packed R and
