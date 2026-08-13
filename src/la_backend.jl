@@ -612,19 +612,6 @@ la_trsv_transpose!(backend::LegacyLABackend, L, x) =
 la_trsv_transpose!(backend::MultiFloatLABackend, L, x) =
     _la_provider_call(backend, :trsv_transpose!, L, x)
 
-"""Factor a dense SPD buffer through the selected arithmetic backend."""
-la_factor!(backend::AbstractLABackend, A) = la_chol!(backend, A)
-
-"""Solve a factored lower-triangular SPD system in place."""
-function la_solve!(backend::AbstractLABackend, L, rhs)
-    la_trsv_lower!(backend, L, rhs)
-    return la_trsv_transpose!(backend, L, rhs)
-end
-
-"""Apply one residual correction using the selected arithmetic backend."""
-la_refine!(backend::AbstractLABackend, α, correction, β, residual) =
-    la_axpby_owned!(backend, α, correction, β, residual)
-
 function la_axpby!(::StandardLABackend, α, X, β, Y)
     @inbounds for index in eachindex(X, Y)
         Y[index] = α * X[index] + β * Y[index]

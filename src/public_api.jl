@@ -65,9 +65,6 @@ const la_chol! = SDPX.la_chol!
 const la_trsm! = SDPX.la_trsm!
 const la_trsv_lower! = SDPX.la_trsv_lower!
 const la_trsv_transpose! = SDPX.la_trsv_transpose!
-const la_factor! = SDPX.la_factor!
-const la_solve! = SDPX.la_solve!
-const la_refine! = SDPX.la_refine!
 const la_axpby! = SDPX.la_axpby!
 const la_axpby_owned! = SDPX.la_axpby_owned!
 const SolveDiagnostics = SDPX.SolveDiagnostics
@@ -173,7 +170,6 @@ export la_lu_factor!, la_qr_factor!, la_factor_solve!
 export validate_la_backend_configuration
 export la_dot, la_norminf, la_mul!, la_mul_owned!, la_syrk!, la_chol!
 export la_trsm!, la_trsv_lower!, la_trsv_transpose!
-export la_factor!, la_solve!, la_refine!
 export la_axpby!, la_axpby_owned!
 export AbstractPreprocessStage, PreprocessContext, PreprocessPlan
 export PreprocessReport, PreprocessStageReport, ReconstructionMap
