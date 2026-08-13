@@ -158,6 +158,12 @@ _Provider(::Type{MF}; threads::Int=1) where {MF<:MultiFloat} =
         MFWorkspace(MF; thread_count=max(threads, 1)),
     )
 
+SDPX.la_equality_gram_kernel(
+    ::SDPX.MultiFloatLABackend,
+    ::Type{<:MultiFloat},
+) = :multifloat_syrk
+SDPX.la_backend_owns_equality_gram(::SDPX.MultiFloatLABackend) = true
+
 """Callable adapter exposing both owned GEMM/GEMV arities."""
 struct _ProviderMulOwned{P}
     provider::P

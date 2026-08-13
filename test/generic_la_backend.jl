@@ -3,8 +3,17 @@ using LinearAlgebra
 using MultiFloats: Float64x4
 using Test
 
+struct UnadaptedSemanticLABackend <: SDPX.AbstractLABackend end
+
 @testset "generic LA provider capabilities" begin
     LA = SDPX.Experimental
+
+    unadapted = UnadaptedSemanticLABackend()
+    @test !SDPX.la_backend_owns_equality_gram(unadapted)
+    @test SDPX.la_equality_gram_kernel(unadapted, Float64) ===
+          :provider_syrk
+    @test SDPX.la_equality_factor_failure_policy(unadapted) ===
+          :provider_fail_closed
 
     for T in (Float64, BigFloat, Float64x4)
         config = LA.plan_la_backend(T; equality_solver=:auto)

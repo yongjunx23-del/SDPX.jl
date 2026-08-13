@@ -572,6 +572,33 @@ la_backend_capabilities(backend::MultiFloatLABackend) =
 la_backend_capabilities(backend::BFLALABackend) =
     la_provider_capability_model(backend.provider)
 
+"""Whether the selected backend owns dense equality Gram formation."""
+la_backend_owns_equality_gram(::AbstractLABackend) = false
+la_backend_owns_equality_gram(::StandardLABackend) = true
+
+"""Stable diagnostic label for a backend-owned equality SYRK."""
+la_equality_gram_kernel(::AbstractLABackend, ::Type) = :provider_syrk
+la_equality_gram_kernel(::StandardLABackend, ::Type{T}) where {T} =
+    T <: Union{Float32,Float64} ? :blas_syrk : :generic_syrk
+
+"""Provider hook for factors whose successful status owns the rank decision."""
+la_provider_cholesky_rank_authoritative(::Any) = false
+la_cholesky_rank_authoritative(::AbstractLACholeskyFactor) = false
+la_cholesky_rank_authoritative(
+    factor::ProviderLACholeskyFactor,
+) = la_provider_cholesky_rank_authoritative(factor.provider)
+la_cholesky_rank_authoritative(
+    ::LegacyLACholeskyFactor{BigFloat},
+) = true
+
+"""Solver policy after an equality Cholesky factor is rejected."""
+la_equality_factor_failure_policy(::AbstractLABackend) =
+    :provider_fail_closed
+la_equality_factor_failure_policy(::StandardLABackend) =
+    :standard_compatibility
+la_equality_factor_failure_policy(::LegacyLABackend) =
+    :legacy_fail_closed
+
 function _assert_la_backend_capabilities(
     backend::AbstractLABackend,
     config::LABackendConfiguration,

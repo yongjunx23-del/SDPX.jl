@@ -64,6 +64,13 @@ transform and original-coordinate reconstruction exists. An explicit dual
 request therefore fails closed before backend/provider planning instead of
 silently executing the primal route.
 
+Dense equality assembly and factor recovery now use semantic LA hooks for
+Gram ownership, diagnostic labels, factor-authoritative rank decisions, and
+failure policy. Provider-specific labels and BFLA rank authority live in the
+optional extensions; `kkt.jl` no longer branches on MFLA/BFLA backend names.
+Legacy remains explicit only where the solver owns a specialized structural
+route, such as block-arrow and extended-precision crossover kernels.
+
 The staged target is therefore:
 
 `CanonicalProblem -> ProblemFeatures -> FormulationPlan -> required LA capabilities -> ExecutionPlan`.

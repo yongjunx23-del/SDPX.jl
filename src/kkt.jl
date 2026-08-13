@@ -50,7 +50,16 @@ end
 function _legacy_factor_has_numerical_rank(
     factor::LegacyLACholeskyFactor{T},
 ) where {T}
-    T === BigFloat && return true
+    la_cholesky_rank_authoritative(factor) && return true
+    return _cholesky_has_numerical_rank(
+        la_factor_handle_matrix(factor),
+    )
+end
+
+function _la_factor_has_numerical_rank(
+    factor::AbstractLACholeskyFactor,
+)
+    la_cholesky_rank_authoritative(factor) && return true
     return _cholesky_has_numerical_rank(
         la_factor_handle_matrix(factor),
     )
@@ -266,17 +275,12 @@ function _build_equality_gram_matrix!(
     thread_count::Int,
     la_backend::Union{Nothing,AbstractLABackend}=nothing,
 ) where {T}
-    # A planned Standard/MultiFloat backend owns dense Gram formation for all
-    # arithmetic families; Legacy retains the established crossover path.
-    if la_backend isa StandardLABackend
+    # Migrated backends own dense Gram formation for all arithmetic families;
+    # specialized Legacy routes retain the established crossover path.
+    if la_backend !== nothing &&
+       la_backend_owns_equality_gram(la_backend)
         la_syrk!(la_backend, Q, Btil, one(T), zero(T))
-        return nothing, T <: Union{Float32,Float64} ? :blas_syrk : :generic_syrk
-    elseif la_backend isa MultiFloatLABackend
-        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
-        return nothing, :multifloat_syrk
-    elseif la_backend isa BFLALABackend
-        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
-        return nothing, :bfla_native_syrk
+        return nothing, la_equality_gram_kernel(la_backend, T)
     elseif T <: Union{Float32,Float64}
         la_backend === nothing ?
         ksyrk!(Q, Btil, one(T), zero(T)) :
@@ -1149,24 +1153,15 @@ function _factor_dense_kkt_native!(
             # Every selected LA backend owns its factor handle on migrated
             # dense routes. No backend may silently execute another provider
             # while retaining its planned identity.
-            legacy_provider_factor =
-                ws.la_backend isa LegacyLABackend
             equality_factor =
                 la_cholesky_factor!(ws.la_backend, ws.Qbuf)
-            factor_matrix = equality_factor === nothing ? nothing :
-                            la_factor_handle_matrix(equality_factor)
-            if (equality_factor isa LegacyLACholeskyFactor &&
-                _legacy_factor_has_numerical_rank(equality_factor)) ||
-               (
-                   equality_factor isa ProviderLACholeskyFactor{BigFloat} &&
-                   ws.la_backend isa BFLALABackend
-               ) ||
-               (equality_factor !== nothing &&
-                _cholesky_has_numerical_rank(factor_matrix))
+            if equality_factor !== nothing &&
+               _la_factor_has_numerical_rank(equality_factor)
                 ws.Qchol = equality_factor
             else
-                if ws.la_backend isa MultiFloatLABackend ||
-                   ws.la_backend isa BFLALABackend
+                failure_policy =
+                    la_equality_factor_failure_policy(ws.la_backend)
+                if failure_policy === :provider_fail_closed
                     # Provider failure is an explicit A/B numerical failure;
                     # do not silently claim a provider result after generic
                     # factorization. Existing QR/pivot policy remains the
@@ -1190,7 +1185,7 @@ function _factor_dense_kkt_native!(
                             qr_quality=qr_factor.quality,
                         )
                     end
-                elseif legacy_provider_factor
+                elseif failure_policy === :legacy_fail_closed
                     # A provider failure is not permission to execute a
                     # StandardLA factor while continuing to report LegacyLA.
                     # Restore the possibly partially-mutated buffer, then
@@ -1231,7 +1226,7 @@ function _factor_dense_kkt_native!(
                             ),
                         )
                     end
-                else
+                elseif failure_policy === :standard_compatibility
                     copy_owned!(ws.Qbuf, ws.Q)
                     Cq = LinearAlgebra.cholesky!(
                         Symmetric(ws.Qbuf, :L);
@@ -1297,6 +1292,11 @@ function _factor_dense_kkt_native!(
                             end
                         end
                     end
+                else
+                    throw(ArgumentError(
+                        "unknown equality factor failure policy " *
+                        "$(failure_policy)",
+                    ))
                 end
             end
             phase_equality_factorization +=

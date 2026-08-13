@@ -209,6 +209,9 @@ if _MFLA_LOADED
         for T in _MFLA_TYPES
             rng = MersenneTwister(0x5eed + sizeof(T))
             backend = _expect_multifloat_backend(T)
+            @test SDPX.la_backend_owns_equality_gram(backend)
+            @test SDPX.la_equality_gram_kernel(backend, T) ===
+                  :multifloat_syrk
             n = 5
             A = _spd_matrix(T, rng, n)
             borrowed = copy(A)
@@ -218,6 +221,7 @@ if _MFLA_LOADED
 
             factor = SDPX.la_cholesky_factor!(backend, borrowed)
             @test factor isa SDPX.ProviderLACholeskyFactor{T}
+            @test !SDPX.la_cholesky_rank_authoritative(factor)
             @test SDPX.la_factor_handle_matrix(factor) === borrowed
 
             rhs_two = T.(randn(rng, n, 2))

@@ -269,6 +269,14 @@ SDPX.la_provider_factor_precision(factor::BFLA.BFLACholeskyFactor) =
     BFLA.factor_precision(factor)
 SDPX.la_factor_provider_identity(::BFLA.BFLACholeskyFactor) =
     :bigfloat_linear_algebra
+SDPX.la_provider_cholesky_rank_authoritative(
+    ::BFLA.BFLACholeskyFactor,
+) = true
+SDPX.la_equality_gram_kernel(
+    ::SDPX.BFLALABackend,
+    ::Type{BigFloat},
+) = :bfla_native_syrk
+SDPX.la_backend_owns_equality_gram(::SDPX.BFLALABackend) = true
 
 function SDPX.la_provider_factor_solve!(
     factor::BFLA.BFLACholeskyFactor,

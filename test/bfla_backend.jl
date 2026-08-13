@@ -96,6 +96,9 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         @test plan.capability_model.pivoted_symmetric_ldlt == upstream.ldlt
         @test :pivoted_symmetric_ldlt ∉ plan.required_capabilities
         backend = LA.instantiate_la_backend(plan, BigFloat)
+        @test SDPX.la_backend_owns_equality_gram(backend)
+        @test SDPX.la_equality_gram_kernel(backend, BigFloat) ===
+              :bfla_native_syrk
         @test !SDPX.la_backend_capabilities(backend).qr
         @test SDPX.la_backend_capabilities(backend).rank_revealing_qr
         @test SDPX.la_backend_capabilities(backend).pivoted_symmetric_ldlt
@@ -341,6 +344,9 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
                     SDPX._owned_array_copy(BigFloat, spd),
                 )
                 @test cholesky_handle isa SDPX.ProviderLACholeskyFactor{BigFloat}
+                @test SDPX.la_cholesky_rank_authoritative(
+                    cholesky_handle,
+                )
 
                 # The upper triangle is deliberately poisoned: BFLA must
                 # consume only lower-authoritative storage. One borrowed
