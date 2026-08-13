@@ -12,6 +12,7 @@ const QUICK_TESTS = (
     "public_api.jl",
     "performance_trace.jl",
     "prepared_structure.jl",
+    "v05_core_invariants.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -67,6 +68,7 @@ const FULL_TESTS = (
     "aqua.jl",
     "shadowing_guard.jl",
     "gates.jl",
+    "v05_core_invariants.jl",
 )
 
 function _test_profile()
