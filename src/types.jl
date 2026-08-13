@@ -478,6 +478,7 @@ end
 la_factor_provider(::AbstractLAQRFactor) = nothing
 la_factor_provider(factor::EqualityQRFactor) = factor.provider
 la_factor_provider(factor::StandardLAQRFactor) = factor.provider
+la_factor_provider(factor::ProviderLACholeskyFactor) = factor.provider
 la_factor_provider(factor::ProviderLALUFactor) = factor.provider
 la_factor_provider(factor::LegacyLALUFactor) = factor.provider
 la_factor_provider(factor::ProviderLALDLTFactor) = factor.provider

@@ -202,11 +202,9 @@ function Base.getproperty(provider::_Provider, name::Symbol)
 end
 
 Base.hasproperty(handle::_CholeskyHandle, name::Symbol) =
-    name in (:solve!, :factors, :factor, :config)
+    name in (:factor, :config)
 
 function Base.getproperty(handle::_CholeskyHandle, name::Symbol)
-    name === :solve! && return rhs -> _provider_solve!(handle, rhs)
-    name === :factors && return factor_matrix(handle.factor)
     name in (:factor, :config) && return getfield(handle, name)
     throw(ArgumentError("MFLA Cholesky handle does not implement $(name)"))
 end
@@ -410,7 +408,7 @@ Solve through MFLA's public `ldiv!` so a single right-hand-side vector or a
 matrix of right-hand sides uses the correct trsv!/trsm! dispatch and validates
 the factor status internally.
 """
-function _provider_solve!(handle::_CholeskyHandle, rhs)
+function SDPX.la_provider_factor_solve!(handle::_CholeskyHandle, rhs)
     ldiv!(rhs, handle.factor; config=handle.config)
     return rhs
 end
@@ -479,7 +477,7 @@ function SDPX.la_mfla_mixed_residual!(
 end
 
 """One MFLA `refinement_correction!`; no loop, stopping rule, or fallback."""
-function SDPX.la_mfla_refinement_correction!(
+function SDPX.la_provider_refinement_correction!(
     factor::_CholeskyHandle{MF},
     residual,
     correction,
@@ -498,6 +496,8 @@ end
 
 SDPX.la_factor_provider_identity(::_CholeskyHandle) =
     :multifloat_linear_algebra
+SDPX.la_provider_factor_matrix(handle::_CholeskyHandle) =
+    factor_matrix(handle.factor)
 
 """
     _QRPayload{MF}
@@ -573,15 +573,15 @@ function SDPX.la_mfla_lu_factor!(
     return _LUPayload{MF,typeof(factor)}(factor, provider.config)
 end
 
-function SDPX.la_mfla_lu_factor_matrix(payload::_LUPayload)
+function SDPX.la_provider_factor_matrix(payload::_LUPayload)
     return factor_matrix(payload.factor)
 end
 
-function SDPX.la_mfla_lu_diagnostics(payload::_LUPayload)
+function SDPX.la_provider_factor_diagnostics(payload::_LUPayload)
     return factor_diagnostics(payload.factor)
 end
 
-function SDPX.la_mfla_lu_solve!(payload::_LUPayload, rhs)
+function SDPX.la_provider_factor_solve!(payload::_LUPayload, rhs)
     ldiv!(rhs, payload.factor; config=payload.config)
     return rhs
 end
@@ -604,20 +604,20 @@ function SDPX.la_mfla_ldlt_factor!(
     return _LDLTPayload{MF,typeof(factor)}(factor, provider.config)
 end
 
-function SDPX.la_mfla_ldlt_factor_matrix(payload::_LDLTPayload)
+function SDPX.la_provider_factor_matrix(payload::_LDLTPayload)
     return factor_matrix(payload.factor)
 end
 
-function SDPX.la_mfla_ldlt_diagnostics(payload::_LDLTPayload)
+function SDPX.la_provider_factor_diagnostics(payload::_LDLTPayload)
     return factor_diagnostics(payload.factor)
 end
 
-function SDPX.la_mfla_ldlt_solve!(payload::_LDLTPayload, rhs)
+function SDPX.la_provider_factor_solve!(payload::_LDLTPayload, rhs)
     ldiv!(rhs, payload.factor; config=payload.config)
     return rhs
 end
 
-function SDPX.la_mfla_refinement_correction!(
+function SDPX.la_provider_refinement_correction!(
     factor::_LUPayload{MF},
     residual,
     correction,
@@ -634,7 +634,7 @@ function SDPX.la_mfla_refinement_correction!(
     return correction
 end
 
-function SDPX.la_mfla_refinement_correction!(
+function SDPX.la_provider_refinement_correction!(
     factor::_LDLTPayload{MF},
     residual,
     correction,
@@ -699,12 +699,12 @@ function _final_ldlt_permutation(
     return perm
 end
 
-function SDPX.la_mfla_ldlt_blocks(payload::_LDLTPayload)
+function SDPX.la_provider_ldlt_blocks(payload::_LDLTPayload)
     diagnostics = factor_diagnostics(payload.factor)
     return _compact_ldlt_blocks(diagnostics.blocks, length(diagnostics.blocks))
 end
 
-function SDPX.la_mfla_ldlt_permutation(payload::_LDLTPayload)
+function SDPX.la_provider_ldlt_permutation(payload::_LDLTPayload)
     diagnostics = factor_diagnostics(payload.factor)
     n = length(diagnostics.blocks)
     return _final_ldlt_permutation(
@@ -712,6 +712,10 @@ function SDPX.la_mfla_ldlt_permutation(payload::_LDLTPayload)
         diagnostics.pivots,
         n,
     )
+end
+
+function SDPX.la_provider_ldlt_inertia(payload::_LDLTPayload)
+    return factor_diagnostics(payload.factor).inertia
 end
 
 function SDPX.la_provider_descriptor(

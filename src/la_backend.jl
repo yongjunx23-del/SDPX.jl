@@ -603,10 +603,7 @@ function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
         throw(ArgumentError(
             "MultiFloat Cholesky provider returned a foreign factor payload",
         ))
-    hasproperty(payload, :factors) || throw(ArgumentError(
-        "MultiFloat Cholesky provider handle must expose factors",
-    ))
-    factors = getproperty(payload, :factors)
+    factors = la_provider_factor_matrix(payload)
     factors isa AbstractMatrix{eltype(A)} || throw(ArgumentError(
         "MultiFloat Cholesky provider factors must be an $(eltype(A)) matrix",
     ))
@@ -629,7 +626,7 @@ function la_cholesky_factor!(backend::BFLALABackend, A::AbstractMatrix{BigFloat}
     input_precision = _validate_bfla_lower_operand(A, "BFLA Cholesky")
     payload = la_bfla_cholesky_factor!(backend.provider, A)
     payload === nothing && return nothing
-    factors = la_bfla_factor_matrix(payload)
+    factors = la_provider_factor_matrix(payload)
     factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
         "BFLA Cholesky provider factors must be a BigFloat matrix",
     ))
@@ -648,7 +645,7 @@ function la_cholesky_factor!(backend::BFLALABackend, A::AbstractMatrix{BigFloat}
         "BFLA Cholesky provider returned non-finite factor storage",
     ))
     if input_precision !== nothing &&
-       la_bfla_factor_precision(payload) != input_precision
+       la_provider_factor_precision(payload) != input_precision
         throw(ArgumentError(
             "BFLA Cholesky provider factor precision does not match input",
         ))
@@ -660,13 +657,6 @@ end
 
 la_bfla_cholesky_factor!(::Any, ::AbstractMatrix{BigFloat}) =
     throw(ArgumentError("BFLA provider does not implement Cholesky"))
-la_bfla_factor_matrix(::Any) =
-    throw(ArgumentError("BFLA factor handle does not expose storage"))
-la_bfla_factor_precision(::Any) =
-    throw(ArgumentError("BFLA factor handle does not expose precision"))
-la_bfla_factor_solve!(::Any, rhs) =
-    throw(ArgumentError("BFLA factor handle does not implement solve"))
-
 """Expose the standard generic factor handle without changing legacy routes."""
 @inline _standard_requires_finite_guard(backend::StandardLABackend) =
     backend.arithmetic ∉ (:float32, :float64)
@@ -746,7 +736,7 @@ function la_lu_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
         throw(ArgumentError(
             "MultiFloat LU provider returned a foreign factor payload",
         ))
-    factors = la_mfla_lu_factor_matrix(payload)
+    factors = la_provider_factor_matrix(payload)
     factors isa AbstractMatrix{eltype(A)} || throw(ArgumentError(
         "MultiFloat LU provider factors must be an $(eltype(A)) matrix",
     ))
@@ -757,7 +747,7 @@ function la_lu_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
     all(isfinite, factors) || throw(ArgumentError(
         "MultiFloat LU provider returned non-finite factor storage",
     ))
-    diagnostics = la_mfla_lu_diagnostics(payload)
+    diagnostics = la_provider_factor_diagnostics(payload)
     diagnostics isa NamedTuple && hasproperty(diagnostics, :success) ||
         throw(ArgumentError(
             "MultiFloat LU provider returned no factor diagnostics",
@@ -780,7 +770,7 @@ function la_lu_factor!(
     payload === nothing && return nothing
     la_factor_provider_identity(payload) === :bigfloat_linear_algebra ||
         throw(ArgumentError("BFLA LU provider returned a foreign factor payload"))
-    factors = la_bfla_lu_factor_matrix(payload)
+    factors = la_provider_factor_matrix(payload)
     factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
         "BFLA LU provider factors must be a BigFloat matrix",
     ))
@@ -791,9 +781,9 @@ function la_lu_factor!(
     all(isfinite, factors) || throw(ArgumentError(
         "BFLA LU provider returned non-finite factor storage",
     ))
-    la_bfla_lu_factor_precision(payload) == input_precision ||
+    la_provider_factor_precision(payload) == input_precision ||
         throw(ArgumentError("BFLA LU provider factor precision does not match input"))
-    diagnostics = la_bfla_lu_diagnostics(payload)
+    diagnostics = la_provider_factor_diagnostics(payload)
     diagnostics isa NamedTuple || throw(ArgumentError(
         "BFLA LU provider returned no factor diagnostics",
     ))
@@ -1042,7 +1032,7 @@ function la_ldlt_factor!(
     input_precision = _validate_bfla_lower_operand(A, "BFLA LDLT")
     payload = la_bfla_ldlt_factor!(backend.provider, A)
     payload === nothing && return nothing
-    factors = la_bfla_ldlt_factor_matrix(payload)
+    factors = la_provider_factor_matrix(payload)
     factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
         "BFLA LDLT provider factors must be a BigFloat matrix",
     ))
@@ -1057,16 +1047,16 @@ function la_ldlt_factor!(
     _all_finite_lower(factors) || throw(ArgumentError(
         "BFLA LDLT provider returned non-finite factor storage",
     ))
-    la_bfla_ldlt_factor_precision(payload) == input_precision ||
+    la_provider_factor_precision(payload) == input_precision ||
         throw(ArgumentError(
             "BFLA LDLT provider factor precision does not match input",
         ))
-    permutation = la_bfla_ldlt_permutation(payload)
+    permutation = la_provider_ldlt_permutation(payload)
     length(permutation) == size(A, 1) &&
         sort(permutation) == collect(1:size(A, 1)) || throw(ArgumentError(
             "BFLA LDLT provider returned an invalid permutation",
         ))
-    blocks = la_bfla_ldlt_blocks(payload)
+    blocks = la_provider_ldlt_blocks(payload)
     all(block -> block in (1, 2), blocks) && sum(blocks) == size(A, 1) ||
         throw(ArgumentError(
             "BFLA LDLT provider returned an invalid pivot-block layout",
@@ -1083,7 +1073,7 @@ function la_ldlt_factor!(
 )
     payload = la_mfla_ldlt_factor!(backend.provider, A)
     payload === nothing && return nothing
-    factors = la_mfla_ldlt_factor_matrix(payload)
+    factors = la_provider_factor_matrix(payload)
     factors isa AbstractMatrix{eltype(A)} || throw(ArgumentError(
         "MultiFloat LDLT provider factors must be an $(eltype(A)) matrix",
     ))
@@ -1101,7 +1091,7 @@ function la_ldlt_factor!(
     _all_finite_lower(factors) || throw(ArgumentError(
         "MultiFloat LDLT provider returned non-finite factor storage",
     ))
-    diagnostics = la_mfla_ldlt_diagnostics(payload)
+    diagnostics = la_provider_factor_diagnostics(payload)
     diagnostics isa NamedTuple && hasproperty(diagnostics, :success) ||
         throw(ArgumentError(
             "MultiFloat LDLT provider returned no factor diagnostics",
@@ -1113,14 +1103,14 @@ function la_ldlt_factor!(
     # plus consumed partners).  The extension projects it to compact block
     # sizes; SDPX validates only that projection and never assumes the raw
     # markers are a sum-preserving 1/2 sequence.
-    blocks = la_mfla_ldlt_blocks(payload)
+    blocks = la_provider_ldlt_blocks(payload)
     all(block -> block in (1, 2), blocks) && sum(blocks) == size(A, 1) ||
         throw(ArgumentError(
             "MultiFloat LDLT provider returned an invalid pivot-block layout",
         ))
     # `pivots` is the step-by-step Bunch-Kaufman swap record, not a final
     # permutation.  The extension reconstructs the final permutation from it.
-    permutation = la_mfla_ldlt_permutation(payload)
+    permutation = la_provider_ldlt_permutation(payload)
     length(permutation) == size(A, 1) &&
         sort(permutation) == collect(1:size(A, 1)) || throw(ArgumentError(
             "MultiFloat LDLT provider returned an invalid permutation",
@@ -1139,43 +1129,18 @@ la_ldlt_factor!(
 ))
 
 function la_ldlt_factor_solve!(factor::ProviderLALDLTFactor, rhs)
-    identity = la_factor_provider_identity(factor.provider)
-    if identity === :bigfloat_linear_algebra
-        la_bfla_ldlt_solve!(factor.provider, rhs)
-        return rhs
-    elseif identity === :multifloat_linear_algebra
-        la_mfla_ldlt_solve!(factor.provider, rhs)
-        return rhs
-    end
-    throw(ArgumentError("LDLT provider handle does not implement solve"))
+    la_provider_factor_solve!(factor.provider, rhs)
+    return rhs
 end
 
-function la_ldlt_inertia(factor::ProviderLALDLTFactor)
-    identity = la_factor_provider_identity(factor.provider)
-    identity === :bigfloat_linear_algebra &&
-        return la_bfla_ldlt_inertia(factor.provider)
-    identity === :multifloat_linear_algebra &&
-        return la_mfla_ldlt_diagnostics(factor.provider).inertia
-    throw(ArgumentError("LDLT provider handle does not expose inertia"))
-end
+la_ldlt_inertia(factor::ProviderLALDLTFactor) =
+    la_provider_ldlt_inertia(factor.provider)
 
-function la_ldlt_permutation(factor::ProviderLALDLTFactor)
-    identity = la_factor_provider_identity(factor.provider)
-    identity === :bigfloat_linear_algebra &&
-        return la_bfla_ldlt_permutation(factor.provider)
-    identity === :multifloat_linear_algebra &&
-        return la_mfla_ldlt_permutation(factor.provider)
-    throw(ArgumentError("LDLT provider handle does not expose a permutation"))
-end
+la_ldlt_permutation(factor::ProviderLALDLTFactor) =
+    la_provider_ldlt_permutation(factor.provider)
 
-function la_ldlt_blocks(factor::ProviderLALDLTFactor)
-    identity = la_factor_provider_identity(factor.provider)
-    identity === :bigfloat_linear_algebra &&
-        return la_bfla_ldlt_blocks(factor.provider)
-    identity === :multifloat_linear_algebra &&
-        return la_mfla_ldlt_blocks(factor.provider)
-    throw(ArgumentError("LDLT provider handle does not expose pivot blocks"))
-end
+la_ldlt_blocks(factor::ProviderLALDLTFactor) =
+    la_provider_ldlt_blocks(factor.provider)
 
 la_factor_kind(::ProviderLALDLTFactor) = :ldlt
 la_factor_handle_matrix(factor::ProviderLALDLTFactor) = factor.factors
@@ -1341,11 +1306,7 @@ function la_refine_once!(
     residual,
     correction,
 )
-    la_factor_provider_identity(factor.provider) ===
-        :bigfloat_linear_algebra || throw(ArgumentError(
-            "provider Cholesky handle does not support BFLA refinement",
-        ))
-    return la_bfla_refine_once!(
+    return la_provider_refine_once!(
         factor.provider, A, x, b, residual, correction,
     )
 end
@@ -1355,11 +1316,7 @@ function la_refinement_correction!(
     residual,
     correction,
 )
-    la_factor_provider_identity(factor.provider) ===
-        :multifloat_linear_algebra || throw(ArgumentError(
-            "provider Cholesky handle does not support MFLA correction",
-        ))
-    return la_mfla_refinement_correction!(
+    return la_provider_refinement_correction!(
         factor.provider, residual, correction,
     )
 end
@@ -1369,11 +1326,7 @@ function la_refinement_correction!(
     residual,
     correction,
 )
-    la_factor_provider_identity(factor.provider) ===
-        :multifloat_linear_algebra || throw(ArgumentError(
-            "provider LU handle does not support MFLA correction",
-        ))
-    return la_mfla_refinement_correction!(
+    return la_provider_refinement_correction!(
         factor.provider, residual, correction,
     )
 end
@@ -1383,11 +1336,7 @@ function la_refinement_correction!(
     residual,
     correction,
 )
-    la_factor_provider_identity(factor.provider) ===
-        :multifloat_linear_algebra || throw(ArgumentError(
-            "provider LDLT handle does not support MFLA correction",
-        ))
-    return la_mfla_refinement_correction!(
+    return la_provider_refinement_correction!(
         factor.provider, residual, correction,
     )
 end
@@ -1413,19 +1362,8 @@ la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::LegacyLACholeskyFactor) = factor.factors
 
-function _provider_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
-    provider = factor.provider
-    if la_factor_provider_identity(provider) === :bigfloat_linear_algebra
-        la_bfla_factor_solve!(provider, rhs)
-        return rhs
-    end
-    hasproperty(provider, :solve!) ||
-        throw(ArgumentError("provider Cholesky handle lacks solve!"))
-    getproperty(provider, :solve!)(rhs)
-    return rhs
-end
 la_factor_solve!(factor::ProviderLACholeskyFactor, rhs) =
-    _provider_cholesky_solve!(factor, rhs)
+    (la_provider_factor_solve!(factor.provider, rhs); rhs)
 la_factor_solve!(factor::StandardLACholeskyFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
 la_factor_solve!(factor::LegacyLACholeskyFactor, rhs) =
@@ -1445,14 +1383,7 @@ la_factor_solve!(factor::LegacyLALUFactor, rhs) =
         rhs,
     ); rhs)
 function la_factor_solve!(factor::ProviderLALUFactor, rhs)
-    identity = la_factor_provider_identity(factor.provider)
-    if identity === :multifloat_linear_algebra
-        la_mfla_lu_solve!(factor.provider, rhs)
-    elseif identity === :bigfloat_linear_algebra
-        la_bfla_lu_solve!(factor.provider, rhs)
-    else
-        throw(ArgumentError("LU provider handle does not implement solve"))
-    end
+    la_provider_factor_solve!(factor.provider, rhs)
     return rhs
 end
 la_factor_solve!(factor::StandardLAQRFactor, rhs) =
@@ -1734,66 +1665,48 @@ la_bfla_qr_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("BFLA pivoted QR unavailable"))
 la_bfla_lu_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("BFLA LU unavailable"))
-la_bfla_lu_factor_matrix(::Any) =
-    throw(ArgumentError("BFLA LU factor handle does not expose storage"))
-la_bfla_lu_factor_precision(::Any) =
-    throw(ArgumentError("BFLA LU factor handle does not expose precision"))
-la_bfla_lu_diagnostics(::Any) =
-    throw(ArgumentError("BFLA LU factor handle does not expose diagnostics"))
-la_bfla_lu_solve!(::Any, rhs) =
-    throw(ArgumentError("BFLA LU factor handle does not implement solve"))
 la_bfla_ldlt_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("BFLA LDLT unavailable"))
-la_bfla_ldlt_factor_matrix(::Any) =
-    throw(ArgumentError("BFLA LDLT factor handle does not expose storage"))
-la_bfla_ldlt_factor_precision(::Any) =
-    throw(ArgumentError("BFLA LDLT factor handle does not expose precision"))
-la_bfla_ldlt_solve!(::Any, rhs) =
-    throw(ArgumentError("BFLA LDLT factor handle does not implement solve"))
-la_bfla_ldlt_inertia(::Any) =
-    throw(ArgumentError("BFLA LDLT factor handle does not expose inertia"))
-la_bfla_ldlt_permutation(::Any) =
-    throw(ArgumentError("BFLA LDLT factor handle does not expose a permutation"))
-la_bfla_ldlt_blocks(::Any) =
-    throw(ArgumentError("BFLA LDLT factor handle does not expose pivot blocks"))
 la_bfla_residual!(::Any, args...) =
     throw(ArgumentError("BFLA residual unavailable"))
 la_bfla_normwise_backward_error(::Any, args...) =
     throw(ArgumentError("BFLA backward error unavailable"))
 la_bfla_higher_precision_residual!(::Any, args...; kwargs...) =
     throw(ArgumentError("BFLA higher-precision residual unavailable"))
-la_bfla_refine_once!(::Any, args...) =
-    throw(ArgumentError("BFLA one-step refinement unavailable"))
 la_mfla_residual!(::Any, args...) =
     throw(ArgumentError("MultiFloat residual unavailable"))
 la_mfla_normwise_backward_error(::Any, args...) =
     throw(ArgumentError("MultiFloat backward error unavailable"))
 la_mfla_mixed_residual!(::Any, args...) =
     throw(ArgumentError("MultiFloat mixed-precision residual unavailable"))
-la_mfla_refinement_correction!(::Any, args...) =
-    throw(ArgumentError("MultiFloat refinement correction unavailable"))
 la_mfla_qr_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("MultiFloat pivoted QR unavailable"))
 la_mfla_lu_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("MultiFloat LU unavailable"))
-la_mfla_lu_factor_matrix(::Any) =
-    throw(ArgumentError("MultiFloat LU factor handle does not expose storage"))
-la_mfla_lu_diagnostics(::Any) =
-    throw(ArgumentError("MultiFloat LU factor handle does not expose diagnostics"))
-la_mfla_lu_solve!(::Any, rhs) =
-    throw(ArgumentError("MultiFloat LU factor handle does not implement solve"))
 la_mfla_ldlt_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("MultiFloat LDLT unavailable"))
-la_mfla_ldlt_factor_matrix(::Any) =
-    throw(ArgumentError("MultiFloat LDLT factor handle does not expose storage"))
-la_mfla_ldlt_diagnostics(::Any) =
-    throw(ArgumentError("MultiFloat LDLT factor handle does not expose diagnostics"))
-la_mfla_ldlt_solve!(::Any, rhs) =
-    throw(ArgumentError("MultiFloat LDLT factor handle does not implement solve"))
-la_mfla_ldlt_blocks(::Any) =
-    throw(ArgumentError("MultiFloat LDLT factor handle does not expose pivot blocks"))
-la_mfla_ldlt_permutation(::Any) =
-    throw(ArgumentError("MultiFloat LDLT factor handle does not expose a permutation"))
+
+# Semantic provider-factor protocol. Optional extensions implement these on
+# their opaque factor payload types. Core dispatches by factor semantics and
+# never by provider name; unsupported payloads fail closed here.
+la_provider_factor_matrix(::Any) =
+    throw(ArgumentError("provider factor handle does not expose storage"))
+la_provider_factor_precision(::Any) =
+    throw(ArgumentError("provider factor handle does not expose precision"))
+la_provider_factor_diagnostics(::Any) =
+    throw(ArgumentError("provider factor handle does not expose diagnostics"))
+la_provider_factor_solve!(::Any, rhs) =
+    throw(ArgumentError("provider factor handle does not implement solve"))
+la_provider_ldlt_inertia(::Any) =
+    throw(ArgumentError("provider LDLT handle does not expose inertia"))
+la_provider_ldlt_permutation(::Any) =
+    throw(ArgumentError("provider LDLT handle does not expose a permutation"))
+la_provider_ldlt_blocks(::Any) =
+    throw(ArgumentError("provider LDLT handle does not expose pivot blocks"))
+la_provider_refine_once!(::Any, args...) =
+    throw(ArgumentError("provider factor does not expose one-step refinement"))
+la_provider_refinement_correction!(::Any, args...) =
+    throw(ArgumentError("provider factor does not expose one correction"))
 
 function _la_provider_call(backend::MultiFloatLABackend, operation::Symbol, args...)
     provider = backend.provider

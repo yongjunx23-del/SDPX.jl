@@ -135,14 +135,14 @@ end
 
 SDPX.la_factor_provider_identity(::BFLA.BFLALUFactor) =
     :bigfloat_linear_algebra
-SDPX.la_bfla_lu_factor_matrix(factor::BFLA.BFLALUFactor) =
+SDPX.la_provider_factor_matrix(factor::BFLA.BFLALUFactor) =
     BFLA.factor_matrix(factor)
-SDPX.la_bfla_lu_factor_precision(factor::BFLA.BFLALUFactor) =
+SDPX.la_provider_factor_precision(factor::BFLA.BFLALUFactor) =
     BFLA.factor_precision(factor)
-SDPX.la_bfla_lu_diagnostics(factor::BFLA.BFLALUFactor) =
+SDPX.la_provider_factor_diagnostics(factor::BFLA.BFLALUFactor) =
     BFLA.factor_diagnostics(factor)
 
-function SDPX.la_bfla_lu_solve!(factor::BFLA.BFLALUFactor, rhs)
+function SDPX.la_provider_factor_solve!(factor::BFLA.BFLALUFactor, rhs)
     BFLA.solve!(factor, rhs)
     return rhs
 end
@@ -180,12 +180,12 @@ end
 
 SDPX.la_factor_provider_identity(::BFLA.BFLALDLTFactor) =
     :bigfloat_linear_algebra
-SDPX.la_bfla_ldlt_factor_matrix(factor::BFLA.BFLALDLTFactor) =
+SDPX.la_provider_factor_matrix(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_matrix(factor)
-SDPX.la_bfla_ldlt_factor_precision(factor::BFLA.BFLALDLTFactor) =
+SDPX.la_provider_factor_precision(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_precision(factor)
 
-function SDPX.la_bfla_ldlt_solve!(
+function SDPX.la_provider_factor_solve!(
     factor::BFLA.BFLALDLTFactor,
     rhs,
 )
@@ -193,11 +193,11 @@ function SDPX.la_bfla_ldlt_solve!(
     return rhs
 end
 
-SDPX.la_bfla_ldlt_inertia(factor::BFLA.BFLALDLTFactor) =
+SDPX.la_provider_ldlt_inertia(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_inertia(factor)
-SDPX.la_bfla_ldlt_permutation(factor::BFLA.BFLALDLTFactor) =
+SDPX.la_provider_ldlt_permutation(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_perm(factor)
-SDPX.la_bfla_ldlt_blocks(factor::BFLA.BFLALDLTFactor) =
+SDPX.la_provider_ldlt_blocks(factor::BFLA.BFLALDLTFactor) =
     BFLA.factor_blocks(factor)
 
 function SDPX.la_bfla_residual!(
@@ -252,7 +252,7 @@ function SDPX.la_bfla_higher_precision_residual!(
     )
 end
 
-function SDPX.la_bfla_refine_once!(
+function SDPX.la_provider_refine_once!(
     factor::BFLA.BFLACholeskyFactor,
     A,
     x,
@@ -263,14 +263,14 @@ function SDPX.la_bfla_refine_once!(
     return BFLA.refine_once!(factor, A, x, b, residual, correction)
 end
 
-SDPX.la_bfla_factor_matrix(factor::BFLA.BFLACholeskyFactor) =
+SDPX.la_provider_factor_matrix(factor::BFLA.BFLACholeskyFactor) =
     BFLA.factor_matrix(factor)
-SDPX.la_bfla_factor_precision(factor::BFLA.BFLACholeskyFactor) =
+SDPX.la_provider_factor_precision(factor::BFLA.BFLACholeskyFactor) =
     BFLA.factor_precision(factor)
 SDPX.la_factor_provider_identity(::BFLA.BFLACholeskyFactor) =
     :bigfloat_linear_algebra
 
-function SDPX.la_bfla_factor_solve!(
+function SDPX.la_provider_factor_solve!(
     factor::BFLA.BFLACholeskyFactor,
     rhs,
 )
