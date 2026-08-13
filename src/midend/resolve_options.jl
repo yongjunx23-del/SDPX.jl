@@ -243,6 +243,7 @@ function resolve_solve_options(
         parameter_strategy=:adaptive,
         refine_policy=:auto,
         step_rule=:auto,
+        certification=certification,
     )
 
     summary = (

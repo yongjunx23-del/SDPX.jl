@@ -23,6 +23,22 @@ using Test
     @test resolved.core.scaling === :auto
     @test resolved.core.algorithm === :auto
     @test resolved.certification
+    @test resolved.core.certification === true
+    @test resolved.summary.certification === true
+
+    explicit_false = SDPX.Experimental.resolve_solve_options(
+        Float64, SDPX.SolveOptions(certification=false),
+    )
+    @test explicit_false.certification === false
+    @test explicit_false.core.certification === false
+    @test explicit_false.summary.certification === false
+
+    explicit_true = SDPX.Experimental.resolve_solve_options(
+        Float64, SDPX.SolveOptions(certification=true),
+    )
+    @test explicit_true.certification === true
+    @test explicit_true.core.certification === true
+    @test explicit_true.summary.certification === true
 
     setprecision(BigFloat, 840) do
         automatic = SDPX.Experimental.auto_tolerance(BigFloat, 840)

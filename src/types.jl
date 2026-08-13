@@ -413,6 +413,10 @@ Base.@kwdef struct SolverOptions{T}
     chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
+    # Pipeline post-solve certification handoff. `true` preserves the
+    # historical original-coordinate final certificate; `false` skips the
+    # independent certificate and returns the raw core status.
+    certification::Bool       = true
     expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
 end
 

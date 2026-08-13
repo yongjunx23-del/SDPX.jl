@@ -392,7 +392,24 @@ end
     @test timed_out.status == SDPX.TimeLimit
     @test timed_out.iterations == 0
     @test timed_out.diagnostics.termination.reason == :time_limit
+    @test timed_out.diagnostics.selected_algorithms.certificate ==
+          (available=false, reason=:time_limit)
     @test timed_out.diagnostics.timings.pipeline >= 0.0
+
+    uncertified_timeout = SDPX.solve!(
+        problem,
+        SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            parameter_policy=:fixed,
+            max_time=0.0,
+            certification=false,
+            verbosity=0,
+        ),
+    )
+    @test uncertified_timeout.status == SDPX.TimeLimit
+    @test uncertified_timeout.iterations == 0
+    @test uncertified_timeout.diagnostics.selected_algorithms.certificate ==
+          (available=false, reason=:certification_disabled)
 end
 
 @testset "initial-point scaling tracks the block data" begin

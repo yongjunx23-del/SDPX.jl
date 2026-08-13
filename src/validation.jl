@@ -1175,6 +1175,11 @@ function certify_final_result(
     result::SDPResult{T},
     opts::SolverOptions{T},
 ) where {T}
+    opts.certification || return (
+        result,
+        (available=false, reason=:certification_disabled),
+        nothing,
+    )
     certificate = result_certificate(prob, result, opts)
     authoritative_status = result.status in (
         Optimal,

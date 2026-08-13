@@ -2184,11 +2184,17 @@ function solve!(
     end
     lower_result = run_at_precision(lower_options, selected_precision)
     if _working_precision_success(lower_result.status)
+        message = opts.certification ?
+                  "Adaptive working precision selected " *
+                  "$(selected_precision) of $(requested_precision) " *
+                  "requested bits; the result passed original-coordinate " *
+                  "certification without a retry." :
+                  "Adaptive working precision selected " *
+                  "$(selected_precision) of $(requested_precision) " *
+                  "requested bits; final certification was disabled."
         return _record_working_precision!(
             lower_result,
-            "Adaptive working precision selected $(selected_precision) of " *
-            "$(requested_precision) requested bits; the result passed " *
-            "original-coordinate certification without a retry.",
+            message,
         )
     end
 
@@ -2368,6 +2374,7 @@ function _solve_pipeline!(
             warnings,
             opts.diagnostics,
             opts.max_time,
+            opts.certification,
         )
     end
     report.inconsistent &&
@@ -2516,7 +2523,8 @@ function _solve_pipeline!(
                 deadline=deadline,
             )
         end
-        native_certificate = if native_result !== nothing &&
+        native_certificate = if opts.certification &&
+                                native_result !== nothing &&
                                 native_result.status === Optimal
             result_certificate(reduced, native_result, q3_options)
         else
@@ -2544,6 +2552,7 @@ function _solve_pipeline!(
                 warnings,
                 opts.diagnostics,
                 opts.max_time,
+                opts.certification,
             )
         end
         if fallback && time() < deadline
@@ -2706,15 +2715,19 @@ function _solve_pipeline!(
         NumericalFailure,
     )
     if opts.mode === OPTIMIZE && diagnosable_failure
-        result, _, infeasibility_message =
-            certify_optimize_infeasibility(prob, result, opts)
-        infeasibility_message === nothing ||
-            push!(warnings, infeasibility_message)
+        if opts.certification
+            result, _, infeasibility_message =
+                certify_optimize_infeasibility(prob, result, opts)
+            infeasibility_message === nothing ||
+                push!(warnings, infeasibility_message)
+        end
     end
     result, certificate, certificate_warning = if result.status === TimeLimit
         (
             result,
-            (available=false, reason=:time_limit),
+            opts.certification ?
+            (available=false, reason=:time_limit) :
+            (available=false, reason=:certification_disabled),
             nothing,
         )
     else

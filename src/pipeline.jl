@@ -2306,7 +2306,9 @@ function _inconsistent_presolve_result(
             ),
         ),
     )
-    certificate = result_certificate(prob, result, opts)
+    certificate = opts.certification ?
+                  result_certificate(prob, result, opts) :
+                  (available=false, reason=:certification_disabled)
     return _attach_diagnostics(
         result,
         plan,
@@ -2331,6 +2333,7 @@ function _time_limit_pipeline_result(
     warnings::Vector{String},
     diagnostics_enabled::Bool,
     max_time::Float64,
+    certification_enabled::Bool,
 ) where {T}
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
@@ -2366,5 +2369,9 @@ function _time_limit_pipeline_result(
         warnings,
         0,
         diagnostics_enabled,
+        (reason=:none,),
+        certification_enabled ?
+        (available=false, reason=:time_limit) :
+        (available=false, reason=:certification_disabled),
     )
 end
