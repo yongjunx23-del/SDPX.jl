@@ -93,6 +93,9 @@ using Test
         qr_rhs = copy(rhs)
         qr_buffer = SDPX._owned_array_copy(T, source)
         qr_factor = LA.la_qr_factor!(backend, qr_buffer; pivoted=true)
+        @test qr_factor isa SDPX.AbstractLAQRFactor
+        @test SDPX.la_factor_rank(qr_factor) == size(source, 2)
+        @test SDPX.la_factor_permutation(qr_factor) isa Vector{Int}
         LA.la_factor_solve!(qr_factor, qr_rhs)
         @test source * qr_rhs ≈ rhs
     end

@@ -365,17 +365,19 @@ leading triangular `R` block; keeping the reflectors makes the representation
 compatible with later residual-based extensions without another workspace
 change.
 """
-struct EqualityQRFactor{T}
+abstract type AbstractLAFactorization{T} end
+abstract type AbstractLACholeskyFactor{T} <: AbstractLAFactorization{T} end
+
+"""Abstract marker for provider-neutral QR factor handles."""
+abstract type AbstractLAQRFactor{T} <: AbstractLAFactorization{T} end
+
+struct EqualityQRFactor{T} <: AbstractLAQRFactor{T}
     factors::Matrix{T}
     coefficients::Vector{T}
     permutation::Vector{Int}
     rank::Int
     quality::T
 end
-
-"""Abstract marker for an unpivoted equality Gram Cholesky handle."""
-abstract type AbstractLAFactorization{T} end
-abstract type AbstractLACholeskyFactor{T} <: AbstractLAFactorization{T} end
 
 """Standard generic factor handle wrapping Julia's Cholesky object."""
 struct StandardLACholeskyFactor{T,F<:LinearAlgebra.Cholesky{T}} <:
@@ -398,10 +400,49 @@ end
 
 """Standard generic QR handle; `pivoted` records rank-revealing selection."""
 struct StandardLAQRFactor{T,F<:LinearAlgebra.Factorization{T}} <:
-       AbstractLAFactorization{T}
+       AbstractLAQRFactor{T}
     factor::F
     pivoted::Bool
 end
+
+la_factor_provider(::AbstractLAQRFactor) = nothing
+la_factor_provider(::EqualityQRFactor) = :equality_fallback
+la_factor_provider(::StandardLAQRFactor) = :standard
+
+la_factor_rank(::AbstractLAQRFactor) = nothing
+la_factor_rank(factor::EqualityQRFactor) = factor.rank
+function la_factor_rank(factor::StandardLAQRFactor)
+    factor.pivoted && return LinearAlgebra.rank(factor.factor)
+    return min(size(factor.factor.R)...)
+end
+
+la_factor_quality(::AbstractLAQRFactor) = nothing
+la_factor_quality(factor::EqualityQRFactor) = factor.quality
+function la_factor_quality(factor::StandardLAQRFactor)
+    rank = la_factor_rank(factor)
+    rank === nothing && return nothing
+    rank == 0 && return zero(eltype(factor.factor))
+    diagonal = abs.(LinearAlgebra.diag(factor.factor.R))
+    leading = diagonal[1:rank]
+    largest = maximum(leading)
+    largest > zero(eltype(factor.factor)) || return zero(eltype(factor.factor))
+    return clamp(
+        minimum(leading) / largest,
+        zero(eltype(factor.factor)),
+        one(eltype(factor.factor)),
+    )
+end
+
+la_factor_permutation(::AbstractLAQRFactor) = nothing
+la_factor_permutation(factor::EqualityQRFactor) = factor.permutation
+function la_factor_permutation(factor::StandardLAQRFactor)
+    factor.pivoted && return Vector{Int}(factor.factor.jpvt)
+    return collect(1:size(factor.factor.R, 2))
+end
+
+la_factor_packed_factors(::AbstractLAQRFactor) = nothing
+la_factor_packed_factors(factor::EqualityQRFactor) = factor.factors
+la_factor_packed_factors(factor::StandardLAQRFactor) = factor.factor.factors
 
 """
     SolverOptions{T}
