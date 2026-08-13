@@ -9,7 +9,6 @@ include("types.jl")
 include("selector.jl")
 include("calibration.jl")
 include("packing.jl")
-include("gemm.jl")
 include("syrk.jl")
 
 export CrossoverFeatures
@@ -17,8 +16,6 @@ export CrossoverDecision
 export KernelConfig
 export arithmetic_family
 export choose_crossover
-export gemm!
-export pack_columns!
 export prepare_storage!
 export prepare_triangle_storage!
 export syrk!

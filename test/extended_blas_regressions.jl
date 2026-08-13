@@ -494,27 +494,6 @@ end
         end
     end
 
-    @testset "GEMM clamps zero tile sizes" begin
-        T = Float64x4
-        left = _regression_panel(T, 7, 5)
-        right = transpose(_regression_panel(T, 6, 5))
-        output = zeros(T, 7, 6)
-        EXTENDED_BLAS_REGRESSION.gemm!(
-            output,
-            left,
-            right,
-            one(T),
-            zero(T),
-            EXTENDED_BLAS_REGRESSION.KernelConfig(
-                row_tile=0,
-                column_tile=0,
-                micro_tile=1,
-            ),
-        )
-        reference = left * right
-        @test maximum(abs, output - reference) < T(1e-55)
-    end
-
     @testset "conservative memory budget" begin
         @test EXTENDED_BLAS_REGRESSION._parse_memory_bytes("1024") == 1_024
         @test EXTENDED_BLAS_REGRESSION._parse_memory_bytes("1 KiB") == 1_024
