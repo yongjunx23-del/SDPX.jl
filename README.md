@@ -73,7 +73,7 @@ the test suite; setup and commands are in [`examples/README.md`](examples/README
 
 ## Command-line frontend
 
-The v0.4.1 development snapshot adds a small SDPB-style command-line policy
+The v0.5 development snapshot adds a small SDPB-style command-line policy
 layer.  All ordinary options default to `auto`; backend-specific IPM/KKT
 parameters stay internal.  After one-time setup:
 

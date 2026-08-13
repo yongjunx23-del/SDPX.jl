@@ -1,4 +1,4 @@
-# SDPX v0.4.1-dev auto-conic package manifest
+# SDPX v0.5-dev auto-conic package manifest
 
 This tree is intended as a **direct continuation point** for SDPX development.
 It is based on the uploaded SDPX v0.4.0 source archive and includes the
@@ -40,7 +40,7 @@ checked against the bundled benchmark suite before replacing the old paths.
 ./scripts/dev_v041_smoke.sh
 ```
 
-Then read `START_HERE_v0.4.1.md` and `DEVELOPMENT_v0.4.1.md`.
+For the historical transition context, read `DEVELOPMENT_v0.4.1.md`.
 
 ## Assembly provenance
 

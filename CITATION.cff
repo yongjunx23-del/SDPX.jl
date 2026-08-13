@@ -14,7 +14,7 @@ authors:
   - given-names: Yongjun
     family-names: Xu
     email: yongjunx23@gmail.com
-version: 0.4.0
+version: 0.5.0-DEV
 license: MIT
 repository-code: "https://github.com/yongjunx23-del/SDPX.jl"
 keywords:
