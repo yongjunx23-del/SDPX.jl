@@ -29,7 +29,10 @@ const _DENSE_CHOLESKY_REQUIRED = (
 )
 
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
-    equality_solver === :qr && return (_DENSE_CHOLESKY_REQUIRED..., :qr)
+    # SDPX's explicit equality QR route is column-pivoted and rank revealing;
+    # it is not a request for a general unpivoted QR implementation.
+    equality_solver === :qr &&
+        return (_DENSE_CHOLESKY_REQUIRED..., :rank_revealing_qr)
     return _DENSE_CHOLESKY_REQUIRED
 end
 
@@ -120,10 +123,10 @@ function validate_la_backend_configuration(
                 "for equality fallback",
             ))
     end
-    if :qr in config.required_capabilities
-        la_provider_supports(config.capability_model, :qr) ||
+    if :rank_revealing_qr in config.required_capabilities
+        la_provider_supports(config.capability_model, :rank_revealing_qr) ||
             throw(ArgumentError(
-                "planned LA provider $(config.provider) lacks QR capability " *
+                "planned LA provider $(config.provider) lacks rank-revealing QR " *
                 "required by equality_solver=:qr",
             ))
     end
@@ -142,6 +145,55 @@ function _all_finite_lower(A::AbstractMatrix)
         end
     end
     return true
+end
+
+"""Return the uniform MPFR precision of a non-empty BigFloat array."""
+function _bigfloat_uniform_precision_bits(A::AbstractArray{BigFloat})
+    isempty(A) && return nothing
+    bits = precision(first(A))
+    @inbounds for index in eachindex(A)
+        precision(A[index]) == bits || throw(ArgumentError(
+            "LA operand has mixed BigFloat precision",
+        ))
+    end
+    return bits
+end
+
+"""
+Validate the caller-owned lower triangle before an in-place BFLA factorization.
+
+The numerical provider is allowed to borrow and overwrite this storage, but
+distinct authoritative entries must not share one mutable MPFR object. The
+upper triangle is deliberately not inspected here.
+"""
+function _validate_bfla_lower_operand(
+    A::AbstractMatrix{BigFloat},
+    operation::AbstractString,
+)
+    size(A, 1) == size(A, 2) || throw(ArgumentError(
+        "$(operation) requires a square matrix",
+    ))
+    seen = IdDict{BigFloat,Nothing}()
+    precision_bits = nothing
+    @inbounds for column in axes(A, 2), row in column:size(A, 1)
+        value = A[row, column]
+        isfinite(value) || throw(ArgumentError(
+            "$(operation) input contains non-finite authoritative lower storage",
+        ))
+        bits = precision(value)
+        if precision_bits === nothing
+            precision_bits = bits
+        elseif bits != precision_bits
+            throw(ArgumentError(
+                "$(operation) input has mixed lower-triangle BigFloat precision",
+            ))
+        end
+        haskey(seen, value) && throw(ArgumentError(
+            "$(operation) requires independently-owned lower-triangle entries",
+        ))
+        seen[value] = nothing
+    end
+    return precision_bits
 end
 
 """Optional setup hook; an extension returns its concrete provider payload."""
@@ -339,8 +391,9 @@ function plan_la_backend(
             "requested MultiFloat LA provider unavailable: $(reason)",
         ))
     end
-    # BigFloat auto remains on generic LinearAlgebra in dense routes; explicit
-    # legacy is the ownership-safe opt-out for callers that require it.
+    # Unknown arithmetic retains the bundled implementation. BigFloat auto is
+    # resolved above: BFLA when its complete extension is loaded, otherwise
+    # Standard generic LinearAlgebra. Explicit legacy remains the rollback.
     requested === :auto && return _legacy_la_backend_configuration(
         T,
         requested,
@@ -457,12 +510,33 @@ function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
 end
 
 function la_cholesky_factor!(backend::BFLALABackend, A::AbstractMatrix{BigFloat})
+    input_precision = _validate_bfla_lower_operand(A, "BFLA Cholesky")
     payload = la_bfla_cholesky_factor!(backend.provider, A)
     payload === nothing && return nothing
     factors = la_bfla_factor_matrix(payload)
     factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
         "BFLA Cholesky provider factors must be a BigFloat matrix",
     ))
+    size(factors) == size(A) || throw(ArgumentError(
+        "BFLA Cholesky provider returned factors with dimensions " *
+        "$(size(factors)) for input $(size(A))",
+    ))
+    size(factors, 1) == size(factors, 2) || throw(ArgumentError(
+        "BFLA Cholesky provider returned non-square factors",
+    ))
+    la_factor_provider_identity(payload) === :bigfloat_linear_algebra ||
+        throw(ArgumentError(
+            "BFLA Cholesky provider returned a foreign factor payload",
+        ))
+    _all_finite_lower(factors) || throw(ArgumentError(
+        "BFLA Cholesky provider returned non-finite factor storage",
+    ))
+    if input_precision !== nothing &&
+       la_bfla_factor_precision(payload) != input_precision
+        throw(ArgumentError(
+            "BFLA Cholesky provider factor precision does not match input",
+        ))
+    end
     return ProviderLACholeskyFactor{BigFloat,typeof(payload),typeof(factors)}(
         payload, factors,
     )
@@ -472,6 +546,8 @@ la_bfla_cholesky_factor!(::Any, ::AbstractMatrix{BigFloat}) =
     throw(ArgumentError("BFLA provider does not implement Cholesky"))
 la_bfla_factor_matrix(::Any) =
     throw(ArgumentError("BFLA factor handle does not expose storage"))
+la_bfla_factor_precision(::Any) =
+    throw(ArgumentError("BFLA factor handle does not expose precision"))
 la_bfla_factor_solve!(::Any, rhs) =
     throw(ArgumentError("BFLA factor handle does not implement solve"))
 
@@ -591,6 +667,35 @@ function la_qr_factor!(
         pivoted,
     )
 end
+function la_qr_factor!(
+    backend::BFLALABackend,
+    A::AbstractMatrix{BigFloat};
+    pivoted::Bool=false,
+    relative_tolerance=nothing,
+)
+    capabilities = la_provider_capability_model(backend.provider)
+    needed = pivoted ? :rank_revealing_qr : :qr
+    la_provider_supports(capabilities, needed) || throw(ArgumentError(
+        "BFLA LA provider does not support $(needed)",
+    ))
+    # The BFLA adapter only exposes the equality RRQR contract today.  It is
+    # a pivoted QR capability, not a general unpivoted QR or least-squares
+    # provider, so unpivoted or untoleranced requests fail closed.
+    pivoted || throw(ArgumentError(
+        "BFLA QR adapter is equality-RRQR-only; request pivoted=true",
+    ))
+    relative_tolerance === nothing && throw(ArgumentError(
+        "BFLA equality QR requires an SDPX relative tolerance",
+    ))
+    payload = la_bfla_qr_factor!(backend.provider, A)
+    return _equality_qr_factor_handle(
+        backend.provider,
+        payload.factors,
+        eltype(A)[],
+        payload.jpvt,
+        relative_tolerance,
+    )
+end
 la_qr_factor!(
     ::AbstractLABackend,
     ::AbstractMatrix;
@@ -603,20 +708,58 @@ la_qr_factor!(
 
 function _equality_qr_factor_handle(
     provider,
-    factor,
+    factors::AbstractMatrix,
+    coefficients::AbstractVector,
+    permutation::AbstractVector{<:Integer},
     relative_tolerance,
 )
-    T = eltype(factor.factors)
-    diagonal_count = min(size(factor.factors)...)
+    T = eltype(factors)
+    relative_tolerance isa Real && isfinite(relative_tolerance) &&
+        relative_tolerance >= zero(relative_tolerance) ||
+        throw(ArgumentError(
+            "equality QR relative tolerance must be finite and nonnegative",
+        ))
+    rows, columns = size(factors)
+    permutation_copy = Vector{Int}(permutation)
+    length(permutation_copy) == columns || throw(ArgumentError(
+        "equality QR permutation length must equal the factor column count",
+    ))
+    seen = falses(columns)
+    @inbounds for index in permutation_copy
+        1 <= index <= columns && !seen[index] || throw(ArgumentError(
+            "equality QR permutation must contain each factor column once",
+        ))
+        seen[index] = true
+    end
+    diagonal_count = min(rows, columns)
+    length(coefficients) in (0, diagonal_count) || throw(ArgumentError(
+        "equality QR coefficients must be empty or match the reflector count",
+    ))
+    all(isfinite, factors) || throw(ArgumentError(
+        "equality QR provider returned non-finite packed factors",
+    ))
+    all(isfinite, coefficients) || throw(ArgumentError(
+        "equality QR provider returned non-finite reflector coefficients",
+    ))
+    if T === BigFloat
+        factor_precision = _bigfloat_uniform_precision_bits(factors)
+        if !isempty(coefficients)
+            coefficient_precision =
+                _bigfloat_uniform_precision_bits(coefficients)
+            factor_precision == coefficient_precision || throw(ArgumentError(
+                "equality QR factors and coefficients have different precision",
+            ))
+        end
+    end
     largest = zero(T)
     @inbounds for index in 1:diagonal_count
-        largest = max(largest, abs(factor.factors[index, index]))
+        largest = max(largest, abs(factors[index, index]))
     end
     threshold = T(relative_tolerance) * largest
     rank = 0
     smallest = largest
     @inbounds for index in 1:diagonal_count
-        diagonal = abs(factor.factors[index, index])
+        diagonal = abs(factors[index, index])
         diagonal > threshold || break
         rank += 1
         smallest = min(smallest, diagonal)
@@ -625,13 +768,176 @@ function _equality_qr_factor_handle(
               clamp(smallest / largest, zero(T), one(T)) : zero(T)
     return EqualityQRFactor{T,typeof(provider)}(
         provider,
-        factor.factors,
-        factor.τ,
-        Vector{Int}(factor.jpvt),
+        factors,
+        Vector{T}(coefficients),
+        permutation_copy,
         rank,
         quality,
     )
 end
+
+function _equality_qr_factor_handle(provider, factor, relative_tolerance)
+    return _equality_qr_factor_handle(
+        provider,
+        factor.factors,
+        factor.τ,
+        factor.jpvt,
+        relative_tolerance,
+    )
+end
+
+"""
+    la_ldlt_factor!(backend, A) -> Union{Nothing,ProviderLALDLTFactor}
+
+Factor a symmetric (possibly indefinite) matrix through the selected provider.
+This is an internal provider seam: no production ExecutionPlan currently
+routes dense KKT factorization through LDLT, so `:pivoted_symmetric_ldlt` is
+advertised only as a capability and is never added to a required operation
+set by the planner.
+"""
+function la_ldlt_factor!(
+    backend::BFLALABackend,
+    A::AbstractMatrix{BigFloat},
+)
+    input_precision = _validate_bfla_lower_operand(A, "BFLA LDLT")
+    payload = la_bfla_ldlt_factor!(backend.provider, A)
+    payload === nothing && return nothing
+    factors = la_bfla_ldlt_factor_matrix(payload)
+    factors isa AbstractMatrix{BigFloat} || throw(ArgumentError(
+        "BFLA LDLT provider factors must be a BigFloat matrix",
+    ))
+    size(factors) == size(A) || throw(ArgumentError(
+        "BFLA LDLT provider returned factors with dimensions " *
+        "$(size(factors)) for input $(size(A))",
+    ))
+    la_factor_provider_identity(payload) === :bigfloat_linear_algebra ||
+        throw(ArgumentError(
+            "BFLA LDLT provider returned a foreign factor payload",
+        ))
+    _all_finite_lower(factors) || throw(ArgumentError(
+        "BFLA LDLT provider returned non-finite factor storage",
+    ))
+    la_bfla_ldlt_factor_precision(payload) == input_precision ||
+        throw(ArgumentError(
+            "BFLA LDLT provider factor precision does not match input",
+        ))
+    permutation = la_bfla_ldlt_permutation(payload)
+    length(permutation) == size(A, 1) &&
+        sort(permutation) == collect(1:size(A, 1)) || throw(ArgumentError(
+            "BFLA LDLT provider returned an invalid permutation",
+        ))
+    blocks = la_bfla_ldlt_blocks(payload)
+    all(block -> block in (1, 2), blocks) && sum(blocks) == size(A, 1) ||
+        throw(ArgumentError(
+            "BFLA LDLT provider returned an invalid pivot-block layout",
+        ))
+    return ProviderLALDLTFactor{BigFloat,typeof(payload),typeof(factors)}(
+        payload,
+        factors,
+    )
+end
+
+la_ldlt_factor!(
+    ::AbstractLABackend,
+    ::AbstractMatrix,
+) = throw(ArgumentError(
+    "selected LA provider does not support pivoted symmetric LDLT",
+))
+
+function la_ldlt_factor_solve!(factor::ProviderLALDLTFactor, rhs)
+    if la_factor_provider_identity(factor.provider) === :bigfloat_linear_algebra
+        la_bfla_ldlt_solve!(factor.provider, rhs)
+        return rhs
+    end
+    throw(ArgumentError("LDLT provider handle does not implement solve"))
+end
+
+la_ldlt_inertia(factor::ProviderLALDLTFactor) =
+    la_bfla_ldlt_inertia(factor.provider)
+la_ldlt_permutation(factor::ProviderLALDLTFactor) =
+    la_bfla_ldlt_permutation(factor.provider)
+la_ldlt_blocks(factor::ProviderLALDLTFactor) =
+    la_bfla_ldlt_blocks(factor.provider)
+la_factor_kind(::ProviderLALDLTFactor) = :ldlt
+la_factor_handle_matrix(factor::ProviderLALDLTFactor) = factor.factors
+
+"""
+Provider-neutral access to BFLA's plain dense quality primitives.
+
+These operations are intentionally not called by SDPX's structured KKT
+refinement loop: that loop owns its block residual, stopping rule, and update
+policy. They are exposed for mathematically identical dense systems only, and
+all unsupported providers fail closed rather than falling back implicitly.
+"""
+la_residual!(
+    backend::BFLALABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+) = la_bfla_residual!(backend.provider, trans, A, x, b, residual)
+
+la_normwise_backward_error(
+    backend::BFLALABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+) = la_bfla_normwise_backward_error(
+    backend.provider, trans, A, x, b, residual,
+)
+
+function la_higher_precision_residual!(
+    backend::BFLALABackend,
+    trans,
+    A,
+    x,
+    b,
+    residual;
+    residual_precision::Int,
+    factor_precision=nothing,
+)
+    return la_bfla_higher_precision_residual!(
+        backend.provider,
+        trans,
+        A,
+        x,
+        b,
+        residual;
+        residual_precision=residual_precision,
+        factor_precision=factor_precision,
+    )
+end
+
+function la_refine_once!(
+    factor::ProviderLACholeskyFactor{BigFloat},
+    A,
+    x,
+    b,
+    residual,
+    correction,
+)
+    la_factor_provider_identity(factor.provider) ===
+        :bigfloat_linear_algebra || throw(ArgumentError(
+            "provider Cholesky handle does not support BFLA refinement",
+        ))
+    return la_bfla_refine_once!(
+        factor.provider, A, x, b, residual, correction,
+    )
+end
+
+la_residual!(::AbstractLABackend, args...) =
+    throw(ArgumentError("selected LA provider does not expose dense residuals"))
+la_normwise_backward_error(::AbstractLABackend, args...) =
+    throw(ArgumentError("selected LA provider does not expose backward error"))
+la_higher_precision_residual!(::AbstractLABackend, args...; kwargs...) =
+    throw(ArgumentError(
+        "selected LA provider does not expose higher-precision residuals",
+    ))
+la_refine_once!(::AbstractLAFactorization, args...) =
+    throw(ArgumentError("selected LA factor does not expose one-step refinement"))
 
 la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
@@ -871,8 +1177,10 @@ end
 la_chol!(backend::LegacyLABackend, A) =
     _sdpx_legacy_la_call(backend.provider, Val(:chol), A)
 la_chol!(backend::MultiFloatLABackend, A) = _la_provider_call(backend, :chol!, A)
-la_chol!(backend::BFLALABackend, A::AbstractMatrix{BigFloat}) =
-    la_bfla_chol!(backend.provider, A)
+function la_chol!(backend::BFLALABackend, A::AbstractMatrix{BigFloat})
+    _validate_bfla_lower_operand(A, "BFLA Cholesky")
+    return la_bfla_chol!(backend.provider, A)
+end
 
 la_trsm!(::StandardLABackend, L, X) = LinearAlgebra.ldiv!(LowerTriangular(L), X)
 la_trsm!(backend::LegacyLABackend, L, X) =
@@ -941,6 +1249,30 @@ la_bfla_trsm!(::Any, args...) = throw(ArgumentError("BFLA TRSM unavailable"))
 la_bfla_trsv_lower!(::Any, args...) = throw(ArgumentError("BFLA TRSV unavailable"))
 la_bfla_trsv_transpose!(::Any, args...) = throw(ArgumentError("BFLA transpose TRSV unavailable"))
 la_bfla_axpby!(::Any, args...) = throw(ArgumentError("BFLA AXPBY unavailable"))
+la_bfla_qr_factor!(::Any, ::AbstractMatrix) =
+    throw(ArgumentError("BFLA pivoted QR unavailable"))
+la_bfla_ldlt_factor!(::Any, ::AbstractMatrix) =
+    throw(ArgumentError("BFLA LDLT unavailable"))
+la_bfla_ldlt_factor_matrix(::Any) =
+    throw(ArgumentError("BFLA LDLT factor handle does not expose storage"))
+la_bfla_ldlt_factor_precision(::Any) =
+    throw(ArgumentError("BFLA LDLT factor handle does not expose precision"))
+la_bfla_ldlt_solve!(::Any, rhs) =
+    throw(ArgumentError("BFLA LDLT factor handle does not implement solve"))
+la_bfla_ldlt_inertia(::Any) =
+    throw(ArgumentError("BFLA LDLT factor handle does not expose inertia"))
+la_bfla_ldlt_permutation(::Any) =
+    throw(ArgumentError("BFLA LDLT factor handle does not expose a permutation"))
+la_bfla_ldlt_blocks(::Any) =
+    throw(ArgumentError("BFLA LDLT factor handle does not expose pivot blocks"))
+la_bfla_residual!(::Any, args...) =
+    throw(ArgumentError("BFLA residual unavailable"))
+la_bfla_normwise_backward_error(::Any, args...) =
+    throw(ArgumentError("BFLA backward error unavailable"))
+la_bfla_higher_precision_residual!(::Any, args...; kwargs...) =
+    throw(ArgumentError("BFLA higher-precision residual unavailable"))
+la_bfla_refine_once!(::Any, args...) =
+    throw(ArgumentError("BFLA one-step refinement unavailable"))
 
 function _la_provider_call(backend::MultiFloatLABackend, operation::Symbol, args...)
     provider = backend.provider

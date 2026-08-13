@@ -32,8 +32,15 @@ _Provider(threads::Int) = _Provider(
 
 const _CAPABILITIES = SDPX.LAProviderCapabilities(
     cholesky=true,
+    # The adapter exposes BFLA's column-pivoted equality RRQR contract, not a
+    # general unpivoted QR/least-squares operation.
+    qr=false,
+    rank_revealing_qr=true,
+    pivoted_symmetric_ldlt=true,
     factor_solve=true,
     multi_rhs=true,
+    iterative_refinement=true,
+    higher_precision_residual=true,
     threading=true,
     dot=true,
     norminf=true,
@@ -79,8 +86,125 @@ function SDPX.la_bfla_cholesky_factor!(
     return BFLA.issuccess(factor) ? factor : nothing
 end
 
+# SDPX's equality fallback only consumes the provider-produced packed R and
+# column permutation to solve the semantic R'R system. It intentionally does
+# not depend on BFLA's private Householder-coefficient representation.
+struct _QRPayload{M<:AbstractMatrix{BigFloat}}
+    factors::M
+    jpvt::Vector{Int}
+end
+
+function SDPX.la_bfla_qr_factor!(
+    provider::_Provider,
+    A::AbstractMatrix{BigFloat},
+)
+    # BFLA's default `tol=nothing` is an exact-zero absolute tolerance at the
+    # operand precision, so the factorization is complete.  SDPX re-derives
+    # the numerical rank from its own relative tolerance afterwards.
+    factor = BFLA.qr!(provider.backend, A)
+    return _QRPayload(
+        BFLA.factor_matrix(factor),
+        BFLA.factor_jpvt(factor),
+    )
+end
+
+function SDPX.la_bfla_ldlt_factor!(
+    provider::_Provider,
+    A::AbstractMatrix{BigFloat},
+)
+    factor = BFLA.ldlt!(provider.backend, A; check=false)
+    return BFLA.issuccess(factor) ? factor : nothing
+end
+
+SDPX.la_factor_provider_identity(::BFLA.BFLALDLTFactor) =
+    :bigfloat_linear_algebra
+SDPX.la_bfla_ldlt_factor_matrix(factor::BFLA.BFLALDLTFactor) =
+    BFLA.factor_matrix(factor)
+SDPX.la_bfla_ldlt_factor_precision(factor::BFLA.BFLALDLTFactor) =
+    BFLA.factor_precision(factor)
+
+function SDPX.la_bfla_ldlt_solve!(
+    factor::BFLA.BFLALDLTFactor,
+    rhs,
+)
+    BFLA.solve!(factor, rhs)
+    return rhs
+end
+
+SDPX.la_bfla_ldlt_inertia(factor::BFLA.BFLALDLTFactor) =
+    BFLA.factor_inertia(factor)
+SDPX.la_bfla_ldlt_permutation(factor::BFLA.BFLALDLTFactor) =
+    BFLA.factor_perm(factor)
+SDPX.la_bfla_ldlt_blocks(factor::BFLA.BFLALDLTFactor) =
+    BFLA.factor_blocks(factor)
+
+function SDPX.la_bfla_residual!(
+    provider::_Provider,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+)
+    return BFLA.residual!(
+        provider.backend,
+        trans,
+        A,
+        x,
+        b,
+        residual;
+        config=provider.config,
+    )
+end
+
+SDPX.la_bfla_normwise_backward_error(
+    provider::_Provider,
+    trans,
+    A,
+    x,
+    b,
+    residual,
+) = BFLA.normwise_backward_error(
+    provider.backend, trans, A, x, b, residual,
+)
+
+function SDPX.la_bfla_higher_precision_residual!(
+    provider::_Provider,
+    trans,
+    A,
+    x,
+    b,
+    residual;
+    residual_precision::Int,
+    factor_precision=nothing,
+)
+    return BFLA.higher_precision_residual!(
+        provider.backend,
+        trans,
+        A,
+        x,
+        b,
+        residual;
+        residual_precision=residual_precision,
+        factor_precision=factor_precision,
+    )
+end
+
+function SDPX.la_bfla_refine_once!(
+    factor::BFLA.BFLACholeskyFactor,
+    A,
+    x,
+    b,
+    residual,
+    correction,
+)
+    return BFLA.refine_once!(factor, A, x, b, residual, correction)
+end
+
 SDPX.la_bfla_factor_matrix(factor::BFLA.BFLACholeskyFactor) =
     BFLA.factor_matrix(factor)
+SDPX.la_bfla_factor_precision(factor::BFLA.BFLACholeskyFactor) =
+    BFLA.factor_precision(factor)
 SDPX.la_factor_provider_identity(::BFLA.BFLACholeskyFactor) =
     :bigfloat_linear_algebra
 

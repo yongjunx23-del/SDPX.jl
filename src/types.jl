@@ -365,11 +365,11 @@ reduced_arrow_solver_worker_count(
     EqualityQRFactor{T}
 
 Rank-revealing Householder QR factor used by the guarded equality fallback.
-Only the packed reflector matrix, reflector coefficients, column permutation,
-and numerical-rank diagnostics are retained. The Newton solve only needs the
-leading triangular `R` block; keeping the reflectors makes the representation
-compatible with later residual-based extensions without another workspace
-change.
+The packed provider-produced matrix, column permutation, and numerical-rank
+diagnostics are retained. `coefficients` may be empty for providers whose
+public contract exposes packed `R` but not reflector coefficients: SDPX's
+Newton solve uses only the leading triangular `R` block to solve the semantic
+`R'R` system and never treats this as a generic QR least-squares handle.
 """
 abstract type AbstractLAFactorization{T} end
 abstract type AbstractLACholeskyFactor{T} <: AbstractLAFactorization{T} end
@@ -408,7 +408,14 @@ struct StandardLACholeskyFactor{T,F<:LinearAlgebra.Cholesky{T}} <:
     factors::Matrix{T}
 end
 
-"""Provider-owned factor payload supplied by an optional arithmetic extension."""
+"""
+Provider factor payload supplied by an optional arithmetic extension.
+
+The external factor may borrow the SDPX-owned workspace buffer that was passed
+to its in-place factorization. The wrapper keeps the factor payload and storage
+alive together; `provider_owned` describes execution authority, not a promise
+that the provider allocated a second copy of the matrix.
+"""
 struct ProviderLACholeskyFactor{T,P,M<:AbstractMatrix{T}} <: AbstractLACholeskyFactor{T}
     provider::P
     factors::M
@@ -428,9 +435,17 @@ struct StandardLAQRFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
     pivoted::Bool
 end
 
+"""Provider-owned symmetric-indefinite LDLT factor handle."""
+struct ProviderLALDLTFactor{T,P,M<:AbstractMatrix{T}} <:
+       AbstractLAFactorization{T}
+    provider::P
+    factors::M
+end
+
 la_factor_provider(::AbstractLAQRFactor) = nothing
 la_factor_provider(factor::EqualityQRFactor) = factor.provider
 la_factor_provider(factor::StandardLAQRFactor) = factor.provider
+la_factor_provider(factor::ProviderLALDLTFactor) = factor.provider
 
 la_factor_rank(::AbstractLAQRFactor) = nothing
 la_factor_rank(factor::EqualityQRFactor) = factor.rank
