@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   test:
-    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads
+    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads / ${{ matrix.profile }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -26,6 +26,7 @@ jobs:
         julia: ['1.10', '1']
         os: [ubuntu-latest]
         threads: ['1', '4']
+        profile: ['quick']
         include:
           # Spot-check the other platforms once, on the current release. The
           # thread count is part of the matrix rather than fixed because several
@@ -33,9 +34,18 @@ jobs:
           - julia: '1'
             os: macOS-latest
             threads: '4'
+            profile: quick
           - julia: '1'
             os: windows-latest
             threads: '4'
+            profile: quick
+          # Run the expensive numerical/extension matrix once. Cross-version,
+          # cross-platform, and serial/threaded compatibility are already
+          # covered by the quick jobs above.
+          - julia: '1'
+            os: ubuntu-latest
+            threads: '4'
+            profile: full
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -46,10 +56,11 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         env:
           JULIA_NUM_THREADS: ${{ matrix.threads }}
+          SDPX_TEST_PROFILE: ${{ matrix.profile }}
       - uses: julia-actions/julia-processcoverage@v1
-        if: matrix.julia == '1' && matrix.os == 'ubuntu-latest' && matrix.threads == '4'
+        if: matrix.profile == 'full'
       - uses: codecov/codecov-action@v5
-        if: matrix.julia == '1' && matrix.os == 'ubuntu-latest' && matrix.threads == '4'
+        if: matrix.profile == 'full'
         with:
           files: lcov.info
           use_oidc: true
