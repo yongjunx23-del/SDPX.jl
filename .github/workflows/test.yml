@@ -87,6 +87,8 @@ jobs:
           julia --project=bench -e '
             include("bench/run.jl")
             main(; tiers=(:small,), types=(Float64,), reps=1, results_path=tempname())'
+      - name: Run Round 2 Micro semantic smoke
+        run: julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 
   quality:
     name: Package quality

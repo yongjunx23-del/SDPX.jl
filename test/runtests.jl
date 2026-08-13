@@ -13,6 +13,7 @@ const QUICK_TESTS = (
     "v041_architecture_regressions.jl",
     "public_api.jl",
     "performance_trace.jl",
+    "benchmark_registry.jl",
     "prepared_structure.jl",
     "v05_core_invariants.jl",
 )
@@ -52,6 +53,7 @@ const FULL_TESTS = (
     "v041_architecture_regressions.jl",
     "public_api.jl",
     "performance_trace.jl",
+    "benchmark_registry.jl",
     "prepared_structure.jl",
     "moi_regressions.jl",
     "convex_regressions.jl",

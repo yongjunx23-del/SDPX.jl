@@ -31,6 +31,8 @@ bench/**/*.jld2
 bench/**/*.npy
 bench/**/*.npz
 bench/**/__pycache__/
+benchmark/data/cache/
+benchmark/out/
 
 # Machine-specific scheduler scripts. These embed absolute paths, usernames and
 # site-specific module environments; the portable drivers they invoke are the
