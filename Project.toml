@@ -1,7 +1,7 @@
 name = "SDPX"
 uuid = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
-version = "0.4.1-DEV"
+version = "0.5.0-DEV"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -36,7 +36,7 @@ Aqua = "0.8"
 Convex = "0.16"
 DoubleFloats = "1"
 JLD2 = "0.4, 0.5, 0.6"
-GenericLinearAlgebra = "0.3"
+GenericLinearAlgebra = "0.3, 0.4"
 JSON = "0.21, 1"
 JuMP = "1"
 LinearAlgebra = "1"

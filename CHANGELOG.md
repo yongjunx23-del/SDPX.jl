@@ -4,7 +4,11 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] — unreleased
+## [0.5.0] — unreleased
+
+The active development target was renamed from v0.4.1 to v0.5.0, so the
+former unreleased v0.4.1 entries below now belong to v0.5.0. There will be no
+separate v0.4.1 release.
 
 ### Added
 
