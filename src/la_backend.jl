@@ -331,6 +331,35 @@ function plan_la_backend(
             :provider_owned,
         )
         return validate_la_backend_configuration(config, T)
+    elseif requested === :auto &&
+           is_multifloat_arithmetic(T) &&
+           descriptor.available &&
+           descriptor.provider === :multifloat_linear_algebra
+        descriptor_capabilities = _descriptor_capability_model(descriptor)
+        if all(cap -> cap in descriptor.capabilities, required_operations) &&
+           isempty(_missing_la_capabilities(
+               descriptor_capabilities,
+               required_capabilities,
+           ))
+            fallback_chain =
+                equality_solver === :auto &&
+                la_provider_supports(
+                    descriptor_capabilities,
+                    :rank_revealing_qr,
+                ) ? (:rank_revealing_qr,) : ()
+            config = LABackendConfiguration(
+                arithmetic, requested, :multifloat, descriptor.provider,
+                descriptor.capabilities,
+                descriptor_capabilities,
+                required_capabilities,
+                descriptor.provider,
+                fallback_chain, :none,
+                :provider_owned,
+            )
+            return validate_la_backend_configuration(config, T)
+        end
+        # A loaded-but-incomplete MultiFloat provider falls through to the
+        # generic Standard path below; no hidden runtime fallback is installed.
     elseif requested === :standard || requested === :fixed_extended ||
            (requested === :auto &&
             (arithmetic in (:float32, :float64, :bigfloat) ||
@@ -497,12 +526,26 @@ end
 function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
     payload = _la_provider_call(backend, :cholesky_factor!, A)
     payload === nothing && return nothing
+    la_factor_provider_identity(payload) === :multifloat_linear_algebra ||
+        throw(ArgumentError(
+            "MultiFloat Cholesky provider returned a foreign factor payload",
+        ))
     hasproperty(payload, :factors) || throw(ArgumentError(
         "MultiFloat Cholesky provider handle must expose factors",
     ))
     factors = getproperty(payload, :factors)
     factors isa AbstractMatrix{eltype(A)} || throw(ArgumentError(
         "MultiFloat Cholesky provider factors must be an $(eltype(A)) matrix",
+    ))
+    size(factors) == size(A) || throw(ArgumentError(
+        "MultiFloat Cholesky provider returned factors with dimensions " *
+        "$(size(factors)) for input $(size(A))",
+    ))
+    size(factors, 1) == size(factors, 2) || throw(ArgumentError(
+        "MultiFloat Cholesky provider returned non-square factors",
+    ))
+    _all_finite_lower(factors) || throw(ArgumentError(
+        "MultiFloat Cholesky provider returned non-finite factor storage",
     ))
     return ProviderLACholeskyFactor{eltype(A),typeof(payload),typeof(factors)}(
         payload, factors,
