@@ -105,6 +105,85 @@ default_mixed_precision_kkt(::Type{T}) where {T} =
 
 abstract type AbstractLABackend end
 
+"""
+    LAProviderCapabilities
+
+Pure, immutable description of the operations and numerical contracts exposed
+by one linear-algebra provider.  These are facts, not preferences: capability
+lookup never benchmarks the machine and never installs a runtime fallback.
+
+The semantic fields (`cholesky`, `lu`, `qr`, `factor_solve`, ... ) are the
+planner boundary.  The final six fields describe the dense primitives already
+used by SDPX's KKT implementation.  A provider may therefore be useful for a
+Cholesky route without being advertised as a robust symmetric-indefinite
+solver.
+"""
+Base.@kwdef struct LAProviderCapabilities
+    cholesky::Bool = false
+    lu::Bool = false
+    qr::Bool = false
+    rank_revealing_qr::Bool = false
+    pivoted_symmetric_ldlt::Bool = false
+    factor_solve::Bool = false
+    multi_rhs::Bool = false
+    iterative_refinement::Bool = false
+    higher_precision_residual::Bool = false
+    sparse_factorization::Bool = false
+    threading::Bool = false
+    dot::Bool = false
+    norminf::Bool = false
+    mul::Bool = false
+    mul_owned::Bool = false
+    syrk::Bool = false
+    triangular_solve::Bool = false
+    axpby::Bool = false
+end
+
+const _LA_CAPABILITY_NAMES = fieldnames(LAProviderCapabilities)
+
+@inline function _canonical_la_capability(capability::Symbol)
+    capability in (:chol, :cholesky_factor!) && return :cholesky
+    capability in (:solve, :cholsolve_owned) && return :factor_solve
+    capability in (:trsm, :trsv_lower, :trsv_transpose) &&
+        return :triangular_solve
+    capability in (:axpby_owned,) && return :axpby
+    return capability
+end
+
+"""Return whether `capabilities` satisfies one semantic capability name."""
+function la_provider_supports(
+    capabilities::LAProviderCapabilities,
+    capability::Symbol,
+)
+    name = _canonical_la_capability(capability)
+    name in _LA_CAPABILITY_NAMES || throw(ArgumentError(
+        "unknown linear-algebra capability $(capability)",
+    ))
+    return getfield(capabilities, name)
+end
+
+Base.in(capability::Symbol, capabilities::LAProviderCapabilities) =
+    la_provider_supports(capabilities, capability)
+
+"""Stable tuple projection used by diagnostics and compatibility adapters."""
+la_capability_symbols(capabilities::LAProviderCapabilities) = Tuple(
+    name for name in _LA_CAPABILITY_NAMES if getfield(capabilities, name)
+)
+
+"""Conservatively translate a historical operation tuple into semantic facts."""
+function la_capabilities_from_symbols(symbols::Tuple)
+    enabled = Set{Symbol}()
+    for symbol in symbols
+        symbol isa Symbol || throw(ArgumentError(
+            "linear-algebra capability names must be Symbols",
+        ))
+        push!(enabled, _canonical_la_capability(symbol))
+    end
+    return LAProviderCapabilities(;
+        (name => (name in enabled) for name in _LA_CAPABILITY_NAMES)...,
+    )
+end
+
 struct StandardLABackend <: AbstractLABackend
     arithmetic::Symbol
     provider::Symbol
@@ -144,9 +223,40 @@ struct LABackendConfiguration
     selected::Symbol
     provider::Symbol
     capabilities::Tuple{Vararg{Symbol}}
+    capability_model::LAProviderCapabilities
+    required_capabilities::Tuple{Vararg{Symbol}}
+    provider_implementation::Symbol
     fallback_chain::Tuple{Vararg{Symbol}}
     fallback_reason::Symbol
     ownership::Symbol
+end
+
+# Source compatibility for the v0.4.1 eight-field descriptor.  Modern planner
+# code supplies an explicit semantic model and requirement set; historical
+# callers remain conservative and do not gain new route authority.
+function LABackendConfiguration(
+    arithmetic::Symbol,
+    requested::Symbol,
+    selected::Symbol,
+    provider::Symbol,
+    capabilities::Tuple{Vararg{Symbol}},
+    fallback_chain::Tuple{Vararg{Symbol}},
+    fallback_reason::Symbol,
+    ownership::Symbol,
+)
+    return LABackendConfiguration(
+        arithmetic,
+        requested,
+        selected,
+        provider,
+        capabilities,
+        la_capabilities_from_symbols(capabilities),
+        (),
+        provider,
+        fallback_chain,
+        fallback_reason,
+        ownership,
+    )
 end
 
 """Conservative configuration used by historical positional plan builders."""
@@ -157,6 +267,9 @@ function _compat_la_backend_configuration(
     return LABackendConfiguration(
         arithmetic, :legacy, :legacy, :sdpx_legacy_la,
         SDPX_LEGACY_LA_CAPABILITIES,
+        SDPX_LEGACY_LA_CAPABILITY_MODEL,
+        (),
+        :bundled_sdpx_legacy,
         equality_solver === :auto ? (:rank_revealing_qr,) : (),
         :compatibility,
         _legacy_la_symbol_ownership(arithmetic),
@@ -261,7 +374,8 @@ struct EqualityQRFactor{T}
 end
 
 """Abstract marker for an unpivoted equality Gram Cholesky handle."""
-abstract type AbstractLACholeskyFactor{T} end
+abstract type AbstractLAFactorization{T} end
+abstract type AbstractLACholeskyFactor{T} <: AbstractLAFactorization{T} end
 
 """Standard generic factor handle wrapping Julia's Cholesky object."""
 struct StandardLACholeskyFactor{T,F<:LinearAlgebra.Cholesky{T}} <:
@@ -274,6 +388,19 @@ end
 struct ProviderLACholeskyFactor{T,P,M<:AbstractMatrix{T}} <: AbstractLACholeskyFactor{T}
     provider::P
     factors::M
+end
+
+"""Standard LU handle exposed through the provider-neutral factor API."""
+struct StandardLALUFactor{T,F<:LinearAlgebra.Factorization{T}} <:
+       AbstractLAFactorization{T}
+    factor::F
+end
+
+"""Standard generic QR handle; `pivoted` records rank-revealing selection."""
+struct StandardLAQRFactor{T,F<:LinearAlgebra.Factorization{T}} <:
+       AbstractLAFactorization{T}
+    factor::F
+    pivoted::Bool
 end
 
 """

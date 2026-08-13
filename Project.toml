@@ -16,6 +16,7 @@ AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
 Convex = "f65535da-76fb-5f13-bab9-19810c17039a"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 MultiFloatLinearAlgebra = "642d9d30-8e28-45ca-9d81-256429ea358f"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 
@@ -24,6 +25,7 @@ SDPXAppleAccelerateExt = "AppleAccelerate"
 SDPXConvexExt = "Convex"
 SDPXDoubleFloatsExt = "DoubleFloats"
 SDPXJLD2Ext = "JLD2"
+SDPXGenericLinearAlgebraExt = "GenericLinearAlgebra"
 SDPXMultiFloatLinearAlgebraExt = ["MultiFloats", "MultiFloatLinearAlgebra"]
 SDPXMultiFloatsExt = "MultiFloats"
 
@@ -33,6 +35,7 @@ Aqua = "0.8"
 Convex = "0.16"
 DoubleFloats = "1"
 JLD2 = "0.4, 0.5, 0.6"
+GenericLinearAlgebra = "0.3"
 JSON = "0.21, 1"
 JuMP = "1"
 LinearAlgebra = "1"
@@ -55,6 +58,7 @@ Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
@@ -64,4 +68,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [targets]
-test = ["Aqua", "Convex", "DoubleFloats", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "SHA", "StableRNGs", "Test", "TOML"]
+test = ["Aqua", "Convex", "DoubleFloats", "GenericLinearAlgebra", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "SHA", "StableRNGs", "Test", "TOML"]

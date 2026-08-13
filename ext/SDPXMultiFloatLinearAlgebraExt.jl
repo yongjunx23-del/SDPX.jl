@@ -195,6 +195,33 @@ function _provider_solve!(
     return rhs
 end
 
+function _provider_solve!(
+    handle::_ProviderCholesky{MF},
+    rhs::AbstractMatrix{MF},
+) where {MF}
+    trsm!(
+        rhs,
+        handle.factor.factors,
+        one(MF);
+        side=:left,
+        uplo=:lower,
+        trans=:N,
+        diag=:nonunit,
+        config=handle.config,
+    )
+    trsm!(
+        rhs,
+        handle.factor.factors,
+        one(MF);
+        side=:left,
+        uplo=:lower,
+        trans=:T,
+        diag=:nonunit,
+        config=handle.config,
+    )
+    return rhs
+end
+
 function _provider_trsv_lower!(
     provider::_Provider{MF},
     L::AbstractMatrix{MF},
@@ -346,8 +373,32 @@ function SDPX.la_provider_descriptor(
             :dot,
             :cholesky_factor!,
         ),
+        capability_model=SDPX.LAProviderCapabilities(
+            cholesky=true,
+            factor_solve=true,
+            multi_rhs=true,
+            threading=true,
+            dot=true,
+            mul=true,
+            mul_owned=true,
+            syrk=true,
+            triangular_solve=true,
+        ),
     )
 end
+
+SDPX.la_provider_capability_model(::_Provider) =
+    SDPX.LAProviderCapabilities(
+        cholesky=true,
+        factor_solve=true,
+        multi_rhs=true,
+        threading=true,
+        dot=true,
+        mul=true,
+        mul_owned=true,
+        syrk=true,
+        triangular_solve=true,
+    )
 
 function SDPX.instantiate_multifloat_la_backend(
     ::Type{MF},

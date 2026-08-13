@@ -39,6 +39,7 @@ const legacy_la_provider_ownership = SDPX.legacy_la_provider_ownership
 const legacy_la_provider_supports = SDPX.legacy_la_provider_supports
 const MultiFloatLABackend = SDPX.MultiFloatLABackend
 const LABackendConfiguration = SDPX.LABackendConfiguration
+const LAProviderCapabilities = SDPX.LAProviderCapabilities
 const AbstractLACholeskyFactor = SDPX.AbstractLACholeskyFactor
 const StandardLACholeskyFactor = SDPX.StandardLACholeskyFactor
 const ProviderLACholeskyFactor = SDPX.ProviderLACholeskyFactor
@@ -49,6 +50,12 @@ const la_provider_descriptor = SDPX.la_provider_descriptor
 const instantiate_multifloat_la_backend = SDPX.instantiate_multifloat_la_backend
 const la_cholesky_factor! = SDPX.la_cholesky_factor!
 const la_cholesky_solve! = SDPX.la_cholesky_solve!
+const la_lu_factor! = SDPX.la_lu_factor!
+const la_qr_factor! = SDPX.la_qr_factor!
+const la_factor_solve! = SDPX.la_factor_solve!
+const la_provider_supports = SDPX.la_provider_supports
+const validate_la_backend_configuration =
+    SDPX.validate_la_backend_configuration
 const la_dot = SDPX.la_dot
 const la_norminf = SDPX.la_norminf
 const la_mul! = SDPX.la_mul!
@@ -137,6 +144,7 @@ export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
 export AbstractLABackend, StandardLABackend, LegacyLABackend
 export SDPXLegacyLAProvider, MultiFloatLABackend, LABackendConfiguration
+export LAProviderCapabilities, la_provider_supports
 export plan_la_backend
 export legacy_la_provider_identity, legacy_la_provider_capabilities
 export legacy_la_provider_arithmetic, legacy_la_provider_ownership
@@ -146,6 +154,8 @@ export ProviderLACholeskyFactor, LegacyLACholeskyFactor
 export instantiate_la_backend, la_provider_descriptor
 export instantiate_multifloat_la_backend
 export la_cholesky_factor!, la_cholesky_solve!
+export la_lu_factor!, la_qr_factor!, la_factor_solve!
+export validate_la_backend_configuration
 export la_dot, la_norminf, la_mul!, la_mul_owned!, la_syrk!, la_chol!
 export la_trsm!, la_trsv_lower!, la_trsv_transpose!
 export la_factor!, la_solve!, la_refine!

@@ -13,6 +13,116 @@ la_provider_descriptor(::Type{T}, ::Int=1) where {T} = (
     capabilities=(),
 )
 
+"""Optional GLA extension marker; the core remains independent of GLA APIs."""
+generic_la_provider_implementation(::Val) = :julia_generic_linear_algebra
+
+"""Optional provider payload capability hook used by setup validation."""
+la_provider_capability_model(::Any) = LAProviderCapabilities()
+
+const _DENSE_CHOLESKY_REQUIRED = (
+    :cholesky,
+    :factor_solve,
+    :multi_rhs,
+    :triangular_solve,
+    :syrk,
+    :mul_owned,
+)
+
+function _dense_cholesky_required_capabilities(equality_solver::Symbol)
+    return _DENSE_CHOLESKY_REQUIRED
+end
+
+function standard_la_provider_capabilities(::Type{T}) where {T}
+    known_generic = T in (Float32, Float64, BigFloat) ||
+                    is_multifloat_arithmetic(T)
+    known_generic || return LAProviderCapabilities()
+    blas_lapack = T in (Float32, Float64)
+    return LAProviderCapabilities(
+        cholesky=true,
+        lu=true,
+        qr=true,
+        rank_revealing_qr=true,
+        # GenericLinearAlgebra's LDLT is deliberately not treated as a robust
+        # pivoted Bunch-Kaufman production KKT factorization.  Float64 does
+        # have LAPACK support, but SDPX has not yet exposed that operation
+        # through this backend seam, so the capability remains conservative.
+        pivoted_symmetric_ldlt=false,
+        factor_solve=true,
+        multi_rhs=true,
+        threading=blas_lapack,
+        dot=true,
+        norminf=true,
+        mul=true,
+        mul_owned=true,
+        syrk=true,
+        triangular_solve=true,
+        axpby=true,
+    )
+end
+
+function _standard_la_capabilities(arithmetic::Symbol)
+    arithmetic === :float32 && return standard_la_provider_capabilities(Float32)
+    arithmetic === :float64 && return standard_la_provider_capabilities(Float64)
+    arithmetic === :bigfloat && return standard_la_provider_capabilities(BigFloat)
+    # Compatibility-only projection for an instantiated backend.  Modern
+    # execution validation uses the concrete arithmetic type instead.
+    return LAProviderCapabilities()
+end
+
+function _descriptor_capability_model(descriptor)
+    hasproperty(descriptor, :capability_model) &&
+        return descriptor.capability_model::LAProviderCapabilities
+    model = la_capabilities_from_symbols(descriptor.capabilities)
+    # Historical optional-provider descriptors used `:solve` for vector
+    # factor solves.  Multi-RHS must be advertised explicitly.
+    return model
+end
+
+function _missing_la_capabilities(
+    capabilities::LAProviderCapabilities,
+    required::Tuple,
+)
+    return Tuple(
+        capability for capability in required
+        if !la_provider_supports(capabilities, capability)
+    )
+end
+
+"""Validate a modern plan without executing or probing a numerical kernel."""
+function validate_la_backend_configuration(config::LABackendConfiguration)
+    missing = _missing_la_capabilities(
+        config.capability_model,
+        config.required_capabilities,
+    )
+    isempty(missing) || throw(ArgumentError(
+        "planned LA provider $(config.provider) lacks required capabilities " *
+        "$(missing)",
+    ))
+    for fallback in config.fallback_chain
+        fallback === :rank_revealing_qr || throw(ArgumentError(
+            "unknown planned LA fallback $(fallback)",
+        ))
+    end
+    return config
+end
+
+
+function validate_la_backend_configuration(
+    config::LABackendConfiguration,
+    ::Type{T},
+) where {T}
+    validate_la_backend_configuration(config)
+    generic = standard_la_provider_capabilities(T)
+    if :rank_revealing_qr in config.fallback_chain ||
+       :qr in config.required_capabilities
+        la_provider_supports(generic, :rank_revealing_qr) ||
+            throw(ArgumentError(
+                "rank-revealing QR is unsupported for arithmetic $(T)",
+            ))
+    end
+    return config
+end
+
 """Whether an optional extension recognizes `T` as a MultiFloat family."""
 is_multifloat_arithmetic(::Type) = false
 
@@ -67,8 +177,15 @@ function plan_la_backend(
             "unknown LA equality solver $(equality_solver)",
         ))
     arithmetic = _la_arithmetic_symbol(T)
+    generic_capabilities = standard_la_provider_capabilities(T)
+    if equality_solver === :qr
+        la_provider_supports(generic_capabilities, :rank_revealing_qr) ||
+            throw(ArgumentError(
+                "equality_solver=:qr is unsupported for arithmetic $(T)",
+            ))
+    end
     descriptor = la_provider_descriptor(T, threads)
-    required = (
+    required_operations = (
         :chol,
         :cholesky_factor!,
         :solve,
@@ -78,6 +195,8 @@ function plan_la_backend(
         :syrk,
         :mul_owned,
     )
+    required_capabilities =
+        _dense_cholesky_required_capabilities(equality_solver)
     # The first LA migration only owns dense Cholesky routes.  Historical
     # automatic/legacy callers retain the old implementation on every other
     # structural route, while an explicit request is rejected rather than
@@ -115,19 +234,41 @@ function plan_la_backend(
         # use the explicitly authorized rank-revealing QR fallback.
         fallback_chain = equality_solver === :auto ?
             (:rank_revealing_qr,) : ()
-        return LABackendConfiguration(
+        capabilities = generic_capabilities
+        config = LABackendConfiguration(
             arithmetic, requested, :standard, provider,
-            required, fallback_chain, :none, ownership,
+            la_capability_symbols(capabilities),
+            capabilities,
+            required_capabilities,
+            provider === :generic_linear_algebra ?
+                generic_la_provider_implementation(
+                    Val(:generic_linear_algebra),
+                ) : :julia_blas_lapack,
+            fallback_chain, :none, ownership,
         )
+        return validate_la_backend_configuration(config, T)
     elseif requested === :multifloat
-        if descriptor.available && all(cap -> cap in descriptor.capabilities, required)
+        descriptor_capabilities = descriptor.available ?
+            _descriptor_capability_model(descriptor) :
+            LAProviderCapabilities()
+        if descriptor.available &&
+           all(cap -> cap in descriptor.capabilities, required_operations) &&
+           isempty(_missing_la_capabilities(
+               descriptor_capabilities,
+               required_capabilities,
+           ))
             fallback_chain = equality_solver === :auto ?
                 (:rank_revealing_qr,) : ()
-            return LABackendConfiguration(
+            config = LABackendConfiguration(
                 arithmetic, requested, :multifloat, descriptor.provider,
-                descriptor.capabilities, fallback_chain, :none,
+                descriptor.capabilities,
+                descriptor_capabilities,
+                required_capabilities,
+                descriptor.provider,
+                fallback_chain, :none,
                 :provider_owned,
             )
+            return validate_la_backend_configuration(config, T)
         end
         reason = descriptor.available ? :incomplete_provider_capabilities :
                  :missing_provider
@@ -156,20 +297,25 @@ function instantiate_la_backend(
     ::Type{T},
     threads::Int=1,
 ) where {T}
+    validate_la_backend_configuration(config, T)
     config.arithmetic == _la_arithmetic_symbol(T) || throw(ArgumentError(
         "LA plan arithmetic $(config.arithmetic) does not match $(T)",
     ))
     if config.selected === :standard
         ownership = config.arithmetic in (:float32, :float64) ?
                      :immutable_scalars : :owned_mutable_scalars
-        return StandardLABackend(config.arithmetic, config.provider, ownership)
+        backend = StandardLABackend(config.arithmetic, config.provider, ownership)
+        _assert_la_backend_capabilities(backend, config, T)
+        return backend
     end
     if config.selected === :multifloat
         payload = instantiate_multifloat_la_backend(T, config, threads)
         payload === nothing && throw(ArgumentError(
             "planned MultiFloat LA provider $(config.provider) did not instantiate",
         ))
-        return MultiFloatLABackend(config.arithmetic, payload)
+        backend = MultiFloatLABackend(config.arithmetic, payload)
+        _assert_la_backend_capabilities(backend, config, T)
+        return backend
     end
     config.selected === :legacy || throw(ArgumentError(
         "unknown planned LA backend $(config.selected)",
@@ -182,7 +328,40 @@ function instantiate_la_backend(
             "planned legacy LA provider $(config.provider) does not match " *
             "bundled provider $(legacy_la_provider_identity(provider))",
         ))
-    return LegacyLABackend(config.arithmetic, reason, provider)
+    backend = LegacyLABackend(config.arithmetic, reason, provider)
+    _assert_la_backend_capabilities(backend, config, T)
+    return backend
+end
+
+la_backend_capabilities(backend::StandardLABackend) =
+    _standard_la_capabilities(backend.arithmetic)
+la_backend_capabilities(::LegacyLABackend) =
+    SDPX_LEGACY_LA_CAPABILITY_MODEL
+la_backend_capabilities(backend::MultiFloatLABackend) =
+    la_provider_capability_model(backend.provider)
+
+function _assert_la_backend_capabilities(
+    backend::AbstractLABackend,
+    config::LABackendConfiguration,
+    ::Type{T},
+) where {T}
+    actual = backend isa StandardLABackend ?
+        standard_la_provider_capabilities(T) :
+        la_backend_capabilities(backend)
+    unsupported_claims = _missing_la_capabilities(
+        actual,
+        la_capability_symbols(config.capability_model),
+    )
+    isempty(unsupported_claims) || throw(ArgumentError(
+        "instantiated LA backend $(la_backend_name(backend)) does not match " *
+        "planned capability claims $(unsupported_claims)",
+    ))
+    missing = _missing_la_capabilities(actual, config.required_capabilities)
+    isempty(missing) || throw(ArgumentError(
+        "instantiated LA backend $(la_backend_name(backend)) lacks planned " *
+        "capabilities $(missing)",
+    ))
+    return backend
 end
 
 function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
@@ -235,6 +414,46 @@ end
 
 la_cholesky_factor!(::AbstractLABackend, ::AbstractArray) = nothing
 
+"""Factor a dense matrix with generic LU through the selected provider."""
+function la_lu_factor!(backend::StandardLABackend, A::AbstractMatrix)
+    capabilities = standard_la_provider_capabilities(eltype(A))
+    la_provider_supports(capabilities, :lu) || throw(ArgumentError(
+        "LA provider $(backend.provider) does not support LU",
+    ))
+    factor = LinearAlgebra.lu!(A; check=false)
+    LinearAlgebra.issuccess(factor) || return nothing
+    return StandardLALUFactor{eltype(A),typeof(factor)}(factor)
+end
+la_lu_factor!(::AbstractLABackend, ::AbstractMatrix) = throw(ArgumentError(
+    "selected LA provider does not support LU factorization",
+))
+
+"""
+    la_qr_factor!(backend, A; pivoted=false)
+
+Factor a dense matrix with the stable LinearAlgebra interface.  A pivoted
+request is a rank-revealing QR capability, not an implicit fallback.
+"""
+function la_qr_factor!(
+    backend::StandardLABackend,
+    A::AbstractMatrix;
+    pivoted::Bool=false,
+)
+    capabilities = standard_la_provider_capabilities(eltype(A))
+    needed = pivoted ? :rank_revealing_qr : :qr
+    la_provider_supports(capabilities, needed) || throw(ArgumentError(
+        "LA provider $(backend.provider) does not support $(needed)",
+    ))
+    factor = pivoted ?
+        LinearAlgebra.qr!(A, LinearAlgebra.ColumnNorm()) :
+        LinearAlgebra.qr!(A)
+    return StandardLAQRFactor{eltype(A),typeof(factor)}(factor, pivoted)
+end
+la_qr_factor!(::AbstractLABackend, ::AbstractMatrix; pivoted::Bool=false) =
+    throw(ArgumentError(
+        "selected LA provider does not support QR factorization",
+    ))
+
 la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::LegacyLACholeskyFactor) = factor.factors
@@ -260,6 +479,13 @@ la_cholesky_solve!(factor::LegacyLACholeskyFactor, rhs) =
     ); rhs)
 la_cholesky_solve!(factor::BigFloatCholeskyFactor, rhs) =
     (kcholsolve_owned!(factor.L, rhs); rhs)
+
+la_factor_solve!(factor::AbstractLACholeskyFactor, rhs) =
+    la_cholesky_solve!(factor, rhs)
+la_factor_solve!(factor::StandardLALUFactor, rhs) =
+    (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
+la_factor_solve!(factor::StandardLAQRFactor, rhs) =
+    (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
 
 la_backend_name(::StandardLABackend) = :standard
 la_backend_name(::LegacyLABackend) = :legacy

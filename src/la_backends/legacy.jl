@@ -26,6 +26,21 @@ const SDPX_LEGACY_LA_CAPABILITIES = (
     :axpby_owned,
 )
 
+const SDPX_LEGACY_LA_CAPABILITY_MODEL = LAProviderCapabilities(
+    cholesky=true,
+    factor_solve=true,
+    multi_rhs=true,
+    iterative_refinement=true,
+    higher_precision_residual=true,
+    dot=true,
+    norminf=true,
+    mul=true,
+    mul_owned=true,
+    syrk=true,
+    triangular_solve=true,
+    axpby=true,
+)
+
 """Stateless payload for the bundled legacy arithmetic implementation."""
 struct SDPXLegacyLAProvider{A,O} end
 
@@ -42,6 +57,8 @@ legacy_la_provider_identity(::SDPXLegacyLAProvider) = :sdpx_legacy_la
 legacy_la_provider_arithmetic(::SDPXLegacyLAProvider{A,O}) where {A,O} = A
 legacy_la_provider_capabilities(::SDPXLegacyLAProvider) =
     SDPX_LEGACY_LA_CAPABILITIES
+legacy_la_provider_capability_model(::SDPXLegacyLAProvider) =
+    SDPX_LEGACY_LA_CAPABILITY_MODEL
 legacy_la_provider_ownership(::SDPXLegacyLAProvider{A,O}) where {A,O} = O
 legacy_la_provider_supports(
     provider::SDPXLegacyLAProvider,
@@ -73,6 +90,9 @@ function _legacy_la_backend_configuration(
         :legacy,
         :sdpx_legacy_la,
         SDPX_LEGACY_LA_CAPABILITIES,
+        SDPX_LEGACY_LA_CAPABILITY_MODEL,
+        _dense_cholesky_required_capabilities(equality_solver),
+        :bundled_sdpx_legacy,
         equality_solver === :auto ? (:rank_revealing_qr,) : (),
         reason,
         _legacy_la_ownership(T),

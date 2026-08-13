@@ -5,6 +5,7 @@ using Test
 
 @testset "SDPX.jl" begin
     include("la_backend_regressions.jl")
+    include("generic_la_backend.jl")
     include("correctness.jl")
     include("genericity.jl")
     include("extended_precision_blas.jl")
