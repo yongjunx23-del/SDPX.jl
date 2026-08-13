@@ -55,6 +55,20 @@ end
 
 @inline _seconds(source, key) = _project_field(source, key)
 
+@inline function _first_recorded_seconds(timings, primary, fallback)
+    value = _seconds(timings, primary)
+    return value === unavailable ? _seconds(timings, fallback) : value
+end
+
+function _direction_recovery_seconds(timings)
+    direct = _seconds(timings, :direction_recovery)
+    direct !== unavailable && return direct
+    predictor = _seconds(timings, :predictor_direction_recovery)
+    corrector = _seconds(timings, :corrector_direction_recovery)
+    (predictor === unavailable || corrector === unavailable) && return unavailable
+    return predictor + corrector
+end
+
 function _selected_algorithms(result::SDPResult)
     diagnostics = result.diagnostics
     diagnostics === nothing && return unavailable
@@ -74,6 +88,7 @@ function _setup_facts(result::SDPResult)
     selected = _selected_algorithms(result)
     return (
         frontend_seconds=_seconds(timings, :frontend),
+        preprocess_seconds=_seconds(timings, :preprocess),
         presolve_seconds=_seconds(timings, :presolve),
         equality_presolve_seconds=_seconds(timings, :equality_presolve),
         structural_analysis_seconds=_seconds(timings, :structural_analysis),
@@ -116,7 +131,11 @@ end
 function _iteration_facts(result::SDPResult)
     timings = _recorded_timings(result)
     return (
-        cone_scaling_metric_seconds=_seconds(timings, :cone_scaling_metric),
+        cone_scaling_metric_seconds=_first_recorded_seconds(
+            timings,
+            :cone_scaling_metric,
+            :q3_local_metric_factor,
+        ),
         initial_residual_seconds=_seconds(timings, :initial_residual),
         residual_and_block_factor_seconds=
             _seconds(timings, :residual_and_block_factor),
@@ -135,8 +154,12 @@ function _iteration_facts(result::SDPResult)
             _seconds(timings, :corrector_linear_solve),
         line_search_seconds=_seconds(timings, :line_search),
         refinement_seconds=_seconds(timings, :refinement),
-        accepted_update_seconds=_seconds(timings, :accepted_update),
-        direction_recovery_seconds=_seconds(timings, :direction_recovery),
+        accepted_update_seconds=_first_recorded_seconds(
+            timings,
+            :accepted_update,
+            :update,
+        ),
+        direction_recovery_seconds=_direction_recovery_seconds(timings),
         complementarity_analysis_seconds=
             _seconds(timings, :complementarity_analysis),
         finalization_seconds=_seconds(timings, :finalization),
@@ -185,7 +208,8 @@ function _counter_facts(result::SDPResult)
         symbolic_analyses=_project_field(sparse, :analyses),
         symbolic_analysis_reuse=
             _project_field(sparse, :symbolic_reuse_ratio),
-        schur_nnz=_project_field(sparse, :factor_nonzeros),
+        schur_nnz=_project_field(sparse, :schur_nnz),
+        factor_nnz=_project_field(sparse, :factor_nonzeros),
         kkt_nnz=_project_field(result.termination, :kkt_nonzeros),
         factor_memory_estimate_bytes=
             _project_field(result.termination, :factor_memory_estimate_bytes),

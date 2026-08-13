@@ -1852,6 +1852,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                             statistics(backend),
                             (
                                 available=true,
+                                schur_nnz=nnz(sparse_workspace.matrix),
                                 factor_nonzeros=
                                     nnz(backend.factorization),
                                 regularization=
@@ -2254,6 +2255,11 @@ function _solve_pipeline!(
 ) where {T}
     _validate_solver_options(opts)
     pipeline_started = time()
+    pipeline_preprocess_seconds = 0.0
+    pipeline_equality_presolve_seconds = 0.0
+    pipeline_structural_analysis_seconds = 0.0
+    pipeline_execution_planning_seconds = 0.0
+    pipeline_certification_seconds = 0.0
     deadline = isfinite(opts.max_time) ?
                pipeline_started + opts.max_time :
                Inf
@@ -2265,9 +2271,14 @@ function _solve_pipeline!(
                 "arithmetic precision",
             ))
     end
+    preprocess_started = time_ns()
     preprocessed = _prepared_data === nothing ?
                    preprocess(prob, opts) :
                    _prepared_data.preprocessed
+    pipeline_preprocess_seconds = _prepared_data === nothing ?
+                                  (time_ns() - preprocess_started) / 1.0e9 :
+                                  0.0
+    equality_presolve_started = time_ns()
     reduced, equality_map, equality_report = if _prepared_data === nothing
         presolve_equalities(preprocessed.problem, opts)
     else
@@ -2277,6 +2288,8 @@ function _solve_pipeline!(
             _prepared_data.equality_report,
         )
     end
+    pipeline_equality_presolve_seconds = _prepared_data === nothing ?
+        (time_ns() - equality_presolve_started) / 1.0e9 : 0.0
     report = _merge_presolve_reports(
         preprocessed,
         equality_map,
@@ -2287,16 +2300,29 @@ function _solve_pipeline!(
     # In particular, equality presolve can change the selected parameter profile
     # and the diagnostic equality count.
     planning_problem = report.inconsistent ? prob : reduced
+    structural_analysis_started = time_ns()
     execution_route = resolve_execution_route(
         AutoPlanner(),
         planning_problem,
         opts,
     )
+    pipeline_structural_analysis_seconds +=
+        (time_ns() - structural_analysis_started) / 1.0e9
+    execution_planning_started = time_ns()
     plan = build_execution_plan(
         AutoPlanner(),
         planning_problem,
         execution_route,
     )
+    pipeline_execution_planning_seconds +=
+        (time_ns() - execution_planning_started) / 1.0e9
+    pipeline_timings = () -> opts.timing ? (
+        preprocess=pipeline_preprocess_seconds,
+        equality_presolve=pipeline_equality_presolve_seconds,
+        structural_analysis=pipeline_structural_analysis_seconds,
+        execution_planning=pipeline_execution_planning_seconds,
+        certification=pipeline_certification_seconds,
+    ) : NamedTuple()
     warnings = String[]
     if opts.threads > Base.Threads.nthreads()
         push!(
@@ -2401,6 +2427,7 @@ function _solve_pipeline!(
             opts.diagnostics,
             opts.max_time,
             opts.certification,
+            pipeline_timings(),
         )
     end
     report.inconsistent &&
@@ -2409,6 +2436,7 @@ function _solve_pipeline!(
             report,
             plan,
             opts,
+            pipeline_timings(),
         )
 
     preprocessed_warm_start = _transform_preprocess_warm_start(
@@ -2549,6 +2577,7 @@ function _solve_pipeline!(
                 deadline=deadline,
             )
         end
+        native_certification_started = time_ns()
         native_certificate = if opts.certification &&
                                 native_result !== nothing &&
                                 native_result.status === Optimal
@@ -2556,6 +2585,8 @@ function _solve_pipeline!(
         else
             nothing
         end
+        pipeline_certification_seconds +=
+            (time_ns() - native_certification_started) / 1.0e9
         native_certificate_valid = native_certificate === nothing ||
                                    native_certificate.valid
         if !native_certificate_valid
@@ -2579,6 +2610,7 @@ function _solve_pipeline!(
                 opts.diagnostics,
                 opts.max_time,
                 opts.certification,
+                pipeline_timings(),
             )
         end
         if fallback && time() < deadline
@@ -2603,11 +2635,22 @@ function _solve_pipeline!(
                 equilibrate=false,
                 threads=plan.threads,
             )
+            fallback_structural_analysis_started = time_ns()
             fallback_route = resolve_execution_route(
                 AutoPlanner(),
                 reduced,
                 fallback_options,
             )
+            pipeline_structural_analysis_seconds +=
+                (time_ns() - fallback_structural_analysis_started) / 1.0e9
+            fallback_execution_planning_started = time_ns()
+            fallback_plan = build_execution_plan(
+                AutoPlanner(),
+                reduced,
+                fallback_route,
+            )
+            pipeline_execution_planning_seconds +=
+                (time_ns() - fallback_execution_planning_started) / 1.0e9
             result = _solve_sdp_core!(
                 reduced,
                 fallback_options;
@@ -2617,11 +2660,7 @@ function _solve_pipeline!(
                 Y0=preprocessed_warm_start.Y0,
                 resume=resume,
                 deadline=deadline,
-                execution_plan=build_execution_plan(
-                    AutoPlanner(),
-                    reduced,
-                    fallback_route,
-                ),
+                execution_plan=fallback_plan,
             )
             workspace_bytes = max(
                 workspace_bytes,
@@ -2732,6 +2771,7 @@ function _solve_pipeline!(
         prob,
         result,
     )
+    certification_started = time_ns()
     diagnosable_failure = result.status in (
         Stalled,
         IterLimit,
@@ -2761,6 +2801,8 @@ function _solve_pipeline!(
     end
     certificate_warning === nothing ||
         push!(warnings, certificate_warning)
+    pipeline_certification_seconds +=
+        (time_ns() - certification_started) / 1.0e9
     equality_diagnostics = get(
         result.termination,
         :equality_system,
@@ -2824,6 +2866,7 @@ function _solve_pipeline!(
         opts.diagnostics,
         (reason=:none,),
         certificate,
+        pipeline_timings(),
     )
 end
 
@@ -2898,6 +2941,7 @@ function solve(
             )
         end
     end
+    frontend_started = time_ns()
     precision_bits = precision === nothing ?
                      (T === BigFloat ? Base.precision(BigFloat) : sig_bits(T)) :
                      Int(precision)
@@ -2928,12 +2972,15 @@ function solve(
         minimum_working_precision_bits=minimum_working_precision_bits,
         parameter_policy=:auto,
     )
-    if warm_start === nothing
-        return solve!(prob, options)
+    frontend_seconds = (time_ns() - frontend_started) / 1.0e9
+    result = if warm_start === nothing
+        solve!(prob, options)
+    else
+        warm_start isa NamedTuple ||
+            throw(ArgumentError("warm_start must be a NamedTuple such as (; x0, X0, y0, Y0)"))
+        solve!(prob, options; warm_start...)
     end
-    warm_start isa NamedTuple ||
-        throw(ArgumentError("warm_start must be a NamedTuple such as (; x0, X0, y0, Y0)"))
-    return solve!(prob, options; warm_start...)
+    return _with_frontend_timing(result, frontend_seconds, timing)
 end
 
 function _resolve_precision_type(precision, c, A, C, B, b)
@@ -3003,7 +3050,8 @@ function solve(
                              Float64(time_limit) - (time() - api_started),
                          ) :
                          Inf
-        return solve(
+        frontend_seconds = time() - api_started
+        result = solve(
             problem;
             tolerance=tolerance,
             maximum_iterations=maximum_iterations,
@@ -3031,6 +3079,7 @@ function solve(
             minimum_working_precision_bits=
                 minimum_working_precision_bits,
         )
+        return _with_frontend_timing(result, frontend_seconds, timing)
     end
     return T === BigFloat ? setprecision(run, BigFloat, precision_bits) : run()
 end

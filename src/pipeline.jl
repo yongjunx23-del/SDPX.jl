@@ -2071,6 +2071,7 @@ function _attach_diagnostics(
     diagnostics_enabled::Bool,
     termination::NamedTuple=(reason=:none,),
     certificate::NamedTuple=(available=false,),
+    pipeline_timings::NamedTuple=NamedTuple(),
 ) where {T}
     diagnostics_enabled || return result
     core_time = result.timings === nothing ? NaN :
@@ -2088,6 +2089,7 @@ function _attach_diagnostics(
                       core=core_time,
                       pipeline=pipeline_time,
                   ),
+                  pipeline_timings,
               )
     memory = (
         workspace_bytes=workspace_bytes,
@@ -2255,11 +2257,78 @@ function _attach_diagnostics(
     )
 end
 
+"""Add measured public-frontend work without changing the result payload.
+
+Frontend wrappers may be nested (for example one-call ingest -> typed solve),
+so the phase is accumulated.  The helper is deliberately a pure result
+rewrite: it does not revisit planning, numerical state, or certification.
+"""
+function _with_frontend_timing(
+    result::SDPResult{T},
+    elapsed::Float64,
+    enabled::Bool,
+) where {T}
+    enabled || return result
+    result_timings = result.timings === nothing ?
+                     (frontend=elapsed,) :
+                     merge(
+                         result.timings,
+                         (
+                             frontend=
+                                 get(result.timings, :frontend, 0.0) + elapsed,
+                         ),
+                     )
+    diagnostics = result.diagnostics
+    updated_diagnostics = if diagnostics === nothing
+        nothing
+    else
+        diagnostic_timings = merge(
+            diagnostics.timings,
+            (
+                frontend=
+                    get(diagnostics.timings, :frontend, 0.0) + elapsed,
+            ),
+        )
+        SolveDiagnostics(
+            diagnostics.classification,
+            diagnostics.plan,
+            diagnostics.presolve,
+            diagnostic_timings,
+            diagnostics.memory,
+            diagnostics.selected_algorithms,
+            diagnostics.parameter_history,
+            diagnostics.warnings,
+            diagnostics.termination,
+        )
+    end
+    return SDPResult{T}(
+        result.status,
+        result.message,
+        result.x,
+        result.X,
+        result.y,
+        result.Y,
+        result.pObj,
+        result.dObj,
+        result.gap_rel,
+        result.p_res,
+        result.d_res,
+        result.iterations,
+        result.restarts,
+        result.regularizations,
+        result_timings,
+        result.parameter_history,
+        updated_diagnostics,
+        result.termination,
+    )
+end
+
 function _inconsistent_presolve_result(
     prob::SDPProblem{T},
     report::PresolveReport,
     plan::ExecutionPlan,
     opts::SolverOptions{T},
+    pipeline_timings::NamedTuple=NamedTuple(),
 ) where {T}
     # A negative fixed scalar block is exactly the dedicated LP zero-row
     # contradiction. Preserve that established, more specific termination
@@ -2306,9 +2375,19 @@ function _inconsistent_presolve_result(
             ),
         ),
     )
+    certification_started = time_ns()
     certificate = opts.certification ?
                   result_certificate(prob, result, opts) :
                   (available=false, reason=:certification_disabled)
+    recorded_pipeline_timings = opts.timing ?
+        merge(
+            pipeline_timings,
+            (
+                certification=
+                    get(pipeline_timings, :certification, 0.0) +
+                    (time_ns() - certification_started) / 1.0e9,
+            ),
+        ) : NamedTuple()
     return _attach_diagnostics(
         result,
         plan,
@@ -2322,6 +2401,7 @@ function _inconsistent_presolve_result(
         opts.diagnostics,
         (reason=:none,),
         certificate,
+        recorded_pipeline_timings,
     )
 end
 
@@ -2334,6 +2414,7 @@ function _time_limit_pipeline_result(
     diagnostics_enabled::Bool,
     max_time::Float64,
     certification_enabled::Bool,
+    pipeline_timings::NamedTuple=NamedTuple(),
 ) where {T}
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
@@ -2373,5 +2454,6 @@ function _time_limit_pipeline_result(
         certification_enabled ?
         (available=false,) :
         (available=false, reason=:certification_disabled),
+        pipeline_timings,
     )
 end

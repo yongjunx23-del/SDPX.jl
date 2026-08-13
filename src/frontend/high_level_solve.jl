@@ -9,8 +9,15 @@
 end
 
 function _solve_sdp_with_frontend(problem::SDPProblem{T}, options::SolveOptions) where {T}
+    frontend_started = time_ns()
     resolved = resolve_solve_options(T, options)
-    return solve!(problem, resolved.core)
+    frontend_seconds = (time_ns() - frontend_started) / 1.0e9
+    result = solve!(problem, resolved.core)
+    return _with_frontend_timing(
+        result,
+        frontend_seconds,
+        resolved.core.timing,
+    )
 end
 
 """
@@ -41,10 +48,17 @@ end
 """Solve a compact SOC model through the all-auto frontend policy."""
 function solve_socp(problem::ConicProblem{T}, options::SolveOptions) where {T}
     run = function ()
+        frontend_started = time_ns()
         resolved = resolve_solve_options(T, options)
         lifted = _soc_psd_lift(problem; sparse=resolved.core.sparse,
                                verbosity=resolved.core.verbosity)
+        frontend_seconds = (time_ns() - frontend_started) / 1.0e9
         result = solve!(lifted, resolved.core)
+        result = _with_frontend_timing(
+            result,
+            frontend_seconds,
+            resolved.core.timing,
+        )
         return _conic_result(problem, result)
     end
     if T === BigFloat

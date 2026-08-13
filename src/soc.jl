@@ -374,8 +374,15 @@ boundary allow the native Lorentz Newton backend to replace this reference
 without changing the public API.
 """
 function solve_socp(problem::ConicProblem{T}; sparse=:auto, verbosity::Int=1, kwargs...) where {T}
+    frontend_started = time_ns()
     lifted = _soc_psd_lift(problem; sparse=sparse, verbosity=verbosity)
+    frontend_seconds = (time_ns() - frontend_started) / 1.0e9
     result = solve(lifted; verbosity=verbosity, kwargs...)
+    result = _with_frontend_timing(
+        result,
+        frontend_seconds,
+        get(kwargs, :timing, true),
+    )
     return _conic_result(problem, result)
 end
 
