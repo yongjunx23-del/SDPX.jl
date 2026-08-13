@@ -128,6 +128,8 @@ Base.@kwdef struct LAProviderCapabilities
     multi_rhs::Bool = false
     iterative_refinement::Bool = false
     higher_precision_residual::Bool = false
+    refinement_correction::Bool = false
+    mixed_precision_residual::Bool = false
     sparse_factorization::Bool = false
     threading::Bool = false
     dot::Bool = false

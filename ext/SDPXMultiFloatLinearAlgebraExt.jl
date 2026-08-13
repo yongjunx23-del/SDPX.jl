@@ -90,10 +90,11 @@ function _capability_model(::Type{MF}) where {MF<:MultiFloat}
         pivoted_symmetric_ldlt=c.ldlt,
         factor_solve=c.cholesky,
         multi_rhs=c.multi_rhs,
-        # MFLA provides a single correction primitive, not a full refinement
-        # loop; SDPX owns the structured refinement policy.
-        iterative_refinement=c.refinement_correction,
-        higher_precision_residual=c.mixed_precision_residual,
+        # These are deliberately distinct from a provider-owned refinement
+        # loop or implicit precision policy: SDPX requests one correction or
+        # one explicit source-to-residual precision pair at a time.
+        refinement_correction=c.refinement_correction,
+        mixed_precision_residual=c.mixed_precision_residual,
         sparse_factorization=false,
         threading=c.threading,
         dot=c.dot,
@@ -132,8 +133,8 @@ const _DESCRIPTOR_CAPABILITIES = (
     :rank_revealing_qr,
     :lu,
     :pivoted_symmetric_ldlt,
-    :iterative_refinement,
-    :higher_precision_residual,
+    :refinement_correction,
+    :mixed_precision_residual,
 )
 
 struct _Provider{MF<:MultiFloat}
@@ -413,10 +414,10 @@ end
 function SDPX.la_mfla_residual!(
     provider::_Provider{MF},
     trans,
-    A,
-    x,
-    b,
-    residual,
+    A::AbstractMatrix{MF},
+    x::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    b::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    residual::Union{AbstractVector{MF},AbstractMatrix{MF}},
     uplo::Symbol=:general,
 ) where {MF}
     trans in (:N, :NoTrans) || throw(ArgumentError(
@@ -438,10 +439,10 @@ end
 function SDPX.la_mfla_normwise_backward_error(
     provider::_Provider{MF},
     trans,
-    A,
-    x,
-    b,
-    residual,
+    A::AbstractMatrix{MF},
+    x::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    b::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    residual::Union{AbstractVector{MF},AbstractMatrix{MF}},
     uplo::Symbol=:general,
 ) where {MF}
     trans in (:N, :NoTrans) || throw(ArgumentError(
@@ -453,22 +454,29 @@ end
 
 function SDPX.la_mfla_mixed_residual!(
     provider::_Provider{MF},
-    A,
-    x,
-    b,
-    residual,
+    A::AbstractMatrix{MF},
+    x::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    b::Union{AbstractVector{MF},AbstractMatrix{MF}},
+    residual::Union{AbstractVector{<:MultiFloat},AbstractMatrix{<:MultiFloat}},
     uplo::Symbol=:general,
 ) where {MF}
+    facts = mfla_capabilities(MF)
+    target = eltype(residual)
+    target_limbs = Base.unwrap_unionall(target).parameters[2]
+    target_name = target_limbs == 3 ? :x3 :
+                  target_limbs == 4 ? :x4 : :x2
+    getproperty(facts.mixed_residual_targets, target_name) ||
+        throw(ArgumentError(
+            "MFLA provider arithmetic $(MF) does not authorize a mixed " *
+            "residual in $(target)",
+        ))
     residual_mixed!(residual, A, x, b; uplo=uplo, config=provider.config)
     return residual
 end
 
 """One MFLA `refinement_correction!`; no loop, stopping rule, or fallback."""
-function SDPX.la_mfla_refine_once!(
+function SDPX.la_mfla_refinement_correction!(
     factor::_CholeskyHandle{MF},
-    A,
-    x,
-    b,
     residual,
     correction,
 ) where {MF}
@@ -619,11 +627,8 @@ function SDPX.la_mfla_ldlt_solve!(payload::_LDLTPayload, rhs)
     return rhs
 end
 
-function SDPX.la_mfla_refine_once!(
+function SDPX.la_mfla_refinement_correction!(
     factor::_LUPayload{MF},
-    A,
-    x,
-    b,
     residual,
     correction,
 ) where {MF}
@@ -636,11 +641,8 @@ function SDPX.la_mfla_refine_once!(
     return correction
 end
 
-function SDPX.la_mfla_refine_once!(
+function SDPX.la_mfla_refinement_correction!(
     factor::_LDLTPayload{MF},
-    A,
-    x,
-    b,
     residual,
     correction,
 ) where {MF}

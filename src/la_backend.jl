@@ -1218,54 +1218,45 @@ function la_refine_once!(
     )
 end
 
-function la_refine_once!(
+function la_refinement_correction!(
     factor::ProviderLACholeskyFactor,
-    A,
-    x,
-    b,
     residual,
     correction,
 )
     la_factor_provider_identity(factor.provider) ===
         :multifloat_linear_algebra || throw(ArgumentError(
-            "provider Cholesky handle does not support MFLA one-step refinement",
+            "provider Cholesky handle does not support MFLA correction",
         ))
-    return la_mfla_refine_once!(
-        factor.provider, A, x, b, residual, correction,
+    return la_mfla_refinement_correction!(
+        factor.provider, residual, correction,
     )
 end
 
-function la_refine_once!(
+function la_refinement_correction!(
     factor::ProviderLALUFactor,
-    A,
-    x,
-    b,
     residual,
     correction,
 )
     la_factor_provider_identity(factor.provider) ===
         :multifloat_linear_algebra || throw(ArgumentError(
-            "provider LU handle does not support MFLA one-step refinement",
+            "provider LU handle does not support MFLA correction",
         ))
-    return la_mfla_refine_once!(
-        factor.provider, A, x, b, residual, correction,
+    return la_mfla_refinement_correction!(
+        factor.provider, residual, correction,
     )
 end
 
-function la_refine_once!(
+function la_refinement_correction!(
     factor::ProviderLALDLTFactor,
-    A,
-    x,
-    b,
     residual,
     correction,
 )
     la_factor_provider_identity(factor.provider) ===
         :multifloat_linear_algebra || throw(ArgumentError(
-            "provider LDLT handle does not support MFLA one-step refinement",
+            "provider LDLT handle does not support MFLA correction",
         ))
-    return la_mfla_refine_once!(
-        factor.provider, A, x, b, residual, correction,
+    return la_mfla_refinement_correction!(
+        factor.provider, residual, correction,
     )
 end
 
@@ -1283,6 +1274,8 @@ la_higher_precision_residual!(::AbstractLABackend, args...; kwargs...) =
     ))
 la_refine_once!(::AbstractLAFactorization, args...) =
     throw(ArgumentError("selected LA factor does not expose one-step refinement"))
+la_refinement_correction!(::AbstractLAFactorization, args...) =
+    throw(ArgumentError("selected LA factor does not expose one correction"))
 
 la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
@@ -1632,8 +1625,8 @@ la_mfla_normwise_backward_error(::Any, args...) =
     throw(ArgumentError("MultiFloat backward error unavailable"))
 la_mfla_mixed_residual!(::Any, args...) =
     throw(ArgumentError("MultiFloat mixed-precision residual unavailable"))
-la_mfla_refine_once!(::Any, args...) =
-    throw(ArgumentError("MultiFloat one-step refinement unavailable"))
+la_mfla_refinement_correction!(::Any, args...) =
+    throw(ArgumentError("MultiFloat refinement correction unavailable"))
 la_mfla_qr_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("MultiFloat pivoted QR unavailable"))
 la_mfla_lu_factor!(::Any, ::AbstractMatrix) =

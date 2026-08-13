@@ -131,14 +131,16 @@ if _MFLA_LOADED
                 :syrk,
                 :triangular_solve,
                 :rank_revealing_qr,
-                :iterative_refinement,
+                :refinement_correction,
             )
                 @test capability in config.capability_model
             end
-            @test (:higher_precision_residual in config.capability_model) ==
+            @test (:mixed_precision_residual in config.capability_model) ==
                   (T !== Float64x4)
             for absent in (
                 :qr,
+                :iterative_refinement,
+                :higher_precision_residual,
                 :sparse_factorization,
                 :norminf,
                 :axpby,
@@ -480,11 +482,8 @@ if _MFLA_LOADED
             )
             for factor in factors
                 correction = zeros(T, 2)
-                SDPX.la_refine_once!(
+                SDPX.la_refinement_correction!(
                     factor,
-                    A,
-                    approximate,
-                    rhs,
                     residual,
                     correction,
                 )
@@ -523,6 +522,17 @@ if _MFLA_LOADED
         b4 = A4 * x4
         @test_throws ArgumentError SDPX.la_mixed_residual!(
             high_backend, A4, x4, b4, zeros(Float64x3, 2),
+        )
+        # The selected backend arithmetic is authoritative; it cannot be used
+        # as a generic dispatcher for a different source arithmetic.
+        @test_throws ArgumentError SDPX.la_mixed_residual!(
+            high_backend, A2, x2, b2, zeros(Float64x3, 2),
+        )
+        A3 = Float64x3[2 1; 1 3]
+        x3 = Float64x3[1, 2]
+        b3 = A3 * x3
+        @test_throws ArgumentError SDPX.la_mixed_residual!(
+            source_backend, A3, x3, b3, zeros(Float64x4, 2),
         )
     end
 
