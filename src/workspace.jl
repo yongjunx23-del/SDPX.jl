@@ -992,6 +992,16 @@ function Workspace(
             "execution plan backend configuration $(config.route) does not match " *
             "kkt_backend $(plan.kkt_backend)",
         ))
+    formulation = plan.kkt_formulation
+    formulation in KKT_FORMULATION_ROUTES || throw(ArgumentError(
+        "execution plan KKT formulation $(formulation) cannot construct an " *
+        "SDP Workspace",
+    ))
+    formulation === kkt_formulation_from_backend(plan.kkt_backend) ||
+        throw(ArgumentError(
+            "execution plan KKT formulation $(formulation) does not match " *
+            "kkt_backend $(plan.kkt_backend)",
+        ))
     config.deferred && throw(ArgumentError(
         "deferred LP backend configurations cannot construct an SDP Workspace",
     ))
@@ -1065,7 +1075,7 @@ function Workspace(
     # selected its effective whole-solver width. Direct reduced panels never
     # consume the full Schur partial matrices; keep only the small RHS
     # partials and allocate Schur partials lazily if the kernel falls back.
-    compact_arrow = config.route === :block_arrow
+    compact_arrow = formulation === :block_arrow
     arrow = compact_arrow ? ArrowWorkspace(
         prob,
         reduced_arrow_panel ? reduced_block_nbins : selected_threads;
@@ -1075,7 +1085,7 @@ function Workspace(
         throw(ArgumentError(
             "execution plan selected block-arrow, but the reduced problem is incompatible",
         ))
-    sparse_schur = config.route === :sparse_schur_cholesky
+    sparse_schur = formulation === :sparse_normal_equations
     sparse_schur && !_use_sparse_schur_sdp(prob) &&
         throw(ArgumentError(
             "execution plan selected sparse Schur, but the reduced problem is incompatible",
@@ -1359,7 +1369,7 @@ function Workspace(
         :not_run, selected_threads, config, nothing, :not_executed, :none,
         la_backend, :not_executed, :not_executed, :not_executed, :none,
         plan.la_config.fallback_chain)
-    workspace.backend = _backend_from_configuration(workspace, config)
+    workspace.backend = _backend_from_configuration(workspace, formulation)
     generic_mixed_mode !== :off &&
         workspace.mixed_precision === nothing &&
         error("execution plan selected mixed precision without a workspace")

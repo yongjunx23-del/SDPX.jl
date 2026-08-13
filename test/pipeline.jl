@@ -838,7 +838,12 @@ end
         ws = SDPX.Workspace(prob)
         actual = SDPX.select_backend(ws)
         plan = SDPX.build_execution_plan(prob, SDPX.SolverOptions{Float64}())
-        return (actual=actual, ws=ws, planned=plan.kkt_backend)
+        return (
+            actual=actual,
+            ws=ws,
+            plan=plan,
+            planned=plan.kkt_backend,
+        )
     end
 
     # An SDP model goes through the Schur/Workspace path.
@@ -848,6 +853,8 @@ end
     @test SDPX.backend_name(d.actual) === :dense_cholesky
     @test SDPX.supports_equalities(d.actual)
     @test string(d.planned) == string(SDPX.backend_name(d.actual))
+    @test d.plan.kkt_formulation === :dense_normal_equations
+    @test SDPX.select_backend(d.ws) isa SDPX.DenseCholeskyBackend
 
     # An all-scalar-cone model is dispatched to the dedicated LP solver, which
     # factorizes its own dense `K` and never builds an SDP `Workspace`. Its
@@ -856,6 +863,7 @@ end
     lp_plan = SDPX.build_execution_plan(lp, SDPX.SolverOptions{Float64}())
     lp_backend = SDPX.select_lp_backend(lp.dims.n)
     @test string(lp_plan.kkt_backend) == string(SDPX.backend_name(lp_backend))
+    @test lp_plan.kkt_formulation === :not_applicable
     @test SDPX.backend_name(SDPX.select_lp_backend(0)) === :positive_definite_cholesky
     @test SDPX.backend_name(SDPX.select_lp_backend(3)) === :dense_lu
 
@@ -863,6 +871,7 @@ end
     a = backends_for(arrow)
     @test a.actual isa SDPX.ArrowBackend
     @test SDPX.backend_name(a.actual) === :block_arrow
+    @test a.plan.kkt_formulation === :block_arrow
     # The backend also supports equalities for the exactly block-diagonal
     # all-local specialization; ArrowWorkspace rejects incompatible
     # shared-variable/equality structures before backend selection.
@@ -881,6 +890,76 @@ end
     # distinguishable from "zero".
     @test SDPX.statistics(d.actual, d.ws).arrow_blocks === nothing
     @test SDPX.statistics(a.actual, a.ws).arrow_blocks == 4
+end
+
+@testset "KKT formulation descriptor (§15.1)" begin
+    @test SDPX.kkt_formulation_from_backend(:dense_cholesky) ===
+          :dense_normal_equations
+    @test SDPX.kkt_formulation_from_backend(:dense_cholesky_fallback) ===
+          :dense_normal_equations
+    @test SDPX.kkt_formulation_from_backend(:sparse_schur_cholesky) ===
+          :sparse_normal_equations
+    @test SDPX.kkt_formulation_from_backend(:block_arrow) === :block_arrow
+    @test SDPX.kkt_formulation_from_backend(:positive_definite_cholesky) ===
+          :not_applicable
+    @test SDPX.kkt_formulation_from_backend(:dense_lu) === :not_applicable
+    @test SDPX.kkt_formulation_from_backend(:q3_block_diagonal_equality) ===
+          :not_applicable
+
+    dense = unbalanced_block_sdp()
+    dense_plan = SDPX.build_execution_plan(
+        dense,
+        SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            scaling=:none,
+            presolve=false,
+            threads=1,
+        ),
+    )
+    # Historical positional callers keep working and still carry a
+    # backend-derived formulation descriptor.
+    positional = SDPX.ExecutionPlan(
+        dense_plan.classification,
+        dense_plan.algorithm,
+        dense_plan.scaling,
+        :dense_cholesky,
+        dense_plan.backend_config,
+        dense_plan.gram_kernel,
+        dense_plan.schedule,
+        dense_plan.threads,
+        dense_plan.parameter_profile,
+        dense_plan.memory_budget_bytes,
+        dense_plan.parameters,
+    )
+    @test positional.kkt_formulation === :dense_normal_equations
+    positional_workspace = SDPX.Workspace(
+        dense;
+        execution_plan=positional,
+    )
+    @test SDPX.select_backend(positional_workspace) isa
+          SDPX.DenseCholeskyBackend
+
+    # Unknown formulation markers must not run a backend they were not
+    # planned for.
+    inconsistent = SDPX.ExecutionPlan(
+        dense_plan.classification,
+        dense_plan.algorithm,
+        dense_plan.scaling,
+        :dense_cholesky,
+        dense_plan.backend_config,
+        :not_a_route,
+        dense_plan.la_config,
+        dense_plan.gram_kernel,
+        dense_plan.schedule,
+        dense_plan.threads,
+        dense_plan.parameter_profile,
+        dense_plan.memory_budget_bytes,
+        dense_plan.parameters,
+    )
+    @test_throws ArgumentError SDPX.Workspace(
+        dense;
+        execution_plan=inconsistent,
+    )
 end
 
 @testset "worker reporting distinguishes cores from threads (§18.4)" begin

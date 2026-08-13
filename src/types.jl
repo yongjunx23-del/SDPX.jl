@@ -1211,6 +1211,38 @@ struct BackendConfiguration
 end
 
 """
+    KKT_FORMULATION_ROUTES
+
+Mathematical KKT formulations the planner may select.  These are distinct
+from the LA provider (`la_config`) and from backend implementation details:
+`plan.kkt_formulation` names the actual linear-system route, while
+`backend_config` records which optimized implementation of that route is
+active.
+"""
+const KKT_FORMULATION_ROUTES = (
+    :dense_normal_equations,
+    :sparse_normal_equations,
+    :block_arrow,
+)
+
+"""
+    kkt_formulation_from_backend(kkt_backend) -> Symbol
+
+Stable route mapping used by compatibility positional `ExecutionPlan`
+constructors and by Workspace validation.  Dense Cholesky and its historical
+fallback label execute the same dense normal-equation route, so both map to
+`:dense_normal_equations`.  Deferred LP and native Q3 plans have no SDP KKT
+formulation and map to `:not_applicable`.
+"""
+function kkt_formulation_from_backend(kkt_backend::Symbol)
+    kkt_backend === :block_arrow && return :block_arrow
+    kkt_backend === :sparse_schur_cholesky && return :sparse_normal_equations
+    kkt_backend in (:dense_cholesky, :dense_cholesky_fallback) &&
+        return :dense_normal_equations
+    return :not_applicable
+end
+
+"""
     ExecutionPlan
 
 Algorithms selected before a solve. This is deliberately descriptive: it is
@@ -1223,6 +1255,7 @@ struct ExecutionPlan
     scaling::Symbol
     kkt_backend::Symbol
     backend_config::BackendConfiguration
+    kkt_formulation::Symbol
     la_config::LABackendConfiguration
     gram_kernel::Symbol
     schedule::Symbol
@@ -1253,10 +1286,45 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         backend_config,
+        kkt_formulation_from_backend(kkt_backend),
         _compat_la_backend_configuration(
             classification.arithmetic,
             backend_config.equality_solver,
         ),
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
+end
+
+# Compatibility constructor for the v0.4.1-dev plan carrying `la_config` but
+# no formulation field.  New planner code supplies the formulation explicitly;
+# old callers retain the backend-derived route mapping.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    la_config::LABackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        kkt_formulation_from_backend(kkt_backend),
+        la_config,
         gram_kernel,
         schedule,
         threads,
@@ -1299,6 +1367,7 @@ function ExecutionPlan(
         scaling,
         kkt_backend,
         config,
+        kkt_formulation_from_backend(kkt_backend),
         _compat_la_backend_configuration(
             classification.arithmetic,
             equality_solver,

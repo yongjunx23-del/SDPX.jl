@@ -80,27 +80,28 @@ function select_backend(ws::Workspace)
     return ws.backend::KKTBackend
 end
 
-function _backend_from_configuration(
-    ws::Workspace,
-    config::BackendConfiguration,
-)
-    config.route === :block_arrow && return ArrowBackend()
-    config.route === :sparse_schur_cholesky && return SparseSchurBackend()
-    config.route in (:dense_cholesky, :dense_cholesky_fallback) ||
-        throw(ArgumentError(
-            "unsupported Workspace KKT backend route $(config.route)",
-        ))
-    return ws.mixed_precision === nothing ?
-           DenseCholeskyBackend() : MixedPrecisionBackend()
+function _backend_from_configuration(ws::Workspace, formulation::Symbol)
+    formulation === :block_arrow && return ArrowBackend()
+    formulation === :sparse_normal_equations && return SparseSchurBackend()
+    formulation === :dense_normal_equations &&
+        return ws.backend_config.mixed_precision_mode !== :off ?
+               MixedPrecisionBackend() : DenseCholeskyBackend()
+    throw(ArgumentError(
+        "unsupported Workspace KKT formulation $(formulation)",
+    ))
 end
 
-function planned_backend_name(ws::Workspace)
-    config = ws.backend_config
+function planned_backend_name(config::BackendConfiguration)
+    config.deferred && return :lp_deferred
     config.mixed_reduced_arrow && return :mixed_reduced_arrow
     config.route === :dense_cholesky &&
         config.mixed_precision_mode !== :off &&
         return :mixed_precision
     return config.route
+end
+
+function planned_backend_name(ws::Workspace)
+    return planned_backend_name(ws.backend_config)
 end
 
 """

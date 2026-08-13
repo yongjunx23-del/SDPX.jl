@@ -1066,6 +1066,7 @@ function build_execution_plan(
                       :dense_lu
                   ) :
                   _runtime_schur_backend(prob, opts.equality_solver)
+    kkt_formulation = kkt_formulation_from_backend(kkt_backend)
     generic_mixed_applicable =
         algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
         kkt_backend in (:dense_cholesky, :dense_cholesky_fallback)
@@ -1250,6 +1251,7 @@ function build_execution_plan(
         scaling,
         kkt_backend,
         backend_config,
+        kkt_formulation,
         la_config,
         gram_kernel,
         schedule,
@@ -1313,13 +1315,7 @@ function build_execution_plan(
 end
 
 function planned_backend_name(plan::ExecutionPlan)
-    config = plan.backend_config
-    config.deferred && return :lp_deferred
-    config.mixed_reduced_arrow && return :mixed_reduced_arrow
-    config.route === :dense_cholesky &&
-        config.mixed_precision_mode !== :off &&
-        return :mixed_precision
-    return config.route
+    return planned_backend_name(plan.backend_config)
 end
 
 function _empty_presolve_report(prob::SDPProblem)
@@ -2155,6 +2151,7 @@ function _attach_diagnostics(
             :planned_backend,
             planned_backend_name(plan),
         ),
+        planned_kkt_formulation=plan.kkt_formulation,
         executed_backend=get(
             executed,
             :executed_backend,
