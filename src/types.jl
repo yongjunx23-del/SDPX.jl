@@ -584,8 +584,9 @@ Base.@kwdef struct SolverOptions{T}
     # switches to rank-revealing QR only when factor diagnostics justify its
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.
     equality_solver::Symbol    = :auto                   # :auto | :normal_equations | :qr
-    # Dense linear-algebra implementation. `:bfla` and `:multifloat` are
-    # explicit optional providers; `:auto` remains environment-independent.
+    # Dense linear-algebra implementation. `:auto` resolves once while the
+    # ExecutionPlan is built: complete BFLA/MFLA extensions may be selected,
+    # but numerical execution never retries another provider implicitly.
     linear_algebra_backend::Symbol = :auto              # :auto | :standard | :bfla | :multifloat | :legacy
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
