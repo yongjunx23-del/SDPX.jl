@@ -137,6 +137,8 @@ if _MFLA_LOADED
             end
             @test (:mixed_precision_residual in config.capability_model) ==
                   (T !== Float64x4)
+            @test (:mixed_precision_residual in descriptor.capabilities) ==
+                  (T !== Float64x4)
             for absent in (
                 :qr,
                 :iterative_refinement,
@@ -490,6 +492,11 @@ if _MFLA_LOADED
                 corrected = approximate + correction
                 corrected_residual = rhs - A * corrected
                 @test maximum(abs, corrected_residual) < maximum(abs, residual)
+                @test_throws ArgumentError SDPX.la_refinement_correction!(
+                    factor,
+                    T[NaN, 0],
+                    zeros(T, 2),
+                )
             end
         end
     end

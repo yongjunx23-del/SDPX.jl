@@ -480,6 +480,9 @@ function SDPX.la_mfla_refinement_correction!(
     residual,
     correction,
 ) where {MF}
+    all(isfinite, residual) || throw(ArgumentError(
+        "MFLA refinement residual must be finite",
+    ))
     refinement_correction!(
         correction,
         factor.factor,
@@ -632,6 +635,9 @@ function SDPX.la_mfla_refinement_correction!(
     residual,
     correction,
 ) where {MF}
+    all(isfinite, residual) || throw(ArgumentError(
+        "MFLA refinement residual must be finite",
+    ))
     refinement_correction!(
         correction,
         factor.factor,
@@ -646,6 +652,9 @@ function SDPX.la_mfla_refinement_correction!(
     residual,
     correction,
 ) where {MF}
+    all(isfinite, residual) || throw(ArgumentError(
+        "MFLA refinement residual must be finite",
+    ))
     refinement_correction!(
         correction,
         factor.factor,
@@ -729,11 +738,16 @@ function SDPX.la_provider_descriptor(
         capability_model=SDPX.LAProviderCapabilities(),
         reason=:unsupported_multifloat_limbs,
     )
+    model = _capability_model(MF)
+    capabilities = Tuple(
+        capability for capability in _DESCRIPTOR_CAPABILITIES
+        if SDPX.la_provider_supports(model, capability)
+    )
     return (
         available=true,
         provider=:multifloat_linear_algebra,
-        capabilities=_DESCRIPTOR_CAPABILITIES,
-        capability_model=_capability_model(MF),
+        capabilities,
+        capability_model=model,
     )
 end
 
