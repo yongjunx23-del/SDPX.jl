@@ -61,6 +61,7 @@ allowed, but it must be recorded as:
 
 ```text
 planned_backend
+planned_kkt_formulation
 executed_backend
 fallback_reason
 ```

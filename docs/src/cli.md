@@ -1,6 +1,6 @@
-# SDPX command-line frontend (v0.4.1 development)
+# SDPX command-line frontend (v0.5 development)
 
-The v0.4.1 development frontend intentionally resembles the small set of
+The v0.5 development frontend intentionally resembles the small set of
 high-value options used in SDPB workflows while keeping SDPX's LP/SOCP/SDP
 automatic pipeline in control.
 

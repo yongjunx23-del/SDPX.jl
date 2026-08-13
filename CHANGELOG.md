@@ -18,6 +18,8 @@ separate v0.4.1 release.
   independent duality-gap, primal-error, and dual-error thresholds.
 - CLI result provenance for resolved frontend options and the automatic
   `ExecutionPlan`.
+- An explicit KKT formulation descriptor in `ExecutionPlan`, kept distinct
+  from the selected linear-algebra provider and exposed in diagnostics.
 - The public LP/SOCP/SDP benchmark starter suite under
   `bench/public_conic_suite/` as the acceptance layer for continued solver
   reorganization.
