@@ -24,6 +24,8 @@ const SDPX_LEGACY_LA_CAPABILITIES = (
     :trsv_transpose,
     :axpby,
     :axpby_owned,
+    :qr,
+    :rank_revealing_qr,
 )
 
 const SDPX_LEGACY_LA_CAPABILITY_MODEL = LAProviderCapabilities(
@@ -39,6 +41,8 @@ const SDPX_LEGACY_LA_CAPABILITY_MODEL = LAProviderCapabilities(
     syrk=true,
     triangular_solve=true,
     axpby=true,
+    qr=true,
+    rank_revealing_qr=true,
 )
 
 """Stateless payload for the bundled legacy arithmetic implementation."""
@@ -84,6 +88,16 @@ function _legacy_la_backend_configuration(
     reason::Symbol,
     equality_solver::Symbol=:auto,
 ) where {T}
+    # The bundled provider advertises a real Julia LinearAlgebra QR kernel.
+    # Automatic equality planning may therefore authorize RRQR; the explicit
+    # `equality_solver=:qr` requirement wiring stays in the planner.
+    fallback_chain =
+        equality_solver === :auto &&
+        la_provider_supports(
+            SDPX_LEGACY_LA_CAPABILITY_MODEL,
+            :rank_revealing_qr,
+        ) ?
+        (:rank_revealing_qr,) : ()
     return LABackendConfiguration(
         _la_arithmetic_symbol(T),
         requested,
@@ -93,7 +107,7 @@ function _legacy_la_backend_configuration(
         SDPX_LEGACY_LA_CAPABILITY_MODEL,
         _dense_cholesky_required_capabilities(equality_solver),
         :bundled_sdpx_legacy,
-        equality_solver === :auto ? (:rank_revealing_qr,) : (),
+        fallback_chain,
         reason,
         _legacy_la_ownership(T),
     )
@@ -131,6 +145,30 @@ struct LegacyLACholeskyFactor{
 } <: AbstractLACholeskyFactor{T}
     provider::P
     factors::M
+end
+
+"""
+    _sdpx_legacy_la_qr!(provider, A; pivoted=true)
+
+Single exact delegation to Julia `LinearAlgebra.qr!` for the bundled legacy
+provider. Returns the raw factor together with provider metadata so a future
+provider-owned QR handle can be constructed without re-entering the backend
+seam. The caller owns `A`; pivoted QR overwrites it in place.
+"""
+@inline function _sdpx_legacy_la_qr!(
+    provider::SDPXLegacyLAProvider,
+    A::AbstractMatrix;
+    pivoted::Bool=true,
+)
+    factor = pivoted ?
+        LinearAlgebra.qr!(A, LinearAlgebra.ColumnNorm()) :
+        LinearAlgebra.qr!(A)
+    return (
+        factor=factor,
+        provider=provider,
+        arithmetic=legacy_la_provider_arithmetic(provider),
+        ownership=legacy_la_provider_ownership(provider),
+    )
 end
 
 # Every adapter below is intentionally a single exact delegation.  In
