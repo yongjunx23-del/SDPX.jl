@@ -487,16 +487,6 @@ function _equality_factor_diagnostics(
                     ),
             gram_kernel=workspace.equality_gram_kernel,
         )
-    elseif factor isa BigFloatCholeskyFactor
-        return (
-            available=true,
-            method=:normal_equations,
-            rank=equality_count,
-            dimension=equality_count,
-            rank_deficient=false,
-            quality=_cholesky_diagonal_quality(factor.L),
-            gram_kernel=workspace.equality_gram_kernel,
-        )
     elseif factor isa LegacyLACholeskyFactor
         return (
             available=true,

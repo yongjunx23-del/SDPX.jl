@@ -462,12 +462,11 @@ mutable struct Workspace{T}
     Qbuf::Matrix{T}            # scratch copy of Q fed to cholesky!/cholesky(...)
     # Set by factor_kkt!. The concrete union, not Any: _solve_Q! is called
     # twice per iteration (predictor and corrector), and an Any field makes
-    # every one of those calls a dynamic dispatch. The BigFloat member wraps
-    # the kernel-owned factor; the two LinearAlgebra members cover the plain
-    # and rank-revealing dense paths.
+    # every one of those calls a dynamic dispatch. The two LinearAlgebra
+    # members cover the plain and rank-revealing dense paths. Provider factors
+    # use one abstract wrapper family instead of arithmetic-specific markers.
     Qchol::Union{Nothing,LinearAlgebra.Cholesky{T,Matrix{T}},
                  LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
-                 BigFloatCholeskyFactor{Matrix{BigFloat}},
                  EqualityQRFactor{T},
                  AbstractLACholeskyFactor{T}}
     arrow::Union{Nothing,ArrowWorkspace{T}}

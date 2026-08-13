@@ -758,18 +758,6 @@ function kcholsolve_owned!(
     )
 end
 
-"""
-    BigFloatCholeskyFactor(L)
-
-Internal marker for a full-rank BigFloat Cholesky factor produced by
-[`kchol!`](@ref). The KKT layer stores this lightweight wrapper in its
-factorization cache and solves through [`kcholsolve!`](@ref), avoiding Base's
-allocation-heavy generic `Cholesky` solve. `L` is borrowed, not copied.
-"""
-struct BigFloatCholeskyFactor{M<:AbstractMatrix{BigFloat}}
-    L::M
-end
-
 # The determinant-only 2x2 line-search test is excellent for immutable
 # fixed-width arithmetic, but tiny last-bit differences can change the
 # accepted step in long BigFloat trajectories. Retain the original

@@ -273,8 +273,6 @@ function _kkt_factorization_quality(ws::Workspace{T}) where {T}
                         1:factor.rank,
                     ),
                 )
-            elseif ws.Qchol isa BigFloatCholeskyFactor
-                _cholesky_diagonal_quality(ws.Qchol.L)
             elseif ws.Qchol === nothing
                 zero(T)
             else

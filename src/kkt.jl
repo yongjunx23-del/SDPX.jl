@@ -1155,11 +1155,8 @@ function _factor_dense_kkt_native!(
                 la_cholesky_factor!(ws.la_backend, ws.Qbuf)
             factor_matrix = equality_factor === nothing ? nothing :
                             la_factor_handle_matrix(equality_factor)
-            if equality_factor isa BigFloatCholeskyFactor ||
-               (
-                   equality_factor isa LegacyLACholeskyFactor &&
-                   _legacy_factor_has_numerical_rank(equality_factor)
-               ) ||
+            if (equality_factor isa LegacyLACholeskyFactor &&
+                _legacy_factor_has_numerical_rank(equality_factor)) ||
                (
                    equality_factor isa ProviderLACholeskyFactor{BigFloat} &&
                    ws.la_backend isa BFLALABackend
@@ -2066,16 +2063,6 @@ function _solve_Q!(
 ) where {T}
     copy_owned!(dy_out, rhs)
     return la_factor_solve!(factor, dy_out)
-end
-
-function _solve_Q!(
-    dy_out::AbstractVector{BigFloat},
-    factor::BigFloatCholeskyFactor,
-    rhs::AbstractVector{BigFloat},
-    ::AbstractVector{BigFloat},
-)
-    copy_owned!(dy_out, rhs)
-    return kcholsolve_owned!(factor.L, dy_out)
 end
 
 function _solve_Q!(

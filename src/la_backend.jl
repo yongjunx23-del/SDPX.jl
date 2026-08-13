@@ -636,7 +636,6 @@ end
 la_factor_handle_matrix(factor::ProviderLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::StandardLACholeskyFactor) = factor.factors
 la_factor_handle_matrix(factor::LegacyLACholeskyFactor) = factor.factors
-la_factor_handle_matrix(factor::BigFloatCholeskyFactor) = factor.L
 
 function _provider_cholesky_solve!(factor::ProviderLACholeskyFactor, rhs)
     provider = factor.provider
@@ -660,8 +659,6 @@ la_factor_solve!(factor::LegacyLACholeskyFactor, rhs) =
         factor.factors,
         rhs,
     ); rhs)
-la_factor_solve!(factor::BigFloatCholeskyFactor, rhs) =
-    (kcholsolve_owned!(factor.L, rhs); rhs)
 la_factor_solve!(factor::StandardLALUFactor, rhs) =
     (LinearAlgebra.ldiv!(factor.factor, rhs); rhs)
 la_factor_solve!(factor::StandardLAQRFactor, rhs) =
