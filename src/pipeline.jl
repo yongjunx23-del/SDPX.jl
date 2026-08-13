@@ -2371,7 +2371,7 @@ function _time_limit_pipeline_result(
         diagnostics_enabled,
         (reason=:none,),
         certification_enabled ?
-        (available=false, reason=:time_limit) :
+        (available=false,) :
         (available=false, reason=:certification_disabled),
     )
 end

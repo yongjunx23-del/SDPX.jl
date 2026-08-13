@@ -392,8 +392,10 @@ end
     @test timed_out.status == SDPX.TimeLimit
     @test timed_out.iterations == 0
     @test timed_out.diagnostics.termination.reason == :time_limit
+    # Preserve the historical diagnostics shape when certification is enabled;
+    # only the opt-out path adds an explicit disabled-policy reason.
     @test timed_out.diagnostics.selected_algorithms.certificate ==
-          (available=false, reason=:time_limit)
+          (available=false,)
     @test timed_out.diagnostics.timings.pipeline >= 0.0
 
     uncertified_timeout = SDPX.solve!(
