@@ -374,6 +374,8 @@ provider capabilities cannot reverse-select the mathematical system.
 function _runtime_schur_formulation(
     prob::SDPProblem,
     equality_solver::Symbol=:auto,
+    ;
+    storage_request::Union{Nothing,Symbol}=nothing,
 )
     equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError("equality_solver must be :auto, :normal_equations, or :qr"))
@@ -407,15 +409,23 @@ function _runtime_schur_formulation(
     # workspace allocation.  The exact block-arrow route above is still
     # allowed because it never builds a generic Schur factor.
     schur_plan = prob.structure.schur_plan
-    if schur_plan.requested === :sparse &&
-       !(eltype(prob.c) === Float64) &&
-       prob.dims.n > 0
+    requested_storage = storage_request === nothing ?
+                        schur_plan.requested : storage_request
+    selected_storage = storage_request === nothing ||
+                       requested_storage === :auto ?
+                       schur_plan.storage : requested_storage
+    requested_storage in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse/storage policy must be :auto, :dense, or :sparse",
+    ))
+    if requested_storage === :sparse &&
+       selected_storage === :sparse &&
+       !_use_sparse_schur_sdp(prob)
         throw(ArgumentError(
-            "explicit sparse Schur with generic arithmetic and equalities is " *
-            "not yet supported; use sparse=:auto or sparse=:dense",
+            "explicit sparse Schur requires equality-free SparseCons and a " *
+            "provider-native Cholesky path; use sparse=:dense",
         ))
     end
-    if schur_plan.requested === :sparse &&
+    if requested_storage === :sparse &&
        equality_solver === :qr &&
        prob.dims.n > 0
         throw(ArgumentError(
@@ -423,8 +433,8 @@ function _runtime_schur_formulation(
             "use equality_solver=:normal_equations or sparse=:dense",
         ))
     end
-    if schur_plan.requested === :auto &&
-       schur_plan.storage === :sparse &&
+    if requested_storage === :auto &&
+       selected_storage === :sparse &&
        !_use_sparse_schur_sdp(prob)
         # Auto may choose dense only through this explicit pre-execution
         # provider gate; no numeric try-sparse/fallback happens in Workspace.
@@ -438,7 +448,9 @@ function _runtime_schur_formulation(
     # elimination. An explicit QR request therefore has to be reflected in the
     # plan *before* memory preflight/workspace construction; otherwise the plan
     # says sparse while the runtime silently allocates the dense route.
-    if equality_solver !== :qr && _use_sparse_schur_sdp(prob)
+    if selected_storage === :sparse &&
+       equality_solver !== :qr &&
+       _use_sparse_schur_sdp(prob)
         return FormulationPlan(
             SparseNormalEquations(),
             :sparse_schur_structure,
@@ -1181,7 +1193,11 @@ function build_execution_plan(
         :socp_psd_lift,
     )
         structural_formulation =
-            _runtime_schur_formulation(prob, opts.equality_solver)
+            _runtime_schur_formulation(
+                prob,
+                opts.equality_solver;
+                storage_request=_normalize_kkt_storage_request(opts.sparse),
+            )
         dense_features = opts.formulation === :normal_equations ||
                          structural_formulation.formulation isa
                          DenseNormalEquations ?
@@ -1395,8 +1411,36 @@ function build_execution_plan(
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
     storage_policy = _normalize_kkt_storage_request(opts.sparse)
-    storage_selected = storage_policy === :auto ? classification.storage : storage_policy
-    storage_reason = storage_policy === :auto ? :classification_storage :
+    if algorithm === :lp_primal_dual && storage_policy === :sparse
+        prob.cons isa SparseCons || throw(ArgumentError(
+            "storage=:sparse requires a structurally sparse LP input",
+        ))
+        prob.dims.n == 0 || throw(ArgumentError(
+            "explicit sparse LP KKT with equality rows is unsupported; " *
+            "use storage=:dense",
+        ))
+    end
+    auto_sparse_equalities_dense =
+        algorithm === :lp_primal_dual &&
+        storage_policy === :auto &&
+        prob.cons isa SparseCons &&
+        prob.dims.n > 0 &&
+        classification.storage === :sparse
+    auto_extended_sparse_dense =
+        algorithm === :lp_primal_dual &&
+        storage_policy === :auto &&
+        supports_sparse_generic(T) &&
+        classification.storage === :sparse
+    storage_selected = storage_policy === :auto ?
+                       (auto_sparse_equalities_dense || auto_extended_sparse_dense ?
+                        :dense : classification.storage) :
+                       storage_policy
+    storage_reason = storage_policy === :auto ?
+                     (auto_sparse_equalities_dense ?
+                      :auto_sparse_equalities_dense_route :
+                      auto_extended_sparse_dense ?
+                      :auto_extended_arithmetic_dense_route :
+                      :classification_storage) :
                      storage_policy === :sparse ? :explicit_sparse : :explicit_dense
     gram_kernel = if algorithm === :lp_primal_dual
         if T === Float64

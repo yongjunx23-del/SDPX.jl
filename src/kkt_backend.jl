@@ -6,7 +6,7 @@
     decided by `if ws.arrow !== nothing` / `if ws.mixed_precision !== nothing`
     chains repeated at each of three call sites. That makes the choice
     invisible in diagnostics, impossible to assert on in a test, and
-    awkward to extend: adding the sparse LDL and augmented-system
+    awkward to extend: adding the sparse and augmented-system
     backends the plan calls for would mean editing every chain again.
 
     This module names the choice once. It deliberately does *not*
@@ -40,9 +40,9 @@ struct ArrowBackend <: KKTBackend end
 working precision."""
 struct MixedPrecisionBackend <: KKTBackend end
 
-"""Sparse Float64 SDP Schur complement.  This route marker is distinct from
-`SparseCholeskyBackend`, whose stateful factor object is also used by the
-dedicated sparse LP path and has a different public diagnostic name."""
+"""Provider-neutral frozen-CSC sparse SDP Schur complement route marker.
+The stateful factor object is selected by arithmetic type (CHOLMOD for
+Float64, generic provider for extended arithmetic)."""
 struct SparseSchurBackend <: KKTBackend end
 
 """Dense Cholesky of the LP Newton system. The dedicated LP path builds its own
@@ -259,18 +259,6 @@ end
 
 function factorize!(
     backend::SparseSchurBackend,
-    ws::Workspace{Float64},
-    prob::SDPProblem{Float64},
-    opts::SolverOptions{Float64},
-)
-    _assert_planned_backend!(ws, backend, opts)
-    _record_backend_execution!(ws, backend)
-    result = _factor_sparse_schur_sdp!(ws, prob, opts)
-    return result
-end
-
-function factorize!(
-    backend::SparseSchurBackend,
     ws::Workspace{T},
     prob::SDPProblem{T},
     opts::SolverOptions{T},
@@ -334,18 +322,6 @@ solve!(::ArrowBackend, ws::Workspace{T}, n::Int,
     r::AbstractVector{T}, p_rhs::AbstractVector{T},
     dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T} =
     _solve_arrow_kkt_owned!(ws, n, r, p_rhs, dx_out, dy_out)
-
-solve!(::SparseSchurBackend, ws::Workspace{Float64}, n::Int,
-    r::AbstractVector{Float64}, p_rhs::AbstractVector{Float64},
-    dx_out::AbstractVector{Float64}, dy_out::AbstractVector{Float64}) =
-    _solve_sparse_schur_kkt_owned!(
-        ws,
-        n,
-        r,
-        p_rhs,
-        dx_out,
-        dy_out,
-    )
 
 function solve!(
     ::SparseSchurBackend,

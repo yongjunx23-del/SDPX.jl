@@ -127,6 +127,7 @@ function LPWorkspace(
     equalities::Int;
     packed_hessian::Bool=true,
     reduced_standard_form::Bool=false,
+    sparse_storage::Bool=false,
     la_backend::AbstractLABackend=LegacyLABackend(
         _la_arithmetic_symbol(T),
         :compatibility,
@@ -135,16 +136,16 @@ function LPWorkspace(
     system_size = variables + equalities
     LB = typeof(la_backend)
     return LPWorkspace{T,LB}(
-        reduced_standard_form ?
+        reduced_standard_form || sparse_storage ?
         alloc_zeros(T, 0, 0) :
         alloc_zeros(T, variables, variables),
-        reduced_standard_form ?
+        reduced_standard_form || sparse_storage ?
         alloc_zeros(T, 0, 0) :
         alloc_zeros(T, system_size, system_size),
-        packed_hessian && !reduced_standard_form ?
+        packed_hessian && !reduced_standard_form && !sparse_storage ?
         alloc_zeros(T, inequalities, variables) :
         alloc_zeros(T, 0, 0),
-        packed_hessian && !reduced_standard_form ?
+        packed_hessian && !reduced_standard_form && !sparse_storage ?
         alloc_zeros(T, inequalities) :
         alloc_zeros(T, 0),
         alloc_zeros(T, system_size),
@@ -252,6 +253,40 @@ function _extract_lp_rows(prob::SDPProblem{T}) where {T}
             end
         end
     end
+    h = alloc_zeros(T, L)
+    @inbounds for row in 1:L
+        _lp_copy_scalar!(h, row, prob.C[row][1, 1])
+    end
+    return G, h
+end
+
+"""Extract a structurally sparse LP ingress directly as frozen CSC inputs.
+
+This path is selected from the pre-ingest structure/storage plan, before any
+dense `G`, Hessian, or KKT buffer is allocated.  Only stored scalar
+coefficients are visited; absent coefficients never pass through a dense
+matrix proxy.
+"""
+function _extract_lp_rows_sparse(prob::SDPProblem{T}) where {T}
+    L, m, _, k = prob.dims
+    all(==(1), k) || throw(ArgumentError(
+        "the dedicated LP path requires 1×1 blocks",
+    ))
+    cons = prob.cons isa SparseCons{T} ? prob.cons::SparseCons{T} :
+           throw(ArgumentError("sparse LP ingress requires SparseCons"))
+    rows = Int[]
+    columns = Int[]
+    values = T[]
+    @inbounds for row in 1:L
+        for variable in cons.active[row]
+            value = cons.Asp[row][variable][1, 1]
+            iszero(value) && continue
+            push!(rows, row)
+            push!(columns, variable)
+            push!(values, value)
+        end
+    end
+    G = sparse(rows, columns, values, L, m)
     h = alloc_zeros(T, L)
     @inbounds for row in 1:L
         _lp_copy_scalar!(h, row, prob.C[row][1, 1])
@@ -371,12 +406,12 @@ factorization.
 """
 function _lp_sparse_system(
     prob::SDPProblem{T},
-    G::Matrix{T},
-    B::Matrix{T};
+    G::SparseMatrixCSC{T,Int},
+    B::SparseMatrixCSC{T,Int};
     storage::Union{Bool,Symbol}=:auto,
 ) where {T}
     if prob.cons isa SparseCons{T}
-        return lp_sparse_candidate(sparse(G), sparse(B), T; storage=storage)
+        return lp_sparse_candidate(G, B, T; storage=storage)
     end
     storage isa Bool && !storage && return nothing
     storage === :dense && return nothing
@@ -385,6 +420,26 @@ function _lp_sparse_system(
         "re-ingest the model with sparse=true",
     ))
     return nothing
+end
+
+# Compatibility for callers that already materialized a dense post-presolve
+# panel. Production sparse ingress uses the CSC method above directly.
+function _lp_sparse_system(
+    prob::SDPProblem{T},
+    G::Matrix{T},
+    B::Matrix{T};
+    storage::Union{Bool,Symbol}=:auto,
+) where {T}
+    prob.cons isa SparseCons{T} || begin
+        storage isa Bool && !storage && return nothing
+        storage === :dense && return nothing
+        storage === :sparse && throw(ArgumentError(
+            "storage=:sparse requires a structurally sparse LP input; " *
+            "re-ingest the model with sparse=true",
+        ))
+        return nothing
+    end
+    return lp_sparse_candidate(sparse(G), sparse(B), T; storage=storage)
 end
 
 @inline function _lp_copy_scalar!(
@@ -440,7 +495,7 @@ function _same_lp_direction(
     return true
 end
 
-function _presolve_lp_rows(G::Matrix{T}, h::Vector{T}, tolerance::T) where {T}
+function _presolve_lp_rows(G::AbstractMatrix{T}, h::Vector{T}, tolerance::T) where {T}
     rows, variables = size(G)
     keep = Int[]
     scales = T[]
@@ -546,6 +601,57 @@ function _scale_lp!(
         G[:, variable] .*= variable_scale[variable]
         B[variable, :] .*= variable_scale[variable]
         c[variable] *= variable_scale[variable]
+    end
+    return LPScaling(variable_scale, inequality_scale, equality_scale)
+end
+
+"""Scale sparse LP panels in place without densifying any Newton input."""
+function _scale_lp!(
+    G::SparseMatrixCSC{T,Int},
+    h::Vector{T},
+    B::SparseMatrixCSC{T,Int},
+    b::Vector{T},
+    c::Vector{T},
+    enabled::Bool,
+) where {T}
+    inequalities, variables = size(G)
+    equalities = size(B, 2)
+    variable_scale = ones(T, variables)
+    inequality_scale = ones(T, inequalities)
+    equality_scale = ones(T, equalities)
+    enabled || return LPScaling(variable_scale, inequality_scale, equality_scale)
+
+    @inbounds for row in 1:inequalities
+        magnitude = max(maximum(abs, view(G, row, :); init=zero(T)), abs(h[row]))
+        inequality_scale[row] = magnitude > zero(T) ? inv(magnitude) : one(T)
+        h[row] *= inequality_scale[row]
+    end
+    @inbounds for pointer in eachindex(G.nzval)
+        G.nzval[pointer] *= inequality_scale[G.rowval[pointer]]
+    end
+
+    @inbounds for column in 1:equalities
+        magnitude = max(maximum(abs, view(B, :, column); init=zero(T)), abs(b[column]))
+        equality_scale[column] = magnitude > zero(T) ? inv(magnitude) : one(T)
+        b[column] *= equality_scale[column]
+        for pointer in B.colptr[column]:(B.colptr[column + 1] - 1)
+            B.nzval[pointer] *= equality_scale[column]
+        end
+    end
+    @inbounds for variable in 1:variables
+        magnitude = max(
+            abs(c[variable]),
+            maximum(abs, view(G, :, variable); init=zero(T)),
+            maximum(abs, view(B, variable, :); init=zero(T)),
+        )
+        variable_scale[variable] = magnitude > zero(T) ? inv(magnitude) : one(T)
+        c[variable] *= variable_scale[variable]
+        for pointer in G.colptr[variable]:(G.colptr[variable + 1] - 1)
+            G.nzval[pointer] *= variable_scale[variable]
+        end
+    end
+    @inbounds for pointer in eachindex(B.nzval)
+        B.nzval[pointer] *= variable_scale[B.rowval[pointer]]
     end
     return LPScaling(variable_scale, inequality_scale, equality_scale)
 end
@@ -1319,6 +1425,22 @@ function _lp_factor_kkt!(
            _lp_factor_dense_lu!(workspace, B, regularization)
 end
 
+function _lp_factor_kkt!(
+    workspace::LPWorkspace{T},
+    B::SparseMatrixCSC{T,Int},
+    regularization::T,
+) where {T}
+    reduced = workspace.standard_system
+    reduced isa LPStandardFormSystem{T} &&
+        return _lp_factor_reduced!(workspace, regularization)
+    system = workspace.sparse_system
+    system isa LPSparseSystem{T} &&
+        return _lp_factor_sparse!(workspace, regularization)
+    return isempty(B) ?
+           _lp_factor_dense_cholesky!(workspace, Matrix(B), regularization) :
+           _lp_factor_dense_lu!(workspace, Matrix(B), regularization)
+end
+
 function _lp_factor_reduced!(
     workspace::LPWorkspace{T},
     regularization::T,
@@ -1424,13 +1546,11 @@ end
 
 function factorize!(
     backend::Union{
-        SparseCholeskyBackend,
-        SparseLDLBackend,
         CHOLMODSparseCholeskyBackend,
         GenericSparseCholeskyBackend,
     },
     workspace::LPWorkspace{T},
-    B::Matrix{T},
+    B::AbstractMatrix{T},
     regularization::T,
 ) where {T}
     _assert_lp_backend(workspace, backend)
@@ -1459,8 +1579,6 @@ end
 solve!(::LPReducedCholeskyBackend, factor::LPReducedFactor, rhs) =
     _lp_solve_factor!(factor, rhs)
 solve!(::Union{
-        SparseCholeskyBackend,
-        SparseLDLBackend,
         CHOLMODSparseCholeskyBackend,
         GenericSparseCholeskyBackend,
     },
@@ -1661,11 +1779,11 @@ end
     _lp_sparse_backend_diagnostics(system) -> NamedTuple
 
 Stable public-facing observability for a sparse LP Schur factor.  The
-termination payload deliberately uses one schema for the new frozen CSC
-providers and the legacy compatibility backends so performance tracing can
-consume it without knowing which provider ran.  `factor_nnz` is the provider's
-actual numeric factor nonzero count when exposed by CHOLMOD; generic sparse
-providers report their frozen symbolic factor pattern.  No elapsed time is
+termination payload deliberately uses one schema for the frozen CSC
+providers so performance tracing can consume it without knowing which
+provider ran.  `factor_nnz` is the provider's actual numeric factor nonzero
+count when exposed by CHOLMOD; generic sparse providers report their frozen
+symbolic factor pattern.  No elapsed time is
 inferred here -- the measured `kkt_factorization` timing remains authoritative.
 """
 function _lp_sparse_backend_diagnostics(system::LPSparseSystem)
@@ -1676,14 +1794,11 @@ function _lp_sparse_backend_diagnostics(system::LPSparseSystem)
         GenericSparseCholeskyBackend,
     }
         backend.factor
-    elseif backend isa Union{SparseCholeskyBackend,SparseLDLBackend}
-        backend.factorization
     else
         nothing
     end
     provider = backend isa CHOLMODSparseCholeskyBackend ? :cholmod :
-               backend isa GenericSparseCholeskyBackend ? :generic :
-               backend isa SparseLDLBackend ? :cholmod_ldl : :cholmod
+               backend isa GenericSparseCholeskyBackend ? :generic : :unknown
     arithmetic = backend isa GenericSparseCholeskyBackend ?
                  backend.factor === nothing ? eltype(system.G) :
                  backend.factor.arithmetic : Float64
@@ -1833,7 +1948,7 @@ end
 
 function _lp_equality_only_result(
     prob::SDPProblem{T},
-    G_original::Matrix{T},
+    G_original::AbstractMatrix{T},
     h_original::Vector{T},
     opts::SolverOptions{T},
     removed::Int,
@@ -2054,8 +2169,35 @@ function solve_lp!(
                           started + opts.max_time :
                           Inf)
     _validate_lp_options(opts)
-    diagonal_original = _extract_lp_diagonal_nonnegative(prob)
-    G_original, h_original = if diagonal_original === nothing
+    sparse_policy = opts.sparse isa Bool ?
+                    (opts.sparse ? :sparse : :dense) :
+                    opts.sparse === :on ? :sparse :
+                    opts.sparse === :off ? :dense : opts.sparse
+    sparse_policy in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse/storage policy must be :auto, :dense, or :sparse",
+    ))
+    explicit_sparse = sparse_policy === :sparse
+    structurally_sparse = prob.cons isa SparseCons{T}
+    authoritative_auto_sparse = sparse_policy === :auto &&
+                                structurally_sparse &&
+                                supports_sparse_backend(T) &&
+                                size(prob.B, 2) == 0 &&
+                                prob.structure.schur_plan.storage === :sparse
+    sparse_ingress = structurally_sparse &&
+                     (explicit_sparse || authoritative_auto_sparse) &&
+                     supports_sparse_execution(T)
+    explicit_sparse && !structurally_sparse && throw(ArgumentError(
+        "storage=:sparse requires a structurally sparse LP input; " *
+        "re-ingest the model with sparse=true",
+    ))
+    explicit_sparse && size(prob.B, 2) > 0 && throw(ArgumentError(
+        "explicit sparse LP KKT with equality rows is unsupported; " *
+        "use storage=:dense",
+    ))
+    diagonal_original = sparse_ingress ? nothing : _extract_lp_diagonal_nonnegative(prob)
+    G_original, h_original = if sparse_ingress
+        _extract_lp_rows_sparse(prob)
+    elseif diagonal_original === nothing
         _extract_lp_rows(prob)
     else
         (
@@ -2094,14 +2236,16 @@ function solve_lp!(
 
     G = if G_original isa LPDiagonalMatrix{T}
         _lp_owned_copy(G_original)
+    elseif G_original isa SparseMatrixCSC{T,Int}
+        copy(G_original[keep, :])
     else
         _owned_array_copy(T, view(G_original, keep, :))
     end
     h = _owned_array_copy(T, view(h_original, keep))
-    # The LP workspace currently uses dense row/column scaling and dense KKT
-    # buffers. Keep that established path even when the SDP frontend retained
-    # a sparse equality matrix.
-    B = _owned_array_copy(T, Matrix(prob.B))
+    B = sparse_ingress ?
+        copy(prob.B isa SparseMatrixCSC{T,Int} ?
+             prob.B : sparse(prob.B)) :
+        _owned_array_copy(T, Matrix(prob.B))
     b = _owned_array_copy(T, prob.b)
     c = _owned_array_copy(T, prob.c)
     scaling = _scale_lp!(
@@ -2128,6 +2272,7 @@ function solve_lp!(
         equalities;
         packed_hessian=packed_hessian,
         reduced_standard_form=G isa LPDiagonalMatrix{T},
+        sparse_storage=sparse_ingress,
         la_backend=instantiate_la_backend(plan.la_config, T, plan.threads),
     )
     if G isa LPDiagonalMatrix{T}
@@ -2138,17 +2283,13 @@ function solve_lp!(
             plan.gram_kernel,
         )
     else
-        # Decided once, on the `G` the iteration will actually use. A `nothing`
-        # here keeps every downstream call on the dense path unchanged.
-        sparse_policy = opts.sparse isa Bool ?
-                         (opts.sparse ? :sparse : :dense) :
-                         opts.sparse === :on ? :sparse :
-                         opts.sparse === :off ? :dense : opts.sparse
+        # Decided once, on the `G` the iteration will actually use. The sparse
+        # ingress branch above already has CSC G/B and skips any dense proxy.
         workspace.sparse_system = _lp_sparse_system(
             prob,
             G,
             B;
-            storage=sparse_policy,
+            storage=sparse_ingress ? :sparse : sparse_policy,
         )
     end
     _resolve_lp_backend!(workspace, equalities)

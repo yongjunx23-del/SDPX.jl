@@ -1,4 +1,5 @@
 using LinearAlgebra
+using SparseArrays
 
 if !isdefined(@__MODULE__, :soc_psd_reference_problem)
     include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
@@ -305,6 +306,49 @@ end
         @test plan.cone.specialization === :fixed_trace_q3
         @test plan.cone.native_coordinates == 6
         @test plan.cone.active_coordinates == 4
+        reduction = plan.cone.execution.payload
+        @test reduction.ownership === :owned
+        @test reduction.active_ids == [1 3; 2 4]
+        @test reduction.tail_map[:, :, 1] == [1.0 0.0; 0.0 1.0]
+
+        one_iteration_problem = second_order_program(
+            [-1.0, 0.0, -1.0, 0.0],
+            [
+                SOCConstraint(sparse(first), [1.0, 0.0, 0.0]),
+                SOCConstraint(sparse(second), [1.0, 0.0, 0.0]),
+            ];
+            Aeq=[1.0 0.0 0.0 0.0; 0.0 0.0 1.0 0.0],
+            beq=[0.2, -0.1],
+        )
+        one_iteration = solve_socp(
+            one_iteration_problem;
+            tolerance=1e-9,
+            maximum_iterations=1,
+            verbosity=0,
+            timing=true,
+            specialization=:fixed_trace,
+        )
+        @test one_iteration.status === SDPX.IterLimit
+        @test one_iteration.iterations == 1
+        counters = one_iteration.termination
+        @test counters.local_metric_preparations == 1
+        @test counters.local_factorizations == 1
+        @test counters.equality_panel_transforms == 1
+        @test counters.equality_gram_assemblies == 1
+        @test counters.equality_factorizations == 1
+        @test counters.kkt_rhs_solves == 2
+        @test counters.predictor_rhs_solves == 1
+        @test counters.corrector_rhs_solves == 1
+        @test one_iteration.diagnostics.selected_algorithms.scaling === :hkm
+        @test one_iteration.timings.fixed_local_metric >= 0
+        @test one_iteration.timings.fixed_local_factor >= 0
+        @test one_iteration.timings.equality_panel_transform >= 0
+        @test one_iteration.timings.equality_gram_syrk >= 0
+        @test one_iteration.timings.equality_factor >= 0
+        @test one_iteration.timings.predictor_rhs >= 0
+        @test one_iteration.timings.corrector_rhs >= 0
+        @test one_iteration.timings.fixed_block_residual >= 0
+        @test one_iteration.timings.fixed_block_recovery >= 0
 
         specialized = solve_socp(
             problem;
@@ -357,5 +401,72 @@ end
         @test_throws ArgumentError SDPX._native_soc_cone_plan(
             variable_trace; specialization=:fixed_trace,
         )
+    end
+
+    @testset "FixedTraceQ3 planner storage owns mutable BigFloat scalars" begin
+        setprecision(BigFloat, 128) do
+            affine = zeros(BigFloat, 3, 2)
+            affine[2, 1] = 1
+            affine[3, 2] = 1
+            problem = second_order_program(
+                BigFloat[-1, 0],
+                [SOCConstraint(affine, BigFloat[1, 0, 0])],
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(BigFloat),
+            )
+            reduction = plan.cone.execution.payload
+            @test reduction.tail_map[1, 1, 1] == 1
+            source_entry = problem.cones[1].A[2, 1]
+            SDPX.MA.operate_to!(source_entry, +, source_entry, BigFloat(8))
+            @test problem.cones[1].A[2, 1] == 9
+            @test reduction.tail_map[1, 1, 1] == 1
+            @test reduction.tail_map[1, 1, 1] !== source_entry
+        end
+    end
+
+    if get(ENV, "SDPX_RUN_MFLA_NATIVE_SOC", "0") == "1"
+        @testset "Float64x4 fixed-trace one-iteration provider gate" begin
+            Base.eval(Main, :(using MultiFloats: Float64x4))
+            Base.eval(Main, :(using MultiFloatLinearAlgebra))
+            T = Main.Float64x4
+            first = sparse(
+                [2, 3], [1, 2], T[one(T), one(T)], 3, 4,
+            )
+            second = sparse(
+                [2, 3], [3, 4], T[one(T), one(T)], 3, 4,
+            )
+            problem = second_order_program(
+                T[-1, 0, -1, 0],
+                [
+                    SOCConstraint(first, T[1, 0, 0]),
+                    SOCConstraint(second, T[1, 0, 0]),
+                ];
+                Aeq=T[1 0 0 0; 0 0 1 0],
+                beq=T[0.2, -0.1],
+            )
+            result = solve_socp(
+                problem;
+                tolerance=T(1e-12),
+                maximum_iterations=1,
+                verbosity=0,
+                timing=true,
+                specialization=:fixed_trace,
+                linear_algebra_backend=:multifloat,
+            )
+            @test result.status === SDPX.IterLimit
+            @test result.iterations == 1
+            @test result.diagnostics.selected_algorithms.soc_specialization ===
+                  :fixed_trace_q3
+            @test result.diagnostics.selected_algorithms.scaling === :hkm
+            @test result.diagnostics.selected_algorithms.la_executed_provider ===
+                  :multifloat_linear_algebra
+            @test result.lifted === nothing
+            @test result.termination.equality_gram_assemblies == 1
+            @test result.termination.equality_factorizations == 1
+            @test result.termination.kkt_rhs_solves == 2
+            @test result.termination.predictor_rhs_solves == 1
+            @test result.termination.corrector_rhs_solves == 1
+        end
     end
 end

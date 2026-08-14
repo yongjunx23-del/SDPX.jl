@@ -392,12 +392,12 @@ struct SchurAssemblyMap{T}
     pattern_signature::UInt64
 end
 
-"""Generic sparse-Schur execution state used by MultiFloat/BigFloat.
+"""Provider-neutral sparse-Schur execution state.
 
-The Float64 B3 workspace keeps its compact Int32 CSC representation for
-CHOLMOD.  This companion state uses the provider-neutral `SparseKKTStorage`
-and therefore shares the same frozen pattern/map with the generic sparse
-factor providers without converting the Schur matrix to a dense buffer.
+All production sparse SDP arithmetic uses the frozen `SparseKKTStorage` and
+provider-selected factor object.  Float64 uses CHOLMOD while BigFloat and
+MultiFloat use the generic provider; no arithmetic type has a parallel legacy
+workspace or an implicit dense fallback.
 """
 mutable struct GenericSparseSchurSDPWorkspace{T}
     storage::SparseKKTStorage{T}
@@ -1283,20 +1283,20 @@ function analyze(backend::GenericSparseCholeskyBackend, prob::SDPProblem)
     )
 end
 
-"""Construct the generic sparse SDP Schur workspace at setup time."""
+"""Construct the provider-neutral sparse SDP Schur workspace at setup time."""
 function _sparse_schur_sdp_workspace(
     prob::SDPProblem{T},
     thread_count::Int,
 ) where {T}
-    supports_sparse_generic(T) || throw(ArgumentError(
-        "generic sparse SDP Schur requires BigFloat or a MultiFloat arithmetic type",
+    supports_sparse_execution(T) || throw(ArgumentError(
+        "sparse SDP Schur is unsupported for this arithmetic type",
     ))
     prob.cons isa SparseCons{T} || throw(ArgumentError(
         "generic sparse SDP Schur requires SparseCons coefficients",
     ))
     storage, assembly_map = freeze_schur_pattern(
         prob;
-        provider=GenericSparseProvider(T),
+        provider=_sparse_provider(T),
     )
     B = prob.B isa SparseMatrixCSC ? Matrix{T}(prob.B) : Matrix{T}(prob.B)
     n = prob.dims.n

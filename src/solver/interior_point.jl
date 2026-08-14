@@ -1879,11 +1879,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                             # frozen-pattern metrics above.
                             schur_nnz=diagnostics.structural_nnz,
                             regularization=sparse_workspace isa
-                                           SparseSchurSDPWorkspace ?
+                                           GenericSparseSchurSDPWorkspace ?
                                            sparse_workspace.regularization :
                                            nothing,
                             equality_requires_pivoting=
-                                sparse_workspace isa SparseSchurSDPWorkspace ?
+                                sparse_workspace isa GenericSparseSchurSDPWorkspace ?
                                 sparse_workspace.equality_requires_pivoting :
                                 false,
                         ),

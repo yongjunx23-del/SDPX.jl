@@ -27,10 +27,9 @@ measured separately on this backend, refactorizing into an existing symbolic
 factorization is 2.45x / 2.37x / 1.17x faster at `n = 500 / 2000 / 5000`.
 
 `formulation` is `:sparse_normal` when there are no equality rows, in which case
-the system is positive definite and Cholesky applies.  The historical
-`:sparse_ldl` augmented route remains available to the auto compatibility gate;
-the explicit Round-6 `storage=:sparse` policy fails closed for that unsupported
-indefinite route.
+the system is positive definite and the provider-neutral sparse Cholesky path
+applies. Sparse equality KKT systems are unsupported and fail closed before
+execution.
 """
 mutable struct LPSparseSystem{T}
     G::SparseMatrixCSC{T,Int}
@@ -90,9 +89,9 @@ function lp_sparse_candidate(
     ))
     requested_storage === :dense && return nothing
 
-    # Generic providers intentionally implement only SPD normal equations in
-    # Round 6A.  Explicit sparse requests fail closed rather than silently
-    # routing to dense or to the legacy sparse LDL backend.
+    # Sparse providers intentionally implement only SPD normal equations.
+    # Explicit sparse requests fail closed rather than silently routing to a
+    # dense or indefinite solver.
     generic = supports_sparse_generic(T)
     if generic && equalities > 0
         requested_storage === :sparse && throw(ArgumentError(
@@ -101,7 +100,7 @@ function lp_sparse_candidate(
         ))
         return nothing
     end
-    generic || supports_sparse_backend(T) || return nothing
+    supports_sparse_execution(T) || return nothing
 
     # Probe the pattern with unit weights: the fill-in of `GᵀDG` does not
     # depend on the weight values, only on the pattern of `G`.
@@ -135,12 +134,9 @@ function lp_sparse_candidate(
         )
     end
 
-    # Explicit Float64 sparse normal equations use the first-class CSC storage
-    # layer as well.  The historical SparseCholeskyBackend remains available
-    # only to the compatibility `storage=:auto` route (and to augmented LDL),
-    # while this branch owns one frozen pattern and refactors CHOLMOD's numeric
-    # values in place on every iteration.
-    if requested_storage === :sparse && T === Float64 && equalities == 0
+    # Both explicit and authoritative auto sparse normal equations use one
+    # frozen CSC pattern and refactor the provider's numeric values in place.
+    if T === Float64 && equalities == 0 && formulation === :sparse_normal
         lower = sparse_lower_csc(probe)
         frozen = freeze_sparse_csc(
             lower;
@@ -186,8 +182,9 @@ K = [ H + δI    B   ]
     [   Bᵀ    -δI   ]
 ```
 
-which is what [`SparseLDLBackend`](@ref) can factor. With no equality rows this
-degenerates to `H + δI`, which is positive definite.
+which is factorized only for equality-free normal equations. With no equality
+rows this degenerates to `H + δI`, which is positive definite; the explicit
+sparse equality route is rejected before this assembly is reached.
 
 This is deliberately *not* the *shape* of the dense `_lp_populate_kkt!`, which
 is unsymmetric and therefore needs `lu!`. Solving this form yields `-y` where

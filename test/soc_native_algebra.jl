@@ -31,6 +31,33 @@ using LinearAlgebra
         ) ≈ 0.5
     end
 
+    @testset "strict full-step policy" begin
+        state = [[2.0, 0.0]]
+        direction = [[0.0, 0.5]]
+        trial = [[0.0, 0.0]]
+        @test SDPX._native_soc_strict_step(
+            state, direction, trial, 1.0; allow_full_step=true,
+        ) == 1.0
+        @test SDPX._native_soc_strict_step(
+            state, direction, trial, 1.0,
+        ) == 0.99
+
+        boundary_state = [[1.0, 0.0]]
+        boundary_direction = [[-0.5, 0.5]]
+        boundary_trial = [[0.0, 0.0]]
+        boundary_step = SDPX._native_soc_strict_step(
+            boundary_state, boundary_direction, boundary_trial, 1.0;
+            allow_full_step=true,
+        )
+        @test boundary_step == 0.99
+        @test SDPX._soc_is_interior(
+            boundary_state[1] .+ boundary_step .* boundary_direction[1],
+        )
+        @test SDPX._native_soc_strict_step(
+            state, direction, trial, 0.5,
+        ) == 0.495
+    end
+
     @testset "general NT agrees with Q3 and its inverse" begin
         primal = [3.0, 0.3, -0.2]
         dual = [2.5, -0.1, 0.25]
@@ -72,5 +99,48 @@ using LinearAlgebra
         @test det(matrix) ≈ SDPX._soc_determinant(coordinate)
         @test eigmin(Symmetric(matrix)) ≈ SDPX._soc_margin(coordinate)
         @test SDPX._sym2_to_q3(matrix) ≈ coordinate
+    end
+
+    @testset "fixed-trace local kernels match explicit affine algebra" begin
+        A = [0.0 0.0; 1.25 -0.5; 0.75 2.0]
+        x = [0.4, -0.3]
+        slack = [1.1, -0.2, 0.7]
+        offset = [1.5, -0.6, 0.25]
+        dual = [0.8, -0.4, 0.3]
+
+        residual = zeros(3)
+        SDPX._soc_fixed_trace_primal_residual!(
+            residual, x, slack, 1, 2,
+            A[2, 1], A[2, 2], A[3, 1], A[3, 2],
+            offset[1], offset[2], offset[3],
+        )
+        @test residual ≈ A * x + offset - slack
+
+        scattered = [0.2, -0.1]
+        reference = scattered - transpose(A) * dual
+        SDPX._soc_fixed_trace_dual_scatter!(
+            scattered, dual, 1, 2,
+            A[2, 1], A[2, 2], A[3, 1], A[3, 2],
+        )
+        @test scattered ≈ reference
+
+        contracted = [0.15, -0.25]
+        source = [0.9, -0.2, 0.45]
+        contraction_reference = contracted + transpose(A) * source
+        SDPX._soc_fixed_trace_transpose_scatter!(
+            contracted, source, 1, 2,
+            A[2, 1], A[2, 2], A[3, 1], A[3, 2],
+        )
+        @test contracted ≈ contraction_reference
+
+        direction = [0.7, -0.35]
+        recovered = [0.6, -0.8, 0.4]
+        recovery_reference = recovered + A * direction
+        SDPX._soc_fixed_trace_primal_map!(
+            recovered, direction, 1, 2,
+            A[2, 1], A[2, 2], A[3, 1], A[3, 2],
+        )
+        @test recovered ≈ recovery_reference
+        @test recovered[1] == 0.6
     end
 end

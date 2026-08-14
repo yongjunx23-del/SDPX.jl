@@ -291,9 +291,9 @@ function _kkt_factorization_quality(ws::Workspace{T}) where {T}
         end
         return _cholesky_diagonal_quality(arrow.Sredbuf)
     end
-    if T === Float64 && ws.sparse_kkt !== nothing
+    if ws.sparse_kkt isa GenericSparseSchurSDPWorkspace{T}
         sparse_workspace =
-            ws.sparse_kkt::SparseSchurSDPWorkspace
+            ws.sparse_kkt::GenericSparseSchurSDPWorkspace{T}
         return T(sparse_workspace.factorization_quality)
     end
     if ws.mixed_precision !== nothing

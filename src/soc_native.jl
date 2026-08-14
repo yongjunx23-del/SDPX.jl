@@ -20,11 +20,21 @@ end
 
 struct FixedTraceQ3Reduction{T}
     blocks::Vector{FixedTraceQ3Block{T}}
+    # Immutable plan object with owned structure-of-arrays storage.  The
+    # arrays are populated once during planning and are never borrowed from
+    # the caller's cone matrices; this is important for mutable BigFloat
+    # scalars as well as for the fixed-trace hot path.
+    active_ids::Matrix{Int}
+    tail_map::Array{T,3}
+    fixed_head::Vector{T}
+    offset::Matrix{T}
+    ownership::Symbol
 end
 
 struct NativeSOCFixedTraceFactor{T}
     reduction::FixedTraceQ3Reduction{T}
     factors::Matrix{T}
+    inverse_pivots::Matrix{T}
 end
 
 """Planner-owned cone representation, independent of KKT and LA choices."""
@@ -66,6 +76,11 @@ function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
     frequency = zeros(Int, problem.variables)
     blocks = FixedTraceQ3Block{T}[]
     sizehint!(blocks, length(problem.cones))
+    block_count = length(problem.cones)
+    active_ids = Matrix{Int}(undef, 2, block_count)
+    tail_map = alloc_zeros(T, 2, 2, block_count)
+    fixed_head = alloc_zeros(T, block_count)
+    offset = alloc_zeros(T, 2, block_count)
     @inbounds for (block, cone) in pairs(problem.cones)
         length(cone.b) == 3 || return nothing
         isfinite(cone.b[1]) && cone.b[1] > zero(T) || return nothing
@@ -89,10 +104,29 @@ function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
         abs(determinant) > sqrt(eps(T)) * scale * scale || return nothing
         frequency[first] += 1
         frequency[second] += 1
+        active_ids[1, block] = first
+        active_ids[2, block] = second
+        # Tail map rows are (u₁,u₂), columns are the two active variables.
+        # Every scalar is ingested into planner-owned storage so an MPFR
+        # mutation in the input cone cannot corrupt a future solve.
+        tail_map[1, 1, block] = _ingest_owned_scalar(T, cone.A[2, first])
+        tail_map[1, 2, block] = _ingest_owned_scalar(T, cone.A[2, second])
+        tail_map[2, 1, block] = _ingest_owned_scalar(T, cone.A[3, first])
+        tail_map[2, 2, block] = _ingest_owned_scalar(T, cone.A[3, second])
+        fixed_head[block] = _ingest_owned_scalar(T, cone.b[1])
+        offset[1, block] = _ingest_owned_scalar(T, cone.b[2])
+        offset[2, block] = _ingest_owned_scalar(T, cone.b[3])
         push!(blocks, FixedTraceQ3Block{T}(block, (first, second)))
     end
     all(==(1), frequency) || return nothing
-    return FixedTraceQ3Reduction(blocks)
+    return FixedTraceQ3Reduction(
+        blocks,
+        active_ids,
+        tail_map,
+        fixed_head,
+        offset,
+        :owned,
+    )
 end
 
 function _native_soc_cone_plan(
@@ -206,6 +240,7 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend}
     factor_buffer::Matrix{T}
     local_metric::Matrix{T}
     local_factor::Matrix{T}
+    local_inverse::Matrix{T}
     augmented_buffer::Matrix{T}
     augmented_rhs::Vector{T}
     rhs::Vector{T}
@@ -216,6 +251,30 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend}
     rhs_solves::Int
     equality_method::Symbol
     la_fallback_reason::Symbol
+    equality_factor::Any
+    equality_prepared::Bool
+    local_metric_preparations::Int
+    local_factorizations::Int
+    equality_panel_transforms::Int
+    equality_gram_assemblies::Int
+    equality_factorizations::Int
+    kkt_rhs_solves::Int
+    predictor_rhs_solves::Int
+    corrector_rhs_solves::Int
+    fixed_residual_blocks::Int
+    fixed_rhs_contractions::Int
+    fixed_direction_recoveries::Int
+    fixed_local_scaling_seconds::Float64
+    fixed_local_metric_seconds::Float64
+    fixed_local_factor_seconds::Float64
+    fixed_rhs_contraction_seconds::Float64
+    equality_panel_transform_seconds::Float64
+    equality_gram_seconds::Float64
+    equality_factor_seconds::Float64
+    predictor_rhs_seconds::Float64
+    corrector_rhs_seconds::Float64
+    fixed_block_residual_seconds::Float64
+    fixed_block_recovery_seconds::Float64
 end
 
 function NativeSOCWorkspace(
@@ -237,7 +296,9 @@ function NativeSOCWorkspace(
         variables + equalities : 0
     @inbounds for block in eachindex(problem.cones)
         scale = max(one(T), maximum(abs, problem.cones[block].b; init=zero(T)))
-        slack[block][1] = options.Ωp * scale
+        slack[block][1] = fixed_trace ? _ingest_owned_scalar(
+            T, plan.cone.execution.payload.fixed_head[block],
+        ) : options.Ωp * scale
         dual[block][1] = options.Ωd / scale
     end
     return NativeSOCWorkspace(
@@ -266,6 +327,7 @@ function NativeSOCWorkspace(
         alloc_zeros(T, dense_dimension, dense_dimension),
         alloc_zeros(T, 3, local_blocks),
         alloc_zeros(T, 3, local_blocks),
+        alloc_zeros(T, 2, local_blocks),
         alloc_zeros(T, augmented_dimension, augmented_dimension),
         alloc_zeros(T, augmented_dimension),
         alloc_zeros(T, variables),
@@ -276,6 +338,30 @@ function NativeSOCWorkspace(
         0,
         :none,
         la_backend_reason(backend),
+        nothing,
+        false,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     )
 end
 
@@ -304,22 +390,58 @@ function _native_soc_residuals!(
             one(T),
         )
     end
-    @inbounds for block in eachindex(problem.cones)
-        cone = problem.cones[block]
-        residual = workspace.primal_residual[block]
-        la_mul_owned!(workspace.la_backend, residual, cone.A, workspace.x)
-        for coordinate in eachindex(residual)
-            residual[coordinate] +=
-                cone.b[coordinate] - workspace.slack[block][coordinate]
+    if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        reduction = workspace.plan.cone.execution.payload
+        started = time_ns()
+        @inbounds for block in eachindex(problem.cones)
+            first = reduction.active_ids[1, block]
+            second = reduction.active_ids[2, block]
+            _soc_fixed_trace_primal_residual!(
+                workspace.primal_residual[block],
+                workspace.x,
+                workspace.slack[block],
+                first,
+                second,
+                reduction.tail_map[1, 1, block],
+                reduction.tail_map[1, 2, block],
+                reduction.tail_map[2, 1, block],
+                reduction.tail_map[2, 2, block],
+                reduction.fixed_head[block],
+                reduction.offset[1, block],
+                reduction.offset[2, block],
+            )
+            _soc_fixed_trace_dual_scatter!(
+                workspace.dual_residual,
+                workspace.dual[block],
+                first,
+                second,
+                reduction.tail_map[1, 1, block],
+                reduction.tail_map[1, 2, block],
+                reduction.tail_map[2, 1, block],
+                reduction.tail_map[2, 2, block],
+            )
         end
-        la_mul_owned!(
-            workspace.la_backend,
-            workspace.dual_residual,
-            transpose(cone.A),
-            workspace.dual[block],
-            -one(T),
-            one(T),
-        )
+        workspace.fixed_residual_blocks += length(problem.cones)
+        workspace.fixed_block_residual_seconds +=
+            (time_ns() - started) / 1.0e9
+    else
+        @inbounds for block in eachindex(problem.cones)
+            cone = problem.cones[block]
+            residual = workspace.primal_residual[block]
+            la_mul_owned!(workspace.la_backend, residual, cone.A, workspace.x)
+            for coordinate in eachindex(residual)
+                residual[coordinate] +=
+                    cone.b[coordinate] - workspace.slack[block][coordinate]
+            end
+            la_mul_owned!(
+                workspace.la_backend,
+                workspace.dual_residual,
+                transpose(cone.A),
+                workspace.dual[block],
+                -one(T),
+                one(T),
+            )
+        end
     end
     return workspace
 end
@@ -342,12 +464,22 @@ function _native_soc_metrics(
     barrier_degree = 0
     primal_margin = T(Inf)
     dual_margin = T(Inf)
+    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
     @inbounds for block in eachindex(problem.cones)
         barrier_degree += length(problem.cones[block].b) == 1 ? 1 : 2
-        dual_objective -= la_dot(
-            workspace.la_backend,
-            problem.cones[block].b, workspace.dual[block],
-        )
+        if fixed_trace
+            dual_block = workspace.dual[block]
+            dual_objective -=
+                reduction.fixed_head[block] * dual_block[1] +
+                reduction.offset[1, block] * dual_block[2] +
+                reduction.offset[2, block] * dual_block[3]
+        else
+            dual_objective -= la_dot(
+                workspace.la_backend,
+                problem.cones[block].b, workspace.dual[block],
+            )
+        end
         primal_residual = max(
             primal_residual,
             norm(workspace.primal_residual[block], Inf),
@@ -388,6 +520,8 @@ function _native_soc_metrics(
 end
 
 function _native_soc_scaling!(workspace::NativeSOCWorkspace)
+    workspace.plan.cone.execution isa FixedTraceQ3Execution &&
+        return true, 0
     @inbounds for block in eachindex(workspace.slack)
         ok, eta, eta_squared = _soc_nt_scaling!(
             workspace.nt_w[block],
@@ -409,34 +543,23 @@ function _native_soc_add_metric!(
 ) where {T}
     if workspace.plan.cone.execution isa FixedTraceQ3Execution
         reduction = workspace.plan.cone.execution.payload
-        local_block = reduction.blocks[block]
-        first, second = local_block.variables
-        basis = workspace.offset[block]
-        metric = workspace.scratch[block]
-        copy_owned!(basis, view(cone.A, :, first))
-        _soc_nt_apply_hs_inverse!(
-            metric,
-            workspace.nt_w[block],
-            workspace.nt_eta_squared[block],
-            basis,
+        first = reduction.active_ids[1, block]
+        second = reduction.active_ids[2, block]
+        a11 = reduction.tail_map[1, 1, block]
+        a12 = reduction.tail_map[1, 2, block]
+        a21 = reduction.tail_map[2, 1, block]
+        a22 = reduction.tail_map[2, 2, block]
+        metric = _soc_fixed_trace_hkm_metric!(
+            workspace.scratch[block],
+            workspace.slack[block],
+            workspace.dual[block],
         )
-        h11 = zero(T)
-        h12 = zero(T)
-        @inbounds for coordinate in eachindex(metric)
-            h11 += cone.A[coordinate, first] * metric[coordinate]
-            h12 += cone.A[coordinate, second] * metric[coordinate]
-        end
-        copy_owned!(basis, view(cone.A, :, second))
-        _soc_nt_apply_hs_inverse!(
-            metric,
-            workspace.nt_w[block],
-            workspace.nt_eta_squared[block],
-            basis,
-        )
-        h22 = zero(T)
-        @inbounds for coordinate in eachindex(metric)
-            h22 += cone.A[coordinate, second] * metric[coordinate]
-        end
+        h11 = a11 * (metric[1] * a11 + metric[2] * a21) +
+              a21 * (metric[2] * a11 + metric[3] * a21)
+        h12 = a11 * (metric[1] * a12 + metric[2] * a22) +
+              a21 * (metric[2] * a12 + metric[3] * a22)
+        h22 = a12 * (metric[1] * a12 + metric[2] * a22) +
+              a22 * (metric[2] * a12 + metric[3] * a22)
         workspace.local_metric[1, block] = h11
         workspace.local_metric[2, block] = h12
         workspace.local_metric[3, block] = h22
@@ -479,8 +602,9 @@ function _native_soc_assemble_factor!(
                              sqrt(eps(T)) * T(10)^(attempt - 2)
             if workspace.plan.cone.execution isa FixedTraceQ3Execution
                 reduction = workspace.plan.cone.execution.payload
-                @inbounds for (block, local_block) in pairs(reduction.blocks)
-                    first, second = local_block.variables
+                @inbounds for block in axes(reduction.active_ids, 2)
+                    first = reduction.active_ids[1, block]
+                    second = reduction.active_ids[2, block]
                     a = workspace.local_metric[1, block]
                     b = workspace.local_metric[2, block]
                     c = workspace.local_metric[3, block]
@@ -533,7 +657,7 @@ function _native_soc_assemble_factor!(
             regularization = attempt == 1 ? zero(T) :
                              sqrt(eps(T)) * T(10)^(attempt - 2)
             successful = true
-            @inbounds for block in eachindex(reduction.blocks)
+            @inbounds for block in axes(reduction.active_ids, 2)
                 a = workspace.local_metric[1, block]
                 b = workspace.local_metric[2, block]
                 c = workspace.local_metric[3, block]
@@ -555,11 +679,14 @@ function _native_soc_assemble_factor!(
                 workspace.local_factor[1, block] = l11
                 workspace.local_factor[2, block] = l21
                 workspace.local_factor[3, block] = sqrt(pivot)
+                workspace.local_inverse[1, block] = one(T) / l11
+                workspace.local_inverse[2, block] =
+                    one(T) / workspace.local_factor[3, block]
             end
             if successful
                 attempt > 1 && (workspace.regularizations += attempt - 1)
                 return NativeSOCFixedTraceFactor(
-                    reduction, workspace.local_factor,
+                    reduction, workspace.local_factor, workspace.local_inverse,
                 )
             end
         end
@@ -589,14 +716,17 @@ function _native_soc_fixed_trsv_lower!(
     factor::NativeSOCFixedTraceFactor{T},
     values::AbstractVector{T},
 ) where {T}
-    @inbounds for (block, local_block) in pairs(factor.reduction.blocks)
-        first, second = local_block.variables
+    @inbounds for block in axes(factor.factors, 2)
+        first = factor.reduction.active_ids[1, block]
+        second = factor.reduction.active_ids[2, block]
         l11 = factor.factors[1, block]
         l21 = factor.factors[2, block]
-        l22 = factor.factors[3, block]
-        first_value = values[first] / l11
+        inverse_l11 = factor.inverse_pivots[1, block]
+        inverse_l22 = factor.inverse_pivots[2, block]
+        first_value = values[first] * inverse_l11
         values[first] = first_value
-        values[second] = (values[second] - l21 * first_value) / l22
+        values[second] =
+            (values[second] - l21 * first_value) * inverse_l22
     end
     return values
 end
@@ -605,14 +735,16 @@ function _native_soc_fixed_trsv_transpose!(
     factor::NativeSOCFixedTraceFactor{T},
     values::AbstractVector{T},
 ) where {T}
-    @inbounds for (block, local_block) in pairs(factor.reduction.blocks)
-        first, second = local_block.variables
-        l11 = factor.factors[1, block]
+    @inbounds for block in axes(factor.factors, 2)
+        first = factor.reduction.active_ids[1, block]
+        second = factor.reduction.active_ids[2, block]
         l21 = factor.factors[2, block]
-        l22 = factor.factors[3, block]
-        second_value = values[second] / l22
+        inverse_l11 = factor.inverse_pivots[1, block]
+        inverse_l22 = factor.inverse_pivots[2, block]
+        second_value = values[second] * inverse_l22
         values[second] = second_value
-        values[first] = (values[first] - l21 * second_value) / l11
+        values[first] =
+            (values[first] - l21 * second_value) * inverse_l11
     end
     return values
 end
@@ -625,6 +757,66 @@ function _native_soc_fixed_trsm_lower!(
         _native_soc_fixed_trsv_lower!(factor, view(values, :, column))
     end
     return values
+end
+
+"""Prepare equality-side KKT data once for a fixed-trace IPM iteration."""
+function _native_soc_prepare_kkt!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T},
+    factor::NativeSOCFixedTraceFactor{T},
+    options::SolverOptions{T},
+) where {T}
+    workspace.equality_prepared && return true
+    equalities = length(problem.beq)
+    if equalities == 0
+        workspace.equality_factor = nothing
+        workspace.equality_method = :none
+        workspace.equality_prepared = true
+        return true
+    end
+
+    panel_started = time_ns()
+    copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
+    _native_soc_fixed_trsm_lower!(factor, workspace.equality_panel)
+    workspace.equality_panel_transforms += 1
+    workspace.equality_panel_transform_seconds +=
+        (time_ns() - panel_started) / 1.0e9
+
+    gram_started = time_ns()
+    la_syrk!(
+        workspace.la_backend,
+        workspace.equality_factor_buffer,
+        workspace.equality_panel,
+        one(T),
+        zero(T),
+    )
+    workspace.equality_gram_assemblies += 1
+    workspace.equality_gram_seconds += (time_ns() - gram_started) / 1.0e9
+
+    factor_started = time_ns()
+    equality_factor = la_cholesky_factor!(
+        workspace.la_backend, workspace.equality_factor_buffer,
+    )
+    if equality_factor === nothing
+        :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
+            return false
+        options.equality_solver === :auto || return false
+        equality_factor = _factor_equality_qr(
+            workspace.la_backend,
+            workspace.equality_panel,
+            options,
+        )
+        equality_factor === nothing && return false
+        workspace.equality_method = :rank_revealing_qr
+        workspace.la_fallback_reason = :la_equality_factor_failed
+    else
+        workspace.equality_method = :normal_equations
+    end
+    workspace.equality_factor = equality_factor
+    workspace.equality_factorizations += 1
+    workspace.equality_factor_seconds += (time_ns() - factor_started) / 1.0e9
+    workspace.equality_prepared = true
+    return true
 end
 
 function _native_soc_solve_kkt!(
@@ -651,6 +843,7 @@ function _native_soc_solve_kkt!(
     )
     workspace.equality_method = :augmented_ldlt
     workspace.rhs_solves += 1
+    workspace.kkt_rhs_solves += 1
     return true
 end
 
@@ -661,25 +854,16 @@ function _native_soc_solve_kkt!(
     options::SolverOptions{T},
 ) where {T}
     equalities = length(problem.beq)
+    _native_soc_prepare_kkt!(workspace, problem, factor, options) || return false
     if equalities == 0
         _native_soc_fixed_trsv_lower!(factor, workspace.rhs)
         _native_soc_fixed_trsv_transpose!(factor, workspace.rhs)
         copy_owned!(workspace.dx, workspace.rhs)
         workspace.rhs_solves += 1
+        workspace.kkt_rhs_solves += 1
         return true
     end
-    copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
-    _native_soc_fixed_trsm_lower!(factor, workspace.equality_panel)
-    la_syrk!(
-        workspace.la_backend,
-        workspace.equality_factor_buffer,
-        workspace.equality_panel,
-        one(T),
-        zero(T),
-    )
-    equality_factor = la_cholesky_factor!(
-        workspace.la_backend, workspace.equality_factor_buffer,
-    )
+    equality_factor = workspace.equality_factor
     _native_soc_fixed_trsv_lower!(factor, workspace.rhs)
     la_mul_owned!(
         workspace.la_backend,
@@ -692,28 +876,16 @@ function _native_soc_solve_kkt!(
             workspace.equality_residual[index] -
             workspace.equality_rhs[index]
     end
-    if equality_factor === nothing
-        :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
-            return false
-        options.equality_solver === :auto || return false
-        equality_factor = _factor_equality_qr(
-            workspace.la_backend,
-            workspace.equality_panel,
-            options,
-        )
-        equality_factor === nothing && return false
+    if workspace.equality_method === :rank_revealing_qr
         la_factor_solve!(
             equality_factor,
             workspace.equality_rhs,
             workspace.dy,
         )
-        workspace.equality_method = :rank_revealing_qr
-        workspace.la_fallback_reason = :la_equality_factor_failed
     else
         la_factor_solve!(equality_factor, workspace.equality_rhs)
-        workspace.equality_method = :normal_equations
+        copy_owned!(workspace.dy, workspace.equality_rhs)
     end
-    copy_owned!(workspace.dy, workspace.equality_rhs)
     la_mul_owned!(
         workspace.la_backend,
         workspace.rhs,
@@ -724,7 +896,8 @@ function _native_soc_solve_kkt!(
     )
     _native_soc_fixed_trsv_transpose!(factor, workspace.rhs)
     copy_owned!(workspace.dx, workspace.rhs)
-    workspace.rhs_solves += 2
+    workspace.rhs_solves += 1
+    workspace.kkt_rhs_solves += 1
     return true
 end
 
@@ -806,58 +979,156 @@ function _native_soc_direction!(
     problem::ConicProblem{T},
     factor,
     options::SolverOptions{T},
+    ;
+    rhs_phase::Symbol=:none,
 ) where {T}
+    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    rhs_started = fixed_trace ? time_ns() : 0
     copy_owned!(workspace.rhs, workspace.dual_residual)
-    @inbounds for block in eachindex(problem.cones)
-        cone = problem.cones[block]
-        _soc_nt_apply_hs_inverse!(
-            workspace.scratch[block],
-            workspace.nt_w[block],
-            workspace.nt_eta_squared[block],
-            workspace.primal_residual[block],
-        )
-        for coordinate in eachindex(workspace.offset[block])
-            workspace.scratch[block][coordinate] +=
-                workspace.offset[block][coordinate]
+    if fixed_trace
+        contraction_started = time_ns()
+        include_affine_product = rhs_phase === :corrector
+        @inbounds for block in eachindex(problem.cones)
+            first = reduction.active_ids[1, block]
+            second = reduction.active_ids[2, block]
+            a11 = reduction.tail_map[1, 1, block]
+            a12 = reduction.tail_map[1, 2, block]
+            a21 = reduction.tail_map[2, 1, block]
+            a22 = reduction.tail_map[2, 2, block]
+            target = include_affine_product ? workspace.offset[block][1] : zero(T)
+            q0, q1, q2 = _soc_fixed_trace_hkm_rhs_coordinates(
+                workspace.slack[block],
+                workspace.dual[block],
+                workspace.primal_residual[block],
+                workspace.affine_ds[block],
+                workspace.affine_dz[block],
+                target,
+                include_affine_product,
+            )
+            workspace.scratch[block][1] = q0
+            workspace.scratch[block][2] = q1
+            workspace.scratch[block][3] = q2
+            _soc_fixed_trace_transpose_scatter!(
+                workspace.rhs,
+                workspace.scratch[block],
+                first,
+                second,
+                a11,
+                a12,
+                a21,
+                a22,
+            )
         end
-        la_mul_owned!(
-            workspace.la_backend,
-            workspace.rhs,
-            transpose(cone.A),
-            workspace.scratch[block],
-            one(T),
-            one(T),
-        )
+        workspace.fixed_rhs_contractions += length(problem.cones)
+        workspace.fixed_rhs_contraction_seconds +=
+            (time_ns() - contraction_started) / 1.0e9
+    else
+        @inbounds for block in eachindex(problem.cones)
+            cone = problem.cones[block]
+            _soc_nt_apply_hs_inverse!(
+                workspace.scratch[block],
+                workspace.nt_w[block],
+                workspace.nt_eta_squared[block],
+                workspace.primal_residual[block],
+            )
+            for coordinate in eachindex(workspace.offset[block])
+                workspace.scratch[block][coordinate] +=
+                    workspace.offset[block][coordinate]
+            end
+            la_mul_owned!(
+                workspace.la_backend,
+                workspace.rhs,
+                transpose(cone.A),
+                workspace.scratch[block],
+                one(T),
+                one(T),
+            )
+        end
     end
     @inbounds for index in eachindex(workspace.rhs)
         workspace.rhs[index] = -workspace.rhs[index]
     end
     _native_soc_solve_kkt!(workspace, problem, factor, options) || return false
+    if fixed_trace
+        elapsed = (time_ns() - rhs_started) / 1.0e9
+        if rhs_phase === :predictor
+            workspace.predictor_rhs_seconds += elapsed
+            workspace.predictor_rhs_solves += 1
+        elseif rhs_phase === :corrector
+            workspace.corrector_rhs_seconds += elapsed
+            workspace.corrector_rhs_solves += 1
+        end
+    end
 
-    @inbounds for block in eachindex(problem.cones)
-        cone = problem.cones[block]
-        copy_owned!(workspace.ds[block], workspace.primal_residual[block])
-        la_mul_owned!(
-            workspace.la_backend,
-            workspace.ds[block], cone.A, workspace.dx, one(T), one(T),
-        )
-        _soc_nt_apply_hs_inverse!(
-            workspace.dz[block],
-            workspace.nt_w[block],
-            workspace.nt_eta_squared[block],
-            workspace.ds[block],
-        )
-        for coordinate in eachindex(workspace.dz[block])
-            workspace.dz[block][coordinate] = -(
-                workspace.offset[block][coordinate] +
-                workspace.dz[block][coordinate]
+    if fixed_trace
+        started = time_ns()
+        include_affine_product = rhs_phase === :corrector
+        @inbounds for block in eachindex(problem.cones)
+            first = reduction.active_ids[1, block]
+            second = reduction.active_ids[2, block]
+            a11 = reduction.tail_map[1, 1, block]
+            a12 = reduction.tail_map[1, 2, block]
+            a21 = reduction.tail_map[2, 1, block]
+            a22 = reduction.tail_map[2, 2, block]
+            copy_owned!(workspace.ds[block], workspace.primal_residual[block])
+            _soc_fixed_trace_primal_map!(
+                workspace.ds[block],
+                workspace.dx,
+                first,
+                second,
+                a11,
+                a12,
+                a21,
+                a22,
             )
+            target = include_affine_product ? workspace.offset[block][1] : zero(T)
+            _soc_fixed_trace_hkm_recovery!(
+                workspace.dz[block],
+                workspace.slack[block],
+                workspace.dual[block],
+                workspace.ds[block],
+                workspace.affine_ds[block],
+                workspace.affine_dz[block],
+                target,
+                include_affine_product,
+            )
+        end
+        workspace.fixed_direction_recoveries += length(problem.cones)
+        workspace.fixed_block_recovery_seconds +=
+            (time_ns() - started) / 1.0e9
+    else
+        @inbounds for block in eachindex(problem.cones)
+            cone = problem.cones[block]
+            copy_owned!(workspace.ds[block], workspace.primal_residual[block])
+            la_mul_owned!(
+                workspace.la_backend,
+                workspace.ds[block], cone.A, workspace.dx, one(T), one(T),
+            )
+            _soc_nt_apply_hs_inverse!(
+                workspace.dz[block],
+                workspace.nt_w[block],
+                workspace.nt_eta_squared[block],
+                workspace.ds[block],
+            )
+            for coordinate in eachindex(workspace.dz[block])
+                workspace.dz[block][coordinate] = -(
+                    workspace.offset[block][coordinate] +
+                    workspace.dz[block][coordinate]
+                )
+            end
         end
     end
     return true
 end
 
 function _native_soc_predictor_offsets!(workspace::NativeSOCWorkspace)
+    if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        @inbounds for block in eachindex(workspace.offset)
+            zero_owned!(workspace.offset[block])
+        end
+        return workspace
+    end
     @inbounds for block in eachindex(workspace.dual)
         copy_owned!(workspace.offset[block], workspace.dual[block])
     end
@@ -868,6 +1139,13 @@ function _native_soc_corrector_offsets!(
     workspace::NativeSOCWorkspace{T},
     sigma_mu::T,
 ) where {T}
+    if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        @inbounds for block in eachindex(workspace.offset)
+            zero_owned!(workspace.offset[block])
+            workspace.offset[block][1] = sigma_mu
+        end
+        return workspace
+    end
     @inbounds for block in eachindex(workspace.slack)
         transformed_primal = workspace.scratch[block]
         transformed_dual = workspace.offset[block]
@@ -933,9 +1211,28 @@ function _native_soc_strict_step(
     direction::Vector{Vector{T}},
     trial::Vector{Vector{T}},
     bound::T,
+    ;
+    allow_full_step::Bool=false,
 ) where {T}
     safety = T(99) / T(100)
-    step = min(one(T), safety * max(zero(T), bound))
+    candidate = min(one(T), max(zero(T), bound))
+    # Preserve the validated Q3 controller semantics: take an exact unit step
+    # when its endpoint is strictly interior. Applying the safety fraction to
+    # every nominal full step needlessly contracts well-centered iterates.
+    # A full step that rounds onto the boundary is rejected before state is
+    # updated, retaining the Round 5 NT-scaling protection.
+    if allow_full_step && candidate == one(T)
+        full_step_is_interior = true
+        @inbounds for block in eachindex(state)
+            for coordinate in eachindex(state[block])
+                trial[block][coordinate] =
+                    state[block][coordinate] + direction[block][coordinate]
+            end
+            full_step_is_interior &= _soc_is_interior(trial[block])
+        end
+        full_step_is_interior && return one(T)
+    end
+    step = safety * candidate
     for _ in 1:24
         interior = true
         @inbounds for block in eachindex(state)
@@ -1013,12 +1310,21 @@ function _native_soc_workspace_bytes(workspace::NativeSOCWorkspace)
     matrices = (
         workspace.hessian, workspace.factor_buffer,
         workspace.local_metric, workspace.local_factor,
+        workspace.local_inverse,
         workspace.augmented_buffer,
         workspace.equality_factor_buffer, workspace.equality_panel,
     )
-    return sum(Base.summarysize, vectors; init=0) +
-           sum(collection -> sum(Base.summarysize, collection; init=0), blocks; init=0) +
-           sum(Base.summarysize, matrices; init=0)
+    bytes = sum(Base.summarysize, vectors; init=0) +
+            sum(collection -> sum(Base.summarysize, collection; init=0), blocks; init=0) +
+            sum(Base.summarysize, matrices; init=0)
+    if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        reduction = workspace.plan.cone.execution.payload
+        bytes += Base.summarysize(reduction.active_ids)
+        bytes += Base.summarysize(reduction.tail_map)
+        bytes += Base.summarysize(reduction.fixed_head)
+        bytes += Base.summarysize(reduction.offset)
+    end
+    return bytes
 end
 
 function _native_soc_result(
@@ -1052,7 +1358,7 @@ function _native_soc_result(
         planned_regularization=:primal_diagonal_retry,
         executed_regularization=workspace.regularizations == 0 ? :none :
                                 :primal_diagonal_retry,
-        scaling=:nesterov_todd,
+        scaling=fixed_trace ? :hkm : :nesterov_todd,
         kkt=kkt_backend,
         gram=:native_lorentz_metric,
         equality=isempty(workspace.equality_dual) ? :none :
@@ -1150,7 +1456,11 @@ Base.@noinline function _solve_native_soc_core(
 
         scaling_started = time_ns()
         scaling_ok, failed_block = _native_soc_scaling!(workspace)
-        phase_scaling += (time_ns() - scaling_started) / 1.0e9
+        scaling_elapsed = (time_ns() - scaling_started) / 1.0e9
+        phase_scaling += scaling_elapsed
+        if workspace.plan.cone.execution isa FixedTraceQ3Execution
+            workspace.fixed_local_scaling_seconds += scaling_elapsed
+        end
         if !scaling_ok
             status = NumericalBreakdown
             message = "NativeSOC NT scaling failed for cone $failed_block."
@@ -1166,20 +1476,43 @@ Base.@noinline function _solve_native_soc_core(
         @inbounds for block in eachindex(problem.cones)
             _native_soc_add_metric!(workspace, problem.cones[block], block)
         end
-        phase_assembly += (time_ns() - assembly_started) / 1.0e9
+        assembly_elapsed = (time_ns() - assembly_started) / 1.0e9
+        phase_assembly += assembly_elapsed
+        if workspace.plan.cone.execution isa FixedTraceQ3Execution
+            workspace.local_metric_preparations += 1
+            workspace.fixed_local_metric_seconds += assembly_elapsed
+        end
+        workspace.equality_prepared = false
+        workspace.equality_factor = nothing
         factor_started = time_ns()
         factor = _native_soc_assemble_factor!(workspace, problem)
-        phase_factor += (time_ns() - factor_started) / 1.0e9
+        factor_elapsed = (time_ns() - factor_started) / 1.0e9
+        phase_factor += factor_elapsed
+        if workspace.plan.cone.execution isa FixedTraceQ3Execution
+            workspace.local_factorizations += 1
+            workspace.fixed_local_factor_seconds += factor_elapsed
+        end
         if factor === nothing
             status = NumericalBreakdown
             message = "NativeSOC normal-equations factorization failed."
             termination = (reason=:la_factor_failed, stage=:kkt_factorization)
             break
         end
+        if workspace.plan.cone.execution isa FixedTraceQ3Execution &&
+           workspace.plan.formulation.formulation isa DenseNormalEquations
+            _native_soc_prepare_kkt!(workspace, problem, factor, options) || begin
+                status = NumericalBreakdown
+                message = "NativeSOC equality KKT preparation failed."
+                termination = (reason=:equality_prepare_failed, stage=:kkt_factorization)
+                break
+            end
+        end
 
         predictor_started = time_ns()
         _native_soc_predictor_offsets!(workspace)
-        _native_soc_direction!(workspace, problem, factor, options) || begin
+        _native_soc_direction!(
+            workspace, problem, factor, options; rhs_phase=:predictor,
+        ) || begin
             status = NumericalBreakdown
             message = "NativeSOC affine KKT solve failed."
             termination = (reason=:affine_solve_failed, stage=:predictor)
@@ -1203,7 +1536,9 @@ Base.@noinline function _solve_native_soc_core(
 
         corrector_started = time_ns()
         _native_soc_corrector_offsets!(workspace, sigma * mu)
-        _native_soc_direction!(workspace, problem, factor, options) || begin
+        _native_soc_direction!(
+            workspace, problem, factor, options; rhs_phase=:corrector,
+        ) || begin
             status = NumericalBreakdown
             message = "NativeSOC corrector KKT solve failed."
             termination = (reason=:corrector_solve_failed, stage=:corrector)
@@ -1224,12 +1559,16 @@ Base.@noinline function _solve_native_soc_core(
             workspace.ds,
             workspace.scratch,
             primal_bound,
+            allow_full_step=
+                workspace.plan.cone.execution isa FixedTraceQ3Execution,
         )
         dual_step = _native_soc_strict_step(
             workspace.dual,
             workspace.dz,
             workspace.offset,
             dual_bound,
+            allow_full_step=
+                workspace.plan.cone.execution isa FixedTraceQ3Execution,
         )
         if !(primal_step > options.min_step && dual_step > options.min_step)
             status = Stalled
@@ -1260,10 +1599,32 @@ Base.@noinline function _solve_native_soc_core(
         predictor=phase_predictor,
         corrector=phase_corrector,
         line_search=phase_line_search,
+        fixed_local_scaling_metric=workspace.fixed_local_scaling_seconds,
+        fixed_local_metric=workspace.fixed_local_metric_seconds,
+        fixed_local_factor=workspace.fixed_local_factor_seconds,
+        fixed_rhs_contraction=workspace.fixed_rhs_contraction_seconds,
+        equality_panel_transform=workspace.equality_panel_transform_seconds,
+        equality_gram_syrk=workspace.equality_gram_seconds,
+        equality_factor=workspace.equality_factor_seconds,
+        predictor_rhs=workspace.predictor_rhs_seconds,
+        corrector_rhs=workspace.corrector_rhs_seconds,
+        fixed_block_residual=workspace.fixed_block_residual_seconds,
+        fixed_block_recovery=workspace.fixed_block_recovery_seconds,
     ) : NamedTuple()
     termination = merge(termination, (
         regularizations=workspace.regularizations,
         rhs_solves=workspace.rhs_solves,
+        local_metric_preparations=workspace.local_metric_preparations,
+        local_factorizations=workspace.local_factorizations,
+        equality_panel_transforms=workspace.equality_panel_transforms,
+        equality_gram_assemblies=workspace.equality_gram_assemblies,
+        equality_factorizations=workspace.equality_factorizations,
+        kkt_rhs_solves=workspace.kkt_rhs_solves,
+        predictor_rhs_solves=workspace.predictor_rhs_solves,
+        corrector_rhs_solves=workspace.corrector_rhs_solves,
+        fixed_residual_blocks=workspace.fixed_residual_blocks,
+        fixed_rhs_contractions=workspace.fixed_rhs_contractions,
+        fixed_direction_recoveries=workspace.fixed_direction_recoveries,
         numeric_factorizations=iterations + (status === Optimal ? 0 : 1),
         refinement_solves=0,
     ))

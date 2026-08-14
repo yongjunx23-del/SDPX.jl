@@ -247,6 +247,201 @@ function _soc_nt_apply_hs_inverse!(destination, w, eta_squared, source)
     return destination
 end
 
+"""
+Fixed-trace Q3 block kernels.
+
+The planner supplies the two active variable ids and the owned 2x2 tail map,
+so these routines never touch a sparse/dense cone matrix.  They are kept in
+the Lorentz-kernel file deliberately: the arithmetic is provider-independent
+and can be exercised directly for Float64, MultiFloat, and BigFloat.
+"""
+@inline function _soc_fixed_trace_primal_residual!(
+    destination,
+    x,
+    slack,
+    first::Int,
+    second::Int,
+    a11,
+    a12,
+    a21,
+    a22,
+    head,
+    offset1,
+    offset2,
+)
+    # The fixed head row of A is zero by construction.
+    destination[1] = head - slack[1]
+    destination[2] = a11 * x[first] + a12 * x[second] + offset1 - slack[2]
+    destination[3] = a21 * x[first] + a22 * x[second] + offset2 - slack[3]
+    return destination
+end
+
+@inline function _soc_fixed_trace_dual_scatter!(
+    destination,
+    dual,
+    first::Int,
+    second::Int,
+    a11,
+    a12,
+    a21,
+    a22,
+)
+    u1 = dual[2]
+    u2 = dual[3]
+    destination[first] -= a11 * u1 + a21 * u2
+    destination[second] -= a12 * u1 + a22 * u2
+    return destination
+end
+
+@inline function _soc_fixed_trace_transpose_scatter!(
+    destination,
+    values,
+    first::Int,
+    second::Int,
+    a11,
+    a12,
+    a21,
+    a22,
+)
+    u1 = values[2]
+    u2 = values[3]
+    destination[first] += a11 * u1 + a21 * u2
+    destination[second] += a12 * u1 + a22 * u2
+    return destination
+end
+
+@inline function _soc_fixed_trace_primal_map!(
+    destination,
+    dx,
+    first::Int,
+    second::Int,
+    a11,
+    a12,
+    a21,
+    a22,
+)
+    # Match the generic `mul!(destination, A, dx, 1, 1)` contract: the
+    # destination already contains the primal residual, and the fixed-head
+    # row contributes zero while the two tail rows are accumulated.
+    destination[2] += a11 * dx[first] + a12 * dx[second]
+    destination[3] += a21 * dx[first] + a22 * dx[second]
+    return destination
+end
+
+@inline function _soc_fixed_trace_hkm_metric!(destination, primal, dual)
+    x0, x1, x2 = primal
+    z0, z1, z2 = dual
+    determinant = x0 * x0 - x1 * x1 - x2 * x2
+    determinant > zero(determinant) || throw(ArgumentError(
+        "fixed-trace HKM primal state must be interior",
+    ))
+    destination[1] = (x0 * z0 - x1 * z1 + x2 * z2) / determinant
+    destination[2] = -(x1 * z2 + x2 * z1) / determinant
+    destination[3] = (x0 * z0 + x1 * z1 - x2 * z2) / determinant
+    return destination
+end
+
+@inline function _soc_fixed_trace_hkm_rhs_coordinates(
+    primal,
+    dual,
+    primal_residual,
+    affine_primal,
+    affine_dual,
+    target,
+    include_affine_product::Bool,
+)
+    x0, x1, x2 = primal
+    z0, z1, z2 = dual
+    p0, p1, p2 = primal_residual
+    x11, x12, x22 = x0 + x1, x2, x0 - x1
+    y11, y12, y22 = (z0 + z1) / 2, z2 / 2, (z0 - z1) / 2
+    p11, p12, p22 = p0 + p1, p2, p0 - p1
+
+    r11 = target - (x11 * y11 + x12 * y12)
+    r12 = -(x11 * y12 + x12 * y22)
+    r21 = -(x12 * y11 + x22 * y12)
+    r22 = target - (x12 * y12 + x22 * y22)
+    if include_affine_product
+        dx0, dx1, dx2 = affine_primal
+        dz0, dz1, dz2 = affine_dual
+        dx11, dx12, dx22 = dx0 + dx1, dx2, dx0 - dx1
+        dy11, dy12, dy22 =
+            (dz0 + dz1) / 2, dz2 / 2, (dz0 - dz1) / 2
+        r11 -= dx11 * dy11 + dx12 * dy12
+        r12 -= dx11 * dy12 + dx12 * dy22
+        r21 -= dx12 * dy11 + dx22 * dy12
+        r22 -= dx12 * dy12 + dx22 * dy22
+    end
+
+    w11 = p11 * y11 + p12 * y12 - r11
+    w12 = p11 * y12 + p12 * y22 - r12
+    w21 = p12 * y11 + p22 * y12 - r21
+    w22 = p12 * y12 + p22 * y22 - r22
+    determinant = x0 * x0 - x1 * x1 - x2 * x2
+    inverse11 = (x0 - x1) / determinant
+    inverse12 = -x2 / determinant
+    inverse22 = (x0 + x1) / determinant
+    q11 = inverse11 * w11 + inverse12 * w21
+    q12 = inverse11 * w12 + inverse12 * w22
+    q21 = inverse12 * w11 + inverse22 * w21
+    q22 = inverse12 * w12 + inverse22 * w22
+    # The direct Lorentz dual uses Euclidean pairing, whereas the historical
+    # 2x2 representation stores Y=Z/2.  These are exactly the coordinates of
+    # twice the symmetric projection, which is the direct-coordinate
+    # contraction consumed by A_tail'.
+    return q11 + q22, q11 - q22, q12 + q21
+end
+
+@inline function _soc_fixed_trace_hkm_recovery!(
+    destination,
+    primal,
+    dual,
+    primal_direction,
+    affine_primal,
+    affine_dual,
+    target,
+    include_affine_product::Bool,
+)
+    x0, x1, x2 = primal
+    z0, z1, z2 = dual
+    dx0, dx1, dx2 = primal_direction
+    x11, x12, x22 = x0 + x1, x2, x0 - x1
+    y11, y12, y22 = (z0 + z1) / 2, z2 / 2, (z0 - z1) / 2
+    dx11, dx12, dx22 = dx0 + dx1, dx2, dx0 - dx1
+
+    r11 = target - (x11 * y11 + x12 * y12)
+    r12 = -(x11 * y12 + x12 * y22)
+    r21 = -(x12 * y11 + x22 * y12)
+    r22 = target - (x12 * y12 + x22 * y22)
+    if include_affine_product
+        ax0, ax1, ax2 = affine_primal
+        az0, az1, az2 = affine_dual
+        ax11, ax12, ax22 = ax0 + ax1, ax2, ax0 - ax1
+        ay11, ay12, ay22 =
+            (az0 + az1) / 2, az2 / 2, (az0 - az1) / 2
+        r11 -= ax11 * ay11 + ax12 * ay12
+        r12 -= ax11 * ay12 + ax12 * ay22
+        r21 -= ax12 * ay11 + ax22 * ay12
+        r22 -= ax12 * ay12 + ax22 * ay22
+    end
+    w11 = r11 - (dx11 * y11 + dx12 * y12)
+    w12 = r12 - (dx11 * y12 + dx12 * y22)
+    w21 = r21 - (dx12 * y11 + dx22 * y12)
+    w22 = r22 - (dx12 * y12 + dx22 * y22)
+    determinant = x0 * x0 - x1 * x1 - x2 * x2
+    inverse11 = (x0 - x1) / determinant
+    inverse12 = -x2 / determinant
+    inverse22 = (x0 + x1) / determinant
+    q11 = inverse11 * w11 + inverse12 * w21
+    q12 = inverse11 * w12 + inverse12 * w22
+    q21 = inverse12 * w11 + inverse22 * w21
+    q22 = inverse12 * w12 + inverse22 * w22
+    destination[1] = q11 + q22
+    destination[2] = q11 - q22
+    destination[3] = q12 + q21
+    return destination
+end
+
 """Solve `left o result = right` in the Lorentz Jordan algebra."""
 function _soc_jordan_solve!(destination, left, right)
     dimension = _soc_require_equal_dimensions(

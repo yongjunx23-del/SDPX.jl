@@ -236,6 +236,20 @@ function _iteration_facts(result::SDPResult)
         complementarity_analysis_seconds=
             _seconds(timings, :complementarity_analysis),
         finalization_seconds=_seconds(timings, :finalization),
+        fixed_local_scaling_metric_seconds=
+            _seconds(timings, :fixed_local_scaling_metric),
+        fixed_local_metric_seconds=_seconds(timings, :fixed_local_metric),
+        fixed_local_factor_seconds=_seconds(timings, :fixed_local_factor),
+        fixed_rhs_contraction_seconds=
+            _seconds(timings, :fixed_rhs_contraction),
+        equality_panel_transform_seconds=
+            _seconds(timings, :equality_panel_transform),
+        equality_gram_syrk_seconds=_seconds(timings, :equality_gram_syrk),
+        equality_factor_seconds=_seconds(timings, :equality_factor),
+        fixed_block_residual_seconds=
+            _seconds(timings, :fixed_block_residual),
+        fixed_block_recovery_seconds=
+            _seconds(timings, :fixed_block_recovery),
     )
 end
 
@@ -262,6 +276,15 @@ function _iteration_facts(result::ConicResult)
         direction_recovery_seconds=_seconds(timings, :direction_recovery),
         complementarity_analysis_seconds=_seconds(timings, :complementarity_analysis),
         finalization_seconds=_seconds(timings, :finalization),
+        fixed_local_scaling_metric_seconds=_seconds(timings, :fixed_local_scaling_metric),
+        fixed_local_metric_seconds=_seconds(timings, :fixed_local_metric),
+        fixed_local_factor_seconds=_seconds(timings, :fixed_local_factor),
+        fixed_rhs_contraction_seconds=_seconds(timings, :fixed_rhs_contraction),
+        equality_panel_transform_seconds=_seconds(timings, :equality_panel_transform),
+        equality_gram_syrk_seconds=_seconds(timings, :equality_gram_syrk),
+        equality_factor_seconds=_seconds(timings, :equality_factor),
+        fixed_block_residual_seconds=_seconds(timings, :fixed_block_residual),
+        fixed_block_recovery_seconds=_seconds(timings, :fixed_block_recovery),
     )
 end
 
@@ -304,6 +327,28 @@ function _counter_facts(result::SDPResult)
         rhs_solves=_project_field(result.termination, :rhs_solves),
         refinement_solves=
             _project_field(result.termination, :total_refinement_steps),
+        local_metric_preparations=_project_field(
+            result.termination, :local_metric_preparations,
+        ),
+        local_factorizations=_project_field(
+            result.termination, :local_factorizations,
+        ),
+        equality_panel_transforms=_project_field(
+            result.termination, :equality_panel_transforms,
+        ),
+        equality_gram_assemblies=_project_field(
+            result.termination, :equality_gram_assemblies,
+        ),
+        equality_factorizations=_project_field(
+            result.termination, :equality_factorizations,
+        ),
+        kkt_rhs_solves=_project_field(result.termination, :kkt_rhs_solves),
+        predictor_rhs_solves=_project_field(
+            result.termination, :predictor_rhs_solves,
+        ),
+        corrector_rhs_solves=_project_field(
+            result.termination, :corrector_rhs_solves,
+        ),
         symbolic_analyses=_project_field(sparse, :analyses),
         symbolic_analysis_reuse=
             _project_field(sparse, :symbolic_reuse_ratio),
@@ -354,6 +399,22 @@ function _counter_facts(result::ConicResult)
         numeric_factorizations=_project_field(termination, :numeric_factorizations),
         rhs_solves=_project_field(termination, :rhs_solves),
         refinement_solves=_project_field(termination, :refinement_solves),
+        local_metric_preparations=_project_field(
+            termination, :local_metric_preparations,
+        ),
+        local_factorizations=_project_field(termination, :local_factorizations),
+        equality_panel_transforms=_project_field(
+            termination, :equality_panel_transforms,
+        ),
+        equality_gram_assemblies=_project_field(
+            termination, :equality_gram_assemblies,
+        ),
+        equality_factorizations=_project_field(
+            termination, :equality_factorizations,
+        ),
+        kkt_rhs_solves=_project_field(termination, :kkt_rhs_solves),
+        predictor_rhs_solves=_project_field(termination, :predictor_rhs_solves),
+        corrector_rhs_solves=_project_field(termination, :corrector_rhs_solves),
         symbolic_analyses=unavailable,
         symbolic_analysis_reuse=unavailable,
         schur_nnz=unavailable,

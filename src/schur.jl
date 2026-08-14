@@ -1142,76 +1142,6 @@ function _reduce_sparse_schur_serial!(ws::Workspace{T}, cons::SparseCons{T}) whe
     return ws.S
 end
 
-"""
-    reduce_sparse_schur_csc!(ws, cons)
-
-Accumulate block-local packed Schur triangles directly into the fixed lower
-CSC pattern used by the sparse Schur SDP backend. Output columns are
-owned exclusively by workers. Each block suffix and destination column are
-sorted, so a linear merge locates entries without a giant pair-to-CSC lookup
-table (317 million candidate pairs on B3).
-"""
-function reduce_sparse_schur_csc!(
-    ws::Workspace{Float64},
-    cons::SparseCons{Float64},
-)
-    assembly_started = time_ns()
-    sparse_workspace =
-        ws.sparse_kkt::SparseSchurSDPWorkspace
-    matrix = sparse_workspace.matrix
-    memberships = sparse_workspace.memberships
-    counts = sparse_workspace.schur_counts
-    m = length(counts)
-    ntasks = min(max(ws.thread_count, 1), max(m, 1))
-    balanced =
-        length(ws.schur_column_boundaries) == ntasks + 1
-    chunk = cld(m, ntasks)
-
-    @sync for task in 1:ntasks
-        first_column = balanced ?
-                       ws.schur_column_boundaries[task] :
-                       (task - 1) * chunk + 1
-        first_column > m && continue
-        last_column = balanced ?
-                      ws.schur_column_boundaries[task + 1] - 1 :
-                      min(task * chunk, m)
-        Threads.@spawn begin
-            @inbounds for column in first_column:last_column
-                first = Int(matrix.colptr[column])
-                last = first + Int(counts[column]) - 1
-                for destination in first:last
-                    matrix.nzval[destination] = 0.0
-                end
-                for (block32, position32) in memberships[column]
-                    block = Int(block32)
-                    position = Int(position32)
-                    ids = cons.schur_order[block]
-                    count = length(ids)
-                    values = ws.blk[block].Svals
-                    source_base = _packed_pair_base(position, count)
-                    destination = first
-                    for source_position in position:count
-                        row = ids[source_position]
-                        while matrix.rowval[destination] < row
-                            destination += 1
-                        end
-                        matrix.rowval[destination] == row ||
-                            error("internal sparse Schur CSC pattern mismatch")
-                        matrix.nzval[destination] +=
-                            values[source_base + (source_position - position + 1)]
-                    end
-                end
-                sparse_workspace.primal_diagonal_values[column] =
-                    matrix.nzval[first]
-            end
-        end
-    end
-    elapsed = (time_ns() - assembly_started) / 1.0e9
-    sparse_workspace.assembly_count += 1
-    sparse_workspace.last_assembly_seconds = elapsed
-    sparse_workspace.assembly_seconds += elapsed
-    return matrix
-end
 
 """
     reduce_sparse_schur!(ws, cons)
@@ -1245,12 +1175,6 @@ block order within one task.
 """
 function reduce_sparse_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
     ws.arrow === nothing || return reduce_arrow_schur!(ws, cons)
-    if T === Float64 && ws.sparse_kkt !== nothing
-        return reduce_sparse_schur_csc!(
-            ws::Workspace{Float64},
-            cons::SparseCons{Float64},
-        )
-    end
     if ws.sparse_kkt !== nothing
         sparse_workspace = ws.sparse_kkt
         sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
@@ -1353,24 +1277,12 @@ function sparse_schur_diagnostics(ws::Workspace)
         assembly_count=0,
         provider=:none,
     )
-    matrix, backend, assembly_seconds, assembly_count =
-        if sparse_workspace isa SparseSchurSDPWorkspace
-        (
-            sparse_workspace.matrix,
-            sparse_workspace.backend,
-            sparse_workspace.assembly_seconds,
-            sparse_workspace.assembly_count,
-        )
-    elseif sparse_workspace isa GenericSparseSchurSDPWorkspace
-        (
-            sparse_workspace.storage.matrix,
-            sparse_workspace.factor,
-            0.0,
-            sparse_workspace.assembly_count,
-        )
-    else
+    sparse_workspace isa GenericSparseSchurSDPWorkspace ||
         throw(ArgumentError("unsupported sparse Schur workspace $(typeof(sparse_workspace))"))
-    end
+    matrix = sparse_workspace.storage.matrix
+    backend = sparse_workspace.factor
+    assembly_seconds = 0.0
+    assembly_count = sparse_workspace.assembly_count
     structural_nnz = nnz(matrix)
     actual_nnz = count(value -> !iszero(value), matrix.nzval)
     symbolic = backend === nothing ? nothing :
@@ -1378,19 +1290,10 @@ function sparse_schur_diagnostics(ws::Workspace)
                 sparse_factor_diagnostics(backend) : nothing)
     backend_stats = backend === nothing ? nothing :
                     try statistics(backend) catch; nothing end
-    # The SDP CHOLMOD path predates `AbstractSparseFactor` and stores the raw
-    # CHOLMOD factor in `SparseCholeskyBackend.factorization`; preserve that
-    # factor nonzero count rather than reporting zero simply because no
-    # provider-neutral symbolic wrapper is attached.
-    raw_factor = backend === nothing ||
-                 !hasproperty(backend, :factorization) ?
-                 nothing : getproperty(backend, :factorization)
-    raw_factor_nnz = raw_factor === nothing ? 0 :
-                     try nnz(raw_factor) catch; 0 end
     factor_nnz = symbolic === nothing ?
-                 (backend_stats === nothing ? raw_factor_nnz :
-                  get(backend_stats, :factor_nnz, raw_factor_nnz)) :
-                 get(symbolic, :factor_nnz, raw_factor_nnz)
+                 (backend_stats === nothing ? 0 :
+                  get(backend_stats, :factor_nnz, 0)) :
+                 get(symbolic, :factor_nnz, 0)
     input_nnz = symbolic === nothing ? structural_nnz :
                 get(symbolic, :input_nnz, structural_nnz)
     reuse = backend_stats === nothing ?
@@ -3497,9 +3400,9 @@ function materialize_schur!(dest::AbstractMatrix{T}, ws::Workspace{T}) where {T}
     arrow = ws.arrow
     if arrow === nothing && ws.sparse_kkt !== nothing
         sparse_workspace = ws.sparse_kkt
-        matrix = sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ?
-                 sparse_workspace.storage.matrix :
-                 sparse_workspace.matrix
+        sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+            throw(ArgumentError("unsupported sparse Schur workspace $(typeof(sparse_workspace))"))
+        matrix = sparse_workspace.storage.matrix
         size(dest) == size(matrix) || throw(DimensionMismatch(
             "materialized Schur destination has size $(size(dest)); expected $(size(matrix))",
         ))

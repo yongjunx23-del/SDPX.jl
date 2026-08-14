@@ -251,7 +251,7 @@ function choose_crossover(
             1.0 + 0.25 * (1.0 - clamp(features.active_density, 0.0, 1.0))
         packing_cost =
             Float64(rows) * Float64(columns) * activity_penalty
-        # The legacy sparse BigFloat path constructs fresh MPFR values for
+        # The pre-Round7 sparse BigFloat path constructed fresh MPFR values for
         # every scalar multiply/add and for every packed Schur store. The new
         # kernel mutates independent destinations and reuses its MPFR
         # accumulator buffers, so arithmetic count alone underestimates the

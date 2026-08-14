@@ -19,10 +19,12 @@ The pipeline performs:
 
 Pure `1x1` cone models are solved by a dedicated scalar Mehrotra
 predictor-corrector LP engine. Standard scalar inequalities supplied through
-JuMP/MOI are converted directly to that representation. General SOC constraints
-use an exact PSD arrow lift. Exactly certified local fixed-trace PSD2 cells can
-instead use the native compact Q3 backend described below. General PSD blocks
-use the existing SDP engine, so its Float64 numerical path is unchanged.
+JuMP/MOI are converted directly to that representation. Compact `ConicProblem`
+and pure-SOC JuMP/MOI models use NativeSOC in original Lorentz coordinates;
+general Lorentz blocks use the Nesterov--Todd path, while exactly certified
+fixed-trace Q3 cells use the compact HKM specialization described below.
+Explicit SDP-shaped lift inputs remain supported by the SDP engine, whose
+Float64 numerical path is unchanged.
 
 ## Presolve
 
@@ -317,17 +319,18 @@ provide a generic symmetric eigensolver for every scalar type.
 1. The large dense SDP Schur matrix and its factorization still dominate
    `Task_Low08`; the Float64 path was intentionally left numerically unchanged.
 2. Equality-constrained LPs use dense LU. A null-space/range-space selector
-   and sparse LDL backend should improve models with many variables but few
-   equalities; equality-free LPs already use Cholesky.
+   remains future work; sparse execution is intentionally restricted to
+   equality-free frozen-CSC normal equations with provider-native Cholesky.
 3. LP panel GEMM computes full output panels. A lower-triangle-only blocked
    BLAS-3 kernel would reduce arithmetic further while retaining multicore
    scaling.
 4. Strict local fixed-trace Q3 products have a compact Mehrotra/HKM backend.
-   A Q3-specific Nesterov--Todd direction exists as the explicit research
-   option `q3_direction=:nt`, but J40 solve-level gates were slower than HKM,
-   so it is not selected automatically. General-dimensional SOCP paths retain
-   the exact PSD lift, and a general-dimensional native NT backend remains
-   future work.
+   General-dimensional SOCP uses the native Lorentz Nesterov--Todd path.
+   Fixed-trace execution compiles each two-variable Q3 block into owned SoA
+   storage and reuses one equality Gram/factorization for the predictor and
+   corrector right-hand sides. Explicit SDP-shaped reference lifts remain
+   available for comparison, but production NativeSOC does not construct PSD
+   matrices.
 5. Presolve currently removes equality dependence and scalar-row redundancy;
    bound propagation, singleton substitution, coefficient strengthening, and
    chordal SDP decomposition remain future work.
