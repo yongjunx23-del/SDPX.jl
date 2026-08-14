@@ -454,6 +454,57 @@ performance_trace(result::ConicResult) = result.lifted === nothing ?
         _counter_facts(result),
     ) : performance_trace(result.lifted)
 
+"""Project an answer-only reduced-dual solve without inventing IPM phases."""
+function performance_trace(result::CertifiedObjective)
+    timings = result.timings
+    counters = result.counters
+    iterations = get(
+        counters,
+        :lbfgs_iterations,
+        get(counters, :ipm_polish_iterations, 0),
+    )
+    trace_counters = hasproperty(counters, :iterations) ? counters :
+                     merge(counters, (; iterations))
+    return PerformanceTrace(
+        (
+            solver=:native_soc_reduced_dual,
+            specialization=result.specialization,
+            algorithm=result.algorithm,
+            provider=result.provider,
+            arithmetic=result.arithmetic,
+            precision_bits=result.precision_bits,
+            reduced_dual_setup_seconds=_seconds(timings, :reduced_dual_setup),
+            fixed_trace_compile_seconds=_seconds(timings, :fixed_trace_compile),
+            equality_panel_conversion_seconds=
+                _seconds(timings, :equality_panel_conversion),
+        ),
+        (
+            equality_transpose_gemv_seconds=
+                _seconds(timings, :equality_transpose_gemv),
+            equality_forward_gemv_seconds=
+                _seconds(timings, :equality_forward_gemv),
+            block_support_seconds=_seconds(timings, :block_support),
+            lbfgs_direction_seconds=_seconds(timings, :lbfgs_direction),
+            line_search_seconds=_seconds(timings, :line_search),
+            history_update_seconds=
+                _seconds(timings, :lbfgs_history_update),
+            continuation_seconds=_seconds(timings, :continuation),
+        ),
+        (
+            status=result.status,
+            termination_reason=result.termination.reason,
+            objective=result.objective,
+            relative_gap=result.relative_gap,
+            certificate_valid=result.certificate.valid,
+            certificate_seconds=_seconds(timings, :certificate),
+            total_seconds=_seconds(timings, :total),
+            interval_kind=result.interval_kind,
+            rigorous_interval=result.rigorous_interval,
+        ),
+        trace_counters,
+    )
+end
+
 function Base.show(io::IO, trace::PerformanceTrace)
     print(io, "PerformanceTrace(status=", trace.final.status,
         ", iterations=", trace.counters.iterations,
