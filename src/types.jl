@@ -525,7 +525,19 @@ la_factor_provider(factor::ProviderLALDLTFactor) = factor.provider
 la_factor_rank(::AbstractLAQRFactor) = nothing
 la_factor_rank(factor::EqualityQRFactor) = factor.rank
 function la_factor_rank(factor::StandardLAQRFactor)
-    factor.pivoted && return LinearAlgebra.rank(factor.factor)
+    if factor.pivoted
+        # `rank(::QRPivoted)` was added in Julia 1.12.  Keep the same
+        # diagonal-threshold definition on every supported Julia release.
+        dimension = min(size(factor.factor)...)
+        dimension == 0 && return 0
+        tolerance = dimension * eps(real(float(eltype(factor.factor)))) *
+                    abs(factor.factor.factors[1, 1])
+        first_small = findfirst(
+            index -> abs(factor.factor.factors[index, index]) <= tolerance,
+            1:dimension,
+        )
+        return something(first_small, dimension + 1) - 1
+    end
     return min(size(factor.factor.R)...)
 end
 

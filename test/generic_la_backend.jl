@@ -108,6 +108,14 @@ struct UnadaptedSemanticLABackend <: SDPX.AbstractLABackend end
         @test SDPX.la_factor_permutation(qr_factor) isa Vector{Int}
         LA.la_factor_solve!(qr_factor, qr_rhs)
         @test source * qr_rhs ≈ rhs
+
+        rank_deficient = SDPX._owned_array_copy(T, T[1 1; 2 2])
+        rank_deficient_qr = LA.la_qr_factor!(
+            backend,
+            rank_deficient;
+            pivoted=true,
+        )
+        @test SDPX.la_factor_rank(rank_deficient_qr) == 1
     end
 
     legacy = LA.instantiate_la_backend(
