@@ -1,5 +1,43 @@
 # CSDR FixedTrace NativeSOCP benchmark
 
+## Reduced-dual L-BFGS path
+
+`run_reduced_dual.jl` benchmarks the explicit analytic FixedTraceQ3 reduced
+dual. It records a warm objective/gradient microbenchmark (at least two
+warmups and ten measured repetitions), then runs the requested 1/5/20/full
+L-BFGS gate. The runner never requests an IPM polish, PSD lift, Hessian, Gram
+matrix, HVP, or CG solve.
+
+```sh
+SDPX_BENCH_ARITHMETIC=float64 \
+SDPX_BENCH_MAX_ITERATIONS=20 \
+SDPX_BENCH_REQUIRE_OPTIMAL=false \
+julia -t 1 --project=<provider-env> run_reduced_dual.jl \
+  /tmp/csdr-fixedtrace-reduced-neutral.bin /tmp/eft-rd-f64-i20
+```
+
+Supported selectors are `float64`, `float64x2`, `float64x3`, and
+`float64x4`. Float64 uses the planned Standard/BLAS GEMV route; MultiFloat
+requests MFLA explicitly and fails during planning if it is unavailable. The
+reported interval is numerical at the requested arithmetic and tolerance
+(`rigorous_interval=false`), not an outward-rounded real bound.
+
+### Current reduced-dual evidence
+
+On the final one-thread worktree, warm objective/gradient medians were about
+`0.000198 s` (Float64), `0.00263 s` (Float64x2), and `0.02084 s`
+(Float64x4), with zero measured steady-state allocation. The 200-step runs
+took `0.109 s`, `0.736 s`, and `5.654 s`, respectively, and all preserved the
+planned provider, `fixed_trace_q3`, no-PSD, and no-fallback invariants.
+
+Those fast runs did **not** pass the numerical gate: all ended at `IterLimit`
+with an invalid original-coordinate certificate. A diagnostic Float64 run
+with 10,000 accepted steps took `2.604 s` but also failed certification
+(`relative_gap=0.525`). The low-`tau` support Hessian becomes increasingly
+ill-conditioned near nonsmooth active blocks, so cheap evaluations do not
+translate into high-accuracy L-BFGS convergence on this model. The runner and
+API therefore remain experimental; they do not replace the certified IPM.
+
 This benchmark converts the archived CSDR model
 
 ```text
@@ -76,16 +114,17 @@ end-to-end solve.
 
 ## Validated regression fix
 
-On the same one-Julia-thread/one-BLAS-thread Mac configuration, the final
-Float64x4 run completed in 120 iterations with `solve_seconds=59.6199` and
-`timing_total=58.6104`. The original-coordinate certificate was valid, the
+On the same one-Julia-thread/one-BLAS-thread Mac configuration and final
+worktree, the Float64x4 reference run completed in 120 iterations with
+`solve_seconds=57.2905` and `timing_total=56.3282`. The original-coordinate
+certificate was valid, the
 relative gap was `9.27e-14`, and the physical objective was inside the archived
 certificate interval. Each iteration performed exactly one equality-panel
 transform, one Gram SYRK, one equality factorization, and two KKT RHS solves.
 
 The corresponding Float64x2 run also completed in 120 iterations, with
-`solve_seconds=11.9606` and `timing_total=11.6682`. Its relative gap was
+`solve_seconds=10.4755` and `timing_total=10.2199`. Its relative gap was
 `9.51e-14`, the original-coordinate certificate was valid, and the physical
 objective remained inside the same archived interval. Equality Gram assembly
-remained the largest measured phase at `6.5553` seconds. These are separate
+remained the largest measured phase at `5.9825` seconds. These are separate
 single-thread measurements; they do not imply a cross-thread speedup.
