@@ -550,23 +550,39 @@ mutable struct SparseSchurSDPWorkspace
     equality_requires_pivoting::Bool
     regularization::Float64
     factorization_quality::Float64
+    assembly_count::Int
+    assembly_seconds::Float64
+    last_assembly_seconds::Float64
 end
 
 const SPARSE_SCHUR_SDP_MINIMUM_VARIABLES = 10_000
 const SPARSE_SCHUR_SDP_MAXIMUM_DENSITY = 0.10
 
 function _use_sparse_schur_sdp(prob::SDPProblem{T}) where {T}
-    T === Float64 || return false
     sizeof(Int) >= 8 || return false
-    prob.cons isa SparseCons{Float64} || return false
-    prob.B isa SparseMatrixCSC{Float64,Int} || return false
-    prob.dims.n > 0 || return false
-    prob.dims.m >= SPARSE_SCHUR_SDP_MINIMUM_VARIABLES || return false
-    prob.structure.schur_density <= SPARSE_SCHUR_SDP_MAXIMUM_DENSITY ||
-        return false
-    dense_factor_nonzeros =
-        Int128(prob.dims.m) * Int128(prob.dims.m + 1) ÷ 2
-    return dense_factor_nonzeros < typemax(Int32)
+    # Generic MPFR/MultiFloat sparse Schur is production-supported only for
+    # equality-free normal equations.  Equality recovery still requires a
+    # provider-owned panel audit and is rejected before Workspace allocation.
+    generic = T !== Float64
+    generic && prob.dims.n > 0 && return false
+    (T === Float64 || supports_sparse_generic(T)) || return false
+    prob.cons isa SparseCons{T} || return false
+    # The Schur planner is authoritative.  It has already compared the
+    # structural nnz estimate with the deterministic density/memory rule, so
+    # no numeric try-sparse/fallback decision is made here.  Explicit sparse
+    # requests are represented by the same plan and therefore remain
+    # inspectable before workspace construction.
+    plan = prob.structure.schur_plan
+    plan.storage === :sparse || return false
+    # CHOLMOD's compact Int32 index path has a hard capacity guard.  Generic
+    # providers use native Int indices but retain the same conservative check
+    # on Float64 to avoid constructing an unrepresentable factor pattern.
+    if T === Float64
+        dense_factor_nonzeros =
+            Int128(prob.dims.m) * Int128(prob.dims.m + 1) ÷ 2
+        dense_factor_nonzeros < typemax(Int32) || return false
+    end
+    return true
 end
 
 function _sparse_sdp_memberships(cons::SparseCons{Float64}, m::Int)
@@ -671,7 +687,11 @@ function _sparse_schur_sdp_workspace(
     thread_count::Int,
 )
     cons = prob.cons::SparseCons{Float64}
-    B = prob.B::SparseMatrixCSC{Float64,Int}
+    # Dense equality input is converted once at setup.  The Schur matrix
+    # remains sparse; this conversion is only the small m×n equality RHS
+    # panel and does not constitute a dense-Schur fallback.
+    B = prob.B isa SparseMatrixCSC ?
+        (prob.B::SparseMatrixCSC{Float64}) : sparse(prob.B)
     m, n = prob.dims.m, prob.dims.n
     memberships = _sparse_sdp_memberships(cons, m)
     schur_counts = zeros(Int32, m)
@@ -736,6 +756,9 @@ function _sparse_schur_sdp_workspace(
         # iterations.
         sqrt(eps(Float64)),
         1.0,
+        0,
+        0.0,
+        0.0,
     )
 end
 
@@ -1338,13 +1361,8 @@ function Workspace(
             min(selected_threads, max(m, 1)),
         ) :
         Int[]
-    sparse_kkt_workspace =
-        sparse_schur ?
-        _sparse_schur_sdp_workspace(
-            prob::SDPProblem{Float64},
-            selected_threads,
-        ) :
-        nothing
+    sparse_kkt_workspace = sparse_schur ?
+        _sparse_schur_sdp_workspace(prob, selected_threads) : nothing
     vector_partial_count =
         sparse_schur ?
         min(selected_threads, max(m, 1)) :

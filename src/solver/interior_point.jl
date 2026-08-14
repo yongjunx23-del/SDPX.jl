@@ -1869,25 +1869,25 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 _mixed_precision_kkt_diagnostics(ws),
             sparse_schur_backend=
                 ws.sparse_kkt === nothing ? nothing :
-                let sparse_workspace =
-                        ws.sparse_kkt::SparseSchurSDPWorkspace,
-                    backend = sparse_workspace.backend
-                    backend === nothing ||
-                    backend.factorization === nothing ?
-                    (available=false,) :
+                let diagnostics = sparse_schur_diagnostics(ws, solve_prob),
+                    sparse_workspace = ws.sparse_kkt
                     merge(
-                            statistics(backend),
-                            (
-                                available=true,
-                                schur_nnz=nnz(sparse_workspace.matrix),
-                                factor_nonzeros=
-                                    nnz(backend.factorization),
-                                regularization=
-                                    sparse_workspace.regularization,
-                                equality_requires_pivoting=
-                                    sparse_workspace.equality_requires_pivoting,
-                            ),
-                        )
+                        diagnostics,
+                        (
+                            # Preserve the historical termination keys used by
+                            # diagnostics consumers while exposing the richer
+                            # frozen-pattern metrics above.
+                            schur_nnz=diagnostics.structural_nnz,
+                            regularization=sparse_workspace isa
+                                           SparseSchurSDPWorkspace ?
+                                           sparse_workspace.regularization :
+                                           nothing,
+                            equality_requires_pivoting=
+                                sparse_workspace isa SparseSchurSDPWorkspace ?
+                                sparse_workspace.equality_requires_pivoting :
+                                false,
+                        ),
+                    )
                 end,
             equality_system=equality_diagnostics,
             augmented_kkt=

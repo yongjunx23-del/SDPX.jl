@@ -1065,6 +1065,150 @@ function _factor_sparse_schur_sdp!(
     )
 end
 
+"""Generic BigFloat/MultiFloat sparse-Schur factor path.
+
+The sparse CSC pattern and generic provider are selected before execution and
+remain fixed for the solve.  Only `nzval` is refreshed and numerically
+refactorized; a failed sparse factor is reported to the caller and is never
+silently replaced by the dense Schur workspace.
+"""
+function _factor_sparse_schur_sdp!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    sparse_workspace = ws.sparse_kkt
+    sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+        throw(ArgumentError(
+            "generic sparse-Schur factorization received $(typeof(sparse_workspace))",
+        ))
+    storage = sparse_workspace.storage
+    matrix = storage.matrix
+    positions = sparse_workspace.primal_diagonal_positions
+    values = sparse_workspace.primal_diagonal_values
+    @inbounds for index in eachindex(positions)
+        value = matrix.nzval[positions[index]]
+        if T === BigFloat
+            _sparse_store!(values[index], value)
+        else
+            values[index] = value
+        end
+    end
+
+    factor = sparse_workspace.factor
+    if factor === nothing
+        factor = sparse_factor(
+            matrix;
+            provider=GenericSparseProvider(T),
+            symbolic=storage.symbolic,
+        )
+        sparse_workspace.factor = factor
+    end
+
+    regularization = sparse_workspace.regularization
+    attempts = regularization > zero(T) ? 1 : 0
+    ok = false
+    while true
+        @inbounds for index in eachindex(positions)
+            diagonal = values[index]
+            shifted = diagonal + regularization * max(abs(diagonal), one(T))
+            if T === BigFloat
+                _sparse_store!(matrix.nzval[positions[index]], shifted)
+            else
+                matrix.nzval[positions[index]] = shifted
+            end
+        end
+        ok = numeric_factorize!(factor, matrix) |> issuccess
+        @inbounds for index in eachindex(positions)
+            if T === BigFloat
+                _sparse_store!(matrix.nzval[positions[index]], values[index])
+            else
+                matrix.nzval[positions[index]] = values[index]
+            end
+        end
+        ok && break
+        attempts >= 6 && break
+        attempts += 1
+        regularization = attempts == 1 ? sqrt(eps(T)) : 10 * regularization
+    end
+    sparse_workspace.regularization = regularization
+    if !ok
+        return (
+            ok=false,
+            reg_attempts=attempts,
+            q_pivoted=false,
+            q_rank_deficient=false,
+            phase_times=(
+                schur_copy=0.0,
+                schur_factorization=0.0,
+                constraint_triangular_solve=0.0,
+                equality_gram=0.0,
+                equality_factorization=0.0,
+            ),
+        )
+    end
+
+    smallest = typemax(Float64)
+    largest = 0.0
+    @inbounds for diagonal in values
+        magnitude = Float64(abs(diagonal))
+        effective = magnitude + Float64(regularization) * max(magnitude, 1.0)
+        smallest = min(smallest, effective)
+        largest = max(largest, effective)
+    end
+    quality = largest > 0 && isfinite(smallest) ? smallest / largest : 0.0
+    sparse_workspace.factorization_quality = T(quality)
+
+    n = prob.dims.n
+    q_pivoted = false
+    q_rank_deficient = false
+    if n > 0
+        # Btil = S⁻¹B using the same generic sparse factor.  The equality
+        # Gram remains dense by definition (its order is n, not m), and is
+        # factored through the provider-neutral dense LA seam.
+        sparse_factor_solve!(ws.Btil, factor, sparse_workspace.constraint_rhs)
+        mul!(ws.Q, transpose(prob.B), ws.Btil)
+        equality_scaling = sparse_workspace.equality_scaling
+        @inbounds for index in 1:n
+            diagonal = abs(ws.Q[index, index])
+            equality_scaling[index] = inv(sqrt(max(diagonal, eps(T))))
+        end
+        @inbounds for column in 1:n, row in column:n
+            ws.Q[row, column] *= equality_scaling[row] * equality_scaling[column]
+            row != column && (ws.Q[column, row] = ws.Q[row, column])
+        end
+        copy_owned!(ws.Qbuf, ws.Q)
+        ok_q = la_chol!(ws.la_backend, ws.Qbuf)
+        if ok_q
+            ws.Qchol = ws.Qbuf isa Matrix{T} ?
+                       cholesky!(Symmetric(ws.Qbuf, :L); check=false) :
+                       cholesky(Symmetric(ws.Qbuf, :L); check=false)
+        else
+            q_pivoted = true
+            pivoted = cholesky!(
+                Symmetric(ws.Qbuf, :L),
+                LinearAlgebra.RowMaximum();
+                check=false,
+            )
+            ws.Qchol = pivoted
+            q_rank_deficient = pivoted.rank < n
+        end
+    end
+    return (
+        ok=true,
+        reg_attempts=attempts,
+        q_pivoted=q_pivoted,
+        q_rank_deficient=q_rank_deficient,
+        phase_times=(
+            schur_copy=0.0,
+            schur_factorization=0.0,
+            constraint_triangular_solve=0.0,
+            equality_gram=0.0,
+            equality_factorization=0.0,
+        ),
+    )
+end
+
 function _factor_dense_kkt_native!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -2228,6 +2372,44 @@ function _solve_sparse_schur_kkt_owned!(
     return dx_out, dy_out
 end
 
+function _solve_sparse_schur_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    sparse_workspace = ws.sparse_kkt
+    sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+        throw(ArgumentError("generic sparse-Schur solve received an incompatible workspace"))
+    factor = sparse_workspace.factor
+    factor === nothing && throw(ArgumentError(
+        "generic sparse-Schur factor is unavailable; call factorize! first",
+    ))
+    sparse_factor_solve!(ws.rtil, factor, r)
+    if n > 0
+        copy_owned!(ws.q_rhs, p_rhs)
+        mul!(ws.q_perm, transpose(sparse_workspace.constraint_rhs), ws.rtil)
+        @inbounds for index in eachindex(ws.q_rhs)
+            ws.q_rhs[index] =
+                (ws.q_rhs[index] - ws.q_perm[index]) *
+                sparse_workspace.equality_scaling[index]
+        end
+        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
+        @inbounds for index in eachindex(dy_out)
+            dy_out[index] *= sparse_workspace.equality_scaling[index]
+        end
+        mul!(dx_out, ws.Btil, dy_out)
+        @inbounds for index in eachindex(dx_out)
+            dx_out[index] += ws.rtil[index]
+        end
+    else
+        copy_owned!(dx_out, ws.rtil)
+    end
+    return dx_out, dy_out
+end
+
 function _solve_dense_kkt_owned!(
     ws::Workspace{T},
     n::Int,
@@ -2275,14 +2457,24 @@ function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs
             dy_out,
         )
     end
-    if T === Float64 && ws.sparse_kkt !== nothing
+    if ws.sparse_kkt !== nothing
+        if T === Float64
+            return _solve_sparse_schur_kkt_owned!(
+                ws::Workspace{Float64},
+                n,
+                r::AbstractVector{Float64},
+                p_rhs::AbstractVector{Float64},
+                dx_out::AbstractVector{Float64},
+                dy_out::AbstractVector{Float64},
+            )
+        end
         return _solve_sparse_schur_kkt_owned!(
-            ws::Workspace{Float64},
+            ws,
             n,
-            r::AbstractVector{Float64},
-            p_rhs::AbstractVector{Float64},
-            dx_out::AbstractVector{Float64},
-            dy_out::AbstractVector{Float64},
+            r,
+            p_rhs,
+            dx_out,
+            dy_out,
         )
     end
     return _solve_dense_kkt_owned!(
@@ -3221,6 +3413,40 @@ function schur_mul!(
                     value += ws.vpartial[worker][index]
                 end
                 out[index] = α * value + β * out[index]
+            end
+            return out
+        end
+        if ws.sparse_kkt isa GenericSparseSchurSDPWorkspace{T}
+            sparse_workspace = ws.sparse_kkt::GenericSparseSchurSDPWorkspace{T}
+            matrix = sparse_workspace.storage.matrix
+            dimension = size(matrix, 1)
+            length(out) == dimension && length(x) == dimension ||
+                throw(DimensionMismatch("sparse Schur-vector dimensions do not match"))
+            # The frozen matrix stores the authoritative lower triangle.  A
+            # column-wise traversal applies both symmetric entries without
+            # materialising a dense Schur matrix.
+            if T === BigFloat
+                @inbounds for index in eachindex(out)
+                    out[index] *= β
+                end
+                @inbounds for column in axes(matrix, 2), pointer in
+                                  matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                    row = matrix.rowval[pointer]
+                    value = α * matrix.nzval[pointer] * x[column]
+                    out[row] += value
+                    row != column && (out[column] += α * matrix.nzval[pointer] * x[row])
+                end
+            else
+                @inbounds for index in eachindex(out)
+                    out[index] *= β
+                end
+                @inbounds for column in axes(matrix, 2), pointer in
+                                  matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                    row = matrix.rowval[pointer]
+                    value = α * matrix.nzval[pointer]
+                    out[row] += value * x[column]
+                    row != column && (out[column] += value * x[row])
+                end
             end
             return out
         end

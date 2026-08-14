@@ -270,6 +270,17 @@ function factorize!(
 end
 
 function factorize!(
+    backend::SparseSchurBackend,
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    _assert_planned_backend!(ws, backend, opts)
+    _record_backend_execution!(ws, backend)
+    return _factor_sparse_schur_sdp!(ws, prob, opts)
+end
+
+function factorize!(
     backend::MixedPrecisionBackend,
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -335,6 +346,25 @@ solve!(::SparseSchurBackend, ws::Workspace{Float64}, n::Int,
         dx_out,
         dy_out,
     )
+
+function solve!(
+    ::SparseSchurBackend,
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    return _solve_sparse_schur_kkt_owned!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+end
 
 function solve!(
     ::MixedPrecisionBackend,

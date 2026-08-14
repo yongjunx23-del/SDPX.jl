@@ -192,6 +192,41 @@ struct ChordalAnalysis
     beneficial::Bool
 end
 
+"""
+    ChordalPlan
+
+Analysis-only decision for one PSD block.  `transformation=:none` is
+intentional in Round 7: even a beneficial already-chordal pattern is reported
+for diagnostics, but no clique/separator reformulation is applied to the
+problem or certification coordinates.
+"""
+struct ChordalPlan
+    block::Int
+    is_chordal::Bool
+    cliques::Vector{Vector{Int}}
+    largest_clique::Int
+    density::Float64
+    estimated_cost_ratio::Float64
+    beneficial::Bool
+    selected::Bool
+    transformation::Symbol
+    reason::Symbol
+end
+
+function Base.getproperty(plan::ChordalPlan, name::Symbol)
+    name === :chordal && return getfield(plan, :is_chordal)
+    name === :largest && return getfield(plan, :largest_clique)
+    name === :cost_ratio && return getfield(plan, :estimated_cost_ratio)
+    name === :candidate && return getfield(plan, :beneficial)
+    name === :analysis_only && return getfield(plan, :transformation) === :none
+    return getfield(plan, name)
+end
+
+function Base.propertynames(plan::ChordalPlan, private::Bool=false)
+    names = fieldnames(typeof(plan))
+    return (names..., :chordal, :largest, :cost_ratio, :candidate, :analysis_only)
+end
+
 """Splitting is only worth it when the cliques cost this fraction of the dense
 factorization or less; above it, the overlap bookkeeping outweighs the saving."""
 const CHORDAL_MAXIMUM_COST_RATIO = 0.5
@@ -233,6 +268,44 @@ function analyze_chordal_structure(prob::SDPProblem{T}, block::Integer) where {T
     return ChordalAnalysis(dimension, chordal, cliques, largest, density,
         ratio, beneficial)
 end
+
+"""Create an analysis-only ChordalPlan; no formulation transformation occurs."""
+function chordal_plan(
+    prob::SDPProblem,
+    block::Integer;
+    requested::Symbol=:auto,
+)
+    requested in (:auto, :on, :off) || throw(ArgumentError(
+        "chordal request must be :auto, :on, or :off",
+    ))
+    1 <= block <= prob.dims.L || throw(BoundsError(1:prob.dims.L, block))
+    analysis = analyze_chordal_structure(prob, block)
+    beneficial = analysis.beneficial
+    # `selected` means an executable transformation.  Round 7 intentionally
+    # keeps clique conversion analysis-only, so a beneficial candidate is
+    # reported through `beneficial`/`candidate` while `selected` stays false.
+    selected = false
+    reason = !analysis.chordal ? :non_chordal :
+             requested === :off ? :disabled :
+             !beneficial ? :not_beneficial : :analysis_only_beneficial
+    return ChordalPlan(
+        Int(block),
+        analysis.chordal,
+        analysis.cliques,
+        analysis.largest_clique,
+        analysis.density,
+        analysis.predicted_cost_ratio,
+        beneficial,
+        selected,
+        :none,
+        reason,
+    )
+end
+
+chordal_plans(prob::SDPProblem; requested::Symbol=:auto) = [
+    chordal_plan(prob, block; requested=requested)
+    for block in 1:prob.dims.L
+]
 
 """
     chordal_summary(prob) -> Vector{ChordalAnalysis}

@@ -104,6 +104,114 @@ function _estimate_schur_structure(active::Vector{Vector{Int}}, m::Int, L::Int)
     return estimate, upper_slots, false
 end
 
+"""Build the constraint-overlap graph used by the Schur planner.
+
+An edge is added when two constraints are active in the same PSD block.  The
+graph is structural (it never inspects iterate values) and is built once at
+ingest.  Materialising all edges of a very large, nearly complete graph would
+consume more memory than the sparse matrix it predicts, so the graph is
+deterministically capped while the scalar density estimate remains available
+from `_estimate_schur_structure`.
+"""
+function _constraint_overlap_graph(
+    active::Vector{Vector{Int}},
+    m::Int;
+    edge_cap::Int=2_000_000,
+)
+    candidate_pairs = sum(
+        count -> count * max(count - 1, 0) ÷ 2,
+        (length(ids) for ids in active);
+        init=0,
+    )
+    # Avoid walking a provably near-complete large graph.  The scalar Schur
+    # estimate uses its own exact/sampled mask pass; this graph is explicitly
+    # marked inexact and remains an optional diagnostic object.
+    candidate_pairs > 4 * edge_cap &&
+        return [Int[] for _ in 1:m], 0, false
+    neighbours = [Set{Int}() for _ in 1:m]
+    edges = 0
+    exact = true
+    for ids in active
+        count = length(ids)
+        for left in 1:count
+            i = ids[left]
+            for right in (left + 1):count
+                j = ids[right]
+                # Sets avoid duplicate edges when two PSD blocks share the
+                # same pair.  Once the cap is reached we retain the already
+                # materialised prefix and mark the graph as sampled.
+                if j in neighbours[i]
+                    continue
+                end
+                if edges >= edge_cap
+                    exact = false
+                    continue
+                end
+                push!(neighbours[i], j)
+                push!(neighbours[j], i)
+                edges += 1
+            end
+        end
+    end
+    graph = [sort!(collect(set)) for set in neighbours]
+    return graph, edges, exact
+end
+
+@inline function _schur_storage_request(requested)
+    requested isa Bool && return requested ? :sparse : :dense
+    requested in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse/storage selection must be false/:dense, true/:sparse, or :auto",
+    ))
+    return requested
+end
+
+"""Select a Schur storage strategy before any workspace/factor is allocated."""
+function _schur_structure_plan(
+    active::Vector{Vector{Int}},
+    m::Int,
+    k::Vector{Int},
+    estimated_nnz::Int,
+    estimated_density::Float64,
+    requested,
+)
+    request = _schur_storage_request(requested)
+    # `:auto` intentionally uses only deterministic structural facts.  The
+    # 20% threshold leaves a generous margin for symbolic fill and avoids a
+    # try-sparse-then-fallback policy.  `:block_sparse` is an assembly hint,
+    # not a separate factorization/provider.
+    sparse_candidate = estimated_density <= 0.20
+    selected = request === :dense ? :dense :
+               request === :sparse ? :sparse :
+               sparse_candidate ? :sparse : :dense
+    active_incidence = sum(length, active; init=0)
+    average_active = active_incidence / max(length(active), 1)
+    block_sparse = selected === :sparse &&
+                   length(active) > 1 &&
+                   (estimated_density <= 0.10 || average_active <= max(4.0, 0.10 * m))
+    strategy = block_sparse ? :block_sparse : selected
+    reason = request === :dense ? :explicit_dense :
+             request === :sparse ? :explicit_sparse :
+             sparse_candidate ?
+             (block_sparse ? :low_overlap_block_sparse : :low_schur_density) :
+             :dense_schur_structure
+    # A symbolic fill estimate is unavailable until the pattern is frozen. A
+    # monotone cubic proxy is useful for diagnostics and does not influence
+    # route selection.
+    factor_cost = selected === :dense ?
+                  Float64(max(m, 1))^3 :
+                  Float64(max(estimated_nnz, 1)) * sqrt(Float64(max(m, 1)))
+    return SchurStructurePlan(
+        strategy;
+        storage=selected,
+        estimated_nnz=estimated_nnz,
+        estimated_density=estimated_density,
+        estimated_factor_cost=factor_cost,
+        reason=reason,
+        requested=request,
+        pre_execution=true,
+    )
+end
+
 function _structure_analysis(
     active::Vector{Vector{Int}},
     coefficient_nnz_by_block::Vector{Int},
@@ -136,6 +244,18 @@ function _structure_analysis(
     schur_upper_nnz, schur_upper_slots, schur_exact =
         _estimate_schur_structure(active, m, L)
     schur_density = schur_upper_nnz / max(schur_upper_slots, 1)
+
+    overlap_graph, overlap_edges, overlap_graph_exact =
+        _constraint_overlap_graph(active, m)
+    schur_analysis_exact = schur_exact && overlap_graph_exact
+    schur_plan = _schur_structure_plan(
+        active,
+        m,
+        k,
+        schur_upper_nnz,
+        schur_density,
+        requested_storage,
+    )
 
     recommended_storage =
         coefficient_density <= 0.20 || active_density <= 0.55 ? :sparse : :dense
@@ -187,12 +307,26 @@ function _structure_analysis(
         schur_upper_nnz,
         schur_upper_slots,
         schur_density,
-        schur_exact,
+        schur_analysis_exact,
         recommended_storage,
         selected_storage,
         psd_kernel,
         schur_backend,
         profile,
+        SchurStructureAnalysis(
+            m,
+            L,
+            copy(k),
+            [length(ids) for ids in active],
+            overlap_graph,
+            overlap_edges,
+            schur_upper_nnz,
+            schur_density,
+            schur_plan.estimated_factor_cost,
+            schur_analysis_exact,
+        ),
+        schur_plan,
+        overlap_graph,
     )
 end
 
@@ -320,6 +454,10 @@ function structure_summary(prob::SDPProblem)
         block_pattern_density=analysis.block_pattern_density,
         schur_density=analysis.schur_density,
         schur_exact=analysis.schur_exact,
+        schur_strategy=analysis.schur_plan.strategy,
+        schur_plan_reason=analysis.schur_plan.reason,
+        schur_estimated_nnz=analysis.schur_plan.estimated_nnz,
+        overlap_edges=analysis.schur_analysis.overlap_edges,
         psd_kernel=analysis.psd_kernel,
         schur_backend=analysis.schur_backend,
     )

@@ -41,6 +41,19 @@ Primal-to-dual conversion and chordal transformation are analysis-only. The
 estimators may report a potentially cheaper alternative, but neither
 transformation is selected automatically.
 
+Sparse Schur planning is also completed before a workspace is allocated.
+`problem.structure.schur_analysis` records the active-constraint overlap graph,
+estimated upper-triangle nonzeros, density, and per-block active counts;
+`problem.structure.schur_plan` records the deterministic `:dense`, `:sparse`,
+or `:block_sparse` choice and its reason.  A selected Float64 sparse plan
+freezes one CSC pattern and `SchurAssemblyMap`, so later iterations update only
+`nzval`.  `SDPX.Experimental.sparse_schur_diagnostics(workspace)` reports structural/numeric
+nonzeros, factor fill, pattern reuse, overlap/block counts, and assembly timing.
+Generic MultiFloat/BigFloat sparse-Schur equality recovery remains explicitly
+fail-closed: an explicit `sparse=:sparse` request raises before workspace
+construction, while `sparse=:auto` may choose the dense route when its plan
+does not have a supported provider.
+
 ## Bound storage
 
 MOI supports `VariableIndex` and `ScalarAffineFunction` constraints in

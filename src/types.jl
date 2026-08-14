@@ -1064,6 +1064,98 @@ struct SparseCons{T} <: AbstractCons{T}
     coo::Vector{SparseBlockCOO{T}}
 end
 
+"""
+    SchurStructureAnalysis
+
+Arithmetic-independent facts about the variable-space Schur complement of an
+SDP.  The analysis is deliberately separate from `StructureAnalysis`'s
+coefficient-storage facts: sparse coefficient matrices do not imply a sparse
+Schur matrix.  `overlap_graph[i]` contains the constraint indices that share
+at least one PSD block with constraint `i`; an edge therefore denotes a
+*possible* nonzero Schur entry and is never inferred from iterate values.
+
+For very large models an analysis may be sampled/capped.  In that case
+`exact=false` and the graph contains the deterministic prefix that was
+materialised; the density estimate remains the authoritative planner fact.
+"""
+struct SchurStructureAnalysis
+    dimension::Int
+    psd_block_count::Int
+    block_dimensions::Vector{Int}
+    active_constraints_per_block::Vector{Int}
+    overlap_graph::Vector{Vector{Int}}
+    overlap_edges::Int
+    estimated_nnz::Int
+    estimated_density::Float64
+    estimated_factor_cost::Float64
+    exact::Bool
+end
+
+function Base.getproperty(analysis::SchurStructureAnalysis, name::Symbol)
+    name === :constraint_count && return getfield(analysis, :dimension)
+    name === :block_count && return getfield(analysis, :psd_block_count)
+    name === :estimated_schur_nnz && return getfield(analysis, :estimated_nnz)
+    name === :schur_nnz && return getfield(analysis, :estimated_nnz)
+    name === :density && return getfield(analysis, :estimated_density)
+    name === :factor_cost && return getfield(analysis, :estimated_factor_cost)
+    return getfield(analysis, name)
+end
+
+"""Pre-execution Schur storage decision.
+
+`strategy` is one of `:dense`, `:sparse`, or `:block_sparse`.  The object is
+purely descriptive and is built before a workspace/factor is allocated;
+numeric factorisation is never used as a try-and-fallback selector.
+"""
+struct SchurStructurePlan
+    strategy::Symbol
+    storage::Symbol
+    estimated_nnz::Int
+    estimated_density::Float64
+    estimated_factor_cost::Float64
+    reason::Symbol
+    requested::Symbol
+    pre_execution::Bool
+end
+
+function SchurStructurePlan(
+    strategy::Symbol;
+    storage::Symbol=strategy === :dense ? :dense : :sparse,
+    estimated_nnz::Integer=0,
+    estimated_density::Real=0.0,
+    estimated_factor_cost::Real=0.0,
+    reason::Symbol=:static_structure,
+    requested::Symbol=:auto,
+    pre_execution::Bool=true,
+)
+    strategy in (:dense, :sparse, :block_sparse) ||
+        throw(ArgumentError(
+            "Schur strategy must be :dense, :sparse, or :block_sparse",
+        ))
+    storage in (:dense, :sparse) ||
+        throw(ArgumentError("Schur storage must be :dense or :sparse"))
+    requested in (:auto, :dense, :sparse) ||
+        throw(ArgumentError("Schur storage request must be :auto, :dense, or :sparse"))
+    return SchurStructurePlan(
+        strategy,
+        storage,
+        Int(estimated_nnz),
+        Float64(estimated_density),
+        Float64(estimated_factor_cost),
+        reason,
+        requested,
+        pre_execution,
+    )
+end
+
+function Base.getproperty(plan::SchurStructurePlan, name::Symbol)
+    name === :selected && return getfield(plan, :strategy)
+    name === :nnz && return getfield(plan, :estimated_nnz)
+    name === :density && return getfield(plan, :estimated_density)
+    name === :factor_cost && return getfield(plan, :estimated_factor_cost)
+    return getfield(plan, name)
+end
+
 @inline function _packed2_nonzero_mask(
     coefficients::AbstractMatrix,
     position::Int,
@@ -1158,6 +1250,84 @@ struct StructureAnalysis
     psd_kernel::Symbol
     schur_backend::Symbol
     profile::Symbol
+    schur_analysis::SchurStructureAnalysis
+    schur_plan::SchurStructurePlan
+    overlap_graph::Vector{Vector{Int}}
+end
+
+# Source compatibility for callers that construct the pre-Round7 positional
+# descriptor directly.  Ingestion uses the richer constructor below; the
+# compatibility object still exposes a valid (conservative) Schur plan.
+function StructureAnalysis(
+    coefficient_nnz::Int,
+    coefficient_slots::Int,
+    coefficient_density::Float64,
+    active_incidences::Int,
+    active_slots::Int,
+    active_density::Float64,
+    block_pattern_nnz::Int,
+    block_pattern_slots::Int,
+    block_pattern_density::Float64,
+    block_coefficient_densities::Vector{Float64},
+    block_pattern_densities::Vector{Float64},
+    schur_upper_nnz::Int,
+    schur_upper_slots::Int,
+    schur_density::Float64,
+    schur_exact::Bool,
+    recommended_storage::Symbol,
+    selected_storage::Symbol,
+    psd_kernel::Symbol,
+    schur_backend::Symbol,
+    profile::Symbol,
+)
+    dimension = max(length(block_coefficient_densities), 0)
+    graph = [Int[] for _ in 1:dimension]
+    facts = SchurStructureAnalysis(
+        0,
+        dimension,
+        Int[],
+        Int[],
+        graph,
+        0,
+        schur_upper_nnz,
+        schur_density,
+        Float64(schur_upper_nnz),
+        schur_exact,
+    )
+    plan = SchurStructurePlan(
+        selected_storage === :sparse ? :sparse : :dense;
+        storage=selected_storage === :sparse ? :sparse : :dense,
+        estimated_nnz=schur_upper_nnz,
+        estimated_density=schur_density,
+        estimated_factor_cost=Float64(schur_upper_nnz),
+        reason=:compatibility,
+        requested=selected_storage,
+    )
+    return StructureAnalysis(
+        coefficient_nnz,
+        coefficient_slots,
+        coefficient_density,
+        active_incidences,
+        active_slots,
+        active_density,
+        block_pattern_nnz,
+        block_pattern_slots,
+        block_pattern_density,
+        block_coefficient_densities,
+        block_pattern_densities,
+        schur_upper_nnz,
+        schur_upper_slots,
+        schur_density,
+        schur_exact,
+        recommended_storage,
+        selected_storage,
+        psd_kernel,
+        schur_backend,
+        profile,
+        facts,
+        plan,
+        graph,
+    )
 end
 
 """

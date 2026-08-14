@@ -48,7 +48,6 @@ sparse_provider_capabilities(::Type{T}) where {T} =
 supports_sparse_generic(::Type{BigFloat}) = true
 supports_sparse_generic(::Type{T}) where {T} = is_multifloat_arithmetic(T)
 supports_sparse_generic(::Type{Float64}) = false
-supports_sparse_generic(::Type) = false
 
 """Whether any first-class sparse provider can execute arithmetic `T`."""
 supports_sparse_execution(::Type{Float64}) = true
@@ -373,6 +372,221 @@ end
 
 function sparse_position(storage::SparseKKTStorage, row::Int, column::Int)
     get(storage.position_map, (row, column), 0)
+end
+
+"""
+    SchurAssemblyMap
+
+Frozen map from every PSD-block-local upper-triangle contribution to a global
+lower CSC `nzval` slot.  The map is built once from the active constraint sets
+and is independent of the numeric iterates.  Iterations therefore only clear
+and update `nzval`; they never perform dictionary/CSC searches or rebuild
+`colptr`/`rowval`.
+"""
+struct SchurAssemblyMap{T}
+    block::Vector{Int32}
+    left::Vector{Int32}
+    right::Vector{Int32}
+    position::Vector{Int32}
+    block_ranges::Vector{UnitRange{Int}}
+    pattern_signature::UInt64
+end
+
+"""Generic sparse-Schur execution state used by MultiFloat/BigFloat.
+
+The Float64 B3 workspace keeps its compact Int32 CSC representation for
+CHOLMOD.  This companion state uses the provider-neutral `SparseKKTStorage`
+and therefore shares the same frozen pattern/map with the generic sparse
+factor providers without converting the Schur matrix to a dense buffer.
+"""
+mutable struct GenericSparseSchurSDPWorkspace{T}
+    storage::SparseKKTStorage{T}
+    assembly_map::SchurAssemblyMap{T}
+    primal_diagonal_positions::Vector{Int}
+    primal_diagonal_values::Vector{T}
+    constraint_rhs::Matrix{T}
+    equality_scaling::Vector{T}
+    factor::Any
+    equality_requires_pivoting::Bool
+    regularization::T
+    factorization_quality::T
+    assembly_count::Int
+end
+
+function Base.getproperty(map::SchurAssemblyMap, name::Symbol)
+    name === :block_ids && return getfield(map, :block)
+    name === :local_left && return getfield(map, :left)
+    name === :local_right && return getfield(map, :right)
+    name === :nzval_positions && return getfield(map, :position)
+    name === :ranges && return getfield(map, :block_ranges)
+    return getfield(map, name)
+end
+
+"""Return the lower CSC pattern induced by PSD-block active constraint overlap."""
+function schur_pattern_csc(
+    active::AbstractVector{<:AbstractVector{<:Integer}},
+    dimension::Integer,
+    ::Type{T}=Float64,
+) where {T}
+    m = Int(dimension)
+    m >= 0 || throw(ArgumentError("Schur dimension must be nonnegative"))
+    rows = Int[]
+    columns = Int[]
+    values = T[]
+    seen = Set{Tuple{Int,Int}}()
+    # Keep every diagonal structurally present.  A zero numerical diagonal is
+    # valid during setup and is regularised by the factorization layer when
+    # necessary, while dropping it would make the symbolic recurrence invalid.
+    for index in 1:m
+        push!(rows, index)
+        push!(columns, index)
+        push!(values, one(T))
+        push!(seen, (index, index))
+    end
+    for ids0 in active
+        ids = sort!(unique!(Int.(ids0)))
+        for left in eachindex(ids)
+            i = ids[left]
+            1 <= i <= m || throw(BoundsError(1:m, i))
+            for right in left:length(ids)
+                j = ids[right]
+                lower = (max(i, j), min(i, j))
+                lower in seen && continue
+                push!(seen, lower)
+                push!(rows, lower[1])
+                push!(columns, lower[2])
+                push!(values, one(T))
+            end
+        end
+    end
+    return sparse(rows, columns, values, m, m)
+end
+
+"""Build a direct local-pair → CSC-slot map for a frozen Schur pattern."""
+function schur_assembly_map(
+    active::AbstractVector{<:AbstractVector{<:Integer}},
+    storage::SparseKKTStorage{T},
+) where {T}
+    blocks = Int32[]
+    left = Int32[]
+    right = Int32[]
+    positions = Int32[]
+    ranges = Vector{UnitRange{Int}}(undef, length(active))
+    cursor = 1
+    @inbounds for block_id in eachindex(active)
+        ids = sort!(unique!(Int.(active[block_id])))
+        first = cursor
+        for p in eachindex(ids)
+            i = ids[p]
+            for r in p:length(ids)
+                j = ids[r]
+                row, column = max(i, j), min(i, j)
+                pointer = sparse_position(storage, row, column)
+                pointer == 0 && throw(ArgumentError(
+                    "frozen Schur CSC pattern is missing ($(row),$(column))",
+                ))
+                push!(blocks, Int32(block_id))
+                push!(left, Int32(p))
+                push!(right, Int32(r))
+                push!(positions, Int32(pointer))
+                cursor += 1
+            end
+        end
+        ranges[block_id] = first:(cursor - 1)
+    end
+    return SchurAssemblyMap{T}(
+        blocks,
+        left,
+        right,
+        positions,
+        ranges,
+        storage.pattern_signature,
+    )
+end
+
+"""Freeze a Schur CSC pattern and its assembly map in one setup operation."""
+function freeze_schur_pattern(
+    active::AbstractVector{<:AbstractVector{<:Integer}},
+    dimension::Integer,
+    ::Type{T}=Float64;
+    provider=nothing,
+) where {T}
+    pattern = schur_pattern_csc(active, dimension, T)
+    selected_provider = provider === nothing ? _sparse_provider(T) : provider
+    storage = freeze_sparse_csc(pattern; provider=selected_provider)
+    map = schur_assembly_map(active, storage)
+    return storage, map
+end
+
+function freeze_schur_pattern(
+    prob::SDPProblem{T};
+    provider=nothing,
+) where {T}
+    prob.cons isa SparseCons{T} || throw(ArgumentError(
+        "freeze_schur_pattern requires SparseCons; dense coefficients have no active map",
+    ))
+    cons = prob.cons::SparseCons{T}
+    return freeze_schur_pattern(
+        cons.schur_order,
+        prob.dims.m,
+        T;
+        provider=provider,
+    )
+end
+
+"""Update only numeric Schur values from block-packed contributions."""
+function assemble_sparse_schur!(
+    storage::SparseKKTStorage{T},
+    map::SchurAssemblyMap{T},
+    block_values::AbstractVector{<:AbstractVector{T}},
+) where {T}
+    storage.pattern_signature == map.pattern_signature || throw(ArgumentError(
+        "Schur assembly map does not match the frozen CSC pattern",
+    ))
+    length(block_values) == length(map.block_ranges) || throw(DimensionMismatch(
+        "block contribution count does not match Schur assembly map",
+    ))
+    _sparse_zero_values!(storage.matrix.nzval)
+    @inbounds for block_id in eachindex(map.block_ranges)
+        values = block_values[block_id]
+        expected = length(map.block_ranges[block_id])
+        length(values) == expected || throw(DimensionMismatch(
+            "packed block Schur contribution has length $(length(values)); expected $(expected)",
+        ))
+        for (offset, pointer32) in enumerate(map.block_ranges[block_id])
+            destination = Int(map.position[pointer32])
+            value = storage.matrix.nzval[destination] + values[offset]
+            if T === BigFloat
+                _sparse_store!(storage.matrix.nzval[destination], value)
+            else
+                storage.matrix.nzval[destination] = value
+            end
+        end
+    end
+    return storage.matrix
+end
+
+"""Convenience diagnostics for a frozen Schur storage/map pair."""
+function schur_structure_diagnostics(
+    storage::SparseKKTStorage,
+    map::SchurAssemblyMap,
+)
+    storage.pattern_signature == map.pattern_signature || throw(ArgumentError(
+        "Schur diagnostics received mismatched frozen pattern/map",
+    ))
+    symbolic = storage.symbolic
+    return (
+        dimension=size(storage.matrix, 1),
+        nnz=nnz(storage.matrix),
+        input_nnz=symbolic.input_nnz,
+        density=symbolic.input_nnz /
+                max(size(storage.matrix, 1) * (size(storage.matrix, 1) + 1) ÷ 2, 1),
+        factor_nnz=symbolic.factor_nnz,
+        fill_ratio=symbolic.fill_estimate,
+        pattern_reused=true,
+        map_entries=length(map.position),
+        blocks=length(map.block_ranges),
+    )
 end
 
 """Contribution map for a weighted Gram matrix `G' * Diagonal(w) * G`."""
@@ -1066,5 +1280,37 @@ function analyze(backend::GenericSparseCholeskyBackend, prob::SDPProblem)
         symbolic_reuse=true,
         provider=:generic_sparse_cholesky,
         arithmetic=eltype(prob),
+    )
+end
+
+"""Construct the generic sparse SDP Schur workspace at setup time."""
+function _sparse_schur_sdp_workspace(
+    prob::SDPProblem{T},
+    thread_count::Int,
+) where {T}
+    supports_sparse_generic(T) || throw(ArgumentError(
+        "generic sparse SDP Schur requires BigFloat or a MultiFloat arithmetic type",
+    ))
+    prob.cons isa SparseCons{T} || throw(ArgumentError(
+        "generic sparse SDP Schur requires SparseCons coefficients",
+    ))
+    storage, assembly_map = freeze_schur_pattern(
+        prob;
+        provider=GenericSparseProvider(T),
+    )
+    B = prob.B isa SparseMatrixCSC ? Matrix{T}(prob.B) : Matrix{T}(prob.B)
+    n = prob.dims.n
+    return GenericSparseSchurSDPWorkspace{T}(
+        storage,
+        assembly_map,
+        [sparse_position(storage, index, index) for index in 1:prob.dims.m],
+        [one(T) for _ in 1:prob.dims.m],
+        B,
+        [one(T) for _ in 1:n],
+        nothing,
+        false,
+        sqrt(eps(T)),
+        zero(T),
+        0,
     )
 end

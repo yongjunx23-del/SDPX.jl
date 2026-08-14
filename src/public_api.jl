@@ -15,8 +15,15 @@ import ..SDPX
 
 const recommended_parameters = SDPX.recommended_parameters
 const StructureAnalysis = SDPX.StructureAnalysis
+const SchurStructureAnalysis = SDPX.SchurStructureAnalysis
+const SchurStructurePlan = SDPX.SchurStructurePlan
 const analyze_structure = SDPX.analyze_structure
 const structure_summary = SDPX.structure_summary
+const SchurAssemblyMap = SDPX.SchurAssemblyMap
+const ChordalPlan = SDPX.ChordalPlan
+const chordal_plan = SDPX.chordal_plan
+const chordal_plans = SDPX.chordal_plans
+const sparse_schur_diagnostics = SDPX.sparse_schur_diagnostics
 
 const AbstractParameterPolicy = SDPX.AbstractParameterPolicy
 const FixedParameterPolicy = SDPX.FixedParameterPolicy
@@ -193,7 +200,10 @@ const blas_threads = SDPX.blas_threads
 const set_blas_threads! = SDPX.set_blas_threads!
 
 export recommended_parameters, StructureAnalysis, analyze_structure
+export SchurStructureAnalysis, SchurStructurePlan
 export structure_summary
+export SchurAssemblyMap, sparse_schur_diagnostics
+export ChordalPlan, chordal_plan, chordal_plans
 export AbstractParameterPolicy, FixedParameterPolicy
 export AdaptiveParameterPolicy, IterationDiagnostics, IterationParameters
 export select_parameters

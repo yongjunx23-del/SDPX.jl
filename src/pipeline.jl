@@ -401,6 +401,39 @@ function _runtime_schur_formulation(
             )
         end
     end
+    # An explicit sparse-Schur request is a hard route commitment.  Generic
+    # MPFR/MultiFloat sparse-Schur is supported for equality-free normal
+    # equations; equality-bearing generic requests remain fail-closed before
+    # workspace allocation.  The exact block-arrow route above is still
+    # allowed because it never builds a generic Schur factor.
+    schur_plan = prob.structure.schur_plan
+    if schur_plan.requested === :sparse &&
+       !(eltype(prob.c) === Float64) &&
+       prob.dims.n > 0
+        throw(ArgumentError(
+            "explicit sparse Schur with generic arithmetic and equalities is " *
+            "not yet supported; use sparse=:auto or sparse=:dense",
+        ))
+    end
+    if schur_plan.requested === :sparse &&
+       equality_solver === :qr &&
+       prob.dims.n > 0
+        throw(ArgumentError(
+            "explicit sparse Schur is incompatible with equality_solver=:qr; " *
+            "use equality_solver=:normal_equations or sparse=:dense",
+        ))
+    end
+    if schur_plan.requested === :auto &&
+       schur_plan.storage === :sparse &&
+       !_use_sparse_schur_sdp(prob)
+        # Auto may choose dense only through this explicit pre-execution
+        # provider gate; no numeric try-sparse/fallback happens in Workspace.
+        return FormulationPlan(
+            DenseNormalEquations(),
+            :auto_sparse_provider_unavailable,
+            :structural_planner,
+        )
+    end
     # The current sparse-Schur workspace implements normal-equation equality
     # elimination. An explicit QR request therefore has to be reflected in the
     # plan *before* memory preflight/workspace construction; otherwise the plan
@@ -2353,31 +2386,39 @@ function estimate_sdp_workspace_bytes(
     L, m, n, k = prob.dims
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     if _use_sparse_schur_sdp(prob)
-        cons = prob.cons::SparseCons{Float64}
+        cons = prob.cons::SparseCons{T}
         packed_pairs = sum(
             ids -> length(ids) * (length(ids) + 1) ÷ 2,
             cons.active;
             init=0,
         )
         schur_nonzeros = prob.structure.schur_upper_nnz
+        # Float64/CHOLMOD stores Int32 CSC indices, while the generic
+        # BigFloat/MultiFloat provider owns a native-Int CSC.  Numeric arrays
+        # use the selected arithmetic's element width (BigFloat is accounted
+        # through the provider's storage-byte policy, not as Float64).
+        index_bytes = T === Float64 ? sizeof(Int32) : sizeof(Int)
         csc_bytes = saturating_sum_bytes(
-            saturating_bytes(8, schur_nonzeros),
-            saturating_bytes(4, schur_nonzeros + m + 1),
+            saturating_bytes(scalar_bytes, schur_nonzeros),
+            saturating_bytes(index_bytes, schur_nonzeros + m + 1),
         )
         # The selector guarantees that a completely filled lower Cholesky
         # factor still fits Int32. Use that worst case instead of guessing a
         # fill ratio from the input density.
         dense_factor_nonzeros = m * (m + 1) ÷ 2
-        factor_bytes = saturating_bytes(12, dense_factor_nonzeros)
-        packed_bytes = saturating_bytes(8, packed_pairs)
-        equality_solve_bytes = saturating_bytes(2, 8, m, n)
-        equality_gram_bytes = saturating_bytes(2, 8, n, n)
+        factor_bytes = saturating_sum_bytes(
+            saturating_bytes(scalar_bytes, dense_factor_nonzeros),
+            saturating_bytes(index_bytes * 3, dense_factor_nonzeros),
+        )
+        packed_bytes = saturating_bytes(scalar_bytes, packed_pairs)
+        equality_solve_bytes = saturating_bytes(2, scalar_bytes, m, n)
+        equality_gram_bytes = saturating_bytes(2, scalar_bytes, n, n)
         vector_bytes = saturating_bytes(
-            8,
+            scalar_bytes,
             12m + 8n + max(thread_count, 1) * m,
         )
         state_bytes = saturating_bytes(
-            8,
+            scalar_bytes,
             2m + 2n + 4sum(dimension -> dimension^2, k; init=0),
         )
         return saturating_sum_bytes(
