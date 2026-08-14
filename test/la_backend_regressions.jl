@@ -1,4 +1,83 @@
 using MultiFloats: Float64x4
+using LinearAlgebra
+
+# Provider-neutral contract doubles.  The real MFLA payload lives only behind
+# the optional extension; these types prove that MultiFloat core dispatch is
+# a fixed semantic protocol and cannot discover operations dynamically.
+struct _ContractOnlyProvider end
+
+SDPX.la_provider_capability_model(::_ContractOnlyProvider) =
+    SDPX.LAProviderCapabilities(
+        dot=true,
+        mul_owned=true,
+        syrk=true,
+        cholesky=true,
+        factor_solve=true,
+    )
+
+SDPX.la_mfla_dot(::_ContractOnlyProvider, x, y) = sum(x .* y)
+
+function SDPX.la_mfla_syrk!(
+    ::_ContractOnlyProvider,
+    S::AbstractMatrix,
+    P::AbstractMatrix,
+    α,
+    β,
+)
+    S .= α .* (transpose(P) * P) .+ β .* S
+    return S
+end
+
+function SDPX.la_mfla_mul_owned!(
+    ::_ContractOnlyProvider,
+    C::AbstractMatrix,
+    A::AbstractMatrix,
+    B::AbstractMatrix,
+    α,
+    β,
+)
+    C .= α .* (A * B) .+ β .* C
+    return C
+end
+
+function SDPX.la_mfla_mul_owned!(
+    ::_ContractOnlyProvider,
+    C::AbstractMatrix,
+    A::AbstractMatrix,
+    B::AbstractMatrix,
+)
+    C .= A * B
+    return C
+end
+
+function SDPX.la_mfla_cholesky_factor!(
+    ::_ContractOnlyProvider,
+    A::AbstractMatrix,
+)
+    factor = LinearAlgebra.cholesky!(Symmetric(A, :L); check=false)
+    LinearAlgebra.issuccess(factor) || return nothing
+    return _ContractCholeskyPayload(factor)
+end
+
+struct _ContractCholeskyPayload{F<:LinearAlgebra.Cholesky}
+    factor::F
+end
+
+SDPX.la_factor_provider_identity(::_ContractCholeskyPayload) =
+    :multifloat_linear_algebra
+
+SDPX.la_provider_factor_matrix(payload::_ContractCholeskyPayload) =
+    payload.factor.factors
+
+function SDPX.la_provider_factor_solve!(
+    payload::_ContractCholeskyPayload,
+    rhs,
+)
+    LinearAlgebra.ldiv!(payload.factor, rhs)
+    return rhs
+end
+
+struct _UnsupportedProvider end
 
 @testset "linear algebra backend planning" begin
     f64 = SDPX.Experimental.plan_la_backend(Float64)
@@ -272,5 +351,174 @@ using MultiFloats: Float64x4
         @test SDPX.la_cholesky_factor!(legacy, failed) === nothing
         @test SDPX.la_backend_provider(legacy) === :sdpx_legacy_la
         @test SDPX.la_backend_reason(legacy) === :requested_legacy
+    end
+end
+
+@testset "MultiFloat provider protocol is explicit and fail-closed" begin
+    # The arbitrary Symbol/getproperty escape hatch no longer exists: core
+    # dispatch must name each semantic operation up front.
+    @test !isdefined(SDPX, :_la_provider_call)
+    @test !hasproperty(_ContractOnlyProvider(), :cholesky_factor!)
+
+    contract_only = SDPX.Experimental.MultiFloatLABackend(
+        :float64x4,
+        _ContractOnlyProvider(),
+    )
+    @test SDPX.la_backend_name(contract_only) === :multifloat
+    @test SDPX.la_dot(contract_only, [1.0, 2.0], [3.0, 4.0]) == 11.0
+
+    S = [1.0 0.0; 0.0 1.0]
+    P = [1.0 2.0; 3.0 4.0]
+    output = copy(S)
+    @test SDPX.la_syrk!(contract_only, output, P, 0.5, -0.25) === output
+    @test output ≈ 0.5 .* (transpose(P) * P) .- 0.25 .* S
+
+    C = zeros(2, 2)
+    @test SDPX.la_mul_owned!(
+        contract_only,
+        C,
+        P,
+        P,
+        0.5,
+        0.0,
+    ) === C
+    @test C ≈ 0.5 .* (P * P)
+
+    # Cholesky is advertised and implemented by the explicit hook; the core
+    # factor wrapper still validates provider identity and storage.
+    factor = SDPX.la_cholesky_factor!(
+        contract_only,
+        [4.0 1.0; 1.0 3.0],
+    )
+    @test factor !== nothing
+    @test SDPX.la_factor_provider_identity(factor.provider) ===
+          :multifloat_linear_algebra
+    rhs = [1.0, 2.0]
+    SDPX.la_factor_solve!(factor, rhs)
+    @test all(isfinite, rhs)
+    # The payload contract is custom to this test; no Julia `Cholesky` type
+    # piracy leaks into Standard factor behavior.
+    @test_throws ArgumentError SDPX.la_provider_factor_matrix(
+        LinearAlgebra.cholesky([4.0 1.0; 1.0 3.0]),
+    )
+
+    # An op the model does not advertise, and for which no hook exists, must
+    # fail closed instead of being discovered dynamically.
+    @test !SDPX.la_backend_capabilities(contract_only).triangular_solve
+    @test_throws ArgumentError SDPX.la_chol!(
+        contract_only,
+        [4.0 1.0; 1.0 3.0],
+    )
+    @test_throws ArgumentError SDPX.la_trsm!(
+        contract_only,
+        [1.0 0.0; 2.0 1.0],
+        [1.0 0.0; 0.0 1.0],
+    )
+
+    unsupported = SDPX.Experimental.MultiFloatLABackend(
+        :float64x4,
+        _UnsupportedProvider(),
+    )
+    @test SDPX.la_backend_capabilities(unsupported) ==
+          SDPX.LAProviderCapabilities()
+    @test !SDPX.la_provider_supports(
+        SDPX.la_backend_capabilities(unsupported),
+        :dot,
+    )
+    A = [4.0 1.0; 1.0 3.0]
+    for operation in (
+        () -> SDPX.la_dot(unsupported, [1.0, 2.0], [3.0, 4.0]),
+        () -> SDPX.la_syrk!(unsupported, copy(A), P, 1.0, 0.0),
+        () -> SDPX.la_chol!(unsupported, copy(A)),
+        () -> SDPX.la_cholesky_factor!(unsupported, copy(A)),
+        () -> SDPX.la_trsm!(unsupported, copy(A), copy(A)),
+        () -> SDPX.la_trsv_lower!(unsupported, copy(A), [1.0, 2.0]),
+        () -> SDPX.la_trsv_transpose!(unsupported, copy(A), [1.0, 2.0]),
+        () -> SDPX.la_mul_owned!(unsupported, copy(A), copy(A), copy(A)),
+    )
+        @test_throws ArgumentError operation()
+    end
+    # No hidden Standard or Legacy retry: an unsupported MultiFloat op must
+    # not be rewritten into another backend.
+    @test SDPX.la_backend_name(unsupported) === :multifloat
+    @test SDPX.la_backend_provider(unsupported) ===
+          :multifloat_linear_algebra
+end
+
+@testset "Standard pivoted QR capability is executable" begin
+    # This file deliberately does not import GenericLinearAlgebra.  BigFloat
+    # RRQR therefore exercises the production Standard/LinearAlgebra contract
+    # that the planner advertises on the minimum supported Julia line.
+    for T in (Float64, BigFloat)
+        setprecision(BigFloat, 256) do
+            backend = SDPX.Experimental.StandardLABackend(
+                SDPX._la_arithmetic_symbol(T),
+            )
+            capabilities = SDPX.standard_la_provider_capabilities(T)
+            @test capabilities.qr
+            @test capabilities.rank_revealing_qr
+            @test capabilities.factor_solve
+            @test capabilities.multi_rhs
+
+            source = T[4 1 0; 1 3 1; 0 1 2]
+            equality_factor = SDPX.la_qr_factor!(
+                backend,
+                SDPX._owned_array_copy(T, source);
+                pivoted=true,
+                relative_tolerance=T(100) * eps(T),
+            )
+            @test equality_factor isa SDPX.EqualityQRFactor{T}
+            @test SDPX.la_factor_provider(equality_factor) === backend.provider
+            @test size(SDPX.la_factor_packed_factors(equality_factor)) ==
+                  size(source)
+            @test SDPX.la_factor_rank(equality_factor) == size(source, 2)
+            @test sort(SDPX.la_factor_permutation(equality_factor)) ==
+                  collect(1:size(source, 2))
+            @test isfinite(SDPX.la_factor_quality(equality_factor))
+            if T === BigFloat
+                @test all(
+                    value -> precision(value) == 256,
+                    SDPX.la_factor_packed_factors(equality_factor),
+                )
+            end
+
+            vector_rhs = T[1, 2, 3]
+            vector_solution = SDPX._owned_array_copy(T, vector_rhs)
+            scratch = SDPX.alloc_zeros(T, length(vector_rhs))
+            SDPX.la_factor_solve!(
+                equality_factor,
+                vector_solution,
+                scratch,
+            )
+            @test transpose(source) * source * vector_solution ≈ vector_rhs
+
+            # The same Standard QR capability also returns a conventional
+            # LinearAlgebra wrapper when no equality-normal-equation tolerance
+            # is requested. That handle owns vector and multi-RHS solves.
+            factor = SDPX.la_qr_factor!(
+                backend,
+                SDPX._owned_array_copy(T, source);
+                pivoted=true,
+            )
+            @test factor isa SDPX.StandardLAQRFactor{T}
+            @test factor.pivoted
+            @test SDPX.la_factor_provider(factor) === backend.provider
+            matrix_rhs = T[1 2; 2 1; 3 4]
+            matrix_solution = SDPX._owned_array_copy(T, matrix_rhs)
+            SDPX.la_factor_solve!(factor, matrix_solution)
+            @test source * matrix_solution ≈ matrix_rhs
+
+            rank_deficient = T[1 1; 2 2; 3 3]
+            failed_rank = SDPX.la_qr_factor!(
+                backend,
+                SDPX._owned_array_copy(T, rank_deficient);
+                pivoted=true,
+                relative_tolerance=T(100) * eps(T),
+            )
+            @test failed_rank isa SDPX.EqualityQRFactor{T}
+            @test SDPX.la_factor_rank(failed_rank) == 1
+            @test SDPX.la_factor_provider(failed_rank) === backend.provider
+            @test SDPX.la_backend_name(backend) === :standard
+        end
     end
 end

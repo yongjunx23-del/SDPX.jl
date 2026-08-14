@@ -67,12 +67,26 @@ struct FormulationDecision{T}
     risk_indicators::NamedTuple
 end
 
-const _FORMULATION_SCALE_SPREAD_THRESHOLD = 1.0e8
-const _FORMULATION_RRQR_QUALITY_THRESHOLD = 1.0e-8
+"""
+    FormulationPlannerConfig
+
+Internal numerical policy for the pure, static formulation planner.  This is
+deliberately not a public solve option: providers and runtime measurements do
+not participate in these thresholds, and the resulting decision is frozen
+into `ExecutionPlan` before numerical execution.
+"""
+struct FormulationPlannerConfig
+    scale_spread_threshold::Float64
+    rrqr_quality_threshold::Float64
+end
+
+const DEFAULT_FORMULATION_PLANNER_CONFIG =
+    FormulationPlannerConfig(1.0e8, 1.0e-8)
 
 @inline function _formulation_risk_indicators(
     features::DenseFormulationFeatures,
     equality::EqualityPlanningEvidence,
+    policy::FormulationPlannerConfig,
 )
     scale_spread = try
         Float64(features.equality_scale_spread)
@@ -84,11 +98,11 @@ const _FORMULATION_RRQR_QUALITY_THRESHOLD = 1.0e-8
                    equality.relative_rrqr_quality : nothing
     large_equality_scale_spread =
         isfinite(scale_spread) ?
-        scale_spread >= _FORMULATION_SCALE_SPREAD_THRESHOLD :
+        scale_spread >= policy.scale_spread_threshold :
         scale_spread > 0
     poor_equality_quality =
         rrqr_quality !== nothing && isfinite(rrqr_quality) &&
-        rrqr_quality <= _FORMULATION_RRQR_QUALITY_THRESHOLD
+        rrqr_quality <= policy.rrqr_quality_threshold
     strong_numerical_risk =
         equality.basis_verified &&
         (large_equality_scale_spread || poor_equality_quality)
@@ -98,8 +112,8 @@ const _FORMULATION_RRQR_QUALITY_THRESHOLD = 1.0e-8
         large_equality_scale_spread,
         poor_equality_quality,
         strong_numerical_risk,
-        scale_spread_threshold=_FORMULATION_SCALE_SPREAD_THRESHOLD,
-        rrqr_quality_threshold=_FORMULATION_RRQR_QUALITY_THRESHOLD,
+        scale_spread_threshold=policy.scale_spread_threshold,
+        rrqr_quality_threshold=policy.rrqr_quality_threshold,
     )
 end
 
@@ -150,6 +164,8 @@ function plan_formulation(
     requested::Symbol,
     equality_evidence::EqualityPlanningEvidence,
     feasibility::FormulationFeasibility,
+    ;
+    policy::FormulationPlannerConfig=DEFAULT_FORMULATION_PLANNER_CONFIG,
 ) where {T}
     requested in (:auto, :primal, :normal_equations, :augmented) ||
         throw(ArgumentError(
@@ -158,7 +174,7 @@ function plan_formulation(
         ))
     candidates = _dense_formulation_candidates(dense, feasibility)
     normal, augmented = candidates
-    risk = _formulation_risk_indicators(dense, equality_evidence)
+    risk = _formulation_risk_indicators(dense, equality_evidence, policy)
 
     if requested in (:primal, :normal_equations)
         formulation_candidate_feasible(normal) || throw(ArgumentError(
@@ -246,12 +262,16 @@ function plan_formulation(
     requested::Symbol,
     equality_evidence::EqualityPlanningEvidence,
     feasibility::FormulationFeasibility,
+    ;
+    policy::FormulationPlannerConfig=DEFAULT_FORMULATION_PLANNER_CONFIG,
 )
     return plan_formulation(
         features.dense_formulation,
         requested,
         equality_evidence,
         feasibility,
+        ;
+        policy,
     )
 end
 

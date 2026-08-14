@@ -128,6 +128,16 @@ end
     @test easy.selected === :dense_normal_equations
     @test easy.reason === :default_dense_normal_equations
     @test length(easy.candidates) == 2
+    @test easy.risk_indicators.scale_spread_threshold == 1.0e8
+    @test easy.risk_indicators.rrqr_quality_threshold == 1.0e-8
+
+    below_scale_threshold = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=prevfloat(1.0e8)),
+        :auto,
+        verified,
+        _formulation_feasibility(),
+    )
+    @test below_scale_threshold.selected === :dense_normal_equations
 
     scaled = PlannerAPI.plan_formulation(
         _formulation_features(Float64; spread=1.0e8),
@@ -155,6 +165,36 @@ end
     )
     @test conditioned.selected === :dense_augmented_kkt
     @test conditioned.reason === :poor_equality_quality
+
+    above_quality_threshold = PlannerAPI.EqualityPlanningEvidence(
+        true,
+        true,
+        5,
+        5,
+        nextfloat(1.0e-8),
+        :verified_retained_basis,
+    )
+    better_conditioned = PlannerAPI.plan_formulation(
+        features,
+        :auto,
+        above_quality_threshold,
+        _formulation_feasibility(),
+    )
+    @test better_conditioned.selected === :dense_normal_equations
+
+    # The typed policy boundary is internal and deterministic.  Changing it in
+    # this unit test proves the thresholds are inputs to the static planner,
+    # not provider/runtime globals; production calls retain the defaults above.
+    custom_policy = SDPX.FormulationPlannerConfig(1.0e9, 1.0e-9)
+    custom = PlannerAPI.plan_formulation(
+        _formulation_features(Float64; spread=1.0e8),
+        :auto,
+        verified,
+        _formulation_feasibility();
+        policy=custom_policy,
+    )
+    @test custom.selected === :dense_normal_equations
+    @test custom.risk_indicators.scale_spread_threshold == 1.0e9
 
     unavailable = PlannerAPI.EqualityPlanningEvidence(5)
     conservative = PlannerAPI.plan_formulation(

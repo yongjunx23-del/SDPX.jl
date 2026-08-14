@@ -635,7 +635,7 @@ function _assert_la_backend_capabilities(
 end
 
 function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
-    payload = _la_provider_call(backend, :cholesky_factor!, A)
+    payload = la_mfla_cholesky_factor!(backend.provider, A)
     payload === nothing && return nothing
     la_factor_provider_identity(payload) === :multifloat_linear_algebra ||
         throw(ArgumentError(
@@ -1541,7 +1541,7 @@ end
     _sdpx_legacy_la_call(backend.provider, Val(:dot), x, y)
 
 function la_dot(backend::MultiFloatLABackend, x, y)
-    return _la_provider_call(backend, :dot, x, y)
+    return la_mfla_dot(backend.provider, x, y)
 end
 la_dot(backend::BFLALABackend, x, y) =
     la_bfla_dot(backend.provider, x, y)
@@ -1586,9 +1586,9 @@ la_mul_owned!(backend::LegacyLABackend, C, A, B, α, β) =
 la_mul_owned!(backend::LegacyLABackend, C, A, B) =
     _sdpx_legacy_la_call(backend.provider, Val(:mul_owned), C, A, B)
 la_mul_owned!(backend::MultiFloatLABackend, C, A, B, α, β) =
-    _la_provider_call(backend, :mul_owned!, C, A, B, α, β)
+    la_mfla_mul_owned!(backend.provider, C, A, B, α, β)
 la_mul_owned!(backend::MultiFloatLABackend, C, A, B) =
-    _la_provider_call(backend, :mul_owned!, C, A, B)
+    la_mfla_mul_owned!(backend.provider, C, A, B)
 la_mul_owned!(backend::BFLALABackend, C, A, B, α, β) =
     la_bfla_mul_owned!(backend.provider, C, A, B, α, β)
 la_mul_owned!(backend::BFLALABackend, C, A, B) =
@@ -1608,7 +1608,7 @@ end
 la_syrk!(backend::LegacyLABackend, S, P, α, β) =
     _sdpx_legacy_la_call(backend.provider, Val(:syrk), S, P, α, β)
 la_syrk!(backend::MultiFloatLABackend, S, P, α, β) =
-    _la_provider_call(backend, :syrk!, S, P, α, β)
+    la_mfla_syrk!(backend.provider, S, P, α, β)
 la_syrk!(backend::BFLALABackend, S, P, α, β) =
     la_bfla_syrk!(backend.provider, S, P, α, β)
 
@@ -1631,7 +1631,8 @@ function la_chol!(backend::LegacyLABackend, A::AbstractMatrix{BigFloat})
 end
 la_chol!(backend::LegacyLABackend, A) =
     _sdpx_legacy_la_call(backend.provider, Val(:chol), A)
-la_chol!(backend::MultiFloatLABackend, A) = _la_provider_call(backend, :chol!, A)
+la_chol!(backend::MultiFloatLABackend, A) =
+    la_mfla_chol!(backend.provider, A)
 function la_chol!(backend::BFLALABackend, A::AbstractMatrix{BigFloat})
     _validate_bfla_lower_operand(A, "BFLA Cholesky")
     return la_bfla_chol!(backend.provider, A)
@@ -1640,7 +1641,8 @@ end
 la_trsm!(::StandardLABackend, L, X) = LinearAlgebra.ldiv!(LowerTriangular(L), X)
 la_trsm!(backend::LegacyLABackend, L, X) =
     _sdpx_legacy_la_call(backend.provider, Val(:trsm), L, X)
-la_trsm!(backend::MultiFloatLABackend, L, X) = _la_provider_call(backend, :trsm!, L, X)
+la_trsm!(backend::MultiFloatLABackend, L, X) =
+    la_mfla_trsm!(backend.provider, L, X)
 la_trsm!(backend::BFLALABackend, L, X) =
     la_bfla_trsm!(backend.provider, L, X)
 
@@ -1648,7 +1650,7 @@ la_trsv_lower!(::StandardLABackend, L, x) = LinearAlgebra.ldiv!(LowerTriangular(
 la_trsv_lower!(backend::LegacyLABackend, L, x) =
     _sdpx_legacy_la_call(backend.provider, Val(:trsv_lower), L, x)
 la_trsv_lower!(backend::MultiFloatLABackend, L, x) =
-    _la_provider_call(backend, :trsv_lower!, L, x)
+    la_mfla_trsv_lower!(backend.provider, L, x)
 la_trsv_lower!(backend::BFLALABackend, L, x) =
     la_bfla_trsv_lower!(backend.provider, L, x)
 
@@ -1657,7 +1659,7 @@ la_trsv_transpose!(::StandardLABackend, L, x) =
 la_trsv_transpose!(backend::LegacyLABackend, L, x) =
     _sdpx_legacy_la_call(backend.provider, Val(:trsv_transpose), L, x)
 la_trsv_transpose!(backend::MultiFloatLABackend, L, x) =
-    _la_provider_call(backend, :trsv_transpose!, L, x)
+    la_mfla_trsv_transpose!(backend.provider, L, x)
 la_trsv_transpose!(backend::BFLALABackend, L, x) =
     la_bfla_trsv_transpose!(backend.provider, L, x)
 
@@ -1722,6 +1724,22 @@ la_mfla_normwise_backward_error(::Any, args...) =
     throw(ArgumentError("MultiFloat backward error unavailable"))
 la_mfla_mixed_residual!(::Any, args...) =
     throw(ArgumentError("MultiFloat mixed-precision residual unavailable"))
+la_mfla_cholesky_factor!(::Any, ::AbstractMatrix) =
+    throw(ArgumentError("MultiFloat Cholesky factor unavailable"))
+la_mfla_chol!(::Any, args...) =
+    throw(ArgumentError("MultiFloat Cholesky unavailable"))
+la_mfla_dot(::Any, args...) =
+    throw(ArgumentError("MultiFloat dot unavailable"))
+la_mfla_mul_owned!(::Any, args...) =
+    throw(ArgumentError("MultiFloat GEMM/GEMV unavailable"))
+la_mfla_syrk!(::Any, args...) =
+    throw(ArgumentError("MultiFloat SYRK unavailable"))
+la_mfla_trsm!(::Any, args...) =
+    throw(ArgumentError("MultiFloat TRSM unavailable"))
+la_mfla_trsv_lower!(::Any, args...) =
+    throw(ArgumentError("MultiFloat TRSV unavailable"))
+la_mfla_trsv_transpose!(::Any, args...) =
+    throw(ArgumentError("MultiFloat transpose TRSV unavailable"))
 la_mfla_qr_factor!(::Any, ::AbstractMatrix) =
     throw(ArgumentError("MultiFloat pivoted QR unavailable"))
 la_mfla_lu_factor!(::Any, ::AbstractMatrix) =
@@ -1750,15 +1768,3 @@ la_provider_refine_once!(::Any, args...) =
     throw(ArgumentError("provider factor does not expose one-step refinement"))
 la_provider_refinement_correction!(::Any, args...) =
     throw(ArgumentError("provider factor does not expose one correction"))
-
-function _la_provider_call(backend::MultiFloatLABackend, operation::Symbol, args...)
-    provider = backend.provider
-    if hasproperty(provider, operation)
-        return getproperty(provider, operation)(args...)
-    elseif backend.provider isa Function
-        return backend.provider(operation, args...)
-    end
-    throw(ArgumentError(
-        "MultiFloat LA provider does not implement $(operation) for $(backend.arithmetic)",
-    ))
-end

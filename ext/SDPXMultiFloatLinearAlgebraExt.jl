@@ -114,18 +114,6 @@ function _capability_model(::Type{MF}) where {MF<:MultiFloat}
     )
 end
 
-"""SDPX operation names this provider actually dispatches on `getproperty`."""
-const _PROVIDER_OPERATIONS = (
-    :chol!,
-    :cholesky_factor!,
-    :trsm!,
-    :trsv_lower!,
-    :trsv_transpose!,
-    :syrk!,
-    :mul_owned!,
-    :dot,
-)
-
 """Semantic operation names advertised to the SDPX planner."""
 const _DESCRIPTOR_CAPABILITIES = (
     :chol,
@@ -166,16 +154,6 @@ SDPX.la_equality_gram_kernel(
 ) = :multifloat_syrk
 SDPX.la_backend_owns_equality_gram(::SDPX.MultiFloatLABackend) = true
 
-"""Callable adapter exposing both owned GEMM/GEMV arities."""
-struct _ProviderMulOwned{P}
-    provider::P
-end
-
-(_mul::_ProviderMulOwned)(C, A, B, α, β) =
-    _provider_mul_owned!(_mul.provider, C, A, B, α, β)
-(_mul::_ProviderMulOwned)(C, A, B) =
-    _provider_mul_owned!(_mul.provider, C, A, B)
-
 """
     _CholeskyHandle{MF}
 
@@ -187,34 +165,6 @@ ordering stay with MFLA.
 struct _CholeskyHandle{MF<:MultiFloat,F<:MFCholesky{MF}}
     factor::F
     config::KernelConfig
-end
-
-Base.hasproperty(::_Provider, name::Symbol) =
-    name in _PROVIDER_OPERATIONS || name in (:config, :workspace)
-
-function Base.getproperty(provider::_Provider, name::Symbol)
-    name === :chol! && return A -> _provider_chol!(provider, A)
-    name === :cholesky_factor! &&
-        return A -> _provider_cholesky_factor!(provider, A)
-    name === :trsm! && return (L, X) -> _provider_trsm!(provider, L, X)
-    name === :trsv_lower! &&
-        return (L, x) -> _provider_trsv_lower!(provider, L, x)
-    name === :trsv_transpose! &&
-        return (L, x) -> _provider_trsv_transpose!(provider, L, x)
-    name === :syrk! &&
-        return (S, P, α, β) -> _provider_syrk!(provider, S, P, α, β)
-    name === :mul_owned! && return _ProviderMulOwned(provider)
-    name === :dot && return (x, y) -> mfdot(x, y)
-    name in (:config, :workspace) && return getfield(provider, name)
-    throw(ArgumentError("MFLA provider does not implement $(name)"))
-end
-
-Base.hasproperty(handle::_CholeskyHandle, name::Symbol) =
-    name in (:factor, :config)
-
-function Base.getproperty(handle::_CholeskyHandle, name::Symbol)
-    name in (:factor, :config) && return getfield(handle, name)
-    throw(ArgumentError("MFLA Cholesky handle does not implement $(name)"))
 end
 
 """
@@ -249,6 +199,13 @@ function _validate_cholesky_handle(
     return handle
 end
 
+function SDPX.la_mfla_cholesky_factor!(
+    provider::_Provider{MF},
+    A::AbstractMatrix{MF},
+) where {MF}
+    return _provider_cholesky_factor!(provider, A)
+end
+
 function _provider_cholesky_factor!(
     provider::_Provider{MF},
     A::AbstractMatrix{MF},
@@ -265,11 +222,19 @@ function _provider_cholesky_factor!(
     return _validate_cholesky_handle(handle, A)
 end
 
-function _provider_chol!(
+function SDPX.la_mfla_chol!(
     provider::_Provider{MF},
     A::AbstractMatrix{MF},
 ) where {MF}
     return _provider_cholesky_factor!(provider, A) !== nothing
+end
+
+function SDPX.la_mfla_trsm!(
+    provider::_Provider{MF},
+    L::AbstractMatrix{MF},
+    X::AbstractMatrix{MF},
+) where {MF}
+    return _provider_trsm!(provider, L, X)
 end
 
 function _provider_trsm!(
@@ -290,6 +255,14 @@ function _provider_trsm!(
     return X
 end
 
+function SDPX.la_mfla_trsv_lower!(
+    provider::_Provider{MF},
+    L::AbstractMatrix{MF},
+    x::AbstractVector{MF},
+) where {MF}
+    return _provider_trsv_lower!(provider, L, x)
+end
+
 function _provider_trsv_lower!(
     provider::_Provider{MF},
     L::AbstractMatrix{MF},
@@ -305,6 +278,14 @@ function _provider_trsv_lower!(
         config=provider.config,
     )
     return x
+end
+
+function SDPX.la_mfla_trsv_transpose!(
+    provider::_Provider{MF},
+    L::AbstractMatrix{MF},
+    x::AbstractVector{MF},
+) where {MF}
+    return _provider_trsv_transpose!(provider, L, x)
 end
 
 function _provider_trsv_transpose!(
@@ -324,6 +305,19 @@ function _provider_trsv_transpose!(
     return x
 end
 
+function SDPX.la_mfla_syrk!(
+    provider::_Provider{MF},
+    S::AbstractMatrix{MF},
+    P::AbstractMatrix{MF},
+    α::MF,
+    β::MF,
+) where {MF}
+    return _provider_syrk!(provider, S, P, α, β)
+end
+
+SDPX.la_mfla_dot(::_Provider{MF}, x, y) where {MF<:MultiFloat} =
+    mfdot(x, y)
+
 function _provider_syrk!(
     provider::_Provider{MF},
     S::AbstractMatrix{MF},
@@ -333,6 +327,17 @@ function _provider_syrk!(
 ) where {MF}
     syrk!(S, P, α, β; config=provider.config)
     return S
+end
+
+function SDPX.la_mfla_mul_owned!(
+    provider::_Provider{MF},
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractMatrix{MF},
+    α::MF,
+    β::MF,
+) where {MF}
+    return _provider_mul_owned!(provider, C, A, B, α, β)
 end
 
 function _provider_mul_owned!(
@@ -371,6 +376,15 @@ function _provider_mul_owned!(
     )
 end
 
+function SDPX.la_mfla_mul_owned!(
+    provider::_Provider{MF},
+    C::AbstractMatrix{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractMatrix{MF},
+) where {MF}
+    return _provider_mul_owned!(provider, C, A, B)
+end
+
 function _provider_mul_owned!(
     provider::_Provider{MF},
     C::AbstractVector{MF},
@@ -395,6 +409,17 @@ function _provider_mul_owned!(
     return C
 end
 
+function SDPX.la_mfla_mul_owned!(
+    provider::_Provider{MF},
+    C::AbstractVector{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractVector{MF},
+    α::MF,
+    β::MF,
+) where {MF}
+    return _provider_mul_owned!(provider, C, A, B, α, β)
+end
+
 function _provider_mul_owned!(
     provider::_Provider{MF},
     C::AbstractVector{MF},
@@ -409,6 +434,15 @@ function _provider_mul_owned!(
         one(MF),
         zero(MF),
     )
+end
+
+function SDPX.la_mfla_mul_owned!(
+    provider::_Provider{MF},
+    C::AbstractVector{MF},
+    A::AbstractMatrix{MF},
+    B::AbstractVector{MF},
+) where {MF}
+    return _provider_mul_owned!(provider, C, A, B)
 end
 
 """
