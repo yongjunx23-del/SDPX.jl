@@ -1079,7 +1079,8 @@ function sparse_factor_diagnostics(factor::CHOLMODSparseFactor)
     if factor.factorization !== nothing
         try
             factor_nnz = nnz(factor.factorization.L)
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
             # SuiteSparse's factor component is not materializable on all
             # supported Julia versions; the shared symbolic estimate remains
             # a valid provider-neutral diagnostic.

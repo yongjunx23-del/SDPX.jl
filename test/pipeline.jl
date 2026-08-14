@@ -47,16 +47,18 @@ end
     optimizer = SDPX.Optimizer()
     PIPELINE_MOI.set(optimizer, PIPELINE_MOI.Silent(), true)
     index_map = PIPELINE_MOI.copy_to(optimizer, model)
-    @test SDPX.classify_problem(optimizer.problem).cone == :socp
+    @test optimizer.problem isa SDPX.ConicProblem{Float64}
     PIPELINE_MOI.optimize!(optimizer)
     result = PIPELINE_MOI.get(optimizer, PIPELINE_MOI.RawSolver())
     @test result.status == SDPX.Optimal
     @test result.pObj ≈ 1.0 atol=1e-7
-    @test result.diagnostics.plan.algorithm == :socp_psd2
-    @test any(
-        warning -> occursin("Lorentz-compatible 2x2 structure", warning),
-        result.diagnostics.warnings,
-    )
+    # Compact MOI SOC models go through the production NativeSOC route, whose
+    # plan shape differs from the SDPProblem/PSD-lift plan used by the old
+    # assertion. The cone is still kept in native Lorentz coordinates.
+    @test result.diagnostics.selected_algorithms.solver === :native_soc
+    @test result.diagnostics.selected_algorithms.cone_representation ===
+          :native_lorentz
+    @test result.lifted === nothing
     @test PIPELINE_MOI.get(
         optimizer,
         PIPELINE_MOI.ConstraintPrimal(),

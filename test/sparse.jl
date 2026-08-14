@@ -324,7 +324,13 @@ end
     end
 
     @testset "sparse and dense solves agree on analytic problem" begin
-        c, A, C, B, b = t1_data(Float64)
+        A, C = zeros(Float64, 2, 2, 2), zeros(Float64, 2, 2)
+        A[1, 1, 1] = 1.0
+        A[2, 2, 2] = 1.0
+        C[1, 2], C[2, 1] = 1.0, 1.0
+        c, B, b = Float64[2, 3], zeros(Float64, 2, 0), Float64[]
+        A = [A]
+        C = [C]
         dense = SDPX.sdp(c, A, C, B, b; sparse=false, verbosity=0)
         sparse = SDPX.sdp(c, A, C, B, b; sparse=true, verbosity=0)
         @test dense.status == SDPX.Optimal
@@ -344,6 +350,7 @@ end
             @test_skip "requires at least two Julia threads"
         else
             rng = StableRNG(90125)
+            dense_comparisons = 0
             for trial in 1:12
                 L = rand(rng, 1:4)
                 m = rand(rng, 4:30)
@@ -368,25 +375,50 @@ end
                 )
                 prob.cons isa SDPX.SparseCons || continue
                 ws = SDPX.Workspace(prob)
-                ws.arrow === nothing || continue   # arrow models use their own reducer
-                @test ws.schur_lower_only
-                @test first(ws.schur_column_boundaries) == 1
-                @test last(ws.schur_column_boundaries) == m + 1
-                @test issorted(ws.schur_column_boundaries)
                 X = [Matrix(3.0I, ks[l], ks[l]) for l in 1:L]
                 Y = [Matrix(2.0I, ks[l], ks[l]) for l in 1:L]
                 SDPX.factor_blocks!(ws, X, Y)
                 for l in 1:L
                     SDPX.sparse_schur_block!(ws.blk[l], prob.cons, l, X[l], Y[l])
                 end
-                parallel = copy(SDPX.reduce_sparse_schur!(ws, prob.cons))
-                SDPX._zero_schur_accumulator!(ws.S, ws)
-                serial = copy(SDPX._reduce_sparse_schur_serial!(ws, prob.cons))
-                @test parallel == serial
-                materialized = similar(ws.S)
+                materialized = Matrix{Float64}(
+                    undef,
+                    m,
+                    m,
+                )
                 SDPX.materialize_schur!(materialized, ws)
                 @test issymmetric(materialized)
+                if ws.sparse_kkt !== nothing
+                    sparse_workspace = ws.sparse_kkt
+                    @test sparse_workspace isa
+                          SDPX.GenericSparseSchurSDPWorkspace{Float64}
+                    parallel = copy(
+                        SDPX.assemble_sparse_schur!(
+                            sparse_workspace.storage,
+                            sparse_workspace.assembly_map,
+                            [ws.blk[l].Svals for l in eachindex(ws.blk)],
+                        ),
+                    )
+                    serial = Matrix{Float64}(undef, m, m)
+                    fill!(serial, 0.0)
+                    for l in eachindex(ws.blk)
+                        ids = prob.cons.schur_order[l]
+                        Svals = ws.blk[l].Svals
+                        q = 0
+                        for p in eachindex(ids), r in p:length(ids)
+                            q += 1
+                            i, j = ids[p], ids[r]
+                            serial[j, i] += Svals[q]
+                        end
+                    end
+                    @test Matrix(parallel) == serial
+                    @test parallel == Matrix(sparse_workspace.storage.matrix)
+                    dense_comparisons += 1
+                else
+                    @test ws.arrow !== nothing
+                end
             end
+            @test dense_comparisons > 0
         end
     end
 

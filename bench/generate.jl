@@ -96,3 +96,25 @@ const TIERS = (
 
 tier_instance(tier::Symbol, T; seed=1, scalespread=8) =
     bootstrap_like(T; TIERS[tier]..., scalespread=scalespread, seed=seed)
+
+"""
+    closed_form_instance(T) -> (; c, A, C, B, b)
+
+Deterministic closed-form SDP fixture whose optimum is `2√6` in closed form.
+The same 2x2 problem is used by the deterministic benchmark gates and the
+performance-trace tests, so the CI smoke tier exercises a verified instance
+instead of the bootstrap generator.  The bootstrap `:small` tier remains
+available for performance measurement and manual runs.
+"""
+function closed_form_instance(::Type{T}) where {T}
+    coefficients = zeros(T, 2, 2, 2)
+    coefficients[1, 1, 1] = one(T)
+    coefficients[2, 2, 2] = one(T)
+    return (
+        c=T[2, 3],
+        A=[coefficients],
+        C=[T[0 1; 1 0]],
+        B=Matrix{T}(undef, 2, 0),
+        b=T[],
+    )
+end

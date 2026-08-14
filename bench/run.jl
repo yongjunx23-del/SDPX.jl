@@ -27,7 +27,9 @@ One solve, returning the result plus the ingested problem so the caller can
 validate the answer in the original coordinates.
 """
 function solve_instance(::Type{T}, tier::Symbol; seed=1, iterMax=200, kwargs...) where {T}
-    inst = tier_instance(tier, T; seed=seed)
+    inst = tier === :small_closed_form ?
+           closed_form_instance(T) :
+           tier_instance(tier, T; seed=seed)
     problem = SDPX.ingest(inst.c, inst.A, inst.C, inst.B, inst.b; verbosity=0)
     options = SDPX.SolverOptions{T}(; verbosity=0, iter_max=iterMax, kwargs...)
     return (instance=inst, problem=problem, options=options,
@@ -64,7 +66,8 @@ function bench_tier(::Type{T}, tier::Symbol; seed=1, reps=3, iterMax=200, kwargs
     run() = solve_instance(T, tier; seed=seed, iterMax=iterMax, kwargs...)
     # Untimed warm-up on the same shape, so JIT cost is attributed to
     # `compile_seconds` and never to the samples.
-    compile_seconds = @elapsed solve_instance(T, :small; seed=seed, iterMax=3)
+    warmup_tier = tier === :small_closed_form ? :small_closed_form : :small
+    compile_seconds = @elapsed solve_instance(T, warmup_tier; seed=seed, iterMax=3)
 
     samples = Float64[]
     allocated = 0
@@ -132,6 +135,13 @@ function main(; tiers=(:small,), types=(Float64,), reps=3,
             measurement.validated ? "validated" : "VALIDATION FAILED")
         measurement.validated ||
             push!(failures, "$(tier)/$(T): $(measurement.validation_detail)")
+        # The benchmark measures convergence quality as well as time: a row
+        # that returns Stalled without an Optimal certificate is a failed
+        # solve, not a timing sample.  `validate` checks the answer in the
+        # original coordinates, and a non-Optimal result is never accepted
+        # here, even when the certificate happens to be permissive.
+        measurement.status == "Optimal" ||
+            push!(failures, "$(tier)/$(T): status $(measurement.status), not Optimal")
     end
 
     base = endswith(results_path, ".md") ? results_path[1:end-3] : results_path

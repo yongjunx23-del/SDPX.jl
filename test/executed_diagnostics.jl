@@ -40,7 +40,7 @@ using Test
         @test selected.kkt === :sparse_normal
         @test selected.gram === :sparse_gram
         @test selected.planned_backend === :lp_deferred
-        @test selected.executed_backend === :sparse_cholesky
+        @test selected.executed_backend === :cholmod_sparse_cholesky
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :post_presolve
         @test selected.lp_formulation === :sparse_normal

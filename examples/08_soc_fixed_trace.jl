@@ -18,8 +18,9 @@ soc_result = solve_socp(soc; verbosity=0)
 #     [1 + q  r    ] >= 0    <=>    (1, q, r) in Q3,
 #     [r      1 - q]
 #
-# has two local variables and a constant cone head. This is the narrow
-# structure for which `algorithm=:socp` selects SDPX's native Q3 backend.
+# has two local variables and a constant cone head. The ingested SDPProblem
+# remains on the PSD-lift compatibility route (`algorithm=:socp_psd2`), which
+# executes the exact singleton 2x2 structure as a block arrow.
 coefficients = zeros(2, 2, 2)
 coefficients[1, :, :] = [1.0 0.0; 0.0 -1.0]
 coefficients[2, :, :] = [0.0 1.0; 1.0 0.0]
@@ -45,7 +46,8 @@ certificate = result_certificate(fixed_trace, q3_result, q3_options)
 
 @assert q3_result.status == SDPX.Optimal
 @assert certificate.valid
-@assert q3_result.termination.executed.kkt == :q3_block_diagonal_equality
+@assert SDPX.build_execution_plan(fixed_trace).algorithm == :socp_psd2
+@assert q3_result.termination.executed.kkt == :block_arrow
 @assert isapprox(q3_result.pObj, -1.0; atol=1e-7)
 
 println("direct SOC optimum = ", soc_result.pObj)

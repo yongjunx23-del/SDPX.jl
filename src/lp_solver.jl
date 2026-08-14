@@ -1819,7 +1819,8 @@ function _lp_sparse_backend_diagnostics(system::LPSparseSystem)
         # fallback conservative when the factor component is opaque.
         try
             factor_nnz = nnz(factor.L)
-        catch
+        catch exception
+            _recoverable(exception) || rethrow()
             factor_nnz = 0
         end
         ordering = :cholmod_amd
