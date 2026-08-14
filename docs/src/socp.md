@@ -152,6 +152,13 @@ path. Executed diagnostics expose `local_pivot_kernel` and
 
 ### Answer-only reduced dual (experimental)
 
+```@docs
+CertifiedObjective
+ReducedDualReconstructionToken
+solve_value
+reconstruct_fixed_trace_solution
+```
+
 Eligible FixedTraceQ3 models also expose an explicit answer-only algorithm:
 
 ```julia

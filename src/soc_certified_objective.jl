@@ -7,6 +7,13 @@ struct ReducedDualExecutionPlan
     fallback_chain::Tuple
 end
 
+"""
+Opaque data required to reconstruct original-coordinate FixedTraceQ3 primal
+and dual vectors from an answer-only reduced-dual solve.
+
+Use [`reconstruct_fixed_trace_solution`](@ref) instead of inspecting the
+token fields directly.
+"""
 struct ReducedDualReconstructionToken{T}
     problem_fingerprint::NTuple{32,UInt8}
     reduction_fingerprint::NTuple{32,UInt8}
