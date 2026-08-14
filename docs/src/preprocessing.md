@@ -1,4 +1,4 @@
-# Conservative preprocessing
+# Preprocessing
 
 SDPX runs a typed structural preprocessing pipeline before scaling and the
 numerical solve. The pipeline operates on `SDPProblem{T}` and preserves the
@@ -14,9 +14,9 @@ prepared = SDPX.Experimental.preprocess(problem, options)
 ```
 
 `prepared` contains the transformed problem, a typed `PreprocessPlan`, a
-`ReconstructionMap`, and a structured `PreprocessReport`. The ordinary
-`solve` and `solve!` entry points run the same pipeline automatically and
-return the solution in the original coordinates.
+`ReconstructionMap`, and a structured `PreprocessReport`. The ordinary `solve`
+and `solve!` entry points run the same pipeline automatically and return the
+solution in the original coordinates.
 
 The automatic stages are:
 
@@ -45,14 +45,14 @@ Sparse Schur planning is also completed before a workspace is allocated.
 `problem.structure.schur_analysis` records the active-constraint overlap graph,
 estimated upper-triangle nonzeros, density, and per-block active counts;
 `problem.structure.schur_plan` records the deterministic `:dense`, `:sparse`,
-or `:block_sparse` choice and its reason.  A selected Float64 sparse plan
+or `:block_sparse` choice and its reason. A selected Float64 sparse plan
 freezes one CSC pattern and `SchurAssemblyMap`, so later iterations update only
-`nzval`.  `SDPX.Experimental.sparse_schur_diagnostics(workspace)` reports structural/numeric
-nonzeros, factor fill, pattern reuse, overlap/block counts, and assembly timing.
-Generic MultiFloat/BigFloat sparse-Schur equality recovery remains explicitly
-fail-closed: an explicit `sparse=:sparse` request raises before workspace
-construction, while `sparse=:auto` may choose the dense route when its plan
-does not have a supported provider.
+`nzval`. `SDPX.Experimental.sparse_schur_diagnostics(workspace)` reports
+structural/numeric nonzeros, factor fill, pattern reuse, overlap/block counts,
+and assembly timing. Generic MultiFloat/BigFloat sparse-Schur equality
+recovery remains explicitly fail-closed: an explicit `sparse=:sparse` request
+raises before workspace construction, while `sparse=:auto` may choose the
+dense route when its plan does not have a supported provider.
 
 ## Bound storage
 
@@ -61,12 +61,11 @@ MOI supports `VariableIndex` and `ScalarAffineFunction` constraints in
 recognized as a variable bound only when it has exactly one nonzero
 coefficient.
 
-Single-variable scalar blocks use
-`CompactScalarCoefficientVector{T}`. It preserves the historical
-`Asp[block][variable]` indexing contract while avoiding a length-`m` reference
-vector for each bound. Active-only ingestion, classification, chordal
-analysis, scaling, LP extraction, and precision preparation avoid scanning
-inactive variables.
+Single-variable scalar blocks use `CompactScalarCoefficientVector{T}`. It
+preserves the historical `Asp[block][variable]` indexing contract while
+avoiding a length-`m` reference vector for each bound. Active-only ingestion,
+classification, chordal analysis, scaling, LP extraction, and precision
+preparation avoid scanning inactive variables.
 
 The merged bound plan uses contiguous `Vector{T}` lower and upper arrays plus
 compact activity flags and original source indices. No bound is converted
@@ -121,22 +120,15 @@ large dense system would exceed that budget, SDPX records an explicit warning
 and skips only the approximate diagnostic; exact cleanup and the subsequent
 target-arithmetic rank presolve remain enabled.
 
-This bound is material on the fixed-trace J80 benchmark (32,800 PSD2 blocks,
-65,600 variables, and 350 supplied equalities). All 350 equalities are retained
-after strict cleanup, but the former diagnostic-only near-proportional scan
-took 224.42 seconds. The bounded implementation reduced exact-cleanup time to
-0.0735 seconds and total preprocessing from 224.75 to 0.395 seconds on the same
-node without changing the model, objective, or certificate.
-
 Use `result.diagnostics.presolve.preprocessing` to inspect stage timings,
 allocations, dimension changes, bound counts, equality cleanup, formulation
 costs, chordal estimates, and warnings.
 
 ## Target-model behavior
 
-The maintained `Task_Low08` input has 6,119 variables, 482 supplied
+The maintained dense bootstrap input has 6,119 variables, 482 supplied
 equalities, and 32 PSD blocks, but no scalar bound blocks. Its equality matrix
-has rank 394. The aggregate PSD patterns are 99.84% dense even though
+has rank 394, and the aggregate PSD patterns are 99.84% dense even though
 individual coefficient matrices are sparse. Consequently:
 
 - bound extraction and fixed-variable elimination make no change;
@@ -145,27 +137,19 @@ individual coefficient matrices are sparse. Consequently:
 - the existing sparse-coefficient, dense-Schur numerical path remains
   selected.
 
-This distinction matters: individual coefficient sparsity is not evidence
-that a PSD block or its final Schur complement is sparse.
+This distinction matters: individual coefficient sparsity is not evidence that
+a PSD block or its final Schur complement is sparse. The canonical medium
+CSDR model contains 1,700 dense-pattern `2×2` PSD blocks and no explicit
+equalities or scalar bounds, so preprocessing is a no-change regression path
+there; its optimized reduced-arrow and SIMD kernels remain responsible for
+performance.
 
-The canonical medium CSDR model contains 1,700 dense-pattern `2x2` PSD blocks
-and no explicit equalities or scalar bounds. Preprocessing is therefore a
-no-change regression path there; its optimized reduced-arrow and SIMD kernels
-remain responsible for performance.
-
-Sparse equilibration nevertheless benefits from the same active-incidence
-representation. On the cluster model, copying only active matrices and
-sharing one read-only empty CSC matrix per block reduced the median
-equilibration call from 1.241 to 0.633 seconds and allocation from 685.8 to
-269.7 MB. The old and new scaled-problem checksums were identical. This
-optimization does not share writable coefficient or BigFloat storage.
-
-A local Apple M4 measurement of a 5,000-variable MOI interval construction
-produced 10,000 compact scalar blocks. Copying the model took 0.911 seconds
-and allocated 59.2 MB; structural preprocessing took 0.0006 seconds and
-allocated 1.60 MB. The former length-`m` reference-grid representation would
-require at least 400 MB for references alone, before any sparse matrix
-objects.
+Sparse equilibration uses the same active-incidence representation. On the
+cluster model, copying only active matrices and sharing one read-only empty
+CSC matrix per block reduced the median equilibration call from 1.241 to 0.633
+seconds and allocation from 685.8 to 269.7 MB; the old and new scaled-problem
+checksums were identical. This optimization does not share writable
+coefficient or BigFloat storage.
 
 ## Arithmetic limitations
 

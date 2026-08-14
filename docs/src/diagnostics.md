@@ -19,7 +19,10 @@ summary.warnings
 `result_certificate` recomputes objectives, affine residuals, componentwise
 backward errors, complementarity, and PSD checks in the original coordinates.
 An authoritative solver status is downgraded when this independent check
-fails.
+fails. The certificate is also the boundary used by benchmark harnesses:
+`result.termination.executed` records what actually ran (backend,
+formulation, provider, fallback reason), so an automatic decision is
+inspectable after the fact.
 
 For a failed optimize-mode run, `infeasibility_diagnosis` checks normalized
 homogeneous rays:
@@ -37,12 +40,12 @@ homogeneous stationarity, and positive contradiction-margin checks.
 direction passed homogeneous equality, PSD, and negative objective checks.
 `kind=:undetermined` is not a feasibility claim.
 
-In v0.3 an eligible failed solve is promoted to `PrimalInfeasible` or
-`DualInfeasible` only when the corresponding ray passes the independent check.
-The normalized ray is returned in the relevant primal or dual fields,
+An eligible failed solve is promoted to `PrimalInfeasible` or
+`DualInfeasible` only when the corresponding ray passes the independent
+check. The normalized ray is returned in the relevant primal or dual fields,
 `result_certificate` verifies it again, and the MathOptInterface wrapper
-reports `INFEASIBLE` or `DUAL_INFEASIBLE` with
-`INFEASIBILITY_CERTIFICATE` on the certificate side.
+reports `INFEASIBLE` or `DUAL_INFEASIBLE` with `INFEASIBILITY_CERTIFICATE` on
+the certificate side.
 
 The current Newton iteration still does not carry homogeneous self-dual
 embedding variables `τ` and `κ`. Its formal certificate generator is recorded
@@ -51,3 +54,11 @@ leaving a compatible boundary for an HSD generator that can find certificates
 more reliably. Eligible stopped solves attach the report at
 `result.termination.infeasibility_diagnosis` even when verbose diagnostics are
 disabled, because the report justifies the terminal status itself.
+
+## Diagnostics layout
+
+`result.diagnostics` adds classification, presolve summary, execution plan,
+selected algorithms, workspace/memory estimates, phase timings, and warnings.
+`result.termination` records planned-versus-executed KKT/LA state and
+refinement details. The [architecture page](architecture.md) describes the
+planning invariants; [parameters](parameters.md) lists the controls.

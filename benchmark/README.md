@@ -1,8 +1,10 @@
-# SDPX comprehensive registry and lightweight Mac regression
+# SDPX canonical benchmark registry and runner
 
-Round 2 separates a comprehensive workload catalogue from stage-specific
-execution. It reuses the solver's existing `performance_trace`; no benchmark
-hook was added to numerical code.
+`benchmark/runner.jl` is the canonical benchmark runner. It loads
+`benchmark/SDPXBenchmarkRegistry.jl`, which owns the registry, suites,
+generators, cache, result schema, and comparison. Every suite writes one
+machine-readable result convention and no benchmark hook is added to numerical
+code.
 
 ## Suites
 
@@ -16,7 +18,7 @@ hook was added to numerical code.
 ## Local commands
 
 ```sh
-julia --project=. benchmark/runner.jl micro
+julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 julia --project=. benchmark/runner.jl representative --verbose
 julia --project=. benchmark/runner.jl local_full
 julia --project=. benchmark/runner.jl micro --problem=synthetic/sdp_dense
@@ -24,9 +26,9 @@ julia --project=. benchmark/runner.jl micro \
   --problem=synthetic/sdp_dense --arithmetic=bigfloat256 --provider=bfla
 ```
 
-Results are written as matching TOML and TSV files. Semantic facts—status,
-objective, residuals, certificate, iterations, planned/executed route/provider
-and fallback—are primary. A solved row carries `semantic_pass`, a compact list
+Results are written as matching TOML and TSV files. Semantic facts (status,
+objective, residuals, certificate, iterations, planned/executed route/provider,
+and fallback) are primary. A solved row carries `semantic_pass`, a compact list
 of `semantic_failures`, and an explicit `unexpected_fallback` flag. The runner
 writes the complete artifact before failing on a semantic regression. Timings
 are one post-warmup observation and are never an ordinary CI failure threshold.
@@ -38,7 +40,7 @@ as `original_coordinate_api_unavailable`. LP and SDP rows are labeled `lp_native
 and `sdp_native`, while the separate planned/executed formulation columns retain
 the KKT formulation selected inside the solver.
 
-Compare two artifacts offline:
+## Compare
 
 ```sh
 julia --project=. benchmark/compare.jl baseline.toml candidate.toml comparison.tsv
@@ -61,8 +63,12 @@ julia --project=. benchmark/runner.jl representative \
 ```
 
 Ordinary tests and solves never access the network. Missing data or a missing
-MPS/SDPA/CBF loader produces a structured `skipped` result. Current Round 2
-deliberately leaves those three full external parsers unsupported.
+MPS/SDPA/CBF loader produces a structured `skipped` result. The full external
+parsers remain unsupported.
+
+`bench/public_conic_suite/` is retained as a provenance/catalogue layer:
+manifests, tier configs, pathological generators, the on-demand downloader,
+and data placeholders. It has no runner of its own.
 
 ## Precision sampling
 
@@ -73,40 +79,10 @@ explicit MFLA and one explicit BFLA smoke; they become structured skips when
 the corresponding optional package is unavailable. Loading an arithmetic type
 alone does not opt `:auto` into an optional provider.
 
-## Round 3 subset
+## Specialized campaigns
 
-Start Dense Normal Equations vs Augmented KKT + LDLT work with:
-
-1. `synthetic/lp_eq_full`
-2. `synthetic/lp_eq_near_1e2`
-3. `synthetic/lp_eq_near_1e4`
-4. `synthetic/lp_eq_near_1e8`
-5. `synthetic/lp_eq_exact_deficient`
-6. `synthetic/lp_scale_1e8`
-7. `synthetic/sdp_equality_heavy`
-8. `synthetic/sdp_small_eig_1e8`
-9. `synthetic/sdp_small_eig_1e12`
-10. `synthetic/sdp_block_arrow`
-
-These provide well-conditioned control, equality-heavy, rank-deficient,
-conditioning, scaling, near-singular Schur and structured cases without a
-large workload.
-
-## Round 4 formulation planner scoreboard
-
-The Round 4 scoreboard is a small correctness-first A/B over the dense cases
-that informed the initial static formulation policy:
-
-```sh
-SDPX_ROUND4_OUT=/tmp/sdpx-round4.toml \
-  julia --project=. benchmark/round4_formulation_scoreboard.jl
-```
-
-Each case is solved with `:auto`, explicit `:normal_equations`, and explicit
-`:augmented` using the same arithmetic, provider, tolerances, and one warmup.
-Original-coordinate certificate validity is the first gate. Residual quality
-and iteration count classify only pairs that also match the registry or
-analytic reference objective within a scale-aware tolerance. Wall time is
-recorded but never selects the winner from this single-sample local run.
-Planned and executed formulations must match and any runtime fallback is an
-error.
+Application/cluster benchmarks under `bench/` and the scoreboards under
+`benchmark/` (`round3_augmented_ab.jl`, `round4_formulation_scoreboard.jl`,
+`round5_soc_scoreboard.jl`) remain specialized and outside the canonical
+runner. `bench/gates.jl` with `bench/baselines/gates.json` remains the
+correctness acceptance gate.

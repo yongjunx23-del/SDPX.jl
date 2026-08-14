@@ -10,8 +10,9 @@ This runs the **quick** profile. `Pkg.test()` selects the same profile, but may
 still spend time resolving every package listed in the full test environment.
 Quick checks the LA backend, planner and public API boundaries,
 canonical/problem-feature IR, prepared reuse, diagnostics, plus one small LP,
-SOCP, and SDP solve. It also validates the Round 2 benchmark registry and one
-tiny runner/serialization path; public benchmark files are never downloaded.
+SOCP, and SDP solve. It also validates benchmark registry and scoreboard
+contracts, sparse LP/Schur execution, and one tiny runner/serialization path;
+public benchmark files are never downloaded.
 
 Run the complete numerical, precision, extension, threading, integration, and
 quality suite before release or after a solver-hot-path change:

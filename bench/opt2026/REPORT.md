@@ -13,7 +13,7 @@ worse, and reverted (recorded in "Rejected changes" so they are not retried).
 > reproducibility. They are not the current release baseline unless repeated
 > in the [extended-precision report](../extended_precision_blas/REPORT.md),
 > [CSDR results](../csdr_psd_dual/RESULTS.md),
-> [automatic-pipeline report](../../docs/automatic-optimization-pipeline.md),
+> [automatic-pipeline guide](../../docs/src/pipeline.md),
 > or [threading results](../threading/RESULTS.md).
 
 ---

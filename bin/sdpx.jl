@@ -61,10 +61,10 @@ Output:
   --quiet             Do not print the solve summary.
   --help, -h          Show this help.
 
-Input format in this development snapshot:
-  JSON bridge schema v1 (`docs/bridge-schema.md`).  The bundled public conic
-  benchmark suite under `bench/public_conic_suite/` is the development gate
-  for the next native SDPA/CBF/MPS loader phase.
+Input format:
+  JSON bridge schema v1 (`docs/bridge-schema.md`).  The canonical benchmark
+  registry under `benchmark/` records generated and external conic workloads;
+  native SDPA/CBF/MPS command-line loaders are not yet provided.
 """
 
 const VALUE_OPTIONS = Set([

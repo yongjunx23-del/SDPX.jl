@@ -1,8 +1,8 @@
-# SDPX command-line frontend (v0.5 development)
+# SDPX command-line frontend
 
-The v0.5 development frontend intentionally resembles the small set of
-high-value options used in SDPB workflows while keeping SDPX's LP/SOCP/SDP
-automatic pipeline in control.
+The command-line frontend resembles the small set of high-value options used
+in SDPB workflows while keeping SDPX's LP/SOCP/SDP automatic pipeline in
+control.
 
 ## Setup
 
@@ -14,7 +14,7 @@ julia bin/setup_cli.jl
 ```
 
 `bin/setup_cli.jl` creates the isolated CLI environment and develops the local
-checkout into it.  The solver core still has no JSON dependency.
+checkout into it. The solver core still has no JSON dependency.
 
 ## Normal use: everything automatic
 
@@ -22,7 +22,7 @@ checkout into it.  The solver core still has no JSON dependency.
 ./bin/sdpx problem.json
 ```
 
-The result is written to `problem.result.json`.  The output contains both
+The result is written to `problem.result.json`. The output contains both
 `resolved_options` and `plan`, so `auto` is inspectable rather than opaque.
 
 ## SDPB-style high precision
@@ -36,14 +36,14 @@ The result is written to `problem.result.json`.  The output contains both
 ```
 
 An integer `--precision=N` means BigFloat with `N` **bits**, matching the
-meaning users normally expect from SDPB's precision flag.  High-precision
+meaning users normally expect from SDPB's precision flag. High-precision
 coefficients in the JSON input should be strings so that they are parsed only
 after the BigFloat precision scope has been established.
 
-The three stopping thresholds are independent.  If any is omitted or set to
+The three stopping thresholds are independent. If any is omitted or set to
 `auto`, the frontend selects a conservative target using roughly one third of
-the available decimal precision, with a Float64 floor of `1e-8`.  For example,
-840 bits resolves to approximately `1e-84`.  This is only a stopping-policy
+the available decimal precision, with a Float64 floor of `1e-8`. For example,
+840 bits resolves to approximately `1e-84`. This is only a stopping-policy
 heuristic; final success remains governed by original-coordinate
 certification.
 
@@ -64,13 +64,14 @@ The ordinary frontend exposes policies, not low-level IPM constants:
 --certificate=auto|on|off
 ```
 
-In v0.5, `auto` uses the static formulation planner for eligible dense systems.
-`normal_equations` and `augmented` are expert overrides; `primal` preserves the
-historical primal orientation without disabling sparse or block-arrow routes.
-`dual` is reserved for a future typed dual transform and fails closed.
+Under `:auto`, the static formulation planner selects the dense KKT
+formulation before execution. `normal_equations` and `augmented` are expert
+overrides; `primal` preserves the historical primal orientation without
+disabling sparse or block-arrow routes. `dual` is reserved for a future typed
+dual transform and fails closed.
 
 Parameters such as centering constants, Q3 Gram strategies, mixed-precision
-condition limits and refinement micro-policy remain expert/internal controls.
+condition limits, and refinement micro-policy remain expert/internal controls.
 They should not become command-line flags unless a benchmarked scientific
 workflow proves that users need to override them.
 
@@ -96,10 +97,9 @@ options = SolveOptions(
 )
 ```
 
-For an already-ingested problem, its arithmetic has already been chosen.  A
+For an already-ingested problem, its arithmetic has already been chosen. A
 request for 840 bits therefore requires that the problem itself was created as
-BigFloat at the desired precision.  The CLI does not have this issue because
-it parses the model inside the requested precision scope.
+BigFloat at the desired precision. The CLI does not have this issue because it
+parses the model inside the requested precision scope.
 
-`SolverOptions{T}` remains available as the expert resolved interface and is
-not removed in v0.4.1.
+`SolverOptions{T}` remains available as the expert resolved interface.

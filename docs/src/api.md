@@ -75,10 +75,9 @@ using JuMP, LinearAlgebra, SDPX
 model = Model(() -> SDPX.Optimizer(sparse=:auto, verbosity=0))
 ```
 
-See the repository's `docs/julia-interface.md` for the full JuMP guide,
-including `GenericModel{Float64x4}` for extended precision.
-See `docs/convex-interface.md` for Convex atom coverage, typed models, and
-frontend-overhead benchmarks.
+See [jump.md](jump.md) for the full JuMP guide, including
+`GenericModel{Float64x4}` for extended precision, and [convex.md](convex.md)
+for Convex atom coverage, typed models, and frontend-overhead benchmarks.
 
 ```@docs
 Optimizer

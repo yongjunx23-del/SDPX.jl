@@ -6,44 +6,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.5.0] — unreleased
 
-The active development target was renamed from v0.4.1 to v0.5.0, so the
-former unreleased v0.4.1 entries below now belong to v0.5.0. There will be no
-separate v0.4.1 release.
+### User-facing
 
-### Added
+- A typed all-auto `SolveOptions` frontend and an SDPB-style CLI with integer
+  BigFloat bit precision and independent duality-gap, primal-error, and
+  dual-error thresholds; resolved choices and the automatic `ExecutionPlan`
+  remain visible in result provenance.
+- Native Lorentz SOCP through `solve_socp`/`second_order_program`, including
+  the `fixed_trace_q3` specialization, with original-coordinate certification.
+- End-to-end sparse LP execution and frozen-CSC sparse SDP Schur execution.
+- Certificates, executed diagnostics, and the canonical public LP/SOCP/SDP
+  benchmark registry under `benchmark/`.
 
-- A small all-auto `SolveOptions` frontend policy separated from the fully
-  resolved expert `SolverOptions{T}` numerical configuration.
-- An SDPB-style command-line frontend with integer BigFloat bit precision and
-  independent duality-gap, primal-error, and dual-error thresholds.
-- CLI result provenance for resolved frontend options and the automatic
-  `ExecutionPlan`.
-- An explicit KKT formulation descriptor in `ExecutionPlan`, kept distinct
-  from the selected linear-algebra provider and exposed in diagnostics.
-- The public LP/SOCP/SDP benchmark starter suite under
-  `bench/public_conic_suite/` as the acceptance layer for continued solver
-  reorganization.
-- Development and architecture notes for the frontend/midend/backend migration.
-- Optional BigFloatLinearAlgebra (BFLA) and MultiFloatLinearAlgebra (MFLA)
-  providers now share provider-neutral dense factor handles for Cholesky,
-  equality rank-revealing QR, pivoted symmetric LDLT, and LU, with explicit
-  installed-provider smoke coverage in `test/provider_smoke.jl`.
-- GenericLinearAlgebra remains an explicit reference route for `:standard`
-  requests on BigFloat and extended arithmetic; MFLA/BFLA selection is final
-  at planning time and no runtime provider fallback is installed.
-- Provider smoke is intentionally outside the ordinary `Pkg.test` target
-  because MFLA is unregistered; `scripts/dev_v05_provider_smoke.sh` builds a
-  temporary environment from the real installed/local MFLA and BFLA checkouts
-  (`SDPX_MFLA_PROJECT` / `SDPX_BFLA_PROJECT`) and runs tiny Float64x4/BigFloat
-  LP and SDP solves without cloning either provider.
+### Developer
 
-### Development policy
-
-- Ordinary user controls default to `auto`; microkernel, KKT and predictor
-  details remain expert/internal options.
-- The existing numerical backends are preserved in this snapshot; canonical
-  LP/SOC/PSD IR, native general SOCP, end-to-end sparse LP, and equality-memory
-  rework are staged follow-up tasks guarded by the benchmark suite.
+- Explicit KKT formulation descriptor in `ExecutionPlan` plus a static
+  formulation planner, kept independent of the selected linear-algebra
+  provider.
+- Provider-neutral `:standard`, MFLA, BFLA, and legacy linear-algebra routing:
+  provider choice is final at planning time with no hidden runtime fallback.
+  The bundled legacy provider (`src/la_backends/legacy.jl`) is included
+  statically, and every `LegacyLABackend` `la_*` dispatch routes through
+  `_sdpx_legacy_la_call` instead of calling historical `k*` kernels directly.
+- Benchmark registry and scoreboard contracts are covered by the ordinary test
+  suite; public benchmark files are never downloaded.
 
 ## [0.4.0] — 2026-08-09
 
@@ -145,7 +131,7 @@ separate v0.4.1 release.
   variables instead of being embedded in the public scripts.
 - User documentation is consolidated around the Documenter manual and a
   shorter README. Obsolete internal review, audit, and roadmap documents were
-  removed; detailed implementation history remains in `WORKLOG.md` and Git.
+  removed; detailed implementation history remains available in Git history.
 
 ## [0.3.1] — 2026-08-07
 

@@ -48,6 +48,26 @@ summary = solve_summary(
 )
 ```
 
+## LP and SOCP
+
+Native LP models avoid manufacturing one `1×1` PSD block per inequality:
+
+```julia
+problem = SDPX.linear_program(
+    c,
+    G,
+    h;
+    Aeq=Aeq,
+    beq=beq,
+    sparse=:auto,
+)
+result = SDPX.solve(problem; tolerance=1e-8, threads=4)
+```
+
+This represents `G*x >= h` and `Aeq*x = beq`; `SDPX.solve_lp(c, G, h; ...)` is
+the one-call form. Compact Lorentz-cone models use `second_order_program` and
+`solve_socp`; see [socp.md](socp.md).
+
 ## Reuse an ingested problem
 
 Ingestion analyzes sparsity and creates the internal coefficient layout. Reuse
@@ -73,5 +93,5 @@ options = SolverOptions(
 result = solve!(problem, options)
 ```
 
-The examples directory contains self-checking LP, SDP, extended-precision, and
-JuMP programs and is exercised by the test suite.
+The examples directory contains self-checking LP, SOCP, SDP, extended-
+precision, and JuMP programs and is exercised by the test suite.

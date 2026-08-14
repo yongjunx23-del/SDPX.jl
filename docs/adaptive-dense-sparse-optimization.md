@@ -9,7 +9,7 @@ Date: 2026-07-24
 > kernels, a fused exact-arrow path that allocates neither transformed panels
 > nor pair buffers, and a usable-memory-aware scheduler. See the current
 > [extended-precision report](../bench/extended_precision_blas/REPORT.md),
-> [automatic-pipeline report](automatic-optimization-pipeline.md), and
+> [automatic-pipeline report](src/pipeline.md), and
 > [threading results](../bench/threading/RESULTS.md).
 
 ## Executive result

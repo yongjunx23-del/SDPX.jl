@@ -50,16 +50,18 @@ genuine contribution — it stops the next person repeating it.
 
 ## Benchmarks
 
-Large benchmarks are deliberately **not** run in CI and their inputs and outputs
-are not committed — the serialized problem instances run to gigabytes. Only the
-`:small` tier runs as a smoke check.
+The canonical benchmark runner is `benchmark/runner.jl`, backed by
+`benchmark/SDPXBenchmarkRegistry.jl` and a single result schema/cache
+convention. CI runs only the deterministic `micro` suite; larger registered
+suites need generated or downloaded inputs and are run manually, never in CI.
 
 ```bash
-julia --project=bench -e 'include("bench/run.jl"); main(tiers=(:small,))'
+julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 ```
 
-Regenerate larger instances locally with `bench/generate.jl` rather than
-committing them.
+`bench/gates.jl` plus `bench/baselines/gates.json` remain the correctness
+acceptance gate. See `benchmark/README.md` for suites, public provenance, and
+result comparison.
 
 ## Comparisons with other solvers
 

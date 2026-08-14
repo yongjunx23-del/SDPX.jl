@@ -424,8 +424,8 @@ the legacy path with `:off` or request a diagnostic attempt with `:on`.
 - `test/extended_precision_blas.jl`
 - `test/bigfloat_sparse_schur_regressions.jl`
 - `test/sparse.jl`
-- `docs/parameters.md`
-- `docs/precision.md`
+- `docs/src/parameters.md`
+- `docs/src/precision.md`
 
 The independent benchmark harness is mirrored at
 `benchmarks/sdpx-medium-j32-k4` outside the package repository. It contains

@@ -6,5 +6,5 @@ SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 [compat]
 JSON = "0.21, 1"
 MultiFloats = "3"
-SDPX = "0.2, 0.3, 0.4"
+SDPX = "0.2, 0.3, 0.4, 0.5"
 julia = "1.10"

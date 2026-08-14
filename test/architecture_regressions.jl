@@ -2,7 +2,7 @@ using LinearAlgebra
 using SparseArrays
 using Test
 
-@testset "v0.4.1 architecture regressions" begin
+@testset "current architecture regressions" begin
     @testset "sparse equality backward errors equal dense definition" begin
         B_dense = [1.0 0.0 2.0; 0.0 -3.0 0.0; 4.0 0.0 5.0]
         B_sparse = sparse(B_dense)
@@ -215,5 +215,108 @@ using Test
             lp_workspace,
             0,
         )
+    end
+end
+
+# Bundled legacy-provider architecture contract, formerly asserted only by the
+# cluster probe.  The provider must stay included and every routed
+# `LegacyLABackend` `la_*` dispatch body must go through
+# `_sdpx_legacy_la_call` rather than calling historical `k*` kernels directly.
+const LEGACY_ROUTED_OPERATIONS = (
+    "la_cholesky_factor!",
+    "la_factor_solve!",
+    "la_dot",
+    "la_norminf",
+    "la_mul!",
+    "la_mul_owned!",
+    "la_syrk!",
+    "la_chol!",
+    "la_trsm!",
+    "la_trsv_lower!",
+    "la_trsv_transpose!",
+    "la_axpby!",
+    "la_axpby_owned!",
+)
+
+function _legacy_contract_contains_symbol(value, target::Symbol)
+    value === target && return true
+    value isa Expr || return false
+    return any(
+        argument -> _legacy_contract_contains_symbol(argument, target),
+        value.args,
+    )
+end
+
+function _legacy_contract_is_la_dispatch_call(value)
+    return value isa Expr &&
+           value.head === :call &&
+           !isempty(value.args) &&
+           value.args[1] isa Symbol &&
+           startswith(String(value.args[1]), "la_")
+end
+
+function _legacy_contract_is_dispatch_signature(call_expression)
+    _legacy_contract_contains_symbol(call_expression, :LegacyLABackend) &&
+        return true
+    name = String(call_expression.args[1])
+    return name == "la_factor_solve!" &&
+           _legacy_contract_contains_symbol(
+               call_expression,
+               :LegacyLACholeskyFactor,
+           )
+end
+
+function _legacy_contract_definitions(ast)
+    definitions = Pair{String,Any}[]
+    function record(call_expression, body)
+        _legacy_contract_is_la_dispatch_call(call_expression) || return
+        name = String(call_expression.args[1])
+        name in LEGACY_ROUTED_OPERATIONS || return
+        _legacy_contract_is_dispatch_signature(call_expression) || return
+        push!(definitions, name => body)
+    end
+    function walk(value)
+        value isa Expr || return
+        if value.head === :function && length(value.args) >= 2
+            record(value.args[1], value.args[2])
+        elseif value.head === :(=) && length(value.args) == 2
+            record(value.args[1], value.args[2])
+        end
+        foreach(walk, value.args)
+    end
+    walk(ast)
+    return definitions
+end
+
+const LEGACY_KERNEL_NAME = r"^k[a-z_]+!?$"
+
+function _legacy_contract_direct_kernel_calls(value, hits)
+    value isa Expr || return
+    if value.head === :call && !isempty(value.args) &&
+       value.args[1] isa Symbol &&
+       occursin(LEGACY_KERNEL_NAME, String(value.args[1]))
+        push!(hits, String(value.args[1]))
+    end
+    foreach(
+        argument -> _legacy_contract_direct_kernel_calls(argument, hits),
+        value.args,
+    )
+end
+
+@testset "bundled legacy LA provider contract" begin
+    root = realpath(joinpath(dirname(pathof(SDPX)), ".."))
+    module_source = read(joinpath(root, "src", "SDPX.jl"), String)
+    @test occursin("include(\"la_backends/legacy.jl\")", module_source)
+
+    la_backend_source = read(joinpath(root, "src", "la_backend.jl"), String)
+    ast = Meta.parseall(la_backend_source)
+    definitions = _legacy_contract_definitions(ast)
+    @test !isempty(definitions)
+    @test Set(first.(definitions)) == Set(LEGACY_ROUTED_OPERATIONS)
+    for (name, body) in definitions
+        direct = String[]
+        _legacy_contract_direct_kernel_calls(body, direct)
+        @test isempty(direct)
+        @test _legacy_contract_contains_symbol(body, :_sdpx_legacy_la_call)
     end
 end

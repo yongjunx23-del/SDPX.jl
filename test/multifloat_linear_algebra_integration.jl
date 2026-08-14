@@ -3,9 +3,8 @@
 
     These tests are NOT part of the ordinary Pkg.test target: the MFLA
     package is unregistered and must be developed into an independent
-    cluster environment (see cluster-probes/v041-unified-la).  The file is
-    included by the PBS focused probe with MultiFloatLinearAlgebra already
-    loaded.
+    provider environment.  `scripts/dev_v05_provider_smoke.sh` includes this
+    file with MultiFloatLinearAlgebra already loaded.
 =#
 using SDPX
 using Test

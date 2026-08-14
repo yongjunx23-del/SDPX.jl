@@ -2,7 +2,7 @@
 
 These names support inspection, custom preprocessing, and solver research.
 Use them through `SDPX.Experimental`; their result layouts may change before
-1.0. Their historical top-level exports completed the deprecation cycle in
+1.0. The historical top-level exports completed their deprecation cycle in
 0.4. Qualified `SDPX.name` access remains available for compatibility.
 
 ```@docs
@@ -40,6 +40,12 @@ SDPX.PreprocessReport
 SDPX.PreprocessStageReport
 SDPX.ReconstructionMap
 ```
+
+## Formulation and sparse planning
+
+The static formulation planner and provider-neutral sparse layer are exposed
+through their diagnostic entry points; see [architecture.md](architecture.md),
+[providers.md](providers.md), and [sparse-execution.md](sparse-execution.md).
 
 ## Spectrum and BLAS inspection
 

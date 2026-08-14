@@ -79,19 +79,9 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Instantiate benchmark environment
         run: julia --project=bench -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-      # Only the deterministic small tier runs here. The bootstrap-shaped
-      # :small tier is a stress fixture whose Float64 tail can collapse at the
-      # requested 1e-10 tolerance on some platforms; the closed-form tier keeps
-      # the smoke gate deterministic and still runs through this same harness.
-      # The large sparse and lattice-bootstrap benchmarks take hours, need
-      # multi-gigabyte generated inputs, and are slower still in BigFloat —
-      # they are run manually, never in CI.
-      - name: Run small-tier smoke benchmark
-        run: |
-          julia --project=bench -e '
-            include("bench/run.jl")
-            main(; tiers=(:small_closed_form,), types=(Float64,), reps=1, results_path=tempname())'
-      - name: Run Round 2 Micro semantic smoke
+      # Only the canonical micro suite runs in CI. Larger registered suites
+      # need generated or downloaded inputs and are run manually.
+      - name: Run canonical micro benchmark smoke
         run: julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 
   quality:

@@ -1,23 +1,12 @@
-# Integration status in the SDPX v0.4.1 development snapshot
+# Integration status
 
-The supplied suite is copied into the repository unchanged so its provenance,
-manifests and generators can act as a stable acceptance layer.
+`bench/public_conic_suite` is retained as a provenance/catalogue layer. The
+canonical execution path is `benchmark/runner.jl`; see `benchmark/README.md`.
 
-Implemented in this snapshot:
+- Manifests, tier configs, generators, and source provenance are present.
+- `scripts/download_external.jl` remains available for on-demand downloads.
+- Full SDPA, CBF, and MPS loaders are not implemented in this snapshot; external
+  manifest entries are recorded as structured skips until a supported loader
+  exists.
 
-- suite present under the intended repository path;
-- all-auto frontend policy and SDPB-style precision/tolerance CLI;
-- development plan that assigns benchmark families to frontend/midend/backend
-  milestones.
-
-Not yet implemented (next development tasks):
-
-- SDPA sparse file loader for the external SDP cases;
-- CBF loader preserving native Lorentz semantics;
-- MPS/Netlib loader feeding the native sparse LP path;
-- one unified external-suite runner and normalized result record;
-- external reference solver adapters;
-- pinned same-hardware baseline results.
-
-Do not treat the presence of the manifest as evidence that these external cases
-have been executed by this snapshot.
+No benchmark results are claimed from the catalogue itself.

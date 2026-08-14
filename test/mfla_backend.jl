@@ -1,8 +1,8 @@
 #=
     MultiFloatLinearAlgebra focused backend contract.
 
-    The MFLA package is unregistered and is developed into an independent
-    environment (see cluster-probes/v041-unified-la).  This file is therefore
+    The MFLA package is unregistered and is tested in an independent provider
+    environment (see scripts/dev_v05_provider_smoke.sh).  This file is therefore
     extension-gated: without MFLA loaded it only verifies that explicit
     :multifloat requests fail closed while :auto / :standard / :legacy remain
     stable.  With MFLA loaded it covers planning, dense factors, residuals,
