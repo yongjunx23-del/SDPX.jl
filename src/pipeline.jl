@@ -2174,12 +2174,13 @@ rather than a central guess; see `estimate_sdp_workspace_bytes`."""
 const WORKSPACE_ESTIMATE_MARGIN_NUMERATOR = 3
 const WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR = 2
 # Array/object headers and allocator size classes are platform-dependent and
-# are not represented by an element count. Julia 1.12 on 64-bit Linux needed
-# 152 bytes more than the old estimate on a small workspace even after the
+# are not represented by an element count. As the immutable planner and
+# diagnostics snapshots grew, Julia 1.12 on 64-bit Linux needed roughly
+# 21 KiB more than the counted arrays on a small workspace even after the
 # multiplicative margin. Charge a conservative fixed amount plus one cache
 # line per major per-block workspace object; this is negligible for large
 # models but keeps the documented upper-bound contract portable.
-const WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES = 4096
+const WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES = 32 * 1024
 const WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES = 1024
 
 @inline function _workspace_estimate_with_margin(

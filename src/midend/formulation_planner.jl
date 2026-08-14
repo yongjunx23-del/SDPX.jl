@@ -81,13 +81,13 @@ const _FORMULATION_RRQR_QUALITY_THRESHOLD = 1.0e-8
         Inf
     end
     rrqr_quality = equality.available && equality.basis_verified ?
-                   equality.relative_rrqr_quality : NaN
+                   equality.relative_rrqr_quality : nothing
     large_equality_scale_spread =
         isfinite(scale_spread) ?
         scale_spread >= _FORMULATION_SCALE_SPREAD_THRESHOLD :
         scale_spread > 0
     poor_equality_quality =
-        isfinite(rrqr_quality) &&
+        rrqr_quality !== nothing && isfinite(rrqr_quality) &&
         rrqr_quality <= _FORMULATION_RRQR_QUALITY_THRESHOLD
     strong_numerical_risk =
         equality.basis_verified &&
@@ -267,6 +267,16 @@ function formulation_decision_summary(decision::FormulationDecision)
         estimated_memory_bytes=candidate.estimated_memory_bytes,
         reason=candidate.reason,
     )
+    equality = decision.equality_evidence
+    equality_summary = (
+        available=equality.available,
+        basis_verified=equality.basis_verified,
+        rank_before=equality.rank_before,
+        rank_after=equality.rank_after,
+        relative_rrqr_quality=equality.available ?
+            equality.relative_rrqr_quality : nothing,
+        reason=equality.reason,
+    )
     return (
         requested=decision.requested,
         preferred=decision.preferred,
@@ -274,7 +284,7 @@ function formulation_decision_summary(decision::FormulationDecision)
         reason=decision.reason,
         candidates=map(summarize, decision.candidates),
         supporting_features=decision.supporting_features,
-        equality_evidence=decision.equality_evidence,
+        equality_evidence=equality_summary,
         risk_indicators=decision.risk_indicators,
     )
 end

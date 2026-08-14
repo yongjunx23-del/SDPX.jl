@@ -148,7 +148,10 @@ function _round4_run(case, ::Type{T}, formulation::Symbol) where {T}
             decision.supporting_features.equality_scale_spread,
         ),
         equality_rrqr_quality=string(
-            decision.equality_evidence.relative_rrqr_quality,
+            something(
+                decision.equality_evidence.relative_rrqr_quality,
+                NaN,
+            ),
         ),
         equality_basis_verified=decision.equality_evidence.basis_verified,
         normal_dimension=decision.supporting_features.normal_dimension,
