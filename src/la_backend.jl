@@ -45,6 +45,12 @@ const _DENSE_AUGMENTED_REQUIRED = (
     :multi_rhs,
 )
 
+# Reduced-dual NativeSOC only needs two dense matrix-vector products per
+# objective/gradient evaluation.  Keeping this as a distinct route prevents
+# the planner from requiring (or advertising) factorization capabilities that
+# the algorithm never uses.
+const _DENSE_GEMV_REQUIRED = (:mul_owned,)
+
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
     # SDPX's explicit equality QR route is column-pivoted and rank revealing;
     # it is not a request for a general unpivoted QR implementation.
@@ -84,6 +90,11 @@ function _la_route_requirements(
     route === :dense_augmented_ldlt && return (
         operations=(:pivoted_symmetric_ldlt, :solve),
         capabilities=_DENSE_AUGMENTED_REQUIRED,
+        fallback=nothing,
+    )
+    route === :dense_gemv && return (
+        operations=(:mul_owned,),
+        capabilities=_DENSE_GEMV_REQUIRED,
         fallback=nothing,
     )
     return nothing

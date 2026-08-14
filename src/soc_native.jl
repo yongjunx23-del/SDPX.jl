@@ -31,6 +31,33 @@ struct FixedTraceQ3Reduction{T}
     ownership::Symbol
 end
 
+function _fixed_trace_q3_active_variables(A::SparseMatrixCSC)
+    active = Int[]
+    rows, columns, values = findnz(A)
+    @inbounds for index in eachindex(values)
+        iszero(values[index]) && continue
+        row = rows[index]
+        row == 1 && return nothing
+        if row == 2 || row == 3
+            column = columns[index]
+            column in active || push!(active, column)
+            length(active) > 2 && return active
+        end
+    end
+    sort!(active)
+    return active
+end
+
+function _fixed_trace_q3_active_variables(A::AbstractMatrix)
+    all(iszero, view(A, 1, :)) || return nothing
+    active = Int[]
+    @inbounds for variable in axes(A, 2)
+        (!iszero(A[2, variable]) || !iszero(A[3, variable])) &&
+            push!(active, variable)
+    end
+    return active
+end
+
 struct NativeSOCFixedTraceFactor{T}
     reduction::FixedTraceQ3Reduction{T}
     factors::Matrix{T}
@@ -84,12 +111,8 @@ function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
     @inbounds for (block, cone) in pairs(problem.cones)
         length(cone.b) == 3 || return nothing
         isfinite(cone.b[1]) && cone.b[1] > zero(T) || return nothing
-        all(iszero, view(cone.A, 1, :)) || return nothing
-        active = Int[]
-        for variable in axes(cone.A, 2)
-            (!iszero(cone.A[2, variable]) ||
-             !iszero(cone.A[3, variable])) && push!(active, variable)
-        end
+        active = _fixed_trace_q3_active_variables(cone.A)
+        active === nothing && return nothing
         length(active) == 2 || return nothing
         first, second = active
         scale = max(
