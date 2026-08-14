@@ -108,6 +108,10 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "presolve must be false/:off, true/:on, or :auto",
         ))
+    opts.sparse isa Bool || opts.sparse in (:auto, :dense, :sparse, :on, :off) ||
+        throw(ArgumentError(
+            "sparse storage must be false/:dense, true/:sparse, or :auto",
+        ))
     opts.parameter_policy in (:fixed, :auto) ||
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     opts.parameter_strategy in (:fixed, :adaptive) ||
@@ -1357,6 +1361,10 @@ function build_execution_plan(
     end
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
+    storage_policy = _normalize_kkt_storage_request(opts.sparse)
+    storage_selected = storage_policy === :auto ? classification.storage : storage_policy
+    storage_reason = storage_policy === :auto ? :classification_storage :
+                     storage_policy === :sparse ? :explicit_sparse : :explicit_dense
     gram_kernel = if algorithm === :lp_primal_dual
         if T === Float64
             selected_threads > 1 &&
@@ -1463,6 +1471,12 @@ function build_execution_plan(
             mixed_precision_memory_fraction=
                 opts.mixed_precision_memory_fraction,
             execution_route_provenance=route.provenance,
+            storage_policy,
+            storage_selected,
+            storage_reason,
+            storage_dimension=classification.variables + classification.equalities,
+            storage_input_nnz=0,
+            storage_density=classification.expected_schur_density,
             reduced_arrow_decision,
             mixed_reduced_arrow_decision=mixed_arrow_decision,
             generic_mixed_precision_decision=generic_mixed_decision,

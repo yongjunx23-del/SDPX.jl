@@ -1395,6 +1395,112 @@ const KKT_FORMULATION_ROUTES = (
     :block_arrow,
 )
 
+# ---------------------------------------------------------------------------
+# KKT storage is an execution dimension independent of formulation and LA
+# provider.  The small descriptors below are intentionally immutable and carry
+# only structural facts; numeric factors live in the sparse execution layer.
+# ---------------------------------------------------------------------------
+
+abstract type AbstractKKTStorage end
+
+"""Dense KKT storage marker used by the planner and diagnostics."""
+struct DenseKKTStorage <: AbstractKKTStorage end
+
+"""Frozen CSC storage marker used by sparse KKT execution."""
+struct SparseCSCStorage <: AbstractKKTStorage end
+
+"""
+    KKTStoragePlan
+
+Structural storage choice, deliberately separate from `FormulationPlan` and
+`LABackendConfiguration`.  `dimension`/`input_nnz` are optional estimates used
+by diagnostics and the simple `:auto` policy; no numeric factorization is run
+while constructing the plan.
+"""
+struct KKTStoragePlan
+    storage::Symbol
+    dimension::Int
+    input_nnz::Int
+    density::Float64
+    reason::Symbol
+    provenance::Symbol
+    requested::Symbol
+end
+
+function KKTStoragePlan(
+    storage::Symbol;
+    dimension::Integer=0,
+    input_nnz::Integer=0,
+    density::Real=0.0,
+    reason::Symbol=:explicit,
+    provenance::Symbol=:storage_planner,
+    requested::Symbol=storage,
+)
+    storage in (:dense, :sparse) || throw(ArgumentError(
+        "KKT storage must be :dense or :sparse",
+    ))
+    dim = Int(dimension)
+    nnz_value = Int(input_nnz)
+    dim >= 0 || throw(ArgumentError("KKT storage dimension must be nonnegative"))
+    nnz_value >= 0 || throw(ArgumentError("KKT storage nnz must be nonnegative"))
+    return KKTStoragePlan(
+        storage,
+        dim,
+        nnz_value,
+        Float64(density),
+        reason,
+        provenance,
+        requested,
+    )
+end
+
+KKTStoragePlan(storage::Symbol, dimension::Integer, input_nnz::Integer) =
+    KKTStoragePlan(storage; dimension=dimension, input_nnz=input_nnz)
+KKTStoragePlan(::DenseKKTStorage; kwargs...) = KKTStoragePlan(:dense; kwargs...)
+KKTStoragePlan(::SparseCSCStorage; kwargs...) = KKTStoragePlan(:sparse; kwargs...)
+storage_symbol(::DenseKKTStorage) = :dense
+storage_symbol(::SparseCSCStorage) = :sparse
+storage_symbol(plan::KKTStoragePlan) = plan.storage
+
+@inline function _normalize_kkt_storage_request(value)
+    value isa Bool && return value ? :sparse : :dense
+    value === :on && return :sparse
+    value === :off && return :dense
+    value in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse/storage policy must be :auto, :dense, :sparse, :on, :off, or Bool",
+    ))
+    return value
+end
+
+"""Simple, explainable storage policy used before symbolic fill is known."""
+function plan_kkt_storage(
+    requested::Union{Bool,Symbol};
+    dimension::Integer=0,
+    input_nnz::Integer=0,
+    sparse_threshold::Float64=0.20,
+)
+    policy = requested isa Bool ? (requested ? :sparse : :dense) : requested
+    policy in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "storage policy must be :auto, :dense, or :sparse",
+    ))
+    dim = Int(dimension)
+    nnz_value = Int(input_nnz)
+    density = nnz_value / max(dim * dim, 1)
+    if policy === :dense
+        return KKTStoragePlan(:dense; dimension=dim, input_nnz=nnz_value,
+                              density=density, reason=:explicit_dense,
+                              requested=:dense)
+    elseif policy === :sparse
+        return KKTStoragePlan(:sparse; dimension=dim, input_nnz=nnz_value,
+                              density=density, reason=:explicit_sparse,
+                              requested=:sparse)
+    end
+    selected = density <= sparse_threshold ? :sparse : :dense
+    return KKTStoragePlan(selected; dimension=dim, input_nnz=nnz_value,
+                          density=density, reason=:static_density,
+                          requested=:auto)
+end
+
 """Typed mathematical KKT formulation, independent of its implementation."""
 abstract type AbstractKKTFormulation end
 
@@ -1549,12 +1655,39 @@ end
 function Base.getproperty(plan::ExecutionPlan, name::Symbol)
     name === :kkt_formulation &&
         return formulation_symbol(getfield(plan, :formulation_plan))
+    if name === :storage_plan
+        classification = getfield(plan, :classification)
+        parameters = getfield(plan, :parameters)
+        requested = hasproperty(parameters, :storage_policy) ?
+                    parameters.storage_policy : :auto
+        requested = _normalize_kkt_storage_request(requested)
+        selected = hasproperty(parameters, :storage_selected) ?
+                   parameters.storage_selected : classification.storage
+        selected in (:dense, :sparse) || (selected = classification.storage)
+        dimension = hasproperty(parameters, :storage_dimension) ?
+                    parameters.storage_dimension : classification.variables
+        input_nnz = hasproperty(parameters, :storage_input_nnz) ?
+                    parameters.storage_input_nnz : 0
+        density = hasproperty(parameters, :storage_density) ?
+                  parameters.storage_density : classification.expected_schur_density
+        reason = hasproperty(parameters, :storage_reason) ?
+                 parameters.storage_reason : :route_storage_policy
+        return KKTStoragePlan(
+            selected;
+            dimension=dimension,
+            input_nnz=input_nnz,
+            density=density,
+            reason=reason,
+            provenance=:execution_plan,
+            requested=requested,
+        )
+    end
     return getfield(plan, name)
 end
 
 function Base.propertynames(plan::ExecutionPlan, private::Bool=false)
     names = fieldnames(typeof(plan))
-    return (names..., :kkt_formulation)
+    return (names..., :kkt_formulation, :storage_plan)
 end
 
 # Source compatibility for the former 13-field constructor. Modern planner

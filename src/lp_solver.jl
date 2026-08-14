@@ -369,9 +369,22 @@ Gated on the problem having been stored sparsely to begin with. Re-sparsifying a
 contain, which is not structural sparsity and is not a basis for choosing a
 factorization.
 """
-function _lp_sparse_system(prob::SDPProblem{T}, G::Matrix{T}, B::Matrix{T}) where {T}
-    prob.cons isa SparseCons{T} || return nothing
-    return lp_sparse_candidate(sparse(G), sparse(B), T)
+function _lp_sparse_system(
+    prob::SDPProblem{T},
+    G::Matrix{T},
+    B::Matrix{T};
+    storage::Union{Bool,Symbol}=:auto,
+) where {T}
+    if prob.cons isa SparseCons{T}
+        return lp_sparse_candidate(sparse(G), sparse(B), T; storage=storage)
+    end
+    storage isa Bool && !storage && return nothing
+    storage === :dense && return nothing
+    storage === :sparse && throw(ArgumentError(
+        "storage=:sparse requires a structurally sparse LP input; " *
+        "re-ingest the model with sparse=true",
+    ))
+    return nothing
 end
 
 @inline function _lp_copy_scalar!(
@@ -1410,7 +1423,12 @@ function factorize!(
 end
 
 function factorize!(
-    backend::Union{SparseCholeskyBackend,SparseLDLBackend},
+    backend::Union{
+        SparseCholeskyBackend,
+        SparseLDLBackend,
+        CHOLMODSparseCholeskyBackend,
+        GenericSparseCholeskyBackend,
+    },
     workspace::LPWorkspace{T},
     B::Matrix{T},
     regularization::T,
@@ -1440,7 +1458,12 @@ end
 
 solve!(::LPReducedCholeskyBackend, factor::LPReducedFactor, rhs) =
     _lp_solve_factor!(factor, rhs)
-solve!(::Union{SparseCholeskyBackend,SparseLDLBackend},
+solve!(::Union{
+        SparseCholeskyBackend,
+        SparseLDLBackend,
+        CHOLMODSparseCholeskyBackend,
+        GenericSparseCholeskyBackend,
+    },
     factor::LPSparseFactor, rhs) = _lp_solve_factor!(factor, rhs)
 solve!(::LPCholeskyBackend, factor::AbstractLACholeskyFactor, rhs) =
     la_factor_solve!(factor, rhs)
@@ -1632,6 +1655,88 @@ function _lp_workspace_bytes(workspace::LPWorkspace)
         end
     end
     return total
+end
+
+"""
+    _lp_sparse_backend_diagnostics(system) -> NamedTuple
+
+Stable public-facing observability for a sparse LP Schur factor.  The
+termination payload deliberately uses one schema for the new frozen CSC
+providers and the legacy compatibility backends so performance tracing can
+consume it without knowing which provider ran.  `factor_nnz` is the provider's
+actual numeric factor nonzero count when exposed by CHOLMOD; generic sparse
+providers report their frozen symbolic factor pattern.  No elapsed time is
+inferred here -- the measured `kkt_factorization` timing remains authoritative.
+"""
+function _lp_sparse_backend_diagnostics(system::LPSparseSystem)
+    backend = system.backend
+    stats = statistics(backend)
+    factor = if backend isa Union{
+        CHOLMODSparseCholeskyBackend,
+        GenericSparseCholeskyBackend,
+    }
+        backend.factor
+    elseif backend isa Union{SparseCholeskyBackend,SparseLDLBackend}
+        backend.factorization
+    else
+        nothing
+    end
+    provider = backend isa CHOLMODSparseCholeskyBackend ? :cholmod :
+               backend isa GenericSparseCholeskyBackend ? :generic :
+               backend isa SparseLDLBackend ? :cholmod_ldl : :cholmod
+    arithmetic = backend isa GenericSparseCholeskyBackend ?
+                 backend.factor === nothing ? eltype(system.G) :
+                 backend.factor.arithmetic : Float64
+    dimension = size(system.K, 1)
+    input_nnz = nnz(system.K)
+    factor_nnz = 0
+    ordering = :unavailable
+    if factor isa Union{CHOLMODSparseFactor,GenericSparseCholeskyFactor}
+        details = sparse_factor_diagnostics(factor)
+        dimension = details.dimension
+        input_nnz = details.input_nnz
+        factor_nnz = details.factor_nnz
+        ordering = details.ordering
+        arithmetic = details.arithmetic
+        provider = details.provider === :cholmod ? :cholmod : :generic
+    elseif factor !== nothing && hasproperty(factor, :L)
+        # Legacy CHOLMOD components expose L on some Julia versions.  Keep the
+        # fallback conservative when the factor component is opaque.
+        try
+            factor_nnz = nnz(factor.L)
+        catch
+            factor_nnz = 0
+        end
+        ordering = :cholmod_amd
+    end
+    analyses = get(stats, :analyses, 0)
+    factorizations = get(stats, :factorizations, 0)
+    reused = get(stats, :reused, max(factorizations - analyses, 0))
+    reuse_ratio = get(
+        stats,
+        :symbolic_reuse_ratio,
+        factorizations == 0 ? 0.0 : reused / factorizations,
+    )
+    failures = get(stats, :failures, 0)
+    return (
+        available=factor !== nothing,
+        backend=get(stats, :backend, backend_name(backend)),
+        provider=provider,
+        arithmetic=arithmetic,
+        analyses=analyses,
+        factorizations=factorizations,
+        reused=reused,
+        reuse_ratio=reuse_ratio,
+        symbolic_reuse_ratio=reuse_ratio,
+        failures=failures,
+        dimension=dimension,
+        input_nnz=input_nnz,
+        schur_nnz=nnz(system.K),
+        factor_nnz=factor_nnz,
+        factor_nonzeros=factor_nnz,
+        fill_ratio=factor_nnz / max(input_nnz, 1),
+        ordering=ordering,
+    )
 end
 
 function _lp_infeasible_rows_result(
@@ -2035,7 +2140,16 @@ function solve_lp!(
     else
         # Decided once, on the `G` the iteration will actually use. A `nothing`
         # here keeps every downstream call on the dense path unchanged.
-        workspace.sparse_system = _lp_sparse_system(prob, G, B)
+        sparse_policy = opts.sparse isa Bool ?
+                         (opts.sparse ? :sparse : :dense) :
+                         opts.sparse === :on ? :sparse :
+                         opts.sparse === :off ? :dense : opts.sparse
+        workspace.sparse_system = _lp_sparse_system(
+            prob,
+            G,
+            B;
+            storage=sparse_policy,
+        )
     end
     _resolve_lp_backend!(workspace, equalities)
     x = x0 === nothing ? alloc_zeros(T, variables) :
@@ -2550,6 +2664,10 @@ function solve_lp!(
         nothing,
         (
             reason=:none,
+            sparse_schur_backend=workspace.sparse_system === nothing ?
+                nothing : _lp_sparse_backend_diagnostics(
+                    workspace.sparse_system::LPSparseSystem{T},
+                ),
             # What actually ran, as opposed to what the pre-presolve plan
             # chose. The sparse Newton system is selected at runtime, after
             # presolve and scaling have settled `G`, so the plan cannot know
@@ -2557,6 +2675,9 @@ function solve_lp!(
             # and a BLAS Gram kernel for solves that executed neither.
             executed=(
                 solver=:lp_primal_dual,
+                planned_storage=plan.storage_plan.storage,
+                executed_storage=workspace.sparse_system === nothing ?
+                    :dense : :sparse,
                 kkt=backend_execution_attempted ?
                     _lp_executed_backend(workspace, equalities) :
                     :not_executed,

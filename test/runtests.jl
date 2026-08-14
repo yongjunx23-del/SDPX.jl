@@ -20,6 +20,7 @@ const QUICK_TESTS = (
     "benchmark_registry.jl",
     "prepared_structure.jl",
     "v05_core_invariants.jl",
+    "sparse_execution_round6.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -83,6 +84,7 @@ const FULL_TESTS = (
     "shadowing_guard.jl",
     "gates.jl",
     "v05_core_invariants.jl",
+    "sparse_execution_round6.jl",
 )
 
 function _test_profile()

@@ -461,14 +461,42 @@ slower. `nonzeros` is the nonzero count of the augmented KKT matrix, not of the
 constraint matrix, since it is the fill-in of `GᵀDG` that decides this and not
 the sparsity of `G` alone.
 
-Non-`Float64` arithmetic always gets `:dense_lu`: CHOLMOD is `Float64`-only.
+Auto selection remains conservative for non-`Float64` arithmetic because the
+generic provider is intentionally opt-in; `storage=:sparse` selects generic
+normal equations for BigFloat/MultiFloat when supported.
 """
-function select_lp_formulation(; dimension::Integer, nonzeros::Integer,
-                               equalities::Integer, arithmetic::Type=Float64)
-    supports_sparse_backend(arithmetic) || return :dense_lu
-    dimension >= LP_SPARSE_MINIMUM_DIMENSION || return :dense_lu
+function select_lp_formulation(
+    ; dimension::Integer,
+    nonzeros::Integer,
+    equalities::Integer,
+    arithmetic::Type=Float64,
+    storage::Union{Bool,Symbol}=:auto,
+)
+    requested_storage = storage isa Bool ? (storage ? :sparse : :dense) : storage
+    requested_storage in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse storage must be :auto, :dense, or :sparse",
+    ))
+    requested_storage === :dense && return :dense_lu
+    generic = supports_sparse_generic(arithmetic)
+    # Extended arithmetic is explicit-first in Round 6A.  The generic sparse
+    # provider is never selected by `:auto`; callers must opt in with
+    # `storage=:sparse` after checking precision/ownership requirements.
+    generic && requested_storage !== :sparse && return :dense_lu
+    generic || supports_sparse_backend(arithmetic) || return :dense_lu
+    if requested_storage !== :sparse
+        dimension >= LP_SPARSE_MINIMUM_DIMENSION || return :dense_lu
+    end
     dimension > 0 || return :dense_lu
-    nonzeros / dimension < LP_SPARSE_NNZ_PER_ROW || return :dense_lu
+    if requested_storage !== :sparse
+        nonzeros / dimension < LP_SPARSE_NNZ_PER_ROW || return :dense_lu
+    end
+    if requested_storage === :sparse && equalities > 0
+        throw(ArgumentError(
+            "storage=:sparse currently supports only SPD normal equations; " *
+            "sparse augmented LDL is a legacy route and is not enabled by the " *
+            "Round-6 storage plan",
+        ))
+    end
     # With no equality rows the system is positive definite, so Cholesky applies
     # and is cheaper than LDL.
     return equalities == 0 ? :sparse_normal : :sparse_ldl

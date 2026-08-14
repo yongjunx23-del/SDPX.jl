@@ -27,8 +27,10 @@ measured separately on this backend, refactorizing into an existing symbolic
 factorization is 2.45x / 2.37x / 1.17x faster at `n = 500 / 2000 / 5000`.
 
 `formulation` is `:sparse_normal` when there are no equality rows, in which case
-the system is positive definite and Cholesky applies, and `:sparse_ldl`
-otherwise, where the augmented matrix is symmetric quasi-definite.
+the system is positive definite and Cholesky applies.  The historical
+`:sparse_ldl` augmented route remains available to the auto compatibility gate;
+the explicit Round-6 `storage=:sparse` policy fails closed for that unsupported
+indefinite route.
 """
 mutable struct LPSparseSystem{T}
     G::SparseMatrixCSC{T,Int}
@@ -39,6 +41,28 @@ mutable struct LPSparseSystem{T}
     variables::Int
     equalities::Int
     analyzed::Bool
+    # First-class sparse storage is optional for the historical Float64
+    # augmented route.  Generic normal-equation systems populate these fields
+    # once at setup and update only `matrix.nzval` in later iterations.
+    storage::Any
+    assembly_map::Any
+end
+
+# Compatibility constructor for the pre-Round-6 eight-field value layout.
+function LPSparseSystem{T}(
+    G::SparseMatrixCSC{T,Int},
+    B::SparseMatrixCSC{T,Int},
+    K::SparseMatrixCSC{T,Int},
+    backend::KKTBackend,
+    formulation::Symbol,
+    variables::Int,
+    equalities::Int,
+    analyzed::Bool,
+) where {T}
+    return LPSparseSystem{T}(
+        G, B, K, backend, formulation, variables, equalities, analyzed,
+        nothing, nothing,
+    )
 end
 
 """
@@ -52,11 +76,32 @@ because `GᵀDG` can be far denser than `G` — a single dense column of `G` fil
 `H` completely. Assembling once to find out costs one sparse triple product,
 which is negligible against the per-iteration factorizations it decides.
 """
-function lp_sparse_candidate(G::SparseMatrixCSC{T,Int}, B::SparseMatrixCSC{T,Int},
-                             ::Type{T}) where {T}
+function lp_sparse_candidate(
+    G::SparseMatrixCSC{T,Int},
+    B::SparseMatrixCSC{T,Int},
+    ::Type{T};
+    storage::Union{Bool,Symbol}=:auto,
+) where {T}
     variables = size(G, 2)
     equalities = size(B, 2)
-    supports_sparse_backend(T) || return nothing
+    requested_storage = storage isa Bool ? (storage ? :sparse : :dense) : storage
+    requested_storage in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse storage must be :auto, :dense, or :sparse",
+    ))
+    requested_storage === :dense && return nothing
+
+    # Generic providers intentionally implement only SPD normal equations in
+    # Round 6A.  Explicit sparse requests fail closed rather than silently
+    # routing to dense or to the legacy sparse LDL backend.
+    generic = supports_sparse_generic(T)
+    if generic && equalities > 0
+        requested_storage === :sparse && throw(ArgumentError(
+            "generic sparse provider currently supports only normal equations " *
+            "(equalities=0); sparse augmented KKT is not implemented",
+        ))
+        return nothing
+    end
+    generic || supports_sparse_backend(T) || return nothing
 
     # Probe the pattern with unit weights: the fill-in of `GᵀDG` does not
     # depend on the weight values, only on the pattern of `G`.
@@ -67,8 +112,55 @@ function lp_sparse_candidate(G::SparseMatrixCSC{T,Int}, B::SparseMatrixCSC{T,Int
         nonzeros=nnz(kkt),
         equalities=equalities,
         arithmetic=T,
+        storage=requested_storage,
     )
     formulation === :dense_lu && return nothing
+
+    if generic
+        lower = sparse_lower_csc(probe)
+        frozen = freeze_sparse_csc(lower; provider=GenericSparseProvider{T}())
+        assembly_map = sparse_gram_assembly_map(G, frozen)
+        backend = GenericSparseCholeskyBackend(T)
+        return LPSparseSystem{T}(
+            G,
+            B,
+            frozen.matrix,
+            backend,
+            :sparse_normal,
+            variables,
+            equalities,
+            false,
+            frozen,
+            assembly_map,
+        )
+    end
+
+    # Explicit Float64 sparse normal equations use the first-class CSC storage
+    # layer as well.  The historical SparseCholeskyBackend remains available
+    # only to the compatibility `storage=:auto` route (and to augmented LDL),
+    # while this branch owns one frozen pattern and refactors CHOLMOD's numeric
+    # values in place on every iteration.
+    if requested_storage === :sparse && T === Float64 && equalities == 0
+        lower = sparse_lower_csc(probe)
+        frozen = freeze_sparse_csc(
+            lower;
+            provider=CHOLMODSparseProvider(),
+        )
+        assembly_map = sparse_gram_assembly_map(G, frozen)
+        backend = CHOLMODSparseCholeskyBackend()
+        return LPSparseSystem{T}(
+            G,
+            B,
+            frozen.matrix,
+            backend,
+            :sparse_normal,
+            variables,
+            equalities,
+            false,
+            frozen,
+            assembly_map,
+        )
+    end
 
     return LPSparseSystem{T}(
         G,
@@ -79,6 +171,8 @@ function lp_sparse_candidate(G::SparseMatrixCSC{T,Int}, B::SparseMatrixCSC{T,Int
         variables,
         equalities,
         false,
+        nothing,
+        nothing,
     )
 end
 
@@ -126,6 +220,19 @@ contract the dense path uses.
 """
 function lp_sparse_factor!(system::LPSparseSystem{T}, weights::AbstractVector{T},
                            regularization::T) where {T}
+    if system.storage isa SparseKKTStorage{T}
+        storage = system.storage::SparseKKTStorage{T}
+        assembly_map = system.assembly_map::SparseAssemblyMap{T}
+        system.K = assemble_sparse_gram!(
+            storage,
+            assembly_map,
+            weights;
+            regularization=regularization,
+        )
+        ok = factorize!(system.backend, system.K)
+        system.analyzed = ok
+        return ok
+    end
     weighted = transpose(system.G) * (Diagonal(weights) * system.G)
     system.K = _lp_sparse_assemble(weighted, system.B, regularization)
     # `factorize!` analyses on its own whenever the pattern is new, so calling
@@ -149,7 +256,13 @@ happens, and getting it wrong is silent rather than loud, which is why it is
 covered directly by a regression test against the dense factorization.
 """
 function lp_sparse_solve!(rhs::AbstractVector{T}, system::LPSparseSystem{T}) where {T}
-    solution = similar(rhs)
+    solution = if system.backend isa GenericSparseCholeskyBackend{T}
+        factor = (system.backend::GenericSparseCholeskyBackend{T}).factor
+        bits = factor === nothing ? 0 : (factor::GenericSparseCholeskyFactor{T}).precision_bits
+        _sparse_factor_zeros(T, length(rhs), bits)
+    else
+        similar(rhs)
+    end
     solve!(solution, system.backend, rhs)
     copyto!(rhs, solution)
     @inbounds for index in (system.variables + 1):(system.variables + system.equalities)

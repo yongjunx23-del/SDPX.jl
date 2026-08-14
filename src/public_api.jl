@@ -32,6 +32,23 @@ const AbstractKKTFormulation = SDPX.AbstractKKTFormulation
 const DenseNormalEquations = SDPX.DenseNormalEquations
 const DenseAugmentedKKT = SDPX.DenseAugmentedKKT
 const SparseNormalEquations = SDPX.SparseNormalEquations
+const KKTStoragePlan = SDPX.KKTStoragePlan
+const DenseKKTStorage = SDPX.DenseKKTStorage
+const SparseCSCStorage = SDPX.SparseCSCStorage
+const SparseSymbolicAnalysis = SDPX.SparseSymbolicAnalysis
+const SparseKKTStorage = SDPX.SparseKKTStorage
+const SparseAssemblyMap = SDPX.SparseAssemblyMap
+const CHOLMODSparseProvider = SDPX.CHOLMODSparseProvider
+const CHOLMODSparseCholeskyBackend = SDPX.CHOLMODSparseCholeskyBackend
+const GenericSparseProvider = SDPX.GenericSparseProvider
+const GenericSparseCholeskyFactor = SDPX.GenericSparseCholeskyFactor
+const analyze_sparse_pattern = SDPX.analyze_sparse_pattern
+const freeze_sparse_csc = SDPX.freeze_sparse_csc
+const sparse_factor = SDPX.sparse_factor
+const sparse_factor_solve = SDPX.sparse_factor_solve
+const sparse_factor_diagnostics = SDPX.sparse_factor_diagnostics
+const supports_sparse_generic = SDPX.supports_sparse_generic
+const supports_sparse_execution = SDPX.supports_sparse_execution
 const BlockArrowElimination = SDPX.BlockArrowElimination
 const NoKKTFormulation = SDPX.NoKKTFormulation
 const FormulationPlan = SDPX.FormulationPlan
@@ -183,6 +200,13 @@ export select_parameters
 export ProblemClassification, PresolveReport, ExecutionPlan, SolveDiagnostics
 export AbstractKKTFormulation, DenseNormalEquations
 export DenseAugmentedKKT, SparseNormalEquations
+export KKTStoragePlan, DenseKKTStorage, SparseCSCStorage
+export SparseSymbolicAnalysis, SparseKKTStorage, SparseAssemblyMap
+export CHOLMODSparseProvider, CHOLMODSparseCholeskyBackend, GenericSparseProvider
+export GenericSparseCholeskyFactor, analyze_sparse_pattern
+export freeze_sparse_csc, sparse_factor, sparse_factor_solve
+export sparse_factor_diagnostics, supports_sparse_generic
+export supports_sparse_execution
 export BlockArrowElimination, NoKKTFormulation
 export FormulationPlan, formulation_symbol
 export kkt_backend_from_formulation
