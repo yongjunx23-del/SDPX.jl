@@ -39,7 +39,7 @@ The current tree is kept running while code migrates behind stable boundaries.
 |---|---|
 | `ingest.jl`, `lp_api.jl`, `soc.jl`, `moi_wrapper.jl` | frontend/canonicalization |
 | `preprocessing.jl`, `pipeline.jl`, `adaptive_parameters.jl` | midend |
-| `lp_solver.jl`, `soc_native_q3.jl`, `schur.jl`, `step.jl` | cone/system backend |
+| `lp_solver.jl`, `soc_native.jl`, `schur.jl`, `step.jl` | cone/system backend |
 | `kkt*.jl`, mixed-precision kernels | linear-system backend |
 | `validation.jl` | authoritative certificate |
 

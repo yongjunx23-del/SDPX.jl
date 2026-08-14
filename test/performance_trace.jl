@@ -181,7 +181,7 @@ using Test
         @test trace.counters.factor_nnz == 11
     end
 
-    @testset "native SOC result projects its lifted solve" begin
+    @testset "native SOC result exposes Lorentz phases" begin
         soc = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
@@ -199,7 +199,7 @@ using Test
         @test trace.counters.iterations > 0
         @test SDPX.isavailable(trace.setup.frontend_seconds)
         @test trace.setup.frontend_seconds >= 0.0
-        if trace.setup.solver === :socp_fixed_trace_q3
+        if trace.setup.solver === :native_soc
             @test SDPX.isavailable(
                 trace.iteration.cone_scaling_metric_seconds,
             )

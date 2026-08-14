@@ -1102,6 +1102,226 @@ function result_certificate(
     )
 end
 
+"""
+    result_certificate(problem::ConicProblem, result::ConicResult, options)
+
+Recompute an SOCP certificate in the authoritative Lorentz coordinates.  No
+PSD arrow matrix or lifted `SDPResult` is consulted, including when `result`
+originated from the historical reference path.
+"""
+function result_certificate(
+    problem::ConicProblem{T},
+    result::ConicResult{T},
+    options::SolverOptions{T}=SolverOptions{T}(),
+) where {T}
+    length(result.x) == problem.variables || throw(DimensionMismatch(
+        "SOCP result has the wrong primal dimension",
+    ))
+    length(result.slack) == length(problem.cones) == length(result.dual) ||
+        throw(DimensionMismatch("SOCP result has the wrong cone count"))
+    length(result.equality_dual) == length(problem.beq) ||
+        throw(DimensionMismatch("SOCP result has the wrong equality-dual dimension"))
+
+    primal_objective = LinearAlgebra.dot(problem.c, result.x)
+    dual_objective = isempty(problem.beq) ? zero(T) :
+                     LinearAlgebra.dot(problem.beq, result.equality_dual)
+    equality_residual = alloc_zeros(T, length(problem.beq))
+    if !isempty(problem.beq)
+        LinearAlgebra.mul!(equality_residual, problem.Aeq, result.x)
+        @inbounds for index in eachindex(equality_residual)
+            equality_residual[index] -= problem.beq[index]
+        end
+    end
+    dual_affine = _owned_array_copy(T, problem.c)
+    if !isempty(problem.beq)
+        LinearAlgebra.mul!(
+            dual_affine,
+            transpose(problem.Aeq),
+            result.equality_dual,
+            -one(T),
+            one(T),
+        )
+    end
+
+    primal_affine_residual = isempty(equality_residual) ? zero(T) :
+                             norm(equality_residual, Inf)
+    primal_cone_violation = zero(T)
+    dual_cone_violation = zero(T)
+    complementarity = zero(T)
+    primal_margins = Vector{T}(undef, length(problem.cones))
+    dual_margins = Vector{T}(undef, length(problem.cones))
+    primal_block_residuals = Vector{T}(undef, length(problem.cones))
+    finite = all(isfinite, result.x) && all(isfinite, result.equality_dual)
+
+    @inbounds for block in eachindex(problem.cones)
+        cone = problem.cones[block]
+        length(result.slack[block]) == length(cone.b) ==
+            length(result.dual[block]) || throw(DimensionMismatch(
+                "SOCP result cone $block has the wrong coordinate dimension",
+            ))
+        residual = alloc_zeros(T, length(cone.b))
+        LinearAlgebra.mul!(residual, cone.A, result.x)
+        for coordinate in eachindex(residual)
+            residual[coordinate] +=
+                cone.b[coordinate] - result.slack[block][coordinate]
+        end
+        block_residual = norm(residual, Inf)
+        primal_block_residuals[block] = block_residual
+        primal_affine_residual = max(primal_affine_residual, block_residual)
+        LinearAlgebra.mul!(
+            dual_affine,
+            transpose(cone.A),
+            result.dual[block],
+            -one(T),
+            one(T),
+        )
+        dual_objective -= LinearAlgebra.dot(cone.b, result.dual[block])
+        complementarity += LinearAlgebra.dot(
+            result.slack[block], result.dual[block],
+        )
+        primal_margins[block] = _soc_margin(result.slack[block])
+        dual_margins[block] = _soc_margin(result.dual[block])
+        primal_cone_violation = max(
+            primal_cone_violation, max(zero(T), -primal_margins[block]),
+        )
+        dual_cone_violation = max(
+            dual_cone_violation, max(zero(T), -dual_margins[block]),
+        )
+        finite &= all(isfinite, result.slack[block]) &&
+                  all(isfinite, result.dual[block])
+    end
+    dual_affine_residual = norm(dual_affine, Inf)
+    primal_residual = max(primal_affine_residual, primal_cone_violation)
+    dual_residual = max(dual_affine_residual, dual_cone_violation)
+    two = one(T) + one(T)
+    objective_scale = max(
+        one(T), (abs(primal_objective) + abs(dual_objective)) / two,
+    )
+    gap = primal_objective - dual_objective
+    gap_relative = abs(gap) / objective_scale
+    primal_scale = one(T) + max(
+        maximum(
+            cone -> maximum(abs, cone.b; init=zero(T)),
+            problem.cones;
+            init=zero(T),
+        ),
+        isempty(problem.beq) ? zero(T) : norm(problem.beq, Inf),
+    )
+    dual_scale = one(T) + norm(problem.c, Inf)
+    primal_scaled = primal_residual / primal_scale
+    dual_scaled = dual_residual / dual_scale
+    failures = Symbol[]
+    finite &= isfinite(primal_objective) && isfinite(dual_objective) &&
+              isfinite(gap_relative) && isfinite(complementarity)
+    finite || push!(failures, :nonfinite)
+    primal_scaled <= options.ϵ_primal || push!(failures, :primal_residual)
+    dual_scaled <= options.ϵ_dual || push!(failures, :dual_residual)
+    gap_relative <= options.ϵ_gap || push!(failures, :duality_gap)
+    primal_cone_violation <= options.ϵ_primal ||
+        push!(failures, :primal_lorentz_cone)
+    dual_cone_violation <= options.ϵ_dual ||
+        push!(failures, :dual_lorentz_cone)
+    return (
+        available=true,
+        valid=isempty(failures),
+        kind=:optimality,
+        validation_kind=:optimality,
+        failures,
+        primal_objective,
+        dual_objective,
+        gap,
+        gap_relative,
+        primal_residual,
+        dual_residual,
+        primal_affine_residual,
+        dual_affine_residual,
+        primal_cone_violation,
+        dual_cone_violation,
+        primal_residual_scaled=primal_scaled,
+        dual_residual_scaled=dual_scaled,
+        complementarity,
+        complementarity_relative=abs(complementarity) / objective_scale,
+        primal_residual_limit=options.ϵ_primal,
+        dual_residual_limit=options.ϵ_dual,
+        gap_limit=options.ϵ_gap,
+        primal_margins,
+        dual_margins,
+        primal_block_residuals,
+        equality_residual,
+        provenance=(
+            coordinates=:original_lorentz,
+            lifted_reference_used=false,
+            arithmetic=_la_arithmetic_symbol(T),
+            precision_bits=T === BigFloat ? Base.precision(BigFloat) : sig_bits(T),
+        ),
+    )
+end
+
+function _with_native_soc_certificate(
+    result::ConicResult{T},
+    certificate,
+    status::SolveStatus=result.status,
+    message::String=result.message,
+) where {T}
+    diagnostics = result.diagnostics
+    if diagnostics isa NativeSOCDiagnostics
+        termination = diagnostics.termination
+        if status !== result.status && status === NumericalFailure
+            previous_reason = hasproperty(termination, :reason) ?
+                              termination.reason : :unknown
+            termination = merge(termination, (
+                reason=:final_certificate_failed,
+                previous_reason,
+                certificate_failures=hasproperty(certificate, :failures) ?
+                                     certificate.failures : (),
+            ))
+        end
+        diagnostics = NativeSOCDiagnostics(
+            diagnostics.plan,
+            diagnostics.timings,
+            diagnostics.memory,
+            merge(diagnostics.selected_algorithms, (certificate=certificate,)),
+            diagnostics.warnings,
+            termination,
+        )
+    end
+    return ConicResult{T}(
+        status,
+        message,
+        result.x,
+        result.slack,
+        result.dual,
+        result.equality_dual,
+        result.pObj,
+        result.dObj,
+        result.gap_rel,
+        result.p_res,
+        result.d_res,
+        result.iterations,
+        diagnostics,
+        result.lifted,
+    )
+end
+
+function certify_native_soc_result(
+    problem::ConicProblem{T},
+    result::ConicResult{T},
+    options::SolverOptions{T},
+) where {T}
+    options.certification || return _with_native_soc_certificate(
+        result, (available=false, reason=:certification_disabled),
+    )
+    certificate = result_certificate(problem, result, options)
+    if result.status === Optimal && !certificate.valid
+        message = "NativeSOCP original-coordinate certification failed: " *
+                  join(string.(certificate.failures), ", ")
+        return _with_native_soc_certificate(
+            result, certificate, NumericalFailure, message,
+        )
+    end
+    return _with_native_soc_certificate(result, certificate)
+end
+
 function _certificate_failure_message(certificate)
     parts = String[]
     :nonfinite in certificate.failures &&

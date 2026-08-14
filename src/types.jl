@@ -673,12 +673,12 @@ Base.@kwdef struct SolverOptions{T}
     # Expert selector for the native fixed-trace Q3 equality Gram. Output-tile
     # ownership uses no replicated Gram storage; row bins keep a packed lower
     # triangle per worker and trade bounded memory for better cache/NUMA reuse.
-    q3_gram_strategy::Symbol = :auto                    # :auto | :output_tiles | :row_bins
+    q3_gram_strategy::Symbol = :auto                    # compatibility no-op after NativeSOC consolidation
     # Search-direction scaling for the compact fixed-trace Q3 backend.  HKM is
     # the established reference path; NT is the symmetric Lorentz-cone
     # Nesterov--Todd direction.  NT remains an explicit opt-in until the J40
     # and J80 certificate/performance gates have both passed.
-    q3_direction::Symbol = :hkm                         # :hkm | :nt
+    q3_direction::Symbol = :hkm                         # compatibility no-op after NativeSOC consolidation
     # Opt-in extended-precision KKT acceleration. The Schur complement is
     # factored in Float64, while residuals and accepted directions remain in
     # the requested BigFloat or fixed-width extended arithmetic.
@@ -1474,8 +1474,6 @@ function kkt_backend_from_formulation(
     formulation isa SparseNormalEquations && return :sparse_schur_cholesky
     formulation isa BlockArrowElimination && return :block_arrow
     if formulation isa NoKKTFormulation
-        algorithm === :socp_fixed_trace_q3 &&
-            return :q3_block_diagonal_equality
         algorithm === :lp_primal_dual &&
             return equalities == 0 ?
                    :positive_definite_cholesky : :dense_lu

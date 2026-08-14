@@ -909,59 +909,9 @@ this policy in [`build_execution_plan`](@ref).
     parameter_strategy::Symbol,
 )
     algorithm === :lp_primal_dual && return :lp_geometric
-    # A diagonal PSD congruence generally destroys exact tracelessness. The
-    # native fixed-trace compiler performs its own per-block disk
-    # normalization and must therefore run in the verified original basis.
-    algorithm === :socp_fixed_trace_q3 && return :none
     parameter_profile === :large_lattice_dense_schur &&
         parameter_strategy === :fixed && return :none
     return :sdp_ruiz
-end
-
-# Automatic native-Q3 promotion is intentionally narrower than structural
-# eligibility.  The J40 controlled campaign is the first formulation-level
-# gate that passed all of: a 1.97x eight-worker solver speedup, sub-one-percent
-# run-to-run CV, a 9.6% one-worker improvement, identical certificates, and
-# lower same-allocation memory.  Do not extrapolate that result to Float64,
-# BigFloat, small models, or cheaper fixed-width expansions without equivalent
-# evidence.  The dimension helper keeps this measured policy independently
-# testable without constructing a multi-gigabyte benchmark in the unit suite.
-const _AUTO_Q3_MIN_BLOCKS = 4_096
-const _AUTO_Q3_MIN_VARIABLES = 8_192
-const _AUTO_Q3_MIN_EQUALITIES = 128
-const _AUTO_Q3_MIN_STORAGE_BYTES = 4 * sizeof(Float64)
-
-@inline function _auto_fixed_trace_q3_dimensions(
-    arithmetic::Symbol,
-    storage::Symbol,
-    element_storage_bytes::Int,
-    blocks::Int,
-    variables::Int,
-    equalities::Int,
-)
-    return arithmetic === :fixed_extended &&
-           storage === :sparse &&
-           element_storage_bytes >= _AUTO_Q3_MIN_STORAGE_BYTES &&
-           blocks >= _AUTO_Q3_MIN_BLOCKS &&
-           variables >= _AUTO_Q3_MIN_VARIABLES &&
-           equalities >= _AUTO_Q3_MIN_EQUALITIES
-end
-
-@inline function _auto_fixed_trace_q3_policy(
-    prob::SDPProblem{T},
-    classification::ProblemClassification,
-) where {T}
-    ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended ||
-        return false
-    L, m, n, _ = prob.dims
-    return _auto_fixed_trace_q3_dimensions(
-        classification.arithmetic,
-        classification.storage,
-        sizeof(T),
-        L,
-        m,
-        n,
-    )
 end
 
 """
@@ -993,18 +943,9 @@ function resolve_execution_route(
         ))
     soc_algorithm = classification.maximum_block_size <= 2 ?
                     :socp_psd2 : :socp_psd_lift
-    native_fixed_trace_q3 =
-        !(opts.formulation in (:augmented, :normal_equations)) &&
-        opts.mode === OPTIMIZE &&
-        opts.scaling !== :equilibrate &&
-        _fixed_trace_q3_eligible(prob)
-    automatic_fixed_trace_q3 =
-        native_fixed_trace_q3 &&
-        _auto_fixed_trace_q3_policy(prob, classification)
     algorithm = if opts.algorithm === :auto
         classification.cone === :lp && opts.mode === OPTIMIZE ?
         :lp_primal_dual :
-        automatic_fixed_trace_q3 ? :socp_fixed_trace_q3 :
         classification.cone === :socp ? soc_algorithm :
         :sdp_primal_dual
     elseif opts.algorithm === :lp
@@ -1017,7 +958,7 @@ function resolve_execution_route(
         classification.cone === :socp || throw(ArgumentError(
             "algorithm=:socp requires Lorentz-compatible cone blocks",
         ))
-        native_fixed_trace_q3 ? :socp_fixed_trace_q3 : soc_algorithm
+        soc_algorithm
     else
         # `algorithm=:sdp` is the stable reference/rollback path even when
         # the model is exactly SOC-representable.
@@ -1066,7 +1007,6 @@ function _validate_execution_route(
         :lp_primal_dual,
         :socp_psd2,
         :socp_psd_lift,
-        :socp_fixed_trace_q3,
         :sdp_primal_dual,
     ) || throw(ArgumentError("resolved execution route has invalid algorithm"))
     return nothing
@@ -1300,8 +1240,7 @@ function build_execution_plan(
     else
         FormulationPlan(
             NoKKTFormulation(),
-            algorithm === :lp_primal_dual ?
-            :dedicated_lp_system : :native_q3_system,
+            :dedicated_lp_system,
             :structural_planner,
         )
     end
@@ -1335,9 +1274,7 @@ function build_execution_plan(
     mixed_precision_mode =
         generic_mixed_enabled || mixed_reduced_arrow_enabled ?
         opts.mixed_precision_kkt : :off
-    backend_fallback_chain = if algorithm === :socp_fixed_trace_q3
-        (:dense_cholesky,)
-    elseif mixed_reduced_arrow_enabled
+    backend_fallback_chain = if mixed_reduced_arrow_enabled
         (:block_arrow,)
     elseif mixed_precision_mode !== :off
         (:dense_cholesky,)
@@ -1369,8 +1306,6 @@ function build_execution_plan(
         algorithm,
     )
     selected_threads =
-        algorithm === :socp_fixed_trace_q3 ?
-        min(requested_threads, Base.Threads.nthreads()) :
         classification.arithmetic === :bigfloat &&
         !mixed_arrow_threads &&
         !native_bigfloat_reduced &&
@@ -1407,10 +1342,6 @@ function build_execution_plan(
     end
     schedule = if selected_threads == 1
         :serial
-    elseif algorithm === :socp_fixed_trace_q3
-        classification.arithmetic === :bigfloat ?
-        :owned_q3_blocks_and_gram_tiles :
-        :q3_contiguous_blocks
     elseif lp_bigfloat_thread_limit > 1
         :lp_bigfloat_panels
     elseif owned_bigfloat_arrow_equalities
@@ -1426,10 +1357,7 @@ function build_execution_plan(
     end
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
-    gram_kernel = if algorithm === :socp_fixed_trace_q3
-        T <: Union{Float32,Float64} ?
-        :blas_triangular_syrk : :automatic_q3_triangular_syrk
-    elseif algorithm === :lp_primal_dual
+    gram_kernel = if algorithm === :lp_primal_dual
         if T === Float64
             selected_threads > 1 &&
             classification.cone_rows * classification.variables^2 >= 2_000_000 &&

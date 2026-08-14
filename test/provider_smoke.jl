@@ -318,6 +318,44 @@ function _solve_smoke_sdp_bigfloat(backend::Symbol, provider::Symbol)
     return result
 end
 
+function _solve_smoke_soc_augmented(
+    ::Type{T},
+    backend::Symbol,
+    provider::Symbol,
+) where {T}
+    problem = SDPX.second_order_program(
+        T[1, 0, 0],
+        Matrix{T}(I, 3, 3),
+        zeros(T, 3);
+        Aeq=T[0 1 0; 0 0 1],
+        beq=T[3, 4],
+    )
+    tolerance = T === BigFloat ? T(1e-24) : T(1e-12)
+    options = SDPX.SolverOptions{T}(
+        formulation=:augmented,
+        equality_solver=:normal_equations,
+        presolve=false,
+        scaling=:none,
+        linear_algebra_backend=backend,
+        ϵ_gap=tolerance,
+        ϵ_primal=tolerance,
+        ϵ_dual=tolerance,
+        iter_max=120,
+        verbosity=0,
+        diagnostics=true,
+    )
+    result = SDPX._solve_native_soc_core(problem, options)
+    @test result.status == SDPX.Optimal
+    @test isapprox(Float64(result.pObj), 5.0; atol=1e-7)
+    selected = result.diagnostics.selected_algorithms
+    @test selected.executed_kkt_formulation === :dense_augmented_kkt
+    @test selected.executed_factorization === :pivoted_symmetric_ldlt
+    @test selected.la_executed_provider === provider
+    certificate = SDPX.result_certificate(problem, result, options)
+    @test certificate.valid
+    return result
+end
+
 if !_PROVIDERS_LOADED
     @info "provider smoke skipped" reason=(
         "MultiFloatLinearAlgebra/BigFloatLinearAlgebra not loaded; " *
@@ -346,12 +384,22 @@ end
     @testset "tiny Float64x4 LP and SDP through MFLA" begin
         _solve_smoke_lp(Float64x4, :multifloat, :multifloat_linear_algebra)
         _solve_smoke_sdp(Float64x4, :multifloat, :multifloat_linear_algebra)
+        _solve_smoke_soc_augmented(
+            Float64x4,
+            :multifloat,
+            :multifloat_linear_algebra,
+        )
     end
 
     @testset "tiny BigFloat LP and SDP through BFLA" begin
         setprecision(BigFloat, 256) do
             _solve_smoke_lp(BigFloat, :bfla, :bigfloat_linear_algebra)
             _solve_smoke_sdp_bigfloat(:bfla, :bigfloat_linear_algebra)
+            _solve_smoke_soc_augmented(
+                BigFloat,
+                :bfla,
+                :bigfloat_linear_algebra,
+            )
         end
     end
 

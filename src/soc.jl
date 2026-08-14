@@ -42,8 +42,8 @@ end
 Base.eltype(::ConicProblem{T}) where {T} = T
 
 """
-Result in original Lorentz coordinates. `lifted` is retained as a compatibility
-and validation reference while the compact Newton backend is introduced.
+Result in original Lorentz coordinates. Production NativeSOC results set
+`lifted=nothing`; the optional field only supports test/reference adapters.
 """
 struct ConicResult{T}
     status::SolveStatus
@@ -51,28 +51,64 @@ struct ConicResult{T}
     x::Vector{T}
     slack::Vector{Vector{T}}
     dual::Vector{Vector{T}}
+    equality_dual::Vector{T}
     pObj::T
     dObj::T
     gap_rel::T
     p_res::T
     d_res::T
     iterations::Int
-    diagnostics::Union{Nothing,SolveDiagnostics}
-    lifted::SDPResult{T}
+    diagnostics::Any
+    lifted::Union{Nothing,SDPResult{T}}
+end
+
+"""Native SOCP compatibility aliases for common result-inspection fields."""
+function Base.getproperty(result::ConicResult, name::Symbol)
+    name === :y && return getfield(result, :equality_dual)
+    if name in (:termination, :timings, :restarts, :regularizations,
+                :parameter_history)
+        lifted = getfield(result, :lifted)
+        lifted !== nothing && return getproperty(lifted, name)
+        diagnostics = getfield(result, :diagnostics)
+        name === :termination && return diagnostics === nothing ?
+                                      (reason=:unavailable,) :
+                                      diagnostics.termination
+        name === :timings && return diagnostics === nothing ?
+                                  nothing : diagnostics.timings
+        name === :restarts && return 0
+        name === :regularizations && return diagnostics === nothing ? 0 :
+            get(diagnostics.termination, :regularizations, 0)
+        return NamedTuple[]
+    end
+    return getfield(result, name)
+end
+
+function Base.propertynames(result::ConicResult, private::Bool=false)
+    fields = fieldnames(typeof(result))
+    aliases = (
+        :y, :termination, :timings, :restarts, :regularizations,
+        :parameter_history,
+    )
+    return private ? (fields..., aliases...) : (fields..., aliases...)
 end
 
 """Lorentz Jordan product `(t,u) o (s,v)`."""
 function _soc_jordan!(destination, left, right)
     length(destination) == length(left) == length(right) ||
         throw(DimensionMismatch("Lorentz vectors must have equal dimensions"))
-    value = left[1] * right[1]
+    # Cache both heads before writing.  This makes the kernel safe when the
+    # destination aliases either input, which is useful for scaled Newton
+    # corrections and avoids an otherwise silent tail corruption.
+    left_head = left[1]
+    right_head = right[1]
+    value = left_head * right_head
     @inbounds for index in 2:length(left)
         value += left[index] * right[index]
     end
     destination[1] = value
     @inbounds for index in 2:length(left)
         destination[index] =
-            left[1] * right[index] + right[1] * left[index]
+            left_head * right[index] + right_head * left[index]
     end
     return destination
 end
@@ -86,14 +122,18 @@ end
 end
 
 @inline _soc_is_interior(vector) =
-    vector[1] > zero(eltype(vector)) && _soc_determinant(vector) > zero(eltype(vector))
+    vector[1] > zero(eltype(vector)) && _soc_margin(vector) > zero(eltype(vector))
 
 """Exact inverse in the Lorentz Jordan algebra."""
 function _soc_inverse!(destination, source)
-    determinant = _soc_determinant(source)
-    determinant > zero(determinant) ||
+    length(destination) == length(source) || throw(DimensionMismatch(
+        "Lorentz vectors must have equal dimensions",
+    ))
+    _soc_is_interior(source) ||
         throw(ArgumentError("the Lorentz vector is not in the cone interior"))
-    destination[1] = source[1] / determinant
+    determinant = _soc_determinant(source)
+    head = source[1]
+    destination[1] = head / determinant
     @inbounds for index in 2:length(source)
         destination[index] = -source[index] / determinant
     end
@@ -109,38 +149,70 @@ factorization is required.
 """
 function _soc_fraction_to_boundary(s, ds)
     length(s) == length(ds) || throw(DimensionMismatch())
-    T = eltype(s)
-    full_first = s[1] + ds[1]
+    T = promote_type(eltype(s), eltype(ds))
+    z = zero(T)
+    o = one(T)
+    two = o + o
+    four = two + two
+
+    # Normalize before forming determinant coefficients.  Cone membership is
+    # homogeneous, so the roots are unchanged while representable large/small
+    # inputs avoid overflow and underflow.
+    scale = z
+    @inbounds for index in eachindex(s, ds)
+        scale = max(scale, abs(T(s[index])), abs(T(ds[index])))
+    end
+    iszero(scale) && return o
+
+    s0 = T(s[1]) / scale
+    d0 = T(ds[1]) / scale
+    c0 = s0 * s0
+    c1 = two * s0 * d0
+    c2 = d0 * d0
+    full_first = s0 + d0
     full_det = full_first * full_first
     @inbounds for index in 2:length(s)
-        value = s[index] + ds[index]
-        full_det -= value * value
+        si = T(s[index]) / scale
+        di = T(ds[index]) / scale
+        c0 -= si * si
+        c1 -= two * si * di
+        c2 -= di * di
+        full_value = si + di
+        full_det -= full_value * full_value
     end
-    full_first >= zero(T) && full_det >= zero(T) && return one(T)
 
-    c0 = _soc_determinant(s)
-    c1 = (one(T) + one(T)) * s[1] * ds[1]
-    c2 = ds[1] * ds[1]
-    @inbounds for index in 2:length(s)
-        c1 -= (one(T) + one(T)) * s[index] * ds[index]
-        c2 -= ds[index] * ds[index]
+    # Preserve the literal closed-cone contract for boundary diagnostics.
+    if s0 == z && d0 < z
+        return z
+    elseif c0 == z && (c1 < z || (iszero(c1) && c2 < z))
+        return z
     end
-    root = one(T)
+    full_first >= z && full_det >= z && return o
+
+    root = o
     if iszero(c2)
-        c1 < zero(T) && (root = min(root, -c0 / c1))
+        c1 < z && (root = min(root, -c0 / c1))
     else
-        discriminant = max(c1 * c1 - T(4) * c2 * c0, zero(T))
+        discriminant = max(c1 * c1 - four * c2 * c0, z)
         square_root = sqrt(discriminant)
-        denominator = T(2) * c2
-        first = (-c1 - square_root) / denominator
-        second = (-c1 + square_root) / denominator
-        zero(T) < first <= root && (root = first)
-        zero(T) < second <= root && (root = second)
+        # Stable q-formula: form the well-separated numerator and recover the
+        # second root from their product c0/c2.
+        q = c1 >= z ? -(c1 + square_root) / two :
+            -(c1 - square_root) / two
+        if !iszero(q)
+            first = q / c2
+            second = c0 / q
+            z < first <= root && (root = first)
+            z < second <= root && (root = second)
+        else
+            repeated = -c1 / (two * c2)
+            z < repeated <= root && (root = repeated)
+        end
     end
-    if ds[1] < zero(T)
-        root = min(root, -s[1] / ds[1])
+    if d0 < z
+        root = min(root, -s0 / d0)
     end
-    return clamp(root, zero(T), one(T))
+    return clamp(root, z, o)
 end
 
 function _convert_soc_constraint(::Type{T}, cone::SOCConstraint) where {T}
@@ -214,176 +286,6 @@ function second_order_program(
         first_row = last_row + 1
     end
     return second_order_program(c, cones; kwargs...)
-end
-
-function _soc_arrow_matrix(vector::AbstractVector{T}) where {T}
-    dimension = length(vector)
-    if dimension == 3
-        matrix = alloc_zeros(T, 2, 2)
-        matrix[1, 1] = vector[1] + vector[2]
-        matrix[2, 2] = vector[1] - vector[2]
-        matrix[1, 2] = vector[3]
-        matrix[2, 1] = vector[3]
-        return matrix
-    end
-    matrix = alloc_zeros(T, dimension, dimension)
-    @inbounds begin
-        for index in 1:dimension
-            matrix[index, index] = vector[1]
-        end
-        for index in 2:dimension
-            matrix[1, index] = vector[index]
-            matrix[index, 1] = vector[index]
-        end
-    end
-    return matrix
-end
-
-function _soc_coefficient_matrix(::Type{T}, cone::SOCConstraint{T}, variable::Int) where {T}
-    dimension = length(cone.b)
-    if dimension == 3
-        first = cone.A[1, variable]
-        second = cone.A[2, variable]
-        third = cone.A[3, variable]
-        rows = Int[]
-        columns = Int[]
-        values = T[]
-        first_diagonal = first + second
-        second_diagonal = first - second
-        if !iszero(first_diagonal)
-            push!(rows, 1); push!(columns, 1); push!(values, first_diagonal)
-        end
-        if !iszero(second_diagonal)
-            push!(rows, 2); push!(columns, 2); push!(values, second_diagonal)
-        end
-        if !iszero(third)
-            push!(rows, 1); push!(columns, 2); push!(values, third)
-            push!(rows, 2); push!(columns, 1); push!(values, third)
-        end
-        return sparse(rows, columns, values, 2, 2)
-    end
-    rows = Int[]
-    columns = Int[]
-    values = T[]
-    head = cone.A[1, variable]
-    if !iszero(head)
-        for index in 1:dimension
-            push!(rows, index); push!(columns, index); push!(values, head)
-        end
-    end
-    @inbounds for index in 2:dimension
-        value = cone.A[index, variable]
-        iszero(value) && continue
-        push!(rows, 1); push!(columns, index); push!(values, value)
-        push!(rows, index); push!(columns, 1); push!(values, value)
-    end
-    return sparse(rows, columns, values, dimension, dimension)
-end
-
-"""Compile the compact SOC model to the exact PSD-arrow reference model."""
-function _soc_psd_lift(problem::ConicProblem{T}; sparse=:auto, verbosity=1) where {T}
-    blocks = SparseCoefficientVector{T}[]
-    constants = Matrix{T}[]
-    sizehint!(blocks, length(problem.cones))
-    sizehint!(constants, length(problem.cones))
-    for cone in problem.cones
-        dimension = length(cone.b)
-        side = dimension == 3 ? 2 : dimension
-        ids = Int[]
-        coefficients = SparseMatrixCSC{T,Int}[]
-        for variable in 1:problem.variables
-            matrix = _soc_coefficient_matrix(T, cone, variable)
-            nnz(matrix) == 0 && continue
-            push!(ids, variable)
-            push!(coefficients, matrix)
-        end
-        push!(blocks, ActiveSparseCoefficientVector(
-            T,
-            problem.variables,
-            ids,
-            coefficients,
-            side,
-        ))
-        push!(constants, -_soc_arrow_matrix(cone.b))
-    end
-    return ingest(
-        problem.c,
-        blocks,
-        constants,
-        transpose(problem.Aeq),
-        problem.beq;
-        T=T,
-        sparse=sparse,
-        validate=true,
-        symmetrize=false,
-        verbosity=verbosity,
-    )
-end
-
-function _conic_result(problem::ConicProblem{T}, result::SDPResult{T}) where {T}
-    slack = Vector{Vector{T}}(undef, length(problem.cones))
-    dual = Vector{Vector{T}}(undef, length(problem.cones))
-    for block in eachindex(problem.cones)
-        dimension = length(problem.cones[block].b)
-        primal_matrix = result.X[block]
-        dual_matrix = result.Y[block]
-        primal = Vector{T}(undef, dimension)
-        dual_vector = Vector{T}(undef, dimension)
-        if dimension == 3
-            two = one(T) + one(T)
-            primal[1] = (primal_matrix[1, 1] + primal_matrix[2, 2]) / two
-            primal[2] = (primal_matrix[1, 1] - primal_matrix[2, 2]) / two
-            primal[3] = (primal_matrix[1, 2] + primal_matrix[2, 1]) / two
-            dual_vector[1] = dual_matrix[1, 1] + dual_matrix[2, 2]
-            dual_vector[2] = dual_matrix[1, 1] - dual_matrix[2, 2]
-            dual_vector[3] = dual_matrix[1, 2] + dual_matrix[2, 1]
-        else
-            primal[1] = primal_matrix[1, 1]
-            dual_vector[1] = tr(dual_matrix)
-            @inbounds for index in 2:dimension
-                primal[index] = primal_matrix[index, 1]
-                dual_vector[index] = T(2) * dual_matrix[1, index]
-            end
-        end
-        slack[block] = primal
-        dual[block] = dual_vector
-    end
-    return ConicResult{T}(
-        result.status,
-        result.message,
-        result.x,
-        slack,
-        dual,
-        result.pObj,
-        result.dObj,
-        result.gap_rel,
-        result.p_res,
-        result.d_res,
-        result.iterations,
-        result.diagnostics,
-        result,
-    )
-end
-
-"""
-    solve_socp(problem; kwargs...)
-
-Solve a compact LP+SOC model. The current reference implementation compiles
-the model once to an exact PSD arrow; the separate representation and result
-boundary allow the native Lorentz Newton backend to replace this reference
-without changing the public API.
-"""
-function solve_socp(problem::ConicProblem{T}; sparse=:auto, verbosity::Int=1, kwargs...) where {T}
-    frontend_started = time_ns()
-    lifted = _soc_psd_lift(problem; sparse=sparse, verbosity=verbosity)
-    frontend_seconds = (time_ns() - frontend_started) / 1.0e9
-    result = solve(lifted; verbosity=verbosity, kwargs...)
-    result = _with_frontend_timing(
-        result,
-        frontend_seconds,
-        get(kwargs, :timing, true),
-    )
-    return _conic_result(problem, result)
 end
 
 solve(problem::ConicProblem; kwargs...) = solve_socp(problem; kwargs...)

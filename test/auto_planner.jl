@@ -2,6 +2,10 @@ using SparseArrays
 using Test
 using MultiFloats: Float64x4
 
+if !isdefined(@__MODULE__, :soc_psd_reference_problem)
+    include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
+end
+
 const PlannerAPI = SDPX.Experimental
 
 function _synthetic_features(
@@ -326,7 +330,7 @@ end
 
 @testset "AutoPlanner preserves existing execution-plan decisions" begin
     problem, _ = _planner_features(Float64, false)
-    lifted = SDPX._soc_psd_lift(problem; verbosity=0)
+    lifted = soc_psd_reference_problem(problem; verbosity=0)
     options = SDPX.SolverOptions{Float64}(
         algorithm=:socp,
         scaling=:none,

@@ -2,6 +2,10 @@ using SDPX
 using LinearAlgebra
 using Test
 
+if !isdefined(@__MODULE__, :soc_psd_reference_problem)
+    include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
+end
+
 # Tiny deterministic fixtures for the certification handoff.  No solve is
 # needed: the invariant is that a disabled policy never runs the independent
 # certificate and never rewrites the raw core result.
@@ -277,7 +281,7 @@ end
             T=Float64,
         )
         normal_soc = SDPX.Experimental.build_execution_plan(
-            SDPX._soc_psd_lift(conic; verbosity=0),
+            soc_psd_reference_problem(conic; verbosity=0),
             SDPX.SolverOptions{Float64}(
                 algorithm=:socp,
                 formulation=:normal_equations,
@@ -286,7 +290,6 @@ end
                 threads=1,
             ),
         )
-        @test normal_soc.algorithm !== :socp_fixed_trace_q3
         @test normal_soc.kkt_formulation === :dense_normal_equations
 
     end

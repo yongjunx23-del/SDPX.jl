@@ -80,7 +80,7 @@ they live today:
 - KKT/Schur assembly and sparse symbolic structure (`kkt.jl`, `schur.jl`,
   `kkt_sparse_backend.jl`, `mixed_precision_kkt.jl`, nullspace/chordal
   preprocessing)
-- cone-native LP/Q3/SOC paths (`lp_solver.jl`, `soc_native_q3.jl`,
+- cone-native LP/SOC paths (`lp_solver.jl`, `soc_native.jl`,
   `soc_q3_kernels.jl`)
 - planner, workspaces, solve-step orchestration, convergence, restarts,
   adaptive parameters, diagnostics, and certification

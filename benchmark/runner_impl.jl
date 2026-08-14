@@ -109,7 +109,6 @@ function _solve_built(built, ::Type{T}, provider; verbose=false) where {T}
 end
 
 function _safe_certificate(problem, result, ::Type{T}) where {T}
-    result isa SDPX.ConicResult && return nothing
     try
         return SDPX.result_certificate(
             problem,
@@ -221,7 +220,7 @@ function _semantic_failures(
             end
         end
     end
-    if actual_optimal && spec.family in (:lp, :sdp)
+    if actual_optimal && spec.family in (:lp, :socp, :sdp)
         (certificate === nothing || !certificate.valid) &&
             push!(failures, "certificate")
     end
@@ -303,7 +302,7 @@ function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
         name=spec.name,
         family=spec.family,
         problem_type=spec.problem_type,
-        conic_formulation=built.kind === :socp ? :soc_psd_lift :
+        conic_formulation=built.kind === :socp ? :native_lorentz :
                           spec.family === :lp ? :lp_native : :sdp_native,
         source=spec.source,
         purpose=spec.purpose,
@@ -336,9 +335,7 @@ function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
         primal_residual=string(primal_residual),
         dual_residual=string(dual_residual),
         relative_gap=string(relative_gap),
-        certificate_policy=spec.family === :socp ?
-                           :original_coordinate_api_unavailable :
-                           :original_coordinate_required,
+        certificate_policy=:original_coordinate_required,
         certificate_available=_trace_value(trace.final.certificate_available),
         certificate_valid=certificate === nothing ? missing : certificate.valid,
         provider_match=provider_match,
@@ -381,9 +378,7 @@ function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
         :reference_status => spec.reference.status,
         :reference_absolute_tolerance => spec.reference.absolute_tolerance,
         :reference_relative_tolerance => spec.reference.relative_tolerance,
-        :certificate_policy => spec.family === :socp ?
-                               :original_coordinate_api_unavailable :
-                               :original_coordinate_required,
+        :certificate_policy => :original_coordinate_required,
         :skip_reason => reason,
         :external_checksum => checksum === missing && spec.external !== nothing ?
                               something(spec.external.sha256, missing) : checksum,
