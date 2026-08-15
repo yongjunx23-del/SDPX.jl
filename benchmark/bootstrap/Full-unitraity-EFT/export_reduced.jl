@@ -1,8 +1,11 @@
 using Serialization
+using SHA
 using SparseArrays
 
-const DEFAULT_STUDY_ROOT = "/Users/xuyongjun/Desktop/project/massless eft scalar/benchmarks/c00_nx3_primal_full_study/mac_bf256_zero_c00_j40_na15_nmu200_nx2_nalpha2_v040_worktree"
-const STUDY_ROOT = get(ENV, "CSDR_STUDY_ROOT", DEFAULT_STUDY_ROOT)
+const STUDY_ROOT = get(ENV, "CSDR_STUDY_ROOT", "")
+isempty(STUDY_ROOT) && error(
+    "set CSDR_STUDY_ROOT to the archived Full-unitarity EFT study checkout",
+)
 const CSDR_SOURCE = joinpath(STUDY_ROOT, "source", "src", "CSDRBootstrap.jl")
 isfile(CSDR_SOURCE) || error("CSDRBootstrap source not found at $CSDR_SOURCE")
 isdefined(Main, :CSDRBootstrap) || Base.include(Main, CSDR_SOURCE)
@@ -26,7 +29,9 @@ function main(args=ARGS)
         coefficient_labels=copy(payload.coefficient_labels),
         objective=Dict(payload.config.objective),
         fixed_coefficients=Dict(payload.config.fixed_coefficients),
-        source_model_path=model_path,
+        source_model_sha256=open(model_path, "r") do io
+            bytes2hex(SHA.sha256(io))
+        end,
     )
     mkpath(dirname(output_path))
     open(output_path, "w") do io

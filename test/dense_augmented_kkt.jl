@@ -3,6 +3,38 @@ using SDPX
 using SparseArrays
 using Test
 
+mutable struct ScriptedAugmentedLDLTBackend <: SDPX.AbstractLABackend
+    inertias::Vector{Any}
+    calls::Int
+end
+
+struct ScriptedAugmentedLDLTPayload
+    inertia::Any
+    diagnostics::NamedTuple
+end
+
+function SDPX.la_ldlt_factor!(
+    backend::ScriptedAugmentedLDLTBackend,
+    A::AbstractMatrix{T},
+) where {T}
+    backend.calls += 1
+    index = min(backend.calls, length(backend.inertias))
+    payload = ScriptedAugmentedLDLTPayload(
+        backend.inertias[index],
+        (success=true, attempt=backend.calls),
+    )
+    factors = copy(A)
+    return SDPX.ProviderLALDLTFactor{T,typeof(payload),typeof(factors)}(
+        payload,
+        factors,
+    )
+end
+
+SDPX.la_provider_ldlt_inertia(payload::ScriptedAugmentedLDLTPayload) =
+    payload.inertia
+SDPX.la_provider_factor_diagnostics(payload::ScriptedAugmentedLDLTPayload) =
+    payload.diagnostics
+
 function _augmented_test_problem(::Type{T}; equalities::Int=2) where {T}
     variables = 3
     coefficients = zeros(T, variables, 3, 3)
@@ -23,6 +55,87 @@ function _augmented_test_problem(::Type{T}; equalities::Int=2) where {T}
 end
 
 @testset "dense augmented KKT algebra and planning" begin
+    @testset "full inertia is authoritative across retries" begin
+        function scripted_factor(inertias; dependent=false)
+            problem = _augmented_test_problem(Float64; equalities=2)
+            if dependent
+                problem.B[:, 2] .= problem.B[:, 1]
+            end
+            workspace = SDPX.Workspace(problem)
+            workspace.augmented = SDPX.DenseAugmentedKKTWorkspace(
+                Float64,
+                problem.dims.m,
+                problem.dims.n,
+            )
+            workspace.S .= Matrix{Float64}(I, problem.dims.m, problem.dims.m)
+            backend = ScriptedAugmentedLDLTBackend(Any[inertias...], 0)
+            workspace.la_backend = backend
+            outcome = SDPX.factor_dense_augmented_kkt!(
+                workspace,
+                problem,
+                SDPX.SolverOptions{Float64}(verbosity=0),
+            )
+            return outcome, workspace, backend
+        end
+
+        valid, valid_workspace, valid_backend = scripted_factor(
+            [(positive=3, negative=2, zero=0)],
+        )
+        @test valid.ok
+        @test valid.reg_attempts == 0
+        @test valid_backend.calls == 1
+        @test valid_workspace.augmented.factor !== nothing
+        @test valid_workspace.augmented.inertia ==
+              (positive=3, negative=2, zero=0)
+
+        recovered, recovered_workspace, recovered_backend = scripted_factor(
+            [(positive=2, negative=3, zero=0), (3, 2, 0)],
+        )
+        @test recovered.ok
+        @test recovered.reg_attempts == 1
+        @test recovered_backend.calls == 2
+        @test recovered_workspace.augmented.inertia == (3, 2, 0)
+        @test recovered_workspace.augmented.regularization > 0
+
+        wrong_sign, wrong_workspace, wrong_backend = scripted_factor(
+            [(2, 3, 0)],
+        )
+        @test !wrong_sign.ok
+        @test !wrong_sign.q_rank_deficient
+        @test wrong_sign.reg_attempts == 6
+        @test wrong_backend.calls == 7
+        @test wrong_workspace.augmented.factor === nothing
+        @test !wrong_workspace.augmented.rank_deficient
+        @test wrong_workspace.augmented.inertia == (2, 3, 0)
+        @test wrong_workspace.la_fallback_reason ===
+              :la_equality_inertia_mismatch
+
+        dependent, dependent_workspace, dependent_backend = scripted_factor(
+            [(positive=3, negative=1, zero=1)];
+            dependent=true,
+        )
+        @test !dependent.ok
+        @test dependent.q_rank_deficient
+        @test dependent_backend.calls == 7
+        @test dependent_workspace.augmented.factor === nothing
+        @test dependent_workspace.augmented.rank_deficient
+        @test dependent_workspace.augmented.inertia.zero == 1
+        @test dependent_workspace.la_fallback_reason ===
+              :la_equality_rank_deficient
+
+        invalid, invalid_workspace, invalid_backend = scripted_factor(
+            [(3, 2)],
+        )
+        @test !invalid.ok
+        @test !invalid.q_rank_deficient
+        @test invalid_backend.calls == 7
+        @test invalid_workspace.augmented.factor === nothing
+        @test invalid_workspace.augmented.inertia === nothing
+        @test invalid_workspace.augmented.factor_diagnostics.attempt == 7
+        @test invalid_workspace.la_fallback_reason ===
+              :la_provider_inertia_invalid
+    end
+
     @testset "exact signs, direction equivalence, and reduced residual" begin
         S = [4.0 0.5 -0.25; 0.5 3.0 0.2; -0.25 0.2 2.5]
         B = [1.0 0.0; 0.25 1.0; -0.5 0.75]

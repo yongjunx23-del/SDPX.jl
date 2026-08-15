@@ -618,11 +618,11 @@ function _native_soc_assemble_factor!(
     if workspace.plan.formulation.formulation isa DenseAugmentedKKT
         variables = problem.variables
         equalities = length(problem.beq)
-        dimension = variables + equalities
-        for attempt in 1:6
+        rejection = :factor_failed
+        for retry in 0:6
             zero_owned!(workspace.augmented_buffer)
-            regularization = attempt == 1 ? zero(T) :
-                             sqrt(eps(T)) * T(10)^(attempt - 2)
+            regularization = retry == 0 ? zero(T) :
+                             sqrt(eps(T)) * T(10)^(retry - 1)
             if workspace.plan.cone.execution isa FixedTraceQ3Execution
                 reduction = workspace.plan.cone.execution.payload
                 @inbounds for block in axes(reduction.active_ids, 2)
@@ -665,12 +665,27 @@ function _native_soc_assemble_factor!(
             )
             factor === nothing && continue
             inertia = la_ldlt_inertia(factor)
-            length(inertia) == 3 || throw(ArgumentError(
-                "native SOC LDLT provider returned invalid inertia",
-            ))
-            inertia[3] == 0 || return nothing
-            attempt > 1 && (workspace.regularizations += attempt - 1)
-            return factor
+            inertia_class = _ldlt_inertia_class(
+                inertia, variables, equalities,
+            )
+            if inertia_class === :accepted
+                workspace.regularizations += retry
+                return factor
+            end
+            rejection = inertia_class
+            # The factor may borrow augmented_buffer. Drop it before the next
+            # regularized attempt overwrites that storage. Wrong-sign, zero,
+            # and malformed inertia are never accepted as a successful KKT.
+            factor = nothing
+        end
+        workspace.la_fallback_reason = if rejection === :rank_deficient
+            :la_equality_rank_deficient
+        elseif rejection === :mismatch
+            :la_equality_inertia_mismatch
+        elseif rejection === :invalid
+            :la_provider_inertia_invalid
+        else
+            :la_factor_failed
         end
         return nothing
     end

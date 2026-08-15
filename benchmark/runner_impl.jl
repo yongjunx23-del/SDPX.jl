@@ -1,21 +1,37 @@
 const RESULT_COLUMNS = (
     :schema_version, :source_commit, :source_dirty, :julia_version, :os,
-    :cpu_name, :julia_threads, :blas_threads, :suite, :problem_id, :name, :family,
+    :cpu_name, :hostname, :pbs_job_id, :julia_threads, :blas_threads,
+    :project_sha256, :manifest_sha256, :benchmark_driver_sha256,
+    :mfla_commit, :bfla_commit,
+    :suite, :problem_id, :name, :family,
     :problem_type, :conic_formulation, :source, :purpose, :seed, :arithmetic,
     :precision_bits, :requested_provider, :status, :reference_status,
     :reference_absolute_tolerance, :reference_relative_tolerance,
     :skip_reason, :termination_reason,
     :variables, :equalities, :blocks, :block_sizes, :planned_formulation,
     :executed_formulation, :planned_backend, :executed_backend,
-    :planned_provider, :executed_provider, :fallback_reason,
+    :planned_provider, :executed_provider, :executed_specialization,
+    :psd_lift_used, :fallback_reason,
     :la_fallback_reason, :iterations, :objective, :reference_objective,
+    :physical_objective, :objective_interval_lower, :objective_interval_upper,
+    :objective_in_reference_interval, :benchmark_scale,
+    :input_generation_precision_bits, :original_equalities, :source_parameters,
     :objective_error, :primal_residual, :dual_residual, :relative_gap,
     :certificate_policy, :certificate_available, :certificate_valid,
     :provider_match, :unexpected_fallback,
-    :semantic_pass, :semantic_failures, :total_seconds,
+    :production_invariants_valid, :full_numerical_gate_valid,
+    :semantic_pass, :semantic_failures, :total_seconds, :seconds_per_iteration,
+    :allocated_bytes, :gc_seconds,
     :assembly_seconds, :factor_seconds, :solve_seconds,
-    :refinement_seconds, :input_fingerprint, :external_checksum,
+    :refinement_seconds, :local_metric_seconds, :local_factor_seconds,
+    :panel_transform_seconds, :equality_gram_seconds, :equality_factor_seconds,
+    :predictor_rhs_seconds, :corrector_rhs_seconds, :block_residual_seconds,
+    :block_recovery_seconds, :local_metric_preparations,
+    :equality_gram_assemblies, :equality_factorizations, :rhs_solves,
+    :input_fingerprint, :external_checksum,
 )
+
+const RESULT_SCHEMA_VERSION = 2
 
 _cell(value) = value === missing || value === nothing ? "" :
                replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')
@@ -46,6 +62,46 @@ _blas_threads() = try
     LinearAlgebra.BLAS.get_num_threads()
 catch
     missing
+end
+
+_hostname() = try
+    gethostname()
+catch
+    "unknown"
+end
+
+function _sha256_if_file(path)
+    path === nothing && return missing
+    isfile(path) || return missing
+    return _sha256_file(path)
+end
+
+function _manifest_sha256()
+    project = Base.active_project()
+    project === nothing && return missing
+    return _sha256_if_file(joinpath(dirname(project), "Manifest.toml"))
+end
+
+function _package_commit(package::AbstractString)
+    source = try
+        Base.find_package(package)
+    catch
+        nothing
+    end
+    source === nothing && return :not_loaded
+    root = normpath(joinpath(dirname(source), ".."))
+    return try
+        readchomp(`git -C $root rev-parse HEAD`)
+    catch
+        :not_a_git_checkout
+    end
+end
+
+_built_value(built, name::Symbol, default) =
+    hasproperty(built, name) ? getproperty(built, name) : default
+
+function _solve_settings(built)
+    return _built_value(built, :solve_settings, (;))
 end
 
 function _arithmetic_label(::Type{T}) where {T}
@@ -84,14 +140,20 @@ function _load_requested_provider(provider::Symbol)
     return nothing
 end
 
-function _options(provider::Symbol, ::Type{T}; verbose=false) where {T}
-    tolerance = T === Float64 ? 1.0e-8 : T(1.0e-20)
+function _options(provider::Symbol, ::Type{T}, built=nothing; verbose=false) where {T}
+    settings = built === nothing ? (;) : _solve_settings(built)
+    default_tolerance = T === Float64 ? T(1.0e-8) : T(1.0e-20)
+    tolerance = hasproperty(settings, :tolerance) ?
+                parse(T, string(settings.tolerance)) : default_tolerance
+    maximum_iterations = get(settings, :maximum_iterations, 200)
+    max_time = get(settings, :max_time, Inf)
     return SDPX.SolveOptions(
         duality_gap_threshold=tolerance,
         primal_error_threshold=tolerance,
         dual_error_threshold=tolerance,
-        maximum_iterations=200,
-        threads=1,
+        maximum_iterations=maximum_iterations,
+        max_runtime=max_time,
+        threads=Threads.nthreads(),
         verbosity=0,
         linear_algebra_backend=provider,
         diagnostics=true,
@@ -101,22 +163,44 @@ function _options(provider::Symbol, ::Type{T}; verbose=false) where {T}
 end
 
 function _solve_built(built, ::Type{T}, provider; verbose=false) where {T}
-    options = _options(provider, T; verbose=verbose)
+    options = _options(provider, T, built; verbose=verbose)
     if built.kind === :socp
+        settings = _solve_settings(built)
+        specialization = get(settings, :specialization, :auto)
+        if specialization !== :auto
+            tolerance = parse(T, string(settings.tolerance))
+            return SDPX.solve_socp(
+                built.problem;
+                specialization,
+                tolerance,
+                maximum_iterations=get(settings, :maximum_iterations, 200),
+                max_time=get(settings, :max_time, Inf),
+                verbosity=0,
+                timing=true,
+                diagnostics=true,
+                certification=true,
+                linear_algebra_backend=provider,
+                threads=Threads.nthreads(),
+            )
+        end
         return SDPX.solve_socp(built.problem, options)
     end
     return SDPX.solve(built.problem, options)
 end
 
-function _safe_certificate(problem, result, ::Type{T}) where {T}
+function _safe_certificate(problem, result, ::Type{T}, built=nothing) where {T}
+    settings = built === nothing ? (;) : _solve_settings(built)
+    tolerance = hasproperty(settings, :tolerance) ?
+                parse(T, string(settings.tolerance)) :
+                (T === Float64 ? T(1e-8) : T(1e-20))
     try
         return SDPX.result_certificate(
             problem,
             result,
             SDPX.SolverOptions{T}(
-                ϵ_gap=T === Float64 ? T(1e-8) : T(1e-20),
-                ϵ_primal=T === Float64 ? T(1e-8) : T(1e-20),
-                ϵ_dual=T === Float64 ? T(1e-8) : T(1e-20),
+                ϵ_gap=tolerance,
+                ϵ_primal=tolerance,
+                ϵ_dual=tolerance,
             ),
         )
     catch
@@ -144,18 +228,24 @@ end
 
 function _problem_fingerprint(spec, built, arithmetic)
     facts = _problem_facts(built.problem)
+    builder_path = spec.external === nothing ?
+                   joinpath(ROOT, "generators", "problems.jl") :
+                   joinpath(ROOT, "loaders", "csdr_fixed_trace.jl")
     payload = join((
         spec.id,
         string(arithmetic),
         string(spec.seed),
         repr(spec.parameters),
         repr(facts),
-        bytes2hex(SHA.sha256(read(joinpath(ROOT, "generators", "problems.jl")))),
+        string(_built_value(built, :external_checksum, "")),
+        bytes2hex(SHA.sha256(read(builder_path))),
     ), "|")
     return bytes2hex(SHA.sha256(payload))
 end
 
 _trace_value(value) = SDPX.isavailable(value) ? value : missing
+_trace_field(record, name::Symbol) = hasproperty(record, name) ?
+    _trace_value(getproperty(record, name)) : missing
 _sym(value) = value isa Symbol ? value : missing
 
 _normalized_status(status) = Symbol(lowercase(string(status)))
@@ -252,10 +342,41 @@ function _formulation(trace, result, planned::Bool)
                get(selected, :planned_kkt_formulation, missing))
 end
 
-function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
+function _specialization(result)
+    diagnostics = result.diagnostics
+    diagnostics === nothing && return missing
+    selected = diagnostics.selected_algorithms
+    return get(selected, :soc_specialization, missing)
+end
+
+function _physical_objective(built, result, default)
+    objective_map = _built_value(built, :physical_objective, nothing)
+    objective_map === nothing && return default
+    return objective_map(result.x)
+end
+
+function _reference_interval(built, ::Type{T}) where {T}
+    interval = _built_value(built, :objective_interval, nothing)
+    interval === nothing && return nothing
+    return (
+        lower=parse(T, string(interval.lower)),
+        upper=parse(T, string(interval.upper)),
+    )
+end
+
+function _result_row(
+    spec, suite, arithmetic, provider, built, result, elapsed;
+    allocated_bytes=missing,
+    gc_seconds=missing,
+)
     trace = SDPX.performance_trace(result)
-    certificate = _safe_certificate(built.problem, result, eltype(built.problem))
-    objective = trace.final.primal_objective
+    T = eltype(built.problem)
+    certificate = _safe_certificate(built.problem, result, T, built)
+    native_objective = trace.final.primal_objective
+    objective = _physical_objective(built, result, native_objective)
+    interval = _reference_interval(built, T)
+    interval_pass = interval === nothing ? missing :
+                    interval.lower <= objective <= interval.upper
     expected = built.expected === nothing ? spec.reference.objective : built.expected
     objective_error = expected === nothing ? missing : abs(objective - expected)
     primal_residual = trace.final.primal_residual
@@ -282,6 +403,34 @@ function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
         provider_match,
         unexpected_fallback,
     )
+    specialization = _specialization(result)
+    required_specialization = _built_value(
+        built, :required_specialization, nothing,
+    )
+    required_specialization !== nothing &&
+        specialization !== required_specialization &&
+        push!(failures, "specialization")
+    psd_lift_used = result isa SDPX.ConicResult ? result.lifted !== nothing : false
+    _built_value(built, :forbid_psd_lift, false) && psd_lift_used &&
+        push!(failures, "psd_lift")
+    interval_pass === false && push!(failures, "objective_interval")
+    maximum_relative_gap = _built_value(
+        built, :maximum_relative_gap, nothing,
+    )
+    if maximum_relative_gap !== nothing
+        limit = parse(T, string(maximum_relative_gap))
+        (relative_gap === missing || !isfinite(relative_gap) ||
+         abs(relative_gap) > limit) && push!(failures, "relative_gap_strict")
+    end
+    production_invariants =
+        (required_specialization === nothing ||
+         specialization === required_specialization) &&
+        provider_match && !psd_lift_used && !unexpected_fallback
+    if _built_value(built, :require_no_fallback, false)
+        exact_no_fallback = fallback_reason === :none && la_fallback_reason === :none
+        exact_no_fallback || push!(failures, "fallback")
+        production_invariants &= exact_no_fallback
+    end
     facts = _problem_facts(built.problem)
     solve_seconds = begin
         predictor = _trace_value(trace.iteration.predictor_solve_seconds)
@@ -289,14 +438,21 @@ function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
         predictor === missing || corrector === missing ? missing : predictor + corrector
     end
     return (
-        schema_version=1,
+        schema_version=RESULT_SCHEMA_VERSION,
         source_commit=_source_commit(),
         source_dirty=_source_dirty(),
         julia_version=string(VERSION),
         os=string(Sys.KERNEL),
         cpu_name=_cpu_name(),
+        hostname=_hostname(),
+        pbs_job_id=get(ENV, "PBS_JOBID", missing),
         julia_threads=Threads.nthreads(),
         blas_threads=_blas_threads(),
+        project_sha256=_sha256_if_file(Base.active_project()),
+        manifest_sha256=_manifest_sha256(),
+        benchmark_driver_sha256=_sha256_file(joinpath(ROOT, "runner_impl.jl")),
+        mfla_commit=_package_commit("MultiFloatLinearAlgebra"),
+        bfla_commit=_package_commit("BigFloatLinearAlgebra"),
         suite=suite,
         problem_id=spec.id,
         name=spec.name,
@@ -326,11 +482,28 @@ function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
         executed_backend=_trace_value(trace.setup.executed_backend),
         planned_provider=_trace_value(trace.setup.planned_la_provider),
         executed_provider=executed_provider,
+        executed_specialization=specialization,
+        psd_lift_used,
         fallback_reason=fallback_reason,
         la_fallback_reason=la_fallback_reason,
         iterations=trace.counters.iterations,
         objective=string(objective),
         reference_objective=expected === nothing ? missing : string(expected),
+        physical_objective=
+            _built_value(built, :physical_objective, nothing) === nothing ?
+            missing : string(objective),
+        objective_interval_lower=interval === nothing ? missing : string(interval.lower),
+        objective_interval_upper=interval === nothing ? missing : string(interval.upper),
+        objective_in_reference_interval=interval_pass,
+        benchmark_scale=_built_value(built, :benchmark_scale, missing),
+        input_generation_precision_bits=_built_value(
+            built, :input_generation_precision_bits, missing,
+        ),
+        original_equalities=_built_value(built, :original_equalities, missing),
+        source_parameters=begin
+            parameters = _built_value(built, :source_parameters, nothing)
+            parameters === nothing ? missing : repr(parameters)
+        end,
         objective_error=objective_error === missing ? missing : string(objective_error),
         primal_residual=string(primal_residual),
         dual_residual=string(dual_residual),
@@ -340,29 +513,62 @@ function _result_row(spec, suite, arithmetic, provider, built, result, elapsed)
         certificate_valid=certificate === nothing ? missing : certificate.valid,
         provider_match=provider_match,
         unexpected_fallback=unexpected_fallback,
+        production_invariants_valid=production_invariants,
+        full_numerical_gate_valid=isempty(failures),
         semantic_pass=isempty(failures),
         semantic_failures=join(failures, ","),
         total_seconds=elapsed,
+        seconds_per_iteration=elapsed / max(trace.counters.iterations, 1),
+        allocated_bytes,
+        gc_seconds,
         assembly_seconds=_trace_value(trace.iteration.schur_assembly_seconds),
         factor_seconds=_trace_value(trace.iteration.kkt_factorization_seconds),
         solve_seconds=solve_seconds,
         refinement_seconds=_trace_value(trace.iteration.refinement_seconds),
+        local_metric_seconds=_trace_value(trace.iteration.fixed_local_metric_seconds),
+        local_factor_seconds=_trace_value(trace.iteration.fixed_local_factor_seconds),
+        panel_transform_seconds=
+            _trace_value(trace.iteration.equality_panel_transform_seconds),
+        equality_gram_seconds=
+            _trace_value(trace.iteration.equality_gram_syrk_seconds),
+        equality_factor_seconds=
+            _trace_value(trace.iteration.equality_factor_seconds),
+        predictor_rhs_seconds=_trace_value(trace.iteration.predictor_rhs_seconds),
+        corrector_rhs_seconds=_trace_value(trace.iteration.corrector_rhs_seconds),
+        block_residual_seconds=
+            _trace_value(trace.iteration.fixed_block_residual_seconds),
+        block_recovery_seconds=
+            _trace_value(trace.iteration.fixed_block_recovery_seconds),
+        local_metric_preparations=
+            _trace_field(trace.counters, :local_metric_preparations),
+        equality_gram_assemblies=
+            _trace_field(trace.counters, :equality_gram_assemblies),
+        equality_factorizations=
+            _trace_field(trace.counters, :equality_factorizations),
+        rhs_solves=_trace_field(trace.counters, :rhs_solves),
         input_fingerprint=_problem_fingerprint(spec, built, arithmetic),
-        external_checksum=missing,
+        external_checksum=_built_value(built, :external_checksum, missing),
     )
 end
 
 function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
     values = Dict{Symbol,Any}(field => missing for field in RESULT_COLUMNS)
     merge!(values, Dict(
-        :schema_version => 1,
+        :schema_version => RESULT_SCHEMA_VERSION,
         :source_commit => _source_commit(),
         :source_dirty => _source_dirty(),
         :julia_version => string(VERSION),
         :os => string(Sys.KERNEL),
         :cpu_name => _cpu_name(),
+        :hostname => _hostname(),
+        :pbs_job_id => get(ENV, "PBS_JOBID", missing),
         :julia_threads => Threads.nthreads(),
         :blas_threads => _blas_threads(),
+        :project_sha256 => _sha256_if_file(Base.active_project()),
+        :manifest_sha256 => _manifest_sha256(),
+        :benchmark_driver_sha256 => _sha256_file(joinpath(ROOT, "runner_impl.jl")),
+        :mfla_commit => _package_commit("MultiFloatLinearAlgebra"),
+        :bfla_commit => _package_commit("BigFloatLinearAlgebra"),
         :suite => suite,
         :problem_id => spec.id,
         :name => spec.name,
@@ -434,7 +640,7 @@ function write_results(path::AbstractString, rows)
     mkpath(dirname(tsv))
     _write_tsv(tsv, rows)
     document = Dict(
-        "schema_version" => 1,
+        "schema_version" => RESULT_SCHEMA_VERSION,
         "generated_at" => string(Dates.now()),
         "result" => [Dict(string(field) => _toml_value(getproperty(row, field))
                          for field in RESULT_COLUMNS) for row in rows],
@@ -452,6 +658,13 @@ function _selected_entries(suite, problem, arithmetic, provider)
                                                      e.provider) for e in entries])
     provider !== nothing && (entries = [SuiteEntry(e.problem_id, e.arithmetic,
                                                    provider) for e in entries])
+    seen = Set{Tuple{String,Symbol,Symbol}}()
+    entries = filter(entries) do entry
+        key = (entry.problem_id, entry.arithmetic, entry.provider)
+        key in seen && return false
+        push!(seen, key)
+        return true
+    end
     isempty(entries) && throw(ArgumentError("selection contains no benchmark entries"))
     return entries
 end
@@ -466,16 +679,23 @@ function run_suite(
     warmup=true,
     strict_semantics=true,
     cache_dir=DEFAULT_CACHE,
+    allow_large=false,
 )
     suite === :heavy && throw(ArgumentError(
-        "the heavy suite is register-only in Round 2 and cannot be executed",
+        "the heavy suite is register-only and cannot be executed",
     ))
+    suite === :large && !(allow_large || haskey(ENV, "PBS_JOBID")) &&
+        throw(ArgumentError(
+            "the large suite is cluster-only; run it inside PBS or pass " *
+            "allow_large=true for an explicitly authorized non-cluster diagnostic",
+        ))
     entries = _selected_entries(suite, problem, arithmetic, provider)
     rows = NamedTuple[]
     for entry in entries
         spec = benchmark_spec(entry.problem_id)
-        if spec.external !== nothing
-            cache = external_cache_status(spec; cache_dir=cache_dir)
+        cache = spec.external === nothing ? nothing :
+                external_cache_status(spec; cache_dir=cache_dir)
+        if cache !== nothing && !cache.loadable
             push!(rows, _skip_row(
                 spec, suite, entry.arithmetic, entry.provider,
                 cache.reason, something(cache.checksum, missing),
@@ -504,7 +724,7 @@ function run_suite(
             continue
         end
         run = function ()
-            built = build_problem(spec, T)
+            built = build_problem(spec, T; cache_dir)
             result = _solve_built(
                 built, T, entry.provider; verbose=verbose,
             )
@@ -515,16 +735,22 @@ function run_suite(
             if T === BigFloat
                 bits = parse(Int, replace(string(entry.arithmetic), "bigfloat" => ""))
                 row = setprecision(BigFloat, bits) do
-                    warmup && Base.invokelatest(run)
-                    elapsed = @elapsed built, result = Base.invokelatest(run)
+                    warmup && suite !== :large && Base.invokelatest(run)
+                    measurement = @timed Base.invokelatest(run)
+                    built, result = measurement.value
                     _result_row(spec, suite, entry.arithmetic, entry.provider,
-                                built, result, elapsed)
+                                built, result, measurement.time;
+                                allocated_bytes=measurement.bytes,
+                                gc_seconds=measurement.gctime)
                 end
             else
-                warmup && Base.invokelatest(run)
-                elapsed = @elapsed built, result = Base.invokelatest(run)
+                warmup && suite !== :large && Base.invokelatest(run)
+                measurement = @timed Base.invokelatest(run)
+                built, result = measurement.value
                 row = _result_row(spec, suite, entry.arithmetic, entry.provider,
-                                  built, result, elapsed)
+                                  built, result, measurement.time;
+                                  allocated_bytes=measurement.bytes,
+                                  gc_seconds=measurement.gctime)
             end
         catch exception
             row = _error_row(
@@ -561,8 +787,10 @@ function _parse_cli(args)
     arithmetic = nothing
     provider = nothing
     output = nothing
+    cache_dir = DEFAULT_CACHE
     verbose = false
     prepare = false
+    allow_large = false
     positional = String[]
     for argument in args
         if startswith(argument, "--problem=")
@@ -573,10 +801,14 @@ function _parse_cli(args)
             provider = _parse_symbol(split(argument, "="; limit=2)[2])
         elseif startswith(argument, "--output=")
             output = split(argument, "="; limit=2)[2]
+        elseif startswith(argument, "--cache-dir=")
+            cache_dir = abspath(split(argument, "="; limit=2)[2])
         elseif argument == "--verbose"
             verbose = true
         elseif argument == "--prepare"
             prepare = true
+        elseif argument == "--allow-large"
+            allow_large = true
         elseif startswith(argument, "--")
             throw(ArgumentError("unknown option $argument"))
         else
@@ -585,7 +817,8 @@ function _parse_cli(args)
     end
     !isempty(positional) && (suite = Symbol(lowercase(first(positional))))
     length(positional) > 1 && problem === nothing && (problem = positional[2])
-    return (; suite, problem, arithmetic, provider, output, verbose, prepare)
+    return (; suite, problem, arithmetic, provider, output, cache_dir, verbose,
+            prepare, allow_large)
 end
 
 function main(args=ARGS)
@@ -598,7 +831,9 @@ function main(args=ARGS)
               [entry.problem_id for entry in suite_entries(options.suite)
                if benchmark_spec(entry.problem_id).external !== nothing] :
               [options.problem]
-        return prepare_external!(ids; verbose=options.verbose)
+        return prepare_external!(
+            ids; cache_dir=options.cache_dir, verbose=options.verbose,
+        )
     end
     output = something(
         options.output,
@@ -611,6 +846,8 @@ function main(args=ARGS)
         provider=options.provider,
         output=output,
         verbose=options.verbose,
+        cache_dir=options.cache_dir,
+        allow_large=options.allow_large,
     )
     solved = count(row -> !(row.status in (:skipped, :error)), result.rows)
     errors = count(row -> row.status === :error, result.rows)

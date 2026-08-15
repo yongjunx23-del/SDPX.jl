@@ -42,6 +42,7 @@ benchmark/out/
 # path is supplied through environment variables, so keep them with the
 # reproducible benchmark harness.
 !bench/soc_fixed_trace/*.pbs
+!benchmark/cluster/*.pbs
 *.o[0-9]*
 *.e[0-9]*
 

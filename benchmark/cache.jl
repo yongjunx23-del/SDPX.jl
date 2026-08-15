@@ -1,7 +1,9 @@
 using Downloads
 
 const DEFAULT_CACHE = joinpath(ROOT, "data", "cache")
-const SUPPORTED_EXTERNAL_LOADERS = Set{Symbol}()
+const SUPPORTED_EXTERNAL_LOADERS = Set{Symbol}((
+    :csdr_fixed_trace_reduced_v1,
+))
 
 function _cached_path(spec::BenchmarkSpec; cache_dir=DEFAULT_CACHE)
     spec.external === nothing && return nothing

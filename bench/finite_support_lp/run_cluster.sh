@@ -17,11 +17,12 @@ if [ -n "${SDPX_SITE_ENV:-}" ]; then
   source "$SDPX_SITE_ENV"
 fi
 : "${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}"
+: "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH directly or through SDPX_SITE_ENV}"
 
 mkdir -p "$SDPX_RESULT_DIR"
 SDPX_BENCH_SOURCE="${SDPX_BENCH_SOURCE:-$SDPX_SOURCE}"
 export JULIA_PKG_OFFLINE=true
-export JULIA_DEPOT_PATH="${SDPX_DEPOT_PATH:-/public/home/yongjunxu/tools/julia-depot}"
+export JULIA_DEPOT_PATH="$SDPX_DEPOT_PATH"
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1

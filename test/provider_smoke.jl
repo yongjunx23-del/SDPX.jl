@@ -6,12 +6,18 @@
     never clones or resolves MultiFloatLinearAlgebra or BigFloatLinearAlgebra.
     Run it through `scripts/dev_v05_provider_smoke.sh` (or an equivalent
     environment that has SDPX, MultiFloatLinearAlgebra,
-    BigFloatLinearAlgebra, and GenericLinearAlgebra loaded together).
+    BigFloatLinearAlgebra, and GenericLinearAlgebra loaded together). CI may
+    set `SDPX_PROVIDER_SMOKE_TARGET=mfla` to exercise the public MFLA provider
+    independently; the default target remains `all` and requires both.
 
     The smoke deliberately uses the real installed/local MFLA and BFLA
     packages: no provider result is fabricated and no package is cloned by
     this file.  `SDPX_MFLA_PROJECT` / `SDPX_BFLA_PROJECT`, when set, are only
     used to assert that the loaded modules come from those checkouts.
+
+    Provider presence is part of the contract: this file must never report a
+    silent pass when the providers are absent, and a broken loaded provider
+    must fail the process.
 =#
 using SDPX
 using Test
@@ -19,14 +25,23 @@ using LinearAlgebra
 using Random
 using MultiFloats: Float64x2, Float64x3, Float64x4
 
-const _PROVIDERS_LOADED = try
-    @eval begin
-        import MultiFloats
-        import MultiFloatLinearAlgebra
-        import BigFloatLinearAlgebra
-    end
-    Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt) !== nothing &&
-        Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt) !== nothing
+const _SMOKE_TARGET = Symbol(lowercase(get(
+    ENV, "SDPX_PROVIDER_SMOKE_TARGET", "all",
+)))
+_SMOKE_TARGET in (:all, :mfla, :bfla) || error(
+    "SDPX_PROVIDER_SMOKE_TARGET must be all, mfla, or bfla",
+)
+
+const _MFLA_LOADED = try
+    @eval import MultiFloatLinearAlgebra
+    Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt) !== nothing
+catch
+    false
+end
+
+const _BFLA_LOADED = try
+    @eval import BigFloatLinearAlgebra
+    Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt) !== nothing
 catch
     false
 end
@@ -37,6 +52,21 @@ const _GENERIC_LOADED = try
 catch
     false
 end
+
+const _REQUIRE_MFLA = _SMOKE_TARGET in (:all, :mfla)
+const _REQUIRE_BFLA = _SMOKE_TARGET in (:all, :bfla)
+
+_REQUIRE_MFLA && !_MFLA_LOADED && error(
+    "provider smoke target $(_SMOKE_TARGET) requires " *
+    "MultiFloatLinearAlgebra; run scripts/dev_v05_provider_smoke.sh",
+)
+_REQUIRE_BFLA && !_BFLA_LOADED && error(
+    "provider smoke target $(_SMOKE_TARGET) requires " *
+    "BigFloatLinearAlgebra; run scripts/dev_v05_provider_smoke.sh",
+)
+
+const _PROVIDERS_LOADED =
+    (!_REQUIRE_MFLA || _MFLA_LOADED) && (!_REQUIRE_BFLA || _BFLA_LOADED)
 
 const LA = SDPX.Experimental
 
@@ -356,50 +386,113 @@ function _solve_smoke_soc_augmented(
     return result
 end
 
-if !_PROVIDERS_LOADED
-    @info "provider smoke skipped" reason=(
-        "MultiFloatLinearAlgebra/BigFloatLinearAlgebra not loaded; " *
-        "run scripts/dev_v05_provider_smoke.sh"
+function _solve_smoke_soc_normal(
+    ::Type{T},
+    backend::Symbol,
+    provider::Symbol,
+) where {T}
+    problem = SDPX.second_order_program(
+        T[1, 0, 0],
+        Matrix{T}(I, 3, 3),
+        zeros(T, 3);
+        Aeq=T[0 1 0; 0 0 1],
+        beq=T[3, 4],
     )
-    exit(0)
+    tolerance = T === BigFloat ? T(1e-24) : T(1e-12)
+    options = SDPX.SolverOptions{T}(
+        formulation=:normal_equations,
+        equality_solver=:normal_equations,
+        presolve=false,
+        scaling=:none,
+        linear_algebra_backend=backend,
+        ϵ_gap=tolerance,
+        ϵ_primal=tolerance,
+        ϵ_dual=tolerance,
+        iter_max=120,
+        verbosity=0,
+        diagnostics=true,
+    )
+    result = SDPX._solve_native_soc_core(problem, options)
+    @test result.status == SDPX.Optimal
+    @test isapprox(Float64(result.pObj), 5.0; atol=1e-7)
+    selected = result.diagnostics.selected_algorithms
+    @test selected.executed_kkt_formulation === :dense_normal_equations
+    @test selected.executed_factorization === :cholesky
+    @test selected.la_executed_provider === provider
+    certificate = SDPX.result_certificate(problem, result, options)
+    @test certificate.valid
+    return result
 end
 
+_PROVIDERS_LOADED || error("required provider smoke extensions are unavailable")
+
 @testset "installed provider smoke" begin
-    @testset "MFLA Float64x4 factors" begin
-        _assert_provider_root("SDPX_MFLA_PROJECT", MultiFloatLinearAlgebra)
-        _exercise_mfla_factors(Float64x4)
-    end
+    if _REQUIRE_MFLA
+        @testset "MFLA Float64x2/x3/x4 factors" begin
+            _assert_provider_root("SDPX_MFLA_PROJECT", MultiFloatLinearAlgebra)
+            for T in (Float64x2, Float64x3, Float64x4)
+                @testset "factors $T" begin
+                    _exercise_mfla_factors(T)
+                end
+            end
+        end
 
-    @testset "MFLA mixed residual Float64x2 -> Float64x4" begin
-        _exercise_mfla_mixed_residual()
-    end
+        @testset "MFLA mixed residual Float64x2 -> Float64x4" begin
+            _exercise_mfla_mixed_residual()
+        end
 
-    @testset "BFLA BigFloat factors" begin
-        setprecision(BigFloat, 256) do
-            _assert_provider_root("SDPX_BFLA_PROJECT", BigFloatLinearAlgebra)
-            _exercise_bfla_factors()
+        @testset "tiny Float64x2/x3/x4 LP and SDP through MFLA" begin
+            for T in (Float64x2, Float64x3, Float64x4)
+                @testset "LP/SDP $T" begin
+                    _solve_smoke_lp(T, :multifloat, :multifloat_linear_algebra)
+                    _solve_smoke_sdp(T, :multifloat, :multifloat_linear_algebra)
+                end
+            end
+        end
+
+        @testset "NativeSOC IPM Float64x2/x3/x4 through MFLA" begin
+            for T in (Float64x2, Float64x3, Float64x4)
+                @testset "normal equations $T" begin
+                    _solve_smoke_soc_normal(
+                        T,
+                        :multifloat,
+                        :multifloat_linear_algebra,
+                    )
+                end
+                @testset "augmented KKT $T" begin
+                    _solve_smoke_soc_augmented(
+                        T,
+                        :multifloat,
+                        :multifloat_linear_algebra,
+                    )
+                end
+            end
         end
     end
 
-    @testset "tiny Float64x4 LP and SDP through MFLA" begin
-        _solve_smoke_lp(Float64x4, :multifloat, :multifloat_linear_algebra)
-        _solve_smoke_sdp(Float64x4, :multifloat, :multifloat_linear_algebra)
-        _solve_smoke_soc_augmented(
-            Float64x4,
-            :multifloat,
-            :multifloat_linear_algebra,
-        )
-    end
+    if _REQUIRE_BFLA
+        @testset "BFLA BigFloat factors" begin
+            setprecision(BigFloat, 256) do
+                _assert_provider_root("SDPX_BFLA_PROJECT", BigFloatLinearAlgebra)
+                _exercise_bfla_factors()
+            end
+        end
 
-    @testset "tiny BigFloat LP and SDP through BFLA" begin
-        setprecision(BigFloat, 256) do
-            _solve_smoke_lp(BigFloat, :bfla, :bigfloat_linear_algebra)
-            _solve_smoke_sdp_bigfloat(:bfla, :bigfloat_linear_algebra)
-            _solve_smoke_soc_augmented(
-                BigFloat,
-                :bfla,
-                :bigfloat_linear_algebra,
-            )
+        @testset "tiny BigFloat LP and SDP through BFLA" begin
+            setprecision(BigFloat, 256) do
+                _solve_smoke_lp(BigFloat, :bfla, :bigfloat_linear_algebra)
+                _solve_smoke_sdp_bigfloat(:bfla, :bigfloat_linear_algebra)
+                _solve_smoke_soc_normal(
+                    BigFloat,
+                    :bfla,
+                    :bigfloat_linear_algebra,
+                )
+                _solve_smoke_soc_augmented(
+                    BigFloat,
+                    :bfla,
+                    :bigfloat_linear_algebra,
+                )
+            end
         end
     end
 

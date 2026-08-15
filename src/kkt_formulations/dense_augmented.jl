@@ -114,66 +114,71 @@ function factor_dense_augmented_kkt!(
     # residual/refinement; only the provider input receives the deterministic
     # diagonal shift. Provider perturbation or a retry through Normal
     # Equations is never authorized.
+    # A provider factor may borrow `factor_buffer`; release the previous
+    # handle before this iteration overwrites that storage.
+    workspace.factor = nothing
     workspace.regularization = zero(T)
     workspace.factor_diagnostics = nothing
     workspace.inertia = nothing
     workspace.rank_deficient = false
-    copy_owned!(workspace.factor_buffer, workspace.matrix)
-    started = time_ns()
-    factor = la_ldlt_factor!(ws.la_backend, workspace.factor_buffer)
-    factorization_seconds = _elapsed_seconds(started)
+    factorization_seconds = 0.0
     reg_attempts = 0
     reg = zero(T)
     m = prob.dims.m
-    while factor === nothing && reg_attempts < 6
-        reg_attempts += 1
-        reg = reg_attempts == 1 ? sqrt(eps(T)) : reg * T(10)
+    n = prob.dims.n
+    factor = nothing
+    rejection = :factor_failed
+    while true
         copy_owned!(workspace.factor_buffer, workspace.matrix)
-        @inbounds for index in 1:m
-            workspace.factor_buffer[index, index] +=
-                reg * max(abs(ws.S[index, index]), one(T))
+        if reg_attempts > 0
+            @inbounds for index in 1:m
+                workspace.factor_buffer[index, index] +=
+                    reg * max(abs(ws.S[index, index]), one(T))
+            end
         end
         started = time_ns()
         factor = la_ldlt_factor!(ws.la_backend, workspace.factor_buffer)
         factorization_seconds += _elapsed_seconds(started)
+        if factor !== nothing
+            diagnostics = la_factor_diagnostics(factor)
+            inertia = la_ldlt_inertia(factor)
+            workspace.factor_diagnostics = diagnostics
+            workspace.inertia = inertia
+            inertia_class = _ldlt_inertia_class(inertia, m, n)
+            if inertia_class === :accepted
+                workspace.rank_deficient = false
+                workspace.factor = factor
+                break
+            end
+            workspace.factor = nothing
+            workspace.rank_deficient = inertia_class === :rank_deficient
+            inertia_class === :invalid && (workspace.inertia = nothing)
+            rejection = inertia_class
+            # The provider may borrow `factor_buffer`. Drop the rejected
+            # handle before the next retry overwrites that storage.
+            factor = nothing
+        end
+        reg_attempts == 6 && break
+        reg_attempts += 1
+        reg = reg_attempts == 1 ? sqrt(eps(T)) : reg * T(10)
     end
     workspace.regularization = reg
     if factor === nothing
         workspace.factor = nothing
-        workspace.factor_diagnostics = nothing
-        workspace.inertia = nothing
-        ws.la_fallback_reason = :la_factor_failed
+        ws.la_fallback_reason = if rejection === :rank_deficient
+            :la_equality_rank_deficient
+        elseif rejection === :mismatch
+            :la_equality_inertia_mismatch
+        elseif rejection === :invalid
+            :la_provider_inertia_invalid
+        else
+            :la_factor_failed
+        end
         return (
             ok=false,
             reg_attempts=reg_attempts,
             q_pivoted=false,
-            q_rank_deficient=false,
-            equality_solver=:augmented_ldlt,
-            phase_times=(
-                schur_copy=assembly_seconds,
-                schur_factorization=factorization_seconds,
-                constraint_triangular_solve=0.0,
-                equality_gram=0.0,
-                equality_factorization=0.0,
-            ),
-        )
-    end
-    workspace.factor = factor
-    workspace.factor_diagnostics = la_factor_diagnostics(factor)
-    inertia = la_ldlt_inertia(factor)
-    workspace.inertia = inertia
-    # Equality presolve, not LDLT pivoting, owns rank reduction. A successful
-    # factor with structural zero inertia would otherwise silently accept a
-    # dependent equality basis when presolve is disabled.
-    Int(inertia[3]) == 0 || begin
-        workspace.factor = nothing
-        workspace.rank_deficient = true
-        ws.la_fallback_reason = :la_equality_rank_deficient
-        return (
-            ok=false,
-            reg_attempts=reg_attempts,
-            q_pivoted=false,
-            q_rank_deficient=true,
+            q_rank_deficient=rejection === :rank_deficient,
             equality_solver=:augmented_ldlt,
             phase_times=(
                 schur_copy=assembly_seconds,

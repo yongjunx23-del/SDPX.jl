@@ -23,8 +23,6 @@ include("midend/auto_planner.jl")
 include("midend/formulation_planner.jl")
 include("soc_q3_kernels.jl")
 include("soc_native.jl")
-include("soc_fixed_trace_dual.jl")
-include("soc_reduced_dual_lbfgs.jl")
 include("pipeline.jl")
 include("adaptive_parameters.jl")
 include("stagnation.jl")
@@ -46,7 +44,6 @@ include("lp_solver.jl")
 include("solve.jl")
 include("prepared.jl")
 include("validation.jl")
-include("soc_certified_objective.jl")
 include("spectrum.jl")
 include("moi_wrapper.jl")
 include("convex_api.jl")
@@ -60,8 +57,6 @@ export solve, solve!, ingest, SDPProblem, SolverOptions, SolveOptions, SDPResult
 export linear_program, solve_lp
 export SOCConstraint, ConicProblem, ConicResult
 export second_order_program, solve_socp
-export CertifiedObjective, ReducedDualReconstructionToken, solve_value
-export reconstruct_fixed_trace_solution
 export PreparedSolver, prepare
 export ActiveSparseCoefficientVector
 export reconstruct_spectrum, export_spectrum

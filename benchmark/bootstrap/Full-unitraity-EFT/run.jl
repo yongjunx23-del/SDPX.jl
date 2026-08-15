@@ -6,9 +6,8 @@ using Serialization
 using SparseArrays
 using TOML
 
-const DEFAULT_STUDY_ROOT = "/Users/xuyongjun/Desktop/project/massless eft scalar/benchmarks/c00_nx3_primal_full_study/mac_bf256_zero_c00_j40_na15_nmu200_nx2_nalpha2_v040_worktree"
-const STUDY_ROOT = get(ENV, "CSDR_STUDY_ROOT", DEFAULT_STUDY_ROOT)
-const CSDR_SOURCE = joinpath(
+const STUDY_ROOT = get(ENV, "CSDR_STUDY_ROOT", "")
+const CSDR_SOURCE = isempty(STUDY_ROOT) ? "" : joinpath(
     STUDY_ROOT, "source", "src", "CSDRBootstrap.jl",
 )
 
@@ -212,9 +211,14 @@ end
 
 function main(args=ARGS)
     study_root = STUDY_ROOT
-    model_path = isempty(args) ?
-                 joinpath(study_root, "results", "generate", "model.bin") :
-                 abspath(args[1])
+    model_path = if isempty(args)
+        isempty(study_root) && error(
+            "set CSDR_STUDY_ROOT or pass a neutral reduced payload path",
+        )
+        joinpath(study_root, "results", "generate", "model.bin")
+    else
+        abspath(args[1])
+    end
     output_dir = length(args) >= 2 ? abspath(args[2]) :
                  joinpath(
                      @__DIR__, "..", "..", "out",

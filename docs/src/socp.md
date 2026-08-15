@@ -150,62 +150,6 @@ destination range. Broader layouts and BigFloat keep the copy-then-transform
 path. Executed diagnostics expose `local_pivot_kernel` and
 `equality_panel_transform`.
 
-### Answer-only reduced dual (experimental)
-
-```@docs
-CertifiedObjective
-ReducedDualReconstructionToken
-solve_value
-reconstruct_fixed_trace_solution
-```
-
-Eligible FixedTraceQ3 models also expose an explicit answer-only algorithm:
-
-```julia
-answer = solve_value(
-    problem;
-    soc_algorithm=:reduced_dual_lbfgs,
-    arithmetic=Float64,
-    tolerance=1e-10,
-    smoothing=:auto,
-    polish=:none,
-)
-```
-
-For a block `s_l=(h_l,M_l*x_l+o_l)` and equalities `E*x=d`, SDPX compiles
-owned local inverses and minimizes
-
-```math
-F_\tau(y)=\sum_l\left(h_l\sqrt{\lVert
-M_l^{-T}(c_l-E_l^Ty)\rVert^2+\tau^2}+o_l^T
-M_l^{-T}(c_l-E_l^Ty)\right)-d^Ty.
-```
-
-The analytic gradient is `E*x(y)-d`. Each evaluation performs two planned
-dense equality-panel GEMVs and constant work per cone; it never revisits the
-original sparse cone matrices and never forms a Hessian or equality Gram.
-The continuation schedule is deterministic and the typed L-BFGS core uses the
-requested arithmetic throughout.
-
-`CertifiedObjective` is accepted as `Optimal` only when L-BFGS reports
-convergence and an independent certificate succeeds in the original Lorentz
-coordinates. Its lower/upper pair is a finite-arithmetic numerical envelope
-(`rigorous_interval=false`), not an outward-rounded real interval. A
-reconstruction token permits cold recovery of generic conic primal/dual
-coordinates with the same arithmetic, precision, provider, fingerprints, and
-ownership checks. It does not build a physical spectrum.
-
-MultiFloat execution requires the planned MFLA provider and fails closed if it
-is unavailable. `polish=:native_soc_ipm` is an explicit second solve; it is
-never triggered by an L-BFGS failure. There is no PSD lift, formulation switch,
-generic provider retry, Newton method, HVP, CG, or hidden IPM fallback.
-
-This route remains experimental. FixedTrace support functions become sharply
-ill-conditioned near nonsmooth active blocks as `tau` approaches zero, so a
-cheap objective/gradient evaluation does not guarantee rapid high-accuracy
-L-BFGS convergence. The original-coordinate certificate and terminal status,
-not the smoothed objective, remain authoritative.
-
 ## Q3 direction and controller
 
 The default method is a compact Mehrotra predictor-corrector with an

@@ -13,10 +13,11 @@ set -euo pipefail
 : "${SDPX_MODEL_DIR:?set SDPX_MODEL_DIR to the staged model directory}"
 : "${SDPX_RESULT_DIR:?set SDPX_RESULT_DIR to a unique result directory}"
 : "${JULIA_BIN:?set JULIA_BIN to the cluster Julia executable}"
+: "${SDPX_DEPOT_PATH:?set SDPX_DEPOT_PATH to the Julia depot}"
 
 mkdir -p "$SDPX_RESULT_DIR"
 export JULIA_PKG_OFFLINE=true
-export JULIA_DEPOT_PATH="${SDPX_DEPOT_PATH:-/public/home/yongjunxu/tools/julia-depot}"
+export JULIA_DEPOT_PATH="$SDPX_DEPOT_PATH"
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export MKL_NUM_THREADS=1

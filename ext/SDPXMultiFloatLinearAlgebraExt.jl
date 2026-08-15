@@ -95,7 +95,8 @@ function _capability_model(::Type{MF}) where {MF<:MultiFloat}
         qr=false,
         rank_revealing_qr=c.rrqr,
         pivoted_symmetric_ldlt=c.ldlt,
-        factor_solve=c.cholesky || c.lu,
+        ldlt_inertia=c.ldlt,
+        factor_solve=c.cholesky || c.lu || c.ldlt,
         multi_rhs=c.multi_rhs,
         # These are deliberately distinct from a provider-owned refinement
         # loop or implicit precision policy: SDPX requests one correction or
@@ -128,6 +129,7 @@ const _DESCRIPTOR_CAPABILITIES = (
     :rank_revealing_qr,
     :lu,
     :pivoted_symmetric_ldlt,
+    :ldlt_inertia,
     :multi_rhs,
     :refinement_correction,
     :mixed_precision_residual,

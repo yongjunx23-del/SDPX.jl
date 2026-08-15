@@ -1,5 +1,8 @@
 using Test
 using TOML
+using SHA
+using Serialization
+using SparseArrays
 
 include(joinpath(@__DIR__, "..", "benchmark", "SDPXBenchmarkRegistry.jl"))
 using .SDPXBenchmarkRegistry
@@ -33,14 +36,62 @@ end
         @test all(!isempty(spec.external.license_note) for spec in specs)
     end
 
-    @test suite_names() == (:micro, :representative, :local_full, :heavy)
+    @test suite_names() == (:micro, :representative, :local_full, :large, :heavy)
     @test 6 <= length(suite_entries(:micro)) <= 12
     @test 20 <= length(suite_entries(:representative)) <= 30
     @test 50 <= length(suite_entries(:local_full)) <= 100
     @test all(entry.arithmetic === :registered_only for entry in
               suite_entries(:heavy))
+    @test [(entry.problem_id, entry.arithmetic, entry.provider)
+           for entry in suite_entries(:large)] == [
+        ("csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2",
+         :float64x2, :multifloat),
+        ("csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2",
+         :float64x4, :multifloat),
+    ]
     @test_throws ArgumentError run_suite(:heavy; output=tempname())
     @test_throws ArgumentError SDPXBenchmarkRegistry.main(["heavy", "--prepare"])
+    haskey(ENV, "PBS_JOBID") || @test_throws ArgumentError run_suite(
+        :large; output=tempname(), warmup=false,
+    )
+    large_skip = run_suite(
+        :large;
+        problem="csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2",
+        arithmetic=:float64x2,
+        output=tempname() * ".toml",
+        cache_dir=mktempdir(),
+        allow_large=true,
+        warmup=false,
+    ).rows
+    @test length(large_skip) == 1
+    @test large_skip[1].status === :skipped
+    @test large_skip[1].skip_reason === :not_cached
+
+    eft = benchmark_spec(
+        "csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2",
+    )
+    @test eft.loader === :csdr_fixed_trace_reduced_v1
+    @test eft.external.sha256 ==
+          "ae66d61cdf2b00d46fd6ab83438c4e07bce3134a0fcd54519b7f7d5fce2533e8"
+    @test eft.size == (
+        variables=8400,
+        soc_blocks=4200,
+        cone_dimension=3,
+        equalities=84,
+        source_psd2_blocks=4200,
+    )
+    rung2 = benchmark_spec(
+        "csdr/full_unitarity_eft_j80_na30_nmu400_nx4_nalpha4",
+    )
+    rung4 = benchmark_spec(
+        "csdr/full_unitarity_eft_j160_na60_nmu800_nx8_nalpha8",
+    )
+    @test rung2.parameters.source_parameters ==
+          (l_max=80, N_a=30, N_mu=400, N_x=4, N_alpha=4)
+    @test rung4.parameters.source_parameters ==
+          (l_max=160, N_a=60, N_mu=800, N_x=8, N_alpha=8)
+    @test :pending_artifact in rung2.tags
+    @test :pending_artifact in rung4.tags
 
     micro_ids = Set(entry.problem_id for entry in suite_entries(:micro))
     @test "synthetic/lp_eq_exact_deficient" in micro_ids
@@ -120,4 +171,122 @@ end
         clean_output,
         clean_output,
     )) == 1
+end
+
+@testset "Full-unitarity neutral payload adapter" begin
+    raw = (
+        schema=:csdr_fixed_trace_reduced_v1,
+        reduced_c=[-1.0, 0.0, -1.0, 0.0],
+        reduced_B=sparse([1, 3], [1, 1], [1.0, 1.0], 4, 1),
+        reduced_b=[0.25],
+        coefficient_constant=[2.0],
+        coefficient_from_spectrum=reshape([1.0, 0.0, 0.0, 0.0], 1, 4),
+        coefficient_labels=["c_0_0"],
+        objective=Dict("c_0_0" => "1"),
+        fixed_coefficients=Dict{String,String}(),
+        source_model_sha256=repeat("a", 64),
+    )
+    cache = mktempdir()
+    path = joinpath(cache, "csdr", "tiny-fixed-trace-v1.bin")
+    mkpath(dirname(path))
+    open(path, "w") do io
+        serialize(io, raw)
+    end
+    checksum = open(path, "r") do io
+        bytes2hex(SHA.sha256(io))
+    end
+    spec = BenchmarkSpec(
+        "test/full_unitarity_tiny",
+        "tiny fixed trace adapter",
+        :socp,
+        :second_order_cone_program,
+        :csdr,
+        (:large,),
+        (:fixed_trace_q3, :test_fixture),
+        :loader_contract,
+        nothing,
+        :csdr_fixed_trace_reduced_v1,
+        (
+            benchmark_scale=0,
+            source_parameters=(l_max=0, N_a=0, N_mu=0, N_x=0, N_alpha=0),
+            input_generation_precision_bits=53,
+            original_equalities=1,
+            source_model_sha256=repeat("a", 64),
+            solve_settings=(
+                tolerance="1e-8",
+                maximum_iterations=1,
+                max_time=1.0,
+                specialization=:fixed_trace,
+            ),
+            objective_interval=(lower="0", upper="10"),
+        ),
+        BenchmarkReference(:optimal, nothing, 1e-8, 1e-8, "fixture"),
+        (variables=4, soc_blocks=2, equalities=1),
+        ExternalSource(
+            "fixture", "", basename(path), :csdr_fixed_trace_reduced_v1,
+            checksum, "test fixture",
+        ),
+    )
+    built = build_problem(spec, Float64; cache_dir=cache)
+    @test built.kind === :socp
+    @test built.external_checksum == checksum
+    @test built.source_model_sha256 == repeat("a", 64)
+    @test built.required_specialization === :fixed_trace_q3
+    @test built.forbid_psd_lift
+    @test built.require_no_fallback
+    @test built.problem.variables == 4
+    @test length(built.problem.cones) == 2
+    @test size(built.problem.Aeq) == (1, 4)
+    @test nnz(built.problem.cones[1].A) == 2
+    @test built.physical_objective([3.0, 0.0, 0.0, 0.0]) == 5.0
+    raw.reduced_c[1] = 99.0
+    @test built.problem.c[1] == -1.0
+    for arithmetic in (:float64x2, :float64x4)
+        haskey(SDPXBenchmarkRegistry.MULTIFLOAT_TYPES, arithmetic) || continue
+        T = SDPXBenchmarkRegistry.MULTIFLOAT_TYPES[arithmetic]
+        converted = build_problem(spec, T; cache_dir=cache)
+        @test eltype(converted.problem) === T
+        @test size(converted.problem.Aeq) == (1, 4)
+    end
+
+    bad = BenchmarkSpec(
+        spec.id,
+        spec.name,
+        spec.family,
+        spec.problem_type,
+        spec.source,
+        spec.tiers,
+        spec.tags,
+        spec.purpose,
+        spec.seed,
+        spec.loader,
+        spec.parameters,
+        spec.reference,
+        spec.size,
+        ExternalSource(
+            "fixture", "", basename(path), :csdr_fixed_trace_reduced_v1,
+            repeat("0", 64), "test fixture",
+        ),
+    )
+    @test external_cache_status(bad; cache_dir=cache).reason === :checksum_mismatch
+
+    wrong_source = BenchmarkSpec(
+        spec.id,
+        spec.name,
+        spec.family,
+        spec.problem_type,
+        spec.source,
+        spec.tiers,
+        spec.tags,
+        spec.purpose,
+        spec.seed,
+        spec.loader,
+        merge(spec.parameters, (source_model_sha256=repeat("b", 64),)),
+        spec.reference,
+        spec.size,
+        spec.external,
+    )
+    @test_throws ArgumentError build_problem(
+        wrong_source, Float64; cache_dir=cache,
+    )
 end

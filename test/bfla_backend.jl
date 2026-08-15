@@ -84,6 +84,7 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         # LDLT is a provider fact consumed only after an explicit or static
         # provider-neutral dense augmented formulation choice.
         @test plan.capability_model.pivoted_symmetric_ldlt
+        @test plan.capability_model.ldlt_inertia
         @test !plan.capability_model.iterative_refinement
         @test plan.capability_model.higher_precision_residual
         upstream = bfla_extension.BFLA.capabilities(
@@ -105,6 +106,7 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         @test augmented_plan.fallback_chain == ()
         @test augmented_plan.required_capabilities == (
             :pivoted_symmetric_ldlt,
+            :ldlt_inertia,
             :factor_solve,
             :multi_rhs,
         )

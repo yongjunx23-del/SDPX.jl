@@ -72,14 +72,17 @@ struct SuiteEntry
 end
 
 include("generators/problems.jl")
+include("loaders/csdr_fixed_trace.jl")
 include("registry/public.jl")
 include("registry/synthetic.jl")
 include("registry/heavy.jl")
+include("registry/full_unitarity_eft.jl")
 
 const REGISTRY = let entries = vcat(
         PUBLIC_SPECS,
         SYNTHETIC_SPECS,
         HEAVY_SPECS,
+        FULL_UNITARITY_EFT_SPECS,
     )
     table = Dict{String,BenchmarkSpec}()
     for spec in entries
@@ -93,12 +96,14 @@ end
 include("suites/micro.jl")
 include("suites/representative.jl")
 include("suites/local_full.jl")
+include("suites/large.jl")
 include("suites/heavy.jl")
 
 const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :micro => MICRO_SUITE,
     :representative => REPRESENTATIVE_SUITE,
     :local_full => LOCAL_FULL_SUITE,
+    :large => LARGE_SUITE,
     :heavy => HEAVY_SUITE,
 )
 
@@ -110,7 +115,7 @@ benchmark_registry() = sort!(collect(values(REGISTRY)); by=spec -> spec.id)
 benchmark_spec(id::AbstractString) = get(REGISTRY, String(id)) do
     throw(KeyError("unknown benchmark id $(repr(id))"))
 end
-suite_names() = (:micro, :representative, :local_full, :heavy)
+suite_names() = (:micro, :representative, :local_full, :large, :heavy)
 
 function suite_entries(name::Symbol)
     haskey(SUITES, name) || throw(ArgumentError(
@@ -119,11 +124,19 @@ function suite_entries(name::Symbol)
     return copy(SUITES[name])
 end
 
-function build_problem(spec::BenchmarkSpec, ::Type{T}) where {T}
-    spec.source === :synthetic || throw(ArgumentError(
-        "$(spec.id) is external metadata; prepare its cache and add a supported loader before execution",
+function build_problem(
+    spec::BenchmarkSpec,
+    ::Type{T};
+    cache_dir=DEFAULT_CACHE,
+) where {T}
+    if spec.source === :synthetic
+        return build_generated_problem(spec.loader, T; spec.parameters...)
+    end
+    status = external_cache_status(spec; cache_dir)
+    status.loadable || throw(ArgumentError(
+        "$(spec.id) is not executable: $(status.reason)",
     ))
-    return build_generated_problem(spec.loader, T; spec.parameters...)
+    return build_external_problem(spec, T, status.path, status.checksum)
 end
 
 end # module

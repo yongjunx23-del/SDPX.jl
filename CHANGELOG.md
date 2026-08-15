@@ -31,6 +31,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Benchmark registry and scoreboard contracts are covered by the ordinary test
   suite; public benchmark files are never downloaded.
 
+### Removed
+
+- Removed the unreleased answer-only reduced-dual L-BFGS implementation and
+  its `CertifiedObjective`, `ReducedDualReconstructionToken`, `solve_value`,
+  and `reconstruct_fixed_trace_solution` API. NativeSOC primal-dual IPM is the
+  sole production SOCP solver.
+
 ## [0.4.0] — 2026-08-09
 
 ### Added

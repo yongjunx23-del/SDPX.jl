@@ -41,15 +41,10 @@ const _LP_DENSE_EQUALITY_REQUIRED = (
 
 const _DENSE_AUGMENTED_REQUIRED = (
     :pivoted_symmetric_ldlt,
+    :ldlt_inertia,
     :factor_solve,
     :multi_rhs,
 )
-
-# Reduced-dual NativeSOC only needs two dense matrix-vector products per
-# objective/gradient evaluation.  Keeping this as a distinct route prevents
-# the planner from requiring (or advertising) factorization capabilities that
-# the algorithm never uses.
-const _DENSE_GEMV_REQUIRED = (:mul_owned,)
 
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
     # SDPX's explicit equality QR route is column-pivoted and rank revealing;
@@ -88,13 +83,8 @@ function _la_route_requirements(
         fallback=nothing,
     )
     route === :dense_augmented_ldlt && return (
-        operations=(:pivoted_symmetric_ldlt, :solve),
+        operations=(:pivoted_symmetric_ldlt, :ldlt_inertia, :solve),
         capabilities=_DENSE_AUGMENTED_REQUIRED,
-        fallback=nothing,
-    )
-    route === :dense_gemv && return (
-        operations=(:mul_owned,),
-        capabilities=_DENSE_GEMV_REQUIRED,
         fallback=nothing,
     )
     return nothing
@@ -451,8 +441,14 @@ function plan_la_backend(
             )
             return validate_la_backend_configuration(config, T)
         end
-        # A loaded-but-incomplete MultiFloat provider falls through to the
-        # generic Standard path below; no hidden runtime fallback is installed.
+        # A provider that is present but cannot execute the planned route is a
+        # broken installation, not an authorization to hide it behind the
+        # Standard backend.  Absence remains an explicit compatibility case;
+        # loaded-but-incomplete providers fail during planning.
+        throw(ArgumentError(
+            "automatic MultiFloat LA provider unavailable: " *
+            "incomplete_provider_capabilities",
+        ))
     elseif requested === :standard || requested === :fixed_extended ||
            (requested === :auto &&
             (arithmetic in (:float32, :float64, :bigfloat) ||
@@ -1183,6 +1179,22 @@ end
 
 la_ldlt_inertia(factor::ProviderLALDLTFactor) =
     la_provider_ldlt_inertia(factor.provider)
+
+"""Classify provider inertia against one exact symmetric-KKT signature."""
+function _ldlt_inertia_class(inertia, positive::Int, negative::Int)
+    counts = try
+        length(inertia) == 3 || return :invalid
+        (Int(inertia[1]), Int(inertia[2]), Int(inertia[3]))
+    catch exception
+        _recoverable(exception) || rethrow()
+        return :invalid
+    end
+    all(count -> count >= 0, counts) || return :invalid
+    sum(counts) == positive + negative || return :invalid
+    counts == (positive, negative, 0) && return :accepted
+    counts[3] > 0 && return :rank_deficient
+    return :mismatch
+end
 
 la_ldlt_permutation(factor::ProviderLALDLTFactor) =
     la_provider_ldlt_permutation(factor.provider)

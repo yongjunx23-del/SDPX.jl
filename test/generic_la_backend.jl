@@ -5,6 +5,18 @@ using Test
 
 struct UnadaptedSemanticLABackend <: SDPX.AbstractLABackend end
 
+struct IncompleteMultiFloatProvider <: AbstractFloat end
+SDPX.is_multifloat_arithmetic(::Type{IncompleteMultiFloatProvider}) = true
+SDPX.la_provider_descriptor(
+    ::Type{IncompleteMultiFloatProvider},
+    ::Int=1,
+) = (
+    available=true,
+    provider=:multifloat_linear_algebra,
+    capabilities=(:mul_owned,),
+    capability_model=SDPX.LAProviderCapabilities(mul_owned=true),
+)
+
 @testset "generic LA provider capabilities" begin
     LA = SDPX.Experimental
 
@@ -79,6 +91,15 @@ struct UnadaptedSemanticLABackend <: SDPX.AbstractLABackend end
         :owned_mutable_scalars,
     )
     @test_throws ArgumentError LA.instantiate_la_backend(false_claim, BigFloat)
+
+    # A loaded provider with an incomplete route contract is broken.  Auto
+    # selection must fail during planning rather than silently masking it with
+    # the generic Standard backend.
+    @test_throws ArgumentError LA.plan_la_backend(
+        IncompleteMultiFloatProvider;
+        requested=:auto,
+        route=:dense_cholesky,
+    )
 
     for T in (Float64, BigFloat, Float64x4)
         backend = LA.instantiate_la_backend(LA.plan_la_backend(T), T)

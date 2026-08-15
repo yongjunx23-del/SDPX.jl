@@ -124,6 +124,7 @@ Base.@kwdef struct LAProviderCapabilities
     qr::Bool = false
     rank_revealing_qr::Bool = false
     pivoted_symmetric_ldlt::Bool = false
+    ldlt_inertia::Bool = false
     factor_solve::Bool = false
     multi_rhs::Bool = false
     iterative_refinement::Bool = false

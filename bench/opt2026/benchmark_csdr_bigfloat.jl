@@ -19,10 +19,9 @@ using SparseArrays
 using SDPX
 using TOML
 
-const CSDR_SOURCE = get(
-    ENV,
-    "CSDR_SOURCE",
-    "/public/home/yongjunxu/projects/massless-eft-scalar/releases/35e3dec8e9b2-packed12",
+const CSDR_SOURCE = get(ENV, "CSDR_SOURCE", "")
+isempty(CSDR_SOURCE) && error(
+    "set CSDR_SOURCE to the immutable CSDRBootstrap source checkout",
 )
 include(joinpath(CSDR_SOURCE, "src", "CSDRBootstrap.jl"))
 using .CSDRBootstrap

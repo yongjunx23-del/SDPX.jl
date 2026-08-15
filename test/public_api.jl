@@ -30,6 +30,18 @@ using Test
     end
 end
 
+@testset "removed reduced-dual API" begin
+    for name in (
+        :CertifiedObjective,
+        :ReducedDualReconstructionToken,
+        :solve_value,
+        :reconstruct_fixed_trace_solution,
+    )
+        @test !isdefined(SDPX, name)
+        @test !isdefined(SDPX.Experimental, name)
+    end
+end
+
 @testset "Experimental LA wrapper surface" begin
     @test !isdefined(SDPX.Experimental, :la_factor!)
     @test !isdefined(SDPX.Experimental, :la_solve!)

@@ -1,43 +1,5 @@
 # CSDR FixedTrace NativeSOCP benchmark
 
-## Reduced-dual L-BFGS path
-
-`run_reduced_dual.jl` benchmarks the explicit analytic FixedTraceQ3 reduced
-dual. It records a warm objective/gradient microbenchmark (at least two
-warmups and ten measured repetitions), then runs the requested 1/5/20/full
-L-BFGS gate. The runner never requests an IPM polish, PSD lift, Hessian, Gram
-matrix, HVP, or CG solve.
-
-```sh
-SDPX_BENCH_ARITHMETIC=float64 \
-SDPX_BENCH_MAX_ITERATIONS=20 \
-SDPX_BENCH_REQUIRE_OPTIMAL=false \
-julia -t 1 --project=<provider-env> run_reduced_dual.jl \
-  /tmp/csdr-fixedtrace-reduced-neutral.bin /tmp/eft-rd-f64-i20
-```
-
-Supported selectors are `float64`, `float64x2`, `float64x3`, and
-`float64x4`. Float64 uses the planned Standard/BLAS GEMV route; MultiFloat
-requests MFLA explicitly and fails during planning if it is unavailable. The
-reported interval is numerical at the requested arithmetic and tolerance
-(`rigorous_interval=false`), not an outward-rounded real bound.
-
-### Current reduced-dual evidence
-
-On the final one-thread worktree, warm objective/gradient medians were about
-`0.000198 s` (Float64), `0.00263 s` (Float64x2), and `0.02084 s`
-(Float64x4), with zero measured steady-state allocation. The 200-step runs
-took `0.109 s`, `0.736 s`, and `5.654 s`, respectively, and all preserved the
-planned provider, `fixed_trace_q3`, no-PSD, and no-fallback invariants.
-
-Those fast runs did **not** pass the numerical gate: all ended at `IterLimit`
-with an invalid original-coordinate certificate. A diagnostic Float64 run
-with 10,000 accepted steps took `2.604 s` but also failed certification
-(`relative_gap=0.525`). The low-`tau` support Hessian becomes increasingly
-ill-conditioned near nonsmooth active blocks, so cheap evaluations do not
-translate into high-accuracy L-BFGS convergence on this model. The runner and
-API therefore remain experimental; they do not replace the certified IPM.
-
 This benchmark converts the archived CSDR model
 
 ```text

@@ -59,7 +59,12 @@ function compare_result_files(
             "blas_threads", "conic_formulation", "precision_bits",
             "reference_status", "reference_objective",
             "reference_absolute_tolerance", "reference_relative_tolerance",
-            "external_checksum",
+            "external_checksum", "project_sha256", "manifest_sha256",
+            "benchmark_driver_sha256", "mfla_commit", "bfla_commit",
+            "executed_specialization", "psd_lift_used", "benchmark_scale",
+            "input_generation_precision_bits", "original_equalities",
+            "source_parameters",
+            "objective_interval_lower", "objective_interval_upper",
         )
             get(before, field, "") == get(after, field, "") || throw(ArgumentError(
                 "$field differs for $(key[1]); timing/semantic comparison is not paired",
@@ -92,6 +97,10 @@ function compare_result_files(
                                    get(after, "executed_backend", ""),
             provider_match=get(before, "executed_provider", "") ==
                            get(after, "executed_provider", ""),
+            specialization_match=get(before, "executed_specialization", "") ==
+                                 get(after, "executed_specialization", ""),
+            psd_lift_match=get(before, "psd_lift_used", "") ==
+                           get(after, "psd_lift_used", ""),
             fallback_match=get(before, "fallback_reason", "") ==
                            get(after, "fallback_reason", "") &&
                            get(before, "la_fallback_reason", "") ==

@@ -1,6 +1,39 @@
 using LinearAlgebra
 using SparseArrays
 
+mutable struct ScriptedNativeSOCLDLTBackend <: SDPX.AbstractLABackend
+    inertias::Vector{Any}
+    calls::Int
+end
+
+struct ScriptedNativeSOCLDLTPayload
+    inertia::Any
+end
+
+function SDPX.la_ldlt_factor!(
+    backend::ScriptedNativeSOCLDLTBackend,
+    A::AbstractMatrix{T},
+) where {T}
+    backend.calls += 1
+    index = min(backend.calls, length(backend.inertias))
+    payload = ScriptedNativeSOCLDLTPayload(backend.inertias[index])
+    factors = copy(A)
+    return SDPX.ProviderLALDLTFactor{T,typeof(payload),typeof(factors)}(
+        payload, factors,
+    )
+end
+
+SDPX.la_provider_ldlt_inertia(payload::ScriptedNativeSOCLDLTPayload) =
+    payload.inertia
+
+function _native_soc_workspace_with_backend(workspace, backend)
+    values = ntuple(
+        index -> index == 2 ? backend : getfield(workspace, index),
+        fieldcount(typeof(workspace)),
+    )
+    return SDPX.NativeSOCWorkspace{Float64,SDPX.AbstractLABackend}(values...)
+end
+
 if !isdefined(@__MODULE__, :soc_psd_reference_problem)
     include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
 end
@@ -42,6 +75,63 @@ end
         @test_throws ArgumentError SDPX._native_soc_cone_plan(
             problem; specialization=:fixed_trace,
         )
+    end
+
+    @testset "augmented LDLT requires exact NativeSOC inertia" begin
+        cone = SOCConstraint(
+            sparse([2, 3], [1, 2], [1.0, 1.0], 3, 2),
+            [1.0, 0.0, 0.0],
+        )
+        problem = second_order_program(
+            [-1.0, 0.0], [cone];
+            Aeq=reshape([0.0, 1.0], 1, 2),
+            beq=[0.5],
+        )
+        options = _native_soc_options(Float64)
+        normal_plan = SDPX.plan_native_soc(
+            problem, options; specialization=:fixed_trace,
+        )
+        augmented_plan = SDPX.NativeSOCPlan(
+            normal_plan.cone,
+            SDPX.FormulationPlan(
+                SDPX.DenseAugmentedKKT(), :test_fixture, :test_fixture,
+            ),
+            normal_plan.la_config,
+            1,
+        )
+
+        function scripted_workspace(inertias)
+            base = SDPX.NativeSOCWorkspace(problem, augmented_plan, options)
+            base.local_metric[:, 1] .= [2.0, 0.0, 3.0]
+            backend = ScriptedNativeSOCLDLTBackend(Any[inertias...], 0)
+            return _native_soc_workspace_with_backend(base, backend), backend
+        end
+
+        accepted, accepted_backend = scripted_workspace([(2, 1, 0)])
+        @test SDPX._native_soc_assemble_factor!(accepted, problem) !== nothing
+        @test accepted_backend.calls == 1
+
+        recovered, recovered_backend = scripted_workspace([
+            (1, 2, 0), (positive=2, negative=1, zero=0),
+        ])
+        @test SDPX._native_soc_assemble_factor!(recovered, problem) !== nothing
+        @test recovered_backend.calls == 2
+        @test recovered.regularizations == 1
+
+        wrong, wrong_backend = scripted_workspace([(1, 2, 0)])
+        @test SDPX._native_soc_assemble_factor!(wrong, problem) === nothing
+        @test wrong_backend.calls == 7
+        @test wrong.la_fallback_reason === :la_equality_inertia_mismatch
+
+        deficient, deficient_backend = scripted_workspace([(2, 0, 1)])
+        @test SDPX._native_soc_assemble_factor!(deficient, problem) === nothing
+        @test deficient_backend.calls == 7
+        @test deficient.la_fallback_reason === :la_equality_rank_deficient
+
+        malformed, malformed_backend = scripted_workspace([(2, 1)])
+        @test SDPX._native_soc_assemble_factor!(malformed, problem) === nothing
+        @test malformed_backend.calls == 7
+        @test malformed.la_fallback_reason === :la_provider_inertia_invalid
     end
 
     @testset "single general Q3 and PSD2 reference" begin

@@ -38,6 +38,7 @@ const _ADAPTED_CAPABILITIES = SDPX.LAProviderCapabilities(
     qr=false,
     rank_revealing_qr=true,
     pivoted_symmetric_ldlt=true,
+    ldlt_inertia=true,
     factor_solve=true,
     multi_rhs=true,
     # BFLA supports a one-step primitive for every factor kind, but SDPX has
@@ -67,6 +68,7 @@ function _capability_model(provider::_Provider)
             adapted.rank_revealing_qr && upstream.rank_revealing_qr,
         pivoted_symmetric_ldlt=
             adapted.pivoted_symmetric_ldlt && upstream.ldlt,
+        ldlt_inertia=adapted.ldlt_inertia && upstream.ldlt,
         factor_solve=adapted.factor_solve && upstream.factor_solve,
         multi_rhs=adapted.multi_rhs && upstream.multi_rhs,
         iterative_refinement=

@@ -140,6 +140,7 @@ if _MFLA_LOADED
                 :cholesky,
                 :lu,
                 :pivoted_symmetric_ldlt,
+                :ldlt_inertia,
                 :factor_solve,
                 :multi_rhs,
                 :threading,
@@ -214,6 +215,7 @@ if _MFLA_LOADED
             @test augmented.fallback_chain == ()
             @test augmented.required_capabilities == (
                 :pivoted_symmetric_ldlt,
+                :ldlt_inertia,
                 :factor_solve,
                 :multi_rhs,
             )
