@@ -462,13 +462,14 @@ mutable struct Workspace{T}
     Qbuf::Matrix{T}            # scratch copy of Q fed to cholesky!/cholesky(...)
     # Set by factor_kkt!. The concrete union, not Any: _solve_Q! is called
     # twice per iteration (predictor and corrector), and an Any field makes
-    # every one of those calls a dynamic dispatch. The BigFloat member wraps
-    # the kernel-owned factor; the two LinearAlgebra members cover the plain
-    # and rank-revealing dense paths.
+    # every one of those calls a dynamic dispatch. The two LinearAlgebra
+    # members cover the plain and rank-revealing dense paths. Provider factors
+    # use one abstract wrapper family instead of arithmetic-specific markers.
     Qchol::Union{Nothing,LinearAlgebra.Cholesky{T,Matrix{T}},
                  LinearAlgebra.CholeskyPivoted{T,Matrix{T},Vector{Int}},
-                 BigFloatCholeskyFactor{Matrix{BigFloat}},
-                 EqualityQRFactor{T}}
+                 EqualityQRFactor{T},
+                 AbstractLACholeskyFactor{T}}
+    augmented::Union{Nothing,DenseAugmentedKKTWorkspace{T}}
     arrow::Union{Nothing,ArrowWorkspace{T}}
     sparse_kkt::Any
     v::Vector{T}
@@ -498,226 +499,43 @@ mutable struct Workspace{T}
     mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
     equality_gram_kernel::Symbol
     thread_count::Int
-end
-
-"""
-    SparseSchurSDPWorkspace
-
-Storage for a large Float64 SDP whose Schur complement is structurally sparse
-but has equality constraints. The lower triangle of `S` is held directly in
-one CSC matrix. `memberships[i]` identifies every PSD block containing
-variable `i` and its position in that block's sorted active set. That compact
-incidence map lets Schur assembly merge block contributions into the fixed CSC
-pattern without a dense matrix or a pair-to-nonzero lookup table.
-
-The `backend` field is intentionally `Any`: `SparseCholeskyBackend` is included
-after `Workspace` because the general KKT backend API itself refers to
-`Workspace`. It is assigned exactly once and used only at the coarse
-factor/solve boundary, so this does not put dynamic dispatch in a scalar hot
-loop.
-"""
-mutable struct SparseSchurSDPWorkspace
-    # This SPD factor has order `m`, not `m+n` as the rejected augmented LDL
-    # route did. The selector proves that even a fully dense lower factor fits
-    # in Int32 before choosing the smaller/faster CHOLMOD index width.
-    matrix::SparseMatrixCSC{Float64,Int32}
-    memberships::Vector{Vector{Tuple{Int32,Int32}}}
-    schur_counts::Vector{Int32}
-    primal_diagonal_positions::Vector{Int32}
-    primal_diagonal_values::Vector{Float64}
-    constraint_rhs::Matrix{Float64}
-    equality_scaling::Vector{Float64}
+    backend_config::BackendConfiguration
+    # KKTBackend is included after Workspace because its methods accept a
+    # Workspace.  The value stored here is nevertheless one concrete backend
+    # instance selected once from `backend_config`; `Any` only breaks that
+    # include-order cycle and is never re-used for structural selection.
     backend::Any
-    equality_requires_pivoting::Bool
-    regularization::Float64
-    factorization_quality::Float64
+    executed_backend::Symbol
+    # Last non-`:none` fallback observed during this solve.  It is deliberately
+    # cumulative so a later successful retry cannot erase fallback provenance.
+    backend_fallback_reason::Symbol
+    # Arithmetic backend is resolved once from ExecutionPlan and never inferred
+    # again by numerical kernels.  The final two fields are solve provenance.
+    la_backend::AbstractLABackend
+    executed_la_backend::Symbol
+    executed_la_provider::Symbol
+    executed_la_ownership::Symbol
+    la_fallback_reason::Symbol
+    la_fallback_chain::Tuple{Vararg{Symbol}}
 end
-
-const SPARSE_SCHUR_SDP_MINIMUM_VARIABLES = 10_000
-const SPARSE_SCHUR_SDP_MAXIMUM_DENSITY = 0.10
 
 function _use_sparse_schur_sdp(prob::SDPProblem{T}) where {T}
-    T === Float64 || return false
     sizeof(Int) >= 8 || return false
-    prob.cons isa SparseCons{Float64} || return false
-    prob.B isa SparseMatrixCSC{Float64,Int} || return false
-    prob.dims.n > 0 || return false
-    prob.dims.m >= SPARSE_SCHUR_SDP_MINIMUM_VARIABLES || return false
-    prob.structure.schur_density <= SPARSE_SCHUR_SDP_MAXIMUM_DENSITY ||
-        return false
-    dense_factor_nonzeros =
-        Int128(prob.dims.m) * Int128(prob.dims.m + 1) ÷ 2
-    return dense_factor_nonzeros < typemax(Int32)
-end
-
-function _sparse_sdp_memberships(cons::SparseCons{Float64}, m::Int)
-    memberships = [Tuple{Int32,Int32}[] for _ in 1:m]
-    @inbounds for block in eachindex(cons.schur_order)
-        ids = cons.schur_order[block]
-        for position in eachindex(ids)
-            push!(
-                memberships[ids[position]],
-                (Int32(block), Int32(position)),
-            )
-        end
-    end
-    return memberships
-end
-
-function _sparse_sdp_pattern_counts!(
-    counts::Vector{Int32},
-    memberships::Vector{Vector{Tuple{Int32,Int32}}},
-    cons::SparseCons{Float64},
-    thread_count::Int,
-)
-    m = length(counts)
-    workers = min(max(thread_count, 1), max(m, 1))
-    @sync for worker in 1:workers
-        Threads.@spawn begin
-            marker = zeros(Int32, m)
-            first_column = fld((worker - 1) * m, workers) + 1
-            last_column = fld(worker * m, workers)
-            @inbounds for column in first_column:last_column
-                tag = Int32(column)
-                marker[column] = tag
-                count = 1
-                for (block32, position32) in memberships[column]
-                    ids = cons.schur_order[Int(block32)]
-                    for position in Int(position32):length(ids)
-                        row = ids[position]
-                        if marker[row] != tag
-                            marker[row] = tag
-                            count += 1
-                        end
-                    end
-                end
-                count <= typemax(Int32) ||
-                    throw(OverflowError("sparse Schur column exceeds Int32"))
-                counts[column] = Int32(count)
-            end
-        end
-    end
-    return counts
-end
-
-function _sparse_sdp_fill_pattern!(
-    rowval::Vector{Int32},
-    colptr::Vector{Int32},
-    schur_counts::Vector{Int32},
-    memberships::Vector{Vector{Tuple{Int32,Int32}}},
-    cons::SparseCons{Float64},
-    thread_count::Int,
-)
-    m = length(schur_counts)
-    workers = min(max(thread_count, 1), max(m, 1))
-    @sync for worker in 1:workers
-        Threads.@spawn begin
-            marker = zeros(Int32, m)
-            rows = Int32[]
-            first_column = fld((worker - 1) * m, workers) + 1
-            last_column = fld(worker * m, workers)
-            @inbounds for column in first_column:last_column
-                empty!(rows)
-                tag = Int32(column)
-                marker[column] = tag
-                push!(rows, Int32(column))
-                for (block32, position32) in memberships[column]
-                    ids = cons.schur_order[Int(block32)]
-                    for position in Int(position32):length(ids)
-                        row = ids[position]
-                        if marker[row] != tag
-                            marker[row] = tag
-                            push!(rows, Int32(row))
-                        end
-                    end
-                end
-                sort!(rows)
-                length(rows) == Int(schur_counts[column]) ||
-                    error("internal sparse Schur pattern count mismatch")
-                copyto!(
-                    rowval,
-                    Int(colptr[column]),
-                    rows,
-                    1,
-                    length(rows),
-                )
-            end
-        end
-    end
-    return rowval
-end
-
-function _sparse_schur_sdp_workspace(
-    prob::SDPProblem{Float64},
-    thread_count::Int,
-)
-    cons = prob.cons::SparseCons{Float64}
-    B = prob.B::SparseMatrixCSC{Float64,Int}
-    m, n = prob.dims.m, prob.dims.n
-    memberships = _sparse_sdp_memberships(cons, m)
-    schur_counts = zeros(Int32, m)
-    _sparse_sdp_pattern_counts!(
-        schur_counts,
-        memberships,
-        cons,
-        thread_count,
-    )
-
-    colptr = Vector{Int32}(undef, m + 1)
-    colptr[1] = Int32(1)
-    @inbounds for column in 1:m
-        column_nonzeros = Int(schur_counts[column])
-        next_pointer = Int64(colptr[column]) + column_nonzeros
-        next_pointer <= typemax(Int32) ||
-            throw(OverflowError("sparse Schur CSC exceeds Int32 capacity"))
-        colptr[column + 1] = Int32(next_pointer)
-    end
-
-    nonzeros_count = Int(colptr[end]) - 1
-    rowval = Vector{Int32}(undef, nonzeros_count)
-    nzval = zeros(Float64, nonzeros_count)
-    _sparse_sdp_fill_pattern!(
-        rowval,
-        colptr,
-        schur_counts,
-        memberships,
-        cons,
-        thread_count,
-    )
-
-    primal_diagonal_positions = Vector{Int32}(undef, m)
-    @inbounds for column in 1:m
-        first = Int(colptr[column])
-        primal_diagonal_positions[column] = Int32(first)
-        rowval[first] == column ||
-            error("internal sparse Schur pattern is missing its diagonal")
-    end
-
-    matrix = SparseMatrixCSC{Float64,Int32}(
-        m,
-        m,
-        colptr,
-        rowval,
-        nzval,
-    )
-    return SparseSchurSDPWorkspace(
-        matrix,
-        memberships,
-        schur_counts,
-        primal_diagonal_positions,
-        zeros(Float64, m),
-        Matrix(B),
-        ones(Float64, n),
-        nothing,
-        false,
-        # The unshifted B3 Schur factorization was measured and rejected: it
-        # fails, adds about 9.8 seconds before the same shifted factorization,
-        # and does not change the direction. Start with the smallest
-        # successful standard relative shift and retain it on later
-        # iterations.
-        sqrt(eps(Float64)),
-        1.0,
-    )
+    supports_sparse_execution(T) || return false
+    # The frozen SPD sparse path has no pivoted sparse saddle-point solver.
+    # Equality-bearing requests therefore remain dense (or an exact arrow
+    # reduction selected before this predicate) and never allocate a sparse
+    # workspace that would need an implicit fallback.
+    prob.dims.n == 0 || return false
+    prob.cons isa SparseCons{T} || return false
+    # The Schur planner is authoritative.  It has already compared the
+    # structural nnz estimate with the deterministic density/memory rule, so
+    # no numeric try-sparse/fallback decision is made here.  Explicit sparse
+    # requests are represented by the same plan and therefore remain
+    # inspectable before workspace construction.
+    plan = prob.structure.schur_plan
+    plan.storage === :sparse || return false
+    return true
 end
 
 """
@@ -837,6 +655,80 @@ function _sparse_lower_column_boundaries(
     return boundaries
 end
 
+@inline function _planned_or_computed_decision(
+    parameters::NamedTuple,
+    key::Symbol,
+    compute::F,
+) where {F}
+    hasproperty(parameters, key) && return getproperty(parameters, key)
+    return compute()
+end
+
+@inline _planned_or_computed_mixed_reduced_decision(
+    parameters::NamedTuple,
+    compute::F,
+) where {F} = _planned_or_computed_decision(
+    parameters,
+    :mixed_reduced_arrow_decision,
+    compute,
+)
+
+function _lazy_memory_supplier(supply::F) where {F}
+    cache = Ref{Union{Nothing,Int}}(nothing)
+    return () -> begin
+        value = cache[]
+        value === nothing || return value
+        resolved = supply()
+        cache[] = resolved
+        return resolved
+    end
+end
+
+@inline _arrow_crossover_needs_memory(parameters::NamedTuple) =
+    !hasproperty(parameters, :reduced_arrow_decision) ||
+    !hasproperty(parameters, :mixed_reduced_arrow_decision)
+
+"""Normalize a pre-LA positional plan without weakening modern-plan checks.
+
+The v0.4.1-dev positional constructors encode the classification arithmetic
+symbol in their compatibility LA descriptor.  Fixed-width arithmetic has a
+distinct LA symbol (for example `Float64x4` versus `:fixed_extended`), so a
+supplied historical plan must be rewritten deterministically before the
+modern exact arithmetic guard runs.  Only the explicitly marked compatibility
+legacy descriptor is eligible; all modern plans are returned unchanged.
+"""
+function _normalize_compatibility_execution_plan(
+    plan::ExecutionPlan,
+    ::Type{T},
+) where {T}
+    family_matches = plan.classification.arithmetic in
+                     (_arithmetic_class(T), :generic)
+    if plan.la_config.selected === :legacy &&
+       plan.la_config.fallback_reason === :compatibility &&
+       family_matches
+        compatibility_la = _compat_la_backend_configuration(
+            _la_arithmetic_symbol(T),
+            plan.backend_config.equality_solver,
+        )
+        return ExecutionPlan(
+            plan.classification,
+            plan.algorithm,
+            plan.scaling,
+            plan.kkt_backend,
+            plan.backend_config,
+            plan.formulation_plan,
+            compatibility_la,
+            plan.gram_kernel,
+            plan.schedule,
+            plan.threads,
+            plan.parameter_profile,
+            plan.memory_budget_bytes,
+            plan.parameters,
+        )
+    end
+    return plan
+end
+
 function Workspace(
     prob::SDPProblem{T};
     extended_precision_blas::Symbol=:off,
@@ -845,40 +737,133 @@ function Workspace(
     mixed_precision_memory_fraction::Float64=0.10,
     equality_solver::Symbol=:auto,
     thread_count::Int=Threads.nthreads(),
+    execution_plan::Union{Nothing,ExecutionPlan}=nothing,
 ) where {T}
     L, m, n, k = prob.dims
-    requested_threads =
-        min(max(thread_count, 1), Threads.nthreads())
-    selected_threads = requested_threads
-    is_sparse = prob.cons isa SparseCons
-    available_memory = ExtendedPrecisionBLAS._system_free_memory_bytes()
-    reduced_arrow_decision =
-        _reduced_arrow_crossover(
-            prob,
-            T,
-            extended_precision_blas,
-            extended_precision_memory_fraction,
-            thread_count;
-            available_memory_bytes=available_memory,
+    plan_supplied = execution_plan !== nothing
+    plan = if !plan_supplied
+        workspace_options = SolverOptions{T}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            extended_precision_blas=extended_precision_blas,
+            extended_precision_memory_fraction=
+                extended_precision_memory_fraction,
+            mixed_precision_kkt=mixed_precision_kkt,
+            mixed_precision_memory_fraction=
+                mixed_precision_memory_fraction,
+            equality_solver=equality_solver,
+            threads=thread_count,
         )
-    reduced_arrow_panel = reduced_arrow_decision.enabled
-    if reduced_arrow_panel
-        frequency = zeros(Int, m)
-        for variables in (prob.cons::SparseCons{T}).active
-            for variable in variables
-                frequency[variable] += 1
-            end
-        end
-        selected_threads = min(
-            selected_threads,
-            reduced_arrow_solver_worker_count(
-                T,
-                selected_threads,
-                L,
-                count(>(1), frequency),
-            ),
+        build_execution_plan(AutoPlanner(), prob, workspace_options)
+    else
+        execution_plan
+    end
+    if !plan_supplied
+        # Historical direct Workspace construction remains on the legacy
+        # arithmetic seam; only an explicit ExecutionPlan opts into Standard.
+        compatibility_la = _compat_la_backend_configuration(
+            _la_arithmetic_symbol(T),
+            equality_solver,
+        )
+        plan = ExecutionPlan(
+            plan.classification,
+            plan.algorithm,
+            plan.scaling,
+            plan.kkt_backend,
+            plan.backend_config,
+            plan.formulation_plan,
+            compatibility_la,
+            plan.gram_kernel,
+            plan.schedule,
+            plan.threads,
+            plan.parameter_profile,
+            plan.memory_budget_bytes,
+            plan.parameters,
         )
     end
+    plan_supplied && (plan = _normalize_compatibility_execution_plan(plan, T))
+    plan.algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) ||
+        throw(ArgumentError(
+            "Workspace requires an SDP/PSD-lift execution plan, got $(plan.algorithm)",
+        ))
+    config = plan.backend_config
+    config.route == plan.kkt_backend ||
+        throw(ArgumentError(
+            "execution plan backend configuration $(config.route) does not match " *
+            "kkt_backend $(plan.kkt_backend)",
+        ))
+    formulation_plan = plan.formulation_plan
+    formulation = formulation_symbol(formulation_plan)
+    formulation in KKT_FORMULATION_ROUTES || throw(ArgumentError(
+        "execution plan KKT formulation $(formulation) cannot construct an " *
+        "SDP Workspace",
+    ))
+    kkt_backend_matches_formulation(
+        plan.kkt_backend,
+        formulation_plan,
+        plan.algorithm,
+        plan.classification.equalities,
+    ) ||
+        throw(ArgumentError(
+            "execution plan KKT formulation $(formulation) does not match " *
+            "kkt_backend $(plan.kkt_backend)",
+        ))
+    config.deferred && throw(ArgumentError(
+        "deferred LP backend configurations cannot construct an SDP Workspace",
+    ))
+    expected_la = _la_arithmetic_symbol(T)
+    plan.la_config.arithmetic == expected_la || throw(ArgumentError(
+        "execution plan LA arithmetic $(plan.la_config.arithmetic) does not match $(expected_la)",
+    ))
+    plan.classification.arithmetic in (_arithmetic_class(T), :generic) ||
+        throw(ArgumentError(
+            "execution plan arithmetic family $(plan.classification.arithmetic) does not match $(T)",
+        ))
+    # Once a plan is supplied, its resolved options are the sole source of
+    # route-affecting configuration.  The keywords remain for the legacy
+    # `Workspace(prob; ...)` API, where they are used to build this plan.
+    planned_extended_precision_blas = get(
+        plan.parameters,
+        :extended_precision_blas,
+        extended_precision_blas,
+    )
+    planned_extended_precision_memory_fraction = get(
+        plan.parameters,
+        :extended_precision_memory_fraction,
+        extended_precision_memory_fraction,
+    )
+    planned_mixed_precision_kkt = config.mixed_precision_mode
+    planned_mixed_precision_memory_fraction = get(
+        plan.parameters,
+        :mixed_precision_memory_fraction,
+        mixed_precision_memory_fraction,
+    )
+    requested_threads = plan.threads
+    selected_threads = plan.threads
+    is_sparse = prob.cons isa SparseCons
+    available_memory = _lazy_memory_supplier(
+        ExtendedPrecisionBLAS._system_free_memory_bytes,
+    )
+    _arrow_crossover_needs_memory(plan.parameters) && available_memory()
+    reduced_arrow_decision = _planned_or_computed_decision(
+        plan.parameters,
+        :reduced_arrow_decision,
+        () -> _reduced_arrow_crossover(
+            prob,
+            T,
+            planned_extended_precision_blas,
+            planned_extended_precision_memory_fraction,
+            requested_threads;
+            available_memory_bytes=available_memory(),
+        ),
+    )
+    reduced_arrow_panel = config.reduced_arrow
+    reduced_arrow_panel && !reduced_arrow_decision.enabled &&
+        throw(ArgumentError(
+            "execution plan selected reduced-arrow storage but the workspace " *
+            "crossover no longer supports it",
+        ))
 
     reduced_block_nbins = max(
         1,
@@ -897,16 +882,30 @@ function Workspace(
     # selected its effective whole-solver width. Direct reduced panels never
     # consume the full Schur partial matrices; keep only the small RHS
     # partials and allocate Schur partials lazily if the kernel falls back.
-    arrow = ArrowWorkspace(
+    compact_arrow = formulation === :block_arrow
+    arrow = compact_arrow ? ArrowWorkspace(
         prob,
         reduced_arrow_panel ? reduced_block_nbins : selected_threads;
         allocate_schur_partials=!reduced_arrow_panel,
-    )
-    compact_arrow = arrow !== nothing
-    sparse_schur =
-        !compact_arrow &&
-        equality_solver !== :qr &&
-        _use_sparse_schur_sdp(prob)
+    ) : nothing
+    compact_arrow && arrow === nothing &&
+        throw(ArgumentError(
+            "execution plan selected block-arrow, but the reduced problem is incompatible",
+        ))
+    sparse_schur = formulation === :sparse_normal_equations
+    sparse_schur && !_use_sparse_schur_sdp(prob) &&
+        throw(ArgumentError(
+            "execution plan selected sparse Schur, but the reduced problem is incompatible",
+        ))
+    config.route in (
+        :block_arrow,
+        :sparse_schur_cholesky,
+        :dense_cholesky,
+        :dense_cholesky_fallback,
+        :dense_augmented_ldlt,
+    ) || throw(ArgumentError(
+        "unsupported SDP workspace backend route $(config.route)",
+    ))
     fused_arrow =
         compact_arrow &&
         L > 0 &&
@@ -922,10 +921,15 @@ function Workspace(
         isempty(arrow_workspace.global_ids)
     if T === BigFloat &&
        !reduced_arrow_panel &&
+       !config.mixed_reduced_arrow &&
        !owned_bigfloat_arrow_equalities
-        # Native BigFloat remains serial except for explicitly
-        # ownership-safe reduced panels and block-diagonal equality systems.
-        selected_threads = 1
+        # Native BigFloat remains serial except for explicitly ownership-safe
+        # reduced panels, mixed Float64x4 reduced panels, and block-diagonal
+        # equality systems.
+        selected_threads == 1 || throw(ArgumentError(
+            "execution plan selected $(selected_threads) threads for a " *
+            "serial native BigFloat workspace",
+        ))
     end
     if reduced_arrow_panel
         arrow_workspace.reduced_panel =
@@ -941,35 +945,46 @@ function Workspace(
         end
     end
     mixed_type =
-        T === BigFloat && mixed_precision_kkt !== :off ?
+        T === BigFloat && planned_mixed_precision_kkt !== :off ?
         mixed_arrow_arithmetic(T) : nothing
-    mixed_reduced_decision = if mixed_type === nothing
-        ExtendedPrecisionBLAS.CrossoverDecision(
-            false,
-            :unsupported_arithmetic,
-            1.0,
-            0,
-            0.0,
-            0.0,
-            ExtendedPrecisionBLAS.KernelConfig(),
+    mixed_reduced_decision =
+        _planned_or_computed_mixed_reduced_decision(
+            plan.parameters,
+            () -> if mixed_type === nothing
+                ExtendedPrecisionBLAS.CrossoverDecision(
+                    false,
+                    :unsupported_arithmetic,
+                    1.0,
+                    0,
+                    0.0,
+                    0.0,
+                    ExtendedPrecisionBLAS.KernelConfig(),
+                )
+            else
+                _reduced_arrow_crossover(
+                    prob,
+                    mixed_type,
+                    planned_mixed_precision_kkt,
+                    planned_mixed_precision_memory_fraction,
+                    selected_threads;
+                    mixed=true,
+                    available_memory_bytes=available_memory(),
+                )
+            end,
         )
-    else
-        _reduced_arrow_crossover(
-            prob,
-            mixed_type,
-            mixed_precision_kkt,
-            mixed_precision_memory_fraction,
-            thread_count;
-            mixed=true,
-            available_memory_bytes=available_memory,
-        )
-    end
-    mixed_reduced_arrow = mixed_reduced_decision.enabled
+    mixed_reduced_arrow = config.mixed_reduced_arrow
+    mixed_reduced_arrow && !mixed_reduced_decision.enabled &&
+        throw(ArgumentError(
+            "execution plan selected mixed reduced-arrow storage but the " *
+            "workspace crossover no longer supports it",
+        ))
     compact_arrow &&
-        (arrow_workspace.mixed_reduced_mode = mixed_precision_kkt)
+        (arrow_workspace.mixed_reduced_mode = planned_mixed_precision_kkt)
     if mixed_reduced_arrow
+        # The plan has already applied whole-solver worker caps, so the
+        # Float64x4 panel must not be widened back to the caller's request.
         mixed_threads = min(
-            max(thread_count, 1),
+            max(selected_threads, 1),
             Threads.nthreads(),
         )
         arrow_workspace.mixed_reduced_coefficients = [
@@ -999,18 +1014,27 @@ function Workspace(
     end
     extended_precision = _extended_precision_workspace(
         prob,
-        extended_precision_blas,
-        extended_precision_memory_fraction,
+        planned_extended_precision_blas,
+        planned_extended_precision_memory_fraction,
         selected_threads,
         fused_arrow,
     )
     # Block-arrow systems have their own reduced mixed-precision path. Avoid
     # allocating the generic dense Float64 KKT copy, which factor_kkt! can
     # never use when `arrow !== nothing`.
-    mixed_precision = _mixed_precision_workspace(
+    generic_mixed_decision = get(
+        plan.parameters,
+        :generic_mixed_precision_decision,
+        nothing,
+    )
+    generic_mixed_mode = compact_arrow || sparse_schur ?
+                         :off : config.mixed_precision_mode
+    mixed_precision = generic_mixed_mode === :off ? nothing :
+                      _mixed_precision_workspace(
         prob,
-        (compact_arrow || sparse_schur) ? :off : mixed_precision_kkt,
-        mixed_precision_memory_fraction,
+        generic_mixed_mode,
+        planned_mixed_precision_memory_fraction;
+        decision=generic_mixed_decision,
     )
     block_nbins = max(
         1,
@@ -1113,17 +1137,13 @@ function Workspace(
             min(selected_threads, max(m, 1)),
         ) :
         Int[]
-    sparse_kkt_workspace =
-        sparse_schur ?
-        _sparse_schur_sdp_workspace(
-            prob::SDPProblem{Float64},
-            selected_threads,
-        ) :
-        nothing
+    sparse_kkt_workspace = sparse_schur ?
+        _sparse_schur_sdp_workspace(prob, selected_threads) : nothing
     vector_partial_count =
         sparse_schur ?
         min(selected_threads, max(m, 1)) :
         T === BigFloat ? 1 : block_nbins
+    la_backend = instantiate_la_backend(plan.la_config, T, selected_threads)
     workspace = Workspace{T}(blk,
         (compact_arrow || sparse_schur) ?
         alloc_zeros(T, 0, 0) :
@@ -1139,6 +1159,8 @@ function Workspace(
         alloc_zeros(T, n, n),
         alloc_zeros(T, n, n),
         nothing,
+        formulation_plan.formulation isa DenseAugmentedKKT ?
+        DenseAugmentedKKTWorkspace(T, m, n) : nothing,
         arrow,
         sparse_kkt_workspace,
         alloc_zeros(T, m), alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m),
@@ -1149,7 +1171,16 @@ function Workspace(
         block_bins, schur_bins, schur_column_boundaries,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
-        :not_run, selected_threads)
+        :not_run, selected_threads, config, nothing, :not_executed, :none,
+        la_backend, :not_executed, :not_executed, :not_executed, :none,
+        plan.la_config.fallback_chain)
+    workspace.backend = _backend_from_configuration(
+        workspace,
+        formulation_plan,
+    )
+    generic_mixed_mode !== :off &&
+        workspace.mixed_precision === nothing &&
+        error("execution plan selected mixed precision without a workspace")
     if T === BigFloat && extended_precision.lower_only
         ExtendedPrecisionBLAS.prepare_triangle_storage!(workspace.S)
         for partial in workspace.Spartial

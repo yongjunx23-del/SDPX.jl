@@ -581,10 +581,10 @@ Documentation:
 
 - `README.md`
 - `CHANGELOG.md`
-- `docs/automatic-optimization-pipeline.md`
+- `docs/src/pipeline.md`
 - `docs/cluster-workflow.md`
-- `docs/parameters.md`
-- `docs/precision.md`
+- `docs/src/parameters.md`
+- `docs/src/precision.md`
 - `docs/threading.md`
 - `bench/extended_precision_blas/REPORT.md`
 - this report

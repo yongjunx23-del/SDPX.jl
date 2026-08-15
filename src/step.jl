@@ -248,6 +248,13 @@ function _block_factorization_margins(ws::Workspace{T}) where {T}
 end
 
 function _kkt_factorization_quality(ws::Workspace{T}) where {T}
+    if ws.augmented !== nothing
+        factor = (ws.augmented::DenseAugmentedKKTWorkspace{T}).factor
+        factor === nothing && return zero(T)
+        # Pivot diagnostics are recorded as facts.  No unproven scalar quality
+        # proxy is allowed to alter the adaptive policy in Round 3.
+        return one(T)
+    end
     if ws.arrow !== nothing
         arrow = ws.arrow::ArrowWorkspace{T}
         if size(ws.Btil, 2) > 0 &&
@@ -273,8 +280,6 @@ function _kkt_factorization_quality(ws::Workspace{T}) where {T}
                         1:factor.rank,
                     ),
                 )
-            elseif ws.Qchol isa BigFloatCholeskyFactor
-                _cholesky_diagonal_quality(ws.Qchol.L)
             elseif ws.Qchol === nothing
                 zero(T)
             else
@@ -286,9 +291,9 @@ function _kkt_factorization_quality(ws::Workspace{T}) where {T}
         end
         return _cholesky_diagonal_quality(arrow.Sredbuf)
     end
-    if T === Float64 && ws.sparse_kkt !== nothing
+    if ws.sparse_kkt isa GenericSparseSchurSDPWorkspace{T}
         sparse_workspace =
-            ws.sparse_kkt::SparseSchurSDPWorkspace
+            ws.sparse_kkt::GenericSparseSchurSDPWorkspace{T}
         return T(sparse_workspace.factorization_quality)
     end
     if ws.mixed_precision !== nothing
@@ -345,6 +350,18 @@ end
     return value
 end
 
+@inline function _same_normalized_complementarity(
+    value::T,
+    dimension::Int,
+    reference_value::T,
+    reference_dimension::Int,
+) where {T}
+    # Equal dimensions make normalized equality equivalent to raw equality;
+    # avoid a division for the overwhelmingly common uniform-block case.
+    dimension == reference_dimension && return value == reference_value
+    return value / T(dimension) == reference_value / T(reference_dimension)
+end
+
 function _predictor_complementarity_diagnostics!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -352,9 +369,16 @@ function _predictor_complementarity_diagnostics!(
     Y,
     primal_step::T,
     dual_step::T,
+    ;
+    detect_uniformity::Bool=true,
 ) where {T}
     complementarity = zero(T)
     affine_complementarity = zero(T)
+    # Exact equality is intentional: no tolerance may classify heterogeneous
+    # blocks as uniform and suppress their local target.
+    uniform_complementarity = detect_uniformity
+    uniform_reference_value = nothing
+    uniform_reference_dimension = 0
     if use_owned_bigfloat_block_loops(ws, prob)
         # Two waves reuse the one scalar slot per block. Each MPFR accumulator
         # and multiplication scratch belongs to its complete block, and the
@@ -375,8 +399,32 @@ function _predictor_complementarity_diagnostics!(
                 end
             end
         end
-        @inbounds for block in 1:prob.dims.L
-            complementarity += ws.block_norms[block]
+        if detect_uniformity
+            @inbounds for block in 1:prob.dims.L
+                value = ws.block_norms[block]
+                complementarity += value
+                dimension = prob.dims.k[block]
+                dimension == 0 && continue
+                if !isfinite(value)
+                    uniform_complementarity = false
+                    continue
+                end
+                if uniform_reference_value === nothing
+                    uniform_reference_value = value
+                    uniform_reference_dimension = dimension
+                elseif !_same_normalized_complementarity(
+                    value,
+                    dimension,
+                    uniform_reference_value,
+                    uniform_reference_dimension,
+                )
+                    uniform_complementarity = false
+                end
+            end
+        else
+            @inbounds for block in 1:prob.dims.L
+                complementarity += ws.block_norms[block]
+            end
         end
         @sync for task_index in 1:task_count
             Threads.@spawn begin
@@ -410,7 +458,56 @@ function _predictor_complementarity_diagnostics!(
         @inbounds for block in 1:prob.dims.L
             affine_complementarity += ws.block_norms[block]
         end
+    elseif detect_uniformity
+        @inbounds for block in 1:prob.dims.L
+            workspace = ws.blk[block]
+            if T === BigFloat
+                kdot!(
+                    ws.block_norms[block],
+                    workspace.trialX[1, 1],
+                    X[block],
+                    Y[block],
+                )
+                value = ws.block_norms[block]
+            else
+                value = kdot(X[block], Y[block])
+            end
+            complementarity += value
+            dimension = prob.dims.k[block]
+            if dimension > 0
+                if !isfinite(value)
+                    uniform_complementarity = false
+                elseif uniform_reference_value === nothing
+                    uniform_reference_value = value
+                    uniform_reference_dimension = dimension
+                elseif !_same_normalized_complementarity(
+                    value,
+                    dimension,
+                    uniform_reference_value,
+                    uniform_reference_dimension,
+                )
+                    uniform_complementarity = false
+                end
+            end
+            trial_combine_owned!(
+                workspace.W1,
+                X[block],
+                primal_step,
+                workspace.dX,
+                workspace.trialX[1, 1],
+            )
+            trial_combine_owned!(
+                workspace.W2,
+                Y[block],
+                dual_step,
+                workspace.dY,
+                workspace.trialX[1, 1],
+            )
+            affine_complementarity += kdot(workspace.W1, workspace.W2)
+        end
     else
+        # Preserve the historical legacy/fixed loop exactly. The uniformity
+        # decision is consumed only by the adaptive path.
         @inbounds for block in 1:prob.dims.L
             workspace = ws.blk[block]
             complementarity += kdot(X[block], Y[block])
@@ -431,7 +528,11 @@ function _predictor_complementarity_diagnostics!(
             affine_complementarity += kdot(workspace.W1, workspace.W2)
         end
     end
-    return complementarity, affine_complementarity
+    return (
+        complementarity,
+        affine_complementarity,
+        uniform_complementarity,
+    )
 end
 
 function _affine_predictor_diagnostics!(
@@ -448,7 +549,7 @@ function _affine_predictor_diagnostics!(
         zero(T),
         :fraction_to_boundary,
     )
-    complementarity, affine_complementarity =
+    complementarity, affine_complementarity, uniform_complementarity =
         _predictor_complementarity_diagnostics!(
             ws,
             prob,
@@ -472,6 +573,7 @@ function _affine_predictor_diagnostics!(
         predictor_quality=quality,
         affine_primal_step=primal_step,
         affine_dual_step=dual_step,
+        uniform_complementarity=uniform_complementarity,
     )
 end
 
@@ -482,7 +584,7 @@ function _legacy_predictor_diagnostics!(
     Y,
 ) where {T}
     unit_step = one(T)
-    current_complementarity, affine_complementarity =
+    current_complementarity, affine_complementarity, _ =
         _predictor_complementarity_diagnostics!(
             ws,
             prob,
@@ -490,6 +592,7 @@ function _legacy_predictor_diagnostics!(
             Y,
             unit_step,
             unit_step,
+            detect_uniformity=false,
         )
     cone_dimension = sum(prob.dims.k; init=0)
     denominator = T(max(cone_dimension, 1))
@@ -510,6 +613,7 @@ function _legacy_predictor_diagnostics!(
         predictor_quality=quality,
         affine_primal_step=one(T),
         affine_dual_step=one(T),
+        uniform_complementarity=false,
     )
 end
 
@@ -567,11 +671,14 @@ function newton_step!(
     end
     schur_finished = time_ns()
 
+    backend = select_backend(ws)
     kkt = _with_blas_threads(_kkt_blas_threads(m)) do
-        factor_kkt!(ws, prob, opts)
+        factorize!(backend, ws, prob, opts)
     end
     kkt.ok || return (status=:breakdown,
-        reason="Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
+        reason=backend isa DenseAugmentedKKTBackend ?
+            "pivoted LDLT factorization of the dense augmented KKT system failed after $(kkt.reg_attempts) SDPX regularization attempt(s)" :
+            "Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
         p_res=p_res, d_res=d_res, reg_attempts=kkt.reg_attempts, q_pivoted=false)
     factor_finished = time_ns()
     kkt_phases = hasproperty(kkt, :phase_times) ?
@@ -587,13 +694,13 @@ function newton_step!(
         r[i] = -(ws.d[i] + ws.v[i])
     end
     predictor_rhs_finished = time_ns()
-    predictor_ok = if ws.mixed_precision !== nothing &&
-                      ws.mixed_precision.active
-        _solve_mixed_kkt_guarded!(ws, prob, opts, r)
-    else
-        _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
-        true
-    end
+    predictor_ok = solve_direction!(
+        backend,
+        ws,
+        prob,
+        opts,
+        r,
+    )
     predictor_solve_finished = time_ns()
     predictor_ok || return (
         status=:breakdown,
@@ -735,6 +842,8 @@ function newton_step!(
                 Y,
                 iteration_parameters.sigma,
                 predictor_diagnostics.mu,
+                block_local_target=
+                    !predictor_diagnostics.uniform_complementarity,
             )
         else
             threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)
@@ -744,13 +853,13 @@ function newton_step!(
         r[i] = -(ws.d[i] + ws.v[i])
     end
     corrector_rhs_finished = time_ns()
-    corrector_ok = if ws.mixed_precision !== nothing &&
-                      ws.mixed_precision.active
-        _solve_mixed_kkt_guarded!(ws, prob, opts, r)
-    else
-        _solve_kkt_owned!(ws, n, r, ws.p, ws.dx, ws.dy)
-        true
-    end
+    corrector_ok = solve_direction!(
+        backend,
+        ws,
+        prob,
+        opts,
+        r,
+    )
     corrector_solve_finished = time_ns()
     corrector_ok || return (
         status=:breakdown,
@@ -780,7 +889,13 @@ function newton_step!(
     refine_steps, refine_residual =
         skip_automatic_refinement ?
         (0, zero(T)) :
-        refine_direction!(ws, prob, corrector_options, r)
+        refine!(
+            backend,
+            ws,
+            prob,
+            corrector_options,
+            r,
+        )
     refinement_finished = time_ns()
 
     _with_blas_threads(parallel_blas) do
@@ -870,7 +985,16 @@ feasible point, the returned `t` reflects that (`< min_step`) so the
 caller can trigger the restart repair (§5.2).
 """
 function line_search!(ws::Workspace{T}, X, Y, γ::T, min_step::T) where {T}
-    return line_search!(ws, X, Y, γ, min_step, one(T), one(T))
+    return line_search!(
+        ws,
+        X,
+        Y,
+        γ,
+        min_step,
+        one(T),
+        one(T),
+        zero(T),
+    )
 end
 
 function line_search!(
@@ -881,6 +1005,7 @@ function line_search!(
     min_step::T,
     primal_initial_step::T,
     dual_initial_step::T,
+    minimum_cholesky_ratio::T=zero(T),
 ) where {T}
     L = length(X)
     tX = primal_initial_step
@@ -888,7 +1013,13 @@ function line_search!(
         ok = true
         for l in 1:L
             bw = ws.blk[l]
-            if !trial_isposdef!(bw.trialX, X[l], tX, bw.dX)
+            if !trial_has_cholesky_margin!(
+                bw.trialX,
+                X[l],
+                tX,
+                bw.dX,
+                minimum_cholesky_ratio,
+            )
                 ok = false
                 break
             end
@@ -901,7 +1032,13 @@ function line_search!(
         ok = true
         for l in 1:L
             bw = ws.blk[l]
-            if !trial_isposdef!(bw.trialY, Y[l], tY, bw.dY)
+            if !trial_has_cholesky_margin!(
+                bw.trialY,
+                Y[l],
+                tY,
+                bw.dY,
+                minimum_cholesky_ratio,
+            )
                 ok = false
                 break
             end

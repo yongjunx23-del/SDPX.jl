@@ -1,23 +1,26 @@
 cff-version: 1.2.0
 message: "If you use SDPX.jl in academic work, please cite it as below."
-title: "SDPX.jl: an arbitrary-precision primal-dual interior-point SDP solver in Julia"
+title: "SDPX.jl: a native Julia solver for high-precision conic optimization"
 abstract: >-
-  SDPX.jl is a native Julia semidefinite programming solver using the
-  primal-dual interior-point method with the HRVW/KSH/M search direction and a
-  Mehrotra predictor-corrector. It supports Float64, BigFloat, MultiFloats and
-  DoubleFloats arithmetic, multithreaded kernels, sparse and arrow-structured
-  KKT paths, and a MathOptInterface/JuMP wrapper. It is a substantial rewrite of
-  SDPJSolver.jl and is motivated by the S-matrix/EFT bootstrap, the modular
-  bootstrap, and the lattice bootstrap.
+  SDPX.jl is a native Julia solver for linear, second-order cone, and
+  semidefinite programs. It uses primal-dual interior-point methods and
+  supports Float64, BigFloat, MultiFloats, and DoubleFloats arithmetic,
+  structured sparse and dense KKT paths, original-coordinate certificates,
+  and MathOptInterface/JuMP integration. It is a substantial rewrite of
+  SDPJSolver.jl and is motivated by the S-matrix/EFT, modular, and lattice
+  bootstrap programs.
 type: software
 authors:
   - given-names: Yongjun
     family-names: Xu
     email: yongjunx23@gmail.com
-version: 0.4.0
+version: 0.5.0-DEV
 license: MIT
 repository-code: "https://github.com/yongjunx23-del/SDPX.jl"
 keywords:
+  - conic optimization
+  - linear programming
+  - second-order cone programming
   - semidefinite programming
   - interior-point method
   - arbitrary precision

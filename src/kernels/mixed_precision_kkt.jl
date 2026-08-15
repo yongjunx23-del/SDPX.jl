@@ -181,31 +181,97 @@ function _mixed_precision_storage_bytes(m::Int, n::Int)
     return Base.checked_mul(elements, sizeof(Float64))
 end
 
-function _mixed_precision_workspace(
+function _mixed_precision_workspace_decision(
     prob::SDPProblem{T},
     mode::Symbol,
-    memory_fraction::Float64,
+    memory_fraction::Float64;
+    available_memory_bytes::Integer=_available_memory_bytes(),
 ) where {T}
     arithmetic = _arithmetic_class(T)
-    arithmetic in (:bigfloat, :fixed_extended) || return nothing
-    mode === :off && return nothing
-    prob.structure.schur_backend === :dense_cholesky || return nothing
-    L, m, n, k = prob.dims
-    m > 0 || return nothing
-
+    arithmetic in (:bigfloat, :fixed_extended) || return (
+        enabled=false,
+        reason=:unsupported_arithmetic,
+        required_bytes=0,
+        memory_limit_bytes=0,
+    )
+    mode === :off && return (
+        enabled=false,
+        reason=:disabled,
+        required_bytes=0,
+        memory_limit_bytes=0,
+    )
+    prob.structure.schur_backend === :dense_cholesky || return (
+        enabled=false,
+        reason=:unsupported_schur_backend,
+        required_bytes=0,
+        memory_limit_bytes=0,
+    )
+    _, m, n, _ = prob.dims
+    m > 0 || return (
+        enabled=false,
+        reason=:empty_system,
+        required_bytes=0,
+        memory_limit_bytes=0,
+    )
     required = try
         _mixed_precision_storage_bytes(m, n)
     catch error
         error isa OverflowError || rethrow()
-        return nothing
+        return (
+            enabled=false,
+            reason=:storage_overflow,
+            required_bytes=typemax(Int),
+            memory_limit_bytes=0,
+        )
     end
-    available = _available_memory_bytes()
+    available = Int(available_memory_bytes)
     memory_limit = available > 0 ?
                    floor(Int, available * memory_fraction) : 0
-    # Optional acceleration may not allocate from an unknown or inadequate
-    # memory budget. `:on` requests an attempt; it does not override safety.
-    (memory_limit > 0 && required <= memory_limit) || return nothing
-    mode === :auto && m < MIXED_KKT_MINIMUM_AUTO_DIMENSION && return nothing
+    (memory_limit > 0 && required <= memory_limit) || return (
+        enabled=false,
+        reason=available > 0 ? :memory_budget : :memory_unknown,
+        required_bytes=required,
+        memory_limit_bytes=memory_limit,
+    )
+    mode === :auto && m < MIXED_KKT_MINIMUM_AUTO_DIMENSION && return (
+        enabled=false,
+        reason=:below_auto_dimension,
+        required_bytes=required,
+        memory_limit_bytes=memory_limit,
+    )
+    return (
+        enabled=true,
+        reason=:selected,
+        required_bytes=required,
+        memory_limit_bytes=memory_limit,
+    )
+end
+
+function _mixed_precision_workspace(
+    prob::SDPProblem{T},
+    mode::Symbol,
+    memory_fraction::Float64;
+    decision=nothing,
+) where {T}
+    resolved = decision === nothing ?
+               _mixed_precision_workspace_decision(
+                   prob,
+                   mode,
+                   memory_fraction,
+               ) : decision
+    resolved.enabled || return nothing
+    arithmetic = _arithmetic_class(T)
+    arithmetic in (:bigfloat, :fixed_extended) || error(
+        "planned mixed-precision route has unsupported arithmetic $T",
+    )
+    mode === :off && error(
+        "planned mixed-precision route cannot use mode=:off",
+    )
+    prob.structure.schur_backend === :dense_cholesky || error(
+        "planned mixed-precision route requires a dense Schur backend",
+    )
+    L, m, n, k = prob.dims
+    m > 0 || error("planned mixed-precision route has an empty system")
 
     return MixedPrecisionKKTWorkspace(
         mode,

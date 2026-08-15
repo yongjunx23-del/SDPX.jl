@@ -1,6 +1,186 @@
 using LinearAlgebra
+using MultiFloats: Float64x4
 using SDPX
 using Test
+
+@testset "adaptive backtracking rejects unresolved cone pivots" begin
+    threshold = sqrt(eps(Float64))
+    direction = zeros(2, 2)
+    scratch = zeros(2, 2)
+    fragile = Matrix(Diagonal([1.0, (threshold / 2)^2]))
+    safe = Matrix(Diagonal([1.0, (2threshold)^2]))
+
+    @test SDPX.trial_isposdef!(scratch, fragile, 1.0, direction)
+    @test !SDPX.trial_has_cholesky_margin!(
+        scratch,
+        fragile,
+        1.0,
+        direction,
+        threshold,
+    )
+    @test SDPX.trial_has_cholesky_margin!(
+        scratch,
+        safe,
+        1.0,
+        direction,
+        threshold,
+    )
+    @test SDPX.trial_has_cholesky_margin!(
+        scratch,
+        fragile,
+        1.0,
+        direction,
+        0.0,
+    )
+
+    nonfinite = copy(safe)
+    nonfinite[2, 2] = NaN
+    @test !SDPX.trial_has_cholesky_margin!(
+        scratch,
+        nonfinite,
+        1.0,
+        direction,
+        threshold,
+    )
+end
+
+@testset "adaptive Mehrotra block-local target stays in solver arithmetic" begin
+    for T in (Float64, BigFloat)
+        setprecision(BigFloat, 256) do
+            sigma = T(1) / T(5)
+            global_mu = T(3) / T(20)
+            X = Matrix(Diagonal(T[2, 4]))
+            Y = Matrix(Diagonal(T[3, 5]))
+            global_target = SDPX._mehrotra_corrector_target(
+                sigma,
+                global_mu,
+                X,
+                Y,
+                2,
+                false,
+            )
+            local_target = SDPX._mehrotra_corrector_target(
+                sigma,
+                global_mu,
+                X,
+                Y,
+                2,
+                true,
+            )
+            @test global_target == sigma * global_mu
+            @test local_target == sigma * T(13)
+            if T === BigFloat
+                @test objectid(local_target) != objectid(X[1, 1])
+                @test objectid(local_target) != objectid(Y[1, 1])
+            end
+        end
+    end
+end
+
+@testset "adaptive predictor caches exact block complementarity uniformity" begin
+    for T in (Float64, Float64x4, BigFloat)
+        setprecision(BigFloat, 256) do
+            base = T(7) / T(20)
+            same_dimension_reference = base * T(2)
+            mixed_dimension_value = base * T(4)
+            @test SDPX._same_normalized_complementarity(
+                same_dimension_reference,
+                2,
+                same_dimension_reference,
+                2,
+            )
+            @test !SDPX._same_normalized_complementarity(
+                nextfloat(same_dimension_reference),
+                2,
+                same_dimension_reference,
+                2,
+            )
+            @test SDPX._same_normalized_complementarity(
+                mixed_dimension_value,
+                4,
+                same_dimension_reference,
+                2,
+            )
+            @test !SDPX._same_normalized_complementarity(
+                nextfloat(mixed_dimension_value),
+                4,
+                same_dimension_reference,
+                2,
+            )
+
+            slab_one = SDPX.alloc_zeros(T, 2, 2, 2)
+            slab_one[1, 1, 1] = one(T)
+            slab_two = SDPX.alloc_zeros(T, 2, 2, 2)
+            slab_two[2, 2, 2] = one(T)
+            constant = T[0 1; 1 0]
+            problem = SDPX.ingest(
+                T[1, 1],
+                [slab_one, slab_two],
+                [constant, constant],
+                zeros(T, 2, 0),
+                T[];
+                T=T,
+                sparse=false,
+                verbosity=0,
+            )
+            workspace = SDPX.Workspace(problem; thread_count=1)
+            value = T(7) / T(20)
+            if T !== BigFloat
+                sentinel = T(123)
+                fill!(workspace.block_norms, sentinel)
+            end
+            uniform_X = [
+                Matrix(value * I, 2, 2),
+                Matrix(value * I, 2, 2),
+            ]
+            uniform_Y = [
+                Matrix(one(T) * I, 2, 2),
+                Matrix(one(T) * I, 2, 2),
+            ]
+            uniform = SDPX._affine_predictor_diagnostics!(
+                workspace,
+                problem,
+                uniform_X,
+                uniform_Y,
+            )
+            @test uniform.uniform_complementarity === true
+            if T !== BigFloat
+                @test all(x -> x == sentinel, workspace.block_norms)
+            end
+            if T === BigFloat
+                @test objectid(workspace.block_norms[1]) !=
+                      objectid(workspace.block_norms[2])
+            end
+
+            heterogeneous_X = [
+                uniform_X[1],
+                Matrix(nextfloat(value) * I, 2, 2),
+            ]
+            heterogeneous = SDPX._affine_predictor_diagnostics!(
+                workspace,
+                problem,
+                heterogeneous_X,
+                uniform_Y,
+            )
+            @test heterogeneous.uniform_complementarity === false
+            if T !== BigFloat
+                @test all(x -> x == sentinel, workspace.block_norms)
+                legacy_workspace = SDPX.Workspace(problem; thread_count=1)
+                fill!(legacy_workspace.block_norms, sentinel)
+                SDPX._legacy_predictor_diagnostics!(
+                    legacy_workspace,
+                    problem,
+                    uniform_X,
+                    uniform_Y,
+                )
+                @test all(
+                    x -> x == sentinel,
+                    legacy_workspace.block_norms,
+                )
+            end
+        end
+    end
+end
 
 function regression_sdp_data(::Type{T}) where {T}
     coefficients = zeros(T, 2, 2, 2)

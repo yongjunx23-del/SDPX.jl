@@ -1,0 +1,159 @@
+using GenericLinearAlgebra
+using LinearAlgebra
+using MultiFloats: Float64x4
+using Test
+
+struct UnadaptedSemanticLABackend <: SDPX.AbstractLABackend end
+
+struct IncompleteMultiFloatProvider <: AbstractFloat end
+SDPX.is_multifloat_arithmetic(::Type{IncompleteMultiFloatProvider}) = true
+SDPX.la_provider_descriptor(
+    ::Type{IncompleteMultiFloatProvider},
+    ::Int=1,
+) = (
+    available=true,
+    provider=:multifloat_linear_algebra,
+    capabilities=(:mul_owned,),
+    capability_model=SDPX.LAProviderCapabilities(mul_owned=true),
+)
+
+@testset "generic LA provider capabilities" begin
+    LA = SDPX.Experimental
+
+    unadapted = UnadaptedSemanticLABackend()
+    @test !SDPX.la_backend_owns_equality_gram(unadapted)
+    @test SDPX.la_equality_gram_kernel(unadapted, Float64) ===
+          :provider_syrk
+    @test SDPX.la_equality_factor_failure_policy(unadapted) ===
+          :provider_fail_closed
+
+    for T in (Float64, BigFloat, Float64x4)
+        config = LA.plan_la_backend(T; equality_solver=:auto)
+        capabilities = config.capability_model
+        @test capabilities isa LA.LAProviderCapabilities
+        @test LA.la_provider_supports(capabilities, :cholesky)
+        @test LA.la_provider_supports(capabilities, :lu)
+        @test LA.la_provider_supports(capabilities, :qr)
+        @test LA.la_provider_supports(capabilities, :rank_revealing_qr)
+        @test LA.la_provider_supports(capabilities, :factor_solve)
+        @test LA.la_provider_supports(capabilities, :multi_rhs)
+        @test !LA.la_provider_supports(
+            capabilities,
+            :pivoted_symmetric_ldlt,
+        )
+        @test config.required_capabilities == SDPX._DENSE_CHOLESKY_REQUIRED
+        @test LA.validate_la_backend_configuration(config, T) === config
+    end
+
+    f64 = LA.plan_la_backend(Float64)
+    @test f64.provider_implementation === :julia_blas_lapack
+    @test f64.capability_model.threading
+
+    big = LA.plan_la_backend(BigFloat)
+    @test big.provider === :generic_linear_algebra
+    @test big.provider_implementation === :julia_generic_with_gla_loaded
+    @test !big.capability_model.threading
+
+    @test_throws ArgumentError LA.la_provider_supports(
+        big.capability_model,
+        :not_a_capability,
+    )
+
+    # Planner/execution capability validation fails before an operation is
+    # attempted; there is no try-and-switch runtime fallback.
+    incomplete = SDPX.LABackendConfiguration(
+        :bigfloat,
+        :standard,
+        :standard,
+        :generic_linear_algebra,
+        (:cholesky,),
+        SDPX.LAProviderCapabilities(cholesky=true),
+        (:cholesky, :factor_solve, :multi_rhs),
+        :julia_generic_with_gla_loaded,
+        (),
+        :none,
+        :owned_mutable_scalars,
+    )
+    @test_throws ArgumentError LA.validate_la_backend_configuration(incomplete)
+    @test_throws ArgumentError LA.instantiate_la_backend(incomplete, BigFloat)
+
+    false_claim = SDPX.LABackendConfiguration(
+        :bigfloat,
+        :standard,
+        :standard,
+        :generic_linear_algebra,
+        (:pivoted_symmetric_ldlt,),
+        SDPX.LAProviderCapabilities(pivoted_symmetric_ldlt=true),
+        (),
+        :julia_generic_with_gla_loaded,
+        (),
+        :none,
+        :owned_mutable_scalars,
+    )
+    @test_throws ArgumentError LA.instantiate_la_backend(false_claim, BigFloat)
+
+    # A loaded provider with an incomplete route contract is broken.  Auto
+    # selection must fail during planning rather than silently masking it with
+    # the generic Standard backend.
+    @test_throws ArgumentError LA.plan_la_backend(
+        IncompleteMultiFloatProvider;
+        requested=:auto,
+        route=:dense_cholesky,
+    )
+
+    for T in (Float64, BigFloat, Float64x4)
+        backend = LA.instantiate_la_backend(LA.plan_la_backend(T), T)
+        source = T[4 1; 1 3]
+        rhs = T[1 2; 3 5]
+
+        chol_rhs = copy(rhs)
+        chol_buffer = SDPX._owned_array_copy(T, source)
+        chol = LA.la_cholesky_factor!(backend, chol_buffer)
+        @test chol !== nothing
+        LA.la_factor_solve!(chol, chol_rhs)
+        @test source * chol_rhs ≈ rhs
+
+        lu_rhs = copy(rhs)
+        lu_buffer = SDPX._owned_array_copy(T, source)
+        lu_factor = LA.la_lu_factor!(backend, lu_buffer)
+        @test lu_factor !== nothing
+        LA.la_factor_solve!(lu_factor, lu_rhs)
+        @test source * lu_rhs ≈ rhs
+
+        qr_rhs = copy(rhs)
+        qr_buffer = SDPX._owned_array_copy(T, source)
+        qr_factor = LA.la_qr_factor!(backend, qr_buffer; pivoted=true)
+        @test qr_factor isa SDPX.AbstractLAQRFactor
+        @test SDPX.la_factor_provider(qr_factor) === backend.provider
+        @test SDPX.la_factor_rank(qr_factor) == size(source, 2)
+        @test SDPX.la_factor_permutation(qr_factor) isa Vector{Int}
+        LA.la_factor_solve!(qr_factor, qr_rhs)
+        @test source * qr_rhs ≈ rhs
+
+        rank_deficient = SDPX._owned_array_copy(T, T[1 1; 2 2])
+        rank_deficient_qr = LA.la_qr_factor!(
+            backend,
+            rank_deficient;
+            pivoted=true,
+        )
+        @test SDPX.la_factor_rank(rank_deficient_qr) == 1
+    end
+
+    legacy = LA.instantiate_la_backend(
+        LA.plan_la_backend(Float64; requested=:legacy),
+        Float64,
+    )
+    legacy_lu = LA.la_lu_factor!(legacy, [2.0 1.0; 1.0 2.0])
+    @test legacy_lu isa SDPX.LegacyLALUFactor{Float64}
+    legacy_rhs = [1.0, 0.0]
+    LA.la_factor_solve!(legacy_lu, legacy_rhs)
+    @test [2.0 1.0; 1.0 2.0] * legacy_rhs ≈ [1.0, 0.0]
+    legacy_qr = LA.la_qr_factor!(
+        legacy,
+        [1.0 0.0; 0.0 1.0];
+        pivoted=true,
+        relative_tolerance=eps(Float64),
+    )
+    @test legacy_qr isa SDPX.EqualityQRFactor{Float64}
+    @test SDPX.la_factor_provider(legacy_qr) === legacy.provider
+end

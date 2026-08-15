@@ -897,7 +897,14 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
 
     # W2 <- X^-1 from the already-computed Cholesky factor. This replaces
     # inv(LowerTriangular(LX)) and Linv' * Linv, both of which allocated.
-    fill!(bw.W2, zero(T))
+    # `fill!(A, zero(BigFloat))` aliases one mutable MPFR object across the
+    # panel.  The triangular solve below mutates destinations independently,
+    # so preserve the ownership invariant used by the generic sparse factor.
+    if T === BigFloat
+        zero_owned!(bw.W2)
+    else
+        fill!(bw.W2, zero(T))
+    end
     @inbounds for i in 1:kl
         bw.W2[i, i] = one(T)
     end
@@ -1135,71 +1142,6 @@ function _reduce_sparse_schur_serial!(ws::Workspace{T}, cons::SparseCons{T}) whe
     return ws.S
 end
 
-"""
-    reduce_sparse_schur_csc!(ws, cons)
-
-Accumulate block-local packed Schur triangles directly into the fixed lower
-CSC pattern used by the sparse Schur SDP backend. Output columns are
-owned exclusively by workers. Each block suffix and destination column are
-sorted, so a linear merge locates entries without a giant pair-to-CSC lookup
-table (317 million candidate pairs on B3).
-"""
-function reduce_sparse_schur_csc!(
-    ws::Workspace{Float64},
-    cons::SparseCons{Float64},
-)
-    sparse_workspace =
-        ws.sparse_kkt::SparseSchurSDPWorkspace
-    matrix = sparse_workspace.matrix
-    memberships = sparse_workspace.memberships
-    counts = sparse_workspace.schur_counts
-    m = length(counts)
-    ntasks = min(max(ws.thread_count, 1), max(m, 1))
-    balanced =
-        length(ws.schur_column_boundaries) == ntasks + 1
-    chunk = cld(m, ntasks)
-
-    @sync for task in 1:ntasks
-        first_column = balanced ?
-                       ws.schur_column_boundaries[task] :
-                       (task - 1) * chunk + 1
-        first_column > m && continue
-        last_column = balanced ?
-                      ws.schur_column_boundaries[task + 1] - 1 :
-                      min(task * chunk, m)
-        Threads.@spawn begin
-            @inbounds for column in first_column:last_column
-                first = Int(matrix.colptr[column])
-                last = first + Int(counts[column]) - 1
-                for destination in first:last
-                    matrix.nzval[destination] = 0.0
-                end
-                for (block32, position32) in memberships[column]
-                    block = Int(block32)
-                    position = Int(position32)
-                    ids = cons.schur_order[block]
-                    count = length(ids)
-                    values = ws.blk[block].Svals
-                    source_base = _packed_pair_base(position, count)
-                    destination = first
-                    for source_position in position:count
-                        row = ids[source_position]
-                        while matrix.rowval[destination] < row
-                            destination += 1
-                        end
-                        matrix.rowval[destination] == row ||
-                            error("internal sparse Schur CSC pattern mismatch")
-                        matrix.nzval[destination] +=
-                            values[source_base + (source_position - position + 1)]
-                    end
-                end
-                sparse_workspace.primal_diagonal_values[column] =
-                    matrix.nzval[first]
-            end
-        end
-    end
-    return matrix
-end
 
 """
     reduce_sparse_schur!(ws, cons)
@@ -1233,11 +1175,18 @@ block order within one task.
 """
 function reduce_sparse_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
     ws.arrow === nothing || return reduce_arrow_schur!(ws, cons)
-    if T === Float64 && ws.sparse_kkt !== nothing
-        return reduce_sparse_schur_csc!(
-            ws::Workspace{Float64},
-            cons::SparseCons{Float64},
+    if ws.sparse_kkt !== nothing
+        sparse_workspace = ws.sparse_kkt
+        sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+            error("unsupported sparse Schur workspace $(typeof(sparse_workspace))")
+        block_values = [ws.blk[block].Svals for block in eachindex(ws.blk)]
+        assemble_sparse_schur!(
+            sparse_workspace.storage,
+            sparse_workspace.assembly_map,
+            block_values,
         )
+        sparse_workspace.assembly_count += 1
+        return sparse_workspace.storage.matrix
     end
     _zero_schur_accumulator!(ws.S, ws)
     m = size(ws.S, 1)
@@ -1305,6 +1254,111 @@ function reduce_sparse_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
         end
     end
     return ws.S
+end
+
+"""
+    sparse_schur_diagnostics(ws)
+
+Production Schur diagnostics.  Values are structural where noted and are
+safe to query before the first factorization (`nothing` backend reports zero
+numeric counts).  The helper never materializes a dense Schur matrix.
+"""
+function sparse_schur_diagnostics(ws::Workspace)
+    sparse_workspace = ws.sparse_kkt
+    sparse_workspace === nothing && return (
+        available=false,
+        dimension=0,
+        actual_nnz=0,
+        density=0.0,
+        pattern_reuse=0,
+        factor_nnz=0,
+        fill_ratio=0.0,
+        assembly_seconds=0.0,
+        assembly_count=0,
+        provider=:none,
+    )
+    sparse_workspace isa GenericSparseSchurSDPWorkspace ||
+        throw(ArgumentError("unsupported sparse Schur workspace $(typeof(sparse_workspace))"))
+    matrix = sparse_workspace.storage.matrix
+    backend = sparse_workspace.factor
+    assembly_seconds = 0.0
+    assembly_count = sparse_workspace.assembly_count
+    structural_nnz = nnz(matrix)
+    actual_nnz = count(value -> !iszero(value), matrix.nzval)
+    symbolic = backend === nothing ? nothing :
+               (backend isa AbstractSparseFactor ?
+                sparse_factor_diagnostics(backend) : nothing)
+    backend_stats = backend === nothing ? nothing :
+                    try statistics(backend) catch; nothing end
+    factor_nnz = symbolic === nothing ?
+                 (backend_stats === nothing ? 0 :
+                  get(backend_stats, :factor_nnz, 0)) :
+                 get(symbolic, :factor_nnz, 0)
+    input_nnz = symbolic === nothing ? structural_nnz :
+                get(symbolic, :input_nnz, structural_nnz)
+    reuse = backend_stats === nothing ?
+            (symbolic === nothing ? 0 : get(symbolic, :pattern_reused, 0)) :
+            get(backend_stats, :reused, get(backend_stats, :pattern_reused, 0))
+    return (
+        available=true,
+        dimension=size(matrix, 1),
+        structural_nnz=structural_nnz,
+        actual_nnz=actual_nnz,
+        nnz=actual_nnz,
+        density=actual_nnz /
+                 max(size(matrix, 1) * (size(matrix, 1) + 1) ÷ 2, 1),
+        input_nnz=input_nnz,
+        pattern_reuse=reuse,
+        factor_nnz=factor_nnz,
+        factor_nonzeros=factor_nnz,
+        fill_ratio=factor_nnz / max(input_nnz, 1),
+        analyses=backend_stats === nothing ? 0 :
+                 get(backend_stats, :analyses, 0),
+        factorizations=backend_stats === nothing ? 0 :
+                       get(backend_stats, :factorizations, 0),
+        reused=backend_stats === nothing ? reuse :
+               get(backend_stats, :reused, reuse),
+        reuse_ratio=backend_stats === nothing ? 0.0 :
+                    get(backend_stats, :symbolic_reuse_ratio, 0.0),
+        symbolic_reuse_ratio=backend_stats === nothing ? 0.0 :
+                            get(backend_stats, :symbolic_reuse_ratio, 0.0),
+        failures=backend_stats === nothing ? 0 :
+                 get(backend_stats, :failures, 0),
+        assembly_seconds=assembly_seconds,
+        assembly_count=assembly_count,
+        provider=symbolic === nothing ? :none : get(symbolic, :provider, :unknown),
+        backend=backend_stats === nothing ? :none :
+                get(backend_stats, :backend, :unknown),
+    )
+end
+
+"""Attach production structure facts without changing sparse storage."""
+function sparse_schur_diagnostics(
+    ws::Workspace,
+    prob::SDPProblem,
+)
+    base = sparse_schur_diagnostics(ws)
+    analysis = prob.structure.schur_analysis
+    # Chordal conversion remains analysis-only.  Keep a cheap, inspectable
+    # marker here rather than scanning every PSD coefficient at finalization.
+    # Callers can use `chordal_plans(prob)` when detailed clique facts are
+    # explicitly requested.
+    return merge(
+        base,
+        (
+            psd_block_count=analysis.psd_block_count,
+            block_dimensions=copy(analysis.block_dimensions),
+            active_constraints_per_block=
+                copy(analysis.active_constraints_per_block),
+            overlap_edges=analysis.overlap_edges,
+            chordal=(
+                available=false,
+                analysis_only=true,
+                transformation=:none,
+                reason=:not_materialized,
+            ),
+        ),
+    )
 end
 
 function reduce_arrow_schur!(ws::Workspace{T}, cons::SparseCons{T}) where {T}
@@ -3344,6 +3398,40 @@ end
 
 function materialize_schur!(dest::AbstractMatrix{T}, ws::Workspace{T}) where {T}
     arrow = ws.arrow
+    if arrow === nothing && ws.sparse_kkt !== nothing
+        sparse_workspace = ws.sparse_kkt
+        sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+            throw(ArgumentError("unsupported sparse Schur workspace $(typeof(sparse_workspace))"))
+        matrix = sparse_workspace.storage.matrix
+        size(dest) == size(matrix) || throw(DimensionMismatch(
+            "materialized Schur destination has size $(size(dest)); expected $(size(matrix))",
+        ))
+        # Materialization is an explicit diagnostic/reference operation.  The
+        # production factor and iteration kernels continue to consume the
+        # frozen sparse CSC values directly.
+        if T === BigFloat
+            ExtendedPrecisionBLAS.prepare_storage!(dest)
+            zero_owned!(dest)
+            @inbounds for column in axes(matrix, 2), pointer in
+                              matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                row = matrix.rowval[pointer]
+                value = matrix.nzval[pointer]
+                _set_materialized_schur_entry!(dest, row, column, value)
+                row != column &&
+                    _set_materialized_schur_entry!(dest, column, row, value)
+            end
+        else
+            fill!(dest, zero(T))
+            @inbounds for column in axes(matrix, 2), pointer in
+                              matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                row = matrix.rowval[pointer]
+                value = matrix.nzval[pointer]
+                dest[row, column] = value
+                row != column && (dest[column, row] = value)
+            end
+        end
+        return dest
+    end
     if arrow === nothing
         if T === BigFloat
             ExtendedPrecisionBLAS.prepare_storage!(dest)

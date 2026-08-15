@@ -394,4 +394,74 @@ end
         @test certificate.primal_residual == result.p_res
         @test certificate.dual_residual == result.d_res
     end
+
+    @testset "certify_final_result honors a disabled certification policy" begin
+        problem = scalar_certificate_problem(Float64)
+        invalid = scalar_certificate_result(Float64; slack=-1e-3)
+        options = SDPX.SolverOptions{Float64}(
+            ϵ_gap=1e-8,
+            ϵ_primal=1e-8,
+            ϵ_dual=1e-8,
+            certification=false,
+            verbosity=0,
+        )
+        result, certificate, warning =
+            SDPX.certify_final_result(problem, invalid, options)
+        @test result === invalid
+        @test result.status == SDPX.Optimal
+        @test certificate == (available=false, reason=:certification_disabled)
+        @test warning === nothing
+        @test result.termination.reason == :none
+    end
+
+    @testset "certification=false skips the pipeline final certificate" begin
+        coefficients = [
+            reshape([1.0, 0.0], 2, 1, 1),
+            reshape([0.0, 1.0], 2, 1, 1),
+        ]
+        problem = SDPX.ingest(
+            [1.0, 1.0],
+            coefficients,
+            [fill(1.0, 1, 1), fill(2.0, 1, 1)],
+            zeros(2, 0),
+            Float64[];
+            verbosity=0,
+        )
+
+        uncertified = SDPX.solve(
+            problem,
+            SDPX.SolveOptions(certification=false, verbosity=0),
+        )
+        @test uncertified.status == SDPX.Optimal
+        certificate =
+            uncertified.diagnostics.selected_algorithms.certificate
+        @test certificate.available == false
+        @test certificate.reason == :certification_disabled
+        @test uncertified.termination.reason != :final_certificate_failed
+
+        for options in (
+            SDPX.SolveOptions(verbosity=0),
+            SDPX.SolveOptions(certification=true, verbosity=0),
+        )
+            result = SDPX.solve(problem, options)
+            @test result.status == SDPX.Optimal
+            certificate =
+                result.diagnostics.selected_algorithms.certificate
+            @test certificate.available
+            @test certificate.valid
+            @test certificate.primal_objective == result.pObj
+            @test certificate.dual_objective == result.dObj
+        end
+
+        raw = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                verbosity=0,
+                certification=false,
+            ),
+        )
+        @test raw.status == SDPX.Optimal
+        @test raw.diagnostics.selected_algorithms.certificate.reason ==
+              :certification_disabled
+    end
 end

@@ -1,0 +1,68 @@
+version = 1
+purpose = "Analytic or high-precision-reference stress tests for scaling, conditioning, degeneracy, weak infeasibility, and precision ladders."
+
+[precision]
+float64 = true
+float64x2 = true
+float64x3 = true
+float64x4 = true
+bigfloat_bits = [128, 256, 512, 1024]
+
+[lp.near_dependent_equalities]
+n = [8, 16, 32, 64]
+epsilon = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64"]
+ground_truth = "KKT-consistent construction with x*=1 and exact objective c'x*."
+tests = ["equality_presolve", "KKT_conditioning", "regularization", "iterative_refinement"]
+
+[lp.row_scaling]
+n = [16, 64]
+decades = [2, 4, 8, 12, 16, 24, 32, 48, 64]
+ground_truth = "Equivalent LP with invariant optimizer/objective."
+tests = ["equilibration", "residual_invariance", "termination"]
+
+[lp.infeasible_margin]
+epsilon = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64", "1e-100"]
+ground_truth = "x>=0 and x<=-epsilon is infeasible for every epsilon>0."
+tests = ["infeasibility_status", "false_feasible_rate", "certificate_quality"]
+
+[lp.klee_minty]
+n = [4, 8, 16, 32, 64]
+epsilon = ["1e-2"]
+tests = ["scaling", "algorithm_path", "simplex_fallback_if_added"]
+
+[socp.near_tangent]
+epsilon = ["1e-2", "1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64"]
+ground_truth = "min s s.t. ||(1,epsilon)||_2 <= 1+s; s*=sqrt(1+epsilon^2)-1."
+tests = ["effective_precision", "cone_residual", "objective_accuracy"]
+
+[socp.near_infeasible]
+epsilon = ["1e-2", "1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32"]
+ground_truth = "||(1,epsilon)||_2 <= 1 is infeasible for every epsilon>0; violation≈epsilon^2/2."
+tests = ["status", "near_boundary", "false_feasible_rate"]
+
+[socp.many_tiny_cones]
+ncones = [10, 100, 1000, 10000, 100000]
+epsilon = ["1e-4", "1e-8"]
+ground_truth = "Separable SOCs: min sum(t_i), t_i>=sqrt(1+epsilon^2)."
+tests = ["cone_count_scaling", "assembly", "threading", "memory"]
+
+[sdp.weak_infeasible_2x2]
+delta = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-50", "1e-100", "0"]
+ground_truth = "min x s.t. [[x,1],[1,delta]] PSD. For delta>0 x*=1/delta; delta=0 is weakly infeasible."
+tests = ["weak_infeasibility", "dynamic_range", "precision_escalation"]
+
+[sdp.hilbert_min_eigenvalue]
+n = [6, 8, 10, 12, 16, 20, 24]
+ground_truth = "max t s.t. H_n-tI PSD; t*=lambda_min(H_n). Use >=512-bit oracle for larger n."
+tests = ["ill_conditioned_PSD", "eigenvalue_accuracy", "precision"]
+
+[sdp.congruence_scaling]
+decades = [2, 4, 8, 12, 16, 24, 32, 48]
+ground_truth = "Congruence transformation D*M(x)*D preserves PSD feasibility and objective."
+tests = ["PSD_scaling", "equilibration", "residual_invariance"]
+
+[sdp.small_eigenvalue]
+n = [4, 8, 16, 32]
+epsilon = ["1e-4", "1e-8", "1e-12", "1e-16", "1e-24", "1e-32", "1e-64"]
+ground_truth = "max t s.t. Q*diag(lambda)*Q'-tI PSD; t*=epsilon."
+tests = ["rank_detection", "near_singularity", "complementarity", "precision"]

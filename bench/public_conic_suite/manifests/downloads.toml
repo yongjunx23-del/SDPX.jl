@@ -1,0 +1,433 @@
+# External benchmark download manifest.
+# Large binaries are intentionally not embedded in this archive.
+# The downloader records SHA-256 after retrieval so local benchmark campaigns can be pinned.
+
+[[sdp]]
+name = "biggs"
+tier = "core"
+filename = "biggs.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/biggs.dat-s.gz"
+
+[[sdp]]
+name = "cnhil10"
+tier = "core"
+filename = "cnhil10.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/cnhil10.dat-s.gz"
+
+[[sdp]]
+name = "hand"
+tier = "core"
+filename = "hand.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/hand.dat-s.gz"
+
+[[sdp]]
+name = "yalsdp"
+tier = "core"
+filename = "yalsdp.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/yalsdp.dat-s.gz"
+
+[[sdp]]
+name = "sensor_1000"
+tier = "core"
+filename = "sensor_1000.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/sensor_1000.dat-s.gz"
+
+[[sdp]]
+name = "G48mc"
+tier = "core"
+filename = "G48mc.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/G48mc.dat-s.gz"
+
+[[sdp]]
+name = "G55mc"
+tier = "core"
+filename = "G55mc.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/G55mc.dat-s.gz"
+
+[[sdp]]
+name = "G60mc"
+tier = "core"
+filename = "G60mc.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/G60mc.dat-s.gz"
+
+[[sdp]]
+name = "checker"
+tier = "core"
+filename = "checker.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/checker.dat-s.gz"
+
+[[sdp]]
+name = "ice_2.0"
+tier = "core"
+filename = "ice_2.0.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/ice_2.0.dat-s.gz"
+
+[[sdp]]
+name = "r1_2000"
+tier = "core"
+filename = "rendl1_2000_1e-6.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/rendl1_2000_1e-6.dat-s.gz"
+
+[[sdp]]
+name = "t_texture"
+tier = "core"
+filename = "tiger_texture.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/tiger_texture.dat-s.gz"
+
+[[sdp]]
+name = "G40_mb"
+tier = "core"
+filename = "G40_mb.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/G40_mb.dat-s.gz"
+
+[[sdp]]
+name = "G48_mb"
+tier = "core"
+filename = "G48_mb.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/G48_mb.dat-s.gz"
+
+[[sdp]]
+name = "G60_mb"
+tier = "core"
+filename = "G60_mb.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/G60_mb.dat-s.gz"
+
+[[sdp]]
+name = "foot"
+tier = "core"
+filename = "foot.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/foot.dat-s.gz"
+
+[[sdp_special]]
+name = "torusg3-15"
+tier = "core"
+source_family = "dimacs"
+url = ""
+note = "Resolve from DIMACS/source page during integration; do not silently substitute a different formulation."
+
+[[sdp_special]]
+name = "biomedP"
+tier = "core"
+source_family = "dimacs"
+url = ""
+note = "Resolve from DIMACS/source page during integration; do not silently substitute a different formulation."
+
+[[sdp]]
+name = "prob_2_4_0"
+tier = "core"
+filename = "prob_2_4_0.m"
+url = "https://plato.asu.edu/ftp/sdp/prob_2_4_0.m"
+
+[[sdp]]
+name = "broyden25"
+tier = "core"
+filename = "broyden25.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/broyden25.dat-s.gz"
+
+[[sdp]]
+name = "cphil12"
+tier = "core"
+filename = "cphil12.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/cphil12.dat-s.gz"
+
+[[sdp]]
+name = "theta102"
+tier = "core"
+filename = "theta102.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/theta102.dat-s.gz"
+
+[[sdp]]
+name = "theta123"
+tier = "core"
+filename = "theta123.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/theta123.dat-s.gz"
+
+[[sdp]]
+name = "mater-6"
+tier = "core"
+filename = "mater-6.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/mater-6.dat-s.gz"
+
+[[sdp]]
+name = "ros_2000"
+tier = "core"
+filename = "ros_2000.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/ros_2000.dat-s.gz"
+
+[[sdp]]
+name = "reimer5"
+tier = "core"
+filename = "reimer5.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/reimer5.dat-s.gz"
+
+[[sdp]]
+name = "dia_patch"
+tier = "core"
+filename = "diamond_patch.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/diamond_patch.dat-s.gz"
+
+[[sdp]]
+name = "swissroll"
+tier = "core"
+filename = "swissroll.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/swissroll.dat-s.gz"
+
+[[sdp]]
+name = "fap09"
+tier = "core"
+filename = "fap09.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/fap09.dat-s.gz"
+
+[[sdp]]
+name = "neu2"
+tier = "core"
+filename = "neu2.dat-s.gz"
+url = "https://plato.asu.edu/ftp/sdp/neu2.dat-s.gz"
+
+[[socp]]
+name = "beam7"
+tier = "core"
+filename = "beam7.cbf.gz"
+url = "https://cblib.zib.de/download/all/beam7.cbf.gz"
+
+[[socp]]
+name = "beam30"
+tier = "core"
+filename = "beam30.cbf.gz"
+url = "https://cblib.zib.de/download/all/beam30.cbf.gz"
+
+[[socp]]
+name = "chainsing-50000-1"
+tier = "core"
+filename = "chainsing-50000-1.cbf.gz"
+url = "https://cblib.zib.de/download/all/chainsing-50000-1.cbf.gz"
+
+[[socp]]
+name = "chainsing-50000-2"
+tier = "core"
+filename = "chainsing-50000-2.cbf.gz"
+url = "https://cblib.zib.de/download/all/chainsing-50000-2.cbf.gz"
+
+[[socp]]
+name = "chainsing-50000-3"
+tier = "full"
+filename = "chainsing-50000-3.cbf.gz"
+url = "https://cblib.zib.de/download/all/chainsing-50000-3.cbf.gz"
+
+[[socp]]
+name = "db-joint-soerensen"
+tier = "core"
+filename = "db-joint-soerensen.cbf.gz"
+url = "https://cblib.zib.de/download/all/db-joint-soerensen.cbf.gz"
+
+[[socp]]
+name = "db-plate-yield-line"
+tier = "core"
+filename = "db-plate-yield-line.cbf.gz"
+url = "https://cblib.zib.de/download/all/db-plate-yield-line.cbf.gz"
+
+[[socp]]
+name = "dsNRL"
+tier = "core"
+filename = "2013_dsNRL.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_dsNRL.cbf.gz"
+
+[[socp]]
+name = "firL1"
+tier = "core"
+filename = "2013_firL1.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL1.cbf.gz"
+
+[[socp]]
+name = "firL1Linfalph"
+tier = "core"
+filename = "2013_firL1Linfalph.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL1Linfalph.cbf.gz"
+
+[[socp]]
+name = "firL1Linfeps"
+tier = "full"
+filename = "2013_firL1Linfeps.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL1Linfeps.cbf.gz"
+
+[[socp]]
+name = "firL2L1alph"
+tier = "full"
+filename = "2013_firL2L1alph.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL2L1alph.cbf.gz"
+
+[[socp]]
+name = "firL2L1eps"
+tier = "full"
+filename = "2013_firL2L1eps.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL2L1eps.cbf.gz"
+
+[[socp]]
+name = "firL2Linfalph"
+tier = "core"
+filename = "2013_firL2Linfalph.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL2Linfalph.cbf.gz"
+
+[[socp]]
+name = "firL2Linfeps"
+tier = "full"
+filename = "2013_firL2Linfeps.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL2Linfeps.cbf.gz"
+
+[[socp]]
+name = "firL2a"
+tier = "full"
+filename = "2013_firL2a.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firL2a.cbf.gz"
+
+[[socp]]
+name = "firLinf"
+tier = "core"
+filename = "2013_firLinf.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_firLinf.cbf.gz"
+
+[[socp]]
+name = "wbNRL"
+tier = "core"
+filename = "2013_wbNRL.cbf.gz"
+url = "https://cblib.zib.de/download/all/2013_wbNRL.cbf.gz"
+
+[[lp_netlib]]
+name = "afiro"
+tier = "core"
+filename = "afiro"
+url = "https://netlib.org/lp/data/afiro"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "adlittle"
+tier = "core"
+filename = "adlittle"
+url = "https://netlib.org/lp/data/adlittle"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "blend"
+tier = "core"
+filename = "blend"
+url = "https://netlib.org/lp/data/blend"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "sc50a"
+tier = "core"
+filename = "sc50a"
+url = "https://netlib.org/lp/data/sc50a"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "sc50b"
+tier = "core"
+filename = "sc50b"
+url = "https://netlib.org/lp/data/sc50b"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "sc105"
+tier = "core"
+filename = "sc105"
+url = "https://netlib.org/lp/data/sc105"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "sc205"
+tier = "core"
+filename = "sc205"
+url = "https://netlib.org/lp/data/sc205"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "kb2"
+tier = "core"
+filename = "kb2"
+url = "https://netlib.org/lp/data/kb2"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "share1b"
+tier = "core"
+filename = "share1b"
+url = "https://netlib.org/lp/data/share1b"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "share2b"
+tier = "core"
+filename = "share2b"
+url = "https://netlib.org/lp/data/share2b"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "recipe"
+tier = "core"
+filename = "recipe"
+url = "https://netlib.org/lp/data/recipe"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "ship04l"
+tier = "core"
+filename = "ship04l"
+url = "https://netlib.org/lp/data/ship04l"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "ship04s"
+tier = "core"
+filename = "ship04s"
+url = "https://netlib.org/lp/data/ship04s"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "ship08l"
+tier = "core"
+filename = "ship08l"
+url = "https://netlib.org/lp/data/ship08l"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "ship12s"
+tier = "core"
+filename = "ship12s"
+url = "https://netlib.org/lp/data/ship12s"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "fit1d"
+tier = "core"
+filename = "fit1d"
+url = "https://netlib.org/lp/data/fit1d"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "fit2d"
+tier = "core"
+filename = "fit2d"
+url = "https://netlib.org/lp/data/fit2d"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "pilot4"
+tier = "core"
+filename = "pilot4"
+url = "https://netlib.org/lp/data/pilot4"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "pilot87"
+tier = "core"
+filename = "pilot87"
+url = "https://netlib.org/lp/data/pilot87"
+note = "Netlib compact encoding may need emps before MPS import."
+
+[[lp_netlib]]
+name = "pilotnov"
+tier = "core"
+filename = "pilotnov"
+url = "https://netlib.org/lp/data/pilotnov"
+note = "Netlib compact encoding may need emps before MPS import."

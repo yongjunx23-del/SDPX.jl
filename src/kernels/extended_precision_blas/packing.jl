@@ -1,27 +1,3 @@
-"""
-    pack_columns!(destination, source, rows, columns)
-
-Copy a logical `rows × columns` panel into contiguous column-major storage.
-The caller owns both buffers, so the loop performs no allocation. Sparse
-SDPX packing supplies columns in shared-pattern groups before calling the
-matrix kernels; dense panels are already in this layout.
-"""
-function pack_columns!(
-    destination::AbstractMatrix{T},
-    source::AbstractMatrix{T},
-    rows::Int=size(source, 1),
-    columns::Int=size(source, 2),
-) where {T}
-    size(destination, 1) >= rows ||
-        throw(DimensionMismatch("packed destination has too few rows"))
-    size(destination, 2) >= columns ||
-        throw(DimensionMismatch("packed destination has too few columns"))
-    @inbounds for column in 1:columns, row in 1:rows
-        destination[row, column] = source[row, column]
-    end
-    return destination
-end
-
 prepare_storage!(array::AbstractArray) = array
 
 function prepare_storage!(array::AbstractArray{BigFloat})

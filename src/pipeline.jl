@@ -64,6 +64,21 @@ struct EqualityPresolveMap{T}
     original_count::Int
     keep::Vector{Int}
     multiplier_map::Matrix{T}
+    planning_evidence::EqualityPlanningEvidence
+end
+
+
+function EqualityPresolveMap{T}(
+    original_count::Int,
+    keep::Vector{Int},
+    multiplier_map::Matrix{T},
+) where {T}
+    return EqualityPresolveMap{T}(
+        original_count,
+        keep,
+        multiplier_map,
+        EqualityPlanningEvidence(original_count; reason=:compatibility),
+    )
 end
 
 @inline _presolve_enabled(opts::SolverOptions) =
@@ -83,6 +98,7 @@ function EqualityPresolveMap(
         original_count,
         keep,
         multiplier_map,
+        EqualityPlanningEvidence(original_count; reason=:compatibility),
     )
 end
 
@@ -91,6 +107,10 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         opts.presolve in (:auto, :off, :on) ||
         throw(ArgumentError(
             "presolve must be false/:off, true/:on, or :auto",
+        ))
+    opts.sparse isa Bool || opts.sparse in (:auto, :dense, :sparse, :on, :off) ||
+        throw(ArgumentError(
+            "sparse storage must be false/:dense, true/:sparse, or :auto",
         ))
     opts.parameter_policy in (:fixed, :auto) ||
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
@@ -104,6 +124,10 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
     opts.equality_solver in (:auto, :normal_equations, :qr) ||
         throw(ArgumentError(
             "equality_solver must be :auto, :normal_equations, or :qr",
+        ))
+    opts.linear_algebra_backend in (:auto, :standard, :bfla, :multifloat, :legacy) ||
+        throw(ArgumentError(
+            "linear_algebra_backend must be :auto, :standard, :bfla, :multifloat, or :legacy",
         ))
     zero(T) < opts.β < one(T) ||
         throw(ArgumentError("β must be strictly between zero and one"))
@@ -154,9 +178,9 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "scaling must be :auto, :none, or :equilibrate",
         ))
-    opts.formulation in (:auto, :primal, :dual) ||
+    opts.formulation in (:auto, :primal, :normal_equations, :dual, :augmented) ||
         throw(ArgumentError(
-            "formulation must be :auto, :primal, or :dual",
+            "formulation must be :auto, :primal, :normal_equations, :dual, or :augmented",
         ))
     opts.chordal_decomposition in (:auto, :off, :on) ||
         throw(ArgumentError(
@@ -329,10 +353,36 @@ function _supports_owned_bigfloat_arrow_equalities(
     return all(==(1), frequency)
 end
 
-function _runtime_schur_backend(prob::SDPProblem)
-    if _use_sparse_schur_sdp(prob)
-        return :sparse_schur_cholesky
-    end
+function _runtime_schur_backend(
+    prob::SDPProblem,
+    equality_solver::Symbol=:auto,
+)
+    return kkt_backend_from_formulation(
+        _runtime_schur_formulation(prob, equality_solver),
+        :sdp_primal_dual,
+        prob.dims.n,
+    )
+end
+
+"""
+    _runtime_schur_formulation(prob, equality_solver) -> FormulationPlan
+
+Choose the mathematical SDP Schur formulation from structure alone. Backend
+selection occurs afterward through `kkt_backend_from_formulation`, so LA
+provider capabilities cannot reverse-select the mathematical system.
+"""
+function _runtime_schur_formulation(
+    prob::SDPProblem,
+    equality_solver::Symbol=:auto,
+    ;
+    storage_request::Union{Nothing,Symbol}=nothing,
+)
+    equality_solver in (:auto, :normal_equations, :qr) ||
+        throw(ArgumentError("equality_solver must be :auto, :normal_equations, or :qr"))
+    # Preserve the historical Workspace precedence.  Exact block-arrow
+    # structure is a mathematical reduction, while sparse Schur is an
+    # implementation of the general system, so Arrow wins when both gates
+    # happen to apply.
     if prob.cons isa SparseCons
         frequency = zeros(Int, prob.dims.m)
         for variables in prob.cons.active, variable in variables
@@ -346,12 +396,77 @@ function _runtime_schur_backend(prob::SDPProblem)
             _supports_owned_bigfloat_arrow_equalities(prob)
         if has_arrow && equality_compatible &&
            bigfloat_equality_supported
-            return :block_arrow
+            return FormulationPlan(
+                BlockArrowElimination(),
+                :exact_singleton_local_structure,
+                :structural_planner,
+            )
         end
     end
-    return prob.structure.schur_density >= 0.15 ?
-           :dense_cholesky :
-           :dense_cholesky_fallback
+    # An explicit sparse-Schur request is a hard route commitment.  Generic
+    # MPFR/MultiFloat sparse-Schur is supported for equality-free normal
+    # equations; equality-bearing generic requests remain fail-closed before
+    # workspace allocation.  The exact block-arrow route above is still
+    # allowed because it never builds a generic Schur factor.
+    schur_plan = prob.structure.schur_plan
+    requested_storage = storage_request === nothing ?
+                        schur_plan.requested : storage_request
+    selected_storage = storage_request === nothing ||
+                       requested_storage === :auto ?
+                       schur_plan.storage : requested_storage
+    requested_storage in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse/storage policy must be :auto, :dense, or :sparse",
+    ))
+    if requested_storage === :sparse &&
+       selected_storage === :sparse &&
+       !_use_sparse_schur_sdp(prob)
+        throw(ArgumentError(
+            "explicit sparse Schur requires equality-free SparseCons and a " *
+            "provider-native Cholesky path; use sparse=:dense",
+        ))
+    end
+    if requested_storage === :sparse &&
+       equality_solver === :qr &&
+       prob.dims.n > 0
+        throw(ArgumentError(
+            "explicit sparse Schur is incompatible with equality_solver=:qr; " *
+            "use equality_solver=:normal_equations or sparse=:dense",
+        ))
+    end
+    if requested_storage === :auto &&
+       selected_storage === :sparse &&
+       !_use_sparse_schur_sdp(prob)
+        # Auto may choose dense only through this explicit pre-execution
+        # provider gate; no numeric try-sparse/fallback happens in Workspace.
+        return FormulationPlan(
+            DenseNormalEquations(),
+            :auto_sparse_provider_unavailable,
+            :structural_planner,
+        )
+    end
+    # The current sparse-Schur workspace implements normal-equation equality
+    # elimination. An explicit QR request therefore has to be reflected in the
+    # plan *before* memory preflight/workspace construction; otherwise the plan
+    # says sparse while the runtime silently allocates the dense route.
+    if selected_storage === :sparse &&
+       equality_solver !== :qr &&
+       _use_sparse_schur_sdp(prob)
+        return FormulationPlan(
+            SparseNormalEquations(),
+            :sparse_schur_structure,
+            :structural_planner,
+        )
+    end
+    # Both remaining density regimes execute the same dense Cholesky backend.
+    # The old `:dense_cholesky_fallback` label described why sparse structure
+    # was not used, not a distinct runtime implementation, and therefore made
+    # planned/executed parity impossible to state precisely.
+    return FormulationPlan(
+        DenseNormalEquations(),
+        equality_solver === :qr ?
+        :equality_rrqr_requires_dense_route : :general_dense_route,
+        :structural_planner,
+    )
 end
 
 """
@@ -609,6 +724,17 @@ function _mixed_reduced_arrow_decision(
     opts::SolverOptions{T},
     available_memory_bytes::Integer,
 ) where {T}
+    if opts.refine_policy === :fixed
+        return ExtendedPrecisionBLAS.CrossoverDecision(
+            false,
+            :fixed_refinement_policy,
+            1.0,
+            0,
+            0.0,
+            0.0,
+            ExtendedPrecisionBLAS.KernelConfig(),
+        )
+    end
     mixed_type =
         T === BigFloat ? mixed_arrow_arithmetic(T) : nothing
     if mixed_type === nothing
@@ -832,86 +958,43 @@ this policy in [`build_execution_plan`](@ref).
     parameter_strategy::Symbol,
 )
     algorithm === :lp_primal_dual && return :lp_geometric
-    # A diagonal PSD congruence generally destroys exact tracelessness. The
-    # native fixed-trace compiler performs its own per-block disk
-    # normalization and must therefore run in the verified original basis.
-    algorithm === :socp_fixed_trace_q3 && return :none
     parameter_profile === :large_lattice_dense_schur &&
         parameter_strategy === :fixed && return :none
     return :sdp_ruiz
 end
 
-# Automatic native-Q3 promotion is intentionally narrower than structural
-# eligibility.  The J40 controlled campaign is the first formulation-level
-# gate that passed all of: a 1.97x eight-worker solver speedup, sub-one-percent
-# run-to-run CV, a 9.6% one-worker improvement, identical certificates, and
-# lower same-allocation memory.  Do not extrapolate that result to Float64,
-# BigFloat, small models, or cheaper fixed-width expansions without equivalent
-# evidence.  The dimension helper keeps this measured policy independently
-# testable without constructing a multi-gigabyte benchmark in the unit suite.
-const _AUTO_Q3_MIN_BLOCKS = 4_096
-const _AUTO_Q3_MIN_VARIABLES = 8_192
-const _AUTO_Q3_MIN_EQUALITIES = 128
-const _AUTO_Q3_MIN_STORAGE_BYTES = 4 * sizeof(Float64)
+"""
+    resolve_execution_route(::AutoPlanner, prob, opts)
 
-@inline function _auto_fixed_trace_q3_dimensions(
-    arithmetic::Symbol,
-    storage::Symbol,
-    element_storage_bytes::Int,
-    blocks::Int,
-    variables::Int,
-    equalities::Int,
-)
-    return arithmetic === :fixed_extended &&
-           storage === :sparse &&
-           element_storage_bytes >= _AUTO_Q3_MIN_STORAGE_BYTES &&
-           blocks >= _AUTO_Q3_MIN_BLOCKS &&
-           variables >= _AUTO_Q3_MIN_VARIABLES &&
-           equalities >= _AUTO_Q3_MIN_EQUALITIES
-end
-
-@inline function _auto_fixed_trace_q3_policy(
-    prob::SDPProblem{T},
-    classification::ProblemClassification,
-) where {T}
-    ExtendedPrecisionBLAS.arithmetic_family(T) === :fixed_extended ||
-        return false
-    L, m, n, _ = prob.dims
-    return _auto_fixed_trace_q3_dimensions(
-        classification.arithmetic,
-        classification.storage,
-        sizeof(T),
-        L,
-        m,
-        n,
-    )
-end
-
-function build_execution_plan(
+Resolve the post-presolve value-level execution route.  This is the only
+place that chooses the mature algorithm formula; scaling, parameters, and
+resource-dependent backend choices remain late-bound below.
+"""
+function resolve_execution_route(
+    ::AutoPlanner,
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
+    ;
+    equality_evidence::EqualityPlanningEvidence=
+        _equality_evidence_without_rrqr(prob, :not_computed),
 ) where {T}
     classification = classify_problem(prob)
-    available = _available_memory_bytes()
-    reduced_arrow_decision =
-        _reduced_arrow_decision(prob, opts, available)
-    mixed_arrow_decision =
-        _mixed_reduced_arrow_decision(prob, opts, available)
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
+    opts.formulation === :dual && throw(ArgumentError(
+        "formulation=:dual is analysis-only in SDPX v0.5; no typed " *
+        "dual transform or reconstruction path is implemented",
+    ))
+    opts.formulation === :augmented &&
+        !(classification.cone in (:sdp, :socp)) &&
+        throw(ArgumentError(
+            "formulation=:augmented is supported only by the dense SDP/PSD-lift route",
+        ))
     soc_algorithm = classification.maximum_block_size <= 2 ?
                     :socp_psd2 : :socp_psd_lift
-    native_fixed_trace_q3 =
-        opts.mode === OPTIMIZE &&
-        opts.scaling !== :equilibrate &&
-        _fixed_trace_q3_eligible(prob)
-    automatic_fixed_trace_q3 =
-        native_fixed_trace_q3 &&
-        _auto_fixed_trace_q3_policy(prob, classification)
     algorithm = if opts.algorithm === :auto
         classification.cone === :lp && opts.mode === OPTIMIZE ?
         :lp_primal_dual :
-        automatic_fixed_trace_q3 ? :socp_fixed_trace_q3 :
         classification.cone === :socp ? soc_algorithm :
         :sdp_primal_dual
     elseif opts.algorithm === :lp
@@ -924,12 +1007,146 @@ function build_execution_plan(
         classification.cone === :socp || throw(ArgumentError(
             "algorithm=:socp requires Lorentz-compatible cone blocks",
         ))
-        native_fixed_trace_q3 ? :socp_fixed_trace_q3 : soc_algorithm
+        soc_algorithm
     else
         # `algorithm=:sdp` is the stable reference/rollback path even when
         # the model is exactly SOC-representable.
         :sdp_primal_dual
     end
+    if opts.formulation === :augmented &&
+       !(algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift))
+        throw(ArgumentError(
+            "formulation=:augmented requires the dense SDP/PSD-lift solver; " *
+            "dedicated LP and native Q3 routes are unsupported",
+        ))
+    end
+    if opts.formulation === :normal_equations &&
+       algorithm === :lp_primal_dual
+        throw(ArgumentError(
+            "formulation=:normal_equations requires the dense SDP/PSD-lift " *
+            "solver; the dedicated LP route has its own Newton system",
+        ))
+    end
+    return ResolvedExecutionRoute(
+        prob,
+        opts,
+        classification,
+        equality_evidence,
+        algorithm,
+        :value_level_mature_formula,
+        _EXECUTION_ROUTE_TOKEN,
+    )
+end
+
+function _validate_execution_route(
+    route::ResolvedExecutionRoute{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    route.problem === prob || throw(ArgumentError(
+        "resolved execution route belongs to a different problem",
+    ))
+    route.options === opts || throw(ArgumentError(
+        "resolved execution route belongs to different solver options",
+    ))
+    route.provenance === :value_level_mature_formula || throw(ArgumentError(
+        "resolved execution route has unknown provenance",
+    ))
+    route.algorithm in (
+        :lp_primal_dual,
+        :socp_psd2,
+        :socp_psd_lift,
+        :sdp_primal_dual,
+    ) || throw(ArgumentError("resolved execution route has invalid algorithm"))
+    return nothing
+end
+
+function _formulation_backend_feasible(
+    ::Type{T},
+    opts::SolverOptions,
+    route::Symbol,
+) where {T}
+    try
+        plan_la_backend(
+            T;
+            requested=opts.linear_algebra_backend,
+            route,
+            threads=max(opts.threads, 1),
+            equality_solver=opts.equality_solver,
+        )
+        return true
+    catch exception
+        exception isa InterruptException && rethrow()
+        exception isa ArgumentError || rethrow()
+        return false
+    end
+end
+
+function _dense_formulation_feasibility(
+    ::Type{T},
+    prob::SDPProblem,
+    opts::SolverOptions,
+    available_memory::Int,
+) where {T}
+    normal_bytes = estimate_dense_workspace_bytes(
+        prob,
+        max(opts.threads, 1),
+    )
+    augmented_bytes = estimate_dense_augmented_workspace_bytes(
+        prob,
+        max(opts.threads, 1),
+    )
+    return FormulationFeasibility(
+        _formulation_backend_feasible(T, opts, :dense_cholesky),
+        opts.equality_solver !== :qr &&
+            _formulation_backend_feasible(T, opts, :dense_augmented_ldlt),
+        available_memory <= 0 || normal_bytes <= available_memory,
+        available_memory <= 0 || augmented_bytes <= available_memory,
+        normal_bytes,
+        augmented_bytes,
+        opts.equality_solver === :qr ?
+        :augmented_incompatible_equality_solver :
+        :augmented_backend_capability_unavailable,
+    )
+end
+
+function _execution_route_equality_evidence(
+    features::DenseFormulationFeatures,
+    evidence::EqualityPlanningEvidence,
+)
+    features.equalities == evidence.rank_after &&
+        return evidence
+    return EqualityPlanningEvidence(
+        false,
+        false,
+        features.equalities,
+        features.equalities,
+        NaN,
+        :planning_problem_differs_from_equality_basis,
+    )
+end
+
+"""
+    build_execution_plan(::AutoPlanner, prob, route)
+
+Consume a route resolved after equality presolve.  The remaining code is the
+existing late-bound plan construction and deliberately keeps its scaling,
+parameter, memory, backend, and scheduling semantics unchanged.
+"""
+function build_execution_plan(
+    ::AutoPlanner,
+    prob::SDPProblem{T},
+    route::ResolvedExecutionRoute{T},
+) where {T}
+    opts = route.options
+    _validate_execution_route(route, prob, opts)
+    classification = route.classification
+    algorithm = route.algorithm
+    available = _available_memory_bytes()
+    reduced_arrow_decision =
+        _reduced_arrow_decision(prob, opts, available)
+    mixed_arrow_decision =
+        _mixed_reduced_arrow_decision(prob, opts, available)
     selected = if opts.parameter_policy === :auto
         recommended_parameters(prob, opts)
     else
@@ -969,13 +1186,171 @@ function build_execution_plan(
     else
         :none
     end
+    formulation_decision = nothing
+    formulation_plan = if algorithm in (
+        :sdp_primal_dual,
+        :socp_psd2,
+        :socp_psd_lift,
+    )
+        structural_formulation =
+            _runtime_schur_formulation(
+                prob,
+                opts.equality_solver;
+                storage_request=_normalize_kkt_storage_request(opts.sparse),
+            )
+        dense_features = opts.formulation === :normal_equations ||
+                         structural_formulation.formulation isa
+                         DenseNormalEquations ?
+                         dense_formulation_features(prob) : nothing
+        equality_evidence = dense_features === nothing ?
+                            route.equality_evidence :
+                            _execution_route_equality_evidence(
+                                dense_features,
+                                route.equality_evidence,
+                            )
+        feasibility = nothing
+        if opts.formulation === :normal_equations ||
+           (opts.formulation === :primal &&
+            structural_formulation.formulation isa DenseNormalEquations)
+            feasibility = _dense_formulation_feasibility(
+                T,
+                prob,
+                opts,
+                available,
+            )
+            decision = plan_formulation(
+                dense_features,
+                opts.formulation,
+                equality_evidence,
+                feasibility,
+            )
+            formulation_decision = decision
+            FormulationPlan(
+                DenseNormalEquations(),
+                decision.reason,
+                :explicit_formulation_policy,
+            )
+        elseif opts.formulation === :primal
+            # `:primal` predates the dense formulation A/B. Preserve its
+            # historical meaning: it fixes primal orientation but does not
+            # disable exact block-arrow or sparse-normal structural routes.
+            structural_formulation
+        elseif opts.formulation === :augmented
+            prob.dims.m > 0 || throw(ArgumentError(
+                "formulation=:augmented requires at least one primal Newton variable",
+            ))
+            structural_formulation.formulation isa DenseNormalEquations ||
+                throw(ArgumentError(
+                    "formulation=:augmented requires the general dense KKT route; " *
+                    "sparse and block-arrow routes are not implemented",
+                ))
+            opts.equality_solver === :qr && throw(ArgumentError(
+                "formulation=:augmented does not use equality_solver=:qr; " *
+                "dependent equalities must be removed by presolve",
+            ))
+            feasibility = _dense_formulation_feasibility(
+                T,
+                prob,
+                opts,
+                available,
+            )
+            decision = plan_formulation(
+                dense_features,
+                :augmented,
+                equality_evidence,
+                feasibility,
+            )
+            formulation_decision = decision
+            FormulationPlan(
+                DenseAugmentedKKT(),
+                decision.reason,
+                :explicit_formulation_policy,
+            )
+        elseif opts.formulation === :auto &&
+               structural_formulation.formulation isa DenseNormalEquations
+            feasibility = _dense_formulation_feasibility(
+                T,
+                prob,
+                opts,
+                available,
+            )
+            decision = plan_formulation(
+                dense_features,
+                :auto,
+                equality_evidence,
+                feasibility,
+            )
+            formulation_decision = decision
+            FormulationPlan(
+                decision.selected === :dense_augmented_kkt ?
+                DenseAugmentedKKT() : DenseNormalEquations(),
+                decision.reason,
+                :automatic_formulation_planner,
+            )
+        else
+            structural_formulation
+        end
+    else
+        FormulationPlan(
+            NoKKTFormulation(),
+            :dedicated_lp_system,
+            :structural_planner,
+        )
+    end
+    kkt_backend = kkt_backend_from_formulation(
+        formulation_plan,
+        algorithm,
+        classification.equalities,
+    )
+    generic_mixed_applicable =
+        algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
+        kkt_backend in (:dense_cholesky, :dense_cholesky_fallback)
+    generic_mixed_decision = generic_mixed_applicable &&
+                             opts.refine_policy !== :fixed ?
+        _mixed_precision_workspace_decision(
+            prob,
+            opts.mixed_precision_kkt,
+            opts.mixed_precision_memory_fraction;
+            available_memory_bytes=available,
+        ) : (
+            enabled=false,
+            reason=generic_mixed_applicable ?
+                   :fixed_refinement_policy : :not_applicable,
+            required_bytes=0,
+            memory_limit_bytes=0,
+        )
+    reduced_arrow_enabled =
+        kkt_backend === :block_arrow && reduced_arrow_decision.enabled
+    mixed_reduced_arrow_enabled =
+        kkt_backend === :block_arrow && mixed_arrow_decision.enabled
+    generic_mixed_enabled = generic_mixed_decision.enabled
+    mixed_precision_mode =
+        generic_mixed_enabled || mixed_reduced_arrow_enabled ?
+        opts.mixed_precision_kkt : :off
+    backend_fallback_chain = if mixed_reduced_arrow_enabled
+        (:block_arrow,)
+    elseif mixed_precision_mode !== :off
+        (:dense_cholesky,)
+    else
+        ()
+    end
+    backend_config = BackendConfiguration(
+        kkt_backend,
+        opts.equality_solver,
+        reduced_arrow_enabled,
+        mixed_reduced_arrow_enabled,
+        mixed_precision_mode,
+        backend_fallback_chain,
+        algorithm === :lp_primal_dual,
+    )
+
     requested_threads = max(opts.threads, 1)
     mixed_arrow_threads =
         classification.arithmetic === :bigfloat &&
-        mixed_arrow_decision.enabled
+        mixed_reduced_arrow_enabled
     native_bigfloat_reduced =
         classification.arithmetic === :bigfloat &&
-        reduced_arrow_decision.enabled
+        reduced_arrow_enabled
     owned_bigfloat_arrow_equalities =
         classification.arithmetic === :bigfloat &&
         _supports_owned_bigfloat_arrow_equalities(prob)
@@ -984,8 +1359,6 @@ function build_execution_plan(
         algorithm,
     )
     selected_threads =
-        algorithm === :socp_fixed_trace_q3 ?
-        min(requested_threads, Base.Threads.nthreads()) :
         classification.arithmetic === :bigfloat &&
         !mixed_arrow_threads &&
         !native_bigfloat_reduced &&
@@ -995,6 +1368,23 @@ function build_execution_plan(
             Base.Threads.nthreads(),
             lp_bigfloat_thread_limit,
         ) : min(requested_threads, Base.Threads.nthreads())
+    if reduced_arrow_enabled || mixed_reduced_arrow_enabled
+        frequency = zeros(Int, prob.dims.m)
+        for variables in (prob.cons::SparseCons{T}).active
+            for variable in variables
+                frequency[variable] += 1
+            end
+        end
+        selected_threads = min(
+            selected_threads,
+            reduced_arrow_solver_worker_count(
+                mixed_reduced_arrow_enabled ? mixed_arrow_arithmetic(T) : T,
+                selected_threads,
+                prob.dims.L,
+                count(>(1), frequency),
+            ),
+        )
+    end
     if classification.arithmetic === :float64 &&
        classification.cone === :sdp &&
        classification.maximum_block_size <= 2 &&
@@ -1005,38 +1395,54 @@ function build_execution_plan(
     end
     schedule = if selected_threads == 1
         :serial
-    elseif algorithm === :socp_fixed_trace_q3
-        classification.arithmetic === :bigfloat ?
-        :owned_q3_blocks_and_gram_tiles :
-        :q3_contiguous_blocks
     elseif lp_bigfloat_thread_limit > 1
         :lp_bigfloat_panels
     elseif owned_bigfloat_arrow_equalities
         :owned_bigfloat_equality_tiles
     elseif mixed_arrow_threads
         :mixed_arrow_contiguous_blocks
-    elseif reduced_arrow_decision.enabled
+    elseif reduced_arrow_enabled
         :reduced_arrow_contiguous_blocks
     elseif classification.size === :small
         :static_columns
     else
         :blocked_dynamic
     end
-    kkt_backend = algorithm === :socp_fixed_trace_q3 ?
-                  :q3_block_diagonal_equality :
-                  algorithm === :lp_primal_dual ?
-                  (
-                      classification.equalities == 0 ?
-                      :positive_definite_cholesky :
-                      :dense_lu
-                  ) :
-                  _runtime_schur_backend(prob)
     budget = available > 0 ?
              floor(Int, available * opts.extended_precision_memory_fraction) : 0
-    gram_kernel = if algorithm === :socp_fixed_trace_q3
-        T <: Union{Float32,Float64} ?
-        :blas_triangular_syrk : :automatic_q3_triangular_syrk
-    elseif algorithm === :lp_primal_dual
+    storage_policy = _normalize_kkt_storage_request(opts.sparse)
+    if algorithm === :lp_primal_dual && storage_policy === :sparse
+        prob.cons isa SparseCons || throw(ArgumentError(
+            "storage=:sparse requires a structurally sparse LP input",
+        ))
+        prob.dims.n == 0 || throw(ArgumentError(
+            "explicit sparse LP KKT with equality rows is unsupported; " *
+            "use storage=:dense",
+        ))
+    end
+    auto_sparse_equalities_dense =
+        algorithm === :lp_primal_dual &&
+        storage_policy === :auto &&
+        prob.cons isa SparseCons &&
+        prob.dims.n > 0 &&
+        classification.storage === :sparse
+    auto_extended_sparse_dense =
+        algorithm === :lp_primal_dual &&
+        storage_policy === :auto &&
+        supports_sparse_generic(T) &&
+        classification.storage === :sparse
+    storage_selected = storage_policy === :auto ?
+                       (auto_sparse_equalities_dense || auto_extended_sparse_dense ?
+                        :dense : classification.storage) :
+                       storage_policy
+    storage_reason = storage_policy === :auto ?
+                     (auto_sparse_equalities_dense ?
+                      :auto_sparse_equalities_dense_route :
+                      auto_extended_sparse_dense ?
+                      :auto_extended_arithmetic_dense_route :
+                      :classification_storage) :
+                     storage_policy === :sparse ? :explicit_sparse : :explicit_dense
+    gram_kernel = if algorithm === :lp_primal_dual
         if T === Float64
             selected_threads > 1 &&
             classification.cone_rows * classification.variables^2 >= 2_000_000 &&
@@ -1064,9 +1470,9 @@ function build_execution_plan(
         else
             :serial_weighted_outer_product
         end
-    elseif mixed_arrow_decision.enabled
+    elseif mixed_reduced_arrow_enabled
         :mixed_float64x4_reduced_arrow_syrk
-    elseif reduced_arrow_decision.enabled
+    elseif reduced_arrow_enabled
         reduced_arrow_syrk_label(T, selected_threads > 1)
     elseif _uses_fused_arrow(prob)
         :fused_arrow_2x2
@@ -1077,6 +1483,17 @@ function build_execution_plan(
     else
         :automatic_extended_precision
     end
+    # Linear-algebra arithmetic is resolved once, after structural planning,
+    # and carried by the immutable plan into Workspace.  Standard routes use
+    # Julia generic or BLAS/LAPACK kernels; MFLA is an explicit provider A/B.
+    la_config = plan_la_backend(
+        T;
+        requested=opts.linear_algebra_backend,
+        route=backend_config.mixed_precision_mode !== :off ?
+              :mixed_precision : kkt_backend,
+        threads=selected_threads,
+        equality_solver=opts.equality_solver,
+    )
     adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
                          recommended_adaptive_sigma_max(
                              selected.profile,
@@ -1089,6 +1506,9 @@ function build_execution_plan(
         algorithm,
         scaling,
         kkt_backend,
+        backend_config,
+        formulation_plan,
+        la_config,
         gram_kernel,
         schedule,
         selected_threads,
@@ -1102,13 +1522,99 @@ function build_execution_plan(
             predictor=selected.predictor,
             strategy=opts.parameter_strategy,
             adaptive_sigma_max,
+            equality_solver=opts.equality_solver,
+            formulation=opts.formulation,
+            formulation_decision=formulation_decision === nothing ?
+                (
+                    requested=opts.formulation,
+                    preferred=formulation_symbol(formulation_plan),
+                    selected=formulation_symbol(formulation_plan),
+                    reason=formulation_plan.reason,
+                    candidates=(),
+                ) : formulation_decision_summary(formulation_decision),
+            planned_factorization=
+                formulation_plan.formulation isa DenseAugmentedKKT ?
+                :pivoted_symmetric_ldlt :
+                formulation_plan.formulation isa DenseNormalEquations ?
+                :cholesky : :specialized,
+            planned_regularization=
+                formulation_plan.formulation isa DenseAugmentedKKT ?
+                :schur_diagonal_retry : :existing_route_policy,
+            linear_algebra_backend=opts.linear_algebra_backend,
+            extended_precision_blas=opts.extended_precision_blas,
+            extended_precision_memory_fraction=
+                opts.extended_precision_memory_fraction,
+            mixed_precision_kkt=opts.mixed_precision_kkt,
+            mixed_precision_memory_fraction=
+                opts.mixed_precision_memory_fraction,
+            execution_route_provenance=route.provenance,
+            storage_policy,
+            storage_selected,
+            storage_reason,
+            storage_dimension=classification.variables + classification.equalities,
+            storage_input_nnz=0,
+            storage_density=classification.expected_schur_density,
+            reduced_arrow_decision,
+            mixed_reduced_arrow_decision=mixed_arrow_decision,
+            generic_mixed_precision_decision=generic_mixed_decision,
         ),
     )
+end
+
+"""Compatibility delegate for the historical two-argument entry point."""
+function build_execution_plan(
+    prob::SDPProblem{T},
+    opts::SolverOptions{T}=SolverOptions{T}(),
+) where {T}
+    return build_execution_plan(AutoPlanner(), prob, resolve_execution_route(
+        AutoPlanner(), prob, opts,
+    ))
+end
+
+"""Compatibility delegate for the historical planner/options entry point."""
+function build_execution_plan(
+    planner::AutoPlanner,
+    prob::SDPProblem{T},
+    opts::SolverOptions{T}=SolverOptions{T}(),
+) where {T}
+    return build_execution_plan(
+        planner,
+        prob,
+        resolve_execution_route(planner, prob, opts),
+    )
+end
+
+"""Lower resolved frontend options without introducing a second planner."""
+function build_execution_plan(
+    planner::AutoPlanner,
+    prob::SDPProblem{T},
+    resolved::ResolvedSolveOptions{T},
+) where {T}
+    return build_execution_plan(planner, prob, resolved.core)
+end
+
+function planned_backend_name(plan::ExecutionPlan)
+    return planned_backend_name(plan.backend_config)
 end
 
 function _empty_presolve_report(prob::SDPProblem)
     n = prob.dims.n
     return PresolveReport(n, n, 0, 0, 0, false, collect(1:n), 0.0)
+end
+
+@inline function _equality_evidence_without_rrqr(
+    prob::SDPProblem,
+    reason::Symbol,
+)
+    n = prob.dims.n
+    return EqualityPlanningEvidence(
+        false,
+        n == 0,
+        n,
+        n,
+        NaN,
+        reason,
+    )
 end
 
 function _equality_column_scales(B::AbstractMatrix{T}) where {T}
@@ -1173,15 +1679,29 @@ function _normalized_equality_columns(
     return normalized
 end
 
-function _equality_rank_indices(
+@inline function _rrqr_relative_quality(diagonal, rank::Int)
+    rank == 0 && return 1.0
+    leading = view(diagonal, 1:rank)
+    largest = maximum(leading)
+    iszero(largest) && return 0.0
+    value = minimum(leading) / largest
+    return try
+        Float64(value)
+    catch exception
+        exception isa InterruptException && rethrow()
+        0.0
+    end
+end
+
+function _equality_rank_analysis(
     B::SparseMatrixCSC{Float64,Int},
     tolerance::Real,
 )
     n = size(B, 2)
-    n == 0 && return Int[]
+    n == 0 && return (keep=Int[], quality=1.0, available=true)
     scales = _equality_column_scales(B)
     nonzero_columns = findall(!iszero, scales)
-    isempty(nonzero_columns) && return Int[]
+    isempty(nonzero_columns) && return (keep=Int[], quality=1.0, available=true)
     normalized =
         _normalized_equality_columns(B, nonzero_columns, scales)
     factor = qr(normalized)
@@ -1197,10 +1717,14 @@ function _equality_rank_indices(
     ) * scale
     rank_estimate = count(>(threshold), diagonal)
     selected = nonzero_columns[factor.pcol[1:rank_estimate]]
-    return sort!(Vector{Int}(selected))
+    return (
+        keep=sort!(Vector{Int}(selected)),
+        quality=_rrqr_relative_quality(diagonal, rank_estimate),
+        available=true,
+    )
 end
 
-function _equality_rank_indices(
+function _equality_rank_analysis(
     B::SparseMatrixCSC{T,Int},
     tolerance::Real,
 ) where {T}
@@ -1210,16 +1734,21 @@ function _equality_rank_indices(
     # the original arithmetic before changing the model. This avoids the old
     # all-or-nothing choice between densifying `B` and skipping numerical rank
     # presolve entirely.
-    size(B, 2) <= 2_048 || return collect(1:size(B, 2))
-    nnz(B) <= 100_000_000 || return collect(1:size(B, 2))
+    size(B, 2) <= 2_048 || return (
+        keep=collect(1:size(B, 2)), quality=NaN, available=false,
+    )
+    nnz(B) <= 100_000_000 || return (
+        keep=collect(1:size(B, 2)), quality=NaN, available=false,
+    )
     scales = _equality_column_scales(B)
     nonzero_columns = findall(!iszero, scales)
-    isempty(nonzero_columns) && return Int[]
+    isempty(nonzero_columns) && return (keep=Int[], quality=1.0, available=true)
     normalized =
         _normalized_equality_columns(B, nonzero_columns, scales)
     normalized_float = _ingest_owned_sparse(Float64, normalized)
-    all(isfinite, nonzeros(normalized_float)) ||
-        return collect(1:size(B, 2))
+    all(isfinite, nonzeros(normalized_float)) || return (
+        keep=collect(1:size(B, 2)), quality=NaN, available=false,
+    )
     factor = qr(normalized_float)
     diagonal_count = min(size(factor.R)...)
     diagonal = [
@@ -1240,12 +1769,16 @@ function _equality_rank_indices(
     rank_estimate = count(>(threshold), diagonal)
     selected =
         nonzero_columns[factor.pcol[1:rank_estimate]]
-    return sort!(Vector{Int}(selected))
+    return (
+        keep=sort!(Vector{Int}(selected)),
+        quality=_rrqr_relative_quality(diagonal, rank_estimate),
+        available=true,
+    )
 end
 
-function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
+function _equality_rank_analysis(B::AbstractMatrix{T}, tolerance::Real) where {T}
     n = size(B, 2)
-    n == 0 && return Int[]
+    n == 0 && return (keep=Int[], quality=1.0, available=true)
     # Equality presolve is part of the numerical algorithm, so its arithmetic
     # must be at least as wide as the solve arithmetic. Converting an extended
     # matrix to Float64 can silently erase a direction that is resolvable by
@@ -1256,7 +1789,7 @@ function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
     # wrote `x = 1` or `1e-30*x = 1e-30`.
     scales = _equality_column_scales(B)
     nonzero_columns = findall(!iszero, scales)
-    isempty(nonzero_columns) && return Int[]
+    isempty(nonzero_columns) && return (keep=Int[], quality=1.0, available=true)
     normalized =
         _normalized_equality_columns(B, nonzero_columns, scales)
     factor = qr(normalized, ColumnNorm())
@@ -1269,8 +1802,15 @@ function _equality_rank_indices(B::AbstractMatrix{T}, tolerance::Real) where {T}
     ) * scale
     rank = count(>(threshold), diagonal)
     selected = nonzero_columns[factor.p[1:rank]]
-    return sort!(Vector{Int}(selected))
+    return (
+        keep=sort!(Vector{Int}(selected)),
+        quality=_rrqr_relative_quality(diagonal, rank),
+        available=true,
+    )
 end
+
+_equality_rank_indices(B::AbstractMatrix, tolerance::Real) =
+    _equality_rank_analysis(B, tolerance).keep
 
 function _equality_elimination_check(
     prob::SDPProblem{T},
@@ -1466,6 +2006,8 @@ function _equality_presolve_map(
     coefficients=nothing,
     dependent_columns::Vector{Int}=Int[],
     scales=nothing,
+    planning_evidence::EqualityPlanningEvidence=
+        EqualityPlanningEvidence(prob.dims.n; reason=:not_computed),
 ) where {T}
     n = prob.dims.n
     multiplier_map = alloc_zeros(T, length(keep), n)
@@ -1474,7 +2016,12 @@ function _equality_presolve_map(
     end
     dropped = setdiff(collect(1:n), keep)
     isempty(dropped) &&
-        return EqualityPresolveMap{T}(n, keep, multiplier_map)
+        return EqualityPresolveMap{T}(
+            n,
+            keep,
+            multiplier_map,
+            planning_evidence,
+        )
 
     scales === nothing && (scales = _equality_column_scales(prob.B))
     isempty(dependent_columns) &&
@@ -1505,7 +2052,12 @@ function _equality_presolve_map(
             end
         end
     end
-    return EqualityPresolveMap{T}(n, keep, multiplier_map)
+    return EqualityPresolveMap{T}(
+        n,
+        keep,
+        multiplier_map,
+        planning_evidence,
+    )
 end
 
 function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
@@ -1516,9 +2068,21 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
        n == 0
         report = _empty_presolve_report(prob)
         keep = collect(1:n)
-        return prob, _equality_presolve_map(prob, keep), report
+        evidence = _equality_evidence_without_rrqr(
+            prob,
+            n == 0 ? :no_equalities : :equality_presolve_disabled,
+        )
+        return prob, _equality_presolve_map(
+            prob,
+            keep,
+            nothing,
+            Int[],
+            nothing,
+            evidence,
+        ), report
     end
-    keep = _equality_rank_indices(prob.B, opts.presolve_tolerance)
+    analysis = _equality_rank_analysis(prob.B, opts.presolve_tolerance)
+    keep = analysis.keep
     check = _equality_elimination_check(
         prob,
         keep,
@@ -1530,6 +2094,16 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         keep = collect(1:n)
     end
     consistent = check.consistent
+    planning_evidence = EqualityPlanningEvidence(
+        analysis.available,
+        analysis.available && check.elimination_valid && consistent,
+        n,
+        length(keep),
+        analysis.quality,
+        !analysis.available ? :rrqr_unavailable :
+        !check.elimination_valid ? :basis_relation_unverified :
+        !consistent ? :inconsistent_equalities : :verified_retained_basis,
+    )
     zero_columns = prob.B isa SparseMatrixCSC ?
                    count(column -> isempty(nzrange(prob.B, column)), 1:n) :
                    count(
@@ -1552,6 +2126,7 @@ function presolve_equalities(prob::SDPProblem{T}, opts::SolverOptions{T}) where 
         check.coefficients,
         check.dependent_columns,
         check.scales,
+        planning_evidence,
     )
     consistent || return prob, mapping, report
     length(keep) == n &&
@@ -1618,13 +2193,92 @@ rather than a central guess; see `estimate_sdp_workspace_bytes`."""
 const WORKSPACE_ESTIMATE_MARGIN_NUMERATOR = 3
 const WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR = 2
 # Array/object headers and allocator size classes are platform-dependent and
-# are not represented by an element count. Julia 1.12 on 64-bit Linux needed
-# 152 bytes more than the old estimate on a small workspace even after the
+# are not represented by an element count. As the immutable planner and
+# diagnostics snapshots grew, Julia 1.12 on 64-bit Linux needed roughly
+# 21 KiB more than the counted arrays on a small workspace even after the
 # multiplicative margin. Charge a conservative fixed amount plus one cache
 # line per major per-block workspace object; this is negligible for large
 # models but keeps the documented upper-bound contract portable.
-const WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES = 4096
+const WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES = 32 * 1024
 const WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES = 1024
+
+@inline function _workspace_estimate_with_margin(
+    counted::Int,
+    blocks::Int,
+    fixed_overhead::Int=WORKSPACE_ESTIMATE_FIXED_OVERHEAD_BYTES,
+)
+    counted >= typemax(Int) ÷ WORKSPACE_ESTIMATE_MARGIN_NUMERATOR &&
+        return typemax(Int)
+    element_bound = cld(
+        counted * WORKSPACE_ESTIMATE_MARGIN_NUMERATOR,
+        WORKSPACE_ESTIMATE_MARGIN_DENOMINATOR,
+    )
+    object_overhead = saturating_sum_bytes(
+        fixed_overhead,
+        saturating_bytes(
+            WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES,
+            blocks,
+        ),
+    )
+    return saturating_sum_bytes(element_bound, object_overhead)
+end
+
+"""
+    estimate_dense_workspace_bytes(prob, thread_count)
+
+Dimension-only conservative estimate for a general dense Workspace. Unlike
+`estimate_sdp_workspace_bytes`, it never walks coefficient storage: every
+block is charged as if every variable were active. This makes it suitable for
+pre-execution candidate filtering without taxing LP, sparse, arrow, or Q3
+routes with a full model scan.
+"""
+function estimate_dense_workspace_bytes(
+    prob::SDPProblem{T},
+    thread_count::Int,
+) where {T}
+    L, m, n, k = prob.dims
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    schur_bins = T === BigFloat ? 1 : min(max(thread_count, 1), L)
+    block_squares = sum(dimension -> dimension^2, k; init=0)
+    counted = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, m, m),
+        saturating_bytes(schur_bins, scalar_bytes, m, m),
+        saturating_bytes(scalar_bytes, m, n),
+        saturating_bytes(2, scalar_bytes, n, n),
+        saturating_bytes(8, scalar_bytes, m),
+        saturating_bytes(6, scalar_bytes, n),
+        saturating_bytes(scalar_bytes, L),
+        saturating_bytes(2, scalar_bytes, m),
+        saturating_bytes(2, scalar_bytes, n),
+        saturating_bytes(4, scalar_bytes, block_squares),
+        # Dense storage is the safe upper envelope for the implemented block
+        # workspaces: a sparse block can activate at most all m variables.
+        saturating_bytes(12, scalar_bytes, block_squares),
+        saturating_bytes(scalar_bytes, m, block_squares),
+    )
+    return _workspace_estimate_with_margin(counted, L)
+end
+
+"""
+    estimate_dense_augmented_workspace_bytes(prob, thread_count)
+
+Conservative dense estimate plus the two `(m+n)^2` matrices, three vectors,
+and object overhead owned by `DenseAugmentedKKTWorkspace`.
+"""
+function estimate_dense_augmented_workspace_bytes(
+    prob::SDPProblem{T},
+    thread_count::Int,
+) where {T}
+    base = estimate_dense_workspace_bytes(prob, thread_count)
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    dimension = saturating_sum_bytes(prob.dims.m, prob.dims.n)
+    counted = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, dimension, dimension),
+        saturating_bytes(3, scalar_bytes, dimension),
+    )
+    augmented = _workspace_estimate_with_margin(counted, 0)
+    return saturating_sum_bytes(base, augmented)
+end
 
 """
     dense_workspace_floor_bytes(::Type{T}, m, n, L, thread_count) -> Int
@@ -1660,6 +2314,30 @@ function dense_workspace_floor_bytes(::Type{T}, m::Integer, n::Integer,
         saturating_bytes(scalar_bytes, Int(m), Int(n)),
         saturating_bytes(2, scalar_bytes, Int(n), Int(n)),
     )
+end
+
+"""
+    dense_augmented_workspace_floor_bytes(T, m, n, L, thread_count)
+
+Dimension-only lower bound for the implemented dense augmented route. The
+ordinary dense Workspace remains allocated, so this adds its explicit
+`DenseAugmentedKKTWorkspace`: two `(m+n)^2` matrices and three vectors.
+"""
+function dense_augmented_workspace_floor_bytes(
+    ::Type{T},
+    m::Integer,
+    n::Integer,
+    L::Integer,
+    thread_count::Integer,
+) where {T}
+    base = dense_workspace_floor_bytes(T, m, n, L, thread_count)
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    dimension = saturating_sum_bytes(Int(m), Int(n))
+    augmented = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, dimension, dimension),
+        saturating_bytes(3, scalar_bytes, dimension),
+    )
+    return saturating_sum_bytes(base, augmented)
 end
 
 """
@@ -1752,31 +2430,39 @@ function estimate_sdp_workspace_bytes(
     L, m, n, k = prob.dims
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     if _use_sparse_schur_sdp(prob)
-        cons = prob.cons::SparseCons{Float64}
+        cons = prob.cons::SparseCons{T}
         packed_pairs = sum(
             ids -> length(ids) * (length(ids) + 1) ÷ 2,
             cons.active;
             init=0,
         )
         schur_nonzeros = prob.structure.schur_upper_nnz
+        # Float64/CHOLMOD stores Int32 CSC indices, while the generic
+        # BigFloat/MultiFloat provider owns a native-Int CSC.  Numeric arrays
+        # use the selected arithmetic's element width (BigFloat is accounted
+        # through the provider's storage-byte policy, not as Float64).
+        index_bytes = T === Float64 ? sizeof(Int32) : sizeof(Int)
         csc_bytes = saturating_sum_bytes(
-            saturating_bytes(8, schur_nonzeros),
-            saturating_bytes(4, schur_nonzeros + m + 1),
+            saturating_bytes(scalar_bytes, schur_nonzeros),
+            saturating_bytes(index_bytes, schur_nonzeros + m + 1),
         )
         # The selector guarantees that a completely filled lower Cholesky
         # factor still fits Int32. Use that worst case instead of guessing a
         # fill ratio from the input density.
         dense_factor_nonzeros = m * (m + 1) ÷ 2
-        factor_bytes = saturating_bytes(12, dense_factor_nonzeros)
-        packed_bytes = saturating_bytes(8, packed_pairs)
-        equality_solve_bytes = saturating_bytes(2, 8, m, n)
-        equality_gram_bytes = saturating_bytes(2, 8, n, n)
+        factor_bytes = saturating_sum_bytes(
+            saturating_bytes(scalar_bytes, dense_factor_nonzeros),
+            saturating_bytes(index_bytes * 3, dense_factor_nonzeros),
+        )
+        packed_bytes = saturating_bytes(scalar_bytes, packed_pairs)
+        equality_solve_bytes = saturating_bytes(2, scalar_bytes, m, n)
+        equality_gram_bytes = saturating_bytes(2, scalar_bytes, n, n)
         vector_bytes = saturating_bytes(
-            8,
+            scalar_bytes,
             12m + 8n + max(thread_count, 1) * m,
         )
         state_bytes = saturating_bytes(
-            8,
+            scalar_bytes,
             2m + 2n + 4sum(dimension -> dimension^2, k; init=0),
         )
         return saturating_sum_bytes(
@@ -1855,6 +2541,7 @@ function _attach_diagnostics(
     diagnostics_enabled::Bool,
     termination::NamedTuple=(reason=:none,),
     certificate::NamedTuple=(available=false,),
+    pipeline_timings::NamedTuple=NamedTuple(),
 ) where {T}
     diagnostics_enabled || return result
     core_time = result.timings === nothing ? NaN :
@@ -1872,6 +2559,7 @@ function _attach_diagnostics(
                       core=core_time,
                       pipeline=pipeline_time,
                   ),
+                  pipeline_timings,
               )
     memory = (
         workspace_bytes=workspace_bytes,
@@ -1885,13 +2573,138 @@ function _attach_diagnostics(
     # sparse Newton system at runtime, after the plan is frozen -- reported
     # a dense LU and a BLAS Gram kernel for solves that executed neither.
     executed = get(result.termination, :executed, NamedTuple())
+    executed_parameter_profile = get(
+        executed,
+        :parameter_profile,
+        plan.parameter_profile,
+    )
+    executed_parameters = get(
+        executed,
+        :executed_parameters,
+        plan.parameters,
+    )
+    actual_initial_parameters = merge(
+        plan.parameters,
+        (
+            beta=get(executed_parameters, :beta, plan.parameters.beta),
+            gamma=get(executed_parameters, :gamma, plan.parameters.gamma),
+            omega_p=get(
+                executed_parameters,
+                :omega_p,
+                plan.parameters.omega_p,
+            ),
+            omega_d=get(
+                executed_parameters,
+                :omega_d,
+                plan.parameters.omega_d,
+            ),
+            predictor=get(
+                executed_parameters,
+                :predictor,
+                plan.parameters.predictor,
+            ),
+            strategy=get(
+                executed_parameters,
+                :strategy,
+                plan.parameters.strategy,
+            ),
+            adaptive_sigma_max=get(
+                executed_parameters,
+                :adaptive_sigma_max,
+                plan.parameters.adaptive_sigma_max,
+            ),
+        ),
+    )
+    parameter_source = get(executed, :parameter_source, :plan)
     selected = (
         solver=get(executed, :solver, plan.algorithm),
         scaling=plan.scaling,
         kkt=get(executed, :kkt, plan.kkt_backend),
+        planned_backend=get(
+            executed,
+            :planned_backend,
+            planned_backend_name(plan),
+        ),
+        planned_kkt_formulation=plan.kkt_formulation,
+        requested_kkt_formulation=get(
+            plan.parameters,
+            :formulation,
+            :auto,
+        ),
+        formulation_decision=get(
+            plan.parameters,
+            :formulation_decision,
+            (
+                requested=:auto,
+                preferred=plan.kkt_formulation,
+                selected=plan.kkt_formulation,
+                reason=plan.formulation_plan.reason,
+                candidates=(),
+            ),
+        ),
+        executed_kkt_formulation=get(
+            executed,
+            :kkt_formulation,
+            :not_executed,
+        ),
+        planned_factorization=get(
+            plan.parameters,
+            :planned_factorization,
+            :not_applicable,
+        ),
+        executed_factorization=get(
+            executed,
+            :la_factorization,
+            :not_executed,
+        ),
+        planned_regularization=get(
+            plan.parameters,
+            :planned_regularization,
+            :not_recorded,
+        ),
+        executed_regularization=get(
+            executed,
+            :la_regularization,
+            nothing,
+        ),
+        executed_backend=get(
+            executed,
+            :executed_backend,
+            :not_executed,
+        ),
+        fallback_reason=get(
+            executed,
+            :fallback_reason,
+            :none,
+        ),
+        la_backend=get(executed, :la_backend, :not_executed),
+        la_executed_provider=get(executed, :la_provider, :not_executed),
+        la_executed_ownership=get(executed, :la_ownership, :not_executed),
+        la_fallback_reason=get(executed, :la_fallback_reason, :none),
+        la_factorization=get(executed, :la_factorization, :not_executed),
+        factor_diagnostics=get(executed, :factor_diagnostics, nothing),
+        planned_la_backend=plan.la_config.selected,
+        planned_la_fallback_reason=plan.la_config.fallback_reason,
+        la_provider=plan.la_config.provider,
+        la_ownership=plan.la_config.ownership,
+        planned_la_provider=plan.la_config.provider,
+        planned_la_ownership=plan.la_config.ownership,
+        backend_resolution=get(
+            executed,
+            :backend_resolution,
+            :planned,
+        ),
+        lp_formulation=get(
+            executed,
+            :lp_formulation,
+            :not_applicable,
+        ),
         gram=get(executed, :gram, plan.gram_kernel),
         equality=get(executed, :equality, :not_executed),
-        planned=(kkt=plan.kkt_backend, gram=plan.gram_kernel),
+        planned=(
+            kkt=plan.kkt_backend,
+            gram=plan.gram_kernel,
+        ),
         scheduling=plan.schedule,
         threads=plan.threads,
         effective_threads=get(executed, :effective_threads, plan.threads),
@@ -1913,8 +2726,16 @@ function _attach_diagnostics(
             :arrow_linear_solve,
             nothing,
         ),
-        parameter_profile=plan.parameter_profile,
-        initial_parameters=plan.parameters,
+        # `parameter_profile`/`initial_parameters` describe the parameters
+        # that actually reached the core when that provenance is available.
+        # Keep the pre-equilibration planner choice separately named so a
+        # post-Ruiz auto selection cannot be mistaken for the plan.
+        parameter_profile=executed_parameter_profile,
+        initial_parameters=actual_initial_parameters,
+        parameter_source,
+        executed_parameters,
+        planned_parameter_profile=plan.parameter_profile,
+        planned_parameters=plan.parameters,
         certificate=certificate,
     )
     diagnostics = SolveDiagnostics(
@@ -1950,11 +2771,78 @@ function _attach_diagnostics(
     )
 end
 
+"""Add measured public-frontend work without changing the result payload.
+
+Frontend wrappers may be nested (for example one-call ingest -> typed solve),
+so the phase is accumulated.  The helper is deliberately a pure result
+rewrite: it does not revisit planning, numerical state, or certification.
+"""
+function _with_frontend_timing(
+    result::SDPResult{T},
+    elapsed::Float64,
+    enabled::Bool,
+) where {T}
+    enabled || return result
+    result_timings = result.timings === nothing ?
+                     (frontend=elapsed,) :
+                     merge(
+                         result.timings,
+                         (
+                             frontend=
+                                 get(result.timings, :frontend, 0.0) + elapsed,
+                         ),
+                     )
+    diagnostics = result.diagnostics
+    updated_diagnostics = if diagnostics === nothing
+        nothing
+    else
+        diagnostic_timings = merge(
+            diagnostics.timings,
+            (
+                frontend=
+                    get(diagnostics.timings, :frontend, 0.0) + elapsed,
+            ),
+        )
+        SolveDiagnostics(
+            diagnostics.classification,
+            diagnostics.plan,
+            diagnostics.presolve,
+            diagnostic_timings,
+            diagnostics.memory,
+            diagnostics.selected_algorithms,
+            diagnostics.parameter_history,
+            diagnostics.warnings,
+            diagnostics.termination,
+        )
+    end
+    return SDPResult{T}(
+        result.status,
+        result.message,
+        result.x,
+        result.X,
+        result.y,
+        result.Y,
+        result.pObj,
+        result.dObj,
+        result.gap_rel,
+        result.p_res,
+        result.d_res,
+        result.iterations,
+        result.restarts,
+        result.regularizations,
+        result_timings,
+        result.parameter_history,
+        updated_diagnostics,
+        result.termination,
+    )
+end
+
 function _inconsistent_presolve_result(
     prob::SDPProblem{T},
     report::PresolveReport,
     plan::ExecutionPlan,
     opts::SolverOptions{T},
+    pipeline_timings::NamedTuple=NamedTuple(),
 ) where {T}
     # A negative fixed scalar block is exactly the dedicated LP zero-row
     # contradiction. Preserve that established, more specific termination
@@ -1988,9 +2876,32 @@ function _inconsistent_presolve_result(
             reason=termination_reason,
             certificate_method=:presolve_contradiction,
             certificate_generator=:analytic_presolve,
+            executed=(
+                solver=plan.algorithm,
+                kkt=:not_executed,
+                planned_backend=planned_backend_name(plan),
+                executed_backend=:not_executed,
+                fallback_reason=:none,
+                backend_resolution=:not_resolved,
+                lp_formulation=plan.algorithm === :lp_primal_dual ?
+                               :not_resolved : :not_applicable,
+                gram=:not_executed,
+            ),
         ),
     )
-    certificate = result_certificate(prob, result, opts)
+    certification_started = time_ns()
+    certificate = opts.certification ?
+                  result_certificate(prob, result, opts) :
+                  (available=false, reason=:certification_disabled)
+    recorded_pipeline_timings = opts.timing ?
+        merge(
+            pipeline_timings,
+            (
+                certification=
+                    get(pipeline_timings, :certification, 0.0) +
+                    (time_ns() - certification_started) / 1.0e9,
+            ),
+        ) : NamedTuple()
     return _attach_diagnostics(
         result,
         plan,
@@ -2004,6 +2915,7 @@ function _inconsistent_presolve_result(
         opts.diagnostics,
         (reason=:none,),
         certificate,
+        recorded_pipeline_timings,
     )
 end
 
@@ -2015,6 +2927,8 @@ function _time_limit_pipeline_result(
     warnings::Vector{String},
     diagnostics_enabled::Bool,
     max_time::Float64,
+    certification_enabled::Bool,
+    pipeline_timings::NamedTuple=NamedTuple(),
 ) where {T}
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
@@ -2050,5 +2964,10 @@ function _time_limit_pipeline_result(
         warnings,
         0,
         diagnostics_enabled,
+        (reason=:none,),
+        certification_enabled ?
+        (available=false,) :
+        (available=false, reason=:certification_disabled),
+        pipeline_timings,
     )
 end

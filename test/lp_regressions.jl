@@ -208,7 +208,7 @@ end
                 Matrix{T}(undef, 3, 0),
                 T(1e-20),
             )
-            @test factor isa SDPX.LPCholeskyFactor
+            @test factor isa SDPX.AbstractLACholeskyFactor
             @test issuccess(factor)
             rhs = T[1, -2, 3]
             expected =
@@ -217,6 +217,111 @@ end
             tolerance = T === BigFloat ? T(1e-65) : T(1e-12)
             @test rhs ≈ expected rtol=tolerance atol=tolerance
         end
+    end
+end
+
+function dense_lp_fixture(::Type{T}; with_equality::Bool=false) where {T}
+    c = T[1, 2]
+    G = T[1 0; 0 1; 1 1]
+    h = T[1, 1, 3]
+    if with_equality
+        return SDPX.linear_program(
+            c,
+            G,
+            h;
+            Aeq=T[1 1],
+            beq=T[3],
+            T=T,
+            sparse=false,
+            verbosity=0,
+        )
+    end
+    return SDPX.linear_program(
+        c,
+        G,
+        h;
+        T=T,
+        sparse=false,
+        verbosity=0,
+    )
+end
+
+@testset "dense LP provider planning and execution" begin
+    @testset "Float64 positive-definite and equality routes plan Standard" begin
+        for (with_equality, expected_kkt, expected_factor) in (
+            (false, :positive_definite_cholesky, :cholesky),
+            (true, :dense_lu, :lu),
+        )
+            problem = dense_lp_fixture(
+                Float64;
+                with_equality=with_equality,
+            )
+            for requested in (:auto, :standard)
+                options = SDPX.SolverOptions{Float64}(
+                    algorithm=:lp,
+                    presolve=false,
+                    scaling=:none,
+                    linear_algebra_backend=requested,
+                    verbosity=0,
+                    diagnostics=true,
+                )
+                plan = SDPX.build_execution_plan(problem, options)
+                @test plan.algorithm === :lp_primal_dual
+                @test plan.kkt_backend === expected_kkt
+                @test plan.la_config.selected === :standard
+                @test plan.la_config.provider === :blas_lapack
+                @test plan.la_config.fallback_chain === ()
+                @test expected_factor in
+                      plan.la_config.required_capabilities
+                @test (expected_factor === :cholesky ? :lu : :cholesky) ∉
+                      plan.la_config.required_capabilities
+            end
+
+            result = SDPX.solve!(
+                problem,
+                SDPX.SolverOptions{Float64}(
+                    algorithm=:lp,
+                    presolve=false,
+                    scaling=:none,
+                    linear_algebra_backend=:standard,
+                    verbosity=0,
+                    diagnostics=true,
+                ),
+            )
+            @test result.status == SDPX.Optimal
+            @test result.x ≈ [2.0, 1.0] rtol=1e-7
+            @test result.pObj ≈ 4.0 rtol=1e-7
+            selected = result.diagnostics.selected_algorithms
+            @test selected.kkt === expected_kkt
+            @test selected.lp_formulation === expected_kkt
+            @test selected.la_backend === :standard
+            @test selected.la_executed_provider === :blas_lapack
+            @test selected.la_factorization === expected_factor
+            @test selected.planned_la_backend === :standard
+            @test selected.backend_resolution === :post_presolve
+        end
+    end
+
+    @testset "explicit legacy dense LP stays legacy" begin
+        problem = dense_lp_fixture(Float64; with_equality=true)
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:lp,
+            presolve=false,
+            scaling=:none,
+            linear_algebra_backend=:legacy,
+            verbosity=0,
+            diagnostics=true,
+        )
+        plan = SDPX.build_execution_plan(problem, options)
+        @test plan.la_config.selected === :legacy
+        @test plan.la_config.provider === :sdpx_legacy_la
+        @test plan.la_config.fallback_reason === :requested_legacy
+        result = SDPX.solve!(problem, options)
+        @test result.status == SDPX.Optimal
+        selected = result.diagnostics.selected_algorithms
+        @test selected.la_backend === :legacy
+        @test selected.la_executed_provider === :sdpx_legacy_la
+        @test selected.la_factorization === :lu
     end
 end
 
@@ -401,6 +506,10 @@ end
         @test unbounded_result.status == SDPX.DualInfeasible
         @test unbounded_result.status != SDPX.InfeasibleCert
         @test occursin("unbounded below", unbounded_result.message)
+        @test unbounded_result.termination.reason ==
+              :dual_infeasibility_certificate
+        @test unbounded_result.termination.executed.backend_resolution ===
+              :analytic_equality_only
         certificate = SDPX.result_certificate(
             unbounded,
             unbounded_result,
@@ -457,12 +566,48 @@ end
             reshape([0.0], 1, 1),
             [1.0],
         )
-        result = SDPX.solve(problem; verbosity=0)
+        result = SDPX.solve(
+            problem;
+            diagnostics=true,
+            verbosity=0,
+        )
         @test result.status == SDPX.InfeasibleCert
         @test result.termination.reason == :lp_zero_row_infeasible
         certificate =
             result.diagnostics.selected_algorithms.certificate
         @test certificate.kind == :structural_infeasibility
         @test certificate.valid
+        selected = result.diagnostics.selected_algorithms
+        @test selected.planned_backend === :lp_deferred
+        @test selected.executed_backend === :not_executed
+        @test selected.kkt === :not_executed
+        @test selected.backend_resolution === :not_resolved
+        @test selected.lp_formulation === :not_resolved
+        @test selected.gram === :not_executed
+    end
+
+    @testset "equality-only LP keeps analytic provenance" begin
+        c = [1.0]
+        B = reshape([1.0], 1, 1)
+        problem = lp_regression_problem(
+            c,
+            reshape([0.0], 1, 1),
+            [-1.0];
+            B=B,
+            b=[1.0],
+        )
+        result = SDPX.solve(
+            problem;
+            diagnostics=true,
+            verbosity=0,
+        )
+        @test result.status == SDPX.Optimal
+        selected = result.diagnostics.selected_algorithms
+        @test selected.planned_backend === :lp_deferred
+        @test selected.executed_backend === :not_executed
+        @test selected.kkt === :not_executed
+        @test selected.backend_resolution === :analytic_equality_only
+        @test selected.lp_formulation === :equality_only
+        @test selected.gram === :not_executed
     end
 end

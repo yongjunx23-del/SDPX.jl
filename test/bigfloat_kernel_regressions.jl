@@ -101,8 +101,6 @@ using Test
             @test actual_transpose ≈ expected_transpose rtol=big"1e-60"
             @test transpose_rhs != actual_transpose
 
-            marker = SDPX.BigFloatCholeskyFactor(factor)
-            @test marker.L === factor
         end
 
         @testset "alias-safe vector updates and trial construction" begin

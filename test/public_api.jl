@@ -29,3 +29,30 @@ using Test
               getproperty(SDPX, name)
     end
 end
+
+@testset "removed reduced-dual API" begin
+    for name in (
+        :CertifiedObjective,
+        :ReducedDualReconstructionToken,
+        :solve_value,
+        :reconstruct_fixed_trace_solution,
+    )
+        @test !isdefined(SDPX, name)
+        @test !isdefined(SDPX.Experimental, name)
+    end
+end
+
+@testset "Experimental LA wrapper surface" begin
+    @test !isdefined(SDPX.Experimental, :la_factor!)
+    @test !isdefined(SDPX.Experimental, :la_solve!)
+    @test !isdefined(SDPX.Experimental, :la_refine!)
+    @test !isdefined(SDPX.Experimental, :la_cholesky_solve!)
+    @test isdefined(SDPX.Experimental, :la_lu_factor!)
+    @test isdefined(SDPX.Experimental, :la_qr_factor!)
+    @test isdefined(SDPX.Experimental, :la_factor_solve!)
+    @test SDPX.Experimental.AbstractLAFactorization ===
+          SDPX.AbstractLAFactorization
+    @test SDPX.Experimental.StandardLALUFactor === SDPX.StandardLALUFactor
+    @test SDPX.Experimental.ProviderLALUFactor === SDPX.ProviderLALUFactor
+    @test SDPX.Experimental.LegacyLALUFactor === SDPX.LegacyLALUFactor
+end

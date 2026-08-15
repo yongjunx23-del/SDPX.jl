@@ -132,11 +132,32 @@ end
           ActiveSparseCoefficientVector{Float64}
     @test compact_problem.cons.active == expanded_problem.cons.active
     @test compact_problem.cons.packed2 == expanded_problem.cons.packed2
-    @test all(
-        field -> getfield(compact_problem.structure, field) ==
-                 getfield(expanded_problem.structure, field),
-        fieldnames(SDPX.StructureAnalysis),
+    # The storage-owning analysis intentionally represents inactive positions
+    # differently for compact and expanded coefficient vectors (empty vectors
+    # versus vectors of empty matrices). The semantic facts that matter are the
+    # compactness of the active map and the aggregate structure statistics.
+    for field in (
+        :coefficient_nnz,
+        :coefficient_slots,
+        :active_incidences,
+        :active_slots,
+        :schur_upper_nnz,
+        :schur_upper_slots,
+        :schur_density,
+        :schur_backend,
+        :recommended_storage,
+        :selected_storage,
+        :psd_kernel,
     )
+        @test getfield(compact_problem.structure, field) ==
+              getfield(expanded_problem.structure, field)
+    end
+    @test compact_problem.structure.schur_analysis.dimension ==
+          expanded_problem.structure.schur_analysis.dimension
+    @test compact_problem.structure.schur_analysis.active_constraints_per_block ==
+          expanded_problem.structure.schur_analysis.active_constraints_per_block
+    @test compact_problem.structure.schur_analysis.estimated_nnz ==
+          expanded_problem.structure.schur_analysis.estimated_nnz
 
     input = collect(range(-1.0, 1.0; length=variables))
     compact_matrix = zeros(2, 2)

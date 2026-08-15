@@ -24,8 +24,9 @@ julia --project=examples examples/01_basic_sdp.jl
 | [`03_sparse_lp.jl`](03_sparse_lp.jl) | The dedicated LP path, and how it decides between a sparse and a dense factorization |
 | [`04_certificates.jl`](04_certificates.jl) | Verifying a solution independently, including a solve the certificate refuses to accept |
 | [`05_jump.jl`](05_jump.jl) | The same problem through JuMP, via MathOptInterface |
+| [`06_cli_bridge.jl`](06_cli_bridge.jl) | The same problem through the command-line bridge, JSON problem in, JSON result out |
 | [`07_convex.jl`](07_convex.jl) | LP, SOCP, and SDP modeling through Convex.jl, including SDPX's packed-triangle PSD frontend |
-| [`08_soc_fixed_trace.jl`](08_soc_fixed_trace.jl) | Direct Lorentz modeling and the native constant-trace Q3 fast path |
+| [`08_soc_fixed_trace.jl`](08_soc_fixed_trace.jl) | Direct Lorentz SOCP through the NativeSOC frontend, plus the fixed-trace Q3 form through the singleton block-arrow execution plan |
 
 ## What `02` is really about
 
@@ -48,3 +49,16 @@ stalls short of your tolerance, not before.
 These numbers are from one small, well-conditioned problem. Real bootstrap
 programs exhaust `Float64` far earlier, which is the case the solver is built
 for; the mechanism is the same, the crossover is not.
+
+## Development CLI
+
+After `julia bin/setup_cli.jl`, the included JSON fixtures can be used directly:
+
+```bash
+./bin/sdpx examples/cli_problem.json
+./bin/sdpx examples/cli_problem_high_precision.json \
+  --precision=840 \
+  --dualityGapThreshold=1e-80 \
+  --primalErrorThreshold=1e-80 \
+  --dualErrorThreshold=1e-80
+```

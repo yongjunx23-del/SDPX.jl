@@ -1,0 +1,322 @@
+using LinearAlgebra
+using SparseArrays
+using Test
+
+@testset "current architecture regressions" begin
+    @testset "sparse equality backward errors equal dense definition" begin
+        B_dense = [1.0 0.0 2.0; 0.0 -3.0 0.0; 4.0 0.0 5.0]
+        B_sparse = sparse(B_dense)
+        b = [2.0, -1.0, 7.0]
+        x = [1.25, -0.5, 0.75]
+        dense = SDPX._equality_backward_errors(B_dense, b, x)
+        sparse_result = SDPX._equality_backward_errors(B_sparse, b, x)
+        @test sparse_result == dense
+
+        nominal_dense = abs.([2.0, 3.0, 5.0])
+        realized_dense = copy(nominal_dense)
+        nominal_sparse = copy(nominal_dense)
+        realized_sparse = copy(realized_dense)
+        y = [0.25, -1.0, 2.0]
+        SDPX._accumulate_equality_dual_scales!(
+            nominal_dense, realized_dense, B_dense, y,
+        )
+        SDPX._accumulate_equality_dual_scales!(
+            nominal_sparse, realized_sparse, B_sparse, y,
+        )
+        @test nominal_sparse == nominal_dense
+        @test realized_sparse == realized_dense
+    end
+
+    @testset "explicit equality QR is reflected by the execution plan" begin
+        # The backend selector itself is the regression boundary: a model that
+        # otherwise qualifies for sparse Schur must not advertise that route
+        # when equality_solver=:qr forces the current dense/QR workspace path.
+        # Existing sparse-SDP tests cover the positive sparse route; this check
+        # protects the option-dependent selector without duplicating a large
+        # fixture here.
+        @test hasmethod(SDPX._runtime_schur_backend, Tuple{SDPX.SDPProblem,Symbol})
+    end
+
+    @testset "execution plan is authoritative for Workspace structure" begin
+        blocks = 3
+        shared = 2
+        variables = shared + blocks
+        coefficients = [
+            [
+                variable <= shared || variable == shared + block ?
+                sparse(
+                    [1, 2, 2],
+                    [1, 1, 2],
+                    [0.2 + 0.01variable, 0.03, -0.1],
+                    2,
+                    2,
+                ) : spzeros(2, 2)
+                for variable in 1:variables
+            ]
+            for block in 1:blocks
+        ]
+        constants = [Matrix{Float64}(1.5I, 2, 2) for _ in 1:blocks]
+        problem = SDPX.ingest(
+            ones(variables),
+            coefficients,
+            constants,
+            zeros(variables, 0),
+            Float64[];
+            # This test exercises the sparse block-arrow route itself.  The
+            # tiny fixture is intentionally below the automatic sparse-ingest
+            # crossover, so leaving this at `:auto` silently builds DenseCons
+            # and tests the dense planner instead.
+            sparse=true,
+            verbosity=0,
+        )
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            scaling=:none,
+            presolve=false,
+            threads=1,
+        )
+        arrow_plan = SDPX.build_execution_plan(problem, options)
+        @test arrow_plan.kkt_backend === :block_arrow
+        @test arrow_plan.backend_config.route === :block_arrow
+        arrow_workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=arrow_plan,
+        )
+        @test arrow_workspace.arrow !== nothing
+        @test arrow_workspace.sparse_kkt === nothing
+        @test SDPX.select_backend(arrow_workspace) isa SDPX.ArrowBackend
+        @test SDPX.planned_backend_name(arrow_workspace) === :block_arrow
+
+        # A supplied plan is self-contained: callers do not have to repeat
+        # route-affecting keywords at Workspace construction.  The backend
+        # rejects a mismatched solve option later instead of silently changing
+        # the equality route.
+        qr_options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            scaling=:none,
+            presolve=false,
+            equality_solver=:qr,
+            threads=1,
+        )
+        qr_plan = SDPX.build_execution_plan(problem, qr_options)
+        qr_workspace = SDPX.Workspace(
+            problem;
+            execution_plan=qr_plan,
+        )
+        @test qr_workspace.backend_config.equality_solver === :qr
+        @test SDPX.select_backend(qr_workspace) isa SDPX.ArrowBackend
+        @test_throws ErrorException SDPX._assert_planned_backend!(
+            qr_workspace,
+            SDPX.select_backend(qr_workspace),
+            options,
+        )
+        @test SDPX._assert_planned_backend!(
+            qr_workspace,
+            SDPX.select_backend(qr_workspace),
+            qr_options,
+        ) === SDPX.select_backend(qr_workspace)
+
+        dense_config = SDPX.BackendConfiguration(
+            :dense_cholesky,
+            :auto,
+            false,
+            false,
+            :off,
+            (),
+            false,
+        )
+        dense_plan = SDPX.ExecutionPlan(
+            arrow_plan.classification,
+            :sdp_primal_dual,
+            arrow_plan.scaling,
+            :dense_cholesky,
+            dense_config,
+            arrow_plan.gram_kernel,
+            arrow_plan.schedule,
+            arrow_plan.threads,
+            arrow_plan.parameter_profile,
+            arrow_plan.memory_budget_bytes,
+            arrow_plan.parameters,
+        )
+        dense_workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=dense_plan,
+        )
+        @test dense_workspace.arrow === nothing
+        @test dense_workspace.sparse_kkt === nothing
+        @test size(dense_workspace.S) == (variables, variables)
+        @test SDPX.select_backend(dense_workspace) isa SDPX.DenseCholeskyBackend
+        @test_throws ErrorException SDPX._assert_planned_backend!(
+            dense_workspace,
+            SDPX.ArrowBackend(),
+            options,
+        )
+
+        inconsistent_config = SDPX.BackendConfiguration(
+            :block_arrow,
+            :auto,
+            false,
+            false,
+            :off,
+            (),
+            false,
+        )
+        inconsistent_plan = SDPX.ExecutionPlan(
+            dense_plan.classification,
+            dense_plan.algorithm,
+            dense_plan.scaling,
+            :dense_cholesky,
+            inconsistent_config,
+            dense_plan.gram_kernel,
+            dense_plan.schedule,
+            dense_plan.threads,
+            dense_plan.parameter_profile,
+            dense_plan.memory_budget_bytes,
+            dense_plan.parameters,
+        )
+        @test_throws ArgumentError SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=inconsistent_plan,
+        )
+
+        lp = SDPX.ingest(
+            [1.0],
+            [reshape([1.0], 1, 1, 1)],
+            [reshape([-1.0], 1, 1)],
+            zeros(1, 0),
+            Float64[];
+            verbosity=0,
+        )
+        lp_plan = SDPX.build_execution_plan(lp, SDPX.SolverOptions{Float64}())
+        @test lp_plan.scaling === :lp_geometric
+        @test lp_plan.backend_config.deferred
+
+        lp_workspace = SDPX.LPWorkspace(
+            Float64,
+            1,
+            2,
+            0;
+            packed_hessian=false,
+        )
+        lp_backend = SDPX._resolve_lp_backend!(lp_workspace, 0)
+        @test lp_backend isa SDPX.LPCholeskyBackend
+        @test lp_workspace.backend_formulation ===
+              :positive_definite_cholesky
+        @test_throws ErrorException SDPX.factorize!(
+            SDPX.LPLUBackend(),
+            lp_workspace,
+            zeros(2, 0),
+            sqrt(eps(Float64)),
+        )
+        @test_throws ErrorException SDPX._resolve_lp_backend!(
+            lp_workspace,
+            0,
+        )
+    end
+end
+
+# Bundled legacy-provider architecture contract, formerly asserted only by the
+# cluster probe.  The provider must stay included and every routed
+# `LegacyLABackend` `la_*` dispatch body must go through
+# `_sdpx_legacy_la_call` rather than calling historical `k*` kernels directly.
+const LEGACY_ROUTED_OPERATIONS = (
+    "la_cholesky_factor!",
+    "la_factor_solve!",
+    "la_dot",
+    "la_norminf",
+    "la_mul!",
+    "la_mul_owned!",
+    "la_syrk!",
+    "la_chol!",
+    "la_trsm!",
+    "la_trsv_lower!",
+    "la_trsv_transpose!",
+    "la_axpby!",
+    "la_axpby_owned!",
+)
+
+function _legacy_contract_contains_symbol(value, target::Symbol)
+    value === target && return true
+    value isa Expr || return false
+    return any(
+        argument -> _legacy_contract_contains_symbol(argument, target),
+        value.args,
+    )
+end
+
+function _legacy_contract_is_la_dispatch_call(value)
+    return value isa Expr &&
+           value.head === :call &&
+           !isempty(value.args) &&
+           value.args[1] isa Symbol &&
+           startswith(String(value.args[1]), "la_")
+end
+
+function _legacy_contract_is_dispatch_signature(call_expression)
+    _legacy_contract_contains_symbol(call_expression, :LegacyLABackend) &&
+        return true
+    name = String(call_expression.args[1])
+    return name == "la_factor_solve!" &&
+           _legacy_contract_contains_symbol(
+               call_expression,
+               :LegacyLACholeskyFactor,
+           )
+end
+
+function _legacy_contract_definitions(ast)
+    definitions = Pair{String,Any}[]
+    function record(call_expression, body)
+        _legacy_contract_is_la_dispatch_call(call_expression) || return
+        name = String(call_expression.args[1])
+        name in LEGACY_ROUTED_OPERATIONS || return
+        _legacy_contract_is_dispatch_signature(call_expression) || return
+        push!(definitions, name => body)
+    end
+    function walk(value)
+        value isa Expr || return
+        if value.head === :function && length(value.args) >= 2
+            record(value.args[1], value.args[2])
+        elseif value.head === :(=) && length(value.args) == 2
+            record(value.args[1], value.args[2])
+        end
+        foreach(walk, value.args)
+    end
+    walk(ast)
+    return definitions
+end
+
+const LEGACY_KERNEL_NAME = r"^k[a-z_]+!?$"
+
+function _legacy_contract_direct_kernel_calls(value, hits)
+    value isa Expr || return
+    if value.head === :call && !isempty(value.args) &&
+       value.args[1] isa Symbol &&
+       occursin(LEGACY_KERNEL_NAME, String(value.args[1]))
+        push!(hits, String(value.args[1]))
+    end
+    foreach(
+        argument -> _legacy_contract_direct_kernel_calls(argument, hits),
+        value.args,
+    )
+end
+
+@testset "bundled legacy LA provider contract" begin
+    root = realpath(joinpath(dirname(pathof(SDPX)), ".."))
+    module_source = read(joinpath(root, "src", "SDPX.jl"), String)
+    @test occursin("include(\"la_backends/legacy.jl\")", module_source)
+
+    la_backend_source = read(joinpath(root, "src", "la_backend.jl"), String)
+    ast = Meta.parseall(la_backend_source)
+    definitions = _legacy_contract_definitions(ast)
+    @test !isempty(definitions)
+    @test Set(first.(definitions)) == Set(LEGACY_ROUTED_OPERATIONS)
+    for (name, body) in definitions
+        direct = String[]
+        _legacy_contract_direct_kernel_calls(body, direct)
+        @test isempty(direct)
+        @test _legacy_contract_contains_symbol(body, :_sdpx_legacy_la_call)
+    end
+end

@@ -1,10 +1,10 @@
-#=====================================================================
+#=
     Core types: options, problem data, constraint representations,
     solve status/result. No mutable global state anywhere in this
     file (P8) — the element type T is a type parameter throughout,
     so every downstream function specializes and compiles concretely
     instead of dynamically dispatching on a global `T::Type`.
-=====================================================================#
+=#
 
 """
     _recoverable(exception) -> Bool
@@ -93,6 +93,198 @@ default_mixed_precision_kkt(::Type{T}) where {T} =
         (isbitstype(T) && sizeof(T) > sizeof(Float64))
     ) ? :auto : :off
 
+# ---------------------------------------------------------------------------
+# Linear-algebra backend description
+#
+# The configuration is deliberately non-parametric and immutable.  It is part
+# of an ExecutionPlan (and is therefore serialized in diagnostics/checkpoints)
+# rather than inferred again by a Workspace.  `provider` is an optional
+# symbols supplied by an arithmetic extension; concrete setup payloads live
+# only in the instantiated MultiFloatLABackend, never in the plan.
+# ---------------------------------------------------------------------------
+
+abstract type AbstractLABackend end
+
+"""
+    LAProviderCapabilities
+
+Pure, immutable description of the operations and numerical contracts exposed
+by one linear-algebra provider.  These are facts, not preferences: capability
+lookup never benchmarks the machine and never installs a runtime fallback.
+
+The semantic fields (`cholesky`, `lu`, `qr`, `factor_solve`, ... ) are the
+planner boundary.  The final six fields describe the dense primitives already
+used by SDPX's KKT implementation.  A provider may therefore be useful for a
+Cholesky route without being advertised as a robust symmetric-indefinite
+solver.
+"""
+Base.@kwdef struct LAProviderCapabilities
+    cholesky::Bool = false
+    lu::Bool = false
+    qr::Bool = false
+    rank_revealing_qr::Bool = false
+    pivoted_symmetric_ldlt::Bool = false
+    ldlt_inertia::Bool = false
+    factor_solve::Bool = false
+    multi_rhs::Bool = false
+    iterative_refinement::Bool = false
+    higher_precision_residual::Bool = false
+    refinement_correction::Bool = false
+    mixed_precision_residual::Bool = false
+    sparse_factorization::Bool = false
+    threading::Bool = false
+    dot::Bool = false
+    norminf::Bool = false
+    mul::Bool = false
+    mul_owned::Bool = false
+    syrk::Bool = false
+    triangular_solve::Bool = false
+    axpby::Bool = false
+end
+
+const _LA_CAPABILITY_NAMES = fieldnames(LAProviderCapabilities)
+
+@inline function _canonical_la_capability(capability::Symbol)
+    capability in (:chol, :cholesky_factor!) && return :cholesky
+    capability in (:solve, :cholsolve_owned) && return :factor_solve
+    capability in (:trsm, :trsv_lower, :trsv_transpose) &&
+        return :triangular_solve
+    capability in (:axpby_owned,) && return :axpby
+    return capability
+end
+
+"""Return whether `capabilities` satisfies one semantic capability name."""
+function la_provider_supports(
+    capabilities::LAProviderCapabilities,
+    capability::Symbol,
+)
+    name = _canonical_la_capability(capability)
+    name in _LA_CAPABILITY_NAMES || throw(ArgumentError(
+        "unknown linear-algebra capability $(capability)",
+    ))
+    return getfield(capabilities, name)
+end
+
+Base.in(capability::Symbol, capabilities::LAProviderCapabilities) =
+    la_provider_supports(capabilities, capability)
+
+"""Stable tuple projection used by diagnostics and compatibility adapters."""
+la_capability_symbols(capabilities::LAProviderCapabilities) = Tuple(
+    name for name in _LA_CAPABILITY_NAMES if getfield(capabilities, name)
+)
+
+"""Conservatively translate a historical operation tuple into semantic facts."""
+function la_capabilities_from_symbols(symbols::Tuple)
+    enabled = Set{Symbol}()
+    for symbol in symbols
+        symbol isa Symbol || throw(ArgumentError(
+            "linear-algebra capability names must be Symbols",
+        ))
+        push!(enabled, _canonical_la_capability(symbol))
+    end
+    return LAProviderCapabilities(;
+        (name => (name in enabled) for name in _LA_CAPABILITY_NAMES)...,
+    )
+end
+
+struct StandardLABackend <: AbstractLABackend
+    arithmetic::Symbol
+    provider::Symbol
+    mode::Symbol
+end
+
+StandardLABackend(arithmetic::Symbol) = begin
+    provider = arithmetic in (:float32, :float64) ? :blas_lapack :
+               :generic_linear_algebra
+    ownership = arithmetic in (:float32, :float64) ? :immutable_scalars :
+                 :owned_mutable_scalars
+    StandardLABackend(arithmetic, provider, ownership)
+end
+
+struct LegacyLABackend{P} <: AbstractLABackend
+    arithmetic::Symbol
+    reason::Symbol
+    provider::P
+
+    function LegacyLABackend{P}(
+        arithmetic::Symbol,
+        reason::Symbol,
+        provider::P,
+    ) where {P}
+        return new{P}(arithmetic, reason, provider)
+    end
+end
+
+struct MultiFloatLABackend{P} <: AbstractLABackend
+    arithmetic::Symbol
+    provider::P
+end
+
+"""Optional native BigFloat provider instantiated by the BFLA extension."""
+struct BFLALABackend{P} <: AbstractLABackend
+    arithmetic::Symbol
+    provider::P
+end
+
+struct LABackendConfiguration
+    arithmetic::Symbol
+    requested::Symbol
+    selected::Symbol
+    provider::Symbol
+    capabilities::Tuple{Vararg{Symbol}}
+    capability_model::LAProviderCapabilities
+    required_capabilities::Tuple{Vararg{Symbol}}
+    provider_implementation::Symbol
+    fallback_chain::Tuple{Vararg{Symbol}}
+    fallback_reason::Symbol
+    ownership::Symbol
+end
+
+# Source compatibility for the v0.4.1 eight-field descriptor.  Modern planner
+# code supplies an explicit semantic model and requirement set; historical
+# callers remain conservative and do not gain new route authority.
+function LABackendConfiguration(
+    arithmetic::Symbol,
+    requested::Symbol,
+    selected::Symbol,
+    provider::Symbol,
+    capabilities::Tuple{Vararg{Symbol}},
+    fallback_chain::Tuple{Vararg{Symbol}},
+    fallback_reason::Symbol,
+    ownership::Symbol,
+)
+    return LABackendConfiguration(
+        arithmetic,
+        requested,
+        selected,
+        provider,
+        capabilities,
+        la_capabilities_from_symbols(capabilities),
+        (),
+        provider,
+        fallback_chain,
+        fallback_reason,
+        ownership,
+    )
+end
+
+"""Conservative configuration used by historical positional plan builders."""
+function _compat_la_backend_configuration(
+    arithmetic::Symbol,
+    equality_solver::Symbol=:auto,
+)
+    return LABackendConfiguration(
+        arithmetic, :legacy, :legacy, :sdpx_legacy_la,
+        SDPX_LEGACY_LA_CAPABILITIES,
+        SDPX_LEGACY_LA_CAPABILITY_MODEL,
+        (),
+        :bundled_sdpx_legacy,
+        equality_solver === :auto ? (:rank_revealing_qr,) : (),
+        :compatibility,
+        _legacy_la_symbol_ownership(arithmetic),
+    )
+end
+
 """
     fine_grained_block_bins(T, requested, reduced_arrow_panel, block_count)
 
@@ -176,19 +368,207 @@ reduced_arrow_solver_worker_count(
     EqualityQRFactor{T}
 
 Rank-revealing Householder QR factor used by the guarded equality fallback.
-Only the packed reflector matrix, reflector coefficients, column permutation,
-and numerical-rank diagnostics are retained. The Newton solve only needs the
-leading triangular `R` block; keeping the reflectors makes the representation
-compatible with later residual-based extensions without another workspace
-change.
+The packed provider-produced matrix, column permutation, and numerical-rank
+diagnostics are retained. `coefficients` may be empty for providers whose
+public contract exposes packed `R` but not reflector coefficients: SDPX's
+Newton solve uses only the leading triangular `R` block to solve the semantic
+`R'R` system and never treats this as a generic QR least-squares handle.
 """
-struct EqualityQRFactor{T}
+abstract type AbstractLAFactorization{T} end
+abstract type AbstractLACholeskyFactor{T} <: AbstractLAFactorization{T} end
+
+"""Abstract marker for provider-neutral QR factor handles."""
+abstract type AbstractLAQRFactor{T} <: AbstractLAFactorization{T} end
+
+struct EqualityQRFactor{T,P} <: AbstractLAQRFactor{T}
+    provider::P
     factors::Matrix{T}
     coefficients::Vector{T}
     permutation::Vector{Int}
     rank::Int
     quality::T
 end
+
+EqualityQRFactor{T}(
+    factors::Matrix{T},
+    coefficients::Vector{T},
+    permutation::Vector{Int},
+    rank::Int,
+    quality::T,
+) where {T} = EqualityQRFactor{T,Symbol}(
+    :compatibility,
+    factors,
+    coefficients,
+    permutation,
+    rank,
+    quality,
+)
+
+"""Standard generic factor handle wrapping Julia's Cholesky object."""
+struct StandardLACholeskyFactor{T,F<:LinearAlgebra.Cholesky{T}} <:
+       AbstractLACholeskyFactor{T}
+    factor::F
+    factors::Matrix{T}
+end
+
+"""
+Provider factor payload supplied by an optional arithmetic extension.
+
+The external factor may borrow the SDPX-owned workspace buffer that was passed
+to its in-place factorization. The wrapper keeps the factor payload and storage
+alive together; `provider_owned` describes execution authority, not a promise
+that the provider allocated a second copy of the matrix.
+"""
+struct ProviderLACholeskyFactor{T,P,M<:AbstractMatrix{T}} <: AbstractLACholeskyFactor{T}
+    provider::P
+    factors::M
+end
+
+"""Standard LU handle exposed through the provider-neutral factor API."""
+struct StandardLALUFactor{T,F<:LinearAlgebra.Factorization{T}} <:
+       AbstractLAFactorization{T}
+    factor::F
+end
+
+"""Provider-owned dense LU factor handle (e.g. MultiFloatLinearAlgebra)."""
+struct ProviderLALUFactor{T,P,M<:AbstractMatrix{T}} <:
+       AbstractLAFactorization{T}
+    provider::P
+    factors::M
+end
+
+"""Bundled-provider LU handle used by explicit Legacy dense LP plans."""
+struct LegacyLALUFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
+       AbstractLAFactorization{T}
+    provider::P
+    factor::F
+end
+
+"""
+Successful-factor status for the provider-neutral handles.
+
+Only handles that can wrap an unsuccessful factorization delegate to the
+underlying `LinearAlgebra` object; provider-owned and borrowed-legacy handles
+are constructed exclusively after their factor kernels have reported success,
+so they are success by construction.
+"""
+LinearAlgebra.issuccess(factor::StandardLACholeskyFactor) =
+    LinearAlgebra.issuccess(factor.factor)
+LinearAlgebra.issuccess(::ProviderLACholeskyFactor) = true
+LinearAlgebra.issuccess(factor::StandardLALUFactor) =
+    LinearAlgebra.issuccess(factor.factor)
+LinearAlgebra.issuccess(::ProviderLALUFactor) = true
+LinearAlgebra.issuccess(factor::LegacyLALUFactor) =
+    LinearAlgebra.issuccess(factor.factor)
+
+"""Standard generic QR handle; `pivoted` records rank-revealing selection."""
+struct StandardLAQRFactor{T,P,F<:LinearAlgebra.Factorization{T}} <:
+       AbstractLAQRFactor{T}
+    provider::P
+    factor::F
+    pivoted::Bool
+end
+
+"""Provider-owned symmetric-indefinite LDLT factor handle."""
+struct ProviderLALDLTFactor{T,P,M<:AbstractMatrix{T}} <:
+       AbstractLAFactorization{T}
+    provider::P
+    factors::M
+end
+
+LinearAlgebra.issuccess(::ProviderLALDLTFactor) = true
+
+"""
+    DenseAugmentedKKTWorkspace{T}
+
+Owned storage for the explicit symmetric-indefinite Newton system.  The
+unknown ordering is `[dx; dy]`; only the lower triangle of `matrix` is
+authoritative.  The provider may borrow `factor_buffer` for the lifetime of
+`factor`, while SDPX retains the unfactored matrix for residual evaluation.
+"""
+mutable struct DenseAugmentedKKTWorkspace{T}
+    matrix::Matrix{T}
+    factor_buffer::Matrix{T}
+    rhs::Vector{T}
+    solution::Vector{T}
+    residual::Vector{T}
+    factor::Union{Nothing,ProviderLALDLTFactor{T}}
+    regularization::T
+    factor_diagnostics::Any
+    inertia::Any
+    rank_deficient::Bool
+end
+
+function DenseAugmentedKKTWorkspace(::Type{T}, m::Int, n::Int) where {T}
+    dimension = m + n
+    return DenseAugmentedKKTWorkspace{T}(
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        nothing,
+        zero(T),
+        nothing,
+        nothing,
+        false,
+    )
+end
+
+la_factor_provider(::AbstractLAQRFactor) = nothing
+la_factor_provider(factor::EqualityQRFactor) = factor.provider
+la_factor_provider(factor::StandardLAQRFactor) = factor.provider
+la_factor_provider(factor::ProviderLACholeskyFactor) = factor.provider
+la_factor_provider(factor::ProviderLALUFactor) = factor.provider
+la_factor_provider(factor::LegacyLALUFactor) = factor.provider
+la_factor_provider(factor::ProviderLALDLTFactor) = factor.provider
+
+la_factor_rank(::AbstractLAQRFactor) = nothing
+la_factor_rank(factor::EqualityQRFactor) = factor.rank
+function la_factor_rank(factor::StandardLAQRFactor)
+    if factor.pivoted
+        # `rank(::QRPivoted)` was added in Julia 1.12.  Keep the same
+        # diagonal-threshold definition on every supported Julia release.
+        dimension = min(size(factor.factor)...)
+        dimension == 0 && return 0
+        tolerance = dimension * eps(real(float(eltype(factor.factor)))) *
+                    abs(factor.factor.factors[1, 1])
+        first_small = findfirst(
+            index -> abs(factor.factor.factors[index, index]) <= tolerance,
+            1:dimension,
+        )
+        return something(first_small, dimension + 1) - 1
+    end
+    return min(size(factor.factor.R)...)
+end
+
+la_factor_quality(::AbstractLAQRFactor) = nothing
+la_factor_quality(factor::EqualityQRFactor) = factor.quality
+function la_factor_quality(factor::StandardLAQRFactor)
+    rank = la_factor_rank(factor)
+    rank === nothing && return nothing
+    rank == 0 && return zero(eltype(factor.factor))
+    diagonal = abs.(LinearAlgebra.diag(factor.factor.R))
+    leading = diagonal[1:rank]
+    largest = maximum(leading)
+    largest > zero(eltype(factor.factor)) || return zero(eltype(factor.factor))
+    return clamp(
+        minimum(leading) / largest,
+        zero(eltype(factor.factor)),
+        one(eltype(factor.factor)),
+    )
+end
+
+la_factor_permutation(::AbstractLAQRFactor) = nothing
+la_factor_permutation(factor::EqualityQRFactor) = factor.permutation
+function la_factor_permutation(factor::StandardLAQRFactor)
+    factor.pivoted && return Vector{Int}(factor.factor.jpvt)
+    return collect(1:size(factor.factor.R, 2))
+end
+
+la_factor_packed_factors(::AbstractLAQRFactor) = nothing
+la_factor_packed_factors(factor::EqualityQRFactor) = factor.factors
+la_factor_packed_factors(factor::StandardLAQRFactor) = factor.factor.factors
 
 """
     SolverOptions{T}
@@ -284,18 +664,22 @@ Base.@kwdef struct SolverOptions{T}
     # switches to rank-revealing QR only when factor diagnostics justify its
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.
     equality_solver::Symbol    = :auto                   # :auto | :normal_equations | :qr
+    # Dense linear-algebra implementation. `:auto` resolves once while the
+    # ExecutionPlan is built: complete BFLA/MFLA extensions may be selected,
+    # but numerical execution never retries another provider implicitly.
+    linear_algebra_backend::Symbol = :auto              # :auto | :standard | :bfla | :multifloat | :legacy
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
     # Expert selector for the native fixed-trace Q3 equality Gram. Output-tile
     # ownership uses no replicated Gram storage; row bins keep a packed lower
     # triangle per worker and trade bounded memory for better cache/NUMA reuse.
-    q3_gram_strategy::Symbol = :auto                    # :auto | :output_tiles | :row_bins
+    q3_gram_strategy::Symbol = :auto                    # compatibility no-op after NativeSOC consolidation
     # Search-direction scaling for the compact fixed-trace Q3 backend.  HKM is
     # the established reference path; NT is the symmetric Lorentz-cone
     # Nesterov--Todd direction.  NT remains an explicit opt-in until the J40
     # and J80 certificate/performance gates have both passed.
-    q3_direction::Symbol = :hkm                         # :hkm | :nt
+    q3_direction::Symbol = :hkm                         # compatibility no-op after NativeSOC consolidation
     # Opt-in extended-precision KKT acceleration. The Schur complement is
     # factored in Float64, while residuals and accepted directions remain in
     # the requested BigFloat or fixed-width extended arithmetic.
@@ -320,10 +704,16 @@ Base.@kwdef struct SolverOptions{T}
     # elimination and is still validated in the original arithmetic.
     presolve_tolerance::T     = zero(T)
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
-    formulation::Symbol       = :auto                   # :auto | :primal | :dual (dual is analysis-only)
+    # :dual has an analysis estimate but no production transform; an explicit
+    # request fails before backend/provider planning.
+    formulation::Symbol       = :auto                   # :auto | :primal | :normal_equations | :dual | :augmented
     chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
+    # Pipeline post-solve certification handoff. `true` preserves the
+    # historical original-coordinate final certificate; `false` skips the
+    # independent certificate and returns the raw core status.
+    certification::Bool       = true
     expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
 end
 
@@ -675,6 +1065,98 @@ struct SparseCons{T} <: AbstractCons{T}
     coo::Vector{SparseBlockCOO{T}}
 end
 
+"""
+    SchurStructureAnalysis
+
+Arithmetic-independent facts about the variable-space Schur complement of an
+SDP.  The analysis is deliberately separate from `StructureAnalysis`'s
+coefficient-storage facts: sparse coefficient matrices do not imply a sparse
+Schur matrix.  `overlap_graph[i]` contains the constraint indices that share
+at least one PSD block with constraint `i`; an edge therefore denotes a
+*possible* nonzero Schur entry and is never inferred from iterate values.
+
+For very large models an analysis may be sampled/capped.  In that case
+`exact=false` and the graph contains the deterministic prefix that was
+materialised; the density estimate remains the authoritative planner fact.
+"""
+struct SchurStructureAnalysis
+    dimension::Int
+    psd_block_count::Int
+    block_dimensions::Vector{Int}
+    active_constraints_per_block::Vector{Int}
+    overlap_graph::Vector{Vector{Int}}
+    overlap_edges::Int
+    estimated_nnz::Int
+    estimated_density::Float64
+    estimated_factor_cost::Float64
+    exact::Bool
+end
+
+function Base.getproperty(analysis::SchurStructureAnalysis, name::Symbol)
+    name === :constraint_count && return getfield(analysis, :dimension)
+    name === :block_count && return getfield(analysis, :psd_block_count)
+    name === :estimated_schur_nnz && return getfield(analysis, :estimated_nnz)
+    name === :schur_nnz && return getfield(analysis, :estimated_nnz)
+    name === :density && return getfield(analysis, :estimated_density)
+    name === :factor_cost && return getfield(analysis, :estimated_factor_cost)
+    return getfield(analysis, name)
+end
+
+"""Pre-execution Schur storage decision.
+
+`strategy` is one of `:dense`, `:sparse`, or `:block_sparse`.  The object is
+purely descriptive and is built before a workspace/factor is allocated;
+numeric factorisation is never used as a try-and-fallback selector.
+"""
+struct SchurStructurePlan
+    strategy::Symbol
+    storage::Symbol
+    estimated_nnz::Int
+    estimated_density::Float64
+    estimated_factor_cost::Float64
+    reason::Symbol
+    requested::Symbol
+    pre_execution::Bool
+end
+
+function SchurStructurePlan(
+    strategy::Symbol;
+    storage::Symbol=strategy === :dense ? :dense : :sparse,
+    estimated_nnz::Integer=0,
+    estimated_density::Real=0.0,
+    estimated_factor_cost::Real=0.0,
+    reason::Symbol=:static_structure,
+    requested::Symbol=:auto,
+    pre_execution::Bool=true,
+)
+    strategy in (:dense, :sparse, :block_sparse) ||
+        throw(ArgumentError(
+            "Schur strategy must be :dense, :sparse, or :block_sparse",
+        ))
+    storage in (:dense, :sparse) ||
+        throw(ArgumentError("Schur storage must be :dense or :sparse"))
+    requested in (:auto, :dense, :sparse) ||
+        throw(ArgumentError("Schur storage request must be :auto, :dense, or :sparse"))
+    return SchurStructurePlan(
+        strategy,
+        storage,
+        Int(estimated_nnz),
+        Float64(estimated_density),
+        Float64(estimated_factor_cost),
+        reason,
+        requested,
+        pre_execution,
+    )
+end
+
+function Base.getproperty(plan::SchurStructurePlan, name::Symbol)
+    name === :selected && return getfield(plan, :strategy)
+    name === :nnz && return getfield(plan, :estimated_nnz)
+    name === :density && return getfield(plan, :estimated_density)
+    name === :factor_cost && return getfield(plan, :estimated_factor_cost)
+    return getfield(plan, name)
+end
+
 @inline function _packed2_nonzero_mask(
     coefficients::AbstractMatrix,
     position::Int,
@@ -769,6 +1251,84 @@ struct StructureAnalysis
     psd_kernel::Symbol
     schur_backend::Symbol
     profile::Symbol
+    schur_analysis::SchurStructureAnalysis
+    schur_plan::SchurStructurePlan
+    overlap_graph::Vector{Vector{Int}}
+end
+
+# Source compatibility for callers that construct the pre-Round7 positional
+# descriptor directly.  Ingestion uses the richer constructor below; the
+# compatibility object still exposes a valid (conservative) Schur plan.
+function StructureAnalysis(
+    coefficient_nnz::Int,
+    coefficient_slots::Int,
+    coefficient_density::Float64,
+    active_incidences::Int,
+    active_slots::Int,
+    active_density::Float64,
+    block_pattern_nnz::Int,
+    block_pattern_slots::Int,
+    block_pattern_density::Float64,
+    block_coefficient_densities::Vector{Float64},
+    block_pattern_densities::Vector{Float64},
+    schur_upper_nnz::Int,
+    schur_upper_slots::Int,
+    schur_density::Float64,
+    schur_exact::Bool,
+    recommended_storage::Symbol,
+    selected_storage::Symbol,
+    psd_kernel::Symbol,
+    schur_backend::Symbol,
+    profile::Symbol,
+)
+    dimension = max(length(block_coefficient_densities), 0)
+    graph = [Int[] for _ in 1:dimension]
+    facts = SchurStructureAnalysis(
+        0,
+        dimension,
+        Int[],
+        Int[],
+        graph,
+        0,
+        schur_upper_nnz,
+        schur_density,
+        Float64(schur_upper_nnz),
+        schur_exact,
+    )
+    plan = SchurStructurePlan(
+        selected_storage === :sparse ? :sparse : :dense;
+        storage=selected_storage === :sparse ? :sparse : :dense,
+        estimated_nnz=schur_upper_nnz,
+        estimated_density=schur_density,
+        estimated_factor_cost=Float64(schur_upper_nnz),
+        reason=:compatibility,
+        requested=selected_storage,
+    )
+    return StructureAnalysis(
+        coefficient_nnz,
+        coefficient_slots,
+        coefficient_density,
+        active_incidences,
+        active_slots,
+        active_density,
+        block_pattern_nnz,
+        block_pattern_slots,
+        block_pattern_density,
+        block_coefficient_densities,
+        block_pattern_densities,
+        schur_upper_nnz,
+        schur_upper_slots,
+        schur_density,
+        schur_exact,
+        recommended_storage,
+        selected_storage,
+        psd_kernel,
+        schur_backend,
+        profile,
+        facts,
+        plan,
+        graph,
+    )
 end
 
 """
@@ -970,23 +1530,490 @@ PresolveReport(
 )
 
 """
+    BackendConfiguration
+
+Immutable description of the linear-system route selected by the planner.
+`route` is the native structural backend, while the two reduced-arrow flags
+and `mixed_precision_mode` describe optional implementations of that route.
+`fallback_chain` contains the only structural fallbacks the runtime may use.
+The dedicated LP path resolves its backend after row presolve and scaling, so
+it is represented by `deferred=true` without changing the established LP
+selection formulas.
+"""
+struct BackendConfiguration
+    route::Symbol
+    equality_solver::Symbol
+    reduced_arrow::Bool
+    mixed_reduced_arrow::Bool
+    mixed_precision_mode::Symbol
+    fallback_chain::Tuple{Vararg{Symbol}}
+    deferred::Bool
+end
+
+"""
+    KKT_FORMULATION_ROUTES
+
+Mathematical KKT formulations the planner may select.  These are distinct
+from the LA provider (`la_config`) and from backend implementation details:
+`plan.kkt_formulation` names the actual linear-system route, while
+`backend_config` records which optimized implementation of that route is
+active.
+"""
+const KKT_FORMULATION_ROUTES = (
+    :dense_normal_equations,
+    :dense_augmented_kkt,
+    :sparse_normal_equations,
+    :block_arrow,
+)
+
+# ---------------------------------------------------------------------------
+# KKT storage is an execution dimension independent of formulation and LA
+# provider.  The small descriptors below are intentionally immutable and carry
+# only structural facts; numeric factors live in the sparse execution layer.
+# ---------------------------------------------------------------------------
+
+abstract type AbstractKKTStorage end
+
+"""Dense KKT storage marker used by the planner and diagnostics."""
+struct DenseKKTStorage <: AbstractKKTStorage end
+
+"""Frozen CSC storage marker used by sparse KKT execution."""
+struct SparseCSCStorage <: AbstractKKTStorage end
+
+"""
+    KKTStoragePlan
+
+Structural storage choice, deliberately separate from `FormulationPlan` and
+`LABackendConfiguration`.  `dimension`/`input_nnz` are optional estimates used
+by diagnostics and the simple `:auto` policy; no numeric factorization is run
+while constructing the plan.
+"""
+struct KKTStoragePlan
+    storage::Symbol
+    dimension::Int
+    input_nnz::Int
+    density::Float64
+    reason::Symbol
+    provenance::Symbol
+    requested::Symbol
+end
+
+function KKTStoragePlan(
+    storage::Symbol;
+    dimension::Integer=0,
+    input_nnz::Integer=0,
+    density::Real=0.0,
+    reason::Symbol=:explicit,
+    provenance::Symbol=:storage_planner,
+    requested::Symbol=storage,
+)
+    storage in (:dense, :sparse) || throw(ArgumentError(
+        "KKT storage must be :dense or :sparse",
+    ))
+    dim = Int(dimension)
+    nnz_value = Int(input_nnz)
+    dim >= 0 || throw(ArgumentError("KKT storage dimension must be nonnegative"))
+    nnz_value >= 0 || throw(ArgumentError("KKT storage nnz must be nonnegative"))
+    return KKTStoragePlan(
+        storage,
+        dim,
+        nnz_value,
+        Float64(density),
+        reason,
+        provenance,
+        requested,
+    )
+end
+
+KKTStoragePlan(storage::Symbol, dimension::Integer, input_nnz::Integer) =
+    KKTStoragePlan(storage; dimension=dimension, input_nnz=input_nnz)
+KKTStoragePlan(::DenseKKTStorage; kwargs...) = KKTStoragePlan(:dense; kwargs...)
+KKTStoragePlan(::SparseCSCStorage; kwargs...) = KKTStoragePlan(:sparse; kwargs...)
+storage_symbol(::DenseKKTStorage) = :dense
+storage_symbol(::SparseCSCStorage) = :sparse
+storage_symbol(plan::KKTStoragePlan) = plan.storage
+
+@inline function _normalize_kkt_storage_request(value)
+    value isa Bool && return value ? :sparse : :dense
+    value === :on && return :sparse
+    value === :off && return :dense
+    value in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "sparse/storage policy must be :auto, :dense, :sparse, :on, :off, or Bool",
+    ))
+    return value
+end
+
+"""Simple, explainable storage policy used before symbolic fill is known."""
+function plan_kkt_storage(
+    requested::Union{Bool,Symbol};
+    dimension::Integer=0,
+    input_nnz::Integer=0,
+    sparse_threshold::Float64=0.20,
+)
+    policy = requested isa Bool ? (requested ? :sparse : :dense) : requested
+    policy in (:auto, :dense, :sparse) || throw(ArgumentError(
+        "storage policy must be :auto, :dense, or :sparse",
+    ))
+    dim = Int(dimension)
+    nnz_value = Int(input_nnz)
+    density = nnz_value / max(dim * dim, 1)
+    if policy === :dense
+        return KKTStoragePlan(:dense; dimension=dim, input_nnz=nnz_value,
+                              density=density, reason=:explicit_dense,
+                              requested=:dense)
+    elseif policy === :sparse
+        return KKTStoragePlan(:sparse; dimension=dim, input_nnz=nnz_value,
+                              density=density, reason=:explicit_sparse,
+                              requested=:sparse)
+    end
+    selected = density <= sparse_threshold ? :sparse : :dense
+    return KKTStoragePlan(selected; dimension=dim, input_nnz=nnz_value,
+                          density=density, reason=:static_density,
+                          requested=:auto)
+end
+
+"""Typed mathematical KKT formulation, independent of its implementation."""
+abstract type AbstractKKTFormulation end
+
+struct DenseNormalEquations <: AbstractKKTFormulation end
+"""Explicit dense symmetric-indefinite Newton system, factored by pivoted LDLT."""
+struct DenseAugmentedKKT <: AbstractKKTFormulation end
+struct SparseNormalEquations <: AbstractKKTFormulation end
+struct BlockArrowElimination <: AbstractKKTFormulation end
+struct NoKKTFormulation <: AbstractKKTFormulation end
+
+"""Compatibility marker retained only so malformed old plans fail in setup."""
+struct UnsupportedKKTFormulation <: AbstractKKTFormulation
+    name::Symbol
+end
+
+"""
+    FormulationPlan
+
+Planner-owned mathematical formulation. `reason` explains the structural
+choice and `provenance` names the planner layer that made it. LA provider and
+factorization capabilities are deliberately absent.
+"""
+struct FormulationPlan{F<:AbstractKKTFormulation}
+    formulation::F
+    reason::Symbol
+    provenance::Symbol
+end
+
+formulation_symbol(::DenseNormalEquations) = :dense_normal_equations
+formulation_symbol(::DenseAugmentedKKT) = :dense_augmented_kkt
+formulation_symbol(::SparseNormalEquations) = :sparse_normal_equations
+formulation_symbol(::BlockArrowElimination) = :block_arrow
+formulation_symbol(::NoKKTFormulation) = :not_applicable
+formulation_symbol(formulation::UnsupportedKKTFormulation) = formulation.name
+formulation_symbol(plan::FormulationPlan) =
+    formulation_symbol(plan.formulation)
+
+function FormulationPlan(
+    formulation::Symbol;
+    reason::Symbol=:compatibility,
+    provenance::Symbol=:compatibility,
+)
+    typed = formulation === :dense_normal_equations ?
+            DenseNormalEquations() :
+            formulation === :dense_augmented_kkt ?
+            DenseAugmentedKKT() :
+            formulation === :sparse_normal_equations ?
+            SparseNormalEquations() :
+            formulation === :block_arrow ?
+            BlockArrowElimination() :
+            formulation === :not_applicable ?
+            NoKKTFormulation() : UnsupportedKKTFormulation(formulation)
+    return FormulationPlan(typed, reason, provenance)
+end
+
+"""Map a typed formulation to its current implementation after planning."""
+function kkt_backend_from_formulation(
+    plan::FormulationPlan,
+    algorithm::Symbol,
+    equalities::Integer,
+)
+    formulation = plan.formulation
+    sdp_algorithms = (:sdp_primal_dual, :socp_psd2, :socp_psd_lift)
+    if formulation isa Union{
+        DenseNormalEquations,
+        DenseAugmentedKKT,
+        SparseNormalEquations,
+        BlockArrowElimination,
+    }
+        algorithm in sdp_algorithms || throw(ArgumentError(
+            "SDP KKT formulation $(formulation_symbol(plan)) is incompatible " *
+            "with algorithm $(algorithm)",
+        ))
+    end
+    formulation isa DenseNormalEquations && return :dense_cholesky
+    formulation isa DenseAugmentedKKT && return :dense_augmented_ldlt
+    formulation isa SparseNormalEquations && return :sparse_schur_cholesky
+    formulation isa BlockArrowElimination && return :block_arrow
+    if formulation isa NoKKTFormulation
+        algorithm === :lp_primal_dual &&
+            return equalities == 0 ?
+                   :positive_definite_cholesky : :dense_lu
+    end
+    throw(ArgumentError(
+        "KKT formulation $(formulation_symbol(plan)) does not implement " *
+        "algorithm $(algorithm)",
+    ))
+end
+
+"""Compatibility equality for backend aliases implementing one formulation."""
+function kkt_backend_matches_formulation(
+    backend::Symbol,
+    plan::FormulationPlan,
+    algorithm::Symbol,
+    equalities::Integer,
+)
+    planned = kkt_backend_from_formulation(plan, algorithm, equalities)
+    backend === planned && return true
+    return planned === :dense_cholesky &&
+           backend === :dense_cholesky_fallback
+end
+
+"""
+    kkt_formulation_from_backend(kkt_backend) -> Symbol
+
+Stable route mapping used by compatibility positional `ExecutionPlan`
+constructors and by Workspace validation.  Dense Cholesky and its historical
+fallback label execute the same dense normal-equation route, so both map to
+`:dense_normal_equations`.  Deferred LP and native Q3 plans have no SDP KKT
+formulation and map to `:not_applicable`.
+"""
+function kkt_formulation_from_backend(kkt_backend::Symbol)
+    kkt_backend === :block_arrow && return :block_arrow
+    kkt_backend === :sparse_schur_cholesky && return :sparse_normal_equations
+    kkt_backend in (:dense_cholesky, :dense_cholesky_fallback) &&
+        return :dense_normal_equations
+    kkt_backend === :dense_augmented_ldlt && return :dense_augmented_kkt
+    return :not_applicable
+end
+
+"""Compatibility-only inverse mapping for historical positional plans."""
+formulation_plan_from_backend(kkt_backend::Symbol) = FormulationPlan(
+    kkt_formulation_from_backend(kkt_backend);
+    reason=:backend_compatibility,
+    provenance=:compatibility_constructor,
+)
+
+"""
     ExecutionPlan
 
 Algorithms selected before a solve. This is deliberately descriptive: it is
 returned to callers in diagnostics so automatic decisions are inspectable and
 reproducible.
 """
-struct ExecutionPlan
+struct ExecutionPlan{F<:AbstractKKTFormulation}
     classification::ProblemClassification
     algorithm::Symbol
     scaling::Symbol
     kkt_backend::Symbol
+    backend_config::BackendConfiguration
+    formulation_plan::FormulationPlan{F}
+    la_config::LABackendConfiguration
     gram_kernel::Symbol
     schedule::Symbol
     threads::Int
     parameter_profile::Symbol
     memory_budget_bytes::Int
     parameters::NamedTuple
+end
+
+
+function Base.getproperty(plan::ExecutionPlan, name::Symbol)
+    name === :kkt_formulation &&
+        return formulation_symbol(getfield(plan, :formulation_plan))
+    if name === :storage_plan
+        classification = getfield(plan, :classification)
+        parameters = getfield(plan, :parameters)
+        requested = hasproperty(parameters, :storage_policy) ?
+                    parameters.storage_policy : :auto
+        requested = _normalize_kkt_storage_request(requested)
+        selected = hasproperty(parameters, :storage_selected) ?
+                   parameters.storage_selected : classification.storage
+        selected in (:dense, :sparse) || (selected = classification.storage)
+        dimension = hasproperty(parameters, :storage_dimension) ?
+                    parameters.storage_dimension : classification.variables
+        input_nnz = hasproperty(parameters, :storage_input_nnz) ?
+                    parameters.storage_input_nnz : 0
+        density = hasproperty(parameters, :storage_density) ?
+                  parameters.storage_density : classification.expected_schur_density
+        reason = hasproperty(parameters, :storage_reason) ?
+                 parameters.storage_reason : :route_storage_policy
+        return KKTStoragePlan(
+            selected;
+            dimension=dimension,
+            input_nnz=input_nnz,
+            density=density,
+            reason=reason,
+            provenance=:execution_plan,
+            requested=requested,
+        )
+    end
+    return getfield(plan, name)
+end
+
+function Base.propertynames(plan::ExecutionPlan, private::Bool=false)
+    names = fieldnames(typeof(plan))
+    return (names..., :kkt_formulation, :storage_plan)
+end
+
+# Source compatibility for the former 13-field constructor. Modern planner
+# code passes a typed FormulationPlan directly; historical callers may still
+# pass the formulation Symbol in the same position.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    kkt_formulation::Symbol,
+    la_config::LABackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        FormulationPlan(
+            kkt_formulation;
+            reason=:explicit_descriptor,
+            provenance=:compatibility_constructor,
+        ),
+        la_config,
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
+end
+
+# Compatibility constructor for the v0.4.1-dev 11-field plan.  New planner
+# code supplies `la_config` explicitly; old callers retain the legacy path.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        formulation_plan_from_backend(kkt_backend),
+        _compat_la_backend_configuration(
+            classification.arithmetic,
+            backend_config.equality_solver,
+        ),
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
+end
+
+# Compatibility constructor for the v0.4.1-dev plan carrying `la_config` but
+# no formulation field.  New planner code supplies the formulation explicitly;
+# old callers retain the backend-derived route mapping.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    la_config::LABackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        formulation_plan_from_backend(kkt_backend),
+        la_config,
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
+end
+
+# Source compatibility for the pre-`backend_config` positional form.  The
+# compatibility route is intentionally conservative: callers constructing an
+# `ExecutionPlan` directly get the same backend named by `kkt_backend`, while
+# plans built by `build_execution_plan` carry the complete configuration.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+)
+    equality_solver = get(parameters, :equality_solver, :auto)
+    deferred = algorithm === :lp_primal_dual
+    config = BackendConfiguration(
+        kkt_backend,
+        equality_solver,
+        false,
+        false,
+        :off,
+        (),
+        deferred,
+    )
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        config,
+        formulation_plan_from_backend(kkt_backend),
+        _compat_la_backend_configuration(
+            classification.arithmetic,
+            equality_solver,
+        ),
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+    )
 end
 
 """

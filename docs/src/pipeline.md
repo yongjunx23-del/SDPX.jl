@@ -1,49 +1,195 @@
 # Automatic pipeline
 
-Every public solve runs a conservative preparation pipeline:
+Every `solve` and `solve!` call builds an inspectable `ExecutionPlan`. The
+pipeline performs:
 
-1. classify the cone, storage, arithmetic, size, and expected Schur density;
-2. remove exact zero, duplicate, and verified dependent equalities;
-3. extract scalar bounds and eliminate exactly fixed variables;
-4. select scaling or Ruiz equilibration;
-5. estimate formulation, kernel, factorization, memory, and scheduling costs;
-6. solve the reduced model; and
-7. reconstruct and certify the original-coordinate result.
+1. cone, storage, arithmetic, and size classification;
+2. rank-revealing equality presolve with a consistency check and dual
+   reconstruction map;
+3. redundant scalar-cone row elimination for LPs;
+4. automatic scaling and equilibration selection;
+5. solver, Gram/Schur kernel, KKT backend, thread schedule, and memory-budget
+   selection;
+6. guarded adaptive interior-point parameter control with a fixed fallback;
+7. phase timing, workspace estimation, warnings, and result reconstruction.
 
-Transformations that are not fully implemented or not numerically justified,
-including general primal-to-dual conversion and chordal decomposition, remain
-analysis-only.
+Pure `1×1` cone models are solved by a dedicated scalar Mehrotra
+predictor-corrector LP engine. Standard scalar inequalities supplied through
+JuMP/MOI are converted directly to that representation. Compact `ConicProblem`
+and pure-SOC JuMP/MOI models use NativeSOC in original Lorentz coordinates;
+general Lorentz blocks use the Nesterov--Todd path, while exactly certified
+fixed-trace Q3 cells use the compact HKM specialization (see
+[socp.md](socp.md)). Explicit SDP-shaped lift inputs remain supported by the
+SDP engine, whose Float64 numerical path is unchanged.
 
-```julia
-result = solve(
-    problem;
-    presolve=:auto,
-    scaling=:auto,
-    algorithm=:auto,
-    threads=8,
-    diagnostics=true,
-)
+## Presolve
+
+Equality columns in `B` are normalized independently and reduced using
+column-pivoted QR in the problem's arithmetic type. This avoids narrowing away
+a direction that is meaningful to Float64x4 or BigFloat. Discarded columns are
+checked against both the retained basis and their right-hand sides in the same
+arithmetic; an ambiguous rank decision keeps all equalities. An inconsistent
+system returns `InfeasibleCert` before factorization. Reduced dual multipliers
+are mapped back to the original equality ordering, with zero assigned to
+non-unique discarded multipliers.
+
+The LP presolver additionally removes:
+
+- zero rows that are always satisfied;
+- infeasible zero rows;
+- positive scalar multiples with the same left-hand side, retaining the
+  strongest lower bound.
+
+## Dedicated LP kernels and multicore scheduling
+
+The LP normal matrix is
+
+```text
+H = G' * Diagonal(z ./ s) * G.
 ```
 
-Inspect decisions after the solve:
+For Float64 and one thread, SDPX packs `sqrt(z ./ s) .* G` once and calls BLAS
+`syrk`. For sufficiently large models with single-threaded BLAS and more than
+one requested Julia thread, variables are split into coarse column panels.
+Each worker performs one independent BLAS-3 GEMM into a disjoint output panel.
+There are no partial-matrix reductions, atomics, or locks. BigFloat remains
+serial.
 
-```julia
-result.diagnostics.classification
-result.diagnostics.plan
-result.diagnostics.presolve
-result.diagnostics.selected_algorithms
-result.diagnostics.timings
-result.diagnostics.memory
-result.diagnostics.warnings
+For `Float64xN` and `BigFloat`, `extended_precision_blas=:auto` permits the
+planner to choose the packed blocked triangular `syrk!` path only when its
+predicted benefit exceeds packing cost and it fits the memory budget.
+`extended_precision_blas=:on` is intended for diagnostics and still cannot
+override the memory-safety check. Float64 is never redirected by this option.
+
+The equality-free LP Newton matrix is positive definite after regularization,
+so SDPX factors it with Cholesky and reuses the kernel triangular solves.
+Equality-constrained LPs retain dense LU because their augmented KKT matrix is
+indefinite. Small Float64 SDPs containing only `1×1`/`2×2` blocks and fewer
+than 1,000 variables are kept serial because repeated task barriers cost more
+than the block kernels. Fixed-width extended arithmetic retains multicore
+block scheduling.
+
+## High-precision ownership and allocation policy
+
+Julia `BigFloat` values are mutable. Solver workspaces are therefore created
+with independent scalar objects instead of relying on `zeros(BigFloat, ...)`
+or `fill!`, which can install the same object into multiple slots. Internal
+`*_owned!` operations may mutate destinations only after that ownership
+invariant has been established.
+
+The dedicated BigFloat layer covers copying, zeroing, fused vector updates,
+matrix products, triangular solves, Cholesky factorization/solve, Schur and
+KKT right-hand sides, weighted LP Hessian/KKT assembly, and blocked triangular
+`syrk!`/`gemm!` paths. Input conversion, result construction, and operations
+that must create independent output values may still allocate.
+
+## Extended-precision crossover and memory budget
+
+The packed-kernel selector uses arithmetic family, dimensions, active density,
+average nonzeros, expected Schur density, requested threads, and packing
+bytes. The current conservative automatic gates are:
+
+| Gate | Fixed-width extended | BigFloat |
+|---|---:|---:|
+| Minimum columns | 32 | 20 |
+| Minimum pair-row work | 200,000 | 50,000 |
+| Minimum expected Schur density | 0.20 | 0.05 |
+| Minimum predicted speedup | 1.18x | 1.12x |
+| Sparse average fill required | 0.42 | 0.62 |
+
+Fixed-width sparse blocks of dimension at most two retain their specialized
+small-block path. Every packed block must also fit its cumulative memory
+budget.
+
+Available memory is the minimum usable signal from host free memory, Linux
+cgroup v1/v2 counters, and the optional `SDPX_MEMORY_LIMIT_BYTES` ceiling.
+The requested packing budget is
+`extended_precision_memory_fraction × available` (default `0.10 ×`), capped at
+half of the available amount so at least half remains as general headroom. If
+no reliable signal exists, optional packing is disabled instead of risking an
+out-of-memory kill.
+
+For the fused exact-arrow `2×2` SDP path, transformed panels and packed pair
+buffers are not allocated because the compute-and-scatter kernel consumes
+neither. This specialization takes precedence over optional packed extended
+BLAS for both Float64x4 and BigFloat. Execution diagnostics report
+`gram_kernel=:fused_arrow_2x2` and
+`gram_kernel_reason=:fused_arrow_specialized`.
+
+## Automatic LP cold-start parameters
+
+The dedicated LP engine uses a deterministic distance diagnostic before the
+first iteration:
+
+```text
+max(max_i |h_i| / ||G_i||_inf, max_j |b_j| / ||B_j||_inf).
 ```
 
-Sparse coefficient matrices do not necessarily imply a sparse Schur matrix.
-The selector uses active incidence density and predicted Schur density
-separately, which is important for lattice-bootstrap models with sparse
-individual coefficients but dense aggregate coupling.
+This quantity is invariant to positive rescaling of an individual constraint.
+With `parameter_policy=:auto`, an indicator at most `1000` selects
+`beta=1/50, gamma=99/100`; larger or non-finite values retain the configured
+conservative parameters. The guard applies to BigFloat as well as
+fixed-exponent arithmetic: extra precision prevents rounding loss, but does
+not by itself globalize a very distant infeasible start.
+`parameter_policy=:fixed` remains an exact override.
 
-See the
-[preprocessing design](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/preprocessing.md)
-and
-[automatic pipeline design](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/automatic-optimization-pipeline.md)
-for stage invariants and reconstruction details.
+## Adaptive Newton parameters
+
+`parameter_strategy=:adaptive` selects a bounded Mehrotra `sigma` from the
+affine complementarity ratio, centrality, factor quality, and recent progress.
+It separately selects primal and dual fraction-to-boundary values, the
+backtracking contraction, and the refinement target/cap. The complete fixed
+predictor/corrector path is restored after non-finite diagnostics,
+rank-revealing equality factorization, or unstable progress.
+
+Every accepted iteration is stored in `result.parameter_history`, including
+`sigma`, `mu`, `mu_aff`, affine and accepted steps, the separate step
+safeguards, residual progress, factor/PSD-margin proxies, regularization,
+refinement, and fallback provenance. See
+[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md) for
+the audit, equations, exact bounds, and arithmetic-specific behavior.
+
+## Result and optional spectrum
+
+`SDPResult` contains status, objectives, residuals, iteration counts, phase
+timings, and parameter history. `result.diagnostics` adds the classification,
+execution plan, presolve summary, analytical workspace estimate, process peak
+RSS, selected algorithms, and warnings.
+`result.termination.total_refinement_steps` records accepted refinement
+corrections across the complete SDP solve.
+
+Spectrum reconstruction is intentionally post-solve:
+
+```julia
+records = reconstruct_spectrum(result; source=:primal)
+export_spectrum("spectrum.csv", result)
+export_spectrum("spectrum.json", result)
+
+using JLD2
+export_spectrum("spectrum.jld2", result)
+```
+
+The JLD2 file contains a top-level dataset named `spectrum`, with a versioned
+payload: `format_version` (currently `1`), solve-wide `metadata`, and
+per-block eigenvalue `records`. Generic extended-precision matrices are
+projected to Float64 only for this optional eigenvalue post-processing because
+Julia's standard library does not provide a generic symmetric eigensolver for
+every scalar type.
+
+## Remaining bottlenecks
+
+1. Large dense SDP Schur matrices and their factorization dominate the heavy
+   benchmark models; the Float64 numerical path is intentionally unchanged.
+2. Equality-constrained LPs use dense LU. A null-space/range-space selector
+   remains future work; sparse execution is intentionally restricted to
+   equality-free frozen-CSC normal equations with provider-native Cholesky.
+3. LP panel GEMM computes full output panels. A lower-triangle-only blocked
+   BLAS-3 kernel would reduce arithmetic further.
+4. General-dimensional native SOCP is production; general BigFloat work is
+   serial, while exact singleton-local `2×2` arrows may use ownership-safe
+   panel preparation and disjoint Schur tiles.
+5. Presolve removes equality dependence and scalar-row redundancy; bound
+   propagation, singleton substitution, coefficient strengthening, and chordal
+   SDP decomposition remain future work.
+6. Nested solves in one process are not supported because BLAS thread count is
+   process-global. Use separate processes for concurrent instances.

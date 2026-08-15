@@ -78,23 +78,34 @@ end
             thread_count=1,
         )
         @test workspace.mixed_precision !== nothing
+        backend = SDPX.select_backend(workspace)
+        @test backend isa SDPX.MixedPrecisionBackend
+        @test SDPX.planned_backend_name(workspace) === :mixed_precision
         SDPX.copy_owned!(workspace.S, schur)
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(backend, workspace, problem, options)
         @test factor.ok
         @test workspace.mixed_precision.active
         @test workspace.mixed_precision.reason === :active
         @test isfinite(workspace.mixed_precision.condition_estimate)
+        equality_diagnostics =
+            SDPX._equality_factor_diagnostics(workspace, equalities)
+        @test equality_diagnostics.available
+        @test equality_diagnostics.method ===
+              :mixed_float64_normal_equations
+        @test equality_diagnostics.rank == equalities
+        @test !equality_diagnostics.rank_deficient
+        @test equality_diagnostics.quality > zero(BigFloat)
 
         SDPX.copy_owned!(workspace.p, equality_rhs)
-        SDPX.solve_kkt!(
+        @test SDPX.solve_direction!(
+            backend,
             workspace,
-            equalities,
+            problem,
+            options,
             primal_rhs,
-            equality_rhs,
-            workspace.dx,
-            workspace.dy,
         )
-        refinement_steps, residual = SDPX.refine_direction!(
+        refinement_steps, residual = SDPX.refine!(
+            backend,
             workspace,
             problem,
             options,
@@ -160,14 +171,18 @@ end
             mixed_precision_memory_fraction=1.0,
             thread_count=1,
         )
+        backend = SDPX.select_backend(workspace)
+        @test backend isa SDPX.MixedPrecisionBackend
         schur = zeros(BigFloat, 4, 4)
         @inbounds for index in 1:4
             schur[index, index] = BigFloat(10)^(-4(index - 1))
         end
         SDPX.copy_owned!(workspace.S, schur)
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(backend, workspace, problem, options).ok
         @test !workspace.mixed_precision.active
         @test workspace.mixed_precision.reason === :condition_limit
+        @test workspace.executed_backend === :dense_cholesky
+        @test workspace.backend_fallback_reason === :condition_limit
         @test workspace.mixed_precision.static_rejection_count == 1
         @test workspace.mixed_precision.cooldown_remaining ==
               SDPX.MIXED_KKT_FALLBACK_COOLDOWN

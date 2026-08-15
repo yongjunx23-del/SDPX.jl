@@ -1,48 +1,117 @@
 using SDPX
-using DoubleFloats
-using JLD2
 using Test
 
-@testset "SDPX.jl" begin
-    include("correctness.jl")
-    include("genericity.jl")
-    include("extended_precision_blas.jl")
-    include("sparse.jl")
-    include("moi.jl")
-    include("threads.jl")
-    include("pipeline.jl")
-    include("adaptive_parameter_policy.jl")
-    include("preprocessing_regressions.jl")
-    include("lp_regressions.jl")
-    include("soc_regressions.jl")
-    include("fixed_trace_benchmark_regressions.jl")
-    include("soc_q3_kernel_regressions.jl")
-    include("solver_regressions.jl")
-    include("kkt_regressions.jl")
-    include("kkt_sparse_backend.jl")
-    include("sparse_sdp_kkt.jl")
-    include("mixed_precision_kkt_regressions.jl")
-    include("result_certificate.jl")
-    include("infeasibility_diagnostics.jl")
-    include("options_interface.jl")
-    include("public_api.jl")
-    include("moi_regressions.jl")
-    include("convex_regressions.jl")
-    include("extended_blas_regressions.jl")
-    include("bigfloat_kernel_regressions.jl")
-    include("bigfloat_ownership_regressions.jl")
-    include("bigfloat_sparse_schur_regressions.jl")
-    include("schur_scheduler_regressions.jl")
-    include("ingest_regressions.jl")
-    include("spectrum_regressions.jl")
-    include("extensions_regressions.jl")
-    include("lp_sparse.jl")
-    include("examples.jl")
-    include("nullspace_reduction.jl")
-    include("error_handling.jl")
-    include("executed_diagnostics.jl")
-    include("cli_bridge.jl")
-    include("aqua.jl")
-    include("shadowing_guard.jl")
-    include("gates.jl")
+const QUICK_TESTS = (
+    "la_backend_regressions.jl",
+    "generic_la_backend.jl",
+    "dense_augmented_kkt.jl",
+    "soc_native_algebra.jl",
+    "soc_native_solver.jl",
+    "moi_native_soc.jl",
+    "bfla_backend.jl",
+    "mfla_backend.jl",
+    "canonical_conic_problem.jl",
+    "problem_features.jl",
+    "auto_planner.jl",
+    "frontend_auto_options.jl",
+    "architecture_regressions.jl",
+    "public_api.jl",
+    "performance_trace.jl",
+    "benchmark_registry.jl",
+    "prepared_structure.jl",
+    "v05_core_invariants.jl",
+    "sparse_execution_round6.jl",
+    "sparse_schur_round7.jl",
+)
+
+# Keep this list in the historical full-suite order. Some older tests share
+# helpers through that order (notably correctness.jl -> sparse.jl).
+const FULL_TESTS = (
+    "la_backend_regressions.jl",
+    "generic_la_backend.jl",
+    "dense_augmented_kkt.jl",
+    "bfla_backend.jl",
+    "mfla_backend.jl",
+    "correctness.jl",
+    "genericity.jl",
+    "extended_precision_blas.jl",
+    "sparse.jl",
+    "moi_native_soc.jl",
+    "moi.jl",
+    "threads.jl",
+    "pipeline.jl",
+    "adaptive_parameter_policy.jl",
+    "preprocessing_regressions.jl",
+    "lp_regressions.jl",
+    "soc_regressions.jl",
+    "soc_native_algebra.jl",
+    "soc_native_solver.jl",
+    "canonical_conic_problem.jl",
+    "problem_features.jl",
+    "auto_planner.jl",
+    "fixed_trace_benchmark_regressions.jl",
+    "soc_q3_kernel_regressions.jl",
+    "solver_regressions.jl",
+    "kkt_regressions.jl",
+    "kkt_sparse_backend.jl",
+    "sparse_sdp_kkt.jl",
+    "mixed_precision_kkt_regressions.jl",
+    "result_certificate.jl",
+    "infeasibility_diagnostics.jl",
+    "options_interface.jl",
+    "frontend_auto_options.jl",
+    "architecture_regressions.jl",
+    "public_api.jl",
+    "performance_trace.jl",
+    "benchmark_registry.jl",
+    "prepared_structure.jl",
+    "moi_regressions.jl",
+    "convex_regressions.jl",
+    "extended_blas_regressions.jl",
+    "bigfloat_kernel_regressions.jl",
+    "bigfloat_ownership_regressions.jl",
+    "bigfloat_sparse_schur_regressions.jl",
+    "schur_scheduler_regressions.jl",
+    "ingest_regressions.jl",
+    "spectrum_regressions.jl",
+    "extensions_regressions.jl",
+    "lp_sparse.jl",
+    "examples.jl",
+    "nullspace_reduction.jl",
+    "error_handling.jl",
+    "executed_diagnostics.jl",
+    "cli_bridge.jl",
+    "aqua.jl",
+    "shadowing_guard.jl",
+    "gates.jl",
+    "v05_core_invariants.jl",
+    "sparse_execution_round6.jl",
+    "sparse_schur_round7.jl",
+)
+
+function _test_profile()
+    profile = Symbol(lowercase(strip(get(ENV, "SDPX_TEST_PROFILE", "quick"))))
+    profile in (:quick, :full) || throw(ArgumentError(
+        "SDPX_TEST_PROFILE must be quick or full, got $(repr(profile))",
+    ))
+    return profile
+end
+
+const TEST_PROFILE = _test_profile()
+
+# These packages are only needed by full-suite extension tests. Avoiding their
+# load cost is part of making the normal edit-test loop small.
+if TEST_PROFILE === :full
+    using DoubleFloats
+    using JLD2
+end
+
+const SELECTED_TESTS = TEST_PROFILE === :quick ? QUICK_TESTS : FULL_TESTS
+
+@info "SDPX test profile" profile=TEST_PROFILE files=length(SELECTED_TESTS)
+
+@testset "SDPX.jl ($(TEST_PROFILE))" begin
+    for file in SELECTED_TESTS
+        include(joinpath(@__DIR__, file))
+    end
 end

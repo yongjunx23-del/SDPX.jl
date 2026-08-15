@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   test:
-    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads
+    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads / ${{ matrix.profile }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -26,6 +26,7 @@ jobs:
         julia: ['1.10', '1']
         os: [ubuntu-latest]
         threads: ['1', '4']
+        profile: ['quick']
         include:
           # Spot-check the other platforms once, on the current release. The
           # thread count is part of the matrix rather than fixed because several
@@ -33,9 +34,18 @@ jobs:
           - julia: '1'
             os: macOS-latest
             threads: '4'
+            profile: quick
           - julia: '1'
             os: windows-latest
             threads: '4'
+            profile: quick
+          # Run the expensive numerical/extension matrix once. Cross-version,
+          # cross-platform, and serial/threaded compatibility are already
+          # covered by the quick jobs above.
+          - julia: '1'
+            os: ubuntu-latest
+            threads: '4'
+            profile: full
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -46,10 +56,11 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         env:
           JULIA_NUM_THREADS: ${{ matrix.threads }}
+          SDPX_TEST_PROFILE: ${{ matrix.profile }}
       - uses: julia-actions/julia-processcoverage@v1
-        if: matrix.julia == '1' && matrix.os == 'ubuntu-latest' && matrix.threads == '4'
+        if: matrix.profile == 'full'
       - uses: codecov/codecov-action@v5
-        if: matrix.julia == '1' && matrix.os == 'ubuntu-latest' && matrix.threads == '4'
+        if: matrix.profile == 'full'
         with:
           files: lcov.info
           use_oidc: true
@@ -68,14 +79,50 @@ jobs:
       - uses: julia-actions/cache@v2
       - name: Instantiate benchmark environment
         run: julia --project=bench -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-      # Only the :small tier runs here. The large sparse and lattice-bootstrap
-      # benchmarks take hours, need multi-gigabyte generated inputs, and are
-      # slower still in BigFloat — they are run manually, never in CI.
-      - name: Run small-tier smoke benchmark
+      # Only the canonical micro suite runs in CI. Larger registered suites
+      # need generated or downloaded inputs and are run manually.
+      - name: Run canonical micro benchmark smoke
+        run: julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+
+  provider-smoke:
+    name: MFLA/BFLA provider smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Clone pinned provider checkouts
         run: |
-          julia --project=bench -e '
-            include("bench/run.jl")
-            main(; tiers=(:small,), types=(Float64,), reps=1, results_path=tempname())'
+          git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
+          git -C "$RUNNER_TEMP/MFLA" checkout e257f367754e0a2024c9ff3508460c4e1e70e3a9
+          git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
+          git -C "$RUNNER_TEMP/BFLA" checkout e6eeef20bcad76b65da881860fc34610e66f9c8d
+      - name: Build provider smoke environment
+        env:
+          SDPX_PROJECT: ${{ github.workspace }}
+          SDPX_MFLA_PROJECT: ${{ runner.temp }}/MFLA
+          SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
+          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
+        run: |
+          mkdir -p "$SDPX_PROVIDER_ENV"
+          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -e '
+            using Pkg
+            Pkg.develop(path=ENV["SDPX_PROJECT"])
+            Pkg.develop(path=ENV["SDPX_MFLA_PROJECT"])
+            Pkg.develop(path=ENV["SDPX_BFLA_PROJECT"])
+            Pkg.add(["MultiFloats", "GenericLinearAlgebra"])
+          '
+      - name: Run installed-provider smoke and extension gates
+        env:
+          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
+          SDPX_MFLA_PROJECT: ${{ runner.temp }}/MFLA
+          SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
+          SDPX_PROVIDER_SMOKE_TARGET: all
+        run: |
+          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 test/provider_smoke.jl
+          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 test/multifloat_linear_algebra_integration.jl
 
   quality:
     name: Package quality

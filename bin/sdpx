@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if ! command -v julia >/dev/null 2>&1; then
+  echo "SDPX: Julia is not on PATH" >&2
+  exit 127
+fi
+if [[ ! -f "$ROOT/bin/Manifest.toml" ]]; then
+  echo "SDPX CLI environment is not instantiated." >&2
+  echo "Run: julia '$ROOT/bin/setup_cli.jl'" >&2
+  exit 2
+fi
+exec julia --project="$ROOT/bin" "$ROOT/bin/sdpx.jl" "$@"

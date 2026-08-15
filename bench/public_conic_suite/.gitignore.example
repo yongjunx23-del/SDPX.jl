@@ -1,0 +1,6 @@
+# Public conic benchmark data/results
+data/external/
+data/download_lock.toml
+data/generated/*.csv
+results/
+*.log

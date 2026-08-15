@@ -1,0 +1,37 @@
+version = 1
+purpose = "Map the public conic suite to SDPX frontend/midend/backend development gates."
+
+[frontend]
+policy = ["all_auto_options", "sdpb_style_cli_precision_thresholds", "exact_numeric_string_parsing"]
+smoke = ["lp_netlib_smoke", "pathological_lp", "pathological_socp", "pathological_sdp"]
+required_fields = ["requested_options", "resolved_options", "formulation", "certificate"]
+
+[midend]
+policy = ["execution_plan_authoritative", "no_hidden_deterministic_route_change", "original_coordinate_reconstruction"]
+smoke = ["lp.near_dependent_equalities", "lp.row_scaling", "socp.near_tangent", "sdp.congruence_scaling"]
+nightly = ["sdp_core30", "socp_core12", "lp_modern20"]
+
+[backend.lp]
+correctness = ["netlib_core20", "lp.near_dependent_equalities", "lp.infeasible_margin"]
+performance = ["mittelmann_modern20", "network_lp25"]
+blockers = ["implicit_dense_G", "implicit_dense_Aeq", "dense_nvar_squared_workspace"]
+
+[backend.socp]
+correctness = ["socp.near_tangent", "socp.near_infeasible"]
+performance = ["socp.many_tiny_cones", "mittelmann_socp_core12"]
+formulations = ["soc_native", "soc_psd_arrow_reference"]
+rule = "Never label PSD-arrow timing as native SOCP."
+
+[backend.sdp]
+correctness = ["sdp.small_eigenvalue", "sdp.hilbert_min_eigenvalue", "sdp.weak_infeasible_2x2"]
+sparse_schur = ["G48mc", "G55mc", "G60mc", "checker"]
+tall_kkt = ["cphil12", "theta123"]
+many_blocks = ["mater-6", "ros_2000"]
+memory = ["reimer5", "fap09"]
+
+[numerical_reliability]
+precision_ladder = ["Float64", "Float64x2", "Float64x3", "Float64x4", "BigFloat128", "BigFloat256", "BigFloat512", "BigFloat1024"]
+required = ["certificate_valid", "primal_residual", "dual_residual", "relative_gap", "cone_violation", "precision_bits"]
+
+[merge_gate]
+rule = "No optimization merges on kernel timing alone: the targeted end-to-end benchmark must not regress certification or median wall time."

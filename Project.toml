@@ -1,40 +1,52 @@
 name = "SDPX"
 uuid = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
-version = "0.4.0"
+version = "0.5.0-DEV"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 MutableArithmetics = "d8a4904e-b15c-11e9-3269-09a3773c0cb0"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [weakdeps]
 AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
+BigFloatLinearAlgebra = "44d352a4-380e-4c6a-9c2a-31e5bfe329aa"
 Convex = "f65535da-76fb-5f13-bab9-19810c17039a"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
+MultiFloatLinearAlgebra = "642d9d30-8e28-45ca-9d81-256429ea358f"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 
 [extensions]
 SDPXAppleAccelerateExt = "AppleAccelerate"
+SDPXBigFloatLinearAlgebraExt = "BigFloatLinearAlgebra"
 SDPXConvexExt = "Convex"
 SDPXDoubleFloatsExt = "DoubleFloats"
 SDPXJLD2Ext = "JLD2"
+SDPXGenericLinearAlgebraExt = "GenericLinearAlgebra"
+SDPXMultiFloatLinearAlgebraExt = ["MultiFloats", "MultiFloatLinearAlgebra"]
 SDPXMultiFloatsExt = "MultiFloats"
 
 [compat]
 AppleAccelerate = "0.7"
 Aqua = "0.8"
+BigFloatLinearAlgebra = "0.1"
 Convex = "0.16"
 DoubleFloats = "1"
+Dates = "1"
+Downloads = "1"
 JLD2 = "0.4, 0.5, 0.6"
+GenericLinearAlgebra = "0.3, 0.4"
 JSON = "0.21, 1"
 JuMP = "1"
 LinearAlgebra = "1"
 MathOptInterface = "1.38"
+MultiFloatLinearAlgebra = "0.1"
 MultiFloats = "3"
 MutableArithmetics = "1"
 Printf = "1"
@@ -50,8 +62,11 @@ julia = "1.10"
 [extras]
 Aqua = "4c88cf16-eb10-579e-8560-4a9242c79595"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Downloads = "f43a241f-c20a-4ad4-852c-f6b1247861c6"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
@@ -61,4 +76,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [targets]
-test = ["Aqua", "Convex", "DoubleFloats", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "SHA", "StableRNGs", "Test", "TOML"]
+test = ["Aqua", "Convex", "Dates", "DoubleFloats", "Downloads", "GenericLinearAlgebra", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "SHA", "StableRNGs", "Test", "TOML"]

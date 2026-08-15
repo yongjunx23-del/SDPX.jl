@@ -1,8 +1,14 @@
-#=====================================================================
+#=
     KKT block elimination (§2.2) and iterative refinement (§2.5).
 
         [ S  −B ] [dx]   [ r ]        S := Σ_l S[l]  (m×m, SPD)
         [ Bᵀ  0 ] [dy] = [ p ]        B ∈ ℝ^{m×n},  n ≪ m
+
+    The explicit dense augmented formulation negates only the equality row
+    and factors the mathematically equivalent symmetric system
+
+        [ S   −B ] [dx]   [ r ]
+        [−Bᵀ   0 ] [dy] = [−p ].
 
     L_S = chol(S).L ; B̃ = L_S⁻¹B ; Q = B̃ᵀB̃ = BᵀS⁻¹B ; r̃ = L_S⁻¹r
     Q·dy = p − B̃ᵀr̃   (Cholesky of Q) ; dx = L_S⁻ᵀ(r̃ + B̃·dy)
@@ -11,7 +17,7 @@
     iteration (P2): `factor_kkt!` runs once, `solve_kkt!` runs once
     per right-hand side (predictor r, corrector r, and — via
     `refine_kkt!` — the residual-correction system).
-=====================================================================#
+=#
 
 @inline _elapsed_seconds(started) =
     (time_ns() - started) / 1.0e9
@@ -27,12 +33,16 @@ _empty_kkt_phase_times() = (
 function _cholesky_has_numerical_rank(
     factor::LinearAlgebra.Cholesky{T},
 ) where {T}
-    dimension = size(factor.factors, 1)
+    return _cholesky_has_numerical_rank(factor.factors)
+end
+
+function _cholesky_has_numerical_rank(matrix::AbstractMatrix{T}) where {T}
+    dimension = size(matrix, 1)
     dimension == 0 && return true
-    minimum_diagonal = abs(factor.factors[1, 1])
+    minimum_diagonal = abs(matrix[1, 1])
     maximum_diagonal = minimum_diagonal
     @inbounds for index in 2:dimension
-        value = abs(factor.factors[index, index])
+        value = abs(matrix[index, index])
         minimum_diagonal = min(minimum_diagonal, value)
         maximum_diagonal = max(maximum_diagonal, value)
     end
@@ -41,6 +51,24 @@ function _cholesky_has_numerical_rank(
         maximum_diagonal > zero(T) &&
         minimum_diagonal >
         sqrt(T(dimension) * eps(T)) * maximum_diagonal
+end
+
+function _legacy_factor_has_numerical_rank(
+    factor::LegacyLACholeskyFactor{T},
+) where {T}
+    la_cholesky_rank_authoritative(factor) && return true
+    return _cholesky_has_numerical_rank(
+        la_factor_handle_matrix(factor),
+    )
+end
+
+function _la_factor_has_numerical_rank(
+    factor::AbstractLACholeskyFactor,
+)
+    la_cholesky_rank_authoritative(factor) && return true
+    return _cholesky_has_numerical_rank(
+        la_factor_handle_matrix(factor),
+    )
 end
 
 function _has_exact_duplicate_columns(matrix::AbstractMatrix)
@@ -126,7 +154,17 @@ function _equality_qr_allowed(
            estimated_extra_bytes <= max(256 * 2^20, fld(available, 8))
 end
 
+function _la_equality_qr_fallback_allowed(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+) where {T}
+    :rank_revealing_qr in ws.la_fallback_chain || return false
+    opts.equality_solver === :auto || return false
+    return _equality_qr_allowed(ws.Btil, opts)
+end
+
 function _factor_equality_qr(
+    backend::AbstractLABackend,
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
 ) where {T}
@@ -136,32 +174,12 @@ function _factor_equality_qr(
             "dimension or memory crossover; use equality_solver=" *
             ":normal_equations or reduce the equality basis first",
         ))
-    factor = qr(Btil, ColumnNorm())
-    diagonal_count = min(size(Btil)...)
-    largest = zero(T)
-    @inbounds for index in 1:diagonal_count
-        largest = max(largest, abs(factor.factors[index, index]))
-    end
-    threshold =
-        _equality_qr_relative_tolerance(Btil, opts) * largest
-    rank = 0
-    smallest = largest
-    @inbounds for index in 1:diagonal_count
-        diagonal = abs(factor.factors[index, index])
-        diagonal > threshold || break
-        rank += 1
-        smallest = min(smallest, diagonal)
-    end
-    quality =
-        rank > 0 && largest > zero(T) ?
-        clamp(smallest / largest, zero(T), one(T)) :
-        zero(T)
-    return EqualityQRFactor{T}(
-        factor.factors,
-        factor.τ,
-        Vector{Int}(factor.jpvt),
-        rank,
-        quality,
+    buffer = _owned_array_copy(T, Btil)
+    return la_qr_factor!(
+        backend,
+        buffer;
+        pivoted=true,
+        relative_tolerance=_equality_qr_relative_tolerance(Btil, opts),
     )
 end
 
@@ -261,12 +279,18 @@ function _build_equality_gram_matrix!(
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
     thread_count::Int,
+    la_backend::Union{Nothing,AbstractLABackend}=nothing,
 ) where {T}
-    # Preserve the established Float32/Float64 path exactly, including its
-    # vendor BLAS SYRK call. Do not even run the extended crossover or query
-    # system memory on ordinary floating-point solves.
-    if T <: Union{Float32,Float64}
-        ksyrk!(Q, Btil, one(T), zero(T))
+    # Migrated backends own dense Gram formation for all arithmetic families;
+    # specialized Legacy routes retain the established crossover path.
+    if la_backend !== nothing &&
+       la_backend_owns_equality_gram(la_backend)
+        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
+        return nothing, la_equality_gram_kernel(la_backend, T)
+    elseif T <: Union{Float32,Float64}
+        la_backend === nothing ?
+        ksyrk!(Q, Btil, one(T), zero(T)) :
+        la_syrk!(la_backend, Q, Btil, one(T), zero(T))
         return nothing, :blas_syrk
     end
     decision = _equality_gram_crossover(
@@ -312,6 +336,7 @@ function _build_equality_gram!(
         ws.Btil,
         opts,
         ws.thread_count,
+        ws.arrow === nothing ? ws.la_backend : nothing,
     )
     ws.equality_gram_kernel = label
     return decision
@@ -362,12 +387,8 @@ Factor the current Schur complement `ws.S` (accumulated by
 """
 function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     ws.arrow === nothing || return factor_arrow_kkt!(ws, prob, opts)
-    if T === Float64 && ws.sparse_kkt !== nothing
-        return _factor_sparse_schur_sdp!(
-            ws::Workspace{Float64},
-            prob::SDPProblem{Float64},
-            opts::SolverOptions{Float64},
-        )
+    if ws.sparse_kkt !== nothing
+        return _factor_sparse_schur_sdp!(ws, prob, opts)
     end
     if ws.mixed_precision !== nothing
         if _try_factor_mixed_kkt!(
@@ -682,7 +703,7 @@ function _factor_arrow_equality_system!(
         )
     if direct_qr
         ws.equality_gram_kernel = :not_formed_qr
-        qr_factor = _factor_equality_qr(ws.Btil, opts)
+        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
         ws.Qchol = qr_factor
         q_pivoted = true
         q_rank_deficient = qr_factor.rank < n
@@ -695,8 +716,55 @@ function _factor_arrow_equality_system!(
         factor_started = gram_finished
 
         copy_owned!(ws.Qbuf, ws.Q)
-        if T === BigFloat && kchol!(ws.Qbuf)
-            ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
+        legacy_provider_factor =
+            ws.la_backend isa LegacyLABackend
+        legacy_factor = if legacy_provider_factor
+            _record_la_execution!(ws)
+            la_cholesky_factor!(ws.la_backend, ws.Qbuf)
+        else
+            nothing
+        end
+        if legacy_factor !== nothing &&
+           _legacy_factor_has_numerical_rank(legacy_factor)
+            ws.Qchol = legacy_factor
+        elseif legacy_provider_factor
+            # `kchol!` may have partially overwritten the factor buffer
+            # before reporting failure. Restore the authoritative Gram matrix
+            # before the only plan-authorized solver-level fallback.
+            copy_owned!(ws.Qbuf, ws.Q)
+            ws.la_fallback_reason = :la_equality_factor_failed
+            if _la_equality_qr_fallback_allowed(ws, opts)
+                qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
+                ws.Qchol = qr_factor
+                q_pivoted = true
+                q_rank_deficient = qr_factor.rank < n
+                if opts.verbosity >= 1
+                    @warn(
+                        "Block-diagonal equality solve switched " *
+                        "from legacy normal equations to " *
+                        "rank-revealing QR",
+                        reason=:normal_equation_rank_loss,
+                        qr_rank=qr_factor.rank,
+                        equalities=n,
+                        qr_quality=qr_factor.quality,
+                    )
+                end
+            else
+                equality_finished = time_ns()
+                return (
+                    ok=false,
+                    q_pivoted=false,
+                    q_rank_deficient=false,
+                    equality_solver=:normal_equations,
+                    phase_times=(
+                        constraint_triangular_solve=
+                            (constraint_finished - constraint_started) / 1.0e9,
+                        equality_gram=gram_seconds,
+                        equality_factorization=
+                            (equality_finished - factor_started) / 1.0e9,
+                    ),
+                )
+            end
         else
             T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
             factor = LinearAlgebra.cholesky!(
@@ -712,7 +780,7 @@ function _factor_arrow_equality_system!(
                 # normal-equation factor anyway. Go there directly: generic
                 # pivoted BigFloat Cholesky is unavailable on Julia 1.10, and
                 # its rank was used only for the diagnostic message.
-                qr_factor = _factor_equality_qr(ws.Btil, opts)
+                qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                 ws.Qchol = qr_factor
                 q_pivoted = true
                 q_rank_deficient = qr_factor.rank < n
@@ -771,6 +839,7 @@ function _factor_arrow_equality_system!(
     end
     equality_finished = time_ns()
     return (
+        ok=true,
         q_pivoted=q_pivoted,
         q_rank_deficient=q_rank_deficient,
         equality_solver=
@@ -786,208 +855,145 @@ function _factor_arrow_equality_system!(
     )
 end
 
-function _sparse_factor_matrix_solve!(
-    destination::Matrix{Float64},
-    backend,
-    rhs::Matrix{Float64},
-)
-    factorization = backend.factorization
-    try
-        # Julia 1.12 provides the allocation-free CHOLMOD Int32 multi-RHS
-        # method. Some older supported Julia releases reach a generic
-        # three-argument fallback that throws a MethodError internally.
-        ldiv!(destination, factorization, rhs)
-    catch exception
-        if exception isa MethodError
-            copyto!(destination, factorization \ rhs)
-        else
-            rethrow()
-        end
-    end
-    return destination
-end
+"""Provider-neutral sparse-Schur factor path.
 
+The frozen CSC pattern and provider are selected before execution. Only
+`nzval` is refreshed and numerically refactorized; a failed sparse factor is
+reported to the caller and is never silently replaced by a dense workspace.
+"""
 function _factor_sparse_schur_sdp!(
-    ws::Workspace{Float64},
-    prob::SDPProblem{Float64},
-    opts::SolverOptions{Float64},
-)
-    sparse_workspace =
-        ws.sparse_kkt::SparseSchurSDPWorkspace
-    backend = sparse_workspace.backend
-    if backend === nothing
-        backend = SparseCholeskyBackend()
-        sparse_workspace.backend = backend
-    end
-    matrix = sparse_workspace.matrix
-    primal_positions = sparse_workspace.primal_diagonal_positions
-    diagonal_values = sparse_workspace.primal_diagonal_values
-
-    factorization_started = time_ns()
-    ok = false
-    # Once an unregularized factorization has failed, retain the smallest
-    # successful shift on later IPM iterations. Retrying the known-bad zero
-    # shift invalidates CHOLMOD's factor and forces a fresh symbolic analysis.
-    regularization = sparse_workspace.regularization
-    reg_attempts = regularization > 0.0 ? 1 : 0
-    while true
-        @inbounds for index in eachindex(primal_positions)
-            diagonal = diagonal_values[index]
-            matrix.nzval[Int(primal_positions[index])] =
-                diagonal +
-                regularization * max(abs(diagonal), 1.0)
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    sparse_workspace = ws.sparse_kkt
+    sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+        throw(ArgumentError(
+            "generic sparse-Schur factorization received $(typeof(sparse_workspace))",
+        ))
+    storage = sparse_workspace.storage
+    matrix = storage.matrix
+    positions = sparse_workspace.primal_diagonal_positions
+    values = sparse_workspace.primal_diagonal_values
+    @inbounds for index in eachindex(positions)
+        value = matrix.nzval[positions[index]]
+        if T === BigFloat
+            _sparse_store!(values[index], value)
+        else
+            values[index] = value
         end
-        ok = factorize_static_pattern!(backend, matrix)
+    end
 
-        # Keep the workspace matrix equal to the mathematical, unregularized
-        # Schur/KKT operator. The factor owns its numeric copy and refinement
-        # therefore measures the original equations rather than the perturbed
-        # system.
-        @inbounds for index in eachindex(primal_positions)
-            matrix.nzval[Int(primal_positions[index])] =
-                diagonal_values[index]
+    factor = sparse_workspace.factor
+    if factor === nothing
+        factor = sparse_factor(
+            matrix;
+            provider=_sparse_provider(T),
+            symbolic=storage.symbolic,
+        )
+        sparse_workspace.factor = factor
+    end
+
+    regularization = sparse_workspace.regularization
+    attempts = regularization > zero(T) ? 1 : 0
+    ok = false
+    while true
+        @inbounds for index in eachindex(positions)
+            diagonal = values[index]
+            shifted = diagonal + regularization * max(abs(diagonal), one(T))
+            if T === BigFloat
+                _sparse_store!(matrix.nzval[positions[index]], shifted)
+            else
+                matrix.nzval[positions[index]] = shifted
+            end
+        end
+        ok = numeric_factorize!(factor, matrix) |> issuccess
+        @inbounds for index in eachindex(positions)
+            if T === BigFloat
+                _sparse_store!(matrix.nzval[positions[index]], values[index])
+            else
+                matrix.nzval[positions[index]] = values[index]
+            end
         end
         ok && break
-        reg_attempts >= 6 && break
-        reg_attempts += 1
-        regularization =
-            reg_attempts == 1 ? sqrt(eps(Float64)) :
-            10.0 * regularization
+        attempts >= 6 && break
+        attempts += 1
+        regularization = attempts == 1 ? sqrt(eps(T)) : 10 * regularization
     end
-    factorization_seconds = _elapsed_seconds(factorization_started)
     sparse_workspace.regularization = regularization
-    ok || return (
-        ok=false,
-        reg_attempts=reg_attempts,
-        q_pivoted=false,
-        phase_times=(
-            schur_copy=0.0,
-            schur_factorization=factorization_seconds,
-            constraint_triangular_solve=0.0,
-            equality_gram=0.0,
-            equality_factorization=0.0,
-        ),
-    )
+    if !ok
+        return (
+            ok=false,
+            reg_attempts=attempts,
+            q_pivoted=false,
+            q_rank_deficient=false,
+            phase_times=(
+                schur_copy=0.0,
+                schur_factorization=0.0,
+                constraint_triangular_solve=0.0,
+                equality_gram=0.0,
+                equality_factorization=0.0,
+            ),
+        )
+    end
 
-    smallest = Inf
+    smallest = typemax(Float64)
     largest = 0.0
-    @inbounds for value in diagonal_values
-        magnitude = abs(value)
-        effective =
-            magnitude +
-            regularization * max(magnitude, 1.0)
+    @inbounds for diagonal in values
+        magnitude = Float64(abs(diagonal))
+        effective = magnitude + Float64(regularization) * max(magnitude, 1.0)
         smallest = min(smallest, effective)
         largest = max(largest, effective)
     end
-    # Report the quality of the matrix that was actually factorized. A zero
-    # diagonal in the unregularized Schur operator is common when a direction
-    # is controlled jointly by equalities; after a successful regularized
-    # factorization it is not evidence of a failed Newton system. Reporting
-    # zero here made the adaptive controller permanently fall back on the first
-    # B3 iteration even though residual-controlled refinement succeeded.
-    # Genuine equality rank loss is reported separately below and still maps
-    # to zero quality in the step layer.
-    sparse_workspace.factorization_quality =
-        isfinite(smallest) && largest > 0.0 ?
-        clamp(smallest / largest, 0.0, 1.0) :
-        0.0
+    quality = largest > 0 && isfinite(smallest) ? smallest / largest : 0.0
+    sparse_workspace.factorization_quality = T(quality)
 
-    if opts.verbosity >= 2 && ok && reg_attempts > 0
-        @info(
-            "Sparse Schur SDP factor regularized",
-            regularization,
-            attempts=reg_attempts,
-        )
-    end
-
-    constraint_started = time_ns()
-    _sparse_factor_matrix_solve!(
-        ws.Btil,
-        backend,
-        sparse_workspace.constraint_rhs,
-    )
-    constraint_seconds = _elapsed_seconds(constraint_started)
-
-    gram_started = time_ns()
-    mul!(ws.Q, transpose(prob.B), ws.Btil)
-    equality_scaling = sparse_workspace.equality_scaling
-    maximum_diagonal = 0.0
-    @inbounds for index in eachindex(equality_scaling)
-        maximum_diagonal =
-            max(maximum_diagonal, abs(ws.Q[index, index]))
-    end
-    diagonal_floor =
-        eps(Float64) * max(maximum_diagonal, 1.0)
-    @inbounds for index in eachindex(equality_scaling)
-        equality_scaling[index] = inv(
-            sqrt(max(abs(ws.Q[index, index]), diagonal_floor)),
-        )
-    end
-    # Congruence scaling is an exact coordinate change:
-    #   Q*dy = q,  dy = D*z  =>  (D*Q*D)z = D*q.
-    # It normalizes the equality Gram diagonal before Cholesky without
-    # changing the Newton direction returned in original coordinates.
-    @inbounds for column in axes(ws.Q, 2)
-        column_scale = equality_scaling[column]
-        for row in column:size(ws.Q, 1)
-            ws.Q[row, column] *=
-                equality_scaling[row] * column_scale
+    n = prob.dims.n
+    q_pivoted = false
+    q_rank_deficient = false
+    if n > 0
+        # Btil = S⁻¹B using the same generic sparse factor.  The equality
+        # Gram remains dense by definition (its order is n, not m), and is
+        # factored through the provider-neutral dense LA seam.
+        sparse_factor_solve!(ws.Btil, factor, sparse_workspace.constraint_rhs)
+        mul!(ws.Q, transpose(prob.B), ws.Btil)
+        equality_scaling = sparse_workspace.equality_scaling
+        @inbounds for index in 1:n
+            diagonal = abs(ws.Q[index, index])
+            equality_scaling[index] = inv(sqrt(max(diagonal, eps(T))))
         end
-    end
-    gram_seconds = _elapsed_seconds(gram_started)
-
-    equality_factor_started = time_ns()
-    q_pivoted = sparse_workspace.equality_requires_pivoting
-    if !q_pivoted
+        @inbounds for column in 1:n, row in column:n
+            ws.Q[row, column] *= equality_scaling[row] * equality_scaling[column]
+            row != column && (ws.Q[column, row] = ws.Q[row, column])
+        end
         copy_owned!(ws.Qbuf, ws.Q)
-        equality_factor = LinearAlgebra.cholesky!(
-            Symmetric(ws.Qbuf, :L);
-            check=false,
-        )
-        if issuccess(equality_factor) &&
-           _cholesky_has_numerical_rank(equality_factor)
-            ws.Qchol = equality_factor
+        ok_q = la_chol!(ws.la_backend, ws.Qbuf)
+        if ok_q
+            ws.Qchol = ws.Qbuf isa Matrix{T} ?
+                       cholesky!(Symmetric(ws.Qbuf, :L); check=false) :
+                       cholesky(Symmetric(ws.Qbuf, :L); check=false)
         else
             q_pivoted = true
-            sparse_workspace.equality_requires_pivoting = true
+            pivoted = cholesky!(
+                Symmetric(ws.Qbuf, :L),
+                LinearAlgebra.RowMaximum();
+                check=false,
+            )
+            ws.Qchol = pivoted
+            q_rank_deficient = pivoted.rank < n
         end
     end
-    if q_pivoted
-        copy_owned!(ws.Qbuf, ws.Q)
-        # Factor the existing equality buffer in place. The allocating form
-        # copied roughly 754 MiB per B3 iteration (9708^2 Float64 entries),
-        # making RSS climb until a full GC even though the previous factor was
-        # already dead. Once an equality system has required pivoting, skip
-        # the known-to-be-rejected unpivoted trial on subsequent iterations.
-        pivoted = LinearAlgebra.cholesky!(
-            Symmetric(ws.Qbuf, :L),
-            LinearAlgebra.RowMaximum();
-            check=false,
-        )
-        ws.Qchol = pivoted
-        opts.verbosity >= 1 && @warn(
-            "Sparse Schur SDP equality normal matrix required pivoted Cholesky",
-            rank=pivoted.rank,
-            equalities=prob.dims.n,
-        )
-    end
-    q_rank_deficient =
-        q_pivoted &&
-        ws.Qchol isa LinearAlgebra.CholeskyPivoted &&
-        ws.Qchol.rank < prob.dims.n
-    equality_factor_seconds =
-        _elapsed_seconds(equality_factor_started)
     return (
-        ok=ok,
-        reg_attempts=reg_attempts,
+        ok=true,
+        reg_attempts=attempts,
         q_pivoted=q_pivoted,
         q_rank_deficient=q_rank_deficient,
         phase_times=(
             schur_copy=0.0,
-            schur_factorization=factorization_seconds,
-            constraint_triangular_solve=constraint_seconds,
-            equality_gram=gram_seconds,
-            equality_factorization=equality_factor_seconds,
+            schur_factorization=0.0,
+            constraint_triangular_solve=0.0,
+            equality_gram=0.0,
+            equality_factorization=0.0,
         ),
     )
 end
@@ -998,6 +1004,7 @@ function _factor_dense_kkt_native!(
     opts::SolverOptions{T},
 ) where {T}
     L, m, n, k = prob.dims
+    _record_la_execution!(ws)
 
     phase_schur_copy = 0.0
     phase_schur_factorization = 0.0
@@ -1013,7 +1020,7 @@ function _factor_dense_kkt_native!(
     )
     phase_schur_copy += _elapsed_seconds(started)
     started = time_ns()
-    ok = kchol!(ws.Sbuf)
+    ok = la_chol!(ws.la_backend, ws.Sbuf)
     phase_schur_factorization += _elapsed_seconds(started)
     reg_attempts = 0
     reg = zero(T)
@@ -1031,7 +1038,7 @@ function _factor_dense_kkt_native!(
         end
         phase_schur_copy += _elapsed_seconds(started)
         started = time_ns()
-        ok = kchol!(ws.Sbuf)
+        ok = la_chol!(ws.la_backend, ws.Sbuf)
         phase_schur_factorization += _elapsed_seconds(started)
     end
     if !ok
@@ -1058,7 +1065,7 @@ function _factor_dense_kkt_native!(
     if n > 0
         started = time_ns()
         copy_owned!(ws.Btil, prob.B)
-        ktrsm!(ws.Sbuf, ws.Btil)                     # B̃ = L_S⁻¹B
+        la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)    # B̃ = L_S⁻¹B
         phase_constraint_triangular_solve +=
             _elapsed_seconds(started)
         direct_qr =
@@ -1070,7 +1077,7 @@ function _factor_dense_kkt_native!(
         if direct_qr
             ws.equality_gram_kernel = :not_formed_qr
             started = time_ns()
-            qr_factor = _factor_equality_qr(ws.Btil, opts)
+            qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
             ws.Qchol = qr_factor
             q_pivoted = true
             q_rank_deficient = qr_factor.rank < n
@@ -1082,24 +1089,28 @@ function _factor_dense_kkt_native!(
             phase_equality_gram += _elapsed_seconds(started)
             started = time_ns()
             copy_owned!(ws.Qbuf, ws.Q)
-            if T === BigFloat && kchol!(ws.Qbuf)
-                ws.Qchol = BigFloatCholeskyFactor(ws.Qbuf)
+            # Every selected LA backend owns its factor handle on migrated
+            # dense routes. No backend may silently execute another provider
+            # while retaining its planned identity.
+            equality_factor =
+                la_cholesky_factor!(ws.la_backend, ws.Qbuf)
+            if equality_factor !== nothing &&
+               _la_factor_has_numerical_rank(equality_factor)
+                ws.Qchol = equality_factor
             else
-                T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
-                Cq = LinearAlgebra.cholesky!(
-                    Symmetric(ws.Qbuf, :L);
-                    check=false,
-                )
-                if issuccess(Cq) &&
-                   _cholesky_has_numerical_rank(Cq)
-                    ws.Qchol = Cq
-                elseif opts.equality_solver === :auto &&
-                       _equality_qr_allowed(ws.Btil, opts)
-                    # Avoid the redundant pivoted-normal-equation probe. It
-                    # is not implemented for generic BigFloat matrices on
-                    # Julia 1.10, while QR is the selected automatic backend
-                    # for this exact rank-loss condition on every version.
-                    qr_factor = _factor_equality_qr(ws.Btil, opts)
+                failure_policy =
+                    la_equality_factor_failure_policy(ws.la_backend)
+                if failure_policy === :provider_fail_closed
+                    # Provider failure is an explicit A/B numerical failure;
+                    # do not silently claim a provider result after generic
+                    # factorization. Existing QR/pivot policy remains the
+                    # authorized fallback and is recorded below.
+                    ws.la_fallback_reason = :la_equality_factor_failed
+                    _la_equality_qr_fallback_allowed(ws, opts) ||
+                        throw(ArgumentError(
+                            "provider equality Cholesky failed and QR fallback is not authorized",
+                        ))
+                    qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
                     ws.Qchol = qr_factor
                     q_pivoted = true
                     q_rank_deficient = qr_factor.rank < n
@@ -1113,42 +1124,118 @@ function _factor_dense_kkt_native!(
                             qr_quality=qr_factor.quality,
                         )
                     end
-                else
+                elseif failure_policy === :legacy_fail_closed
+                    # A provider failure is not permission to execute a
+                    # StandardLA factor while continuing to report LegacyLA.
+                    # Restore the possibly partially-mutated buffer, then
+                    # use only the plan-authorized rank-revealing QR policy.
                     copy_owned!(ws.Qbuf, ws.Q)
-                    pivoted = LinearAlgebra.cholesky(
-                        Symmetric(ws.Qbuf, :L),
-                        LinearAlgebra.RowMaximum();
+                    ws.la_fallback_reason = :la_equality_factor_failed
+                    if _la_equality_qr_fallback_allowed(ws, opts)
+                        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
+                        ws.Qchol = qr_factor
+                        q_pivoted = true
+                        q_rank_deficient = qr_factor.rank < n
+                        if opts.verbosity >= 1
+                            @warn(
+                                "KKT equality solve switched from legacy " *
+                                "normal equations to rank-revealing QR",
+                                reason=:normal_equation_rank_loss,
+                                qr_rank=qr_factor.rank,
+                                equalities=n,
+                                qr_quality=qr_factor.quality,
+                            )
+                        end
+                    else
+                        phase_equality_factorization +=
+                            _elapsed_seconds(started)
+                        return (
+                            ok=false,
+                            reg_attempts=reg_attempts,
+                            q_pivoted=false,
+                            phase_times=(
+                                schur_copy=phase_schur_copy,
+                                schur_factorization=
+                                    phase_schur_factorization,
+                                constraint_triangular_solve=
+                                    phase_constraint_triangular_solve,
+                                equality_gram=phase_equality_gram,
+                                equality_factorization=
+                                    phase_equality_factorization,
+                            ),
+                        )
+                    end
+                elseif failure_policy === :standard_compatibility
+                    copy_owned!(ws.Qbuf, ws.Q)
+                    Cq = LinearAlgebra.cholesky!(
+                        Symmetric(ws.Qbuf, :L);
                         check=false,
                     )
-                    if pivoted.rank == n &&
-                       _has_exact_duplicate_columns(ws.Btil)
-                        # Some vendor POTRF implementations accept a tiny
-                        # positive pivot for exactly duplicated equality
-                        # columns. Apply a nonzero tolerance only for this
-                        # structural case.
-                        maximum_q_diagonal = maximum(
-                            index -> abs(ws.Q[index, index]),
-                            1:n;
-                            init=zero(T),
-                        )
+                    if issuccess(Cq) &&
+                       _cholesky_has_numerical_rank(Cq)
+                        ws.Qchol = Cq
+                    elseif _la_equality_qr_fallback_allowed(ws, opts)
+                        # Avoid the redundant pivoted-normal-equation probe. It
+                        # is not implemented for generic BigFloat matrices on
+                        # Julia 1.10, while QR is the selected automatic backend
+                        # for this exact rank-loss condition on every version.
+                        ws.la_fallback_reason = :la_equality_factor_failed
+                        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
+                        ws.Qchol = qr_factor
+                        q_pivoted = true
+                        q_rank_deficient = qr_factor.rank < n
+                        if opts.verbosity >= 1
+                            @warn(
+                                "KKT equality solve switched from normal " *
+                                "equations to rank-revealing QR",
+                                reason=:normal_equation_rank_loss,
+                                qr_rank=qr_factor.rank,
+                                equalities=n,
+                                qr_quality=qr_factor.quality,
+                            )
+                        end
+                    else
+                        copy_owned!(ws.Qbuf, ws.Q)
                         pivoted = LinearAlgebra.cholesky(
                             Symmetric(ws.Qbuf, :L),
                             LinearAlgebra.RowMaximum();
-                            tol=T(2) * eps(T) * maximum_q_diagonal,
                             check=false,
                         )
-                    end
-                    ws.Qchol = pivoted
-                    q_pivoted = true
-                    q_rank_deficient = pivoted.rank < n
-                    if opts.verbosity >= 1
-                        if pivoted.rank < n
-                            @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
-                                  "(likely redundant/duplicated equality constraints)"
-                        else
-                            @warn "KKT: Q = B̃ᵀB̃ is numerically ill-conditioned — using pivoted Cholesky"
+                        if pivoted.rank == n &&
+                           _has_exact_duplicate_columns(ws.Btil)
+                            # Some vendor POTRF implementations accept a tiny
+                            # positive pivot for exactly duplicated equality
+                            # columns. Apply a nonzero tolerance only for this
+                            # structural case.
+                            maximum_q_diagonal = maximum(
+                                index -> abs(ws.Q[index, index]),
+                                1:n;
+                                init=zero(T),
+                            )
+                            pivoted = LinearAlgebra.cholesky(
+                                Symmetric(ws.Qbuf, :L),
+                                LinearAlgebra.RowMaximum();
+                                tol=T(2) * eps(T) * maximum_q_diagonal,
+                                check=false,
+                            )
+                        end
+                        ws.Qchol = pivoted
+                        q_pivoted = true
+                        q_rank_deficient = pivoted.rank < n
+                        if opts.verbosity >= 1
+                            if pivoted.rank < n
+                                @warn "KKT: Q = B̃ᵀB̃ is rank-deficient (rank $(pivoted.rank) of $n) — using pivoted Cholesky " *
+                                      "(likely redundant/duplicated equality constraints)"
+                            else
+                                @warn "KKT: Q = B̃ᵀB̃ is numerically ill-conditioned — using pivoted Cholesky"
+                            end
                         end
                     end
+                else
+                    throw(ArgumentError(
+                        "unknown equality factor failure policy " *
+                        "$(failure_policy)",
+                    ))
                 end
             end
             phase_equality_factorization +=
@@ -1850,6 +1937,13 @@ function factor_arrow_kkt!(
 
     equality =
         _factor_arrow_equality_system!(ws, prob, opts)
+    equality.ok || return (
+        ok=false,
+        reg_attempts=local_factor.reg_attempts,
+        q_pivoted=false,
+        q_rank_deficient=false,
+        phase_times=_empty_kkt_phase_times(),
+    )
     local_phases = local_factor.phase_times
     equality_phases = equality.phase_times
     return (
@@ -1901,13 +1995,13 @@ function _solve_Q!(
 end
 
 function _solve_Q!(
-    dy_out::AbstractVector{BigFloat},
-    factor::BigFloatCholeskyFactor,
-    rhs::AbstractVector{BigFloat},
-    ::AbstractVector{BigFloat},
-)
+    dy_out::AbstractVector{T},
+    factor::AbstractLACholeskyFactor{T},
+    rhs::AbstractVector{T},
+    ::AbstractVector{T},
+) where {T}
     copy_owned!(dy_out, rhs)
-    return kcholsolve_owned!(factor.L, dy_out)
+    return la_factor_solve!(factor, dy_out)
 end
 
 function _solve_Q!(
@@ -1964,39 +2058,8 @@ function _solve_Q!(
     rhs::AbstractVector{T},
     permuted::AbstractVector{T},
 ) where {T}
-    rank = factor.rank
-    permutation = factor.permutation
-    packed = factor.factors
-    zero_owned!(permuted)
-    @inbounds for index in 1:rank
-        permuted[index] = rhs[permutation[index]]
-    end
-
-    # If B̃[:,p] = Q*R, then
-    #     (B̃'B̃) dy = q
-    # becomes R'R*dy[p] = q[p]. Solve the leading rank-revealing block
-    # directly, leaving dependent coordinates at zero. This avoids forming
-    # the normal equations in the fallback path and therefore avoids squaring
-    # the condition number a second time during the solve.
-    @inbounds for row in 1:rank
-        value = permuted[row]
-        for column in 1:(row - 1)
-            value -= packed[column, row] * permuted[column]
-        end
-        permuted[row] = value / packed[row, row]
-    end
-    @inbounds for row in rank:-1:1
-        value = permuted[row]
-        for column in (row + 1):rank
-            value -= packed[row, column] * permuted[column]
-        end
-        permuted[row] = value / packed[row, row]
-    end
-    zero_owned!(dy_out)
-    @inbounds for index in 1:rank
-        dy_out[permutation[index]] = permuted[index]
-    end
-    return dy_out
+    copy_owned!(dy_out, rhs)
+    return la_factor_solve!(factor, dy_out, permuted)
 end
 
 function _solve_Q!(
@@ -2005,65 +2068,8 @@ function _solve_Q!(
     rhs::AbstractVector{BigFloat},
     permuted::AbstractVector{BigFloat},
 )
-    rank = factor.rank
-    permutation = factor.permutation
-    packed = factor.factors
-    zero_owned!(permuted)
-    accumulator = BigFloat()
-    product = BigFloat()
-    difference = BigFloat()
-    @inbounds for index in 1:rank
-        MA.operate_to!(
-            permuted[index],
-            copy,
-            rhs[permutation[index]],
-        )
-    end
-    @inbounds for row in 1:rank
-        MA.operate_to!(accumulator, copy, permuted[row])
-        for column in 1:(row - 1)
-            MA.operate_to!(
-                product,
-                *,
-                packed[column, row],
-                permuted[column],
-            )
-            MA.operate_to!(difference, -, accumulator, product)
-            MA.operate_to!(accumulator, copy, difference)
-        end
-        _mpfr_divide!(
-            permuted[row],
-            accumulator,
-            packed[row, row],
-        )
-    end
-    @inbounds for row in rank:-1:1
-        MA.operate_to!(accumulator, copy, permuted[row])
-        for column in (row + 1):rank
-            MA.operate_to!(
-                product,
-                *,
-                packed[row, column],
-                permuted[column],
-            )
-            MA.operate_to!(difference, -, accumulator, product)
-            MA.operate_to!(accumulator, copy, difference)
-        end
-        _mpfr_divide!(
-            permuted[row],
-            accumulator,
-            packed[row, row],
-        )
-    end
-    zero_owned!(dy_out)
-    @inbounds for index in 1:rank
-        MA.operate_to!(
-            dy_out[permutation[index]],
-            copy,
-            permuted[index],
-        )
-    end
-    return dy_out
+    copy_owned!(dy_out, rhs)
+    return la_factor_solve!(factor, dy_out, permuted)
 end
 
 """
@@ -2075,12 +2081,124 @@ writing into caller-supplied `dx_out`/`dy_out` — so the same
 factorization serves the predictor, the corrector, and (via
 [`refine_kkt!`](@ref)) the refinement correction without recomputation.
 """
+function _solve_arrow_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    ws.arrow === nothing && error("block-arrow backend has no ArrowWorkspace")
+    n == 0 && return solve_arrow_kkt!(ws, r, dx_out), dy_out
+    return solve_block_diagonal_equality_kkt!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+end
+
+function _solve_mixed_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    mixed = ws.mixed_precision
+    mixed === nothing && error("mixed-precision backend has no workspace")
+    mixed.active || error("mixed-precision factor is not active")
+    return _solve_mixed_kkt!(
+        mixed,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+end
+
+function _solve_sparse_schur_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    sparse_workspace = ws.sparse_kkt
+    sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
+        throw(ArgumentError("generic sparse-Schur solve received an incompatible workspace"))
+    factor = sparse_workspace.factor
+    factor === nothing && throw(ArgumentError(
+        "generic sparse-Schur factor is unavailable; call factorize! first",
+    ))
+    sparse_factor_solve!(ws.rtil, factor, r)
+    if n > 0
+        copy_owned!(ws.q_rhs, p_rhs)
+        mul!(ws.q_perm, transpose(sparse_workspace.constraint_rhs), ws.rtil)
+        @inbounds for index in eachindex(ws.q_rhs)
+            ws.q_rhs[index] =
+                (ws.q_rhs[index] - ws.q_perm[index]) *
+                sparse_workspace.equality_scaling[index]
+        end
+        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
+        @inbounds for index in eachindex(dy_out)
+            dy_out[index] *= sparse_workspace.equality_scaling[index]
+        end
+        mul!(dx_out, ws.Btil, dy_out)
+        @inbounds for index in eachindex(dx_out)
+            dx_out[index] += ws.rtil[index]
+        end
+    else
+        copy_owned!(dx_out, ws.rtil)
+    end
+    return dx_out, dy_out
+end
+
+function _solve_dense_kkt_owned!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p_rhs::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    copy_owned!(ws.rtil, r)
+    la_trsv_lower!(ws.la_backend, ws.Sbuf, ws.rtil) # r̃ = L_S⁻¹r
+
+    if n > 0
+        la_mul_owned!(ws.la_backend, ws.q_rhs, transpose(ws.Btil), ws.rtil) # q_rhs = B̃ᵀr̃
+        la_axpby_owned!(ws.la_backend, one(T), p_rhs, -one(T), ws.q_rhs)    # q_rhs = p − B̃ᵀr̃
+        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)        # dy = Q⁻¹(p − B̃ᵀr̃)
+
+        la_mul_owned!(ws.la_backend, dx_out, ws.Btil, dy_out)     # dx_out = B̃·dy
+        la_axpby_owned!(ws.la_backend, one(T), ws.rtil, one(T), dx_out) # dx_out = r̃ + B̃·dy
+        la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)       # dx = L_S⁻ᵀ(r̃ + B̃·dy)
+    else
+        copy_owned!(dx_out, ws.rtil)
+        la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)
+    end
+    return dx_out, dy_out
+end
+
 function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs::AbstractVector{T},
     dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T}
-    if ws.arrow !== nothing
-        n == 0 &&
-            return solve_arrow_kkt!(ws, r, dx_out), dy_out
-        return solve_block_diagonal_equality_kkt!(
+    ws.arrow === nothing || return _solve_arrow_kkt_owned!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
+    if ws.mixed_precision !== nothing &&
+       ws.mixed_precision.active
+        return _solve_mixed_kkt_owned!(
             ws,
             n,
             r,
@@ -2089,10 +2207,19 @@ function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs
             dy_out,
         )
     end
-    if ws.mixed_precision !== nothing &&
-       ws.mixed_precision.active
-        return _solve_mixed_kkt!(
-            ws.mixed_precision,
+    if ws.sparse_kkt !== nothing
+        if T === Float64
+            return _solve_sparse_schur_kkt_owned!(
+                ws::Workspace{Float64},
+                n,
+                r::AbstractVector{Float64},
+                p_rhs::AbstractVector{Float64},
+                dx_out::AbstractVector{Float64},
+                dy_out::AbstractVector{Float64},
+            )
+        end
+        return _solve_sparse_schur_kkt_owned!(
+            ws,
             n,
             r,
             p_rhs,
@@ -2100,55 +2227,14 @@ function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs
             dy_out,
         )
     end
-    if T === Float64 && ws.sparse_kkt !== nothing
-        sparse_workspace =
-            ws.sparse_kkt::SparseSchurSDPWorkspace
-        m = length(dx_out)
-        n == length(dy_out) ||
-            throw(DimensionMismatch("sparse Schur SDP equality dimension mismatch"))
-        solve!(
-            ws.rtil,
-            sparse_workspace.backend,
-            r,
-        )
-        copy_owned!(ws.q_rhs, p_rhs)
-        kmul_owned!(
-            ws.q_rhs,
-            transpose(sparse_workspace.constraint_rhs),
-            ws.rtil,
-            -one(T),
-            one(T),
-        )
-        @inbounds for index in eachindex(ws.q_rhs)
-            ws.q_rhs[index] *=
-                sparse_workspace.equality_scaling[index]
-        end
-        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
-        @inbounds for index in eachindex(dy_out)
-            dy_out[index] *=
-                sparse_workspace.equality_scaling[index]
-        end
-        kmul_owned!(dx_out, ws.Btil, dy_out)
-        kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)
-        return dx_out, dy_out
-    end
-
-    copy_owned!(ws.rtil, r)
-    ktrsv_lower!(ws.Sbuf, ws.rtil)   # r̃ = L_S⁻¹r
-
-    if n > 0
-        kmul_owned!(ws.q_rhs, transpose(ws.Btil), ws.rtil)       # q_rhs = B̃ᵀr̃
-        kaxpby_owned!(one(T), p_rhs, -one(T), ws.q_rhs)          # q_rhs = p − B̃ᵀr̃
-        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)        # dy = Q⁻¹(p − B̃ᵀr̃)
-
-        kmul_owned!(dx_out, ws.Btil, dy_out)                     # dx_out = B̃·dy
-        kaxpby_owned!(one(T), ws.rtil, one(T), dx_out)           # dx_out = r̃ + B̃·dy
-        ktrsv_transpose!(ws.Sbuf, dx_out)                        # dx = L_S⁻ᵀ(r̃ + B̃·dy)
-    else
-        copy_owned!(dx_out, ws.rtil)
-        ktrsv_transpose!(ws.Sbuf, dx_out)
-    end
-    return dx_out, dy_out
+    return _solve_dense_kkt_owned!(
+        ws,
+        n,
+        r,
+        p_rhs,
+        dx_out,
+        dy_out,
+    )
 end
 
 function solve_block_diagonal_equality_kkt!(
@@ -3030,53 +3116,37 @@ function schur_mul!(
 ) where {T}
     arrow = ws.arrow
     if arrow === nothing
-        if T === Float64 && ws.sparse_kkt !== nothing
-            sparse_workspace =
-                ws.sparse_kkt::SparseSchurSDPWorkspace
-            matrix = sparse_workspace.matrix
-            counts = sparse_workspace.schur_counts
-            m = length(counts)
-            length(out) == m && length(x) == m ||
+        if ws.sparse_kkt isa GenericSparseSchurSDPWorkspace{T}
+            sparse_workspace = ws.sparse_kkt::GenericSparseSchurSDPWorkspace{T}
+            matrix = sparse_workspace.storage.matrix
+            dimension = size(matrix, 1)
+            length(out) == dimension && length(x) == dimension ||
                 throw(DimensionMismatch("sparse Schur-vector dimensions do not match"))
-            workers = min(
-                ws.thread_count,
-                length(ws.vpartial),
-                max(m, 1),
-            )
-            balanced =
-                length(ws.schur_column_boundaries) == workers + 1
-            chunk = cld(m, workers)
-            @sync for worker in 1:workers
-                partial = ws.vpartial[worker]
-                first_column = balanced ?
-                               ws.schur_column_boundaries[worker] :
-                               (worker - 1) * chunk + 1
-                first_column > m && continue
-                last_column = balanced ?
-                              ws.schur_column_boundaries[worker + 1] - 1 :
-                              min(worker * chunk, m)
-                Threads.@spawn begin
-                    fill!(partial, 0.0)
-                    @inbounds for column in first_column:last_column
-                        first = Int(matrix.colptr[column])
-                        last = first + Int(counts[column]) - 1
-                        column_value = x[column]
-                        for position in first:last
-                            row = Int(matrix.rowval[position])
-                            value = matrix.nzval[position]
-                            partial[row] += value * column_value
-                            row != column &&
-                                (partial[column] += value * x[row])
-                        end
-                    end
+            # The frozen matrix stores the authoritative lower triangle.  A
+            # column-wise traversal applies both symmetric entries without
+            # materialising a dense Schur matrix.
+            if T === BigFloat
+                @inbounds for index in eachindex(out)
+                    out[index] *= β
                 end
-            end
-            @inbounds for index in eachindex(out)
-                value = 0.0
-                for worker in 1:workers
-                    value += ws.vpartial[worker][index]
+                @inbounds for column in axes(matrix, 2), pointer in
+                                  matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                    row = matrix.rowval[pointer]
+                    value = α * matrix.nzval[pointer] * x[column]
+                    out[row] += value
+                    row != column && (out[column] += α * matrix.nzval[pointer] * x[row])
                 end
-                out[index] = α * value + β * out[index]
+            else
+                @inbounds for index in eachindex(out)
+                    out[index] *= β
+                end
+                @inbounds for column in axes(matrix, 2), pointer in
+                                  matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                    row = matrix.rowval[pointer]
+                    value = α * matrix.nzval[pointer]
+                    out[row] += value * x[column]
+                    row != column && (out[column] += value * x[row])
+                end
             end
             return out
         end
@@ -3187,6 +3257,9 @@ function _kkt_direction_residual!(
     prob::SDPProblem{T},
     r::AbstractVector{T},
 ) where {T}
+    if ws.augmented !== nothing
+        return _augmented_kkt_direction_residual!(ws, r)
+    end
     n = prob.dims.n
     copy_owned!(ws.ρr, r)
     schur_mul!(ws.ρr, ws, ws.dx, -one(T), one(T))        # ρr = r − S·dx
@@ -3200,12 +3273,73 @@ function _kkt_direction_residual!(
     return residual
 end
 
+function _augmented_kkt_direction_residual!(
+    ws::Workspace{T},
+    r::AbstractVector{T},
+) where {T}
+    workspace = _augmented_workspace(ws)
+    residual = reduced_augmented_kkt_residual!(
+        workspace,
+        r,
+        ws.p,
+        ws.dx,
+        ws.dy,
+    )
+    m = length(ws.dx)
+    copy_owned!(ws.ρr, view(workspace.residual, 1:m))
+    @inbounds for equality in eachindex(ws.dy)
+        _augmented_store_negative!(
+            ws.ρp,
+            equality,
+            workspace.residual[m + equality],
+        )
+    end
+    # Correction solves use the original nonsymmetric convention
+    # [ρr; ρp]. The augmented RHS builder applies the equality-row minus.
+    return residual
+end
+
 function _apply_kkt_correction!(
     ws::Workspace{T},
     prob::SDPProblem{T},
 ) where {T}
+    return _apply_kkt_correction!(nothing, ws, prob)
+end
+
+function _solve_refinement_correction!(
+    ::Nothing,
+    ws::Workspace{T},
+    n::Int,
+    primal_rhs::AbstractVector{T},
+    equality_rhs::AbstractVector{T},
+    primal_direction::AbstractVector{T},
+    equality_direction::AbstractVector{T},
+) where {T}
+    return _solve_kkt_owned!(
+        ws,
+        n,
+        primal_rhs,
+        equality_rhs,
+        primal_direction,
+        equality_direction,
+    )
+end
+
+function _apply_kkt_correction!(
+    backend,
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
     n = prob.dims.n
-    _solve_kkt_owned!(ws, n, ws.ρr, ws.ρp, ws.δx, ws.δy)
+    _solve_refinement_correction!(
+        backend,
+        ws,
+        n,
+        ws.ρr,
+        ws.ρp,
+        ws.δx,
+        ws.δy,
+    )
     _add_direction_correction!(ws.dx, ws.δx)
     n > 0 && _add_direction_correction!(ws.dy, ws.δy)
     return ws
@@ -3277,12 +3411,17 @@ Returns the ∞-norm of the residual this pass corrected, which is what
 """
 function refine_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, r::AbstractVector{T};
                      tol::T=zero(T)) where {T}
+    return refine_kkt!(nothing, ws, prob, r; tol=tol)
+end
+
+function refine_kkt!(backend, ws::Workspace{T}, prob::SDPProblem{T}, r::AbstractVector{T};
+                     tol::T=zero(T)) where {T}
     residual = _kkt_direction_residual!(ws, prob, r)
     # The residual is measured *before* the correction, so a caller that passes
     # `tol` can skip the correction solve entirely when the direction is already
     # accurate — that is where the adaptive policy saves a full KKT solve.
     residual <= tol && return (residual, false)
-    _apply_kkt_correction!(ws, prob)
+    _apply_kkt_correction!(backend, ws, prob)
     return (residual, true)
 end
 
@@ -3312,11 +3451,16 @@ function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
        ws.mixed_precision.active
         return _refine_mixed_direction!(ws, prob, opts, r)
     end
+    return _refine_native_direction!(nothing, ws, prob, opts, r)
+end
+
+function _refine_native_direction!(backend, ws::Workspace{T}, prob::SDPProblem{T},
+                                   opts::SolverOptions{T}, r::AbstractVector{T}) where {T}
     if opts.refine_policy === :fixed
         opts.refine_steps > 0 || return (0, zero(T))
         residual = zero(T)
         for _ in 1:opts.refine_steps
-            residual, _ = refine_kkt!(ws, prob, r)
+            residual, _ = refine_kkt!(backend, ws, prob, r)
         end
         return (opts.refine_steps, residual)
     end
@@ -3343,7 +3487,7 @@ function refine_direction!(ws::Workspace{T}, prob::SDPProblem{T},
         # already-worsened direction instead of the last accepted one.
         copy_owned!(ws.dx_best, ws.dx)
         n > 0 && copy_owned!(ws.dy_best, ws.dy)
-        _apply_kkt_correction!(ws, prob)
+        _apply_kkt_correction!(backend, ws, prob)
         corrected_residual = _kkt_direction_residual!(ws, prob, r)
         if !isfinite(corrected_residual) || corrected_residual > residual
             copy_owned!(ws.dx, ws.dx_best)

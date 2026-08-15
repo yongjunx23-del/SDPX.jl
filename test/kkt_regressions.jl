@@ -48,6 +48,37 @@ function _dense_workspace_problem(B::Matrix{Float64})
     )
 end
 
+function _dense_duplicate_equality_fixture()
+    variables = 4
+    coefficients = [
+        zeros(Float64, variables, 2, 2),
+        zeros(Float64, variables, 2, 2),
+    ]
+    coefficients[1][1, :, :] .= [0.0 1.0; 1.0 0.0]
+    coefficients[1][2, :, :] .= [1.0 0.0; 0.0 -1.0]
+    coefficients[2][3, :, :] .= [0.0 1.0; 1.0 0.0]
+    coefficients[2][4, :, :] .= [1.0 0.0; 0.0 -1.0]
+    B = [1.0 0.2; -0.5 0.7; 0.3 -0.4; 0.8 1.1]
+    problem = SDPX.ingest(
+        zeros(variables),
+        coefficients,
+        [zeros(2, 2), zeros(2, 2)],
+        hcat(B[:, 1], B[:, 1]),
+        zeros(2);
+        sparse=false,
+        verbosity=0,
+    )
+    X = [
+        [2.0 0.1; 0.1 1.5],
+        [1.8 -0.2; -0.2 2.2],
+    ]
+    Y = [
+        [1.4 0.2; 0.2 1.9],
+        [2.1 -0.1; -0.1 1.6],
+    ]
+    return problem, X, Y
+end
+
 @testset "KKT regressions" begin
     @testset "column-major arrow rank updates" begin
         rng = MersenneTwister(90210)
@@ -396,6 +427,136 @@ end
         @test allocated <= 64
     end
 
+    @testset "Standard dense equality QR fallback records provenance" begin
+        problem, X, Y = _dense_duplicate_equality_fixture()
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equality_solver=:auto,
+                threads=1,
+                verbosity=0,
+            ),
+        )
+        @test plan.la_config.selected === :standard
+        @test plan.la_config.fallback_chain === (:rank_revealing_qr,)
+
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=plan,
+        )
+        @test workspace.la_backend isa
+              SDPX.Experimental.StandardLABackend
+        @test workspace.la_fallback_chain === (:rank_revealing_qr,)
+
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
+
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            verbosity=0,
+            equality_solver=:auto,
+        )
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test factor.equality_solver === :rank_revealing_qr
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
+        @test workspace.la_fallback_reason ===
+              :la_equality_factor_failed
+    end
+
+    @testset "Standard dense normal equations never report QR fallback" begin
+        problem, X, Y = _dense_duplicate_equality_fixture()
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equality_solver=:normal_equations,
+                threads=1,
+                verbosity=0,
+            ),
+        )
+        @test plan.la_config.selected === :standard
+        @test plan.la_config.fallback_chain === ()
+
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=plan,
+        )
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
+
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            verbosity=0,
+            equality_solver=:normal_equations,
+        )
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test factor.equality_solver === :normal_equations
+        @test !(workspace.Qchol isa SDPX.EqualityQRFactor{Float64})
+        @test workspace.la_fallback_reason === :none
+    end
+
+    @testset "Legacy dense equality QR fallback stays on legacy provider" begin
+        problem, X, Y = _dense_duplicate_equality_fixture()
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equality_solver=:auto,
+                linear_algebra_backend=:legacy,
+                threads=1,
+                verbosity=0,
+            ),
+        )
+        @test plan.la_config.selected === :legacy
+        @test plan.la_config.fallback_chain === (:rank_revealing_qr,)
+
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=plan,
+        )
+        @test workspace.la_backend isa
+              SDPX.Experimental.LegacyLABackend
+        @test workspace.la_fallback_chain === (:rank_revealing_qr,)
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
+
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            verbosity=0,
+            equality_solver=:auto,
+        )
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test factor.equality_solver === :rank_revealing_qr
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
+        @test SDPX.la_backend_name(workspace.la_backend) === :legacy
+        @test SDPX.la_backend_provider(workspace.la_backend) ===
+              :sdpx_legacy_la
+        @test workspace.la_fallback_reason ===
+              :la_equality_factor_failed
+    end
+
     @testset "rank-revealing QR avoids squared equality conditioning" begin
         rng = MersenneTwister(771)
         rows = 24
@@ -449,7 +610,13 @@ end
                     verbosity=0,
                     equality_solver=:qr,
                 )
-                factor = SDPX._factor_equality_qr(B, options)
+                factor = SDPX._factor_equality_qr(
+                    SDPX.Experimental.StandardLABackend(
+                        SDPX._la_arithmetic_symbol(T),
+                    ),
+                    B,
+                    options,
+                )
                 rhs = T.(randn(rng, 5))
                 direction = SDPX.alloc_zeros(T, 5)
                 scratch = SDPX.alloc_zeros(T, 5)

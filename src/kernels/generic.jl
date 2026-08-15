@@ -306,6 +306,40 @@ function trial_isposdef!(scratch::AbstractMatrix{T}, X::AbstractMatrix{T},
 end
 
 """
+    trial_has_cholesky_margin!(scratch, X, t, dX, minimum_ratio)
+
+Test positive definiteness like [`trial_isposdef!`](@ref), and when
+`minimum_ratio > 0` also require the smallest Cholesky diagonal to exceed
+`minimum_ratio` times the largest.  A merely positive last pivot can be below
+the resolution of a fixed-width arithmetic once the block is updated; this
+guard keeps adaptive backtracking from committing such a trial.  A zero
+threshold preserves the historical acceptance path exactly.
+"""
+function trial_has_cholesky_margin!(
+    scratch::AbstractMatrix{T},
+    X::AbstractMatrix{T},
+    t::T,
+    dX::AbstractMatrix{T},
+    minimum_ratio::T,
+) where {T}
+    minimum_ratio > zero(T) ||
+        return trial_isposdef!(scratch, X, t, dX)
+    trial_combine_owned!(scratch, X, t, dX)
+    kchol!(scratch) || return false
+    minimum_diagonal = abs(scratch[1, 1])
+    maximum_diagonal = minimum_diagonal
+    @inbounds for index in 2:size(scratch, 1)
+        diagonal = abs(scratch[index, index])
+        minimum_diagonal = min(minimum_diagonal, diagonal)
+        maximum_diagonal = max(maximum_diagonal, diagonal)
+    end
+    return isfinite(minimum_diagonal) &&
+           isfinite(maximum_diagonal) &&
+           maximum_diagonal > zero(T) &&
+           minimum_diagonal > minimum_ratio * maximum_diagonal
+end
+
+"""
     fraction_to_boundary_bound!(scratch, X, dX)
 
 Return the largest step in `[0, 1]` before `X + t*dX` reaches the PSD

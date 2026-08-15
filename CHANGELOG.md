@@ -4,6 +4,40 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — unreleased
+
+### User-facing
+
+- A typed all-auto `SolveOptions` frontend and an SDPB-style CLI with integer
+  BigFloat bit precision and independent duality-gap, primal-error, and
+  dual-error thresholds; resolved choices and the automatic `ExecutionPlan`
+  remain visible in result provenance.
+- Native Lorentz SOCP through `solve_socp`/`second_order_program`, including
+  the `fixed_trace_q3` specialization, with original-coordinate certification.
+- End-to-end sparse LP execution and frozen-CSC sparse SDP Schur execution.
+- Certificates, executed diagnostics, and the canonical public LP/SOCP/SDP
+  benchmark registry under `benchmark/`.
+
+### Developer
+
+- Explicit KKT formulation descriptor in `ExecutionPlan` plus a static
+  formulation planner, kept independent of the selected linear-algebra
+  provider.
+- Provider-neutral `:standard`, MFLA, BFLA, and legacy linear-algebra routing:
+  provider choice is final at planning time with no hidden runtime fallback.
+  The bundled legacy provider (`src/la_backends/legacy.jl`) is included
+  statically, and every `LegacyLABackend` `la_*` dispatch routes through
+  `_sdpx_legacy_la_call` instead of calling historical `k*` kernels directly.
+- Benchmark registry and scoreboard contracts are covered by the ordinary test
+  suite; public benchmark files are never downloaded.
+
+### Removed
+
+- Removed the unreleased answer-only reduced-dual L-BFGS implementation and
+  its `CertifiedObjective`, `ReducedDualReconstructionToken`, `solve_value`,
+  and `reconstruct_fixed_trace_solution` API. NativeSOC primal-dual IPM is the
+  sole production SOCP solver.
+
 ## [0.4.0] — 2026-08-09
 
 ### Added
@@ -104,7 +138,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   variables instead of being embedded in the public scripts.
 - User documentation is consolidated around the Documenter manual and a
   shorter README. Obsolete internal review, audit, and roadmap documents were
-  removed; detailed implementation history remains in `WORKLOG.md` and Git.
+  removed; detailed implementation history remains available in Git history.
 
 ## [0.3.1] — 2026-08-07
 

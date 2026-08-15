@@ -427,6 +427,66 @@ function _equality_factor_diagnostics(
             quality=one(T),
             gram_kernel=:none,
         )
+    if workspace.augmented !== nothing
+        augmented = workspace.augmented::DenseAugmentedKKTWorkspace{T}
+        factor = augmented.factor
+        factor === nothing && return let inertia = augmented.inertia,
+            zero_count = inertia === nothing ? equality_count : Int(inertia[3]),
+            numerical_rank = max(equality_count - zero_count, 0)
+            (
+                available=inertia !== nothing,
+                factor_available=false,
+                method=:augmented_ldlt,
+                rank=numerical_rank,
+                dimension=equality_count,
+                rank_deficient=augmented.rank_deficient,
+                quality=zero(T),
+                gram_kernel=:not_formed_augmented,
+                inertia,
+                factor_diagnostics=augmented.factor_diagnostics,
+                regularization=augmented.regularization,
+            )
+        end
+        inertia = la_ldlt_inertia(factor)
+        numerical_rank = max(equality_count - Int(inertia[3]), 0)
+        return (
+            available=true,
+            method=:augmented_ldlt,
+            rank=numerical_rank,
+            dimension=equality_count,
+            rank_deficient=numerical_rank < equality_count,
+            quality=one(T),
+            gram_kernel=:not_formed_augmented,
+            inertia,
+            pivot_blocks=la_ldlt_blocks(factor),
+            permutation=la_ldlt_permutation(factor),
+            factor_diagnostics=augmented.factor_diagnostics,
+            regularization=augmented.regularization,
+        )
+    end
+    mixed = workspace.mixed_precision
+    if mixed !== nothing && mixed.active
+        factor = mixed.intermediate_active ?
+                 mixed.intermediate.Qfactor : mixed.Qfactor
+        if factor !== nothing
+            lower = factor isa IntermediateCholeskyFactor ?
+                    factor.L : factor.factors
+            return (
+                available=true,
+                method=mixed.intermediate_active ?
+                       :mixed_intermediate_normal_equations :
+                       :mixed_float64_normal_equations,
+                rank=equality_count,
+                dimension=equality_count,
+                rank_deficient=false,
+                quality=_ingest_owned_scalar(
+                    T,
+                    _cholesky_diagonal_quality(lower),
+                ),
+                gram_kernel=workspace.equality_gram_kernel,
+            )
+        end
+    end
     factor = workspace.Qchol
     factor === nothing &&
         return (
@@ -464,14 +524,24 @@ function _equality_factor_diagnostics(
                     ),
             gram_kernel=workspace.equality_gram_kernel,
         )
-    elseif factor isa BigFloatCholeskyFactor
+    elseif factor isa LegacyLACholeskyFactor
         return (
             available=true,
             method=:normal_equations,
             rank=equality_count,
             dimension=equality_count,
             rank_deficient=false,
-            quality=_cholesky_diagonal_quality(factor.L),
+            quality=_cholesky_diagonal_quality(factor.factors),
+            gram_kernel=workspace.equality_gram_kernel,
+        )
+    elseif factor isa AbstractLACholeskyFactor{T}
+        return (
+            available=true,
+            method=:la_backend_normal_equations,
+            rank=equality_count,
+            dimension=equality_count,
+            rank_deficient=false,
+            quality=_cholesky_diagonal_quality(factor.factors),
             gram_kernel=workspace.equality_gram_kernel,
         )
     end
@@ -781,7 +851,8 @@ wraps this.
 """
 function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
     x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
-    resume::AbstractString="", deadline::Float64=Inf) where {T}
+    resume::AbstractString="", deadline::Float64=Inf,
+    execution_plan::Union{Nothing,ExecutionPlan}=nothing) where {T}
 
     core_started = time()
     core_started_ns = time_ns()
@@ -862,7 +933,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # badly-scaled benchmark generator: Ω selected from `max‖C_l‖∞ = 1.6e7` and
     # applied to an equilibrated problem of unit scale drove the primal residual
     # to 8.7e+15, where the same solve without equilibration converged.
-    if opts.parameter_policy === :auto
+    parameter_source = opts.parameter_policy === :auto ?
+                       (eq === nothing ? :solve_problem : :post_equilibration) :
+                       :options
+    executed_parameters = if opts.parameter_policy === :auto
         selected = recommended_parameters(solve_prob, opts)
         adaptive_sigma_max = selected.parameter_strategy === :adaptive ?
                              recommended_adaptive_sigma_max(
@@ -889,6 +963,27 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             adaptive_sigma_max,
             parameter_policy=:fixed,
         )
+        (
+            beta=selected.β,
+            gamma=selected.γ,
+            omega_p=selected.Ωp,
+            omega_d=selected.Ωd,
+            predictor=selected.predictor,
+            strategy=selected.parameter_strategy,
+            adaptive_sigma_max,
+            profile=selected.profile,
+        )
+    else
+        (
+            beta=opts.β,
+            gamma=opts.γ,
+            omega_p=opts.Ωp,
+            omega_d=opts.Ωd,
+            predictor=opts.predictor,
+            strategy=opts.parameter_strategy,
+            adaptive_sigma_max=opts.adaptive_sigma_max,
+            profile=:fixed,
+        )
     end
     if eq !== nothing && isempty(resume)
         x0, X0, y0, Y0 = _equilibrate_warm_start(
@@ -913,6 +1008,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             opts.mixed_precision_memory_fraction,
         equality_solver=opts.equality_solver,
         thread_count=opts.threads,
+        execution_plan=execution_plan,
     )
     workspace_finished_ns = time_ns()
     time() >= deadline &&
@@ -1267,6 +1363,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             selected_parameters.backtracking_factor,
             selected_parameters.minimum_step,
             opts.step_rule,
+            opts.parameter_strategy === :adaptive ? sqrt(eps(T)) : zero(T),
         )
         selected_step_rule = resolved_step_rule(ws, opts.step_rule)
         backtracking_count =
@@ -1772,32 +1869,104 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 _mixed_precision_kkt_diagnostics(ws),
             sparse_schur_backend=
                 ws.sparse_kkt === nothing ? nothing :
-                let sparse_workspace =
-                        ws.sparse_kkt::SparseSchurSDPWorkspace,
-                    backend = sparse_workspace.backend
-                    backend === nothing ||
-                    backend.factorization === nothing ?
-                    (available=false,) :
+                let diagnostics = sparse_schur_diagnostics(ws, solve_prob),
+                    sparse_workspace = ws.sparse_kkt
                     merge(
-                            statistics(backend),
-                            (
-                                available=true,
-                                factor_nonzeros=
-                                    nnz(backend.factorization),
-                                regularization=
-                                    sparse_workspace.regularization,
-                                equality_requires_pivoting=
-                                    sparse_workspace.equality_requires_pivoting,
-                            ),
-                        )
+                        diagnostics,
+                        (
+                            # Preserve the historical termination keys used by
+                            # diagnostics consumers while exposing the richer
+                            # frozen-pattern metrics above.
+                            schur_nnz=diagnostics.structural_nnz,
+                            regularization=sparse_workspace isa
+                                           GenericSparseSchurSDPWorkspace ?
+                                           sparse_workspace.regularization :
+                                           nothing,
+                            equality_requires_pivoting=
+                                sparse_workspace isa GenericSparseSchurSDPWorkspace ?
+                                sparse_workspace.equality_requires_pivoting :
+                                false,
+                        ),
+                    )
                 end,
             equality_system=equality_diagnostics,
+            augmented_kkt=
+                ws.augmented === nothing ?
+                (available=false,) :
+                let augmented =
+                        ws.augmented::DenseAugmentedKKTWorkspace{T},
+                    factor = augmented.factor
+                    factor === nothing ?
+                    (
+                        available=false,
+                        factorization=:pivoted_symmetric_ldlt,
+                        regularization=augmented.regularization,
+                        rank_deficient=augmented.rank_deficient,
+                        inertia=augmented.inertia,
+                        factor_diagnostics=augmented.factor_diagnostics,
+                    ) :
+                    (
+                        available=true,
+                        dimension=size(augmented.matrix, 1),
+                        factorization=:pivoted_symmetric_ldlt,
+                        factor_kind=la_factor_kind(factor),
+                        factor_provider=la_factor_provider_identity(
+                            la_factor_provider(factor),
+                        ),
+                        factor_precision=la_factor_precision(factor),
+                        inertia=la_ldlt_inertia(factor),
+                        pivot_blocks=la_ldlt_blocks(factor),
+                        permutation=la_ldlt_permutation(factor),
+                        factor_diagnostics=augmented.factor_diagnostics,
+                        regularization=augmented.regularization,
+                    )
+                end,
             executed=(
                 solver=:sdp,
-                kkt=ws.arrow !== nothing ? :block_arrow :
-                    ws.sparse_kkt !== nothing ?
-                    :sparse_schur_cholesky :
-                    :dense_cholesky,
+                parameter_profile=executed_parameters.profile,
+                executed_parameters=(
+                    beta=executed_parameters.beta,
+                    gamma=executed_parameters.gamma,
+                    omega_p=executed_parameters.omega_p,
+                    omega_d=executed_parameters.omega_d,
+                    predictor=executed_parameters.predictor,
+                    strategy=executed_parameters.strategy,
+                    adaptive_sigma_max=
+                        executed_parameters.adaptive_sigma_max,
+                ),
+                parameter_source,
+                kkt=ws.executed_backend,
+                planned_backend=planned_backend_name(ws),
+                executed_backend=ws.executed_backend,
+                kkt_formulation=kkt_formulation_from_backend(
+                    ws.executed_backend,
+                ),
+                fallback_reason=ws.backend_fallback_reason,
+                la_backend=ws.executed_la_backend,
+                la_provider=ws.executed_la_provider,
+                la_ownership=ws.executed_la_ownership,
+                la_fallback_reason=ws.la_fallback_reason,
+                la_factorization=if ws.augmented !== nothing
+                    :pivoted_symmetric_ldlt
+                elseif ws.executed_backend === :dense_cholesky
+                    :cholesky
+                elseif ws.executed_backend === :mixed_precision
+                    :mixed_precision_cholesky
+                elseif ws.executed_backend === :sparse_schur_cholesky
+                    :sparse_cholesky
+                elseif ws.executed_backend === :block_arrow
+                    :block_cholesky
+                else
+                    :not_executed
+                end,
+                la_regularization=
+                    ws.augmented === nothing ?
+                    nothing :
+                    (ws.augmented::DenseAugmentedKKTWorkspace{T}).regularization,
+                factor_diagnostics=
+                    ws.augmented === nothing ?
+                    nothing :
+                    (ws.augmented::DenseAugmentedKKTWorkspace{T}).factor_diagnostics,
                 equality=equality_diagnostics.method,
                 effective_threads=ws.thread_count,
                 fine_grained_block_tasks=length(ws.block_bins),
@@ -1962,6 +2131,7 @@ function solve!(
     y0=nothing,
     Y0=nothing,
     resume::AbstractString="",
+    _prepared_data=nothing,
 ) where {T}
     return _solve_pipeline!(
         prob,
@@ -1971,6 +2141,7 @@ function solve!(
         y0=y0,
         Y0=Y0,
         resume=resume,
+        _prepared_data=_prepared_data,
     )
 end
 
@@ -2051,6 +2222,7 @@ function solve!(
     y0=nothing,
     Y0=nothing,
     resume::AbstractString="",
+    _prepared_data=nothing,
 )
     _validate_solver_options(opts)
     requested_precision = opts.precision_bits
@@ -2061,6 +2233,10 @@ function solve!(
     started = time()
 
     function run_at_precision(run_options, bits)
+        reusable_prepared_data =
+            _prepared_data !== nothing &&
+            get(_prepared_data, :precision_bits, 0) == bits ?
+            _prepared_data : nothing
         run = () -> _solve_pipeline!(
             prob,
             run_options;
@@ -2069,6 +2245,7 @@ function solve!(
             y0=y0,
             Y0=Y0,
             resume=resume,
+            _prepared_data=reusable_prepared_data,
         )
         return Base.precision(BigFloat) == bits ?
                run() :
@@ -2098,11 +2275,17 @@ function solve!(
     end
     lower_result = run_at_precision(lower_options, selected_precision)
     if _working_precision_success(lower_result.status)
+        message = opts.certification ?
+                  "Adaptive working precision selected " *
+                  "$(selected_precision) of $(requested_precision) " *
+                  "requested bits; the result passed original-coordinate " *
+                  "certification without a retry." :
+                  "Adaptive working precision selected " *
+                  "$(selected_precision) of $(requested_precision) " *
+                  "requested bits; final certification was disabled."
         return _record_working_precision!(
             lower_result,
-            "Adaptive working precision selected $(selected_precision) of " *
-            "$(requested_precision) requested bits; the result passed " *
-            "original-coordinate certification without a retry.",
+            message,
         )
     end
 
@@ -2150,15 +2333,45 @@ function _solve_pipeline!(
     y0=nothing,
     Y0=nothing,
     resume::AbstractString="",
+    _prepared_data=nothing,
 ) where {T}
     _validate_solver_options(opts)
     pipeline_started = time()
+    pipeline_preprocess_seconds = 0.0
+    pipeline_equality_presolve_seconds = 0.0
+    pipeline_structural_analysis_seconds = 0.0
+    pipeline_execution_planning_seconds = 0.0
+    pipeline_certification_seconds = 0.0
     deadline = isfinite(opts.max_time) ?
                pipeline_started + opts.max_time :
                Inf
-    preprocessed = preprocess(prob, opts)
-    reduced, equality_map, equality_report =
+    if _prepared_data !== nothing
+        get(_prepared_data, :precision_bits, 0) == _preprocess_precision_bits(T) ||
+            throw(PreparedStructureMismatch(
+                :arithmetic_precision_changed,
+                "prepared preprocessing data was built at a different " *
+                "arithmetic precision",
+            ))
+    end
+    preprocess_started = time_ns()
+    preprocessed = _prepared_data === nothing ?
+                   preprocess(prob, opts) :
+                   _prepared_data.preprocessed
+    pipeline_preprocess_seconds = _prepared_data === nothing ?
+                                  (time_ns() - preprocess_started) / 1.0e9 :
+                                  0.0
+    equality_presolve_started = time_ns()
+    reduced, equality_map, equality_report = if _prepared_data === nothing
         presolve_equalities(preprocessed.problem, opts)
+    else
+        (
+            _prepared_data.reduced,
+            _prepared_data.equality_map,
+            _prepared_data.equality_report,
+        )
+    end
+    pipeline_equality_presolve_seconds = _prepared_data === nothing ?
+        (time_ns() - equality_presolve_started) / 1.0e9 : 0.0
     report = _merge_presolve_reports(
         preprocessed,
         equality_map,
@@ -2168,7 +2381,31 @@ function _solve_pipeline!(
     # Finalize the plan against the model that will actually be factorized.
     # In particular, equality presolve can change the selected parameter profile
     # and the diagnostic equality count.
-    plan = build_execution_plan(report.inconsistent ? prob : reduced, opts)
+    planning_problem = report.inconsistent ? prob : reduced
+    structural_analysis_started = time_ns()
+    execution_route = resolve_execution_route(
+        AutoPlanner(),
+        planning_problem,
+        opts,
+        equality_evidence=equality_map.planning_evidence,
+    )
+    pipeline_structural_analysis_seconds +=
+        (time_ns() - structural_analysis_started) / 1.0e9
+    execution_planning_started = time_ns()
+    plan = build_execution_plan(
+        AutoPlanner(),
+        planning_problem,
+        execution_route,
+    )
+    pipeline_execution_planning_seconds +=
+        (time_ns() - execution_planning_started) / 1.0e9
+    pipeline_timings = () -> opts.timing ? (
+        preprocess=pipeline_preprocess_seconds,
+        equality_presolve=pipeline_equality_presolve_seconds,
+        structural_analysis=pipeline_structural_analysis_seconds,
+        execution_planning=pipeline_execution_planning_seconds,
+        certification=pipeline_certification_seconds,
+    ) : NamedTuple()
     warnings = String[]
     if opts.threads > Base.Threads.nthreads()
         push!(
@@ -2219,15 +2456,7 @@ function _solve_pipeline!(
         end
     end
     if plan.classification.cone === :socp
-        if plan.algorithm === :socp_fixed_trace_q3
-            push!(
-                warnings,
-                "Selected the compact fixed-trace Q3 backend. Cone state, " *
-                "local Newton metrics, and boundary steps remain in Lorentz " *
-                "coordinates; PSD matrices are materialized only for the " *
-                "final compatibility certificate.",
-            )
-        elseif plan.algorithm === :socp_psd2
+        if plan.algorithm === :socp_psd2
             push!(
                 warnings,
                 "Detected Lorentz-compatible 2x2 structure. SDPX is using " *
@@ -2272,6 +2501,8 @@ function _solve_pipeline!(
             warnings,
             opts.diagnostics,
             opts.max_time,
+            opts.certification,
+            pipeline_timings(),
         )
     end
     report.inconsistent &&
@@ -2280,6 +2511,7 @@ function _solve_pipeline!(
             report,
             plan,
             opts,
+            pipeline_timings(),
         )
 
     preprocessed_warm_start = _transform_preprocess_warm_start(
@@ -2366,129 +2598,6 @@ function _solve_pipeline!(
             y0=reduced_y0,
             deadline=deadline,
         )
-    elseif plan.algorithm === :socp_fixed_trace_q3
-        workspace_bytes = estimate_fixed_trace_q3_workspace_bytes(
-            T,
-            reduced,
-            plan.threads;
-            q3_gram_strategy=opts.q3_gram_strategy,
-        )
-        available = _available_memory_bytes()
-        if available > 0 && workspace_bytes > available
-            push!(
-                warnings,
-                "The compact Q3 workspace needs approximately " *
-                "$(round(workspace_bytes / 2^30; digits=2)) GiB but only " *
-                "$(round(available / 2^30; digits=2)) GiB is available.",
-            )
-        end
-        reduced_rejection = _fixed_trace_q3_rejection(reduced)
-        unsupported_start =
-            preprocessed_warm_start.x0 !== nothing ||
-            preprocessed_warm_start.X0 !== nothing ||
-            reduced_y0 !== nothing ||
-            preprocessed_warm_start.Y0 !== nothing ||
-            !isempty(resume)
-        q3_options = _replace_solver_options(
-            opts;
-            algorithm=:socp,
-            presolve=false,
-            scaling=:none,
-            equilibrate=false,
-            threads=plan.threads,
-        )
-        native_result = if reduced_rejection !== :eligible
-            push!(
-                warnings,
-                "Presolve changed the fixed-trace Q3 structure " *
-                "(reason=$reduced_rejection); this solve used the exact " *
-                "PSD2 fallback.",
-            )
-            nothing
-        elseif unsupported_start
-            push!(
-                warnings,
-                "The first native fixed-trace Q3 implementation does not " *
-                "consume matrix warm starts or checkpoints; this solve used " *
-                "the exact PSD2 fallback.",
-            )
-            nothing
-        else
-            _solve_fixed_trace_q3_core!(
-                reduced,
-                q3_options;
-                deadline=deadline,
-            )
-        end
-        native_certificate = if native_result !== nothing &&
-                                native_result.status === Optimal
-            result_certificate(reduced, native_result, q3_options)
-        else
-            nothing
-        end
-        native_certificate_valid = native_certificate === nothing ||
-                                   native_certificate.valid
-        if !native_certificate_valid
-            push!(
-                warnings,
-                "Native fixed-trace Q3 failed its reduced original-coordinate " *
-                "certificate ($(native_certificate.failures)); SDPX will use " *
-                "the PSD2 reference fallback.",
-            )
-        end
-        fallback = native_result === nothing ||
-                   !(native_result.status in (Optimal, TimeLimit, UserStopped)) ||
-                   !native_certificate_valid
-        if fallback && native_result === nothing && time() >= deadline
-            return _time_limit_pipeline_result(
-                prob,
-                report,
-                plan,
-                time() - pipeline_started,
-                warnings,
-                opts.diagnostics,
-                opts.max_time,
-            )
-        end
-        if fallback && time() < deadline
-            reason = native_result === nothing ?
-                     (
-                         reduced_rejection === :eligible ?
-                         :unsupported_start : reduced_rejection
-                     ) : native_result.status
-            push!(
-                warnings,
-                "Native fixed-trace Q3 did not produce a promoted result " *
-                "(reason=$reason); SDPX reran the unchanged PSD2 reference " *
-                "path for numerical safety.",
-            )
-            native_result = nothing
-            T === BigFloat && GC.gc()
-            fallback_options = _replace_solver_options(
-                opts;
-                algorithm=:sdp,
-                presolve=false,
-                scaling=:none,
-                equilibrate=false,
-                threads=plan.threads,
-            )
-            result = _solve_sdp_core!(
-                reduced,
-                fallback_options;
-                x0=preprocessed_warm_start.x0,
-                X0=preprocessed_warm_start.X0,
-                y0=reduced_y0,
-                Y0=preprocessed_warm_start.Y0,
-                resume=resume,
-                deadline=deadline,
-            )
-            workspace_bytes = max(
-                workspace_bytes,
-                estimate_sdp_workspace_bytes(reduced, plan.threads),
-            )
-        else
-            result = native_result
-        end
     else
         # Pre-flight against the memory actually available. Nothing compared
         # the workspace size against anything before this, so a model too large
@@ -2520,7 +2629,14 @@ function _solve_pipeline!(
                               reduced,
                               plan.threads,
                           ) :
-                          dense_workspace_floor_bytes(
+                          route === :dense_augmented_ldlt ?
+                          dense_augmented_workspace_floor_bytes(
+                              T,
+                              reduced.dims.m,
+                              reduced.dims.n,
+                              reduced.dims.L,
+                              plan.threads,
+                          ) : dense_workspace_floor_bytes(
                               T,
                               reduced.dims.m,
                               reduced.dims.n,
@@ -2563,13 +2679,18 @@ function _solve_pipeline!(
             Y0=preprocessed_warm_start.Y0,
             resume=resume,
             deadline=deadline,
+            execution_plan=plan,
         )
         # Keep diagnostics out of the hot path: recursively traversing every
         # sparse coefficient object can cost much more than a warmed solve.
-        workspace_bytes = estimate_sdp_workspace_bytes(
-            reduced,
-            plan.threads,
-        )
+        workspace_bytes = plan.kkt_backend === :dense_augmented_ldlt ?
+                          estimate_dense_augmented_workspace_bytes(
+                              reduced,
+                              plan.threads,
+                          ) : estimate_sdp_workspace_bytes(
+                              reduced,
+                              plan.threads,
+                          )
     end
     if redundant_rows > 0
         report = PresolveReport(
@@ -2590,6 +2711,7 @@ function _solve_pipeline!(
         prob,
         result,
     )
+    certification_started = time_ns()
     diagnosable_failure = result.status in (
         Stalled,
         IterLimit,
@@ -2599,15 +2721,19 @@ function _solve_pipeline!(
         NumericalFailure,
     )
     if opts.mode === OPTIMIZE && diagnosable_failure
-        result, _, infeasibility_message =
-            certify_optimize_infeasibility(prob, result, opts)
-        infeasibility_message === nothing ||
-            push!(warnings, infeasibility_message)
+        if opts.certification
+            result, _, infeasibility_message =
+                certify_optimize_infeasibility(prob, result, opts)
+            infeasibility_message === nothing ||
+                push!(warnings, infeasibility_message)
+        end
     end
     result, certificate, certificate_warning = if result.status === TimeLimit
         (
             result,
-            (available=false, reason=:time_limit),
+            opts.certification ?
+            (available=false, reason=:time_limit) :
+            (available=false, reason=:certification_disabled),
             nothing,
         )
     else
@@ -2615,6 +2741,8 @@ function _solve_pipeline!(
     end
     certificate_warning === nothing ||
         push!(warnings, certificate_warning)
+    pipeline_certification_seconds +=
+        (time_ns() - certification_started) / 1.0e9
     equality_diagnostics = get(
         result.termination,
         :equality_system,
@@ -2678,6 +2806,7 @@ function _solve_pipeline!(
         opts.diagnostics,
         (reason=:none,),
         certificate,
+        pipeline_timings(),
     )
 end
 
@@ -2752,6 +2881,7 @@ function solve(
             )
         end
     end
+    frontend_started = time_ns()
     precision_bits = precision === nothing ?
                      (T === BigFloat ? Base.precision(BigFloat) : sig_bits(T)) :
                      Int(precision)
@@ -2782,12 +2912,15 @@ function solve(
         minimum_working_precision_bits=minimum_working_precision_bits,
         parameter_policy=:auto,
     )
-    if warm_start === nothing
-        return solve!(prob, options)
+    frontend_seconds = (time_ns() - frontend_started) / 1.0e9
+    result = if warm_start === nothing
+        solve!(prob, options)
+    else
+        warm_start isa NamedTuple ||
+            throw(ArgumentError("warm_start must be a NamedTuple such as (; x0, X0, y0, Y0)"))
+        solve!(prob, options; warm_start...)
     end
-    warm_start isa NamedTuple ||
-        throw(ArgumentError("warm_start must be a NamedTuple such as (; x0, X0, y0, Y0)"))
-    return solve!(prob, options; warm_start...)
+    return _with_frontend_timing(result, frontend_seconds, timing)
 end
 
 function _resolve_precision_type(precision, c, A, C, B, b)
@@ -2857,7 +2990,8 @@ function solve(
                              Float64(time_limit) - (time() - api_started),
                          ) :
                          Inf
-        return solve(
+        frontend_seconds = time() - api_started
+        result = solve(
             problem;
             tolerance=tolerance,
             maximum_iterations=maximum_iterations,
@@ -2885,6 +3019,7 @@ function solve(
             minimum_working_precision_bits=
                 minimum_working_precision_bits,
         )
+        return _with_frontend_timing(result, frontend_seconds, timing)
     end
     return T === BigFloat ? setprecision(run, BigFloat, precision_bits) : run()
 end

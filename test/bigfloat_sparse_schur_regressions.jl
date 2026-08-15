@@ -573,6 +573,97 @@ end
     end
 end
 
+@testset "BigFloat mixed reduced arrow without native panel" begin
+    # Each scenario uses a fresh supplier so the prewarm count is proven
+    # independently of any earlier cache warming.
+    function probe(value=4096)
+        count = Ref(0)
+        memory = SDPX._lazy_memory_supplier() do
+            count[] += 1
+            value
+        end
+        return memory, count
+    end
+
+    # A: both stored -> no probe and both compute thunks short-circuit.
+    memory_a, count_a = probe()
+    @test !SDPX._arrow_crossover_needs_memory((
+        reduced_arrow_decision=:r,
+        mixed_reduced_arrow_decision=:m,
+    ))
+    @test SDPX._planned_or_computed_decision(
+        (reduced_arrow_decision=:r,),
+        :reduced_arrow_decision,
+        () -> memory_a(),
+    ) === :r
+    @test SDPX._planned_or_computed_mixed_reduced_decision(
+        (mixed_reduced_arrow_decision=:m,),
+        () -> memory_a(),
+    ) === :m
+    @test count_a[] == 0
+
+    # B: stored reduced + missing mixed -> prewarm once, mixed helper shares it.
+    memory_b, count_b = probe()
+    @test SDPX._arrow_crossover_needs_memory((
+        reduced_arrow_decision=:r,
+    ))
+    memory_b()
+    @test count_b[] == 1
+    @test SDPX._planned_or_computed_mixed_reduced_decision(
+        (reduced_arrow_decision=:r,),
+        () -> memory_b(),
+    ) == 4096
+    @test count_b[] == 1
+
+    # C: both missing -> cold prewarm once, both helpers share it.
+    memory_c, count_c = probe()
+    @test SDPX._arrow_crossover_needs_memory(NamedTuple())
+    memory_c()
+    @test count_c[] == 1
+    @test SDPX._planned_or_computed_decision(
+        NamedTuple(),
+        :reduced_arrow_decision,
+        () -> memory_c(),
+    ) == 4096
+    @test SDPX._planned_or_computed_mixed_reduced_decision(
+        NamedTuple(),
+        () -> memory_c(),
+    ) == 4096
+    @test count_c[] == 1
+
+    # D: zero-valued probe still caches and counts once.
+    memory_d, count_d = probe(0)
+    @test memory_d() == 0
+    @test memory_d() == 0
+    @test count_d[] == 1
+
+    setprecision(BigFloat, 256) do
+        problem, _, _ = _bigfloat_arrow_fixture()
+        requested_threads = max(Threads.nthreads(), 16)
+        plan = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{BigFloat}(
+                algorithm=:sdp,
+                scaling=:none,
+                presolve=false,
+                extended_precision_blas=:off,
+                mixed_precision_kkt=:on,
+                threads=requested_threads,
+            ),
+        )
+        @test plan.backend_config.route === :block_arrow
+        @test !plan.backend_config.reduced_arrow
+        @test plan.backend_config.mixed_reduced_arrow
+        @test plan.threads <= requested_threads
+        @test plan.threads <= Threads.nthreads()
+        workspace = SDPX.Workspace(problem; execution_plan=plan)
+        @test workspace.arrow.mixed_reduced_enabled
+        @test workspace.thread_count == plan.threads
+        @test workspace.arrow.mixed_reduced_threads == plan.threads
+        @test workspace.arrow.mixed_reduced_threads <= Threads.nthreads()
+    end
+end
+
 @testset "BigFloat singleton-arrow Float64x4 preconditioner" begin
     setprecision(BigFloat, 256) do
         problem, X, Y = _bigfloat_arrow_fixture()

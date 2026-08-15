@@ -45,9 +45,6 @@ struct MOISOCConstraintInfo <: AbstractMOIConstraintInfo
     representation::Symbol
 end
 
-MOISOCConstraintInfo(block::Int, dimension::Int) =
-    MOISOCConstraintInfo(block, dimension, :arrow)
-
 """
     Optimizer{T}(; kwargs...)
     Optimizer(; kwargs...)
@@ -64,8 +61,8 @@ Common raw keywords include `tolerance`, `max_iterations`, `time_limit`,
 """
 mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     options::SolverOptions{T}
-    problem::Union{Nothing,SDPProblem{T}}
-    result::Union{Nothing,SDPResult{T}}
+    problem::Union{Nothing,SDPProblem{T},ConicProblem{T}}
+    result::Union{Nothing,SDPResult{T},ConicResult{T}}
     num_variables::Int
     sense::MOI.OptimizationSense
     objective_constant::T
@@ -453,7 +450,9 @@ function _append_equality_constraint!(
     destination_index = _new_constraint_index!(counts, F, MOI.EqualTo{T})
     index_map[source_index] = destination_index
     optimizer.constraint_info[destination_index] =
-        MOIEqualityConstraintInfo{T}(length(rhs), constant)
+        MOIEqualityConstraintInfo{T}(
+            length(rhs), _ingest_owned_scalar(T, constant),
+        )
     return nothing
 end
 
@@ -536,8 +535,8 @@ function _append_scalar_inequality!(
     optimizer.constraint_info[destination_index] =
         MOIScalarInequalityConstraintInfo{T}(
             length(A),
-            bound,
-            direction,
+            _ingest_owned_scalar(T, bound),
+            _ingest_owned_scalar(T, direction),
         )
     return nothing
 end
@@ -588,16 +587,33 @@ function _append_scalar_interval!(
         MOIScalarIntervalConstraintInfo{T}(
             lower_block,
             upper_block,
-            set.lower,
-            set.upper,
+            _ingest_owned_scalar(T, set.lower),
+            _ingest_owned_scalar(T, set.upper),
         )
     return nothing
 end
 
-function _append_soc_constraint!(
-    A::Vector{SparseCoefficientVector{T}},
-    C::Vector{Matrix{T}},
-    empty_cache::Dict{Int,SparseMatrixCSC{T,Int}},
+function _moi_scalar_affine_data(
+    ::Type{T},
+    optimizer::Optimizer{T},
+    function_value,
+    index_map,
+) where {T}
+    coefficients = zeros(T, optimizer.num_variables)
+    constant = zero(T)
+    if function_value isa MOI.ScalarAffineFunction{T}
+        constant = function_value.constant
+        @inbounds for term in function_value.terms
+            coefficients[index_map[term.variable].value] += term.coefficient
+        end
+    else
+        coefficients[index_map[function_value].value] = one(T)
+    end
+    return coefficients, constant
+end
+
+function _append_native_soc_constraint!(
+    cones::Vector{SOCConstraint{T}},
     optimizer::Optimizer{T},
     source,
     index_map,
@@ -609,98 +625,98 @@ function _append_soc_constraint!(
     dimension = set.dimension
     MOI.output_dimension(function_value) == dimension ||
         throw(DimensionMismatch("SOC function dimension does not match its set"))
-    constants = function_value isa MOI.VectorAffineFunction{T} ?
-                function_value.constants : zeros(T, dimension)
-    representation = dimension == 3 ? :psd2_isomorphism : :arrow
-    side = representation === :psd2_isomorphism ? 2 : dimension
-    block_constant = zeros(T, side, side)
-    if representation === :psd2_isomorphism
-        block_constant[1, 1] = constants[1] + constants[2]
-        block_constant[2, 2] = constants[1] - constants[2]
-        block_constant[1, 2] = constants[3]
-        block_constant[2, 1] = constants[3]
-    else
-        block_constant[1, 1] = constants[1]
-        @inbounds for index in 2:dimension
-            block_constant[index, index] = constants[1]
-            block_constant[1, index] = constants[index]
-            block_constant[index, 1] = constants[index]
-        end
-    end
-    coefficient_blocks = Dict{Int,Matrix{T}}()
-    coefficient_block(variable) = get!(coefficient_blocks, variable) do
-        alloc_zeros(T, side, side)
-    end
+    matrix = zeros(T, dimension, optimizer.num_variables)
+    offset = function_value isa MOI.VectorAffineFunction{T} ?
+             Vector{T}(function_value.constants) : zeros(T, dimension)
     if function_value isa MOI.VectorAffineFunction{T}
-        for term in function_value.terms
-            output = term.output_index
-            variable = index_map[term.scalar_term.variable].value
-            coefficient = term.scalar_term.coefficient
-            matrix = coefficient_block(variable)
-            if representation === :psd2_isomorphism
-                if output == 1
-                    matrix[1, 1] += coefficient
-                    matrix[2, 2] += coefficient
-                elseif output == 2
-                    matrix[1, 1] += coefficient
-                    matrix[2, 2] -= coefficient
-                else
-                    matrix[1, 2] += coefficient
-                    matrix[2, 1] += coefficient
-                end
-            elseif output == 1
-                @inbounds for index in 1:dimension
-                    matrix[index, index] += coefficient
-                end
-            else
-                matrix[1, output] += coefficient
-                matrix[output, 1] += coefficient
-            end
+        @inbounds for term in function_value.terms
+            matrix[
+                term.output_index,
+                index_map[term.scalar_term.variable].value,
+            ] += term.scalar_term.coefficient
         end
     else
-        for (output, variable_index) in pairs(function_value.variables)
-            variable = index_map[variable_index].value
-            matrix = coefficient_block(variable)
-            if representation === :psd2_isomorphism
-                if output == 1
-                    matrix[1, 1] += one(T)
-                    matrix[2, 2] += one(T)
-                elseif output == 2
-                    matrix[1, 1] += one(T)
-                    matrix[2, 2] -= one(T)
-                else
-                    matrix[1, 2] += one(T)
-                    matrix[2, 1] += one(T)
-                end
-            elseif output == 1
-                @inbounds for index in 1:dimension
-                    matrix[index, index] += one(T)
-                end
-            else
-                matrix[1, output] += one(T)
-                matrix[output, 1] += one(T)
-            end
+        @inbounds for (output, variable) in pairs(function_value.variables)
+            matrix[output, index_map[variable].value] += one(T)
         end
     end
-    block_A = _empty_coefficient_vector(
-        empty_cache,
-        side,
-        optimizer.num_variables,
-    )
-    for (variable, coefficient_block) in coefficient_blocks
-        matrix = sparse(coefficient_block)
-        dropzeros!(matrix)
-        nnz(matrix) > 0 && (block_A[variable] = matrix)
-    end
-    push!(A, block_A)
-    # SDPX stores sum(A_i*x_i) - C, whereas the lifted matrix above is
-    # exactly the affine SOC function.
-    push!(C, -block_constant)
-    destination_index =
-        _new_constraint_index!(counts, F, MOI.SecondOrderCone)
+    push!(cones, SOCConstraint(matrix, offset; T=T))
+    destination_index = _new_constraint_index!(counts, F, MOI.SecondOrderCone)
     index_map[source_index] = destination_index
     optimizer.constraint_info[destination_index] =
-        MOISOCConstraintInfo(length(A), dimension, representation)
+        MOISOCConstraintInfo(length(cones), dimension, :native_lorentz)
+    return nothing
+end
+
+function _append_native_scalar_inequality!(
+    cones::Vector{SOCConstraint{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,S},
+) where {T,F,S<:MOIScalarInequalitySet{T}}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    coefficients, constant = _moi_scalar_affine_data(
+        T, optimizer, function_value, index_map,
+    )
+    if set isa MOI.GreaterThan{T}
+        bound = set.lower
+        direction = one(T)
+        offset = constant - bound
+    else
+        bound = set.upper
+        direction = -one(T)
+        offset = bound - constant
+    end
+    matrix = reshape(direction .* coefficients, 1, optimizer.num_variables)
+    push!(cones, SOCConstraint(matrix, T[offset]; T=T))
+    destination_index = _new_constraint_index!(counts, F, S)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIScalarInequalityConstraintInfo{T}(
+            length(cones),
+            _ingest_owned_scalar(T, bound),
+            _ingest_owned_scalar(T, direction),
+        )
+    return nothing
+end
+
+function _append_native_scalar_interval!(
+    cones::Vector{SOCConstraint{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,MOI.Interval{T}},
+) where {T,F}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    coefficients, constant = _moi_scalar_affine_data(
+        T, optimizer, function_value, index_map,
+    )
+    push!(cones, SOCConstraint(
+        reshape(coefficients, 1, optimizer.num_variables),
+        T[constant - set.lower];
+        T=T,
+    ))
+    lower_block = length(cones)
+    push!(cones, SOCConstraint(
+        reshape(-coefficients, 1, optimizer.num_variables),
+        T[set.upper - constant];
+        T=T,
+    ))
+    upper_block = length(cones)
+    destination_index = _new_constraint_index!(counts, F, MOI.Interval{T})
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIScalarIntervalConstraintInfo{T}(
+            lower_block,
+            upper_block,
+            _ingest_owned_scalar(T, set.lower),
+            _ingest_owned_scalar(T, set.upper),
+        )
     return nothing
 end
 
@@ -768,8 +784,17 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
         index_map[variable] = MOI.VariableIndex(i)
     end
 
+    constraint_types = MOI.get(source, MOI.ListOfConstraintTypesPresent())
+    has_soc = any(entry -> last(entry) == MOI.SecondOrderCone, constraint_types)
+    has_psd = any(entry -> last(entry) <: MOIPSDSet, constraint_types)
+    has_soc && has_psd && throw(ArgumentError(
+        "mixed PSD and SOC constraints are not supported by one production " *
+        "route; use the native SOCP API or an all-PSD model explicitly",
+    ))
+
     A = SparseCoefficientVector{T}[]
     C = Matrix{T}[]
+    native_cones = SOCConstraint{T}[]
     equality_rows = Int[]
     equality_columns = Int[]
     equality_values = T[]
@@ -777,9 +802,36 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
     counts = Dict{Any,Int}()
     empty_cache = Dict{Int,SparseMatrixCSC{T,Int}}()
 
-    for (F, S) in MOI.get(source, MOI.ListOfConstraintTypesPresent())
+    for (F, S) in constraint_types
         for source_index in MOI.get(source, MOI.ListOfConstraintIndices{F,S}())
-            if S <: MOIPSDSet
+            if has_soc && S == MOI.SecondOrderCone
+                _append_native_soc_constraint!(
+                    native_cones,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif has_soc && S <: MOIScalarInequalitySet{T}
+                _append_native_scalar_inequality!(
+                    native_cones,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif has_soc && S <: MOI.Interval{T}
+                _append_native_scalar_interval!(
+                    native_cones,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif S <: MOIPSDSet
                 _append_psd_constraint!(
                     A,
                     C,
@@ -824,23 +876,12 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
                     counts,
                     source_index,
                 )
-            elseif S == MOI.SecondOrderCone
-                _append_soc_constraint!(
-                    A,
-                    C,
-                    empty_cache,
-                    optimizer,
-                    source,
-                    index_map,
-                    counts,
-                    source_index,
-                )
             else
                 throw(MOI.UnsupportedConstraint{F,S}())
             end
         end
     end
-    if isempty(A)
+    if !has_soc && isempty(A)
         # The core representation intentionally keeps L >= 1. A pure-equality
         # or unconstrained LP therefore receives one internal, always-satisfied
         # scalar cone row:
@@ -874,16 +915,28 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
         Matrix(sparse_B) : sparse_B
     c, objective_constant, sense = _objective_data(optimizer, source, index_map)
     optimizer.sense = sense
-    optimizer.objective_constant = objective_constant
-    optimizer.problem = ingest(
-        c,
-        A,
-        C,
-        B,
-        equality_rhs;
-        sparse=optimizer.options.sparse,
-        verbosity=optimizer.options.verbosity,
-    )
+    optimizer.objective_constant = _ingest_owned_scalar(T, objective_constant)
+    optimizer.problem = if has_soc
+        equality_matrix = B isa SparseMatrixCSC ?
+                          sparse(transpose(B)) : transpose(B)
+        second_order_program(
+            c,
+            native_cones;
+            Aeq=equality_matrix,
+            beq=equality_rhs,
+            T=T,
+        )
+    else
+        ingest(
+            c,
+            A,
+            C,
+            B,
+            equality_rhs;
+            sparse=optimizer.options.sparse,
+            verbosity=optimizer.options.verbosity,
+        )
+    end
     optimizer.result = nothing
     return index_map
 end
@@ -894,7 +947,15 @@ function MOI.optimize!(optimizer::Optimizer)
     optimizer.problem === nothing &&
         error("no model has been copied to SDPX")
     optimizer.solve_time = @elapsed begin
-        optimizer.result = solve!(optimizer.problem, optimizer.options)
+        if optimizer.problem isa ConicProblem
+            optimizer.result = _run_native_soc_frontend(
+                optimizer.problem,
+                optimizer.options,
+                :auto,
+            )
+        else
+            optimizer.result = solve!(optimizer.problem, optimizer.options)
+        end
     end
     return nothing
 end
@@ -912,6 +973,7 @@ MOI.get(optimizer::Optimizer, ::MOI.RawSolver) = optimizer.result
 # `MOI.get(problem.model, MOI.RawSolver())` fails after an otherwise successful
 # Convex solve.
 MOI.Utilities.map_indices(::Any, ::MOI.RawSolver, result::SDPResult) = result
+MOI.Utilities.map_indices(::Any, ::MOI.RawSolver, result::ConicResult) = result
 MOI.get(optimizer::Optimizer, ::MOI.NumberOfVariables) = optimizer.num_variables
 MOI.get(optimizer::Optimizer, ::MOI.ObjectiveSense) = optimizer.sense
 MOI.set(optimizer::Optimizer, ::MOI.ObjectiveSense, sense) =
@@ -920,7 +982,7 @@ MOI.get(optimizer::Optimizer, ::MOI.SolveTimeSec) = optimizer.solve_time
 MOI.get(optimizer::Optimizer, ::MOI.BarrierIterations) =
     optimizer.result === nothing ? 0 : optimizer.result.iterations
 
-function _moi_has_iterate(result::SDPResult)
+function _moi_has_iterate(result::Union{SDPResult,ConicResult})
     return result.status in (
         Optimal,
         FeasibleCert,
@@ -1058,6 +1120,22 @@ function MOI.get(
 )
     result = _check_result(optimizer, attribute)
     info = optimizer.constraint_info[index]
+    if result isa ConicResult
+        if info isa MOIScalarInequalityConstraintInfo
+            return info.bound + info.direction * result.slack[info.block][1]
+        end
+        if info isa MOIScalarIntervalConstraintInfo
+            return info.lower + result.slack[info.lower_block][1]
+        end
+        if info isa MOISOCConstraintInfo
+            return copy(result.slack[info.block])
+        end
+        equality = info::MOIEqualityConstraintInfo
+        return dot(
+            view(optimizer.problem.Aeq, equality.column, :),
+            result.x,
+        ) + equality.constant
+    end
     if info isa MOIPSDConstraintInfo
         return _pack_psd_matrix(result.X[info.block], info.scaled)
     end
@@ -1066,18 +1144,6 @@ function MOI.get(
     end
     if info isa MOIScalarIntervalConstraintInfo
         return info.lower + result.X[info.lower_block][1, 1]
-    end
-    if info isa MOISOCConstraintInfo
-        matrix = result.X[info.block]
-        if info.representation === :psd2_isomorphism
-            two = one(eltype(matrix)) + one(eltype(matrix))
-            return [
-                (matrix[1, 1] + matrix[2, 2]) / two,
-                (matrix[1, 1] - matrix[2, 2]) / two,
-                (matrix[1, 2] + matrix[2, 1]) / two,
-            ]
-        end
-        return vcat(matrix[1, 1], Vector(view(matrix, 2:info.dimension, 1)))
     end
     equality = info::MOIEqualityConstraintInfo
     return dot(view(optimizer.problem.B, :, equality.column), result.x) +
@@ -1091,6 +1157,20 @@ function MOI.get(
 )
     result = _check_result(optimizer, attribute)
     info = optimizer.constraint_info[index]
+    if result isa ConicResult
+        if info isa MOIScalarInequalityConstraintInfo
+            return info.direction * result.dual[info.block][1]
+        end
+        if info isa MOIScalarIntervalConstraintInfo
+            return result.dual[info.lower_block][1] -
+                   result.dual[info.upper_block][1]
+        end
+        if info isa MOISOCConstraintInfo
+            return copy(result.dual[info.block])
+        end
+        equality = info::MOIEqualityConstraintInfo
+        return result.equality_dual[equality.column]
+    end
     if info isa MOIPSDConstraintInfo
         return _pack_psd_matrix(result.Y[info.block], info.scaled)
     end
@@ -1100,22 +1180,6 @@ function MOI.get(
     if info isa MOIScalarIntervalConstraintInfo
         return result.Y[info.lower_block][1, 1] -
                result.Y[info.upper_block][1, 1]
-    end
-    if info isa MOISOCConstraintInfo
-        matrix = result.Y[info.block]
-        if info.representation === :psd2_isomorphism
-            return [
-                matrix[1, 1] + matrix[2, 2],
-                matrix[1, 1] - matrix[2, 2],
-                matrix[1, 2] + matrix[2, 1],
-            ]
-        end
-        dual = Vector{eltype(matrix)}(undef, info.dimension)
-        dual[1] = tr(matrix)
-        @inbounds for index in 2:info.dimension
-            dual[index] = 2matrix[1, index]
-        end
-        return dual
     end
     equality = info::MOIEqualityConstraintInfo
     return result.y[equality.column]

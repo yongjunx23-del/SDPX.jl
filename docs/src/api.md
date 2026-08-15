@@ -18,6 +18,7 @@ second_order_program
 solve_socp
 PreparedSolver
 prepare
+SolveOptions
 SolverOptions
 SDPResult
 SolveStatus
@@ -51,6 +52,8 @@ Additional introspection entry points live under `SDPX.Experimental`
 `SDPX.Experimental.build_execution_plan` the pre-solve execution plan.
 `SDPX.Experimental.analyze_fixed_trace` conservatively detects direct and
 equality-implied constant-trace PSD blocks.
+`SDPX.Experimental.resolve_solve_options` shows how the small all-auto
+`SolveOptions` policy is lowered to the resolved numerical configuration.
 The historical top-level experimental exports completed their deprecation
 cycle in 0.4. Qualified `SDPX.name` bindings remain available, while new code
 should use `SDPX.Experimental.name`.
@@ -72,10 +75,9 @@ using JuMP, LinearAlgebra, SDPX
 model = Model(() -> SDPX.Optimizer(sparse=:auto, verbosity=0))
 ```
 
-See the repository's `docs/julia-interface.md` for the full JuMP guide,
-including `GenericModel{Float64x4}` for extended precision.
-See `docs/convex-interface.md` for Convex atom coverage, typed models, and
-frontend-overhead benchmarks.
+See [jump.md](jump.md) for the full JuMP guide, including
+`GenericModel{Float64x4}` for extended precision, and [convex.md](convex.md)
+for Convex atom coverage, typed models, and frontend-overhead benchmarks.
 
 ```@docs
 Optimizer

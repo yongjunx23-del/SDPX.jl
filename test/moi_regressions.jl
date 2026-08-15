@@ -38,18 +38,7 @@ function moi_sparse_conversion_model(variables::Int)
     )
     MOI.add_constraint(model, scalar_function, MOI.GreaterThan(0.0))
 
-    soc_function = MOI.VectorAffineFunction(
-        [
-            MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[2])),
-            MOI.VectorAffineTerm(2, MOI.ScalarAffineTerm(1.0, x[3])),
-            MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(1.0, x[4])),
-            MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(-1.0, x[4])),
-        ],
-        [1.0, 0.0, 0.0],
-    )
-    MOI.add_constraint(model, soc_function, MOI.SecondOrderCone(3))
-
-    psd_function = MOI.VectorAffineFunction(
+    psd_first = MOI.VectorAffineFunction(
         [
             MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[1])),
             MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(1.0, x[variables])),
@@ -58,7 +47,19 @@ function moi_sparse_conversion_model(variables::Int)
     )
     MOI.add_constraint(
         model,
-        psd_function,
+        psd_first,
+        MOI.PositiveSemidefiniteConeTriangle(2),
+    )
+    psd_second = MOI.VectorAffineFunction(
+        [
+            MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[2])),
+            MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(1.0, x[3])),
+        ],
+        zeros(3),
+    )
+    MOI.add_constraint(
+        model,
+        psd_second,
         MOI.PositiveSemidefiniteConeTriangle(2),
     )
     MOI.set(model, MOI.ObjectiveSense(), MOI.FEASIBILITY_SENSE)
@@ -187,9 +188,11 @@ end
         MOI.copy_to(optimizer, model)
         cons = optimizer.problem.cons
         @test cons isa SDPX.SparseCons{Float64}
-        # A three-dimensional Lorentz cone is exactly isomorphic to S_+^2;
-        # it must not be expanded to the historical 3x3 arrow lift.
+        # The scalar inequality is kept as one scalar cone row, and the two
+        # PSD blocks are exactly S_+^2 (the native Lorentz equivalent of the
+        # historical SOC block must not be expanded to a 3x3 arrow lift).
         @test count(==(2), optimizer.problem.dims.k) == 2
+        @test optimizer.problem.dims.k[1] == 1
         @test maximum(optimizer.problem.dims.k) == 2
         @test any(==([1, 2]), cons.active)
         @test any(==([2, 3]), cons.active)
@@ -230,12 +233,12 @@ end
             objective,
         )
 
-        bounded_optimizer = SDPX.Optimizer(sparse=true, verbosity=0)
+        bounded_optimizer = SDPX.Optimizer(sparse=false, verbosity=0)
         bounded_map = MOI.copy_to(bounded_optimizer, bounded_model)
         @test bounded_optimizer.problem.dims.L == 1
         @test bounded_optimizer.problem.dims.k == [1]
         @test bounded_optimizer.problem.C[1][1, 1] == -1.0
-        @test isempty(bounded_optimizer.problem.cons.active[1])
+        @test iszero(bounded_optimizer.problem.cons.Av[1])
         @test length(bounded_optimizer.constraint_info) == 1
         @test haskey(
             bounded_optimizer.constraint_info,
@@ -271,7 +274,7 @@ end
             MOI.ObjectiveFunction{MOI.VariableIndex}(),
             unbounded_variable,
         )
-        unbounded_optimizer = SDPX.Optimizer(sparse=true, verbosity=0)
+        unbounded_optimizer = SDPX.Optimizer(sparse=false, verbosity=0)
         unbounded_map = MOI.copy_to(unbounded_optimizer, unbounded_model)
         @test isempty(unbounded_optimizer.constraint_info)
         @test unbounded_optimizer.problem.dims.L == 1

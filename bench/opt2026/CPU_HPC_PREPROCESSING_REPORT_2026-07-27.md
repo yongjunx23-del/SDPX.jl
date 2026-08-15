@@ -372,7 +372,7 @@ or certificate threshold was weakened.
 - `bench/preprocessing/benchmark_medium_preprocess.jl`
 - `bench/preprocessing/benchmark_sparse_equilibration.jl`
 - `bench/lattice_bootstrap/benchmark_sdpx_float64_solve.jl`
-- `docs/preprocessing.md`
+- `docs/src/preprocessing.md`
 - `docs/cluster-workflow.md`
 - `README.md`
 - `CHANGELOG.md`

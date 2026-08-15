@@ -886,16 +886,31 @@ function threaded_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T},
 end
 
 """
-    threaded_mehrotra_corrector_rhs!(ws, prob, X, Y, sigma, mu)
+    threaded_mehrotra_corrector_rhs!(ws, prob, X, Y, sigma, mu;
+        block_local_target=false)
 
 Build the canonical Mehrotra SDP corrector right-hand side
 
 `R_l = sigma*mu*I - X_l*Y_l - dX_aff_l*dY_aff_l`
 
-using one global average complementarity `mu`. This path is used by the
-default adaptive policy; the expert `:fixed` policy retains the historical
-block-local corrector exactly.
+By default this uses one global average complementarity `mu`.  Setting
+`block_local_target=true` instead uses the current complementarity of each
+block, divided by that block's dimension.  Both paths keep all arithmetic in
+the solver scalar type.
 """
+@inline function _mehrotra_corrector_target(
+    sigma::T,
+    mu::T,
+    X::AbstractMatrix{T},
+    Y::AbstractMatrix{T},
+    dimension::Int,
+    block_local_target::Bool,
+) where {T}
+    block_local_target || return sigma * mu
+    dimension > 0 || return zero(T)
+    return sigma * kdot(X, Y) / T(dimension)
+end
+
 function threaded_mehrotra_corrector_rhs!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -903,8 +918,10 @@ function threaded_mehrotra_corrector_rhs!(
     Y,
     sigma::T,
     mu::T,
+    ;
+    block_local_target::Bool=false,
 ) where {T}
-    target = sigma * mu
+    global_target = sigma * mu
     if use_owned_bigfloat_block_loops(ws, prob)
         task_count = _owned_bigfloat_block_task_count(ws)
         @sync for task_index in 1:task_count
@@ -914,6 +931,16 @@ function threaded_mehrotra_corrector_rhs!(
                         workspace = ws.blk[block]
                         dimension = prob.dims.k[block]
                         dimension == 0 && continue
+                        target = block_local_target ?
+                                 _mehrotra_corrector_target(
+                                     sigma,
+                                     mu,
+                                     X[block],
+                                     Y[block],
+                                     dimension,
+                                     true,
+                                 ) :
+                                 global_target
                         kmul_owned!(
                             workspace.R,
                             X[block],
@@ -942,6 +969,16 @@ function threaded_mehrotra_corrector_rhs!(
             workspace = ws.blk[block]
             dimension = prob.dims.k[block]
             dimension == 0 && continue
+            target = block_local_target ?
+                     _mehrotra_corrector_target(
+                         sigma,
+                         mu,
+                         X[block],
+                         Y[block],
+                         dimension,
+                         true,
+                     ) :
+                     global_target
             kmul!(
                 workspace.R,
                 X[block],
@@ -974,6 +1011,16 @@ function threaded_mehrotra_corrector_rhs!(
                 workspace = ws.blk[block]
                 dimension = prob.dims.k[block]
                 dimension == 0 && continue
+                target = block_local_target ?
+                         _mehrotra_corrector_target(
+                             sigma,
+                             mu,
+                             X[block],
+                             Y[block],
+                             dimension,
+                             true,
+                         ) :
+                         global_target
                 kmul!(
                     workspace.R,
                     X[block],
@@ -1463,6 +1510,7 @@ function threaded_line_search!(
     γ::T,
     min_step::T,
     step_rule::Symbol=:backtrack,
+    minimum_cholesky_ratio::T=zero(T),
 ) where {T}
     return threaded_line_search!(
         ws,
@@ -1473,6 +1521,7 @@ function threaded_line_search!(
         γ,
         min_step,
         step_rule,
+        minimum_cholesky_ratio,
     )
 end
 
@@ -1485,6 +1534,7 @@ function threaded_line_search!(
     backtracking_factor::T,
     min_step::T,
     step_rule::Symbol=:backtrack,
+    minimum_cholesky_ratio::T=zero(T),
 ) where {T}
     L = length(X)
     nt = ws.thread_count
@@ -1617,6 +1667,7 @@ function threaded_line_search!(
             min_step,
             one(T),
             one(T),
+            minimum_cholesky_ratio,
         )
     end
     bins = ws.block_bins
@@ -1631,7 +1682,13 @@ function threaded_line_search!(
             Threads.@spawn begin
                 for l in bin
                     bw = ws.blk[l]
-                    trial_isposdef!(bw.trialX, X[l], tX, bw.dX) ||
+                    trial_has_cholesky_margin!(
+                        bw.trialX,
+                        X[l],
+                        tX,
+                        bw.dX,
+                        minimum_cholesky_ratio,
+                    ) ||
                         (okbins[p] = false)
                 end
             end
@@ -1647,7 +1704,13 @@ function threaded_line_search!(
             Threads.@spawn begin
                 for l in bin
                     bw = ws.blk[l]
-                    trial_isposdef!(bw.trialY, Y[l], tY, bw.dY) ||
+                    trial_has_cholesky_margin!(
+                        bw.trialY,
+                        Y[l],
+                        tY,
+                        bw.dY,
+                        minimum_cholesky_ratio,
+                    ) ||
                         (okbins[p] = false)
                 end
             end

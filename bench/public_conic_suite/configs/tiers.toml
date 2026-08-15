@@ -1,0 +1,38 @@
+[smoke]
+description = "PR/CI: generated analytic cases + small external cases; correctness first."
+sdp_external = ["biggs", "cnhil10", "hand", "yalsdp", "neu2"]
+lp_netlib = ["afiro", "blend", "sc50a", "sc105", "adlittle", "kb2"]
+socp_external = []
+generated = ["lp.near_dependent_equalities", "lp.infeasible_margin", "socp.near_tangent", "sdp.weak_infeasible_2x2"]
+repetitions = 1
+
+[nightly]
+description = "Core solver regression campaign."
+sdp_external = "core30"
+lp_netlib = "core20"
+lp_modern = "modern20"
+socp_external = "core12"
+generated = "all"
+repetitions = 3
+
+[release]
+description = "Publication/release campaign: full public suites, reference solvers, precision ladders."
+sdp_external = "mittelmann75_plus_core30"
+sdp_infeasible = "8x100"
+lp_netlib = "core20_plus_full_available"
+lp_modern = "all_public_mittelmann"
+lp_network = "network25"
+socp_external = "mittelmann18"
+generated = "all_all_precisions"
+repetitions = 5
+
+[fairness]
+warmup = 1
+blas_threads_default = 1
+record_julia_threads = true
+record_blas_threads = true
+record_cpu_model = true
+record_memory = true
+record_git_sha = true
+record_problem_sha256 = true
+cross_machine_speedup_claims = false

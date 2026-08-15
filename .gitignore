@@ -20,6 +20,7 @@ flamegraph*.svg
 # and are far too large to distribute — the serialized problem instances alone
 # run to gigabytes.
 bench/**/results/
+bench/**/out/
 bench/**/*.bin
 bench/**/*.log
 bench/**/*.out
@@ -30,6 +31,8 @@ bench/**/*.jld2
 bench/**/*.npy
 bench/**/*.npz
 bench/**/__pycache__/
+benchmark/data/cache/
+benchmark/out/
 
 # Machine-specific scheduler scripts. These embed absolute paths, usernames and
 # site-specific module environments; the portable drivers they invoke are the
@@ -39,6 +42,7 @@ bench/**/__pycache__/
 # path is supplied through environment variables, so keep them with the
 # reproducible benchmark harness.
 !bench/soc_fixed_trace/*.pbs
+!benchmark/cluster/*.pbs
 *.o[0-9]*
 *.e[0-9]*
 

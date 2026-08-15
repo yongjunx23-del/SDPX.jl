@@ -1,0 +1,12 @@
+name = "SDPXBenchmarkSuite"
+uuid = "ca8e15f0-fbe7-4d97-a7fb-c08af741e1e8"
+version = "0.1.0"
+
+[deps]
+SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+
+[compat]
+julia = "1.10"
+JuMP = "1"
+SDPX = "0.2, 0.3, 0.4, 0.5"

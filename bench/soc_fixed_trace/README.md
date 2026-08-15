@@ -101,9 +101,9 @@ the recorded digest even when `src/` is unchanged.
 The release campaign is capped at 32 Julia/solver workers. Use
 `1/2/4/8/16/32` for J40 and `8/16/32` for J80, with one configuration per PBS
 job and BLAS fixed at one thread. Recommendations come from complete-solve
-medians, not from the largest scheduler allocation. Retired 64/96/128-worker
-experiments remain documented only in `WORKLOG.md`; no current PBS template
-requests more than 32 slots. Both the portable launcher and the direct J40/J80
+medians, not from the largest scheduler allocation. Retired experiments remain
+available in Git history; no current PBS template requests more than 32 slots.
+Both the portable launcher and the direct J40/J80
 benchmark driver reject wider requests; this is a release-campaign policy, not
 a global limit on `SolverOptions` for unrelated SDPX models.
 
