@@ -1134,10 +1134,11 @@ and at most `max(sqrt(eps(T)), tolerance)`.  Each block is then lifted
 strictly into the cone by the shared Lorentz head shift, the direct Euclidean
 complementarity `κ`, the identity head masses, and the barrier degree
 (1 for scalar, 2 for proper Lorentz blocks) are aggregated, the aggregate
-identity-mass floor (ρ = number of blocks) raises any side whose total head
-mass is below the identity-unit mass to at least that mass, the shared head
-pre-centering cross rule is applied, and post-centering margins and `κ` are
-recorded.  The fixed-trace hot path uses only the immutable SoA tail
+identity-mass floor (ρ = number of blocks) raises a side to unit identity
+mass only while its total head remains inside the typed cone-vertex envelope;
+an already balanced nonvertex Lorentz point is not renormalized.  The shared
+head pre-centering cross rule is then applied, and post-centering margins and
+`κ` are recorded.  The fixed-trace hot path uses only the immutable SoA tail
 maps/scatter/map helpers and the raw fixed head; it never touches a
 per-block cone matrix or provider GEMV.
 
