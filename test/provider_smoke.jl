@@ -215,6 +215,76 @@ function _exercise_bfla_factors()
     return backend
 end
 
+function _exercise_bfla_repeated_solve_correction()
+    config = LA.plan_la_backend(
+        BigFloat;
+        requested=:bfla,
+        route=:dense_cholesky,
+        threads=1,
+    )
+    backend = LA.instantiate_la_backend(config, BigFloat, 1)
+
+    rng = MersenneTwister(2026_0815)
+    n = 4
+    R = BigFloat.(randn(rng, n, n))
+    A = transpose(R) * R + BigFloat(8) * Matrix{BigFloat}(I, n, n)
+    rhs = BigFloat.(randn(rng, n))
+    chol = SDPX.la_cholesky_factor!(
+        backend,
+        SDPX._owned_array_copy(BigFloat, A),
+    )
+    @test chol !== nothing
+    first = SDPX._owned_array_copy(BigFloat, rhs)
+    second = SDPX._owned_array_copy(BigFloat, rhs)
+    SDPX.la_factor_solve!(chol, first)
+    SDPX.la_factor_solve!(chol, second)
+    @test _max_abs_error(A * first, rhs) <= big"1e-12"
+    @test _max_abs_error(A * second, rhs) <= big"1e-12"
+
+    square = BigFloat.(randn(rng, n, n)) + BigFloat(2) * Matrix{BigFloat}(I, n, n)
+    lu = SDPX.la_lu_factor!(
+        backend,
+        SDPX._owned_array_copy(BigFloat, square),
+    )
+    @test lu !== nothing
+    first = SDPX._owned_array_copy(BigFloat, rhs)
+    second = SDPX._owned_array_copy(BigFloat, rhs)
+    SDPX.la_factor_solve!(lu, first)
+    SDPX.la_factor_solve!(lu, second)
+    @test _max_abs_error(square * first, rhs) <= big"1e-12"
+    @test _max_abs_error(square * second, rhs) <= big"1e-12"
+
+    D = BigFloat[
+        4 1 0
+        1 3 1
+        0 1 -2
+    ]
+    ldlt = SDPX.la_ldlt_factor!(
+        backend,
+        SDPX._owned_array_copy(BigFloat, D),
+    )
+    @test ldlt !== nothing
+    first = SDPX._owned_array_copy(BigFloat, BigFloat[1, -1, 2])
+    second = SDPX._owned_array_copy(BigFloat, first)
+    SDPX.la_ldlt_factor_solve!(ldlt, first)
+    SDPX.la_ldlt_factor_solve!(ldlt, second)
+    @test _max_abs_error(D * first, BigFloat[1, -1, 2]) <= big"1e-12"
+    @test _max_abs_error(D * second, BigFloat[1, -1, 2]) <= big"1e-12"
+
+    for (factor, matrix, residual_source) in (
+        (chol, A, rhs),
+        (lu, square, rhs),
+        (ldlt, D, BigFloat[1, -1, 2]),
+    )
+        residual = SDPX._owned_array_copy(BigFloat, residual_source)
+        correction = SDPX.alloc_zeros(BigFloat, length(residual_source))
+        SDPX.la_refinement_correction!(factor, residual, correction)
+        @test all(isfinite, correction)
+        @test _max_abs_error(matrix * correction, residual) <= big"1e-12"
+    end
+    return backend
+end
+
 function _exercise_mfla_mixed_residual()
     config = LA.plan_la_backend(
         Float64x2;
@@ -475,6 +545,7 @@ _PROVIDERS_LOADED || error("required provider smoke extensions are unavailable")
             setprecision(BigFloat, 256) do
                 _assert_provider_root("SDPX_BFLA_PROJECT", BigFloatLinearAlgebra)
                 _exercise_bfla_factors()
+                _exercise_bfla_repeated_solve_correction()
             end
         end
 

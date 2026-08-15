@@ -18,13 +18,22 @@ using SparseArrays
         )
         @test result.status == SDPX.Optimal
         @test result.pObj ≈ 5.0 atol=1e-7
-        @test result.lifted === nothing
+        @test !hasproperty(result, :lifted)
         @test result.diagnostics.selected_algorithms.solver === :native_soc
         @test result_certificate(
             problem,
             result,
             SolverOptions(Float64; tolerance=1e-8, verbosity=0),
         ).valid
+
+        # The historical representation switch was removed; the compact API
+        # exposes no public non-native path.
+        @test_throws MethodError solve_socp(
+            problem;
+            soc_representation=:native,
+            tolerance=1e-8,
+            verbosity=0,
+        )
     end
 
     @testset "fixed-trace SDP remains an SDP compatibility model" begin

@@ -6,11 +6,14 @@ using Test
 mutable struct ScriptedAugmentedLDLTBackend <: SDPX.AbstractLABackend
     inertias::Vector{Any}
     calls::Int
+    diagnostics_calls::Int
+    correction_calls::Int
 end
 
 struct ScriptedAugmentedLDLTPayload
     inertia::Any
     diagnostics::NamedTuple
+    backend::ScriptedAugmentedLDLTBackend
 end
 
 function SDPX.la_ldlt_factor!(
@@ -22,6 +25,7 @@ function SDPX.la_ldlt_factor!(
     payload = ScriptedAugmentedLDLTPayload(
         backend.inertias[index],
         (success=true, attempt=backend.calls),
+        backend,
     )
     factors = copy(A)
     return SDPX.ProviderLALDLTFactor{T,typeof(payload),typeof(factors)}(
@@ -32,8 +36,24 @@ end
 
 SDPX.la_provider_ldlt_inertia(payload::ScriptedAugmentedLDLTPayload) =
     payload.inertia
+SDPX.la_provider_ldlt_blocks(::ScriptedAugmentedLDLTPayload) = ones(Int, 5)
+SDPX.la_provider_ldlt_permutation(::ScriptedAugmentedLDLTPayload) = collect(1:5)
+SDPX.la_provider_factor_precision(::ScriptedAugmentedLDLTPayload) = 53
+SDPX.la_provider_factor_status(payload::ScriptedAugmentedLDLTPayload) = 0
 SDPX.la_provider_factor_diagnostics(payload::ScriptedAugmentedLDLTPayload) =
-    payload.diagnostics
+    begin
+        payload.backend.diagnostics_calls += 1
+        payload.diagnostics
+    end
+function SDPX.la_provider_refinement_correction!(
+    payload::ScriptedAugmentedLDLTPayload,
+    residual,
+    correction,
+)
+    payload.backend.correction_calls += 1
+    copyto!(correction, residual)
+    return correction
+end
 
 function _augmented_test_problem(::Type{T}; equalities::Int=2) where {T}
     variables = 3
@@ -68,7 +88,7 @@ end
                 problem.dims.n,
             )
             workspace.S .= Matrix{Float64}(I, problem.dims.m, problem.dims.m)
-            backend = ScriptedAugmentedLDLTBackend(Any[inertias...], 0)
+            backend = ScriptedAugmentedLDLTBackend(Any[inertias...], 0, 0, 0)
             workspace.la_backend = backend
             outcome = SDPX.factor_dense_augmented_kkt!(
                 workspace,
@@ -84,9 +104,33 @@ end
         @test valid.ok
         @test valid.reg_attempts == 0
         @test valid_backend.calls == 1
+        @test valid_backend.diagnostics_calls == 1
         @test valid_workspace.augmented.factor !== nothing
         @test valid_workspace.augmented.inertia ==
               (positive=3, negative=2, zero=0)
+        @test valid_workspace.augmented.factor_diagnostics.attempt == 1
+
+        # Refinement of the explicit augmented formulation requests exactly
+        # one provider correction with the already retained LDLT factor.  The
+        # scripted correction copies the symmetric augmented RHS, exposing the
+        # equality-row sign convention without pretending to own SDPX's
+        # residual, stopping, or acceptance policy.
+        correction_dx = zeros(3)
+        correction_dy = zeros(2)
+        correction_r = [0.25, -0.5, 0.75]
+        correction_p = [0.4, -0.2]
+        SDPX._solve_refinement_correction!(
+            SDPX.DenseAugmentedKKTBackend(),
+            valid_workspace,
+            2,
+            correction_r,
+            correction_p,
+            correction_dx,
+            correction_dy,
+        )
+        @test valid_backend.correction_calls == 1
+        @test correction_dx == correction_r
+        @test correction_dy == -correction_p
 
         recovered, recovered_workspace, recovered_backend = scripted_factor(
             [(positive=2, negative=3, zero=0), (3, 2, 0)],
@@ -94,8 +138,10 @@ end
         @test recovered.ok
         @test recovered.reg_attempts == 1
         @test recovered_backend.calls == 2
+        @test recovered_backend.diagnostics_calls == 1
         @test recovered_workspace.augmented.inertia == (3, 2, 0)
         @test recovered_workspace.augmented.regularization > 0
+        @test recovered_workspace.augmented.factor_diagnostics.attempt == 2
 
         wrong_sign, wrong_workspace, wrong_backend = scripted_factor(
             [(2, 3, 0)],
@@ -104,9 +150,11 @@ end
         @test !wrong_sign.q_rank_deficient
         @test wrong_sign.reg_attempts == 6
         @test wrong_backend.calls == 7
+        @test wrong_backend.diagnostics_calls == 1
         @test wrong_workspace.augmented.factor === nothing
         @test !wrong_workspace.augmented.rank_deficient
         @test wrong_workspace.augmented.inertia == (2, 3, 0)
+        @test wrong_workspace.augmented.factor_diagnostics.attempt == 7
         @test wrong_workspace.la_fallback_reason ===
               :la_equality_inertia_mismatch
 
@@ -117,9 +165,11 @@ end
         @test !dependent.ok
         @test dependent.q_rank_deficient
         @test dependent_backend.calls == 7
+        @test dependent_backend.diagnostics_calls == 1
         @test dependent_workspace.augmented.factor === nothing
         @test dependent_workspace.augmented.rank_deficient
         @test dependent_workspace.augmented.inertia.zero == 1
+        @test dependent_workspace.augmented.factor_diagnostics.attempt == 7
         @test dependent_workspace.la_fallback_reason ===
               :la_equality_rank_deficient
 
@@ -129,6 +179,7 @@ end
         @test !invalid.ok
         @test !invalid.q_rank_deficient
         @test invalid_backend.calls == 7
+        @test invalid_backend.diagnostics_calls == 1
         @test invalid_workspace.augmented.factor === nothing
         @test invalid_workspace.augmented.inertia === nothing
         @test invalid_workspace.augmented.factor_diagnostics.attempt == 7

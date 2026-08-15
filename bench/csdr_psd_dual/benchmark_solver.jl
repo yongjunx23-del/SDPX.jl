@@ -193,7 +193,7 @@ function run_sdpx(data, tolerance, cli)
         iter_max = 1000,
         verbosity = 0,
         max_time = 600.0,
-        equilibrate = cli.equilibrate,
+        scaling = cli.equilibrate ? :equilibrate : :none,
         predictor = cli.predictor,
         step_rule = cli.step_rule,
         max_restarts = cli.max_restarts,

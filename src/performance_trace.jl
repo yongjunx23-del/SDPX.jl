@@ -444,15 +444,16 @@ end
     performance_trace(result::ConicResult) -> PerformanceTrace
 
 Native Lorentz-cone results project their own diagnostics. Test-only
-historical reference results may still carry a lifted SDP record.
+reference results carry SDP-shaped diagnostics and project them directly.
 """
-performance_trace(result::ConicResult) = result.lifted === nothing ?
-    PerformanceTrace(
+function performance_trace(result::ConicResult)
+    return PerformanceTrace(
         _setup_facts(result),
         _iteration_facts(result),
         _final_facts(result),
         _counter_facts(result),
-    ) : performance_trace(result.lifted)
+    )
+end
 
 function Base.show(io::IO, trace::PerformanceTrace)
     print(io, "PerformanceTrace(status=", trace.final.status,

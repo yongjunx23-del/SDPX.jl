@@ -147,45 +147,11 @@ const SpectrumResult = SDPX.SpectrumResult
 const FixedTraceBlock = SDPX.FixedTraceBlock
 const FixedTraceAnalysis = SDPX.FixedTraceAnalysis
 const analyze_fixed_trace = SDPX.analyze_fixed_trace
-const AbstractCanonicalCone = SDPX.AbstractCanonicalCone
-const AbstractCanonicalLinearCone = SDPX.AbstractCanonicalLinearCone
-const AbstractCanonicalLorentzCone = SDPX.AbstractCanonicalLorentzCone
-const AbstractCanonicalPSDCone = SDPX.AbstractCanonicalPSDCone
-const CanonicalLinearCone = SDPX.CanonicalLinearCone
-const CanonicalLorentzCone = SDPX.CanonicalLorentzCone
-const CanonicalPSDCone = SDPX.CanonicalPSDCone
-const CanonicalDensePanelCoefficients = SDPX.CanonicalDensePanelCoefficients
-const CanonicalNegatedMatrixView = SDPX.CanonicalNegatedMatrixView
-const CanonicalScalarBlockRowsView = SDPX.CanonicalScalarBlockRowsView
-const CanonicalNegatedScalarOffsetsView = SDPX.CanonicalNegatedScalarOffsetsView
-const AbstractCanonicalEqualities = SDPX.AbstractCanonicalEqualities
-const CanonicalEqualities = SDPX.CanonicalEqualities
-const CanonicalIdentityReconstructionMap =
-    SDPX.CanonicalIdentityReconstructionMap
-const CanonicalReconstructionMap = SDPX.CanonicalReconstructionMap
-const CanonicalConicProblem = SDPX.CanonicalConicProblem
-const canonicalize = SDPX.canonicalize
-const reconstruct_identity = SDPX.reconstruct_identity
-const CanonicalMatrixFacts = SDPX.CanonicalMatrixFacts
-const CanonicalAffineMapFacts = SDPX.CanonicalAffineMapFacts
-const CanonicalAffineConeFacts = SDPX.CanonicalAffineConeFacts
-const CanonicalPSDConeFacts = SDPX.CanonicalPSDConeFacts
 const DenseFormulationFeatures = SDPX.DenseFormulationFeatures
 const dense_formulation_features = SDPX.dense_formulation_features
 const EqualityPlanningEvidence = SDPX.EqualityPlanningEvidence
-const ProblemFeatures = SDPX.ProblemFeatures
-const extract_problem_features = SDPX.extract_problem_features
 const AutoPlanner = SDPX.AutoPlanner
 const resolve_execution_route = SDPX.resolve_execution_route
-const StructuralPlanningIntent = SDPX.StructuralPlanningIntent
-const AutoPlannerSnapshot = SDPX.AutoPlannerSnapshot
-const planner_snapshot = SDPX.planner_snapshot
-const unresolved_options = SDPX.unresolved_options
-const planner_summary = SDPX.planner_summary
-const PlanningDecision = SDPX.PlanningDecision
-const ResolvedAutoPlannerSnapshot = SDPX.ResolvedAutoPlannerSnapshot
-const resolve_planner_snapshot = SDPX.resolve_planner_snapshot
-const resolved_planner_summary = SDPX.resolved_planner_summary
 const FormulationCandidate = SDPX.FormulationCandidate
 const FormulationFeasibility = SDPX.FormulationFeasibility
 const FormulationDecision = SDPX.FormulationDecision
@@ -255,24 +221,10 @@ export FixedVariableEliminationStage, StructuralCleanupStage
 export FormulationAnalysisStage, ChordalAnalysisStage, preprocess
 export classify_problem, build_execution_plan, SpectrumResult
 export FixedTraceBlock, FixedTraceAnalysis, analyze_fixed_trace
-export AbstractCanonicalCone, CanonicalLinearCone, CanonicalLorentzCone
-export AbstractCanonicalLinearCone, AbstractCanonicalLorentzCone
-export AbstractCanonicalPSDCone, CanonicalPSDCone
-export CanonicalDensePanelCoefficients, CanonicalNegatedMatrixView
-export CanonicalScalarBlockRowsView, CanonicalNegatedScalarOffsetsView
-export AbstractCanonicalEqualities, CanonicalEqualities
-export CanonicalIdentityReconstructionMap, CanonicalReconstructionMap
-export CanonicalConicProblem, canonicalize, reconstruct_identity
-export CanonicalMatrixFacts, CanonicalAffineMapFacts, CanonicalAffineConeFacts
-export CanonicalPSDConeFacts, DenseFormulationFeatures
+export DenseFormulationFeatures
 export dense_formulation_features
-export EqualityPlanningEvidence, ProblemFeatures
-export extract_problem_features
+export EqualityPlanningEvidence
 export AutoPlanner, resolve_execution_route
-export StructuralPlanningIntent, AutoPlannerSnapshot
-export planner_snapshot, unresolved_options, planner_summary
-export PlanningDecision, ResolvedAutoPlannerSnapshot
-export resolve_planner_snapshot, resolved_planner_summary
 export FormulationCandidate, FormulationFeasibility, FormulationDecision
 export plan_formulation, formulation_decision_summary
 export ResolvedSolveOptions, resolve_solve_options, auto_tolerance
@@ -318,8 +270,6 @@ const _LEGACY_TOP_LEVEL_EXPORTS = (
     :sdp,
     :findFeasible,
     :setArithmeticType,
-    :setSparseMode,
-    :setMode,
 )
 
 const _DEPRECATED_EXPERIMENTAL_EXPORTS = ()

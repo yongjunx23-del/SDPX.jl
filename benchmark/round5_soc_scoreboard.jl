@@ -30,13 +30,11 @@ end
 
 function workspace_bytes(result)
     diagnostics = result.diagnostics
-    if diagnostics isa SDPX.NativeSOCDiagnostics
-        return diagnostics.memory.workspace_bytes
-    elseif result.lifted !== nothing && result.lifted.diagnostics !== nothing
-        memory = result.lifted.diagnostics.memory
-        return hasproperty(memory, :workspace_bytes) ? memory.workspace_bytes : missing
-    end
-    return missing
+    diagnostics === nothing && return missing
+    hasproperty(diagnostics, :memory) || return missing
+    memory = diagnostics.memory
+    return hasproperty(memory, :workspace_bytes) ?
+           memory.workspace_bytes : missing
 end
 
 function reference_certificate(problem, result, tolerance)

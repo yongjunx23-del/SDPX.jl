@@ -62,7 +62,10 @@ import MultiFloatLinearAlgebra:
     factor_matrix,
     factor_precision,
     factor_diagnostics,
-    factor_permutation
+    factor_permutation,
+    factor_blocks,
+    factor_inertia,
+    factor_status
 
 # SDPX's MultiFloat provider targets the x2/x3/x4 limbs used by its dense
 # arithmetic paths.  N == 1 is a Float64-wrapped degenerate form that the
@@ -195,9 +198,6 @@ function _validate_cholesky_handle(
     size(factors, 1) == size(factors, 2) || throw(ArgumentError(
         "MFLA Cholesky factor is not square",
     ))
-    SDPX._all_finite_lower(factors) || throw(ArgumentError(
-        "MFLA Cholesky factor contains non-finite lower storage",
-    ))
     return handle
 end
 
@@ -219,7 +219,6 @@ function _provider_cholesky_factor!(
     ))
     factor = cholesky!(A; check=false, config=provider.config)
     mfla_issuccess(factor) || return nothing
-    SDPX._all_finite_lower(factor_matrix(factor)) || return nothing
     handle = _CholeskyHandle{MF,typeof(factor)}(factor, provider.config)
     return _validate_cholesky_handle(handle, A)
 end
@@ -625,6 +624,10 @@ function SDPX.la_provider_factor_diagnostics(payload::_LUPayload)
     return factor_diagnostics(payload.factor)
 end
 
+function SDPX.la_provider_factor_status(payload::_LUPayload)
+    return factor_status(payload.factor)
+end
+
 function SDPX.la_provider_factor_solve!(payload::_LUPayload, rhs)
     ldiv!(rhs, payload.factor; config=payload.config)
     return rhs
@@ -654,6 +657,10 @@ end
 
 function SDPX.la_provider_factor_diagnostics(payload::_LDLTPayload)
     return factor_diagnostics(payload.factor)
+end
+
+function SDPX.la_provider_factor_status(payload::_LDLTPayload)
+    return factor_status(payload.factor)
 end
 
 function SDPX.la_provider_factor_precision(payload::_LDLTPayload)
@@ -720,50 +727,17 @@ function _compact_ldlt_blocks(raw::AbstractVector{UInt8}, n::Int)
     return blocks
 end
 
-"""Reconstruct the final row permutation from MFLA's stepwise pivot swaps."""
-function _final_ldlt_permutation(
-    raw_blocks::AbstractVector{UInt8},
-    pivots::AbstractVector{Int},
-    n::Int,
-)
-    perm = collect(1:n)
-    k = 1
-    @inbounds while k <= n
-        marker = raw_blocks[k]
-        if marker == UInt8(1)
-            pivot = pivots[k]
-            perm[k], perm[pivot] = perm[pivot], perm[k]
-            k += 1
-        elseif marker == UInt8(2) && k < n && raw_blocks[k + 1] == UInt8(0)
-            pivot = pivots[k]
-            perm[k + 1], perm[pivot] = perm[pivot], perm[k + 1]
-            k += 2
-        else
-            throw(ArgumentError(
-                "MFLA LDLT returned an invalid pivot-block grammar",
-            ))
-        end
-    end
-    return perm
-end
-
 function SDPX.la_provider_ldlt_blocks(payload::_LDLTPayload)
-    diagnostics = factor_diagnostics(payload.factor)
-    return _compact_ldlt_blocks(diagnostics.blocks, length(diagnostics.blocks))
+    blocks = factor_blocks(payload.factor)
+    return _compact_ldlt_blocks(blocks, length(blocks))
 end
 
 function SDPX.la_provider_ldlt_permutation(payload::_LDLTPayload)
-    diagnostics = factor_diagnostics(payload.factor)
-    n = length(diagnostics.blocks)
-    return _final_ldlt_permutation(
-        diagnostics.blocks,
-        diagnostics.pivots,
-        n,
-    )
+    return factor_permutation(payload.factor)
 end
 
 function SDPX.la_provider_ldlt_inertia(payload::_LDLTPayload)
-    return factor_diagnostics(payload.factor).inertia
+    return factor_inertia(payload.factor)
 end
 
 function SDPX.la_provider_descriptor(

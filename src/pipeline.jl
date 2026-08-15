@@ -178,13 +178,9 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "scaling must be :auto, :none, or :equilibrate",
         ))
-    opts.formulation in (:auto, :primal, :normal_equations, :dual, :augmented) ||
+    opts.formulation in (:auto, :primal, :normal_equations, :augmented) ||
         throw(ArgumentError(
-            "formulation must be :auto, :primal, :normal_equations, :dual, or :augmented",
-        ))
-    opts.chordal_decomposition in (:auto, :off, :on) ||
-        throw(ArgumentError(
-            "chordal_decomposition must be :auto, :off, or :on",
+            "formulation must be :auto, :primal, :normal_equations, or :augmented",
         ))
     opts.step_rule in (:backtrack, :fraction_to_boundary, :auto) ||
         throw(ArgumentError(
@@ -208,12 +204,6 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "extended_precision_blas must be :off, :auto, or :on",
         ))
-    opts.q3_gram_strategy in (:auto, :output_tiles, :row_bins) ||
-        throw(ArgumentError(
-            "q3_gram_strategy must be :auto, :output_tiles, or :row_bins",
-        ))
-    opts.q3_direction in (:hkm, :nt) ||
-        throw(ArgumentError("q3_direction must be :hkm or :nt"))
     isfinite(opts.extended_precision_memory_fraction) &&
         0.0 <= opts.extended_precision_memory_fraction <= 1.0 ||
         throw(ArgumentError(
@@ -873,11 +863,56 @@ selected fraction of free memory, which trades parallelism for memory.
 Section 18.4 asks that a change in algorithm selection between thread counts
 be reported rather than inferred from disappointing scaling, and section 19.3
 asks for an informative estimate rather than a silent degradation.
+
+Eligible multi-threaded dense Float64 workspaces own disjoint
+lower-triangle output columns and allocate no partials, so `assembly_mode` is
+`:column_owned`, `selected_bins == requested_bins`, `capped === false`, and
+`total_bytes` is zero. Single-thread and single-block workspaces also store no
+partials, but report `:serial` because they do not execute the owner kernel.
+`would_have_been_bytes` keeps the historical per-bin cost for the diagnostic's
+avoided-memory display. Pass `dense_owner=true` only for a known eligible
+`DenseCons` route; the dimension-only default remains the legacy partial
+report because sparse Float64 dense-Schur assembly still uses partials.
+`_schur_parallel_bins` itself remains the legacy cap for sparse and
+extended-arithmetic routes.
 """
 function schur_bin_report(::Type{T}, m::Integer, L::Integer,
                           threads::Integer;
-                          free_memory_bytes::Union{Nothing,Integer}=nothing) where {T}
+                          free_memory_bytes::Union{Nothing,Integer}=nothing,
+                          dense_owner::Bool=false) where {T}
     requested = max(1, min(Int(threads), Int(L)))
+    bytes_each = saturating_bytes(max(sizeof(T), 8), Int(m), Int(m))
+    if requested == 1
+        return (
+            requested_bins=requested,
+            selected_bins=requested,
+            capped=false,
+            memory_fraction=0.0,
+            memory_budget_bytes=0,
+            bytes_per_bin=bytes_each,
+            total_bytes=0,
+            would_have_been_bytes=saturating_bytes(requested, bytes_each),
+            assembly_mode=:serial,
+            owner_tasks=1,
+        )
+    end
+    if dense_owner
+        T === Float64 || throw(ArgumentError(
+            "dense column ownership is available only for Float64",
+        ))
+        return (
+            requested_bins=requested,
+            selected_bins=requested,
+            capped=false,
+            memory_fraction=0.0,
+            memory_budget_bytes=0,
+            bytes_per_bin=bytes_each,
+            total_bytes=0,
+            would_have_been_bytes=saturating_bytes(requested, bytes_each),
+            assembly_mode=:column_owned,
+            owner_tasks=min(max(Int(threads), 1), max(Int(m), 1)),
+        )
+    end
     available = free_memory_bytes === nothing ?
         ExtendedPrecisionBLAS._system_free_memory_bytes() :
         Int(free_memory_bytes)
@@ -895,7 +930,6 @@ function schur_bin_report(::Type{T}, m::Integer, L::Integer,
             available,
             memory_fraction,
         )
-    bytes_each = Int(m)^2 * max(sizeof(T), 8)
     return (
         requested_bins=requested,
         selected_bins=selected,
@@ -903,8 +937,10 @@ function schur_bin_report(::Type{T}, m::Integer, L::Integer,
         memory_fraction=memory_fraction,
         memory_budget_bytes=memory_budget_bytes,
         bytes_per_bin=bytes_each,
-        total_bytes=selected * bytes_each,
-        would_have_been_bytes=requested * bytes_each,
+        total_bytes=saturating_bytes(selected, bytes_each),
+        would_have_been_bytes=saturating_bytes(requested, bytes_each),
+        assembly_mode=:partial_accumulators,
+        owner_tasks=0,
     )
 end
 
@@ -978,13 +1014,11 @@ function resolve_execution_route(
     equality_evidence::EqualityPlanningEvidence=
         _equality_evidence_without_rrqr(prob, :not_computed),
 ) where {T}
+    _require_supported_arithmetic_type(T)
+    _validate_solver_options(opts)
     classification = classify_problem(prob)
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
-    opts.formulation === :dual && throw(ArgumentError(
-        "formulation=:dual is analysis-only in SDPX v0.5; no typed " *
-        "dual transform or reconstruction path is implemented",
-    ))
     opts.formulation === :augmented &&
         !(classification.cone in (:sdp, :socp)) &&
         throw(ArgumentError(
@@ -2238,11 +2272,15 @@ function estimate_dense_workspace_bytes(
 ) where {T}
     L, m, n, k = prob.dims
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
-    schur_bins = T === BigFloat ? 1 : min(max(thread_count, 1), L)
+    storage_partial_bins =
+        prob.cons isa DenseCons{T} &&
+        T === Float64 ? 0 :
+        T === BigFloat ? 1 :
+        min(max(thread_count, 1), L)
     block_squares = sum(dimension -> dimension^2, k; init=0)
     counted = saturating_sum_bytes(
         saturating_bytes(2, scalar_bytes, m, m),
-        saturating_bytes(schur_bins, scalar_bytes, m, m),
+        saturating_bytes(storage_partial_bins, scalar_bytes, m, m),
         saturating_bytes(scalar_bytes, m, n),
         saturating_bytes(2, scalar_bytes, n, n),
         saturating_bytes(8, scalar_bytes, m),
@@ -2292,10 +2330,12 @@ can be called, the allocation it would have warned about has already happened.
 
 This counts only the terms that follow from `m`, `n`, and the thread count: the
 Schur complement and its factorization scratch, the task-local reductions, and
-the equality blocks. Those dominate at the sizes where the budget is at risk,
-and omitting the per-block terms keeps it `O(1)`. It is a floor, so exceeding
-the budget here means the real workspace exceeds it too; not exceeding it
-proves nothing.
+the equality blocks. Eligible dense Float64 workspaces own disjoint
+Schur output columns and never allocate per-bin `m×m` partials, so their floor
+omits that thread-scaled term too. Those dominate at the sizes where the
+budget is at risk, and omitting the per-block terms keeps it `O(1)`. It is a
+floor, so exceeding the budget here means the real workspace exceeds it too;
+not exceeding it proves nothing.
 
 No margin is applied. The margin in the full estimate exists to make it an
 upper bound; a bound that is deliberately low must not carry one.
@@ -2303,14 +2343,23 @@ upper bound; a bound that is deliberately low must not carry one.
 function dense_workspace_floor_bytes(::Type{T}, m::Integer, n::Integer,
                                      L::Integer, thread_count::Integer) where {T}
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
-    schur_bins = T === BigFloat ? 1 : min(max(Int(thread_count), 1), max(Int(L), 1))
+    # Dense Float64 workspaces never allocate Schur partials, even at
+    # thread_count == 1 (`schur_nbins == 1` allocates none). Omitting the
+    # partial term for every thread count keeps this a valid lower bound for
+    # sparse routes as well. Other arithmetic counts task-local matrices only
+    # when at least two bins exist; a one-bin workspace stores no `Spartial`.
+    candidate_partial_bins = T === BigFloat ? 1 :
+        min(max(Int(thread_count), 1), max(Int(L), 1))
+    storage_partial_bins =
+        T === Float64 || candidate_partial_bins <= 1 ?
+        0 : candidate_partial_bins
     # Saturating, not native Int: this figure feeds a memory pre-flight, and a
     # product that wraps negative compares as smaller than every budget --
     # approving exactly the allocation the check exists to refuse. Measured
     # before the fix, m = 4e9 returned -6763251095801167872.
     return saturating_sum_bytes(
         saturating_bytes(2, scalar_bytes, Int(m), Int(m)),
-        saturating_bytes(schur_bins, scalar_bytes, Int(m), Int(m)),
+        saturating_bytes(storage_partial_bins, scalar_bytes, Int(m), Int(m)),
         saturating_bytes(scalar_bytes, Int(m), Int(n)),
         saturating_bytes(2, scalar_bytes, Int(n), Int(n)),
     )
@@ -2477,10 +2526,14 @@ function estimate_sdp_workspace_bytes(
             WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES * L,
         )
     end
-    schur_bins = T === BigFloat ? 1 : min(max(thread_count, 1), L)
+    storage_partial_bins =
+        prob.cons isa DenseCons{T} &&
+        T === Float64 ? 0 :
+        T === BigFloat ? 1 :
+        min(max(thread_count, 1), L)
     matrix_elements =
         2m * m +                 # S and factorization scratch
-        schur_bins * m * m +    # deterministic task-local Schur reductions
+        storage_partial_bins * m * m +  # deterministic task-local Schur reductions
         m * n +
         2n * n
     vector_elements = 8m + 6n + L

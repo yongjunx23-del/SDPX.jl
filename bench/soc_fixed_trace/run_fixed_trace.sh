@@ -109,7 +109,6 @@ fi
     echo "allocated_slots=$PPN"
     echo "blas_threads=1"
     echo "thread_policy=$THREAD_POLICY"
-    echo "q3_direction=${SDPX_Q3_DIRECTION:-hkm}"
     echo "julia_exclusive=${JULIA_EXCLUSIVE:-0}"
     echo "julia_thread_sleep_threshold=${JULIA_THREAD_SLEEP_THRESHOLD:-default}"
     echo "julia_bin=$(readlink -f "$JULIA_BIN")"
@@ -146,8 +145,6 @@ fi
     --max-iterations="${SDPX_MAX_ITERATIONS:-500}" \
     --time-limit-seconds="${SDPX_TIME_LIMIT_SECONDS:-43200}" \
     --precision-bits="${SDPX_PRECISION_BITS:-256}" \
-    --q3-gram-strategy="${SDPX_Q3_GRAM_STRATEGY:-auto}" \
-    --q3-direction="${SDPX_Q3_DIRECTION:-hkm}" \
     --scaling="${SDPX_SCALING:-none}" \
     --output="$OUTPUT_ROOT/report.toml" \
     --manifest="$OUTPUT_ROOT/manifest.toml" \

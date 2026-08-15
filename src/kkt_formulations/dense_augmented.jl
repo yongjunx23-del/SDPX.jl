@@ -78,7 +78,14 @@ function assemble_dense_augmented_kkt!(
         "augmented workspace dimensions do not match the Newton system",
     ))
 
-    zero_owned!(workspace.matrix)
+    # Every authoritative nonzero block is overwritten below.  Only the
+    # equality/equality lower block must be reset to structural zero; the
+    # inactive upper triangle is deliberately left untouched.
+    n > 0 && zero_owned!(view(
+        workspace.matrix,
+        (m + 1):(m + n),
+        (m + 1):(m + n),
+    ))
     @inbounds for column in 1:m
         for row in column:m
             _augmented_store!(workspace.matrix, row, column, S[row, column])
@@ -120,6 +127,9 @@ function factor_dense_augmented_kkt!(
     workspace.regularization = zero(T)
     workspace.factor_diagnostics = nothing
     workspace.inertia = nothing
+    workspace.pivot_blocks = nothing
+    workspace.permutation = nothing
+    workspace.factor_precision = nothing
     workspace.rank_deficient = false
     factorization_seconds = 0.0
     reg_attempts = 0
@@ -127,9 +137,10 @@ function factor_dense_augmented_kkt!(
     m = prob.dims.m
     n = prob.dims.n
     factor = nothing
+    last_inertia = nothing
     rejection = :factor_failed
     while true
-        copy_owned!(workspace.factor_buffer, workspace.matrix)
+        _copy_lower_triangle!(workspace.factor_buffer, workspace.matrix)
         if reg_attempts > 0
             @inbounds for index in 1:m
                 workspace.factor_buffer[index, index] +=
@@ -140,22 +151,34 @@ function factor_dense_augmented_kkt!(
         factor = la_ldlt_factor!(ws.la_backend, workspace.factor_buffer)
         factorization_seconds += _elapsed_seconds(started)
         if factor !== nothing
-            diagnostics = la_factor_diagnostics(factor)
             inertia = la_ldlt_inertia(factor)
-            workspace.factor_diagnostics = diagnostics
-            workspace.inertia = inertia
+            last_inertia = inertia
             inertia_class = _ldlt_inertia_class(inertia, m, n)
             if inertia_class === :accepted
                 workspace.rank_deficient = false
                 workspace.factor = factor
+                workspace.inertia = inertia
+                workspace.pivot_blocks = la_ldlt_blocks(factor)
+                workspace.permutation = la_ldlt_permutation(factor)
+                workspace.factor_precision = la_factor_precision(factor)
+                workspace.factor_diagnostics = la_factor_diagnostics(factor)
                 break
             end
             workspace.factor = nothing
             workspace.rank_deficient = inertia_class === :rank_deficient
-            inertia_class === :invalid && (workspace.inertia = nothing)
             rejection = inertia_class
-            # The provider may borrow `factor_buffer`. Drop the rejected
-            # handle before the next retry overwrites that storage.
+            if reg_attempts == 6
+                # Snapshot the terminal candidate while its borrowed factor
+                # storage is still valid.  No provider accessor may be called
+                # after the next overwrite of `factor_buffer`.
+                workspace.inertia = inertia_class === :invalid ? nothing : inertia
+                if inertia_class !== :invalid
+                    workspace.pivot_blocks = la_ldlt_blocks(factor)
+                    workspace.permutation = la_ldlt_permutation(factor)
+                    workspace.factor_precision = la_factor_precision(factor)
+                end
+                workspace.factor_diagnostics = la_factor_diagnostics(factor)
+            end
             factor = nothing
         end
         reg_attempts == 6 && break
@@ -165,6 +188,14 @@ function factor_dense_augmented_kkt!(
     workspace.regularization = reg
     if factor === nothing
         workspace.factor = nothing
+        if workspace.inertia === nothing &&
+           last_inertia !== nothing &&
+           _ldlt_inertia_class(last_inertia, m, n) !== :invalid
+            # A terminal provider failure has no live factor metadata. Keep
+            # only the last lightweight immutable inertia evidence; blocks,
+            # permutation, precision, and diagnostics remain unavailable.
+            workspace.inertia = last_inertia
+        end
         ws.la_fallback_reason = if rejection === :rank_deficient
             :la_equality_rank_deficient
         elseif rejection === :mismatch
@@ -247,6 +278,40 @@ function solve_dense_augmented_kkt!(
     _assemble_dense_augmented_rhs!(workspace, r, p)
     copy_owned!(workspace.solution, workspace.rhs)
     la_ldlt_factor_solve!(factor, workspace.solution)
+    m = length(r)
+    copy_owned!(dx_out, view(workspace.solution, 1:m))
+    n > 0 && copy_owned!(dy_out, view(workspace.solution, (m + 1):(m + n)))
+    return dx_out, dy_out
+end
+
+"""
+Apply exactly one provider correction solve to the explicit augmented system.
+
+SDPX has already formed the structured KKT residual and remains responsible
+for deciding whether the correction is needed, whether it improves the
+residual, and whether another pass is allowed.  On this formulation the
+provider's correction primitive is mathematically identical to one solve with
+the retained full augmented LDLT factor, so it can reuse provider-owned solve
+scratch without replacing SDPX's refinement policy.
+"""
+function correct_dense_augmented_kkt!(
+    ws::Workspace{T},
+    n::Int,
+    r::AbstractVector{T},
+    p::AbstractVector{T},
+    dx_out::AbstractVector{T},
+    dy_out::AbstractVector{T},
+) where {T}
+    workspace = _augmented_workspace(ws)
+    factor = workspace.factor
+    factor === nothing && error(
+        "dense augmented KKT correction requested without a successful LDLT factor",
+    )
+    length(p) == n || throw(DimensionMismatch(
+        "equality residual length does not match the augmented correction request",
+    ))
+    _assemble_dense_augmented_rhs!(workspace, r, p)
+    la_refinement_correction!(factor, workspace.rhs, workspace.solution)
     m = length(r)
     copy_owned!(dx_out, view(workspace.solution, 1:m))
     n > 0 && copy_owned!(dy_out, view(workspace.solution, (m + 1):(m + n)))

@@ -1,10 +1,12 @@
 #=
     SDPX <-> BigFloatLinearAlgebra optional extension.
 
-The payload is immutable and carries only a BFLA NativeBackend plus the
-KernelConfig derived from ExecutionPlan's selected thread count.  There is no
-hardware probing, calibration, ambient precision selection, or runtime
-provider fallback in this extension.
+The payload carries only a BFLA NativeBackend, the KernelConfig derived from
+ExecutionPlan's selected thread count, and one lazy precision-matched
+BFLAWorkspace slot reused for the provider lifetime.  Successful factors are
+wrapped in opaque handles that retain that workspace.  There is no hardware
+probing, calibration, ambient precision selection, or runtime provider
+fallback in this extension.
 =#
 module SDPXBigFloatLinearAlgebraExt
 
@@ -14,9 +16,10 @@ using LinearAlgebra
 
 const BFLA = BigFloatLinearAlgebra
 
-struct _Provider
+mutable struct _Provider
     backend::BFLA.NativeBackend
     config::BFLA.KernelConfig
+    workspace::Union{Nothing,BFLA.BFLAWorkspace}
 end
 
 _Provider(threads::Int) = _Provider(
@@ -28,7 +31,42 @@ _Provider(threads::Int) = _Provider(
         0,
         0,
     ),
+    nothing,
 )
+
+# Opaque provider factor payload. The public BFLA factor remains reachable
+# through the provider-factor metadata protocol, while the handle keeps the
+# factor and the provider workspace alive together.
+struct _FactorHandle{F<:BFLA.AbstractBFLAFactor}
+    factor::F
+    workspace::BFLA.BFLAWorkspace
+end
+
+"""
+Provider-level workspace for factorizations and repeated trusted solves.
+
+Precision is unknown at provider instantiation, so the workspace is created
+lazily from the first factor input.  One worker slot is used because SDPX
+serializes all calls through a single solver workspace.  A later factor at a
+different precision replaces the provider slot; handles created earlier retain
+their own workspace reference, so old factors stay solvable sequentially.
+"""
+function _workspace_for!(
+    provider::_Provider,
+    A::AbstractMatrix{BigFloat},
+)
+    isempty(A) && throw(ArgumentError(
+        "BFLA provider factorization requires a nonempty matrix",
+    ))
+    bits = precision(first(A))
+    workspace = provider.workspace
+    if workspace === nothing ||
+       BFLA.workspace_precision(workspace) != bits
+        workspace = BFLA.BFLAWorkspace(bits; workers=1)
+        provider.workspace = workspace
+    end
+    return workspace
+end
 
 const _ADAPTED_CAPABILITIES = SDPX.LAProviderCapabilities(
     cholesky=true,
@@ -41,10 +79,8 @@ const _ADAPTED_CAPABILITIES = SDPX.LAProviderCapabilities(
     ldlt_inertia=true,
     factor_solve=true,
     multi_rhs=true,
-    # BFLA supports a one-step primitive for every factor kind, but SDPX has
-    # wired it only for Cholesky handles. This provider-wide fact therefore
-    # remains false until the semantic factor interface is complete.
     iterative_refinement=false,
+    refinement_correction=true,
     higher_precision_residual=true,
     threading=true,
     dot=true,
@@ -73,6 +109,9 @@ function _capability_model(provider::_Provider)
         multi_rhs=adapted.multi_rhs && upstream.multi_rhs,
         iterative_refinement=
             adapted.iterative_refinement && upstream.refinement,
+        refinement_correction=
+            adapted.refinement_correction &&
+            upstream.refinement,
         higher_precision_residual=
             adapted.higher_precision_residual &&
             upstream.higher_precision_residual,
@@ -117,35 +156,57 @@ function SDPX.la_bfla_cholesky_factor!(
     provider::_Provider,
     A::AbstractMatrix{BigFloat},
 )
+    workspace = _workspace_for!(provider, A)
     factor = BFLA.cholesky!(
         provider.backend,
         A;
         triangle=BFLA.Lower,
         check=false,
         config=provider.config,
+        workspace=workspace,
+        workspace_worker=1,
     )
-    return BFLA.issuccess(factor) ? factor : nothing
+    BFLA.issuccess(factor) || return nothing
+    return _FactorHandle(factor, workspace)
 end
 
 function SDPX.la_bfla_lu_factor!(
     provider::_Provider,
     A::AbstractMatrix{BigFloat},
 )
+    workspace = _workspace_for!(provider, A)
     factor = BFLA.lu!(provider.backend, A; check=false)
-    return BFLA.issuccess(factor) ? factor : nothing
+    BFLA.issuccess(factor) || return nothing
+    return _FactorHandle(factor, workspace)
 end
 
-SDPX.la_factor_provider_identity(::BFLA.BFLALUFactor) =
+SDPX.la_factor_provider_identity(::_FactorHandle) =
     :bigfloat_linear_algebra
-SDPX.la_provider_factor_matrix(factor::BFLA.BFLALUFactor) =
-    BFLA.factor_matrix(factor)
-SDPX.la_provider_factor_precision(factor::BFLA.BFLALUFactor) =
-    BFLA.factor_precision(factor)
-SDPX.la_provider_factor_diagnostics(factor::BFLA.BFLALUFactor) =
-    BFLA.factor_diagnostics(factor)
+SDPX.la_provider_factor_matrix(handle::_FactorHandle) =
+    BFLA.factor_matrix(handle.factor)
+SDPX.la_provider_factor_precision(handle::_FactorHandle) =
+    BFLA.factor_precision(handle.factor)
+SDPX.la_provider_factor_diagnostics(handle::_FactorHandle) =
+    BFLA.factor_diagnostics(handle.factor)
+SDPX.la_provider_factor_status(handle::_FactorHandle) =
+    BFLA.factor_status(handle.factor)
+SDPX.la_provider_ldlt_inertia(handle::_FactorHandle) =
+    BFLA.factor_inertia(handle.factor)
+SDPX.la_provider_ldlt_permutation(handle::_FactorHandle) =
+    BFLA.factor_perm(handle.factor)
+SDPX.la_provider_ldlt_blocks(handle::_FactorHandle) =
+    BFLA.factor_blocks(handle.factor)
 
-function SDPX.la_provider_factor_solve!(factor::BFLA.BFLALUFactor, rhs)
-    BFLA.solve!(factor, rhs)
+function SDPX.la_provider_factor_solve!(handle::_FactorHandle, rhs)
+    # The factor storage is solver-owned and immutable until a refactor; the
+    # trusted boundary skips only that storage rescan and reuses the handle's
+    # precision-matched workspace for every repeated solve.
+    BFLA.ldiv_trusted!(
+        handle.factor,
+        rhs;
+        workspace=handle.workspace,
+        workspace_worker=1,
+    )
     return rhs
 end
 
@@ -176,33 +237,17 @@ function SDPX.la_bfla_ldlt_factor!(
     provider::_Provider,
     A::AbstractMatrix{BigFloat},
 )
-    factor = BFLA.ldlt!(provider.backend, A; check=false)
-    return BFLA.issuccess(factor) ? factor : nothing
+    workspace = _workspace_for!(provider, A)
+    factor = BFLA.ldlt!(
+        provider.backend,
+        A;
+        check=false,
+        workspace=workspace,
+        workspace_worker=1,
+    )
+    BFLA.issuccess(factor) || return nothing
+    return _FactorHandle(factor, workspace)
 end
-
-SDPX.la_factor_provider_identity(::BFLA.BFLALDLTFactor) =
-    :bigfloat_linear_algebra
-SDPX.la_provider_factor_matrix(factor::BFLA.BFLALDLTFactor) =
-    BFLA.factor_matrix(factor)
-SDPX.la_provider_factor_precision(factor::BFLA.BFLALDLTFactor) =
-    BFLA.factor_precision(factor)
-SDPX.la_provider_factor_diagnostics(factor::BFLA.BFLALDLTFactor) =
-    BFLA.factor_diagnostics(factor)
-
-function SDPX.la_provider_factor_solve!(
-    factor::BFLA.BFLALDLTFactor,
-    rhs,
-)
-    BFLA.solve!(factor, rhs)
-    return rhs
-end
-
-SDPX.la_provider_ldlt_inertia(factor::BFLA.BFLALDLTFactor) =
-    BFLA.factor_inertia(factor)
-SDPX.la_provider_ldlt_permutation(factor::BFLA.BFLALDLTFactor) =
-    BFLA.factor_perm(factor)
-SDPX.la_provider_ldlt_blocks(factor::BFLA.BFLALDLTFactor) =
-    BFLA.factor_blocks(factor)
 
 function SDPX.la_bfla_residual!(
     provider::_Provider,
@@ -257,38 +302,45 @@ function SDPX.la_bfla_higher_precision_residual!(
 end
 
 function SDPX.la_provider_refine_once!(
-    factor::BFLA.BFLACholeskyFactor,
+    handle::_FactorHandle,
     A,
     x,
     b,
     residual,
     correction,
 )
-    return BFLA.refine_once!(factor, A, x, b, residual, correction)
+    return BFLA.refine_once!(
+        handle.factor,
+        A,
+        x,
+        b,
+        residual,
+        correction;
+        workspace=handle.workspace,
+        workspace_worker=1,
+    )
 end
 
-SDPX.la_provider_factor_matrix(factor::BFLA.BFLACholeskyFactor) =
-    BFLA.factor_matrix(factor)
-SDPX.la_provider_factor_precision(factor::BFLA.BFLACholeskyFactor) =
-    BFLA.factor_precision(factor)
-SDPX.la_factor_provider_identity(::BFLA.BFLACholeskyFactor) =
-    :bigfloat_linear_algebra
-SDPX.la_provider_cholesky_rank_authoritative(
-    ::BFLA.BFLACholeskyFactor,
-) = true
+function SDPX.la_provider_refinement_correction!(
+    handle::_FactorHandle,
+    residual,
+    correction,
+)
+    return BFLA.refinement_correction!(
+        correction,
+        handle.factor,
+        residual;
+        trusted=true,
+        workspace=handle.workspace,
+        workspace_worker=1,
+    )
+end
+
 SDPX.la_equality_gram_kernel(
     ::SDPX.BFLALABackend,
     ::Type{BigFloat},
 ) = :bfla_native_syrk
 SDPX.la_backend_owns_equality_gram(::SDPX.BFLALABackend) = true
-
-function SDPX.la_provider_factor_solve!(
-    factor::BFLA.BFLACholeskyFactor,
-    rhs,
-)
-    BFLA.solve!(factor, rhs)
-    return rhs
-end
 
 function SDPX.la_bfla_chol!(
     provider::_Provider,
@@ -391,9 +443,8 @@ function SDPX.la_bfla_syrk!(
         S;
         config=provider.config,
     )
-    # The solver-facing `la_syrk!` contract still exposes a full symmetric
-    # matrix.  Keep this adapter-local until all consumers become lower-only.
-    BFLA.mirror_triangle!(S, BFLA.Lower)
+    # The solver-facing seam is lower-authoritative: BFLA writes only the
+    # requested lower triangle and upper storage remains untouched.
     return S
 end
 

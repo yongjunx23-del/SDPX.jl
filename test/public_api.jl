@@ -42,6 +42,51 @@ end
     end
 end
 
+@testset "removed shadow planner API" begin
+    removed = (
+        :AbstractCanonicalCone,
+        :AbstractCanonicalLinearCone,
+        :AbstractCanonicalLorentzCone,
+        :AbstractCanonicalPSDCone,
+        :CanonicalLinearCone,
+        :CanonicalLorentzCone,
+        :CanonicalPSDCone,
+        :CanonicalDensePanelCoefficients,
+        :CanonicalNegatedMatrixView,
+        :CanonicalScalarBlockRowsView,
+        :CanonicalNegatedScalarOffsetsView,
+        :AbstractCanonicalEqualities,
+        :CanonicalEqualities,
+        :CanonicalIdentityReconstructionMap,
+        :CanonicalReconstructionMap,
+        :CanonicalConicProblem,
+        :canonicalize,
+        :reconstruct_identity,
+        :CanonicalAffineConeFacts,
+        :CanonicalPSDConeFacts,
+        :ProblemFeatures,
+        :extract_problem_features,
+        :StructuralPlanningIntent,
+        :AutoPlannerSnapshot,
+        :planner_snapshot,
+        :unresolved_options,
+        :planner_summary,
+        :PlanningDecision,
+        :ResolvedAutoPlannerSnapshot,
+        :resolve_planner_snapshot,
+        :resolved_planner_summary,
+    )
+    # The two matrix-facts structs remain module-internal for
+    # `dense_formulation_features`; they are removed from the public surface,
+    # not from `SDPX` itself.
+    internal_only = (:CanonicalMatrixFacts, :CanonicalAffineMapFacts)
+    for name in (removed..., internal_only...)
+        name in internal_only || @test !isdefined(SDPX, name)
+        @test !isdefined(SDPX.Experimental, name)
+        @test !(name in names(SDPX))
+    end
+end
+
 @testset "Experimental LA wrapper surface" begin
     @test !isdefined(SDPX.Experimental, :la_factor!)
     @test !isdefined(SDPX.Experimental, :la_solve!)

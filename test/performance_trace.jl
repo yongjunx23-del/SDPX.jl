@@ -28,7 +28,7 @@ using Test
         @test trace isa SDPX.PerformanceTrace
         @test propertynames(trace) == (:setup, :iteration, :final, :counters)
 
-        # Terminal quality is lifted directly from the solve record.
+        # Terminal quality is projected directly from the solve record.
         @test trace.final.status === :Optimal
         @test trace.final.termination_reason isa Symbol
         @test isapprox(trace.final.primal_objective, 2 * sqrt(6); atol=1e-7)
@@ -213,8 +213,8 @@ using Test
             )
             @test trace.iteration.cone_scaling_metric_seconds >= 0.0
         else
-            # A lifted/reference SOC solve has no separately measured cone
-            # metric phase; do not relabel its block factor time.
+            # A reference/SDP-backed SOC solve has no separately measured
+            # cone metric phase; do not relabel its block factor time.
             @test !SDPX.isavailable(
                 trace.iteration.cone_scaling_metric_seconds,
             )

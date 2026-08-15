@@ -280,7 +280,7 @@ end
     end
     @test dense_complex_error isa ArgumentError
     @test occursin(
-        "real AbstractFloat",
+        "unsupported SDPX arithmetic type",
         sprint(showerror, dense_complex_error),
     )
 
@@ -297,7 +297,7 @@ end
     end
     @test dense_integer_type_error isa ArgumentError
     @test occursin(
-        "got Int",
+        "type Int",
         sprint(showerror, dense_integer_type_error),
     )
 
@@ -314,7 +314,7 @@ end
     end
     @test sparse_complex_error isa ArgumentError
     @test occursin(
-        "real AbstractFloat",
+        "unsupported SDPX arithmetic type",
         sprint(showerror, sparse_complex_error),
     )
 
@@ -332,7 +332,7 @@ end
     end
     @test sparse_integer_type_error isa ArgumentError
     @test occursin(
-        "got Int",
+        "type Int",
         sprint(showerror, sparse_integer_type_error),
     )
 
@@ -345,6 +345,16 @@ end
         verbosity=0,
     )
     @test eltype(inferred_integer) == Float64
+
+    @test_throws ArgumentError SDPX.Optimizer{Float32}()
+    @test_throws ArgumentError SDPX.ingest(
+        Float32[1],
+        [reshape(Float32[1], 1, 1, 1)],
+        [reshape(Float32[0], 1, 1)],
+        zeros(Float32, 1, 0),
+        Float32[];
+        verbosity=0,
+    )
 end
 
 @testset "zero-dimensional PSD blocks are rejected" begin

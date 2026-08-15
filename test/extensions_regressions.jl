@@ -1,4 +1,3 @@
-using DoubleFloats: Double64
 using JLD2
 using JuMP
 using LinearAlgebra
@@ -115,39 +114,5 @@ using Test
                 )
             end
         end
-    end
-
-    @testset "Double64 native and MOI solve smoke tests" begin
-        @test SDPX.dynamic_range_limited(Double64)
-        problem = SDPX.ingest(
-            Double64[1],
-            [reshape(Double64[1], 1, 1, 1)],
-            [fill(Double64(1), 1, 1)],
-            zeros(Double64, 1, 0),
-            Double64[];
-            verbosity=0,
-        )
-        result = SDPX.solve(
-            problem;
-            tolerance=Double64(1e-20),
-            verbosity=0,
-        )
-        @test result.status == SDPX.Optimal
-        @test abs(result.pObj - Double64(1)) <= Double64(1e-18)
-        @test result.p_res <= Double64(1e-18)
-        @test result.d_res <= Double64(1e-18)
-
-        model = GenericModel{Double64}(
-            () -> SDPX.Optimizer{Double64}(
-                verbosity=0,
-                tolerance=Double64(1e-20),
-            ),
-        )
-        @variable(model, z >= Double64(1))
-        @objective(model, Min, z)
-        optimize!(model)
-        @test termination_status(model) == EXT_MOI.OPTIMAL
-        @test objective_value(model) ≈ Double64(1) atol=Double64(1e-18)
-        @test value(z) ≈ Double64(1) atol=Double64(1e-18)
     end
 end

@@ -9,7 +9,7 @@ interior-point methods, automatic formulation planning, sparse and structured
 linear algebra, and independent original-coordinate result certificates.
 
 The solver follows the arithmetic of its inputs. It supports `Float64`,
-fixed-width `MultiFloats` types, `Double64`, and `BigFloat`, making it suitable
+fixed-width `MultiFloats` types, and `BigFloat`, making it suitable
 for bootstrap and other ill-conditioned conic models that need more precision
 than `Float64` provides.
 
@@ -104,7 +104,6 @@ production PSD lift. See [the SOCP guide](docs/src/socp.md).
 | --- | --- |
 | `Float64` | Well-scaled baseline problems |
 | `MultiFloats.Float64x2` / `Float64x4` | Fast fixed-width extra precision |
-| `DoubleFloats.Double64` | Alternative extended precision |
 | `BigFloat` | Arbitrary precision and difficult exponent ranges |
 
 Construct every `BigFloat` coefficient inside the intended precision scope:
@@ -124,9 +123,11 @@ boundaries. See [precision](docs/src/precision.md) and
 ## Frontends and command line
 
 `SDPX.Optimizer` is a non-incremental MathOptInterface optimizer. It supports
-JuMP affine equalities, scalar bounds, PSD triangle constraints, and
-second-order cones. Convex.jl support is available through the optional
-`SDPX.solve_convex!` extension.
+JuMP affine equalities, scalar and vector linear cones, PSD triangle
+constraints, standard second-order cones, and rotated second-order cones.
+Rotated cones use an exact sparse linear map into NativeSOC; MOI primal and
+dual getters map the result back to rotated coordinates. Convex.jl support is
+available through the optional `SDPX.solve_convex!` extension.
 
 The SDPB-style command-line frontend uses the same planning and certification
 pipeline:

@@ -209,21 +209,24 @@ function _safe_certificate(problem, result, ::Type{T}, built=nothing) where {T}
 end
 
 function _problem_facts(problem)
-    canonical = SDPX.Experimental.canonicalize(problem)
-    features = SDPX.Experimental.extract_problem_features(canonical)
-    blocks = length(features.linear_cones) + length(features.lorentz_cones) +
-             length(features.psd_cones)
-    block_sizes = vcat(
-        [cone.dimension for cone in features.linear_cones],
-        [cone.dimension for cone in features.lorentz_cones],
-        [cone.dimension for cone in features.psd_cones],
-    )
-    return (
-        variables=features.variables,
-        equalities=features.equalities.matrix.rows,
-        blocks=blocks,
-        block_sizes=Tuple(block_sizes),
-    )
+    if problem isa SDPX.SDPProblem
+        return (
+            variables=problem.dims.m,
+            equalities=problem.dims.n,
+            blocks=problem.dims.L,
+            block_sizes=Tuple(problem.dims.k),
+        )
+    elseif problem isa SDPX.ConicProblem
+        return (
+            variables=length(problem.c),
+            equalities=size(problem.Aeq, 1),
+            blocks=length(problem.cones),
+            block_sizes=Tuple(size(cone.A, 1) for cone in problem.cones),
+        )
+    end
+    throw(ArgumentError(
+        "benchmark facts require SDPProblem or ConicProblem, got $(typeof(problem))",
+    ))
 end
 
 function _problem_fingerprint(spec, built, arithmetic)
@@ -410,7 +413,14 @@ function _result_row(
     required_specialization !== nothing &&
         specialization !== required_specialization &&
         push!(failures, "specialization")
-    psd_lift_used = result isa SDPX.ConicResult ? result.lifted !== nothing : false
+    # NativeSOCDiagnostics is the positive evidence that a ConicResult came
+    # from direct Lorentz execution. Test/reference PSD helpers deliberately
+    # retain SDP diagnostics, so the benchmark gate remains able to detect a
+    # reference lift without restoring the removed compatibility payload.
+    psd_lift_used =
+        result isa SDPX.ConicResult &&
+        result.diagnostics !== nothing &&
+        !(result.diagnostics isa SDPX.NativeSOCDiagnostics)
     _built_value(built, :forbid_psd_lift, false) && psd_lift_used &&
         push!(failures, "psd_lift")
     interval_pass === false && push!(failures, "objective_interval")

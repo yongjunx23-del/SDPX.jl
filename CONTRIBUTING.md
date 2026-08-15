@@ -43,7 +43,7 @@ genuine contribution — it stops the next person repeating it.
   / `zero_distinct!`. This caused a long-standing "MPFR is not thread-safe" bug
   that was not, in fact, about MPFR.
 - **Generic element types.** Kernels must work for `Float64`, `BigFloat`,
-  `MultiFloats.Float64xN`, and `DoubleFloats.Double64`. Avoid assuming BLAS is
+  `MultiFloats.Float64xN`. Avoid assuming BLAS is
   available for the element type.
 - **Docstring placement.** Julia rejects a docstring placed immediately after
   another docstring; put each on its own function.

@@ -1,12 +1,9 @@
 #=====================================================================
-    Legacy API (§1.1, §5.4): `sdp`, `findFeasible`, and the old global
-    setters, preserved so existing callers are unaffected. The
-    globals become thin shims over per-call state — `setArithmeticType`
+    Legacy API (§1.1, §5.4): `sdp`, `findFeasible`, and the arithmetic
+    setter. The global is a thin shim over per-call state: `setArithmeticType`
     only influences legacy calls whose input arrays don't already pin
-    a concrete type (all-Int/Rational literals), and `setMode`/`mode`
-    no longer exist as shared mutable state at all (P8's state-leak:
-    the original `findFeasible` restored the global in a non-`finally`
-    way, so a throw left it stuck on `"feas"` for every later solve).
+    a concrete type (all-Int/Rational literals). Mode and sparse selection are
+    local solve options; their obsolete process-global setters were removed.
 =====================================================================#
 
 const _LEGACY_T = Ref{Type}(BigFloat)
@@ -17,21 +14,6 @@ function setArithmeticType(type)
                  "Int/Rational (nothing else to infer from) — for new code, prefer building A/C/B/b/c " *
                  "at the type you want, or pass T=... to `ingest`.", :setArithmeticType)
     _LEGACY_T[] = type
-    return nothing
-end
-
-function setSparseMode(arg::Bool)
-    Base.depwarn("setSparseMode is deprecated; pass sparse=true to sdp()/findFeasible() instead.", :setSparseMode)
-    println(arg ? "Sparse mode ON" : "Sparse mode OFF")
-    return nothing
-end
-setSparseMode(arg) = (println("sparseMode should be true or false!"); nothing)
-
-function setMode(str::AbstractString)
-    Base.depwarn("setMode is deprecated and has no effect; `mode` is now local to each solve, passed as " *
-                 "an option, so it can never leak between concurrent or sequential solves the way the " *
-                 "global did.", :setMode)
-    str ∈ ("opt", "feas") || @error "Mode should be either \"opt\" or \"feas\"!"
     return nothing
 end
 
@@ -114,8 +96,8 @@ function sdp(c, A, C, B, b;
             min_step=T(minStep), max_omega=max_omega_t,
             omega_step=omega_step_t, max_restarts=legacy_max_restarts,
             mode=OPTIMIZE, verbosity=verbosity, termination=termination,
-            equilibrate=equilibrate, refine_steps=refine_steps,
-            predictor=predictor, max_time=Float64(max_time),
+            refine_steps=refine_steps, predictor=predictor,
+            max_time=Float64(max_time),
             callback=callback, parameter_policy=:fixed,
             parameter_strategy=:fixed,
             working_precision_policy=:fixed,

@@ -447,7 +447,20 @@ function _equality_factor_diagnostics(
                 regularization=augmented.regularization,
             )
         end
-        inertia = la_ldlt_inertia(factor)
+        inertia = augmented.inertia
+        inertia === nothing && return (
+            available=false,
+            factor_available=true,
+            method=:augmented_ldlt,
+            rank=0,
+            dimension=equality_count,
+            rank_deficient=true,
+            quality=zero(T),
+            gram_kernel=:not_formed_augmented,
+            inertia=nothing,
+            factor_diagnostics=augmented.factor_diagnostics,
+            regularization=augmented.regularization,
+        )
         numerical_rank = max(equality_count - Int(inertia[3]), 0)
         return (
             available=true,
@@ -458,8 +471,8 @@ function _equality_factor_diagnostics(
             quality=one(T),
             gram_kernel=:not_formed_augmented,
             inertia,
-            pivot_blocks=la_ldlt_blocks(factor),
-            permutation=la_ldlt_permutation(factor),
+            pivot_blocks=augmented.pivot_blocks,
+            permutation=augmented.permutation,
             factor_diagnostics=augmented.factor_diagnostics,
             regularization=augmented.regularization,
         )
@@ -852,6 +865,7 @@ wraps this.
 function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
     x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
     resume::AbstractString="", deadline::Float64=Inf,
+    apply_equilibration::Bool=false,
     execution_plan::Union{Nothing,ExecutionPlan}=nothing) where {T}
 
     core_started = time()
@@ -899,7 +913,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
 
     eq = nothing
     solve_prob = prob
-    if opts.equilibrate
+    if apply_equilibration
         solve_prob, eq = equilibrate(prob)
     end
     equilibration_finished_ns = time_ns()
@@ -1617,7 +1631,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             status, message = NumericalBreakdown,
             "non-finite primal or dual iterate detected" *
             (dynamic_range_limited(T) ? " ($T's dynamic range exceeded)" : "") *
-            " — rescale (equilibrate=true), loosen Ωp/Ωd/omega_step, or use a wider-range T"
+            " — rescale (scaling=:equilibrate), loosen Ωp/Ωd/omega_step, or use a wider-range T"
             break
         end
 
@@ -1913,10 +1927,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                         factor_provider=la_factor_provider_identity(
                             la_factor_provider(factor),
                         ),
-                        factor_precision=la_factor_precision(factor),
-                        inertia=la_ldlt_inertia(factor),
-                        pivot_blocks=la_ldlt_blocks(factor),
-                        permutation=la_ldlt_permutation(factor),
+                        factor_precision=augmented.factor_precision,
+                        inertia=augmented.inertia,
+                        pivot_blocks=augmented.pivot_blocks,
+                        permutation=augmented.permutation,
                         factor_diagnostics=augmented.factor_diagnostics,
                         regularization=augmented.regularization,
                     )
@@ -2382,23 +2396,34 @@ function _solve_pipeline!(
     # In particular, equality presolve can change the selected parameter profile
     # and the diagnostic equality count.
     planning_problem = report.inconsistent ? prob : reduced
-    structural_analysis_started = time_ns()
-    execution_route = resolve_execution_route(
-        AutoPlanner(),
-        planning_problem,
-        opts,
-        equality_evidence=equality_map.planning_evidence,
-    )
-    pipeline_structural_analysis_seconds +=
-        (time_ns() - structural_analysis_started) / 1.0e9
-    execution_planning_started = time_ns()
-    plan = build_execution_plan(
-        AutoPlanner(),
-        planning_problem,
-        execution_route,
-    )
-    pipeline_execution_planning_seconds +=
-        (time_ns() - execution_planning_started) / 1.0e9
+    prepared_plan = _prepared_data === nothing ? nothing :
+                    get(_prepared_data, :execution_plan, nothing)
+    reuse_prepared_plan = !report.inconsistent &&
+                          prepared_plan !== nothing &&
+                          get(_prepared_data, :precision_bits, 0) ==
+                              _preprocess_precision_bits(T)
+    plan::ExecutionPlan = if reuse_prepared_plan
+        prepared_plan::ExecutionPlan
+    else
+        structural_analysis_started = time_ns()
+        execution_route = resolve_execution_route(
+            AutoPlanner(),
+            planning_problem,
+            opts,
+            equality_evidence=equality_map.planning_evidence,
+        )
+        pipeline_structural_analysis_seconds +=
+            (time_ns() - structural_analysis_started) / 1.0e9
+        execution_planning_started = time_ns()
+        built = build_execution_plan(
+            AutoPlanner(),
+            planning_problem,
+            execution_route,
+        )
+        pipeline_execution_planning_seconds +=
+            (time_ns() - execution_planning_started) / 1.0e9
+        built
+    end
     pipeline_timings = () -> opts.timing ? (
         preprocess=pipeline_preprocess_seconds,
         equality_presolve=pipeline_equality_presolve_seconds,
@@ -2667,7 +2692,6 @@ function _solve_pipeline!(
             algorithm=:sdp,
             presolve=false,
             scaling=:none,
-            equilibrate=plan.scaling === :sdp_ruiz,
             threads=plan.threads,
         )
         result = _solve_sdp_core!(
@@ -2679,6 +2703,7 @@ function _solve_pipeline!(
             Y0=preprocessed_warm_start.Y0,
             resume=resume,
             deadline=deadline,
+            apply_equilibration=plan.scaling === :sdp_ruiz,
             execution_plan=plan,
         )
         # Keep diagnostics out of the hot path: recursively traversing every
@@ -2838,7 +2863,6 @@ function solve(
     presolve_dependent_equalities::Bool=true,
     scaling::Symbol=:auto,
     formulation::Symbol=:auto,
-    chordal_decomposition::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:adaptive,
     working_precision_policy::Symbol=:auto,
@@ -2872,7 +2896,6 @@ function solve(
                     presolve_dependent_equalities,
                 scaling=scaling,
                 formulation=formulation,
-                chordal_decomposition=chordal_decomposition,
                 algorithm=algorithm,
                 parameter_strategy=parameter_strategy,
                 working_precision_policy=working_precision_policy,
@@ -2905,7 +2928,6 @@ function solve(
         presolve_dependent_equalities=presolve_dependent_equalities,
         scaling=scaling,
         formulation=formulation,
-        chordal_decomposition=chordal_decomposition,
         algorithm=algorithm,
         parameter_strategy=parameter_strategy,
         working_precision_policy=working_precision_policy,
@@ -2927,9 +2949,9 @@ function _resolve_precision_type(precision, c, A, C, B, b)
     precision === nothing && return infer_eltype(c, A, C, B, b)
     precision === :float64 && return Float64
     precision === :bigfloat && return BigFloat
-    precision isa Type && precision <: AbstractFloat && return precision
+    precision isa Type && return _require_supported_arithmetic_type(precision)
     throw(ArgumentError(
-        "precision must be nothing, :float64, :bigfloat, or an AbstractFloat type",
+        "precision must be nothing, :float64, :bigfloat, or a supported MultiFloats type",
     ))
 end
 
@@ -2964,7 +2986,6 @@ function solve(
     presolve_dependent_equalities::Bool=true,
     scaling::Symbol=:auto,
     formulation::Symbol=:auto,
-    chordal_decomposition::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:adaptive,
     working_precision_policy::Symbol=:auto,
@@ -3012,7 +3033,6 @@ function solve(
                 presolve_dependent_equalities,
             scaling=scaling,
             formulation=formulation,
-            chordal_decomposition=chordal_decomposition,
             algorithm=algorithm,
             parameter_strategy=parameter_strategy,
             working_precision_policy=working_precision_policy,

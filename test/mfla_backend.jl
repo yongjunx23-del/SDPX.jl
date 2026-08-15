@@ -468,6 +468,21 @@ if _MFLA_LOADED
             @test SDPX.la_ldlt_blocks(factor) == [2]
             permutation = SDPX.la_ldlt_permutation(factor)
             @test sort(permutation) == [1, 2]
+            payload = factor.provider
+            @test SDPX.la_provider_factor_status(payload) ==
+                  MultiFloatLinearAlgebra.factor_status(payload.factor)
+            @test SDPX.la_provider_ldlt_inertia(payload) ==
+                  MultiFloatLinearAlgebra.factor_inertia(payload.factor)
+            @test SDPX.la_provider_ldlt_blocks(payload) == [2]
+            @test SDPX.la_provider_ldlt_permutation(payload) ==
+                  MultiFloatLinearAlgebra.factor_permutation(payload.factor)
+            # Full diagnostics remains available as one explicit observation;
+            # classification and metadata use the lightweight accessors above.
+            diagnostics = SDPX.la_factor_diagnostics(factor)
+            @test diagnostics.kind === :ldlt
+            @test diagnostics.success
+            @test diagnostics.status == 0
+            @test diagnostics.inertia == (positive=1, negative=1, zero=0)
 
             rhs_vector = T[1, 2]
             solution = copy(rhs_vector)
@@ -616,7 +631,10 @@ if _MFLA_LOADED
             )
         end
 
-        function _assert_multifloat_execution(selected)
+        function _assert_multifloat_execution(
+            selected;
+            backend_resolution::Symbol=:planned,
+        )
             @test selected.planned_la_backend === :multifloat
             @test selected.la_backend === :multifloat
             @test selected.planned_la_provider ===
@@ -625,7 +643,7 @@ if _MFLA_LOADED
                   :multifloat_linear_algebra
             @test selected.planned_la_fallback_reason === :none
             @test selected.la_fallback_reason === :none
-            @test selected.backend_resolution === :planned
+            @test selected.backend_resolution === backend_resolution
             @test selected.certificate.valid
         end
 
@@ -812,6 +830,7 @@ if _MFLA_LOADED
             @test result.d_res <= T(1e-6)
             _assert_multifloat_execution(
                 result.diagnostics.selected_algorithms,
+                backend_resolution=:native_soc_plan,
             )
 
             augmented_options = SDPX.SolveOptions(

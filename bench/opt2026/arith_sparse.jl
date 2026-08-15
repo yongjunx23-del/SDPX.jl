@@ -51,7 +51,7 @@ function run_case(::Type{T}, data, tol, reps, iter_max, output, label) where {T}
     options(n) = SDPX.SolverOptions{T}(
         ϵ_gap=T(tol), ϵ_primal=T(tol), ϵ_dual=T(tol),
         iter_max=n, verbosity=0, max_time=7200.0,
-        equilibrate=false, refine_steps=1, parameter_policy=:auto,
+        scaling=:none, refine_steps=1, parameter_policy=:auto,
     )
 
     SDPX.solve!(problem, options(2))          # warmup / JIT

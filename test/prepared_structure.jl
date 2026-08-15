@@ -74,6 +74,77 @@ end
         @test !(:workspace in fieldnames(typeof(prepared.state)))
     end
 
+    @testset "cached execution plan reuse matches cold planning" begin
+        reuse_options = SolverOptions{Float64}(
+            scaling=:none,
+            presolve=true,
+            parameter_policy=:fixed,
+            timing=true,
+            verbosity=0,
+        )
+        problem = _prepared_lp([1.0, 2.0])
+        prepared = prepare(problem, reuse_options)
+        @test prepared.structure.execution_plan isa SDPX.ExecutionPlan
+
+        result = solve!(
+            prepared;
+            objective=[2.0, 1.0],
+            rhs=[2.0],
+            warm_start=nothing,
+        )
+        cold_problem = _prepared_lp([2.0, 1.0]; rhs=[2.0])
+        cold = solve!(cold_problem, reuse_options)
+
+        @test result.status == cold.status == SDPX.Optimal
+        @test result.pObj ≈ cold.pObj atol=1e-8
+        @test result.dObj ≈ cold.dObj atol=1e-8
+        @test result.x ≈ cold.x atol=1e-8
+        @test SDPX.result_certificate(cold_problem, result, reuse_options).valid
+        @test SDPX.result_certificate(cold_problem, cold, reuse_options).valid
+
+        prepared_plan = result.diagnostics.plan
+        cold_plan = cold.diagnostics.plan
+        @test prepared_plan === prepared.structure.execution_plan
+        @test prepared_plan.algorithm == cold_plan.algorithm
+        @test prepared_plan.scaling == cold_plan.scaling
+        @test prepared_plan.kkt_backend == cold_plan.kkt_backend
+        @test prepared_plan.formulation_plan == cold_plan.formulation_plan
+        @test prepared_plan.la_config == cold_plan.la_config
+        @test prepared_plan.gram_kernel == cold_plan.gram_kernel
+        @test prepared_plan.schedule == cold_plan.schedule
+        @test prepared_plan.threads == cold_plan.threads
+        @test prepared_plan.parameter_profile == cold_plan.parameter_profile
+        @test prepared_plan.parameters == cold_plan.parameters
+
+        @test result.diagnostics.timings.presolve == 0.0
+        @test result.diagnostics.timings.structural_analysis == 0.0
+        @test result.diagnostics.timings.execution_planning == 0.0
+        @test cold.diagnostics.timings.structural_analysis >= 0.0
+        @test cold.diagnostics.timings.execution_planning >= 0.0
+    end
+
+    @testset "RHS-sensitive LP planning is not cached" begin
+        auto_options = SolverOptions{Float64}(
+            scaling=:none,
+            presolve=true,
+            timing=true,
+            verbosity=0,
+        )
+        prepared = prepare(_prepared_lp([1.0, 2.0]), auto_options)
+        @test prepared.structure.execution_plan === nothing
+
+        result = solve!(
+            prepared;
+            objective=[2.0, 1.0],
+            rhs=[2.0],
+            warm_start=nothing,
+        )
+        @test result.status == SDPX.Optimal
+        @test result.diagnostics.plan isa SDPX.ExecutionPlan
+        @test result.diagnostics.timings.structural_analysis >= 0.0
+        @test result.diagnostics.timings.execution_planning >= 0.0
+    end
+
     @testset "fixed-variable objective transform refreshes offset" begin
         G = [1.0 0.0; -1.0 0.0; 0.0 1.0]
         h = [2.0, -2.0, 1.0]

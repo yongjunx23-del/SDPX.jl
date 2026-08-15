@@ -196,7 +196,6 @@ export SDPX_RELEASE_SOURCE="$SOURCE"
         PackageSpec(name="Aqua", version="0.8"),
         PackageSpec(name="Convex", version="0.16"),
         PackageSpec(name="MultiFloats", version="3"),
-        PackageSpec(name="DoubleFloats", version="1"),
         PackageSpec(name="JLD2"),
         PackageSpec(name="JSON"),
         PackageSpec(name="JuMP", version="1"),
@@ -260,8 +259,8 @@ Set `TASK_LOW08_INPUT` to that verified path before submitting validation.
 
 ## Preprocessing and model classification
 
-Leave `presolve=:auto`, `scaling=:auto`, `formulation=:auto`, and
-`chordal_decomposition=:auto` for ordinary cluster runs. The typed
+Leave `presolve=:auto`, `scaling=:auto`, and `formulation=:auto` for ordinary
+cluster runs. The typed
 preprocessing report is available at:
 
 ```julia

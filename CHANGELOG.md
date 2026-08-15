@@ -14,6 +14,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remain visible in result provenance.
 - Native Lorentz SOCP through `solve_socp`/`second_order_program`, including
   the `fixed_trace_q3` specialization, with original-coordinate certification.
+- JuMP/MOI vector linear cones and rotated second-order cones, lowered through
+  batched sparse rows and the exact rotated-to-Lorentz primal/dual map.
 - End-to-end sparse LP execution and frozen-CSC sparse SDP Schur execution.
 - Certificates, executed diagnostics, and the canonical public LP/SOCP/SDP
   benchmark registry under `benchmark/`.
@@ -28,8 +30,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   The bundled legacy provider (`src/la_backends/legacy.jl`) is included
   statically, and every `LegacyLABackend` `la_*` dispatch routes through
   `_sdpx_legacy_la_call` instead of calling historical `k*` kernels directly.
+- Lower-authoritative equality Grams, lightweight MFLA LDLT metadata, and a
+  reusable BFLA workspace/trusted repeated-solve seam remove redundant
+  symmetric mirroring, diagnostics scans, and solve scratch allocation while
+  leaving equality-rank thresholds, structured refinement, and fallback
+  authorization in SDPX.
 - Benchmark registry and scoreboard contracts are covered by the ordinary test
   suite; public benchmark files are never downloaded.
+- `PreparedSolver` reuses an immutable post-presolve `ExecutionPlan` only when
+  planning is invariant to objective/RHS updates; numeric workspaces and
+  factors remain solve-local.
+- Removed the unused canonical snapshot/feature planner so production has one
+  authoritative `ResolvedExecutionRoute -> ExecutionPlan` decision path.
 
 ### Removed
 
@@ -37,6 +49,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   its `CertifiedObjective`, `ReducedDualReconstructionToken`, `solve_value`,
   and `reconstruct_fixed_trace_solution` API. NativeSOC primal-dual IPM is the
   sole production SOCP solver.
+- Removed the DoubleFloats extension and all nonhistorical Double64 support;
+  unsupported arithmetic now fails before planning instead of entering a
+  generic `AbstractFloat` route.
 
 ## [0.4.0] — 2026-08-09
 

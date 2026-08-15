@@ -63,12 +63,14 @@ arrow measurements are tracked in:
 
 ## Test suite
 
-The final local release-candidate matrix passed 1,272/1,272 assertions with
-four Julia threads. The one-thread run passed 1,263 assertions with one
-expected broken multithread-only assertion and no failures. Coverage includes
-correctness, Float64x4, BigFloat ownership, sparse/dense dispatch, LP/SDP
-pipelines, presolve, MathOptInterface, JLD2 and Double64 extensions,
-checkpoints, certificates, spectrum export, and threaded scheduling.
+The 2026-08-15 local release-candidate full profile passed 9,278 assertions
+with four Julia threads, one explicitly expected `Broken`, and no failures or
+errors. The installed-provider smoke against MFLA `2b93685` and BFLA `b2aed39`
+passed 182/182 assertions, and the canonical single-thread micro suite solved
+8/8 cases with no semantic errors. Coverage includes correctness, fixed-width
+MultiFloat arithmetic, BigFloat ownership, sparse/dense dispatch, LP/SOCP/SDP
+pipelines, presolve, MathOptInterface and JLD2 extensions, checkpoints,
+certificates, spectrum export, provider factor reuse, and threaded scheduling.
 
 ## Adaptive lattice-bootstrap path
 

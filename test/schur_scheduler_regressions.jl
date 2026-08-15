@@ -379,4 +379,183 @@ using Test
             8,
         ) == 1
     end
+
+    @testset "dense column-owner Schur mode" begin
+        @test SDPX._dense_lower_owner_boundaries(2, 2) == [1, 2, 3]
+        @test SDPX._dense_lower_owner_boundaries(8, 8) == collect(1:9)
+        @test all(diff(SDPX._dense_lower_owner_boundaries(17, 6)) .> 0)
+
+        function dense_owner_problem(::Type{T}, m, blocks, side) where {T}
+            coefficients = [zeros(T, m, side, side) for _ in 1:blocks]
+            for l in 1:blocks, i in 1:m
+                coefficients[l][i, 1, 1] = T(i + l) / T(17)
+                coefficients[l][i, side, side] = T(i * l) / T(23)
+            end
+            constants = [
+                Matrix{T}(one(T) * I, side, side)
+                for _ in 1:blocks
+            ]
+            return SDPX.ingest(
+                ones(T, m),
+                coefficients,
+                constants,
+                zeros(T, m, 0),
+                T[];
+                sparse=false,
+                verbosity=0,
+            )
+        end
+
+        threads = min(4, Threads.nthreads())
+        if threads > 1
+            for T in (Float64,)
+                problem = dense_owner_problem(T, 300, 8, 6)
+                identity_blocks = [
+                    Matrix{T}(one(T) * I, 6, 6)
+                    for _ in 1:problem.dims.L
+                ]
+                owner = SDPX.Workspace(problem; thread_count=threads)
+
+                # Eligible mode: no per-bin m×m partials, but more than one
+                # deterministic owner range.
+                @test owner.dense_schur_owner
+                @test isempty(owner.Spartial)
+                @test length(owner.schur_bins) > 1
+                @test length(owner.schur_column_boundaries) == threads + 1
+                @test owner.schur_column_boundaries[1] == 1
+                @test owner.schur_column_boundaries[end] == problem.dims.m + 1
+                @test all(diff(owner.schur_column_boundaries) .> 0)
+                @test SDPX.schur_threading_engaged(owner, problem, problem.cons)
+
+                serial = SDPX.Workspace(problem; thread_count=1)
+                @test !serial.dense_schur_owner
+                @test SDPX.factor_blocks!(serial, identity_blocks, identity_blocks)
+                @test SDPX.factor_blocks!(owner, identity_blocks, identity_blocks)
+                SDPX.schur_build!(
+                    serial,
+                    problem,
+                    problem.cons,
+                    identity_blocks,
+                    identity_blocks,
+                )
+                SDPX.threaded_schur_build!(
+                    owner,
+                    problem,
+                    problem.cons,
+                    identity_blocks,
+                    identity_blocks,
+                )
+                reference = similar(serial.S)
+                SDPX.materialize_schur!(reference, serial)
+                materialized = similar(owner.S)
+                SDPX.materialize_schur!(materialized, owner)
+                tolerance = T(1e-12)
+                @test maximum(abs, materialized - reference) /
+                      max(maximum(abs, reference), one(T)) < tolerance
+
+                # Fixed thread count is deterministic: a second build on the
+                # same workspace reproduces the lower triangle bit-for-bit.
+                first = copy(owner.S)
+                SDPX.threaded_schur_build!(
+                    owner,
+                    problem,
+                    problem.cons,
+                    identity_blocks,
+                    identity_blocks,
+                )
+                @test owner.S == first
+
+                # Upper triangle stays untouched until materialization.
+                sentinel = T(-17)
+                fill!(owner.S, sentinel)
+                SDPX.threaded_schur_build!(
+                    owner,
+                    problem,
+                    problem.cons,
+                    identity_blocks,
+                    identity_blocks,
+                )
+                @test all(
+                    owner.S[row, column] == sentinel
+                    for column in 1:problem.dims.m
+                    for row in 1:(column - 1)
+                )
+
+                # The accumulator memory cap no longer collapses this mode:
+                # with an absurdly small budget the generic cap returns one
+                # bin, while the workspace still owns every worker a range.
+                @test SDPX._schur_parallel_bins(
+                    T,
+                    problem.dims.m,
+                    problem.dims.L,
+                    threads;
+                    free_memory_bytes=1,
+                ) == 1
+                @test length(owner.schur_bins) ==
+                      min(threads, problem.dims.L)
+            end
+        end
+
+        # Small/unprofitable dense problems stay serial, but must not allocate
+        # useless eligible partials.
+        if threads > 1
+            small = dense_owner_problem(Float64, 24, 4, 4)
+            small_ws = SDPX.Workspace(small; thread_count=threads)
+            @test small_ws.dense_schur_owner
+            @test isempty(small_ws.Spartial)
+            @test !SDPX.schur_threading_engaged(small_ws, small, small.cons)
+            @test SDPX._dense_schur_threading_profitable(
+                Float64,
+                small.dims.m,
+                small.dims.k,
+            ) == false
+
+            # Existing fixed-extended partial path is unchanged.
+            wide = dense_owner_problem(Float64x4, 60, 8, 4)
+            wide_ws = SDPX.Workspace(wide; thread_count=threads)
+            @test !wide_ws.dense_schur_owner
+            @test !isempty(wide_ws.Spartial)
+            @test length(wide_ws.schur_column_boundaries) == 0
+
+            # Estimates reflect the removed per-bin m² partials: Dense
+            # Float64 stores no partial at any thread count, so the
+            # multi-thread partial term equals the single-thread one.
+            eligible = dense_owner_problem(Float64, 120, 8, 5)
+            @test SDPX.estimate_dense_workspace_bytes(eligible, threads) ==
+                  SDPX.estimate_dense_workspace_bytes(eligible, 1)
+            @test SDPX.dense_workspace_floor_bytes(
+                Float64,
+                eligible.dims.m,
+                eligible.dims.n,
+                eligible.dims.L,
+                threads,
+            ) == SDPX.dense_workspace_floor_bytes(
+                Float64,
+                eligible.dims.m,
+                eligible.dims.n,
+                eligible.dims.L,
+                1,
+            )
+            report = SDPX.schur_bin_report(
+                Float64,
+                eligible.dims.m,
+                eligible.dims.L,
+                threads,
+                dense_owner=true,
+            )
+            @test report.assembly_mode === :column_owned
+            @test report.owner_tasks == min(threads, eligible.dims.m)
+            @test report.selected_bins == report.requested_bins
+            @test !report.capped
+            @test report.total_bytes == 0
+            @test report.would_have_been_bytes > 0
+        end
+        @test SDPX.dense_workspace_floor_bytes(
+            Float64,
+            4_000_000_000,
+            0,
+            32,
+            max(threads, 1),
+        ) == typemax(Int)
+    end
 end

@@ -40,7 +40,7 @@ function make_options(::Type{T}, problem, tol; iter_max=1000, policy=:auto) wher
     return SDPX.SolverOptions{T}(
         ϵ_gap=T(tol), ϵ_primal=T(tol), ϵ_dual=T(tol),
         iter_max=iter_max, verbosity=0, max_time=3600.0,
-        equilibrate=false, refine_steps=1,
+        scaling=:none, refine_steps=1,
         parameter_policy=policy, timing=true,
     )
 end

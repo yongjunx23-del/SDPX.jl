@@ -86,6 +86,7 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         @test plan.capability_model.pivoted_symmetric_ldlt
         @test plan.capability_model.ldlt_inertia
         @test !plan.capability_model.iterative_refinement
+        @test plan.capability_model.refinement_correction
         @test plan.capability_model.higher_precision_residual
         upstream = bfla_extension.BFLA.capabilities(
             bfla_extension.BFLA.NativeBackend(),
@@ -189,7 +190,7 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
             @test sort(SDPX.la_factor_permutation(near)) == [1, 2]
 
             # Scalar defaults must follow operand precision, not the ambient
-            # MPFR context. Both the 3-argument mul and triangular solve are
+            # MPFR context. The 3-argument mul, triangular solve, and SYRK are
             # provider operations and may not silently switch implementations.
             setprecision(BigFloat, 64) do
                 precision_matrix = bfla_extension.BFLA.owned_zeros(
@@ -219,6 +220,53 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
                 )
                 SDPX.la_trsm!(backend, triangular, rhs_precision)
                 @test triangular * rhs_precision ≈ expected_rhs
+
+                # SYRK is lower-authoritative: BFLA writes only the lower
+                # triangle, so poisoned upper storage must survive untouched.
+                syrk_target = bfla_extension.BFLA.owned_zeros(
+                    BigFloat, 2, 2; precision_bits=256,
+                )
+                syrk_target[1, 1] = BigFloat(1; precision=256)
+                syrk_target[2, 1] = BigFloat(0; precision=256)
+                syrk_target[2, 2] = BigFloat(1; precision=256)
+                upper_poison = BigFloat(NaN; precision=256)
+                syrk_target[1, 2] = upper_poison
+                syrk_reference = bfla_extension.BFLA.owned_zeros(
+                    BigFloat, 2, 2; precision_bits=256,
+                )
+                syrk_reference[1, 1] = BigFloat(1; precision=256)
+                syrk_reference[2, 1] = BigFloat(0; precision=256)
+                syrk_reference[2, 2] = BigFloat(1; precision=256)
+                syrk_reference[1, 2] = BigFloat(7; precision=256)
+                bfla_extension.BFLA.syrk!(
+                    bfla_extension.BFLA.NativeBackend(),
+                    bfla_extension.BFLA.Lower,
+                    bfla_extension.BFLA.Trans,
+                    BigFloat(1; precision=256),
+                    precision_matrix,
+                    BigFloat(0; precision=256),
+                    syrk_reference,
+                )
+                # The adapter is the lower-authoritative boundary. BFLA's raw
+                # kernel may still overwrite inactive upper storage, so the
+                # adapter path must preserve it while matching the lower
+                # triangle of the direct primitive.
+                SDPX.la_syrk!(
+                    backend,
+                    syrk_target,
+                    precision_matrix,
+                    BigFloat(1; precision=256),
+                    BigFloat(0; precision=256),
+                )
+                @test syrk_target[1, 2] === upper_poison
+                @test all(
+                    isequal(
+                        syrk_target[row, column],
+                        syrk_reference[row, column],
+                    )
+                    for column in 1:2
+                    for row in column:2
+                )
             end
 
             # Fail closed rather than inventing an unpivoted or untoleranced
@@ -359,7 +407,7 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
                     SDPX._owned_array_copy(BigFloat, spd),
                 )
                 @test cholesky_handle isa SDPX.ProviderLACholeskyFactor{BigFloat}
-                @test SDPX.la_cholesky_rank_authoritative(
+                @test !SDPX.la_cholesky_rank_authoritative(
                     cholesky_handle,
                 )
 
@@ -488,10 +536,163 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
                 backend.provider,
                 mixed_ldlt,
             )
-            @test_throws ArgumentError SDPX.la_ldlt_factor!(
-                backend,
-                mixed_ldlt,
+                @test_throws BFLA.PrecisionMismatch SDPX.la_ldlt_factor!(
+                    backend,
+                    mixed_ldlt,
+                )
+
+            # SDPX owns the equality Cholesky rank policy. A successful
+            # 256-bit BFLA factor is accepted/rejected by the SDPX tau
+            # relative to Btil, never by BFLA's success status, and never by
+            # the ambient MPFR context.
+            setprecision(BigFloat, 64) do
+                for delta_text in ("1e-42", "1e-20")
+                    delta = BigFloat(delta_text; precision=256)
+                    delta_squared = setprecision(BigFloat, 256) do
+                        delta * delta
+                    end
+                    q = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits=256)
+                    q[1, 1] = BigFloat(1; precision=256)
+                    q[2, 2] = delta_squared
+                    q[1, 2] = q[2, 1] = BigFloat(0; precision=256)
+                    btil = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits=256)
+                    btil[1, 1] = BigFloat(1; precision=256)
+                    btil[2, 2] = BigFloat(delta; precision=256)
+                    btil[1, 2] = btil[2, 1] = BigFloat(0; precision=256)
+                    factor = SDPX.la_cholesky_factor!(
+                        backend,
+                        BFLA.owned_copy(q; precision_bits=256),
+                    )
+                    @test factor !== nothing
+                    options = SDPX.SolverOptions{BigFloat}(
+                        ϵ_gap=BigFloat("1e-30"; precision=256),
+                        ϵ_primal=BigFloat("1e-30"; precision=256),
+                        ϵ_dual=BigFloat("1e-30"; precision=256),
+                    )
+                    tau = SDPX._equality_cholesky_rank_tau(
+                        btil,
+                        SDPX.la_factor_handle_matrix(factor),
+                        options,
+                    )
+                    accepted = SDPX._la_factor_has_numerical_rank(
+                        factor,
+                        btil,
+                        options,
+                    )
+                    @test accepted == (delta > tau)
+                    @test all(precision(value) == 256 for value in btil)
+                    @test all(precision(value) == 256 for value in q)
+                end
+            end
+        end
+    end
+end
+
+@testset "BFLA workspace-backed repeated solves and correction" begin
+    if bfla_extension === nothing
+        @test true
+    else
+        setprecision(BigFloat, 256) do
+            LA = SDPX.Experimental
+            BFLA = bfla_extension.BFLA
+            backend = LA.instantiate_la_backend(
+                LA.plan_la_backend(BigFloat; requested=:bfla),
+                BigFloat,
             )
+            spd = BigFloat[4 1 0; 1 3 1; 0 1 2]
+            square = BigFloat[4 1 2; 1 3 1; 0 1 2]
+            indefinite = BigFloat[0 1 0; 1 0 0; 0 0 2]
+            rhs = BigFloat[1, 2, 3]
+
+            factors = (
+                SDPX.la_cholesky_factor!(
+                    backend,
+                    SDPX._owned_array_copy(BigFloat, spd),
+                ),
+                SDPX.la_lu_factor!(
+                    backend,
+                    SDPX._owned_array_copy(BigFloat, square),
+                ),
+                SDPX.la_ldlt_factor!(
+                    backend,
+                    SDPX._owned_array_copy(BigFloat, indefinite),
+                ),
+            )
+            matrices = (spd, square, indefinite)
+            for (factor, matrix) in zip(factors, matrices)
+                @test factor !== nothing
+                handle = SDPX.la_factor_provider(factor)
+                @test SDPX.la_factor_provider_identity(handle) ===
+                      :bigfloat_linear_algebra
+                # One lazy provider workspace slot is reused across all
+                # factors and solves at the same precision.
+                @test handle.workspace === backend.provider.workspace
+                @test SDPX.la_backend_capabilities(backend).refinement_correction
+                @test !SDPX.la_backend_capabilities(backend).iterative_refinement
+                @test BFLA.workspace_precision(handle.workspace) == 256
+                @test BFLA.workspace_workers(handle.workspace) == 1
+                @test SDPX.la_provider_factor_status(handle) ===
+                      BFLA.factor_status(handle.factor)
+                @test SDPX.la_provider_factor_diagnostics(handle) ==
+                      BFLA.factor_diagnostics(handle.factor)
+                scratch = BFLA.workspace_scratch!(handle.workspace, 1, 1)
+
+                first = SDPX._owned_array_copy(BigFloat, rhs)
+                second = SDPX._owned_array_copy(BigFloat, rhs)
+                SDPX.la_provider_factor_solve!(handle, first)
+                SDPX.la_provider_factor_solve!(handle, second)
+                @test matrix * first ≈ rhs rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
+                @test first ≈ second rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
+                @test BFLA.workspace_scratch!(handle.workspace, 1, 1) === scratch
+
+                # The trusted solve reuses the same precision-matched
+                # workspace object across repeated calls. A warmed solve
+                # performs no per-solve workspace allocation; count evidence
+                # stays at the workspace/worker-object scale rather than
+                # allocating new solve buffers.
+                warmup = SDPX._owned_array_copy(BigFloat, rhs)
+                SDPX.la_provider_factor_solve!(handle, warmup)
+                measured = SDPX._owned_array_copy(BigFloat, rhs)
+                allocated = @allocated SDPX.la_provider_factor_solve!(
+                    handle, measured,
+                )
+                @test allocated < 512
+                @test BFLA.workspace_scratch!(handle.workspace, 1, 1) === scratch
+
+                low_precision = BFLA.owned_zeros(
+                    BigFloat, 3; precision_bits=128,
+                )
+                @test_throws BFLA.PrecisionMismatch SDPX.la_provider_factor_solve!(
+                    handle,
+                    low_precision,
+                )
+                @test_throws ArgumentError SDPX.la_provider_factor_solve!(
+                    handle,
+                    SDPX.la_provider_factor_matrix(handle),
+                )
+
+                correction = SDPX.alloc_zeros(BigFloat, 3)
+                SDPX.la_refinement_correction!(factor, rhs, correction)
+                @test matrix * correction ≈ rhs rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
+            end
+
+            # A later precision replaces the provider slot, while the earlier
+            # handle keeps its own precision-matched workspace and remains
+            # solvable sequentially.
+            low_spd = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits=128)
+            low_spd[1, 1] = BigFloat(2; precision=128)
+            low_spd[2, 2] = BigFloat(3; precision=128)
+            low_spd_copy = BFLA.owned_copy(low_spd; precision_bits=128)
+            low_factor = SDPX.la_cholesky_factor!(
+                backend,
+                low_spd_copy,
+            )
+            @test low_factor !== nothing
+            @test BFLA.workspace_precision(backend.provider.workspace) == 128
+            @test BFLA.workspace_precision(factors[1].provider.workspace) == 256
+            legacy_solution = SDPX._owned_array_copy(BigFloat, rhs)
+            SDPX.la_factor_solve!(factors[1], legacy_solution)
+            @test spd * legacy_solution ≈ rhs rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
         end
     end
 end
@@ -711,6 +912,71 @@ if _BFLA_LOADED
                 )
                 SDPX.la_factor_solve!(factor, solution_matrix)
                 @test A * solution_matrix ≈ rhs_matrix rtol=BigFloat(1e-30) atol=BigFloat(1e-30)
+            end
+
+            @testset "BFLA duplicated-equality auto route" begin
+                # Exact duplicate equality columns make the normal-equation
+                # Gram factor rank-deficient. Automatic mode is authorized to
+                # record a BFLA->RRQR switch; forced normal equations must
+                # fail closed instead of hidden-fallback.
+                c = BigFloat[1, 1]
+                coefficients = zeros(BigFloat, 2, 2, 2)
+                coefficients[1, 1, 1] = one(BigFloat)
+                coefficients[2, 2, 2] = one(BigFloat)
+                problem = SDPX.ingest(
+                    c,
+                    [coefficients],
+                    [SDPX.alloc_zeros(BigFloat, 2, 2)],
+                    BigFloat[1 1; 0 0],
+                    BigFloat[1, 1];
+                    sparse=false,
+                    verbosity=0,
+                )
+                base_options = (
+                    algorithm=:sdp,
+                    presolve=false,
+                    scaling=:none,
+                    sparse=false,
+                    formulation=:normal_equations,
+                    linear_algebra_backend=:bfla,
+                    verbosity=0,
+                    diagnostics=true,
+                    iter_max=100,
+                    ϵ_gap=big"1e-20",
+                    ϵ_primal=big"1e-20",
+                    ϵ_dual=big"1e-20",
+                )
+                auto_options = SDPX.SolverOptions{BigFloat}(
+                    ; base_options...,
+                    equality_solver=:auto,
+                )
+                auto_plan = SDPX.build_execution_plan(problem, auto_options)
+                @test auto_plan.la_config.selected === :bfla
+                @test auto_plan.la_config.fallback_chain ===
+                      (:rank_revealing_qr,)
+                auto = SDPX.solve!(problem, auto_options)
+                @test auto.status == SDPX.Optimal
+                selected = auto.diagnostics.selected_algorithms
+                @test selected.la_executed_provider ===
+                      :bigfloat_linear_algebra
+                @test selected.la_fallback_reason ===
+                      :la_equality_factor_failed
+                @test selected.equality === :rank_revealing_qr
+                @test selected.certificate.valid
+
+                forced_options = SDPX.SolverOptions{BigFloat}(
+                    ; base_options...,
+                    equality_solver=:normal_equations,
+                )
+                forced_plan = SDPX.build_execution_plan(
+                    problem,
+                    forced_options,
+                )
+                @test forced_plan.la_config.fallback_chain === ()
+                @test_throws ArgumentError SDPX.solve!(
+                    problem,
+                    forced_options,
+                )
             end
 
             @testset "tiny dense LP planned and executed with BFLA" begin

@@ -49,8 +49,7 @@ Automatic pipeline controls:
   --presolve=auto|on|off
   --scaling=auto|none|equilibrate
   --sparse=auto|on|off
-  --formulation=auto|primal|normal_equations|augmented|dual
-  --chordalDecomposition=auto|on|off
+  --formulation=auto|primal|normal_equations|augmented
   --equalitySolver=auto|normal_equations|qr
   --workingPrecisionPolicy=auto|fixed
   --certificate=auto|on|off
@@ -81,7 +80,6 @@ const VALUE_OPTIONS = Set([
     "scaling",
     "sparse",
     "formulation",
-    "chordalDecomposition",
     "equalitySolver",
     "workingPrecisionPolicy",
     "certificate",
@@ -172,7 +170,7 @@ function _overlay!(spec, cli_options)
     for key in ("algorithm", "scaling", "formulation", "equalitySolver", "workingPrecisionPolicy")
         haskey(cli_options, key) && (settings[key] = lowercase(strip(cli_options[key])))
     end
-    for key in ("presolve", "sparse", "chordalDecomposition", "certificate")
+    for key in ("presolve", "sparse", "certificate")
         haskey(cli_options, key) && (settings[key] = _canonical_switch(cli_options[key], key))
     end
     return spec

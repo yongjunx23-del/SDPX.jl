@@ -16,7 +16,6 @@ Pkg.develop(PackageSpec(path=source))
 Pkg.add([
     PackageSpec(name="Aqua", version="0.8"),
     PackageSpec(name="Convex", version="0.16"),
-    PackageSpec(name="DoubleFloats", version="1"),
     PackageSpec(name="JLD2"),
     PackageSpec(name="JSON"),
     PackageSpec(name="JuMP", version="1"),

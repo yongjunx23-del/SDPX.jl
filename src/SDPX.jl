@@ -17,7 +17,6 @@ include("ingest.jl")
 include("lp_api.jl")
 include("soc.jl")
 include("soc_lorentz_kernels.jl")
-include("midend/canonical_problem.jl")
 include("midend/problem_features.jl")
 include("midend/auto_planner.jl")
 include("midend/formulation_planner.jl")
@@ -52,7 +51,7 @@ include("frontend/high_level_solve.jl")
 include("performance_trace.jl")
 include("public_api.jl")
 
-export sdp, findFeasible, setArithmeticType, setSparseMode, setMode
+export sdp, findFeasible, setArithmeticType
 export solve, solve!, ingest, SDPProblem, SolverOptions, SolveOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
 export linear_program, solve_lp
 export SOCConstraint, ConicProblem, ConicResult

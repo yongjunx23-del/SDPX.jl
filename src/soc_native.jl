@@ -201,9 +201,7 @@ function plan_native_soc(
     options::SolverOptions{T};
     specialization::Symbol=:auto,
 ) where {T}
-    options.formulation === :dual && throw(ArgumentError(
-        "NativeSOC does not implement the dual KKT formulation",
-    ))
+    _require_supported_arithmetic_type(T)
     options.equality_solver === :qr && throw(ArgumentError(
         "NativeSOC equality_solver=:qr is not implemented; use :auto or " *
         ":normal_equations",
@@ -237,8 +235,8 @@ function plan_native_soc(
     )
 end
 
-mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend}
-    plan::NativeSOCPlan
+mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
+    plan::P
     la_backend::B
     x::Vector{T}
     slack::Vector{Vector{T}}
@@ -302,9 +300,9 @@ end
 
 function NativeSOCWorkspace(
     problem::ConicProblem{T},
-    plan::NativeSOCPlan,
+    plan::P,
     options::SolverOptions{T},
-) where {T}
+) where {T,P<:NativeSOCPlan}
     backend = instantiate_la_backend(plan.la_config, T, plan.threads)
     variables = problem.variables
     equalities = length(problem.beq)
@@ -386,6 +384,13 @@ function NativeSOCWorkspace(
         0.0,
         0.0,
     )
+end
+
+function NativeSOCWorkspace{T,B}(
+    plan::P,
+    args...,
+) where {T,B<:AbstractLABackend,P<:NativeSOCPlan}
+    return NativeSOCWorkspace{T,B,P}(plan, args...)
 end
 
 function _native_soc_residuals!(
@@ -857,6 +862,73 @@ function _native_soc_prepare_kkt!(
     return true
 end
 
+"""Prepare equality-side KKT data once for a general IPM iteration."""
+function _native_soc_prepare_kkt!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T},
+    factor,
+    options::SolverOptions{T},
+) where {T}
+    workspace.equality_prepared && return true
+    equalities = length(problem.beq)
+    if equalities == 0
+        workspace.equality_factor = nothing
+        workspace.equality_method = :none
+        workspace.equality_prepared = true
+        return true
+    end
+
+    factor_matrix = la_factor_handle_matrix(factor)
+    panel_started = time_ns()
+    copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
+    la_trsm!(workspace.la_backend, factor_matrix, workspace.equality_panel)
+    workspace.equality_panel_transforms += 1
+    workspace.equality_panel_transform_seconds +=
+        (time_ns() - panel_started) / 1.0e9
+
+    gram_started = time_ns()
+    la_syrk!(
+        workspace.la_backend,
+        workspace.equality_factor_buffer,
+        workspace.equality_panel,
+        one(T),
+        zero(T),
+    )
+    workspace.equality_gram_assemblies += 1
+    workspace.equality_gram_seconds += (time_ns() - gram_started) / 1.0e9
+
+    factor_started = time_ns()
+    equality_factor = la_cholesky_factor!(
+        workspace.la_backend, workspace.equality_factor_buffer,
+    )
+    if equality_factor === nothing ||
+       !_la_factor_has_numerical_rank(
+           equality_factor, workspace.equality_panel, options,
+       )
+        # A rejected Cholesky may borrow the Gram buffer.  Drop it before the
+        # panel-backed QR fallback or a prepare failure.
+        equality_factor = nothing
+        :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
+            return false
+        options.equality_solver === :auto || return false
+        equality_factor = _factor_equality_qr(
+            workspace.la_backend,
+            workspace.equality_panel,
+            options,
+        )
+        equality_factor === nothing && return false
+        workspace.equality_method = :rank_revealing_qr
+        workspace.la_fallback_reason = :la_equality_factor_failed
+    else
+        workspace.equality_method = :normal_equations
+    end
+    workspace.equality_factor = equality_factor
+    workspace.equality_factorizations += 1
+    workspace.equality_factor_seconds += (time_ns() - factor_started) / 1.0e9
+    workspace.equality_prepared = true
+    return true
+end
+
 function _native_soc_solve_kkt!(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
@@ -922,8 +994,11 @@ function _native_soc_solve_kkt!(
         )
     else
         la_factor_solve!(equality_factor, workspace.equality_rhs)
-        copy_owned!(workspace.dy, workspace.equality_rhs)
     end
+    # A QR solve writes the unpermuted solution into equality_rhs and only
+    # permuted scratch into dy, so dy is copied from equality_rhs in both
+    # branches.
+    copy_owned!(workspace.dy, workspace.equality_rhs)
     la_mul_owned!(
         workspace.la_backend,
         workspace.rhs,
@@ -946,25 +1021,16 @@ function _native_soc_solve_kkt!(
     options::SolverOptions{T},
 ) where {T}
     equalities = length(problem.beq)
+    _native_soc_prepare_kkt!(workspace, problem, factor, options) || return false
     if equalities == 0
         la_factor_solve!(factor, workspace.rhs)
         copy_owned!(workspace.dx, workspace.rhs)
         workspace.rhs_solves += 1
+        workspace.kkt_rhs_solves += 1
         return true
     end
     factor_matrix = la_factor_handle_matrix(factor)
-    copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
-    la_trsm!(workspace.la_backend, factor_matrix, workspace.equality_panel)
-    la_syrk!(
-        workspace.la_backend,
-        workspace.equality_factor_buffer,
-        workspace.equality_panel,
-        one(T),
-        zero(T),
-    )
-    equality_factor = la_cholesky_factor!(
-        workspace.la_backend, workspace.equality_factor_buffer,
-    )
+    equality_factor = workspace.equality_factor
     la_trsv_lower!(workspace.la_backend, factor_matrix, workspace.rhs)
     la_mul_owned!(
         workspace.la_backend,
@@ -976,27 +1042,18 @@ function _native_soc_solve_kkt!(
         workspace.equality_rhs[index] =
             workspace.equality_residual[index] - workspace.equality_rhs[index]
     end
-    if equality_factor === nothing
-        :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
-            return false
-        options.equality_solver === :auto || return false
-        equality_factor = _factor_equality_qr(
-            workspace.la_backend,
-            workspace.equality_panel,
-            options,
-        )
-        equality_factor === nothing && return false
+    if workspace.equality_method === :rank_revealing_qr
         la_factor_solve!(
             equality_factor,
             workspace.equality_rhs,
             workspace.dy,
         )
-        workspace.equality_method = :rank_revealing_qr
-        workspace.la_fallback_reason = :la_equality_factor_failed
     else
         la_factor_solve!(equality_factor, workspace.equality_rhs)
-        workspace.equality_method = :normal_equations
     end
+    # A QR solve writes the unpermuted solution into equality_rhs and only
+    # permuted scratch into dy, so dy is copied from equality_rhs in both
+    # branches.
     copy_owned!(workspace.dy, workspace.equality_rhs)
     la_mul_owned!(
         workspace.la_backend,
@@ -1008,7 +1065,8 @@ function _native_soc_solve_kkt!(
     )
     la_trsv_transpose!(workspace.la_backend, factor_matrix, workspace.rhs)
     copy_owned!(workspace.dx, workspace.rhs)
-    workspace.rhs_solves += 2
+    workspace.rhs_solves += 1
+    workspace.kkt_rhs_solves += 1
     return true
 end
 
@@ -1088,14 +1146,17 @@ function _native_soc_direction!(
         workspace.rhs[index] = -workspace.rhs[index]
     end
     _native_soc_solve_kkt!(workspace, problem, factor, options) || return false
+    if rhs_phase === :predictor
+        workspace.predictor_rhs_solves += 1
+    elseif rhs_phase === :corrector
+        workspace.corrector_rhs_solves += 1
+    end
     if fixed_trace
         elapsed = (time_ns() - rhs_started) / 1.0e9
         if rhs_phase === :predictor
             workspace.predictor_rhs_seconds += elapsed
-            workspace.predictor_rhs_solves += 1
         elseif rhs_phase === :corrector
             workspace.corrector_rhs_seconds += elapsed
-            workspace.corrector_rhs_solves += 1
         end
     end
 
@@ -1443,7 +1504,6 @@ function _native_soc_result(
         d_res,
         iterations,
         diagnostics,
-        nothing,
     )
 end
 
@@ -1522,6 +1582,10 @@ Base.@noinline function _solve_native_soc_core(
         end
         workspace.equality_prepared = false
         workspace.equality_factor = nothing
+        # The provider factor may borrow `factor_buffer` or
+        # `augmented_buffer`. Release the previous iteration's handle before
+        # the next assembly overwrites that storage.
+        factor = nothing
         factor_started = time_ns()
         factor = _native_soc_assemble_factor!(workspace, problem)
         factor_elapsed = (time_ns() - factor_started) / 1.0e9
@@ -1536,8 +1600,7 @@ Base.@noinline function _solve_native_soc_core(
             termination = (reason=:la_factor_failed, stage=:kkt_factorization)
             break
         end
-        if workspace.plan.cone.execution isa FixedTraceQ3Execution &&
-           workspace.plan.formulation.formulation isa DenseNormalEquations
+        if workspace.plan.formulation.formulation isa DenseNormalEquations
             _native_soc_prepare_kkt!(workspace, problem, factor, options) || begin
                 status = NumericalBreakdown
                 message = "NativeSOC equality KKT preparation failed."

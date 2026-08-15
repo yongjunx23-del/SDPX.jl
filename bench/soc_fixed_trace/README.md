@@ -59,19 +59,6 @@ and 500 iterations.  The selected best Float64x4 and BigFloat256 configurations
 must also be repeated at `1e-20`; never compare rows with different tolerance
 or precision fields.
 
-`--q3-gram-strategy=output_tiles` and `row_bins` are expert benchmark
-overrides. The former assigns each output tile to one worker and keeps no
-replicated Gram storage. The latter assigns contiguous panel rows to workers,
-stores one packed lower triangle per worker, and performs a deterministic
-tree reduction. Production `auto` retains output tiles. Controlled J40
-BigFloat256 measurements found row bins slower, so they remain only a
-research/reference override and are not part of the release campaign.
-For BigFloat, automatic output tiles require at least two selected workers, 32
-equality columns, and 250,000 triangular contractions; smaller panels retain
-the pairwise kernel. The report records the executed Gram worker count and
-selection reason, so an allocated-but-idle thread request is visible.
-Even when forced, their private storage must fit the configured memory fraction.
-
 The protocol is: load and hash → preflight → `warmup` complete solves → `reps`
 timed cold solves.  Every timed and warm-up result is certified with
 `SDPX.result_certificate` in original coordinates.  A failed certificate or

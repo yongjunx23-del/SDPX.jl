@@ -727,4 +727,186 @@ end
         @test hopeless.reg_attempts == 6
     end
 
+    @testset "equality Cholesky rank uses explicit precision" begin
+        rng = MersenneTwister(991)
+        rows = 24
+        base = randn(rng, rows, 3)
+        tau = SDPX._equality_cholesky_rank_tau(
+            base,
+            base,
+            SDPX.SolverOptions{Float64}(verbosity=0),
+        )
+        @test tau ≈ max(24.0 * eps(Float64), 1e-10)
+
+        below = Matrix(Diagonal([1.0, 1e-12]))
+        above = Matrix(Diagonal([1.0, 1e-6]))
+        options = SDPX.SolverOptions{Float64}(verbosity=0)
+        B_below = below
+        B_above = above
+        Q_below = transpose(B_below) * B_below
+        Q_above = transpose(B_above) * B_above
+        L_below = cholesky(Symmetric(Q_below, :L); check=false)
+        L_above = cholesky(Symmetric(Q_above, :L); check=false)
+
+        # The threshold is relative: both the near-dependent and the healthy
+        # Gram factors may succeed, but only the healthy one clears the
+        # explicit-precision rank policy. Scale invariance is covered below
+        # by factoring the same dependency at 1e3 and 1e-3 scales.
+        @test !SDPX._cholesky_has_numerical_rank(
+            L_below,
+            B_below,
+            options,
+        )
+        @test SDPX._cholesky_has_numerical_rank(
+            L_above,
+            B_above,
+            options,
+        )
+        @test !SDPX._cholesky_has_numerical_rank(
+            L_below,
+            B_below,
+            SDPX.SolverOptions{Float64}(
+                verbosity=0,
+                ϵ_gap=1e-4,
+                ϵ_primal=1e-4,
+                ϵ_dual=1e-4,
+            ),
+        )
+
+        for scale in (1e-3, 1e3)
+            scaled_below = scale .* B_below
+            scaled_q = transpose(scaled_below) * scaled_below
+            scaled_l = cholesky(
+                Symmetric(scaled_q, :L);
+                check=false,
+            )
+            @test !SDPX._cholesky_has_numerical_rank(
+                scaled_l,
+                scaled_below,
+                options,
+            )
+        end
+
+        setprecision(BigFloat, 256) do
+            big_below = BigFloat.(B_below)
+            big_q = transpose(big_below) * big_below
+            big_l = cholesky(Symmetric(big_q, :L); check=false)
+            big_options = SDPX.SolverOptions{BigFloat}(
+                verbosity=0,
+                ϵ_gap=big"1e-12",
+                ϵ_primal=big"1e-12",
+                ϵ_dual=big"1e-12",
+            )
+            # Near-dependent at Float64 rounding noise is far above BigFloat
+            # eps, so a genuinely higher-precision factor owns full rank.
+            @test SDPX._cholesky_has_numerical_rank(
+                big_l,
+                big_below,
+                big_options,
+            )
+            # A BigFloat factor of the exact duplicate has an exactly zero
+            # diagonal and is therefore rejected even at tight tolerances.
+            duplicated = hcat(big_below, big_below[:, 1])
+            duplicated_q = transpose(duplicated) * duplicated
+            duplicated_l = cholesky(
+                Symmetric(duplicated_q, :L);
+                check=false,
+            )
+            @test !SDPX._cholesky_has_numerical_rank(
+                duplicated_l,
+                duplicated,
+                big_options,
+            )
+        end
+    end
+
+    @testset "equality lower-triangle copies never read upper storage" begin
+        source = Matrix{Float64}([
+            4.0 1.0
+            1.0 3.0
+        ])
+        destination = fill(NaN, 2, 2)
+        SDPX._copy_lower_triangle!(destination, source)
+        @test destination[1, 1] == 4.0
+        @test destination[2, 1] == 1.0
+        @test isnan(destination[1, 2])
+        @test destination[2, 2] == 3.0
+
+        poisoned = copy(source)
+        poisoned[1, 2] = NaN
+        destination = fill(NaN, 2, 2)
+        SDPX._copy_lower_triangle!(destination, poisoned)
+        @test destination[2, 1] == 1.0
+        @test isnan(destination[1, 2])
+        @test destination[2, 2] == 3.0
+
+        # BigFloat lower copies also deep-copy into independent storage.
+        setprecision(BigFloat, 256) do
+            big_source = BigFloat[
+                4.0 1.0
+                1.0 3.0
+            ]
+            big_source[1, 2] = BigFloat(NaN)
+            big_destination = SDPX.alloc_zeros(BigFloat, 2, 2)
+            SDPX._copy_lower_triangle!(big_destination, big_source)
+            @test big_destination[2, 1] == big_source[2, 1]
+            @test iszero(big_destination[1, 2])
+            @test big_destination[2, 2] == big_source[2, 2]
+            @test big_destination[1, 1] !== big_source[1, 1]
+        end
+
+        # Standard Float64 BLAS SYRK owns only the lower triangle. With
+        # beta=0 the upper poison is preserved rather than mirrored from the
+        # computed lower triangle, and the dense equality consumer still
+        # factors successfully from lower-authoritative storage.
+        backend = SDPX.Experimental.StandardLABackend(:float64)
+        panel = [1.0 2.0; 3.0 4.0]
+        gram = fill(NaN, 2, 2)
+        SDPX.la_syrk!(backend, gram, panel, 1.0, 0.0)
+        @test gram[1, 1] ≈ 10.0
+        @test gram[2, 1] ≈ 14.0
+        @test gram[2, 2] ≈ 20.0
+        @test isnan(gram[1, 2])
+    end
+
+    @testset "explicit normal equations keep pivoted Cholesky" begin
+        column = [1.0, -0.5, 2.0]
+        B = hcat(column, column)
+        problem = _dense_workspace_problem(B)
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equality_solver=:normal_equations,
+                threads=1,
+                verbosity=0,
+            ),
+        )
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=plan,
+        )
+        copyto!(
+            workspace.S,
+            [3.0 0.2 0.1; 0.2 2.5 -0.3; 0.1 -0.3 4.0],
+        )
+        workspace.Q[1, 2] = workspace.Q[2, 1] = NaN
+        workspace.Q[2, 2] = NaN
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:normal_equations,
+        )
+        factor = SDPX.factor_kkt!(workspace, problem, options)
+        @test factor.ok
+        @test factor.equality_solver === :normal_equations
+        @test factor.q_pivoted
+        @test workspace.Qchol isa
+              LinearAlgebra.CholeskyPivoted{Float64}
+        @test all(isfinite, workspace.Qbuf)
+    end
+
 end

@@ -108,8 +108,7 @@ presolve_zero_constraints = true
 presolve_duplicate_constraints = true
 presolve_dependent_equalities = true
 scaling = :auto                 # :auto, :none, or :equilibrate
-formulation = :auto             # explicit :dual fails until transform exists
-chordal_decomposition = :auto   # analysis only
+formulation = :auto             # :auto, :primal, :normal_equations, or :augmented
 ```
 
 Exact zero, duplicate, and proportional equalities are always verified in the

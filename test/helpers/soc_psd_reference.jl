@@ -156,7 +156,6 @@ function _soc_psd_reference_result(
         result.d_res,
         result.iterations,
         result.diagnostics,
-        result,
     )
 end
 

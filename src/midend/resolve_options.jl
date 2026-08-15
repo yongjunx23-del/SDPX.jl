@@ -204,10 +204,9 @@ function resolve_solve_options(
     algorithm = _frontend_policy(options.algorithm, (:auto, :lp, :socp, :sdp), "algorithm")
     formulation = _frontend_policy(
         options.formulation,
-        (:auto, :primal, :normal_equations, :dual, :augmented),
+        (:auto, :primal, :normal_equations, :augmented),
         "formulation",
     )
-    chordal = _frontend_policy(options.chordal_decomposition, (:auto, :on, :off), "chordal_decomposition")
     equality_solver = _frontend_policy(
         options.equality_solver, (:auto, :normal_equations, :qr), "equality_solver",
     )
@@ -239,7 +238,6 @@ function resolve_solve_options(
         sparse=sparse,
         algorithm=algorithm,
         formulation=formulation,
-        chordal_decomposition=chordal,
         equality_solver=equality_solver,
         linear_algebra_backend=linear_algebra_backend,
         working_precision_policy=working_precision_policy,
@@ -265,7 +263,6 @@ function resolve_solve_options(
         algorithm=algorithm,
         sparse=sparse,
         formulation=formulation,
-        chordal_decomposition=chordal,
         equality_solver=equality_solver,
         linear_algebra_backend=linear_algebra_backend,
         working_precision_policy=working_precision_policy,

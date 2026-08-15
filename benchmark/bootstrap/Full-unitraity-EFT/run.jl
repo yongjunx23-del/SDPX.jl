@@ -294,9 +294,9 @@ function main(args=ARGS)
     termination = result.termination
     objective_in_interval = reference <= physical <= reference_upper
     production_invariants =
+        result isa SDPX.ConicResult &&
         plan.cone.specialization === :fixed_trace_q3 &&
         selected.la_executed_provider === :multifloat_linear_algebra &&
-        result.lifted === nothing &&
         selected.fallback_reason === :none &&
         selected.la_fallback_reason === :none
     full_numerical_gate =

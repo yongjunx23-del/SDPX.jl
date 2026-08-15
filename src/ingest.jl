@@ -11,12 +11,11 @@ _coefficient_eltype(A::AbstractVector{<:AbstractVector{<:AbstractMatrix}}) =
     mapreduce(block -> mapreduce(eltype, promote_type, block), promote_type, A)
 
 function _require_supported_arithmetic_type(::Type{T}) where {T}
-    T <: AbstractFloat &&
-        return T
+    is_supported_arithmetic(T) && return T
     throw(
         ArgumentError(
-            "SDPX arithmetic must be a real AbstractFloat type; got $T. " *
-            "Use Float64, BigFloat, a MultiFloats type, or Double64. " *
+            "unsupported SDPX arithmetic type $T. " *
+            "Use Float64, BigFloat, or a MultiFloats type. " *
             "Integer and Rational inputs are accepted when T is inferred " *
             "and are converted to floating-point arithmetic.",
         ),
@@ -1407,7 +1406,9 @@ function equilibrate(
 ) where {T}
     cons = prob.cons
     cons isa SparseCons && return equilibrate(prob, cons; ruiz_iters=ruiz_iters)
-    cons isa DenseCons || throw(ArgumentError("equilibrate=true requires dense or sparse constraints"))
+    cons isa DenseCons || throw(ArgumentError(
+        "equilibration requires dense or sparse constraints",
+    ))
     L, m, n, k = prob.dims
     ruiz = _ruiz_control(T, ruiz_iters)
 

@@ -132,6 +132,18 @@ function reference_threaded_dense_schur_build!(
             Y,
         )
     end
+    if isempty(workspace.Spartial)
+        # Dense Float64 owner mode has no per-bin partials; the
+        # reference is the serial BLAS build over the same panels.
+        SDPX._zero_schur_accumulator!(workspace.S, workspace)
+        return SDPX.schur_build!(
+            workspace,
+            problem,
+            problem.cons,
+            X,
+            Y,
+        )
+    end
     for partial in workspace.Spartial
         SDPX._zero_schur_accumulator!(partial, workspace)
     end

@@ -189,9 +189,6 @@ function _solver_options(::Type{T}, settings) where {T}
         algorithm=_setting(settings, "algorithm"; default=:auto),
         sparse=_setting(settings, "sparse"; default=:auto),
         formulation=_setting(settings, "formulation"; default=:auto),
-        chordal_decomposition=_setting(
-            settings, "chordalDecomposition", "chordal_decomposition"; default=:auto,
-        ),
         equality_solver=_setting(
             settings, "equalitySolver", "equality_solver"; default=:auto,
         ),

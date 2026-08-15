@@ -496,6 +496,9 @@ mutable struct DenseAugmentedKKTWorkspace{T}
     regularization::T
     factor_diagnostics::Any
     inertia::Any
+    pivot_blocks::Any
+    permutation::Any
+    factor_precision::Any
     rank_deficient::Bool
 end
 
@@ -509,6 +512,9 @@ function DenseAugmentedKKTWorkspace(::Type{T}, m::Int, n::Int) where {T}
         alloc_zeros(T, dimension),
         nothing,
         zero(T),
+        nothing,
+        nothing,
+        nothing,
         nothing,
         nothing,
         false,
@@ -643,7 +649,6 @@ Base.@kwdef struct SolverOptions{T}
     refine_policy::Symbol     = :auto
     refine_max_steps::Int     = 8                    # cap for the adaptive policy only
     refine_tol::T             = zero(T)              # 0 ⇒ REFINE_DEFAULT_TOL_ULPS·eps(T)
-    equilibrate::Bool         = false                # core compatibility flag; scaling=:auto selects Ruiz
     max_time::Float64         = Inf                  # wall-clock budget, seconds
     checkpoint_every::Int     = 0                     # 0 disables; else write every N iterations
     checkpoint_path::String   = ""
@@ -671,15 +676,6 @@ Base.@kwdef struct SolverOptions{T}
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
     extended_precision_memory_fraction::Float64 = 0.10  # upper bound for packed extended-precision panels
-    # Expert selector for the native fixed-trace Q3 equality Gram. Output-tile
-    # ownership uses no replicated Gram storage; row bins keep a packed lower
-    # triangle per worker and trade bounded memory for better cache/NUMA reuse.
-    q3_gram_strategy::Symbol = :auto                    # compatibility no-op after NativeSOC consolidation
-    # Search-direction scaling for the compact fixed-trace Q3 backend.  HKM is
-    # the established reference path; NT is the symmetric Lorentz-cone
-    # Nesterov--Todd direction.  NT remains an explicit opt-in until the J40
-    # and J80 certificate/performance gates have both passed.
-    q3_direction::Symbol = :hkm                         # compatibility no-op after NativeSOC consolidation
     # Opt-in extended-precision KKT acceleration. The Schur complement is
     # factored in Float64, while residuals and accepted directions remain in
     # the requested BigFloat or fixed-width extended arithmetic.
@@ -704,10 +700,7 @@ Base.@kwdef struct SolverOptions{T}
     # elimination and is still validated in the original arithmetic.
     presolve_tolerance::T     = zero(T)
     scaling::Symbol           = :auto                   # :auto | :none | :equilibrate
-    # :dual has an analysis estimate but no production transform; an explicit
-    # request fails before backend/provider planning.
-    formulation::Symbol       = :auto                   # :auto | :primal | :normal_equations | :dual | :augmented
-    chordal_decomposition::Symbol = :auto               # :auto | :off | :on (analysis-only)
+    formulation::Symbol       = :auto                   # :auto | :primal | :normal_equations | :augmented
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
     # Pipeline post-solve certification handoff. `true` preserves the
@@ -2155,7 +2148,7 @@ Base.haskey(::SDPResult, k::AbstractString) =
 
 `true` for `BigFloat`, where `setprecision` changes the working
 precision at runtime; `false` for fixed-width bitstypes
-(`Float64`, `MultiFloat`s, `Double64`, …), for which precision is
+(`Float64`, `MultiFloat`s, …), for which precision is
 baked into the type and `precision_bits` is a no-op.
 """
 has_dynamic_precision(::Type{BigFloat}) = true
@@ -2165,8 +2158,8 @@ has_dynamic_precision(::Type) = false
     sig_bits(::Type{T})
 
 Significand width in bits. Works for `BigFloat` (current global
-`precision`), `Float64`/`Float32`, and any type implementing
-`Base.precision` (MultiFloats, DoubleFloats).
+`precision`), `Float64`, and any type implementing
+`Base.precision` (MultiFloats).
 """
 sig_bits(::Type{T}) where {T} = precision(T)
 

@@ -62,10 +62,14 @@ The wrapper supports:
 - scalar affine and single-variable objectives;
 - free scalar variables;
 - scalar affine or single-variable constraints in `MOI.EqualTo`,
-  `MOI.GreaterThan`, and `MOI.LessThan`; pure scalar-cone models use the
-  dedicated LP engine;
+  `MOI.GreaterThan`, `MOI.LessThan`, and `MOI.Interval`; pure scalar-cone
+  models use the dedicated LP engine;
 - vector affine or vector-of-variables constraints in
-  `MOI.SecondOrderCone` (through native Lorentz SOC);
+  `MOI.Nonnegatives`, `MOI.Nonpositives`, and `MOI.Zeros` (through batched
+  linear rows);
+- vector affine or vector-of-variables constraints in
+  `MOI.SecondOrderCone` and `MOI.RotatedSecondOrderCone` (through native
+  Lorentz SOC and the exact rotated map);
 - vector affine or vector-of-variables constraints in
   `MOI.PositiveSemidefiniteConeTriangle` and
   `MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}`.
@@ -124,8 +128,8 @@ Convenience aliases:
 
 Setting the raw `"tolerance"` attribute updates the gap, primal, and dual
 tolerances together. Every exact `SolverOptions` field name is also accepted
-as a raw optimizer attribute, including `sparse`, `equilibrate`,
-`predictor`, `refine_steps`, `max_restarts`, `extended_precision_blas`, and
+as a raw optimizer attribute, including `sparse`, `scaling`, `predictor`,
+`refine_steps`, `max_restarts`, `extended_precision_blas`, and
 `extended_precision_memory_fraction`. Unknown names are rejected.
 
 `parameter_policy=:auto` (the default) selects a calibrated structural
@@ -147,11 +151,14 @@ request (`julia -t 4`).
 - The wrapper is non-incremental. Modifying and re-solving a JuMP model
   causes the finalized SDPX representation to be rebuilt.
 - At least one scalar, SOC, or PSD cone constraint is required.
-- Rotated SOC and other nonsymmetric cones still rely on MOI bridges or
-  future native support. General Lorentz SOC constraints use NativeSOC
-  directly; strict local fixed-trace Q3 products may select the compact
-  specialization. Mixed PSD+SOC models fail clearly rather than silently
-  lifting one cone family.
+- Rotated SOC constraints use the exact sparse map
+  `(u,v,w) -> (u+v,u-v,sqrt(2)w)` into NativeSOC; MOI primal and dual getters
+  apply the inverse and adjoint maps. `Nonnegatives`, `Nonpositives`, and
+  `Zeros` vector sets are lowered in batches. General Lorentz SOC constraints
+  use NativeSOC directly; strict local fixed-trace Q3 products may select the
+  compact specialization. Mixed PSD+SOC models fail clearly rather than
+  silently lifting one cone family, and other nonsymmetric cones remain
+  unsupported.
 - Sparse and dense coefficient storage both support internal equilibration;
   sparse derived caches are rebuilt after scaling.
 - LP unboundedness and general conic infeasibility certificates are not yet

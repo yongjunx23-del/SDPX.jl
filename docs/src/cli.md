@@ -56,8 +56,7 @@ The ordinary frontend exposes policies, not low-level IPM constants:
 --presolve=auto|on|off
 --scaling=auto|none|equilibrate
 --sparse=auto|on|off
---formulation=auto|primal|normal_equations|augmented|dual
---chordalDecomposition=auto|on|off
+--formulation=auto|primal|normal_equations|augmented
 --equalitySolver=auto|normal_equations|qr
 --workingPrecisionPolicy=auto|fixed
 --threads=auto|N

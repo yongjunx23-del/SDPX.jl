@@ -50,7 +50,7 @@ using SparseArrays
     @test MOI.get(
         optimizer, MOI.ConstraintDual(), index_map[soc],
     ) ≈ [1.0, -0.6, -0.8] atol=2e-6
-    @test MOI.get(optimizer, MOI.RawSolver()).lifted === nothing
+    @test !hasproperty(MOI.get(optimizer, MOI.RawSolver()), :lifted)
 end
 
 @testset "MOI BigFloat metadata owns mutable scalars" begin

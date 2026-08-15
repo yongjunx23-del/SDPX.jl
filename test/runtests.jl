@@ -7,11 +7,10 @@ const QUICK_TESTS = (
     "dense_augmented_kkt.jl",
     "soc_native_algebra.jl",
     "soc_native_solver.jl",
+    "moi_vector_cones.jl",
     "moi_native_soc.jl",
     "bfla_backend.jl",
     "mfla_backend.jl",
-    "canonical_conic_problem.jl",
-    "problem_features.jl",
     "auto_planner.jl",
     "frontend_auto_options.jl",
     "architecture_regressions.jl",
@@ -36,6 +35,7 @@ const FULL_TESTS = (
     "genericity.jl",
     "extended_precision_blas.jl",
     "sparse.jl",
+    "moi_vector_cones.jl",
     "moi_native_soc.jl",
     "moi.jl",
     "threads.jl",
@@ -46,8 +46,6 @@ const FULL_TESTS = (
     "soc_regressions.jl",
     "soc_native_algebra.jl",
     "soc_native_solver.jl",
-    "canonical_conic_problem.jl",
-    "problem_features.jl",
     "auto_planner.jl",
     "fixed_trace_benchmark_regressions.jl",
     "soc_q3_kernel_regressions.jl",
@@ -102,7 +100,6 @@ const TEST_PROFILE = _test_profile()
 # These packages are only needed by full-suite extension tests. Avoiding their
 # load cost is part of making the normal edit-test loop small.
 if TEST_PROFILE === :full
-    using DoubleFloats
     using JLD2
 end
 

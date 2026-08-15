@@ -80,7 +80,6 @@ function _native_soc_frontend_timing(
             diagnostics.warnings,
             diagnostics.termination,
         ),
-        result.lifted,
     )
 end
 
@@ -88,16 +87,10 @@ Base.@noinline function _solve_socp_keyword_dispatch(
     problem,
     sparse,
     verbosity,
-    soc_representation,
     specialization,
     kwargs,
 )
     Base.@nospecialize problem kwargs
-    soc_representation in (:auto, :native) ||
-        throw(ArgumentError(
-            "soc_representation must be :auto or :native; the historical " *
-            "PSD lift is now a test-only reference",
-        ))
     # Preserve the historical public `solve_socp` default: unlike the expert
     # `SolverOptions` constructor, the compact API records timings unless the
     # caller explicitly disables them.
@@ -114,6 +107,7 @@ Base.@noinline function _run_native_soc_frontend(
     options::SolverOptions{T},
     specialization::Symbol,
 ) where {T}
+    _require_supported_arithmetic_type(T)
     frontend_started = time_ns()
     # NativeSOC has no representation transform: frontend work is limited to
     # validating the specialization selector and crossing the public boundary.
@@ -138,14 +132,13 @@ end
     solve_socp(problem; kwargs...)
 
 Solve a compact LP+SOC model directly in Lorentz coordinates. Production
-`:auto` and `:native` never construct PSD matrices; the historical PSD lift
-lives only in test/benchmark reference code.
+always uses NativeSOC; the historical PSD lift lives only in test/benchmark
+reference code and is not exposed as a public solve option.
 """
 Base.@noinline function solve_socp(
     problem::ConicProblem{T};
     sparse=:auto,
     verbosity::Int=1,
-    soc_representation::Symbol=:auto,
     specialization::Symbol=:auto,
     kwargs...,
 ) where {T}
@@ -156,7 +149,6 @@ Base.@noinline function solve_socp(
         problem,
         sparse,
         verbosity,
-        soc_representation,
         specialization,
         kwargs,
     )

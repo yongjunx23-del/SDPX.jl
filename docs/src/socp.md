@@ -20,6 +20,17 @@ result = solve_socp(problem; verbosity=0)
 Each `SOCConstraint(A, b)` means `A*x+b in Q`, with the scalar/head coordinate
 first. Multiple cones can be passed to `second_order_program(c, cones)`.
 
+JuMP/MOI rotated cones are supported through the exact isomorphism
+
+```text
+(u, v, w) in Qr  <=>  (u+v, u-v, sqrt(2)w) in Q.
+```
+
+The bridge builds sparse rows directly, maps duals by the transpose of this
+linear transformation, and maps primal values back through its inverse. The
+native `SOCConstraint` API itself remains a standard-Lorentz API; it does not
+introduce a second rotated-cone solver.
+
 ## Native Lorentz execution
 
 `solve_socp` and pure-SOC MOI models run directly in Lorentz coordinates:
@@ -40,12 +51,12 @@ Frontend / MOI
 
 Production native SOC never constructs PSD matrices. The historical SOC-to-PSD
 transform lives only in `test/helpers/soc_psd_reference.jl` for correctness
-and benchmark comparisons. The compact API always selects a native execution;
-`soc_representation` accepts only `:auto` or `:native`. For the general
-`solve`/`SolverOptions` path, the automatic planner may select exact PSD-lift
-reference formulations (`:socp_psd2`, `:socp_psd_lift`) for SOC-shaped input;
-those are explicit exact reference routes, not hidden fallbacks, and the
-executed algorithm is recorded in diagnostics.
+and benchmark comparisons. The compact API always selects a native execution
+and exposes no representation switch. For the general `solve`/`SolverOptions`
+path, the automatic planner may select exact PSD-lift reference formulations
+(`:socp_psd2`, `:socp_psd_lift`) for SOC-shaped input; those are explicit
+exact reference routes, not hidden fallbacks, and the executed algorithm is
+recorded in diagnostics.
 
 For `x = (t,u)`, SDPX uses the Euclidean Lorentz pairing, determinant
 `t^2 - dot(u,u)`, margin `t - norm(u)`, and Jordan product
@@ -154,10 +165,9 @@ path. Executed diagnostics expose `local_pivot_kernel` and
 
 The default method is a compact Mehrotra predictor-corrector with an
 HKM-equivalent local direction. An ownership-safe Lorentz Nesterov--Todd
-direction is also implemented for Q3 and can be selected explicitly with
-`q3_direction=:nt`; it is a research path, not an automatic selector target.
-HKM remains the validated default after matched certificate and performance
-gates.
+direction is also implemented internally for Q3, but it is not exposed as a
+solve option; HKM remains the validated execution path after matched
+certificate and performance gates.
 
 The compact backend currently owns its iteration controller: it selects
 `sigma` from the affine complementarity ratio and uses a 0.99 exact
@@ -175,12 +185,16 @@ copies. Model coefficients are never installed by reference into scratch
 storage. MFLA/BFLA factor handles retain provider state and configured
 precision.
 
-`ConicResult` stores primal slacks, cone duals, and equality multipliers in
-original Lorentz coordinates. Its optional `lifted` field is `nothing` for
-production solves and exists only for test-reference objects. Certification
-independently recomputes affine/equality residuals, stationarity, primal and
-dual Lorentz margins, objectives, gap, and complementarity. Pure-SOC MOI input
-stays native; mixed PSD+SOC input fails clearly instead of silently lifting.
+`ConicResult` stores primal slacks, cone duals, and equality multipliers in the
+coordinates of its native `ConicProblem`. For MOI rotated cones those native
+coordinates are the exact canonical Lorentz image; MOI getters return the
+original rotated coordinates. Timings, termination counters, and diagnostics
+come directly from the NativeSOC run; no PSD `SDPResult` is stored.
+Test/reference PSD helpers keep their own `SDPResult` apart from the
+`ConicResult`. Certification independently recomputes affine/equality
+residuals, stationarity, primal and dual Lorentz margins, objectives, gap,
+and complementarity. Pure-SOC MOI input stays native; mixed PSD+SOC input
+fails clearly instead of silently lifting.
 
 Lightweight development evidence for the native routes is summarized in
 [benchmarks.md](benchmarks.md), with full reports under
@@ -211,5 +225,8 @@ first = solve!(session; objective=c1, warm_start=nothing)
 second = solve!(session; objective=c2, warm_start=:previous)
 ```
 
-`PreparedSolver` is sequential and non-reentrant. Use one session per
-concurrent worker.
+`PreparedSolver` is sequential and non-reentrant. It caches only immutable
+preprocessing structure and an `ExecutionPlan` when planning is invariant to
+the permitted objective/RHS updates; every solve still creates fresh numeric
+workspace and factor state. RHS-sensitive automatic LP planning is deliberately
+recomputed. Use one session per concurrent worker.

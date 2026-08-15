@@ -30,44 +30,171 @@ _empty_kkt_phase_times() = (
     equality_factorization=0.0,
 )
 
-function _cholesky_has_numerical_rank(
-    factor::LinearAlgebra.Cholesky{T},
-) where {T}
-    return _cholesky_has_numerical_rank(factor.factors)
+# Equality full-rank evidence is never carried by a successful Cholesky call
+# alone. A lower factor of Q = Btil'Btil is accepted only when its smallest
+# relative diagonal still exceeds
+#
+#     τ = max(max(size(Btil)...) · eps_eff,
+#             min(sqrt(eps_eff), requested_accuracy))
+#
+# where eps_eff is the explicit precision of the arithmetic that produced the
+# factor entries (never ambient BigFloat precision) and requested_accuracy is
+# requested from SolverOptions. The only solver-level fallback after rejection
+# is the plan-authorized RRQR/pivoted path; provider fail-closed routes use
+# only plan-authorized QR.
+
+"""Uniform significand bits of authoritative matrix storage."""
+function _uniform_arithmetic_bits(
+    matrix::AbstractMatrix{BigFloat};
+    authoritative_lower::Bool=false,
+)
+    rows, columns = size(matrix)
+    (rows == 0 || columns == 0) && return nothing
+    bits = precision(matrix[1, 1])
+    if authoritative_lower
+        rows == columns || return nothing
+        # Factor handles only commit the lower triangle; the upper entries may
+        # be unassigned, so inspect exactly the authoritative storage.
+        @inbounds for column in 1:columns
+            for row in column:rows
+                isassigned(matrix, row, column) || return nothing
+                precision(matrix[row, column]) == bits || return nothing
+            end
+        end
+    else
+        @inbounds for column in 1:columns
+            for row in 1:rows
+                isassigned(matrix, row, column) || return nothing
+                precision(matrix[row, column]) == bits || return nothing
+            end
+        end
+    end
+    return bits
 end
 
-function _cholesky_has_numerical_rank(matrix::AbstractMatrix{T}) where {T}
+function _equality_cholesky_rank_tau(
+    Btil::AbstractMatrix{T},
+    factor_matrix::AbstractMatrix{T},
+    opts::SolverOptions{T},
+    ;
+    factor_authoritative_lower::Bool=true,
+) where {T}
+    if T === BigFloat
+        btil_bits = _uniform_arithmetic_bits(Btil)
+        factor_bits = _uniform_arithmetic_bits(
+            factor_matrix;
+            authoritative_lower=factor_authoritative_lower,
+        )
+        btil_bits === nothing && return nothing
+        factor_bits === nothing && return nothing
+        bits = min(btil_bits, factor_bits)
+        eps_eff = ldexp(BigFloat(1; precision=bits), 1 - bits)
+        requested = BigFloat(_requested_accuracy(opts); precision=bits)
+        if !(requested > zero(BigFloat))
+            requested = sqrt(eps_eff)
+        end
+        requested = min(sqrt(eps_eff), requested)
+        dimension_floor =
+            BigFloat(max(size(Btil)...); precision=bits) * eps_eff
+        accuracy_floor = min(sqrt(eps_eff), requested)
+        return max(dimension_floor, accuracy_floor)
+    end
+    eps_eff = eps(T)
+    requested = _requested_accuracy(opts)
+    if !(requested > zero(T))
+        requested = sqrt(eps_eff)
+    end
+    requested = min(sqrt(eps_eff), requested)
+    dimension_floor = T(max(size(Btil)...)) * eps_eff
+    accuracy_floor = min(sqrt(eps_eff), requested)
+    return max(dimension_floor, accuracy_floor)
+end
+
+function _cholesky_has_numerical_rank(
+    factor::LinearAlgebra.Cholesky{T},
+    Btil::AbstractMatrix{T},
+    opts::SolverOptions{T},
+) where {T}
+    return _cholesky_has_numerical_rank(factor.factors, Btil, opts)
+end
+
+function _cholesky_has_numerical_rank(
+    matrix::AbstractMatrix{T},
+    Btil::AbstractMatrix{T},
+    opts::SolverOptions{T},
+) where {T}
     dimension = size(matrix, 1)
     dimension == 0 && return true
     minimum_diagonal = abs(matrix[1, 1])
     maximum_diagonal = minimum_diagonal
     @inbounds for index in 2:dimension
         value = abs(matrix[index, index])
+        isfinite(value) || return false
         minimum_diagonal = min(minimum_diagonal, value)
         maximum_diagonal = max(maximum_diagonal, value)
     end
-    isfinite(minimum_diagonal) &&
-        isfinite(maximum_diagonal) &&
-        maximum_diagonal > zero(T) &&
-        minimum_diagonal >
-        sqrt(T(dimension) * eps(T)) * maximum_diagonal
+    isfinite(minimum_diagonal) || return false
+    isfinite(maximum_diagonal) || return false
+    maximum_diagonal > zero(T) || return false
+    tau = _equality_cholesky_rank_tau(Btil, matrix, opts)
+    tau === nothing && return false
+    isfinite(tau) || return false
+    minimum_diagonal > tau * maximum_diagonal || return false
+    # POTRF may round the zero pivot of exactly duplicated columns up to an
+    # O(sqrt(eps)) positive value.  Only pay the structural duplicate scan in
+    # this suspicious diagonal regime; ordinary well-conditioned factors do
+    # not incur the O(rows * columns^2) check.
+    if minimum_diagonal <= sqrt(tau) * maximum_diagonal &&
+       _has_exact_duplicate_columns(Btil)
+        return false
+    end
+    return true
 end
 
 function _legacy_factor_has_numerical_rank(
     factor::LegacyLACholeskyFactor{T},
+    Btil::AbstractMatrix{T},
+    opts::SolverOptions{T},
 ) where {T}
     la_cholesky_rank_authoritative(factor) && return true
     return _cholesky_has_numerical_rank(
         la_factor_handle_matrix(factor),
+        Btil,
+        opts,
     )
 end
 
-function _la_factor_has_numerical_rank(
-    factor::AbstractLACholeskyFactor,
+# Compatibility probe used by la_backend_regressions without a workspace.
+# It applies the same explicit-precision policy with default SolverOptions.
+function _legacy_factor_has_numerical_rank(
+    factor::LegacyLACholeskyFactor{T},
+) where {T}
+    handle = la_factor_handle_matrix(factor)
+    return _cholesky_has_numerical_rank(
+        handle,
+        handle,
+        SolverOptions{T}(),
+    )
+end
+
+# Legacy BigFloat factors own an explicit rank declaration; a provider that
+# declares the rank authoritative is trusted without diagonal polling.
+function _legacy_factor_has_numerical_rank(
+    factor::LegacyLACholeskyFactor{BigFloat},
 )
+    return la_cholesky_rank_authoritative(factor)
+end
+
+function _la_factor_has_numerical_rank(
+    factor::AbstractLACholeskyFactor{T},
+    Btil::AbstractMatrix{T},
+    opts::SolverOptions{T},
+) where {T}
     la_cholesky_rank_authoritative(factor) && return true
     return _cholesky_has_numerical_rank(
         la_factor_handle_matrix(factor),
+        Btil,
+        opts,
     )
 end
 
@@ -106,13 +233,76 @@ function _has_exact_duplicate_columns(matrix::AbstractMatrix)
     return false
 end
 
+"""
+    _copy_lower_triangle!(destination, source) -> destination
+
+Copy the lower triangle into preallocated workspace storage without touching
+the upper triangle. Equality Cholesky and pivot consumers read only the lower
+authoritative triangle, so a full copy can smuggle poisoned or stale upper
+entries into the factor buffer; this helper keeps that storage unreachable.
+BigFloat entries are deep-copied into independent MPFR objects, and the
+Float32/Float64 fast path remains allocation-free.
+"""
+function _copy_lower_triangle!(
+    destination::AbstractMatrix{BigFloat},
+    source::AbstractMatrix{BigFloat},
+)
+    axes(destination) == axes(source) ||
+        throw(DimensionMismatch(
+            "lower-triangle copy arrays must have matching axes",
+        ))
+    dimension = size(source, 1)
+    size(source, 2) == dimension ||
+        throw(DimensionMismatch("lower-triangle copy source must be square"))
+    @inbounds for column in 1:dimension
+        for row in column:dimension
+            MA.operate_to!(
+                destination[row, column],
+                copy,
+                source[row, column],
+            )
+        end
+    end
+    return destination
+end
+
+function _copy_lower_triangle!(
+    destination::AbstractMatrix,
+    source::AbstractMatrix,
+)
+    axes(destination) == axes(source) ||
+        throw(DimensionMismatch(
+            "lower-triangle copy arrays must have matching axes",
+        ))
+    dimension = size(source, 1)
+    size(source, 2) == dimension ||
+        throw(DimensionMismatch("lower-triangle copy source must be square"))
+    if eltype(destination) <: Union{Float32,Float64} &&
+       destination isa StridedMatrix &&
+       source isa StridedMatrix
+        @inbounds for column in 1:dimension
+            @simd for row in column:dimension
+                destination[row, column] = source[row, column]
+            end
+        end
+    else
+        @inbounds for column in 1:dimension
+            for row in column:dimension
+                destination[row, column] = source[row, column]
+            end
+        end
+    end
+    return destination
+end
+
 function _copy_schur_factor_buffer!(
     destination::AbstractMatrix,
     source::AbstractMatrix,
     lower_only::Bool,
 )
-    copy_owned!(destination, source)
-    return destination
+    return lower_only ?
+           _copy_lower_triangle!(destination, source) :
+           copy_owned!(destination, source)
 end
 
 @inline function _requested_accuracy(opts::SolverOptions{T}) where {T}
@@ -124,9 +314,19 @@ function _equality_qr_relative_tolerance(
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
 ) where {T}
-    dimension_floor = T(max(size(Btil)...)) * eps(T)
-    accuracy_floor = min(sqrt(eps(T)), _requested_accuracy(opts))
-    return max(dimension_floor, accuracy_floor)
+    # QR factors the generally rectangular Btil directly.  Its precision
+    # check must therefore inspect the full operand rather than applying the
+    # square, lower-authoritative Cholesky-factor contract.
+    tau = _equality_cholesky_rank_tau(
+        Btil,
+        Btil,
+        opts;
+        factor_authoritative_lower=false,
+    )
+    tau === nothing && throw(ArgumentError(
+        "equality QR operand has nonuniform arithmetic precision",
+    ))
+    return tau
 end
 
 function _equality_qr_allowed(
@@ -354,17 +554,7 @@ function _copy_schur_factor_buffer!(
         copyto!(destination, source)
         return destination
     end
-    dimension = size(source, 1)
-    size(source, 2) == dimension ||
-        throw(DimensionMismatch("Schur source must be square"))
-    size(destination) == size(source) ||
-        throw(DimensionMismatch("Schur buffers must have matching dimensions"))
-    @inbounds for column in 1:dimension
-        @simd for row in column:dimension
-            destination[row, column] = source[row, column]
-        end
-    end
-    return destination
+    return _copy_lower_triangle!(destination, source)
 end
 
 """
@@ -380,10 +570,10 @@ Factor the current Schur complement `ws.S` (accumulated by
 - If `cholesky!` on `Q` fails (rank-deficient `B`, e.g. duplicated
   equality rows — §T3), automatic mode uses rank-revealing QR. Forced
   normal-equation mode retains pivoted Cholesky (`RowMaximum()`), which detects
-  the rank and gives a consistent least-norm solve for `dy` (verified against
-  Julia's `CholeskyPivoted \\` behavior on a synthetic rank-deficient
-  case during development — it drops the dependent direction cleanly
-  rather than producing `NaN`/throwing).
+  the rank and gives a consistent least-norm solve for `dy`. A successful
+  unpivoted Cholesky is accepted only when its relative lower diagonal clears
+  the explicit-precision threshold, so a near-dependent or exactly duplicated
+  equality basis is never reported as full-rank evidence.
 """
 function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     ws.arrow === nothing || return factor_arrow_kkt!(ws, prob, opts)
@@ -701,6 +891,9 @@ function _factor_arrow_equality_system!(
             opts.equality_solver === :auto &&
             ws.Qchol isa EqualityQRFactor{T}
         )
+    # A prior provider factor may borrow ws.Qbuf, so release it before the
+    # buffer is overwritten by the next iteration's Gram and factorization.
+    ws.Qchol = nothing
     if direct_qr
         ws.equality_gram_kernel = :not_formed_qr
         qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
@@ -715,7 +908,7 @@ function _factor_arrow_equality_system!(
             (gram_finished - gram_started) / 1.0e9
         factor_started = gram_finished
 
-        copy_owned!(ws.Qbuf, ws.Q)
+        _copy_lower_triangle!(ws.Qbuf, ws.Q)
         legacy_provider_factor =
             ws.la_backend isa LegacyLABackend
         legacy_factor = if legacy_provider_factor
@@ -725,13 +918,17 @@ function _factor_arrow_equality_system!(
             nothing
         end
         if legacy_factor !== nothing &&
-           _legacy_factor_has_numerical_rank(legacy_factor)
+           _legacy_factor_has_numerical_rank(
+               legacy_factor,
+               ws.Btil,
+               opts,
+           )
             ws.Qchol = legacy_factor
         elseif legacy_provider_factor
             # `kchol!` may have partially overwritten the factor buffer
             # before reporting failure. Restore the authoritative Gram matrix
             # before the only plan-authorized solver-level fallback.
-            copy_owned!(ws.Qbuf, ws.Q)
+            _copy_lower_triangle!(ws.Qbuf, ws.Q)
             ws.la_fallback_reason = :la_equality_factor_failed
             if _la_equality_qr_fallback_allowed(ws, opts)
                 qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
@@ -766,13 +963,13 @@ function _factor_arrow_equality_system!(
                 )
             end
         else
-            T === BigFloat && copy_owned!(ws.Qbuf, ws.Q)
+            T === BigFloat && _copy_lower_triangle!(ws.Qbuf, ws.Q)
             factor = LinearAlgebra.cholesky!(
                 Symmetric(ws.Qbuf, :L);
                 check=false,
             )
             if issuccess(factor) &&
-               _cholesky_has_numerical_rank(factor)
+               _cholesky_has_numerical_rank(factor, ws.Btil, opts)
                 ws.Qchol = factor
             elseif opts.equality_solver === :auto &&
                    _equality_qr_allowed(ws.Btil, opts)
@@ -795,7 +992,7 @@ function _factor_arrow_equality_system!(
                     )
                 end
             else
-                copy_owned!(ws.Qbuf, ws.Q)
+                _copy_lower_triangle!(ws.Qbuf, ws.Q)
                 pivoted = LinearAlgebra.cholesky(
                     Symmetric(ws.Qbuf, :L),
                     LinearAlgebra.RowMaximum();
@@ -966,7 +1163,7 @@ function _factor_sparse_schur_sdp!(
             ws.Q[row, column] *= equality_scaling[row] * equality_scaling[column]
             row != column && (ws.Q[column, row] = ws.Q[row, column])
         end
-        copy_owned!(ws.Qbuf, ws.Q)
+        _copy_lower_triangle!(ws.Qbuf, ws.Q)
         ok_q = la_chol!(ws.la_backend, ws.Qbuf)
         if ok_q
             ws.Qchol = ws.Qbuf isa Matrix{T} ?
@@ -1074,6 +1271,9 @@ function _factor_dense_kkt_native!(
                 opts.equality_solver === :auto &&
                 ws.Qchol isa EqualityQRFactor{T}
             )
+        # Release any prior provider factor before overwriting its borrowed
+        # ws.Qbuf storage with the current iteration's Gram.
+        ws.Qchol = nothing
         if direct_qr
             ws.equality_gram_kernel = :not_formed_qr
             started = time_ns()
@@ -1088,14 +1288,18 @@ function _factor_dense_kkt_native!(
             _build_equality_gram!(ws, opts)           # Q = B̃ᵀB̃
             phase_equality_gram += _elapsed_seconds(started)
             started = time_ns()
-            copy_owned!(ws.Qbuf, ws.Q)
+            _copy_lower_triangle!(ws.Qbuf, ws.Q)
             # Every selected LA backend owns its factor handle on migrated
             # dense routes. No backend may silently execute another provider
             # while retaining its planned identity.
             equality_factor =
                 la_cholesky_factor!(ws.la_backend, ws.Qbuf)
             if equality_factor !== nothing &&
-               _la_factor_has_numerical_rank(equality_factor)
+               _la_factor_has_numerical_rank(
+                   equality_factor,
+                   ws.Btil,
+                   opts,
+               )
                 ws.Qchol = equality_factor
             else
                 failure_policy =
@@ -1103,8 +1307,8 @@ function _factor_dense_kkt_native!(
                 if failure_policy === :provider_fail_closed
                     # Provider failure is an explicit A/B numerical failure;
                     # do not silently claim a provider result after generic
-                    # factorization. Existing QR/pivot policy remains the
-                    # authorized fallback and is recorded below.
+                    # factorization. Plan-authorized QR is the only fallback
+                    # and is recorded below.
                     ws.la_fallback_reason = :la_equality_factor_failed
                     _la_equality_qr_fallback_allowed(ws, opts) ||
                         throw(ArgumentError(
@@ -1129,7 +1333,7 @@ function _factor_dense_kkt_native!(
                     # StandardLA factor while continuing to report LegacyLA.
                     # Restore the possibly partially-mutated buffer, then
                     # use only the plan-authorized rank-revealing QR policy.
-                    copy_owned!(ws.Qbuf, ws.Q)
+                    _copy_lower_triangle!(ws.Qbuf, ws.Q)
                     ws.la_fallback_reason = :la_equality_factor_failed
                     if _la_equality_qr_fallback_allowed(ws, opts)
                         qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
@@ -1166,13 +1370,13 @@ function _factor_dense_kkt_native!(
                         )
                     end
                 elseif failure_policy === :standard_compatibility
-                    copy_owned!(ws.Qbuf, ws.Q)
+                    _copy_lower_triangle!(ws.Qbuf, ws.Q)
                     Cq = LinearAlgebra.cholesky!(
                         Symmetric(ws.Qbuf, :L);
                         check=false,
                     )
                     if issuccess(Cq) &&
-                       _cholesky_has_numerical_rank(Cq)
+                       _cholesky_has_numerical_rank(Cq, ws.Btil, opts)
                         ws.Qchol = Cq
                     elseif _la_equality_qr_fallback_allowed(ws, opts)
                         # Avoid the redundant pivoted-normal-equation probe. It
@@ -1195,7 +1399,11 @@ function _factor_dense_kkt_native!(
                             )
                         end
                     else
-                        copy_owned!(ws.Qbuf, ws.Q)
+                        # A successful unpivoted Cholesky is not automatic
+                        # full-rank evidence. Without plan-authorized QR,
+                        # explicit normal equations still follow the original
+                        # plan-authorized pivoted Cholesky path below.
+                        _copy_lower_triangle!(ws.Qbuf, ws.Q)
                         pivoted = LinearAlgebra.cholesky(
                             Symmetric(ws.Qbuf, :L),
                             LinearAlgebra.RowMaximum();

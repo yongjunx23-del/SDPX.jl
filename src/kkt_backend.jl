@@ -445,6 +445,25 @@ function _solve_refinement_correction!(
     )
 end
 
+function _solve_refinement_correction!(
+    ::DenseAugmentedKKTBackend,
+    ws::Workspace{T},
+    n::Int,
+    primal_rhs::AbstractVector{T},
+    equality_rhs::AbstractVector{T},
+    primal_direction::AbstractVector{T},
+    equality_direction::AbstractVector{T},
+) where {T}
+    return correct_dense_augmented_kkt!(
+        ws,
+        n,
+        primal_rhs,
+        equality_rhs,
+        primal_direction,
+        equality_direction,
+    )
+end
+
 function refine!(
     backend::Union{DenseCholeskyBackend,DenseAugmentedKKTBackend,SparseSchurBackend},
     ws::Workspace{T},

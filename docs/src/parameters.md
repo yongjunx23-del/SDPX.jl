@@ -72,10 +72,9 @@ non-finite.
 | `working_precision_policy` | `:auto` | May start lower and retry at `precision_bits` unless certification passes. |
 | `minimum_working_precision_bits` | `192` | Lower bound for the staged BigFloat selector. |
 | `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`; cannot recover lost digits. |
-| `equilibrate` | `false` | Expert compatibility flag; public `scaling=:auto` takes precedence. |
 | `scaling` | `:auto` | LP geometric scaling and adaptive-pass Ruiz congruence/variable scaling for SDP. |
 | `sparse` | `:auto` | Storage selection during ingestion; distinguishes sparse coefficients from aggregate PSD/Schur density. |
-| `formulation` | `:auto` | Static dense KKT formulation selection (`:normal_equations`, `:augmented`, `:primal`; `:dual` fails closed). |
+| `formulation` | `:auto` | Static dense KKT formulation selection (`:normal_equations`, `:augmented`, `:primal`). |
 | `linear_algebra_backend` | `:auto` | Resolves once during planning: `:standard`, `:bfla`, `:multifloat`, `:legacy`. |
 | `extended_precision_blas` | type-dependent | Conservative `:auto` for fixed-width extended types and BigFloat, `:off` for Float64. |
 | `extended_precision_memory_fraction` | `0.10` | Maximum fraction of available memory for packed extended-precision panels. |
@@ -84,8 +83,6 @@ non-finite.
 | `mixed_precision_refine_max_steps` | `32` | Maximum correction solves before native fallback. |
 | `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of available memory for Float64 factors and conversion scratch. |
 | `equality_solver` | `:auto` | Normal equations with rank-revealing QR fallback when factor diagnostics justify it. |
-| `q3_direction` | `:hkm` | Compact fixed-trace Q3 search direction; `:nt` is the explicit research opt-in. |
-| `q3_gram_strategy` | `:auto` | Output-tile or row-bin scheduling for the extended-precision equality Gram. |
 | `force_gc` | `false` | Run a full collection after each accepted iteration and return free allocator pages where supported. |
 
 Unless `refine_tol` is explicitly positive, dense mixed-precision refinement
@@ -94,12 +91,13 @@ normally targets `64 * eps(T)`; the large regularized sparse Float64 SDP route
 uses a looser tolerance retaining two guard digits beyond the requested
 certificate. A positive user-supplied `refine_tol` always takes precedence.
 
-Sparse equilibration rebuilds derived sparse caches after scaling, so the
-following combination is supported:
+Sparse equilibration rebuilds derived sparse caches after scaling. Use
+`scaling=:equilibrate` (or the legacy `sdp(...; equilibrate=true)` keyword,
+which maps to it):
 
 ```julia
 prob = ingest(c, A, C, B, b; sparse=true)
-opts = SolverOptions{T}(equilibrate=true)
+opts = SolverOptions{T}(scaling=:equilibrate)
 ```
 
 Warm starts are supplied in original input coordinates. SDPX maps `x0`, `X0`,

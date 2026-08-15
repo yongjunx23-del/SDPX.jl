@@ -59,7 +59,66 @@ function v05_mismatched_la_config(provider::Symbol, arithmetic::Symbol)
     )
 end
 
+function v05_raw_float32_sdp_problem()
+    source = SDPX.ingest(
+        [1.0],
+        [reshape([1.0], 1, 1, 1)],
+        [zeros(1, 1)],
+        zeros(1, 0),
+        Float64[];
+        sparse=false,
+        verbosity=0,
+    )
+    cons = SDPX.DenseCons{Float32}(
+        [Float32.(matrix) for matrix in source.cons.Av],
+    )
+    return SDPX.SDPProblem{Float32}(
+        Float32.(source.c),
+        [Float32.(matrix) for matrix in source.C],
+        Float32.(source.B),
+        Float32.(source.b),
+        cons,
+        source.dims,
+        source.structure,
+    )
+end
+
 @testset "v0.5 core invariants" begin
+    @testset "planning rejects manually constructed unsupported arithmetic" begin
+        raw = v05_raw_float32_sdp_problem()
+        @test raw isa SDPX.SDPProblem{Float32}
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            raw,
+            SDPX.SolverOptions{Float32}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+            ),
+        )
+        @test_throws ArgumentError SDPX.solve!(raw, SDPX.SolverOptions{Float32}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            verbosity=0,
+        ))
+
+        raw_cone = SDPX.SOCConstraint{Float32}(
+            reshape(Float32[1], 1, 1),
+            Float32[0],
+        )
+        raw_soc = SDPX.ConicProblem{Float32}(
+            Float32[1],
+            [raw_cone],
+            zeros(Float32, 0, 1),
+            Float32[],
+            1,
+        )
+        @test_throws ArgumentError SDPX.plan_native_soc(
+            raw_soc,
+            SDPX.SolverOptions{Float32}(verbosity=0),
+        )
+    end
+
     @testset "typed formulation precedes backend planning" begin
         dense_problem, _ = v05_scalar_certificate_fixture()
         dense_plan = SDPX.Experimental.build_execution_plan(
@@ -150,9 +209,8 @@ end
             lp_plan.classification.equalities,
         ) === lp_plan.kkt_backend
 
-        # Dualization has analysis metadata but no production transform. It
-        # must fail before backend/provider planning instead of silently
-        # executing the primal route.
+        # Dualization has analysis metadata but is not a production solve
+        # option; an explicit request must fail before backend planning.
         @test_throws ArgumentError SDPX.Experimental.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(

@@ -58,7 +58,7 @@ end
     @test result.diagnostics.selected_algorithms.solver === :native_soc
     @test result.diagnostics.selected_algorithms.cone_representation ===
           :native_lorentz
-    @test result.lifted === nothing
+    @test !hasproperty(result, :lifted)
     @test PIPELINE_MOI.get(
         optimizer,
         PIPELINE_MOI.ConstraintPrimal(),
@@ -1572,6 +1572,8 @@ end
         32,
         28 * 1024^3,
     ) == 0.15
+    # The dimension-only default remains the legacy partial report because a
+    # sparse Float64 problem can still stream into dense task-local partials.
     task_large_budget = SDPX.schur_bin_report(
         Float64,
         6119,
@@ -1581,6 +1583,7 @@ end
     )
     @test task_large_budget.selected_bins == 25
     @test task_large_budget.capped
+    @test task_large_budget.assembly_mode === :partial_accumulators
     @test task_large_budget.memory_fraction == 0.25
     @test task_large_budget.memory_budget_bytes == 7 * 1024^3
     task_small_budget = SDPX.schur_bin_report(
@@ -1592,6 +1595,7 @@ end
     )
     @test task_small_budget.selected_bins == 8
     @test task_small_budget.capped
+    @test task_small_budget.assembly_mode === :partial_accumulators
     @test task_small_budget.memory_fraction == 0.15
     @test task_small_budget.memory_budget_bytes == floor(Int, 0.15 * 15 * 1024^3)
     small = SDPX.schur_bin_report(Float64, 200, 32, 8; free_memory_bytes=budget)
@@ -1600,7 +1604,6 @@ end
     @test !small.capped
     @test small.total_bytes == small.would_have_been_bytes
 
-    # A large m must cap, and must report both the actual and the avoided cost.
     large = SDPX.schur_bin_report(Float64, 6119, 32, 8; free_memory_bytes=budget)
     @test large.requested_bins == 8
     @test large.selected_bins < 8
@@ -1609,12 +1612,32 @@ end
     @test large.bytes_per_bin == 6119^2 * 8
     @test large.total_bytes == large.selected_bins * large.bytes_per_bin
 
+    # A known eligible DenseCons route opts into the zero-partial owner report.
+    owned = SDPX.schur_bin_report(
+        Float64,
+        6119,
+        32,
+        32;
+        free_memory_bytes=1,
+        dense_owner=true,
+    )
+    @test owned.selected_bins == 32
+    @test !owned.capped
+    @test owned.assembly_mode === :column_owned
+    @test owned.owner_tasks == 32
+    @test owned.total_bytes == 0
+    @test owned.would_have_been_bytes == 32 * 6119^2 * sizeof(Float64)
+
     # Bins never exceed the block count: more accumulators than blocks would be
     # pure waste.
     @test SDPX.schur_bin_report(Float64, 100, 3, 8).requested_bins == 3
 
-    # Single-threaded never reports capping — there is nothing to reduce.
+    # Single-threaded dense workspaces also store no partials, but execute the
+    # serial BLAS build rather than the multi-task column-owner kernel.
     @test !SDPX.schur_bin_report(Float64, 6119, 32, 1).capped
+    @test SDPX.schur_bin_report(Float64, 6119, 32, 1).assembly_mode === :serial
+    @test SDPX.schur_bin_report(Float64, 6119, 32, 1).owner_tasks == 1
+    @test SDPX.schur_bin_report(Float64, 6119, 32, 1).total_bytes == 0
 
     # Wider arithmetic makes each accumulator larger, so it caps at least as
     # aggressively as Float64 at the same size.
@@ -1659,9 +1682,13 @@ end
             problem.dims.L,
             1,
         )
-        # Grows with the thread count, which is what makes it the right check
-        # for a thread-driven memory blowup.
-        @test SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 8) >
+        # Eligible dense Float64 owner mode removes the per-bin m²
+        # partials entirely, and even a single-thread workspace stores no
+        # partial (`schur_nbins == 1` allocates none). The floor therefore
+        # stops growing with thread count for Float64. Wider fixed-
+        # extended arithmetic keeps the thread-scaled term, which is what
+        # makes it the right check for a thread-driven memory blowup there.
+        @test SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 8) ==
               SDPX.dense_workspace_floor_bytes(Float64, 500, 0, 8, 1)
         # Wider arithmetic needs more, not the same.
         @test SDPX.dense_workspace_floor_bytes(Float64x4, 500, 0, 8, 1) >
@@ -1708,7 +1735,9 @@ end
         arrow = SDPX.arrow_workspace_floor_bytes(Float64, problem, 8)
         dense = SDPX.dense_workspace_floor_bytes(Float64, variables, 0, blocks, 8)
         @test arrow > 0                      # the decomposition was recognised
-        @test arrow < dense ÷ 50             # measured ratio here is ~168x
+        # Dense Float64 no longer includes thread-count Schur replicas, but
+        # the compact arrow floor must still remain decisively smaller.
+        @test arrow < dense ÷ 20
         # It scales with the shared dimension, not with m: doubling the block
         # count must not square the estimate the way the dense figure does.
         @test arrow < 16 * variables * shared * sizeof(Float64)

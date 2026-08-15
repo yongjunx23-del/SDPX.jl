@@ -4,7 +4,7 @@ title: "SDPX.jl: a native Julia solver for high-precision conic optimization"
 abstract: >-
   SDPX.jl is a native Julia solver for linear, second-order cone, and
   semidefinite programs. It uses primal-dual interior-point methods and
-  supports Float64, BigFloat, MultiFloats, and DoubleFloats arithmetic,
+  supports Float64, BigFloat, and MultiFloats arithmetic,
   structured sparse and dense KKT paths, original-coordinate certificates,
   and MathOptInterface/JuMP integration. It is a substantial rewrite of
   SDPJSolver.jl and is motivated by the S-matrix/EFT, modular, and lattice

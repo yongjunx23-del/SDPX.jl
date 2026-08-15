@@ -80,6 +80,7 @@ struct PreparedStructure{T}
     equality_map::EqualityPresolveMap{T}
     equality_report::PresolveReport
     fixed_trace::FixedTraceAnalysis{T}
+    execution_plan::Union{Nothing,ExecutionPlan}
     preparation_time::Float64
 end
 
@@ -249,12 +250,10 @@ function _prepared_option_signature(options::SolverOptions)
         presolve_tolerance=options.presolve_tolerance,
         scaling=options.scaling,
         formulation=options.formulation,
-        chordal_decomposition=options.chordal_decomposition,
         equality_solver=options.equality_solver,
         linear_algebra_backend=options.linear_algebra_backend,
         extended_precision_blas=options.extended_precision_blas,
         mixed_precision_kkt=options.mixed_precision_kkt,
-        q3_gram_strategy=options.q3_gram_strategy,
         threads=options.threads,
     )
 end
@@ -398,6 +397,20 @@ function prepare(
     preprocessed = preprocess(owned, options)
     reduced, equality_map, equality_report =
         presolve_equalities(preprocessed.problem, options)
+    reusable_plan = !preprocessed.inconsistent &&
+                    !equality_report.inconsistent &&
+                    _prepared_plan_reusable(reduced, options)
+    execution_plan = if reusable_plan
+        execution_route = resolve_execution_route(
+            AutoPlanner(),
+            reduced,
+            options,
+            equality_evidence=equality_map.planning_evidence,
+        )
+        build_execution_plan(AutoPlanner(), reduced, execution_route)
+    else
+        nothing
+    end
     structure = PreparedStructure{T}(
         owned,
         structure_fingerprint(owned, options),
@@ -407,6 +420,7 @@ function prepare(
         equality_map,
         equality_report,
         analyze_fixed_trace(owned),
+        execution_plan,
         time() - started,
     )
     state = SolveState{T}(
@@ -423,6 +437,22 @@ function prepare(
         0,
     )
     return PreparedSolver{T}(structure, state, options)
+end
+
+"""Whether the mature planner may be frozen for an objective/RHS-only session.
+
+The pure-LP auto parameter selector reads the equality right-hand side through
+`lp_initial_scale_indicator`, so its plan is not invariant under RHS-only
+changes. Every other mature planning decision reads structure and immutable
+constant data only.
+"""
+function _prepared_plan_reusable(
+    reduced::SDPProblem{T},
+    options::SolverOptions{T},
+) where {T}
+    all(==(1), reduced.dims.k) && options.parameter_policy === :auto &&
+        return false
+    return true
 end
 
 function _prepared_objective(
@@ -788,6 +818,7 @@ function _prepared_problem(
         equality_map=prepared.structure.equality_map,
         equality_report=equality_report,
         precision_bits=_preprocess_precision_bits(T),
+        execution_plan=prepared.structure.execution_plan,
     )
     return original, prepared_data, reduced_c, reduced_b, objective_offset
 end
@@ -835,12 +866,13 @@ function solve!(
     rhs=nothing,
     warm_start=:previous,
 ) where {T}
-    return solve!(
+    return _solve_prepared!(
         prepared,
         prepared.structure.problem;
         objective=objective,
         rhs=rhs,
         warm_start=warm_start,
+        validate_external_structure=false,
     )
 end
 
@@ -851,6 +883,24 @@ function solve!(
     objective=nothing,
     rhs=nothing,
     warm_start=:previous,
+) where {T}
+    return _solve_prepared!(
+        prepared,
+        problem;
+        objective,
+        rhs,
+        warm_start,
+        validate_external_structure=true,
+    )
+end
+
+function _solve_prepared!(
+    prepared::PreparedSolver{T},
+    problem::SDPProblem{T};
+    objective=nothing,
+    rhs=nothing,
+    warm_start=:previous,
+    validate_external_structure::Bool,
 ) where {T}
     state = prepared.state
     trylock(state.lock) || throw(ArgumentError(
@@ -866,7 +916,13 @@ function solve!(
     end
     state.busy = true
     try
-        _assert_prepared_structure!(prepared, problem)
+        # The no-argument solve uses the immutable structure owned by the
+        # PreparedSolver itself. Rehashing every coefficient on each repeated
+        # objective/RHS solve proves nothing new and can dominate small solves.
+        # An explicitly supplied external problem still receives the complete
+        # structural fingerprint check.
+        validate_external_structure &&
+            _assert_prepared_structure!(prepared, problem)
         selected_objective = objective === nothing ? problem.c : objective
         selected_rhs = rhs === nothing ? problem.b : rhs
         solve_problem, prepared_data, reduced_c, reduced_b, objective_offset =

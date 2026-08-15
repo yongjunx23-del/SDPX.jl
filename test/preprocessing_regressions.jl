@@ -141,7 +141,6 @@ end
                 SDPX.SolverOptions{T}(
                     verbosity=0,
                     presolve_fixed_variables=false,
-                    chordal_decomposition=:off,
                 ),
             )
             @test reduced.problem.dims.n == 2
@@ -161,7 +160,6 @@ end
                     verbosity=0,
                     precision_bits=192,
                     presolve_fixed_variables=false,
-                    chordal_decomposition=:off,
                 ),
             )
             @test reduced.problem.dims.n == 2
@@ -191,7 +189,6 @@ end
             SDPX.SolverOptions{Float64}(
                 verbosity=0,
                 presolve_fixed_variables=false,
-                chordal_decomposition=:off,
             ),
         )
         @test diagnosis.inconsistent
@@ -207,7 +204,6 @@ end
             SDPX.SolverOptions{Float64}(
                 verbosity=0,
                 presolve_fixed_variables=false,
-                chordal_decomposition=:off,
             ),
         )
         @test reduced.report.near_duplicate_equalities >= 1
@@ -245,7 +241,6 @@ end
             SDPX.SolverOptions{Float64}(
                 verbosity=0,
                 presolve_fixed_variables=false,
-                chordal_decomposition=:off,
             ),
         )
         @test reduced.problem.dims.n == equalities - 2

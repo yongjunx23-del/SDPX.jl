@@ -36,7 +36,6 @@ Base.@kwdef struct SolveOptions
     algorithm::Any = :auto
     sparse::Any = :auto
     formulation::Any = :auto
-    chordal_decomposition::Any = :auto
     equality_solver::Any = :auto
     linear_algebra_backend::Any = :auto
     working_precision_policy::Any = :auto

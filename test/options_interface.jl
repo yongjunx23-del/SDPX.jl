@@ -41,3 +41,15 @@ using Test
         ϵ_gap=1e-9,
     )
 end
+
+@testset "compatibility no-op options removed" begin
+    options = SDPX.SolverOptions{Float64}()
+    @test !hasproperty(options, :q3_gram_strategy)
+    @test !hasproperty(options, :q3_direction)
+    @test_throws MethodError SDPX.SolverOptions{Float64}(
+        q3_gram_strategy=:auto,
+    )
+    @test_throws MethodError SDPX.SolverOptions{Float64}(
+        q3_direction=:hkm,
+    )
+end

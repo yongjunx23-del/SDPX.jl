@@ -190,6 +190,11 @@ end
 """Whether an optional extension recognizes `T` as a MultiFloat family."""
 is_multifloat_arithmetic(::Type) = false
 
+"""Whether `T` is a maintained public SDPX solve arithmetic."""
+is_supported_arithmetic(::Type) = false
+is_supported_arithmetic(::Type{Float64}) = true
+is_supported_arithmetic(::Type{BigFloat}) = true
+
 """Check the authoritative lower triangle without inspecting stale upper data."""
 function _all_finite_lower(A::AbstractMatrix)
     rows, columns = size(A)
@@ -214,76 +219,23 @@ function _bigfloat_uniform_precision_bits(A::AbstractArray{BigFloat})
 end
 
 """
-Validate the caller-owned lower triangle before an in-place BFLA factorization.
+Return the explicit precision carried by a BFLA operand without duplicating
+the provider's safe operand validation.
 
-The numerical provider is allowed to borrow and overwrite this storage, but
-distinct authoritative entries must not share one mutable MPFR object. The
-upper triangle is deliberately not inspected here.
+BFLA's public factorization APIs already validate finiteness, uniform MPFR
+precision, and independently-owned mutable entries before mutation.  SDPX
+only needs an O(1) precision snapshot for the returned-factor contract; doing
+another `IdDict` scan here made each Newton factorization pay twice for the
+same ownership proof.
 """
-function _validate_bfla_lower_operand(
+function _bfla_operand_precision_hint(
     A::AbstractMatrix{BigFloat},
     operation::AbstractString,
 )
     size(A, 1) == size(A, 2) || throw(ArgumentError(
         "$(operation) requires a square matrix",
     ))
-    seen = IdDict{BigFloat,Nothing}()
-    precision_bits = nothing
-    @inbounds for column in axes(A, 2), row in column:size(A, 1)
-        value = A[row, column]
-        isfinite(value) || throw(ArgumentError(
-            "$(operation) input contains non-finite authoritative lower storage",
-        ))
-        bits = precision(value)
-        if precision_bits === nothing
-            precision_bits = bits
-        elseif bits != precision_bits
-            throw(ArgumentError(
-                "$(operation) input has mixed lower-triangle BigFloat precision",
-            ))
-        end
-        haskey(seen, value) && throw(ArgumentError(
-            "$(operation) requires independently-owned lower-triangle entries",
-        ))
-        seen[value] = nothing
-    end
-    return precision_bits
-end
-
-"""
-Validate the caller-owned dense square matrix before an in-place BFLA LU
-factorization.  Unlike the symmetric Cholesky/LDLT seam, every entry of the LU
-operand is authoritative, so finiteness, uniform precision, and independent
-MPFR entry ownership are checked across the full matrix.
-"""
-function _validate_bfla_dense_operand(
-    A::AbstractMatrix{BigFloat},
-    operation::AbstractString,
-)
-    size(A, 1) == size(A, 2) || throw(ArgumentError(
-        "$(operation) requires a square matrix",
-    ))
-    seen = IdDict{BigFloat,Nothing}()
-    precision_bits = nothing
-    @inbounds for column in axes(A, 2), row in axes(A, 1)
-        value = A[row, column]
-        isfinite(value) || throw(ArgumentError(
-            "$(operation) input contains non-finite authoritative storage",
-        ))
-        bits = precision(value)
-        if precision_bits === nothing
-            precision_bits = bits
-        elseif bits != precision_bits
-            throw(ArgumentError(
-                "$(operation) input has mixed BigFloat precision",
-            ))
-        end
-        haskey(seen, value) && throw(ArgumentError(
-            "$(operation) requires independently-owned entries",
-        ))
-        seen[value] = nothing
-    end
-    return precision_bits
+    return isempty(A) ? nothing : precision(first(A))
 end
 
 """Optional setup hook; an extension returns its concrete provider payload."""
@@ -668,7 +620,7 @@ function la_cholesky_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
 end
 
 function la_cholesky_factor!(backend::BFLALABackend, A::AbstractMatrix{BigFloat})
-    input_precision = _validate_bfla_lower_operand(A, "BFLA Cholesky")
+    input_precision = _bfla_operand_precision_hint(A, "BFLA Cholesky")
     payload = la_bfla_cholesky_factor!(backend.provider, A)
     payload === nothing && return nothing
     factors = la_provider_factor_matrix(payload)
@@ -792,12 +744,7 @@ function la_lu_factor!(backend::MultiFloatLABackend, A::AbstractMatrix)
     all(isfinite, factors) || throw(ArgumentError(
         "MultiFloat LU provider returned non-finite factor storage",
     ))
-    diagnostics = la_provider_factor_diagnostics(payload)
-    diagnostics isa NamedTuple && hasproperty(diagnostics, :success) ||
-        throw(ArgumentError(
-            "MultiFloat LU provider returned no factor diagnostics",
-        ))
-    diagnostics.success || throw(ArgumentError(
+    la_provider_factor_status(payload) == 0 || throw(ArgumentError(
         "MultiFloat LU provider returned an unsuccessful factorization",
     ))
     return ProviderLALUFactor{eltype(A),typeof(payload),typeof(factors)}(
@@ -809,7 +756,7 @@ function la_lu_factor!(
     backend::BFLALABackend,
     A::AbstractMatrix{BigFloat},
 )
-    input_precision = _validate_bfla_dense_operand(A, "BFLA LU")
+    input_precision = _bfla_operand_precision_hint(A, "BFLA LU")
     input_precision === nothing && return nothing
     payload = la_bfla_lu_factor!(backend.provider, A)
     payload === nothing && return nothing
@@ -828,10 +775,10 @@ function la_lu_factor!(
     ))
     la_provider_factor_precision(payload) == input_precision ||
         throw(ArgumentError("BFLA LU provider factor precision does not match input"))
-    diagnostics = la_provider_factor_diagnostics(payload)
-    diagnostics isa NamedTuple || throw(ArgumentError(
-        "BFLA LU provider returned no factor diagnostics",
-    ))
+    # The extension returns a payload only after the public BFLA success gate.
+    # Full diagnostics are a cold observability query, not a hot-path status
+    # check; shape, finiteness, precision, and provider identity are validated
+    # independently above.
     return ProviderLALUFactor{BigFloat,typeof(payload),typeof(factors)}(
         payload,
         factors,
@@ -1073,7 +1020,7 @@ function la_ldlt_factor!(
     backend::BFLALABackend,
     A::AbstractMatrix{BigFloat},
 )
-    input_precision = _validate_bfla_lower_operand(A, "BFLA LDLT")
+    input_precision = _bfla_operand_precision_hint(A, "BFLA LDLT")
     payload = la_bfla_ldlt_factor!(backend.provider, A)
     payload === nothing && return nothing
     factors = la_provider_factor_matrix(payload)
@@ -1135,12 +1082,7 @@ function la_ldlt_factor!(
     _all_finite_lower(factors) || throw(ArgumentError(
         "MultiFloat LDLT provider returned non-finite factor storage",
     ))
-    diagnostics = la_provider_factor_diagnostics(payload)
-    diagnostics isa NamedTuple && hasproperty(diagnostics, :success) ||
-        throw(ArgumentError(
-            "MultiFloat LDLT provider returned no factor diagnostics",
-        ))
-    diagnostics.success || throw(ArgumentError(
+    la_provider_factor_status(payload) == 0 || throw(ArgumentError(
         "MultiFloat LDLT provider returned an unsuccessful factorization",
     ))
     # `blocks` is the provider-native length-n pivot grammar (1x1/2x2 markers
@@ -1617,15 +1559,22 @@ la_mul_owned!(backend::BFLALABackend, C, A, B, α, β) =
 la_mul_owned!(backend::BFLALABackend, C, A, B) =
     la_bfla_mul_owned!(backend.provider, C, A, B)
 
+"""
+Form `P'P` into the authoritative lower triangle of `S`.
+
+The upper triangle is unspecified and must not be read by a solver consumer.
+Providers may preserve it, poison it, or materialize it as an implementation
+detail; Cholesky, augmented assembly, and residual paths select `:L`
+explicitly.  This avoids a redundant O(n^2) mirror after every equality Gram.
+"""
 function la_syrk!(::StandardLABackend, S, P, α, β)
     if eltype(S) <: Union{Float32,Float64} &&
        S isa StridedMatrix && P isa StridedMatrix
         LinearAlgebra.BLAS.syrk!('L', 'T', α, P, β, S)
-        @inbounds for column in axes(S, 2), row in (column + 1):size(S, 1)
-            S[column, row] = S[row, column]
-        end
         return S
     end
+    # Generic LinearAlgebra may fill both triangles.  The solver contract is
+    # still lower-authoritative, so consumers cannot rely on that extra work.
     return LinearAlgebra.mul!(S, transpose(P), P, α, β)
 end
 la_syrk!(backend::LegacyLABackend, S, P, α, β) =
@@ -1657,7 +1606,7 @@ la_chol!(backend::LegacyLABackend, A) =
 la_chol!(backend::MultiFloatLABackend, A) =
     la_mfla_chol!(backend.provider, A)
 function la_chol!(backend::BFLALABackend, A::AbstractMatrix{BigFloat})
-    _validate_bfla_lower_operand(A, "BFLA Cholesky")
+    _bfla_operand_precision_hint(A, "BFLA Cholesky")
     return la_bfla_chol!(backend.provider, A)
 end
 
@@ -1779,6 +1728,8 @@ la_provider_factor_precision(::Any) =
     throw(ArgumentError("provider factor handle does not expose precision"))
 la_provider_factor_diagnostics(::Any) =
     throw(ArgumentError("provider factor handle does not expose diagnostics"))
+la_provider_factor_status(::Any) =
+    throw(ArgumentError("provider factor handle does not expose status"))
 la_provider_factor_solve!(::Any, rhs) =
     throw(ArgumentError("provider factor handle does not implement solve"))
 la_provider_ldlt_inertia(::Any) =

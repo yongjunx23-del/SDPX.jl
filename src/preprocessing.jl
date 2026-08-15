@@ -1304,10 +1304,7 @@ function _formulation_cost(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T
     primal_bytes = scalar_bytes * primal_kkt * primal_kkt
     dual_bytes = scalar_bytes * dual_kkt * dual_kkt
     selected = :primal
-    reason = if opts.formulation === :dual
-        "Dualization was requested, but the transformation and high-precision " *
-        "solution map remain analysis-only."
-    elseif dual_kkt < primal_kkt && dual_bytes < primal_bytes
+    reason = if dual_kkt < primal_kkt && dual_bytes < primal_bytes
         "The estimator favors the dual form, but automatic dualization is " *
         "disabled until a typed reconstruction path is benchmarked."
     else
@@ -1342,29 +1339,16 @@ analyze(
     context::PreprocessContext{T},
 ) where {T} = analyze(stage, context, SolverOptions{T}())
 
-function _chordal_cost(prob::SDPProblem, opts::SolverOptions)
+function _chordal_cost(prob::SDPProblem)
     original_storage = sum(
         dimension -> dimension * (dimension + 1) ÷ 2,
         prob.dims.k;
         init=0,
     )
-    opts.chordal_decomposition === :off &&
-        return ChordalCostEstimate(
-            false,
-            original_storage,
-            original_storage,
-            0,
-            maximum(prob.dims.k; init=0),
-            0,
-            0,
-            false,
-            "Chordal analysis was disabled.",
-        )
     # Avoid turning an analysis-only diagnostic into a new ingestion
     # bottleneck on large dense-aggregate lattice models.
-    if opts.chordal_decomposition === :auto &&
-       (prob.structure.block_pattern_density >= 0.75 ||
-        prob.structure.coefficient_nnz > 2_000_000)
+    if prob.structure.block_pattern_density >= 0.75 ||
+        prob.structure.coefficient_nnz > 2_000_000
         return ChordalCostEstimate(
             false,
             original_storage,
@@ -1426,7 +1410,7 @@ analyze(
     ::ChordalAnalysisStage,
     context::PreprocessContext{T},
     opts::SolverOptions{T},
-) where {T} = _chordal_cost(context.problem, opts)
+) where {T} = _chordal_cost(context.problem)
 
 analyze(
     stage::ChordalAnalysisStage,
@@ -1696,7 +1680,7 @@ function preprocess(
         stages,
         _stage_report(
             :chordal_analysis,
-            opts.chordal_decomposition !== :off,
+            true,
             false,
             chordal.rejection_reason,
             formulation_size,

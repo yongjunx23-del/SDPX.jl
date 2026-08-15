@@ -71,11 +71,34 @@ Common options:
   --max-iterations=N       solver iteration cap (default: 500)
   --time-limit-seconds=S   per-solve limit (default: 43200)
   --scaling=auto|none|equilibrate (SOC mode requires none)
-  --q3-gram-strategy=auto|output_tiles|row_bins
-  --q3-direction=hkm|nt   native Q3 search direction (default: hkm)
   --synthetic              generate a tiny fixed-trace model; no --model needed
   --synthetic-blocks=N     synthetic block count (default: 2)
 """
+
+const _CLI_ALLOWED_KEYS = (
+    "model",
+    "synthetic",
+    "case",
+    "mode",
+    "arithmetic",
+    "threads",
+    "reps",
+    "warmup",
+    "preflight",
+    "preflight-only",
+    "expected-hash",
+    "output",
+    "manifest",
+    "tolerance",
+    "precision-bits",
+    "max-iterations",
+    "time-limit-seconds",
+    "scaling",
+    "synthetic-blocks",
+    "sparse",
+    "verbosity",
+    "release",
+)
 
 struct Config
     case::String
@@ -96,8 +119,6 @@ struct Config
     max_iterations::Int
     time_limit_seconds::Float64
     scaling::Symbol
-    q3_gram_strategy::Symbol
-    q3_direction::Symbol
     synthetic::Bool
     synthetic_blocks::Int
     sparse::Union{Bool,Symbol}
@@ -149,6 +170,12 @@ function parse_cli(args=ARGS)
         index += 1
     end
 
+    unknown = sort!(collect(keys(values)))
+    filter!(key -> !(key in _CLI_ALLOWED_KEYS), unknown)
+    isempty(unknown) || _usage_error(
+        "unknown option(s): --" * join(unknown, ", --"),
+    )
+
     model = get(values, "model", get(ENV, "CSDR_MODEL", ""))
     isempty(model) && !isempty(positional) && (model = first(positional))
     synthetic = _parse_bool(get(values, "synthetic", get(ENV, "SDPX_SYNTHETIC", "false")))
@@ -185,28 +212,6 @@ function parse_cli(args=ARGS)
     scaling = Symbol(lowercase(get(values, "scaling", get(ENV, "SDPX_SCALING", "auto"))))
     scaling in (:auto, :none, :equilibrate) ||
         _usage_error("scaling must be auto, none, or equilibrate")
-    q3_gram_strategy = Symbol(lowercase(get(
-        values,
-        "q3-gram-strategy",
-        get(ENV, "SDPX_Q3_GRAM_STRATEGY", "auto"),
-    )))
-    q3_gram_strategy in (:auto, :output_tiles, :row_bins) ||
-        _usage_error("q3-gram-strategy must be auto, output_tiles, or row_bins")
-    q3_direction = Symbol(lowercase(get(
-        values,
-        "q3-direction",
-        get(ENV, "SDPX_Q3_DIRECTION", "hkm"),
-    )))
-    q3_direction in (:hkm, :nt) ||
-        _usage_error("q3-direction must be hkm or nt")
-    if mode === :sdp
-        q3_gram_strategy === :auto || _usage_error(
-            "q3-gram-strategy is a SOCP-only control and must remain auto in SDP mode",
-        )
-        q3_direction === :hkm || _usage_error(
-            "q3-direction is a SOCP-only control and must remain hkm in SDP mode",
-        )
-    end
     synthetic_blocks = parse(Int, get(values, "synthetic-blocks", get(ENV, "SDPX_SYNTHETIC_BLOCKS", "2")))
     sparse = _parse_sparse(get(values, "sparse", get(ENV, "SDPX_SPARSE", "true")))
     verbosity = parse(Int, get(values, "verbosity", get(ENV, "SDPX_VERBOSITY", "0")))
@@ -252,7 +257,6 @@ function parse_cli(args=ARGS)
         expected_hash,
         output, manifest, tolerance, precision_bits, max_iterations,
         time_limit_seconds, scaling,
-        q3_gram_strategy, q3_direction,
         synthetic, synthetic_blocks, sparse, verbosity,
     )
 end
@@ -844,8 +848,6 @@ function _solver_options(::Type{T}, config::Config) where {T}
         timing=true,
         diagnostics=true,
         sparse=config.sparse,
-        q3_gram_strategy=config.q3_gram_strategy,
-        q3_direction=config.q3_direction,
         parameter_policy=:auto,
         parameter_strategy=:adaptive,
         algorithm=config.mode,
@@ -921,22 +923,6 @@ function _validate_requested_execution!(result, options)
         get(executed, :kkt, :not_recorded) === :q3_block_diagonal_equality || error(
             "requested native Q3 but execution used $(get(executed, :kkt, :not_recorded))",
         )
-        actual_direction = get(executed, :q3_direction, :not_recorded)
-        actual_direction === options.q3_direction || error(
-            "requested Q3 direction $(options.q3_direction) but execution used " *
-            "$actual_direction (fallback=$(get(executed, :q3_direction_fallback_reason, :not_recorded)))",
-        )
-        get(executed, :q3_direction_fallback_reason, :none) === :none || error(
-            "Q3 direction fallback occurred: " *
-            string(get(executed, :q3_direction_fallback_reason, :not_recorded)),
-        )
-        requested_gram = options.q3_gram_strategy
-        if requested_gram !== :auto
-            actual_gram = get(executed, :gram_strategy, :not_recorded)
-            actual_gram === requested_gram || error(
-                "requested Q3 Gram strategy $requested_gram but execution used $actual_gram",
-            )
-        end
     end
     return result
 end
@@ -1173,8 +1159,6 @@ function _write_manifest(path::String, config::Config, model_hash::String, geome
         "max_iterations" => config.max_iterations,
         "time_limit_seconds" => config.time_limit_seconds,
         "scaling" => string(config.scaling),
-        "q3_gram_strategy" => string(config.q3_gram_strategy),
-        "q3_direction" => string(config.q3_direction),
         "geometry" => Dict(string(name) => _toml_scalar(value) for (name, value) in pairs(geometry_data) if name != :block_dimensions),
         "block_dimensions" => Int.(geometry_data.block_dimensions),
         "resources" => Dict(key => _toml_scalar(value) for (key, value) in metadata),
@@ -1196,8 +1180,7 @@ function _report_text(config::Config, model_hash::String, geometry_data, metadat
     println(io, "SDPX fixed-trace CSDR benchmark")
     println(
         io,
-        "case=$(config.case) mode=$(config.mode) arithmetic=$(config.arithmetic) " *
-        "q3_direction=$(config.q3_direction)",
+        "case=$(config.case) mode=$(config.mode) arithmetic=$(config.arithmetic)",
     )
     println(io, "preflight_only=$(config.preflight_only)")
     println(io, "model_sha256=$model_hash")
@@ -1262,8 +1245,7 @@ function _run(config::Config, ::Type{T}) where {T}
         q3_workspace_bytes=SDPX.estimate_fixed_trace_q3_workspace_bytes(
             T,
             problem,
-            config.threads;
-            q3_gram_strategy=config.q3_gram_strategy,
+            config.threads,
         ),
         sdp_arrow_workspace_floor_bytes=SDPX.arrow_workspace_floor_bytes(
             T,
@@ -1375,8 +1357,6 @@ function main(args=ARGS)
             "case" => config.case,
             "mode" => string(config.mode),
             "arithmetic" => config.arithmetic,
-            "q3_direction" => string(config.q3_direction),
-            "q3_gram_strategy" => string(config.q3_gram_strategy),
             "preflight_only" => config.preflight_only,
             "model_sha256" => model_hash,
             "geometry" => Dict(

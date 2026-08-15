@@ -6,11 +6,13 @@
 
     Correctness constraint that shapes everything here: block-local
     work (factoring X[l]/Y[l], the line-search trial for block l) has
-    no cross-block state and is safe to parallelize directly. Dense Schur
-    blocks accumulate into task-local `m x m` buffers. Sparse exact-arrow
-    blocks instead own disjoint local/coupling storage and use small
-    task-local global-global buffers. Both avoid atomics and locks and reduce
-    in a deterministic fixed-bin order.
+    no cross-block state and is safe to parallelize directly. Dense
+    Float64 Schur builds use deterministic output-column ownership
+    (no task-local `m x m` buffers); other dense arithmetic keeps task-local
+    `m x m` partial accumulators. Sparse exact-arrow blocks instead own
+    disjoint local/coupling storage and use small task-local global-global
+    buffers. All routes avoid atomics and locks and reduce in a deterministic
+    fixed-bin or fixed-owner order.
 
     General BigFloat paths deliberately remain serial. Their allocation-free
     MPFR scalar kernels reuse mutable scratch objects, while dense task-local
@@ -111,7 +113,9 @@ Both [`threaded_schur_build!`](@ref) methods fall back to the serial
 [`schur_build!`](@ref) under several conditions, the important one being
 `length(ws.schur_bins) <= 1`: `_schur_parallel_bins` caps the task-local `m×m`
 accumulators at a fraction of free memory, and for a large `m` that cap is one
-bin regardless of how many threads were requested.
+bin regardless of how many threads were requested. Dense Float64
+owner-mode workspaces bypass that cap because they allocate no partials; the
+predicate then still applies the same serial-fallback rules to them.
 
 The caller needs this answer *before* setting BLAS width. Serializing BLAS is
 correct only when Julia threads supply the parallelism instead; when the
@@ -1281,11 +1285,25 @@ buffer (`ws.Spartial[bin]`, sized once in [`Workspace`](@ref)); the
 partials are then summed by [`_reduce_schur_partials!`](@ref) over
 disjoint column ranges, so results are reproducible at a fixed thread
 count regardless of task completion order.
+
+Eligible dense Float64 workspaces (`ws.dense_schur_owner`) instead
+transform every panel in parallel, then let each worker own a contiguous
+lower-triangle output-column range. Workers loop the established LPT bins and
+their blocks in fixed order, calling `BLAS.syrk!` for the owned diagonal tile
+and `BLAS.gemm!` for the owned trailing rectangle, so every `S[row, col]` has
+exactly one writer and no per-bin `m×m` partial is allocated. The upper
+triangle remains untouched until [`materialize_schur!`](@ref) mirrors it.
+The tiled BLAS calls are numerically equivalent to the serial full-panel
+`syrk!`, but do not promise bitwise identity with it or across thread counts;
+fixed owner/bin geometry remains deterministic.
 """
 function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::DenseCons{T}, X, Y) where {T}
-    L, m, n, k = prob.dims
+    L, m, _, k = prob.dims
     if !schur_threading_engaged(ws, prob, cons)
         return schur_build!(ws, prob, cons, X, Y)
+    end
+    if ws.dense_schur_owner
+        return _dense_owner_schur_build!(ws, prob, cons, X, Y)
     end
     bins = ws.schur_bins
     nbins = length(bins)
@@ -1334,6 +1352,86 @@ function threaded_schur_build!(ws::Workspace{T}, prob::SDPProblem{T}, cons::Dens
     end
 
     _reduce_schur_partials!(ws, lower_only)
+    return ws.S
+end
+
+function _dense_owner_schur_build!(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    cons::DenseCons{T},
+    X,
+    Y,
+) where {T<:Float64}
+    _, m, _, k = prob.dims
+    _zero_schur_accumulator!(ws.S, ws)
+
+    # Phase 1: transform each block's panel into its own BlockWS.Ppanel.
+    # Every block has exactly one writer, so the whole phase is race-free.
+    @sync for bin in ws.schur_bins
+        isempty(bin) && continue
+        Threads.@spawn begin
+            for l in bin
+                bw = ws.blk[l]
+                kl = k[l]
+                kl == 0 && continue
+                src = reshape(cons.Av[l], kl, kl * m)
+                copyto!(bw.Ppanel, src)
+                ktrsm!(bw.LX, bw.Ppanel)
+                for i in 1:m
+                    cols = ((i-1)*kl+1):(i*kl)
+                    ktrmm!(view(bw.Ppanel, :, cols), bw.MY)
+                end
+            end
+        end
+    end
+
+    # Phase 2: deterministic contiguous output-column ownership. Workers use
+    # the established fixed LPT-bin traversal, so each owned entry is
+    # accumulated in the same order at a fixed thread count, and no task
+    # touches another's columns.
+    boundaries = ws.schur_column_boundaries
+    ntasks = length(boundaries) - 1
+    @sync for task in 1:ntasks
+        first_column = boundaries[task]
+        last_column = boundaries[task + 1] - 1
+        first_column > last_column && continue
+        Threads.@spawn begin
+            owned = first_column:last_column
+            # Preserve the established LPT-bin traversal order. The old path
+            # accumulated each bin locally and then reduced bins in this
+            # order; flattening the same bins here avoids an unrelated
+            # permutation of block contributions.
+            @inbounds for bin in ws.schur_bins
+                for l in bin
+                    bw = ws.blk[l]
+                    kl = k[l]
+                    kl == 0 && continue
+                    transformed = reshape(bw.Ppanel, kl * kl, m)
+                    owned_panel = view(transformed, :, owned)
+                    diagonal = view(ws.S, owned, owned)
+                    LinearAlgebra.BLAS.syrk!(
+                        'L',
+                        'T',
+                        one(T),
+                        owned_panel,
+                        one(T),
+                        diagonal,
+                    )
+                    last_column < m || continue
+                    rows = (last_column + 1):m
+                    LinearAlgebra.BLAS.gemm!(
+                        'T',
+                        'N',
+                        one(T),
+                        view(transformed, :, rows),
+                        owned_panel,
+                        one(T),
+                        view(ws.S, rows, owned),
+                    )
+                end
+            end
+        end
+    end
     return ws.S
 end
 

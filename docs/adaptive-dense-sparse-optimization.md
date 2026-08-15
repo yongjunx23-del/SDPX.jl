@@ -70,7 +70,7 @@ PSD matrix or sparse Schur factor.
 
 6. **Dense BLAS kernel**
 
-   The native dense Float32/Float64 coefficient path uses triangular BLAS
+   The native dense Float64 coefficient path uses triangular BLAS
    `SYRK`, then mirrors once. Generic arithmetic retains a type-stable kernel.
 
 7. **Parallel scheduling**

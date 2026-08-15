@@ -151,7 +151,6 @@ function main(arguments)
             parameter_policy=:auto,
             parameter_strategy=:adaptive,
             refine_policy=:auto,
-            equilibrate=true,
             scaling=:auto,
             stall_iterations=0,
             extended_precision_blas=:on,

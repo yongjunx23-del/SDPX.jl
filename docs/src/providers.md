@@ -43,12 +43,13 @@ BigFloat arithmetic. It advertises exactly
 `:syrk`, `:chol`, `:cholesky_factor!`, `:solve`, `:cholsolve_owned`, `:trsm`,
 `:trsv_lower`, `:trsv_transpose`, `:axpby`, and `:axpby_owned`.
 
-The legacy provider's `ksyrk!` contract mirrors both triangles after the
-kernel runs, even when an upstream arithmetic provider is lower-triangle-only.
-That mirroring note is load-bearing: some SDPX call sites still read the upper
-triangle, so a provider advertising `:syrk` must either mirror both triangles
-itself or the provider layer must mirror the authoritative lower triangle
-before returning.
+The solver-facing `la_syrk!` contract is lower-triangle-authoritative.  A
+provider may leave the upper triangle unchanged, poisoned, or materialized as
+an implementation detail; dense equality Cholesky, pivoted compatibility, and
+augmented assembly select the lower triangle explicitly.  The bundled legacy
+kernel may still mirror both triangles, but no migrated solver path relies on
+that extra work.  Provider tests deliberately poison the inactive upper
+triangle to keep this boundary auditable.
 
 Callers use `la_*` dispatchers, never `k*` directly. `kdot!`,
 `kdot_columns!`, `alloc_zeros`, and `copy_owned!` are implementation helpers
@@ -77,6 +78,12 @@ factor correction. SDPX still decides whether to request a promoted residual,
 whether to accept a correction, and whether to repeat refinement. Structured
 KKT residuals, cone mappings, stopping policy, and certification stay in SDPX.
 
+Pivoted LDLT status, block layout, final permutation, and inertia are queried
+through MFLA's lightweight public accessors.  Full `factor_diagnostics` is a
+cold observability operation: an augmented factorization records it once for
+the accepted factor or final rejected candidate, rather than rescanning every
+retry for each metadata field.
+
 LU and LDLT are provider capabilities and tested internal seams. The
 mathematical formulation is still chosen first: an explicit augmented request,
 or the provider-neutral static planner, may require LDLT; only then may
@@ -90,6 +97,22 @@ factor-owned solve, residual/refinement primitives, triangle/precision/
 ownership validation, and Native/Generic backend provenance. BFLA QR no
 longer has an exact-zero default rank policy; SDPX determines equality rank
 from its explicit relative tolerance and the packed `R` diagonal.
+
+One precision-matched `BFLAWorkspace` is created lazily per instantiated SDPX
+provider and reused by sequential factorizations and predictor, corrector, and
+correction solves.  Because SDPX owns the factor buffer and does not mutate it
+between those solves, the adapter uses BFLA's explicit trusted solve boundary;
+the checked public BFLA semantics remain unchanged for every other caller.
+The workspace is never shared concurrently.  BFLA's one-step correction is
+used only when it is the same retained factor equation (for example the full
+augmented LDLT); SDPX still forms the KKT residual and owns acceptance,
+stopping, precision escalation, and fallback.
+
+A successful BFLA Cholesky is a factorization fact, not an equality-rank
+decision.  SDPX compares the public lower-factor diagonal quality against its
+requested-accuracy and explicit factor/problem precision, then either accepts
+normal equations, invokes only a plan-authorized RRQR/pivoted route, or fails
+closed.  Ambient MPFR precision is not part of that decision.
 
 The following routes remain SDPX-specific formulations rather than ordinary
 dense provider work: native LP and fixed-trace Q3/SOCP kernels, sparse and

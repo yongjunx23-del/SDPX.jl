@@ -156,7 +156,7 @@ end
             verbosity=0,
         )
         @test native.status === SDPX.Optimal
-        @test native.lifted === nothing
+        @test !hasproperty(native, :lifted)
         @test native.termination.reason === :converged
         @test native.timings isa NamedTuple
         @test native.regularizations >= 0
@@ -188,7 +188,6 @@ end
             0.0,
             0,
             native.diagnostics,
-            nothing,
         )
         downgraded = SDPX.certify_native_soc_result(
             problem, invalid, _native_soc_options(Float64),
@@ -370,7 +369,99 @@ end
             ),
         )
         @test fail_closed.status === SDPX.NumericalBreakdown
-        @test fail_closed.diagnostics.termination.reason === :affine_solve_failed
+        @test fail_closed.diagnostics.termination.reason ===
+              :equality_prepare_failed
+    end
+
+
+    @testset "general normal equations prepare equality once per iteration" begin
+        problem = second_order_program(
+            [1.0, 0.0, 0.0],
+            Matrix{Float64}(I, 3, 3),
+            zeros(3);
+            Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
+            beq=[3.0, 4.0],
+        )
+        one_iteration = solve_socp(
+            problem;
+            tolerance=1e-8,
+            maximum_iterations=1,
+            verbosity=0,
+            timing=true,
+            specialization=:off,
+        )
+        @test one_iteration.status === SDPX.IterLimit
+        @test one_iteration.iterations == 1
+        counters = one_iteration.termination
+        @test counters.equality_panel_transforms == 1
+        @test counters.equality_gram_assemblies == 1
+        @test counters.equality_factorizations == 1
+        @test counters.kkt_rhs_solves == 2
+        @test counters.predictor_rhs_solves == 1
+        @test counters.corrector_rhs_solves == 1
+        @test counters.rhs_solves == 2
+        @test one_iteration.diagnostics.selected_algorithms.equality ===
+              :normal_equations
+        @test one_iteration.timings.equality_panel_transform >= 0
+        @test one_iteration.timings.equality_gram_syrk >= 0
+        @test one_iteration.timings.equality_factor >= 0
+
+        converged = solve_socp(
+            problem;
+            tolerance=1e-8,
+            maximum_iterations=120,
+            verbosity=0,
+            specialization=:off,
+        )
+        @test converged.status === SDPX.Optimal
+        @test converged.pObj ≈ 5.0 atol=1e-6
+        @test result_certificate(
+            problem, converged, _native_soc_options(Float64),
+        ).valid
+    end
+
+    @testset "general equality Gram is lower-authoritative" begin
+        problem = second_order_program(
+            [1.0, 0.0, 0.0],
+            Matrix{Float64}(I, 3, 3),
+            zeros(3);
+            Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
+            beq=[3.0, 4.0],
+        )
+        options = _native_soc_options(Float64)
+        plan = SDPX.plan_native_soc(problem, options)
+        clean = SDPX.NativeSOCWorkspace(problem, plan, options)
+        poisoned = SDPX.NativeSOCWorkspace(problem, plan, options)
+        factor_matrix = 2.0 .* Matrix{Float64}(I, 3, 3)
+        factor = SDPX.la_cholesky_factor!(clean.la_backend, factor_matrix)
+        @test factor !== nothing
+        clean.rhs .= [1.0, 2.0, 3.0]
+        clean.equality_residual .= [0.2, -0.4]
+        poisoned.rhs .= clean.rhs
+        poisoned.equality_residual .= clean.equality_residual
+        @inbounds for column in 1:2, row in 1:(column - 1)
+            poisoned.equality_factor_buffer[row, column] = Inf
+        end
+        @test SDPX._native_soc_prepare_kkt!(
+            clean, problem, factor, options,
+        )
+        @test SDPX._native_soc_prepare_kkt!(
+            poisoned, problem, factor, options,
+        )
+        @test SDPX._native_soc_solve_kkt!(
+            clean, problem, factor, options,
+        )
+        @test SDPX._native_soc_solve_kkt!(
+            poisoned, problem, factor, options,
+        )
+        @test clean.equality_method === :normal_equations
+        @test clean.equality_factorizations == 1
+        @test clean.equality_gram_assemblies == 1
+        @test clean.kkt_rhs_solves == 1
+        @test clean.dx ≈ poisoned.dx
+        @test clean.dy ≈ poisoned.dy
+        @test all(isfinite, poisoned.dx)
+        @test all(isfinite, poisoned.dy)
     end
 
 
@@ -439,6 +530,47 @@ end
         @test one_iteration.timings.corrector_rhs >= 0
         @test one_iteration.timings.fixed_block_residual >= 0
         @test one_iteration.timings.fixed_block_recovery >= 0
+
+        @testset "fixed-trace steady-state allocation stays bounded" begin
+            # Concrete plan parameterization keeps the fixed-trace reduction
+            # inferred. Measured steady state is 22,048 bytes/iteration on
+            # Julia 1.12; the ceiling keeps three times that headroom while
+            # still catching Any/boxing regressions on the hot iteration path.
+            options = (
+                tolerance=1e-9,
+                maximum_iterations=5,
+                verbosity=0,
+                timing=true,
+                specialization=:fixed_trace,
+            )
+            solve_socp(one_iteration_problem; options...)  # warm up
+            GC.gc()
+            totals = Int[]
+            results = SDPX.ConicResult{Float64}[]
+            for _ in 1:3
+                result = Ref{SDPX.ConicResult{Float64}}()
+                total = @allocated result[] = solve_socp(
+                    one_iteration_problem; options...,
+                )
+                push!(totals, total)
+                push!(results, result[])
+            end
+            best = argmin(totals)
+            result = results[best]
+
+            @test result.status === SDPX.Optimal
+            @test result.iterations == 3
+            counters = result.termination
+            @test counters.local_metric_preparations == 3
+            @test counters.local_factorizations == 3
+            @test counters.equality_panel_transforms == 3
+            @test counters.equality_gram_assemblies == 3
+            @test counters.equality_factorizations == 3
+            @test counters.kkt_rhs_solves == 6
+            @test counters.predictor_rhs_solves == 3
+            @test counters.corrector_rhs_solves == 3
+            @test totals[best] / result.iterations <= 65_536
+        end
 
         specialized = solve_socp(
             problem;
@@ -551,7 +683,7 @@ end
             @test result.diagnostics.selected_algorithms.scaling === :hkm
             @test result.diagnostics.selected_algorithms.la_executed_provider ===
                   :multifloat_linear_algebra
-            @test result.lifted === nothing
+            @test !hasproperty(result, :lifted)
             @test result.termination.equality_gram_assemblies == 1
             @test result.termination.equality_factorizations == 1
             @test result.termination.kkt_rhs_solves == 2

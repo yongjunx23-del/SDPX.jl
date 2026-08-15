@@ -46,6 +46,20 @@ struct MOISOCConstraintInfo <: AbstractMOIConstraintInfo
 end
 
 """
+Batched metadata for one MOI vector linear cone. `kind` is `:nonnegative`,
+`:nonpositive`, or `:zeros`. Linear rows reference 1×1 cone blocks in `blocks`
+and use `directions` to recover the original sign; zero rows reference shared
+equality columns and carry their function constants.
+"""
+struct MOIVectorLinearConstraintInfo{T} <: AbstractMOIConstraintInfo
+    kind::Symbol
+    blocks::Vector{Int}
+    columns::Vector{Int}
+    constants::Vector{T}
+    directions::Vector{T}
+end
+
+"""
     Optimizer{T}(; kwargs...)
     Optimizer(; kwargs...)
 
@@ -71,6 +85,7 @@ mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     requested_threads::Union{Nothing,Int}
 
     function Optimizer{T}(; kwargs...) where {T<:AbstractFloat}
+        _require_supported_arithmetic_type(T)
         optimizer = new{T}(
             SolverOptions{T}(sparse=:auto),
             nothing,
@@ -184,11 +199,36 @@ const MOIPSDSet = Union{
     MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle},
 }
 
+const MOIVectorLinearSet = Union{
+    MOI.Nonnegatives,
+    MOI.Nonpositives,
+}
+
+const MOIVectorConicSet = Union{
+    MOI.Nonnegatives,
+    MOI.Nonpositives,
+    MOI.Zeros,
+    MOI.RotatedSecondOrderCone,
+}
+
+const MOILorentzSet = Union{
+    MOI.SecondOrderCone,
+    MOI.RotatedSecondOrderCone,
+}
+
 function MOI.supports_constraint(
     ::Optimizer{T},
     ::Type{MOI.VectorAffineFunction{T}},
     ::Type{S},
 ) where {T,S<:MOIPSDSet}
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer{T},
+    ::Type{MOI.VectorAffineFunction{T}},
+    ::Type{S},
+) where {T,S<:MOIVectorConicSet}
     return true
 end
 
@@ -205,6 +245,14 @@ function MOI.supports_constraint(
     ::Type{MOI.VectorOfVariables},
     ::Type{MOI.SecondOrderCone},
 )
+    return true
+end
+
+function MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{MOI.VectorOfVariables},
+    ::Type{S},
+) where {S<:MOIVectorConicSet}
     return true
 end
 
@@ -593,22 +641,35 @@ function _append_scalar_interval!(
     return nothing
 end
 
-function _moi_scalar_affine_data(
+function _moi_scalar_affine_row(
     ::Type{T},
     optimizer::Optimizer{T},
     function_value,
     index_map,
 ) where {T}
-    coefficients = zeros(T, optimizer.num_variables)
     constant = zero(T)
+    columns = Int[]
+    values = T[]
     if function_value isa MOI.ScalarAffineFunction{T}
         constant = function_value.constant
-        @inbounds for term in function_value.terms
-            coefficients[index_map[term.variable].value] += term.coefficient
+        sizehint!(columns, length(function_value.terms))
+        sizehint!(values, length(function_value.terms))
+        for term in function_value.terms
+            push!(columns, index_map[term.variable].value)
+            push!(values, term.coefficient)
         end
     else
-        coefficients[index_map[function_value].value] = one(T)
+        push!(columns, index_map[function_value].value)
+        push!(values, one(T))
     end
+    coefficients = sparse(
+        ones(Int, length(columns)),
+        columns,
+        values,
+        1,
+        optimizer.num_variables,
+    )
+    dropzeros!(coefficients)
     return coefficients, constant
 end
 
@@ -625,26 +686,139 @@ function _append_native_soc_constraint!(
     dimension = set.dimension
     MOI.output_dimension(function_value) == dimension ||
         throw(DimensionMismatch("SOC function dimension does not match its set"))
-    matrix = zeros(T, dimension, optimizer.num_variables)
-    offset = function_value isa MOI.VectorAffineFunction{T} ?
-             Vector{T}(function_value.constants) : zeros(T, dimension)
+    rows = Int[]
+    columns = Int[]
+    values = T[]
+    term_count = function_value isa MOI.VectorAffineFunction{T} ?
+                 length(function_value.terms) : dimension
+    sizehint!(rows, term_count)
+    sizehint!(columns, term_count)
+    sizehint!(values, term_count)
+    offset = Vector{T}(undef, dimension)
     if function_value isa MOI.VectorAffineFunction{T}
+        copyto!(offset, function_value.constants)
         @inbounds for term in function_value.terms
-            matrix[
-                term.output_index,
-                index_map[term.scalar_term.variable].value,
-            ] += term.scalar_term.coefficient
+            1 <= term.output_index <= dimension || throw(DimensionMismatch(
+                "SOC term output index $(term.output_index) is outside 1:$dimension",
+            ))
+            push!(rows, term.output_index)
+            push!(columns, index_map[term.scalar_term.variable].value)
+            push!(values, term.scalar_term.coefficient)
         end
     else
+        fill!(offset, zero(T))
         @inbounds for (output, variable) in pairs(function_value.variables)
-            matrix[output, index_map[variable].value] += one(T)
+            push!(rows, output)
+            push!(columns, index_map[variable].value)
+            push!(values, one(T))
         end
     end
+    matrix = sparse(rows, columns, values, dimension, optimizer.num_variables)
+    dropzeros!(matrix)
     push!(cones, SOCConstraint(matrix, offset; T=T))
     destination_index = _new_constraint_index!(counts, F, MOI.SecondOrderCone)
     index_map[source_index] = destination_index
     optimizer.constraint_info[destination_index] =
         MOISOCConstraintInfo(length(cones), dimension, :native_lorentz)
+    return nothing
+end
+
+function _append_native_rsoc_constraint!(
+    cones::Vector{SOCConstraint{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,MOI.RotatedSecondOrderCone},
+) where {T,F}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    dimension = set.dimension
+    dimension >= 2 || throw(ArgumentError(
+        "RotatedSecondOrderCone dimension must be at least 2, got $dimension",
+    ))
+    MOI.output_dimension(function_value) == dimension ||
+        throw(DimensionMismatch(
+            "RSOC function dimension does not match its set",
+        ))
+    sqrt_two = sqrt(T(2))
+    rows = Int[]
+    columns = Int[]
+    values = T[]
+    term_count = function_value isa MOI.VectorAffineFunction{T} ?
+                 length(function_value.terms) : dimension
+    sizehint!(rows, 2 * term_count)
+    sizehint!(columns, 2 * term_count)
+    sizehint!(values, 2 * term_count)
+    offset = Vector{T}(undef, dimension)
+    if function_value isa MOI.VectorAffineFunction{T}
+        constants = function_value.constants
+        offset[1] = _ingest_owned_scalar(T, constants[1] + constants[2])
+        offset[2] = _ingest_owned_scalar(T, constants[1] - constants[2])
+        @inbounds for output in 3:dimension
+            offset[output] =
+                _ingest_owned_scalar(T, sqrt_two * constants[output])
+        end
+        for term in function_value.terms
+            output = term.output_index
+            1 <= output <= dimension || throw(DimensionMismatch(
+                "RSOC term output index $output is outside 1:$dimension",
+            ))
+            variable = index_map[term.scalar_term.variable].value
+            coefficient = term.scalar_term.coefficient
+            if output == 1
+                push!(rows, 1)
+                push!(columns, variable)
+                push!(values, coefficient)
+                push!(rows, 2)
+                push!(columns, variable)
+                push!(values, coefficient)
+            elseif output == 2
+                push!(rows, 1)
+                push!(columns, variable)
+                push!(values, coefficient)
+                push!(rows, 2)
+                push!(columns, variable)
+                push!(values, -coefficient)
+            else
+                push!(rows, output)
+                push!(columns, variable)
+                push!(values, sqrt_two * coefficient)
+            end
+        end
+    else
+        fill!(offset, zero(T))
+        for (output, variable_index) in pairs(function_value.variables)
+            variable = index_map[variable_index].value
+            if output == 1
+                push!(rows, 1)
+                push!(columns, variable)
+                push!(values, one(T))
+                push!(rows, 2)
+                push!(columns, variable)
+                push!(values, one(T))
+            elseif output == 2
+                push!(rows, 1)
+                push!(columns, variable)
+                push!(values, one(T))
+                push!(rows, 2)
+                push!(columns, variable)
+                push!(values, -one(T))
+            else
+                push!(rows, output)
+                push!(columns, variable)
+                push!(values, sqrt_two)
+            end
+        end
+    end
+    matrix = sparse(rows, columns, values, dimension, optimizer.num_variables)
+    dropzeros!(matrix)
+    push!(cones, SOCConstraint(matrix, offset; T=T))
+    destination_index =
+        _new_constraint_index!(counts, F, MOI.RotatedSecondOrderCone)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOISOCConstraintInfo(length(cones), dimension, :rotated_lorentz)
     return nothing
 end
 
@@ -658,7 +832,7 @@ function _append_native_scalar_inequality!(
 ) where {T,F,S<:MOIScalarInequalitySet{T}}
     set = MOI.get(source, MOI.ConstraintSet(), source_index)
     function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
-    coefficients, constant = _moi_scalar_affine_data(
+    coefficients, constant = _moi_scalar_affine_row(
         T, optimizer, function_value, index_map,
     )
     if set isa MOI.GreaterThan{T}
@@ -670,7 +844,7 @@ function _append_native_scalar_inequality!(
         direction = -one(T)
         offset = bound - constant
     end
-    matrix = reshape(direction .* coefficients, 1, optimizer.num_variables)
+    matrix = direction .* coefficients
     push!(cones, SOCConstraint(matrix, T[offset]; T=T))
     destination_index = _new_constraint_index!(counts, F, S)
     index_map[source_index] = destination_index
@@ -693,17 +867,17 @@ function _append_native_scalar_interval!(
 ) where {T,F}
     set = MOI.get(source, MOI.ConstraintSet(), source_index)
     function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
-    coefficients, constant = _moi_scalar_affine_data(
+    coefficients, constant = _moi_scalar_affine_row(
         T, optimizer, function_value, index_map,
     )
     push!(cones, SOCConstraint(
-        reshape(coefficients, 1, optimizer.num_variables),
+        coefficients,
         T[constant - set.lower];
         T=T,
     ))
     lower_block = length(cones)
     push!(cones, SOCConstraint(
-        reshape(-coefficients, 1, optimizer.num_variables),
+        -coefficients,
         T[set.upper - constant];
         T=T,
     ))
@@ -718,6 +892,357 @@ function _append_native_scalar_interval!(
             _ingest_owned_scalar(T, set.upper),
         )
     return nothing
+end
+
+# ---- batched vector linear cone lowering ----
+
+function _moi_vector_function_data(
+    ::Type{T},
+    function_value,
+    index_map,
+    dimension::Int,
+) where {T}
+    constants = Vector{T}(undef, dimension)
+    rows = Int[]
+    columns = Int[]
+    values = T[]
+    if function_value isa MOI.VectorAffineFunction{T}
+        copyto!(constants, function_value.constants)
+        sizehint!(rows, length(function_value.terms))
+        sizehint!(columns, length(function_value.terms))
+        sizehint!(values, length(function_value.terms))
+        for term in function_value.terms
+            1 <= term.output_index <= dimension || throw(DimensionMismatch(
+                "vector cone term output index $(term.output_index) is outside 1:$dimension",
+            ))
+            push!(rows, term.output_index)
+            push!(columns, index_map[term.scalar_term.variable].value)
+            push!(values, term.scalar_term.coefficient)
+        end
+    else
+        fill!(constants, zero(T))
+        for (output, variable_index) in pairs(function_value.variables)
+            push!(rows, output)
+            push!(columns, index_map[variable_index].value)
+            push!(values, one(T))
+        end
+    end
+    return constants, rows, columns, values
+end
+
+function _vector_coefficient_order(rows, columns)
+    order = collect(1:length(rows))
+    sort!(order; by=index -> (rows[index], columns[index]))
+    return order
+end
+
+"""Compact one-row LP coefficient block built from one sorted row segment."""
+function _batch_scalar_coefficient_block(
+    ::Type{T},
+    variables::Int,
+    order::Vector{Int},
+    rows::Vector{Int},
+    columns::Vector{Int},
+    values::Vector{T},
+    first::Int,
+    last::Int,
+    direction::T,
+) where {T}
+    first > last &&
+        return ActiveSparseCoefficientVector(
+            T,
+            variables,
+            Int[],
+            SparseMatrixCSC{T,Int}[],
+            1,
+        )
+    active = Int[]
+    coefficients = T[]
+    sizehint!(active, last - first + 1)
+    sizehint!(coefficients, last - first + 1)
+    previous = -1
+    @inbounds for position in first:last
+        index = order[position]
+        variable = columns[index]
+        value = direction * values[index]
+        if variable == previous
+            coefficients[end] += value
+        else
+            push!(active, variable)
+            push!(coefficients, value)
+            previous = variable
+        end
+    end
+    kept = Int[]
+    kept_values = T[]
+    @inbounds for position in eachindex(active)
+        iszero(coefficients[position]) && continue
+        push!(kept, active[position])
+        push!(kept_values, _ingest_owned_scalar(T, coefficients[position]))
+    end
+    isempty(kept) &&
+        return ActiveSparseCoefficientVector(
+            T,
+            variables,
+            Int[],
+            SparseMatrixCSC{T,Int}[],
+            1,
+        )
+    length(kept) == 1 &&
+        return CompactScalarCoefficientVector(T, variables, kept[1], kept_values[1])
+    matrices = SparseMatrixCSC{T,Int}[
+        sparse([1], [1], T[value], 1, 1) for value in kept_values
+    ]
+    return ActiveSparseCoefficientVector(T, variables, kept, matrices, 1)
+end
+
+"""One sparse 1×n NativeSOC row built from one sorted row segment."""
+function _batch_native_linear_row(
+    ::Type{T},
+    variables::Int,
+    order::Vector{Int},
+    rows::Vector{Int},
+    columns::Vector{Int},
+    values::Vector{T},
+    first::Int,
+    last::Int,
+    direction::T,
+) where {T}
+    count = last - first + 1
+    row_indices = ones(Int, count)
+    col_indices = Vector{Int}(undef, count)
+    entries = Vector{T}(undef, count)
+    cursor = 0
+    previous = -1
+    @inbounds for position in first:last
+        index = order[position]
+        variable = columns[index]
+        value = direction * values[index]
+        if cursor > 0 && col_indices[cursor] == variable
+            entries[cursor] += value
+        else
+            cursor += 1
+            col_indices[cursor] = variable
+            entries[cursor] = value
+        end
+    end
+    matrix = sparse(
+        row_indices[1:cursor],
+        col_indices[1:cursor],
+        entries[1:cursor],
+        1,
+        variables,
+    )
+    dropzeros!(matrix)
+    return matrix
+end
+
+function _append_vector_linear_cone!(
+    A::Vector{SparseCoefficientVector{T}},
+    C::Vector{Matrix{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,S},
+) where {T,F,S<:MOIVectorLinearSet}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    dimension = set.dimension
+    dimension >= 1 || throw(ArgumentError(
+        "$(typeof(set)) dimension must be positive, got $dimension",
+    ))
+    MOI.output_dimension(function_value) == dimension ||
+        throw(DimensionMismatch(
+            "$(typeof(set)) function dimension does not match its set",
+        ))
+    constants, rows, columns, values =
+        _moi_vector_function_data(T, function_value, index_map, dimension)
+    order = _vector_coefficient_order(rows, columns)
+    positive = S <: MOI.Nonnegatives
+    direction = positive ? one(T) : -one(T)
+    blocks = Vector{Int}(undef, dimension)
+    first = 1
+    @inbounds for row in 1:dimension
+        last = first - 1
+        while last < length(order) && rows[order[last + 1]] == row
+            last += 1
+        end
+        push!(
+            A,
+            _batch_scalar_coefficient_block(
+                T,
+                optimizer.num_variables,
+                order,
+                rows,
+                columns,
+                values,
+                first,
+                last,
+                direction,
+            ),
+        )
+        offset = positive ? -constants[row] : constants[row]
+        push!(C, reshape(T[_ingest_owned_scalar(T, offset)], 1, 1))
+        blocks[row] = length(A)
+        first = last + 1
+    end
+    destination_index = _new_constraint_index!(counts, F, S)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIVectorLinearConstraintInfo{T}(
+            positive ? :nonnegative : :nonpositive,
+            blocks,
+            Int[],
+            T[],
+            [_ingest_owned_scalar(T, direction) for _ in 1:dimension],
+        )
+    return nothing
+end
+
+function _append_native_vector_linear_cone!(
+    cones::Vector{SOCConstraint{T}},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,S},
+) where {T,F,S<:MOIVectorLinearSet}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    dimension = set.dimension
+    dimension >= 1 || throw(ArgumentError(
+        "$(typeof(set)) dimension must be positive, got $dimension",
+    ))
+    MOI.output_dimension(function_value) == dimension ||
+        throw(DimensionMismatch(
+            "$(typeof(set)) function dimension does not match its set",
+        ))
+    constants, rows, columns, values =
+        _moi_vector_function_data(T, function_value, index_map, dimension)
+    order = _vector_coefficient_order(rows, columns)
+    positive = S <: MOI.Nonnegatives
+    direction = positive ? one(T) : -one(T)
+    blocks = Vector{Int}(undef, dimension)
+    first = 1
+    @inbounds for row in 1:dimension
+        last = first - 1
+        while last < length(order) && rows[order[last + 1]] == row
+            last += 1
+        end
+        matrix = _batch_native_linear_row(
+            T,
+            optimizer.num_variables,
+            order,
+            rows,
+            columns,
+            values,
+            first,
+            last,
+            direction,
+        )
+        offset = direction * constants[row]
+        push!(
+            cones,
+            SOCConstraint(matrix, T[_ingest_owned_scalar(T, offset)]; T=T),
+        )
+        blocks[row] = length(cones)
+        first = last + 1
+    end
+    destination_index = _new_constraint_index!(counts, F, S)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIVectorLinearConstraintInfo{T}(
+            positive ? :nonnegative : :nonpositive,
+            blocks,
+            Int[],
+            T[],
+            [_ingest_owned_scalar(T, direction) for _ in 1:dimension],
+        )
+    return nothing
+end
+
+function _append_vector_zeros!(
+    matrix_rows::Vector{Int},
+    matrix_columns::Vector{Int},
+    matrix_values::Vector{T},
+    rhs::Vector{T},
+    optimizer::Optimizer{T},
+    source,
+    index_map,
+    counts,
+    source_index::MOI.ConstraintIndex{F,S},
+) where {T,F,S<:MOI.Zeros}
+    set = MOI.get(source, MOI.ConstraintSet(), source_index)
+    function_value = MOI.get(source, MOI.ConstraintFunction(), source_index)
+    dimension = set.dimension
+    dimension >= 1 || throw(ArgumentError(
+        "MOI.Zeros dimension must be positive, got $dimension",
+    ))
+    MOI.output_dimension(function_value) == dimension ||
+        throw(DimensionMismatch(
+            "Zeros function dimension does not match its set",
+        ))
+    constants, rows, columns, values =
+        _moi_vector_function_data(T, function_value, index_map, dimension)
+    order = _vector_coefficient_order(rows, columns)
+    equality_columns = Vector{Int}(undef, dimension)
+    stored_constants = Vector{T}(undef, dimension)
+    first = 1
+    @inbounds for row in 1:dimension
+        last = first - 1
+        while last < length(rows) && rows[order[last + 1]] == row
+            last += 1
+        end
+        column = length(rhs) + 1
+        for position in first:last
+            index = order[position]
+            push!(matrix_rows, columns[index])
+            push!(matrix_columns, column)
+            push!(matrix_values, _ingest_owned_scalar(T, values[index]))
+        end
+        push!(rhs, _ingest_owned_scalar(T, -constants[row]))
+        equality_columns[row] = column
+        stored_constants[row] = _ingest_owned_scalar(T, constants[row])
+        first = last + 1
+    end
+    destination_index = _new_constraint_index!(counts, F, S)
+    index_map[source_index] = destination_index
+    optimizer.constraint_info[destination_index] =
+        MOIVectorLinearConstraintInfo{T}(
+            :zeros,
+            Int[],
+            equality_columns,
+            stored_constants,
+            T[],
+        )
+    return nothing
+end
+
+# ---- rotated Lorentz result maps ----
+
+function _rotated_soc_inverse(slack::Vector{T}) where {T}
+    dimension = length(slack)
+    value = Vector{T}(undef, dimension)
+    value[1] = (slack[1] + slack[2]) / 2
+    value[2] = (slack[1] - slack[2]) / 2
+    sqrt_two = sqrt(T(2))
+    @inbounds for output in 3:dimension
+        value[output] = slack[output] / sqrt_two
+    end
+    return value
+end
+
+function _rotated_soc_adjoint(dual::Vector{T}) where {T}
+    dimension = length(dual)
+    value = Vector{T}(undef, dimension)
+    value[1] = dual[1] + dual[2]
+    value[2] = dual[1] - dual[2]
+    sqrt_two = sqrt(T(2))
+    @inbounds for output in 3:dimension
+        value[output] = sqrt_two * dual[output]
+    end
+    return value
 end
 
 function _objective_data(
@@ -785,7 +1310,7 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
     end
 
     constraint_types = MOI.get(source, MOI.ListOfConstraintTypesPresent())
-    has_soc = any(entry -> last(entry) == MOI.SecondOrderCone, constraint_types)
+    has_soc = any(entry -> last(entry) <: MOILorentzSet, constraint_types)
     has_psd = any(entry -> last(entry) <: MOIPSDSet, constraint_types)
     has_soc && has_psd && throw(ArgumentError(
         "mixed PSD and SOC constraints are not supported by one production " *
@@ -804,9 +1329,51 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T}
 
     for (F, S) in constraint_types
         for source_index in MOI.get(source, MOI.ListOfConstraintIndices{F,S}())
-            if has_soc && S == MOI.SecondOrderCone
+            if S <: MOI.SecondOrderCone
                 _append_native_soc_constraint!(
                     native_cones,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif S <: MOI.RotatedSecondOrderCone
+                _append_native_rsoc_constraint!(
+                    native_cones,
+                    optimizer,
+                    source,
+                    index_map,
+                    counts,
+                    source_index,
+                )
+            elseif S <: MOIVectorLinearSet
+                if has_soc
+                    _append_native_vector_linear_cone!(
+                        native_cones,
+                        optimizer,
+                        source,
+                        index_map,
+                        counts,
+                        source_index,
+                    )
+                else
+                    _append_vector_linear_cone!(
+                        A,
+                        C,
+                        optimizer,
+                        source,
+                        index_map,
+                        counts,
+                        source_index,
+                    )
+                end
+            elseif S <: MOI.Zeros
+                _append_vector_zeros!(
+                    equality_rows,
+                    equality_columns,
+                    equality_values,
+                    equality_rhs,
                     optimizer,
                     source,
                     index_map,
@@ -1113,6 +1680,122 @@ function _pack_psd_matrix(matrix::AbstractMatrix{T}, scaled::Bool) where {T}
     return packed
 end
 
+function _vector_linear_primal(
+    optimizer::Optimizer,
+    result,
+    info::MOIVectorLinearConstraintInfo{T},
+) where {T}
+    if info.kind === :zeros
+        value = Vector{T}(undef, length(info.columns))
+        columns = info.columns
+        if result isa ConicResult
+            Aeq = optimizer.problem.Aeq
+            @inbounds for position in eachindex(columns)
+                value[position] =
+                    dot(view(Aeq, columns[position], :), result.x) +
+                    info.constants[position]
+            end
+        else
+            B = optimizer.problem.B
+            @inbounds for position in eachindex(columns)
+                value[position] =
+                    dot(view(B, :, columns[position]), result.x) +
+                    info.constants[position]
+            end
+        end
+        return value
+    end
+    value = Vector{T}(undef, length(info.blocks))
+    if result isa ConicResult
+        @inbounds for position in eachindex(info.blocks)
+            value[position] =
+                info.directions[position] * result.slack[info.blocks[position]][1]
+        end
+    else
+        @inbounds for position in eachindex(info.blocks)
+            value[position] =
+                info.directions[position] *
+                result.X[info.blocks[position]][1, 1]
+        end
+    end
+    return value
+end
+
+function _vector_linear_dual(
+    optimizer::Optimizer,
+    result,
+    info::MOIVectorLinearConstraintInfo{T},
+) where {T}
+    if info.kind === :zeros
+        value = Vector{T}(undef, length(info.columns))
+        columns = info.columns
+        if result isa ConicResult
+            @inbounds for position in eachindex(columns)
+                value[position] =
+                    result.equality_dual[columns[position]]
+            end
+        else
+            @inbounds for position in eachindex(columns)
+                value[position] = result.y[columns[position]]
+            end
+        end
+        return value
+    end
+    value = Vector{T}(undef, length(info.blocks))
+    if result isa ConicResult
+        @inbounds for position in eachindex(info.blocks)
+            value[position] =
+                info.directions[position] * result.dual[info.blocks[position]][1]
+        end
+    else
+        @inbounds for position in eachindex(info.blocks)
+            value[position] =
+                info.directions[position] *
+                result.Y[info.blocks[position]][1, 1]
+        end
+    end
+    return value
+end
+
+function _constraint_bridge_metadata(info)
+    if info isa MOIPSDConstraintInfo
+        return (kind=:psd, representation=:psd_triangle)
+    elseif info isa MOIEqualityConstraintInfo
+        return (kind=:equality, representation=:linear_equality)
+    elseif info isa MOIScalarInequalityConstraintInfo
+        return (kind=:scalar_inequality, representation=:linear_row)
+    elseif info isa MOIScalarIntervalConstraintInfo
+        return (kind=:scalar_interval, representation=:two_linear_rows)
+    elseif info isa MOISOCConstraintInfo
+        return (
+            kind=:lorentz,
+            representation=info.representation === :rotated_lorentz ?
+                             :rotated_linear_map : :identity,
+        )
+    elseif info isa MOIVectorLinearConstraintInfo
+        return (kind=info.kind, representation=:batch_linear_rows)
+    else
+        return (kind=:unknown, representation=:unknown)
+    end
+end
+
+"""
+    bridge_plan(optimizer) -> NamedTuple
+
+Stable inspection metadata describing how each MOI constraint was lowered by
+`copy_to`. This is a direct map from the existing `constraint_info` bookkeeping,
+not a parallel planner or execution route.
+"""
+function bridge_plan(optimizer::Optimizer)
+    return (
+        constraints=[
+            _constraint_bridge_metadata(info)
+            for info in values(optimizer.constraint_info)
+        ],
+        route=optimizer.problem isa ConicProblem ? :native_soc : :sdp,
+    )
+end
+
 function MOI.get(
     optimizer::Optimizer,
     attribute::MOI.ConstraintPrimal,
@@ -1120,6 +1803,9 @@ function MOI.get(
 )
     result = _check_result(optimizer, attribute)
     info = optimizer.constraint_info[index]
+    if info isa MOIVectorLinearConstraintInfo
+        return _vector_linear_primal(optimizer, result, info)
+    end
     if result isa ConicResult
         if info isa MOIScalarInequalityConstraintInfo
             return info.bound + info.direction * result.slack[info.block][1]
@@ -1128,6 +1814,9 @@ function MOI.get(
             return info.lower + result.slack[info.lower_block][1]
         end
         if info isa MOISOCConstraintInfo
+            if info.representation === :rotated_lorentz
+                return _rotated_soc_inverse(result.slack[info.block])
+            end
             return copy(result.slack[info.block])
         end
         equality = info::MOIEqualityConstraintInfo
@@ -1157,6 +1846,9 @@ function MOI.get(
 )
     result = _check_result(optimizer, attribute)
     info = optimizer.constraint_info[index]
+    if info isa MOIVectorLinearConstraintInfo
+        return _vector_linear_dual(optimizer, result, info)
+    end
     if result isa ConicResult
         if info isa MOIScalarInequalityConstraintInfo
             return info.direction * result.dual[info.block][1]
@@ -1166,6 +1858,9 @@ function MOI.get(
                    result.dual[info.upper_block][1]
         end
         if info isa MOISOCConstraintInfo
+            if info.representation === :rotated_lorentz
+                return _rotated_soc_adjoint(result.dual[info.block])
+            end
             return copy(result.dual[info.block])
         end
         equality = info::MOIEqualityConstraintInfo
@@ -1231,6 +1926,7 @@ end
 
 MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
 function MOI.get(optimizer::Optimizer, attribute::MOI.RawOptimizerAttribute)
+    attribute.name == "bridge_plan" && return bridge_plan(optimizer)
     if attribute.name == "tolerance"
         gap = optimizer.options.ϵ_gap
         primal = optimizer.options.ϵ_primal

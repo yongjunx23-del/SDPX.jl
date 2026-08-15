@@ -2,7 +2,7 @@
     Generic kernel implementations (§1.4): correct for any T, built on
     Base LinearAlgebra so BLAS-backed types (Float64, ComplexF64, …)
     get real BLAS/LAPACK speed automatically, while non-BLAS types
-    (BigFloat, MultiFloat, Double64, …) fall onto Base's generic dense
+    (BigFloat, MultiFloat, …) fall onto Base's generic dense
     linear algebra (verified to exist for cholesky!/lu!/qr!/ldiv! on
     BigFloat — see development notes). No array-level temporaries are
     created anywhere in this file: every kernel writes into a caller-

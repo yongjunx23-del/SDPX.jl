@@ -452,7 +452,9 @@ mutable struct Workspace{T}
     blk::Vector{BlockWS{T}}
     S::Matrix{T}          # generic m×m Schur accumulator; empty for compact arrow problems
     Spartial::Vector{Matrix{T}}  # per-LPT-bin partial accumulators (§3): avoids a data race on
-                                 # ws.S from concurrent blocks, summed serially after the parallel region
+                                 # ws.S from concurrent blocks, summed serially after the parallel region.
+                                 # Empty in dense Float64 owner mode, where each worker owns
+                                 # disjoint lower-triangle output columns instead.
     dense_sparse_assembly::Bool  # stream sparse block contributions into dense task-local accumulators
     schur_lower_only::Bool # dense KKT backends consume only the lower triangle
     fused_arrow::Bool            # exact-arrow 2x2 model: compute+scatter in one pass, no packed pair buffer
@@ -492,6 +494,10 @@ mutable struct Workspace{T}
     block_bins::Vector{Vector{Int}}
     schur_bins::Vector{Vector{Int}}
     schur_column_boundaries::Vector{Int}
+    # Dense Float64 owner mode: no per-bin m×m Spartial matrices.
+    # Each worker owns a contiguous lower-triangle column range instead, so
+    # `schur_column_boundaries` holds the deterministic owner ranges.
+    dense_schur_owner::Bool
     vpartial::Vector{Vector{T}}
     block_norms::Vector{T}
     block_ok::Vector{Bool}
@@ -648,6 +654,46 @@ function _sparse_lower_column_boundaries(
         while column <= m &&
               accumulated + work[column] < target
             accumulated += work[column]
+            column += 1
+        end
+        boundaries[task] = column
+    end
+    return boundaries
+end
+
+"""
+    _dense_lower_owner_boundaries(m, ntasks)
+
+Contiguous lower-triangle output-column ranges balanced by accumulated
+triangle area, so each dense Schur owner writes roughly equal numbers of
+entries. Column `c` owns `S[c:m, c]`; a task with range `[first, last]`
+writes the diagonal block `S[first:last, first:last]` and the trailing
+rectangle `S[(last+1):m, first:last]`. Boundaries are stored in
+`Workspace.schur_column_boundaries` when `dense_schur_owner` is active.
+"""
+function _dense_lower_owner_boundaries(m::Int, ntasks::Int)
+    ntasks = max(1, min(ntasks, max(m, 1)))
+    boundaries = Vector{Int}(undef, ntasks + 1)
+    m == 0 && return fill!(boundaries, 1)
+    boundaries[1] = 1
+    boundaries[end] = m + 1
+    total = m * (m + 1) ÷ 2
+    column = 1
+    accumulated = 0
+    @inbounds for task in 2:ntasks
+        target = cld((task - 1) * total, ntasks)
+        # Every owner receives at least one column. The raw area targets can
+        # otherwise repeat near the heavy first columns (for example m=8,
+        # ntasks=8), leaving empty tasks and overstating useful parallelism.
+        minimum_column = boundaries[task - 1] + 1
+        maximum_column = m - (ntasks - task)
+        while column < minimum_column
+            accumulated += m - column + 1
+            column += 1
+        end
+        while column < maximum_column &&
+              accumulated + (m - column + 1) < target
+            accumulated += m - column + 1
             column += 1
         end
         boundaries[task] = column
@@ -1053,7 +1099,25 @@ function Workspace(
             L,
         ),
     )
-    schur_nbins = _schur_parallel_bins(T, m, L, selected_threads)
+    # Dense Float64 owner mode never allocates per-bin m×m Schur
+    # partials, so the accumulator memory cap must not collapse its worker
+    # count to one: owner/bin count is bounded only by selected threads and
+    # the block count. All other routes keep the historical cap.
+    dense_owner_eligible =
+        !is_sparse &&
+        config.route in (
+            :dense_cholesky,
+            :dense_cholesky_fallback,
+            :dense_augmented_ldlt,
+        ) &&
+        !compact_arrow &&
+        !sparse_schur &&
+        selected_threads > 1 &&
+        L > 1 &&
+        T === Float64
+    schur_nbins = dense_owner_eligible ?
+                  min(selected_threads, L) :
+                  _schur_parallel_bins(T, m, L, selected_threads)
     dense_sparse_assembly = false
     if is_sparse
         active = (prob.cons::SparseCons{T}).active
@@ -1089,6 +1153,9 @@ function Workspace(
         Spartial = dense_sparse_assembly && schur_nbins > 1 ?
                    [alloc_zeros(T, m, m) for _ in 1:schur_nbins] :
                    Matrix{T}[]
+    elseif dense_owner_eligible
+        blk = [BlockWS{T}(k[l], m) for l in 1:L]
+        Spartial = Matrix{T}[]
     else
         blk = [BlockWS{T}(k[l], m) for l in 1:L]
         Spartial = schur_nbins > 1 ?
@@ -1100,7 +1167,6 @@ function Workspace(
         (
             sparse_schur ||
             extended_precision.lower_only ||
-            T === Float32 ||
             T === Float64
         )
     block_weights = [Float64(k[l])^3 for l in 1:L]
@@ -1130,6 +1196,8 @@ function Workspace(
                  lpt_partition(block_weights, block_nbins)
     schur_bins = lpt_partition(schur_weights, schur_nbins)
     schur_column_boundaries =
+        dense_owner_eligible ?
+        _dense_lower_owner_boundaries(m, min(selected_threads, max(m, 1))) :
         is_sparse && !compact_arrow && schur_lower_only ?
         _sparse_lower_column_boundaries(
             prob.cons::SparseCons{T},
@@ -1169,6 +1237,7 @@ function Workspace(
         alloc_zeros(T, m), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, n),
         alloc_zeros(T, m), alloc_zeros(T, n),
         block_bins, schur_bins, schur_column_boundaries,
+        dense_owner_eligible,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         :not_run, selected_threads, config, nothing, :not_executed, :none,

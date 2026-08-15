@@ -21,8 +21,6 @@ SHARED_DEPOT="${SDPX_SHARED_DEPOT:-}"
 CSDR_RELEASE="${CSDR_RELEASE:-}"
 ORIGINAL_DEPOT="${JULIA_DEPOT_PATH:-}"
 THREAD_POLICY="${SDPX_THREAD_POLICY:-exclusive}"
-Q3_DIRECTION="${SDPX_Q3_DIRECTION:-hkm}"
-Q3_GRAM_STRATEGY="${SDPX_Q3_GRAM_STRATEGY:-auto}"
 
 [[ -n "${PBS_JOBID:-}" || "${ALLOW_INTERACTIVE:-0}" == 1 ]] || {
     echo "Refusing paired benchmark outside PBS; set ALLOW_INTERACTIVE=1 for a local smoke test." >&2
@@ -38,14 +36,6 @@ Q3_GRAM_STRATEGY="${SDPX_Q3_GRAM_STRATEGY:-auto}"
 }
 [[ "$THREAD_POLICY" == default || "$THREAD_POLICY" == exclusive ]] || {
     echo "SDPX_THREAD_POLICY must be default or exclusive." >&2
-    exit 2
-}
-[[ "$Q3_DIRECTION" == hkm || "$Q3_DIRECTION" == nt ]] || {
-    echo "SDPX_Q3_DIRECTION must be hkm or nt." >&2
-    exit 2
-}
-[[ "$Q3_GRAM_STRATEGY" == auto || "$Q3_GRAM_STRATEGY" == output_tiles || "$Q3_GRAM_STRATEGY" == row_bins ]] || {
-    echo "SDPX_Q3_GRAM_STRATEGY must be auto, output_tiles, or row_bins." >&2
     exit 2
 }
 JULIA_EXECUTABLE="$(command -v "$JULIA_BIN" 2>/dev/null || true)"
@@ -97,8 +87,6 @@ fi
     echo "allocated_slots=$PPN"
     echo "blas_threads=1"
     echo "thread_policy=$THREAD_POLICY"
-    echo "q3_direction=$Q3_DIRECTION"
-    echo "q3_gram_strategy=$Q3_GRAM_STRATEGY"
     echo "julia_bin=$(readlink -f "$JULIA_BIN")"
     echo "job_depot=$JOB_DEPOT"
     echo "job_id=${PBS_JOBID:-interactive}"
@@ -110,13 +98,7 @@ fi
 run_mode() {
     local mode="$1"
     local scaling=none
-    local q3_direction=hkm
-    local q3_gram_strategy=auto
     [[ "$mode" == sdp ]] && scaling="${SDPX_SDP_SCALING:-none}"
-    if [[ "$mode" == socp ]]; then
-        q3_direction="$Q3_DIRECTION"
-        q3_gram_strategy="$Q3_GRAM_STRATEGY"
-    fi
     /usr/bin/time -v -o "$ROOT/$mode.time" \
         "$JULIA_BIN" --startup-file=no --project="$JULIA_PROJECT" \
         "${JULIA_THREAD_ARGS[@]}" \
@@ -129,8 +111,6 @@ run_mode() {
         --max-iterations="${SDPX_MAX_ITERATIONS:-500}" \
         --time-limit-seconds="${SDPX_TIME_LIMIT_SECONDS:-43200}" \
         --precision-bits="${SDPX_PRECISION_BITS:-256}" \
-        --q3-gram-strategy="$q3_gram_strategy" \
-        --q3-direction="$q3_direction" \
         --output="$ROOT/$mode.toml" --manifest="$ROOT/$mode.manifest.toml" \
         > "$ROOT/$mode.log" 2>&1
 }

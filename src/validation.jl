@@ -1299,7 +1299,6 @@ function _with_native_soc_certificate(
         result.d_res,
         result.iterations,
         diagnostics,
-        result.lifted,
     )
 end
 

@@ -20,7 +20,7 @@ work does not justify parallel scheduling.
 | Arithmetic | Solver scheduling policy |
 |---|---|
 | `Float64` | Threaded for sufficiently large block and Schur work; small latency-bound cases remain serial. |
-| `Float64xN`, `Double64` | Threaded when the type is an immutable fixed-width `AbstractFloat`; extended arithmetic crosses over earlier than Float64. |
+| `Float64xN` | Threaded when the type is an immutable fixed-width arithmetic; extended arithmetic crosses over earlier than Float64. |
 | `BigFloat` | General native MPFR phases use one solver thread. Exact singleton-local `2x2` arrows and all-local 2x2 cell systems with explicit equalities may use ownership-safe block tasks and disjoint Schur/Gram-tile workers. |
 | Unknown scalar type | Serial unless the kernel layer explicitly marks it safe. |
 

@@ -2,7 +2,7 @@
 
 A native Julia semidefinite-programming solver: primal-dual interior-point
 method with the HRVW/KSH/M direction and a Mehrotra predictor-corrector, in
-arbitrary precision (`Float64`, `MultiFloats.Float64xN`, `Double64`,
+arbitrary precision (`Float64`, `MultiFloats.Float64xN`,
 `BigFloat`). Built for bootstrap problems whose conditioning exceeds what
 `Float64` can carry, with native LP and SOCP paths alongside the PSD engine.
 

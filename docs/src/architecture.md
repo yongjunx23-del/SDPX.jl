@@ -104,8 +104,8 @@ Explicit requests are never overridden. `formulation=:normal_equations` fixes
 dense normal equations and fails closed for dedicated LP. `formulation=:augmented`
 fixes dense augmented KKT or fails during planning. `formulation=:primal`
 preserves the historical primal orientation without disabling sparse or
-block-arrow routes. `formulation=:dual` remains unsupported and fails before
-backend planning.
+block-arrow routes. The dual KKT form remains an internal cost estimate only;
+production formulation values exclude `:dual`.
 
 The dense augmented KKT system is the equality-augmented Schur system
 
@@ -123,11 +123,12 @@ primal `S` block; the equality block remains exactly zero, residual and
 refinement always evaluate the original unregularized `K`, and failure never
 switches formulation, provider, or precision.
 
-`SDPX.Experimental.plan_formulation` is a pure inspection API returning a
-`FormulationDecision` with requested/preferred/selected formulation, reasons,
-required capabilities, feasibility, equality scale/RRQR evidence, and memory
-estimates. The execution plan and result diagnostics expose the summary
-through `parameters.formulation_decision` and
+`SDPX.Experimental.plan_formulation` is the dense-KKT formulation step used by
+`build_execution_plan`; it returns a `FormulationDecision` with
+requested/preferred/selected formulation, reasons, required capabilities,
+feasibility, equality scale/RRQR evidence, and memory estimates. The execution
+plan and result diagnostics expose the summary through
+`parameters.formulation_decision` and
 `selected_algorithms.formulation_decision`.
 
 ## Dedicated routes

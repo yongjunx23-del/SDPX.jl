@@ -386,11 +386,14 @@ end
         @test result.p_res ≈ primal rtol=1e-14 atol=1e-14
         @test result.d_res ≈ dual rtol=1e-14 atol=1e-14
 
-        scaled_options = SDPX._replace_solver_options(
-            options;
-            equilibrate=true,
+        scaled_result = SDPX._solve_sdp_core!(
+            problem,
+            SDPX._replace_solver_options(
+                options;
+                scaling=:none,
+            );
+            apply_equilibration=true,
         )
-        scaled_result = SDPX.solve!(problem, scaled_options)
         primal, dual = independent_residuals(problem, scaled_result)
         @test scaled_result.p_res ≈ primal rtol=1e-14 atol=1e-14
         @test scaled_result.d_res ≈ dual rtol=1e-14 atol=1e-14

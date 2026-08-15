@@ -257,24 +257,6 @@ function plan_formulation(
     throw(ArgumentError("no feasible dense KKT formulation candidate"))
 end
 
-function plan_formulation(
-    features::ProblemFeatures,
-    requested::Symbol,
-    equality_evidence::EqualityPlanningEvidence,
-    feasibility::FormulationFeasibility,
-    ;
-    policy::FormulationPlannerConfig=DEFAULT_FORMULATION_PLANNER_CONFIG,
-)
-    return plan_formulation(
-        features.dense_formulation,
-        requested,
-        equality_evidence,
-        feasibility,
-        ;
-        policy,
-    )
-end
-
 function formulation_decision_summary(decision::FormulationDecision)
     summarize(candidate) = (
         formulation=candidate.formulation,

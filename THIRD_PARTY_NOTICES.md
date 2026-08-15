@@ -18,7 +18,7 @@ which carries **both** the upstream copyright and the SDPX copyright.
 
 | SDPX file | Derived from | Nature of derivation |
 |---|---|---|
-| `src/compat.jl` | `src/functions.jl` (`sdp`, `findFeasible`, `setArithmeticType`, `setSparseMode`, `setMode`) | **Interface derivation.** The public signatures, keyword names, and defaults are kept for source compatibility; the implementations are rewritten and delegate to the new pipeline. The global setters are deprecated shims. |
+| `src/compat.jl` | `src/functions.jl` (`sdp`, `findFeasible`, `setArithmeticType`) | **Interface derivation.** The retained public signatures, keyword names, and defaults are kept for source compatibility; the implementations are rewritten and delegate to the new pipeline. Obsolete global mode setters were removed. |
 | `README.md` | upstream `README.md` | **Structural derivation.** Problem statement, the primal/dual formulation, and the argument tables follow the upstream document. |
 | `test/correctness.jl` (T1/T2 fixtures) | upstream `test/runtests.jl` | The 2×2 toy problem (`A[1,1,1]=1`, `A[2,2,2]=1`, `C[1,2]=C[2,1]=1`, `c=[2,3]`) is upstream's test case, kept so results stay comparable. |
 | `.github/workflows/TagBot.yml` | upstream | Standard Julia TagBot workflow, adapted to use `GITHUB_TOKEN` only. |
@@ -98,7 +98,6 @@ vendored:
 | **MutableArithmetics.jl** | **MPL-2.0** | runtime |
 | LinearAlgebra, Printf, Serialization, SparseArrays (Julia stdlib) | MIT | runtime |
 | MultiFloats.jl | MIT | weak dep (extension) |
-| DoubleFloats.jl | MIT | weak dep (extension) |
 | JLD2.jl | MIT | weak dep (extension) |
 | JuMP.jl | MPL-2.0 | test only |
 | StableRNGs.jl | MIT | test only |

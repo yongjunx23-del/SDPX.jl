@@ -12,12 +12,10 @@ which have no type of their own to infer from.
 | `Float64` | 53 bits | ~16 | fastest; fine when you do not need more than double precision |
 | `Float64x2` (MultiFloats.jl) | 105 bits | ~31 | bitstype, zero GC pressure, threads normally |
 | `Float64x4` (MultiFloats.jl) | 209 bits | ~62 | sweet spot for many EFT/modular-bootstrap runs |
-| `Double64` (DoubleFloats.jl) | ~106 bits | ~32 | alternative to Float64x2 |
 | `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits) |
 
-`MultiFloats.jl`/`DoubleFloats.jl` types are enabled automatically once you
-`using MultiFloats` / `using DoubleFloats` in your session (package
-extensions), with no other change needed.
+`MultiFloats.jl` types are enabled automatically once you `using MultiFloats`
+in your session, with no other change needed.
 
 ## BigFloat precision plumbing
 
@@ -89,10 +87,10 @@ itself.
 
 ## Dynamic range
 
-`MultiFloats.jl` and `DoubleFloats.jl` types inherit `Float64`'s exponent
-range (~10±308). Raw high-degree-polynomial bootstrap sample data can exceed
+`MultiFloats.jl` types inherit `Float64`'s exponent range (~10±308). Raw
+high-degree-polynomial bootstrap sample data can exceed
 this. `solve!` detects a non-finite iterate and reports `NumericalBreakdown`
-with a message pointing at `equilibrate=true` (which routinely cuts several
+with a message pointing at `scaling=:equilibrate` (which routinely cuts several
 orders of magnitude off the dynamic range of badly scaled data) or falling
 back to `BigFloat`.
 

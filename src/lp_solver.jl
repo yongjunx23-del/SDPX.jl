@@ -2708,7 +2708,7 @@ function solve_lp!(
     # 1×1-block result shape expected by MOI and the legacy dictionary API.
     # A successful termination is certified by the *current* iterate above.
     # Replacing it with an older merit snapshot can silently discard several
-    # digits of complementarity (especially for BigFloat and Double64) and
+    # digits of complementarity (especially for extended arithmetic) and
     # cause the final original-coordinate certificate to downgrade an
     # otherwise optimal solve to `Stalled`.  The snapshot is only a recovery
     # mechanism for an interrupted or unsuccessful solve.

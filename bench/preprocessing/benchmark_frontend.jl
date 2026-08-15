@@ -44,7 +44,6 @@ function benchmark_task(path::String)
         verbosity=0,
         presolve=:auto,
         scaling=:none,
-        chordal_decomposition=:auto,
     )
 
     # Warm compilation on the same immutable problem. Preprocessing never
@@ -141,7 +140,6 @@ function benchmark_intervals(variables::Int)
     options = SDPX.SolverOptions{Float64}(
         verbosity=0,
         scaling=:none,
-        chordal_decomposition=:off,
     )
     SDPX.preprocess(problem, options)
     GC.gc()

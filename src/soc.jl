@@ -43,7 +43,8 @@ Base.eltype(::ConicProblem{T}) where {T} = T
 
 """
 Result in original Lorentz coordinates. Production NativeSOC results set
-`lifted=nothing`; the optional field only supports test/reference adapters.
+timings, termination, and diagnostics directly; no PSD `SDPResult` is stored.
+Test/reference PSD helpers return their own `SDPResult` separately.
 """
 struct ConicResult{T}
     status::SolveStatus
@@ -59,7 +60,6 @@ struct ConicResult{T}
     d_res::T
     iterations::Int
     diagnostics::Any
-    lifted::Union{Nothing,SDPResult{T}}
 end
 
 """Native SOCP compatibility aliases for common result-inspection fields."""
@@ -67,8 +67,6 @@ function Base.getproperty(result::ConicResult, name::Symbol)
     name === :y && return getfield(result, :equality_dual)
     if name in (:termination, :timings, :restarts, :regularizations,
                 :parameter_history)
-        lifted = getfield(result, :lifted)
-        lifted !== nothing && return getproperty(lifted, name)
         diagnostics = getfield(result, :diagnostics)
         name === :termination && return diagnostics === nothing ?
                                       (reason=:unavailable,) :
