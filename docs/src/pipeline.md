@@ -125,10 +125,12 @@ precision-specific parameter profile: `beta`, `gamma`, `predictor`, and
 After presolve and scaling, the selected formulation/provider factors an
 identity-metric initialization system once and solves its primal and dual
 right-hand sides. Cone-native strict-interior shifts are followed by the
-smallest aggregate identity shift that makes each side's identity mass at
-least `<e,e>`, then by deterministic complementarity cross-centering. This
-unit identity-mass floor prevents a valid affine point at the cone vertex from
-remaining at machine-epsilon scale; it is separate from barrier degree. An
+smallest aggregate identity shift that raises orthant/PSD starts, and Lorentz
+sides still within the typed cone-vertex envelope, to unit identity mass, then
+by deterministic complementarity cross-centering. This floor prevents a valid
+affine point at the cone vertex from remaining at machine-epsilon scale without
+renormalizing an already balanced Lorentz point; it is separate from barrier
+degree. An
 accepted regularized or mixed-precision SDP factor is reused for bounded
 structured residual corrections when either original-KKT right-hand side is
 above the existing cold-start gate. `Omega_p` and

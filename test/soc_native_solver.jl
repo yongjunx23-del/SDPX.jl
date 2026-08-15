@@ -464,6 +464,11 @@ end
               init.kappa_before / init.barrier_degree
         @test init.complementarity_after ≈
               init.kappa_after / init.barrier_degree
+        # A balanced nonvertex Lorentz affine point needs only its exact
+        # strict-interior shift and cross-centering; the unit-mass floor is a
+        # precision-scale cone-vertex guard, not a generic head normalization.
+        @test init.primal_mass_floor_shift == 0.0
+        @test init.dual_mass_floor_shift == 0.0
         @test init.primal_margin_after > 0
         @test init.dual_margin_after > 0
         @test init.primal_largest_shift ==

@@ -60,9 +60,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provider-neutral, post-scaling KKT cold start for LP, SDP, and NativeSOC. A
   planned identity-metric factor supplies one primal and one dual affine solve;
   cone-specific typed shifts then establish strict interiority. A minimal
-  aggregate identity shift raises each side's identity mass to
-  `<e,e>` before the generic cross-centering step, preventing an affine point
-  at the cone vertex from starting at machine-epsilon scale. When an accepted
+  aggregate identity shift raises orthant/PSD starts, and Lorentz sides still
+  within the typed cone-vertex envelope, to unit identity mass before the
+  generic cross-centering step. This prevents an affine point at the cone
+  vertex from starting at machine-epsilon scale without renormalizing an
+  already balanced Lorentz point. When an accepted
   regularized or mixed-precision SDP factor leaves an original-KKT residual
   above the existing gate, bounded structured correction reuses that same
   factor; the residual gate remains fail-closed. Initialization

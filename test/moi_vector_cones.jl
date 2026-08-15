@@ -18,6 +18,28 @@ function _vector_affine_identity(variables)
     )
 end
 
+function _test_rsoc_boundary_dual(primal, dual; tolerance=1e-8)
+    @test length(primal) == length(dual) == 3
+    @test dual[1] >= -tolerance
+    @test dual[2] >= -tolerance
+    cone_scale = max(
+        1.0,
+        abs(2 * dual[1] * dual[2]),
+        abs2(dual[3]),
+    )
+    @test 2 * dual[1] * dual[2] - abs2(dual[3]) >=
+          -5 * tolerance * cone_scale
+    complementarity_scale = max(1.0, sum(abs.(primal .* dual)))
+    @test abs(sum(primal .* dual)) <=
+          5 * tolerance * complementarity_scale
+    # The second variable has no equality multiplier, so its stationarity
+    # equation determines this dual coordinate directly.  The other two
+    # boundary coordinates converge only at the square root of the conic
+    # complementarity error and must not be tested as if they were residuals.
+    @test dual[2] ≈ 1.0 atol=5 * tolerance
+    @test dual[3] < 0.0
+end
+
 @testset "MOI vector cone and RSOC frontend" begin
     @testset "RSOC VAF known optimum, primal inverse, dual adjoint" begin
         model = MOI.Utilities.Model{Float64}()
@@ -144,16 +166,18 @@ end
               0.5 atol=1e-6
         @test MOI.get(optimizer, MOI.VariablePrimal(), index_map[x[3]]) ≈
               1.0 atol=1e-6
-        @test MOI.get(
+        primal = MOI.get(
             optimizer,
             MOI.ConstraintPrimal(),
             index_map[rsoc],
-        ) ≈ [1.0, 0.5, 1.0] atol=1e-6
-        @test MOI.get(
+        )
+        @test primal ≈ [1.0, 0.5, 1.0] atol=1e-6
+        rsoc_dual = MOI.get(
             optimizer,
             MOI.ConstraintDual(),
             index_map[rsoc],
-        ) ≈ [0.5, 1.0, -1.0] atol=3e-6
+        )
+        _test_rsoc_boundary_dual(primal, rsoc_dual)
     end
 
     @testset "RSOC dimension two maps without tail coordinates" begin
@@ -233,7 +257,7 @@ end
         @test value(a) ≈ 1.0 atol=1e-6
         @test value(b) ≈ 0.5 atol=1e-6
         @test value(w) ≈ 1.0 atol=1e-6
-        @test dual(rsoc) ≈ [0.5, 1.0, -1.0] atol=3e-6
+        _test_rsoc_boundary_dual(value.(rsoc), dual(rsoc))
     end
 
     @testset "Nonnegatives LP route signs and constants" begin

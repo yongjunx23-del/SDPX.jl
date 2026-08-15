@@ -176,7 +176,9 @@ fraction-to-boundary safety. The general SDP `AdaptiveIPMController` options
 change this Q3 trajectory. For `parameter_policy=:auto`, NativeSOC first solves
 its identity-metric affine KKT system, then shifts each Lorentz head to strict
 interior, raises aggregate head mass to the Lorentz product identity mass
-`<e,e>` when necessary, and cross-centers complementarity. Barrier degree
+`<e,e>` only when a side remains within the typed cone-vertex envelope, and
+cross-centers complementarity. Balanced nonvertex affine points are not
+renormalized. Barrier degree
 continues to normalize complementarity and does not change the identity-mass
 floor. `OmegaP` and `OmegaD`
 therefore do not participate in the automatic Q3 start. Explicit fixed policy

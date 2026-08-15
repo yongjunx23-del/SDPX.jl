@@ -43,7 +43,8 @@ With `parameter_policy=:auto`, the automatic Mehrotra controller keeps `β`,
 After presolve and scaling, the solver builds an identity-metric KKT system,
 solves one primal and one dual affine right-hand side with the same factor,
 then shifts the cone variables in their native coordinates. A minimal identity
-shift raises each aggregate identity mass to `<e,e>` before complementarity
+shift raises orthant/PSD starts, and Lorentz sides still at the typed
+cone-vertex envelope, to unit identity mass before complementarity
 cross-centering; bounded structured correction reuses an accepted SDP factor
 when an original-KKT residual remains above the existing gate.
 `Ωp` and `Ωd` do not participate in this path. The public compatibility

@@ -1427,18 +1427,25 @@ function _native_soc_cold_start_init!(
         dual_margin_before = min(dual_margin_before, _soc_margin(dual))
     end
 
-    # Aggregate identity-mass floor: each Lorentz block contributes one
-    # identity unit, so ρ = ⟨e, e⟩ = #blocks.  Raising the total head mass to
-    # at least ρ keeps an affine vertex start (heads ≈ 0) at O(1) scale while
-    # leaving fixed-trace heads already at e (head = 1) unchanged.  The floor
-    # is applied before the shared cross-centering; masses and complementarity
-    # are recomputed afterwards.  Barrier degree remains the complementarity
-    # denominator only.
+    # A Lorentz identity-mass floor is needed only when the affine candidate is
+    # still at the cone vertex after the minimal strict-interior shift.  Unlike
+    # an orthant or PSD identity, the Lorentz Euclidean identity mass (one per
+    # block) differs from its barrier degree (two per proper cone), so raising
+    # every sub-unit head to one would perturb already balanced nonvertex
+    # starts.  Detect the vertex using the same typed safety and rounding
+    # envelope as the cone shift, then apply the generic unit-identity floor to
+    # the affected side only.  This remains scale- and permutation-invariant.
     rho = T(length(problem.cones))
     floor_ok, primal_mass_floor_shift, dual_mass_floor_shift =
         _cold_start_identity_mass_shifts(
             primal_mass, dual_mass, length(problem.cones),
         )
+    mass_scale = max(one(T), abs(primal_mass), abs(dual_mass))
+    vertex_threshold = _cold_start_safety(T, mass_scale) +
+        _cold_start_rounding_slack(T, mass_scale)
+    primal_mass > vertex_threshold && (primal_mass_floor_shift = zero(T))
+    dual_mass > vertex_threshold && (dual_mass_floor_shift = zero(T))
+    floor_ok = floor_ok && isfinite(vertex_threshold)
     floor_ok || return false, report((
         cause=:mass_floor_failed,
         factor_count=factor_count,

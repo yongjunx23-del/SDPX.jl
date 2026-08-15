@@ -720,6 +720,9 @@ end
             @test initialization.kkt_backend === :mixed_precision
             @test initialization.factorization ===
                   :mixed_precision_cholesky
+            @test initialization.la_backend === :standard
+            @test initialization.la_provider === :blas_lapack
+            @test initialization.la_ownership === :immutable_scalars
             @test initialization.factor_count == 1
             @test initialization.rhs_solves == 2
             @test initialization.fallback_reason === :none

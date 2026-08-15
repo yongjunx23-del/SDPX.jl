@@ -281,6 +281,15 @@ function factorize!(
         "mixed-precision backend has no allocated workspace",
     )
     if _try_factor_mixed_kkt!(mixed, ws, prob, opts)
+        # The accepted preconditioner factor is the Float64 BLAS/LAPACK
+        # factor owned by `MixedPrecisionKKTWorkspace`, not the target-
+        # arithmetic provider stored in `ws.la_backend`.  Record that actual
+        # execution explicitly so cold-start and Newton diagnostics do not
+        # claim that no linear-algebra provider ran (or misattribute the
+        # factor to an optional target-precision provider).
+        ws.executed_la_backend = :standard
+        ws.executed_la_provider = :blas_lapack
+        ws.executed_la_ownership = :immutable_scalars
         _record_backend_execution!(ws, backend)
         return (ok=true, reg_attempts=0, q_pivoted=false)
     end
