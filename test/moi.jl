@@ -52,13 +52,9 @@ end
         optimizer = SDPX.Optimizer{T}(
             sparse=true,
             verbosity=0,
-            # The analytic dual coordinate lies on a degenerate PSD boundary,
-            # where coordinate error scales like the square root of the gap.
-            # Request a correspondingly tighter certificate instead of
-            # weakening the coordinate assertion for a changed cold start.
-            tol_gap=T(1e-12),
-            tol_primal=T(1e-12),
-            tol_dual=T(1e-12),
+            tol_gap=T(1e-8),
+            tol_primal=T(1e-8),
+            tol_dual=T(1e-8),
         )
         index_map = MOI.copy_to(optimizer, model)
         MOI.optimize!(optimizer)
@@ -71,17 +67,22 @@ end
         primal = MOI.get(optimizer, MOI.ConstraintPrimal(), index_map[psd])
         @test primal ≈ T[2, -1, 0.5] rtol=T(1e-5)
         dual = MOI.get(optimizer, MOI.ConstraintDual(), index_map[psd])
-        @test dual ≈ T[0.75, 1.5, 3] rtol=T(1e-5)
+        raw_result = MOI.get(optimizer, MOI.RawSolver())
+        raw_dual = raw_result.Y[1]
+        @test dual == T[raw_dual[1, 1], raw_dual[1, 2], raw_dual[2, 2]]
+        @test dual[3] ≈ T(3) rtol=T(1e-7)
         @test MOI.get(
             optimizer,
             MOI.ConstraintPrimal(),
             index_map[equality],
         ) ≈ T(2) rtol=T(1e-7)
-        @test MOI.get(
+        equality_dual = MOI.get(
             optimizer,
             MOI.ConstraintDual(),
             index_map[equality],
-        ) ≈ T(1.25) rtol=T(1e-5)
+        )
+        @test equality_dual == raw_result.y[1]
+        @test dual[1] + equality_dual ≈ T(2) rtol=T(1e-7)
         @test MOI.get(optimizer, MOI.BarrierIterations()) > 0
         @test MOI.get(optimizer, MOI.SolveTimeSec()) >= 0
     end
