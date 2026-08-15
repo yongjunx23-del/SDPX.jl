@@ -107,7 +107,7 @@ end
               long_step.primal_fraction_to_boundary
     end
 
-    @testset "structural sigma cap prevents over-centering" begin
+    @testset "generic sigma cap prevents over-centering" begin
         options = SDPX.SolverOptions{Float64}(
             β=0.075,
             γ=0.8,
@@ -135,17 +135,26 @@ end
         @test policy.sigma_max == 0.15
 
         @test SDPX.recommended_adaptive_sigma_max(
-            :large_lattice_dense_schur,
             0.075,
             0.0,
-        ) == 0.2
+        ) == 0.5
         @test SDPX.recommended_adaptive_sigma_max(
-            :general_adaptive,
             0.1,
             0.0,
         ) == 0.5
         @test SDPX.recommended_adaptive_sigma_max(
+            0.075,
+            0.2,
+        ) == 0.2
+        # Historical profile-taking entry points are compatibility
+        # forwarders: the profile is ignored.
+        @test SDPX.recommended_adaptive_sigma_max(
             :large_lattice_dense_schur,
+            0.075,
+            0.0,
+        ) == 0.5
+        @test SDPX.recommended_adaptive_sigma_max(
+            :general_adaptive,
             0.075,
             0.2,
         ) == 0.2
@@ -170,25 +179,17 @@ end
             ),
         )
         @test plan.parameters.adaptive_sigma_max == 0.2
+        @test SDPX.automatic_scaling_policy(:sdp_primal_dual) == :sdp_ruiz
+        @test SDPX.automatic_scaling_policy(:lp_primal_dual) == :lp_geometric
         @test SDPX.automatic_scaling_policy(
             :sdp_primal_dual,
             :large_lattice_dense_schur,
-            :fixed,
-        ) == :none
-        @test SDPX.automatic_scaling_policy(
-            :sdp_primal_dual,
-            :large_lattice_dense_schur,
-            :adaptive,
-        ) == :sdp_ruiz
-        @test SDPX.automatic_scaling_policy(
-            :sdp_primal_dual,
-            :general_adaptive,
             :fixed,
         ) == :sdp_ruiz
         @test SDPX.automatic_scaling_policy(
             :lp_primal_dual,
-            :large_lattice_dense_schur,
-            :fixed,
+            :anything,
+            :anything,
         ) == :lp_geometric
     end
 
@@ -308,5 +309,105 @@ end
             ),
             result.parameter_history,
         )
+    end
+
+    @testset "production parameter policy is profile-free" begin
+        # One static architecture regression: automatic cold-start selection
+        # must remain a single generic Mehrotra rule. The public resolver
+        # reports `:generic_mehrotra`, the plan is neutral
+        # (`:automatic_mehrotra`), and executed diagnostics record
+        # `:post_scaling_mehrotra` or `:user_fixed`. Old
+        # benchmark-calibrated profile symbols, their parameter constants,
+        # and their selector helpers are forbidden in production source.
+        # `Task_Low08`/`CSDR` are deliberately not asserted absent: unrelated
+        # historical kernel/storage comments may still name them.
+        forbidden = [
+            ":large_lattice_dense_schur",
+            ":large_equality_dense_schur",
+            ":lp_mehrotra_fast_start",
+            ":lp_mehrotra_conservative_start",
+            ":small_arrow_2x2",
+            ":medium_arrow_2x2",
+            ":wide_arrow_2x2",
+            ":large_arrow_2x2",
+            ":high_accuracy_bigfloat_2x2",
+            ":general_adaptive",
+            ":lp_general_conic",
+            "LP_AGGRESSIVE_START_SCALE_LIMIT",
+            "OMEGA_DATA_MULTIPLIER",
+            "WIDE_ARROW_ACTIVE_LIMIT",
+            "WIDE_ARROW_SMALL_DATA_NORM_LIMIT",
+            "WIDE_ARROW_OMEGA_MULTIPLIER",
+            "lp_initial_scale_indicator",
+            "_large_lattice_dense_schur_profile",
+        ]
+        required = [
+            ":generic_mehrotra",
+            ":automatic_mehrotra",
+            ":post_scaling_mehrotra",
+            ":user_fixed",
+        ]
+        src_root = normpath(joinpath(@__DIR__, "..", "src"))
+        production_files = String[]
+        for (root, _dirs, files) in walkdir(src_root)
+            for file in files
+                endswith(file, ".jl") &&
+                    push!(production_files, joinpath(root, file))
+            end
+        end
+        @test !isempty(production_files)
+        sources = Dict(
+            file => read(file, String) for file in production_files
+        )
+        for symbol in forbidden
+            @test !any(
+                occursin(symbol, text) for text in values(sources)
+            )
+        end
+        combined = join(values(sources))
+        for symbol in required
+            @test occursin(symbol, combined)
+        end
+        # The LP path must keep its geometric post-scale resolver and never
+        # probe SDP cone data (`block_norm_stats`) to derive Ω.
+        lp_source = read(
+            normpath(joinpath(src_root, "lp_solver.jl")),
+            String,
+        )
+        @test occursin("_lp_auto_parameter_resolution", lp_source)
+        @test occursin("_scale_lp!", lp_source)
+        @test !occursin("block_norm_stats(prob", lp_source)
+
+        # Restrict benchmark-name rejection to the production cold-start and
+        # parameter-selector bodies. Other source files retain dated kernel
+        # evidence, so a repository-wide text ban would erase useful history.
+        function source_region(source, first_marker, last_marker)
+            first_range = findfirst(first_marker, source)
+            last_range = findfirst(last_marker, source)
+            @test first_range !== nothing
+            @test last_range !== nothing
+            return source[first(first_range):prevind(source, first(last_range))]
+        end
+        cold_regions = String[
+            read(normpath(joinpath(src_root, "cold_start.jl")), String),
+            source_region(
+                lp_source,
+                "function _lp_phase2_cold_start!",
+                "function _lp_initialization_record",
+            ),
+            source_region(
+                sources[normpath(joinpath(src_root, "solver", "interior_point.jl"))],
+                "function _kkt_cold_start_initialization",
+                "function _solve_sdp_core!",
+            ),
+            source_region(
+                sources[normpath(joinpath(src_root, "soc_native.jl"))],
+                "function _native_soc_cold_start_init!",
+                "function _native_soc_direction!",
+            ),
+        ]
+        for fingerprint in ("Task_Low08", "CSDR")
+            @test !any(occursin(fingerprint, region) for region in cold_regions)
+        end
     end
 end

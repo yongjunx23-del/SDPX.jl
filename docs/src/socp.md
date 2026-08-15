@@ -173,10 +173,16 @@ The compact backend currently owns its iteration controller: it selects
 `sigma` from the affine complementarity ratio and uses a 0.99 exact
 fraction-to-boundary safety. The general SDP `AdaptiveIPMController` options
 (`beta`, `gamma`, `parameter_strategy`, and `adaptive_sigma_max`) do not yet
-change this Q3 trajectory. The primal cone head starts at its exact fixed-trace
-value, so `OmegaP` is intentionally inactive for Q3; automatic `OmegaD` still
-sets the initial dual head. Executed parameter history reports the actual Q3
-values.
+change this Q3 trajectory. For `parameter_policy=:auto`, NativeSOC first solves
+its identity-metric affine KKT system, then shifts each Lorentz head to strict
+interior, raises aggregate head mass to the Lorentz product identity mass
+`<e,e>` when necessary, and cross-centers complementarity. Barrier degree
+continues to normalize complementarity and does not change the identity-mass
+floor. `OmegaP` and `OmegaD`
+therefore do not participate in the automatic Q3 start. Explicit fixed policy
+retains the historical head scales exactly. Executed initialization diagnostics
+report the affine residuals, shifts, margins, complementarity, factor count,
+and two RHS solves.
 
 ## Precision, results, and certification
 

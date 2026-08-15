@@ -113,9 +113,13 @@ end
             prob,
             SDPX.SolverOptions{Float64}(parameter_policy=:auto),
         )
-        @test selected.profile == :small_arrow_2x2
+        @test selected.profile == :generic_mehrotra
         @test selected.β == 0.1
-        @test selected.γ == 0.85
+        @test selected.γ == 0.9
+        # The arrow block constants are all zero, so the initial point keeps
+        # the unit-scale floor.
+        @test selected.Ωp == 1.0
+        @test selected.Ωd == 1.0
 
         ws = SDPX.Workspace(prob)
         @test isempty(ws.S)

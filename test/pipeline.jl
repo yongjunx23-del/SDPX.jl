@@ -21,6 +21,47 @@ function analytic_lp_problem(; duplicate_equality::Bool=false)
     return SDPX.ingest(c, A, C, B, b; verbosity=0)
 end
 
+# A structurally large sparse-coefficient equality SDP: thousands of
+# variables, dense PSD blocks, dense Schur complement, and explicit
+# equalities. It is the `large_equality` member of the generic-controller
+# invariance suite; no structure may special-case its parameters.
+function large_equality_problem(::Type{T}=Float64) where {T}
+    m, dimension, blocks = 1_000, 5, 2
+    upper_coordinates = [
+        (row, column)
+        for column in 1:dimension
+        for row in 1:column
+    ]
+    sparse_coefficients = Vector{Vector{SparseMatrixCSC{T,Int}}}(undef, blocks)
+    for block in 1:blocks
+        coefficients = Vector{SparseMatrixCSC{T,Int}}(undef, m)
+        for variable in 1:m
+            row, column = upper_coordinates[
+                mod1(variable + block - 1, length(upper_coordinates))
+            ]
+            rows = row == column ? [row] : [row, column]
+            columns = row == column ? [column] : [column, row]
+            coefficients[variable] = sparse(
+                rows,
+                columns,
+                ones(T, length(rows)),
+                dimension,
+                dimension,
+            )
+        end
+        sparse_coefficients[block] = coefficients
+    end
+    return SDPX.ingest(
+        ones(T, m),
+        sparse_coefficients,
+        [zeros(T, dimension, dimension) for _ in 1:blocks],
+        zeros(T, m, 1),
+        zeros(T, 1),
+        sparse=:auto,
+        verbosity=0,
+    )
+end
+
 @testset "SOCP classification through MOI" begin
     model = PIPELINE_MOI.Utilities.Model{Float64}()
     variables = PIPELINE_MOI.add_variables(model, 2)
@@ -67,39 +108,46 @@ end
 end
 
 @testset "Automatic pipeline and dedicated LP path" begin
-    @test SDPX._large_lattice_dense_schur_profile(
-        6_119,
-        394,
-        32,
-        0.0010204,
-        0.842601,
+    large_equality = large_equality_problem()
+    @test large_equality.structure.profile ==
+          :sparse_coefficients_dense_psd_dense_schur
+    @test large_equality.dims.m >= 1_000
+    @test large_equality.dims.n > 0
+    large_equality_parameters = SDPX.recommended_parameters(
+        large_equality,
+        SDPX.SolverOptions{Float64}(),
     )
-    @test !SDPX._large_lattice_dense_schur_profile(
-        3_999,
-        394,
-        32,
-        0.0010204,
-        0.842601,
+    @test large_equality_parameters.profile == :generic_mehrotra
+    @test large_equality_parameters.β == 0.1
+    @test large_equality_parameters.γ == 0.9
+    # Phase 2: the automatic resolver returns the raw Ω hints; the initial
+    # point is decided by the identity-metric KKT cold start instead.
+    @test large_equality_parameters.Ωp == 1.0
+    @test large_equality_parameters.Ωd == 1.0
+    @test large_equality_parameters.predictor == :classic
+    @test large_equality_parameters.parameter_strategy == :adaptive
+    large_equality_plan = SDPX.build_execution_plan(
+        large_equality,
+        SDPX.SolverOptions{Float64}(verbosity=0),
     )
-    @test !SDPX._large_lattice_dense_schur_profile(
-        6_119,
-        394,
-        32,
-        0.01,
-        0.842601,
-    )
+    @test large_equality_plan.parameter_profile ==
+          :automatic_mehrotra
+    @test large_equality_plan.scaling == :sdp_ruiz
+    @test large_equality_plan.parameters.adaptive_sigma_max == 0.0
 
     problem = analytic_lp_problem(; duplicate_equality=true)
     classification = SDPX.classify_problem(problem)
     @test classification.cone == :lp
     @test SDPX.build_execution_plan(problem).algorithm == :lp_primal_dual
-    @test SDPX.lp_initial_scale_indicator(problem) ≈ 2.0
 
     fast_parameters =
         SDPX.recommended_parameters(problem, SDPX.SolverOptions{Float64}())
-    @test fast_parameters.profile == :lp_mehrotra_fast_start
-    @test fast_parameters.β == 0.02
-    @test fast_parameters.γ == 0.99
+    @test fast_parameters.profile == :generic_mehrotra
+    @test fast_parameters.β == 0.1
+    @test fast_parameters.γ == 0.9
+    # The resolver never probes cone data: Ωp/Ωd stay at the raw defaults.
+    @test fast_parameters.Ωp == 1.0
+    @test fast_parameters.Ωd == 1.0
 
     distant_problem = SDPX.ingest(
         [1.0],
@@ -111,15 +159,15 @@ end
         verbosity=0,
     )
     @test distant_problem.cons isa SDPX.SparseCons{Float64}
-    @test SDPX.lp_initial_scale_indicator(distant_problem) == 2_000.0
     conservative_parameters = SDPX.recommended_parameters(
         distant_problem,
         SDPX.SolverOptions{Float64}(),
     )
-    @test conservative_parameters.profile ==
-          :lp_mehrotra_conservative_start
+    @test conservative_parameters.profile == :generic_mehrotra
     @test conservative_parameters.β == 0.1
     @test conservative_parameters.γ == 0.9
+    @test conservative_parameters.Ωp == 1.0
+    @test conservative_parameters.Ωd == 1.0
     distant_result = SDPX.solve!(
         distant_problem,
         SDPX.SolverOptions{Float64}(
@@ -133,9 +181,13 @@ end
     )
     @test distant_result.status == SDPX.Optimal
     @test distant_result.diagnostics.plan.parameter_profile ==
-          :lp_mehrotra_conservative_start
-    @test first(distant_result.parameter_history).beta == 0.1
-    @test first(distant_result.parameter_history).gamma == 0.9
+          :automatic_mehrotra
+    @test distant_result.termination.executed.executed_parameters.beta == 0.1
+    @test distant_result.termination.executed.executed_parameters.gamma == 0.9
+    # Iteration-level beta/gamma may adapt immediately from the measured KKT
+    # point; they are runtime evidence, not a cold-start profile assertion.
+    @test isfinite(first(distant_result.parameter_history).beta)
+    @test isfinite(first(distant_result.parameter_history).gamma)
     setprecision(BigFloat, 256) do
         distant_bigfloat = SDPX.ingest(
             BigFloat[1],
@@ -149,8 +201,7 @@ end
             distant_bigfloat,
             SDPX.SolverOptions{BigFloat}(),
         )
-        @test bigfloat_parameters.profile ==
-              :lp_mehrotra_conservative_start
+        @test bigfloat_parameters.profile == :generic_mehrotra
         @test bigfloat_parameters.β == BigFloat(1) / BigFloat(10)
         @test bigfloat_parameters.γ == BigFloat(9) / BigFloat(10)
     end
@@ -319,10 +370,9 @@ end
     @test raw.diagnostics.plan.algorithm == :lp_primal_dual
 end
 
-"""A sparse arrow-structured model of 2x2 blocks — the shape
-`recommended_parameters` has a dedicated profile for — with block constant terms
-spanning four orders of magnitude so the initial-point rules have a real spread
-to react to."""
+"""A sparse arrow-structured model of 2x2 blocks — the classic arrow shape —
+with block constant terms spanning four orders of magnitude so the
+initial-point rules have a real spread to react to."""
 function unbalanced_arrow_problem(;
     blocks::Int=4,
     shared::Int=2,
@@ -424,11 +474,15 @@ end
     @test stats.spread ≈ 1.0e3
     @test stats.gmean ≈ 2.0 * 10.0^1.5
 
-    # Ω is driven by the data rather than left at the old fixed default of 10,
-    # which is what made the CSDR model fail to converge at all.
+    # Phase 2: the automatic Ω is the raw hint. The cone data feed only the
+    # explicit `:per_block` mode below, never the generic resolver.
     rp = SDPX.recommended_parameters(prob, SDPX.SolverOptions{Float64}())
-    @test rp.Ωp ≈ SDPX.OMEGA_DATA_MULTIPLIER * stats.maxnorm
+    @test rp.Ωp == 1.0
     @test rp.Ωd == rp.Ωp
+    @test rp.profile == :generic_mehrotra
+    @test rp.β == 0.1
+    @test rp.γ == 0.9
+    @test rp.predictor == :classic
     # The public API now uses the guarded adaptive policy by default. A
     # cold-start safeguard preserves the fixed controller until normalized
     # feasibility and complementarity enter a reliable range.
@@ -447,11 +501,11 @@ end
         wide,
         SDPX.SolverOptions{Float64}(),
     )
-    @test wide_parameters.profile == :wide_arrow_2x2
+    @test wide_parameters.profile == :generic_mehrotra
     @test wide_parameters.β == 0.1
-    @test wide_parameters.γ == 0.85
-    @test wide_parameters.Ωp == 25.0
-    @test wide_parameters.Ωd == 25.0
+    @test wide_parameters.γ == 0.9
+    @test wide_parameters.Ωp == 1.0
+    @test wide_parameters.Ωd == wide_parameters.Ωp
 
     ones4 = ones(4)
     # `:auto` must agree with `:scalar`: per-block is opt-in, because it was
@@ -465,6 +519,326 @@ end
 
     @test_throws ArgumentError SDPX.initial_block_scales(
         prob, SDPX.SolverOptions{Float64}(omega_scaling=:nonsense))
+end
+
+@testset "generic automatic controller invariance" begin
+    # One branchless cold-start rule: every problem shape and arithmetic gets
+    # the same β, γ, predictor, strategy, and profile, and Ω is the raw user
+    # hint. `block_norm_stats` feeds only the explicit `:per_block` mode of
+    # `initial_block_scales`, never the generic resolver.
+    lp = analytic_lp_problem()
+    dense_coefficients = zeros(3, 2, 2)
+    dense_coefficients[1, 1, 1] = 1.0
+    dense_coefficients[2, 2, 2] = 1.0
+    dense_coefficients[3, 1, 2] = dense_coefficients[3, 2, 1] = 1.0
+    dense = SDPX.ingest(
+        [2.0, 3.0, 1.0],
+        [dense_coefficients],
+        [Matrix{Float64}(2.5I, 2, 2)],
+        zeros(3, 0),
+        Float64[];
+        verbosity=0,
+    )
+    arrow = unbalanced_arrow_problem(blocks=4)
+    large_equality = large_equality_problem()
+    bigfloat = SDPX.ingest(
+        BigFloat[1],
+        [reshape(BigFloat[1], 1, 1, 1)],
+        [fill(BigFloat(2_000), 1, 1)],
+        zeros(BigFloat, 1, 0),
+        BigFloat[];
+        verbosity=0,
+    )
+    for (name, prob) in (
+        :lp => lp,
+        :dense_sdp => dense,
+        :arrow => arrow,
+        :large_equality => large_equality,
+        :bigfloat => bigfloat,
+    )
+        T = eltype(prob.c)
+        options = SDPX.SolverOptions{T}()
+        selected = SDPX.recommended_parameters(prob, options)
+        @test selected.profile === :generic_mehrotra
+        @test selected.β == options.β
+        @test selected.γ == options.γ
+        @test selected.predictor == options.predictor
+        @test selected.parameter_strategy == options.parameter_strategy
+        @test selected.Ωp == options.Ωp
+        @test selected.Ωd == options.Ωd
+    end
+
+    # Ω is data-independent: a same-C problem with a different objective and
+    # equality right-hand side selects identical parameters.
+    variant = SDPX.SDPProblem{Float64}(
+        [7.0, 9.0],
+        lp.C,
+        lp.B,
+        [5.0],
+        lp.cons,
+        lp.dims,
+        lp.structure,
+    )
+    @test SDPX.recommended_parameters(
+        variant,
+        SDPX.SolverOptions{Float64}(),
+    ) == SDPX.recommended_parameters(
+        lp,
+        SDPX.SolverOptions{Float64}(),
+    )
+
+    # The fixed expert path bypasses the rule and keeps the exact options,
+    # including the explicit adaptive sigma cap.
+    fixed_options = SDPX.SolverOptions{Float64}(
+        parameter_policy=:fixed,
+        β=0.075,
+        γ=0.8,
+        Ωp=3.0,
+        Ωd=4.0,
+        predictor=:sdpb,
+        parameter_strategy=:adaptive,
+        adaptive_sigma_max=0.41,
+    )
+    fixed_plan = SDPX.build_execution_plan(dense, fixed_options)
+    @test fixed_plan.parameter_profile === :user_fixed
+    @test fixed_plan.parameters.beta == 0.075
+    @test fixed_plan.parameters.gamma == 0.8
+    @test fixed_plan.parameters.omega_p == 3.0
+    @test fixed_plan.parameters.omega_d == 4.0
+    @test fixed_plan.parameters.predictor == :sdpb
+    @test fixed_plan.parameters.strategy == :adaptive
+    @test fixed_plan.parameters.adaptive_sigma_max == 0.41
+end
+
+@testset "generic automatic controller has no size or active-set cliff" begin
+    # A sparse 1x1-cone problem whose block sees `active` of `variables`
+    # coefficient variables. The historical selector keyed off
+    # `max_active` (6/14/256) and variable count (4_000); the generic rule
+    # must be identical on both sides of every old threshold.
+    function active_problem(::Type{T}, variables::Int, active::Int) where {T}
+        coefficients = [
+            index <= active ?
+            sparse([1], [1], [one(T)], 1, 1) :
+            spzeros(T, 1, 1)
+            for index in 1:variables
+        ]
+        return SDPX.ingest(
+            ones(T, variables),
+            [coefficients],
+            [fill(T(3), 1, 1)],
+            zeros(T, variables, 0),
+            T[];
+            sparse=true,
+            verbosity=0,
+        )
+    end
+    active_selections = [
+        SDPX.recommended_parameters(
+            active_problem(Float64, 64, active),
+            SDPX.SolverOptions{Float64}(),
+        )
+        for active in (255, 256, 257)
+    ]
+    @test all(==(active_selections[1]), active_selections)
+    @test active_selections[1].profile === :generic_mehrotra
+
+    # Lightweight synthetic metadata for the historical large-lattice gate
+    # (`variables >= 4_000 && equalities >= 100 && blocks >= 16 &&
+    # coefficient_density <= 0.005 && schur_density >= 0.75`): no 4000-variable
+    # coefficient arrays are materialized. The generic resolver only reads the
+    # cone constants, so the fabricated structure is sufficient evidence that
+    # the old `:large_lattice_dense_schur` branch would have diverged here.
+    function lattice_gate_problem(::Type{T}, variables::Int) where {T}
+        blocks = 16
+        equalities = 100
+        structure = SDPX.StructureAnalysis(
+            0,
+            0,
+            0.001,
+            0,
+            0,
+            0.0,
+            0,
+            0,
+            0.0,
+            fill(0.0, blocks),
+            fill(0.0, blocks),
+            0,
+            0,
+            0.8,
+            true,
+            :dense,
+            :dense,
+            :dense,
+            :dense,
+            :sparse_coefficients_dense_psd_dense_schur,
+        )
+        empty_panels = [SparseMatrixCSC{T,Int}[] for _ in 1:blocks]
+        return SDPX.SDPProblem{T}(
+            ones(T, variables),
+            [fill(one(T), 1, 1) for _ in 1:blocks],
+            zeros(T, variables, equalities),
+            zeros(T, equalities),
+            SDPX.SparseCons{T}(
+                empty_panels,
+                [Int[] for _ in 1:blocks],
+                [Int[] for _ in 1:blocks],
+                [Matrix{T}(undef, 3, 0) for _ in 1:blocks],
+                [UInt8[] for _ in 1:blocks],
+                [SDPX.SparseBlockCOO{T}() for _ in 1:blocks],
+            ),
+            (L=blocks, m=variables, n=equalities, k=ones(Int, blocks)),
+            structure,
+        )
+    end
+    lattice_selections = [
+        SDPX.recommended_parameters(
+            lattice_gate_problem(Float64, variables),
+            SDPX.SolverOptions{Float64}(),
+        )
+        for variables in (3_999, 4_000, 4_001)
+    ]
+    @test all(==(lattice_selections[1]), lattice_selections)
+    @test lattice_selections[1].profile === :generic_mehrotra
+end
+
+@testset "generic resolver invariance under permutation, scaling, equilibration" begin
+    function small_problem(::Type{T}, constant::T) where {T}
+        coefficients = [
+            reshape(fill(one(T), 2), 2, 1, 1),
+            reshape([T(2), T(3)], 2, 1, 1),
+            reshape([T(0), T(1)], 2, 1, 1),
+        ]
+        return SDPX.ingest(
+            ones(T, 2),
+            coefficients,
+            [
+                fill(constant, 1, 1),
+                fill(constant / T(2), 1, 1),
+                fill(constant / T(4), 1, 1),
+            ],
+            zeros(T, 2, 0),
+            T[];
+            verbosity=0,
+        )
+    end
+    for T in (Float64, Float64x4, BigFloat)
+        base = small_problem(T, T(4))
+        options = SDPX.SolverOptions{T}()
+        selected = SDPX.recommended_parameters(base, options)
+        @test selected.profile === :generic_mehrotra
+        @test selected.Ωp == options.Ωp
+        @test selected.Ωd == options.Ωd
+        # Variable permutation does not change the cone constants, so the
+        # selection is invariant.
+        permuted = SDPX.SDPProblem{T}(
+            reverse(base.c),
+            base.C,
+            base.B,
+            base.b,
+            base.cons,
+            base.dims,
+            base.structure,
+        )
+        @test SDPX.recommended_parameters(
+            permuted,
+            options,
+        ) == selected
+        # Positive rescaling of the cone constants leaves the raw hints
+        # untouched: the resolver is data-independent, so the selection is
+        # identical under scaling and equilibration.
+        scale = T(10)
+        scaled = SDPX.SDPProblem{T}(
+            base.c,
+            [scale .* block for block in base.C],
+            base.B,
+            base.b,
+            base.cons,
+            base.dims,
+            base.structure,
+        )
+        scaled_selected = SDPX.recommended_parameters(scaled, options)
+        @test scaled_selected.Ωp == options.Ωp
+        @test scaled_selected.Ωd == options.Ωd
+        @test scaled_selected.profile === :generic_mehrotra
+        # The actual equilibration transform leaves the raw hints untouched.
+        equilibrated, eq = SDPX.equilibrate(base)
+        equilibrated_selected = SDPX.recommended_parameters(
+            equilibrated,
+            options,
+        )
+        @test equilibrated_selected.Ωp == options.Ωp
+        @test equilibrated_selected.Ωd == options.Ωd
+        @test equilibrated_selected.profile === :generic_mehrotra
+        @test eq !== nothing
+    end
+end
+
+@testset "executed post-scaling provenance and neutral plans" begin
+    # Auto plan: neutral user hints and a deferred identity; the resolver must
+    # not run on the pre-scaled problem.
+    lp = analytic_lp_problem()
+    auto_options = SDPX.SolverOptions{Float64}(
+        β=0.13,
+        γ=0.83,
+        Ωp=2.5,
+        Ωd=1.5,
+        predictor=:sdpb,
+        parameter_strategy=:adaptive,
+        adaptive_sigma_max=0.37,
+        verbosity=0,
+    )
+    auto_plan = SDPX.build_execution_plan(lp, auto_options)
+    @test auto_plan.parameter_profile === :automatic_mehrotra
+    @test auto_plan.parameters.beta == 0.13
+    @test auto_plan.parameters.gamma == 0.83
+    @test auto_plan.parameters.omega_p == 2.5
+    @test auto_plan.parameters.omega_d == 1.5
+    @test auto_plan.parameters.predictor == :sdpb
+    @test auto_plan.parameters.strategy == :adaptive
+    @test auto_plan.parameters.adaptive_sigma_max == 0.37
+
+    result = SDPX.solve!(
+        lp,
+        auto_options,
+    )
+    @test result.status == SDPX.Optimal
+    @test result.diagnostics.plan.parameter_profile === :automatic_mehrotra
+    @test result.diagnostics.selected_algorithms.parameter_profile ===
+          :post_scaling_mehrotra
+    @test result.diagnostics.selected_algorithms.parameter_source ===
+          :post_scaling_mehrotra
+    @test result.diagnostics.selected_algorithms.parameter_resolution_count == 1
+    @test result.diagnostics.selected_algorithms.stage === :post_scaling
+    @test result.termination.executed.parameter_profile ===
+          :post_scaling_mehrotra
+    @test result.termination.executed.parameter_source ===
+          :post_scaling_mehrotra
+    @test result.termination.executed.parameter_resolution_count == 1
+    @test result.termination.executed.stage === :post_scaling
+    @test result.diagnostics.selected_algorithms.planned_parameter_profile ===
+          :automatic_mehrotra
+
+    # Fixed policy: exact options, no resolver invocation.
+    fixed_options = SDPX.SolverOptions{Float64}(
+        parameter_policy=:fixed,
+        β=0.2,
+        γ=0.7,
+        Ωp=9.0,
+        Ωd=8.0,
+        verbosity=0,
+    )
+    fixed_plan = SDPX.build_execution_plan(lp, fixed_options)
+    @test fixed_plan.parameter_profile === :user_fixed
+    fixed_result = SDPX.solve!(lp, fixed_options)
+    @test fixed_result.status == SDPX.Optimal
+    @test fixed_result.diagnostics.selected_algorithms.parameter_profile ===
+          :user_fixed
+    @test fixed_result.diagnostics.selected_algorithms.parameter_source ===
+          :user_fixed
+    @test fixed_result.diagnostics.selected_algorithms.parameter_resolution_count == 0
+    @test fixed_result.diagnostics.selected_algorithms.stage === :not_applicable
+    @test fixed_result.termination.executed.parameter_resolution_count == 0
 end
 
 @testset "adaptive refinement matches fixed refinement on the answer" begin
@@ -1307,11 +1681,31 @@ end
         )
         @test automatic.status == SDPX.Optimal
         @test fixed.status == SDPX.Optimal
+        automatic_certificate = SDPX.result_certificate(
+            problem,
+            automatic,
+            automatic_options,
+        )
+        fixed_certificate = SDPX.result_certificate(
+            problem,
+            fixed,
+            SDPX._replace_solver_options(
+                automatic_options;
+                working_precision_policy=:fixed,
+            ),
+        )
+        @test automatic_certificate.valid
+        @test fixed_certificate.valid
+        # The automatic run executes at 192 bits and now starts from the
+        # affine KKT point; the fixed-precision run executes at 256 bits and
+        # preserves the expert identity start. Requiring 1e-40 trajectory
+        # identity conflates those intentional policies. Their certified
+        # objectives must instead agree at the requested accuracy.
         @test isapprox(
             automatic.pObj,
             fixed.pObj;
-            rtol=big"1e-40",
-            atol=big"1e-40",
+            rtol=automatic_options.ϵ_gap,
+            atol=automatic_options.ϵ_gap,
         )
         @test any(
             warning -> occursin(
@@ -1345,7 +1739,15 @@ end
     # quietly drop one — every field below is something a caller needs and would
     # otherwise have to reach into `diagnostics` or a separate certificate call
     # to obtain.
-    prob = unbalanced_arrow_problem(blocks=4, shared=2)
+    # Pin the shared variables so the affine cold-start KKT system is
+    # nonsingular. The unpinned construction has a genuine recession
+    # direction and now (correctly) fails closed before the callback loop;
+    # that makes it unsuitable for testing the solve-summary contract.
+    prob = unbalanced_arrow_problem(
+        blocks=4,
+        shared=2,
+        fix_shared=true,
+    )
     opts = SDPX.SolverOptions{Float64}(verbosity=0, iter_max=200, diagnostics=true)
     result = SDPX.solve!(prob, opts)
     summary = SDPX.solve_summary(prob, result, opts)

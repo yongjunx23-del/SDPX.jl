@@ -107,6 +107,10 @@ const SELECTED_TESTS = TEST_PROFILE === :quick ? QUICK_TESTS : FULL_TESTS
 
 @info "SDPX test profile" profile=TEST_PROFILE files=length(SELECTED_TESTS)
 
+@testset "cold-start math helpers" begin
+    include(joinpath(@__DIR__, "cold_start.jl"))
+end
+
 @testset "SDPX.jl ($(TEST_PROFILE))" begin
     for file in SELECTED_TESTS
         include(joinpath(@__DIR__, file))

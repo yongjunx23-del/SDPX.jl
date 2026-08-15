@@ -611,3 +611,318 @@ end
         @test selected.gram === :not_executed
     end
 end
+
+@testset "phase-2 KKT cold start initialization" begin
+    # min x1 + 2x2  s.t. x1 >= 1, x2 >= 1, x1 + x2 >= 3, x1 + x2 = 3.
+    # The phase-2 KKT start with H = G'G solves the regularized system
+    #   [G'G  -B; B'  δI][x; q] = [G'h; b]
+    #   [G'G  -B; B'  δI][v; q] = [c; 0]
+    # so the nonzero equality row gives x ≈ (1.5, 1.5) at iter_max=0, where
+    # the old fixed/zero start returned (0, 0).
+    cold_problem = lp_regression_problem(
+        [1.0, 2.0],
+        [1.0 0.0; 0.0 1.0; 1.0 1.0],
+        [1.0, 1.0, 3.0];
+        B=reshape([1.0, 1.0], 2, 1),
+        b=[3.0],
+    )
+
+    @testset "dense equality KKT start and counters" begin
+        options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:auto,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        result = SDPX.solve!(cold_problem, options)
+        @test result.status == SDPX.IterLimit
+        @test norm(result.x) > 0.0
+        # KKT equality row: u1 = u2 = 1 + q, 2q + δq = 1, so x ≈ 1.5 each.
+        @test result.x ≈ [1.5, 1.5] atol=1e-6
+        # The regularized equality residual is O(δ·|q|), well below the gate.
+        @test abs(sum(result.x) - 3.0) <= 1e-6
+
+        @test result.termination.executed.kkt === :dense_lu
+        @test result.termination.executed.backend_resolution === :post_presolve
+        initialization = result.termination.executed.initialization
+        @test initialization.applied
+        @test initialization.policy === :automatic
+        @test initialization.path === :phase2_kkt_cold_start
+        @test initialization.kkt_formulation === :dense_lu
+        @test initialization.provider === :dense_lu
+        @test initialization.factorization in (:lu, :specialized_kernel)
+        @test initialization.factorization_attempts == 1
+        @test initialization.factorization_count == 1
+        @test initialization.rhs_solve_count == 2
+        @test initialization.fallback_reason === :none
+        @test initialization.pre_shift_primal_residual <= 1e-6
+        @test initialization.pre_shift_dual_residual <= 1e-6
+        @test initialization.largest_shift.s > 0
+        @test initialization.largest_shift.z > 0
+        @test initialization.post_margins.s > 0
+        @test initialization.post_margins.z > 0
+        @test initialization.complementarity_before > 0
+        @test initialization.complementarity_after > 0
+        @test initialization.complementarity_after >
+              initialization.complementarity_before
+        @test hasproperty(result.timings, :initialization)
+        @test result.timings.initialization >= 0.0
+        @test result.timings.lp_core <= result.timings.total
+    end
+
+    @testset "equality-free dense Cholesky KKT start" begin
+        unconstrained_problem = lp_regression_problem(
+            [1.0, 2.0],
+            [1.0 0.0; 0.0 1.0; 1.0 1.0],
+            [1.0, 1.0, 3.0],
+        )
+        options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:auto,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        result = SDPX.solve!(unconstrained_problem, options)
+        @test result.status == SDPX.IterLimit
+        # G = [I₂; 1' 1], so H = G'G = [2 1; 1 2] and G'h = [4, 4], giving
+        # the unregularized KKT solution x = H⁻¹G'h = (4/3, 4/3).
+        @test result.x ≈ [4.0 / 3.0, 4.0 / 3.0] atol=1e-6
+        initialization = result.termination.executed.initialization
+        @test initialization.applied
+        @test initialization.kkt_formulation === :positive_definite_cholesky
+        @test initialization.provider === :positive_definite_cholesky
+        @test initialization.rhs_solve_count == 2
+        @test initialization.factorization_count == 1
+        @test initialization.factorization_attempts == 1
+    end
+
+    @testset "sparse LP KKT start reuses the sparse backend" begin
+        variables = 8
+        rows = 24
+        row_pointer = 1
+        I = Int[]
+        J = Int[]
+        V = Float64[]
+        h = zeros(rows)
+        for row in 1:rows
+            first = mod(row - 1, variables) + 1
+            second = mod(row, variables) + 1
+            for (column, value) in ((first, 1.0), (second, 1.0))
+                push!(I, row)
+                push!(J, column)
+                push!(V, value)
+            end
+            h[row] = 0.5
+        end
+        G = sparse(I, J, V, rows, variables)
+        c = ones(variables)
+        problem = SDPX.linear_program(
+            c,
+            G,
+            h;
+            sparse=true,
+            verbosity=0,
+        )
+        options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:auto,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        result = SDPX.solve!(problem, options)
+        @test result.status == SDPX.IterLimit
+        initialization = result.termination.executed.initialization
+        @test initialization.applied
+        @test initialization.kkt_formulation === :sparse_normal
+        @test initialization.rhs_solve_count == 2
+        @test initialization.factorization_count == 1
+        @test initialization.factorization_attempts == 1
+        @test result.termination.executed.kkt === :sparse_normal
+    end
+
+    @testset "vertex LP min -x, x >= 0 recovers the primal ray" begin
+        # The raw affine KKT point for this unbounded LP is the cone vertex:
+        # s = Gx - h = 0 and z = Gv = -1.  The strict sqrt(eps)-scale push
+        # alone leaves both sides near zero, so the aggregate identity-mass
+        # floor (ρ = #inequalities = 1) must raise each side to O(1) identity
+        # mass before cross-centering, and the Newton loop must recover the
+        # primal ray instead of stalling at x = 0.
+        vertex_problem = lp_regression_problem(
+            [-1.0],
+            reshape([1.0], 1, 1),
+            [0.0],
+        )
+        options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:auto,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        result = SDPX.solve!(vertex_problem, options)
+        @test result.status == SDPX.IterLimit
+        initialization = result.termination.executed.initialization
+        @test initialization.applied
+        @test initialization.path === :phase2_kkt_cold_start
+        # Post-strict margins are O(1) identity masses, not sqrt(eps) nudges.
+        @test initialization.primal_mass_floor_shift ≈ 1.0 atol=1e-6
+        @test initialization.dual_mass_floor_shift ≈ 1.0 atol=1e-6
+        @test initialization.primal_mass ≈ 1.0 atol=1e-6
+        @test initialization.dual_mass ≈ 1.0 atol=1e-6
+        @test initialization.post_margins.s >= 0.5
+        @test initialization.post_margins.z >= 0.5
+        @test initialization.largest_shift.s ≈ 1.5 atol=1e-6
+        @test initialization.largest_shift.z ≈ 2.5 atol=1e-6
+        # complementarity_before is the post-strict/pre-floor value; the mass
+        # floor restores O(1) complementarity before the centering step.
+        @test initialization.complementarity_before < 1e-10
+        @test initialization.complementarity_after_mass_floor ≈ 1.0 atol=1e-6
+        @test initialization.complementarity_after >
+              initialization.complementarity_after_mass_floor
+
+        # With the default iteration budget the homogeneous ray is recovered.
+        ray_result = SDPX.solve(vertex_problem; verbosity=0)
+        @test ray_result.status == SDPX.DualInfeasible
+        @test occursin("ray", ray_result.message)
+        @test ray_result.x[1] > 0.0
+    end
+
+    @testset "fixed and warm paths are bit-for-bit unchanged" begin
+        fixed_options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:fixed,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        fixed = SDPX.solve!(cold_problem, fixed_options)
+        @test fixed.status == SDPX.IterLimit
+        @test fixed.x == [0.0, 0.0]
+        @test [block[1, 1] for block in fixed.X] == [-1.0, -1.0, -3.0]
+        @test [block[1, 1] for block in fixed.Y] == [1.0, 1.0, 1.0]
+        @test fixed.y == [0.0]
+        fixed_init = fixed.termination.executed.initialization
+        @test !fixed_init.applied
+        @test fixed_init.path === :preserved_fixed_or_warm_start
+        @test fixed_init.policy === :fixed
+        @test fixed_init.rhs_solve_count == 0
+        @test fixed_init.factorization_attempts == 0
+        @test fixed.termination.executed.kkt === :not_executed
+        @test fixed.termination.executed.backend_resolution ===
+              :resolved_no_iteration
+
+        warm_options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:auto,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        warm = SDPX.solve!(
+            cold_problem,
+            warm_options;
+            x0=[5.0, 5.0],
+            y0=[1.0],
+        )
+        @test warm.status == SDPX.IterLimit
+        @test warm.x == [5.0, 5.0]
+        @test warm.y == [1.0]
+        @test [block[1, 1] for block in warm.X] == [4.0, 4.0, 7.0]
+        @test [block[1, 1] for block in warm.Y] == [1.0, 1.0, 1.0]
+        warm_init = warm.termination.executed.initialization
+        @test !warm_init.applied
+        @test warm_init.path === :preserved_fixed_or_warm_start
+        @test warm_init.rhs_solve_count == 0
+        @test warm.termination.executed.kkt === :not_executed
+    end
+
+    @testset "cold-start failure result carries measured dual and residuals" begin
+        # Direct regression for the failure tail: a residual-gate failure must
+        # report the pre-shift residuals it measured and the `cold.z` dual it
+        # computed instead of an all-zero dual array.
+        options = SDPX.SolverOptions{Float64}(
+            iter_max=0,
+            parameter_policy=:auto,
+            scaling=:none,
+            diagnostics=true,
+            verbosity=0,
+        )
+        plan = SDPX.build_execution_plan(cold_problem, options)
+        G_original, h_original = SDPX._extract_lp_rows(cold_problem)
+        keep = collect(axes(G_original, 1))
+        variables, equalities = 2, 1
+        workspace = SDPX.LPWorkspace(
+            Float64,
+            3,
+            variables,
+            equalities;
+            packed_hessian=true,
+        )
+        SDPX._resolve_lp_backend!(workspace, equalities)
+        scaling = SDPX.LPScaling(
+            ones(Float64, variables),
+            ones(Float64, 3),
+            ones(Float64, equalities),
+        )
+        cold = (
+            success=false,
+            stage=:lp_initialization,
+            reason=:lp_cold_start_residual,
+            x=zeros(Float64, variables),
+            y=zeros(Float64, equalities),
+            s=zeros(Float64, 3),
+            z=Float64[0.1, 0.2, 0.3],
+            pre_primal_residual=1e-3,
+            pre_dual_residual=2e-3,
+            normalized_primal_residual=1e-3,
+            normalized_dual_residual=2e-3,
+            kappa_before=1.0,
+            margins_before=(s=0.0, z=0.1),
+            factorization_attempts=2,
+            factorization_count=0,
+            rhs_solve_count=2,
+            backend_execution_attempted=true,
+            regularization=1e-8,
+            initialization_seconds=0.05,
+            factorization_seconds=0.02,
+            gram_seconds=0.01,
+        )
+        failure, removed = SDPX._lp_cold_start_failure_result(
+            cold_problem,
+            G_original,
+            h_original,
+            keep,
+            options,
+            plan,
+            0,
+            time(),
+            scaling,
+            equalities,
+            SDPX._lp_auto_parameter_resolution(options),
+            workspace,
+            cold,
+        )
+        @test removed == 0
+        @test failure.status == SDPX.NumericalBreakdown
+        @test failure.termination.reason === :lp_initialization_failed
+        @test failure.termination.stage === :lp_initialization
+        @test failure.p_res == 1e-3
+        @test failure.d_res == 2e-3
+        @test [block[1, 1] for block in failure.Y] == [0.1, 0.2, 0.3]
+        initialization = failure.termination.executed.initialization
+        @test !initialization.applied
+        @test initialization.path === :phase2_kkt_cold_start
+        @test initialization.fallback_reason === :lp_cold_start_residual
+        @test initialization.factorization_attempts == 2
+        @test initialization.factorization_count == 0
+        @test initialization.rhs_solve_count == 2
+        @test initialization.pre_shift_primal_residual == 1e-3
+        @test initialization.pre_shift_dual_residual == 2e-3
+        @test failure.termination.executed.kkt === :dense_lu
+        @test failure.termination.executed.fallback_reason ===
+              :lp_cold_start_residual
+    end
+end

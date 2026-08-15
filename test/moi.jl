@@ -52,9 +52,13 @@ end
         optimizer = SDPX.Optimizer{T}(
             sparse=true,
             verbosity=0,
-            tol_gap=T(1e-8),
-            tol_primal=T(1e-8),
-            tol_dual=T(1e-8),
+            # The analytic dual coordinate lies on a degenerate PSD boundary,
+            # where coordinate error scales like the square root of the gap.
+            # Request a correspondingly tighter certificate instead of
+            # weakening the coordinate assertion for a changed cold start.
+            tol_gap=T(1e-12),
+            tol_primal=T(1e-12),
+            tol_dual=T(1e-12),
         )
         index_map = MOI.copy_to(optimizer, model)
         MOI.optimize!(optimizer)

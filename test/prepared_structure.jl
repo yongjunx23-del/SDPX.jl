@@ -123,7 +123,7 @@ end
         @test cold.diagnostics.timings.execution_planning >= 0.0
     end
 
-    @testset "RHS-sensitive LP planning is not cached" begin
+    @testset "auto plan reuse covers objective/RHS sessions" begin
         auto_options = SolverOptions{Float64}(
             scaling=:none,
             presolve=true,
@@ -131,7 +131,7 @@ end
             verbosity=0,
         )
         prepared = prepare(_prepared_lp([1.0, 2.0]), auto_options)
-        @test prepared.structure.execution_plan === nothing
+        @test prepared.structure.execution_plan isa SDPX.ExecutionPlan
 
         result = solve!(
             prepared;
@@ -140,9 +140,63 @@ end
             warm_start=nothing,
         )
         @test result.status == SDPX.Optimal
-        @test result.diagnostics.plan isa SDPX.ExecutionPlan
-        @test result.diagnostics.timings.structural_analysis >= 0.0
-        @test result.diagnostics.timings.execution_planning >= 0.0
+        @test result.diagnostics.plan === prepared.structure.execution_plan
+        @test result.diagnostics.timings.structural_analysis == 0.0
+        @test result.diagnostics.timings.execution_planning == 0.0
+        @test result.diagnostics.plan.parameter_profile == :automatic_mehrotra
+        # The automatic rule reads only the immutable cone constants, so the
+        # cached plan equals a fresh auto plan for the replacement session.
+        cold_plan = SDPX.build_execution_plan(
+            _prepared_lp([2.0, 1.0]; rhs=[2.0]),
+            auto_options,
+        )
+        @test result.diagnostics.plan.parameters == cold_plan.parameters
+    end
+
+    @testset "auto SDP plan resolves once in every prepared session" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 1.0; 1.0 0.0]],
+            zeros(2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        auto_sdp_options = SolverOptions{Float64}(
+            algorithm=:sdp,
+            scaling=:equilibrate,
+            diagnostics=true,
+            verbosity=0,
+        )
+        prepared = prepare(problem, auto_sdp_options)
+        plan = prepared.structure.execution_plan
+        @test plan isa SDPX.ExecutionPlan
+        @test plan.parameter_profile === :automatic_mehrotra
+
+        first_result = solve!(
+            prepared;
+            objective=[2.0, 3.0],
+            warm_start=nothing,
+        )
+        second_result = solve!(
+            prepared;
+            objective=[3.0, 2.0],
+            warm_start=nothing,
+        )
+        @test first_result.status == second_result.status == SDPX.Optimal
+        for result in (first_result, second_result)
+            selected = result.diagnostics.selected_algorithms
+            @test result.diagnostics.plan === plan
+            @test selected.parameter_profile === :post_scaling_mehrotra
+            @test selected.parameter_source === :post_scaling_mehrotra
+            @test selected.parameter_resolution_count == 1
+            @test selected.stage === :post_scaling
+        end
+        @test prepared.state.structure_reuses == 2
+        @test prepared.state.numeric_generation == 2
     end
 
     @testset "fixed-variable objective transform refreshes offset" begin

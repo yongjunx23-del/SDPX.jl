@@ -630,3 +630,252 @@ end
         @test restored.termination.reason == :sentinel
     end
 end
+
+@testset "Phase-2 identity-metric KKT cold start" begin
+    function cold_start_model(::Type{T}; off_diagonal::T=T(1)) where {T}
+        coefficients = zeros(T, 2, 2, 2)
+        coefficients[1, 1, 1] = one(T)
+        coefficients[2, 2, 2] = one(T)
+        constant = T[0 off_diagonal; off_diagonal 0]
+        return SDPX.ingest(
+            T[2, 3],
+            [coefficients],
+            [constant],
+            zeros(T, 2, 0),
+            T[];
+            sparse=false,
+            verbosity=0,
+        )
+    end
+
+    @testset "iter_max=0 KKT equalities, residuals, and counters" begin
+        problem = cold_start_model(Float64)
+        options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            parameter_policy=:auto,
+            scaling=:none,
+            iter_max=0,
+            stall_iterations=0,
+            diagnostics=true,
+            verbosity=0,
+        )
+        result = SDPX.solve!(problem, options)
+        cold = result.termination.executed.initialization
+        @test cold.path === :kkt_cold_start
+        @test cold.policy === :auto
+        @test cold.ok === true
+        @test cold.factor_count == 1
+        @test cold.rhs_solves == 2
+        @test cold.fallback_reason === :none
+        @test cold.regularization_attempts == 0
+        # Identity-metric KKT: H = A'A = I, so x = A'C = 0 and the dual solve
+        # yields v = c, Y = A(v) = diag(c); both residuals are exact zeros.
+        @test result.x == [0.0, 0.0]
+        # Finalization reconstructs the returned slack in original affine
+        # coordinates (`A(x) - C`), so an iter_max=0 result does not expose
+        # the shifted interior workspace block.  The original-coordinate cone
+        # violation is one here; the cold-start record below is the authority
+        # for the exact pre-shift affine residual.
+        @test result.p_res == 1.0
+        @test cold.normalized_primal_residual == 0.0
+        @test cold.normalized_dual_residual == 0.0
+        # The global pre-centering shift lifts the dual point from diag(c);
+        # the final dual residual is exactly that scalar shift.
+        @test result.Y[1] ≈
+              Matrix(Diagonal([2.0, 3.0])) +
+              cold.dual_centering_shift * Matrix(1.0I, 2, 2)
+        @test result.d_res ≈ cold.dual_centering_shift
+        # The cold start never leaves the initialization stage to the Newton
+        # totals: initialization counters are separate from iterations.
+        @test result.iterations == 0
+        @test result.restarts == 0
+        @test result.regularizations == 0
+    end
+
+    @testset "forced mixed precision refines the cold KKT point" begin
+        setprecision(BigFloat, 128) do
+            problem = cold_start_model(BigFloat)
+            tolerance = BigFloat("1e-20")
+            result = SDPX.solve!(
+                problem,
+                SDPX.SolverOptions{BigFloat}(
+                    algorithm=:sdp,
+                    parameter_policy=:auto,
+                    mixed_precision_kkt=:on,
+                    mixed_precision_refine_max_steps=16,
+                    precision_bits=128,
+                    working_precision_policy=:fixed,
+                    ϵ_gap=tolerance,
+                    ϵ_primal=tolerance,
+                    ϵ_dual=tolerance,
+                    iter_max=0,
+                    diagnostics=true,
+                    verbosity=0,
+                ),
+            )
+            initialization = result.termination.executed.initialization
+            @test result.status == SDPX.IterLimit
+            @test initialization.ok === true
+            @test initialization.reason === :none
+            @test initialization.kkt_backend === :mixed_precision
+            @test initialization.factorization ===
+                  :mixed_precision_cholesky
+            @test initialization.factor_count == 1
+            @test initialization.rhs_solves == 2
+            @test initialization.fallback_reason === :none
+            @test initialization.cold_refinement_steps >= 1
+            @test initialization.dual_kkt_final_residual <
+                  initialization.dual_kkt_initial_residual
+            @test initialization.normalized_dual_residual <=
+                  initialization.residual_threshold
+        end
+    end
+
+    @testset "compatible rank-deficient Gram reuses one factor" begin
+        first = zeros(Float64, 3, 1, 1)
+        first[1, 1, 1] = 1.0
+        second = zeros(Float64, 3, 1, 1)
+        second[2, 1, 1] = sqrt(0.1)
+        problem = SDPX.ingest(
+            [1.0, 1.0, 0.0],
+            [first, second],
+            [zeros(1, 1), zeros(1, 1)],
+            zeros(3, 0),
+            Float64[];
+            sparse=false,
+            verbosity=0,
+        )
+        result = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                parameter_policy=:auto,
+                scaling=:none,
+                iter_max=0,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        initialization = result.termination.executed.initialization
+        @test result.status == SDPX.IterLimit
+        @test initialization.ok
+        @test initialization.factor_count == 1
+        @test initialization.rhs_solves == 2
+        @test initialization.regularization_attempts == 1
+        @test initialization.cold_refinement_steps >= 1
+        @test initialization.dual_kkt_final_residual <
+              initialization.dual_kkt_initial_residual
+        @test initialization.normalized_dual_residual <=
+              initialization.residual_threshold
+        @test initialization.fallback_reason === :none
+    end
+
+    @testset "fixed initial identities and warm starts are untouched" begin
+        problem = cold_start_model(Float64)
+        fixed = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                parameter_policy=:fixed,
+                scaling=:none,
+                Ωp=2.5,
+                Ωd=3.5,
+                iter_max=0,
+                stall_iterations=0,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        @test fixed.termination.executed.initialization === nothing
+        # The initial point is the Ω-scaled identity, but the returned primal
+        # slack is always reconstructed from the final x (A(x) − C); the dual
+        # side is untouched by finalization and keeps the Ωd identity.
+        @test fixed.Y[1] == Matrix(3.5I, 2, 2)
+        @test fixed.X[1] == [0.0 -1.0; -1.0 0.0]
+
+        warm = SDPX.solve!(
+            problem,
+            SDPX._replace_solver_options(
+                SDPX.SolverOptions{Float64}(
+                    algorithm=:sdp,
+                    parameter_policy=:auto,
+                    scaling=:none,
+                    iter_max=0,
+                    stall_iterations=0,
+                    diagnostics=true,
+                    verbosity=0,
+                ),
+            );
+            x0=[1.0, 2.0],
+            X0=[Matrix(1.0I, 2, 2)],
+            y0=Float64[],
+            Y0=[Matrix(2.0I, 2, 2)],
+        )
+        @test warm.termination.executed.initialization === nothing
+        @test warm.x == [1.0, 2.0]
+        @test warm.Y[1] == Matrix(2.0I, 2, 2)
+    end
+
+    @testset "dense and sparse-2x2 arrow routes stay stable" begin
+        dense_problem = cold_start_model(Float64)
+        dense_result = SDPX.solve!(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                parameter_policy=:auto,
+                scaling=:none,
+                iter_max=2,
+                stall_iterations=0,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        dense_cold = dense_result.termination.executed.initialization
+        @test dense_cold.kkt_formulation === :dense_normal_equations
+        @test dense_cold.factorization === :cholesky
+        @test dense_cold.ok === true
+
+        m, k, L = 8, 2, 3
+        coefficients = [zeros(m, k, k) for _ in 1:L]
+        active = [[1, 2, 5], [1, 3, 6], [1, 4, 7, 8]]
+        for l in 1:L, (p, i) in pairs(active[l])
+            coefficients[l][i, 1, 1] = 1.0 + p
+            coefficients[l][i, 2, 2] = 2.0 + l + p
+            if isodd(i + l)
+                coefficients[l][i, 1, 2] = coefficients[l][i, 2, 1] =
+                    0.1 * (i + l)
+            end
+        end
+        sparse_problem = SDPX.ingest(
+            ones(m),
+            coefficients,
+            [zeros(k, k) for _ in 1:L],
+            zeros(m, 0),
+            Float64[];
+            sparse=true,
+            verbosity=0,
+        )
+        @test SDPX.build_execution_plan(sparse_problem).kkt_backend ===
+              :block_arrow
+        sparse_result = SDPX.solve!(
+            sparse_problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                parameter_policy=:auto,
+                scaling=:none,
+                iter_max=2,
+                stall_iterations=0,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        sparse_cold = sparse_result.termination.executed.initialization
+        @test sparse_cold.ok === true
+        @test sparse_cold.kkt_formulation === :block_arrow
+        @test sparse_cold.factorization === :block_cholesky
+        @test sparse_cold.factor_count == 1
+        @test sparse_cold.rhs_solves == 2
+        @test isfinite(sparse_cold.normalized_primal_residual)
+        @test isfinite(sparse_cold.normalized_dual_residual)
+    end
+end

@@ -397,9 +397,13 @@ function prepare(
     preprocessed = preprocess(owned, options)
     reduced, equality_map, equality_report =
         presolve_equalities(preprocessed.problem, options)
+    # The mature planner is always reusable for an objective/RHS-only session.
+    # The automatic KKT cold start is solve-local and consumes each session's
+    # transformed objective/RHS only after scaling. It cannot change the
+    # immutable formulation/provider/storage plan, so objective/RHS replacement
+    # does not invalidate plan reuse.
     reusable_plan = !preprocessed.inconsistent &&
-                    !equality_report.inconsistent &&
-                    _prepared_plan_reusable(reduced, options)
+                    !equality_report.inconsistent
     execution_plan = if reusable_plan
         execution_route = resolve_execution_route(
             AutoPlanner(),
@@ -437,22 +441,6 @@ function prepare(
         0,
     )
     return PreparedSolver{T}(structure, state, options)
-end
-
-"""Whether the mature planner may be frozen for an objective/RHS-only session.
-
-The pure-LP auto parameter selector reads the equality right-hand side through
-`lp_initial_scale_indicator`, so its plan is not invariant under RHS-only
-changes. Every other mature planning decision reads structure and immutable
-constant data only.
-"""
-function _prepared_plan_reusable(
-    reduced::SDPProblem{T},
-    options::SolverOptions{T},
-) where {T}
-    all(==(1), reduced.dims.k) && options.parameter_policy === :auto &&
-        return false
-    return true
 end
 
 function _prepared_objective(

@@ -12,9 +12,15 @@ options = SolverOptions{Float64}(
 
 Use `parameter_strategy=:fixed` only for reproducibility with the historical
 trajectory. Automatic cold-start selection through `parameter_policy=:auto`
-is a separate structural policy. The adaptive controller itself returns fixed
-parameters while the normalized cold-start merit is at least one, and it
-permanently falls back after repeated instability.
+is a separate policy that runs one generic automatic Mehrotra controller after
+scaling and before the iteration-level policy. The public resolver
+`recommended_parameters` reports `profile=:generic_mehrotra`; the immutable
+execution plan records the neutral, deferred identity
+`:automatic_mehrotra`; and executed diagnostics record the post-scaling
+resolution as `:post_scaling_mehrotra`. An explicit fixed policy is recorded
+as `:user_fixed`. The adaptive controller itself returns fixed parameters
+while the normalized cold-start merit is at least one, and it permanently
+falls back after repeated instability.
 
 ## Audit of the existing Newton method
 
@@ -83,23 +89,30 @@ The adaptive SDP path now uses the same canonical sequence:
 | tolerances | `1e-10` | Relative gap, primal residual, and dual residual | Unchanged |
 | iteration limit | `200` | Hard outer-iteration limit | Unchanged |
 
-`parameter_policy=:auto` can replace the initial `beta`, `gamma`, `Omega_p`,
-and `Omega_d` from problem structure. It runs before the iteration-level
-policy. `parameter_policy=:fixed` preserves user values exactly.
+`parameter_policy=:auto` runs the generic automatic Mehrotra controller before
+the iteration-level policy. It selects no benchmark-, size-, cone-, or
+precision-specific parameter profile: `beta`, `gamma`, `predictor`, and
+`parameter_strategy` keep the `SolverOptions` defaults or user choices. After
+presolve and scaling, LP, SDP, and NativeSOC use their existing planned KKT
+route to solve one primal and one dual affine right-hand side, followed by
+typed cone-interior shifts and deterministic complementarity mass balancing.
+The automatic path does not use `OmegaP` or `OmegaD`. The public resolver reports
+`profile=:generic_mehrotra`; the immutable execution plan records only the
+deferred `:automatic_mehrotra` identity; and the executed solve records
+`:post_scaling_mehrotra`. `parameter_policy=:fixed` uses the supplied values
+exactly and records `:user_fixed`.
 
-The native fixed-trace Q3 backend is presently a documented exception. It has
-its own compact Mehrotra affine-ratio `sigma` rule and exact Q3 boundary step;
-the general `AdaptiveIPMController`, including `adaptive_sigma_max`, controls
-the SDP and dedicated LP paths but is not yet wired into Q3. Q3 still records
-its actual `sigma`, complementarity, affine steps, and accepted steps in
-`result.parameter_history`; in that backend the compatibility fields `beta`
-and `gamma` alias the locally selected `sigma` and the fixed 0.99 boundary
-safety, not the ignored `SolverOptions.beta` and `SolverOptions.gamma` values.
-`result.termination.executed.parameter_controller` identifies this policy
-explicitly. Fixed trace also makes the native primal cone head exact, so Q3
-does not use `OmegaP`; `OmegaD` remains its dual cold-start scale. Cluster
-history sweeps, rather than the option label alone, gate any future unification
-of these controllers.
+This document concerns iteration parameters. The storage and structure
+classifications reported by `StructureAnalysis.profile` (for example
+`:sparse_coefficients_dense_psd_dense_schur`) describe data layout and kernel
+selection, not iteration parameters; they are unaffected by the generic
+controller.
+
+After initialization, NativeSOC retains its compact Lorentz-specific
+`mu_aff / mu` centering rule and exact cone boundary kernel. The new affine KKT
+cold start only replaces the old automatic identity heads; it does not replace
+that iteration controller. FixedTraceQ3 uses the same Lorentz margin and
+mass-balancing policy through its verified tail-map representation.
 
 ## Existing numerical safeguards
 
@@ -170,9 +183,9 @@ MultiFloat diagnostics are never narrowed through Float64.
   `p=2` after a short step.
 - The candidate is blended as 80% current estimate and 20% previous `sigma`.
 - `sigma` is normally bounded by `[0.02, 0.50]`, expanded only as necessary to
-  include the configured fixed fallback. The calibrated
-  `large_lattice_dense_schur` profile uses 0.20 as its upper bound; the expert
-  `adaptive_sigma_max` option can reproduce or override this selection.
+  include the configured fixed fallback. The generic automatic controller
+  uses the 0.50 upper bound; the expert `adaptive_sigma_max` option can
+  reproduce or override this selection.
 - Short affine steps, residual growth, frequent backtracking, or poor factors
   impose centrality floors of `0.08` or `0.20`.
 - The primal and dual fraction-to-boundary values are selected independently
@@ -212,59 +225,20 @@ The formulas are the same across arithmetic types. Only `eps(T)`, factor
 quality, refinement thresholds, precision-floor detection, and existing
 backend selection differ.
 
-## Validation and promotion decision
+## Validation policy
 
-The following measurements were made on the same local Apple M4 process with
-Julia 1.12.6. Small benchmarks used warmed medians. Task_Low08 used identical
-four-thread processes and timing boundaries; its single-run difference should
-not be interpreted as a high-confidence throughput measurement.
+Automatic-controller changes are accepted only after the same implementation
+passes LP, SDP, NativeSOC, dense/sparse/equality, and arithmetic-type
+regression gates. Every gate compares status, iterations, residuals, relative
+gap, original-coordinate certification, executed provider/formulation
+provenance, and parameter history. Performance claims require repeated
+same-node runs; an improvement on one benchmark never creates a new automatic
+branch.
 
-| Problem | Strategy | Iterations | Solver time | Relative gap | Primal residual | Dual residual | Result |
-|---|---:|---:|---:|---:|---:|---:|---|
-| Dense LP, 80x400 | fixed | 10 | 14.443 ms | `8.97e-10` | `2.22e-16` | `1.08e-15` | Optimal |
-| Dense LP, 80x400 | adaptive | 11 | 14.723 ms | `2.56e-9` | `2.22e-16` | `1.24e-15` | Optimal |
-| Sparse CSDR, s15 | fixed | 19 | 15.749 ms | `8.05e-9` | `3.12e-14` | `3.59e-11` | Optimal |
-| Sparse CSDR, s15 | adaptive | 15 | 13.260 ms | `5.08e-9` | `3.18e-14` | `1.30e-10` | Optimal |
-| Task_Low08 | fixed | 24 | 40.928 s | `4.27e-7` | `2.73e-9` | `1.14e-10` | Optimal |
-| Task_Low08 | adaptive + fallback | 24 | 41.604 s | `7.29e-7` | `1.65e-10` | `1.96e-9` | Optimal |
-
-The sparse CSDR case improved by 1.19x and four iterations. The LP was about
-2% slower and needed one additional iteration. Task_Low08 detected a degraded
-equality factor at iteration 19, restored the fixed path, and produced a valid
-PSD certificate, but did not improve runtime. The adaptive policy is now the
-public default because it adds the required state-aware safeguards and has a
-tested fixed-policy fallback; `parameter_strategy=:fixed` remains available
-for historical trajectory reproduction. Runtime claims still require repeated
-warmed comparisons with identical numerical certificates.
-
-### Task_Low08 structural-cap follow-up
-
-A subsequent cluster sweep used one AMD EPYC node, a 32-core reservation, 16
-Julia threads, 16 OpenBLAS threads, a complete one-iteration warm-up, and
-identical original-coordinate validation for every point.
-
-| Sigma cap | Iterations | Solve time | Backtracks | Relative gap | Minimum primal PSD eigenvalue | Certificate |
-|---:|---:|---:|---:|---:|---:|---:|
-| 0.10 | 28 | 32.114 s | 127 | `4.24e-7` | `-1.71e-7` | valid |
-| 0.15 | 28 | 32.246 s | 134 | `5.10e-7` | `-5.90e-10` | valid |
-| 0.20 | 28 | 29.928 / 32.418 s | 119 | `2.18e-7` | `-7.13e-11` | valid |
-| 0.25 | 29 | 32.421 s | 153 | `2.98e-7` | `-3.36e-11` | valid |
-| 0.30 | 29 | 33.689 s | 157 | `3.73e-7` | `-1.76e-9` | valid |
-| 0.40 | 29 | 32.653 s | 148 | `5.67e-7` | `2.75e-10` | valid |
-| Generic 0.50 | 29 | 35.287 s | 174 | `9.85e-7` | `-6.58e-11` | valid |
-
-The 0.20 cap is retained because it is the largest value that removes an
-iteration, minimizes backtracking in the sweep, and avoids the much weaker
-PSD margin at 0.10. The repeated timing spread is reported rather than
-selecting the fastest sample. No global bound was changed.
-
-The older 24-iteration fixed row above is an original-coordinate trajectory.
-A fresh current-source diagnostic reproduced it with `scaling=:none` and a
-valid `4.27e-7` gap certificate. Combining the same fixed 0.075/0.8 values
-with the newer automatic Ruiz pipeline stalled at iteration 23 and did not
-produce a certificate. Consequently `scaling=:auto` now preserves original
-coordinates only for `large_lattice_dense_schur + parameter_strategy=:fixed`;
-adaptive lattice solves continue to select Ruiz.
+Historical benchmark-specific sweeps remain in dated benchmark reports rather
+than this maintained policy document. They can be reproduced with explicit
+`beta`, `gamma`, `OmegaP`, `OmegaD`, `predictor`, `scaling`, and
+`adaptive_sigma_max` options, but they do not influence automatic selection.
 
 ## Remaining limitations
 

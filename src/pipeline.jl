@@ -980,23 +980,29 @@ function worker_report(requested::Integer, selected::Integer)
 end
 
 """
-    automatic_scaling_policy(algorithm, parameter_profile, strategy)
+    automatic_scaling_policy(algorithm)
 
-Select the scaling stage without probing numerical values. The historical
-large-lattice fixed profile was calibrated in the original coordinates and
-stalls when combined with automatic Ruiz scaling; the adaptive profile is
-calibrated with Ruiz. Explicit `scaling=:none` or `:equilibrate` choices bypass
-this policy in [`build_execution_plan`](@ref).
+Select the scaling stage without probing numerical values: LP routes use
+geometric scaling and every SDP route uses automatic Ruiz scaling. Explicit
+`scaling=:none` or `:equilibrate` choices bypass this policy in
+[`build_execution_plan`](@ref).
+"""
+@inline function automatic_scaling_policy(algorithm::Symbol)
+    algorithm === :lp_primal_dual && return :lp_geometric
+    return :sdp_ruiz
+end
+
+"""Compatibility forwarding for the historical three-argument entry point.
+
+The parameter profile and strategy arguments are ignored: the generic policy
+is a pure function of the algorithm.
 """
 @inline function automatic_scaling_policy(
     algorithm::Symbol,
-    parameter_profile::Symbol,
-    parameter_strategy::Symbol,
+    ::Symbol,
+    ::Symbol,
 )
-    algorithm === :lp_primal_dual && return :lp_geometric
-    parameter_profile === :large_lattice_dense_schur &&
-        parameter_strategy === :fixed && return :none
-    return :sdp_ruiz
+    return automatic_scaling_policy(algorithm)
 end
 
 """
@@ -1163,9 +1169,10 @@ end
 """
     build_execution_plan(::AutoPlanner, prob, route)
 
-Consume a route resolved after equality presolve.  The remaining code is the
-existing late-bound plan construction and deliberately keeps its scaling,
-parameter, memory, backend, and scheduling semantics unchanged.
+Consume a route resolved after equality presolve. The late-bound plan fixes
+scaling, memory, backend, and scheduling, while carrying only a neutral
+parameter-policy identity and the user's numeric request. Automatic numeric
+parameters are resolved later in the final scaled coordinates.
 """
 function build_execution_plan(
     ::AutoPlanner,
@@ -1181,40 +1188,26 @@ function build_execution_plan(
         _reduced_arrow_decision(prob, opts, available)
     mixed_arrow_decision =
         _mixed_reduced_arrow_decision(prob, opts, available)
-    selected = if opts.parameter_policy === :auto
-        recommended_parameters(prob, opts)
-    else
-        (
-            β=opts.β,
-            γ=opts.γ,
-            Ωp=opts.Ωp,
-            Ωd=opts.Ωd,
-            predictor=opts.predictor,
-            profile=:fixed,
-        )
-    end
+    # The planner is neutral: it never runs the cold-start resolver on the
+    # pre-scaled problem. `plan.parameters` carries the user-requested or
+    # default numeric hints only, and the automatic rule resolves exactly once
+    # after scaling inside the solver core. The plan identity distinguishes
+    # the deferred automatic policy from an explicit fixed policy.
+    parameter_profile = opts.parameter_policy === :auto ?
+                        :automatic_mehrotra : :user_fixed
+    selected = (
+        β=opts.β,
+        γ=opts.γ,
+        Ωp=opts.Ωp,
+        Ωd=opts.Ωd,
+        predictor=opts.predictor,
+        parameter_strategy=opts.parameter_strategy,
+        profile=parameter_profile,
+    )
     opts.scaling in (:auto, :none, :equilibrate) ||
         throw(ArgumentError("scaling must be :auto, :none, or :equilibrate"))
-    scaling_profile = if selected.profile === :fixed &&
-                         prob.structure.profile ===
-                         :sparse_coefficients_dense_psd_dense_schur &&
-                         _large_lattice_dense_schur_profile(
-                             prob.dims.m,
-                             prob.dims.n,
-                             prob.dims.L,
-                             prob.structure.coefficient_density,
-                             prob.structure.schur_density,
-                         )
-        :large_lattice_dense_schur
-    else
-        selected.profile
-    end
     scaling = if opts.scaling === :auto
-        automatic_scaling_policy(
-            algorithm,
-            scaling_profile,
-            opts.parameter_strategy,
-        )
+        automatic_scaling_policy(algorithm)
     elseif opts.scaling === :equilibrate
         algorithm === :lp_primal_dual ? :lp_geometric : :sdp_ruiz
     else
@@ -1528,13 +1521,8 @@ function build_execution_plan(
         threads=selected_threads,
         equality_solver=opts.equality_solver,
     )
-    adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
-                         recommended_adaptive_sigma_max(
-                             selected.profile,
-                             selected.β,
-                             opts.adaptive_sigma_max,
-                         ) :
-                         zero(T)
+    # Neutral plan hint: the post-scaling resolver chooses the actual cap.
+    adaptive_sigma_max = opts.adaptive_sigma_max
     return ExecutionPlan(
         classification,
         algorithm,
@@ -2396,11 +2384,11 @@ Lower bound on the workspace for the **block-arrow** KKT route.
 
 The arrow route never forms the dense `m x m` Schur complement, so
 [`dense_workspace_floor_bytes`](@ref) does not describe it — not even
-approximately. On the CSDR 200/2/10/400 model (m = 40,453 with 53 shared
-variables) the dense floor reports 3,218 GiB while the solve runs in about
-5 GiB, and a memory warning that overstates the requirement by three orders
-of magnitude is worse than none: it tells users to abandon runs that fit
-comfortably.
+approximately. For a problem with large `m` but a small shared-variable
+dimension the dense floor can overstate the requirement by three orders of
+magnitude while the actual solve fits comfortably in memory, and a memory
+warning that overstates the requirement by that much is worse than none: it
+tells users to abandon runs that fit comfortably.
 
 What the route actually allocates scales with the *shared* dimension and the
 per-block local dimensions, not with `m`: the compact global Schur `Sgg` and
@@ -2426,8 +2414,8 @@ function arrow_workspace_floor_bytes(::Type{T}, prob::SDPProblem{T},
         # The implemented equality-arrow route is the all-local case. Its
         # dominant storage is Btil (m x n), two equality-Gram triangles, and
         # the independent local factors; it never allocates an m x m Schur
-        # matrix. A zero return here used to make the benchmark's mandatory
-        # memory gate approve J40/J80 as a zero-byte SDP workspace.
+        # matrix. A zero return here would make the mandatory memory gate
+        # approve an all-local equality SDP as a zero-byte workspace.
         all(==(1), frequency) || return 0
         cons = prob.cons::SparseCons{T}
         local_squares = sum(
@@ -2669,6 +2657,12 @@ function _attach_diagnostics(
         ),
     )
     parameter_source = get(executed, :parameter_source, :plan)
+    parameter_resolution_count = get(
+        executed,
+        :parameter_resolution_count,
+        nothing,
+    )
+    stage = get(executed, :stage, :not_resolved)
     selected = (
         solver=get(executed, :solver, plan.algorithm),
         scaling=plan.scaling,
@@ -2786,7 +2780,10 @@ function _attach_diagnostics(
         parameter_profile=executed_parameter_profile,
         initial_parameters=actual_initial_parameters,
         parameter_source,
+        parameter_resolution_count,
+        stage,
         executed_parameters,
+        initialization=get(executed, :initialization, nothing),
         planned_parameter_profile=plan.parameter_profile,
         planned_parameters=plan.parameters,
         certificate=certificate,
@@ -2931,6 +2928,10 @@ function _inconsistent_presolve_result(
             certificate_generator=:analytic_presolve,
             executed=(
                 solver=plan.algorithm,
+                parameter_profile=:not_resolved,
+                parameter_source=:not_resolved,
+                parameter_resolution_count=0,
+                stage=:not_resolved,
                 kkt=:not_executed,
                 planned_backend=planned_backend_name(plan),
                 executed_backend=:not_executed,

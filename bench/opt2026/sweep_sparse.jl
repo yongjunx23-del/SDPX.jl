@@ -1,12 +1,11 @@
 #!/usr/bin/env julia
 
-"""Parameter sweep for the CSDR sparse PSD dual.
+"""Historical explicit-parameter sweep for the CSDR sparse PSD dual.
 
-The `:auto` profile picks `:large_arrow_2x2` (β=0.4, γ=0.7) for this model
-because it keys off `max_active`, whose thresholds top out at 15 — but this
-instance has 385 active variables per block, far outside the range that profile
-was calibrated on. It does not converge. This sweeps the centering and
-backtracking parameters to find what does, and to recalibrate the profile.
+This script compares user-supplied centering, backtracking, and initialization
+values. Its measurements are retained as historical evidence only: the
+automatic controller has no CSDR-, active-set-, size-, or cone-specific
+parameter profile, and this sweep must not be used to create one.
 """
 
 using LinearAlgebra

@@ -589,12 +589,10 @@ post-solve certification (§5.1 legacy note).
 Base.@kwdef struct SolverOptions{T}
     β::T                    = T(1) / 10          # centering reduction target β·μ
     γ::T                    = T(9) / 10           # backtracking factor
-    Ωp::T                    = one(T)              # initial X = Ωp·I
-    Ωd::T                    = one(T)              # initial Y = Ωd·I
-    # `:scalar` uses the same Ωp/Ωd for every block; `:per_block` scales each
-    # block by its own ‖C_l‖∞ (see `initial_block_scales`). `:auto` currently
-    # resolves to `:scalar` — per-block was measured *worse*, see the docstring
-    # of `initial_block_scales`.
+    Ωp::T                    = one(T)              # fixed-policy initial X = Ωp·I
+    Ωd::T                    = one(T)              # fixed-policy initial Y = Ωd·I
+    # Expert fixed-policy identity scaling. Automatic KKT initialization does
+    # not read these block multipliers. `:per_block` remains an explicit mode.
     omega_scaling::Symbol     = :auto
     ϵ_gap::T                 = T(1e-10)
     ϵ_primal::T              = T(1e-10)

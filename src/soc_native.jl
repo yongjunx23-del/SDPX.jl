@@ -316,6 +316,17 @@ function NativeSOCWorkspace(
         plan.formulation.formulation isa DenseAugmentedKKT ?
         variables + equalities : 0
     @inbounds for block in eachindex(problem.cones)
+        if options.parameter_policy === :auto
+            # Phase-2 affine KKT cold start: the temporary point is the cone
+            # identity e = (1, 0, …, 0) in every block.  Ω is never used on
+            # this path; the cold-start routine replaces x/y as well before
+            # the first Newton iteration.
+            zero_owned!(slack[block])
+            zero_owned!(dual[block])
+            slack[block][1] = one(T)
+            dual[block][1] = one(T)
+            continue
+        end
         scale = max(one(T), maximum(abs, problem.cones[block].b; init=zero(T)))
         slack[block][1] = fixed_trace ? _ingest_owned_scalar(
             T, plan.cone.execution.payload.fixed_head[block],
@@ -1070,6 +1081,480 @@ function _native_soc_solve_kkt!(
     return true
 end
 
+"""Reset ordinary per-iteration Newton counters/times after a cold start."""
+function _native_soc_reset_iteration_counters!(workspace::NativeSOCWorkspace)
+    workspace.regularizations = 0
+    workspace.rhs_solves = 0
+    workspace.local_metric_preparations = 0
+    workspace.local_factorizations = 0
+    workspace.equality_panel_transforms = 0
+    workspace.equality_gram_assemblies = 0
+    workspace.equality_factorizations = 0
+    workspace.kkt_rhs_solves = 0
+    workspace.predictor_rhs_solves = 0
+    workspace.corrector_rhs_solves = 0
+    workspace.fixed_residual_blocks = 0
+    workspace.fixed_rhs_contractions = 0
+    workspace.fixed_direction_recoveries = 0
+    workspace.fixed_local_scaling_seconds = 0.0
+    workspace.fixed_local_metric_seconds = 0.0
+    workspace.fixed_local_factor_seconds = 0.0
+    workspace.fixed_rhs_contraction_seconds = 0.0
+    workspace.equality_panel_transform_seconds = 0.0
+    workspace.equality_gram_seconds = 0.0
+    workspace.equality_factor_seconds = 0.0
+    workspace.predictor_rhs_seconds = 0.0
+    workspace.corrector_rhs_seconds = 0.0
+    workspace.fixed_block_residual_seconds = 0.0
+    workspace.fixed_block_recovery_seconds = 0.0
+    workspace.equality_prepared = false
+    workspace.equality_factor = nothing
+    return workspace
+end
+
+"""
+    _native_soc_cold_start_init!(workspace, problem, options) -> (ok, report)
+
+Phase-2 affine KKT cold start for `parameter_policy = :auto`.
+
+Starting from the temporary cone-identity point `s = z = e` (with `x` and
+`equality_dual` zero), the routine builds the identity metric through the
+existing scaling and per-block metric assembly, plans one factorization and
+one equality preparation, and solves two custom KKT right-hand sides with
+the same planned factor:
+
+    primal:  H x = -Σ_l A_l' b_l,  Aeq x = beq        → x
+    dual:    H v = c,              Aeq v = 0           → v, q
+             z_l = A_l v,          equality_dual = -q
+    then    s_l = A_l x + b_l
+
+The affine residuals are verified with the existing NativeSOC residual and
+metric kernels before any shift: both normalized residuals must be finite
+and at most `max(sqrt(eps(T)), tolerance)`.  Each block is then lifted
+strictly into the cone by the shared Lorentz head shift, the direct Euclidean
+complementarity `κ`, the identity head masses, and the barrier degree
+(1 for scalar, 2 for proper Lorentz blocks) are aggregated, the aggregate
+identity-mass floor (ρ = number of blocks) raises any side whose total head
+mass is below the identity-unit mass to at least that mass, the shared head
+pre-centering cross rule is applied, and post-centering margins and `κ` are
+recorded.  The fixed-trace hot path uses only the immutable SoA tail
+maps/scatter/map helpers and the raw fixed head; it never touches a
+per-block cone matrix or provider GEMV.
+
+Returns `(true, initialization_report)` on success.  On failure returns
+`(false, (cause = …, …))`; the caller maps that to
+`NumericalBreakdown` at `stage = :native_soc_initialization` with no
+Ω/PSD/provider/formulation/precision fallback.
+"""
+function _native_soc_cold_start_init!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T},
+    options::SolverOptions{T},
+) where {T}
+    plan = workspace.plan
+    backend = workspace.la_backend
+    fixed_trace = plan.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? plan.cone.execution.payload : nothing
+    augmented = plan.formulation.formulation isa DenseAugmentedKKT
+    factorization = augmented ? :pivoted_symmetric_ldlt :
+                    fixed_trace ? :native_local_cholesky : :cholesky
+
+    # Unified initialization schema: every success and every failure returns
+    # the same full-shaped report, with only `cause` and the partially
+    # computed values differing.  Live workspace counters and the LA fallback
+    # are snapshotted at report construction time.
+    base = (
+        enabled=true,
+        cause=:none,
+        policy=options.parameter_policy,
+        initialization_policy=:kkt_cold_start,
+        path=:kkt_cold_start,
+        formulation=_native_soc_formulation_symbol(plan),
+        provider=plan.la_config.provider,
+        factorization=factorization,
+        pre_primal_residual=zero(T),
+        pre_dual_residual=zero(T),
+        primal_shifts=Vector{T}(undef, 0),
+        dual_shifts=Vector{T}(undef, 0),
+        primal_shift=zero(T),
+        dual_shift=zero(T),
+        primal_largest_shift=zero(T),
+        dual_largest_shift=zero(T),
+        primal_margin_before=T(Inf),
+        dual_margin_before=T(Inf),
+        primal_margin_after=T(Inf),
+        dual_margin_after=T(Inf),
+        kappa_before=zero(T),
+        kappa_after=zero(T),
+        kappa_after_mass_floor=zero(T),
+        complementarity_before=zero(T),
+        complementarity_after=zero(T),
+        complementarity_after_mass_floor=zero(T),
+        primal_mass=zero(T),
+        dual_mass=zero(T),
+        rho=zero(T),
+        primal_mass_floor_shift=zero(T),
+        dual_mass_floor_shift=zero(T),
+        barrier_degree=0,
+        factor_count=0,
+    )
+    function report(overrides)
+        live = (
+            rhs_solves=workspace.rhs_solves,
+            kkt_rhs_solves=workspace.kkt_rhs_solves,
+            equality_panel_transforms=workspace.equality_panel_transforms,
+            equality_gram_assemblies=workspace.equality_gram_assemblies,
+            equality_factorizations=workspace.equality_factorizations,
+            regularizations=workspace.regularizations,
+            fallback=workspace.la_fallback_reason,
+        )
+        merged = merge(base, overrides, live)
+        return merge(
+            merged,
+            (failed = get(merged, :cause, :none) !== :none,),
+        )
+    end
+    factor_count = 0
+
+    # Identity metric from the temporary s = z = e seed through the existing
+    # NT/HKM scaling and per-block metric assembly, then one planned factor
+    # and one equality preparation shared by both custom right-hand sides.
+    scaling_ok, failed_block = _native_soc_scaling!(workspace)
+    if !scaling_ok
+        return false, report((cause=:metric_scaling_failed, block=failed_block))
+    end
+    zero_owned!(workspace.hessian)
+    @inbounds for block in eachindex(problem.cones)
+        _native_soc_add_metric!(workspace, problem.cones[block], block)
+    end
+    factor = _native_soc_assemble_factor!(workspace, problem)
+    factor === nothing && return false, report((cause=:la_factor_failed,))
+    factor_count = 1
+    if plan.formulation.formulation isa DenseNormalEquations
+        _native_soc_prepare_kkt!(workspace, problem, factor, options) ||
+            return false, report((
+                cause=:equality_prepare_failed,
+                factor_count=factor_count,
+            ))
+    end
+
+    # Primal affine system: H x = -Σ_l A_l' b_l with Aeq x = beq.
+    zero_owned!(workspace.rhs)
+    if fixed_trace
+        @inbounds for block in eachindex(problem.cones)
+            scratch = workspace.scratch[block]
+            scratch[1] = zero(T)
+            scratch[2] = reduction.offset[1, block]
+            scratch[3] = reduction.offset[2, block]
+            _soc_fixed_trace_transpose_scatter!(
+                workspace.rhs,
+                scratch,
+                reduction.active_ids[1, block],
+                reduction.active_ids[2, block],
+                reduction.tail_map[1, 1, block],
+                reduction.tail_map[1, 2, block],
+                reduction.tail_map[2, 1, block],
+                reduction.tail_map[2, 2, block],
+            )
+        end
+    else
+        @inbounds for block in eachindex(problem.cones)
+            la_mul_owned!(
+                backend,
+                workspace.rhs,
+                transpose(problem.cones[block].A),
+                problem.cones[block].b,
+                one(T),
+                one(T),
+            )
+        end
+    end
+    @inbounds for index in eachindex(workspace.rhs)
+        workspace.rhs[index] = -workspace.rhs[index]
+    end
+    copy_owned!(workspace.equality_residual, problem.beq)
+    _native_soc_solve_kkt!(workspace, problem, factor, options) ||
+        return false, report((
+            cause=:primal_solve_failed,
+            factor_count=factor_count,
+        ))
+    copy_owned!(workspace.x, workspace.dx)
+
+    # Dual affine system: H v = c with Aeq v = 0, then z_l = A_l v and
+    # equality_dual y = -q.
+    copy_owned!(workspace.rhs, problem.c)
+    zero_owned!(workspace.equality_residual)
+    _native_soc_solve_kkt!(workspace, problem, factor, options) ||
+        return false, report((
+            cause=:dual_solve_failed,
+            factor_count=factor_count,
+        ))
+    @inbounds for index in eachindex(workspace.equality_dual)
+        workspace.equality_dual[index] = -workspace.dy[index]
+    end
+    if fixed_trace
+        @inbounds for block in eachindex(problem.cones)
+            zero_owned!(workspace.dual[block])
+            _soc_fixed_trace_primal_map!(
+                workspace.dual[block],
+                workspace.dx,
+                reduction.active_ids[1, block],
+                reduction.active_ids[2, block],
+                reduction.tail_map[1, 1, block],
+                reduction.tail_map[1, 2, block],
+                reduction.tail_map[2, 1, block],
+                reduction.tail_map[2, 2, block],
+            )
+        end
+    else
+        @inbounds for block in eachindex(problem.cones)
+            zero_owned!(workspace.dual[block])
+            la_mul_owned!(
+                backend,
+                workspace.dual[block],
+                problem.cones[block].A,
+                workspace.dx,
+                one(T),
+                one(T),
+            )
+        end
+    end
+
+    # s = A x + b in every block.  The fixed-trace construction keeps the raw
+    # fixed head and the immutable SoA tail map on the hot path.
+    if fixed_trace
+        @inbounds for block in eachindex(problem.cones)
+            zero_owned!(workspace.ds[block])
+            _soc_fixed_trace_primal_residual!(
+                workspace.slack[block],
+                workspace.x,
+                workspace.ds[block],
+                reduction.active_ids[1, block],
+                reduction.active_ids[2, block],
+                reduction.tail_map[1, 1, block],
+                reduction.tail_map[1, 2, block],
+                reduction.tail_map[2, 1, block],
+                reduction.tail_map[2, 2, block],
+                reduction.fixed_head[block],
+                reduction.offset[1, block],
+                reduction.offset[2, block],
+            )
+        end
+    else
+        @inbounds for block in eachindex(problem.cones)
+            cone = problem.cones[block]
+            zero_owned!(workspace.slack[block])
+            la_mul_owned!(
+                backend,
+                workspace.slack[block],
+                cone.A,
+                workspace.x,
+                one(T),
+                one(T),
+            )
+            for coordinate in eachindex(workspace.slack[block])
+                workspace.slack[block][coordinate] += cone.b[coordinate]
+            end
+        end
+    end
+
+    # Pre-shift affine residual gate through the existing residual/metric
+    # kernels: both normalized residuals must be finite and within
+    # max(sqrt(eps(T)), the solver tolerances).
+    _native_soc_residuals!(workspace, problem)
+    metrics = _native_soc_metrics(workspace, problem)
+    pre_primal_residual = metrics[6]
+    pre_dual_residual = metrics[7]
+    tolerance_primal = max(sqrt(eps(T)), options.ϵ_primal)
+    tolerance_dual = max(sqrt(eps(T)), options.ϵ_dual)
+    if !(isfinite(pre_primal_residual) && isfinite(pre_dual_residual) &&
+         pre_primal_residual <= tolerance_primal &&
+         pre_dual_residual <= tolerance_dual)
+        return false, report((
+            cause=:residual_tolerance,
+            factor_count=factor_count,
+            pre_primal_residual=pre_primal_residual,
+            pre_dual_residual=pre_dual_residual,
+            tolerance_primal=tolerance_primal,
+            tolerance_dual=tolerance_dual,
+        ))
+    end
+
+    # Per-block Lorentz head shifts with the shared strict-interior
+    # certification.
+    primal_shifts = alloc_zeros(T, length(problem.cones))
+    dual_shifts = alloc_zeros(T, length(problem.cones))
+    @inbounds for block in eachindex(problem.cones)
+        ok, shift, _, _ = _cold_start_lorentz_shift!(workspace.slack[block])
+        ok || return false, report((
+            cause=:shift_failed,
+            factor_count=factor_count,
+            side=:primal,
+            block=block,
+            primal_shifts=primal_shifts,
+            dual_shifts=dual_shifts,
+        ))
+        primal_shifts[block] = shift
+        ok, shift, _, _ = _cold_start_lorentz_shift!(workspace.dual[block])
+        ok || return false, report((
+            cause=:shift_failed,
+            factor_count=factor_count,
+            side=:dual,
+            block=block,
+            primal_shifts=primal_shifts,
+            dual_shifts=dual_shifts,
+        ))
+        dual_shifts[block] = shift
+    end
+
+    # Aggregate the direct Euclidean complementarity κ, the identity head
+    # masses, and the barrier degree (1 scalar, 2 proper Lorentz), plus the
+    # margins right after the per-block shifts.
+    kappa = zero(T)
+    primal_mass = zero(T)
+    dual_mass = zero(T)
+    barrier_degree = 0
+    primal_margin_before = T(Inf)
+    dual_margin_before = T(Inf)
+    @inbounds for block in eachindex(problem.cones)
+        barrier_degree += length(problem.cones[block].b) == 1 ? 1 : 2
+        slack = workspace.slack[block]
+        dual = workspace.dual[block]
+        kappa += la_dot(backend, slack, dual)
+        primal_mass += slack[1]
+        dual_mass += dual[1]
+        primal_margin_before = min(primal_margin_before, _soc_margin(slack))
+        dual_margin_before = min(dual_margin_before, _soc_margin(dual))
+    end
+
+    # Aggregate identity-mass floor: each Lorentz block contributes one
+    # identity unit, so ρ = ⟨e, e⟩ = #blocks.  Raising the total head mass to
+    # at least ρ keeps an affine vertex start (heads ≈ 0) at O(1) scale while
+    # leaving fixed-trace heads already at e (head = 1) unchanged.  The floor
+    # is applied before the shared cross-centering; masses and complementarity
+    # are recomputed afterwards.  Barrier degree remains the complementarity
+    # denominator only.
+    rho = T(length(problem.cones))
+    floor_ok, primal_mass_floor_shift, dual_mass_floor_shift =
+        _cold_start_identity_mass_shifts(
+            primal_mass, dual_mass, length(problem.cones),
+        )
+    floor_ok || return false, report((
+        cause=:mass_floor_failed,
+        factor_count=factor_count,
+        primal_shifts=primal_shifts,
+        dual_shifts=dual_shifts,
+        kappa_before=kappa,
+        primal_mass=primal_mass,
+        dual_mass=dual_mass,
+        rho=rho,
+        barrier_degree=barrier_degree,
+        primal_margin_before=primal_margin_before,
+        dual_margin_before=dual_margin_before,
+    ))
+    @inbounds for block in eachindex(problem.cones)
+        _cold_start_add_lorentz_identity!(
+            workspace.slack[block], primal_mass_floor_shift,
+        )
+        _cold_start_add_lorentz_identity!(
+            workspace.dual[block], dual_mass_floor_shift,
+        )
+    end
+    kappa_after_mass_floor = zero(T)
+    primal_mass = zero(T)
+    dual_mass = zero(T)
+    @inbounds for block in eachindex(problem.cones)
+        slack = workspace.slack[block]
+        dual = workspace.dual[block]
+        kappa_after_mass_floor += la_dot(backend, slack, dual)
+        primal_mass += slack[1]
+        dual_mass += dual[1]
+    end
+
+    # Shared head pre-centering cross rule
+    #   primal_shift = κ / (2 ⟨e, z⟩),  dual_shift = κ / (2 ⟨e, s⟩),
+    # then re-verify the margins.  The resulting fixed-head residual is
+    # preserved: the main loop never resets the head to the fixed value.
+    ok, primal_shift, dual_shift =
+        _cold_start_centering_shifts(
+            kappa_after_mass_floor, primal_mass, dual_mass,
+        )
+    ok || return false, report((
+        cause=:centering_failed,
+        factor_count=factor_count,
+        primal_shifts=primal_shifts,
+        dual_shifts=dual_shifts,
+        kappa_before=kappa,
+        kappa_after_mass_floor=kappa_after_mass_floor,
+        primal_mass=primal_mass,
+        dual_mass=dual_mass,
+        rho=rho,
+        primal_mass_floor_shift=primal_mass_floor_shift,
+        dual_mass_floor_shift=dual_mass_floor_shift,
+        barrier_degree=barrier_degree,
+        primal_margin_before=primal_margin_before,
+        dual_margin_before=dual_margin_before,
+    ))
+    @inbounds for block in eachindex(problem.cones)
+        _cold_start_add_lorentz_identity!(workspace.slack[block], primal_shift)
+        _cold_start_add_lorentz_identity!(workspace.dual[block], dual_shift)
+    end
+
+    kappa_after = zero(T)
+    primal_margin_after = T(Inf)
+    dual_margin_after = T(Inf)
+    @inbounds for block in eachindex(problem.cones)
+        slack = workspace.slack[block]
+        dual = workspace.dual[block]
+        kappa_after += la_dot(backend, slack, dual)
+        primal_margin_after = min(primal_margin_after, _soc_margin(slack))
+        dual_margin_after = min(dual_margin_after, _soc_margin(dual))
+    end
+
+    # Every block receives its strict Lorentz head shift plus the aggregate
+    # identity-mass floor plus the shared pre-centering head shift, so the
+    # aggregate largest applied head shift is the maximum of the per-block
+    # sums.  All shifts are nonnegative by construction.
+    primal_largest_shift = maximum(
+        block -> primal_shifts[block] + primal_mass_floor_shift + primal_shift,
+        eachindex(primal_shifts);
+        init=primal_mass_floor_shift + primal_shift,
+    )
+    dual_largest_shift = maximum(
+        block -> dual_shifts[block] + dual_mass_floor_shift + dual_shift,
+        eachindex(dual_shifts);
+        init=dual_mass_floor_shift + dual_shift,
+    )
+    return true, report((
+        pre_primal_residual=pre_primal_residual,
+        pre_dual_residual=pre_dual_residual,
+        primal_shifts=primal_shifts,
+        dual_shifts=dual_shifts,
+        primal_shift=primal_shift,
+        dual_shift=dual_shift,
+        primal_largest_shift=primal_largest_shift,
+        dual_largest_shift=dual_largest_shift,
+        primal_margin_before=primal_margin_before,
+        dual_margin_before=dual_margin_before,
+        primal_margin_after=primal_margin_after,
+        dual_margin_after=dual_margin_after,
+        kappa_before=kappa,
+        kappa_after=kappa_after,
+        kappa_after_mass_floor=kappa_after_mass_floor,
+        complementarity_before=kappa / T(barrier_degree),
+        complementarity_after=kappa_after / T(barrier_degree),
+        complementarity_after_mass_floor=
+            kappa_after_mass_floor / T(barrier_degree),
+        primal_mass=primal_mass,
+        dual_mass=dual_mass,
+        rho=rho,
+        primal_mass_floor_shift=primal_mass_floor_shift,
+        dual_mass_floor_shift=dual_mass_floor_shift,
+        barrier_degree=barrier_degree,
+        factor_count=factor_count,
+    ))
+end
+
 function _native_soc_direction!(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
@@ -1445,6 +1930,15 @@ function _native_soc_result(
     kkt_backend = augmented ? :dense_augmented_ldlt :
                   fixed_trace ? :fixed_trace_local_elimination :
                   :dense_cholesky
+    initialization_report = get(termination, :initialization, NamedTuple())
+    initialization_path = get(initialization_report, :path, :not_applied)
+    executed_initialization = if initialization_path === :omega_head_start
+        :omega_head_start
+    elseif fixed_trace
+        :native_soc_fixed_trace_kkt_cold_start
+    else
+        :native_soc_general_kkt_cold_start
+    end
     selected = (
         solver=:native_soc,
         cone_representation=:native_lorentz,
@@ -1462,6 +1956,7 @@ function _native_soc_result(
         gram=:native_lorentz_metric,
         equality=isempty(workspace.equality_dual) ? :none :
                  workspace.equality_method,
+        initialization=executed_initialization,
         planned_backend=kkt_backend,
         executed_backend=kkt_backend,
         fallback_reason=:none,
@@ -1513,6 +2008,8 @@ Base.@noinline function _solve_native_soc_core(
     specialization::Symbol=:auto,
 ) where {T}
     started = time()
+    options.parameter_policy in (:fixed, :auto) ||
+        throw(ArgumentError("parameter_policy must be :fixed or :auto"))
     plan = plan_native_soc(problem, options; specialization)
     setup_started = time_ns()
     workspace = NativeSOCWorkspace(problem, plan, options)
@@ -1527,12 +2024,53 @@ Base.@noinline function _solve_native_soc_core(
     phase_corrector = 0.0
     phase_line_search = 0.0
     termination = (reason=:none, stage=:native_soc)
+    initialization = (
+        enabled=options.parameter_policy === :auto,
+        policy=options.parameter_policy,
+        path=options.parameter_policy === :auto ?
+              :native_soc_affine_kkt : :omega_head_start,
+    )
+    initialization_seconds = 0.0
     metrics = (
         zero(T), zero(T), T(Inf), T(Inf), T(Inf),
         T(Inf), T(Inf), T(Inf), -T(Inf), -T(Inf),
     )
 
-    while iterations < options.iter_max
+    run_iterations = true
+    if options.parameter_policy === :auto
+        init_started = time_ns()
+        initialization_ok, init_report =
+            _native_soc_cold_start_init!(workspace, problem, options)
+        initialization_seconds = (time_ns() - init_started) / 1.0e9
+        # Snapshot the unified report while the workspace still carries the
+        # cold-start counters and any LA/equality fallback, then reset the
+        # ordinary per-iteration counters/times and restore the constructor
+        # baseline fallback provenance on every outcome.  This keeps the
+        # ordinary Newton counters/timings and `la_fallback_reason` clean
+        # even after a failed initialization, without masking a later
+        # Newton fallback.
+        initialization = init_report
+        workspace.la_fallback_reason =
+            la_backend_reason(workspace.la_backend)
+        _native_soc_reset_iteration_counters!(workspace)
+        if !initialization_ok
+            # Explicit cold-start breakdown: no Ω/PSD lift/provider/
+            # formulation/precision fallback is attempted.
+            run_iterations = false
+            status = NumericalBreakdown
+            message = "NativeSOC affine KKT cold start failed: " *
+                      string(initialization.cause)
+            termination = merge(
+                (
+                    reason=initialization.cause,
+                    stage=:native_soc_initialization,
+                ),
+                initialization,
+            )
+        end
+    end
+
+    while run_iterations && iterations < options.iter_max
         time() - started >= options.max_time && begin
             status = TimeLimit
             message = "NativeSOC time limit reached."
@@ -1694,6 +2232,7 @@ Base.@noinline function _solve_native_soc_core(
     timings = options.timing ? (
         total=total_seconds,
         setup=setup_seconds,
+        initialization_seconds=initialization_seconds,
         cone_scaling_metric=phase_scaling,
         schur_assembly=phase_assembly,
         kkt_factorization=phase_factor,
@@ -1728,6 +2267,7 @@ Base.@noinline function _solve_native_soc_core(
         fixed_direction_recoveries=workspace.fixed_direction_recoveries,
         numeric_factorizations=iterations + (status === Optimal ? 0 : 1),
         refinement_solves=0,
+        initialization=initialization,
     ))
     return _native_soc_result(
         workspace,

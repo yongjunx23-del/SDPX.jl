@@ -42,6 +42,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   factors remain solve-local.
 - Removed the unused canonical snapshot/feature planner so production has one
   authoritative `ResolvedExecutionRoute -> ExecutionPlan` decision path.
+- Removed all structural and benchmark parameter profiles from the automatic
+  SDP/LP cold-start resolver. `parameter_policy=:auto` records a deferred
+  `:automatic_mehrotra` plan and resolves exactly once after scaling. On the
+  SDP path the public `recommended_parameters` resolver reports
+  `:generic_mehrotra` and the executed record reports
+  `:post_scaling_mehrotra`: `beta`, `gamma`, `predictor`, and
+  `parameter_strategy` keep the `SolverOptions` defaults or user choices,
+  every SDP/LP adaptive controller uses the generic 0.50 sigma cap. The LP path
+  runs a provenance-only post-scaling resolver after geometric scaling. The
+  expert `adaptive_sigma_max` option still
+  overrides the cap, and the old profile-taking helpers are compatibility
+  forwarders only. An explicit fixed policy is recorded as `:user_fixed`.
+  NativeSOC's existing local predictor/corrector controller is unchanged by
+  this cleanup.
+- Replaced the remaining automatic `Omega_p`/`Omega_d` identity start with a
+  provider-neutral, post-scaling KKT cold start for LP, SDP, and NativeSOC. A
+  planned identity-metric factor supplies one primal and one dual affine solve;
+  cone-specific typed shifts then establish strict interiority. A minimal
+  aggregate identity shift raises each side's identity mass to
+  `<e,e>` before the generic cross-centering step, preventing an affine point
+  at the cone vertex from starting at machine-epsilon scale. When an accepted
+  regularized or mixed-precision SDP factor leaves an original-KKT residual
+  above the existing gate, bounded structured correction reuses that same
+  factor; the residual gate remains fail-closed. Initialization
+  factor/solve counts, residuals, shifts, margins, complementarity, route, and
+  failure provenance are reported separately from Newton-iteration counters.
+  Automatic initialization fails closed rather than falling back to `Omega`
+  heuristics. Explicit `parameter_policy=:fixed` initialization is unchanged.
 
 ### Removed
 

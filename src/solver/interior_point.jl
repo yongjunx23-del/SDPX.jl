@@ -31,6 +31,23 @@ function print_iter(opts::SolverOptions{T}, iter, pObj, dObj, gap, p_res, d_res,
     flush(stdout)
 end
 
+@inline function _sdp_cold_start_kkt_formulation(ws::Workspace)
+    ws.executed_backend === :mixed_precision &&
+        return :dense_normal_equations
+    return kkt_formulation_from_backend(ws.executed_backend)
+end
+
+@inline function _sdp_cold_start_factorization(ws::Workspace)
+    ws.augmented !== nothing && return :pivoted_symmetric_ldlt
+    ws.executed_backend === :dense_cholesky && return :cholesky
+    ws.executed_backend === :mixed_precision &&
+        return :mixed_precision_cholesky
+    ws.executed_backend === :sparse_schur_cholesky &&
+        return :sparse_cholesky
+    ws.executed_backend === :block_arrow && return :block_cholesky
+    return :not_executed
+end
+
 """
     _release_iteration_memory!()
 
@@ -115,292 +132,68 @@ function _reround_solver_options(
 end
 
 """
-    lp_initial_scale_indicator(prob) -> T
+    recommended_adaptive_sigma_max(beta, requested)
 
-Estimate how far the origin is from the LP constraint hyperplanes, using
-
-`max_i |h_i| / ‖G_i‖∞` and `max_j |b_j| / ‖B_j‖∞`.
-
-Unlike a raw right-hand-side norm, this diagnostic is invariant to positive
-rescaling of an individual constraint. It is used only by the zero-probe
-parameter selector: aggressive LP centering is reliable when the feasible
-set is reasonably close to the origin, while a conservative profile is safer
-for very distant Float64 starts. A nonzero right-hand side with a zero
-coefficient row returns `Inf`; presolve subsequently reports the underlying
-inconsistency.
+Return the expert override when it is positive, otherwise select the guarded
+automatic centering cap. Every solver path uses the generic `0.5` cap;
+`adaptive_sigma_max` remains the inspectable expert override.
 """
-function lp_initial_scale_indicator(prob::SDPProblem{T}) where {T}
-    all(==(1), prob.dims.k) ||
-        throw(ArgumentError(
-            "lp_initial_scale_indicator requires a pure 1x1-cone LP",
-        ))
-    largest = zero(T)
-    if prob.cons isa DenseCons{T}
-        panels = (prob.cons::DenseCons{T}).Av
-        @inbounds for block in eachindex(panels)
-            coefficient = maximum(abs, panels[block]; init=zero(T))
-            rhs = abs(prob.C[block][1, 1])
-            ratio = coefficient > zero(T) ?
-                    rhs / coefficient :
-                    (rhs > zero(T) ? T(Inf) : zero(T))
-            largest = max(largest, ratio)
-        end
-    else
-        cons = prob.cons::SparseCons{T}
-        @inbounds for block in eachindex(cons.Asp)
-            coefficient = zero(T)
-            for variable in cons.active[block]
-                coefficient = max(
-                    coefficient,
-                    abs(cons.Asp[block][variable][1, 1]),
-                )
-            end
-            rhs = abs(prob.C[block][1, 1])
-            ratio = coefficient > zero(T) ?
-                    rhs / coefficient :
-                    (rhs > zero(T) ? T(Inf) : zero(T))
-            largest = max(largest, ratio)
-        end
-    end
-    @inbounds for equality in axes(prob.B, 2)
-        coefficient = maximum(
-            abs,
-            view(prob.B, :, equality);
-            init=zero(T),
-        )
-        rhs = abs(prob.b[equality])
-        ratio = coefficient > zero(T) ?
-                rhs / coefficient :
-                (rhs > zero(T) ? T(Inf) : zero(T))
-        largest = max(largest, ratio)
-    end
-    return largest
-end
-
-# The aggressive LP profile was robust below this row-scale-invariant distance
-# in the deterministic validation suite. Every arithmetic type falls back
-# above it: a wider exponent range prevents overflow, but does not remove the
-# globalization difficulty of a very distant infeasible start.
-const LP_AGGRESSIVE_START_SCALE_LIMIT = 1_000
-
-@inline function _large_lattice_dense_schur_profile(
-    variables::Int,
-    equalities::Int,
-    blocks::Int,
-    coefficient_density::Float64,
-    schur_density::Float64,
-)
-    return variables >= 4_000 &&
-           equalities >= 100 &&
-           blocks >= 16 &&
-           coefficient_density <= 0.005 &&
-           schur_density >= 0.75
+@inline function recommended_adaptive_sigma_max(
+    beta::T,
+    requested::T,
+) where {T}
+    requested > zero(T) && return max(requested, beta)
+    return max(T(1) / T(2), beta)
 end
 
 """
     recommended_adaptive_sigma_max(profile, beta, requested)
 
-Return the expert override when it is positive, otherwise select the guarded
-automatic centering cap for a structural parameter profile. The large dense
-lattice profile has a separately validated low-beta trajectory; allowing the
-generic controller to jump from `0.075` to `0.5` caused 27 backtracking trials
-and an additional Task_Low08 iteration. A controlled same-node sweep selected
-`0.2`: it retained the 28-iteration trajectory, minimized backtracking among
-the accurate capped runs, and improved the PSD certificate. Retain the generic
-`0.5` cap elsewhere.
+Compatibility forwarding for callers that still pass a profile symbol. The
+profile is ignored: every solver path uses the same guarded automatic cap.
 """
 @inline function recommended_adaptive_sigma_max(
-    profile::Symbol,
+    ::Symbol,
     beta::T,
     requested::T,
 ) where {T}
-    requested > zero(T) && return max(requested, beta)
-    return profile === :large_lattice_dense_schur ?
-           max(T(1) / T(5), beta) :
-           max(T(1) / T(2), beta)
+    return recommended_adaptive_sigma_max(beta, requested)
 end
 
 """
     recommended_parameters(prob, opts) -> NamedTuple
 
-Choose a zero-probe parameter profile from problem structure and requested
-arithmetic. The current profiles are calibrated for sparse block-arrow SDPs
-with many `2x2` blocks. General problems retain the supplied parameters.
+    Resolve the automatic SDP cold-start parameters. This numeric resolver is
+    invoked only once per SDP solve, on `solve_prob` after equilibration/Ruiz (or
+    the identity scaling stage). The dedicated LP path has a provenance-only
+    post-scaling resolver after its geometric data scaling; both paths construct
+    the actual automatic initial point from an affine KKT solve.
+
+    The automatic SDP path no longer derives an Ω from the cone data: a fully
+    cold `:auto` solve starts from the identity-metric KKT point instead of a
+    scaled multiple of the cone identity, so the resolver is a pure
+    compatibility hint and returns the raw requested `Ωp`/`Ωd` untouched.
+    Fixed-width users that rely on the old data-scale floor keep full control
+    through `parameter_policy = :fixed`, which never calls this rule and uses
+    the exact supplied options. No structure, cone type, size, or arithmetic
+    branch influences the selection; the executed profile reported by this
+    public function is `:generic_mehrotra` for API compatibility. The solver
+    core re-labels the same resolution `:post_scaling_mehrotra` in executed
+    diagnostics so it is distinguishable from the plan identity
+    `:automatic_mehrotra`.
 """
 function recommended_parameters(
     prob::SDPProblem{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
-    cons = prob.cons
-    if all(==(1), prob.dims.k)
-        if opts.algorithm === :sdp
-            return (
-                β=opts.β,
-                γ=opts.γ,
-                Ωp=opts.Ωp,
-                Ωd=opts.Ωd,
-                predictor=opts.predictor,
-                parameter_strategy=opts.parameter_strategy,
-                profile=:lp_general_conic,
-            )
-        end
-        initial_scale = lp_initial_scale_indicator(prob)
-        aggressive =
-            isfinite(initial_scale) &&
-            initial_scale <= T(LP_AGGRESSIVE_START_SCALE_LIMIT)
-        return (
-            β=aggressive ? T(1) / T(50) : opts.β,
-            γ=aggressive ? T(99) / T(100) : opts.γ,
-            Ωp=opts.Ωp,
-            Ωd=opts.Ωd,
-            predictor=opts.predictor,
-            parameter_strategy=opts.parameter_strategy,
-            profile=aggressive ?
-                    :lp_mehrotra_fast_start :
-                    :lp_mehrotra_conservative_start,
-        )
-    end
-    if prob.structure.profile ===
-       :sparse_coefficients_dense_psd_dense_schur &&
-        prob.dims.m >= 1_000 &&
-       prob.dims.n > 0
-        # Task_Low08-like systems occupy a narrower regime than the general
-        # large-equality profile: thousands of variables, several dense PSD
-        # blocks, extremely sparse coefficients, and an almost-dense Schur
-        # complement. A 2026-07 cluster sweep around the old (0.1, 0.85)
-        # profile found (0.075, 0.8) to be the only nearby setting that was
-        # both robust and faster: 24 versus 27 iterations, with a valid
-        # 4.27e-7 relative gap at a 1e-6 request. Nearby beta/gamma pairs that
-        # stalled are deliberately excluded by the structural gate rather
-        # than generalized to every equality-constrained SDP.
-        lattice_like = _large_lattice_dense_schur_profile(
-            prob.dims.m,
-            prob.dims.n,
-            prob.dims.L,
-            prob.structure.coefficient_density,
-            prob.structure.schur_density,
-        )
-        return (
-            β=lattice_like ? T(3) / T(40) : T(1) / T(10),
-            γ=lattice_like ? T(4) / T(5) : T(17) / T(20),
-            Ωp=T(100),
-            Ωd=T(1) / T(1_000),
-            predictor=:sdpb,
-            parameter_strategy=opts.parameter_strategy,
-            profile=lattice_like ?
-                    :large_lattice_dense_schur :
-                    :large_equality_dense_schur,
-        )
-    end
-    if cons isa SparseCons{T} && prob.dims.n == 0 && all(<=(2), prob.dims.k)
-        max_active = maximum(length, cons.active; init=0)
-        beta, gamma, profile = if max_active <= 6
-            (T(1) / T(10), T(17) / T(20), :small_arrow_2x2)
-        elseif max_active <= 14
-            (T(1) / T(10), T(4) / T(5), :medium_arrow_2x2)
-        elseif max_active <= WIDE_ARROW_ACTIVE_LIMIT
-            # The medium J=32/K=4 CSDR dual has 144 shared variables plus
-            # one local variable per block. The old catch-all "large" profile
-            # selected β=0.01 and stalled; β=0.1 converged reliably across the
-            # Ω/γ sweep. Keep the genuinely large 385-active-variable case on
-            # its separately validated low-β profile.
-            (T(1) / T(10), T(17) / T(20), :wide_arrow_2x2)
-        else
-            # Beyond the separately calibrated wide-arrow range. The CSDR
-            # 80/4/40/100 model has 385 active variables per block, and the
-            # old `(0.4, 0.7)` setting did not converge on it at all; a sweep
-            # found `(0.01, 0.85)` reaching the correct basin.
-            (T(1) / T(100), T(17) / T(20), :large_arrow_2x2)
-        end
-        if T === BigFloat &&
-           opts.ϵ_gap < T(1) / T(10_000_000_000)
-            beta = T(1) / T(10)
-            gamma = min(gamma, T(3) / T(4))
-            profile = :high_accuracy_bigfloat_2x2
-        end
-        # Scale the initial point to the data instead of pinning it at 10.
-        # `X = Ω·I` has to be commensurate with `C`, since the initial primal
-        # residual is `‖Ω·I − C‖`: on the CSDR model `max‖C_l‖∞ = 116.6`, so
-        # Ω=10 starts far outside the region where the Newton step is usable —
-        # measured step sizes collapse to 1e-3 and the primal objective runs
-        # away to 1e13. A sweep confirmed Ω=100 recovers the correct basin on
-        # exactly that instance, and Ω tracking `max‖C_l‖∞` reproduces it
-        # without hard-coding the case.
-        # An earlier revision set this multiplier to 1, reasoning that Ω=100
-        # worked on the CSDR instance whose `max‖C_l‖∞` happened to be 116.6,
-        # so "Ω tracks `max‖C_l‖∞`" reproduced it without hard-coding. That was
-        # a coincidence of one instance. A CSDR model with `max‖C_l‖∞ = 35.4`
-        # gets Ω=35 from the same rule and does not converge.
-        #
-        # Swept across three CSDR instances with independently known Clarabel
-        # optima and the dense lattice benchmark, iterations and status:
-        #
-        #   multiplier   s15         s20              s25         Task_Low08
-        #            1   22 Optimal  94 Stalled       81 Optimal  27 Optimal
-        #           10   26 Optimal  36 Optimal       46 Optimal  27 Optimal
-        #          100   29 Optimal  81 Stalled       53 Optimal  27 Optimal
-        #
-        # Ten is the only value that solves all four. Note the behaviour is not
-        # monotone — 100 is worse than 10 on `s20` — so this cannot be inferred
-        # from a single instance in either direction, which is how the previous
-        # value was arrived at. The dense lattice result is unchanged to every
-        # digit, so this is not a trade against it. Keep 10 as the floor for
-        # small-data models.
-        stats = block_norm_stats(prob)
-        wide_small_data =
-            profile === :wide_arrow_2x2 &&
-            stats.maxnorm <= T(WIDE_ARROW_SMALL_DATA_NORM_LIMIT)
-        omega = if wide_small_data
-            # The response is sharply non-monotone on the medium canonical
-            # model: Ω=25 and Ω=30 converge, while the unrounded 5*maxnorm
-            # value Ω≈27.56 stalls. The lower grid point Ω=25 needs 41
-            # iterations versus 46 at Ω=30, so quantize down to the faster
-            # validated point while retaining the floor at 10.
-            max(
-                T(10),
-                T(WIDE_ARROW_OMEGA_MULTIPLIER) * floor(stats.maxnorm),
-            )
-        else
-            max(T(10), T(OMEGA_DATA_MULTIPLIER) * stats.maxnorm)
-        end
-        return (
-            β=beta,
-            γ=gamma,
-            Ωp=omega,
-            Ωd=omega,
-            predictor=opts.predictor,
-            # Deliberately NOT :adaptive. Enabling the β/γ controller here did
-            # look like a large win, but that measurement was taken while the
-            # solve was terminating prematurely; re-running it against a correct
-            # Ω and correct termination reverses the result — 47 iterations to
-            # gap 3.08e-04 with the fixed parameters, against 33 iterations to
-            # 6.08e-04 with the controller. It also costs accuracy on the dense
-            # lattice benchmark (gap 6.29e-07 → 5.07e-04).
-            parameter_strategy=opts.parameter_strategy,
-            profile,
-        )
-    end
-    # Scale the initial point to the data. `X = Ω·I` has to be commensurate
-    # with `C`, because the initial dual residual is `‖C_l − Ω·I‖`; a fixed
-    # Ω=1 against data of magnitude 1e7 leaves the solve stranded at its
-    # starting residual. Measured on the badly-scaled benchmark generator
-    # (`max‖C_l‖∞ = 1.6e7`): Ω=1 stalls at iteration 15 with `gap_rel = 2.0`
-    # and `dObj = -1.5e12`, while Ω = max‖C_l‖∞ converges to `Optimal` in 19
-    # iterations at `gap_rel = 1.9e-11` with a valid certificate. Equilibration
-    # does not substitute for it — it was measured and left the solve stalled.
-    #
-    # Taking the max with `opts.Ωp` makes this a no-op for data already at unit
-    # scale (where `max‖C_l‖∞ ≈ 1`), so well-scaled models keep their previous
-    # behaviour and a user-supplied larger Ω is still honoured.
-    stats = block_norm_stats(prob)
     return (
         β=opts.β,
         γ=opts.γ,
-        Ωp=max(opts.Ωp, stats.maxnorm),
-        Ωd=max(opts.Ωd, stats.maxnorm),
+        Ωp=opts.Ωp,
+        Ωd=opts.Ωd,
         predictor=opts.predictor,
         parameter_strategy=opts.parameter_strategy,
-        profile=:general_adaptive,
+        profile=:generic_mehrotra,
     )
 end
 
@@ -765,7 +558,12 @@ end
 function _sdp_setup_time_limit_result(
     prob::SDPProblem{T},
     elapsed::Float64,
+    ;
+    executed=nothing,
 ) where {T}
+    termination = executed === nothing ?
+                  (reason=:time_limit, stage=:sdp_setup) :
+                  (reason=:time_limit, stage=:sdp_setup, executed)
     return SDPResult{T}(
         TimeLimit,
         "Time limit exceeded before SDP iterations began.",
@@ -784,7 +582,7 @@ function _sdp_setup_time_limit_result(
         (total=elapsed,),
         NamedTuple[],
         nothing,
-        (reason=:time_limit, stage=:sdp_setup),
+        termination,
     )
 end
 
@@ -853,6 +651,630 @@ function _equilibrate_warm_start(
 end
 
 """
+    _kkt_cold_start_initialization(ws, prob, opts) -> NamedTuple
+
+Phase-2 identity-metric KKT cold start for a fully cold `:auto` SDP solve.
+The cone identity is substituted for the initial point before any iterate is
+formed, the identity-metric Schur complement `H = A'A` is assembled through
+the current threaded Schur route and factored exactly once from the immutable
+plan (`select_backend`/`factorize!`), and the same accepted factor serves the
+two planned direction solves:
+
+    Hx − Bq = A·C,  B'x = b   (primal RHS), and
+    Hv − Bq = c,    B'v = 0   (dual RHS),
+
+giving `x`, `Y = A(v)`, `y = -q`, and `X = A(x) - C`.  Each direction is
+checked against the original, unregularized identity-metric KKT operator.  If
+its normalized residual exceeds the cold-start gate, the existing structured
+refinement seam reuses the same accepted factor for a bounded number of
+correction solves.  This is required for a compatible rank-deficient Gram
+whose factor-side regularization leaves an `O(sqrt(eps(T)))` residual, and for
+an accepted mixed-precision factor whose first solve is intentionally lower
+precision.  It never selects another provider or formulation; any fallback is
+limited to the immutable plan's existing mixed-precision contract and remains
+visible in the initialization record.
+
+Pre-shift cone residuals are then computed with the current residual kernel
+and must be finite and within
+`max(sqrt(eps(T)), ϵ_primal, ϵ_dual)` after normalization; otherwise the
+caller reports `NumericalBreakdown` at stage `:sdp_initialization` with no Ω
+fallback. Each block is then pushed strictly into the PSD interior by
+`_cold_start_psd_shift!` and the global identity pre-centering shifts from
+`_cold_start_centering_shifts` are applied. The returned record carries the
+required provenance (policy/path, formulation/provider/factorization,
+pre-shift residuals, largest shifts, post margins and κ normalized by the
+total PSD degree, factor count `1`, RHS count `2`, fallback reason, and
+regularization attempts) without touching the Newton timing/counter totals.
+"""
+function _kkt_cold_start_initialization(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+) where {T}
+    L, m, n, k = prob.dims
+    cons = prob.cons
+    total_psd_degree = sum(k; init=0)
+    degree_denominator = max(total_psd_degree, 1)
+
+    # ---- identity-metric Schur: X = Y = I, one factorization ----
+    identity = [_scaled_identity(T, one(T), dimension) for dimension in k]
+    factor_blocks!(ws, identity, identity)
+    parallel_blas = ws.thread_count > 1 ? 1 : blas_threads()
+    schur_blas = schur_blas_threads(
+        ws,
+        prob,
+        cons,
+        parallel_blas,
+        blas_threads(),
+    )
+    _with_blas_threads(schur_blas) do
+        threaded_schur_build!(ws, prob, cons, identity, identity)
+    end
+    backend = select_backend(ws)
+    kkt = _with_blas_threads(_kkt_blas_threads(m)) do
+        factorize!(backend, ws, prob, opts)
+    end
+    if !kkt.ok
+        record = (
+            ok=false,
+            reason=:identity_kkt_factorization,
+            policy=:auto,
+            initialization_policy=:kkt_cold_start,
+            path=:kkt_cold_start,
+            # No factor was accepted; regularization_attempts records the
+            # provider/formulation retries that preceded this failure.
+            factor_count=0,
+            rhs_solves=0,
+            kkt_backend=ws.executed_backend,
+            kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+            la_backend=ws.executed_la_backend,
+            la_provider=ws.executed_la_provider,
+            la_ownership=ws.executed_la_ownership,
+            factorization=_sdp_cold_start_factorization(ws),
+            fallback_reason=ws.backend_fallback_reason,
+            regularization_attempts=kkt.reg_attempts,
+            total_psd_degree=total_psd_degree,
+        )
+        return (
+            ok=false,
+            reason=:identity_kkt_factorization,
+            record=record,
+        )
+    end
+
+    # ---- two planned solves and bounded corrections, same accepted factor ----
+    residual_threshold = max(
+        sqrt(eps(T)),
+        opts.ϵ_primal,
+        opts.ϵ_dual,
+    )
+    mixed = ws.mixed_precision
+    guard_refinement_before = mixed === nothing ? 0 :
+        mixed.predictor_refinement_steps
+    dynamic_fallback_before = mixed === nothing ? 0 :
+        mixed.dynamic_fallback_count
+    native_regularization_before = mixed === nothing ? 0 :
+        mixed.native_regularization_attempts
+    primary_rhs_solves = 0
+    cold_refinement_steps = 0
+
+    function solve_cold_rhs!(
+        rhs::AbstractVector{T},
+        equality_rhs::AbstractVector{T},
+    )
+        copy_owned!(ws.p, equality_rhs)
+        solved = solve_direction!(backend, ws, prob, opts, rhs)
+        primary_rhs_solves += 1
+        solved || return (
+            ok=false,
+            initial_residual=T(Inf),
+            final_residual=T(Inf),
+            normalized_residual=T(Inf),
+            refinement_steps=0,
+        )
+        initial_residual = _kkt_direction_residual!(ws, prob, rhs)
+        scale = max(
+            knrmInf(rhs),
+            n > 0 ? knrmInf(equality_rhs) : zero(T),
+            one(T),
+        )
+        normalized_residual = initial_residual / scale
+        refinement_steps = 0
+        final_residual = initial_residual
+        if isfinite(normalized_residual) &&
+           normalized_residual > residual_threshold
+            refinement_steps, final_residual =
+                refine!(backend, ws, prob, opts, rhs)
+            cold_refinement_steps += refinement_steps
+            # `refine!` reports the last accepted residual. Recompute through
+            # the original structured operator so this diagnostic and the
+            # later cone residual gate have one authoritative value.
+            final_residual = _kkt_direction_residual!(ws, prob, rhs)
+            normalized_residual = final_residual / scale
+        end
+        return (
+            ok=isfinite(normalized_residual) &&
+                normalized_residual <= residual_threshold,
+            initial_residual,
+            final_residual,
+            normalized_residual,
+            refinement_steps,
+        )
+    end
+
+    primal_rhs = alloc_zeros(T, m)
+    @inbounds for l in 1:L
+        accumulate_v_owned!(primal_rhs, cons, l, prob.C[l], one(T))
+    end
+    primal_solve = solve_cold_rhs!(primal_rhs, prob.b)
+    if !primal_solve.ok
+        record = (
+            ok=false,
+            reason=:kkt_cold_start_solve,
+            policy=:auto,
+            initialization_policy=:kkt_cold_start,
+            path=:kkt_cold_start,
+            factor_count=1,
+            rhs_solves=primary_rhs_solves,
+            base_rhs_solves=primary_rhs_solves,
+            cold_refinement_steps=cold_refinement_steps,
+            guard_refinement_steps=mixed === nothing ? 0 :
+                mixed.predictor_refinement_steps - guard_refinement_before,
+            dynamic_fallback_factorizations=mixed === nothing ? 0 :
+                mixed.dynamic_fallback_count - dynamic_fallback_before,
+            native_regularization_attempts=mixed === nothing ? 0 :
+                max(
+                    mixed.native_regularization_attempts -
+                    native_regularization_before,
+                    0,
+                ),
+            kkt_backend=ws.executed_backend,
+            kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+            la_backend=ws.executed_la_backend,
+            la_provider=ws.executed_la_provider,
+            la_ownership=ws.executed_la_ownership,
+            factorization=_sdp_cold_start_factorization(ws),
+            fallback_reason=ws.backend_fallback_reason,
+            regularization_attempts=kkt.reg_attempts,
+            total_psd_degree=total_psd_degree,
+            primal_kkt_initial_residual=primal_solve.initial_residual,
+            primal_kkt_final_residual=primal_solve.final_residual,
+        )
+        return (ok=false, reason=:kkt_cold_start_solve, record=record)
+    end
+    x = _owned_array_copy(T, ws.dx)
+    primal_q = _owned_array_copy(T, ws.dy)
+
+    dual_rhs = _owned_array_copy(T, prob.c)
+    zero_equality_rhs = alloc_zeros(T, n)
+    dual_solve = solve_cold_rhs!(dual_rhs, zero_equality_rhs)
+    if !dual_solve.ok
+        record = (
+            ok=false,
+            reason=:kkt_cold_start_solve,
+            policy=:auto,
+            initialization_policy=:kkt_cold_start,
+            path=:kkt_cold_start,
+            factor_count=1,
+            rhs_solves=primary_rhs_solves,
+            base_rhs_solves=primary_rhs_solves,
+            cold_refinement_steps=cold_refinement_steps,
+            guard_refinement_steps=mixed === nothing ? 0 :
+                mixed.predictor_refinement_steps - guard_refinement_before,
+            dynamic_fallback_factorizations=mixed === nothing ? 0 :
+                mixed.dynamic_fallback_count - dynamic_fallback_before,
+            native_regularization_attempts=mixed === nothing ? 0 :
+                max(
+                    mixed.native_regularization_attempts -
+                    native_regularization_before,
+                    0,
+                ),
+            kkt_backend=ws.executed_backend,
+            kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+            la_backend=ws.executed_la_backend,
+            la_provider=ws.executed_la_provider,
+            la_ownership=ws.executed_la_ownership,
+            factorization=_sdp_cold_start_factorization(ws),
+            fallback_reason=ws.backend_fallback_reason,
+            regularization_attempts=kkt.reg_attempts,
+            total_psd_degree=total_psd_degree,
+            primal_kkt_initial_residual=primal_solve.initial_residual,
+            primal_kkt_final_residual=primal_solve.final_residual,
+            dual_kkt_initial_residual=dual_solve.initial_residual,
+            dual_kkt_final_residual=dual_solve.final_residual,
+        )
+        return (ok=false, reason=:kkt_cold_start_solve, record=record)
+    end
+    v = _owned_array_copy(T, ws.dx)
+    q = _owned_array_copy(T, ws.dy)
+
+    X = [
+        begin
+            block = alloc_zeros(T, dimension, dimension)
+            buildP_owned!(block, cons, l, x)
+            kaxpby_owned!(-one(T), prob.C[l], one(T), block)
+            block
+        end
+        for (l, dimension) in pairs(k)
+    ]
+    Y = [
+        begin
+            block = alloc_zeros(T, dimension, dimension)
+            buildP_owned!(block, cons, l, v)
+            block
+        end
+        for (l, dimension) in pairs(k)
+    ]
+    y = _owned_array_copy(T, q)
+    @inbounds for index in eachindex(y)
+        y[index] = -y[index]
+    end
+
+    # ---- pre-shift residuals through the current residual kernel ----
+    placeholder_μ = alloc_zeros(T, L)
+    p_res, d_res, _ = threaded_compute_residuals!(
+        ws,
+        prob,
+        x,
+        X,
+        y,
+        Y,
+        placeholder_μ,
+        opts,
+    )
+    scale_p = one(T) + max(
+        L > 0 ? maximum(l -> knrmInf(prob.C[l]), 1:L) : zero(T),
+        n > 0 ? knrmInf(prob.b) : zero(T),
+    )
+    scale_d = one(T) + knrmInf(prob.c)
+    normalized_primal = p_res / scale_p
+    normalized_dual = d_res / scale_d
+    residuals_finite =
+        isfinite(normalized_primal) && isfinite(normalized_dual)
+    residuals_ok = residuals_finite &&
+        normalized_primal <= residual_threshold &&
+        normalized_dual <= residual_threshold
+    if !residuals_ok
+        record = (
+            ok=false,
+            reason=:kkt_cold_start_residuals,
+            policy=:auto,
+            initialization_policy=:kkt_cold_start,
+            path=:kkt_cold_start,
+            factor_count=1,
+            rhs_solves=2,
+            base_rhs_solves=2,
+            cold_refinement_steps=cold_refinement_steps,
+            guard_refinement_steps=mixed === nothing ? 0 :
+                mixed.predictor_refinement_steps - guard_refinement_before,
+            dynamic_fallback_factorizations=mixed === nothing ? 0 :
+                mixed.dynamic_fallback_count - dynamic_fallback_before,
+            native_regularization_attempts=mixed === nothing ? 0 :
+                max(
+                    mixed.native_regularization_attempts -
+                    native_regularization_before,
+                    0,
+                ),
+            kkt_backend=ws.executed_backend,
+            kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+            la_backend=ws.executed_la_backend,
+            la_provider=ws.executed_la_provider,
+            la_ownership=ws.executed_la_ownership,
+            factorization=_sdp_cold_start_factorization(ws),
+            fallback_reason=ws.backend_fallback_reason,
+            regularization_attempts=kkt.reg_attempts,
+            total_psd_degree=total_psd_degree,
+            pre_shift_primal_residual=p_res,
+            pre_shift_dual_residual=d_res,
+            normalized_primal_residual=normalized_primal,
+            normalized_dual_residual=normalized_dual,
+            residual_threshold=residual_threshold,
+            primal_kkt_initial_residual=primal_solve.initial_residual,
+            primal_kkt_final_residual=primal_solve.final_residual,
+            dual_kkt_initial_residual=dual_solve.initial_residual,
+            dual_kkt_final_residual=dual_solve.final_residual,
+        )
+        return (
+            ok=false,
+            reason=:kkt_cold_start_residuals,
+            record=record,
+        )
+    end
+
+    # ---- strictly interior PSD shifts, then global pre-centering ----
+    primal_shifts = Vector{T}(undef, L)
+    dual_shifts = Vector{T}(undef, L)
+    primal_margins = Vector{T}(undef, L)
+    dual_margins = Vector{T}(undef, L)
+    @inbounds for l in 1:L
+        primal_ok, primal_shifts[l], primal_margins[l], _ =
+            _cold_start_psd_shift!(X[l])
+        dual_ok, dual_shifts[l], dual_margins[l], _ =
+            _cold_start_psd_shift!(Y[l])
+        if !(primal_ok && dual_ok)
+            record = (
+                ok=false,
+                reason=:cold_start_psd_shift,
+                policy=:auto,
+                initialization_policy=:kkt_cold_start,
+                path=:kkt_cold_start,
+                factor_count=1,
+                rhs_solves=2,
+                base_rhs_solves=2,
+                cold_refinement_steps=cold_refinement_steps,
+                guard_refinement_steps=mixed === nothing ? 0 :
+                    mixed.predictor_refinement_steps - guard_refinement_before,
+                dynamic_fallback_factorizations=mixed === nothing ? 0 :
+                    mixed.dynamic_fallback_count - dynamic_fallback_before,
+                native_regularization_attempts=mixed === nothing ? 0 :
+                    max(
+                        mixed.native_regularization_attempts -
+                        native_regularization_before,
+                        0,
+                    ),
+                kkt_backend=ws.executed_backend,
+                kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+                la_backend=ws.executed_la_backend,
+                la_provider=ws.executed_la_provider,
+                la_ownership=ws.executed_la_ownership,
+                factorization=_sdp_cold_start_factorization(ws),
+                fallback_reason=ws.backend_fallback_reason,
+                regularization_attempts=kkt.reg_attempts,
+                total_psd_degree=total_psd_degree,
+                pre_shift_primal_residual=p_res,
+                pre_shift_dual_residual=d_res,
+                normalized_primal_residual=normalized_primal,
+                normalized_dual_residual=normalized_dual,
+                residual_threshold=residual_threshold,
+                block=Int(l),
+            )
+            return (
+                ok=false,
+                reason=:cold_start_psd_shift,
+                record=record,
+            )
+        end
+    end
+
+    kappa_before = sum(
+        block -> kdot(X[block], Y[block]),
+        1:L;
+        init=zero(T),
+    )
+    primal_mass = sum(block -> tr(X[block]), 1:L; init=zero(T))
+    dual_mass = sum(block -> tr(Y[block]), 1:L; init=zero(T))
+    floor_ok, primal_mass_floor, dual_mass_floor =
+        _cold_start_identity_mass_shifts(
+            primal_mass,
+            dual_mass,
+            total_psd_degree,
+        )
+    if !floor_ok
+        record = (
+            ok=false,
+            reason=:cold_start_identity_mass_floor,
+            policy=:auto,
+            initialization_policy=:kkt_cold_start,
+            path=:kkt_cold_start,
+            factor_count=1,
+            rhs_solves=2,
+            base_rhs_solves=2,
+            cold_refinement_steps=cold_refinement_steps,
+            guard_refinement_steps=mixed === nothing ? 0 :
+                mixed.predictor_refinement_steps - guard_refinement_before,
+            dynamic_fallback_factorizations=mixed === nothing ? 0 :
+                mixed.dynamic_fallback_count - dynamic_fallback_before,
+            native_regularization_attempts=mixed === nothing ? 0 :
+                max(
+                    mixed.native_regularization_attempts -
+                    native_regularization_before,
+                    0,
+                ),
+            kkt_backend=ws.executed_backend,
+            kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+            la_backend=ws.executed_la_backend,
+            la_provider=ws.executed_la_provider,
+            la_ownership=ws.executed_la_ownership,
+            factorization=_sdp_cold_start_factorization(ws),
+            fallback_reason=ws.backend_fallback_reason,
+            regularization_attempts=kkt.reg_attempts,
+            total_psd_degree=total_psd_degree,
+            pre_shift_primal_residual=p_res,
+            pre_shift_dual_residual=d_res,
+            normalized_primal_residual=normalized_primal,
+            normalized_dual_residual=normalized_dual,
+            residual_threshold=residual_threshold,
+            kappa_before=kappa_before / degree_denominator,
+            primal_mass,
+            dual_mass,
+        )
+        return (
+            ok=false,
+            reason=:cold_start_identity_mass_floor,
+            record=record,
+        )
+    end
+    if primal_mass_floor > zero(T)
+        @inbounds for l in 1:L
+            _cold_start_add_psd_identity!(X[l], primal_mass_floor)
+        end
+    end
+    if dual_mass_floor > zero(T)
+        @inbounds for l in 1:L
+            _cold_start_add_psd_identity!(Y[l], dual_mass_floor)
+        end
+    end
+    kappa_after_mass_floor = sum(
+        block -> kdot(X[block], Y[block]),
+        1:L;
+        init=zero(T),
+    )
+    primal_mass_after_floor = sum(
+        block -> tr(X[block]),
+        1:L;
+        init=zero(T),
+    )
+    dual_mass_after_floor = sum(
+        block -> tr(Y[block]),
+        1:L;
+        init=zero(T),
+    )
+    centered, primal_centering, dual_centering =
+        _cold_start_centering_shifts(
+            kappa_after_mass_floor,
+            primal_mass_after_floor,
+            dual_mass_after_floor,
+        )
+    if !centered
+        record = (
+            ok=false,
+            reason=:cold_start_centering_shifts,
+            policy=:auto,
+            initialization_policy=:kkt_cold_start,
+            path=:kkt_cold_start,
+            factor_count=1,
+            rhs_solves=2,
+            base_rhs_solves=2,
+            cold_refinement_steps=cold_refinement_steps,
+            guard_refinement_steps=mixed === nothing ? 0 :
+                mixed.predictor_refinement_steps - guard_refinement_before,
+            dynamic_fallback_factorizations=mixed === nothing ? 0 :
+                mixed.dynamic_fallback_count - dynamic_fallback_before,
+            native_regularization_attempts=mixed === nothing ? 0 :
+                max(
+                    mixed.native_regularization_attempts -
+                    native_regularization_before,
+                    0,
+                ),
+            kkt_backend=ws.executed_backend,
+            kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+            la_backend=ws.executed_la_backend,
+            la_provider=ws.executed_la_provider,
+            la_ownership=ws.executed_la_ownership,
+            factorization=_sdp_cold_start_factorization(ws),
+            fallback_reason=ws.backend_fallback_reason,
+            regularization_attempts=kkt.reg_attempts,
+            total_psd_degree=total_psd_degree,
+            pre_shift_primal_residual=p_res,
+            pre_shift_dual_residual=d_res,
+            normalized_primal_residual=normalized_primal,
+            normalized_dual_residual=normalized_dual,
+            residual_threshold=residual_threshold,
+            kappa_before=kappa_before / degree_denominator,
+            kappa_after_mass_floor=
+                kappa_after_mass_floor / degree_denominator,
+            primal_mass=primal_mass_after_floor,
+            dual_mass=dual_mass_after_floor,
+            primal_mass_floor_shift=primal_mass_floor,
+            dual_mass_floor_shift=dual_mass_floor,
+        )
+        return (
+            ok=false,
+            reason=:cold_start_centering_shifts,
+            record=record,
+        )
+    end
+    if primal_centering > zero(T)
+        @inbounds for l in 1:L
+            _cold_start_add_psd_identity!(X[l], primal_centering)
+        end
+    end
+    if dual_centering > zero(T)
+        @inbounds for l in 1:L
+            _cold_start_add_psd_identity!(Y[l], dual_centering)
+        end
+    end
+    @inbounds for l in 1:L
+        _, _, primal_margins[l], _ = _cold_start_psd_shift!(X[l])
+        _, _, dual_margins[l], _ = _cold_start_psd_shift!(Y[l])
+    end
+    kappa_after = sum(
+        block -> kdot(X[block], Y[block]),
+        1:L;
+        init=zero(T),
+    )
+    μ = [
+        opts.β * kdot(X[l], Y[l]) / k[l]
+        for l in 1:L
+    ]
+
+    record = (
+        ok=true,
+        reason=:none,
+        policy=:auto,
+        initialization_policy=:kkt_cold_start,
+        path=:kkt_cold_start,
+        factor_count=1,
+        rhs_solves=2,
+        base_rhs_solves=2,
+        cold_refinement_steps=cold_refinement_steps,
+        guard_refinement_steps=mixed === nothing ? 0 :
+            mixed.predictor_refinement_steps - guard_refinement_before,
+        dynamic_fallback_factorizations=mixed === nothing ? 0 :
+            mixed.dynamic_fallback_count - dynamic_fallback_before,
+        native_regularization_attempts=mixed === nothing ? 0 :
+            max(
+                mixed.native_regularization_attempts -
+                native_regularization_before,
+                0,
+            ),
+        kkt_backend=ws.executed_backend,
+        kkt_formulation=_sdp_cold_start_kkt_formulation(ws),
+        la_backend=ws.executed_la_backend,
+        la_provider=ws.executed_la_provider,
+        la_ownership=ws.executed_la_ownership,
+        factorization=_sdp_cold_start_factorization(ws),
+        fallback_reason=ws.backend_fallback_reason,
+        regularization_attempts=kkt.reg_attempts,
+        total_psd_degree=total_psd_degree,
+        pre_shift_primal_residual=p_res,
+        pre_shift_dual_residual=d_res,
+        normalized_primal_residual=normalized_primal,
+        normalized_dual_residual=normalized_dual,
+        residual_threshold=residual_threshold,
+        primal_kkt_initial_residual=primal_solve.initial_residual,
+        primal_kkt_final_residual=primal_solve.final_residual,
+        dual_kkt_initial_residual=dual_solve.initial_residual,
+        dual_kkt_final_residual=dual_solve.final_residual,
+        largest_primal_shift=L == 0 ? zero(T) :
+            maximum(primal_shifts) +
+            max(primal_mass_floor, zero(T)) +
+            max(primal_centering, zero(T)),
+        largest_dual_shift=L == 0 ? zero(T) :
+            maximum(dual_shifts) +
+            max(dual_mass_floor, zero(T)) +
+            max(dual_centering, zero(T)),
+        primal_margin=L == 0 ? one(T) :
+                      minimum(primal_margins),
+        dual_margin=L == 0 ? one(T) :
+                     minimum(dual_margins),
+        kappa_before=kappa_before / degree_denominator,
+        kappa_after_mass_floor=
+            kappa_after_mass_floor / degree_denominator,
+        kappa_after=kappa_after / degree_denominator,
+        complementarity_before=kappa_before / degree_denominator,
+        complementarity_after=kappa_after / degree_denominator,
+        primal_mass_before=primal_mass,
+        dual_mass_before=dual_mass,
+        primal_mass_after_floor=primal_mass_after_floor,
+        dual_mass_after_floor=dual_mass_after_floor,
+        primal_mass_floor_shift=primal_mass_floor,
+        dual_mass_floor_shift=dual_mass_floor,
+        primal_centering_shift=primal_centering,
+        dual_centering_shift=dual_centering,
+    )
+    return (
+        ok=true,
+        x=x,
+        X=X,
+        y=y,
+        Y=Y,
+        μ=μ,
+        record=record,
+    )
+end
+
+"""
     _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
            x0=nothing, X0=nothing, y0=nothing, Y0=nothing, resume="") -> SDPResult{T}
 
@@ -898,10 +1320,27 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         Y0=Y0,
         resume=resume,
     )
+    # The original automatic policy is captured before the resolver replaces
+    # the options below. A fully cold solve (`:auto` policy with no warm start
+    # and no resume) takes the Phase-2 identity-metric KKT initialization;
+    # every other path keeps its current point construction exactly.
+    fully_cold = opts.parameter_policy === :auto &&
+                 x0 === nothing &&
+                 X0 === nothing &&
+                 y0 === nothing &&
+                 Y0 === nothing &&
+                 isempty(resume)
     time() >= deadline &&
         return _sdp_setup_time_limit_result(
             prob,
             time() - core_started,
+            executed=(
+                solver=:sdp,
+                parameter_profile=:not_resolved,
+                parameter_source=:not_resolved,
+                parameter_resolution_count=0,
+                stage=:not_resolved,
+            ),
         )
     validation_finished_ns = time_ns()
 
@@ -925,36 +1364,34 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # relative-gap denominators are one, so an internally accepted gap is
         # multiplied by that scale after `unequilibrate`. This used to let the
         # core report `Optimal` before the original-coordinate certificate was
-        # accurate enough (J200/K2: 1e-10 internally became 7.7e-9 on return).
+        # accurate enough (a 1e-10 internal gap could return as 7.7e-9).
         #
         # The ratio between original and scaled relative gaps is never larger
         # than max(1, objective_scale), including nonzero large objectives.
         # Tighten only the acceptance threshold. Feeding the stricter value
         # into stagnation and adaptive-control heuristics can make a flat early
         # gap dominate their progress merit and stop a solve that later
-        # recovers (observed on J200/K2 at iteration 18). The controller should
-        # continue to interpret the accuracy requested by the user; only a
-        # prospective success must satisfy the conservative scaled threshold.
+        # recovers once the gap starts moving. The controller should continue
+        # to interpret the accuracy requested by the user; only a prospective
+        # success must satisfy the conservative scaled threshold.
         termination_gap_tolerance =
             opts.ϵ_gap / eq.objective_scale
     end
 
-    # Parameter selection must see the problem that will actually be solved.
-    # Equilibration changes the data scale by orders of magnitude, and the
-    # initial point `X = Ω·I` is chosen *from* that scale — picking Ω on the
-    # original problem and then solving the equilibrated one applies an Ω that
-    # can be wrong by the whole equilibration factor. Observed on the
-    # badly-scaled benchmark generator: Ω selected from `max‖C_l‖∞ = 1.6e7` and
-    # applied to an equilibrated problem of unit scale drove the primal residual
-    # to 8.7e+15, where the same solve without equilibration converged.
+    # Executed provenance: the automatic resolver runs exactly once, on the
+    # post-scaling problem (after equilibration/Ruiz or identity scaling). It
+    # resolves controller parameters only; the automatic initial point is the
+    # affine KKT cold start below and does not depend on Ωp/Ωd.
+    # The plan identity is deferred (`:automatic_mehrotra`); the executed
+    # record reports the post-scaling resolution. Fixed policy never invokes
+    # the resolver and records the exact user options as `:user_fixed`.
+    parameter_resolution_count = opts.parameter_policy === :auto ? 1 : 0
     parameter_source = opts.parameter_policy === :auto ?
-                       (eq === nothing ? :solve_problem : :post_equilibration) :
-                       :options
+                       :post_scaling_mehrotra : :user_fixed
     executed_parameters = if opts.parameter_policy === :auto
         selected = recommended_parameters(solve_prob, opts)
         adaptive_sigma_max = selected.parameter_strategy === :adaptive ?
                              recommended_adaptive_sigma_max(
-                                 selected.profile,
                                  selected.β,
                                  opts.adaptive_sigma_max,
                              ) :
@@ -985,7 +1422,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             predictor=selected.predictor,
             strategy=selected.parameter_strategy,
             adaptive_sigma_max,
-            profile=selected.profile,
+            profile=:post_scaling_mehrotra,
         )
     else
         (
@@ -996,9 +1433,25 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             predictor=opts.predictor,
             strategy=opts.parameter_strategy,
             adaptive_sigma_max=opts.adaptive_sigma_max,
-            profile=:fixed,
+            profile=:user_fixed,
         )
     end
+    executed_parameter_record = (
+        parameter_profile=executed_parameters.profile,
+        executed_parameters=(
+            beta=executed_parameters.beta,
+            gamma=executed_parameters.gamma,
+            omega_p=executed_parameters.omega_p,
+            omega_d=executed_parameters.omega_d,
+            predictor=executed_parameters.predictor,
+            strategy=executed_parameters.strategy,
+            adaptive_sigma_max=executed_parameters.adaptive_sigma_max,
+        ),
+        parameter_source,
+        parameter_resolution_count,
+        stage=parameter_resolution_count == 1 ?
+            :post_scaling : :not_applicable,
+    )
     if eq !== nothing && isempty(resume)
         x0, X0, y0, Y0 = _equilibrate_warm_start(
             T,
@@ -1029,10 +1482,12 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         return _sdp_setup_time_limit_result(
             solve_prob,
             time() - core_started,
+            executed=merge((solver=:sdp,), executed_parameter_record),
         )
 
     local x::Vector{T}, y::Vector{T}, X::Vector{Matrix{T}}, Y::Vector{Matrix{T}}, μ::Vector{T}
     local iter::Int, restarts::Int
+    local initialization_record = nothing
 
     if !isempty(resume)
         cp = load_checkpoint(resume, T)
@@ -1051,26 +1506,106 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         μ = _owned_array_copy(T, cp.μ)
         iter, restarts = cp.iter, cp.restarts
     else
-        x = x0 === nothing ? alloc_zeros(T, m) : _owned_array_copy(T, x0)
-        y = y0 === nothing ? alloc_zeros(T, n) : _owned_array_copy(T, y0)
-        if X0 === nothing
-            scales = initial_block_scales(solve_prob, opts)
-            X = [
-                _scaled_identity(T, opts.Ωp * scales[l], k[l])
-                for l in 1:L
-            ]
-            Y = [
-                _scaled_identity(T, opts.Ωd * scales[l], k[l])
-                for l in 1:L
-            ]
+        if fully_cold
+            cold_start = _kkt_cold_start_initialization(
+                ws,
+                solve_prob,
+                opts,
+            )
+            if !cold_start.ok
+                return SDPResult{T}(
+                    NumericalBreakdown,
+                    "Cold-start KKT initialization failed " *
+                    "($(cold_start.reason)).",
+                    alloc_zeros(T, m),
+                    [
+                        alloc_zeros(T, dimension, dimension)
+                        for dimension in k
+                    ],
+                    alloc_zeros(T, n),
+                    [
+                        alloc_zeros(T, dimension, dimension)
+                        for dimension in k
+                    ],
+                    zero(T),
+                    zero(T),
+                    T(Inf),
+                    T(Inf),
+                    T(Inf),
+                    0,
+                    0,
+                    0,
+                    nothing,
+                    NamedTuple[],
+                    nothing,
+                    (
+                        reason=cold_start.reason,
+                        stage=:sdp_initialization,
+                        initialization=cold_start.record,
+                        executed=merge(
+                            (solver=:sdp,),
+                            executed_parameter_record,
+                            (
+                                stage=:sdp_initialization,
+                                initialization=cold_start.record,
+                            ),
+                        ),
+                    ),
+                )
+            end
+            x = cold_start.x
+            X = cold_start.X
+            y = cold_start.y
+            Y = cold_start.Y
+            μ = cold_start.μ
+            initialization_record = cold_start.record
         else
-            X = [_owned_array_copy(T, X0[l]) for l in 1:L]
-            Y = [_owned_array_copy(T, Y0[l]) for l in 1:L]
-            (all(l -> isposdef(X[l]), 1:L) && all(l -> isposdef(Y[l]), 1:L)) ||
-                return SDPResult{T}(NumericalBreakdown, "initial X0/Y0 must be positive definite",
-                    x, X, y, Y, zero(T), zero(T), T(Inf), T(Inf), T(Inf), 0, 0, 0, nothing)
+            x = x0 === nothing ? alloc_zeros(T, m) : _owned_array_copy(T, x0)
+            y = y0 === nothing ? alloc_zeros(T, n) : _owned_array_copy(T, y0)
+            if X0 === nothing
+                scales = initial_block_scales(solve_prob, opts)
+                X = [
+                    _scaled_identity(T, opts.Ωp * scales[l], k[l])
+                    for l in 1:L
+                ]
+                Y = [
+                    _scaled_identity(T, opts.Ωd * scales[l], k[l])
+                    for l in 1:L
+                ]
+            else
+                X = [_owned_array_copy(T, X0[l]) for l in 1:L]
+                Y = [_owned_array_copy(T, Y0[l]) for l in 1:L]
+                (all(l -> isposdef(X[l]), 1:L) && all(l -> isposdef(Y[l]), 1:L)) ||
+                    return SDPResult{T}(
+                        NumericalBreakdown,
+                        "initial X0/Y0 must be positive definite",
+                        x,
+                        X,
+                        y,
+                        Y,
+                        zero(T),
+                        zero(T),
+                        T(Inf),
+                        T(Inf),
+                        T(Inf),
+                        0,
+                        0,
+                        0,
+                        nothing,
+                        NamedTuple[],
+                        nothing,
+                        (
+                            reason=:invalid_warm_start,
+                            stage=:sdp_initialization,
+                            executed=merge(
+                                (solver=:sdp,),
+                                executed_parameter_record,
+                            ),
+                        ),
+                    )
+            end
+            μ = [opts.β * kdot(X[l], Y[l]) / k[l] for l in 1:L]
         end
-        μ = [opts.β * kdot(X[l], Y[l]) / k[l] for l in 1:L]
         iter = 0
         restarts = 0
     end
@@ -1144,12 +1679,12 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     message = ""
 
     # Best-iterate retention. An interior-point run can reach a good point and
-    # then wander away from it: on the `Task_Low08` lattice benchmark at
-    # `ϵ=1e-8` the primal residual reaches 1.4e-12 around iteration 55 while the
-    # dual residual diverges to ~1.8, after which the restart rule rescales the
-    # collapsed side and the iterate is lost. Reporting the *last* point in that
-    # situation returns a worse answer than the solver actually found, and the
-    # objective from such a run is not meaningful.
+    # then wander away from it: when one side of the KKT system has been driven
+    # deep into tolerance while the other diverges (primal residual at roundoff
+    # scale while the dual residual grows past ~1), the restart rule rescales
+    # the collapsed side and the previously good iterate is lost. Reporting the
+    # *last* point in that situation returns a worse answer than the solver
+    # actually found, and the objective from such a run is not meaningful.
     #
     # The merit is the largest of the three scaled quantities the termination
     # test uses, so "best" means "closest to satisfying the stopping criteria",
@@ -1180,10 +1715,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # never turn an estimate into a false `Optimal` status.
         #
         # Do not perform this full original-coordinate block scan merely
-        # because feasibility is already inside tolerance. On large CSDR
-        # models feasibility can arrive dozens of iterations before the gap;
-        # the old `if term_ok` therefore rebuilt every residual on each of
-        # those iterations even though an optimal certificate was impossible.
+        # because feasibility is already inside tolerance. On large sparse
+        # problems feasibility can arrive many iterations before the gap; the
+        # old `if term_ok` therefore rebuilt every residual on each of those
+        # iterations even though an optimal certificate was impossible.
         certificate_candidate = if opts.mode === OPTIMIZE
             term_ok && gap_ok
         elseif opts.mode === FEASIBILITY
@@ -1262,11 +1797,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # Precision-exhaustion stop. Once the scaled merit has not improved for
         # `stall_iterations` consecutive iterations the working precision is
         # spent: further iterations do not converge, and the restart rule can
-        # actively destroy the best iterate found (observed on `Task_Low08` at
-        # ϵ=1e-8, where the best point is reached near iteration 30 and the run
-        # then degrades through iteration 55 plus restarts). Reporting `Stalled`
-        # with the retained best iterate is both faster and more honest than
-        # grinding to `IterLimit`/`MaxRestartsExceeded`.
+        # actively destroy the best iterate found — rescaling the collapsed
+        # side of an already near-converged KKT system makes the merit degrade
+        # again rather than converge. Reporting `Stalled` with the retained
+        # best iterate is both faster and more honest than grinding to
+        # `IterLimit`/`MaxRestartsExceeded`.
         if stagnated
             # Distinguish "the arithmetic ran out" from "the algorithm stopped
             # making progress". Only the first is fixed by a wider type, and
@@ -1398,10 +1933,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         # there is the expected outcome, and the other side can still make
         # progress. Primal and dual step lengths are independent in this
         # method, so treating `tX < min_step || tY < min_step` as fatal ends
-        # perfectly healthy solves: on the CSDR sparse model the primal reaches
-        # `p_res ≈ 1e-47` by iteration 2 and stays there, `tX` duly collapses,
-        # and the run stopped at iteration 27 with the *dual* gap still at
-        # 9e-4 — the same place whether or not stall detection was enabled.
+        # perfectly healthy solves: when the primal residual sits at roundoff
+        # scale (`p_res ≈ 1e-47`) the primal step `tX` duly collapses while the
+        # duality gap is still ~1e-3, and stopping there discards a solve that
+        # can still make progress.
         #
         # Only a stuck side that still has work to do is a real collapse.
         primal_feasible = p_res / scale_p <= opts.ϵ_primal
@@ -1489,22 +2024,22 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             # It is the wrong response once the solve has clearly made progress.
             # A step collapsing then means the working precision is exhausted,
             # and rescaling by 1e5 destroys the good iterate instead of saving
-            # it — on `Task_Low08` at ϵ=1e-8 the best point (scaled merit 2.2e-7)
-            # is reached near iteration 30 and then thrown away by exactly this
-            # escalation, ending in `MaxRestartsExceeded` after 78 s. The plain
-            # stall counter never fires there because a restart does not
-            # increment `iter`, so the restart budget is spent first.
+            # it. The plain stall counter never fires then because a restart
+            # does not increment `iter`, so the restart budget is spent first
+            # and the run ends in `MaxRestartsExceeded` with the best point
+            # discarded.
             #
             # So: if the merit has improved by orders of magnitude since the
             # start, treat a collapsed step as precision exhaustion and stop
             # with the retained best iterate.
             # Two conditions, not one. Requiring only "improved a lot since the
-            # start" is a false positive on badly *scaled* problems: the CSDR
-            # sparse model improves its merit by ~1000x in the first few
-            # iterations purely by shrinking huge initial residuals, and would
-            # then be declared stalled at iteration 16 while still converging.
-            # Precision exhaustion means the iterate is genuinely *near* a
-            # solution, so also require the merit to be small in absolute terms.
+            # start" is a false positive on badly *scaled* problems: a solve
+            # that starts far from the central path can improve its merit by
+            # several orders of magnitude in the first few iterations purely by
+            # shrinking huge initial residuals, and would then be declared
+            # stalled while still converging. Precision exhaustion means the
+            # iterate is genuinely *near* a solution, so also require the merit
+            # to be small in absolute terms.
             # `merit` is now normalised by the requested tolerances, so
             # `merit <= 1` *is* convergence and "genuinely near a solution"
             # means within a small multiple of 1 — not the old absolute 1e-4,
@@ -1524,14 +2059,13 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             # Before either giving up or rescaling: try *recentering*.
             #
             # A step can collapse for a reason neither branch below addresses.
-            # On the CSDR sparse model the primal sits at `p_res ≈ 1e-47`
-            # (exactly feasible), the KKT residual is ~1e-48 against
-            # `eps(Float64x4) = 2.4e-63` (so the direction is accurate and the
-            # precision is nowhere near exhausted), and yet the step falls under
-            # `min_step = 1e-10` while the duality gap is still ~1e-3. What has
-            # happened is that the iterate has run into the boundary of the PSD
-            # cone far from the optimum — too little centering, not bad scaling
-            # and not lost precision.
+            # The primal can sit at `p_res ≈ 1e-47` (exactly feasible) with a
+            # KKT residual ~1e-48 — far above `eps` of the working type, so the
+            # direction is accurate and the precision is nowhere near exhausted
+            # — and yet the step falls under `min_step = 1e-10` while the
+            # duality gap is still ~1e-3. What has happened is that the iterate
+            # has run into the boundary of the PSD cone far from the optimum —
+            # too little centering, not bad scaling and not lost precision.
             #
             # The repair for that is to aim the next direction back at the
             # central path by raising β, which is cheap and non-destructive: it
@@ -1560,13 +2094,13 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             end
             # Rescale only a side that is *actually* infeasible. The collapsed
             # step tells you which side stopped moving, not which side is badly
-            # scaled, and those are different questions: on the CSDR sparse
-            # model the primal residual sits at 1e-48 (exactly feasible) from
-            # iteration 2 onward while the dual residual crawls down, and both
-            # steps then collapse together. Rescaling X by 1e5 there destroys a
-            # perfectly good primal iterate — the observed trace walks p_res
-            # from 1e-48 up through 1e+8, 1e+13, 1e+18, 1e+23 over five
-            # restarts, converging on nothing.
+            # scaled, and those are different questions: an exactly feasible
+            # side (primal residual ~1e-48) can still see its step collapse
+            # while the other residual crawls down, and both steps then
+            # collapse together. Rescaling that feasible side by 1e5 destroys a
+            # perfectly good iterate — the residual walks from ~1e-48 up
+            # through 1e+8, 1e+13, 1e+18, 1e+23 over successive restarts,
+            # converging on nothing.
             rescale_X = x_stuck && !primal_feasible
             rescale_Y = y_stuck && !dual_feasible
             if opts.restart && restarts < opts.max_restarts && (rescale_X || rescale_Y)
@@ -1949,6 +2483,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                         executed_parameters.adaptive_sigma_max,
                 ),
                 parameter_source,
+                parameter_resolution_count,
+                stage=parameter_resolution_count == 1 ?
+                    :post_scaling : :not_applicable,
                 kkt=ws.executed_backend,
                 planned_backend=planned_backend_name(ws),
                 executed_backend=ws.executed_backend,
@@ -2016,6 +2553,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                     reduced_arrow_simd_solve(T) ?
                     :multifloatvec4_simd_singleton :
                     :scalar_singleton : nothing,
+                initialization=initialization_record,
             ),
         ),
     )
@@ -2024,8 +2562,9 @@ end
 """
     block_norm_stats(prob) -> (norms, gmean, maxnorm, spread)
 
-Per-block `‖C_l‖∞` plus the summary statistics the initial-point scaling rules
-key off. Zero or non-finite norms are replaced by one so a block with no
+Per-block `‖C_l‖∞` plus summary statistics for the explicit expert
+`omega_scaling=:per_block` mode. Automatic KKT initialization does not call
+this helper. Zero or non-finite norms are replaced by one so a block with no
 constant term does not collapse the geometric mean.
 """
 function block_norm_stats(prob::SDPProblem{T}) where {T}
@@ -2041,48 +2580,6 @@ function block_norm_stats(prob::SDPProblem{T}) where {T}
     return (norms=norms, gmean=gmean, maxnorm=hi, spread=hi / lo)
 end
 
-"""Default multiple of `max‖C_l‖∞` used for `X = Ω·I`.
-
-Ten. Chosen by sweeping four problems that each have an independently known
-answer — three CSDR instances against Clarabel optima and the dense lattice
-benchmark — rather than by fitting one of them; see the sweep table at the use
-site in `recommended_parameters`. The separately classified moderate-data
-wide-arrow regime uses [`WIDE_ARROW_OMEGA_MULTIPLIER`](@ref) instead.
-
-The two previous values were each fitted to a single instance and each failed
-elsewhere. Three was fitted against runs that were terminating prematurely. One
-replaced it on the reasoning that Ω=100 worked on a CSDR model whose
-`max‖C_l‖∞` was 116.6, so a multiplier of 1 reproduced that value without
-hard-coding it — but a CSDR model with `max‖C_l‖∞ = 35.4` then gets Ω=35 and
-does not converge.
-
-The response surface is not monotone: 100 is worse than 10 on that same
-instance. So no single problem can identify this constant, in either direction,
-and changing it needs the whole sweep re-run rather than one benchmark
-improved."""
-const OMEGA_DATA_MULTIPLIER = 10
-
-"""Largest active set assigned to the separately calibrated wide-arrow start.
-
-This keeps the 145-active-variable medium CSDR model out of the genuinely
-large 385-active-variable regime while leaving substantial distance from both
-measurements instead of keying on an exact benchmark dimension.
-"""
-const WIDE_ARROW_ACTIVE_LIMIT = 256
-
-"""Use the moderate-data wide-arrow scale only below this block norm."""
-const WIDE_ARROW_SMALL_DATA_NORM_LIMIT = 10
-
-"""Initial-point multiplier for a wide arrow whose block data are below 10.
-
-The fixed J=32/K=4 canonical model converges at Ω=25, 30, 40, and 50, while
-Ω=20, the unrounded `5·maxnorm≈27.6`, and the old automatic Ω≈55 stall.
-The rule rounds `maxnorm` down before applying this multiplier, selecting the
-validated Ω=25 point. It needs 41 iterations versus 46 at Ω=30. The floor at
-10 remains in force.
-"""
-const WIDE_ARROW_OMEGA_MULTIPLIER = 5
-
 """A tolerance-normalised merit below this counts as "near a solution": within
 this factor of the tolerance the user actually asked for."""
 const NEAR_SOLUTION_MERIT = 100
@@ -2096,23 +2593,15 @@ const CENTERING_BETA_MAX = 0.5
 """
     initial_block_scales(prob, opts) -> Vector{T}
 
-Per-block multipliers for the initial point `X_l = Ωp·s_l·I`, `Y_l = Ωd·s_l·I`.
+Expert fixed-policy multipliers for `X_l = Ωp·s_l·I`, `Y_l = Ωd·s_l·I`.
 
 `:scalar` (and `:auto`) return all ones — the classical single-Ω start.
 `:per_block` returns `s_l = ‖C_l‖∞ / geomean(‖C‖∞)`, giving `X_l ≈ ‖C_l‖∞·I`
 when paired with `Ω = geomean`.
 
-`:auto` deliberately does **not** select `:per_block`, because it was measured
-and is worse. The reasoning that motivated it — the initial dual residual on
-block `l` is `‖C_l − Ωd·s_l·I‖`, so a scalar Ωd cannot suit a model whose block
-norms vary widely — turns out to be the wrong criterion. What the initial
-point actually has to do is dominate the data. The final CSDR sweep selected a
-scalar Ω matching the largest block norm, while per-block scaling, which
-shrinks small blocks to their own tiny norms, diverged.
-
-It is kept as an explicit option because the diagnosis may still be right for
-models whose *solution* scales with the block data, but it is not the default
-and should not be enabled without measuring.
+`:auto` resolves to `:scalar` only for compatibility with explicit fixed-policy
+initialization. Automatic KKT initialization bypasses this helper entirely.
+`:per_block` is retained solely as an expert fixed-policy option.
 """
 function initial_block_scales(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     mode = opts.omega_scaling
@@ -2392,9 +2881,10 @@ function _solve_pipeline!(
         equality_report,
         reduced,
     )
-    # Finalize the plan against the model that will actually be factorized.
-    # In particular, equality presolve can change the selected parameter profile
-    # and the diagnostic equality count.
+    # Finalize the structural plan against the model that will actually be
+    # factorized. The automatic initial point remains solve-local and is built
+    # only after scaling; planning sees no Ω heuristic or benchmark profile.
+    # Presolve still changes the diagnostic equality count.
     planning_problem = report.inconsistent ? prob : reduced
     prepared_plan = _prepared_data === nothing ? nothing :
                     get(_prepared_data, :execution_plan, nothing)
@@ -2604,17 +3094,10 @@ function _solve_pipeline!(
             check_precision_consistency(reduced, opts.precision_bits, opts.verbosity)
             opts.convert_inputs && (reduced = reround(reduced, opts.precision_bits))
         end
-        lp_options = opts.parameter_policy === :auto ?
-                     _replace_solver_options(
-                         opts;
-                         β=plan.parameters.beta,
-                         γ=plan.parameters.gamma,
-                         Ωp=plan.parameters.omega_p,
-                         Ωd=plan.parameters.omega_d,
-                         predictor=plan.parameters.predictor,
-                         parameter_policy=:fixed,
-                     ) :
-                     opts
+        # Neutral plan: the plan parameters are user hints only. The LP
+        # resolver runs once inside `solve_lp!` after `_scale_lp!`; the core
+        # must not substitute plan values into the options.
+        lp_options = opts
         result, redundant_rows, workspace_bytes = solve_lp!(
             reduced,
             lp_options,
@@ -2632,8 +3115,8 @@ function _solve_pipeline!(
         # Deliberately *not* checked against `plan.memory_budget_bytes`: that
         # field is `available × extended_precision_memory_fraction`, a budget
         # for extended-precision buffers rather than for the whole workspace.
-        # The lattice benchmark's floor is 2.8 GiB against a 10% budget it
-        # exceeds comfortably while still running fine, so comparing the two
+        # The workspace floor of a large block-arrow solve can exceed that 10%
+        # budget comfortably while still running fine, so comparing the two
         # would warn on a workload that works.
         #
         # Uses the O(1) floor rather than the full estimate, which walks every
@@ -2641,9 +3124,9 @@ function _solve_pipeline!(
         #
         # The estimate must match the KKT route the plan actually chose. The
         # dense floor is an `m x m` figure; the block-arrow route never forms
-        # that matrix, and applying the dense model to it overstated the CSDR
-        # 200/2/10/400 requirement as 3,218 GiB for a solve that runs in about
-        # 5 GiB. A warning wrong by three orders of magnitude drives users off
+        # that matrix, and applying the dense model to it can overstate the
+        # requirement by three orders of magnitude for a solve that fits in
+        # memory. A warning wrong by three orders of magnitude drives users off
         # runs that fit, so each route is estimated on its own terms and a
         # route with no estimate stays silent.
         let route = plan.kkt_backend,

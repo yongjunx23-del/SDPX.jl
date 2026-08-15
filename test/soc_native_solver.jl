@@ -420,6 +420,239 @@ end
         ).valid
     end
 
+    @testset "native SOC affine KKT cold start" begin
+        problem = second_order_program(
+            [1.0, 0.0, 0.0],
+            Matrix{Float64}(I, 3, 3),
+            zeros(3);
+            Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
+            beq=[3.0, 4.0],
+        )
+        cold = solve_socp(
+            problem;
+            tolerance=1e-8,
+            maximum_iterations=0,
+            verbosity=0,
+            timing=true,
+            specialization=:off,
+        )
+        @test cold.status === SDPX.IterLimit
+        @test cold.iterations == 0
+        init = cold.termination.initialization
+        @test init.enabled
+        @test !init.failed
+        @test init.policy === :auto
+        @test init.initialization_policy === :kkt_cold_start
+        @test init.path === :kkt_cold_start
+        @test init.formulation === :dense_normal_equations
+        @test init.factorization === :cholesky
+        @test init.provider === :blas_lapack
+        @test init.pre_primal_residual ≈ 0 atol=1e-14
+        @test init.pre_dual_residual ≈ 0 atol=1e-14
+        @test init.factor_count == 1
+        @test init.rhs_solves == 2
+        @test init.kkt_rhs_solves == 2
+        @test init.equality_panel_transforms == 1
+        @test init.equality_gram_assemblies == 1
+        @test init.equality_factorizations == 1
+        @test init.regularizations == 0
+        @test init.fallback === :none
+        @test init.barrier_degree == 2
+        @test init.kappa_before > 0
+        @test init.kappa_after > init.kappa_before
+        @test init.complementarity_before ≈
+              init.kappa_before / init.barrier_degree
+        @test init.complementarity_after ≈
+              init.kappa_after / init.barrier_degree
+        @test init.primal_margin_after > 0
+        @test init.dual_margin_after > 0
+        @test init.primal_largest_shift ==
+              maximum(init.primal_shifts) + init.primal_mass_floor_shift +
+              init.primal_shift
+        @test init.dual_largest_shift ==
+              maximum(init.dual_shifts) + init.dual_mass_floor_shift +
+              init.dual_shift
+        @test cold.diagnostics.selected_algorithms.initialization ===
+              :native_soc_general_kkt_cold_start
+
+        # The cold-start point is the exact affine solution: Ax + b = s and
+        # A'z + c - Aeq'y = 0 with Ax = beq.
+        @test cold.x ≈ [0.0, 3.0, 4.0] atol=1e-12
+        @test cold.slack[1][2:3] ≈ cold.x[2:3] atol=1e-12
+        @test cold.slack[1][1] ≈ init.primal_largest_shift atol=1e-12
+        @test cold.equality_dual ≈ zeros(2) atol=1e-12
+        @test all(SDPX._soc_margin(block) > 0 for block in cold.slack)
+        @test all(SDPX._soc_margin(block) > 0 for block in cold.dual)
+        @test cold.termination.equality_factorizations == 0
+        @test cold.termination.kkt_rhs_solves == 0
+        @test cold.termination.local_factorizations == 0
+        @test cold.termination.local_metric_preparations == 0
+        @test cold.termination.predictor_rhs_solves == 0
+        @test cold.termination.corrector_rhs_solves == 0
+        @test cold.timings.initialization_seconds >= 0
+        @test cold.timings.cone_scaling_metric == 0.0
+        @test cold.timings.schur_assembly == 0.0
+        @test cold.timings.kkt_factorization == 0.0
+
+        # The ordinary one-iteration counter contract is unchanged after a
+        # successful cold start.
+        one_iteration = solve_socp(
+            problem;
+            tolerance=1e-8,
+            maximum_iterations=1,
+            verbosity=0,
+            timing=true,
+            specialization=:off,
+        )
+        @test one_iteration.status === SDPX.IterLimit
+        @test one_iteration.iterations == 1
+        counters = one_iteration.termination
+        @test counters.equality_panel_transforms == 1
+        @test counters.equality_gram_assemblies == 1
+        @test counters.equality_factorizations == 1
+        @test counters.kkt_rhs_solves == 2
+        @test counters.predictor_rhs_solves == 1
+        @test counters.corrector_rhs_solves == 1
+        @test counters.rhs_solves == 2
+
+        # Fixed parameter policy preserves the historical Ω head start and
+        # never runs the cold start.
+        fixed = solve_socp(
+            problem;
+            tolerance=1e-8,
+            maximum_iterations=1,
+            verbosity=0,
+            timing=true,
+            specialization=:off,
+            parameter_policy=:fixed,
+            primal_initial_scale=2.0,
+            dual_initial_scale=3.0,
+        )
+        @test fixed.status === SDPX.IterLimit
+        @test fixed.iterations == 1
+        @test !fixed.termination.initialization.enabled
+        @test fixed.termination.initialization.path === :omega_head_start
+        @test fixed.diagnostics.selected_algorithms.initialization ===
+              :omega_head_start
+        @test fixed.termination.equality_factorizations == 1
+        @test fixed.termination.kkt_rhs_solves == 2
+        @test fixed.termination.predictor_rhs_solves == 1
+        @test fixed.termination.corrector_rhs_solves == 1
+        options = _native_soc_options(
+            Float64;
+            maximum_iterations=1,
+            parameter_policy=:fixed,
+            primal_initial_scale=2.0,
+            dual_initial_scale=3.0,
+        )
+        plan = SDPX.plan_native_soc(problem, options; specialization=:off)
+        workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
+        @test workspace.slack[1] ≈ [2.0, 0.0, 0.0]
+        @test workspace.dual[1] ≈ [3.0, 0.0, 0.0]
+        auto_options = _native_soc_options(
+            Float64;
+            maximum_iterations=1,
+            parameter_policy=:auto,
+            primal_initial_scale=2.0,
+            dual_initial_scale=3.0,
+        )
+        auto_plan = SDPX.plan_native_soc(
+            problem, auto_options; specialization=:off,
+        )
+        auto_workspace = SDPX.NativeSOCWorkspace(
+            problem, auto_plan, auto_options,
+        )
+        @test auto_workspace.slack[1] ≈ [1.0, 0.0, 0.0]
+        @test auto_workspace.dual[1] ≈ [1.0, 0.0, 0.0]
+    end
+
+    @testset "cold start failure and counter isolation" begin
+        dependent = second_order_program(
+            [1.0, 0.0],
+            Matrix{Float64}(I, 2, 2),
+            zeros(2);
+            Aeq=[0.0 1.0; 0.0 2.0],
+            beq=[1.0, 2.0],
+        )
+        failed = SDPX._solve_native_soc_core(
+            dependent,
+            _native_soc_options(
+                Float64;
+                tolerance=1e-9,
+                equality_solver=:normal_equations,
+            ),
+        )
+        @test failed.status === SDPX.NumericalBreakdown
+        @test failed.iterations == 0
+        @test failed.termination.stage === :native_soc_initialization
+        @test failed.termination.reason === :equality_prepare_failed
+        init = failed.termination.initialization
+        @test init.failed
+        @test init.cause === :equality_prepare_failed
+        @test init.initialization_policy === :kkt_cold_start
+        @test init.path === :kkt_cold_start
+        @test init.factor_count == 1
+        @test all(isfinite, init.primal_shifts)
+        @test all(isfinite, init.dual_shifts)
+        @test all(==(0), init.primal_shifts)
+        @test all(==(0), init.dual_shifts)
+        @test init.fallback === :none
+        @test init.rhs_solves == 0
+        @test init.equality_factorizations == 0
+        @test init.regularizations == 0
+        @test haskey(init, :formulation)
+        @test haskey(init, :provider)
+        @test haskey(init, :pre_primal_residual)
+        @test haskey(init, :pre_dual_residual)
+        @test haskey(init, :barrier_degree)
+        @test haskey(init, :kappa_before)
+        @test haskey(init, :primal_margin_after)
+        # Ordinary per-iteration counters/times are reset even on failure.
+        @test failed.termination.equality_factorizations == 0
+        @test failed.termination.kkt_rhs_solves == 0
+        @test failed.termination.local_factorizations == 0
+        @test failed.termination.equality_panel_transforms == 0
+        @test failed.diagnostics.selected_algorithms.la_fallback_reason ===
+              :none
+
+        # Successful cold start with the planned RRQR equality fallback
+        # snapshots the fallback into the initialization report and restores
+        # the baseline provenance for the ordinary Newton iterations.
+        recovered = solve_socp(
+            dependent;
+            tolerance=1e-9,
+            maximum_iterations=120,
+            verbosity=0,
+            equality_solver=:auto,
+        )
+        @test recovered.status === SDPX.Optimal
+        @test recovered.diagnostics.selected_algorithms.equality ===
+              :rank_revealing_qr
+        @test recovered.termination.initialization.fallback ===
+              :la_equality_factor_failed
+        @test recovered.termination.initialization.equality_factorizations == 1
+
+        # iter_max = 0 never runs an ordinary iteration, so the restored
+        # fallback baseline is visible in the executed provenance.
+        zero_iterations = SDPX._solve_native_soc_core(
+            dependent,
+            _native_soc_options(
+                Float64;
+                tolerance=1e-9,
+                maximum_iterations=0,
+                equality_solver=:auto,
+            ),
+        )
+        @test zero_iterations.status === SDPX.IterLimit
+        @test zero_iterations.iterations == 0
+        @test zero_iterations.termination.initialization.fallback ===
+              :la_equality_factor_failed
+        @test zero_iterations.diagnostics.selected_algorithms.
+              la_fallback_reason === :none
+        @test zero_iterations.termination.kkt_rhs_solves == 0
+        @test zero_iterations.termination.equality_factorizations == 0
+    end
+
     @testset "general equality Gram is lower-authoritative" begin
         problem = second_order_program(
             [1.0, 0.0, 0.0],
@@ -559,17 +792,22 @@ end
             result = results[best]
 
             @test result.status === SDPX.Optimal
+            # The affine dual start is near the cone vertex, so the aggregate
+            # identity-mass floor raises it to O(1) first; this fixture then
+            # converges in three iterations.
             @test result.iterations == 3
             counters = result.termination
-            @test counters.local_metric_preparations == 3
-            @test counters.local_factorizations == 3
-            @test counters.equality_panel_transforms == 3
-            @test counters.equality_gram_assemblies == 3
-            @test counters.equality_factorizations == 3
-            @test counters.kkt_rhs_solves == 6
-            @test counters.predictor_rhs_solves == 3
-            @test counters.corrector_rhs_solves == 3
+            @test counters.local_metric_preparations == result.iterations
+            @test counters.local_factorizations == result.iterations
+            @test counters.equality_panel_transforms == result.iterations
+            @test counters.equality_gram_assemblies == result.iterations
+            @test counters.equality_factorizations == result.iterations
+            @test counters.kkt_rhs_solves == 2 * result.iterations
+            @test counters.predictor_rhs_solves == result.iterations
+            @test counters.corrector_rhs_solves == result.iterations
             @test totals[best] / result.iterations <= 65_536
+            # The Phase-2 affine cold start with the identity-mass floor keeps
+            # per-iteration steady-state allocation bounded.
         end
 
         specialized = solve_socp(
@@ -644,6 +882,138 @@ end
             @test problem.cones[1].A[2, 1] == 9
             @test reduction.tail_map[1, 1, 1] == 1
             @test reduction.tail_map[1, 1, 1] !== source_entry
+        end
+    end
+
+    @testset "fixed-trace affine KKT cold start" begin
+        first = zeros(3, 4)
+        first[2, 1] = 1.0
+        first[3, 2] = 1.0
+        second = zeros(3, 4)
+        second[2, 3] = 1.0
+        second[3, 4] = 1.0
+        problem = second_order_program(
+            [-1.0, 0.0, -1.0, 0.0],
+            [
+                SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SOCConstraint(second, [1.0, 0.0, 0.0]),
+            ];
+            Aeq=[1.0 0.0 0.0 0.0; 0.0 0.0 1.0 0.0],
+            beq=[0.2, -0.1],
+        )
+        cold = solve_socp(
+            problem;
+            tolerance=1e-9,
+            maximum_iterations=0,
+            verbosity=0,
+            timing=true,
+            specialization=:fixed_trace,
+        )
+        @test cold.status === SDPX.IterLimit
+        @test cold.iterations == 0
+        @test cold.diagnostics.selected_algorithms.soc_specialization ===
+              :fixed_trace_q3
+        @test cold.diagnostics.selected_algorithms.initialization ===
+              :native_soc_fixed_trace_kkt_cold_start
+        init = cold.termination.initialization
+        @test !init.failed
+        @test init.initialization_policy === :kkt_cold_start
+        @test init.path === :kkt_cold_start
+        @test init.factorization === :native_local_cholesky
+        @test init.factor_count == 1
+        @test init.rhs_solves == 2
+        @test init.kkt_rhs_solves == 2
+        @test init.equality_panel_transforms == 1
+        @test init.equality_gram_assemblies == 1
+        @test init.equality_factorizations == 1
+        @test init.barrier_degree == 4
+        @test init.complementarity_after ≈
+              init.kappa_after / init.barrier_degree
+        @test init.complementarity_after_mass_floor ≈
+              init.kappa_after_mass_floor / init.barrier_degree
+        # The two fixed heads are already at e (head = 1), so the aggregate
+        # identity-mass floor leaves the primal fixed-trace geometry exactly
+        # unchanged (ρ = 2 blocks, primal mass 2): the floor shift is zero and
+        # each slack head is 1 + the centering shift only.  The affine dual is
+        # near the vertex, so its side receives the O(1) floor push instead.
+        @test init.rho == 2.0
+        @test init.primal_mass == 2.0
+        @test init.primal_mass_floor_shift == 0.0
+        @test init.dual_mass == 2.0
+        @test init.dual_mass_floor_shift > 0.9
+        @test init.primal_largest_shift ==
+              maximum(init.primal_shifts) + init.primal_mass_floor_shift +
+              init.primal_shift
+        @test init.dual_largest_shift ==
+              maximum(init.dual_shifts) + init.dual_mass_floor_shift +
+              init.dual_shift
+        # The affine solution keeps the raw fixed head and satisfies the
+        # equality constraints exactly.
+        @test cold.x ≈ [0.2, 0.0, -0.1, 0.0] atol=1e-12
+        @test cold.slack[1][1] ≈ 1.0 + init.primal_shift atol=1e-12
+        @test cold.slack[2][1] ≈ 1.0 + init.primal_shift atol=1e-12
+        @test cold.slack[1][2:3] ≈ [0.2, 0.0] atol=1e-12
+        @test cold.slack[2][2:3] ≈ [-0.1, 0.0] atol=1e-12
+        @test cold.equality_dual ≈ [-1.0, -1.0] atol=1e-9
+        @test all(SDPX._soc_margin(block) > 0 for block in cold.slack)
+        @test all(SDPX._soc_margin(block) > 0 for block in cold.dual)
+        @test cold.termination.equality_factorizations == 0
+        @test cold.termination.kkt_rhs_solves == 0
+        @test cold.termination.local_factorizations == 0
+        @test cold.termination.local_metric_preparations == 0
+        @test cold.timings.initialization_seconds >= 0
+
+        # One ordinary iteration after the cold start keeps the exact
+        # fixed-trace 1-iteration counter contract.
+        one_iteration = solve_socp(
+            problem;
+            tolerance=1e-9,
+            maximum_iterations=1,
+            verbosity=0,
+            timing=true,
+            specialization=:fixed_trace,
+        )
+        @test one_iteration.status === SDPX.IterLimit
+        @test one_iteration.iterations == 1
+        counters = one_iteration.termination
+        @test counters.local_metric_preparations == 1
+        @test counters.local_factorizations == 1
+        @test counters.equality_panel_transforms == 1
+        @test counters.equality_gram_assemblies == 1
+        @test counters.equality_factorizations == 1
+        @test counters.kkt_rhs_solves == 2
+        @test counters.predictor_rhs_solves == 1
+        @test counters.corrector_rhs_solves == 1
+    end
+
+    setprecision(BigFloat, 128) do
+        @testset "BigFloat general cold start" begin
+            problem = second_order_program(
+                BigFloat[1, 0, 0],
+                Matrix{BigFloat}(I, 3, 3),
+                zeros(BigFloat, 3);
+                Aeq=BigFloat[0 1 0; 0 0 1],
+                beq=BigFloat[3, 4],
+            )
+            result = solve_socp(
+                problem;
+                tolerance=big"1e-16",
+                maximum_iterations=120,
+                verbosity=0,
+            )
+            @test result.status === SDPX.Optimal
+            @test result.pObj ≈ BigFloat(5) atol=big"1e-14"
+            init = result.termination.initialization
+            @test !init.failed
+            @test init.initialization_policy === :kkt_cold_start
+            @test init.factor_count == 1
+            @test init.barrier_degree == 2
+            @test isfinite(init.pre_primal_residual)
+            @test isfinite(init.pre_dual_residual)
+            @test init.primal_margin_after > 0
+            @test init.dual_margin_after > 0
+            @test all(isfinite, init.primal_shifts)
+            @test all(isfinite, init.dual_shifts)
         end
     end
 

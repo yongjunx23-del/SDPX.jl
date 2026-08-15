@@ -28,15 +28,30 @@ surface and its defaults.
 |---|---:|---|
 | `β` | `0.1` | Fixed SDP centering/complementarity reduction target and the safe fallback for adaptive `sigma`. |
 | `γ` | `0.9` | Fixed backtracking reduction factor and exact fraction-to-boundary safety. |
-| `Ωp` | `1` | Initial primal PSD matrices: `X_l=Ωp*I`. |
-| `Ωd` | `1` | Initial dual PSD matrices: `Y_l=Ωd*I`. |
+| `Ωp` | `1` | Expert fixed-policy primal PSD identity scale. Ignored by the default automatic KKT cold start. |
+| `Ωd` | `1` | Expert fixed-policy dual PSD identity scale. Ignored by the default automatic KKT cold start. |
 | `predictor` | `:classic` | Predictor rule: `:classic` or `:sdpb`. |
 | `refine_steps` | `1` | Number of iterative-refinement passes for the KKT predictor/corrector solutions. |
 | `step_rule` | `:auto` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto`. |
-| `parameter_policy` | `:auto` | Cold-start structural policy; `:fixed` preserves supplied values. |
+| `parameter_policy` | `:auto` | Automatic cold-start Mehrotra controller; `:fixed` preserves supplied values exactly. |
 | `parameter_strategy` | `:adaptive` | Guarded per-iteration Mehrotra policy with fixed fallback when cold-start or stability diagnostics are unreliable. |
-| `adaptive_sigma_max` | `0` | Expert adaptive-centering cap; zero selects by structure. |
+| `adaptive_sigma_max` | `0` | Expert adaptive-centering cap; zero uses the generic 0.5 maximum. |
 | `refine_policy` | `:auto` | `:auto`/`:adaptive` stop KKT refinement from its residual; `:fixed` runs exactly `refine_steps` passes. |
+
+With `parameter_policy=:auto`, the automatic Mehrotra controller keeps `β`,
+`γ`, `predictor`, and `parameter_strategy` from the defaults or user choices.
+After presolve and scaling, the solver builds an identity-metric KKT system,
+solves one primal and one dual affine right-hand side with the same factor,
+then shifts the cone variables in their native coordinates. A minimal identity
+shift raises each aggregate identity mass to `<e,e>` before complementarity
+cross-centering; bounded structured correction reuses an accepted SDP factor
+when an original-KKT residual remains above the existing gate.
+`Ωp` and `Ωd` do not participate in this path. The public compatibility
+resolver reports `profile=:generic_mehrotra`, the plan records the deferred
+identity `:automatic_mehrotra`, and executed diagnostics record
+`:post_scaling_mehrotra` plus the separate cold-start report.
+`parameter_policy=:fixed` uses the supplied values exactly and records
+`:user_fixed`.
 
 ## Convergence and stopping
 

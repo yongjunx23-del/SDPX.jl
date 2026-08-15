@@ -116,22 +116,33 @@ BLAS for both Float64x4 and BigFloat. Execution diagnostics report
 `gram_kernel=:fused_arrow_2x2` and
 `gram_kernel_reason=:fused_arrow_specialized`.
 
-## Automatic LP cold-start parameters
+## Automatic cold-start parameters
 
-The dedicated LP engine uses a deterministic distance diagnostic before the
-first iteration:
+`parameter_policy=:auto` runs one generic automatic Mehrotra controller before
+the first iteration. It selects no benchmark-, size-, cone-, or
+precision-specific parameter profile: `beta`, `gamma`, `predictor`, and
+`parameter_strategy` come from the `SolverOptions` defaults or user choices.
+After presolve and scaling, the selected formulation/provider factors an
+identity-metric initialization system once and solves its primal and dual
+right-hand sides. Cone-native strict-interior shifts are followed by the
+smallest aggregate identity shift that makes each side's identity mass at
+least `<e,e>`, then by deterministic complementarity cross-centering. This
+unit identity-mass floor prevents a valid affine point at the cone vertex from
+remaining at machine-epsilon scale; it is separate from barrier degree. An
+accepted regularized or mixed-precision SDP factor is reused for bounded
+structured residual corrections when either original-KKT right-hand side is
+above the existing cold-start gate. `Omega_p` and
+`Omega_d` are not read by this automatic path. The public resolver reports
+`profile=:generic_mehrotra`; the controller is deferred in the plan as
+`:automatic_mehrotra` and resolved exactly once after scaling as
+`:post_scaling_mehrotra`; and the adaptive iteration controller uses the
+generic 0.50 sigma cap (`adaptive_sigma_max` remains the expert override).
+`parameter_policy=:fixed` uses the supplied values exactly and records
+`:user_fixed`.
 
-```text
-max(max_i |h_i| / ||G_i||_inf, max_j |b_j| / ||B_j||_inf).
-```
-
-This quantity is invariant to positive rescaling of an individual constraint.
-With `parameter_policy=:auto`, an indicator at most `1000` selects
-`beta=1/50, gamma=99/100`; larger or non-finite values retain the configured
-conservative parameters. The guard applies to BigFloat as well as
-fixed-exponent arithmetic: extra precision prevents rounding loss, but does
-not by itself globalize a very distant infeasible start.
-`parameter_policy=:fixed` remains an exact override.
+This is separate from the storage/structure classification reported by
+`StructureAnalysis.profile`, which describes data layout and kernel selection
+rather than iteration parameters.
 
 ## Adaptive Newton parameters
 

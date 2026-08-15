@@ -44,6 +44,25 @@ using Test
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :post_presolve
         @test selected.lp_formulation === :sparse_normal
+        @test selected.parameter_profile === :post_scaling_mehrotra
+        @test selected.parameter_source === :post_scaling_mehrotra
+        @test selected.parameter_resolution_count == 1
+        @test selected.stage === :post_scaling
+        @test selected.planned_parameter_profile === :automatic_mehrotra
+        @test selected.executed_parameters.adaptive_sigma_max == 0.5
+        @test selected.initial_parameters.adaptive_sigma_max == 0.5
+        # The automatic phase-2 KKT cold start ran through the sparse backend
+        # and used exactly one accepted factor for its two RHS solves.
+        initialization = result.termination.executed.initialization
+        @test initialization.applied
+        @test initialization.path === :phase2_kkt_cold_start
+        @test initialization.kkt_formulation === :sparse_normal
+        # The cold start factors the unregularized system first (one factor,
+        # two RHS solves) and retries with the arithmetic floor only on
+        # factor failure.
+        @test initialization.factorization_attempts == 1
+        @test initialization.rhs_solve_count == 2
+        @test initialization.factorization_count == 1
         # The plan stays visible under its own name rather than silently
         # replaced, so a plan/executed divergence is observable, not hidden.
         @test selected.planned.kkt !== :sparse_normal
@@ -73,6 +92,16 @@ using Test
         @test selected.lp_formulation === :positive_definite_cholesky
         @test selected.planned.kkt === selected.kkt
         @test selected.planned.gram === selected.gram
+        @test selected.parameter_profile === :post_scaling_mehrotra
+        @test selected.parameter_resolution_count == 1
+        @test selected.stage === :post_scaling
+        @test selected.executed_parameters.adaptive_sigma_max == 0.5
+        initialization = result.termination.executed.initialization
+        @test initialization.applied
+        @test initialization.path === :phase2_kkt_cold_start
+        @test initialization.kkt_formulation === :positive_definite_cholesky
+        @test initialization.rhs_solve_count == 2
+        @test initialization.factorization_count == 1
 
         no_iteration = SDPX.solve!(
             problem,
@@ -85,14 +114,38 @@ using Test
         no_iteration_selected = no_iteration.diagnostics.selected_algorithms
         @test no_iteration.status == SDPX.IterLimit
         @test no_iteration_selected.planned_backend === :lp_deferred
-        @test no_iteration_selected.executed_backend === :not_executed
-        @test no_iteration_selected.kkt === :not_executed
+        # The automatic phase-2 KKT cold start runs even at `iter_max=0`, so
+        # the dense backend genuinely executed.
+        @test no_iteration_selected.executed_backend ===
+              :positive_definite_cholesky
+        @test no_iteration_selected.kkt === :positive_definite_cholesky
         @test no_iteration_selected.backend_resolution ===
-              :resolved_no_iteration
+              :post_presolve
         @test no_iteration_selected.lp_formulation ===
               :positive_definite_cholesky
-        @test no_iteration_selected.gram === :not_executed
-        @test no_iteration_selected.la_backend === :not_executed
+        @test no_iteration_selected.gram === :blas_syrk
+        @test no_iteration_selected.la_backend !== :not_executed
+        @test no_iteration.termination.executed.initialization.applied
+
+        # The fixed-policy path preserves the historical no-execution record
+        # at `iter_max=0`.
+        fixed_no_iteration = SDPX.solve!(
+            problem,
+            SDPX.SolverOptions{Float64}(
+                iter_max=0,
+                parameter_policy=:fixed,
+                diagnostics=true,
+                verbosity=0,
+            ),
+        )
+        fixed_selected = fixed_no_iteration.diagnostics.selected_algorithms
+        @test fixed_selected.executed_backend === :not_executed
+        @test fixed_selected.kkt === :not_executed
+        @test fixed_selected.backend_resolution === :resolved_no_iteration
+        @test fixed_selected.lp_formulation === :positive_definite_cholesky
+        @test fixed_selected.gram === :not_executed
+        @test fixed_selected.la_backend === :not_executed
+        @test !fixed_no_iteration.termination.executed.initialization.applied
     end
 
     @testset "SDP core reports its executed KKT backend" begin
@@ -124,14 +177,20 @@ using Test
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :planned
         @test selected.lp_formulation === :not_applicable
-        @test selected.parameter_source === :post_equilibration
-        @test selected.parameter_profile === :general_adaptive
+        @test selected.parameter_source === :post_scaling_mehrotra
+        @test selected.parameter_profile === :post_scaling_mehrotra
+        @test selected.parameter_resolution_count == 1
+        @test selected.stage === :post_scaling
         @test selected.planned_parameter_profile ===
               result.diagnostics.plan.parameter_profile
+        @test result.diagnostics.plan.parameter_profile ===
+              :automatic_mehrotra
         @test result.termination.executed.parameter_source ===
-              :post_equilibration
+              :post_scaling_mehrotra
         @test result.termination.executed.parameter_profile ===
               selected.parameter_profile
+        @test result.termination.executed.parameter_resolution_count == 1
+        @test result.termination.executed.stage === :post_scaling
         @test !isempty(result.parameter_history)
         # The history contains iteration-local adaptive choices, whereas
         # `executed_parameters` records the initial post-equilibration profile.
@@ -151,6 +210,74 @@ using Test
             result.diagnostics.timings,
             :schur_assembly,
         )
+
+        # The plan stores only the user's request. The numeric resolver runs
+        # after Ruiz scaling and therefore sees the scaled block constants,
+        # exactly once. `iter_max=0` isolates this ordering contract from
+        # convergence behavior.
+        scaled_constant_problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 10_000.0; 10_000.0 0.0]],
+            Matrix{Float64}(undef, 2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        scaled_options = SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            scaling=:equilibrate,
+            Ωp=0.25,
+            Ωd=0.25,
+            iter_max=0,
+            diagnostics=true,
+            verbosity=0,
+        )
+        scaled_plan = SDPX.build_execution_plan(
+            scaled_constant_problem,
+            scaled_options,
+        )
+        equilibrated_problem, _ = SDPX.equilibrate(scaled_constant_problem)
+        expected = SDPX.recommended_parameters(
+            equilibrated_problem,
+            scaled_options,
+        )
+        scaled_result = SDPX.solve!(scaled_constant_problem, scaled_options)
+        scaled_selected = scaled_result.diagnostics.selected_algorithms
+        @test scaled_plan.parameter_profile === :automatic_mehrotra
+        @test scaled_plan.parameters.omega_p == 0.25
+        @test scaled_plan.parameters.omega_d == 0.25
+        # Phase 2: the automatic resolver is a compatibility hint only and
+        # returns the raw requested Ω unchanged; the KKT cold start decides the
+        # actual initial iterate.
+        @test expected.Ωp == 0.25
+        @test expected.Ωd == 0.25
+        @test scaled_selected.executed_parameters.omega_p == expected.Ωp
+        @test scaled_selected.executed_parameters.omega_d == expected.Ωd
+        @test scaled_selected.parameter_resolution_count == 1
+        @test scaled_selected.stage === :post_scaling
+        # The cold-start initialization record is carried under
+        # `termination.executed.initialization` and reports the identity-metric
+        # KKT path: one factorization, two RHS solves, no Ω fallback.
+        cold = scaled_result.termination.executed.initialization
+        @test cold.ok === true
+        @test cold.path === :kkt_cold_start
+        @test cold.policy === :auto
+        @test cold.factor_count == 1
+        @test cold.rhs_solves == 2
+        @test cold.kkt_formulation === :dense_normal_equations
+        @test cold.factorization === :cholesky
+        @test cold.fallback_reason === :none
+        @test cold.regularization_attempts == 0
+        @test isfinite(cold.normalized_primal_residual)
+        @test isfinite(cold.normalized_dual_residual)
+        @test cold.primal_margin > 0
+        @test cold.dual_margin > 0
+        @test cold.kappa_before > 0
+        @test cold.kappa_after > 0
+        # The identity-metric KKT point for this model is `x = 0`, independent
+        # of the requested Ω hints; `iter_max=0` stops on that point.
+        @test scaled_result.status == SDPX.IterLimit
+        @test scaled_result.x == [0.0, 0.0]
 
         untimed = SDPX.solve(
             problem;
@@ -185,10 +312,14 @@ using Test
         )
         @test fixed.status == SDPX.IterLimit
         fixed_selected = fixed.diagnostics.selected_algorithms
-        @test fixed_selected.parameter_source === :options
-        @test fixed_selected.parameter_profile === :fixed
-        @test fixed.termination.executed.parameter_source === :options
-        @test fixed.termination.executed.parameter_profile === :fixed
+        @test fixed_selected.parameter_source === :user_fixed
+        @test fixed_selected.parameter_profile === :user_fixed
+        @test fixed_selected.parameter_resolution_count == 0
+        @test fixed_selected.stage === :not_applicable
+        @test fixed.termination.executed.parameter_source === :user_fixed
+        @test fixed.termination.executed.parameter_profile === :user_fixed
+        @test fixed.termination.executed.parameter_resolution_count == 0
+        @test fixed.termination.executed.stage === :not_applicable
         @test fixed_selected.executed_parameters == (
             beta=0.23,
             gamma=0.73,

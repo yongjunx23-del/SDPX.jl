@@ -115,8 +115,8 @@ Convenience aliases:
 |---|---|---|
 | `beta` | `β` | complementarity reduction target |
 | `gamma` | `γ` | line-search backtracking factor |
-| `omega_p` | `Ωp` | initial primal PSD scale |
-| `omega_d` | `Ωd` | initial dual PSD scale |
+| `omega_p` | `Ωp` | expert fixed-policy primal PSD scale |
+| `omega_d` | `Ωd` | expert fixed-policy dual PSD scale |
 | `tol_gap` | `ϵ_gap` | relative gap tolerance |
 | `tol_primal` | `ϵ_primal` | primal residual tolerance |
 | `tol_dual` | `ϵ_dual` | dual residual tolerance |
@@ -132,10 +132,16 @@ as a raw optimizer attribute, including `sparse`, `scaling`, `predictor`,
 `refine_steps`, `max_restarts`, `extended_precision_blas`, and
 `extended_precision_memory_fraction`. Unknown names are rejected.
 
-`parameter_policy=:auto` (the default) selects a calibrated structural
-profile without a pilot solve; use `:fixed` in expert mode to preserve
-explicitly supplied `beta`, `gamma`, and initialization scales. The selected
-profile and parameters are available in `result.diagnostics.plan`.
+`parameter_policy=:auto` (the default) runs the generic automatic Mehrotra
+controller: `beta`, `gamma`, `predictor`, and `parameter_strategy` keep the
+`SolverOptions` defaults or user choices. After presolve and scaling, the
+selected KKT/provider route constructs a primal/dual affine point and applies
+typed cone-interior shifts plus deterministic complementarity mass balancing;
+`omega_p` and `omega_d` are ignored. The public resolver reports
+`profile=:generic_mehrotra`,
+the plan records the neutral deferred identity `:automatic_mehrotra`, and
+executed diagnostics record `:post_scaling_mehrotra`. Use `:fixed` in expert
+mode to preserve supplied values exactly with provenance `:user_fixed`.
 `parameter_strategy=:adaptive` (the default) enables the bounded Mehrotra
 controller, independent primal/dual step safeguards, adaptive refinement
 limits, and complete fixed-path fallback. See the

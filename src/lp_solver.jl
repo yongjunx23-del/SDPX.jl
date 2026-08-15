@@ -558,6 +558,765 @@ function _validate_lp_options(opts::SolverOptions{T}) where {T}
     return _validate_solver_options(opts)
 end
 
+"""
+    _lp_auto_parameter_resolution(opts) -> NamedTuple
+
+Private no-op automatic cold-start resolver for the dedicated LP path. It runs
+exactly once, after `_scale_lp!` has normalized the data, and before the
+iteration-level controller and affine KKT cold start are constructed. The
+resolver deliberately performs no data probe: it never calls
+`block_norm_stats`, never derives or changes `Ωp`/`Ωd`, and leaves the
+numerical trajectory untouched. It copies those request values only into the
+executed provenance record.
+"""
+@inline function _lp_auto_parameter_resolution(
+    opts::SolverOptions{T},
+) where {T}
+    adaptive_sigma_max = opts.parameter_strategy === :adaptive ?
+                         recommended_adaptive_sigma_max(
+                             opts.β,
+                             opts.adaptive_sigma_max,
+                         ) : zero(T)
+    return (
+        profile=:post_scaling_mehrotra,
+        source=:post_scaling_mehrotra,
+        parameter_resolution_count=1,
+        stage=:post_scaling,
+        executed_parameters=(
+            beta=opts.β,
+            gamma=opts.γ,
+            omega_p=opts.Ωp,
+            omega_d=opts.Ωd,
+            predictor=opts.predictor,
+            strategy=opts.parameter_strategy,
+            adaptive_sigma_max,
+        ),
+    )
+end
+
+"""Fixed-policy provenance for the dedicated LP path: the resolver is never
+invoked, the exact user options are recorded as `:user_fixed`, and the
+resolution stage is explicitly `:not_applicable`."""
+@inline function _lp_fixed_parameter_resolution(
+    opts::SolverOptions{T},
+) where {T}
+    return (
+        profile=:user_fixed,
+        source=:user_fixed,
+        parameter_resolution_count=0,
+        stage=:not_applicable,
+        executed_parameters=(
+            beta=opts.β,
+            gamma=opts.γ,
+            omega_p=opts.Ωp,
+            omega_d=opts.Ωd,
+            predictor=opts.predictor,
+            strategy=opts.parameter_strategy,
+            adaptive_sigma_max=opts.adaptive_sigma_max,
+        ),
+    )
+end
+
+"""
+    _lp_phase2_cold_start!(...)
+
+Phase-2 KKT cold start for the dedicated LP path. Runs only when
+`opts.parameter_policy === :auto` and no user `x0`/`y0` was supplied, after
+`_scale_lp!` and after the workspace/backend have been resolved, so it can
+reuse the exact factor/solve route the Newton loop will use.
+
+The inequality map is treated as a quadratic objective proxy: the unit-weight
+Gram `H = GᵀG` is factored with `δ = 0` first, retrying exactly once with the
+existing arithmetic floor only when that factorization fails, and the two
+KKT solves
+
+    [H  -B; B'  δI] [u; q] = [G'h; b]
+    [H  -B; B'  δI] [v; q] = [c; 0]
+
+give `x = u`, `z = G*v`, `y = -q`, `s = G*x - h`. The sign convention matches
+the Newton solve: the primal RHS carries `+b`, and the equality multiplier is
+recovered with `y = -q`. The shift `s,z -> s+Δs, z+Δz` (strict positive shift,
+then the aggregate identity-mass floor, then the pre-centering identity shift)
+is delegated to the shared cold-start helpers in `src/cold_start.jl`, which are
+expected to exist when this module is loaded.
+
+Returns a NamedTuple with the initialized iterate, typed pre/post margins,
+`κ` before/after normalization by the inequality degree, residual and shift
+records, and KKT execution provenance. Returns `nothing` when the automatic
+phase-2 path is not active, so the caller's fixed/warm path is untouched.
+"""
+function _lp_phase2_cold_start!(
+    workspace::LPWorkspace{T},
+    G,
+    h::Vector{T},
+    B,
+    b::Vector{T},
+    c::Vector{T},
+    opts::SolverOptions{T},
+    plan::ExecutionPlan,
+    scaling::LPScaling{T},
+    lp_parameter_resolution,
+    equalities::Int,
+    x0,
+    y0,
+) where {T}
+    if !(opts.parameter_policy === :auto && x0 === nothing && y0 === nothing)
+        return nothing
+    end
+    variables = size(G, 2)
+    inequalities = size(G, 1)
+    residual_tolerance = max(
+        sqrt(eps(T)),
+        opts.ϵ_primal,
+        opts.ϵ_dual,
+    )
+    regularization = _lp_regularization_floor(T)
+    if T === BigFloat
+        regularization = max(
+            regularization,
+            min(
+                BigFloat("1e-48"),
+                opts.ϵ_gap * BigFloat("1e-8"),
+            ),
+        )
+    end
+
+    initialization_started = time_ns()
+    # The cold-start KKT uses the unit-weight Gram H = GᵀG. The ordinary
+    # factor routes read `workspace.weights` (reduced/sparse pack the
+    # diagonal at factor time) and the dense route reads `workspace.H`
+    # (assembled from the same weights), so both must be primed here.
+    @inbounds for row in eachindex(workspace.weights)
+        workspace.weights[row] = one(T)
+    end
+    gram_started = time_ns()
+    _lp_assemble_hessian!(workspace, G, plan.threads, plan.gram_kernel)
+    gram_seconds = (time_ns() - gram_started) / 1.0e9
+    factor_started = time_ns()
+    backend_execution_attempted = false
+    successful = false
+    factorizations_attempted = 0
+    rhs_solves = 0
+    accepted_regularization = zero(T)
+    failure_reason = :lp_cold_start_factor_failed
+    # Simplified cold-start regularization: factor the unregularized system
+    # (δ = 0) first, and retry exactly once with the existing arithmetic
+    # floor when that factorization fails. The first successful factor serves
+    # exactly two RHS solves; the residual gate then verifies the original
+    # unregularized equations and fails closed (no further factor/RHS work).
+    # A normal solve therefore reports factorization_attempts == 1 and
+    # rhs_solve_count == 2; a floor fallback reports attempts == 2, rhs == 2.
+    last_x = alloc_zeros(T, variables)
+    last_y = alloc_zeros(T, equalities)
+    last_s = alloc_zeros(T, inequalities)
+    last_z = alloc_zeros(T, inequalities)
+    last_pre_primal = T(Inf)
+    last_pre_dual = T(Inf)
+    last_normalized_primal = T(Inf)
+    last_normalized_dual = T(Inf)
+    x = alloc_zeros(T, variables)
+    y = alloc_zeros(T, equalities)
+    s = alloc_zeros(T, inequalities)
+    z = alloc_zeros(T, inequalities)
+    pre_primal_residual = T(Inf)
+    pre_dual_residual = T(Inf)
+    normalized_primal_residual = T(Inf)
+    normalized_dual_residual = T(Inf)
+    for attempt_regularization in (zero(T), regularization)
+        factorizations_attempted += 1
+        factor = factorize!(
+            workspace.backend::KKTBackend,
+            workspace,
+            B,
+            attempt_regularization,
+        )
+        backend_execution_attempted = true
+        if factor === nothing || !issuccess(factor)
+            continue
+        end
+        failure_reason = :lp_cold_start_residual
+        accepted_regularization = attempt_regularization
+
+        primal_rhs = view(workspace.rhs, 1:variables)
+        _lp_mul_Gt!(primal_rhs, G, h, one(T), zero(T))
+        if equalities > 0
+            copy_owned!(
+                view(workspace.rhs, (variables + 1):(variables + equalities)),
+                b,
+            )
+        end
+        solve!(
+            workspace.backend::KKTBackend,
+            factor,
+            workspace.rhs,
+        )
+        rhs_solves += 1
+        candidate_x = _owned_array_copy(T, primal_rhs)
+
+        dual_rhs = view(workspace.correction_rhs, 1:variables)
+        copy_owned!(dual_rhs, c)
+        if equalities > 0
+            zero_owned!(
+                view(
+                    workspace.correction_rhs,
+                    (variables + 1):(variables + equalities),
+                ),
+            )
+        end
+        solve!(
+            workspace.backend::KKTBackend,
+            factor,
+            workspace.correction_rhs,
+        )
+        rhs_solves += 1
+        candidate_z = alloc_zeros(T, inequalities)
+        _lp_mul_G!(candidate_z, G, dual_rhs, one(T), zero(T))
+        candidate_y = equalities > 0 ?
+            _owned_array_copy(
+                T,
+                view(
+                    workspace.correction_rhs,
+                    (variables + 1):(variables + equalities),
+                ),
+            ) :
+            alloc_zeros(T, 0)
+        equalities > 0 && (candidate_y .*= -one(T))
+        candidate_s = alloc_zeros(T, inequalities)
+        _lp_mul_G!(candidate_s, G, candidate_x, one(T), zero(T))
+        candidate_s .-= h
+
+        # The gate verifies the *original unregularized* equations, never the
+        # regularized KKT matrix: the regularization is only a factor-side
+        # stabilizer, and a point that only satisfies the shifted system is
+        # not an admissible phase-2 iterate.
+        _lp_residuals!(
+            workspace,
+            G,
+            h,
+            B,
+            b,
+            c,
+            candidate_x,
+            candidate_s,
+            candidate_y,
+            candidate_z,
+        )
+        candidate_pre_primal = max(
+            maximum(abs, workspace.rp; init=zero(T)),
+            maximum(abs, workspace.re; init=zero(T)),
+        )
+        candidate_pre_dual = maximum(abs, workspace.rd; init=zero(T))
+        primal_scale = one(T) + max(
+            maximum(abs, h; init=zero(T)),
+            maximum(abs, b; init=zero(T)),
+        )
+        dual_scale = one(T) + maximum(abs, c; init=zero(T))
+        candidate_normalized_primal = candidate_pre_primal / primal_scale
+        candidate_normalized_dual = candidate_pre_dual / dual_scale
+        candidate_finite = all(isfinite, candidate_x) &&
+                           all(isfinite, candidate_s) &&
+                           all(isfinite, candidate_z) &&
+                           all(isfinite, candidate_y) &&
+                           isfinite(candidate_pre_primal) &&
+                           isfinite(candidate_pre_dual)
+        copy_owned!(last_x, candidate_x)
+        copy_owned!(last_y, candidate_y)
+        copy_owned!(last_s, candidate_s)
+        copy_owned!(last_z, candidate_z)
+        last_pre_primal = candidate_pre_primal
+        last_pre_dual = candidate_pre_dual
+        last_normalized_primal = candidate_normalized_primal
+        last_normalized_dual = candidate_normalized_dual
+        if candidate_finite &&
+           candidate_normalized_primal <= residual_tolerance &&
+           candidate_normalized_dual <= residual_tolerance
+            successful = true
+            x = candidate_x
+            y = candidate_y
+            s = candidate_s
+            z = candidate_z
+            pre_primal_residual = candidate_pre_primal
+            pre_dual_residual = candidate_pre_dual
+            normalized_primal_residual = candidate_normalized_primal
+            normalized_dual_residual = candidate_normalized_dual
+            regularization = attempt_regularization
+            break
+        end
+        # Residual failure on the first successful factor: fail closed.
+        break
+    end
+    factorization_seconds = (time_ns() - factor_started) / 1.0e9
+    if !successful
+        return (
+            success=false,
+            stage=:lp_initialization,
+            reason=failure_reason,
+            x=last_x,
+            y=last_y,
+            s=last_s,
+            z=last_z,
+            pre_primal_residual=last_pre_primal,
+            pre_dual_residual=last_pre_dual,
+            normalized_primal_residual=last_normalized_primal,
+            normalized_dual_residual=last_normalized_dual,
+            kappa_before=nothing,
+            kappa_after=nothing,
+            kappa_after_mass_floor=nothing,
+            raw_kappa=nothing,
+            margins_before=nothing,
+            margins_after=nothing,
+            largest_shift=(s=nothing, z=nothing),
+            primal_mass=nothing,
+            dual_mass=nothing,
+            primal_mass_floor_shift=nothing,
+            dual_mass_floor_shift=nothing,
+            factorization_attempts=factorizations_attempted,
+            factorization_count=0,
+            rhs_solve_count=rhs_solves,
+            backend_execution_attempted=backend_execution_attempted,
+            regularization=accepted_regularization,
+            initialization_seconds=(time_ns() - initialization_started) / 1.0e9,
+            factorization_seconds=factorization_seconds,
+            gram_seconds=gram_seconds,
+        )
+    end
+
+    raw_kappa = dot(s, z) / T(inequalities)
+    primal_shift_ok, primal_shift, primal_margin, primal_scale =
+        _cold_start_positive_shift!(s)
+    dual_shift_ok, dual_shift, dual_margin, dual_scale =
+        _cold_start_positive_shift!(z)
+    # Strict-shift margins and complementarity (before the aggregate
+    # identity-mass floor and pre-centering): the record's "before" semantics
+    # are the strictly-interior point, not the raw KKT point whose
+    # complementarity may be non-positive.
+    kappa_before = dot(s, z) / T(inequalities)
+    margins_before = (
+        s=primal_margin,
+        z=dual_margin,
+    )
+    # Aggregate identity-mass floor: raise each side's total identity mass to
+    # at least ρ = ⟨e, e⟩ = #inequalities, so a KKT start at the cone vertex
+    # (s ≈ 0 or z ≈ 0) receives an O(1) identity push instead of remaining a
+    # sqrt(eps)-scale nudged vertex.  The floor is applied before the shared
+    # cross-centering; masses and complementarity are recomputed afterwards.
+    primal_mass = sum(s)
+    dual_mass = sum(z)
+    floor_ok, primal_mass_floor_shift, dual_mass_floor_shift =
+        _cold_start_identity_mass_shifts(
+            primal_mass, dual_mass, inequalities,
+        )
+    if !(primal_shift_ok && dual_shift_ok && floor_ok)
+        return (
+            success=false,
+            stage=:lp_initialization,
+            reason=floor_ok ? :lp_cold_start_shift_failed :
+                :lp_cold_start_mass_floor_failed,
+            x=x,
+            y=y,
+            s=s,
+            z=z,
+            pre_primal_residual=pre_primal_residual,
+            pre_dual_residual=pre_dual_residual,
+            normalized_primal_residual=normalized_primal_residual,
+            normalized_dual_residual=normalized_dual_residual,
+            kappa_before=kappa_before,
+            kappa_after=nothing,
+            kappa_after_mass_floor=nothing,
+            raw_kappa=raw_kappa,
+            margins_before=margins_before,
+            margins_after=nothing,
+            largest_shift=(
+                s=primal_shift,
+                z=dual_shift,
+            ),
+            primal_mass=primal_mass,
+            dual_mass=dual_mass,
+            primal_mass_floor_shift=primal_mass_floor_shift,
+            dual_mass_floor_shift=dual_mass_floor_shift,
+            factorization_attempts=factorizations_attempted,
+            factorization_count=1,
+            rhs_solve_count=rhs_solves,
+            backend_execution_attempted=backend_execution_attempted,
+            regularization=regularization,
+            initialization_seconds=(time_ns() - initialization_started) / 1.0e9,
+            factorization_seconds=factorization_seconds,
+            gram_seconds=gram_seconds,
+        )
+    end
+    _cold_start_add_vector_identity!(s, primal_mass_floor_shift)
+    _cold_start_add_vector_identity!(z, dual_mass_floor_shift)
+    primal_mass = sum(s)
+    dual_mass = sum(z)
+    kappa_after_mass_floor = dot(s, z) / T(inequalities)
+    centering_ok, primal_identity_shift, dual_identity_shift =
+        _cold_start_centering_shifts(
+            dot(s, z),
+            primal_mass,
+            dual_mass,
+        )
+    _cold_start_add_vector_identity!(s, primal_identity_shift)
+    _cold_start_add_vector_identity!(z, dual_identity_shift)
+    if !centering_ok
+        return (
+            success=false,
+            stage=:lp_initialization,
+            reason=:lp_cold_start_shift_failed,
+            x=x,
+            y=y,
+            s=s,
+            z=z,
+            pre_primal_residual=pre_primal_residual,
+            pre_dual_residual=pre_dual_residual,
+            normalized_primal_residual=normalized_primal_residual,
+            normalized_dual_residual=normalized_dual_residual,
+            kappa_before=kappa_before,
+            kappa_after=nothing,
+            kappa_after_mass_floor=kappa_after_mass_floor,
+            raw_kappa=raw_kappa,
+            margins_before=margins_before,
+            margins_after=nothing,
+            largest_shift=(
+                s=primal_shift + primal_mass_floor_shift,
+                z=dual_shift + dual_mass_floor_shift,
+            ),
+            primal_mass=primal_mass,
+            dual_mass=dual_mass,
+            primal_mass_floor_shift=primal_mass_floor_shift,
+            dual_mass_floor_shift=dual_mass_floor_shift,
+            factorization_attempts=factorizations_attempted,
+            factorization_count=1,
+            rhs_solve_count=rhs_solves,
+            backend_execution_attempted=backend_execution_attempted,
+            regularization=regularization,
+            initialization_seconds=(time_ns() - initialization_started) / 1.0e9,
+            factorization_seconds=factorization_seconds,
+            gram_seconds=gram_seconds,
+        )
+    end
+    # Total additive identity shift per side: strict push plus the aggregate
+    # identity-mass floor plus the pre-centering identity shift (no temporary
+    # vector materialized).
+    largest_shift = (
+        s=primal_shift + primal_mass_floor_shift + primal_identity_shift,
+        z=dual_shift + dual_mass_floor_shift + dual_identity_shift,
+    )
+    margins_after = (
+        s=isempty(s) ? zero(T) : minimum(s),
+        z=isempty(z) ? zero(T) : minimum(z),
+    )
+    kappa_after = dot(s, z) / T(inequalities)
+
+    @inbounds for row in eachindex(s)
+        workspace.weights[row] = z[row] / s[row]
+    end
+    return (
+        success=true,
+        stage=:lp_initialization,
+        x=x,
+        y=y,
+        s=s,
+        z=z,
+        pre_primal_residual=pre_primal_residual,
+        pre_dual_residual=pre_dual_residual,
+        normalized_primal_residual=normalized_primal_residual,
+        normalized_dual_residual=normalized_dual_residual,
+        kappa_before=kappa_before,
+        kappa_after=kappa_after,
+        kappa_after_mass_floor=kappa_after_mass_floor,
+        raw_kappa=raw_kappa,
+        margins_before=margins_before,
+        margins_after=margins_after,
+        largest_shift=largest_shift,
+        primal_mass=primal_mass,
+        dual_mass=dual_mass,
+        primal_mass_floor_shift=primal_mass_floor_shift,
+        dual_mass_floor_shift=dual_mass_floor_shift,
+        factorization_attempts=factorizations_attempted,
+        factorization_count=1,
+        rhs_solve_count=rhs_solves,
+        backend_execution_attempted=backend_execution_attempted,
+        regularization=regularization,
+        initialization_seconds=(time_ns() - initialization_started) / 1.0e9,
+        factorization_seconds=factorization_seconds,
+        gram_seconds=gram_seconds,
+    )
+end
+
+"""
+    _lp_initialization_record(workspace, equalities, opts, lp_parameter_resolution, lp_initialization)
+
+Stable `termination.executed.initialization` schema shared by the success and
+failure tails of the dedicated LP path. The automatic phase-2 KKT cold start
+records its measured residual, shift, margin, complementarity, and
+factorization/RHS counters; fixed-policy and user-warm-start solves record a
+neutral `not_applied` report so the field is always present without inventing
+numbers for a path that preserved the historical iterate.
+"""
+function _lp_initialization_record(
+    workspace::LPWorkspace{T},
+    equalities::Int,
+    opts::SolverOptions{T},
+    lp_initialization,
+) where {T}
+    lp_initialization === nothing && return (
+        policy=opts.parameter_policy === :auto ? :automatic : :fixed,
+        initialization_policy=:not_applied,
+        path=:preserved_fixed_or_warm_start,
+        applied=false,
+        kkt_formulation=:not_executed,
+        provider=:not_executed,
+        factorization=:not_executed,
+        pre_shift_primal_residual=nothing,
+        pre_shift_dual_residual=nothing,
+        largest_shift=(s=nothing, z=nothing),
+        post_margins=(s=nothing, z=nothing),
+        complementarity_before=nothing,
+        complementarity_after=nothing,
+        complementarity_after_mass_floor=nothing,
+        raw_complementarity=nothing,
+        primal_mass=nothing,
+        dual_mass=nothing,
+        primal_mass_floor_shift=nothing,
+        dual_mass_floor_shift=nothing,
+        factorization_attempts=0,
+        factorization_count=0,
+        rhs_solve_count=0,
+        fallback_reason=:not_applied,
+    )
+    largest_shift = get(lp_initialization, :largest_shift, (s=nothing, z=nothing))
+    margins_after = get(lp_initialization, :margins_after, (s=nothing, z=nothing))
+    pre_primal = get(lp_initialization, :pre_primal_residual, nothing)
+    pre_dual = get(lp_initialization, :pre_dual_residual, nothing)
+    kappa_before = get(lp_initialization, :kappa_before, nothing)
+    kappa_after = get(lp_initialization, :kappa_after, nothing)
+    kappa_after_mass_floor =
+        get(lp_initialization, :kappa_after_mass_floor, nothing)
+    raw_kappa = get(lp_initialization, :raw_kappa, nothing)
+    primal_mass = get(lp_initialization, :primal_mass, nothing)
+    dual_mass = get(lp_initialization, :dual_mass, nothing)
+    primal_mass_floor_shift =
+        get(lp_initialization, :primal_mass_floor_shift, nothing)
+    dual_mass_floor_shift =
+        get(lp_initialization, :dual_mass_floor_shift, nothing)
+    return (
+        policy=:automatic,
+        initialization_policy=:kkt_cold_start,
+        path=:phase2_kkt_cold_start,
+        applied=lp_initialization.success,
+        kkt_formulation=_lp_executed_backend(workspace, equalities),
+        provider=backend_name(workspace.backend::KKTBackend),
+        factorization=workspace.executed_la_factorization === :not_executed ?
+            :specialized_kernel : workspace.executed_la_factorization,
+        pre_shift_primal_residual=pre_primal,
+        pre_shift_dual_residual=pre_dual,
+        largest_shift=largest_shift,
+        post_margins=margins_after,
+        complementarity_before=kappa_before,
+        complementarity_after=kappa_after,
+        complementarity_after_mass_floor=kappa_after_mass_floor,
+        raw_complementarity=raw_kappa,
+        primal_mass=primal_mass,
+        dual_mass=dual_mass,
+        primal_mass_floor_shift=primal_mass_floor_shift,
+        dual_mass_floor_shift=dual_mass_floor_shift,
+        factorization_attempts=lp_initialization.factorization_attempts,
+        factorization_count=lp_initialization.factorization_count,
+        rhs_solve_count=lp_initialization.rhs_solve_count,
+        fallback_reason=lp_initialization.success ?
+            :none : lp_initialization.reason,
+    )
+end
+
+"""
+    _lp_executed_record(workspace, equalities, plan, opts, lp_parameter_resolution, backend_execution_attempted, lp_initialization, fallback_reason)
+
+One executed-provenance schema for every dedicated-LP termination, including
+the new `initialization` report. The success tail and the cold-start failure
+tail share this record so a failure is dressed exactly like the run that
+produced it.
+"""
+function _lp_executed_record(
+    workspace::LPWorkspace{T},
+    equalities::Int,
+    plan::ExecutionPlan,
+    opts::SolverOptions{T},
+    lp_parameter_resolution,
+    backend_execution_attempted::Bool,
+    lp_initialization,
+    fallback_reason::Symbol,
+) where {T}
+    return (
+        solver=:lp_primal_dual,
+        planned_storage=plan.storage_plan.storage,
+        executed_storage=workspace.sparse_system === nothing ?
+            :dense : :sparse,
+        parameter_profile=lp_parameter_resolution.profile,
+        parameter_source=lp_parameter_resolution.source,
+        parameter_resolution_count=
+            lp_parameter_resolution.parameter_resolution_count,
+        stage=lp_parameter_resolution.stage,
+        executed_parameters=
+            lp_parameter_resolution.executed_parameters,
+        kkt=backend_execution_attempted ?
+            _lp_executed_backend(workspace, equalities) :
+            :not_executed,
+        planned_backend=:lp_deferred,
+        executed_backend=backend_execution_attempted ?
+            backend_name(workspace.backend::KKTBackend) :
+            :not_executed,
+        fallback_reason=fallback_reason,
+        backend_resolution=backend_execution_attempted ?
+            :post_presolve : :resolved_no_iteration,
+        lp_formulation=_lp_executed_backend(
+            workspace,
+            equalities,
+        ),
+        gram=backend_execution_attempted ?
+            (
+                workspace.standard_system !== nothing ?
+                :reduced_equality_syrk :
+                workspace.sparse_system === nothing ?
+                plan.gram_kernel : :sparse_gram
+            ) : :not_executed,
+        effective_threads=workspace.standard_system === nothing ?
+            plan.threads :
+            max(
+                workspace.standard_system.packing_workers,
+                workspace.standard_system.schur_workers,
+            ),
+        schur_threads=workspace.standard_system === nothing ?
+            plan.threads : workspace.standard_system.schur_workers,
+        factor_threads=workspace.standard_system === nothing ?
+            nothing : 1,
+        lp_pack_threads=workspace.standard_system === nothing ?
+            nothing : workspace.standard_system.packing_workers,
+        la_backend=backend_execution_attempted &&
+            workspace.executed_la_backend !== :not_executed ?
+            workspace.executed_la_backend : :not_executed,
+        la_provider=backend_execution_attempted &&
+            workspace.executed_la_provider !== :not_executed ?
+            workspace.executed_la_provider : :not_executed,
+        la_ownership=backend_execution_attempted &&
+            workspace.executed_la_ownership !== :not_executed ?
+            workspace.executed_la_ownership : :not_executed,
+        la_fallback_reason=workspace.la_fallback_reason,
+        la_factorization=backend_execution_attempted ?
+            workspace.executed_la_factorization : :not_executed,
+        initialization=_lp_initialization_record(
+            workspace,
+            equalities,
+            opts,
+            lp_initialization,
+        ),
+    )
+end
+
+"""
+    _lp_cold_start_failure_result(...)
+
+`NumericalBreakdown` result for a failed automatic phase-2 KKT cold start. The
+iterates are the (possibly unusable) KKT values when the factor succeeded but
+the pre-shift residual gate failed, and zeros on factor failure; the executed
+provenance and the initialization counters are reported as measured.
+"""
+function _lp_cold_start_failure_result(
+    prob::SDPProblem{T},
+    G_original,
+    h_original::Vector{T},
+    keep::Vector{Int},
+    opts::SolverOptions{T},
+    plan::ExecutionPlan,
+    removed::Int,
+    started::Float64,
+    scaling::LPScaling{T},
+    equalities::Int,
+    lp_parameter_resolution,
+    workspace::LPWorkspace{T},
+    cold,
+) where {T}
+    x_original = scaling.variable .* cold.x
+    y_original = scaling.equality .* cold.y
+    slack_original = alloc_zeros(T, size(G_original, 1))
+    _lp_mul_G!(
+        slack_original,
+        G_original,
+        x_original,
+        one(T),
+        zero(T),
+    )
+    slack_original .-= h_original
+    dual_original = alloc_zeros(T, size(G_original, 1))
+    if !isempty(cold.z)
+        copy_owned!(
+            view(dual_original, keep),
+            scaling.inequality .* cold.z,
+        )
+    end
+    X = [
+        reshape(T[slack_original[row]], 1, 1)
+        for row in axes(G_original, 1)
+    ]
+    Y = [
+        reshape(T[dual_original[row]], 1, 1)
+        for row in axes(G_original, 1)
+    ]
+    p_objective = dot(prob.c, x_original)
+    d_objective =
+        dot(h_original, dual_original) + dot(prob.b, y_original)
+    gap_relative =
+        abs(p_objective - d_objective) /
+        max(one(T), (abs(p_objective) + abs(d_objective)) / T(2))
+    elapsed = time() - started
+    initialization_seconds = cold.initialization_seconds
+    pre_primal_residual = get(cold, :pre_primal_residual, T(Inf))
+    pre_dual_residual = get(cold, :pre_dual_residual, T(Inf))
+    result = SDPResult{T}(
+        NumericalBreakdown,
+        "The LP cold-start KKT initialization failed " *
+        "(reason=$(cold.reason), stage=:lp_initialization).",
+        x_original,
+        X,
+        y_original,
+        Y,
+        p_objective,
+        d_objective,
+        gap_relative,
+        pre_primal_residual,
+        pre_dual_residual,
+        0,
+        0,
+        0,
+        (
+            total=elapsed,
+            lp_core=max(elapsed - initialization_seconds, 0.0),
+            residual=0.0,
+            gram_assembly=0.0,
+            kkt_factorization=0.0,
+            predictor_corrector=0.0,
+            update=0.0,
+            initialization=initialization_seconds,
+        ),
+        NamedTuple[],
+        nothing,
+        (
+            reason=:lp_initialization_failed,
+            stage=:lp_initialization,
+            executed=_lp_executed_record(
+                workspace,
+                equalities,
+                plan,
+                opts,
+                lp_parameter_resolution,
+                true,
+                cold,
+                cold.reason,
+            ),
+        ),
+    )
+    return result, removed
+end
+
 function _scale_lp!(
     G::Matrix{T},
     h::Vector{T},
@@ -1881,6 +2640,10 @@ function _lp_infeasible_rows_result(
             reason=:lp_zero_row_infeasible,
             executed=(
                 solver=:lp_primal_dual,
+                parameter_profile=:not_resolved,
+                parameter_source=:not_resolved,
+                parameter_resolution_count=0,
+                stage=:not_resolved,
                 kkt=:not_executed,
                 planned_backend=:lp_deferred,
                 executed_backend=:not_executed,
@@ -1920,6 +2683,10 @@ function _lp_time_limit_result(
             stage=:lp_setup,
             executed=(
                 solver=:lp_primal_dual,
+                parameter_profile=:not_resolved,
+                parameter_source=:not_resolved,
+                parameter_resolution_count=0,
+                stage=:not_resolved,
                 kkt=:not_executed,
                 planned_backend=:lp_deferred,
                 executed_backend=:not_executed,
@@ -2063,6 +2830,10 @@ function _lp_equality_only_result(
         reason=:none,
         executed=(
             solver=:lp_primal_dual,
+            parameter_profile=:not_resolved,
+            parameter_source=:not_resolved,
+            parameter_resolution_count=0,
+            stage=:not_resolved,
             kkt=:not_executed,
             planned_backend=:lp_deferred,
             executed_backend=:not_executed,
@@ -2257,6 +3028,12 @@ function solve_lp!(
         c,
         plan.scaling === :lp_geometric,
     )
+    # One private post-scaling resolver per automatic solve, after `_scale_lp!`
+    # and before the controller below. It records provenance only; the
+    # controller still reads the untouched user/default options.
+    lp_parameter_resolution = opts.parameter_policy === :auto ?
+                              _lp_auto_parameter_resolution(opts) :
+                              _lp_fixed_parameter_resolution(opts)
 
     inequalities, variables = size(G)
     equalities = size(B, 2)
@@ -2294,19 +3071,68 @@ function solve_lp!(
         )
     end
     _resolve_lp_backend!(workspace, equalities)
-    x = x0 === nothing ? alloc_zeros(T, variables) :
-        _owned_array_copy(T, x0) ./ scaling.variable
-    y = y0 === nothing ? alloc_zeros(T, equalities) :
-        _owned_array_copy(T, y0) ./ scaling.equality
-    s = alloc_zeros(T, inequalities)
-    _lp_mul_G!(s, G, x, one(T), zero(T))
-    s .-= h
-    @inbounds for row in eachindex(s)
-        s[row] = max(s[row], one(T))
+    lp_initialization = _lp_phase2_cold_start!(
+        workspace,
+        G,
+        h,
+        B,
+        b,
+        c,
+        opts,
+        plan,
+        scaling,
+        lp_parameter_resolution,
+        equalities,
+        x0,
+        y0,
+    )
+    if lp_initialization !== nothing && !lp_initialization.success
+        result, removed = _lp_cold_start_failure_result(
+            prob,
+            G_original,
+            h_original,
+            keep,
+            opts,
+            plan,
+            removed,
+            started,
+            scaling,
+            equalities,
+            lp_parameter_resolution,
+            workspace,
+            lp_initialization,
+        )
+        return result, removed, _lp_workspace_bytes(workspace)
     end
-    z = alloc_zeros(T, inequalities)
-    @inbounds for row in eachindex(z)
-        z[row] = one(T)
+    x = if lp_initialization !== nothing
+        lp_initialization.x
+    elseif x0 === nothing
+        alloc_zeros(T, variables)
+    else
+        _owned_array_copy(T, x0) ./ scaling.variable
+    end
+    y = if lp_initialization !== nothing
+        lp_initialization.y
+    elseif y0 === nothing
+        alloc_zeros(T, equalities)
+    else
+        _owned_array_copy(T, y0) ./ scaling.equality
+    end
+    s = lp_initialization === nothing ?
+        alloc_zeros(T, inequalities) : lp_initialization.s
+    z = lp_initialization === nothing ?
+        alloc_zeros(T, inequalities) : lp_initialization.z
+    if lp_initialization === nothing
+        # Historical fixed/warm path: `s = max(Gx-h, 1)`, `z = 1`, with user
+        # `x0`/`y0` divided by the geometric scaling exactly as before.
+        _lp_mul_G!(s, G, x, one(T), zero(T))
+        s .-= h
+        @inbounds for row in eachindex(s)
+            s[row] = max(s[row], one(T))
+        end
+        @inbounds for row in eachindex(z)
+            z[row] = one(T)
+        end
     end
     # The endpoint models in the finite-support family are deliberately
     # degenerate: after feasibility is reached, an ill-conditioned equality
@@ -2360,7 +3186,10 @@ function solve_lp!(
     factor_seconds = 0.0
     direction_seconds = 0.0
     update_seconds = 0.0
-    backend_execution_attempted = false
+    initialization_seconds =
+        lp_initialization === nothing ? 0.0 : lp_initialization.initialization_seconds
+    backend_execution_attempted =
+        lp_initialization !== nothing && lp_initialization.success
 
     opts.verbosity >= 1 && println(
         "SDPX dedicated LP: $(variables) variables, $(inequalities) inequalities, " *
@@ -2795,12 +3624,13 @@ function solve_lp!(
         regularizations,
         (
             total=elapsed,
-            lp_core=elapsed,
+            lp_core=max(elapsed - initialization_seconds, 0.0),
             residual=residual_seconds,
             gram_assembly=gram_seconds,
             kkt_factorization=factor_seconds,
             predictor_corrector=direction_seconds,
             update=update_seconds,
+            initialization=initialization_seconds,
         ),
         parameter_controller.history,
         nothing,
@@ -2815,56 +3645,15 @@ function solve_lp!(
             # presolve and scaling have settled `G`, so the plan cannot know
             # it -- and diagnostics built from the plan reported a dense LU
             # and a BLAS Gram kernel for solves that executed neither.
-            executed=(
-                solver=:lp_primal_dual,
-                planned_storage=plan.storage_plan.storage,
-                executed_storage=workspace.sparse_system === nothing ?
-                    :dense : :sparse,
-                kkt=backend_execution_attempted ?
-                    _lp_executed_backend(workspace, equalities) :
-                    :not_executed,
-                planned_backend=:lp_deferred,
-                executed_backend=backend_execution_attempted ?
-                    backend_name(workspace.backend::KKTBackend) :
-                    :not_executed,
-                fallback_reason=:none,
-                backend_resolution=backend_execution_attempted ?
-                    :post_presolve : :resolved_no_iteration,
-                lp_formulation=_lp_executed_backend(
-                    workspace,
-                    equalities,
-                ),
-                gram=backend_execution_attempted ?
-                    (
-                        workspace.standard_system !== nothing ?
-                        :reduced_equality_syrk :
-                        workspace.sparse_system === nothing ?
-                        plan.gram_kernel : :sparse_gram
-                    ) : :not_executed,
-                effective_threads=workspace.standard_system === nothing ?
-                    plan.threads :
-                    max(
-                        workspace.standard_system.packing_workers,
-                        workspace.standard_system.schur_workers,
-                    ),
-                schur_threads=workspace.standard_system === nothing ?
-                    plan.threads : workspace.standard_system.schur_workers,
-                factor_threads=workspace.standard_system === nothing ?
-                    nothing : 1,
-                lp_pack_threads=workspace.standard_system === nothing ?
-                    nothing : workspace.standard_system.packing_workers,
-                la_backend=backend_execution_attempted &&
-                    workspace.executed_la_backend !== :not_executed ?
-                    workspace.executed_la_backend : :not_executed,
-                la_provider=backend_execution_attempted &&
-                    workspace.executed_la_provider !== :not_executed ?
-                    workspace.executed_la_provider : :not_executed,
-                la_ownership=backend_execution_attempted &&
-                    workspace.executed_la_ownership !== :not_executed ?
-                    workspace.executed_la_ownership : :not_executed,
-                la_fallback_reason=workspace.la_fallback_reason,
-                la_factorization=backend_execution_attempted ?
-                    workspace.executed_la_factorization : :not_executed,
+            executed=_lp_executed_record(
+                workspace,
+                equalities,
+                plan,
+                opts,
+                lp_parameter_resolution,
+                backend_execution_attempted,
+                lp_initialization,
+                :none,
             ),
         ),
     )
