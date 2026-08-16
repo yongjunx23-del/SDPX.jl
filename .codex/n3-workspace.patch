@@ -1,0 +1,24 @@
+diff --git a/src/workspace.jl b/src/workspace.jl
+index ded8630..a971299 100644
+--- a/src/workspace.jl
++++ b/src/workspace.jl
+@@ -459,8 +459,9 @@ mutable struct Workspace{T}
+     schur_lower_only::Bool # dense KKT backends consume only the lower triangle
+     fused_arrow::Bool            # exact-arrow 2x2 model: compute+scatter in one pass, no packed pair buffer
+     Sbuf::Matrix{T}        # generic-path Cholesky scratch; empty for compact arrow problems
+-    Btil::Matrix{T}         # m×n = L_S⁻¹B
+-    Q::Matrix{T}              # n×n = B̃ᵀB̃, accumulator
++    Btil::Matrix{T}         # m×n = (L_S⁻¹B)D in normalized equality coordinates
++    equality_scale::Vector{T} # D[j,j] = 1 / ||(L_S⁻¹B)[:,j]||∞ for nonzero columns
++    Q::Matrix{T}              # n×n = B̂ᵀB̂ in normalized equality coordinates
+     Qbuf::Matrix{T}            # scratch copy of Q fed to cholesky!/cholesky(...)
+     # Set by factor_kkt!. The concrete union, not Any: _solve_Q! is called
+     # twice per iteration (predictor and corrector), and an Any field makes
+@@ -1224,6 +1225,7 @@ function Workspace(
+         alloc_zeros(T, 0, 0) :
+         alloc_zeros(T, m, m),
+         alloc_zeros(T, m, n),
++        alloc_zeros(T, n),
+         alloc_zeros(T, n, n),
+         alloc_zeros(T, n, n),
+         nothing,
