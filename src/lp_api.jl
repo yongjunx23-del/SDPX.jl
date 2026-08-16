@@ -9,7 +9,7 @@ The constructor stores each inequality row by its active variables and keeps a
 sparse equality matrix when appropriate. It therefore avoids the historical
 `number of inequalities × number of variables` grid of empty `1×1` matrices.
 The returned problem uses the same dedicated LP solver selected for scalar-cone
-models built through `ingest`, JuMP, or Convex.jl.
+models built through qualified core ingestion or the public Model/MOI adapters.
 
 Keyword arguments are forwarded to [`ingest`](@ref). The legacy scalar-block
 `ingest` interface remains supported.

@@ -1,12 +1,11 @@
-# Experimental internals
+# Qualified internals
 
 These names support inspection, custom preprocessing, and solver research.
-Use them through `SDPX.Experimental`; their result layouts may change before
-1.0. The historical top-level exports completed their deprecation cycle in
-0.4. Qualified `SDPX.name` access remains available for compatibility.
+Use them with explicit `SDPX.name` qualification; they are intentionally not
+exported and their result layouts may change before 1.0.
 
 ```@docs
-SDPX.Experimental
+SDPX
 ```
 
 ## Problem and execution descriptions

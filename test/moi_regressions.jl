@@ -1,300 +1,107 @@
 using SDPX
+import MathOptInterface as MOI
 using SparseArrays
 using Test
-import MathOptInterface as MOI
 
-function moi_regression_result(status::SDPX.SolveStatus)
-    return SDPX.SDPResult{Float64}(
-        status,
-        string(status),
-        [1.0],
-        [fill(1.0, 1, 1)],
-        Float64[],
-        [fill(1.0, 1, 1)],
-        1.0,
-        1.0,
-        0.0,
-        0.0,
-        0.0,
-        1,
-        0,
-        0,
-        nothing,
-    )
-end
-
-function moi_sparse_conversion_model(variables::Int)
-    model = MOI.Utilities.Model{Float64}()
-    x = MOI.add_variables(model, variables)
-
-    scalar_function = MOI.ScalarAffineFunction(
-        [
-            MOI.ScalarAffineTerm(2.0, x[1]),
-            MOI.ScalarAffineTerm(-1.0, x[1]),
-            MOI.ScalarAffineTerm(0.5, x[2]),
-            MOI.ScalarAffineTerm(0.0, x[5]),
-        ],
-        0.0,
-    )
-    MOI.add_constraint(model, scalar_function, MOI.GreaterThan(0.0))
-
-    psd_first = MOI.VectorAffineFunction(
-        [
-            MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[1])),
-            MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(1.0, x[variables])),
-        ],
-        zeros(3),
-    )
-    MOI.add_constraint(
-        model,
-        psd_first,
-        MOI.PositiveSemidefiniteConeTriangle(2),
-    )
-    psd_second = MOI.VectorAffineFunction(
-        [
-            MOI.VectorAffineTerm(1, MOI.ScalarAffineTerm(1.0, x[2])),
-            MOI.VectorAffineTerm(3, MOI.ScalarAffineTerm(1.0, x[3])),
-        ],
-        zeros(3),
-    )
-    MOI.add_constraint(
-        model,
-        psd_second,
-        MOI.PositiveSemidefiniteConeTriangle(2),
-    )
-    MOI.set(model, MOI.ObjectiveSense(), MOI.FEASIBILITY_SENSE)
-    return model
-end
-
-@testset "MOI result and conversion regressions" begin
-    @testset "result availability is conservative" begin
+@testset "MOI Model-backed adapter regressions" begin
+    @testset "mixed families fail closed before Model allocation" begin
+        source = MOI.Utilities.Model{Float64}()
+        lp_variables = MOI.add_variables(source, 2)
+        soc_variables = MOI.add_variables(source, 3)
+        MOI.add_constraint(
+            source,
+            MOI.VectorOfVariables(lp_variables),
+            MOI.Nonnegatives(2),
+        )
+        MOI.add_constraint(
+            source,
+            MOI.VectorOfVariables(soc_variables),
+            MOI.SecondOrderCone(3),
+        )
         optimizer = SDPX.Optimizer(verbosity=0)
-
-        optimizer.result = moi_regression_result(SDPX.Optimal)
-        @test MOI.get(optimizer, MOI.ResultCount()) == 1
-        @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.FEASIBLE_POINT
-        @test MOI.get(optimizer, MOI.DualStatus()) == MOI.FEASIBLE_POINT
-        @test MOI.get(optimizer, MOI.ObjectiveValue()) == 1.0
-
-        optimizer.result = moi_regression_result(SDPX.FeasibleCert)
-        @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.OPTIMAL
-        @test MOI.get(optimizer, MOI.ResultCount()) == 1
-        @test MOI.get(optimizer, MOI.PrimalStatus()) ==
-              MOI.FEASIBLE_POINT
-        @test MOI.get(optimizer, MOI.DualStatus()) ==
-              MOI.UNKNOWN_RESULT_STATUS
-        @test MOI.get(optimizer, MOI.ObjectiveValue()) == 1.0
-
-        for status in (
-            SDPX.IterLimit,
-            SDPX.TimeLimit,
-            SDPX.Stalled,
-            SDPX.MaxRestartsExceeded,
-            SDPX.UserStopped,
-        )
-            optimizer.result = moi_regression_result(status)
-            @test MOI.get(optimizer, MOI.ResultCount()) == 1
-            @test MOI.get(optimizer, MOI.PrimalStatus()) ==
-                  MOI.UNKNOWN_RESULT_STATUS
-            @test MOI.get(optimizer, MOI.DualStatus()) ==
-                  MOI.UNKNOWN_RESULT_STATUS
-            @test MOI.get(optimizer, MOI.ObjectiveValue()) == 1.0
-        end
-
-        optimizer.result = moi_regression_result(SDPX.InfeasibleCert)
-        @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.INFEASIBLE
-        @test MOI.get(optimizer, MOI.ResultCount()) == 0
-        @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.NO_SOLUTION
-        @test MOI.get(optimizer, MOI.DualStatus()) == MOI.NO_SOLUTION
-        @test_throws MOI.ResultIndexBoundsError MOI.get(
-            optimizer,
-            MOI.ObjectiveValue(),
-        )
-
-        optimizer.result = moi_regression_result(SDPX.PrimalInfeasible)
-        @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.INFEASIBLE
-        @test MOI.get(optimizer, MOI.ResultCount()) == 1
-        @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.NO_SOLUTION
-        @test MOI.get(optimizer, MOI.DualStatus()) ==
-              MOI.INFEASIBILITY_CERTIFICATE
-        @test isnan(MOI.get(optimizer, MOI.ObjectiveValue()))
-
-        optimizer.result = moi_regression_result(SDPX.DualInfeasible)
-        @test MOI.get(optimizer, MOI.TerminationStatus()) ==
-              MOI.DUAL_INFEASIBLE
-        @test MOI.get(optimizer, MOI.ResultCount()) == 1
-        @test MOI.get(optimizer, MOI.PrimalStatus()) ==
-              MOI.INFEASIBILITY_CERTIFICATE
-        @test MOI.get(optimizer, MOI.DualStatus()) == MOI.NO_SOLUTION
-        @test isnan(MOI.get(optimizer, MOI.DualObjectiveValue()))
-
-        optimizer.result = moi_regression_result(SDPX.NumericalBreakdown)
-        @test MOI.get(optimizer, MOI.ResultCount()) == 0
-        @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.NO_SOLUTION
-        @test MOI.get(optimizer, MOI.DualStatus()) == MOI.NO_SOLUTION
-        @test_throws MOI.ResultIndexBoundsError MOI.get(
-            optimizer,
-            MOI.DualObjectiveValue(),
-        )
+        @test_throws SDPX.UnsupportedNativeConeRoute MOI.copy_to(optimizer, source)
+        @test optimizer.model === nothing
+        @test optimizer.public_result === nothing
     end
 
-    @testset "raw aliases and thread attributes round-trip" begin
-        optimizer = SDPX.Optimizer(verbosity=0)
-        tolerance = MOI.RawOptimizerAttribute("tolerance")
-        MOI.set(optimizer, tolerance, 2e-7)
-        @test MOI.get(optimizer, tolerance) == 2e-7
-        @test optimizer.options.ϵ_gap == 2e-7
-        @test optimizer.options.ϵ_primal == 2e-7
-        @test optimizer.options.ϵ_dual == 2e-7
-
-        MOI.set(optimizer, MOI.RawOptimizerAttribute("tol_gap"), 1e-8)
-        split_tolerance = MOI.get(optimizer, tolerance)
-        @test split_tolerance == (
-            gap=1e-8,
-            primal=2e-7,
-            dual=2e-7,
-        )
-
-        for (name, value) in (
-            ("beta", 0.2),
-            ("gamma", 0.8),
-            ("max_iterations", 17),
-            ("num_threads", 1),
-        )
-            attribute = MOI.RawOptimizerAttribute(name)
-            MOI.set(optimizer, attribute, value)
-            @test MOI.get(optimizer, attribute) == value
-        end
-
-        fresh = SDPX.Optimizer(verbosity=0)
-        @test MOI.supports(fresh, MOI.NumberOfThreads())
-        @test MOI.get(fresh, MOI.NumberOfThreads()) === nothing
-        MOI.set(fresh, MOI.NumberOfThreads(), 1)
-        @test MOI.get(fresh, MOI.NumberOfThreads()) == 1
-        @test fresh.options.threads == 1
-        MOI.set(fresh, MOI.NumberOfThreads(), nothing)
-        @test MOI.get(fresh, MOI.NumberOfThreads()) === nothing
-        @test fresh.options.threads == Base.Threads.nthreads()
-        @test_throws ArgumentError MOI.set(
-            fresh,
-            MOI.NumberOfThreads(),
-            0,
-        )
-    end
-
-    @testset "copy-in allocates coefficients only for active variables" begin
-        model = moi_sparse_conversion_model(64)
-        optimizer = SDPX.Optimizer(sparse=true, verbosity=0)
-        MOI.copy_to(optimizer, model)
-        cons = optimizer.problem.cons
-        @test cons isa SDPX.SparseCons{Float64}
-        # The scalar inequality is kept as one scalar cone row, and the two
-        # PSD blocks are exactly S_+^2 (the native Lorentz equivalent of the
-        # historical SOC block must not be expanded to a 3x3 arrow lift).
-        @test count(==(2), optimizer.problem.dims.k) == 2
-        @test optimizer.problem.dims.k[1] == 1
-        @test maximum(optimizer.problem.dims.k) == 2
-        @test any(==([1, 2]), cons.active)
-        @test any(==([2, 3]), cons.active)
-        @test any(==([1, 64]), cons.active)
-        @test sum(length, cons.active) == 6
-        @test any(
-            block -> block isa
-                     SDPX.ActiveSparseCoefficientVector{Float64},
-            cons.Asp,
-        )
-        @test optimizer.problem.B isa SparseMatrixCSC{Float64,Int}
-
-        for block in eachindex(cons.Asp)
-            inactive = setdiff(1:optimizer.num_variables, cons.active[block])
-            length(inactive) >= 2 || continue
-            @test cons.Asp[block][inactive[1]] ===
-                  cons.Asp[block][inactive[2]]
-            @test nnz(cons.Asp[block][inactive[1]]) == 0
-        end
-    end
-
-    @testset "pure-equality and unconstrained LP models are reachable" begin
-        bounded_model = MOI.Utilities.Model{Float64}()
-        bounded_variable = MOI.add_variable(bounded_model)
+    @testset "sparse affine rows and typed maps are preserved" begin
+        source = MOI.Utilities.Model{Float64}()
+        variables = MOI.add_variables(source, 50)
         equality = MOI.add_constraint(
-            bounded_model,
-            bounded_variable,
-            MOI.EqualTo(2.0),
+            source,
+            MOI.ScalarAffineFunction(
+                [
+                    MOI.ScalarAffineTerm(2.0, variables[2]),
+                    MOI.ScalarAffineTerm(-1.0, variables[40]),
+                ],
+                0.0,
+            ),
+            MOI.EqualTo(3.0),
         )
         objective = MOI.ScalarAffineFunction(
-            [MOI.ScalarAffineTerm(3.0, bounded_variable)],
-            0.5,
+            [MOI.ScalarAffineTerm(1.0, variables[2])],
+            0.75,
         )
-        MOI.set(bounded_model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+        MOI.set(source, MOI.ObjectiveSense(), MOI.MIN_SENSE)
         MOI.set(
-            bounded_model,
-            MOI.ObjectiveFunction{typeof(objective)}(),
+            source,
+            MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
             objective,
         )
+        optimizer = SDPX.Optimizer(verbosity=0)
+        index_map = MOI.copy_to(optimizer, source)
+        model = optimizer.model::SDPX.Model{Float64}
+        program = SDPX.compile_product_cone_model(model)
+        @test program.equality_matrix isa SparseMatrixCSC
+        @test size(program.equality_matrix) == (1, 50)
+        @test nnz(program.equality_matrix) == 2
+        @test program.rhs == [3.0]
+        @test index_map[equality] isa MOI.ConstraintIndex
+        @test index_map[variables[40]] == MOI.VariableIndex(40)
+        @test MOI.get(optimizer, MOI.NumberOfVariables()) == 50
+        @test MOI.get(optimizer, MOI.ListOfConstraintIndices{
+            MOI.ScalarAffineFunction{Float64}, MOI.EqualTo{Float64},
+        }()) == [index_map[equality]]
+    end
 
-        bounded_optimizer = SDPX.Optimizer(sparse=false, verbosity=0)
-        bounded_map = MOI.copy_to(bounded_optimizer, bounded_model)
-        @test bounded_optimizer.problem.dims.L == 1
-        @test bounded_optimizer.problem.dims.k == [1]
-        @test bounded_optimizer.problem.C[1][1, 1] == -1.0
-        @test iszero(bounded_optimizer.problem.cons.Av[1])
-        @test length(bounded_optimizer.constraint_info) == 1
-        @test haskey(
-            bounded_optimizer.constraint_info,
-            bounded_map[equality],
+    @testset "Max objective flips only in the LP lowerer" begin
+        source = MOI.Utilities.Model{Float64}()
+        variables = MOI.add_variables(source, 1)
+        MOI.add_constraint(
+            source,
+            MOI.VectorOfVariables(variables),
+            MOI.Nonnegatives(1),
         )
-
-        MOI.optimize!(bounded_optimizer)
-        @test MOI.get(
-            bounded_optimizer,
-            MOI.TerminationStatus(),
-        ) == MOI.OPTIMAL
-        @test MOI.get(bounded_optimizer, MOI.ResultCount()) == 1
-        @test MOI.get(
-            bounded_optimizer,
-            MOI.VariablePrimal(),
-            bounded_map[bounded_variable],
-        ) ≈ 2.0 atol=1e-12
-        @test MOI.get(
-            bounded_optimizer,
-            MOI.ConstraintPrimal(),
-            bounded_map[equality],
-        ) ≈ 2.0 atol=1e-12
-        @test MOI.get(
-            bounded_optimizer,
-            MOI.ObjectiveValue(),
-        ) ≈ 6.5 atol=1e-12
-
-        unbounded_model = MOI.Utilities.Model{Float64}()
-        unbounded_variable = MOI.add_variable(unbounded_model)
-        MOI.set(unbounded_model, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+        MOI.set(source, MOI.ObjectiveSense(), MOI.MAX_SENSE)
         MOI.set(
-            unbounded_model,
-            MOI.ObjectiveFunction{MOI.VariableIndex}(),
-            unbounded_variable,
+            source,
+            MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
+            MOI.ScalarAffineFunction(
+                [MOI.ScalarAffineTerm(1.0, variables[1])],
+                2.0,
+            ),
         )
-        unbounded_optimizer = SDPX.Optimizer(sparse=false, verbosity=0)
-        unbounded_map = MOI.copy_to(unbounded_optimizer, unbounded_model)
-        @test isempty(unbounded_optimizer.constraint_info)
-        @test unbounded_optimizer.problem.dims.L == 1
-        @test unbounded_optimizer.problem.C[1][1, 1] == -1.0
+        optimizer = SDPX.Optimizer(verbosity=0)
+        MOI.copy_to(optimizer, source)
+        program = SDPX.compile_product_cone_model(optimizer.model)
+        @test program.objective_sense isa SDPX.Maximize
+        @test program.objective_vector == [1.0]
+        @test program.objective_constant == 2.0
+        lowered = SDPX.lower_lp_native(program; sparse=true, verbosity=0)
+        @test lowered.objective_sign == -1
+        @test lowered.objective_constant == 2.0
+        @test lowered.core.c == [-1.0]
+    end
 
-        MOI.optimize!(unbounded_optimizer)
-        @test MOI.get(
-            unbounded_optimizer,
-            MOI.TerminationStatus(),
-        ) == MOI.DUAL_INFEASIBLE
-        @test MOI.get(unbounded_optimizer, MOI.ResultCount()) == 1
-        @test MOI.get(
-            unbounded_optimizer,
-            MOI.PrimalStatus(),
-        ) == MOI.INFEASIBILITY_CERTIFICATE
-        @test MOI.get(
-            unbounded_optimizer,
-            MOI.ObjectiveValue(),
-        ) < 0.0
-        @test bounded_map[bounded_variable] == MOI.VariableIndex(1)
-        @test unbounded_map[unbounded_variable] == MOI.VariableIndex(1)
+    @testset "unsupported warm-start seam fails with a typed reason" begin
+        source = MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}())
+        variable = MOI.add_variable(source)
+        interval = MOI.add_constraint(source, variable, MOI.Interval(0.0, 1.0))
+        MOI.set(source, MOI.ConstraintDualStart(), interval, 0.0)
+        optimizer = SDPX.Optimizer(verbosity=0)
+        MOI.copy_to(optimizer, source)
+        @test optimizer.start_error !== nothing
+        @test optimizer.start_error[1] == :warm_start_core_gap
+        @test_throws SDPX.MOIAdapterError MOI.optimize!(optimizer)
     end
 end

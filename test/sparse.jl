@@ -113,7 +113,7 @@ end
             prob,
             SDPX.SolverOptions{Float64}(parameter_policy=:auto),
         )
-        @test selected.profile == :generic_mehrotra
+        @test selected.profile == :post_scaling_mehrotra
         @test selected.β == 0.1
         @test selected.γ == 0.9
         # The arrow block constants are all zero, so the initial point keeps
@@ -335,8 +335,16 @@ end
         c, B, b = Float64[2, 3], zeros(Float64, 2, 0), Float64[]
         A = [A]
         C = [C]
-        dense = SDPX.sdp(c, A, C, B, b; sparse=false, verbosity=0)
-        sparse = SDPX.sdp(c, A, C, B, b; sparse=true, verbosity=0)
+        dense_problem = SDPX.ingest(c, A, C, B, b; sparse=false, verbosity=0)
+        sparse_problem = SDPX.ingest(c, A, C, B, b; sparse=true, verbosity=0)
+        dense = SDPX.solve!(
+            dense_problem,
+            SDPX.SolverOptions{Float64}(sparse=false, verbosity=0),
+        )
+        sparse = SDPX.solve!(
+            sparse_problem,
+            SDPX.SolverOptions{Float64}(sparse=true, verbosity=0),
+        )
         @test dense.status == SDPX.Optimal
         @test sparse.status == SDPX.Optimal
         @test sparse.pObj ≈ dense.pObj rtol=1e-9 atol=1e-9

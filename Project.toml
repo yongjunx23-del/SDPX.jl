@@ -15,7 +15,6 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 [weakdeps]
 AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
 BigFloatLinearAlgebra = "44d352a4-380e-4c6a-9c2a-31e5bfe329aa"
-Convex = "f65535da-76fb-5f13-bab9-19810c17039a"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 MultiFloatLinearAlgebra = "642d9d30-8e28-45ca-9d81-256429ea358f"
@@ -24,7 +23,6 @@ MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 [extensions]
 SDPXAppleAccelerateExt = "AppleAccelerate"
 SDPXBigFloatLinearAlgebraExt = "BigFloatLinearAlgebra"
-SDPXConvexExt = "Convex"
 SDPXJLD2Ext = "JLD2"
 SDPXGenericLinearAlgebraExt = "GenericLinearAlgebra"
 SDPXMultiFloatLinearAlgebraExt = ["MultiFloats", "MultiFloatLinearAlgebra"]
@@ -34,7 +32,6 @@ SDPXMultiFloatsExt = "MultiFloats"
 AppleAccelerate = "0.7"
 Aqua = "0.8"
 BigFloatLinearAlgebra = "0.1"
-Convex = "0.16"
 Dates = "1"
 Downloads = "1"
 JLD2 = "0.4, 0.5, 0.6"
@@ -72,4 +69,4 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [targets]
-test = ["Aqua", "Convex", "Dates", "Downloads", "GenericLinearAlgebra", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "SHA", "StableRNGs", "Test", "TOML"]
+test = ["Aqua", "Dates", "Downloads", "GenericLinearAlgebra", "JLD2", "JSON", "JuMP", "MultiFloats", "Random", "SHA", "StableRNGs", "Test", "TOML"]

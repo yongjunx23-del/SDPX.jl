@@ -88,16 +88,21 @@ end
     optimizer = SDPX.Optimizer()
     PIPELINE_MOI.set(optimizer, PIPELINE_MOI.Silent(), true)
     index_map = PIPELINE_MOI.copy_to(optimizer, model)
-    @test optimizer.problem isa SDPX.ConicProblem{Float64}
+    @test optimizer.model isa SDPX.Model{Float64}
+    @test SDPX.bridge_plan(optimizer).route == :soc_family
     PIPELINE_MOI.optimize!(optimizer)
     result = PIPELINE_MOI.get(optimizer, PIPELINE_MOI.RawSolver())
-    @test result.status == SDPX.Optimal
-    @test result.pObj ≈ 1.0 atol=1e-7
+    @test result isa SDPX.Result{Float64}
+    @test result === optimizer.public_result
+    @test SDPX.status(result) === :optimal
+    @test SDPX.primal_objective(result) ≈ 1.0 atol=1e-7
     # Compact MOI SOC models go through the production NativeSOC route, whose
     # plan shape differs from the SDPProblem/PSD-lift plan used by the old
     # assertion. The cone is still kept in native Lorentz coordinates.
-    @test result.diagnostics.selected_algorithms.solver === :native_soc
-    @test result.diagnostics.selected_algorithms.cone_representation ===
+    diagnostics = SDPX.diagnostics(result)
+    @test SDPX.execution_plan(result) === diagnostics.plan
+    @test diagnostics.selected_algorithms.solver === :native_soc
+    @test diagnostics.selected_algorithms.cone_representation ===
           :native_lorentz
     @test !hasproperty(result, :lifted)
     @test PIPELINE_MOI.get(
@@ -117,7 +122,7 @@ end
         large_equality,
         SDPX.SolverOptions{Float64}(),
     )
-    @test large_equality_parameters.profile == :generic_mehrotra
+    @test large_equality_parameters.profile == :post_scaling_mehrotra
     @test large_equality_parameters.β == 0.1
     @test large_equality_parameters.γ == 0.9
     # Phase 2: the automatic resolver returns the raw Ω hints; the initial
@@ -142,7 +147,7 @@ end
 
     fast_parameters =
         SDPX.recommended_parameters(problem, SDPX.SolverOptions{Float64}())
-    @test fast_parameters.profile == :generic_mehrotra
+    @test fast_parameters.profile == :post_scaling_mehrotra
     @test fast_parameters.β == 0.1
     @test fast_parameters.γ == 0.9
     # The resolver never probes cone data: Ωp/Ωd stay at the raw defaults.
@@ -163,7 +168,7 @@ end
         distant_problem,
         SDPX.SolverOptions{Float64}(),
     )
-    @test conservative_parameters.profile == :generic_mehrotra
+    @test conservative_parameters.profile == :post_scaling_mehrotra
     @test conservative_parameters.β == 0.1
     @test conservative_parameters.γ == 0.9
     @test conservative_parameters.Ωp == 1.0
@@ -201,7 +206,7 @@ end
             distant_bigfloat,
             SDPX.SolverOptions{BigFloat}(),
         )
-        @test bigfloat_parameters.profile == :generic_mehrotra
+        @test bigfloat_parameters.profile == :post_scaling_mehrotra
         @test bigfloat_parameters.β == BigFloat(1) / BigFloat(10)
         @test bigfloat_parameters.γ == BigFloat(9) / BigFloat(10)
     end
@@ -483,7 +488,7 @@ end
     rp = SDPX.recommended_parameters(prob, SDPX.SolverOptions{Float64}())
     @test rp.Ωp == 1.0
     @test rp.Ωd == rp.Ωp
-    @test rp.profile == :generic_mehrotra
+    @test rp.profile == :post_scaling_mehrotra
     @test rp.β == 0.1
     @test rp.γ == 0.9
     @test rp.predictor == :classic
@@ -505,7 +510,7 @@ end
         wide,
         SDPX.SolverOptions{Float64}(),
     )
-    @test wide_parameters.profile == :generic_mehrotra
+    @test wide_parameters.profile == :post_scaling_mehrotra
     @test wide_parameters.β == 0.1
     @test wide_parameters.γ == 0.9
     @test wide_parameters.Ωp == 1.0
@@ -563,7 +568,7 @@ end
         T = eltype(prob.c)
         options = SDPX.SolverOptions{T}()
         selected = SDPX.recommended_parameters(prob, options)
-        @test selected.profile === :generic_mehrotra
+        @test selected.profile === :post_scaling_mehrotra
         @test selected.β == options.β
         @test selected.γ == options.γ
         @test selected.predictor == options.predictor
@@ -644,7 +649,7 @@ end
         for active in (255, 256, 257)
     ]
     @test all(==(active_selections[1]), active_selections)
-    @test active_selections[1].profile === :generic_mehrotra
+    @test active_selections[1].profile === :post_scaling_mehrotra
 
     # Lightweight synthetic metadata for the historical large-lattice gate
     # (`variables >= 4_000 && equalities >= 100 && blocks >= 16 &&
@@ -703,7 +708,7 @@ end
         for variables in (3_999, 4_000, 4_001)
     ]
     @test all(==(lattice_selections[1]), lattice_selections)
-    @test lattice_selections[1].profile === :generic_mehrotra
+    @test lattice_selections[1].profile === :post_scaling_mehrotra
 end
 
 @testset "generic resolver invariance under permutation, scaling, equilibration" begin
@@ -730,7 +735,7 @@ end
         base = small_problem(T, T(4))
         options = SDPX.SolverOptions{T}()
         selected = SDPX.recommended_parameters(base, options)
-        @test selected.profile === :generic_mehrotra
+        @test selected.profile === :post_scaling_mehrotra
         @test selected.Ωp == options.Ωp
         @test selected.Ωd == options.Ωd
         # Variable permutation does not change the cone constants, so the
@@ -764,7 +769,7 @@ end
         scaled_selected = SDPX.recommended_parameters(scaled, options)
         @test scaled_selected.Ωp == options.Ωp
         @test scaled_selected.Ωd == options.Ωd
-        @test scaled_selected.profile === :generic_mehrotra
+        @test scaled_selected.profile === :post_scaling_mehrotra
         # The actual equilibration transform leaves the raw hints untouched.
         equilibrated, eq = SDPX.equilibrate(base)
         equilibrated_selected = SDPX.recommended_parameters(
@@ -773,7 +778,7 @@ end
         )
         @test equilibrated_selected.Ωp == options.Ωp
         @test equilibrated_selected.Ωd == options.Ωd
-        @test equilibrated_selected.profile === :generic_mehrotra
+        @test equilibrated_selected.profile === :post_scaling_mehrotra
         @test eq !== nothing
     end
 end
@@ -1019,16 +1024,7 @@ end
     # status cannot silently inherit `MOI.OPTIMAL`.
     certified = (SDPX.Optimal, SDPX.FeasibleCert)
     for status in instances(SDPX.SolveStatus)
-        optimizer = SDPX.Optimizer()
-        prob = analytic_lp_problem()
-        r = SDPX.solve!(prob, SDPX.SolverOptions{Float64}(verbosity=0))
-        # Rebuild the result carrying the status under test.
-        forced = SDPX.SDPResult{Float64}(
-            status, "forced", r.x, r.X, r.y, r.Y, r.pObj, r.dObj, r.gap_rel,
-            r.p_res, r.d_res, r.iterations, r.restarts, r.regularizations,
-            r.timings, r.parameter_history, r.diagnostics)
-        optimizer.result = forced
-        mapped = PIPELINE_MOI.get(optimizer, PIPELINE_MOI.TerminationStatus())
+        mapped = SDPX._moi_termination_status(status)
         if status in certified
             @test mapped == PIPELINE_MOI.OPTIMAL
         else

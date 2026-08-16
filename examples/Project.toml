@@ -1,22 +1,8 @@
 [deps]
-Convex = "f65535da-76fb-5f13-bab9-19810c17039a"
-JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
-LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
-MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
-Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
-Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
-SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 
 [compat]
-Convex = "0.16"
-JuMP = "1"
-LinearAlgebra = "1"
 MultiFloats = "3"
-MathOptInterface = "1.38"
-Printf = "1"
-Random = "1"
 SDPX = "0.2, 0.3, 0.4, 0.5"
-SparseArrays = "1"
 julia = "1.10"

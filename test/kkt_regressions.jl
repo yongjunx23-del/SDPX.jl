@@ -739,7 +739,7 @@ end
             execution_plan=plan,
         )
         @test workspace.la_backend isa
-              SDPX.Experimental.StandardLABackend
+              SDPX.StandardLABackend
         @test workspace.la_fallback_chain === (:rank_revealing_qr,)
 
         @test SDPX.factor_blocks!(workspace, X, Y)
@@ -823,7 +823,7 @@ end
             execution_plan=plan,
         )
         @test workspace.la_backend isa
-              SDPX.Experimental.LegacyLABackend
+              SDPX.LegacyLABackend
         @test workspace.la_fallback_chain === (:rank_revealing_qr,)
         @test SDPX.factor_blocks!(workspace, X, Y)
         SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
@@ -900,7 +900,7 @@ end
                     equality_solver=:qr,
                 )
                 factor = SDPX._factor_equality_qr(
-                    SDPX.Experimental.StandardLABackend(
+                    SDPX.StandardLABackend(
                         SDPX._la_arithmetic_symbol(T),
                     ),
                     B,
@@ -1148,7 +1148,7 @@ end
         # beta=0 the upper poison is preserved rather than mirrored from the
         # computed lower triangle, and the dense equality consumer still
         # factors successfully from lower-authoritative storage.
-        backend = SDPX.Experimental.StandardLABackend(:float64)
+        backend = SDPX.StandardLABackend(:float64)
         panel = [1.0 2.0; 3.0 4.0]
         gram = fill(NaN, 2, 2)
         SDPX.la_syrk!(backend, gram, panel, 1.0, 0.0)

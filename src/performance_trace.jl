@@ -19,9 +19,9 @@ The four sections are:
   * `counters` - integer counters (iterations, restarts, regularizations,
                 parameter-history length).
 
-This is an internal inspection surface.  It is reachable as
-`SDPX.PerformanceTrace` / `SDPX.performance_trace` and mirrored under
-`SDPX.Experimental`; it is not part of the top-level stable export set.
+This is the typed backing record for the public `performance_trace(result)`
+accessor.  Callers reach it through the single v0.5 `Result` interface; there
+is no parallel experimental namespace or alternate solve route.
 =#
 
 """Distinct marker for a field the solve never recorded."""
@@ -121,6 +121,11 @@ function _setup_facts_for_record(result)
         initialization_seconds=_seconds(timings, :initialization),
         solver=_project_field(selected, :solver),
         scaling=_project_field(selected, :scaling),
+        planned_scaling=_project_field(selected, :planned_scaling),
+        executed_scaling=_project_field(selected, :executed_scaling),
+        native_kernel=_project_field(selected, :native_kernel),
+        planned_native_kernel=_project_field(selected, :planned_native_kernel),
+        executed_native_kernel=_project_field(selected, :executed_native_kernel),
         kkt=_project_field(selected, :kkt),
         requested_kkt_formulation=_project_field(selected, :requested_kkt_formulation),
         planned_kkt_formulation=_project_field(selected, :planned_kkt_formulation),

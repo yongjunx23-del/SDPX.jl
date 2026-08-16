@@ -77,16 +77,24 @@ struct ConeRepresentationPlan{E<:AbstractSOCExecution}
 end
 
 """Complete immutable native-SOCP plan frozen before numerical execution."""
-struct NativeSOCPlan{E<:AbstractSOCExecution,F<:AbstractKKTFormulation}
+struct NativeSOCPlan{E<:AbstractSOCExecution,F<:AbstractKKTFormulation} <:
+       AbstractExecutionPlanPayload
     cone::ConeRepresentationPlan{E}
     formulation::FormulationPlan{F}
     la_config::LABackendConfiguration
     threads::Int
 end
 
-"""Small native-SOCP diagnostics surface in original Lorentz coordinates."""
-struct NativeSOCDiagnostics{P}
-    plan::P
+"""
+Small native-SOCP diagnostics surface in original Lorentz coordinates.
+
+`plan` is the single canonical top-level `ExecutionPlan` built by the
+top-level planner; all family-specific facts are available through
+`plan.payload::NativeSOCPlan`.  The workspace constructor asserts payload/plan
+parity before any numerical execution.
+"""
+struct NativeSOCDiagnostics
+    plan::ExecutionPlan
     timings::NamedTuple
     memory::NamedTuple
     selected_algorithms::NamedTuple
@@ -116,6 +124,24 @@ end
 
 @inline _native_soc_formulation_symbol(plan::NativeSOCPlan) =
     formulation_symbol(plan.formulation)
+
+"""Native kernel frozen by the KKT formulation and payload execution.
+
+The formulation is authoritative first: the augmented system always runs the
+dense augmented LDLT kernel, regardless of the cone execution specialization
+(`_native_soc_assemble_factor!` dispatches on `DenseAugmentedKKT` before
+looking at the payload).  Only under normal equations does the payload
+execution name the kernel: FixedTrace runs local 2x2 elimination, general
+Lorentz runs the generic dense normal-equations kernel.
+"""
+@inline _native_soc_kernel_symbol(augmented::Bool, ::GeneralLorentzExecution) =
+    augmented ? :dense_augmented_ldlt : :general_lorentz
+@inline _native_soc_kernel_symbol(augmented::Bool, ::FixedTraceQ3Execution) =
+    augmented ? :dense_augmented_ldlt : :fixed_trace_q3_local_elimination
+"""Native factorization name frozen by the payload execution specialization."""
+@inline _native_soc_factorization_symbol(augmented::Bool, fixed_trace::Bool) =
+    augmented ? :pivoted_symmetric_ldlt :
+    fixed_trace ? :native_local_cholesky : :cholesky
 
 function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
     length(problem.cones) > 0 || return nothing
@@ -216,7 +242,15 @@ function _native_soc_cone_plan(
     )
 end
 
-function plan_native_soc(
+"""
+    _build_native_soc_payload(problem, options; specialization) -> NativeSOCPlan
+
+Build the exact `NativeSOCPlan` payload for one NativeSOC route.  This is the
+private payload builder: the top-level `build_execution_plan(ConicProblem)`
+calls it and wraps the payload inside the single authoritative
+`ExecutionPlan`.  Production code never calls this function directly.
+"""
+function _build_native_soc_payload(
     problem::ConicProblem{T},
     options::SolverOptions{T};
     specialization::Symbol=:auto,
@@ -430,6 +464,297 @@ function NativeSOCWorkspace{T,B}(
     args...,
 ) where {T,B<:AbstractLABackend,P<:NativeSOCPlan}
     return NativeSOCWorkspace{T,B,P}(plan, args...)
+end
+
+"""
+    _native_soc_owned_warm_vector(value, expected, T, label)
+
+Validate and ingest one vector supplied to the native Lorentz warm-start
+seam.  Conversion is performed directly into the solver arithmetic type and
+the resulting storage is independent of the caller.  In particular,
+BigFloat values are never routed through Float64.
+"""
+function _native_soc_owned_warm_vector(
+    value,
+    expected::Int,
+    ::Type{T},
+    label::AbstractString,
+) where {T}
+    value isa AbstractVector || throw(ArgumentError("$label must be a vector"))
+    length(value) == expected || throw(DimensionMismatch(
+        "$label has length $(length(value)); expected $expected",
+    ))
+    owned = try
+        _owned_array_copy(T, value)
+    catch exception
+        _recoverable(exception) || rethrow()
+        throw(ArgumentError(
+            "$label entries must be finite values representable in the " *
+            "NativeSOC arithmetic type",
+        ))
+    end
+    all(isfinite, owned) || throw(ArgumentError("$label entries must be finite"))
+    return owned
+end
+
+"""Validate and ingest a complete vector-of-Lorentz-block warm start."""
+function _native_soc_owned_warm_blocks(
+    value,
+    problem::ConicProblem{T},
+    label::AbstractString;
+    interior::Bool=true,
+) where {T}
+    value isa Union{AbstractVector,Tuple} || throw(ArgumentError(
+        "$label must be a vector or tuple of Lorentz blocks",
+    ))
+    expected_blocks = length(problem.cones)
+    length(value) == expected_blocks || throw(DimensionMismatch(
+        "$label contains $(length(value)) blocks; expected $expected_blocks",
+    ))
+    owned = Vector{Vector{T}}(undef, expected_blocks)
+    @inbounds for block in 1:expected_blocks
+        source = value[block]
+        source isa AbstractVector || throw(ArgumentError(
+            "$label[$block] must be a Lorentz vector",
+        ))
+        copied = _native_soc_owned_warm_vector(
+            source,
+            length(problem.cones[block].b),
+            T,
+            "$label[$block]",
+        )
+        interior && !_soc_is_interior(copied) && throw(ArgumentError(
+            "$label[$block] must be strictly interior to its Lorentz cone",
+        ))
+        owned[block] = copied
+    end
+    return owned
+end
+
+"""Derive `A*x + b` into solver-owned Lorentz slack blocks."""
+function _native_soc_derive_warm_slack!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T},
+) where {T}
+    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    @inbounds for block in eachindex(problem.cones)
+        slack = workspace.slack[block]
+        cone = problem.cones[block]
+        if fixed_trace
+            first = reduction.active_ids[1, block]
+            second = reduction.active_ids[2, block]
+            slack[1] = _ingest_owned_scalar(T, reduction.fixed_head[block])
+            slack[2] = reduction.tail_map[1, 1, block] * workspace.x[first] +
+                       reduction.tail_map[1, 2, block] * workspace.x[second] +
+                       reduction.offset[1, block]
+            slack[3] = reduction.tail_map[2, 1, block] * workspace.x[first] +
+                       reduction.tail_map[2, 2, block] * workspace.x[second] +
+                       reduction.offset[2, block]
+        else
+            la_mul_owned!(workspace.la_backend, slack, cone.A, workspace.x)
+            for coordinate in eachindex(slack)
+                slack[coordinate] += cone.b[coordinate]
+            end
+        end
+        all(isfinite, slack) || throw(ArgumentError(
+            "x0 induces non-finite affine slack in Lorentz block $block",
+        ))
+        _soc_is_interior(slack) || throw(ArgumentError(
+            "x0 induces a Lorentz slack outside the strict cone interior in " *
+            "block $block",
+        ))
+    end
+    return workspace.slack
+end
+
+"""
+    _native_soc_apply_warm_start!(workspace, problem; x0, z0, y0) -> Bool
+
+Apply the canonical native warm-start coordinates.  Validation and ingestion
+are completed before any caller iteration begins.  `x0` derives affine slack
+from the exact native constraint map; `z0` and `y0` are copied without a
+coordinate shift.  The returned flag is true when any warm data was supplied.
+"""
+function _native_soc_apply_warm_start!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T};
+    x0=nothing,
+    z0=nothing,
+    y0=nothing,
+) where {T}
+    warm = x0 !== nothing || z0 !== nothing || y0 !== nothing
+    warm || return false
+
+    x_owned = x0 === nothing ? nothing : _native_soc_owned_warm_vector(
+        x0,
+        problem.variables,
+        T,
+        "x0",
+    )
+    y_owned = y0 === nothing ? nothing : _native_soc_owned_warm_vector(
+        y0,
+        length(problem.beq),
+        T,
+        "y0",
+    )
+    z_owned = z0 === nothing ? nothing : _native_soc_owned_warm_blocks(
+        z0,
+        problem,
+        "z0";
+        interior=true,
+    )
+
+    if x_owned !== nothing
+        copy_owned!(workspace.x, x_owned)
+        _native_soc_derive_warm_slack!(workspace, problem)
+    end
+    y_owned === nothing || copy_owned!(workspace.equality_dual, y_owned)
+    if z_owned !== nothing
+        @inbounds for block in eachindex(z_owned)
+            copy_owned!(workspace.dual[block], z_owned[block])
+        end
+    end
+    return true
+end
+
+"""
+    _assert_native_soc_execution_plan(plan, payload, ::Type{T}, options)
+
+Assert that one top-level `ExecutionPlan` and its `NativeSOCPlan` payload
+describe the same route before any numerical execution.  The check is
+structural value parity, not object identity: a distinct but field-equal
+payload is accepted, while any mismatched formulation, KKT route, LA
+configuration, precision fact, specialization, thread count, or scaling fails
+closed.  No hidden PSD lift, formulation rewrite, LA provider change, thread
+change, or structural fallback is ever substituted silently.
+"""
+function _assert_native_soc_execution_plan(
+    plan::ExecutionPlan,
+    payload::NativeSOCPlan,
+    ::Type{T},
+    options::SolverOptions{T},
+) where {T}
+    plan.algorithm === :native_soc || throw(ArgumentError(
+        "NativeSOC execution plan must declare algorithm=:native_soc, " *
+        "got $(plan.algorithm)",
+    ))
+    payload.cone.representation === :native_lorentz || throw(ArgumentError(
+        "NativeSOC payload must use the native Lorentz representation, " *
+        "got $(payload.cone.representation)",
+    ))
+    payload.cone.execution isa AbstractSOCExecution || throw(ArgumentError(
+        "NativeSOC payload cone execution is not a NativeSOC execution",
+    ))
+    formulation_symbol(plan.formulation_plan) ===
+        formulation_symbol(payload.formulation) || throw(ArgumentError(
+            "NativeSOC execution plan formulation " *
+            "$(formulation_symbol(plan.formulation_plan)) does not match " *
+            "payload formulation $(formulation_symbol(payload.formulation))",
+        ))
+    # The top-level KKT route is the mathematical dense route only: normal
+    # equations are always `:dense_cholesky` (the FixedTrace specialization is
+    # an implementation detail carried by the payload, never a top-level route)
+    # and the augmented system is `:dense_augmented_ldlt`.
+    expected_backend = payload.formulation.formulation isa
+                       DenseAugmentedKKT ? :dense_augmented_ldlt :
+                       :dense_cholesky
+    plan.kkt_backend === expected_backend || throw(ArgumentError(
+        "NativeSOC execution plan KKT backend $(plan.kkt_backend) does not " *
+        "match payload route $(expected_backend)",
+    ))
+    plan.backend_config.route === plan.kkt_backend || throw(ArgumentError(
+        "NativeSOC execution plan backend configuration route " *
+        "$(plan.backend_config.route) does not match $(plan.kkt_backend)",
+    ))
+    plan.backend_config.equality_solver === options.equality_solver ||
+        throw(ArgumentError(
+            "NativeSOC execution plan equality solver " *
+            "$(plan.backend_config.equality_solver) does not match options " *
+            "$(options.equality_solver)",
+        ))
+    # NativeSOC authorizes no structural fallback and no formulation rewrite.
+    # The only authorized runtime fallback is the provider-level equality
+    # rank-revealing QR recorded inside `la_config` by the planner.
+    plan.backend_config.fallback_chain === () || throw(ArgumentError(
+        "NativeSOC execution plan carries an unauthorized structural " *
+        "fallback chain $(plan.backend_config.fallback_chain)",
+    ))
+    plan.la_config === payload.la_config || throw(ArgumentError(
+        "NativeSOC execution plan LA configuration diverges from its payload",
+    ))
+    plan.classification.arithmetic === _arithmetic_class(T) ||
+        throw(ArgumentError(
+            "NativeSOC execution plan arithmetic " *
+            "$(plan.classification.arithmetic) does not match problem " *
+            "arithmetic $(_arithmetic_class(T))",
+        ))
+    planned_arithmetic = get(plan.parameters, :planned_arithmetic, nothing)
+    planned_arithmetic === _arithmetic_class(T) || throw(ArgumentError(
+        "NativeSOC execution plan precision facts arithmetic " *
+        "$(planned_arithmetic) does not match problem arithmetic " *
+        "$(_arithmetic_class(T))",
+    ))
+    planned_bits = get(plan.parameters, :planned_precision_bits, nothing)
+    expected_bits = T === BigFloat ? Base.precision(BigFloat) : sig_bits(T)
+    planned_bits === expected_bits || throw(ArgumentError(
+        "NativeSOC execution plan precision facts bits $(planned_bits) do " *
+        "not match current execution precision $(expected_bits)",
+    ))
+    # The requested precision is the expert `options.precision_bits` request
+    # (BigFloat only; fixed-width arithmetic records its native significand
+    # bits).  The plan records it exactly as requested; a divergence here
+    # means the plan was built from different options than the workspace was
+    # given, and fails closed instead of silently solving at another width.
+    requested_bits = get(plan.parameters, :requested_precision_bits, nothing)
+    expected_requested_bits =
+        T === BigFloat ? options.precision_bits : sig_bits(T)
+    requested_bits === expected_requested_bits || throw(ArgumentError(
+        "NativeSOC execution plan requested precision bits " *
+        "$(requested_bits) do not match options precision_bits " *
+        "$(expected_requested_bits)",
+    ))
+    planned_specialization = get(plan.parameters, :soc_specialization, nothing)
+    planned_specialization === payload.cone.specialization || throw(
+        ArgumentError(
+            "NativeSOC execution plan specialization " *
+            "$(planned_specialization) does not match payload cone " *
+            "specialization $(payload.cone.specialization)",
+        ),
+    )
+    plan.threads === payload.threads || throw(ArgumentError(
+        "NativeSOC execution plan threads $(plan.threads) do not match " *
+        "payload threads $(payload.threads)",
+    ))
+    expected_scaling = payload.cone.execution isa FixedTraceQ3Execution ?
+                       :hkm : :nesterov_todd
+    plan.scaling === expected_scaling || throw(ArgumentError(
+        "NativeSOC execution plan scaling $(plan.scaling) does not match " *
+        "payload cone scaling $(expected_scaling)",
+    ))
+    return nothing
+end
+
+"""ExecutionPlan-taking NativeSOC workspace constructor.
+
+Extracts and validates the `NativeSOCPlan` payload from the single
+top-level `ExecutionPlan`, then delegates to the numerical payload
+constructor.  The existing `NativeSOCWorkspace(problem, plan, options)` with a
+bare `NativeSOCPlan` remains for compatibility and tests.
+"""
+function NativeSOCWorkspace(
+    problem::ConicProblem{T},
+    plan::ExecutionPlan,
+    options::SolverOptions{T},
+) where {T}
+    payload = plan.payload
+    payload isa NativeSOCPlan || throw(ArgumentError(
+        "NativeSOC workspace requires an ExecutionPlan carrying a " *
+        "NativeSOCPlan payload; got " *
+        "$(payload === nothing ? "nothing" : typeof(payload))",
+    ))
+    _assert_native_soc_execution_plan(plan, payload, T, options)
+    return NativeSOCWorkspace(problem, payload, options)
 end
 
 function _native_soc_residuals!(
@@ -2217,6 +2542,7 @@ function _native_soc_result(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
     options::SolverOptions{T},
+    plan::ExecutionPlan,
     status::SolveStatus,
     message::String,
     iterations::Int,
@@ -2227,56 +2553,113 @@ function _native_soc_result(
     p_obj, d_obj, gap, p_res, d_res = metrics[1:5]
     augmented = workspace.plan.formulation.formulation isa DenseAugmentedKKT
     fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
-    factorization = augmented ? :pivoted_symmetric_ldlt :
-                    fixed_trace ? :native_local_cholesky : :cholesky
-    kkt_backend = augmented ? :dense_augmented_ldlt :
-                  fixed_trace ? :fixed_trace_local_elimination :
-                  :dense_cholesky
+    # Canonical top-level route facts always mirror the ExecutionPlan: normal
+    # equations (including the FixedTraceQ3 kernel) are `:dense_cholesky` and
+    # the augmented system is `:dense_augmented_ldlt`.  The payload freezes
+    # the actual native kernel and factorization, which are reported
+    # separately.  The formulation is authoritative for the kernel: augmented
+    # (with any cone execution) runs the dense augmented LDLT kernel, while
+    # under normal equations FixedTrace runs `fixed_trace_q3_local_elimination`
+    # with a `native_local_cholesky` factorization — never a generic dense
+    # cholesky — and general Lorentz runs `general_lorentz`.
+    planned_payload = plan.payload
+    planned_augmented = planned_payload isa NativeSOCPlan &&
+                        planned_payload.formulation.formulation isa
+                        DenseAugmentedKKT
+    planned_fixed_trace = planned_payload isa NativeSOCPlan &&
+                          planned_payload.cone.execution isa
+                          FixedTraceQ3Execution
+    planned_factorization = _native_soc_factorization_symbol(
+        planned_augmented, planned_fixed_trace,
+    )
+    planned_native_kernel = planned_payload isa NativeSOCPlan ?
+                            _native_soc_kernel_symbol(
+                                planned_augmented,
+                                planned_payload.cone.execution,
+                            ) : :unknown
+    executed_factorization = _native_soc_factorization_symbol(
+        augmented, fixed_trace,
+    )
+    kkt_backend = augmented ? :dense_augmented_ldlt : :dense_cholesky
+    native_kernel = _native_soc_kernel_symbol(
+        augmented,
+        workspace.plan.cone.execution,
+    )
     initialization_report = get(termination, :initialization, NamedTuple())
     initialization_path = get(initialization_report, :path, :not_applied)
     executed_initialization = if initialization_path === :omega_head_start
         :omega_head_start
+    elseif initialization_path === :warm_start
+        :warm_start
     elseif fixed_trace
         :native_soc_fixed_trace_kkt_cold_start
     else
         :native_soc_general_kkt_cold_start
     end
+    # Planned facts come from the canonical top-level ExecutionPlan and its
+    # frozen payload; executed facts come from the validated workspace.  The
+    # workspace constructor has already asserted plan/payload value parity for
+    # formulation, route, LA config, arithmetic/precision, scaling,
+    # specialization, and threads, so a divergence here is a reporting bug
+    # rather than a silent route change.  `planned_backend`/`executed_backend`
+    # name the canonical top-level dense mathematical route
+    # (`:dense_cholesky` or `:dense_augmented_ldlt`); the payload
+    # implementation detail is reported as `native_kernel` plus the
+    # planned/executed native kernel and factorization fields.
     selected = (
         solver=:native_soc,
+        planned_algorithm=plan.algorithm,
+        executed_algorithm=:native_soc,
         cone_representation=:native_lorentz,
         soc_specialization=workspace.plan.cone.specialization,
         requested_kkt_formulation=options.formulation,
-        planned_kkt_formulation=_native_soc_formulation_symbol(workspace.plan),
+        planned_kkt_formulation=formulation_symbol(plan.formulation_plan),
         executed_kkt_formulation=_native_soc_formulation_symbol(workspace.plan),
-        planned_factorization=factorization,
-        executed_factorization=factorization,
+        planned_factorization=planned_factorization,
+        executed_factorization=executed_factorization,
         planned_regularization=:primal_diagonal_retry,
         executed_regularization=workspace.regularizations == 0 ? :none :
                                 :primal_diagonal_retry,
-        scaling=fixed_trace ? :hkm : :nesterov_todd,
+        planned_scaling=plan.scaling,
+        executed_scaling=fixed_trace ? :hkm : :nesterov_todd,
+        native_kernel=native_kernel,
+        planned_native_kernel=planned_native_kernel,
+        executed_native_kernel=native_kernel,
         kkt=kkt_backend,
         gram=:native_lorentz_metric,
         equality=isempty(workspace.equality_dual) ? :none :
                  workspace.equality_method,
         initialization=executed_initialization,
-        planned_backend=kkt_backend,
+        planned_backend=plan.kkt_backend,
         executed_backend=kkt_backend,
         fallback_reason=:none,
-        backend_resolution=:native_soc_plan,
+        backend_resolution=:top_level_execution_plan,
         lp_formulation=:not_applicable,
-        planned_la_backend=workspace.plan.la_config.selected,
-        planned_la_provider=workspace.plan.la_config.provider,
-        planned_la_ownership=workspace.plan.la_config.ownership,
-        planned_la_fallback_reason=workspace.plan.la_config.fallback_reason,
+        planned_la_backend=plan.la_config.selected,
+        planned_la_provider=plan.la_config.provider,
+        planned_la_ownership=plan.la_config.ownership,
+        planned_la_fallback_reason=plan.la_config.fallback_reason,
         la_backend=la_backend_name(workspace.la_backend),
         la_executed_provider=la_backend_provider(workspace.la_backend),
         la_executed_ownership=la_backend_ownership(workspace.la_backend),
         la_fallback_reason=workspace.la_fallback_reason,
+        planned_arithmetic=get(plan.parameters, :planned_arithmetic, :unknown),
+        executed_arithmetic=_arithmetic_class(T),
+        requested_precision_bits=get(
+            plan.parameters, :requested_precision_bits, :unknown,
+        ),
+        planned_precision_bits=get(
+            plan.parameters, :planned_precision_bits, :unknown,
+        ),
+        executed_precision_bits=
+            T === BigFloat ? Base.precision(BigFloat) : sig_bits(T),
+        planned_threads=plan.threads,
+        executed_threads=workspace.plan.threads,
         certificate=(available=false, reason=:pending_original_soc_validation),
     )
     diagnostics = options.diagnostics ?
                   NativeSOCDiagnostics(
-                      workspace.plan,
+                      plan,
                       timings,
                       (
                           workspace_bytes=_native_soc_workspace_bytes(workspace),
@@ -2304,18 +2687,34 @@ function _native_soc_result(
     )
 end
 
+"""Production NativeSOC core driven by one top-level `ExecutionPlan`.
+
+The plan is built exactly once by the AutoPlanner; the workspace constructor
+validates the `NativeSOCPlan` payload against every route dimension before any
+numerical work.
+"""
 Base.@noinline function _solve_native_soc_core(
     problem::ConicProblem{T},
-    options::SolverOptions{T};
-    specialization::Symbol=:auto,
+    options::SolverOptions{T},
+    plan::ExecutionPlan,
+    ;
+    x0=nothing,
+    z0=nothing,
+    y0=nothing,
 ) where {T}
     started = time()
     options.parameter_policy in (:fixed, :auto) ||
         throw(ArgumentError("parameter_policy must be :fixed or :auto"))
-    plan = plan_native_soc(problem, options; specialization)
     setup_started = time_ns()
     workspace = NativeSOCWorkspace(problem, plan, options)
     setup_seconds = (time_ns() - setup_started) / 1.0e9
+    warm_start = _native_soc_apply_warm_start!(
+        workspace,
+        problem;
+        x0=x0,
+        z0=z0,
+        y0=y0,
+    )
     status = NotStarted
     message = ""
     iterations = 0
@@ -2326,7 +2725,13 @@ Base.@noinline function _solve_native_soc_core(
     phase_corrector = 0.0
     phase_line_search = 0.0
     termination = (reason=:none, stage=:native_soc)
-    initialization = (
+    initialization = warm_start ? (
+        enabled=false,
+        policy=options.parameter_policy,
+        initialization_policy=:warm_start,
+        path=:warm_start,
+        applied=true,
+    ) : (
         enabled=options.parameter_policy === :auto,
         policy=options.parameter_policy,
         path=options.parameter_policy === :auto ?
@@ -2339,7 +2744,7 @@ Base.@noinline function _solve_native_soc_core(
     )
 
     run_iterations = true
-    if options.parameter_policy === :auto
+    if options.parameter_policy === :auto && !warm_start
         init_started = time_ns()
         initialization_ok, init_report =
             _native_soc_cold_start_init!(workspace, problem, options)
@@ -2595,6 +3000,7 @@ Base.@noinline function _solve_native_soc_core(
         workspace,
         problem,
         options,
+        plan,
         status,
         message,
         iterations,

@@ -17,7 +17,7 @@ using Test
         3,
     )
     rhs = [0.25, 0.5, 0.75]
-    problem = ingest(
+    problem = SDPX.ingest(
         ones(variables),
         coefficients,
         constants,
@@ -30,7 +30,7 @@ using Test
     nonzeros(equality)[1] = 99.0
     @test nonzeros(problem.B)[1] == 1.0
 
-    options = SolverOptions{Float64}(
+    options = SDPX.SolverOptions{Float64}(
         presolve=:auto,
         scaling=:equilibrate,
         verbosity=0,
@@ -46,7 +46,7 @@ using Test
 
     setprecision(BigFloat, 80) do
         big_equality = sparse(BigFloat.(Matrix(reduced.B)))
-        big_problem = ingest(
+        big_problem = SDPX.ingest(
             BigFloat.(problem.c),
             [BigFloat.(coefficients[1])],
             [BigFloat.(constants[1])],
@@ -87,7 +87,7 @@ end
         sparse([1, 1, 2], [1, 2, 2], [0.25, 0.1, 0.75], 2, 2),
         sparse([1, 2], [1, 2], [0.4, 1.2], 2, 2),
     ]
-    compact = ActiveSparseCoefficientVector(
+    compact = SDPX.ActiveSparseCoefficientVector(
         Float64,
         variables,
         active,
@@ -110,7 +110,7 @@ end
     C = [zeros(2, 2)]
     B = zeros(variables, 0)
     b = Float64[]
-    compact_problem = ingest(
+    compact_problem = SDPX.ingest(
         c,
         [compact],
         C,
@@ -119,7 +119,7 @@ end
         sparse=true,
         verbosity=0,
     )
-    expanded_problem = ingest(
+    expanded_problem = SDPX.ingest(
         c,
         [expanded],
         C,
@@ -129,7 +129,7 @@ end
         verbosity=0,
     )
     @test compact_problem.cons.Asp[1] isa
-          ActiveSparseCoefficientVector{Float64}
+          SDPX.ActiveSparseCoefficientVector{Float64}
     @test compact_problem.cons.active == expanded_problem.cons.active
     @test compact_problem.cons.packed2 == expanded_problem.cons.packed2
     # The storage-owning analysis intentionally represents inactive positions
@@ -172,16 +172,16 @@ end
         ruiz_iters=1,
     )
     @test equilibrated.cons.Asp[1] isa
-          ActiveSparseCoefficientVector{Float64}
+          SDPX.ActiveSparseCoefficientVector{Float64}
     reduced_cons = SDPX._reduced_sparse_cons(
         compact_problem,
         [1],
         active,
     )
-    @test reduced_cons.Asp[1] isa ActiveSparseCoefficientVector{Float64}
+    @test reduced_cons.Asp[1] isa SDPX.ActiveSparseCoefficientVector{Float64}
     @test reduced_cons.active == [[1, 2, 3]]
 
-    widened_source = ActiveSparseCoefficientVector(
+    widened_source = SDPX.ActiveSparseCoefficientVector(
         BigFloat,
         variables,
         active,
@@ -192,7 +192,7 @@ end
         2,
     )
     widened_problem = setprecision(BigFloat, 64) do
-        ingest(
+        SDPX.ingest(
             BigFloat.(c),
             [widened_source],
             [zeros(BigFloat, 2, 2)],
@@ -204,7 +204,7 @@ end
     end
     rerounded = SDPX.reround(widened_problem, 160)
     @test rerounded.cons.Asp[1] isa
-          ActiveSparseCoefficientVector{BigFloat}
+          SDPX.ActiveSparseCoefficientVector{BigFloat}
     @test SDPX.min_precision_bits(rerounded) == 160
 end
 
@@ -538,44 +538,6 @@ end
         @test coo_value !== packed_value
         MA.operate!(+, sparse_source_value, BigFloat(9))
         @test sparse_problem.cons.Asp[1][1] == sparse_snapshot
-    end
-end
-
-@testset "legacy exact inputs enter the requested precision scope" begin
-    previous_type = SDPX._LEGACY_T[]
-    try
-        SDPX._LEGACY_T[] = BigFloat
-        setprecision(BigFloat, 64) do
-            coefficients = [
-                reshape(Rational{Int}[1 // 1], 1, 1, 1),
-            ]
-            constants = [
-                reshape(Rational{Int}[1 // 3], 1, 1),
-            ]
-            result = SDPX.sdp(
-                Rational{Int}[1 // 1],
-                coefficients,
-                constants,
-                Matrix{Rational{Int}}(undef, 1, 0),
-                Rational{Int}[];
-                prec=60,
-                ϵ_gap=1e-35,
-                ϵ_primal=1e-35,
-                ϵ_dual=1e-35,
-                iterMax=150,
-                verbosity=0,
-            )
-            target = setprecision(
-                () -> BigFloat(1) / BigFloat(3),
-                BigFloat,
-                200,
-            )
-            @test result.status == SDPX.Optimal
-            @test precision(result.pObj) == 200
-            @test abs(result.pObj - target) < big"1e-34"
-        end
-    finally
-        SDPX._LEGACY_T[] = previous_type
     end
 end
 

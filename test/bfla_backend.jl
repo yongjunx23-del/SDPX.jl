@@ -11,7 +11,7 @@ catch
 end
 
 @testset "BFLA optional provider core contract" begin
-    LA = SDPX.Experimental
+    LA = SDPX
 
     # Without the optional package loaded, explicit BFLA requests fail at
     # planning time; no runtime try-and-switch fallback exists.
@@ -74,7 +74,7 @@ bfla_extension = Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt)
         # focused runs load BigFloatLinearAlgebra before SDPX.
         @test true
     else
-        LA = SDPX.Experimental
+        LA = SDPX
         plan = LA.plan_la_backend(BigFloat; requested=:bfla)
         @test plan.selected === :bfla
         @test plan.fallback_chain === (:rank_revealing_qr,)
@@ -593,7 +593,7 @@ end
         @test true
     else
         setprecision(BigFloat, 256) do
-            LA = SDPX.Experimental
+            LA = SDPX
             BFLA = bfla_extension.BFLA
             backend = LA.instantiate_la_backend(
                 LA.plan_la_backend(BigFloat; requested=:bfla),
@@ -699,7 +699,7 @@ end
 
 @testset "BFLA dense LP route and non-migrated routes" begin
     setprecision(BigFloat, 256) do
-        LA = SDPX.Experimental
+        LA = SDPX
         if bfla_extension === nothing
             problem = SDPX.linear_program(
                 BigFloat[1, 2],
@@ -877,7 +877,7 @@ if _BFLA_LOADED
             end
 
             @testset "BFLA LU internal seam" begin
-                LA = SDPX.Experimental
+                LA = SDPX
                 backend = LA.instantiate_la_backend(
                     LA.plan_la_backend(BigFloat; requested=:bfla),
                     BigFloat,

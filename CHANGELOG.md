@@ -46,7 +46,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SDP/LP cold-start resolver. `parameter_policy=:auto` records a deferred
   `:automatic_mehrotra` plan and resolves exactly once after scaling. On the
   SDP path the public `recommended_parameters` resolver reports
-  `:generic_mehrotra` and the executed record reports
+  `:post_scaling_mehrotra` and the executed record reports
   `:post_scaling_mehrotra`: `beta`, `gamma`, `predictor`, and
   `parameter_strategy` keep the `SolverOptions` defaults or user choices,
   every SDP/LP adaptive controller uses the generic 0.50 sigma cap. The LP path

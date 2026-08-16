@@ -17,8 +17,6 @@ not repeat every table.
   scheduling kernel measurements.
 - [`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/mixed_precision_kkt/RESULTS.md)
   — mixed-precision KKT promotion evidence.
-- [`bench/convex_frontend/README.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/convex_frontend/README.md) —
-  Convex versus native modeling overhead.
 - [`bench/opt2026/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/bench/opt2026) — native BigFloat optimization,
   preprocessing, and cluster campaign reports.
 

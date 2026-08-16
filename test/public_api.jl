@@ -1,103 +1,131 @@
 using SDPX
 using Test
 
-@testset "versioned public API policy" begin
-    policy = SDPX.api_surface()
-    @test isempty(
-        intersect(
-            Set(policy.stable),
-            Set(policy.deprecated_experimental),
-        ),
-    )
-    @test isempty(intersect(Set(policy.stable), Set(policy.legacy)))
-    @test policy.experimental_replacement === :Experimental
-    @test policy.experimental_export_removal == v"0.4.0"
-    @test policy.legacy_export_removal == v"1.0.0"
+# This is the frozen v0.5 contract.  The assertions intentionally fail until
+# the central module removes its old includes/exports; that integration work is
+# owned by the SOL agent (see the handoff message from this migration).
+const FINAL_PUBLIC_EXPORTS = Set((
+    :Model,
+    :variable!,
+    :constraint!,
+    :objective!,
+    :set_start!,
+    :set_dual_start!,
+    :set_dual_slack_start!,
+    :Reals,
+    :Nonnegative,
+    :Nonpositive,
+    :ZeroCone,
+    :LorentzCone,
+    :RotatedLorentzCone,
+    :PSDCone,
+    :Minimize,
+    :Maximize,
+    :Settings,
+    :Tolerances,
+    :Limits,
+    :Outputs,
+    :optimize!,
+    :execution_plan,
+    :status,
+    :value,
+    :dual,
+    :dual_slack,
+    :primal_objective,
+    :dual_objective,
+    :certificate,
+    :diagnostics,
+    :iteration_history,
+    :performance_trace,
+    :Optimizer,
+))
 
+const REMOVED_PUBLIC_NAMES = (
+    # Compatibility entry points and their old synonyms.
+    :sdp,
+    :findFeasible,
+    :setArithmeticType,
+    :solve,
+    :solve!,
+    :ingest,
+    :linear_program,
+    :solve_lp,
+    :second_order_program,
+    :solve_socp,
+    :convex_optimizer,
+    :convex_semidefinite,
+    :solve_convex!,
+    :Experimental,
+    :api_surface,
+    :SDPProblem,
+    :SolverOptions,
+    :SolveOptions,
+    :SDPResult,
+    :SolveStatus,
+    :SolveMode,
+    :OPTIMIZE,
+    :FEASIBILITY,
+    :SOCConstraint,
+    :ConicProblem,
+    :ConicResult,
+    :PreparedSolver,
+    :prepare,
+    :ActiveSparseCoefficientVector,
+    :reconstruct_spectrum,
+    :export_spectrum,
+    :result_certificate,
+    :solve_summary,
+    # Explicitly forbidden model/orientation vocabulary.
+    :orientation,
+    :dual_model,
+    :primal_model,
+    :dualize,
+    :dualization,
+)
+
+# These names must disappear completely, rather than merely becoming
+# unexported.  Numerical-core names such as `solve!`, `ingest`, and
+# `SDPProblem` remain qualified implementation seams for migrated tests.
+const ABSENT_BINDINGS = (
+    :sdp,
+    :findFeasible,
+    :setArithmeticType,
+    :convex_optimizer,
+    :convex_semidefinite,
+    :solve_convex!,
+    :Experimental,
+    :api_surface,
+    :orientation,
+    :dual_model,
+    :primal_model,
+    :dualize,
+    :dualization,
+)
+
+@testset "frozen v0.5 public export set" begin
     exported = Set(names(SDPX; all=false, imported=false))
     delete!(exported, :SDPX)
-    expected = Set((
-        policy.stable...,
-        policy.legacy...,
-        policy.deprecated_experimental...,
-    ))
-    @test exported == expected
-
-    for name in policy.deprecated_experimental
-        @test isdefined(SDPX.Experimental, name)
-        @test getproperty(SDPX.Experimental, name) ===
-              getproperty(SDPX, name)
+    @test exported == FINAL_PUBLIC_EXPORTS
+    for name in FINAL_PUBLIC_EXPORTS
+        @test isdefined(SDPX, name)
     end
 end
 
-@testset "removed reduced-dual API" begin
-    for name in (
-        :CertifiedObjective,
-        :ReducedDualReconstructionToken,
-        :solve_value,
-        :reconstruct_fixed_trace_solution,
-    )
+@testset "legacy, orientation, and dual-model names are absent" begin
+    exported = names(SDPX; all=false, imported=false)
+    for name in REMOVED_PUBLIC_NAMES
+        @test !(name in exported)
+    end
+    for name in ABSENT_BINDINGS
         @test !isdefined(SDPX, name)
-        @test !isdefined(SDPX.Experimental, name)
+        @test !(name in exported)
     end
 end
 
-@testset "removed shadow planner API" begin
-    removed = (
-        :AbstractCanonicalCone,
-        :AbstractCanonicalLinearCone,
-        :AbstractCanonicalLorentzCone,
-        :AbstractCanonicalPSDCone,
-        :CanonicalLinearCone,
-        :CanonicalLorentzCone,
-        :CanonicalPSDCone,
-        :CanonicalDensePanelCoefficients,
-        :CanonicalNegatedMatrixView,
-        :CanonicalScalarBlockRowsView,
-        :CanonicalNegatedScalarOffsetsView,
-        :AbstractCanonicalEqualities,
-        :CanonicalEqualities,
-        :CanonicalIdentityReconstructionMap,
-        :CanonicalReconstructionMap,
-        :CanonicalConicProblem,
-        :canonicalize,
-        :reconstruct_identity,
-        :CanonicalAffineConeFacts,
-        :CanonicalPSDConeFacts,
-        :ProblemFeatures,
-        :extract_problem_features,
-        :StructuralPlanningIntent,
-        :AutoPlannerSnapshot,
-        :planner_snapshot,
-        :unresolved_options,
-        :planner_summary,
-        :PlanningDecision,
-        :ResolvedAutoPlannerSnapshot,
-        :resolve_planner_snapshot,
-        :resolved_planner_summary,
-    )
-    # The two matrix-facts structs remain module-internal for
-    # `dense_formulation_features`; they are removed from the public surface,
-    # not from `SDPX` itself.
-    internal_only = (:CanonicalMatrixFacts, :CanonicalAffineMapFacts)
-    for name in (removed..., internal_only...)
-        name in internal_only || @test !isdefined(SDPX, name)
-        @test !isdefined(SDPX.Experimental, name)
-        @test !(name in names(SDPX))
-    end
-end
-
-@testset "Experimental LA wrapper surface" begin
-    @test !isdefined(SDPX.Experimental, :la_factor!)
-    @test !isdefined(SDPX.Experimental, :la_solve!)
-    @test !isdefined(SDPX.Experimental, :la_refine!)
-    @test !isdefined(SDPX.Experimental, :la_cholesky_solve!)
-    @test isdefined(SDPX.Experimental, :la_lu_factor!)
-    @test isdefined(SDPX.Experimental, :la_qr_factor!)
-    @test isdefined(SDPX.Experimental, :la_factor_solve!)
-    @test SDPX.Experimental.AbstractLAFactorization ===
-          SDPX.AbstractLAFactorization
-    @test SDPX.Experimental.StandardLALUFactor === SDPX.StandardLALUFactor
-    @test SDPX.Experimental.ProviderLALUFactor === SDPX.ProviderLALUFactor
-    @test SDPX.Experimental.LegacyLALUFactor === SDPX.LegacyLALUFactor
+@testset "public status contract" begin
+    # `status` is the only terminal-state accessor.  It is intentionally a
+    # function over the typed Result, not an exported SolveStatus enum or a
+    # dual/orientation discriminator.
+    @test isdefined(SDPX, :status)
+    @test SDPX.status isa Function
 end

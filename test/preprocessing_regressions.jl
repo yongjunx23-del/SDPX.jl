@@ -400,7 +400,11 @@ end
             max_iter=100,
         )
         indices = PRE_MOI.copy_to(optimizer, source)
-        sparse_cons = optimizer.problem.cons::SDPX.SparseCons{Float64}
+        @test optimizer.model isa SDPX.Model{Float64}
+        @test SDPX.bridge_plan(optimizer).route === :lp_family
+        program = SDPX.compile_product_cone_model(optimizer.model)
+        lowering = SDPX.lower_lp_native(program; sparse=:sparse, verbosity=0)
+        sparse_cons = lowering.core.cons::SDPX.SparseCons{Float64}
         @test all(
             block -> block isa SDPX.CompactScalarCoefficientVector{Float64},
             sparse_cons.Asp,

@@ -1,24 +1,27 @@
-# SOCP and fixed-trace PSD blocks
+# Native SOC and fixed-trace PSD blocks
 
-SDPX accepts compact standard second-order cone constraints without requiring
-users to construct PSD arrow matrices:
+The public SOC route is a typed `Model` with a `LorentzCone` or
+`RotatedLorentzCone` block. No PSD arrow matrix is needed:
 
 ```julia
-using LinearAlgebra, SDPX
+using SDPX
 
-# min t, subject to (t, x, y) in Q3 and x=3, y=4
-problem = second_order_program(
-    [1.0, 0.0, 0.0],
-    Matrix{Float64}(I, 3, 3),
-    zeros(3);
-    Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
-    beq=[3.0, 4.0],
+# minimise t subject to (t, x, y) in Q3 and x=3, y=4
+model = Model(Float64)
+q = variable!(model, :q, 3; domain=LorentzCone())
+constraint!(model, :fix_tail, [q[2] - 3, q[3] - 4], ZeroCone())
+objective!(model, Minimize(), q[1])
+result = optimize!(
+    model;
+    settings=Settings(model; algorithm=:socp, verbosity=0),
+    outputs=Outputs(:all, :all, :all; objectives=true, certificate=:summary),
 )
-result = solve_socp(problem; verbosity=0)
 ```
 
-Each `SOCConstraint(A, b)` means `A*x+b in Q`, with the scalar/head coordinate
-first. Multiple cones can be passed to `second_order_program(c, cones)`.
+An affine expression in a `LorentzCone()` or `RotatedLorentzCone()` is
+canonicalized as one native cone block. `ZeroCone()` and `Reals()` may appear
+alongside it; adding a non-free LP or PSD block makes the model a mixed route
+and causes `optimize!` to fail closed before lowering.
 
 JuMP/MOI rotated cones are supported through the exact isomorphism
 
@@ -26,18 +29,19 @@ JuMP/MOI rotated cones are supported through the exact isomorphism
 (u, v, w) in Qr  <=>  (u+v, u-v, sqrt(2)w) in Q.
 ```
 
-The bridge builds sparse rows directly, maps duals by the transpose of this
-linear transformation, and maps primal values back through its inverse. The
-native `SOCConstraint` API itself remains a standard-Lorentz API; it does not
-introduce a second rotated-cone solver.
+The JuMP/MOI bridge builds sparse rows directly, maps duals by the transpose of
+this linear transformation, and maps primal values back through its inverse.
+The native `constraint!` API remains a standard-Lorentz API; RSOC is selected
+by the `RotatedLorentzCone()` domain rather than by a second solver.
 
 ## Native Lorentz execution
 
-`solve_socp` and pure-SOC MOI models run directly in Lorentz coordinates:
+Pure-SOC JuMP/MOI models and public `Model` instances run directly in Lorentz
+coordinates:
 
 ```text
-Frontend / MOI
-  -> ConicProblem
+Model / MOI
+  -> NativeConeProgram
   -> ConeRepresentationPlan
        -> GeneralLorentzExecution
        -> FixedTraceQ3Execution (verified specialization)
@@ -49,14 +53,12 @@ Frontend / MOI
   -> original-coordinate certificate
 ```
 
-Production native SOC never constructs PSD matrices. The historical SOC-to-PSD
-transform lives only in `test/helpers/soc_psd_reference.jl` for correctness
-and benchmark comparisons. The compact API always selects a native execution
-and exposes no representation switch. For the general `solve`/`SolverOptions`
-path, the automatic planner may select exact PSD-lift reference formulations
-(`:socp_psd2`, `:socp_psd_lift`) for SOC-shaped input; those are explicit
-exact reference routes, not hidden fallbacks, and the executed algorithm is
-recorded in diagnostics.
+The native SOC route never constructs PSD matrices. The compact API has no
+representation switch. An SDP model remains an SDP model even when a block
+has a Lorentz-compatible algebraic structure; `algorithm=:sdp` keeps the
+ordinary SDP route, while `algorithm=:socp` is accepted only for a pure
+SOC/RSOC model. Structural 2×2/fixed-trace kernels and storage decisions stay
+inside their classified family, and no family conversion is attempted.
 
 For `x = (t,u)`, SDPX uses the Euclidean Lorentz pairing, determinant
 `t^2 - dot(u,u)`, margin `t - norm(u)`, and Jordan product
@@ -111,7 +113,7 @@ is the unit disk `(q-1)^2+r^2 <= 1`. The `Q3 <-> S_+^2` isomorphism is
 retained for derivation and tests only; production Q3 stays in Lorentz
 coordinates.
 
-`SDPX.Experimental.analyze_fixed_trace(problem)` detects direct constant traces
+`SDPX.analyze_fixed_trace(problem)` detects direct constant traces
 and, when the estimated relation-analysis work is conservative, traces implied
 by `B'x=b`. Relations are accepted only after an original-arithmetic residual
 check. Expensive large-block equality scans are recorded as skipped because no
@@ -202,7 +204,7 @@ Test/reference PSD helpers keep their own `SDPResult` apart from the
 `ConicResult`. Certification independently recomputes affine/equality
 residuals, stationarity, primal and dual Lorentz margins, objectives, gap,
 and complementarity. Pure-SOC MOI input stays native; mixed PSD+SOC input
-fails clearly instead of silently lifting.
+fails clearly before any numerical route is selected.
 
 Lightweight development evidence for the native routes is summarized in
 [benchmarks.md](benchmarks.md), with full reports under
@@ -224,17 +226,12 @@ per Q3 cell is not automatically advantageous for fixed-trace CSDR.
 
 ## Reusing a model
 
-For a small number of objective directions, reuse the ingested constraints and
-optionally the previous solution:
+The public `Model` is mutable while it is being built and immutable from the
+solver's point of view after `optimize!` starts. A new objective direction is
+represented by a new model; warm starts can be attached with the exported
+`set_start!`, `set_dual_start!`, and `set_dual_slack_start!` helpers before a
+solve. Each call creates fresh numeric workspace and certification state.
 
-```julia
-session = prepare(problem, options)
-first = solve!(session; objective=c1, warm_start=nothing)
-second = solve!(session; objective=c2, warm_start=:previous)
-```
-
-`PreparedSolver` is sequential and non-reentrant. It caches only immutable
-preprocessing structure and an `ExecutionPlan` when planning is invariant to
-the permitted objective/RHS updates; every solve still creates fresh numeric
-workspace and factor state. RHS-sensitive automatic LP planning is deliberately
-recomputed. Use one session per concurrent worker.
+The qualified prepared-session API remains available for compatibility
+integrations that need to reuse immutable preprocessing. It is sequential and
+non-reentrant, and is not part of the public v0.5 quickstart route.

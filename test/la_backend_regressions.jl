@@ -80,78 +80,78 @@ end
 struct _UnsupportedProvider end
 
 @testset "linear algebra backend planning" begin
-    f64 = SDPX.Experimental.plan_la_backend(Float64)
+    f64 = SDPX.plan_la_backend(Float64)
     @test f64.selected === :standard
     @test f64.provider === :blas_lapack
     @test f64.fallback_chain === (:rank_revealing_qr,)
-    @test SDPX.Experimental.plan_la_backend(
+    @test SDPX.plan_la_backend(
         Float64;
         equality_solver=:normal_equations,
     ).fallback_chain === ()
-    @test SDPX.Experimental.instantiate_la_backend(f64, Float64) isa
-          SDPX.Experimental.StandardLABackend
+    @test SDPX.instantiate_la_backend(f64, Float64) isa
+          SDPX.StandardLABackend
 
-    bf = SDPX.Experimental.plan_la_backend(BigFloat)
+    bf = SDPX.plan_la_backend(BigFloat)
     @test bf.selected === :standard
     @test bf.provider === :generic_linear_algebra
     @test bf.fallback_chain === (:rank_revealing_qr,)
-    @test SDPX.Experimental.instantiate_la_backend(bf, BigFloat) isa
-          SDPX.Experimental.StandardLABackend
+    @test SDPX.instantiate_la_backend(bf, BigFloat) isa
+          SDPX.StandardLABackend
 
-    fixed = SDPX.Experimental.plan_la_backend(
+    fixed = SDPX.plan_la_backend(
         Float64x4;
         requested=:fixed_extended,
     )
     @test fixed.selected === :standard
     @test fixed.provider === :generic_linear_algebra
-    auto_fixed = SDPX.Experimental.plan_la_backend(Float64x4)
+    auto_fixed = SDPX.plan_la_backend(Float64x4)
     @test auto_fixed.selected === :standard
     @test auto_fixed.provider === :generic_linear_algebra
 
     # Non-dense routes stay on the historical backend for automatic/legacy
     # planning.  An explicit migrated backend must fail closed instead of
     # being silently rewritten to legacy.
-    block_arrow = SDPX.Experimental.plan_la_backend(
+    block_arrow = SDPX.plan_la_backend(
         Float64;
         route=:block_arrow,
     )
-    @test block_arrow isa SDPX.Experimental.LABackendConfiguration
+    @test block_arrow isa SDPX.LABackendConfiguration
     @test block_arrow.selected === :legacy
     @test block_arrow.fallback_reason === :route_not_migrated
     @test block_arrow.fallback_chain === (:rank_revealing_qr,)
-    @test SDPX.Experimental.plan_la_backend(
+    @test SDPX.plan_la_backend(
         Float64;
         route=:block_arrow,
         equality_solver=:normal_equations,
     ).fallback_chain === ()
-    @test SDPX.Experimental.plan_la_backend(
+    @test SDPX.plan_la_backend(
         Float64;
         route=:block_arrow,
         equality_solver=:qr,
     ).fallback_chain === ()
-    @test_throws ArgumentError SDPX.Experimental.plan_la_backend(
+    @test_throws ArgumentError SDPX.plan_la_backend(
         Float64;
         route=:block_arrow,
         equality_solver=:bogus,
     )
-    @test SDPX.Experimental.plan_la_backend(
+    @test SDPX.plan_la_backend(
         Float64;
         route=:block_arrow,
         requested=:legacy,
     ).selected === :legacy
     for request in (:standard, :multifloat, :fixed_extended)
-        @test_throws ArgumentError SDPX.Experimental.plan_la_backend(
+        @test_throws ArgumentError SDPX.plan_la_backend(
             Float64;
             route=:block_arrow,
             requested=request,
         )
     end
-    dense_legacy = SDPX.Experimental.plan_la_backend(
+    dense_legacy = SDPX.plan_la_backend(
         Float64;
         requested=:legacy,
     )
     @test dense_legacy.fallback_chain === (:rank_revealing_qr,)
-    @test SDPX.Experimental.plan_la_backend(
+    @test SDPX.plan_la_backend(
         Float64;
         requested=:legacy,
         equality_solver=:normal_equations,
@@ -206,28 +206,28 @@ struct _UnsupportedProvider end
     @test normalized.la_config.fallback_reason === :compatibility
 
     A = [4.0 1.0; 1.0 3.0]
-    backend = SDPX.Experimental.StandardLABackend(:float64)
+    backend = SDPX.StandardLABackend(:float64)
     # Keep the dense-matrix signatures concrete enough that the generic
     # AbstractLABackend/AbstractArray fallback cannot become ambiguous for
     # Float64, BigFloat, or an optional MultiFloat provider.
     @test hasmethod(
         SDPX.la_cholesky_factor!,
-        Tuple{SDPX.Experimental.StandardLABackend,Matrix{Float64}},
+        Tuple{SDPX.StandardLABackend,Matrix{Float64}},
     )
     @test hasmethod(
         SDPX.la_cholesky_factor!,
-        Tuple{SDPX.Experimental.StandardLABackend,Matrix{BigFloat}},
+        Tuple{SDPX.StandardLABackend,Matrix{BigFloat}},
     )
     @test hasmethod(
         SDPX.la_cholesky_factor!,
-        Tuple{SDPX.Experimental.MultiFloatLABackend{Any},Matrix{Float64x4}},
+        Tuple{SDPX.MultiFloatLABackend{Any},Matrix{Float64x4}},
     )
     @test SDPX.la_chol!(backend, A)
     rhs = [1.0, 2.0]
     SDPX.la_trsv_lower!(backend, A, rhs)
     @test all(isfinite, rhs)
 
-    legacy_float = SDPX.Experimental.LegacyLABackend(
+    legacy_float = SDPX.LegacyLABackend(
         :float64,
         :compatibility,
     )
@@ -237,24 +237,24 @@ struct _UnsupportedProvider end
         legacy_float_matrix,
     )
     @test legacy_float_factor isa
-          SDPX.Experimental.LegacyLACholeskyFactor{Float64}
+          SDPX.LegacyLACholeskyFactor{Float64}
     legacy_float_rhs = [1.0, 2.0]
     SDPX.la_factor_solve!(legacy_float_factor, legacy_float_rhs)
     @test all(isfinite, legacy_float_rhs)
     @test SDPX.la_backend_provider(legacy_float) === :sdpx_legacy_la
-    rank_loss_float = SDPX.Experimental.LegacyLACholeskyFactor(
+    rank_loss_float = SDPX.LegacyLACholeskyFactor(
         legacy_float.provider,
         [1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0e-12],
     )
     @test !SDPX._legacy_factor_has_numerical_rank(rank_loss_float)
 
     factored = SDPX.la_cholesky_factor!(backend, [4.0 1.0; 1.0 3.0])
-    @test factored isa SDPX.Experimental.StandardLACholeskyFactor
+    @test factored isa SDPX.StandardLACholeskyFactor
     solved = [1.0, 2.0]
     SDPX.la_factor_solve!(factored, solved)
     @test all(isfinite, solved)
 
-    generic = SDPX.Experimental.StandardLABackend(
+    generic = SDPX.StandardLABackend(
         :bigfloat,
         :generic_linear_algebra,
         :owned_mutable_scalars,
@@ -270,24 +270,24 @@ struct _UnsupportedProvider end
     @test SDPX.la_cholesky_factor!(generic, BigFloat[-1 0; 0 1]) === nothing
     @test !SDPX.la_chol!(generic, BigFloat[-1 0; 0 1])
 
-    legacy = SDPX.Experimental.LegacyLABackend(:bigfloat, :requested_legacy)
-    @test legacy.provider isa SDPX.Experimental.SDPXLegacyLAProvider
+    legacy = SDPX.LegacyLABackend(:bigfloat, :requested_legacy)
+    @test legacy.provider isa SDPX.SDPXLegacyLAProvider
     @test SDPX.la_backend_provider(legacy) === :sdpx_legacy_la
     @test SDPX.la_backend_ownership(legacy) === :owned_mutable_scalars
     @test isbitstype(typeof(legacy.provider))
     @test isempty(fieldnames(typeof(legacy.provider)))
-    @test SDPX.Experimental.legacy_la_provider_ownership(
+    @test SDPX.legacy_la_provider_ownership(
         legacy.provider,
     ) === :owned_mutable_scalars
-    @test SDPX.Experimental.legacy_la_provider_arithmetic(
+    @test SDPX.legacy_la_provider_arithmetic(
         legacy.provider,
     ) === :bigfloat
-    @test_throws ArgumentError SDPX.Experimental.LegacyLABackend(
+    @test_throws ArgumentError SDPX.LegacyLABackend(
         :float64,
         :requested_legacy,
         legacy.provider,
     )
-    @test_throws ArgumentError SDPX.Experimental.SDPXLegacyLAProvider(
+    @test_throws ArgumentError SDPX.SDPXLegacyLAProvider(
         :bigfloat,
         :unknown_ownership,
     )
@@ -299,11 +299,11 @@ struct _UnsupportedProvider end
         ),
         (:dot, :mul_owned, :syrk, :chol, :solve, :trsm),
     )
-    @test SDPX.Experimental.legacy_la_provider_supports(
+    @test SDPX.legacy_la_provider_supports(
         legacy.provider,
         :cholesky_factor!,
     )
-    @test !SDPX.Experimental.legacy_la_provider_supports(
+    @test !SDPX.legacy_la_provider_supports(
         legacy.provider,
         :eigen,
     )
@@ -325,7 +325,7 @@ struct _UnsupportedProvider end
         SDPX.copy_owned!(provider_matrix, source)
         SDPX.copy_owned!(direct_matrix, source)
         provider_factor = SDPX.la_cholesky_factor!(legacy, provider_matrix)
-        @test provider_factor isa SDPX.Experimental.LegacyLACholeskyFactor
+        @test provider_factor isa SDPX.LegacyLACholeskyFactor
         @test provider_factor.provider === legacy.provider
         @test provider_factor.factors === provider_matrix
         @test SDPX.kchol!(direct_matrix)
@@ -360,7 +360,7 @@ end
     @test !isdefined(SDPX, :_la_provider_call)
     @test !hasproperty(_ContractOnlyProvider(), :cholesky_factor!)
 
-    contract_only = SDPX.Experimental.MultiFloatLABackend(
+    contract_only = SDPX.MultiFloatLABackend(
         :float64x4,
         _ContractOnlyProvider(),
     )
@@ -415,7 +415,7 @@ end
         [1.0 0.0; 0.0 1.0],
     )
 
-    unsupported = SDPX.Experimental.MultiFloatLABackend(
+    unsupported = SDPX.MultiFloatLABackend(
         :float64x4,
         _UnsupportedProvider(),
     )
@@ -451,7 +451,7 @@ end
     # that the planner advertises on the minimum supported Julia line.
     for T in (Float64, BigFloat)
         setprecision(BigFloat, 256) do
-            backend = SDPX.Experimental.StandardLABackend(
+            backend = SDPX.StandardLABackend(
                 SDPX._la_arithmetic_symbol(T),
             )
             capabilities = SDPX.standard_la_provider_capabilities(T)

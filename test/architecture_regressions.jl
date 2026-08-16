@@ -200,6 +200,15 @@ using Test
             2,
             0;
             packed_hessian=false,
+            lp_route_payload=SDPX.LPRoutePlan(
+                :positive_definite_cholesky,
+                :dense,
+                :blas_lapack,
+                0,
+                2,
+                0,
+                1,
+            ),
         )
         lp_backend = SDPX._resolve_lp_backend!(lp_workspace, 0)
         @test lp_backend isa SDPX.LPCholeskyBackend
@@ -513,4 +522,40 @@ end
         (reason=:final_certificate_failed, previous=:none),
         (available=true, valid=false),
     ).downgrade === true
+end
+
+# A2 — typed `LPRoutePlan` schema on the generic `ExecutionPlan.payload`
+# slot: no second plan field, no silent shadowing.  Red by design until the
+# A2 source lands.
+@testset "A2 LP route truth lives in ExecutionPlan.payload" begin
+    @test isdefined(SDPX, :AbstractExecutionPlanPayload)
+    @test isdefined(SDPX, :LPRoutePlan)
+    @test SDPX.LPRoutePlan <: SDPX.AbstractExecutionPlanPayload
+
+    problem = SDPX.linear_program(
+        [1.0, 2.0],
+        [1.0 0.0; 0.0 1.0; 1.0 1.0],
+        [1.0, 1.0, 3.0];
+        sparse=false,
+        verbosity=0,
+    )
+    plan = SDPX.build_execution_plan(
+        problem,
+        SDPX.SolverOptions{Float64}(verbosity=0),
+    )
+    @test hasproperty(plan, :payload)
+    @test !hasproperty(plan, :lp_route)
+    @test !hasproperty(plan, :route_plan)
+
+    result = SDPX.solve(
+        problem;
+        tolerance=1e-8,
+        verbosity=0,
+        diagnostics=true,
+    )
+    finalized = result.diagnostics.plan
+    @test finalized.payload isa SDPX.LPRoutePlan
+    @test finalized.payload.route === :positive_definite_cholesky
+    @test finalized.payload.route ===
+          only(result.diagnostics.attempts).executed.formulation
 end

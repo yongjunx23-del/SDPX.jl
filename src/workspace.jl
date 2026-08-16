@@ -830,9 +830,9 @@ function Workspace(
         )
     end
     plan_supplied && (plan = _normalize_compatibility_execution_plan(plan, T))
-    plan.algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) ||
+    plan.algorithm === :sdp_primal_dual ||
         throw(ArgumentError(
-            "Workspace requires an SDP/PSD-lift execution plan, got $(plan.algorithm)",
+            "Workspace requires an SDP primal-dual execution plan, got $(plan.algorithm)",
         ))
     config = plan.backend_config
     config.route == plan.kkt_backend ||

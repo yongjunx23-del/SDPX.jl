@@ -2,8 +2,9 @@
 
 SDPX provides a non-incremental [MathOptInterface](https://jump.dev/MathOptInterface.jl/stable/)
 optimizer. JuMP builds a cached model, then SDPX converts the completed model
-into its native typed representation before solving it. The wrapper calls the
-same `ingest` and `solve!` core as the native API.
+into the same typed cone representation used by the public `Model` route before
+solving it. The wrapper performs one route classification and one family
+lowering; it does not create a second modeling or numerical route.
 
 ```julia
 using JuMP, LinearAlgebra, SDPX
@@ -109,9 +110,10 @@ set_time_limit_sec(model, 60.0)
 set_silent(model)
 ```
 
-Convenience aliases:
+The adapter accepts these compatibility aliases. They lower to qualified
+engine options; native v0.5 applications should use `Settings` instead:
 
-| Interface name | `SolverOptions` field | Meaning |
+| Adapter attribute | Qualified engine field | Meaning |
 |---|---|---|
 | `beta` | `β` | complementarity reduction target |
 | `gamma` | `γ` | line-search backtracking factor |
@@ -127,18 +129,20 @@ Convenience aliases:
 | `verbose` | `verbosity` | output level from 0 to 3 |
 
 Setting the raw `"tolerance"` attribute updates the gap, primal, and dual
-tolerances together. Every exact `SolverOptions` field name is also accepted
+tolerances together. Every exact qualified engine field name is also accepted
 as a raw optimizer attribute, including `sparse`, `scaling`, `predictor`,
 `refine_steps`, `max_restarts`, `extended_precision_blas`, and
-`extended_precision_memory_fraction`. Unknown names are rejected.
+`extended_precision_memory_fraction`. Unknown names are rejected. The
+attribute bridge does not change the public pure-route contract: mixed
+non-free cone families fail before lowering.
 
 `parameter_policy=:auto` (the default) runs the generic automatic Mehrotra
 controller: `beta`, `gamma`, `predictor`, and `parameter_strategy` keep the
-`SolverOptions` defaults or user choices. After presolve and scaling, the
+adapter defaults or user choices. After presolve and scaling, the
 selected KKT/provider route constructs a primal/dual affine point and applies
 typed cone-interior shifts plus deterministic complementarity mass balancing;
 `omega_p` and `omega_d` are ignored. The public resolver reports
-`profile=:generic_mehrotra`,
+`profile=:post_scaling_mehrotra`,
 the plan records the neutral deferred identity `:automatic_mehrotra`, and
 executed diagnostics record `:post_scaling_mehrotra`. Use `:fixed` in expert
 mode to preserve supplied values exactly with provenance `:user_fixed`.
@@ -170,6 +174,6 @@ request (`julia -t 4`).
 - LP unboundedness and general conic infeasibility certificates are not yet
   available in every numerical-breakdown case.
 
-The native `SDPProblem` API remains preferable when bootstrap code already has
-final block arrays and wants to avoid modeling-layer conversion. See the
-[Convex.jl guide](convex.md) for DCP modeling through the same optimizer.
+Bootstrap integrations that already have final block arrays may continue to use
+the qualified `SDPProblem`/loader internals, but new native code should use the
+typed `Model` route. No production route converts SOC blocks into PSD blocks.

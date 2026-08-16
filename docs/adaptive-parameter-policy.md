@@ -14,7 +14,7 @@ Use `parameter_strategy=:fixed` only for reproducibility with the historical
 trajectory. Automatic cold-start selection through `parameter_policy=:auto`
 is a separate policy that runs one generic automatic Mehrotra controller after
 scaling and before the iteration-level policy. The public resolver
-`recommended_parameters` reports `profile=:generic_mehrotra`; the immutable
+`recommended_parameters` reports `profile=:post_scaling_mehrotra`; the immutable
 execution plan records the neutral, deferred identity
 `:automatic_mehrotra`; and executed diagnostics record the post-scaling
 resolution as `:post_scaling_mehrotra`. An explicit fixed policy is recorded
@@ -97,7 +97,7 @@ presolve and scaling, LP, SDP, and NativeSOC use their existing planned KKT
 route to solve one primal and one dual affine right-hand side, followed by
 typed cone-interior shifts and deterministic complementarity mass balancing.
 The automatic path does not use `OmegaP` or `OmegaD`. The public resolver reports
-`profile=:generic_mehrotra`; the immutable execution plan records only the
+`profile=:post_scaling_mehrotra`; the immutable execution plan records only the
 deferred `:automatic_mehrotra` identity; and the executed solve records
 `:post_scaling_mehrotra`. `parameter_policy=:fixed` uses the supplied values
 exactly and records `:user_fixed`.

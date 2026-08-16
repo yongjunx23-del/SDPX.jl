@@ -18,7 +18,7 @@ SDPX.la_provider_descriptor(
 )
 
 @testset "generic LA provider capabilities" begin
-    LA = SDPX.Experimental
+    LA = SDPX
 
     unadapted = UnadaptedSemanticLABackend()
     @test !SDPX.la_backend_owns_equality_gram(unadapted)

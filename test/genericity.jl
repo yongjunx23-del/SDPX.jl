@@ -124,7 +124,7 @@ using Test
         end
     end
 
-    @testset "Ω/tolerance kwargs on legacy sdp() promote to the inferred T" begin
+    @testset "solver options promote to the inferred T" begin
         T = BigFloat
         A, C = zeros(T, 2, 2, 2), zeros(T, 2, 2)
         A[1, 1, 1] = 1
@@ -133,9 +133,19 @@ using Test
         c = T[2, 3]
         B = Matrix{T}(undef, 2, 0)
         b = Array{T}(undef, 0)
-        # Ωp, ϵ_gap, etc. passed as plain Float64/Int literals (as every caller does)
-        prob = SDPX.sdp(c, [A], [C], B, b; Ωp=1, Ωd=1, ϵ_gap=1e-20, verbosity=0)
-        @test prob["pObj"] isa BigFloat
-        @test abs(prob["pObj"] - 2 * sqrt(T(6))) < T(1e-15)
+        # SolverOptions accepts plain Float64/Int literals and converts them
+        # into the inferred arithmetic type without leaking Float64 into the
+        # solve core.
+        prob = SDPX.ingest(c, [A], [C], B, b; T=T, verbosity=0)
+        options = SDPX.SolverOptions(
+            T;
+            primal_initial_scale=1,
+            dual_initial_scale=1,
+            gap_tolerance=1e-20,
+            verbosity=0,
+        )
+        result = SDPX.solve!(prob, options)
+        @test result.pObj isa BigFloat
+        @test abs(result.pObj - 2 * sqrt(T(6))) < T(1e-15)
     end
 end

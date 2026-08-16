@@ -27,7 +27,7 @@ end
 const _MFLA_TYPES = (Float64x2, Float64x3, Float64x4)
 
 function _expect_multifloat_backend(::Type{T}) where {T}
-    LA = SDPX.Experimental
+    LA = SDPX
     config = LA.plan_la_backend(
         T;
         requested=:multifloat,
@@ -55,7 +55,7 @@ function _max_abs(A, B)
 end
 
 @testset "MFLA optional provider core contract" begin
-    LA = SDPX.Experimental
+    LA = SDPX
 
     if !_MFLA_LOADED
         @testset "fail closed without optional package" begin
@@ -115,7 +115,7 @@ end
 
 if _MFLA_LOADED
     @testset "MFLA capability and planning" begin
-        LA = SDPX.Experimental
+        LA = SDPX
         for T in _MFLA_TYPES
             descriptor = LA.la_provider_descriptor(T, 1)
             @test descriptor.available

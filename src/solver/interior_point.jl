@@ -147,20 +147,6 @@ automatic centering cap. Every solver path uses the generic `0.5` cap;
 end
 
 """
-    recommended_adaptive_sigma_max(profile, beta, requested)
-
-Compatibility forwarding for callers that still pass a profile symbol. The
-profile is ignored: every solver path uses the same guarded automatic cap.
-"""
-@inline function recommended_adaptive_sigma_max(
-    ::Symbol,
-    beta::T,
-    requested::T,
-) where {T}
-    return recommended_adaptive_sigma_max(beta, requested)
-end
-
-"""
     recommended_parameters(prob, opts) -> NamedTuple
 
     Resolve the automatic SDP cold-start parameters. This numeric resolver is
@@ -176,10 +162,9 @@ end
     Fixed-width users that rely on the old data-scale floor keep full control
     through `parameter_policy = :fixed`, which never calls this rule and uses
     the exact supplied options. No structure, cone type, size, or arithmetic
-    branch influences the selection; the executed profile reported by this
-    public function is `:generic_mehrotra` for API compatibility. The solver
-    core re-labels the same resolution `:post_scaling_mehrotra` in executed
-    diagnostics so it is distinguishable from the plan identity
+    branch influences the selection. Because this resolver runs only in the
+    final transformed coordinates, it reports `:post_scaling_mehrotra`; the
+    immutable plan records the deferred policy identity
     `:automatic_mehrotra`.
 """
 function recommended_parameters(
@@ -193,7 +178,7 @@ function recommended_parameters(
         Ωd=opts.Ωd,
         predictor=opts.predictor,
         parameter_strategy=opts.parameter_strategy,
-        profile=:generic_mehrotra,
+        profile=:post_scaling_mehrotra,
     )
 end
 
@@ -3190,26 +3175,20 @@ function _solve_pipeline!(
         end
     end
     if plan.classification.cone === :socp
-        if plan.algorithm === :socp_psd2
+        if plan.classification.maximum_block_size <= 2
             push!(
                 warnings,
                 "Detected Lorentz-compatible 2x2 structure. SDPX is using " *
-                "the exact Q3-to-S_+^2 isomorphism and specialized scalar " *
-                "2x2 kernels; the general-dimensional Lorentz NT backend " *
-                "remains experimental.",
-            )
-        elseif plan.classification.maximum_block_size <= 2
-            push!(
-                warnings,
-                "The model is exactly Q3/S_+^2 representable, but " *
-                "algorithm=:sdp selected the semidefinite reference path.",
+                "the semidefinite primal-dual route with the exact " *
+                "Q3-to-S_+^2 structural mapping and specialized scalar " *
+                "2x2 kernels.",
             )
         else
             push!(
                 warnings,
-                "Detected exact SOC-arrow PSD structure. General-dimensional " *
-                "cones still use the semidefinite lift because the compact " *
-                "Lorentz NT backend has not passed its promotion gates.",
+                "Detected exact SOC-arrow PSD structure. SDPX is using the " *
+                "semidefinite primal-dual route; the NativeSOC backend is " *
+                "available only through the public Model/ConicProblem API.",
             )
         end
     end
@@ -3258,6 +3237,31 @@ function _solve_pipeline!(
         Y0=Y0,
     )
 
+    # The dedicated LP route stores each scalar inequality dual as a 1×1 PSD
+    # block at the generic warm-start boundary.  Preserve the preprocessing
+    # block map above, then unwrap those owned scalar blocks immediately before
+    # calling solve_lp!, whose native z0 entry uses row-vector coordinates.
+    lp_preprocessed_z0 = if plan.algorithm !== :lp_primal_dual ||
+                            preprocessed_warm_start.Y0 === nothing
+        nothing
+    else
+        blocks = preprocessed_warm_start.Y0
+        blocks isa Union{AbstractVector,Tuple} || throw(ArgumentError(
+            "LP Y0 warm start must be a vector or tuple of 1×1 blocks",
+        ))
+        values = Vector{T}(undef, length(blocks))
+        @inbounds for index in eachindex(values)
+            block = blocks[index]
+            block isa AbstractMatrix && size(block) == (1, 1) || throw(
+                ArgumentError(
+                    "LP Y0 warm start block $index must be a 1×1 matrix",
+                ),
+            )
+            values[index] = _owned_array_copy(T, block)[1, 1]
+        end
+        values
+    end
+
     reduced_y0 = if preprocessed_warm_start.y0 === nothing
         nothing
     else
@@ -3300,12 +3304,10 @@ function _solve_pipeline!(
     if plan.algorithm === :lp_primal_dual
         isempty(resume) ||
             throw(ArgumentError("resume checkpoints are not supported by the dedicated LP path"))
-        X0 === nothing && Y0 === nothing ||
-            push!(
-                warnings,
-                "Matrix-valued X0/Y0 warm starts are ignored by the dedicated LP path; " *
-                "provide x0/y0.",
-            )
+        # Public LP cone-dual starts arrive as scalar 1×1 Y0 blocks.  The
+        # generic preprocessing stage has already mapped and reduced those
+        # blocks above; only the resulting scalar vector is passed to the
+        # dedicated core below.
         # The same precision hygiene the SDP core performs (this file,
         # `_solve_sdp_core!`): warn when BigFloat inputs carry fewer bits than
         # the requested working precision, and normalize stored precision when
@@ -3325,6 +3327,7 @@ function _solve_pipeline!(
             plan;
             x0=preprocessed_warm_start.x0,
             y0=reduced_y0,
+            z0=lp_preprocessed_z0,
             deadline=deadline,
         )
     else

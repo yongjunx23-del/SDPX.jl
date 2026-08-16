@@ -43,13 +43,13 @@ function v05_scalar_certificate_fixture()
 end
 
 function v05_mismatched_la_config(provider::Symbol, arithmetic::Symbol)
-    return SDPX.Experimental.LABackendConfiguration(
+    return SDPX.LABackendConfiguration(
         arithmetic,
         :standard,
         :standard,
         provider,
         (:cholesky,),
-        SDPX.Experimental.LAProviderCapabilities(cholesky=true),
+        SDPX.LAProviderCapabilities(cholesky=true),
         (:cholesky, :factor_solve, :multi_rhs),
         provider === :blas_lapack ? :julia_blas_lapack :
         :julia_generic_with_gla_loaded,
@@ -113,7 +113,8 @@ end
             Float32[],
             1,
         )
-        @test_throws ArgumentError SDPX.plan_native_soc(
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
             raw_soc,
             SDPX.SolverOptions{Float32}(verbosity=0),
         )
@@ -121,7 +122,7 @@ end
 
     @testset "typed formulation precedes backend planning" begin
         dense_problem, _ = v05_scalar_certificate_fixture()
-        dense_plan = SDPX.Experimental.build_execution_plan(
+        dense_plan = SDPX.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:sdp,
@@ -131,8 +132,8 @@ end
             ),
         )
         @test dense_plan.formulation_plan isa
-              SDPX.Experimental.FormulationPlan{
-                  SDPX.Experimental.DenseNormalEquations,
+              SDPX.FormulationPlan{
+                  SDPX.DenseNormalEquations,
               }
         @test dense_plan.formulation_plan.provenance ===
               :automatic_formulation_planner
@@ -191,7 +192,7 @@ end
             dense_plan.classification.equalities,
         )
 
-        lp_plan = SDPX.Experimental.build_execution_plan(
+        lp_plan = SDPX.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:lp,
@@ -201,7 +202,7 @@ end
             ),
         )
         @test lp_plan.formulation_plan.formulation isa
-              SDPX.Experimental.NoKKTFormulation
+              SDPX.NoKKTFormulation
         @test lp_plan.kkt_formulation === :not_applicable
         @test SDPX.kkt_backend_from_formulation(
             lp_plan.formulation_plan,
@@ -211,7 +212,7 @@ end
 
         # Dualization has analysis metadata but is not a production solve
         # option; an explicit request must fail before backend planning.
-        @test_throws ArgumentError SDPX.Experimental.build_execution_plan(
+        @test_throws ArgumentError SDPX.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:sdp,
@@ -222,7 +223,7 @@ end
             ),
         )
 
-        explicit_normal = SDPX.Experimental.build_execution_plan(
+        explicit_normal = SDPX.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:sdp,
@@ -236,7 +237,7 @@ end
         @test explicit_normal.parameters.formulation_decision.reason ===
               :user_forced_normal
 
-        explicit_primal = SDPX.Experimental.build_execution_plan(
+        explicit_primal = SDPX.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:sdp,
@@ -266,7 +267,7 @@ end
             sparse=true,
             verbosity=0,
         )
-        primal_arrow = SDPX.Experimental.build_execution_plan(
+        primal_arrow = SDPX.build_execution_plan(
             arrow_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:sdp,
@@ -277,10 +278,10 @@ end
             ),
         )
         @test primal_arrow.formulation_plan.formulation isa
-              SDPX.Experimental.BlockArrowElimination
+              SDPX.BlockArrowElimination
         @test isempty(primal_arrow.parameters.formulation_decision.candidates)
 
-        explicit_qr = SDPX.Experimental.build_execution_plan(
+        explicit_qr = SDPX.build_execution_plan(
             dense_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:sdp,
@@ -318,7 +319,7 @@ end
             sparse=false,
             verbosity=0,
         )
-        @test_throws ArgumentError SDPX.Experimental.build_execution_plan(
+        @test_throws ArgumentError SDPX.build_execution_plan(
             lp_problem,
             SDPX.SolverOptions{Float64}(
                 algorithm=:lp,
@@ -338,8 +339,9 @@ end
             )];
             T=Float64,
         )
-        normal_soc = SDPX.Experimental.build_execution_plan(
-            soc_psd_reference_problem(conic; verbosity=0),
+        soc_reference = soc_psd_reference_problem(conic; verbosity=0)
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            soc_reference,
             SDPX.SolverOptions{Float64}(
                 algorithm=:socp,
                 formulation=:normal_equations,
@@ -348,12 +350,23 @@ end
                 threads=1,
             ),
         )
-        @test normal_soc.kkt_formulation === :dense_normal_equations
+        normal_sdp = SDPX.build_execution_plan(
+            soc_reference,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                formulation=:normal_equations,
+                presolve=false,
+                scaling=:none,
+                threads=1,
+            ),
+        )
+        @test normal_sdp.algorithm === :sdp_primal_dual
+        @test normal_sdp.kkt_formulation === :dense_normal_equations
 
     end
 
     @testset "standard auto equality QR plan authorization" begin
-        config = SDPX.Experimental.plan_la_backend(
+        config = SDPX.plan_la_backend(
             Float64;
             requested=:auto,
             equality_solver=:auto,
@@ -361,22 +374,22 @@ end
         @test config.selected === :standard
         @test config.provider === :blas_lapack
         @test config.fallback_chain === (:rank_revealing_qr,)
-        @test SDPX.Experimental.la_provider_supports(
+        @test SDPX.la_provider_supports(
             config.capability_model,
             :rank_revealing_qr,
         )
-        @test SDPX.Experimental.validate_la_backend_configuration(
+        @test SDPX.validate_la_backend_configuration(
             config,
             Float64,
         ) === config
-        backend = SDPX.Experimental.instantiate_la_backend(config, Float64)
-        @test backend isa SDPX.Experimental.StandardLABackend
+        backend = SDPX.instantiate_la_backend(config, Float64)
+        @test backend isa SDPX.StandardLABackend
         @test SDPX.la_backend_provider(backend) === :blas_lapack
     end
 
     @testset "explicit normal_equations disables QR" begin
         for requested in (:auto, :standard, :legacy)
-            config = SDPX.Experimental.plan_la_backend(
+            config = SDPX.plan_la_backend(
                 Float64;
                 requested=requested,
                 equality_solver=:normal_equations,
@@ -388,7 +401,7 @@ end
     end
 
     @testset "legacy and route provenance never silently change" begin
-        dense = SDPX.Experimental.plan_la_backend(
+        dense = SDPX.plan_la_backend(
             Float64;
             requested=:legacy,
         )
@@ -396,7 +409,7 @@ end
         @test dense.provider === :sdpx_legacy_la
         @test dense.fallback_reason === :requested_legacy
 
-        route = SDPX.Experimental.plan_la_backend(
+        route = SDPX.plan_la_backend(
             Float64;
             route=:block_arrow,
         )
@@ -405,11 +418,11 @@ end
         @test route.fallback_reason === :route_not_migrated
 
         for config in (dense, route)
-            backend = SDPX.Experimental.instantiate_la_backend(
+            backend = SDPX.instantiate_la_backend(
                 config,
                 Float64,
             )
-            @test backend isa SDPX.Experimental.LegacyLABackend
+            @test backend isa SDPX.LegacyLABackend
             @test SDPX.la_backend_name(backend) === :legacy
             @test SDPX.la_backend_provider(backend) === :sdpx_legacy_la
             @test SDPX.la_backend_reason(backend) ===
@@ -419,7 +432,7 @@ end
 
         # An explicit migrated request on an unmigrated route must fail
         # closed instead of being rewritten to the legacy backend.
-        @test_throws ArgumentError SDPX.Experimental.plan_la_backend(
+        @test_throws ArgumentError SDPX.plan_la_backend(
             Float64;
             route=:block_arrow,
             requested=:standard,
@@ -427,13 +440,13 @@ end
     end
 
     @testset "QR validation follows provider capability model" begin
-        no_qr = SDPX.Experimental.LABackendConfiguration(
+        no_qr = SDPX.LABackendConfiguration(
             :float64,
             :standard,
             :standard,
             :generic_linear_algebra,
             (:cholesky,),
-            SDPX.Experimental.LAProviderCapabilities(cholesky=true),
+            SDPX.LAProviderCapabilities(cholesky=true),
             (:cholesky,),
             :julia_blas_lapack,
             (:rank_revealing_qr,),
@@ -441,7 +454,7 @@ end
             :immutable_scalars,
         )
         @test_throws ArgumentError (
-            SDPX.Experimental.validate_la_backend_configuration(
+            SDPX.validate_la_backend_configuration(
                 no_qr,
                 Float64,
             )
@@ -468,7 +481,7 @@ end
         @test final.termination.reason ==
               :minimal_original_coordinate_gate_failed
 
-        resolved = SDPX.Experimental.resolve_solve_options(
+        resolved = SDPX.resolve_solve_options(
             Float64,
             SDPX.SolveOptions(certification=false),
         )
@@ -481,16 +494,16 @@ end
         for provider in (:blas_lapack, :generic_linear_algebra)
             config = v05_mismatched_la_config(provider, :float64)
             @test_throws ArgumentError (
-                SDPX.Experimental.validate_la_backend_configuration(config)
+                SDPX.validate_la_backend_configuration(config)
             )
             @test_throws ArgumentError (
-                SDPX.Experimental.instantiate_la_backend(config, Float64)
+                SDPX.instantiate_la_backend(config, Float64)
             )
         end
     end
 
     @testset "dense LP routes use the migrated provider seam" begin
-        LA = SDPX.Experimental
+        LA = SDPX
         pd = LA.plan_la_backend(
             Float64;
             route=:positive_definite_cholesky,
@@ -523,7 +536,7 @@ end
     end
 
     @testset "specialized LP-adjacent routes remain non-migrated" begin
-        LA = SDPX.Experimental
+        LA = SDPX
         for route in (:block_arrow, :q3_block_diagonal_equality)
             automatic = LA.plan_la_backend(Float64; route=route)
             @test automatic.selected === :legacy
@@ -545,7 +558,7 @@ end
     end
 
     @testset "dense LP provider requests fail closed" begin
-        LA = SDPX.Experimental
+        LA = SDPX
         if Base.get_extension(SDPX, :SDPXBigFloatLinearAlgebraExt) === nothing
             for route in (:positive_definite_cholesky, :dense_lu)
                 @test_throws ArgumentError LA.plan_la_backend(
@@ -565,13 +578,13 @@ end
 
         # A provider that claims the dense-LP route without the required LU
         # capability must be rejected during validation, never executed.
-        incomplete = SDPX.Experimental.LABackendConfiguration(
+        incomplete = SDPX.LABackendConfiguration(
             :float64,
             :standard,
             :standard,
             :blas_lapack,
             (:cholesky,),
-            SDPX.Experimental.LAProviderCapabilities(cholesky=true),
+            SDPX.LAProviderCapabilities(cholesky=true),
             (:lu, :factor_solve),
             :julia_blas_lapack,
             (),
@@ -579,7 +592,7 @@ end
             :immutable_scalars,
         )
         @test_throws ArgumentError (
-            SDPX.Experimental.validate_la_backend_configuration(incomplete)
+            SDPX.validate_la_backend_configuration(incomplete)
         )
     end
 end

@@ -1,26 +1,43 @@
 # Parameters
 
-Most applications should configure only:
+The public policy is typed and attached to the same `Model` that is passed to
+`optimize!`:
 
 ```julia
-result = solve(
-    problem;
-    tolerance=1e-8,
-    maximum_iterations=200,
-    time_limit=Inf,
-    threads=Threads.nthreads(),
-    precision=nothing,
+model = SDPX.Model(Float64)
+x = SDPX.variable!(model, :x, 1; domain=SDPX.Nonnegative())
+SDPX.constraint!(model, :lower, x[1] - 1, SDPX.Nonnegative())
+SDPX.objective!(model, SDPX.Minimize(), x[1])
+settings = SDPX.Settings(
+    model;
+    tolerances=SDPX.Tolerances(Float64; primal=1e-8, dual=1e-8, gap=1e-8),
+    limits=SDPX.Limits(iterations=200, time=Inf, threads=1),
+    algorithm=:auto,
+    presolve=:auto,
+    scaling=:auto,
+    sparse=:auto,
+    diagnostics=:summary,
+    certification=true,
     verbosity=1,
-    diagnostics=true,
-    warm_start=nothing,
 )
+result = SDPX.optimize!(model; settings=settings)
 ```
+
+`Settings{T}` accepts only typed policy fields: `tolerances`, `limits`,
+`scaling`, `formulation`, `provider`, `presolve`, `algorithm`, `sparse`,
+`equality_solver`, `working_precision_policy`, `diagnostics`, `verbosity`,
+`timing`, `certification`, and `blas_threads`. Route selection is pure and
+fail-closed: `:lp` is valid only for a pure LP model, `:socp` only for a pure
+SOC/RSOC model, and `:sdp` only for a pure SDP model; `:auto` follows the
+classified family. Public formulation values are `:auto`,
+`:variable_space_schur`, and `:dense_augmented_kkt`.
 
 The default controller adapts centering, fraction-to-boundary values,
 backtracking, and refinement from the measured Newton iteration. Presolve,
 scaling, kernel selection, working precision, and scheduling also default to
-automatic policies. The tables below describe the expert `SolverOptions{T}`
-surface and its defaults.
+automatic policies. The detailed tables below retain the mature
+`SolverOptions{T}` field names for algorithm and compatibility notes only;
+that qualified low-level record is not the public quickstart interface.
 
 ## Interior-point method and initialization
 
@@ -48,7 +65,7 @@ cone-vertex envelope, to unit identity mass before complementarity
 cross-centering; bounded structured correction reuses an accepted SDP factor
 when an original-KKT residual remains above the existing gate.
 `Ωp` and `Ωd` do not participate in this path. The public compatibility
-resolver reports `profile=:generic_mehrotra`, the plan records the deferred
+resolver reports `profile=:post_scaling_mehrotra`, the plan records the deferred
 identity `:automatic_mehrotra`, and executed diagnostics record
 `:post_scaling_mehrotra` plus the separate cold-start report.
 `parameter_policy=:fixed` uses the supplied values exactly and records
@@ -63,7 +80,7 @@ identity `:automatic_mehrotra`, and executed diagnostics record
 | `ϵ_dual` | `1e-10` | Dual residual tolerance. |
 | `termination` | `:relative` | Scale-normalized stopping tests; `:legacy` is the legacy absolute/nonnegative-gap convention. |
 | `iter_max` | `200` | Maximum outer iterations (legacy keyword `iterMax`). |
-| `max_time` | `Inf` | End-to-end wall-clock limit in seconds, including automatic-pipeline setup and (for the raw-array one-call interface) ingestion. |
+| `max_time` | `Inf` | End-to-end wall-clock limit in seconds, including automatic-pipeline setup and model compilation. |
 | `callback` | `nothing` | Called after every iteration; returning `true` stops with `UserStopped`. |
 
 ## Restarts and numerical safeguards
@@ -74,7 +91,7 @@ identity `:automatic_mehrotra`, and executed diagnostics record
 | `min_step` | `1e-10` | A backtracking step below this value triggers a convergence-tail check or restart. |
 | `omega_step` | `1e5` | Per-restart multiplier applied to the collapsed `X` or `Y` side. |
 | `max_restarts` | `5` | Maximum restarts in the new API. |
-| `max_omega` | `1e50` | Compatibility field; the new `solve!` loop does not read it directly. |
+| `max_omega` | `1e50` | Compatibility field for the qualified legacy engine; public `Settings` has no equivalent. |
 
 For fixed-exponent types such as `Float64x4`, SDPX limits the effective
 restart multiplier and returns `NumericalBreakdown` when an iterate becomes
@@ -89,7 +106,7 @@ non-finite.
 | `minimum_working_precision_bits` | `192` | Lower bound for the staged BigFloat selector. |
 | `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`; cannot recover lost digits. |
 | `scaling` | `:auto` | LP geometric scaling and adaptive-pass Ruiz congruence/variable scaling for SDP. |
-| `sparse` | `:auto` | Storage selection during ingestion; distinguishes sparse coefficients from aggregate PSD/Schur density. |
+| `sparse` | `:auto` | Storage selection during model compilation; distinguishes sparse coefficients from aggregate PSD/Schur density. |
 | `formulation` | `:auto` | Static dense KKT formulation selection (`:normal_equations`, `:augmented`, `:primal`). |
 | `linear_algebra_backend` | `:auto` | Resolves once during planning: `:standard`, `:bfla`, `:multifloat`, `:legacy`. |
 | `extended_precision_blas` | type-dependent | Conservative `:auto` for fixed-width extended types and BigFloat, `:off` for Float64. |
@@ -107,13 +124,13 @@ normally targets `64 * eps(T)`; the large regularized sparse Float64 SDP route
 uses a looser tolerance retaining two guard digits beyond the requested
 certificate. A positive user-supplied `refine_tol` always takes precedence.
 
-Sparse equilibration rebuilds derived sparse caches after scaling. Use
-`scaling=:equilibrate` (or the legacy `sdp(...; equilibrate=true)` keyword,
-which maps to it):
+Sparse equilibration rebuilds derived sparse caches after scaling. On the
+public route, request it with `Settings(model; scaling=:equilibrate)`; the
+model and all warm-start values remain in their original coordinates:
 
 ```julia
-prob = ingest(c, A, C, B, b; sparse=true)
-opts = SolverOptions{T}(scaling=:equilibrate)
+settings = SDPX.Settings(model; scaling=:equilibrate)
+result = SDPX.optimize!(model; settings=settings)
 ```
 
 Warm starts are supplied in original input coordinates. SDPX maps `x0`, `X0`,
@@ -136,30 +153,13 @@ history, stagnation windows, phase timers, and best-iterate history; a resumed
 adaptive solve is therefore not bit-for-bit equivalent to an uninterrupted
 run. Checkpoint resume is not currently supported by the dedicated LP path.
 
-## Legacy `sdp(...)` defaults
+## Qualified compatibility defaults
 
-The common legacy call is equivalent to:
-
-```julia
-sdp(c, A, C, B, b;
-    β=0.1, γ=0.9, Ωp=1, Ωd=1,
-    ϵ_gap=1e-10, ϵ_primal=1e-10, ϵ_dual=1e-10,
-    iterMax=200, prec=300,
-    restart=true, minStep=1e-10,
-    maxOmega=1e50, OmegaStep=1e5,
-    sparse=:auto, verbosity=1,
-    termination=:relative,
-    equilibrate=false, refine_steps=1, predictor=:classic,
-    max_time=Inf, callback=nothing)
-```
-
-Two differences matter:
-
-1. `prec=300` is expressed in decimal digits and is converted internally to
-   approximately `997` bits. It affects `BigFloat` only.
-2. The legacy wrapper derives its restart limit from `maxOmega/OmegaStep`;
-   their defaults produce `max_restarts=10`, while directly constructing
-   `SolverOptions` defaults to `5`.
+The mature low-level engine retains historical names such as `sdp`,
+`SolverOptions`, `β`, `γ`, `Ωp`, and `Ωd` for compatibility and algorithm
+audits. Those names are qualified implementation details; they are not
+additional v0.5 public entry points. Public code should express stopping and
+resource policy with `Tolerances`, `Limits`, and `Settings` as shown above.
 
 The full Newton-method audit, exact diagnostic fields, controller bounds,
 fallback rules, arithmetic behavior, and fixed-versus-adaptive results are in

@@ -19,7 +19,6 @@ makedocs(;
             "Command line" => "cli.md",
             "Precision" => "precision.md",
             "JuMP and MOI" => "jump.md",
-            "Convex.jl" => "convex.md",
             "SOCP and fixed trace" => "socp.md",
         ],
         "Solver workflow" => [

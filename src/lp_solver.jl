@@ -140,6 +140,10 @@ mutable struct LPWorkspace{T,LB<:AbstractLABackend}
     # formulas while making the deferred plan decision explicit.
     backend::Union{Nothing,KKTBackend}
     backend_formulation::Symbol
+    # The finalized immutable LP route payload, asserted against by every
+    # workspace/backend consumer. Production constructs it once after scaling
+    # and passes it into this workspace; direct test helpers may use `nothing`.
+    lp_route_payload::Union{Nothing,LPRoutePlan}
     # Instantiated exactly once from ExecutionPlan.la_config. Ordinary dense
     # LP factor/solve calls consume this concrete backend; reduced and sparse
     # LP structures deliberately retain their specialized implementations.
@@ -166,6 +170,7 @@ function LPWorkspace(
     packed_hessian::Bool=true,
     reduced_standard_form::Bool=false,
     sparse_storage::Bool=false,
+    lp_route_payload::Union{Nothing,LPRoutePlan}=nothing,
     la_backend::AbstractLABackend=LegacyLABackend(
         _la_arithmetic_symbol(T),
         :compatibility,
@@ -207,6 +212,7 @@ function LPWorkspace(
         nothing,
         nothing,
         :not_resolved,
+        lp_route_payload,
         la_backend,
         :not_executed,
         :not_executed,
@@ -593,6 +599,55 @@ function _presolve_lp_rows(G::AbstractMatrix{T}, h::Vector{T}, tolerance::T) whe
     return keep, removed, infeasible
 end
 
+"""
+    _lp_validate_z0(z0, rows, keep, T) -> owned original-row vector
+
+Validate an inequality-dual warm start while it is still expressed in the
+original core inequality-row coordinates.  Presolve can remove duplicate or
+zero rows, so silently taking `z0[keep]` would discard a caller-provided
+coordinate.  A nonzero value on a removed row is therefore rejected; a zero
+value is harmless and is explicitly ignored.  Retained coordinates must be
+finite and strictly positive.  The returned vector is solver-owned (and uses
+the LP arithmetic type) so BigFloat starts never alias caller storage.
+"""
+function _lp_validate_z0(
+    z0,
+    rows::Int,
+    keep::AbstractVector{<:Integer},
+    ::Type{T},
+) where {T}
+    z0 isa AbstractVector || throw(ArgumentError("z0 must be a vector"))
+    length(z0) == rows || throw(DimensionMismatch(
+        "z0 has length $(length(z0)); expected $rows original inequality rows",
+    ))
+    owned = try
+        _owned_array_copy(T, z0)
+    catch exception
+        _recoverable(exception) || rethrow()
+        throw(ArgumentError(
+            "z0 entries must be finite values representable in the LP arithmetic type",
+        ))
+    end
+    all(isfinite, owned) || throw(ArgumentError(
+        "z0 entries must be finite",
+    ))
+    retained = BitSet(Int.(keep))
+    @inbounds for row in axes(owned, 1)
+        value = owned[row]
+        if row in retained
+            value > zero(T) || throw(ArgumentError(
+                "z0[$row] must be strictly positive for a retained inequality row",
+            ))
+        elseif !iszero(value)
+            throw(ArgumentError(
+                "z0[$row] targets an inequality row removed by LP presolve; " *
+                "provide zero there or disable presolve",
+            ))
+        end
+    end
+    return owned
+end
+
 function _validate_lp_options(opts::SolverOptions{T}) where {T}
     return _validate_solver_options(opts)
 end
@@ -698,8 +753,10 @@ function _lp_phase2_cold_start!(
     equalities::Int,
     x0,
     y0,
+    z0,
 ) where {T}
-    if !(opts.parameter_policy === :auto && x0 === nothing && y0 === nothing)
+    if !(opts.parameter_policy === :auto && x0 === nothing &&
+         y0 === nothing && z0 === nothing)
         return nothing
     end
     variables = size(G, 2)
@@ -1083,7 +1140,7 @@ function _lp_phase2_cold_start!(
 end
 
 """
-    _lp_initialization_record(workspace, equalities, opts, lp_parameter_resolution, lp_initialization)
+    _lp_initialization_record(workspace, equalities, opts, lp_parameter_resolution, lp_initialization; warm_start=false)
 
 Stable `termination.executed.initialization` schema shared by the success and
 failure tails of the dedicated LP path. The automatic phase-2 KKT cold start
@@ -1097,12 +1154,14 @@ function _lp_initialization_record(
     equalities::Int,
     opts::SolverOptions{T},
     lp_initialization,
+    ;
+    warm_start::Bool=false,
 ) where {T}
     lp_initialization === nothing && return (
         policy=opts.parameter_policy === :auto ? :automatic : :fixed,
-        initialization_policy=:not_applied,
-        path=:preserved_fixed_or_warm_start,
-        applied=false,
+        initialization_policy=warm_start ? :warm_start : :not_applied,
+        path=warm_start ? :warm_start : :preserved_fixed_or_warm_start,
+        applied=warm_start,
         kkt_formulation=:not_executed,
         provider=:not_executed,
         factorization=:not_executed,
@@ -1184,7 +1243,34 @@ function _lp_executed_record(
     backend_execution_attempted::Bool,
     lp_initialization,
     fallback_reason::Symbol,
+    ;
+    warm_start::Bool=false,
 ) where {T}
+    # Sparse LP factors are owned by the provider-neutral sparse layer, not by
+    # the ordinary dense `LABackend` instantiated from the pre-row plan.  The
+    # frozen route payload is therefore the execution authority for sparse
+    # provider/ownership facts.  Dense and reduced routes retain the existing
+    # LA execution fields unchanged.
+    lp_route_payload = _lp_route_payload(workspace)
+    sparse_route = lp_route_payload.storage === :sparse
+    executed_la_provider = if !backend_execution_attempted
+        :not_executed
+    elseif sparse_route
+        lp_route_payload.provider
+    elseif workspace.executed_la_provider !== :not_executed
+        workspace.executed_la_provider
+    else
+        :not_executed
+    end
+    executed_la_ownership = if !backend_execution_attempted
+        :not_executed
+    elseif sparse_route
+        :provider_owned
+    elseif workspace.executed_la_ownership !== :not_executed
+        workspace.executed_la_ownership
+    else
+        :not_executed
+    end
     return (
         solver=:lp_primal_dual,
         planned_storage=plan.storage_plan.storage,
@@ -1233,12 +1319,8 @@ function _lp_executed_record(
         la_backend=backend_execution_attempted &&
             workspace.executed_la_backend !== :not_executed ?
             workspace.executed_la_backend : :not_executed,
-        la_provider=backend_execution_attempted &&
-            workspace.executed_la_provider !== :not_executed ?
-            workspace.executed_la_provider : :not_executed,
-        la_ownership=backend_execution_attempted &&
-            workspace.executed_la_ownership !== :not_executed ?
-            workspace.executed_la_ownership : :not_executed,
+        la_provider=executed_la_provider,
+        la_ownership=executed_la_ownership,
         la_fallback_reason=workspace.la_fallback_reason,
         la_factorization=backend_execution_attempted ?
             workspace.executed_la_factorization : :not_executed,
@@ -1247,7 +1329,9 @@ function _lp_executed_record(
             equalities,
             opts,
             lp_initialization,
+            warm_start=warm_start,
         ),
+        lp_route_payload=lp_route_payload,
     )
 end
 
@@ -2413,7 +2497,112 @@ function _resolve_lp_backend!(
                                         :positive_definite_cholesky
         select_lp_backend(equalities)
     end
+    _assert_lp_route_parity(workspace)
     return workspace.backend::KKTBackend
+end
+
+"""Assert the workspace's frozen LP route payload against the resolved
+backend and storage.  The route is finalized exactly once, before workspace
+construction; this is the single parity gate that prevents re-planning,
+second probes, and hidden provider fallback."""
+function _assert_lp_route_parity(workspace::LPWorkspace{T}) where {T}
+    payload = workspace.lp_route_payload
+    payload === nothing && error(
+        "LP route payload was not finalized before backend resolution",
+    )
+    resolved = workspace.backend_formulation
+    resolved === payload.route || error(
+        "LP route payload $(payload.route) does not match resolved backend $(resolved)",
+    )
+    storage = resolved in (
+        :diagonal_reduced_cholesky,
+        :positive_definite_cholesky,
+        :dense_lu,
+    ) ? :dense : :sparse
+    storage === payload.storage || error(
+        "LP route payload storage $(payload.storage) does not match " *
+        "resolved route $(resolved)",
+    )
+    resolved === :diagonal_reduced_cholesky &&
+        workspace.standard_system === nothing && error(
+            "diagonal reduced route payload requires the reduced standard " *
+            "system",
+        )
+    if resolved === :sparse_normal
+        workspace.sparse_system === nothing && error(
+            "sparse route payload requires the sparse Newton system",
+        )
+        payload.provider === :cholmod ||
+            payload.provider === :generic ||
+            error("sparse route payload has an unknown provider")
+    else
+        workspace.sparse_system === nothing || error(
+            "dense route payload must not carry a sparse Newton system",
+        )
+    end
+    return payload
+end
+
+"""Provider label for an LP route payload, mirroring the executed-record
+provider facts so the payload and `record.executed.provider` agree."""
+function _lp_route_provider(
+    resolved::Symbol,
+    sparse_system::Union{Nothing,LPSparseSystem},
+)
+    resolved === :diagonal_reduced_cholesky && return :reduced_kernel
+    resolved in (:positive_definite_cholesky, :dense_lu) && return :blas_lapack
+    resolved === :sparse_normal || error(
+        "unknown resolved LP route $(resolved)",
+    )
+    system = sparse_system::LPSparseSystem
+    return system.backend isa CHOLMODSparseCholeskyBackend ?
+           :cholmod :
+           system.backend isa GenericSparseCholeskyBackend ?
+           :generic : error("unknown sparse LP provider")
+end
+
+"""
+    _build_lp_route_plan(route, sparse_system, inequalities, variables,
+                         equalities, sparse_probe_count)
+
+Build the single immutable `LPRoutePlan` after row presolve and `_scale_lp!`
+have settled `G`/`B`, but before `LPWorkspace` construction. Backend
+resolution later asserts parity with this frozen payload.
+`sparse_probe_count` is the number of measured-pattern sparse probes already
+performed by the caller (zero for structurally decided routes).
+"""
+function _build_lp_route_plan(
+    resolved::Symbol,
+    sparse_system::Union{Nothing,LPSparseSystem},
+    inequalities::Int,
+    variables::Int,
+    equalities::Int,
+    sparse_probe_count::Int,
+)
+    provider = _lp_route_provider(resolved, sparse_system)
+    storage = resolved in (
+        :diagonal_reduced_cholesky,
+        :positive_definite_cholesky,
+        :dense_lu,
+    ) ? :dense : :sparse
+    return LPRoutePlan(
+        resolved,
+        storage,
+        provider,
+        sparse_probe_count,
+        variables,
+        equalities,
+        inequalities,
+    )
+end
+
+"""The frozen LP route payload, or an error when finalization did not run."""
+function _lp_route_payload(workspace::LPWorkspace{T}) where {T}
+    payload = workspace.lp_route_payload
+    payload === nothing && error(
+        "LP route payload was not finalized",
+    )
+    return payload::LPRoutePlan
 end
 
 function _lp_executed_backend(
@@ -3454,6 +3643,7 @@ function solve_lp!(
     plan::ExecutionPlan;
     x0=nothing,
     y0=nothing,
+    z0=nothing,
     deadline::Float64=Inf,
 ) where {T}
     started = time()
@@ -3478,14 +3668,17 @@ function solve_lp!(
     ))
     explicit_sparse = sparse_policy === :sparse
     structurally_sparse = prob.cons isa SparseCons{T}
+    diagonal_original = explicit_sparse ?
+                        nothing : _extract_lp_diagonal_nonnegative(prob)
     authoritative_auto_sparse = sparse_policy === :auto &&
+                                diagonal_original === nothing &&
                                 structurally_sparse &&
-                                supports_sparse_backend(T) &&
-                                size(prob.B, 2) == 0 &&
-                                prob.structure.schur_plan.storage === :sparse
+                                supports_sparse_execution(T) &&
+                                size(prob.B, 2) == 0
     sparse_ingress = structurally_sparse &&
                      (explicit_sparse || authoritative_auto_sparse) &&
                      supports_sparse_execution(T)
+    auto_sparse_candidate = authoritative_auto_sparse
     explicit_sparse && !structurally_sparse && throw(ArgumentError(
         "storage=:sparse requires a structurally sparse LP input; " *
         "re-ingest the model with sparse=true",
@@ -3494,7 +3687,6 @@ function solve_lp!(
         "explicit sparse LP KKT with equality rows is unsupported; " *
         "use storage=:dense",
     ))
-    diagonal_original = sparse_ingress ? nothing : _extract_lp_diagonal_nonnegative(prob)
     G_original, h_original = if sparse_ingress
         _extract_lp_rows_sparse(prob)
     elseif diagonal_original === nothing
@@ -3512,16 +3704,28 @@ function solve_lp!(
     else
         (collect(axes(G_original, 1)), 0, false)
     end
-    row_infeasible &&
+    # z0 is intentionally validated before any early presolve return.  It is
+    # expressed in original core row coordinates, and a removed nonzero
+    # coordinate must never disappear silently.  Mapping to working rows is
+    # deferred until `_scale_lp!` has produced the retained-row scales.
+    z0_owned = z0 === nothing ? nothing : _lp_validate_z0(
+        z0,
+        size(G_original, 1),
+        keep,
+        T,
+    )
+    if row_infeasible
         return _lp_infeasible_rows_result(
             prob,
             "LP presolve found a zero left-hand side with a positive lower bound.",
         ), removed, 0
-    time() >= effective_deadline &&
+    end
+    if time() >= effective_deadline
         return _lp_time_limit_result(
             prob,
             time() - started,
         ), removed, 0
+    end
     isempty(keep) &&
         return _lp_equality_only_result(
             prob,
@@ -3556,13 +3760,25 @@ function solve_lp!(
         c,
         plan.scaling === :lp_geometric,
     )
-    # One private post-scaling resolver per automatic solve, after `_scale_lp!`
-    # and before the controller below. It records provenance only; the
-    # controller still reads the untouched user/default options.
-    lp_parameter_resolution = opts.parameter_policy === :auto ?
-                              _lp_auto_parameter_resolution(opts) :
-                              _lp_fixed_parameter_resolution(opts)
-
+    sparse_system = sparse_ingress ?
+                    _lp_sparse_system(
+        prob,
+        G,
+        B;
+        storage=explicit_sparse ? :sparse : :auto,
+    ) : nothing
+    sparse_selected = sparse_system !== nothing
+    if sparse_ingress && !sparse_selected
+        # The single measured pattern probe rejected sparse normal equations.
+        # Materialize the dense panels only after that authoritative decision;
+        # no second probe or runtime route switch is permitted below.
+        G = _owned_array_copy(T, Matrix(G))
+        B = _owned_array_copy(T, Matrix(B))
+    end
+    # The single LP route finalization point: after row presolve and scaling
+    # have settled `G`/`B`, decide the route exactly once and freeze the
+    # `LPRoutePlan` payload.  Everything below (workspace construction,
+    # backend resolution, factor/solve) asserts parity with this payload.
     inequalities, variables = size(G)
     equalities = size(B, 2)
     packed_hessian = plan.gram_kernel in (
@@ -3571,33 +3787,52 @@ function solve_lp!(
         :blocked_syrk,
         :threaded_blocked_syrk,
     )
+    reduced_standard_form = G isa LPDiagonalMatrix{T}
+    resolved_route = reduced_standard_form ? :diagonal_reduced_cholesky :
+                     sparse_selected ?
+                     (sparse_system::LPSparseSystem{T}).formulation :
+                     equalities > 0 ? :dense_lu : :positive_definite_cholesky
+    sparse_probe_count = auto_sparse_candidate ? 1 : 0
+    lp_route_payload = _build_lp_route_plan(
+        resolved_route,
+        sparse_system,
+        inequalities,
+        variables,
+        equalities,
+        sparse_probe_count,
+    )
     workspace = LPWorkspace(
         T,
         inequalities,
         variables,
         equalities;
         packed_hessian=packed_hessian,
-        reduced_standard_form=G isa LPDiagonalMatrix{T},
-        sparse_storage=sparse_ingress,
+        reduced_standard_form=reduced_standard_form,
+        sparse_storage=sparse_selected,
+        lp_route_payload=lp_route_payload,
         la_backend=instantiate_la_backend(plan.la_config, T, plan.threads),
     )
-    if G isa LPDiagonalMatrix{T}
+    if reduced_standard_form
         workspace.standard_system = LPStandardFormSystem(
             G,
             B,
             plan.threads,
             plan.gram_kernel,
         )
+        workspace.backend_formulation = resolved_route
+    elseif sparse_selected
+        workspace.sparse_system = sparse_system
+        workspace.backend_formulation = resolved_route
     else
-        # Decided once, on the `G` the iteration will actually use. The sparse
-        # ingress branch above already has CSC G/B and skips any dense proxy.
-        workspace.sparse_system = _lp_sparse_system(
-            prob,
-            G,
-            B;
-            storage=sparse_ingress ? :sparse : sparse_policy,
-        )
+        workspace.backend_formulation = resolved_route
     end
+    # One private post-scaling resolver per automatic solve, after `_scale_lp!`
+    # and before the controller below. It records provenance only; the
+    # controller still reads the untouched user/default options.
+    lp_parameter_resolution = opts.parameter_policy === :auto ?
+                              _lp_auto_parameter_resolution(opts) :
+                              _lp_fixed_parameter_resolution(opts)
+
     _resolve_lp_backend!(workspace, equalities)
     lp_initialization = _lp_phase2_cold_start!(
         workspace,
@@ -3613,6 +3848,7 @@ function solve_lp!(
         equalities,
         x0,
         y0,
+        z0_owned,
     )
     if lp_initialization !== nothing && !lp_initialization.success
         result, removed = _lp_cold_start_failure_result(
@@ -3658,8 +3894,18 @@ function solve_lp!(
         @inbounds for row in eachindex(s)
             s[row] = max(s[row], one(T))
         end
-        @inbounds for row in eachindex(z)
-            z[row] = one(T)
+        if z0_owned === nothing
+            @inbounds for row in eachindex(z)
+                z[row] = one(T)
+            end
+        else
+            # z0 is supplied in original, pre-presolve coordinates.  The
+            # scaled working dual satisfies z_original = d_ineq .* z_work,
+            # hence z_work = z0[keep] ./ d_ineq.  `_lp_validate_z0` has
+            # already rejected every nonzero value on a removed row.
+            @inbounds for row in eachindex(z)
+                z[row] = z0_owned[keep[row]] / scaling.inequality[row]
+            end
         end
     end
     # The endpoint models in the finite-support family are deliberately
@@ -4238,6 +4484,8 @@ function solve_lp!(
                 lp_initialization,
                 termination_reason === :none ?
                     :none : termination_reason,
+                warm_start=x0 !== nothing || y0 !== nothing ||
+                            z0_owned !== nothing,
             ),
         ),
     )

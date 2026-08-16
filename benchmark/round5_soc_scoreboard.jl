@@ -84,7 +84,7 @@ function run_case(label, problem, expected, mode; tolerance=1e-8)
                      hasproperty(selected, :soc_specialization) ?
                      selected.soc_specialization : :psd_reference
     cone_plan = result.diagnostics isa SDPX.NativeSOCDiagnostics ?
-                result.diagnostics.plan.cone : nothing
+                result.diagnostics.plan.payload.cone : nothing
     soc_coordinates = sum(length(cone.b) for cone in problem.cones)
     lifted_psd_storage = sum(
         length(cone.b) == 3 ? 3 :

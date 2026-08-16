@@ -10,7 +10,7 @@ of the reduction logic depends on JuMP.
 The public entry point is:
 
 ```julia
-prepared = SDPX.Experimental.preprocess(problem, options)
+prepared = SDPX.preprocess(problem, options)
 ```
 
 `prepared` contains the transformed problem, a typed `PreprocessPlan`, a
@@ -47,7 +47,7 @@ estimated upper-triangle nonzeros, density, and per-block active counts;
 `problem.structure.schur_plan` records the deterministic `:dense`, `:sparse`,
 or `:block_sparse` choice and its reason. A selected Float64 sparse plan
 freezes one CSC pattern and `SchurAssemblyMap`, so later iterations update only
-`nzval`. `SDPX.Experimental.sparse_schur_diagnostics(workspace)` reports
+`nzval`. `SDPX.sparse_schur_diagnostics(workspace)` reports
 structural/numeric nonzeros, factor fill, pattern reuse, overlap/block counts,
 and assembly timing. Generic MultiFloat/BigFloat sparse-Schur equality
 recovery remains explicitly fail-closed: an explicit `sparse=:sparse` request

@@ -13,7 +13,7 @@ using Random
 using MultiFloats
 using MultiFloatLinearAlgebra
 
-const LA = SDPX.Experimental
+const LA = SDPX
 
 _extension_module() = SDPX.Base.get_extension(
     SDPX,

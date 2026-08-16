@@ -78,7 +78,7 @@ end
 
 function _native_soc_options(::Type{T}; kwargs...) where {T}
     tolerance = T === Float64 ? T(1e-8) : T(1e-16)
-    return SolverOptions(
+    return SDPX.SolverOptions(
         T;
         tolerance,
         maximum_iterations=120,
@@ -91,44 +91,41 @@ end
 
 @testset "NativeSOC direct Lorentz execution" begin
     @testset "planner separation and explicit boundary" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
             zeros(3);
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        plan = SDPX.plan_native_soc(
-            problem, _native_soc_options(Float64),
-        )
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(Float64)).payload
         @test plan.cone.representation === :native_lorentz
         @test plan.cone.execution isa SDPX.GeneralLorentzExecution
         @test plan.cone.specialization === :general_lorentz
         @test plan.formulation.formulation isa SDPX.DenseNormalEquations
         @test plan.la_config.selected === :standard
-        @test_throws ArgumentError SDPX._solve_native_soc_core(
-            problem,
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), problem,
             _native_soc_options(Float64; formulation=:augmented),
         )
-        @test_throws ArgumentError SDPX._native_soc_cone_plan(
-            problem; specialization=:fixed_trace,
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), problem,
+            _native_soc_options(Float64); specialization=:fixed_trace,
         )
     end
 
     @testset "augmented LDLT requires exact NativeSOC inertia" begin
-        cone = SOCConstraint(
+        cone = SDPX.SOCConstraint(
             sparse([2, 3], [1, 2], [1.0, 1.0], 3, 2),
             [1.0, 0.0, 0.0],
         )
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [-1.0, 0.0], [cone];
             Aeq=reshape([0.0, 1.0], 1, 2),
             beq=[0.5],
         )
         options = _native_soc_options(Float64)
-        normal_plan = SDPX.plan_native_soc(
-            problem, options; specialization=:fixed_trace,
-        )
+        normal_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:fixed_trace).payload
         augmented_plan = SDPX.NativeSOCPlan(
             normal_plan.cone,
             SDPX.FormulationPlan(
@@ -173,14 +170,14 @@ end
     end
 
     @testset "single general Q3 and PSD2 reference" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
             zeros(3);
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        native = solve_socp(
+        native = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -201,7 +198,7 @@ end
         @test native.pObj ≈ 5.0 atol=1e-6
         @test native.pObj ≈ reference.pObj atol=2e-6
         @test native.x ≈ reference.x atol=2e-6
-        certificate = result_certificate(
+        certificate = SDPX.result_certificate(
             problem, native, _native_soc_options(Float64),
         )
         @test certificate.valid
@@ -261,14 +258,14 @@ end
 
     @testset "general dimension and mixed blocks" begin
         dimension = 8
-        general_problem = second_order_program(
+        general_problem = SDPX.second_order_program(
             [1.0; zeros(dimension - 1)],
             Matrix{Float64}(I, dimension, dimension),
             zeros(dimension);
             Aeq=[zeros(dimension - 1) Matrix{Float64}(I, dimension - 1, dimension - 1)],
             beq=ones(dimension - 1),
         )
-        general = solve_socp(
+        general = SDPX.solve_socp(
             general_problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -276,18 +273,18 @@ end
         )
         @test general.status === SDPX.Optimal
         @test general.pObj ≈ sqrt(7.0) atol=2e-6
-        @test result_certificate(
+        @test SDPX.result_certificate(
             general_problem, general, _native_soc_options(Float64),
         ).valid
 
-        disk = SOCConstraint(Matrix{Float64}(I, 3, 3), zeros(3))
-        nonnegative = SOCConstraint(reshape([0.0, 1.0, 0.0], 1, 3), [0.0])
-        mixed_problem = second_order_program(
+        disk = SDPX.SOCConstraint(Matrix{Float64}(I, 3, 3), zeros(3))
+        nonnegative = SDPX.SOCConstraint(reshape([0.0, 1.0, 0.0], 1, 3), [0.0])
+        mixed_problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0], [disk, nonnegative];
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        mixed = solve_socp(
+        mixed = SDPX.solve_socp(
             mixed_problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -295,7 +292,7 @@ end
         )
         @test mixed.status === SDPX.Optimal
         @test mixed.pObj ≈ 5.0 atol=2e-6
-        @test result_certificate(
+        @test SDPX.result_certificate(
             mixed_problem, mixed, _native_soc_options(Float64),
         ).valid
 
@@ -303,7 +300,7 @@ end
         # scalar nonnegative blocks contribute one and proper Lorentz blocks
         # contribute two.
         mixed_options = _native_soc_options(Float64)
-        mixed_plan = SDPX.plan_native_soc(mixed_problem, mixed_options)
+        mixed_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), mixed_problem, mixed_options).payload
         mixed_workspace = SDPX.NativeSOCWorkspace(
             mixed_problem, mixed_plan, mixed_options,
         )
@@ -316,11 +313,11 @@ end
 
     @testset "multiple SOC blocks without equalities" begin
         cones = [
-            SOCConstraint(reshape([1.0, 0.0], 2, 1), [0.0, -1.0]),
-            SOCConstraint(reshape([1.0, 0.0], 2, 1), [0.0, -2.0]),
+            SDPX.SOCConstraint(reshape([1.0, 0.0], 2, 1), [0.0, -1.0]),
+            SDPX.SOCConstraint(reshape([1.0, 0.0], 2, 1), [0.0, -2.0]),
         ]
-        problem = second_order_program([1.0], cones)
-        result = solve_socp(
+        problem = SDPX.second_order_program([1.0], cones)
+        result = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -328,20 +325,20 @@ end
         )
         @test result.status === SDPX.Optimal
         @test result.pObj ≈ 2.0 atol=2e-6
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem, result, _native_soc_options(Float64),
         ).valid
     end
 
     @testset "strict-interior steps at tight tolerance" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0],
             Matrix{Float64}(I, 2, 2),
             zeros(2);
             Aeq=reshape([0.0, 1.0], 1, 2),
             beq=[1.0],
         )
-        result = solve_socp(
+        result = SDPX.solve_socp(
             problem;
             tolerance=1e-10,
             maximum_iterations=120,
@@ -350,12 +347,12 @@ end
         @test result.status === SDPX.Optimal
         @test result.slack[1][1] > abs(result.slack[1][2])
         @test result.dual[1][1] > abs(result.dual[1][2])
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem,
             result,
             _native_soc_options(Float64; tolerance=1e-10),
         ).valid
-        no_diagnostics = solve_socp(
+        no_diagnostics = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -368,7 +365,7 @@ end
 
     @testset "BigFloat cone data stays provider-owned" begin
         setprecision(BigFloat, 128) do
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 BigFloat[1, 0, 0],
                 Matrix{BigFloat}(I, 3, 3),
                 zeros(BigFloat, 3);
@@ -378,7 +375,7 @@ end
             coefficients = SDPX._owned_array_copy(
                 BigFloat, problem.cones[1].A,
             )
-            result = solve_socp(
+            result = SDPX.solve_socp(
                 problem;
                 tolerance=big"1e-16",
                 maximum_iterations=120,
@@ -387,7 +384,7 @@ end
             @test result.status === SDPX.Optimal
             @test result.pObj ≈ BigFloat(5) atol=big"1e-14"
             @test problem.cones[1].A == coefficients
-            @test result_certificate(
+            @test SDPX.result_certificate(
                 problem,
                 result,
                 _native_soc_options(BigFloat; tolerance=big"1e-16"),
@@ -397,14 +394,14 @@ end
 
 
     @testset "dependent equalities use planned RRQR only" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0],
             Matrix{Float64}(I, 2, 2),
             zeros(2);
             Aeq=[0.0 1.0; 0.0 2.0],
             beq=[1.0, 2.0],
         )
-        result = solve_socp(
+        result = SDPX.solve_socp(
             problem;
             tolerance=1e-9,
             maximum_iterations=120,
@@ -416,19 +413,18 @@ end
               :rank_revealing_qr
         @test result.diagnostics.selected_algorithms.la_fallback_reason ===
               :la_equality_factor_failed
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem,
             result,
             _native_soc_options(Float64; tolerance=1e-9),
         ).valid
 
-        fail_closed = SDPX._solve_native_soc_core(
-            problem,
-            _native_soc_options(
-                Float64;
-                tolerance=1e-9,
-                equality_solver=:normal_equations,
-            ),
+        fail_closed = SDPX.solve_socp(
+            problem;
+            tolerance=1e-9,
+            equality_solver=:normal_equations,
+            maximum_iterations=120,
+            verbosity=0,
         )
         @test fail_closed.status === SDPX.NumericalBreakdown
         @test fail_closed.diagnostics.termination.reason ===
@@ -437,14 +433,14 @@ end
 
 
     @testset "general normal equations prepare equality once per iteration" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
             zeros(3);
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        one_iteration = solve_socp(
+        one_iteration = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=1,
@@ -468,7 +464,7 @@ end
         @test one_iteration.timings.equality_gram_syrk >= 0
         @test one_iteration.timings.equality_factor >= 0
 
-        converged = solve_socp(
+        converged = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -477,20 +473,20 @@ end
         )
         @test converged.status === SDPX.Optimal
         @test converged.pObj ≈ 5.0 atol=1e-6
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem, converged, _native_soc_options(Float64),
         ).valid
     end
 
     @testset "native SOC affine KKT cold start" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
             zeros(3);
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        cold = solve_socp(
+        cold = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=0,
@@ -563,7 +559,7 @@ end
 
         # The ordinary one-iteration counter contract is unchanged after a
         # successful cold start.
-        one_iteration = solve_socp(
+        one_iteration = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=1,
@@ -584,7 +580,7 @@ end
 
         # Fixed parameter policy preserves the historical Ω head start and
         # never runs the cold start.
-        fixed = solve_socp(
+        fixed = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=1,
@@ -612,7 +608,7 @@ end
             primal_initial_scale=2.0,
             dual_initial_scale=3.0,
         )
-        plan = SDPX.plan_native_soc(problem, options; specialization=:off)
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:off).payload
         workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
         @test workspace.slack[1] ≈ [2.0, 0.0, 0.0]
         @test workspace.dual[1] ≈ [3.0, 0.0, 0.0]
@@ -623,9 +619,7 @@ end
             primal_initial_scale=2.0,
             dual_initial_scale=3.0,
         )
-        auto_plan = SDPX.plan_native_soc(
-            problem, auto_options; specialization=:off,
-        )
+        auto_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, auto_options; specialization=:off).payload
         auto_workspace = SDPX.NativeSOCWorkspace(
             problem, auto_plan, auto_options,
         )
@@ -634,20 +628,19 @@ end
     end
 
     @testset "cold start failure and counter isolation" begin
-        dependent = second_order_program(
+        dependent = SDPX.second_order_program(
             [1.0, 0.0],
             Matrix{Float64}(I, 2, 2),
             zeros(2);
             Aeq=[0.0 1.0; 0.0 2.0],
             beq=[1.0, 2.0],
         )
-        failed = SDPX._solve_native_soc_core(
-            dependent,
-            _native_soc_options(
-                Float64;
-                tolerance=1e-9,
-                equality_solver=:normal_equations,
-            ),
+        failed = SDPX.solve_socp(
+            dependent;
+            tolerance=1e-9,
+            equality_solver=:normal_equations,
+            maximum_iterations=120,
+            verbosity=0,
         )
         @test failed.status === SDPX.NumericalBreakdown
         @test failed.iterations == 0
@@ -685,7 +678,7 @@ end
         # Successful cold start with the planned RRQR equality fallback
         # snapshots the fallback into the initialization report and restores
         # the baseline provenance for the ordinary Newton iterations.
-        recovered = solve_socp(
+        recovered = SDPX.solve_socp(
             dependent;
             tolerance=1e-9,
             maximum_iterations=120,
@@ -701,14 +694,12 @@ end
 
         # iter_max = 0 never runs an ordinary iteration, so the restored
         # fallback baseline is visible in the executed provenance.
-        zero_iterations = SDPX._solve_native_soc_core(
-            dependent,
-            _native_soc_options(
-                Float64;
-                tolerance=1e-9,
-                maximum_iterations=0,
-                equality_solver=:auto,
-            ),
+        zero_iterations = SDPX.solve_socp(
+            dependent;
+            tolerance=1e-9,
+            maximum_iterations=0,
+            equality_solver=:auto,
+            verbosity=0,
         )
         @test zero_iterations.status === SDPX.IterLimit
         @test zero_iterations.iterations == 0
@@ -721,7 +712,7 @@ end
     end
 
     @testset "general equality Gram is lower-authoritative" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
             zeros(3);
@@ -729,7 +720,7 @@ end
             beq=[3.0, 4.0],
         )
         options = _native_soc_options(Float64)
-        plan = SDPX.plan_native_soc(problem, options)
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options).payload
         clean = SDPX.NativeSOCWorkspace(problem, plan, options)
         poisoned = SDPX.NativeSOCWorkspace(problem, plan, options)
         factor_matrix = 2.0 .* Matrix{Float64}(I, 3, 3)
@@ -772,11 +763,11 @@ end
         second = zeros(3, 4)
         second[2, 3] = 1.0
         second[3, 4] = 1.0
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],
             [
-                SOCConstraint(first, [1.0, 0.0, 0.0]),
-                SOCConstraint(second, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(second, [1.0, 0.0, 0.0]),
             ];
             Aeq=[1.0 0.0 0.0 0.0; 0.0 1.0 0.0 0.0],
             beq=[0.2, -0.1],
@@ -786,9 +777,7 @@ end
             tolerance=1e-9,
             equality_solver=:auto,
         )
-        plan = SDPX.plan_native_soc(
-            problem, options; specialization=:fixed_trace,
-        )
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:fixed_trace).payload
         base = SDPX.NativeSOCWorkspace(problem, plan, options)
         base.local_metric[:, 1] .= [2.0, 0.0, 3.0]
         base.local_metric[:, 2] .= [2.0, 0.0, 3.0]
@@ -814,17 +803,14 @@ end
         second = zeros(3, 4)
         second[2, 3] = 1.0
         second[3, 4] = 1.0
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],
             [
-                SOCConstraint(first, [1.0, 0.0, 0.0]),
-                SOCConstraint(second, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(second, [1.0, 0.0, 0.0]),
             ],
         )
-        plan = SDPX.plan_native_soc(
-            problem,
-            _native_soc_options(Float64),
-        )
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(Float64)).payload
         @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
         @test plan.cone.specialization === :fixed_trace_q3
         @test plan.cone.native_coordinates == 6
@@ -834,16 +820,16 @@ end
         @test reduction.active_ids == [1 3; 2 4]
         @test reduction.tail_map[:, :, 1] == [1.0 0.0; 0.0 1.0]
 
-        one_iteration_problem = second_order_program(
+        one_iteration_problem = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],
             [
-                SOCConstraint(sparse(first), [1.0, 0.0, 0.0]),
-                SOCConstraint(sparse(second), [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(sparse(first), [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(sparse(second), [1.0, 0.0, 0.0]),
             ];
             Aeq=[1.0 0.0 0.0 0.0; 0.0 0.0 1.0 0.0],
             beq=[0.2, -0.1],
         )
-        one_iteration = solve_socp(
+        one_iteration = SDPX.solve_socp(
             one_iteration_problem;
             tolerance=1e-9,
             maximum_iterations=1,
@@ -862,7 +848,10 @@ end
         @test counters.kkt_rhs_solves == 2
         @test counters.predictor_rhs_solves == 1
         @test counters.corrector_rhs_solves == 1
-        @test one_iteration.diagnostics.selected_algorithms.scaling === :hkm
+        @test one_iteration.diagnostics.selected_algorithms.planned_scaling ===
+              :hkm
+        @test one_iteration.diagnostics.selected_algorithms.executed_scaling ===
+              :hkm
         @test one_iteration.timings.fixed_local_metric >= 0
         @test one_iteration.timings.fixed_local_factor >= 0
         @test one_iteration.timings.equality_panel_transform >= 0
@@ -885,13 +874,13 @@ end
                 timing=true,
                 specialization=:fixed_trace,
             )
-            solve_socp(one_iteration_problem; options...)  # warm up
+            SDPX.solve_socp(one_iteration_problem; options...)  # warm up
             GC.gc()
             totals = Int[]
             results = SDPX.ConicResult{Float64}[]
             for _ in 1:3
                 result = Ref{SDPX.ConicResult{Float64}}()
-                total = @allocated result[] = solve_socp(
+                total = @allocated result[] = SDPX.solve_socp(
                     one_iteration_problem; options...,
                 )
                 push!(totals, total)
@@ -919,14 +908,14 @@ end
             # per-iteration steady-state allocation bounded.
         end
 
-        specialized = solve_socp(
+        specialized = SDPX.solve_socp(
             problem;
             tolerance=1e-9,
             maximum_iterations=120,
             verbosity=0,
             specialization=:auto,
         )
-        general = solve_socp(
+        general = SDPX.solve_socp(
             problem;
             tolerance=1e-9,
             maximum_iterations=120,
@@ -945,12 +934,12 @@ end
         @test specialized.pObj ≈ -2.0 atol=2e-6
         @test specialized.pObj ≈ general.pObj atol=2e-6
         @test specialized.pObj ≈ reference.pObj atol=2e-6
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem,
             specialized,
             _native_soc_options(Float64; tolerance=1e-9),
         ).valid
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem,
             general,
             _native_soc_options(Float64; tolerance=1e-9),
@@ -958,17 +947,21 @@ end
 
         variable_head = copy(first)
         variable_head[1, 1] = 0.25
-        variable_trace = second_order_program(
+        variable_trace = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],
             [
-                SOCConstraint(variable_head, [1.0, 0.0, 0.0]),
-                SOCConstraint(second, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(variable_head, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(second, [1.0, 0.0, 0.0]),
             ],
         )
-        @test SDPX._native_soc_cone_plan(variable_trace).execution isa
-              SDPX.GeneralLorentzExecution
-        @test_throws ArgumentError SDPX._native_soc_cone_plan(
-            variable_trace; specialization=:fixed_trace,
+        @test SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), variable_trace,
+            _native_soc_options(Float64; tolerance=1e-9),
+        ).payload.cone.execution isa SDPX.GeneralLorentzExecution
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), variable_trace,
+            _native_soc_options(Float64; tolerance=1e-9);
+            specialization=:fixed_trace,
         )
     end
 
@@ -977,13 +970,11 @@ end
             affine = zeros(BigFloat, 3, 2)
             affine[2, 1] = 1
             affine[3, 2] = 1
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 BigFloat[-1, 0],
-                [SOCConstraint(affine, BigFloat[1, 0, 0])],
+                [SDPX.SOCConstraint(affine, BigFloat[1, 0, 0])],
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(BigFloat),
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(BigFloat)).payload
             reduction = plan.cone.execution.payload
             @test reduction.tail_map[1, 1, 1] == 1
             source_entry = problem.cones[1].A[2, 1]
@@ -1001,16 +992,16 @@ end
         second = zeros(3, 4)
         second[2, 3] = 1.0
         second[3, 4] = 1.0
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],
             [
-                SOCConstraint(first, [1.0, 0.0, 0.0]),
-                SOCConstraint(second, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(second, [1.0, 0.0, 0.0]),
             ];
             Aeq=[1.0 0.0 0.0 0.0; 0.0 0.0 1.0 0.0],
             beq=[0.2, -0.1],
         )
-        cold = solve_socp(
+        cold = SDPX.solve_socp(
             problem;
             tolerance=1e-9,
             maximum_iterations=0,
@@ -1074,7 +1065,7 @@ end
 
         # One ordinary iteration after the cold start keeps the exact
         # fixed-trace 1-iteration counter contract.
-        one_iteration = solve_socp(
+        one_iteration = SDPX.solve_socp(
             problem;
             tolerance=1e-9,
             maximum_iterations=1,
@@ -1097,14 +1088,14 @@ end
 
     setprecision(BigFloat, 128) do
         @testset "BigFloat general cold start" begin
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 BigFloat[1, 0, 0],
                 Matrix{BigFloat}(I, 3, 3),
                 zeros(BigFloat, 3);
                 Aeq=BigFloat[0 1 0; 0 0 1],
                 beq=BigFloat[3, 4],
             )
-            result = solve_socp(
+            result = SDPX.solve_socp(
                 problem;
                 tolerance=big"1e-16",
                 maximum_iterations=120,
@@ -1137,16 +1128,16 @@ end
             second = sparse(
                 [2, 3], [3, 4], T[one(T), one(T)], 3, 4,
             )
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[-1, 0, -1, 0],
                 [
-                    SOCConstraint(first, T[1, 0, 0]),
-                    SOCConstraint(second, T[1, 0, 0]),
+                    SDPX.SOCConstraint(first, T[1, 0, 0]),
+                    SDPX.SOCConstraint(second, T[1, 0, 0]),
                 ];
                 Aeq=T[1 0 0 0; 0 0 1 0],
                 beq=T[0.2, -0.1],
             )
-            result = solve_socp(
+            result = SDPX.solve_socp(
                 problem;
                 tolerance=T(1e-12),
                 maximum_iterations=1,
@@ -1159,7 +1150,10 @@ end
             @test result.iterations == 1
             @test result.diagnostics.selected_algorithms.soc_specialization ===
                   :fixed_trace_q3
-            @test result.diagnostics.selected_algorithms.scaling === :hkm
+            @test result.diagnostics.selected_algorithms.planned_scaling ===
+                  :hkm
+            @test result.diagnostics.selected_algorithms.executed_scaling ===
+                  :hkm
             @test result.diagnostics.selected_algorithms.la_executed_provider ===
                   :multifloat_linear_algebra
             @test !hasproperty(result, :lifted)
@@ -1189,16 +1183,14 @@ end
         end
 
         function general_gate_workspace(::Type{T}) where {T}
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[1, 0, 0],
                 Matrix{T}(I, 3, 3),
                 zeros(T, 3);
                 Aeq=T[0.0 1.0 0.0; 0.0 0.0 1.0],
                 beq=T[3.0, 4.0],
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T); specialization=:off,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off).payload
             @assert plan.cone.execution isa SDPX.GeneralLorentzExecution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
@@ -1313,14 +1305,12 @@ end
 
         @testset "GeneralLorentz without equalities" begin
             T = Float64
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[1, 0],
                 Matrix{T}(I, 2, 2),
                 zeros(T, 2),
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T); specialization=:off,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off).payload
             @test plan.cone.execution isa SDPX.GeneralLorentzExecution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
@@ -1353,18 +1343,16 @@ end
             second = zeros(T, 3, 4)
             second[2, 3] = one(T)
             second[3, 4] = one(T)
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[-1, 0, -1, 0],
                 [
-                    SOCConstraint(sparse(first), T[1, 0, 0]),
-                    SOCConstraint(sparse(second), T[1, 0, 0]),
+                    SDPX.SOCConstraint(sparse(first), T[1, 0, 0]),
+                    SDPX.SOCConstraint(sparse(second), T[1, 0, 0]),
                 ];
                 Aeq=T[1.0 0.0 0.0 0.0; 0.0 1.0 0.0 0.0],
                 beq=T[0.2, -0.1],
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T); specialization=:fixed_trace,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace).payload
             @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
@@ -1450,16 +1438,14 @@ end
             second = zeros(T, 3, 4)
             second[2, 3] = one(T)
             second[3, 4] = one(T)
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[-1, 0, -1, 0],
                 [
-                    SOCConstraint(sparse(first), T[1, 0, 0]),
-                    SOCConstraint(sparse(second), T[1, 0, 0]),
+                    SDPX.SOCConstraint(sparse(first), T[1, 0, 0]),
+                    SDPX.SOCConstraint(sparse(second), T[1, 0, 0]),
                 ],
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T); specialization=:fixed_trace,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace).payload
             @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
@@ -1529,14 +1515,12 @@ end
 
         @testset "δ=0 strict and zero system" begin
             T = Float64
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[1, 0],
                 Matrix{T}(I, 2, 2),
                 zeros(T, 2),
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T); specialization=:off,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off).payload
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1605,15 +1589,12 @@ end
 
         function run_precision_gate_fixture(::Type{T}) where {T}
             tolerance = T === BigFloat ? T(big"1e-16") : T(1e-12)
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[1, 0],
                 Matrix{T}(I, 2, 2),
                 zeros(T, 2),
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T; tolerance);
-                specialization=:off,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T; tolerance); specialization=:off).payload
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T; tolerance),
             )
@@ -1677,18 +1658,16 @@ end
             second = zeros(T, 3, 4)
             second[2, 3] = one(T)
             second[3, 4] = one(T)
-            problem = second_order_program(
+            problem = SDPX.second_order_program(
                 T[0, 1, 0, 1],
                 [
-                    SOCConstraint(sparse(first), T[1, 0, 0]),
-                    SOCConstraint(sparse(second), T[1, 0, 0]),
+                    SDPX.SOCConstraint(sparse(first), T[1, 0, 0]),
+                    SDPX.SOCConstraint(sparse(second), T[1, 0, 0]),
                 ];
                 Aeq=T[1.0 0.0 0.0 0.0],
                 beq=T[0.1],
             )
-            plan = SDPX.plan_native_soc(
-                problem, _native_soc_options(T); specialization=:fixed_trace,
-            )
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace).payload
             @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
@@ -1742,6 +1721,229 @@ end
             @test !rejected_gate.ok
             @test rejected_gate.reason === :direction_residual
             @test rejected_gate.residual > rejected_gate.tolerance
+        end
+    end
+end
+
+# A3 — NativeSOC is owned by the single top-level ExecutionPlan:
+# ConicProblem -> AutoPlanner -> ExecutionPlan{payload=NativeSOCPlan} ->
+# NativeSOCWorkspace (route asserts) -> NativeSOC core.  Diagnostics expose
+# one canonical `plan::ExecutionPlan`; the payload is `plan.payload`.
+@testset "A3 NativeSOC top-level ExecutionPlan" begin
+    _a3_general_problem() = SDPX.second_order_program(
+        [1.0, 0.0, 0.0],
+        Matrix{Float64}(I, 3, 3),
+        zeros(3);
+        Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
+        beq=[3.0, 4.0],
+    )
+
+    function _a3_fixed_trace_problem()
+        first = zeros(3, 4); first[2, 1] = 1.0; first[3, 2] = 1.0
+        second = zeros(3, 4); second[2, 3] = 1.0; second[3, 4] = 1.0
+        return SDPX.second_order_program(
+            [-1.0, 0.0, -1.0, 0.0],
+            [
+                SDPX.SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(second, [1.0, 0.0, 0.0]),
+            ],
+        )
+    end
+
+    function _a3_rebuilt(top; classification=top.classification,
+            scaling=top.scaling, kkt_backend=top.kkt_backend,
+            backend_config=top.backend_config,
+            formulation_plan=top.formulation_plan,
+            la_config=top.la_config, threads=top.threads, payload=top.payload)
+        return SDPX.ExecutionPlan(
+            classification, top.algorithm, scaling, kkt_backend,
+            backend_config, formulation_plan, la_config, top.gram_kernel,
+            top.schedule, threads, top.parameter_profile,
+            top.memory_budget_bytes, top.parameters, payload,
+        )
+    end
+
+    @testset "payload identity and compatibility view" begin
+        @test SDPX.NativeSOCPlan <: SDPX.AbstractExecutionPlanPayload
+        problem = _a3_general_problem()
+        options = _native_soc_options(Float64)
+        top = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
+        @test top isa SDPX.ExecutionPlan
+        @test top.payload isa SDPX.NativeSOCPlan
+        @test top.algorithm === :native_soc
+        @test top.kkt_backend === :dense_cholesky
+        @test top.backend_config.fallback_chain === ()
+        @test top.threads === top.payload.threads
+        @test top.la_config == top.payload.la_config
+        @test SDPX.formulation_symbol(top.formulation_plan) ===
+              SDPX.formulation_symbol(top.payload.formulation)
+        @test top.parameters.planned_arithmetic === :float64
+        # Value parity, not object identity: a distinct equal payload is
+        # accepted through the canonical ExecutionPlan carrier.
+        equal_payload = SDPX.NativeSOCPlan(
+            top.payload.cone, top.payload.formulation,
+            top.payload.la_config, top.payload.threads,
+        )
+        @test SDPX.NativeSOCWorkspace(
+            problem, _a3_rebuilt(top; payload=equal_payload), options,
+        ) isa SDPX.NativeSOCWorkspace
+    end
+
+    @testset "general Lorentz and FixedTrace auto/off/on" begin
+        problem = _a3_general_problem()
+        options = _native_soc_options(Float64)
+        for specialization in (:auto, :off)
+            plan = SDPX.build_execution_plan(
+                SDPX.AutoPlanner(), problem, options; specialization,
+            )
+            @test plan.payload.cone.execution isa
+                  SDPX.GeneralLorentzExecution
+            @test plan.payload.cone.specialization === :general_lorentz
+            @test plan.scaling === :nesterov_todd
+            @test plan.kkt_backend === :dense_cholesky
+        end
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), problem, options; specialization=:fixed_trace,
+        )
+
+        fixed = _a3_fixed_trace_problem()
+        fixed_options = _native_soc_options(Float64; tolerance=1e-9)
+        for (specialization, spec, scaling) in (
+            (:auto, :fixed_trace_q3, :hkm),
+            (:fixed_trace, :fixed_trace_q3, :hkm),
+            (:off, :general_lorentz, :nesterov_todd),
+        )
+            plan = SDPX.build_execution_plan(
+                SDPX.AutoPlanner(), fixed, fixed_options; specialization,
+            )
+            @test plan.payload.cone.specialization === spec
+            @test plan.scaling === scaling
+            # The top-level route names the mathematical dense system; the
+            # FixedTrace kernel stays inside the payload.
+            @test plan.kkt_backend === :dense_cholesky
+        end
+    end
+
+    @testset "normal and augmented parity" begin
+        problem = _a3_general_problem()
+        normal_options = _native_soc_options(
+            Float64; formulation=:normal_equations,
+        )
+        normal = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), problem, normal_options,
+        )
+        @test SDPX.formulation_symbol(normal.formulation_plan) ===
+              :dense_normal_equations
+        @test normal.kkt_backend === :dense_cholesky
+        # The stock provider lacks pivoted-LDLT inertia, so augmented must
+        # fail at planning rather than silently rewrite to normal equations.
+        @test_throws ArgumentError SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), problem,
+            _native_soc_options(Float64; formulation=:augmented),
+        )
+        # The consistent augmented workspace/core path is covered by the
+        # "augmented LDLT requires exact NativeSOC inertia" fixture above.
+    end
+
+    @testset "workspace route asserts fail closed" begin
+        problem = _a3_general_problem()
+        options = _native_soc_options(Float64)
+        top = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
+        @test SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top), options) isa
+              SDPX.NativeSOCWorkspace
+        mismatched_payload = SDPX.NativeSOCPlan(
+            top.payload.cone,
+            SDPX.FormulationPlan(
+                SDPX.DenseAugmentedKKT(),
+                :user_forced_augmented,
+                :native_soc_planner,
+            ),
+            top.payload.la_config,
+            top.payload.threads,
+        )
+        @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; payload=mismatched_payload), options)
+        @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; kkt_backend=:dense_augmented_ldlt), options)
+        @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; scaling=:hkm), options)
+        @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; backend_config=SDPX.BackendConfiguration(top.kkt_backend, :qr, false, false, :off, (), false)), options)
+    end
+
+    @testset "planned/executed parity and diagnostics view" begin
+        general = SDPX.solve_socp(_a3_general_problem(); tolerance=1e-8, maximum_iterations=120, verbosity=0, timing=true)
+        @test general.status === SDPX.Optimal
+        plan = general.diagnostics.plan
+        selected = general.diagnostics.selected_algorithms
+        @test plan isa SDPX.ExecutionPlan
+        @test plan.payload isa SDPX.NativeSOCPlan
+        @test selected.planned_scaling === selected.executed_scaling ===
+              plan.scaling
+        @test selected.planned_backend === selected.executed_backend ===
+              plan.kkt_backend
+        @test selected.native_kernel === :general_lorentz
+        @test selected.planned_kkt_formulation ===
+              selected.executed_kkt_formulation
+        @test selected.planned_la_provider === selected.la_executed_provider
+        @test selected.planned_arithmetic === selected.executed_arithmetic
+        @test selected.planned_precision_bits ===
+              selected.executed_precision_bits
+        @test selected.planned_threads === selected.executed_threads
+        @test !hasproperty(general, :lifted)
+
+        fixed = SDPX.solve_socp(_a3_fixed_trace_problem(); tolerance=1e-9, maximum_iterations=120, verbosity=0, timing=true, specialization=:auto)
+        @test fixed.status === SDPX.Optimal
+        fixed_selected = fixed.diagnostics.selected_algorithms
+        @test fixed_selected.planned_backend ===
+              fixed_selected.executed_backend === :dense_cholesky
+        @test fixed_selected.native_kernel ===
+              :fixed_trace_q3_local_elimination
+    end
+
+    @testset "factor failure keeps the native route (no PSD lift)" begin
+        dependent = SDPX.second_order_program(
+            [1.0, 0.0],
+            Matrix{Float64}(I, 2, 2),
+            zeros(2);
+            Aeq=[0.0 1.0; 0.0 2.0],
+            beq=[1.0, 2.0],
+        )
+        options = _native_soc_options(Float64; tolerance=1e-9)
+        top = SDPX.build_execution_plan(SDPX.AutoPlanner(), dependent, options)
+        @test :rank_revealing_qr in top.la_config.fallback_chain
+        @test top.backend_config.fallback_chain === ()
+        recovered = SDPX.solve_socp(dependent; tolerance=1e-9, maximum_iterations=120, verbosity=0, timing=true, equality_solver=:auto)
+        @test recovered.status === SDPX.Optimal
+        @test !hasproperty(recovered, :lifted)
+        @test recovered.diagnostics.selected_algorithms.equality ===
+              :rank_revealing_qr
+        fail_closed = SDPX.solve_socp(dependent; tolerance=1e-9, equality_solver=:normal_equations, maximum_iterations=120, verbosity=0, timing=true)
+        @test fail_closed.status === SDPX.NumericalBreakdown
+        @test fail_closed.termination.reason === :equality_prepare_failed
+        @test !hasproperty(fail_closed, :lifted)
+    end
+
+    @testset "BigFloat precision parity" begin
+        setprecision(BigFloat, 128) do
+            problem = SDPX.second_order_program(
+                BigFloat[1, 0, 0],
+                Matrix{BigFloat}(I, 3, 3),
+                zeros(BigFloat, 3);
+                Aeq=BigFloat[0 1 0; 0 0 1],
+                beq=BigFloat[3, 4],
+            )
+            options = _native_soc_options(
+                BigFloat; tolerance=big"1e-16",
+            )
+            top = SDPX.build_execution_plan(
+                SDPX.AutoPlanner(), problem, options,
+            )
+            @test top.parameters.planned_arithmetic === :bigfloat
+            @test top.parameters.planned_precision_bits ===
+                  Base.precision(BigFloat)
+            result = SDPX.solve_socp(problem; tolerance=big"1e-16", maximum_iterations=120, verbosity=0, timing=true)
+            @test result.status === SDPX.Optimal
+            @test result.pObj ≈ BigFloat(5) atol=big"1e-14"
+            @test result.diagnostics.plan isa SDPX.ExecutionPlan
+            @test result.diagnostics.plan.payload isa SDPX.NativeSOCPlan
+            @test SDPX.result_certificate(problem, result, options).valid
         end
     end
 end

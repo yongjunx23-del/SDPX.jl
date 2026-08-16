@@ -729,6 +729,7 @@ end
             iter_max=0,
             parameter_policy=:auto,
             scaling=:none,
+            sparse=:sparse,
             diagnostics=true,
             verbosity=0,
         )
@@ -833,8 +834,9 @@ end
         @test [block[1, 1] for block in warm.X] == [4.0, 4.0, 7.0]
         @test [block[1, 1] for block in warm.Y] == [1.0, 1.0, 1.0]
         warm_init = warm.termination.executed.initialization
-        @test !warm_init.applied
-        @test warm_init.path === :preserved_fixed_or_warm_start
+        @test warm_init.applied
+        @test warm_init.initialization_policy === :warm_start
+        @test warm_init.path === :warm_start
         @test warm_init.rhs_solve_count == 0
         @test warm.termination.executed.kkt === :not_executed
     end
@@ -860,6 +862,15 @@ end
             variables,
             equalities;
             packed_hessian=true,
+            lp_route_payload=SDPX.LPRoutePlan(
+                :dense_lu,
+                :dense,
+                :blas_lapack,
+                0,
+                variables,
+                equalities,
+                3,
+            ),
         )
         SDPX._resolve_lp_backend!(workspace, equalities)
         scaling = SDPX.LPScaling(
@@ -925,4 +936,91 @@ end
         @test failure.termination.executed.fallback_reason ===
               :lp_cold_start_residual
     end
+end
+
+# A2 — LP final-route freeze.  Finalized LP diagnostics carry the resolved
+# route as a typed `LPRoutePlan` on `ExecutionPlan.payload`.  Red by design
+# until the A2 source lands.
+@testset "A2 LP final-route payload (dense Cholesky and dense LU)" begin
+    for (with_equality, route) in (
+        (false, :positive_definite_cholesky),
+        (true, :dense_lu),
+    )
+        problem = dense_lp_fixture(Float64; with_equality=with_equality)
+        result = SDPX.solve!(problem, SDPX.SolverOptions{Float64}(
+            algorithm=:lp, presolve=false, scaling=:none,
+            linear_algebra_backend=:standard, verbosity=0, diagnostics=true))
+        payload = result.diagnostics.plan.payload
+        @test payload isa SDPX.LPRoutePlan
+        @test payload.route === route
+        @test payload.storage === :dense
+        @test payload.provider === :blas_lapack
+        record = only(result.diagnostics.attempts)
+        @test payload.route === record.executed.formulation
+        @test payload.storage === record.executed.storage
+        @test payload.provider === record.executed.provider
+    end
+end
+
+@testset "A2 LP final-route payload (diagonal reduced Cholesky)" begin
+    variables = 3
+    blocks = [
+        SDPX.CompactScalarCoefficientVector(Float64, variables, variable, 1.0)
+        for variable in 1:variables
+    ]
+    problem = SDPX.ingest(
+        [1.0, 2.0, 3.0],
+        blocks,
+        [zeros(1, 1) for _ in 1:variables],
+        ones(variables, 1),
+        [1.0];
+        sparse=true,
+        verbosity=0,
+    )
+    result = SDPX.solve(
+        problem;
+        tolerance=1e-8,
+        maximum_iterations=200,
+        verbosity=0,
+        diagnostics=true,
+    )
+    payload = result.diagnostics.plan.payload
+    @test payload isa SDPX.LPRoutePlan
+    @test payload.route === :diagonal_reduced_cholesky
+    @test payload.storage === :dense
+    record = only(result.diagnostics.attempts)
+    @test payload.route === record.executed.formulation
+    @test payload.storage === record.executed.storage
+    # The reduced kernel owns the factor; provider parity holds against the
+    # executed record's provider facts.
+    @test payload.provider === record.executed.provider
+end
+
+@testset "A2 regularization retry keeps the same frozen route" begin
+    # The automatic cold start factors the unregularized system, retries
+    # exactly once at the arithmetic floor on the same route, and the
+    # finalized payload freezes that route.
+    G = Float64[1 0; 0 0]
+    problem = SDPX.ingest(
+        [1.0, 0.0],
+        [reshape(G[1, :], 2, 1, 1), reshape(G[2, :], 2, 1, 1)],
+        [reshape([1.0], 1, 1), reshape([0.0], 1, 1)],
+        zeros(2, 0),
+        Float64[];
+        verbosity=0,
+    )
+    result = SDPX.solve!(
+        problem,
+        SDPX.SolverOptions{Float64}(
+            iter_max=0, parameter_policy=:auto, scaling=:none,
+            diagnostics=true, verbosity=0),
+    )
+    initialization = result.termination.executed.initialization
+    @test initialization.applied
+    @test initialization.factorization_attempts == 2
+    @test initialization.factorization_count == 1
+    @test initialization.kkt_formulation === :positive_definite_cholesky
+    @test result.termination.executed.kkt === :positive_definite_cholesky
+    @test result.diagnostics.plan.payload isa SDPX.LPRoutePlan
+    @test result.diagnostics.plan.payload.route === :positive_definite_cholesky
 end

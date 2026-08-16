@@ -3,14 +3,14 @@ using SparseArrays
 
 @testset "SOC compatibility regressions" begin
     @testset "compact frontend stays in Lorentz coordinates" begin
-        problem = second_order_program(
+        problem = SDPX.second_order_program(
             [1.0, 0.0, 0.0],
             Matrix{Float64}(I, 3, 3),
             zeros(3);
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        result = solve_socp(
+        result = SDPX.solve_socp(
             problem;
             tolerance=1e-8,
             maximum_iterations=120,
@@ -20,15 +20,15 @@ using SparseArrays
         @test result.pObj ≈ 5.0 atol=1e-7
         @test !hasproperty(result, :lifted)
         @test result.diagnostics.selected_algorithms.solver === :native_soc
-        @test result_certificate(
+        @test SDPX.result_certificate(
             problem,
             result,
-            SolverOptions(Float64; tolerance=1e-8, verbosity=0),
+            SDPX.SolverOptions(Float64; tolerance=1e-8, verbosity=0),
         ).valid
 
         # The historical representation switch was removed; the compact API
         # exposes no public non-native path.
-        @test_throws MethodError solve_socp(
+        @test_throws MethodError SDPX.solve_socp(
             problem;
             soc_representation=:native,
             tolerance=1e-8,
@@ -40,7 +40,7 @@ using SparseArrays
         coefficients = zeros(2, 2, 2)
         coefficients[1, :, :] = [1.0 0.0; 0.0 -1.0]
         coefficients[2, :, :] = [0.0 1.0; 1.0 0.0]
-        problem = ingest(
+        problem = SDPX.ingest(
             [0.0, 0.0],
             [coefficients],
             [[0.0 0.0; 0.0 -2.0]],
@@ -58,7 +58,20 @@ using SparseArrays
         # SDPProblem continues through the ordinary SDP compatibility route;
         # compact ConicProblem/MOI models use NativeSOC.
         plan = SDPX.build_execution_plan(problem)
-        @test plan.algorithm == :socp_psd2
+        @test SDPX.classify_problem(problem).cone == :socp
+        @test plan.algorithm == :sdp_primal_dual
+        socp_error = try
+            SDPX.build_execution_plan(
+                problem,
+                SDPX.SolverOptions{Float64}(algorithm=:socp, verbosity=0),
+            )
+            nothing
+        catch exception
+            exception
+        end
+        @test socp_error isa ArgumentError
+        @test socp_error isa ArgumentError &&
+              occursin("NativeSOC", sprint(showerror, socp_error))
     end
 
     @testset "mixed SOC-shaped and general PSD blocks stay SDP" begin
@@ -68,7 +81,7 @@ using SparseArrays
         arrow[1, 3, 3] = 1.0
         large = zeros(1, 4, 4)
         large[1, 1, 1] = 1.0
-        problem = ingest(
+        problem = SDPX.ingest(
             [0.0],
             [arrow, large],
             [-Matrix{Float64}(I, 3, 3), -Matrix{Float64}(I, 4, 4)],
@@ -81,7 +94,7 @@ using SparseArrays
         @test SDPX.build_execution_plan(problem).algorithm == :sdp_primal_dual
         @test_throws ArgumentError SDPX.build_execution_plan(
             problem,
-            SolverOptions{Float64}(algorithm=:socp, verbosity=0),
+            SDPX.SolverOptions{Float64}(algorithm=:socp, verbosity=0),
         )
     end
 end

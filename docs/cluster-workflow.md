@@ -194,7 +194,6 @@ export SDPX_RELEASE_SOURCE="$SOURCE"
     Pkg.develop(PackageSpec(path=ENV["SDPX_RELEASE_SOURCE"]))
     Pkg.add([
         PackageSpec(name="Aqua", version="0.8"),
-        PackageSpec(name="Convex", version="0.16"),
         PackageSpec(name="MultiFloats", version="3"),
         PackageSpec(name="JLD2"),
         PackageSpec(name="JSON"),

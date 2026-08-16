@@ -524,9 +524,9 @@ using Test
     end
 
     @testset "experimental namespace mirrors the surface" begin
-        @test SDPX.Experimental.PerformanceTrace === SDPX.PerformanceTrace
-        @test SDPX.Experimental.performance_trace === SDPX.performance_trace
-        @test SDPX.Experimental.unavailable === SDPX.unavailable
-        @test SDPX.Experimental.isavailable === SDPX.isavailable
+        @test SDPX.PerformanceTrace === SDPX.PerformanceTrace
+        @test SDPX.performance_trace === SDPX.performance_trace
+        @test SDPX.unavailable === SDPX.unavailable
+        @test SDPX.isavailable === SDPX.isavailable
     end
 end

@@ -146,18 +146,6 @@ end
             0.075,
             0.2,
         ) == 0.2
-        # Historical profile-taking entry points are compatibility
-        # forwarders: the profile is ignored.
-        @test SDPX.recommended_adaptive_sigma_max(
-            :large_lattice_dense_schur,
-            0.075,
-            0.0,
-        ) == 0.5
-        @test SDPX.recommended_adaptive_sigma_max(
-            :general_adaptive,
-            0.075,
-            0.2,
-        ) == 0.2
         @test SDPX.AdaptiveParameterPolicy(
             SDPX.SolverOptions{Float64}(
                 β=0.2,
@@ -181,16 +169,6 @@ end
         @test plan.parameters.adaptive_sigma_max == 0.2
         @test SDPX.automatic_scaling_policy(:sdp_primal_dual) == :sdp_ruiz
         @test SDPX.automatic_scaling_policy(:lp_primal_dual) == :lp_geometric
-        @test SDPX.automatic_scaling_policy(
-            :sdp_primal_dual,
-            :large_lattice_dense_schur,
-            :fixed,
-        ) == :sdp_ruiz
-        @test SDPX.automatic_scaling_policy(
-            :lp_primal_dual,
-            :anything,
-            :anything,
-        ) == :lp_geometric
     end
 
     @testset "non-finite diagnostics fall back explicitly" begin
@@ -342,7 +320,7 @@ end
     @testset "production parameter policy is profile-free" begin
         # One static architecture regression: automatic cold-start selection
         # must remain a single generic Mehrotra rule. The public resolver
-        # reports `:generic_mehrotra`, the plan is neutral
+        # reports `:post_scaling_mehrotra`, the plan is neutral
         # (`:automatic_mehrotra`), and executed diagnostics record
         # `:post_scaling_mehrotra` or `:user_fixed`. Old
         # benchmark-calibrated profile symbols, their parameter constants,
@@ -370,7 +348,7 @@ end
             "_large_lattice_dense_schur_profile",
         ]
         required = [
-            ":generic_mehrotra",
+            ":post_scaling_mehrotra",
             ":automatic_mehrotra",
             ":post_scaling_mehrotra",
             ":user_fixed",

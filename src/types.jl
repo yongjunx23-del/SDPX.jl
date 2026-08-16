@@ -1374,10 +1374,11 @@ const CHECKPOINT_FORMAT_VERSION = 1
 
 Immutable structural description used by the automatic solve pipeline. A
 model containing only `1×1` PSD blocks is an LP in SDPX's geometric form.
-Lorentz-compatible blocks are classified as `cone=:socp`. Blocks of side at
-most two use the exact `Q3 <-> S_+^2` isomorphism and specialized scalar
-kernels; larger arrow representations retain the semidefinite-lift fallback.
-Other larger PSD blocks are classified and solved as SDP.
+Lorentz-compatible blocks are classified as `cone=:socp` for structural
+diagnostics. Blocks of side at most two use the exact `Q3 <-> S_+^2`
+isomorphism and specialized scalar kernels; all explicit `SDPProblem` inputs
+execute through the ordinary semidefinite primal-dual route. Other larger PSD
+blocks are classified and solved as SDP.
 """
 struct ProblemClassification
     cone::Symbol
@@ -1726,7 +1727,7 @@ function kkt_backend_from_formulation(
     equalities::Integer,
 )
     formulation = plan.formulation
-    sdp_algorithms = (:sdp_primal_dual, :socp_psd2, :socp_psd_lift)
+    sdp_algorithms = (:sdp_primal_dual,)
     if formulation isa Union{
         DenseNormalEquations,
         DenseAugmentedKKT,
@@ -1792,6 +1793,45 @@ formulation_plan_from_backend(kkt_backend::Symbol) = FormulationPlan(
 )
 
 """
+    AbstractExecutionPlanPayload
+
+Optional solver-family payload carried by one top-level `ExecutionPlan`.
+Subtypes (for example `NativeSOCPlan`) freeze family-specific planning inside
+the single authoritative execution-plan object.  The abstract type lives in
+`types.jl` so `ExecutionPlan` can hold the field without any include-order
+dependency on the family modules that define concrete payload types.
+"""
+abstract type AbstractExecutionPlanPayload end
+
+"""
+    LPRoutePlan
+
+Finalized route payload for the dedicated LP path, carried by
+`ExecutionPlan.payload` on the single post-presolve LP execution plan.
+
+`route` is one of `:diagonal_reduced_cholesky`, `:positive_definite_cholesky`,
+`:dense_lu`, or `:sparse_normal`. The dense and diagonal routes always report
+`:dense` storage with their dense provider. `storage` is `:dense` or
+`:sparse`; `provider` is the executed provider. `sparse_probe_count` counts
+the measured-pattern sparse probes performed while finalizing this route
+(exactly zero for routes decided structurally, and exactly one for an
+auto-sparse candidate that was probed and rejected or accepted).
+
+The payload is finalized exactly once, after LP row presolve and `_scale_lp!`
+have settled `G`/`B`, and is frozen for the whole solve: workspace and backend
+construction assert parity with it instead of re-planning.
+"""
+struct LPRoutePlan <: AbstractExecutionPlanPayload
+    route::Symbol
+    storage::Symbol
+    provider::Symbol
+    sparse_probe_count::Int
+    variables::Int
+    equalities::Int
+    inequalities::Int
+end
+
+"""
     ExecutionPlan
 
 Algorithms selected before a solve. This is deliberately descriptive: it is
@@ -1812,6 +1852,45 @@ struct ExecutionPlan{F<:AbstractKKTFormulation}
     parameter_profile::Symbol
     memory_budget_bytes::Int
     parameters::NamedTuple
+    # Optional solver-family payload. `nothing` for plans that describe a
+    # generic SDP/LP route; solver families that need a typed specialization
+    # (NativeSOC) carry their exact plan here so the ExecutionPlan remains the
+    # sole top-level planning authority.
+    payload::Union{Nothing,AbstractExecutionPlanPayload}
+
+    function ExecutionPlan(
+        classification::ProblemClassification,
+        algorithm::Symbol,
+        scaling::Symbol,
+        kkt_backend::Symbol,
+        backend_config::BackendConfiguration,
+        formulation_plan::FormulationPlan{F},
+        la_config::LABackendConfiguration,
+        gram_kernel::Symbol,
+        schedule::Symbol,
+        threads::Int,
+        parameter_profile::Symbol,
+        memory_budget_bytes::Int,
+        parameters::NamedTuple,
+        payload::Union{Nothing,AbstractExecutionPlanPayload},
+    ) where {F<:AbstractKKTFormulation}
+        return new{F}(
+            classification,
+            algorithm,
+            scaling,
+            kkt_backend,
+            backend_config,
+            formulation_plan,
+            la_config,
+            gram_kernel,
+            schedule,
+            threads,
+            parameter_profile,
+            memory_budget_bytes,
+            parameters,
+            payload,
+        )
+    end
 end
 
 
@@ -1851,6 +1930,66 @@ end
 function Base.propertynames(plan::ExecutionPlan, private::Bool=false)
     names = fieldnames(typeof(plan))
     return (names..., :kkt_formulation, :storage_plan)
+end
+
+"""Immutable copy of `plan` carrying the given solver-family payload.
+The mathematical formulation, backend, and parameter fields are copied
+verbatim; only the payload slot is replaced."""
+function ExecutionPlan(
+    plan::ExecutionPlan{F},
+    payload::Union{Nothing,AbstractExecutionPlanPayload},
+) where {F<:AbstractKKTFormulation}
+    return ExecutionPlan(
+        plan.classification,
+        plan.algorithm,
+        plan.scaling,
+        plan.kkt_backend,
+        plan.backend_config,
+        plan.formulation_plan,
+        plan.la_config,
+        plan.gram_kernel,
+        plan.schedule,
+        plan.threads,
+        plan.parameter_profile,
+        plan.memory_budget_bytes,
+        plan.parameters,
+        payload,
+    )
+end
+
+# Source compatibility for the modern typed 13-field constructor: planners
+# that do not need a solver-family payload keep working with `payload=nothing`.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    formulation_plan::FormulationPlan{F},
+    la_config::LABackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+) where {F<:AbstractKKTFormulation}
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        formulation_plan,
+        la_config,
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+        nothing,
+    )
 end
 
 # Source compatibility for the former 13-field constructor. Modern planner

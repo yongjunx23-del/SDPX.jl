@@ -1,8 +1,7 @@
 #=====================================================================
     Thread-safety / no-shared-state checks (§3.3, §P8). The original
     had `T`/`mode`/`sparseMode` as mutable globals — a second
-    concurrent `sdp()` call (or a throw partway through `findFeasible`)
-    could leak state into an unrelated solve. `solve!` now touches no
+    concurrent solve could leak state into an unrelated solve. `solve!` now touches no
     global mutable state at all: `SDPProblem`/`SolverOptions`/
     `Workspace` are all per-call. This runs several *different*
     problems concurrently and checks each gets its own correct,
@@ -12,6 +11,12 @@
 using SDPX
 using LinearAlgebra
 using Test
+
+function _threads_solve(c, A, C, B, b)
+    T = SDPX.infer_eltype(c, A, C, B, b)
+    problem = SDPX.ingest(c, A, C, B, b; T=T, verbosity=0)
+    return SDPX.solve!(problem, SDPX.SolverOptions{T}(verbosity=0))
+end
 
 function _t1_like(scale::Float64)
     T = Float64
@@ -33,12 +38,12 @@ end
         # results against the same problems solved sequentially, one at a time,
         # rather than asserting a fixed expected status/value.
         scales = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 0.25, 4.0]
-        sequential = [(s=s, prob=SDPX.sdp(_t1_like(s)[1:5]...; verbosity=0)) for s in scales]
+        sequential = [(s=s, prob=_threads_solve(_t1_like(s)[1:5]...)) for s in scales]
 
         results = Vector{Any}(undef, length(scales))
         Threads.@threads for i in eachindex(scales)
             c, A, C, B, b, s = _t1_like(scales[i])
-            results[i] = (s=s, prob=SDPX.sdp(c, A, C, B, b; verbosity=0))
+            results[i] = (s=s, prob=_threads_solve(c, A, C, B, b))
         end
         for (seq, r) in zip(sequential, results)
             @test r.s == seq.s
@@ -60,19 +65,6 @@ end
         @test r1[].status == SDPX.Optimal
         @test r2[].status == SDPX.Optimal
         @test isapprox(r1[].pObj, r2[].pObj; atol=1e-8)
-    end
-
-    @testset "setArithmeticType does not affect calls that carry their own type" begin
-        # the one remaining piece of global state (_LEGACY_T) must not leak into
-        # a call whose inputs already pin a concrete type (BigFloat here) —
-        # only the all-Int/Rational edge case consults it.
-        SDPX.setArithmeticType(Float64)
-        c, A, C, B, b, _ = _t1_like(1.0)
-        Ab = BigFloat.(A[1])
-        cb, Ab3, Cb, Bb, bb = BigFloat.(c), [Ab], [BigFloat.(C[1])], BigFloat.(B), BigFloat.(b)
-        prob = SDPX.sdp(cb, Ab3, Cb, Bb, bb; verbosity=0)
-        @test prob["pObj"] isa BigFloat
-        SDPX.setArithmeticType(BigFloat)  # restore the documented default
     end
 
     @testset "block update reductions preserve serial arithmetic" begin

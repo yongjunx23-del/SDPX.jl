@@ -135,7 +135,7 @@ accepted regularized or mixed-precision SDP factor is reused for bounded
 structured residual corrections when either original-KKT right-hand side is
 above the existing cold-start gate. `Omega_p` and
 `Omega_d` are not read by this automatic path. The public resolver reports
-`profile=:generic_mehrotra`; the controller is deferred in the plan as
+`profile=:post_scaling_mehrotra`; the controller is deferred in the plan as
 `:automatic_mehrotra` and resolved exactly once after scaling as
 `:post_scaling_mehrotra`; and the adaptive iteration controller uses the
 generic 0.50 sigma cap (`adaptive_sigma_max` remains the expert override).

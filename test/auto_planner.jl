@@ -6,7 +6,7 @@ if !isdefined(@__MODULE__, :soc_psd_reference_problem)
     include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
 end
 
-const PlannerAPI = SDPX.Experimental
+const PlannerAPI = SDPX
 
 function _formulation_features(
     ::Type{T};
@@ -192,14 +192,14 @@ end
     problem = _socp_problem(Float64)
     lifted = soc_psd_reference_problem(problem; verbosity=0)
     options = SDPX.SolverOptions{Float64}(
-        algorithm=:socp,
+        algorithm=:sdp,
         scaling=:none,
         presolve=false,
         verbosity=0,
     )
     legacy = SDPX.build_execution_plan(lifted, options)
     planned = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, options)
-    @test legacy.algorithm === :socp_psd2
+    @test legacy.algorithm === :sdp_primal_dual
     @test legacy.scaling === :none
     stable_route(plan) = (
         classification=plan.classification,
@@ -213,9 +213,9 @@ end
         parameter_profile=plan.parameter_profile,
     )
     @test stable_route(planned) == stable_route(legacy)
-    resolved = SDPX.Experimental.resolve_solve_options(
+    resolved = SDPX.resolve_solve_options(
         Float64,
-        SDPX.SolveOptions(algorithm=:socp, scaling=:none, presolve=false),
+        SDPX.SolveOptions(algorithm=:sdp, scaling=:none, presolve=false),
     )
     resolved_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved)
     core_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, resolved.core)
@@ -231,12 +231,42 @@ end
     @test route.classification.cone === :socp
     @test route.classification.variables == lifted.dims.m
     @test route.classification.equalities == lifted.dims.n
-    @test route.algorithm === :socp_psd2
+    @test route.algorithm === :sdp_primal_dual
     @test route.provenance === :value_level_mature_formula
     routed_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, route)
     @test stable_route(routed_plan) == stable_route(planned)
     @test routed_plan.parameters.execution_route_provenance ===
           :value_level_mature_formula
+    auto_options = SDPX.SolverOptions{Float64}(
+        algorithm=:auto,
+        scaling=:none,
+        presolve=false,
+        verbosity=0,
+    )
+    auto_route = PlannerAPI.resolve_execution_route(
+        SDPX.AutoPlanner(),
+        lifted,
+        auto_options,
+    )
+    @test auto_route.algorithm === :sdp_primal_dual
+    @test SDPX.build_execution_plan(
+        SDPX.AutoPlanner(), lifted, auto_options,
+    ).algorithm === :sdp_primal_dual
+    socp_options = SDPX.SolverOptions{Float64}(
+        algorithm=:socp,
+        scaling=:none,
+        presolve=false,
+        verbosity=0,
+    )
+    socp_error = try
+        SDPX.build_execution_plan(SDPX.AutoPlanner(), lifted, socp_options)
+        nothing
+    catch exception
+        exception
+    end
+    @test socp_error isa ArgumentError
+    @test socp_error isa ArgumentError &&
+          occursin("NativeSOC", sprint(showerror, socp_error))
     lp = SDPX.ingest(
         [1.0],
         [reshape([1.0], 1, 1, 1)],

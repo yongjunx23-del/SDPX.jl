@@ -1,37 +1,37 @@
 using Test
 
-# The files in `examples/` are documentation that executes, so they are only
-# worth shipping if they still run. Each one ends in its own assertions --
-# `01` checks the objective against `2√6`, `02` checks that Float64 really
-# does fall short where the table says it does, `03` checks the LP formulation
-# selector reaches opposite conclusions either side of the threshold, `04`
-# checks the certificate refuses to certify a stalled solve -- so running them
-# is the test. A broken example raises and fails here.
-#
-# This caught a real defect on its first run: the JuMP example used
-# `Symmetric` without `using LinearAlgebra`, which meant the snippet in the
-# README failed for anyone who pasted it.
-#
-# Each file is loaded into a fresh module so the examples cannot see each
-# other's globals, and their output is suppressed to keep the suite readable.
-@testset "examples run" begin
-    directory = joinpath(@__DIR__, "..", "examples")
-    scripts = sort(filter(name -> endswith(name, ".jl"), readdir(directory)))
-    @test !isempty(scripts)
+# Keep this list explicit: these are the three v0.5 examples and no legacy
+# numbered/compatibility snippets are allowed to silently re-enter the suite.
+const FINAL_EXAMPLE_INVOCATIONS = (
+    ("l2_integral_socp.jl", ["8"]),
+    ("moment_lp.jl", ["9"]),
+    (
+        "quartic_integral_sdp.jl",
+        ["--order", "4", "--bound", "both", "--max-iterations", "150"],
+    ),
+)
 
-    for script in scripts
+@testset "v0.5 examples run through the public API" begin
+    directory = joinpath(@__DIR__, "..", "examples")
+    expected_names = Set(first.(FINAL_EXAMPLE_INVOCATIONS))
+    actual_names = Set(filter(name -> endswith(name, ".jl"), readdir(directory)))
+    @test actual_names == expected_names
+
+    for (script, arguments) in FINAL_EXAMPLE_INVOCATIONS
         @testset "$script" begin
             path = joinpath(directory, script)
             sandbox = Module(Symbol("Example_", replace(script, r"\W" => "_")))
-            # `Base.include` on a bare module needs `eval`/`include` defined
-            # for `using` to resolve; evaluating the import machinery in first
-            # is what makes an isolated module behave like a script's Main.
+            # `Base.include` on a bare module needs `eval`/`include` defined for
+            # `using` to resolve.  Each script receives a fresh module so no
+            # globals or starts can leak between examples.
             Core.eval(sandbox, :(eval(x) = Core.eval($sandbox, x)))
             Core.eval(sandbox, :(include(p) = Base.include($sandbox, p)))
             redirect_stdout(devnull) do
                 Base.include(sandbox, path)
+                entry = Base.invokelatest(getfield, sandbox, :main)
+                Base.invokelatest(entry, arguments)
             end
-            @test true                      # reached only if the script ran clean
+            @test true
         end
     end
 end

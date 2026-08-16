@@ -199,7 +199,7 @@ function _solver_options(::Type{T}, settings) where {T}
         timing=_setting(settings, "timing"; default=:auto),
         certification=_setting(settings, "certificate", "certification"; default=:auto),
     )
-    return SDPX.Experimental.resolve_solve_options(T, frontend)
+    return SDPX.resolve_solve_options(T, frontend)
 end
 
 function _precision_name_and_bits(spec, settings)

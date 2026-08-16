@@ -10,6 +10,59 @@ using LinearAlgebra
 using Random
 using Test
 
+# Numerical regression tests use the internal ingest/solve seam directly.  The
+# old `sdp`/`findFeasible` wrappers were compatibility entry points and are no
+# longer part of the v0.5 surface; this helper keeps the assertions on the
+# solver core itself.
+function _correctness_solve(c, A, C, B, b; kwargs...)
+    T = SDPX.infer_eltype(c, A, C, B, b)
+    ingest_kwargs = (; T=T, verbosity=get(kwargs, :verbosity, 0),
+        sparse=get(kwargs, :sparse, :auto))
+    problem = SDPX.ingest(c, A, C, B, b; ingest_kwargs...)
+    options_kwargs = merge(
+        (
+            parameter_policy=:fixed,
+            parameter_strategy=:fixed,
+            working_precision_policy=:fixed,
+            scaling=:none,
+            mixed_precision_kkt=:off,
+        ),
+        kwargs,
+    )
+    options = SDPX.SolverOptions{T}(; options_kwargs...)
+    return SDPX.solve!(problem, options)
+end
+
+function _correctness_feasibility_problem(A, C, B, b, ::Type{T}) where {T}
+    block_count = length(A)
+    m = size(A[1], 1)
+    n = length(b)
+    extended_A = Vector{Array{T,3}}(undef, block_count + 1)
+    extended_C = Vector{Matrix{T}}(undef, block_count + 1)
+    for block in 1:block_count
+        size_block = size(A[block], 2)
+        lifted = Array{T,3}(undef, m + 1, size_block, size_block)
+        lifted[1, :, :] = Matrix{T}(I, size_block, size_block)
+        for row in 1:m
+            lifted[row + 1, :, :] = T.(@view A[block][row, :, :])
+        end
+        extended_A[block] = lifted
+        extended_C[block] = Matrix{T}(C[block])
+    end
+    max_constant = zero(T)
+    for block in C
+        max_constant = max(max_constant, maximum(abs, block; init=zero(T)))
+    end
+    t_max = T(10) * (one(T) + max_constant)
+    bound = zeros(T, m + 1, 1, 1)
+    bound[1, 1, 1] = -one(T)
+    extended_A[block_count + 1] = bound
+    extended_C[block_count + 1] = fill(-t_max, 1, 1)
+    objective = [one(T); zeros(T, m)]
+    equalities = vcat(zeros(T, 1, n), B)
+    return objective, extended_A, extended_C, equalities, b
+end
+
 # ---------------------------------------------------------------
 # T1 — toy problem with a closed-form optimum.
 #   min 2x₁+3x₂  s.t.  X = [[x₁,−1],[−1,x₂]] ⪰ 0  (⇔ x₁x₂≥1, x₁≥0)
@@ -28,15 +81,15 @@ end
 
 function test_T1(::Type{T}; tol=1e-8, ϵ_gap=1e-10) where {T}
     c, A, C, B, b = t1_data(T)
-    prob = SDPX.sdp(c, A, C, B, b; verbosity=0, ϵ_gap=T(ϵ_gap))
+    prob = _correctness_solve(c, A, C, B, b; verbosity=0, ϵ_gap=T(ϵ_gap))
     popt = 2 * sqrt(T(6))
-    @test prob["status"] == "Optimal"
-    @test abs(prob["pObj"] - popt) < T(tol)
-    @test abs(prob["pObj"] - prob["dObj"]) < T(tol)
+    @test prob.status == SDPX.Optimal
+    @test abs(prob.pObj - popt) < T(tol)
+    @test abs(prob.pObj - prob.dObj) < T(tol)
     # `eigvals` has no generic (non-LAPACK) fallback for BigFloat (verified during
     # development), so PSD-ness is checked via Cholesky success on a shifted
     # matrix instead of via eigenvalues — works uniformly across T.
-    @test all(l -> isposdef(Symmetric(l) + T(tol) * I), prob["X"])
+    @test all(l -> isposdef(Symmetric(l) + T(tol) * I), prob.X)
     return prob
 end
 
@@ -55,12 +108,12 @@ end
 
 function test_T2(::Type{T}; tol=1e-6) where {T}
     c, A, C, B, b = t2_data(T)
-    prob = SDPX.sdp(c, A, C, B, b; verbosity=0)
-    @test prob["status"] == "Optimal"
-    @test abs(prob["pObj"] - T(11) / 2) < T(tol)
-    @test abs(only(transpose(B) * prob["x"] - b)) < T(tol)
+    prob = _correctness_solve(c, A, C, B, b; verbosity=0)
+    @test prob.status == SDPX.Optimal
+    @test abs(prob.pObj - T(11) / 2) < T(tol)
+    @test abs(only(transpose(B) * prob.x - b)) < T(tol)
     # dual feasibility of the returned (y,Y), recomputed independently
-    d = c - [sum(sum(A[l][i, :, :] .* prob["Y"][l]) for l in eachindex(A)) for i in eachindex(c)] - B * prob["y"]
+    d = c - [sum(sum(A[l][i, :, :] .* prob.Y[l]) for l in eachindex(A)) for i in eachindex(c)] - B * prob.y
     @test maximum(abs, d) < T(tol)
     return prob
 end
@@ -76,10 +129,10 @@ function test_T3(::Type{T}; tol=1e-6) where {T}
     c, A, C, _, _ = t2_data(T)
     B = T[1 1; 0 0]
     b = T[2, 2]
-    prob = SDPX.sdp(c, A, C, B, b; verbosity=0)
-    @test prob["status"] == "Optimal"
-    @test abs(prob["pObj"] - T(11) / 2) < T(tol)
-    @test all(x -> !isnan(x), prob["x"])
+    prob = _correctness_solve(c, A, C, B, b; verbosity=0)
+    @test prob.status == SDPX.Optimal
+    @test abs(prob.pObj - T(11) / 2) < T(tol)
+    @test all(x -> !isnan(x), prob.x)
     return prob
 end
 
@@ -109,15 +162,34 @@ end
 
 function test_T4(::Type{T}; seed=1) where {T}
     A, C, B, b, c = t4_data(T, seed)
-    prob = SDPX.findFeasible(A, C, B, b; Ωp=10, Ωd=10, β=0.01, prec=100,
-        ϵ_dual=1e-50, ϵ_primal=1e-50, ϵ_gap=1e-10, verbosity=0)
-    @test prob["status"] in ("Feasible", "Infeasible")
+    objective, extended_A, extended_C, equalities, original_b =
+        _correctness_feasibility_problem(A, C, B, b, T)
+    prob = _correctness_solve(
+        objective,
+        extended_A,
+        extended_C,
+        equalities,
+        original_b;
+        mode=SDPX.FEASIBILITY,
+        Ωp=T(10),
+        Ωd=T(10),
+        β=T(0.01),
+        precision_bits=333,
+        working_precision_policy=:fixed,
+        parameter_policy=:fixed,
+        parameter_strategy=:fixed,
+        ϵ_dual=T(1e-50),
+        ϵ_primal=T(1e-50),
+        ϵ_gap=T(1e-10),
+        verbosity=0,
+    )
+    @test prob.status in (SDPX.FeasibleCert, SDPX.InfeasibleCert)
 
     # independently recompute the primal residual of the *original* L blocks
     # (X^{(l)} = Σᵢxᵢ₊₁Aᵢ^{(l)} − C^{(l)} + t·I, t = x[1]); the solver's own
     # extra bound block (§5.4's t≤t_max fix) is an implementation detail not
     # re-derived here.
-    x, X = prob["x"], prob["X"]
+    x, X = prob.x, prob.X
     t = x[1]
     m, L = size(A[1], 1), length(A)
     p_res = maximum(1:L) do l
@@ -126,7 +198,7 @@ function test_T4(::Type{T}; seed=1) where {T}
         maximum(abs, Xl_check - X[l])
     end
     @test p_res < T(1e-6)
-    @test prob["pObj"] >= prob["dObj"] - T(1e-4)
+    @test prob.pObj >= prob.dObj - T(1e-4)
     return prob
 end
 
@@ -162,11 +234,11 @@ const T6_PINS = Dict(
 
 function test_T6()
     c, A, C, B, b = t1_data(Float64)
-    prob = SDPX.sdp(c, A, C, B, b; verbosity=0)
+    prob = _correctness_solve(c, A, C, B, b; verbosity=0)
     @test abs(prob.iterations - T6_PINS[:T1_Float64]) <= 2
 
     c2, A2, C2, B2, b2 = t2_data(Float64)
-    prob2 = SDPX.sdp(c2, A2, C2, B2, b2; verbosity=0)
+    prob2 = _correctness_solve(c2, A2, C2, B2, b2; verbosity=0)
     @test abs(prob2.iterations - T6_PINS[:T2_Float64]) <= 2
 end
 

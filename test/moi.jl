@@ -1,5 +1,6 @@
 using SDPX
 using JuMP
+using LinearAlgebra
 using MultiFloats: Float64x4
 using Test
 import MathOptInterface as MOI
@@ -50,13 +51,18 @@ end
     @testset "copy_to, PSD primal/dual, and equality — $T" for T in (Float64, Float64x4)
         model, x, psd, equality = moi_t1_model(T; equality=true)
         optimizer = SDPX.Optimizer{T}(
-            sparse=true,
+            # The MOI option is lowered to the public Settings sparse policy.
+            # `:auto` is the common public spelling accepted by both the
+            # settings layer and the native SDP lowerer.
+            sparse=:auto,
             verbosity=0,
             tol_gap=T(1e-8),
             tol_primal=T(1e-8),
             tol_dual=T(1e-8),
         )
         index_map = MOI.copy_to(optimizer, model)
+        @test optimizer.model isa SDPX.Model{T}
+        @test SDPX.bridge_plan(optimizer).route == :sdp_family
         MOI.optimize!(optimizer)
         @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.OPTIMAL
         @test MOI.get(optimizer, MOI.PrimalStatus()) == MOI.FEASIBLE_POINT
@@ -67,9 +73,30 @@ end
         primal = MOI.get(optimizer, MOI.ConstraintPrimal(), index_map[psd])
         @test primal ≈ T[2, -1, 0.5] rtol=T(1e-5)
         dual = MOI.get(optimizer, MOI.ConstraintDual(), index_map[psd])
-        raw_result = MOI.get(optimizer, MOI.RawSolver())
-        raw_dual = raw_result.Y[1]
-        @test dual == T[raw_dual[1, 1], raw_dual[1, 2], raw_dual[2, 2]]
+        result = MOI.get(optimizer, MOI.RawSolver())
+        @test result isa SDPX.Result{T}
+        @test result === optimizer.public_result
+        @test SDPX.status(result) === :optimal
+        @test SDPX.execution_plan(result) isa SDPX.ExecutionPlan
+        @test SDPX.execution_plan(result) === SDPX.diagnostics(result).plan
+        @test SDPX.primal_objective(result) ≈ T(5.75) rtol=T(1e-6)
+        # The raw MOI dual is reconstructed from the public Result and the
+        # copied Model constraint references; no legacy raw-solver Y field is
+        # part of the assertion anymore.
+        psd_info = optimizer.model_constraint_records[
+            (typeof(index_map[psd]), index_map[psd].value)
+        ]
+        psd_block = SDPX.ConstraintBlockRef(
+            optimizer.model,
+            psd_info.refs[1].block,
+        )
+        raw_dual_matrix = SDPX.dual(result, psd_block)
+        raw_dual = T[
+            raw_dual_matrix[1, 1],
+            raw_dual_matrix[1, 2],
+            raw_dual_matrix[2, 2],
+        ]
+        @test dual == raw_dual
         @test dual[3] ≈ T(3) rtol=T(1e-7)
         @test MOI.get(
             optimizer,
@@ -81,7 +108,10 @@ end
             MOI.ConstraintDual(),
             index_map[equality],
         )
-        @test equality_dual == raw_result.y[1]
+        equality_info = optimizer.model_constraint_records[
+            (typeof(index_map[equality]), index_map[equality].value)
+        ]
+        @test equality_dual == SDPX.dual(result, equality_info.refs[1])
         @test dual[1] + equality_dual ≈ T(2) rtol=T(1e-7)
         @test MOI.get(optimizer, MOI.BarrierIterations()) > 0
         @test MOI.get(optimizer, MOI.SolveTimeSec()) >= 0
@@ -89,9 +119,13 @@ end
 
     @testset "scaled PSD triangle conversion" begin
         model, _, psd, _ = moi_t1_model(Float64; scaled=true)
-        optimizer = SDPX.Optimizer(sparse=true, verbosity=0)
+        optimizer = SDPX.Optimizer(sparse=:auto, verbosity=0)
         index_map = MOI.copy_to(optimizer, model)
         MOI.optimize!(optimizer)
+        result = MOI.get(optimizer, MOI.RawSolver())
+        @test result isa SDPX.Result{Float64}
+        @test SDPX.status(result) === :optimal
+        @test SDPX.execution_plan(result) isa SDPX.ExecutionPlan
         @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.OPTIMAL
         primal = MOI.get(optimizer, MOI.ConstraintPrimal(), index_map[psd])
         @test primal[2] ≈ -sqrt(2.0) rtol=1e-8
@@ -114,7 +148,7 @@ end
         )
         MOI.set(model, MOI.ObjectiveSense(), MOI.MAX_SENSE)
         MOI.set(model, MOI.ObjectiveFunction{MOI.VariableIndex}(), x)
-        optimizer = SDPX.Optimizer(sparse=true, verbosity=0)
+        optimizer = SDPX.Optimizer(sparse=:auto, verbosity=0)
         index_map = MOI.copy_to(optimizer, model)
         MOI.optimize!(optimizer)
         @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.OPTIMAL
@@ -123,35 +157,35 @@ end
     end
 
     @testset "JuMP smoke test" begin
-        model = Model(() -> SDPX.Optimizer(sparse=true, verbosity=0))
+        model = JuMP.Model(() -> SDPX.Optimizer(sparse=:auto, verbosity=0))
         @variable(model, x[1:2])
         @constraint(
             model,
-            Symmetric([x[1] -1.0; -1.0 x[2]]) in PSDCone(),
+            LinearAlgebra.Symmetric([x[1] -1.0; -1.0 x[2]]) in JuMP.PSDCone(),
         )
         @objective(model, Min, 2x[1] + 3x[2])
-        optimize!(model)
-        @test termination_status(model) == MOI.OPTIMAL
-        @test objective_value(model) ≈ 2sqrt(6.0) rtol=1e-7
-        @test value(x[1]) ≈ sqrt(3 / 2) rtol=1e-6
-        @test value(x[2]) ≈ sqrt(2 / 3) rtol=1e-6
+        JuMP.optimize!(model)
+        @test JuMP.termination_status(model) == MOI.OPTIMAL
+        @test JuMP.objective_value(model) ≈ 2sqrt(6.0) rtol=1e-7
+        @test JuMP.value(x[1]) ≈ sqrt(3 / 2) rtol=1e-6
+        @test JuMP.value(x[2]) ≈ sqrt(2 / 3) rtol=1e-6
     end
 
     @testset "JuMP Float64x4 smoke test" begin
         T = Float64x4
-        model = GenericModel{T}(
-            () -> SDPX.Optimizer{T}(sparse=true, verbosity=0),
+        model = JuMP.GenericModel{T}(
+            () -> SDPX.Optimizer{T}(sparse=:auto, verbosity=0),
         )
         @variable(model, x[1:2])
         @constraint(
             model,
-            Symmetric([x[1] T(-1); T(-1) x[2]]) in PSDCone(),
+            LinearAlgebra.Symmetric([x[1] T(-1); T(-1) x[2]]) in JuMP.PSDCone(),
         )
         @objective(model, Min, T(2) * x[1] + T(3) * x[2])
-        optimize!(model)
-        @test termination_status(model) == MOI.OPTIMAL
-        @test objective_value(model) ≈ T(2sqrt(6.0)) rtol=T(1e-7)
-        @test value(x[1]) ≈ T(sqrt(3 / 2)) rtol=T(1e-6)
-        @test value(x[2]) ≈ T(sqrt(2 / 3)) rtol=T(1e-6)
+        JuMP.optimize!(model)
+        @test JuMP.termination_status(model) == MOI.OPTIMAL
+        @test JuMP.objective_value(model) ≈ T(2sqrt(6.0)) rtol=T(1e-7)
+        @test JuMP.value(x[1]) ≈ T(sqrt(3 / 2)) rtol=T(1e-6)
+        @test JuMP.value(x[2]) ≈ T(sqrt(2 / 3)) rtol=T(1e-6)
     end
 end

@@ -257,7 +257,13 @@ function main(args=ARGS)
         linear_algebra_backend=:multifloat,
         threads=Threads.nthreads(),
     )
-    plan = SDPX.plan_native_soc(problem, options; specialization=:fixed_trace)
+    execution_plan = SDPX.build_execution_plan(
+        SDPX.AutoPlanner(),
+        problem,
+        options;
+        specialization=:fixed_trace,
+    )
+    plan = execution_plan.payload
     plan.cone.specialization === :fixed_trace_q3 || error(
         "NativeSOC did not select the fixed-trace Q3 specialization",
     )
@@ -328,7 +334,7 @@ function main(args=ARGS)
         "specialization" => string(plan.cone.specialization),
         "equality_method" => string(selected.equality),
         "la_provider" => string(selected.la_executed_provider),
-        "scaling" => string(selected.scaling),
+        "scaling" => string(selected.executed_scaling),
         "julia_threads" => Threads.nthreads(),
         "solve_seconds" => solve_seconds,
         "solve_allocations" => solve_allocations,

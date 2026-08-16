@@ -65,9 +65,9 @@ The ordinary frontend exposes policies, not low-level IPM constants:
 
 Under `:auto`, the static formulation planner selects the dense KKT
 formulation before execution. `normal_equations` and `augmented` are expert
-overrides; `primal` preserves the historical primal orientation without
-disabling sparse or block-arrow routes. `dual` is reserved for a future typed
-dual transform and fails closed.
+overrides; `primal` preserves the historical primal-formulation policy without
+disabling sparse or block-arrow routes. `dual` is not a production formulation
+and fails closed.
 
 Parameters such as centering constants, Q3 Gram strategies, mixed-precision
 condition limits, and refinement micro-policy remain expert/internal controls.
@@ -76,29 +76,41 @@ workflow proves that users need to override them.
 
 ## Julia frontend
 
-The same policy boundary is available without the CLI:
+The typed `Model` frontend exposes the same policy boundary without JSON:
 
 ```julia
 using SDPX
 
-options = SolveOptions()  # every field is :auto
-result = solve(problem, options)
+model = Model(Float64)
+x = variable!(model, :x, 1; domain=Nonnegative())
+constraint!(model, :lower, x[1] - 1, Nonnegative())
+objective!(model, Minimize(), x[1])
+settings = Settings(model; algorithm=:lp, verbosity=0)
+result = optimize!(model; settings=settings)
 ```
 
 High-precision policy can be explicit:
 
 ```julia
-options = SolveOptions(
-    precision=840,
-    duality_gap_threshold="1e-80",
-    primal_error_threshold="1e-80",
-    dual_error_threshold="1e-80",
+model = Model(BigFloat; precision_bits=840)
+settings = Settings(
+    model;
+    tolerances=Tolerances(
+        BigFloat;
+        primal=big"1e-80",
+        dual=big"1e-80",
+        gap=big"1e-80",
+    ),
+    algorithm=:sdp,
 )
 ```
 
-For an already-ingested problem, its arithmetic has already been chosen. A
-request for 840 bits therefore requires that the problem itself was created as
-BigFloat at the desired precision. The CLI does not have this issue because it
-parses the model inside the requested precision scope.
+The model's arithmetic is chosen at construction. A request for 840 bits
+therefore requires `Model(BigFloat; precision_bits=840)`, while the CLI parses
+JSON inside the requested precision scope. `Settings.algorithm` must match the
+pure LP, native SOC/RSOC, or SDP family; mixed non-free families fail closed
+before numerical lowering.
 
-`SolverOptions{T}` remains available as the expert resolved interface.
+The CLI implementation lowers its JSON policy through qualified compatibility
+option records, but those records are not part of the public Julia quickstart
+surface.

@@ -5,7 +5,7 @@ typed numerical backend behind one `ExecutionPlan`.
 
 ```text
                  Frontend
- Julia arrays / JuMP-MOI / Convex / CLI / file loaders
+   Model builder / JuMP-MOI / CLI / file loaders
                        |
                        v
              Canonical cone semantics
@@ -34,21 +34,27 @@ typed numerical backend behind one `ExecutionPlan`.
 
 ## Frontend boundaries
 
-The native APIs (`ingest`, `linear_program`, `second_order_program`) validate
-and canonicalize typed data into `SDPProblem{T}` or `ConicProblem{T}`. JuMP
-and MathOptInterface are adapters over the same core: MOI caches a completed
-model and `copy_to` finalizes PSD incidence data, then SDPX converts it to the
-native typed representation. Convex.jl uses the same MOI optimizer after DCP
-canonicalization. The CLI parses JSON into the same typed model boundary and
-is not a separate numerical route.
+The public boundary is one typed `Model` builder. `variable!`, `constraint!`,
+and `objective!` record affine expressions and cone domains; `optimize!`
+compiles that model once, classifies its native cone family, and dispatches to
+the corresponding typed lowerer. The public domains are `Reals`, the scalar
+orthants and `ZeroCone` (LP), `LorentzCone`/`RotatedLorentzCone` (SOC), and
+`PSDCone` (SDP). `Settings` and `Outputs` carry the typed solve policy and
+retention policy; result accessors read the single typed result boundary.
 
-The compact SOC frontend crosses the public boundary into `ConicProblem`
-without any representation transform; production SOC solves stay in Lorentz
-coordinates. The historical SOC-to-PSD transform is a test-only reference.
+JuMP and MathOptInterface remain adapters over the same boundary: MOI caches a
+completed model and `copy_to` finalizes cone incidence before the SDPX
+optimizer lowers it. The CLI parses JSON through the mature qualified loader
+into the same numerical pipeline; it is not a separate solver route.
+
+Route classification is fail-closed. A model containing more than one nonfree
+family (for example LP + SOC, LP + SDP, or SOC + SDP) raises a typed error
+before lowering. There is no production conversion from a Lorentz block to a
+PSD block; SOC models stay in native Lorentz coordinates.
 
 ## Midend: presolve, scale, formulate, plan
 
-Every public solve runs a conservative preparation pipeline:
+Every public `optimize!` runs a conservative preparation pipeline:
 
 1. classify cone, storage, arithmetic, size, and predicted Schur density;
 2. rank-revealing equality presolve in the problem arithmetic;
@@ -68,10 +74,12 @@ certificate remains the final status authority.
 
 ## Cone formulation ownership
 
-SOC-to-PSD is a **formulation transform**, not a frontend fact. Native SOC and
-the arrow specialized Q3 implementation share the same Lorentz semantic IR.
-The planner may choose an exact PSD-arrow reference route when necessary, but
-diagnostics and benchmarks must label that formulation explicitly.
+Cone family and numerical formulation are separate decisions. Native SOC and
+the arrow-specialized Q3 implementation share one Lorentz semantic IR; the
+specialization is selected only inside the native SOC route. A PSD model stays
+on the SDP route even when its blocks have a structure that admits a Lorentz
+interpretation. Derivation and test fixtures may compare the two mathematical
+cones, but execution never silently changes family.
 
 The automatic planner uses structure facts first, then checks backend
 feasibility. Providers and arithmetic names never choose the mathematical
@@ -100,12 +108,12 @@ conservatively keeps dense normal equations. Augmented KKT is selected only
 when strong normal-equation risk is present and the candidate passes
 structural, backend, and memory feasibility.
 
-Explicit requests are never overridden. `formulation=:normal_equations` fixes
-dense normal equations and fails closed for dedicated LP. `formulation=:augmented`
-fixes dense augmented KKT or fails during planning. `formulation=:primal`
-preserves the historical primal orientation without disabling sparse or
-block-arrow routes. The dual KKT form remains an internal cost estimate only;
-production formulation values exclude `:dual`.
+Explicit requests are never overridden. Public `Settings.formulation` accepts
+`:auto`, `:variable_space_schur`, and `:dense_augmented_kkt`; a request that is
+incompatible with the classified route fails during planning. The first two
+names lower to the mature normal-equation and augmented-KKT implementations.
+Qualified low-level option records retain additional compatibility spellings,
+but those records are internal and are not a second public modeling API.
 
 The dense augmented KKT system is the equality-augmented Schur system
 
@@ -123,8 +131,8 @@ primal `S` block; the equality block remains exactly zero, residual and
 refinement always evaluate the original unregularized `K`, and failure never
 switches formulation, provider, or precision.
 
-`SDPX.Experimental.plan_formulation` is the dense-KKT formulation step used by
-`build_execution_plan`; it returns a `FormulationDecision` with
+`SDPX.plan_formulation` is a qualified internal dense-KKT formulation step used
+by `build_execution_plan`; it returns a `FormulationDecision` with
 requested/preferred/selected formulation, reasons, required capabilities,
 feasibility, equality scale/RRQR evidence, and memory estimates. The execution
 plan and result diagnostics expose the summary through
@@ -144,16 +152,19 @@ factor operations.
 
 ## Validation boundary
 
-`result_certificate` recomputes objectives, affine residuals, componentwise
-backward errors, complementarity, and PSD margins in the original coordinates.
-A solver status is not authoritative when this independent check fails. The
-direct primal-dual iteration is not a full homogeneous self-dual embedding,
-so infeasibility certificates are produced only when a validated homogeneous
-ray is found. See [diagnostics.md](diagnostics.md).
+The `certificate(result)` accessor exposes a post-solve check that recomputes
+objectives, affine residuals, componentwise backward errors, complementarity,
+and PSD margins in the original coordinates. A solver status is not
+authoritative when this independent check fails. The direct primal-dual
+iteration is not a full homogeneous self-dual embedding, so infeasibility
+certificates are produced only when a validated homogeneous ray is found. See
+[diagnostics.md](diagnostics.md).
 
 ## Current limitations
 
 - The public API is experimental and may change before 1.0.
+- LP, native SOC/RSOC, and SDP are the supported pure routes; mixed nonfree
+  cone families fail closed before numerical lowering.
 - The direct primal-dual iteration does not carry HSD `τ`/`κ` variables, so it
   may fail to produce a ray for some infeasible models.
 - Equality-constrained LPs use dense LU; null-space/range-space selection is

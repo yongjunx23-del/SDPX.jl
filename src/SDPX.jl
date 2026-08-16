@@ -3,10 +3,24 @@ module SDPX
 using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, Serialization
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
+include("modeling/domains.jl")
+include("modeling/refs.jl")
+include("modeling/types.jl")
+include("ir/types.jl")
+include("ir/storage.jl")
+include("modeling/model.jl")
+include("modeling/affine.jl")
+include("modeling/constraints.jl")
+include("modeling/starts.jl")
+include("ir/reconstruction.jl")
+include("modeling/compile.jl")
+include("ir/route.jl")
 include("types.jl")
 include("memory_utils.jl")
 include("frontend/solve_options.jl")
 include("midend/resolve_options.jl")
+include("public/settings.jl")
+include("public/outputs.jl")
 include("kernels/api.jl")
 include("kernels/generic.jl")
 include("kernels/bigfloat.jl")
@@ -16,7 +30,10 @@ include("kernels/extended_precision_blas/ExtendedPrecisionBLAS.jl")
 include("blas_backend.jl")
 include("ingest.jl")
 include("lp_api.jl")
+include("ir/lower_lp.jl")
+include("ir/lower_sdp.jl")
 include("soc.jl")
+include("ir/lower_soc.jl")
 include("soc_lorentz_kernels.jl")
 include("cold_start.jl")
 include("midend/problem_features.jl")
@@ -46,24 +63,26 @@ include("solve.jl")
 include("prepared.jl")
 include("validation.jl")
 include("spectrum.jl")
-include("moi_wrapper.jl")
-include("convex_api.jl")
-include("compat.jl")
 include("frontend/high_level_solve.jl")
 include("performance_trace.jl")
-include("public_api.jl")
+include("public/result.jl")
+include("public/optimize.jl")
+include("moi_wrapper.jl")
 
-export sdp, findFeasible, setArithmeticType
-export solve, solve!, ingest, SDPProblem, SolverOptions, SolveOptions, SDPResult, SolveStatus, SolveMode, OPTIMIZE, FEASIBILITY
-export linear_program, solve_lp
-export SOCConstraint, ConicProblem, ConicResult
-export second_order_program, solve_socp
-export PreparedSolver, prepare
-export ActiveSparseCoefficientVector
-export reconstruct_spectrum, export_spectrum
-export result_certificate, solve_summary
+# v0.5 has one public modeling/solve interface.  Mature problem, workspace,
+# provider, and legacy solve types remain package-internal implementation
+# details and are intentionally not re-exported as parallel entry points.
+export Model
+export variable!, constraint!, objective!
+export set_start!, set_dual_start!, set_dual_slack_start!
+export Reals, Nonnegative, Nonpositive, ZeroCone
+export LorentzCone, RotatedLorentzCone, PSDCone
+export Minimize, Maximize
+export Settings, Tolerances, Limits, Outputs
+export optimize!, execution_plan
+export status, value, dual, dual_slack
+export primal_objective, dual_objective
+export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
-export convex_optimizer, convex_semidefinite, solve_convex!
-export Experimental
 
 end

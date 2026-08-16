@@ -106,6 +106,10 @@ Base.@noinline function _run_native_soc_frontend(
     problem::ConicProblem{T},
     options::SolverOptions{T},
     specialization::Symbol,
+    ;
+    x0=nothing,
+    z0=nothing,
+    y0=nothing,
 ) where {T}
     _require_supported_arithmetic_type(T)
     frontend_started = time_ns()
@@ -115,7 +119,19 @@ Base.@noinline function _run_native_soc_frontend(
         "native SOC specialization must be :auto, :off, or :fixed_trace",
     ))
     frontend_seconds = (time_ns() - frontend_started) / 1.0e9
-    result = _solve_native_soc_core(problem, options; specialization)
+    # One top-level plan per solve: the AutoPlanner freezes the NativeSOC
+    # payload, and the core validates it instead of planning a second time.
+    plan = build_execution_plan(
+        AutoPlanner(), problem, options; specialization,
+    )
+    result = _solve_native_soc_core(
+        problem,
+        options,
+        plan;
+        x0=x0,
+        z0=z0,
+        y0=y0,
+    )
     certification_started = time_ns()
     result = certify_native_soc_result(problem, result, options)
     certification_seconds =

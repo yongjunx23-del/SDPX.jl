@@ -68,7 +68,7 @@ _REQUIRE_BFLA && !_BFLA_LOADED && error(
 const _PROVIDERS_LOADED =
     (!_REQUIRE_MFLA || _MFLA_LOADED) && (!_REQUIRE_BFLA || _BFLA_LOADED)
 
-const LA = SDPX.Experimental
+const LA = SDPX
 
 function _assert_provider_root(environment::AbstractString, mod)
     project = get(ENV, environment, nothing)
@@ -444,7 +444,8 @@ function _solve_smoke_soc_augmented(
         verbosity=0,
         diagnostics=true,
     )
-    result = SDPX._solve_native_soc_core(problem, options)
+    plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
+    result = SDPX._solve_native_soc_core(problem, options, plan)
     @test result.status == SDPX.Optimal
     @test isapprox(Float64(result.pObj), 5.0; atol=1e-7)
     selected = result.diagnostics.selected_algorithms
@@ -482,7 +483,8 @@ function _solve_smoke_soc_normal(
         verbosity=0,
         diagnostics=true,
     )
-    result = SDPX._solve_native_soc_core(problem, options)
+    plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
+    result = SDPX._solve_native_soc_core(problem, options, plan)
     @test result.status == SDPX.Optimal
     @test isapprox(Float64(result.pObj), 5.0; atol=1e-7)
     selected = result.diagnostics.selected_algorithms

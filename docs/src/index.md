@@ -17,35 +17,51 @@ Pkg.add(url="https://github.com/yongjunx23-del/SDPX.jl")
 
 ## First solve
 
+The public route is a typed `Model`: declare product-cone variables, add affine
+cone constraints, set one objective, then call `optimize!`. This small LP uses
+only exported names and returns a typed result whose fields are read through
+accessors:
+
 ```julia
 using SDPX
 
-# minimise cᵀx  subject to  Σᵢ xᵢ Aᵢ − C ⪰ 0
-A = zeros(2, 2, 2)
-A[1, 1, 1] = 1
-A[2, 2, 2] = 1
-C = [0.0 1.0; 1.0 0.0]
-c = [2.0, 3.0]
+model = Model(Float64)
+x = variable!(model, :x, 2; domain=Nonnegative())
+constraint!(model, :mass, x[1] + x[2] - 1, ZeroCone())
+objective!(model, Minimize(), 2 * x[1] + 3 * x[2])
 
-result = solve(c, [A], [C], Matrix{Float64}(undef, 2, 0), Float64[]; verbosity=0)
-result.status      # Optimal
-result.pObj        # 4.898979506633980  (exact optimum 2√6)
+settings = Settings(
+    model;
+    algorithm=:lp,
+    limits=Limits(iterations=200, time=60.0, threads=1),
+    verbosity=0,
+)
+outputs = Outputs(:all, :all, :all; objectives=true, certificate=:summary)
+result = optimize!(model; settings=settings, outputs=outputs)
+
+status(result)             # :optimal
+value(result, x)           # approximately [1, 0]
+primal_objective(result)   # approximately 2
+certificate(result).valid  # true when the independent check passes
 ```
 
-The repository's [`examples/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/examples)
-directory holds runnable, self-checking versions of this and more: extended
-precision, the sparse LP path, native SOCP, independent certificates, JuMP,
-and the command-line bridge. They are executed by the test suite, so they do
-not go stale.
+The three runnable, self-checking examples are deliberately the only examples
+promoted by the v0.5 documentation:
+
+- [`examples/quartic_integral_sdp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/quartic_integral_sdp.jl)
+  — a native PSD moment bound with Float64 and BigFloat modes.
+- [`examples/moment_lp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/moment_lp.jl)
+  — a finite-grid moment LP and objective-sense checks.
+- [`examples/l2_integral_socp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/l2_integral_socp.jl)
+  — a native Lorentz-cone integral bound.
 
 ## Where to go next
 
-- [Quick start](quickstart.md) — native-array and typed problem workflows.
+- [Quick start](quickstart.md) — the typed `Model` builder and result accessors.
 - [SOCP and fixed trace](socp.md) — native Lorentz solves and the Q3
   specialization.
 - [Precision](precision.md) — choosing Float64, Float64x4, or BigFloat.
 - [JuMP and MOI](jump.md) — JuMP modeling through the SDPX optimizer.
-- [Convex.jl](convex.md) — DCP modeling through the SDPX MOI optimizer.
 - [Automatic pipeline](pipeline.md) — classification, presolve, scaling, and
   planning.
 - [Preprocessing](preprocessing.md) — conservative structural reductions.
@@ -56,7 +72,8 @@ not go stale.
   formulations.
 - [Linear-algebra providers](providers.md) — the replaceable LA seam.
 - [Benchmarks and evidence](benchmarks.md) — measured results and policy.
-- [API reference](api.md) — the stable-intent entry points.
+- [API reference](api.md) — qualified implementation and metadata reference;
+  the public quickstart is the typed `Model` route above.
 - [README](https://github.com/yongjunx23-del/SDPX.jl#readme) — features,
   precision guidance, and known limitations.
 

@@ -43,13 +43,17 @@ function gram_ab_main(args=ARGS)
         linear_algebra_backend=:multifloat,
         threads=Threads.nthreads(),
     )
-    plan = SDPX.plan_native_soc(
-        problem, options; specialization=:fixed_trace,
+    execution_plan = SDPX.build_execution_plan(
+        SDPX.AutoPlanner(),
+        problem,
+        options;
+        specialization=:fixed_trace,
     )
+    plan = execution_plan.payload
     plan.cone.specialization === :fixed_trace_q3 || error(
         "fixed-trace specialization was not selected",
     )
-    workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
+    workspace = SDPX.NativeSOCWorkspace(problem, execution_plan, options)
     scaling_ok, failed_block = SDPX._native_soc_scaling!(workspace)
     scaling_ok || error("NT scaling failed for block $failed_block")
     SDPX.zero_owned!(workspace.hessian)

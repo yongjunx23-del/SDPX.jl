@@ -44,6 +44,18 @@ using Test
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :post_presolve
         @test selected.lp_formulation === :sparse_normal
+        # The finalized sparse payload is also the canonical planned LA
+        # provider.  CHOLMOD owns the sparse factor/solve, so the executed
+        # provider and ownership facts must not inherit the pre-row BLAS plan.
+        @test selected.planned_la_backend === :sparse
+        @test selected.la_provider === :cholmod
+        @test selected.la_ownership === :provider_owned
+        @test selected.planned_la_provider === :cholmod
+        @test selected.planned_la_ownership === :provider_owned
+        @test selected.la_executed_provider === :cholmod
+        @test selected.la_executed_ownership === :provider_owned
+        @test result.termination.executed.la_provider === :cholmod
+        @test result.termination.executed.la_ownership === :provider_owned
         @test selected.parameter_profile === :post_scaling_mehrotra
         @test selected.parameter_source === :post_scaling_mehrotra
         @test selected.parameter_resolution_count == 1
@@ -465,7 +477,8 @@ using Test
         @test record.executed.storage === :sparse
         @test record.planned.formulation === :not_applicable
         @test record.executed.formulation === :sparse_normal
-        @test record.executed.provider === :not_executed
+        @test record.planned.provider === :cholmod
+        @test record.executed.provider === :cholmod
         @test record.executed.threads == 1
         @test record.fallback_events == ()
         @test record.certificate.available === true
@@ -784,4 +797,50 @@ using Test
         @test length(fieldnames(SDPX.SolveDiagnostics)) == 11
         @test fieldnames(SDPX.SolveDiagnostics)[end] == :precision_ladder
     end
+end
+
+# A2 — LP final-route freeze: finalized LP diagnostics carry the resolved
+# route as a typed `LPRoutePlan` on `ExecutionPlan.payload`.  Red until the
+# A2 source lands.
+@testset "A2 LP final-route payload (sparse accepted)" begin
+    rng = MersenneTwister(11)
+    variables, base_rows, per_row = 220, 900, 2
+    G = spzeros(Float64, base_rows, variables)
+    for row in 1:base_rows, column in randperm(rng, variables)[1:per_row]
+        G[row, column] = randn(rng)
+    end
+    G = [G; sparse(1.0I, variables, variables); -sparse(1.0I, variables, variables)]
+    rows = size(G, 1)
+    interior = randn(rng, variables)
+    h = G * interior .- 1.0
+    multipliers = rand(rng, rows) .+ 0.5
+    objective = vec(transpose(G) * multipliers)
+    lp = SDPX.linear_program(objective, G, h; sparse=true, verbosity=0)
+
+    result = SDPX.solve(lp; tolerance=1e-9, verbosity=0, diagnostics=true)
+    payload = result.diagnostics.plan.payload
+    @test payload isa SDPX.AbstractExecutionPlanPayload
+    @test payload isa SDPX.LPRoutePlan
+    @test payload.route in (
+        :diagonal_reduced_cholesky,
+        :sparse_normal,
+        :positive_definite_cholesky,
+        :dense_lu,
+    )
+    @test payload.route === :sparse_normal
+    @test payload.storage === :sparse
+    @test payload.provider === :cholmod
+    @test result.diagnostics.plan.la_config.selected === :sparse
+    @test result.diagnostics.plan.la_config.provider === payload.provider
+    @test result.diagnostics.plan.la_config.ownership === :provider_owned
+    record = only(result.diagnostics.attempts)
+    @test payload.route === record.executed.formulation
+    @test payload.storage === record.executed.storage
+    @test payload.provider ===
+          result.termination.sparse_schur_backend.provider
+    @test payload.sparse_probe_count == 1
+    # The outer pre-row plan stays deferred; the payload is the finalized
+    # truth carried by the result/attempt, not an impossible pre-row plan.
+    @test record.planned.formulation === :not_applicable
+    @test payload.route !== :not_applicable
 end

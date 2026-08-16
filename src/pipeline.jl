@@ -992,19 +992,6 @@ geometric scaling and every SDP route uses automatic Ruiz scaling. Explicit
     return :sdp_ruiz
 end
 
-"""Compatibility forwarding for the historical three-argument entry point.
-
-The parameter profile and strategy arguments are ignored: the generic policy
-is a pure function of the algorithm.
-"""
-@inline function automatic_scaling_policy(
-    algorithm::Symbol,
-    ::Symbol,
-    ::Symbol,
-)
-    return automatic_scaling_policy(algorithm)
-end
-
 """
     resolve_execution_route(::AutoPlanner, prob, opts)
 
@@ -1028,14 +1015,11 @@ function resolve_execution_route(
     opts.formulation === :augmented &&
         !(classification.cone in (:sdp, :socp)) &&
         throw(ArgumentError(
-            "formulation=:augmented is supported only by the dense SDP/PSD-lift route",
+            "formulation=:augmented is supported only by the dense SDP route",
         ))
-    soc_algorithm = classification.maximum_block_size <= 2 ?
-                    :socp_psd2 : :socp_psd_lift
     algorithm = if opts.algorithm === :auto
         classification.cone === :lp && opts.mode === OPTIMIZE ?
         :lp_primal_dual :
-        classification.cone === :socp ? soc_algorithm :
         :sdp_primal_dual
     elseif opts.algorithm === :lp
         classification.cone === :lp ||
@@ -1044,26 +1028,27 @@ function resolve_execution_route(
             throw(ArgumentError("algorithm=:lp currently supports optimization mode only"))
         :lp_primal_dual
     elseif opts.algorithm === :socp
-        classification.cone === :socp || throw(ArgumentError(
-            "algorithm=:socp requires Lorentz-compatible cone blocks",
+        throw(ArgumentError(
+            "algorithm=:socp is unavailable for SDPProblem; use the public " *
+            "Model/ConicProblem NativeSOC route (for example, second_order_program " *
+            "or solve_socp)",
         ))
-        soc_algorithm
     else
         # `algorithm=:sdp` is the stable reference/rollback path even when
         # the model is exactly SOC-representable.
         :sdp_primal_dual
     end
     if opts.formulation === :augmented &&
-       !(algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift))
+       algorithm !== :sdp_primal_dual
         throw(ArgumentError(
-            "formulation=:augmented requires the dense SDP/PSD-lift solver; " *
+            "formulation=:augmented requires the dense SDP solver; " *
             "dedicated LP and native Q3 routes are unsupported",
         ))
     end
     if opts.formulation === :normal_equations &&
        algorithm === :lp_primal_dual
         throw(ArgumentError(
-            "formulation=:normal_equations requires the dense SDP/PSD-lift " *
+            "formulation=:normal_equations requires the dense SDP " *
             "solver; the dedicated LP route has its own Newton system",
         ))
     end
@@ -1094,8 +1079,6 @@ function _validate_execution_route(
     ))
     route.algorithm in (
         :lp_primal_dual,
-        :socp_psd2,
-        :socp_psd_lift,
         :sdp_primal_dual,
     ) || throw(ArgumentError("resolved execution route has invalid algorithm"))
     return nothing
@@ -1214,11 +1197,7 @@ function build_execution_plan(
         :none
     end
     formulation_decision = nothing
-    formulation_plan = if algorithm in (
-        :sdp_primal_dual,
-        :socp_psd2,
-        :socp_psd_lift,
-    )
+    formulation_plan = if algorithm === :sdp_primal_dual
         structural_formulation =
             _runtime_schur_formulation(
                 prob,
@@ -1259,8 +1238,8 @@ function build_execution_plan(
             )
         elseif opts.formulation === :primal
             # `:primal` predates the dense formulation A/B. Preserve its
-            # historical meaning: it fixes primal orientation but does not
-            # disable exact block-arrow or sparse-normal structural routes.
+            # historical policy meaning without disabling exact block-arrow
+            # or sparse-normal structural routes.
             structural_formulation
         elseif opts.formulation === :augmented
             prob.dims.m > 0 || throw(ArgumentError(
@@ -1330,7 +1309,7 @@ function build_execution_plan(
         classification.equalities,
     )
     generic_mixed_applicable =
-        algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
+        algorithm === :sdp_primal_dual &&
         kkt_backend in (:dense_cholesky, :dense_cholesky_fallback)
     generic_mixed_decision = generic_mixed_applicable &&
                              opts.refine_policy !== :fixed ?
@@ -1613,6 +1592,166 @@ function build_execution_plan(
     resolved::ResolvedSolveOptions{T},
 ) where {T}
     return build_execution_plan(planner, prob, resolved.core)
+end
+
+"""
+    _conic_problem_classification(prob) -> ProblemClassification
+
+Structural classification of a compact `ConicProblem` for the NativeSOC route.
+NativeSOC always executes its own dense native Lorentz KKT, so storage is
+`:dense` and the Schur-density estimates are descriptive.
+"""
+function _conic_problem_classification(
+    prob::ConicProblem{T},
+) where {T}
+    dimensions = [length(cone.b) for cone in prob.cones]
+    variables = prob.variables
+    equalities = length(prob.beq)
+    cone_rows = sum(dimensions)
+    scale = max(variables, equalities, cone_rows, 1)
+    size_class = scale <= 128 ? :small : scale <= 2_000 ? :medium : :large
+    coefficient_nnz = sum(
+        _matrix_nnz(cone.A) for cone in prob.cones; init=0,
+    ) + _matrix_nnz(prob.Aeq)
+    coefficient_slots = variables * (cone_rows + equalities)
+    coefficient_density = coefficient_slots > 0 ?
+                          min(1.0, coefficient_nnz / coefficient_slots) : 0.0
+    return ProblemClassification(
+        :socp,
+        :dense,
+        _arithmetic_class(T),
+        size_class,
+        variables,
+        equalities,
+        cone_rows,
+        maximum(dimensions; init=0),
+        coefficient_density,
+        1.0,
+    )
+end
+
+"""
+    _conic_input_nnz(prob) -> Int
+
+Exact generic structural count of nonzero input data in a compact conic
+model: nonzero objective entries, every nonzero cone coefficient and offset
+entry, and every nonzero equality coefficient and offset entry.  Dense and
+sparse matrices use the same convention — count nonzero entries (`nnz` for
+sparse arrays, an explicit nonzero scan for dense arrays) — so the value is
+well-defined and truthful for empty and nonempty models alike.
+"""
+function _conic_input_nnz(prob::ConicProblem)
+    total = count(!iszero, prob.c) + count(!iszero, prob.beq)
+    for cone in prob.cones
+        total += _matrix_nnz(cone.A) + count(!iszero, cone.b)
+    end
+    total += _matrix_nnz(prob.Aeq)
+    return total
+end
+
+"""Generic nonzero count for dense and sparse conic coefficient matrices."""
+_matrix_nnz(A::SparseMatrixCSC) = nnz(A)
+_matrix_nnz(A::AbstractMatrix) = count(!iszero, A)
+
+"""
+    build_execution_plan(::AutoPlanner, prob::ConicProblem, opts; specialization)
+
+Build the single top-level `ExecutionPlan` for the NativeSOC route.  The exact
+`NativeSOCPlan` is carried as the plan's payload; production workspace and
+core construction extract that payload and assert route parity instead of
+planning a second time.  The payload is built by `_build_native_soc_payload`
+below; there is no separate bare planning entry point.
+"""
+function build_execution_plan(
+    planner::AutoPlanner,
+    prob::ConicProblem{T},
+    opts::SolverOptions{T};
+    specialization::Symbol=:auto,
+) where {T}
+    _require_supported_arithmetic_type(T)
+    _validate_solver_options(opts)
+    payload = _build_native_soc_payload(prob, opts; specialization)
+    fixed_trace = payload.cone.execution isa FixedTraceQ3Execution
+    augmented = payload.formulation.formulation isa DenseAugmentedKKT
+    # The top-level KKT route names the mathematical dense system only.  The
+    # FixedTraceQ3 specialization is an implementation of the dense
+    # normal-equations route and stays inside the payload.
+    kkt_backend = augmented ? :dense_augmented_ldlt : :dense_cholesky
+    classification = _conic_problem_classification(prob)
+    parameter_profile = opts.parameter_policy === :auto ?
+                        :automatic_mehrotra : :user_fixed
+    selected_threads = payload.threads
+    schedule = selected_threads == 1 ? :serial : :blocked_dynamic
+    input_nnz = _conic_input_nnz(prob)
+    backend_config = BackendConfiguration(
+        kkt_backend,
+        opts.equality_solver,
+        false,
+        false,
+        :off,
+        (),
+        false,
+    )
+    parameters = (
+        beta=opts.β,
+        gamma=opts.γ,
+        omega_p=opts.Ωp,
+        omega_d=opts.Ωd,
+        predictor=opts.predictor,
+        strategy=opts.parameter_strategy,
+        adaptive_sigma_max=opts.adaptive_sigma_max,
+        equality_solver=opts.equality_solver,
+        formulation=opts.formulation,
+        soc_specialization=payload.cone.specialization,
+        storage_policy=:dense,
+        storage_selected=:dense,
+        storage_dimension=prob.variables + length(prob.beq),
+        storage_input_nnz=input_nnz,
+        storage_density=1.0,
+        storage_reason=:native_soc_dense_kkt,
+        planned_arithmetic=_arithmetic_class(T),
+        # Requested precision is the expert `SolverOptions.precision_bits`
+        # request (BigFloat only; a no-op for fixed-width arithmetic, where
+        # native significand bits are the truthful request).  The active
+        # bits below are the precision scope the plan will execute in, which
+        # the high-level frontend wraps with `setprecision` and the expert
+        # path inherits from the ambient BigFloat scope.
+        requested_precision_bits=
+            T === BigFloat ? opts.precision_bits : sig_bits(T),
+        planned_precision_bits=
+            T === BigFloat ? Base.precision(BigFloat) : sig_bits(T),
+        linear_algebra_backend=opts.linear_algebra_backend,
+        extended_precision_blas=opts.extended_precision_blas,
+        mixed_precision_kkt=opts.mixed_precision_kkt,
+    )
+    return ExecutionPlan(
+        classification,
+        :native_soc,
+        fixed_trace ? :hkm : :nesterov_todd,
+        kkt_backend,
+        backend_config,
+        payload.formulation,
+        payload.la_config,
+        :native_lorentz_metric,
+        schedule,
+        selected_threads,
+        parameter_profile,
+        0,
+        parameters,
+        payload,
+    )
+end
+
+"""Compatibility delegate for the historical two-argument entry point."""
+function build_execution_plan(
+    prob::ConicProblem{T},
+    opts::SolverOptions{T}=SolverOptions{T}(),
+    ;
+    specialization::Symbol=:auto,
+) where {T}
+    return build_execution_plan(
+        AutoPlanner(), prob, opts; specialization,
+    )
 end
 
 function planned_backend_name(plan::ExecutionPlan)
@@ -2583,13 +2722,13 @@ end
 # ---------------------------------------------------------------------------
 
 # Canonical solver family names. The plan carries exact algorithm labels
-# (`:lp_primal_dual`, `:sdp_primal_dual`, `:socp_psd2`, `:socp_psd_lift`),
+# (`:lp_primal_dual`, `:sdp_primal_dual`),
 # while termination records report the executing family (`:lp`, `:sdp`,
 # `:native_soc`). Both sides of the attempt record use these canonical names
 # so an ordinary LP solve does not look like a planned/executed divergence.
 function _attempt_solver_family(algorithm::Symbol)
     algorithm === :lp_primal_dual && return :lp
-    algorithm in (:sdp_primal_dual, :socp_psd2, :socp_psd_lift) &&
+    algorithm === :sdp_primal_dual &&
         return :sdp
     return algorithm
 end
@@ -2688,7 +2827,14 @@ function _attempt_executed_route_facts(
     else
         get(executed, :lp_formulation, :not_executed)
     end
-    provider = get(executed, :la_provider, :not_executed)
+    # The finalized LP route payload is the authoritative provider for the
+    # dedicated LP path: sparse routes run provider-owned frozen-CSC kernels
+    # and the diagonal reduced route owns its own kernel, neither of which is
+    # a BLAS/LAPACK `la_provider`.
+    payload = get(executed, :lp_route_payload, nothing)
+    provider = payload isa LPRoutePlan ?
+               payload.provider :
+               get(executed, :la_provider, :not_executed)
     storage = get(
         executed,
         :executed_storage,
@@ -2907,6 +3053,88 @@ function _build_execution_attempt_record(
     )
 end
 
+"""
+    _lp_sparse_diagnostics_la_config(plan, payload)
+
+Return the LA descriptor for a finalized sparse LP route.  The ordinary LA
+planner runs before LP row presolve and cannot know that this route will use
+CHOLMOD (or the arithmetic-generic sparse provider), so copying its BLAS
+descriptor into the post-execution diagnostics plan would make planned and
+executed provider facts disagree.  This descriptor is diagnostics-only: the
+sparse factor/solve path never instantiates it or uses it for numerical
+fallback.
+"""
+function _lp_sparse_diagnostics_la_config(
+    plan::ExecutionPlan,
+    payload::LPRoutePlan,
+)
+    payload.storage === :sparse || return plan.la_config
+    payload.route === :sparse_normal || throw(ArgumentError(
+        "sparse LP diagnostics payload must use :sparse_normal",
+    ))
+    provider = payload.provider
+    provider in (:cholmod, :generic) || throw(ArgumentError(
+        "unknown sparse LP diagnostics provider $(provider)",
+    ))
+    implementation = provider === :cholmod ?
+                     :cholmod_sparse_cholesky : :generic_sparse_cholesky
+    # The sparse layer has its own capability registry.  This compact LA
+    # projection is only for the immutable diagnostics descriptor and keeps
+    # the provider-owned factor/solve and sparse-factorization requirements
+    # explicit without claiming dense BLAS/LAPACK ownership.
+    capabilities = LAProviderCapabilities(
+        cholesky=true,
+        factor_solve=true,
+        multi_rhs=true,
+        sparse_factorization=true,
+    )
+    return LABackendConfiguration(
+        plan.la_config.arithmetic,
+        plan.la_config.requested,
+        :sparse,
+        provider,
+        la_capability_symbols(capabilities),
+        capabilities,
+        (:cholesky, :factor_solve, :multi_rhs, :sparse_factorization),
+        implementation,
+        (),
+        :none,
+        :provider_owned,
+    )
+end
+
+"""Build the canonical diagnostics plan for one finalized LP route.
+
+Dense and reduced payloads deliberately preserve the pre-existing
+`ExecutionPlan(plan, payload)` copy.  Sparse routes replace only the LA
+descriptor so the payload provider is the planned provider as well as the
+executed provider; mathematical formulation, backend deferment, and all
+numerical settings remain untouched.
+"""
+function _lp_finalized_diagnostics_plan(
+    plan::ExecutionPlan,
+    payload::LPRoutePlan,
+)
+    payload.storage === :sparse || return ExecutionPlan(plan, payload)
+    la_config = _lp_sparse_diagnostics_la_config(plan, payload)
+    return ExecutionPlan(
+        plan.classification,
+        plan.algorithm,
+        plan.scaling,
+        plan.kkt_backend,
+        plan.backend_config,
+        plan.formulation_plan,
+        la_config,
+        plan.gram_kernel,
+        plan.schedule,
+        plan.threads,
+        plan.parameter_profile,
+        plan.memory_budget_bytes,
+        plan.parameters,
+        payload,
+    )
+end
+
 function _attach_diagnostics(
     result::SDPResult{T},
     plan::ExecutionPlan,
@@ -2921,6 +3149,21 @@ function _attach_diagnostics(
     ladder_context::Union{Nothing,PrecisionLadderContext}=nothing,
 ) where {T}
     diagnostics_enabled || return result
+    # The finalized LP route payload (built after LP row presolve and
+    # `_scale_lp!`) is the authoritative diagnostics plan: it carries the
+    # resolved route that actually executed, while the outer pre-row plan
+    # remains the deferred `:not_applicable` planner artifact.  The finalized
+    # payload is never falsified into the outer plan's formulation.
+    lp_route_payload = get(
+        get(result.termination, :executed, NamedTuple()),
+        :lp_route_payload,
+        nothing,
+    )
+    diagnostics_plan = if lp_route_payload isa LPRoutePlan
+        _lp_finalized_diagnostics_plan(plan, lp_route_payload)
+    else
+        plan
+    end
     core_time = result.timings === nothing ? NaN :
                 get(result.timings, :total, NaN)
     timings = result.timings === nothing ?
@@ -3066,12 +3309,12 @@ function _attach_diagnostics(
         la_fallback_reason=get(executed, :la_fallback_reason, :none),
         la_factorization=get(executed, :la_factorization, :not_executed),
         factor_diagnostics=get(executed, :factor_diagnostics, nothing),
-        planned_la_backend=plan.la_config.selected,
-        planned_la_fallback_reason=plan.la_config.fallback_reason,
-        la_provider=plan.la_config.provider,
-        la_ownership=plan.la_config.ownership,
-        planned_la_provider=plan.la_config.provider,
-        planned_la_ownership=plan.la_config.ownership,
+        planned_la_backend=diagnostics_plan.la_config.selected,
+        planned_la_fallback_reason=diagnostics_plan.la_config.fallback_reason,
+        la_provider=diagnostics_plan.la_config.provider,
+        la_ownership=diagnostics_plan.la_config.ownership,
+        planned_la_provider=diagnostics_plan.la_config.provider,
+        planned_la_ownership=diagnostics_plan.la_config.ownership,
         backend_resolution=get(
             executed,
             :backend_resolution,
@@ -3130,7 +3373,7 @@ function _attach_diagnostics(
                     nothing : ladder_context.explicit_bits
     attempt_id = ladder_context === nothing ? 1 : ladder_context.attempt_id
     attempt_record = _build_execution_attempt_record(
-        plan,
+        diagnostics_plan,
         result,
         executed,
         effective_termination,
@@ -3161,7 +3404,7 @@ function _attach_diagnostics(
         spec = ladder_context.plan.rungs[ladder_context.rung]
         rung_report = PrecisionAttemptReport(
             spec,
-            plan,
+            diagnostics_plan,
             attempt_record,
             PrecisionAttemptScalarFacts(
                 status,
@@ -3179,8 +3422,8 @@ function _attach_diagnostics(
         )
     end
     diagnostics = SolveDiagnostics(
-        plan.classification,
-        plan,
+        diagnostics_plan.classification,
+        diagnostics_plan,
         report,
         timings,
         memory,
