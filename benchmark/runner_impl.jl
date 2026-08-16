@@ -22,6 +22,12 @@ const RESULT_COLUMNS = (
     :production_invariants_valid, :full_numerical_gate_valid,
     :semantic_pass, :semantic_failures, :total_seconds, :seconds_per_iteration,
     :allocated_bytes, :gc_seconds,
+    :sample_count, :sample_seconds, :sample_semantic_pass,
+    :sample_status, :sample_iterations, :sample_objective,
+    :sample_certificate_valid, :sample_route,
+    :sample_semantic_parity, :sample_parity_failures,
+    :sample_median_seconds, :sample_min_seconds, :sample_max_seconds,
+    :sample_mad_seconds, :sample_spread_seconds,
     :assembly_seconds, :factor_seconds, :solve_seconds,
     :refinement_seconds, :local_metric_seconds, :local_factor_seconds,
     :panel_transform_seconds, :equality_gram_seconds, :equality_factor_seconds,
@@ -31,7 +37,7 @@ const RESULT_COLUMNS = (
     :input_fingerprint, :external_checksum,
 )
 
-const RESULT_SCHEMA_VERSION = 2
+const RESULT_SCHEMA_VERSION = 3
 
 _cell(value) = value === missing || value === nothing ? "" :
                replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')
@@ -531,6 +537,21 @@ function _result_row(
         seconds_per_iteration=elapsed / max(trace.counters.iterations, 1),
         allocated_bytes,
         gc_seconds,
+        sample_count=1,
+        sample_seconds=missing,
+        sample_semantic_pass=missing,
+        sample_status=missing,
+        sample_iterations=missing,
+        sample_objective=missing,
+        sample_certificate_valid=missing,
+        sample_route=missing,
+        sample_semantic_parity=missing,
+        sample_parity_failures=missing,
+        sample_median_seconds=missing,
+        sample_min_seconds=missing,
+        sample_max_seconds=missing,
+        sample_mad_seconds=missing,
+        sample_spread_seconds=missing,
         assembly_seconds=_trace_value(trace.iteration.schur_assembly_seconds),
         factor_seconds=_trace_value(trace.iteration.kkt_factorization_seconds),
         solve_seconds=solve_seconds,
@@ -558,6 +579,186 @@ function _result_row(
         rhs_solves=_trace_field(trace.counters, :rhs_solves),
         input_fingerprint=_problem_fingerprint(spec, built, arithmetic),
         external_checksum=_built_value(built, :external_checksum, missing),
+    )
+end
+
+function _json_escape(value)
+    escaped = replace(string(value), "\\" => "\\\\", "\"" => "\\\"")
+    return replace(escaped, "\n" => "\\n", "\r" => "\\r", "\t" => "\\t")
+end
+
+function _sample_json_list(values)
+    isempty(values) && return missing
+    payload = join((
+        value isa AbstractString ? "\"" * _json_escape(value) * "\"" :
+        value === true ? "true" :
+        value === false ? "false" :
+        value === nothing || value === missing ? "null" :
+        repr(value)
+        for value in values
+    ), ",")
+    return "[" * payload * "]"
+end
+
+function _median(values)
+    ordered = sort!(collect(Float64, values))
+    isempty(ordered) && return NaN
+    midpoint = (length(ordered) + 1) ÷ 2
+    return isodd(length(ordered)) ? ordered[midpoint] :
+           (ordered[midpoint] + ordered[midpoint + 1]) / 2
+end
+
+function _sampling_summary(sample_seconds)
+    seconds = [Float64(value) for value in sample_seconds]
+    ordered = sort(seconds)
+    center = _median(ordered)
+    deviations = sort(abs.(ordered .- center))
+    return (
+        median_seconds=center,
+        min_seconds=first(ordered),
+        max_seconds=last(ordered),
+        mad_seconds=_median(deviations),
+        spread_seconds=last(ordered) - first(ordered),
+    )
+end
+
+function _sample_route_key(row)
+    fields = (
+        :conic_formulation, :planned_formulation, :executed_formulation,
+        :planned_backend, :executed_backend, :planned_provider,
+        :executed_provider, :executed_specialization, :psd_lift_used,
+        :fallback_reason, :la_fallback_reason,
+    )
+    return join((_cell(getproperty(row, field)) for field in fields), "|")
+end
+
+function _reference_tolerance(row)
+    absolute = getproperty(row, :reference_absolute_tolerance)
+    relative = getproperty(row, :reference_relative_tolerance)
+    if absolute isa Real && isfinite(absolute) && absolute >= 0 &&
+       relative isa Real && isfinite(relative) && relative >= 0
+        return string(absolute), string(relative)
+    end
+    return nothing, nothing
+end
+
+function _parity_precision_bits(values...)
+    lengths = Int[]
+    for value in values
+        value === nothing && continue
+        push!(lengths, length(string(value)))
+    end
+    return max(256, ceil(Int, 4 * maximum(lengths; init=0)))
+end
+
+function _objective_parity(rows)
+    # Semantic agreement, not bitwise string equality: exact equality is the
+    # fast path, otherwise compare through BigFloat against the benchmark
+    # row's reference absolute/relative tolerances. Missing/unusable
+    # tolerances fall back to exact equality; unparseable or non-finite
+    # objective values fail closed. Precision is derived from the decimal
+    # string lengths (>=256 bits) and scoped locally, so long BigFloat
+    # objectives are never collapsed at the ambient working precision.
+    try
+        objective_strings = [
+            string(getproperty(row, :objective)) for row in rows
+        ]
+        absolute, relative = _reference_tolerance(first(rows))
+        bits = _parity_precision_bits(
+            objective_strings..., absolute, relative,
+        )
+        return setprecision(BigFloat, bits) do
+            numeric = [
+                parse(BigFloat, objective)
+                for objective in objective_strings
+            ]
+            all(isfinite, numeric) || return (
+                ok=false, message="objective_nonfinite",
+            )
+            first_value = first(numeric)
+            all(value -> value == first_value, numeric) && return (
+                ok=true, message="",
+            )
+            if absolute === nothing || relative === nothing
+                return (
+                    ok=false,
+                    message="objective_differ_no_reference_tolerance",
+                )
+            end
+            absolute_tolerance = parse(BigFloat, absolute)
+            relative_tolerance = parse(BigFloat, relative)
+            if all(numeric) do value
+                error = abs(value - first_value)
+                allowed = absolute_tolerance + relative_tolerance *
+                          max(one(BigFloat), abs(first_value))
+                error <= allowed
+            end
+                return (ok=true, message="")
+            end
+            return (ok=false, message="objective")
+        end
+    catch exception
+        return (
+            ok=false,
+            message="objective_unparseable",
+        )
+    end
+end
+
+function _sample_parity(rows)
+    failures = String[]
+    statuses = [_cell(getproperty(row, :status)) for row in rows]
+    iterations = [getproperty(row, :iterations) for row in rows]
+    objectives = [_cell(getproperty(row, :objective)) for row in rows]
+    certificates = [_cell(getproperty(row, :certificate_valid)) for row in rows]
+    routes = [_sample_route_key(row) for row in rows]
+    length(unique(statuses)) == 1 || push!(failures, "status")
+    length(unique(iterations)) == 1 || push!(failures, "iterations")
+    objective_parity = _objective_parity(rows)
+    objective_parity.ok || push!(failures, objective_parity.message)
+    length(unique(certificates)) == 1 || push!(failures, "certificate")
+    length(unique(routes)) == 1 || push!(failures, "route")
+    all(row -> row.semantic_pass, rows) || push!(failures, "semantic_pass")
+    return (
+        parity=isempty(failures),
+        failures=join(failures, ","),
+        statuses=statuses,
+        iterations=iterations,
+        objectives=objectives,
+        certificates=certificates,
+        routes=routes,
+    )
+end
+
+function _sampling_row(rows, sample_seconds; sample_count=length(rows))
+    summary = _sampling_summary(sample_seconds)
+    selected = findmin(abs.(sample_seconds .- summary.median_seconds))[2]
+    parity = _sample_parity(rows)
+    base = rows[selected]
+    values = Dict{Symbol,Any}(
+        :sample_count => sample_count,
+        :sample_seconds => _sample_json_list(sample_seconds),
+        :sample_semantic_pass =>
+            _sample_json_list([row.semantic_pass for row in rows]),
+        :sample_status => _sample_json_list(parity.statuses),
+        :sample_iterations => _sample_json_list(parity.iterations),
+        :sample_objective => _sample_json_list(parity.objectives),
+        :sample_certificate_valid =>
+            _sample_json_list(parity.certificates),
+        :sample_route => _sample_json_list(parity.routes),
+        :sample_semantic_parity => parity.parity,
+        :sample_parity_failures => parity.failures,
+        :sample_median_seconds => summary.median_seconds,
+        :sample_min_seconds => summary.min_seconds,
+        :sample_max_seconds => summary.max_seconds,
+        :sample_mad_seconds => summary.mad_seconds,
+        :sample_spread_seconds => summary.spread_seconds,
+    )
+    return NamedTuple{RESULT_COLUMNS}(
+        Tuple(
+            haskey(values, field) ? values[field] : getproperty(base, field)
+            for field in RESULT_COLUMNS
+        ),
     )
 end
 
@@ -620,6 +821,7 @@ function _error_row(spec, suite, arithmetic, provider, exception)
     values[:status] = :error
     values[:semantic_pass] = false
     values[:semantic_failures] = "execution_error"
+    values[:sample_count] = 1
     return NamedTuple{RESULT_COLUMNS}(
         Tuple(values[field] for field in RESULT_COLUMNS),
     )
@@ -688,6 +890,7 @@ function run_suite(
     verbose=false,
     warmup=true,
     strict_semantics=true,
+    samples=1,
     cache_dir=DEFAULT_CACHE,
     allow_large=false,
 )
@@ -699,6 +902,13 @@ function run_suite(
             "the large suite is cluster-only; run it inside PBS or pass " *
             "allow_large=true for an explicitly authorized non-cluster diagnostic",
         ))
+    samples isa Integer || throw(ArgumentError(
+        "samples must be an integer count of timed solves, got $samples",
+    ))
+    samples == 1 || samples >= 3 || throw(ArgumentError(
+        "samples must be 1 (default single run) or >= 3 timed solves; " *
+        "got $samples; a two-run observation cannot support a timing statistic",
+    ))
     entries = _selected_entries(suite, problem, arithmetic, provider)
     rows = NamedTuple[]
     for entry in entries
@@ -740,44 +950,125 @@ function run_suite(
             )
             return built, result
         end
-        local row
+        local rows_for_entry
         try
-            if T === BigFloat
+            if samples >= 3
+                _measure_sample = function ()
+                    # Canonical O0 boundary: problem build, JIT compilation,
+                    # and the untimed warm-up run are excluded from every
+                    # timed sample. A fresh deterministic build per sample
+                    # keeps problem generation out of the measurement while
+                    # preserving identical problem fingerprints.
+                    built = Base.invokelatest(
+                        build_problem, spec, T; cache_dir=cache_dir,
+                    )
+                    measurement = @timed Base.invokelatest(
+                        _solve_built, built, T, entry.provider;
+                        verbose=verbose,
+                    )
+                    result = measurement.value
+                    row = _result_row(
+                        spec, suite, entry.arithmetic, entry.provider,
+                        built, result, measurement.time;
+                        allocated_bytes=measurement.bytes,
+                        gc_seconds=measurement.gctime,
+                    )
+                    return row, measurement.time
+                end
+                timed = Float64[]
+                if T === BigFloat
+                    bits = parse(Int, replace(string(entry.arithmetic), "bigfloat" => ""))
+                    rows_for_entry = setprecision(BigFloat, bits) do
+                        warmup && Base.invokelatest(run)
+                        sample_rows = NamedTuple[]
+                        for _ in 1:samples
+                            row, elapsed = _measure_sample()
+                            push!(sample_rows, row)
+                            push!(timed, elapsed)
+                        end
+                        [_sampling_row(
+                            sample_rows,
+                            timed,
+                            sample_count=samples,
+                        )]
+                    end
+                else
+                    warmup && Base.invokelatest(run)
+                    sample_rows = NamedTuple[]
+                    for _ in 1:samples
+                        row, elapsed = _measure_sample()
+                        push!(sample_rows, row)
+                        push!(timed, elapsed)
+                    end
+                    rows_for_entry = [_sampling_row(
+                        sample_rows,
+                        timed,
+                        sample_count=samples,
+                    )]
+                end
+            elseif T === BigFloat
                 bits = parse(Int, replace(string(entry.arithmetic), "bigfloat" => ""))
-                row = setprecision(BigFloat, bits) do
-                    warmup && suite !== :large && Base.invokelatest(run)
+                rows_for_entry = [setprecision(BigFloat, bits) do
+                    warmup && Base.invokelatest(run)
                     measurement = @timed Base.invokelatest(run)
                     built, result = measurement.value
                     _result_row(spec, suite, entry.arithmetic, entry.provider,
                                 built, result, measurement.time;
                                 allocated_bytes=measurement.bytes,
                                 gc_seconds=measurement.gctime)
-                end
+                end]
             else
-                warmup && suite !== :large && Base.invokelatest(run)
+                warmup && Base.invokelatest(run)
                 measurement = @timed Base.invokelatest(run)
                 built, result = measurement.value
-                row = _result_row(spec, suite, entry.arithmetic, entry.provider,
-                                  built, result, measurement.time;
-                                  allocated_bytes=measurement.bytes,
-                                  gc_seconds=measurement.gctime)
+                row = _result_row(
+                    spec, suite, entry.arithmetic, entry.provider,
+                    built, result, measurement.time;
+                    allocated_bytes=measurement.bytes,
+                    gc_seconds=measurement.gctime,
+                )
+                rows_for_entry = [row]
             end
         catch exception
-            row = _error_row(
+            rows_for_entry = [_error_row(
                 spec, suite, entry.arithmetic, entry.provider, exception,
-            )
+            )]
         end
-        push!(rows, row)
+        append!(rows, rows_for_entry)
         if verbose
-            elapsed_label = row.total_seconds isa Real ?
-                string(round(row.total_seconds; digits=3), "s") : "unavailable"
+            row = first(rows_for_entry)
+            if row.sample_count isa Integer && row.sample_count >= 3 &&
+               row.sample_median_seconds isa Real
+                elapsed_label = string(
+                    "median=", round(row.sample_median_seconds; digits=3), "s ",
+                    "spread=", round(row.sample_spread_seconds; digits=3), "s ",
+                    "samples=", row.sample_count,
+                )
+            else
+                elapsed_label = row.total_seconds isa Real ?
+                    string(round(row.total_seconds; digits=3), "s") : "unavailable"
+            end
             println(spec.id, " ", row.status, " ", elapsed_label)
         end
     end
     paths = write_results(output, rows)
-    failed = filter(row -> row.status != :skipped && row.semantic_pass === false, rows)
+    failed = filter(
+        row -> row.status != :skipped &&
+               (row.semantic_pass === false ||
+                row.sample_semantic_parity === false),
+        rows,
+    )
     if strict_semantics && !isempty(failed)
-        details = join(("$(row.problem_id):$(row.semantic_failures)" for row in failed), "; ")
+        details = join((
+            let failures = String[]
+                isempty(row.semantic_failures) ||
+                    push!(failures, row.semantic_failures)
+                row.sample_semantic_parity === false &&
+                    push!(failures, "sample_parity:$(row.sample_parity_failures)")
+                join(failures, ",")
+            end
+            for row in failed
+        ), "; ")
         throw(ErrorException(
             "semantic regression in $(length(failed)) benchmark result(s): $details; " *
             "results were written to $(paths.toml)",
@@ -801,6 +1092,8 @@ function _parse_cli(args)
     verbose = false
     prepare = false
     allow_large = false
+    samples = 1
+    warmup = true
     positional = String[]
     for argument in args
         if startswith(argument, "--problem=")
@@ -813,12 +1106,16 @@ function _parse_cli(args)
             output = split(argument, "="; limit=2)[2]
         elseif startswith(argument, "--cache-dir=")
             cache_dir = abspath(split(argument, "="; limit=2)[2])
+        elseif startswith(argument, "--samples=")
+            samples = parse(Int, split(argument, "="; limit=2)[2])
         elseif argument == "--verbose"
             verbose = true
         elseif argument == "--prepare"
             prepare = true
         elseif argument == "--allow-large"
             allow_large = true
+        elseif argument == "--no-warmup"
+            warmup = false
         elseif startswith(argument, "--")
             throw(ArgumentError("unknown option $argument"))
         else
@@ -828,7 +1125,7 @@ function _parse_cli(args)
     !isempty(positional) && (suite = Symbol(lowercase(first(positional))))
     length(positional) > 1 && problem === nothing && (problem = positional[2])
     return (; suite, problem, arithmetic, provider, output, cache_dir, verbose,
-            prepare, allow_large)
+            prepare, allow_large, samples, warmup)
 end
 
 function main(args=ARGS)
@@ -856,6 +1153,8 @@ function main(args=ARGS)
         provider=options.provider,
         output=output,
         verbose=options.verbose,
+        samples=options.samples,
+        warmup=options.warmup,
         cache_dir=options.cache_dir,
         allow_large=options.allow_large,
     )

@@ -20,6 +20,68 @@ include(joinpath(
     @test !_round4_severe_false_negative(false, false, false)
 end
 
+@testset "sampling objective parity tolerance gates" begin
+    spec = benchmark_spec("synthetic/lp_box")
+    built = build_problem(spec, Float64)
+    result = SDPXBenchmarkRegistry._solve_built(
+        built, Float64, :auto; verbose=false,
+    )
+    before = SDPXBenchmarkRegistry._result_row(
+        spec, :micro, :float64, :auto, built, result, 1.0,
+    )
+    function tolerance_row(factor)
+        return merge(
+            before,
+            (
+                objective=string(
+                    parse(BigFloat, before.objective) +
+                    factor * BigFloat("1.0e-9"),
+                ),
+                reference_absolute_tolerance=1.0e-7,
+                reference_relative_tolerance=1.0e-7,
+            ),
+        )
+    end
+    @test SDPXBenchmarkRegistry._objective_parity(
+        [before, tolerance_row(1.0)],
+    ).ok
+    @test SDPXBenchmarkRegistry._objective_parity(
+        [before, tolerance_row(1.0e6)],
+    ).ok === false
+
+    prefix = repeat("1", 160)
+    long_a = "0." * prefix * "5"
+    long_b = "0." * prefix * "6"
+    @test length(long_a) > 100
+    @test length(long_b) > 100
+    long_base = merge(
+        before,
+        (
+            objective=long_a,
+            reference_absolute_tolerance=1.0e-160,
+            reference_relative_tolerance=1.0e-160,
+        ),
+    )
+    long_close = merge(long_base, (objective=long_b,))
+    ambient = precision(BigFloat)
+    @test SDPXBenchmarkRegistry._objective_parity(
+        [long_base, long_close],
+    ).ok
+    @test precision(BigFloat) == ambient
+
+    long_far = merge(
+        long_base,
+        (
+            objective="0." * repeat("1", 139) * "2" * repeat("1", 20) * "5",
+            reference_absolute_tolerance=1.0e-160,
+            reference_relative_tolerance=1.0e-160,
+        ),
+    )
+    @test SDPXBenchmarkRegistry._objective_parity(
+        [long_base, long_far],
+    ).ok === false
+end
+
 @testset "benchmark registry contracts" begin
     registry = benchmark_registry()
     @test length(registry) >= 60
@@ -144,8 +206,98 @@ end
     @test local_result.rows[1].certificate_policy === :original_coordinate_required
     @test local_result.rows[1].provider_match
     @test isempty(local_result.rows[1].semantic_failures)
+    @test local_result.rows[1].schema_version == 3
+    @test local_result.rows[1].sample_count == 1
+    @test local_result.rows[1].sample_seconds === missing
+    @test local_result.rows[1].sample_semantic_pass === missing
+    @test local_result.rows[1].sample_semantic_parity === missing
+    @test local_result.rows[1].sample_parity_failures === missing
     @test isfile(local_result.paths.toml)
     @test isfile(local_result.paths.tsv)
+
+    @test_throws ArgumentError run_suite(
+        :micro;
+        problem="synthetic/lp_box",
+        output=tempname() * ".toml",
+        warmup=false,
+        samples=2,
+    )
+    @test_throws ArgumentError run_suite(
+        :micro;
+        problem="synthetic/lp_box",
+        output=tempname() * ".toml",
+        samples=0,
+    )
+    @test SDPXBenchmarkRegistry._parse_cli(["--no-warmup"]).warmup === false
+    @test SDPXBenchmarkRegistry._parse_cli(String[]).warmup === true
+
+    sampled_output = tempname() * ".toml"
+    sampled = run_suite(
+        :micro;
+        problem="synthetic/lp_box",
+        output=sampled_output,
+        warmup=false,
+        samples=3,
+    )
+    @test length(sampled.rows) == 1
+    row = sampled.rows[1]
+    @test row.status === :Optimal
+    @test row.semantic_pass
+    @test row.sample_count == 3
+    @test row.sample_median_seconds isa Float64
+    @test row.sample_min_seconds isa Float64
+    @test row.sample_max_seconds isa Float64
+    @test row.sample_mad_seconds isa Float64
+    @test row.sample_spread_seconds isa Float64
+    @test row.sample_min_seconds <= row.sample_median_seconds <=
+          row.sample_max_seconds
+    @test row.sample_spread_seconds ==
+          row.sample_max_seconds - row.sample_min_seconds
+    @test row.sample_mad_seconds >= 0.0
+    @test row.total_seconds == row.sample_median_seconds
+    @test row.sample_semantic_parity === true
+    @test isempty(row.sample_parity_failures)
+    @test occursin("Optimal", row.sample_status)
+    @test startswith(row.sample_iterations, "[")
+    @test occursin("lp_native", row.sample_route)
+    @test occursin("true", row.sample_certificate_valid)
+    sample_values = [
+        parse(Float64, part)
+        for part in split(row.sample_seconds[2:end-1], ",")
+    ]
+    @test length(sample_values) == 3
+    @test all(isfinite, sample_values)
+    @test minimum(sample_values) == row.sample_min_seconds
+    @test maximum(sample_values) == row.sample_max_seconds
+    @test sort(sample_values)[2] == row.sample_median_seconds
+    sampled_document = TOML.parsefile(sampled_output)
+    sampled_row = only(sampled_document["result"])
+    @test sampled_row["schema_version"] == 3
+    @test sampled_row["sample_count"] == 3
+    @test startswith(sampled_row["sample_seconds"], "[")
+    @test endswith(sampled_row["sample_seconds"], "]")
+    @test sampled_row["sample_semantic_pass"] == "[true,true,true]"
+    @test sampled_row["sample_status"] ==
+          "[\"Optimal\",\"Optimal\",\"Optimal\"]"
+    @test sampled_row["sample_semantic_parity"] == true
+    @test sampled_row["sample_parity_failures"] == ""
+    @test occursin("lp_native", sampled_row["sample_route"])
+
+    sampled_clean_document = deepcopy(sampled_document)
+    for sampled_row_item in sampled_clean_document["result"]
+        sampled_row_item["source_dirty"] = false
+    end
+    sampled_clean_output = tempname() * ".toml"
+    open(sampled_clean_output, "w") do io
+        TOML.print(io, sampled_clean_document; sorted=true)
+    end
+    compared_sampled = compare_result_files(
+        sampled_clean_output,
+        sampled_clean_output,
+    )
+    @test length(compared_sampled) == 1
+    @test compared_sampled[1].samples_parity_match
+    @test compared_sampled[1].sample_median_seconds_ratio == 1.0
 
     clean_document = TOML.parsefile(local_result.paths.toml)
     dirty_document = deepcopy(clean_document)

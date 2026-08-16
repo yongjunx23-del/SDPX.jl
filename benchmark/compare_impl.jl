@@ -89,6 +89,24 @@ function compare_result_files(
             candidate_semantic_pass=get(after, "semantic_pass", ""),
             semantic_pass_match=get(before, "semantic_pass", "") ==
                                 get(after, "semantic_pass", ""),
+            samples_parity_match=begin
+                before_count = get(before, "sample_count", missing)
+                after_count = get(after, "sample_count", missing)
+                parity_fields = (
+                    "sample_semantic_pass",
+                    "sample_status",
+                    "sample_iterations",
+                    "sample_objective",
+                    "sample_certificate_valid",
+                    "sample_route",
+                    "sample_semantic_parity",
+                    "sample_parity_failures",
+                )
+                before_count == after_count &&
+                    all(get(before, field, missing) ==
+                        get(after, field, missing)
+                        for field in parity_fields)
+            end,
             conic_formulation_match=get(before, "conic_formulation", "") ==
                                     get(after, "conic_formulation", ""),
             planned_backend_match=get(before, "planned_backend", "") ==
@@ -118,6 +136,16 @@ function compare_result_files(
                 a === nothing || b === nothing ? missing : Int(a - b)
             end,
             total_seconds_ratio=_ratio(after, before, "total_seconds"),
+            sample_median_seconds_ratio=begin
+                before_count = get(before, "sample_count", missing)
+                after_count = get(after, "sample_count", missing)
+                if before_count isa Integer && after_count isa Integer &&
+                   before_count >= 3 && after_count >= 3
+                    _ratio(after, before, "sample_median_seconds")
+                else
+                    missing
+                end
+            end,
             factor_seconds_ratio=_ratio(after, before, "factor_seconds"),
         ))
     end
