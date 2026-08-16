@@ -21,6 +21,55 @@ SDPX_v0.5_release_readiness_audit.md
 
 冲突处理原则：数值正确性高于性能；original-coordinate certification 高于内部 success；显式 plan authority 高于 late binding；当前 SHA 的 end-to-end evidence 高于历史 benchmark；低风险 cleanup 必须等待数学与架构合同稳定。
 
+## Progress summary
+
+Status at development HEAD
+`12b313efc5c984cebe7826689be7ac73aa0c5a5c` (tree
+`876086b25c7bfc7779c7ea1120de003de4fa72d7`). See
+[`HEAD_DRIFT_REVIEW.md`](HEAD_DRIFT_REVIEW.md) for the baseline-to-candidate
+review. A task is marked done only when production source, required tests, and
+semantic review are all present.
+
+### DONE
+
+- N1 — true unregularized SDP trial residual and accepted-trial carry
+- N1 follow-up — direction acceptance/refinement tolerance separation
+- runtime equality-coordinate normalization
+- mixed-precision equality-scaling parity
+- N3 — FixedTraceQ3 requested-accuracy equality-rank parity
+- N4 — fixed-refinement worsening/nonfinite rollback
+- N5 — equality-bearing generic sparse-Schur fail-closed quarantine
+- D1 — minimal original-coordinate `Optimal` gate when detailed certification is disabled
+
+### IN PROGRESS
+
+- N7 — LP and NativeSOC validated-direction closure; staging artifacts are not completion evidence
+
+### TODO
+
+- A0 — first-class execution-attempt authority
+- O0 — minimal trustworthy observability and benchmark sampling contract
+- A1 — first-class BigFloat precision-attempt ladder
+- A2 — final LP route frozen before `LPWorkspace`
+- A3 — NativeSOC under the top-level `ExecutionPlan`
+- A4 — sparse provider as first-class plan data
+- A5 — exact `WorkspaceStoragePlan`
+- A6 — truthful PreparedSolver attempt-level reuse reporting
+- LA1-LA5 — provider call-count and evidence-gated integration work
+- P1 — evidence-gated sparse LP solve-destination reuse
+- M1-M8 — low-risk maintainability cleanup
+- R0-R8 — clean-candidate release validation and evidence
+
+### DEFERRED / PROFILE-GATED
+
+- P2-P5 unless the current candidate crosses their documented profile thresholds
+- M9 physical source split
+- all explicitly rejected P6 work and out-of-scope solver redesigns
+
+The current release decision is `NO-GO`. Draft PR #8 remains open and draft;
+the branch must not be merged, marked ready, tagged, or released without owner
+approval.
+
 ---
 
 # 0. Codex 角色与工作方式
