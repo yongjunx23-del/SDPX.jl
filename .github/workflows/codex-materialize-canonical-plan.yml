@@ -49,7 +49,6 @@ jobs:
         shell: bash
         run: |
           git add docs/development/SDPX_v0.5_execution_plan.md
-          git diff --cached --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'docs: add canonical v0.5 execution plan'
