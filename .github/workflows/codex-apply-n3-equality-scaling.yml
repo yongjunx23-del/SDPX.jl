@@ -32,9 +32,6 @@ jobs:
             echo 'Runtime equality scaling fix is already present.'
             exit 0
           fi
-          echo '4d6798cf12d948c0fc97b904ed50b7a6e3ec22295b653154c43b62eaaac49992  .codex/n3-kkt.patch' | sha256sum -c -
-          echo '2217665b8d398c062df11271a7ab1447c7cdcf04ef16e7f24197bb4806b5cebb  .codex/n3-workspace.patch' | sha256sum -c -
-          echo '989b13d926d31762b24913751ad092a7de0711af667ade70a6996e61c4a9af81  .codex/n3-tests.patch' | sha256sum -c -
           git apply --check .codex/n3-workspace.patch
           git apply .codex/n3-workspace.patch
           git apply --check .codex/n3-kkt.patch
@@ -42,6 +39,9 @@ jobs:
           git apply --check .codex/n3-tests.patch
           git apply .codex/n3-tests.patch
           git diff --check
+          echo 'b5ce3c2d11a2fc45f0f202a37cf5564f19f076e8de2090af7687235d25f24938  src/kkt.jl' | sha256sum -c -
+          echo '4c352c3e7fc4becca5dd1b5f4910587097919518f052da787bc6eeacd1a6ef8f  src/workspace.jl' | sha256sum -c -
+          echo 'd34cb243f3b87f27159fabe7d08dda1f43cfefb5933c5ffcf378a227f97a5389  test/kkt_regressions.jl' | sha256sum -c -
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run full numerical regression gate before push
         env:
