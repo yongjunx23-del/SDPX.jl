@@ -1,0 +1,53 @@
+name: Codex apply N3 equality scaling
+
+on:
+  push:
+    branches:
+      - development/v0.5-execution-plan
+    paths:
+      - .codex/n3-equality-scaling.patch.gz.b64
+      - .github/workflows/codex-apply-n3-equality-scaling.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Apply runtime equality scaling patch
+        run: |
+          set -euo pipefail
+          if git log --format=%s -n 50 | grep -Fxq 'fix: normalize runtime equality coordinates'; then
+            echo 'Runtime equality scaling fix is already present.'
+            exit 0
+          fi
+          base64 --decode .codex/n3-equality-scaling.patch.gz.b64 > "$RUNNER_TEMP/n3.patch.gz"
+          gzip -dc "$RUNNER_TEMP/n3.patch.gz" > "$RUNNER_TEMP/n3.patch"
+          echo 'd9279b3ccc2f1e3a3d025f41d5eee750279d89b3b082b8cafb1bff122c2aa7fd  '"$RUNNER_TEMP/n3.patch" | sha256sum -c -
+          git apply --check "$RUNNER_TEMP/n3.patch"
+          git apply "$RUNNER_TEMP/n3.patch"
+          git diff --check
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Run full numerical regression gate before push
+        env:
+          JULIA_NUM_THREADS: '4'
+          SDPX_TEST_PROFILE: full
+        run: julia --startup-file=no --project=. -t4 -e 'using Pkg; Pkg.test(; coverage=false)'
+      - name: Commit and push tested equality scaling fix
+        run: |
+          set -euo pipefail
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.invalid'
+          git add src/kkt.jl src/workspace.jl test/kkt_regressions.jl
+          git diff --cached --check
+          git commit -m 'fix: normalize runtime equality coordinates'
+          git push origin HEAD:development/v0.5-execution-plan
