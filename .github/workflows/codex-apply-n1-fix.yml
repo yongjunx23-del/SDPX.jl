@@ -38,11 +38,6 @@ jobs:
           git am --3way "$RUNNER_TEMP/n1.patch"
           git diff --check HEAD~1..HEAD
       - uses: julia-actions/julia-buildpkg@v1
-      - name: Run quick regression profile
-        env:
-          JULIA_NUM_THREADS: '1'
-          SDPX_TEST_PROFILE: quick
-        run: julia --startup-file=no --project=. -e 'using Pkg; Pkg.test(; coverage=false)'
       - name: Run focused KKT regressions
         env:
           JULIA_NUM_THREADS: '1'
@@ -52,5 +47,10 @@ jobs:
             using MultiFloats: Float64x4
             include("test/kkt_regressions.jl")
           '
-      - name: Push validated N1 fix
+      - name: Push focused-tested N1 fix
         run: git push origin HEAD:development/v0.5-execution-plan
+      - name: Run quick regression profile on the pushed commit
+        env:
+          JULIA_NUM_THREADS: '1'
+          SDPX_TEST_PROFILE: quick
+        run: julia --startup-file=no --project=. -e 'using Pkg; Pkg.test(; coverage=false)'
