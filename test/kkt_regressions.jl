@@ -228,6 +228,43 @@ end
         @test dual_after == 2.0
     end
 
+    @testset "direction acceptance and refinement use distinct tolerances" begin
+        problem = _dense_workspace_problem(reshape([1.0], 1, 1))
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        workspace.p[1] = 100.0
+        rhs = [2.0]
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            ϵ_primal=1.0e-8,
+            ϵ_dual=1.0e-8,
+            refine_tol=1.0e-14,
+        )
+
+        refinement_tolerance =
+            SDPX._kkt_direction_refinement_tolerance(
+                workspace, options, rhs,
+            )
+        acceptance_tolerance =
+            SDPX._kkt_direction_acceptance_tolerance(
+                workspace, options, rhs,
+            )
+
+        expected_refinement_tolerance =
+            options.refine_tol * max(SDPX.knrmInf(rhs), 1.0)
+        @test refinement_tolerance == expected_refinement_tolerance
+        @test acceptance_tolerance ≈ sqrt(eps(Float64)) * 100.0
+        @test acceptance_tolerance > refinement_tolerance
+
+        requested_options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            ϵ_primal=1.0e-5,
+            ϵ_dual=1.0e-6,
+        )
+        @test SDPX._kkt_direction_acceptance_tolerance(
+            workspace, requested_options, rhs,
+        ) ≈ 1.0e-3
+    end
+
     @testset "allocation-free equality KKT right-hand side" begin
         B = reshape([1.0, 2.0, -1.0], 3, 1)
         problem = _dense_workspace_problem(B)

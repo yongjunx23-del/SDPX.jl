@@ -3415,7 +3415,7 @@ function _automatic_refinement_relative_tolerance(
     return roundoff_floor
 end
 
-function _kkt_direction_residual_tolerance(
+function _kkt_direction_refinement_tolerance(
     ws::Workspace{T},
     opts::SolverOptions{T},
     r::AbstractVector{T},
@@ -3424,6 +3424,25 @@ function _kkt_direction_residual_tolerance(
                          opts.refine_tol :
                          _automatic_refinement_relative_tolerance(ws, opts)
     return relative_tolerance * max(knrmInf(r), one(T))
+end
+
+function _kkt_direction_acceptance_tolerance(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+    r::AbstractVector{T},
+) where {T}
+    # Direction acceptance is an outer-solver safety gate, not the stopping
+    # rule for iterative refinement.  Reuse the same requested-accuracy floor
+    # as cold-start validation so regularized sparse factors are not rejected
+    # merely because they cannot meet the stricter refinement target.
+    relative_tolerance = max(
+        sqrt(eps(T)),
+        opts.ϵ_primal,
+        opts.ϵ_dual,
+    )
+    equality_scale = isempty(ws.p) ? zero(T) : knrmInf(ws.p)
+    scale = max(knrmInf(r), equality_scale, one(T))
+    return relative_tolerance * scale
 end
 
 function _kkt_direction_residual!(
@@ -3660,7 +3679,7 @@ function _refine_native_direction!(backend, ws::Workspace{T}, prob::SDPProblem{T
     cap = opts.refine_max_steps
     cap > 0 || return (0, zero(T))
 
-    abstol = _kkt_direction_residual_tolerance(ws, opts, r)
+    abstol = _kkt_direction_refinement_tolerance(ws, opts, r)
     steps = 0
     n = prob.dims.n
     residual = _kkt_direction_residual!(ws, prob, r)

@@ -910,8 +910,8 @@ function newton_step!(
     # operator and retained factor state; it adds no factorization and also
     # leaves rho_r/rho_p populated for exact accepted-trial residual carry.
     refine_residual = _kkt_direction_residual!(ws, prob, r)
-    direction_tolerance = _kkt_direction_residual_tolerance(
-        ws, corrector_options, r,
+    direction_tolerance = _kkt_direction_acceptance_tolerance(
+        ws, opts, r,
     )
     if !isfinite(refine_residual) || refine_residual > direction_tolerance
         return (
