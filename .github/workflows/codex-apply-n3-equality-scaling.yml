@@ -5,7 +5,10 @@ on:
     branches:
       - development/v0.5-execution-plan
     paths:
-      - .codex/n3-kkt.patch
+      - .codex/n3-kkt-a.patch
+      - .codex/n3-kkt-b.patch
+      - .codex/n3-kkt-c.patch
+      - .codex/n3-kkt-d.patch
       - .codex/n3-workspace.patch
       - .codex/n3-tests.patch
       - .github/workflows/codex-apply-n3-equality-scaling.yml
@@ -32,12 +35,17 @@ jobs:
             echo 'Runtime equality scaling fix is already present.'
             exit 0
           fi
-          git apply --check .codex/n3-workspace.patch
-          git apply .codex/n3-workspace.patch
-          git apply --check .codex/n3-kkt.patch
-          git apply .codex/n3-kkt.patch
-          git apply --check .codex/n3-tests.patch
-          git apply .codex/n3-tests.patch
+          for patch in \
+            .codex/n3-workspace.patch \
+            .codex/n3-kkt-a.patch \
+            .codex/n3-kkt-b.patch \
+            .codex/n3-kkt-c.patch \
+            .codex/n3-kkt-d.patch \
+            .codex/n3-tests.patch
+          do
+            git apply --check "$patch"
+            git apply "$patch"
+          done
           git diff --check
           echo 'b5ce3c2d11a2fc45f0f202a37cf5564f19f076e8de2090af7687235d25f24938  src/kkt.jl' | sha256sum -c -
           echo '4c352c3e7fc4becca5dd1b5f4910587097919518f052da787bc6eeacd1a6ef8f  src/workspace.jl' | sha256sum -c -
