@@ -121,6 +121,40 @@ function _round7_ab_problem(storage)
     )
 end
 
+@testset "Round-7 equality-bearing sparse Schur fails closed" begin
+    equality_free = _round7_ab_problem(:sparse)
+    workspace = SDPX.Workspace(equality_free; thread_count=1)
+    @test workspace.sparse_kkt isa SDPX.GenericSparseSchurSDPWorkspace{Float64}
+
+    equality_problem = SDPX.SDPProblem{Float64}(
+        equality_free.c,
+        equality_free.C,
+        reshape([1.0, 0.0], 2, 1),
+        [0.0],
+        equality_free.cons,
+        (
+            L=equality_free.dims.L,
+            m=equality_free.dims.m,
+            n=1,
+            k=equality_free.dims.k,
+        ),
+        equality_free.structure,
+    )
+    options = SDPX.SolverOptions{Float64}(verbosity=0)
+    @test_throws ArgumentError SDPX._factor_sparse_schur_sdp!(
+        workspace, equality_problem, options,
+    )
+    @test_throws ArgumentError SDPX._solve_sparse_schur_kkt_owned!(
+        workspace,
+        1,
+        zeros(2),
+        zeros(1),
+        zeros(2),
+        zeros(1),
+    )
+end
+
+
 @testset "Round-7 Float64 dense/sparse end-to-end A/B" begin
     dense = SDPX.solve(
         _round7_ab_problem(:dense);

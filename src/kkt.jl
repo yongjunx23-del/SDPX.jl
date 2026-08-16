@@ -1068,6 +1068,10 @@ function _factor_sparse_schur_sdp!(
         throw(ArgumentError(
             "generic sparse-Schur factorization received $(typeof(sparse_workspace))",
         ))
+    prob.dims.n == 0 || throw(ArgumentError(
+        "generic sparse-Schur SDP factorization is equality-free; " *
+        "equality-bearing SDP requires a planned dense or augmented KKT route",
+    ))
     storage = sparse_workspace.storage
     matrix = storage.matrix
     positions = sparse_workspace.primal_diagonal_positions
@@ -1145,46 +1149,11 @@ function _factor_sparse_schur_sdp!(
     quality = largest > 0 && isfinite(smallest) ? smallest / largest : 0.0
     sparse_workspace.factorization_quality = T(quality)
 
-    n = prob.dims.n
-    q_pivoted = false
-    q_rank_deficient = false
-    if n > 0
-        # Btil = S⁻¹B using the same generic sparse factor.  The equality
-        # Gram remains dense by definition (its order is n, not m), and is
-        # factored through the provider-neutral dense LA seam.
-        sparse_factor_solve!(ws.Btil, factor, sparse_workspace.constraint_rhs)
-        mul!(ws.Q, transpose(prob.B), ws.Btil)
-        equality_scaling = sparse_workspace.equality_scaling
-        @inbounds for index in 1:n
-            diagonal = abs(ws.Q[index, index])
-            equality_scaling[index] = inv(sqrt(max(diagonal, eps(T))))
-        end
-        @inbounds for column in 1:n, row in column:n
-            ws.Q[row, column] *= equality_scaling[row] * equality_scaling[column]
-            row != column && (ws.Q[column, row] = ws.Q[row, column])
-        end
-        _copy_lower_triangle!(ws.Qbuf, ws.Q)
-        ok_q = la_chol!(ws.la_backend, ws.Qbuf)
-        if ok_q
-            ws.Qchol = ws.Qbuf isa Matrix{T} ?
-                       cholesky!(Symmetric(ws.Qbuf, :L); check=false) :
-                       cholesky(Symmetric(ws.Qbuf, :L); check=false)
-        else
-            q_pivoted = true
-            pivoted = cholesky!(
-                Symmetric(ws.Qbuf, :L),
-                LinearAlgebra.RowMaximum();
-                check=false,
-            )
-            ws.Qchol = pivoted
-            q_rank_deficient = pivoted.rank < n
-        end
-    end
     return (
         ok=true,
         reg_attempts=attempts,
-        q_pivoted=q_pivoted,
-        q_rank_deficient=q_rank_deficient,
+        q_pivoted=false,
+        q_rank_deficient=false,
         phase_times=(
             schur_copy=0.0,
             schur_factorization=0.0,
@@ -2341,30 +2310,16 @@ function _solve_sparse_schur_kkt_owned!(
     sparse_workspace = ws.sparse_kkt
     sparse_workspace isa GenericSparseSchurSDPWorkspace{T} ||
         throw(ArgumentError("generic sparse-Schur solve received an incompatible workspace"))
+    n == 0 || throw(ArgumentError(
+        "generic sparse-Schur SDP solve is equality-free; " *
+        "equality-bearing SDP requires a planned dense or augmented KKT route",
+    ))
     factor = sparse_workspace.factor
     factor === nothing && throw(ArgumentError(
         "generic sparse-Schur factor is unavailable; call factorize! first",
     ))
     sparse_factor_solve!(ws.rtil, factor, r)
-    if n > 0
-        copy_owned!(ws.q_rhs, p_rhs)
-        mul!(ws.q_perm, transpose(sparse_workspace.constraint_rhs), ws.rtil)
-        @inbounds for index in eachindex(ws.q_rhs)
-            ws.q_rhs[index] =
-                (ws.q_rhs[index] - ws.q_perm[index]) *
-                sparse_workspace.equality_scaling[index]
-        end
-        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
-        @inbounds for index in eachindex(dy_out)
-            dy_out[index] *= sparse_workspace.equality_scaling[index]
-        end
-        mul!(dx_out, ws.Btil, dy_out)
-        @inbounds for index in eachindex(dx_out)
-            dx_out[index] += ws.rtil[index]
-        end
-    else
-        copy_owned!(dx_out, ws.rtil)
-    end
+    copy_owned!(dx_out, ws.rtil)
     return dx_out, dy_out
 end
 
