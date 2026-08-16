@@ -40,6 +40,7 @@ mixed_intermediate_arithmetic(::Type) = Nothing
 mutable struct IntermediatePrecisionKKTWorkspace{U}
     S::Matrix{U}
     Btil::Matrix{U}
+    equality_scale::Vector{U}
     Q::Matrix{U}
     r::Vector{U}
     p::Vector{U}
@@ -77,6 +78,7 @@ mutable struct MixedPrecisionKKTWorkspace
     native_regularization_attempts::Int
     S64::Matrix{Float64}
     Btil64::Matrix{Float64}
+    equality_scale64::Vector{Float64}
     Q64::Matrix{Float64}
     r64::Vector{Float64}
     p64::Vector{Float64}
@@ -177,7 +179,7 @@ end
 function _mixed_precision_storage_bytes(m::Int, n::Int)
     elements =
         m * m + m * n + n * n +
-        3m + 2n
+        3m + 3n
     return Base.checked_mul(elements, sizeof(Float64))
 end
 
@@ -296,6 +298,7 @@ function _mixed_precision_workspace(
         0,
         zeros(Float64, m, m),
         zeros(Float64, m, n),
+        zeros(Float64, n),
         zeros(Float64, n, n),
         zeros(Float64, m),
         zeros(Float64, n),
@@ -521,7 +524,7 @@ function _intermediate_precision_storage_bytes(
     m::Int,
     n::Int,
 ) where {U}
-    elements = m * m + m * n + n * n + 2m + 2n
+    elements = m * m + m * n + n * n + 2m + 3n
     return Base.checked_mul(elements, sizeof(U))
 end
 
@@ -545,6 +548,7 @@ function _intermediate_precision_workspace(
     return IntermediatePrecisionKKTWorkspace{U}(
         alloc_zeros(U, m, m),
         alloc_zeros(U, m, n),
+        alloc_zeros(U, n),
         alloc_zeros(U, n, n),
         alloc_zeros(U, m),
         alloc_zeros(U, n),
@@ -916,6 +920,10 @@ function _try_factor_intermediate_kkt!(
             intermediate.Btil,
             opts.threads,
         )
+        _normalize_equality_panel_columns!(
+            intermediate.Btil,
+            intermediate.equality_scale,
+        )
         ExtendedPrecisionBLAS.syrk!(
             intermediate.Q,
             intermediate.Btil,
@@ -1047,6 +1055,10 @@ function _try_factor_mixed_kkt!(
             LowerTriangular(schur_factor.L),
             mixed.Btil64,
         )
+        _normalize_equality_panel_columns!(
+            mixed.Btil64,
+            mixed.equality_scale64,
+        )
         equality_result =
             _factor_float64_equality_preconditioner!(mixed)
         mixed.float64_regularization_attempts +=
@@ -1130,6 +1142,9 @@ function _solve_mixed_kkt!(
     if n > 0
         _copy_float64_checked!(mixed.p64, p_rhs) ||
             throw(ArgumentError("mixed-precision equality right-hand side overflowed Float64"))
+        @inbounds for index in eachindex(mixed.p64, mixed.equality_scale64)
+            mixed.p64[index] *= mixed.equality_scale64[index]
+        end
         LinearAlgebra.mul!(
             mixed.dy64,
             transpose(mixed.Btil64),
@@ -1147,6 +1162,10 @@ function _solve_mixed_kkt!(
         LinearAlgebra.ldiv!(
             UpperTriangular(transpose(mixed.Sfactor.L)),
             mixed.dx64,
+        )
+        _recover_original_equality_multiplier!(
+            mixed.dy64,
+            mixed.equality_scale64,
         )
         _copy_extended_owned!(dy_out, mixed.dy64)
     else
@@ -1178,6 +1197,12 @@ function _solve_intermediate_kkt!(
     if n > 0
         _copy_intermediate_checked!(intermediate.p, p_rhs) ||
             throw(ArgumentError("intermediate-precision equality right-hand side overflowed"))
+        @inbounds for index in eachindex(
+            intermediate.p,
+            intermediate.equality_scale,
+        )
+            intermediate.p[index] *= intermediate.equality_scale[index]
+        end
         _intermediate_transpose_matvec!(
             intermediate.dy,
             intermediate.Btil,
@@ -1204,6 +1229,10 @@ function _solve_intermediate_kkt!(
         LinearAlgebra.ldiv!(
             UpperTriangular(transpose(intermediate.Sfactor.L)),
             intermediate.dx,
+        )
+        _recover_original_equality_multiplier!(
+            intermediate.dy,
+            intermediate.equality_scale,
         )
         @inbounds for index in eachindex(dy_out, intermediate.dy)
             dy_out[index] = T(intermediate.dy[index])

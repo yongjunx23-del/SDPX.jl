@@ -532,3 +532,116 @@ end
         ) <= T(1e-52)
     end
 end
+
+
+function _mixed_scaled_equality_direction(
+    problem::SDPX.SDPProblem{T},
+    schur::AbstractMatrix{T},
+    primal_rhs::AbstractVector{T},
+    equality_rhs::AbstractVector{T},
+    options::SDPX.SolverOptions{T},
+) where {T}
+    workspace = SDPX.Workspace(
+        problem;
+        mixed_precision_kkt=:on,
+        mixed_precision_memory_fraction=1.0,
+        thread_count=1,
+    )
+    backend = SDPX.select_backend(workspace)
+    @test backend isa SDPX.MixedPrecisionBackend
+    SDPX.copy_owned!(workspace.S, schur)
+    factor = SDPX.factorize!(
+        backend,
+        workspace,
+        problem,
+        options,
+    )
+    @test factor.ok
+    @test workspace.mixed_precision !== nothing
+    @test workspace.mixed_precision.active
+    SDPX.copy_owned!(workspace.p, equality_rhs)
+    @test SDPX.solve_direction!(
+        backend,
+        workspace,
+        problem,
+        options,
+        primal_rhs,
+    )
+    @test workspace.mixed_precision.active
+    @test !workspace.mixed_precision.fell_back
+    scale = max(
+        SDPX.knrmInf(primal_rhs),
+        SDPX.knrmInf(equality_rhs),
+        one(T),
+    )
+    @test SDPX._kkt_direction_residual!(
+        workspace,
+        problem,
+        primal_rhs,
+    ) <= T(SDPX.MIXED_KKT_PREDICTOR_RESIDUAL_LIMIT) * scale
+
+    dx = SDPX.alloc_zeros(T, length(workspace.dx))
+    dy = SDPX.alloc_zeros(T, length(workspace.dy))
+    SDPX.copy_owned!(dx, workspace.dx)
+    SDPX.copy_owned!(dy, workspace.dy)
+    return dx, dy
+end
+
+function _check_mixed_equality_rescaling(::Type{T}) where {T}
+    variables = 18
+    equalities = 3
+    base_problem = mixed_kkt_problem(T, variables, equalities)
+    scaled_problem = mixed_kkt_problem(T, variables, equalities)
+    scales = T[T(1e-80), -T(1e80), T(1e-20)]
+    @inbounds for column in 1:equalities
+        for row in 1:variables
+            scaled_problem.B[row, column] *= scales[column]
+        end
+    end
+
+    rng = MersenneTwister(73191)
+    source = T.(randn(rng, variables, variables))
+    schur =
+        source * transpose(source) +
+        T(2) * Matrix{T}(I, variables, variables)
+    primal_rhs = T.(randn(rng, variables))
+    equality_rhs = T.(randn(rng, equalities))
+    scaled_rhs = SDPX.alloc_zeros(T, equalities)
+    @inbounds for index in 1:equalities
+        scaled_rhs[index] =
+            equality_rhs[index] * scales[index]
+    end
+    options = SDPX.SolverOptions{T}(
+        verbosity=0,
+        mixed_precision_kkt=:on,
+        mixed_precision_condition_limit=1.0e10,
+        mixed_precision_refine_max_steps=16,
+        mixed_precision_memory_fraction=1.0,
+    )
+    base_dx, base_dy = _mixed_scaled_equality_direction(
+        base_problem, schur, primal_rhs, equality_rhs, options,
+    )
+    scaled_dx, scaled_dy = _mixed_scaled_equality_direction(
+        scaled_problem, schur, primal_rhs, scaled_rhs, options,
+    )
+    tolerance = T(5e-8)
+    delta_dx = SDPX.alloc_zeros(T, length(base_dx))
+    SDPX.copy_owned!(delta_dx, base_dx)
+    @inbounds for index in eachindex(delta_dx, scaled_dx)
+        delta_dx[index] -= scaled_dx[index]
+    end
+    @test SDPX.knrmInf(delta_dx) <=
+          tolerance * max(SDPX.knrmInf(base_dx), one(T))
+    @inbounds for index in 1:equalities
+        recovered = scaled_dy[index] * scales[index]
+        @test abs(recovered - base_dy[index]) <=
+              tolerance * max(abs(base_dy[index]), one(T))
+    end
+end
+
+@testset "mixed equality rescaling invariance" begin
+    _check_mixed_equality_rescaling(Float64x4)
+    setprecision(BigFloat, 256) do
+        _check_mixed_equality_rescaling(BigFloat)
+    end
+end
