@@ -96,77 +96,7 @@ function _recorded_timings(result::ConicResult)
     return getfield(diagnostics, :timings)
 end
 
-function _setup_facts(result::SDPResult)
-    timings = _recorded_timings(result)
-    selected = _selected_algorithms(result)
-    return (
-        frontend_seconds=_seconds(timings, :frontend),
-        preprocess_seconds=_seconds(timings, :preprocess),
-        presolve_seconds=_seconds(timings, :presolve),
-        equality_presolve_seconds=_seconds(timings, :equality_presolve),
-        structural_analysis_seconds=_seconds(timings, :structural_analysis),
-        execution_planning_seconds=_seconds(timings, :execution_planning),
-        pipeline_seconds=_seconds(timings, :pipeline),
-        core_seconds=_seconds(timings, :core),
-        setup_seconds=_seconds(timings, :setup),
-        setup_validation_seconds=_seconds(timings, :setup_validation),
-        precision_preparation_seconds=
-            _seconds(timings, :precision_preparation),
-        equilibration_seconds=_seconds(timings, :equilibration),
-        parameter_selection_seconds=
-            _seconds(timings, :parameter_selection),
-        workspace_setup_seconds=_seconds(timings, :workspace_setup),
-        initialization_seconds=_seconds(timings, :initialization),
-        solver=_project_field(selected, :solver),
-        scaling=_project_field(selected, :scaling),
-        kkt=_project_field(selected, :kkt),
-        requested_kkt_formulation=
-            _project_field(selected, :requested_kkt_formulation),
-        planned_kkt_formulation=
-            _project_field(selected, :planned_kkt_formulation),
-        executed_kkt_formulation=
-            _project_field(selected, :executed_kkt_formulation),
-        planned_factorization=
-            _project_field(selected, :planned_factorization),
-        executed_factorization=
-            _project_field(selected, :executed_factorization),
-        planned_regularization=
-            _project_field(selected, :planned_regularization),
-        executed_regularization=
-            _project_field(selected, :executed_regularization),
-        gram=_project_field(selected, :gram),
-        equality=_project_field(selected, :equality),
-        planned_backend=_project_field(selected, :planned_backend),
-        executed_backend=_project_field(selected, :executed_backend),
-        fallback_reason=_project_field(selected, :fallback_reason),
-        backend_resolution=_project_field(selected, :backend_resolution),
-        lp_formulation=_project_field(selected, :lp_formulation),
-        executed_la_backend=_project_field(selected, :la_backend),
-        executed_la_provider=_project_field(selected, :la_executed_provider),
-        executed_la_ownership=_project_field(selected, :la_executed_ownership),
-        executed_la_fallback_reason=
-            _project_field(selected, :la_fallback_reason),
-        planned_la_backend=_project_field(selected, :planned_la_backend),
-        planned_la_provider=_project_field(selected, :planned_la_provider),
-        planned_la_ownership=_project_field(selected, :planned_la_ownership),
-        planned_la_fallback_reason=
-            _project_field(selected, :planned_la_fallback_reason),
-        parameter_source=_project_field(selected, :parameter_source),
-        la_factorization=_project_field(selected, :la_factorization),
-        effective_threads=_project_field(selected, :effective_threads),
-        schur_threads=_project_field(selected, :schur_threads),
-        factor_threads=_project_field(selected, :factor_threads),
-        lp_pack_threads=_project_field(selected, :lp_pack_threads),
-        arrow_linear_solve=_project_field(selected, :arrow_linear_solve),
-        fine_grained_block_tasks=
-            _project_field(selected, :fine_grained_block_tasks),
-        fine_grained_block_partition=
-            _project_field(selected, :fine_grained_block_partition),
-        parameter_resolution_count=
-            _project_field(selected, :parameter_resolution_count),
-        parameter_resolution_stage=_project_field(selected, :stage),
-    )
-end
+_setup_facts(result::SDPResult) = _setup_facts_for_record(result)
 
 _setup_facts(result::ConicResult) = _setup_facts_for_record(result)
 
