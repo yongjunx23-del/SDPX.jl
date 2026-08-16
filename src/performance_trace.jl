@@ -152,6 +152,19 @@ function _setup_facts(result::SDPResult)
         planned_la_fallback_reason=
             _project_field(selected, :planned_la_fallback_reason),
         parameter_source=_project_field(selected, :parameter_source),
+        la_factorization=_project_field(selected, :la_factorization),
+        effective_threads=_project_field(selected, :effective_threads),
+        schur_threads=_project_field(selected, :schur_threads),
+        factor_threads=_project_field(selected, :factor_threads),
+        lp_pack_threads=_project_field(selected, :lp_pack_threads),
+        arrow_linear_solve=_project_field(selected, :arrow_linear_solve),
+        fine_grained_block_tasks=
+            _project_field(selected, :fine_grained_block_tasks),
+        fine_grained_block_partition=
+            _project_field(selected, :fine_grained_block_partition),
+        parameter_resolution_count=
+            _project_field(selected, :parameter_resolution_count),
+        parameter_resolution_stage=_project_field(selected, :stage),
     )
 end
 
@@ -202,6 +215,18 @@ function _setup_facts_for_record(result)
         planned_la_ownership=_project_field(selected, :planned_la_ownership),
         planned_la_fallback_reason=_project_field(selected, :planned_la_fallback_reason),
         parameter_source=_project_field(selected, :parameter_source),
+        la_factorization=_project_field(selected, :la_factorization),
+        effective_threads=_project_field(selected, :effective_threads),
+        schur_threads=_project_field(selected, :schur_threads),
+        factor_threads=_project_field(selected, :factor_threads),
+        lp_pack_threads=_project_field(selected, :lp_pack_threads),
+        arrow_linear_solve=_project_field(selected, :arrow_linear_solve),
+        fine_grained_block_tasks=_project_field(selected, :fine_grained_block_tasks),
+        fine_grained_block_partition=
+            _project_field(selected, :fine_grained_block_partition),
+        parameter_resolution_count=
+            _project_field(selected, :parameter_resolution_count),
+        parameter_resolution_stage=_project_field(selected, :stage),
     )
 end
 
@@ -250,6 +275,20 @@ function _iteration_facts(result::SDPResult)
             _seconds(timings, :fixed_block_residual),
         fixed_block_recovery_seconds=
             _seconds(timings, :fixed_block_recovery),
+        kkt_schur_copy_seconds=_seconds(timings, :kkt_schur_copy),
+        kkt_constraint_triangular_solve_seconds=
+            _seconds(timings, :kkt_constraint_triangular_solve),
+        kkt_equality_factorization_seconds=
+            _seconds(timings, :kkt_equality_factorization),
+        kkt_other_seconds=_seconds(timings, :kkt_other),
+        predictor_direction_recovery_seconds=
+            _seconds(timings, :predictor_direction_recovery),
+        corrector_direction_recovery_seconds=
+            _seconds(timings, :corrector_direction_recovery),
+        best_iterate_seconds=_seconds(timings, :best_iterate),
+        objective_and_targets_seconds=
+            _seconds(timings, :objective_and_targets),
+        other_seconds=_seconds(timings, :other),
     )
 end
 
@@ -285,6 +324,20 @@ function _iteration_facts(result::ConicResult)
         equality_factor_seconds=_seconds(timings, :equality_factor),
         fixed_block_residual_seconds=_seconds(timings, :fixed_block_residual),
         fixed_block_recovery_seconds=_seconds(timings, :fixed_block_recovery),
+        kkt_schur_copy_seconds=_seconds(timings, :kkt_schur_copy),
+        kkt_constraint_triangular_solve_seconds=
+            _seconds(timings, :kkt_constraint_triangular_solve),
+        kkt_equality_factorization_seconds=
+            _seconds(timings, :kkt_equality_factorization),
+        kkt_other_seconds=_seconds(timings, :kkt_other),
+        predictor_direction_recovery_seconds=
+            _seconds(timings, :predictor_direction_recovery),
+        corrector_direction_recovery_seconds=
+            _seconds(timings, :corrector_direction_recovery),
+        best_iterate_seconds=_seconds(timings, :best_iterate),
+        objective_and_targets_seconds=
+            _seconds(timings, :objective_and_targets),
+        other_seconds=_seconds(timings, :other),
     )
 end
 
@@ -307,6 +360,9 @@ function _final_facts(result::SDPResult)
         dual_residual=result.d_res,
         certificate_available=_project_field(certificate, :available),
         certificate_reason=_project_field(certificate, :reason),
+        certificate_valid=_project_field(certificate, :valid),
+        certificate_kind=_project_field(certificate, :kind),
+        certificate_failures=_project_field(certificate, :failures),
         certification_seconds=_seconds(timings, :certification),
         workspace_bytes=_project_field(memory, :workspace_bytes),
         process_peak_rss_bytes=_project_field(memory, :process_peak_rss_bytes),
@@ -357,6 +413,18 @@ function _counter_facts(result::SDPResult)
         kkt_nnz=_project_field(result.termination, :kkt_nonzeros),
         factor_memory_estimate_bytes=
             _project_field(result.termination, :factor_memory_estimate_bytes),
+        schur_assembly_count=_project_field(sparse, :assembly_count),
+        sparse_factor_failures=_project_field(sparse, :failures),
+        symbolic_analysis_reuses=_project_field(sparse, :reused),
+        fixed_residual_blocks=_project_field(
+            result.termination, :fixed_residual_blocks,
+        ),
+        fixed_rhs_contractions=_project_field(
+            result.termination, :fixed_rhs_contractions,
+        ),
+        fixed_direction_recoveries=_project_field(
+            result.termination, :fixed_direction_recoveries,
+        ),
     )
 end
 
@@ -380,6 +448,9 @@ function _final_facts(result::ConicResult)
         dual_residual=result.d_res,
         certificate_available=_project_field(certificate, :available),
         certificate_reason=_project_field(certificate, :reason),
+        certificate_valid=_project_field(certificate, :valid),
+        certificate_kind=_project_field(certificate, :kind),
+        certificate_failures=_project_field(certificate, :failures),
         certification_seconds=_seconds(timings, :certification),
         workspace_bytes=_project_field(memory, :workspace_bytes),
         process_peak_rss_bytes=_project_field(memory, :process_peak_rss_bytes),
@@ -421,6 +492,13 @@ function _counter_facts(result::ConicResult)
         factor_nnz=unavailable,
         kkt_nnz=unavailable,
         factor_memory_estimate_bytes=unavailable,
+        schur_assembly_count=unavailable,
+        sparse_factor_failures=unavailable,
+        symbolic_analysis_reuses=unavailable,
+        fixed_residual_blocks=_project_field(termination, :fixed_residual_blocks),
+        fixed_rhs_contractions=_project_field(termination, :fixed_rhs_contractions),
+        fixed_direction_recoveries=
+            _project_field(termination, :fixed_direction_recoveries),
     )
 end
 
