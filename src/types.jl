@@ -2008,6 +2008,104 @@ function ExecutionPlan(
     )
 end
 
+# ---------------------------------------------------------------------------
+# A0 — first-class execution-attempt records.
+#
+# One solve is one attempt: a single immutable snapshot of the planned route,
+# the route that actually executed, and every divergence the plan authorized.
+# These records are constructed exactly once per solve, inside
+# diagnostics-enabled `_attach_diagnostics`; they never carry per-iteration
+# state and never feed back into solver math.
+# ---------------------------------------------------------------------------
+
+"""Precision facts for one execution route: the arithmetic tag plus the
+explicit significand width when execution reached that route. BigFloat facts
+are captured inside the exact per-attempt `setprecision` scope; a route that
+never executed records `nothing` instead of re-reading ambient precision.
+`mode` records whether the route used the mixed-precision implementation of
+its formulation."""
+struct AttemptPrecisionFacts
+    arithmetic::Symbol
+    mode::Symbol
+    explicit_bits::Union{Nothing,Int}
+end
+
+"""One immutable route snapshot: solver family, formulation, storage, LA
+provider, precision, and thread count. `planned` comes from the
+`ExecutionPlan`; `executed` mirrors the same dimensions from the actual
+termination record, using `:not_executed` where the route never ran."""
+struct ExecutionRouteFacts
+    family::Symbol
+    formulation::Symbol
+    storage::Symbol
+    provider::Symbol
+    precision::AttemptPrecisionFacts
+    threads::Int
+end
+
+"""One ordered fallback event. `authorized` is derived fail-closed from the
+plan's fallback chains: a divergence that is not one of the plan's explicitly
+authorized fallback targets is labeled `authorized=false`, never silently
+accepted. `source` is `:plan` for planned provenance or `:runtime_executed`
+for facts read from the termination record."""
+struct FallbackEvent
+    kind::Symbol
+    reason::Symbol
+    authorized::Bool
+    source::Symbol
+    detail::NamedTuple
+end
+
+"""Regularization facts. Regularization is a numerical retry inside the same
+formulation, never a route switch, so it is recorded here and must not appear
+among `fallback_events`. `count` is the solve-level counter already exposed
+by `SDPResult.regularizations`; `events` carries only counts that were
+explicitly recorded by an initialization/factor report, each with its own
+source."""
+struct RegularizationFacts
+    count::Int
+    events::Tuple{Vararg{NamedTuple}}
+    executed_value::Union{Nothing,Real}
+end
+
+"""Certificate summary for the attempt. A certification downgrade (status
+demoted because the original-coordinate gate failed) is a certificate fact,
+not a fallback event."""
+struct CertificateFacts
+    available::Bool
+    method::Symbol
+    reason::Symbol
+    valid::Union{Nothing,Bool}
+    downgrade::Bool
+    minimal_gate_valid::Union{Nothing,Bool}
+end
+
+"""Prepared-structure reuse facts. A6 owns truthful attempt-level reuse
+reporting; until then the record states explicitly that reuse facts are
+unavailable and that no reuse was reported."""
+struct PreparedReuseFacts
+    available::Bool
+    reused::Bool
+    source::Symbol
+end
+
+"""A0 first-class execution attempt: one immutable record of one solve.
+`attempt_id`/`plan_id` are attempt-local stable indices for now; `planned`
+and `executed` describe the same route dimensions so a divergence is visible
+and the plan's authorization of every fallback event is checkable."""
+struct ExecutionAttemptRecord
+    attempt_id::Int
+    plan_id::Int
+    planned::ExecutionRouteFacts
+    executed::ExecutionRouteFacts
+    fallback_events::Tuple{Vararg{FallbackEvent}}
+    regularization::RegularizationFacts
+    certificate::CertificateFacts
+    reuse::PreparedReuseFacts
+    status::SolveStatus
+    termination_reason::Symbol
+end
+
 """
     SolveDiagnostics
 
@@ -2029,6 +2127,10 @@ struct SolveDiagnostics
     # `:too_slow`, `:precision_floor`) plus the measured convergence rate and
     # projected iterations, so the decision can be checked rather than trusted.
     termination::NamedTuple
+    # A0 execution-attempt records. Constructed exactly once per solve inside
+    # diagnostics-enabled `_attach_diagnostics`; empty when a diagnostics
+    # object was built by a compatibility path that never ran a solve.
+    attempts::Tuple{Vararg{ExecutionAttemptRecord}}
 end
 
 # Source compatibility for the pre-`termination` positional form.
@@ -2036,6 +2138,12 @@ SolveDiagnostics(classification, plan, presolve, timings, memory,
     selected_algorithms, parameter_history, warnings) =
     SolveDiagnostics(classification, plan, presolve, timings, memory,
         selected_algorithms, parameter_history, warnings, (reason=:none,))
+
+# Source compatibility for the pre-`attempts` positional form.
+SolveDiagnostics(classification, plan, presolve, timings, memory,
+    selected_algorithms, parameter_history, warnings, termination) =
+    SolveDiagnostics(classification, plan, presolve, timings, memory,
+        selected_algorithms, parameter_history, warnings, termination, ())
 
 """
     SDPResult{T}

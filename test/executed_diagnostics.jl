@@ -334,4 +334,451 @@ using Test
         @test fixed_selected.planned_parameters ==
               fixed.diagnostics.plan.parameters
     end
+
+    # A0 — first-class execution-attempt record. These tests pin the immutable
+    # attempt schema, the single-attempt construction rule, truthful
+    # planned/executed route facts, fail-closed fallback authorization, and
+    # the diagnostics-disabled allocation/absence contract.
+    @testset "A0 execution attempt record" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 1.0; 1.0 0.0]],
+            Matrix{Float64}(undef, 2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        result = SDPX.solve(
+            problem;
+            tolerance=1e-8,
+            verbosity=0,
+            diagnostics=true,
+            algorithm=:sdp,
+            scaling=:equilibrate,
+        )
+        @test result.status == SDPX.Optimal
+        @test result.diagnostics.attempts isa Tuple
+        @test length(result.diagnostics.attempts) == 1
+        record = only(result.diagnostics.attempts)
+        @test record isa SDPX.ExecutionAttemptRecord
+        @test record.attempt_id == 1
+        @test record.plan_id == 1
+
+        # Canonical solver family on both sides: planned `:sdp_primal_dual`
+        # and executed `:sdp` map to the same `:sdp` family, so an ordinary
+        # solve is not a false divergence.
+        @test record.planned.family === :sdp
+        @test record.executed.family === :sdp
+        @test record.planned.formulation === :dense_normal_equations
+        @test record.executed.formulation === :dense_normal_equations
+        @test record.planned.storage === :dense
+        @test record.executed.storage === :dense
+        @test record.planned.provider === :blas_lapack
+        @test record.executed.provider === :blas_lapack
+        @test record.planned.threads == 1
+        @test record.executed.threads == 1
+
+        # Precision facts record the arithmetic tag, the mixed-precision mode,
+        # and the explicit significand width.
+        @test record.planned.precision.arithmetic === :float64
+        @test record.executed.precision.arithmetic === :float64
+        @test record.planned.precision.mode === :fixed
+        @test record.executed.precision.mode === :fixed
+        @test record.planned.precision.explicit_bits == 53
+        @test record.executed.precision.explicit_bits == 53
+
+        # The A0 plan adds no precision keys, so `planned_parameters` stays
+        # byte-for-byte with the pre-A0 plan. The attempt width comes from
+        # the arithmetic type (fixed-width) or the exact setprecision scope
+        # (BigFloat), never from a request option.
+        @test !hasproperty(result.diagnostics.plan.parameters, :precision_bits)
+        @test !hasproperty(
+            result.diagnostics.plan.parameters,
+            :working_precision_policy,
+        )
+        @test SDPX._attempt_planned_precision_facts(
+            SDPX.build_execution_plan(
+                problem,
+                SDPX.SolverOptions{Float64}(
+                    algorithm=:sdp,
+                    verbosity=0,
+                ),
+            ),
+            Float64,
+        ).explicit_bits == 53
+
+        # No fallback events, no regularization, certified with no downgrade,
+        # and A6 reuse facts are explicitly unavailable.
+        @test record.fallback_events == ()
+        @test record.regularization isa SDPX.RegularizationFacts
+        @test record.regularization.count == 0
+        @test record.regularization.events == ()
+        @test record.certificate.available === true
+        @test record.certificate.valid === true
+        @test record.certificate.downgrade === false
+        @test record.reuse.available === false
+        @test record.reuse.reused === false
+        @test record.status == SDPX.Optimal
+        @test record.termination_reason === :none
+    end
+
+    @testset "A0 LP canonical family and planned/executed parity" begin
+        # The sparse LP fixture from `executed_diagnostics.jl` exercises the
+        # deferred runner whose executed solver is `:lp` while the plan
+        # algorithm is `:lp_primal_dual`; the attempt record must not claim a
+        # divergence for that.
+        rng = MersenneTwister(11)
+        variables, base_rows, per_row = 220, 900, 2
+        G = spzeros(Float64, base_rows, variables)
+        for row in 1:base_rows, column in randperm(rng, variables)[1:per_row]
+            G[row, column] = randn(rng)
+        end
+        G = [G; sparse(1.0I, variables, variables); -sparse(1.0I, variables, variables)]
+        rows = size(G, 1)
+        interior = randn(rng, variables)
+        h = G * interior .- 1.0
+        multipliers = rand(rng, rows) .+ 0.5
+        objective = vec(transpose(G) * multipliers)
+        coefficients = [
+            [sparse([1], [1], [G[row, column]], 1, 1) for column in 1:variables]
+            for row in 1:rows
+        ]
+        constants = [reshape([h[row]], 1, 1) for row in 1:rows]
+        lp = SDPX.ingest(
+            objective,
+            coefficients,
+            constants,
+            zeros(variables, 0),
+            Float64[];
+            sparse=true,
+            verbosity=0,
+        )
+        result = SDPX.solve(lp; tolerance=1e-9, verbosity=0, diagnostics=true)
+        @test result.status == SDPX.Optimal
+        record = only(result.diagnostics.attempts)
+        @test record.planned.family === :lp
+        @test record.executed.family === :lp
+        @test record.planned.storage === :sparse
+        @test record.executed.storage === :sparse
+        @test record.planned.formulation === :not_applicable
+        @test record.executed.formulation === :sparse_normal
+        @test record.executed.provider === :not_executed
+        @test record.executed.threads == 1
+        @test record.fallback_events == ()
+        @test record.certificate.available === true
+    end
+
+    @testset "A0 early setup failure is an honest not-executed route" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 1.0; 1.0 0.0]],
+            Matrix{Float64}(undef, 2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        plan = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{Float64}(algorithm=:sdp, verbosity=0),
+        )
+        report = SDPX.PresolveReport(
+            0, 0, 0, 0, 0, false, Vector{Int}(), 0.0,
+        )
+        from_scratch = SDPX.SDPResult{Float64}(
+            SDPX.NumericalBreakdown,
+            "early setup failure",
+            Float64[],
+            Matrix{Float64}[],
+            Float64[],
+            Matrix{Float64}[],
+            0.0,
+            0.0,
+            Inf,
+            Inf,
+            Inf,
+            0,
+            0,
+            0,
+            nothing,
+            NamedTuple[],
+            nothing,
+            (reason=:time_limit, stage=:sdp_setup),
+        )
+        attached = SDPX._attach_diagnostics(
+            from_scratch,
+            plan,
+            report,
+            0.0,
+            String[],
+            0,
+            true,
+            (reason=:time_limit, stage=:sdp_setup),
+            (available=false,),
+            NamedTuple(),
+        )
+        record = only(attached.diagnostics.attempts)
+        @test record.planned.family === :sdp
+        @test record.executed.family === :not_executed
+        @test record.executed.formulation === :not_executed
+        @test record.executed.storage === :not_executed
+        @test record.executed.provider === :not_executed
+        @test record.executed.precision.mode === :not_executed
+        @test record.executed.precision.explicit_bits === nothing
+        @test record.executed.threads == 0
+        @test record.fallback_events == ()
+        @test record.termination_reason === :time_limit
+    end
+
+    @testset "A0 mixed-precision mode reflects the plan decision" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            BigFloat[2, 3],
+            [BigFloat.(coefficients)],
+            [BigFloat[0 1; 1 0]],
+            Matrix{BigFloat}(undef, 2, 0),
+            BigFloat[];
+            verbosity=0,
+        )
+        # `mixed_precision_kkt=:auto` on BigFloat can resolve to `:off`
+        # (e.g. fixed refinement policy); the frozen decision must be
+        # visible, not the request hint.
+        auto_corrected = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{BigFloat}(
+                algorithm=:sdp,
+                mixed_precision_kkt=:auto,
+                precision_bits=256,
+                verbosity=0,
+            ),
+        )
+        requested = get(auto_corrected.parameters, :mixed_precision_kkt, :off)
+        @test requested === :auto
+        @test auto_corrected.backend_config.mixed_precision_mode === :off
+
+        enabled = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{BigFloat}(
+                algorithm=:sdp,
+                mixed_precision_kkt=:on,
+                precision_bits=256,
+                verbosity=0,
+            ),
+        )
+        @test enabled.backend_config.mixed_precision_mode === :on
+        @test SDPX._attempt_planned_precision_facts(
+            enabled,
+            BigFloat,
+        ).mode === :mixed_precision
+        @test SDPX._attempt_planned_precision_facts(
+            auto_corrected,
+            BigFloat,
+        ).mode === :fixed
+    end
+
+    @testset "A0 BigFloat attempt precision facts" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            BigFloat[2, 3],
+            [BigFloat.(coefficients)],
+            [BigFloat[0 1; 1 0]],
+            Matrix{BigFloat}(undef, 2, 0),
+            BigFloat[];
+            verbosity=0,
+        )
+        # Fixed 256-bit request: both planned and executed carry 256.
+        fixed = SDPX.solve(
+            problem;
+            tolerance=1e-16,
+            verbosity=0,
+            diagnostics=true,
+            algorithm=:sdp,
+            scaling=:equilibrate,
+            precision=256,
+            working_precision_policy=:fixed,
+        )
+        fixed_record = only(fixed.diagnostics.attempts)
+        @test fixed_record.planned.precision.arithmetic === :bigfloat
+        @test fixed_record.executed.precision.arithmetic === :bigfloat
+        @test fixed_record.planned.precision.explicit_bits == 256
+        @test fixed_record.executed.precision.explicit_bits == 256
+
+        # Adaptive policy: the attempt runs at the selected rung inside its
+        # exact setprecision scope, so both planned and executed facts carry
+        # that factual width (here the successful 192-bit lower attempt).
+        # A1 will add the requested-vs-selected rung distinction.
+        adaptive = SDPX.solve(
+            problem;
+            tolerance=1e-16,
+            verbosity=0,
+            diagnostics=true,
+            algorithm=:sdp,
+            scaling=:equilibrate,
+            precision=256,
+            working_precision_policy=:auto,
+            minimum_working_precision_bits=192,
+        )
+        adaptive_record = only(adaptive.diagnostics.attempts)
+        @test adaptive_record.planned.precision.explicit_bits ==
+              adaptive_record.executed.precision.explicit_bits
+        @test 192 <= adaptive_record.planned.precision.explicit_bits <= 256
+        @test adaptive_record.planned.precision.mode === :fixed
+        @test adaptive_record.executed.precision.mode === :fixed
+
+        # Early setup failure on BigFloat must not claim precision bits that
+        # never executed.
+        plan = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{BigFloat}(
+                algorithm=:sdp,
+                precision_bits=256,
+                verbosity=0,
+            ),
+        )
+        report = SDPX.PresolveReport(
+            0, 0, 0, 0, 0, false, Vector{Int}(), 0.0,
+        )
+        from_scratch = SDPX.SDPResult{BigFloat}(
+            SDPX.NumericalBreakdown,
+            "early setup failure",
+            BigFloat[],
+            Matrix{BigFloat}[],
+            BigFloat[],
+            Matrix{BigFloat}[],
+            big"0.0",
+            big"0.0",
+            big"Inf",
+            big"Inf",
+            big"Inf",
+            0,
+            0,
+            0,
+            nothing,
+            NamedTuple[],
+            nothing,
+            (reason=:time_limit, stage=:sdp_setup),
+        )
+        attached = SDPX._attach_diagnostics(
+            from_scratch,
+            plan,
+            report,
+            0.0,
+            String[],
+            0,
+            true,
+            (reason=:time_limit, stage=:sdp_setup),
+            (available=false,),
+            NamedTuple(),
+        )
+        early = only(attached.diagnostics.attempts)
+        @test early.executed.precision.mode === :not_executed
+        @test early.executed.precision.explicit_bits === nothing
+    end
+
+    @testset "A0 no record and no construction when diagnostics are disabled" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 1.0; 1.0 0.0]],
+            Matrix{Float64}(undef, 2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        disabled = SDPX.solve(
+            problem;
+            tolerance=1e-8,
+            verbosity=0,
+            diagnostics=false,
+            algorithm=:sdp,
+            scaling=:equilibrate,
+        )
+        @test disabled.diagnostics === nothing
+
+        plan = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{Float64}(algorithm=:sdp, verbosity=0),
+        )
+        report = SDPX.PresolveReport(
+            0, 0, 0, 0, 0, false, Vector{Int}(), 0.0,
+        )
+        warnings = String[]
+        termination = (reason=:none,)
+        certificate = (available=false,)
+        pipeline_timings = NamedTuple()
+        # Warm up method compilation, then the disabled path must be a plain
+        # passthrough with zero allocations (no attempt record construction).
+        SDPX._attach_diagnostics(
+            disabled,
+            plan,
+            report,
+            0.0,
+            warnings,
+            0,
+            false,
+            termination,
+            certificate,
+            pipeline_timings,
+        )
+        GC.gc()
+        allocated = @allocated SDPX._attach_diagnostics(
+            disabled,
+            plan,
+            report,
+            0.0,
+            warnings,
+            0,
+            false,
+            termination,
+            certificate,
+            pipeline_timings,
+        )
+        @test allocated == 0
+    end
+
+    @testset "A0 compatibility constructor keeps attempts empty" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 1.0; 1.0 0.0]],
+            Matrix{Float64}(undef, 2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        plan = SDPX.build_execution_plan(
+            problem,
+            SDPX.SolverOptions{Float64}(algorithm=:sdp, verbosity=0),
+        )
+        report = SDPX.PresolveReport(
+            0, 0, 0, 0, 0, false, Vector{Int}(), 0.0,
+        )
+        diagnostics = SDPX.SolveDiagnostics(
+            plan.classification,
+            plan,
+            report,
+            (total=0.0,),
+            (workspace_bytes=0,),
+            (solver=:sdp,),
+            NamedTuple[],
+            String[],
+            (reason=:none,),
+        )
+        @test diagnostics.attempts == ()
+        @test length(fieldnames(SDPX.SolveDiagnostics)) == 10
+        @test fieldnames(SDPX.SolveDiagnostics)[end] == :attempts
+    end
 end

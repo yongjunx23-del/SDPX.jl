@@ -320,3 +320,197 @@ end
         @test _legacy_contract_contains_symbol(body, :_sdpx_legacy_la_call)
     end
 end
+
+@testset "A0 fallback events are fail-closed and ordered" begin
+    coefficients = zeros(2, 2, 2)
+    coefficients[1, 1, 1] = 1.0
+    coefficients[2, 2, 2] = 1.0
+    problem = SDPX.ingest(
+        [2.0, 3.0],
+        [coefficients],
+        [[0.0 1.0; 1.0 0.0]],
+        Matrix{Float64}(undef, 2, 0),
+        Float64[];
+        verbosity=0,
+    )
+    plain_plan = SDPX.build_execution_plan(
+        problem,
+        SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            equality_solver=:auto,
+            verbosity=0,
+        ),
+    )
+    # A real mixed-precision plan must authorize exactly the structural
+    # fallback chain `(:dense_cholesky,)`; this premise is asserted so a
+    # broken planner cannot make the fail-closed test vacuously pass. Generic
+    # mixed is only applicable to BigFloat (fixed-width routes always execute),
+    # so the fixture uses BigFloat and an explicit `:on`.
+    mixed_problem = SDPX.ingest(
+        BigFloat[2, 3],
+        [BigFloat.(coefficients)],
+        [BigFloat[0 1; 1 0]],
+        Matrix{BigFloat}(undef, 2, 0),
+        BigFloat[];
+        verbosity=0,
+    )
+    mixed_plan = SDPX.build_execution_plan(
+        mixed_problem,
+        SDPX.SolverOptions{BigFloat}(
+            algorithm=:sdp,
+            mixed_precision_kkt=:on,
+            precision_bits=256,
+            verbosity=0,
+        ),
+    )
+    @test mixed_plan.backend_config.fallback_chain == (:dense_cholesky,)
+
+    # Forged structural fallback: a reason naming the mixed route must not
+    # become authorized merely because the executed target coincides with a
+    # chain entry. Forge a target *not* in the chain (`:block_arrow`) and
+    # assert the fail-closed result.
+    forged = (
+        fallback_reason=:anything,
+        executed_backend=:block_arrow,
+        la_fallback_reason=:none,
+        solver=:sdp,
+        kkt_formulation=:dense_normal_equations,
+    )
+    forged_target = SDPX._attempt_runtime_backend_fallback_event(
+        mixed_plan,
+        forged,
+    )
+    @test forged_target !== nothing
+    @test forged_target.kind === :backend_structural
+    @test forged_target.authorized === false
+
+    # Real mixed fallback event: the executed backend is exactly the
+    # authorized chain target.
+    mixed_event = SDPX._attempt_runtime_backend_fallback_event(
+        mixed_plan,
+        merge(forged, (executed_backend=:dense_cholesky,)),
+    )
+    @test mixed_event !== nothing
+    @test mixed_event.authorized === true
+
+    # A terminal reason while the planned backend remains active is not a
+    # route divergence and therefore must not be fabricated as a fallback.
+    same_backend_terminal = SDPX._attempt_runtime_backend_fallback_event(
+        plain_plan,
+        (
+            fallback_reason=:factorization_failed,
+            executed_backend=SDPX.planned_backend_name(plain_plan),
+        ),
+    )
+    @test same_backend_terminal === nothing
+
+    # The dedicated LP runner intentionally resolves its backend after row
+    # presolve.  A deferred plan is not evidence of a runtime fallback even
+    # when a terminal record contains a reason.
+    lp_problem = SDPX.linear_program(
+        [1.0],
+        reshape([1.0], 1, 1),
+        [0.0];
+        verbosity=0,
+    )
+    deferred_lp_plan = SDPX.build_execution_plan(
+        lp_problem,
+        SDPX.SolverOptions{Float64}(verbosity=0),
+    )
+    @test deferred_lp_plan.backend_config.deferred
+    @test SDPX._attempt_runtime_backend_fallback_event(
+        deferred_lp_plan,
+        (fallback_reason=:factorization_failed, executed_backend=:dense_lu),
+    ) === nothing
+
+    # Terminal `:la_factor_failed` with no demonstrated QR equality route is
+    # not a fallback event.
+    terminal = (
+        solver=:lp,
+        lp_formulation=:cholesky,
+        la_fallback_reason=:la_factor_failed,
+        equality=:not_executed,
+    )
+    @test SDPX._attempt_runtime_la_fallback_event(
+        plain_plan,
+        terminal,
+    ) === nothing
+
+    # A demonstrated authorized QR equality fallback creates one event.
+    equality_plan = SDPX.build_execution_plan(
+        problem,
+        SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            equality_solver=:auto,
+            verbosity=0,
+        ),
+    )
+    qr = (
+        solver=:sdp,
+        kkt_formulation=:dense_normal_equations,
+        la_fallback_reason=:la_equality_factor_failed,
+        equality=:rank_revealing_qr,
+    )
+    qr_event = SDPX._attempt_runtime_la_fallback_event(
+        equality_plan,
+        qr,
+    )
+    @test qr_event !== nothing
+    @test qr_event.kind === :la_equality
+    @test qr_event.authorized === true
+
+    # Identical planned and runtime LA reasons must not duplicate: only the
+    # planned LA provenance event is built without runtime divergence
+    # evidence, and with `equality=:not_executed` no runtime event is added.
+    legacy_plan = SDPX.build_execution_plan(
+        problem,
+        SDPX.SolverOptions{Float64}(
+            algorithm=:sdp,
+            linear_algebra_backend=:legacy,
+            verbosity=0,
+        ),
+    )
+    legacy_runtime = (
+        solver=:sdp,
+        kkt_formulation=:dense_normal_equations,
+        la_fallback_reason=:legacy_selected,
+        equality=:not_executed,
+    )
+    legacy_events = SDPX._attempt_fallback_events(
+        legacy_plan,
+        legacy_runtime,
+    )
+    @test length(legacy_events) == 1
+    @test legacy_events[1].kind === :la_route
+    @test legacy_events[1].source === :plan
+    @test legacy_events[1].authorized === true
+
+    # Regularization is not a fallback event.
+    regularization_events = SDPX._attempt_fallback_events(
+        plain_plan,
+        (
+            solver=:sdp,
+            kkt_formulation=:dense_normal_equations,
+            la_fallback_reason=:none,
+            fallback_reason=:none,
+        ),
+    )
+    @test regularization_events == ()
+
+    # Certification downgrades are certificate facts, not fallback events.
+    @test SDPX._attempt_certificate_facts(
+        (
+            reason=:minimal_original_coordinate_gate_failed,
+            previous=:none,
+        ),
+        (
+            available=false,
+            reason=:certification_disabled,
+            minimal_gate=(available=false, reason=:not_applicable),
+        ),
+    ).downgrade === true
+    @test SDPX._attempt_certificate_facts(
+        (reason=:final_certificate_failed, previous=:none),
+        (available=true, valid=false),
+    ).downgrade === true
+end
