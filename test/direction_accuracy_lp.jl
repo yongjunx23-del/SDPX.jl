@@ -416,10 +416,13 @@ end
         @test accepted.eta_fact_normalized <= accepted.tau
         @test accepted.k0_infinity ≈ opnorm(Matrix(H0), Inf)
 
-        # The sparse operator norm computes each column sum directly; after
-        # warm-up it allocates no per-direction scratch.
-        SDPX._lp_sparse_k0_infinity_norm(Kδ, delta)
-        norm_allocated = @allocated SDPX._lp_sparse_k0_infinity_norm(Kδ, delta)
+        # The sparse operator norm reads the authoritative lower triangle and
+        # reuses caller-owned row-sum scratch.
+        row_sums = zeros(T, variables)
+        SDPX._lp_sparse_k0_infinity_norm(Kδ, delta, row_sums)
+        norm_allocated = @allocated SDPX._lp_sparse_k0_infinity_norm(
+            Kδ, delta, row_sums,
+        )
         @test norm_allocated == 0
 
         # The sparse action accumulates in place without forming any dense
@@ -434,6 +437,23 @@ end
             1.0,
         )
         @test action_scratch ≈ expected_action atol=1e-12
+
+        # Production frozen storage retains only the lower triangle. The
+        # result and operator norm must remain identical, and an inactive
+        # poisoned upper triangle must never be consulted.
+        lower_Kδ = sparse(tril(Kδ))
+        lower_scratch = copy(rhs)
+        SDPX._lp_sparse_regularized_action!(
+            lower_scratch,
+            lower_Kδ,
+            direction,
+            -1.0,
+            1.0,
+        )
+        @test lower_scratch ≈ expected_action atol=1e-12
+        @test SDPX._lp_sparse_k0_infinity_norm(
+            lower_Kδ, delta, row_sums,
+        ) ≈ opnorm(Matrix(H0), Inf)
 
         corrupted = copy(direction)
         corrupted[1] += 1e-2

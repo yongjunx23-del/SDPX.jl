@@ -2610,33 +2610,50 @@ function _lp_reduced_k0_infinity_norm(
 end
 
 """
-    _lp_sparse_k0_infinity_norm(K, delta) -> T
+    _lp_sparse_k0_infinity_norm(K, delta, row_sums) -> T
 
 ∞-norm of the unregularized sparse equality-free LP operator from the
 retained regularized matrix `K = K0 + δI`. The sparse factorization never
 mutates `K`, so this is the exact operator the accepted factor solved. `K` is
-symmetric (`K = G'DG + δI`), so `‖K0‖∞` equals the maximum absolute column
-sum, computed directly from each CSC column with its diagonal contribution
-replaced by `|K[i,i] - δ|` — no `O(n)` scratch allocation and no dense
-generic fallback. `δI` guarantees a stored diagonal whenever `δ ≠ 0`; for
+symmetric (`K = G'DG + δI`) but provider storage is lower-authoritative.
+Every off-diagonal entry therefore contributes to both endpoint row sums.
+The caller supplies `row_sums`, which is reused immediately afterward as
+residual scratch; no per-direction allocation or dense materialization is
+introduced. `δI` guarantees a stored diagonal whenever `δ ≠ 0`; for
 `δ = 0` the adjustment is zero in every column.
 """
 function _lp_sparse_k0_infinity_norm(
     K::SparseMatrixCSC{T,Int},
     delta::T,
+    row_sums::AbstractVector{T},
 ) where {T}
     n = size(K, 1)
-    column_max = zero(T)
+    length(row_sums) == n ||
+        throw(DimensionMismatch("sparse LP row-sum scratch mismatch"))
+    zero_owned!(row_sums)
     @inbounds for column in 1:n
-        accumulator = zero(T)
         for pointer in K.colptr[column]:(K.colptr[column + 1] - 1)
             row = K.rowval[pointer]
             value = K.nzval[pointer]
-            accumulator += row == column ? abs(value - delta) : abs(value)
+            if row == column
+                row_sums[column] += abs(value - delta)
+            elseif row > column
+                magnitude = abs(value)
+                row_sums[row] += magnitude
+                row_sums[column] += magnitude
+            else
+                # Historical full symmetric matrices are accepted by reading
+                # only their authoritative lower triangle.
+                continue
+            end
         end
-        column_max = max(column_max, accumulator)
     end
-    return column_max
+    # `row_sums` is reused as residual scratch immediately after this call.
+    # Own the selected scalar so mutable BigFloat storage cannot retroactively
+    # change the retained operator norm.
+    return _ingest_owned_scalar(
+        T, maximum(row_sums; init=zero(T)),
+    )
 end
 
 """`scratch = rhs - K0*d` for the dense route, `K0 = [H -B; B' 0]`."""
@@ -2733,8 +2750,10 @@ end
     _lp_sparse_regularized_action!(destination, K, x, alpha, beta)
 
 `destination = alpha * K * x + beta * destination` for the retained sparse
-regularized LP operator. Implemented as a plain CSC matvec accumulating
-directly into `destination` with per-entry owned mutation, so the per-direction
+regularized LP operator. Frozen sparse storage is lower-authoritative, so each
+off-diagonal value is applied symmetrically to both endpoint rows. Historical
+full symmetric inputs are accepted by ignoring their inactive upper half.
+The operation accumulates directly into `destination`, so the per-direction
 gate allocates no array storage and no dense generic fallback is introduced.
 """
 function _lp_sparse_regularized_action!(
@@ -2752,10 +2771,17 @@ function _lp_sparse_regularized_action!(
         end
     end
     @inbounds for column in 1:size(K, 2)
-        value = x[column]
-        iszero(value) && continue
         for pointer in K.colptr[column]:(K.colptr[column + 1] - 1)
-            destination[K.rowval[pointer]] += alpha * K.nzval[pointer] * value
+            row = K.rowval[pointer]
+            entry = K.nzval[pointer]
+            if row == column
+                destination[row] += alpha * entry * x[column]
+            elseif row > column
+                destination[row] += alpha * entry * x[column]
+                destination[column] += alpha * entry * x[row]
+            else
+                continue
+            end
         end
     end
     return destination
@@ -2889,7 +2915,7 @@ function _lp_direction_accuracy_gate!(
         eta_fact = knrmInf(scratch)
     elseif workspace.sparse_system !== nothing
         K = (workspace.sparse_system::LPSparseSystem{T}).K
-        k0_infinity = _lp_sparse_k0_infinity_norm(K, delta)
+        k0_infinity = _lp_sparse_k0_infinity_norm(K, delta, scratch)
         copy_owned!(scratch, rhs)
         _lp_sparse_regularized_action!(
             scratch,
