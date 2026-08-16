@@ -3415,6 +3415,17 @@ function _automatic_refinement_relative_tolerance(
     return roundoff_floor
 end
 
+function _kkt_direction_residual_tolerance(
+    ws::Workspace{T},
+    opts::SolverOptions{T},
+    r::AbstractVector{T},
+) where {T}
+    relative_tolerance = opts.refine_tol > zero(T) ?
+                         opts.refine_tol :
+                         _automatic_refinement_relative_tolerance(ws, opts)
+    return relative_tolerance * max(knrmInf(r), one(T))
+end
+
 function _kkt_direction_residual!(
     ws::Workspace{T},
     prob::SDPProblem{T},
@@ -3649,11 +3660,7 @@ function _refine_native_direction!(backend, ws::Workspace{T}, prob::SDPProblem{T
     cap = opts.refine_max_steps
     cap > 0 || return (0, zero(T))
 
-    scale = max(knrmInf(r), one(T))
-    reltol = opts.refine_tol > zero(T) ?
-             opts.refine_tol :
-             _automatic_refinement_relative_tolerance(ws, opts)
-    abstol = reltol * scale
+    abstol = _kkt_direction_residual_tolerance(ws, opts, r)
     steps = 0
     n = prob.dims.n
     residual = _kkt_direction_residual!(ws, prob, r)

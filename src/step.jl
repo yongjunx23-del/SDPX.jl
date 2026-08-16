@@ -71,6 +71,14 @@ function compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T}, x, X, y, Y, Î
     return p_res, d_res
 end
 
+@inline function _block_primal_residual_norm(ws::Workspace{T}) where {T}
+    residual = zero(T)
+    @inbounds for block in ws.blk
+        residual = max(residual, knrmInf(block.P))
+    end
+    return residual
+end
+
 function factor_blocks!(ws::Workspace{T}, X, Y) where {T}
     ok = true
     for l in eachindex(X)
@@ -886,7 +894,7 @@ function newton_step!(
                                 iteration_parameters.refinement_max_count,
                         ) :
                         opts
-    refine_steps, refine_residual =
+    refine_steps, _ =
         skip_automatic_refinement ?
         (0, zero(T)) :
         refine!(
@@ -896,6 +904,28 @@ function newton_step!(
             corrector_options,
             r,
         )
+
+    # Close the linear-solve accuracy contract before cone geometry is allowed
+    # to accept the direction.  This reuses the unregularized structured KKT
+    # operator and retained factor state; it adds no factorization and also
+    # leaves rho_r/rho_p populated for exact accepted-trial residual carry.
+    refine_residual = _kkt_direction_residual!(ws, prob, r)
+    direction_tolerance = _kkt_direction_residual_tolerance(
+        ws, corrector_options, r,
+    )
+    if !isfinite(refine_residual) || refine_residual > direction_tolerance
+        return (
+            status=:breakdown,
+            reason=
+                "final structured KKT direction residual $(refine_residual) " *
+                "exceeded the accepted tolerance $(direction_tolerance)",
+            p_res=p_res,
+            d_res=d_res,
+            reg_attempts=kkt.reg_attempts,
+            q_pivoted=kkt.q_pivoted,
+        )
+    end
+    block_primal_residual = _block_primal_residual_norm(ws)
     refinement_finished = time_ns()
 
     _with_blas_threads(parallel_blas) do
@@ -915,6 +945,9 @@ function newton_step!(
         reason="",
         p_res=p_res,
         d_res=d_res,
+        block_primal_residual=block_primal_residual,
+        direction_residual=refine_residual,
+        direction_tolerance=direction_tolerance,
         reg_attempts=kkt.reg_attempts,
         q_pivoted=kkt.q_pivoted,
         predictor_quality=predictor_diagnostics.predictor_quality,

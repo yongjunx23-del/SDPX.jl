@@ -279,6 +279,34 @@ end
         end
     end
 
+    @testset "controller records explicit accepted-trial residuals" begin
+        options = SDPX.SolverOptions{Float64}(
+            parameter_strategy=:adaptive,
+            verbosity=0,
+        )
+        controller = SDPX.AdaptiveIPMController(options)
+        selected = controller.parameters
+        SDPX.record_and_update!(
+            controller;
+            iteration=1,
+            predictor_quality=0.5,
+            complementarity_before=1.0,
+            complementarity_after=0.4,
+            primal_residual=1.0,
+            dual_residual=0.5,
+            primal_step=1.0,
+            dual_step=1.0,
+            primal_residual_after=0.75,
+            dual_residual_after=0.25,
+            backtracking_count=0,
+            selected_parameters=selected,
+        )
+        row = only(controller.history)
+        @test row.primal_residual_after == 0.75
+        @test row.dual_residual_after == 0.25
+        @test row.achieved_residual_reduction == 0.75
+    end
+
     @testset "adaptive SDP records canonical affine diagnostics" begin
         problem = policy_toy_sdp(Float64)
         result = SDPX.solve!(

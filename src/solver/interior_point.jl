@@ -1274,6 +1274,32 @@ function _kkt_cold_start_initialization(
     )
 end
 
+function _accepted_sdp_trial_residuals!(
+    ws::Workspace{T},
+    block_primal_residual::T,
+    primal_step::T,
+    dual_step::T,
+) where {T}
+    primal_scale = one(T) - primal_step
+    dual_scale = one(T) - dual_step
+    block_residual_after = abs(primal_scale) * block_primal_residual
+
+    primal_residual_after = block_residual_after
+    if !isempty(ws.p)
+        # p+ = (1-tX)p + tX*rho_p
+        kaxpby_owned!(primal_step, ws.ρp, primal_scale, ws.p)
+        primal_residual_after = max(
+            primal_residual_after,
+            knrmInf(ws.p),
+        )
+    end
+
+    # d+ = (1-tY)d - tY*rho_r
+    kaxpby_owned!(-dual_step, ws.ρr, dual_scale, ws.d)
+    dual_residual_after = knrmInf(ws.d)
+    return primal_residual_after, dual_residual_after
+end
+
 """
     _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
            x0=nothing, X0=nothing, y0=nothing, Y0=nothing, resume="") -> SDPResult{T}
@@ -2169,6 +2195,14 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             break
         end
 
+        primal_residual_after, dual_residual_after =
+            _accepted_sdp_trial_residuals!(
+                ws,
+                result.block_primal_residual,
+                tX,
+                tY,
+            )
+
         record_and_update!(
             parameter_controller;
             iteration=iter + 1,
@@ -2179,6 +2213,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             dual_residual=d_res,
             primal_step=tX,
             dual_step=tY,
+            primal_residual_after=primal_residual_after,
+            dual_residual_after=dual_residual_after,
             backtracking_count=backtracking_count,
             affine_primal_step=result.affine_primal_step,
             affine_dual_step=result.affine_dual_step,
@@ -2227,13 +2263,13 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             (time_ns() - objective_and_targets_started) / 1.0e9
         iter += 1
 
-        # Newton feasibility equations are affine:
-        #   P⁺ = (1-tX)P and d⁺ = (1-tY)d.
-        # Carry the residual norms to the accepted iterate without another full
-        # contraction. A direct recomputation still certifies any prospective
-        # `Optimal` status and the final returned point.
-        p_res *= abs(one(T) - tX)
-        d_res *= abs(one(T) - tY)
+        # The accepted affine residuals include the final inexact-direction
+        # terms recorded by the unregularized structured KKT operator.  The
+        # vector update above is exact and O(m+n); prospective success and the
+        # final returned point are still recomputed/certified independently in
+        # original coordinates.
+        p_res = primal_residual_after
+        d_res = dual_residual_after
         t2 = time()
         print_iter(opts, iter, pObj, dObj, pObj - dObj, p_res, d_res, tX, tY, t2 - t1)
 

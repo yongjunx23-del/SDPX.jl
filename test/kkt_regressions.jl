@@ -182,6 +182,52 @@ end
         @test workspace.dx == initial_direction
     end
 
+    @testset "accepted SDP trial residuals include direction error" begin
+        problem = _dense_workspace_problem(reshape([1.0], 1, 1))
+        workspace = SDPX.Workspace(problem; thread_count=1)
+
+        # Minimal counterexample from the numerical audit: the ideal carry
+        # would report zero at a full step, while rho_p keeps the true equality
+        # residual at one.
+        workspace.p[1] = 1.0
+        workspace.ρp[1] = 1.0
+        workspace.d[1] = 0.0
+        workspace.ρr[1] = 0.0
+        primal_after, dual_after =
+            SDPX._accepted_sdp_trial_residuals!(
+                workspace, 0.0, 1.0, 1.0,
+            )
+        @test primal_after == 1.0
+        @test workspace.p == [1.0]
+        @test dual_after == 0.0
+
+        # The dual affine residual has the opposite structured-residual sign:
+        # d+ = (1-tY)d - tY*rho_r.
+        workspace.p[1] = 0.0
+        workspace.ρp[1] = 0.0
+        workspace.d[1] = 1.0
+        workspace.ρr[1] = 1.0
+        primal_after, dual_after =
+            SDPX._accepted_sdp_trial_residuals!(
+                workspace, 0.0, 1.0, 1.0,
+            )
+        @test primal_after == 0.0
+        @test workspace.d == [-1.0]
+        @test dual_after == 1.0
+
+        # Exact directions retain the historical affine carry formula.
+        workspace.p[1] = 2.0
+        workspace.ρp[1] = 0.0
+        workspace.d[1] = -4.0
+        workspace.ρr[1] = 0.0
+        primal_after, dual_after =
+            SDPX._accepted_sdp_trial_residuals!(
+                workspace, 3.0, 0.25, 0.5,
+            )
+        @test primal_after == 2.25
+        @test dual_after == 2.0
+    end
+
     @testset "allocation-free equality KKT right-hand side" begin
         B = reshape([1.0, 2.0, -1.0], 3, 1)
         problem = _dense_workspace_problem(B)
