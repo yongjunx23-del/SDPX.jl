@@ -156,6 +156,32 @@ end
         @test workspace.dx == initial_direction
     end
 
+    @testset "fixed refinement restores last accepted direction" begin
+        problem = _dense_workspace_problem(zeros(2, 0))
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        workspace.S .= Matrix{Float64}(I, 2, 2)
+        fill!(workspace.Sbuf, 0.0)
+        workspace.Sbuf[1, 1] = 0.5
+        workspace.Sbuf[2, 2] = 0.5
+        initial_direction = [0.25, -0.5]
+        copyto!(workspace.dx, initial_direction)
+        rhs = [1.0, -2.0]
+        initial_residual =
+            norm(rhs - workspace.S * initial_direction, Inf)
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            refine_policy=:fixed,
+            refine_steps=1,
+            refine_tol=0.0,
+        )
+
+        steps, residual =
+            SDPX.refine_direction!(workspace, problem, options, rhs)
+        @test steps == 0
+        @test residual == initial_residual
+        @test workspace.dx == initial_direction
+    end
+
     @testset "allocation-free equality KKT right-hand side" begin
         B = reshape([1.0, 2.0, -1.0], 3, 1)
         problem = _dense_workspace_problem(B)

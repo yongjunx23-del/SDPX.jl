@@ -3666,11 +3666,28 @@ function _refine_native_direction!(backend, ws::Workspace{T}, prob::SDPProblem{T
                                    opts::SolverOptions{T}, r::AbstractVector{T}) where {T}
     if opts.refine_policy === :fixed
         opts.refine_steps > 0 || return (0, zero(T))
-        residual = zero(T)
+        n = prob.dims.n
+        steps = 0
+        residual = _kkt_direction_residual!(ws, prob, r)
         for _ in 1:opts.refine_steps
-            residual, _ = refine_kkt!(backend, ws, prob, r)
+            # A fixed policy fixes the correction budget; it does not authorize
+            # keeping a direction that the original structured KKT residual
+            # proves is worse.  Snapshot the last accepted direction exactly as
+            # the adaptive policy does, then retain only finite non-worsening
+            # corrections.
+            copy_owned!(ws.dx_best, ws.dx)
+            n > 0 && copy_owned!(ws.dy_best, ws.dy)
+            _apply_kkt_correction!(backend, ws, prob)
+            corrected_residual = _kkt_direction_residual!(ws, prob, r)
+            if !isfinite(corrected_residual) || corrected_residual > residual
+                copy_owned!(ws.dx, ws.dx_best)
+                n > 0 && copy_owned!(ws.dy, ws.dy_best)
+                break
+            end
+            steps += 1
+            residual = corrected_residual
         end
-        return (opts.refine_steps, residual)
+        return (steps, residual)
     end
     (opts.refine_policy === :adaptive || opts.refine_policy === :auto) ||
         throw(ArgumentError("refine_policy must be :fixed, :adaptive, or :auto, got $(opts.refine_policy)"))
