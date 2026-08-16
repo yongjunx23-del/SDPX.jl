@@ -32,7 +32,7 @@ jobs:
           fi
           base64 --decode .codex/n3-equality-scaling.patch.gz.b64 > "$RUNNER_TEMP/n3.patch.gz"
           gzip -dc "$RUNNER_TEMP/n3.patch.gz" > "$RUNNER_TEMP/n3.patch"
-          echo 'd9279b3ccc2f1e3a3d025f41d5eee750279d89b3b082b8cafb1bff122c2aa7fd  '"$RUNNER_TEMP/n3.patch" | sha256sum -c -
+          echo '3831ce93f2075af12115b106b67abfd1dccf14daa135464562af5d9df82a9b8a  '"$RUNNER_TEMP/n3.patch" | sha256sum -c -
           git apply --check "$RUNNER_TEMP/n3.patch"
           git apply "$RUNNER_TEMP/n3.patch"
           git diff --check
