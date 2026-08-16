@@ -1269,8 +1269,13 @@ function _with_native_soc_certificate(
         if status !== result.status && status === NumericalFailure
             previous_reason = hasproperty(termination, :reason) ?
                               termination.reason : :unknown
+            failure_reason =
+                hasproperty(certificate, :reason) &&
+                certificate.reason === :certification_disabled ?
+                :minimal_original_coordinate_gate_failed :
+                :final_certificate_failed
             termination = merge(termination, (
-                reason=:final_certificate_failed,
+                reason=failure_reason,
                 previous_reason,
                 certificate_failures=hasproperty(certificate, :failures) ?
                                      certificate.failures : (),
@@ -1307,9 +1312,70 @@ function certify_native_soc_result(
     result::ConicResult{T},
     options::SolverOptions{T},
 ) where {T}
-    options.certification || return _with_native_soc_certificate(
-        result, (available=false, reason=:certification_disabled),
-    )
+    if !options.certification
+        if result.status !== Optimal
+            return _with_native_soc_certificate(
+                result,
+                (
+                    available=false,
+                    reason=:certification_disabled,
+                    minimal_gate=(available=false, reason=:not_applicable),
+                ),
+            )
+        end
+
+        # NativeSOC already validates directly in Lorentz coordinates. Reuse
+        # that arithmetic, but expose only a compact success gate when the
+        # caller has disabled the detailed certificate payload.
+        full = result_certificate(problem, result, options)
+        gate = (
+            available=true,
+            valid=full.valid,
+            kind=:minimal_original_lorentz_optimality,
+            failures=copy(full.failures),
+            primal_objective=full.primal_objective,
+            dual_objective=full.dual_objective,
+            gap_relative=full.gap_relative,
+            primal_residual=full.primal_residual,
+            dual_residual=full.dual_residual,
+            primal_residual_scaled=full.primal_residual_scaled,
+            dual_residual_scaled=full.dual_residual_scaled,
+            primal_residual_limit=full.primal_residual_limit,
+            dual_residual_limit=full.dual_residual_limit,
+            gap_limit=full.gap_limit,
+        )
+        certificate = (
+            available=false,
+            reason=:certification_disabled,
+            failures=copy(gate.failures),
+            minimal_gate=gate,
+        )
+        recomputed = ConicResult{T}(
+            result.status,
+            result.message,
+            result.x,
+            result.slack,
+            result.dual,
+            result.equality_dual,
+            gate.primal_objective,
+            gate.dual_objective,
+            gate.gap_relative,
+            gate.primal_residual,
+            gate.dual_residual,
+            result.iterations,
+            result.diagnostics,
+        )
+        if !gate.valid
+            message =
+                "NativeSOCP minimal original-coordinate success gate failed: " *
+                join(string.(gate.failures), ", ")
+            return _with_native_soc_certificate(
+                recomputed, certificate, NumericalFailure, message,
+            )
+        end
+        return _with_native_soc_certificate(recomputed, certificate)
+    end
+
     certificate = result_certificate(problem, result, options)
     if result.status === Optimal && !certificate.valid
         message = "NativeSOCP original-coordinate certification failed: " *
@@ -1389,16 +1455,158 @@ function _certificate_failure_message(certificate)
     return join(parts, "; ")
 end
 
+function _minimal_sdp_optimality_gate(
+    prob::SDPProblem{T},
+    result::SDPResult{T},
+    opts::SolverOptions{T},
+) where {T}
+    primal_objective = LinearAlgebra.dot(prob.c, result.x)
+    dual_objective_value = dual_objective(prob, result.y, result.Y)
+    primal_affine_residual, dual_affine_residual = solution_residuals(
+        prob,
+        result.x,
+        result.X,
+        result.y,
+        result.Y,
+    )
+    gap = primal_objective - dual_objective_value
+    objective_scale = max(
+        one(T),
+        (abs(primal_objective) + abs(dual_objective_value)) / T(2),
+    )
+    gap_relative = abs(gap) / objective_scale
+
+    primal_psd = _blocks_psd_certificate(
+        result.X, max(opts.ϵ_primal, opts.ϵ_gap),
+    )
+    dual_psd = _blocks_psd_certificate(
+        result.Y, max(opts.ϵ_dual, opts.ϵ_gap),
+    )
+    primal_residual = max(
+        primal_affine_residual, _psd_violation(primal_psd, T),
+    )
+    dual_residual = max(
+        dual_affine_residual, _psd_violation(dual_psd, T),
+    )
+
+    L = prob.dims.L
+    primal_scale = one(T) + max(
+        L > 0 ?
+        maximum(block -> knrmInf(prob.C[block]), 1:L) :
+        zero(T),
+        prob.dims.n > 0 ? knrmInf(prob.b) : zero(T),
+    )
+    dual_scale = one(T) + knrmInf(prob.c)
+    primal_scaled = primal_residual / primal_scale
+    dual_scaled = dual_residual / dual_scale
+    gap_ok = opts.termination === :legacy ?
+             zero(T) <= gap <= opts.ϵ_gap :
+             gap_relative <= opts.ϵ_gap
+    finite =
+        isfinite(primal_objective) &&
+        isfinite(dual_objective_value) &&
+        isfinite(gap_relative) &&
+        isfinite(primal_residual) &&
+        isfinite(dual_residual) &&
+        all(isfinite, result.x) &&
+        all(block -> all(isfinite, block), result.X) &&
+        all(isfinite, result.y) &&
+        all(block -> all(isfinite, block), result.Y)
+
+    failures = Symbol[]
+    finite || push!(failures, :nonfinite)
+    primal_scaled <= opts.ϵ_primal || push!(failures, :primal_residual)
+    dual_scaled <= opts.ϵ_dual || push!(failures, :dual_residual)
+    gap_ok || push!(failures, :duality_gap)
+    primal_psd.ok || push!(failures, :primal_psd)
+    dual_psd.ok || push!(failures, :dual_psd)
+    return (
+        available=true,
+        valid=isempty(failures),
+        kind=:minimal_original_coordinate_optimality,
+        failures,
+        primal_objective,
+        dual_objective=dual_objective_value,
+        gap,
+        gap_relative,
+        primal_residual,
+        dual_residual,
+        primal_affine_residual,
+        dual_affine_residual,
+        primal_residual_scaled=primal_scaled,
+        dual_residual_scaled=dual_scaled,
+        primal_residual_limit=opts.ϵ_primal,
+        dual_residual_limit=opts.ϵ_dual,
+        gap_limit=opts.ϵ_gap,
+        primal_psd,
+        dual_psd,
+    )
+end
+
 function certify_final_result(
     prob::SDPProblem{T},
     result::SDPResult{T},
     opts::SolverOptions{T},
 ) where {T}
-    opts.certification || return (
-        result,
-        (available=false, reason=:certification_disabled),
-        nothing,
-    )
+    if !opts.certification
+        if result.status !== Optimal
+            return (
+                result,
+                (
+                    available=false,
+                    reason=:certification_disabled,
+                    minimal_gate=(available=false, reason=:not_applicable),
+                ),
+                nothing,
+            )
+        end
+
+        gate = _minimal_sdp_optimality_gate(prob, result, opts)
+        certificate = (
+            available=false,
+            reason=:certification_disabled,
+            minimal_gate=gate,
+        )
+        downgrade = !gate.valid
+        status = downgrade ? Stalled : result.status
+        failure_message = downgrade ?
+            "Minimal original-coordinate success gate failed: " *
+            _certificate_failure_message(gate) : ""
+        message = downgrade ?
+                  result.message * ". " * failure_message :
+                  result.message
+        termination = downgrade ?
+            merge(
+                result.termination,
+                (
+                    reason=:minimal_original_coordinate_gate_failed,
+                    failures=copy(gate.failures),
+                    previous=result.termination.reason,
+                ),
+            ) : result.termination
+        gated = SDPResult{T}(
+            status,
+            message,
+            result.x,
+            result.X,
+            result.y,
+            result.Y,
+            gate.primal_objective,
+            gate.dual_objective,
+            gate.gap_relative,
+            gate.primal_residual,
+            gate.dual_residual,
+            result.iterations,
+            result.restarts,
+            result.regularizations,
+            result.timings,
+            result.parameter_history,
+            result.diagnostics,
+            termination,
+        )
+        return gated, certificate, downgrade ? failure_message : nothing
+    end
+
     certificate = result_certificate(prob, result, opts)
     authoritative_status = result.status in (
         Optimal,

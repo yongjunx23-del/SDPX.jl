@@ -1,3 +1,4 @@
+using MultiFloats: Float64x4
 using SDPX
 using Test
 
@@ -395,23 +396,45 @@ end
         @test certificate.dual_residual == result.d_res
     end
 
-    @testset "certify_final_result honors a disabled certification policy" begin
-        problem = scalar_certificate_problem(Float64)
-        invalid = scalar_certificate_result(Float64; slack=-1e-3)
-        options = SDPX.SolverOptions{Float64}(
-            ϵ_gap=1e-8,
-            ϵ_primal=1e-8,
-            ϵ_dual=1e-8,
-            certification=false,
-            verbosity=0,
-        )
-        result, certificate, warning =
-            SDPX.certify_final_result(problem, invalid, options)
-        @test result === invalid
-        @test result.status == SDPX.Optimal
-        @test certificate == (available=false, reason=:certification_disabled)
-        @test warning === nothing
-        @test result.termination.reason == :none
+    @testset "certification=false retains the minimal original-coordinate gate" begin
+        function check_disabled_gate(::Type{T}) where {T}
+            problem = scalar_certificate_problem(T)
+            options = SDPX.SolverOptions{T}(
+                ϵ_gap=T(1e-8),
+                ϵ_primal=T(1e-8),
+                ϵ_dual=T(1e-8),
+                certification=false,
+                verbosity=0,
+            )
+            invalid = scalar_certificate_result(
+                T; slack=-T(1e-3),
+            )
+            result, certificate, warning =
+                SDPX.certify_final_result(problem, invalid, options)
+            @test result.status == SDPX.Stalled
+            @test !certificate.available
+            @test certificate.reason == :certification_disabled
+            @test certificate.minimal_gate.available
+            @test !certificate.minimal_gate.valid
+            @test :primal_psd in certificate.minimal_gate.failures
+            @test warning !== nothing
+            @test result.termination.reason ==
+                  :minimal_original_coordinate_gate_failed
+
+            valid = scalar_certificate_result(T)
+            accepted, certificate, warning =
+                SDPX.certify_final_result(problem, valid, options)
+            @test accepted.status == SDPX.Optimal
+            @test certificate.minimal_gate.valid
+            @test warning === nothing
+            @test accepted.termination.reason == :none
+        end
+
+        check_disabled_gate(Float64)
+        check_disabled_gate(Float64x4)
+        setprecision(BigFloat, 256) do
+            check_disabled_gate(BigFloat)
+        end
     end
 
     @testset "certification=false skips the pipeline final certificate" begin
@@ -437,6 +460,8 @@ end
             uncertified.diagnostics.selected_algorithms.certificate
         @test certificate.available == false
         @test certificate.reason == :certification_disabled
+        @test certificate.minimal_gate.available
+        @test certificate.minimal_gate.valid
         @test uncertified.termination.reason != :final_certificate_failed
 
         for options in (
@@ -463,5 +488,6 @@ end
         @test raw.status == SDPX.Optimal
         @test raw.diagnostics.selected_algorithms.certificate.reason ==
               :certification_disabled
+        @test raw.diagnostics.selected_algorithms.certificate.minimal_gate.valid
     end
 end

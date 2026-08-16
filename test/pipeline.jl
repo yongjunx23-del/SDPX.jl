@@ -462,8 +462,12 @@ end
     )
     @test uncertified_timeout.status == SDPX.TimeLimit
     @test uncertified_timeout.iterations == 0
-    @test uncertified_timeout.diagnostics.selected_algorithms.certificate ==
-          (available=false, reason=:certification_disabled)
+    timeout_certificate =
+        uncertified_timeout.diagnostics.selected_algorithms.certificate
+    @test !timeout_certificate.available
+    @test timeout_certificate.reason == :certification_disabled
+    @test timeout_certificate.minimal_gate ==
+          (available=false, reason=:not_applicable)
 end
 
 @testset "initial-point scaling tracks the block data" begin

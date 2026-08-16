@@ -6,9 +6,9 @@ if !isdefined(@__MODULE__, :soc_psd_reference_problem)
     include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
 end
 
-# Tiny deterministic fixtures for the certification handoff.  No solve is
-# needed: the invariant is that a disabled policy never runs the independent
-# certificate and never rewrites the raw core result.
+# Tiny deterministic fixtures for the certification handoff. No solve is
+# needed: disabling the detailed certificate payload must still preserve the
+# minimal original-coordinate success semantics of `Optimal`.
 function v05_scalar_certificate_fixture()
     coefficients = [reshape([1.0], 1, 1, 1)]
     problem = SDPX.ingest(
@@ -448,7 +448,7 @@ end
         )
     end
 
-    @testset "certification=false returns certification_disabled" begin
+    @testset "certification=false keeps the minimal Optimal gate" begin
         problem, invalid = v05_scalar_certificate_fixture()
         options = SDPX.SolverOptions{Float64}(
             ϵ_gap=1e-8,
@@ -459,11 +459,14 @@ end
         )
         final, certificate, warning =
             SDPX.certify_final_result(problem, invalid, options)
-        @test final === invalid
-        @test final.status == SDPX.Optimal
-        @test certificate == (available=false, reason=:certification_disabled)
-        @test warning === nothing
-        @test final.termination.reason == :none
+        @test final.status == SDPX.Stalled
+        @test !certificate.available
+        @test certificate.reason == :certification_disabled
+        @test certificate.minimal_gate.available
+        @test !certificate.minimal_gate.valid
+        @test warning !== nothing
+        @test final.termination.reason ==
+              :minimal_original_coordinate_gate_failed
 
         resolved = SDPX.Experimental.resolve_solve_options(
             Float64,

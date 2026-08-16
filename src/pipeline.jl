@@ -2946,7 +2946,11 @@ function _inconsistent_presolve_result(
     certification_started = time_ns()
     certificate = opts.certification ?
                   result_certificate(prob, result, opts) :
-                  (available=false, reason=:certification_disabled)
+                  (
+            available=false,
+            reason=:certification_disabled,
+            minimal_gate=(available=false, reason=:not_applicable),
+        )
     recorded_pipeline_timings = opts.timing ?
         merge(
             pipeline_timings,
@@ -3021,7 +3025,11 @@ function _time_limit_pipeline_result(
         (reason=:none,),
         certification_enabled ?
         (available=false,) :
-        (available=false, reason=:certification_disabled),
+        (
+            available=false,
+            reason=:certification_disabled,
+            minimal_gate=(available=false, reason=:not_applicable),
+        ),
         pipeline_timings,
     )
 end

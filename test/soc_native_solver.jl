@@ -233,6 +233,30 @@ end
         @test downgraded.status === SDPX.NumericalFailure
         @test downgraded.termination.reason === :final_certificate_failed
         @test downgraded.termination.previous_reason === :converged
+
+        minimal = SDPX.certify_native_soc_result(
+            problem, invalid,
+            _native_soc_options(Float64; certification=false),
+        )
+        @test minimal.status === SDPX.NumericalFailure
+        @test minimal.termination.reason ===
+              :minimal_original_coordinate_gate_failed
+        minimal_certificate =
+            minimal.diagnostics.selected_algorithms.certificate
+        @test !minimal_certificate.available
+        @test minimal_certificate.reason === :certification_disabled
+        @test minimal_certificate.minimal_gate.available
+        @test !minimal_certificate.minimal_gate.valid
+
+        valid_minimal = SDPX.certify_native_soc_result(
+            problem, native,
+            _native_soc_options(Float64; certification=false),
+        )
+        @test valid_minimal.status === SDPX.Optimal
+        valid_minimal_certificate =
+            valid_minimal.diagnostics.selected_algorithms.certificate
+        @test !valid_minimal_certificate.available
+        @test valid_minimal_certificate.minimal_gate.valid
     end
 
     @testset "general dimension and mixed blocks" begin

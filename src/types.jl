@@ -701,9 +701,10 @@ Base.@kwdef struct SolverOptions{T}
     formulation::Symbol       = :auto                   # :auto | :primal | :normal_equations | :augmented
     threads::Int              = Base.Threads.nthreads() # per-solve scheduling limit
     diagnostics::Bool         = true                    # retain execution plan, phase timings, and warnings
-    # Pipeline post-solve certification handoff. `true` preserves the
-    # historical original-coordinate final certificate; `false` skips the
-    # independent certificate and returns the raw core status.
+    # Pipeline post-solve certification handoff. `true` retains the full
+    # original-coordinate certificate payload. `false` skips that detailed
+    # payload, but any raw `Optimal` must still pass the minimal final
+    # original-coordinate residual/gap/cone success gate.
     certification::Bool       = true
     expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
 end
