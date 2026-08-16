@@ -22,6 +22,37 @@ struct LPScaling{T}
 end
 
 """
+    LPDirectionGateRecord{T}
+
+Immutable, concretely typed record of one LP Newton direction validation
+(N7). `eta_fact = ‖rhoδ‖∞`, `eta0 = ‖rho0‖∞`, `eta_reg = ‖qδ‖∞`,
+`scale_s0 = ‖r‖∞ + ‖K0‖∞·‖d‖∞`, `scale_sigma = scale_s0 + ‖Eδ‖∞·‖d‖∞`
+and `tolerance = tau · scale_sigma` with
+`tau = max(sqrt(eps(T)), opts.ϵ_primal, opts.ϵ_dual)`. Normalized ratios use
+their exact denominators (`rhoδ`/`sδ`, `rho0`/`s0`, `qδ`/`s0`) with explicit
+zero-denominator handling. The record is retained in the workspace for
+diagnostics only and never consumed by any numeric path.
+"""
+struct LPDirectionGateRecord{T}
+    ok::Bool
+    phase::Symbol
+    reason::Symbol
+    delta::T
+    eta_fact::T
+    eta0::T
+    eta_reg::T
+    tau::T
+    scale_s0::T
+    scale_sigma::T
+    tolerance::T
+    residual::T
+    k0_infinity::T
+    eta_fact_normalized::T
+    eta0_normalized::T
+    eta_reg_normalized::T
+end
+
+"""
     LPDiagonalMatrix{T}
 
 Permutation-diagonal representation of the scalar cone map in a standard-form
@@ -118,6 +149,13 @@ mutable struct LPWorkspace{T,LB<:AbstractLABackend}
     executed_la_ownership::Symbol
     la_fallback_reason::Symbol
     executed_la_factorization::Symbol
+    # Retained evidence for the most recently validated Newton direction
+    # (N7): `eta_fact = ||rhoδ||∞`, `eta0 = ||rho0||∞`,
+    # `eta_reg = ||qδ||∞`, the accepted factor-side `delta`, the acceptance
+    # tolerance and its `tau`/`sδ` components. `nothing` before the first
+    # predictor direction is validated. Read-only downstream; never consumed
+    # by any numeric path.
+    direction_gate::Union{Nothing,LPDirectionGateRecord{T}}
 end
 
 function LPWorkspace(
@@ -175,6 +213,7 @@ function LPWorkspace(
         :not_executed,
         :none,
         :not_executed,
+        nothing,
     )
 end
 
@@ -2482,6 +2521,469 @@ function _lp_complete_direction!(
     return nothing
 end
 
+"""
+    _lp_direction_acceptance_tolerance(opts::SolverOptions{T}) -> T
+
+Arithmetic-aware relative tolerance for LP Newton direction acceptance:
+`max(sqrt(eps(T)), opts.ϵ_primal, opts.ϵ_dual)`, the same floor the automatic
+phase-2 cold start uses. The accepted factor-side regularization `δ` is
+deliberately **not** added here: the regularization-aware scale `sδ` computed
+by [`_lp_direction_accuracy_gate!`](@ref) is the only place the shift enters
+the acceptance test.
+"""
+@inline function _lp_direction_acceptance_tolerance(
+    opts::SolverOptions{T},
+) where {T}
+    return max(sqrt(eps(T)), opts.ϵ_primal, opts.ϵ_dual)
+end
+
+"""
+    _lp_dense_k0_infinity_norm(H, B) -> T
+
+∞-norm of the unregularized dense LP KKT operator `K0 = [H -B; B' 0]`,
+computed directly from the assembled Hessian `H` and the equality panel `B`
+as the largest absolute row sum. `H` is the same panel the accepted
+factorization was assembled from, so no matrix is re-formed and no generic
+refinement is hidden behind the measurement.
+"""
+function _lp_dense_k0_infinity_norm(
+    H::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+) where {T}
+    variables = size(H, 1)
+    equalities = size(B, 2)
+    row_max = zero(T)
+    @inbounds for row in 1:variables
+        accumulator = zero(T)
+        for column in 1:variables
+            accumulator += abs(H[row, column])
+        end
+        for equality in 1:equalities
+            accumulator += abs(B[row, equality])
+        end
+        row_max = max(row_max, accumulator)
+    end
+    @inbounds for equality in 1:equalities
+        accumulator = zero(T)
+        for row in 1:variables
+            accumulator += abs(B[row, equality])
+        end
+        row_max = max(row_max, accumulator)
+    end
+    return row_max
+end
+
+"""
+    _lp_reduced_k0_infinity_norm(system, weights, B) -> T
+
+∞-norm of the unregularized standard-form LP KKT operator. The inequality
+panel is permutation diagonal, so the primal Hessian is the diagonal
+`H[v,v] = weights[row_for_variable[v]] * coefficient[v]^2`, evaluated from
+the retained standard system and current barrier weights without
+materializing either `G` or `H`.
+"""
+function _lp_reduced_k0_infinity_norm(
+    system::LPStandardFormSystem{T},
+    weights::AbstractVector{T},
+    B::AbstractMatrix{T},
+) where {T}
+    variables = length(system.diagonal_coefficient)
+    equalities = size(B, 2)
+    row_max = zero(T)
+    @inbounds for variable in 1:variables
+        row = system.row_for_variable[variable]
+        coefficient = system.diagonal_coefficient[variable]
+        accumulator = abs(weights[row] * coefficient * coefficient)
+        for equality in 1:equalities
+            accumulator += abs(B[variable, equality])
+        end
+        row_max = max(row_max, accumulator)
+    end
+    @inbounds for equality in 1:equalities
+        accumulator = zero(T)
+        for row in 1:variables
+            accumulator += abs(B[row, equality])
+        end
+        row_max = max(row_max, accumulator)
+    end
+    return row_max
+end
+
+"""
+    _lp_sparse_k0_infinity_norm(K, delta) -> T
+
+∞-norm of the unregularized sparse equality-free LP operator from the
+retained regularized matrix `K = K0 + δI`. The sparse factorization never
+mutates `K`, so this is the exact operator the accepted factor solved. `K` is
+symmetric (`K = G'DG + δI`), so `‖K0‖∞` equals the maximum absolute column
+sum, computed directly from each CSC column with its diagonal contribution
+replaced by `|K[i,i] - δ|` — no `O(n)` scratch allocation and no dense
+generic fallback. `δI` guarantees a stored diagonal whenever `δ ≠ 0`; for
+`δ = 0` the adjustment is zero in every column.
+"""
+function _lp_sparse_k0_infinity_norm(
+    K::SparseMatrixCSC{T,Int},
+    delta::T,
+) where {T}
+    n = size(K, 1)
+    column_max = zero(T)
+    @inbounds for column in 1:n
+        accumulator = zero(T)
+        for pointer in K.colptr[column]:(K.colptr[column + 1] - 1)
+            row = K.rowval[pointer]
+            value = K.nzval[pointer]
+            accumulator += row == column ? abs(value - delta) : abs(value)
+        end
+        column_max = max(column_max, accumulator)
+    end
+    return column_max
+end
+
+"""`scratch = rhs - K0*d` for the dense route, `K0 = [H -B; B' 0]`."""
+function _lp_dense_k0_residual!(
+    scratch::AbstractVector{T},
+    rhs::AbstractVector{T},
+    H::AbstractMatrix{T},
+    B::AbstractMatrix{T},
+    dx::AbstractVector{T},
+    dy::AbstractVector{T},
+) where {T}
+    variables = length(dx)
+    equalities = length(dy)
+    copy_owned!(scratch, rhs)
+    kmul_owned!(view(scratch, 1:variables), H, dx, -one(T), one(T))
+    if equalities > 0
+        kmul_owned!(
+            view(scratch, 1:variables),
+            B,
+            dy,
+            one(T),
+            one(T),
+        )
+        kmul_owned!(
+            view(scratch, (variables + 1):(variables + equalities)),
+            transpose(B),
+            dx,
+            -one(T),
+            one(T),
+        )
+    end
+    return scratch
+end
+
+"""
+`scratch = rhs - K0*d` for the reduced standard-form route, with the diagonal
+primal Hessian `H[v,v] = weights[row] * coefficient^2` applied analytically.
+"""
+function _lp_reduced_k0_residual!(
+    scratch::AbstractVector{T},
+    rhs::AbstractVector{T},
+    system::LPStandardFormSystem{T},
+    weights::AbstractVector{T},
+    B::AbstractMatrix{T},
+    dx::AbstractVector{T},
+    dy::AbstractVector{T},
+) where {T}
+    variables = length(dx)
+    equalities = length(dy)
+    copy_owned!(scratch, rhs)
+    @inbounds for variable in 1:variables
+        row = system.row_for_variable[variable]
+        coefficient = system.diagonal_coefficient[variable]
+        hessian = weights[row] * coefficient * coefficient
+        scratch[variable] -= hessian * dx[variable]
+    end
+    if equalities > 0
+        kmul_owned!(
+            view(scratch, 1:variables),
+            B,
+            dy,
+            one(T),
+            one(T),
+        )
+        kmul_owned!(
+            view(scratch, (variables + 1):(variables + equalities)),
+            transpose(B),
+            dx,
+            -one(T),
+            one(T),
+        )
+    end
+    return scratch
+end
+
+"""`destination += scale * [dx; dy]` (owned-in-place, `BigFloat`-safe)."""
+function _lp_add_regularization_shift!(
+    scratch::AbstractVector{T},
+    dx::AbstractVector{T},
+    dy::AbstractVector{T},
+    scale::T,
+) where {T}
+    @inbounds for index in eachindex(dx)
+        scratch[index] += scale * dx[index]
+    end
+    offset = length(dx)
+    @inbounds for index in eachindex(dy)
+        scratch[offset + index] += scale * dy[index]
+    end
+    return scratch
+end
+
+"""
+    _lp_sparse_regularized_action!(destination, K, x, alpha, beta)
+
+`destination = alpha * K * x + beta * destination` for the retained sparse
+regularized LP operator. Implemented as a plain CSC matvec accumulating
+directly into `destination` with per-entry owned mutation, so the per-direction
+gate allocates no array storage and no dense generic fallback is introduced.
+"""
+function _lp_sparse_regularized_action!(
+    destination::AbstractVector{T},
+    K::SparseMatrixCSC{T,Int},
+    x::AbstractVector{T},
+    alpha::T,
+    beta::T,
+) where {T}
+    if iszero(beta)
+        fill!(destination, zero(T))
+    elseif !isone(beta)
+        @inbounds for index in eachindex(destination)
+            destination[index] *= beta
+        end
+    end
+    @inbounds for column in 1:size(K, 2)
+        value = x[column]
+        iszero(value) && continue
+        for pointer in K.colptr[column]:(K.colptr[column + 1] - 1)
+            destination[K.rowval[pointer]] += alpha * K.nzval[pointer] * value
+        end
+    end
+    return destination
+end
+
+function _lp_direction_gate_rejected(
+    workspace::LPWorkspace{T},
+    phase::Symbol,
+    delta::T,
+    reason::Symbol,
+) where {T}
+    record = LPDirectionGateRecord{T}(
+        false,
+        phase,
+        reason,
+        delta,
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+        T(Inf),
+    )
+    workspace.direction_gate = record
+    return record
+end
+
+"""
+    _lp_direction_accuracy_gate!(workspace, G, B, rhs, dx, dy, delta, scratch, opts; phase)
+
+Regularization-aware validation of one accepted LP Newton direction (N7).
+The production KKT convention is `K0 = [H -B; B' 0]` and the accepted factor
+solves `Kδ = K0 + Eδ` with `Eδ = δI` on the primal and equality coordinates
+for the dense and reduced routes, and `Eδ = δI` on the primal coordinates
+for the sparse equality-free route. For the direction `d = [dx; dy]` and the
+unregularized residual
+
+    rho0 = r - K0*d,   qδ = Eδ*d,   rhoδ = rho0 - qδ = r - Kδ*d,
+
+the direction is accepted iff everything is finite and
+
+    ‖rhoδ‖∞ <= τ * sδ,   τ = max(sqrt(eps(T)), opts.ϵ_primal, opts.ϵ_dual),
+    sδ = ‖r‖∞ + (‖K0‖∞ + ‖Eδ‖∞) * ‖d‖∞,
+
+with no `δ` added to `τ` itself. A direction that only satisfies the shifted
+system is measured by the unregularized `rho0` (reported as `eta0`) and by
+the shift action `qδ` (reported as `eta_reg`), but acceptance is decided on
+`eta_fact = ‖rhoδ‖∞` against the shift-aware scale `sδ`.
+
+The gate adds no factorization, no RHS solve, no correction and no fallback:
+it evaluates the retained operators in the caller-owned `scratch` and records
+`eta_fact`/`eta0`/`eta_reg`/`delta`/`tau`/`sδ` in `workspace.direction_gate`.
+Unknown, non-finite, or unsupported (sparse equality) routes fail closed.
+"""
+function _lp_direction_accuracy_gate!(
+    workspace::LPWorkspace{T},
+    G,
+    B,
+    rhs::AbstractVector{T},
+    dx::AbstractVector{T},
+    dy::AbstractVector{T},
+    delta::T,
+    scratch::AbstractVector{T},
+    opts::SolverOptions{T};
+    phase::Symbol=:affine,
+) where {T}
+    variables = length(dx)
+    equalities = length(dy)
+    length(rhs) == variables + equalities ||
+        throw(DimensionMismatch("LP direction RHS dimension mismatch"))
+    length(scratch) == variables + equalities ||
+        throw(DimensionMismatch("LP direction scratch dimension mismatch"))
+
+    if !(workspace.backend_formulation in (
+        :dense_lu,
+        :positive_definite_cholesky,
+        :diagonal_reduced_cholesky,
+        :sparse_normal,
+    ))
+        return _lp_direction_gate_rejected(
+            workspace,
+            phase,
+            delta,
+            :unknown_lp_route,
+        )
+    end
+    if !(isfinite(delta) &&
+         all(isfinite, rhs) &&
+         all(isfinite, dx) &&
+         all(isfinite, dy))
+        return _lp_direction_gate_rejected(
+            workspace,
+            phase,
+            delta,
+            :nonfinite_direction_data,
+        )
+    end
+    if workspace.sparse_system !== nothing && equalities > 0
+        return _lp_direction_gate_rejected(
+            workspace,
+            phase,
+            delta,
+            :sparse_equality_unsupported,
+        )
+    end
+
+    reduced = workspace.standard_system
+    if reduced isa LPStandardFormSystem{T}
+        k0_infinity = _lp_reduced_k0_infinity_norm(
+            reduced,
+            workspace.weights,
+            B,
+        )
+        _lp_reduced_k0_residual!(
+            scratch,
+            rhs,
+            reduced,
+            workspace.weights,
+            B,
+            dx,
+            dy,
+        )
+        eta0 = knrmInf(scratch)
+        _lp_add_regularization_shift!(scratch, dx, dy, -delta)
+        eta_fact = knrmInf(scratch)
+    elseif workspace.sparse_system !== nothing
+        K = (workspace.sparse_system::LPSparseSystem{T}).K
+        k0_infinity = _lp_sparse_k0_infinity_norm(K, delta)
+        copy_owned!(scratch, rhs)
+        _lp_sparse_regularized_action!(
+            scratch,
+            K,
+            dx,
+            -one(T),
+            one(T),
+        )
+        eta_fact = knrmInf(scratch)
+        # Restore `scratch` to `rho0` for the retained evidence.
+        _lp_add_regularization_shift!(scratch, dx, dy, delta)
+        eta0 = knrmInf(scratch)
+    else
+        k0_infinity = _lp_dense_k0_infinity_norm(workspace.H, B)
+        _lp_dense_k0_residual!(
+            scratch,
+            rhs,
+            workspace.H,
+            B,
+            dx,
+            dy,
+        )
+        eta0 = knrmInf(scratch)
+        _lp_add_regularization_shift!(scratch, dx, dy, -delta)
+        eta_fact = knrmInf(scratch)
+    end
+
+    direction_scale = max(
+        knrmInf(dx),
+        isempty(dy) ? zero(T) : knrmInf(dy),
+    )
+    eta_reg = abs(delta) * direction_scale
+    tau = _lp_direction_acceptance_tolerance(opts)
+    scale_s0 = knrmInf(rhs) + k0_infinity * direction_scale
+    scale_sigma = scale_s0 + abs(delta) * direction_scale
+    tolerance = tau * scale_sigma
+    # Normalized ratios use their exact acceptance denominators: `rhoδ` is
+    # measured against `sδ = s0 + ‖Eδ‖·‖d‖`, while the unregularized `rho0`
+    # and the shift action `qδ` are measured against `s0`. A zero denominator
+    # means the corresponding measured quantities are all exactly zero; the
+    # ratio is then exactly zero (and an exact zero residual is accepted).
+    zero_sigma = iszero(scale_sigma)
+    zero_s0 = iszero(scale_s0)
+    all_finite = isfinite(k0_infinity) &&
+                 isfinite(direction_scale) &&
+                 isfinite(eta0) &&
+                 isfinite(eta_reg) &&
+                 isfinite(tau) &&
+                 isfinite(scale_s0) &&
+                 isfinite(scale_sigma) &&
+                 isfinite(tolerance) &&
+                 isfinite(eta_fact)
+    ok = all_finite &&
+         (zero_sigma ? iszero(eta_fact) : eta_fact <= tolerance)
+    reason = if !all_finite
+        :nonfinite_operator_data
+    elseif !ok
+        :direction_residual_exceeded
+    else
+        :none
+    end
+    # Raw ∞-norms plus the normalized gate ratios. `tau` is deliberately
+    # δ-free; the shift enters only through `scale_sigma`.
+    eta_fact_normalized =
+        zero_sigma ? (iszero(eta_fact) ? zero(T) : T(Inf)) :
+        eta_fact / scale_sigma
+    eta0_normalized =
+        zero_s0 ? (iszero(eta0) ? zero(T) : T(Inf)) :
+        eta0 / scale_s0
+    eta_reg_normalized =
+        zero_s0 ? (iszero(eta_reg) ? zero(T) : T(Inf)) :
+        eta_reg / scale_s0
+    record = LPDirectionGateRecord{T}(
+        ok,
+        phase,
+        reason,
+        delta,
+        eta_fact,
+        eta0,
+        eta_reg,
+        tau,
+        scale_s0,
+        scale_sigma,
+        tolerance,
+        eta_fact,
+        k0_infinity,
+        eta_fact_normalized,
+        eta0_normalized,
+        eta_reg_normalized,
+    )
+    workspace.direction_gate = record
+    return record
+end
+
 function _fraction_to_boundary(values, direction, fraction)
     step = one(eltype(values))
     @inbounds for index in eachindex(values)
@@ -3151,6 +3653,8 @@ function solve_lp!(
 
     status = NotStarted
     message = ""
+    termination_reason = :none
+    termination_stage = :none
     iterations = 0
     regularizations = 0
     p_residual = T(Inf)
@@ -3355,6 +3859,32 @@ function solve_lp!(
             workspace.dy_aff,
             view(workspace.affine_rhs, (variables + 1):(variables + equalities)),
         )
+        affine_direction_gate = _lp_direction_accuracy_gate!(
+            workspace,
+            G,
+            B,
+            workspace.rhs,
+            workspace.dx_aff,
+            workspace.dy_aff,
+            attempt_regularization,
+            workspace.correction_rhs,
+            opts;
+            phase=:affine,
+        )
+        if !affine_direction_gate.ok
+            direction_seconds += (time_ns() - direction_started) / 1.0e9
+            termination_reason = :lp_affine_direction_residual
+            termination_stage = :predictor
+            status = NumericalBreakdown
+            message =
+                "LP affine direction failed the regularized KKT residual gate: " *
+                "eta_fact=$(affine_direction_gate.eta_fact) > " *
+                "tau*sδ=$(affine_direction_gate.tolerance) " *
+                "(tau=$(affine_direction_gate.tau), " *
+                "sδ=$(affine_direction_gate.scale_sigma), " *
+                "δ=$(affine_direction_gate.delta))."
+            break
+        end
         _lp_complete_direction!(
             workspace.ds_aff,
             workspace.dz_aff,
@@ -3473,6 +4003,32 @@ function solve_lp!(
             workspace.dy,
             view(workspace.correction_rhs, (variables + 1):(variables + equalities)),
         )
+        corrector_direction_gate = _lp_direction_accuracy_gate!(
+            workspace,
+            G,
+            B,
+            workspace.rhs,
+            workspace.dx,
+            workspace.dy,
+            attempt_regularization,
+            workspace.affine_rhs,
+            opts;
+            phase=:corrector,
+        )
+        if !corrector_direction_gate.ok
+            direction_seconds += (time_ns() - direction_started) / 1.0e9
+            termination_reason = :lp_corrector_direction_residual
+            termination_stage = :corrector
+            status = NumericalBreakdown
+            message =
+                "LP corrector direction failed the regularized KKT residual gate: " *
+                "eta_fact=$(corrector_direction_gate.eta_fact) > " *
+                "tau*sδ=$(corrector_direction_gate.tolerance) " *
+                "(tau=$(corrector_direction_gate.tau), " *
+                "sδ=$(corrector_direction_gate.scale_sigma), " *
+                "δ=$(corrector_direction_gate.delta))."
+            break
+        end
         _lp_complete_direction!(
             workspace.ds,
             workspace.dz,
@@ -3635,7 +4191,8 @@ function solve_lp!(
         parameter_controller.history,
         nothing,
         (
-            reason=:none,
+            reason=termination_reason,
+            stage=termination_stage,
             sparse_schur_backend=workspace.sparse_system === nothing ?
                 nothing : _lp_sparse_backend_diagnostics(
                     workspace.sparse_system::LPSparseSystem{T},
@@ -3653,7 +4210,8 @@ function solve_lp!(
                 lp_parameter_resolution,
                 backend_execution_attempted,
                 lp_initialization,
-                :none,
+                termination_reason === :none ?
+                    :none : termination_reason,
             ),
         ),
     )

@@ -43,6 +43,7 @@ const FULL_TESTS = (
     "adaptive_parameter_policy.jl",
     "preprocessing_regressions.jl",
     "lp_regressions.jl",
+    "direction_accuracy_lp.jl",
     "soc_regressions.jl",
     "soc_native_algebra.jl",
     "soc_native_solver.jl",
