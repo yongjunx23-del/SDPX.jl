@@ -1,0 +1,3 @@
+Trigger standard pull-request CI after the GitHub Actions-authored N3 production commit.
+No production source change.
+Validated N3 custom full gate: actions run 31929112459.
