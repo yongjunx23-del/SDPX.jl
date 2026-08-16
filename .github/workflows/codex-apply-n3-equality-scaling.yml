@@ -11,6 +11,8 @@ on:
       - .codex/n3-kkt-d.patch
       - .codex/n3-workspace.patch
       - .codex/n3-tests.patch
+      - .codex/n3-proportional-rank.patch
+      - .codex/n3-proportional-tests.patch
       - .github/workflows/codex-apply-n3-equality-scaling.yml
   workflow_dispatch:
 
@@ -41,15 +43,17 @@ jobs:
             .codex/n3-kkt-b.patch \
             .codex/n3-kkt-c.patch \
             .codex/n3-kkt-d.patch \
-            .codex/n3-tests.patch
+            .codex/n3-tests.patch \
+            .codex/n3-proportional-rank.patch \
+            .codex/n3-proportional-tests.patch
           do
             git apply --check "$patch"
             git apply "$patch"
           done
           git diff --check
-          echo 'b5ce3c2d11a2fc45f0f202a37cf5564f19f076e8de2090af7687235d25f24938  src/kkt.jl' | sha256sum -c -
+          echo '8fad7ba8d7528a5b9ee89989cef5f55ce6d93df745adf8511655dbc883fa7070  src/kkt.jl' | sha256sum -c -
           echo '4c352c3e7fc4becca5dd1b5f4910587097919518f052da787bc6eeacd1a6ef8f  src/workspace.jl' | sha256sum -c -
-          echo 'd34cb243f3b87f27159fabe7d08dda1f43cfefb5933c5ffcf378a227f97a5389  test/kkt_regressions.jl' | sha256sum -c -
+          echo 'c07c8c74a3778bd59de58bcceb715b48d48e31499d4e1b94a8d165f2457915d3  test/kkt_regressions.jl' | sha256sum -c -
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run full numerical regression gate before push
         env:
