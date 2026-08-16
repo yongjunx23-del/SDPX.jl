@@ -26,7 +26,7 @@ jobs:
       - name: Apply and isolate the N2 equality-scaling commit
         run: |
           set -euo pipefail
-          if git log --format=%s -n 40 | grep -Fxq 'fix: make equality solves coordinate-scale invariant'; then
+          if git log --format=%s -n 40 | grep -Fxq 'fix: normalize runtime equality coordinates'; then
             echo 'N2 is already present.'
             exit 0
           fi
@@ -39,7 +39,7 @@ jobs:
           git config user.name 'OpenAI Codex'
           git config user.email 'codex@openai.invalid'
           git am --3way "$RUNNER_TEMP/mails/0001"
-          git log -1 --format=%s | grep -Fx 'fix: make equality solves coordinate-scale invariant'
+          git log -1 --format=%s | grep -Fx 'fix: normalize runtime equality coordinates'
           git diff --check HEAD~1..HEAD
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run quick regression profile
