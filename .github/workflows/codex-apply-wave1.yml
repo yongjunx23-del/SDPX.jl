@@ -23,7 +23,7 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
-      - name: Apply the reviewed Wave 1 commits
+      - name: Apply the remaining reviewed Wave 1 commits
         run: |
           set -euo pipefail
           if git log --format=%s -n 40 | grep -Fxq 'fix: preserve minimal original-coordinate success gates'; then
@@ -32,12 +32,12 @@ jobs:
           fi
           base64 --decode .codex/wave1.patch.gz.b64 > "$RUNNER_TEMP/wave1.patch.gz"
           gzip -dc "$RUNNER_TEMP/wave1.patch.gz" > "$RUNNER_TEMP/wave1.patch"
-          echo 'a3656401dd8e98f2e8ba946529595998c932b0dfe0776cf3ef14dfd17054eb8a  '"$RUNNER_TEMP/wave1.patch" | sha256sum -c -
+          echo '31d584e6b063c92996f16b8a8e5719bb0c3a9580cc5417a1f3a8e6bfe7930076  '"$RUNNER_TEMP/wave1.patch" | sha256sum -c -
           git config user.name 'OpenAI Codex'
           git config user.email 'codex@openai.invalid'
           git am --3way "$RUNNER_TEMP/wave1.patch"
-          git diff --check HEAD~6..HEAD
-          test "$(git rev-list --count HEAD~6..HEAD)" = 6
+          git diff --check HEAD~2..HEAD
+          test "$(git rev-list --count HEAD~2..HEAD)" = 2
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run quick regression profile
         env:
