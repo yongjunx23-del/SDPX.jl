@@ -5,7 +5,9 @@ on:
     branches:
       - development/v0.5-execution-plan
     paths:
-      - .codex/n3-equality-scaling.patch.gz.b64
+      - .codex/n3-kkt.patch
+      - .codex/n3-workspace.patch
+      - .codex/n3-tests.patch
       - .github/workflows/codex-apply-n3-equality-scaling.yml
   workflow_dispatch:
 
@@ -23,18 +25,22 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
-      - name: Apply runtime equality scaling patch
+      - name: Apply runtime equality scaling patches
         run: |
           set -euo pipefail
           if git log --format=%s -n 50 | grep -Fxq 'fix: normalize runtime equality coordinates'; then
             echo 'Runtime equality scaling fix is already present.'
             exit 0
           fi
-          base64 --decode .codex/n3-equality-scaling.patch.gz.b64 > "$RUNNER_TEMP/n3.patch.gz"
-          gzip -dc "$RUNNER_TEMP/n3.patch.gz" > "$RUNNER_TEMP/n3.patch"
-          echo '3831ce93f2075af12115b106b67abfd1dccf14daa135464562af5d9df82a9b8a  '"$RUNNER_TEMP/n3.patch" | sha256sum -c -
-          git apply --check "$RUNNER_TEMP/n3.patch"
-          git apply "$RUNNER_TEMP/n3.patch"
+          echo '4d6798cf12d948c0fc97b904ed50b7a6e3ec22295b653154c43b62eaaac49992  .codex/n3-kkt.patch' | sha256sum -c -
+          echo '2217665b8d398c062df11271a7ab1447c7cdcf04ef16e7f24197bb4806b5cebb  .codex/n3-workspace.patch' | sha256sum -c -
+          echo '989b13d926d31762b24913751ad092a7de0711af667ade70a6996e61c4a9af81  .codex/n3-tests.patch' | sha256sum -c -
+          git apply --check .codex/n3-workspace.patch
+          git apply .codex/n3-workspace.patch
+          git apply --check .codex/n3-kkt.patch
+          git apply .codex/n3-kkt.patch
+          git apply --check .codex/n3-tests.patch
+          git apply .codex/n3-tests.patch
           git diff --check
       - uses: julia-actions/julia-buildpkg@v1
       - name: Run full numerical regression gate before push
