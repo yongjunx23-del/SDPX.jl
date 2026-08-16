@@ -2605,28 +2605,30 @@ const _ATTEMPT_CERTIFICATE_DOWNGRADE_REASONS = (
 function _attempt_planned_precision_facts(
     plan::ExecutionPlan,
     ::Type{T},
+    explicit_bits::Union{Nothing,Int}=nothing,
 ) where {T}
-    explicit_bits =
-        plan.classification.arithmetic === :bigfloat ?
-        # The attempt builder runs inside the exact `setprecision(..., bits)`
-        # scope used by the solve (plan construction and `_attach_diagnostics`
-        # are both under it), so the active width is factual planned evidence.
-        # A1 will later distinguish the requested rung from the selected rung
-        # explicitly.
-        precision(BigFloat) : sig_bits(T)
+    bits = explicit_bits === nothing ?
+           # Legacy fallback: the attempt builder runs inside the exact
+           # `setprecision(..., bits)` scope used by the solve (plan
+           # construction and `_attach_diagnostics` are both under it), so
+           # the active width is factual planned evidence.
+           (plan.classification.arithmetic === :bigfloat ?
+            precision(BigFloat) : sig_bits(T)) :
+           explicit_bits
     return AttemptPrecisionFacts(
         plan.classification.arithmetic,
         # The mode is the planner's frozen decision, not the user request
         # hint: `mixed_precision_kkt=:auto` may resolve to `:off`.
         plan.backend_config.mixed_precision_mode === :off ?
         :fixed : :mixed_precision,
-        explicit_bits,
+        bits,
     )
 end
 
 function _attempt_executed_precision_facts(
     executed::NamedTuple,
     ::Type{T},
+    explicit_bits::Union{Nothing,Int}=nothing,
 ) where {T}
     solver = get(executed, :solver, :not_executed)
     solver === :not_executed &&
@@ -2635,10 +2637,13 @@ function _attempt_executed_precision_facts(
     # `_attach_diagnostics` runs inside the exact `setprecision(..., bits)`
     # scope used by the executed solve, so `precision(BigFloat)` here is
     # factual execution evidence, not a post-hoc ambient guess.
+    bits = explicit_bits === nothing ?
+           (T === BigFloat ? precision(BigFloat) : sig_bits(T)) :
+           explicit_bits
     return AttemptPrecisionFacts(
         _arithmetic_class(T),
         executed_backend === :mixed_precision ? :mixed_precision : :fixed,
-        T === BigFloat ? precision(BigFloat) : sig_bits(T),
+        bits,
     )
 end
 
@@ -2657,13 +2662,14 @@ end
 function _attempt_planned_route_facts(
     plan::ExecutionPlan,
     ::Type{T},
+    explicit_bits::Union{Nothing,Int}=nothing,
 ) where {T}
     return ExecutionRouteFacts(
         _attempt_solver_family(plan.algorithm),
         plan.kkt_formulation,
         plan.storage_plan.storage,
         plan.la_config.provider,
-        _attempt_planned_precision_facts(plan, T),
+        _attempt_planned_precision_facts(plan, T, explicit_bits),
         plan.threads,
     )
 end
@@ -2672,6 +2678,7 @@ function _attempt_executed_route_facts(
     plan::ExecutionPlan,
     executed::NamedTuple,
     ::Type{T},
+    explicit_bits::Union{Nothing,Int}=nothing,
 ) where {T}
     solver = get(executed, :solver, :not_executed)
     formulation = if solver === :not_executed
@@ -2695,7 +2702,7 @@ function _attempt_executed_route_facts(
         formulation,
         storage,
         provider,
-        _attempt_executed_precision_facts(executed, T),
+        _attempt_executed_precision_facts(executed, T, explicit_bits),
         threads,
     )
 end
@@ -2882,12 +2889,15 @@ function _build_execution_attempt_record(
     executed::NamedTuple,
     termination::NamedTuple,
     certificate::NamedTuple,
+    explicit_bits::Union{Nothing,Int}=nothing,
+    attempt_id::Int=1,
+    plan_id::Int=1,
 ) where {T}
     return ExecutionAttemptRecord(
-        1,
-        1,
-        _attempt_planned_route_facts(plan, T),
-        _attempt_executed_route_facts(plan, executed, T),
+        attempt_id,
+        plan_id,
+        _attempt_planned_route_facts(plan, T, explicit_bits),
+        _attempt_executed_route_facts(plan, executed, T, explicit_bits),
         _attempt_fallback_events(plan, executed),
         _attempt_regularization_facts(result, executed),
         _attempt_certificate_facts(termination, certificate),
@@ -2908,6 +2918,7 @@ function _attach_diagnostics(
     termination::NamedTuple=(reason=:none,),
     certificate::NamedTuple=(available=false,),
     pipeline_timings::NamedTuple=NamedTuple(),
+    ladder_context::Union{Nothing,PrecisionLadderContext}=nothing,
 ) where {T}
     diagnostics_enabled || return result
     core_time = result.timings === nothing ? NaN :
@@ -3115,15 +3126,58 @@ function _attach_diagnostics(
     )
     effective_termination =
         termination.reason === :none ? result.termination : termination
-    attempts = (
-        _build_execution_attempt_record(
-            plan,
-            result,
-            executed,
-            effective_termination,
-            certificate,
-        ),
+    explicit_bits = ladder_context === nothing ?
+                    nothing : ladder_context.explicit_bits
+    attempt_id = ladder_context === nothing ? 1 : ladder_context.attempt_id
+    attempt_record = _build_execution_attempt_record(
+        plan,
+        result,
+        executed,
+        effective_termination,
+        certificate,
+        explicit_bits,
+        attempt_id,
+        attempt_id,
     )
+    attempts = (attempt_record,)
+    ladder = if ladder_context === nothing
+        nothing
+    else
+        elapsed = max(
+            0.0,
+            (time_ns() - ladder_context.rung_started_ns) / 1.0e9,
+        )
+        remaining_after = max(
+            0.0,
+            ladder_context.remaining_budget_seconds - elapsed,
+        )
+        status = result.status
+        retry_decision = _ladder_retry_decision(
+            ladder_context.plan,
+            ladder_context.rung,
+            status,
+            remaining_after,
+        )
+        spec = ladder_context.plan.rungs[ladder_context.rung]
+        rung_report = PrecisionAttemptReport(
+            spec,
+            plan,
+            attempt_record,
+            PrecisionAttemptScalarFacts(
+                status,
+                get(effective_termination, :reason, :none),
+                elapsed,
+                _working_precision_success(status),
+                retry_decision,
+                remaining_after,
+            ),
+        )
+        push!(ladder_context.reports, rung_report)
+        PrecisionLadderReport(
+            ladder_context.plan,
+            Tuple(copy(ladder_context.reports)),
+        )
+    end
     diagnostics = SolveDiagnostics(
         plan.classification,
         plan,
@@ -3135,6 +3189,7 @@ function _attach_diagnostics(
         warnings,
         effective_termination,
         attempts,
+        ladder,
     )
     return SDPResult{T}(
         result.status,
@@ -3201,6 +3256,7 @@ function _with_frontend_timing(
             diagnostics.warnings,
             diagnostics.termination,
             diagnostics.attempts,
+            diagnostics.precision_ladder,
         )
     end
     return SDPResult{T}(
@@ -3231,6 +3287,7 @@ function _inconsistent_presolve_result(
     plan::ExecutionPlan,
     opts::SolverOptions{T},
     pipeline_timings::NamedTuple=NamedTuple(),
+    ladder_context::Union{Nothing,PrecisionLadderContext}=nothing,
 ) where {T}
     # A negative fixed scalar block is exactly the dedicated LP zero-row
     # contradiction. Preserve that established, more specific termination
@@ -3312,6 +3369,7 @@ function _inconsistent_presolve_result(
         (reason=:none,),
         certificate,
         recorded_pipeline_timings,
+        ladder_context,
     )
 end
 
@@ -3325,6 +3383,7 @@ function _time_limit_pipeline_result(
     max_time::Float64,
     certification_enabled::Bool,
     pipeline_timings::NamedTuple=NamedTuple(),
+    ladder_context::Union{Nothing,PrecisionLadderContext}=nothing,
 ) where {T}
     X = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
     Y = [alloc_zeros(T, dimension, dimension) for dimension in prob.dims.k]
@@ -3369,5 +3428,6 @@ function _time_limit_pipeline_result(
             minimal_gate=(available=false, reason=:not_applicable),
         ),
         pipeline_timings,
+        ladder_context,
     )
 end

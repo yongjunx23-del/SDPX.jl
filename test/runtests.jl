@@ -21,6 +21,7 @@ const QUICK_TESTS = (
     "v05_core_invariants.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
+    "precision_ladder_plan.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -84,6 +85,7 @@ const FULL_TESTS = (
     "shadowing_guard.jl",
     "gates.jl",
     "v05_core_invariants.jl",
+    "precision_ladder_plan.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
 )

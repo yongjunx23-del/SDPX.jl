@@ -2106,6 +2106,158 @@ struct ExecutionAttemptRecord
     termination_reason::Symbol
 end
 
+# ---------------------------------------------------------------------------
+# A1 — first-class BigFloat precision ladder.
+#
+# Pre-execution authority (`PrecisionAttemptSpec` / `PrecisionLadderPlan`) is
+# split from post-execution diagnostics (`PrecisionAttemptReport` /
+# `PrecisionLadderReport`). The ladder plan is built unconditionally before
+# the first BigFloat rung; the reports are diagnostics-only and never carry a
+# result, workspace, factor, or mutable BigFloat array.
+# ---------------------------------------------------------------------------
+
+"""One pre-execution rung of a BigFloat precision ladder: the exact
+significand bits, and whether those bits are the caller's requested
+`precision_bits` or an adaptive selector's lower choice. A rung never
+contains an `ExecutionPlan`; each rung's child plan is built exactly once
+inside that rung, when it executes."""
+struct PrecisionAttemptSpec
+    rung::Int
+    bits::Int
+    role::Symbol
+end
+
+"""The immutable pre-execution ladder authority for one BigFloat solve.
+`policy` is `:fixed` or `:auto`; `requested_bits` is the caller's hard upper
+bound; `selected_bits` is the adaptive selector's first-rung choice (the
+requested bits for `:fixed` and resume); `floor_bits` is the selector floor;
+`resume_bypass` records that resume bypasses the selector; `selection_reason`
+is `:resume`, `:fixed`, `:adaptive_lower`, or `:adaptive_requested`. `rungs`
+is the ordered rung list (exactly one rung for fixed / resume or when the
+adaptive selector lands on the requested bits, at most two rungs otherwise);
+`retry_statuses` is the fixed retry-eligibility set that drives the staging
+loop (a rung retries only when its status is in this set and shared budget
+remains); `time_budget` is the shared wall-clock policy. The plan holds no
+results and no child `ExecutionPlan`s (those are built per rung)."""
+struct PrecisionLadderPlan
+    policy::Symbol
+    requested_bits::Int
+    selected_bits::Int
+    floor_bits::Int
+    resume_bypass::Bool
+    selection_reason::Symbol
+    rungs::Tuple{Vararg{PrecisionAttemptSpec}}
+    retry_statuses::Tuple{Vararg{SolveStatus}}
+    time_budget::Symbol
+
+    function PrecisionLadderPlan(
+        policy::Symbol,
+        requested_bits::Int,
+        selected_bits::Int,
+        floor_bits::Int,
+        resume_bypass::Bool,
+        selection_reason::Symbol,
+        rungs::Tuple{Vararg{PrecisionAttemptSpec}},
+        retry_statuses::Tuple{Vararg{SolveStatus}},
+        time_budget::Symbol=:shared_wall_clock,
+    )
+        1 <= length(rungs) <= 2 ||
+            throw(ArgumentError(
+                "a precision ladder has exactly one or two rungs",
+            ))
+        for (index, rung) in enumerate(rungs)
+            rung.rung == index ||
+                throw(ArgumentError(
+                    "precision ladder rungs must be ordered 1, 2, ...",
+                ))
+            rung.bits > 0 ||
+                throw(ArgumentError(
+                    "precision ladder rung bits must be positive",
+                ))
+        end
+        rungs[1].bits == selected_bits ||
+            throw(ArgumentError(
+                "precision ladder selected bits must match the first rung",
+            ))
+        floor_bits > 0 ||
+            throw(ArgumentError(
+                "precision ladder floor bits must be positive",
+            ))
+        floor_bits <= selected_bits <= requested_bits ||
+            throw(ArgumentError(
+                "precision ladder bits must satisfy " *
+                "floor <= selected <= requested",
+            ))
+        return new(
+            policy,
+            requested_bits,
+            selected_bits,
+            floor_bits,
+            resume_bypass,
+            selection_reason,
+            rungs,
+            retry_statuses,
+            time_budget,
+        )
+    end
+
+    # Compatibility constructor for callers that only provide the ordered
+    # rungs: the selected bits are the first rung's bits and the floor is
+    # taken as the selected bits.
+    function PrecisionLadderPlan(
+        policy::Symbol,
+        requested_bits::Int,
+        rungs::Tuple{Vararg{PrecisionAttemptSpec}},
+        retry_statuses::Tuple{Vararg{SolveStatus}},
+        time_budget::Symbol=:shared_wall_clock,
+    )
+        selected = length(rungs) == 2 ? rungs[1].bits : requested_bits
+        return PrecisionLadderPlan(
+            policy,
+            requested_bits,
+            selected,
+            selected,
+            false,
+            :compatibility,
+            rungs,
+            retry_statuses,
+            time_budget,
+        )
+    end
+end
+
+"""Scalar execution facts for one ladder rung. `retry_decision` is the
+plan-driven decision for the rung (`:success`, `:retry`, `:ineligible_status`,
+`:no_time`, or `:terminal`); `remaining_budget_seconds` is the shared
+wall-clock budget remaining when the rung completed. Diagnostics-only: no
+result, workspace, factor, or mutable BigFloat arrays are retained."""
+struct PrecisionAttemptScalarFacts
+    status::SolveStatus
+    termination_reason::Symbol
+    elapsed_seconds::Float64
+    success::Bool
+    retry_decision::Symbol
+    remaining_budget_seconds::Float64
+end
+
+"""Post-execution report for one ladder rung. Retains the rung's
+`PrecisionAttemptSpec`, its child `ExecutionPlan` (built inside that rung),
+its A0 `ExecutionAttemptRecord`, and scalar facts only."""
+struct PrecisionAttemptReport
+    spec::PrecisionAttemptSpec
+    child_plan::ExecutionPlan
+    record::ExecutionAttemptRecord
+    facts::PrecisionAttemptScalarFacts
+end
+
+"""Post-execution ladder diagnostics: the immutable pre-execution plan plus
+the ordered per-rung reports. Diagnostics-only; attempts remain accessible
+flattened in rung order through `SolveDiagnostics.attempts`."""
+struct PrecisionLadderReport
+    plan::PrecisionLadderPlan
+    attempts::Tuple{Vararg{PrecisionAttemptReport}}
+end
+
 """
     SolveDiagnostics
 
@@ -2131,19 +2283,47 @@ struct SolveDiagnostics
     # diagnostics-enabled `_attach_diagnostics`; empty when a diagnostics
     # object was built by a compatibility path that never ran a solve.
     attempts::Tuple{Vararg{ExecutionAttemptRecord}}
+    # A1 precision-ladder diagnostics. `nothing` for solves that never ran a
+    # BigFloat ladder; otherwise the full ladder plan plus per-rung reports.
+    precision_ladder::Union{Nothing,PrecisionLadderReport}
+end
+
+"""Solve-local ladder bookkeeping threaded from the BigFloat staging loop into
+`_attach_diagnostics`. Mutable because it accumulates the small per-rung
+diagnostics reports (`PrecisionAttemptReport`s — never results, workspaces,
+factors, or per-rung `SolveDiagnostics` snapshots) as the ladder advances; it
+is never part of any public record. Diagnostics-disabled runs allocate the
+empty report vector once and never fill it."""
+mutable struct PrecisionLadderContext
+    plan::PrecisionLadderPlan
+    rung::Int
+    attempt_id::Int
+    explicit_bits::Int
+    rung_started_ns::UInt64
+    remaining_budget_seconds::Float64
+    reports::Vector{PrecisionAttemptReport}
 end
 
 # Source compatibility for the pre-`termination` positional form.
 SolveDiagnostics(classification, plan, presolve, timings, memory,
     selected_algorithms, parameter_history, warnings) =
     SolveDiagnostics(classification, plan, presolve, timings, memory,
-        selected_algorithms, parameter_history, warnings, (reason=:none,))
+        selected_algorithms, parameter_history, warnings, (reason=:none,),
+        (), nothing)
 
 # Source compatibility for the pre-`attempts` positional form.
 SolveDiagnostics(classification, plan, presolve, timings, memory,
     selected_algorithms, parameter_history, warnings, termination) =
     SolveDiagnostics(classification, plan, presolve, timings, memory,
-        selected_algorithms, parameter_history, warnings, termination, ())
+        selected_algorithms, parameter_history, warnings, termination, (),
+        nothing)
+
+# Source compatibility for the pre-`precision_ladder` positional form.
+SolveDiagnostics(classification, plan, presolve, timings, memory,
+    selected_algorithms, parameter_history, warnings, termination, attempts) =
+    SolveDiagnostics(classification, plan, presolve, timings, memory,
+        selected_algorithms, parameter_history, warnings, termination,
+        attempts, nothing)
 
 """
     SDPResult{T}

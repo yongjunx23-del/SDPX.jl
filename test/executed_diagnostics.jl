@@ -778,7 +778,10 @@ using Test
             (reason=:none,),
         )
         @test diagnostics.attempts == ()
-        @test length(fieldnames(SDPX.SolveDiagnostics)) == 10
-        @test fieldnames(SDPX.SolveDiagnostics)[end] == :attempts
+        @test diagnostics.precision_ladder === nothing
+        # A1 appended the optional precision-ladder field to the diagnostics
+        # schema; the compatibility constructor leaves it empty.
+        @test length(fieldnames(SDPX.SolveDiagnostics)) == 11
+        @test fieldnames(SDPX.SolveDiagnostics)[end] == :precision_ladder
     end
 end

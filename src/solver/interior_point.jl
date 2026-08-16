@@ -2734,16 +2734,6 @@ end
         DualInfeasible,
     )
 
-@inline _working_precision_retry(status::SolveStatus) =
-    status in (
-        AlmostOptimal,
-        InsufficientPrecision,
-        Stalled,
-        NumericalBreakdown,
-        NumericalFailure,
-        MaxRestartsExceeded,
-    )
-
 function _record_working_precision!(
     result::SDPResult,
     message::String,
@@ -2751,6 +2741,153 @@ function _record_working_precision!(
     result.diagnostics === nothing ||
         push!(result.diagnostics.warnings, message)
     return result
+end
+
+"""Build the immutable pre-execution ladder authority for a BigFloat solve.
+The ladder is built unconditionally before the first rung executes. The
+selector semantics are unchanged: `:fixed` and resume use exactly the
+requested rung; `:auto` selects at most two rungs (the adaptive lower choice
+plus the requested upper rung)."""
+function _build_precision_ladder_plan(
+    prob::SDPProblem{BigFloat},
+    opts::SolverOptions{BigFloat};
+    resume::AbstractString="",
+)
+    requested_bits = opts.precision_bits
+    resume_bypass = !isempty(resume)
+    selected_bits = resume_bypass ?
+                    requested_bits :
+                    adaptive_working_precision_bits(prob, opts)
+    rungs = if selected_bits == requested_bits
+        (
+            PrecisionAttemptSpec(1, requested_bits, :requested),
+        )
+    else
+        (
+            PrecisionAttemptSpec(1, selected_bits, :selected),
+            PrecisionAttemptSpec(2, requested_bits, :requested),
+        )
+    end
+    selection_reason = resume_bypass ? :resume :
+                       opts.working_precision_policy === :fixed ? :fixed :
+                       selected_bits < requested_bits ? :adaptive_lower :
+                       :adaptive_requested
+    return PrecisionLadderPlan(
+        opts.working_precision_policy,
+        requested_bits,
+        selected_bits,
+        min(opts.minimum_working_precision_bits, requested_bits),
+        resume_bypass,
+        selection_reason,
+        rungs,
+        (
+            AlmostOptimal,
+            InsufficientPrecision,
+            Stalled,
+            NumericalBreakdown,
+            NumericalFailure,
+            MaxRestartsExceeded,
+        ),
+        :shared_wall_clock,
+    )
+end
+
+"""The ladder's own retry decision for a completed rung, driven exclusively
+by the ladder plan's retry-eligibility set and the shared remaining budget —
+never by a separate authority."""
+@inline function _ladder_retry_decision(
+    plan::PrecisionLadderPlan,
+    rung::Int,
+    status::SolveStatus,
+    remaining_budget_seconds::Float64,
+)
+    # There is no next rung: the ladder stops regardless of the outcome.
+    rung >= length(plan.rungs) && return :terminal
+    _working_precision_success(status) && return :success
+    status in plan.retry_statuses || return :ineligible_status
+    remaining_budget_seconds > 0 || return :no_time
+    return :retry
+end
+
+"""Patch the just-completed rung's report with the orchestrator's
+authoritative retry decision and shared remaining budget. The report built
+inside `_attach_diagnostics` records the same rule provisionally; the
+orchestrator owns the final gate and the true remaining wall-clock budget
+(which includes inter-rung overhead such as the release/GC step)."""
+function _patch_ladder_report!(
+    context::PrecisionLadderContext,
+    decision::Symbol,
+    remaining_budget_seconds::Float64,
+)
+    old = context.reports[end]
+    facts = old.facts
+    context.reports[end] = PrecisionAttemptReport(
+        old.spec,
+        old.child_plan,
+        old.record,
+        PrecisionAttemptScalarFacts(
+            facts.status,
+            facts.termination_reason,
+            facts.elapsed_seconds,
+            facts.success,
+            decision,
+            remaining_budget_seconds,
+        ),
+    )
+    return context
+end
+
+"""Flatten the per-rung A0 records into the final diagnostics. `result` is
+the final rung's result; its diagnostics already carry the full ladder report
+(every rung, in order) and the final child plan. `attempts` is replaced with
+the flattened per-rung records; every other diagnostics field is preserved."""
+function _merge_ladder_result(
+    result::SDPResult{T},
+    ladder_context::PrecisionLadderContext,
+) where {T}
+    # Diagnostics-disabled runs never build attempt records; there is nothing
+    # to merge and the result already carries the final rung's payload.
+    result.diagnostics === nothing && return result
+    attempts = Tuple(
+        report.record for report in ladder_context.reports
+    )
+    diagnostics = result.diagnostics
+    merged_diagnostics = SolveDiagnostics(
+        diagnostics.classification,
+        diagnostics.plan,
+        diagnostics.presolve,
+        diagnostics.timings,
+        diagnostics.memory,
+        diagnostics.selected_algorithms,
+        diagnostics.parameter_history,
+        diagnostics.warnings,
+        diagnostics.termination,
+        attempts,
+        PrecisionLadderReport(
+            ladder_context.plan,
+            Tuple(copy(ladder_context.reports)),
+        ),
+    )
+    return SDPResult{T}(
+        result.status,
+        result.message,
+        result.x,
+        result.X,
+        result.y,
+        result.Y,
+        result.pObj,
+        result.dObj,
+        result.gap_rel,
+        result.p_res,
+        result.d_res,
+        result.iterations,
+        result.restarts,
+        result.regularizations,
+        result.timings,
+        result.parameter_history,
+        merged_diagnostics,
+        result.termination,
+    )
 end
 
 function solve!(
@@ -2764,14 +2901,25 @@ function solve!(
     _prepared_data=nothing,
 )
     _validate_solver_options(opts)
-    requested_precision = opts.precision_bits
-    selected_precision =
-        isempty(resume) ?
-        adaptive_working_precision_bits(prob, opts) :
-        requested_precision
-    started = time()
+    ladder_plan = _build_precision_ladder_plan(
+        prob,
+        opts;
+        resume=resume,
+    )
+    requested_precision = ladder_plan.requested_bits
+    selected_precision = ladder_plan.selected_bits
+    ladder_started_ns = time_ns()
+    ladder_context = PrecisionLadderContext(
+        ladder_plan,
+        1,
+        1,
+        ladder_plan.rungs[1].bits,
+        ladder_started_ns,
+        isfinite(opts.max_time) ? opts.max_time : Inf,
+        PrecisionAttemptReport[],
+    )
 
-    function run_at_precision(run_options, bits)
+    function run_at_precision(run_options, bits, context)
         reusable_prepared_data =
             _prepared_data !== nothing &&
             get(_prepared_data, :precision_bits, 0) == bits ?
@@ -2785,35 +2933,62 @@ function solve!(
             Y0=Y0,
             resume=resume,
             _prepared_data=reusable_prepared_data,
+            ladder_context=context,
         )
         return Base.precision(BigFloat) == bits ?
                run() :
                setprecision(run, BigFloat, bits)
     end
 
-    if selected_precision == requested_precision
-        result = run_at_precision(opts, requested_precision)
-        if opts.working_precision_policy === :auto && !isempty(resume)
-            _record_working_precision!(
-                result,
-                "Adaptive working precision was bypassed while resuming a " *
-                "checkpoint; the requested $(requested_precision)-bit " *
-                "precision was used.",
+    first_spec = ladder_plan.rungs[1]
+    first_options = if first_spec.bits == requested_precision
+        opts
+    else
+        setprecision(BigFloat, first_spec.bits) do
+            _reround_solver_options(
+                opts,
+                first_spec.bits;
+                precision_bits=first_spec.bits,
+                working_precision_policy=:fixed,
             )
         end
-        return result
     end
-
-    lower_options = setprecision(BigFloat, selected_precision) do
-        _reround_solver_options(
-            opts,
-            selected_precision;
-            precision_bits=selected_precision,
-            working_precision_policy=:fixed,
+    lower_result = run_at_precision(
+        first_options,
+        first_spec.bits,
+        ladder_context,
+    )
+    if opts.working_precision_policy === :auto && !isempty(resume)
+        _record_working_precision!(
+            lower_result,
+            "Adaptive working precision was bypassed while resuming a " *
+            "checkpoint; the requested $(requested_precision)-bit " *
+            "precision was used.",
         )
+        return _merge_ladder_result(lower_result, ladder_context)
     end
-    lower_result = run_at_precision(lower_options, selected_precision)
-    if _working_precision_success(lower_result.status)
+    length(ladder_plan.rungs) == 1 &&
+        return _merge_ladder_result(lower_result, ladder_context)
+
+    elapsed = (time_ns() - ladder_started_ns) / 1.0e9
+    remaining_time = isfinite(opts.max_time) ?
+                     max(0.0, opts.max_time - elapsed) :
+                     Inf
+    decision = _ladder_retry_decision(
+        ladder_plan,
+        1,
+        lower_result.status,
+        remaining_time,
+    )
+    # Diagnostics-enabled runs carry the same rule inside the rung report;
+    # the orchestrator's authoritative clock and shared-budget gate may
+    # refine the provisional decision (inter-rung overhead), so the report is
+    # patched with the final decision and remaining budget. Diagnostics-
+    # disabled runs never build reports; the decision above is all they need.
+    isempty(ladder_context.reports) ||
+        _patch_ladder_report!(ladder_context, decision, remaining_time)
+
+    if decision === :success
         message = opts.certification ?
                   "Adaptive working precision selected " *
                   "$(selected_precision) of $(requested_precision) " *
@@ -2822,25 +2997,19 @@ function solve!(
                   "Adaptive working precision selected " *
                   "$(selected_precision) of $(requested_precision) " *
                   "requested bits; final certification was disabled."
-        return _record_working_precision!(
-            lower_result,
-            message,
-        )
+        _record_working_precision!(lower_result, message)
+        return _merge_ladder_result(lower_result, ladder_context)
     end
 
-    elapsed = time() - started
-    remaining_time = isfinite(opts.max_time) ?
-                     max(0.0, opts.max_time - elapsed) :
-                     Inf
-    if !_working_precision_retry(lower_result.status) ||
-       remaining_time <= 0
-        return _record_working_precision!(
+    if decision !== :retry
+        _record_working_precision!(
             lower_result,
             "Adaptive working precision selected $(selected_precision) of " *
             "$(requested_precision) requested bits, but the run ended with " *
             "$(lower_result.status); the fallback was not eligible or its " *
             "time budget was exhausted.",
         )
+        return _merge_ladder_result(lower_result, ladder_context)
     end
 
     lower_status = lower_result.status
@@ -2854,14 +3023,27 @@ function solve!(
         working_precision_policy=:fixed,
         max_time=remaining_time,
     )
-    fallback_result =
-        run_at_precision(fallback_options, requested_precision)
-    return _record_working_precision!(
+    fallback_context = PrecisionLadderContext(
+        ladder_plan,
+        2,
+        2,
+        requested_precision,
+        time_ns(),
+        remaining_time,
+        ladder_context.reports,
+    )
+    fallback_result = run_at_precision(
+        fallback_options,
+        requested_precision,
+        fallback_context,
+    )
+    _record_working_precision!(
         fallback_result,
         "Adaptive working precision first tried $(selected_precision) bits " *
         "and ended with $(lower_status); SDPX retried at the requested " *
         "$(requested_precision)-bit precision.",
     )
+    return _merge_ladder_result(fallback_result, fallback_context)
 end
 
 function _solve_pipeline!(
@@ -2873,6 +3055,7 @@ function _solve_pipeline!(
     Y0=nothing,
     resume::AbstractString="",
     _prepared_data=nothing,
+    ladder_context::Union{Nothing,PrecisionLadderContext}=nothing,
 ) where {T}
     _validate_solver_options(opts)
     pipeline_started = time()
@@ -3054,6 +3237,7 @@ function _solve_pipeline!(
             opts.max_time,
             opts.certification,
             pipeline_timings(),
+            ladder_context,
         )
     end
     report.inconsistent &&
@@ -3063,6 +3247,7 @@ function _solve_pipeline!(
             plan,
             opts,
             pipeline_timings(),
+            ladder_context,
         )
 
     preprocessed_warm_start = _transform_preprocess_warm_start(
@@ -3351,6 +3536,7 @@ function _solve_pipeline!(
         (reason=:none,),
         certificate,
         pipeline_timings(),
+        ladder_context,
     )
 end
 
