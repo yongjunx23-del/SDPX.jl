@@ -23,9 +23,9 @@ SDPX_v0.5_release_readiness_audit.md
 
 ## Progress summary
 
-Status at development HEAD
-`12b313efc5c984cebe7826689be7ac73aa0c5a5c` (tree
-`876086b25c7bfc7779c7ea1120de003de4fa72d7`). See
+Status through development commit
+`cc1b7246f097e0b16ce7e8df0a4bf7cccc75800e` (tree
+`64e4288b980b257f2e30a2424ab1e17540b575b6`). See
 [`HEAD_DRIFT_REVIEW.md`](HEAD_DRIFT_REVIEW.md) for the baseline-to-candidate
 review. A task is marked done only when production source, required tests, and
 semantic review are all present.
@@ -40,15 +40,17 @@ semantic review are all present.
 - N4 — fixed-refinement worsening/nonfinite rollback
 - N5 — equality-bearing generic sparse-Schur fail-closed quarantine
 - D1 — minimal original-coordinate `Optimal` gate when detailed certification is disabled
+- A0 — first-class immutable execution-attempt records with fail-closed
+  fallback provenance and a zero-construction diagnostics-disabled path
 
 ### IN PROGRESS
 
 - N7 — LP and NativeSOC validated-direction closure; staging artifacts are not completion evidence
+- O0 — robust warm full-solve sampling is complete; phase/counter completeness
+  and representative benchmark evidence remain in progress
 
 ### TODO
 
-- A0 — first-class execution-attempt authority
-- O0 — minimal trustworthy observability and benchmark sampling contract
 - A1 — first-class BigFloat precision-attempt ladder
 - A2 — final LP route frozen before `LPWorkspace`
 - A3 — NativeSOC under the top-level `ExecutionPlan`
