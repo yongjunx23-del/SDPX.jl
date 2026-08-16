@@ -323,16 +323,10 @@ function analyze(
         length(candidates) -
         count(block -> keep_bound_block[block], 1:prob.dims.L)
 
-    fixed_equalities_set = BitSet(
-        candidate.equality
-        for candidate in fixed_equalities
-        if candidate.variable in fixed_set
-    )
-    keep_equalities = [
-        equality
-        for equality in 1:prob.dims.n
-        if !(equality in fixed_equalities_set)
-    ]
+    # `fixed_equalities` is retained as always-empty metadata: exact
+    # fixed-variable elimination is driven by matching bounds, so the
+    # former equality-side filter is provably inert.
+    keep_equalities = collect(1:prob.dims.n)
     changed =
         length(keep_blocks) != prob.dims.L ||
         length(keep_equalities) != prob.dims.n ||
