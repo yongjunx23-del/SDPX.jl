@@ -4,6 +4,7 @@ using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, 
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("types.jl")
+include("memory_utils.jl")
 include("frontend/solve_options.jl")
 include("midend/resolve_options.jl")
 include("kernels/api.jl")
