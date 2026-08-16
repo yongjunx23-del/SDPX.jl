@@ -32,7 +32,7 @@ jobs:
           fi
           base64 --decode .codex/n1-acceptance-fix.patch.gz.b64 > "$RUNNER_TEMP/n1.patch.gz"
           gzip -dc "$RUNNER_TEMP/n1.patch.gz" > "$RUNNER_TEMP/n1.patch"
-          echo 'ff019a5f7e2c8a79e151c1f40a47350368e5f9a429e581bee3403727839ca5b0  '"$RUNNER_TEMP/n1.patch" | sha256sum -c -
+          echo 'a910439da2917277eab268029fcf8720c065a0e3cecaf782f04426354a90d45a  '"$RUNNER_TEMP/n1.patch" | sha256sum -c -
           git config user.name 'OpenAI Codex'
           git config user.email 'codex@openai.invalid'
           git am --3way "$RUNNER_TEMP/n1.patch"
