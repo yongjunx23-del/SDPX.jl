@@ -1,0 +1,56 @@
+name: Codex apply N1 acceptance fix
+
+on:
+  push:
+    branches:
+      - development/v0.5-execution-plan
+    paths:
+      - .codex/n1-acceptance-fix.patch.gz.b64
+      - .github/workflows/codex-apply-n1-fix.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Apply N1 acceptance-threshold fix
+        run: |
+          set -euo pipefail
+          if git log --format=%s -n 40 | grep -Fxq 'fix: separate direction acceptance from refinement'; then
+            echo 'N1 acceptance fix is already present.'
+            exit 0
+          fi
+          base64 --decode .codex/n1-acceptance-fix.patch.gz.b64 > "$RUNNER_TEMP/n1.patch.gz"
+          gzip -dc "$RUNNER_TEMP/n1.patch.gz" > "$RUNNER_TEMP/n1.patch"
+          echo 'ff019a5f7e2c8a79e151c1f40a47350368e5f9a429e581bee3403727839ca5b0  '"$RUNNER_TEMP/n1.patch" | sha256sum -c -
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.invalid'
+          git am --3way "$RUNNER_TEMP/n1.patch"
+          git diff --check HEAD~1..HEAD
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Run quick regression profile
+        env:
+          JULIA_NUM_THREADS: '1'
+          SDPX_TEST_PROFILE: quick
+        run: julia --startup-file=no --project=. -e 'using Pkg; Pkg.test(; coverage=false)'
+      - name: Run focused KKT regressions
+        env:
+          JULIA_NUM_THREADS: '1'
+        run: |
+          julia --startup-file=no --project=. -e '
+            using SDPX, Test, LinearAlgebra, SparseArrays, Random
+            using MultiFloats: Float64x4
+            include("test/kkt_regressions.jl")
+          '
+      - name: Push validated N1 fix
+        run: git push origin HEAD:development/v0.5-execution-plan
