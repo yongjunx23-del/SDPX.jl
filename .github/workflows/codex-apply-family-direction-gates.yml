@@ -1,0 +1,58 @@
+name: Codex apply family direction gates
+
+on:
+  push:
+    branches:
+      - development/v0.5-execution-plan
+    paths:
+      - .codex/family-direction-gates.patch.gz.b64
+      - .github/workflows/codex-apply-family-direction-gates.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-test-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+      - name: Apply LP and NativeSOC direction residual gates
+        run: |
+          set -euo pipefail
+          if git log --format=%s -n 80 | grep -Fxq 'fix: gate LP and NativeSOC direction residuals'; then
+            echo 'Family direction residual gates are already present.'
+            exit 0
+          fi
+          base64 --decode .codex/family-direction-gates.patch.gz.b64 > "$RUNNER_TEMP/family-direction.patch.gz"
+          gzip -dc "$RUNNER_TEMP/family-direction.patch.gz" > "$RUNNER_TEMP/family-direction.patch"
+          echo '34dd2aada4ba9fa91fe08f56668ec6b88ed7678c5592733afc88756c1190b58e  '"$RUNNER_TEMP/family-direction.patch" | sha256sum -c -
+          git apply --check "$RUNNER_TEMP/family-direction.patch"
+          git apply "$RUNNER_TEMP/family-direction.patch"
+          git diff --check
+      - uses: julia-actions/julia-buildpkg@v1
+      - name: Run quick family regression gate before push
+        env:
+          JULIA_NUM_THREADS: '4'
+          SDPX_TEST_PROFILE: quick
+        run: julia --startup-file=no --project=. -t4 -e 'using Pkg; Pkg.test(; coverage=false)'
+      - name: Run full regression gate before push
+        env:
+          JULIA_NUM_THREADS: '4'
+          SDPX_TEST_PROFILE: full
+        run: julia --startup-file=no --project=. -t4 -e 'using Pkg; Pkg.test(; coverage=false)'
+      - name: Commit and push tested family direction gates
+        run: |
+          set -euo pipefail
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.invalid'
+          git add src/lp_solver.jl src/soc_native.jl test/direction_accuracy_families.jl test/runtests.jl
+          git diff --cached --check
+          git commit -m 'fix: gate LP and NativeSOC direction residuals'
+          git push origin HEAD:development/v0.5-execution-plan
