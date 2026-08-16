@@ -1,0 +1,326 @@
+diff --git a/src/kkt.jl b/src/kkt.jl
+index e487a72..da5e224 100644
+--- a/src/kkt.jl
++++ b/src/kkt.jl
+@@ -10,8 +10,9 @@
+         [ S   −B ] [dx]   [ r ]
+         [−Bᵀ   0 ] [dy] = [−p ].
+ 
+-    L_S = chol(S).L ; B̃ = L_S⁻¹B ; Q = B̃ᵀB̃ = BᵀS⁻¹B ; r̃ = L_S⁻¹r
+-    Q·dy = p − B̃ᵀr̃   (Cholesky of Q) ; dx = L_S⁻ᵀ(r̃ + B̃·dy)
++    L_S = chol(S).L ; B̄ = L_S⁻¹B ; D_jj = 1/||B̄[:,j]||∞ ; B̃ = B̄D
++    Q = B̃ᵀB̃ ; r̃ = L_S⁻¹r ; Q·dŷ = Dp − B̃ᵀr̃
++    dx = L_S⁻ᵀ(r̃ + B̃·dŷ) ; dy = D·dŷ
+ 
+     Predictor and corrector share one factorization per outer
+     iteration (P2): `factor_kkt!` runs once, `solve_kkt!` runs once
+@@ -118,27 +119,51 @@ function _cholesky_has_numerical_rank(
+     return _cholesky_has_numerical_rank(factor.factors, Btil, opts)
+ end
+ 
+-function _cholesky_has_numerical_rank(
++function _cholesky_diagonal_rank_facts(
+     matrix::AbstractMatrix{T},
+     Btil::AbstractMatrix{T},
+     opts::SolverOptions{T},
+ ) where {T}
+     dimension = size(matrix, 1)
+-    dimension == 0 && return true
++    dimension == 0 && return (zero(T), zero(T), zero(T))
+     minimum_diagonal = abs(matrix[1, 1])
+     maximum_diagonal = minimum_diagonal
+     @inbounds for index in 2:dimension
+         value = abs(matrix[index, index])
+-        isfinite(value) || return false
++        isfinite(value) || return nothing
+         minimum_diagonal = min(minimum_diagonal, value)
+         maximum_diagonal = max(maximum_diagonal, value)
+     end
+-    isfinite(minimum_diagonal) || return false
+-    isfinite(maximum_diagonal) || return false
+-    maximum_diagonal > zero(T) || return false
++    isfinite(minimum_diagonal) || return nothing
++    isfinite(maximum_diagonal) || return nothing
++    maximum_diagonal > zero(T) || return nothing
+     tau = _equality_cholesky_rank_tau(Btil, matrix, opts)
+-    tau === nothing && return false
+-    isfinite(tau) || return false
++    tau === nothing && return nothing
++    isfinite(tau) || return nothing
++    return (minimum_diagonal, maximum_diagonal, tau)
++end
++
++function _cholesky_duplicate_guard_required(
++    matrix::AbstractMatrix{T},
++    Btil::AbstractMatrix{T},
++    opts::SolverOptions{T},
++) where {T}
++    size(matrix, 1) == 0 && return false
++    facts = _cholesky_diagonal_rank_facts(matrix, Btil, opts)
++    facts === nothing && return true
++    minimum_diagonal, maximum_diagonal, tau = facts
++    return minimum_diagonal <= sqrt(tau) * maximum_diagonal
++end
++
++function _cholesky_has_numerical_rank(
++    matrix::AbstractMatrix{T},
++    Btil::AbstractMatrix{T},
++    opts::SolverOptions{T},
++) where {T}
++    size(matrix, 1) == 0 && return true
++    facts = _cholesky_diagonal_rank_facts(matrix, Btil, opts)
++    facts === nothing && return false
++    minimum_diagonal, maximum_diagonal, tau = facts
+     minimum_diagonal > tau * maximum_diagonal || return false
+     # POTRF may round the zero pivot of exactly duplicated columns up to an
+     # O(sqrt(eps)) positive value.  Only pay the structural duplicate scan in
+@@ -151,6 +176,18 @@ function _cholesky_has_numerical_rank(
+     return true
+ end
+ 
++function _authoritative_cholesky_preserves_exact_rank(
++    factor::AbstractLACholeskyFactor{T},
++    Btil::AbstractMatrix{T},
++    original_B::AbstractMatrix{T},
++    opts::SolverOptions{T},
++) where {T}
++    la_cholesky_rank_authoritative(factor) || return true
++    matrix = la_factor_handle_matrix(factor)
++    _cholesky_duplicate_guard_required(matrix, Btil, opts) || return true
++    return !_has_exact_duplicate_columns(original_B)
++end
++
+ function _legacy_factor_has_numerical_rank(
+     factor::LegacyLACholeskyFactor{T},
+     Btil::AbstractMatrix{T},
+@@ -198,6 +235,145 @@ function _la_factor_has_numerical_rank(
+     )
+ end
+ 
++"""
++    _normalize_equality_panel_columns!(Btil, equality_scale) -> Btil
++
++Normalize each nonzero equality column in-place and record the diagonal
++coordinate map `D` in `equality_scale`, so the factorized equality system uses
++
++    Bhat = Btil * D,   D[j,j] = 1 / ||Btil[:,j]||∞.
++
++Exact zero columns remain exactly zero with scale one. The corresponding
++right-hand side is `D*p`, and the original multiplier is recovered as
++`dy = D*dŷ`. This makes runtime rank semantics invariant to independent
++nonzero rescaling of equality equations without changing the original KKT
++operator used by structured residuals and certification.
++"""
++function _normalize_equality_panel_columns!(
++    Btil::AbstractMatrix{T},
++    equality_scale::AbstractVector{T},
++) where {T}
++    rows, columns = size(Btil)
++    length(equality_scale) == columns ||
++        throw(DimensionMismatch("equality scaling dimension mismatch"))
++    @inbounds for column in 1:columns
++        column_norm = zero(T)
++        for row in 1:rows
++            column_norm = max(column_norm, abs(Btil[row, column]))
++        end
++        scale = iszero(column_norm) ? one(T) : inv(column_norm)
++        # If the reciprocal is not representable in this arithmetic, retain
++        # the unscaled column and let the existing rank policy fail closed.
++        isfinite(scale) || (scale = one(T))
++        equality_scale[column] = scale
++        isone(scale) && continue
++        for row in 1:rows
++            Btil[row, column] *= scale
++        end
++    end
++    return Btil
++end
++
++function _normalize_equality_panel_columns!(
++    Btil::AbstractMatrix{BigFloat},
++    equality_scale::AbstractVector{BigFloat},
++)
++    rows, columns = size(Btil)
++    length(equality_scale) == columns ||
++        throw(DimensionMismatch("equality scaling dimension mismatch"))
++    columns == 0 && return Btil
++    @inbounds for column in 1:columns
++        bits = rows > 0 ?
++               precision(Btil[1, column]) :
++               precision(equality_scale[column])
++        column_norm = BigFloat(0; precision=bits)
++        for row in 1:rows
++            value = abs(Btil[row, column])
++            value > column_norm &&
++                MA.operate_to!(column_norm, copy, value)
++        end
++        if iszero(column_norm)
++            MA.operate_to!(
++                equality_scale[column],
++                copy,
++                BigFloat(1; precision=bits),
++            )
++            continue
++        end
++        scale = BigFloat(1; precision=bits) / column_norm
++        MA.operate_to!(equality_scale[column], copy, scale)
++        for row in 1:rows
++            MA.operate_to!(
++                Btil[row, column],
++                *,
++                Btil[row, column],
++                equality_scale[column],
++            )
++        end
++    end
++    return Btil
++end
++
++function _form_scaled_equality_rhs!(
++    ws::Workspace{T},
++    p_rhs::AbstractVector{T},
++) where {T}
++    length(p_rhs) == length(ws.equality_scale) ||
++        throw(DimensionMismatch("equality right-hand side dimension mismatch"))
++    @inbounds for index in eachindex(ws.q_perm, p_rhs, ws.equality_scale)
++        ws.q_perm[index] = ws.equality_scale[index] * p_rhs[index]
++    end
++    kaxpby_owned!(one(T), ws.q_perm, -one(T), ws.q_rhs)
++    return ws.q_rhs
++end
++
++function _form_scaled_equality_rhs!(
++    ws::Workspace{BigFloat},
++    p_rhs::AbstractVector{BigFloat},
++)
++    length(p_rhs) == length(ws.equality_scale) ||
++        throw(DimensionMismatch("equality right-hand side dimension mismatch"))
++    @inbounds for index in eachindex(ws.q_perm, p_rhs, ws.equality_scale)
++        MA.operate_to!(
++            ws.q_perm[index],
++            *,
++            ws.equality_scale[index],
++            p_rhs[index],
++        )
++    end
++    kaxpby_owned!(
++        one(BigFloat),
++        ws.q_perm,
++        -one(BigFloat),
++        ws.q_rhs,
++    )
++    return ws.q_rhs
++end
++
++function _recover_original_equality_multiplier!(
++    dy::AbstractVector{T},
++    equality_scale::AbstractVector{T},
++) where {T}
++    length(dy) == length(equality_scale) ||
++        throw(DimensionMismatch("equality multiplier dimension mismatch"))
++    @inbounds for index in eachindex(dy, equality_scale)
++        dy[index] *= equality_scale[index]
++    end
++    return dy
++end
++
++function _recover_original_equality_multiplier!(
++    dy::AbstractVector{BigFloat},
++    equality_scale::AbstractVector{BigFloat},
++)
++    length(dy) == length(equality_scale) ||
++        throw(DimensionMismatch("equality multiplier dimension mismatch"))
++    @inbounds for index in eachindex(dy, equality_scale)
++        MA.operate_to!(dy[index], *, dy[index], equality_scale[index])
++    end
++    return dy
++end
++
+ function _has_exact_duplicate_columns(matrix::AbstractMatrix)
+     row_count, column_count = size(matrix)
+     column_count <= 1 && return false
+@@ -879,6 +1055,7 @@ function _factor_arrow_equality_system!(
+             )
+         end
+     end
++    _normalize_equality_panel_columns!(ws.Btil, ws.equality_scale)
+     constraint_finished = time_ns()
+ 
+     q_pivoted = false
+@@ -918,6 +1095,12 @@ function _factor_arrow_equality_system!(
+             nothing
+         end
+         if legacy_factor !== nothing &&
++           _authoritative_cholesky_preserves_exact_rank(
++               legacy_factor,
++               ws.Btil,
++               prob.B,
++               opts,
++           ) &&
+            _legacy_factor_has_numerical_rank(
+                legacy_factor,
+                ws.Btil,
+@@ -1232,6 +1415,7 @@ function _factor_dense_kkt_native!(
+         started = time_ns()
+         copy_owned!(ws.Btil, prob.B)
+         la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)    # B̃ = L_S⁻¹B
++        _normalize_equality_panel_columns!(ws.Btil, ws.equality_scale)
+         phase_constraint_triangular_solve +=
+             _elapsed_seconds(started)
+         direct_qr =
+@@ -1264,6 +1448,12 @@ function _factor_dense_kkt_native!(
+             equality_factor =
+                 la_cholesky_factor!(ws.la_backend, ws.Qbuf)
+             if equality_factor !== nothing &&
++               _authoritative_cholesky_preserves_exact_rank(
++                   equality_factor,
++                   ws.Btil,
++                   prob.B,
++                   opts,
++               ) &&
+                _la_factor_has_numerical_rank(
+                    equality_factor,
+                    ws.Btil,
+@@ -2335,13 +2525,14 @@ function _solve_dense_kkt_owned!(
+     la_trsv_lower!(ws.la_backend, ws.Sbuf, ws.rtil) # r̃ = L_S⁻¹r
+ 
+     if n > 0
+-        la_mul_owned!(ws.la_backend, ws.q_rhs, transpose(ws.Btil), ws.rtil) # q_rhs = B̃ᵀr̃
+-        la_axpby_owned!(ws.la_backend, one(T), p_rhs, -one(T), ws.q_rhs)    # q_rhs = p − B̃ᵀr̃
+-        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)        # dy = Q⁻¹(p − B̃ᵀr̃)
+-
+-        la_mul_owned!(ws.la_backend, dx_out, ws.Btil, dy_out)     # dx_out = B̃·dy
+-        la_axpby_owned!(ws.la_backend, one(T), ws.rtil, one(T), dx_out) # dx_out = r̃ + B̃·dy
+-        la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)       # dx = L_S⁻ᵀ(r̃ + B̃·dy)
++        la_mul_owned!(ws.la_backend, ws.q_rhs, transpose(ws.Btil), ws.rtil) # q_rhs = B̂ᵀr̃
++        _form_scaled_equality_rhs!(ws, p_rhs)                    # q_rhs = Dp − B̂ᵀr̃
++        _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)         # dŷ = Q̂⁻¹(Dp − B̂ᵀr̃)
++
++        la_mul_owned!(ws.la_backend, dx_out, ws.Btil, dy_out)    # dx_out = B̂·dŷ
++        la_axpby_owned!(ws.la_backend, one(T), ws.rtil, one(T), dx_out) # dx_out = r̃ + B̂·dŷ
++        la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)       # dx = L_S⁻ᵀ(r̃ + B̂·dŷ)
++        _recover_original_equality_multiplier!(dy_out, ws.equality_scale)
+     else
+         copy_owned!(dx_out, ws.rtil)
+         la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)
+@@ -2463,12 +2654,7 @@ function solve_block_diagonal_equality_kkt!(
+         ws.rtil,
+         task_count,
+     )
+-    kaxpby_owned!(
+-        one(T),
+-        p_rhs,
+-        -one(T),
+-        ws.q_rhs,
+-    )
++    _form_scaled_equality_rhs!(ws, p_rhs)
+     _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)
+ 
+     _arrow_equality_gemv!(
+@@ -2505,6 +2691,7 @@ function solve_block_diagonal_equality_kkt!(
+             )
+         end
+     end
++    _recover_original_equality_multiplier!(dy_out, ws.equality_scale)
+     return dx_out, dy_out
+ end
