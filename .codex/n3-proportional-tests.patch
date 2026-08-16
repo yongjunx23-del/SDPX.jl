@@ -1,0 +1,26 @@
+diff --git a/test/kkt_regressions.jl b/test/kkt_regressions.jl
+index 7878798..d66560e 100644
+--- a/test/kkt_regressions.jl
++++ b/test/kkt_regressions.jl
+@@ -419,6 +419,21 @@ end
+         @test !zero_factor.ok
+         @test zero_workspace.equality_scale[2] == 1.0
+         @test all(iszero, zero_workspace.Btil[:, 2])
++
++        proportional_B = [1.0 2.0; -0.5 -1.0]
++        @test SDPX._has_exact_proportional_columns(proportional_B)
++        proportional_problem = _dense_workspace_problem(proportional_B)
++        proportional_workspace = SDPX.Workspace(
++            proportional_problem;
++            equality_solver=:normal_equations,
++            mixed_precision_kkt=:off,
++            thread_count=1,
++        )
++        proportional_workspace.S .= Matrix{Float64}(I, 2, 2)
++        proportional_factor = SDPX.factor_kkt!(
++            proportional_workspace, proportional_problem, options,
++        )
++        @test !proportional_factor.ok
+     end
+ 
+     @testset "runtime equality scaling covers fixed-width arithmetic" begin
