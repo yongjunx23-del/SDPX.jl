@@ -851,7 +851,16 @@ function _native_soc_prepare_kkt!(
     equality_factor = la_cholesky_factor!(
         workspace.la_backend, workspace.equality_factor_buffer,
     )
-    if equality_factor === nothing
+    if equality_factor === nothing ||
+       !_la_factor_has_numerical_rank(
+           equality_factor, workspace.equality_panel, options,
+       )
+        # A successful POTRF is not proof that the equality basis has the
+        # numerical rank required by the requested solver accuracy.  Keep the
+        # FixedTraceQ3 specialization on the same rank/fallback contract as
+        # the general NativeSOC route, and release any factor that borrows the
+        # Gram buffer before the panel-backed RRQR fallback.
+        equality_factor = nothing
         :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
             return false
         options.equality_solver === :auto || return false

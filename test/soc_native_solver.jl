@@ -34,6 +34,44 @@ function _native_soc_workspace_with_backend(workspace, backend)
     return SDPX.NativeSOCWorkspace{Float64,SDPX.AbstractLABackend}(values...)
 end
 
+"""Standard kernels with a scripted successful-but-rank-poor Cholesky view."""
+struct ScriptedRankRejectingCholeskyBackend <: SDPX.AbstractLABackend
+    standard::SDPX.StandardLABackend
+end
+
+SDPX.la_syrk!(
+    backend::ScriptedRankRejectingCholeskyBackend,
+    S,
+    P,
+    alpha,
+    beta,
+) = SDPX.la_syrk!(backend.standard, S, P, alpha, beta)
+
+function SDPX.la_cholesky_factor!(
+    backend::ScriptedRankRejectingCholeskyBackend,
+    A::AbstractMatrix{T},
+) where {T}
+    factor = SDPX.la_cholesky_factor!(backend.standard, A)
+    factor === nothing && return nothing
+    rank_view = copy(SDPX.la_factor_handle_matrix(factor))
+    rank_view[end, end] = zero(T)
+    return SDPX.StandardLACholeskyFactor(factor.factor, rank_view)
+end
+
+function SDPX.la_qr_factor!(
+    backend::ScriptedRankRejectingCholeskyBackend,
+    A::AbstractMatrix;
+    pivoted::Bool=false,
+    relative_tolerance=nothing,
+)
+    return SDPX.la_qr_factor!(
+        backend.standard,
+        A;
+        pivoted=pivoted,
+        relative_tolerance=relative_tolerance,
+    )
+end
+
 if !isdefined(@__MODULE__, :soc_psd_reference_problem)
     include(joinpath(@__DIR__, "helpers", "soc_psd_reference.jl"))
 end
@@ -702,6 +740,48 @@ end
         @test all(isfinite, poisoned.dy)
     end
 
+
+    @testset "FixedTraceQ3 applies the general equality rank gate" begin
+        first = zeros(3, 4)
+        first[2, 1] = 1.0
+        first[3, 2] = 1.0
+        second = zeros(3, 4)
+        second[2, 3] = 1.0
+        second[3, 4] = 1.0
+        problem = second_order_program(
+            [-1.0, 0.0, -1.0, 0.0],
+            [
+                SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SOCConstraint(second, [1.0, 0.0, 0.0]),
+            ];
+            Aeq=[1.0 0.0 0.0 0.0; 0.0 1.0 0.0 0.0],
+            beq=[0.2, -0.1],
+        )
+        options = _native_soc_options(
+            Float64;
+            tolerance=1e-9,
+            equality_solver=:auto,
+        )
+        plan = SDPX.plan_native_soc(
+            problem, options; specialization=:fixed_trace,
+        )
+        base = SDPX.NativeSOCWorkspace(problem, plan, options)
+        base.local_metric[:, 1] .= [2.0, 0.0, 3.0]
+        base.local_metric[:, 2] .= [2.0, 0.0, 3.0]
+        factor = SDPX._native_soc_assemble_factor!(base, problem)
+        @test factor isa SDPX.NativeSOCFixedTraceFactor
+
+        scripted = ScriptedRankRejectingCholeskyBackend(
+            SDPX.StandardLABackend(:float64),
+        )
+        workspace = _native_soc_workspace_with_backend(base, scripted)
+        @test SDPX._native_soc_prepare_kkt!(
+            workspace, problem, factor, options,
+        )
+        @test workspace.equality_method === :rank_revealing_qr
+        @test workspace.la_fallback_reason === :la_equality_factor_failed
+        @test workspace.equality_factorizations == 1
+    end
 
     @testset "FixedTraceQ3 is a NativeSOC local reduction" begin
         first = zeros(3, 4)
