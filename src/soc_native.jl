@@ -94,6 +94,26 @@ struct NativeSOCDiagnostics{P}
     termination::NamedTuple
 end
 
+"""Immutable evidence for one NativeSOC family-KKT direction gate."""
+struct NativeSOCDirectionGateRecord{T}
+    ok::Bool
+    phase::Symbol
+    reason::Symbol
+    delta::T
+    residual::T
+    rho0::T
+    qdelta::T
+    tau::T
+    scale_s0::T
+    scale_sdelta::T
+    tolerance::T
+    k0_infinity::T
+    regularizer_infinity::T
+    eta_fact::T
+    eta0::T
+    eta_reg::T
+end
+
 @inline _native_soc_formulation_symbol(plan::NativeSOCPlan) =
     formulation_symbol(plan.formulation)
 
@@ -260,15 +280,19 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
     hessian::Matrix{T}
     factor_buffer::Matrix{T}
     local_metric::Matrix{T}
+    local_metric_regularization::Matrix{T}
     local_factor::Matrix{T}
     local_inverse::Matrix{T}
     augmented_buffer::Matrix{T}
     augmented_rhs::Vector{T}
+    direction_rhs_original::Vector{T}
     rhs::Vector{T}
     equality_factor_buffer::Matrix{T}
     equality_rhs::Vector{T}
     equality_panel::Matrix{T}
     regularizations::Int
+    accepted_regularization::T
+    direction_gate::Union{Nothing,NativeSOCDirectionGateRecord{T}}
     rhs_solves::Int
     equality_method::Symbol
     la_fallback_reason::Symbol
@@ -359,14 +383,18 @@ function NativeSOCWorkspace(
         alloc_zeros(T, dense_dimension, dense_dimension),
         alloc_zeros(T, 3, local_blocks),
         alloc_zeros(T, 3, local_blocks),
+        alloc_zeros(T, 3, local_blocks),
         alloc_zeros(T, 2, local_blocks),
         alloc_zeros(T, augmented_dimension, augmented_dimension),
         alloc_zeros(T, augmented_dimension),
+        alloc_zeros(T, variables),
         alloc_zeros(T, variables),
         alloc_zeros(T, equalities, equalities),
         alloc_zeros(T, equalities),
         alloc_zeros(T, variables, equalities),
         0,
+        zero(T),
+        nothing,
         0,
         :none,
         la_backend_reason(backend),
@@ -636,6 +664,7 @@ function _native_soc_assemble_factor!(
         equalities = length(problem.beq)
         rejection = :factor_failed
         for retry in 0:6
+            zero_owned!(workspace.local_metric_regularization)
             zero_owned!(workspace.augmented_buffer)
             regularization = retry == 0 ? zero(T) :
                              sqrt(eps(T)) * T(10)^(retry - 1)
@@ -647,6 +676,10 @@ function _native_soc_assemble_factor!(
                     a = workspace.local_metric[1, block]
                     b = workspace.local_metric[2, block]
                     c = workspace.local_metric[3, block]
+                    workspace.local_metric_regularization[1, block] =
+                        regularization * max(abs(a), one(T))
+                    workspace.local_metric_regularization[3, block] =
+                        regularization * max(abs(c), one(T))
                     workspace.augmented_buffer[first, first] =
                         a + regularization * max(abs(a), one(T))
                     workspace.augmented_buffer[second, first] =
@@ -686,6 +719,7 @@ function _native_soc_assemble_factor!(
             )
             if inertia_class === :accepted
                 workspace.regularizations += retry
+                workspace.accepted_regularization = regularization
                 return factor
             end
             rejection = inertia_class
@@ -708,6 +742,7 @@ function _native_soc_assemble_factor!(
     if workspace.plan.cone.execution isa FixedTraceQ3Execution
         reduction = workspace.plan.cone.execution.payload
         for attempt in 1:6
+            zero_owned!(workspace.local_metric_regularization)
             regularization = attempt == 1 ? zero(T) :
                              sqrt(eps(T)) * T(10)^(attempt - 2)
             successful = true
@@ -718,6 +753,10 @@ function _native_soc_assemble_factor!(
                 if attempt > 1
                     a += regularization * max(abs(a), one(T))
                     c += regularization * max(abs(c), one(T))
+                    workspace.local_metric_regularization[1, block] =
+                        regularization * max(abs(workspace.local_metric[1, block]), one(T))
+                    workspace.local_metric_regularization[3, block] =
+                        regularization * max(abs(workspace.local_metric[3, block]), one(T))
                 end
                 if !(isfinite(a) && isfinite(b) && isfinite(c) && a > zero(T))
                     successful = false
@@ -738,7 +777,12 @@ function _native_soc_assemble_factor!(
                     one(T) / workspace.local_factor[3, block]
             end
             if successful
-                attempt > 1 && (workspace.regularizations += attempt - 1)
+                if attempt > 1
+                    workspace.regularizations += attempt - 1
+                    workspace.accepted_regularization = regularization
+                else
+                    workspace.accepted_regularization = zero(T)
+                end
                 return NativeSOCFixedTraceFactor(
                     reduction, workspace.local_factor, workspace.local_inverse,
                 )
@@ -748,6 +792,7 @@ function _native_soc_assemble_factor!(
     end
     attempts = 6
     for attempt in 1:attempts
+        zero_owned!(workspace.local_metric_regularization)
         copy_owned!(workspace.factor_buffer, workspace.hessian)
         if attempt > 1
             regularization = sqrt(eps(T)) * T(10)^(attempt - 2)
@@ -756,11 +801,15 @@ function _native_soc_assemble_factor!(
                 workspace.factor_buffer[index, index] += regularization * scale
             end
             workspace.regularizations += 1
+            workspace.accepted_regularization = regularization
+        else
+            workspace.accepted_regularization = zero(T)
         end
         factor = la_cholesky_factor!(
             workspace.la_backend, workspace.factor_buffer,
         )
         factor === nothing && continue
+        zero_owned!(workspace.local_metric_regularization)
         return factor
     end
     return nothing
@@ -1091,8 +1140,12 @@ function _native_soc_solve_kkt!(
 end
 
 """Reset ordinary per-iteration Newton counters/times after a cold start."""
-function _native_soc_reset_iteration_counters!(workspace::NativeSOCWorkspace)
+function _native_soc_reset_iteration_counters!(
+    workspace::NativeSOCWorkspace{T},
+) where {T}
     workspace.regularizations = 0
+    zero_owned!(workspace.local_metric_regularization)
+    workspace.accepted_regularization = zero(T)
     workspace.rhs_solves = 0
     workspace.local_metric_preparations = 0
     workspace.local_factorizations = 0
@@ -1580,9 +1633,40 @@ function _native_soc_direction!(
     ;
     rhs_phase::Symbol=:none,
 ) where {T}
+    workspace.direction_gate = nothing
+    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    rhs_started = fixed_trace ? time_ns() : 0
+    _native_soc_build_direction_rhs!(workspace, problem; rhs_phase=rhs_phase)
+    _native_soc_solve_kkt!(workspace, problem, factor, options) || return false
+    if rhs_phase === :predictor
+        workspace.predictor_rhs_solves += 1
+    elseif rhs_phase === :corrector
+        workspace.corrector_rhs_solves += 1
+    end
+    if fixed_trace
+        elapsed = (time_ns() - rhs_started) / 1.0e9
+        if rhs_phase === :predictor
+            workspace.predictor_rhs_seconds += elapsed
+        elseif rhs_phase === :corrector
+            workspace.corrector_rhs_seconds += elapsed
+        end
+    end
+    _native_soc_complete_direction!(workspace, problem; rhs_phase=rhs_phase)
+    gate = _native_soc_direction_accuracy_gate!(
+        workspace, problem, options; rhs_phase=rhs_phase,
+    )
+    gate.ok || return false
+    return true
+end
+
+"""Build the exact pre-solve Newton RHS from the retained residuals."""
+function _native_soc_build_direction_rhs!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T};
+    rhs_phase::Symbol=:none,
+) where {T}
     fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
     reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
-    rhs_started = fixed_trace ? time_ns() : 0
     copy_owned!(workspace.rhs, workspace.dual_residual)
     if fixed_trace
         contraction_started = time_ns()
@@ -1647,21 +1731,18 @@ function _native_soc_direction!(
     @inbounds for index in eachindex(workspace.rhs)
         workspace.rhs[index] = -workspace.rhs[index]
     end
-    _native_soc_solve_kkt!(workspace, problem, factor, options) || return false
-    if rhs_phase === :predictor
-        workspace.predictor_rhs_solves += 1
-    elseif rhs_phase === :corrector
-        workspace.corrector_rhs_solves += 1
-    end
-    if fixed_trace
-        elapsed = (time_ns() - rhs_started) / 1.0e9
-        if rhs_phase === :predictor
-            workspace.predictor_rhs_seconds += elapsed
-        elseif rhs_phase === :corrector
-            workspace.corrector_rhs_seconds += elapsed
-        end
-    end
+    copy_owned!(workspace.direction_rhs_original, workspace.rhs)
+    return workspace.rhs
+end
 
+"""Recover the full cone direction from the solved family variables."""
+function _native_soc_complete_direction!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T};
+    rhs_phase::Symbol=:none,
+) where {T}
+    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
     if fixed_trace
         started = time_ns()
         include_affine_product = rhs_phase === :corrector
@@ -1720,7 +1801,208 @@ function _native_soc_direction!(
             end
         end
     end
-    return true
+    return workspace
+end
+
+"""Direction-acceptance tolerance for the NativeSOC Newton family operator."""
+@inline function _native_soc_direction_acceptance_tolerance(
+    options::SolverOptions{T},
+) where {T}
+    return max(sqrt(eps(T)), options.ϵ_primal, options.ϵ_dual)
+end
+
+"""
+    _native_soc_direction_accuracy_gate!(
+        workspace, problem, options; rhs_phase=:none, accepted_regularization=...,),
+
+Validate one NativeSOC Newton direction against the family operator
+`K0 + Eδ` used by the accepted factor:
+
+    rho0 = r - K0*d
+    qδ   = Eδ*d
+    rhoδ = rho0 - qδ
+
+with `Eδ` the primal-only diagonal rule from the factor assembly (General:
+`δ*max(abs(Hii),1)`; FixedTrace: the active-pair diagonal `δ` scale used by
+the local assembly).  The equality rows are unregularized: they enter `r`,
+`rho0`, and the norm through the same saddle equation and are never shifted.
+Accepts iff `rhoδ` is finite and its infinity norm is at most
+`τ*(‖r‖∞ + (‖K0‖∞ + ‖Eδ‖∞)*‖d‖∞)`.
+"""
+function _native_soc_direction_accuracy_gate!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T},
+    options::SolverOptions{T};
+    rhs_phase::Symbol=:none,
+    accepted_regularization::T=workspace.accepted_regularization,
+) where {T}
+    if !(isfinite(accepted_regularization) &&
+         accepted_regularization >= zero(T))
+        record = NativeSOCDirectionGateRecord{T}(
+            false, rhs_phase, :unknown_regularization,
+            accepted_regularization,
+            T(Inf), T(Inf), T(Inf), T(Inf), T(Inf), T(Inf), T(Inf),
+            T(Inf), T(Inf), T(Inf), T(Inf), T(Inf),
+        )
+        workspace.direction_gate = record
+        return record
+    end
+    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    # The gate must use the exact pre-solve RHS that produced `dx`, retained
+    # in `direction_rhs_original` by `_native_soc_build_direction_rhs!`; it never
+    # reconstructs that RHS from offsets.
+    copy_owned!(workspace.rhs, workspace.direction_rhs_original)
+    # `direction_rhs_original` is already the exact pre-solve RHS in the
+    # solver sign convention (dual_residual contracted through A' plus the
+    # fixed-trace scatter, then negated).  Do not negate it again.
+    equality_scale = isempty(problem.beq) ? zero(T) :
+                     knrmInf(workspace.equality_residual)
+    rhs_scale = max(knrmInf(workspace.rhs), equality_scale)
+    k0_operator_scale = zero(T)
+    e_operator_scale = zero(T)
+    direction_scale = max(
+        knrmInf(workspace.dx),
+        isempty(workspace.dy) ? zero(T) : knrmInf(workspace.dy),
+    )
+    if fixed_trace
+        @inbounds for block in axes(reduction.active_ids, 2)
+            first = reduction.active_ids[1, block]
+            second = reduction.active_ids[2, block]
+            h11 = workspace.local_metric[1, block]
+            h12 = workspace.local_metric[2, block]
+            h22 = workspace.local_metric[3, block]
+            r11 = workspace.local_metric_regularization[1, block]
+            r22 = workspace.local_metric_regularization[3, block]
+            workspace.rhs[first] -= h11 * workspace.dx[first] +
+                                    h12 * workspace.dx[second]
+            workspace.rhs[second] -= h12 * workspace.dx[first] +
+                                     h22 * workspace.dx[second]
+            k0_row_sum = abs(h11) + abs(h12)
+            e_row_sum = abs(r11)
+            @inbounds for equality in axes(problem.Aeq, 1)
+                k0_row_sum += abs(problem.Aeq[equality, first])
+            end
+            k0_operator_scale = max(k0_operator_scale, k0_row_sum)
+            e_operator_scale = max(e_operator_scale, e_row_sum)
+            k0_row_sum = abs(h12) + abs(h22)
+            e_row_sum = abs(r22)
+            @inbounds for equality in axes(problem.Aeq, 1)
+                k0_row_sum += abs(problem.Aeq[equality, second])
+            end
+            k0_operator_scale = max(k0_operator_scale, k0_row_sum)
+            e_operator_scale = max(e_operator_scale, e_row_sum)
+        end
+    else
+        @inbounds for row in axes(workspace.hessian, 1)
+            k0_row_sum = zero(T)
+            for column in axes(workspace.hessian, 2)
+                k0_row_sum += abs(workspace.hessian[row, column])
+                workspace.rhs[row] -= workspace.hessian[row, column] *
+                                      workspace.dx[column]
+            end
+            @inbounds for equality in axes(problem.Aeq, 1)
+                k0_row_sum += abs(problem.Aeq[equality, row])
+            end
+            k0_operator_scale = max(k0_operator_scale, k0_row_sum)
+            e_row_sum = abs(accepted_regularization *
+                max(abs(workspace.hessian[row, row]), one(T)))
+            e_operator_scale = max(e_operator_scale, e_row_sum)
+        end
+    end
+    if !isempty(problem.beq)
+        @inbounds for equality in axes(problem.Aeq, 1)
+            k0_row_sum = zero(T)
+            for variable in axes(problem.Aeq, 2)
+                k0_row_sum += abs(problem.Aeq[equality, variable])
+            end
+            k0_operator_scale = max(k0_operator_scale, k0_row_sum)
+        end
+        la_mul_owned!(
+            workspace.la_backend,
+            workspace.rhs,
+            transpose(problem.Aeq),
+            workspace.dy,
+            one(T),
+            one(T),
+        )
+        copy_owned!(workspace.equality_rhs, workspace.equality_residual)
+        la_mul_owned!(
+            workspace.la_backend,
+            workspace.equality_rhs,
+            problem.Aeq,
+            workspace.dx,
+            -one(T),
+            one(T),
+        )
+    end
+    rho0_norm = knrmInf(workspace.rhs)
+    if !isempty(problem.beq)
+        rho0_norm = max(rho0_norm, knrmInf(workspace.equality_rhs))
+    end
+    qdelta_norm = zero(T)
+    if fixed_trace
+        @inbounds for block in axes(reduction.active_ids, 2)
+            first = reduction.active_ids[1, block]
+            second = reduction.active_ids[2, block]
+            qdelta = workspace.local_metric_regularization[1, block] *
+                     workspace.dx[first]
+            qdelta_norm = max(qdelta_norm, abs(qdelta))
+            workspace.rhs[first] -= qdelta
+            qdelta = workspace.local_metric_regularization[3, block] *
+                     workspace.dx[second]
+            qdelta_norm = max(qdelta_norm, abs(qdelta))
+            workspace.rhs[second] -= qdelta
+        end
+    else
+        @inbounds for index in eachindex(workspace.rhs)
+            qdelta = workspace.dx[index] *
+                     accepted_regularization *
+                     max(abs(workspace.hessian[index, index]), one(T))
+            qdelta_norm = max(qdelta_norm, abs(qdelta))
+            workspace.rhs[index] -= qdelta
+        end
+    end
+    residual = max(
+        knrmInf(workspace.rhs),
+        isempty(problem.beq) ? zero(T) :
+        knrmInf(workspace.equality_rhs),
+    )
+    s0 = rhs_scale + k0_operator_scale * direction_scale
+    sdelta = s0 + e_operator_scale * direction_scale
+    tau = _native_soc_direction_acceptance_tolerance(options)
+    tolerance = tau * sdelta
+    eta_fact = sdelta > zero(T) ? residual / sdelta :
+               iszero(residual) ? zero(T) : T(Inf)
+    eta0 = s0 > zero(T) ? rho0_norm / s0 :
+           iszero(rho0_norm) ? zero(T) : T(Inf)
+    eta_reg = s0 > zero(T) ? qdelta_norm / s0 :
+            iszero(qdelta_norm) ? zero(T) : T(Inf)
+    ok = isfinite(residual) && isfinite(tau) && isfinite(rhs_scale) &&
+         isfinite(k0_operator_scale) && isfinite(e_operator_scale) &&
+         isfinite(direction_scale) && isfinite(s0) && isfinite(sdelta) &&
+         isfinite(tolerance) && isfinite(eta_fact) && isfinite(eta0) &&
+         isfinite(eta_reg) && residual <= tolerance
+    record = NativeSOCDirectionGateRecord{T}(
+        ok,
+        rhs_phase,
+        ok ? :none : :direction_residual,
+        accepted_regularization,
+        residual,
+        rho0_norm,
+        qdelta_norm,
+        tau,
+        s0,
+        sdelta,
+        tolerance,
+        k0_operator_scale,
+        e_operator_scale,
+        eta_fact,
+        eta0,
+        eta_reg,
+    )
+    workspace.direction_gate = record
+    return record
 end
 
 function _native_soc_predictor_offsets!(workspace::NativeSOCWorkspace)
@@ -1899,7 +2181,9 @@ function _native_soc_workspace_bytes(workspace::NativeSOCWorkspace)
     vectors = (
         workspace.x, workspace.equality_dual, workspace.dx, workspace.dy,
         workspace.dual_residual, workspace.equality_residual,
-        workspace.rhs, workspace.augmented_rhs, workspace.equality_rhs, workspace.nt_eta,
+        workspace.rhs, workspace.augmented_rhs,
+        workspace.direction_rhs_original,
+        workspace.equality_rhs, workspace.nt_eta,
         workspace.nt_eta_squared,
     )
     blocks = (
@@ -1910,7 +2194,8 @@ function _native_soc_workspace_bytes(workspace::NativeSOCWorkspace)
     )
     matrices = (
         workspace.hessian, workspace.factor_buffer,
-        workspace.local_metric, workspace.local_factor,
+        workspace.local_metric, workspace.local_metric_regularization,
+        workspace.local_factor,
         workspace.local_inverse,
         workspace.augmented_buffer,
         workspace.equality_factor_buffer, workspace.equality_panel,
@@ -2170,8 +2455,18 @@ Base.@noinline function _solve_native_soc_core(
             workspace, problem, factor, options; rhs_phase=:predictor,
         ) || begin
             status = NumericalBreakdown
-            message = "NativeSOC affine KKT solve failed."
-            termination = (reason=:affine_solve_failed, stage=:predictor)
+            if workspace.direction_gate === nothing
+                message = "NativeSOC affine KKT solve failed."
+                termination = (reason=:affine_solve_failed, stage=:predictor)
+            else
+                gate = workspace.direction_gate
+                message = "NativeSOC affine direction failed the regularized KKT residual gate."
+                termination = (
+                    reason=:native_soc_affine_direction_residual,
+                    stage=:predictor,
+                    direction_gate=gate,
+                )
+            end
             break
         end
         phase_predictor += (time_ns() - predictor_started) / 1.0e9
@@ -2196,8 +2491,18 @@ Base.@noinline function _solve_native_soc_core(
             workspace, problem, factor, options; rhs_phase=:corrector,
         ) || begin
             status = NumericalBreakdown
-            message = "NativeSOC corrector KKT solve failed."
-            termination = (reason=:corrector_solve_failed, stage=:corrector)
+            if workspace.direction_gate === nothing
+                message = "NativeSOC corrector KKT solve failed."
+                termination = (reason=:corrector_solve_failed, stage=:corrector)
+            else
+                gate = workspace.direction_gate
+                message = "NativeSOC corrector direction failed the regularized KKT residual gate."
+                termination = (
+                    reason=:native_soc_corrector_direction_residual,
+                    stage=:corrector,
+                    direction_gate=gate,
+                )
+            end
             break
         end
         phase_corrector += (time_ns() - corrector_started) / 1.0e9

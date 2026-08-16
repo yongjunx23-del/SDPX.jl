@@ -1170,4 +1170,578 @@ end
             @test result.termination.corrector_rhs_solves == 1
         end
     end
+
+    @testset "NativeSOC direction accuracy gate" begin
+        # Counters are read-only from the gate's perspective: the gate only
+        # writes `direction_gate` and residual scratch, never the
+        # factor/RHS accounting.
+        function snapshot_gate_counters(workspace)
+            names = (
+                :regularizations, :rhs_solves, :kkt_rhs_solves,
+                :predictor_rhs_solves, :corrector_rhs_solves,
+                :local_metric_preparations, :local_factorizations,
+                :equality_panel_transforms, :equality_gram_assemblies,
+                :equality_factorizations, :fixed_residual_blocks,
+                :fixed_rhs_contractions, :fixed_direction_recoveries,
+            )
+            return ntuple(index -> getfield(workspace, names[index]),
+                          length(names))
+        end
+
+        function general_gate_workspace(::Type{T}) where {T}
+            problem = second_order_program(
+                T[1, 0, 0],
+                Matrix{T}(I, 3, 3),
+                zeros(T, 3);
+                Aeq=T[0.0 1.0 0.0; 0.0 0.0 1.0],
+                beq=T[3.0, 4.0],
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T); specialization=:off,
+            )
+            @assert plan.cone.execution isa SDPX.GeneralLorentzExecution
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T),
+            )
+            hessian = T[2 1 0; 1 3 1; 0 1 4]
+            dx = T[1, 2, 3]
+            dy = T[0.2, 0.1]
+            workspace.hessian .= hessian
+            workspace.dx .= dx
+            workspace.dy .= dy
+            # The gate validates `equality_residual - Aeq*dx`, so the
+            # fixture must be consistent with the KKT equality row.
+            workspace.equality_residual .= problem.Aeq * dx
+            return problem, workspace, hessian, dx, dy
+        end
+
+        function general_regularized_rhs(
+            problem,
+            hessian,
+            dx,
+            dy,
+            delta,
+        )
+            T = eltype(hessian)
+            r = similar(dx)
+            mul!(r, hessian, dx)
+            for index in eachindex(dx)
+                r[index] += delta * max(abs(hessian[index, index]), one(T)) *
+                            dx[index]
+            end
+            mul!(r, transpose(problem.Aeq), dy, -one(T), one(T))
+            return r
+        end
+
+        @testset "GeneralLorentz regularization-aware K0+Eδ" begin
+            T = Float64
+            problem, workspace, hessian, dx, dy =
+                general_gate_workspace(T)
+            delta = T(1e-6)
+            r = general_regularized_rhs(problem, hessian, dx, dy, delta)
+            workspace.direction_rhs_original .= r
+            before = snapshot_gate_counters(workspace)
+            record = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+                accepted_regularization=delta,
+            )
+            @test snapshot_gate_counters(workspace) == before
+            @test record.ok
+            @test record.phase === :predictor
+            @test record.reason === :none
+            @test record.delta == delta
+            @test workspace.direction_gate === record
+            @test record.residual <= record.tolerance
+            @test record.tolerance > 0
+            @test record.qdelta > 0
+            @test record.k0_infinity > 0
+            @test record.regularizer_infinity > 0
+
+            # An injected solve error (dx that does not satisfy the
+            # regularized system) is rejected: the residual is
+            # δ*max(|H11|,1)*0.5, orders above the tolerance.
+            poisoned = copy(dx)
+            poisoned[1] += T(0.5)
+            r_poisoned = general_regularized_rhs(
+                problem, hessian, poisoned, dy, delta,
+            )
+            workspace.equality_residual .= problem.Aeq * poisoned
+            workspace.direction_rhs_original .= r_poisoned
+            rejected = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:corrector,
+                accepted_regularization=delta,
+            )
+            @test !rejected.ok
+            @test rejected.phase === :corrector
+            @test rejected.reason === :direction_residual
+            @test rejected.residual > rejected.tolerance
+
+            # The RHS must be validated against the same regularization the
+            # accepted factor used: a δ=0 gate on a δ=1e-3-regularized RHS
+            # sees Eδ d as the residual and fails closed.
+            r_wrong_delta = general_regularized_rhs(
+                problem, hessian, dx, dy, T(1e-3),
+            )
+            workspace.direction_rhs_original .= r_wrong_delta
+            wrong = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+                accepted_regularization=zero(T),
+            )
+            @test !wrong.ok
+            @test wrong.reason === :direction_residual
+            @test wrong.qdelta == 0
+            @test wrong.residual > wrong.tolerance
+
+            # Exact shifted direction at δ=0 is accepted with zero qδ.
+            r_zero = general_regularized_rhs(
+                problem, hessian, dx, dy, zero(T),
+            )
+            workspace.direction_rhs_original .= r_zero
+            strict = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:none,
+                accepted_regularization=zero(T),
+            )
+            @test strict.ok
+            @test strict.delta == 0
+            @test strict.qdelta == 0
+            @test strict.residual <= strict.tolerance
+        end
+
+        @testset "GeneralLorentz without equalities" begin
+            T = Float64
+            problem = second_order_program(
+                T[1, 0],
+                Matrix{T}(I, 2, 2),
+                zeros(T, 2),
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T); specialization=:off,
+            )
+            @test plan.cone.execution isa SDPX.GeneralLorentzExecution
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T),
+            )
+            hessian = T[2 1; 1 3]
+            delta = T(1e-6)
+            dx = T[1, -2]
+            workspace.hessian .= hessian
+            workspace.dx .= dx
+            workspace.direction_rhs_original .= hessian * dx
+            @inbounds for index in eachindex(dx)
+                workspace.direction_rhs_original[index] +=
+                    delta * max(abs(hessian[index, index]), one(T)) * dx[index]
+            end
+            record = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+                accepted_regularization=delta,
+            )
+            @test record.ok
+            @test record.reason === :none
+            @test record.residual <= record.tolerance
+        end
+
+        @testset "FixedTraceQ3 regularization-aware K0+Eδ" begin
+            T = Float64
+            first = zeros(T, 3, 4)
+            first[2, 1] = one(T)
+            first[3, 2] = one(T)
+            second = zeros(T, 3, 4)
+            second[2, 3] = one(T)
+            second[3, 4] = one(T)
+            problem = second_order_program(
+                T[-1, 0, -1, 0],
+                [
+                    SOCConstraint(sparse(first), T[1, 0, 0]),
+                    SOCConstraint(sparse(second), T[1, 0, 0]),
+                ];
+                Aeq=T[1.0 0.0 0.0 0.0; 0.0 1.0 0.0 0.0],
+                beq=T[0.2, -0.1],
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T); specialization=:fixed_trace,
+            )
+            @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T),
+            )
+            delta = T(1e-6)
+            workspace.local_metric[:, 1] .= T[2.0, 0.5, 3.0]
+            workspace.local_metric[:, 2] .= T[1.5, -0.25, 2.0]
+            workspace.local_metric_regularization[1, 1] =
+                delta * max(abs(workspace.local_metric[1, 1]), one(T))
+            workspace.local_metric_regularization[3, 1] =
+                delta * max(abs(workspace.local_metric[3, 1]), one(T))
+            workspace.local_metric_regularization[1, 2] =
+                delta * max(abs(workspace.local_metric[1, 2]), one(T))
+            workspace.local_metric_regularization[3, 2] =
+                delta * max(abs(workspace.local_metric[3, 2]), one(T))
+            dx = T[1, 2, -1, 3]
+            dy = T[0.2, -0.1]
+            workspace.dx .= dx
+            workspace.dy .= dy
+            workspace.equality_residual .= problem.Aeq * dx
+            r = similar(dx)
+            r .= zero(T)
+            @inbounds for block in 1:2
+                first_id = plan.cone.execution.payload.active_ids[1, block]
+                second_id = plan.cone.execution.payload.active_ids[2, block]
+                a = workspace.local_metric[1, block]
+                b = workspace.local_metric[2, block]
+                c = workspace.local_metric[3, block]
+                r[first_id] += (a + workspace.local_metric_regularization[
+                    1, block]) * dx[first_id] + b * dx[second_id]
+                r[second_id] += b * dx[first_id] +
+                                (c + workspace.local_metric_regularization[
+                                    3, block]) * dx[second_id]
+            end
+            mul!(r, transpose(problem.Aeq), dy, -one(T), one(T))
+            workspace.direction_rhs_original .= r
+            record = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+                accepted_regularization=delta,
+            )
+            @test record.ok
+            @test record.reason === :none
+            @test record.delta == delta
+            @test record.residual <= record.tolerance
+            @test record.qdelta > 0
+
+            poisoned = copy(dx)
+            poisoned[1] += T(0.5)
+            r_poisoned = similar(dx)
+            r_poisoned .= zero(T)
+            @inbounds for block in 1:2
+                first_id = plan.cone.execution.payload.active_ids[1, block]
+                second_id = plan.cone.execution.payload.active_ids[2, block]
+                a = workspace.local_metric[1, block]
+                b = workspace.local_metric[2, block]
+                c = workspace.local_metric[3, block]
+                r_poisoned[first_id] +=
+                    (a + workspace.local_metric_regularization[1, block]) *
+                    poisoned[first_id] + b * poisoned[second_id]
+                r_poisoned[second_id] += b * poisoned[first_id] +
+                    (c + workspace.local_metric_regularization[3, block]) *
+                    poisoned[second_id]
+            end
+            mul!(r_poisoned, transpose(problem.Aeq), dy, -one(T), one(T))
+            workspace.equality_residual .= problem.Aeq * poisoned
+            workspace.direction_rhs_original .= r_poisoned
+            rejected = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:corrector,
+                accepted_regularization=delta,
+            )
+            @test !rejected.ok
+            @test rejected.reason === :direction_residual
+            @test rejected.residual > rejected.tolerance
+        end
+
+        @testset "FixedTraceQ3 without equalities" begin
+            T = Float64
+            first = zeros(T, 3, 4)
+            first[2, 1] = one(T)
+            first[3, 2] = one(T)
+            second = zeros(T, 3, 4)
+            second[2, 3] = one(T)
+            second[3, 4] = one(T)
+            problem = second_order_program(
+                T[-1, 0, -1, 0],
+                [
+                    SOCConstraint(sparse(first), T[1, 0, 0]),
+                    SOCConstraint(sparse(second), T[1, 0, 0]),
+                ],
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T); specialization=:fixed_trace,
+            )
+            @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T),
+            )
+            delta = T(1e-6)
+            workspace.local_metric[:, 1] .= T[3.0, 0.25, 4.0]
+            workspace.local_metric[:, 2] .= T[2.0, -0.5, 1.0]
+            workspace.local_metric_regularization[1, 1] =
+                delta * max(abs(workspace.local_metric[1, 1]), one(T))
+            workspace.local_metric_regularization[3, 1] =
+                delta * max(abs(workspace.local_metric[3, 1]), one(T))
+            workspace.local_metric_regularization[1, 2] =
+                delta * max(abs(workspace.local_metric[1, 2]), one(T))
+            workspace.local_metric_regularization[3, 2] =
+                delta * max(abs(workspace.local_metric[3, 2]), one(T))
+            dx = T[1, 0, -2, 1]
+            workspace.dx .= dx
+            r = zeros(T, 4)
+            @inbounds for block in 1:2
+                first_id = plan.cone.execution.payload.active_ids[1, block]
+                second_id = plan.cone.execution.payload.active_ids[2, block]
+                a = workspace.local_metric[1, block]
+                b = workspace.local_metric[2, block]
+                c = workspace.local_metric[3, block]
+                r[first_id] += (a + workspace.local_metric_regularization[
+                    1, block]) * dx[first_id] + b * dx[second_id]
+                r[second_id] += b * dx[first_id] +
+                                (c + workspace.local_metric_regularization[
+                                    3, block]) * dx[second_id]
+            end
+            workspace.direction_rhs_original .= r
+            record = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+                accepted_regularization=delta,
+            )
+            @test record.ok
+            @test record.reason === :none
+            @test record.residual <= record.tolerance
+
+            poisoned = copy(dx)
+            poisoned[3] += T(0.5)
+            r_poisoned = zeros(T, 4)
+            @inbounds for block in 1:2
+                first_id = plan.cone.execution.payload.active_ids[1, block]
+                second_id = plan.cone.execution.payload.active_ids[2, block]
+                a = workspace.local_metric[1, block]
+                b = workspace.local_metric[2, block]
+                c = workspace.local_metric[3, block]
+                r_poisoned[first_id] +=
+                    (a + workspace.local_metric_regularization[1, block]) *
+                    poisoned[first_id] + b * poisoned[second_id]
+                r_poisoned[second_id] += b * poisoned[first_id] +
+                    (c + workspace.local_metric_regularization[3, block]) *
+                    poisoned[second_id]
+            end
+            workspace.direction_rhs_original .= r_poisoned
+            rejected = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:corrector,
+                accepted_regularization=delta,
+            )
+            @test !rejected.ok
+            @test rejected.reason === :direction_residual
+            @test rejected.residual > rejected.tolerance
+        end
+
+        @testset "δ=0 strict and zero system" begin
+            T = Float64
+            problem = second_order_program(
+                T[1, 0],
+                Matrix{T}(I, 2, 2),
+                zeros(T, 2),
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T); specialization=:off,
+            )
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T),
+            )
+            # δ = 0 exactly with an exact unregularized direction.
+            workspace.hessian .= T[2 1; 1 3]
+            workspace.dx .= T[1, -1]
+            workspace.direction_rhs_original .= workspace.hessian *
+                workspace.dx
+            zero_delta = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+                accepted_regularization=zero(T),
+            )
+            @test zero_delta.ok
+            @test zero_delta.delta == 0
+            @test zero_delta.qdelta == 0
+            @test zero_delta.eta_reg == 0
+
+            # A zero RHS cannot be validated against a nonzero direction.
+            workspace.direction_rhs_original .= 0
+            poisoned = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:none,
+                accepted_regularization=zero(T),
+            )
+            @test !poisoned.ok
+            @test poisoned.reason === :direction_residual
+
+            # Fully zero system at δ = 0 is accepted (zero residual, zero
+            # tolerance).
+            workspace.hessian .= 0
+            workspace.dx .= 0
+            workspace.direction_rhs_original .= 0
+            zero_system = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:none,
+                accepted_regularization=zero(T),
+            )
+            @test zero_system.ok
+            @test zero_system.residual == 0
+            @test zero_system.tolerance == 0
+        end
+
+        @testset "nonfinite and unknown regularization fail closed" begin
+            T = Float64
+            problem, workspace, hessian, dx, dy =
+                general_gate_workspace(T)
+            delta = T(1e-6)
+            r = general_regularized_rhs(problem, hessian, dx, dy, delta)
+            workspace.direction_rhs_original .= r
+            for bad in (T(NaN), T(Inf), -T(1))
+                before = snapshot_gate_counters(workspace)
+                record = SDPX._native_soc_direction_accuracy_gate!(
+                    workspace, problem, _native_soc_options(T);
+                    rhs_phase=:predictor,
+                    accepted_regularization=bad,
+                )
+                @test snapshot_gate_counters(workspace) == before
+                @test !record.ok
+                @test record.reason === :unknown_regularization
+                @test workspace.direction_gate === record
+                @test !isfinite(record.residual)
+                @test !isfinite(record.tolerance)
+            end
+        end
+
+        function run_precision_gate_fixture(::Type{T}) where {T}
+            tolerance = T === BigFloat ? T(big"1e-16") : T(1e-12)
+            problem = second_order_program(
+                T[1, 0],
+                Matrix{T}(I, 2, 2),
+                zeros(T, 2),
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T; tolerance);
+                specialization=:off,
+            )
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T; tolerance),
+            )
+            hessian = T[2 1; 1 3]
+            delta = T(1e-6)
+            dx = T[1, -2]
+            workspace.hessian .= hessian
+            workspace.dx .= dx
+            r = hessian * dx
+            for index in eachindex(dx)
+                r[index] += delta * max(abs(hessian[index, index]), one(T)) *
+                            dx[index]
+            end
+            workspace.direction_rhs_original .= r
+            record = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem,
+                _native_soc_options(T; tolerance);
+                rhs_phase=:predictor,
+                accepted_regularization=delta,
+            )
+            @test record.ok
+            @test record.reason === :none
+            @test record.residual <= record.tolerance
+            poisoned = copy(dx)
+            poisoned[1] += T(0.5)
+            r_poisoned = hessian * poisoned
+            for index in eachindex(poisoned)
+                r_poisoned[index] +=
+                    delta * max(abs(hessian[index, index]), one(T)) *
+                    poisoned[index]
+            end
+            workspace.direction_rhs_original .= r_poisoned
+            rejected = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem,
+                _native_soc_options(T; tolerance);
+                rhs_phase=:corrector,
+                accepted_regularization=delta,
+            )
+            @test !rejected.ok
+            @test rejected.reason === :direction_residual
+        end
+
+        @testset "Float64x4 and BigFloat gate coverage" begin
+            using MultiFloats: Float64x4
+            for T in (Float64x4, BigFloat)
+                if T === BigFloat
+                    setprecision(128) do
+                        run_precision_gate_fixture(T)
+                    end
+                else
+                    run_precision_gate_fixture(T)
+                end
+            end
+        end
+
+        @testset "end-to-end gate wiring with injected solve error" begin
+            T = Float64
+            first = zeros(T, 3, 4)
+            first[2, 1] = one(T)
+            first[3, 2] = one(T)
+            second = zeros(T, 3, 4)
+            second[2, 3] = one(T)
+            second[3, 4] = one(T)
+            problem = second_order_program(
+                T[0, 1, 0, 1],
+                [
+                    SOCConstraint(sparse(first), T[1, 0, 0]),
+                    SOCConstraint(sparse(second), T[1, 0, 0]),
+                ];
+                Aeq=T[1.0 0.0 0.0 0.0],
+                beq=T[0.1],
+            )
+            plan = SDPX.plan_native_soc(
+                problem, _native_soc_options(T); specialization=:fixed_trace,
+            )
+            @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
+            workspace = SDPX.NativeSOCWorkspace(
+                problem, plan, _native_soc_options(T),
+            )
+            @inbounds for block in eachindex(workspace.slack)
+                workspace.slack[block] .= T[1, 0, 0]
+                workspace.dual[block] .= T[1, 0, 0]
+            end
+            SDPX._native_soc_residuals!(workspace, problem)
+            @inbounds for block in eachindex(problem.cones)
+                SDPX._native_soc_add_metric!(
+                    workspace, problem.cones[block], block,
+                )
+            end
+            factor = SDPX._native_soc_assemble_factor!(workspace, problem)
+            @test factor isa SDPX.NativeSOCFixedTraceFactor
+            @test workspace.accepted_regularization == 0
+            @test SDPX._native_soc_direction!(
+                workspace, problem, factor, _native_soc_options(T);
+                rhs_phase=:predictor,
+            )
+            clean_gate = workspace.direction_gate
+            @test clean_gate !== nothing
+            @test clean_gate.ok
+            @test clean_gate.delta == 0
+            # The retained pre-solve RHS is the negated dual residual, and
+            # the local KKT solve reproduces the hand-computed solution.
+            @test workspace.direction_rhs_original ≈ T[0, -1, 0, -1] atol=1e-12
+            @test workspace.dx ≈ T[0.1, -1, 0, -1] atol=1e-12
+            @test workspace.dy ≈ T[0.1] atol=1e-12
+            solves_after_clean = workspace.predictor_rhs_solves
+            @test solves_after_clean == 1
+            @test workspace.kkt_rhs_solves == 1
+
+            # Inject an error after the accepted solve while retaining the
+            # exact RHS/equality row that produced it. The gate must reject
+            # the corrupted direction without running another RHS solve.
+            workspace.dx[1] += T(0.5)
+            rejected_gate = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, _native_soc_options(T);
+                rhs_phase=:predictor,
+            )
+            # The gate itself leaves every factor/RHS counter untouched: the
+            # only increments are the build/solve that ran before it.
+            @test workspace.regularizations == 0
+            @test workspace.equality_factorizations == 1
+            @test workspace.predictor_rhs_solves == solves_after_clean
+            @test workspace.kkt_rhs_solves == 1
+            @test workspace.rhs_solves == 1
+            @test rejected_gate !== nothing
+            @test !rejected_gate.ok
+            @test rejected_gate.reason === :direction_residual
+            @test rejected_gate.residual > rejected_gate.tolerance
+        end
+    end
 end
