@@ -252,23 +252,9 @@ instantiate_bfla_la_backend(
     ::Int=1,
 ) where {T} = nothing
 
-function _la_arithmetic_symbol(::Type{Float32})
-    return :float32
-end
-
-function _la_arithmetic_symbol(::Type{Float64})
-    return :float64
-end
-
-function _la_arithmetic_symbol(::Type{BigFloat})
-    return :bigfloat
-end
-
-function _la_arithmetic_symbol(::Type{T}) where {T}
-    name = lowercase(string(T))
-    occursin("float64x", name) && return Symbol(replace(name, " " => ""))
-    return Symbol(replace(name, '.' => '_'))
-end
+"""Canonical arithmetic tag resolver lives in `midend/resolve_options.jl`;
+this compatibility name delegates to it so both tags stay identical."""
+_la_arithmetic_symbol(::Type{T}) where {T} = _arithmetic_symbol(T)
 
 """Resolve the arithmetic implementation without loading optional packages."""
 function plan_la_backend(
