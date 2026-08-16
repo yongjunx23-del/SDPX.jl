@@ -34,7 +34,7 @@ jobs:
           gzip -dc "$RUNNER_TEMP/wave1.patch.gz" > "$RUNNER_TEMP/wave1.patch"
           echo '31d584e6b063c92996f16b8a8e5719bb0c3a9580cc5417a1f3a8e6bfe7930076  '"$RUNNER_TEMP/wave1.patch" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/mails"
-          count=$(git mailsplit -d4 -o "$RUNNER_TEMP/mails" "$RUNNER_TEMP/wave1.patch")
+          count=$(git mailsplit -d4 -o"$RUNNER_TEMP/mails" "$RUNNER_TEMP/wave1.patch")
           test "$count" = 2
           git config user.name 'OpenAI Codex'
           git config user.email 'codex@openai.invalid'
