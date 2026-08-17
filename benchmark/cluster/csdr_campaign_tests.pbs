@@ -113,15 +113,16 @@ printf '%s\n' \
     'printf "status=complete\\n" > "$output"' \
     > "$empty_frontier_root/fake-julia"
 chmod +x "$empty_frontier_root/fake-julia"
-CAMPAIGN_ROOT="$empty_frontier_root" \
-    CSDR_SOLVE_MANIFEST="$empty_frontier_root/manifests/csdr-grid-solve.tsv" \
+env \
+    "CAMPAIGN_ROOT=$empty_frontier_root" \
+    "CSDR_SOLVE_MANIFEST=$empty_frontier_root/manifests/csdr-grid-solve.tsv" \
     SDPX_DEPLOYED_COMMIT=0000000000000000000000000000000000000000 \
     MFLA_DEPLOYED_COMMIT=1111111111111111111111111111111111111111 \
     CSDR_SOURCE_TREE_SHA256=2222222222222222222222222222222222222222222222222222222222222222 \
-    CSDR_CONTROLLER="$empty_frontier_root/csdr_convergence_cli.jl" \
+    "CSDR_CONTROLLER=$empty_frontier_root/csdr_convergence_cli.jl" \
     CSDR_STAGE=alpha \
     CSDR_RUN_ID=empty-frontier \
-    JULIA_BIN="$empty_frontier_root/fake-julia" \
+    "JULIA_BIN=$empty_frontier_root/fake-julia" \
     bash "$SCRIPT_DIR/csdr_campaign_controller.pbs" >/dev/null
 test -L "$empty_frontier_root/validation/convergence-alpha-latest.toml"
 
