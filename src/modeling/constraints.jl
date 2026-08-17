@@ -146,7 +146,13 @@ function objective!(
 ) where {T<:AbstractFloat}
     model.objective === nothing || throw(ArgumentError("objective! may be called only once"))
     affine = _as_affine(model, expression)
-    model.objective = ObjectiveRecord{T}(sense, affine)
+    # Keep the expression returned to the caller separate from the one held
+    # by the model.  ScalarAffine's outer struct is immutable, but its index
+    # and coefficient vectors (and BigFloat coefficient objects) are not;
+    # retaining `affine` directly would let a caller mutate a registered
+    # objective through either the original expression or this return value.
+    stored = _owned_affine_copy(model, affine)
+    model.objective = ObjectiveRecord{T}(sense, stored)
     return affine
 end
 

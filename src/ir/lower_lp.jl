@@ -77,9 +77,6 @@ struct CoreLPRecordOrigin
     sign::Int
 end
 
-const _LP_INEQ_ORIGIN = :inequality
-const _LP_EQ_ORIGIN = :equality
-
 """
     SDPX.CoreLPInequalityDual
 

@@ -154,11 +154,90 @@ end
     )
 end
 
+@testset "Round-7 sparse Schur regularization is failure-driven" begin
+    # The second variable has a zero Schur column, so the first unregularized
+    # numeric factorization must fail and the existing typed floor must be
+    # used exactly once. This protects both sides of the contract: ordinary
+    # SPD systems start with δ=0, while genuinely singular systems still take
+    # the planned same-provider retry.
+    A = [zeros(Float64, 2, 1, 1) for _ in 1:2]
+    A[1][1, 1, 1] = 1.0
+    A[2][1, 1, 1] = 1.0
+    problem = SDPX.ingest(
+        [1.0, 1.0],
+        A,
+        [zeros(Float64, 1, 1), zeros(Float64, 1, 1)],
+        zeros(Float64, 2, 0),
+        Float64[];
+        sparse=:sparse,
+        verbosity=0,
+    )
+    workspace = SDPX.Workspace(problem; thread_count=1)
+    identity_blocks = [ones(Float64, 1, 1), ones(Float64, 1, 1)]
+    @test SDPX.factor_blocks!(workspace, identity_blocks, identity_blocks)
+    SDPX.schur_build!(
+        workspace,
+        problem,
+        problem.cons,
+        identity_blocks,
+        identity_blocks,
+    )
+    factorization = SDPX._factor_sparse_schur_sdp!(
+        workspace,
+        problem,
+        SDPX.SolverOptions{Float64}(verbosity=0),
+    )
+    @test factorization.ok
+    @test factorization.reg_attempts == 1
+    @test workspace.sparse_kkt.regularization == sqrt(eps(Float64))
+end
+
+@testset "Round-7 BigFloat Schur quality stays in owned arithmetic" begin
+    setprecision(BigFloat, 256) do
+        scale = BigFloat("1e200")
+        A = [zeros(BigFloat, 2, 2, 2) for _ in 1:2]
+        for block in eachindex(A)
+            A[block][1, 1, 1] = scale
+            A[block][2, 2, 2] = 2 * scale
+        end
+        problem = SDPX.ingest(
+            BigFloat[1, 1],
+            A,
+            [zeros(BigFloat, 2, 2), zeros(BigFloat, 2, 2)],
+            zeros(BigFloat, 2, 0),
+            BigFloat[];
+            T=BigFloat,
+            sparse=:sparse,
+            verbosity=0,
+        )
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        identity_blocks = [Matrix{BigFloat}(I, 2, 2) for _ in 1:2]
+        @test SDPX.factor_blocks!(workspace, identity_blocks, identity_blocks)
+        SDPX.schur_build!(
+            workspace,
+            problem,
+            problem.cons,
+            identity_blocks,
+            identity_blocks,
+        )
+        factorization = SDPX._factor_sparse_schur_sdp!(
+            workspace,
+            problem,
+            SDPX.SolverOptions{BigFloat}(verbosity=0),
+        )
+        @test factorization.ok
+        @test factorization.reg_attempts == 0
+        @test workspace.sparse_kkt.regularization == 0
+        @test isfinite(workspace.sparse_kkt.factorization_quality)
+        @test workspace.sparse_kkt.factorization_quality ≈ BigFloat(1) / 4
+    end
+end
+
 
 @testset "Round-7 Float64 dense/sparse end-to-end A/B" begin
     dense = SDPX.solve(
         _round7_ab_problem(:dense);
-        tolerance=1e-7,
+        tolerance=1e-8,
         maximum_iterations=80,
         threads=1,
         verbosity=0,
@@ -166,7 +245,7 @@ end
     )
     sparse = SDPX.solve(
         _round7_ab_problem(:sparse);
-        tolerance=1e-7,
+        tolerance=1e-8,
         maximum_iterations=80,
         threads=1,
         verbosity=0,
@@ -174,10 +253,12 @@ end
     )
     @test dense.status === SDPX.Optimal
     @test sparse.status === SDPX.Optimal
-    @test sparse.pObj ≈ dense.pObj atol=1e-7
-    @test sparse.dObj ≈ dense.dObj atol=1e-7
-    @test sparse.p_res <= 1e-7
-    @test sparse.d_res <= 1e-7
+    @test sparse.pObj ≈ dense.pObj atol=1e-8
+    @test sparse.dObj ≈ dense.dObj atol=1e-8
+    @test sparse.p_res <= 1e-8
+    @test sparse.d_res <= 1e-8
+    @test sparse.gap_rel <= 1e-8
+    @test sparse.regularizations == 0
     @test dense.diagnostics.selected_algorithms.certificate.valid
     @test sparse.diagnostics.selected_algorithms.certificate.valid
     @test sparse.termination.executed.executed_backend ===
@@ -186,6 +267,7 @@ end
     @test backend.available
     @test backend.actual_nnz > 0
     @test backend.pattern_reuse > 0
+    @test backend.regularization == 0
     @test backend.psd_block_count == 2
     @test backend.overlap_edges == 1
     @test backend.chordal.analysis_only

@@ -10,11 +10,6 @@
     transforms, Frobenius products, or general-cone Schur code are used.
 =====================================================================#
 
-struct LPRowMap
-    original_count::Int
-    keep::Vector{Int}
-end
-
 struct LPScaling{T}
     variable::Vector{T}
     inequality::Vector{T}

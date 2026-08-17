@@ -709,6 +709,17 @@ end
               la_fallback_reason === :none
         @test zero_iterations.termination.kkt_rhs_solves == 0
         @test zero_iterations.termination.equality_factorizations == 0
+        @test zero_iterations.termination.numeric_factorizations == 0
+
+        one_iteration = SDPX.solve_socp(
+            dependent;
+            tolerance=1e-9,
+            maximum_iterations=1,
+            equality_solver=:auto,
+            verbosity=0,
+        )
+        @test one_iteration.iterations == 1
+        @test one_iteration.termination.numeric_factorizations == 1
     end
 
     @testset "general equality Gram is lower-authoritative" begin

@@ -104,17 +104,6 @@ struct Maximize end
 const ProductConeDomain = Union{Reals,Nonnegative,Nonpositive,ZeroCone,LorentzCone,RotatedLorentzCone,PSDCone}
 const AffineConeDomain = ProductConeDomain
 
-# Domain predicates used by native-block validation. A domain is a
-# mathematical value; a block carries shape. These helpers must stay
-# local to type invariants and must not grow into a canonicalizer.
-is_reals(::Reals) = true
-is_nonnegative(::Nonnegative) = true
-is_nonpositive(::Nonpositive) = true
-is_zerocone(::ZeroCone) = true
-is_lorentz(::LorentzCone) = true
-is_rotated_lorentz(::RotatedLorentzCone) = true
-is_psd(::PSDCone) = true
-
 is_product_cone(domain) = domain isa ProductConeDomain
 
 """

@@ -119,7 +119,7 @@ function _lp_program(
     )
 end
 
-function _caught_error(f)
+function _caught_lp_error(f)
     try
         f()
         return nothing
@@ -281,12 +281,12 @@ Test.@testset "L7 mixed and non-LP rejected" begin
         products=((SDPX.Nonnegative(), 1), (SDPX.LorentzCone(), 3)),
         equalities=[],
     )
-    err = _caught_error(() -> SDPX.lower_lp_native(mixed))
+    err = _caught_lp_error(() -> SDPX.lower_lp_native(mixed))
     @test err isa SDPX.UnsupportedNativeConeRoute
     @test err.detected_families == [:lp_family, :soc_family]
 
     psd = _lp_program(products=((SDPX.PSDCone(), 2),), equalities=[])
-    err2 = _caught_error(() -> SDPX.lower_lp_native(psd))
+    err2 = _caught_lp_error(() -> SDPX.lower_lp_native(psd))
     @test err2 isa SDPX.LPLoweringError
     @test err2.reason === :non_lp_route
 end
@@ -296,7 +296,7 @@ Test.@testset "L7b constant-only LP fails before core allocation" begin
     SDPX.constraint!(model, :constant, 1.0, SDPX.Nonnegative())
     SDPX.objective!(model, SDPX.Minimize(), 0.0)
     program = SDPX.compile_product_cone_model(model)
-    err = _caught_error(() -> SDPX.lower_lp_native(program; verbosity=0))
+    err = _caught_lp_error(() -> SDPX.lower_lp_native(program; verbosity=0))
     @test err isa SDPX.LPLoweringError
     @test err.reason === :no_variables
 end
@@ -308,13 +308,13 @@ Test.@testset "L8 equality-only fails explicitly without dummy cone" begin
         equalities=[[(1, 1.0), (2, -1.0)]],
         T=Float64,
     )
-    err = _caught_error(() -> SDPX.lower_lp_native(equality_only))
+    err = _caught_lp_error(() -> SDPX.lower_lp_native(equality_only))
     @test err isa SDPX.LPLoweringError
     @test err.reason === :no_dummy_cone
     @test occursin("without a dummy cone", err.message)
 
     all_free = _lp_program(products=((SDPX.Reals(), 1),), equalities=[])
-    err2 = _caught_error(() -> SDPX.lower_lp_native(all_free))
+    err2 = _caught_lp_error(() -> SDPX.lower_lp_native(all_free))
     @test err2 isa SDPX.LPLoweringError
     @test err2.reason === :no_dummy_cone
 end

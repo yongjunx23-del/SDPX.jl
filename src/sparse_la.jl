@@ -599,16 +599,6 @@ struct SparseAssemblyMap{T}
     diagonal_positions::Vector{Int}
 end
 
-function _sparse_lower_position_map(A::SparseMatrixCSC)
-    map = Dict{Tuple{Int,Int},Int}()
-    for column in 1:size(A, 2)
-        for pointer in A.colptr[column]:(A.colptr[column + 1] - 1)
-            map[(A.rowval[pointer], column)] = pointer
-        end
-    end
-    return map
-end
-
 function sparse_gram_assembly_map(
     G::SparseMatrixCSC{T,Int},
     storage::SparseKKTStorage{T},
@@ -1310,7 +1300,7 @@ function _sparse_schur_sdp_workspace(
         [one(T) for _ in 1:n],
         nothing,
         false,
-        sqrt(eps(T)),
+        zero(T),
         zero(T),
         0,
     )

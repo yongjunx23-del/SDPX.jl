@@ -1,9 +1,8 @@
 using SDPX
 using Test
 
-# This is the frozen v0.5 contract.  The assertions intentionally fail until
-# the central module removes its old includes/exports; that integration work is
-# owned by the SOL agent (see the handoff message from this migration).
+# This is the frozen v0.5 contract. Any extra export or reintroduced legacy
+# binding is an API regression.
 const FINAL_PUBLIC_EXPORTS = Set((
     :Model,
     :variable!,

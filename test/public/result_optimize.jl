@@ -458,3 +458,25 @@ end
         @test SDPX.value(result, x)[1] ≈ BigFloat(1) atol=BigFloat("1e-20")
     end
 end
+
+@testset "BigFloat Result PSD expansion keeps stored precision" begin
+    # Mimic a retained 256-bit Result payload being read after the caller has
+    # changed the ambient BigFloat scope to 64 bits.  The packed dual map
+    # divides off-diagonal entries by two and must perform that operation at
+    # the stored precision, not at the getter's ambient precision.
+    packed = setprecision(BigFloat, 256) do
+        [
+            BigFloat("1.0"; precision=256),
+            BigFloat("1.23456789012345678901234567890123456789"; precision=256),
+            BigFloat("2.0"; precision=256),
+        ]
+    end
+    setprecision(BigFloat, 64) do
+        matrix = SDPX._result_packed_matrix(packed, 2, BigFloat, true)
+        @test all(precision(value) == 256 for value in matrix)
+        @test matrix[1, 2] == setprecision(BigFloat, 256) do
+            packed[2] / BigFloat(2; precision=256)
+        end
+        @test matrix[2, 1] == matrix[1, 2]
+    end
+end

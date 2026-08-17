@@ -104,7 +104,7 @@ struct Limits
         (isinf(time) || isfinite(time)) && time >= 0.0 ||
             throw(ArgumentError("time must be finite and nonnegative, or Inf, got $time"))
         threads >= 1 ||
-            throw(ArgumentError("threads must be a positive Int (0 or nothing requests automatic resolution in `Limits(; ...)`), got $threads"))
+            throw(ArgumentError("threads must be a positive Int (`nothing` requests automatic resolution in `Limits(; ...)`), got $threads"))
         return new(iterations, time, threads)
     end
 end

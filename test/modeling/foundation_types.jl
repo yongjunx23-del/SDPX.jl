@@ -150,6 +150,39 @@ Test.@testset "F0 affine PSD remains ONE row block" begin
     @test_throws ArgumentError SDPX.RowBlock(SDPX.PSDCone(), 1, 3, collect(1:3))
 end
 
+Test.@testset "registered affine data owns caller storage" begin
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
+
+    # Objective registration must not retain either the source expression or
+    # the expression returned by objective!.  Both ScalarAffine vectors are
+    # caller-mutable even though the outer expression is immutable.
+    source_objective = 3.0 * x[1] + 4.0 * x[2] + 5.0
+    returned_objective = SDPX.objective!(model, SDPX.Minimize(), source_objective)
+    source_objective.indices[1] = 2
+    source_objective.coefficients[1] = 99.0
+    returned_objective.indices[1] = 2
+    returned_objective.coefficients[1] = 88.0
+
+    rows = [x[1] + 1.0, 2.0 * x[2] + 3.0]
+    SDPX.constraint!(model, :rows, rows, SDPX.Nonnegative())
+    rows[1].indices[1] = 2
+    rows[1].coefficients[1] = 77.0
+    rows[2].coefficients[1] = 66.0
+
+    psd_entries = [1.0 + x[1] 0.0 + x[2]; 0.0 + x[2] 2.0 + x[1]]
+    SDPX.constraint!(model, :psd, psd_entries, SDPX.PSDCone())
+    psd_entries[1, 1].indices[1] = 2
+    psd_entries[1, 1].coefficients[1] = 55.0
+    psd_entries[2, 1].coefficients[1] = 44.0
+
+    program = SDPX.compile_product_cone_model(model)
+    @test program.objective_vector == [3.0, 4.0]
+    @test program.objective_constant == 5.0
+    @test Matrix(program.equality_matrix) == [1.0 0.0; 0.0 2.0; 1.0 0.0; 0.0 1.0; 1.0 0.0]
+    @test program.rhs == [-1.0, -3.0, -1.0, -0.0, -2.0]
+end
+
 Test.@testset "F0 reference identity and model isolation" begin
     @test isbitstype(SDPX.VariableRef)
     @test isbitstype(SDPX.ConstraintRef)

@@ -18,7 +18,6 @@ which carries **both** the upstream copyright and the SDPX copyright.
 
 | SDPX file | Derived from | Nature of derivation |
 |---|---|---|
-| `src/compat.jl` | `src/functions.jl` (`sdp`, `findFeasible`, `setArithmeticType`) | **Interface derivation.** The retained public signatures, keyword names, and defaults are kept for source compatibility; the implementations are rewritten and delegate to the new pipeline. Obsolete global mode setters were removed. |
 | `README.md` | upstream `README.md` | **Structural derivation.** Problem statement, the primal/dual formulation, and the argument tables follow the upstream document. |
 | `test/correctness.jl` (T1/T2 fixtures) | upstream `test/runtests.jl` | The 2×2 toy problem (`A[1,1,1]=1`, `A[2,2,2]=1`, `C[1,2]=C[2,1]=1`, `c=[2,3]`) is upstream's test case, kept so results stay comparable. |
 | `.github/workflows/TagBot.yml` | upstream | Standard Julia TagBot workflow, adapted to use `GITHUB_TOKEN` only. |
@@ -35,9 +34,8 @@ eliminates the most substantial piece of copied implementation.
 The upstream `src/functions.jl` and `src/SDPJSolver.jl` files are also absent.
 None of their numerical implementation functions (`getResidue`, `NewtonStep`,
 `NewtonStepSparse`, `f1`, `df`, `f`, `sdpBFGS`, or `findFeasibleBFGS`) is
-defined by SDPX. The retained `sdp` and `findFeasible` names are compatibility
-front ends that construct an `SDPProblem` and delegate to the new solver
-pipeline. The deprecated setter names contain no numerical algorithm.
+defined by SDPX. The former compatibility names `sdp`, `findFeasible`, and
+`setArithmeticType` were retired with the v0.5 single-interface API.
 
 The release CI checks both the removed filenames and the former numerical
 function definitions so they cannot be reintroduced accidentally. The
@@ -57,11 +55,11 @@ engine, and no structured termination or final-certificate diagnostics.
 
 ### Why the upstream copyright is still retained
 
-`src/compat.jl`, the README structure and the T1/T2 test fixtures remain
-derived, and the project began as a fork of the upstream repository. MIT
-requires the original notice to accompany substantial portions of the original
-software, and retaining it costs nothing, so [LICENSE](LICENSE) carries both
-copyright lines. This is a deliberate choice, not an oversight.
+The README structure and the T1/T2 test fixtures remain derived, and the
+project began as a fork of the upstream repository. MIT requires the original
+notice to accompany substantial portions of the original software, and
+retaining it costs nothing, so [LICENSE](LICENSE) carries both copyright lines.
+This is a deliberate choice, not an oversight.
 
 ### Algorithmic lineage (ideas, not code)
 

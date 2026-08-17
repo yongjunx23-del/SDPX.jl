@@ -81,7 +81,7 @@ mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
             Dict{MOIModelConstraintKey,Vector{T}}(),
             nothing,
             0,
-            MOI.MIN_SENSE,
+            MOI.FEASIBILITY_SENSE,
             zero(T),
             0.0,
             nothing,
@@ -164,7 +164,7 @@ function MOI.empty!(optimizer::Optimizer{T}) where {T}
     empty!(optimizer.model_constraint_starts)
     optimizer.start_error = nothing
     optimizer.num_variables = 0
-    optimizer.sense = MOI.MIN_SENSE
+    optimizer.sense = MOI.FEASIBILITY_SENSE
     optimizer.objective_constant = zero(T)
     optimizer.solve_time = 0.0
     return nothing
@@ -296,6 +296,10 @@ function MOI.supports_constraint(
     return true
 end
 
+# Unscaled product PSD variables are bridged by `_moi_vector_variable_groups`.
+# The scaled product form is not; keep that capability false so MOI clients
+# fail during discovery/copy rather than entering the unsupported branch
+# (VectorAffineFunction PSD constraints remain supported above).
 function MOI.supports_constraint(
     ::Optimizer,
     ::Type{MOI.VectorOfVariables},
@@ -303,6 +307,12 @@ function MOI.supports_constraint(
 ) where {S<:MOIPSDSet}
     return true
 end
+
+MOI.supports_constraint(
+    ::Optimizer,
+    ::Type{MOI.VectorOfVariables},
+    ::Type{MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}},
+) = false
 
 function MOI.supports_constraint(
     ::Optimizer{T},
@@ -459,6 +469,32 @@ end
 @inline _moi_model_name(prefix::AbstractString, number::Integer) =
     Symbol(prefix, "_", number)
 
+# ConstraintIndex values are only unique within one (function, set) type
+# pair.  Native Model block names, however, share one namespace per block
+# kind, so using `index.value` alone lets (for example) a ScalarAffineFunction
+# and a VariableIndex constraint both claim `moi_scalar_constraint_1`.  Keep
+# names deterministic while including the full source function/set type in
+# the name.  The type spelling is sanitized only for readability; the source
+# type parameters themselves (including the arithmetic type) remain encoded.
+@inline function _moi_type_tag(::Type{T}) where {T}
+    return replace(string(T), r"[^A-Za-z0-9_]+" => "_")
+end
+
+@inline function _moi_model_name(
+    prefix::AbstractString,
+    index::MOI.ConstraintIndex{F,S},
+) where {F,S}
+    return Symbol(
+        prefix,
+        "_",
+        _moi_type_tag(F),
+        "_",
+        _moi_type_tag(S),
+        "_",
+        index.value,
+    )
+end
+
 @inline function _moi_owned(::Type{T}, value; bits::Int=precision(T)) where {T<:AbstractFloat}
     return owned_arithmetic_copy(T, value; precision_bits=bits)
 end
@@ -538,20 +574,49 @@ function _moi_vector_expressions(
     return expressions
 end
 
+@inline function _moi_psd_sqrt_two(::Type{T}, bits::Int) where {T<:AbstractFloat}
+    # BigFloat operators obey the ambient precision even when their operands
+    # carry a larger significand.  Evaluate the square root itself in the
+    # Model-owned precision, then copy the result back into that ownership.
+    return _owned_arithmetic_eval(
+        T,
+        () -> sqrt(_moi_owned(T, 2; bits=bits));
+        precision_bits=bits,
+    )
+end
+
+@inline function _moi_matrix_precision(::Type{BigFloat}, matrix)
+    isempty(matrix) && return precision(BigFloat)
+    return maximum(precision(value) for value in matrix)
+end
+
+@inline _moi_matrix_precision(::Type{T}, matrix) where {T<:AbstractFloat} =
+    precision(T)
+
 function _moi_psd_matrix_expressions(
     expressions::Vector{ScalarAffine{T}},
     side::Int,
-    scaled::Bool,
+    scaled::Bool;
+    precision_bits::Int=precision(T),
 ) where {T<:AbstractFloat}
     coordinates = _triangle_coordinates(side)
     length(expressions) == length(coordinates) || throw(DimensionMismatch(
         "PSD expression length $(length(expressions)) != packed side $side",
     ))
     matrix = Matrix{ScalarAffine{T}}(undef, side, side)
-    sqrt_two = sqrt(T(2))
+    sqrt_two = _moi_psd_sqrt_two(T, precision_bits)
     for output in eachindex(coordinates)
         row, column = coordinates[output]
-        expression = scaled && row != column ? inv(sqrt_two) * expressions[output] : expressions[output]
+        expression = if scaled && row != column
+            inverse_sqrt_two = _owned_arithmetic_eval(
+                T,
+                () -> one(T) / sqrt_two;
+                precision_bits=precision_bits,
+            )
+            inverse_sqrt_two * expressions[output]
+        else
+            expressions[output]
+        end
         matrix[row, column] = expression
         matrix[column, row] = expression
     end
@@ -563,17 +628,24 @@ function _moi_psd_vector_matrix(
     side::Int,
     ::Type{T},
     scaled::Bool,
+    ; precision_bits::Int=precision(T),
 ) where {T<:AbstractFloat}
     coordinates = _triangle_coordinates(side)
     length(values) == length(coordinates) || throw(DimensionMismatch(
         "PSD start length $(length(values)) != packed side $side",
     ))
     matrix = zeros(T, side, side)
-    sqrt_two = sqrt(T(2))
+    sqrt_two = _moi_psd_sqrt_two(T, precision_bits)
     for output in eachindex(coordinates)
         row, column = coordinates[output]
-        value = _moi_owned(T, values[output])
-        scaled && row != column && (value /= sqrt_two)
+        value = _moi_owned(T, values[output]; bits=precision_bits)
+        if scaled && row != column
+            value = _owned_arithmetic_eval(
+                T,
+                () -> value / sqrt_two;
+                precision_bits=precision_bits,
+            )
+        end
         matrix[row, column] = value
         matrix[column, row] = value
     end
@@ -584,17 +656,24 @@ function _moi_psd_vector_from_matrix(
     matrix::AbstractMatrix{T},
     side::Int,
     scaled::Bool,
+    ; precision_bits::Int=_moi_matrix_precision(T, matrix),
 ) where {T<:AbstractFloat}
     size(matrix) == (side, side) || throw(DimensionMismatch(
         "PSD result matrix size $(size(matrix)) != ($side, $side)",
     ))
     coordinates = _triangle_coordinates(side)
-    sqrt_two = sqrt(T(2))
+    sqrt_two = _moi_psd_sqrt_two(T, precision_bits)
     values = Vector{T}(undef, length(coordinates))
     for output in eachindex(coordinates)
         row, column = coordinates[output]
-        value = matrix[row, column]
-        scaled && row != column && (value *= sqrt_two)
+        value = _moi_owned(T, matrix[row, column]; bits=precision_bits)
+        if scaled && row != column
+            value = _owned_arithmetic_eval(
+                T,
+                () -> value * sqrt_two;
+                precision_bits=precision_bits,
+            )
+        end
         values[output] = value
     end
     return values
@@ -658,25 +737,25 @@ function _moi_vector_variable_groups(
                 length(variables) == expected || throw(DimensionMismatch(
                     "PSD product variable count $(length(variables)) != packed side $side",
                 ))
-                variable!(model, _moi_model_name("moi_psd", source_index.value),
+                variable!(model, _moi_model_name("moi_psd", source_index),
                           side, side; domain=PSDCone())
             elseif kind === :nonnegative
-                variable!(model, _moi_model_name("moi_nonnegative", source_index.value),
+                variable!(model, _moi_model_name("moi_nonnegative", source_index),
                           length(variables); domain=Nonnegative())
             elseif kind === :nonpositive
-                variable!(model, _moi_model_name("moi_nonpositive", source_index.value),
+                variable!(model, _moi_model_name("moi_nonpositive", source_index),
                           length(variables); domain=Nonpositive())
             elseif kind === :zero
-                variable!(model, _moi_model_name("moi_zero", source_index.value),
+                variable!(model, _moi_model_name("moi_zero", source_index),
                           length(variables); domain=ZeroCone())
             elseif kind === :soc
-                variable!(model, _moi_model_name("moi_soc", source_index.value),
+                variable!(model, _moi_model_name("moi_soc", source_index),
                           length(variables); domain=LorentzCone())
             elseif kind === :rsoc
-                variable!(model, _moi_model_name("moi_rsoc", source_index.value),
+                variable!(model, _moi_model_name("moi_rsoc", source_index),
                           length(variables); domain=RotatedLorentzCone())
             elseif kind === :free
-                variable!(model, _moi_model_name("moi_free_product", source_index.value),
+                variable!(model, _moi_model_name("moi_free_product", source_index),
                           length(variables); domain=Reals())
             else
                 throw(MOI.UnsupportedConstraint{F,S}())
@@ -764,8 +843,13 @@ function _moi_add_vector_constraint!(
     if kind === :psd || kind === :psd_scaled
         side = MOI.side_dimension(set)
         scaled = kind === :psd_scaled
-        matrix = _moi_psd_matrix_expressions(expressions, side, scaled)
-        block = constraint!(model, _moi_model_name("moi_psd_constraint", source_index.value),
+        matrix = _moi_psd_matrix_expressions(
+            expressions,
+            side,
+            scaled;
+            precision_bits=precision_bits(model),
+        )
+        block = constraint!(model, _moi_model_name("moi_psd_constraint", source_index),
                             matrix, PSDCone())
         info = MOIModelConstraintInfo{T}(
             :psd, kind, expressions, _moi_model_constraint_refs(block),
@@ -782,7 +866,7 @@ function _moi_add_vector_constraint!(
                  kind === :nonpositive ? Nonpositive() :
                  kind === :zero ? ZeroCone() :
                  kind === :soc ? LorentzCone() : RotatedLorentzCone()
-        block = constraint!(model, _moi_model_name("moi_vector_constraint", source_index.value),
+        block = constraint!(model, _moi_model_name("moi_vector_constraint", source_index),
                             expressions, domain)
         info = MOIModelConstraintInfo{T}(
             :vector, kind, expressions, _moi_model_constraint_refs(block),
@@ -808,9 +892,9 @@ function _moi_add_scalar_constraint!(
     expression = _moi_scalar_expression(model, function_value, entries)
     kind = _moi_set_kind(S)
     if kind === :interval
-        lower_block = constraint!(model, _moi_model_name("moi_interval_lower", source_index.value),
+        lower_block = constraint!(model, _moi_model_name("moi_interval_lower", source_index),
                                   expression - set.lower, Nonnegative())
-        upper_block = constraint!(model, _moi_model_name("moi_interval_upper", source_index.value),
+        upper_block = constraint!(model, _moi_model_name("moi_interval_upper", source_index),
                                   expression - set.upper, Nonpositive())
         info = MOIModelConstraintInfo{T}(
             :interval, kind, ScalarAffine{T}[expression],
@@ -828,7 +912,7 @@ function _moi_add_scalar_constraint!(
         else
             expression - set.value
         end
-        block = constraint!(model, _moi_model_name("moi_scalar_constraint", source_index.value),
+        block = constraint!(model, _moi_model_name("moi_scalar_constraint", source_index),
                             shifted, domain)
         info = MOIModelConstraintInfo{T}(
             :scalar, kind, ScalarAffine{T}[expression],
@@ -917,17 +1001,27 @@ function _moi_psd_dual_start_matrix(
     side::Int,
     ::Type{T},
     scaled::Bool,
+    ; precision_bits::Int=precision(T),
 ) where {T<:AbstractFloat}
     coordinates = _triangle_coordinates(side)
     length(values) == length(coordinates) || throw(DimensionMismatch(
         "PSD dual start length $(length(values)) != packed side $side",
     ))
     matrix = zeros(T, side, side)
-    sqrt_two = sqrt(T(2))
+    sqrt_two = _moi_psd_sqrt_two(T, precision_bits)
     for output in eachindex(coordinates)
         row, column = coordinates[output]
-        value = _moi_owned(T, values[output])
-        scaled && row != column && (value *= sqrt_two)
+        value = _moi_owned(T, values[output]; bits=precision_bits)
+        if scaled && row != column
+            # The scaled PSD affine map stores off-diagonals as
+            # `native / sqrt(2)`.  Its dual start therefore uses the inverse
+            # adjoint map and divides the supplied packed value by sqrt(2).
+            value = _owned_arithmetic_eval(
+                T,
+                () -> value / sqrt_two;
+                precision_bits=precision_bits,
+            )
+        end
         matrix[row, column] = value
         matrix[column, row] = value
     end
@@ -965,7 +1059,13 @@ function _moi_install_variable_starts!(
         block = group.block
         if group.set_kind === :psd
             side = size(block)[1]
-            matrix = _moi_psd_vector_matrix(values, side, T, false)
+            matrix = _moi_psd_vector_matrix(
+                values,
+                side,
+                T,
+                false;
+                precision_bits=precision_bits(block.model),
+            )
             set_start!(block, matrix)
         else
             set_start!(block, T[_moi_owned(T, value) for value in values])
@@ -1002,7 +1102,13 @@ function _moi_install_constraint_start!(
         if info.set_kind === :psd
             set_dual_slack_start!(
                 block,
-                _moi_psd_dual_start_matrix(values, size(block)[1], T, info.scaled),
+                _moi_psd_dual_start_matrix(
+                    values,
+                    size(block)[1],
+                    T,
+                    info.scaled;
+                    precision_bits=precision_bits(block.model),
+                ),
             )
         else
             set_dual_slack_start!(block, T[_moi_owned(T, item) for item in values])
@@ -1022,9 +1128,18 @@ function _moi_install_constraint_start!(
     ))
     model = optimizer.model::Model{T}
     native = ConstraintBlockRef{T}(model, info.refs[1].block)
-    if info.set_kind === :psd
+    if info.set_kind === :psd || info.set_kind === :psd_scaled
         side = size(native)[1]
-        set_dual_start!(native, _moi_psd_dual_start_matrix(values, side, T, info.scaled))
+        set_dual_start!(
+            native,
+            _moi_psd_dual_start_matrix(
+                values,
+                side,
+                T,
+                info.scaled;
+                precision_bits=precision_bits(model),
+            ),
+        )
     else
         set_dual_start!(native, T[_moi_owned(T, item) for item in values])
     end
@@ -1077,6 +1192,28 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
         options.certification,
         nothing,
     )
+end
+
+function _moi_require_executable_cone(model::Model)
+    # The pure LP lowerer intentionally does not synthesize a dummy
+    # inequality for an all-free/equality-only model.  Detect that case at
+    # the MOI seam so callers receive a typed adapter error before any public
+    # solver/result object is allocated.  ZeroCone is an equality and Reals
+    # is unconstrained; every other native domain contributes an executable
+    # cone coordinate.
+    has_cone = any(
+        record -> !(record.domain isa Reals || record.domain isa ZeroCone),
+        model.variable_blocks,
+    ) || any(
+        record -> !(record.domain isa Reals || record.domain isa ZeroCone),
+        model.constraint_blocks,
+    )
+    has_cone || throw(MOIAdapterError(
+        :no_dummy_cone,
+        "MOI model has no executable nonfree cone; all-free/equality-only " *
+        "LP models are unsupported without a dummy inequality cone",
+    ))
+    return nothing
 end
 
 function _moi_install_objective!(
@@ -1267,40 +1404,7 @@ end
 @inline _moi_public_result(optimizer::Optimizer) =
     optimizer.public_result
 
-function _moi_result_status_value(result::Result)
-    value = result.status
-    value === :optimal && return Optimal
-    value === :feasible_cert && return FeasibleCert
-    value === :infeasible_cert && return InfeasibleCert
-    value === :primal_infeasible && return PrimalInfeasible
-    value === :dual_infeasible && return DualInfeasible
-    value === :iteration_limit && return IterLimit
-    value === :time_limit && return TimeLimit
-    value === :interrupted && return UserStopped
-    value === :slow_progress && return Stalled
-    value === :almost_optimal && return AlmostOptimal
-    value === :insufficient_precision && return InsufficientPrecision
-    value === :numerical_error && return NumericalFailure
-    return value
-end
-
-function _moi_public_has_iterate(result)
-    status_value = _moi_result_status_value(result)
-    return status_value in (
-        Optimal,
-        FeasibleCert,
-        IterLimit,
-        TimeLimit,
-        Stalled,
-        MaxRestartsExceeded,
-        UserStopped,
-        PrimalInfeasible,
-        DualInfeasible,
-        AlmostOptimal,
-        InsufficientPrecision,
-        NumericalFailure,
-    )
-end
+@inline _moi_result_status_value(result::Result) = result.status
 
 @inline function _moi_check_public_result(optimizer::Optimizer, attribute)
     result = _moi_public_result(optimizer)
@@ -1317,6 +1421,8 @@ function MOI.optimize!(optimizer::Optimizer{T}) where {T<:AbstractFloat}
         reason, message = optimizer.start_error
         throw(MOIAdapterError(reason, message))
     end
+
+    _moi_require_executable_cone(model)
 
     settings = _moi_settings(optimizer)
     outputs = Outputs(
@@ -1360,14 +1466,6 @@ function _moi_eval_affine(
     return acc
 end
 
-function _moi_model_block(model::Model{T}, ref::ConstraintRef) where {T<:AbstractFloat}
-    return ConstraintBlockRef{T}(model, ref.block)
-end
-
-function _moi_model_block(model::Model{T}, ref::VariableRef) where {T<:AbstractFloat}
-    return VariableBlockRef{T}(model, ref.block)
-end
-
 function _moi_model_constraint_block(
     optimizer::Optimizer{T},
     refs::Vector{ConstraintRef},
@@ -1381,10 +1479,16 @@ function _moi_variable_primal(
     result,
     info::MOIModelConstraintInfo{T},
 ) where {T<:AbstractFloat}
+    model = optimizer.model::Model{T}
     block = info.variable_block::VariableBlockRef{T}
     if info.set_kind === :psd
         matrix = value(result, block)
-        return _moi_psd_vector_from_matrix(matrix, size(block)[1], info.scaled)
+        return _moi_psd_vector_from_matrix(
+            matrix,
+            size(block)[1],
+            info.scaled;
+            precision_bits=precision_bits(model),
+        )
     end
     return T[value(result, entry.ref) for entry in info.entries]
 end
@@ -1394,10 +1498,16 @@ function _moi_variable_dual(
     result,
     info::MOIModelConstraintInfo{T},
 ) where {T<:AbstractFloat}
+    model = optimizer.model::Model{T}
     block = info.variable_block::VariableBlockRef{T}
     if info.set_kind === :psd
         matrix = dual_slack(result, block)
-        return _moi_psd_vector_from_matrix(matrix, size(block)[1], info.scaled)
+        return _moi_psd_vector_from_matrix(
+            matrix,
+            size(block)[1],
+            info.scaled;
+            precision_bits=precision_bits(model),
+        )
     end
     return T[dual_slack(result, entry.ref) for entry in info.entries]
 end
@@ -1467,6 +1577,7 @@ end
 function _moi_primal_status(status_value, index::Int, optimizer)
     status_value in (Optimal, FeasibleCert) && return MOI.FEASIBLE_POINT
     status_value == DualInfeasible && return MOI.INFEASIBILITY_CERTIFICATE
+    status_value in (PrimalInfeasible, InfeasibleCert) && return MOI.NO_SOLUTION
     status_value == AlmostOptimal && return MOI.NEARLY_FEASIBLE_POINT
     return MOI.UNKNOWN_RESULT_STATUS
 end
@@ -1481,23 +1592,36 @@ end
 function _moi_dual_status(status_value, index::Int, optimizer)
     status_value == Optimal && return MOI.FEASIBLE_POINT
     status_value == PrimalInfeasible && return MOI.INFEASIBILITY_CERTIFICATE
+    status_value in (DualInfeasible, InfeasibleCert) && return MOI.NO_SOLUTION
     status_value == AlmostOptimal && return MOI.NEARLY_FEASIBLE_POINT
     return MOI.UNKNOWN_RESULT_STATUS
 end
 
-function MOI.get(optimizer::Optimizer, attribute::MOI.ObjectiveValue)
+function MOI.get(
+    optimizer::Optimizer{T},
+    attribute::MOI.ObjectiveValue,
+) where {T<:AbstractFloat}
     result = _moi_public_result(optimizer)
     result === nothing && throw(MOI.GetAttributeNotAllowed(attribute))
     _moi_check_public_result(optimizer, attribute)
-    _moi_result_status_value(result) == PrimalInfeasible && return NaN
+    if _moi_result_status_value(result) == PrimalInfeasible
+        model = optimizer.model::Model{T}
+        return _moi_owned(T, NaN; bits=precision_bits(model))
+    end
     return primal_objective(result)
 end
 
-function MOI.get(optimizer::Optimizer, attribute::MOI.DualObjectiveValue)
+function MOI.get(
+    optimizer::Optimizer{T},
+    attribute::MOI.DualObjectiveValue,
+) where {T<:AbstractFloat}
     result = _moi_public_result(optimizer)
     result === nothing && throw(MOI.GetAttributeNotAllowed(attribute))
     _moi_check_public_result(optimizer, attribute)
-    _moi_result_status_value(result) == DualInfeasible && return NaN
+    if _moi_result_status_value(result) == DualInfeasible
+        model = optimizer.model::Model{T}
+        return _moi_owned(T, NaN; bits=precision_bits(model))
+    end
     return dual_objective(result)
 end
 
@@ -1543,10 +1667,10 @@ function MOI.get(
 end
 
 function MOI.get(
-    optimizer::Optimizer,
+    optimizer::Optimizer{T},
     attribute::MOI.ConstraintDual,
     index::MOI.ConstraintIndex,
-)
+) where {T<:AbstractFloat}
     result = _moi_public_result(optimizer)
     result === nothing && throw(MOI.GetAttributeNotAllowed(attribute))
     _moi_check_public_result(optimizer, attribute)
@@ -1557,11 +1681,25 @@ function MOI.get(
         return _moi_variable_dual(optimizer, result, info)
     elseif info.kind === :psd
         matrix = dual(result, _moi_model_constraint_block(optimizer, info.refs))
-        return _moi_psd_vector_from_matrix(matrix, size(matrix, 1), info.scaled)
+        return _moi_psd_vector_from_matrix(
+            matrix,
+            size(matrix, 1),
+            info.scaled;
+            precision_bits=precision_bits(model),
+        )
     elseif info.kind === :interval
-        return dual(result, info.refs[1]) - dual(result, info.aux_refs[1])
+        lower_dual = dual(result, info.refs[1])
+        upper_dual = dual(result, info.aux_refs[1])
+        return _owned_arithmetic_eval(
+            T,
+            () -> lower_dual - upper_dual;
+            precision_bits=precision_bits(model),
+        )
     elseif info.kind === :free
-        return zeros(eltype(optimizer), length(info.expressions))
+        return [
+            _moi_owned(T, 0; bits=precision_bits(model))
+            for _ in info.expressions
+        ]
     elseif info.kind === :vector
         return [dual(result, ref) for ref in info.refs]
     end
@@ -1605,7 +1743,51 @@ function MOI.get(::Optimizer, ::MOI.SolverVersion)
 end
 MOI.get(optimizer::Optimizer, ::MOI.NumberOfVariables) = optimizer.num_variables
 MOI.get(optimizer::Optimizer, ::MOI.ObjectiveSense) = optimizer.sense
-MOI.set(optimizer::Optimizer, ::MOI.ObjectiveSense, sense) = (optimizer.sense = sense)
+function MOI.set(
+    optimizer::Optimizer{T},
+    ::MOI.ObjectiveSense,
+    sense::MOI.OptimizationSense,
+) where {T<:AbstractFloat}
+    sense in (MOI.MIN_SENSE, MOI.MAX_SENSE, MOI.FEASIBILITY_SENSE) ||
+        throw(ArgumentError("unsupported MOI objective sense $sense"))
+
+    model = optimizer.model
+    if model !== nothing
+        if sense === MOI.FEASIBILITY_SENSE
+            # MOI's feasibility sense removes the objective entirely.  The
+            # copied Model has no feasibility marker, so represent that state
+            # as an absent ObjectiveRecord; compilation then uses its typed
+            # zero objective while the adapter reports FEASIBILITY_SENSE.
+            model.objective = nothing
+            optimizer.objective_constant = _moi_owned(
+                T,
+                0;
+                bits=precision_bits(model),
+            )
+        elseif model.objective === nothing
+            # A copied feasibility model has no ObjectiveRecord.  MOI's
+            # default objective is the zero function, so installing that
+            # record makes a subsequent MIN/MAX setter truthful and keeps the
+            # public Model/optimizer senses aligned.
+            objective!(
+                model,
+                sense === MOI.MAX_SENSE ? Maximize() : Minimize(),
+                _constant_affine(model, zero(T)),
+            )
+        else
+            objective = model.objective
+            model.objective = ObjectiveRecord{T}(
+                sense === MOI.MAX_SENSE ? Maximize() : Minimize(),
+                objective.expression,
+            )
+        end
+        # Any installed result corresponds to the old model objective.
+        optimizer.public_result = nothing
+        optimizer.solve_time = 0.0
+    end
+    optimizer.sense = sense
+    return nothing
+end
 MOI.get(optimizer::Optimizer, ::MOI.SolveTimeSec) = optimizer.solve_time
 
 function MOI.get(optimizer::Optimizer{T}, ::MOI.ObjectiveFunctionType) where {T}
@@ -1617,9 +1799,13 @@ function MOI.get(
     ::MOI.ObjectiveFunction{MOI.ScalarAffineFunction{T}},
 ) where {T}
     model = optimizer.model
-    model === nothing && return MOI.ScalarAffineFunction{T}(MOI.ScalarAffineTerm{T}[], zero(T))
+    bits = model === nothing ?
+        (T === BigFloat ? optimizer.options.precision_bits : precision(T)) :
+        precision_bits(model)
+    owned_zero = _moi_owned(T, 0; bits=bits)
+    model === nothing && return MOI.ScalarAffineFunction{T}(MOI.ScalarAffineTerm{T}[], owned_zero)
     objective = model.objective
-    objective === nothing && return MOI.ScalarAffineFunction{T}(MOI.ScalarAffineTerm{T}[], zero(T))
+    objective === nothing && return MOI.ScalarAffineFunction{T}(MOI.ScalarAffineTerm{T}[], owned_zero)
     expression = objective.expression
     terms = MOI.ScalarAffineTerm{T}[
         MOI.ScalarAffineTerm{T}(coefficient, MOI.VariableIndex(index))

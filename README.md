@@ -4,32 +4,23 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 SDPX.jl is a native Julia solver for linear programs (LPs), second-order cone
-programs (SOCPs), and semidefinite programs (SDPs). It combines primal-dual
-interior-point methods, automatic formulation planning, sparse and structured
-linear algebra, and independent original-coordinate result certificates.
+programs (SOCPs), and semidefinite programs (SDPs). It provides typed modeling,
+automatic execution planning, extended-precision arithmetic, and independent
+certification in the model's original coordinates.
 
-The solver follows the arithmetic of its inputs. It supports `Float64`,
-fixed-width `MultiFloats` types, and `BigFloat`, making it suitable
-for bootstrap and other ill-conditioned conic models that need more precision
-than `Float64` provides.
+> **Status:** experimental, pre-1.0. Public interfaces may change between
+> minor versions; consult [CHANGELOG.md](CHANGELOG.md) when upgrading.
 
-> **Status: experimental, pre-1.0.** Public interfaces may change between
-> minor versions. See [CHANGELOG.md](CHANGELOG.md) when upgrading.
+## Features
 
-## Highlights
-
-- Native LP, Lorentz-cone SOCP, and block-SDP execution.
-- NativeSOC primal-dual IPM with a verified fixed-trace Q3 specialization.
-- Dense normal equations, dense augmented KKT, sparse LP, and sparse Schur
-  formulations selected before numerical execution.
-- Optional MFLA and BFLA providers for extended and arbitrary precision.
-- JuMP/MathOptInterface, Convex.jl, raw-array, typed-problem, and command-line
-  frontends.
-- Presolve, scaling, diagnostics, performance traces, and certificates in the
-  model's original coordinates.
-
-Unsupported arithmetic, provider, storage, and formulation combinations fail
-during planning instead of silently switching algorithms.
+- One typed public modeling route for LP, native Lorentz/rotated-Lorentz SOCP,
+  and block SDP models.
+- `Float64`, optional fixed-width `MultiFloats`, and `BigFloat` arithmetic.
+- Dense and sparse execution plans selected before numerical execution.
+- Original-coordinate primal/dual residuals and result certificates.
+- MathOptInterface/JuMP and command-line integration.
+- Unsupported mixed cone families and provider/formulation combinations fail
+  during planning instead of silently changing algorithms.
 
 ## Installation
 
@@ -40,137 +31,123 @@ using Pkg
 Pkg.add(url="https://github.com/yongjunx23-del/SDPX.jl")
 ```
 
-For a local checkout, use `Pkg.develop(path=".")`. Optional frontends and
-linear-algebra providers load through Julia package extensions when their
-packages are installed.
+For a local checkout:
+
+```julia
+using Pkg
+Pkg.develop(path=".")
+Pkg.instantiate()
+```
+
+SDPX requires Julia 1.10 or newer.
 
 ## Quick start
-
-The native SDP model is
-
-\[
-\min_x c^T x
-\quad\text{subject to}\quad
-\sum_i x_i A_i^{(l)}-C^{(l)}\succeq0,
-\qquad B^T x=b.
-\]
 
 ```julia
 using SDPX
 
-# Minimise cᵀx subject to Σᵢ xᵢAᵢ − C ⪰ 0.
-A = zeros(2, 2, 2)
-A[1, 1, 1] = 1
-A[2, 2, 2] = 1
-C = [0.0 1.0; 1.0 0.0]
-c = [2.0, 3.0]
+model = Model(Float64)
+x = variable!(model, :x, 2; domain=Nonnegative())
+constraint!(model, :mass, x[1] + x[2] - 1, ZeroCone())
+objective!(model, Minimize(), 2 * x[1] + 3 * x[2])
 
-result = solve(
-    c,
-    [A],
-    [C],
-    Matrix{Float64}(undef, 2, 0),
-    Float64[];
+settings = Settings(
+    model;
+    algorithm=:lp,
+    limits=Limits(iterations=200, time=60.0, threads=1),
     verbosity=0,
 )
+outputs = Outputs(
+    :all,
+    :all,
+    :all;
+    objectives=true,
+    certificate=:summary,
+)
+result = optimize!(model; settings=settings, outputs=outputs)
 
-result.status       # Optimal
-result.pObj         # 4.898979506633980 (exactly 2√6)
-result.termination  # stopping reason and executed-plan diagnostics
+status(result)             # :optimal
+value(result, x)           # approximately [1, 0]
+primal_objective(result)   # approximately 2
+certificate(result).valid  # true
 ```
 
-Call `ingest` once and reuse the resulting typed `SDPProblem` or
-`PreparedSolver` for repeated solves. Runnable LP, SOCP, SDP, extended-
-precision, JuMP, and certificate examples live in [`examples/`](examples/).
+Use one non-free cone family per model. `Nonnegative`/`Nonpositive` select the
+LP route, `LorentzCone`/`RotatedLorentzCone` select NativeSOC, and `PSDCone`
+selects the SDP route. `Reals` and `ZeroCone` may be used as auxiliary blocks.
 
-## LP and SOCP
+## Examples
 
-Use `linear_program` or `solve_lp` for scalar inequalities without creating
-`1×1` PSD blocks:
+The tested examples are:
 
-```julia
-problem = linear_program(c, G, h; Aeq=Aeq, beq=beq, sparse=:auto)
-result = solve(problem; tolerance=1e-8, verbosity=0)
+- [Moment LP](examples/moment_lp.jl)
+- [L2 integral SOCP](examples/l2_integral_socp.jl)
+- [Quartic integral SDP](examples/quartic_integral_sdp.jl)
+
+Run them from the repository root after instantiating the examples environment:
+
+```bash
+julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+julia --project=examples examples/moment_lp.jl 17
+julia --project=examples examples/l2_integral_socp.jl 16
+julia --project=examples examples/quartic_integral_sdp.jl --order 8
 ```
 
-Use `second_order_program` or `solve_socp` for Lorentz cones. NativeSOC solves
-general-dimensional cones directly. Eligible fixed-trace `2×2` PSD blocks are
-compiled to Q3 coordinates and solved by the same primal-dual IPM, without a
-production PSD lift. See [the SOCP guide](docs/src/socp.md).
+## Precision
 
-## Precision and providers
-
-| Arithmetic | Typical use |
-| --- | --- |
-| `Float64` | Well-scaled baseline problems |
-| `MultiFloats.Float64x2` / `Float64x4` | Fast fixed-width extra precision |
-| `BigFloat` | Arbitrary precision and difficult exponent ranges |
-
-Construct every `BigFloat` coefficient inside the intended precision scope:
+Create `BigFloat` data inside the intended precision scope; increasing the
+solver precision after coefficients have already been rounded cannot recover
+lost digits.
 
 ```julia
 setprecision(BigFloat, 256) do
-    c = BigFloat[1, 2]
-    # Construct the remaining model data here too.
+    model = Model(BigFloat; precision_bits=256)
+    # Construct variables, coefficients, and constants here.
 end
 ```
 
-Increasing `precision_bits` after coefficients were rounded cannot recover
-lost digits. SDPX validates precision and mutable-scalar ownership at provider
-boundaries. See [precision](docs/src/precision.md) and
-[linear-algebra providers](docs/src/providers.md).
+Optional linear-algebra providers load through Julia package extensions. See
+[Precision](docs/src/precision.md) and [Providers](docs/src/providers.md).
 
-## Frontends and command line
+## JuMP and command line
 
-`SDPX.Optimizer` is a non-incremental MathOptInterface optimizer. It supports
-JuMP affine equalities, scalar and vector linear cones, PSD triangle
-constraints, standard second-order cones, and rotated second-order cones.
-Rotated cones use an exact sparse linear map into NativeSOC; MOI primal and
-dual getters map the result back to rotated coordinates. Convex.jl support is
-available through the optional `SDPX.solve_convex!` extension.
+`SDPX.Optimizer` is a non-incremental MathOptInterface optimizer:
 
-The SDPB-style command-line frontend uses the same planning and certification
-pipeline:
+```julia
+using JuMP, SDPX
+model = JuMP.Model(() -> SDPX.Optimizer(sparse=:auto, verbosity=0))
+```
+
+For the JSON command-line bridge:
 
 ```bash
 julia bin/setup_cli.jl
-./bin/sdpx problem.json result.json --precision=840
+./bin/sdpx problem.json result.json
 ```
 
-See [JuMP/MOI](docs/src/jump.md), [Convex.jl](docs/src/convex.md), and the
-[CLI guide](docs/src/cli.md).
+See the [JuMP/MOI](docs/src/jump.md), [CLI](docs/src/cli.md), and
+[API](docs/src/api.md) documentation.
 
-## Documentation and development
-
-The [Documenter manual](https://yongjunx23-del.github.io/SDPX.jl/) covers the
-automatic pipeline, preprocessing, sparse execution, parameters, diagnostics,
-certificates, providers, and benchmark policy. Operational and research notes
-remain in [`docs/`](docs/).
-
-Run the package tests with:
+## Tests and benchmarks
 
 ```julia
 using Pkg
 Pkg.test()
 ```
 
-Provider integrations and expensive numerical campaigns have separate test
-profiles; see [CONTRIBUTING.md](CONTRIBUTING.md) and
-[benchmark/README.md](benchmark/README.md). Performance claims must identify
-the model, arithmetic, tolerance, hardware, thread configuration, timing
-boundary, and certificate result.
+The deterministic benchmark smoke suite is:
+
+```bash
+julia --project=. benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+```
+
+Larger campaigns require validated external inputs. See
+[CONTRIBUTING.md](CONTRIBUTING.md) and [benchmark/README.md](benchmark/README.md).
 
 ## Citation and license
 
-If you use SDPX.jl in academic work, cite:
-
-```text
-Yongjun Xu, "SDPX.jl: a native Julia solver for high-precision conic
-optimization", version 0.5.0-DEV, https://github.com/yongjunx23-del/SDPX.jl
-```
-
-Machine-readable metadata is in [CITATION.cff](CITATION.cff). SDPX began as a
-fork of [SDPJSolver.jl](https://github.com/FishboneChiang/SDPJSolver.jl);
-copyright, derived components, acknowledgements, and third-party notices are
-recorded in [LICENSE](LICENSE), [CONTRIBUTORS.md](CONTRIBUTORS.md), and
+Citation metadata is in [CITATION.cff](CITATION.cff). SDPX derives from
+[SDPJSolver.jl](https://github.com/FishboneChiang/SDPJSolver.jl); copyright,
+contributors, and derived-component notices are recorded in
+[LICENSE](LICENSE), [CONTRIBUTORS.md](CONTRIBUTORS.md), and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

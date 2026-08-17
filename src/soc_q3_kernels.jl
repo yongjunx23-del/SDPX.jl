@@ -18,12 +18,6 @@ code works for `Float64`, `BigFloat`, and the package's extended scalar types.
 @inline _q3_owned_scalar(value) = value
 @inline _q3_owned_scalar(value::BigFloat) = deepcopy(value)
 
-"""Check that a Q3 coordinate container has at least its three coordinates."""
-@inline function _q3_require_coords(v)
-    length(v) >= 3 || throw(DimensionMismatch("Q3 coordinates must have length 3"))
-    return nothing
-end
-
 @inline function _q3_coordinate_values(v)
     length(v) in (2, 3) ||
         throw(DimensionMismatch("Q3 coordinates must have length 2 or 3"))
@@ -176,16 +170,6 @@ const _q3_min_eigenvalue = _q3_margin
     return first > z && first * first - second * second - third * third > z
 end
 
-@inline function _q3_trial_is_psd(coordinates, alpha, direction)
-    s0, s1, s2 = _q3_coordinate_values(coordinates)
-    d0, d1, d2 = _q3_coordinate_values(direction)
-    first = s0 + alpha * d0
-    second = s1 + alpha * d1
-    third = s2 + alpha * d2
-    z = zero(first)
-    return first >= z && first * first - second * second - third * third >= z
-end
-
 @inline function _q3_consider_boundary(root, candidate, zero_value)
     return candidate > zero_value && candidate <= root ? candidate : root
 end
@@ -306,10 +290,6 @@ const _q3_dot = _q3_frobenius_dot
 const _q3_frob_dot = _q3_frobenius_dot
 const _q3_inner = _q3_frobenius_dot
 
-@inline function _q3_vector_components(coordinates)
-    return _q3_coordinate_values(coordinates)
-end
-
 @inline function _q3_matrix_components(matrix::AbstractMatrix)
     _q3_require_matrix(matrix)
     return matrix[1, 1], matrix[1, 2], matrix[2, 1], matrix[2, 2]
@@ -365,18 +345,6 @@ function _q3_product_full4!(destination::AbstractMatrix, left, right)
     destination[1, 2] = a11 * b12 + a12 * b22
     destination[2, 1] = a21 * b11 + a22 * b21
     destination[2, 2] = a21 * b12 + a22 * b22
-    return destination
-end
-
-function _q3_product_full4(left, right)
-    a11, a12, a21, a22 = _q3_full_components(left)
-    b11, b12, b21, b22 = _q3_full_components(right)
-    T = promote_type(typeof(a11), typeof(b11))
-    destination = Vector{T}(undef, 4)
-    destination[1] = a11 * b11 + a12 * b21
-    destination[2] = a11 * b12 + a12 * b22
-    destination[3] = a21 * b11 + a22 * b21
-    destination[4] = a21 * b12 + a22 * b22
     return destination
 end
 
@@ -578,14 +546,6 @@ function _q3_predictor_rhs_contraction!(destination::AbstractMatrix, x, p, y, re
     destination[1, 2] = q12
     destination[2, 1] = q21
     destination[2, 2] = q22
-    return destination
-end
-
-function _q3_predictor_rhs_contraction(x, p, y, residual)
-    values = _q3_predictor_components(x, p, y, residual)
-    T = typeof(values[1])
-    destination = Vector{T}(undef, 4)
-    destination[1], destination[2], destination[3], destination[4] = values
     return destination
 end
 

@@ -76,8 +76,6 @@ function contiguous_partition(item_count::Int, nbins::Int)
     return bins
 end
 
-block_weight(k::Int, m::Int) = Float64(k)^3 + Float64(m) * Float64(k)^2 / 2
-
 """
     _dense_schur_threading_profitable(T, m, block_dimensions)
 

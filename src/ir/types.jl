@@ -80,14 +80,6 @@ _domain_cone(::LorentzCone) = :soc
 _domain_cone(::RotatedLorentzCone) = :rsoc
 _domain_cone(::PSDCone) = :psd
 
-_cone_domain(::Val{:free}) = Reals()
-_cone_domain(::Val{:nonnegative}) = Nonnegative()
-_cone_domain(::Val{:nonpositive}) = Nonpositive()
-_cone_domain(::Val{:zero}) = ZeroCone()
-_cone_domain(::Val{:soc}) = LorentzCone()
-_cone_domain(::Val{:rsoc}) = RotatedLorentzCone()
-_cone_domain(::Val{:psd}) = PSDCone()
-
 """
     SDPX.NativeBlock
 

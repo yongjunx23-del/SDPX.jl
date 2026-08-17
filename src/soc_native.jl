@@ -2718,6 +2718,7 @@ Base.@noinline function _solve_native_soc_core(
     status = NotStarted
     message = ""
     iterations = 0
+    numeric_factorizations = 0
     phase_scaling = 0.0
     phase_assembly = 0.0
     phase_factor = 0.0
@@ -2832,6 +2833,7 @@ Base.@noinline function _solve_native_soc_core(
         # the next assembly overwrites that storage.
         factor = nothing
         factor_started = time_ns()
+        numeric_factorizations += 1
         factor = _native_soc_assemble_factor!(workspace, problem)
         factor_elapsed = (time_ns() - factor_started) / 1.0e9
         phase_factor += factor_elapsed
@@ -2992,7 +2994,7 @@ Base.@noinline function _solve_native_soc_core(
         fixed_residual_blocks=workspace.fixed_residual_blocks,
         fixed_rhs_contractions=workspace.fixed_rhs_contractions,
         fixed_direction_recoveries=workspace.fixed_direction_recoveries,
-        numeric_factorizations=iterations + (status === Optimal ? 0 : 1),
+        numeric_factorizations=numeric_factorizations,
         refinement_solves=0,
         initialization=initialization,
     ))

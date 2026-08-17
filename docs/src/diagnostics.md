@@ -1,64 +1,71 @@
 # Diagnostics and certificates
 
-`SDPResult` contains the terminal status, primal and dual solutions,
-objectives, residuals, iteration counts, timings, and adaptive-parameter
-history. `solve_summary` assembles the public information contract into one
-named tuple.
+`optimize!` returns the single typed v0.5 result. Terminal state and the
+compact original-coordinate certificate are always available through public
+accessors:
 
 ```julia
-summary = solve_summary(problem, result, options)
-summary.status
-summary.objective_value
-summary.primal_residual
-summary.dual_residual
-summary.relative_gap
-summary.certificate.valid
-summary.warnings
+result = optimize!(model; settings=settings, outputs=outputs)
+status(result)
+
+cert = certificate(result)
+cert.available
+cert.valid
+cert.reason
+cert.primal_objective
+cert.dual_objective
+cert.primal_residual
+cert.dual_residual
+cert.relative_gap
 ```
 
-`result_certificate` recomputes objectives, affine residuals, componentwise
-backward errors, complementarity, and PSD checks in the original coordinates.
-An authoritative solver status is downgraded when this independent check
-fails. The certificate is also the boundary used by benchmark harnesses:
-`result.termination.executed` records what actually ran (backend,
-formulation, provider, fallback reason), so an automatic decision is
-inspectable after the fact.
+An optimal core status is exposed as `:optimal` only when the independent
+original-coordinate certificate is valid. The certificate checks affine
+equations, cone membership, dual stationarity, objectives, and gap after all
+presolve, scaling, and reconstruction maps have been undone. Non-finite or
+uncertified results fail closed rather than acquiring an optimal public
+status.
 
-For a failed optimize-mode run, `infeasibility_diagnosis` checks normalized
-homogeneous rays:
+A stopped solve keeps its non-optimal core status. Absence of an optimal
+certificate is never interpreted as feasibility or infeasibility.
+
+## Retention policy
+
+`Outputs` controls the potentially large result payloads. Requested primal,
+constraint-dual, and dual-slack entries are read with `value`, `dual`, and
+`dual_slack`. Objectives use `primal_objective` and `dual_objective`. Accessing
+a payload that was not retained raises `ResultFieldNotRetained` instead of
+re-solving or returning a placeholder.
+
+Retention applies to the returned `Result`; it does not shrink the numerical
+workspace used during the solve. Iteration history is route-dependent and may
+be empty even when retained if the selected core does not publish iteration
+records.
 
 ```julia
-ray = SDPX.infeasibility_diagnosis(problem, result, options)
-ray.kind
-ray.primal_infeasibility
-ray.dual_infeasibility
+outputs = Outputs(
+    :all,
+    :all,
+    :all;
+    objectives=true,
+    certificate=:summary,
+    diagnostics=:full,
+    history=true,
+    trace=true,
+)
 ```
 
-`kind=:primal_infeasible` means the returned dual direction passed PSD,
-homogeneous stationarity, and positive contradiction-margin checks.
-`kind=:dual_infeasible_or_primal_unbounded` means the returned primal
-direction passed homogeneous equality, PSD, and negative objective checks.
-`kind=:undetermined` is not a feasibility claim.
+## Execution provenance
 
-An eligible failed solve is promoted to `PrimalInfeasible` or
-`DualInfeasible` only when the corresponding ray passes the independent
-check. The normalized ray is returned in the relevant primal or dual fields,
-`result_certificate` verifies it again, and the MathOptInterface wrapper
-reports `INFEASIBLE` or `DUAL_INFEASIBLE` with `INFEASIBILITY_CERTIFICATE` on
-the certificate side.
+`execution_plan(result)` returns the immutable route/formulation/provider plan
+used by the solve. When diagnostics were retained, `diagnostics(result)` adds
+classification, presolve facts, planned-versus-executed algorithms, workspace
+and memory estimates, phase timings, warnings, and fallback provenance.
+`iteration_history(result)` and `performance_trace(result)` return their
+retained payloads.
 
-The current Newton iteration still does not carry homogeneous self-dual
-embedding variables `τ` and `κ`. Its formal certificate generator is recorded
-as `:direct_primal_dual`; this makes the present guarantee precise while
-leaving a compatible boundary for an HSD generator that can find certificates
-more reliably. Eligible stopped solves attach the report at
-`result.termination.infeasibility_diagnosis` even when verbose diagnostics are
-disabled, because the report justifies the terminal status itself.
-
-## Diagnostics layout
-
-`result.diagnostics` adds classification, presolve summary, execution plan,
-selected algorithms, workspace/memory estimates, phase timings, and warnings.
-`result.termination` records planned-versus-executed KKT/LA state and
-refinement details. The [architecture page](architecture.md) describes the
-planning invariants; [parameters](parameters.md) lists the controls.
+Automatic BigFloat precision staging is one predeclared same-route ladder, not
+an alternate cone formulation. Full diagnostics retain its executed rungs and
+each rung's child execution plan. See [architecture](architecture.md),
+[parameters](parameters.md), and [precision](precision.md) for the planning and
+arithmetic invariants.

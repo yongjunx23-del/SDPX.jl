@@ -47,8 +47,43 @@ function _entry_affine(entry::VariableEntry{T}) where {T<:AbstractFloat}
     )
 end
 
-function _affine_model(expression::ScalarAffine)
-    return expression.model
+"""Return a fully model-owned copy of one scalar affine expression.
+
+`ScalarAffine` is immutable only at the outer struct level: its index and
+coefficient vectors (and, for `BigFloat`, each coefficient object) remain
+mutable.  Registration therefore cannot retain an expression supplied by a
+caller, even when it already has the right model identity.  Copy every
+mutable component through the model's owned-arithmetic boundary so BigFloat
+values are rounded at the model precision rather than the ambient scope.
+"""
+function _owned_affine_copy(
+    model::Model{T},
+    expression::ScalarAffine{T},
+) where {T<:AbstractFloat}
+    expression.model == model_identity(model) || throw(ArgumentError(
+        "affine expression belongs to a different model",
+    ))
+    expression.precision_bits == precision_bits(model) || throw(ArgumentError(
+        "affine expression precision does not match model precision",
+    ))
+    length(expression.indices) == length(expression.coefficients) ||
+        throw(DimensionMismatch("affine indices and coefficients must have equal length"))
+
+    bits = precision_bits(model)
+    indices = copy(expression.indices)
+    coefficients = owned_vector_copy(
+        T,
+        expression.coefficients;
+        precision_bits=bits,
+    )
+    constant = owned_arithmetic_copy(T, expression.constant; precision_bits=bits)
+    return ScalarAffine{T}(
+        model_identity(model),
+        bits,
+        indices,
+        coefficients,
+        constant,
+    )
 end
 
 function _require_same_affine_model(left::ScalarAffine, right::ScalarAffine)
@@ -59,60 +94,6 @@ function _require_same_affine_model(left::ScalarAffine, right::ScalarAffine)
         "cannot combine affine expressions with different precision ownership",
     ))
     return nothing
-end
-
-function _canonical_affine(
-    model::Model{T},
-    indices::Vector{Int},
-    coefficients::Vector{T},
-    constant::T,
-) where {T<:AbstractFloat}
-    length(indices) == length(coefficients) || throw(DimensionMismatch(
-        "affine indices and coefficients must have equal length",
-    ))
-    permutation = sortperm(indices)
-    merged_indices = Int[]
-    merged_coefficients = T[]
-    for position in permutation
-        index = indices[position]
-        1 <= index <= num_variables(model) || throw(ArgumentError(
-            "affine variable index $index is outside this model",
-        ))
-        coefficient = coefficients[position]
-        isfinite(coefficient) || throw(ArgumentError("affine coefficient is NaN or Inf"))
-        if !isempty(merged_indices) && merged_indices[end] == index
-            merged_coefficients[end] = _owned_affine_eval(
-                T,
-                precision_bits(model),
-                () -> merged_coefficients[end] + coefficient,
-            )
-            iszero(merged_coefficients[end]) && begin
-                pop!(merged_indices)
-                pop!(merged_coefficients)
-            end
-        elseif !iszero(coefficient)
-            push!(merged_indices, index)
-            push!(merged_coefficients, coefficient)
-        end
-    end
-    isfinite(constant) || throw(ArgumentError("affine constant is NaN or Inf"))
-    return ScalarAffine{T}(
-        model_identity(model),
-        precision_bits(model),
-        merged_indices,
-        merged_coefficients,
-        constant,
-    )
-end
-
-function _model_for_affine(expression::ScalarAffine{T}, candidates...) where {T}
-    for candidate in candidates
-        if candidate isa VariableEntry{T} &&
-           model_identity(candidate.model) == expression.model
-            return candidate.model
-        end
-    end
-    throw(ArgumentError("the affine expression is not attached to the supplied model"))
 end
 
 Base.convert(::Type{ScalarAffine{T}}, entry::VariableEntry{T}) where {T} =
@@ -242,15 +223,6 @@ Base.:+(constant::Number, entry::VariableEntry) = entry + constant
 Base.:-(entry::VariableEntry, constant::Number) = _entry_affine(entry) - constant
 Base.:-(constant::Number, entry::VariableEntry) = constant - _entry_affine(entry)
 
-function _sum_affines(expressions::AbstractVector{<:ScalarAffine{T}}) where {T}
-    isempty(expressions) && throw(ArgumentError("cannot infer a model from an empty affine sum"))
-    result = expressions[1]
-    @inbounds for index in 2:length(expressions)
-        result = result + expressions[index]
-    end
-    return result
-end
-
 function Base.:*(matrix::AbstractMatrix, block::VariableBlockRef{T}) where {T}
     record = _variable_record(block)
     record.domain isa PSDCone && throw(ArgumentError("A*X is not a scalar-affine PSD operation"))
@@ -313,10 +285,7 @@ end
 
 @inline function _as_affine(model::Model{T}, value) where {T<:AbstractFloat}
     if value isa ScalarAffine{T}
-        value.model == model_identity(model) || throw(ArgumentError(
-            "affine expression belongs to a different model",
-        ))
-        return value
+        return _owned_affine_copy(model, value)
     elseif value isa VariableEntry{T}
         value.model === model || throw(ArgumentError("variable belongs to a different model"))
         return _entry_affine(value)

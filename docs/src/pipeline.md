@@ -1,7 +1,7 @@
 # Automatic pipeline
 
-Every `solve` and `solve!` call builds an inspectable `ExecutionPlan`. The
-pipeline performs:
+Every public `optimize!` call compiles one typed model and builds an
+inspectable `ExecutionPlan`. The pipeline performs:
 
 1. cone, storage, arithmetic, and size classification;
 2. rank-revealing equality presolve with a consistency check and dual
@@ -13,14 +13,12 @@ pipeline performs:
 6. guarded adaptive interior-point parameter control with a fixed fallback;
 7. phase timing, workspace estimation, warnings, and result reconstruction.
 
-Pure `1×1` cone models are solved by a dedicated scalar Mehrotra
-predictor-corrector LP engine. Standard scalar inequalities supplied through
-JuMP/MOI are converted directly to that representation. Compact `ConicProblem`
-and pure-SOC JuMP/MOI models use NativeSOC in original Lorentz coordinates;
-general Lorentz blocks use the Nesterov--Todd path, while exactly certified
-fixed-trace Q3 cells use the compact HKM specialization (see
-[socp.md](socp.md)). Explicit SDP-shaped lift inputs remain supported by the
-SDP engine, whose Float64 numerical path is unchanged.
+Pure scalar-cone models are lowered once to the dedicated Mehrotra LP engine.
+Pure SOC/RSOC models use NativeSOC in original Lorentz coordinates; general
+Lorentz blocks use the Nesterov--Todd path, while exactly certified fixed-trace
+Q3 cells use the compact HKM specialization (see [socp.md](socp.md)). Pure PSD
+models use the SDP engine. Mixed cone families fail during classification;
+there is no production SOC-to-PSD lift or model retry.
 
 ## Presolve
 
@@ -155,39 +153,21 @@ backtracking contraction, and the refinement target/cap. The complete fixed
 predictor/corrector path is restored after non-finite diagnostics,
 rank-revealing equality factorization, or unstable progress.
 
-Every accepted iteration is stored in `result.parameter_history`, including
-`sigma`, `mu`, `mu_aff`, affine and accepted steps, the separate step
-safeguards, residual progress, factor/PSD-margin proxies, regularization,
-refinement, and fallback provenance. See
+When history retention is enabled, `iteration_history(result)` contains every
+accepted iteration, including `sigma`, `mu`, `mu_aff`, affine and accepted
+steps, the separate step safeguards, residual progress, factor/PSD-margin
+proxies, regularization, refinement, and fallback provenance. See
 [Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md) for
 the audit, equations, exact bounds, and arithmetic-specific behavior.
 
-## Result and optional spectrum
+## Result and diagnostics
 
-`SDPResult` contains status, objectives, residuals, iteration counts, phase
-timings, and parameter history. `result.diagnostics` adds the classification,
-execution plan, presolve summary, analytical workspace estimate, process peak
-RSS, selected algorithms, and warnings.
-`result.termination.total_refinement_steps` records accepted refinement
-corrections across the complete SDP solve.
-
-Spectrum reconstruction is intentionally post-solve:
-
-```julia
-records = reconstruct_spectrum(result; source=:primal)
-export_spectrum("spectrum.csv", result)
-export_spectrum("spectrum.json", result)
-
-using JLD2
-export_spectrum("spectrum.jld2", result)
-```
-
-The JLD2 file contains a top-level dataset named `spectrum`, with a versioned
-payload: `format_version` (currently `1`), solve-wide `metadata`, and
-per-block eigenvalue `records`. Generic extended-precision matrices are
-projected to Float64 only for this optional eigenvalue post-processing because
-Julia's standard library does not provide a generic symmetric eigensolver for
-every scalar type.
+The public result exposes terminal status, objectives, certificate residuals,
+the immutable execution plan, and retained primal/dual data through the v0.5
+accessors. Full diagnostics add classification, presolve facts, analytical
+workspace estimates, process peak RSS, selected algorithms, timings, warnings,
+and refinement/fallback provenance. See [diagnostics](diagnostics.md) for the
+retention and accessor contract.
 
 ## Remaining bottlenecks
 

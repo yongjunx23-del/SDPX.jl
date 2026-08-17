@@ -1636,35 +1636,6 @@ storage_symbol(plan::KKTStoragePlan) = plan.storage
     return value
 end
 
-"""Simple, explainable storage policy used before symbolic fill is known."""
-function plan_kkt_storage(
-    requested::Union{Bool,Symbol};
-    dimension::Integer=0,
-    input_nnz::Integer=0,
-    sparse_threshold::Float64=0.20,
-)
-    policy = requested isa Bool ? (requested ? :sparse : :dense) : requested
-    policy in (:auto, :dense, :sparse) || throw(ArgumentError(
-        "storage policy must be :auto, :dense, or :sparse",
-    ))
-    dim = Int(dimension)
-    nnz_value = Int(input_nnz)
-    density = nnz_value / max(dim * dim, 1)
-    if policy === :dense
-        return KKTStoragePlan(:dense; dimension=dim, input_nnz=nnz_value,
-                              density=density, reason=:explicit_dense,
-                              requested=:dense)
-    elseif policy === :sparse
-        return KKTStoragePlan(:sparse; dimension=dim, input_nnz=nnz_value,
-                              density=density, reason=:explicit_sparse,
-                              requested=:sparse)
-    end
-    selected = density <= sparse_threshold ? :sparse : :dense
-    return KKTStoragePlan(selected; dimension=dim, input_nnz=nnz_value,
-                          density=density, reason=:static_density,
-                          requested=:auto)
-end
-
 """Typed mathematical KKT formulation, independent of its implementation."""
 abstract type AbstractKKTFormulation end
 

@@ -863,9 +863,6 @@ function _equality_pattern_summary(prob::SDPProblem, equality::Int)
     )
 end
 
-_equality_pattern_hash(prob::SDPProblem, equality::Int) =
-    _equality_pattern_summary(prob, equality).signature
-
 @inline function _saturating_u128_add(left::UInt128, right::UInt128)
     return right > typemax(UInt128) - left ? typemax(UInt128) : left + right
 end

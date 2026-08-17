@@ -65,23 +65,6 @@ function _public_validate_algorithm(route::NativeConeRoute, settings::Settings)
     return nothing
 end
 
-@inline function _public_has_warm_start(model::Model)
-    any(record -> record.primal_start !== nothing ||
-                  record.dual_slack_start !== nothing,
-        model.variable_blocks) ||
-    any(record -> record.dual_start !== nothing, model.constraint_blocks)
-end
-
-"""Fail closed only for starts that the selected core cannot represent.
-
-The route-specific adapters map all supported native coordinates exactly and
-raise typed errors for omitted free coordinates or incomplete vectors.
-"""
-function _public_validate_warm_starts(model::Model, route::NativeConeRoute)
-    !_public_has_warm_start(model) && return nothing
-    return nothing
-end
-
 @inline function _public_start_copy(::Type{T}, values, bits::Int) where {T<:AbstractFloat}
     destination = Vector{T}(undef, length(values))
     @inbounds for index in eachindex(destination)
@@ -1320,7 +1303,6 @@ function _optimize_impl(
     program = compile_product_cone_model(model)
     route = classify_native_cone_program(program)
     _public_validate_algorithm(route, resolved_settings)
-    _public_validate_warm_starts(model, route)
     lowering = _public_lower_native(program, route, resolved_settings)
     return _public_result_from_lowering(
         model,

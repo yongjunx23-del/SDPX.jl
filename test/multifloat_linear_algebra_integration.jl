@@ -3,8 +3,8 @@
 
     These tests are NOT part of the ordinary Pkg.test target: the MFLA
     package is unregistered and must be developed into an independent
-    provider environment.  `scripts/dev_v05_provider_smoke.sh` includes this
-    file with MultiFloatLinearAlgebra already loaded.
+    provider environment. Provider CI runs this file after loading
+    MultiFloatLinearAlgebra.
 =#
 using SDPX
 using Test

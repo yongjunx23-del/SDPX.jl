@@ -60,5 +60,5 @@ Temporary files live in `$TemporaryDirectory` under unique names and are
 deleted on every path unless `"KeepFiles" -> True`.
 
 See [`examples/SDPXExample.nb`](examples/SDPXExample.nb) for a worked
-notebook, and `examples/06_cli_bridge.jl` in the repository root for the
-same round trip driven from Julia (that one runs in CI).
+notebook. The same JSON round trip is covered by
+[`test/cli_bridge.jl`](../test/cli_bridge.jl) in CI.

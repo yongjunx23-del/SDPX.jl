@@ -424,7 +424,24 @@ function _result_packed_matrix(
     @inbounds for column in 1:n
         for row in column:n
             value = values[position]
-            scale_dual_offdiagonals && row != column && (value /= T(2))
+            if scale_dual_offdiagonals && row != column
+                if T === BigFloat
+                    # BigFloat division rounds at the ambient precision.  A
+                    # result may be read after that scope has been lowered
+                    # (for example, a 256-bit result under a 64-bit caller
+                    # scope), so recover the precision owned by this stored
+                    # value and perform both construction of 2 and division
+                    # inside that explicit precision scope.
+                    bits = precision(value)
+                    value = _owned_arithmetic_eval(
+                        BigFloat,
+                        () -> value / BigFloat(2; precision=bits);
+                        precision_bits=bits,
+                    )
+                else
+                    value /= T(2)
+                end
+            end
             matrix[row, column] = value
             matrix[column, row] = value
             position += 1

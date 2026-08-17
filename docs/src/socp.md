@@ -195,13 +195,12 @@ copies. Model coefficients are never installed by reference into scratch
 storage. MFLA/BFLA factor handles retain provider state and configured
 precision.
 
-`ConicResult` stores primal slacks, cone duals, and equality multipliers in the
-coordinates of its native `ConicProblem`. For MOI rotated cones those native
-coordinates are the exact canonical Lorentz image; MOI getters return the
-original rotated coordinates. Timings, termination counters, and diagnostics
-come directly from the NativeSOC run; no PSD `SDPResult` is stored.
-Test/reference PSD helpers keep their own `SDPResult` apart from the
-`ConicResult`. Certification independently recomputes affine/equality
+The public `Result` reconstructs primal slacks, cone duals, and equality
+multipliers in the original model coordinates. For MOI rotated cones the core
+uses the exact canonical Lorentz image and getters return the original rotated
+coordinates. Timings, termination counters, and diagnostics come directly
+from the NativeSOC run; no hidden PSD solve or result is stored. Certification
+independently recomputes affine/equality
 residuals, stationarity, primal and dual Lorentz margins, objectives, gap,
 and complementarity. Pure-SOC MOI input stays native; mixed PSD+SOC input
 fails clearly before any numerical route is selected.

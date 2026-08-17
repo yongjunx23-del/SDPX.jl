@@ -91,25 +91,16 @@ downgrades an otherwise authoritative solver status.
 Typical callers can leave preprocessing at its defaults:
 
 ```julia
-result = solve(
-    problem;
+settings = Settings{Float64}(
     presolve=:auto,
     scaling=:auto,
 )
+result = optimize!(model; settings=settings)
 ```
 
-The structural controls are:
-
-```julia
-presolve = :auto                # :auto, :on, :off, true, or false
-presolve_bounds = true
-presolve_fixed_variables = true
-presolve_zero_constraints = true
-presolve_duplicate_constraints = true
-presolve_dependent_equalities = true
-scaling = :auto                 # :auto, :none, or :equilibrate
-formulation = :auto             # :auto, :primal, :normal_equations, or :augmented
-```
+The public structural controls are `presolve=:auto|:on|:off` and
+`scaling=:auto|:none|:equilibrate`. Detailed cleanup stages are one atomic
+presolve pipeline rather than separate public toggles.
 
 Exact zero, duplicate, and proportional equalities are always verified in the
 problem arithmetic before they are removed. Near-proportional detection is a
@@ -119,7 +110,7 @@ large dense system would exceed that budget, SDPX records an explicit warning
 and skips only the approximate diagnostic; exact cleanup and the subsequent
 target-arithmetic rank presolve remain enabled.
 
-Use `result.diagnostics.presolve.preprocessing` to inspect stage timings,
+Use `diagnostics(result).presolve.preprocessing` to inspect stage timings,
 allocations, dimension changes, bound counts, equality cleanup, formulation
 costs, chordal estimates, and warnings.
 

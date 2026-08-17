@@ -1,11 +1,8 @@
-# Sparse LP policy and provider-neutral refinement helpers.
+# Sparse LP policy and backend selection helpers.
 #
 # Numeric sparse factors live in `sparse_la.jl`; this file deliberately has no
 # legacy sparse LDL/Cholesky backend.  Sparse execution is the Round-6/7
 # frozen-CSC provider seam only.
-
-pattern_fingerprint(A::SparseMatrixCSC) =
-    hash(A.colptr, hash(A.rowval, hash(size(A))))
 
 """The provider-neutral sparse layer supports Float64 through CHOLMOD."""
 supports_sparse_backend(::Type{Float64}) = true
@@ -13,8 +10,6 @@ supports_sparse_backend(::Type) = false
 
 const LP_SPARSE_NNZ_PER_ROW = 13.0
 const LP_SPARSE_MINIMUM_DIMENSION = 200
-const LPFormulation = Symbol
-
 function select_lp_formulation(
     ; dimension::Integer,
     nonzeros::Integer,
@@ -50,40 +45,6 @@ function formulation_backend(formulation::Symbol)
     formulation === :sparse_normal && return CHOLMODSparseCholeskyBackend()
     formulation === :dense_lu && return LPLUBackend()
     throw(ArgumentError("unknown LP formulation $(formulation)"))
-end
-
-const SPARSE_REFINE_MIN_DECREASE = 0.5
-
-function refine_solution!(x::AbstractVector{Float64}, backend::KKTBackend,
-                          K::SparseMatrixCSC{Float64}, rhs::AbstractVector{Float64};
-                          max_steps::Int=4, tolerance::Float64=0.0)
-    residual = similar(x)
-    correction = similar(x)
-    previous = similar(x)
-    scale = max(maximum(abs, rhs), 1.0)
-    target = tolerance > 0 ? tolerance : 64 * eps(Float64) * scale
-    mul!(residual, K, x)
-    residual .= rhs .- residual
-    best = maximum(abs, residual)
-    steps = 0
-    for _ in 1:max_steps
-        best <= target && break
-        copyto!(previous, x)
-        solve!(correction, backend, residual)
-        x .+= correction
-        mul!(residual, K, x)
-        residual .= rhs .- residual
-        current = maximum(abs, residual)
-        if !isfinite(current) || current > best
-            copyto!(x, previous)
-            break
-        end
-        improved = current <= best * SPARSE_REFINE_MIN_DECREASE
-        steps += 1
-        best = current
-        improved || break
-    end
-    return (steps, best)
 end
 
 inertia_available(::KKTBackend) = false

@@ -44,6 +44,12 @@ diagnostics/facts — be retained).  `diagnostics::Symbol` is `:none`,
 payload).  `history::Bool` / `trace::Bool` retain iteration history and
 performance-trace payloads respectively.
 
+This policy controls what is retained in the returned `Result`; it does not
+change the solver workspace or guarantee a lower peak allocation during the
+solve. Iteration-history availability is route-dependent, so a retained
+history may be empty when the selected core does not publish per-iteration
+records.
+
 All fields are validated on construction and normalized by the public
 `normalize_outputs` entry point.
 """

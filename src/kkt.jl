@@ -1307,8 +1307,13 @@ function _factor_sparse_schur_sdp!(
         sparse_workspace.factor = factor
     end
 
-    regularization = sparse_workspace.regularization
-    attempts = regularization > zero(T) ? 1 : 0
+    # Each new Schur matrix gets an unregularized factor attempt.  The
+    # workspace field records the last accepted shift for diagnostics only;
+    # carrying it into the next iteration would make regularization sticky
+    # and impose a precision-dependent residual floor on otherwise SPD
+    # systems.
+    regularization = zero(T)
+    attempts = 0
     ok = false
     while true
         @inbounds for index in eachindex(positions)
@@ -1350,16 +1355,22 @@ function _factor_sparse_schur_sdp!(
         )
     end
 
-    smallest = typemax(Float64)
-    largest = 0.0
+    # Keep the quality proxy in the solver arithmetic.  Converting a finite
+    # BigFloat Schur diagonal outside Float64's dynamic range to Float64
+    # yields `Inf`, which incorrectly reports quality zero and sends the
+    # adaptive controller down its degraded-factorization path even though
+    # the sparse factorization succeeded.
+    smallest = T(Inf)
+    largest = zero(T)
     @inbounds for diagonal in values
-        magnitude = Float64(abs(diagonal))
-        effective = magnitude + Float64(regularization) * max(magnitude, 1.0)
+        magnitude = abs(diagonal)
+        effective = magnitude + regularization * max(magnitude, one(T))
         smallest = min(smallest, effective)
         largest = max(largest, effective)
     end
-    quality = largest > 0 && isfinite(smallest) ? smallest / largest : 0.0
-    sparse_workspace.factorization_quality = T(quality)
+    sparse_workspace.factorization_quality =
+        largest > zero(T) && isfinite(smallest) && isfinite(largest) ?
+        smallest / largest : zero(T)
 
     return (
         ok=true,

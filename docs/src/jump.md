@@ -72,8 +72,11 @@ The wrapper supports:
   `MOI.SecondOrderCone` and `MOI.RotatedSecondOrderCone` (through native
   Lorentz SOC and the exact rotated map);
 - vector affine or vector-of-variables constraints in
-  `MOI.PositiveSemidefiniteConeTriangle` and
-  `MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}`.
+  `MOI.PositiveSemidefiniteConeTriangle`;
+- vector affine constraints in
+  `MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}`. Scaled PSD product
+  variables are reported unsupported rather than entering an unavailable
+  product-scaling path.
 
 The wrapper converts MathOptInterface's column-major upper-triangle ordering
 to full symmetric SDPX blocks and applies the required `sqrt(2)` off-diagonal

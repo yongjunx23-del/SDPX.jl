@@ -1,9 +1,9 @@
 # Precision
 
-SDPX solves at whatever element type `T` your input arrays (`A`, `C`, `B`,
-`b`, `c`) carry. There is no process-global arithmetic mode in the typed API.
-The legacy `setArithmeticType` still works for all-`Int`/`Rational` inputs,
-which have no type of their own to infer from.
+SDPX solves in the arithmetic owned by its typed `Model{T}`. Construct the
+model with `Model(Float64)`, `Model(BigFloat; precision_bits=...)`, or a loaded
+fixed-width type such as `Model(Float64x4)`. There is no process-global
+arithmetic selector and no implicit conversion from an untyped model.
 
 ## Choosing a type
 
@@ -12,43 +12,37 @@ which have no type of their own to infer from.
 | `Float64` | 53 bits | ~16 | fastest; fine when you do not need more than double precision |
 | `Float64x2` (MultiFloats.jl) | 105 bits | ~31 | bitstype, zero GC pressure, threads normally |
 | `Float64x4` (MultiFloats.jl) | 209 bits | ~62 | sweet spot for many EFT/modular-bootstrap runs |
-| `BigFloat` | `precision_bits` option | arbitrary | arbitrary precision; the convenience `solve` API defaults to 256 bits, while `SolverOptions` and the legacy API default to 997 bits (about 300 decimal digits) |
+| `BigFloat` | model `precision_bits` | arbitrary | arbitrary precision; `Model(BigFloat)` defaults to 256 bits |
 
 `MultiFloats.jl` types are enabled automatically once you `using MultiFloats`
 in your session, with no other change needed.
 
 ## BigFloat precision plumbing
 
-`prec` (legacy, base-10 digits) and `precision_bits` (new API, bits) control
-the *working* precision of the solve. The one-call and legacy interfaces also
-convert exact `Int`/`Rational` inputs inside that precision scope. Existing
-`BigFloat` input data still carries the precision at which it was originally
-created: solving 256-bit data at 997 bits cannot recover the missing digits.
-`SolverOptions{BigFloat}(convert_inputs=true)` can normalize every stored
-scalar to the working precision, but it does not create information. To gain
-accuracy, rebuild the source data inside
-`setprecision(BigFloat, precision_bits) do ... end`.
+`Model(BigFloat; precision_bits=bits)` owns the model and solve precision.
+Public modeling operations copy coefficients, right-hand sides, starts, and
+objective data inside that precision scope. Existing `BigFloat` values still
+carry the precision at which they were originally created: copying a rounded
+value into a wider model cannot recover missing digits. Build source data
+inside `setprecision(BigFloat, bits) do ... end` whenever those digits matter.
 
 ## Staged working precision
 
-BigFloat callers may opt into a conservative first-attempt precision:
+BigFloat callers select the staged working-precision policy through typed
+public settings:
 
 ```julia
-options = SolverOptions{BigFloat}(
-    precision_bits=256,
-    working_precision_policy=:auto,
-    minimum_working_precision_bits=192,
-)
-result = solve!(problem, options)
+model = Model(BigFloat; precision_bits=256)
+settings = Settings{BigFloat}(working_precision_policy=:auto)
+result = optimize!(model; settings=settings)
 ```
 
 The selector combines the smallest requested tolerance, a 96-bit numerical
-guard, and a dimension term, rounds upward to 32 bits, and clamps the result
-between the configured floor and requested precision. A lower-precision
-result is accepted only if normal original-coordinate certification succeeds.
-Precision exhaustion, stagnation, `AlmostOptimal`, or a numerical failure
-causes a retry at `precision_bits` when time remains. Checkpoint resume
-bypasses staging and uses the requested precision.
+guard, and a dimension term, rounds upward to 32 bits, and clamps the result to
+the predeclared ladder. A lower-precision result is accepted only if normal
+original-coordinate certification succeeds. Precision exhaustion, stagnation,
+an almost-optimal status, or a numerical failure advances to the requested
+model precision when the predeclared policy and remaining wall time allow it.
 
 The policy defaults to `:auto`; `:fixed` remains the expert override. See the
 [native BigFloat report](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md)
