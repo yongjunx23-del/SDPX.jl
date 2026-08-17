@@ -89,6 +89,58 @@ else
     end
 
     @testset "CSDR alpha-max subset cache" begin
+        @test canonical_alpha_set(["-1/2", "0"]) == ["0", "-1/2"]
+        @test canonical_alpha_set(["-4/8", "0", "-2/8"]) ==
+            ["0", "-1/4", "-1/2"]
+        @test_throws ErrorException canonical_alpha_set(["0", "-1/4"])
+        @test_throws ErrorException canonical_alpha_set(["0", "-1/4", "-2/8"])
+        @test hasmethod(
+            PrimalCSDRSource.parse_alpha,
+            Tuple{AbstractString,Type{BigFloat}},
+        )
+        @test hasmethod(
+            PrimalCSDRSource.parse_alpha,
+            Tuple{String,Type{BigFloat}},
+        )
+        @test hasmethod(
+            PrimalCSDRSource.phase_factors,
+            Tuple{AbstractString,Type{BigFloat}},
+        )
+        @test hasmethod(
+            PrimalCSDRSource.phase_factors,
+            Tuple{String,Type{BigFloat}},
+        )
+        @test PrimalCSDRSource.parse_alpha("-1/8", BigFloat) ==
+            -BigFloat(1) / BigFloat(8)
+        @test PrimalCSDRSource.parse_alpha("-0.125", BigFloat) ==
+            -BigFloat(1) / BigFloat(8)
+        @test PrimalCSDRSource.parse_alpha("-3/8", BigFloat) ==
+            -BigFloat(3) / BigFloat(8)
+        @test PrimalCSDRSource.parse_alpha("0", BigFloat) == zero(BigFloat)
+        @test PrimalCSDRSource.parse_alpha("-1/2", BigFloat) ==
+            -BigFloat(1) / BigFloat(2)
+        @test PrimalCSDRSource.parse_alpha("-1/4", BigFloat) ==
+            -BigFloat(1) / BigFloat(4)
+        minus_eighth = PrimalCSDRSource.phase_factors("-1/8", BigFloat)
+        minus_eighth_alpha = -BigFloat(1) / BigFloat(8)
+        @test minus_eighth.cosine ==
+            cos(BigFloat(pi) * minus_eighth_alpha)
+        @test minus_eighth.sine ==
+            sin(BigFloat(pi) * minus_eighth_alpha)
+        minus_three_eighths =
+            PrimalCSDRSource.phase_factors("-3/8", BigFloat)
+        minus_three_eighths_alpha = -BigFloat(3) / BigFloat(8)
+        @test minus_three_eighths.cosine ==
+            cos(BigFloat(pi) * minus_three_eighths_alpha)
+        @test minus_three_eighths.sine ==
+            sin(BigFloat(pi) * minus_three_eighths_alpha)
+        @test PrimalCSDRSource.phase_factors("0", BigFloat) ==
+            (cosine=one(BigFloat), sine=zero(BigFloat))
+        @test PrimalCSDRSource.phase_factors("-1/2", BigFloat) ==
+            (cosine=zero(BigFloat), sine=-one(BigFloat))
+        quarter_phase = PrimalCSDRSource.phase_factors("-1/4", BigFloat)
+        @test quarter_phase.cosine == inv(sqrt(BigFloat(2)))
+        @test quarter_phase.sine == -inv(sqrt(BigFloat(2)))
         maximal_alpha = dyadic_alpha_set(6)
         config = synthetic_config(maximal_alpha)
         coefficient_count = 3 # c_0_0, c_1_0, c_1_1 for Nx=1

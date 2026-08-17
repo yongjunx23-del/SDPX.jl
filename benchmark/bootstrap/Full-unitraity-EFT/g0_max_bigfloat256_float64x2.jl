@@ -199,6 +199,51 @@ function dyadic_alpha_set(level::Int)
     return labels
 end
 
+# Alpha canonicalization is a campaign/input concern, not part of the
+# external CSDR source module.  Keep it in this driver so the bootstrap source
+# remains a minimal, version-pinned include closure.  In particular, the
+# external source does not define `canonical_alpha_set`; qualifying this helper
+# through `PrimalCSDRSource` makes the first settings validation fail before any
+# model work is attempted.
+function _alpha_fraction(label)
+    label = strip(String(label))
+    isempty(label) && error("alpha label is empty")
+    matched = match(r"^(-?\d+)(?:/(\d+))?$", label)
+    isnothing(matched) && error("invalid alpha label: $label")
+    numerator = parse(BigInt, matched.captures[1])
+    denominator = isnothing(matched.captures[2]) ? BigInt(1) :
+        parse(BigInt, matched.captures[2])
+    denominator > 0 || error("alpha label has a non-positive denominator: $label")
+    numerator == 0 && return (BigInt(0), BigInt(1))
+    divisor = gcd(abs(numerator), denominator)
+    return (numerator ÷ divisor, denominator ÷ divisor)
+end
+
+function canonical_alpha_set(alpha_labels)
+    entries = Tuple{BigInt,BigInt,String}[]
+    seen = Set{Tuple{BigInt,BigInt}}()
+    for raw in alpha_labels
+        label = strip(String(raw))
+        numerator, denominator = _alpha_fraction(label)
+        numerator <= 0 || error("alpha label must be non-positive: $label")
+        2 * abs(numerator) <= denominator || error(
+            "alpha label must lie in [-1/2, 0]: $label",
+        )
+        key = (numerator, denominator)
+        key in seen && error("alpha set contains duplicate value: $label")
+        push!(seen, key)
+        canonical = numerator == 0 ? "0" : "$(numerator)/$(denominator)"
+        push!(entries, (numerator, denominator, canonical))
+    end
+    isempty(entries) && error("alpha set must not be empty")
+    sort!(entries; lt=(left, right) ->
+        left[1] * right[2] > right[1] * left[2])
+    labels = String[entry[3] for entry in entries]
+    labels[1] == "0" || error("alpha set must contain alpha=0")
+    labels[end] == "-1/2" || error("alpha set must contain alpha=-1/2")
+    return labels
+end
+
 function campaign_na(J::Int)
     J in CAMPAIGN_J_VALUES || error(
         "J=$J is outside the campaign grid $(CAMPAIGN_J_VALUES)",
@@ -208,7 +253,7 @@ function campaign_na(J::Int)
 end
 
 function campaign_alpha_level(alpha_labels)
-    canonical = PrimalCSDRSource.canonical_alpha_set(alpha_labels)
+    canonical = canonical_alpha_set(alpha_labels)
     for level in CAMPAIGN_ALPHA_LEVELS
         canonical == dyadic_alpha_set(level) && return level
     end
@@ -298,7 +343,7 @@ function expected_dimensions(settings::RunSettings; alpha_count=length(settings.
 end
 
 function memory_estimate(settings::RunSettings; alpha_labels=settings.alpha_labels)
-    labels = PrimalCSDRSource.canonical_alpha_set(alpha_labels)
+    labels = canonical_alpha_set(alpha_labels)
     n_range = 0:settings.N_x
     ncell = Int128(settings.N_mu) * Int128(settings.l_max ÷ 2 + 1)
     nlow = Int128(sum(n + 1 for n in n_range))
@@ -392,6 +437,33 @@ include(joinpath(SOURCE, "csdr_kinematics.jl"))
 include(joinpath(SOURCE, "csdr_quadrature.jl"))
 include(joinpath(SOURCE, "csdr_partialwaves.jl"))
 include(joinpath(SOURCE, "csdr_model.jl"))
+
+# The pinned CSDR source exposes generic `AbstractString` methods for these
+# helpers, but its fallback uses `parse(T, label)` and therefore cannot read
+# campaign labels such as `-1/8`.  Add narrower `String` methods here rather
+# than overwriting the external methods; all driver relation labels are
+# ordinary `String`s.  The helper remains owned by Main so the external source
+# tree and its identity hash stay immutable.
+function parse_alpha(label::String, ::Type{T}) where {T}
+    label == "0" && return zero(T)
+    label in ("-1/2", "-0.5") && return -one(T) / T(2)
+    label in ("-1/4", "-0.25") && return -one(T) / T(4)
+    occursin('/', label) || return parse(T, label)
+    numerator, denominator = Main._alpha_fraction(label)
+    return T(numerator) / T(denominator)
+end
+
+function phase_factors(label::String, ::Type{T}) where {T}
+    label == "0" && return (cosine=one(T), sine=zero(T))
+    label in ("-1/2", "-0.5") &&
+        return (cosine=zero(T), sine=-one(T))
+    label in ("-1/4", "-0.25") && begin
+        value = inv(sqrt(T(2)))
+        return (cosine=value, sine=-value)
+    end
+    alpha = parse_alpha(label, T)
+    return (cosine=cos(T(pi) * alpha), sine=sin(T(pi) * alpha))
+end
 end
 
 function validate_settings(settings::RunSettings)
@@ -443,9 +515,7 @@ function validate_settings(settings::RunSettings)
 end
 
 function csdr_config(settings::RunSettings)
-    alpha_labels = PrimalCSDRSource.canonical_alpha_set(
-        settings.alpha_labels,
-    )
+    alpha_labels = canonical_alpha_set(settings.alpha_labels)
     return PrimalCSDRSource.CSDRConfig(
         abspath(@__FILE__),
         "g0_max_j$(settings.l_max)_na$(settings.N_a)_nmu$(settings.N_mu)",
@@ -957,7 +1027,7 @@ function load_cached_model(settings::RunSettings)
     problem = subset_cached_problem(
         payload.problem,
         payload.remaining_relation_specs,
-        PrimalCSDRSource.canonical_alpha_set(settings.alpha_labels),
+        canonical_alpha_set(settings.alpha_labels),
         length(payload.model_metadata.coefficient_labels),
         payload.model_metadata.config,
     )
