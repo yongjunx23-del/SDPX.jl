@@ -35,9 +35,9 @@ end
     SolveMode
 
 Whether `solve!` is chasing an optimum (`OPTIMIZE`) or a feasibility
-certificate (`FEASIBILITY`, used internally by [`findFeasible`](@ref)).
+certificate (`FEASIBILITY`, used by the qualified internal feasibility path).
 Replaces the old global `mode::String` (P8): it now lives inside
-[`SolverOptions`](@ref), so two concurrent solves never share state.
+`SolverOptions`, so two concurrent solves never share state.
 """
 @enum SolveMode OPTIMIZE FEASIBILITY
 
@@ -1326,7 +1326,8 @@ end
 """
     SDPProblem{T}
 
-Ingested, validated problem data. Construct via [`ingest`](@ref) —
+Ingested, validated problem data. Construct via the qualified internal
+`SDPX.ingest` function —
 user-facing input stays `Vector{Array{T,3}}` for `A` (§1.2); this is
 the one-time-converted internal layout everything else operates on.
 """

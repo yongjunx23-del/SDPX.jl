@@ -4,9 +4,9 @@ These names support inspection, custom preprocessing, and solver research.
 Use them with explicit `SDPX.name` qualification; they are intentionally not
 exported and their result layouts may change before 1.0.
 
-```@docs
-SDPX
-```
+The `SDPX` module itself exports only the stable v0.5 modeling and result
+surface. The entries below document selected qualified implementation records
+that are useful for diagnostics and solver development.
 
 ## Problem and execution descriptions
 

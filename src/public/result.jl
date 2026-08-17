@@ -144,6 +144,7 @@ end
 # Stable scalar accessors
 # ---------------------------------------------------------------------------
 
+"""Return the immutable execution plan that governed `result`."""
 execution_plan(result::Result) = result.execution_plan
 
 """Return the stable public terminal-status symbol for `result`.
@@ -172,31 +173,51 @@ the public getter translates it to one documented, allocation-free symbol.
     throw(ArgumentError("unknown internal solve status $(repr(core))"))
 end
 termination(result::Result) = result.termination
+
+"""Return the original-coordinate certificate summary for `result`."""
 certificate(result::Result) = result.certificate
 
+"""
+Return the retained solver diagnostics.
+
+Throws `ResultFieldNotRetained` when diagnostics were disabled in the
+requested [`Outputs`](@ref).
+"""
 function diagnostics(result::Result)
     result.diagnostics === nothing && throw(ResultFieldNotRetained(:diagnostics))
     return result.diagnostics
 end
 
+"""
+Return a copy of the retained per-iteration history.
+
+Throws `ResultFieldNotRetained` when history retention was disabled.
+"""
 function iteration_history(result::Result)
     result.iteration_history === nothing &&
         throw(ResultFieldNotRetained(:history))
     return copy(result.iteration_history)
 end
 
+"""
+Return the retained phase-level performance trace.
+
+Throws `ResultFieldNotRetained` when trace retention was disabled.
+"""
 function performance_trace(result::Result)
     result.performance_trace === nothing &&
         throw(ResultFieldNotRetained(:trace))
     return result.performance_trace
 end
 
+"""Return the retained primal objective in the original objective sense."""
 function primal_objective(result::Result)
     result.primal_objective_data === nothing &&
         throw(ResultFieldNotRetained(:objectives))
     return result.primal_objective_data
 end
 
+"""Return the retained dual objective in the original objective sense."""
 function dual_objective(result::Result)
     result.dual_objective_data === nothing &&
         throw(ResultFieldNotRetained(:objectives))

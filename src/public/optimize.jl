@@ -1283,13 +1283,6 @@ end
 # Public entry point
 # ---------------------------------------------------------------------------
 
-"""
-    optimize!(model; settings=nothing, outputs=Outputs()) -> Result
-
-Compile and solve one authoritative `Model` through exactly one classified,
-family-specific native lowering.  Pure LP, SOC, and SDP routes use their
-corresponding typed lowerer and reconstruct the same public `Result` contract.
-"""
 function _optimize_impl(
     model::Model{T};
     settings::Union{Nothing,Settings}=nothing,
@@ -1313,6 +1306,14 @@ function _optimize_impl(
     )
 end
 
+"""
+    optimize!(model; settings=nothing, outputs=Outputs()) -> Result
+
+Compile and solve `model` through its single classified native LP, SOC, or SDP
+route. `settings` controls the numerical solve, while `outputs` controls which
+result data are retained. The returned `Result` is expressed in the
+original model coordinates.
+"""
 function optimize!(
     model::Model{T};
     settings::Union{Nothing,Settings}=nothing,
