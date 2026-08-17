@@ -83,6 +83,48 @@ trap 'rm -rf "$gate_tmp"' EXIT
 "$MANIFEST_TOOL" --phase solve --stage alpha --output "$gate_tmp/alpha.tsv"
 awk -F '\t' 'NR == 1 {next} NR == 2 {ok = ($1 == "solve" && $4 == 40 && $6 == 400 && $8 == 2 && $13 == "small16")} END {exit(ok ? 0 : 1)}' "$gate_tmp/alpha.tsv"
 
+# The controller must also accept a clean validation directory with no
+# resource-frontier TSVs.  Exercise the actual PBS wrapper with a shell stub
+# for Julia so this regression stays deterministic and does not build or solve
+# a model.  This specifically covers the `set -u` empty-array path.
+empty_frontier_root="$gate_tmp/controller-empty-frontier"
+mkdir -p "$empty_frontier_root/manifests" \
+    "$empty_frontier_root/validation/alpha-empty-frontier" \
+    "$empty_frontier_root/results"
+printf 'phase\tstage\tcase_id\nsolve\talpha\tseed\n' \
+    > "$empty_frontier_root/manifests/csdr-grid-solve.tsv"
+printf 'failed=0\n' \
+    > "$empty_frontier_root/validation/alpha-empty-frontier/campaign_summary.toml"
+printf '# controller stub\n' > "$empty_frontier_root/csdr_convergence_cli.jl"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'set -euo pipefail' \
+    'output=' \
+    'for ((i = 1; i <= $#; i++)); do' \
+    '    if [[ "${!i}" == --output ]]; then' \
+    '        ((i++))' \
+    '        output="${!i}"' \
+    '    elif [[ "${!i}" == --frontier ]]; then' \
+    '        echo "unexpected frontier argument" >&2' \
+    '        exit 31' \
+    '    fi' \
+    'done' \
+    '[[ -n "$output" ]]' \
+    'printf "status=complete\\n" > "$output"' \
+    > "$empty_frontier_root/fake-julia"
+chmod +x "$empty_frontier_root/fake-julia"
+CAMPAIGN_ROOT="$empty_frontier_root" \
+    CSDR_SOLVE_MANIFEST="$empty_frontier_root/manifests/csdr-grid-solve.tsv" \
+    SDPX_DEPLOYED_COMMIT=0000000000000000000000000000000000000000 \
+    MFLA_DEPLOYED_COMMIT=1111111111111111111111111111111111111111 \
+    CSDR_SOURCE_TREE_SHA256=2222222222222222222222222222222222222222222222222222222222222222 \
+    CSDR_CONTROLLER="$empty_frontier_root/csdr_convergence_cli.jl" \
+    CSDR_STAGE=alpha \
+    CSDR_RUN_ID=empty-frontier \
+    JULIA_BIN="$empty_frontier_root/fake-julia" \
+    bash "$SCRIPT_DIR/csdr_campaign_controller.pbs" >/dev/null
+test -L "$empty_frontier_root/validation/convergence-alpha-latest.toml"
+
 # Release/driver parser gates.  Invalid-grid must fail closed; no model solve
 # is launched by this job.
 "$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" --help >/dev/null

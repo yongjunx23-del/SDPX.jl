@@ -70,7 +70,13 @@ while IFS= read -r frontier_path; do
     frontier_args+=(--frontier "$frontier_path")
 done < <(find "$CAMPAIGN_ROOT/manifests" "$CAMPAIGN_ROOT/validation" \
     -type f -name 'resource-frontier.tsv' -print 2>/dev/null | LC_ALL=C sort)
-args+=("${frontier_args[@]}")
+# Under `set -u`, expanding an empty array with "${array[@]}" is an
+# unbound-variable error in the Bash versions used by the cluster.  A clean
+# validation run has no resource-frontier rows, so append this optional
+# argument group only when at least one valid frontier exists.
+if ((${#frontier_args[@]})); then
+    args+=("${frontier_args[@]}")
+fi
 if [[ -n "${CSDR_DRIVER_SHA256:-}" ]]; then
     [[ "$CSDR_DRIVER_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || exit 2
     args+=(--driver-sha256 "$CSDR_DRIVER_SHA256")
