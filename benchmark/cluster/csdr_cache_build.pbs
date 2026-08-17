@@ -175,16 +175,12 @@ if [[ -n "${CSDR_EXPECTED_SDPX_COMMIT:-}" ]]; then
 fi
 sdpx_source_tree_sha256=$(cd "$SDPX_SOURCE_ROOT" && \
     while IFS= read -r rel; do
-        printf '%s:' "$rel"
-        sha256sum "$rel" | awk '{print $1}'
-        printf '\n'
+        printf '%s:%s\n' "$rel" "$(sha256sum "$rel" | awk '{print $1}')"
     done < <({ find src ext -type f -name '*.jl' -print; printf '%s\n' Project.toml; } | LC_ALL=C sort -u) | sha256sum | awk '{print $1}')
 [[ "$sdpx_source_tree_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || exit 3
 csdr_tree_sha256=$(cd "$CSDR_SOURCE_ROOT" && \
     while IFS= read -r rel; do
-        printf '%s:' "$rel"
-        sha256sum "$rel" | awk '{print $1}'
-        printf '\n'
+        printf '%s:%s\n' "$rel" "$(sha256sum "$rel" | awk '{print $1}')"
     done < <(find src -type f -name '*.jl' -print | LC_ALL=C sort) | sha256sum | awk '{print $1}')
 [[ "$csdr_tree_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
     echo "CSDR source tree hash is not 64-hex" >&2
