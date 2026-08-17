@@ -136,8 +136,8 @@ tolerances together. Every exact qualified engine field name is also accepted
 as a raw optimizer attribute, including `sparse`, `scaling`, `predictor`,
 `refine_steps`, `max_restarts`, `extended_precision_blas`, and
 `extended_precision_memory_fraction`. Unknown names are rejected. The
-attribute bridge does not change the public pure-route contract: mixed
-non-free cone families fail before lowering.
+attribute bridge uses the same LP, native SOC/RSOC, and SDP route selection as
+the typed Model API.
 
 `parameter_policy=:auto` (the default) runs the generic automatic Mehrotra
 controller: `beta`, `gamma`, `predictor`, and `parameter_strategy` keep the

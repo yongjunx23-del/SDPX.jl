@@ -107,9 +107,8 @@ settings = Settings(
 
 The model's arithmetic is chosen at construction. A request for 840 bits
 therefore requires `Model(BigFloat; precision_bits=840)`, while the CLI parses
-JSON inside the requested precision scope. `Settings.algorithm` must match the
-pure LP, native SOC/RSOC, or SDP family; mixed non-free families fail closed
-before numerical lowering.
+JSON inside the requested precision scope. `Settings.algorithm` selects the
+LP, native SOC/RSOC, or SDP implementation used for the compiled model.
 
 The CLI implementation lowers its JSON policy through qualified compatibility
 option records, but those records are not part of the public Julia quickstart

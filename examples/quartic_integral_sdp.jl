@@ -1,10 +1,18 @@
 using SDPX
+using GenericLinearAlgebra
+using LinearAlgebra
+using MultiFloats
 
-"""Run a small, native moment SDP for the zero-dimensional quartic integral.
+"""Bound the normalized second moment of a quartic integral with an SDP.
 
-The variable `w[n+1]` represents `W_(2n)`.  The Hankel constraint is kept as
-one affine PSD block; odd moments are fixed to zero by the even Hankel basis.
-Only the public Model builder and result accessors are used below.
+For `exp(-x^2/2-g*x^4/4)`, integration by parts gives
+
+    (2n+1) W_(2n) - W_(2n+2) - g W_(2n+4) = 0.
+
+`w[n+1]` stores `W_(2n)`, `W_0=1`, and the parity-aware Hankel moment matrix
+is constrained positive semidefinite. Minimizing and maximizing `W_2` gives
+finite-order certified bounds. The script reconstructs the numerical Hankel
+matrix after solving and reports its smallest eigenvalue.
 """
 
 const _QUARTIC_REFERENCE_W2 = "0.467919916973665188637421298330615640"
@@ -35,20 +43,11 @@ function _arithmetic_type(name::AbstractString)
     key in ("f64x2", "f64x4") || error(
         "unknown arithmetic '$name'; choose f64, f64x2, f64x4, bf256, or bf512",
     )
-    module_ = try
-        @eval import MultiFloats
-        MultiFloats
-    catch error_value
-        error(
-            "arithmetic $key is unavailable: load the optional MultiFloats " *
-            "package ($(sprint(showerror, error_value)))",
-        )
-    end
     type_name = key == "f64x2" ? :Float64x2 : :Float64x4
-    isdefined(module_, type_name) || error(
+    isdefined(MultiFloats, type_name) || error(
         "arithmetic $key is unavailable: MultiFloats does not provide $type_name",
     )
-    return (getfield(module_, type_name), nothing)
+    return (getfield(MultiFloats, type_name), nothing)
 end
 
 function _quartic_model(
@@ -104,6 +103,15 @@ function _quartic_outputs()
     )
 end
 
+function _quartic_hankel(moments::AbstractVector{T}, order::Int) where {T}
+    matrix = Matrix{T}(undef, order + 1, order + 1)
+    for i in 0:order, j in 0:order
+        matrix[i + 1, j + 1] =
+            iseven(i + j) ? moments[(i + j) ÷ 2 + 1] : zero(T)
+    end
+    return matrix
+end
+
 function _quartic_bound(
     ::Type{T},
     bits,
@@ -128,7 +136,16 @@ function _quartic_bound(
     )
     moments = SDPX.value(result, w)
     bound = moments[2]
-    return (bound=bound, result=result)
+    hankel = _quartic_hankel(moments, order)
+    spectrum = eigvals(Symmetric(hankel))
+    return (
+        bound=bound,
+        moments=moments,
+        hankel=hankel,
+        spectrum=spectrum,
+        certificate=cert,
+        result=result,
+    )
 end
 
 function _run_quartic(
@@ -242,8 +259,16 @@ function main(args=ARGS)
         rethrow()
     end
     println("quartic integral: g=$g_text, order=$order, arithmetic=$arithmetic_name")
-    values.lower === nothing || println("  lower W2 = ", values.lower.bound)
-    values.upper === nothing || println("  upper W2 = ", values.upper.bound)
+    if values.lower !== nothing
+        println("  lower W2 = ", values.lower.bound)
+        println("  lower Hankel min eigenvalue = ", minimum(values.lower.spectrum))
+        println("  lower primal residual = ", values.lower.certificate.primal_residual)
+    end
+    if values.upper !== nothing
+        println("  upper W2 = ", values.upper.bound)
+        println("  upper Hankel min eigenvalue = ", minimum(values.upper.spectrum))
+        println("  upper primal residual = ", values.upper.certificate.primal_residual)
+    end
     return values
 end
 

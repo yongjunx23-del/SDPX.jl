@@ -18,21 +18,23 @@ Pkg.add(url="https://github.com/yongjunx23-del/SDPX.jl")
 ## First solve
 
 The public route is a typed `Model`: declare product-cone variables, add affine
-cone constraints, set one objective, then call `optimize!`. This small LP uses
-only exported names and returns a typed result whose fields are read through
-accessors:
+cone constraints, set one objective, then call `optimize!`. This two-by-two
+quartic moment SDP uses only exported names and returns a typed result whose
+fields are read through accessors:
 
 ```julia
 using SDPX
 
 model = Model(Float64)
-x = variable!(model, :x, 2; domain=Nonnegative())
-constraint!(model, :mass, x[1] + x[2] - 1, ZeroCone())
-objective!(model, Minimize(), 2 * x[1] + 3 * x[2])
+w = variable!(model, :w, 3; domain=Reals())
+constraint!(model, :normalization, w[1] - 1, ZeroCone())
+constraint!(model, :quartic_recurrence, w[1] - w[2] - w[3], ZeroCone())
+constraint!(model, :moment_matrix, [w[1] w[2]; w[2] w[3]], PSDCone())
+objective!(model, Maximize(), w[2])
 
 settings = Settings(
     model;
-    algorithm=:lp,
+    algorithm=:sdp,
     limits=Limits(iterations=200, time=60.0, threads=1),
     verbosity=0,
 )
@@ -40,8 +42,8 @@ outputs = Outputs(:all, :all, :all; objectives=true, certificate=:summary)
 result = optimize!(model; settings=settings, outputs=outputs)
 
 status(result)             # :optimal
-value(result, x)           # approximately [1, 0]
-primal_objective(result)   # approximately 2
+value(result, w)           # approximately [1, 0.618034, 0.381966]
+primal_objective(result)   # approximately 0.618034
 certificate(result).valid  # true when the independent check passes
 ```
 

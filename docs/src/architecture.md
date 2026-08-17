@@ -83,8 +83,7 @@ cones, but execution never silently changes family.
 
 The automatic planner uses structure facts first, then checks backend
 feasibility. Providers and arithmetic names never choose the mathematical
-formulation. Unsupported provider/formulation pairs fail closed during
-planning; no silent route substitution is performed at execution time.
+formulation; execution uses the provider/formulation pair frozen in the plan.
 
 ## KKT formulations
 
@@ -163,14 +162,12 @@ certificates are produced only when a validated homogeneous ray is found. See
 ## Current limitations
 
 - The public API is experimental and may change before 1.0.
-- LP, native SOC/RSOC, and SDP are the supported pure routes; mixed nonfree
-  cone families fail closed before numerical lowering.
+- LP, native SOC/RSOC, and SDP are implemented as separate typed routes.
 - The direct primal-dual iteration does not carry HSD `τ`/`κ` variables, so it
   may fail to produce a ray for some infeasible models.
 - Equality-constrained LPs use dense LU; null-space/range-space selection is
   future work.
-- Sparse augmented/indefinite LDL is not implemented; unsupported sparse
-  requests fail closed.
+- Sparse augmented/indefinite LDL is not implemented.
 - General BigFloat work is serial; ownership-safe independent blocks and exact
   local arrow phases may use workers.
 - Nested solves in one process are not supported because BLAS thread count is

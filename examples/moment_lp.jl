@@ -1,9 +1,11 @@
 using SDPX
 
-"""A finite moment LP on a grid containing 0, 1/2, and 1.
+"""Optimize the second moment of a probability distribution on a grid.
 
-The two objectives are built independently so the example exercises both
-objective senses without changing a model after it has been compiled.
+The weights satisfy `p_i >= 0`, `sum(p_i)=1`, and `sum(t_i*p_i)=1/2`.
+The script solves both senses of `sum(t_i^2*p_i)`, checks the exact bounds
+`1/4` and `1/2`, and reports the mass/mean residuals. The two objectives are
+built as independent models so each solve has immutable model data.
 """
 
 function _precision_scope(f::Function, ::Type{BigFloat}, bits::Int)
@@ -62,7 +64,16 @@ function _moment_bound(::Type{T}, bits, n::Int, sense) where {T<:AbstractFloat}
     )
     values = SDPX.value(result, p)
     computed = sum(grid[index]^2 * values[index] for index in eachindex(values))
-    return (bound=computed, objective=SDPX.primal_objective(result))
+    mass = sum(values)
+    mean = sum(grid[index] * values[index] for index in eachindex(values))
+    return (
+        bound=computed,
+        objective=SDPX.primal_objective(result),
+        weights=values,
+        mass_residual=mass - one(T),
+        mean_residual=mean - one(T) / T(2),
+        certificate=cert,
+    )
 end
 
 function _moment_tolerance(::Type{BigFloat})
@@ -97,6 +108,8 @@ function main(args=ARGS)
     high_precision = _run_moment(BigFloat, 256, 9)
     println("moment LP: N=$n, Float64 min I2 = ", values.lower.bound)
     println("moment LP: N=$n, Float64 max I2 = ", values.upper.bound)
+    println("moment LP: min mass residual = ", values.lower.mass_residual)
+    println("moment LP: min mean residual = ", values.lower.mean_residual)
     println("moment LP: BigFloat(256) smoke min I2 = ", high_precision.lower.bound)
     return (float64=values, bigfloat=high_precision)
 end

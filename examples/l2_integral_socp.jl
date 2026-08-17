@@ -1,6 +1,12 @@
 using SDPX
 
-"""Midpoint-grid L2 integral bound using one native Lorentz cone."""
+"""Midpoint-grid L2 integral bound using one native Lorentz cone.
+
+The vector `u` has zero discrete mean and lies in the Euclidean unit ball,
+encoded directly as `(1,u...) in Q`. The linear objective samples a centered
+coordinate. The script reconstructs the cone margin `1-norm(u)` and compares
+the solver value with the closed-form finite-grid norm.
+"""
 
 function _precision_scope(f::Function, ::Type{BigFloat}, bits::Int)
     return setprecision(BigFloat, bits) do
@@ -58,7 +64,16 @@ function _l2_bound(::Type{T}, bits, n::Int) where {T<:AbstractFloat}
     )
     values = SDPX.value(result, u)
     computed = sum(coefficients[index] * values[index] for index in eachindex(values))
-    return (bound=computed, objective=SDPX.primal_objective(result))
+    mean_residual = sum(values) / sqrt(T(length(values)))
+    cone_margin = one(T) - sqrt(sum(abs2, values))
+    return (
+        bound=computed,
+        objective=SDPX.primal_objective(result),
+        values=values,
+        mean_residual=mean_residual,
+        cone_margin=cone_margin,
+        certificate=cert,
+    )
 end
 
 function _run_l2(::Type{T}, bits, n::Int) where {T<:AbstractFloat}
@@ -80,6 +95,8 @@ function main(args=ARGS)
     high_precision = _run_l2(BigFloat, 256, 9)
     println("L2 integral SOCP: N=$n, value = ", value.value.bound)
     println("L2 integral SOCP: analytic value = ", value.expected)
+    println("L2 integral SOCP: equality residual = ", value.value.mean_residual)
+    println("L2 integral SOCP: Lorentz margin = ", value.value.cone_margin)
     println("L2 integral SOCP: BigFloat(256) smoke = ", high_precision.value.bound)
     return (float64=value, bigfloat=high_precision)
 end

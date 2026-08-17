@@ -3,13 +3,12 @@
 #
 #    Pure, typed dispatch metadata for a `NativeConeProgram`: it
 #    decides whether an ordered program belongs to the LP, SOC or SDP
-#    route family and, when nonfree cone families are mixed, it fails
-#    closed with `UnsupportedNativeConeRoute` instead of guessing.
+#    route family. Only the selected family is retained; block order and
+#    dimensions already live in `NativeConeProgram` and are not duplicated.
 #
 #    This file contains NO numerical lowering, NO canonicalization, NO
 #    split/lift/scalarization, and NO solver/provider/formulation or
-#    precision decisions. It records only mathematical route families
-#    and structural block metadata in program order.
+#    precision decisions. It records only the mathematical route family.
 #
 #    DELIBERATE ABSENCES (fixed by the SOL contract):
 #    - no `orientation` field of any kind;
@@ -30,25 +29,10 @@
     SDPX.NativeConeRoute
 
 Immutable, fully typed route classification of a
-[`NativeConeProgram`](@ref). One program maps to exactly one route
-family; the record preserves product/row block order.
+[`NativeConeProgram`](@ref). One program maps to exactly one route family.
 
 Fields
 - `route::Symbol` — `:lp_family`, `:soc_family` or `:sdp_family`.
-- `product_families::Vector{Symbol}` — one family label per product
-  block, in program order: `:free`, `:zero`, `:lp_family`,
-  `:soc_family` or `:sdp_family`.
-- `row_families::Vector{Symbol}` — one family label per affine row
-  block, in program order (same label set; an affine PSD `RowBlock`
-  is `:sdp_family`).
-- `num_product_blocks::Int`, `num_row_blocks::Int` — native block
-  counts.
-- `product_dimensions::Vector{Int}`, `row_dimensions::Vector{Int}` —
-  native block dimensions in program order (matrix dimension for PSD
-  blocks).
-- `variables::Int` — total stored scalar variables (concatenated
-  product-block lengths).
-- `rows::Int` — total stored rows (concatenated row-block lengths).
 
 This is dispatch metadata only. It carries no orientation, no
 primal/dual labels, no dualization metadata, no provider or
@@ -57,33 +41,7 @@ scalarizes, lifts or splits a block.
 """
 struct NativeConeRoute
     route::Symbol
-    product_families::Vector{Symbol}
-    row_families::Vector{Symbol}
-    num_product_blocks::Int
-    num_row_blocks::Int
-    product_dimensions::Vector{Int}
-    row_dimensions::Vector{Int}
-    variables::Int
-    rows::Int
 end
-
-# Route records are value metadata.  The default `==` for a struct with
-# mutable vector fields compares those vectors by identity in Julia, which
-# makes two independent classifications of the same program appear unequal.
-# Define the intended structural comparison explicitly; route classification
-# itself remains allocation-free on the mixed-family rejection path.
-Base.:(==)(left::NativeConeRoute, right::NativeConeRoute) =
-    left.route == right.route &&
-    left.product_families == right.product_families &&
-    left.row_families == right.row_families &&
-    left.num_product_blocks == right.num_product_blocks &&
-    left.num_row_blocks == right.num_row_blocks &&
-    left.product_dimensions == right.product_dimensions &&
-    left.row_dimensions == right.row_dimensions &&
-    left.variables == right.variables &&
-    left.rows == right.rows
-
-Base.isequal(left::NativeConeRoute, right::NativeConeRoute) = left == right
 
 """
     SDPX.UnsupportedNativeConeRoute <: Exception
@@ -92,32 +50,26 @@ Fail-closed error thrown by [`classify_native_cone_program`](@ref)
 when the nonfree cone domains of a program span more than one route
 family (for example orthant + SOC, orthant + PSD, or PSD + SOC).
 
-Fields
-- `detected_families::Vector{Symbol}` — the conflicting route
-  families, deterministically ordered `:lp_family`, `:soc_family`,
-  `:sdp_family`.
-- `message::String` — fixed-format diagnostic message.
+The detected families are stored in deterministic LP, SOC, SDP order.
 """
 struct UnsupportedNativeConeRoute <: Exception
     detected_families::Vector{Symbol}
-    message::String
+    function UnsupportedNativeConeRoute(detected_families::Vector{Symbol})
+        # Canonical family order: LP, SOC, SDP. Lexicographic Symbol order
+        # would put SDP before SOC and is not part of the model contract.
+        families = Symbol[
+            family for family in (:lp_family, :soc_family, :sdp_family)
+            if family in detected_families
+        ]
+        length(families) >= 2 || throw(ArgumentError(
+            "a mixed-route error needs at least two detected families, got $families",
+        ))
+        return new(families)
+    end
 end
 
-function UnsupportedNativeConeRoute(detected_families::Vector{Symbol})
-    # Canonical family order: LP, SOC, SDP (lexicographic Symbol order
-    # would place `:sdp_family` before `:soc_family`, which is neither
-    # documented nor stable under implementation details).
-    families = Symbol[
-        family for family in (:lp_family, :soc_family, :sdp_family)
-        if family in detected_families
-    ]
-    length(families) >= 2 ||
-        throw(ArgumentError("a mixed-route error needs at least two detected families, got $families"))
-    message = "unsupported mixed native cone route: detected families $families"
-    return UnsupportedNativeConeRoute(families, message)
-end
-
-Base.showerror(io::IO, err::UnsupportedNativeConeRoute) = print(io, err.message)
+Base.showerror(io::IO, err::UnsupportedNativeConeRoute) =
+    print(io, "model combines unsupported cone families ", err.detected_families)
 
 # ---------------------------------------------------------------------------
 # Family labels (pure mathematical mapping; never a formulation choice)
@@ -155,8 +107,8 @@ Classify an ordered native program into exactly one route family:
 Affine PSD [`RowBlock`](@ref)s count as PSD for family detection. The
 classifier validates structural counts — product-block variables,
 row-block rows and equality-matrix size must match the program — and
-preserves block order in every per-block vector. It never lowers,
-lifts, splits or scalarizes the program, and it makes no provider,
+does not duplicate block metadata already owned by the program. It never
+lowers, lifts, splits or scalarizes the program, and it makes no provider,
 formulation, orientation or precision decision.
 """
 function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:AbstractFloat}
@@ -211,28 +163,5 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
             saw_sdp ? :sdp_family :
             :lp_family
 
-    # Second pass: ordered, typed metadata for the accepted route.
-    product_families = Vector{Symbol}(undef, length(blocks))
-    row_families = Vector{Symbol}(undef, length(row_blocks))
-    product_dimensions = Vector{Int}(undef, length(blocks))
-    row_dimensions = Vector{Int}(undef, length(row_blocks))
-    for (i, block) in enumerate(blocks)
-        product_families[i] = _route_family(block.domain)
-        product_dimensions[i] = block.shape
-    end
-    for (i, row_block) in enumerate(row_blocks)
-        row_families[i] = _route_family(row_block.domain)
-        row_dimensions[i] = row_block.shape
-    end
-    return NativeConeRoute(
-        route,
-        product_families,
-        row_families,
-        length(blocks),
-        length(row_blocks),
-        product_dimensions,
-        row_dimensions,
-        total_variables,
-        total_rows,
-    )
+    return NativeConeRoute(route)
 end

@@ -29,9 +29,8 @@ mathematical input facts and equality-basis evidence only. A capability is
 advertised by the SDPX extension only when both the upstream capability and
 the corresponding semantic adapter are present.
 
-Unsupported provider/formulation pairs fail during planning. Runtime failure
-policy is explicit: a provider failure is not permission to execute a
-different provider unless that fallback is already part of the plan.
+The plan records the selected provider/formulation pair and any authorized
+runtime fallback. A provider failure does not implicitly change that plan.
 
 ## Standard and legacy providers
 

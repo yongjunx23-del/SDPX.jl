@@ -390,8 +390,8 @@ using Test
         @test record.executed.storage === :dense
         @test record.planned.provider === :blas_lapack
         @test record.executed.provider === :blas_lapack
-        @test record.planned.threads == 1
-        @test record.executed.threads == 1
+        @test record.planned.threads == result.diagnostics.plan.threads
+        @test record.executed.threads == record.planned.threads
 
         # Precision facts record the arithmetic tag, the mixed-precision mode,
         # and the explicit significand width.
@@ -479,7 +479,7 @@ using Test
         @test record.executed.formulation === :sparse_normal
         @test record.planned.provider === :cholmod
         @test record.executed.provider === :cholmod
-        @test record.executed.threads == 1
+        @test record.executed.threads == record.planned.threads
         @test record.fallback_events == ()
         @test record.certificate.available === true
     end

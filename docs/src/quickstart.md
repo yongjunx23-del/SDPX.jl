@@ -20,15 +20,23 @@ solver structs.
 
 ```julia
 using SDPX
+using LinearAlgebra
 
 model = Model(Float64)
-x = variable!(model, :x, 2; domain=Nonnegative())
-constraint!(model, :mass, x[1] + x[2] - 1, ZeroCone())
-objective!(model, Minimize(), 2 * x[1] + 3 * x[2])
+w = variable!(model, :w, 3; domain=Reals())
+constraint!(model, :normalization, w[1] - 1, ZeroCone())
+constraint!(model, :quartic_recurrence, w[1] - w[2] - w[3], ZeroCone())
+constraint!(
+    model,
+    :moment_matrix,
+    [w[1] w[2]; w[2] w[3]],
+    PSDCone(),
+)
+objective!(model, Maximize(), w[2])
 
 settings = Settings(
     model;
-    algorithm=:lp,
+    algorithm=:sdp,
     limits=Limits(iterations=200, time=60.0, threads=1),
     verbosity=0,
 )
@@ -36,10 +44,15 @@ outputs = Outputs(:all, :all, :all; objectives=true, certificate=:summary)
 result = optimize!(model; settings=settings, outputs=outputs)
 
 @assert status(result) == :optimal
-value(result, x)             # approximately [1, 0]
-primal_objective(result)     # approximately 2
-certificate(result).valid     # independent original-coordinate check
+moments = value(result, w)  # approximately [1, 0.618034, 0.381966]
+H = [moments[1] moments[2]; moments[2] moments[3]]
+eigvals(Symmetric(H))       # nonnegative up to solver tolerance
+primal_objective(result)    # approximately 0.618034
+certificate(result).valid  # independent original-coordinate check
 ```
+
+This is the `g=1` two-by-two moment truncation of the quartic integral:
+`W0=1`, `W0-W2-W4=0`, and `[W0 W2; W2 W4]` is positive semidefinite.
 
 `Model(Float64)` is the default arithmetic. `Model(BigFloat;
 precision_bits=256)` and loaded `MultiFloats` types provide the other typed
@@ -88,11 +101,8 @@ objective!(sdp, Minimize(), 2 * X[1, 1] + 3 * X[2, 2])
 sdp_result = optimize!(sdp; settings=Settings(sdp; algorithm=:sdp, verbosity=0))
 ```
 
-Mixed non-free families fail closed before numerical lowering. For example, a
-model containing both a `Nonnegative` block and a `LorentzCone` block raises a
-typed mixed-route error; SDPX never guesses a lift or silently changes the
-family. Likewise, `algorithm=:socp` on an SDP model (or `:lp` on an SOC model)
-is rejected before execution.
+Choose `algorithm=:lp`, `:socp`, or `:sdp` to match the model family shown in
+the table. `:auto` asks SDPX to select the matching implemented route.
 
 ## Settings and retained outputs
 

@@ -138,8 +138,7 @@ constant head, zero head coefficients, exactly two nonsingular local tail
 variables, no shared variables, and complete variable coverage. Under
 `specialization=:auto`, the compact execution is selected whenever the exact
 reduction verifies; otherwise `:auto` uses GeneralLorentz. A forced
-`specialization=:fixed_trace` throws when the reduction does not verify.
-Unsupported provider/formulation pairs fail during planning.
+`specialization=:fixed_trace` requires that exact reduction.
 
 For eligible blocks SDPX stores three local metric entries and a local 2-by-2
 Cholesky factor. It eliminates each block locally and forms only the global
@@ -202,8 +201,7 @@ coordinates. Timings, termination counters, and diagnostics come directly
 from the NativeSOC run; no hidden PSD solve or result is stored. Certification
 independently recomputes affine/equality
 residuals, stationarity, primal and dual Lorentz margins, objectives, gap,
-and complementarity. Pure-SOC MOI input stays native; mixed PSD+SOC input
-fails clearly before any numerical route is selected.
+and complementarity. Pure-SOC MOI input stays on the native route.
 
 Lightweight development evidence for the native routes is summarized in
 [benchmarks.md](benchmarks.md), with full reports under

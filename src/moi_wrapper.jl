@@ -679,7 +679,7 @@ function _moi_psd_vector_from_matrix(
     return values
 end
 
-function _moi_present_family_set(source, constraint_types)
+function _moi_validate_family_set(constraint_types)
     families = Symbol[]
     for (_, set_type) in constraint_types
         family = _moi_route_family(set_type)
@@ -689,7 +689,7 @@ function _moi_present_family_set(source, constraint_types)
     ordered = Symbol[family for family in (:lp_family, :soc_family, :sdp_family)
                     if family in families]
     length(ordered) > 1 && throw(UnsupportedNativeConeRoute(ordered))
-    return ordered
+    return nothing
 end
 
 function _moi_vector_variable_groups(
@@ -1293,7 +1293,7 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T<:A
     # mixed LP/SOC/SDP source fails closed before any numerical buffers or
     # native solver object can be created.
     constraint_types = MOI.get(source, MOI.ListOfConstraintTypesPresent())
-    _moi_present_family_set(source, constraint_types)
+    _moi_validate_family_set(constraint_types)
 
     MOI.empty!(optimizer)
     model = if T === BigFloat
