@@ -736,12 +736,21 @@ function _build_equality_gram!(
     ws::Workspace{T},
     opts::SolverOptions{T},
 ) where {T}
+    # Block-arrow owns the local 2x2 factors and Btil row solves.  Only an
+    # explicitly planned MultiFloat backend may own its dense equality Gram;
+    # all other specialized arrow routes retain the established SDPX kernel.
+    gram_backend = if ws.arrow === nothing ||
+                      ws.la_backend isa MultiFloatLABackend
+        ws.la_backend
+    else
+        nothing
+    end
     decision, label = _build_equality_gram_matrix!(
         ws.Q,
         ws.Btil,
         opts,
         ws.thread_count,
-        ws.arrow === nothing ? ws.la_backend : nothing,
+        gram_backend,
     )
     ws.equality_gram_kernel = label
     return decision
@@ -1115,29 +1124,30 @@ function _factor_arrow_equality_system!(
         factor_started = gram_finished
 
         _copy_lower_triangle!(ws.Qbuf, ws.Q)
-        legacy_provider_factor =
-            ws.la_backend isa LegacyLABackend
-        legacy_factor = if legacy_provider_factor
+        provider_arrow_factor =
+            ws.la_backend isa LegacyLABackend ||
+            ws.la_backend isa MultiFloatLABackend
+        provider_factor = if provider_arrow_factor
             _record_la_execution!(ws)
             la_cholesky_factor!(ws.la_backend, ws.Qbuf)
         else
             nothing
         end
-        if legacy_factor !== nothing &&
+        if provider_factor !== nothing &&
            _authoritative_cholesky_preserves_exact_rank(
-               legacy_factor,
+               provider_factor,
                ws.Btil,
                prob.B,
                opts,
            ) &&
-           _legacy_factor_has_numerical_rank(
-               legacy_factor,
+           _la_factor_has_numerical_rank(
+               provider_factor,
                ws.Btil,
                opts,
            )
-            ws.Qchol = legacy_factor
-        elseif legacy_provider_factor
-            # `kchol!` may have partially overwritten the factor buffer
+            ws.Qchol = provider_factor
+        elseif provider_arrow_factor
+            # The provider may have partially overwritten the factor buffer
             # before reporting failure. Restore the authoritative Gram matrix
             # before the only plan-authorized solver-level fallback.
             _copy_lower_triangle!(ws.Qbuf, ws.Q)
@@ -1148,9 +1158,10 @@ function _factor_arrow_equality_system!(
                 q_pivoted = true
                 q_rank_deficient = qr_factor.rank < n
                 if opts.verbosity >= 1
+                    provider_name = la_backend_provider(ws.la_backend)
                     @warn(
                         "Block-diagonal equality solve switched " *
-                        "from legacy normal equations to " *
+                        "from $(provider_name) normal equations to " *
                         "rank-revealing QR",
                         reason=:normal_equation_rank_loss,
                         qr_rank=qr_factor.rank,

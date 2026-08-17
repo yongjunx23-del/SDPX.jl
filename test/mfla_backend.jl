@@ -54,6 +54,58 @@ function _max_abs(A, B)
     return maximum(abs(A[index] - B[index]) for index in eachindex(A, B))
 end
 
+function _mfla_block_arrow_fixture(
+    ::Type{T};
+    block_count::Int=8,
+    equality_count::Int=8,
+    rank_deficient::Bool=false,
+) where {T}
+    variable_count = 3 * block_count
+    equality_count <= variable_count || throw(ArgumentError(
+        "equalities cannot exceed variables",
+    ))
+    coefficients = [
+        zeros(T, variable_count, 2, 2)
+        for _ in 1:block_count
+    ]
+    for block in 1:block_count
+        first = 3 * block - 2
+        coefficients[block][first, 1, 1] = one(T)
+        coefficients[block][first + 1, 1, 2] = one(T)
+        coefficients[block][first + 1, 2, 1] = one(T)
+        coefficients[block][first + 2, 2, 2] = one(T)
+    end
+    equality = zeros(T, variable_count, equality_count)
+    for column in 1:equality_count
+        equality[column, column] = one(T)
+        for row in (equality_count + 1):variable_count
+            equality[row, column] =
+                T(mod(17 * row + 11 * column, 29) - 14) / T(257)
+        end
+    end
+    if rank_deficient && equality_count >= 2
+        equality[:, equality_count] .= equality[:, 1]
+    end
+    problem = SDPX.ingest(
+        ones(T, variable_count),
+        coefficients,
+        [zeros(T, 2, 2) for _ in 1:block_count],
+        equality,
+        zeros(T, equality_count);
+        sparse=true,
+        verbosity=0,
+    )
+    X = [
+        T[2 + block / 100 1 / 31; 1 / 31 3 / 2 + block / 200]
+        for block in 1:block_count
+    ]
+    Y = [
+        T[7 / 5 + block / 150 1 / 37; 1 / 37 19 / 10 + block / 250]
+        for block in 1:block_count
+    ]
+    return problem, X, Y
+end
+
 @testset "MFLA optional provider core contract" begin
     LA = SDPX
 
@@ -64,6 +116,7 @@ end
                     :dense_cholesky,
                     :positive_definite_cholesky,
                     :dense_lu,
+                    :block_arrow,
                 )
                     @test_throws ArgumentError LA.plan_la_backend(
                         T;
@@ -110,6 +163,53 @@ end
                 route=route,
             ).selected === (_MFLA_LOADED ? :multifloat : :standard)
         end
+        for T in _MFLA_TYPES
+            @test LA.plan_la_backend(
+                T;
+                requested=:auto,
+                route=:block_arrow,
+            ).selected === (_MFLA_LOADED ? :multifloat : :legacy)
+            @test LA.plan_la_backend(
+                T;
+                requested=:legacy,
+                route=:block_arrow,
+            ).selected === :legacy
+            @test_throws ArgumentError LA.plan_la_backend(
+                T;
+                requested=:standard,
+                route=:block_arrow,
+            )
+        end
+    end
+
+    @testset "legacy block-arrow equality tail is unchanged" begin
+        T = Float64
+        problem, X, Y = _mfla_block_arrow_fixture(T)
+        options = SDPX.SolverOptions{T}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            sparse=true,
+            formulation=:auto,
+            equality_solver=:normal_equations,
+            linear_algebra_backend=:legacy,
+            extended_precision_blas=:off,
+            mixed_precision_kkt=:off,
+            threads=1,
+            verbosity=0,
+        )
+        plan = SDPX.build_execution_plan(problem, options)
+        @test plan.kkt_backend === :block_arrow
+        @test plan.la_config.selected === :legacy
+        workspace = SDPX.Workspace(problem; execution_plan=plan)
+        @test workspace.la_backend isa SDPX.LegacyLABackend
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
+        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        @test factorization.ok
+        @test workspace.equality_gram_kernel === :blas_syrk
+        @test workspace.Qchol isa SDPX.LegacyLACholeskyFactor{T}
+        @test workspace.executed_la_provider === :sdpx_legacy_la
     end
 end
 
@@ -204,6 +304,30 @@ if _MFLA_LOADED
             @test :lu ∉ automatic.required_capabilities
             @test :pivoted_symmetric_ldlt ∉ automatic.required_capabilities
 
+            block_arrow = LA.plan_la_backend(
+                T;
+                requested=:multifloat,
+                route=:block_arrow,
+                equality_solver=:normal_equations,
+            )
+            @test block_arrow.selected === :multifloat
+            @test block_arrow.provider === :multifloat_linear_algebra
+            @test block_arrow.required_capabilities == (
+                :cholesky,
+                :factor_solve,
+                :syrk,
+            )
+            @test block_arrow.fallback_chain == ()
+            @test :triangular_solve ∉ block_arrow.required_capabilities
+            block_arrow_auto = LA.plan_la_backend(
+                T;
+                requested=:auto,
+                route=:block_arrow,
+                equality_solver=:auto,
+            )
+            @test block_arrow_auto.selected === :multifloat
+            @test block_arrow_auto.fallback_chain == (:rank_revealing_qr,)
+
             augmented = LA.plan_la_backend(
                 T;
                 requested=:multifloat,
@@ -222,6 +346,146 @@ if _MFLA_LOADED
             @test :pivoted_symmetric_ldlt in augmented.capabilities
             @test :multi_rhs in augmented.capabilities
         end
+    end
+
+
+    @testset "MFLA block-arrow equality tail" begin
+        T = Float64x2
+        problem, X, Y = _mfla_block_arrow_fixture(T)
+        options = SDPX.SolverOptions{T}(
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            sparse=true,
+            formulation=:auto,
+            equality_solver=:normal_equations,
+            linear_algebra_backend=:multifloat,
+            extended_precision_blas=:off,
+            mixed_precision_kkt=:off,
+            threads=1,
+            verbosity=0,
+        )
+        plan = SDPX.build_execution_plan(problem, options)
+        @test plan.kkt_backend === :block_arrow
+        @test plan.la_config.selected === :multifloat
+        @test plan.la_config.required_capabilities == (
+            :cholesky,
+            :factor_solve,
+            :syrk,
+        )
+
+        workspace = SDPX.Workspace(problem; execution_plan=plan)
+        @test workspace.la_backend isa SDPX.MultiFloatLABackend
+        @test workspace.arrow !== nothing
+        @test isempty(workspace.arrow.global_ids)
+        @test SDPX.factor_blocks!(workspace, X, Y)
+        SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
+        schur = zeros(T, problem.dims.m, problem.dims.m)
+        SDPX.materialize_schur!(schur, workspace)
+
+        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        @test factorization.ok
+        @test !factorization.q_pivoted
+        @test !factorization.q_rank_deficient
+        @test workspace.equality_gram_kernel === :multifloat_syrk
+        @test workspace.Qchol isa SDPX.ProviderLACholeskyFactor{T}
+        @test SDPX.la_factor_provider_identity(
+            SDPX.la_factor_provider(workspace.Qchol),
+        ) === :multifloat_linear_algebra
+        @test workspace.executed_la_backend === :multifloat
+        @test workspace.executed_la_provider ===
+              :multifloat_linear_algebra
+
+        expected_gram = transpose(workspace.Btil) * workspace.Btil
+        gram_scale = max(maximum(abs, expected_gram), one(T))
+        @test maximum(
+            abs,
+            LowerTriangular(workspace.Q) - LowerTriangular(expected_gram),
+        ) / gram_scale <= T(1e-24)
+
+        primal_rhs = T.(range(-0.7, 1.1; length=problem.dims.m))
+        equality_rhs = T.(range(-0.2, 0.3; length=problem.dims.n))
+        dx = zeros(T, problem.dims.m)
+        dy = zeros(T, problem.dims.n)
+        SDPX.solve_kkt!(
+            workspace,
+            problem.dims.n,
+            primal_rhs,
+            equality_rhs,
+            dx,
+            dy,
+        )
+        first_residual = schur * dx - problem.B * dy - primal_rhs
+        second_residual = transpose(problem.B) * dx - equality_rhs
+        residual_scale = max(
+            maximum(abs, primal_rhs),
+            maximum(abs, equality_rhs),
+            one(T),
+        )
+        @test max(
+            maximum(abs, first_residual),
+            maximum(abs, second_residual),
+        ) / residual_scale <= T(1e-20)
+
+        deficient, Xdef, Ydef = _mfla_block_arrow_fixture(
+            T;
+            rank_deficient=true,
+        )
+        normal_plan = SDPX.build_execution_plan(deficient, options)
+        normal_workspace = SDPX.Workspace(
+            deficient;
+            execution_plan=normal_plan,
+        )
+        @test SDPX.factor_blocks!(normal_workspace, Xdef, Ydef)
+        SDPX.schur_build!(
+            normal_workspace,
+            deficient,
+            deficient.cons,
+            Xdef,
+            Ydef,
+        )
+        rejected = SDPX.factor_kkt!(
+            normal_workspace,
+            deficient,
+            options,
+        )
+        @test !rejected.ok
+        @test normal_workspace.la_fallback_reason ===
+              :la_equality_factor_failed
+        @test !(normal_workspace.Qchol isa LinearAlgebra.CholeskyPivoted)
+
+        auto_options = SDPX._replace_solver_options(
+            options;
+            equality_solver=:auto,
+        )
+        auto_plan = SDPX.build_execution_plan(deficient, auto_options)
+        @test auto_plan.la_config.fallback_chain == (:rank_revealing_qr,)
+        auto_workspace = SDPX.Workspace(
+            deficient;
+            execution_plan=auto_plan,
+        )
+        @test SDPX.factor_blocks!(auto_workspace, Xdef, Ydef)
+        SDPX.schur_build!(
+            auto_workspace,
+            deficient,
+            deficient.cons,
+            Xdef,
+            Ydef,
+        )
+        accepted = SDPX.factor_kkt!(
+            auto_workspace,
+            deficient,
+            auto_options,
+        )
+        @test accepted.ok
+        @test accepted.q_pivoted
+        @test accepted.q_rank_deficient
+        @test auto_workspace.Qchol isa SDPX.EqualityQRFactor{T}
+        @test auto_workspace.la_fallback_reason ===
+              :la_equality_factor_failed
+        @test SDPX.la_factor_provider_identity(
+            SDPX.la_factor_provider(auto_workspace.Qchol),
+        ) === :multifloat_linear_algebra
     end
 
     @testset "MFLA Cholesky multi-RHS and provenance" begin

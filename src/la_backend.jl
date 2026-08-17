@@ -2,9 +2,10 @@
     SDPX linear-algebra backend
 
 The structural planner remains in `pipeline.jl`; this file is the small
-arithmetic seam used by ordinary dense KKT primitives. Legacy kernels remain
-for Q3, sparse, arrow, reduced, mixed-precision, and other explicitly
-non-migrated paths.
+arithmetic seam used by dense KKT primitives. Legacy kernels remain for Q3,
+sparse, reduced, mixed-precision, and other explicitly non-migrated paths.
+Block-arrow retains its specialized local kernels while optionally delegating
+only its dense equality tail to MultiFloatLinearAlgebra.
 =#
 
 """Optional arithmetic-provider hook; extensions overload this method."""
@@ -45,6 +46,28 @@ const _DENSE_AUGMENTED_REQUIRED = (
     :factor_solve,
     :multi_rhs,
 )
+
+# Block-arrow keeps its specialized 2x2 block factors and row-wise triangular
+# solves in SDPX.  The optional MultiFloat provider owns only the dense
+# equality tail: Q = Btil'Btil, its Cholesky factor, and factor solves.
+const _BLOCK_ARROW_MULTIFLOAT_REQUIRED = (
+    :cholesky,
+    :factor_solve,
+    :syrk,
+)
+
+function _block_arrow_multifloat_requirements(equality_solver::Symbol)
+    equality_solver === :qr && return (
+        operations=(:rank_revealing_qr,),
+        capabilities=(:rank_revealing_qr,),
+        fallback=nothing,
+    )
+    return (
+        operations=(:cholesky_factor!, :solve, :syrk),
+        capabilities=_BLOCK_ARROW_MULTIFLOAT_REQUIRED,
+        fallback=equality_solver === :auto ? :rank_revealing_qr : nothing,
+    )
+end
 
 function _dense_cholesky_required_capabilities(equality_solver::Symbol)
     # SDPX's explicit equality QR route is column-pivoted and rank revealing;
@@ -280,9 +303,23 @@ function plan_la_backend(
             ))
     end
     descriptor = la_provider_descriptor(T, threads)
-    requirements = _la_route_requirements(route, equality_solver)
+    multifloat_block_arrow =
+        route === :block_arrow &&
+        (
+            requested === :multifloat ||
+            (
+                requested === :auto &&
+                is_multifloat_arithmetic(T) &&
+                descriptor.available &&
+                descriptor.provider === :multifloat_linear_algebra
+            )
+        )
+    requirements = multifloat_block_arrow ?
+        _block_arrow_multifloat_requirements(equality_solver) :
+        _la_route_requirements(route, equality_solver)
     # Ordinary dense SDP and LP factors use the provider seam. Specialized
-    # routes retain their established implementation; explicit requests fail
+    # routes retain their established implementation, except for block-arrow's
+    # narrowly migrated MultiFloat equality tail. Other explicit requests fail
     # during planning instead of being silently reselected at execution.
     if requirements === nothing
         if requested in (:auto, :legacy)
@@ -418,6 +455,7 @@ function plan_la_backend(
             _descriptor_capability_model(descriptor) :
             LAProviderCapabilities()
         if descriptor.available &&
+           descriptor.provider === :multifloat_linear_algebra &&
            all(cap -> cap in descriptor.capabilities, required_operations) &&
            isempty(_missing_la_capabilities(
                descriptor_capabilities,
@@ -441,8 +479,9 @@ function plan_la_backend(
             )
             return validate_la_backend_configuration(config, T)
         end
-        reason = descriptor.available ? :incomplete_provider_capabilities :
-                 :missing_provider
+        reason = descriptor.available &&
+                 descriptor.provider === :multifloat_linear_algebra ?
+                 :incomplete_provider_capabilities : :missing_provider
         throw(ArgumentError(
             "requested MultiFloat LA provider unavailable: $(reason)",
         ))
