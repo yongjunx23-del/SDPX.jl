@@ -29,6 +29,7 @@ const QUICK_TESTS = (
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
     "precision_ladder_plan.jl",
+    "csdr_convergence.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -101,6 +102,7 @@ const FULL_TESTS = (
     "precision_ladder_plan.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
+    "csdr_convergence.jl",
 )
 
 function _test_profile()

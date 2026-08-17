@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# One-iteration KKT/resource gate. Its artifacts are never consumed as solve
+# results by the convergence controller.
+#PBS -N csdr-campaign-preflight
+#PBS -q normal
+#PBS -l nodes=1:ppn=64
+#PBS -l mem=224gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+set -euo pipefail
+: "${CAMPAIGN_ROOT:?qsub must export CAMPAIGN_ROOT}"
+: "${CSDR_PREFLIGHT_MANIFEST:?qsub must export CSDR_PREFLIGHT_MANIFEST}"
+: "${SDPX_SOURCE_ROOT:?qsub must export SDPX_SOURCE_ROOT}"
+: "${SDPX_ENV_ROOT:?qsub must export SDPX_ENV_ROOT}"
+: "${SDPX_DEPLOYED_COMMIT:?qsub must export SDPX_DEPLOYED_COMMIT}"
+: "${MFLA_DEPLOYED_COMMIT:?qsub must export MFLA_DEPLOYED_COMMIT}"
+: "${CSDR_SOURCE_TREE_SHA256:?qsub must export CSDR_SOURCE_TREE_SHA256}"
+readonly CSDR_SOURCE_ROOT="${CSDR_SOURCE_ROOT:-$CAMPAIGN_ROOT/csdr-source}"
+readonly ARRAY_INDEX="${PBS_ARRAY_INDEX:-${PBS_ARRAYID:-}}"
+: "${ARRAY_INDEX:?preflight requires PBS array index}"
+row=$(sed -n "$((ARRAY_INDEX + 2))p" "$CSDR_PREFLIGHT_MANIFEST")
+IFS=$'\t' read -r phase stage case_id j na nmu alpha_level alpha_count frontier_max_count predicted_peak_gib nred solver_threads resource_class requested_cores memory_gb walltime cache_alpha_level cache_alpha_count cache_rel result_rel build_rel predecessor_key <<< "$row"
+[[ "$phase" == solve && "$resource_class" != resource_frontier ]] || exit 2
+readonly SHARED_ROOT="${CSDR_SHARED_ROOT:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat}"
+readonly JULIA_BIN="${JULIA_BIN:-$SHARED_ROOT/julia/julia-1.12.6/bin/julia}"
+readonly DRIVER="${CSDR_DRIVER:-$CAMPAIGN_ROOT/driver/g0_max_bigfloat256_float64x2.jl}"
+readonly CACHE="$CAMPAIGN_ROOT/$cache_rel"
+readonly BUILD_ROOT="$CAMPAIGN_ROOT/$build_rel"
+readonly OUT_ROOT="$CAMPAIGN_ROOT/preflight/$stage/j${j}/nmu${nmu}/q${alpha_count}"
+readonly OUT="$OUT_ROOT/preflight.toml"
+readonly CAP_GB="${CSDR_PREFLIGHT_MEMORY_CAP_GB:-176}"
+test -x "$JULIA_BIN"; test -f "$DRIVER"; test -s "$CACHE"; test -f "$BUILD_ROOT/BUILD_COMPLETE"
+test -f "$BUILD_ROOT/cache.sha256"; test -f "$BUILD_ROOT/source.sha256"
+test -f "$SDPX_SOURCE_ROOT/Project.toml"; test -d "$SDPX_SOURCE_ROOT/ext"
+test -f "$SDPX_ENV_ROOT/Project.toml"; test -f "$SDPX_ENV_ROOT/Manifest.toml"
+test -f "$CSDR_SOURCE_ROOT/src/csdr_model.jl"
+mkdir -p "$OUT_ROOT"
+[[ ! -e "$OUT" ]] || { echo "refusing to overwrite immutable preflight: $OUT" >&2; exit 3; }
+export JULIA_NUM_THREADS="$solver_threads" JULIA_PROJECT="$SDPX_ENV_ROOT" JULIA_PKG_OFFLINE=true
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+export SDPX_SOURCE_ROOT CSDR_SOURCE_ROOT SDPX_DEPLOYED_COMMIT MFLA_DEPLOYED_COMMIT CSDR_SOURCE_TREE_SHA256
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-$SHARED_ROOT/depot}" JULIA_LOAD_PATH="$SDPX_ENV_ROOT:@stdlib"
+allocated_slots=$(wc -l < "${PBS_NODEFILE:-/dev/null}" 2>/dev/null || echo 0)
+((allocated_slots == solver_threads)) || { echo "preflight allocation/thread mismatch" >&2; exit 2; }
+source /public/software/profile.d/compiler_gcc_11.sh
+active_sdpx=$($JULIA_BIN --startup-file=no --project="$SDPX_ENV_ROOT" -e 'using SDPX; print(pathof(SDPX))')
+case "$active_sdpx" in "$SDPX_SOURCE_ROOT"/*) ;; *) exit 3 ;; esac
+active_project=$($JULIA_BIN --startup-file=no --project="$SDPX_ENV_ROOT" -e 'print(Base.active_project())')
+[[ "$active_project" == "$SDPX_ENV_ROOT/Project.toml" ]] || exit 3
+cache_hash=$(sha256sum "$CACHE" | awk '{print $1}')
+expected_build_hash=$(awk 'NR == 1 {print $1}' "$BUILD_ROOT/cache.sha256")
+[[ "$cache_hash" == "$expected_build_hash" ]] || exit 3
+export CSDR_CACHE_SHA256="$cache_hash"
+
+write_preflight_marker() {
+    local status=$1 reason=$2 marker_tmp="$OUT.part.${PBS_JOBID:-$$}"
+    # Preserve a driver-written diagnostic under a distinct name; the
+    # canonical preflight path is always one immutable machine-readable state.
+    if [[ -e "$OUT" ]]; then
+        mv "$OUT" "$OUT.driver-output.${PBS_JOBID:-$$}"
+    fi
+    {
+        printf 'preflight=true\n'
+        printf 'status="%s"\n' "$status"
+        printf 'case_id="%s"\n' "$case_id"
+        printf 'J=%s\nN_mu=%s\nN_a=%s\n' "$j" "$nmu" "$na"
+        printf 'alpha_level=%s\nalpha_count=%s\n' "$alpha_level" "$alpha_count"
+        printf 'predicted_peak_gib=%s\nmemory_cap_gb=%s\n' "$predicted_peak_gib" "$CAP_GB"
+        printf 'preflight_gate_valid=false\n'
+        printf 'la_planned_provider="multifloat_linear_algebra"\n'
+        printf 'la_executed_provider="not_executed"\n'
+        printf 'fallback_reason="%s"\nla_fallback_reason="%s"\n' "$reason" "$reason"
+        printf 'cache_sha256="%s"\n' "$cache_hash"
+        if [[ "$status" == RESOURCE_FRONTIER ]]; then
+            printf 'resource_frontier="unresolved_at_resource_frontier"\n'
+        else
+            printf 'preflight_failure=true\n'
+        fi
+        printf 'failure_reason="%s"\n' "$reason"
+    } > "$marker_tmp"
+    mv "$marker_tmp" "$OUT"
+}
+
+current_source_hash="$OUT_ROOT/source.sha256"
+{
+    sha256sum "$DRIVER" "$SDPX_SOURCE_ROOT/Project.toml" \
+        "$SDPX_ENV_ROOT/Project.toml" "$SDPX_ENV_ROOT/Manifest.toml"
+    while IFS= read -r rel; do
+        (cd "$SDPX_SOURCE_ROOT" && sha256sum "$rel")
+    done < <(cd "$SDPX_SOURCE_ROOT" && find src ext -type f -name '*.jl' -print | LC_ALL=C sort)
+    while IFS= read -r rel; do
+        (cd "$CSDR_SOURCE_ROOT" && sha256sum "$rel")
+    done < <(cd "$CSDR_SOURCE_ROOT" && find src -type f -name '*.jl' -print | LC_ALL=C sort)
+} > "$current_source_hash"
+cmp -s "$BUILD_ROOT/source.sha256" "$current_source_hash" || {
+    echo "preflight source/environment fingerprint differs from cache build" >&2
+    exit 3
+}
+
+command=("$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" --mode=preflight-cache --cache="$CACHE" --output="$OUT" --J="$j" --N_x=1 --n-mu="$nmu" --n-a="$na" --alpha-level="$alpha_level" --precompute-bits=256 --node-memory-gb="$CAP_GB" --tolerance=1e-6 --maximum-iterations=1 --maximum-time=600 --solver-threads="$solver_threads" --warmup-iterations=0 --verbosity=0)
+rss_file="$OUT_ROOT/time.txt"
+if /usr/bin/time -v -o "$rss_file" "${command[@]}" > "$OUT_ROOT/stdout" 2> "$OUT_ROOT/stderr"; then
+    value() { sed -n -E "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"?([^\"[:space:]]+)\"?.*$/\1/p" "$OUT" | tail -n1; }
+    [[ "$(value preflight_gate_valid)" == true ]] || { write_preflight_marker PREFLIGHT_FAILED gate; exit 1; }
+    [[ "$(value la_planned_provider)" == multifloat_linear_algebra ]] || { write_preflight_marker PREFLIGHT_FAILED provider; exit 1; }
+    [[ "$(value la_executed_provider)" == multifloat_linear_algebra ]] || { write_preflight_marker PREFLIGHT_FAILED provider; exit 1; }
+    [[ "$(value fallback_reason)" == none && "$(value la_fallback_reason)" == none ]] || { write_preflight_marker PREFLIGHT_FAILED fallback; exit 1; }
+    [[ "$(value cache_sha256)" == "$cache_hash" ]] || { write_preflight_marker PREFLIGHT_FAILED cache_digest; exit 1; }
+    rss_kib=$(awk -F: '/Maximum resident set size/ {gsub(/[^0-9]/,"",$2); print $2}' "$rss_file" | tail -n1)
+    rss_bytes=$(( ${rss_kib:-0} * 1024 ))
+    driver_peak=$(value peak_rss_bytes)
+    [[ "$driver_peak" =~ ^[0-9]+$ ]] || driver_peak=0
+    peak=$((driver_peak > rss_bytes ? driver_peak : rss_bytes))
+    ((peak > 0)) || { write_preflight_marker PREFLIGHT_FAILED missing_rss; exit 1; }
+    ((peak <= CAP_GB * 1024 * 1024 * 1024)) || { write_preflight_marker RESOURCE_FRONTIER memory; exit 1; }
+    request_bytes=$((memory_gb * 1024 * 1024 * 1024))
+    ((request_bytes * 4 >= peak * 5)) || {
+        write_preflight_marker RESOURCE_FRONTIER memory_request_headroom
+        exit 1
+    }
+else
+    if grep -Eqi 'frontier|memory|node-memory|exceeds' "$OUT_ROOT/stderr"; then
+        write_preflight_marker RESOURCE_FRONTIER driver_exit
+    else
+        write_preflight_marker PREFLIGHT_FAILED driver_exit
+    fi
+    exit 1
+fi

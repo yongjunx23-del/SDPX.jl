@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Run the read-only adaptive convergence controller after row validation.
+# The controller writes only its action manifest; it never submits PBS jobs.
+#PBS -N csdr-campaign-controller
+#PBS -q normal
+#PBS -l nodes=1:ppn=8
+#PBS -l mem=8gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+: "${CAMPAIGN_ROOT:?qsub must export CAMPAIGN_ROOT}"
+: "${CSDR_SOLVE_MANIFEST:?qsub must export CSDR_SOLVE_MANIFEST}"
+: "${SDPX_DEPLOYED_COMMIT:?qsub must export SDPX_DEPLOYED_COMMIT}"
+: "${MFLA_DEPLOYED_COMMIT:?qsub must export MFLA_DEPLOYED_COMMIT}"
+: "${CSDR_SOURCE_TREE_SHA256:?qsub must export CSDR_SOURCE_TREE_SHA256}"
+: "${CSDR_CONTROLLER:?qsub must export CSDR_CONTROLLER (csdr_convergence_cli.jl)}"
+: "${CSDR_STAGE:?qsub must export CSDR_STAGE}"
+: "${CSDR_RUN_ID:?qsub must export CSDR_RUN_ID}"
+[[ "$SDPX_DEPLOYED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || exit 2
+[[ "$MFLA_DEPLOYED_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]] || exit 2
+[[ "$CSDR_SOURCE_TREE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || exit 2
+
+readonly SHARED_ROOT="${CSDR_SHARED_ROOT:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat}"
+readonly JULIA_BIN="${JULIA_BIN:-$SHARED_ROOT/julia/julia-1.12.6/bin/julia}"
+case "$CSDR_STAGE" in alpha|j|nmu|fence) ;; *) echo "invalid CSDR_STAGE=$CSDR_STAGE" >&2; exit 2 ;; esac
+readonly JOB_TOKEN="${PBS_JOBID:-manual-$$}"
+readonly OUTPUT="${CSDR_CONTROLLER_OUTPUT:-$CAMPAIGN_ROOT/validation/convergence-${CSDR_STAGE}-${CSDR_RUN_ID}-${JOB_TOKEN}.toml}"
+readonly LATEST="$CAMPAIGN_ROOT/validation/convergence-${CSDR_STAGE}-latest.toml"
+readonly VALIDATION_SUMMARY="$CAMPAIGN_ROOT/validation/${CSDR_STAGE}-${CSDR_RUN_ID}/campaign_summary.toml"
+test -x "$JULIA_BIN"
+test -f "$CSDR_CONTROLLER"
+test -s "$CSDR_SOLVE_MANIFEST"
+test -s "$VALIDATION_SUMMARY"
+mkdir -p "$(dirname "$OUTPUT")"
+[[ ! -e "$OUTPUT" ]] || { echo "refusing to overwrite immutable controller output: $OUTPUT" >&2; exit 3; }
+if [[ -z "${CSDR_DRIVER_SHA256:-}" && -n "${CSDR_DRIVER:-}" && -f "$CSDR_DRIVER" ]]; then
+    CSDR_DRIVER_SHA256=$(sha256sum "$CSDR_DRIVER" | awk '{print $1}')
+    export CSDR_DRIVER_SHA256
+fi
+
+args=(
+    --startup-file=no
+    "$CSDR_CONTROLLER"
+    --root "$CAMPAIGN_ROOT"
+    --output "$OUTPUT"
+    --sdpx-commit "$SDPX_DEPLOYED_COMMIT"
+    --mfla-commit "$MFLA_DEPLOYED_COMMIT"
+    --csdr-source-tree-sha256 "$CSDR_SOURCE_TREE_SHA256"
+    --expect la_planned_provider=multifloat_linear_algebra
+    --expect la_executed_provider=multifloat_linear_algebra
+    --expect fallback_reason=none
+    --expect la_fallback_reason=none
+)
+manifest_args=()
+while IFS= read -r manifest_path; do
+    [[ -s "$manifest_path" ]] || continue
+    manifest_args+=(--manifest "$manifest_path")
+done < <(find "$CAMPAIGN_ROOT/manifests" -type f -name 'csdr-grid-solve.tsv' -print 2>/dev/null | LC_ALL=C sort)
+if ((${#manifest_args[@]} == 0)); then
+    manifest_args+=(--manifest "$CSDR_SOLVE_MANIFEST")
+fi
+args+=("${manifest_args[@]}")
+args+=(--result-root "$CAMPAIGN_ROOT/results")
+frontier_args=()
+while IFS= read -r frontier_path; do
+    [[ -s "$frontier_path" ]] || continue
+    awk 'NR > 1 && NF > 0 { found=1 } END { exit(found ? 0 : 1) }' "$frontier_path" || continue
+    frontier_args+=(--frontier "$frontier_path")
+done < <(find "$CAMPAIGN_ROOT/manifests" "$CAMPAIGN_ROOT/validation" \
+    -type f -name 'resource-frontier.tsv' -print 2>/dev/null | LC_ALL=C sort)
+args+=("${frontier_args[@]}")
+if [[ -n "${CSDR_DRIVER_SHA256:-}" ]]; then
+    [[ "$CSDR_DRIVER_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || exit 2
+    args+=(--driver-sha256 "$CSDR_DRIVER_SHA256")
+fi
+
+set +e
+"$JULIA_BIN" "${args[@]}" > "$OUTPUT.stdout" 2> "$OUTPUT.stderr"
+controller_rc=$?
+set -e
+test -s "$OUTPUT"
+summary_sha256=$(sha256sum "$VALIDATION_SUMMARY" | awk '{print $1}')
+summary_failed=$(sed -n -E 's/^failed=([0-9]+)$/\1/p' "$VALIDATION_SUMMARY" | tail -n1)
+[[ "$summary_sha256" =~ ^[0-9a-fA-F]{64}$ && "$summary_failed" =~ ^[0-9]+$ ]] || {
+    echo "invalid aggregate validation summary: $VALIDATION_SUMMARY" >&2
+    exit 2
+}
+{
+    printf 'validation_summary_path="%s"\n' "$VALIDATION_SUMMARY"
+    printf 'validation_summary_sha256="%s"\n' "$summary_sha256"
+    printf 'validation_summary_failed=%s\n' "$summary_failed"
+} >> "$OUTPUT"
+latest_tmp="$LATEST.part.${JOB_TOKEN}"
+ln -s "$(basename "$OUTPUT")" "$latest_tmp"
+mv -Tf "$latest_tmp" "$LATEST"
+printf 'controller_output=%s\n' "$OUTPUT"
+exit "$controller_rc"

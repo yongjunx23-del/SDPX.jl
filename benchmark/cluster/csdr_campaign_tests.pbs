@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Cluster-only orchestration and release gate.  This job is intentionally
+# bounded and must run on a compute node in the pinned Julia environment; it
+# is never a substitute for the production PBS campaign.
+#PBS -N csdr-campaign-tests
+#PBS -q normal
+#PBS -l nodes=1:ppn=8
+#PBS -l mem=8gb
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+readonly RELEASE_ROOT="${CSDR_RELEASE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+readonly MANIFEST_TOOL="$SCRIPT_DIR/csdr_campaign_manifest.sh"
+readonly JULIA_BIN="${JULIA_BIN:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat/julia/julia-1.12.6/bin/julia}"
+readonly DRIVER="${CSDR_DRIVER:-$RELEASE_ROOT/benchmark/bootstrap/Full-unitraity-EFT/g0_max_bigfloat256_float64x2.jl}"
+readonly CONVERGENCE_TEST="${CSDR_CONVERGENCE_TEST:-$RELEASE_ROOT/test/csdr_convergence.jl}"
+readonly CACHE_TEST="${CSDR_CACHE_CONTRACT_TEST:-$RELEASE_ROOT/test/csdr_cache_contract.jl}"
+: "${SDPX_ENV_ROOT:?qsub must export SDPX_ENV_ROOT}"
+: "${SDPX_SOURCE_ROOT:?qsub must export SDPX_SOURCE_ROOT}"
+: "${CSDR_SOURCE_ROOT:?qsub must export CSDR_SOURCE_ROOT}"
+: "${SDPX_DEPLOYED_COMMIT:?qsub must export SDPX_DEPLOYED_COMMIT}"
+: "${MFLA_DEPLOYED_COMMIT:?qsub must export MFLA_DEPLOYED_COMMIT}"
+: "${CSDR_SOURCE_TREE_SHA256:?qsub must export CSDR_SOURCE_TREE_SHA256}"
+[[ "$SDPX_DEPLOYED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
+[[ "$MFLA_DEPLOYED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
+[[ "$CSDR_SOURCE_TREE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
+
+test -x "$JULIA_BIN"
+test -f "$DRIVER"
+test -f "$CONVERGENCE_TEST"
+test -f "$MANIFEST_TOOL"
+test -f "$SDPX_SOURCE_ROOT/Project.toml"
+test -f "$CSDR_SOURCE_ROOT/src/csdr_model.jl"
+source /public/software/profile.d/compiler_gcc_11.sh
+export JULIA_PROJECT="$SDPX_ENV_ROOT" JULIA_PKG_OFFLINE=true
+export JULIA_DEPOT_PATH="${JULIA_DEPOT_PATH:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat/depot}"
+export JULIA_LOAD_PATH="$SDPX_ENV_ROOT:@stdlib"
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+export SDPX_SOURCE_ROOT CSDR_SOURCE_ROOT SDPX_DEPLOYED_COMMIT MFLA_DEPLOYED_COMMIT CSDR_SOURCE_TREE_SHA256
+
+active_sdpx=$("$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" \
+    -e 'using SDPX; print(pathof(SDPX))')
+case "$active_sdpx" in
+    "$SDPX_SOURCE_ROOT"/*) ;;
+    *) echo "active SDPX package path does not match release: $active_sdpx" >&2; exit 3 ;;
+esac
+active_project=$("$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" \
+    -e 'print(Base.active_project())')
+[[ "$active_project" == "$SDPX_ENV_ROOT/Project.toml" ]] || {
+    echo "active Julia project does not match pinned environment: $active_project" >&2
+    exit 3
+}
+actual_csdr_tree=$(cd "$CSDR_SOURCE_ROOT" && \
+    while IFS= read -r rel; do
+        printf '%s:' "$rel"
+        sha256sum "$rel" | awk '{print $1}'
+        printf '\n'
+    done < <(find src -type f -name '*.jl' -print | LC_ALL=C sort) | sha256sum | awk '{print $1}')
+[[ "$actual_csdr_tree" == "$CSDR_SOURCE_TREE_SHA256" ]] || {
+    echo "CSDR source tree differs from the pinned campaign identity" >&2
+    exit 3
+}
+
+# Syntax and canonical one-point dry-run checks happen on the compute node.
+for script in \
+    "$SCRIPT_DIR/csdr_campaign_manifest.sh" \
+    "$SCRIPT_DIR/csdr_campaign_launch.sh" \
+    "$SCRIPT_DIR/csdr_campaign_validate.sh" \
+    "$SCRIPT_DIR/csdr_cache_build.pbs" \
+    "$SCRIPT_DIR/csdr_cache_solve.pbs" \
+    "$SCRIPT_DIR/csdr_campaign_preflight.pbs" \
+    "$SCRIPT_DIR/csdr_campaign_controller.pbs" \
+    "$SCRIPT_DIR/csdr_campaign_tests.pbs"; do
+    bash -n "$script"
+done
+gate_tmp=$(mktemp -d "${TMPDIR:-/tmp}/csdr-campaign-gate.XXXXXX")
+trap 'rm -rf "$gate_tmp"' EXIT
+"$MANIFEST_TOOL" --phase solve --stage alpha --output "$gate_tmp/alpha.tsv"
+awk -F '\t' 'NR == 1 {next} NR == 2 {ok = ($1 == "solve" && $4 == 40 && $6 == 400 && $8 == 2 && $13 == "small16")} END {exit(ok ? 0 : 1)}' "$gate_tmp/alpha.tsv"
+
+# Release/driver parser gates.  Invalid-grid must fail closed; no model solve
+# is launched by this job.
+"$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" --help >/dev/null
+if "$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" \
+    --mode=preflight-cache --cache="$gate_tmp/missing.cache" --output="$gate_tmp/out.toml" \
+    --J=39 --N_x=1 --n-mu=400 --n-a=15 --alpha-level=1 \
+    --precompute-bits=256 --node-memory-gb=176 --maximum-iterations=1 \
+    --maximum-time=60 --solver-threads=16 >/dev/null 2>&1; then
+    echo 'driver accepted an invalid-grid gate invocation' >&2
+    exit 1
+fi
+"$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" \
+    -e 'using MultiFloatLinearAlgebra; print(pathof(MultiFloatLinearAlgebra))' >/dev/null
+"$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$CONVERGENCE_TEST"
+
+if [[ "${SDPX_RUN_CSDR_CAMPAIGN_TESTS:-0}" == 1 ]]; then
+    test -f "$CACHE_TEST"
+    SDPX_RUN_CSDR_CACHE_CONTRACT_TESTS=1 \
+        "$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$CACHE_TEST"
+fi
+echo 'csdr campaign cluster gate: PASS'

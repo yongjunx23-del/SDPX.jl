@@ -1,0 +1,233 @@
+"""
+Cluster-only contract tests for the alpha-max CSDR cache.
+
+The ordinary SDPX test profiles intentionally do not include this file: the
+driver imports MultiFloatLinearAlgebra and loads the external CSDR source at
+include time.  Run explicitly in the pinned cluster environment with
+`SDPX_RUN_CSDR_CACHE_CONTRACT_TESTS=1` plus the normal CSDR/MFLA deployment
+identity variables.
+"""
+
+using Test
+using SparseArrays
+
+const CSDR_CACHE_CONTRACT_GATE =
+    strip(get(ENV, "SDPX_RUN_CSDR_CACHE_CONTRACT_TESTS", "")) == "1"
+
+if !CSDR_CACHE_CONTRACT_GATE
+    @info "Skipping cluster-only CSDR cache contract tests" env="SDPX_RUN_CSDR_CACHE_CONTRACT_TESTS=1"
+else
+    const CSDR_DRIVER_PATH = joinpath(
+        @__DIR__, "..", "benchmark", "bootstrap", "Full-unitraity-EFT",
+        "g0_max_bigfloat256_float64x2.jl",
+    )
+
+    # The production driver parses ARGS and loads its source checkout while it
+    # is included.  Empty ARGS for this one explicit cluster-only include, then
+    # restore the test runner's arguments.  No model construction is performed.
+    const _saved_args = copy(ARGS)
+    empty!(ARGS)
+    try
+        include(CSDR_DRIVER_PATH)
+    finally
+        append!(ARGS, _saved_args)
+    end
+
+    function synthetic_config(alpha_labels; N_mu=2, N_a=2, l_max=40, N_x=1)
+        return PrimalCSDRSource.CSDRConfig(
+            "synthetic-cache-contract.jl",
+            "synthetic-cache-contract",
+            "zero_subtraction",
+            4,
+            N_mu,
+            N_a,
+            l_max,
+            N_x,
+            copy(alpha_labels),
+            256,
+            "Float64x2",
+            "max",
+            Dict("c_0_0" => "1"),
+            Dict{String,String}(),
+            "1e-6",
+            1,
+            1.0,
+            120.0,
+        )
+    end
+
+    function synthetic_problem(equalities)
+        variables = 4
+        off_diagonal = sparse(SOLVE_TYPE[0 1; 1 0])
+        traceless = sparse(SOLVE_TYPE[1 0; 0 -1])
+        blocks = [
+            SDPX.ActiveSparseCoefficientVector(
+                SOLVE_TYPE, variables, [1, 2], [off_diagonal, traceless], 2,
+            ),
+            SDPX.ActiveSparseCoefficientVector(
+                SOLVE_TYPE, variables, [3, 4], [off_diagonal, traceless], 2,
+            ),
+        ]
+        constants = [SOLVE_TYPE[0 0; 0 -2] for _ in 1:2]
+        rows = [((column - 1) % variables) + 1 for column in 1:equalities]
+        columns = collect(1:equalities)
+        values = fill(SOLVE_TYPE(1), equalities)
+        equality = sparse(rows, columns, values, variables, equalities)
+        rhs = SOLVE_TYPE.(1:equalities)
+        return SDPX.ingest(
+            fill(SOLVE_TYPE(1), variables),
+            blocks,
+            constants,
+            equality,
+            rhs;
+            T=SOLVE_TYPE,
+            sparse=:sparse,
+            validate=true,
+            symmetrize=false,
+            verbosity=0,
+        )
+    end
+
+    @testset "CSDR alpha-max subset cache" begin
+        maximal_alpha = dyadic_alpha_set(6)
+        config = synthetic_config(maximal_alpha)
+        coefficient_count = 3 # c_0_0, c_1_0, c_1_1 for Nx=1
+        relation_specs = [
+            (n, alpha, ja)
+            for n in 0:1, alpha in maximal_alpha, ja in 1:config.N_a
+        ]
+        eliminated = Set(((0, "0", 1), (1, "0", 1), (1, "0", 2)))
+        relation_specs = [
+            specification for specification in relation_specs
+            if !(specification in eliminated)
+        ]
+        maximal_problem = synthetic_problem(length(relation_specs))
+        reconstruction = (
+            coefficient_constant=SOLVE_TYPE[1, 2, 3],
+            coefficient_from_spectrum=fill(SOLVE_TYPE(1), 3, 4),
+            objective_constant=SOLVE_TYPE(7),
+        )
+
+        for level in CAMPAIGN_ALPHA_LEVELS
+            requested = dyadic_alpha_set(level)
+            requested_set = Set(requested)
+            keep = findall(specification -> specification[2] in requested_set,
+                           relation_specs)
+            subset = subset_cached_problem(
+                maximal_problem,
+                relation_specs,
+                requested,
+                coefficient_count,
+                config,
+            )
+            expected_equalities = 2 * length(requested) * config.N_a -
+                coefficient_count
+            @test length(requested) in CAMPAIGN_ALPHA_COUNTS
+            @test subset.dims.m == maximal_problem.dims.m
+            @test subset.dims.m == 4
+            @test subset.dims.L == maximal_problem.dims.L
+            @test subset.dims.L == 2
+            @test subset.dims.n == expected_equalities
+            @test subset.dims.n == length(keep)
+            @test subset.c == maximal_problem.c
+            @test subset.b == maximal_problem.b[keep]
+            @test subset.B == maximal_problem.B[:, keep]
+            # The production loader returns cache.reconstruction unchanged by
+            # alpha row filtering; verify the mapping contract independently
+            # of the sliced equality matrix.
+            @test size(reconstruction.coefficient_from_spectrum, 2) == subset.dims.m
+            @test reconstruction.coefficient_constant == SOLVE_TYPE[1, 2, 3]
+        end
+    end
+
+    @testset "CSDR cache geometry rejection" begin
+        payload = (
+            N_mu=400,
+            N_a=15,
+            l_max=40,
+            N_x=1,
+            precompute_bits=256,
+        )
+        function geometry_settings(; N_mu=400, N_a=15, l_max=40, N_x=1,
+                                   precompute_bits=256)
+            return RunSettings(
+                mode=:solve_cache,
+                cache="synthetic.cache",
+                N_mu=N_mu,
+                N_a=N_a,
+                l_max=l_max,
+                N_x=N_x,
+                precompute_bits=precompute_bits,
+                alpha_labels=dyadic_alpha_set(2),
+            )
+        end
+        valid = geometry_settings()
+        @test validate_cache_geometry(payload, valid) === nothing
+        @test_throws ErrorException validate_cache_geometry(
+            merge(payload, (N_mu=800,)), valid,
+        )
+        @test_throws ErrorException validate_cache_geometry(
+            payload, geometry_settings(N_mu=800),
+        )
+        @test_throws ErrorException validate_cache_geometry(
+            payload, geometry_settings(N_a=30),
+        )
+        @test_throws ErrorException validate_cache_geometry(
+            payload, geometry_settings(l_max=80, N_a=30),
+        )
+        @test_throws ErrorException validate_cache_geometry(
+            payload, geometry_settings(N_x=0),
+        )
+        @test_throws ErrorException validate_cache_geometry(
+            payload, geometry_settings(precompute_bits=128),
+        )
+    end
+
+    @testset "CSDR campaign dimensions" begin
+        for J in CAMPAIGN_J_VALUES, N_mu in CAMPAIGN_NMU_VALUES,
+            alpha_count in CAMPAIGN_ALPHA_COUNTS
+            N_a = campaign_na(J)
+            settings = RunSettings(
+                mode=:solve_cache,
+                N_mu=N_mu,
+                N_a=N_a,
+                l_max=J,
+                N_x=CAMPAIGN_NX,
+                precompute_bits=CAMPAIGN_PRECOMPUTE_BITS,
+                alpha_labels=dyadic_alpha_set(
+                    campaign_alpha_level_from_count(alpha_count),
+                ),
+            )
+            expected = expected_dimensions(settings; alpha_count=alpha_count)
+            L = N_mu * (J ÷ 2 + 1)
+            @test expected.n_range_count == 2
+            @test expected.low_energy_variables == 3
+            @test expected.psd_blocks == L
+            @test expected.reduced_variables == 2 * L
+            @test expected.reduced_equalities == 2 * alpha_count * N_a - 3
+            @test expected.reduced_equalities >= 0
+        end
+    end
+
+    @testset "MFLA cache provenance" begin
+        valid = (
+            la_planned_provider=string(MFLA_PROVIDER),
+            la_executed_provider="not_executed",
+            fallback_reason="none",
+            la_fallback_reason="none",
+        )
+        @test validate_cache_la_provenance(valid) === nothing
+        @test_throws ErrorException validate_cache_la_provenance(
+            merge(valid, (la_planned_provider="legacy",)),
+        )
+        @test_throws ErrorException validate_cache_la_provenance(
+            merge(valid, (la_executed_provider="multifloat_linear_algebra",)),
+        )
+        @test_throws ErrorException validate_cache_la_provenance(
+            merge(valid, (fallback_reason="dense_fallback",)),
+        )
+        @test_throws ErrorException validate_cache_la_provenance(
+            merge(valid, (la_fallback_reason="la_factor_failed",)),
+        )
+    end
+end
