@@ -50,12 +50,12 @@ certificate(result).valid  # true when the independent check passes
 The three runnable, self-checking examples are deliberately the only examples
 promoted by the v0.5 documentation:
 
-- [`examples/quartic_integral_sdp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/quartic_integral_sdp.jl)
-  — a native PSD moment bound with Float64 and BigFloat modes.
-- [`examples/moment_lp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/moment_lp.jl)
-  — a finite-grid moment LP and objective-sense checks.
-- [`examples/l2_integral_socp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/l2_integral_socp.jl)
-  — a native Lorentz-cone integral bound.
+- [`examples/quartic_bootstrap_sdp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/quartic_bootstrap_sdp.jl)
+  — certified moment-space bounds with Float64 and extended precision.
+- [`examples/quartic_discrete_lp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/quartic_discrete_lp.jl)
+  — a Chebyshev-rational atomic discretization of the same measure.
+- [`examples/quartic_2x2_socp.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/examples/quartic_2x2_socp.jl)
+  — the exact Lorentz form of the first two-by-two moment constraint.
 
 ## Where to go next
 
@@ -76,8 +76,8 @@ promoted by the v0.5 documentation:
 - [Benchmarks and evidence](benchmarks.md) — measured results and policy.
 - [API reference](api.md) — qualified implementation and metadata reference;
   the public quickstart is the typed `Model` route above.
-- [README](https://github.com/yongjunx23-del/SDPX.jl#readme) — features,
-  precision guidance, and known limitations.
+- [README](https://github.com/yongjunx23-del/SDPX.jl#readme) — installation and
+  a minimal semidefinite solve.
 
 The repository's [`docs/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/docs)
 directory keeps the long-term operational and research notes:

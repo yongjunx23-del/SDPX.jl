@@ -3,10 +3,13 @@ using Test
 # Keep this list explicit: these are the three v0.5 examples and no legacy
 # numbered/compatibility snippets are allowed to silently re-enter the suite.
 const FINAL_EXAMPLE_INVOCATIONS = (
-    ("l2_integral_socp.jl", ["8"]),
-    ("moment_lp.jl", ["9"]),
+    ("quartic_2x2_socp.jl", String[]),
     (
-        "quartic_integral_sdp.jl",
+        "quartic_discrete_lp.jl",
+        ["--nodes", "32", "--recurrences", "5", "--arithmetic", "f64"],
+    ),
+    (
+        "quartic_bootstrap_sdp.jl",
         ["--order", "4", "--bound", "both", "--max-iterations", "150"],
     ),
 )
