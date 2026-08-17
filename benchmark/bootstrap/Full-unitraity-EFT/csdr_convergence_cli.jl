@@ -127,7 +127,7 @@ end
 function _validate_hex_option!(expected, key, width)
     haskey(expected, key) || return
     value = expected[key]
-    occursin(Regex("^[0-9a-fA-F]{$(width)}$"), value) ||
+    (length(value) == width && all(isxdigit, value)) ||
         error("$key must be a $(width)-hex value")
 end
 

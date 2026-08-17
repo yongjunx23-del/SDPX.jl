@@ -467,7 +467,7 @@ function _require_hex_identity!(raw, reasons, label, aliases, width)
         return nothing
     end
     text = strip(string(value))
-    occursin(Regex("^[0-9a-fA-F]{$(width)}$"), text) ||
+    (length(text) == width && all(isxdigit, text)) ||
         _record_reason!(reasons, "invalid_identity_$(label)")
     return text
 end
