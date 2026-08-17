@@ -1120,7 +1120,22 @@ function axis_diagnostics(
             status = :pending
         end
     elseif isempty(rows)
-        status = next_level === nothing ? :unresolved : :pending
+        # Preserve the terminal meaning of an invalid first row.  In
+        # particular, a duplicate mathematical point with conflicting
+        # certified bounds is represented by a failed row even though no
+        # valid refinement row has been collected yet.  Falling through to
+        # the generic ``pending`` case here would allow the controller to
+        # schedule the same point again and silently mask a conflict.
+        if frontier_hit || startswith(reason, "resource_frontier")
+            status = :unresolved_at_resource_frontier
+        elseif reason in ("repeated_invalid", "conflicting_valid_results",
+                          "valid_resource_frontier_conflict")
+            status = :unresolved
+        elseif reason == "invalid_retry"
+            status = :pending
+        else
+            status = next_level === nothing ? :unresolved : :pending
+        end
         reason = isempty(reason) ? "no_valid_rows" : reason
     end
 

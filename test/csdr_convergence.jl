@@ -173,8 +173,11 @@ end
     addrow!(PointKey(160, 1600, 3); lower=1.0000002, upper=1.00000021)
     addrow!(PointKey(40, 1600, 5); lower=1.0000001, upper=1.00000011)
     addrow!(PointKey(80, 1600, 5); lower=1.0000002, upper=1.00000021)
-    addrow!(PointKey(160, 400, 5); lower=1.0000001, upper=1.00000011)
-    addrow!(PointKey(160, 800, 5); lower=1.0000002, upper=1.00000021)
+    # (160,400,5) and (160,800,5) are already supplied by the J/Nmu
+    # refinement rows above.  Do not append a second report for either
+    # mathematical point with different bounds: the controller must fail
+    # closed on such a conflict, so the final-corner fixture reuses the
+    # existing rows instead of manufacturing duplicates.
     complete = adaptive_manifest(rows; spec=spec, policy=policy)
     @test complete.status == :converged
     @test isempty(complete.actions)
@@ -214,10 +217,11 @@ end
               upper=1.0 + mu * 1e-10 + 1e-9)
     end
     # q5's first final-cross predecessor is intentionally an outlier; q3/q5
-    # are stable, so q9's three-point gate will pass after promotion.
+    # are stable, so q9's three-point gate will pass after promotion.  The
+    # q5 final-cross row is the Nmu=1600 row already added above; only add the
+    # two genuinely new alpha predecessors here.
     add9!(PointKey(160, 1600, 2); lower=1.1, upper=1.10000001)
     add9!(PointKey(160, 1600, 3); lower=1.0000002, upper=1.00000021)
-    add9!(PointKey(160, 1600, 5); lower=1.00000021, upper=1.00000022)
     first_q9 = adaptive_manifest(rows9; spec=spec9, policy=policy9)
     @test first_q9.actions[1].action == :run
     @test first_q9.actions[1].key == PointKey(160, 1600, 9)
