@@ -26,6 +26,34 @@ end
 
 const _MFLA_TYPES = (Float64x2, Float64x3, Float64x4)
 
+@testset "MultiFloat duplicate-column fingerprints preserve exact decisions" begin
+    left = Float64x2((1.0, 0.0))
+    colliding_but_distinct = Float64x2((1.0, eps(Float64)))
+    signed_negative_zero = Float64x2((-0.0, 0.0))
+    signed_positive_zero = Float64x2((0.0, 0.0))
+
+    # The extension deliberately permits a leading-limb collision. The full
+    # equality scan must still reject columns that differ in a lower limb.
+    @test SDPX._duplicate_column_fingerprint(left, UInt(0)) ==
+          SDPX._duplicate_column_fingerprint(
+              colliding_but_distinct,
+              UInt(0),
+          )
+    @test !SDPX._has_exact_duplicate_columns([
+        left colliding_but_distinct
+        Float64x2(2) Float64x2(2)
+        signed_negative_zero signed_positive_zero
+    ])
+
+    # Signed zero normalization and exact duplicate detection retain the
+    # backend-independent behavior exercised by the generic tests.
+    @test SDPX._has_exact_duplicate_columns([
+        left left
+        Float64x2(2) Float64x2(2)
+        signed_negative_zero signed_positive_zero
+    ])
+end
+
 function _expect_multifloat_backend(::Type{T}) where {T}
     LA = SDPX
     config = LA.plan_la_backend(

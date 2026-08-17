@@ -29,6 +29,22 @@ SDPX.mixed_intermediate_arithmetic(::Type{Float64x4}) = Float64x2
 SDPX.default_extended_precision_blas(::Type{Float64x4}) = :auto
 SDPX.default_mixed_precision_condition_limit(::Type{Float64x4}) = 1.0e14
 
+# Base's generic numeric hash decomposes a MultiFloat through BigInt/MPFR
+# machinery.  The equality-rank guard only needs a candidate fingerprint:
+# `_has_exact_duplicate_columns` always confirms a collision by comparing
+# every full MultiFloat value. Equal MultiFloats have identical limbs, hence
+# identical leading limbs, while a leading-limb collision can only trigger an
+# extra exact comparison. This preserves the duplicate decision and avoids
+# millions of allocating generic hashes on tall block-arrow panels.
+@inline function SDPX._duplicate_column_fingerprint(
+    value::MultiFloat{T,N},
+    fingerprint::UInt,
+) where {T,N}
+    leading_limb = T(value)
+    normalized = iszero(leading_limb) ? zero(T) : leading_limb
+    return hash(normalized, fingerprint)
+end
+
 # The direct 2x2 reduced-arrow pack already computes each singleton local
 # diagonal while its coupling row is hot. Cache the exact factor/inverse here
 # so factor_arrow_kkt! need not launch another block pass. Keep the historical

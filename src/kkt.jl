@@ -403,6 +403,11 @@ function _recover_original_equality_multiplier!(
     return dy
 end
 
+@inline function _duplicate_column_fingerprint(value, fingerprint::UInt)
+    normalized = iszero(value) ? zero(value) : value
+    return hash(normalized, fingerprint)
+end
+
 function _has_exact_duplicate_columns(matrix::AbstractMatrix)
     row_count, column_count = size(matrix)
     column_count <= 1 && return false
@@ -417,7 +422,7 @@ function _has_exact_duplicate_columns(matrix::AbstractMatrix)
         fingerprint = UInt(0)
         for row in 1:row_count
             value = matrix[row, column]
-            fingerprint = hash(iszero(value) ? zero(value) : value, fingerprint)
+            fingerprint = _duplicate_column_fingerprint(value, fingerprint)
         end
         fingerprints[column] = fingerprint
     end
