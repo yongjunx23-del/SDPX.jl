@@ -234,13 +234,16 @@ end
     final_fence_keys = Set([
         PointKey(160, 1600, 2), PointKey(160, 1600, 3),
         PointKey(40, 1600, 5), PointKey(80, 1600, 5),
-        PointKey(160, 400, 5), PointKey(160, 800, 5),
     ])
     fence_pending = adaptive_manifest(
         [row for row in rows if !(row.key in final_fence_keys)];
         spec=spec, policy=policy,
     )
-    @test count(action -> action.action == :fence, fence_pending.actions) >= 6
+    # The staged J/Nmu path necessarily contains (160,400,5) and
+    # (160,800,5); those rows are also the final Nmu predecessors and must
+    # remain present.  The final alpha and J predecessors are the four
+    # genuinely new rows requested by the fence.
+    @test count(action -> action.action == :fence, fence_pending.actions) >= 4
     mktempdir() do directory
         converged_path = write_manifest(joinpath(directory, "converged.toml"), complete)
         converged_document = TOML.parsefile(converged_path)
