@@ -368,6 +368,10 @@ else
         # These roots are supplied by the compute-node release gate.  Keep the
         # assertions structural so the regression catches walkdir/name-binding
         # failures without pinning source contents in this test fixture.
+        synthetic_hashes = Dict("b.jl" => "22", "a.jl" => "11")
+        synthetic_bytes = Vector{UInt8}(codeunits("a.jl:11\nb.jl:22\n"))
+        @test source_tree_fingerprint(synthetic_hashes) ==
+            bytes2hex(SHA.sha256(synthetic_bytes))
         csdr_root = strip(get(ENV, "CSDR_SOURCE_ROOT", ""))
         sdpx_root = strip(get(ENV, "SDPX_SOURCE_ROOT", ""))
         @test !isempty(csdr_root)

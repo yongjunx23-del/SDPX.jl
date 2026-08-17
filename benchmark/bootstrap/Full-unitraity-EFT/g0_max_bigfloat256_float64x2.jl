@@ -1199,7 +1199,7 @@ end
 function source_tree_fingerprint(hashes::Dict{String,String})
     isempty(hashes) && return "unavailable"
     return bytes2hex(SHA.sha256(Vector{UInt8}(codeunits(join(
-        "$(name):$(hash)\n" for name in sort!(collect(keys(hashes)))
+        "$(name):$(hashes[name])\n" for name in sort!(collect(keys(hashes)))
     )))))
 end
 
