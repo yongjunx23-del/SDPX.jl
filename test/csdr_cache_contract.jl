@@ -302,6 +302,17 @@ else
         @test any(startswith(path, "src/") for path in keys(sdpx_hashes))
         @test any(startswith(path, "ext/") for path in keys(sdpx_hashes))
         @test haskey(sdpx_hashes, "Project.toml")
+        mfla = mfla_provenance()
+        @test mfla.provider == string(MFLA_PROVIDER)
+        @test mfla.backend == string(MFLA_BACKEND)
+        deployed_mfla_commit = lowercase(strip(get(ENV, "MFLA_DEPLOYED_COMMIT", "")))
+        if !isempty(deployed_mfla_commit)
+            @test mfla.commit == deployed_mfla_commit
+        end
+        @test mfla.module_sha256 != "unavailable"
+        @test mfla.package_tree_sha256 != "unavailable"
+        @test occursin(r"^[0-9a-f]{64}$", mfla.module_sha256)
+        @test occursin(r"^[0-9a-f]{64}$", mfla.package_tree_sha256)
         @test all(occursin(r"^[0-9a-f]{64}$", digest)
                   for digest in values(csdr_hashes))
         @test all(occursin(r"^[0-9a-f]{64}$", digest)
