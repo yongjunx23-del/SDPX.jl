@@ -19,9 +19,9 @@ julia csdr_convergence_cli.jl \
 julia csdr_convergence_cli.jl \
   --result /campaign/results/j040/nmu0400/alpha2/result.toml \
   --output /campaign/validation/convergence.toml \
-  --sdpx-commit "$SDPX_DEPLOYED_COMMIT" \
-  --mfla-commit "$MFLA_DEPLOYED_COMMIT" \
-  --csdr-source-tree-sha256 "$CSDR_SOURCE_TREE_SHA256"
+  --sdpx-commit "\$SDPX_DEPLOYED_COMMIT" \
+  --mfla-commit "\$MFLA_DEPLOYED_COMMIT" \
+  --csdr-source-tree-sha256 "\$CSDR_SOURCE_TREE_SHA256"
 ```
 
 The default action order is enforced by `adaptive_manifest`: alpha, then J,

@@ -29,11 +29,13 @@ readonly SCRIPT_DIR="$RELEASE_ROOT/benchmark/cluster"
 readonly MANIFEST_TOOL="$SCRIPT_DIR/csdr_campaign_manifest.sh"
 readonly JULIA_BIN="${JULIA_BIN:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat/julia/julia-1.12.6/bin/julia}"
 readonly DRIVER="${CSDR_DRIVER:-$RELEASE_ROOT/benchmark/bootstrap/Full-unitraity-EFT/g0_max_bigfloat256_float64x2.jl}"
+readonly CONVERGENCE_CLI="${CSDR_CONTROLLER:-$RELEASE_ROOT/benchmark/bootstrap/Full-unitraity-EFT/csdr_convergence_cli.jl}"
 readonly CONVERGENCE_TEST="${CSDR_CONVERGENCE_TEST:-$RELEASE_ROOT/test/csdr_convergence.jl}"
 readonly CACHE_TEST="${CSDR_CACHE_CONTRACT_TEST:-$RELEASE_ROOT/test/csdr_cache_contract.jl}"
 
 test -x "$JULIA_BIN"
 test -f "$DRIVER"
+test -f "$CONVERGENCE_CLI"
 test -f "$CONVERGENCE_TEST"
 test -f "$MANIFEST_TOOL"
 test -f "$SDPX_SOURCE_ROOT/Project.toml"
@@ -129,6 +131,8 @@ test -L "$empty_frontier_root/validation/convergence-alpha-latest.toml"
 # Release/driver parser gates.  Invalid-grid must fail closed; no model solve
 # is launched by this job.
 "$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" --help >/dev/null
+"$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" \
+    "$CONVERGENCE_CLI" --help >/dev/null
 if "$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" \
     --mode=preflight-cache --cache="$gate_tmp/missing.cache" --output="$gate_tmp/out.toml" \
     --J=39 --N_x=1 --n-mu=400 --n-a=15 --alpha-level=1 \
