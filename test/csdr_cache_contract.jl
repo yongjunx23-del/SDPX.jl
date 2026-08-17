@@ -282,4 +282,31 @@ else
             merge(valid, (la_fallback_reason="la_factor_failed",)),
         )
     end
+
+    @testset "Pinned source hash walks" begin
+        # These roots are supplied by the compute-node release gate.  Keep the
+        # assertions structural so the regression catches walkdir/name-binding
+        # failures without pinning source contents in this test fixture.
+        csdr_root = strip(get(ENV, "CSDR_SOURCE_ROOT", ""))
+        sdpx_root = strip(get(ENV, "SDPX_SOURCE_ROOT", ""))
+        @test !isempty(csdr_root)
+        @test !isempty(sdpx_root)
+        @test isdir(csdr_root)
+        @test isdir(sdpx_root)
+
+        csdr_hashes = csdr_source_hashes(csdr_root)
+        sdpx_hashes = sdpx_source_hashes(PACKAGE_ROOT)
+        @test !isempty(csdr_hashes)
+        @test !isempty(sdpx_hashes)
+        @test all(endswith(path, ".jl") for path in keys(csdr_hashes))
+        @test any(startswith(path, "src/") for path in keys(sdpx_hashes))
+        @test any(startswith(path, "ext/") for path in keys(sdpx_hashes))
+        @test haskey(sdpx_hashes, "Project.toml")
+        @test all(occursin(r"^[0-9a-f]{64}$", digest)
+                  for digest in values(csdr_hashes))
+        @test all(occursin(r"^[0-9a-f]{64}$", digest)
+                  for digest in values(sdpx_hashes))
+        @test occursin(r"^[0-9a-f]{64}$", source_tree_fingerprint(csdr_hashes))
+        @test occursin(r"^[0-9a-f]{64}$", source_tree_fingerprint(sdpx_hashes))
+    end
 end

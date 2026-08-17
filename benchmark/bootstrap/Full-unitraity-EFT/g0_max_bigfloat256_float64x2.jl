@@ -1182,11 +1182,14 @@ end
 function csdr_source_hashes(root::AbstractString)
     src_root = joinpath(root, "src")
     isdir(src_root) || error("CSDR source src directory was not found at $src_root")
-    files = sort!(String[
-        joinpath(directory, file)
-        for (directory, _, names) in walkdir(src_root), file in names
-        if endswith(file, ".jl")
-    ])
+    files = String[]
+    for (directory, _, filenames) in walkdir(src_root)
+        for file in filenames
+            endswith(file, ".jl") || continue
+            push!(files, joinpath(directory, file))
+        end
+    end
+    sort!(files)
     return Dict(
         relpath(path, root) => bytes2hex(open(SHA.sha256, path))
         for path in files
@@ -1227,11 +1230,16 @@ function mfla_provenance()
     module_hash = isfile(module_path) ?
         bytes2hex(open(SHA.sha256, module_path)) : "unavailable"
     package_root = mfla_package_root()
-    package_files = isdir(package_root) ? sort!(String[
-        joinpath(directory, file)
-        for (directory, _, files) in walkdir(package_root), file in files
-        if endswith(file, ".jl")
-    ]) : String[]
+    package_files = String[]
+    if isdir(package_root)
+        for (directory, _, filenames) in walkdir(package_root)
+            for file in filenames
+                endswith(file, ".jl") || continue
+                push!(package_files, joinpath(directory, file))
+            end
+        end
+        sort!(package_files)
+    end
     package_tree_hash = isempty(package_files) ? "unavailable" : bytes2hex(
         SHA.sha256(Vector{UInt8}(codeunits(join(
             "$(relpath(path, package_root)):$(bytes2hex(open(SHA.sha256, path)))\n" for path in package_files
@@ -1258,11 +1266,12 @@ function sdpx_source_hashes(root::AbstractString)
     for subtree in ("src", "ext")
         subtree_root = joinpath(root, subtree)
         isdir(subtree_root) || continue
-        append!(files, String[
-            joinpath(directory, file)
-            for (directory, _, names) in walkdir(subtree_root), file in names
-            if endswith(file, ".jl")
-        ])
+        for (directory, _, filenames) in walkdir(subtree_root)
+            for file in filenames
+                endswith(file, ".jl") || continue
+                push!(files, joinpath(directory, file))
+            end
+        end
     end
     project = joinpath(root, "Project.toml")
     isfile(project) && push!(files, project)
