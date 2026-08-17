@@ -88,6 +88,87 @@ else
         )
     end
 
+    @testset "CSDR primal BigFloat256 capability contract" begin
+        # The campaign source is a deliberately small, immutable four-file
+        # include closure.  Pin the content identity here so an older source
+        # (whose assembler only accepts the positional config and returns
+        # Float64x4 arrays) fails before a production cache build is started.
+        expected_source_files = Set([
+            "src/csdr_kinematics.jl",
+            "src/csdr_model.jl",
+            "src/csdr_partialwaves.jl",
+            "src/csdr_quadrature.jl",
+        ])
+        source_hashes = csdr_source_hashes(SETTINGS.csdr_source_root)
+        @test Set(keys(source_hashes)) == expected_source_files
+        @test source_tree_fingerprint(source_hashes) ==
+            "50c70bb5da37ef5820c8484cde3a2a5105073bdd904a0088e867e7426bf78e76"
+        @test !any(
+            path -> occursin(r"functional|direct.?dual|dual.?model", lowercase(path)),
+            keys(source_hashes),
+        )
+
+        # Keep this construction tiny but structurally faithful: Nx=1 has
+        # three cone-free coefficients, and the first three alpha=0 equations
+        # (one for n=0 and two for n=1) are therefore enough for exact
+        # elimination.  The source call is the capability check itself; no
+        # production-size model or solve is performed by this test.
+        capability_config = PrimalCSDRSource.CSDRConfig(
+            "csdr-capability-contract.jl",
+            "csdr-capability-contract",
+            "zero_subtraction",
+            4,
+            2,                         # N_mu
+            2,                         # N_a >= Nx+1
+            0,                         # one 2x2 PSD block per energy node
+            1,                         # Nx=1
+            dyadic_alpha_set(3),       # q5: 0,-1/8,-1/4,-3/8,-1/2
+            256,
+            "Float64x2",
+            "max",
+            Dict("c_0_0" => "1"),
+            Dict{String,String}(),
+            "1e-6",
+            1,
+            1.0,
+            4.0,
+        )
+
+        source_payload = PrimalCSDRSource.assemble_primal_model(
+            capability_config;
+            retain_high_precision=true,
+        )
+        @test source_payload.precompute_precision_bits == 256
+        @test source_payload.precompute_numeric_type == "BigFloat"
+        @test source_payload.high_precision_linear_data !== nothing
+        high = source_payload.high_precision_linear_data
+        @test eltype(high.B) === BigFloat
+        @test eltype(high.b) === BigFloat
+        @test eltype(high.objective) === BigFloat
+        @test eltype(high.equality_column_scales) === BigFloat
+
+        high_payload = bigfloat_problem_payload(source_payload)
+        elimination = PrimalCSDRSource._eliminate_low_energy_variables(
+            high_payload,
+        )
+        @test eltype(high_payload.problem) === BigFloat
+        @test eltype(elimination.problem) === BigFloat
+        @test elimination.original_variable_count == 7
+        @test elimination.original_equality_count == 20
+        @test elimination.reduced_variable_count == 4
+        @test elimination.reduced_equality_count == 17
+        @test length(elimination.selected_columns) == 3
+
+        solve_problem, reconstruction = float64x2_problem(elimination)
+        @test eltype(solve_problem) === SOLVE_TYPE
+        @test eltype(solve_problem.B) === SOLVE_TYPE
+        @test eltype(solve_problem.b) === SOLVE_TYPE
+        @test eltype(reconstruction.coefficient_constant) === SOLVE_TYPE
+        @test eltype(reconstruction.coefficient_from_spectrum) === SOLVE_TYPE
+        @test solve_problem.dims.m == 4
+        @test solve_problem.dims.n == 17
+    end
+
     @testset "CSDR alpha-max subset cache" begin
         @test canonical_alpha_set(["-1/2", "0"]) == ["0", "-1/2"]
         @test canonical_alpha_set(["-4/8", "0", "-2/8"]) ==
