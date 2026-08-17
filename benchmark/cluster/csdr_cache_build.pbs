@@ -24,7 +24,6 @@ set -euo pipefail
 [[ "$CSDR_SOURCE_TREE_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || exit 3
 readonly CSDR_SOURCE_ROOT="${CSDR_SOURCE_ROOT:-$CAMPAIGN_ROOT/csdr-source}"
 
-readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 readonly MANIFEST="${CSDR_BUILD_MANIFEST:-}"
 readonly ARRAY_INDEX="${PBS_ARRAY_INDEX:-${PBS_ARRAYID:-}}"
 

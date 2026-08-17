@@ -11,13 +11,6 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-readonly RELEASE_ROOT="${CSDR_RELEASE_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-readonly MANIFEST_TOOL="$SCRIPT_DIR/csdr_campaign_manifest.sh"
-readonly JULIA_BIN="${JULIA_BIN:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat/julia/julia-1.12.6/bin/julia}"
-readonly DRIVER="${CSDR_DRIVER:-$RELEASE_ROOT/benchmark/bootstrap/Full-unitraity-EFT/g0_max_bigfloat256_float64x2.jl}"
-readonly CONVERGENCE_TEST="${CSDR_CONVERGENCE_TEST:-$RELEASE_ROOT/test/csdr_convergence.jl}"
-readonly CACHE_TEST="${CSDR_CACHE_CONTRACT_TEST:-$RELEASE_ROOT/test/csdr_cache_contract.jl}"
 : "${SDPX_ENV_ROOT:?qsub must export SDPX_ENV_ROOT}"
 : "${SDPX_SOURCE_ROOT:?qsub must export SDPX_SOURCE_ROOT}"
 : "${CSDR_SOURCE_ROOT:?qsub must export CSDR_SOURCE_ROOT}"
@@ -27,6 +20,17 @@ readonly CACHE_TEST="${CSDR_CACHE_CONTRACT_TEST:-$RELEASE_ROOT/test/csdr_cache_c
 [[ "$SDPX_DEPLOYED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$MFLA_DEPLOYED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || exit 2
 [[ "$CSDR_SOURCE_TREE_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 2
+
+# Torque/PBS executes a private spool copy of this file, so BASH_SOURCE points
+# at the spool directory rather than the immutable release. Resolve every
+# companion path from the explicitly pinned source root instead.
+readonly RELEASE_ROOT="${CSDR_RELEASE_ROOT:-$SDPX_SOURCE_ROOT}"
+readonly SCRIPT_DIR="$RELEASE_ROOT/benchmark/cluster"
+readonly MANIFEST_TOOL="$SCRIPT_DIR/csdr_campaign_manifest.sh"
+readonly JULIA_BIN="${JULIA_BIN:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat/julia/julia-1.12.6/bin/julia}"
+readonly DRIVER="${CSDR_DRIVER:-$RELEASE_ROOT/benchmark/bootstrap/Full-unitraity-EFT/g0_max_bigfloat256_float64x2.jl}"
+readonly CONVERGENCE_TEST="${CSDR_CONVERGENCE_TEST:-$RELEASE_ROOT/test/csdr_convergence.jl}"
+readonly CACHE_TEST="${CSDR_CACHE_CONTRACT_TEST:-$RELEASE_ROOT/test/csdr_cache_contract.jl}"
 
 test -x "$JULIA_BIN"
 test -f "$DRIVER"
