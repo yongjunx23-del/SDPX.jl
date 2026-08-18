@@ -128,6 +128,72 @@ env \
     bash "$SCRIPT_DIR/csdr_campaign_controller.pbs" >/dev/null
 test -L "$empty_frontier_root/validation/convergence-alpha-latest.toml"
 
+# Exercise the real CLI through the controller wrapper with one synthetic,
+# fully certified seed row.  This remains model/solver-free but reaches main's
+# manifest parsing, point validation, adaptive action selection, TOML writing,
+# and wrapper output checks (including the no-frontier path).
+cli_e2e_root="$gate_tmp/controller-cli-e2e"
+cli_result_dir="$cli_e2e_root/results/alpha/j40/nmu400/q2"
+mkdir -p "$cli_e2e_root/manifests" "$cli_result_dir" \
+    "$cli_e2e_root/validation/alpha-cli-e2e"
+printf '%s\n' \
+    'J = 40' \
+    'N_mu = 400' \
+    'N_a = 15' \
+    'N_x = 1' \
+    'alpha_count = 2' \
+    'alpha_set = "0,-1/2"' \
+    'solve_arithmetic = "Float64x2"' \
+    'precompute_precision_bits = 256' \
+    'memory_estimate_gate_valid = true' \
+    'numerical_gate_valid = true' \
+    "sdpx_commit = \"$SDPX_DEPLOYED_COMMIT\"" \
+    "mfla_commit = \"$MFLA_DEPLOYED_COMMIT\"" \
+    "csdr_source_tree_sha256 = \"$CSDR_SOURCE_TREE_SHA256\"" \
+    'driver_sha256 = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"' \
+    'cache_sha256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"' \
+    'status = "Optimal"' \
+    'certificate_available = true' \
+    'certificate_valid = true' \
+    'primal_residual = "1e-7"' \
+    'dual_residual = "2e-7"' \
+    'relative_gap = "3e-7"' \
+    'tolerance_primal = "1e-6"' \
+    'tolerance_dual = "1e-6"' \
+    'tolerance_relative_gap = "1e-6"' \
+    'physical_g0_lower_bound = "1.0"' \
+    'physical_g0_upper_bound = "1.0"' \
+    'physical_g0_max = "1.0"' \
+    'la_planned_provider = "multifloat_linear_algebra"' \
+    'planned_la_provider = "multifloat_linear_algebra"' \
+    'la_executed_provider = "multifloat_linear_algebra"' \
+    'la_fallback_reason = "none"' \
+    'fallback_reason = "none"' \
+    > "$cli_result_dir/result.toml"
+printf 'phase\tstage\tresult_rel\nsolve\talpha\tresults/alpha/j40/nmu400/q2\n' \
+    > "$cli_e2e_root/manifests/csdr-grid-solve.tsv"
+printf 'failed=0\n' \
+    > "$cli_e2e_root/validation/alpha-cli-e2e/campaign_summary.toml"
+env \
+    "CAMPAIGN_ROOT=$cli_e2e_root" \
+    "CSDR_SOLVE_MANIFEST=$cli_e2e_root/manifests/csdr-grid-solve.tsv" \
+    "SDPX_DEPLOYED_COMMIT=$SDPX_DEPLOYED_COMMIT" \
+    "MFLA_DEPLOYED_COMMIT=$MFLA_DEPLOYED_COMMIT" \
+    "CSDR_SOURCE_TREE_SHA256=$CSDR_SOURCE_TREE_SHA256" \
+    "CSDR_CONTROLLER=$CONVERGENCE_CLI" \
+    CSDR_STAGE=alpha \
+    CSDR_RUN_ID=cli-e2e \
+    "JULIA_BIN=$JULIA_BIN" \
+    CSDR_DRIVER= \
+    CSDR_DRIVER_SHA256= \
+    CSDR_CONTROLLER_OUTPUT= \
+    bash "$SCRIPT_DIR/csdr_campaign_controller.pbs" >/dev/null
+cli_output="$cli_e2e_root/validation/convergence-alpha-latest.toml"
+test -s "$cli_output"
+grep -Eq '^status[[:space:]]*=[[:space:]]*"pending"$' "$cli_output"
+grep -Eq '^valid_row_count[[:space:]]*=[[:space:]]*1$' "$cli_output"
+grep -Eq '^action[[:space:]]*=[[:space:]]*"run"$' "$cli_output"
+
 # Release/driver parser gates.  Invalid-grid must fail closed; no model solve
 # is launched by this job.
 "$JULIA_BIN" --startup-file=no --project="$SDPX_ENV_ROOT" "$DRIVER" --help >/dev/null

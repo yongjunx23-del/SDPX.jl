@@ -202,7 +202,8 @@ function _manifest_entries(path, root; force_frontier::Bool=false)
     phase_position = _column_position(positions, ["phase", "stage"])
     paths = String[]
     frontiers = NamedTuple{(:key, :reason, :path),Tuple{PointKey,String,String}}[]
-    for (row_number, line) in enumerate(Iterators.drop(lines, 1), 2)
+    for (offset, line) in enumerate(Iterators.drop(lines, 1))
+        row_number = offset + 1
         isempty(strip(line)) && continue
         columns = split(chomp(line), '\t'; keepempty=true)
         phase = lowercase(replace(
