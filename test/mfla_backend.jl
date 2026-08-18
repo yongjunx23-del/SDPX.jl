@@ -511,9 +511,11 @@ if _MFLA_LOADED
         @test auto_workspace.Qchol isa SDPX.EqualityQRFactor{T}
         @test auto_workspace.la_fallback_reason ===
               :la_equality_factor_failed
-        @test SDPX.la_factor_provider_identity(
-            SDPX.la_factor_provider(auto_workspace.Qchol),
-        ) === :multifloat_linear_algebra
+        auto_qr_payload = SDPX.la_factor_provider(auto_workspace.Qchol)
+        @test SDPX.la_factor_provider_identity(auto_qr_payload) ===
+              :multifloat_linear_algebra
+        @test SDPX.la_provider_factor_status(auto_qr_payload) == 0
+        @test SDPX.la_provider_factor_diagnostics(auto_qr_payload).success
     end
 
     @testset "MFLA Cholesky multi-RHS and provenance" begin
@@ -534,6 +536,13 @@ if _MFLA_LOADED
             @test factor isa SDPX.ProviderLACholeskyFactor{T}
             @test !SDPX.la_cholesky_rank_authoritative(factor)
             @test SDPX.la_factor_handle_matrix(factor) === borrowed
+            chol_payload = SDPX.la_factor_provider(factor)
+            @test SDPX.la_provider_factor_status(chol_payload) == 0
+            chol_diagnostics = SDPX.la_provider_factor_diagnostics(chol_payload)
+            @test chol_diagnostics.kind === :cholesky
+            @test chol_diagnostics.status == 0
+            @test chol_diagnostics.success
+            @test chol_diagnostics.finite
 
             rhs_two = T.(randn(rng, n, 2))
             solution_two = copy(rhs_two)
@@ -576,6 +585,16 @@ if _MFLA_LOADED
         @test SDPX.la_factor_provider_identity(
             SDPX.la_factor_provider(factor),
         ) === :multifloat_linear_algebra
+        qr_payload = SDPX.la_factor_provider(factor)
+        @test SDPX.la_provider_factor_status(qr_payload) == 0
+        @test SDPX.la_provider_factor_precision(qr_payload) ==
+              MultiFloatLinearAlgebra.factor_precision(qr_payload.factor)
+        qr_diagnostics = SDPX.la_provider_factor_diagnostics(qr_payload)
+        @test qr_diagnostics.kind === :qr
+        @test qr_diagnostics.status == 0
+        @test qr_diagnostics.success
+        @test qr_diagnostics.permutation ==
+              MultiFloatLinearAlgebra.factor_permutation(qr_payload.factor)
         @test SDPX.la_factor_rank(factor) == size(M, 2)
         @test sort(SDPX.la_factor_permutation(factor)) == collect(1:4)
         @test SDPX.la_factor_packed_factors(factor) isa Matrix{T}
@@ -641,6 +660,18 @@ if _MFLA_LOADED
             SDPX._owned_array_copy(T, M);
             pivoted=true,
         )
+
+        # MFLA's `check=false` contract still returns an explicit unsuccessful
+        # factor for non-finite input.  The SDPX adapter must reject it as a
+        # failed provider operation, not wrap it as an equality handle.
+        nonfinite = SDPX._owned_array_copy(T, M)
+        nonfinite[1, 1] = T(NaN)
+        @test SDPX.la_qr_factor!(
+            backend,
+            nonfinite;
+            pivoted=true,
+            relative_tolerance=T(1e-30),
+        ) === nothing
     end
 
     @testset "MFLA equality RRQR survives workspace reuse" begin
