@@ -340,7 +340,8 @@ function main(args=ARGS)
     end
     manifest = adaptive_manifest(rows; spec=spec, policy=policy)
     output = _write_cli_manifest(options.output, manifest, rows, paths, expected)
-    println("status=$(manifest.status) stage=$(manifest_dict(manifest)[\"stage\"]) output=$output")
+    stage = manifest_dict(manifest)["stage"]
+    println("status=$(manifest.status) stage=$stage output=$output")
     for action in manifest.actions
         key = action.key === nothing ? "-" :
             "J=$(action.key.J),Nmu=$(action.key.Nmu),alpha=$(action.key.alpha_count)"
