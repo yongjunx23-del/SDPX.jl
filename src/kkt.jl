@@ -31,6 +31,86 @@ _empty_kkt_phase_times() = (
     equality_factorization=0.0,
 )
 
+"""Compact provenance for the last equality factor attempt.
+
+The provider wrapper is intentionally opaque: a non-`nothing` handle is the
+only provider-success status exposed by the public LA interface.  The
+diagnostic therefore records that fact separately from the solver acceptance
+predicates and from RRQR execution, rather than inferring a provider status
+code or rewriting the fallback reason.
+"""
+function _equality_factor_route_diagnostics(
+    route::Symbol;
+    provider_factor_attempted::Bool=false,
+    provider_factor_available::Union{Bool,Nothing}=nothing,
+    provider_status=:not_attempted,
+    provider_status_code=nothing,
+    provider_diagnostics=nothing,
+    provider_identity=nothing,
+    acceptance_exact_rank::Union{Bool,Nothing}=nothing,
+    acceptance_numerical_rank::Union{Bool,Nothing}=nothing,
+    acceptance::Symbol=:not_applicable,
+    rrqr_executed::Bool=false,
+    rrqr_rank=nothing,
+    rrqr_quality=nothing,
+)
+    return (
+        route=route,
+        provider_factor_attempted=provider_factor_attempted,
+        provider_factor_available=provider_factor_available,
+        provider_status=provider_status,
+        provider_status_code=provider_status_code,
+        provider_diagnostics=provider_diagnostics,
+        provider_identity=provider_identity,
+        acceptance_exact_rank=acceptance_exact_rank,
+        acceptance_numerical_rank=acceptance_numerical_rank,
+        acceptance=acceptance,
+        rrqr_executed=rrqr_executed,
+        rrqr_rank=rrqr_rank,
+        rrqr_quality=rrqr_quality,
+    )
+end
+
+"""Read optional provider metadata without changing the factor contract."""
+function _equality_provider_factor_metadata(factor)
+    provider = try
+        la_factor_provider(factor)
+    catch exception
+        _recoverable(exception) || rethrow()
+        nothing
+    end
+    provider === nothing && return (
+        status=:not_available,
+        status_code=nothing,
+        diagnostics=nothing,
+        identity=nothing,
+    )
+    identity = try
+        la_factor_provider_identity(provider)
+    catch exception
+        _recoverable(exception) || rethrow()
+        nothing
+    end
+    status_code = try
+        la_provider_factor_status(provider)
+    catch exception
+        _recoverable(exception) || rethrow()
+        nothing
+    end
+    diagnostics = try
+        la_provider_factor_diagnostics(provider)
+    catch exception
+        _recoverable(exception) || rethrow()
+        nothing
+    end
+    return (
+        status=status_code === nothing ? :success_by_contract : :reported,
+        status_code=status_code,
+        diagnostics=diagnostics,
+        identity=identity,
+    )
+end
+
 # Equality full-rank evidence is never carried by a successful Cholesky call
 # alone. A lower factor of Q = Btil'Btil is accepted only when its smallest
 # relative diagonal still exceeds
@@ -1105,8 +1185,10 @@ function _factor_arrow_equality_system!(
     q_rank_deficient = false
     gram_seconds = 0.0
     factor_started = time_ns()
+    ws.equality_factor_diagnostics = nothing
     direct_qr =
         opts.equality_solver === :qr ||
+        ws.planned_equality_solver === :qr ||
         (
             opts.equality_solver === :auto &&
             ws.Qchol isa EqualityQRFactor{T}
@@ -1120,6 +1202,20 @@ function _factor_arrow_equality_system!(
         ws.Qchol = qr_factor
         q_pivoted = true
         q_rank_deficient = qr_factor.rank < n
+        provider_metadata = _equality_provider_factor_metadata(qr_factor)
+        ws.equality_factor_diagnostics = _equality_factor_route_diagnostics(
+            opts.equality_solver === :qr ?
+            :explicit_rank_revealing_qr : :planned_rank_revealing_qr;
+            provider_factor_attempted=provider_metadata.identity !== nothing,
+            provider_factor_available=true,
+            provider_status=provider_metadata.status,
+            provider_status_code=provider_metadata.status_code,
+            provider_diagnostics=provider_metadata.diagnostics,
+            provider_identity=provider_metadata.identity,
+            rrqr_executed=true,
+            rrqr_rank=qr_factor.rank,
+            rrqr_quality=qr_factor.quality,
+        )
     else
         gram_started = time_ns()
         _build_equality_gram!(ws, opts)
@@ -1138,18 +1234,45 @@ function _factor_arrow_equality_system!(
         else
             nothing
         end
-        if provider_factor !== nothing &&
-           _authoritative_cholesky_preserves_exact_rank(
-               provider_factor,
-               ws.Btil,
-               prob.B,
-               opts,
-           ) &&
-           _la_factor_has_numerical_rank(
-               provider_factor,
-               ws.Btil,
-               opts,
-           )
+        provider_available = provider_factor !== nothing
+        provider_metadata = provider_available ?
+                           _equality_provider_factor_metadata(provider_factor) :
+                           (
+                               status=:not_returned,
+                               status_code=nothing,
+                               diagnostics=nothing,
+                               identity=la_backend_provider(ws.la_backend),
+                           )
+        exact_rank_accepted = provider_available &&
+            _authoritative_cholesky_preserves_exact_rank(
+                provider_factor,
+                ws.Btil,
+                prob.B,
+                opts,
+            )
+        numerical_rank_accepted = provider_available &&
+            _la_factor_has_numerical_rank(
+                provider_factor,
+                ws.Btil,
+                opts,
+            )
+        ws.equality_factor_diagnostics = _equality_factor_route_diagnostics(
+            :provider_cholesky;
+            provider_factor_attempted=provider_arrow_factor,
+            provider_factor_available=provider_available,
+            provider_status=provider_metadata.status,
+            provider_status_code=provider_metadata.status_code,
+            provider_diagnostics=provider_metadata.diagnostics,
+            provider_identity=provider_metadata.identity,
+            acceptance_exact_rank=exact_rank_accepted,
+            acceptance_numerical_rank=numerical_rank_accepted,
+            acceptance=provider_available && exact_rank_accepted &&
+                        numerical_rank_accepted ? :accepted :
+                        !provider_available ? :provider_not_returned :
+                        !exact_rank_accepted ? :exact_rank_rejected :
+                        :numerical_rank_rejected,
+        )
+        if provider_available && exact_rank_accepted && numerical_rank_accepted
             ws.Qchol = provider_factor
         elseif provider_arrow_factor
             # The provider may have partially overwritten the factor buffer
@@ -1162,6 +1285,15 @@ function _factor_arrow_equality_system!(
                 ws.Qchol = qr_factor
                 q_pivoted = true
                 q_rank_deficient = qr_factor.rank < n
+                ws.equality_factor_diagnostics = merge(
+                    ws.equality_factor_diagnostics,
+                    (
+                        route=:runtime_rank_revealing_qr,
+                        rrqr_executed=true,
+                        rrqr_rank=qr_factor.rank,
+                        rrqr_quality=qr_factor.quality,
+                    ),
+                )
                 if opts.verbosity >= 1
                     provider_name = la_backend_provider(ws.la_backend)
                     @warn(
@@ -1196,8 +1328,21 @@ function _factor_arrow_equality_system!(
                 Symmetric(ws.Qbuf, :L);
                 check=false,
             )
-            if issuccess(factor) &&
-               _cholesky_has_numerical_rank(factor, ws.Btil, opts)
+            standard_factor_available = issuccess(factor)
+            standard_rank_accepted = standard_factor_available &&
+                _cholesky_has_numerical_rank(factor, ws.Btil, opts)
+            ws.equality_factor_diagnostics = _equality_factor_route_diagnostics(
+                :standard_cholesky;
+                provider_factor_attempted=false,
+                provider_factor_available=nothing,
+                provider_status=:not_applicable,
+                acceptance_exact_rank=standard_factor_available,
+                acceptance_numerical_rank=standard_rank_accepted,
+                acceptance=standard_rank_accepted ? :accepted :
+                            !standard_factor_available ? :factor_failed :
+                            :numerical_rank_rejected,
+            )
+            if standard_rank_accepted
                 ws.Qchol = factor
             elseif opts.equality_solver === :auto &&
                    _equality_qr_allowed(ws.Btil, opts)
@@ -1209,6 +1354,15 @@ function _factor_arrow_equality_system!(
                 ws.Qchol = qr_factor
                 q_pivoted = true
                 q_rank_deficient = qr_factor.rank < n
+                ws.equality_factor_diagnostics = merge(
+                    ws.equality_factor_diagnostics,
+                    (
+                        route=:runtime_rank_revealing_qr,
+                        rrqr_executed=true,
+                        rrqr_rank=qr_factor.rank,
+                        rrqr_quality=qr_factor.quality,
+                    ),
+                )
                 if opts.verbosity >= 1
                     @warn(
                         "Block-diagonal equality solve switched " *
@@ -1243,6 +1397,14 @@ function _factor_arrow_equality_system!(
                 ws.Qchol = pivoted
                 q_pivoted = true
                 q_rank_deficient = pivoted.rank < n
+                ws.equality_factor_diagnostics = merge(
+                    ws.equality_factor_diagnostics,
+                    (
+                        route=:pivoted_normal_equations,
+                        acceptance=(pivoted.rank == n ?
+                                   :accepted : :rank_deficient),
+                    ),
+                )
                 if opts.verbosity >= 1
                     if pivoted.rank < n
                         @warn(
@@ -1467,6 +1629,7 @@ function _factor_dense_kkt_native!(
 
     q_pivoted = false
     q_rank_deficient = false
+    ws.equality_factor_diagnostics = nothing
     if n > 0
         started = time_ns()
         copy_owned!(ws.Btil, prob.B)
@@ -1476,6 +1639,7 @@ function _factor_dense_kkt_native!(
             _elapsed_seconds(started)
         direct_qr =
             opts.equality_solver === :qr ||
+            ws.planned_equality_solver === :qr ||
             (
                 opts.equality_solver === :auto &&
                 ws.Qchol isa EqualityQRFactor{T}
@@ -1490,6 +1654,20 @@ function _factor_dense_kkt_native!(
             ws.Qchol = qr_factor
             q_pivoted = true
             q_rank_deficient = qr_factor.rank < n
+            provider_metadata = _equality_provider_factor_metadata(qr_factor)
+            ws.equality_factor_diagnostics = _equality_factor_route_diagnostics(
+                opts.equality_solver === :qr ?
+                :explicit_rank_revealing_qr : :planned_rank_revealing_qr;
+                provider_factor_attempted=provider_metadata.identity !== nothing,
+                provider_factor_available=true,
+                provider_status=provider_metadata.status,
+                provider_status_code=provider_metadata.status_code,
+                provider_diagnostics=provider_metadata.diagnostics,
+                provider_identity=provider_metadata.identity,
+                rrqr_executed=true,
+                rrqr_rank=qr_factor.rank,
+                rrqr_quality=qr_factor.quality,
+            )
             phase_equality_factorization +=
                 _elapsed_seconds(started)
         else
@@ -1503,18 +1681,45 @@ function _factor_dense_kkt_native!(
             # while retaining its planned identity.
             equality_factor =
                 la_cholesky_factor!(ws.la_backend, ws.Qbuf)
-            if equality_factor !== nothing &&
-               _authoritative_cholesky_preserves_exact_rank(
-                   equality_factor,
-                   ws.Btil,
-                   prob.B,
-                   opts,
-               ) &&
-               _la_factor_has_numerical_rank(
-                   equality_factor,
-                   ws.Btil,
-                   opts,
-               )
+            provider_available = equality_factor !== nothing
+            provider_metadata = provider_available ?
+                               _equality_provider_factor_metadata(equality_factor) :
+                               (
+                                   status=:not_returned,
+                                   status_code=nothing,
+                                   diagnostics=nothing,
+                                   identity=la_backend_provider(ws.la_backend),
+                               )
+            exact_rank_accepted = provider_available &&
+                _authoritative_cholesky_preserves_exact_rank(
+                    equality_factor,
+                    ws.Btil,
+                    prob.B,
+                    opts,
+                )
+            numerical_rank_accepted = provider_available &&
+                _la_factor_has_numerical_rank(
+                    equality_factor,
+                    ws.Btil,
+                    opts,
+                )
+            ws.equality_factor_diagnostics = _equality_factor_route_diagnostics(
+                :provider_cholesky;
+                provider_factor_attempted=true,
+                provider_factor_available=provider_available,
+                provider_status=provider_metadata.status,
+                provider_status_code=provider_metadata.status_code,
+                provider_diagnostics=provider_metadata.diagnostics,
+                provider_identity=provider_metadata.identity,
+                acceptance_exact_rank=exact_rank_accepted,
+                acceptance_numerical_rank=numerical_rank_accepted,
+                acceptance=provider_available && exact_rank_accepted &&
+                            numerical_rank_accepted ? :accepted :
+                            !provider_available ? :provider_not_returned :
+                            !exact_rank_accepted ? :exact_rank_rejected :
+                            :numerical_rank_rejected,
+            )
+            if provider_available && exact_rank_accepted && numerical_rank_accepted
                 ws.Qchol = equality_factor
             else
                 failure_policy =
@@ -1533,6 +1738,15 @@ function _factor_dense_kkt_native!(
                     ws.Qchol = qr_factor
                     q_pivoted = true
                     q_rank_deficient = qr_factor.rank < n
+                    ws.equality_factor_diagnostics = merge(
+                        ws.equality_factor_diagnostics,
+                        (
+                            route=:runtime_rank_revealing_qr,
+                            rrqr_executed=true,
+                            rrqr_rank=qr_factor.rank,
+                            rrqr_quality=qr_factor.quality,
+                        ),
+                    )
                     if opts.verbosity >= 1
                         @warn(
                             "KKT equality solve switched from normal " *
@@ -1555,6 +1769,15 @@ function _factor_dense_kkt_native!(
                         ws.Qchol = qr_factor
                         q_pivoted = true
                         q_rank_deficient = qr_factor.rank < n
+                        ws.equality_factor_diagnostics = merge(
+                            ws.equality_factor_diagnostics,
+                            (
+                                route=:runtime_rank_revealing_qr,
+                                rrqr_executed=true,
+                                rrqr_rank=qr_factor.rank,
+                                rrqr_quality=qr_factor.quality,
+                            ),
+                        )
                         if opts.verbosity >= 1
                             @warn(
                                 "KKT equality solve switched from legacy " *
@@ -1603,6 +1826,15 @@ function _factor_dense_kkt_native!(
                         ws.Qchol = qr_factor
                         q_pivoted = true
                         q_rank_deficient = qr_factor.rank < n
+                        ws.equality_factor_diagnostics = merge(
+                            ws.equality_factor_diagnostics,
+                            (
+                                route=:runtime_rank_revealing_qr,
+                                rrqr_executed=true,
+                                rrqr_rank=qr_factor.rank,
+                                rrqr_quality=qr_factor.quality,
+                            ),
+                        )
                         if opts.verbosity >= 1
                             @warn(
                                 "KKT equality solve switched from normal " *

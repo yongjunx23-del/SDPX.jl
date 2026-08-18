@@ -1164,6 +1164,15 @@ function build_execution_plan(
 ) where {T}
     opts = route.options
     _validate_execution_route(route, prob, opts)
+    # Equality presolve has already produced a verified RRQR quality estimate.
+    # Use that evidence to choose a deterministic QR route before KKT starts;
+    # the user request remains in BackendConfiguration for provenance and
+    # compatibility checks.
+    planned_equality_solver = _planned_equality_solver(
+        prob,
+        opts,
+        route.equality_evidence,
+    )
     classification = route.classification
     algorithm = route.algorithm
     available = _available_memory_bytes()
@@ -1498,7 +1507,7 @@ function build_execution_plan(
         route=backend_config.mixed_precision_mode !== :off ?
               :mixed_precision : kkt_backend,
         threads=selected_threads,
-        equality_solver=opts.equality_solver,
+        equality_solver=planned_equality_solver,
     )
     # Neutral plan hint: the post-scaling resolver chooses the actual cap.
     adaptive_sigma_max = opts.adaptive_sigma_max
@@ -1524,6 +1533,7 @@ function build_execution_plan(
             strategy=opts.parameter_strategy,
             adaptive_sigma_max,
             equality_solver=opts.equality_solver,
+            planned_equality_solver,
             formulation=opts.formulation,
             formulation_decision=formulation_decision === nothing ?
                 (
@@ -1822,6 +1832,67 @@ function _normalized_equality_columns(
     return normalized
 end
 
+"""
+    _equality_runtime_rank_tolerance(B, opts) -> Real
+
+Return the numerical-rank floor used by the runtime normal-equation Cholesky
+acceptance test. Presolve already owns an RRQR quality estimate for `B`; the
+planning policy applies a conservative square-root safety margin to this floor
+when deciding whether to select equality RRQR up front. This keeps the
+feasible set unchanged (no extra columns are removed) while avoiding the
+misleading runtime `la_equality_factor_failed` fallback event.
+
+The formula mirrors `_equality_cholesky_rank_tau`: a dimension-scaled machine
+floor together with the requested-accuracy floor, capped by `sqrt(eps)`.
+"""
+function _equality_runtime_rank_tolerance(
+    B::AbstractMatrix{T},
+    opts::SolverOptions{T},
+) where {T}
+    rows, columns = size(B)
+    (rows == 0 || columns == 0) && return zero(T)
+    eps_eff = eps(T)
+    requested = min(opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual)
+    requested > zero(T) || (requested = sqrt(eps_eff))
+    requested = min(sqrt(eps_eff), requested)
+    return max(
+        T(max(rows, columns)) * eps_eff,
+        requested,
+    )
+end
+
+"""Choose the equality route before numerical KKT execution.
+
+Only the automatic route may be promoted to `:qr`, and only from verified
+presolve evidence. Explicit `:normal_equations` and `:qr` requests retain
+their existing semantics. The returned symbol is stored in the immutable plan
+parameters and consumed by the workspace; `BackendConfiguration` continues to
+record the user's request (`:auto`) for provenance and compatibility checks.
+"""
+function _planned_equality_solver(
+    prob::SDPProblem{T},
+    opts::SolverOptions{T},
+    evidence::EqualityPlanningEvidence,
+) where {T}
+    opts.equality_solver !== :auto && return opts.equality_solver
+    evidence.available && evidence.basis_verified || return :auto
+    quality = evidence.relative_rrqr_quality
+    isfinite(quality) || return :auto
+    # Cholesky forms the Gram matrix, so a column-space quality `q` is exposed
+    # to a squared condition number.  Use the square root of the runtime
+    # rank floor as a conservative *normal-equation safety* threshold.  This
+    # is deliberately distinct from the runtime acceptance predicate: a
+    # verified retained basis may remain mathematically full rank while still
+    # being routed to QR early to avoid provider factorization failure.
+    threshold = try
+        sqrt(Float64(_equality_runtime_rank_tolerance(prob.B, opts)))
+    catch exception
+        _recoverable(exception) || rethrow()
+        return :auto
+    end
+    isfinite(threshold) && quality <= threshold ? :qr : :auto
+end
+
 function _normalized_equality_columns(
     B::SparseMatrixCSC{T,Int},
     columns::AbstractVector{Int},
@@ -1973,6 +2044,26 @@ end
 _equality_rank_indices(B::AbstractMatrix, tolerance::Real) =
     _equality_rank_analysis(B, tolerance).keep
 
+"""Normwise scale for a proposed equality-column relation.
+
+The forward residual `Bkeep*C - Bdropped` must be compared with the
+coefficient-arithmetic backward scale `|Bkeep|*|C| + |Bdropped|`.  A plain
+maximum of the two operands is too strict when `C` contains cancellation and
+would reject a valid relation reconstructed by a lower-precision proposal
+factorization.
+"""
+function _equality_relation_backward_scale(
+    Bkeep::AbstractMatrix{T},
+    coefficients::AbstractMatrix{T},
+    Bdropped::AbstractMatrix{T},
+) where {T}
+    weighted = abs.(Bkeep) * abs.(coefficients)
+    @inbounds for index in eachindex(weighted, Bdropped)
+        weighted[index] += abs(Bdropped[index])
+    end
+    return maximum(weighted; init=zero(T))
+end
+
 function _equality_elimination_check(
     prob::SDPProblem{T},
     keep::Vector{Int},
@@ -2036,8 +2127,10 @@ function _equality_elimination_check(
         dependent_columns,
         scales,
     )
+    proposal_coefficients_from_float64 = false
     coefficients = try
         if Bkeep isa SparseMatrixCSC && T !== Float64
+            proposal_coefficients_from_float64 = true
             Bkeep_float =
                 _ingest_owned_sparse(Float64, Bkeep)
             Bdropped_float =
@@ -2067,6 +2160,29 @@ function _equality_elimination_check(
         )
     end
     relative_tolerance = max(T(tolerance), T(100) * eps(T))
+    if proposal_coefficients_from_float64
+        # Sparse extended-precision equalities use Float64 SPQR only to
+        # propose a basis.  The relation coefficients therefore carry a
+        # Float64 dot-product backward error even though the residual is
+        # evaluated in the solve arithmetic `T`.  Use a conservative
+        # normwise gamma_r envelope (with a modest safety factor) rather than
+        # the much smaller `eps(T)` floor; this does not relax the original
+        # arithmetic check for dense/high-precision proposals.
+        dot_length = size(Bkeep, 2)
+        rho = Float64(dot_length) * eps(Float64)
+        gamma = rho < one(Float64) ? rho / (one(Float64) - rho) : Inf
+        isfinite(gamma) || return (
+            elimination_valid=false,
+            consistent=true,
+            coefficients=nothing,
+            dependent_columns=dependent_columns,
+            scales=scales,
+        )
+        relative_tolerance = max(
+            relative_tolerance,
+            T(16 * gamma),
+        )
+    end
 
     # Validate the proposed column relation before using it to make a
     # feasibility decision. If the numerical relation is ambiguous, retain all
@@ -2077,9 +2193,10 @@ function _equality_elimination_check(
         relation .- Bdropped;
         init=zero(T),
     )
-    relation_scale = max(
-        maximum(abs, relation; init=zero(T)),
-        maximum(abs, Bdropped; init=zero(T)),
+    relation_scale = _equality_relation_backward_scale(
+        Bkeep,
+        coefficients,
+        Bdropped,
     )
     if iszero(relation_scale)
         iszero(relation_residual) ||
