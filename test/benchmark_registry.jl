@@ -8,7 +8,7 @@ include(joinpath(@__DIR__, "..", "benchmark", "SDPXBenchmarkRegistry.jl"))
 using .SDPXBenchmarkRegistry
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "round4_scoreboard_contracts.jl",
+    @__DIR__, "..", "benchmark", "contracts", "round4.jl",
 ))
 
 @testset "formulation scoreboard correctness gates" begin
@@ -82,6 +82,61 @@ end
     ).ok === false
 end
 
+@testset "canonical analytic registry adapter" begin
+    @test :analytic_fast in suite_names()
+    @test :analytic_numerical in suite_names()
+    @test :analytic_stress in suite_names()
+    @test_throws ArgumentError run_suite(
+        :analytic_stress; output=tempname() * ".toml", warmup=false,
+    )
+
+    spec = benchmark_spec("analytic/weighted_socp/n32/spread0")
+    built = build_problem(spec, Float64)
+    @test built.expected ≈ inv(sqrt(32.0))
+    @test built.analytic_contract.family === :weighted_minimum_norm_socp
+    @test built.analytic_contract.kind === :exact
+    @test built.analytic_contract.direction === :exact
+    @test built.source_parameters.dimension == 32
+    @test hasproperty(built, :solve_settings)
+
+    output = tempname() * ".toml"
+    result = run_suite(
+        :analytic_fast;
+        problem=spec.id,
+        output=output,
+        warmup=false,
+    )
+    row = only(result.rows)
+    @test row.semantic_pass
+    @test row.eligible_for_performance
+    @test row.classification === :PASS
+    @test row.analytic_family === :weighted_minimum_norm_socp
+    @test row.analytic_direction === :exact
+    @test row.objective_relative_error isa String
+    @test row.b_correct isa Real
+    @test row.certificate_failures isa Vector
+    @test row.validation_precision_bits isa Integer
+    @test row.nonzeros isa Integer
+    @test row.cone_composition == "lorentz33x1"
+    document = TOML.parsefile(output)
+    canonical = only(document["result"])
+    @test canonical["analytic_family"] == "weighted_minimum_norm_socp"
+    @test canonical["eligible_for_performance"]
+    @test !isempty(canonical["solve_settings"])
+
+    failure_output = tempname() * ".toml"
+    failure = run_suite(
+        :analytic_fast;
+        problem="analytic/moment/m4/order4/lower",
+        output=failure_output,
+        warmup=false,
+        allow_semantic_failures=true,
+    )
+    @test failure.failure_map !== nothing
+    @test isfile(failure.failure_map)
+    @test !only(TOML.parsefile(failure_output)["result"])["eligible_for_performance"]
+end
+
 @testset "benchmark registry contracts" begin
     registry = benchmark_registry()
     @test length(registry) >= 60
@@ -98,7 +153,10 @@ end
         @test all(!isempty(spec.external.license_note) for spec in specs)
     end
 
-    @test suite_names() == (:micro, :representative, :local_full, :large, :heavy)
+    @test suite_names() == (
+        :micro, :representative, :local_full, :large, :heavy,
+        :analytic_fast, :analytic_numerical, :analytic_stress,
+    )
     @test 6 <= length(suite_entries(:micro)) <= 12
     @test 20 <= length(suite_entries(:representative)) <= 30
     @test 50 <= length(suite_entries(:local_full)) <= 100
@@ -206,7 +264,7 @@ end
     @test local_result.rows[1].certificate_policy === :original_coordinate_required
     @test local_result.rows[1].provider_match
     @test isempty(local_result.rows[1].semantic_failures)
-    @test local_result.rows[1].schema_version == 3
+    @test local_result.rows[1].schema_version == 4
     @test local_result.rows[1].sample_count == 1
     @test local_result.rows[1].sample_seconds === missing
     @test local_result.rows[1].sample_semantic_pass === missing
@@ -272,7 +330,7 @@ end
     @test sort(sample_values)[2] == row.sample_median_seconds
     sampled_document = TOML.parsefile(sampled_output)
     sampled_row = only(sampled_document["result"])
-    @test sampled_row["schema_version"] == 3
+    @test sampled_row["schema_version"] == 4
     @test sampled_row["sample_count"] == 3
     @test startswith(sampled_row["sample_seconds"], "[")
     @test endswith(sampled_row["sample_seconds"], "]")

@@ -10,6 +10,7 @@ const RESULT_COLUMNS = (
     :skip_reason, :termination_reason,
     :variables, :equalities, :blocks, :block_sizes, :planned_formulation,
     :executed_formulation, :planned_backend, :executed_backend,
+    :requested_scaling, :planned_scaling, :executed_scaling,
     :planned_provider, :executed_provider, :executed_specialization,
     :psd_lift_used, :fallback_reason,
     :la_fallback_reason, :iterations, :objective, :reference_objective,
@@ -17,11 +18,27 @@ const RESULT_COLUMNS = (
     :objective_in_reference_interval, :benchmark_scale,
     :input_generation_precision_bits, :original_equalities, :source_parameters,
     :objective_error, :primal_residual, :dual_residual, :relative_gap,
+    :objective_relative_error, :b_correct, :analytic_family, :analytic_kind,
+    :analytic_direction, :analytic_equivalence_group,
+    :analytic_monotonic_group, :analytic_bound_group, :analytic_reference,
+    :analytic_absolute_tolerance, :analytic_relative_tolerance,
+    :complementarity, :relative_complementarity,
+    :primal_cone_violation, :dual_cone_violation,
     :certificate_policy, :certificate_available, :certificate_valid,
+    :certificate_kind, :certificate_failures, :certificate_provenance,
+    :validation_precision_bits, :certificate_error,
     :provider_match, :unexpected_fallback,
     :production_invariants_valid, :full_numerical_gate_valid,
-    :semantic_pass, :semantic_failures, :total_seconds, :seconds_per_iteration,
+    :classification, :semantic_pass, :eligible_for_performance,
+    :semantic_failures, :equivalence_gate_valid,
+    :monotonicity_gate_valid, :bound_pair_gate_valid, :group_failures,
+    :solve_settings, :nonzeros, :coefficient_dynamic_range,
+    :setup_seconds, :equilibration_seconds, :certification_seconds,
+    :independent_validation_seconds, :end_to_end_seconds,
+    :factorization_count, :refinement_count,
+    :total_seconds, :seconds_per_iteration,
     :allocated_bytes, :gc_seconds,
+    :workspace_bytes, :process_peak_rss_bytes, :memory_budget_bytes,
     :sample_count, :sample_seconds, :sample_semantic_pass,
     :sample_status, :sample_iterations, :sample_objective,
     :sample_certificate_valid, :sample_route,
@@ -34,10 +51,10 @@ const RESULT_COLUMNS = (
     :predictor_rhs_seconds, :corrector_rhs_seconds, :block_residual_seconds,
     :block_recovery_seconds, :local_metric_preparations,
     :equality_gram_assemblies, :equality_factorizations, :rhs_solves,
-    :input_fingerprint, :external_checksum,
+    :cone_composition, :input_fingerprint, :external_checksum,
 )
 
-const RESULT_SCHEMA_VERSION = 3
+const RESULT_SCHEMA_VERSION = 4
 
 _cell(value) = value === missing || value === nothing ? "" :
                replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')
@@ -161,7 +178,14 @@ function _options(provider::Symbol, ::Type{T}, built=nothing; verbose=false) whe
         max_runtime=max_time,
         threads=Threads.nthreads(),
         verbosity=0,
+        presolve=get(settings, :presolve, :auto),
+        scaling=get(settings, :scaling, :auto),
+        algorithm=get(settings, :algorithm, :auto),
+        sparse=get(settings, :sparse, :auto),
+        formulation=get(settings, :formulation, :auto),
+        equality_solver=get(settings, :equality_solver, :auto),
         linear_algebra_backend=provider,
+        working_precision_policy=get(settings, :working_precision_policy, :auto),
         diagnostics=true,
         timing=true,
         certification=true,
@@ -200,7 +224,7 @@ function _safe_certificate(problem, result, ::Type{T}, built=nothing) where {T}
                 parse(T, string(settings.tolerance)) :
                 (T === Float64 ? T(1e-8) : T(1e-20))
     try
-        return SDPX.result_certificate(
+        return (value=SDPX.result_certificate(
             problem,
             result,
             SDPX.SolverOptions{T}(
@@ -208,9 +232,9 @@ function _safe_certificate(problem, result, ::Type{T}, built=nothing) where {T}
                 ϵ_primal=tolerance,
                 ϵ_dual=tolerance,
             ),
-        )
-    catch
-        return nothing
+        ), error=missing)
+    catch exception
+        return (value=nothing, error=sprint(showerror, exception))
     end
 end
 
@@ -237,9 +261,18 @@ end
 
 function _problem_fingerprint(spec, built, arithmetic)
     facts = _problem_facts(built.problem)
-    builder_path = spec.external === nothing ?
-                   joinpath(ROOT, "generators", "problems.jl") :
-                   joinpath(ROOT, "loaders", "csdr_fixed_trace.jl")
+    builder_paths = if spec.external === nothing
+        paths = [joinpath(ROOT, "generators", "problems.jl")]
+        spec.loader === :analytic && push!(
+            paths, joinpath(ROOT, "analytic", "AnalyticFamilies.jl"),
+        )
+        paths
+    else
+        [joinpath(ROOT, "loaders", "csdr_fixed_trace.jl")]
+    end
+    builder_digest = bytes2hex(SHA.sha256(vcat(
+        (read(path) for path in builder_paths)...,
+    )))
     payload = join((
         spec.id,
         string(arithmetic),
@@ -247,10 +280,92 @@ function _problem_fingerprint(spec, built, arithmetic)
         repr(spec.parameters),
         repr(facts),
         string(_built_value(built, :external_checksum, "")),
-        bytes2hex(SHA.sha256(read(builder_path))),
+        builder_digest,
     ), "|")
     return bytes2hex(SHA.sha256(payload))
 end
+
+function _problem_nonzeros(problem)
+    if problem isa SDPX.ConicProblem
+        total = Base.count(!iszero, problem.c) + Base.count(!iszero, problem.beq)
+        total += Base.count(!iszero, problem.Aeq)
+        for cone in problem.cones
+            total += Base.count(!iszero, cone.A) + Base.count(!iszero, cone.b)
+        end
+        return total
+    elseif problem isa SDPX.SDPProblem
+        total = Base.count(!iszero, problem.c) + Base.count(!iszero, problem.b)
+        total += Base.count(!iszero, problem.B)
+        total += sum(Base.count(!iszero, block) for block in problem.C)
+        if problem.cons isa SDPX.DenseCons
+            total += sum(Base.count(!iszero, block) for block in problem.cons.Av)
+        elseif problem.cons isa SDPX.SparseCons
+            total += sum(length(block.val) for block in problem.cons.coo)
+        end
+        return total
+    end
+    return missing
+end
+
+function _cone_composition(problem)
+    if problem isa SDPX.ConicProblem
+        dimensions = sort!(collect(size(cone.A, 1) for cone in problem.cones))
+        counts = Dict{Int,Int}()
+        for dimension in dimensions
+            counts[dimension] = get(counts, dimension, 0) + 1
+        end
+        return join(("lorentz$(dimension)x$(counts[dimension])"
+                     for dimension in sort!(collect(keys(counts)))), ",")
+    elseif problem isa SDPX.SDPProblem
+        counts = Dict{Int,Int}()
+        for dimension in problem.dims.k
+            counts[dimension] = get(counts, dimension, 0) + 1
+        end
+        return join(("psd$(dimension)x$(counts[dimension])"
+                     for dimension in sort!(collect(keys(counts)))), ",")
+    end
+    return missing
+end
+
+function _coefficient_dynamic_range(problem)
+    minimum_value = nothing
+    maximum_value = nothing
+    function scan(values)
+        for value in values
+            magnitude = abs(value)
+            iszero(magnitude) && continue
+            minimum_value = minimum_value === nothing ? magnitude :
+                            min(minimum_value, magnitude)
+            maximum_value = maximum_value === nothing ? magnitude :
+                            max(maximum_value, magnitude)
+        end
+    end
+    if problem isa SDPX.ConicProblem
+        scan(problem.c)
+        scan(problem.Aeq)
+        scan(problem.beq)
+        for cone in problem.cones
+            scan(cone.A)
+            scan(cone.b)
+        end
+    elseif problem isa SDPX.SDPProblem
+        scan(problem.c)
+        scan(problem.b)
+        scan(problem.B)
+        foreach(scan, problem.C)
+        if problem.cons isa SDPX.DenseCons
+            foreach(scan, problem.cons.Av)
+        elseif problem.cons isa SDPX.SparseCons
+            foreach(block -> scan(block.val), problem.cons.coo)
+        end
+    else
+        return missing
+    end
+    minimum_value === nothing && return zero(eltype(problem))
+    return maximum_value / minimum_value
+end
+
+_analytic_contract(built) = _built_value(built, :analytic_contract, nothing)
 
 _trace_value(value) = SDPX.isavailable(value) ? value : missing
 _trace_field(record, name::Symbol) = hasproperty(record, name) ?
@@ -258,6 +373,19 @@ _trace_field(record, name::Symbol) = hasproperty(record, name) ?
 _sym(value) = value isa Symbol ? value : missing
 
 _normalized_status(status) = Symbol(lowercase(string(status)))
+
+function _classification(status, semantic_pass::Bool)
+    semantic_pass && return :PASS
+    normalized = _normalized_status(status)
+    normalized in (
+        :optimal,
+        :primalinfeasible,
+        :dualinfeasible,
+        :infeasiblecert,
+        :error,
+    ) && return :FAIL
+    return :UNRESOLVED
+end
 
 function _unexpected_fallback(spec, fallback_reason, la_fallback_reason)
     planned_reasons = (
@@ -285,6 +413,7 @@ function _semantic_failures(
     status,
     objective,
     expected,
+    analytic_contract,
     primal_residual,
     dual_residual,
     relative_gap,
@@ -296,16 +425,38 @@ function _semantic_failures(
     _normalized_status(status) === _normalized_status(spec.reference.status) ||
         push!(failures, "status")
     actual_optimal = _normalized_status(status) === :optimal
-    if actual_optimal && expected !== nothing
-        error = abs(objective - expected)
-        allowed = spec.reference.absolute_tolerance +
-                  spec.reference.relative_tolerance * max(one(error), abs(expected))
-        (!isfinite(error) || error > allowed) && push!(failures, "objective")
+    if actual_optimal
+        if analytic_contract !== nothing
+            reference = get(analytic_contract, :reference, nothing)
+            direction = get(analytic_contract, :direction, :exact)
+            if reference !== nothing
+                absolute = get(analytic_contract, :absolute_tolerance, 0.0)
+                relative = get(analytic_contract, :relative_tolerance, 0.0)
+                allowed = absolute + relative * abs(reference)
+                error = abs(objective - reference)
+                objective_ok = if direction === :lower
+                    objective <= reference + allowed
+                elseif direction === :upper
+                    objective >= reference - allowed
+                else
+                    isfinite(error) && error <= allowed
+                end
+                objective_ok || push!(failures, direction === :exact ?
+                    "objective" : "objective_bound")
+            end
+        elseif expected !== nothing
+            error = abs(objective - expected)
+            allowed = spec.reference.absolute_tolerance +
+                      spec.reference.relative_tolerance * max(one(error), abs(expected))
+            (!isfinite(error) || error > allowed) && push!(failures, "objective")
+        end
     end
-    residual_limit = 10 * max(
-        spec.reference.absolute_tolerance,
-        spec.reference.relative_tolerance,
-    )
+    residual_tolerance = analytic_contract === nothing ?
+        max(spec.reference.absolute_tolerance,
+            spec.reference.relative_tolerance) :
+        get(analytic_contract, :residual_tolerance,
+            spec.reference.relative_tolerance)
+    residual_limit = 10 * residual_tolerance
     if actual_optimal
         for (name, value) in (
             ("primal_residual", primal_residual),
@@ -380,14 +531,43 @@ function _result_row(
 )
     trace = SDPX.performance_trace(result)
     T = eltype(built.problem)
-    certificate = _safe_certificate(built.problem, result, T, built)
+    certificate_measurement = @timed _safe_certificate(
+        built.problem, result, T, built,
+    )
+    certificate_record = certificate_measurement.value
+    certificate = certificate_record.value
+    certificate_error = certificate_record.error
     native_objective = trace.final.primal_objective
     objective = _physical_objective(built, result, native_objective)
     interval = _reference_interval(built, T)
     interval_pass = interval === nothing ? missing :
                     interval.lower <= objective <= interval.upper
-    expected = built.expected === nothing ? spec.reference.objective : built.expected
-    objective_error = expected === nothing ? missing : abs(objective - expected)
+    analytic = _analytic_contract(built)
+    analytic_reference = analytic === nothing ? nothing :
+                         get(analytic, :reference, nothing)
+    expected = analytic_reference !== nothing ?
+               (get(analytic, :kind, :exact) === :exact ? analytic_reference : nothing) :
+               (built.expected === nothing ? spec.reference.objective : built.expected)
+    objective_error_reference = analytic_reference !== nothing ?
+                                analytic_reference : expected
+    objective_error = objective_error_reference === nothing ? missing :
+                      abs(objective - objective_error_reference)
+    objective_error_scale = if objective_error_reference === nothing
+        nothing
+    elseif iszero(objective_error_reference)
+        eps(one(objective_error_reference))
+    else
+        max(abs(objective_error_reference), eps(abs(objective_error_reference)))
+    end
+    objective_relative_error = objective_error === missing ? missing :
+        objective_error / objective_error_scale
+    b_correct = if objective_error === missing
+        missing
+    elseif iszero(objective_error)
+        Inf
+    else
+        Float64(-log2(objective_relative_error))
+    end
     primal_residual = trace.final.primal_residual
     dual_residual = trace.final.dual_residual
     relative_gap = trace.final.relative_gap
@@ -405,6 +585,7 @@ function _result_row(
         trace.final.status,
         objective,
         expected,
+        _analytic_contract(built),
         primal_residual,
         dual_residual,
         relative_gap,
@@ -448,6 +629,17 @@ function _result_row(
         production_invariants &= exact_no_fallback
     end
     facts = _problem_facts(built.problem)
+    certificate_failures = certificate === nothing ? missing :
+        get(certificate, :failures, missing)
+    certificate_kind = certificate === nothing ? missing :
+        get(certificate, :kind, missing)
+    certificate_provenance = certificate === nothing ? nothing :
+        get(certificate, :provenance, nothing)
+    validation_precision_bits = certificate_provenance === nothing ? missing :
+        get(certificate_provenance, :validation_precision_bits,
+            get(certificate_provenance, :precision_bits, missing))
+    semantic_pass = isempty(failures)
+    classification = _classification(trace.final.status, semantic_pass)
     solve_seconds = begin
         predictor = _trace_value(trace.iteration.predictor_solve_seconds)
         corrector = _trace_value(trace.iteration.corrector_solve_seconds)
@@ -496,6 +688,9 @@ function _result_row(
         executed_formulation=_formulation(trace, result, false),
         planned_backend=_trace_value(trace.setup.planned_backend),
         executed_backend=_trace_value(trace.setup.executed_backend),
+        requested_scaling=get(_solve_settings(built), :scaling, :auto),
+        planned_scaling=_trace_value(trace.setup.planned_scaling),
+        executed_scaling=_trace_value(trace.setup.executed_scaling),
         planned_provider=_trace_value(trace.setup.planned_la_provider),
         executed_provider=executed_provider,
         executed_specialization=specialization,
@@ -524,19 +719,72 @@ function _result_row(
         primal_residual=string(primal_residual),
         dual_residual=string(dual_residual),
         relative_gap=string(relative_gap),
+        objective_relative_error=objective_relative_error === missing ? missing :
+                                 string(objective_relative_error),
+        b_correct=b_correct,
+        analytic_family=analytic === nothing ? missing : get(analytic, :family, missing),
+        analytic_kind=analytic === nothing ? missing : get(analytic, :kind, missing),
+        analytic_direction=analytic === nothing ? missing : get(analytic, :direction, missing),
+        analytic_equivalence_group=analytic === nothing ? missing :
+                                   get(analytic, :equivalence_group, missing),
+        analytic_monotonic_group=analytic === nothing ? missing :
+                                 get(analytic, :monotonic_group, missing),
+        analytic_bound_group=analytic === nothing ? missing :
+                             get(analytic, :bound_group, missing),
+        analytic_reference=analytic_reference === nothing ? missing :
+                           string(analytic_reference),
+        analytic_absolute_tolerance=analytic === nothing ? missing :
+            string(get(analytic, :absolute_tolerance, missing)),
+        analytic_relative_tolerance=analytic === nothing ? missing :
+            string(get(analytic, :relative_tolerance, missing)),
+        complementarity=certificate === nothing ? missing :
+                        get(certificate, :complementarity, missing),
+        relative_complementarity=certificate === nothing ? missing :
+                                 get(certificate, :complementarity_relative, missing),
+        primal_cone_violation=certificate === nothing ? missing :
+                              get(certificate, :primal_cone_violation, missing),
+        dual_cone_violation=certificate === nothing ? missing :
+                            get(certificate, :dual_cone_violation, missing),
         certificate_policy=:original_coordinate_required,
-        certificate_available=_trace_value(trace.final.certificate_available),
+        certificate_available=certificate !== nothing,
         certificate_valid=certificate === nothing ? missing : certificate.valid,
+        certificate_kind=certificate_kind,
+        certificate_failures=certificate_failures,
+        certificate_provenance=certificate_provenance === nothing ? missing :
+                               repr(certificate_provenance),
+        validation_precision_bits=validation_precision_bits,
+        certificate_error=certificate_error,
         provider_match=provider_match,
         unexpected_fallback=unexpected_fallback,
         production_invariants_valid=production_invariants,
         full_numerical_gate_valid=isempty(failures),
-        semantic_pass=isempty(failures),
+        classification=classification,
+        semantic_pass=semantic_pass,
+        eligible_for_performance=classification === :PASS,
         semantic_failures=join(failures, ","),
+        equivalence_gate_valid=missing,
+        monotonicity_gate_valid=missing,
+        bound_pair_gate_valid=missing,
+        group_failures="",
+        solve_settings=repr(_solve_settings(built)),
+        nonzeros=_problem_nonzeros(built.problem),
+        coefficient_dynamic_range=string(
+            _coefficient_dynamic_range(built.problem),
+        ),
+        setup_seconds=_trace_value(trace.setup.setup_seconds),
+        equilibration_seconds=_trace_value(trace.setup.equilibration_seconds),
+        certification_seconds=_trace_value(trace.final.certification_seconds),
+        independent_validation_seconds=certificate_measurement.time,
+        end_to_end_seconds=elapsed + certificate_measurement.time,
+        factorization_count=_trace_field(trace.counters, :numeric_factorizations),
+        refinement_count=_trace_field(trace.counters, :refinement_solves),
         total_seconds=elapsed,
         seconds_per_iteration=elapsed / max(trace.counters.iterations, 1),
         allocated_bytes,
         gc_seconds,
+        workspace_bytes=_trace_value(trace.final.workspace_bytes),
+        process_peak_rss_bytes=_trace_value(trace.final.process_peak_rss_bytes),
+        memory_budget_bytes=_trace_value(trace.final.memory_budget_bytes),
         sample_count=1,
         sample_seconds=missing,
         sample_semantic_pass=missing,
@@ -577,6 +825,7 @@ function _result_row(
         equality_factorizations=
             _trace_field(trace.counters, :equality_factorizations),
         rhs_solves=_trace_field(trace.counters, :rhs_solves),
+        cone_composition=_cone_composition(built.problem),
         input_fingerprint=_problem_fingerprint(spec, built, arithmetic),
         external_checksum=_built_value(built, :external_checksum, missing),
     )
@@ -633,13 +882,27 @@ function _sample_route_key(row)
 end
 
 function _reference_tolerance(row)
-    absolute = getproperty(row, :reference_absolute_tolerance)
-    relative = getproperty(row, :reference_relative_tolerance)
+    analytic_absolute = getproperty(row, :analytic_absolute_tolerance)
+    analytic_relative = getproperty(row, :analytic_relative_tolerance)
+    analytic = analytic_absolute !== missing && analytic_relative !== missing
+    absolute = analytic ? analytic_absolute :
+               getproperty(row, :reference_absolute_tolerance)
+    relative = analytic ? analytic_relative :
+               getproperty(row, :reference_relative_tolerance)
+    if analytic
+        try
+            parse(BigFloat, string(absolute)) >= 0 &&
+                parse(BigFloat, string(relative)) >= 0 || return nothing, nothing, false
+            return string(absolute), string(relative), false
+        catch
+            return nothing, nothing, false
+        end
+    end
     if absolute isa Real && isfinite(absolute) && absolute >= 0 &&
        relative isa Real && isfinite(relative) && relative >= 0
-        return string(absolute), string(relative)
+        return string(absolute), string(relative), true
     end
-    return nothing, nothing
+    return nothing, nothing, true
 end
 
 function _parity_precision_bits(values...)
@@ -663,7 +926,7 @@ function _objective_parity(rows)
         objective_strings = [
             string(getproperty(row, :objective)) for row in rows
         ]
-        absolute, relative = _reference_tolerance(first(rows))
+        absolute, relative, unit_scale = _reference_tolerance(first(rows))
         bits = _parity_precision_bits(
             objective_strings..., absolute, relative,
         )
@@ -689,8 +952,9 @@ function _objective_parity(rows)
             relative_tolerance = parse(BigFloat, relative)
             if all(numeric) do value
                 error = abs(value - first_value)
-                allowed = absolute_tolerance + relative_tolerance *
-                          max(one(BigFloat), abs(first_value))
+                scale = unit_scale ? max(one(BigFloat), abs(first_value)) :
+                        abs(first_value)
+                allowed = absolute_tolerance + relative_tolerance * scale
                 error <= allowed
             end
                 return (ok=true, message="")
@@ -764,6 +1028,8 @@ end
 
 function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
     values = Dict{Symbol,Any}(field => missing for field in RESULT_COLUMNS)
+    analytic_parameters = spec.loader === :analytic ? spec.parameters : (;)
+    family_parameters = get(analytic_parameters, :analytic_parameters, (;))
     merge!(values, Dict(
         :schema_version => RESULT_SCHEMA_VERSION,
         :source_commit => _source_commit(),
@@ -795,7 +1061,18 @@ function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
         :reference_status => spec.reference.status,
         :reference_absolute_tolerance => spec.reference.absolute_tolerance,
         :reference_relative_tolerance => spec.reference.relative_tolerance,
+        :analytic_family => get(analytic_parameters, :analytic_family, missing),
+        :analytic_direction => get(family_parameters, :bound, :exact),
+        :analytic_equivalence_group =>
+            get(analytic_parameters, :equivalence_group, missing),
+        :analytic_monotonic_group =>
+            get(analytic_parameters, :monotonic_group, missing),
+        :analytic_bound_group => get(analytic_parameters, :bound_group, missing),
         :certificate_policy => :original_coordinate_required,
+        :classification => :UNRESOLVED,
+        :eligible_for_performance => false,
+        :group_failures => "",
+        :solve_settings => repr(get(analytic_parameters, :solve_settings, (;))),
         :skip_reason => reason,
         :external_checksum => checksum === missing && spec.external !== nothing ?
                               something(spec.external.sha256, missing) : checksum,
@@ -819,12 +1096,245 @@ function _error_row(spec, suite, arithmetic, provider, exception)
         field => getproperty(skipped, field) for field in RESULT_COLUMNS
     )
     values[:status] = :error
+    values[:classification] = :FAIL
     values[:semantic_pass] = false
+    values[:eligible_for_performance] = false
     values[:semantic_failures] = "execution_error"
     values[:sample_count] = 1
     return NamedTuple{RESULT_COLUMNS}(
         Tuple(values[field] for field in RESULT_COLUMNS),
     )
+end
+
+function _replace_result_row(row, updates::Pair...)
+    replacement = Dict{Symbol,Any}(updates)
+    values = Any[
+        haskey(replacement, field) ? replacement[field] :
+        getproperty(row, field)
+        for field in RESULT_COLUMNS
+    ]
+    return NamedTuple{RESULT_COLUMNS}(Tuple(values))
+end
+
+function _append_failure(existing, failure)
+    text = existing === missing || existing === nothing ? "" : string(existing)
+    isempty(text) && return string(failure)
+    failure in split(text, ',') && return text
+    return text * "," * string(failure)
+end
+
+_classification_rank(value) = value === :FAIL ? 3 :
+                              value === :UNRESOLVED ? 2 :
+                              value === :PASS ? 1 : 0
+
+function _worse_classification(left, right)
+    return _classification_rank(left) >= _classification_rank(right) ? left : right
+end
+
+function _analytic_groups(rows, field)
+    groups = Dict{Tuple{String,String,String},Vector{Int}}()
+    for (index, row) in pairs(rows)
+        value = getproperty(row, field)
+        (value === missing || value === nothing) && continue
+        row.status === :skipped && continue
+        isempty(string(value)) && continue
+        key = (
+            string(value),
+            string(getproperty(row, :arithmetic)),
+            string(getproperty(row, :requested_provider)),
+        )
+        push!(get!(groups, key, Int[]), index)
+    end
+    return groups
+end
+
+function _analytic_group_tolerance(group_rows, values)
+    absolute = BigFloat(0)
+    relative = BigFloat(0)
+    for row in group_rows
+        absolute = max(
+            absolute,
+            parse(BigFloat, string(row.analytic_absolute_tolerance)),
+        )
+        relative = max(
+            relative,
+            parse(BigFloat, string(row.analytic_relative_tolerance)),
+        )
+    end
+    scale = maximum(abs, values; init=BigFloat(0))
+    return absolute + relative * scale
+end
+
+function _group_precision(group_rows)
+    recorded = [row.precision_bits for row in group_rows
+                if row.precision_bits isa Integer]
+    strings = String[]
+    for row in group_rows
+        for field in (:objective, :analytic_absolute_tolerance,
+                      :analytic_relative_tolerance)
+            value = getproperty(row, field)
+            value === missing || push!(strings, string(value))
+        end
+    end
+    return max(maximum(recorded; init=128) * 2,
+               _parity_precision_bits(strings...))
+end
+
+function _mark_group!(rows, indices, field, valid, failure, severity)
+    for index in indices
+        row = rows[index]
+        if valid
+            rows[index] = _replace_result_row(row, field => true)
+            continue
+        end
+        classification = _worse_classification(row.classification, severity)
+        rows[index] = _replace_result_row(
+            row,
+            field => false,
+            :classification => classification,
+            :semantic_pass => false,
+            :eligible_for_performance => false,
+            :semantic_failures => _append_failure(row.semantic_failures, failure),
+            :group_failures => _append_failure(row.group_failures, failure),
+        )
+    end
+    return rows
+end
+
+function _apply_equivalence_gates!(rows)
+    for indices in values(_analytic_groups(rows, :analytic_equivalence_group))
+        length(indices) >= 2 || continue
+        group_rows = rows[indices]
+        # Formulation invariance is an independent diagnostic: two certified
+        # Optimal rows can agree with each other even when both miss the
+        # analytic oracle. Do not conflate those two failure mechanisms.
+        ready = all(
+            row -> _normalized_status(row.status) === :optimal &&
+                   row.certificate_valid === true,
+            group_rows,
+        )
+        valid = false
+        failure = "equivalence_unresolved"
+        severity = any(row -> row.classification === :FAIL, group_rows) ?
+                   :FAIL : :UNRESOLVED
+        if ready
+            bits = _group_precision(group_rows)
+            valid = setprecision(BigFloat, bits) do
+                objectives = [parse(BigFloat, string(row.objective)) for row in group_rows]
+                all(isfinite, objectives) || return false
+                maximum(objectives) - minimum(objectives) <=
+                    _analytic_group_tolerance(group_rows, objectives)
+            end
+            failure = "equivalence_objective"
+            severity = :FAIL
+        end
+        _mark_group!(
+            rows, indices, :equivalence_gate_valid,
+            valid, failure, severity,
+        )
+    end
+    return rows
+end
+
+function _analytic_order(row)
+    spec = benchmark_spec(row.problem_id)
+    parameters = get(spec.parameters, :analytic_parameters, (;))
+    return get(parameters, :order, nothing)
+end
+
+function _has_nonfinite_objective(rows)
+    try
+        objectives = [parse(BigFloat, string(row.objective)) for row in rows]
+        return any(!isfinite, objectives)
+    catch
+        return true
+    end
+end
+
+function _apply_monotonicity_gates!(rows)
+    for indices in values(_analytic_groups(rows, :analytic_monotonic_group))
+        length(indices) >= 2 || continue
+        sort!(indices; by=index -> something(_analytic_order(rows[index]), typemax(Int)))
+        group_rows = rows[indices]
+        ready = all(row -> row.classification === :PASS, group_rows)
+        valid = false
+        failure = "monotonicity_unresolved"
+        severity = any(row -> row.classification === :FAIL, group_rows) ?
+                   :FAIL : :UNRESOLVED
+        if _has_nonfinite_objective(group_rows)
+            failure = "monotonicity"
+            severity = :FAIL
+            ready = false
+        end
+        if ready
+            bits = _group_precision(group_rows)
+            valid = setprecision(BigFloat, bits) do
+                objectives = [parse(BigFloat, string(row.objective)) for row in group_rows]
+                allowed = _analytic_group_tolerance(group_rows, objectives)
+                direction = first(group_rows).analytic_direction
+                if direction === :lower
+                    all(objectives[index + 1] + allowed >= objectives[index]
+                        for index in 1:(length(objectives) - 1))
+                elseif direction === :upper
+                    all(objectives[index + 1] <= objectives[index] + allowed
+                        for index in 1:(length(objectives) - 1))
+                else
+                    false
+                end
+            end
+            failure = "monotonicity"
+            severity = :FAIL
+        end
+        _mark_group!(
+            rows, indices, :monotonicity_gate_valid,
+            valid, failure, severity,
+        )
+    end
+    return rows
+end
+
+function _apply_bound_pair_gates!(rows)
+    for indices in values(_analytic_groups(rows, :analytic_bound_group))
+        length(indices) >= 2 || continue
+        group_rows = rows[indices]
+        directions = Dict(row.analytic_direction => row for row in group_rows)
+        haskey(directions, :lower) && haskey(directions, :upper) || continue
+        ready = all(row -> row.classification === :PASS, group_rows)
+        valid = false
+        failure = "bound_pair_unresolved"
+        severity = any(row -> row.classification === :FAIL, group_rows) ?
+                   :FAIL : :UNRESOLVED
+        bound_rows = (directions[:lower], directions[:upper])
+        if _has_nonfinite_objective(bound_rows)
+            failure = "bound_pair"
+            severity = :FAIL
+            ready = false
+        end
+        if ready
+            bits = _group_precision(group_rows)
+            valid = setprecision(BigFloat, bits) do
+                lower = parse(BigFloat, string(directions[:lower].objective))
+                upper = parse(BigFloat, string(directions[:upper].objective))
+                values = BigFloat[lower, upper]
+                lower <= upper + _analytic_group_tolerance(group_rows, values)
+            end
+            failure = "bound_pair"
+            severity = :FAIL
+        end
+        _mark_group!(
+            rows, indices, :bound_pair_gate_valid,
+            valid, failure, severity,
+        )
+    end
+    return rows
+end
+
+function _apply_analytic_group_gates(rows)
+    updated = NamedTuple[row for row in rows]
+    _apply_equivalence_gates!(updated)
+    _apply_monotonicity_gates!(updated)
+    _apply_bound_pair_gates!(updated)
+    return updated
 end
 
 function _write_tsv(path, rows)
@@ -842,6 +1352,9 @@ function _toml_value(value)
     end
     value isa Symbol && return string(value)
     value isa Tuple && return join(string.(value), ",")
+    value isa AbstractVector && return [
+        item isa Symbol ? string(item) : item for item in value
+    ]
     return value
 end
 
@@ -861,6 +1374,32 @@ function write_results(path::AbstractString, rows)
         TOML.print(io, document; sorted=true)
     end
     return (tsv=tsv, toml=toml)
+end
+
+function _write_failure_map(path::AbstractString, rows)
+    failed = filter(row -> row.status != :skipped &&
+                    (row.semantic_pass === false ||
+                     row.sample_semantic_parity === false), rows)
+    document = Dict(
+        "schema_version" => RESULT_SCHEMA_VERSION,
+        "generated_at" => string(Dates.now()),
+        "failure" => [Dict(
+            "problem_id" => row.problem_id,
+            "status" => string(row.status),
+            "classification" => _cell(row.classification),
+            "semantic_failures" => string(row.semantic_failures),
+            "group_failures" => _cell(row.group_failures),
+            "analytic_family" => _cell(row.analytic_family),
+            "analytic_direction" => _cell(row.analytic_direction),
+            "objective" => _cell(row.objective),
+            "analytic_reference" => _cell(row.analytic_reference),
+        ) for row in failed],
+    )
+    mkpath(dirname(path))
+    open(path, "w") do io
+        TOML.print(io, document; sorted=true)
+    end
+    return path
 end
 
 function _selected_entries(suite, problem, arithmetic, provider)
@@ -893,6 +1432,7 @@ function run_suite(
     samples=1,
     cache_dir=DEFAULT_CACHE,
     allow_large=false,
+    allow_semantic_failures=false,
 )
     suite === :heavy && throw(ArgumentError(
         "the heavy suite is register-only and cannot be executed",
@@ -901,6 +1441,11 @@ function run_suite(
         throw(ArgumentError(
             "the large suite is cluster-only; run it inside PBS or pass " *
             "allow_large=true for an explicitly authorized non-cluster diagnostic",
+        ))
+    suite === :analytic_stress && !allow_large &&
+        throw(ArgumentError(
+            "the analytic stress suite is gated; pass allow_large=true for an " *
+            "explicitly authorized stress run",
         ))
     samples isa Integer || throw(ArgumentError(
         "samples must be an integer count of timed solves, got $samples",
@@ -941,6 +1486,17 @@ function run_suite(
                 :provider_unavailable,
             ))
             verbose && println("skip ", spec.id, ": ", exception)
+            continue
+        end
+        if :capability_skip in spec.tags
+            reason = Symbol(get(
+                spec.parameters, :skip_reason,
+                :backend_capability_unavailable,
+            ))
+            push!(rows, _skip_row(
+                spec, suite, entry.arithmetic, entry.provider, reason,
+            ))
+            verbose && println("skip ", spec.id, ": ", reason)
             continue
         end
         run = function ()
@@ -1051,6 +1607,7 @@ function run_suite(
             println(spec.id, " ", row.status, " ", elapsed_label)
         end
     end
+    rows = _apply_analytic_group_gates(rows)
     paths = write_results(output, rows)
     failed = filter(
         row -> row.status != :skipped &&
@@ -1058,7 +1615,15 @@ function run_suite(
                 row.sample_semantic_parity === false),
         rows,
     )
-    if strict_semantics && !isempty(failed)
+    failure_map = nothing
+    if !isempty(failed) && allow_semantic_failures
+        root, extension = splitext(output)
+        failure_map = _write_failure_map(
+            (extension == ".toml" || extension == ".tsv" ? root : output) *
+            ".failure-map.toml", rows,
+        )
+    end
+    if strict_semantics && !allow_semantic_failures && !isempty(failed)
         details = join((
             let failures = String[]
                 isempty(row.semantic_failures) ||
@@ -1074,7 +1639,7 @@ function run_suite(
             "results were written to $(paths.toml)",
         ))
     end
-    return (rows=rows, paths=paths)
+    return (rows=rows, paths=paths, failure_map=failure_map)
 end
 
 function _parse_symbol(value)
@@ -1092,6 +1657,7 @@ function _parse_cli(args)
     verbose = false
     prepare = false
     allow_large = false
+    allow_semantic_failures = false
     samples = 1
     warmup = true
     positional = String[]
@@ -1114,6 +1680,8 @@ function _parse_cli(args)
             prepare = true
         elseif argument == "--allow-large"
             allow_large = true
+        elseif argument == "--allow-semantic-failures"
+            allow_semantic_failures = true
         elseif argument == "--no-warmup"
             warmup = false
         elseif startswith(argument, "--")
@@ -1125,7 +1693,7 @@ function _parse_cli(args)
     !isempty(positional) && (suite = Symbol(lowercase(first(positional))))
     length(positional) > 1 && problem === nothing && (problem = positional[2])
     return (; suite, problem, arithmetic, provider, output, cache_dir, verbose,
-            prepare, allow_large, samples, warmup)
+            prepare, allow_large, allow_semantic_failures, samples, warmup)
 end
 
 function main(args=ARGS)
@@ -1157,6 +1725,7 @@ function main(args=ARGS)
         warmup=options.warmup,
         cache_dir=options.cache_dir,
         allow_large=options.allow_large,
+        allow_semantic_failures=options.allow_semantic_failures,
     )
     solved = count(row -> !(row.status in (:skipped, :error)), result.rows)
     errors = count(row -> row.status === :error, result.rows)

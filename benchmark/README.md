@@ -18,6 +18,10 @@ code.
   `--allow-large` is explicitly supplied for a diagnostic.
 - `heavy`: full NETLIB/SDPLIB/CBLIB, Mittelmann, large sparse, bootstrap and
   precision sweeps. It is register-only and the runner refuses to execute it.
+- `analytic_fast`: small closed-form LP/SOCP/SDP correctness and equivalence
+  checks.
+- `analytic_numerical`: moderate size/pathology with selected MFLA/BFLA rows.
+- `analytic_stress`: explicitly gated scale/precision research cases.
 
 ## Local commands
 
@@ -32,10 +36,11 @@ julia --project=. benchmark/runner.jl micro \
 
 Results are written as matching TOML and TSV files. Semantic facts (status,
 objective, residuals, certificate, iterations, planned/executed route/provider,
-and fallback) are primary. A solved row carries `semantic_pass`, a compact list
-of `semantic_failures`, and an explicit `unexpected_fallback` flag. The runner
-writes the complete artifact before failing on a semantic regression. Timings
-are one post-warmup observation and are never an ordinary CI failure threshold.
+and fallback) are primary. A solved row carries `PASS`/`FAIL`/`UNRESOLVED`,
+`semantic_pass`, compact individual/group failures, and an explicit
+`unexpected_fallback` flag. The runner writes the complete artifact before
+failing on a semantic regression. Timing comparisons require passing gates;
+use at least three post-warmup samples for median/MAD data.
 
 Current SOCP cases exercise the native Lorentz frontend. Rows record the
 executed specialization and whether a PSD lift was present; the Full-unitarity
@@ -97,6 +102,24 @@ bounded 1/5/20-iteration diagnostics, not repeated full holdout solves.
 manifests, tier configs, pathological generators, the on-demand downloader,
 and data placeholders. It has no runner of its own.
 
+## Analytic referee suite
+
+`benchmark/analytic/` supplies six deterministic LP/SOCP/SDP families with
+closed-form objectives (and bound-direction checks for the moment hierarchy).
+They use the same canonical runner and result schema as every other benchmark;
+there is no second timer, provider selector or solver path. Only `PASS` rows
+are eligible for timing comparisons, while `FAIL` and `UNRESOLVED` remain
+visible in a generated failure map.
+
+```sh
+JULIA_DEPOT_PATH=/tmp/sdpx-julia-depot julia --project=. \
+  benchmark/runner.jl analytic_fast --allow-semantic-failures \
+  --output=/tmp/sdpx-analytic.toml
+```
+
+See `benchmark/analytic/README.md` for the exact formulas, registered grids,
+group gates and initial baseline observations.
+
 ## Precision sampling
 
 Float64 is the default. Local Full adds selected LP/SDP/stress cases in
@@ -108,8 +131,8 @@ alone does not opt `:auto` into an optional provider.
 
 ## Specialized campaigns
 
-Application/cluster benchmarks under `bench/` and the scoreboards under
-`benchmark/` (`round3_augmented_ab.jl`, `round4_formulation_scoreboard.jl`,
-`round5_soc_scoreboard.jl`) remain specialized and outside the canonical
-runner. `bench/gates.jl` with `bench/baselines/gates.json` remains the
-correctness acceptance gate.
+Application/cluster benchmarks remain under `bench/`. The historical Round
+3--5 scoreboards have been removed: their semantic coverage is retained by the
+canonical registry suites, unit tests, and the correctness contracts in
+`benchmark/contracts/`. `bench/gates.jl` with `bench/baselines/gates.json`
+remains the correctness acceptance gate.
