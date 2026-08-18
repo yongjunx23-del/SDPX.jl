@@ -64,6 +64,19 @@ end
     @test valid.valid
     @test valid.key == key
     @test valid.lower == BigFloat("1.0")
+
+    # The historical Julia producer spelling is qualified, while the public
+    # schema is canonical.  Accept this one explicit Float64x2 alias for
+    # report-reader compatibility, but do not generalize the rule to x4.
+    qualified_x2 = _synthetic_row(spec, key)
+    qualified_x2["solve_arithmetic"] = "MultiFloats.Float64x2"
+    @test validate_point(qualified_x2; spec=spec, policy=policy).valid
+    qualified_x4 = _synthetic_row(spec, key)
+    qualified_x4["solve_arithmetic"] = "MultiFloats.Float64x4"
+    @test "solve_arithmetic_mismatch" in validate_point(
+        qualified_x4; spec=spec, policy=policy,
+    ).reasons
+
     @test "missing_identity_mfla_commit" in validate_point(
         delete!(_synthetic_row(spec, key), "mfla_commit"); spec=spec, policy=policy,
     ).reasons

@@ -89,6 +89,9 @@ else
     end
 
     @testset "CSDR primal BigFloat256 capability contract" begin
+        @test SOLVE_ARITHMETIC == "Float64x2"
+        @test SOLVE_ARITHMETIC_TYPE == string(SOLVE_TYPE)
+
         # The campaign source is a deliberately small, immutable four-file
         # include closure.  Pin the content identity here so an older source
         # (whose assembler only accepts the positional config and returns

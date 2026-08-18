@@ -36,6 +36,11 @@ using SparseArrays
 using TOML
 
 const SOLVE_TYPE = Float64x2
+# `solve_arithmetic` is a public campaign-schema value.  Keep it stable
+# across Julia versions and qualified type-name display changes; record the
+# concrete Julia type separately for provenance/debugging.
+const SOLVE_ARITHMETIC = "Float64x2"
+const SOLVE_ARITHMETIC_TYPE = string(SOLVE_TYPE)
 const J40_G0_REFERENCE = "30.4732058529286002611344264526887472"
 const CAMPAIGN_NX = 1
 const CAMPAIGN_PRECOMPUTE_BITS = 256
@@ -827,7 +832,8 @@ function write_maximal_cache(settings::RunSettings)
         csdr_source_root=settings.csdr_source_root,
         precompute_bits=settings.precompute_bits,
         precompute_arithmetic="BigFloat",
-        solve_arithmetic=string(SOLVE_TYPE),
+        solve_arithmetic=SOLVE_ARITHMETIC,
+        solve_arithmetic_type=SOLVE_ARITHMETIC_TYPE,
         rounding_policy="complete reduced arrays rounded once BigFloat -> Float64x2",
         linear_algebra_backend=string(MFLA_BACKEND),
         linear_algebra_provider=string(MFLA_PROVIDER),
@@ -1364,8 +1370,12 @@ function validate_cache_provenance(payload, settings::RunSettings)
     payload.precompute_arithmetic == "BigFloat" || error(
         "cache precompute arithmetic is not BigFloat",
     )
-    payload.solve_arithmetic == string(SOLVE_TYPE) || error(
-        "cache solve arithmetic $(payload.solve_arithmetic) is not $(SOLVE_TYPE)",
+    payload.solve_arithmetic == SOLVE_ARITHMETIC || error(
+        "cache solve arithmetic $(payload.solve_arithmetic) is not $(SOLVE_ARITHMETIC)",
+    )
+    payload.solve_arithmetic_type == SOLVE_ARITHMETIC_TYPE || error(
+        "cache solve arithmetic type $(payload.solve_arithmetic_type) is not " *
+        "$(SOLVE_ARITHMETIC_TYPE)",
     )
     payload.rounding_policy ==
         "complete reduced arrays rounded once BigFloat -> Float64x2" || error(
@@ -1687,7 +1697,8 @@ function main(settings::RunSettings=SETTINGS)
         "csdr_source_root" => settings.csdr_source_root,
         "precompute_arithmetic" => "BigFloat",
         "precompute_precision_bits" => settings.precompute_bits,
-        "solve_arithmetic" => string(SOLVE_TYPE),
+        "solve_arithmetic" => SOLVE_ARITHMETIC,
+        "solve_arithmetic_type" => SOLVE_ARITHMETIC_TYPE,
         "rounding_policy" => "complete reduced arrays rounded once BigFloat -> Float64x2",
         "linear_algebra_backend_requested" => string(MFLA_BACKEND),
         "linear_algebra_provider_requested" => string(MFLA_PROVIDER),

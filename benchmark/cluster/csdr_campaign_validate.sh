@@ -96,6 +96,7 @@ validate_row() {
     require_value "$na" N_a "$result"
     require_value "$nmu" N_mu "$result"
     require_value "$alpha_count" alpha_count "$result"
+    require_value Float64x2 solve_arithmetic "$result"
     require_value "$solver_threads" solver_threads "$result"
     require_value 2 cache_contract_version "$result"
     require_value 2 cache_schema_version "$result"

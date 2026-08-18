@@ -311,6 +311,16 @@ AdaptiveManifest(
 
 _canonical_name(value) = lowercase(replace(strip(string(value)), r"[^a-zA-Z0-9]" => ""))
 
+# Julia may print the concrete MFLA type as `MultiFloats.Float64x2`, while
+# campaign reports expose the stable public spelling `Float64x2`.  This is an
+# explicit, narrow compatibility alias: a qualified Float64x4 (or any other
+# arithmetic type) remains distinct and is rejected by the normal comparison.
+function _canonical_arithmetic_name(value)
+    name = _canonical_name(value)
+    name == "multifloatsfloat64x2" && return "float64x2"
+    return name
+end
+
 function _lookup(raw::AbstractDict, names::AbstractVector{<:AbstractString})
     for name in names
         haskey(raw, name) && return (true, raw[name])
@@ -520,7 +530,8 @@ function validate_point(
         _record_reason!(reasons, "memory_estimate_gate_invalid")
 
     arithmetic !== nothing &&
-        _canonical_name(arithmetic) != _canonical_name(spec.solve_arithmetic) &&
+        _canonical_arithmetic_name(arithmetic) !=
+            _canonical_arithmetic_name(spec.solve_arithmetic) &&
         _record_reason!(reasons, "solve_arithmetic_mismatch")
     precision_bits !== nothing && precision_bits != spec.precompute_precision_bits &&
         _record_reason!(reasons, "precompute_precision_mismatch")
