@@ -48,6 +48,45 @@ end
         below,
     ) === :normal_equations
 
+    T = Float64x2
+    oversized_columns = 1_025
+    wide_base = SDPX.linear_program(
+        T[1, 2],
+        T[1 0; 0 1],
+        T[0, 0];
+        Aeq=T[1 0; 0 1],
+        beq=T[0, 0],
+        T=T,
+        verbosity=0,
+    )
+    oversized = SDPX.SDPProblem{T}(
+        wide_base.c,
+        wide_base.C,
+        spzeros(T, wide_base.dims.m, oversized_columns),
+        zeros(T, oversized_columns),
+        wide_base.cons,
+        (
+            L=wide_base.dims.L,
+            m=wide_base.dims.m,
+            n=oversized_columns,
+            k=wide_base.dims.k,
+        ),
+        wide_base.structure,
+    )
+    oversized_evidence = SDPX.EqualityPlanningEvidence(
+        true,
+        true,
+        oversized_columns,
+        oversized_columns,
+        0.0,
+        :verified_retained_basis,
+    )
+    @test SDPX._planned_equality_solver(
+        oversized,
+        SDPX.SolverOptions{T}(equality_solver=:auto),
+        oversized_evidence,
+    ) === :auto
+
     route = SDPX._equality_factor_route_diagnostics(
         :planned_rank_revealing_qr;
         rrqr_executed=true,

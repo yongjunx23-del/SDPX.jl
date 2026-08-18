@@ -1876,6 +1876,11 @@ function _planned_equality_solver(
 ) where {T}
     opts.equality_solver !== :auto && return opts.equality_solver
     evidence.available && evidence.basis_verified || return :auto
+    # A planned route must be executable under the same dimension and memory
+    # policy enforced by the KKT factorization.  Otherwise planning `:qr`
+    # would remove the normal-equation fallback chain only to fail later when
+    # `_factor_equality_qr` applies its conservative crossover guard.
+    _equality_qr_allowed(prob.B, opts) || return :auto
     quality = evidence.relative_rrqr_quality
     isfinite(quality) || return :auto
     # Cholesky forms the Gram matrix, so a column-space quality `q` is exposed
