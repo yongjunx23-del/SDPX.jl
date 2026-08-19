@@ -505,13 +505,6 @@ mutable struct Workspace{T}
     extended_precision::ExtendedPrecisionWorkspace
     mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
     equality_gram_kernel::Symbol
-    # Equality route selected by the immutable execution plan. This is
-    # distinct from `backend_config.equality_solver`, which records the
-    # user's request for provenance and compatibility checks.
-    planned_equality_solver::Symbol
-    # Last equality factor attempt, including provider availability,
-    # acceptance predicates, and whether RRQR actually executed.
-    equality_factor_diagnostics::Any
     thread_count::Int
     backend_config::BackendConfiguration
     # KKTBackend is included after Workspace because its methods accept a
@@ -1220,16 +1213,6 @@ function Workspace(
         min(selected_threads, max(m, 1)) :
         T === BigFloat ? 1 : block_nbins
     la_backend = instantiate_la_backend(plan.la_config, T, selected_threads)
-    planned_equality_solver = get(
-        plan.parameters,
-        :planned_equality_solver,
-        config.equality_solver,
-    )
-    planned_equality_solver in (:auto, :normal_equations, :qr) ||
-        throw(ArgumentError(
-            "execution plan has invalid planned equality solver " *
-            "$(planned_equality_solver)",
-        ))
     workspace = Workspace{T}(blk,
         (compact_arrow || sparse_schur) ?
         alloc_zeros(T, 0, 0) :
@@ -1259,8 +1242,7 @@ function Workspace(
         dense_owner_eligible,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
-        :not_run, planned_equality_solver, nothing, selected_threads,
-        config, nothing, :not_executed, :none,
+        :not_run, selected_threads, config, nothing, :not_executed, :none,
         la_backend, :not_executed, :not_executed, :not_executed, :none,
         plan.la_config.fallback_chain)
     workspace.backend = _backend_from_configuration(

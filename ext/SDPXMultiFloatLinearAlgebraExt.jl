@@ -541,12 +541,6 @@ SDPX.la_factor_provider_identity(::_CholeskyHandle) =
     :multifloat_linear_algebra
 SDPX.la_provider_factor_matrix(handle::_CholeskyHandle) =
     factor_matrix(handle.factor)
-SDPX.la_provider_factor_precision(handle::_CholeskyHandle) =
-    factor_precision(handle.factor)
-SDPX.la_provider_factor_status(handle::_CholeskyHandle) =
-    factor_status(handle.factor)
-SDPX.la_provider_factor_diagnostics(handle::_CholeskyHandle) =
-    factor_diagnostics(handle.factor)
 
 """
     _QRPayload{MF}
@@ -564,33 +558,6 @@ end
 
 SDPX.la_factor_provider_identity(::_QRPayload) =
     :multifloat_linear_algebra
-SDPX.la_provider_factor_matrix(payload::_QRPayload) = payload.factors
-SDPX.la_provider_factor_precision(payload::_QRPayload) =
-    factor_precision(payload.factor)
-SDPX.la_provider_factor_status(payload::_QRPayload) =
-    factor_status(payload.factor)
-SDPX.la_provider_factor_diagnostics(payload::_QRPayload) =
-    factor_diagnostics(payload.factor)
-
-function _validate_qr_payload(
-    factor::MFQR{MF},
-    factors::AbstractMatrix{MF},
-    permutation::AbstractVector{<:Integer},
-) where {MF<:MultiFloat}
-    factor_kind(factor) === :qr || throw(ArgumentError(
-        "MFLA RRQR returned factor kind $(factor_kind(factor))",
-    ))
-    mfla_issuccess(factor) || throw(ArgumentError(
-        "MFLA RRQR returned unsuccessful status $(factor_status(factor))",
-    ))
-    all(isfinite, factors) || throw(ArgumentError(
-        "MFLA RRQR returned non-finite packed factor storage",
-    ))
-    length(permutation) == size(factors, 2) || throw(ArgumentError(
-        "MFLA RRQR permutation length does not match factor columns",
-    ))
-    return nothing
-end
 
 function SDPX.la_mfla_qr_factor!(
     provider::_Provider{MF},
@@ -598,13 +565,10 @@ function SDPX.la_mfla_qr_factor!(
 ) where {MF}
     factor = rrqr!(A; check=false, workspace=provider.workspace)
     mfla_issuccess(factor) || return nothing
-    factors = factor_matrix(factor)
-    permutation = factor_permutation(factor)
-    _validate_qr_payload(factor, factors, permutation)
     return _QRPayload{MF,typeof(factor_matrix(factor))}(
         factor,
-        factors,
-        permutation,
+        factor_matrix(factor),
+        factor_permutation(factor),
     )
 end
 

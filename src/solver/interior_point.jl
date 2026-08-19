@@ -204,7 +204,6 @@ function _equality_factor_diagnostics(
             rank_deficient=false,
             quality=one(T),
             gram_kernel=:none,
-            factor_route_diagnostics=nothing,
         )
     if workspace.augmented !== nothing
         augmented = workspace.augmented::DenseAugmentedKKTWorkspace{T}
@@ -221,7 +220,6 @@ function _equality_factor_diagnostics(
                 rank_deficient=augmented.rank_deficient,
                 quality=zero(T),
                 gram_kernel=:not_formed_augmented,
-                factor_route_diagnostics=workspace.equality_factor_diagnostics,
                 inertia,
                 factor_diagnostics=augmented.factor_diagnostics,
                 regularization=augmented.regularization,
@@ -237,7 +235,6 @@ function _equality_factor_diagnostics(
             rank_deficient=true,
             quality=zero(T),
             gram_kernel=:not_formed_augmented,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
             inertia=nothing,
             factor_diagnostics=augmented.factor_diagnostics,
             regularization=augmented.regularization,
@@ -251,7 +248,6 @@ function _equality_factor_diagnostics(
             rank_deficient=numerical_rank < equality_count,
             quality=one(T),
             gram_kernel=:not_formed_augmented,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
             inertia,
             pivot_blocks=augmented.pivot_blocks,
             permutation=augmented.permutation,
@@ -279,7 +275,6 @@ function _equality_factor_diagnostics(
                     _cholesky_diagonal_quality(lower),
                 ),
                 gram_kernel=workspace.equality_gram_kernel,
-                factor_route_diagnostics=workspace.equality_factor_diagnostics,
             )
         end
     end
@@ -293,7 +288,6 @@ function _equality_factor_diagnostics(
             rank_deficient=false,
             quality=zero(T),
             gram_kernel=workspace.equality_gram_kernel,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
         )
     if factor isa EqualityQRFactor{T}
         qr_factor = factor::EqualityQRFactor{T}
@@ -305,7 +299,6 @@ function _equality_factor_diagnostics(
             rank_deficient=qr_factor.rank < equality_count,
             quality=qr_factor.quality,
             gram_kernel=workspace.equality_gram_kernel,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
         )
     elseif factor isa LinearAlgebra.CholeskyPivoted
         rank = factor.rank
@@ -321,7 +314,6 @@ function _equality_factor_diagnostics(
                         view(factor.L, 1:rank, 1:rank),
                     ),
             gram_kernel=workspace.equality_gram_kernel,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
         )
     elseif factor isa LegacyLACholeskyFactor
         return (
@@ -332,7 +324,6 @@ function _equality_factor_diagnostics(
             rank_deficient=false,
             quality=_cholesky_diagonal_quality(factor.factors),
             gram_kernel=workspace.equality_gram_kernel,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
         )
     elseif factor isa AbstractLACholeskyFactor{T}
         return (
@@ -343,7 +334,6 @@ function _equality_factor_diagnostics(
             rank_deficient=false,
             quality=_cholesky_diagonal_quality(factor.factors),
             gram_kernel=workspace.equality_gram_kernel,
-            factor_route_diagnostics=workspace.equality_factor_diagnostics,
         )
     end
     return (
@@ -354,7 +344,6 @@ function _equality_factor_diagnostics(
         rank_deficient=false,
         quality=_cholesky_diagonal_quality(factor.factors),
         gram_kernel=workspace.equality_gram_kernel,
-        factor_route_diagnostics=workspace.equality_factor_diagnostics,
     )
 end
 

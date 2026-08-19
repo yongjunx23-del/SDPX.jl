@@ -75,14 +75,12 @@ include("generators/problems.jl")
 include("loaders/csdr_fixed_trace.jl")
 include("registry/public.jl")
 include("registry/synthetic.jl")
-include("registry/analytic.jl")
 include("registry/heavy.jl")
 include("registry/full_unitarity_eft.jl")
 
 const REGISTRY = let entries = vcat(
         PUBLIC_SPECS,
         SYNTHETIC_SPECS,
-        ANALYTIC_SPECS,
         HEAVY_SPECS,
         FULL_UNITARITY_EFT_SPECS,
     )
@@ -100,7 +98,6 @@ include("suites/representative.jl")
 include("suites/local_full.jl")
 include("suites/large.jl")
 include("suites/heavy.jl")
-include("suites/analytic.jl")
 
 const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :micro => MICRO_SUITE,
@@ -108,9 +105,6 @@ const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :local_full => LOCAL_FULL_SUITE,
     :large => LARGE_SUITE,
     :heavy => HEAVY_SUITE,
-    :analytic_fast => ANALYTIC_FAST_SUITE,
-    :analytic_numerical => ANALYTIC_NUMERICAL_SUITE,
-    :analytic_stress => ANALYTIC_STRESS_SUITE,
 )
 
 include("cache.jl")
@@ -121,10 +115,7 @@ benchmark_registry() = sort!(collect(values(REGISTRY)); by=spec -> spec.id)
 benchmark_spec(id::AbstractString) = get(REGISTRY, String(id)) do
     throw(KeyError("unknown benchmark id $(repr(id))"))
 end
-suite_names() = (
-    :micro, :representative, :local_full, :large, :heavy,
-    :analytic_fast, :analytic_numerical, :analytic_stress,
-)
+suite_names() = (:micro, :representative, :local_full, :large, :heavy)
 
 function suite_entries(name::Symbol)
     haskey(SUITES, name) || throw(ArgumentError(
@@ -139,9 +130,6 @@ function build_problem(
     cache_dir=DEFAULT_CACHE,
 ) where {T}
     if spec.source === :synthetic
-        spec.loader === :analytic && return _build_analytic_problem(
-            T; spec.parameters...
-        )
         return build_generated_problem(spec.loader, T; spec.parameters...)
     end
     status = external_cache_status(spec; cache_dir)

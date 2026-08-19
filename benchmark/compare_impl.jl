@@ -65,11 +65,6 @@ function compare_result_files(
             "input_generation_precision_bits", "original_equalities",
             "source_parameters",
             "objective_interval_lower", "objective_interval_upper",
-            "analytic_family", "analytic_kind", "analytic_direction",
-            "analytic_equivalence_group", "analytic_monotonic_group",
-            "analytic_bound_group", "analytic_reference",
-            "analytic_absolute_tolerance", "analytic_relative_tolerance",
-            "solve_settings", "requested_scaling",
         )
             get(before, field, "") == get(after, field, "") || throw(ArgumentError(
                 "$field differs for $(key[1]); timing/semantic comparison is not paired",
@@ -81,22 +76,6 @@ function compare_result_files(
                 "dirty source tree for $(key[1]); pass allow_dirty=true only for local diagnostics",
             ))
         end
-        analytic_metadata_match = all(
-            get(before, field, "") == get(after, field, "")
-            for field in (
-                "analytic_family", "analytic_kind", "analytic_direction",
-                "analytic_equivalence_group", "analytic_monotonic_group",
-                "analytic_bound_group", "analytic_reference",
-                "analytic_absolute_tolerance", "analytic_relative_tolerance",
-                "solve_settings",
-            )
-        )
-        before_pass = get(before, "semantic_pass", false) === true
-        after_pass = get(after, "semantic_pass", false) === true
-        performance_eligible = before_pass && after_pass &&
-            get(before, "eligible_for_performance", before_pass) == true &&
-            get(after, "eligible_for_performance", after_pass) == true &&
-            analytic_metadata_match
         push!(rows, (
             problem_id=key[1],
             arithmetic=key[2],
@@ -106,23 +85,10 @@ function compare_result_files(
             baseline_status=get(before, "status", ""),
             candidate_status=get(after, "status", ""),
             status_match=get(before, "status", "") == get(after, "status", ""),
-            baseline_classification=get(before, "classification", ""),
-            candidate_classification=get(after, "classification", ""),
-            classification_match=get(before, "classification", "") ==
-                                 get(after, "classification", ""),
             baseline_semantic_pass=get(before, "semantic_pass", ""),
             candidate_semantic_pass=get(after, "semantic_pass", ""),
             semantic_pass_match=get(before, "semantic_pass", "") ==
                                 get(after, "semantic_pass", ""),
-            analytic_metadata_match=analytic_metadata_match,
-            performance_eligible=performance_eligible,
-            group_gates_match=all(
-                get(before, field, "") == get(after, field, "")
-                for field in (
-                    "equivalence_gate_valid", "monotonicity_gate_valid",
-                    "bound_pair_gate_valid", "group_failures",
-                )
-            ),
             samples_parity_match=begin
                 before_count = get(before, "sample_count", missing)
                 after_count = get(after, "sample_count", missing)
@@ -147,10 +113,6 @@ function compare_result_files(
                                   get(after, "planned_backend", ""),
             executed_backend_match=get(before, "executed_backend", "") ==
                                    get(after, "executed_backend", ""),
-            planned_scaling_match=get(before, "planned_scaling", "") ==
-                                  get(after, "planned_scaling", ""),
-            executed_scaling_match=get(before, "executed_scaling", "") ==
-                                   get(after, "executed_scaling", ""),
             provider_match=get(before, "executed_provider", "") ==
                            get(after, "executed_provider", ""),
             specialization_match=get(before, "executed_specialization", "") ==
@@ -173,21 +135,18 @@ function compare_result_files(
                 b = _parsed_number(before, "iterations")
                 a === nothing || b === nothing ? missing : Int(a - b)
             end,
-            total_seconds_ratio=performance_eligible ?
-                                _ratio(after, before, "total_seconds") : missing,
+            total_seconds_ratio=_ratio(after, before, "total_seconds"),
             sample_median_seconds_ratio=begin
                 before_count = get(before, "sample_count", missing)
                 after_count = get(after, "sample_count", missing)
-                if performance_eligible && before_count isa Integer &&
-                   after_count isa Integer &&
+                if before_count isa Integer && after_count isa Integer &&
                    before_count >= 3 && after_count >= 3
                     _ratio(after, before, "sample_median_seconds")
                 else
                     missing
                 end
             end,
-            factor_seconds_ratio=performance_eligible ?
-                                 _ratio(after, before, "factor_seconds") : missing,
+            factor_seconds_ratio=_ratio(after, before, "factor_seconds"),
         ))
     end
     if output !== nothing
