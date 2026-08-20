@@ -689,10 +689,11 @@ Base.@kwdef struct SolverOptions{T}
     algorithm::Symbol         = :auto                   # :auto | :lp | :socp | :sdp
     presolve::Union{Bool,Symbol} = :auto                 # false/:off | true/:on | :auto
     presolve_bounds::Bool     = true                    # merge exact scalar variable bounds
-    presolve_fixed_variables::Bool = true               # eliminate only exactly fixed variables
+    presolve_fixed_variables::Bool = true               # eliminate exactly fixed variables
     presolve_zero_constraints::Bool = true              # remove exact zero equalities
     presolve_duplicate_constraints::Bool = true         # remove collision-checked exact duplicates
-    presolve_dependent_equalities::Bool = true           # arithmetic-aware verified rank reduction
+    # Verified equality reductions, including affine singleton substitution.
+    presolve_dependent_equalities::Bool = true
     # Zero selects the conservative dimension-scaled machine-epsilon rank
     # threshold. A larger value explicitly opts into approximate equality
     # elimination and is still validated in the original arithmetic.

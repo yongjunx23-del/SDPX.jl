@@ -267,6 +267,13 @@ end
     @test backend.available
     @test backend.actual_nnz > 0
     @test backend.pattern_reuse > 0
+    @test backend.factorizations > 0
+    @test backend.reused == backend.factorizations - 1
+    @test backend.factorization_attempts > 0
+    @test backend.factorization_successes == backend.factorization_attempts
+    @test backend.factorization_failures == 0
+    @test backend.factor_status === :success
+    @test backend.backend === :cholmod
     @test backend.regularization == 0
     @test backend.psd_block_count == 2
     @test backend.overlap_edges == 1
@@ -295,6 +302,52 @@ end
     bytes = SDPX.estimate_sdp_workspace_bytes(problem, 1)
     @test bytes > 0
     @test bytes < typemax(Int)
+    m = problem.dims.m
+    input_nnz = problem.structure.schur_upper_nnz
+    dense_factor_nnz = m * (m + 1) ÷ 2
+    scalar_bytes = SDPX.ExtendedPrecisionBLAS._element_storage_bytes(BigFloat)
+    state_bytes = SDPX._sparse_generic_factor_state_bytes(
+        BigFloat,
+        scalar_bytes,
+        sizeof(Int),
+        m,
+        input_nnz,
+        dense_factor_nnz,
+    )
+    @test state_bytes > 0
+    @test bytes >= state_bytes
+    storage, _ = SDPX.freeze_schur_pattern(
+        problem;
+        provider=SDPX.GenericSparseProvider(BigFloat),
+    )
+    factor = SDPX.instantiate_sparse_factor(
+        SDPX.GenericSparseProvider(BigFloat),
+        storage.symbolic,
+        storage.matrix,
+    )
+    actual_state = Base.summarysize((
+        input_colptr=factor.input_colptr,
+        input_rowval=factor.input_rowval,
+        source_pointers=factor.source_pointers,
+        diagonal_positions=factor.diagonal_positions,
+        column_link_positions=factor.column_link_positions,
+        numeric_work=factor.numeric_work,
+    ))
+    @test state_bytes >= actual_state
+    @test SDPX._sparse_generic_factor_state_bytes(
+        Float64,
+        sizeof(Float64),
+        sizeof(Int32),
+        m,
+        input_nnz,
+        dense_factor_nnz,
+    ) == 0
+    # Removing only this newly accounted state leaves the prior estimate
+    # positive, so the component is additive rather than replacing factor
+    # numeric storage.
+    legacy_estimate_bound = bytes - state_bytes
+    @test legacy_estimate_bound > 0
+    @test legacy_estimate_bound < bytes
 end
 
 # MPFR/MultiFloat IPM integration is opt-in because some Mac runners abort in
@@ -342,6 +395,12 @@ if get(ENV, "SDPX_RUN_GENERIC_SPARSE_SCHUR_INTEGRATION", "0") == "1"
             backend = sparse.termination.sparse_schur_backend
             @test backend.available
             @test backend.pattern_reuse > 0
+            @test backend.factorizations > 0
+            @test backend.reused == backend.factorizations - 1
+            @test backend.factorization_attempts > 0
+            @test backend.factorization_successes == backend.factorization_attempts
+            @test backend.factorization_failures == 0
+            @test backend.factor_status === :success
             @test backend.actual_nnz > 0
             @test backend.psd_block_count == 2
             @test backend.overlap_edges == 1

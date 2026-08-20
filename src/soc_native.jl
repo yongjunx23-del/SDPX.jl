@@ -86,12 +86,16 @@ struct NativeSOCPlan{E<:AbstractSOCExecution,F<:AbstractKKTFormulation} <:
 end
 
 """
-Small native-SOCP diagnostics surface in original Lorentz coordinates.
+Small native-SOCP diagnostics surface for an original-coordinate result.
 
-`plan` is the single canonical top-level `ExecutionPlan` built by the
-top-level planner; all family-specific facts are available through
-`plan.payload::NativeSOCPlan`.  The workspace constructor asserts payload/plan
-parity before any numerical execution.
+`plan` is the single canonical top-level `ExecutionPlan` actually executed;
+after a guarded frontend reduction it therefore describes the reduced solver
+input, while the returned iterate and certificate remain in original Lorentz
+coordinates.  `selected_algorithms.plan_coordinates` and
+`selected_algorithms.result_coordinates` make that distinction explicit.  All
+family-specific facts are available through `plan.payload::NativeSOCPlan`, and
+the workspace constructor asserts payload/plan parity before numerical
+execution.
 """
 struct NativeSOCDiagnostics
     plan::ExecutionPlan
@@ -841,14 +845,24 @@ end
 function _native_soc_metrics(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
+    ;
+    objective_offset::T=zero(T),
 ) where {T}
-    primal_objective = la_dot(workspace.la_backend, problem.c, workspace.x)
+    # A singleton-equality substitution contributes the same typed constant
+    # to the primal and dual objectives.  Keeping it in the core metric path
+    # (rather than adding it only after the solve) makes gap scaling and the
+    # stopping gate use the original objective coordinates throughout the
+    # reduced execution.  The default is an exact zero, so the historical
+    # route is numerically unchanged.
+    primal_objective = la_dot(workspace.la_backend, problem.c, workspace.x) +
+                       objective_offset
     dual_objective = isempty(problem.beq) ? zero(T) :
                      la_dot(
                          workspace.la_backend,
                          problem.beq,
                          workspace.equality_dual,
                      )
+    dual_objective += objective_offset
     primal_residual = isempty(problem.beq) ? zero(T) :
                       norm(workspace.equality_residual, Inf)
     dual_residual = norm(workspace.dual_residual, Inf)
@@ -928,6 +942,17 @@ function _native_soc_scaling!(workspace::NativeSOCWorkspace)
     return true, 0
 end
 
+"""Return whether a CSC coefficient matrix has a structurally empty column."""
+@inline function _native_soc_sparse_has_empty_column(
+    A::SparseMatrixCSC,
+    variables::Int,
+)
+    @inbounds for column in 1:variables
+        A.colptr[column] == A.colptr[column + 1] && return true
+    end
+    return false
+end
+
 function _native_soc_add_metric!(
     workspace::NativeSOCWorkspace{T},
     cone::SOCConstraint{T},
@@ -960,6 +985,38 @@ function _native_soc_add_metric!(
     metric = workspace.scratch[block]
     basis = workspace.offset[block]
     variables = size(cone.A, 2)
+    if cone.A isa SparseMatrixCSC
+        A = cone.A
+        has_empty_column = _native_soc_sparse_has_empty_column(A, variables)
+        if has_empty_column
+            # A sparse CSC cone may contain entirely empty source or target
+            # columns.  Skip only those structural columns; for every active
+            # column retain the dense branch's copy, NT Hs⁻¹ application,
+            # direct CSC accessor, ascending loop order, and full symmetric
+            # writes.
+            @inbounds for column in 1:variables
+                A.colptr[column] == A.colptr[column + 1] && continue
+                copy_owned!(basis, view(A, :, column))
+                _soc_nt_apply_hs_inverse!(
+                    metric,
+                    workspace.nt_w[block],
+                    workspace.nt_eta_squared[block],
+                    basis,
+                )
+                for row in column:variables
+                    A.colptr[row] == A.colptr[row + 1] && continue
+                    value = zero(T)
+                    for coordinate in eachindex(metric)
+                        value += A[coordinate, row] * metric[coordinate]
+                    end
+                    workspace.hessian[row, column] += value
+                    row == column ||
+                        (workspace.hessian[column, row] += value)
+                end
+            end
+            return workspace
+        end
+    end
     @inbounds for column in 1:variables
         copy_owned!(basis, view(cone.A, :, column))
         _soc_nt_apply_hs_inverse!(
@@ -2549,6 +2606,8 @@ function _native_soc_result(
     metrics,
     timings::NamedTuple,
     termination::NamedTuple,
+    ;
+    objective_offset::T=zero(T),
 ) where {T}
     p_obj, d_obj, gap, p_res, d_res = metrics[1:5]
     augmented = workspace.plan.formulation.formulation isa DenseAugmentedKKT
@@ -2655,6 +2714,7 @@ function _native_soc_result(
             T === BigFloat ? Base.precision(BigFloat) : sig_bits(T),
         planned_threads=plan.threads,
         executed_threads=workspace.plan.threads,
+        objective_offset=objective_offset,
         certificate=(available=false, reason=:pending_original_soc_validation),
     )
     diagnostics = options.diagnostics ?
@@ -2701,6 +2761,7 @@ Base.@noinline function _solve_native_soc_core(
     x0=nothing,
     z0=nothing,
     y0=nothing,
+    objective_offset::T=zero(T),
 ) where {T}
     started = time()
     options.parameter_policy in (:fixed, :auto) ||
@@ -2786,7 +2847,11 @@ Base.@noinline function _solve_native_soc_core(
             break
         end
         _native_soc_residuals!(workspace, problem)
-        metrics = _native_soc_metrics(workspace, problem)
+        metrics = _native_soc_metrics(
+            workspace,
+            problem;
+            objective_offset,
+        )
         if metrics[6] <= options.ϵ_primal &&
            metrics[7] <= options.ϵ_dual &&
            metrics[3] <= options.ϵ_gap &&
@@ -2956,7 +3021,11 @@ Base.@noinline function _solve_native_soc_core(
         termination = (reason=:iteration_limit, stage=:native_soc_iteration)
     end
     _native_soc_residuals!(workspace, problem)
-    metrics = _native_soc_metrics(workspace, problem)
+    metrics = _native_soc_metrics(
+        workspace,
+        problem;
+        objective_offset,
+    )
     total_seconds = time() - started
     timings = options.timing ? (
         total=total_seconds,
@@ -3009,5 +3078,7 @@ Base.@noinline function _solve_native_soc_core(
         metrics,
         timings,
         termination,
+        ;
+        objective_offset,
     )
 end

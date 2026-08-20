@@ -8,14 +8,17 @@ code.
 
 ## Suites
 
-- `micro`: eight tiny generated LP/SOCP/SDP and rank/conditioning cases.
-- `representative`: broader generated coverage plus curated public metadata.
+- `micro`: eleven tiny generated LP/SOCP/SDP, rank/conditioning, and typed
+  pathological cases.
+- `representative`: broader generated/pathological coverage plus executable
+  checksum-pinned public cases when their local cache is present.
 - `local_full`: every small/medium registered case, mostly Float64, with a
   deliberately small Float64x2/x3/x4 and BigFloat-256 sample.
-- `large`: executable cluster-only application anchors. It currently contains
-  the pinned Full-unitarity-EFT J40/Na15/Nmu200/Nx2/Nalpha2 NativeSOC case in
-  Float64x2 and Float64x4. The runner refuses this suite outside PBS unless
-  `--allow-large` is explicitly supplied for a diagnostic.
+- `large`: executable cluster-only public/application anchors. It contains the
+  native-CBF CBLIB `nql30` SOCP in Float64 and the pinned Full-unitarity-EFT
+  J40/Na15/Nmu200/Nx2/Nalpha2 NativeSOC case in Float64x2 and Float64x4. The
+  runner refuses this suite outside PBS unless `--allow-large` is explicitly
+  supplied for a diagnostic.
 - `heavy`: full NETLIB/SDPLIB/CBLIB, Mittelmann, large sparse, bootstrap and
   precision sweeps. It is register-only and the runner refuses to execute it.
 
@@ -53,7 +56,31 @@ julia --project=. benchmark/compare.jl baseline.toml candidate.toml comparison.t
 The comparator requires identical selections and input fingerprints before it
 reports semantic agreement or timing ratios. It also rejects mismatched Julia,
 OS, CPU, thread counts, BLAS threads, precision and conic formulation. Every
-row records the source commit and whether the source tree was dirty.
+row records the source commit and whether the source tree was dirty. Schema-v6
+rows must carry canonical 64-hex `solver_source_sha256` values on
+both sides; the values may differ for an optimization candidate. Missing or
+legacy hashes fail closed with comparison evidence instead of producing a
+timing claim. For repeated samples, `total_seconds` is the reported aggregate
+median (the arithmetic mean of the two middle observations for an even sample
+count), so the scalar timing and `sample_median_seconds` are consistent.
+
+For timing claims, use the fresh-process campaign wrapper. Every repetition
+starts a separate Julia process, performs an untimed warmup, writes its own raw
+TOML/TSV/log, and is aggregated only when status, objective, iterations,
+certificate, route, input fingerprint, and environment agree:
+
+```sh
+julia --project=. benchmark/fresh_process_runner.jl micro \
+  --problem=synthetic/lp_box --arithmetic=float64 --provider=auto \
+  --repetitions=3 --threads=1 --blas-threads=1 \
+  --campaign-dir=work/baseline/lp_box_float64
+```
+
+`process_peak_rss_bytes` is the peak of the complete child Julia process. It
+includes the runtime, package loading, compilation caches, and allocator
+arenas, so use it for same-environment regression detection rather than as a
+solver-workspace measurement. `workspace_bytes` is the separate solver-owned
+storage estimate.
 
 ## Public data and provenance
 
@@ -67,8 +94,25 @@ julia --project=. benchmark/runner.jl representative \
 ```
 
 Ordinary tests and solves never access the network. Missing data or a missing
-MPS/SDPA/CBF loader produces a structured `skipped` result. The full external
-parsers remain unsupported.
+or unsupported loader produces a structured `skipped` result. The canonical
+runner implements Netlib compressed MPS, historical SDPLIB compact SDPpack,
+and DIMACS sparse SDPA. CBF support is deliberately limited to cone families
+that SDPX can execute without changing the published formulation. CBLIB
+`nql30` is the native continuous-SOCP anchor; CBF instances containing integer,
+PSD, rotated-quadratic, exponential, or power-cone constructs fail closed or
+remain metadata-only.
+
+`nql30` is a completed native-SOCP anchor. On the accepted local one-thread
+campaign, three fresh processes all return `Optimal` in 13 iterations with an
+original-coordinate certificate, objective `-0.9460283775140597`, and matching
+input/route/source identities. The median post-warmup solve time is 14.814 s
+and solver workspace is 186,614,568 bytes. These numbers are local evidence,
+not a cross-machine reference; reproduce them through the Large suite before
+comparing another candidate.
+
+Fresh-process campaigns for an explicitly authorized Large-suite diagnostic
+must also pass `--allow-large` to `fresh_process_runner.jl`; the flag is
+forwarded unchanged to each canonical child.
 
 The Full-unitarity input is the neutral
 `csdr_fixed_trace_reduced_v1` payload, not an archived `SDPXProblem`. Copy the

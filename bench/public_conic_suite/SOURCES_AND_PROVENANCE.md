@@ -15,6 +15,12 @@ Public source pages used to construct the manifests:
 - Large Network-LP benchmark (1 Jul 2026): https://plato.asu.edu/ftp/network.html
 - CBLIB: https://cblib.zib.de/
 - CBLIB file directory: https://cblib.zib.de/download/all/
+- CBF v3 technical reference: https://cblib.zib.de/doc/format3.pdf
+- DIMACS Seventh Challenge archive: https://archive.dimacs.rutgers.edu/Challenges/Seventh/Instances/
+- SDPLIB catalogue: https://github.com/vsdp/SDPLIB
+- SDPpack historical compact format/software: https://cs.nyu.edu/~overton/software/sdppack/
+- SDPA sparse format: https://sdpa-python.github.io/docs/formats/sdpa.html
+- SDPA-GMP high-precision SDPLIB objective table: https://github.com/nakatamaho/sdpa-gmp
 - Netlib LP data: https://netlib.org/lp/data/
 
 CBLIB explicitly permits redistribution of its data subject to its license
@@ -30,3 +36,7 @@ Mittelmann tables. Flags:
 - `t`: time limit exceeded (LP/SOCP tables as applicable).
 
 Do not compare those seconds directly to SDPX timings on another machine.
+
+The Maros–Mészáros collection is a convex QP/QPS collection, not an SDP
+library. It must be labelled separately if a future QP-to-conic campaign adds
+it; SDPLIB and DIMACS are the SDP/conic sources used here.

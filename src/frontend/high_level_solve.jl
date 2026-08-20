@@ -111,6 +111,24 @@ Base.@noinline function _run_native_soc_frontend(
     z0=nothing,
     y0=nothing,
 ) where {T}
+    # The compact keyword API accepts an expert `precision_bits` setting
+    # directly, without passing through the all-auto `SolveOptions` wrapper.
+    # Keep every NativeSOC arithmetic phase (including presolve, factorization,
+    # reconstruction, and certification) inside that exact BigFloat scope.
+    if T === BigFloat && Base.precision(BigFloat) != options.precision_bits
+        bits = options.precision_bits
+        bits > 0 || throw(ArgumentError("precision_bits must be positive"))
+        return setprecision(BigFloat, bits) do
+            _run_native_soc_frontend(
+                problem,
+                options,
+                specialization;
+                x0,
+                z0,
+                y0,
+            )
+        end
+    end
     _require_supported_arithmetic_type(T)
     frontend_started = time_ns()
     # NativeSOC has no representation transform: frontend work is limited to
@@ -119,21 +137,87 @@ Base.@noinline function _run_native_soc_frontend(
         "native SOC specialization must be :auto, :off, or :fixed_trace",
     ))
     frontend_seconds = (time_ns() - frontend_started) / 1.0e9
-    # One top-level plan per solve: the AutoPlanner freezes the NativeSOC
-    # payload, and the core validates it instead of planning a second time.
-    plan = build_execution_plan(
-        AutoPlanner(), problem, options; specialization,
-    )
-    result = _solve_native_soc_core(
+    # Singleton substitution is a strictly guarded execution reduction.  The
+    # original problem remains the certification authority; when any guard is
+    # rejected this branch falls through to the historical one-plan route.
+    presolve_started = time_ns()
+    decision = _native_soc_presolve(
         problem,
-        options,
-        plan;
-        x0=x0,
-        z0=z0,
-        y0=y0,
+        options;
+        specialization,
+        x0,
+        z0,
+        y0,
     )
+    presolve_seconds = (time_ns() - presolve_started) / 1.0e9
+    precomputed_certificate = nothing
+    if decision.applied
+        reduced_problem = decision.problem
+        reduced_map = decision.map
+        reduced_plan = build_execution_plan(
+            AutoPlanner(), reduced_problem, options; specialization,
+        )
+        reduced_result = _solve_native_soc_core(
+            reduced_problem,
+            options,
+            reduced_plan;
+            x0=nothing,
+            z0=nothing,
+            y0=nothing,
+            objective_offset=reduced_map.kappa,
+        )
+        reconstruction_started = time_ns()
+        result = _native_soc_restore_result(
+            problem,
+            reduced_problem,
+            reduced_result,
+            reduced_map,
+        )
+        reconstruction_seconds =
+            (time_ns() - reconstruction_started) / 1.0e9
+        result = _native_soc_presolve_annotate(
+            result,
+            decision,
+            options,
+            presolve_seconds,
+            reconstruction_seconds,
+        )
+        precomputed_certificate = result_certificate(problem, result, options)
+        result = _native_soc_recompute_result_metrics(
+            result,
+            precomputed_certificate,
+        )
+    else
+        # One top-level plan per ordinary solve: the AutoPlanner freezes the
+        # NativeSOC payload, and the core validates it instead of planning a
+        # second time.  Presolve-off remains byte-for-byte on this path.
+        plan = build_execution_plan(
+            AutoPlanner(), problem, options; specialization,
+        )
+        result = _solve_native_soc_core(
+            problem,
+            options,
+            plan;
+            x0=x0,
+            z0=z0,
+            y0=y0,
+        )
+        if decision.reason !== :disabled
+            result = _native_soc_presolve_annotate(
+                result,
+                decision,
+                options,
+                presolve_seconds,
+            )
+        end
+    end
     certification_started = time_ns()
-    result = certify_native_soc_result(problem, result, options)
+    result = certify_native_soc_result(
+        problem,
+        result,
+        options;
+        precomputed_certificate,
+    )
     certification_seconds =
         (time_ns() - certification_started) / 1.0e9
     return _native_soc_frontend_timing(

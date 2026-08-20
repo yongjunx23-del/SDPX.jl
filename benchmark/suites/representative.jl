@@ -10,8 +10,10 @@ const REPRESENTATIVE_SUITE = SuiteEntry[
     SuiteEntry("synthetic/sdp_sparse", :float64, :auto),
     SuiteEntry("synthetic/sdp_block_arrow", :float64, :auto),
     SuiteEntry("synthetic/sdp_small_eig_1e4", :float64, :auto),
-    # Public instances are registered here but become structured skips until
-    # their format loader and local cache are both available.
+    SuiteEntry("pathological/socp_many_tiny_cones", :float64, :auto),
+    SuiteEntry("pathological/sdp_congruence_scaling", :float64, :auto),
+    # Public instances execute only when their checksum-verified local cache is
+    # present; otherwise they remain deterministic structured skips.
     SuiteEntry("netlib/afiro", :float64, :auto),
     SuiteEntry("netlib/degen2", :float64, :auto),
     SuiteEntry("sdplib/control1", :float64, :auto),

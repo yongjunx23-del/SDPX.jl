@@ -20,6 +20,51 @@ include(joinpath(
     @test !_round4_severe_false_negative(false, false, false)
 end
 
+@testset "benchmark status normalization" begin
+    solver = SDPXBenchmarkRegistry.SDPX
+    @test SDPXBenchmarkRegistry._normalized_status(solver.Optimal) === :optimal
+    @test SDPXBenchmarkRegistry._normalized_status(
+        solver.PrimalInfeasible,
+    ) === :primal_infeasible
+    @test SDPXBenchmarkRegistry._normalized_status(
+        solver.DualInfeasible,
+    ) === :dual_infeasible
+    @test SDPXBenchmarkRegistry._normalized_status(
+        solver.InfeasibleCert,
+    ) === :infeasible_certificate
+    @test SDPXBenchmarkRegistry._normalized_status(
+        :primal_infeasible,
+    ) === :primal_infeasible
+
+    spec = benchmark_spec("pathological/lp_infeasible_margin")
+    valid_certificate = (valid=true, kind=:primal_infeasibility)
+    @test isempty(SDPXBenchmarkRegistry._semantic_failures(
+        spec,
+        solver.PrimalInfeasible,
+        0.0,
+        nothing,
+        missing,
+        missing,
+        missing,
+        valid_certificate,
+        true,
+        false,
+    ))
+    invalid_certificate = (valid=false, kind=:primal_infeasibility)
+    @test "certificate" in SDPXBenchmarkRegistry._semantic_failures(
+        spec,
+        solver.PrimalInfeasible,
+        0.0,
+        nothing,
+        missing,
+        missing,
+        missing,
+        invalid_certificate,
+        true,
+        false,
+    )
+end
+
 @testset "sampling objective parity tolerance gates" begin
     spec = benchmark_spec("synthetic/lp_box")
     built = build_problem(spec, Float64)
@@ -96,16 +141,44 @@ end
         @test all(!isempty(spec.external.filename) for spec in specs)
         @test all(spec.external.format isa Symbol for spec in specs)
         @test all(!isempty(spec.external.license_note) for spec in specs)
+        @test all(
+            spec.external.sha256 === nothing ||
+            occursin(r"^[0-9a-f]{64}$", spec.external.sha256)
+            for spec in specs
+        )
     end
+
+    sdplib = benchmark_spec("sdplib/truss1")
+    @test sdplib.loader === :external_sdppack_compact_gzip
+    @test sdplib.external.format === :sdppack_compact_gzip
+    @test sdplib.reference.objective == "-8.9999963152868905"
+    dimacs = benchmark_spec("dimacs/hinf13")
+    @test dimacs.loader === :external_sdpa_sparse_gzip
+    @test dimacs.family === :sdp
+    @test :sdpa_conversion in dimacs.tags
+    @test :source_sdp in dimacs.tags
+    @test benchmark_spec("cblib/beam7").family === :mixed_conic
+    @test benchmark_spec("cblib/beam7").loader ===
+          :external_cbf_metadata_only
+    cblib_nql = benchmark_spec("cblib/nql30")
+    @test cblib_nql.family === :socp
+    @test cblib_nql.loader === :external_cbf_gzip
+    @test cblib_nql.reference.objective == "-9.4602e-1"
+    @test :rank_ladder in cblib_nql.tags
+    pathological = benchmark_spec("pathological/socp_near_tangent")
+    @test pathological.source === :synthetic
+    @test pathological.loader === :pathological_socp_near_tangent
+    @test :pathological in pathological.tags
 
     @test suite_names() == (:micro, :representative, :local_full, :large, :heavy)
     @test 6 <= length(suite_entries(:micro)) <= 12
-    @test 20 <= length(suite_entries(:representative)) <= 30
+    @test 20 <= length(suite_entries(:representative)) <= 40
     @test 50 <= length(suite_entries(:local_full)) <= 100
     @test all(entry.arithmetic === :registered_only for entry in
               suite_entries(:heavy))
     @test [(entry.problem_id, entry.arithmetic, entry.provider)
            for entry in suite_entries(:large)] == [
+        ("cblib/nql30", :float64, :auto),
         ("csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2",
          :float64x2, :multifloat),
         ("csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2",
@@ -158,6 +231,9 @@ end
     micro_ids = Set(entry.problem_id for entry in suite_entries(:micro))
     @test "synthetic/lp_eq_exact_deficient" in micro_ids
     @test "synthetic/sdp_small_eig_1e8" in micro_ids
+    @test "pathological/lp_degenerate_scaled" in micro_ids
+    @test "pathological/socp_near_tangent" in micro_ids
+    @test "pathological/sdp_small_eigenvalue" in micro_ids
     @test all(benchmark_spec(id).source === :synthetic for id in micro_ids)
 
     seed_spec = benchmark_spec("synthetic/sdp_small_eig_1e8")
@@ -168,7 +244,8 @@ end
     @test first_problem.problem.C == second_problem.problem.C
 
     external = benchmark_spec("netlib/afiro")
-    status = external_cache_status(external; cache_dir=mktempdir())
+    empty_cache = mktempdir()
+    status = external_cache_status(external; cache_dir=empty_cache)
     @test !status.available
     @test status.reason === :not_cached
 
@@ -187,6 +264,7 @@ end
         problem="netlib/afiro",
         output=tempname() * ".toml",
         warmup=false,
+        cache_dir=empty_cache,
     ).rows
     @test length(rows) == 1
     @test rows[1].status === :skipped
@@ -206,7 +284,10 @@ end
     @test local_result.rows[1].certificate_policy === :original_coordinate_required
     @test local_result.rows[1].provider_match
     @test isempty(local_result.rows[1].semantic_failures)
-    @test local_result.rows[1].schema_version == 3
+    @test local_result.rows[1].schema_version == 6
+    @test occursin(
+        r"^[0-9a-f]{64}$", local_result.rows[1].solver_source_sha256,
+    )
     @test local_result.rows[1].sample_count == 1
     @test local_result.rows[1].sample_seconds === missing
     @test local_result.rows[1].sample_semantic_pass === missing
@@ -214,6 +295,52 @@ end
     @test local_result.rows[1].sample_parity_failures === missing
     @test isfile(local_result.paths.toml)
     @test isfile(local_result.paths.tsv)
+    row = local_result.rows[1]
+    for field in (
+        :solver_name, :solver_version, :solver_source_sha256,
+        :dual_objective, :absolute_gap,
+        :primal_tolerance, :dual_tolerance, :gap_tolerance,
+        :certificate_kind, :certificate_failures,
+        :primal_affine_residual, :dual_affine_residual,
+        :primal_cone_violation, :dual_cone_violation,
+        :primal_residual_scaled, :dual_residual_scaled,
+        :complementarity, :relative_complementarity,
+        :termination_stage, :setup_seconds, :frontend_seconds,
+        :preprocess_seconds, :presolve_seconds, :core_seconds,
+        :certification_seconds, :workspace_bytes,
+        :process_peak_rss_bytes, :memory_budget_bytes, :restarts,
+        :regularizations, :refinement_solves, :numeric_factorizations,
+        :factorization_attempts, :factorization_successes,
+        :factorization_failures,
+    )
+        @test field in propertynames(row)
+    end
+    for field in (
+        :dual_objective, :absolute_gap, :primal_tolerance,
+        :dual_tolerance, :gap_tolerance, :certificate_failures,
+        :primal_affine_residual, :dual_affine_residual,
+        :primal_cone_violation, :dual_cone_violation,
+        :primal_residual_scaled, :dual_residual_scaled,
+        :complementarity, :relative_complementarity,
+    )
+        @test getproperty(row, field) isa Union{String,Missing}
+    end
+    @test row.solver_name isa Union{String,Missing}
+    @test row.solver_version isa Union{String,Missing}
+    @test row.certificate_kind isa Union{Symbol,Missing}
+
+    # Accuracy values are serialized from their native arithmetic type rather
+    # than through Float64.  This direct check uses a value longer than the
+    # Float64 decimal range while leaving the process precision unchanged.
+    high_precision_text = "0." * repeat("1", 140) * "5"
+    high_precision_value = setprecision(BigFloat, 640) do
+        parse(BigFloat, high_precision_text)
+    end
+    rendered_high_precision = SDPXBenchmarkRegistry._string_metric(
+        high_precision_value,
+    )
+    @test length(rendered_high_precision) > 100
+    @test rendered_high_precision == string(high_precision_value)
 
     @test_throws ArgumentError run_suite(
         :micro;
@@ -270,9 +397,28 @@ end
     @test minimum(sample_values) == row.sample_min_seconds
     @test maximum(sample_values) == row.sample_max_seconds
     @test sort(sample_values)[2] == row.sample_median_seconds
+
+    # Even sample counts use the arithmetic mean of the two middle values;
+    # the aggregate scalar timing must report that same median rather than a
+    # nearby representative sample selected for semantic fields.
+    even_rows = [
+        merge(row, (total_seconds=value,))
+        for value in (1.0, 2.0, 3.0, 10.0)
+    ]
+    even_aggregate = SDPXBenchmarkRegistry._sampling_row(
+        even_rows, [1.0, 2.0, 3.0, 10.0]; sample_count=4,
+    )
+    @test even_aggregate.sample_count == 4
+    @test even_aggregate.sample_median_seconds == 2.5
+    @test even_aggregate.total_seconds == 2.5
+    @test even_aggregate.total_seconds == even_aggregate.sample_median_seconds
+    @test even_aggregate.seconds_per_iteration ==
+          even_aggregate.total_seconds / max(even_aggregate.iterations, 1)
+    @test even_aggregate.sample_min_seconds == 1.0
+    @test even_aggregate.sample_max_seconds == 10.0
     sampled_document = TOML.parsefile(sampled_output)
     sampled_row = only(sampled_document["result"])
-    @test sampled_row["schema_version"] == 3
+    @test sampled_row["schema_version"] == 6
     @test sampled_row["sample_count"] == 3
     @test startswith(sampled_row["sample_seconds"], "[")
     @test endswith(sampled_row["sample_seconds"], "]")
@@ -441,4 +587,156 @@ end
     @test_throws ArgumentError build_problem(
         wrong_source, Float64; cache_dir=cache,
     )
+end
+
+@testset "external cache prepare is atomic and checksum-verified" begin
+    source_dir = mktempdir()
+    cache_dir = mktempdir()
+    source_path = joinpath(source_dir, "fixture.bin")
+    payload = Vector{UInt8}(codeunits("authoritative fixture payload\n"))
+    write(source_path, payload)
+    expected = open(source_path, "r") do io
+        bytes2hex(SHA.sha256(io))
+    end
+
+    function fixture_spec(; filename="fixture.bin", checksum=expected)
+        base = benchmark_spec("cblib/nql30")
+        return BenchmarkSpec(
+            "test/cache_fixture",
+            "cache fixture",
+            base.family,
+            base.problem_type,
+            :netlib,
+            (:micro,),
+            (:test_fixture,),
+            :cache_fixture,
+            nothing,
+            base.loader,
+            NamedTuple(),
+            base.reference,
+            (variables=1,),
+            ExternalSource(
+                "test",
+                "file://fixture.bin",
+                filename,
+                base.external.format,
+                checksum,
+                "test fixture",
+            ),
+        )
+    end
+
+    target = SDPXBenchmarkRegistry._cached_path(
+        fixture_spec(); cache_dir=cache_dir,
+    )
+    calls = Ref(0)
+    observed_part_dir = Ref("")
+    downloader = function (_, destination)
+        calls[] += 1
+        observed_part_dir[] = dirname(destination)
+        cp(source_path, destination; force=true)
+        return destination
+    end
+
+    first = SDPXBenchmarkRegistry._prepare_external_spec!(
+        fixture_spec();
+        cache_dir=cache_dir,
+        verbose=false,
+        downloader=downloader,
+    )
+    @test first.status === :cached
+    @test first.checksum == expected
+    @test read(target) == payload
+    @test calls[] == 1
+    @test observed_part_dir[] == dirname(target)
+    @test !any(occursin(".part", name) for name in readdir(dirname(target)))
+
+    # An already valid artifact is reused without invoking the downloader.
+    calls[] = 0
+    reused = SDPXBenchmarkRegistry._prepare_external_spec!(
+        fixture_spec();
+        cache_dir=cache_dir,
+        verbose=false,
+        downloader=downloader,
+    )
+    @test reused.status === :cached
+    @test reused.checksum == expected
+    @test calls[] == 0
+
+    # Explicit prepare repairs a checksum-mismatched canonical file.
+    write(target, "corrupt cache")
+    @test external_cache_status(fixture_spec(); cache_dir=cache_dir).reason ===
+          :checksum_mismatch
+    calls[] = 0
+    repaired = SDPXBenchmarkRegistry._prepare_external_spec!(
+        fixture_spec();
+        cache_dir=cache_dir,
+        verbose=false,
+        downloader=downloader,
+    )
+    @test repaired.checksum == expected
+    @test read(target) == payload
+    @test calls[] == 1
+
+    # A bad downloaded digest leaves the pre-existing valid artifact intact
+    # and does not leak the temporary `.part` file.
+    write(target, payload)
+    bad_downloader = function (_, destination)
+        write(destination, "wrong payload")
+        return destination
+    end
+    @test_throws ArgumentError SDPXBenchmarkRegistry._prepare_external_spec!(
+        fixture_spec(checksum=repeat("0", 64));
+        cache_dir=cache_dir,
+        verbose=false,
+        downloader=bad_downloader,
+    )
+    @test read(target) == payload
+    @test !any(occursin(".part", name) for name in readdir(dirname(target)))
+
+    # Downloader exceptions (including an interrupted/partial write) have the
+    # same cleanup and preservation guarantees.
+    throwing_downloader = function (_, destination)
+        write(destination, "partial payload")
+        error("synthetic downloader failure")
+    end
+    @test_throws ErrorException SDPXBenchmarkRegistry._prepare_external_spec!(
+        fixture_spec(checksum=repeat("0", 64));
+        cache_dir=cache_dir,
+        verbose=false,
+        downloader=throwing_downloader,
+    )
+    @test read(target) == payload
+    @test !any(occursin(".part", name) for name in readdir(dirname(target)))
+
+    # With no registry digest, preserve the historical trust semantics while
+    # returning the actual SHA-256 for callers to record.
+    nohash_dir = mktempdir()
+    nohash_spec = fixture_spec(filename="nohash.bin", checksum=nothing)
+    nohash_target = SDPXBenchmarkRegistry._cached_path(
+        nohash_spec; cache_dir=nohash_dir,
+    )
+    nohash_calls = Ref(0)
+    nohash_downloader = function (_, destination)
+        nohash_calls[] += 1
+        cp(source_path, destination; force=true)
+        return destination
+    end
+    nohash = SDPXBenchmarkRegistry._prepare_external_spec!(
+        nohash_spec;
+        cache_dir=nohash_dir,
+        verbose=false,
+        downloader=nohash_downloader,
+    )
+    @test nohash.checksum == expected
+    @test nohash_calls[] == 1
+    nohash_reused = SDPXBenchmarkRegistry._prepare_external_spec!(
+        nohash_spec;
+        cache_dir=nohash_dir,
+        verbose=false,
+        downloader=nohash_downloader,
+    )
+    @test nohash_reused.checksum == expected
+    @test nohash_calls[] == 1
+    @test !any(occursin(".part", name) for name in readdir(dirname(nohash_target)))
 end

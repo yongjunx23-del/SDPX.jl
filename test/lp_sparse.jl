@@ -38,6 +38,28 @@ using Test
     expected = (Matrix(transpose(G) * G) + regularization * I) \ rhs
     @test actual ≈ expected atol=1e-8
 
+    # `_lp_workspace_bytes` must include the sparse solver-owned graph after
+    # factorization, while excluding model ingress G/B.  The one snapshot
+    # graph deduplicates K/storage.matrix and shared symbolic state.
+    sparse_workspace = SDPX.LPWorkspace(
+        Float64,
+        size(G, 1),
+        size(G, 2),
+        0;
+        sparse_storage=true,
+    )
+    empty_bytes = SDPX._lp_workspace_bytes(sparse_workspace)
+    sparse_workspace.sparse_system = system
+    populated_bytes = SDPX._lp_workspace_bytes(sparse_workspace)
+    sparse_snapshot = (
+        K=system.K,
+        storage=system.storage,
+        assembly_map=system.assembly_map,
+        backend=system.backend,
+    )
+    @test populated_bytes > empty_bytes
+    @test populated_bytes - empty_bytes == Base.summarysize(sparse_snapshot)
+
     # Explicit sparse equality KKT has no sparse pivoted-indefinite provider;
     # selection is fail-closed before any factorization or dense fallback.
     @test_throws ArgumentError SDPX.select_lp_formulation(
