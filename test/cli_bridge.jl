@@ -71,6 +71,12 @@ _bridge_problem() = JSON.parse(JSON.json(BRIDGE_PROBLEM))   # deep copy via roun
         unknown["precision"] = "Float128"
         @test_throws ErrorException SDPXSolveCLI.solve_specification(unknown)
 
+        # One-bit BigFloat requests are rejected before entering MPFR scope.
+        too_low = _bridge_problem()
+        too_low["precision"] = "BigFloat"
+        too_low["settings"]["precision_bits"] = 1
+        @test_throws ErrorException SDPXSolveCLI.solve_specification(too_low)
+
         # An index outside its block is caught at decode, before the solver.
         outside = _bridge_problem()
         outside["blocks"][1]["coefficients"][1]["rows"] = [7]
@@ -162,4 +168,12 @@ using .SDPXUserCLI
     auto = SDPXUserCLI.parse_cli(["model.json"])
     @test !haskey(auto.options, "precision")
     @test SDPXUserCLI._default_output("model.json") == "model.result.json"
+
+    too_low = _bridge_problem()
+    delete!(too_low, "precision")
+    too_low["settings"] = Dict{String,Any}()
+    @test_throws ErrorException SDPXUserCLI._overlay!(
+        too_low,
+        Dict("precision" => "1"),
+    )
 end
