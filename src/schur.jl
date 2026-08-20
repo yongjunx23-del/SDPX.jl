@@ -108,7 +108,32 @@ function _buildP_sparse_generic!(
     l::Int,
     x::AbstractVector{T},
 ) where {T}
-    fill!(P, zero(T))
+    # Public destinations may contain mutable scalars. In particular,
+    # `fill!(P, zero(BigFloat))` aliases every structural-zero slot to one
+    # MPFR object, so a later owned in-place kernel can corrupt several
+    # entries by updating only one of them.
+    zero_distinct!(P)
+    return _accumulate_buildP_sparse!(P, cons, l, x)
+end
+
+function _buildP_sparse_owned!(
+    P::Matrix{T},
+    cons::SparseCons{T},
+    l::Int,
+    x::AbstractVector{T},
+) where {T}
+    # Solver workspaces already guarantee independent scalar storage. Keep
+    # that ownership intact while avoiding fresh MPFR allocations.
+    zero_owned!(P)
+    return _accumulate_buildP_sparse!(P, cons, l, x)
+end
+
+function _accumulate_buildP_sparse!(
+    P::Matrix{T},
+    cons::SparseCons{T},
+    l::Int,
+    x::AbstractVector{T},
+) where {T}
     coeffs = cons.packed2[l]
     if size(coeffs, 1) == 3
         p11 = zero(T)
@@ -139,6 +164,27 @@ function _buildP_sparse_generic!(
         end
     end
     return P
+end
+
+function buildP_owned!(
+    P::Matrix{T},
+    cons::SparseCons{T},
+    l::Int,
+    x::AbstractVector{T},
+) where {T}
+    return _buildP_sparse_owned!(P, cons, l, x)
+end
+
+function buildP_owned!(
+    P::Matrix{BigFloat},
+    cons::SparseCons{BigFloat},
+    l::Int,
+    x::AbstractVector{BigFloat},
+)
+    # Retain the allocation-free symmetric 2x2 specialization below. Larger
+    # sparse blocks use the ownership-preserving generic accumulator.
+    size(cons.packed2[l], 1) == 3 && return buildP!(P, cons, l, x)
+    return _buildP_sparse_owned!(P, cons, l, x)
 end
 
 @inline function _independent_bigfloat_2x2(P::Matrix{BigFloat})

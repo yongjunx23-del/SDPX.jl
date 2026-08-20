@@ -194,6 +194,50 @@ end
             @test output[1] !== output[2]
             @test output[2] !== output[3]
         end
+
+        @testset "owned sparse block build preserves structural-zero ownership" begin
+            coefficients = [zeros(BigFloat, 1, 3, 3)]
+            coefficients[1][1, 2, 2] = BigFloat(1)
+            constants = [zeros(BigFloat, 3, 3)]
+            constants[1][1, 1] = BigFloat(-1)
+            problem = SDPX.ingest(
+                BigFloat[0],
+                coefficients,
+                constants,
+                zeros(BigFloat, 1, 0),
+                BigFloat[];
+                sparse=true,
+                verbosity=0,
+            )
+            @test problem.cons isa SDPX.SparseCons{BigFloat}
+
+            public_block = zeros(BigFloat, 3, 3)
+            @test public_block[1] === public_block[2]
+            SDPX.buildP!(public_block, problem.cons, 1, BigFloat[2])
+            @test all(
+                first == second || public_block[first] !== public_block[second]
+                for first in eachindex(public_block),
+                    second in eachindex(public_block)
+            )
+
+            block = SDPX.alloc_zeros(BigFloat, 3, 3)
+            SDPX.buildP_owned!(block, problem.cons, 1, BigFloat[2])
+            SDPX.kaxpby_owned!(
+                -one(BigFloat),
+                problem.C[1],
+                one(BigFloat),
+                block,
+            )
+
+            expected = zeros(BigFloat, 3, 3)
+            expected[1, 1] = BigFloat(1)
+            expected[2, 2] = BigFloat(2)
+            @test block == expected
+            @test all(
+                first == second || block[first] !== block[second]
+                for first in eachindex(block), second in eachindex(block)
+            )
+        end
     end
 
     @testset "LP path applies BigFloat precision consistency (review P2.7)" begin
