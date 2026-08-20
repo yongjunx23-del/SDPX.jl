@@ -593,6 +593,38 @@ function _factor_equality_qr(
     )
 end
 
+"""
+    _factor_equality_qr!(buffer, backend, Btil, opts)
+
+In-place variant of [`_factor_equality_qr`](@ref) that factors the equality
+panel into a caller-owned reusable `buffer` (same shape as `Btil`), avoiding
+a fresh panel copy on every iteration.  The returned factor borrows `buffer`,
+so the caller must not reuse `buffer` until the factor is no longer needed.
+"""
+function _factor_equality_qr!(
+    buffer::AbstractMatrix{T},
+    backend::AbstractLABackend,
+    Btil::AbstractMatrix{T},
+    opts::SolverOptions{T},
+) where {T}
+    _equality_qr_allowed(Btil, opts) ||
+        throw(ArgumentError(
+            "rank-revealing equality QR exceeds the conservative " *
+            "dimension or memory crossover; use equality_solver=" *
+            ":normal_equations or reduce the equality basis first",
+        ))
+    size(buffer) == size(Btil) || throw(DimensionMismatch(
+        "equality QR buffer $(size(buffer)) does not match panel $(size(Btil))",
+    ))
+    copyto!(buffer, Btil)
+    return la_qr_factor!(
+        backend,
+        buffer;
+        pivoted=true,
+        relative_tolerance=_equality_qr_relative_tolerance(Btil, opts),
+    )
+end
+
 function _equality_gram_crossover(
     panel::AbstractMatrix{T},
     opts::SolverOptions{T},

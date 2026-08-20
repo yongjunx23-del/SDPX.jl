@@ -324,6 +324,7 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
     equality_factor_buffer::Matrix{T}
     equality_rhs::Vector{T}
     equality_panel::Matrix{T}
+    equality_qr_buffer::Matrix{T}
     regularizations::Int
     accepted_regularization::T
     direction_gate::Union{Nothing,NativeSOCDirectionGateRecord{T}}
@@ -426,6 +427,7 @@ function NativeSOCWorkspace(
         alloc_zeros(T, variables),
         alloc_zeros(T, equalities, equalities),
         alloc_zeros(T, equalities),
+        alloc_zeros(T, variables, equalities),
         alloc_zeros(T, variables, equalities),
         0,
         zero(T),
@@ -1267,7 +1269,8 @@ function _native_soc_prepare_kkt!(
 
     if options.equality_solver === :qr || workspace.equality_qr_required
         factor_started = time_ns()
-        equality_factor = _factor_equality_qr(
+        equality_factor = _factor_equality_qr!(
+            workspace.equality_qr_buffer,
             workspace.la_backend,
             workspace.equality_panel,
             options,
@@ -1358,7 +1361,8 @@ function _native_soc_prepare_kkt!(
 
     if options.equality_solver === :qr || workspace.equality_qr_required
         factor_started = time_ns()
-        equality_factor = _factor_equality_qr(
+        equality_factor = _factor_equality_qr!(
+            workspace.equality_qr_buffer,
             workspace.la_backend,
             workspace.equality_panel,
             options,
