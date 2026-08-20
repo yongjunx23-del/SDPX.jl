@@ -68,4 +68,23 @@ using Test
         BigFloat, SDPX.SolveOptions(precision=2),
     )
     @test two_bit.core.precision_bits == 2
+
+    @test_throws ArgumentError SDPX._validate_solver_options(
+        SDPX.SolverOptions{BigFloat}(
+            precision_bits=1,
+            minimum_working_precision_bits=2,
+        ),
+    )
+    @test_throws ArgumentError SDPX._validate_solver_options(
+        SDPX.SolverOptions{BigFloat}(
+            precision_bits=2,
+            minimum_working_precision_bits=1,
+        ),
+    )
+    SDPX._validate_solver_options(
+        SDPX.SolverOptions{BigFloat}(
+            precision_bits=2,
+            minimum_working_precision_bits=2,
+        ),
+    )
 end
