@@ -276,6 +276,7 @@ function solve_specification(spec)
               "(Float64x2/Float64x3/Float64x4 need MultiFloats in the bridge environment)")
     T = PRECISIONS[name]
     if T === BigFloat
+        requested_bits >= 2 || error("precision_bits must be at least 2")
         settings["precision_bits"] = requested_bits
     end
 
