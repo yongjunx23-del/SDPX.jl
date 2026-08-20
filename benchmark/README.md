@@ -6,7 +6,7 @@ generators, cache, result schema, and comparison. Every suite writes one
 machine-readable result convention and no benchmark hook is added to numerical
 code.
 
-## Suites
+## Suites and fixed campaigns
 
 - `micro`: eleven tiny generated LP/SOCP/SDP, rank/conditioning, and typed
   pathological cases.
@@ -21,6 +21,17 @@ code.
   supplied for a diagnostic.
 - `heavy`: full NETLIB/SDPLIB/CBLIB, Mittelmann, large sparse, bootstrap and
   precision sweeps. It is register-only and the runner refuses to execute it.
+- `core_matrix`: the fixed benchmark-driven-development campaign. It runs
+  `synthetic/lp_box`, `synthetic/soc_q3`, and `synthetic/sdp_dense` in
+  Float64/auto, Float64x4/MFLA, and BigFloat256/BFLA, for exactly nine rows.
+  Missing optional providers become structured `provider_unavailable` skips;
+  they never silently fall back to an incomparable legacy implementation.
+
+`core_matrix` is deliberately listed as a campaign rather than broad suite. It
+is the stable smoke/per-change matrix required before numerical work, not a
+claim that three small synthetic problems establish production performance.
+Relevant structural, pathological, public, and scale-ladder rows remain
+mandatory for an accepted optimization.
 
 ## Local commands
 
@@ -31,6 +42,12 @@ julia --project=. benchmark/runner.jl local_full
 julia --project=. benchmark/runner.jl micro --problem=synthetic/sdp_dense
 julia --project=. benchmark/runner.jl micro \
   --problem=synthetic/sdp_dense --arithmetic=bigfloat256 --provider=bfla
+
+# Fixed LP/SOCP/SDP × precision campaign. Three samples are a local hot-state
+# development gate; use the fresh-process protocol below for performance claims.
+julia --project=bench benchmark/runner.jl core_matrix \
+  --samples=3 --verbose \
+  --output=work/baseline/core-matrix.toml
 ```
 
 Results are written as matching TOML and TSV files. Semantic facts (status,
@@ -38,7 +55,23 @@ objective, residuals, certificate, iterations, planned/executed route/provider,
 and fallback) are primary. A solved row carries `semantic_pass`, a compact list
 of `semantic_failures`, and an explicit `unexpected_fallback` flag. The runner
 writes the complete artifact before failing on a semantic regression. Timings
-are one post-warmup observation and are never an ordinary CI failure threshold.
+are post-warmup observations and are never an ordinary CI failure threshold.
+
+The canonical result schema records the metrics needed by the core campaign:
+
+- runtime: total solve time and exposed frontend, setup, preprocessing,
+  presolve, core, factorization, refinement, reconstruction, certification, and
+  other phase timings;
+- memory: Julia allocated bytes, GC time, solver-owned workspace bytes, and
+  fresh-process peak RSS when the fresh-process wrapper is used;
+- accuracy: primal/dual objective, absolute/relative gap, primal/dual and affine
+  residuals, cone/PSD violations, complementarity, semantic failures, and the
+  original-coordinate certificate;
+- convergence: iterations, restarts, regularization attempts, refinement solves,
+  factorization counters, selected formulation, requested/planned/executed
+  provider, and fallback reason;
+- stability: repeated-sample status, objective, iteration, route, provider,
+  input and semantic parity together with median, MAD, range, and spread.
 
 Current SOCP cases exercise the native Lorentz frontend. Rows record the
 executed specialization and whether a PSD lift was present; the Full-unitarity
@@ -46,6 +79,34 @@ case requires `fixed_trace_q3`, an original-coordinate Lorentz certificate,
 MFLA provenance, and `psd_lift_used=false`. LP and SDP rows are labeled
 `lp_native` and `sdp_native`, while the separate planned/executed formulation
 columns retain the KKT formulation selected inside the solver.
+
+## Baseline/candidate loop
+
+Create artifacts from clean, commit-pinned worktrees using identical Julia,
+project/manifest, thread, BLAS, provider, input, and environment settings:
+
+```sh
+# Baseline worktree / commit
+JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+  julia --project=bench benchmark/runner.jl core_matrix \
+  --samples=3 --output=work/baseline/core-matrix.toml
+
+# Candidate worktree / commit
+JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
+  julia --project=bench benchmark/runner.jl core_matrix \
+  --samples=3 --output=work/candidate/core-matrix.toml
+
+julia --project=. benchmark/compare.jl \
+  work/baseline/core-matrix.toml \
+  work/candidate/core-matrix.toml \
+  work/comparison/core-matrix.tsv
+```
+
+The in-process `--samples=3` path is a fast local gate and driver-validation
+step. It rebuilds identical problem data for each timed solve but shares one
+Julia process. Do not use it alone for an end-to-end speed claim. Freeze a
+microbenchmark for the suspected phase and use at least three independent
+fresh processes for the affected end-to-end rows.
 
 ## Compare
 
@@ -75,6 +136,11 @@ julia --project=. benchmark/fresh_process_runner.jl micro \
   --repetitions=3 --threads=1 --blas-threads=1 \
   --campaign-dir=work/baseline/lp_box_float64
 ```
+
+Run the same command for the affected `core_matrix` rows by replacing the
+problem, arithmetic, and provider arguments. A numerical optimization is not
+accepted until its relevant rows pass fresh-process parity and the strict
+baseline/candidate comparison.
 
 `process_peak_rss_bytes` is the peak of the complete child Julia process. It
 includes the runtime, package loading, compilation caches, and allocator
@@ -106,9 +172,10 @@ remain metadata-only.
 campaign, three fresh processes all return `Optimal` in 13 iterations with an
 original-coordinate certificate, objective `-0.9460283775140597`, and matching
 input/route/source identities. The median post-warmup solve time is 14.814 s
-and solver workspace is 186,614,568 bytes. These numbers are local evidence,
-not a cross-machine reference; reproduce them through the Large suite before
-comparing another candidate.
+and solver workspace is 186,614,568 bytes. These numbers are historical local
+evidence from the recorded campaign, not a cross-machine or current-branch
+reference; reproduce them through the Large suite before comparing another
+candidate.
 
 Fresh-process campaigns for an explicitly authorized Large-suite diagnostic
 must also pass `--allow-large` to `fresh_process_runner.jl`; the flag is
@@ -149,6 +216,12 @@ providers and arithmetic. Representative and Local Full each contain one
 explicit MFLA and one explicit BFLA smoke; they become structured skips when
 the corresponding optional package is unavailable. Loading an arithmetic type
 alone does not opt `:auto` into an optional provider.
+
+The `core_matrix` campaign is the deliberate exception to sparse precision
+sampling: it is a fixed three-family by three-arithmetic matrix used to prevent
+Float64-only optimization. Its nine rows are small enough for development but
+must be augmented by structural and scale-specific evidence before a claim is
+made.
 
 ## Specialized campaigns
 
