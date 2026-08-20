@@ -358,15 +358,6 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
     corrector_rhs_seconds::Float64
     fixed_block_residual_seconds::Float64
     fixed_block_recovery_seconds::Float64
-    kkt_trsv_seconds::Float64
-    kkt_gemv_seconds::Float64
-    kkt_eq_solve_seconds::Float64
-    kkt_complete_seconds::Float64
-    # Cached per-column / per-row L1 norms of Aeq for the direction-accuracy
-    # gate. Aeq is iteration-invariant, so these are computed once instead of
-    # re-walking the sparse matrix 4200 x 84 times per direction.
-    equality_col_abssum::Union{Nothing,Vector{T}}
-    equality_row_abssum::Union{Nothing,Vector{T}}
 end
 
 function NativeSOCWorkspace(
@@ -469,12 +460,6 @@ function NativeSOCWorkspace(
         0.0,
         0.0,
         0.0,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        nothing,
-        nothing,
     )
 end
 
@@ -957,20 +942,6 @@ function _native_soc_scaling!(workspace::NativeSOCWorkspace)
     return true, 0
 end
 
-@inline function _native_soc_copy_basis_entry!(basis, index::Int, value)
-    basis[index] = value
-    return basis
-end
-
-@inline function _native_soc_copy_basis_entry!(
-    basis::AbstractVector{BigFloat}, index::Int, value::BigFloat,
-)
-    # Reuse the owned destination object.  This is the scalar equivalent of
-    # copy_owned! and avoids one mutable MPFR allocation per CSC slot.
-    MA.operate_to!(basis[index], copy, value)
-    return basis
-end
-
 """Return whether a CSC coefficient matrix has a structurally empty column."""
 @inline function _native_soc_sparse_has_empty_column(
     A::SparseMatrixCSC,
@@ -1015,46 +986,36 @@ function _native_soc_add_metric!(
     basis = workspace.offset[block]
     variables = size(cone.A, 2)
     if cone.A isa SparseMatrixCSC
-        # Native SOC models often contain many tiny cones whose affine maps
-        # touch only one or two variables.  Iterating the frozen CSC slots
-        # keeps the same A' H A contraction while avoiding the historical
-        # dense N-column/N-row sweep for every block.
-        matrix = cone.A
-        row_indices = rowvals(matrix)
-        matrix_values = nonzeros(matrix)
-        @inbounds for column in 1:variables
-            first = matrix.colptr[column]
-            last = matrix.colptr[column + 1] - 1
-            first > last && continue
-            zero_owned!(basis)
-            for pointer in first:last
-                # BigFloat slots are mutable: a plain assignment would alias
-                # the caller-owned CSC value, and the next zero_owned!(basis)
-                # would then erase the input matrix.  Keep the same ownership
-                # rule as the dense copy path while retaining the CSC walk.
-                _native_soc_copy_basis_entry!(
-                    basis, row_indices[pointer], matrix_values[pointer],
+        A = cone.A
+        has_empty_column = _native_soc_sparse_has_empty_column(A, variables)
+        if has_empty_column
+            # A sparse CSC cone may contain entirely empty source or target
+            # columns.  Skip only those structural columns; for every active
+            # column retain the dense branch's copy, NT Hs⁻¹ application,
+            # direct CSC accessor, ascending loop order, and full symmetric
+            # writes.
+            @inbounds for column in 1:variables
+                A.colptr[column] == A.colptr[column + 1] && continue
+                copy_owned!(basis, view(A, :, column))
+                _soc_nt_apply_hs_inverse!(
+                    metric,
+                    workspace.nt_w[block],
+                    workspace.nt_eta_squared[block],
+                    basis,
                 )
-            end
-            _soc_nt_apply_hs_inverse!(
-                metric,
-                workspace.nt_w[block],
-                workspace.nt_eta_squared[block],
-                basis,
-            )
-            for row in column:variables
-                row_first = matrix.colptr[row]
-                row_last = matrix.colptr[row + 1] - 1
-                row_first > row_last && continue
-                value = zero(T)
-                for pointer in row_first:row_last
-                    value += matrix_values[pointer] * metric[row_indices[pointer]]
+                for row in column:variables
+                    A.colptr[row] == A.colptr[row + 1] && continue
+                    value = zero(T)
+                    for coordinate in eachindex(metric)
+                        value += A[coordinate, row] * metric[coordinate]
+                    end
+                    workspace.hessian[row, column] += value
+                    row == column ||
+                        (workspace.hessian[column, row] += value)
                 end
-                workspace.hessian[row, column] += value
-                row == column || (workspace.hessian[column, row] += value)
             end
+            return workspace
         end
-        return workspace
     end
     @inbounds for column in 1:variables
         copy_owned!(basis, view(cone.A, :, column))
@@ -1464,7 +1425,6 @@ function _native_soc_solve_kkt!(
         return true
     end
     equality_factor = workspace.equality_factor
-    kkt_trsv_started = time_ns()
     _native_soc_fixed_trsv_lower!(factor, workspace.rhs)
     la_mul_owned!(
         workspace.la_backend,
@@ -1477,9 +1437,6 @@ function _native_soc_solve_kkt!(
             workspace.equality_residual[index] -
             workspace.equality_rhs[index]
     end
-    kkt_gemv_started = time_ns()
-    workspace.kkt_trsv_seconds +=
-        (kkt_gemv_started - kkt_trsv_started) / 1.0e9
     if workspace.equality_method === :rank_revealing_qr
         la_factor_solve!(
             equality_factor,
@@ -1493,9 +1450,6 @@ function _native_soc_solve_kkt!(
     # permuted scratch into dy, so dy is copied from equality_rhs in both
     # branches.
     copy_owned!(workspace.dy, workspace.equality_rhs)
-    kkt_eq_solve_ended = time_ns()
-    workspace.kkt_gemv_seconds +=
-        (kkt_eq_solve_ended - kkt_gemv_started) / 1.0e9
     la_mul_owned!(
         workspace.la_backend,
         workspace.rhs,
@@ -1505,8 +1459,6 @@ function _native_soc_solve_kkt!(
         one(T),
     )
     _native_soc_fixed_trsv_transpose!(factor, workspace.rhs)
-    workspace.kkt_eq_solve_seconds +=
-        (time_ns() - kkt_eq_solve_ended) / 1.0e9
     copy_owned!(workspace.dx, workspace.rhs)
     workspace.rhs_solves += 1
     workspace.kkt_rhs_solves += 1
@@ -1599,12 +1551,6 @@ function _native_soc_reset_iteration_counters!(
     workspace.corrector_rhs_seconds = 0.0
     workspace.fixed_block_residual_seconds = 0.0
     workspace.fixed_block_recovery_seconds = 0.0
-    workspace.kkt_trsv_seconds = 0.0
-    workspace.kkt_gemv_seconds = 0.0
-    workspace.kkt_eq_solve_seconds = 0.0
-    workspace.kkt_complete_seconds = 0.0
-    workspace.equality_col_abssum = nothing
-    workspace.equality_row_abssum = nothing
     workspace.equality_prepared = false
     workspace.equality_factor = nothing
     return workspace
@@ -2213,9 +2159,8 @@ function _native_soc_complete_direction!(
             )
         end
         workspace.fixed_direction_recoveries += length(problem.cones)
-        elapsed = (time_ns() - started) / 1.0e9
-        workspace.fixed_block_recovery_seconds += elapsed
-        workspace.kkt_complete_seconds += elapsed
+        workspace.fixed_block_recovery_seconds +=
+            (time_ns() - started) / 1.0e9
     else
         @inbounds for block in eachindex(problem.cones)
             cone = problem.cones[block]
@@ -2286,36 +2231,6 @@ function _native_soc_direction_accuracy_gate!(
     end
     fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
     reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
-    # Aeq is iteration-invariant: cache its per-column and per-row L1 norms
-    # once instead of re-walking the sparse matrix 4200 blocks x 84 rows per
-    # direction. This is numerically neutral (the gate only consumes the
-    # resulting per-column/per-row maxima as residual scale).
-    if workspace.equality_col_abssum === nothing
-        col_sum = alloc_zeros(T, problem.variables)
-        row_sum = alloc_zeros(T, size(problem.Aeq, 1))
-        if problem.Aeq isa SparseMatrixCSC
-            Aeq_sparse = problem.Aeq
-            nz_rows = rowvals(Aeq_sparse)
-            vals_index = nonzeros(Aeq_sparse)
-            @inbounds for column in axes(Aeq_sparse, 2)
-                for pointer in nzrange(Aeq_sparse, column)
-                    magnitude = abs(vals_index[pointer])
-                    col_sum[column] += magnitude
-                    row_sum[nz_rows[pointer]] += magnitude
-                end
-            end
-        else
-            @inbounds for column in axes(problem.Aeq, 2), row in axes(problem.Aeq, 1)
-                magnitude = abs(problem.Aeq[row, column])
-                col_sum[column] += magnitude
-                row_sum[row] += magnitude
-            end
-        end
-        workspace.equality_col_abssum = col_sum
-        workspace.equality_row_abssum = row_sum
-    end
-    col_abssum = workspace.equality_col_abssum
-    row_abssum = workspace.equality_row_abssum
     # The gate must use the exact pre-solve RHS that produced `dx`, retained
     # in `direction_rhs_original` by `_native_soc_build_direction_rhs!`; it never
     # reconstructs that RHS from offsets.
@@ -2345,12 +2260,18 @@ function _native_soc_direction_accuracy_gate!(
                                     h12 * workspace.dx[second]
             workspace.rhs[second] -= h12 * workspace.dx[first] +
                                      h22 * workspace.dx[second]
-            k0_row_sum = abs(h11) + abs(h12) + col_abssum[first]
+            k0_row_sum = abs(h11) + abs(h12)
             e_row_sum = abs(r11)
+            @inbounds for equality in axes(problem.Aeq, 1)
+                k0_row_sum += abs(problem.Aeq[equality, first])
+            end
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_operator_scale = max(e_operator_scale, e_row_sum)
-            k0_row_sum = abs(h12) + abs(h22) + col_abssum[second]
+            k0_row_sum = abs(h12) + abs(h22)
             e_row_sum = abs(r22)
+            @inbounds for equality in axes(problem.Aeq, 1)
+                k0_row_sum += abs(problem.Aeq[equality, second])
+            end
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_operator_scale = max(e_operator_scale, e_row_sum)
         end
@@ -2362,7 +2283,9 @@ function _native_soc_direction_accuracy_gate!(
                 workspace.rhs[row] -= workspace.hessian[row, column] *
                                       workspace.dx[column]
             end
-            k0_row_sum += col_abssum[row]
+            @inbounds for equality in axes(problem.Aeq, 1)
+                k0_row_sum += abs(problem.Aeq[equality, row])
+            end
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_row_sum = abs(accepted_regularization *
                 max(abs(workspace.hessian[row, row]), one(T)))
@@ -2371,7 +2294,11 @@ function _native_soc_direction_accuracy_gate!(
     end
     if !isempty(problem.beq)
         @inbounds for equality in axes(problem.Aeq, 1)
-            k0_operator_scale = max(k0_operator_scale, row_abssum[equality])
+            k0_row_sum = zero(T)
+            for variable in axes(problem.Aeq, 2)
+                k0_row_sum += abs(problem.Aeq[equality, variable])
+            end
+            k0_operator_scale = max(k0_operator_scale, k0_row_sum)
         end
         la_mul_owned!(
             workspace.la_backend,
@@ -3121,10 +3048,6 @@ Base.@noinline function _solve_native_soc_core(
         corrector_rhs=workspace.corrector_rhs_seconds,
         fixed_block_residual=workspace.fixed_block_residual_seconds,
         fixed_block_recovery=workspace.fixed_block_recovery_seconds,
-        kkt_trsv=workspace.kkt_trsv_seconds,
-        kkt_gemv=workspace.kkt_gemv_seconds,
-        kkt_eq_solve=workspace.kkt_eq_solve_seconds,
-        kkt_complete=workspace.kkt_complete_seconds,
     ) : NamedTuple()
     termination = merge(termination, (
         regularizations=workspace.regularizations,
