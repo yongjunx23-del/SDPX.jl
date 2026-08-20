@@ -1236,6 +1236,90 @@ end
             return r
         end
 
+        @testset "noncanonical CSC preserves legacy gate scans" begin
+            T = Float64
+            # Column 1 contains a duplicate row with values [1, -1], while
+            # column 2 stores row 2 before row 1.  Both noncanonical cases
+            # must use the historical scalar-getindex path verbatim.
+            Aeq = SparseMatrixCSC{T,Int}(
+                2, 2,
+                [1, 3, 6],
+                [1, 1, 2, 2, 1],
+                [1.0, -1.0, 0.25, 0.5, 0.5],
+            )
+            @test !SDPX._native_soc_sparse_rowvals_canonical(Aeq)
+
+            legacy_rows = T[
+                sum(abs(Aeq[equality, variable]) for variable in axes(Aeq, 2))
+                for equality in axes(Aeq, 1)
+            ]
+            cached_rows = SDPX._native_soc_equality_abs_row_sums(Aeq, false)
+            @test cached_rows == legacy_rows
+            @test cached_rows == T[1.0, 0.25]
+
+            for variable in axes(Aeq, 2)
+                legacy_column = zero(T)
+                for equality in axes(Aeq, 1)
+                    legacy_column += abs(Aeq[equality, variable])
+                end
+                @test SDPX._native_soc_add_equality_column_abs(
+                    zero(T), Aeq, variable, false,
+                ) == legacy_column
+            end
+
+            canonical_Aeq = SparseMatrixCSC{T,Int}(
+                2, 2,
+                [1, 3, 5],
+                [1, 2, 1, 2],
+                [1.0, 2.0, 0.5, 0.25],
+            )
+            @test SDPX._native_soc_sparse_rowvals_canonical(canonical_Aeq)
+            @test SDPX._native_soc_equality_abs_row_sums(
+                canonical_Aeq, true,
+            ) == T[1.5, 2.25]
+
+            cone = SDPX.SOCConstraint(Matrix{T}(I, 2, 2), zeros(T, 2))
+            problem = SDPX.ConicProblem{T}(
+                zeros(T, 2), [cone], Aeq, zeros(T, 2), 2,
+            )
+            options = _native_soc_options(T)
+            plan = SDPX.build_execution_plan(
+                SDPX.AutoPlanner(), problem, options;
+                specialization=:off,
+            ).payload
+            workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
+            @test !workspace.equality_sparse_canonical
+            workspace.hessian .= zeros(T, 2, 2)
+            workspace.dx .= T[0.25, 0.5]
+            workspace.dy .= zeros(T, 2)
+            workspace.equality_residual .= problem.Aeq * workspace.dx
+            workspace.direction_rhs_original .= zeros(T, 2)
+            record = SDPX._native_soc_direction_accuracy_gate!(
+                workspace, problem, options;
+                rhs_phase=:predictor,
+                accepted_regularization=zero(T),
+            )
+
+            legacy_k0 = zero(T)
+            for row in axes(problem.Aeq, 1)
+                row_sum = zero(T)
+                for column in axes(problem.Aeq, 2)
+                    row_sum += abs(problem.Aeq[row, column])
+                end
+                legacy_k0 = max(legacy_k0, row_sum)
+            end
+            for column in axes(problem.Aeq, 2)
+                column_sum = zero(T)
+                for row in axes(problem.Aeq, 1)
+                    column_sum += abs(problem.Aeq[row, column])
+                end
+                legacy_k0 = max(legacy_k0, column_sum)
+            end
+            @test record.ok
+            @test record.k0_infinity == legacy_k0
+            @test record.k0_infinity == T(1)
+        end
+
         @testset "GeneralLorentz regularization-aware K0+Eδ" begin
             T = Float64
             problem, workspace, hessian, dx, dy =

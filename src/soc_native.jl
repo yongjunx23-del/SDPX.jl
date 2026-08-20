@@ -64,6 +64,143 @@ struct NativeSOCFixedTraceFactor{T}
     inverse_pivots::Matrix{T}
 end
 
+"""
+    _native_soc_equality_abs_row_sums(Aeq)
+
+Build the absolute equality-row sums once from the solver-owned `Aeq`.  The
+row loop visits variables in ascending order, exactly matching the former
+equality×variable gate loop.  The cache assumes solve-lifetime immutability:
+`second_order_program` has already ingested an owned matrix, and concurrent or
+manual mutation during a solve is unsupported.
+"""
+@inline function _native_soc_sparse_rowvals_canonical(
+    Aeq::SparseMatrixCSC{T,Int},
+) where {T}
+    @inbounds for variable in axes(Aeq, 2)
+        previous = 0
+        for pointer in nzrange(Aeq, variable)
+            equality = Aeq.rowval[pointer]
+            equality > previous || return false
+            previous = equality
+        end
+    end
+    return true
+end
+
+@inline _native_soc_sparse_rowvals_canonical(::AbstractMatrix) = true
+
+function _native_soc_equality_abs_row_sums(
+    Aeq::SparseMatrixCSC{T,Int},
+    canonical::Bool,
+) where {T}
+    equalities = size(Aeq, 1)
+    row_sums = alloc_zeros(T, equalities)
+    if !canonical
+        # Preserve the historical scalar-getindex loop for noncanonical CSC.
+        # Its access semantics may differ from raw nzval traversal, and the
+        # row / column nesting preserves the former floating-point association.
+        @inbounds for equality in axes(Aeq, 1)
+            row_sum = zero(T)
+            for variable in axes(Aeq, 2)
+                row_sum += abs(Aeq[equality, variable])
+            end
+            row_sums[equality] = row_sum
+        end
+        return row_sums
+    end
+    # Canonical CSC storage is column-major; accumulating into each row while
+    # visiting columns in order reproduces the original row-sum order without
+    # scalar getindex/binary-search calls.
+    @inbounds for variable in axes(Aeq, 2)
+        for pointer in nzrange(Aeq, variable)
+            equality = Aeq.rowval[pointer]
+            magnitude = abs(Aeq.nzval[pointer])
+            iszero(magnitude) && continue
+            row_sums[equality] += magnitude
+        end
+    end
+    return row_sums
+end
+
+function _native_soc_equality_abs_row_sums(
+    Aeq::SparseMatrixCSC{T,Int},
+) where {T}
+    canonical = _native_soc_sparse_rowvals_canonical(Aeq)
+    return _native_soc_equality_abs_row_sums(Aeq, canonical)
+end
+
+function _native_soc_equality_abs_row_sums(
+    Aeq::AbstractMatrix{T},
+) where {T}
+    equalities = size(Aeq, 1)
+    row_sums = alloc_zeros(T, equalities)
+    @inbounds for variable in axes(Aeq, 2)
+        for equality in axes(Aeq, 1)
+            magnitude = abs(Aeq[equality, variable])
+            iszero(magnitude) && continue
+            row_sums[equality] += magnitude
+        end
+    end
+    return row_sums
+end
+
+# Strict-order column contribution helpers.  The dynamic metric row sum is
+# passed in and each absolute Aeq term is added one at a time, preserving the
+# historical `((metric + a1) + a2) ...` association.  The sparse method walks
+# canonical CSC entries in row order and avoids scalar indexing searches.
+@inline function _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::SparseMatrixCSC{T,Int},
+    variable::Int,
+    canonical::Bool,
+) where {T}
+    if !canonical
+        # Match the former equality×variable scalar scan when duplicate or
+        # unsorted CSC storage makes raw nzval traversal non-equivalent.
+        @inbounds for equality in axes(Aeq, 1)
+            value += abs(Aeq[equality, variable])
+        end
+        return value
+    end
+    @inbounds for pointer in nzrange(Aeq, variable)
+        magnitude = abs(Aeq.nzval[pointer])
+        iszero(magnitude) && continue
+        value += magnitude
+    end
+    return value
+end
+
+@inline function _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::SparseMatrixCSC{T,Int},
+    variable::Int,
+) where {T}
+    canonical = _native_soc_sparse_rowvals_canonical(Aeq)
+    return _native_soc_add_equality_column_abs(
+        value, Aeq, variable, canonical,
+    )
+end
+
+@inline function _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::AbstractMatrix{T},
+    variable::Int,
+    ::Bool,
+) where {T}
+    @inbounds for equality in axes(Aeq, 1)
+        value += abs(Aeq[equality, variable])
+    end
+    return value
+end
+
+@inline _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::AbstractMatrix{T},
+    variable::Int,
+) where {T} = _native_soc_add_equality_column_abs(
+    value, Aeq, variable, true,
+)
+
 """Planner-owned cone representation, independent of KKT and LA choices."""
 struct ConeRepresentationPlan{E<:AbstractSOCExecution}
     representation::Symbol
@@ -356,6 +493,12 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
     corrector_rhs_seconds::Float64
     fixed_block_residual_seconds::Float64
     fixed_block_recovery_seconds::Float64
+    # Owned once per solve from the ingested Aeq.  Row sums can replace the
+    # former equality×variable scan directly.  Column contributions are
+    # dispatched directly from the dense/CSC Aeq after each dynamic metric sum
+    # so the historical addition association is unchanged.
+    equality_sparse_canonical::Bool
+    equality_abs_row_sums::Vector{T}
 end
 
 function NativeSOCWorkspace(
@@ -375,6 +518,16 @@ function NativeSOCWorkspace(
     augmented_dimension =
         plan.formulation.formulation isa DenseAugmentedKKT ?
         variables + equalities : 0
+    equality_sparse_canonical = _native_soc_sparse_rowvals_canonical(
+        problem.Aeq,
+    )
+    equality_abs_row_sums = if problem.Aeq isa SparseMatrixCSC
+        _native_soc_equality_abs_row_sums(
+            problem.Aeq, equality_sparse_canonical,
+        )
+    else
+        _native_soc_equality_abs_row_sums(problem.Aeq)
+    end
     @inbounds for block in eachindex(problem.cones)
         if options.parameter_policy === :auto
             # Phase-2 affine KKT cold start: the temporary point is the cone
@@ -460,6 +613,8 @@ function NativeSOCWorkspace(
         0.0,
         0.0,
         0.0,
+        equality_sparse_canonical,
+        equality_abs_row_sums,
     )
 end
 
@@ -2307,16 +2462,18 @@ function _native_soc_direction_accuracy_gate!(
                                      h22 * workspace.dx[second]
             k0_row_sum = abs(h11) + abs(h12)
             e_row_sum = abs(r11)
-            @inbounds for equality in axes(problem.Aeq, 1)
-                k0_row_sum += abs(problem.Aeq[equality, first])
-            end
+            k0_row_sum = _native_soc_add_equality_column_abs(
+                k0_row_sum, problem.Aeq, first,
+                workspace.equality_sparse_canonical,
+            )
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_operator_scale = max(e_operator_scale, e_row_sum)
             k0_row_sum = abs(h12) + abs(h22)
             e_row_sum = abs(r22)
-            @inbounds for equality in axes(problem.Aeq, 1)
-                k0_row_sum += abs(problem.Aeq[equality, second])
-            end
+            k0_row_sum = _native_soc_add_equality_column_abs(
+                k0_row_sum, problem.Aeq, second,
+                workspace.equality_sparse_canonical,
+            )
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_operator_scale = max(e_operator_scale, e_row_sum)
         end
@@ -2328,9 +2485,10 @@ function _native_soc_direction_accuracy_gate!(
                 workspace.rhs[row] -= workspace.hessian[row, column] *
                                       workspace.dx[column]
             end
-            @inbounds for equality in axes(problem.Aeq, 1)
-                k0_row_sum += abs(problem.Aeq[equality, row])
-            end
+            k0_row_sum = _native_soc_add_equality_column_abs(
+                k0_row_sum, problem.Aeq, row,
+                workspace.equality_sparse_canonical,
+            )
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_row_sum = abs(accepted_regularization *
                 max(abs(workspace.hessian[row, row]), one(T)))
@@ -2339,10 +2497,7 @@ function _native_soc_direction_accuracy_gate!(
     end
     if !isempty(problem.beq)
         @inbounds for equality in axes(problem.Aeq, 1)
-            k0_row_sum = zero(T)
-            for variable in axes(problem.Aeq, 2)
-                k0_row_sum += abs(problem.Aeq[equality, variable])
-            end
+            k0_row_sum = workspace.equality_abs_row_sums[equality]
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
         end
         la_mul_owned!(
@@ -2610,7 +2765,8 @@ function _native_soc_workspace_bytes(workspace::NativeSOCWorkspace)
         workspace.dual_residual, workspace.equality_residual,
         workspace.rhs, workspace.augmented_rhs,
         workspace.direction_rhs_original,
-        workspace.equality_rhs, workspace.nt_eta,
+        workspace.equality_rhs, workspace.equality_abs_row_sums,
+        workspace.nt_eta,
         workspace.nt_eta_squared,
     )
     blocks = (
