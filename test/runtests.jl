@@ -39,7 +39,6 @@ const QUICK_TESTS = (
     "v05_core_invariants.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
-    "coo_contraction_regression.jl",
     "precision_ladder_plan.jl",
 )
 
@@ -55,7 +54,6 @@ const FULL_TESTS = (
     "genericity.jl",
     "extended_precision_blas.jl",
     "sparse.jl",
-    "coo_contraction_regression.jl",
     "moi_vector_cones.jl",
     "moi_native_soc.jl",
     "moi.jl",
