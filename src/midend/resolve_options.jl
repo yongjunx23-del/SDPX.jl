@@ -28,6 +28,21 @@ const _MINIMUM_BIGFLOAT_PRECISION_BITS = 2
     return value
 end
 
+# The generic expert-option validator is defined later in `pipeline.jl`.
+# Specializing here keeps every public BigFloat entry point on the same
+# precision contract without duplicating the rest of the solver-option checks.
+function _validate_solver_options(options::SolverOptions{BigFloat})
+    _require_bigfloat_precision_bits(
+        options.precision_bits,
+        "precision_bits",
+    )
+    _require_bigfloat_precision_bits(
+        options.minimum_working_precision_bits,
+        "minimum_working_precision_bits",
+    )
+    return invoke(_validate_solver_options, Tuple{SolverOptions}, options)
+end
+
 function _frontend_number(::Type{T}, value, label::AbstractString) where {T}
     _is_auto(value) && throw(ArgumentError("$label is still :auto"))
     if value isa AbstractString
