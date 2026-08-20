@@ -2,12 +2,14 @@ const RESULT_COLUMNS = (
     :schema_version, :source_commit, :source_dirty, :julia_version, :os,
     :cpu_name, :hostname, :pbs_job_id, :julia_threads, :blas_threads,
     :project_sha256, :manifest_sha256, :benchmark_driver_sha256,
+    :solver_source_sha256,
     :mfla_commit, :bfla_commit,
+    :solver_name, :solver_version,
     :suite, :problem_id, :name, :family,
     :problem_type, :conic_formulation, :source, :purpose, :seed, :arithmetic,
     :precision_bits, :requested_provider, :status, :reference_status,
     :reference_absolute_tolerance, :reference_relative_tolerance,
-    :skip_reason, :termination_reason,
+    :skip_reason, :termination_reason, :termination_stage,
     :variables, :equalities, :blocks, :block_sizes, :planned_formulation,
     :executed_formulation, :planned_backend, :executed_backend,
     :planned_provider, :executed_provider, :executed_specialization,
@@ -16,12 +18,26 @@ const RESULT_COLUMNS = (
     :physical_objective, :objective_interval_lower, :objective_interval_upper,
     :objective_in_reference_interval, :benchmark_scale,
     :input_generation_precision_bits, :original_equalities, :source_parameters,
-    :objective_error, :primal_residual, :dual_residual, :relative_gap,
+    :objective_error, :dual_objective, :absolute_gap,
+    :primal_tolerance, :dual_tolerance, :gap_tolerance,
+    :certificate_kind, :certificate_failures,
+    :primal_affine_residual, :dual_affine_residual,
+    :primal_cone_violation, :dual_cone_violation,
+    :primal_residual_scaled, :dual_residual_scaled,
+    :complementarity, :relative_complementarity,
+    :primal_residual, :dual_residual, :relative_gap,
     :certificate_policy, :certificate_available, :certificate_valid,
     :provider_match, :unexpected_fallback,
     :production_invariants_valid, :full_numerical_gate_valid,
     :semantic_pass, :semantic_failures, :total_seconds, :seconds_per_iteration,
     :allocated_bytes, :gc_seconds,
+    :setup_seconds, :frontend_seconds, :preprocess_seconds,
+    :presolve_seconds, :core_seconds, :certification_seconds,
+    :workspace_bytes, :process_peak_rss_bytes, :memory_budget_bytes,
+    :restarts, :regularizations, :refinement_solves,
+    :numeric_factorizations,
+    :factorization_attempts, :factorization_successes,
+    :factorization_failures,
     :sample_count, :sample_seconds, :sample_semantic_pass,
     :sample_status, :sample_iterations, :sample_objective,
     :sample_certificate_valid, :sample_route,
@@ -37,7 +53,7 @@ const RESULT_COLUMNS = (
     :input_fingerprint, :external_checksum,
 )
 
-const RESULT_SCHEMA_VERSION = 3
+const RESULT_SCHEMA_VERSION = 6
 
 _cell(value) = value === missing || value === nothing ? "" :
                replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')
@@ -86,6 +102,40 @@ function _manifest_sha256()
     project = Base.active_project()
     project === nothing && return missing
     return _sha256_if_file(joinpath(dirname(project), "Manifest.toml"))
+end
+
+const _SOLVER_SOURCE_SHA256_CACHE = Ref{Union{Nothing,String}}(nothing)
+
+"""Hash the exact Julia solver source tree used by this process.
+
+`source_commit` plus `source_dirty` cannot distinguish two local optimization
+candidates based on the same commit.  This content hash is stable across file
+timestamps and directory traversal order, and deliberately excludes benchmark
+drivers so solver and measurement identities remain separate.
+"""
+function _solver_source_sha256()
+    cached = _SOLVER_SOURCE_SHA256_CACHE[]
+    cached === nothing || return cached
+    source_root = joinpath(REPOSITORY, "src")
+    paths = String[]
+    for (directory, _, files) in walkdir(source_root)
+        for file in files
+            endswith(file, ".jl") || continue
+            push!(paths, joinpath(directory, file))
+        end
+    end
+    sort!(paths)
+    payload = IOBuffer()
+    for path in paths
+        relative = replace(relpath(path, source_root), '\\' => '/')
+        write(payload, relative)
+        write(payload, UInt8(0))
+        write(payload, read(path))
+        write(payload, UInt8(0xff))
+    end
+    digest = bytes2hex(SHA.sha256(take!(payload)))
+    _SOLVER_SOURCE_SHA256_CACHE[] = digest
+    return digest
 end
 
 function _package_commit(package::AbstractString)
@@ -237,9 +287,17 @@ end
 
 function _problem_fingerprint(spec, built, arithmetic)
     facts = _problem_facts(built.problem)
-    builder_path = spec.external === nothing ?
-                   joinpath(ROOT, "generators", "problems.jl") :
-                   joinpath(ROOT, "loaders", "csdr_fixed_trace.jl")
+    builder_paths = if spec.external !== nothing
+        external_loader_source_files(spec.loader)
+    elseif startswith(string(spec.loader), "pathological_")
+        (joinpath(ROOT, "generators", "pathological.jl"),)
+    else
+        (joinpath(ROOT, "generators", "problems.jl"),)
+    end
+    builder_identity = join((
+        string(relpath(path, ROOT), ":", bytes2hex(SHA.sha256(read(path))))
+        for path in builder_paths
+    ), "|")
     payload = join((
         spec.id,
         string(arithmetic),
@@ -247,7 +305,7 @@ function _problem_fingerprint(spec, built, arithmetic)
         repr(spec.parameters),
         repr(facts),
         string(_built_value(built, :external_checksum, "")),
-        bytes2hex(SHA.sha256(read(builder_path))),
+        builder_identity,
     ), "|")
     return bytes2hex(SHA.sha256(payload))
 end
@@ -257,7 +315,67 @@ _trace_field(record, name::Symbol) = hasproperty(record, name) ?
     _trace_value(getproperty(record, name)) : missing
 _sym(value) = value isa Symbol ? value : missing
 
-_normalized_status(status) = Symbol(lowercase(string(status)))
+"""Render a recorded accuracy value without narrowing its arithmetic type."""
+function _string_metric(value)
+    (value === missing || value === nothing) && return missing
+    SDPX.isavailable(value) || return missing
+    return string(value)
+end
+
+function _string_failures(value)
+    (value === missing || value === nothing) && return missing
+    SDPX.isavailable(value) || return missing
+    if value isa AbstractVector || value isa Tuple
+        return join(string.(value), ",")
+    end
+    return string(value)
+end
+
+function _certificate_field(certificate, name::Symbol)
+    (certificate === nothing || certificate === missing) && return missing
+    hasproperty(certificate, name) || return missing
+    return getproperty(certificate, name)
+end
+
+function _first_recorded(values...)
+    for value in values
+        (value === missing || value === nothing) && continue
+        SDPX.isavailable(value) || continue
+        return value
+    end
+    return missing
+end
+
+function _solver_version()
+    return try
+        string(Base.pkgversion(SDPX))
+    catch
+        missing
+    end
+end
+
+function _normalized_status(status)
+    token = Symbol(lowercase(replace(
+        string(status),
+        '-' => '_',
+        ' ' => '_',
+    )))
+    return get((
+        notstarted=:not_started,
+        feasiblecert=:feasible_certificate,
+        infeasiblecert=:infeasible_certificate,
+        iterlimit=:iteration_limit,
+        timelimit=:time_limit,
+        numericalbreakdown=:numerical_breakdown,
+        maxrestartsexceeded=:max_restarts_exceeded,
+        userstopped=:user_stopped,
+        almostoptimal=:almost_optimal,
+        insufficientprecision=:insufficient_precision,
+        numericalfailure=:numerical_failure,
+        primalinfeasible=:primal_infeasible,
+        dualinfeasible=:dual_infeasible,
+    ), token, token)
+end
 
 function _unexpected_fallback(spec, fallback_reason, la_fallback_reason)
     planned_reasons = (
@@ -295,7 +413,12 @@ function _semantic_failures(
     failures = String[]
     _normalized_status(status) === _normalized_status(spec.reference.status) ||
         push!(failures, "status")
-    actual_optimal = _normalized_status(status) === :optimal
+    normalized_status = _normalized_status(status)
+    actual_optimal = normalized_status === :optimal
+    actual_infeasible = normalized_status in (
+        :primal_infeasible,
+        :dual_infeasible,
+    )
     if actual_optimal && expected !== nothing
         error = abs(objective - expected)
         allowed = spec.reference.absolute_tolerance +
@@ -319,9 +442,17 @@ function _semantic_failures(
             end
         end
     end
-    if actual_optimal && spec.family in (:lp, :socp, :sdp)
+    if (actual_optimal || actual_infeasible) &&
+       spec.family in (:lp, :socp, :sdp)
         (certificate === nothing || !certificate.valid) &&
             push!(failures, "certificate")
+    end
+    if actual_infeasible && certificate !== nothing && certificate.valid
+        expected_kind = normalized_status === :primal_infeasible ?
+                        :primal_infeasibility : :dual_infeasibility
+        hasproperty(certificate, :kind) &&
+            certificate.kind !== expected_kind &&
+            push!(failures, "certificate_kind")
     end
     provider_match || push!(failures, "provider_mismatch")
     unexpected_fallback && push!(failures, "unexpected_fallback")
@@ -383,6 +514,57 @@ function _result_row(
     certificate = _safe_certificate(built.problem, result, T, built)
     native_objective = trace.final.primal_objective
     objective = _physical_objective(built, result, native_objective)
+    trace_dual_objective = _trace_value(trace.final.dual_objective)
+    certificate_dual_objective = _certificate_field(certificate, :dual_objective)
+    dual_objective = _first_recorded(
+        trace_dual_objective, certificate_dual_objective,
+    )
+    certificate_gap = _certificate_field(certificate, :gap)
+    absolute_gap_value = if certificate_gap !== missing &&
+                              certificate_gap !== nothing &&
+                              SDPX.isavailable(certificate_gap)
+        abs(certificate_gap)
+    elseif native_objective !== missing &&
+           trace_dual_objective !== missing &&
+           SDPX.isavailable(native_objective) &&
+           SDPX.isavailable(trace_dual_objective)
+        abs(native_objective - trace_dual_objective)
+    else
+        missing
+    end
+    primal_tolerance = _certificate_field(certificate, :primal_residual_limit)
+    dual_tolerance = _certificate_field(certificate, :dual_residual_limit)
+    gap_tolerance = _certificate_field(certificate, :gap_limit)
+    certificate_kind = _first_recorded(
+        _certificate_field(certificate, :kind),
+        _trace_value(trace.final.certificate_kind),
+    )
+    certificate_failures = _first_recorded(
+        _certificate_field(certificate, :failures),
+        _trace_value(trace.final.certificate_failures),
+    )
+    primal_affine_residual = _certificate_field(
+        certificate, :primal_affine_residual,
+    )
+    dual_affine_residual = _certificate_field(
+        certificate, :dual_affine_residual,
+    )
+    primal_cone_violation = _certificate_field(
+        certificate, :primal_cone_violation,
+    )
+    dual_cone_violation = _certificate_field(
+        certificate, :dual_cone_violation,
+    )
+    primal_residual_scaled = _certificate_field(
+        certificate, :primal_residual_scaled,
+    )
+    dual_residual_scaled = _certificate_field(
+        certificate, :dual_residual_scaled,
+    )
+    complementarity = _certificate_field(certificate, :complementarity)
+    relative_complementarity = _certificate_field(
+        certificate, :complementarity_relative,
+    )
     interval = _reference_interval(built, T)
     interval_pass = interval === nothing ? missing :
                     interval.lower <= objective <= interval.upper
@@ -467,8 +649,11 @@ function _result_row(
         project_sha256=_sha256_if_file(Base.active_project()),
         manifest_sha256=_manifest_sha256(),
         benchmark_driver_sha256=_sha256_file(joinpath(ROOT, "runner_impl.jl")),
+        solver_source_sha256=_solver_source_sha256(),
         mfla_commit=_package_commit("MultiFloatLinearAlgebra"),
         bfla_commit=_package_commit("BigFloatLinearAlgebra"),
+        solver_name=_string_metric(_trace_value(trace.setup.solver)),
+        solver_version=_solver_version(),
         suite=suite,
         problem_id=spec.id,
         name=spec.name,
@@ -488,6 +673,7 @@ function _result_row(
         reference_relative_tolerance=spec.reference.relative_tolerance,
         skip_reason=missing,
         termination_reason=_trace_value(trace.final.termination_reason),
+        termination_stage=_trace_value(trace.final.termination_stage),
         variables=facts.variables,
         equalities=facts.equalities,
         blocks=facts.blocks,
@@ -521,9 +707,24 @@ function _result_row(
             parameters === nothing ? missing : repr(parameters)
         end,
         objective_error=objective_error === missing ? missing : string(objective_error),
-        primal_residual=string(primal_residual),
-        dual_residual=string(dual_residual),
-        relative_gap=string(relative_gap),
+        dual_objective=_string_metric(dual_objective),
+        absolute_gap=_string_metric(absolute_gap_value),
+        primal_tolerance=_string_metric(primal_tolerance),
+        dual_tolerance=_string_metric(dual_tolerance),
+        gap_tolerance=_string_metric(gap_tolerance),
+        certificate_kind=certificate_kind,
+        certificate_failures=_string_failures(certificate_failures),
+        primal_affine_residual=_string_metric(primal_affine_residual),
+        dual_affine_residual=_string_metric(dual_affine_residual),
+        primal_cone_violation=_string_metric(primal_cone_violation),
+        dual_cone_violation=_string_metric(dual_cone_violation),
+        primal_residual_scaled=_string_metric(primal_residual_scaled),
+        dual_residual_scaled=_string_metric(dual_residual_scaled),
+        complementarity=_string_metric(complementarity),
+        relative_complementarity=_string_metric(relative_complementarity),
+        primal_residual=_string_metric(primal_residual),
+        dual_residual=_string_metric(dual_residual),
+        relative_gap=_string_metric(relative_gap),
         certificate_policy=:original_coordinate_required,
         certificate_available=_trace_value(trace.final.certificate_available),
         certificate_valid=certificate === nothing ? missing : certificate.valid,
@@ -537,6 +738,30 @@ function _result_row(
         seconds_per_iteration=elapsed / max(trace.counters.iterations, 1),
         allocated_bytes,
         gc_seconds,
+        setup_seconds=_trace_value(trace.setup.setup_seconds),
+        frontend_seconds=_trace_value(trace.setup.frontend_seconds),
+        preprocess_seconds=_trace_value(trace.setup.preprocess_seconds),
+        presolve_seconds=_trace_value(trace.setup.presolve_seconds),
+        core_seconds=_trace_value(trace.setup.core_seconds),
+        certification_seconds=_trace_value(trace.final.certification_seconds),
+        workspace_bytes=_trace_value(trace.final.workspace_bytes),
+        process_peak_rss_bytes=_trace_value(trace.final.process_peak_rss_bytes),
+        memory_budget_bytes=_trace_value(trace.final.memory_budget_bytes),
+        restarts=_trace_field(trace.counters, :restarts),
+        regularizations=_trace_field(trace.counters, :regularizations),
+        refinement_solves=_trace_field(trace.counters, :refinement_solves),
+        numeric_factorizations=_trace_field(
+            trace.counters, :numeric_factorizations,
+        ),
+        factorization_attempts=_trace_field(
+            trace.counters, :factorization_attempts,
+        ),
+        factorization_successes=_trace_field(
+            trace.counters, :factorization_successes,
+        ),
+        factorization_failures=_trace_field(
+            trace.counters, :factorization_failures,
+        ),
         sample_count=1,
         sample_seconds=missing,
         sample_semantic_pass=missing,
@@ -753,6 +978,14 @@ function _sampling_row(rows, sample_seconds; sample_count=length(rows))
         :sample_max_seconds => summary.max_seconds,
         :sample_mad_seconds => summary.mad_seconds,
         :sample_spread_seconds => summary.spread_seconds,
+        # The aggregate row represents the sample distribution.  Keep the
+        # legacy scalar timing field aligned with the reported median even
+        # when an even number of samples requires averaging the two middle
+        # observations (and therefore no individual sample has that value).
+        :total_seconds => summary.median_seconds,
+        :seconds_per_iteration => base.iterations isa Real &&
+                                  isfinite(base.iterations) ?
+            summary.median_seconds / max(base.iterations, 1) : missing,
     )
     return NamedTuple{RESULT_COLUMNS}(
         Tuple(
@@ -778,6 +1011,7 @@ function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
         :project_sha256 => _sha256_if_file(Base.active_project()),
         :manifest_sha256 => _manifest_sha256(),
         :benchmark_driver_sha256 => _sha256_file(joinpath(ROOT, "runner_impl.jl")),
+        :solver_source_sha256 => _solver_source_sha256(),
         :mfla_commit => _package_commit("MultiFloatLinearAlgebra"),
         :bfla_commit => _package_commit("BigFloatLinearAlgebra"),
         :suite => suite,

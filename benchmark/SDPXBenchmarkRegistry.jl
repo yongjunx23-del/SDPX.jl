@@ -72,15 +72,22 @@ struct SuiteEntry
 end
 
 include("generators/problems.jl")
+include("generators/pathological.jl")
 include("loaders/csdr_fixed_trace.jl")
+include("loaders/netlib_mps.jl")
+include("loaders/sdpa_sparse.jl")
+include("loaders/cbf.jl")
+include("loaders/external.jl")
 include("registry/public.jl")
 include("registry/synthetic.jl")
+include("registry/pathological.jl")
 include("registry/heavy.jl")
 include("registry/full_unitarity_eft.jl")
 
 const REGISTRY = let entries = vcat(
         PUBLIC_SPECS,
         SYNTHETIC_SPECS,
+        PATHOLOGICAL_SPECS,
         HEAVY_SPECS,
         FULL_UNITARITY_EFT_SPECS,
     )
@@ -130,6 +137,8 @@ function build_problem(
     cache_dir=DEFAULT_CACHE,
 ) where {T}
     if spec.source === :synthetic
+        startswith(string(spec.loader), "pathological_") &&
+            return build_pathological_problem(spec.loader, T; spec.parameters...)
         return build_generated_problem(spec.loader, T; spec.parameters...)
     end
     status = external_cache_status(spec; cache_dir)

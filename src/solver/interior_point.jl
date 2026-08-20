@@ -31,6 +31,31 @@ function print_iter(opts::SolverOptions{T}, iter, pObj, dObj, gap, p_res, d_res,
     flush(stdout)
 end
 
+"""Classify a failed Newton step for the solve-level termination record.
+
+`newton_step!` deliberately keeps its historical human-readable `reason`
+strings (they are part of the returned message), while the typed result also
+needs a stable machine-readable reason and stage.  Keep this mapping here at
+the loop boundary so the numerical kernel and its successful trajectory are
+unchanged.  The prefix checks are intentionally conservative: an unknown
+future detail is reported as the generic `:newton_breakdown` rather than
+silently falling back to `:none`.
+"""
+@inline function _sdp_newton_termination_metadata(detail)
+    text = String(detail)
+    if startswith(text, "Cholesky factorization")
+        return (:cone_factorization_failed, :newton_factorization)
+    elseif startswith(text, "pivoted LDLT factorization") ||
+           startswith(text, "Schur complement not positive definite")
+        return (:kkt_factorization_failed, :newton_factorization)
+    elseif startswith(text, "Native extended-precision fallback")
+        return (:direction_solve_failed, :newton_direction)
+    elseif startswith(text, "final structured KKT direction residual")
+        return (:direction_residual_exceeded, :newton_refinement)
+    end
+    return (:newton_breakdown, :newton_step)
+end
+
 @inline function _sdp_cold_start_kkt_formulation(ws::Workspace)
     ws.executed_backend === :mixed_precision &&
         return :dense_normal_equations
@@ -1688,6 +1713,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
 
     status = NotStarted
     message = ""
+    # Structured terminal metadata for this iterative core.  Successful SDP
+    # results intentionally retain the historical `(:none, :none)` pair;
+    # every non-success break below assigns an explicit reason and stage.
+    termination_reason = :none
+    termination_stage = :none
 
     # Best-iterate retention. An interior-point run can reach a good point and
     # then wander away from it: when one side of the KKT system has been driven
@@ -1794,15 +1824,21 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             elseif opts.mode === FEASIBILITY
                 if pObj < zero(T)
                     status, message = FeasibleCert, "Feasible"
+                    termination_reason = :feasible_certificate
+                    termination_stage = :termination_check
                     break
                 elseif dObj >= zero(T)
                     status, message = InfeasibleCert, "Infeasible"
+                    termination_reason = :infeasible_certificate
+                    termination_stage = :termination_check
                     break
                 end
             end
         end
         if iter >= opts.iter_max
             status, message = IterLimit, "Cannot reach optimality (feasibility) within $(opts.iter_max) iterations."
+            termination_reason = :iteration_limit
+            termination_stage = :termination_check
             break
         end
         # Precision-exhaustion stop. Once the scaled merit has not improved for
@@ -1820,10 +1856,15 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             # bare `Stalled`.
             status = stagnation.reason === :precision_floor ? InsufficientPrecision : Stalled
             message = stagnation_message(stagnation, opts.ϵ_gap)
+            termination_reason = stagnation.reason === :precision_floor ?
+                                 :precision_floor : :stagnation
+            termination_stage = :stagnation_check
             break
         end
         if time() >= deadline || time() - t_start > opts.max_time
             status, message = TimeLimit, "Time limit ($(opts.max_time)s) exceeded after $iter iterations."
+            termination_reason = :time_limit
+            termination_stage = :termination_check
             break
         end
         if opts.callback !== nothing
@@ -1852,6 +1893,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             )
             if opts.callback(cbstate) === true
                 status, message = UserStopped, "Stopped by callback after $iter iterations."
+                termination_reason = :user_stopped
+                termination_stage = :termination_check
                 break
             end
         end
@@ -1875,6 +1918,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         )
         if result.status === :breakdown
             status, message = NumericalBreakdown, result.reason
+            termination_reason, termination_stage =
+                _sdp_newton_termination_metadata(result.reason)
             break
         end
         p_res, d_res = result.p_res, result.d_res
@@ -2014,6 +2059,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                     "Step size collapsed within $(Float64(near_tol))×, but not within, " *
                     "the requested tolerance. Returning the best iterate without an " *
                     "Optimal certificate; use a wider arithmetic type or loosen the tolerance."
+                    termination_reason = :step_collapse_near_tolerance
+                    termination_stage = :line_search
                     break
                 end
             end
@@ -2065,6 +2112,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 "in the scaled merit; this is precision exhaustion at $(T), not bad " *
                 "initial scaling, so restarting would discard the best iterate. " *
                 "Use a wider arithmetic type (for example Float64x2) or loosen the tolerance."
+                termination_reason = :precision_floor
+                termination_stage = :line_search
                 break
             end
             # Before either giving up or rescaling: try *recentering*.
@@ -2146,12 +2195,17 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 "Step size collapsed while both residuals were already within " *
                 "tolerance (p_res=$(Float64(p_res)), d_res=$(Float64(d_res))); " *
                 "rescaling would only discard the converged iterate."
+                termination_reason = :step_collapse_feasible
+                termination_stage = :line_search
                 break
             else
                 status = restarts >= opts.max_restarts ? MaxRestartsExceeded : NumericalBreakdown
                 message = restarts >= opts.max_restarts ?
                            "Step size collapsed after using up max_restarts=$(opts.max_restarts) rescue attempts." :
                            "Step size collapsed below min_step and restart=false."
+                termination_reason = restarts >= opts.max_restarts ?
+                                     :max_restarts : :step_collapse
+                termination_stage = :line_search
                 break
             end
         end
@@ -2177,6 +2231,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             "non-finite primal or dual iterate detected" *
             (dynamic_range_limited(T) ? " ($T's dynamic range exceeded)" : "") *
             " — rescale (scaling=:equilibrate), loosen Ωp/Ωd/omega_step, or use a wider-range T"
+            termination_reason = :nonfinite_iterate
+            termination_stage = :iterate_update
             break
         end
 
@@ -2234,6 +2290,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         if !all(isfinite, μ)
             status, message = NumericalBreakdown,
             "non-finite complementarity target detected"
+            termination_reason = :nonfinite_complementarity
+            termination_stage = :target_update
             break
         end
 
@@ -2242,6 +2300,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         if !isfinite(pObj) || !isfinite(dObj)
             status, message = NumericalBreakdown,
             "non-finite primal or dual objective detected"
+            termination_reason = :nonfinite_objective
+            termination_stage = :objective_update
             break
         end
         phase_objective_and_targets +=
@@ -2262,6 +2322,24 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             save_checkpoint(opts.checkpoint_path, T, x, X, y, Y, μ, iter, restarts, solve_prob.dims)
         end
         opts.force_gc && _release_iteration_memory!()
+    end
+
+    # A future guard added to the loop must not silently regress to the old
+    # uninformative `:none` record.  All current non-success branches assign a
+    # more specific reason above; this fail-closed fallback keeps the metadata
+    # contract explicit if a new status is introduced later.
+    if status !== Optimal && termination_reason === :none
+        termination_reason = status === FeasibleCert ?
+                             :feasible_certificate :
+                             status === InfeasibleCert ?
+                             :infeasible_certificate :
+                             status === IterLimit ?
+                             :iteration_limit :
+                             status === TimeLimit ?
+                             :time_limit :
+                             status === UserStopped ?
+                             :user_stopped : :nonoptimal_exit
+        termination_stage = :termination_check
     end
 
     # On a non-optimal exit, hand back the best point actually visited rather
@@ -2423,7 +2501,11 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         parameter_controller.history,
         nothing,
         (
-            reason=stagnation.reason,
+            reason=termination_reason,
+            stage=termination_stage,
+            # Keep the detector's raw signal available to diagnostics users;
+            # `reason` above is the stable terminal-path classification.
+            stagnation_reason=stagnation.reason,
             merit=best_merit,
             rate=stagnation.rate,
             projected_iterations=stagnation.projected,

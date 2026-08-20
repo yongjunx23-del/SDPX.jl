@@ -119,6 +119,7 @@ function _setup_facts_for_record(result)
         parameter_selection_seconds=_seconds(timings, :parameter_selection),
         workspace_setup_seconds=_seconds(timings, :workspace_setup),
         initialization_seconds=_seconds(timings, :initialization),
+        reconstruction_seconds=_seconds(timings, :reconstruction),
         solver=_project_field(selected, :solver),
         scaling=_project_field(selected, :scaling),
         planned_scaling=_project_field(selected, :planned_scaling),
@@ -315,6 +316,9 @@ function _counter_facts(result::SDPResult)
         regularizations=result.regularizations,
         parameter_history_length=length(result.parameter_history),
         numeric_factorizations=_project_field(sparse, :factorizations),
+        factorization_attempts=_project_field(sparse, :factorization_attempts),
+        factorization_successes=_project_field(sparse, :factorization_successes),
+        factorization_failures=_project_field(sparse, :factorization_failures),
         rhs_solves=_project_field(result.termination, :rhs_solves),
         refinement_solves=
             _project_field(result.termination, :total_refinement_steps),
@@ -403,6 +407,9 @@ function _counter_facts(result::ConicResult)
         regularizations=_project_field(termination, :regularizations),
         parameter_history_length=0,
         numeric_factorizations=_project_field(termination, :numeric_factorizations),
+        factorization_attempts=unavailable,
+        factorization_successes=unavailable,
+        factorization_failures=unavailable,
         rhs_solves=_project_field(termination, :rhs_solves),
         refinement_solves=_project_field(termination, :refinement_solves),
         local_metric_preparations=_project_field(

@@ -95,7 +95,7 @@ function _csdr_physical_objective(payload::NamedTuple, x)
     return value
 end
 
-function build_external_problem(
+function _build_csdr_fixed_trace_problem(
     spec::BenchmarkSpec,
     ::Type{T},
     path::AbstractString,

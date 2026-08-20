@@ -2599,6 +2599,35 @@ function arrow_workspace_floor_bytes(::Type{T}, prob::SDPProblem{T},
     )
 end
 
+@inline function _sparse_generic_factor_state_bytes(
+    ::Type{T},
+    scalar_bytes::Int,
+    index_bytes::Int,
+    dimension::Int,
+    input_nnz::Int,
+    dense_factor_nonzeros::Int,
+) where {T}
+    # Float64's sparse-Schur provider is CHOLMOD and does not own the generic
+    # factor metadata/scratch arrays.  BigFloat and fixed-width MultiFloats do.
+    T === Float64 && return 0
+    return saturating_sum_bytes(
+        # Exact original input pattern copies.
+        saturating_bytes(index_bytes, dimension + 1),
+        saturating_bytes(index_bytes, input_nnz),
+        # Source-slot, diagonal, and link position maps. A dense lower factor
+        # is the conservative upper envelope for each integer payload.
+        saturating_bytes(index_bytes, dense_factor_nonzeros),
+        saturating_bytes(index_bytes, dimension),
+        saturating_bytes(index_bytes, dense_factor_nonzeros),
+        # Persistent numeric scratch in the solve arithmetic.
+        saturating_bytes(scalar_bytes, dimension),
+        # Outer/inner Vector headers and pointer storage for link vectors.
+        # Include allocator/header slack for one outer and one inner vector per
+        # factor column; this keeps the bound conservative on Julia 1.12.
+        saturating_bytes(128, dimension),
+    )
+end
+
 function estimate_sdp_workspace_bytes(
     prob::SDPProblem{T},
     thread_count::Int,
@@ -2630,6 +2659,19 @@ function estimate_sdp_workspace_bytes(
             saturating_bytes(scalar_bytes, dense_factor_nonzeros),
             saturating_bytes(index_bytes * 3, dense_factor_nonzeros),
         )
+        # Generic MultiFloat/BigFloat factors retain additional frozen CSC
+        # metadata and one persistent numeric scratch vector after symbolic
+        # setup.  Float64 uses CHOLMOD and does not own these arrays.  Count
+        # only the new arrays here; the factor numeric values themselves remain
+        # charged exactly once by `factor_bytes` above.
+        generic_factor_state_bytes = _sparse_generic_factor_state_bytes(
+            T,
+            scalar_bytes,
+            index_bytes,
+            m,
+            schur_nonzeros,
+            dense_factor_nonzeros,
+        )
         packed_bytes = saturating_bytes(scalar_bytes, packed_pairs)
         equality_solve_bytes = saturating_bytes(2, scalar_bytes, m, n)
         equality_gram_bytes = saturating_bytes(2, scalar_bytes, n, n)
@@ -2644,6 +2686,7 @@ function estimate_sdp_workspace_bytes(
         return saturating_sum_bytes(
             csc_bytes,
             factor_bytes,
+            generic_factor_state_bytes,
             packed_bytes,
             equality_solve_bytes,
             equality_gram_bytes,

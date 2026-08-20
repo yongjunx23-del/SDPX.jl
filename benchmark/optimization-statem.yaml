@@ -1,0 +1,142 @@
+name: sdpx-public-benchmark-optimization
+initial: survey
+
+nodes:
+  survey:
+    prompt: |
+      Audit the current solver, benchmark registry, public-data provenance,
+      precision paths, and existing performance evidence. Freeze the numerical
+      and benchmarking invariants in benchmark/OPTIMIZATION_PROGRESS.md before
+      changing implementation code.
+    before_transfer:
+      - type: predicate
+        path: OPTIMIZATION_PROGRESS.md
+        exists: true
+        non_empty: true
+      - type: checklist
+        items:
+          - The starting commit and worktree state are recorded
+          - Existing benchmark capabilities and concrete gaps are recorded
+          - Mathematical-equivalence and correctness gates are explicit
+          - Public-source provenance and licensing risks are recorded
+
+  framework:
+    prompt: |
+      Implement the smallest coherent benchmark-framework increment. Keep
+      public data outside Git, require pinned hashes, preserve a single result
+      schema, and add focused tests for every new loader or runner behavior.
+    before_transfer:
+      type: checklist
+      items:
+        - The increment has focused tests
+        - Missing or unsupported inputs produce structured skips
+        - Parsed problems are audited in original coordinates
+        - Unrelated solver code was not changed
+    out_hook:
+      type: message
+      text: "Record implemented framework scope and verification in benchmark/OPTIMIZATION_PROGRESS.md."
+
+  baseline:
+    prompt: |
+      Run correctness-first local baselines in fresh Julia processes. Separate
+      compilation/warmup from measured samples and record arithmetic, threads,
+      allocations, peak RSS where available, iterations, residuals, route,
+      factorization, refinement, and source/input hashes.
+    before_transfer:
+      type: checklist
+      items:
+        - Every timed row passed its semantic and certificate gates
+        - Float64 smoke coverage includes LP, SOCP, and SDP
+        - Extended-precision availability or structured skips are recorded
+        - Raw results and the baseline interpretation are preserved
+    out_hook:
+      type: message
+      text: "Record baseline artifacts, bottlenecks, and confidence in benchmark/OPTIMIZATION_PROGRESS.md."
+
+  optimize:
+    prompt: |
+      Implement one evidence-backed optimization at a time. Preserve the
+      formulation, original-coordinate certificate policy, scalar genericity,
+      and planned-versus-executed diagnostics. Prefer simplifying duplicated
+      data flow and numerical interfaces when it also lowers measured cost.
+    before_transfer:
+      type: checklist
+      items:
+        - The change targets a measured bottleneck
+        - Mathematical and precision invariants are unchanged
+        - Focused regression tests cover the changed path
+        - The expected performance or reliability effect is stated before measurement
+    out_hook:
+      type: message
+      text: "Record the optimization hypothesis, code scope, and tests in benchmark/OPTIMIZATION_PROGRESS.md."
+
+  validate:
+    prompt: |
+      Compare candidate and baseline on identical inputs, environments, scalar
+      types, tolerances, and thread placement. Reject speedups that fail semantic
+      parity. Use PBS only after local gates pass, and preserve raw cluster logs
+      and manifests in a campaign-specific directory.
+    before_transfer:
+      type: checklist
+      items:
+        - Candidate and baseline selections and fingerprints match
+        - Correctness, residual, gap, cone, and certificate parity passed
+        - Timing and memory claims use repeated fresh processes
+        - Remaining precision, scaling, and platform risks are documented
+    out_hook:
+      type: message
+      text: "Record comparison evidence and the accept/reject decision in benchmark/OPTIMIZATION_PROGRESS.md."
+
+  review:
+    prompt: |
+      Review the full iteration: framework integrity, code clarity, regression
+      coverage, benchmark fairness, numerical evidence, and repository scope.
+      Choose another focused loop or prepare a grounded handoff.
+    before_transfer:
+      type: checklist
+      items:
+        - All changed files are within the declared scope
+        - Tests and benchmark evidence are sufficient for the risk
+        - Performance claims exclude compilation and cross-machine comparisons
+        - Follow-up work is prioritized and bounded
+
+  handoff:
+    prompt: |
+      Summarize delivered code, public benchmark coverage, verified numerical
+      and performance results, rejected hypotheses, remaining risks, and the
+      next reproducible command or StateM transition.
+    in_hook:
+      type: message
+      text: "Read benchmark/OPTIMIZATION_PROGRESS.md and recent StateM history before the final handoff."
+
+edges:
+  - from: survey
+    to: framework
+    condition: The repository and benchmark contract are understood well enough for a scoped framework increment.
+  - from: framework
+    to: baseline
+    condition: The framework increment and its focused tests pass.
+  - from: baseline
+    to: optimize
+    condition: A concrete bottleneck or reliability gap is supported by baseline evidence.
+  - from: optimize
+    to: validate
+    condition: The focused optimization and regression tests are ready for controlled comparison.
+  - from: validate
+    to: optimize
+    condition: Validation found a fixable numerical, correctness, or performance gap.
+  - from: validate
+    to: review
+    condition: The candidate passed the declared validation gates or was rejected with preserved evidence.
+  - from: review
+    to: framework
+    condition: The next iteration requires another benchmark-framework increment.
+  - from: review
+    to: baseline
+    condition: The next iteration only requires a new controlled baseline.
+  - from: review
+    to: optimize
+    condition: The next evidence-backed solver optimization is ready.
+  - from: review
+    to: handoff
+    condition: Delivered work and remaining risks are ready for user handoff.

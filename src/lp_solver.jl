@@ -3243,6 +3243,22 @@ function _lp_workspace_bytes(workspace::LPWorkspace)
             value isa Array && (total += Base.summarysize(value))
         end
     end
+    sparse_system = workspace.sparse_system
+    if sparse_system !== nothing
+        # Sparse LP workspaces keep their solver-owned CSC matrix, frozen
+        # storage/assembly maps, and provider factor outside the top-level
+        # Array fields above.  A single object graph lets `summarysize` dedupe
+        # `K === storage.matrix` and the symbolic object shared by storage and
+        # the factor.  Model ingress arrays `G`/`B` are intentionally omitted;
+        # they are accounted for with the scaled model, not this workspace.
+        sparse_snapshot = (
+            K=sparse_system.K,
+            storage=sparse_system.storage,
+            assembly_map=sparse_system.assembly_map,
+            backend=sparse_system.backend,
+        )
+        total += Base.summarysize(sparse_snapshot)
+    end
     return total
 end
 

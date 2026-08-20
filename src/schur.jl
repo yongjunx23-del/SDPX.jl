@@ -1276,6 +1276,9 @@ function sparse_schur_diagnostics(ws::Workspace)
         assembly_seconds=0.0,
         assembly_count=0,
         provider=:none,
+        factorization_attempts=0,
+        factorization_successes=0,
+        factorization_failures=0,
     )
     sparse_workspace isa GenericSparseSchurSDPWorkspace ||
         throw(ArgumentError("unsupported sparse Schur workspace $(typeof(sparse_workspace))"))
@@ -1285,10 +1288,14 @@ function sparse_schur_diagnostics(ws::Workspace)
     assembly_count = sparse_workspace.assembly_count
     structural_nnz = nnz(matrix)
     actual_nnz = count(value -> !iszero(value), matrix.nzval)
+    factor_direct = backend isa AbstractSparseFactor
     symbolic = backend === nothing ? nothing :
-               (backend isa AbstractSparseFactor ?
+               (factor_direct ?
                 sparse_factor_diagnostics(backend) : nothing)
-    backend_stats = backend === nothing ? nothing :
+    # SDP sparse workspaces retain the provider factor itself rather than a
+    # GenericSparseCholeskyBackend wrapper.  Do not call `statistics(factor)`
+    # and manufacture zero counts; read the factor's own telemetry snapshot.
+    backend_stats = backend === nothing || factor_direct ? nothing :
                     try statistics(backend) catch; nothing end
     factor_nnz = symbolic === nothing ?
                  (backend_stats === nothing ? 0 :
@@ -1296,9 +1303,33 @@ function sparse_schur_diagnostics(ws::Workspace)
                  get(symbolic, :factor_nnz, 0)
     input_nnz = symbolic === nothing ? structural_nnz :
                 get(symbolic, :input_nnz, structural_nnz)
-    reuse = backend_stats === nothing ?
+    direct_factorizations = factor_direct && symbolic !== nothing ?
+                            get(symbolic, :numeric_refactorizations, 0) : 0
+    direct_reused = factor_direct ?
+                    max(direct_factorizations - 1, 0) : 0
+    reuse = factor_direct ? direct_reused :
+            backend_stats === nothing ?
             (symbolic === nothing ? 0 : get(symbolic, :pattern_reused, 0)) :
             get(backend_stats, :reused, get(backend_stats, :pattern_reused, 0))
+    direct_status = factor_direct && symbolic !== nothing ?
+                    get(symbolic, :status, :unknown) : :none
+    direct_ratio = direct_factorizations == 0 ? 0.0 :
+                   direct_reused / direct_factorizations
+    direct_factorization_attempts = factor_direct && symbolic !== nothing ?
+        get(symbolic, :factorization_attempts, 0) : 0
+    direct_factorization_successes = factor_direct && symbolic !== nothing ?
+        get(symbolic, :factorization_successes, 0) : 0
+    direct_factorization_failures = factor_direct && symbolic !== nothing ?
+        get(symbolic, :factorization_failures, 0) : 0
+    factorization_attempts = factor_direct ? direct_factorization_attempts :
+        backend_stats === nothing ? 0 :
+        get(backend_stats, :factorization_attempts, 0)
+    factorization_successes = factor_direct ? direct_factorization_successes :
+        backend_stats === nothing ? 0 :
+        get(backend_stats, :factorization_successes, 0)
+    factorization_failures = factor_direct ? direct_factorization_failures :
+        backend_stats === nothing ? 0 :
+        get(backend_stats, :factorization_failures, 0)
     return (
         available=true,
         dimension=size(matrix, 1),
@@ -1312,23 +1343,29 @@ function sparse_schur_diagnostics(ws::Workspace)
         factor_nnz=factor_nnz,
         factor_nonzeros=factor_nnz,
         fill_ratio=factor_nnz / max(input_nnz, 1),
-        analyses=backend_stats === nothing ? 0 :
+        analyses=factor_direct ? 1 : backend_stats === nothing ? 0 :
                  get(backend_stats, :analyses, 0),
-        factorizations=backend_stats === nothing ? 0 :
+        factorizations=factor_direct ? direct_factorizations :
+                       backend_stats === nothing ? 0 :
                        get(backend_stats, :factorizations, 0),
-        reused=backend_stats === nothing ? reuse :
+        reused=factor_direct ? direct_reused : backend_stats === nothing ? reuse :
                get(backend_stats, :reused, reuse),
-        reuse_ratio=backend_stats === nothing ? 0.0 :
+        reuse_ratio=factor_direct ? direct_ratio : backend_stats === nothing ? 0.0 :
                     get(backend_stats, :symbolic_reuse_ratio, 0.0),
-        symbolic_reuse_ratio=backend_stats === nothing ? 0.0 :
+        symbolic_reuse_ratio=factor_direct ? direct_ratio : backend_stats === nothing ? 0.0 :
                             get(backend_stats, :symbolic_reuse_ratio, 0.0),
         failures=backend_stats === nothing ? 0 :
                  get(backend_stats, :failures, 0),
         assembly_seconds=assembly_seconds,
         assembly_count=assembly_count,
         provider=symbolic === nothing ? :none : get(symbolic, :provider, :unknown),
-        backend=backend_stats === nothing ? :none :
+        backend=factor_direct ? get(symbolic, :provider, :unknown) :
+                backend_stats === nothing ? :none :
                 get(backend_stats, :backend, :unknown),
+        factor_status=direct_status,
+        factorization_attempts=factorization_attempts,
+        factorization_successes=factorization_successes,
+        factorization_failures=factorization_failures,
     )
 end
 

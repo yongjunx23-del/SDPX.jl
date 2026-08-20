@@ -714,10 +714,32 @@ abstract type AbstractSparseFactor end
 mutable struct GenericSparseCholeskyFactor{T} <: AbstractSparseFactor
     symbolic::SparseSymbolicAnalysis
     nzval::Vector{T}
+    # Frozen copy of the caller's CSC structure.  Numeric refactorization
+    # checks these arrays directly; the hash signature remains a diagnostic
+    # only and is never used as the sole compatibility test.
+    input_colptr::Vector{Int}
+    input_rowval::Vector{Int}
+    # For every frozen factor CSC slot, the corresponding source A.nzval
+    # pointer (or zero for symbolic fill).  This is built once at setup and
+    # preserves the existing authoritative-lower rule in permuted
+    # coordinates.  The numeric loop therefore has no tuple-key Dict lookup.
+    source_pointers::Vector{Int}
+    diagonal_positions::Vector{Int}
+    column_link_positions::Vector{Vector{Int}}
+    # Owned scratch used only by numeric factorization.  Solve work remains
+    # per-call below so concurrent solves never race on factor state.
+    numeric_work::Vector{T}
     status::Symbol
     provider::Symbol
     arithmetic::DataType
     numeric_refactorizations::Int
+    # Explicit numeric-factorization telemetry.  `numeric_refactorizations`
+    # remains the historical successful-refactorization counter; these fields
+    # classify only accepted numeric attempts and therefore make a failed
+    # recovery sequence observable without changing the old field's meaning.
+    factorization_attempts::Int
+    factorization_successes::Int
+    factorization_failures::Int
     minimum_diagonal::T
     precision_bits::Int
 end
@@ -773,49 +795,145 @@ function _sparse_owned_destination!(destination::AbstractArray{BigFloat}, bits::
     return destination
 end
 
+"""Allocation-free exact CSC structure comparison for a frozen factor."""
+function _sparse_exact_pattern_matches(
+    factor::GenericSparseCholeskyFactor,
+    A::SparseMatrixCSC,
+)
+    n = factor.symbolic.n
+    size(A, 1) == n && size(A, 2) == n || return false
+    length(A.colptr) == length(factor.input_colptr) || return false
+    length(A.rowval) == length(factor.input_rowval) || return false
+    @inbounds for index in eachindex(factor.input_colptr)
+        A.colptr[index] == factor.input_colptr[index] || return false
+    end
+    @inbounds for index in eachindex(factor.input_rowval)
+        A.rowval[index] == factor.input_rowval[index] || return false
+    end
+    return true
+end
+
+"""Build setup-time source/slot maps for the generic numeric recurrence."""
+function _generic_sparse_numeric_maps(
+    symbolic::SparseSymbolicAnalysis,
+    A::SparseMatrixCSC,
+)
+    n = symbolic.n
+    size(A, 1) == n && size(A, 2) == n || throw(DimensionMismatch(
+        "sparse factor symbolic analysis and numeric matrix have different dimensions",
+    ))
+    source_pointers = zeros(Int, symbolic.factor_nnz)
+    inverse = symbolic.inverse_permutation
+    @inbounds for column in 1:n
+        for source_pointer in A.colptr[column]:(A.colptr[column + 1] - 1)
+            row = A.rowval[source_pointer]
+            prow, pcol = inverse[row], inverse[column]
+            lower_row, lower_column = max(prow, pcol), min(prow, pcol)
+            # `factor_positions` is retained on the symbolic object for
+            # compatibility, but is intentionally touched only during setup.
+            factor_pointer = get(
+                symbolic.factor_positions[lower_column], lower_row, 0,
+            )
+            factor_pointer == 0 && throw(ArgumentError(
+                "sparse factor symbolic analysis does not match the numeric CSC pattern",
+            ))
+            # Match the old Dict recurrence exactly: first occurrence wins
+            # unless this source entry is lower in permuted coordinates.
+            if source_pointers[factor_pointer] == 0 || prow >= pcol
+                source_pointers[factor_pointer] = source_pointer
+            end
+        end
+    end
+    diagonal_positions = Vector{Int}(undef, n)
+    @inbounds for column in 1:n
+        diagonal_positions[column] = get(
+            symbolic.factor_positions[column], column, 0,
+        )
+        diagonal_positions[column] == 0 && throw(ArgumentError(
+            "sparse factor symbolic analysis is missing a structural diagonal",
+        ))
+    end
+    column_link_positions = [Int[] for _ in 1:n]
+    @inbounds for column in 1:n
+        links = symbolic.column_links[column]
+        positions = column_link_positions[column]
+        sizehint!(positions, length(links))
+        for previous in links
+            push!(positions, get(
+                symbolic.factor_positions[previous], column, 0,
+            ))
+            positions[end] == 0 && throw(ArgumentError(
+                "sparse factor symbolic analysis has an invalid column link",
+            ))
+        end
+    end
+    return source_pointers, diagonal_positions, column_link_positions
+end
+
 function _sparse_numeric_factorize!(
     factor::GenericSparseCholeskyFactor{T},
     A::SparseMatrixCSC{T,Int},
 ) where {T}
-    factor.symbolic.pattern_signature == sparse_pattern_signature(A) ||
+    _sparse_exact_pattern_matches(factor, A) ||
         throw(ArgumentError("sparse numeric refactorization received a changed CSC pattern"))
     n = factor.symbolic.n
-    n == 0 && (factor.status = :success; factor.numeric_refactorizations += 1; return factor)
     bits = T === BigFloat ? _validate_sparse_bigfloat_precision(A) : 0
-    factor.precision_bits = bits
-    work = _sparse_factor_zeros(T, n, bits)
+    if T === BigFloat && bits != factor.precision_bits
+        throw(ArgumentError(
+            "sparse BigFloat refactorization has precision $(bits); " *
+            "factor is fixed at $(factor.precision_bits) bits",
+        ))
+    end
+    # Pattern, dimensions, and fixed BigFloat precision have all been
+    # validated above, so this is an accepted numeric attempt.  Rejections
+    # therefore leave all three explicit counters untouched.
+    factor.factorization_attempts += 1
+    n == 0 && begin
+        factor.status = :success
+        factor.factorization_successes += 1
+        factor.numeric_refactorizations += 1
+        return factor
+    end
+    work = factor.numeric_work
     factor.status = :failed
-    factor.minimum_diagonal = zero(T)
-    _run = function()
-        # Symmetric values are copied into a sparse dictionary in permuted
-        # coordinates.  This is O(nnz(A)) and never allocates n² storage.
-        values = Dict{Tuple{Int,Int},T}()
-        inverse = factor.symbolic.inverse_permutation
-        for column in 1:n
-            for pointer in A.colptr[column]:(A.colptr[column + 1] - 1)
-                row = A.rowval[pointer]
-                prow, pcol = inverse[row], inverse[column]
-                lower = (max(prow, pcol), min(prow, pcol))
-                if !haskey(values, lower) || prow >= pcol
-                    values[lower] = A.nzval[pointer]
-                end
-            end
+    # Keep the diagnostic scalar owned by the factor at its fixed MPFR
+    # precision.  Assigning `zero(BigFloat)` here would use the caller's
+    # ambient precision and could leave a failed factor with a narrower
+    # minimum-diagonal object than its numeric storage.
+    if T === BigFloat
+        setprecision(factor.precision_bits) do
+            MA.operate!(zero, factor.minimum_diagonal)
         end
+    else
+        factor.minimum_diagonal = zero(T)
+    end
+    _run = function()
         _sparse_zero_values!(factor.nzval)
+        _sparse_zero_values!(work)
         for column in 1:n
             start = factor.symbolic.factor_colptr[column]
             stop = factor.symbolic.factor_colptr[column + 1] - 1
             for pointer in start:stop
                 row = factor.symbolic.factor_rowval[pointer]
-                value = get(values, (row, column), zero(T))
-                if T === BigFloat
-                    _sparse_store!(work[row], value)
+                source_pointer = factor.source_pointers[pointer]
+                if source_pointer == 0
+                    # A previous column's Schur update may have changed this
+                    # slot.  Every factor slot must be overwritten before the
+                    # current column's updates; otherwise symbolic fill can
+                    # leak stale values across columns.
+                    if T === BigFloat
+                        MA.operate!(zero, work[row])
+                    else
+                        work[row] = zero(T)
+                    end
+                elseif T === BigFloat
+                    _sparse_store!(work[row], A.nzval[source_pointer])
                 else
-                    work[row] = value
+                    work[row] = A.nzval[source_pointer]
                 end
             end
-            for previous in factor.symbolic.column_links[column]
-                lposition = factor.symbolic.factor_positions[previous][column]
+            for (link_index, previous) in enumerate(factor.symbolic.column_links[column])
+                lposition = factor.column_link_positions[column][link_index]
                 lvalue = factor.nzval[lposition]
                 pstart = factor.symbolic.factor_colptr[previous]
                 pstop = factor.symbolic.factor_colptr[previous + 1] - 1
@@ -825,7 +943,7 @@ function _sparse_numeric_factorize!(
                     work[row] -= lvalue * factor.nzval[pointer]
                 end
             end
-            diagonal_position = factor.symbolic.factor_positions[column][column]
+            diagonal_position = factor.diagonal_positions[column]
             diagonal = work[column]
             isfinite(diagonal) && diagonal > zero(T) || return false
             root = sqrt(diagonal)
@@ -836,7 +954,11 @@ function _sparse_numeric_factorize!(
                 factor.nzval[diagonal_position] = root
             end
             if factor.minimum_diagonal == zero(T) || root < factor.minimum_diagonal
-                factor.minimum_diagonal = root
+                if T === BigFloat
+                    _sparse_store!(factor.minimum_diagonal, root)
+                else
+                    factor.minimum_diagonal = root
+                end
             end
             for pointer in (start + 1):stop
                 row = factor.symbolic.factor_rowval[pointer]
@@ -850,11 +972,23 @@ function _sparse_numeric_factorize!(
         end
         return true
     end
-    ok = T === BigFloat ? setprecision(bits) do
-        _run()
-    end : _run()
-    ok || return factor
+    ok = try
+        T === BigFloat ? setprecision(bits) do
+            _run()
+        end : _run()
+    catch exception
+        # Keep the attempt/success/failure invariant even when an accepted
+        # numeric operation raises (interrupt/resource exceptions are still
+        # rethrown exactly as before).
+        factor.factorization_failures += 1
+        rethrow(exception)
+    end
+    if !ok
+        factor.factorization_failures += 1
+        return factor
+    end
     factor.status = :success
+    factor.factorization_successes += 1
     factor.numeric_refactorizations += 1
     return factor
 end
@@ -865,13 +999,27 @@ function instantiate_sparse_factor(
     A::SparseMatrixCSC{T,Int},
 ) where {T}
     bits = T === BigFloat ? _validate_sparse_bigfloat_precision(A) : 0
+    symbolic.pattern_signature == sparse_pattern_signature(A) || throw(ArgumentError(
+        "sparse factor symbolic analysis and numeric matrix have different CSC patterns",
+    ))
     minimum = T === BigFloat ? _sparse_factor_zeros(BigFloat, 1, bits)[1] : zero(T)
+    source_pointers, diagonal_positions, column_link_positions =
+        _generic_sparse_numeric_maps(symbolic, A)
     return GenericSparseCholeskyFactor{T}(
         symbolic,
         _sparse_factor_zeros(T, symbolic.factor_nnz, bits),
+        copy(A.colptr),
+        copy(A.rowval),
+        source_pointers,
+        diagonal_positions,
+        column_link_positions,
+        _sparse_factor_zeros(T, symbolic.n, bits),
         :uninitialized,
         :generic_sparse_cholesky,
         T,
+        0,
+        0,
+        0,
         0,
         minimum,
         bits,
@@ -923,7 +1071,7 @@ function sparse_factor_solve!(
         end
     end
     @inbounds for column in 1:n
-        diagonal = factor.nzval[factor.symbolic.factor_positions[column][column]]
+        diagonal = factor.nzval[factor.diagonal_positions[column]]
         work[column] /= diagonal
         start = factor.symbolic.factor_colptr[column] + 1
         stop = factor.symbolic.factor_colptr[column + 1] - 1
@@ -940,7 +1088,7 @@ function sparse_factor_solve!(
             row = factor.symbolic.factor_rowval[pointer]
             value -= factor.nzval[pointer] * work[row]
         end
-        diagonal = factor.nzval[factor.symbolic.factor_positions[column][column]]
+        diagonal = factor.nzval[factor.diagonal_positions[column]]
         value /= diagonal
         if T === BigFloat
             _sparse_store!(work[column], value)
@@ -983,6 +1131,9 @@ function sparse_factor_diagnostics(factor::GenericSparseCholeskyFactor)
         ordering=symbolic.ordering,
         pattern_reused=max(factor.numeric_refactorizations - 1, 0),
         numeric_refactorizations=factor.numeric_refactorizations,
+        factorization_attempts=factor.factorization_attempts,
+        factorization_successes=factor.factorization_successes,
+        factorization_failures=factor.factorization_failures,
         status=factor.status,
         minimum_diagonal=factor.minimum_diagonal,
         precision_bits=factor.precision_bits,
@@ -994,6 +1145,9 @@ mutable struct CHOLMODSparseFactor{T} <: AbstractSparseFactor
     factorization::Any
     status::Symbol
     numeric_refactorizations::Int
+    factorization_attempts::Int
+    factorization_successes::Int
+    factorization_failures::Int
     provider::Symbol
     arithmetic::DataType
 end
@@ -1008,6 +1162,9 @@ function instantiate_sparse_factor(
         nothing,
         :uninitialized,
         0,
+        0,
+        0,
+        0,
         :cholmod,
         Float64,
     )
@@ -1019,25 +1176,40 @@ function numeric_factorize!(
 )
     factor.symbolic.pattern_signature == sparse_pattern_signature(A) ||
         throw(ArgumentError("CHOLMOD sparse refactorization received a changed CSC pattern"))
+    # The structural compatibility check above is intentionally before this
+    # increment: rejected patterns are not accepted numeric attempts.
+    factor.factorization_attempts += 1
     if factor.factorization === nothing
         factor.factorization = try
             cholesky(Symmetric(A, :L); check=false)
         catch exception
-            _recoverable(exception) || rethrow()
+            if !_recoverable(exception)
+                factor.factorization_failures += 1
+                rethrow(exception)
+            end
             nothing
         end
     else
         try
             cholesky!(factor.factorization, Symmetric(A, :L); check=false)
         catch exception
-            _recoverable(exception) || rethrow()
+            if !_recoverable(exception)
+                factor.factorization_failures += 1
+                rethrow(exception)
+            end
             factor.status = :failed
+            factor.factorization_failures += 1
             return factor
         end
     end
     factor.status = factor.factorization === nothing ||
                     !issuccess(factor.factorization) ? :failed : :success
-    factor.status === :success && (factor.numeric_refactorizations += 1)
+    if factor.status === :success
+        factor.factorization_successes += 1
+        factor.numeric_refactorizations += 1
+    else
+        factor.factorization_failures += 1
+    end
     return factor
 end
 
@@ -1086,6 +1258,9 @@ function sparse_factor_diagnostics(factor::CHOLMODSparseFactor)
         ordering=:cholmod_amd,
         pattern_reused=max(factor.numeric_refactorizations - 1, 0),
         numeric_refactorizations=factor.numeric_refactorizations,
+        factorization_attempts=factor.factorization_attempts,
+        factorization_successes=factor.factorization_successes,
+        factorization_failures=factor.factorization_failures,
         status=factor.status,
     )
 end
@@ -1154,6 +1329,14 @@ end
 
 function statistics(backend::CHOLMODSparseCholeskyBackend)
     reused = max(backend.factorizations - backend.analyses, 0)
+    # `factorizations` and `failures` are historical wrapper counters: the
+    # former is incremented for every backend call, while the factor-level
+    # counters classify accepted numeric attempts explicitly.  Expose both
+    # surfaces so callers never have to infer success from old semantics.
+    factor = backend.factor
+    factorization_attempts = factor === nothing ? 0 : factor.factorization_attempts
+    factorization_successes = factor === nothing ? 0 : factor.factorization_successes
+    factorization_failures = factor === nothing ? 0 : factor.factorization_failures
     return (
         backend=backend_name(backend),
         analyses=backend.analyses,
@@ -1162,6 +1345,9 @@ function statistics(backend::CHOLMODSparseCholeskyBackend)
         symbolic_reuse_ratio=backend.factorizations == 0 ? 0.0 :
                              reused / backend.factorizations,
         failures=backend.failures,
+        factorization_attempts=factorization_attempts,
+        factorization_successes=factorization_successes,
+        factorization_failures=factorization_failures,
     )
 end
 
@@ -1250,6 +1436,10 @@ end
 
 function statistics(backend::GenericSparseCholeskyBackend)
     reused = max(backend.factorizations - backend.analyses, 0)
+    factor = backend.factor
+    factorization_attempts = factor === nothing ? 0 : factor.factorization_attempts
+    factorization_successes = factor === nothing ? 0 : factor.factorization_successes
+    factorization_failures = factor === nothing ? 0 : factor.factorization_failures
     return (
         backend=backend_name(backend),
         analyses=backend.analyses,
@@ -1258,6 +1448,9 @@ function statistics(backend::GenericSparseCholeskyBackend)
         symbolic_reuse_ratio=backend.factorizations == 0 ? 0.0 :
                              reused / backend.factorizations,
         failures=backend.failures,
+        factorization_attempts=factorization_attempts,
+        factorization_successes=factorization_successes,
+        factorization_failures=factorization_failures,
     )
 end
 

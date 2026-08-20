@@ -6,6 +6,7 @@ function _public_spec(
     relative_tolerance=1.0e-7,
     note="reference supplied by the authoritative source",
     size=(;),
+    loader=nothing,
 )
     return BenchmarkSpec(
         id,
@@ -17,7 +18,7 @@ function _public_spec(
         tags,
         purpose,
         nothing,
-        Symbol("external_", external.format),
+        something(loader, Symbol("external_", external.format)),
         (;),
         BenchmarkReference(
             status, objective, absolute_tolerance, relative_tolerance, note,
@@ -133,9 +134,19 @@ for (name, checksum, purpose, bytes) in _NETLIB_LOCAL_FULL
 end
 
 const _SDPLIB_ROOT = "https://plato.asu.edu/ftp/sdplib"
-const _SDPLIB_NOTE = "Official SDPLIB data directory; retain original SDPLIB attribution and per-instance provenance."
+const _SDPLIB_NOTE = "Official SDPLIB data directory; historical .sdp.gz files use SDPpack's compact ASCII encoding. Retain original SDPLIB and SDPpack attribution."
 
-function _sdplib(name, tiers, purpose, m, block_sizes, bytes, checksum; tags=(:public, :sdplib))
+function _sdplib(
+    name,
+    tiers,
+    purpose,
+    m,
+    block_sizes,
+    bytes,
+    checksum,
+    objective;
+    tags=(:public, :sdplib),
+)
     filename = "$name.sdp.gz"
     return _public_spec(
         "sdplib/$name", :sdp, :semidefinite_program, :sdplib,
@@ -144,11 +155,12 @@ function _sdplib(name, tiers, purpose, m, block_sizes, bytes, checksum; tags=(:p
             "SDPLIB",
             "$_SDPLIB_ROOT/$filename",
             filename,
-            :sdpa_sparse_gzip,
+            :sdppack_compact_gzip,
             checksum,
             _SDPLIB_NOTE,
         );
-        note="reference objective pending authoritative SDPLIB table import",
+        objective=objective,
+        note="SDPA-GMP high-precision SDPLIB objective in the SDPA convention",
         size=(variables=m, blocks=length(block_sizes),
               block_sizes=block_sizes, compressed_bytes=bytes),
     )
@@ -156,39 +168,57 @@ end
 
 const SDPLIB_SPECS = BenchmarkSpec[
     _sdplib("control1", (:representative, :local_full), :control_lmi, 21, (10, 5), 1644,
-        "fb6f544c26c2d88502308c49558b0e0929d063f1efe5d1f76bf0b6727c81871a"),
+        "fb6f544c26c2d88502308c49558b0e0929d063f1efe5d1f76bf0b6727c81871a", "1.7784626717523405e1"),
     _sdplib("control2", (:representative, :local_full), :larger_control_lmi, 66, (20, 10), 11125,
-        "3b0027494eb1447d0fc23aaca4026366c66892b1c9c023af64e3c9b1d7cc3305"),
+        "3b0027494eb1447d0fc23aaca4026366c66892b1c9c023af64e3c9b1d7cc3305", "8.2999999857902351"),
     _sdplib("truss1", (:representative, :local_full), :structured_truss_sdp, 6, (2,2,2,2,2,2,1), 173,
-        "ff992a77a95850a625184b4ad9cb999c88fb03b6619dc24ae63882e244cd972f"),
+        "ff992a77a95850a625184b4ad9cb999c88fb03b6619dc24ae63882e244cd972f", "-8.9999963152868905"),
     _sdplib("truss3", (:representative, :local_full), :multiblock_structural_sdp, 27, (5,5,5,5,5,5,1), 389,
-        "7fb1ff1e94e02df467c9dbbd2ec87b036c9f25dd68d6b1efd2a487489c13a099"),
+        "7fb1ff1e94e02df467c9dbbd2ec87b036c9f25dd68d6b1efd2a487489c13a099", "-9.1099962092020534"),
     _sdplib("mcp100", (:representative, :local_full), :max_cut_relaxation, 100, (100,), 1736,
-        "17f594b630a03dd82154871b0f542f4c8c4ff5d155488938edfa9a146f7ba887"),
+        "17f594b630a03dd82154871b0f542f4c8c4ff5d155488938edfa9a146f7ba887", "2.2615735148330884e2"),
     _sdplib("gpp100", (:representative, :local_full), :graph_partition_relaxation, 101, (100,), 16005,
-        "7f02e5a5ba4ce6b7584d17b6c563331a5f035949e75314bb418ba8b3b8246710"),
+        "7f02e5a5ba4ce6b7584d17b6c563331a5f035949e75314bb418ba8b3b8246710", "-4.4943550775891146e1"),
     _sdplib("theta1", (:representative, :local_full), :lovasz_theta, 104, (50,), 3819,
-        "2188cbab3a4779d3101a25ca72d90fbb7747a2dfa30cc35b6ee00805e066b27d"),
+        "2188cbab3a4779d3101a25ca72d90fbb7747a2dfa30cc35b6ee00805e066b27d", "2.3000000000000000e1"),
     _sdplib("theta2", (:representative, :local_full), :larger_lovasz_theta, 498, (100,), 16402,
-        "6023c79ee8876060a46f5d92073a33f64a65d8fa389fa846cc7aa28133866eeb"),
+        "6023c79ee8876060a46f5d92073a33f64a65d8fa389fa846cc7aa28133866eeb", "3.2879169015772581e1"),
     _sdplib("qap5", (:local_full,), :qap_relaxation, 136, (26,), 2455,
-        "39010b45dc47bcdf7af28b3f6f365ca67978e5322d1ff68b59fc9cc8205b40f2"),
+        "39010b45dc47bcdf7af28b3f6f365ca67978e5322d1ff68b59fc9cc8205b40f2", "-4.3600000000000000e2"),
     _sdplib("qap6", (:local_full,), :larger_qap_relaxation, 229, (37,), 5898,
-        "ff2f41311dd292b41d435e89475f0bc1baf4a6b68f7a1709c6f0e7484262df93"),
+        "ff2f41311dd292b41d435e89475f0bc1baf4a6b68f7a1709c6f0e7484262df93", "-3.8143840217367920e2"),
     _sdplib("mcp124-1", (:local_full,), :max_cut_family_diversity, 124, (124,), 1537,
-        "ac48ff67d2a1aa6075bf167deca9a501d1a038a21069a95a8cb77f1e8f1a1e50"),
+        "ac48ff67d2a1aa6075bf167deca9a501d1a038a21069a95a8cb77f1e8f1a1e50", "1.4199047709767370e2"),
     _sdplib("gpp124-1", (:local_full,), :graph_partition_family_diversity, 125, (124,), 22484,
-        "b1c4c0f036fb74f0e75e18dcccccb92c4be13725529a493fe9af86aceb20e394"),
+        "b1c4c0f036fb74f0e75e18dcccccb92c4be13725529a493fe9af86aceb20e394", "-7.3430762652465377"),
 ]
 
 const _DIMACS_ROOT = "https://plato.asu.edu/ftp/dimacs"
-const _DIMACS_NOTE = "Official DIMACS conic benchmark directory; SDPA sparse representation may encode Lorentz blocks by negative block sizes."
+const _DIMACS_NOTE = "Official DIMACS conic benchmark mirror. These .dat-s.gz files are converted sparse-SDPA formulations; negative block sizes denote diagonal LP blocks, not native Lorentz cones."
 
-function _dimacs(name, tiers, purpose, m, blocks, bytes, checksum; family=:socp, tags=(:public, :dimacs))
+function _dimacs(
+    name,
+    tiers,
+    purpose,
+    m,
+    blocks,
+    bytes,
+    checksum;
+    source_family=:socp,
+    tags=(:public, :dimacs),
+)
+    execution_tags = (
+        tags...,
+        :sdpa_conversion,
+        Symbol("source_", source_family),
+    )
     filename = "$name.dat-s.gz"
     return _public_spec(
-        "dimacs/$name", family, :mixed_conic_program, :dimacs,
-        tiers, tags, purpose,
+        # The cached representation contains only PSD and diagonal LP blocks.
+        # Keep the original cone family as metadata, but benchmark this loader
+        # as the exact converted SDP formulation that it actually executes.
+        "dimacs/$name", :sdp, :semidefinite_program, :dimacs,
+        tiers, execution_tags, purpose,
         ExternalSource(
             "DIMACS conic benchmark",
             "$_DIMACS_ROOT/$filename",
@@ -215,20 +245,32 @@ const DIMACS_SPECS = BenchmarkSpec[
         "70f8efa93c05c604a689a0182600bff838bc242978174a85e1106c33c12b6f47"),
     _dimacs("hinf13", (:representative, :local_full), :hinfinity_control, 57, 3, 20975,
         "7687c2bca21a843bf4a67bfe8b06c23d2d46537384117b29aec0c868ca2d93ea";
-        family=:mixed_conic, tags=(:public, :dimacs, :mixed)),
+        source_family=:sdp, tags=(:public, :dimacs)),
     _dimacs("minphase", (:representative, :local_full), :minimum_phase_filter, 48, 1, 6062,
         "28fda50de3f18eee9c1d7e584dc94aad865b7b4e9b8aa145e9b03f91794a5786";
-        family=:mixed_conic, tags=(:public, :dimacs, :mixed)),
+        source_family=:mixed_conic, tags=(:public, :dimacs, :mixed)),
 ]
 
 const _CBLIB_ROOT = "https://cblib.zib.de/download/all"
 const _CBLIB_NOTE = "CBLIB continuous conic benchmark; redistribution is subject to the CBLIB license, so data stay on-demand."
 
-function _cblib(name, tiers, purpose, bytes, checksum)
+function _cblib(
+    name, tiers, purpose, bytes, checksum;
+    family=:mixed_conic,
+    problem_type=:continuous_conic_program,
+    status=:optimal,
+    objective=nothing,
+    absolute_tolerance=1.0e-7,
+    relative_tolerance=1.0e-7,
+    note="CBF instance is metadata-only because its cone mix is outside the native loader contract",
+    size=(compressed_bytes=bytes,),
+    native_loader=false,
+    tags=(:public, :cblib, :continuous),
+)
     filename = "$name.cbf.gz"
     return _public_spec(
-        "cblib/$name", :socp, :continuous_conic_program, :cblib,
-        tiers, (:public, :cblib, :continuous), purpose,
+        "cblib/$name", family, problem_type, :cblib,
+        tiers, tags, purpose,
         ExternalSource(
             "CBLIB",
             "$_CBLIB_ROOT/$filename",
@@ -237,12 +279,31 @@ function _cblib(name, tiers, purpose, bytes, checksum)
             checksum,
             _CBLIB_NOTE,
         );
-        note="CBF loader intentionally deferred; metadata/download interface only",
-        size=(compressed_bytes=bytes,),
+        status=status,
+        objective=objective,
+        absolute_tolerance=absolute_tolerance,
+        relative_tolerance=relative_tolerance,
+        note=note,
+        size=size,
+        loader=native_loader ? :external_cbf_gzip : :external_cbf_metadata_only,
     )
 end
 
 const CBLIB_SPECS = BenchmarkSpec[
+    _cblib(
+        "nql30", (:large,), :native_cbf_socp, 72814,
+        "f926413ff08c1c296254f60c54cb7a4154f501ddb9d2f6948918d72d14f93739";
+        family=:socp,
+        problem_type=:second_order_cone_program,
+        objective="-9.4602e-1",
+        absolute_tolerance=1.0e-5,
+        relative_tolerance=1.0e-5,
+        note="CBLIB 2014 reports a rounded optimum; this continuous F/L=/Q instance is executed natively from CBF",
+        size=(variables=4501, constraints=6380, lorentz_cones=900,
+              nonzeros=20569, compressed_bytes=72814),
+        native_loader=true,
+        tags=(:public, :cblib, :continuous, :rank_ladder),
+    ),
     _cblib("beam7", (:local_full,), :cblib_continuous_interface, 57395879,
         "d337224aeecb482dd020c9bcd293fa2c446806b30ba2434a7591d137958f61f5"),
     _cblib("beam30", (:heavy,), :larger_cblib_continuous_interface, 28912469,

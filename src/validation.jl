@@ -1311,6 +1311,8 @@ function certify_native_soc_result(
     problem::ConicProblem{T},
     result::ConicResult{T},
     options::SolverOptions{T},
+    ;
+    precomputed_certificate=nothing,
 ) where {T}
     if !options.certification
         if result.status !== Optimal
@@ -1327,7 +1329,9 @@ function certify_native_soc_result(
         # NativeSOC already validates directly in Lorentz coordinates. Reuse
         # that arithmetic, but expose only a compact success gate when the
         # caller has disabled the detailed certificate payload.
-        full = result_certificate(problem, result, options)
+        full = precomputed_certificate === nothing ?
+               result_certificate(problem, result, options) :
+               precomputed_certificate
         gate = (
             available=true,
             valid=full.valid,
@@ -1376,7 +1380,9 @@ function certify_native_soc_result(
         return _with_native_soc_certificate(recomputed, certificate)
     end
 
-    certificate = result_certificate(problem, result, options)
+    certificate = precomputed_certificate === nothing ?
+                  result_certificate(problem, result, options) :
+                  precomputed_certificate
     if result.status === Optimal && !certificate.valid
         message = "NativeSOCP original-coordinate certification failed: " *
                   join(string.(certificate.failures), ", ")

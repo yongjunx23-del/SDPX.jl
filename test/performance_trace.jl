@@ -49,6 +49,9 @@ using Test
         )
         @test :certification_seconds in propertynames(trace.final)
         @test :numeric_factorizations in propertynames(trace.counters)
+        @test :factorization_attempts in propertynames(trace.counters)
+        @test :factorization_successes in propertynames(trace.counters)
+        @test :factorization_failures in propertynames(trace.counters)
         @test :symbolic_analyses in propertynames(trace.counters)
         @test :factor_nnz in propertynames(trace.counters)
         @test :factor_memory_estimate_bytes in propertynames(trace.counters)
@@ -222,6 +225,8 @@ using Test
         # SDP solve; none may be defaulted to zero.
         for name in (
             :schur_assembly_count, :sparse_factor_failures,
+            :factorization_attempts, :factorization_successes,
+            :factorization_failures,
             :symbolic_analysis_reuses, :fixed_residual_blocks,
             :fixed_rhs_contractions, :fixed_direction_recoveries,
         )
@@ -259,6 +264,9 @@ using Test
             assembly_count=3,
             failures=0,
             reused=1,
+            factorization_attempts=2,
+            factorization_successes=2,
+            factorization_failures=0,
         )
         projected = SDPX.SDPResult{Float64}(
             result.status,
@@ -291,6 +299,9 @@ using Test
         @test trace.counters.factor_nnz == 11
         @test trace.counters.schur_assembly_count == 3
         @test trace.counters.sparse_factor_failures == 0
+        @test trace.counters.factorization_attempts == 2
+        @test trace.counters.factorization_successes == 2
+        @test trace.counters.factorization_failures == 0
         @test trace.counters.symbolic_analysis_reuses == 1
     end
 
@@ -460,6 +471,9 @@ using Test
         # Sparse-backend counters are not fabricated on the Conic path.
         @test !SDPX.isavailable(trace.counters.schur_assembly_count)
         @test !SDPX.isavailable(trace.counters.sparse_factor_failures)
+        @test !SDPX.isavailable(trace.counters.factorization_attempts)
+        @test !SDPX.isavailable(trace.counters.factorization_successes)
+        @test !SDPX.isavailable(trace.counters.factorization_failures)
         @test !SDPX.isavailable(trace.counters.symbolic_analysis_reuses)
 
         # Minimal diagnostics: every new field is explicitly unavailable.
@@ -516,6 +530,8 @@ using Test
         @test !SDPX.isavailable(trace_poor.final.certificate_failures)
         for name in (
             :schur_assembly_count, :sparse_factor_failures,
+            :factorization_attempts, :factorization_successes,
+            :factorization_failures,
             :symbolic_analysis_reuses, :fixed_residual_blocks,
             :fixed_rhs_contractions, :fixed_direction_recoveries,
         )

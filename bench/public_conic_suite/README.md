@@ -16,18 +16,19 @@ See `benchmark/README.md` for suite selection, result schema, and comparison.
   including download URLs and pathological parameter grids.
 - `configs/`: tier and development-gate definitions.
 - `generators/`: parameterized LP/SOCP/SDP pathological generators.
-- `scripts/download_external.jl`: on-demand, checksum-pinned download helper
-  for manifest entries.
+- `scripts/download_external.jl`: legacy catalogue downloader that records the
+  observed checksum; it is not the canonical pinned-cache path.
 - `data/external/` and `data/generated/`: ignored placeholders for downloaded
   and generated inputs.
 - `Project.toml`: suite dependencies for local tooling.
 - `RESULT_SCHEMA.md` and `SOURCES_AND_PROVENANCE.md`: retained field and source
   provenance notes.
 
-External binaries are not embedded. Downloads require an explicit helper call
-and are stored under ignored data directories. Mittelmann reference times in
-provenance files are orientation data only and must never be used for
-cross-machine speedup claims.
+External binaries are not embedded. Executable downloads use the checksum
+values in the canonical registry and require an explicit `--prepare` call;
+they are stored under `benchmark/data/cache/`, which is ignored. Mittelmann
+reference times in provenance files are orientation data only and must never
+be used for cross-machine speedup claims.
 
 The pathological generators are retained, but campaign execution goes through
 the canonical registry runner or the retained specialized benchmark campaigns.
