@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - refactor/benchmark-driven-core-20260821
     tags: ['*']
   pull_request:
 
