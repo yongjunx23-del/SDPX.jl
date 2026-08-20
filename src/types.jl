@@ -476,6 +476,11 @@ struct ProviderLALDLTFactor{T,P,M<:AbstractMatrix{T}} <:
     factors::M
 end
 
+"""Standard-backend Bunch-Kaufman payload for the provider LDLT seam."""
+struct StandardLALDLTPayload{T,B}
+    bk::B
+end
+
 LinearAlgebra.issuccess(::ProviderLALDLTFactor) = true
 
 """
@@ -668,8 +673,8 @@ Base.@kwdef struct SolverOptions{T}
     # cost. `:normal_equations` and `:qr` are expert-mode overrides.
     equality_solver::Symbol    = :auto                   # :auto | :normal_equations | :qr
     # Dense linear-algebra implementation. `:auto` resolves once while the
-    # ExecutionPlan is built: complete BFLA/MFLA extensions may be selected,
-    # but numerical execution never retries another provider implicitly.
+    # ExecutionPlan is built (complete BFLA/MFLA extensions may be selected,
+    # but numerical execution never retries another provider implicitly).
     linear_algebra_backend::Symbol = :auto              # :auto | :standard | :bfla | :multifloat | :legacy
     extended_precision_blas::Symbol =
         default_extended_precision_blas(T)               # :off | :auto | :on; Float64 is never redirected
@@ -1246,6 +1251,7 @@ struct StructureAnalysis
     schur_analysis::SchurStructureAnalysis
     schur_plan::SchurStructurePlan
     overlap_graph::Vector{Vector{Int}}
+    frequency::Vector{Int}
 end
 
 # Source compatibility for callers that construct the pre-Round7 positional
@@ -1320,6 +1326,7 @@ function StructureAnalysis(
         facts,
         plan,
         graph,
+        Int[],
     )
 end
 
