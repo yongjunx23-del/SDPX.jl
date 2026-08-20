@@ -15,6 +15,19 @@ end
 @inline _is_auto(value) = value === :auto ||
     (value isa AbstractString && lowercase(strip(value)) == "auto")
 
+const _MINIMUM_BIGFLOAT_PRECISION_BITS = 2
+
+@inline function _require_bigfloat_precision_bits(
+    bits::Integer,
+    label::AbstractString,
+)
+    value = Int(bits)
+    value >= _MINIMUM_BIGFLOAT_PRECISION_BITS || throw(ArgumentError(
+        "$label must be at least $_MINIMUM_BIGFLOAT_PRECISION_BITS bits, got $value",
+    ))
+    return value
+end
+
 function _frontend_number(::Type{T}, value, label::AbstractString) where {T}
     _is_auto(value) && throw(ArgumentError("$label is still :auto"))
     if value isa AbstractString
@@ -142,12 +155,11 @@ function _resolve_precision_bits(::Type{T}, requested) where {T}
     if requested isa Integer ||
        (requested isa AbstractString && all(isdigit, strip(requested)))
         bits = requested isa Integer ? Int(requested) : parse(Int, strip(requested))
-        bits > 0 || throw(ArgumentError("precision must be a positive bit count"))
         T === BigFloat || throw(ArgumentError(
             "an integer precision requests BigFloat input, but the problem is stored as $T; " *
             "re-ingest the model at BigFloat precision or use the CLI so parsing occurs at the requested precision",
         ))
-        return bits
+        return _require_bigfloat_precision_bits(bits, "precision")
     end
     requested_symbol = requested isa Symbol ? requested : Symbol(lowercase(strip(String(requested))))
     requested_symbol === :auto && return native
