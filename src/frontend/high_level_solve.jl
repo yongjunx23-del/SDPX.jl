@@ -36,7 +36,7 @@ function solve(problem::SDPProblem{T}, options::SolveOptions) where {T}
     if T === BigFloat
         bits = _frontend_requested_bigfloat_bits(options)
         if bits !== nothing && Base.precision(BigFloat) != bits
-            bits > 0 || throw(ArgumentError("precision must be positive"))
+            _require_bigfloat_precision_bits(bits, "precision")
             return setprecision(BigFloat, bits) do
                 _solve_sdp_with_frontend(problem, options)
             end
@@ -117,7 +117,7 @@ Base.@noinline function _run_native_soc_frontend(
     # reconstruction, and certification) inside that exact BigFloat scope.
     if T === BigFloat && Base.precision(BigFloat) != options.precision_bits
         bits = options.precision_bits
-        bits > 0 || throw(ArgumentError("precision_bits must be positive"))
+        _require_bigfloat_precision_bits(bits, "precision_bits")
         return setprecision(BigFloat, bits) do
             _run_native_soc_frontend(
                 problem,
@@ -263,7 +263,7 @@ function solve_socp(problem::ConicProblem{T}, options::SolveOptions) where {T}
     if T === BigFloat
         bits = _frontend_requested_bigfloat_bits(options)
         if bits !== nothing && Base.precision(BigFloat) != bits
-            bits > 0 || throw(ArgumentError("precision must be positive"))
+            _require_bigfloat_precision_bits(bits, "precision")
             return setprecision(run, BigFloat, bits)
         end
     end
