@@ -260,10 +260,6 @@ function _build_native_soc_payload(
     specialization::Symbol=:auto,
 ) where {T}
     _require_supported_arithmetic_type(T)
-    options.equality_solver === :qr && throw(ArgumentError(
-        "NativeSOC equality_solver=:qr is not implemented; use :auto or " *
-        ":normal_equations",
-    ))
     formulation = if options.formulation === :augmented
         FormulationPlan(
             DenseAugmentedKKT(), :user_forced_augmented, :native_soc_planner,
@@ -336,6 +332,7 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
     la_fallback_reason::Symbol
     equality_factor::Any
     equality_prepared::Bool
+    equality_qr_required::Bool
     local_metric_preparations::Int
     local_factorizations::Int
     equality_panel_transforms::Int
@@ -437,6 +434,7 @@ function NativeSOCWorkspace(
         :none,
         la_backend_reason(backend),
         nothing,
+        false,
         false,
         0,
         0,
@@ -1267,6 +1265,25 @@ function _native_soc_prepare_kkt!(
     workspace.equality_panel_transform_seconds +=
         (time_ns() - panel_started) / 1.0e9
 
+    if options.equality_solver === :qr || workspace.equality_qr_required
+        factor_started = time_ns()
+        equality_factor = _factor_equality_qr(
+            workspace.la_backend,
+            workspace.equality_panel,
+            options,
+        )
+        equality_factor === nothing && return false
+        workspace.equality_method = :rank_revealing_qr
+        workspace.la_fallback_reason = :la_equality_factor_failed
+        workspace.equality_qr_required = true
+        workspace.equality_factor = equality_factor
+        workspace.equality_factorizations += 1
+        workspace.equality_factor_seconds +=
+            (time_ns() - factor_started) / 1.0e9
+        workspace.equality_prepared = true
+        return true
+    end
+
     gram_started = time_ns()
     la_syrk!(
         workspace.la_backend,
@@ -1303,8 +1320,10 @@ function _native_soc_prepare_kkt!(
         equality_factor === nothing && return false
         workspace.equality_method = :rank_revealing_qr
         workspace.la_fallback_reason = :la_equality_factor_failed
+        workspace.equality_qr_required = true
     else
         workspace.equality_method = :normal_equations
+        workspace.equality_qr_required = false
     end
     workspace.equality_factor = equality_factor
     workspace.equality_factorizations += 1
@@ -1336,6 +1355,25 @@ function _native_soc_prepare_kkt!(
     workspace.equality_panel_transforms += 1
     workspace.equality_panel_transform_seconds +=
         (time_ns() - panel_started) / 1.0e9
+
+    if options.equality_solver === :qr || workspace.equality_qr_required
+        factor_started = time_ns()
+        equality_factor = _factor_equality_qr(
+            workspace.la_backend,
+            workspace.equality_panel,
+            options,
+        )
+        equality_factor === nothing && return false
+        workspace.equality_method = :rank_revealing_qr
+        workspace.la_fallback_reason = :la_equality_factor_failed
+        workspace.equality_qr_required = true
+        workspace.equality_factor = equality_factor
+        workspace.equality_factorizations += 1
+        workspace.equality_factor_seconds +=
+            (time_ns() - factor_started) / 1.0e9
+        workspace.equality_prepared = true
+        return true
+    end
 
     gram_started = time_ns()
     la_syrk!(
@@ -1370,8 +1408,10 @@ function _native_soc_prepare_kkt!(
         equality_factor === nothing && return false
         workspace.equality_method = :rank_revealing_qr
         workspace.la_fallback_reason = :la_equality_factor_failed
+        workspace.equality_qr_required = true
     else
         workspace.equality_method = :normal_equations
+        workspace.equality_qr_required = false
     end
     workspace.equality_factor = equality_factor
     workspace.equality_factorizations += 1
@@ -1528,6 +1568,7 @@ function _native_soc_reset_iteration_counters!(
     workspace.regularizations = 0
     zero_owned!(workspace.local_metric_regularization)
     workspace.accepted_regularization = zero(T)
+    workspace.equality_qr_required = false
     workspace.rhs_solves = 0
     workspace.local_metric_preparations = 0
     workspace.local_factorizations = 0
