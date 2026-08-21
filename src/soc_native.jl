@@ -3230,6 +3230,9 @@ Base.@noinline function _solve_native_soc_core(
     total_seconds = time() - started
     timings = options.timing ? (
         total=total_seconds,
+        # Same core convention as the SDP/LP diagnostics: the solver's own
+        # wall time, excluding frontend and certification phases.
+        core=total_seconds,
         setup=setup_seconds,
         initialization_seconds=initialization_seconds,
         cone_scaling_metric=phase_scaling,
