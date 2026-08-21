@@ -35,6 +35,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Split the 3719-line `src/pipeline.jl` into eleven ordered files under
+  `src/pipeline/` (helpers, options, classify, resources, route, plan,
+  presolve, workspace_estimate, attempts, diagnostics, timing). The
+  concatenation is byte-identical to the original file and every chunk
+  parses independently; the split separates the pure decision helpers
+  (classification, route resolution, planning, presolve) from the
+  diagnostics and timing plumbing that had accumulated around them.
+- Split the 2577-line `src/types.jl` into seven ordered files under
+  `src/types/` (core, backends, workspaces, constraints, problems, plans,
+  results). The concatenation is byte-identical to the original file and the
+  include order is unchanged, so definitions and semantics are exactly as
+  before; the split makes the type layer navigable and future extractions
+  local.
 - Retired the legacy `factor_kkt!` nothing-chain dispatcher (kkt.jl): the
   production path has dispatched through `factorize!(backend, ...)` with
   plan assertions and execution provenance since the KKT backend layer
