@@ -1,0 +1,46 @@
+name: Full suite
+
+# The expensive numerical/extension matrix plus coverage. Runs weekly, on
+# demand, and on release tags -- not per PR (PRs run the quick profile in
+# test.yml plus the stdlib-only quick-checks.yml structural gate).
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+  push:
+    tags: ['*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  full:
+    name: Julia 1 / ubuntu-latest / 4 threads / full
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
+      - uses: julia-actions/julia-buildpkg@v1
+      - uses: julia-actions/julia-runtest@v1
+        env:
+          JULIA_NUM_THREADS: '4'
+          SDPX_TEST_PROFILE: full
+      - uses: julia-actions/julia-processcoverage@v1
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          use_oidc: true
+          fail_ci_if_error: true
+          flags: unittests
+          name: sdpx-julia

@@ -272,7 +272,7 @@ end
         schur = [4.0 0.5 -0.2; 0.5 3.0 0.1; -0.2 0.1 2.0]
         copyto!(workspace.S, schur)
         options = SDPX.SolverOptions{Float64}(verbosity=0)
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test !factor.q_pivoted
 
@@ -327,7 +327,7 @@ end
             equality_solver=:normal_equations,
             mixed_precision_kkt=:off,
         )
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test !factor.q_rank_deficient
         @test workspace.equality_scale[1] ≈ 1.0
@@ -358,11 +358,7 @@ end
             thread_count=1,
         )
         unit_workspace.S .= Matrix{Float64}(I, 2, 2)
-        unit_factor = SDPX.factor_kkt!(
-            unit_workspace,
-            unit_problem,
-            options,
-        )
+        unit_factor = SDPX.factorize!(SDPX.select_backend(unit_workspace), unit_workspace, unit_problem, options)
         @test unit_factor.ok
         unit_dx = zeros(2)
         unit_dy = zeros(2)
@@ -415,7 +411,7 @@ end
             thread_count=1,
         )
         zero_workspace.S .= Matrix{Float64}(I, 2, 2)
-        zero_factor = SDPX.factor_kkt!(zero_workspace, zero_problem, options)
+        zero_factor = SDPX.factorize!(SDPX.select_backend(zero_workspace), zero_workspace, zero_problem, options)
         @test !zero_factor.ok
         @test zero_workspace.equality_scale[2] == 1.0
         @test all(iszero, zero_workspace.Btil[:, 2])
@@ -430,9 +426,7 @@ end
             thread_count=1,
         )
         proportional_workspace.S .= Matrix{Float64}(I, 2, 2)
-        proportional_factor = SDPX.factor_kkt!(
-            proportional_workspace, proportional_problem, options,
-        )
+        proportional_factor = SDPX.factorize!(SDPX.select_backend(proportional_workspace), proportional_workspace, proportional_problem, options)
         @test !proportional_factor.ok
     end
 
@@ -467,7 +461,7 @@ end
                 equality_solver=:normal_equations,
                 mixed_precision_kkt=:off,
             )
-            factor = SDPX.factor_kkt!(workspace, problem, options)
+            factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
             @test factor.ok
             @test !factor.q_rank_deficient
             @test all(value -> precision(value) == 256, workspace.equality_scale)
@@ -582,16 +576,8 @@ end
             verbosity=0,
             equality_solver=:qr,
         )
-        sparse_factor = SDPX.factor_kkt!(
-            sparse_workspace,
-            sparse_problem,
-            options,
-        )
-        dense_factor = SDPX.factor_kkt!(
-            dense_workspace,
-            dense_problem,
-            options,
-        )
+        sparse_factor = SDPX.factorize!(SDPX.select_backend(sparse_workspace), sparse_workspace, sparse_problem, options)
+        dense_factor = SDPX.factorize!(SDPX.select_backend(dense_workspace), dense_workspace, dense_problem, options)
         @test sparse_factor.ok
         @test dense_factor.ok
         @test sparse_factor.equality_solver ==
@@ -652,11 +638,7 @@ end
             verbosity=0,
             equality_solver=:auto,
         )
-        duplicate_factor = SDPX.factor_kkt!(
-            duplicate_workspace,
-            duplicate_problem,
-            duplicate_options,
-        )
+        duplicate_factor = SDPX.factorize!(SDPX.select_backend(duplicate_workspace), duplicate_workspace, duplicate_problem, duplicate_options)
         @test duplicate_factor.ok
         @test duplicate_factor.q_rank_deficient
         @test duplicate_factor.equality_solver ==
@@ -671,7 +653,7 @@ end
         schur = [3.0 0.2 0.1; 0.2 2.5 -0.3; 0.1 -0.3 4.0]
         copyto!(workspace.S, schur)
         options = SDPX.SolverOptions{Float64}(verbosity=0)
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test factor.q_pivoted
         @test factor.equality_solver == :rank_revealing_qr
@@ -752,7 +734,7 @@ end
             verbosity=0,
             equality_solver=:auto,
         )
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test factor.equality_solver === :rank_revealing_qr
         @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
@@ -792,7 +774,7 @@ end
             verbosity=0,
             equality_solver=:normal_equations,
         )
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test factor.equality_solver === :normal_equations
         @test !(workspace.Qchol isa SDPX.EqualityQRFactor{Float64})
@@ -835,7 +817,7 @@ end
             verbosity=0,
             equality_solver=:auto,
         )
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test factor.equality_solver === :rank_revealing_qr
         @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
@@ -864,7 +846,7 @@ end
             verbosity=0,
             equality_solver=:qr,
         )
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test factor.equality_solver == :rank_revealing_qr
         @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
@@ -1189,7 +1171,7 @@ end
             verbosity=0,
             equality_solver=:normal_equations,
         )
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factor.ok
         @test factor.equality_solver === :normal_equations
         @test factor.q_pivoted

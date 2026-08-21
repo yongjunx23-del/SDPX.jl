@@ -29,6 +29,8 @@ const QUICK_TESTS = (
     "sdpa_benchmark_loader.jl",
     "benchmark_pathological.jl",
     "benchmark_registry.jl",
+    "benchmark_core_matrix.jl",
+    "benchmark_core_matrix_fresh_process.jl",
     "netlib_benchmark_loader.jl",
     "cbf_benchmark_loader.jl",
     "benchmark_compare.jl",
@@ -37,6 +39,7 @@ const QUICK_TESTS = (
     "v05_core_invariants.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
+    "coo_contraction_regression.jl",
     "precision_ladder_plan.jl",
 )
 
@@ -52,6 +55,7 @@ const FULL_TESTS = (
     "genericity.jl",
     "extended_precision_blas.jl",
     "sparse.jl",
+    "coo_contraction_regression.jl",
     "moi_vector_cones.jl",
     "moi_native_soc.jl",
     "moi.jl",
@@ -92,6 +96,8 @@ const FULL_TESTS = (
     "sdpa_benchmark_loader.jl",
     "benchmark_pathological.jl",
     "benchmark_registry.jl",
+    "benchmark_core_matrix.jl",
+    "benchmark_core_matrix_fresh_process.jl",
     "netlib_benchmark_loader.jl",
     "cbf_benchmark_loader.jl",
     "benchmark_compare.jl",

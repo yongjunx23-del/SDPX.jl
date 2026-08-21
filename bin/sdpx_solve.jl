@@ -22,7 +22,7 @@
         caller is a foreign runtime that cannot parse a Julia stack
         trace; it can parse `{"success": false, "error": "..."}`.
 
-    The schema is documented in `docs/bridge-schema.md`. This is a
+    The schema is documented in `docs/src/bridge-schema.md`. This is a
     subprocess bridge by design — one process per solve, no state. The
     documented upgrade path (same document) is a persistent server or
     LibraryLink once the schema has proven itself; the schema is the

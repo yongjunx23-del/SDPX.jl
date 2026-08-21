@@ -166,8 +166,8 @@ end
         @test Ss ≈ Sd rtol=1e-12 atol=1e-12
 
         options = SDPX.SolverOptions{Float64}(verbosity=0)
-        @test SDPX.factor_kkt!(wd, dense, options).ok
-        @test SDPX.factor_kkt!(ws, sparse, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(wd), wd, dense, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(ws), ws, sparse, options).ok
         r = collect(range(0.2, 1.6; length=dense.dims.m))
         p = Float64[]
         dxd, dys = zeros(dense.dims.m), Float64[]
@@ -317,8 +317,8 @@ end
             @test Ss ≈ Sd rtol=big"1e-60" atol=big"1e-60"
 
             options = SDPX.SolverOptions{BigFloat}(verbosity=0)
-            @test SDPX.factor_kkt!(wd, dense, options).ok
-            @test SDPX.factor_kkt!(ws, sparse, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(wd), wd, dense, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(ws), ws, sparse, options).ok
             rhs = BigFloat.(collect(range(0.2, 1.6; length=dense.dims.m)))
             dxd, dxs = zeros(BigFloat, dense.dims.m), zeros(BigFloat, dense.dims.m)
             SDPX.solve_kkt!(wd, 0, rhs, BigFloat[], dxd, BigFloat[])
@@ -481,8 +481,8 @@ end
             @test Ss ≈ Sd rtol = 1e-10
 
             options = SDPX.SolverOptions{Float64}(verbosity=0)
-            @test SDPX.factor_kkt!(ws, sp, options).ok
-            @test SDPX.factor_kkt!(wd, dn, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(ws), ws, sp, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(wd), wd, dn, options).ok
             m = sp.dims.m
             rhs = collect(range(0.2, 1.6; length=m))
             dxs, dxd = zeros(m), zeros(m)

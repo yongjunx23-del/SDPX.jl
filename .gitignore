@@ -51,7 +51,7 @@ scratch/
 tmp/
 *.tmp
 core
-core.*
+/core.*
 LocalPreferences.toml
 .julia/
 

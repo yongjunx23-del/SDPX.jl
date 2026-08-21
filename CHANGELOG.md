@@ -35,6 +35,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Certification fast path: `_primal_block_backward_errors` and
+  `_dual_backward_errors` asserted their `AbstractCons` subtype once
+  outside the per-block loop instead of re-dispatching through the
+  abstract field for every block. On the ladder's 2000-block LP row the
+  certification phase dropped from 0.89 s to ~0.02 s (measured >300x on
+  the isolated backward-error pass; allocation fell from 415 MB to
+  <1 MB per call), lifting end-to-end ladder rows by 3.5-12.7x.
+  Arithmetic order is unchanged -- certificate values are identical.
+- Split the 3719-line `src/pipeline.jl` into eleven ordered files under
+  `src/pipeline/` (helpers, options, classify, resources, route, plan,
+  presolve, workspace_estimate, attempts, diagnostics, timing). The
+  concatenation is byte-identical to the original file and every chunk
+  parses independently; the split separates the pure decision helpers
+  (classification, route resolution, planning, presolve) from the
+  diagnostics and timing plumbing that had accumulated around them.
+- Split the 2577-line `src/types.jl` into seven ordered files under
+  `src/types/` (core, backends, workspaces, constraints, problems, plans,
+  results). The concatenation is byte-identical to the original file and the
+  include order is unchanged, so definitions and semantics are exactly as
+  before; the split makes the type layer navigable and future extractions
+  local.
+- Retired the legacy `factor_kkt!` nothing-chain dispatcher (kkt.jl): the
+  production path has dispatched through `factorize!(backend, ...)` with
+  plan assertions and execution provenance since the KKT backend layer
+  landed, and the chain had no production callers -- only the sparse
+  regression tests, which now call `factorize!(select_backend(ws), ...)`
+  directly. Behaviour unchanged; the remaining per-phase `ws.arrow`/
+  `ws.sparse_kkt`/`ws.mixed_precision` branches in schur/step/kernels are
+  the Phase-2 KKTPlan extraction, not part of this step.
+- Repository cleanup: the former `bench/` tree is consolidated — the
+  acceptance gate now lives at `benchmark/gates.jl` (with
+  `benchmark/baselines/gates.json` and the benchmarking environment
+  `benchmark/benchenv/`), and historical application/cluster campaigns with
+  their dated reports are archived under `docs/evidence/`. The five hand-linked
+  topic guides are served through Documenter under "Topic guides", and dated
+  review snapshots moved to `docs/evidence/development-reviews/`. One-shot
+  Codex patch automation (`.codex/` payloads and their four workflows, whose
+  target branch no longer exists) and the unwired COO micro benchmark were
+  removed. The optimization pipeline is defined once in
+  `.github/workflows/optimization-benchmark.yml`; the push loop and the
+  pull-request gate are thin callers.
 - Benchmark registry and scoreboard contracts are covered by the ordinary test
   suite; public benchmark files are never downloaded.
 - `PreparedSolver` reuses an immutable post-presolve `ExecutionPlan` only when

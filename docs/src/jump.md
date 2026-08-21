@@ -152,7 +152,7 @@ mode to preserve supplied values exactly with provenance `:user_fixed`.
 `parameter_strategy=:adaptive` (the default) enables the bounded Mehrotra
 controller, independent primal/dual step safeguards, adaptive refinement
 limits, and complete fixed-path fallback. See the
-[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md).
+[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).
 
 Native SDP checkpoints are iterate-level warm restarts, not full execution
 snapshots. The dedicated LP path does not currently support checkpoint

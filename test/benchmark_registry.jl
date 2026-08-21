@@ -170,7 +170,8 @@ end
     @test pathological.loader === :pathological_socp_near_tangent
     @test :pathological in pathological.tags
 
-    @test suite_names() == (:micro, :representative, :local_full, :large, :heavy)
+    @test suite_names() ==
+       (:micro, :representative, :local_full, :large, :heavy, :ladder)
     @test 6 <= length(suite_entries(:micro)) <= 12
     @test 20 <= length(suite_entries(:representative)) <= 40
     @test 50 <= length(suite_entries(:local_full)) <= 100
@@ -275,6 +276,7 @@ end
         :micro;
         problem="synthetic/lp_box",
         output=local_output,
+        samples=1,
         warmup=false,
     )
     @test length(local_result.rows) == 1

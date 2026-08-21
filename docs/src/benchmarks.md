@@ -6,16 +6,16 @@ not repeat every table.
 
 ## Benchmark locations
 
-- [`bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/soc_fixed_trace/README.md) — the native
+- [`bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/benchmark/soc_fixed_trace/README.md) — the native
   fixed-trace Q3 versus PSD2 campaign, including models, launcher policy,
   certificate checks, and provenance.
-- [`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/RESULTS.md) — retained historical context and
+- [`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md) — retained historical context and
   the small smoke tier index.
-- [`bench/automatic_pipeline/PARAMETER_SELECTION.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/automatic_pipeline/PARAMETER_SELECTION.md)
+- [`bench/automatic_pipeline/PARAMETER_SELECTION.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/automatic_pipeline/PARAMETER_SELECTION.md)
   — LP cold-start crossover and distant-start sweeps.
-- [`bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/threading/RESULTS.md) — Schur
+- [`bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md) — Schur
   scheduling kernel measurements.
-- [`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/mixed_precision_kkt/RESULTS.md)
+- [`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
   — mixed-precision KKT promotion evidence.
 - [`bench/opt2026/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/bench/opt2026) — native BigFloat optimization,
   preprocessing, and cluster campaign reports.
@@ -58,6 +58,6 @@ fixed-trace execution are production and tested today.
 ## Adaptive parameter evidence
 
 The adaptive parameter controller and its fixed fallback are documented in
-[`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md), with
+[`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md), with
 equations, exact bounds, and arithmetic-specific behavior. Measured
 fixed-versus-adaptive decisions appear in the benchmark locations above.

@@ -172,7 +172,8 @@ end
                 0 1 / 5 2
             ]
             SDPX.copy_owned!(workspace.S, schur)
-            @test SDPX.factor_kkt!(
+            @test SDPX.factorize!(
+                SDPX.select_backend(workspace),
                 workspace,
                 problem,
                 SDPX.SolverOptions{BigFloat}(verbosity=0),
