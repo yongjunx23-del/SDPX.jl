@@ -148,6 +148,17 @@ function _set_raw_option!(optimizer::Optimizer, name::String, value)
             throw(ArgumentError("threads must be a positive integer"))
         optimizer.requested_threads = Int(value)
     end
+    if symbol === :iter_max && value isa Integer && value == 0
+        # The MOI path funnels expert options through the public Settings
+        # surface, where an iteration count of 0 is the *automatic*
+        # sentinel and would silently resolve to the 200-iteration
+        # default. Fail closed instead of misreporting the request.
+        throw(ArgumentError(
+            "max_iterations must be at least 1 on the MOI surface; " *
+            "0 is the Settings automatic sentinel and cannot request a " *
+            "zero-iteration solve here",
+        ))
+    end
     optimizer.options = _replace_option(optimizer.options, symbol, value)
     return nothing
 end

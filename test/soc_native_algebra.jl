@@ -144,3 +144,24 @@ using LinearAlgebra
         @test recovered[1] == 0.6
     end
 end
+
+@testset "fixed-trace HKM metric interiority contract" begin
+    destination = zeros(3)
+    dual = [2.0, 0.25, -0.5]
+    @test SDPX._soc_fixed_trace_hkm_metric!(
+        destination, [3.0, 1.0, 0.5], dual,
+    )
+    @test destination ≈ [
+        (3 * 2 - 1 * 0.25 + 0.5 * -0.5) / (9 - 1 - 0.25),
+        -(1 * -0.5 + 0.5 * 0.25) / (9 - 1 - 0.25),
+        (3 * 2 + 1 * 0.25 - 0.5 * -0.5) / (9 - 1 - 0.25),
+    ]
+    # A reflected head has a positive determinant but is outside the cone;
+    # the boundary itself is non-interior in either representation.
+    @test !SDPX._soc_fixed_trace_hkm_metric!(
+        zeros(3), [-3.0, 1.0, 0.5], dual,
+    )
+    @test !SDPX._soc_fixed_trace_hkm_metric!(
+        zeros(3), [1.0, 1.0, 0.0], dual,
+    )
+end

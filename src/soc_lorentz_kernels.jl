@@ -331,14 +331,20 @@ end
 @inline function _soc_fixed_trace_hkm_metric!(destination, primal, dual)
     x0, x1, x2 = primal
     z0, z1, z2 = dual
+    # Interiority is decided by the stable head-versus-tail-norm comparison,
+    # not the raw determinant difference (which cancels near the boundary);
+    # the raw determinant is still what the metric divides by, so it must
+    # also be strictly positive in floating point. A reflected head
+    # (x0 < -||tail||) has a positive determinant but is outside the cone —
+    # the old determinant-only test accepted it.
+    tail_norm = sqrt(x1 * x1 + x2 * x2)
+    x0 > tail_norm || return false
     determinant = x0 * x0 - x1 * x1 - x2 * x2
-    determinant > zero(determinant) || throw(ArgumentError(
-        "fixed-trace HKM primal state must be interior",
-    ))
+    determinant > zero(determinant) || return false
     destination[1] = (x0 * z0 - x1 * z1 + x2 * z2) / determinant
     destination[2] = -(x1 * z2 + x2 * z1) / determinant
     destination[3] = (x0 * z0 + x1 * z1 - x2 * z2) / determinant
-    return destination
+    return true
 end
 
 @inline function _soc_fixed_trace_hkm_rhs_coordinates(

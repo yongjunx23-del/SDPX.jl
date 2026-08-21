@@ -1108,6 +1108,14 @@ end
     return false
 end
 
+"""
+    _native_soc_add_metric!(workspace, cone, block) -> (ok, failed_block)
+
+Accumulate one cone's NT metric block into the Schur Hessian. Returns
+`(true, 0)` on success; `(false, block)` marks a cone whose state left
+the interior during fixed-trace HKM assembly, mirroring
+`_native_soc_scaling!` so callers convert it to `NumericalBreakdown`.
+"""
 function _native_soc_add_metric!(
     workspace::NativeSOCWorkspace{T},
     cone::SOCConstraint{T},
@@ -1121,11 +1129,13 @@ function _native_soc_add_metric!(
         a12 = reduction.tail_map[1, 2, block]
         a21 = reduction.tail_map[2, 1, block]
         a22 = reduction.tail_map[2, 2, block]
-        metric = _soc_fixed_trace_hkm_metric!(
+        metric_ok = _soc_fixed_trace_hkm_metric!(
             workspace.scratch[block],
             workspace.slack[block],
             workspace.dual[block],
         )
+        metric_ok || return (false, block)
+        metric = workspace.scratch[block]
         h11 = a11 * (metric[1] * a11 + metric[2] * a21) +
               a21 * (metric[2] * a11 + metric[3] * a21)
         h12 = a11 * (metric[1] * a12 + metric[2] * a22) +
@@ -1135,7 +1145,7 @@ function _native_soc_add_metric!(
         workspace.local_metric[1, block] = h11
         workspace.local_metric[2, block] = h12
         workspace.local_metric[3, block] = h22
-        return workspace
+        return (true, 0)
     end
     metric = workspace.scratch[block]
     basis = workspace.offset[block]
@@ -1169,7 +1179,7 @@ function _native_soc_add_metric!(
                         (workspace.hessian[column, row] += value)
                 end
             end
-            return workspace
+            return (true, 0)
         end
     end
     # Dense single-cone assembly: the NT scaled metric is constant across the
@@ -1198,7 +1208,7 @@ function _native_soc_add_metric!(
         one(T),
         one(T),
     )
-    return workspace
+    return (true, 0)
 end
 
 function _native_soc_assemble_factor!(
@@ -1879,7 +1889,13 @@ function _native_soc_cold_start_init!(
     end
     zero_owned!(workspace.hessian)
     @inbounds for block in eachindex(problem.cones)
-        _native_soc_add_metric!(workspace, problem.cones[block], block)
+        metric_ok, metric_block = _native_soc_add_metric!(
+            workspace, problem.cones[block], block,
+        )
+        metric_ok || return false, report((
+            cause=:metric_assembly_failed,
+            block=metric_block,
+        ))
     end
     factor = _native_soc_assemble_factor!(workspace, problem)
     factor === nothing && return false, report((cause=:la_factor_failed,))
@@ -3092,14 +3108,32 @@ Base.@noinline function _solve_native_soc_core(
         end
         assembly_started = time_ns()
         zero_owned!(workspace.hessian)
+        metric_failed_block = 0
         @inbounds for block in eachindex(problem.cones)
-            _native_soc_add_metric!(workspace, problem.cones[block], block)
+            metric_ok, metric_block = _native_soc_add_metric!(
+                workspace, problem.cones[block], block,
+            )
+            if !metric_ok
+                metric_failed_block = metric_block
+                break
+            end
         end
         assembly_elapsed = (time_ns() - assembly_started) / 1.0e9
         phase_assembly += assembly_elapsed
         if workspace.plan.cone.execution isa FixedTraceQ3Execution
             workspace.local_metric_preparations += 1
             workspace.fixed_local_metric_seconds += assembly_elapsed
+        end
+        if metric_failed_block > 0
+            status = NumericalBreakdown
+            message = "NativeSOC metric assembly left the interior for cone " *
+                      "$metric_failed_block."
+            termination = (
+                reason=:metric_assembly_failure,
+                stage=:schur_assembly,
+                block=metric_failed_block,
+            )
+            break
         end
         workspace.equality_prepared = false
         workspace.equality_factor = nothing

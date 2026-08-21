@@ -231,3 +231,21 @@ end
         @test interval_dual ≈ -1.0 atol = 1e-6
     end
 end
+
+@testset "zero iteration request fails closed at the MOI seam" begin
+    optimizer = SDPX.Optimizer(; verbosity=0)
+    error_value = try
+        MOI.set(
+            optimizer,
+            MOI.RawOptimizerAttribute("max_iterations"),
+            0,
+        )
+        nothing
+    catch caught
+        caught
+    end
+    @test error_value isa ArgumentError
+    @test occursin(
+        "automatic sentinel", sprint(showerror, error_value),
+    )
+end

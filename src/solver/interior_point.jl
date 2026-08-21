@@ -2355,8 +2355,16 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # `IterLimit` runs that were still improving are reported as-is.
     if status !== Optimal && status !== FeasibleCert && status !== InfeasibleCert &&
        best_iterate.valid
-        final_merit = max(p_res / scale_p, d_res / scale_d,
-            abs(pObj - dObj) / max(one(T), (abs(pObj) + abs(dObj)) / 2))
+        # Compare like with like: the stored best merit and the exit merit
+        # both come from `stagnation_merit`, so the complementarity term
+        # ranks both sides of the comparison. The exit iterate's relative
+        # gap is recomputed from the final objectives as before.
+        final_merit = stagnation_merit(
+            stagnation, opts, p_res, d_res,
+            abs(pObj - dObj) / max(one(T), (abs(pObj) + abs(dObj)) / 2),
+            current_complementarity, scale_p, scale_d,
+            max(abs(pObj), abs(dObj)),
+        )
         if !isfinite(final_merit) || best_merit < final_merit / 2
             best = best_iterate
             x, X, y, Y = best.x, best.X, best.y, best.Y
