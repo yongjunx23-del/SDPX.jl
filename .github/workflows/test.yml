@@ -194,3 +194,12 @@ jobs:
         run: |
           julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
           julia --project=docs docs/make.jl
+
+  optimization-gate:
+    name: Benchmark-driven optimization gate
+    if: github.event_name == 'pull_request' && github.base_ref == 'refactor/benchmark-driven-core-20260821'
+    permissions:
+      contents: write
+      actions: read
+      statuses: write
+    uses: ./.github/workflows/optimization-loop.yml

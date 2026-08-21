@@ -9,6 +9,7 @@ on:
   pull_request:
     branches:
       - refactor/benchmark-driven-core-20260821
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
