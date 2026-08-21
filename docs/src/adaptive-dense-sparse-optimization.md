@@ -8,9 +8,9 @@ Date: 2026-07-24
 > certification, a guarded adaptive parameter controller, owned BigFloat
 > kernels, a fused exact-arrow path that allocates neither transformed panels
 > nor pair buffers, and a usable-memory-aware scheduler. See the current
-> [extended-precision report](../evidence/bench/extended_precision_blas/REPORT.md),
+> [extended-precision report](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/extended_precision_blas/REPORT.md),
 > [automatic-pipeline report](pipeline.md), and
-> [threading results](../evidence/bench/threading/RESULTS.md).
+> [threading results](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md).
 
 ## Executive result
 
