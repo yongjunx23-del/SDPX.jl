@@ -188,21 +188,11 @@ const MOIPSDSet = Union{
     MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle},
 }
 
-const MOIVectorLinearSet = Union{
-    MOI.Nonnegatives,
-    MOI.Nonpositives,
-}
-
 const MOIVectorConicSet = Union{
     MOI.Nonnegatives,
     MOI.Nonpositives,
     MOI.Zeros,
     MOI.ExponentialCone,
-    MOI.RotatedSecondOrderCone,
-}
-
-const MOILorentzSet = Union{
-    MOI.SecondOrderCone,
     MOI.RotatedSecondOrderCone,
 }
 
@@ -1196,7 +1186,10 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
         _moi_option_symbol(options.sparse, :on, :off),
         options.equality_solver,
         options.working_precision_policy,
-        options.diagnostics in (:none, :summary, :full) ? options.diagnostics : :summary,
+        # SolverOptions carries diagnostics as a Bool; the public Settings
+        # surface wants the symbolic level (:summary retains plan/phase
+        # payloads, :none drops them).
+        options.diagnostics ? :summary : :none,
         options.verbosity,
         options.timing,
         options.certification,
@@ -1672,6 +1665,7 @@ function MOI.get(
                for expression in info.expressions]
     info.kind === :psd && return values
     info.kind === :vector && return values
+    info.kind === :free && return values
     info.kind === :interval && return values[1]
     return values[1]
 end
@@ -1700,9 +1694,13 @@ function MOI.get(
     elseif info.kind === :interval
         lower_dual = dual(result, info.refs[1])
         upper_dual = dual(result, info.aux_refs[1])
+        # The interval is bridged into (f - l) ∈ Nonnegative() and
+        # (f - u) ∈ Nonpositive(); MOI's interval dual is their sum —
+        # nonnegative when the lower bound is active, nonnegative-bound
+        # sign flipped at the upper bound (upper_dual <= 0 there).
         return _owned_arithmetic_eval(
             T,
-            () -> lower_dual - upper_dual;
+            () -> lower_dual + upper_dual;
             precision_bits=precision_bits(model),
         )
     elseif info.kind === :free

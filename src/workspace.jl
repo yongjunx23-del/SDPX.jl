@@ -1208,10 +1208,11 @@ function Workspace(
         Int[]
     sparse_kkt_workspace = sparse_schur ?
         _sparse_schur_sdp_workspace(prob, selected_threads) : nothing
-    vector_partial_count =
-        sparse_schur ?
-        min(selected_threads, max(m, 1)) :
-        T === BigFloat ? 1 : block_nbins
+    # `vpartial` is indexed exclusively by block-bin position in the
+    # threaded block kernels, so it must always cover `block_nbins` bins.
+    # (The former sparse-route cap `min(selected_threads, max(m, 1))` could
+    # fall below the bin count when threads > m and underran the array.)
+    vector_partial_count = T === BigFloat ? 1 : block_nbins
     la_backend = instantiate_la_backend(plan.la_config, T, selected_threads)
     workspace = Workspace{T}(blk,
         (compact_arrow || sparse_schur) ?

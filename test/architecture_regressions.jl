@@ -559,3 +559,33 @@ end
     @test finalized.payload.route ===
           only(result.diagnostics.attempts).executed.formulation
 end
+
+@testset "vector partials cover every block bin" begin
+    # `vpartial` is indexed by block-bin position in the threaded block
+    # kernels. The former sparse-route sizing `min(threads, max(m, 1))`
+    # allocated fewer partials than bins whenever threads exceeded the
+    # dual dimension m, underrunning the array in the first threaded
+    # residual sweep. BigFloat stays at one partial because its block
+    # loops are serial by ownership.
+    coefficients = [Vector{SparseMatrixCSC{Float64,Int}}(undef, 2)]
+    for i in 1:2
+        coefficients[1][i] = sparse(1.0I, 3, 3)
+    end
+    C = [Matrix{Float64}(1.0I, 3, 3)]
+    sparse_problem = SDPX.ingest(
+        ones(2), coefficients, C, zeros(2, 0), Float64[];
+        sparse=true, verbosity=0,
+    )
+    threads = max(Threads.nthreads(), 4)
+    sparse_workspace = SDPX.Workspace(sparse_problem; thread_count=threads)
+    @test length(sparse_workspace.vpartial) >=
+          length(sparse_workspace.block_bins)
+
+    dense_problem = SDPX.ingest(
+        ones(2), [zeros(2, 3, 3)], C, zeros(2, 0), Float64[];
+        verbosity=0,
+    )
+    dense_workspace = SDPX.Workspace(dense_problem; thread_count=threads)
+    @test length(dense_workspace.vpartial) >=
+          length(dense_workspace.block_bins)
+end

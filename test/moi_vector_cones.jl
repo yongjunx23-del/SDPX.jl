@@ -165,4 +165,69 @@ end
         @test index_map[zero] isa MOI.ConstraintIndex
         @test MOI.get(optimizer, MOI.NumberOfVariables()) == 5
     end
+
+    @testset "vector Reals primal and interval dual signs" begin
+        # VectorAffineFunction-in-Reals(d): the constraint is vacuous (the
+        # reals are the whole space) but its primal is still the full
+        # d-vector of evaluated row expressions (regression: the getter
+        # truncated it to the first coordinate).
+        source = MOI.Utilities.Model{Float64}()
+        variables = MOI.add_variables(source, 2)
+        orthant = MOI.add_constraint(
+            source,
+            MOI.VectorOfVariables(variables),
+            MOI.Nonnegatives(2),
+        )
+        moi_contract_objective!(source, variables, [1.0, 1.0])
+        free = MOI.add_constraint(
+            source,
+            MOI.VectorAffineFunction(
+                [
+                    MOI.VectorAffineTerm(
+                        1, MOI.ScalarAffineTerm(1.0, variables[1]),
+                    ),
+                    MOI.VectorAffineTerm(
+                        2, MOI.ScalarAffineTerm(1.0, variables[2]),
+                    ),
+                ],
+                [-1.0, -2.0],
+            ),
+            MOI.Reals(2),
+        )
+        optimizer, index_map = moi_contract_copy(source)
+        MOI.optimize!(optimizer)
+        @test MOI.get(optimizer, MOI.TerminationStatus()) == MOI.OPTIMAL
+        primal = MOI.get(optimizer, MOI.ConstraintPrimal(), index_map[free])
+        @test primal isa Vector{Float64}
+        @test length(primal) == 2
+        @test primal ≈ [-1.0, -2.0] atol = 1e-6
+        @test MOI.get(
+            optimizer, MOI.ConstraintPrimal(), index_map[orthant],
+        ) ≈ [0.0, 0.0] atol = 1e-6
+
+        # Interval dual at an active upper bound is negative (regression:
+        # the getter subtracted the Nonpositive upper part — itself <= 0 —
+        # so a negative interval dual was unrepresentable).
+        interval_source = MOI.Utilities.Model{Float64}()
+        bounded = MOI.add_variable(interval_source)
+        moi_contract_objective!(interval_source, [bounded], [-1.0])
+        interval = MOI.add_constraint(
+            interval_source,
+            MOI.ScalarAffineFunction(
+                [MOI.ScalarAffineTerm(1.0, bounded)], 0.0,
+            ),
+            MOI.Interval(0.0, 1.0),
+        )
+        interval_optimizer, interval_map = moi_contract_copy(interval_source)
+        MOI.optimize!(interval_optimizer)
+        @test MOI.get(interval_optimizer, MOI.TerminationStatus()) ==
+              MOI.OPTIMAL
+        @test MOI.get(
+            interval_optimizer, MOI.VariablePrimal(), interval_map[bounded],
+        ) ≈ 1.0 atol = 1e-6
+        interval_dual = MOI.get(
+            interval_optimizer, MOI.ConstraintDual(), interval_map[interval],
+        )
+        @test interval_dual ≈ -1.0 atol = 1e-6
+    end
 end

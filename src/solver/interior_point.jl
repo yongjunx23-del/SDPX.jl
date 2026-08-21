@@ -1695,7 +1695,7 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         n > 0 ? knrmInf(solve_prob.b) : zero(T))
     scale_d = 1 + knrmInf(solve_prob.c)
 
-    # §4.1 tolerance hygiene: warn once, up front, if the requested gap is at or
+    # §4.1 tolerance hygiene: warn once, up front, if the requested gap is
     # below the type's own working precision — verified during development that
     # asking Float64x2 (eps≈1e-31) for ϵ_gap=1e-25 grinds the line search down to
     # noise and exhausts restarts, exactly the silent-iterMax-burn this catches.
@@ -2053,7 +2053,14 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 gap_rel_now = abs(pObj - dObj) / max(one(T), (abs(pObj) + abs(dObj)) / 2)
                 p_res_rel_now = p_res / scale_p
                 d_res_rel_now = d_res / scale_d
-                if gap_rel_now < near_tol * opts.ϵ_gap && p_res_rel_now < near_tol * opts.ϵ_primal &&
+                # The gap term uses the equilibration-tightened acceptance
+                # threshold: this is a terminal decision whose message claims
+                # nearness to the *requested* tolerance, and an internally
+                # saturated gap can be up to `objective_scale` times looser in
+                # original coordinates. The residual terms are unaffected by
+                # objective scaling and keep the user's raw tolerances.
+                if gap_rel_now < near_tol * termination_gap_tolerance &&
+                   p_res_rel_now < near_tol * opts.ϵ_primal &&
                    d_res_rel_now < near_tol * opts.ϵ_dual
                     status, message = Stalled,
                     "Step size collapsed within $(Float64(near_tol))×, but not within, " *

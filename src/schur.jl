@@ -1056,7 +1056,14 @@ function sparse_schur_block_scatter!(
     blocks = cons.Asp[l]
     coeffs = cons.packed2[l]
 
-    fill!(bw.W2, zero(T))
+    # `fill!(A, zero(BigFloat))` aliases one mutable MPFR object across the
+    # panel; zero it per entry like `sparse_schur_block!` so the ownership
+    # invariant survives any downstream owned-solve dispatch.
+    if T === BigFloat
+        zero_owned!(bw.W2)
+    else
+        fill!(bw.W2, zero(T))
+    end
     @inbounds for i in 1:dimension
         bw.W2[i, i] = one(T)
     end
