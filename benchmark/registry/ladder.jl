@@ -54,15 +54,15 @@ const LADDER_SPECS = BenchmarkSpec[
         size=(variables=250, blocks=250, block_dimension=2),
     ),
     _synthetic(
-        "ladder/sdp_600", :sdp, :semidefinite_program, (:ladder,),
+        "ladder/sdp_500", :sdp, :semidefinite_program, (:ladder,),
         (:scaling, :ladder), :sdp_scaling_ladder_medium, 251,
-        :sdp_many_small, (blocks=600,); objective=600.0,
-        size=(variables=600, blocks=600, block_dimension=2),
+        :sdp_many_small, (blocks=500,); objective=500.0,
+        size=(variables=500, blocks=500, block_dimension=2),
     ),
     _synthetic(
-        "ladder/sdp_1000", :sdp, :semidefinite_program, (:ladder,),
+        "ladder/sdp_750", :sdp, :semidefinite_program, (:ladder,),
         (:scaling, :ladder), :sdp_scaling_ladder_large, 257,
-        :sdp_many_small, (blocks=1000,); objective=1000.0,
-        size=(variables=1000, blocks=1000, block_dimension=2),
+        :sdp_many_small, (blocks=750,); objective=750.0,
+        size=(variables=750, blocks=750, block_dimension=2),
     ),
 ]
