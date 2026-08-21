@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           git worktree add --detach "$BASELINE_DIR" HEAD^
           git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$MFLA_DIR"
-          git -C "$MFLA_DIR" checkout 2b93685c773db323e9397e448063925dc6cb96fe
+          git -C "$MFLA_DIR" checkout 00ee8c76827dd69b04ae728a7542abe64bb35431
           git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$BFLA_DIR"
           git -C "$BFLA_DIR" checkout b2aed396718d03c60faf017388c3e2fc30934513
 
