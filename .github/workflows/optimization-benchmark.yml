@@ -41,15 +41,24 @@ jobs:
       MKL_NUM_THREADS: '1'
       SDPX_TEST_PROFILE: quick
       OUT_DIR: ${{ github.workspace }}/optimization-artifacts
-      BASELINE_DIR: ${{ runner.temp }}/sdpx-parent
-      BASELINE_ENV: ${{ runner.temp }}/sdpx-parent-env
-      CANDIDATE_ENV: ${{ runner.temp }}/sdpx-candidate-env
-      MFLA_DIR: ${{ runner.temp }}/MFLA
-      BFLA_DIR: ${{ runner.temp }}/BFLA
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # The runner context is unavailable in job-level env (GitHub rejects
+      # the workflow at parse time), so the scratch paths are exported in
+      # this first step; every later step reads them unchanged.
+      - name: Define benchmark scratch paths
+        shell: bash
+        run: |
+          cat >> "$GITHUB_ENV" <<'EOF'
+          BASELINE_DIR=$RUNNER_TEMP/sdpx-parent
+          BASELINE_ENV=$RUNNER_TEMP/sdpx-parent-env
+          CANDIDATE_ENV=$RUNNER_TEMP/sdpx-candidate-env
+          MFLA_DIR=$RUNNER_TEMP/MFLA
+          BFLA_DIR=$RUNNER_TEMP/BFLA
+          EOF
 
       - name: Mark optimization gate pending
         if: inputs.post_status
