@@ -25,6 +25,10 @@ function _validate_variable_shape(domain::ProductConeDomain, shape::Int)
     shape >= 1 || throw(ArgumentError("variable dimension must be positive, got $shape"))
     domain isa RotatedLorentzCone && shape < 3 &&
         throw(ArgumentError("RotatedLorentzCone variable dimension must be at least 3"))
+    domain isa ExponentialCone && shape != EXPONENTIAL_CONE_DIMENSION &&
+        throw(ArgumentError(
+            "ExponentialCone variable dimension must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+        ))
     return shape
 end
 

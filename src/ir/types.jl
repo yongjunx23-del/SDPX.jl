@@ -70,7 +70,7 @@ packed_length(metadata::PSDStorageMetadata) = metadata.packed_length
 # Native product-cone block
 # ---------------------------------------------------------------------------
 
-const PRODUCT_CONES = (:free, :nonnegative, :nonpositive, :zero, :soc, :rsoc, :psd)
+const PRODUCT_CONES = (:free, :nonnegative, :nonpositive, :zero, :soc, :rsoc, :psd, :exp)
 
 _domain_cone(::Reals) = :free
 _domain_cone(::Nonnegative) = :nonnegative
@@ -79,6 +79,10 @@ _domain_cone(::ZeroCone) = :zero
 _domain_cone(::LorentzCone) = :soc
 _domain_cone(::RotatedLorentzCone) = :rsoc
 _domain_cone(::PSDCone) = :psd
+_domain_cone(::ExponentialCone) = :exp
+
+"""Fixed vector dimension of one exponential-cone block."""
+const EXPONENTIAL_CONE_DIMENSION = 3
 
 """
     SDPX.NativeBlock
@@ -87,11 +91,12 @@ Descriptor of ONE native product-cone block.
 
 Fields
 - `cone::Symbol` — cone kind: `:free`, `:nonnegative`,
-  `:nonpositive`, `:zero`, `:soc`, `:rsoc` or `:psd`.
+  `:nonpositive`, `:zero`, `:soc`, `:rsoc`, `:psd` or `:exp`.
 - `domain` — the matching mathematical singleton (`Reals()`,
-  `Nonnegative()`, …, `PSDCone()`).
+  `Nonnegative()`, …, `PSDCone()`, `ExponentialCone()`).
 - `shape::Int` — block shape: matrix dimension `n` for `:psd`,
-  vector dimension `n` for every other cone.
+  vector dimension `n` for every other cone (fixed at 3 for
+  `:exp`).
 - `offset::Int` — 1-based first scalar variable position of this
   block in the global column vector (`blocks` are concatenated in
   order; `offset` is validated to be exactly one past the previous
@@ -119,6 +124,11 @@ struct NativeBlock
         _domain_cone(domain) === cone ||
             throw(ArgumentError("cone kind $cone does not match domain $domain"))
         shape >= 1 || throw(ArgumentError("block shape must be >= 1, got $shape"))
+        if cone === :exp && Int(shape) != EXPONENTIAL_CONE_DIMENSION
+            throw(ArgumentError(
+                "ExponentialCone block shape must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+            ))
+        end
         offset >= 1 || throw(ArgumentError("block offset must be >= 1, got $offset"))
         length_ = variable_length(domain, shape)
         psd_ = cone === :psd ? PSDStorageMetadata(Int(shape)) : nothing
@@ -154,7 +164,9 @@ Ordered affine-cone block over the rows of the equality map.
 Fields
 - `domain` — the affine-cone domain of the block (`Reals`,
   `Nonnegative`, `Nonpositive`, `ZeroCone`, `LorentzCone`,
-  `RotatedLorentzCone` or `PSDCone`).
+  `RotatedLorentzCone`, `PSDCone` or `ExponentialCone`; the
+  exponential cone's shape is fixed at
+  `EXPONENTIAL_CONE_DIMENSION`).
 - `shape::Int` — vector dimension for vector cones and matrix dimension
   for a PSD block.
 - `offset::Int` — 1-based first global row of this block.
@@ -175,6 +187,11 @@ struct RowBlock
     function RowBlock(domain::AffineConeDomain, offset::Integer, shape::Integer, rows::Vector{Int})
         offset >= 1 || throw(ArgumentError("row block offset must be >= 1, got $offset"))
         shape >= 1 || throw(ArgumentError("row block shape must be >= 1, got $shape"))
+        if domain isa ExponentialCone && Int(shape) != EXPONENTIAL_CONE_DIMENSION
+            throw(ArgumentError(
+                "ExponentialCone row block shape must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+            ))
+        end
         block_length = variable_length(domain, shape)
         length(rows) == block_length ||
             throw(ArgumentError("row source map length $(length(rows)) != block length $block_length"))

@@ -57,6 +57,7 @@ function _public_validate_algorithm(route::NativeConeRoute, settings::Settings)
     allowed = route.route === :lp_family ? (:auto, :lp) :
               route.route === :soc_family ? (:auto, :socp) :
               route.route === :sdp_family ? (:auto, :sdp) :
+              route.route === :exp_family ? (:auto,) :
               (:auto,)
     settings.algorithm in allowed || throw(ArgumentError(
         "settings.algorithm=$(settings.algorithm) is incompatible with " *
@@ -268,6 +269,16 @@ function _public_lower_native(
     route::NativeConeRoute,
     settings::Settings,
 )
+    # Phase A fail-closed contract: the exponential route classifies and
+    # compiles, but no native exponential lowering exists yet. The named
+    # error keeps the failure explicit instead of silently routing exp
+    # programs into the SOC or SDP lowerers.
+    route.route === :exp_family && throw(PublicOptimizeError(
+        route.route,
+        :exp_lowerer_unavailable,
+        "optimize: native exponential-cone lowering is not available yet; " *
+        "the :exp_family route is classification-only in this build",
+    ))
     lowerer_name = route.route === :lp_family ? :lower_lp_native :
                    route.route === :soc_family ? :lower_soc_native :
                    route.route === :sdp_family ? :lower_sdp_native :

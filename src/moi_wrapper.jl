@@ -197,6 +197,7 @@ const MOIVectorConicSet = Union{
     MOI.Nonnegatives,
     MOI.Nonpositives,
     MOI.Zeros,
+    MOI.ExponentialCone,
     MOI.RotatedSecondOrderCone,
 }
 
@@ -448,6 +449,7 @@ _moi_set_kind(::Type{<:MOI.RotatedSecondOrderCone}) = :rsoc
 _moi_set_kind(::Type{<:MOI.Reals}) = :free
 _moi_set_kind(::Type{<:MOI.PositiveSemidefiniteConeTriangle}) = :psd
 _moi_set_kind(::Type{<:MOI.Scaled{MOI.PositiveSemidefiniteConeTriangle}}) = :psd_scaled
+_moi_set_kind(::Type{<:MOI.ExponentialCone}) = :exp
 _moi_set_kind(::Type{<:MOI.GreaterThan}) = :nonnegative
 _moi_set_kind(::Type{<:MOI.LessThan}) = :nonpositive
 _moi_set_kind(::Type{<:MOI.EqualTo}) = :zero
@@ -463,6 +465,7 @@ function _moi_route_family(::Type{S}) where {S}
     kind in (:nonnegative, :nonpositive, :interval) && return :lp_family
     kind in (:soc, :rsoc) && return :soc_family
     kind in (:psd, :psd_scaled) && return :sdp_family
+    kind === :exp && return :exp_family
     return nothing
 end
 
@@ -686,8 +689,9 @@ function _moi_validate_family_set(constraint_types)
         family === nothing && continue
         family in families || push!(families, family)
     end
-    ordered = Symbol[family for family in (:lp_family, :soc_family, :sdp_family)
-                    if family in families]
+    ordered = Symbol[family for family in
+                     (:lp_family, :soc_family, :sdp_family, :exp_family)
+                     if family in families]
     length(ordered) > 1 && throw(UnsupportedNativeConeRoute(ordered))
     return nothing
 end
@@ -754,6 +758,11 @@ function _moi_vector_variable_groups(
             elseif kind === :rsoc
                 variable!(model, _moi_model_name("moi_rsoc", source_index),
                           length(variables); domain=RotatedLorentzCone())
+            elseif kind === :exp
+                length(variables) == EXPONENTIAL_CONE_DIMENSION ||
+                    throw(MOI.UnsupportedConstraint{F,S}())
+                variable!(model, _moi_model_name("moi_exp", source_index),
+                          length(variables); domain=ExponentialCone())
             elseif kind === :free
                 variable!(model, _moi_model_name("moi_free_product", source_index),
                           length(variables); domain=Reals())
@@ -861,11 +870,12 @@ function _moi_add_vector_constraint!(
             ConstraintRef[], VariableEntry{T}[], nothing, false,
         )
     elseif kind === :nonnegative || kind === :nonpositive || kind === :zero ||
-           kind === :soc || kind === :rsoc
+           kind === :soc || kind === :rsoc || kind === :exp
         domain = kind === :nonnegative ? Nonnegative() :
                  kind === :nonpositive ? Nonpositive() :
                  kind === :zero ? ZeroCone() :
-                 kind === :soc ? LorentzCone() : RotatedLorentzCone()
+                 kind === :soc ? LorentzCone() :
+                 kind === :rsoc ? RotatedLorentzCone() : ExponentialCone()
         block = constraint!(model, _moi_model_name("moi_vector_constraint", source_index),
                             expressions, domain)
         info = MOIModelConstraintInfo{T}(

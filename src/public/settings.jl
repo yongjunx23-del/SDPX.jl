@@ -146,7 +146,9 @@ Fields
   carried to `SolveOptions.linear_algebra_backend`; this file never
   instantiates or probes a provider).
 - `presolve::Symbol` — structural presolve: `:auto`, `:on`, or `:off`.
-- `algorithm::Symbol` — `:auto` / `:lp` / `:socp` / `:sdp`.
+- `algorithm::Symbol` — `:auto` / `:lp` / `:socp` / `:sdp`.  Problems
+  routed to the exponential-cone family accept `:auto` only and fail
+  closed otherwise.
 - `sparse::Symbol` — sparse storage preference `:auto`, `:on`, or `:off`.
 - `equality_solver::Symbol` — `:auto` / `:normal_equations` / `:qr`.
 - `working_precision_policy::Symbol` — `:auto` / `:fixed`.

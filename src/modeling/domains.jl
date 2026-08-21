@@ -71,6 +71,18 @@ dimension `n` belongs to the block shape.
 struct RotatedLorentzCone end
 
 """
+    SDPX.ExponentialCone
+
+The 3-dimensional exponential cone
+`K_exp = { (x, y, z) : y * exp(x / y) <= z, y > 0 }` together with its
+limit `{ (0, y, z) : y >= 0, z >= 0 }`. The dimension is fixed at 3 and
+is validated at block construction: an exponential block always has
+vector shape `n == 3`, never more and never less. This type carries no
+data and remains one block — it is never split or lifted.
+"""
+struct ExponentialCone end
+
+"""
     SDPX.PSDCone
 
 The positive semidefinite cone over real symmetric matrices. This type
@@ -101,7 +113,7 @@ struct Maximize end
 
 # Type unions used by the native IR for well-typed fields. Affine cone
 # blocks use the same mathematical domains as product-variable blocks.
-const ProductConeDomain = Union{Reals,Nonnegative,Nonpositive,ZeroCone,LorentzCone,RotatedLorentzCone,PSDCone}
+const ProductConeDomain = Union{Reals,Nonnegative,Nonpositive,ZeroCone,LorentzCone,RotatedLorentzCone,PSDCone,ExponentialCone}
 const AffineConeDomain = ProductConeDomain
 
 is_product_cone(domain) = domain isa ProductConeDomain

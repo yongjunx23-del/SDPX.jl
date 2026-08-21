@@ -94,7 +94,7 @@ export Model
 export variable!, constraint!, objective!
 export set_start!, set_dual_start!, set_dual_slack_start!
 export Reals, Nonnegative, Nonpositive, ZeroCone
-export LorentzCone, RotatedLorentzCone, PSDCone
+export LorentzCone, RotatedLorentzCone, PSDCone, ExponentialCone
 export Minimize, Maximize
 export Settings, Tolerances, Limits, Outputs
 export optimize!, execution_plan
