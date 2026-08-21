@@ -21,6 +21,13 @@ code.
   supplied for a diagnostic.
 - `heavy`: full NETLIB/SDPLIB/CBLIB, Mittelmann, large sparse, bootstrap and
   precision sweeps. It is register-only and the runner refuses to execute it.
+- `ladder`: per-class scaling ladders, three rungs each — LP box
+  (100/300/1000 variables), single SOC cone (128/512/2048), block-diagonal SDP
+  (250/600/1000 variables, dense Schur complement). Float64/auto, reference
+  objectives empirically verified. The rung grows the dimension that stresses
+  each class's core linear algebra, so a regression surfaces as a phase ratio;
+  the whole suite runs on a laptop in about two minutes and makes no
+  production-scale claim.
 - `core_matrix`: the fixed benchmark-driven-development campaign. It runs
   `synthetic/lp_box`, `synthetic/soc_q3`, and `synthetic/sdp_dense` in
   Float64/auto, Float64x4/MFLA, and BigFloat256/BFLA, for exactly nine rows.
@@ -48,6 +55,10 @@ julia --project=. benchmark/runner.jl micro \
 julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
   --samples=3 --verbose \
   --output=work/baseline/core-matrix.toml
+
+# Per-class scaling ladders (LP/SOC/SDP), laptop-scale phase-scaling evidence.
+julia --project=. benchmark/runner.jl ladder --samples=3 --verbose \
+  --output=work/baseline/ladder.toml
 ```
 
 Results are written as matching TOML and TSV files. Semantic facts (status,

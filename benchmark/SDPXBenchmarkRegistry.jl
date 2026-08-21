@@ -83,6 +83,7 @@ include("registry/synthetic.jl")
 include("registry/pathological.jl")
 include("registry/heavy.jl")
 include("registry/full_unitarity_eft.jl")
+include("registry/ladder.jl")
 
 const REGISTRY = let entries = vcat(
         PUBLIC_SPECS,
@@ -90,6 +91,7 @@ const REGISTRY = let entries = vcat(
         PATHOLOGICAL_SPECS,
         HEAVY_SPECS,
         FULL_UNITARITY_EFT_SPECS,
+        LADDER_SPECS,
     )
     table = Dict{String,BenchmarkSpec}()
     for spec in entries
@@ -106,6 +108,7 @@ include("suites/local_full.jl")
 include("suites/large.jl")
 include("suites/heavy.jl")
 include("suites/core_matrix.jl")
+include("suites/ladder.jl")
 
 const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :micro => MICRO_SUITE,
@@ -114,6 +117,7 @@ const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :large => LARGE_SUITE,
     :heavy => HEAVY_SUITE,
     :core_matrix => CORE_MATRIX_SUITE,
+    :ladder => LADDER_SUITE,
 )
 
 include("cache.jl")
@@ -124,7 +128,7 @@ benchmark_registry() = sort!(collect(values(REGISTRY)); by=spec -> spec.id)
 benchmark_spec(id::AbstractString) = get(REGISTRY, String(id)) do
     throw(KeyError("unknown benchmark id $(repr(id))"))
 end
-suite_names() = (:micro, :representative, :local_full, :large, :heavy)
+suite_names() = (:micro, :representative, :local_full, :large, :heavy, :ladder)
 campaign_names() = (:core_matrix,)
 
 function suite_entries(name::Symbol)
