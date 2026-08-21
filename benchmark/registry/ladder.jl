@@ -48,6 +48,18 @@ const LADDER_SPECS = BenchmarkSpec[
         size=(variables=2048, cone_dimensions=(2048,), equalities=2047),
     ),
     _synthetic(
+        "ladder/soc_many_512x8", :socp, :second_order_cone_program, (:ladder,),
+        (:scaling, :ladder), :soc_scaling_ladder_many_small, 263,
+        :soc_many_blocks, (blocks=512, dimension=8); objective=0.0,
+        size=(variables=4096, blocks=512, cone_dimensions=8),
+    ),
+    _synthetic(
+        "ladder/soc_many_2048x4", :socp, :second_order_cone_program, (:ladder,),
+        (:scaling, :ladder), :soc_scaling_ladder_many_tiny, 269,
+        :soc_many_blocks, (blocks=2048, dimension=4); objective=0.0,
+        size=(variables=8192, blocks=2048, cone_dimensions=4),
+    ),
+    _synthetic(
         "ladder/sdp_250", :sdp, :semidefinite_program, (:ladder,),
         (:scaling, :ladder), :sdp_scaling_ladder_small, 241,
         :sdp_many_small, (blocks=250,); objective=250.0,
