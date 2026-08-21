@@ -1,11 +1,11 @@
 # Sparse-Schur COO contraction kernels.
 #
 # The generic compatibility implementation in `schur.jl` accepts any
-# `AbstractMatrix` and obtains flat storage through `vec`.  Production Schur
+# `AbstractMatrix` and obtains flat storage through `vec`. Production Schur
 # workspaces pass owned dense `Matrix` values, and Julia 1.10 does not reliably
 # eliminate that wrapper after this method is inlined into the quadratic
-# active-variable loop.  Specialize the production case so every contraction
-# indexes the existing column-major matrix storage directly.
+# active-variable loop. Specialize only the owned production case so every
+# contraction indexes the same existing column-major storage directly.
 
 @inline function _dot_dense_coo(
     matrix::Matrix{T},
