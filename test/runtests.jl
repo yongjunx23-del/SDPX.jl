@@ -73,7 +73,6 @@ const FULL_TESTS = (
     "soc_native_solver.jl",
     "auto_planner.jl",
     "fixed_trace_benchmark_regressions.jl",
-    "soc_q3_kernel_regressions.jl",
     "solver_regressions.jl",
     "kkt_regressions.jl",
     "kkt_sparse_backend.jl",

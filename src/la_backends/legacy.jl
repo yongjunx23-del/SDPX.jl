@@ -63,8 +63,6 @@ legacy_la_provider_identity(::SDPXLegacyLAProvider) = :sdpx_legacy_la
 legacy_la_provider_arithmetic(::SDPXLegacyLAProvider{A,O}) where {A,O} = A
 legacy_la_provider_capabilities(::SDPXLegacyLAProvider) =
     SDPX_LEGACY_LA_CAPABILITIES
-legacy_la_provider_capability_model(::SDPXLegacyLAProvider) =
-    SDPX_LEGACY_LA_CAPABILITY_MODEL
 legacy_la_provider_ownership(::SDPXLegacyLAProvider{A,O}) where {A,O} = O
 legacy_la_provider_supports(
     provider::SDPXLegacyLAProvider,

@@ -145,7 +145,6 @@ NativeBlock(domain::ProductConeDomain, shape::Integer, offset::Integer) =
     NativeBlock(_domain_cone(domain), domain, shape, offset)
 
 block_cone(block::NativeBlock) = block.cone
-block_domain(block::NativeBlock) = block.domain
 block_shape(block::NativeBlock) = block.shape
 block_offset(block::NativeBlock) = block.offset
 block_length(block::NativeBlock) = block.length
@@ -212,7 +211,6 @@ end
 
 row_block_domain(block::RowBlock) = block.domain
 row_block_shape(block::RowBlock) = block.shape
-row_block_offset(block::RowBlock) = block.offset
 row_block_length(block::RowBlock) = block.length
 row_block_rows(block::RowBlock) = block.rows
 row_block_psd_storage(block::RowBlock) = block.psd

@@ -401,9 +401,3 @@ function _attach_diagnostics(
     )
 end
 
-"""Add measured public-frontend work without changing the result payload.
-
-Frontend wrappers may be nested (for example one-call ingest -> typed solve),
-so the phase is accumulated.  The helper is deliberately a pure result
-rewrite: it does not revisit planning, numerical state, or certification.
-"""

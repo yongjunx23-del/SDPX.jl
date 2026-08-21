@@ -168,13 +168,6 @@ function Base.iterate(block::VariableBlockRef, state::Int=1)
 end
 
 variable_ref(entry::VariableEntry) = entry.ref
-variable_refs(block::VariableBlockRef) = begin
-    record = _variable_record(block)
-    identity = model_identity(block.model)
-    [VariableRef(identity, block.block, index) for index in 1:record.length]
-end
-variable_domain(block::VariableBlockRef) = _variable_record(block).domain
-variable_name(block::VariableBlockRef) = _variable_record(block).name
 
 function Base.show(io::IO, block::VariableBlockRef{T}) where {T}
     record = _variable_record(block)

@@ -345,6 +345,3 @@ function reduced_augmented_kkt_residual!(
     return knrmInf(workspace.residual)
 end
 
-# Compatibility/internal spelling retained for callers added during Round 3.
-dense_augmented_kkt_residual!(args...) =
-    reduced_augmented_kkt_residual!(args...)
