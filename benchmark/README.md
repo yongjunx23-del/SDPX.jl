@@ -36,7 +36,7 @@ mandatory for an accepted optimization.
 ## Local commands
 
 ```sh
-julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 julia --project=. benchmark/runner.jl representative --verbose
 julia --project=. benchmark/runner.jl local_full
 julia --project=. benchmark/runner.jl micro --problem=synthetic/sdp_dense
@@ -45,7 +45,7 @@ julia --project=. benchmark/runner.jl micro \
 
 # Fixed LP/SOCP/SDP × precision campaign. Three samples are a local hot-state
 # development gate; use the fresh-process protocol below for performance claims.
-julia --project=bench benchmark/runner.jl core_matrix \
+julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
   --samples=3 --verbose \
   --output=work/baseline/core-matrix.toml
 ```
@@ -88,12 +88,12 @@ project/manifest, thread, BLAS, provider, input, and environment settings:
 ```sh
 # Baseline worktree / commit
 JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-  julia --project=bench benchmark/runner.jl core_matrix \
+  julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
   --samples=3 --output=work/baseline/core-matrix.toml
 
 # Candidate worktree / commit
 JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-  julia --project=bench benchmark/runner.jl core_matrix \
+  julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
   --samples=3 --output=work/candidate/core-matrix.toml
 
 julia --project=. benchmark/compare.jl \
@@ -204,7 +204,8 @@ J40 matrices or repeating cones is forbidden. The J40 payload is the certified
 application holdout. Algorithm tuning uses synthetic fixed-trace proxies and
 bounded 1/5/20-iteration diagnostics, not repeated full holdout solves.
 
-`bench/public_conic_suite/` is retained as a provenance/catalogue layer:
+`docs/evidence/bench/public_conic_suite/` is retained as an archived
+provenance/catalogue layer:
 manifests, tier configs, pathological generators, the on-demand downloader,
 and data placeholders. It has no runner of its own.
 
@@ -225,8 +226,9 @@ made.
 
 ## Specialized campaigns
 
-Application/cluster benchmarks under `bench/` and the scoreboards under
-`benchmark/` (`round3_augmented_ab.jl`, `round4_formulation_scoreboard.jl`,
+Historical application/cluster campaigns live under `docs/evidence/` (moved
+from the former `bench/` tree) and the scoreboards under `benchmark/`
+(`round3_augmented_ab.jl`, `round4_formulation_scoreboard.jl`,
 `round5_soc_scoreboard.jl`) remain specialized and outside the canonical
-runner. `bench/gates.jl` with `bench/baselines/gates.json` remains the
+runner. `benchmark/gates.jl` with `benchmark/baselines/gates.json` remains the
 correctness acceptance gate.

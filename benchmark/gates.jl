@@ -3,7 +3,7 @@
 """Performance and accuracy acceptance gates (plan §25).
 
 Runs a fixed set of problems covering the paths that matter and compares the
-outcome against recorded baselines in `bench/baselines/gates.json`.
+outcome against recorded baselines in `benchmark/baselines/gates.json`.
 
 The split that makes this useful rather than noisy:
 
@@ -32,10 +32,10 @@ quietly stops converging.
 
 Usage:
 
-    julia --project=. bench/gates.jl                    # check deterministic gates
-    julia --project=. bench/gates.jl --check-runtime    # also gate runtime
-    julia --project=. bench/gates.jl --record           # rewrite the baselines
-    julia --project=. bench/gates.jl --json out.json    # write the measurements
+    julia --project=. benchmark/gates.jl                    # check deterministic gates
+    julia --project=. benchmark/gates.jl --check-runtime    # also gate runtime
+    julia --project=. benchmark/gates.jl --record           # rewrite the baselines
+    julia --project=. benchmark/gates.jl --json out.json    # write the measurements
 """
 
 module Gates
