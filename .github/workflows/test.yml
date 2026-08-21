@@ -124,7 +124,7 @@ jobs:
       - name: Clone pinned provider checkouts
         run: |
           git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
-          git -C "$RUNNER_TEMP/MFLA" checkout 2b93685c773db323e9397e448063925dc6cb96fe
+          git -C "$RUNNER_TEMP/MFLA" checkout 00ee8c76827dd69b04ae728a7542abe64bb35431
           git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
           git -C "$RUNNER_TEMP/BFLA" checkout b2aed396718d03c60faf017388c3e2fc30934513
       - name: Build provider smoke environment
