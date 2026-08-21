@@ -8,3 +8,12 @@ commit,committed_at,dirty,suite,problem_id,arithmetic,provider,status,semantic_p
 6cd8afc74eb811c436cbad955b0f14078e6cdc39,2026-08-21T05:43:26Z,dirty,ladder,ladder/sdp_250,float64,blas_lapack,Optimal,true,3,0.129619167,,92286320,6
 6cd8afc74eb811c436cbad955b0f14078e6cdc39,2026-08-21T05:43:26Z,dirty,ladder,ladder/sdp_500,float64,blas_lapack,Optimal,true,3,0.473697708,,361904384,6
 6cd8afc74eb811c436cbad955b0f14078e6cdc39,2026-08-21T05:43:26Z,dirty,ladder,ladder/sdp_750,float64,blas_lapack,Optimal,true,3,1.068383417,,825573360,6
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/lp_100,float64,blas_lapack,Optimal,true,1,0.010756875,,13326640,7
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/lp_300,float64,blas_lapack,Optimal,true,1,0.085495125,,108151488,7
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/lp_1000,float64,blas_lapack,Optimal,true,1,1.166550292,,1218787616,7
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/soc_128,float64,blas_lapack,Optimal,true,1,0.004914625,,1496576,6
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/soc_512,float64,blas_lapack,Optimal,true,1,0.402314792,,21613776,9
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/soc_2048,float64,blas_lapack,Optimal,true,1,20.702640709,,337291824,6
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/sdp_250,float64,blas_lapack,Optimal,true,1,0.174406792,,194815040,6
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/sdp_500,float64,blas_lapack,Optimal,true,1,0.663036083,,771169504,6
+4e21d496f1ca7da6ea90d3311dc961f302af4ddd,2026-08-21T06:49:17Z,dirty,ladder,ladder/sdp_750,float64,blas_lapack,Optimal,true,1,1.799370625,,1764522224,6

@@ -107,6 +107,11 @@ columns retain the KKT formulation selected inside the solver.
 
 ## Baseline/candidate loop
 
+The loop is automated: `julia benchmark/optimize.jl loop` runs baseline
+(parent worktree), candidate, phase-ratio comparison, and history recording
+in one command. The narrative and decision rules live in
+`benchmark/WORKFLOW.md`.
+
 Create artifacts from clean, commit-pinned worktrees using identical Julia,
 project/manifest, thread, BLAS, provider, input, and environment settings:
 
