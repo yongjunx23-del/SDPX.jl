@@ -21,7 +21,7 @@ JULIA_NUM_THREADS=4 julia --project=. -e 'using Pkg; Pkg.test()'
 ## What a good change looks like
 
 **Performance changes need a before/after number.** Not an estimate — a measured
-one, from `bench/`, stating the machine and thread count. Several plausible
+one, from `benchmark/`, stating the machine and thread count. Several plausible
 optimisations in this codebase were measured and turned out to be slower; those
 are documented in place so they are not retried. If your change replaces one of
 them, say so and show the number.
@@ -56,17 +56,17 @@ convention. CI runs only the deterministic `micro` suite; larger registered
 suites need generated or downloaded inputs and are run manually, never in CI.
 
 ```bash
-julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 ```
 
-`bench/gates.jl` plus `bench/baselines/gates.json` remain the correctness
-acceptance gate. See `benchmark/README.md` for suites, public provenance, and
+`benchmark/gates.jl` plus `benchmark/baselines/gates.json` remain the
+correctness acceptance gate. See `benchmark/README.md` for suites, public provenance, and
 result comparison.
 
 ## Comparisons with other solvers
 
 Do not add claims that SDPX is faster than MOSEK, SDPB, Clarabel, or any other
-solver unless the comparison is reproducible from a script in `bench/` and
+solver unless the comparison is reproducible from a script in `benchmark/` and
 states the problem, tolerance, precision, thread count, and hardware. Solver
 comparisons are extremely sensitive to all five, and an unqualified claim is
 usually wrong.

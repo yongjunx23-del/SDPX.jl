@@ -205,7 +205,7 @@ and complementarity. Pure-SOC MOI input stays on the native route.
 
 Lightweight development evidence for the native routes is summarized in
 [benchmarks.md](benchmarks.md), with full reports under
-[`bench/soc_fixed_trace/README.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/soc_fixed_trace/README.md).
+[`bench/soc_fixed_trace/README.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/soc_fixed_trace/README.md).
 
 ### Native-SOC implementation references
 
