@@ -29,11 +29,13 @@ function _owned_variable_start(
             "$label size $(size(values)) != $((record.shape, record.shape))",
         ))
         packed = Vector{T}(undef, record.length)
-        for column in 1:record.shape, row in column:record.shape
+        coordinates = psd_packed_pairs(record.shape)
+        for position in eachindex(coordinates)
+            row, column = coordinates[position]
             values[row, column] == values[column, row] || throw(ArgumentError(
                 "$label for a PSD variable must be exactly symmetric",
             ))
-            packed[psd_packed_index(row, column, record.shape)] =
+            packed[position] =
                 _owned_model_scalar(block.model, values[row, column])
         end
         return packed
@@ -90,11 +92,13 @@ function set_dual_start!(
             "PSD dual-start size $(size(values)) != $((record.shape, record.shape))",
         ))
         packed = Vector{T}(undef, length(record.refs))
-        for column in 1:record.shape, row in column:record.shape
+        coordinates = psd_packed_pairs(record.shape)
+        for position in eachindex(coordinates)
+            row, column = coordinates[position]
             values[row, column] == values[column, row] || throw(ArgumentError(
                 "dual start for a PSD constraint must be exactly symmetric",
             ))
-            packed[psd_packed_index(row, column, record.shape)] =
+            packed[position] =
                 _owned_model_scalar(block.model, values[row, column])
         end
         packed

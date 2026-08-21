@@ -78,6 +78,24 @@ function psd_packed_row(k::Integer, n::Integer)
 end
 
 """
+    psd_packed_pairs(n) -> Vector{Tuple{Int,Int}}
+
+The canonical lower-column-major packed coordinates of an `n × n` PSD
+block: `psd_packed_pairs(n)[k] == (psd_packed_row(k, n),
+psd_packed_column(k, n))` and `psd_packed_index(pairs[k]..., n) == k`
+for every valid `k`. Every packed-triangle enumeration should iterate
+this list instead of re-deriving the layout.
+"""
+function psd_packed_pairs(n::Integer)
+    coordinates = Tuple{Int,Int}[]
+    sizehint!(coordinates, variable_length(PSDCone(), n))
+    for column in 1:Int(n), row in column:Int(n)
+        push!(coordinates, (row, column))
+    end
+    return coordinates
+end
+
+"""
     psd_packed_length(n) -> Int
 
 Packed-lower length `n(n+1)/2` of an `n × n` PSD block, matching

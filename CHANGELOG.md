@@ -182,6 +182,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `analyze` convenience methods, the pre-Round-6 eight-field
   `LPSparseSystem` constructor, and the 2-/3-argument `Equilibration`
   convenience constructors — all verified by repo-wide reference grep.
+- Consolidation round (behavior-preserving, each verified): the three
+  per-family result builders share one `_public_result_from_core` tail
+  (certification, status downgrade, termination, `Result` assembly);
+  the dense and sparse `equilibrate` routes share the Ruiz block
+  algebra and the per-variable/objective tail through
+  `_ruiz_step`/`_ruiz_congruence!`/`_equilibration_variable_scales`
+  (bit-identical outputs verified on dense and sparse fixtures); and
+  every SDPX-side packed-triangle enumeration iterates the canonical
+  `psd_packed_pairs` list locked to `psd_packed_index/row/column` by a
+  regression test (the MOI converters keep the MOI upper-triangle
+  convention through `_triangle_coordinates`).
+- Fixed-trace HKM metric assembly fails gracefully: the interiority
+  gate uses the stable head-versus-tail-norm comparison (the raw
+  determinant difference cancelled near the boundary and, worse,
+  accepted a reflected head `x0 < -‖tail‖`, which has a positive
+  determinant but lies outside the cone), and a non-interior block now
+  returns `(false, block)` from `_native_soc_add_metric!`, surfacing as
+  `NumericalFailure`-style `NumericalBreakdown` with
+  `reason=:metric_assembly_failure` like the NT-scaling path, instead
+  of an uncaught `ArgumentError` from the Schur assembly.
+- The best-iterate fallback compares merits computed by the same
+  `stagnation_merit` formula on both sides (the exit side previously
+  omitted the complementarity term that ranked the stored best).
+- The MOI seam rejects `max_iterations=0` up front: the option funnels
+  through the public `Settings` surface where 0 is the *automatic*
+  sentinel and would silently resolve to the 200-iteration default, so
+  a zero-iteration request now fails closed with a named reason
+  instead of being misreported.
 
 ### Removed
 

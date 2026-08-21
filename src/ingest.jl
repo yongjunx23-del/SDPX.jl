@@ -1197,6 +1197,74 @@ function _scale_equality_rows!(
     return matrix
 end
 
+# --- Shared numeric core of the two `equilibrate` storage paths -------------
+# The dense and sparse routes walk different storages for the coefficient
+# contribution, but the Ruiz block algebra, the per-variable/objective tail,
+# and their scaling rationale live here exactly once.
+
+"""Absorb the objective block's row-∞-norm contribution into `rn` (max is
+exact, so the column-major traversal order is irrelevant to the result)."""
+function _ruiz_absorb_c_rowmax!(rn::AbstractVector{T}, C2l::Matrix{T}) where {T}
+    @inbounds for c in 1:size(C2l, 2), r in 1:size(C2l, 1)
+        rn[r] = max(rn[r], abs(C2l[r, c]))
+    end
+    return rn
+end
+
+"""Symmetric diagonal congruence `C2l ← E·C2l·E` for one Ruiz factor."""
+function _ruiz_congruence!(C2l::Matrix{T}, e::AbstractVector{T}) where {T}
+    @inbounds for c in eachindex(e), r in eachindex(e)
+        C2l[r, c] *= e[r] * e[c]
+    end
+    return C2l
+end
+
+"""Ruiz step direction from the block row norms, with the adaptive
+convergence decision for the current iteration."""
+function _ruiz_step(rn::AbstractVector{T}, ruiz, iteration::Int) where {T}
+    converged =
+        ruiz.adaptive &&
+        iteration >= ruiz.minimum_iterations &&
+        _ruiz_converged(rn, ruiz.log_tolerance)
+    e = [rn[r] > 0 ? 1 / sqrt(rn[r]) : one(T) for r in eachindex(rn)]
+    return e, converged
+end
+
+"""Per-variable scales `s`, the scaled objective `cc`, and the single
+objective normalizer, from the per-variable coefficient maxima.
+
+Constraint coefficients only. Including `abs(c[i])` here conflates objective
+scale with constraint scale: the substitution is `x̂_i = s_i x_i`, so one
+`s_i` has to serve both, and whichever of the two is larger wins. On the
+badly-scaled benchmark generator `|c_i|` reaches 1.8e10 while the row-scaled
+`A_i` is ~1e-4, so `s_i` was set entirely by the objective and dividing `A_i`
+by it drove the constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0`
+satisfiable only by enormous `x`. Objective magnitude is a separate concern
+and is handled by the single scalar below, which cannot distort the feasible
+set the way a per-variable objective scale does.
+
+Objective normalisation (plan §9.2): one positive scalar rescales the
+objective without touching the feasible set or the optimal `x`, keeping
+`‖c‖∞` near one so the dual residual and the gap are measured on a sane
+scale. The factor is recorded in `Equilibration` and undone on the dual in
+`unequilibrate`; the primal objective needs no correction because it is
+recomputed from the original `prob.c` after unscaling."""
+function _equilibration_variable_scales(
+    c::AbstractVector{T},
+    maxima::AbstractVector{T},
+) where {T}
+    s = similar(maxima)
+    @inbounds for i in eachindex(s)
+        s[i] = maxima[i] > zero(T) ? maxima[i] : one(T)
+    end
+    cc = c ./ s
+    objective_scale = knrmInf(cc)
+    (objective_scale > zero(T) && isfinite(objective_scale)) ||
+        (objective_scale = one(T))
+    cc ./= objective_scale
+    return s, cc, objective_scale
+end
+
 """
     equilibrate(prob::SDPProblem{T}, cons::SparseCons) -> (scaled, Equilibration)
 
@@ -1265,11 +1333,7 @@ function equilibrate(
         for iteration in 1:ruiz.maximum_iterations
             ruiz_passes[l] = iteration
             rn = alloc_zeros(T, kl)
-            # Column outermost: `C2[l]` is column-major, and `max` is exact, so
-            # the traversal order changes speed but not the result.
-            @inbounds for c in 1:kl, r in 1:kl
-                rn[r] = max(rn[r], abs(C2[l][r, c]))
-            end
+            _ruiz_absorb_c_rowmax!(rn, C2[l])
             @inbounds for i in cons.active[l]
                 A = Asp2[l][i]
                 rows = rowvals(A)
@@ -1279,14 +1343,8 @@ function equilibrate(
                     rn[r] = max(rn[r], abs(vals[idx]))
                 end
             end
-            converged =
-                ruiz.adaptive &&
-                iteration >= ruiz.minimum_iterations &&
-                _ruiz_converged(rn, ruiz.log_tolerance)
-            e = [rn[r] > 0 ? inv(sqrt(rn[r])) : one(T) for r in 1:kl]
-            @inbounds for c in 1:kl, r in 1:kl
-                C2[l][r, c] *= e[r] * e[c]
-            end
+            e, converged = _ruiz_step(rn, ruiz, iteration)
+            _ruiz_congruence!(C2[l], e)
             @inbounds for i in cons.active[l]
                 A = Asp2[l][i]
                 rows = rowvals(A)
@@ -1301,18 +1359,7 @@ function equilibrate(
     end
 
     # Per-variable scale: x_i is rescaled so the largest coefficient touching it
-    # (or its objective entry) is O(1).
-    s = ones(T, m)
-    # Constraint coefficients only. Including `abs(prob.c[i])` here
-    # conflates objective scale with constraint scale: the substitution is
-    # `x̂_i = s_i x_i`, so one `s_i` has to serve both, and whichever of the
-    # two is larger wins. On the badly-scaled benchmark generator `|c_i|`
-    # reaches 1.8e10 while the row-scaled `A_i` is ~1e-4, so `s_i` was set
-    # entirely by the objective and dividing `A_i` by it drove the
-    # constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0` satisfiable
-    # only by enormous `x`. Objective magnitude is a separate concern and is
-    # handled by a single scalar below, which cannot distort the feasible
-    # set the way a per-variable objective scale does.
+    # (or its objective entry) is O(1); see `_equilibration_variable_scales`.
     maxima = alloc_zeros(T, m)
     @inbounds for l in 1:L
         for i in cons.active[l]
@@ -1324,19 +1371,7 @@ function equilibrate(
             )
         end
     end
-    @inbounds for i in 1:m
-        s[i] = maxima[i] > zero(T) ? maxima[i] : one(T)
-    end
-    cc = prob.c ./ s
-    # Objective normalisation (plan §9.2). A single positive scalar rescales the
-    # objective without touching the feasible set or the optimal `x`, keeping
-    # `‖c‖∞` near one so the dual residual and the gap are measured on a sane
-    # scale. The factor is recorded in `Equilibration` and undone on the dual in
-    # `unequilibrate`; the primal objective needs no correction because it is
-    # recomputed from the original `prob.c` after unscaling.
-    objective_scale = knrmInf(cc)
-    (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
-    cc ./= objective_scale
+    s, cc, objective_scale = _equilibration_variable_scales(prob.c, maxima)
     Bc = copy(prob.B)
     _scale_equality_rows!(Bc, s)
     @inbounds for l in 1:L
@@ -1415,27 +1450,15 @@ function equilibrate(
         for iteration in 1:ruiz.maximum_iterations
             ruiz_passes[l] = iteration
             rn = alloc_zeros(T, kl)
-            @inbounds for r in 1:kl
-                v = abs(C2[l][r, r])
-                for c in 1:kl
-                    v = max(v, abs(C2[l][r, c]))
+            _ruiz_absorb_c_rowmax!(rn, C2[l])
+            @inbounds for i in 1:m
+                Ai = reshape(view(Av2[l], :, i), kl, kl)
+                for r in 1:kl, c in 1:kl
+                    rn[r] = max(rn[r], abs(Ai[r, c]))
                 end
-                for i in 1:m
-                    Ai = reshape(view(Av2[l], :, i), kl, kl)
-                    for c in 1:kl
-                        v = max(v, abs(Ai[r, c]))
-                    end
-                end
-                rn[r] = v
             end
-            converged =
-                ruiz.adaptive &&
-                iteration >= ruiz.minimum_iterations &&
-                _ruiz_converged(rn, ruiz.log_tolerance)
-            e = [rn[r] > 0 ? 1 / sqrt(rn[r]) : one(T) for r in 1:kl]
-            @inbounds for c in 1:kl, r in 1:kl
-                C2[l][r, c] *= e[r] * e[c]
-            end
+            e, converged = _ruiz_step(rn, ruiz, iteration)
+            _ruiz_congruence!(C2[l], e)
             for i in 1:m
                 Ai = reshape(view(Av2[l], :, i), kl, kl)
                 @inbounds for c in 1:kl, r in 1:kl
@@ -1447,18 +1470,11 @@ function equilibrate(
         end
     end
 
-    s = ones(T, m)
+    # Per-variable scale: x_i is rescaled so the largest coefficient touching
+    # it is O(1); see `_equilibration_variable_scales` for the
+    # constraint-only rationale.
+    maxima = alloc_zeros(T, m)
     for i in 1:m
-        # Constraint coefficients only. Including `abs(prob.c[i])` here
-        # conflates objective scale with constraint scale: the substitution is
-        # `x̂_i = s_i x_i`, so one `s_i` has to serve both, and whichever of the
-        # two is larger wins. On the badly-scaled benchmark generator `|c_i|`
-        # reaches 1.8e10 while the row-scaled `A_i` is ~1e-4, so `s_i` was set
-        # entirely by the objective and dividing `A_i` by it drove the
-        # constraint matrices to 3e-8 — leaving `Σ x_i A_i − C ⪰ 0` satisfiable
-        # only by enormous `x`. Objective magnitude is a separate concern and is
-        # handled by a single scalar below, which cannot distort the feasible
-        # set the way a per-variable objective scale does.
         v = zero(T)
         for l in 1:L
             kl = k[l]
@@ -1467,15 +1483,9 @@ function equilibrate(
                 v = max(v, abs(Ai[idx]))
             end
         end
-        s[i] = v > 0 ? v : one(T)
+        maxima[i] = v
     end
-
-    cc = prob.c ./ s
-    # Objective normalisation (plan §9.2), matching the sparse path so the two
-    # equilibration routes produce comparably scaled problems.
-    objective_scale = knrmInf(cc)
-    (objective_scale > zero(T) && isfinite(objective_scale)) || (objective_scale = one(T))
-    cc ./= objective_scale
+    s, cc, objective_scale = _equilibration_variable_scales(prob.c, maxima)
     Bc = copy(prob.B)
     _scale_equality_rows!(Bc, s)
     for l in 1:L
