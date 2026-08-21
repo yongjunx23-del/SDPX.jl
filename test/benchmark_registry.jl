@@ -276,6 +276,7 @@ end
         :micro;
         problem="synthetic/lp_box",
         output=local_output,
+        samples=1,
         warmup=false,
     )
     @test length(local_result.rows) == 1

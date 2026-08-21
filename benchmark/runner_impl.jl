@@ -1124,7 +1124,7 @@ function run_suite(
     verbose=false,
     warmup=true,
     strict_semantics=true,
-    samples=1,
+    samples=3,
     cache_dir=DEFAULT_CACHE,
     allow_large=false,
 )
@@ -1140,7 +1140,7 @@ function run_suite(
         "samples must be an integer count of timed solves, got $samples",
     ))
     samples == 1 || samples >= 3 || throw(ArgumentError(
-        "samples must be 1 (default single run) or >= 3 timed solves; " *
+        "samples must be 1 (explicit single run) or >= 3 timed solves; " *
         "got $samples; a two-run observation cannot support a timing statistic",
     ))
     entries = _selected_entries(suite, problem, arithmetic, provider)
@@ -1326,7 +1326,7 @@ function _parse_cli(args)
     verbose = false
     prepare = false
     allow_large = false
-    samples = 1
+    samples = 3
     warmup = true
     positional = String[]
     for argument in args

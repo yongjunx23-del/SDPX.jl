@@ -313,6 +313,14 @@ function compare_result_files(
             objective_delta=_objective_delta(after, before),
             iteration_delta=_integer_delta(after, before, "iterations"),
             total_seconds_ratio=_ratio(after, before, "total_seconds"),
+            setup_seconds_ratio=_ratio(after, before, "setup_seconds"),
+            frontend_seconds_ratio=_ratio(after, before, "frontend_seconds"),
+            preprocess_seconds_ratio=_ratio(after, before, "preprocess_seconds"),
+            presolve_seconds_ratio=_ratio(after, before, "presolve_seconds"),
+            core_seconds_ratio=_ratio(after, before, "core_seconds"),
+            certification_seconds_ratio=_ratio(
+                after, before, "certification_seconds",
+            ),
             sample_median_seconds_ratio=begin
                 if before_count isa Integer && after_count isa Integer &&
                    before_count >= 3 && after_count >= 3

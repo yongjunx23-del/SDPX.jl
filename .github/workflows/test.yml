@@ -104,7 +104,7 @@ jobs:
       # Only the canonical micro suite runs in CI. Larger registered suites
       # need generated or downloaded inputs and are run manually.
       - name: Run canonical micro benchmark smoke
-        run: julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+        run: julia --project=benchmark/benchenv benchmark/runner.jl micro --samples=1 --output=/tmp/sdpx-micro.toml
 
   provider-smoke:
     name: MFLA/BFLA provider smoke
