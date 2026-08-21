@@ -59,7 +59,21 @@ julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
 # Per-class scaling ladders (LP/SOC/SDP), laptop-scale phase-scaling evidence.
 julia --project=. benchmark/runner.jl ladder --samples=3 --verbose \
   --output=work/baseline/ladder.toml
+
+# Append a result file to the per-commit performance log, then read trends.
+julia --project=. benchmark/history_log.jl record work/baseline/ladder.toml \
+  --suite=ladder
+julia --project=. benchmark/history_log.jl trend ladder/lp_1000 --last=10
 ```
+
+## Performance history
+
+`benchmark/history/performance-log.csv` is an append-only, one-row-per-problem
+log stamped with the commit, UTC time, and tree cleanliness. `record` appends
+from any runner output file; `trend` prints the median-time sequence per
+problem with the ratio against the first recorded entry -- the direct answer
+to "is this branch actually faster than where we started". Rows recorded from
+a dirty tree are marked and should not be used for claims.
 
 Results are written as matching TOML and TSV files. Semantic facts (status,
 objective, residuals, certificate, iterations, planned/executed route/provider,
