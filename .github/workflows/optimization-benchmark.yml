@@ -27,8 +27,9 @@ on:
         type: boolean
         default: false
 
-permissions:
-  contents: read
+# No permissions block here on purpose: a called workflow's explicit
+# permissions would narrow the caller's grant, breaking the status step for
+# the push caller. Both callers declare the exact job permissions they need.
 
 jobs:
   correctness-and-benchmark:
