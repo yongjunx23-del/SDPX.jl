@@ -796,7 +796,7 @@ end
         source_coupling = deepcopy(arrow.coupling)
 
         options = SDPX.SolverOptions{BigFloat}(verbosity=0)
-        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        factorization = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factorization.ok
         @test arrow.Sgg == source_global
         @test arrow.Dsrc == source_local
@@ -880,7 +880,7 @@ end
             problem.dims.m,
         )
         SDPX.materialize_schur!(schur, workspace)
-        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        factorization = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factorization.ok
         @test !factorization.q_rank_deficient
         automatic_refinement = SDPX.SolverOptions{BigFloat}(
@@ -1312,7 +1312,7 @@ end
             extended_precision_blas=:on,
             equality_solver=:auto,
         )
-        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        factorization = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factorization.ok
         @test factorization.q_rank_deficient
         @test factorization.equality_solver === :rank_revealing_qr
