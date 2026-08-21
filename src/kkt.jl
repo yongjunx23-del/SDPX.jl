@@ -539,6 +539,17 @@ function _equality_qr_relative_tolerance(
     return tau
 end
 
+function _equality_qr_maximum_elements(::Type{T}) where {T}
+    T === BigFloat && return 2_000_000
+    T === Float64 && return 50_000_000
+    # Float64x2 panels have twice Float64's storage, and the memory gate below
+    # already accounts for those bytes.  Permit the campaign-scale panel that
+    # the MFLA RRQR path can process while retaining the older conservative
+    # limit for wider extended-precision scalar types.
+    return ExtendedPrecisionBLAS._element_storage_bytes(T) <= 2 * sizeof(Float64) ?
+           40_000_000 : 20_000_000
+end
+
 function _equality_qr_allowed(
     Btil::AbstractMatrix{T},
     opts::SolverOptions{T},
@@ -550,9 +561,7 @@ function _equality_qr_allowed(
         T === BigFloat ? 256 :
         T === Float64 ? 2_048 : 1_024
     columns <= maximum_columns || return false
-    maximum_elements =
-        T === BigFloat ? 2_000_000 :
-        T === Float64 ? 50_000_000 : 20_000_000
+    maximum_elements = _equality_qr_maximum_elements(T)
     Int128(rows) * Int128(columns) <= Int128(maximum_elements) ||
         return false
     element_bytes =
