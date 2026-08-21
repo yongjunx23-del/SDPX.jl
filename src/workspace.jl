@@ -444,7 +444,7 @@ end
 All KKT-level scratch, sized once from an [`SDPProblem`](@ref) and
 reused across the whole solve (§3.1's target pipeline). `Schol`/
 `Qchol` hold the current iteration's factorizations (`nothing` before
-the first Schur build); `factor_kkt!` (kkt.jl) refreshes them once per
+the first Schur build); `factorize!` (kkt_backend.jl) refreshes them once per
 outer iteration, and `solve_kkt!` reuses them for the predictor,
 corrector, and refinement solves.
 """
@@ -463,7 +463,7 @@ mutable struct Workspace{T}
     equality_scale::Vector{T} # D[j,j] = 1 / ||(L_S⁻¹B)[:,j]||∞ for nonzero columns
     Q::Matrix{T}              # n×n = B̂ᵀB̂ in normalized equality coordinates
     Qbuf::Matrix{T}            # scratch copy of Q fed to cholesky!/cholesky(...)
-    # Set by factor_kkt!. The concrete union, not Any: _solve_Q! is called
+    # Set by factorize!. The concrete union, not Any: _solve_Q! is called
     # twice per iteration (predictor and corrector), and an Any field makes
     # every one of those calls a dynamic dispatch. The two LinearAlgebra
     # members cover the plain and rank-revealing dense paths. Provider factors
@@ -1067,7 +1067,7 @@ function Workspace(
         fused_arrow,
     )
     # Block-arrow systems have their own reduced mixed-precision path. Avoid
-    # allocating the generic dense Float64 KKT copy, which factor_kkt! can
+    # allocating the generic dense Float64 KKT copy, which factorize! can
     # never use when `arrow !== nothing`.
     generic_mixed_decision = get(
         plan.parameters,

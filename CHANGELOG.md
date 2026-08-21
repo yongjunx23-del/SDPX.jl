@@ -35,6 +35,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Retired the legacy `factor_kkt!` nothing-chain dispatcher (kkt.jl): the
+  production path has dispatched through `factorize!(backend, ...)` with
+  plan assertions and execution provenance since the KKT backend layer
+  landed, and the chain had no production callers -- only the sparse
+  regression tests, which now call `factorize!(select_backend(ws), ...)`
+  directly. Behaviour unchanged; the remaining per-phase `ws.arrow`/
+  `ws.sparse_kkt`/`ws.mixed_precision` branches in schur/step/kernels are
+  the Phase-2 KKTPlan extraction, not part of this step.
 - Repository cleanup: the former `bench/` tree is consolidated — the
   acceptance gate now lives at `benchmark/gates.jl` (with
   `benchmark/baselines/gates.json` and the benchmarking environment

@@ -15,7 +15,7 @@
     dx = L_S⁻ᵀ(r̃ + B̃·dŷ) ; dy = D·dŷ
 
     Predictor and corrector share one factorization per outer
-    iteration (P2): `factor_kkt!` runs once, `solve_kkt!` runs once
+    iteration (P2): `factorize!` runs once, `solve!` runs once
     per right-hand side (predictor r, corrector r, and — via
     `refine_kkt!` — the residual-correction system).
 =#
@@ -817,51 +817,6 @@ function _copy_schur_factor_buffer!(
     return _copy_lower_triangle!(destination, source)
 end
 
-"""
-    factor_kkt!(ws, prob, opts) -> (ok, reg_attempts, q_pivoted)
-
-Factor the current Schur complement `ws.S` (accumulated by
-[`schur_build!`](@ref)) into `ws.Sbuf`'s lower triangle, then build
-`B̃ = L_S⁻¹B` and factor `Q = B̃ᵀB̃`.
-
-- If `cholesky!` on `S` fails (loss of positivity from rounding near
-  convergence), retries with escalating relative diagonal
-  regularization `S + δ·diag(|S_ii|)` (§2.2) up to 6 attempts.
-- If `cholesky!` on `Q` fails (rank-deficient `B`, e.g. duplicated
-  equality rows — §T3), automatic mode uses rank-revealing QR. Forced
-  normal-equation mode retains pivoted Cholesky (`RowMaximum()`), which detects
-  the rank and gives a consistent least-norm solve for `dy`. A successful
-  unpivoted Cholesky is accepted only when its relative lower diagonal clears
-  the explicit-precision threshold, so a near-dependent or exactly duplicated
-  equality basis is never reported as full-rank evidence.
-"""
-function factor_kkt!(ws::Workspace{T}, prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
-    ws.arrow === nothing || return factor_arrow_kkt!(ws, prob, opts)
-    if ws.sparse_kkt !== nothing
-        return _factor_sparse_schur_sdp!(ws, prob, opts)
-    end
-    if ws.mixed_precision !== nothing
-        if _try_factor_mixed_kkt!(
-            ws.mixed_precision,
-            ws,
-            prob,
-            opts,
-        )
-            return (ok=true, reg_attempts=0, q_pivoted=false)
-        end
-        opts.verbosity >= 1 && @warn(
-            "Mixed-precision KKT factorization rejected; using the native target-precision factorization.",
-            reason = ws.mixed_precision.reason,
-            condition_estimate=
-                ws.mixed_precision.condition_estimate,
-            predicted_refinement_steps=
-                ws.mixed_precision.predicted_refinement_steps,
-            float64_regularization_attempts=
-                ws.mixed_precision.float64_regularization_attempts,
-        )
-    end
-    return _factor_dense_kkt_native!(ws, prob, opts)
-end
 
 function _arrow_lower_solve_rows!(
     destination::AbstractMatrix{T},
