@@ -1,0 +1,127 @@
+name: Quick checks
+
+# Fast structural sanity gate: everything here is stdlib-only (no package
+# installation, no solver runs), so the whole job finishes in about a minute.
+# It is deliberately NOT a replacement for the full test suite -- it catches
+# the breakage classes a structural/refactor change can introduce:
+#
+#   1. workflow files that no longer parse as YAML;
+#   2. Julia files with syntax errors anywhere in the tree;
+#   3. release metadata drift (Project.toml versions, [compat] coverage,
+#      CITATION.cff) via the existing scripts/check_release_metadata.jl;
+#   4. test files referenced by runtests.jl that no longer exist, and test
+#      files on disk that are mounted neither in runtests.jl nor on the
+#      documented manual-only allowlist;
+#   5. documentation pages listed in docs/make.jl that do not exist.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sanity:
+    name: Structural sanity (stdlib-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+
+      - name: Validate workflow YAML
+        run: |
+          python3 - <<'EOF'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              sys.exit("PyYAML unavailable on the runner image")
+          bad = []
+          for path in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  with open(path) as io:
+                      yaml.safe_load(io)
+              except Exception as error:
+                  bad.append(f"{path}: {error}")
+          if bad:
+              sys.exit("invalid workflow YAML:\n" + "\n".join(bad))
+          print(f"all {len(glob.glob('.github/workflows/*.yml'))} workflow files parse")
+          EOF
+
+      - name: Julia syntax check (parse only, no package load)
+        run: |
+          julia --startup-file=no -e '
+          root = pwd()
+          files = String[]
+          for dir in ("src", "test", "benchmark", "bin",
+                      "scripts", "ext", "examples", "docs")
+              path = joinpath(root, dir)
+              isdir(path) || continue
+              for (rootdir, _, filenames) in walkdir(path)
+                  for f in filenames
+                      endswith(f, ".jl") &&
+                          push!(files, relpath(joinpath(rootdir, f), root))
+                  end
+              end
+          end
+          files = unique(files)
+          failures = String[]
+          for f in files
+              try
+                  Meta.parseall(read(f, String); filename=f)
+              catch error
+                  push!(failures, "$f: $(error)")
+              end
+          end
+          isempty(failures) ||
+              error("syntax errors:\n" * join(failures, "\n"))
+          println("parsed ", length(files), " Julia files cleanly")'
+
+      - name: Release metadata consistency
+        run: julia --startup-file=no scripts/check_release_metadata.jl
+
+      - name: Test suite list integrity
+        run: |
+          julia --startup-file=no -e '
+          listed = Set{String}()
+          for line in eachline("test/runtests.jl")
+              for m in eachmatch(r"\"([a-z0-9_]+\.jl)\"", line)
+                  push!(listed, m.captures[1])
+            end
+          end
+          on_disk = Set{String}(filter(endswith(".jl"), readdir("test")))
+          pop!(on_disk, "runtests.jl")
+          # Manual-only entry points that are intentionally not mounted in
+          # runtests.jl; each has a documented driver outside the suite.
+          manual_only = Set{String}([
+              "provider_smoke.jl",                    # scripts/dev_v05_provider_smoke.sh
+              "multifloat_linear_algebra_integration.jl", # manual MFLA integration probe
+          ])
+          missing = sort!(collect(setdiff(listed, on_disk)))
+          isempty(missing) ||
+              error("runtests.jl references missing files: " * join(missing, ", "))
+          unmounted = sort!(collect(setdiff(on_disk, listed, manual_only)))
+          isempty(unmounted) || error(
+              "test files mounted nowhere (add to runtests.jl or the " *
+              "manual-only allowlist): " * join(unmounted, ", "))
+          println("runtests lists ", length(listed), " files; disk and list agree")'
+
+      - name: Documentation page integrity
+        run: |
+          julia --startup-file=no -e '
+          pages = Set{String}()
+          for m in eachmatch(r"\"([a-z0-9_\-/]+\.md)\"", read("docs/make.jl", String))
+              push!(pages, m.captures[1])
+          end
+          missing = sort!([p for p in pages if !isfile(joinpath("docs", "src", p))])
+          isempty(missing) ||
+              error("docs/make.jl lists missing pages: " * join(missing, ", "))
+          println("all ", length(pages), " documented pages exist in docs/src")'
