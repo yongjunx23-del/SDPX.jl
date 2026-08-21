@@ -6,6 +6,9 @@ on:
       - refactor/benchmark-driven-core-20260821
     paths-ignore:
       - 'benchmark/history/**'
+  pull_request:
+    branches:
+      - refactor/benchmark-driven-core-20260821
   workflow_dispatch:
 
 concurrency:
@@ -167,7 +170,7 @@ jobs:
           retention-days: 30
 
       - name: Persist successful evidence in Git history
-        if: success()
+        if: success() && github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
