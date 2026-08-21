@@ -1,11 +1,11 @@
 name: Optimization loop
 
 on:
-  push:
-    branches:
-      - refactor/benchmark-driven-core-20260821
-    paths-ignore:
-      - 'benchmark/history/**'
+  # Manual for now: the original push trigger (refactor/benchmark-driven-
+  # core-20260821) was removed with that branch, and running the ~2h
+  # parent-versus-candidate loop on every push is a policy decision. The
+  # day-to-day benchmark loop lives in benchmark/WORKFLOW.md (local Mac);
+  # this workflow exists to record evidence runs in git history.
   workflow_dispatch:
 
 concurrency:
