@@ -35,6 +35,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Ladder generalization: two many-small-cones SOC rows
+  (`soc_many_512x8`, `soc_many_2048x4` -- block-diagonal second-order
+  programs with hundreds to thousands of small Lorentz cones) join the
+  scaling ladder alongside the single-large-cone rows. The first run
+  exposed a shape overfit: the BLAS metric assembly that accelerated the
+  single-cone row degrades into thousands of tiny gemm calls on the
+  many-cone shape (53.9 s in one iteration), which is now the tracked
+  top hotspot for the structured-SOCP path.
 - Native SOC metric assembly fast path: the dense general-Lorentz branch
   of `_native_soc_add_metric!` assembled the Hessian through a scalar
   triple loop with a per-column NT inverse application. The scaled metric
