@@ -35,6 +35,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Native SOC metric assembly fast path: the dense general-Lorentz branch
+  of `_native_soc_add_metric!` assembled the Hessian through a scalar
+  triple loop with a per-column NT inverse application. The scaled metric
+  is constant across a cone's columns, so the assembly now builds the
+  cone's metric matrix once (same kernel, column probes) and finishes
+  with two gemm passes. Ladder soc_2048: 17.7 s -> 4.7 s (3.75x);
+  soc_512: 2.4x. Arithmetic order changes within the assembly (BLAS
+  accumulation), covered by the SOC solver/algebra/regression suites.
 - Certification fast path: `_primal_block_backward_errors` and
   `_dual_backward_errors` asserted their `AbstractCons` subtype once
   outside the per-block loop instead of re-dispatching through the

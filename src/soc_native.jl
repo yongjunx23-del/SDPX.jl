@@ -1172,23 +1172,31 @@ function _native_soc_add_metric!(
             return workspace
         end
     end
-    @inbounds for column in 1:variables
-        copy_owned!(basis, view(cone.A, :, column))
+    # Dense single-cone assembly: the NT scaled metric is constant across the
+    # cone's columns, so H += A' * (M * A) collapses to two BLAS passes
+    # instead of a scalar triple loop. M is assembled column-by-column with
+    # the same `_soc_nt_apply_hs_inverse!` kernel the scalar loop used, so
+    # the metric entries are identical; the two gemm passes accumulate into
+    # the existing hessian with identical semantics.
+    w = workspace.nt_w[block]
+    eta_squared = workspace.nt_eta_squared[block]
+    cone_dimension = length(w)
+    metric_matrix = Matrix{T}(undef, cone_dimension, cone_dimension)
+    @inbounds for column in 1:cone_dimension
+        unit = zeros(T, cone_dimension)
+        unit[column] = one(T)
         _soc_nt_apply_hs_inverse!(
-            metric,
-            workspace.nt_w[block],
-            workspace.nt_eta_squared[block],
-            basis,
+            view(metric_matrix, :, column), w, eta_squared, unit,
         )
-        for row in column:variables
-            value = zero(T)
-            for coordinate in eachindex(metric)
-                value += cone.A[coordinate, row] * metric[coordinate]
-            end
-            workspace.hessian[row, column] += value
-            row == column || (workspace.hessian[column, row] += value)
-        end
     end
+    scaled = metric_matrix * cone.A
+    mul!(
+        workspace.hessian,
+        transpose(cone.A),
+        scaled,
+        one(T),
+        one(T),
+    )
     return workspace
 end
 
