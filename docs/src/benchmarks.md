@@ -58,6 +58,6 @@ fixed-trace execution are production and tested today.
 ## Adaptive parameter evidence
 
 The adaptive parameter controller and its fixed fallback are documented in
-[`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md), with
+[`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md), with
 equations, exact bounds, and arithmetic-specific behavior. Measured
 fixed-versus-adaptive decisions appear in the benchmark locations above.

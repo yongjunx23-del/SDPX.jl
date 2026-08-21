@@ -463,7 +463,7 @@ export SDPX_MEMORY_LIMIT_BYTES=28GiB
   --project="$ENVIRONMENT" \
   --startup-file=no \
   -t 1 \
-  "$SOURCE/bench/extended_precision_blas/small_solve_validation.jl" \
+  "$SOURCE/docs/evidence/bench/extended_precision_blas/small_solve_validation.jl" \
   "$RESULT/small-solve.csv" \
   2>&1 | tee "$RESULT/small-solve.log"
 
@@ -474,7 +474,7 @@ export SDPX_MEMORY_LIMIT_BYTES=28GiB
   --project="$ENVIRONMENT" \
   --startup-file=no \
   -t 4 \
-  "$SOURCE/bench/lattice_bootstrap/benchmark_sdpx_float64_solve.jl" \
+  "$SOURCE/docs/evidence/bench/lattice_bootstrap/benchmark_sdpx_float64_solve.jl" \
   "$TASK_LOW08_INPUT" \
   "$RESULT/task-low08-float64.json" \
   4 600 0.1 0.85 100 0.001 sdpb 100 1e-6 \
@@ -484,7 +484,7 @@ export SDPX_MEMORY_LIMIT_BYTES=28GiB
   --project="$ENVIRONMENT" \
   --startup-file=no \
   -t 8 \
-  "$SOURCE/bench/threading/benchmark_sparse_schur_scheduler.jl" \
+  "$SOURCE/docs/evidence/bench/threading/benchmark_sparse_schur_scheduler.jl" \
   "$RESULT/sparse-threading.csv" \
   2>&1 | tee "$RESULT/sparse-threading.log"
 
@@ -593,7 +593,7 @@ for threads in 1 2 4 8; do
       --project="$ENVIRONMENT" \
       --startup-file=no \
       -t "$threads" \
-      "$SOURCE/bench/extended_precision_blas/benchmark_schur.jl" \
+      "$SOURCE/docs/evidence/bench/extended_precision_blas/benchmark_schur.jl" \
       --problem=sparse \
       --input="$INPUT" \
       --output="$RESULT/float64x4-schur.csv" \
@@ -622,7 +622,7 @@ export BENCH_OUTPUT="$RESULT/bigfloat-sparse-schur.csv"
   --project="$ENVIRONMENT" \
   --startup-file=no \
   -t 1 \
-  "$SOURCE/bench/bigfloat_sparse_schur/benchmark.jl" \
+  "$SOURCE/docs/evidence/bench/bigfloat_sparse_schur/benchmark.jl" \
   2>&1 | tee "$RESULT/bigfloat-sparse-schur.log"
 ```
 

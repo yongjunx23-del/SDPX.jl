@@ -3,7 +3,7 @@
 (* SDPXLink — call the SDPX.jl semidefinite-programming solver from Mathematica.
 
    First-version transport: a command-line bridge. The problem is exported as
-   JSON (schema v1, documented in docs/bridge-schema.md), Julia is invoked with
+   JSON (schema v1, documented in docs/src/bridge-schema.md), Julia is invoked with
    RunProcess on bin/sdpx_solve.jl, and the JSON result is imported back.
    One process per solve, no shared state, arbitrary-precision numbers as
    strings. The documented upgrade path to a persistent Julia server or

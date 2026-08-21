@@ -443,7 +443,7 @@ reduced calling-task allocations to 768 bytes. Maximum relative Schur errors
 were `2.67e-16` for dense Float64, `3.57e-65` for dense Float64x4,
 `1.67e-15` for sparse Float64, and `1.33e-64` for sparse Float64x4.
 
-See [`bench/threading/RESULTS.md`](../bench/threading/RESULTS.md) for the full
+See [`bench/threading/RESULTS.md`](../evidence/bench/threading/RESULTS.md) for the full
 protocol, all 1/2/4/8-worker rows, reduction timings, memory estimates, and
 reproduction commands.
 

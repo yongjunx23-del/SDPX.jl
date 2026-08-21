@@ -176,5 +176,5 @@ certificates are produced only when a validated homogeneous ray is found. See
 Operational details and measured trade-offs live in
 [providers.md](providers.md), [benchmarks.md](benchmarks.md),
 [preprocessing.md](preprocessing.md), and the root research notes
-[`docs/adaptive-dense-sparse-optimization.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-dense-sparse-optimization.md)
-and [`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md).
+[`docs/adaptive-dense-sparse-optimization.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-dense-sparse-optimization.md)
+and [`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).

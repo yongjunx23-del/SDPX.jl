@@ -61,7 +61,7 @@ Output:
   --help, -h          Show this help.
 
 Input format:
-  JSON bridge schema v1 (`docs/bridge-schema.md`).  The canonical benchmark
+  JSON bridge schema v1 (`docs/src/bridge-schema.md`).  The canonical benchmark
   registry under `benchmark/` records generated and external conic workloads;
   native SDPA/CBF/MPS command-line loaders are not yet provided.
 """

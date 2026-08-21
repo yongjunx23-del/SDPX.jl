@@ -32,6 +32,14 @@ makedocs(;
             "Architecture" => "architecture.md",
             "Linear-algebra providers" => "providers.md",
         ],
+        "Topic guides" => [
+            "Threading" => "threading.md",
+            "Cluster workflow" => "cluster-workflow.md",
+            "Bridge schema" => "bridge-schema.md",
+            "Adaptive parameter policy" => "adaptive-parameter-policy.md",
+            "Adaptive dense/sparse optimization" =>
+                "adaptive-dense-sparse-optimization.md",
+        ],
         "Benchmarks and evidence" => "benchmarks.md",
         "API reference" => "api.md",
         "Experimental internals" => "internals.md",
