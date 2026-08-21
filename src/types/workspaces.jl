@@ -220,6 +220,11 @@ Base.@kwdef struct SolverOptions{T}
     # original-coordinate residual/gap/cone success gate.
     certification::Bool       = true
     expert_mode::Bool         = false                   # documents intentional use of low-level IPM knobs
+    # Chordal PSD decomposition policy. Detection/preprocessing analysis runs
+    # unchanged for every value; P0 only records the policy and a reason in
+    # the execution plan — the clique transformation itself is not implemented
+    # yet, so `chordal_selected` stays `false` even for beneficial blocks.
+    chordal::Symbol           = :off                    # :off | :auto | :on
 end
 
 """

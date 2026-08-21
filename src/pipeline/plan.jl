@@ -1,15 +1,20 @@
 """
-    build_execution_plan(::AutoPlanner, prob, route)
+    build_execution_plan(::AutoPlanner, prob, route; chordal_estimate=nothing)
 
 Consume a route resolved after equality presolve. The late-bound plan fixes
 scaling, memory, backend, and scheduling, while carrying only a neutral
 parameter-policy identity and the user's numeric request. Automatic numeric
 parameters are resolved later in the final scaled coordinates.
+
+`chordal_estimate` is the clique-cost estimate produced by the preprocessing
+stage when one ran upstream; it only informs the descriptive chordal policy
+recorded in `plan.parameters` and never changes execution.
 """
 function build_execution_plan(
     ::AutoPlanner,
     prob::SDPProblem{T},
-    route::ResolvedExecutionRoute{T},
+    route::ResolvedExecutionRoute{T};
+    chordal_estimate::Union{Nothing,ChordalCostEstimate}=nothing,
 ) where {T}
     opts = route.options
     _validate_execution_route(route, prob, opts)
@@ -297,6 +302,8 @@ function build_execution_plan(
                       :auto_extended_arithmetic_dense_route :
                       :classification_storage) :
                      storage_policy === :sparse ? :explicit_sparse : :explicit_dense
+    chordal_selected, chordal_reason, chordal_beneficial_blocks =
+        _chordal_policy(opts.chordal, chordal_estimate)
     gram_kernel = if algorithm === :lp_primal_dual
         if T === Float64
             selected_threads > 1 &&
@@ -404,6 +411,10 @@ function build_execution_plan(
             storage_dimension=classification.variables + classification.equalities,
             storage_input_nnz=0,
             storage_density=classification.expected_schur_density,
+            chordal_policy=opts.chordal,
+            chordal_selected,
+            chordal_reason,
+            chordal_beneficial_blocks,
             reduced_arrow_decision,
             mixed_reduced_arrow_decision=mixed_arrow_decision,
             generic_mixed_precision_decision=generic_mixed_decision,
@@ -441,6 +452,39 @@ function build_execution_plan(
     resolved::ResolvedSolveOptions{T},
 ) where {T}
     return build_execution_plan(planner, prob, resolved.core)
+end
+
+"""
+    _chordal_policy(requested, estimate) -> (selected, reason, beneficial_blocks)
+
+Plan-level chordal decomposition policy from the user request and the
+preprocessing clique-cost estimate. The clique transformation is not
+implemented, so `selected` is always `false`; the reason records how the
+request met the analysis. `estimate === nothing` marks call sites without an
+upstream preprocessing stage (compatibility delegates), whose reason only
+applies to requests other than `:off`.
+"""
+function _chordal_policy(
+    requested::Symbol,
+    estimate::Union{Nothing,ChordalCostEstimate},
+)
+    requested in (:off, :auto, :on) ||
+        throw(ArgumentError("chordal must be :off, :auto, or :on"))
+    if requested === :off
+        reason = :chordal_disabled
+    elseif estimate === nothing
+        reason = :chordal_estimate_unavailable
+    elseif !estimate.analyzed
+        reason = :chordal_analysis_skipped
+    elseif estimate.beneficial_blocks == 0
+        reason = :not_beneficial
+    elseif requested === :on
+        reason = :transformation_unavailable
+    else
+        reason = :analysis_only_beneficial
+    end
+    beneficial_blocks = estimate === nothing ? 0 : estimate.beneficial_blocks
+    return (false, reason, beneficial_blocks)
 end
 
 """

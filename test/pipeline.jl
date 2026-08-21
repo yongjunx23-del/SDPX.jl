@@ -1930,6 +1930,154 @@ end
     end
 end
 
+@testset "chordal execution-plan policy (P0)" begin
+    # The `chordal` option is a plan-level policy surface only: detection and
+    # preprocessing run unchanged for every value, and no clique
+    # transformation exists yet, so `chordal_selected` stays false even for
+    # beneficial blocks. The plan records how the request met the analysis.
+    function banded_problem(k, m; bandwidth=1)
+        coefficients = [Vector{SparseMatrixCSC{Float64,Int}}(undef, m)]
+        for i in 1:m
+            rows, columns, values = Int[], Int[], Float64[]
+            for r in 1:k, c in max(1, r - bandwidth):min(k, r + bandwidth)
+                push!(rows, r); push!(columns, c)
+                push!(values, r == c ? 2.0 : 0.3)
+            end
+            coefficients[1][i] = sparse(rows, columns, values, k, k)
+        end
+        return SDPX.ingest(ones(m), coefficients, [Matrix{Float64}(1.0I, k, k)],
+            zeros(m, 0), Float64[]; sparse=true, verbosity=0)
+    end
+
+    function dense_problem(k, m)
+        rng = StableRNG(51)
+        A = [zeros(m, k, k)]
+        for i in 1:m
+            M = randn(rng, k, k)
+            A[1][i, :, :] = M + M'
+        end
+        return SDPX.ingest(ones(m), A, [Matrix{Float64}(1.0I, k, k)],
+            zeros(m, 0), Float64[]; verbosity=0)
+    end
+
+    banded = banded_problem(40, 3; bandwidth=1)
+    dense = dense_problem(20, 3)
+
+    @testset "default off is recorded and selects nothing" begin
+        plan = SDPX.build_execution_plan(banded)
+        @test plan.parameters.chordal_policy === :off
+        @test plan.parameters.chordal_selected === false
+        @test plan.parameters.chordal_reason === :chordal_disabled
+        @test plan.chordal_plan.policy === :off
+        @test plan.chordal_plan.selected === false
+        @test plan.chordal_plan.reason === :chordal_disabled
+        @test plan.chordal_plan.transformation === :none
+        @test :chordal_plan in propertynames(plan)
+    end
+
+    @testset "compatibility delegates have no estimate to consult" begin
+        plan = SDPX.build_execution_plan(
+            banded, SDPX.SolverOptions{Float64}(chordal=:auto),
+        )
+        @test plan.parameters.chordal_policy === :auto
+        @test plan.parameters.chordal_reason === :chordal_estimate_unavailable
+        @test plan.parameters.chordal_selected === false
+    end
+
+    @testset "estimate-driven reason cascade" begin
+        estimate = SDPX.ChordalCostEstimate(
+            true, 8000, 200, 39, 2, 38, 2, false, "test",
+        )
+        auto_route = SDPX.resolve_execution_route(
+            SDPX.AutoPlanner(), banded, SDPX.SolverOptions{Float64}(chordal=:auto),
+        )
+        auto_plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), banded, auto_route; chordal_estimate=estimate,
+        )
+        @test auto_plan.parameters.chordal_reason === :analysis_only_beneficial
+        @test auto_plan.parameters.chordal_beneficial_blocks == 2
+        @test auto_plan.parameters.chordal_selected === false
+
+        forced = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), banded,
+            SDPX.resolve_execution_route(
+                SDPX.AutoPlanner(), banded,
+                SDPX.SolverOptions{Float64}(chordal=:on),
+            );
+            chordal_estimate=estimate,
+        )
+        @test forced.parameters.chordal_policy === :on
+        @test forced.parameters.chordal_reason === :transformation_unavailable
+        @test forced.parameters.chordal_selected === false
+
+        unbeneficial = SDPX.ChordalCostEstimate(
+            true, 100, 100, 1, 20, 0, 0, false, "test",
+        )
+        flat = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), banded, auto_route; chordal_estimate=unbeneficial,
+        )
+        @test flat.parameters.chordal_reason === :not_beneficial
+
+        skipped = SDPX.ChordalCostEstimate(
+            false, 0, 0, 0, 0, 0, 0, false, "dense pattern",
+        )
+        bail = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), banded, auto_route; chordal_estimate=skipped,
+        )
+        @test bail.parameters.chordal_reason === :chordal_analysis_skipped
+    end
+
+    @testset "preprocessing threads the real estimate through the plan" begin
+        opts = SDPX.SolverOptions{Float64}(chordal=:auto, verbosity=0)
+        preprocessed = SDPX.preprocess(banded, opts)
+        @test preprocessed.plan.chordal.analyzed
+        @test preprocessed.plan.chordal.beneficial_blocks >= 1
+        route = SDPX.resolve_execution_route(SDPX.AutoPlanner(), banded, opts)
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), banded, route;
+            chordal_estimate=preprocessed.plan.chordal,
+        )
+        @test plan.parameters.chordal_reason === :analysis_only_beneficial
+
+        # A dense pattern never reaches the clique analysis, which the plan
+        # records instead of pretending an analysis happened.
+        dense_pre = SDPX.preprocess(dense, opts)
+        @test !dense_pre.plan.chordal.analyzed
+        dense_route = SDPX.resolve_execution_route(
+            SDPX.AutoPlanner(), dense, opts,
+        )
+        dense_plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), dense, dense_route;
+            chordal_estimate=dense_pre.plan.chordal,
+        )
+        @test dense_plan.parameters.chordal_reason === :chordal_analysis_skipped
+
+        # The solve pipeline passes the estimate through _solve_pipeline!,
+        # so the retained diagnostics expose the same reason.
+        result = SDPX.solve!(deepcopy(banded), opts)
+        @test result.diagnostics.plan.parameters.chordal_reason ===
+              :analysis_only_beneficial
+        @test result.diagnostics.plan.chordal_plan.selected === false
+    end
+
+    @testset "chordal policy never changes the numerics" begin
+        off = SDPX.solve!(
+            deepcopy(banded),
+            SDPX.SolverOptions{Float64}(verbosity=0, iter_max=100),
+        )
+        auto = SDPX.solve!(
+            deepcopy(banded),
+            SDPX.SolverOptions{Float64}(
+                verbosity=0, iter_max=100, chordal=:auto,
+            ),
+        )
+        @test auto.x == off.x
+        @test auto.pObj === off.pObj
+        @test auto.dObj === off.dObj
+        @test auto.iterations == off.iterations
+    end
+end
+
 @testset "Schur accumulator capping is visible (§18.4, §19.3)" begin
     # Per-worker Schur accumulators are full m x m matrices, so their total
     # scales as threads * m^2 and a memory cap silently reduces the bin count.

@@ -3194,7 +3194,9 @@ function _solve_pipeline!(
         built = build_execution_plan(
             AutoPlanner(),
             planning_problem,
-            execution_route,
+            execution_route;
+            chordal_estimate=preprocessed.plan === nothing ?
+                             nothing : preprocessed.plan.chordal,
         )
         pipeline_execution_planning_seconds +=
             (time_ns() - execution_planning_started) / 1.0e9

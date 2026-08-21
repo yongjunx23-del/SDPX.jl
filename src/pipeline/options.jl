@@ -134,6 +134,8 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         ))
     opts.checkpoint_every >= 0 ||
         throw(ArgumentError("checkpoint_every must be nonnegative"))
+    opts.chordal in (:off, :auto, :on) ||
+        throw(ArgumentError("chordal must be :off, :auto, or :on"))
     return nothing
 end
 

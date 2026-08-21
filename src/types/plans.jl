@@ -334,12 +334,27 @@ function Base.getproperty(plan::ExecutionPlan, name::Symbol)
             requested=requested,
         )
     end
+    if name === :chordal_plan
+        parameters = getfield(plan, :parameters)
+        return (
+            policy=hasproperty(parameters, :chordal_policy) ?
+                   parameters.chordal_policy : :off,
+            selected=hasproperty(parameters, :chordal_selected) ?
+                     parameters.chordal_selected : false,
+            reason=hasproperty(parameters, :chordal_reason) ?
+                   parameters.chordal_reason : :chordal_disabled,
+            beneficial_blocks=hasproperty(parameters, :chordal_beneficial_blocks) ?
+                              parameters.chordal_beneficial_blocks : 0,
+            transformation=:none,
+            provenance=:execution_plan,
+        )
+    end
     return getfield(plan, name)
 end
 
 function Base.propertynames(plan::ExecutionPlan, private::Bool=false)
     names = fieldnames(typeof(plan))
-    return (names..., :kkt_formulation, :storage_plan)
+    return (names..., :kkt_formulation, :storage_plan, :chordal_plan)
 end
 
 """Immutable copy of `plan` carrying the given solver-family payload.

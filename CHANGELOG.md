@@ -19,6 +19,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - End-to-end sparse LP execution and frozen-CSC sparse SDP Schur execution.
 - Certificates, executed diagnostics, and the canonical public LP/SOCP/SDP
   benchmark registry under `benchmark/`.
+- `ExponentialCone` (Phase A): the domain with its dimension fixed at 3 and
+  validated at block construction (`NativeBlock` and `RowBlock`),
+  `:exp_family` classification with mixed families reported in canonical
+  order, and MOI ingestion of `MOI.ExponentialCone` sets for
+  `VectorOfVariables` and `VectorAffineFunction` inputs. Solving exp
+  programs is fail-closed with the named reason
+  `:exp_lowerer_unavailable`; native exp kernels arrive with Phase B.
 
 ### Developer
 
@@ -129,6 +136,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failure provenance are reported separately from Newton-iteration counters.
   Automatic initialization fails closed rather than falling back to `Omega`
   heuristics. Explicit `parameter_policy=:fixed` initialization is unchanged.
+- Dense/CSC SOC metric parity is asserted to roundoff (`16*eps(T)`) rather
+  than bitwise: the fused scalar-loop and two-gemm branches of
+  `_native_soc_add_metric!` evaluate the same formula in different
+  operation orders, on every arithmetic type and independent of BLAS
+  threading. Bitwise-by-construction assertions (symmetry, structural
+  zeros, frozen-reference comparisons) stay exact.
+- Chordal policy surface (P0): `SolverOptions.chordal`
+  (`:off`/`:auto`/`:on`, default `:off`, validated) records a descriptive
+  plan-level policy — `chordal_policy`, `chordal_selected`,
+  `chordal_reason`, and `chordal_beneficial_blocks` in
+  `ExecutionPlan.parameters`, surfaced as a lazy `plan.chordal_plan`
+  accessor — derived from the preprocessing clique-cost estimate threaded
+  through `_solve_pipeline!` and `prepare` (compatibility delegates record
+  `:chordal_estimate_unavailable`). The clique transformation itself
+  remains analysis-only: `chordal_selected` stays `false`, preprocessing
+  runs unchanged for every value, and solve results are numerically
+  identical under any policy.
 
 ### Removed
 

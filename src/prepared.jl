@@ -411,7 +411,11 @@ function prepare(
             options,
             equality_evidence=equality_map.planning_evidence,
         )
-        build_execution_plan(AutoPlanner(), reduced, execution_route)
+        build_execution_plan(
+            AutoPlanner(), reduced, execution_route;
+            chordal_estimate=preprocessed.plan === nothing ?
+                             nothing : preprocessed.plan.chordal,
+        )
     else
         nothing
     end
