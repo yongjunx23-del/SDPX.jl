@@ -35,6 +35,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Certification fast path: `_primal_block_backward_errors` and
+  `_dual_backward_errors` asserted their `AbstractCons` subtype once
+  outside the per-block loop instead of re-dispatching through the
+  abstract field for every block. On the ladder's 2000-block LP row the
+  certification phase dropped from 0.89 s to ~0.02 s (measured >300x on
+  the isolated backward-error pass; allocation fell from 415 MB to
+  <1 MB per call), lifting end-to-end ladder rows by 3.5-12.7x.
+  Arithmetic order is unchanged -- certificate values are identical.
 - Split the 3719-line `src/pipeline.jl` into eleven ordered files under
   `src/pipeline/` (helpers, options, classify, resources, route, plan,
   presolve, workspace_estimate, attempts, diagnostics, timing). The

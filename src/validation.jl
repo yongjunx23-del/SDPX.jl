@@ -530,26 +530,33 @@ function _primal_block_backward_errors(
 ) where {T}
     mixed_error = zero(T)
     strict_error = zero(T)
-    for block in 1:prob.dims.L
-        dimension = prob.dims.k[block]
-        residual = alloc_zeros(T, dimension, dimension)
-        buildP_owned!(residual, prob.cons, block, x)
-        kaxpby_owned!(-one(T), X[block], one(T), residual)
-        kaxpby_owned!(
-            -one(T),
-            prob.C[block],
-            one(T),
-            residual,
-        )
-        nominal_scale = alloc_zeros(T, dimension, dimension)
-        realized_scale = alloc_zeros(T, dimension, dimension)
-        @inbounds for index in eachindex(realized_scale)
-            nominal_scale[index] = abs(prob.C[block][index])
-            realized_scale[index] =
-                abs(X[block][index]) + abs(prob.C[block][index])
-        end
-        if prob.cons isa DenseCons{T}
-            panel = prob.cons.Av[block]
+    cons = prob.cons
+    # `cons` reaches this loop through an abstract field. Asserting the
+    # concrete subtype once outside the block loop keeps the inner loops
+    # free of per-block dynamic dispatch and allocation (measured >300x
+    # on the 2000-block LP ladder row).
+    if cons isa DenseCons{T}
+        for block in 1:prob.dims.L
+            dimension = prob.dims.k[block]
+            residual = alloc_zeros(T, dimension, dimension)
+            buildP_owned!(residual, cons, block, x)
+            X_block = X[block]
+            C_block = prob.C[block]
+            kaxpby_owned!(-one(T), X_block, one(T), residual)
+            kaxpby_owned!(
+                -one(T),
+                C_block,
+                one(T),
+                residual,
+            )
+            nominal_scale = alloc_zeros(T, dimension, dimension)
+            realized_scale = alloc_zeros(T, dimension, dimension)
+            @inbounds for index in eachindex(realized_scale)
+                nominal_scale[index] = abs(C_block[index])
+                realized_scale[index] =
+                    abs(X_block[index]) + abs(C_block[index])
+            end
+            panel = cons.Av[block]
             @inbounds for variable in axes(panel, 2)
                 weight = abs(x[variable])
                 for index in axes(panel, 1)
@@ -558,8 +565,38 @@ function _primal_block_backward_errors(
                     realized_scale[index] += coefficient * weight
                 end
             end
-        else
-            sparse_cons = prob.cons::SparseCons{T}
+            @inbounds for index in eachindex(residual)
+                errors = _componentwise_backward_errors(
+                    residual[index],
+                    nominal_scale[index],
+                    realized_scale[index],
+                )
+                mixed_error = max(mixed_error, errors.mixed)
+                strict_error = max(strict_error, errors.strict)
+            end
+        end
+    else
+        sparse_cons = cons::SparseCons{T}
+        for block in 1:prob.dims.L
+            dimension = prob.dims.k[block]
+            residual = alloc_zeros(T, dimension, dimension)
+            buildP_owned!(residual, sparse_cons, block, x)
+            X_block = X[block]
+            C_block = prob.C[block]
+            kaxpby_owned!(-one(T), X_block, one(T), residual)
+            kaxpby_owned!(
+                -one(T),
+                C_block,
+                one(T),
+                residual,
+            )
+            nominal_scale = alloc_zeros(T, dimension, dimension)
+            realized_scale = alloc_zeros(T, dimension, dimension)
+            @inbounds for index in eachindex(realized_scale)
+                nominal_scale[index] = abs(C_block[index])
+                realized_scale[index] =
+                    abs(X_block[index]) + abs(C_block[index])
+            end
             @inbounds for variable in sparse_cons.active[block]
                 coefficient = sparse_cons.Asp[block][variable]
                 weight = abs(x[variable])
@@ -575,15 +612,15 @@ function _primal_block_backward_errors(
                     end
                 end
             end
-        end
-        @inbounds for index in eachindex(residual)
-            errors = _componentwise_backward_errors(
-                residual[index],
-                nominal_scale[index],
-                realized_scale[index],
-            )
-            mixed_error = max(mixed_error, errors.mixed)
-            strict_error = max(strict_error, errors.strict)
+            @inbounds for index in eachindex(residual)
+                errors = _componentwise_backward_errors(
+                    residual[index],
+                    nominal_scale[index],
+                    realized_scale[index],
+                )
+                mixed_error = max(mixed_error, errors.mixed)
+                strict_error = max(strict_error, errors.strict)
+            end
         end
     end
     return (mixed=mixed_error, strict=strict_error)
@@ -635,16 +672,19 @@ function _dual_backward_errors(
     copy_owned!(residual, prob.c)
     nominal_scale = abs.(prob.c)
     realized_scale = abs.(prob.c)
-    for block in 1:prob.dims.L
-        accumulate_v_owned!(
-            residual,
-            prob.cons,
-            block,
-            Y[block],
-            -one(T),
-        )
-        if prob.cons isa DenseCons{T}
-            panel = prob.cons.Av[block]
+    cons = prob.cons
+    # Same abstract-field consideration as the primal pass: assert the
+    # concrete subtype once so the per-block loops stay dispatch-free.
+    if cons isa DenseCons{T}
+        for block in 1:prob.dims.L
+            accumulate_v_owned!(
+                residual,
+                cons,
+                block,
+                Y[block],
+                -one(T),
+            )
+            panel = cons.Av[block]
             dual_block = vec(Y[block])
             @inbounds for variable in axes(panel, 2)
                 for index in axes(panel, 1)
@@ -654,8 +694,17 @@ function _dual_backward_errors(
                         coefficient * abs(dual_block[index])
                 end
             end
-        else
-            sparse_cons = prob.cons::SparseCons{T}
+        end
+    else
+        sparse_cons = cons::SparseCons{T}
+        for block in 1:prob.dims.L
+            accumulate_v_owned!(
+                residual,
+                sparse_cons,
+                block,
+                Y[block],
+                -one(T),
+            )
             @inbounds for variable in sparse_cons.active[block]
                 coefficient = sparse_cons.Asp[block][variable]
                 rows = rowvals(coefficient)
