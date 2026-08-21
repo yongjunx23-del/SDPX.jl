@@ -93,16 +93,6 @@ function _sym2_to_q3(matrix::AbstractMatrix)
     return _sym2_to_q3!(destination, matrix)
 end
 
-# Descriptive aliases used by the native backend and by older experiments.
-const _q3_to_matrix! = _q3_to_sym2!
-const _q3_from_matrix! = _sym2_to_q3!
-const _q3_to_matrix = _q3_to_sym2
-const _q3_from_matrix = _sym2_to_q3
-const _q3_from_sym2! = _sym2_to_q3!
-const _sym2_from_q3! = _q3_to_sym2!
-const _q3_coords_to_sym2! = _q3_to_sym2!
-const _sym2_to_q3_coords! = _sym2_to_q3!
-
 @inline function _q3_determinant(coordinates)
     m0, m1, m2 = _q3_coordinate_values(coordinates)
     return m0 * m0 - m1 * m1 - m2 * m2
@@ -141,24 +131,7 @@ end
     return matrix[1, 1] > z && _q3_determinant(matrix) > z
 end
 
-@inline function _q3_is_psd(coordinates)
-    m0, _, _ = _q3_coordinate_values(coordinates)
-    z = zero(m0)
-    return m0 >= z && _q3_determinant(coordinates) >= z
-end
-
-@inline function _q3_is_psd(matrix::AbstractMatrix)
-    _q3_require_matrix(matrix)
-    z = zero(matrix[1, 1])
-    return matrix[1, 1] >= z && _q3_determinant(matrix) >= z
-end
-
-const _q3_pd = _q3_isposdef
-const _q3_is_pd = _q3_isposdef
-const _q3_is_interior = _q3_isposdef
 const _q3_det = _q3_determinant
-const _q3_psd_margin = _q3_margin
-const _q3_min_eigenvalue = _q3_margin
 
 @inline function _q3_trial_isposdef(coordinates, alpha, direction)
     s0, s1, s2 = _q3_coordinate_values(coordinates)
@@ -253,8 +226,6 @@ function _q3_fraction_to_boundary(coordinates, direction)
     return clamp(root, z, o)
 end
 
-const _q3_fraction_to_boundary_bound = _q3_fraction_to_boundary
-const _q3_fraction_to_boundary_exact = _q3_fraction_to_boundary
 
 """Frobenius inner product of two Q3 coordinate vectors."""
 @inline function _q3_frobenius_dot(left, right)
@@ -285,10 +256,6 @@ end
            left[2, 1] * right21 + left[2, 2] * right22
 end
 
-const _q3_frobenius_inner = _q3_frobenius_dot
-const _q3_dot = _q3_frobenius_dot
-const _q3_frob_dot = _q3_frobenius_dot
-const _q3_inner = _q3_frobenius_dot
 
 @inline function _q3_matrix_components(matrix::AbstractMatrix)
     _q3_require_matrix(matrix)
@@ -348,9 +315,6 @@ function _q3_product_full4!(destination::AbstractMatrix, left, right)
     return destination
 end
 
-const _q3_mul_full4! = _q3_product_full4!
-const _q3_product4! = _q3_product_full4!
-const _q3_product_to_full4! = _q3_product_full4!
 
 """Compute `X⁻¹ * F`, writing a full result in row-major coordinates."""
 function _q3_inverse_left_multiply_full4!(destination::AbstractVector, x, full)
@@ -383,9 +347,6 @@ function _q3_inverse_left_multiply_full4!(destination::AbstractMatrix, x, full)
     return destination
 end
 
-const _q3_left_inverse_full4! = _q3_inverse_left_multiply_full4!
-const _q3_inverse_left_full4! = _q3_inverse_left_multiply_full4!
-const _q3_left_multiply_inverse! = _q3_inverse_left_multiply_full4!
 
 @inline function _q3_coefficient_count(coefficients)
     if coefficients isa AbstractMatrix
@@ -505,8 +466,6 @@ function _q3_schur_metric!(H::AbstractMatrix, coefficients, X, Y)
 end
 
 const _q3_fixed_trace_schur_metric! = _q3_schur_metric!
-const _q3_traceless_schur_metric! = _q3_schur_metric!
-const _q3_schur! = _q3_schur_metric!
 
 @inline function _q3_predictor_components(x, p, y, residual)
     x0, x1, x2 = _q3_symmetric_coordinates(x)
@@ -550,7 +509,6 @@ function _q3_predictor_rhs_contraction!(destination::AbstractMatrix, x, p, y, re
 end
 
 const _q3_predictor_rhs! = _q3_predictor_rhs_contraction!
-const _q3_predictor_contract! = _q3_predictor_rhs_contraction!
 
 @inline function _q3_direction_components(x, direction_x, y, residual)
     q11, q12, q21, q22 = _q3_predictor_components(x, direction_x, y, residual)
@@ -604,7 +562,6 @@ function _q3_direction_recovery!(destination::AbstractMatrix, x, direction_x, y,
     return destination
 end
 
-const _q3_recover_direction! = _q3_direction_recovery!
 const _q3_direction! = _q3_direction_recovery!
 
 """Compute `target*I - X*Y - dX*dY` in row-major full-4 coordinates."""
@@ -651,8 +608,6 @@ function _q3_corrector_residual!(destination::AbstractMatrix, target, x, y, dire
 end
 
 const _q3_corrector! = _q3_corrector_residual!
-const _q3_corrector_rhs! = _q3_corrector_residual!
-const _q3_corrector_residual_full4! = _q3_corrector_residual!
 
 # ---------------------------------------------------------------------------
 # Q3 Nesterov--Todd scaling
@@ -1078,13 +1033,3 @@ function _q3_jordan_solve!(destination::AbstractVector,
     destination[3] = y2
     return destination
 end
-
-# Descriptive aliases retained for callers experimenting with the standalone
-# kernels.  The mutating forms above are the allocation-conscious API.
-const _q3_nt_scale! = _q3_nt_scaling!
-const _q3_nesterov_todd_scaling! = _q3_nt_scaling!
-const _q3_soc_nt_scaling! = _q3_nt_scaling!
-const _q3_nt_build_hs! = _q3_nt_hs!
-const _q3_hs! = _q3_nt_hs!
-const _q3_apply_hs! = _q3_nt_apply_hs!
-const _q3_apply_hs_inverse! = _q3_nt_apply_hs_inverse!

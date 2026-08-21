@@ -60,10 +60,11 @@ end
 Typed map from local variable slot to the frontend `VariableRef` used
 for dual-slack reconstruction. The map is the model's global variable
 registry in compiled order; the numeric dual-slack warm-start vectors
-themselves remain owned by the `VariableBlockRecord`s and are compiled
-separately (see `compile_product_cone_model`). This mirrors the
-existing SDPX convention where dual-slack values are reported per
-variable through the same reference identity used by primal values.
+themselves remain owned by the `VariableBlockRecord`s and are lowered
+at `optimize!` time by the per-family start builders in
+`src/public/optimize.jl`. This mirrors the existing SDPX convention
+where dual-slack values are reported per variable through the same
+reference identity used by primal values.
 
 The downstream dual-slack *scaling* convention of the existing SDPX
 frontend is preserved as a pure contract: for a non-PSD variable the

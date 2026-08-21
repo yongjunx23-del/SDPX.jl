@@ -192,18 +192,3 @@ function owned_sparse_copy(
     values = owned_vector_copy(T, matrix.nzval; precision_bits=precision_bits)
     return SparseMatrixCSC{T,Int}(m, n, column_pointer, row_indices, values)
 end
-
-"""
-    copy_stored_vector(values; precision_bits=precision(T)) -> Union{Nothing,Vector{T}}
-
-Owned copy of an optional stored vector (`nothing` stays `nothing`),
-used for primal / dual-slack / dual starts at the compiler boundary.
-The returned vector never aliases the model-owned data.
-"""
-copy_stored_vector(::Nothing; precision_bits::Int=0) = nothing
-function copy_stored_vector(
-    values::AbstractVector;
-    precision_bits::Int=precision(eltype(values)),
-)
-    return owned_vector_copy(eltype(values), values; precision_bits=precision_bits)
-end

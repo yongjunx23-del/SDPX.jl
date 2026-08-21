@@ -26,6 +26,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `VectorOfVariables` and `VectorAffineFunction` inputs. Solving exp
   programs is fail-closed with the named reason
   `:exp_lowerer_unavailable`; native exp kernels arrive with Phase B.
+- MOI `ConstraintPrimal` for a `VectorAffineFunction`-in-`Reals` row set
+  returns the full evaluated vector (previously truncated to the first
+  coordinate), and MOI interval `ConstraintDual` now follows the MOI sign
+  convention — the sum of the bridged lower (`Nonnegative`) and upper
+  (`Nonpositive`) duals, so an active upper bound reports a negative dual
+  (previously the subtraction made negative interval duals
+  unrepresentable).
 
 ### Developer
 
@@ -153,6 +160,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   remains analysis-only: `chordal_selected` stays `false`, preprocessing
   runs unchanged for every value, and solve results are numerically
   identical under any policy.
+- Whole-codebase audit fixes: `ws.vpartial` is sized by the block-bin
+  count on every route (the sparse-schur route previously capped it by
+  the dual dimension `m` and underran the array in the first threaded
+  residual sweep when threads exceeded `m`); the step-collapse
+  near-tolerance exit tests the gap against the equilibration-tightened
+  acceptance threshold so its "within 1000× of the requested tolerance"
+  message holds in original coordinates under objective scaling;
+  `sparse_schur_block_scatter!` zeroes its BigFloat panel with
+  `zero_owned!` like its sibling kernel (a bare `fill!` aliases one MPFR
+  object across the panel); `_sparse_store!` fails closed for non-BigFloat
+  callers instead of silently dropping writes; the MOI settings seam maps
+  the `diagnostics::Bool` option to a symbolic level instead of a dead
+  conditional that always produced `:summary`; `ksyrk!`'s documented
+  default is the overwrite semantics (`β=zero`) the kernels implement.
+- Dead-code sweep: removed 26 zero-reference Q3 kernel aliases, the
+  unused `_q3_is_psd`, the 5-argument `line_search!` wrapper,
+  `_safe_parameter_bounds`, `copy_stored_vector`, `analyze_structure`,
+  `program_row_blocks`, `soc_primal_map`/`soc_dual_map`, the
+  `MOIVectorLinearSet`/`MOILorentzSet` unions, four 2-argument
+  `analyze` convenience methods, the pre-Round-6 eight-field
+  `LPSparseSystem` constructor, and the 2-/3-argument `Equilibration`
+  convenience constructors — all verified by repo-wide reference grep.
 
 ### Removed
 

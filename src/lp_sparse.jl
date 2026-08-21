@@ -47,22 +47,6 @@ mutable struct LPSparseSystem{T}
     assembly_map::Any
 end
 
-# Compatibility constructor for the pre-Round-6 eight-field value layout.
-function LPSparseSystem{T}(
-    G::SparseMatrixCSC{T,Int},
-    B::SparseMatrixCSC{T,Int},
-    K::SparseMatrixCSC{T,Int},
-    backend::KKTBackend,
-    formulation::Symbol,
-    variables::Int,
-    equalities::Int,
-    analyzed::Bool,
-) where {T}
-    return LPSparseSystem{T}(
-        G, B, K, backend, formulation, variables, equalities, analyzed,
-        nothing, nothing,
-    )
-end
 
 """
     lp_sparse_candidate(G, B, arithmetic) -> Union{Nothing,LPSparseSystem}

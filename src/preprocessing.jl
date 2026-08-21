@@ -354,11 +354,6 @@ function analyze(
     )
 end
 
-analyze(
-    stage::BoundExtractionStage,
-    context::PreprocessContext{T},
-) where {T} = analyze(stage, context, SolverOptions{T}())
-
 function _subtract_scaled_dense!(
     destination::AbstractArray{T},
     scale::T,
@@ -1274,11 +1269,6 @@ apply(
     plan::StructuralCleanupPlan{T},
 ) where {T} = _replace_equalities(context, plan)
 
-analyze(
-    stage::StructuralCleanupStage,
-    context::PreprocessContext{T},
-) where {T} = analyze(stage, context, SolverOptions{T}())
-
 function _formulation_cost(prob::SDPProblem{T}, opts::SolverOptions{T}) where {T}
     triangle = sum(
         dimension -> dimension * (dimension + 1) ÷ 2,
@@ -1324,11 +1314,6 @@ analyze(
     context::PreprocessContext{T},
     opts::SolverOptions{T},
 ) where {T} = _formulation_cost(context.problem, opts)
-
-analyze(
-    stage::FormulationAnalysisStage,
-    context::PreprocessContext{T},
-) where {T} = analyze(stage, context, SolverOptions{T}())
 
 function _chordal_cost(prob::SDPProblem)
     original_storage = sum(
@@ -1402,11 +1387,6 @@ analyze(
     context::PreprocessContext{T},
     opts::SolverOptions{T},
 ) where {T} = _chordal_cost(context.problem)
-
-analyze(
-    stage::ChordalAnalysisStage,
-    context::PreprocessContext{T},
-) where {T} = analyze(stage, context, SolverOptions{T}())
 
 function _empty_formulation_cost(prob::SDPProblem{T}) where {T}
     return _formulation_cost(prob, SolverOptions{T}(formulation=:primal))

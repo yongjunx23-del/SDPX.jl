@@ -668,7 +668,11 @@ function _sparse_store!(destination::BigFloat, value::BigFloat)
     MA.operate_to!(destination, copy, value)
     return destination
 end
-_sparse_store!(destination, value) = (destination = value)
+function _sparse_store!(destination, value)
+    # Generic element types copy by value; a silent no-op here would drop
+    # writes for any future caller, so fail closed instead.
+    error("_sparse_store! requires independently owned BigFloat scalars")
+end
 
 function _sparse_zero_values!(values::AbstractVector)
     if eltype(values) === BigFloat
@@ -1482,7 +1486,7 @@ function _sparse_schur_sdp_workspace(
         prob;
         provider=_sparse_provider(T),
     )
-    B = prob.B isa SparseMatrixCSC ? Matrix{T}(prob.B) : Matrix{T}(prob.B)
+    B = Matrix{T}(prob.B)
     n = prob.dims.n
     return GenericSparseSchurSDPWorkspace{T}(
         storage,

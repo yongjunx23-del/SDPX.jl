@@ -292,9 +292,6 @@ function reconstruct_soc_dual(
     return record.map * core_value
 end
 
-soc_primal_map(record::SOCPrimalReconstruction) = record.map
-soc_dual_map(record::SOCDualReconstruction) = record.map
-
 # ---------------------------------------------------------------------------
 # Sparse row assembly helpers
 # ---------------------------------------------------------------------------

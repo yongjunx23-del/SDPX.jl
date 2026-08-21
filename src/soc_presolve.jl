@@ -28,13 +28,8 @@ struct NativeSOCPresolveMap{T}
     augmented_work_after::Int
 end
 
-@inline function _soc_presolve_owned_scalar(::Type{BigFloat}, value)
-    return _ingest_owned_scalar(BigFloat, value)
-end
-
-@inline function _soc_presolve_owned_scalar(::Type{T}, value) where {T}
-    return _ingest_owned_scalar(T, value)
-end
+@inline _soc_presolve_owned_scalar(::Type{T}, value) where {T} =
+    _ingest_owned_scalar(T, value)
 
 function _soc_presolve_owned_vector(::Type{T}, source) where {T}
     destination = alloc_zeros(T, length(source))
@@ -150,7 +145,6 @@ function _soc_presolve_reduce_cone(
     K::Vector{Int},
     P::Vector{Int},
     Q::SparseMatrixCSC{T,Int},
-    beta::Vector{T},
 ) where {T}
     rows = size(A, 1)
     columns = length(K)
@@ -204,7 +198,7 @@ function _soc_presolve_reduce_cone(
     Q::SparseMatrixCSC{T,Int},
     beta::Vector{T},
 ) where {T}
-    reduced, offset = _soc_presolve_reduce_cone(A, K, P, Q, beta)
+    reduced, offset = _soc_presolve_reduce_cone(A, K, P, Q)
     copy_owned!(offset, b)
     source_values = nonzeros(A)
     @inbounds for pivot_position in eachindex(P)

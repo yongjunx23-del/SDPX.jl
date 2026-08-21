@@ -440,8 +440,6 @@ function _analyze_matrix_coefficients(A, m::Int, n::Int, k::Vector{Int}, request
     )
 end
 
-analyze_structure(prob::SDPProblem) = prob.structure
-
 function structure_summary(prob::SDPProblem)
     analysis = prob.structure
     return (
@@ -1198,11 +1196,6 @@ function _scale_equality_rows!(
     end
     return matrix
 end
-
-Equilibration{T}(E, s, objective_scale) where {T} =
-    Equilibration{T}(E, s, objective_scale, zeros(Int, length(E)))
-Equilibration{T}(E, s) where {T} =
-    Equilibration{T}(E, s, one(T), zeros(Int, length(E)))
 
 """
     equilibrate(prob::SDPProblem{T}, cons::SparseCons) -> (scaled, Equilibration)

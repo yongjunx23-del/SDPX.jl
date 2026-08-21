@@ -358,7 +358,6 @@ program_objective_constant(program::NativeConeProgram) = program.objective_const
 program_equality_matrix(program::NativeConeProgram) = program.equality_matrix
 program_rhs(program::NativeConeProgram) = program.rhs
 program_blocks(program::NativeConeProgram) = program.blocks
-program_row_blocks(program::NativeConeProgram) = program.row_blocks
 program_source_model(program::NativeConeProgram) = program.source_model
 
 program_num_blocks(program::NativeConeProgram) = length(program.blocks)
