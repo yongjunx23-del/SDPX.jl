@@ -436,8 +436,8 @@ function _result_packed_matrix(
     ::Type{T},
     scale_dual_offdiagonals::Bool=false,
 ) where {T<:AbstractFloat}
-    length(values) == n * (n + 1) ÷ 2 || throw(DimensionMismatch(
-        "packed PSD length $(length(values)) != $((n * (n + 1)) ÷ 2)",
+    length(values) == psd_packed_length(n) || throw(DimensionMismatch(
+        "packed PSD length $(length(values)) != $(psd_packed_length(n))",
     ))
     matrix = Matrix{T}(undef, n, n)
     fill!(matrix, zero(T))

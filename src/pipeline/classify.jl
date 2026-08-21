@@ -24,7 +24,7 @@ function classify_problem(prob::SDPProblem{T}) where {T}
         size_class,
         m,
         n,
-        sum(dimension * (dimension + 1) ÷ 2 for dimension in k),
+        sum(psd_packed_length, k),
         maximum(k; init=0),
         prob.structure.coefficient_density,
         prob.structure.schur_density,

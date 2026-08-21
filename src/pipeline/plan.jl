@@ -41,8 +41,7 @@ function build_execution_plan(
         parameter_strategy=opts.parameter_strategy,
         profile=parameter_profile,
     )
-    opts.scaling in (:auto, :none, :equilibrate) ||
-        throw(ArgumentError("scaling must be :auto, :none, or :equilibrate"))
+    _validate_scaling_option(opts.scaling)
     scaling = if opts.scaling === :auto
         automatic_scaling_policy(algorithm)
     elseif opts.scaling === :equilibrate

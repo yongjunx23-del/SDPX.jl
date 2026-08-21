@@ -1,3 +1,12 @@
+"""Validate the `scaling` option value shared by option and plan paths."""
+function _validate_scaling_option(scaling::Symbol)
+    scaling in (:auto, :none, :equilibrate) ||
+        throw(ArgumentError(
+            "scaling must be :auto, :none, or :equilibrate",
+        ))
+    return nothing
+end
+
 function _validate_solver_options(opts::SolverOptions{T}) where {T}
     opts.presolve isa Bool ||
         opts.presolve in (:auto, :off, :on) ||
@@ -70,10 +79,7 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError("termination must be :relative or :legacy"))
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
-    opts.scaling in (:auto, :none, :equilibrate) ||
-        throw(ArgumentError(
-            "scaling must be :auto, :none, or :equilibrate",
-        ))
+    _validate_scaling_option(opts.scaling)
     opts.formulation in (:auto, :primal, :normal_equations, :augmented) ||
         throw(ArgumentError(
             "formulation must be :auto, :primal, :normal_equations, or :augmented",

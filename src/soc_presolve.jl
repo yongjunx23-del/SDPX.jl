@@ -28,13 +28,10 @@ struct NativeSOCPresolveMap{T}
     augmented_work_after::Int
 end
 
-@inline _soc_presolve_owned_scalar(::Type{T}, value) where {T} =
-    _ingest_owned_scalar(T, value)
-
 function _soc_presolve_owned_vector(::Type{T}, source) where {T}
     destination = alloc_zeros(T, length(source))
     @inbounds for index in eachindex(source)
-        destination[index] = _soc_presolve_owned_scalar(T, source[index])
+        destination[index] = _ingest_owned_scalar(T, source[index])
     end
     return destination
 end
@@ -73,7 +70,7 @@ function _soc_presolve_csc(
             previous = row
             iszero(value) && continue
             push!(rowval, row)
-            push!(nzval, _soc_presolve_owned_scalar(T, value))
+            push!(nzval, _ingest_owned_scalar(T, value))
         end
         colptr[column + 1] = length(rowval) + 1
     end
@@ -94,7 +91,7 @@ end
     ::Type{T},
 ) where {T}
     iszero(value) && return values
-    owned = _soc_presolve_owned_scalar(T, value)
+    owned = _ingest_owned_scalar(T, value)
     if haskey(values, row)
         values[row] = values[row] + owned
     else
@@ -260,10 +257,10 @@ function _soc_presolve_row_data(Aeq::SparseMatrixCSC{T,Int}) where {T}
             row in seen && (duplicate = true)
             push!(seen, row)
             push!(column_rows[column], row)
-            owned = _soc_presolve_owned_scalar(T, value)
+            owned = _ingest_owned_scalar(T, value)
             push!(column_values[column], owned)
             push!(row_columns[row], column)
-            push!(row_values[row], _soc_presolve_owned_scalar(T, value))
+            push!(row_values[row], _ingest_owned_scalar(T, value))
             row_width[row] += 1
             row_scale[row] = max(row_scale[row], abs(value))
         end
@@ -437,14 +434,14 @@ function _native_soc_presolve(
         pivot_column = pivot_columns[pivot_position]
         alpha = column_values[pivot_column][1]
         beta[pivot_position] =
-            _soc_presolve_owned_scalar(T, problem.beq[row] / alpha)
+            _ingest_owned_scalar(T, problem.beq[row] / alpha)
         for (entry_column, value) in zip(
             row_columns[row], row_values[row],
         )
             entry_column == pivot_column && continue
             retained_position = k_position[entry_column]
             retained_position == 0 && continue
-            coefficient = _soc_presolve_owned_scalar(T, -value / alpha)
+            coefficient = _ingest_owned_scalar(T, -value / alpha)
             push!(q_entries[retained_position], (pivot_position, coefficient))
         end
     end
@@ -457,7 +454,7 @@ function _native_soc_presolve(
             c_red[column] += Q.nzval[pointer] * problem.c[pivot_columns[pivot_position]]
         end
     end
-    kappa = _soc_presolve_owned_scalar(T, zero(T))
+    kappa = _ingest_owned_scalar(T, zero(T))
     @inbounds for pivot_position in eachindex(pivot_columns)
         kappa += problem.c[pivot_columns[pivot_position]] * beta[pivot_position]
     end
@@ -576,7 +573,7 @@ function _soc_presolve_column_dot(
     column::Int,
     z::AbstractVector{T},
 ) where {T}
-    value = _soc_presolve_owned_scalar(T, zero(T))
+    value = _ingest_owned_scalar(T, zero(T))
     source_values = nonzeros(A)
     @inbounds for pointer in nzrange(A, column)
         value += source_values[pointer] * z[A.rowval[pointer]]
@@ -589,7 +586,7 @@ function _soc_presolve_column_dot(
     column::Int,
     z::AbstractVector{T},
 ) where {T}
-    value = _soc_presolve_owned_scalar(T, zero(T))
+    value = _ingest_owned_scalar(T, zero(T))
     @inbounds for row in axes(A, 1)
         value += A[row, column] * z[row]
     end
@@ -605,10 +602,10 @@ function _native_soc_restore_result(
 ) where {T}
     x = alloc_zeros(T, original.variables)
     @inbounds for (position, column) in pairs(map.K)
-        x[column] = _soc_presolve_owned_scalar(T, result.x[position])
+        x[column] = _ingest_owned_scalar(T, result.x[position])
     end
     @inbounds for (position, column) in pairs(map.P)
-        x[column] = _soc_presolve_owned_scalar(T, map.beta[position])
+        x[column] = _ingest_owned_scalar(T, map.beta[position])
     end
     @inbounds for column in 1:length(map.K)
         u = result.x[column]
@@ -621,7 +618,7 @@ function _native_soc_restore_result(
 
     equality_dual = alloc_zeros(T, length(original.beq))
     @inbounds for (position, row) in pairs(map.S)
-        equality_dual[row] = _soc_presolve_owned_scalar(
+        equality_dual[row] = _ingest_owned_scalar(
             T,
             result.equality_dual[position],
         )
@@ -629,7 +626,7 @@ function _native_soc_restore_result(
     @inbounds for (pivot_position, row) in pairs(map.R)
         column = map.P[pivot_position]
         alpha = original.Aeq[row, column]
-        stationarity = _soc_presolve_owned_scalar(T, original.c[column])
+        stationarity = _ingest_owned_scalar(T, original.c[column])
         for block in eachindex(original.cones)
             cone = original.cones[block]
             stationarity -= _soc_presolve_column_dot(
@@ -710,7 +707,7 @@ function _native_soc_presolve_annotate(
     diagnostics isa NativeSOCDiagnostics || return result
     map = decision.map
     map_bytes = map === nothing ? 0 : _native_soc_presolve_map_bytes(map)
-    objective_offset = map === nothing ? _soc_presolve_owned_scalar(T, zero(T)) : map.kappa
+    objective_offset = map === nothing ? _ingest_owned_scalar(T, zero(T)) : map.kappa
     facts = (
         enabled=_presolve_enabled(options) &&
                 (options.presolve_fixed_variables ||

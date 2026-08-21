@@ -170,6 +170,22 @@ function _owned_arithmetic_eval(
 end
 
 """
+    _owned_sqrt_two(::Type{T}, bits) -> T
+
+Owned `sqrt(2)` computed at the explicit model precision `bits`. The
+square root itself is evaluated inside the precision scope (BigFloat
+operators otherwise use the ambient `setprecision`), and the result is
+copied back into model ownership.
+"""
+@inline function _owned_sqrt_two(::Type{T}, bits::Int) where {T<:AbstractFloat}
+    return _owned_arithmetic_eval(
+        T,
+        () -> sqrt(owned_arithmetic_copy(T, 2; precision_bits=bits));
+        precision_bits=bits,
+    )
+end
+
+"""
     owned_vector_copy(::Type{T}, values; precision_bits=precision(T)) -> Vector{T}
 
 Owned `Vector{T}` copy of `values` at the model arithmetic. Every

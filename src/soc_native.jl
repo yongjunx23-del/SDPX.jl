@@ -1193,12 +1193,18 @@ function _native_soc_add_metric!(
     eta_squared = workspace.nt_eta_squared[block]
     cone_dimension = length(w)
     metric_matrix = Matrix{T}(undef, cone_dimension, cone_dimension)
+    # The unit-vector scratch reuses the sparse branch's `basis` buffer
+    # (`workspace.offset[block]`, unused on this branch) instead of one
+    # `zeros` per column; the kernel only reads it, so the values handed
+    # in are identical either way. `zero_owned!` keeps BigFloat entries
+    # independently owned.
+    zero_owned!(basis)
     @inbounds for column in 1:cone_dimension
-        unit = zeros(T, cone_dimension)
-        unit[column] = one(T)
+        basis[column] = one(T)
         _soc_nt_apply_hs_inverse!(
-            view(metric_matrix, :, column), w, eta_squared, unit,
+            view(metric_matrix, :, column), w, eta_squared, basis,
         )
+        basis[column] = zero(T)
     end
     scaled = metric_matrix * cone.A
     mul!(

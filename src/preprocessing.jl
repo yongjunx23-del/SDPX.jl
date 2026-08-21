@@ -144,7 +144,7 @@ function _preprocess_size(prob::SDPProblem)
         prob.dims.m,
         prob.dims.n,
         prob.dims.L,
-        sum(dimension -> dimension * (dimension + 1) ÷ 2, prob.dims.k; init=0),
+        sum(psd_packed_length, prob.dims.k; init=0),
         prob.structure.coefficient_nnz,
         count(!iszero, prob.B),
         prob.dims.m,
@@ -518,7 +518,7 @@ function _dense_structure(
     m = isempty(panels) ? 0 : size(first(panels), 2)
     @inbounds for block in eachindex(panels)
         dimension = dimensions[block]
-        pattern = falses(dimension * (dimension + 1) ÷ 2)
+        pattern = falses(psd_packed_length(dimension))
         indices = Int[]
         for variable in 1:m
             output = 0

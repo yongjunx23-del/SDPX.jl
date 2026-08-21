@@ -221,7 +221,7 @@ function _structure_analysis(
     requested_storage,
 )
     L = length(k)
-    block_slots = [dimension * (dimension + 1) ÷ 2 for dimension in k]
+    block_slots = [psd_packed_length(dimension) for dimension in k]
     coefficient_slots_by_block = m .* block_slots
     coefficient_nnz = sum(coefficient_nnz_by_block)
     coefficient_slots = sum(coefficient_slots_by_block)
@@ -336,7 +336,7 @@ function _analyze_dense_coefficients(A, m::Int, n::Int, k::Vector{Int}, requeste
     pattern_nnz = zeros(Int, L)
     for l in 1:L
         dimension = k[l]
-        pattern = falses(dimension * (dimension + 1) ÷ 2)
+        pattern = falses(psd_packed_length(dimension))
         for variable in 1:m
             variable_active = false
             output = 0
