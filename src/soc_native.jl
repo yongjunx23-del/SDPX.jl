@@ -1176,8 +1176,9 @@ function _native_soc_add_metric!(
     # cone's columns, so H += A' * (M * A) collapses to two BLAS passes
     # instead of a scalar triple loop. M is assembled column-by-column with
     # the same `_soc_nt_apply_hs_inverse!` kernel the scalar loop used, so
-    # the metric entries are identical; the two gemm passes accumulate into
-    # the existing hessian with identical semantics.
+    # the two branches agree in exact arithmetic; the fused scalar loop and
+    # the two gemm passes round in different orders, and results match only
+    # to roundoff, not bitwise.
     w = workspace.nt_w[block]
     eta_squared = workspace.nt_eta_squared[block]
     cone_dimension = length(w)
