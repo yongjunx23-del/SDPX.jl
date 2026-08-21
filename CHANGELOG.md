@@ -35,6 +35,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Repository cleanup: the former `bench/` tree is consolidated — the
+  acceptance gate now lives at `benchmark/gates.jl` (with
+  `benchmark/baselines/gates.json` and the benchmarking environment
+  `benchmark/benchenv/`), and historical application/cluster campaigns with
+  their dated reports are archived under `docs/evidence/`. The five hand-linked
+  topic guides are served through Documenter under "Topic guides", and dated
+  review snapshots moved to `docs/evidence/development-reviews/`. One-shot
+  Codex patch automation (`.codex/` payloads and their four workflows, whose
+  target branch no longer exists) and the unwired COO micro benchmark were
+  removed. The optimization pipeline is defined once in
+  `.github/workflows/optimization-benchmark.yml`; the push loop and the
+  pull-request gate are thin callers.
 - Benchmark registry and scoreboard contracts are covered by the ordinary test
   suite; public benchmark files are never downloaded.
 - `PreparedSolver` reuses an immutable post-presolve `ExecutionPlan` only when
