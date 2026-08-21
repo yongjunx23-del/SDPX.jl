@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Cluster workflow · SDPX.jl</title><meta name="title" content="Cluster workflow · SDPX.jl"/><meta property="og:title" content="Cluster workflow · SDPX.jl"/><meta property="twitter:title" content="Cluster workflow · SDPX.jl"/><meta name="description" content="Documentation for SDPX.jl."/><meta property="og:description" content="Documentation for SDPX.jl."/><meta property="twitter:description" content="Documentation for SDPX.jl."/><script data-outdated-warner src="../assets/warner.js"></script><link href="https://cdnjs.cloudflare.com/ajax/libs/lato-font/3.0.0/css/lato-font.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/juliamono/0.050/juliamono.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/fontawesome.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/solid.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/brands.min.css" rel="stylesheet" type="text/css"/><link href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.8/katex.min.css" rel="stylesheet" type="text/css"/><script>documenterBaseURL=".."</script><script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js" data-main="../assets/documenter.js"></script><script src="../search_index.js"></script><script src="../siteinfo.js"></script><script src="../../versions.js"></script><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-mocha.css" data-theme-name="catppuccin-mocha"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-macchiato.css" data-theme-name="catppuccin-macchiato"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-frappe.css" data-theme-name="catppuccin-frappe"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/catppuccin-latte.css" data-theme-name="catppuccin-latte"/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-dark.css" data-theme-name="documenter-dark" data-theme-primary-dark/><link class="docs-theme-link" rel="stylesheet" type="text/css" href="../assets/themes/documenter-light.css" data-theme-name="documenter-light" data-theme-primary/><script src="../assets/themeswap.js"></script></head><body><div id="documenter"><nav class="docs-sidebar"><div class="docs-package-name"><span class="docs-autofit"><a href="../">SDPX.jl</a></span></div><button class="docs-search-query input is-rounded is-small is-clickable my-2 mx-auto py-1 px-2" id="documenter-search-query">Search docs (Ctrl + /)</button><ul class="docs-menu"><li><a class="tocitem" href="../">Home</a></li><li><span class="tocitem">Getting started</span><ul><li><a class="tocitem" href="../quickstart/">Quick start</a></li><li><a class="tocitem" href="../cli/">Command line</a></li><li><a class="tocitem" href="../precision/">Precision</a></li><li><a class="tocitem" href="../jump/">JuMP and MOI</a></li><li><a class="tocitem" href="../socp/">SOCP and fixed trace</a></li></ul></li><li><span class="tocitem">Solver workflow</span><ul><li><a class="tocitem" href="../pipeline/">Automatic pipeline</a></li><li><a class="tocitem" href="../preprocessing/">Preprocessing</a></li><li><a class="tocitem" href="../sparse-execution/">Sparse execution</a></li><li><a class="tocitem" href="../parameters/">Parameters</a></li><li><a class="tocitem" href="../diagnostics/">Diagnostics and certificates</a></li></ul></li><li><span class="tocitem">Architecture</span><ul><li><a class="tocitem" href="../architecture/">Architecture</a></li><li><a class="tocitem" href="../providers/">Linear-algebra providers</a></li></ul></li><li><span class="tocitem">Topic guides</span><ul><li><a class="tocitem" href="../threading/">Threading</a></li><li class="is-active"><a class="tocitem" href>Cluster workflow</a><ul class="internal"><li><a class="tocitem" href="#Required-site-variables"><span>Required site variables</span></a></li><li><a class="tocitem" href="#Immutable-release-layout"><span>Immutable release layout</span></a></li><li><a class="tocitem" href="#Prepare-a-release-locally"><span>Prepare a release locally</span></a></li><li><a class="tocitem" href="#Install-a-candidate-without-overwriting-anything"><span>Install a candidate without overwriting anything</span></a></li><li><a class="tocitem" href="#Resolve-the-Julia-environment-on-the-login-node"><span>Resolve the Julia environment on the login node</span></a></li><li><a class="tocitem" href="#External-benchmark-data"><span>External benchmark data</span></a></li><li><a class="tocitem" href="#Preprocessing-and-model-classification"><span>Preprocessing and model classification</span></a></li><li><a class="tocitem" href="#Thread-and-memory-policy"><span>Thread and memory policy</span></a></li><li><a class="tocitem" href="#Validation-job"><span>Validation job</span></a></li><li><a class="tocitem" href="#Candidate-acceptance-gates"><span>Candidate acceptance gates</span></a></li><li><a class="tocitem" href="#Sparse-1/2/4/8-and-BigFloat-benchmark-job"><span>Sparse 1/2/4/8 and BigFloat benchmark job</span></a></li><li><a class="tocitem" href="#Promotion"><span>Promotion</span></a></li><li><a class="tocitem" href="#Rollback"><span>Rollback</span></a></li><li><a class="tocitem" href="#Result-collection"><span>Result collection</span></a></li></ul></li><li><a class="tocitem" href="../bridge-schema/">Bridge schema</a></li><li><a class="tocitem" href="../adaptive-parameter-policy/">Adaptive parameter policy</a></li><li><a class="tocitem" href="../adaptive-dense-sparse-optimization/">Adaptive dense/sparse optimization</a></li></ul></li><li><a class="tocitem" href="../benchmarks/">Benchmarks and evidence</a></li><li><a class="tocitem" href="../api/">API reference</a></li><li><a class="tocitem" href="../internals/">Experimental internals</a></li><li><a class="tocitem" href="../development/">Development</a></li></ul><div class="docs-version-selector field has-addons"><div class="control"><span class="docs-label button is-static is-size-7">Version</span></div><div class="docs-selector control is-expanded"><div class="select is-fullwidth is-size-7"><select id="documenter-version-selector"></select></div></div></div></nav><div class="docs-main"><header class="docs-navbar"><a class="docs-sidebar-button docs-navbar-link fa-solid fa-bars is-hidden-desktop" id="documenter-sidebar-button" href="#"></a><nav class="breadcrumb"><ul class="is-hidden-mobile"><li><a class="is-disabled">Topic guides</a></li><li class="is-active"><a href>Cluster workflow</a></li></ul><ul class="is-hidden-tablet"><li class="is-active"><a href>Cluster workflow</a></li></ul></nav><div class="docs-right"><a class="docs-navbar-link" href="https://github.com/yongjunx23-del/SDPX.jl" title="View the repository on GitHub"><span class="docs-icon fa-brands"></span><span class="docs-label is-hidden-touch">GitHub</span></a><a class="docs-navbar-link" href="https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/cluster-workflow.md" title="Edit source on GitHub"><span class="docs-icon fa-solid"></span></a><a class="docs-settings-button docs-navbar-link fa-solid fa-gear" id="documenter-settings-button" href="#" title="Settings"></a><a class="docs-article-toggle-button fa-solid fa-chevron-up" id="documenter-article-toggle-button" href="javascript:;" title="Collapse all docstrings"></a></div></header><article class="content" id="documenter-page"><h1 id="Cluster-Deployment-and-Execution"><a class="docs-heading-anchor" href="#Cluster-Deployment-and-Execution">Cluster Deployment and Execution</a><a id="Cluster-Deployment-and-Execution-1"></a><a class="docs-heading-anchor-permalink" href="#Cluster-Deployment-and-Execution" title="Permalink"></a></h1><p>This guide describes a generic single-node PBS workflow for SDPX. It keeps source releases immutable, preserves previous campaigns, separates the Julia environment from the source tree, and promotes a release only after numerical validation. Site-specific accounts, login hosts, filesystem paths, module commands, and node topology belong in private operator documentation.</p><p>The examples use PBS (<code>qsub</code>, <code>qstat</code>, and <code>qdel</code>) and its conventional <code>normal</code> queue. Adapt resource syntax if the local PBS installation differs. Do not place passwords, private keys, access tokens, complete process environments, or private site topology in source control or result logs.</p><h2 id="Required-site-variables"><a class="docs-heading-anchor" href="#Required-site-variables">Required site variables</a><a id="Required-site-variables-1"></a><a class="docs-heading-anchor-permalink" href="#Required-site-variables" title="Permalink"></a></h2><p>Define these values in the shell or a private site-environment helper before using the examples:</p><pre><code class="language-bash hljs">export CLUSTER=pbs-login
+export SDPX_REMOTE_BASE=/absolute/path/to/SDPX.jl
+# export SDPX_SITE_ENV=/absolute/path/to/site-environment.sh  # optional
+export JULIA_BIN=/absolute/path/to/julia  # unless SDPX_SITE_ENV defines it</code></pre><ul><li><code>CLUSTER</code> is an SSH alias or login hostname.</li><li><code>SDPX_REMOTE_BASE</code> is a new canonical deployment root owned by the user.</li><li><code>SDPX_SITE_ENV</code> is optional; it may load compiler/runtime modules and define <code>JULIA_BIN</code> or an existing shared <code>JULIA_DEPOT_PATH</code>.</li><li><code>JULIA_BIN</code> must resolve to the Julia executable used on login and compute nodes.</li></ul><p>Always pass an explicit <code>--project=...</code>; a site helper may otherwise select an unrelated default project. Never reuse an older solver checkout as the release root or overwrite its manifests. Historical inputs may be copied or referenced only after their documented size and checksum have been verified.</p><h2 id="Immutable-release-layout"><a class="docs-heading-anchor" href="#Immutable-release-layout">Immutable release layout</a><a id="Immutable-release-layout-1"></a><a class="docs-heading-anchor-permalink" href="#Immutable-release-layout" title="Permalink"></a></h2><p>Use one directory per full Git commit:</p><pre><code class="language-text hljs">$SDPX_REMOTE_BASE/
+├── current -&gt; releases/&lt;full-commit&gt;/source
+├── data/
+│   └── csdr-40-4-20-100/
+├── depot/
+├── incoming/
+├── jobs/
+│   └── &lt;full-commit&gt;/
+├── releases/
+│   └── &lt;full-commit&gt;/
+│       ├── environment/
+│       │   ├── Project.toml
+│       │   └── Manifest.toml
+│       ├── metadata/
+│       │   ├── archive-sha256.txt
+│       │   ├── commit.txt
+│       │   ├── environment-sha256.txt
+│       │   └── previous-current.txt
+│       └── source/
+└── results/
+    └── &lt;full-commit&gt;/
+        └── &lt;PBS-job-id&gt;/</code></pre><p>The <code>source</code> directory is exactly one <code>git archive</code>. The generated <code>environment</code> is separate so package resolution never modifies the source tree. A job writes only below its unique result directory. The <code>current</code> symlink is an activation pointer, not a working checkout.</p><p>This layout has three useful properties:</p><ol><li>a result names the exact source commit and resolved Julia environment;</li><li>a failed candidate cannot corrupt the active release;</li><li>rollback changes one symlink and does not delete releases or results.</li></ol><h2 id="Prepare-a-release-locally"><a class="docs-heading-anchor" href="#Prepare-a-release-locally">Prepare a release locally</a><a id="Prepare-a-release-locally-1"></a><a class="docs-heading-anchor-permalink" href="#Prepare-a-release-locally" title="Permalink"></a></h2><p>Deploy only committed source. First confirm the intended branch, tests, and working tree:</p><pre><code class="language-bash hljs">cd /path/to/SDPX.jl
+git status --short --branch
+git diff --check
+git rev-parse HEAD</code></pre><p>Do not archive a dirty tree. After the final commit is available, create an archive whose top-level directory is <code>source</code>:</p><pre><code class="language-bash hljs">COMMIT=&quot;$(git rev-parse HEAD)&quot;
+ARCHIVE=&quot;/tmp/sdpx-${COMMIT}.tar.gz&quot;
+
+git archive \
+  --format=tar.gz \
+  --prefix=source/ \
+  --output=&quot;$ARCHIVE&quot; \
+  &quot;$COMMIT&quot;
+
+ARCHIVE_SHA=&quot;$(shasum -a 256 &quot;$ARCHIVE&quot; | awk &#39;{print $1}&#39;)&quot;
+printf &#39;commit=%s\narchive=%s\nsha256=%s\n&#39; \
+  &quot;$COMMIT&quot; &quot;$ARCHIVE&quot; &quot;$ARCHIVE_SHA&quot;</code></pre><p>The archive intentionally excludes ignored benchmark inputs and results. Move large inputs separately and verify them by content hash.</p><h2 id="Install-a-candidate-without-overwriting-anything"><a class="docs-heading-anchor" href="#Install-a-candidate-without-overwriting-anything">Install a candidate without overwriting anything</a><a id="Install-a-candidate-without-overwriting-anything-1"></a><a class="docs-heading-anchor-permalink" href="#Install-a-candidate-without-overwriting-anything" title="Permalink"></a></h2><p>Inspect the configured target before the first write:</p><pre><code class="language-bash hljs">: &quot;${CLUSTER:?set CLUSTER to the PBS login SSH alias}&quot;
+: &quot;${SDPX_REMOTE_BASE:?set SDPX_REMOTE_BASE to the deployment root}&quot;
+
+ssh &quot;$CLUSTER&quot; \
+  &quot;test ! -e &#39;$SDPX_REMOTE_BASE/releases/$COMMIT&#39; &amp;&amp;
+   test ! -e &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp&#39;&quot;</code></pre><p>Create only the new canonical root and its children:</p><pre><code class="language-bash hljs">ssh &quot;$CLUSTER&quot; \
+  &quot;mkdir -p \
+    &#39;$SDPX_REMOTE_BASE/releases&#39; \
+    &#39;$SDPX_REMOTE_BASE/incoming&#39; \
+    &#39;$SDPX_REMOTE_BASE/depot&#39; \
+    &#39;$SDPX_REMOTE_BASE/data&#39; \
+    &#39;$SDPX_REMOTE_BASE/results&#39; \
+    &#39;$SDPX_REMOTE_BASE/jobs&#39;&quot;</code></pre><p>Upload to a temporary name, verify the archive remotely, and extract into a new temporary release:</p><pre><code class="language-bash hljs">scp &quot;$ARCHIVE&quot; \
+  &quot;$CLUSTER:$SDPX_REMOTE_BASE/incoming/$COMMIT.tar.gz.part&quot;
+
+ssh &quot;$CLUSTER&quot; &quot;
+  set -eu
+  uploaded=&#39;$SDPX_REMOTE_BASE/incoming/$COMMIT.tar.gz.part&#39;
+  actual=\$(sha256sum \&quot;\$uploaded\&quot; | awk &#39;{print \$1}&#39;)
+  test \&quot;\$actual\&quot; = &#39;$ARCHIVE_SHA&#39;
+  mv \&quot;\$uploaded\&quot; &#39;$SDPX_REMOTE_BASE/incoming/$COMMIT.tar.gz&#39;
+  mkdir &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp&#39;
+  tar -xzf &#39;$SDPX_REMOTE_BASE/incoming/$COMMIT.tar.gz&#39; \
+    -C &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp&#39;
+  mkdir -p \
+    &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp/environment&#39; \
+    &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp/metadata&#39;
+  printf &#39;%s\n&#39; &#39;$COMMIT&#39; \
+    &gt; &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp/metadata/commit.txt&#39;
+  printf &#39;%s\n&#39; &#39;$ARCHIVE_SHA&#39; \
+    &gt; &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp/metadata/archive-sha256.txt&#39;
+  mv &#39;$SDPX_REMOTE_BASE/releases/$COMMIT.tmp&#39; \
+    &#39;$SDPX_REMOTE_BASE/releases/$COMMIT&#39;
+&quot;</code></pre><p>Every final path is new. If a temporary or final release already exists, stop and inspect it. Do not delete or overwrite it automatically.</p><h2 id="Resolve-the-Julia-environment-on-the-login-node"><a class="docs-heading-anchor" href="#Resolve-the-Julia-environment-on-the-login-node">Resolve the Julia environment on the login node</a><a id="Resolve-the-Julia-environment-on-the-login-node-1"></a><a class="docs-heading-anchor-permalink" href="#Resolve-the-Julia-environment-on-the-login-node" title="Permalink"></a></h2><p>Compute nodes cannot be assumed to reach Julia package servers. Resolve, download, and precompile dependencies on the login node before submitting a job. Use a release-specific environment and a private depot layered in front of any site-provided shared cache:</p><pre><code class="language-bash hljs">BASE=&quot;$SDPX_REMOTE_BASE&quot;
+RELEASE=&quot;$BASE/releases/$COMMIT&quot;
+SOURCE=&quot;$RELEASE/source&quot;
+ENVIRONMENT=&quot;$RELEASE/environment&quot;
+
+if [ -n &quot;${SDPX_SITE_ENV:-}&quot; ]; then
+  source &quot;$SDPX_SITE_ENV&quot;
+fi
+: &quot;${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}&quot;
+
+export JULIA_DEPOT_PATH=&quot;$BASE/depot${JULIA_DEPOT_PATH:+:$JULIA_DEPOT_PATH}&quot;
+export SDPX_RELEASE_SOURCE=&quot;$SOURCE&quot;
+
+&quot;$JULIA_BIN&quot; \
+  --startup-file=no \
+  --project=&quot;$ENVIRONMENT&quot; \
+  -e &#39;
+    using Pkg
+    Pkg.develop(PackageSpec(path=ENV[&quot;SDPX_RELEASE_SOURCE&quot;]))
+    Pkg.add([
+        PackageSpec(name=&quot;Aqua&quot;, version=&quot;0.8&quot;),
+        PackageSpec(name=&quot;MultiFloats&quot;, version=&quot;3&quot;),
+        PackageSpec(name=&quot;JLD2&quot;),
+        PackageSpec(name=&quot;JSON&quot;),
+        PackageSpec(name=&quot;JuMP&quot;, version=&quot;1&quot;),
+        PackageSpec(name=&quot;StableRNGs&quot;),
+    ])
+    Pkg.instantiate()
+    Pkg.precompile()
+    Pkg.status(; mode=Pkg.PKGMODE_MANIFEST)
+  &#39;
+
+sha256sum \
+  &quot;$ENVIRONMENT/Project.toml&quot; \
+  &quot;$ENVIRONMENT/Manifest.toml&quot; \
+  &gt; &quot;$RELEASE/metadata/environment-sha256.txt&quot;</code></pre><p>The explicit packages include optional backends and the complete test target. Do not copy either manifest from a historical SDPX directory: those projects have a different package UUID and dependency graph.</p><p>After this step, compute jobs should set <code>JULIA_PKG_OFFLINE=true</code>. If an offline package load fails, return to the login node and complete the environment; do not run <code>Pkg.add</code> from a compute node.</p><h2 id="External-benchmark-data"><a class="docs-heading-anchor" href="#External-benchmark-data">External benchmark data</a><a id="External-benchmark-data-1"></a><a class="docs-heading-anchor-permalink" href="#External-benchmark-data" title="Permalink"></a></h2><p>Store large inputs outside both Git and the release source. Name immutable inputs by their SHA-256 digest when practical.</p><p>The validated <code>J/K/N_a/N_mu = 40/4/20/100</code> Float64x4 input has:</p><pre><code class="language-text hljs">size:   614325622 bytes
+sha256: 8622330ad83989a3c183e82b7b0cedc5bbcd1572e96c35e8cc19750129dc4d4a</code></pre><p>Its canonical cluster path is:</p><pre><code class="language-text hljs">$SDPX_REMOTE_BASE/data/csdr-40-4-20-100/8622330ad83989a3c183e82b7b0cedc5bbcd1572e96c35e8cc19750129dc4d4a.bin</code></pre><p>Upload it to a <code>.part</code> file, verify both size and hash remotely, then rename it with <code>mv -n</code>. If the final path already exists, verify it instead of replacing it.</p><p>The validated Task_Low08 Float64 input has:</p><pre><code class="language-text hljs">size:   4640880 bytes
+sha256: 5763deada4260e152c73a38c41a4d8d9a5bb3903a099ae00ee231c90715816b3</code></pre><p>Store it at a site-selected immutable path, for example:</p><pre><code class="language-text hljs">$SDPX_REMOTE_BASE/data/task-low08/5763deada4260e152c73a38c41a4d8d9a5bb3903a099ae00ee231c90715816b3.bin</code></pre><p>Set <code>TASK_LOW08_INPUT</code> to that verified path before submitting validation.</p><h2 id="Preprocessing-and-model-classification"><a class="docs-heading-anchor" href="#Preprocessing-and-model-classification">Preprocessing and model classification</a><a id="Preprocessing-and-model-classification-1"></a><a class="docs-heading-anchor-permalink" href="#Preprocessing-and-model-classification" title="Permalink"></a></h2><p>Leave <code>presolve=:auto</code>, <code>scaling=:auto</code>, and <code>formulation=:auto</code> for ordinary cluster runs. The typed preprocessing report is available at:</p><pre><code class="language-julia hljs">report = result.diagnostics.presolve.preprocessing</code></pre><p>Record its input/output dimensions, extracted-bound counts, fixed-variable count, exact equality cleanup, formulation estimate, chordal decision, elapsed time, allocation, and warnings with the benchmark result.</p><p>Task_Low08 should report no scalar bounds, equality reduction from 482 to 394, and rejected chordal analysis because the aggregate PSD pattern is 99.84% dense. The medium <code>J/K/Na/Nmu = 32/4/16/100</code> CSDR model should report no structural change. Treat any different classification as an input or release regression before comparing solve times.</p><p>Sparse equilibration copies only active coefficient matrices and shares one read-only empty CSC object per block. Keep the scaled-problem checksum in an A/B result when changing this code. On the canonical medium model the validated Float64x4 medians were 1.241 seconds and 685.8 MB before the change, and 0.633 seconds and 269.7 MB after it.</p><h2 id="Thread-and-memory-policy"><a class="docs-heading-anchor" href="#Thread-and-memory-policy">Thread and memory policy</a><a id="Thread-and-memory-policy-1"></a><a class="docs-heading-anchor-permalink" href="#Thread-and-memory-policy" title="Permalink"></a></h2><p>Use one process per solve. The following is a conservative starting policy; adjust PBS resources after measuring the target node:</p><table><tr><th style="text-align: right">Arithmetic and workload</th><th style="text-align: right">Reserved PBS cores</th><th style="text-align: right">Julia threads per solve</th><th style="text-align: right">BLAS threads</th><th style="text-align: right">Strategy</th></tr><tr><td style="text-align: right">Float64x4 sparse/block-arrow</td><td style="text-align: right">8</td><td style="text-align: right">sweep 1, 2, 4, 8</td><td style="text-align: right">1</td><td style="text-align: right">SDPX Julia block and Schur scheduling</td></tr><tr><td style="text-align: right">Medium Float64x4 CSDR, 1,700 uniform <code>2x2</code> blocks / 144 shared variables</td><td style="text-align: right">128 site-specific placement reservation</td><td style="text-align: right">48 (re-sweep 32/48/64 after material geometry changes)</td><td style="text-align: right">1</td><td style="text-align: right">exact Julia compute pool, 10 ms worker-sleep threshold, CPUs 0–47 and NUMA nodes 0–3; do not count the unused reservation as speedup</td></tr><tr><td style="text-align: right">BigFloat, general native</td><td style="text-align: right">site&#39;s minimum allocation</td><td style="text-align: right">1</td><td style="text-align: right">1</td><td style="text-align: right">one serial solve; use separate jobs for independent cases</td></tr><tr><td style="text-align: right">BigFloat, exact singleton-local <code>2x2</code> arrow</td><td style="text-align: right">8</td><td style="text-align: right">sweep 1, 2, 4, 8</td><td style="text-align: right">1</td><td style="text-align: right">native block preparation and disjoint reduced-Schur tiles may be parallel; residual/refinement remains serial</td></tr><tr><td style="text-align: right">BigFloat, all-local <code>2x2</code> cells plus equalities</td><td style="text-align: right">measured node allocation</td><td style="text-align: right">sweep through 64; use 96/128 only for a larger measured panel</td><td style="text-align: right">1</td><td style="text-align: right">block/GEMV/triangular tasks cap at 64; tiled lower equality Gram may use the full width</td></tr><tr><td style="text-align: right">BigFloat, experimental mixed arrow</td><td style="text-align: right">8</td><td style="text-align: right">sweep 1, 2, 4, 8</td><td style="text-align: right">1</td><td style="text-align: right">the Float64x4 reduced panel/factorization is parallel; BigFloat residual/refinement remains serial</td></tr><tr><td style="text-align: right">Task_Low08 Float64 validation</td><td style="text-align: right">8</td><td style="text-align: right">8</td><td style="text-align: right">8</td><td style="text-align: right">sparse assembly plus dense OpenBLAS KKT factorization</td></tr><tr><td style="text-align: right">Task_Low08 Float64 performance on dual EPYC 7742</td><td style="text-align: right">16</td><td style="text-align: right">16</td><td style="text-align: right">16</td><td style="text-align: right">OpenBLAS with <code>numactl --interleave=all</code>; measured, hardware-specific</td></tr><tr><td style="text-align: right">Task_Low08 Float64x4 mixed KKT</td><td style="text-align: right">16</td><td style="text-align: right">16</td><td style="text-align: right">1</td><td style="text-align: right">lower-only sparse Schur plus owned-row refinement; request at least 64 GiB</td></tr><tr><td style="text-align: right">Task_Low08 native BigFloat, 256 bit</td><td style="text-align: right">1</td><td style="text-align: right">1</td><td style="text-align: right">1</td><td style="text-align: right">request at least 128 GiB; the measured 95.720 GiB estimate is unsafe in a 64 GiB job</td></tr><tr><td style="text-align: right">Small package validation</td><td style="text-align: right">8</td><td style="text-align: right">4 for tests, 1 for high-precision smoke</td><td style="text-align: right">1</td><td style="text-align: right">sequential validation phases</td></tr></table><p>General native <code>BigFloat</code> uses one solver thread. Exact singleton-local <code>2x2</code> arrows and all-local 2x2 equality-cell systems may use additional cores only for ownership-safe block work and disjoint triangular Schur or Gram tiles. For the all-local equality path, fine-grained MPFR phases automatically use at most 64 ownership tasks while the equality Gram may use a wider requested allocation. On the certified J40 BigFloat512 model, 64 workers took 368.704 seconds; uniform 128 workers took 495.811 seconds, and phase-capped 128 workers took 425.880 seconds with the exact same certificate. A 96-worker crossover took 398.303 seconds, so start at 64 workers for this geometry. The opt-in mixed reduced-arrow backend may also use those cores for its Float64x4 panel and factorization, while exact BigFloat residual and refinement work remains serial. It must be benchmarked rather than assumed to be faster.</p><p>The fixed BigFloat1024 support gate (job 196296) also passed at 64 workers: 157 iterations, 553.959 seconds solver time, 4,268,480 KiB peak RSS, valid physical certificate, and no restart, regularization, refinement, or fallback. It was slower and did not terminate with a tighter relative gap than the 512-bit run because this archived model is rounded once to Float64x4. Retain 512 bits for routine runs of this input; use 1,024 bits only when the input and requested certificate actually carry enough precision to justify it.</p><p>Do not start a Float64x4 block-parallel run with both Julia and BLAS set to the full allocation. Keep BLAS and OMP at one thread so the 1/2/4/8 comparison changes only SDPX&#39;s scheduler width.</p><p>For the canonical medium CSDR geometry, use an exact compute pool and pin it explicitly. The validated node60 launch shape is:</p><pre><code class="language-bash hljs">export JULIA_EXCLUSIVE=1
+export JULIA_THREAD_SLEEP_THRESHOLD=10000000
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+numactl --physcpubind=0-47 --membind=0-3 \
+  julia --threads=48,0 --gcthreads=1,0 --project=. solve_medium.jl</code></pre><p>The final exact-pool sweep measured 44.112 / 22.954 / 12.450 / 6.946 / 4.275 / 3.286 / 2.967 / 3.074 / 3.540 / 3.403 seconds at 1 / 2 / 4 / 8 / 16 / 32 / 48 / 64 / 96 / 128 workers. Every requested worker was observed active and BLAS remained at one thread. The 48-worker process reached 45.38 sampled CPU cores, placed about 3,009 MiB across local NUMA nodes 0–3, and was 14.87x faster than one worker. Wider pools lost time to barriers, worker wake-up, and NUMA traffic. At 64 workers, forced NUMA interleaving was 5.4% slower than bound local allocation. Reserve 128 cores only when required by this site&#39;s placement policy; create the measured 48-worker runtime pool for this 144-column system. Re-run the 32/48/64 bracket when the shared dimension or block count changes materially.</p><p><code>JULIA_THREAD_SLEEP_THRESHOLD</code> is consumed before Julia starts. The measured 10-millisecond value removed the wide-pool wake-up collapse without the full CPU consumption of permanent spinning. It is a site profile for exclusive jobs, not a package default. Record process CPU time, active-worker samples, BLAS width, RSS, affinity, NUMA placement, and wall time in every new sweep.</p><p>Use full-model warm-ups for source-to-source comparisons. On a fresh Float64x4 process the first solve can spend about 32 seconds compiling while the steady solve is below five seconds. The medium campaign uses three warm-ups and at least five measured solves per process, alternates source order, and reports the combined median. Benchmark drivers must parse the warm-up count as a nonnegative integer; treating it as a Boolean can silently disable warm-up when a value greater than one is requested.</p><p>For dense Task<em>Low08 Float64x4 runs, `mixed</em>precision<em>kkt=:on<code>is an expert configuration: Float64 factorization is accepted only while target-precision predictor and corrector residual corrections decrease monotonically. If those corrections fail, the solver may allocate a guarded</code>Float64x2` factor workspace (0.596 GiB for Task</em>Low08), rebuild it from the current Schur matrix, and accept each solve only after a <code>Float64x4</code> residual check. Native <code>Float64x4</code> factorization remains the final fallback. Keep <code>extended_precision_blas=:auto</code>, Julia at 16 threads, and BLAS at one thread. The 16-thread conservative planner estimate is 43.339 GiB and the measured process peak is approximately 21 GiB; do not use 32 task-local Schur workers in a 64 GiB request because the estimate rises to 70.120 GiB.</p><p>For dense-Schur Float64 jobs, Julia and BLAS widths are separate tuning parameters. Task_Low08 has only 32 PSD blocks, while its <code>6119 x 6119</code> dense Cholesky remains a level-3 LAPACK operation. The measured dual-EPYC optimum used 16 Julia threads, 16 OpenBLAS threads, and interleaved NUMA allocation. Thirty-two Julia threads were within 1%, while 64–128 were slower and 128 used substantially more memory. Treat these values as a site profile, not universal solver defaults.</p><p>Set a planning ceiling below the PBS memory request:</p><pre><code class="language-bash hljs">export SDPX_MEMORY_LIMIT_BYTES=28GiB  # for a 32 GiB validation job
+export SDPX_MEMORY_LIMIT_BYTES=56GiB  # for a 64 GiB benchmark job</code></pre><p>SDPX also reads host and Linux cgroup memory signals, retains headroom, and may reduce Schur workers or reject optional packing.</p><h2 id="Validation-job"><a class="docs-heading-anchor" href="#Validation-job">Validation job</a><a id="Validation-job-1"></a><a class="docs-heading-anchor-permalink" href="#Validation-job" title="Permalink"></a></h2><p>This example candidate gate uses the <code>normal</code> queue, one node, eight reserved cores, 32 GiB, and a two-hour limit. Adapt resource values to site policy without changing the numerical gates:</p><pre><code class="language-bash hljs">#!/bin/bash
+#PBS -N sdpx_validate
+#PBS -q normal
+#PBS -l nodes=1:ppn=8
+#PBS -l mem=32gb
+#PBS -l walltime=02:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+: &quot;${SDPX_COMMIT:?submit with qsub -v SDPX_COMMIT=&lt;full-commit&gt;}&quot;
+: &quot;${SDPX_REMOTE_BASE:?submit with SDPX_REMOTE_BASE set}&quot;
+: &quot;${TASK_LOW08_INPUT:?submit with the checksum-verified Task_Low08 path}&quot;
+
+BASE=&quot;$SDPX_REMOTE_BASE&quot;
+RELEASE=&quot;$BASE/releases/$SDPX_COMMIT&quot;
+SOURCE=&quot;$RELEASE/source&quot;
+ENVIRONMENT=&quot;$RELEASE/environment&quot;
+RESULT=&quot;$BASE/results/$SDPX_COMMIT/$PBS_JOBID&quot;
+
+mkdir -p &quot;$RESULT&quot;
+
+if [ -n &quot;${SDPX_SITE_ENV:-}&quot; ]; then
+  source &quot;$SDPX_SITE_ENV&quot;
+fi
+: &quot;${JULIA_BIN:?set JULIA_BIN directly or through SDPX_SITE_ENV}&quot;
+
+export JULIA_DEPOT_PATH=&quot;$BASE/depot${JULIA_DEPOT_PATH:+:$JULIA_DEPOT_PATH}&quot;
+export JULIA_PKG_OFFLINE=true
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export SDPX_MEMORY_LIMIT_BYTES=28GiB
+
+{
+  printf &#39;commit=%s\n&#39; &quot;$SDPX_COMMIT&quot;
+  printf &#39;pbs_job_id=%s\n&#39; &quot;$PBS_JOBID&quot;
+  printf &#39;pbs_cores=%s\n&#39; &quot;${PBS_NP:-8}&quot;
+  printf &#39;node_class=%s\n&#39; &quot;${SDPX_NODE_CLASS:-unspecified}&quot;
+  printf &#39;pbs_memory_request=%s\n&#39; &quot;32gb&quot;
+  printf &#39;openblas_threads=%s\n&#39; &quot;$OPENBLAS_NUM_THREADS&quot;
+  printf &#39;omp_threads=%s\n&#39; &quot;$OMP_NUM_THREADS&quot;
+  printf &#39;memory_limit=%s\n&#39; &quot;$SDPX_MEMORY_LIMIT_BYTES&quot;
+  &quot;$JULIA_BIN&quot; --version
+} &gt; &quot;$RESULT/environment.txt&quot;
+
+&quot;$JULIA_BIN&quot; \
+  --project=&quot;$ENVIRONMENT&quot; \
+  --startup-file=no \
+  -e &#39;using Pkg; Pkg.status(; mode=Pkg.PKGMODE_MANIFEST)&#39; \
+  &gt; &quot;$RESULT/package-status.txt&quot;
+
+&quot;$JULIA_BIN&quot; \
+  --project=&quot;$ENVIRONMENT&quot; \
+  --startup-file=no \
+  -t 4 \
+  -e &#39;using Pkg; Pkg.test(&quot;SDPX&quot;; coverage=false)&#39; \
+  2&gt;&amp;1 | tee &quot;$RESULT/tests.log&quot;
+
+&quot;$JULIA_BIN&quot; \
+  --project=&quot;$ENVIRONMENT&quot; \
+  --startup-file=no \
+  -t 1 \
+  &quot;$SOURCE/docs/evidence/bench/extended_precision_blas/small_solve_validation.jl&quot; \
+  &quot;$RESULT/small-solve.csv&quot; \
+  2&gt;&amp;1 | tee &quot;$RESULT/small-solve.log&quot;
+
+/usr/bin/time \
+  -v \
+  -o &quot;$RESULT/task-low08.time.txt&quot; \
+  &quot;$JULIA_BIN&quot; \
+  --project=&quot;$ENVIRONMENT&quot; \
+  --startup-file=no \
+  -t 4 \
+  &quot;$SOURCE/docs/evidence/bench/lattice_bootstrap/benchmark_sdpx_float64_solve.jl&quot; \
+  &quot;$TASK_LOW08_INPUT&quot; \
+  &quot;$RESULT/task-low08-float64.json&quot; \
+  4 600 0.1 0.85 100 0.001 sdpb 100 1e-6 \
+  2&gt;&amp;1 | tee &quot;$RESULT/task-low08.log&quot;
+
+&quot;$JULIA_BIN&quot; \
+  --project=&quot;$ENVIRONMENT&quot; \
+  --startup-file=no \
+  -t 8 \
+  &quot;$SOURCE/docs/evidence/bench/threading/benchmark_sparse_schur_scheduler.jl&quot; \
+  &quot;$RESULT/sparse-threading.csv&quot; \
+  2&gt;&amp;1 | tee &quot;$RESULT/sparse-threading.log&quot;
+
+find &quot;$RESULT&quot; \
+  -type f \
+  ! -name artifact-sha256.txt \
+  -exec sha256sum {} + \
+  | sort \
+  &gt; &quot;$RESULT/artifact-sha256.txt&quot;</code></pre><p>Submit from a release-specific job directory so PBS&#39;s default output filename is unique:</p><pre><code class="language-bash hljs">cd &quot;$SDPX_REMOTE_BASE/jobs/$COMMIT&quot;
+PBS_VARS=&quot;SDPX_COMMIT=$COMMIT,SDPX_REMOTE_BASE=$SDPX_REMOTE_BASE&quot;
+PBS_VARS=&quot;$PBS_VARS,TASK_LOW08_INPUT=$TASK_LOW08_INPUT&quot;
+if [ -n &quot;${SDPX_SITE_ENV:-}&quot; ]; then
+  PBS_VARS=&quot;$PBS_VARS,SDPX_SITE_ENV=$SDPX_SITE_ENV&quot;
+fi
+qsub -v &quot;$PBS_VARS&quot; validate.pbs</code></pre><p>Do not log <code>env</code>, <code>set</code>, <code>export -p</code>, or <code>printenv</code>. Those commands can capture unrelated credentials or tokens inherited by a scheduler job. The template records only explicitly approved reproducibility fields. <code>SDPX_NODE_CLASS</code> should be a public, non-identifying label such as <code>zen4-64c</code>; do not substitute a hostname. Keep detailed hostname, <code>lscpu</code>, NUMA, and node-memory captures only in private campaign storage, not in public result artifacts.</p><h2 id="Candidate-acceptance-gates"><a class="docs-heading-anchor" href="#Candidate-acceptance-gates">Candidate acceptance gates</a><a id="Candidate-acceptance-gates-1"></a><a class="docs-heading-anchor-permalink" href="#Candidate-acceptance-gates" title="Permalink"></a></h2><p>Inspect the PBS exit status, complete log, structured result files, and peak RSS. Queue state alone is not validation.</p><p>The candidate may be promoted only when:</p><ul><li>the full test suite exits successfully;</li><li>the analytic Float64x4 and 256-bit BigFloat solves in both kernel modes return <code>Optimal</code>;</li><li>analytic objective relative error is at most <code>1e-18</code> for Float64x4 and <code>1e-28</code> for BigFloat;</li><li>analytic primal and dual residuals, relative gap, and minimum PSD eigenvalue remain within the tolerances recorded by the driver;</li><li>Task_Low08 returns <code>Optimal</code> with <code>abs(objective - 0.653291393898) &lt;= 1e-6</code>;</li><li>Task_Low08 has relative gap, primal residual, and dual residual at most <code>1e-6</code>;</li><li>Task_Low08 maximum equality residual is at most <code>1e-9</code>;</li><li>the original-coordinate certificate reports <code>primal_psd.ok</code> and <code>dual_psd.ok</code>; record raw minimum eigenvalues as diagnostics, but do not replace the solver&#39;s scale-aware <code>tolerance * max(norm(block, Inf), 1)</code> PSD allowance with a fixed absolute threshold;</li><li>the sparse scheduler benchmark reports no meaningful Schur error and no unexpected thread or memory selection;</li><li>no phase exceeds its memory request or reports an ownership/aliasing warning.</li></ul><p>The local release-candidate suite contained 1,272 passing assertions with four Julia threads and no failures when this workflow was written. Treat exit status and the tests present in the candidate commit as authoritative; a later commit may legitimately change the count.</p><p>The Float64 Task<em>Low08 gate must pass before any extended-precision lattice run. A successful small BigFloat solve or Schur benchmark is not evidence that a full BigFloat Task</em>Low08 solve fits memory or has completed.</p><p>The final <code>c9d6514</code> cross-problem gate (job 196277, node58) used 16 Julia and 16 OpenBLAS threads inside a 64-core reservation. It returned <code>Optimal</code> in 28 iterations: primal/dual objectives <code>0.6532912655025964</code> / <code>0.6532910479425099</code>, relative gap <code>2.176e-7</code>, primal/dual residuals <code>3.316e-10</code> / <code>9.534e-12</code>, and maximum original equality residual <code>3.316e-10</code>. The original-coordinate certificate was valid; minimum primal and dual PSD eigenvalues were <code>-7.126e-11</code> and <code>1.975e-15</code>. Solver and driver times were 33.846 and 35.585 seconds, and <code>/usr/bin/time</code> recorded 4,469,000 KiB peak RSS. This measurement is a correctness gate for the BigFloat scheduler change; it is not a replacement for the warmed backend comparison.</p><h2 id="Sparse-1/2/4/8-and-BigFloat-benchmark-job"><a class="docs-heading-anchor" href="#Sparse-1/2/4/8-and-BigFloat-benchmark-job">Sparse 1/2/4/8 and BigFloat benchmark job</a><a id="Sparse-1/2/4/8-and-BigFloat-benchmark-job-1"></a><a class="docs-heading-anchor-permalink" href="#Sparse-1/2/4/8-and-BigFloat-benchmark-job" title="Permalink"></a></h2><p>After the validation gate, use a separate <code>normal</code>-queue job with one node, eight cores, 64 GiB, and up to eight hours. Run the Float64x4 <code>40/4/20/100</code> Schur benchmark sequentially with Julia <code>-t 1</code>, <code>-t 2</code>, <code>-t 4</code>, and <code>-t 8</code>; keep BLAS and OMP at one. Measure both <code>extended_precision_blas=:off</code> and <code>:auto</code>, use at least three timed repetitions, and retain sampled Schur errors and peak RSS.</p><p>The body of the benchmark job can use:</p><pre><code class="language-bash hljs">: &quot;${SDPX_REMOTE_BASE:?set SDPX_REMOTE_BASE}&quot;
+INPUT=&quot;$SDPX_REMOTE_BASE/data/csdr-40-4-20-100/8622330ad83989a3c183e82b7b0cedc5bbcd1572e96c35e8cc19750129dc4d4a.bin&quot;
+
+export OPENBLAS_NUM_THREADS=1
+export OMP_NUM_THREADS=1
+export SDPX_MEMORY_LIMIT_BYTES=56GiB
+
+for threads in 1 2 4 8; do
+  for mode in off auto; do
+    /usr/bin/time \
+      -v \
+      -o &quot;$RESULT/float64x4-${threads}t-${mode}.time.txt&quot; \
+      &quot;$JULIA_BIN&quot; \
+      --project=&quot;$ENVIRONMENT&quot; \
+      --startup-file=no \
+      -t &quot;$threads&quot; \
+      &quot;$SOURCE/docs/evidence/bench/extended_precision_blas/benchmark_schur.jl&quot; \
+      --problem=sparse \
+      --input=&quot;$INPUT&quot; \
+      --output=&quot;$RESULT/float64x4-schur.csv&quot; \
+      --arithmetic=float64x4 \
+      --mode=&quot;$mode&quot; \
+      --repetitions=3 \
+      --validation-samples=128 \
+      --memory-fraction=0.10 \
+      2&gt;&amp;1 | tee &quot;$RESULT/float64x4-${threads}t-${mode}.log&quot;
+  done
+done</code></pre><p>Run the BigFloat comparison in the same allocation only with Julia <code>-t 1</code>:</p><pre><code class="language-bash hljs">export SPARSE_INPUT=&quot;$SDPX_REMOTE_BASE/data/csdr-40-4-20-100/8622330ad83989a3c183e82b7b0cedc5bbcd1572e96c35e8cc19750129dc4d4a.bin&quot;
+export BIGFLOAT_BITS=256
+export BENCH_SAMPLES=3
+export BENCH_OUTPUT=&quot;$RESULT/bigfloat-sparse-schur.csv&quot;
+
+/usr/bin/time \
+  -v \
+  -o &quot;$RESULT/bigfloat-sparse-schur.time.txt&quot; \
+  &quot;$JULIA_BIN&quot; \
+  --project=&quot;$ENVIRONMENT&quot; \
+  --startup-file=no \
+  -t 1 \
+  &quot;$SOURCE/docs/evidence/bench/bigfloat_sparse_schur/benchmark.jl&quot; \
+  2&gt;&amp;1 | tee &quot;$RESULT/bigfloat-sparse-schur.log&quot;</code></pre><p>For exact sparse <code>2x2</code> block-arrow problems, the current runtime uses the fused compute-and-scatter kernel and bypasses packed Gram panels. Historical packed BigFloat measurements are useful implementation history, but they are not a substitute for measuring the current fused path on the target node.</p><p>The historical <code>80/4/40/100</code> input is a later scale-up case, not a replacement for the requested <code>40/4/20/100</code> gate. Run it only after the smaller target passes and request at least 128 GiB with a longer wall-time. Verify its input hash before use and keep all output under the new commit&#39;s result directory. The documented artifact has:</p><pre><code class="language-text hljs">size:   2353958026 bytes
+sha256: ed65290d3517ef24b334abca8b8043b7b7fadbf6911ab02c904113e364203e42</code></pre><p>Store it under a checksum-named site-selected path such as:</p><pre><code class="language-text hljs">$SDPX_REMOTE_BASE/data/csdr-80-4-40-100/ed65290d3517ef24b334abca8b8043b7b7fadbf6911ab02c904113e364203e42.bin</code></pre><h2 id="Promotion"><a class="docs-heading-anchor" href="#Promotion">Promotion</a><a id="Promotion-1"></a><a class="docs-heading-anchor-permalink" href="#Promotion" title="Permalink"></a></h2><p>Do not move <code>current</code> when a job is merely queued or running. After all acceptance gates pass, record the previous target and atomically replace only the symlink:</p><pre><code class="language-bash hljs">: &quot;${SDPX_REMOTE_BASE:?set SDPX_REMOTE_BASE}&quot;
+BASE=&quot;$SDPX_REMOTE_BASE&quot;
+RELEASE=&quot;$BASE/releases/$COMMIT&quot;
+
+cd &quot;$BASE&quot;
+
+if [ -L current ]; then
+  readlink current &gt; &quot;$RELEASE/metadata/previous-current.txt&quot;
+elif [ -e current ]; then
+  printf &#39;current exists but is not a symlink\n&#39; &gt;&amp;2
+  exit 1
+else
+  printf &#39;none\n&#39; &gt; &quot;$RELEASE/metadata/previous-current.txt&quot;
+fi
+
+ln -s &quot;releases/$COMMIT/source&quot; &quot;.current-$COMMIT&quot;
+mv -Tf &quot;.current-$COMMIT&quot; current
+readlink -f current</code></pre><p>Once active, make the archived source read-only:</p><pre><code class="language-bash hljs">chmod -R a-w &quot;$RELEASE/source&quot;</code></pre><p>Jobs should continue to use their explicit release path, not <code>current</code>, so a later promotion cannot change a running campaign.</p><h2 id="Rollback"><a class="docs-heading-anchor" href="#Rollback">Rollback</a><a id="Rollback-1"></a><a class="docs-heading-anchor-permalink" href="#Rollback" title="Permalink"></a></h2><p>Rollback never deletes the failed release or its diagnostics. Read the candidate&#39;s recorded previous target, verify that it still exists, and replace the symlink atomically:</p><pre><code class="language-bash hljs">: &quot;${SDPX_REMOTE_BASE:?set SDPX_REMOTE_BASE}&quot;
+BASE=&quot;$SDPX_REMOTE_BASE&quot;
+FAILED_COMMIT=&lt;full-commit&gt;
+PREVIOUS=&quot;$(
+  cat &quot;$BASE/releases/$FAILED_COMMIT/metadata/previous-current.txt&quot;
+)&quot;
+
+test &quot;$PREVIOUS&quot; != none
+test -d &quot;$BASE/$PREVIOUS&quot;
+
+cd &quot;$BASE&quot;
+ln -s &quot;$PREVIOUS&quot; &quot;.current-rollback-$FAILED_COMMIT&quot;
+mv -Tf &quot;.current-rollback-$FAILED_COMMIT&quot; current
+readlink -f current</code></pre><p>Preserve the failed candidate, PBS output, structured results, input hashes, and environment manifest for diagnosis.</p><h2 id="Result-collection"><a class="docs-heading-anchor" href="#Result-collection">Result collection</a><a id="Result-collection-1"></a><a class="docs-heading-anchor-permalink" href="#Result-collection" title="Permalink"></a></h2><p>Copy a completed result directory back without deleting the cluster original:</p><pre><code class="language-bash hljs">: &quot;${CLUSTER:?set CLUSTER to the PBS login SSH alias}&quot;
+: &quot;${SDPX_REMOTE_BASE:?set SDPX_REMOTE_BASE}&quot;
+rsync -av \
+  &quot;$CLUSTER:$SDPX_REMOTE_BASE/results/$COMMIT/$JOB_ID/&quot; \
+  &quot;./results/$COMMIT/$JOB_ID/&quot;</code></pre><p>Verify <code>artifact-sha256.txt</code> after transfer. Keep raw multi-gigabyte inputs, Julia depots, manifests created for cluster campaigns, and machine-specific result directories outside Git. Commit reusable drivers and concise English summaries only.</p></article><nav class="docs-footer"><a class="docs-footer-prevpage" href="../threading/">« Threading</a><a class="docs-footer-nextpage" href="../bridge-schema/">Bridge schema »</a><div class="flexbox-break"></div><p class="footer-message">Powered by <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> and the <a href="https://julialang.org/">Julia Programming Language</a>.</p></nav></div><div class="modal" id="documenter-settings"><div class="modal-background"></div><div class="modal-card"><header class="modal-card-head"><p class="modal-card-title">Settings</p><button class="delete"></button></header><section class="modal-card-body"><p><label class="label">Theme</label><div class="select"><select id="documenter-themepicker"><option value="auto">Automatic (OS)</option><option value="documenter-light">documenter-light</option><option value="documenter-dark">documenter-dark</option><option value="catppuccin-latte">catppuccin-latte</option><option value="catppuccin-frappe">catppuccin-frappe</option><option value="catppuccin-macchiato">catppuccin-macchiato</option><option value="catppuccin-mocha">catppuccin-mocha</option></select></div></p><hr/><p>This document was generated with <a href="https://github.com/JuliaDocs/Documenter.jl">Documenter.jl</a> version 1.17.0 on <span class="colophon-date" title="Friday 21 August 2026 04:25">Friday 21 August 2026</span>. Using Julia version 1.12.7.</p></section><footer class="modal-card-foot"></footer></div></div></div></body></html>
