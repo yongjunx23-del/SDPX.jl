@@ -547,7 +547,7 @@ function _equality_qr_maximum_elements(::Type{T}) where {T}
     # the MFLA RRQR path can process while retaining the older conservative
     # limit for wider extended-precision scalar types.
     return ExtendedPrecisionBLAS._element_storage_bytes(T) <= 2 * sizeof(Float64) ?
-           40_000_000 : 20_000_000
+           100_000_000 : 20_000_000
 end
 
 function _equality_qr_allowed(
@@ -559,7 +559,9 @@ function _equality_qr_allowed(
     columns == 0 && return false
     maximum_columns =
         T === BigFloat ? 256 :
-        T === Float64 ? 2_048 : 1_024
+        T === Float64 ? 2_048 :
+        ExtendedPrecisionBLAS._element_storage_bytes(T) <= 2 * sizeof(Float64) ?
+        8_192 : 1_024
     columns <= maximum_columns || return false
     maximum_elements = _equality_qr_maximum_elements(T)
     Int128(rows) * Int128(columns) <= Int128(maximum_elements) ||

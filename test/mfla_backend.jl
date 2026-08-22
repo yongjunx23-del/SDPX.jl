@@ -28,10 +28,20 @@ const _MFLA_TYPES = (Float64x2, Float64x3, Float64x4)
 
 @testset "Float64x2 equality QR crossover keeps wider types conservative" begin
     @test SDPX._equality_qr_maximum_elements(Float64) == 50_000_000
-    @test SDPX._equality_qr_maximum_elements(Float64x2) == 40_000_000
+    @test SDPX._equality_qr_maximum_elements(Float64x2) == 100_000_000
     @test SDPX._equality_qr_maximum_elements(Float64x3) == 20_000_000
     @test SDPX._equality_qr_maximum_elements(Float64x4) == 20_000_000
     @test SDPX._equality_qr_maximum_elements(BigFloat) == 2_000_000
+
+    opts = SDPX.SolverOptions(Float64x2; equality_solver=:qr, verbosity=0)
+    @test SDPX._equality_qr_allowed(
+        zeros(Float64x2, 1, 8_192),
+        opts,
+    )
+    @test !SDPX._equality_qr_allowed(
+        zeros(Float64x2, 1, 8_193),
+        opts,
+    )
 end
 
 @testset "MultiFloat duplicate-column fingerprints preserve exact decisions" begin
