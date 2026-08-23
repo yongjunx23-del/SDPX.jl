@@ -779,6 +779,18 @@ end
         @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
         @test workspace.la_fallback_reason ===
               :la_equality_factor_failed
+        first_qr = workspace.Qchol
+        second = SDPX.factorize!(
+            SDPX.select_backend(workspace),
+            workspace,
+            problem,
+            options,
+        )
+        @test second.ok
+        @test workspace.Qchol isa SDPX.EqualityQRFactor{Float64}
+        @test workspace.Qchol.factors === first_qr.factors
+        @test workspace.Qchol.permutation == first_qr.permutation
+        @test workspace.Qchol.rank == first_qr.rank
     end
 
     @testset "Standard dense normal equations never report QR fallback" begin
@@ -911,6 +923,92 @@ end
         @test all(isfinite, dy)
     end
 
+    @testset "equality QR reuses a stable pivot order" begin
+        B = zeros(6, 4)
+        B[1, 1] = 10.0
+        B[2, 2] = 9.0
+        B[3, 3] = 8.0
+        B[1:3, 4] .= 1.0
+        backend = SDPX.StandardLABackend(:float64)
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:qr,
+        )
+        first = SDPX._factor_equality_qr(backend, B, options)
+        first_permutation = copy(first.permutation)
+        left_factor = LowerTriangular([
+            2.0 0.0 0.0 0.0 0.0 0.0
+            0.2 1.5 0.0 0.0 0.0 0.0
+            0.1 -0.1 1.8 0.0 0.0 0.0
+            0.0 0.0 0.0 1.0 0.0 0.0
+            0.0 0.0 0.0 0.0 1.0 0.0
+            0.0 0.0 0.0 0.0 0.0 1.0
+        ])
+        transformed = Matrix(
+            left_factor \ (B * Diagonal([1.1, 0.9, 1.2, 1.0])),
+        )
+        reused = SDPX._factor_equality_qr_next(
+            first,
+            backend,
+            transformed,
+            options,
+        )
+        @test reused.factors === first.factors
+        @test reused.rank == first.rank == 3
+        @test reused.permutation == first_permutation
+        seed = [0.2, -0.3, 0.4, 0.0]
+        rhs = transpose(transformed) * (transformed * seed)
+        direction = zeros(4)
+        scratch = zeros(4)
+        SDPX._solve_Q!(direction, reused, rhs, scratch)
+        @test transpose(transformed) * (transformed * direction) ≈
+              rhs rtol=1e-12 atol=1e-12
+
+        changed = copy(transformed)
+        changed[:, 2] .= changed[:, 1]
+        changed[:, 4] .= 0.0
+        changed[2, 4] = 1.0
+        refactored = SDPX._factor_equality_qr_next(
+            reused,
+            backend,
+            changed,
+            options,
+        )
+        @test refactored.rank == 3
+        @test refactored.permutation != first_permutation
+        rhs = transpose(changed) * (changed * seed)
+        SDPX._solve_Q!(direction, refactored, rhs, scratch)
+        @test transpose(changed) * (changed * direction) ≈
+              rhs rtol=1e-12 atol=1e-12
+
+        rank_two = zeros(6, 4)
+        rank_two[1, 1] = 10.0
+        rank_two[2, 2] = 9.0
+        rank_two[1:2, 3] .= 1.0
+        rank_two[1, 4] = 1.0
+        rank_two[2, 4] = -1.0
+        first_two = SDPX._factor_equality_qr(
+            backend,
+            rank_two,
+            options,
+        )
+        @test first_two.rank == 2
+        expanded = copy(rank_two)
+        permutation = first_two.permutation
+        expanded[:, permutation[3]] .=
+            expanded[:, permutation[1]] .+
+            expanded[:, permutation[2]]
+        expanded[:, permutation[4]] .= 0.0
+        expanded[3, permutation[4]] = 1.0
+        expanded_factor = SDPX._factor_equality_qr_next(
+            first_two,
+            backend,
+            expanded,
+            options,
+        )
+        @test expanded_factor.rank == 3
+    end
+
     @testset "rank-revealing equality QR supports extended arithmetic" begin
         rng = MersenneTwister(772)
         for T in (Float64x4, BigFloat)
@@ -927,6 +1025,16 @@ end
                     B,
                     options,
                 )
+                next_factor = SDPX._factor_equality_qr_next(
+                    factor,
+                    SDPX.StandardLABackend(
+                        SDPX._la_arithmetic_symbol(T),
+                    ),
+                    B,
+                    options,
+                )
+                @test next_factor.factors !== factor.factors
+                @test next_factor.rank == factor.rank
                 rhs = T.(randn(rng, 5))
                 direction = SDPX.alloc_zeros(T, 5)
                 scratch = SDPX.alloc_zeros(T, 5)

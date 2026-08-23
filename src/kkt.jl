@@ -636,6 +636,65 @@ function _factor_equality_qr!(
     )
 end
 
+function _factor_equality_qr_next(
+    ::Union{Nothing,EqualityQRFactor{T}},
+    backend::AbstractLABackend,
+    Btil::AbstractMatrix{T},
+    opts::SolverOptions{T},
+) where {T}
+    return _factor_equality_qr(backend, Btil, opts)
+end
+
+function _factor_equality_qr_next(
+    previous::EqualityQRFactor{Float64},
+    backend::StandardLABackend,
+    Btil::AbstractMatrix{Float64},
+    opts::SolverOptions{Float64},
+)
+    # B̂ = L⁻¹BD has the same exact column dependencies while L and D
+    # remain invertible. Reuse RRQR's basis order, but repeat RRQR whenever
+    # the precision-aware numerical rank changes.
+    buffer = previous.factors
+    size(buffer) == size(Btil) || return _factor_equality_qr(
+        backend,
+        Btil,
+        opts,
+    )
+    permutation = previous.permutation
+    @inbounds for column in axes(Btil, 2), row in axes(Btil, 1)
+        buffer[row, column] = Btil[row, permutation[column]]
+    end
+    relative_tolerance = _equality_qr_relative_tolerance(Btil, opts)
+    rank = previous.rank
+    rank == 0 && return _factor_equality_qr!(buffer, backend, Btil, opts)
+    basis_factor = LinearAlgebra.qr!(view(buffer, :, 1:rank))
+    columns = size(buffer, 2)
+    if rank < columns
+        trailing = view(buffer, :, (rank + 1):columns)
+        LinearAlgebra.lmul!(adjoint(basis_factor.Q), trailing)
+        residual = view(trailing, (rank + 1):size(buffer, 1), :)
+        largest_diagonal = maximum(
+            index -> abs(buffer[index, index]),
+            1:rank,
+        )
+        threshold = relative_tolerance * largest_diagonal
+        maximum(
+            column -> LinearAlgebra.norm(view(residual, :, column)),
+            axes(residual, 2),
+        ) <= threshold ||
+            return _factor_equality_qr!(buffer, backend, Btil, opts)
+    end
+    candidate = _equality_qr_factor_handle(
+        backend.provider,
+        buffer,
+        Float64[],
+        permutation,
+        relative_tolerance,
+    )
+    candidate.rank == rank && return candidate
+    return _factor_equality_qr!(buffer, backend, Btil, opts)
+end
+
 function _equality_gram_crossover(
     panel::AbstractMatrix{T},
     opts::SolverOptions{T},
@@ -1103,18 +1162,22 @@ function _factor_arrow_equality_system!(
     q_rank_deficient = false
     gram_seconds = 0.0
     factor_started = time_ns()
+    previous_qr =
+        ws.Qchol isa EqualityQRFactor{T} ? ws.Qchol : nothing
     direct_qr =
         opts.equality_solver === :qr ||
-        (
-            opts.equality_solver === :auto &&
-            ws.Qchol isa EqualityQRFactor{T}
-        )
+        (opts.equality_solver === :auto && previous_qr !== nothing)
     # A prior provider factor may borrow ws.Qbuf, so release it before the
     # buffer is overwritten by the next iteration's Gram and factorization.
     ws.Qchol = nothing
     if direct_qr
         ws.equality_gram_kernel = :not_formed_qr
-        qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
+        qr_factor = _factor_equality_qr_next(
+            previous_qr,
+            ws.la_backend,
+            ws.Btil,
+            opts,
+        )
         ws.Qchol = qr_factor
         q_pivoted = true
         q_rank_deficient = qr_factor.rank < n
@@ -1472,19 +1535,23 @@ function _factor_dense_kkt_native!(
         _normalize_equality_panel_columns!(ws.Btil, ws.equality_scale)
         phase_constraint_triangular_solve +=
             _elapsed_seconds(started)
+        previous_qr =
+            ws.Qchol isa EqualityQRFactor{T} ? ws.Qchol : nothing
         direct_qr =
             opts.equality_solver === :qr ||
-            (
-                opts.equality_solver === :auto &&
-                ws.Qchol isa EqualityQRFactor{T}
-            )
+            (opts.equality_solver === :auto && previous_qr !== nothing)
         # Release any prior provider factor before overwriting its borrowed
         # ws.Qbuf storage with the current iteration's Gram.
         ws.Qchol = nothing
         if direct_qr
             ws.equality_gram_kernel = :not_formed_qr
             started = time_ns()
-            qr_factor = _factor_equality_qr(ws.la_backend, ws.Btil, opts)
+            qr_factor = _factor_equality_qr_next(
+                previous_qr,
+                ws.la_backend,
+                ws.Btil,
+                opts,
+            )
             ws.Qchol = qr_factor
             q_pivoted = true
             q_rank_deficient = qr_factor.rank < n
