@@ -1209,7 +1209,9 @@ function _public_sdp_starts(
         end
     else
         for origin in lowering.psd_block_origins
-            matrix = zeros(T, origin.shape, origin.shape)
+            # `buildP_owned!` and `kaxpby_owned!` require independent mutable
+            # scalar slots. `zeros(BigFloat, ...)` aliases every zero entry.
+            matrix = alloc_zeros(T, origin.shape, origin.shape)
             buildP_owned!(matrix, lowering.core.cons, origin.core_block, x0)
             kaxpby_owned!(
                 -one(T),

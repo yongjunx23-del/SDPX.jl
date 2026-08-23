@@ -194,6 +194,107 @@ end
             @test output[1] !== output[2]
             @test output[2] !== output[3]
         end
+
+        @testset "owned sparse block build preserves structural-zero ownership" begin
+            coefficients = [zeros(BigFloat, 1, 3, 3)]
+            coefficients[1][1, 2, 2] = BigFloat(1)
+            constants = [zeros(BigFloat, 3, 3)]
+            constants[1][1, 1] = BigFloat(-1)
+            problem = SDPX.ingest(
+                BigFloat[0],
+                coefficients,
+                constants,
+                zeros(BigFloat, 1, 0),
+                BigFloat[];
+                sparse=true,
+                verbosity=0,
+            )
+            @test problem.cons isa SDPX.SparseCons{BigFloat}
+
+            public_block = zeros(BigFloat, 3, 3)
+            @test public_block[1] === public_block[2]
+            SDPX.buildP!(public_block, problem.cons, 1, BigFloat[2])
+            @test all(
+                first == second || public_block[first] !== public_block[second]
+                for first in eachindex(public_block),
+                    second in eachindex(public_block)
+            )
+
+            block = SDPX.alloc_zeros(BigFloat, 3, 3)
+            SDPX.buildP_owned!(block, problem.cons, 1, BigFloat[2])
+            SDPX.kaxpby_owned!(
+                -one(BigFloat),
+                problem.C[1],
+                one(BigFloat),
+                block,
+            )
+
+            expected = zeros(BigFloat, 3, 3)
+            expected[1, 1] = BigFloat(1)
+            expected[2, 2] = BigFloat(2)
+            @test block == expected
+            @test all(
+                first == second || block[first] !== block[second]
+                for first in eachindex(block), second in eachindex(block)
+            )
+
+            coefficients_2x2 = [zeros(BigFloat, 1, 2, 2)]
+            coefficients_2x2[1][1, 1, 2] = BigFloat(3)
+            coefficients_2x2[1][1, 2, 1] = BigFloat(3)
+            problem_2x2 = SDPX.ingest(
+                BigFloat[0],
+                coefficients_2x2,
+                [zeros(BigFloat, 2, 2)],
+                zeros(BigFloat, 1, 0),
+                BigFloat[];
+                sparse=true,
+                verbosity=0,
+            )
+            generic = zeros(BigFloat, 2, 2)
+            SDPX._buildP_sparse_generic!(
+                generic,
+                problem_2x2.cons,
+                1,
+                BigFloat[2],
+            )
+            @test generic == BigFloat[0 6; 6 0]
+            @test generic[1, 2] !== generic[2, 1]
+            MA.operate!(+, generic[1, 2], BigFloat(1))
+            @test generic[2, 1] == BigFloat(6)
+        end
+
+        @testset "public BigFloat SDP warm start owns every matrix slot" begin
+            model = SDPX.Model(BigFloat; precision_bits=192)
+            variable = SDPX.variable!(
+                model,
+                :X,
+                2,
+                2;
+                domain=SDPX.PSDCone(),
+            )
+            primal_start = BigFloat[2 1 / 3; 1 / 3 3]
+            SDPX.set_start!(variable, primal_start)
+            SDPX.set_dual_slack_start!(variable, BigFloat[1 0; 0 1])
+            SDPX.objective!(model, SDPX.Minimize(), variable[1, 1])
+
+            program = SDPX.compile_product_cone_model(model)
+            lowering = SDPX.lower_sdp_native(
+                program;
+                sparse=:sparse,
+                verbosity=0,
+            )
+            starts = SDPX._public_sdp_starts(model, lowering)
+            @test starts.X0 !== nothing
+            @test starts.X0[1] == primal_start
+            @test all(
+                first == second || starts.X0[1][first] !== starts.X0[1][second]
+                for first in eachindex(starts.X0[1]),
+                    second in eachindex(starts.X0[1])
+            )
+            mirrored_before = BigFloat(starts.X0[1][2, 1])
+            MA.operate!(+, starts.X0[1][1, 2], BigFloat(1))
+            @test starts.X0[1][2, 1] == mirrored_before
+        end
     end
 
     @testset "LP path applies BigFloat precision consistency (review P2.7)" begin
