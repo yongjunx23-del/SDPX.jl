@@ -206,6 +206,76 @@ function _single_scalar_coefficient(
     return variable, coefficient
 end
 
+function _isolated_fixed_equalities(prob::SDPProblem{T}) where {T}
+    m = prob.dims.m
+    equality_nnz = zeros(Int, m)
+    if prob.B isa SparseMatrixCSC
+        rows = rowvals(prob.B)
+        values = nonzeros(prob.B)
+        @inbounds for index in eachindex(values)
+            iszero(values[index]) || (equality_nnz[rows[index]] += 1)
+        end
+    else
+        @inbounds for equality in axes(prob.B, 2), variable in axes(prob.B, 1)
+            iszero(prob.B[variable, equality]) ||
+                (equality_nnz[variable] += 1)
+        end
+    end
+
+    psd_active = falses(m)
+    if prob.cons isa SparseCons{T}
+        cons = prob.cons::SparseCons{T}
+        @inbounds for active in cons.active, variable in active
+            psd_active[variable] = true
+        end
+    else
+        cons = prob.cons::DenseCons{T}
+        @inbounds for panel in cons.Av, variable in axes(panel, 2)
+            any(!iszero, view(panel, :, variable)) &&
+                (psd_active[variable] = true)
+        end
+    end
+
+    fixed = FixedEqualityCandidate{T}[]
+    @inbounds for equality in axes(prob.B, 2)
+        variable = 0
+        coefficient = zero(T)
+        if prob.B isa SparseMatrixCSC
+            rows = rowvals(prob.B)
+            values = nonzeros(prob.B)
+            for index in nzrange(prob.B, equality)
+                value = values[index]
+                iszero(value) && continue
+                variable == 0 || (variable = -1; break)
+                variable = rows[index]
+                coefficient = value
+            end
+        else
+            for row in axes(prob.B, 1)
+                value = prob.B[row, equality]
+                iszero(value) && continue
+                variable == 0 || (variable = -1; break)
+                variable = row
+                coefficient = value
+            end
+        end
+        variable > 0 || continue
+        equality_nnz[variable] == 1 || continue
+        iszero(prob.c[variable]) || continue
+        psd_active[variable] && continue
+        push!(
+            fixed,
+            FixedEqualityCandidate{T}(
+                equality,
+                variable,
+                coefficient,
+                prob.b[equality] / coefficient,
+            ),
+        )
+    end
+    return fixed
+end
+
 
 function analyze(
     ::BoundExtractionStage,
@@ -260,14 +330,10 @@ function analyze(
         end
     end
 
-    fixed_equalities = FixedEqualityCandidate{T}[]
+    fixed_equalities = opts.presolve_fixed_variables ?
+                       _isolated_fixed_equalities(prob) :
+                       FixedEqualityCandidate{T}[]
     inconsistent = 0
-    # Native equality columns intentionally remain under the existing
-    # arithmetic-aware equality presolve. Treating every one-column equality
-    # as a fixed-variable declaration changed established warm-start dual
-    # semantics. MOI `VariableIndex` equalities therefore stay equalities;
-    # exact fixed-variable elimination is currently driven by matching lower
-    # and upper bounds, whose nonnegative dual reconstruction is unambiguous.
 
     @inbounds for variable in 1:m
         has_lower = !iszero(flags[variable] & _BOUND_LOWER)
@@ -280,6 +346,10 @@ function analyze(
     fixed_variables = Int[]
     fixed_values = T[]
     if opts.presolve_fixed_variables && inconsistent == 0
+        @inbounds for candidate in fixed_equalities
+            push!(fixed_variables, candidate.variable)
+            push!(fixed_values, candidate.value)
+        end
         @inbounds for variable in 1:m
             if flags[variable] == (_BOUND_LOWER | _BOUND_UPPER) &&
                    lower[variable] == upper[variable]
@@ -296,6 +366,7 @@ function analyze(
         # special constant-feasibility solver into this low-risk stage.
         empty!(fixed_variables)
         empty!(fixed_values)
+        empty!(fixed_equalities)
         push!(
             warnings,
             "All variables are exactly fixed; automatic elimination was " *
@@ -323,10 +394,16 @@ function analyze(
         length(candidates) -
         count(block -> keep_bound_block[block], 1:prob.dims.L)
 
-    # `fixed_equalities` is retained as always-empty metadata: exact
-    # fixed-variable elimination is driven by matching bounds, so the
-    # former equality-side filter is provably inert.
-    keep_equalities = collect(1:prob.dims.n)
+    fixed_equalities_set = BitSet(
+        candidate.equality
+        for candidate in fixed_equalities
+        if candidate.variable in fixed_set
+    )
+    keep_equalities = [
+        equality
+        for equality in 1:prob.dims.n
+        if !(equality in fixed_equalities_set)
+    ]
     changed =
         length(keep_blocks) != prob.dims.L ||
         length(keep_equalities) != prob.dims.n ||
@@ -701,6 +778,14 @@ function apply(
     @inbounds for (position, variable) in pairs(plan.fixed_variables)
         objective_offset += prob.c[variable] * plan.fixed_values[position]
     end
+    equality_multiplier_map = _owned_array_copy(
+        T,
+        view(
+            context.reconstruction.equality_multiplier_map,
+            plan.keep_equalities,
+            :,
+        ),
+    )
     reconstruction = ReconstructionMap{T}(
         prob.dims.m,
         keep_variables,
@@ -712,7 +797,7 @@ function apply(
         removed_bounds,
         prob.dims.n,
         copy(plan.keep_equalities),
-        context.reconstruction.equality_multiplier_map,
+        equality_multiplier_map,
         removed_fixed_equalities,
     )
     return PreprocessContext{T}(context.original, reduced, reconstruction)

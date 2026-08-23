@@ -59,6 +59,27 @@ function cleanup_problem(::Type{T}; inconsistent_zero=false) where {T}
 end
 
 @testset "conservative preprocessing regressions" begin
+    @testset "isolated fixed equalities remove ghost variables" begin
+        for T in (Float64, Float64x2)
+            problem = SDPX.ingest(
+                T[0, 1],
+                [[spzeros(T, 1, 1), sparse([1], [1], T[1], 1, 1)]],
+                [zeros(T, 1, 1)],
+                sparse([1], [1], T[1], 2, 1),
+                T[3]; sparse=true, verbosity=0,
+            )
+            reduced = SDPX.preprocess(
+                problem, SDPX.SolverOptions{T}(verbosity=0),
+            )
+            @test reduced.problem.dims.m == 1
+            @test reduced.problem.dims.n == 0
+            @test reduced.reconstruction.fixed_variables == [1]
+            @test reduced.reconstruction.fixed_values == T[3]
+            @test only(reduced.reconstruction.fixed_equalities).equality == 1
+            @test size(reduced.reconstruction.equality_multiplier_map) == (0, 1)
+        end
+    end
+
     @testset "typed bounds merge and exact fixed elimination" begin
         for T in (Float64, Float64x4)
             problem = bound_heavy_problem(T)
