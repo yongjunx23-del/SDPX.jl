@@ -263,13 +263,15 @@ function _isolated_fixed_equalities(prob::SDPProblem{T}) where {T}
         equality_nnz[variable] == 1 || continue
         iszero(prob.c[variable]) || continue
         psd_active[variable] && continue
+        fixed_value = prob.b[equality] / coefficient
+        isfinite(fixed_value) || continue
         push!(
             fixed,
             FixedEqualityCandidate{T}(
                 equality,
                 variable,
                 coefficient,
-                prob.b[equality] / coefficient,
+                fixed_value,
             ),
         )
     end

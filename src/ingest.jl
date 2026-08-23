@@ -733,7 +733,7 @@ function _ingest_sparse(A, ET, L, m, k, validate, symmetrize, tol, verbosity)
             blocks[i] = _ingest_owned_sparse(ET, sparse(tmp))
         end
         Asp[l] = blocks
-        active[l] = findall(i -> nnz(blocks[i]) > 0, 1:m)
+        active[l] = findall(i -> !iszero(_matrix_nnz(blocks[i])), 1:m)
         # Ascending variable id. `active` already comes from `findall`, so this
         # is just a copy; the ordering matters because `reduce_sparse_schur!`
         # relies on positions for a contiguous column range being contiguous,
@@ -897,7 +897,7 @@ function ingest(
         # every structurally empty coefficient slot. Read-only after ingest.
         empty_block = spzeros(ET, k[l], k[l])
         prepared[l] = [
-            nnz(A[l][i]) == 0 ? empty_block :
+            iszero(_matrix_nnz(A[l][i])) ? empty_block :
             _prepare_sparse_matrix(
                 A[l][i],
                 ET,
@@ -915,7 +915,7 @@ function ingest(
         active = [
             prepared[l] isa ActiveSparseCoefficientVector ?
             copy((prepared[l]::ActiveSparseCoefficientVector).active_variables) :
-            findall(i -> nnz(prepared[l][i]) > 0, 1:m)
+            findall(i -> !iszero(_matrix_nnz(prepared[l][i])), 1:m)
             for l in 1:L
         ]
         order = [

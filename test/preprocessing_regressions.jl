@@ -60,24 +60,50 @@ end
 
 @testset "conservative preprocessing regressions" begin
     @testset "isolated fixed equalities remove ghost variables" begin
-        for T in (Float64, Float64x2)
+        for (T, sparse_input) in ((Float64, false), (Float64x2, true))
+            zero_coefficient = sparse_input ? spzeros(T, 1, 1) : zeros(T, 1, 1)
+            unit_coefficient = sparse_input ?
+                               sparse([1], [1], T[1], 1, 1) : ones(T, 1, 1)
+            equalities = T[1 0; 0 1]
             problem = SDPX.ingest(
-                T[0, 1],
-                [[spzeros(T, 1, 1), sparse([1], [1], T[1], 1, 1)]],
+                T[0, -1],
+                [[zero_coefficient, unit_coefficient]],
                 [zeros(T, 1, 1)],
-                sparse([1], [1], T[1], 2, 1),
-                T[3]; sparse=true, verbosity=0,
+                sparse_input ? sparse(equalities) : equalities,
+                T[3, 0]; sparse=sparse_input, verbosity=0,
             )
             reduced = SDPX.preprocess(
                 problem, SDPX.SolverOptions{T}(verbosity=0),
             )
             @test reduced.problem.dims.m == 1
-            @test reduced.problem.dims.n == 0
+            @test reduced.problem.dims.n == 1
             @test reduced.reconstruction.fixed_variables == [1]
             @test reduced.reconstruction.fixed_values == T[3]
             @test only(reduced.reconstruction.fixed_equalities).equality == 1
-            @test size(reduced.reconstruction.equality_multiplier_map) == (0, 1)
+            @test size(reduced.reconstruction.equality_multiplier_map) == (1, 2)
+            if T === Float64
+                options = SDPX.SolverOptions{T}(
+                    verbosity=0,
+                    ϵ_gap=1e-8,
+                    ϵ_primal=1e-8,
+                    ϵ_dual=1e-8,
+                    iter_max=100,
+                )
+                result = SDPX.solve!(problem, options)
+                @test result.status == SDPX.Optimal
+                @test result.x ≈ T[3, 0] atol=1e-8
+                @test SDPX.result_certificate(problem, result, options).valid
+            end
         end
+
+        tiny_problem = SDPX.ingest(
+            [0.0, -1.0],
+            [[spzeros(1, 1), sparse([1], [1], [1.0], 1, 1)]],
+            [zeros(1, 1)],
+            sparse([1], [1], [nextfloat(0.0)], 2, 1),
+            [1.0]; sparse=true, verbosity=0,
+        )
+        @test isempty(SDPX._isolated_fixed_equalities(tiny_problem))
     end
 
     @testset "typed bounds merge and exact fixed elimination" begin
