@@ -6,9 +6,11 @@ not repeat every table.
 
 ## Benchmark locations
 
-- [`bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/benchmark/soc_fixed_trace/README.md) — the native
-  fixed-trace Q3 versus PSD2 campaign, including models, launcher policy,
-  certificate checks, and provenance.
+- [`benchmark/registry/full_unitarity_eft.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/benchmark/registry/full_unitarity_eft.jl) — the canonical
+  fixed-trace Q3 CSDR campaign. It uses the NativeSOC loader, requires an
+  original-coordinate certificate, and forbids a PSD lift or fallback.
+- [`docs/evidence/bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/soc_fixed_trace/README.md) — archived pre-v0.5
+  PSD2-versus-Q3 scripts retained only as historical evidence.
 - [`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md) — retained historical context and
   the small smoke tier index.
 - [`bench/automatic_pipeline/PARAMETER_SELECTION.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/automatic_pipeline/PARAMETER_SELECTION.md)

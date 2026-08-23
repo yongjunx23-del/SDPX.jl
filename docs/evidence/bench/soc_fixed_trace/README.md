@@ -1,5 +1,10 @@
 # Fixed-trace CSDR J40/J80 benchmark
 
+> Historical evidence only. These scripts target the pre-v0.5 `SDPProblem`
+> fixed-trace private API and are not a runnable production driver. Use
+> `benchmark/runner.jl large` with the registered
+> `csdr/full_unitarity_eft_j40_na15_nmu200_nx2_nalpha2` NativeSOC case.
+
 This directory contains the compute-node harness for the two immutable
 spectral-primal CSDR traces:
 

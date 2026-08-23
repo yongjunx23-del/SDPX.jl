@@ -204,8 +204,11 @@ residuals, stationarity, primal and dual Lorentz margins, objectives, gap,
 and complementarity. Pure-SOC MOI input stays on the native route.
 
 Lightweight development evidence for the native routes is summarized in
-[benchmarks.md](benchmarks.md), with full reports under
-[`bench/soc_fixed_trace/README.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/benchmark/soc_fixed_trace/README.md).
+[benchmarks.md](benchmarks.md). The current fixed-trace CSDR campaign is
+registered in
+[`benchmark/registry/full_unitarity_eft.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/benchmark/registry/full_unitarity_eft.jl);
+the older PSD2-versus-Q3 scripts remain under
+[`docs/evidence/bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/soc_fixed_trace/README.md).
 
 ### Native-SOC implementation references
 
