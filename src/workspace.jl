@@ -1126,13 +1126,17 @@ function Workspace(
     if is_sparse
         active = (prob.cons::SparseCons{T}).active
         total_packed_pairs = sum(
-            ids -> length(ids) * (length(ids) + 1) ÷ 2,
+            ids -> begin
+                count = Int128(length(ids))
+                count * (count + 1) ÷ 2
+            end,
             active;
-            init=0,
+            init=Int128(0),
         )
+        matrix_dimension = Int128(m)
         scatter_entries = schur_nbins == 1 && planned_lower_only ?
-                          m * (m + 1) ÷ 2 :
-                          schur_nbins * m * m
+                          matrix_dimension * (matrix_dimension + 1) ÷ 2 :
+                          Int128(schur_nbins) * matrix_dimension^2
         dense_sparse_assembly =
             !sparse_schur &&
             !compact_arrow &&
