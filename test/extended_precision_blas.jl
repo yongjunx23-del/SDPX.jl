@@ -169,7 +169,11 @@ end
         reference_schur = zeros(T, variable_count, variable_count)
         reduced_schur = similar(reference_schur)
         SDPX.materialize_schur!(reference_schur, reference)
+        reduced_kkt_norm = SDPX._kkt_direction_operator_infinity_norm(reduced, problem)
+        @test all(iszero, reduced.arrow.Sgg)
         SDPX.materialize_schur!(reduced_schur, reduced)
+        @test reduced_kkt_norm ≈
+              maximum(vec(sum(abs.(reference_schur), dims=2))) rtol=T(1e-45)
         @test maximum(abs, reduced_schur - reference_schur) /
               max(maximum(abs, reference_schur), one(T)) < T(1e-54)
         reduced_factor = SDPX.factor_arrow_kkt!(

@@ -695,7 +695,10 @@ end
             SDPX.alloc_zeros(BigFloat, problem.dims.m, problem.dims.m)
         mixed_schur = zeros(BigFloat, problem.dims.m, problem.dims.m)
         SDPX.materialize_schur!(reference_schur, reference)
+        mixed_kkt_norm = SDPX._kkt_direction_operator_infinity_norm(mixed, problem)
+        @test all(iszero, mixed.arrow.Sgg)
         SDPX.materialize_schur!(mixed_schur, mixed)
+        @test mixed_kkt_norm ≈ maximum(vec(sum(abs.(reference_schur), dims=2)))
         @test maximum(abs, mixed_schur - reference_schur) /
               max(maximum(abs, reference_schur), one(BigFloat)) <
               big"1e-65"

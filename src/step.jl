@@ -912,11 +912,12 @@ function newton_step!(
     # to accept the direction.  This reuses the unregularized structured KKT
     # operator and retained factor state; it adds no factorization and also
     # leaves rho_r/rho_p populated for exact accepted-trial residual carry.
-    refine_residual = _kkt_direction_residual!(ws, prob, r)
     direction_tolerance = _kkt_direction_acceptance_tolerance(
-        ws, opts, r,
+        ws, opts, r, prob, ws.dx, ws.dy,
     )
-    if !isfinite(refine_residual) || refine_residual > direction_tolerance
+    refine_residual = _kkt_direction_residual!(ws, prob, r)
+    if !isfinite(refine_residual) || !isfinite(direction_tolerance) ||
+       refine_residual > direction_tolerance
         return (
             status=:breakdown,
             reason=

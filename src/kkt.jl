@@ -3667,23 +3667,167 @@ function _kkt_direction_refinement_tolerance(
     return relative_tolerance * max(knrmInf(r), one(T))
 end
 
+@inline function _kkt_abs_row_sum(B, row, ::Type{T}) where {T}
+    result = zero(T)
+    @inbounds for column in axes(B, 2)
+        result += abs(B[row, column])
+    end
+    return result
+end
+
+@inline function _kkt_abs_column_sum(B, column, ::Type{T}) where {T}
+    result = zero(T)
+    @inbounds for row in axes(B, 1)
+        result += abs(B[row, column])
+    end
+    return result
+end
+
+@inline function _kkt_abs_column_sum(
+    B::SparseMatrixCSC,
+    column,
+    ::Type{T},
+) where {T}
+    result = zero(T)
+    @inbounds for pointer in nzrange(B, column)
+        result += T(abs(B.nzval[pointer]))
+    end
+    return result
+end
+
+function _kkt_sparse_B_row_sums!(
+    destination::AbstractVector{T},
+    B::SparseMatrixCSC,
+) where {T}
+    length(destination) == size(B, 1) ||
+        throw(DimensionMismatch("sparse B row-sum scratch mismatch"))
+    zero_owned!(destination)
+    @inbounds for column in axes(B, 2)
+        for pointer in nzrange(B, column)
+            destination[B.rowval[pointer]] += T(abs(B.nzval[pointer]))
+        end
+    end
+    return destination
+end
+
+@inline function _kkt_lower_symmetric_row_sum(
+    matrix,
+    row,
+    ::Type{T},
+) where {T}
+    result = zero(T)
+    @inbounds for column in 1:row
+        result += T(abs(matrix[row, column]))
+    end
+    @inbounds for column in (row + 1):size(matrix, 2)
+        result += T(abs(matrix[column, row]))
+    end
+    return result
+end
+
+@inline function _kkt_full_row_sum(matrix, row, ::Type{T}) where {T}
+    result = zero(T)
+    @inbounds for column in axes(matrix, 2)
+        result += T(abs(matrix[row, column]))
+    end
+    return result
+end
+
+function _kkt_direction_operator_infinity_norm(
+    ws::Workspace{T},
+    prob::SDPProblem{T},
+) where {T}
+    m, n = prob.dims.m, prob.dims.n
+    B = prob.B
+    row_max = zero(T)
+    sparse_B = B isa SparseMatrixCSC
+    sparse_B && _kkt_sparse_B_row_sums!(ws.ρr, B)
+
+    # ws.S is lower-authoritative; do not form a symmetric copy.
+    if !isempty(ws.S)
+        @inbounds for row in 1:m
+            row_sum = _kkt_lower_symmetric_row_sum(ws.S, row, T)
+            row_sum += sparse_B ? ws.ρr[row] : _kkt_abs_row_sum(B, row, T)
+            row_max = max(row_max, row_sum)
+        end
+    elseif ws.arrow !== nothing
+        arrow = ws.arrow::ArrowWorkspace{T}
+        materialized = arrow.mixed_reduced_ready || arrow.reduced_panel_ready
+        try
+            if arrow.mixed_reduced_ready
+                _materialize_mixed_arrow_shared!(ws::Workspace{BigFloat})
+            elseif arrow.reduced_panel_ready
+                zero_owned!(arrow.Sgg)
+                _materialize_reduced_arrow_shared!(arrow, ws.thread_count)
+            end
+            @inbounds for (global_position, variable) in pairs(arrow.global_ids)
+                row_sum = _kkt_full_row_sum(arrow.Sgg, global_position, T)
+                for coupling in arrow.coupling
+                    row_sum += _kkt_abs_column_sum(coupling, global_position, T)
+                end
+                row_sum += sparse_B ? ws.ρr[variable] :
+                           _kkt_abs_row_sum(B, variable, T)
+                row_max = max(row_max, row_sum)
+            end
+            @inbounds for block in eachindex(arrow.local_ids)
+                ids = arrow.local_ids[block]
+                D = arrow.Dsrc[block]
+                coupling = arrow.coupling[block]
+                for (local_position, variable) in pairs(ids)
+                    row_sum = _kkt_full_row_sum(D, local_position, T) +
+                              _kkt_full_row_sum(coupling, local_position, T)
+                    row_sum += sparse_B ? ws.ρr[variable] :
+                               _kkt_abs_row_sum(B, variable, T)
+                    row_max = max(row_max, row_sum)
+                end
+            end
+        finally
+            materialized && zero_owned!(arrow.Sgg)
+        end
+    elseif ws.sparse_kkt isa GenericSparseSchurSDPWorkspace{T}
+        matrix = (ws.sparse_kkt::GenericSparseSchurSDPWorkspace{T}).storage.matrix
+        zero_owned!(ws.ρr)
+        @inbounds for column in axes(matrix, 2)
+            for pointer in matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+                row = matrix.rowval[pointer]
+                magnitude = abs(matrix.nzval[pointer])
+                ws.ρr[row] += magnitude
+                row != column && (ws.ρr[column] += magnitude)
+            end
+        end
+        row_max = maximum(ws.ρr; init=zero(T))
+    else
+        # A new representation must fail closed until its operator rows are
+        # represented here.
+        return T(NaN)
+    end
+
+    # Equality rows of [S -B; B' 0].
+    @inbounds for equality in 1:n
+        row_sum = _kkt_abs_column_sum(B, equality, T)
+        row_max = max(row_max, row_sum)
+    end
+    return row_max
+end
+
 function _kkt_direction_acceptance_tolerance(
     ws::Workspace{T},
     opts::SolverOptions{T},
     r::AbstractVector{T},
+    prob::SDPProblem{T},
+    dx::AbstractVector{T},
+    dy::AbstractVector{T},
 ) where {T}
-    # Direction acceptance is an outer-solver safety gate, not the stopping
-    # rule for iterative refinement.  Reuse the same requested-accuracy floor
-    # as cold-start validation so regularized sparse factors are not rejected
-    # merely because they cannot meet the stricter refinement target.
-    relative_tolerance = max(
-        sqrt(eps(T)),
-        opts.ϵ_primal,
-        opts.ϵ_dual,
+    # Accept a direction by normwise backward error on the unregularized KKT
+    # operator; iterative refinement keeps its separate stopping tolerance.
+    tau = max(sqrt(eps(T)), opts.ϵ_primal, opts.ϵ_dual)
+    rhs_inf = max(knrmInf(r), isempty(ws.p) ? zero(T) : knrmInf(ws.p))
+    direction_inf = max(
+        knrmInf(dx),
+        isempty(dy) ? zero(T) : knrmInf(dy),
     )
-    equality_scale = isempty(ws.p) ? zero(T) : knrmInf(ws.p)
-    scale = max(knrmInf(r), equality_scale, one(T))
-    return relative_tolerance * scale
+    k0_inf = _kkt_direction_operator_infinity_norm(ws, prob)
+    return tau * (rhs_inf + k0_inf * direction_inf)
 end
 
 function _kkt_direction_residual!(

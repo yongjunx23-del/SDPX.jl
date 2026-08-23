@@ -2,6 +2,7 @@ using LinearAlgebra
 using MultiFloats: Float64x4
 using Random
 using SDPX
+using SparseArrays
 using Test
 
 function _legacy_arrow_rank_add!(destination, coupling, solved_coupling)
@@ -231,6 +232,8 @@ end
     @testset "direction acceptance and refinement use distinct tolerances" begin
         problem = _dense_workspace_problem(reshape([1.0], 1, 1))
         workspace = SDPX.Workspace(problem; thread_count=1)
+        workspace.S[1, 1] = 4.0
+        workspace.dx[1] = 3.0
         workspace.p[1] = 100.0
         rhs = [2.0]
         options = SDPX.SolverOptions{Float64}(
@@ -246,13 +249,13 @@ end
             )
         acceptance_tolerance =
             SDPX._kkt_direction_acceptance_tolerance(
-                workspace, options, rhs,
+                workspace, options, rhs, problem, workspace.dx, workspace.dy,
             )
 
         expected_refinement_tolerance =
             options.refine_tol * max(SDPX.knrmInf(rhs), 1.0)
         @test refinement_tolerance == expected_refinement_tolerance
-        @test acceptance_tolerance ≈ sqrt(eps(Float64)) * 100.0
+        @test acceptance_tolerance ≈ sqrt(eps(Float64)) * (100.0 + 5.0 * 3.0)
         @test acceptance_tolerance > refinement_tolerance
 
         requested_options = SDPX.SolverOptions{Float64}(
@@ -261,8 +264,44 @@ end
             ϵ_dual=1.0e-6,
         )
         @test SDPX._kkt_direction_acceptance_tolerance(
-            workspace, requested_options, rhs,
-        ) ≈ 1.0e-3
+            workspace, requested_options, rhs, problem, workspace.dx, workspace.dy,
+        ) ≈ 1.0e-5 * (100.0 + 5.0 * 3.0)
+    end
+
+    @testset "direction gate uses normwise KKT backward error" begin
+        problem = _dense_workspace_problem(zeros(2, 0))
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        workspace.S .= [1.0e8 -1.0e8; -1.0e8 1.0e8]
+        direction = [1.0e8, 1.0e8]
+        rhs = [1.0e4, -1.0e4]
+        copyto!(workspace.dx, direction)
+        options = SDPX.SolverOptions{Float64}(verbosity=0)
+        residual = SDPX._kkt_direction_residual!(workspace, problem, rhs)
+        tolerance = SDPX._kkt_direction_acceptance_tolerance(
+            workspace, options, rhs, problem, direction, workspace.dy,
+        )
+        scale = norm(rhs, Inf) + 2.0e8 * norm(direction, Inf)
+        @test residual ≈ 1.0e4
+        @test residual / scale ≈ 5.0e-13 rtol=1.0e-12
+        @test residual <= tolerance
+        @test residual > sqrt(eps(Float64)) * norm(rhs, Inf)
+    end
+
+    @testset "KKT operator norm handles sparse B" begin
+        B = sparse([1, 3], [1, 1], [2.0, -4.0], 3, 1)
+        problem = SDPX.ingest(
+            zeros(3), [zeros(3, 1, 1)], [zeros(1, 1)], B, zeros(1);
+            sparse=false, verbosity=0,
+        )
+        workspace = SDPX.Workspace(problem; thread_count=1)
+        workspace.S .= [4.0 0.5 -0.2; 0.5 3.0 0.1; -0.2 0.1 2.0]
+        operator = vcat(
+            hcat(workspace.S, -Matrix(B)),
+            hcat(transpose(Matrix(B)), zeros(1, 1)),
+        )
+        expected = maximum(vec(sum(abs.(operator), dims=2)))
+        @test problem.B isa SparseMatrixCSC
+        @test SDPX._kkt_direction_operator_infinity_norm(workspace, problem) == expected
     end
 
     @testset "allocation-free equality KKT right-hand side" begin
