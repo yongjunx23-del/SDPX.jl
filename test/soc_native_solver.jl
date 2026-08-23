@@ -805,6 +805,9 @@ end
         @test workspace.equality_method === :rank_revealing_qr
         @test workspace.la_fallback_reason === :la_equality_factor_failed
         @test workspace.equality_factorizations == 1
+        @test workspace.equality_factor isa SDPX.EqualityQRFactor
+        @test workspace.equality_factor.factors ===
+              workspace.equality_qr_buffer
     end
 
     @testset "FixedTraceQ3 is a NativeSOC local reduction" begin
@@ -814,6 +817,10 @@ end
         second = zeros(3, 4)
         second[2, 3] = 1.0
         second[3, 4] = 1.0
+        @test SDPX._fixed_trace_q3_active_variables(first) == [1, 2]
+        @test SDPX._fixed_trace_q3_active_variables(sparse(first)) == [1, 2]
+        @test SDPX._fixed_trace_q3_active_variables(second) == [3, 4]
+        @test SDPX._fixed_trace_q3_active_variables(sparse(second)) == [3, 4]
         problem = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],
             [
@@ -830,6 +837,18 @@ end
         @test reduction.ownership === :owned
         @test reduction.active_ids == [1 3; 2 4]
         @test reduction.tail_map[:, :, 1] == [1.0 0.0; 0.0 1.0]
+
+        shared_second = copy(second)
+        shared_second[2, 3] = 0.0
+        shared_second[2, 1] = 1.0
+        shared_problem = SDPX.second_order_program(
+            [-1.0, 0.0, -1.0, 0.0],
+            [
+                SDPX.SOCConstraint(first, [1.0, 0.0, 0.0]),
+                SDPX.SOCConstraint(shared_second, [1.0, 0.0, 0.0]),
+            ],
+        )
+        @test SDPX._fixed_trace_q3_reduction(shared_problem) === nothing
 
         one_iteration_problem = SDPX.second_order_program(
             [-1.0, 0.0, -1.0, 0.0],

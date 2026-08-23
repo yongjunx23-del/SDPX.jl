@@ -13,13 +13,7 @@ struct FixedTraceQ3Execution{P} <: AbstractSOCExecution
     payload::P
 end
 
-struct FixedTraceQ3Block{T}
-    cone::Int
-    variables::NTuple{2,Int}
-end
-
 struct FixedTraceQ3Reduction{T}
-    blocks::Vector{FixedTraceQ3Block{T}}
     # Immutable plan object with owned structure-of-arrays storage.  The
     # arrays are populated once during planning and are never borrowed from
     # the caller's cone matrices; this is important for mutable BigFloat
@@ -33,18 +27,19 @@ end
 
 function _fixed_trace_q3_active_variables(A::SparseMatrixCSC)
     active = Int[]
-    rows, columns, values = findnz(A)
-    @inbounds for index in eachindex(values)
-        iszero(values[index]) && continue
-        row = rows[index]
-        row == 1 && return nothing
-        if row == 2 || row == 3
-            column = columns[index]
-            column in active || push!(active, column)
-            length(active) > 2 && return active
+    sizehint!(active, 2)
+    @inbounds for column in axes(A, 2)
+        tail_active = false
+        for pointer in nzrange(A, column)
+            iszero(A.nzval[pointer]) && continue
+            row = A.rowval[pointer]
+            row == 1 && return nothing
+            tail_active |= row == 2 || row == 3
         end
+        tail_active || continue
+        length(active) == 2 && return nothing
+        push!(active, column)
     end
-    sort!(active)
     return active
 end
 
@@ -64,15 +59,6 @@ struct NativeSOCFixedTraceFactor{T}
     inverse_pivots::Matrix{T}
 end
 
-"""
-    _native_soc_equality_abs_row_sums(Aeq)
-
-Build the absolute equality-row sums once from the solver-owned `Aeq`.  The
-row loop visits variables in ascending order, exactly matching the former
-equality×variable gate loop.  The cache assumes solve-lifetime immutability:
-`second_order_program` has already ingested an owned matrix, and concurrent or
-manual mutation during a solve is unsupported.
-"""
 @inline function _native_soc_sparse_rowvals_canonical(
     Aeq::SparseMatrixCSC{T,Int},
 ) where {T}
@@ -123,13 +109,6 @@ function _native_soc_equality_abs_row_sums(
 end
 
 function _native_soc_equality_abs_row_sums(
-    Aeq::SparseMatrixCSC{T,Int},
-) where {T}
-    canonical = _native_soc_sparse_rowvals_canonical(Aeq)
-    return _native_soc_equality_abs_row_sums(Aeq, canonical)
-end
-
-function _native_soc_equality_abs_row_sums(
     Aeq::AbstractMatrix{T},
 ) where {T}
     equalities = size(Aeq, 1)
@@ -172,17 +151,6 @@ end
 
 @inline function _native_soc_add_equality_column_abs(
     value::T,
-    Aeq::SparseMatrixCSC{T,Int},
-    variable::Int,
-) where {T}
-    canonical = _native_soc_sparse_rowvals_canonical(Aeq)
-    return _native_soc_add_equality_column_abs(
-        value, Aeq, variable, canonical,
-    )
-end
-
-@inline function _native_soc_add_equality_column_abs(
-    value::T,
     Aeq::AbstractMatrix{T},
     variable::Int,
     ::Bool,
@@ -192,14 +160,6 @@ end
     end
     return value
 end
-
-@inline _native_soc_add_equality_column_abs(
-    value::T,
-    Aeq::AbstractMatrix{T},
-    variable::Int,
-) where {T} = _native_soc_add_equality_column_abs(
-    value, Aeq, variable, true,
-)
 
 """Planner-owned cone representation, independent of KKT and LA choices."""
 struct ConeRepresentationPlan{E<:AbstractSOCExecution}
@@ -287,9 +247,7 @@ Lorentz runs the generic dense normal-equations kernel.
 function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
     length(problem.cones) > 0 || return nothing
     problem.variables == 2 * length(problem.cones) || return nothing
-    frequency = zeros(Int, problem.variables)
-    blocks = FixedTraceQ3Block{T}[]
-    sizehint!(blocks, length(problem.cones))
+    used = falses(problem.variables)
     block_count = length(problem.cones)
     active_ids = Matrix{Int}(undef, 2, block_count)
     tail_map = alloc_zeros(T, 2, 2, block_count)
@@ -312,8 +270,9 @@ function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
         determinant = cone.A[2, first] * cone.A[3, second] -
                       cone.A[2, second] * cone.A[3, first]
         abs(determinant) > sqrt(eps(T)) * scale * scale || return nothing
-        frequency[first] += 1
-        frequency[second] += 1
+        (used[first] || used[second]) && return nothing
+        used[first] = true
+        used[second] = true
         active_ids[1, block] = first
         active_ids[2, block] = second
         # Tail map rows are (u₁,u₂), columns are the two active variables.
@@ -326,11 +285,8 @@ function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
         fixed_head[block] = _ingest_owned_scalar(T, cone.b[1])
         offset[1, block] = _ingest_owned_scalar(T, cone.b[2])
         offset[2, block] = _ingest_owned_scalar(T, cone.b[3])
-        push!(blocks, FixedTraceQ3Block{T}(block, (first, second)))
     end
-    all(==(1), frequency) || return nothing
     return FixedTraceQ3Reduction(
-        blocks,
         active_ids,
         tail_map,
         fixed_head,
@@ -1424,29 +1380,31 @@ function _native_soc_fixed_trsm_lower!(
     return values
 end
 
-"""Prepare equality-side KKT data once for a fixed-trace IPM iteration."""
-function _native_soc_prepare_kkt!(
+function _native_soc_transform_equality_panel!(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
     factor::NativeSOCFixedTraceFactor{T},
-    options::SolverOptions{T},
 ) where {T}
-    workspace.equality_prepared && return true
-    equalities = length(problem.beq)
-    if equalities == 0
-        workspace.equality_factor = nothing
-        workspace.equality_method = :none
-        workspace.equality_prepared = true
-        return true
-    end
-
-    panel_started = time_ns()
     copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
     _native_soc_fixed_trsm_lower!(factor, workspace.equality_panel)
-    workspace.equality_panel_transforms += 1
-    workspace.equality_panel_transform_seconds +=
-        (time_ns() - panel_started) / 1.0e9
+    return workspace.equality_panel
+end
 
+function _native_soc_transform_equality_panel!(
+    workspace::NativeSOCWorkspace{T},
+    problem::ConicProblem{T},
+    factor,
+) where {T}
+    factor_matrix = la_factor_handle_matrix(factor)
+    copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
+    la_trsm!(workspace.la_backend, factor_matrix, workspace.equality_panel)
+    return workspace.equality_panel
+end
+
+function _native_soc_prepare_equality_factor!(
+    workspace::NativeSOCWorkspace{T},
+    options::SolverOptions{T},
+) where {T}
     if options.equality_solver === :qr || workspace.equality_qr_required
         factor_started = time_ns()
         equality_factor = _factor_equality_qr!(
@@ -1487,15 +1445,15 @@ function _native_soc_prepare_kkt!(
            equality_factor, workspace.equality_panel, options,
        )
         # A successful POTRF is not proof that the equality basis has the
-        # numerical rank required by the requested solver accuracy.  Keep the
-        # FixedTraceQ3 specialization on the same rank/fallback contract as
-        # the general NativeSOC route, and release any factor that borrows the
-        # Gram buffer before the panel-backed RRQR fallback.
+        # numerical rank required by the requested solver accuracy.  Release
+        # any factor that borrows the Gram buffer before the panel-backed RRQR
+        # fallback.
         equality_factor = nothing
         :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
             return false
         options.equality_solver === :auto || return false
-        equality_factor = _factor_equality_qr(
+        equality_factor = _factor_equality_qr!(
+            workspace.equality_qr_buffer,
             workspace.la_backend,
             workspace.equality_panel,
             options,
@@ -1515,7 +1473,7 @@ function _native_soc_prepare_kkt!(
     return true
 end
 
-"""Prepare equality-side KKT data once for a general IPM iteration."""
+"""Prepare equality-side KKT data once for a NativeSOC IPM iteration."""
 function _native_soc_prepare_kkt!(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
@@ -1531,77 +1489,12 @@ function _native_soc_prepare_kkt!(
         return true
     end
 
-    factor_matrix = la_factor_handle_matrix(factor)
     panel_started = time_ns()
-    copy_owned!(workspace.equality_panel, transpose(problem.Aeq))
-    la_trsm!(workspace.la_backend, factor_matrix, workspace.equality_panel)
+    _native_soc_transform_equality_panel!(workspace, problem, factor)
     workspace.equality_panel_transforms += 1
     workspace.equality_panel_transform_seconds +=
         (time_ns() - panel_started) / 1.0e9
-
-    if options.equality_solver === :qr || workspace.equality_qr_required
-        factor_started = time_ns()
-        equality_factor = _factor_equality_qr!(
-            workspace.equality_qr_buffer,
-            workspace.la_backend,
-            workspace.equality_panel,
-            options,
-        )
-        equality_factor === nothing && return false
-        workspace.equality_method = :rank_revealing_qr
-        workspace.la_fallback_reason = :la_equality_factor_failed
-        workspace.equality_qr_required = true
-        workspace.equality_factor = equality_factor
-        workspace.equality_factorizations += 1
-        workspace.equality_factor_seconds +=
-            (time_ns() - factor_started) / 1.0e9
-        workspace.equality_prepared = true
-        return true
-    end
-
-    gram_started = time_ns()
-    la_syrk!(
-        workspace.la_backend,
-        workspace.equality_factor_buffer,
-        workspace.equality_panel,
-        one(T),
-        zero(T),
-    )
-    workspace.equality_gram_assemblies += 1
-    workspace.equality_gram_seconds += (time_ns() - gram_started) / 1.0e9
-
-    factor_started = time_ns()
-    equality_factor = la_cholesky_factor!(
-        workspace.la_backend, workspace.equality_factor_buffer,
-    )
-    if equality_factor === nothing ||
-       !_la_factor_has_numerical_rank(
-           equality_factor, workspace.equality_panel, options,
-       )
-        # A rejected Cholesky may borrow the Gram buffer.  Drop it before the
-        # panel-backed QR fallback or a prepare failure.
-        equality_factor = nothing
-        :rank_revealing_qr in workspace.plan.la_config.fallback_chain ||
-            return false
-        options.equality_solver === :auto || return false
-        equality_factor = _factor_equality_qr(
-            workspace.la_backend,
-            workspace.equality_panel,
-            options,
-        )
-        equality_factor === nothing && return false
-        workspace.equality_method = :rank_revealing_qr
-        workspace.la_fallback_reason = :la_equality_factor_failed
-        workspace.equality_qr_required = true
-    else
-        workspace.equality_method = :normal_equations
-        workspace.equality_qr_required = false
-    end
-    workspace.equality_factor = equality_factor
-    workspace.equality_factorizations += 1
-    workspace.equality_factor_seconds += (time_ns() - factor_started) / 1.0e9
-    workspace.equality_prepared = true
-    return true
+    return _native_soc_prepare_equality_factor!(workspace, options)
 end
 
 function _native_soc_solve_kkt!(
