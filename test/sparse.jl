@@ -88,6 +88,30 @@ end
         @test workspace.dense_sparse_assembly
         @test all(isempty(block.Ppanel) for block in workspace.blk)
         @test all(isempty(block.Svals) for block in workspace.blk)
+
+        # Serial Float64 consumes only the lower Schur triangle. This model
+        # sits above that footprint but below m², so direct scatter must win.
+        active = [
+            collect(1:10), collect(11:20),
+            [collect(1:5); collect(11:15)],
+            [collect(6:10); collect(16:20)],
+        ]
+        coefficients = [
+            [variable in ids ? sparse([1], [1], [1.0], 3, 3) :
+             spzeros(3, 3) for variable in 1:20]
+            for ids in active
+        ]
+        lower_only_problem = SDPX.ingest(
+            ones(20), coefficients, [zeros(3, 3) for _ in active],
+            ones(20, 1), [0.0]; sparse=:auto,
+        )
+        @test lower_only_problem.structure.schur_backend == :dense_cholesky
+        lower_only_workspace = SDPX.Workspace(
+            lower_only_problem; thread_count=1,
+        )
+        @test lower_only_workspace.schur_lower_only
+        @test lower_only_workspace.dense_sparse_assembly
+        @test all(isempty(block.Svals) for block in lower_only_workspace.blk)
     end
 
     @testset "active sets and compact workspace" begin

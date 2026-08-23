@@ -1119,6 +1119,9 @@ function Workspace(
     schur_nbins = dense_owner_eligible ?
                   min(selected_threads, L) :
                   _schur_parallel_bins(T, m, L, selected_threads)
+    planned_lower_only =
+        !compact_arrow &&
+        (sparse_schur || extended_precision.lower_only || T === Float64)
     dense_sparse_assembly = false
     if is_sparse
         active = (prob.cons::SparseCons{T}).active
@@ -1127,11 +1130,14 @@ function Workspace(
             active;
             init=0,
         )
+        scatter_entries = schur_nbins == 1 && planned_lower_only ?
+                          m * (m + 1) ÷ 2 :
+                          schur_nbins * m * m
         dense_sparse_assembly =
             !sparse_schur &&
             !compact_arrow &&
             prob.structure.schur_backend === :dense_cholesky &&
-            total_packed_pairs > schur_nbins * m * m
+            total_packed_pairs > scatter_entries
         # Exact-arrow model whose blocks are all 2x2: the fused compute+scatter
         # kernel applies, and the packed pair buffer (9.08 GB on the 4100-block
         # CSDR model) is not allocated at all.
@@ -1163,13 +1169,7 @@ function Workspace(
                    [alloc_zeros(T, m, m) for _ in 1:schur_nbins] :
                    Matrix{T}[]
     end
-    schur_lower_only =
-        !compact_arrow &&
-        (
-            sparse_schur ||
-            extended_precision.lower_only ||
-            T === Float64
-        )
+    schur_lower_only = planned_lower_only
     block_weights = [Float64(k[l])^3 for l in 1:L]
     schur_weights = if is_sparse
         active = (prob.cons::SparseCons{T}).active
