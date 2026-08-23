@@ -524,12 +524,3 @@ function StructureAnalysis(
         graph,
     )
 end
-
-"""
-    SDPProblem{T}
-
-Ingested, validated problem data. Construct via the qualified internal
-`SDPX.ingest` function —
-user-facing input stays `Vector{Array{T,3}}` for `A` (§1.2); this is
-the one-time-converted internal layout everything else operates on.
-"""
