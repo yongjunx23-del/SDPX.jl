@@ -1,5 +1,6 @@
 using LinearAlgebra
-using MultiFloats: Float64x4
+using MultiFloats: Float64x2, Float64x4
+using SparseArrays
 using SDPX
 using Test
 
@@ -436,6 +437,41 @@ end
             @test report.reduced_equalities == 2
             @test reduced.dims.n == 2
             @test !report.inconsistent
+        end
+    end
+
+    @testset "extended-precision sparse equality relations use target precision" begin
+        T = Float64x2
+        α = parse(T, "0.333333333333333333333333333333333333")
+        β = parse(T, "0.142857142857142857142857142857142857")
+        left = T[1, 0, 1]
+        right = T[0, 1, 1]
+        B = sparse(hcat(left, right, α * left + β * right))
+        A = zeros(T, 3, 1, 1)
+        A[:, 1, 1] .= one(T)
+        x = T[1, 2, 3]
+        problem = SDPX.ingest(
+            zeros(T, 3), [A], [zeros(T, 1, 1)], B, transpose(B) * x;
+            verbosity=0,
+        )
+        withenv("SDPX_MEMORY_LIMIT_BYTES" => "8589934592") do
+            reduced, mapping, report = SDPX.presolve_equalities(
+                problem, SDPX.SolverOptions(T; verbosity=0),
+            )
+            @test reduced.dims.n == 2
+            @test report.removed_dependent_equalities == 1
+            @test !report.inconsistent
+            @test mapping.planning_evidence.basis_verified
+            @test mapping.planning_evidence.reason === :verified_retained_basis
+        end
+        withenv("SDPX_MEMORY_LIMIT_BYTES" => "1") do
+            retained, mapping, report = SDPX.presolve_equalities(
+                problem, SDPX.SolverOptions(T; verbosity=0),
+            )
+            @test retained.dims.n == 3
+            @test report.removed_dependent_equalities == 0
+            @test !mapping.planning_evidence.basis_verified
+            @test mapping.planning_evidence.reason === :basis_relation_unverified
         end
     end
 

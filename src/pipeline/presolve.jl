@@ -212,6 +212,28 @@ end
 _equality_rank_indices(B::AbstractMatrix, tolerance::Real) =
     _equality_rank_analysis(B, tolerance).keep
 
+# Float64 SPQR proposes a sparse extended-precision basis, but the final
+# dependency coefficients must be resolved in the target arithmetic before
+# original-arithmetic certification. Gate the temporary dense panels against
+# conservatively available memory; the fallback remains fail-closed.
+function _target_precision_relation_affordable(
+    ::Type{T},
+    rows::Int,
+    kept::Int,
+    dropped::Int,
+) where {T}
+    element_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    dense_bytes = saturating_sum_bytes(
+        saturating_bytes(rows, kept, element_bytes),
+        saturating_bytes(rows, dropped, element_bytes),
+    )
+    coefficient_bytes = saturating_bytes(kept, dropped, element_bytes)
+    estimate = saturating_sum_bytes(dense_bytes, coefficient_bytes)
+    available = _available_memory_bytes()
+    available > 0 || return false
+    return estimate <= available ÷ 8
+end
+
 function _equality_elimination_check(
     prob::SDPProblem{T},
     keep::Vector{Int},
@@ -277,15 +299,25 @@ function _equality_elimination_check(
     )
     coefficients = try
         if Bkeep isa SparseMatrixCSC && T !== Float64
-            Bkeep_float =
-                _ingest_owned_sparse(Float64, Bkeep)
-            Bdropped_float =
-                _ingest_owned_sparse(Float64, Bdropped)
-            factor = qr(Bkeep_float)
-            _owned_array_copy(
+            if _target_precision_relation_affordable(
                 T,
-                factor \ Matrix(Bdropped_float),
+                size(Bkeep, 1),
+                length(keep),
+                length(dependent_columns),
             )
+                factor = qr(Matrix(Bkeep), ColumnNorm())
+                factor \ Matrix(Bdropped)
+            else
+                Bkeep_float =
+                    _ingest_owned_sparse(Float64, Bkeep)
+                Bdropped_float =
+                    _ingest_owned_sparse(Float64, Bdropped)
+                factor = qr(Bkeep_float)
+                _owned_array_copy(
+                    T,
+                    factor \ Matrix(Bdropped_float),
+                )
+            end
         else
             factor = Bkeep isa SparseMatrixCSC ? qr(Bkeep) :
                      qr(Bkeep, ColumnNorm())
