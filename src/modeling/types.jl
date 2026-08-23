@@ -50,8 +50,9 @@ Immutable arithmetic/precision metadata owned by a `SDPX.Model`.
 Fields
 - `precision_bits::Int`: nominal precision of the arithmetic. `53` for
   `Float64` (IEEE binary64 mantissa bits), the requested
-  `precision_bits` (`256` or `512`) for `BigFloat`, and an effective
-  mantissa estimate `52 * (sizeof(T) ÷ 8)` for MultiFloat types
+  `precision_bits` (any integer at least `2`, e.g. `128`, `256`, `512`) for
+  `BigFloat`, and an effective mantissa estimate
+  `52 * (sizeof(T) ÷ 8)` for MultiFloat types
   (`104` for `Float64x2`, `208` for `Float64x4`).
 - `supports_multifloat::Bool`: whether `T` is a MultiFloat type
   (requires the optional `MultiFloats` package to be loaded).
@@ -64,15 +65,15 @@ end
 ArithmeticSpec(::Type{Float64}) = ArithmeticSpec{Float64}(53, false)
 
 function ArithmeticSpec(::Type{BigFloat}; precision_bits::Int=256)
-    precision_bits in (256, 512) ||
-        throw(ArgumentError("BigFloat model precision_bits must be 256 or 512, got $precision_bits"))
+    precision_bits >= 2 ||
+        throw(ArgumentError("BigFloat model precision_bits must be a positive integer >= 2, got $precision_bits"))
     return ArithmeticSpec{BigFloat}(precision_bits, false)
 end
 
 function ArithmeticSpec(::Type{T}) where {T<:AbstractFloat}
     T === Float64 && return ArithmeticSpec(Float64)
     T === BigFloat &&
-        throw(ArgumentError("BigFloat models require Model(BigFloat; precision_bits=256|512)"))
+        throw(ArgumentError("BigFloat models require Model(BigFloat; precision_bits=...)"))
     if isbitstype(T) && sizeof(T) > sizeof(Float64)
         _multifloat_type_available(T) ||
             throw(ArgumentError("arithmetic type $T requires the MultiFloats package to be loaded"))
@@ -128,8 +129,8 @@ contract.
 
 Constructors
 - `Model(Float64)` — IEEE binary64 arithmetic.
-- `Model(BigFloat; precision_bits=256)` / `precision_bits=512` —
-  arbitrary-precision arithmetic; other values are rejected.
+- `Model(BigFloat; precision_bits=256)` — arbitrary-precision arithmetic;
+  any integer `precision_bits >= 2` (e.g. `128`, `256`, `512`, `1024`) is accepted.
 - `Model(Float64x2)` / `Model(Float64x4)` — only when the optional
   `MultiFloats` package is loaded.
 
@@ -245,7 +246,7 @@ arithmetic(model::Model) = model.arithmetic
     precision_bits(model) -> Int
 
 Nominal precision of `model`'s arithmetic (`53` for `Float64`, the
-validated `256`/`512` for `BigFloat`, mantissa estimate for
+requested `precision_bits >= 2` for `BigFloat`, mantissa estimate for
 MultiFloat types).
 """
 precision_bits(model::Model) = model.arithmetic.precision_bits

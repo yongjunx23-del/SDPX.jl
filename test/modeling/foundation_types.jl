@@ -239,11 +239,14 @@ Test.@testset "F0 arithmetic and precision ownership" begin
     @test SDPX.precision_bits(model_big_256) == 256
     @test model_big_256.arithmetic.precision_bits == 256
 
-    model_big_512 = SDPX.Model(BigFloat; precision_bits=512)
-    @test eltype(model_big_512) === BigFloat
-    @test SDPX.precision_bits(model_big_512) == 512
+    for bits in (2, 64, 128, 192, 256, 300, 512, 840, 1024)
+        model_big = SDPX.Model(BigFloat; precision_bits=bits)
+        @test eltype(model_big) === BigFloat
+        @test SDPX.precision_bits(model_big) == bits
+        @test SDPX.ArithmeticSpec(BigFloat; precision_bits=bits).precision_bits == bits
+    end
 
-    for bad in (128, 300, 64, 1024, -1, 0)
+    for bad in (-1, 0, 1)
         @test_throws ArgumentError SDPX.Model(BigFloat; precision_bits=bad)
         @test_throws ArgumentError SDPX.ArithmeticSpec(BigFloat; precision_bits=bad)
     end
