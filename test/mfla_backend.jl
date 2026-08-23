@@ -26,6 +26,24 @@ end
 
 const _MFLA_TYPES = (Float64x2, Float64x3, Float64x4)
 
+@testset "Float64x2 equality QR crossover keeps wider types conservative" begin
+    @test SDPX._equality_qr_maximum_elements(Float64) == 50_000_000
+    @test SDPX._equality_qr_maximum_elements(Float64x2) == 100_000_000
+    @test SDPX._equality_qr_maximum_elements(Float64x3) == 20_000_000
+    @test SDPX._equality_qr_maximum_elements(Float64x4) == 20_000_000
+    @test SDPX._equality_qr_maximum_elements(BigFloat) == 2_000_000
+
+    opts = SDPX.SolverOptions(Float64x2; equality_solver=:qr, verbosity=0)
+    @test SDPX._equality_qr_allowed(
+        zeros(Float64x2, 1, 8_192),
+        opts,
+    )
+    @test !SDPX._equality_qr_allowed(
+        zeros(Float64x2, 1, 8_193),
+        opts,
+    )
+end
+
 @testset "MultiFloat duplicate-column fingerprints preserve exact decisions" begin
     left = Float64x2((1.0, 0.0))
     colliding_but_distinct = Float64x2((1.0, eps(Float64)))
@@ -233,7 +251,7 @@ end
         @test workspace.la_backend isa SDPX.LegacyLABackend
         @test SDPX.factor_blocks!(workspace, X, Y)
         SDPX.schur_build!(workspace, problem, problem.cons, X, Y)
-        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        factorization = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factorization.ok
         @test workspace.equality_gram_kernel === :blas_syrk
         @test workspace.Qchol isa SDPX.LegacyLACholeskyFactor{T}
@@ -411,7 +429,7 @@ if _MFLA_LOADED
         schur = zeros(T, problem.dims.m, problem.dims.m)
         SDPX.materialize_schur!(schur, workspace)
 
-        factorization = SDPX.factor_kkt!(workspace, problem, options)
+        factorization = SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options)
         @test factorization.ok
         @test !factorization.q_pivoted
         @test !factorization.q_rank_deficient
@@ -472,7 +490,8 @@ if _MFLA_LOADED
             Xdef,
             Ydef,
         )
-        rejected = SDPX.factor_kkt!(
+        rejected = SDPX.factorize!(
+            SDPX.select_backend(normal_workspace),
             normal_workspace,
             deficient,
             options,
@@ -500,7 +519,8 @@ if _MFLA_LOADED
             Xdef,
             Ydef,
         )
-        accepted = SDPX.factor_kkt!(
+        accepted = SDPX.factorize!(
+            SDPX.select_backend(auto_workspace),
             auto_workspace,
             deficient,
             auto_options,

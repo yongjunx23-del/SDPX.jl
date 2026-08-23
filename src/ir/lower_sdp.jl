@@ -132,9 +132,9 @@ function _sdp_unpack_packed(
         "SDPLoweringError: packed PSD data length $(length(values)) != $packed for shape $n",
     ))
     matrix = alloc_zeros(T, n, n)
-    @inbounds for position in 1:packed
-        row = psd_packed_row(position, n)
-        column = psd_packed_column(position, n)
+    coordinates = psd_packed_pairs(n)
+    @inbounds for position in eachindex(coordinates)
+        row, column = coordinates[position]
         value = owned_arithmetic_copy(T, values[position]; precision_bits=bits)
         matrix[row, column] = value
         row == column && continue

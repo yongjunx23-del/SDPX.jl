@@ -116,7 +116,15 @@ end
                     )
                     dense_metric = _soc_metric(dense, T)
                     sparse_metric = _soc_metric(sparse_matrix, T)
-                    @test sparse_metric == dense_metric
+                    # The dense and CSC branches evaluate the same metric
+                    # formula in different operation orders (fused scalar
+                    # loop vs. two gemm passes), so parity holds to roundoff,
+                    # not bitwise; the bound below covers every arithmetic
+                    # type (measured worst case is about 2 eps(T)).
+                    @test isapprox(
+                        sparse_metric, dense_metric;
+                        rtol = 16 * eps(T), atol = 16 * eps(T),
+                    )
                     @test sparse_metric == transpose(sparse_metric)
                     for column in 1:8
                         sparse_matrix.colptr[column] ==
@@ -150,7 +158,10 @@ end
                 @test !SDPX._native_soc_sparse_has_empty_column(
                     dense_as_csc, 4,
                 )
-                @test _soc_metric(dense_as_csc, T) == _soc_metric(dense, T)
+                @test isapprox(
+                    _soc_metric(dense_as_csc, T), _soc_metric(dense, T);
+                    rtol = 16 * eps(T), atol = 16 * eps(T),
+                )
             end
             if T === BigFloat
                 setprecision(BigFloat, 256) do
@@ -196,8 +207,10 @@ end
                 )
                 @test _soc_metric(canonical, T) ==
                       _soc_metric_old(canonical, T)
-                @test _soc_metric(canonical, T) ==
-                      _soc_metric(Matrix(canonical), T)
+                @test isapprox(
+                    _soc_metric(canonical, T), _soc_metric(Matrix(canonical), T);
+                    rtol = 16 * eps(T), atol = 16 * eps(T),
+                )
             end
             if T === BigFloat
                 setprecision(BigFloat, 256) do

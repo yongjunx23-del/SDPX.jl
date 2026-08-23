@@ -157,7 +157,7 @@ When history retention is enabled, `iteration_history(result)` contains every
 accepted iteration, including `sigma`, `mu`, `mu_aff`, affine and accepted
 steps, the separate step safeguards, residual progress, factor/PSD-margin
 proxies, regularization, refinement, and fallback provenance. See
-[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md) for
+[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md) for
 the audit, equations, exact bounds, and arithmetic-specific behavior.
 
 ## Result and diagnostics

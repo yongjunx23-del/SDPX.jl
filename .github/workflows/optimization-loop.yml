@@ -1,0 +1,114 @@
+name: Optimization loop
+
+on:
+  # Manual for now: the original push trigger (refactor/benchmark-driven-
+  # core-20260821) was removed with that branch, and running the ~2h
+  # parent-versus-candidate loop on every push is a policy decision. The
+  # day-to-day benchmark loop lives in benchmark/WORKFLOW.md (local Mac);
+  # this workflow exists to record evidence runs in git history.
+  workflow_dispatch:
+
+concurrency:
+  group: optimization-loop-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  actions: read
+  statuses: write
+
+jobs:
+  benchmark:
+    name: Correctness and parent-versus-candidate benchmarks
+    uses: ./.github/workflows/optimization-benchmark.yml
+    with:
+      post_status: true
+    permissions:
+      contents: read
+      actions: read
+      statuses: write
+
+  persist-evidence:
+    name: Persist successful evidence in Git history
+    needs: benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdpx-optimization-${{ github.sha }}
+          path: optimization-artifacts
+      - name: Record successful evidence
+        if: needs.benchmark.result == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:12}"
+          record_dir="benchmark/history/${GITHUB_SHA}"
+          mkdir -p "$record_dir"
+          cp optimization-artifacts/candidate-micro.toml "$record_dir/micro.toml"
+          cp optimization-artifacts/candidate-micro.tsv "$record_dir/micro.tsv"
+          cp optimization-artifacts/micro-comparison.tsv "$record_dir/micro-comparison.tsv"
+          cp optimization-artifacts/candidate-core-matrix.toml "$record_dir/core-matrix.toml"
+          cp optimization-artifacts/candidate-core-matrix.tsv "$record_dir/core-matrix.tsv"
+          cp optimization-artifacts/core-matrix-comparison.tsv "$record_dir/core-matrix-comparison.tsv"
+          cp optimization-artifacts/fresh-core-matrix/core_matrix_summary.toml \
+            "$record_dir/fresh-core-matrix.toml"
+          cp optimization-artifacts/fresh-core-matrix/core_matrix_summary.tsv \
+            "$record_dir/fresh-core-matrix.tsv"
+          cat > "$record_dir/README.md" <<EOF
+          # Optimization evidence for ${GITHUB_SHA}
+
+          - Tested commit: \`${GITHUB_SHA}\`
+          - Parent baseline: \`$(git rev-parse HEAD^)\`
+          - Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Julia threads: 1
+          - BLAS threads: 1
+          - Quick correctness suite: passed
+          - Canonical micro parent/candidate comparison: passed
+          - LP/SOCP/SDP × Float64/Float64x4/BigFloat256 comparison: passed
+          - Three-process candidate stability matrix: passed
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            "$record_dir/README.md" \
+            "$record_dir/micro.toml" \
+            "$record_dir/micro.tsv" \
+            "$record_dir/micro-comparison.tsv" \
+            "$record_dir/core-matrix.toml" \
+            "$record_dir/core-matrix.tsv" \
+            "$record_dir/core-matrix-comparison.tsv" \
+            "$record_dir/fresh-core-matrix.toml" \
+            "$record_dir/fresh-core-matrix.tsv"
+          git commit -m "perf: record optimization evidence for ${short_sha}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+  publish-status:
+    name: Publish optimization gate status
+    needs: benchmark
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      statuses: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BENCHMARK_RESULT: ${{ needs.benchmark.result }}
+    steps:
+      - name: Publish optimization gate status
+        shell: bash
+        run: |
+          if [ "$BENCHMARK_RESULT" = success ]; then
+            state=success
+            description='correctness and benchmark comparisons passed'
+          else
+            state=failure
+            description='correctness or benchmark gate failed'
+          fi
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            -f state="$state" \
+            -f context='sdpx/optimization-loop' \
+            -f description="$description" \
+            -f target_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

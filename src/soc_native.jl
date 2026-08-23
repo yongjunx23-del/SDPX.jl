@@ -64,6 +64,143 @@ struct NativeSOCFixedTraceFactor{T}
     inverse_pivots::Matrix{T}
 end
 
+"""
+    _native_soc_equality_abs_row_sums(Aeq)
+
+Build the absolute equality-row sums once from the solver-owned `Aeq`.  The
+row loop visits variables in ascending order, exactly matching the former
+equality×variable gate loop.  The cache assumes solve-lifetime immutability:
+`second_order_program` has already ingested an owned matrix, and concurrent or
+manual mutation during a solve is unsupported.
+"""
+@inline function _native_soc_sparse_rowvals_canonical(
+    Aeq::SparseMatrixCSC{T,Int},
+) where {T}
+    @inbounds for variable in axes(Aeq, 2)
+        previous = 0
+        for pointer in nzrange(Aeq, variable)
+            equality = Aeq.rowval[pointer]
+            equality > previous || return false
+            previous = equality
+        end
+    end
+    return true
+end
+
+@inline _native_soc_sparse_rowvals_canonical(::AbstractMatrix) = true
+
+function _native_soc_equality_abs_row_sums(
+    Aeq::SparseMatrixCSC{T,Int},
+    canonical::Bool,
+) where {T}
+    equalities = size(Aeq, 1)
+    row_sums = alloc_zeros(T, equalities)
+    if !canonical
+        # Preserve the historical scalar-getindex loop for noncanonical CSC.
+        # Its access semantics may differ from raw nzval traversal, and the
+        # row / column nesting preserves the former floating-point association.
+        @inbounds for equality in axes(Aeq, 1)
+            row_sum = zero(T)
+            for variable in axes(Aeq, 2)
+                row_sum += abs(Aeq[equality, variable])
+            end
+            row_sums[equality] = row_sum
+        end
+        return row_sums
+    end
+    # Canonical CSC storage is column-major; accumulating into each row while
+    # visiting columns in order reproduces the original row-sum order without
+    # scalar getindex/binary-search calls.
+    @inbounds for variable in axes(Aeq, 2)
+        for pointer in nzrange(Aeq, variable)
+            equality = Aeq.rowval[pointer]
+            magnitude = abs(Aeq.nzval[pointer])
+            iszero(magnitude) && continue
+            row_sums[equality] += magnitude
+        end
+    end
+    return row_sums
+end
+
+function _native_soc_equality_abs_row_sums(
+    Aeq::SparseMatrixCSC{T,Int},
+) where {T}
+    canonical = _native_soc_sparse_rowvals_canonical(Aeq)
+    return _native_soc_equality_abs_row_sums(Aeq, canonical)
+end
+
+function _native_soc_equality_abs_row_sums(
+    Aeq::AbstractMatrix{T},
+) where {T}
+    equalities = size(Aeq, 1)
+    row_sums = alloc_zeros(T, equalities)
+    @inbounds for variable in axes(Aeq, 2)
+        for equality in axes(Aeq, 1)
+            magnitude = abs(Aeq[equality, variable])
+            iszero(magnitude) && continue
+            row_sums[equality] += magnitude
+        end
+    end
+    return row_sums
+end
+
+# Strict-order column contribution helpers.  The dynamic metric row sum is
+# passed in and each absolute Aeq term is added one at a time, preserving the
+# historical `((metric + a1) + a2) ...` association.  The sparse method walks
+# canonical CSC entries in row order and avoids scalar indexing searches.
+@inline function _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::SparseMatrixCSC{T,Int},
+    variable::Int,
+    canonical::Bool,
+) where {T}
+    if !canonical
+        # Match the former equality×variable scalar scan when duplicate or
+        # unsorted CSC storage makes raw nzval traversal non-equivalent.
+        @inbounds for equality in axes(Aeq, 1)
+            value += abs(Aeq[equality, variable])
+        end
+        return value
+    end
+    @inbounds for pointer in nzrange(Aeq, variable)
+        magnitude = abs(Aeq.nzval[pointer])
+        iszero(magnitude) && continue
+        value += magnitude
+    end
+    return value
+end
+
+@inline function _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::SparseMatrixCSC{T,Int},
+    variable::Int,
+) where {T}
+    canonical = _native_soc_sparse_rowvals_canonical(Aeq)
+    return _native_soc_add_equality_column_abs(
+        value, Aeq, variable, canonical,
+    )
+end
+
+@inline function _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::AbstractMatrix{T},
+    variable::Int,
+    ::Bool,
+) where {T}
+    @inbounds for equality in axes(Aeq, 1)
+        value += abs(Aeq[equality, variable])
+    end
+    return value
+end
+
+@inline _native_soc_add_equality_column_abs(
+    value::T,
+    Aeq::AbstractMatrix{T},
+    variable::Int,
+) where {T} = _native_soc_add_equality_column_abs(
+    value, Aeq, variable, true,
+)
+
 """Planner-owned cone representation, independent of KKT and LA choices."""
 struct ConeRepresentationPlan{E<:AbstractSOCExecution}
     representation::Symbol
@@ -356,6 +493,12 @@ mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
     corrector_rhs_seconds::Float64
     fixed_block_residual_seconds::Float64
     fixed_block_recovery_seconds::Float64
+    # Owned once per solve from the ingested Aeq.  Row sums can replace the
+    # former equality×variable scan directly.  Column contributions are
+    # dispatched directly from the dense/CSC Aeq after each dynamic metric sum
+    # so the historical addition association is unchanged.
+    equality_sparse_canonical::Bool
+    equality_abs_row_sums::Vector{T}
 end
 
 function NativeSOCWorkspace(
@@ -375,6 +518,16 @@ function NativeSOCWorkspace(
     augmented_dimension =
         plan.formulation.formulation isa DenseAugmentedKKT ?
         variables + equalities : 0
+    equality_sparse_canonical = _native_soc_sparse_rowvals_canonical(
+        problem.Aeq,
+    )
+    equality_abs_row_sums = if problem.Aeq isa SparseMatrixCSC
+        _native_soc_equality_abs_row_sums(
+            problem.Aeq, equality_sparse_canonical,
+        )
+    else
+        _native_soc_equality_abs_row_sums(problem.Aeq)
+    end
     @inbounds for block in eachindex(problem.cones)
         if options.parameter_policy === :auto
             # Phase-2 affine KKT cold start: the temporary point is the cone
@@ -460,6 +613,8 @@ function NativeSOCWorkspace(
         0.0,
         0.0,
         0.0,
+        equality_sparse_canonical,
+        equality_abs_row_sums,
     )
 end
 
@@ -953,6 +1108,14 @@ end
     return false
 end
 
+"""
+    _native_soc_add_metric!(workspace, cone, block) -> (ok, failed_block)
+
+Accumulate one cone's NT metric block into the Schur Hessian. Returns
+`(true, 0)` on success; `(false, block)` marks a cone whose state left
+the interior during fixed-trace HKM assembly, mirroring
+`_native_soc_scaling!` so callers convert it to `NumericalBreakdown`.
+"""
 function _native_soc_add_metric!(
     workspace::NativeSOCWorkspace{T},
     cone::SOCConstraint{T},
@@ -966,11 +1129,13 @@ function _native_soc_add_metric!(
         a12 = reduction.tail_map[1, 2, block]
         a21 = reduction.tail_map[2, 1, block]
         a22 = reduction.tail_map[2, 2, block]
-        metric = _soc_fixed_trace_hkm_metric!(
+        metric_ok = _soc_fixed_trace_hkm_metric!(
             workspace.scratch[block],
             workspace.slack[block],
             workspace.dual[block],
         )
+        metric_ok || return (false, block)
+        metric = workspace.scratch[block]
         h11 = a11 * (metric[1] * a11 + metric[2] * a21) +
               a21 * (metric[2] * a11 + metric[3] * a21)
         h12 = a11 * (metric[1] * a12 + metric[2] * a22) +
@@ -980,7 +1145,7 @@ function _native_soc_add_metric!(
         workspace.local_metric[1, block] = h11
         workspace.local_metric[2, block] = h12
         workspace.local_metric[3, block] = h22
-        return workspace
+        return (true, 0)
     end
     metric = workspace.scratch[block]
     basis = workspace.offset[block]
@@ -1014,27 +1179,42 @@ function _native_soc_add_metric!(
                         (workspace.hessian[column, row] += value)
                 end
             end
-            return workspace
+            return (true, 0)
         end
     end
-    @inbounds for column in 1:variables
-        copy_owned!(basis, view(cone.A, :, column))
+    # Dense single-cone assembly: the NT scaled metric is constant across the
+    # cone's columns, so H += A' * (M * A) collapses to two BLAS passes
+    # instead of a scalar triple loop. M is assembled column-by-column with
+    # the same `_soc_nt_apply_hs_inverse!` kernel the scalar loop used, so
+    # the two branches agree in exact arithmetic; the fused scalar loop and
+    # the two gemm passes round in different orders, and results match only
+    # to roundoff, not bitwise.
+    w = workspace.nt_w[block]
+    eta_squared = workspace.nt_eta_squared[block]
+    cone_dimension = length(w)
+    metric_matrix = Matrix{T}(undef, cone_dimension, cone_dimension)
+    # The unit-vector scratch reuses the sparse branch's `basis` buffer
+    # (`workspace.offset[block]`, unused on this branch) instead of one
+    # `zeros` per column; the kernel only reads it, so the values handed
+    # in are identical either way. `zero_owned!` keeps BigFloat entries
+    # independently owned.
+    zero_owned!(basis)
+    @inbounds for column in 1:cone_dimension
+        basis[column] = one(T)
         _soc_nt_apply_hs_inverse!(
-            metric,
-            workspace.nt_w[block],
-            workspace.nt_eta_squared[block],
-            basis,
+            view(metric_matrix, :, column), w, eta_squared, basis,
         )
-        for row in column:variables
-            value = zero(T)
-            for coordinate in eachindex(metric)
-                value += cone.A[coordinate, row] * metric[coordinate]
-            end
-            workspace.hessian[row, column] += value
-            row == column || (workspace.hessian[column, row] += value)
-        end
+        basis[column] = zero(T)
     end
-    return workspace
+    scaled = metric_matrix * cone.A
+    mul!(
+        workspace.hessian,
+        transpose(cone.A),
+        scaled,
+        one(T),
+        one(T),
+    )
+    return (true, 0)
 end
 
 function _native_soc_assemble_factor!(
@@ -1715,7 +1895,13 @@ function _native_soc_cold_start_init!(
     end
     zero_owned!(workspace.hessian)
     @inbounds for block in eachindex(problem.cones)
-        _native_soc_add_metric!(workspace, problem.cones[block], block)
+        metric_ok, metric_block = _native_soc_add_metric!(
+            workspace, problem.cones[block], block,
+        )
+        metric_ok || return false, report((
+            cause=:metric_assembly_failed,
+            block=metric_block,
+        ))
     end
     factor = _native_soc_assemble_factor!(workspace, problem)
     factor === nothing && return false, report((cause=:la_factor_failed,))
@@ -2307,16 +2493,18 @@ function _native_soc_direction_accuracy_gate!(
                                      h22 * workspace.dx[second]
             k0_row_sum = abs(h11) + abs(h12)
             e_row_sum = abs(r11)
-            @inbounds for equality in axes(problem.Aeq, 1)
-                k0_row_sum += abs(problem.Aeq[equality, first])
-            end
+            k0_row_sum = _native_soc_add_equality_column_abs(
+                k0_row_sum, problem.Aeq, first,
+                workspace.equality_sparse_canonical,
+            )
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_operator_scale = max(e_operator_scale, e_row_sum)
             k0_row_sum = abs(h12) + abs(h22)
             e_row_sum = abs(r22)
-            @inbounds for equality in axes(problem.Aeq, 1)
-                k0_row_sum += abs(problem.Aeq[equality, second])
-            end
+            k0_row_sum = _native_soc_add_equality_column_abs(
+                k0_row_sum, problem.Aeq, second,
+                workspace.equality_sparse_canonical,
+            )
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_operator_scale = max(e_operator_scale, e_row_sum)
         end
@@ -2328,9 +2516,10 @@ function _native_soc_direction_accuracy_gate!(
                 workspace.rhs[row] -= workspace.hessian[row, column] *
                                       workspace.dx[column]
             end
-            @inbounds for equality in axes(problem.Aeq, 1)
-                k0_row_sum += abs(problem.Aeq[equality, row])
-            end
+            k0_row_sum = _native_soc_add_equality_column_abs(
+                k0_row_sum, problem.Aeq, row,
+                workspace.equality_sparse_canonical,
+            )
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
             e_row_sum = abs(accepted_regularization *
                 max(abs(workspace.hessian[row, row]), one(T)))
@@ -2339,10 +2528,7 @@ function _native_soc_direction_accuracy_gate!(
     end
     if !isempty(problem.beq)
         @inbounds for equality in axes(problem.Aeq, 1)
-            k0_row_sum = zero(T)
-            for variable in axes(problem.Aeq, 2)
-                k0_row_sum += abs(problem.Aeq[equality, variable])
-            end
+            k0_row_sum = workspace.equality_abs_row_sums[equality]
             k0_operator_scale = max(k0_operator_scale, k0_row_sum)
         end
         la_mul_owned!(
@@ -2610,7 +2796,8 @@ function _native_soc_workspace_bytes(workspace::NativeSOCWorkspace)
         workspace.dual_residual, workspace.equality_residual,
         workspace.rhs, workspace.augmented_rhs,
         workspace.direction_rhs_original,
-        workspace.equality_rhs, workspace.nt_eta,
+        workspace.equality_rhs, workspace.equality_abs_row_sums,
+        workspace.nt_eta,
         workspace.nt_eta_squared,
     )
     blocks = (
@@ -2927,14 +3114,32 @@ Base.@noinline function _solve_native_soc_core(
         end
         assembly_started = time_ns()
         zero_owned!(workspace.hessian)
+        metric_failed_block = 0
         @inbounds for block in eachindex(problem.cones)
-            _native_soc_add_metric!(workspace, problem.cones[block], block)
+            metric_ok, metric_block = _native_soc_add_metric!(
+                workspace, problem.cones[block], block,
+            )
+            if !metric_ok
+                metric_failed_block = metric_block
+                break
+            end
         end
         assembly_elapsed = (time_ns() - assembly_started) / 1.0e9
         phase_assembly += assembly_elapsed
         if workspace.plan.cone.execution isa FixedTraceQ3Execution
             workspace.local_metric_preparations += 1
             workspace.fixed_local_metric_seconds += assembly_elapsed
+        end
+        if metric_failed_block > 0
+            status = NumericalBreakdown
+            message = "NativeSOC metric assembly left the interior for cone " *
+                      "$metric_failed_block."
+            termination = (
+                reason=:metric_assembly_failure,
+                stage=:schur_assembly,
+                block=metric_failed_block,
+            )
+            break
         end
         workspace.equality_prepared = false
         workspace.equality_factor = nothing
@@ -3074,6 +3279,9 @@ Base.@noinline function _solve_native_soc_core(
     total_seconds = time() - started
     timings = options.timing ? (
         total=total_seconds,
+        # Same core convention as the SDP/LP diagnostics: the solver's own
+        # wall time, excluding frontend and certification phases.
+        core=total_seconds,
         setup=setup_seconds,
         initialization_seconds=initialization_seconds,
         cone_scaling_metric=phase_scaling,

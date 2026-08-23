@@ -61,7 +61,7 @@ Output:
   --help, -h          Show this help.
 
 Input format:
-  JSON bridge schema v1 (`docs/bridge-schema.md`).  The canonical benchmark
+  JSON bridge schema v1 (`docs/src/bridge-schema.md`).  The canonical benchmark
   registry under `benchmark/` records generated and external conic workloads;
   native SDPA/CBF/MPS command-line loaders are not yet provided.
 """
@@ -142,7 +142,7 @@ function _overlay!(spec, cli_options)
             settings["precision_bits"] = "auto"
         elseif all(isdigit, raw)
             bits = parse(Int, raw)
-            bits > 0 || error("--precision must be positive")
+            bits >= 2 || error("--precision must be at least 2 bits")
             spec["precision"] = "BigFloat"
             settings["precision_bits"] = bits
         elseif lower in ("float64", "float64x2", "float64x3", "float64x4", "bigfloat")

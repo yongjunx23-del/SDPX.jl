@@ -32,7 +32,8 @@ Immutable, fully typed route classification of a
 [`NativeConeProgram`](@ref). One program maps to exactly one route family.
 
 Fields
-- `route::Symbol` — `:lp_family`, `:soc_family` or `:sdp_family`.
+- `route::Symbol` — `:lp_family`, `:soc_family`, `:sdp_family` or
+  `:exp_family`.
 
 This is dispatch metadata only. It carries no orientation, no
 primal/dual labels, no dualization metadata, no provider or
@@ -48,17 +49,20 @@ end
 
 Fail-closed error thrown by [`classify_native_cone_program`](@ref)
 when the nonfree cone domains of a program span more than one route
-family (for example orthant + SOC, orthant + PSD, or PSD + SOC).
+family (for example orthant + SOC, orthant + PSD, PSD + SOC, or
+orthant + exponential).
 
-The detected families are stored in deterministic LP, SOC, SDP order.
+The detected families are stored in deterministic LP, SOC, SDP, EXP
+order.
 """
 struct UnsupportedNativeConeRoute <: Exception
     detected_families::Vector{Symbol}
     function UnsupportedNativeConeRoute(detected_families::Vector{Symbol})
-        # Canonical family order: LP, SOC, SDP. Lexicographic Symbol order
-        # would put SDP before SOC and is not part of the model contract.
+        # Canonical family order: LP, SOC, SDP, EXP. Lexicographic Symbol
+        # order would put SDP before SOC and is not part of the model contract.
         families = Symbol[
-            family for family in (:lp_family, :soc_family, :sdp_family)
+            family for family in
+            (:lp_family, :soc_family, :sdp_family, :exp_family)
             if family in detected_families
         ]
         length(families) >= 2 || throw(ArgumentError(
@@ -82,6 +86,7 @@ _route_family(::ZeroCone) = :zero
 _route_family(::LorentzCone) = :soc_family
 _route_family(::RotatedLorentzCone) = :soc_family
 _route_family(::PSDCone) = :sdp_family
+_route_family(::ExponentialCone) = :exp_family
 _route_family(domain) =
     throw(ArgumentError("unsupported native cone domain $domain in route classification"))
 
@@ -101,6 +106,10 @@ Classify an ordered native program into exactly one route family:
   allowed).
 - `:sdp_family` — every nonfree cone is PSD/Zero (`Reals` is
   allowed).
+- `:exp_family` — every nonfree cone is ExponentialCone/Zero
+  (`Reals` is allowed). The exponential solver root lands with the
+  Phase B native kernels; until then classification succeeds while
+  any lowering attempt fails closed.
 - otherwise it throws [`UnsupportedNativeConeRoute`](@ref) (mixed
   families) before constructing any route result.
 
@@ -122,12 +131,14 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
     saw_lp = false
     saw_soc = false
     saw_sdp = false
+    saw_exp = false
     for block in blocks
         total_variables += block.length
         family = _route_family(block.domain)
         saw_lp |= family === :lp_family
         saw_soc |= family === :soc_family
         saw_sdp |= family === :sdp_family
+        saw_exp |= family === :exp_family
     end
     for row_block in row_blocks
         total_rows += row_block.length
@@ -135,6 +146,7 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
         saw_lp |= family === :lp_family
         saw_soc |= family === :soc_family
         saw_sdp |= family === :sdp_family
+        saw_exp |= family === :exp_family
     end
 
     total_variables == program_num_variables(program) ||
@@ -150,17 +162,20 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
             "equality matrix size $(size(program.equality_matrix)) != ($total_rows, $total_variables)",
         ))
 
-    detected_count = (saw_lp ? 1 : 0) + (saw_soc ? 1 : 0) + (saw_sdp ? 1 : 0)
+    detected_count = (saw_lp ? 1 : 0) + (saw_soc ? 1 : 0) + (saw_sdp ? 1 : 0) +
+                     (saw_exp ? 1 : 0)
     if detected_count > 1
         families = Symbol[]
         saw_lp && push!(families, :lp_family)
         saw_soc && push!(families, :soc_family)
         saw_sdp && push!(families, :sdp_family)
+        saw_exp && push!(families, :exp_family)
         throw(UnsupportedNativeConeRoute(families))
     end
     route = saw_lp ? :lp_family :
             saw_soc ? :soc_family :
             saw_sdp ? :sdp_family :
+            saw_exp ? :exp_family :
             :lp_family
 
     return NativeConeRoute(route)

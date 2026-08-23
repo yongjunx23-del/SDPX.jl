@@ -239,7 +239,7 @@ Test.@testset "F0 arithmetic and precision ownership" begin
     @test SDPX.precision_bits(model_big_256) == 256
     @test model_big_256.arithmetic.precision_bits == 256
 
-    for bits in (2, 64, 128, 192, 256, 300, 512, 840, 1024)
+    for bits in (2, 64, 128, 192, 256, 300, 412, 512, 840, 1024)
         model_big = SDPX.Model(BigFloat; precision_bits=bits)
         @test eltype(model_big) === BigFloat
         @test SDPX.precision_bits(model_big) == bits
@@ -375,4 +375,21 @@ Test.@testset "F0 NativeConeProgram contract" begin
 
     # Validated construction rejects inconsistent sizes.
     @test_throws ArgumentError _f0_bad_program()
+end
+
+@testset "packed PSD enumeration is canonical" begin
+    # Every packed-triangle consumer iterates `psd_packed_pairs`; this locks
+    # the layout to the frozen `psd_packed_index/row/column` accessors.
+    for n in (1, 2, 3, 5, 8)
+        pairs = SDPX.psd_packed_pairs(n)
+        @test length(pairs) == SDPX.psd_packed_length(n)
+        for k in eachindex(pairs)
+            row, column = pairs[k]
+            @test row >= column
+            @test (row, column) == (
+                SDPX.psd_packed_row(k, n), SDPX.psd_packed_column(k, n),
+            )
+            @test SDPX.psd_packed_index(row, column, n) == k
+        end
+    end
 end

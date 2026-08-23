@@ -127,6 +127,36 @@ function _build_soc_scaling(::Type{T}; decades::Int=4) where {T}
     )
 end
 
+function _build_soc_many_blocks(
+    ::Type{T};
+    blocks::Int=64,
+    dimension::Int=8,
+) where {T}
+    # A block-diagonal second-order program: `blocks` independent
+    # `dimension`-dim Lorentz cones sharing a dense objective. This is the
+    # many-small-cones shape that dominates structured SOCP applications,
+    # as opposed to the single-large-cone shape of the soc_dimension ladder.
+    cones = Vector{SDPX.SOCConstraint{T}}(undef, blocks)
+    for b in 1:blocks
+        # Each cone's selection matrix spans the full variable axis: rows
+        # (b-1)*dimension+1 : b*dimension form an identity slice.
+        A_b = zeros(T, dimension, blocks * dimension)
+        for i in 1:dimension
+            A_b[i, (b-1)*dimension+i] = one(T)
+        end
+        cones[b] = SDPX.SOCConstraint(
+            A_b, zeros(T, dimension); T=T,
+        )
+    end
+    variables = blocks * dimension
+    objective = zeros(T, variables)
+    return (
+        problem=SDPX.second_order_program(objective, cones; T=T),
+        expected=zero(T),
+        kind=:socp,
+    )
+end
+
 function _build_sdp_dense(::Type{T}) where {T}
     coefficients = zeros(T, 2, 2, 2)
     coefficients[1, 1, 1] = one(T)
@@ -244,6 +274,8 @@ function build_generated_problem(loader::Symbol, ::Type{T}; kwargs...) where {T}
     loader === :lp_equality && return _build_lp_equality(T; kwargs...)
     loader === :lp_scaling && return _build_lp_scaling(T; kwargs...)
     loader === :soc_dimension && return _build_soc_dimension(T; kwargs...)
+    loader === :soc_many_blocks &&
+        return _build_soc_many_blocks(T; kwargs...)
     loader === :soc_mixed && return _build_soc_mixed(T; kwargs...)
     loader === :soc_scaling && return _build_soc_scaling(T; kwargs...)
     loader === :sdp_dense && return _build_sdp_dense(T; kwargs...)

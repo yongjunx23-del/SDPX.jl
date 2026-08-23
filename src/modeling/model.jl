@@ -25,6 +25,10 @@ function _validate_variable_shape(domain::ProductConeDomain, shape::Int)
     shape >= 1 || throw(ArgumentError("variable dimension must be positive, got $shape"))
     domain isa RotatedLorentzCone && shape < 3 &&
         throw(ArgumentError("RotatedLorentzCone variable dimension must be at least 3"))
+    domain isa ExponentialCone && shape != EXPONENTIAL_CONE_DIMENSION &&
+        throw(ArgumentError(
+            "ExponentialCone variable dimension must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+        ))
     return shape
 end
 
@@ -164,13 +168,6 @@ function Base.iterate(block::VariableBlockRef, state::Int=1)
 end
 
 variable_ref(entry::VariableEntry) = entry.ref
-variable_refs(block::VariableBlockRef) = begin
-    record = _variable_record(block)
-    identity = model_identity(block.model)
-    [VariableRef(identity, block.block, index) for index in 1:record.length]
-end
-variable_domain(block::VariableBlockRef) = _variable_record(block).domain
-variable_name(block::VariableBlockRef) = _variable_record(block).name
 
 function Base.show(io::IO, block::VariableBlockRef{T}) where {T}
     record = _variable_record(block)

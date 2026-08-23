@@ -19,6 +19,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - End-to-end sparse LP execution and frozen-CSC sparse SDP Schur execution.
 - Certificates, executed diagnostics, and the canonical public LP/SOCP/SDP
   benchmark registry under `benchmark/`.
+- `ExponentialCone` (Phase A): the domain with its dimension fixed at 3 and
+  validated at block construction (`NativeBlock` and `RowBlock`),
+  `:exp_family` classification with mixed families reported in canonical
+  order, and MOI ingestion of `MOI.ExponentialCone` sets for
+  `VectorOfVariables` and `VectorAffineFunction` inputs. Solving exp
+  programs is fail-closed with the named reason
+  `:exp_lowerer_unavailable`; native exp kernels arrive with Phase B.
+- MOI `ConstraintPrimal` for a `VectorAffineFunction`-in-`Reals` row set
+  returns the full evaluated vector (previously truncated to the first
+  coordinate), and MOI interval `ConstraintDual` now follows the MOI sign
+  convention — the sum of the bridged lower (`Nonnegative`) and upper
+  (`Nonpositive`) duals, so an active upper bound reports a negative dual
+  (previously the subtraction made negative interval duals
+  unrepresentable).
 
 ### Developer
 
@@ -35,6 +49,63 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symmetric mirroring, diagnostics scans, and solve scratch allocation while
   leaving equality-rank thresholds, structured refinement, and fallback
   authorization in SDPX.
+- Ladder generalization: two many-small-cones SOC rows
+  (`soc_many_512x8`, `soc_many_2048x4` -- block-diagonal second-order
+  programs with hundreds to thousands of small Lorentz cones) join the
+  scaling ladder alongside the single-large-cone rows. The first run
+  exposed a shape overfit: the BLAS metric assembly that accelerated the
+  single-cone row degrades into thousands of tiny gemm calls on the
+  many-cone shape (53.9 s in one iteration), which is now the tracked
+  top hotspot for the structured-SOCP path.
+- Native SOC metric assembly fast path: the dense general-Lorentz branch
+  of `_native_soc_add_metric!` assembled the Hessian through a scalar
+  triple loop with a per-column NT inverse application. The scaled metric
+  is constant across a cone's columns, so the assembly now builds the
+  cone's metric matrix once (same kernel, column probes) and finishes
+  with two gemm passes. Ladder soc_2048: 17.7 s -> 4.7 s (3.75x);
+  soc_512: 2.4x. Arithmetic order changes within the assembly (BLAS
+  accumulation), covered by the SOC solver/algebra/regression suites.
+- Certification fast path: `_primal_block_backward_errors` and
+  `_dual_backward_errors` asserted their `AbstractCons` subtype once
+  outside the per-block loop instead of re-dispatching through the
+  abstract field for every block. On the ladder's 2000-block LP row the
+  certification phase dropped from 0.89 s to ~0.02 s (measured >300x on
+  the isolated backward-error pass; allocation fell from 415 MB to
+  <1 MB per call), lifting end-to-end ladder rows by 3.5-12.7x.
+  Arithmetic order is unchanged -- certificate values are identical.
+- Split the 3719-line `src/pipeline.jl` into eleven ordered files under
+  `src/pipeline/` (helpers, options, classify, resources, route, plan,
+  presolve, workspace_estimate, attempts, diagnostics, timing). The
+  concatenation is byte-identical to the original file and every chunk
+  parses independently; the split separates the pure decision helpers
+  (classification, route resolution, planning, presolve) from the
+  diagnostics and timing plumbing that had accumulated around them.
+- Split the 2577-line `src/types.jl` into seven ordered files under
+  `src/types/` (core, backends, workspaces, constraints, problems, plans,
+  results). The concatenation is byte-identical to the original file and the
+  include order is unchanged, so definitions and semantics are exactly as
+  before; the split makes the type layer navigable and future extractions
+  local.
+- Retired the legacy `factor_kkt!` nothing-chain dispatcher (kkt.jl): the
+  production path has dispatched through `factorize!(backend, ...)` with
+  plan assertions and execution provenance since the KKT backend layer
+  landed, and the chain had no production callers -- only the sparse
+  regression tests, which now call `factorize!(select_backend(ws), ...)`
+  directly. Behaviour unchanged; the remaining per-phase `ws.arrow`/
+  `ws.sparse_kkt`/`ws.mixed_precision` branches in schur/step/kernels are
+  the Phase-2 KKTPlan extraction, not part of this step.
+- Repository cleanup: the former `bench/` tree is consolidated — the
+  acceptance gate now lives at `benchmark/gates.jl` (with
+  `benchmark/baselines/gates.json` and the benchmarking environment
+  `benchmark/benchenv/`), and historical application/cluster campaigns with
+  their dated reports are archived under `docs/evidence/`. The five hand-linked
+  topic guides are served through Documenter under "Topic guides", and dated
+  review snapshots moved to `docs/evidence/development-reviews/`. One-shot
+  Codex patch automation (`.codex/` payloads and their four workflows, whose
+  target branch no longer exists) and the unwired COO micro benchmark were
+  removed. The optimization pipeline is defined once in
+  `.github/workflows/optimization-benchmark.yml`; the push loop and the
+  pull-request gate are thin callers.
 - Benchmark registry and scoreboard contracts are covered by the ordinary test
   suite; public benchmark files are never downloaded.
 - `PreparedSolver` reuses an immutable post-presolve `ExecutionPlan` only when
@@ -72,6 +143,73 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failure provenance are reported separately from Newton-iteration counters.
   Automatic initialization fails closed rather than falling back to `Omega`
   heuristics. Explicit `parameter_policy=:fixed` initialization is unchanged.
+- Dense/CSC SOC metric parity is asserted to roundoff (`16*eps(T)`) rather
+  than bitwise: the fused scalar-loop and two-gemm branches of
+  `_native_soc_add_metric!` evaluate the same formula in different
+  operation orders, on every arithmetic type and independent of BLAS
+  threading. Bitwise-by-construction assertions (symmetry, structural
+  zeros, frozen-reference comparisons) stay exact.
+- Chordal policy surface (P0): `SolverOptions.chordal`
+  (`:off`/`:auto`/`:on`, default `:off`, validated) records a descriptive
+  plan-level policy — `chordal_policy`, `chordal_selected`,
+  `chordal_reason`, and `chordal_beneficial_blocks` in
+  `ExecutionPlan.parameters`, surfaced as a lazy `plan.chordal_plan`
+  accessor — derived from the preprocessing clique-cost estimate threaded
+  through `_solve_pipeline!` and `prepare` (compatibility delegates record
+  `:chordal_estimate_unavailable`). The clique transformation itself
+  remains analysis-only: `chordal_selected` stays `false`, preprocessing
+  runs unchanged for every value, and solve results are numerically
+  identical under any policy.
+- Whole-codebase audit fixes: `ws.vpartial` is sized by the block-bin
+  count on every route (the sparse-schur route previously capped it by
+  the dual dimension `m` and underran the array in the first threaded
+  residual sweep when threads exceeded `m`); the step-collapse
+  near-tolerance exit tests the gap against the equilibration-tightened
+  acceptance threshold so its "within 1000× of the requested tolerance"
+  message holds in original coordinates under objective scaling;
+  `sparse_schur_block_scatter!` zeroes its BigFloat panel with
+  `zero_owned!` like its sibling kernel (a bare `fill!` aliases one MPFR
+  object across the panel); `_sparse_store!` fails closed for non-BigFloat
+  callers instead of silently dropping writes; the MOI settings seam maps
+  the `diagnostics::Bool` option to a symbolic level instead of a dead
+  conditional that always produced `:summary`; `ksyrk!`'s documented
+  default is the overwrite semantics (`β=zero`) the kernels implement.
+- Dead-code sweep: removed 26 zero-reference Q3 kernel aliases, the
+  unused `_q3_is_psd`, the 5-argument `line_search!` wrapper,
+  `_safe_parameter_bounds`, `copy_stored_vector`, `analyze_structure`,
+  `program_row_blocks`, `soc_primal_map`/`soc_dual_map`, the
+  `MOIVectorLinearSet`/`MOILorentzSet` unions, four 2-argument
+  `analyze` convenience methods, the pre-Round-6 eight-field
+  `LPSparseSystem` constructor, and the 2-/3-argument `Equilibration`
+  convenience constructors — all verified by repo-wide reference grep.
+- Consolidation round (behavior-preserving, each verified): the three
+  per-family result builders share one `_public_result_from_core` tail
+  (certification, status downgrade, termination, `Result` assembly);
+  the dense and sparse `equilibrate` routes share the Ruiz block
+  algebra and the per-variable/objective tail through
+  `_ruiz_step`/`_ruiz_congruence!`/`_equilibration_variable_scales`
+  (bit-identical outputs verified on dense and sparse fixtures); and
+  every SDPX-side packed-triangle enumeration iterates the canonical
+  `psd_packed_pairs` list locked to `psd_packed_index/row/column` by a
+  regression test (the MOI converters keep the MOI upper-triangle
+  convention through `_triangle_coordinates`).
+- Fixed-trace HKM metric assembly fails gracefully: the interiority
+  gate uses the stable head-versus-tail-norm comparison (the raw
+  determinant difference cancelled near the boundary and, worse,
+  accepted a reflected head `x0 < -‖tail‖`, which has a positive
+  determinant but lies outside the cone), and a non-interior block now
+  returns `(false, block)` from `_native_soc_add_metric!`, surfacing as
+  `NumericalFailure`-style `NumericalBreakdown` with
+  `reason=:metric_assembly_failure` like the NT-scaling path, instead
+  of an uncaught `ArgumentError` from the Schur assembly.
+- The best-iterate fallback compares merits computed by the same
+  `stagnation_merit` formula on both sides (the exit side previously
+  omitted the complementarity term that ranked the stored best).
+- The MOI seam rejects `max_iterations=0` up front: the option funnels
+  through the public `Settings` surface where 0 is the *automatic*
+  sentinel and would silently resolve to the 200-iteration default, so
+  a zero-iteration request now fails closed with a named reason
+  instead of being misreported.
 
 ### Removed
 

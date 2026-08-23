@@ -52,7 +52,7 @@ reliability across `Float64`, MultiFloats `Float64x4`, and 256-bit `BigFloat`.
 - Public MPS, sparse SDPA, SeDuMi/DIMACS, and CBF inputs are registered but the
   canonical runner does not yet implement their loaders; ordinary runs emit
   structured skips.
-- The retained `bench/public_conic_suite` catalogue overlaps with, but does not
+- The retained `docs/evidence/bench/public_conic_suite` catalogue overlaps with, but does not
   execute independently of, the canonical registry. Its manifests and source
   terminology need reconciliation rather than a second runner.
 - Portable peak-RSS and lane-level setup/factorization/refinement measurements
@@ -172,7 +172,7 @@ commit-pinned release exists, as required by the cluster release policy.
 
 ## Iteration 2 SOCP metric baseline
 
-The frozen driver at `bench/soc_metric_assembly/benchmark.jl` uses the
+The frozen driver at `docs/evidence/bench/soc_metric_assembly/benchmark.jl` uses the
 production general-Lorentz planner, workspace, NT scaling, and metric kernel.
 It runs identical coefficient/offset/scaling-state data through a dense Matrix
 lane and a CSC lane, with nine warmed samples in Float64, Float64x4, and
@@ -395,7 +395,7 @@ alias caller or intermediate storage. Runtime factorization/certificate
 failure does not trigger an implicit second solve on another formulation.
 
 The benchmark-local reference is frozen under
-`bench/soc_equality_singleton`, with baseline outputs in
+`docs/evidence/bench/soc_equality_singleton`, with baseline outputs in
 `work/baseline/soc_equality_singleton`. The driver digest is
 `a0e9d7d7c873cd64991093a88ffec4cb244e20b672ec91ba6961e2ed534dd566`
 and the unchanged pre-candidate solver digest is

@@ -78,6 +78,24 @@ function psd_packed_row(k::Integer, n::Integer)
 end
 
 """
+    psd_packed_pairs(n) -> Vector{Tuple{Int,Int}}
+
+The canonical lower-column-major packed coordinates of an `n × n` PSD
+block: `psd_packed_pairs(n)[k] == (psd_packed_row(k, n),
+psd_packed_column(k, n))` and `psd_packed_index(pairs[k]..., n) == k`
+for every valid `k`. Every packed-triangle enumeration should iterate
+this list instead of re-deriving the layout.
+"""
+function psd_packed_pairs(n::Integer)
+    coordinates = Tuple{Int,Int}[]
+    sizehint!(coordinates, variable_length(PSDCone(), n))
+    for column in 1:Int(n), row in column:Int(n)
+        push!(coordinates, (row, column))
+    end
+    return coordinates
+end
+
+"""
     psd_packed_length(n) -> Int
 
 Packed-lower length `n(n+1)/2` of an `n × n` PSD block, matching
@@ -152,6 +170,22 @@ function _owned_arithmetic_eval(
 end
 
 """
+    _owned_sqrt_two(::Type{T}, bits) -> T
+
+Owned `sqrt(2)` computed at the explicit model precision `bits`. The
+square root itself is evaluated inside the precision scope (BigFloat
+operators otherwise use the ambient `setprecision`), and the result is
+copied back into model ownership.
+"""
+@inline function _owned_sqrt_two(::Type{T}, bits::Int) where {T<:AbstractFloat}
+    return _owned_arithmetic_eval(
+        T,
+        () -> sqrt(owned_arithmetic_copy(T, 2; precision_bits=bits));
+        precision_bits=bits,
+    )
+end
+
+"""
     owned_vector_copy(::Type{T}, values; precision_bits=precision(T)) -> Vector{T}
 
 Owned `Vector{T}` copy of `values` at the model arithmetic. Every
@@ -191,19 +225,4 @@ function owned_sparse_copy(
     row_indices = copy(matrix.rowval)
     values = owned_vector_copy(T, matrix.nzval; precision_bits=precision_bits)
     return SparseMatrixCSC{T,Int}(m, n, column_pointer, row_indices, values)
-end
-
-"""
-    copy_stored_vector(values; precision_bits=precision(T)) -> Union{Nothing,Vector{T}}
-
-Owned copy of an optional stored vector (`nothing` stays `nothing`),
-used for primal / dual-slack / dual starts at the compiler boundary.
-The returned vector never aliases the model-owned data.
-"""
-copy_stored_vector(::Nothing; precision_bits::Int=0) = nothing
-function copy_stored_vector(
-    values::AbstractVector;
-    precision_bits::Int=precision(eltype(values)),
-)
-    return owned_vector_copy(eltype(values), values; precision_bits=precision_bits)
 end

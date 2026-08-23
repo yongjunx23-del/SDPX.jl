@@ -45,7 +45,7 @@ an almost-optimal status, or a numerical failure advances to the requested
 model precision when the predeclared policy and remaining wall time allow it.
 
 The policy defaults to `:auto`; `:fixed` remains the expert override. See the
-[native BigFloat report](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md)
+[native BigFloat report](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md)
 for measured staged-precision behavior.
 
 ## Guarded mixed-precision KKT solves
@@ -66,7 +66,7 @@ mode. BigFloat and `:auto` retain static cutoffs. Repeated rejection is
 cooled down and eventually disabled for that solve. Exact singleton-local
 `2×2` BigFloat arrows have a separate guarded path when `MultiFloats` is
 loaded. See
-[`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/mixed_precision_kkt/RESULTS.md)
+[`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
 for the current promotion evidence and exact thresholds.
 
 ## Tolerance vs. precision

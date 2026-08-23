@@ -631,11 +631,14 @@ end
 
 Runs the full predictor/corrector Newton step for the current iterate,
 leaving the direction in `ws.dx`, `ws.dy`, and each `ws.blk[l].dX`,
-`ws.blk[l].dY`. Returns `(status, reason, p_res, d_res, reg_attempts,
-q_pivoted)`; `status === :breakdown` means the caller should treat
-this as [`NumericalBreakdown`](@ref SolveStatus) (non-PD block
-factorization, or a Schur complement that stayed singular even after
-regularization retries).
+`ws.blk[l].dY`. Returns a NamedTuple whose diagnostic core is
+`status`, `reason`, `p_res`, `d_res`, `reg_attempts`, and `q_pivoted`,
+alongside iteration quantities (`mu`, `mu_aff`, predictor quality,
+complementarity, refinement residuals) and per-phase timings;
+`status === :breakdown` means the caller should treat this as
+[`NumericalBreakdown`](@ref SolveStatus) (non-PD block factorization,
+or a Schur complement that stayed singular even after regularization
+retries).
 """
 function newton_step!(
     ws::Workspace{T},
@@ -1003,7 +1006,9 @@ function newton_step!(
 end
 
 """
-    line_search!(ws, X, Y, γ, min_step) -> (tX, tY)
+    line_search!(ws, X, Y, backtracking_factor, min_step,
+                 primal_initial_step, dual_initial_step,
+                 minimum_cholesky_ratio=0) -> (tX, tY)
 
 Alloc-free backtracking (§2.4): each trial does `copyto!`-free direct
 construction (`trial_combine!`) plus an in-place `kchol!` with early
@@ -1017,19 +1022,6 @@ bookkeeping. If a side's `t` drops below `min_step` without finding a
 feasible point, the returned `t` reflects that (`< min_step`) so the
 caller can trigger the restart repair (§5.2).
 """
-function line_search!(ws::Workspace{T}, X, Y, γ::T, min_step::T) where {T}
-    return line_search!(
-        ws,
-        X,
-        Y,
-        γ,
-        min_step,
-        one(T),
-        one(T),
-        zero(T),
-    )
-end
-
 function line_search!(
     ws::Workspace{T},
     X,

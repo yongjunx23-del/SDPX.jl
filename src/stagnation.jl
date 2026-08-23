@@ -169,7 +169,7 @@ function observe!(detector::StagnationDetector{T}, merit::T,
 end
 
 """
-    stagnation_message(detector, ::Type{T}, tolerance) -> String
+    stagnation_message(detector, tolerance) -> String
 
 Human-readable termination reason, including the measured rate and projection
 so the choice can be checked rather than taken on trust.

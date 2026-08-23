@@ -24,7 +24,7 @@ const MULTIFLOAT_TYPES = let types = Dict{Symbol,DataType}()
 end
 
 export BenchmarkSpec, ExternalSource, BenchmarkReference, SuiteEntry
-export benchmark_registry, benchmark_spec, suite_names, suite_entries
+export benchmark_registry, benchmark_spec, suite_names, campaign_names, suite_entries
 export build_problem, prepare_external!, external_cache_status
 export run_suite, compare_result_files, write_results, main
 
@@ -83,6 +83,7 @@ include("registry/synthetic.jl")
 include("registry/pathological.jl")
 include("registry/heavy.jl")
 include("registry/full_unitarity_eft.jl")
+include("registry/ladder.jl")
 
 const REGISTRY = let entries = vcat(
         PUBLIC_SPECS,
@@ -90,6 +91,7 @@ const REGISTRY = let entries = vcat(
         PATHOLOGICAL_SPECS,
         HEAVY_SPECS,
         FULL_UNITARITY_EFT_SPECS,
+        LADDER_SPECS,
     )
     table = Dict{String,BenchmarkSpec}()
     for spec in entries
@@ -105,6 +107,8 @@ include("suites/representative.jl")
 include("suites/local_full.jl")
 include("suites/large.jl")
 include("suites/heavy.jl")
+include("suites/core_matrix.jl")
+include("suites/ladder.jl")
 
 const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :micro => MICRO_SUITE,
@@ -112,6 +116,8 @@ const SUITES = Dict{Symbol,Vector{SuiteEntry}}(
     :local_full => LOCAL_FULL_SUITE,
     :large => LARGE_SUITE,
     :heavy => HEAVY_SUITE,
+    :core_matrix => CORE_MATRIX_SUITE,
+    :ladder => LADDER_SUITE,
 )
 
 include("cache.jl")
@@ -122,11 +128,12 @@ benchmark_registry() = sort!(collect(values(REGISTRY)); by=spec -> spec.id)
 benchmark_spec(id::AbstractString) = get(REGISTRY, String(id)) do
     throw(KeyError("unknown benchmark id $(repr(id))"))
 end
-suite_names() = (:micro, :representative, :local_full, :large, :heavy)
+suite_names() = (:micro, :representative, :local_full, :large, :heavy, :ladder)
+campaign_names() = (:core_matrix,)
 
 function suite_entries(name::Symbol)
     haskey(SUITES, name) || throw(ArgumentError(
-        "unknown suite $name; choices=$(join(suite_names(), ", "))",
+        "unknown suite $name; choices=$(join((suite_names()..., campaign_names()...), ", "))",
     ))
     return copy(SUITES[name])
 end

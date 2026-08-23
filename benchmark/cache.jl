@@ -54,6 +54,14 @@ function external_cache_status(spec::BenchmarkSpec; cache_dir=DEFAULT_CACHE)
     )
 end
 
+"""Return a unique same-directory download path on every supported Julia."""
+function _cache_part_path(path::AbstractString)
+    # Julia 1.10 supports `cleanup` but not the later `suffix` keyword on
+    # `tempname`. Appending the marker preserves the observable `.part`
+    # contract while keeping the final rename on the destination filesystem.
+    return tempname(dirname(path); cleanup=false) * ".part"
+end
+
 """
     _prepare_external_spec!(spec; cache_dir, verbose, downloader)
 
@@ -99,7 +107,7 @@ function _prepare_external_spec!(
     end
 
     verbose && println("download ", spec.id, " <- ", source.authoritative_url)
-    part_path = tempname(dirname(path); cleanup=false, suffix=".part")
+    part_path = _cache_part_path(path)
     try
         downloader(source.authoritative_url, part_path)
         isfile(part_path) || throw(ArgumentError(

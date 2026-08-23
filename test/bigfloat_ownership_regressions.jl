@@ -172,7 +172,8 @@ end
                 0 1 / 5 2
             ]
             SDPX.copy_owned!(workspace.S, schur)
-            @test SDPX.factor_kkt!(
+            @test SDPX.factorize!(
+                SDPX.select_backend(workspace),
                 workspace,
                 problem,
                 SDPX.SolverOptions{BigFloat}(verbosity=0),
@@ -237,7 +238,6 @@ end
                 first == second || block[first] !== block[second]
                 for first in eachindex(block), second in eachindex(block)
             )
-
             coefficients_2x2 = [zeros(BigFloat, 1, 2, 2)]
             coefficients_2x2[1][1, 1, 2] = BigFloat(3)
             coefficients_2x2[1][1, 2, 1] = BigFloat(3)

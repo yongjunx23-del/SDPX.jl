@@ -37,12 +37,12 @@ arithmetic write directly into preallocated high-precision scalar storage.
 function kmul_owned! end
 
 """
-    ksyrk!(S, P, α=one(eltype(S)), β=one(eltype(S))) -> S
+    ksyrk!(S, P, α=one(eltype(S)), β=zero(eltype(S))) -> S
 
-`S = α·Pᵀ·P + β·S` for `P` an `r×c` panel, `S` `c×c`. Used for the
-symmetric-square Schur contribution `S += P̂P̂ᵀ` (§2.3) and `Q = B̃ᵀB̃`
-(§2.2); implemented via pairwise `kdot` calls so it inherits the
-BigFloat fast path automatically.
+`S = α·Pᵀ·P + β·S` for `P` an `r×c` panel, `S` `c×c`; the default `β`
+overwrites `S`. Used for the symmetric-square Schur contribution
+`S += P̂P̂ᵀ` (§2.3) and `Q = B̃ᵀB̃` (§2.2); implemented via pairwise
+`kdot` calls so it inherits the BigFloat fast path automatically.
 """
 function ksyrk! end
 

@@ -22,7 +22,7 @@
         caller is a foreign runtime that cannot parse a Julia stack
         trace; it can parse `{"success": false, "error": "..."}`.
 
-    The schema is documented in `docs/bridge-schema.md`. This is a
+    The schema is documented in `docs/src/bridge-schema.md`. This is a
     subprocess bridge by design — one process per solve, no state. The
     documented upgrade path (same document) is a persistent server or
     LibraryLink once the schema has proven itself; the schema is the
@@ -276,6 +276,7 @@ function solve_specification(spec)
               "(Float64x2/Float64x3/Float64x4 need MultiFloats in the bridge environment)")
     T = PRECISIONS[name]
     if T === BigFloat
+        requested_bits >= 2 || error("precision_bits must be at least 2")
         settings["precision_bits"] = requested_bits
     end
 

@@ -475,28 +475,6 @@ function AdaptiveIPMController(opts::SolverOptions{T}) where {T}
     )
 end
 
-"""
-    _safe_parameter_bounds(
-        T,
-        default_beta=T(1) / T(50),
-        default_gamma=T(17) / T(20),
-    )
-
-Backward-compatible view of the built-in policy bounds.
-"""
-function _safe_parameter_bounds(
-    ::Type{T},
-    default_beta::T=T(1) / T(50),
-    default_gamma::T=T(17) / T(20),
-) where {T}
-    return (
-        beta_min=min(T(1) / T(50), default_beta),
-        beta_max=max(T(1) / T(2), default_beta),
-        gamma_min=min(T(13) / T(20), default_gamma),
-        gamma_max=max(T(19) / T(20), default_gamma),
-    )
-end
-
 function _nonnegative_int_saturating(
     value,
     rounding::RoundingMode=RoundNearest,

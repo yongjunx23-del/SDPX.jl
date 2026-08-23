@@ -58,22 +58,14 @@ using LinearAlgebra
         ) == 0.495
     end
 
-    @testset "general NT agrees with Q3 and its inverse" begin
+    @testset "general NT scaling and its inverse roundtrip" begin
         primal = [3.0, 0.3, -0.2]
         dual = [2.5, -0.1, 0.25]
         w = zeros(3)
         lambda = zeros(3)
         ok, eta, eta_squared =
             SDPX._soc_nt_scaling!(w, lambda, primal, dual)
-        q3_w = zeros(3)
-        q3_lambda = zeros(3)
-        q3_ok, q3_eta, q3_eta_squared =
-            SDPX._q3_nt_scaling!(q3_w, q3_lambda, primal, dual)
-        @test ok && q3_ok
-        @test w ≈ q3_w
-        @test lambda ≈ q3_lambda
-        @test eta ≈ q3_eta
-        @test eta_squared ≈ q3_eta_squared
+        @test ok
 
         for dimension in (2, 3, 5)
             s = [3.0; fill(0.15, dimension - 1)]
@@ -93,12 +85,12 @@ using LinearAlgebra
         end
     end
 
-    @testset "Q3 coordinate/matrix identity" begin
+    @testset "Lorentz coordinate/matrix identity" begin
         coordinate = [2.0, 0.4, -0.3]
-        matrix = SDPX._q3_to_sym2(coordinate)
+        matrix = [coordinate[1] + coordinate[2] coordinate[3];
+                  coordinate[3] coordinate[1] - coordinate[2]]
         @test det(matrix) ≈ SDPX._soc_determinant(coordinate)
         @test eigmin(Symmetric(matrix)) ≈ SDPX._soc_margin(coordinate)
-        @test SDPX._sym2_to_q3(matrix) ≈ coordinate
     end
 
     @testset "fixed-trace local kernels match explicit affine algebra" begin
@@ -143,4 +135,25 @@ using LinearAlgebra
         @test recovered ≈ recovery_reference
         @test recovered[1] == 0.6
     end
+end
+
+@testset "fixed-trace HKM metric interiority contract" begin
+    destination = zeros(3)
+    dual = [2.0, 0.25, -0.5]
+    @test SDPX._soc_fixed_trace_hkm_metric!(
+        destination, [3.0, 1.0, 0.5], dual,
+    )
+    @test destination ≈ [
+        (3 * 2 - 1 * 0.25 + 0.5 * -0.5) / (9 - 1 - 0.25),
+        -(1 * -0.5 + 0.5 * 0.25) / (9 - 1 - 0.25),
+        (3 * 2 + 1 * 0.25 - 0.5 * -0.5) / (9 - 1 - 0.25),
+    ]
+    # A reflected head has a positive determinant but is outside the cone;
+    # the boundary itself is non-interior in either representation.
+    @test !SDPX._soc_fixed_trace_hkm_metric!(
+        zeros(3), [-3.0, 1.0, 0.5], dual,
+    )
+    @test !SDPX._soc_fixed_trace_hkm_metric!(
+        zeros(3), [1.0, 1.0, 0.0], dual,
+    )
 end

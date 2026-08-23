@@ -61,4 +61,30 @@ using Test
     @test_throws ArgumentError SDPX.resolve_solve_options(
         Float64, SDPX.SolveOptions(precision=840),
     )
+    @test_throws ArgumentError SDPX.resolve_solve_options(
+        BigFloat, SDPX.SolveOptions(precision=1),
+    )
+    two_bit = SDPX.resolve_solve_options(
+        BigFloat, SDPX.SolveOptions(precision=2),
+    )
+    @test two_bit.core.precision_bits == 2
+
+    @test_throws ArgumentError SDPX._validate_solver_options(
+        SDPX.SolverOptions{BigFloat}(
+            precision_bits=1,
+            minimum_working_precision_bits=2,
+        ),
+    )
+    @test_throws ArgumentError SDPX._validate_solver_options(
+        SDPX.SolverOptions{BigFloat}(
+            precision_bits=2,
+            minimum_working_precision_bits=1,
+        ),
+    )
+    SDPX._validate_solver_options(
+        SDPX.SolverOptions{BigFloat}(
+            precision_bits=2,
+            minimum_working_precision_bits=2,
+        ),
+    )
 end

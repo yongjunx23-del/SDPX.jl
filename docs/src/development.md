@@ -31,10 +31,10 @@ for the review standard and
 for provenance.
 
 Operational references are kept as focused documents: the
-[bridge schema](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/bridge-schema.md),
-[cluster workflow](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/cluster-workflow.md),
-[adaptive dense/sparse optimization](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-dense-sparse-optimization.md),
-[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md),
-and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/threading.md)
+[bridge schema](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/bridge-schema.md),
+[cluster workflow](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/cluster-workflow.md),
+[adaptive dense/sparse optimization](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-dense-sparse-optimization.md),
+[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md),
+and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/threading.md)
 guides. Measured results and provenance live in the benchmark directories and
-[`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/bench/RESULTS.md).
+[`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md).

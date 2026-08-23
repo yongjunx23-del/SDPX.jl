@@ -3,7 +3,7 @@ module FixedTraceBenchmarkRegressions
 using Test
 using MultiFloats: Float64x2
 
-include(joinpath(@__DIR__, "..", "bench", "soc_fixed_trace", "benchmark.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "soc_fixed_trace", "benchmark.jl"))
 
 @testset "fixed-trace benchmark reporting and option gates" begin
     flattened = Dict{String,Any}()
@@ -32,7 +32,7 @@ include(joinpath(@__DIR__, "..", "bench", "soc_fixed_trace", "benchmark.jl"))
     mktempdir() do root
         mkpath(joinpath(root, "src"))
         mkpath(joinpath(root, "ext"))
-        mkpath(joinpath(root, "bench", "soc_fixed_trace"))
+        mkpath(joinpath(root, "benchmark", "soc_fixed_trace"))
         write(joinpath(root, "Project.toml"), "name = \"HashFixture\"\n")
         write(joinpath(root, "src", "HashFixture.jl"), "module HashFixture end\n")
         extension = joinpath(root, "ext", "HashFixtureExt.jl")

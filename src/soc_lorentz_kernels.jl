@@ -247,6 +247,24 @@ function _soc_nt_apply_hs_inverse!(destination, w, eta_squared, source)
     return destination
 end
 
+"""Lorentz determinant of the scalar triple `(x0, x1, x2)`."""
+@inline _soc_lorentz_determinant(x0, x1, x2) = x0 * x0 - x1 * x1 - x2 * x2
+
+"""
+    _soc_sym2_inverse_entries(x0, x1, x2) -> (i11, i12, i22)
+
+Inverse entries of the symmetric 2×2 matrix with packed coordinates
+`(x11, x12, x22) = (x0 + x1, x2, x0 - x1)`, returned as the `(11, 12, 22)`
+triple divided by the Lorentz determinant `x0² - x1² - x2²`. Callers
+guarantee strict interiority, so the determinant is positive. One shared
+formulation for the sign-sensitive triple that every 2×2 X⁻¹ contraction
+needs.
+"""
+@inline function _soc_sym2_inverse_entries(x0, x1, x2)
+    determinant = _soc_lorentz_determinant(x0, x1, x2)
+    return (x0 - x1) / determinant, -x2 / determinant, (x0 + x1) / determinant
+end
+
 """
 Fixed-trace Q3 block kernels.
 
@@ -331,14 +349,20 @@ end
 @inline function _soc_fixed_trace_hkm_metric!(destination, primal, dual)
     x0, x1, x2 = primal
     z0, z1, z2 = dual
-    determinant = x0 * x0 - x1 * x1 - x2 * x2
-    determinant > zero(determinant) || throw(ArgumentError(
-        "fixed-trace HKM primal state must be interior",
-    ))
+    # Interiority is decided by the stable head-versus-tail-norm comparison,
+    # not the raw determinant difference (which cancels near the boundary);
+    # the raw determinant is still what the metric divides by, so it must
+    # also be strictly positive in floating point. A reflected head
+    # (x0 < -||tail||) has a positive determinant but is outside the cone —
+    # the old determinant-only test accepted it.
+    tail_norm = sqrt(x1 * x1 + x2 * x2)
+    x0 > tail_norm || return false
+    determinant = _soc_lorentz_determinant(x0, x1, x2)
+    determinant > zero(determinant) || return false
     destination[1] = (x0 * z0 - x1 * z1 + x2 * z2) / determinant
     destination[2] = -(x1 * z2 + x2 * z1) / determinant
     destination[3] = (x0 * z0 + x1 * z1 - x2 * z2) / determinant
-    return destination
+    return true
 end
 
 @inline function _soc_fixed_trace_hkm_rhs_coordinates(
@@ -377,10 +401,7 @@ end
     w12 = p11 * y12 + p12 * y22 - r12
     w21 = p12 * y11 + p22 * y12 - r21
     w22 = p12 * y12 + p22 * y22 - r22
-    determinant = x0 * x0 - x1 * x1 - x2 * x2
-    inverse11 = (x0 - x1) / determinant
-    inverse12 = -x2 / determinant
-    inverse22 = (x0 + x1) / determinant
+    inverse11, inverse12, inverse22 = _soc_sym2_inverse_entries(x0, x1, x2)
     q11 = inverse11 * w11 + inverse12 * w21
     q12 = inverse11 * w12 + inverse12 * w22
     q21 = inverse12 * w11 + inverse22 * w21
@@ -428,10 +449,7 @@ end
     w12 = r12 - (dx11 * y12 + dx12 * y22)
     w21 = r21 - (dx12 * y11 + dx22 * y12)
     w22 = r22 - (dx12 * y12 + dx22 * y22)
-    determinant = x0 * x0 - x1 * x1 - x2 * x2
-    inverse11 = (x0 - x1) / determinant
-    inverse12 = -x2 / determinant
-    inverse22 = (x0 + x1) / determinant
+    inverse11, inverse12, inverse22 = _soc_sym2_inverse_entries(x0, x1, x2)
     q11 = inverse11 * w11 + inverse12 * w21
     q12 = inverse11 * w12 + inverse12 * w22
     q21 = inverse12 * w11 + inverse22 * w21

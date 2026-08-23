@@ -163,4 +163,4 @@ resource policy with `Tolerances`, `Limits`, and `Settings` as shown above.
 
 The full Newton-method audit, exact diagnostic fields, controller bounds,
 fallback rules, arithmetic behavior, and fixed-versus-adaptive results are in
-[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md).
+[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).

@@ -398,6 +398,8 @@ end
             variables,
             0,
             false,
+            nothing,
+            nothing,
         )
         direction = Matrix(Kδ) \ rhs
         accepted = run_gate(
@@ -481,6 +483,8 @@ end
             variables,
             0,
             false,
+            nothing,
+            nothing,
         )
         unshifted = Matrix(K0_sparse) \ rhs
         exact = run_gate(
@@ -542,6 +546,8 @@ end
                 variables,
                 0,
                 false,
+                nothing,
+                nothing,
             )
             direction = Matrix(Kδ) \ rhs
             accepted = run_gate(
@@ -679,6 +685,8 @@ end
             variables,
             equalities,
             false,
+            nothing,
+            nothing,
         )
         unsupported = run_gate(
             sparse_workspace,

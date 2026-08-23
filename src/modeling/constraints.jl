@@ -46,8 +46,6 @@ end
 
 constraint_ref(entry::ConstraintEntry) = entry.ref
 constraint_refs(block::ConstraintBlockRef) = copy(_constraint_record(block).refs)
-constraint_domain(block::ConstraintBlockRef) = _constraint_record(block).domain
-constraint_name(block::ConstraintBlockRef) = _constraint_record(block).name
 
 function _check_new_constraint_name(model::Model, name::Symbol)
     name === Symbol("") && throw(ArgumentError("constraint name must not be empty"))

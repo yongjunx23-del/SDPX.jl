@@ -57,6 +57,7 @@ function _public_validate_algorithm(route::NativeConeRoute, settings::Settings)
     allowed = route.route === :lp_family ? (:auto, :lp) :
               route.route === :soc_family ? (:auto, :socp) :
               route.route === :sdp_family ? (:auto, :sdp) :
+              route.route === :exp_family ? (:auto,) :
               (:auto,)
     settings.algorithm in allowed || throw(ArgumentError(
         "settings.algorithm=$(settings.algorithm) is incompatible with " *
@@ -268,6 +269,16 @@ function _public_lower_native(
     route::NativeConeRoute,
     settings::Settings,
 )
+    # Phase A fail-closed contract: the exponential route classifies and
+    # compiles, but no native exponential lowering exists yet. The named
+    # error keeps the failure explicit instead of silently routing exp
+    # programs into the SOC or SDP lowerers.
+    route.route === :exp_family && throw(PublicOptimizeError(
+        route.route,
+        :exp_lowerer_unavailable,
+        "optimize: native exponential-cone lowering is not available yet; " *
+        "the :exp_family route is classification-only in this build",
+    ))
     lowerer_name = route.route === :lp_family ? :lower_lp_native :
                    route.route === :soc_family ? :lower_soc_native :
                    route.route === :sdp_family ? :lower_sdp_native :
@@ -634,22 +645,43 @@ function _public_original_certificate(
     )
 end
 
-function _public_result_from_lp(
+"""
+    _public_result_from_core(model, program, core_result, settings, outputs,
+                             primal, constraint_dual, dual_slack,
+                             primal_obj, dual_obj; family, diagnostics_type,
+                             termination_info, history) -> Result{T}
+
+Shared tail of the per-family result builders: original-coordinate
+certification, `Optimal` → `NumericalFailure` downgrade when that
+certificate fails, termination assembly, and `Result` construction.
+Family-specific behavior enters only through the reconstructed
+original-coordinate values, the expected diagnostics type, the
+termination info source (core result for LP/SDP, solver diagnostics for
+the native SOC route), and the history payload.
+"""
+function _public_result_from_core(
     model::Model{T},
     program::NativeConeProgram{T},
-    lowering::LPLowering{T},
-    core_result::SDPResult{T},
+    core_result,
     settings::Settings{T},
     outputs::Outputs,
+    primal,
+    constraint_dual,
+    dual_slack,
+    primal_obj,
+    dual_obj;
+    family::Symbol,
+    diagnostics_type::Type,
+    termination_info,
+    history,
 ) where {T<:AbstractFloat}
     diagnostics = core_result.diagnostics
-    diagnostics isa SolveDiagnostics || throw(PublicOptimizeError(
-        :lp_family,
+    diagnostics isa diagnostics_type || throw(PublicOptimizeError(
+        family,
         :plan_unavailable,
-        "optimize: LP solver did not retain its authoritative ExecutionPlan",
+        "optimize: $(uppercase(replace(String(family), "_family" => ""))) " *
+        "solver did not retain its authoritative ExecutionPlan",
     ))
-    primal, constraint_dual, dual_slack, primal_obj, dual_obj =
-        _public_lp_reconstruct(model, program, lowering, core_result)
     core_status = core_result.status
     certificate_summary = _public_original_certificate(
         model,
@@ -663,8 +695,8 @@ function _public_result_from_lp(
         core_status,
     )
     result_status = core_status
-    termination_reason = get(core_result.termination, :reason, :none)
-    termination_stage = get(core_result.termination, :stage, :core)
+    termination_reason = get(termination_info, :reason, :none)
+    termination_stage = get(termination_info, :stage, :core)
     if core_status === Optimal && !certificate_summary.valid
         result_status = NumericalFailure
         termination_reason = :original_coordinate_certificate_failed
@@ -676,17 +708,7 @@ function _public_result_from_lp(
         termination_stage isa Symbol ? termination_stage : :unknown,
         core_result.message,
     )
-    primal_data = _public_result_data(outputs.primal, model.variables, primal)
-    constraint_data = _public_result_data(
-        outputs.constraint_dual,
-        model.constraints,
-        constraint_dual,
-    )
-    slack_data = _public_result_data(outputs.dual_slack, model.variables, dual_slack)
-    history = outputs.history ? copy(core_result.parameter_history) : nothing
     trace = outputs.trace ? performance_trace(core_result) : nothing
-    objective_primal = outputs.objectives ? primal_obj : nothing
-    objective_dual = outputs.objectives ? dual_obj : nothing
     return Result{T}(
         _result_model_snapshot(model),
         diagnostics.plan,
@@ -695,16 +717,36 @@ function _public_result_from_lp(
         core_result.iterations,
         certificate_summary,
         outputs,
-        primal_data,
-        constraint_data,
-        slack_data,
-        objective_primal,
-        objective_dual,
+        _public_result_data(outputs.primal, model.variables, primal),
+        _public_result_data(outputs.constraint_dual, model.constraints, constraint_dual),
+        _public_result_data(outputs.dual_slack, model.variables, dual_slack),
+        outputs.objectives ? primal_obj : nothing,
+        outputs.objectives ? dual_obj : nothing,
         outputs.diagnostics === :none ? nothing : diagnostics,
         history,
         trace,
         program.objective_sense,
         program.objective_constant,
+    )
+end
+
+function _public_result_from_lp(
+    model::Model{T},
+    program::NativeConeProgram{T},
+    lowering::LPLowering{T},
+    core_result::SDPResult{T},
+    settings::Settings{T},
+    outputs::Outputs,
+) where {T<:AbstractFloat}
+    primal, constraint_dual, dual_slack, primal_obj, dual_obj =
+        _public_lp_reconstruct(model, program, lowering, core_result)
+    return _public_result_from_core(
+        model, program, core_result, settings, outputs,
+        primal, constraint_dual, dual_slack, primal_obj, dual_obj;
+        family=:lp_family,
+        diagnostics_type=SolveDiagnostics,
+        termination_info=core_result.termination,
+        history=outputs.history ? copy(core_result.parameter_history) : nothing,
     )
 end
 
@@ -914,60 +956,16 @@ function _public_result_from_soc(
     settings::Settings{T},
     outputs::Outputs,
 ) where {T<:AbstractFloat}
-    diagnostics = core_result.diagnostics
-    diagnostics isa NativeSOCDiagnostics || throw(PublicOptimizeError(
-        :soc_family,
-        :plan_unavailable,
-        "optimize: SOC solver did not retain its authoritative ExecutionPlan",
-    ))
     primal, constraint_dual, dual_slack, primal_obj, dual_obj =
         _public_soc_reconstruct(model, program, lowering, core_result)
-    core_status = core_result.status
-    certificate_summary = _public_original_certificate(
-        model,
-        program,
-        primal,
-        constraint_dual,
-        dual_slack,
-        primal_obj,
-        dual_obj,
-        settings,
-        core_status,
-    )
-    result_status = core_status
-    termination_reason = get(diagnostics.termination, :reason, :none)
-    termination_stage = get(diagnostics.termination, :stage, :core)
-    if core_status === Optimal && !certificate_summary.valid
-        result_status = NumericalFailure
-        termination_reason = :original_coordinate_certificate_failed
-        termination_stage = :certification
-    end
-    termination = ResultTermination(
-        result_status,
-        termination_reason isa Symbol ? termination_reason : :unknown,
-        termination_stage isa Symbol ? termination_stage : :unknown,
-        core_result.message,
-    )
-    history = outputs.history ? NamedTuple[] : nothing
-    trace = outputs.trace ? performance_trace(core_result) : nothing
-    return Result{T}(
-        _result_model_snapshot(model),
-        diagnostics.plan,
-        result_status,
-        termination,
-        core_result.iterations,
-        certificate_summary,
-        outputs,
-        _public_result_data(outputs.primal, model.variables, primal),
-        _public_result_data(outputs.constraint_dual, model.constraints, constraint_dual),
-        _public_result_data(outputs.dual_slack, model.variables, dual_slack),
-        outputs.objectives ? primal_obj : nothing,
-        outputs.objectives ? dual_obj : nothing,
-        outputs.diagnostics === :none ? nothing : diagnostics,
-        history,
-        trace,
-        program.objective_sense,
-        program.objective_constant,
+    diagnostics = core_result.diagnostics
+    return _public_result_from_core(
+        model, program, core_result, settings, outputs,
+        primal, constraint_dual, dual_slack, primal_obj, dual_obj;
+        family=:soc_family,
+        diagnostics_type=NativeSOCDiagnostics,
+        termination_info=diagnostics.termination,
+        history=outputs.history ? NamedTuple[] : nothing,
     )
 end
 
@@ -1047,58 +1045,15 @@ function _public_result_from_sdp(
     settings::Settings{T},
     outputs::Outputs,
 ) where {T<:AbstractFloat}
-    diagnostics = core_result.diagnostics
-    diagnostics isa SolveDiagnostics || throw(PublicOptimizeError(
-        :sdp_family,
-        :plan_unavailable,
-        "optimize: SDP solver did not retain its authoritative ExecutionPlan",
-    ))
     primal, constraint_dual, dual_slack, primal_obj, dual_obj =
         _public_sdp_reconstruct(model, program, lowering, core_result)
-    core_status = core_result.status
-    certificate_summary = _public_original_certificate(
-        model,
-        program,
-        primal,
-        constraint_dual,
-        dual_slack,
-        primal_obj,
-        dual_obj,
-        settings,
-        core_status,
-    )
-    result_status = core_status
-    termination_reason = get(core_result.termination, :reason, :none)
-    termination_stage = get(core_result.termination, :stage, :core)
-    if core_status === Optimal && !certificate_summary.valid
-        result_status = NumericalFailure
-        termination_reason = :original_coordinate_certificate_failed
-        termination_stage = :certification
-    end
-    termination = ResultTermination(
-        result_status,
-        termination_reason isa Symbol ? termination_reason : :unknown,
-        termination_stage isa Symbol ? termination_stage : :unknown,
-        core_result.message,
-    )
-    return Result{T}(
-        _result_model_snapshot(model),
-        diagnostics.plan,
-        result_status,
-        termination,
-        core_result.iterations,
-        certificate_summary,
-        outputs,
-        _public_result_data(outputs.primal, model.variables, primal),
-        _public_result_data(outputs.constraint_dual, model.constraints, constraint_dual),
-        _public_result_data(outputs.dual_slack, model.variables, dual_slack),
-        outputs.objectives ? primal_obj : nothing,
-        outputs.objectives ? dual_obj : nothing,
-        outputs.diagnostics === :none ? nothing : diagnostics,
-        outputs.history ? copy(core_result.parameter_history) : nothing,
-        outputs.trace ? performance_trace(core_result) : nothing,
-        program.objective_sense,
-        program.objective_constant,
+    return _public_result_from_core(
+        model, program, core_result, settings, outputs,
+        primal, constraint_dual, dual_slack, primal_obj, dual_obj;
+        family=:sdp_family,
+        diagnostics_type=SolveDiagnostics,
+        termination_info=core_result.termination,
+        history=outputs.history ? copy(core_result.parameter_history) : nothing,
     )
 end
 

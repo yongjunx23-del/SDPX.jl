@@ -53,3 +53,14 @@ end
         q3_direction=:hkm,
     )
 end
+
+@testset "chordal policy option" begin
+    defaults = SDPX.SolverOptions{Float64}()
+    @test defaults.chordal === :off
+    @test SDPX.SolverOptions{Float64}(chordal=:auto).chordal === :auto
+    @test SDPX.SolverOptions{Float64}(chordal=:on).chordal === :on
+    @test SDPX._validate_solver_options(defaults) === nothing
+    @test_throws ArgumentError SDPX._validate_solver_options(
+        SDPX.SolverOptions{Float64}(chordal=:sometimes),
+    )
+end

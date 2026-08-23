@@ -5,7 +5,7 @@ the problem is exported as JSON, Julia runs `bin/sdpx_solve.jl` via
 `RunProcess`, and the result is imported back. Numbers above `Float64`
 travel as strings, so `BigFloat` solves round-trip their full precision
 (measured: ~30 correct digits at 256 bits through the whole loop). The
-schema is documented in [`docs/bridge-schema.md`](../docs/bridge-schema.md),
+schema is documented in [`docs/bridge-schema.md`](../docs/src/bridge-schema.md),
 together with the upgrade path to a persistent server or LibraryLink —
 this first version deliberately keeps one process per solve.
 

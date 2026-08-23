@@ -2,9 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     tags: ['*']
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,20 +16,51 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect provider-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      providers: ${{ steps.filter.outputs.providers }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="origin/${{ github.base_ref }}"
+            git fetch --quiet origin "${{ github.base_ref }}" --depth=1
+            changed="$(git diff --name-only "$base"...HEAD)"
+          else
+            changed="$(git diff --name-only HEAD^ HEAD 2>/dev/null || git diff --name-only $(git hash-object -t tree /dev/null) HEAD)"
+          fi
+          echo "changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -qE \
+            '^(ext/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|test/provider_smoke\.jl|test/multifloat_linear_algebra_integration\.jl|Project\.toml)'; then
+            echo "providers=true" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads / ${{ matrix.profile }}
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
-        julia: ['1.10', '1']
-        os: [ubuntu-latest]
-        threads: ['1', '4']
-        profile: ['quick']
+        # Two ubuntu legs cover the axes that matter: LTS + serial path, and
+        # current release + threaded path. The full numerical/extension
+        # profile runs on its own schedule (full-suite.yml), not per PR.
         include:
+          - julia: '1.10'
+            os: ubuntu-latest
+            threads: '1'
+            profile: quick
+          - julia: '1'
+            os: ubuntu-latest
+            threads: '4'
+            profile: quick
           # Spot-check the other platforms once, on the current release. The
           # thread count is part of the matrix rather than fixed because several
           # kernels have threaded and serial paths that must agree exactly.
@@ -39,34 +72,21 @@ jobs:
             os: windows-latest
             threads: '4'
             profile: quick
-          # Run the expensive numerical/extension matrix once. Cross-version,
-          # cross-platform, and serial/threaded compatibility are already
-          # covered by the quick jobs above.
-          - julia: '1'
-            os: ubuntu-latest
-            threads: '4'
-            profile: full
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.julia }}
+      # A shared cache name lets every leg cross-restore the dependency and
+      # precompile caches instead of recompiling the world per leg.
       - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
       - uses: julia-actions/julia-buildpkg@v1
       - uses: julia-actions/julia-runtest@v1
         env:
           JULIA_NUM_THREADS: ${{ matrix.threads }}
           SDPX_TEST_PROFILE: ${{ matrix.profile }}
-      - uses: julia-actions/julia-processcoverage@v1
-        if: matrix.profile == 'full'
-      - uses: codecov/codecov-action@v5
-        if: matrix.profile == 'full'
-        with:
-          files: lcov.info
-          use_oidc: true
-          fail_ci_if_error: true
-          flags: unittests
-          name: sdpx-julia
 
   bench-smoke:
     name: Benchmark smoke test (small tier only)
@@ -77,15 +97,21 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
       - name: Instantiate benchmark environment
-        run: julia --project=bench -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
+        run: julia --project=benchmark/benchenv -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
       # Only the canonical micro suite runs in CI. Larger registered suites
       # need generated or downloaded inputs and are run manually.
       - name: Run canonical micro benchmark smoke
-        run: julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+        run: julia --project=benchmark/benchenv benchmark/runner.jl micro --samples=1 --output=/tmp/sdpx-micro.toml
 
   provider-smoke:
     name: MFLA/BFLA provider smoke
+    needs: changes
+    # Provider installs are slow; only pay for them when the provider-facing
+    # surface changed, or on main pushes where the signal is recorded.
+    if: needs.changes.outputs.providers == 'true' || github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,10 +119,12 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
       - name: Clone pinned provider checkouts
         run: |
           git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
-          git -C "$RUNNER_TEMP/MFLA" checkout 2b93685c773db323e9397e448063925dc6cb96fe
+          git -C "$RUNNER_TEMP/MFLA" checkout 00ee8c76827dd69b04ae728a7542abe64bb35431
           git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
           git -C "$RUNNER_TEMP/BFLA" checkout b2aed396718d03c60faf017388c3e2fc30934513
       - name: Build provider smoke environment
@@ -174,6 +202,9 @@ jobs:
 
   docs:
     name: Documentation build
+    # Page integrity is enforced per-PR by quick-checks.yml; the full
+    # Documenter build only runs where its output is used.
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -186,9 +217,24 @@ jobs:
         with:
           version: '1'
       - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
       - name: Build the Documenter site
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
           julia --project=docs docs/make.jl
+
+  optimization-gate:
+    name: Benchmark-driven optimization gate
+    # Dormant since the refactor branch was removed: the gate now only runs
+    # for PRs targeting a branch listed here. Re-point the base_ref check (or
+    # drop the condition) once the branch policy for the optimization loop
+    # is decided; the reusable pipeline is optimization-benchmark.yml.
+    if: false
+    uses: ./.github/workflows/optimization-benchmark.yml
+    with:
+      post_status: false
+    permissions:
+      contents: read

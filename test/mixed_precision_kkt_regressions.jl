@@ -133,7 +133,8 @@ end
         )
         native_workspace = SDPX.Workspace(problem; thread_count=1)
         SDPX.copy_owned!(native_workspace.S, schur)
-        @test SDPX.factor_kkt!(
+        @test SDPX.factorize!(
+            SDPX.select_backend(native_workspace),
             native_workspace,
             problem,
             native_options,
@@ -203,11 +204,11 @@ end
         # Static rejection also has bounded retry cost: skip two outer
         # factorizations, retry, and disable after three repeated rejections.
         for expected_count in 2:SDPX.MIXED_KKT_MAX_STATIC_REJECTIONS
-            @test SDPX.factor_kkt!(workspace, problem, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
             @test workspace.mixed_precision.reason === :fallback_cooldown
-            @test SDPX.factor_kkt!(workspace, problem, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
             @test workspace.mixed_precision.reason === :fallback_cooldown
-            @test SDPX.factor_kkt!(workspace, problem, options).ok
+            @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
             @test workspace.mixed_precision.static_rejection_count ==
                   expected_count
         end
@@ -215,7 +216,7 @@ end
         @test workspace.mixed_precision.reason ===
               :disabled_after_repeated_static_rejection
         factor_attempts = workspace.mixed_precision.factor_attempt_count
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test workspace.mixed_precision.factor_attempt_count ==
               factor_attempts
         @test workspace.mixed_precision.reason ===
@@ -239,7 +240,7 @@ end
         )
         schur = Matrix{BigFloat}(I, 8, 8)
         SDPX.copy_owned!(workspace.S, schur)
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test workspace.mixed_precision.active
 
         # A moderately inaccurate low-precision solve should be corrected to
@@ -285,13 +286,13 @@ end
 
         # The failed low path is skipped for two outer factorizations, then
         # retried once so a later, safer KKT system can recover acceleration.
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test !workspace.mixed_precision.active
         @test workspace.mixed_precision.reason === :fallback_cooldown
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test !workspace.mixed_precision.active
         @test workspace.mixed_precision.reason === :fallback_cooldown
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test workspace.mixed_precision.active
         @test workspace.mixed_precision.factor_attempt_count == 2
 
@@ -316,7 +317,7 @@ end
         @test diagnostics.factor_attempt_count == 2
         @test diagnostics.dynamic_fallback_count ==
               SDPX.MIXED_KKT_MAX_DYNAMIC_FALLBACKS
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test !workspace.mixed_precision.active
         @test workspace.mixed_precision.reason ===
               :disabled_after_repeated_fallback
@@ -424,7 +425,8 @@ end
             mixed_precision_memory_fraction=1.0,
         )
         SDPX.copy_owned!(workspace.S, schur)
-        @test SDPX.factor_kkt!(
+        @test SDPX.factorize!(
+            SDPX.select_backend(workspace),
             workspace,
             problem,
             measured_options,
@@ -480,7 +482,7 @@ end
             primal_rhs,
         ) <= T(1e-52)
         SDPX.copy_owned!(workspace.S, schur)
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         @test workspace.mixed_precision.active
         SDPX.copy_owned!(workspace.p, equality_rhs)
         tiny_distortion = 1.0 + 1.0e-6
@@ -501,7 +503,7 @@ end
         workspace.mixed_precision.S64[1, 1] /= tiny_distortion
 
         SDPX.copy_owned!(workspace.S, schur)
-        @test SDPX.factor_kkt!(workspace, problem, options).ok
+        @test SDPX.factorize!(SDPX.select_backend(workspace), workspace, problem, options).ok
         SDPX.copy_owned!(workspace.p, equality_rhs)
         SDPX.solve_kkt!(
             workspace,

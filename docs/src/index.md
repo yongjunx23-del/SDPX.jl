@@ -81,8 +81,8 @@ promoted by the v0.5 documentation:
 
 The repository's [`docs/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/docs)
 directory keeps the long-term operational and research notes:
-[adaptive dense/sparse optimization](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-dense-sparse-optimization.md),
-[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/adaptive-parameter-policy.md),
-[bridge schema](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/bridge-schema.md),
-[cluster workflow](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/cluster-workflow.md),
-and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/threading.md).
+[adaptive dense/sparse optimization](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-dense-sparse-optimization.md),
+[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md),
+[bridge schema](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/bridge-schema.md),
+[cluster workflow](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/cluster-workflow.md),
+and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/threading.md).

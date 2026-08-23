@@ -15,6 +15,34 @@ end
 @inline _is_auto(value) = value === :auto ||
     (value isa AbstractString && lowercase(strip(value)) == "auto")
 
+const _MINIMUM_BIGFLOAT_PRECISION_BITS = 2
+
+@inline function _require_bigfloat_precision_bits(
+    bits::Integer,
+    label::AbstractString,
+)
+    value = Int(bits)
+    value >= _MINIMUM_BIGFLOAT_PRECISION_BITS || throw(ArgumentError(
+        "$label must be at least $_MINIMUM_BIGFLOAT_PRECISION_BITS bits, got $value",
+    ))
+    return value
+end
+
+# The generic expert-option validator is defined later in `pipeline.jl`.
+# Specializing here keeps every public BigFloat entry point on the same
+# precision contract without duplicating the rest of the solver-option checks.
+function _validate_solver_options(options::SolverOptions{BigFloat})
+    _require_bigfloat_precision_bits(
+        options.precision_bits,
+        "precision_bits",
+    )
+    _require_bigfloat_precision_bits(
+        options.minimum_working_precision_bits,
+        "minimum_working_precision_bits",
+    )
+    return invoke(_validate_solver_options, Tuple{SolverOptions}, options)
+end
+
 function _frontend_number(::Type{T}, value, label::AbstractString) where {T}
     _is_auto(value) && throw(ArgumentError("$label is still :auto"))
     if value isa AbstractString
@@ -142,12 +170,11 @@ function _resolve_precision_bits(::Type{T}, requested) where {T}
     if requested isa Integer ||
        (requested isa AbstractString && all(isdigit, strip(requested)))
         bits = requested isa Integer ? Int(requested) : parse(Int, strip(requested))
-        bits > 0 || throw(ArgumentError("precision must be a positive bit count"))
         T === BigFloat || throw(ArgumentError(
             "an integer precision requests BigFloat input, but the problem is stored as $T; " *
             "re-ingest the model at BigFloat precision or use the CLI so parsing occurs at the requested precision",
         ))
-        return bits
+        return _require_bigfloat_precision_bits(bits, "precision")
     end
     requested_symbol = requested isa Symbol ? requested : Symbol(lowercase(strip(String(requested))))
     requested_symbol === :auto && return native

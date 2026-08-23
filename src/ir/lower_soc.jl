@@ -162,18 +162,6 @@ function _soc_identity_map(::Type{T}, dimension::Int, bits::Int) where {T<:Abstr
     )
 end
 
-"""Owned `sqrt(2)` computed with explicit BigFloat precision ownership."""
-function _soc_sqrt_two(::Type{T}, bits::Int) where {T<:AbstractFloat}
-    if T === BigFloat
-        # The operand is explicitly owned at `bits`; copying the result makes
-        # the ownership invariant visible even on Julia versions whose MPFR
-        # sqrt implementation returns a temporary with an inherited context.
-        operand = BigFloat(2; precision=bits)
-        return BigFloat(sqrt(operand); precision=bits)
-    end
-    return owned_arithmetic_copy(T, sqrt(T(2)); precision_bits=bits)
-end
-
 """
     _soc_forward_map(T, domain, dimension, bits)
 
@@ -193,7 +181,7 @@ function _soc_forward_map(
             :unsupported_dimension,
             "SOCLoweringError: rotated Lorentz blocks require dimension >= 3, got $dimension",
         ))
-        sqrt_two = _soc_sqrt_two(T, bits)
+        sqrt_two = _owned_sqrt_two(T, bits)
         rows = Int[1, 1, 2, 2]
         columns = Int[1, 2, 1, 2]
         values = T[
@@ -232,7 +220,7 @@ function _soc_inverse_map(
         "SOCLoweringError: rotated Lorentz blocks require dimension >= 3, got $dimension",
     ))
     half = owned_arithmetic_copy(T, 1 / 2; precision_bits=bits)
-    sqrt_two = _soc_sqrt_two(T, bits)
+    sqrt_two = _owned_sqrt_two(T, bits)
     owned_one = owned_arithmetic_copy(T, 1; precision_bits=bits)
     inverse_sqrt_two = _owned_arithmetic_eval(
         T,
@@ -291,9 +279,6 @@ function reconstruct_soc_dual(
     end
     return record.map * core_value
 end
-
-soc_primal_map(record::SOCPrimalReconstruction) = record.map
-soc_dual_map(record::SOCDualReconstruction) = record.map
 
 # ---------------------------------------------------------------------------
 # Sparse row assembly helpers
