@@ -68,6 +68,17 @@ after JIT warm-up). These are Julia heap bytes per iteration (BigFloat excludes 
 So the hot loop is **not yet zero-allocation** (the Phase-4 target). `test/allocation_contract.jl`
 registers a Float64 per-iteration regression ceiling (64 KB) plus an Optimal/certificate semantic gate.
 
+`Profile.Allocs` on one Float64 `newton_step!` (9296 B total) attributes the hot-loop allocation to:
+
+- NamedTuple construction + field access inside `newton_step!` (`step.jl` ~695/797/806/802/947,
+  ≈2.8 KB/iter via `boot.jl:792 NamedTuple`) — the dominant source; these are per-iteration
+  diagnostic records that the spec wants moved to cold state.
+- `vec` / `reshape` in the block kernels (`schur.jl` `buildP_owned!`/`accumulate_v_owned!`).
+- closure allocation in `_with_blas_threads` do-blocks (`step.jl:126`).
+- `_kkt_factorization_quality` (`step.jl:346`).
+
+These are the concrete Phase-4b targets for driving the iteration toward zero allocation.
+
 ## 3. Phase 3 increment — provider-neutral FactorCache (this branch)
 
 Added a provider-neutral factor-cache interface and a reference dense implementation
