@@ -1065,6 +1065,191 @@ function _public_identity_start(::Type{T}, dimension::Int) where {T<:AbstractFlo
     return matrix
 end
 
+@inline function _public_model_has_explicit_starts(model::Model)
+    return any(
+        record -> record.primal_start !== nothing ||
+                  record.dual_slack_start !== nothing,
+        model.variable_blocks,
+    ) || any(
+        record -> record.dual_start !== nothing,
+        model.constraint_blocks,
+    )
+end
+
+function _public_continuation_layout_matches(
+    model::Model,
+    source::Result,
+)
+    snapshot = source.model_snapshot
+    length(model.variable_blocks) == length(snapshot.variable_blocks) ||
+        return false
+    length(model.constraint_blocks) == length(snapshot.constraint_blocks) ||
+        return false
+    for index in eachindex(model.variable_blocks)
+        target = model.variable_blocks[index]
+        previous = snapshot.variable_blocks[index]
+        typeof(target.domain) === typeof(previous.domain) || return false
+        target.shape == previous.shape || return false
+        target.length == previous.length || return false
+        target.offset == previous.offset || return false
+    end
+    for index in eachindex(model.constraint_blocks)
+        target = model.constraint_blocks[index]
+        previous = snapshot.constraint_blocks[index]
+        typeof(target.domain) === typeof(previous.domain) || return false
+        target.shape == previous.shape || return false
+        length(target.refs) == previous.length || return false
+    end
+    target_sense = model.objective === nothing ? Minimize :
+                   typeof(model.objective.sense)
+    source_sense = typeof(source.objective_sense)
+    return target_sense === source_sense
+end
+
+function _public_cold_continuation_starts(
+    model::Model,
+    lowering,
+    reason::Symbol,
+)
+    cold = _public_sdp_starts(model, lowering)
+    return merge(cold, (
+        continuation_requested=true,
+        continuation_accepted=false,
+        continuation_reason=reason,
+    ))
+end
+
+function _public_sdp_continuation_starts(
+    model::Model{T},
+    lowering,
+    source,
+) where {T<:AbstractFloat}
+    source === nothing && return merge(
+        _public_sdp_starts(model, lowering),
+        (
+            continuation_requested=false,
+            continuation_accepted=false,
+            continuation_reason=:not_requested,
+        ),
+    )
+    source isa Result{T} ||
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :arithmetic_mismatch,
+        )
+    status(source) === :optimal ||
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :source_not_optimal,
+        )
+    source.certificate.available && source.certificate.valid ||
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :source_certificate_invalid,
+        )
+    _public_continuation_layout_matches(model, source) ||
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :layout_mismatch,
+        )
+
+    state = try
+        (
+            primal=value(source),
+            constraint_dual=dual(source),
+            dual_slack=dual_slack(source),
+        )
+    catch error
+        error isa ResultFieldNotRetained || rethrow()
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :state_not_retained,
+        )
+    end
+    snapshot = source.model_snapshot
+    length(state.primal) == length(snapshot.variables) &&
+        length(state.dual_slack) == length(snapshot.variables) &&
+        length(state.constraint_dual) == length(snapshot.constraints) ||
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :dimension_mismatch,
+        )
+    all(isfinite, state.primal) &&
+        all(isfinite, state.constraint_dual) &&
+        all(isfinite, state.dual_slack) ||
+        return _public_cold_continuation_starts(
+            model,
+            lowering,
+            :nonfinite_state,
+        )
+
+    x0 = _public_start_copy(T, state.primal, precision_bits(model))
+    y0 = Vector{T}(undef, length(lowering.equality_origins))
+    for (position, origin) in enumerate(lowering.equality_origins)
+        if origin.kind === :product_zero
+            block = source.model_snapshot.variable_blocks[origin.block]
+            y0[position] = state.dual_slack[
+                block.offset + origin.index - 1
+            ]
+        elseif origin.kind === :affine_zero
+            block = source.model_snapshot.constraint_blocks[origin.block]
+            y0[position] = state.constraint_dual[
+                block.offset + origin.index - 1
+            ]
+        else
+            throw(ArgumentError(
+                "unknown SDP equality origin kind $(origin.kind)",
+            ))
+        end
+    end
+    y0 = _public_start_copy(T, y0, precision_bits(model))
+
+    X0 = Matrix{T}[]
+    Y0 = Matrix{T}[]
+    for origin in lowering.psd_block_origins
+        packed = if origin.kind === :product_psd
+            block = source.model_snapshot.variable_blocks[origin.block]
+            state.dual_slack[
+                block.offset:(block.offset + block.length - 1)
+            ]
+        elseif origin.kind === :affine_psd
+            block = source.model_snapshot.constraint_blocks[origin.block]
+            state.constraint_dual[
+                block.offset:(block.offset + block.length - 1)
+            ]
+        else
+            throw(ArgumentError(
+                "unknown SDP PSD origin kind $(origin.kind)",
+            ))
+        end
+        push!(X0, _scaled_identity(T, one(T), origin.shape))
+        push!(
+            Y0,
+            _result_packed_matrix(
+                _public_start_copy(T, packed, precision_bits(model)),
+                origin.shape,
+                T,
+                true,
+            ),
+        )
+    end
+    return (
+        x0=x0,
+        X0=X0,
+        y0=y0,
+        Y0=Y0,
+        continuation_requested=true,
+        continuation_accepted=true,
+        continuation_reason=:none,
+    )
+end
+
 """Map Model starts to the native SDP core's x0/X0/y0/Y0 coordinates."""
 function _public_sdp_starts(
     model::Model{T},
@@ -1193,6 +1378,8 @@ function _public_solve_sdp_core(
         X0=starts.X0,
         y0=starts.y0,
         Y0=starts.Y0,
+        _continuation_start=starts.continuation_accepted,
+        _continuation_reason=starts.continuation_reason,
     )
 end
 
@@ -1202,6 +1389,7 @@ function _public_result_from_lowering(
     lowering,
     settings::Settings{T},
     outputs::Outputs,
+    warm_start,
 ) where {T<:AbstractFloat}
     options = _public_solver_options(settings)
     if lowering isa LPLowering{T}
@@ -1221,12 +1409,41 @@ function _public_result_from_lowering(
         return _public_result_from_soc(model, program, lowering, core_result, settings, outputs)
     elseif isdefined(@__MODULE__, :SDPLowering) &&
            lowering isa getfield(@__MODULE__, :SDPLowering)
+        starts = _public_sdp_continuation_starts(
+            model,
+            lowering,
+            warm_start,
+        )
         core_result = _public_solve_sdp_core(
             lowering.core,
             options,
-            _public_sdp_starts(model, lowering),
+            starts,
         )
-        return _public_result_from_sdp(model, program, lowering, core_result, settings, outputs)
+        result = _public_result_from_sdp(
+            model,
+            program,
+            lowering,
+            core_result,
+            settings,
+            outputs,
+        )
+        executed = get(core_result.termination, :executed, nothing)
+        initialization = executed === nothing ? nothing :
+                         get(executed, :initialization, nothing)
+        continuation = initialization === nothing ? nothing :
+                       get(initialization, :continuation, nothing)
+        if continuation !== nothing &&
+           get(continuation, :fallback, false) &&
+           result.diagnostics !== nothing
+            reason = get(continuation, :reason, :unknown)
+            push!(
+                result.diagnostics.warnings,
+                "Continuation warm start was rejected " *
+                "(reason=$reason); SDPX used its " *
+                "ordinary cold initialization.",
+            )
+        end
+        return result
     end
     throw(PublicOptimizeError(
         classify_native_cone_program(program).route,
@@ -1244,6 +1461,7 @@ function _optimize_impl(
     model::Model{T};
     settings::Union{Nothing,Settings}=nothing,
     outputs::Outputs=Outputs(),
+    warm_start=nothing,
 ) where {T<:AbstractFloat}
     resolved_settings = _public_normalize_settings(model, settings)
     resolved_outputs = normalize_outputs(outputs)
@@ -1252,6 +1470,22 @@ function _optimize_impl(
     # compile_product_cone_model owns the one model validation boundary.
     program = compile_product_cone_model(model)
     route = classify_native_cone_program(program)
+    if warm_start !== nothing
+        warm_start isa Result || throw(ArgumentError(
+            "warm_start must be a previous SDPX Result or nothing",
+        ))
+        route.route === :sdp_family || throw(PublicOptimizeError(
+            route.route,
+            :continuation_route_unavailable,
+            "optimize: Result continuation warm starts are currently " *
+            "available only for the native SDP route",
+        ))
+        _public_model_has_explicit_starts(model) && throw(ArgumentError(
+            "warm_start=Result cannot be combined with explicit model " *
+            "starts set by set_start!, set_dual_start!, or " *
+            "set_dual_slack_start!",
+        ))
+    end
     _public_validate_algorithm(route, resolved_settings)
     lowering = _public_lower_native(program, route, resolved_settings)
     return _public_result_from_lowering(
@@ -1260,29 +1494,61 @@ function _optimize_impl(
         lowering,
         resolved_settings,
         resolved_outputs,
+        warm_start,
     )
 end
 
 """
-    optimize!(model; settings=nothing, outputs=Outputs()) -> Result
+    optimize!(model; settings=nothing, outputs=Outputs(), warm_start=nothing) -> Result
 
 Compile and solve `model` through its single classified native LP, SOC, or SDP
 route. `settings` controls the numerical solve, while `outputs` controls which
 result data are retained. The returned `Result` is expressed in the
 original model coordinates.
+
+For a layout-compatible SDP model whose numerical coefficients have changed,
+`warm_start=previous_result` requests non-mutating continuation from a previous
+optimal, certified result. The source result must retain all primal,
+constraint-dual, and dual-slack components. SDPX rebuilds the primal PSD slack
+from the current model after preprocessing and scaling; it never reuses the
+previous Schur matrix, factorization, presolve map, or scaling. Continuation
+requires target Ruiz equilibration; `scaling=:none` safely uses ordinary cold
+initialization.
 """
 function optimize!(
     model::Model{T};
     settings::Union{Nothing,Settings}=nothing,
     outputs::Outputs=Outputs(),
+    warm_start=nothing,
 ) where {T<:AbstractFloat}
     if T === BigFloat && Base.precision(BigFloat) != precision_bits(model)
         return setprecision(BigFloat, precision_bits(model)) do
-            _optimize_impl(model; settings=settings, outputs=outputs)
+            _optimize_impl(
+                model;
+                settings=settings,
+                outputs=outputs,
+                warm_start=warm_start,
+            )
         end
     end
-    return _optimize_impl(model; settings=settings, outputs=outputs)
+    return _optimize_impl(
+        model;
+        settings=settings,
+        outputs=outputs,
+        warm_start=warm_start,
+    )
 end
 
-optimize!(model::Model, settings::Settings, outputs::Outputs=Outputs()) =
-    optimize!(model; settings=settings, outputs=outputs)
+function optimize!(
+    model::Model,
+    settings::Settings,
+    outputs::Outputs=Outputs();
+    warm_start=nothing,
+)
+    return optimize!(
+        model;
+        settings=settings,
+        outputs=outputs,
+        warm_start=warm_start,
+    )
+end

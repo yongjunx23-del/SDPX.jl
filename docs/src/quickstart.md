@@ -104,6 +104,58 @@ sdp_result = optimize!(sdp; settings=Settings(sdp; algorithm=:sdp, verbosity=0))
 Choose `algorithm=:lp`, `:socp`, or `:sdp` to match the model family shown in
 the table. `:auto` asks SDPX to select the matching implemented route.
 
+## Nearby SDP continuation
+
+For a sequence of native SDP models with the same ordered variable and cone
+layout but nearby numerical data, pass the previous certified `Result` as a
+non-mutating continuation start:
+
+```julia
+function nearby_sdp(lambda)
+    model = Model(Float64)
+    X = variable!(model, :X, 2, 2; domain=PSDCone())
+    constraint!(
+        model,
+        :upper,
+        [1 - X[1, 1] -X[1, 2]; -X[1, 2] lambda - X[2, 2]],
+        PSDCone(),
+    )
+    objective!(model, Maximize(), X[1, 2])
+    return model
+end
+
+continuation_outputs = Outputs(
+    :all,
+    :all,
+    :all;
+    objectives=true,
+    certificate=:summary,
+    diagnostics=:summary,
+)
+base_result = optimize!(
+    nearby_sdp(1.0);
+    outputs=continuation_outputs,
+)
+next_result = optimize!(
+    nearby_sdp(1.001);
+    outputs=continuation_outputs,
+    warm_start=base_result,
+)
+```
+
+The source must be optimal with a valid certificate and must retain all
+primal, constraint-dual, and dual-slack components. SDPX maps those original
+coordinates through the target model's fresh preprocessing and scaling,
+rebuilds the target primal PSD slack, and repairs the iterate to the strict
+interior. It does not reuse the old presolve map, Schur matrix, or
+factorization. An incompatible source safely uses ordinary cold
+initialization; when diagnostics are retained, the warning and initialization
+record contain the rejection reason. Result continuation is currently limited
+to the native SDP route and requires target Ruiz equilibration (the default
+`:auto` scaling route); `scaling=:none` safely falls back to cold
+initialization. It cannot be combined with explicit starts attached through
+`set_start!`, `set_dual_start!`, or `set_dual_slack_start!`.
+
 ## Settings and retained outputs
 
 `Settings{T}` is the typed policy boundary. The most useful fields are

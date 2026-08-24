@@ -238,6 +238,86 @@ end
     end
 end
 
+@testset "continuation PSD shifted-Cholesky repair" begin
+    # The continuation path adds only a post-scale arithmetic safety padding
+    # to an already-PD block. This is intentionally much smaller than the
+    # conservative Gershgorin repair used by the cold-start path.
+    interior = [2.0 0.5; 0.5 1.0]
+    upper_before = interior[1, 2]
+    repaired = _CS._continuation_psd_repair!(interior)
+    @test repaired.ok
+    @test repaired.reason === :none
+    @test repaired.attempts == 2
+    @test repaired.shift > 0.0
+    @test repaired.shift < 1e-6
+    @test interior[1, 2] == upper_before
+    @test isposdef(Symmetric(interior))
+
+    # A genuinely indefinite block needs a bounded ladder escalation.  The
+    # final shift must pass Cholesky, rather than trusting a lower bound that
+    # can be very loose for dense blocks.
+    indefinite = [1.0 2.0; 2.0 1.0]
+    repaired = _CS._continuation_psd_repair!(indefinite)
+    @test repaired.ok
+    @test repaired.reason === :none
+    @test repaired.attempts > 1
+    @test repaired.shift > 1.0
+    @test isposdef(Symmetric(indefinite))
+
+    # Here the negative common-mode eigenvalue is O(n) larger than every
+    # input entry. The final padding must therefore use the shifted scale,
+    # rather than the original scale, to preserve the strict-safety contract.
+    dense_dimension = 64
+    dense = fill(-1.0, dense_dimension, dense_dimension)
+    for index in 1:dense_dimension
+        dense[index, index] = 1.0
+    end
+    repaired = _CS._continuation_psd_repair!(dense)
+    @test repaired.ok
+    dense_scale = maximum(abs, dense)
+    @test eigmin(Symmetric(dense)) >
+          _CS._cold_start_safety(Float64, dense_scale)
+    @test repaired.scale == dense_scale
+
+    # Non-finite authoritative data fail closed and do not get partially
+    # mutated while trying to construct a shifted copy.
+    nonfinite = [1.0 0.0; 0.0 Inf]
+    before = copy(nonfinite)
+    repaired = _CS._continuation_psd_repair!(nonfinite)
+    @test !repaired.ok
+    @test repaired.reason === :nonfinite_state
+    @test nonfinite == before
+
+    # Owned BigFloat values keep the source precision even when the ambient
+    # task precision is temporarily lower.  This catches accidental scalar
+    # construction at ambient precision in the scratch/shift ladder.
+    big = setprecision(BigFloat, 256) do
+        BigFloat[2 0; 0 1]
+    end
+    repaired = setprecision(BigFloat, 64) do
+        _CS._continuation_psd_repair!(big)
+    end
+    @test repaired.ok
+    @test precision(repaired.shift) == 256
+    @test precision(big[1, 1]) == 256
+    @test precision(big[2, 2]) == 256
+    @test isposdef(Symmetric(big))
+
+    big_indefinite = setprecision(BigFloat, 256) do
+        BigFloat[1 0; 0 -BigFloat("0.001")]
+    end
+    repaired = setprecision(BigFloat, 64) do
+        _CS._continuation_psd_repair!(big_indefinite)
+    end
+    @test repaired.ok
+    @test precision(repaired.shift) == 256
+    @test big_indefinite[2, 2] >
+          _CS._cold_start_safety(BigFloat, repaired.scale)
+    big_scratch = _CS.alloc_zeros(BigFloat, 2, 2)
+    _CS.copy_owned!(big_scratch, big_indefinite)
+    @test _CS.kchol!(big_scratch)
+end
+
 @testset "cold-start centering shifts" begin
     @testset "T = $T" for T in (Float64, BigFloat)
         kappa = T(1.0)
@@ -376,6 +456,14 @@ end
         @test ok
         @test shift > zero(T)
         @test margin > sqrt(eps(T)) * max(one(T), scale)
+
+        continuation_psd = T[1 0; 0 -T(0.001)]
+        repaired = _CS._continuation_psd_repair!(continuation_psd)
+        @test repaired.ok
+        @test repaired.shift > T(0.001)
+        @test continuation_psd[2, 2] >
+              _CS._cold_start_safety(T, repaired.scale)
+        @test _CS.kchol!(copy(continuation_psd))
 
         ok, primal_shift, dual_shift = _CS._cold_start_centering_shifts(
             T(1), T(2), T(4),

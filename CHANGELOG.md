@@ -19,6 +19,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - End-to-end sparse LP execution and frozen-CSC sparse SDP Schur execution.
 - Certificates, executed diagnostics, and the canonical public LP/SOCP/SDP
   benchmark registry under `benchmark/`.
+- Opt-in native-SDP continuation through
+  `optimize!(target; warm_start=previous_result)`. For a nearby model with the
+  same ordered cone layout, SDPX transfers an owned original-coordinate
+  primal-dual iterate, rebuilds the primal PSD slack from the target data, and
+  reruns target preprocessing, scaling, Schur assembly, and factorization.
+  Missing or incompatible retained state falls back to ordinary cold
+  initialization with a named diagnostic reason. Native SDP continuation
+  requires target Ruiz equilibration; an explicit `scaling=:none` request
+  also falls back safely.
 - `ExponentialCone` (Phase A): the domain with its dimension fixed at 3 and
   validated at block construction (`NativeBlock` and `RowBlock`),
   `:exp_family` classification with mixed families reported in canonical
@@ -39,6 +48,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Explicit KKT formulation descriptor in `ExecutionPlan` plus a static
   formulation planner, kept independent of the selected linear-algebra
   provider.
+- Precision-generic continuation interior repair uses shifted Cholesky with a
+  Gershgorin upper bracket and geometric search. Gershgorin is never applied
+  as the shift itself, preserving dense cancellation while avoiding a
+  Float64-specific doubling limit for MultiFloat and BigFloat models. The
+  final arithmetic padding is recomputed against the post-shift scale before
+  the owned input block is mutated.
 - Provider-neutral `:standard`, MFLA, BFLA, and legacy linear-algebra routing:
   provider choice is final at planning time with no hidden runtime fallback.
   The bundled legacy provider (`src/la_backends/legacy.jl`) is included

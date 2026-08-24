@@ -312,6 +312,218 @@ function _cold_start_psd_shift!(matrix::AbstractMatrix{T}) where {T}
 end
 
 """
+    _continuation_psd_repair!(matrix) -> NamedTuple
+
+Lift a continuation PSD block to the strict interior with a bounded shifted
+Cholesky search. Unlike the cold-start Gershgorin repair, this path uses the
+Gershgorin margin only as a guaranteed upper bracket and geometrically
+searches for the smallest verified shift. An already positive-definite dense
+warm block therefore keeps its useful off-diagonal information up to the
+arithmetic safety floor.
+
+The input lower triangle is authoritative. The matrix is mutated only after a
+shifted copy has passed Cholesky, and mutable scalar arrays retain independent
+owned storage throughout.
+"""
+function _continuation_psd_repair!(matrix::AbstractMatrix{T}) where {T}
+    dimension = size(matrix, 1)
+    size(matrix, 2) == dimension || return (
+        ok=false,
+        reason=:dimension_mismatch,
+        shift=zero(T),
+        attempts=0,
+        scale=zero(T),
+    )
+    dimension == 0 && return (
+        ok=true,
+        reason=:none,
+        shift=zero(T),
+        attempts=0,
+        scale=one(T),
+    )
+    if T === BigFloat
+        bits = precision(matrix[1, 1])
+        if Base.precision(BigFloat) != bits
+            return setprecision(BigFloat, bits) do
+                _continuation_psd_repair!(matrix)
+            end
+        end
+    end
+    finite, scale, margin = _cold_start_psd_stats(matrix, dimension)
+    finite || return (
+        ok=false,
+        reason=:nonfinite_state,
+        shift=zero(T),
+        attempts=0,
+        scale=scale,
+    )
+    safety = _cold_start_safety(T, scale)
+    slack = _cold_start_rounding_slack(T, scale)
+    floor_shift = safety + slack
+    isfinite(floor_shift) && floor_shift > zero(T) || return (
+        ok=false,
+        reason=:pd_repair_failed,
+        shift=floor_shift,
+        attempts=0,
+        scale=scale,
+    )
+    scratch = alloc_zeros(T, dimension, dimension)
+
+    function shifted_cholesky_succeeds(shift)
+        copy_owned!(scratch, matrix)
+        @inbounds for index in 1:dimension
+            scratch[index, index] = scratch[index, index] + shift
+        end
+        return kchol!(scratch)
+    end
+
+    # Once `boundary_shift` has passed Cholesky, add a separate arithmetic
+    # padding whose threshold is computed from an upper bound on the *final*
+    # shifted scale.  Computing this only from the input scale is insufficient
+    # for a dense indefinite block: its Cholesky boundary can be O(n) larger
+    # than every input entry.
+    function post_shift_padding(boundary_shift)
+        padding = floor_shift
+        for _ in 1:16
+            post_scale_bound = scale + abs(boundary_shift) + padding
+            isfinite(post_scale_bound) || return false, padding
+            required = _cold_start_safety(T, post_scale_bound) +
+                       _cold_start_rounding_slack(T, post_scale_bound)
+            isfinite(required) && required > zero(T) ||
+                return false, required
+            required <= padding && return true, padding
+            padding = required
+        end
+        post_scale_bound = scale + abs(boundary_shift) + padding
+        isfinite(post_scale_bound) || return false, padding
+        required = _cold_start_safety(T, post_scale_bound) +
+                   _cold_start_rounding_slack(T, post_scale_bound)
+        return isfinite(required) && required <= padding, padding
+    end
+
+    function apply_padded_boundary(boundary_shift, attempts)
+        padding_ok, padding = post_shift_padding(boundary_shift)
+        padding_ok || return nothing, attempts, boundary_shift
+        final_shift = boundary_shift + padding
+        isfinite(final_shift) || return nothing, attempts, final_shift
+
+        # Inspect the unmodified shifted candidate before factorization. This
+        # preserves the documented all-or-nothing mutation boundary even if a
+        # custom arithmetic/backend rejects the final verification.
+        copy_owned!(scratch, matrix)
+        @inbounds for index in 1:dimension
+            scratch[index, index] = scratch[index, index] + final_shift
+        end
+        finite_after, scale_after, _ =
+            _cold_start_psd_stats(scratch, dimension)
+        finite_after || return nothing, attempts, final_shift
+        attempts += 1
+        kchol!(scratch) || return nothing, attempts, final_shift
+        _cold_start_add_psd_identity!(matrix, final_shift)
+        return (
+            ok=true,
+            reason=:none,
+            shift=final_shift,
+            attempts,
+            scale=scale_after,
+        ), attempts, final_shift
+    end
+
+    # A successful unshifted factorization is the strongest possible lower
+    # boundary witness: only the post-scale safety padding is then applied.
+    attempts = 1
+    if shifted_cholesky_succeeds(zero(T))
+        repaired, attempts, attempted_shift =
+            apply_padded_boundary(zero(T), attempts)
+        repaired === nothing || return repaired
+        return (
+            ok=false,
+            reason=:pd_repair_failed,
+            shift=attempted_shift,
+            attempts,
+            scale,
+        )
+    end
+
+    # A nearly semidefinite block commonly succeeds at the arithmetic floor.
+    # Treat that floor as a verified boundary and add a second, post-scale
+    # padding; this keeps the perturbation tiny without assuming that a bare
+    # Cholesky success already has the requested safety margin.
+    attempts += 1
+    if shifted_cholesky_succeeds(floor_shift)
+        repaired, attempts, attempted_shift =
+            apply_padded_boundary(floor_shift, attempts)
+        repaired === nothing || return repaired
+        return (
+            ok=false,
+            reason=:pd_repair_failed,
+            shift=attempted_shift,
+            attempts,
+            scale,
+        )
+    end
+
+    # `margin` is only an upper-bracket authority. Applying its implied shift
+    # directly can badly over-center a dense PSD block whose off-diagonal
+    # cancellation makes Gershgorin pessimistic.
+    lower_shift = floor_shift
+    upper_shift = max(
+        floor_shift + floor_shift,
+        floor_shift - margin + slack,
+    )
+    isfinite(upper_shift) && upper_shift > lower_shift || return (
+        ok=false,
+        reason=:pd_repair_failed,
+        shift=upper_shift,
+        attempts,
+        scale,
+    )
+    upper_succeeds = false
+    for _ in 1:8
+        attempts += 1
+        if shifted_cholesky_succeeds(upper_shift)
+            upper_succeeds = true
+            break
+        end
+        next_shift = upper_shift + upper_shift
+        isfinite(next_shift) || break
+        upper_shift = next_shift
+    end
+    upper_succeeds || return (
+        ok=false,
+        reason=:pd_repair_failed,
+        shift=upper_shift,
+        attempts,
+        scale,
+    )
+
+    # A geometric midpoint halves the exponent gap. This remains effective
+    # when BigFloat or MultiFloat makes `floor_shift` many orders of magnitude
+    # smaller than the successful Gershgorin bracket.
+    for _ in 1:32
+        midpoint = sqrt(lower_shift) * sqrt(upper_shift)
+        lower_shift < midpoint < upper_shift || break
+        attempts += 1
+        if shifted_cholesky_succeeds(midpoint)
+            upper_shift = midpoint
+        else
+            lower_shift = midpoint
+        end
+    end
+
+    repaired, attempts, attempted_shift =
+        apply_padded_boundary(upper_shift, attempts)
+    repaired === nothing || return repaired
+    return (
+        ok=false,
+        reason=:pd_repair_failed,
+        shift=attempted_shift,
+        attempts,
+        scale,
+    )
+end
+
+"""
     _cold_start_identity_mass_shifts(
         primal_identity_dot,
         dual_identity_dot,

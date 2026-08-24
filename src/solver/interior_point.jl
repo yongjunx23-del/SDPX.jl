@@ -1310,6 +1310,183 @@ function _accepted_sdp_trial_residuals!(
     return primal_residual_after, dual_residual_after
 end
 
+function _prepare_sdp_continuation_start(
+    prob::SDPProblem{T},
+    x0,
+    y0,
+    Y0,
+) where {T}
+    x0 isa AbstractVector && y0 isa AbstractVector &&
+        Y0 isa Union{AbstractVector,Tuple} || return (
+            ok=false,
+            reason=:dimension_mismatch,
+        )
+    length(x0) == prob.dims.m && length(y0) == prob.dims.n &&
+        length(Y0) == prob.dims.L || return (
+            ok=false,
+            reason=:dimension_mismatch,
+        )
+    all(isfinite, x0) && all(isfinite, y0) || return (
+        ok=false,
+        reason=:nonfinite_state,
+    )
+
+    X = Matrix{T}[]
+    Y = Matrix{T}[]
+    primal_shifts = Vector{T}(undef, prob.dims.L)
+    dual_shifts = Vector{T}(undef, prob.dims.L)
+    primal_attempts = Vector{Int}(undef, prob.dims.L)
+    dual_attempts = Vector{Int}(undef, prob.dims.L)
+    for block in 1:prob.dims.L
+        dimension = prob.dims.k[block]
+        size(Y0[block]) == (dimension, dimension) || return (
+            ok=false,
+            reason=:dimension_mismatch,
+        )
+        primal = alloc_zeros(T, dimension, dimension)
+        buildP_owned!(primal, prob.cons, block, x0)
+        kaxpby_owned!(
+            -one(T),
+            prob.C[block],
+            one(T),
+            primal,
+        )
+        dual = _owned_array_copy(T, Y0[block])
+        primal_repair = _continuation_psd_repair!(primal)
+        primal_repair.ok || return (
+            ok=false,
+            reason=primal_repair.reason,
+        )
+        dual_repair = _continuation_psd_repair!(dual)
+        dual_repair.ok || return (
+            ok=false,
+            reason=dual_repair.reason,
+        )
+        complementarity = kdot(primal, dual)
+        isfinite(complementarity) && complementarity > zero(T) || return (
+            ok=false,
+            reason=:centering_failed,
+        )
+        push!(X, primal)
+        push!(Y, dual)
+        primal_shifts[block] = primal_repair.shift
+        dual_shifts[block] = dual_repair.shift
+        primal_attempts[block] = primal_repair.attempts
+        dual_attempts[block] = dual_repair.attempts
+    end
+    p_res, d_res = solution_residuals(prob, x0, X, y0, Y)
+    isfinite(p_res) && isfinite(d_res) || return (
+        ok=false,
+        reason=:nonfinite_state,
+    )
+    degree = sum(prob.dims.k)
+    degree > 0 || return (
+        ok=false,
+        reason=:dimension_mismatch,
+    )
+    primal_scale = one(T) + max(
+        maximum(block -> knrmInf(prob.C[block]), 1:prob.dims.L),
+        prob.dims.n > 0 ? knrmInf(prob.b) : zero(T),
+    )
+    dual_scale = one(T) + knrmInf(prob.c)
+    normalized_p_res = p_res / primal_scale
+    normalized_d_res = d_res / dual_scale
+    isfinite(normalized_p_res) && isfinite(normalized_d_res) || return (
+        ok=false,
+        reason=:nonfinite_state,
+    )
+    kappa_before = sum(
+        block -> kdot(X[block], Y[block]),
+        1:prob.dims.L;
+        init=zero(T),
+    )
+    primal_mass = sum(
+        block -> tr(X[block]),
+        1:prob.dims.L;
+        init=zero(T),
+    )
+    dual_mass = sum(
+        block -> tr(Y[block]),
+        1:prob.dims.L;
+        init=zero(T),
+    )
+    # The iterate already lives in the freshly equilibrated target problem.
+    # Match average complementarity to its working-coordinate infeasibility;
+    # using the termination-normalized residual here under-centered the same
+    # nearby continuation point and left it outside the controller's stable
+    # neighbourhood.
+    residual_target = max(p_res, d_res)
+    target_kappa = T(degree) * residual_target
+    complementarity_deficit = max(zero(T), target_kappa - kappa_before)
+    primal_centering = zero(T)
+    dual_centering = zero(T)
+    if complementarity_deficit > zero(T)
+        centered, primal_centering, dual_centering =
+            _cold_start_centering_shifts(
+                complementarity_deficit,
+                primal_mass,
+                dual_mass,
+            )
+        centered || return (
+            ok=false,
+            reason=:centering_failed,
+        )
+        for block in 1:prob.dims.L
+            _cold_start_add_psd_identity!(X[block], primal_centering)
+            _cold_start_add_psd_identity!(Y[block], dual_centering)
+        end
+    end
+    kappa_after = sum(
+        block -> kdot(X[block], Y[block]),
+        1:prob.dims.L;
+        init=zero(T),
+    )
+    isfinite(kappa_after) && kappa_after > zero(T) || return (
+        ok=false,
+        reason=:centering_failed,
+    )
+    p_res_after, d_res_after = solution_residuals(prob, x0, X, y0, Y)
+    normalized_p_res_after = p_res_after / primal_scale
+    normalized_d_res_after = d_res_after / dual_scale
+    isfinite(normalized_p_res_after) &&
+        isfinite(normalized_d_res_after) || return (
+            ok=false,
+            reason=:nonfinite_state,
+        )
+    return (
+        ok=true,
+        reason=:none,
+        x=_owned_array_copy(T, x0),
+        X=X,
+        y=_owned_array_copy(T, y0),
+        Y=Y,
+        record=(
+            requested=true,
+            accepted=true,
+            fallback=false,
+            reason=:none,
+            primal_shifts=primal_shifts,
+            dual_shifts=dual_shifts,
+            primal_attempts=primal_attempts,
+            dual_attempts=dual_attempts,
+            primal_residual_before_centering=p_res,
+            dual_residual_before_centering=d_res,
+            normalized_primal_residual_before_centering=normalized_p_res,
+            normalized_dual_residual_before_centering=normalized_d_res,
+            primal_residual_after_centering=p_res_after,
+            dual_residual_after_centering=d_res_after,
+            normalized_primal_residual_after_centering=
+                normalized_p_res_after,
+            normalized_dual_residual_after_centering=
+                normalized_d_res_after,
+            complementarity_before_centering=kappa_before / T(degree),
+            complementarity_after_centering=kappa_after / T(degree),
+            primal_centering_shift=primal_centering,
+            dual_centering_shift=dual_centering,
+        ),
+    )
+end
+
 """
     _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
            x0=nothing, X0=nothing, y0=nothing, Y0=nothing, resume="") -> SDPResult{T}
@@ -1324,7 +1501,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
     resume::AbstractString="", deadline::Float64=Inf,
     apply_equilibration::Bool=false,
-    execution_plan::Union{Nothing,ExecutionPlan}=nothing) where {T}
+    execution_plan::Union{Nothing,ExecutionPlan}=nothing,
+    _continuation_start::Bool=false,
+    _continuation_reason::Symbol=:not_requested) where {T}
 
     core_started = time()
     core_started_ns = time_ns()
@@ -1360,7 +1539,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # the options below. A fully cold solve (`:auto` policy with no warm start
     # and no resume) takes the Phase-2 identity-metric KKT initialization;
     # every other path keeps its current point construction exactly.
-    fully_cold = opts.parameter_policy === :auto &&
+    automatic_policy = opts.parameter_policy === :auto
+    fully_cold = automatic_policy &&
                  x0 === nothing &&
                  X0 === nothing &&
                  y0 === nothing &&
@@ -1421,10 +1601,10 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     # The plan identity is deferred (`:automatic_mehrotra`); the executed
     # record reports the post-scaling resolution. Fixed policy never invokes
     # the resolver and records the exact user options as `:user_fixed`.
-    parameter_resolution_count = opts.parameter_policy === :auto ? 1 : 0
-    parameter_source = opts.parameter_policy === :auto ?
+    parameter_resolution_count = automatic_policy ? 1 : 0
+    parameter_source = automatic_policy ?
                        :post_scaling_mehrotra : :user_fixed
-    executed_parameters = if opts.parameter_policy === :auto
+    executed_parameters = if automatic_policy
         selected = recommended_parameters(solve_prob, opts)
         adaptive_sigma_max = selected.parameter_strategy === :adaptive ?
                              recommended_adaptive_sigma_max(
@@ -1498,6 +1678,57 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             Y0,
         )
     end
+    continuation_record = nothing
+    if _continuation_start && isempty(resume) && eq === nothing
+        # Raw working-coordinate residuals are the continuation centering
+        # signal.  Without target Ruiz equilibration that signal is not
+        # invariant to harmless coefficient rescaling, so fail closed to the
+        # ordinary cold path instead of applying a scale-dependent warm seed.
+        x0 = nothing
+        X0 = nothing
+        y0 = nothing
+        Y0 = nothing
+        fully_cold = automatic_policy
+        continuation_record = (
+            requested=true,
+            accepted=false,
+            fallback=true,
+            reason=:continuation_requires_equilibration,
+        )
+    elseif _continuation_start && isempty(resume)
+        continuation = _prepare_sdp_continuation_start(
+            solve_prob,
+            x0,
+            y0,
+            Y0,
+        )
+        if continuation.ok
+            x0 = continuation.x
+            X0 = continuation.X
+            y0 = continuation.y
+            Y0 = continuation.Y
+            continuation_record = continuation.record
+        else
+            x0 = nothing
+            X0 = nothing
+            y0 = nothing
+            Y0 = nothing
+            fully_cold = automatic_policy
+            continuation_record = (
+                requested=true,
+                accepted=false,
+                fallback=true,
+                reason=continuation.reason,
+            )
+        end
+    elseif _continuation_reason !== :not_requested
+        continuation_record = (
+            requested=true,
+            accepted=false,
+            fallback=true,
+            reason=_continuation_reason,
+        )
+    end
     parameter_selection_finished_ns = time_ns()
 
     L, m, n, k = solve_prob.dims
@@ -1549,6 +1780,12 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 opts,
             )
             if !cold_start.ok
+                failed_initialization = continuation_record === nothing ?
+                                        cold_start.record :
+                                        merge(
+                                            cold_start.record,
+                                            (continuation=continuation_record,),
+                                        )
                 return SDPResult{T}(
                     NumericalBreakdown,
                     "Cold-start KKT initialization failed " *
@@ -1577,13 +1814,13 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                     (
                         reason=cold_start.reason,
                         stage=:sdp_initialization,
-                        initialization=cold_start.record,
+                        initialization=failed_initialization,
                         executed=merge(
                             (solver=:sdp,),
                             executed_parameter_record,
                             (
                                 stage=:sdp_initialization,
-                                initialization=cold_start.record,
+                                initialization=failed_initialization,
                             ),
                         ),
                     ),
@@ -1594,7 +1831,12 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
             y = cold_start.y
             Y = cold_start.Y
             μ = cold_start.μ
-            initialization_record = cold_start.record
+            initialization_record = continuation_record === nothing ?
+                                    cold_start.record :
+                                    merge(
+                                        cold_start.record,
+                                        (continuation=continuation_record,),
+                                    )
         else
             x = x0 === nothing ? alloc_zeros(T, m) : _owned_array_copy(T, x0)
             y = y0 === nothing ? alloc_zeros(T, n) : _owned_array_copy(T, y0)
@@ -1641,6 +1883,27 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                     )
             end
             μ = [opts.β * kdot(X[l], Y[l]) / k[l] for l in 1:L]
+            if continuation_record !== nothing
+                initialization_record = if get(
+                    continuation_record,
+                    :accepted,
+                    false,
+                )
+                    (
+                        method=:continuation,
+                        path=:warm_start,
+                        applied=true,
+                        continuation=continuation_record,
+                    )
+                else
+                    (
+                        method=:identity_cold_start,
+                        path=:cold_start,
+                        applied=false,
+                        continuation=continuation_record,
+                    )
+                end
+            end
         end
         iter = 0
         restarts = 0
@@ -2753,6 +3016,8 @@ function solve!(
     Y0=nothing,
     resume::AbstractString="",
     _prepared_data=nothing,
+    _continuation_start::Bool=false,
+    _continuation_reason::Symbol=:not_requested,
 ) where {T}
     return _solve_pipeline!(
         prob,
@@ -2763,6 +3028,8 @@ function solve!(
         Y0=Y0,
         resume=resume,
         _prepared_data=_prepared_data,
+        _continuation_start=_continuation_start,
+        _continuation_reason=_continuation_reason,
     )
 end
 
@@ -2981,6 +3248,8 @@ function solve!(
     Y0=nothing,
     resume::AbstractString="",
     _prepared_data=nothing,
+    _continuation_start::Bool=false,
+    _continuation_reason::Symbol=:not_requested,
 )
     _validate_solver_options(opts)
     ladder_plan = _build_precision_ladder_plan(
@@ -3016,6 +3285,8 @@ function solve!(
             resume=resume,
             _prepared_data=reusable_prepared_data,
             ladder_context=context,
+            _continuation_start=_continuation_start,
+            _continuation_reason=_continuation_reason,
         )
         return Base.precision(BigFloat) == bits ?
                run() :
@@ -3138,6 +3409,8 @@ function _solve_pipeline!(
     resume::AbstractString="",
     _prepared_data=nothing,
     ladder_context::Union{Nothing,PrecisionLadderContext}=nothing,
+    _continuation_start::Bool=false,
+    _continuation_reason::Symbol=:not_requested,
 ) where {T}
     _validate_solver_options(opts)
     pipeline_started = time()
@@ -3511,6 +3784,8 @@ function _solve_pipeline!(
             deadline=deadline,
             apply_equilibration=plan.scaling === :sdp_ruiz,
             execution_plan=plan,
+            _continuation_start=_continuation_start,
+            _continuation_reason=_continuation_reason,
         )
         # Keep diagnostics out of the hot path: recursively traversing every
         # sparse coefficient object can cost much more than a warmed solve.

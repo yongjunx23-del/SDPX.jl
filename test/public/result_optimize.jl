@@ -257,6 +257,298 @@ end
     )
 end
 
+@testset "native SDP Result continuation" begin
+    # Keep the native layout fixed while changing one numerical objective
+    # coefficient.  This is the public analogue of a nearby lambda step.
+    function continuation_model(lambda; dimension=2)
+        model = SDPX.Model(Float64)
+        X = SDPX.variable!(
+            model,
+            :X,
+            dimension,
+            dimension;
+            domain=SDPX.PSDCone(),
+        )
+        upper = if dimension == 2
+            [1 - X[1, 1] -X[1, 2]; -X[1, 2] 1 - X[2, 2]]
+        else
+            reshape([1 - X[1, 1]], 1, 1)
+        end
+        SDPX.constraint!(model, :upper, upper, SDPX.PSDCone())
+        objective = dimension == 2 ? lambda * X[1, 2] + 3 : lambda * X[1, 1] + 3
+        SDPX.objective!(model, SDPX.Maximize(), objective)
+        return model, X
+    end
+
+    settings = SDPX.Settings{Float64}(
+        limits=SDPX.Limits(iterations=80, time=30.0, threads=1),
+        verbosity=0,
+    )
+    all_outputs = SDPX.Outputs(:all, :all, :all; diagnostics=:summary)
+
+    base, _ = continuation_model(2.0)
+    source = SDPX.optimize!(base; settings=settings, outputs=all_outputs)
+    @test SDPX.status(source) === :optimal
+    @test SDPX.certificate(source).valid
+    source_primal = SDPX.value(source)
+
+    target, target_X = continuation_model(2.01)
+    continued = SDPX.optimize!(
+        target;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=source,
+    )
+    @test SDPX.status(continued) === :optimal
+    @test SDPX.certificate(continued).valid
+    @test isfinite(SDPX.primal_objective(continued))
+    @test SDPX.primal_objective(continued) ≈ 4.005 atol=1e-5
+    initialization = SDPX.diagnostics(continued).selected_algorithms.initialization
+    @test initialization.method === :continuation
+    @test initialization.path === :warm_start
+    @test initialization.applied
+    @test initialization.continuation.accepted
+    @test !initialization.continuation.fallback
+    # The source Result is immutable from the caller's perspective; solving
+    # the target must not overwrite retained source coordinates.
+    @test SDPX.value(source) == source_primal
+    @test size(SDPX.value(continued, target_X)) == (2, 2)
+
+    positional_target, _ = continuation_model(2.005)
+    positional = SDPX.optimize!(
+        positional_target,
+        settings,
+        all_outputs;
+        warm_start=source,
+    )
+    @test SDPX.status(positional) === :optimal
+    @test SDPX.diagnostics(positional).selected_algorithms.initialization.method ===
+          :continuation
+
+    # Continuation centering consumes residuals in fresh equilibrated working
+    # coordinates. An explicit no-scaling target therefore fails closed to
+    # the normal KKT cold path instead of applying a scale-dependent seed.
+    unscaled_target, _ = continuation_model(2.01)
+    unscaled = SDPX.optimize!(
+        unscaled_target;
+        settings=SDPX.Settings{Float64}(
+            limits=SDPX.Limits(iterations=80, time=30.0, threads=1),
+            scaling=:none,
+            verbosity=0,
+        ),
+        outputs=all_outputs,
+        warm_start=source,
+    )
+    @test SDPX.status(unscaled) === :optimal
+    unscaled_init = SDPX.diagnostics(unscaled).selected_algorithms.initialization
+    @test unscaled_init.path === :kkt_cold_start
+    @test unscaled_init.continuation.fallback
+    @test !unscaled_init.continuation.accepted
+    @test unscaled_init.continuation.reason ===
+          :continuation_requires_equilibration
+    @test any(
+        warning -> occursin("continuation_requires_equilibration", warning),
+        SDPX.diagnostics(unscaled).warnings,
+    )
+
+    # The low-level fixed parameter policy uses its ordinary identity seed
+    # after a rejected continuation and must not report that a warm start was
+    # applied. Public Settings currently selects the automatic policy, so
+    # exercise this expert core boundary directly.
+    fixed_program = SDPX.compile_product_cone_model(unscaled_target)
+    fixed_lowering = SDPX.lower_sdp_native(
+        fixed_program;
+        sparse=false,
+        verbosity=0,
+    )
+    fixed_fallback = SDPX.solve!(
+        fixed_lowering.core,
+        SDPX.SolverOptions{Float64}(
+            parameter_policy=:fixed,
+            algorithm=:sdp,
+            presolve=false,
+            scaling=:none,
+            iter_max=80,
+            max_time=30.0,
+            verbosity=0,
+        );
+        _continuation_reason=:layout_mismatch,
+    )
+    fixed_init = fixed_fallback.termination.executed.initialization
+    @test fixed_init.method === :identity_cold_start
+    @test fixed_init.path === :cold_start
+    @test !fixed_init.applied
+    @test fixed_init.continuation.fallback
+    @test fixed_init.continuation.reason === :layout_mismatch
+
+    # The compiler normalizes an omitted objective to Minimize().  Continuation
+    # performs the same normalization when comparing layouts.
+    function feasibility_model()
+        model = SDPX.Model(Float64)
+        X = SDPX.variable!(model, :X, 1, 1; domain=SDPX.PSDCone())
+        SDPX.constraint!(
+            model,
+            :bounded,
+            reshape([1 - X[1, 1]], 1, 1),
+            SDPX.PSDCone(),
+        )
+        return model
+    end
+    feasibility_source = SDPX.optimize!(
+        feasibility_model();
+        settings=settings,
+        outputs=all_outputs,
+    )
+    feasibility_continued = SDPX.optimize!(
+        feasibility_model();
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=feasibility_source,
+    )
+    @test SDPX.status(feasibility_continued) === :optimal
+    feasibility_diagnostics = SDPX.diagnostics(feasibility_continued)
+    feasibility_init = feasibility_diagnostics.selected_algorithms.initialization
+    @test feasibility_init.path === :warm_start
+    @test feasibility_init.applied
+
+    # A source that did not retain all three continuation vectors is rejected
+    # before the core and safely falls back to ordinary cold initialization.
+    sparse_outputs = SDPX.Outputs(
+        :none,
+        :none,
+        :none;
+        objectives=false,
+        certificate=:summary,
+        diagnostics=:summary,
+    )
+    sparse_source_model, _ = continuation_model(2.0)
+    sparse_source = SDPX.optimize!(
+        sparse_source_model;
+        settings=settings,
+        outputs=sparse_outputs,
+    )
+    @test SDPX.status(sparse_source) === :optimal
+    missing_state_model, _ = continuation_model(2.01)
+    missing_state = SDPX.optimize!(
+        missing_state_model;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=sparse_source,
+    )
+    @test SDPX.status(missing_state) === :optimal
+    missing_init = SDPX.diagnostics(missing_state).selected_algorithms.initialization
+    @test missing_init.continuation.requested
+    @test !missing_init.continuation.accepted
+    @test missing_init.continuation.reason === :state_not_retained
+    @test any(
+        warning -> occursin("state_not_retained", warning),
+        SDPX.diagnostics(missing_state).warnings,
+    )
+
+    # A non-optimal source is never used as a continuation point.
+    limited_model, _ = continuation_model(2.0)
+    limited_source = SDPX.optimize!(
+        limited_model;
+        settings=SDPX.Settings{Float64}(
+            limits=SDPX.Limits(iterations=1, time=30.0, threads=1),
+            verbosity=0,
+        ),
+        outputs=all_outputs,
+    )
+    @test SDPX.status(limited_source) !== :optimal
+    nonoptimal_target, _ = continuation_model(2.01)
+    nonoptimal_fallback = SDPX.optimize!(
+        nonoptimal_target;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=limited_source,
+    )
+    @test SDPX.status(nonoptimal_fallback) === :optimal
+    nonoptimal_init = SDPX.diagnostics(nonoptimal_fallback).selected_algorithms.initialization
+    @test !nonoptimal_init.continuation.accepted
+    @test nonoptimal_init.continuation.reason === :source_not_optimal
+
+    # If a source Result is corrupted through internal fields after its
+    # certificate was created, the adapter still sees finite values but the
+    # shifted-Cholesky preparation rejects them.  The core must then restore
+    # the ordinary auto-policy KKT cold start, not the legacy identity seed.
+    corrupted_model, _ = continuation_model(2.0)
+    corrupted_source = SDPX.optimize!(
+        corrupted_model;
+        settings=settings,
+        outputs=all_outputs,
+    )
+    fill!(corrupted_source.dual_slack_data.values, -floatmax(Float64))
+    corrupted_target, _ = continuation_model(2.01)
+    recovered = SDPX.optimize!(
+        corrupted_target;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=corrupted_source,
+    )
+    @test SDPX.status(recovered) === :optimal
+    recovered_init = SDPX.diagnostics(recovered).selected_algorithms.initialization
+    @test recovered_init.path === :kkt_cold_start
+    @test recovered_init.continuation.fallback
+    @test !recovered_init.continuation.accepted
+    @test any(
+        warning -> occursin("Continuation warm start was rejected", warning),
+        SDPX.diagnostics(recovered).warnings,
+    )
+
+    # Retained storage is result-owned but mutable internally. If it is
+    # corrupted to an impossible length, reject it before any origin slice so
+    # continuation remains a safe fallback rather than a BoundsError.
+    short_model, _ = continuation_model(2.0)
+    short_source = SDPX.optimize!(
+        short_model;
+        settings=settings,
+        outputs=all_outputs,
+    )
+    resize!(short_source.dual_slack_data.values, 1)
+    short_target, _ = continuation_model(2.01)
+    short_fallback = SDPX.optimize!(
+        short_target;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=short_source,
+    )
+    @test SDPX.status(short_fallback) === :optimal
+    short_init =
+        SDPX.diagnostics(short_fallback).selected_algorithms.initialization
+    @test short_init.continuation.fallback
+    @test !short_init.continuation.accepted
+    @test short_init.continuation.reason === :dimension_mismatch
+
+    # A different block shape is a safe layout mismatch, even when the
+    # objective sense and cone family agree.
+    mismatch_model, _ = continuation_model(2.0; dimension=1)
+    mismatch_source = SDPX.optimize!(mismatch_model; settings=settings, outputs=all_outputs)
+    @test SDPX.status(mismatch_source) === :optimal
+    mismatch_target, _ = continuation_model(2.01)
+    mismatch = SDPX.optimize!(
+        mismatch_target;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=mismatch_source,
+    )
+    @test SDPX.status(mismatch) === :optimal
+    mismatch_init = SDPX.diagnostics(mismatch).selected_algorithms.initialization
+    @test !mismatch_init.continuation.accepted
+    @test mismatch_init.continuation.reason === :layout_mismatch
+
+    # Explicit model starts and Result continuation are mutually exclusive;
+    # combining them would make the source of the iterate ambiguous.
+    conflicting_model, conflicting_X = continuation_model(2.01)
+    SDPX.set_start!(conflicting_X, [1.0 0.0; 0.0 1.0])
+    @test_throws ArgumentError SDPX.optimize!(
+        conflicting_model;
+        settings=settings,
+        outputs=all_outputs,
+        warm_start=source,
+    )
+end
+
 @testset "NativeSOC warm starts and RSOC adjoint mapping" begin
     settings = SDPX.Settings{Float64}(
         tolerances=SDPX.Tolerances{Float64}(
