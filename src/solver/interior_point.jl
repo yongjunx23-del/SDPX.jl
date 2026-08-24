@@ -1927,35 +1927,35 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
         total_refine_steps += result.refine_steps
         last_refine_residual = result.refine_residual
         total_reg += result.reg_attempts
-        phase_residual += result.phase_times.residual_and_block_factor
-        phase_schur += result.phase_times.schur_assembly
-        phase_kkt += result.phase_times.kkt_factorization
-        phase_predictor += result.phase_times.predictor
-        phase_corrector += result.phase_times.corrector
+        phase_residual += ws.phase_times.residual_and_block_factor
+        phase_schur += ws.phase_times.schur_assembly
+        phase_kkt += ws.phase_times.kkt_factorization
+        phase_predictor += ws.phase_times.predictor
+        phase_corrector += ws.phase_times.corrector
         phase_kkt_schur_copy +=
-            result.phase_times.kkt_schur_copy
+            ws.phase_times.kkt_schur_copy
         phase_kkt_schur_factorization +=
-            result.phase_times.kkt_schur_factorization
+            ws.phase_times.kkt_schur_factorization
         phase_kkt_constraint_triangular_solve +=
-            result.phase_times.kkt_constraint_triangular_solve
+            ws.phase_times.kkt_constraint_triangular_solve
         phase_kkt_equality_gram +=
-            result.phase_times.kkt_equality_gram
+            ws.phase_times.kkt_equality_gram
         phase_kkt_equality_factorization +=
-            result.phase_times.kkt_equality_factorization
-        phase_kkt_other += result.phase_times.kkt_other
-        phase_predictor_rhs += result.phase_times.predictor_rhs
+            ws.phase_times.kkt_equality_factorization
+        phase_kkt_other += ws.phase_times.kkt_other
+        phase_predictor_rhs += ws.phase_times.predictor_rhs
         phase_predictor_linear_solve +=
-            result.phase_times.predictor_linear_solve
+            ws.phase_times.predictor_linear_solve
         phase_predictor_direction_recovery +=
-            result.phase_times.predictor_direction_recovery
+            ws.phase_times.predictor_direction_recovery
         phase_complementarity_analysis +=
-            result.phase_times.complementarity_analysis
-        phase_corrector_rhs += result.phase_times.corrector_rhs
+            ws.phase_times.complementarity_analysis
+        phase_corrector_rhs += ws.phase_times.corrector_rhs
         phase_corrector_linear_solve +=
-            result.phase_times.corrector_linear_solve
-        phase_refinement += result.phase_times.refinement
+            ws.phase_times.corrector_linear_solve
+        phase_refinement += ws.phase_times.refinement
         phase_corrector_direction_recovery +=
-            result.phase_times.corrector_direction_recovery
+            ws.phase_times.corrector_direction_recovery
 
         line_search_started = time_ns()
         selected_parameters = result.iteration_parameters

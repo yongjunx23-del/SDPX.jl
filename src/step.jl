@@ -1034,6 +1034,28 @@ function newton_step!(
         kph_equality_gram +
         kph_equality_factorization
 
+    # Write per-iteration phase timings into the preallocated cold-state record.
+    ws.phase_times.residual_and_block_factor =
+        (residual_finished - phase_started) / 1.0e9
+    ws.phase_times.schur_assembly = (schur_finished - residual_finished) / 1.0e9
+    ws.phase_times.kkt_factorization = (factor_finished - schur_finished) / 1.0e9
+    ws.phase_times.predictor = (predictor_finished - factor_finished) / 1.0e9
+    ws.phase_times.corrector = (corrector_finished - predictor_finished) / 1.0e9
+    ws.phase_times.kkt_schur_copy = kph_schur_copy
+    ws.phase_times.kkt_schur_factorization = kph_schur_factorization
+    ws.phase_times.kkt_constraint_triangular_solve = kph_constraint_triangular_solve
+    ws.phase_times.kkt_equality_gram = kph_equality_gram
+    ws.phase_times.kkt_equality_factorization = kph_equality_factorization
+    ws.phase_times.kkt_other = max(0.0, kkt_total - kkt_accounted)
+    ws.phase_times.predictor_rhs = (predictor_rhs_finished - factor_finished) / 1.0e9
+    ws.phase_times.predictor_linear_solve = (predictor_solve_finished - predictor_rhs_finished) / 1.0e9
+    ws.phase_times.predictor_direction_recovery = (predictor_finished - predictor_solve_finished) / 1.0e9
+    ws.phase_times.complementarity_analysis = (complementarity_finished - predictor_finished) / 1.0e9
+    ws.phase_times.corrector_rhs = (corrector_rhs_finished - complementarity_finished) / 1.0e9
+    ws.phase_times.corrector_linear_solve = (corrector_solve_finished - corrector_rhs_finished) / 1.0e9
+    ws.phase_times.refinement = (refinement_finished - corrector_solve_finished) / 1.0e9
+    ws.phase_times.corrector_direction_recovery = (corrector_finished - refinement_finished) / 1.0e9
+
     return (
         status=:ok,
         reason="",
@@ -1058,41 +1080,6 @@ function newton_step!(
         iteration_parameters=iteration_parameters,
         refine_steps=refine_steps,
         refine_residual=refine_residual,
-        phase_times=(
-            residual_and_block_factor=
-                (residual_finished - phase_started) / 1.0e9,
-            schur_assembly=(schur_finished - residual_finished) / 1.0e9,
-            kkt_factorization=(factor_finished - schur_finished) / 1.0e9,
-            predictor=(predictor_finished - factor_finished) / 1.0e9,
-            corrector=(corrector_finished - predictor_finished) / 1.0e9,
-            kkt_schur_copy=kph_schur_copy,
-            kkt_schur_factorization=kph_schur_factorization,
-            kkt_constraint_triangular_solve=
-                kph_constraint_triangular_solve,
-            kkt_equality_gram=kph_equality_gram,
-            kkt_equality_factorization=
-                kph_equality_factorization,
-            kkt_other=max(0.0, kkt_total - kkt_accounted),
-            predictor_rhs=
-                (predictor_rhs_finished - factor_finished) / 1.0e9,
-            predictor_linear_solve=
-                (predictor_solve_finished - predictor_rhs_finished) /
-                1.0e9,
-            predictor_direction_recovery=
-                (predictor_finished - predictor_solve_finished) / 1.0e9,
-            complementarity_analysis=
-                (complementarity_finished - predictor_finished) / 1.0e9,
-            corrector_rhs=
-                (corrector_rhs_finished - complementarity_finished) /
-                1.0e9,
-            corrector_linear_solve=
-                (corrector_solve_finished - corrector_rhs_finished) /
-                1.0e9,
-            refinement=
-                (refinement_finished - corrector_solve_finished) / 1.0e9,
-            corrector_direction_recovery=
-                (corrector_finished - refinement_finished) / 1.0e9,
-        ),
     )
 end
 

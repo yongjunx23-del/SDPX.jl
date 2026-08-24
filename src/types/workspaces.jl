@@ -1,3 +1,31 @@
+# Per-iteration Newton phase timings, stored in a preallocated Workspace field
+# so `newton_step!` does not construct a fresh 19-field NamedTuple every
+# iteration (Phase-4 cold-state relocation). Pure timing; no control flow.
+mutable struct NewtonPhaseTimes
+    residual_and_block_factor::Float64
+    schur_assembly::Float64
+    kkt_factorization::Float64
+    predictor::Float64
+    corrector::Float64
+    kkt_schur_copy::Float64
+    kkt_schur_factorization::Float64
+    kkt_constraint_triangular_solve::Float64
+    kkt_equality_gram::Float64
+    kkt_equality_factorization::Float64
+    kkt_other::Float64
+    predictor_rhs::Float64
+    predictor_linear_solve::Float64
+    predictor_direction_recovery::Float64
+    complementarity_analysis::Float64
+    corrector_rhs::Float64
+    corrector_linear_solve::Float64
+    refinement::Float64
+    corrector_direction_recovery::Float64
+end
+NewtonPhaseTimes() = NewtonPhaseTimes(
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+)
 mutable struct DenseAugmentedKKTWorkspace{T}
     matrix::Matrix{T}
     factor_buffer::Matrix{T}
