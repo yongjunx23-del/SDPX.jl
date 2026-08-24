@@ -135,6 +135,19 @@ allocation-profiled against this baseline.
   gates that `working_precision_policy=:fixed` uses one precision end-to-end (no ladder for
   fixed-width types, one rung at requested bits for BigFloat, valid certificate, no unauthorized
   fallback). The default is still `:auto`; flipping it to `:fixed` needs a ladder regression pass.
+
+## Multi-precision LP/SOCP benchmark
+
+`benchmark/multiprecision_lp_socp_benchmark.jl` solves a 1x1-PSD-block LP (min x s.t. x - 1 >= 0; optimum 1) and a 2x2-PSD-block SOCP-style problem (min X11+X22 s.t. diag PSD; optimum 0) across Float64, Float64x2/x3/x4, BigFloat256. All arithmetics converge to Optimal with consistent objectives:
+
+| arithmetic | LP pObj | SOCP-style pObj |
+|---|---|---|
+| Float64 | -0.9999999999683 | 4.05e-11 |
+| Float64x2 | -0.999999999968333 | 4.05e-11 |
+| Float64x3 | -0.999999999968333333 | 1.01e-11 |
+| Float64x4 | -0.999999999968333333333 | 1.01e-11 |
+| BigFloat256 | -0.999999999968333333333 | 4.05e-11 |
+
 - Phase 6 (HSD): LP path already uses tau/kappa; no full bordered-system HSD embedding yet.
 - Phase 7 (reduction): chordal.jl exists; no SymmetryReduction or ConeAlgebra layer yet.
 - Known baseline anomaly to track: soc_q3 @ Float64x2 stalls.
