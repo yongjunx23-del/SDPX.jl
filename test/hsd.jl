@@ -50,3 +50,21 @@ end
     @test SDPX.is_skew_symmetric(skew)
     @test all(isapprox(diag(M), ones(system.dim); atol=1e-12))
 end
+
+@testset "Phase 6 HSD classify" begin
+    # Optimal LP: min x1+x2 s.t. x1+x2=1, x>=0. x=(1,0), y=0, s=(0,0), tau=1.
+    A = reshape([1.0, 1.0], 1, 2)
+    b = [1.0]
+    c = [1.0, 1.0]
+    r = SDPX.hsd_classify(A, b, c, [1.0, 0.0], [1.0], [0.0, 0.0], 1.0, 1e-12)
+    @test r.status === :optimal
+    @test r.valid
+
+    # Primal-infeasible LP: x1+x2=1 and x1+x2=2. Farkas y=(-1,1).
+    A2 = reshape([1.0, 1.0], 2, 1)
+    b2 = [1.0, 2.0]
+    c2 = [0.0]
+    r2 = SDPX.hsd_classify(A2, b2, c2, [0.0], [-1.0, 1.0], [0.0], 0.0, 1.0)
+    @test r2.status === :primal_infeasible
+    @test r2.valid
+end

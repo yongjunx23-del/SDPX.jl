@@ -110,3 +110,34 @@ function hsd_bordered_system(A::AbstractMatrix{T}, b::AbstractVector{T},
     end
     return (matrix=M, m=m, n=n, dim=N)
 end
+
+"""Classify an LP HSD candidate (x, y, s, tau, kappa) into a validated status
+using the certificate functions.  Returns a NamedTuple with `status`
+(:optimal / :primal_infeasible / :dual_infeasible / :undetermined) and the
+matching certificate validity flags.  Does not solve; classifies a given
+candidate in original coordinates."""
+function hsd_classify(A::AbstractMatrix{T}, b::AbstractVector{T},
+    c::AbstractVector{T}, x::AbstractVector{T}, y::AbstractVector{T},
+    s::AbstractVector{T}, tau::T, kappa::T) where {T}
+    m, n = size(A)
+    if tau > T(1e-8)
+        # Rescale to the original LP and check primal/dual feasibility.
+        xp = x ./ tau
+        yp = y ./ tau
+        primal_res = norm(A * xp - b, Inf)
+        dual_res = norm(transpose(A) * yp + s ./ tau - c, Inf)
+        if primal_res < T(1e-8) && dual_res < T(1e-8) && all(v -> v >= -T(1e-8), xp)
+            return (status=:optimal, valid=true, primal_residual=primal_res, dual_residual=dual_res)
+        end
+    end
+    if tau <= T(1e-8) && kappa > T(1e-8)
+        primal_cert = primal_infeasibility_certificate(A, b, y)
+        dual_cert = dual_infeasibility_certificate(A, c, x)
+        if primal_cert.valid
+            return (status=:primal_infeasible, valid=true, primal_residual=zero(T), dual_residual=zero(T))
+        elseif dual_cert.valid
+            return (status=:dual_infeasible, valid=true, primal_residual=zero(T), dual_residual=zero(T))
+        end
+    end
+    return (status=:undetermined, valid=false, primal_residual=zero(T), dual_residual=zero(T))
+end
