@@ -112,3 +112,37 @@ function reconstruct(reduced::AbstractVector{T}, perm::Vector{Int}) where {T}
     end
     return original
 end
+
+"""Orbits of the diagonal pair action `sigma*(i,j)=(sigma(i),sigma(j))`.
+A group-invariant matrix is exactly constant on each pair orbit."""
+function pair_orbits(g::SymmetryGroup)
+    seen = Set{Tuple{Int,Int}}()
+    orbits = Vector{Vector{Tuple{Int,Int}}}()
+    for i in 1:g.n, j in 1:g.n
+        (i, j) in seen && continue
+        orb = Set([(i, j)])
+        frontier = [(i, j)]
+        while !isempty(frontier)
+            (a, b) = popfirst!(frontier)
+            for sigma in g.generators
+                nxt = (sigma[a], sigma[b])
+                nxt in orb || (push!(orb, nxt); push!(frontier, nxt))
+            end
+        end
+        union!(seen, orb)
+        push!(orbits, sort!(collect(orb)))
+    end
+    return orbits
+end
+
+"""Whether `A` is constant on every diagonal pair orbit (the commutant
+condition, equivalent to group invariance)."""
+function is_constant_on_pair_orbits(A::AbstractMatrix, orbits::Vector{<:AbstractVector{<:Tuple{Int,Int}}})
+    for orb in orbits
+        reference = A[first(orb)...]
+        for pair in orb
+            A[pair...] == reference || return false
+        end
+    end
+    return true
+end
