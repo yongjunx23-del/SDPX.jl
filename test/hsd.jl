@@ -135,3 +135,15 @@ end
     xp = r.x ./ r.tau
     @test isapprox(xp[2], 0.0; atol=1e-5)
 end
+
+@testset "Phase 6 HSD path-following multi-precision" begin
+    for T in vcat([Float64, BigFloat], _MF ? [MultiFloats.Float64x2, MultiFloats.Float64x3, MultiFloats.Float64x4] : Type[])
+        T === BigFloat && setprecision(BigFloat, 256)
+        A = reshape(T[1, 1], 1, 2)
+        b = T[1]
+        c = T[1, 1]
+        r = SDPX.hsd_lp_solve(A, b, c)
+        @test r.status === :optimal
+        @test isapprox(Float64(r.pobj), 1.0; atol=1e-6)
+    end
+end
