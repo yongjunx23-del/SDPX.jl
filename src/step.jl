@@ -686,11 +686,16 @@ function newton_step!(
     kkt = _with_blas_threads(_kkt_blas_threads(m)) do
         factorize!(backend, ws, prob, opts)
     end
-    kkt.ok || return (status=:breakdown,
+    # Destructure the factorize! result once so its fields are not re-read
+    # through boxing `getproperty` on every subsequent access.
+    kkt_ok = kkt.ok
+    kkt_reg_attempts = kkt.reg_attempts
+    kkt_q_pivoted = kkt.q_pivoted
+    kkt_ok || return (status=:breakdown,
         reason=backend isa DenseAugmentedKKTBackend ?
-            "pivoted LDLT factorization of the dense augmented KKT system failed after $(kkt.reg_attempts) SDPX regularization attempt(s)" :
-            "Schur complement not positive definite after $(kkt.reg_attempts) regularization attempt(s)",
-        p_res=p_res, d_res=d_res, reg_attempts=kkt.reg_attempts, q_pivoted=false)
+            "pivoted LDLT factorization of the dense augmented KKT system failed after $(kkt_reg_attempts) SDPX regularization attempt(s)" :
+            "Schur complement not positive definite after $(kkt_reg_attempts) regularization attempt(s)",
+        p_res=p_res, d_res=d_res, reg_attempts=kkt_reg_attempts, q_pivoted=false)
     factor_finished = time_ns()
     kkt_phases = hasproperty(kkt, :phase_times) ?
                  kkt.phase_times :
@@ -796,12 +801,12 @@ function newton_step!(
     # backends retain the conservative historical interpretation.
     q_rank_deficient = hasproperty(kkt, :q_rank_deficient) ?
                        kkt.q_rank_deficient :
-                       kkt.q_pivoted
+                       kkt_q_pivoted
     factorization_quality =
         q_rank_deficient ? zero(T) : _kkt_factorization_quality(ws)
     regularization = _relative_regularization_from_attempts(
         T,
-        kkt.reg_attempts,
+        kkt_reg_attempts,
     )
     iteration_diagnostics = IterationDiagnostics{T}(
         iteration=iteration,
@@ -925,8 +930,8 @@ function newton_step!(
                 "exceeded the accepted tolerance $(direction_tolerance)",
             p_res=p_res,
             d_res=d_res,
-            reg_attempts=kkt.reg_attempts,
-            q_pivoted=kkt.q_pivoted,
+            reg_attempts=kkt_reg_attempts,
+            q_pivoted=kkt_q_pivoted,
         )
     end
     block_primal_residual = _block_primal_residual_norm(ws)
@@ -952,8 +957,8 @@ function newton_step!(
         block_primal_residual=block_primal_residual,
         direction_residual=refine_residual,
         direction_tolerance=direction_tolerance,
-        reg_attempts=kkt.reg_attempts,
-        q_pivoted=kkt.q_pivoted,
+        reg_attempts=kkt_reg_attempts,
+        q_pivoted=kkt_q_pivoted,
         predictor_quality=predictor_diagnostics.predictor_quality,
         complementarity=predictor_diagnostics.complementarity,
         mu=predictor_diagnostics.mu,
