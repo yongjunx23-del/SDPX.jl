@@ -700,6 +700,13 @@ function newton_step!(
     kkt_phases = hasproperty(kkt, :phase_times) ?
                  kkt.phase_times :
                  _empty_kkt_phase_times()
+    # Destructure the per-iteration KKT phase timings into locals so the
+    # boxed NamedTuple is not re-unpacked on every read below.
+    kph_schur_copy = kkt_phases.schur_copy
+    kph_schur_factorization = kkt_phases.schur_factorization
+    kph_constraint_triangular_solve = kkt_phases.constraint_triangular_solve
+    kph_equality_gram = kkt_phases.equality_gram
+    kph_equality_factorization = kkt_phases.equality_factorization
 
     # ---- Predictor ----
     _with_blas_threads(parallel_blas) do
@@ -943,11 +950,11 @@ function newton_step!(
     corrector_finished = time_ns()
     kkt_total = (factor_finished - schur_finished) / 1.0e9
     kkt_accounted =
-        kkt_phases.schur_copy +
-        kkt_phases.schur_factorization +
-        kkt_phases.constraint_triangular_solve +
-        kkt_phases.equality_gram +
-        kkt_phases.equality_factorization
+        kph_schur_copy +
+        kph_schur_factorization +
+        kph_constraint_triangular_solve +
+        kph_equality_gram +
+        kph_equality_factorization
 
     return (
         status=:ok,
@@ -980,13 +987,13 @@ function newton_step!(
             kkt_factorization=(factor_finished - schur_finished) / 1.0e9,
             predictor=(predictor_finished - factor_finished) / 1.0e9,
             corrector=(corrector_finished - predictor_finished) / 1.0e9,
-            kkt_schur_copy=kkt_phases.schur_copy,
-            kkt_schur_factorization=kkt_phases.schur_factorization,
+            kkt_schur_copy=kph_schur_copy,
+            kkt_schur_factorization=kph_schur_factorization,
             kkt_constraint_triangular_solve=
-                kkt_phases.constraint_triangular_solve,
-            kkt_equality_gram=kkt_phases.equality_gram,
+                kph_constraint_triangular_solve,
+            kkt_equality_gram=kph_equality_gram,
             kkt_equality_factorization=
-                kkt_phases.equality_factorization,
+                kph_equality_factorization,
             kkt_other=max(0.0, kkt_total - kkt_accounted),
             predictor_rhs=
                 (predictor_rhs_finished - factor_finished) / 1.0e9,
