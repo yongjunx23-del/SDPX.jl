@@ -190,3 +190,13 @@ end
     @test r.valid
     @test r.tau < 1e-6
 end
+
+@testset "Phase 6 HSD path-following general constraint matrix" begin
+    # min x1+x2 s.t. x1+2*x2=3, x>=0 => optimum 1.5 (x1=0,x2=1.5).
+    A = reshape([1.0, 2.0], 1, 2)
+    b = [3.0]
+    c = [1.0, 1.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :optimal
+    @test isapprox(r.pobj, 1.5; atol=1e-6)
+end
