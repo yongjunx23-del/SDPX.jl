@@ -32,3 +32,21 @@
     end
     return accumulator
 end
+
+@inline function _dot_dense_coo(
+    matrix::Matrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    symmetric_projection::Bool,
+) where {T}
+    symmetric_projection || return _dot_dense_coo(matrix, coo, position)
+    linear_indices = coo.lin
+    values = coo.val
+    accumulator = zero(T)
+    @inbounds for entry in
+        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
+        accumulator +=
+            matrix[abs(linear_indices[entry])] * values[entry]
+    end
+    return accumulator
+end

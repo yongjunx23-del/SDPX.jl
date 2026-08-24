@@ -591,6 +591,54 @@ each entry costs one flat load from `M` rather than a 2-D index computation.
     return acc
 end
 
+@inline function _dot_dense_coo(
+    M::AbstractMatrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    symmetric_projection::Bool,
+) where {T}
+    symmetric_projection || return _dot_dense_coo(M, coo, position)
+    lin = coo.lin
+    val = coo.val
+    Mflat = vec(M)
+    acc = zero(T)
+    @inbounds for t in coo.ptr[position]:(coo.ptr[position+1]-Int32(1))
+        # A valid projected block has only diagonal positive entries and
+        # compressed off-diagonals. Every coefficient contribution is already
+        # represented by the upper slot of W, so one flat load suffices.
+        acc += Mflat[abs(lin[t])] * val[t]
+    end
+    return acc
+end
+
+@inline function _project_symmetric_coo_upper!(
+    matrix::AbstractMatrix{T},
+) where {T}
+    dimension = size(matrix, 1)
+    # Every later coefficient `r >= p` may have a different sparsity pattern
+    # from the coefficient used to form this matrix. Project the complete
+    # upper triangle once so every projected COO dot observes
+    # W[row,column] + W[column,row], including entries absent from A_p.
+    @inbounds for column in 2:dimension, row in 1:(column - 1)
+        matrix[row, column] += matrix[column, row]
+    end
+    return matrix
+end
+
+@inline function _project_symmetric_coo_upper!(
+    matrix::AbstractMatrix{BigFloat},
+)
+    dimension = size(matrix, 1)
+    @inbounds for column in 2:dimension, row in 1:(column - 1)
+        MA.operate!(
+            +,
+            matrix[row, column],
+            matrix[column, row],
+        )
+    end
+    return matrix
+end
+
 """
     _two_sided_coo_product!(dest, left, coo, position, right)
 
@@ -688,6 +736,19 @@ function _two_sided_coo_product!(
     return dest
 end
 
+@inline function _two_sided_coo_product!(
+    dest::AbstractMatrix{T},
+    left::AbstractMatrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    right::AbstractMatrix{T},
+    symmetric_projection::Bool,
+) where {T}
+    _two_sided_coo_product!(dest, left, coo, position, right)
+    symmetric_projection && _project_symmetric_coo_upper!(dest)
+    return dest
+end
+
 struct _BigFloatCOOContractionScratch
     scaled::BigFloat
     transpose_scaled::BigFloat
@@ -725,6 +786,25 @@ function _two_sided_coo_product_owned!(
     ::Nothing,
 )
     return _two_sided_coo_product!(dest, left, coo, position, right)
+end
+
+@inline function _two_sided_coo_product_owned!(
+    dest::AbstractMatrix,
+    left::AbstractMatrix,
+    coo::SparseBlockCOO,
+    position::Int,
+    right::AbstractMatrix,
+    ::Nothing,
+    symmetric_projection::Bool,
+)
+    return _two_sided_coo_product!(
+        dest,
+        left,
+        coo,
+        position,
+        right,
+        symmetric_projection,
+    )
 end
 
 function _two_sided_coo_product_owned!(
@@ -809,6 +889,27 @@ function _two_sided_coo_product_owned!(
     return dest
 end
 
+@inline function _two_sided_coo_product_owned!(
+    dest::AbstractMatrix{BigFloat},
+    left::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    right::AbstractMatrix{BigFloat},
+    scratch::_BigFloatCOOContractionScratch,
+    symmetric_projection::Bool,
+)
+    _two_sided_coo_product_owned!(
+        dest,
+        left,
+        coo,
+        position,
+        right,
+        scratch,
+    )
+    symmetric_projection && _project_symmetric_coo_upper!(dest)
+    return dest
+end
+
 @inline function _dot_dense_coo_store!(
     destination::AbstractVector{T},
     destination_index::Int,
@@ -819,6 +920,20 @@ end
 ) where {T}
     destination[destination_index] =
         _dot_dense_coo(matrix, coo, position)
+    return destination[destination_index]
+end
+
+@inline function _dot_dense_coo_store!(
+    destination::AbstractVector{T},
+    destination_index::Int,
+    matrix::AbstractMatrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    ::Nothing,
+    symmetric_projection::Bool,
+) where {T}
+    destination[destination_index] =
+        _dot_dense_coo(matrix, coo, position, symmetric_projection)
     return destination[destination_index]
 end
 
@@ -858,6 +973,36 @@ end
     return accumulator
 end
 
+@inline function _dot_dense_coo_owned!(
+    accumulator::BigFloat,
+    matrix::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    scratch::_BigFloatCOOContractionScratch,
+    symmetric_projection::Bool,
+)
+    symmetric_projection || return _dot_dense_coo_owned!(
+        accumulator,
+        matrix,
+        coo,
+        position,
+        scratch,
+    )
+    MA.operate!(zero, accumulator)
+    matrix_values = vec(matrix)
+    @inbounds for entry in
+        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
+        MA.buffered_operate!(
+            scratch.dot_buffer,
+            MA.add_mul,
+            accumulator,
+            matrix_values[abs(coo.lin[entry])],
+            coo.val[entry],
+        )
+    end
+    return accumulator
+end
+
 @inline function _dot_dense_coo_store!(
     destination::AbstractVector{BigFloat},
     destination_index::Int,
@@ -875,6 +1020,25 @@ end
     )
 end
 
+@inline function _dot_dense_coo_store!(
+    destination::AbstractVector{BigFloat},
+    destination_index::Int,
+    matrix::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    scratch::_BigFloatCOOContractionScratch,
+    symmetric_projection::Bool,
+)
+    return _dot_dense_coo_owned!(
+        destination[destination_index],
+        matrix,
+        coo,
+        position,
+        scratch,
+        symmetric_projection,
+    )
+end
+
 @inline function _dot_dense_coo_value!(
     matrix::AbstractMatrix{T},
     coo::SparseBlockCOO{T},
@@ -882,6 +1046,16 @@ end
     ::Nothing,
 ) where {T}
     return _dot_dense_coo(matrix, coo, position)
+end
+
+@inline function _dot_dense_coo_value!(
+    matrix::AbstractMatrix{T},
+    coo::SparseBlockCOO{T},
+    position::Int,
+    ::Nothing,
+    symmetric_projection::Bool,
+) where {T}
+    return _dot_dense_coo(matrix, coo, position, symmetric_projection)
 end
 
 @inline function _dot_dense_coo_value!(
@@ -896,6 +1070,23 @@ end
         coo,
         position,
         scratch,
+    )
+end
+
+@inline function _dot_dense_coo_value!(
+    matrix::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    scratch::_BigFloatCOOContractionScratch,
+    symmetric_projection::Bool,
+)
+    return _dot_dense_coo_owned!(
+        scratch.dot_accumulator,
+        matrix,
+        coo,
+        position,
+        scratch,
+        symmetric_projection,
     )
 end
 
@@ -1106,6 +1297,7 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
     else
         coo = cons.coo[l]
         scratch = _coo_contraction_scratch(T)
+        symmetric_projection = bw.coo_symmetric_projection
         @inbounds for p in 1:na
             _two_sided_coo_product_owned!(
                 bw.W1,
@@ -1114,6 +1306,7 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
                 p,
                 bw.W2,
                 scratch,
+                symmetric_projection,
             )
             for r in p:na
                 q += 1
@@ -1124,6 +1317,7 @@ function sparse_schur_block!(bw::BlockWS{T}, cons::SparseCons{T}, l::Int, Xl, Yl
                     coo,
                     r,
                     scratch,
+                    symmetric_projection,
                 )
             end
         end
@@ -1214,6 +1408,7 @@ function sparse_schur_block_scatter!(
     else
         coo = cons.coo[l]
         scratch = _coo_contraction_scratch(T)
+        symmetric_projection = bw.coo_symmetric_projection
         @inbounds for p in 1:na
             variable_i = ids[p]
             _two_sided_coo_product_owned!(
@@ -1223,11 +1418,17 @@ function sparse_schur_block_scatter!(
                 p,
                 bw.W2,
                 scratch,
+                symmetric_projection,
             )
             for r in p:na
                 variable_j = ids[r]
-                value =
-                    _dot_dense_coo_value!(bw.W1, coo, r, scratch)
+                value = _dot_dense_coo_value!(
+                    bw.W1,
+                    coo,
+                    r,
+                    scratch,
+                    symmetric_projection,
+                )
                 if lower_only
                     # See the packed 2x2 path above: sorted ids make the lower
                     # destination known without a comparison.
