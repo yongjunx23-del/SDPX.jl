@@ -44,6 +44,7 @@ const QUICK_TESTS = (
     "precision_ladder_plan.jl",
     "factor_cache.jl",
     "allocation_contract.jl",
+    "fixed_precision_contract.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -129,6 +130,7 @@ const FULL_TESTS = (
     "sparse_schur_round7.jl",
     "factor_cache.jl",
     "allocation_contract.jl",
+    "fixed_precision_contract.jl",
 )
 
 function _test_profile()
