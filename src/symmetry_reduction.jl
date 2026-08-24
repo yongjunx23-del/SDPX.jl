@@ -269,3 +269,34 @@ function cyclic_block_sizes(k::Int)
     end
     return vcat([1, 1], fill(2, (k - 2) ÷ 2))
 end
+
+"""Dimension of the space of symmetric group-invariant matrices.  Equal to the
+number of orbits of the group action on unordered index pairs (a symmetric
+matrix identifies `(i,j)` with `(j,i)`), i.e. the symmetric centralizer
+dimension."""
+function invariant_matrix_dimension(g::SymmetryGroup)
+    seen = Set{Set{Int}}()
+    dimension = 0
+    for i in 1:g.n, j in i:g.n
+        pair = Set([i, j])
+        pair in seen && continue
+        orb = Set{Set{Int}}()
+        frontier = [pair]
+        while !isempty(frontier)
+            current = popfirst!(frontier)
+            elements = collect(current)
+            a = elements[1]
+            b = length(elements) == 1 ? a : elements[2]
+            for sigma in g.generators
+                next_pair = Set([sigma[a], sigma[b]])
+                if !(next_pair in orb)
+                    push!(orb, next_pair)
+                    push!(frontier, next_pair)
+                end
+            end
+        end
+        union!(seen, orb)
+        dimension += 1
+    end
+    return dimension
+end

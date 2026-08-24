@@ -90,3 +90,12 @@ end
     # Round-trip.
     @test isapprox(SDPX.reconstruct_matrix(B, Q), A; atol=1e-10)
 end
+
+@testset "Phase 7 SymmetryReduction invariant-matrix dimension" begin
+    # swap(1,2) on n=3: invariant matrices [[a,b,c],[b,a,c],[c,c,d]] have 4 params.
+    g = SDPX.SymmetryGroup([[2, 1, 3]], 3)
+    @test SDPX.invariant_matrix_dimension(g) == 4
+    # Two disjoint swaps (1,2),(3,4) on n=4: count orbits on unordered pairs.
+    g4 = SDPX.SymmetryGroup([[2, 1, 4, 3]], 4)
+    @test SDPX.invariant_matrix_dimension(g4) == 6
+end
