@@ -3,6 +3,13 @@ using SDPX
 using Test
 using LinearAlgebra
 
+const _MF = try
+    @eval import MultiFloats
+    true
+catch
+    false
+end
+
 @testset "Phase 6 HSD embedding + certificates" begin
     # Optimal LP: min x1+x2 s.t. x1+x2=1, x>=0.
     A = reshape([1.0, 1.0], 1, 2)
@@ -75,4 +82,19 @@ end
     r3 = SDPX.hsd_classify(A3, b3, c3, [1.0], [0.0], [0.0], 0.0, 1.0)
     @test r3.status === :dual_infeasible
     @test r3.valid
+end
+
+
+@testset "Phase 6 HSD multi-precision classify + bordered" begin
+    for T in vcat([Float64, BigFloat], _MF ? [MultiFloats.Float64x2, MultiFloats.Float64x3, MultiFloats.Float64x4] : Type[])
+        T === BigFloat && setprecision(BigFloat, 256)
+        A = reshape(T[1, 1], 1, 2)
+        b = T[1]
+        c = T[1, 1]
+        r = SDPX.hsd_classify(A, b, c, T[1, 0], T[1], T[0, 0], T(1), T(1e-12))
+        @test r.status === :optimal
+        sys = SDPX.hsd_bordered_system(A, b, c)
+        @test sys.dim == 4
+        @test SDPX.is_skew_symmetric(sys.matrix - Diagonal(sys.matrix))
+    end
 end
