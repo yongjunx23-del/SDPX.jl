@@ -47,6 +47,7 @@ const QUICK_TESTS = (
     "fixed_precision_contract.jl",
     "cone_algebra.jl",
     "symmetry_reduction.jl",
+    "chordal_reduction.jl",
     "hsd_infeasibility_contract.jl",
 )
 
@@ -136,6 +137,7 @@ const FULL_TESTS = (
     "fixed_precision_contract.jl",
     "cone_algebra.jl",
     "symmetry_reduction.jl",
+    "chordal_reduction.jl",
     "hsd_infeasibility_contract.jl",
 )
 
