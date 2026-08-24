@@ -47,6 +47,7 @@ const QUICK_TESTS = (
     "fixed_precision_contract.jl",
     "cone_algebra.jl",
     "symmetry_reduction.jl",
+    "hsd_infeasibility_contract.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -135,6 +136,7 @@ const FULL_TESTS = (
     "fixed_precision_contract.jl",
     "cone_algebra.jl",
     "symmetry_reduction.jl",
+    "hsd_infeasibility_contract.jl",
 )
 
 function _test_profile()
