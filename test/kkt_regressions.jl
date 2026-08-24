@@ -1009,6 +1009,149 @@ end
         @test expanded_factor.rank == 3
     end
 
+    @testset "rank-reduced equality panel preserves full KKT equations" begin
+        B = [
+            1.0 0.0 1.0
+            0.0 1.0 1.0
+            0.0 0.0 0.0
+            0.0 0.0 0.0
+        ]
+        permutation = [3, 1]
+        dense_basis = zeros(4, 2)
+        sparse_basis = zeros(4, 2)
+        SDPX._copy_equality_basis!(dense_basis, B, permutation)
+        SDPX._copy_equality_basis!(sparse_basis, sparse(B), permutation)
+        @test dense_basis == sparse_basis == B[:, permutation]
+
+        problem = _dense_workspace_problem(B)
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equality_solver=:qr,
+                linear_algebra_backend=:standard,
+                threads=1,
+                verbosity=0,
+            ),
+        )
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=plan,
+        )
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:qr,
+        )
+        backend = SDPX.select_backend(workspace)
+        first_schur = [
+            3.0 0.2 0.1 0.0
+            0.2 2.5 -0.3 0.1
+            0.1 -0.3 4.0 0.2
+            0.0 0.1 0.2 2.0
+        ]
+        copyto!(workspace.S, first_schur)
+        first = SDPX.factorize!(backend, workspace, problem, options)
+        @test first.ok
+        @test workspace.Qchol.rank == 2
+
+        second_schur = [
+            2.0 -0.1 0.0 0.2
+            -0.1 3.0 0.1 0.0
+            0.0 0.1 2.5 -0.2
+            0.2 0.0 -0.2 4.0
+        ]
+        copyto!(workspace.S, second_schur)
+        second = SDPX.factorize!(backend, workspace, problem, options)
+        @test second.ok
+        @test workspace.equality_gram_kernel === :rank_reduced_qr
+
+        rhs = [0.2, -0.4, 0.1, 0.3]
+        seed = [0.3, -0.2, 0.5, -0.1]
+        copyto!(workspace.p, transpose(B) * seed)
+        @test SDPX.solve_direction!(
+            backend,
+            workspace,
+            problem,
+            options,
+            rhs,
+        )
+        @test second_schur * workspace.dx - B * workspace.dy ≈
+              rhs rtol=1e-10 atol=1e-10
+        @test transpose(B) * workspace.dx ≈
+              workspace.p rtol=1e-10 atol=1e-10
+        @test !workspace.equality_basis_disabled
+    end
+
+    @testset "rank-reduced equality panel fails closed when rank changes" begin
+        B = [
+            1.0 0.0 1.0
+            0.0 1.0 0.0
+            0.0 0.0 1.0
+            0.0 0.0 0.0
+        ]
+        problem = _dense_workspace_problem(B)
+        plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(),
+            problem,
+            SDPX.SolverOptions{Float64}(
+                algorithm=:sdp,
+                presolve=false,
+                scaling=:none,
+                equality_solver=:qr,
+                linear_algebra_backend=:standard,
+                threads=1,
+                verbosity=0,
+            ),
+        )
+        workspace = SDPX.Workspace(
+            problem;
+            thread_count=1,
+            execution_plan=plan,
+        )
+        options = SDPX.SolverOptions{Float64}(
+            verbosity=0,
+            equality_solver=:qr,
+        )
+        backend = SDPX.select_backend(workspace)
+
+        copyto!(workspace.S, Diagonal([1.0, 1.0, 1e24, 1.0]))
+        first = SDPX.factorize!(backend, workspace, problem, options)
+        @test first.ok
+        @test workspace.Qchol.rank == 2
+
+        copyto!(workspace.S, Matrix{Float64}(I, 4, 4))
+        second = SDPX.factorize!(backend, workspace, problem, options)
+        @test second.ok
+        @test workspace.equality_gram_kernel === :rank_reduced_qr
+
+        rhs = [0.1, -0.3, 0.2, 0.4]
+        seed = [0.4, -0.2, 0.7, 0.1]
+        copyto!(workspace.p, transpose(B) * seed)
+        @test SDPX.solve_direction!(
+            backend,
+            workspace,
+            problem,
+            options,
+            rhs,
+        )
+        @test workspace.equality_basis_disabled
+        @test workspace.equality_gram_kernel ===
+              :not_formed_qr_basis_fallback
+        @test workspace.Qchol.rank == 3
+        @test workspace.S * workspace.dx - B * workspace.dy ≈
+              rhs rtol=1e-10 atol=1e-10
+        @test transpose(B) * workspace.dx ≈
+              workspace.p rtol=1e-10 atol=1e-10
+
+        third = SDPX.factorize!(backend, workspace, problem, options)
+        @test third.ok
+        @test workspace.equality_gram_kernel === :not_formed_qr
+    end
+
     @testset "rank-revealing equality QR supports extended arithmetic" begin
         rng = MersenneTwister(772)
         for T in (Float64x4, BigFloat)

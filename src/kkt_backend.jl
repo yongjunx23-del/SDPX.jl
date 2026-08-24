@@ -390,6 +390,52 @@ target-arithmetic guard and native fallback; the other backends reuse the
 already-selected workspace implementation without another structural choice.
 """
 function solve_direction!(
+    backend::DenseCholeskyBackend,
+    ws::Workspace{Float64},
+    prob::SDPProblem{Float64},
+    opts::SolverOptions{Float64},
+    r::AbstractVector{Float64},
+)
+    _assert_planned_backend!(ws, backend, opts)
+    solve!(backend, ws, prob.dims.n, r, ws.p, ws.dx, ws.dy)
+    ws.equality_gram_kernel === :rank_reduced_qr || return true
+
+    tolerance = _kkt_direction_acceptance_tolerance(
+        ws,
+        opts,
+        r,
+        prob,
+        ws.dx,
+        ws.dy,
+    )
+    residual = _kkt_direction_residual!(ws, prob, r)
+    isfinite(residual) && isfinite(tolerance) && residual <= tolerance &&
+        return true
+
+    factor = ws.Qchol::EqualityQRFactor{Float64}
+    ws.equality_basis_disabled = true
+    ws.Qchol = _rebuild_full_equality_qr!(
+        ws,
+        prob,
+        opts,
+        factor.factors,
+    )
+    ws.equality_gram_kernel = :not_formed_qr_basis_fallback
+    solve!(backend, ws, prob.dims.n, r, ws.p, ws.dx, ws.dy)
+    tolerance = _kkt_direction_acceptance_tolerance(
+        ws,
+        opts,
+        r,
+        prob,
+        ws.dx,
+        ws.dy,
+    )
+    residual = _kkt_direction_residual!(ws, prob, r)
+    return isfinite(residual) && isfinite(tolerance) &&
+           residual <= tolerance
+end
+
+function solve_direction!(
     backend::Union{DenseCholeskyBackend,DenseAugmentedKKTBackend,ArrowBackend,SparseSchurBackend},
     ws::Workspace{T},
     prob::SDPProblem{T},

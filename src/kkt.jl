@@ -636,6 +636,106 @@ function _factor_equality_qr!(
     )
 end
 
+function _copy_equality_basis!(
+    destination::AbstractMatrix{Float64},
+    source::Matrix{Float64},
+    permutation::AbstractVector{Int},
+)
+    @inbounds for position in axes(destination, 2)
+        copyto!(
+            view(destination, :, position),
+            view(source, :, permutation[position]),
+        )
+    end
+    return destination
+end
+
+function _copy_equality_basis!(
+    destination::AbstractMatrix{Float64},
+    source::SparseMatrixCSC{Float64,Int},
+    permutation::AbstractVector{Int},
+)
+    fill!(destination, 0.0)
+    rows = rowvals(source)
+    values = nonzeros(source)
+    @inbounds for position in axes(destination, 2)
+        for pointer in nzrange(source, permutation[position])
+            destination[rows[pointer], position] = values[pointer]
+        end
+    end
+    return destination
+end
+
+"""Transform only the basis columns selected by the preceding full RRQR."""
+function _prepare_reduced_equality_panel!(
+    ws::Workspace{Float64},
+    prob::SDPProblem{Float64},
+    previous::EqualityQRFactor{Float64},
+)
+    rank = previous.rank
+    m, n = prob.dims.m, prob.dims.n
+    0 < rank < n || return false
+    size(previous.factors) == (m, n) || return false
+    length(previous.permutation) == n || return false
+    basis = view(previous.permutation, 1:rank)
+    panel = view(ws.Btil, :, 1:rank)
+    _copy_equality_basis!(panel, prob.B, basis)
+    la_trsm!(ws.la_backend, ws.Sbuf, panel)
+    _normalize_equality_panel_columns!(
+        panel,
+        view(ws.equality_scale, 1:rank),
+    )
+    copyto!(view(previous.factors, :, 1:rank), panel)
+    return all(isfinite, panel)
+end
+
+"""Refresh a known rank-r basis without scanning stale trailing columns."""
+function _factor_reduced_equality_qr!(
+    ws::Workspace{Float64},
+    previous::EqualityQRFactor{Float64},
+    opts::SolverOptions{Float64},
+)
+    rank = previous.rank
+    panel = view(previous.factors, :, 1:rank)
+    LinearAlgebra.qr!(panel)
+    all(isfinite, panel) || return nothing
+    largest = maximum(
+        index -> abs(previous.factors[index, index]),
+        1:rank;
+        init=0.0,
+    )
+    largest > 0.0 && isfinite(largest) || return nothing
+    tolerance = _equality_qr_relative_tolerance(ws.Btil, opts)
+    threshold = tolerance * largest
+    smallest = largest
+    @inbounds for index in 1:rank
+        diagonal = abs(previous.factors[index, index])
+        diagonal > threshold || return nothing
+        smallest = min(smallest, diagonal)
+    end
+    return EqualityQRFactor{Float64,typeof(previous.provider)}(
+        previous.provider,
+        previous.factors,
+        Float64[],
+        previous.permutation,
+        rank,
+        smallest / largest,
+    )
+end
+
+"""Rebuild the original full equality panel and pivoted QR in-place."""
+function _rebuild_full_equality_qr!(
+    ws::Workspace{Float64},
+    prob::SDPProblem{Float64},
+    opts::SolverOptions{Float64},
+    buffer::Matrix{Float64},
+)
+    copy_owned!(ws.Btil, prob.B)
+    la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)
+    _normalize_equality_panel_columns!(ws.Btil, ws.equality_scale)
+    return _factor_equality_qr!(buffer, ws.la_backend, ws.Btil, opts)
+end
+
 function _factor_equality_qr_next(
     ::Union{Nothing,EqualityQRFactor{T}},
     backend::AbstractLABackend,
@@ -1529,34 +1629,92 @@ function _factor_dense_kkt_native!(
     q_pivoted = false
     q_rank_deficient = false
     if n > 0
-        started = time_ns()
-        copy_owned!(ws.Btil, prob.B)
-        la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)    # B̃ = L_S⁻¹B
-        _normalize_equality_panel_columns!(ws.Btil, ws.equality_scale)
-        phase_constraint_triangular_solve +=
-            _elapsed_seconds(started)
         previous_qr =
             ws.Qchol isa EqualityQRFactor{T} ? ws.Qchol : nothing
         direct_qr =
             opts.equality_solver === :qr ||
             (opts.equality_solver === :auto && previous_qr !== nothing)
+        reduced_panel_ready = false
+        reduced_candidate =
+            direct_qr &&
+            T === Float64 &&
+            ws.la_backend isa StandardLABackend &&
+            !ws.equality_basis_disabled &&
+            previous_qr isa EqualityQRFactor{Float64} &&
+            0 < previous_qr.rank < n &&
+            size(previous_qr.factors) == (m, n) &&
+            length(previous_qr.permutation) == n
+        if reduced_candidate
+            started = time_ns()
+            reduced_panel_ready = _prepare_reduced_equality_panel!(
+                ws::Workspace{Float64},
+                prob::SDPProblem{Float64},
+                previous_qr::EqualityQRFactor{Float64},
+            )
+            phase_constraint_triangular_solve +=
+                _elapsed_seconds(started)
+            reduced_panel_ready || (ws.equality_basis_disabled = true)
+        end
+        if !reduced_panel_ready
+            started = time_ns()
+            copy_owned!(ws.Btil, prob.B)
+            la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)    # B̃ = L_S⁻¹B
+            _normalize_equality_panel_columns!(ws.Btil, ws.equality_scale)
+            phase_constraint_triangular_solve +=
+                _elapsed_seconds(started)
+        end
         # Release any prior provider factor before overwriting its borrowed
         # ws.Qbuf storage with the current iteration's Gram.
         ws.Qchol = nothing
         if direct_qr
-            ws.equality_gram_kernel = :not_formed_qr
-            started = time_ns()
-            qr_factor = _factor_equality_qr_next(
-                previous_qr,
-                ws.la_backend,
-                ws.Btil,
-                opts,
-            )
+            if reduced_panel_ready
+                started = time_ns()
+                qr_factor = _factor_reduced_equality_qr!(
+                    ws::Workspace{Float64},
+                    previous_qr::EqualityQRFactor{Float64},
+                    opts::SolverOptions{Float64},
+                )
+                phase_equality_factorization +=
+                    _elapsed_seconds(started)
+                if qr_factor === nothing
+                    ws.equality_basis_disabled = true
+                    started = time_ns()
+                    copy_owned!(ws.Btil, prob.B)
+                    la_trsm!(ws.la_backend, ws.Sbuf, ws.Btil)
+                    _normalize_equality_panel_columns!(
+                        ws.Btil,
+                        ws.equality_scale,
+                    )
+                    phase_constraint_triangular_solve +=
+                        _elapsed_seconds(started)
+                    started = time_ns()
+                    ws.equality_gram_kernel = :not_formed_qr
+                    qr_factor = _factor_equality_qr!(
+                        previous_qr.factors,
+                        ws.la_backend,
+                        ws.Btil,
+                        opts,
+                    )
+                    phase_equality_factorization +=
+                        _elapsed_seconds(started)
+                else
+                    ws.equality_gram_kernel = :rank_reduced_qr
+                end
+            else
+                ws.equality_gram_kernel = :not_formed_qr
+                started = time_ns()
+                qr_factor = _factor_equality_qr_next(
+                    previous_qr,
+                    ws.la_backend,
+                    ws.Btil,
+                    opts,
+                )
+                phase_equality_factorization +=
+                    _elapsed_seconds(started)
+            end
             ws.Qchol = qr_factor
             q_pivoted = true
             q_rank_deficient = qr_factor.rank < n
-            phase_equality_factorization +=
-                _elapsed_seconds(started)
         else
             started = time_ns()
             _build_equality_gram!(ws, opts)           # Q = B̃ᵀB̃
@@ -2634,6 +2792,36 @@ function _solve_sparse_schur_kkt_owned!(
     return dx_out, dy_out
 end
 
+function _solve_reduced_equality_kkt_owned!(
+    ws::Workspace{Float64},
+    factor::EqualityQRFactor{Float64},
+    p_rhs::AbstractVector{Float64},
+    dx_out::AbstractVector{Float64},
+    dy_out::AbstractVector{Float64},
+)
+    rank = factor.rank
+    basis = view(factor.permutation, 1:rank)
+    panel = view(ws.Btil, :, 1:rank)
+    reduced_rhs = view(ws.q_perm, 1:rank)
+    la_mul_owned!(ws.la_backend, reduced_rhs, transpose(panel), ws.rtil)
+    @inbounds for position in 1:rank
+        original = basis[position]
+        ws.q_rhs[original] =
+            ws.equality_scale[position] * p_rhs[original] -
+            reduced_rhs[position]
+    end
+    _solve_Q!(dy_out, factor, ws.q_rhs, ws.q_perm)
+    # `_solve_Q!` leaves the unscaled basis solution in q_perm[1:rank].
+    la_mul_owned!(ws.la_backend, dx_out, panel, reduced_rhs)
+    la_axpby_owned!(ws.la_backend, 1.0, ws.rtil, 1.0, dx_out)
+    la_trsv_transpose!(ws.la_backend, ws.Sbuf, dx_out)
+    @inbounds for position in 1:rank
+        original = basis[position]
+        dy_out[original] *= ws.equality_scale[position]
+    end
+    return dx_out, dy_out
+end
+
 function _solve_dense_kkt_owned!(
     ws::Workspace{T},
     n::Int,
@@ -2646,6 +2834,17 @@ function _solve_dense_kkt_owned!(
     la_trsv_lower!(ws.la_backend, ws.Sbuf, ws.rtil) # r̃ = L_S⁻¹r
 
     if n > 0
+        if T === Float64 &&
+           ws.equality_gram_kernel === :rank_reduced_qr &&
+           ws.Qchol isa EqualityQRFactor{Float64}
+            return _solve_reduced_equality_kkt_owned!(
+                ws::Workspace{Float64},
+                ws.Qchol::EqualityQRFactor{Float64},
+                p_rhs::AbstractVector{Float64},
+                dx_out::AbstractVector{Float64},
+                dy_out::AbstractVector{Float64},
+            )
+        end
         la_mul_owned!(ws.la_backend, ws.q_rhs, transpose(ws.Btil), ws.rtil) # q_rhs = B̂ᵀr̃
         _form_scaled_equality_rhs!(ws, p_rhs)                    # q_rhs = Dp − B̂ᵀr̃
         _solve_Q!(dy_out, ws.Qchol, ws.q_rhs, ws.q_perm)         # dŷ = Q̂⁻¹(Dp − B̂ᵀr̃)

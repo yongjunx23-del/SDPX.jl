@@ -715,10 +715,12 @@ function newton_step!(
     predictor_solve_finished = time_ns()
     predictor_ok || return (
         status=:breakdown,
-        reason="Native extended-precision fallback could not factor the Schur complement",
+        reason="KKT predictor direction failed residual validation",
         p_res=p_res,
         d_res=d_res,
-        reg_attempts=ws.mixed_precision.native_regularization_attempts,
+        reg_attempts=ws.mixed_precision === nothing ?
+                     kkt.reg_attempts :
+                     ws.mixed_precision.native_regularization_attempts,
         q_pivoted=false,
     )
     _with_blas_threads(parallel_blas) do
@@ -874,10 +876,12 @@ function newton_step!(
     corrector_solve_finished = time_ns()
     corrector_ok || return (
         status=:breakdown,
-        reason="Native extended-precision fallback could not factor the Schur complement",
+        reason="KKT corrector direction failed residual validation",
         p_res=p_res,
         d_res=d_res,
-        reg_attempts=ws.mixed_precision.native_regularization_attempts,
+        reg_attempts=ws.mixed_precision === nothing ?
+                     kkt.reg_attempts :
+                     ws.mixed_precision.native_regularization_attempts,
         q_pivoted=false,
     )
 

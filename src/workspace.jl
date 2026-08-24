@@ -505,6 +505,7 @@ mutable struct Workspace{T}
     extended_precision::ExtendedPrecisionWorkspace
     mixed_precision::Union{Nothing,MixedPrecisionKKTWorkspace}
     equality_gram_kernel::Symbol
+    equality_basis_disabled::Bool
     thread_count::Int
     backend_config::BackendConfiguration
     # KKTBackend is included after Workspace because its methods accept a
@@ -1247,7 +1248,7 @@ function Workspace(
         dense_owner_eligible,
         [alloc_zeros(T, m) for _ in 1:vector_partial_count],
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
-        :not_run, selected_threads, config, nothing, :not_executed, :none,
+        :not_run, false, selected_threads, config, nothing, :not_executed, :none,
         la_backend, :not_executed, :not_executed, :not_executed, :none,
         plan.la_config.fallback_chain)
     workspace.backend = _backend_from_configuration(
