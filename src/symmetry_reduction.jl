@@ -228,3 +228,44 @@ the inverse of [`block_diagonalize`](@ref)."""
 function reconstruct_matrix(R::AbstractMatrix, Q::AbstractMatrix)
     return Q * R * transpose(Q)
 end
+
+"""Orthogonal block-diagonalizing basis for a cyclic permutation.
+`cycle` is the list of indices in cyclic order.  Under the cyclic group the
+invariant (circulant-like) matrices block-diagonalize via the real DFT basis:
+one leading trivial block, then 2x2 cosine/sine blocks (and a sign block when
+the cycle length is even)."""
+function cyclic_block_basis(cycle::Vector{Int})
+    k = length(cycle)
+    Q = zeros(Float64, k, k)
+    column = 1
+    for j in 1:k
+        Q[cycle[j], column] = 1 / sqrt(k)
+    end
+    column += 1
+    for m in 1:div(k - 1, 2)
+        for j in 1:k
+            Q[cycle[j], column] = sqrt(2 / k) * cos(2 * pi * m * (j - 1) / k)
+        end
+        column += 1
+        for j in 1:k
+            Q[cycle[j], column] = sqrt(2 / k) * sin(2 * pi * m * (j - 1) / k)
+        end
+        column += 1
+    end
+    if iseven(k)
+        for j in 1:k
+            Q[cycle[j], column] = (isodd(j) ? 1.0 : -1.0) / sqrt(k)
+        end
+        column += 1
+    end
+    column == k + 1 || error("cyclic basis column mismatch")
+    return Q
+end
+
+"""Block sizes produced by [`cyclic_block_basis`] for a cycle of length `k`."""
+function cyclic_block_sizes(k::Int)
+    if isodd(k)
+        return vcat([1], fill(2, (k - 1) ÷ 2))
+    end
+    return vcat([1, 1], fill(2, (k - 2) ÷ 2))
+end

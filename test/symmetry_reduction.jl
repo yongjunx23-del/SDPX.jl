@@ -75,3 +75,18 @@ end
     B = SDPX.block_diagonalize(A, Q)
     @test isapprox(SDPX.reconstruct_matrix(B, Q), A; atol=1e-10)
 end
+
+@testset "Phase 7 SymmetryReduction cyclic (DFT) block-diagonalization" begin
+    # 3-cycle acting on indices [1,2,3]; invariant = circulant matrices.
+    Q = SDPX.cyclic_block_basis([1, 2, 3])
+    @test isapprox(transpose(Q) * Q, Matrix{Float64}(I, 3, 3); atol=1e-12)
+    @test SDPX.cyclic_block_sizes(3) == [1, 2]
+    # A circulant matrix (invariant under the 3-cycle).
+    A = [2.0 1.0 3.0; 3.0 2.0 1.0; 1.0 3.0 2.0]
+    B = SDPX.block_diagonalize(A, Q)
+    @test SDPX.is_block_diagonal(B, [1, 2])
+    # Trivial block = row sum.
+    @test isapprox(B[1, 1], 2.0 + 1.0 + 3.0; atol=1e-10)
+    # Round-trip.
+    @test isapprox(SDPX.reconstruct_matrix(B, Q), A; atol=1e-10)
+end
