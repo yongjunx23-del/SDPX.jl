@@ -57,17 +57,6 @@ function _supports_owned_bigfloat_arrow_equalities(
     return all(==(1), frequency)
 end
 
-function _runtime_schur_backend(
-    prob::SDPProblem,
-    equality_solver::Symbol=:auto,
-)
-    return kkt_backend_from_formulation(
-        _runtime_schur_formulation(prob, equality_solver),
-        :sdp_primal_dual,
-        prob.dims.n,
-    )
-end
-
 """
     _runtime_schur_formulation(prob, equality_solver) -> FormulationPlan
 

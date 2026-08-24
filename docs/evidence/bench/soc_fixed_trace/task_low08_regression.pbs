@@ -16,7 +16,7 @@ set -euo pipefail
 
 JULIA=${CSDR_JULIA:-julia}
 SHARED_DEPOT=${SDPX_SHARED_DEPOT:-${JULIA_DEPOT_PATH:-}}
-DRIVER="${SDPX_CANDIDATE}/bench/lattice_bootstrap/benchmark_sdpx_float64_solve.jl"
+DRIVER="${SDPX_CANDIDATE}/docs/evidence/bench/lattice_bootstrap/benchmark_sdpx_float64_solve.jl"
 if [[ -n "${SDPX_COMPILER_PROFILE:-}" ]]; then
     source "${SDPX_COMPILER_PROFILE}"
 fi

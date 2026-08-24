@@ -22,7 +22,7 @@ MultiFloats installation is represented as a structured `status = "skip"` row.
 Run from the repository root:
 
 ```sh
-julia --project=. bench/generic_sparse_factor/benchmark.jl \
+julia --project=. docs/evidence/bench/generic_sparse_factor/benchmark.jl \
   --output=work/baseline/generic_sparse_factor
 ```
 

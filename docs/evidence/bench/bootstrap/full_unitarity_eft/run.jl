@@ -222,7 +222,7 @@ function main(args=ARGS)
     output_dir = length(args) >= 2 ? abspath(args[2]) :
                  joinpath(
                      @__DIR__, "..", "..", "out",
-                     "bootstrap_full_unitraity_eft",
+                     "bootstrap_full_unitarity_eft",
                  )
     mkpath(output_dir)
 

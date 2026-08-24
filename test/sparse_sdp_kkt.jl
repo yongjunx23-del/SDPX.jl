@@ -28,7 +28,4 @@ using Test
     SDPX.sparse_factor_solve!(destination, factor, rhs)
     @test destination ≈ [1.0, 2.0, 4.0]
 
-    # Equality-bearing sparse SDP has no sparse pivoted-indefinite execution
-    # route; the planner must choose dense or fail closed for an explicit ask.
-    @test !SDPX.supports_sparse_backend(BigFloat)
 end

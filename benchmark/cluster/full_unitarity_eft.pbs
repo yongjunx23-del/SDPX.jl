@@ -1,9 +1,11 @@
 #!/bin/bash
 #PBS -N sdpx-full-eft
-#PBS -q sugon
-#PBS -l nodes=1:ppn=1
+#PBS -q normal
+#PBS -l nodes=1:ppn=8
 #PBS -l walltime=02:00:00
 #PBS -j oe
+
+# Reserve the site-approved small-job allocation; solve threads remain explicit below.
 
 set -euo pipefail
 

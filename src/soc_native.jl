@@ -174,12 +174,8 @@ struct ConeRepresentationPlan{E<:AbstractSOCExecution}
 end
 
 """Complete immutable native-SOCP plan frozen before numerical execution."""
-struct NativeSOCPlan{E<:AbstractSOCExecution,F<:AbstractKKTFormulation} <:
-       AbstractExecutionPlanPayload
+struct NativeSOCPlan{E<:AbstractSOCExecution} <: AbstractExecutionPlanPayload
     cone::ConeRepresentationPlan{E}
-    formulation::FormulationPlan{F}
-    la_config::LABackendConfiguration
-    threads::Int
 end
 
 """
@@ -194,7 +190,7 @@ family-specific facts are available through `plan.payload::NativeSOCPlan`, and
 the workspace constructor asserts payload/plan parity before numerical
 execution.
 """
-struct NativeSOCDiagnostics
+struct NativeSOCDiagnostics <: AbstractCoreDiagnostics
     plan::ExecutionPlan
     timings::NamedTuple
     memory::NamedTuple
@@ -223,8 +219,8 @@ struct NativeSOCDirectionGateRecord{T}
     eta_reg::T
 end
 
-@inline _native_soc_formulation_symbol(plan::NativeSOCPlan) =
-    formulation_symbol(plan.formulation)
+@inline _native_soc_formulation_symbol(plan::ExecutionPlan) =
+    formulation_symbol(plan.formulation_plan)
 
 """Native kernel frozen by the KKT formulation and payload execution.
 
@@ -340,7 +336,7 @@ function _native_soc_cone_plan(
 end
 
 """
-    _build_native_soc_payload(problem, options; specialization) -> NativeSOCPlan
+    _build_native_soc_payload(problem; specialization) -> NativeSOCPlan
 
 Build the exact `NativeSOCPlan` payload for one NativeSOC route.  This is the
 private payload builder: the top-level `build_execution_plan(ConicProblem)`
@@ -348,42 +344,15 @@ calls it and wraps the payload inside the single authoritative
 `ExecutionPlan`.  Production code never calls this function directly.
 """
 function _build_native_soc_payload(
-    problem::ConicProblem{T},
-    options::SolverOptions{T};
+    problem::ConicProblem{T};
     specialization::Symbol=:auto,
 ) where {T}
     _require_supported_arithmetic_type(T)
-    formulation = if options.formulation === :augmented
-        FormulationPlan(
-            DenseAugmentedKKT(), :user_forced_augmented, :native_soc_planner,
-        )
-    else
-        FormulationPlan(
-            DenseNormalEquations(),
-            options.formulation in (:primal, :normal_equations) ?
-            :user_forced_normal : :native_soc_dense_normal_default,
-            :native_soc_planner,
-        )
-    end
-    route = formulation.formulation isa DenseAugmentedKKT ?
-            :dense_augmented_ldlt : :dense_cholesky
-    la_config = plan_la_backend(
-        T;
-        requested=options.linear_algebra_backend,
-        route=route,
-        threads=max(options.threads, 1),
-        equality_solver=options.equality_solver,
-    )
-    return NativeSOCPlan(
-        _native_soc_cone_plan(problem; specialization),
-        formulation,
-        la_config,
-        max(options.threads, 1),
-    )
+    return NativeSOCPlan(_native_soc_cone_plan(problem; specialization))
 end
 
-mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend,P<:NativeSOCPlan}
-    plan::P
+mutable struct NativeSOCWorkspace{T,B<:AbstractLABackend}
+    plan::ExecutionPlan
     la_backend::B
     x::Vector{T}
     slack::Vector{Vector{T}}
@@ -459,20 +428,28 @@ end
 
 function NativeSOCWorkspace(
     problem::ConicProblem{T},
-    plan::P,
+    plan::ExecutionPlan,
     options::SolverOptions{T},
-) where {T,P<:NativeSOCPlan}
+) where {T}
+    payload = plan.payload
+    payload isa NativeSOCPlan || throw(ArgumentError(
+        "NativeSOC workspace requires an ExecutionPlan carrying a " *
+        "NativeSOCPlan payload; got " *
+        "$(payload === nothing ? "nothing" : typeof(payload))",
+    ))
+    _assert_native_soc_execution_plan(plan, payload, T, options)
+    cone_plan = payload::NativeSOCPlan
     backend = instantiate_la_backend(plan.la_config, T, plan.threads)
     variables = problem.variables
     equalities = length(problem.beq)
     allocate_blocks() = [alloc_zeros(T, length(cone.b)) for cone in problem.cones]
     slack = allocate_blocks()
     dual = allocate_blocks()
-    fixed_trace = plan.cone.execution isa FixedTraceQ3Execution
+    fixed_trace = cone_plan.cone.execution isa FixedTraceQ3Execution
     dense_dimension = fixed_trace ? 0 : variables
     local_blocks = fixed_trace ? length(problem.cones) : 0
     augmented_dimension =
-        plan.formulation.formulation isa DenseAugmentedKKT ?
+        plan.formulation_plan.formulation isa DenseAugmentedKKT ?
         variables + equalities : 0
     equality_sparse_canonical = _native_soc_sparse_rowvals_canonical(
         problem.Aeq,
@@ -498,7 +475,7 @@ function NativeSOCWorkspace(
         end
         scale = max(one(T), maximum(abs, problem.cones[block].b; init=zero(T)))
         slack[block][1] = fixed_trace ? _ingest_owned_scalar(
-            T, plan.cone.execution.payload.fixed_head[block],
+            T, cone_plan.cone.execution.payload.fixed_head[block],
         ) : options.Ωp * scale
         dual[block][1] = options.Ωd / scale
     end
@@ -574,13 +551,6 @@ function NativeSOCWorkspace(
     )
 end
 
-function NativeSOCWorkspace{T,B}(
-    plan::P,
-    args...,
-) where {T,B<:AbstractLABackend,P<:NativeSOCPlan}
-    return NativeSOCWorkspace{T,B,P}(plan, args...)
-end
-
 """
     _native_soc_owned_warm_vector(value, expected, T, label)
 
@@ -651,8 +621,8 @@ function _native_soc_derive_warm_slack!(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
 ) where {T}
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
-    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.payload.cone.execution.payload : nothing
     @inbounds for block in eachindex(problem.cones)
         slack = workspace.slack[block]
         cone = problem.cones[block]
@@ -761,26 +731,24 @@ function _assert_native_soc_execution_plan(
     payload.cone.execution isa AbstractSOCExecution || throw(ArgumentError(
         "NativeSOC payload cone execution is not a NativeSOC execution",
     ))
-    formulation_symbol(plan.formulation_plan) ===
-        formulation_symbol(payload.formulation) || throw(ArgumentError(
+    expected_formulation = options.formulation === :augmented ?
+                           :dense_augmented_kkt : :dense_normal_equations
+    formulation_symbol(plan.formulation_plan) === expected_formulation ||
+        throw(ArgumentError(
             "NativeSOC execution plan formulation " *
             "$(formulation_symbol(plan.formulation_plan)) does not match " *
-            "payload formulation $(formulation_symbol(payload.formulation))",
+            "options formulation $(expected_formulation)",
         ))
     # The top-level KKT route is the mathematical dense route only: normal
     # equations are always `:dense_cholesky` (the FixedTrace specialization is
     # an implementation detail carried by the payload, never a top-level route)
     # and the augmented system is `:dense_augmented_ldlt`.
-    expected_backend = payload.formulation.formulation isa
+    expected_backend = plan.formulation_plan.formulation isa
                        DenseAugmentedKKT ? :dense_augmented_ldlt :
                        :dense_cholesky
     plan.kkt_backend === expected_backend || throw(ArgumentError(
         "NativeSOC execution plan KKT backend $(plan.kkt_backend) does not " *
-        "match payload route $(expected_backend)",
-    ))
-    plan.backend_config.route === plan.kkt_backend || throw(ArgumentError(
-        "NativeSOC execution plan backend configuration route " *
-        "$(plan.backend_config.route) does not match $(plan.kkt_backend)",
+        "match formulation route $(expected_backend)",
     ))
     plan.backend_config.equality_solver === options.equality_solver ||
         throw(ArgumentError(
@@ -795,8 +763,22 @@ function _assert_native_soc_execution_plan(
         "NativeSOC execution plan carries an unauthorized structural " *
         "fallback chain $(plan.backend_config.fallback_chain)",
     ))
-    plan.la_config === payload.la_config || throw(ArgumentError(
-        "NativeSOC execution plan LA configuration diverges from its payload",
+    plan.la_config.requested === options.linear_algebra_backend ||
+        throw(ArgumentError(
+            "NativeSOC execution plan LA request " *
+            "$(plan.la_config.requested) does not match options " *
+            "$(options.linear_algebra_backend)",
+        ))
+    expected_la = plan_la_backend(
+        T;
+        requested=options.linear_algebra_backend,
+        route=expected_backend,
+        threads=plan.threads,
+        equality_solver=options.equality_solver,
+    )
+    plan.la_config === expected_la || throw(ArgumentError(
+        "NativeSOC execution plan LA configuration does not match " *
+        "the requested provider/route/thread configuration",
     ))
     plan.classification.arithmetic === _arithmetic_class(T) ||
         throw(ArgumentError(
@@ -837,9 +819,9 @@ function _assert_native_soc_execution_plan(
             "specialization $(payload.cone.specialization)",
         ),
     )
-    plan.threads === payload.threads || throw(ArgumentError(
+    plan.threads === max(options.threads, 1) || throw(ArgumentError(
         "NativeSOC execution plan threads $(plan.threads) do not match " *
-        "payload threads $(payload.threads)",
+        "options threads $(max(options.threads, 1))",
     ))
     expected_scaling = payload.cone.execution isa FixedTraceQ3Execution ?
                        :hkm : :nesterov_todd
@@ -848,28 +830,6 @@ function _assert_native_soc_execution_plan(
         "payload cone scaling $(expected_scaling)",
     ))
     return nothing
-end
-
-"""ExecutionPlan-taking NativeSOC workspace constructor.
-
-Extracts and validates the `NativeSOCPlan` payload from the single
-top-level `ExecutionPlan`, then delegates to the numerical payload
-constructor.  The existing `NativeSOCWorkspace(problem, plan, options)` with a
-bare `NativeSOCPlan` remains for compatibility and tests.
-"""
-function NativeSOCWorkspace(
-    problem::ConicProblem{T},
-    plan::ExecutionPlan,
-    options::SolverOptions{T},
-) where {T}
-    payload = plan.payload
-    payload isa NativeSOCPlan || throw(ArgumentError(
-        "NativeSOC workspace requires an ExecutionPlan carrying a " *
-        "NativeSOCPlan payload; got " *
-        "$(payload === nothing ? "nothing" : typeof(payload))",
-    ))
-    _assert_native_soc_execution_plan(plan, payload, T, options)
-    return NativeSOCWorkspace(problem, payload, options)
 end
 
 function _native_soc_residuals!(
@@ -897,8 +857,8 @@ function _native_soc_residuals!(
             one(T),
         )
     end
-    if workspace.plan.cone.execution isa FixedTraceQ3Execution
-        reduction = workspace.plan.cone.execution.payload
+    if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+        reduction = workspace.plan.payload.cone.execution.payload
         started = time_ns()
         @inbounds for block in eachindex(problem.cones)
             first = reduction.active_ids[1, block]
@@ -981,8 +941,8 @@ function _native_soc_metrics(
     barrier_degree = 0
     primal_margin = T(Inf)
     dual_margin = T(Inf)
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
-    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.payload.cone.execution.payload : nothing
     @inbounds for block in eachindex(problem.cones)
         barrier_degree += length(problem.cones[block].b) == 1 ? 1 : 2
         if fixed_trace
@@ -1037,7 +997,7 @@ function _native_soc_metrics(
 end
 
 function _native_soc_scaling!(workspace::NativeSOCWorkspace)
-    workspace.plan.cone.execution isa FixedTraceQ3Execution &&
+    workspace.plan.payload.cone.execution isa FixedTraceQ3Execution &&
         return true, 0
     @inbounds for block in eachindex(workspace.slack)
         ok, eta, eta_squared = _soc_nt_scaling!(
@@ -1077,8 +1037,8 @@ function _native_soc_add_metric!(
     cone::SOCConstraint{T},
     block::Int,
 ) where {T}
-    if workspace.plan.cone.execution isa FixedTraceQ3Execution
-        reduction = workspace.plan.cone.execution.payload
+    if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+        reduction = workspace.plan.payload.cone.execution.payload
         first = reduction.active_ids[1, block]
         second = reduction.active_ids[2, block]
         a11 = reduction.tail_map[1, 1, block]
@@ -1177,7 +1137,7 @@ function _native_soc_assemble_factor!(
     workspace::NativeSOCWorkspace{T},
     problem::ConicProblem{T},
 ) where {T}
-    if workspace.plan.formulation.formulation isa DenseAugmentedKKT
+    if workspace.plan.formulation_plan.formulation isa DenseAugmentedKKT
         variables = problem.variables
         equalities = length(problem.beq)
         rejection = :factor_failed
@@ -1186,8 +1146,8 @@ function _native_soc_assemble_factor!(
             zero_owned!(workspace.augmented_buffer)
             regularization = retry == 0 ? zero(T) :
                              sqrt(eps(T)) * T(10)^(retry - 1)
-            if workspace.plan.cone.execution isa FixedTraceQ3Execution
-                reduction = workspace.plan.cone.execution.payload
+            if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+                reduction = workspace.plan.payload.cone.execution.payload
                 @inbounds for block in axes(reduction.active_ids, 2)
                     first = reduction.active_ids[1, block]
                     second = reduction.active_ids[2, block]
@@ -1257,8 +1217,8 @@ function _native_soc_assemble_factor!(
         end
         return nothing
     end
-    if workspace.plan.cone.execution isa FixedTraceQ3Execution
-        reduction = workspace.plan.cone.execution.payload
+    if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+        reduction = workspace.plan.payload.cone.execution.payload
         for attempt in 1:6
             zero_owned!(workspace.local_metric_regularization)
             regularization = attempt == 1 ? zero(T) :
@@ -1716,9 +1676,9 @@ function _native_soc_cold_start_init!(
 ) where {T}
     plan = workspace.plan
     backend = workspace.la_backend
-    fixed_trace = plan.cone.execution isa FixedTraceQ3Execution
-    reduction = fixed_trace ? plan.cone.execution.payload : nothing
-    augmented = plan.formulation.formulation isa DenseAugmentedKKT
+    fixed_trace = plan.payload.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? plan.payload.cone.execution.payload : nothing
+    augmented = plan.formulation_plan.formulation isa DenseAugmentedKKT
     factorization = augmented ? :pivoted_symmetric_ldlt :
                     fixed_trace ? :native_local_cholesky : :cholesky
 
@@ -1799,7 +1759,7 @@ function _native_soc_cold_start_init!(
     factor = _native_soc_assemble_factor!(workspace, problem)
     factor === nothing && return false, report((cause=:la_factor_failed,))
     factor_count = 1
-    if plan.formulation.formulation isa DenseNormalEquations
+    if plan.formulation_plan.formulation isa DenseNormalEquations
         _native_soc_prepare_kkt!(workspace, problem, factor, options) ||
             return false, report((
                 cause=:equality_prepare_failed,
@@ -2140,7 +2100,7 @@ function _native_soc_direction!(
     rhs_phase::Symbol=:none,
 ) where {T}
     workspace.direction_gate = nothing
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
     rhs_started = fixed_trace ? time_ns() : 0
     _native_soc_build_direction_rhs!(workspace, problem; rhs_phase=rhs_phase)
     _native_soc_solve_kkt!(workspace, problem, factor, options) || return false
@@ -2171,8 +2131,8 @@ function _native_soc_build_direction_rhs!(
     problem::ConicProblem{T};
     rhs_phase::Symbol=:none,
 ) where {T}
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
-    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.payload.cone.execution.payload : nothing
     copy_owned!(workspace.rhs, workspace.dual_residual)
     if fixed_trace
         contraction_started = time_ns()
@@ -2247,8 +2207,8 @@ function _native_soc_complete_direction!(
     problem::ConicProblem{T};
     rhs_phase::Symbol=:none,
 ) where {T}
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
-    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.payload.cone.execution.payload : nothing
     if fixed_trace
         started = time_ns()
         include_affine_product = rhs_phase === :corrector
@@ -2353,8 +2313,8 @@ function _native_soc_direction_accuracy_gate!(
         workspace.direction_gate = record
         return record
     end
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
-    reduction = fixed_trace ? workspace.plan.cone.execution.payload : nothing
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+    reduction = fixed_trace ? workspace.plan.payload.cone.execution.payload : nothing
     # The gate must use the exact pre-solve RHS that produced `dx`, retained
     # in `direction_rhs_original` by `_native_soc_build_direction_rhs!`; it never
     # reconstructs that RHS from offsets.
@@ -2512,7 +2472,7 @@ function _native_soc_direction_accuracy_gate!(
 end
 
 function _native_soc_predictor_offsets!(workspace::NativeSOCWorkspace)
-    if workspace.plan.cone.execution isa FixedTraceQ3Execution
+    if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
         @inbounds for block in eachindex(workspace.offset)
             zero_owned!(workspace.offset[block])
         end
@@ -2528,7 +2488,7 @@ function _native_soc_corrector_offsets!(
     workspace::NativeSOCWorkspace{T},
     sigma_mu::T,
 ) where {T}
-    if workspace.plan.cone.execution isa FixedTraceQ3Execution
+    if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
         @inbounds for block in eachindex(workspace.offset)
             zero_owned!(workspace.offset[block])
             workspace.offset[block][1] = sigma_mu
@@ -2710,8 +2670,8 @@ function _native_soc_workspace_bytes(workspace::NativeSOCWorkspace)
     bytes = sum(Base.summarysize, vectors; init=0) +
             sum(collection -> sum(Base.summarysize, collection; init=0), blocks; init=0) +
             sum(Base.summarysize, matrices; init=0)
-    if workspace.plan.cone.execution isa FixedTraceQ3Execution
-        reduction = workspace.plan.cone.execution.payload
+    if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
+        reduction = workspace.plan.payload.cone.execution.payload
         bytes += Base.summarysize(reduction.active_ids)
         bytes += Base.summarysize(reduction.tail_map)
         bytes += Base.summarysize(reduction.fixed_head)
@@ -2735,8 +2695,8 @@ function _native_soc_result(
     objective_offset::T=zero(T),
 ) where {T}
     p_obj, d_obj, gap, p_res, d_res = metrics[1:5]
-    augmented = workspace.plan.formulation.formulation isa DenseAugmentedKKT
-    fixed_trace = workspace.plan.cone.execution isa FixedTraceQ3Execution
+    augmented = workspace.plan.formulation_plan.formulation isa DenseAugmentedKKT
+    fixed_trace = workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
     # Canonical top-level route facts always mirror the ExecutionPlan: normal
     # equations (including the FixedTraceQ3 kernel) are `:dense_cholesky` and
     # the augmented system is `:dense_augmented_ldlt`.  The payload freezes
@@ -2747,9 +2707,7 @@ function _native_soc_result(
     # with a `native_local_cholesky` factorization — never a generic dense
     # cholesky — and general Lorentz runs `general_lorentz`.
     planned_payload = plan.payload
-    planned_augmented = planned_payload isa NativeSOCPlan &&
-                        planned_payload.formulation.formulation isa
-                        DenseAugmentedKKT
+    planned_augmented = plan.formulation_plan.formulation isa DenseAugmentedKKT
     planned_fixed_trace = planned_payload isa NativeSOCPlan &&
                           planned_payload.cone.execution isa
                           FixedTraceQ3Execution
@@ -2767,7 +2725,7 @@ function _native_soc_result(
     kkt_backend = augmented ? :dense_augmented_ldlt : :dense_cholesky
     native_kernel = _native_soc_kernel_symbol(
         augmented,
-        workspace.plan.cone.execution,
+        workspace.plan.payload.cone.execution,
     )
     initialization_report = get(termination, :initialization, NamedTuple())
     initialization_path = get(initialization_report, :path, :not_applied)
@@ -2795,7 +2753,7 @@ function _native_soc_result(
         planned_algorithm=plan.algorithm,
         executed_algorithm=:native_soc,
         cone_representation=:native_lorentz,
-        soc_specialization=workspace.plan.cone.specialization,
+        soc_specialization=workspace.plan.payload.cone.specialization,
         requested_kkt_formulation=options.formulation,
         planned_kkt_formulation=formulation_symbol(plan.formulation_plan),
         executed_kkt_formulation=_native_soc_formulation_symbol(workspace.plan),
@@ -2992,7 +2950,7 @@ Base.@noinline function _solve_native_soc_core(
         scaling_ok, failed_block = _native_soc_scaling!(workspace)
         scaling_elapsed = (time_ns() - scaling_started) / 1.0e9
         phase_scaling += scaling_elapsed
-        if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
             workspace.fixed_local_scaling_seconds += scaling_elapsed
         end
         if !scaling_ok
@@ -3019,7 +2977,7 @@ Base.@noinline function _solve_native_soc_core(
         end
         assembly_elapsed = (time_ns() - assembly_started) / 1.0e9
         phase_assembly += assembly_elapsed
-        if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
             workspace.local_metric_preparations += 1
             workspace.fixed_local_metric_seconds += assembly_elapsed
         end
@@ -3045,7 +3003,7 @@ Base.@noinline function _solve_native_soc_core(
         factor = _native_soc_assemble_factor!(workspace, problem)
         factor_elapsed = (time_ns() - factor_started) / 1.0e9
         phase_factor += factor_elapsed
-        if workspace.plan.cone.execution isa FixedTraceQ3Execution
+        if workspace.plan.payload.cone.execution isa FixedTraceQ3Execution
             workspace.local_factorizations += 1
             workspace.fixed_local_factor_seconds += factor_elapsed
         end
@@ -3055,7 +3013,7 @@ Base.@noinline function _solve_native_soc_core(
             termination = (reason=:la_factor_failed, stage=:kkt_factorization)
             break
         end
-        if workspace.plan.formulation.formulation isa DenseNormalEquations
+        if workspace.plan.formulation_plan.formulation isa DenseNormalEquations
             _native_soc_prepare_kkt!(workspace, problem, factor, options) || begin
                 status = NumericalBreakdown
                 message = "NativeSOC equality KKT preparation failed."
@@ -3136,7 +3094,7 @@ Base.@noinline function _solve_native_soc_core(
             workspace.scratch,
             primal_bound,
             allow_full_step=
-                workspace.plan.cone.execution isa FixedTraceQ3Execution,
+                workspace.plan.payload.cone.execution isa FixedTraceQ3Execution,
         )
         dual_step = _native_soc_strict_step(
             workspace.dual,
@@ -3144,7 +3102,7 @@ Base.@noinline function _solve_native_soc_core(
             workspace.offset,
             dual_bound,
             allow_full_step=
-                workspace.plan.cone.execution isa FixedTraceQ3Execution,
+                workspace.plan.payload.cone.execution isa FixedTraceQ3Execution,
         )
         if !(primal_step > options.min_step && dual_step > options.min_step)
             status = Stalled

@@ -1492,10 +1492,9 @@ end
            x0=nothing, X0=nothing, y0=nothing, Y0=nothing, resume="") -> SDPResult{T}
 
 The one loop serving cold start, warm start (`x0,X0,y0,Y0`),
-`OPTIMIZE`/`FEASIBILITY` mode, and resume-from-checkpoint (§1.6, §5.5)
-— replacing the four near-duplicate `sdp`/`findFeasible` bodies in the
-original. See `compat.jl` for the legacy `sdp`/`findFeasible` API that
-wraps this.
+`OPTIMIZE`/`FEASIBILITY` mode, and resume-from-checkpoint (§1.6, §5.5).
+Qualified core callers and the public Model adapter share this implementation;
+there is no parallel legacy frontend.
 """
 function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOptions{T}();
     x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
@@ -2005,14 +2004,9 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
     while true
         gap = pObj - dObj
         gap_rel = abs(gap) / max(one(T), (abs(pObj) + abs(dObj)) / 2)
-        term_ok, gap_ok = if opts.termination === :legacy
-            (p_res <= opts.ϵ_primal && d_res <= opts.ϵ_dual),
-            (zero(T) <= gap <= termination_gap_tolerance)
-        else
-            (p_res / scale_p <= opts.ϵ_primal &&
-             d_res / scale_d <= opts.ϵ_dual),
-            (gap_rel <= termination_gap_tolerance)
-        end
+        term_ok = p_res / scale_p <= opts.ϵ_primal &&
+                  d_res / scale_d <= opts.ϵ_dual
+        gap_ok = gap_rel <= termination_gap_tolerance
         # Residuals between accepted steps are updated from the exact affine
         # residual recurrence below. Before issuing a success certificate,
         # recompute them from the current iterate so accumulated roundoff can
@@ -2038,12 +2032,8 @@ function _solve_sdp_core!(prob::SDPProblem{T}, opts::SolverOptions{T}=SolverOpti
                 y,
                 Y,
             )
-            term_ok = if opts.termination === :legacy
-                p_res <= opts.ϵ_primal && d_res <= opts.ϵ_dual
-            else
-                p_res / scale_p <= opts.ϵ_primal &&
-                d_res / scale_d <= opts.ϵ_dual
-            end
+            term_ok = p_res / scale_p <= opts.ϵ_primal &&
+                      d_res / scale_d <= opts.ϵ_dual
         end
 
         # Progress is judged by `StagnationDetector` (see `stagnation.jl`): all
@@ -3693,7 +3683,7 @@ function _solve_pipeline!(
         # resolver runs once inside `solve_lp!` after `_scale_lp!`; the core
         # must not substitute plan values into the options.
         lp_options = opts
-        result, redundant_rows, workspace_bytes = solve_lp!(
+        result, redundant_rows, workspace_bytes, plan = solve_lp!(
             reduced,
             lp_options,
             plan;

@@ -17,7 +17,7 @@ whose relationship to the CSDR trace is uncertain.
 
 Examples:
 
-    julia --project=. bench/soc_fixed_trace/reference/benchmark_float64.jl \
+    julia --project=. docs/evidence/bench/soc_fixed_trace/reference/benchmark_float64.jl \
       --solver=clarabel --model=/data/J40.bin --release=/data/CSDR \
       --expected-hash=... --reps=1 --warmup=0 --output=/tmp/j40-clarabel.toml
 

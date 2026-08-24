@@ -31,13 +31,13 @@ Reference SDP and native fixed-trace SOC are separate modes:
 
 ```bash
 # PSD reference (one process, all output in English)
-julia --project=. -t 8 bench/soc_fixed_trace/benchmark.jl \
+julia --project=. -t 8 docs/evidence/bench/soc_fixed_trace/benchmark.jl \
   --case=J40 --model=/data/J40.bin --mode=sdp \
   --arithmetic=Float64x4 --reps=3 --warmup=1 \
   --expected-hash="$J40_SHA" --output=results/j40-sdp.toml
 
 # Native Q3/SOC path; native socp requires original coordinates
-julia --project=. -t 8 bench/soc_fixed_trace/benchmark.jl \
+julia --project=. -t 8 docs/evidence/bench/soc_fixed_trace/benchmark.jl \
   --case=J40 --model=/data/J40.bin --mode=socp --scaling=none \
   --arithmetic=Float64x4 --reps=3 --warmup=1 \
   --expected-hash="$J40_SHA" --output=results/j40-socp.toml
@@ -117,7 +117,7 @@ therefore rejected for this benchmark rather than enabled behind heuristics.
 syntax or CI checks.  It is intentionally not a J40/J80 benchmark:
 
 ```bash
-julia --project=. -t 1 bench/soc_fixed_trace/benchmark.jl \
+julia --project=. -t 1 docs/evidence/bench/soc_fixed_trace/benchmark.jl \
   --synthetic --case=synthetic --mode=socp --scaling=none \
   --arithmetic=Float64 --reps=1 --warmup=0
 ```

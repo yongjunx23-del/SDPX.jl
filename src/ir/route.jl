@@ -44,6 +44,9 @@ struct NativeConeRoute
     route::Symbol
 end
 
+const NATIVE_ROUTE_FAMILY_ORDER =
+    (:lp_family, :soc_family, :sdp_family, :exp_family)
+
 """
     SDPX.UnsupportedNativeConeRoute <: Exception
 
@@ -62,7 +65,7 @@ struct UnsupportedNativeConeRoute <: Exception
         # order would put SDP before SOC and is not part of the model contract.
         families = Symbol[
             family for family in
-            (:lp_family, :soc_family, :sdp_family, :exp_family)
+            NATIVE_ROUTE_FAMILY_ORDER
             if family in detected_families
         ]
         length(families) >= 2 || throw(ArgumentError(
@@ -79,14 +82,17 @@ Base.showerror(io::IO, err::UnsupportedNativeConeRoute) =
 # Family labels (pure mathematical mapping; never a formulation choice)
 # ---------------------------------------------------------------------------
 
-_route_family(::Reals) = :free
-_route_family(::Nonnegative) = :lp_family
-_route_family(::Nonpositive) = :lp_family
-_route_family(::ZeroCone) = :zero
-_route_family(::LorentzCone) = :soc_family
-_route_family(::RotatedLorentzCone) = :soc_family
-_route_family(::PSDCone) = :sdp_family
-_route_family(::ExponentialCone) = :exp_family
+function _route_family(kind::Symbol)
+    kind === :free && return :free
+    kind === :zero && return :zero
+    kind in (:nonnegative, :nonpositive, :interval) && return :lp_family
+    kind in (:soc, :rsoc) && return :soc_family
+    kind in (:psd, :psd_scaled) && return :sdp_family
+    kind === :exp && return :exp_family
+    throw(ArgumentError("unsupported cone kind $kind in route classification"))
+end
+
+_route_family(domain::ProductConeDomain) = _route_family(_domain_cone(domain))
 _route_family(domain) =
     throw(ArgumentError("unsupported native cone domain $domain in route classification"))
 
@@ -165,11 +171,11 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
     detected_count = (saw_lp ? 1 : 0) + (saw_soc ? 1 : 0) + (saw_sdp ? 1 : 0) +
                      (saw_exp ? 1 : 0)
     if detected_count > 1
-        families = Symbol[]
-        saw_lp && push!(families, :lp_family)
-        saw_soc && push!(families, :soc_family)
-        saw_sdp && push!(families, :sdp_family)
-        saw_exp && push!(families, :exp_family)
+        detected = (saw_lp, saw_soc, saw_sdp, saw_exp)
+        families = Symbol[
+            family for (family, present) in
+            zip(NATIVE_ROUTE_FAMILY_ORDER, detected) if present
+        ]
         throw(UnsupportedNativeConeRoute(families))
     end
     route = saw_lp ? :lp_family :

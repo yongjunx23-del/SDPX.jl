@@ -104,12 +104,12 @@ enough arithmetic per compact Schur entry to amortize the scheduler.
 
 ```bash
 JULIA_NUM_THREADS=8 julia --project=. \
-  bench/threading/benchmark_schur_scheduler.jl \
-  bench/threading/results/schur-scheduler-2026-07-25.csv
+  docs/evidence/bench/threading/benchmark_schur_scheduler.jl \
+  docs/evidence/bench/threading/results/schur-scheduler-2026-07-25.csv
 
 JULIA_NUM_THREADS=8 julia --project=. \
-  bench/threading/benchmark_sparse_schur_scheduler.jl \
-  bench/threading/results/sparse-schur-scheduler-2026-07-25.csv
+  docs/evidence/bench/threading/benchmark_sparse_schur_scheduler.jl \
+  docs/evidence/bench/threading/results/sparse-schur-scheduler-2026-07-25.csv
 ```
 
 The raw results are:

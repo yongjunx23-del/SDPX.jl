@@ -165,8 +165,6 @@ end
     ]
     primal_record = only(lowered.primal_records)
     dual_record = only(lowered.dual_records)
-    source = [3.0, 1.0, -2.0, 4.0]
-    @test SDPX.reconstruct_soc_primal(primal_record, cone.A * source) ≈ source
     dual_core = [2.0, -1.0, 0.5, -3.0]
     @test SDPX.reconstruct_soc_dual(dual_record, dual_core) ≈ [
         1.0, 3.0, 0.5 * sqrt_two, -3.0 * sqrt_two,

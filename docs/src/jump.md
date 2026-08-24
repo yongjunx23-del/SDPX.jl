@@ -96,7 +96,6 @@ Options can be passed to the constructor:
 model = Model(() -> SDPX.Optimizer(
     tolerance=1e-8,
     threads=4,
-    parameter_policy=:auto,
     max_iterations=300,
     time_limit=60.0,
     verbose=0,
@@ -118,10 +117,6 @@ engine options; native v0.5 applications should use `Settings` instead:
 
 | Adapter attribute | Qualified engine field | Meaning |
 |---|---|---|
-| `beta` | `β` | complementarity reduction target |
-| `gamma` | `γ` | line-search backtracking factor |
-| `omega_p` | `Ωp` | expert fixed-policy primal PSD scale |
-| `omega_d` | `Ωd` | expert fixed-policy dual PSD scale |
 | `tol_gap` | `ϵ_gap` | relative gap tolerance |
 | `tol_primal` | `ϵ_primal` | primal residual tolerance |
 | `tol_dual` | `ϵ_dual` | dual residual tolerance |
@@ -130,28 +125,34 @@ engine options; native v0.5 applications should use `Settings` instead:
 | `num_threads` | `threads` | maximum Julia tasks used by one solve |
 | `precision` | `precision_bits` | BigFloat working precision in bits |
 | `verbose` | `verbosity` | output level from 0 to 3 |
+| `scaling` | `scaling` | `:auto`, `:none`, or `:equilibrate` |
+| `presolve` | `presolve` | `:auto`, `:on`, or `:off` |
+| `algorithm` | `algorithm` | `:auto`, `:lp`, `:socp`, or `:sdp` |
+| `sparse` | `sparse` | sparse-storage policy |
+| `formulation` | `formulation` | `:auto`, `:normal_equations`, or `:augmented` |
+| `equality_solver` | `equality_solver` | `:auto`, `:normal_equations`, or `:qr` |
+| `linear_algebra_backend` | `linear_algebra_backend` | provider policy |
+| `working_precision_policy` | `working_precision_policy` | `:auto` or `:fixed` |
+| `diagnostics` | `diagnostics` | retain execution diagnostics |
+| `timing` | `timing` | record phase timings |
+| `certification` | `certification` | retain post-solve certification |
 
 Setting the raw `"tolerance"` attribute updates the gap, primal, and dual
-tolerances together. Every exact qualified engine field name is also accepted
-as a raw optimizer attribute, including `sparse`, `scaling`, `predictor`,
-`refine_steps`, `max_restarts`, `extended_precision_blas`, and
-`extended_precision_memory_fraction`. Unknown names are rejected. The
-attribute bridge uses the same LP, native SOC/RSOC, and SDP route selection as
-the typed Model API.
+tolerances together. The exact qualified fields listed above are accepted as
+raw optimizer attributes; unknown names and fields without a lossless public
+Settings mapping are rejected with `MOI.UnsupportedAttribute`. This includes
+expert interior-point controls such as `beta`, `gamma`, `omega_p`, `omega_d`,
+`predictor`, `parameter_strategy`, `refine_steps`, `max_restarts`,
+`extended_precision_blas`, `mixed_precision_kkt`, and `checkpoint_path`.
+Use the qualified `SolverOptions` interface for those expert controls instead
+of silently falling back to defaults through JuMP.
 
-`parameter_policy=:auto` (the default) runs the generic automatic Mehrotra
-controller: `beta`, `gamma`, `predictor`, and `parameter_strategy` keep the
-adapter defaults or user choices. After presolve and scaling, the
-selected KKT/provider route constructs a primal/dual affine point and applies
-typed cone-interior shifts plus deterministic complementarity mass balancing;
-`omega_p` and `omega_d` are ignored. The public resolver reports
-`profile=:post_scaling_mehrotra`,
-the plan records the neutral deferred identity `:automatic_mehrotra`, and
-executed diagnostics record `:post_scaling_mehrotra`. Use `:fixed` in expert
-mode to preserve supplied values exactly with provenance `:user_fixed`.
-`parameter_strategy=:adaptive` (the default) enables the bounded Mehrotra
-controller, independent primal/dual step safeguards, adaptive refinement
-limits, and complete fixed-path fallback. See the
+The MOI bridge uses the public automatic Mehrotra controller after presolve
+and scaling. It constructs a primal/dual affine point and applies typed
+cone-interior shifts plus deterministic complementarity mass balancing. The
+typed Model API records this as `profile=:post_scaling_mehrotra`; use the
+qualified low-level interface when a fixed expert trajectory is required. See
+the
 [adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).
 
 Native SDP checkpoints are iterate-level warm restarts, not full execution

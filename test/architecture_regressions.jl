@@ -27,16 +27,6 @@ using Test
         @test realized_sparse == realized_dense
     end
 
-    @testset "explicit equality QR is reflected by the execution plan" begin
-        # The backend selector itself is the regression boundary: a model that
-        # otherwise qualifies for sparse Schur must not advertise that route
-        # when equality_solver=:qr forces the current dense/QR workspace path.
-        # Existing sparse-SDP tests cover the positive sparse route; this check
-        # protects the option-dependent selector without duplicating a large
-        # fixture here.
-        @test hasmethod(SDPX._runtime_schur_backend, Tuple{SDPX.SDPProblem,Symbol})
-    end
-
     @testset "execution plan is authoritative for Workspace structure" begin
         blocks = 3
         shared = 2
@@ -148,6 +138,9 @@ using Test
         @test dense_workspace.sparse_kkt === nothing
         @test size(dense_workspace.S) == (variables, variables)
         @test SDPX.select_backend(dense_workspace) isa SDPX.DenseCholeskyBackend
+        @test !(:kkt_backend in fieldnames(typeof(dense_plan)))
+        @test dense_plan.kkt_backend === dense_plan.backend_config.route
+        @test dense_plan.storage_plan isa SDPX.KKTStoragePlan
         @test_throws ErrorException SDPX._assert_planned_backend!(
             dense_workspace,
             SDPX.ArrowBackend(),
@@ -163,7 +156,9 @@ using Test
             (),
             false,
         )
-        inconsistent_plan = SDPX.ExecutionPlan(
+        # A route/configuration mismatch now fails at plan construction rather
+        # than surviving as duplicated state until Workspace setup.
+        @test_throws ArgumentError SDPX.ExecutionPlan(
             dense_plan.classification,
             dense_plan.algorithm,
             dense_plan.scaling,
@@ -175,11 +170,6 @@ using Test
             dense_plan.parameter_profile,
             dense_plan.memory_budget_bytes,
             dense_plan.parameters,
-        )
-        @test_throws ArgumentError SDPX.Workspace(
-            problem;
-            thread_count=1,
-            execution_plan=inconsistent_plan,
         )
 
         lp = SDPX.ingest(
@@ -194,25 +184,74 @@ using Test
         @test lp_plan.scaling === :lp_geometric
         @test lp_plan.backend_config.deferred
 
+        lp_payload = SDPX.LPRoutePlan(
+            :positive_definite_cholesky,
+            :dense,
+            :blas_lapack,
+            0,
+            2,
+            0,
+            1,
+        )
+        lp_final = SDPX._lp_finalized_execution_plan(lp_plan, lp_payload)
+        @test !lp_final.backend_config.deferred
+        @test lp_final.backend_config.route === lp_payload.route
+        @test lp_final.storage_plan.storage === lp_payload.storage
+        @test_throws ArgumentError SDPX.ExecutionPlan(lp_plan, lp_payload)
+
+        mismatched_lp_config = SDPX.BackendConfiguration(
+            :dense_lu,
+            lp_final.backend_config.equality_solver,
+            false,
+            false,
+            :off,
+            (),
+            false,
+        )
+        @test_throws ArgumentError SDPX.ExecutionPlan(
+            lp_final.classification,
+            lp_final.algorithm,
+            lp_final.scaling,
+            mismatched_lp_config,
+            lp_final.formulation_plan,
+            lp_final.la_config,
+            lp_final.storage_plan,
+            lp_final.gram_kernel,
+            lp_final.schedule,
+            lp_final.threads,
+            lp_final.parameter_profile,
+            lp_final.memory_budget_bytes,
+            lp_final.parameters,
+            lp_payload,
+        )
+        @test_throws ArgumentError SDPX.ExecutionPlan(
+            lp_final.classification,
+            lp_final.algorithm,
+            lp_final.scaling,
+            lp_final.backend_config,
+            lp_final.formulation_plan,
+            lp_final.la_config,
+            SDPX.KKTStoragePlan(:sparse),
+            lp_final.gram_kernel,
+            lp_final.schedule,
+            lp_final.threads,
+            lp_final.parameter_profile,
+            lp_final.memory_budget_bytes,
+            lp_final.parameters,
+            lp_payload,
+        )
+
         lp_workspace = SDPX.LPWorkspace(
             Float64,
             1,
             2,
             0;
             packed_hessian=false,
-            lp_route_payload=SDPX.LPRoutePlan(
-                :positive_definite_cholesky,
-                :dense,
-                :blas_lapack,
-                0,
-                2,
-                0,
-                1,
-            ),
+            lp_route_payload=lp_payload,
         )
         lp_backend = SDPX._resolve_lp_backend!(lp_workspace, 0)
         @test lp_backend isa SDPX.LPCholeskyBackend
-        @test lp_workspace.backend_formulation ===
+        @test SDPX._lp_executed_backend(lp_workspace, 0) ===
               :positive_definite_cholesky
         @test_throws ErrorException SDPX.factorize!(
             SDPX.LPLUBackend(),

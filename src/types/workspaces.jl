@@ -91,11 +91,9 @@ la_factor_packed_factors(factor::StandardLAQRFactor) = factor.factor.factors
     SolverOptions{T}
 
 All solver knobs, keyed to the arithmetic type `T` (P8: `T` is now a
-type parameter flowing from the input data, never a mutable global).
-Defaults reproduce the historical behavior of `sdp`/`findFeasible`
-except where noted; `termination = :legacy` is a one-release escape hatch for
-the old absolute/sign-based convention, with modern inclusive boundaries and
-post-solve certification (§5.1 legacy note).
+type parameter flowing from the input data, never a mutable global). Stopping
+tests use the scale-normalized relative convention shared by the solve loop
+and post-solve certification.
 """
 Base.@kwdef struct SolverOptions{T}
     β::T                    = T(1) / 10          # centering reduction target β·μ
@@ -140,7 +138,6 @@ Base.@kwdef struct SolverOptions{T}
     verbosity::Int            = 1                  # 0 silent … 3 debug diagnostics
     timing::Bool              = false
     callback                  = nothing             # (state) -> Bool ; true stops the solve
-    termination::Symbol       = :relative           # :relative | :legacy
     # `:auto` picks `:fraction_to_boundary` when every block is at most 2x2 and
     # `:backtrack` otherwise. Backtracking accepts the first `γᵏ` that is
     # positive definite, so its effective fraction-to-boundary factor lands

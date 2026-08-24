@@ -26,9 +26,13 @@ end
 SDPX.la_provider_ldlt_inertia(payload::ScriptedNativeSOCLDLTPayload) =
     payload.inertia
 
-function _native_soc_workspace_with_backend(workspace, backend)
+function _native_soc_workspace_with_backend(
+    workspace,
+    backend;
+    plan=workspace.plan,
+)
     values = ntuple(
-        index -> index == 2 ? backend : getfield(workspace, index),
+        index -> index == 1 ? plan : index == 2 ? backend : getfield(workspace, index),
         fieldcount(typeof(workspace)),
     )
     return SDPX.NativeSOCWorkspace{Float64,SDPX.AbstractLABackend}(values...)
@@ -98,11 +102,11 @@ end
             Aeq=[0.0 1.0 0.0; 0.0 0.0 1.0],
             beq=[3.0, 4.0],
         )
-        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(Float64)).payload
-        @test plan.cone.representation === :native_lorentz
-        @test plan.cone.execution isa SDPX.GeneralLorentzExecution
-        @test plan.cone.specialization === :general_lorentz
-        @test plan.formulation.formulation isa SDPX.DenseNormalEquations
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(Float64))
+        @test plan.payload.cone.representation === :native_lorentz
+        @test plan.payload.cone.execution isa SDPX.GeneralLorentzExecution
+        @test plan.payload.cone.specialization === :general_lorentz
+        @test plan.formulation_plan.formulation isa SDPX.DenseNormalEquations
         @test plan.la_config.selected === :standard
         @test_throws ArgumentError SDPX.build_execution_plan(
             SDPX.AutoPlanner(), problem,
@@ -124,22 +128,55 @@ end
             Aeq=reshape([0.0, 1.0], 1, 2),
             beq=[0.5],
         )
-        options = _native_soc_options(Float64)
-        normal_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:fixed_trace).payload
-        augmented_plan = SDPX.NativeSOCPlan(
-            normal_plan.cone,
+        normal_options = _native_soc_options(
+            Float64; formulation=:normal_equations,
+        )
+        options = _native_soc_options(
+            Float64; formulation=:augmented,
+        )
+        normal_plan = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), problem, normal_options;
+            specialization=:fixed_trace,
+        )
+        augmented_plan = SDPX.ExecutionPlan(
+            normal_plan.classification,
+            normal_plan.algorithm,
+            normal_plan.scaling,
+            SDPX.BackendConfiguration(
+                :dense_augmented_ldlt, options.equality_solver,
+                false, false, :off, (), false,
+            ),
             SDPX.FormulationPlan(
                 SDPX.DenseAugmentedKKT(), :test_fixture, :test_fixture,
             ),
             normal_plan.la_config,
-            1,
+            normal_plan.storage_plan,
+            normal_plan.gram_kernel,
+            normal_plan.schedule,
+            normal_plan.threads,
+            normal_plan.parameter_profile,
+            normal_plan.memory_budget_bytes,
+            merge(normal_plan.parameters, (formulation=:augmented,)),
+            SDPX.NativeSOCPlan(normal_plan.payload.cone),
         )
 
         function scripted_workspace(inertias)
-            base = SDPX.NativeSOCWorkspace(problem, augmented_plan, options)
+            # Build the storage through the valid normal-equations plan, then
+            # replace only the route/backend for this synthetic inertia test.
+            # The production constructor remains the fail-closed boundary.
+            base = SDPX.NativeSOCWorkspace(problem, normal_plan, normal_options)
+            # The normal route intentionally allocates no augmented KKT
+            # buffer.  This fixture swaps only the route metadata after
+            # construction, so provision the augmented storage explicitly.
+            augmented_dimension = problem.variables + length(problem.beq)
+            base.augmented_buffer = zeros(
+                Float64, augmented_dimension, augmented_dimension,
+            )
             base.local_metric[:, 1] .= [2.0, 0.0, 3.0]
             backend = ScriptedNativeSOCLDLTBackend(Any[inertias...], 0)
-            return _native_soc_workspace_with_backend(base, backend), backend
+            return _native_soc_workspace_with_backend(
+                base, backend; plan=augmented_plan,
+            ), backend
         end
 
         accepted, accepted_backend = scripted_workspace([(2, 1, 0)])
@@ -300,7 +337,7 @@ end
         # scalar nonnegative blocks contribute one and proper Lorentz blocks
         # contribute two.
         mixed_options = _native_soc_options(Float64)
-        mixed_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), mixed_problem, mixed_options).payload
+        mixed_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), mixed_problem, mixed_options)
         mixed_workspace = SDPX.NativeSOCWorkspace(
             mixed_problem, mixed_plan, mixed_options,
         )
@@ -608,7 +645,7 @@ end
             primal_initial_scale=2.0,
             dual_initial_scale=3.0,
         )
-        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:off).payload
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:off)
         workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
         @test workspace.slack[1] ≈ [2.0, 0.0, 0.0]
         @test workspace.dual[1] ≈ [3.0, 0.0, 0.0]
@@ -619,7 +656,7 @@ end
             primal_initial_scale=2.0,
             dual_initial_scale=3.0,
         )
-        auto_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, auto_options; specialization=:off).payload
+        auto_plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, auto_options; specialization=:off)
         auto_workspace = SDPX.NativeSOCWorkspace(
             problem, auto_plan, auto_options,
         )
@@ -731,7 +768,7 @@ end
             beq=[3.0, 4.0],
         )
         options = _native_soc_options(Float64)
-        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options).payload
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
         clean = SDPX.NativeSOCWorkspace(problem, plan, options)
         poisoned = SDPX.NativeSOCWorkspace(problem, plan, options)
         factor_matrix = 2.0 .* Matrix{Float64}(I, 3, 3)
@@ -788,7 +825,7 @@ end
             tolerance=1e-9,
             equality_solver=:auto,
         )
-        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:fixed_trace).payload
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options; specialization=:fixed_trace)
         base = SDPX.NativeSOCWorkspace(problem, plan, options)
         base.local_metric[:, 1] .= [2.0, 0.0, 3.0]
         base.local_metric[:, 2] .= [2.0, 0.0, 3.0]
@@ -828,12 +865,12 @@ end
                 SDPX.SOCConstraint(second, [1.0, 0.0, 0.0]),
             ],
         )
-        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(Float64)).payload
-        @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
-        @test plan.cone.specialization === :fixed_trace_q3
-        @test plan.cone.native_coordinates == 6
-        @test plan.cone.active_coordinates == 4
-        reduction = plan.cone.execution.payload
+        plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(Float64))
+        @test plan.payload.cone.execution isa SDPX.FixedTraceQ3Execution
+        @test plan.payload.cone.specialization === :fixed_trace_q3
+        @test plan.payload.cone.native_coordinates == 6
+        @test plan.payload.cone.active_coordinates == 4
+        reduction = plan.payload.cone.execution.payload
         @test reduction.ownership === :owned
         @test reduction.active_ids == [1 3; 2 4]
         @test reduction.tail_map[:, :, 1] == [1.0 0.0; 0.0 1.0]
@@ -1004,8 +1041,8 @@ end
                 BigFloat[-1, 0],
                 [SDPX.SOCConstraint(affine, BigFloat[1, 0, 0])],
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(BigFloat)).payload
-            reduction = plan.cone.execution.payload
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(BigFloat))
+            reduction = plan.payload.cone.execution.payload
             @test reduction.tail_map[1, 1, 1] == 1
             source_entry = problem.cones[1].A[2, 1]
             SDPX.MA.operate_to!(source_entry, +, source_entry, BigFloat(8))
@@ -1220,8 +1257,8 @@ end
                 Aeq=T[0.0 1.0 0.0; 0.0 0.0 1.0],
                 beq=T[3.0, 4.0],
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off).payload
-            @assert plan.cone.execution isa SDPX.GeneralLorentzExecution
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off)
+            @assert plan.payload.cone.execution isa SDPX.GeneralLorentzExecution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1305,7 +1342,7 @@ end
             plan = SDPX.build_execution_plan(
                 SDPX.AutoPlanner(), problem, options;
                 specialization=:off,
-            ).payload
+            )
             workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
             @test !workspace.equality_sparse_canonical
             workspace.hessian .= zeros(T, 2, 2)
@@ -1424,8 +1461,8 @@ end
                 Matrix{T}(I, 2, 2),
                 zeros(T, 2),
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off).payload
-            @test plan.cone.execution isa SDPX.GeneralLorentzExecution
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off)
+            @test plan.payload.cone.execution isa SDPX.GeneralLorentzExecution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1466,8 +1503,8 @@ end
                 Aeq=T[1.0 0.0 0.0 0.0; 0.0 1.0 0.0 0.0],
                 beq=T[0.2, -0.1],
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace).payload
-            @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace)
+            @test plan.payload.cone.execution isa SDPX.FixedTraceQ3Execution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1490,8 +1527,8 @@ end
             r = similar(dx)
             r .= zero(T)
             @inbounds for block in 1:2
-                first_id = plan.cone.execution.payload.active_ids[1, block]
-                second_id = plan.cone.execution.payload.active_ids[2, block]
+                first_id = plan.payload.cone.execution.payload.active_ids[1, block]
+                second_id = plan.payload.cone.execution.payload.active_ids[2, block]
                 a = workspace.local_metric[1, block]
                 b = workspace.local_metric[2, block]
                 c = workspace.local_metric[3, block]
@@ -1519,8 +1556,8 @@ end
             r_poisoned = similar(dx)
             r_poisoned .= zero(T)
             @inbounds for block in 1:2
-                first_id = plan.cone.execution.payload.active_ids[1, block]
-                second_id = plan.cone.execution.payload.active_ids[2, block]
+                first_id = plan.payload.cone.execution.payload.active_ids[1, block]
+                second_id = plan.payload.cone.execution.payload.active_ids[2, block]
                 a = workspace.local_metric[1, block]
                 b = workspace.local_metric[2, block]
                 c = workspace.local_metric[3, block]
@@ -1559,8 +1596,8 @@ end
                     SDPX.SOCConstraint(sparse(second), T[1, 0, 0]),
                 ],
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace).payload
-            @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace)
+            @test plan.payload.cone.execution isa SDPX.FixedTraceQ3Execution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1579,8 +1616,8 @@ end
             workspace.dx .= dx
             r = zeros(T, 4)
             @inbounds for block in 1:2
-                first_id = plan.cone.execution.payload.active_ids[1, block]
-                second_id = plan.cone.execution.payload.active_ids[2, block]
+                first_id = plan.payload.cone.execution.payload.active_ids[1, block]
+                second_id = plan.payload.cone.execution.payload.active_ids[2, block]
                 a = workspace.local_metric[1, block]
                 b = workspace.local_metric[2, block]
                 c = workspace.local_metric[3, block]
@@ -1604,8 +1641,8 @@ end
             poisoned[3] += T(0.5)
             r_poisoned = zeros(T, 4)
             @inbounds for block in 1:2
-                first_id = plan.cone.execution.payload.active_ids[1, block]
-                second_id = plan.cone.execution.payload.active_ids[2, block]
+                first_id = plan.payload.cone.execution.payload.active_ids[1, block]
+                second_id = plan.payload.cone.execution.payload.active_ids[2, block]
                 a = workspace.local_metric[1, block]
                 b = workspace.local_metric[2, block]
                 c = workspace.local_metric[3, block]
@@ -1634,7 +1671,7 @@ end
                 Matrix{T}(I, 2, 2),
                 zeros(T, 2),
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off).payload
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:off)
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1708,7 +1745,7 @@ end
                 Matrix{T}(I, 2, 2),
                 zeros(T, 2),
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T; tolerance); specialization=:off).payload
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T; tolerance); specialization=:off)
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T; tolerance),
             )
@@ -1752,14 +1789,24 @@ end
         end
 
         @testset "Float64x4 and BigFloat gate coverage" begin
-            using MultiFloats: Float64x4
-            for T in (Float64x4, BigFloat)
-                if T === BigFloat
-                    setprecision(128) do
-                        run_precision_gate_fixture(T)
-                    end
+            if Base.find_package("MultiFloats") === nothing
+                @test true
+            else
+                @eval import MultiFloats
+                T4 = MultiFloats.Float64x4
+                if !SDPX.is_supported_arithmetic(T4)
+                    @info "MultiFloats installed but SDPX extension is unavailable; skipping Float64x4 NativeSOC gate"
+                    @test true
                 else
-                    run_precision_gate_fixture(T)
+                    for T in (T4, BigFloat)
+                        if T === BigFloat
+                            setprecision(128) do
+                                run_precision_gate_fixture(T)
+                            end
+                        else
+                            run_precision_gate_fixture(T)
+                        end
+                    end
                 end
             end
         end
@@ -1781,8 +1828,8 @@ end
                 Aeq=T[1.0 0.0 0.0 0.0],
                 beq=T[0.1],
             )
-            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace).payload
-            @test plan.cone.execution isa SDPX.FixedTraceQ3Execution
+            plan = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, _native_soc_options(T); specialization=:fixed_trace)
+            @test plan.payload.cone.execution isa SDPX.FixedTraceQ3Execution
             workspace = SDPX.NativeSOCWorkspace(
                 problem, plan, _native_soc_options(T),
             )
@@ -1884,20 +1931,14 @@ end
         top = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
         @test top isa SDPX.ExecutionPlan
         @test top.payload isa SDPX.NativeSOCPlan
+        @test fieldnames(typeof(top.payload)) === (:cone,)
         @test top.algorithm === :native_soc
         @test top.kkt_backend === :dense_cholesky
         @test top.backend_config.fallback_chain === ()
-        @test top.threads === top.payload.threads
-        @test top.la_config == top.payload.la_config
-        @test SDPX.formulation_symbol(top.formulation_plan) ===
-              SDPX.formulation_symbol(top.payload.formulation)
         @test top.parameters.planned_arithmetic === :float64
         # Value parity, not object identity: a distinct equal payload is
         # accepted through the canonical ExecutionPlan carrier.
-        equal_payload = SDPX.NativeSOCPlan(
-            top.payload.cone, top.payload.formulation,
-            top.payload.la_config, top.payload.threads,
-        )
+        equal_payload = SDPX.NativeSOCPlan(top.payload.cone)
         @test SDPX.NativeSOCWorkspace(
             problem, _a3_rebuilt(top; payload=equal_payload), options,
         ) isa SDPX.NativeSOCWorkspace
@@ -1965,16 +2006,10 @@ end
         top = SDPX.build_execution_plan(SDPX.AutoPlanner(), problem, options)
         @test SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top), options) isa
               SDPX.NativeSOCWorkspace
-        mismatched_payload = SDPX.NativeSOCPlan(
-            top.payload.cone,
-            SDPX.FormulationPlan(
-                SDPX.DenseAugmentedKKT(),
-                :user_forced_augmented,
-                :native_soc_planner,
-            ),
-            top.payload.la_config,
-            top.payload.threads,
-        )
+        fixed_payload = SDPX.build_execution_plan(
+            SDPX.AutoPlanner(), _a3_fixed_trace_problem(), options,
+        ).payload
+        mismatched_payload = SDPX.NativeSOCPlan(fixed_payload.cone)
         @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; payload=mismatched_payload), options)
         @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; kkt_backend=:dense_augmented_ldlt), options)
         @test_throws ArgumentError SDPX.NativeSOCWorkspace(problem, _a3_rebuilt(top; scaling=:hkm), options)

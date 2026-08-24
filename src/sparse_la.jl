@@ -18,32 +18,6 @@ struct GenericSparseProvider{T} <: AbstractSparseProvider end
 
 GenericSparseProvider(::Type{T}) where {T} = GenericSparseProvider{T}()
 
-struct SparseProviderCapabilities
-    sparse_cholesky::Bool
-    symbolic_analysis::Bool
-    symbolic_reuse::Bool
-    numeric_refactorization::Bool
-    multi_rhs::Bool
-    ordering::Bool
-    sparse_ldlt::Bool
-end
-
-const CHOLMOD_SPARSE_CAPABILITIES = SparseProviderCapabilities(
-    true, true, true, true, true, true, false,
-)
-const GENERIC_SPARSE_CAPABILITIES = SparseProviderCapabilities(
-    true, true, true, true, true, true, false,
-)
-
-sparse_provider_capabilities(::CHOLMODSparseProvider) =
-    CHOLMOD_SPARSE_CAPABILITIES
-sparse_provider_capabilities(::GenericSparseProvider) =
-    GENERIC_SPARSE_CAPABILITIES
-sparse_provider_capabilities(::Type{Float64}) = CHOLMOD_SPARSE_CAPABILITIES
-sparse_provider_capabilities(::Type{T}) where {T} =
-    supports_sparse_generic(T) ? GENERIC_SPARSE_CAPABILITIES :
-    SparseProviderCapabilities(false, false, false, false, false, false, false)
-
 """The generic route is available for BigFloat and fixed-width MultiFloats."""
 supports_sparse_generic(::Type{BigFloat}) = true
 supports_sparse_generic(::Type{T}) where {T} = is_multifloat_arithmetic(T)

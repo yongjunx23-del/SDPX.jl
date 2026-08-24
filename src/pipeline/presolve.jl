@@ -209,9 +209,6 @@ function _equality_rank_analysis(B::AbstractMatrix{T}, tolerance::Real) where {T
     )
 end
 
-_equality_rank_indices(B::AbstractMatrix, tolerance::Real) =
-    _equality_rank_analysis(B, tolerance).keep
-
 # Float64 SPQR proposes a sparse extended-precision basis, but the final
 # dependency coefficients must be resolved in the target arithmetic before
 # original-arithmetic certification. Gate the temporary dense panels against

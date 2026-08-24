@@ -23,7 +23,7 @@ code.
   precision sweeps. It is register-only and the runner refuses to execute it.
 - `ladder`: per-class scaling ladders, three rungs each — LP box
   (100/300/1000 variables), single SOC cone (128/512/2048), block-diagonal SDP
-  (250/600/1000 variables, dense Schur complement). Float64/auto, reference
+  (250/500/750 variables, dense Schur complement). Float64/auto, reference
   objectives empirically verified. The rung grows the dimension that stresses
   each class's core linear algebra, so a regression surfaces as a phase ratio;
   the whole suite runs on a laptop in about two minutes and makes no

@@ -457,4 +457,106 @@ using Test
             nothing,
         ) == MOI.NO_SOLUTION
     end
+
+    @testset "raw options are lossless or rejected" begin
+        optimizer = SDPX.Optimizer(verbosity=0)
+        supported = (
+            ("tol_gap", 1.0e-8, :ϵ_gap),
+            ("tol_primal", 2.0e-8, :ϵ_primal),
+            ("tol_dual", 3.0e-8, :ϵ_dual),
+            ("max_iterations", 17, :iter_max),
+            ("time_limit", 2.5, :max_time),
+            ("num_threads", 1, :threads),
+            ("precision", 256, :precision_bits),
+            ("scaling", :none, :scaling),
+            ("formulation", :normal_equations, :formulation),
+            ("linear_algebra_backend", :standard, :linear_algebra_backend),
+            ("presolve", :off, :presolve),
+            ("algorithm", :sdp, :algorithm),
+            ("sparse", :off, :sparse),
+            ("equality_solver", :qr, :equality_solver),
+            ("working_precision_policy", :fixed, :working_precision_policy),
+            ("diagnostics", false, :diagnostics),
+            ("timing", true, :timing),
+            ("certification", false, :certification),
+        )
+        for (name, value, field) in supported
+            attribute = MOI.RawOptimizerAttribute(name)
+            @test MOI.supports(optimizer, attribute)
+            MOI.set(optimizer, attribute, value)
+            @test MOI.get(optimizer, attribute) == getfield(optimizer.options, field)
+        end
+        MOI.set(optimizer, MOI.RawOptimizerAttribute("tolerance"), 4.0e-8)
+        @test MOI.get(optimizer, MOI.RawOptimizerAttribute("tolerance")) == 4.0e-8
+
+        # These fields exist on SolverOptions but have no lossless public
+        # Settings representation.  They must not be accepted and silently
+        # reset when MOI.optimize! enters the Settings route.
+        for name in (
+            "beta", "gamma", "omega_p", "omega_d", "predictor",
+            "parameter_policy", "parameter_strategy", "refine_steps",
+            "max_restarts", "extended_precision_blas", "mixed_precision_kkt",
+            "checkpoint_path",
+        )
+            attribute = MOI.RawOptimizerAttribute(name)
+            @test !MOI.supports(optimizer, attribute)
+            @test_throws MOI.UnsupportedAttribute MOI.set(optimizer, attribute, nothing)
+            @test_throws MOI.UnsupportedAttribute MOI.get(optimizer, attribute)
+        end
+        @test_throws ArgumentError MOI.set(
+            optimizer,
+            MOI.RawOptimizerAttribute("formulation"),
+            :primal,
+        )
+
+        # Check the actual public Settings handoff, not just the raw storage
+        # accessor.  Every accepted field below survives the adapter boundary
+        # with the same policy value.
+        source = MOI.Utilities.Model{Float64}()
+        variable = MOI.add_variable(source)
+        MOI.add_constraint(source, MOI.VectorOfVariables([variable]), MOI.Nonnegatives(1))
+        MOI.copy_to(optimizer, source)
+        settings = SDPX._moi_settings(optimizer)
+        @test settings.tolerances.gap == 4.0e-8
+        @test settings.tolerances.primal == 4.0e-8
+        @test settings.tolerances.dual == 4.0e-8
+        @test settings.limits.iterations == 17
+        @test settings.limits.time == 2.5
+        @test settings.limits.threads == 1
+        @test settings.scaling === :none
+        @test settings.formulation === :variable_space_schur
+        @test settings.provider === :standard
+        @test settings.presolve === :off
+        @test settings.algorithm === :sdp
+        @test settings.sparse === :off
+        @test settings.equality_solver === :qr
+        @test settings.working_precision_policy === :fixed
+        @test settings.diagnostics === :none
+        @test settings.verbosity == 0
+        @test settings.timing
+        @test !settings.certification
+
+        # UniversalFallback is the cache layer used by JuMP/CachingOptimizer.
+        # Raw attributes set before optimizer attachment must still reach the
+        # concrete adapter copy seam instead of being discarded by MOI's
+        # generic cache replay policy.
+        cached_source = MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}())
+        cached_variable = MOI.add_variable(cached_source)
+        MOI.add_constraint(
+            cached_source,
+            MOI.VectorOfVariables([cached_variable]),
+            MOI.Nonnegatives(1),
+        )
+        MOI.set(cached_source, MOI.RawOptimizerAttribute("tol_gap"), 7.0e-8)
+        cached_optimizer = SDPX.Optimizer(verbosity=0)
+        MOI.copy_to(cached_optimizer, cached_source)
+        @test cached_optimizer.options.ϵ_gap == 7.0e-8
+
+        rejected_source = MOI.Utilities.UniversalFallback(MOI.Utilities.Model{Float64}())
+        MOI.set(rejected_source, MOI.RawOptimizerAttribute("beta"), 0.2)
+        @test_throws MOI.UnsupportedAttribute MOI.copy_to(
+            SDPX.Optimizer(verbosity=0),
+            rejected_source,
+        )
+    end
 end

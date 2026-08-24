@@ -301,6 +301,15 @@ function build_execution_plan(
                       :auto_extended_arithmetic_dense_route :
                       :classification_storage) :
                      storage_policy === :sparse ? :explicit_sparse : :explicit_dense
+    storage_plan = KKTStoragePlan(
+        storage_selected;
+        dimension=classification.variables + classification.equalities,
+        input_nnz=0,
+        density=classification.expected_schur_density,
+        reason=storage_reason,
+        provenance=:automatic_storage_planner,
+        requested=storage_policy,
+    )
     chordal_selected, chordal_reason, chordal_beneficial_blocks =
         _chordal_policy(opts.chordal, chordal_estimate)
     gram_kernel = if algorithm === :lp_primal_dual
@@ -361,10 +370,10 @@ function build_execution_plan(
         classification,
         algorithm,
         scaling,
-        kkt_backend,
         backend_config,
         formulation_plan,
         la_config,
+        storage_plan,
         gram_kernel,
         schedule,
         selected_threads,
@@ -404,12 +413,6 @@ function build_execution_plan(
             mixed_precision_memory_fraction=
                 opts.mixed_precision_memory_fraction,
             execution_route_provenance=route.provenance,
-            storage_policy,
-            storage_selected,
-            storage_reason,
-            storage_dimension=classification.variables + classification.equalities,
-            storage_input_nnz=0,
-            storage_density=classification.expected_schur_density,
             chordal_policy=opts.chordal,
             chordal_selected,
             chordal_reason,
@@ -561,9 +564,21 @@ function build_execution_plan(
 ) where {T}
     _require_supported_arithmetic_type(T)
     _validate_solver_options(opts)
-    payload = _build_native_soc_payload(prob, opts; specialization)
+    payload = _build_native_soc_payload(prob; specialization)
+    formulation = if opts.formulation === :augmented
+        FormulationPlan(
+            DenseAugmentedKKT(), :user_forced_augmented, :native_soc_planner,
+        )
+    else
+        FormulationPlan(
+            DenseNormalEquations(),
+            opts.formulation in (:primal, :normal_equations) ?
+            :user_forced_normal : :native_soc_dense_normal_default,
+            :native_soc_planner,
+        )
+    end
     fixed_trace = payload.cone.execution isa FixedTraceQ3Execution
-    augmented = payload.formulation.formulation isa DenseAugmentedKKT
+    augmented = formulation.formulation isa DenseAugmentedKKT
     # The top-level KKT route names the mathematical dense system only.  The
     # FixedTraceQ3 specialization is an implementation of the dense
     # normal-equations route and stays inside the payload.
@@ -571,7 +586,15 @@ function build_execution_plan(
     classification = _conic_problem_classification(prob)
     parameter_profile = opts.parameter_policy === :auto ?
                         :automatic_mehrotra : :user_fixed
-    selected_threads = payload.threads
+    selected_threads = max(opts.threads, 1)
+    route = augmented ? :dense_augmented_ldlt : :dense_cholesky
+    la_config = plan_la_backend(
+        T;
+        requested=opts.linear_algebra_backend,
+        route=route,
+        threads=selected_threads,
+        equality_solver=opts.equality_solver,
+    )
     schedule = selected_threads == 1 ? :serial : :blocked_dynamic
     input_nnz = _conic_input_nnz(prob)
     backend_config = BackendConfiguration(
@@ -582,6 +605,15 @@ function build_execution_plan(
         :off,
         (),
         false,
+    )
+    storage_plan = KKTStoragePlan(
+        :dense;
+        dimension=prob.variables + length(prob.beq),
+        input_nnz=input_nnz,
+        density=1.0,
+        reason=:native_soc_dense_kkt,
+        provenance=:native_soc_planner,
+        requested=:dense,
     )
     parameters = (
         beta=opts.β,
@@ -594,12 +626,6 @@ function build_execution_plan(
         equality_solver=opts.equality_solver,
         formulation=opts.formulation,
         soc_specialization=payload.cone.specialization,
-        storage_policy=:dense,
-        storage_selected=:dense,
-        storage_dimension=prob.variables + length(prob.beq),
-        storage_input_nnz=input_nnz,
-        storage_density=1.0,
-        storage_reason=:native_soc_dense_kkt,
         planned_arithmetic=_arithmetic_class(T),
         # Requested precision is the expert `SolverOptions.precision_bits`
         # request (BigFloat only; a no-op for fixed-width arithmetic, where
@@ -619,10 +645,10 @@ function build_execution_plan(
         classification,
         :native_soc,
         fixed_trace ? :hkm : :nesterov_todd,
-        kkt_backend,
         backend_config,
-        payload.formulation,
-        payload.la_config,
+        formulation,
+        la_config,
+        storage_plan,
         :native_lorentz_metric,
         schedule,
         selected_threads,
@@ -647,4 +673,98 @@ end
 
 function planned_backend_name(plan::ExecutionPlan)
     return planned_backend_name(plan.backend_config)
+end
+
+"""
+    _lp_sparse_final_la_config(plan, payload)
+
+Return the immutable LA descriptor for a finalized sparse LP route.  LP row
+presolve and the sparse-pattern probe run after the ordinary LA planner, so
+the final route owns this provider fact.  The descriptor records that fact for
+the execution plan; the sparse factor/solve path does not instantiate it.
+"""
+function _lp_sparse_final_la_config(
+    plan::ExecutionPlan,
+    payload::LPRoutePlan,
+)
+    payload.storage === :sparse || return plan.la_config
+    payload.route === :sparse_normal || throw(ArgumentError(
+        "sparse LP execution payload must use :sparse_normal",
+    ))
+    provider = payload.provider
+    provider in (:cholmod, :generic) || throw(ArgumentError(
+        "unknown sparse LP execution provider $(provider)",
+    ))
+    implementation = provider === :cholmod ?
+                     :cholmod_sparse_cholesky : :generic_sparse_cholesky
+    capabilities = LAProviderCapabilities(
+        cholesky=true,
+        factor_solve=true,
+        multi_rhs=true,
+        sparse_factorization=true,
+    )
+    return LABackendConfiguration(
+        plan.la_config.arithmetic,
+        plan.la_config.requested,
+        :sparse,
+        provider,
+        la_capability_symbols(capabilities),
+        capabilities,
+        (:cholesky, :factor_solve, :multi_rhs, :sparse_factorization),
+        implementation,
+        (),
+        :none,
+        :provider_owned,
+    )
+end
+
+"""Freeze the canonical post-presolve `ExecutionPlan` for one LP route.
+
+LP is the only family whose structural backend cannot be known before row
+presolve, scaling, and the optional sparse-pattern probe.  Once that work has
+finished, replace the deferred backend with the exact executed route, store
+the typed storage descriptor, and attach the immutable `LPRoutePlan`.  Both
+execution and diagnostics consume this same object.
+"""
+function _lp_finalized_execution_plan(
+    plan::ExecutionPlan,
+    payload::LPRoutePlan,
+)
+    la_config = payload.storage === :sparse ?
+                _lp_sparse_final_la_config(plan, payload) :
+                plan.la_config
+    backend_config = BackendConfiguration(
+        payload.route,
+        plan.backend_config.equality_solver,
+        false,
+        false,
+        :off,
+        (),
+        false,
+    )
+    storage_plan = KKTStoragePlan(
+        payload.storage;
+        dimension=payload.variables + payload.equalities,
+        input_nnz=plan.storage_plan.input_nnz,
+        density=plan.storage_plan.density,
+        reason=:lp_post_presolve_route,
+        provenance=:lp_route_finalizer,
+        requested=plan.storage_plan.requested,
+    )
+    return ExecutionPlan(
+        plan.classification,
+        plan.algorithm,
+        plan.scaling,
+        backend_config,
+        plan.formulation_plan,
+        la_config,
+        storage_plan,
+        plan.gram_kernel,
+        plan.schedule,
+        plan.threads,
+        plan.parameter_profile,
+        plan.memory_budget_bytes,
+        plan.parameters,
+        payload,
+    )
 end

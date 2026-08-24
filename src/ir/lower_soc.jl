@@ -244,24 +244,6 @@ function _soc_owned_transpose(::Type{T}, matrix::SparseMatrixCSC{T,Int}, bits::I
     return owned_sparse_copy(T, SparseArrays.sparse(transpose(matrix)); precision_bits=bits)
 end
 
-"""Multiply a typed reconstruction map by one core vector."""
-function reconstruct_soc_primal(
-    record::SOCPrimalReconstruction{T},
-    core_value::AbstractVector,
-) where {T<:AbstractFloat}
-    length(core_value) == record.dimension || throw(DimensionMismatch(
-        "core primal length $(length(core_value)) != SOC dimension $(record.dimension)",
-    ))
-    if T === BigFloat
-        values = nonzeros(record.map)
-        bits = isempty(values) ? precision(BigFloat) : precision(first(values))
-        return setprecision(BigFloat, bits) do
-            record.map * core_value
-        end
-    end
-    return record.map * core_value
-end
-
 """Multiply a typed reconstruction map by one core Lorentz dual."""
 function reconstruct_soc_dual(
     record::SOCDualReconstruction{T},

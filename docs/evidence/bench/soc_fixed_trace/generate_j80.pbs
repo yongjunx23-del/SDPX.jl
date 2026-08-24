@@ -12,7 +12,7 @@ set -euo pipefail
 : "${SDPX_SHARED_DEPOT:?set the read-only shared Julia depot}"
 : "${JULIA_BIN:?set the Julia executable}"
 CANDIDATE="$SDPX_SOURCE"
-HERE="$CANDIDATE/bench/soc_fixed_trace"
+HERE="$CANDIDATE/docs/evidence/bench/soc_fixed_trace"
 SHARED_ENV="$SDPX_SHARED_ENV"
 OUTPUT="${CSDR_OUTPUT:?set CSDR_OUTPUT to a new immutable output directory}"
 test ! -e "$OUTPUT"

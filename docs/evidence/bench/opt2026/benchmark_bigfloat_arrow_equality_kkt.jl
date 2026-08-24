@@ -169,11 +169,12 @@ function benchmark_point(
         primal,
         dual,
     )
-    warm = SDPX.factor_kkt!(workspace, problem, options)
+    backend = SDPX.select_backend(workspace)
+    warm = SDPX.factorize!(backend, workspace, problem, options)
     warm.ok || error("warm KKT factorization failed")
 
     factor_operation() = begin
-        factor = SDPX.factor_kkt!(workspace, problem, options)
+        factor = SDPX.factorize!(backend, workspace, problem, options)
         factor.ok || error("KKT factorization failed")
         factor
     end

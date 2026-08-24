@@ -4,12 +4,10 @@ using SDPX
 using SparseArrays
 using Test
 
-# Diagnostics must report the algorithms that ran, not the ones the plan
-# chose before presolve. The LP path selects its sparse Newton system at
-# runtime, after the plan is frozen, and the record previously copied the
-# plan: a solve that executed sparse Cholesky with a sparse Gram product
-# reported `:positive_definite_cholesky` and `:blas_syrk`. Every benchmark
-# table built from diagnostics inherited that. (Maintainer review P2.4.)
+# LP freezes its final execution plan after row presolve, scaling, and the
+# optional sparse probe. Diagnostics and execution share that exact plan, so
+# planned route facts match the finalized mathematical route while provider
+# facts still identify the concrete CHOLMOD/generic/dense implementation.
 @testset "diagnostics report executed algorithms" begin
     @testset "sparse LP reports its runtime backend" begin
         rng = MersenneTwister(11)
@@ -39,7 +37,7 @@ using Test
         # say so, and must not claim a Gram kernel that never assembled.
         @test selected.kkt === :sparse_normal
         @test selected.gram === :sparse_gram
-        @test selected.planned_backend === :lp_deferred
+        @test selected.planned_backend === :sparse_normal
         @test selected.executed_backend === :cholmod_sparse_cholesky
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :post_presolve
@@ -75,9 +73,7 @@ using Test
         @test initialization.factorization_attempts == 1
         @test initialization.rhs_solve_count == 2
         @test initialization.factorization_count == 1
-        # The plan stays visible under its own name rather than silently
-        # replaced, so a plan/executed divergence is observable, not hidden.
-        @test selected.planned.kkt !== :sparse_normal
+        @test selected.planned.kkt === :sparse_normal
     end
 
     @testset "dense LP reports the dense backend it used" begin
@@ -97,7 +93,7 @@ using Test
         @test result.status == SDPX.Optimal
         @test selected.kkt === :positive_definite_cholesky
         @test selected.gram === :blas_syrk
-        @test selected.planned_backend === :lp_deferred
+        @test selected.planned_backend === :positive_definite_cholesky
         @test selected.executed_backend === :positive_definite_cholesky
         @test selected.fallback_reason === :none
         @test selected.backend_resolution === :post_presolve
@@ -125,7 +121,8 @@ using Test
         )
         no_iteration_selected = no_iteration.diagnostics.selected_algorithms
         @test no_iteration.status == SDPX.IterLimit
-        @test no_iteration_selected.planned_backend === :lp_deferred
+        @test no_iteration_selected.planned_backend ===
+              :positive_definite_cholesky
         # The automatic phase-2 KKT cold start runs even at `iter_max=0`, so
         # the dense backend genuinely executed.
         @test no_iteration_selected.executed_backend ===
@@ -475,7 +472,7 @@ using Test
         @test record.executed.family === :lp
         @test record.planned.storage === :sparse
         @test record.executed.storage === :sparse
-        @test record.planned.formulation === :not_applicable
+        @test record.planned.formulation === :sparse_normal
         @test record.executed.formulation === :sparse_normal
         @test record.planned.provider === :cholmod
         @test record.executed.provider === :cholmod
@@ -839,8 +836,7 @@ end
     @test payload.provider ===
           result.termination.sparse_schur_backend.provider
     @test payload.sparse_probe_count == 1
-    # The outer pre-row plan stays deferred; the payload is the finalized
-    # truth carried by the result/attempt, not an impossible pre-row plan.
-    @test record.planned.formulation === :not_applicable
+    # Execution and diagnostics retain the same post-presolve plan object.
+    @test record.planned.formulation === payload.route
     @test payload.route !== :not_applicable
 end

@@ -60,7 +60,7 @@ Run from the repository root with one Julia and BLAS thread (the driver forces
 BLAS threads to one):
 
 ```text
-julia --project=. bench/soc_equality_singleton/benchmark.jl \
+julia --project=. docs/evidence/bench/soc_equality_singleton/benchmark.jl \
   --output=work/baseline/soc_equality_singleton --samples=9
 ```
 

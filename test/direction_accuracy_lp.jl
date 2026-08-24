@@ -32,6 +32,26 @@ function lp_gate_options(::Type{T}) where {T}
     )
 end
 
+function lp_gate_route(
+    route::Symbol,
+    inequalities::Int,
+    variables::Int,
+    equalities::Int;
+    provider::Symbol=route === :sparse_normal ? :generic : :blas_lapack,
+)
+    storage = route === :sparse_normal ? :sparse : :dense
+    route === :diagonal_reduced_cholesky && (provider = :reduced_kernel)
+    return SDPX.LPRoutePlan(
+        route,
+        storage,
+        provider,
+        0,
+        variables,
+        equalities,
+        inequalities,
+    )
+end
+
 function run_gate(
     workspace::SDPX.LPWorkspace{T},
     G,
@@ -74,8 +94,10 @@ end
             variables,
             equalities;
             packed_hessian=false,
+            lp_route_payload=lp_gate_route(
+                :dense_lu, variables, variables, equalities,
+            ),
         )
-        workspace.backend_formulation = :dense_lu
         workspace.H .= H
 
         # Exact δ = 0 direction: rho0 = rhoδ ≈ 0, gate passes.
@@ -190,8 +212,10 @@ end
                 variables,
                 equalities;
                 packed_hessian=false,
+                lp_route_payload=lp_gate_route(
+                    :dense_lu, variables, variables, equalities,
+                ),
             )
-            workspace.backend_formulation = :dense_lu
             workspace.H .= H
 
             delta = T("1e-2")
@@ -243,8 +267,13 @@ end
             variables,
             equalities;
             packed_hessian=false,
+            lp_route_payload=lp_gate_route(
+                :positive_definite_cholesky,
+                variables,
+                variables,
+                equalities,
+            ),
         )
-        workspace.backend_formulation = :positive_definite_cholesky
         workspace.H .= H
 
         delta = T(1e-2)
@@ -299,8 +328,13 @@ end
             equalities;
             packed_hessian=false,
             reduced_standard_form=true,
+            lp_route_payload=lp_gate_route(
+                :diagonal_reduced_cholesky,
+                variables,
+                variables,
+                equalities,
+            ),
         )
-        workspace.backend_formulation = :diagonal_reduced_cholesky
         workspace.standard_system = SDPX.LPStandardFormSystem(
             G,
             B,
@@ -380,8 +414,10 @@ end
             0;
             packed_hessian=false,
             sparse_storage=true,
+            lp_route_payload=lp_gate_route(
+                :sparse_normal, rows, variables, 0,
+            ),
         )
-        workspace.backend_formulation = :sparse_normal
         H0 = transpose(G) * (Diagonal(weights) * G)
         delta = T(1e-2)
         Kδ = SDPX._lp_sparse_assemble(
@@ -532,8 +568,10 @@ end
                 0;
                 packed_hessian=false,
                 sparse_storage=true,
+                lp_route_payload=lp_gate_route(
+                    :sparse_normal, rows, variables, 0,
+                ),
             )
-            workspace.backend_formulation = :sparse_normal
             H0 = transpose(G) * (Diagonal(weights) * G)
             delta = T("1e-2")
             Kδ = SDPX._lp_sparse_assemble(H0, B, delta)
@@ -616,7 +654,17 @@ end
         @test unknown.reason === :unknown_lp_route
         @test !isfinite(unknown.tolerance)
 
-        workspace.backend_formulation = :dense_lu
+        workspace = SDPX.LPWorkspace(
+            T,
+            variables,
+            variables,
+            equalities;
+            packed_hessian=false,
+            lp_route_payload=lp_gate_route(
+                :dense_lu, variables, variables, equalities,
+            ),
+        )
+        workspace.H .= H
         nonfinite = run_gate(
             workspace,
             G,
@@ -674,8 +722,10 @@ end
             equalities;
             packed_hessian=false,
             sparse_storage=true,
+            lp_route_payload=lp_gate_route(
+                :sparse_normal, variables, variables, equalities,
+            ),
         )
-        sparse_workspace.backend_formulation = :sparse_normal
         sparse_workspace.sparse_system = SDPX.LPSparseSystem{T}(
             sparse(Matrix{T}(I, variables, variables)),
             sparse(B),

@@ -1061,36 +1061,6 @@ function threaded_mehrotra_corrector_rhs!(
 end
 
 """
-    threaded_factor_blocks!(ws, X, Y) -> Bool
-
-Block-parallel Cholesky factorization of every `X[l]`, `Y[l]`. Safe to
-parallelize directly: each block writes only into its own `BlockWS`.
-"""
-function threaded_factor_blocks!(ws::Workspace{T}, X, Y) where {T}
-    L = length(X)
-    nt = ws.thread_count
-    if nt <= 1 || L <= 1 || !thread_safe_arithmetic(T)
-        return factor_blocks!(ws, X, Y)
-    end
-    bins = ws.block_bins
-    oks = ones(Bool, L)
-    @sync for bin in bins
-        isempty(bin) && continue
-        Threads.@spawn begin
-            for l in bin
-                bw = ws.blk[l]
-                copy_owned!(bw.LX, X[l])
-                ok1 = kchol!(bw.LX)
-                copy_owned!(bw.MY, Y[l])
-                ok2 = kchol!(bw.MY)
-                oks[l] = ok1 && ok2
-            end
-        end
-    end
-    return all(oks)
-end
-
-"""
     _reduce_schur_partials!(ws)
 
 Sum the per-bin Schur accumulators into `ws.S`.

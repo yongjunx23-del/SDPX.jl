@@ -48,8 +48,8 @@ function run(blocks, shared)
     schur_err = Float64(maximum(abs, Ss .- Sd) / max(maximum(abs, Sd), one(T)))
 
     o = SDPX.SolverOptions{T}(verbosity=0)
-    ok_s = SDPX.factor_kkt!(ws, sp, o).ok
-    ok_d = SDPX.factor_kkt!(wd, dn, o).ok
+    ok_s = SDPX.factorize!(SDPX.select_backend(ws), ws, sp, o).ok
+    ok_d = SDPX.factorize!(SDPX.select_backend(wd), wd, dn, o).ok
     m = sp.dims.m
     rhs = T.(collect(range(0.2, 1.6; length=m)))
     dxs, dxd = zeros(T, m), zeros(T, m)

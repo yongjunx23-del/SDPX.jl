@@ -225,16 +225,3 @@ jobs:
         run: |
           julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
           julia --project=docs docs/make.jl
-
-  optimization-gate:
-    name: Benchmark-driven optimization gate
-    # Dormant since the refactor branch was removed: the gate now only runs
-    # for PRs targeting a branch listed here. Re-point the base_ref check (or
-    # drop the condition) once the branch policy for the optimization loop
-    # is decided; the reusable pipeline is optimization-benchmark.yml.
-    if: false
-    uses: ./.github/workflows/optimization-benchmark.yml
-    with:
-      post_status: false
-    permissions:
-      contents: read

@@ -10,7 +10,7 @@
     with MutableArithmetics-backed zero-allocation MPFR kernels; since
     `ksyrk!`/`kchol!` route their scalar work through `kdot`, and the
     solver's per-iteration hot loops are themselves built from these
-    eight functions, the speedup composes without touching solve.jl.
+    eight functions, the speedup composes without touching the solver loop.
 =====================================================================#
 
 using LinearAlgebra: LowerTriangular, Symmetric, issuccess

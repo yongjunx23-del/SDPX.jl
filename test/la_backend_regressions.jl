@@ -246,7 +246,12 @@ struct _UnsupportedProvider end
         legacy_float.provider,
         [1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0e-12],
     )
-    @test !SDPX._legacy_factor_has_numerical_rank(rank_loss_float)
+    rank_loss_handle = SDPX.la_factor_handle_matrix(rank_loss_float)
+    @test !SDPX._la_factor_has_numerical_rank(
+        rank_loss_float,
+        rank_loss_handle,
+        SDPX.SolverOptions{Float64}(),
+    )
 
     factored = SDPX.la_cholesky_factor!(backend, [4.0 1.0; 1.0 3.0])
     @test factored isa SDPX.StandardLACholeskyFactor

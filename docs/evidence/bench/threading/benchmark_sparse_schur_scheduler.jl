@@ -7,7 +7,7 @@ reduction memory on deterministic Float64 and Float64x4 problems.
 Usage:
 
     JULIA_NUM_THREADS=8 julia --project=. \
-        bench/threading/benchmark_sparse_schur_scheduler.jl output.csv
+        docs/evidence/bench/threading/benchmark_sparse_schur_scheduler.jl output.csv
 """
 
 using LinearAlgebra

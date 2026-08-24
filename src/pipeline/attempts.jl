@@ -93,7 +93,8 @@ function _attempt_planned_route_facts(
         _attempt_solver_family(plan.algorithm),
         plan.kkt_formulation,
         plan.storage_plan.storage,
-        plan.la_config.provider,
+        plan.payload isa LPRoutePlan ?
+        plan.payload.provider : plan.la_config.provider,
         _attempt_planned_precision_facts(plan, T, explicit_bits),
         plan.threads,
     )

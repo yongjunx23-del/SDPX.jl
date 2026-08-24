@@ -56,8 +56,9 @@ and reuse counters; factorization elapsed time remains the separate
 
 For eligible SDP models, the provider-neutral sparse-Schur path is selected
 before workspace allocation. `ExecutionPlan.storage_plan` is created before
-the post-presolve pattern exists, so `storage_input_nnz=0` and density fields
-are explicit "estimate unavailable" markers, not measured matrix counts.
+the post-presolve pattern exists, so `storage_plan.input_nnz == 0` and its
+density field are explicit "estimate unavailable" markers, not measured
+matrix counts.
 
 ## Scope
 

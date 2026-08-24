@@ -48,7 +48,7 @@ function _parse_args(args)
     samples = DEFAULT_SAMPLES
     for arg in args
         if arg == "--help" || arg == "-h"
-            println("usage: julia --project=. bench/soc_equality_singleton/benchmark.jl [--output=DIR] [--samples=N]")
+            println("usage: julia --project=. docs/evidence/bench/soc_equality_singleton/benchmark.jl [--output=DIR] [--samples=N]")
             exit(0)
         elseif startswith(arg, "--output=")
             value = arg[length("--output=") + 1:end]
@@ -722,7 +722,7 @@ function _metadata(driver_hash::String, source_hash::String)
     return Dict{String,Any}(
         "schema_version" => 1,
         "benchmark" => "soc_equality_singleton",
-        "driver" => "bench/soc_equality_singleton/benchmark.jl",
+        "driver" => "docs/evidence/bench/soc_equality_singleton/benchmark.jl",
         "benchmark_driver_sha256" => driver_hash,
         "solver_source_sha256" => source_hash,
         "expected_solver_source_sha256" => EXPECTED_SOLVER_SOURCE_SHA256,

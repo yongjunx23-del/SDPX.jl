@@ -8,7 +8,6 @@ using Test
     @test SDPX.formulation_backend(:sparse_normal) isa
           SDPX.CHOLMODSparseCholeskyBackend
     @test_throws ArgumentError SDPX.formulation_backend(:sparse_ldl)
-    @test !SDPX.inertia_available(SDPX.CHOLMODSparseCholeskyBackend())
 
     A = sparse(
         [1, 2, 2, 3, 3],

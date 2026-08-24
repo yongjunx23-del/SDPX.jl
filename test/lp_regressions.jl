@@ -201,9 +201,20 @@ end
                 3,
                 0;
                 packed_hessian=false,
+                lp_route_payload=SDPX.LPRoutePlan(
+                    :positive_definite_cholesky,
+                    :dense,
+                    :blas_lapack,
+                    0,
+                    3,
+                    0,
+                    4,
+                ),
             )
             workspace.H .= T[4 1 0; 1 3 1; 0 1 2]
-            factor = SDPX._lp_factor_kkt!(
+            backend = SDPX._resolve_lp_backend!(workspace, 0)
+            factor = SDPX.factorize!(
+                backend,
                 workspace,
                 Matrix{T}(undef, 3, 0),
                 T(1e-20),
@@ -352,6 +363,15 @@ end
             equalities;
             packed_hessian=false,
             reduced_standard_form=true,
+            lp_route_payload=SDPX.LPRoutePlan(
+                :diagonal_reduced_cholesky,
+                :dense,
+                :reduced_kernel,
+                0,
+                variables,
+                equalities,
+                variables,
+            ),
         )
         workspace.standard_system = SDPX.LPStandardFormSystem(
             G,
@@ -361,7 +381,8 @@ end
         )
         workspace.weights .= weights
 
-        factor = SDPX._lp_factor_kkt!(workspace, B, regularization)
+        backend = SDPX._resolve_lp_backend!(workspace, equalities)
+        factor = SDPX.factorize!(backend, workspace, B, regularization)
         @test factor isa SDPX.LPReducedFactor{T}
         @test issuccess(factor)
         rhs = T.(1:(variables + equalities)) ./ T(17)

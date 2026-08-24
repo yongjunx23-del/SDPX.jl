@@ -7,7 +7,7 @@ thread scaling on deterministic dense Float64 and Float64x4 problems.
 Usage:
 
     JULIA_NUM_THREADS=8 julia --project=. \
-        bench/threading/benchmark_schur_scheduler.jl output.csv
+        docs/evidence/bench/threading/benchmark_schur_scheduler.jl output.csv
 
 The benchmark intentionally keeps BLAS single-threaded. Parallelism therefore
 comes only from SDPX's block scheduler, avoiding Julia-task × BLAS
@@ -184,7 +184,7 @@ function reference_threaded_dense_schur_build!(
         end
     end
     reference_reduce_schur_partials!(workspace)
-    SDPX._dense_gram_lower_only(eltype(workspace.S)) &&
+    eltype(workspace.S) <: Union{Float32,Float64} &&
         SDPX._mirror_schur_lower!(workspace.S)
     return workspace.S
 end
@@ -281,7 +281,7 @@ function run_case(
         else
             reduction_lower_only =
                 !workspace.extended_precision.lower_only &&
-                SDPX._dense_gram_lower_only(T)
+                T <: Union{Float32,Float64}
             SDPX._reduce_schur_partials!(
                 workspace,
                 reduction_lower_only,

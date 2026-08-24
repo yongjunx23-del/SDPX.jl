@@ -66,7 +66,7 @@ mode. BigFloat and `:auto` retain static cutoffs. Repeated rejection is
 cooled down and eventually disabled for that solve. Exact singleton-local
 `2×2` BigFloat arrows have a separate guarded path when `MultiFloats` is
 loaded. See
-[`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
+[`docs/evidence/bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
 for the current promotion evidence and exact thresholds.
 
 ## Tolerance vs. precision

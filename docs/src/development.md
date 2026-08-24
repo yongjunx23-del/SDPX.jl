@@ -17,7 +17,7 @@ julia --project=docs docs/make.jl
 Only the small benchmark tier belongs in routine CI:
 
 ```bash
-julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 ```
 
 Performance changes must state the model, arithmetic, tolerances, hardware,
@@ -37,4 +37,4 @@ Operational references are kept as focused documents: the
 [adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md),
 and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/threading.md)
 guides. Measured results and provenance live in the benchmark directories and
-[`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md).
+[`docs/evidence/bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md).

@@ -5,7 +5,7 @@ conic benchmarks. It does not contain its own benchmark runner. Execution is
 handled by the canonical repository runner:
 
 ```bash
-julia --project=bench benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
 ```
 
 See `benchmark/README.md` for suite selection, result schema, and comparison.

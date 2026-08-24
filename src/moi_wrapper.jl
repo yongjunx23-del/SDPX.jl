@@ -96,10 +96,6 @@ end
 Optimizer(; kwargs...) = Optimizer{Float64}(; kwargs...)
 
 const _MOI_OPTION_ALIASES = Dict(
-    "beta" => :β,
-    "gamma" => :γ,
-    "omega_p" => :Ωp,
-    "omega_d" => :Ωd,
     "tol_gap" => :ϵ_gap,
     "tol_primal" => :ϵ_primal,
     "tol_dual" => :ϵ_dual,
@@ -109,6 +105,35 @@ const _MOI_OPTION_ALIASES = Dict(
     "max_iterations" => :iter_max,
     "precision" => :precision_bits,
     "num_threads" => :threads,
+)
+
+# Only options with a lossless representation in the public Settings bridge
+# may enter the non-incremental MOI solve path.  SolverOptions intentionally
+# contains many expert interior-point controls, but _moi_settings does not
+# carry those fields through Settings -> SolveOptions.  Accepting them here
+# would make a subsequent solve silently use a default value.  BigFloat's
+# precision_bits is the one exception: it is consumed while MOI copies the
+# source model and therefore has a real adapter-side effect before solve.
+const _MOI_LOSSLESS_OPTION_FIELDS = (
+    :ϵ_gap,
+    :ϵ_primal,
+    :ϵ_dual,
+    :iter_max,
+    :max_time,
+    :threads,
+    :precision_bits,
+    :scaling,
+    :formulation,
+    :linear_algebra_backend,
+    :presolve,
+    :algorithm,
+    :sparse,
+    :equality_solver,
+    :working_precision_policy,
+    :diagnostics,
+    :verbosity,
+    :timing,
+    :certification,
 )
 
 function _replace_option(options::SolverOptions{T}, name::Symbol, value) where {T}
@@ -130,8 +155,10 @@ end
 
 function _option_symbol(options::SolverOptions, name::String)
     symbol = get(_MOI_OPTION_ALIASES, name, Symbol(name))
-    symbol in fieldnames(typeof(options)) ||
+    if !(symbol in fieldnames(typeof(options)) &&
+         symbol in _MOI_LOSSLESS_OPTION_FIELDS)
         throw(MOI.UnsupportedAttribute(MOI.RawOptimizerAttribute(name)))
+    end
     return symbol
 end
 
@@ -157,6 +184,16 @@ function _set_raw_option!(optimizer::Optimizer, name::String, value)
             "max_iterations must be at least 1 on the MOI surface; " *
             "0 is the Settings automatic sentinel and cannot request a " *
             "zero-iteration solve here",
+        ))
+    end
+    if symbol === :formulation &&
+       !(value isa Symbol && value in (:auto, :normal_equations, :augmented))
+        # :primal is a historical SolverOptions orientation flag.  It has no
+        # one-to-one Settings representation and previously fell through to
+        # :auto in _moi_settings, which made the requested option untruthful.
+        throw(ArgumentError(
+            "MOI formulation must be :auto, :normal_equations, or :augmented; " *
+            "historical orientation values are not supported",
         ))
     end
     optimizer.options = _replace_option(optimizer.options, symbol, value)
@@ -203,6 +240,7 @@ const MOIVectorConicSet = Union{
     MOI.Nonnegatives,
     MOI.Nonpositives,
     MOI.Zeros,
+    MOI.SecondOrderCone,
     MOI.ExponentialCone,
     MOI.RotatedSecondOrderCone,
 }
@@ -220,22 +258,6 @@ function MOI.supports_constraint(
     ::Type{MOI.VectorAffineFunction{T}},
     ::Type{S},
 ) where {T,S<:MOIVectorConicSet}
-    return true
-end
-
-function MOI.supports_constraint(
-    ::Optimizer{T},
-    ::Type{MOI.VectorAffineFunction{T}},
-    ::Type{MOI.SecondOrderCone},
-) where {T}
-    return true
-end
-
-function MOI.supports_constraint(
-    ::Optimizer,
-    ::Type{MOI.VectorOfVariables},
-    ::Type{MOI.SecondOrderCone},
-)
     return true
 end
 
@@ -260,11 +282,6 @@ MOI.supports_constraint(
 ) where {T} = true
 
 const MOIScalarInequalitySet{T} = Union{MOI.GreaterThan{T},MOI.LessThan{T}}
-const MOIScalarBoundSet{T} = Union{
-    MOI.GreaterThan{T},
-    MOI.LessThan{T},
-    MOI.Interval{T},
-}
 
 function MOI.supports_constraint(
     ::Optimizer{T},
@@ -404,7 +421,7 @@ end
 #
 # This section is the sole MOI adapter.  `copy_to` builds one authoritative
 # `Model`, and `optimize!` invokes the public `SDPX.optimize!` seam exactly
-# once.  The retired draft conversion/solve code is disabled above.
+# once. The retired draft conversion/solve path has been removed.
 #=====================================================================#
 
 function _check_copy_attributes(optimizer::Optimizer, source)
@@ -463,11 +480,8 @@ function _moi_route_family(::Type{S}) where {S}
         _recoverable(exception) || rethrow()
         return nothing
     end
-    kind in (:nonnegative, :nonpositive, :interval) && return :lp_family
-    kind in (:soc, :rsoc) && return :soc_family
-    kind in (:psd, :psd_scaled) && return :sdp_family
-    kind === :exp && return :exp_family
-    return nothing
+    family = _route_family(kind)
+    return family in (:free, :zero) ? nothing : family
 end
 
 @inline _moi_model_name(prefix::AbstractString, number::Integer) =
@@ -675,10 +689,7 @@ function _moi_validate_family_set(constraint_types)
         family === nothing && continue
         family in families || push!(families, family)
     end
-    ordered = Symbol[family for family in
-                     (:lp_family, :soc_family, :sdp_family, :exp_family)
-                     if family in families]
-    length(ordered) > 1 && throw(UnsupportedNativeConeRoute(ordered))
+    length(families) > 1 && throw(UnsupportedNativeConeRoute(families))
     return nothing
 end
 
@@ -928,7 +939,21 @@ function MOI.set(optimizer::Optimizer, ::MOI.NumberOfThreads, ::Nothing)
     return nothing
 end
 
-MOI.supports(::Optimizer, ::MOI.RawOptimizerAttribute) = true
+function MOI.supports(
+    optimizer::Optimizer,
+    attribute::MOI.RawOptimizerAttribute,
+)
+    # bridge_plan is a read-only diagnostic attribute, not a settable option.
+    attribute.name == "bridge_plan" && return false
+    attribute.name == "tolerance" && return true
+    try
+        _option_symbol(optimizer.options, attribute.name)
+        return true
+    catch error
+        error isa MOI.UnsupportedAttribute && return false
+        rethrow()
+    end
+end
 
 # Starts are copied into the authoritative Model blocks below.  Declaring the
 # attributes here is important for JuMP/CachingOptimizer: otherwise the cache
@@ -966,6 +991,24 @@ end
 
 @inline function _moi_has_attribute(attributes, attribute::DataType)
     return any(value -> value isa attribute, attributes)
+end
+
+function _moi_apply_raw_optimizer_attributes!(optimizer::Optimizer, source)
+    attributes = try
+        MOI.get(source, MOI.ListOfOptimizerAttributesSet())
+    catch error
+        error isa MOI.UnsupportedAttribute && return nothing
+        rethrow()
+    end
+    for attribute in attributes
+        attribute isa MOI.RawOptimizerAttribute || continue
+        # CachingOptimizer deliberately does not replay raw attributes when
+        # it attaches an optimizer. Re-apply them at the concrete copy seam,
+        # where this adapter can validate the lossless whitelist and reject
+        # expert fields instead of silently dropping them.
+        _set_raw_option!(optimizer, attribute.name, MOI.get(source, attribute))
+    end
+    return nothing
 end
 
 function _moi_attribute_list(source, attribute)
@@ -1254,6 +1297,7 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T<:A
             MOI.copy_to(optimizer, source)
         end
     end
+    _moi_apply_raw_optimizer_attributes!(optimizer, source)
     _check_copy_attributes(optimizer, source)
 
     # Route-family detection intentionally precedes Model allocation.  A

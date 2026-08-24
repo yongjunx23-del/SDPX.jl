@@ -22,7 +22,8 @@ SDPX.is_supported_arithmetic(::Type{<:MultiFloat}) = true
 
 # MultiFloat inherits Float64's ~10±308 exponent range and collapses ±Inf to
 # NaN (no dedicated infinity bit pattern) — solve! runs the non-finite-iterate
-# guard and caps restart escalation for these types (see solve.jl).
+# guard and caps restart escalation for these types (see
+# solver/interior_point.jl).
 SDPX.dynamic_range_limited(::Type{<:MultiFloat}) = true
 SDPX.mixed_arrow_arithmetic(::Type{BigFloat}) = Float64x4
 SDPX.mixed_intermediate_arithmetic(::Type{Float64x4}) = Float64x2

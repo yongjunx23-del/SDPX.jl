@@ -11,7 +11,7 @@ acceptance tests remain in the requested arithmetic (`BigFloat` or
 Command:
 
 ```bash
-julia --project=. bench/mixed_precision_kkt/benchmark.jl
+julia --project=. docs/evidence/bench/mixed_precision_kkt/benchmark.jl
 ```
 
 Environment: Apple M4, four hardware threads exposed, Julia 1.12.6, one Julia

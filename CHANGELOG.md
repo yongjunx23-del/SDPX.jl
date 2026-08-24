@@ -45,6 +45,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Developer
 
+- Consolidated execution metadata and retired stale architecture seams.
+  `ExecutionPlan.backend_config.route` is now the single KKT-route authority,
+  storage is a typed `KKTStoragePlan`, and a post-presolve LP route is frozen
+  once as the plan's `LPRoutePlan` payload for both execution and diagnostics.
+  `LPWorkspace` no longer shadows that route in a mutable formulation field or
+  reselects it through legacy LP selector/factor shims. `NativeSOCPlan` now
+  carries only cone specialization; formulation, LA provider, and threads live
+  exclusively on the enclosing `ExecutionPlan`.
+  The KKT solve boundary dispatches through the selected backend, LP sparse
+  policy lives with the LP sparse implementation, and the empty
+  `src/solve.jl` include shim plus the obsolete `src/kkt_sparse_backend.jl`
+  policy file were removed. Dead analysis-only chordal wrappers and unused
+  SOC/threaded helpers were removed with their tests migrated to the live
+  APIs. Core SDP and conic solver results now share an internal typed result
+  protocol, while the scale-normalized stopping rule replaces the retired
+  `termination=:legacy` branch.
+- MOI raw optimizer attributes now advertise only settings that can be
+  transferred losslessly to the public `Settings` layer. Unsupported expert
+  fields and the historical `formulation=:primal` orientation request fail
+  explicitly, and cached raw attributes are replayed when MOI attaches the
+  optimizer instead of being silently discarded.
 - Explicit KKT formulation descriptor in `ExecutionPlan` plus a static
   formulation planner, kept independent of the selected linear-algebra
   provider.
@@ -168,8 +189,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`:off`/`:auto`/`:on`, default `:off`, validated) records a descriptive
   plan-level policy — `chordal_policy`, `chordal_selected`,
   `chordal_reason`, and `chordal_beneficial_blocks` in
-  `ExecutionPlan.parameters`, surfaced as a lazy `plan.chordal_plan`
-  accessor — derived from the preprocessing clique-cost estimate threaded
+  `ExecutionPlan.parameters` — derived from the preprocessing clique-cost estimate threaded
   through `_solve_pipeline!` and `prepare` (compatibility delegates record
   `:chordal_estimate_unavailable`). The clique transformation itself
   remains analysis-only: `chordal_selected` stays `false`, preprocessing
@@ -660,7 +680,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   103.02 seconds on the controlled node155 run, versus roughly 162--200
   seconds per iteration in the former dense run. Full trajectories,
   certificate status, and rejected alternatives are recorded in the
-  [B3 report](bench/lattice_bootstrap/B3_NO_BOX_MOSEK_SDPX_REPORT.md); a
+  [B3 report](docs/evidence/bench/lattice_bootstrap/B3_NO_BOX_MOSEK_SDPX_REPORT.md); a
   non-optimal iterate is never reported there as a bound.
 - Automatic refinement on the regularized sparse Float64 SDP route now keeps
   two guard digits beyond the requested certificate instead of always
@@ -679,7 +699,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the previous run stopping nine iterations earlier and failing its requested
   original-coordinate gap. The serial update phase fell from 8.95 to 0.81
   seconds. See
-  `bench/opt2026/CSDR_J200_GAP_AND_BLOCK_PASSES_2026-07-28.md`.
+  `docs/evidence/bench/opt2026/CSDR_J200_GAP_AND_BLOCK_PASSES_2026-07-28.md`.
 
 ## [0.2.1] — 2026-07-27
 
@@ -924,10 +944,11 @@ previous published SDPX version.
 
 ### Known limitations
 
-- The sparse conformal-bootstrap benchmark bundled in `bench/` does not yet
-  converge to the tolerance a reference solver reaches on the same instance.
-  See `bench/csdr_psd_dual/RESULTS.md` for current evidence and
-  `bench/opt2026/REPORT.md` for the historical optimization log.
+- The sparse conformal-bootstrap benchmark, now archived under
+  `docs/evidence/bench/`, does not yet converge to the tolerance a reference
+  solver reaches on the same instance. See
+  `docs/evidence/bench/csdr_psd_dual/RESULTS.md` for current evidence and
+  `docs/evidence/bench/opt2026/REPORT.md` for the historical optimization log.
 - General native BigFloat execution is serial. Exact singleton-local `2x2`
   arrows are a validated exception with exclusive block/panel ownership and
   disjoint lower-triangular Schur tiles. The opt-in Float64x4 reduced-arrow

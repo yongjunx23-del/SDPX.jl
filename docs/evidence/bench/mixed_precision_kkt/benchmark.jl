@@ -61,8 +61,9 @@ function direct_kkt_case(::Type{T}, variables::Int; repetitions::Int=3) where {T
         )
         SDPX.copy_owned!(workspace.S, schur)
         SDPX.copy_owned!(workspace.p, equality_rhs)
+        backend = SDPX.select_backend(workspace)
         return function run()
-            factor = SDPX.factor_kkt!(workspace, problem, options)
+            factor = SDPX.factorize!(backend, workspace, problem, options)
             factor.ok || error("KKT factorization failed")
             SDPX.solve_kkt!(
                 workspace,

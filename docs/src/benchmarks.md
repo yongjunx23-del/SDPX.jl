@@ -11,15 +11,15 @@ not repeat every table.
   original-coordinate certificate, and forbids a PSD lift or fallback.
 - [`docs/evidence/bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/soc_fixed_trace/README.md) — archived pre-v0.5
   PSD2-versus-Q3 scripts retained only as historical evidence.
-- [`bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md) — retained historical context and
+- [`docs/evidence/bench/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/RESULTS.md) — retained historical context and
   the small smoke tier index.
-- [`bench/automatic_pipeline/PARAMETER_SELECTION.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/automatic_pipeline/PARAMETER_SELECTION.md)
+- [`docs/evidence/bench/automatic_pipeline/PARAMETER_SELECTION.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/automatic_pipeline/PARAMETER_SELECTION.md)
   — LP cold-start crossover and distant-start sweeps.
-- [`bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md) — Schur
+- [`docs/evidence/bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md) — Schur
   scheduling kernel measurements.
-- [`bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
+- [`docs/evidence/bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
   — mixed-precision KKT promotion evidence.
-- [`bench/opt2026/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/bench/opt2026) — native BigFloat optimization,
+- [`docs/evidence/bench/opt2026/`](https://github.com/yongjunx23-del/SDPX.jl/tree/main/docs/evidence/bench/opt2026) — native BigFloat optimization,
   preprocessing, and cluster campaign reports.
 
 ## Reporting policy

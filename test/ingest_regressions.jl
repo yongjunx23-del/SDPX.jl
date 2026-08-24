@@ -64,18 +64,18 @@ using Test
         )
         large_sparse_equalities =
             spzeros(BigFloat, 5_001, 1_000)
-        @test SDPX._equality_rank_indices(
+        @test SDPX._equality_rank_analysis(
             large_sparse_equalities,
             0.0,
-        ) == Int[]
+        ).keep == Int[]
         # Above the conservative crossover the presolver deliberately keeps
         # every column instead of risking an expensive conversion/factorization.
         oversized_sparse_equalities =
             spzeros(BigFloat, 5_001, 2_049)
-        @test SDPX._equality_rank_indices(
+        @test SDPX._equality_rank_analysis(
             oversized_sparse_equalities,
             0.0,
-        ) == collect(1:2_049)
+        ).keep == collect(1:2_049)
     end
 end
 

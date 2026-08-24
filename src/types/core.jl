@@ -52,8 +52,8 @@ statuses, not exceptions.
 @enum SolveStatus begin
     NotStarted
     Optimal
-    FeasibleCert        # findFeasible: certificate t* < 0 (strictly feasible)
-    InfeasibleCert       # findFeasible: certificate t* >= 0
+    FeasibleCert         # auxiliary feasibility certificate is strictly feasible
+    InfeasibleCert       # auxiliary feasibility certificate is infeasible
     Stalled              # μ / step-size stagnation detected, no progress possible
     IterLimit
     TimeLimit
@@ -75,8 +75,8 @@ statuses, not exceptions.
     # plain breakdown. Never presented as a success.
     NumericalFailure
     # Optimize-mode certificates. These are deliberately distinct from the
-    # historical `InfeasibleCert`, which belongs to the auxiliary
-    # `findFeasible` formulation. A status is promoted to either value only
+    # `InfeasibleCert`, which belongs to the auxiliary feasibility
+    # formulation. A status is promoted to either value only
     # after an independently normalized homogeneous ray passes the original-
     # coordinate affine, cone, sign, and finite-value checks.
     PrimalInfeasible

@@ -214,7 +214,7 @@ function main()
     synthetic_active == 0 && !isfile(input) &&
         error(
             "CSDR input not found at $input. Generate it with " *
-            "bench/csdr_psd_dual/prepare_problem.jl, set SPARSE_INPUT, " *
+            "docs/evidence/bench/csdr_psd_dual/prepare_problem.jl, set SPARSE_INPUT, " *
             "or set SYNTHETIC_ACTIVE to run the self-contained inner-kernel " *
             "benchmark.",
         )

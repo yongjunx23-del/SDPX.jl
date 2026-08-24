@@ -1,4 +1,5 @@
 using LinearAlgebra
+using MultiFloats
 using SparseArrays
 using Test
 

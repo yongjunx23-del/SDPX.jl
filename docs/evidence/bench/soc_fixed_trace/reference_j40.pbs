@@ -73,7 +73,7 @@ export BLIS_NUM_THREADS=1
 
 /usr/bin/time -v -o "${SDPX_OUTPUT_ROOT}/benchmark.time" \
     "${JULIA_BIN}" --startup-file=no --project="${SHARED_ENV}" -t 1 \
-    "${SDPX_SOURCE}/bench/soc_fixed_trace/reference/benchmark_float64.jl" \
+    "${SDPX_SOURCE}/docs/evidence/bench/soc_fixed_trace/reference/benchmark_float64.jl" \
     --case=J40 \
     --solver="${SDPX_REFERENCE_SOLVER}" \
     --model="${CSDR_MODEL}" \

@@ -784,10 +784,10 @@ function _normalize_compatibility_execution_plan(
             plan.classification,
             plan.algorithm,
             plan.scaling,
-            plan.kkt_backend,
             plan.backend_config,
             plan.formulation_plan,
             compatibility_la,
+            plan.storage_plan,
             plan.gram_kernel,
             plan.schedule,
             plan.threads,
@@ -840,10 +840,10 @@ function Workspace(
             plan.classification,
             plan.algorithm,
             plan.scaling,
-            plan.kkt_backend,
             plan.backend_config,
             plan.formulation_plan,
             compatibility_la,
+            plan.storage_plan,
             plan.gram_kernel,
             plan.schedule,
             plan.threads,
@@ -858,11 +858,6 @@ function Workspace(
             "Workspace requires an SDP primal-dual execution plan, got $(plan.algorithm)",
         ))
     config = plan.backend_config
-    config.route == plan.kkt_backend ||
-        throw(ArgumentError(
-            "execution plan backend configuration $(config.route) does not match " *
-            "kkt_backend $(plan.kkt_backend)",
-        ))
     formulation_plan = plan.formulation_plan
     formulation = formulation_symbol(formulation_plan)
     formulation in KKT_FORMULATION_ROUTES || throw(ArgumentError(

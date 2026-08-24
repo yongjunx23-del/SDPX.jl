@@ -279,15 +279,6 @@ function _public_lower_native(
         "optimize: native exponential-cone lowering is not available yet; " *
         "the :exp_family route is classification-only in this build",
     ))
-    lowerer_name = route.route === :lp_family ? :lower_lp_native :
-                   route.route === :soc_family ? :lower_soc_native :
-                   route.route === :sdp_family ? :lower_sdp_native :
-                   :lower_native
-    isdefined(@__MODULE__, lowerer_name) || throw(PublicOptimizeError(
-        route.route,
-        :lowerer_unavailable,
-        "optimize: $(route.route) has no callable $(lowerer_name) lowerer in this build",
-    ))
     sparse = _public_lowering_sparse(settings.sparse)
     # LP and SDP receive the single mapped storage request. NativeSOC owns its
     # structural storage inside the SOC execution plan and takes no lowering
@@ -662,7 +653,7 @@ the native SOC route), and the history payload.
 function _public_result_from_core(
     model::Model{T},
     program::NativeConeProgram{T},
-    core_result,
+    core_result::AbstractCoreResult{T},
     settings::Settings{T},
     outputs::Outputs,
     primal,
@@ -675,14 +666,14 @@ function _public_result_from_core(
     termination_info,
     history,
 ) where {T<:AbstractFloat}
-    diagnostics = core_result.diagnostics
+    diagnostics = core_diagnostics(core_result)
     diagnostics isa diagnostics_type || throw(PublicOptimizeError(
         family,
         :plan_unavailable,
         "optimize: $(uppercase(replace(String(family), "_family" => ""))) " *
         "solver did not retain its authoritative ExecutionPlan",
     ))
-    core_status = core_result.status
+    core_status_value = core_status(core_result)
     certificate_summary = _public_original_certificate(
         model,
         program,
@@ -692,12 +683,12 @@ function _public_result_from_core(
         primal_obj,
         dual_obj,
         settings,
-        core_status,
+        core_status_value,
     )
-    result_status = core_status
+    result_status = core_status_value
     termination_reason = get(termination_info, :reason, :none)
     termination_stage = get(termination_info, :stage, :core)
-    if core_status === Optimal && !certificate_summary.valid
+    if core_status_value === Optimal && !certificate_summary.valid
         result_status = NumericalFailure
         termination_reason = :original_coordinate_certificate_failed
         termination_stage = :certification
@@ -706,7 +697,7 @@ function _public_result_from_core(
         result_status,
         termination_reason isa Symbol ? termination_reason : :unknown,
         termination_stage isa Symbol ? termination_stage : :unknown,
-        core_result.message,
+        core_message(core_result),
     )
     trace = outputs.trace ? performance_trace(core_result) : nothing
     return Result{T}(
@@ -714,7 +705,7 @@ function _public_result_from_core(
         diagnostics.plan,
         result_status,
         termination,
-        core_result.iterations,
+        core_iterations(core_result),
         certificate_summary,
         outputs,
         _public_result_data(outputs.primal, model.variables, primal),
@@ -1119,6 +1110,48 @@ function _public_cold_continuation_starts(
     ))
 end
 
+"""Map every lowered SDP equality origin through caller-owned accessors."""
+function _public_map_sdp_equality_origins(
+    lowering,
+    ::Type{V},
+    product_value,
+    affine_value,
+) where {V}
+    values = Vector{V}(undef, length(lowering.equality_origins))
+    for (position, origin) in enumerate(lowering.equality_origins)
+        values[position] = if origin.kind === :product_zero
+            product_value(origin.block, origin.index)
+        elseif origin.kind === :affine_zero
+            affine_value(origin.block, origin.index)
+        else
+            throw(ArgumentError(
+                "unknown SDP equality origin kind $(origin.kind)",
+            ))
+        end
+    end
+    return values
+end
+
+"""Map every lowered SDP block origin to its packed dual source."""
+function _public_map_sdp_psd_origins(
+    lowering,
+    product_value,
+    affine_value,
+)
+    return map(lowering.psd_block_origins) do origin
+        packed = if origin.kind === :product_psd
+            product_value(origin.block)
+        elseif origin.kind === :affine_psd
+            affine_value(origin.block)
+        else
+            throw(ArgumentError(
+                "unknown SDP PSD origin kind $(origin.kind)",
+            ))
+        end
+        return (origin=origin, packed=packed)
+    end
+end
+
 function _public_sdp_continuation_starts(
     model::Model{T},
     lowering,
@@ -1190,44 +1223,44 @@ function _public_sdp_continuation_starts(
         )
 
     x0 = _public_start_copy(T, state.primal, precision_bits(model))
-    y0 = Vector{T}(undef, length(lowering.equality_origins))
-    for (position, origin) in enumerate(lowering.equality_origins)
-        if origin.kind === :product_zero
-            block = source.model_snapshot.variable_blocks[origin.block]
-            y0[position] = state.dual_slack[
-                block.offset + origin.index - 1
-            ]
-        elseif origin.kind === :affine_zero
-            block = source.model_snapshot.constraint_blocks[origin.block]
-            y0[position] = state.constraint_dual[
-                block.offset + origin.index - 1
-            ]
-        else
-            throw(ArgumentError(
-                "unknown SDP equality origin kind $(origin.kind)",
-            ))
-        end
-    end
+    y0 = _public_map_sdp_equality_origins(
+        lowering,
+        T,
+        (block, index) -> begin
+            snapshot_block = source.model_snapshot.variable_blocks[block]
+            state.dual_slack[snapshot_block.offset + index - 1]
+        end,
+        (block, index) -> begin
+            snapshot_block = source.model_snapshot.constraint_blocks[block]
+            state.constraint_dual[snapshot_block.offset + index - 1]
+        end,
+    )
     y0 = _public_start_copy(T, y0, precision_bits(model))
 
     X0 = Matrix{T}[]
     Y0 = Matrix{T}[]
-    for origin in lowering.psd_block_origins
-        packed = if origin.kind === :product_psd
-            block = source.model_snapshot.variable_blocks[origin.block]
+    mapped_psd = _public_map_sdp_psd_origins(
+        lowering,
+        block -> begin
+            snapshot_block = source.model_snapshot.variable_blocks[block]
             state.dual_slack[
-                block.offset:(block.offset + block.length - 1)
+                snapshot_block.offset:(
+                    snapshot_block.offset + snapshot_block.length - 1
+                )
             ]
-        elseif origin.kind === :affine_psd
-            block = source.model_snapshot.constraint_blocks[origin.block]
+        end,
+        block -> begin
+            snapshot_block = source.model_snapshot.constraint_blocks[block]
             state.constraint_dual[
-                block.offset:(block.offset + block.length - 1)
+                snapshot_block.offset:(
+                    snapshot_block.offset + snapshot_block.length - 1
+                )
             ]
-        else
-            throw(ArgumentError(
-                "unknown SDP PSD origin kind $(origin.kind)",
-            ))
-        end
+        end,
+    )
+    for mapped in mapped_psd
+        origin = mapped.origin
+        packed = mapped.packed
         push!(X0, _scaled_identity(T, one(T), origin.shape))
         push!(
             Y0,
@@ -1286,20 +1319,19 @@ function _public_sdp_starts(
 
     # y0 covers every core equality coordinate. A partial equality start
     # cannot be represented by the core's full-vector keyword.
-    ystarts = Vector{Union{Nothing,T}}(undef, length(lowering.equality_origins))
-    fill!(ystarts, nothing)
-    any_y = false
-    for (position, origin) in enumerate(lowering.equality_origins)
-        if origin.kind === :product_zero
-            value = model.variable_blocks[origin.block].dual_slack_start
-            value === nothing || (ystarts[position] = value[origin.index]; any_y = true)
-        elseif origin.kind === :affine_zero
-            value = model.constraint_blocks[origin.block].dual_start
-            value === nothing || (ystarts[position] = value[origin.index]; any_y = true)
-        else
-            throw(ArgumentError("unknown SDP equality origin kind $(origin.kind)"))
-        end
-    end
+    ystarts = _public_map_sdp_equality_origins(
+        lowering,
+        Union{Nothing,T},
+        (block, index) -> begin
+            values = model.variable_blocks[block].dual_slack_start
+            values === nothing ? nothing : values[index]
+        end,
+        (block, index) -> begin
+            values = model.constraint_blocks[block].dual_start
+            values === nothing ? nothing : values[index]
+        end,
+    )
+    any_y = any(start -> start !== nothing, ystarts)
     y0 = if any_y
         all(start -> start !== nothing, ystarts) || throw(PublicOptimizeError(
             :sdp_family,
@@ -1319,14 +1351,14 @@ function _public_sdp_starts(
     # rows. Native packed starts use lower-authoritative matrix entries;
     # dual off-diagonals therefore divide by two when reconstructing Y.
     Y0 = Matrix{T}[]
-    for origin in lowering.psd_block_origins
-        packed = if origin.kind === :product_psd
-            model.variable_blocks[origin.block].dual_slack_start
-        elseif origin.kind === :affine_psd
-            model.constraint_blocks[origin.block].dual_start
-        else
-            throw(ArgumentError("unknown SDP PSD origin kind $(origin.kind)"))
-        end
+    mapped_psd = _public_map_sdp_psd_origins(
+        lowering,
+        block -> model.variable_blocks[block].dual_slack_start,
+        block -> model.constraint_blocks[block].dual_start,
+    )
+    for mapped in mapped_psd
+        origin = mapped.origin
+        packed = mapped.packed
         matrix = packed === nothing ?
                  _public_identity_start(T, origin.shape) :
                  _result_packed_matrix(
@@ -1399,16 +1431,14 @@ function _public_result_from_lowering(
             _public_lp_starts(model, lowering),
         )
         return _public_result_from_lp(model, program, lowering, core_result, settings, outputs)
-    elseif isdefined(@__MODULE__, :SOCLowering) &&
-           lowering isa getfield(@__MODULE__, :SOCLowering)
+    elseif lowering isa SOCLowering
         core_result = _public_solve_soc_core(
             lowering.core,
             options,
             _public_soc_starts(model, lowering),
         )
         return _public_result_from_soc(model, program, lowering, core_result, settings, outputs)
-    elseif isdefined(@__MODULE__, :SDPLowering) &&
-           lowering isa getfield(@__MODULE__, :SDPLowering)
+    elseif lowering isa SDPLowering
         starts = _public_sdp_continuation_starts(
             model,
             lowering,

@@ -78,7 +78,6 @@ identity `:automatic_mehrotra`, and executed diagnostics record
 | `ϵ_gap` | `1e-10` | Relative primal-dual gap tolerance. |
 | `ϵ_primal` | `1e-10` | Primal residual tolerance. |
 | `ϵ_dual` | `1e-10` | Dual residual tolerance. |
-| `termination` | `:relative` | Scale-normalized stopping tests; `:legacy` is the legacy absolute/nonnegative-gap convention. |
 | `iter_max` | `200` | Maximum outer iterations (legacy keyword `iterMax`). |
 | `max_time` | `Inf` | End-to-end wall-clock limit in seconds, including automatic-pipeline setup and model compilation. |
 | `callback` | `nothing` | Called after every iteration; returning `true` stops with `UserStopped`. |
@@ -133,25 +132,20 @@ settings = SDPX.Settings(model; scaling=:equilibrate)
 result = SDPX.optimize!(model; settings=settings)
 ```
 
-Warm starts are supplied in original input coordinates. SDPX maps `x0`, `X0`,
-and `Y0` through the selected equilibration and maps `y0` through equality
-presolve as needed; callers should not pre-scale them.
+Warm starts use the exported modeling API: `set_start!` sets a variable block,
+`set_dual_start!` sets a constraint block, and `set_dual_slack_start!` sets a
+variable block's dual slack. A layout-compatible SDP can also continue from a
+previous certified result with
+`optimize!(model; settings=settings, warm_start=previous_result)`. Values are
+always supplied in original input coordinates; callers should not pre-scale
+them.
 
-## Output, timing, and checkpoints
+## Output and timing
 
 | Parameter | Default | Meaning |
 |---|---:|---|
 | `verbosity` | `1` | `0` is silent; values of `1` or higher print iteration information. |
 | `timing` | `false` | Records total and phase-level timing. |
-| `checkpoint_every` | `0` | Save an iterate-level warm-restart checkpoint every N iterations; `0` disables. |
-| `checkpoint_path` | `""` | Atomic checkpoint destination used by the SDP path. |
-| `mode` | `OPTIMIZE` | `OPTIMIZE` or the internal feasibility mode `FEASIBILITY`. |
-
-Resume restores the primal/dual iterate, centering targets, and
-iteration/restart counters. It intentionally reinitializes adaptive-parameter
-history, stagnation windows, phase timers, and best-iterate history; a resumed
-adaptive solve is therefore not bit-for-bit equivalent to an uninterrupted
-run. Checkpoint resume is not currently supported by the dedicated LP path.
 
 ## Qualified compatibility defaults
 

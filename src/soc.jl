@@ -46,7 +46,7 @@ Result in original Lorentz coordinates. Production NativeSOC results set
 timings, termination, and diagnostics directly; no PSD `SDPResult` is stored.
 Test/reference PSD helpers return their own `SDPResult` separately.
 """
-struct ConicResult{T}
+struct ConicResult{T,D} <: AbstractCoreResult{T}
     status::SolveStatus
     message::String
     x::Vector{T}
@@ -59,7 +59,39 @@ struct ConicResult{T}
     p_res::T
     d_res::T
     iterations::Int
-    diagnostics::Any
+    diagnostics::D
+end
+
+function ConicResult{T}(
+    status::SolveStatus,
+    message::String,
+    x::Vector{T},
+    slack::Vector{Vector{T}},
+    dual::Vector{Vector{T}},
+    equality_dual::Vector{T},
+    pObj::T,
+    dObj::T,
+    gap_rel::T,
+    p_res::T,
+    d_res::T,
+    iterations::Int,
+    diagnostics::D,
+) where {T,D}
+    return ConicResult{T,D}(
+        status,
+        message,
+        x,
+        slack,
+        dual,
+        equality_dual,
+        pObj,
+        dObj,
+        gap_rel,
+        p_res,
+        d_res,
+        iterations,
+        diagnostics,
+    )
 end
 
 """Native SOCP compatibility aliases for common result-inspection fields."""
@@ -121,22 +153,6 @@ end
 
 @inline _soc_is_interior(vector) =
     vector[1] > zero(eltype(vector)) && _soc_margin(vector) > zero(eltype(vector))
-
-"""Exact inverse in the Lorentz Jordan algebra."""
-function _soc_inverse!(destination, source)
-    length(destination) == length(source) || throw(DimensionMismatch(
-        "Lorentz vectors must have equal dimensions",
-    ))
-    _soc_is_interior(source) ||
-        throw(ArgumentError("the Lorentz vector is not in the cone interior"))
-    determinant = _soc_determinant(source)
-    head = source[1]
-    destination[1] = head / determinant
-    @inbounds for index in 2:length(source)
-        destination[index] = -source[index] / determinant
-    end
-    return destination
-end
 
 """
     _soc_fraction_to_boundary(s, ds)

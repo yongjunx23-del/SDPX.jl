@@ -70,17 +70,18 @@ dirty tree 的记录行会被标记，不用于任何声明。
 
 ```sh
 # 集群侧（PBS）
-julia --project=benchmark benchmark/fresh_process_runner.jl large \
+julia --project=benchmark/benchenv benchmark/fresh_process_runner.jl large \
   --problem=<affected-row> --campaign-dir=work/fresh/<name>
 julia --project=. benchmark/compare.jl work/fresh/base.toml work/fresh/cand.toml
 ```
 
-`process_peak_rss_bytes` 只用于同环境回归对比。通过后更新
-`benchmark/history/`（optimization-loop workflow 会在 push 时自动记录
-parent-versus-candidate 证据，手动触发：`gh workflow run optimization-loop.yml`）。
+`process_peak_rss_bytes` 只用于同环境回归对比。通过后手动触发
+`gh workflow run optimization-loop.yml`；成功的 optimization-loop run 会把
+parent-versus-candidate 证据写入 `benchmark/history/`。
 
 ## 6. 微基准（定位到 phase 之后）
 
 compare 指认变慢的 phase 后，为该 phase 冻结一个微基准再改：
-`benchmark/micro/` 下的脚本模式（固定输入、`@timed` 多样本、checksum 防漂移）。
+使用单文件脚本（固定输入、`@timed` 多样本、checksum 防漂移），并把可复核
+的 driver 与结果归档到 `docs/evidence/bench/<campaign>/`。
 先证明微基准复现总时间变化，再动手优化；改完先过微基准，再回到步骤 2。

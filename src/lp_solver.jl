@@ -132,9 +132,8 @@ mutable struct LPWorkspace{T,LB<:AbstractLABackend}
     sparse_system::Union{Nothing,LPSparseSystem{T}}
     # Resolved exactly once after row presolve/scaling and then used for every
     # factor/solve in the LP loop.  This preserves the established LP route
-    # formulas while making the deferred plan decision explicit.
+    # formulas. The immutable payload below is the sole route authority.
     backend::Union{Nothing,KKTBackend}
-    backend_formulation::Symbol
     # The finalized immutable LP route payload, asserted against by every
     # workspace/backend consumer. Production constructs it once after scaling
     # and passes it into this workspace; direct test helpers may use `nothing`.
@@ -206,7 +205,6 @@ function LPWorkspace(
         nothing,
         nothing,
         nothing,
-        :not_resolved,
         lp_route_payload,
         la_backend,
         :not_executed,
@@ -1281,7 +1279,7 @@ function _lp_executed_record(
         kkt=backend_execution_attempted ?
             _lp_executed_backend(workspace, equalities) :
             :not_executed,
-        planned_backend=:lp_deferred,
+        planned_backend=planned_backend_name(plan),
         executed_backend=backend_execution_attempted ?
             backend_name(workspace.backend::KKTBackend) :
             :not_executed,
@@ -1831,7 +1829,7 @@ function _lp_assemble_hessian!(
     kernel::Symbol,
 ) where {T}
     # The standard-form route eliminates its diagonal primal block inside
-    # `_lp_factor_kkt!`, after the trial regularization is known.
+    # `_lp_factor_reduced!`, after the trial regularization is known.
     workspace.standard_system === nothing || return workspace.H
     # The sparse path forms its own `GᵀDG` directly in sparse arithmetic, so
     # the dense `m×m` product here would be pure waste -- and at the sizes that
@@ -2284,40 +2282,6 @@ function _lp_solve_factor!(factor::LPSparseFactor, rhs)
     return lp_sparse_solve!(rhs, factor.system)
 end
 
-function _lp_factor_kkt!(
-    workspace::LPWorkspace{T},
-    B::Matrix{T},
-    regularization::T,
-) where {T}
-    reduced = workspace.standard_system
-    if reduced isa LPStandardFormSystem{T}
-        return _lp_factor_reduced!(workspace, regularization)
-    end
-    system = workspace.sparse_system
-    if system isa LPSparseSystem{T}
-        return _lp_factor_sparse!(workspace, regularization)
-    end
-    return isempty(B) ?
-           _lp_factor_dense_cholesky!(workspace, B, regularization) :
-           _lp_factor_dense_lu!(workspace, B, regularization)
-end
-
-function _lp_factor_kkt!(
-    workspace::LPWorkspace{T},
-    B::SparseMatrixCSC{T,Int},
-    regularization::T,
-) where {T}
-    reduced = workspace.standard_system
-    reduced isa LPStandardFormSystem{T} &&
-        return _lp_factor_reduced!(workspace, regularization)
-    system = workspace.sparse_system
-    system isa LPSparseSystem{T} &&
-        return _lp_factor_sparse!(workspace, regularization)
-    return isempty(B) ?
-           _lp_factor_dense_cholesky!(workspace, Matrix(B), regularization) :
-           _lp_factor_dense_lu!(workspace, Matrix(B), regularization)
-end
-
 function _lp_factor_reduced!(
     workspace::LPWorkspace{T},
     regularization::T,
@@ -2404,6 +2368,7 @@ function _assert_lp_backend(
     workspace::LPWorkspace,
     backend::KKTBackend,
 )
+    _assert_lp_route_parity(workspace)
     workspace.backend === backend || error(
         "LP backend $(typeof(backend)) does not match the resolved " *
         "backend $(typeof(workspace.backend))",
@@ -2479,18 +2444,25 @@ function _resolve_lp_backend!(
 ) where {T}
     workspace.backend === nothing ||
         error("LP KKT backend was resolved more than once")
-    workspace.backend = if workspace.standard_system !== nothing
-        workspace.backend_formulation = :diagonal_reduced_cholesky
+    payload = _lp_route_payload(workspace)
+    equalities == payload.equalities || error(
+        "LP resolver equality count $(equalities) does not match payload " *
+        "count $(payload.equalities)",
+    )
+    workspace.backend = if payload.route === :diagonal_reduced_cholesky
         LPReducedCholeskyBackend()
-    elseif workspace.sparse_system !== nothing
-        system = workspace.sparse_system::LPSparseSystem{T}
-        workspace.backend_formulation = system.formulation
-        system.backend
+    elseif payload.route === :sparse_normal
+        system = workspace.sparse_system
+        system === nothing && error(
+            "sparse LP route payload requires a sparse Newton system",
+        )
+        (system::LPSparseSystem{T}).backend
+    elseif payload.route === :dense_lu
+        LPLUBackend()
+    elseif payload.route === :positive_definite_cholesky
+        LPCholeskyBackend()
     else
-        workspace.backend_formulation = equalities > 0 ?
-                                        :dense_lu :
-                                        :positive_definite_cholesky
-        select_lp_backend(equalities)
+        error("unknown finalized LP route $(payload.route)")
     end
     _assert_lp_route_parity(workspace)
     return workspace.backend::KKTBackend
@@ -2505,10 +2477,9 @@ function _assert_lp_route_parity(workspace::LPWorkspace{T}) where {T}
     payload === nothing && error(
         "LP route payload was not finalized before backend resolution",
     )
-    resolved = workspace.backend_formulation
-    resolved === payload.route || error(
-        "LP route payload $(payload.route) does not match resolved backend $(resolved)",
-    )
+    resolved = payload.route
+    backend = workspace.backend
+    backend === nothing && error("LP backend was not resolved")
     storage = resolved in (
         :diagonal_reduced_cholesky,
         :positive_definite_cholesky,
@@ -2517,6 +2488,18 @@ function _assert_lp_route_parity(workspace::LPWorkspace{T}) where {T}
     storage === payload.storage || error(
         "LP route payload storage $(payload.storage) does not match " *
         "resolved route $(resolved)",
+    )
+    length(workspace.rd) == payload.variables || error(
+        "LP route payload variable count $(payload.variables) does not match " *
+        "workspace count $(length(workspace.rd))",
+    )
+    length(workspace.re) == payload.equalities || error(
+        "LP route payload equality count $(payload.equalities) does not match " *
+        "workspace count $(length(workspace.re))",
+    )
+    length(workspace.rp) == payload.inequalities || error(
+        "LP route payload inequality count $(payload.inequalities) does not " *
+        "match workspace count $(length(workspace.rp))",
     )
     resolved === :diagonal_reduced_cholesky &&
         workspace.standard_system === nothing && error(
@@ -2530,10 +2513,40 @@ function _assert_lp_route_parity(workspace::LPWorkspace{T}) where {T}
         payload.provider === :cholmod ||
             payload.provider === :generic ||
             error("sparse route payload has an unknown provider")
+        system = workspace.sparse_system::LPSparseSystem{T}
+        system.formulation === resolved || error(
+            "sparse LP system formulation $(system.formulation) does not " *
+            "match payload route $(resolved)",
+        )
+        system.backend === backend || error(
+            "sparse LP system backend does not match the resolved backend",
+        )
+        expected_provider = backend isa CHOLMODSparseCholeskyBackend ?
+                            :cholmod :
+                            backend isa GenericSparseCholeskyBackend ?
+                            :generic : :unknown
+        expected_provider === payload.provider || error(
+            "sparse LP backend provider $(expected_provider) does not match " *
+            "payload provider $(payload.provider)",
+        )
     else
         workspace.sparse_system === nothing || error(
             "dense route payload must not carry a sparse Newton system",
         )
+        if resolved === :diagonal_reduced_cholesky
+            backend isa LPReducedCholeskyBackend || error(
+                "diagonal-reduced LP route requires LPReducedCholeskyBackend",
+            )
+        else
+            workspace.standard_system === nothing || error(
+                "ordinary dense LP route must not carry a reduced standard-form system",
+            )
+            expected_type = resolved === :dense_lu ?
+                            LPLUBackend : LPCholeskyBackend
+            backend isa expected_type || error(
+                "LP route $(resolved) does not match backend $(typeof(backend))",
+            )
+        end
     end
     return payload
 end
@@ -2604,10 +2617,8 @@ function _lp_executed_backend(
     workspace::LPWorkspace{T},
     ::Int,
 ) where {T}
-    workspace.backend_formulation === :not_resolved && error(
-        "LP backend formulation was not resolved",
-    )
-    return workspace.backend_formulation
+    workspace.backend === nothing && error("LP backend was not resolved")
+    return _lp_route_payload(workspace).route
 end
 
 function _lp_direction_rhs!(
@@ -3045,7 +3056,9 @@ function _lp_direction_accuracy_gate!(
     length(scratch) == variables + equalities ||
         throw(DimensionMismatch("LP direction scratch dimension mismatch"))
 
-    if !(workspace.backend_formulation in (
+    payload = workspace.lp_route_payload
+    route = payload === nothing ? :not_resolved : payload.route
+    if !(route in (
         :dense_lu,
         :positive_definite_cholesky,
         :diagonal_reduced_cholesky,
@@ -3729,16 +3742,16 @@ function solve_lp!(
         return _lp_infeasible_rows_result(
             prob,
             "LP presolve found a zero left-hand side with a positive lower bound.",
-        ), removed, 0
+        ), removed, 0, plan
     end
     if time() >= effective_deadline
         return _lp_time_limit_result(
             prob,
             time() - started,
-        ), removed, 0
+        ), removed, 0, plan
     end
-    isempty(keep) &&
-        return _lp_equality_only_result(
+    if isempty(keep)
+        result, removed_rows, workspace_bytes = _lp_equality_only_result(
             prob,
             G_original,
             h_original,
@@ -3748,6 +3761,8 @@ function solve_lp!(
             x0=x0,
             deadline=effective_deadline,
         )
+        return result, removed_rows, workspace_bytes, plan
+    end
 
     G = if G_original isa LPDiagonalMatrix{T}
         _lp_owned_copy(G_original)
@@ -3812,6 +3827,12 @@ function solve_lp!(
         equalities,
         sparse_probe_count,
     )
+    # Instantiate the ordinary dense LA provider before a sparse finalized
+    # plan replaces the diagnostics descriptor with its provider-owned sparse
+    # route. Sparse factorization never calls this backend; dense and reduced
+    # routes retain it unchanged.
+    lp_la_backend = instantiate_la_backend(plan.la_config, T, plan.threads)
+    plan = _lp_finalized_execution_plan(plan, lp_route_payload)
     workspace = LPWorkspace(
         T,
         inequalities,
@@ -3821,7 +3842,7 @@ function solve_lp!(
         reduced_standard_form=reduced_standard_form,
         sparse_storage=sparse_selected,
         lp_route_payload=lp_route_payload,
-        la_backend=instantiate_la_backend(plan.la_config, T, plan.threads),
+        la_backend=lp_la_backend,
     )
     if reduced_standard_form
         workspace.standard_system = LPStandardFormSystem(
@@ -3830,12 +3851,8 @@ function solve_lp!(
             plan.threads,
             plan.gram_kernel,
         )
-        workspace.backend_formulation = resolved_route
     elseif sparse_selected
         workspace.sparse_system = sparse_system
-        workspace.backend_formulation = resolved_route
-    else
-        workspace.backend_formulation = resolved_route
     end
     # One private post-scaling resolver per automatic solve, after `_scale_lp!`
     # and before the controller below. It records provenance only; the
@@ -3877,7 +3894,7 @@ function solve_lp!(
             workspace,
             lp_initialization,
         )
-        return result, removed, _lp_workspace_bytes(workspace)
+        return result, removed, _lp_workspace_bytes(workspace), plan
     end
     x = if lp_initialization !== nothing
         lp_initialization.x
@@ -4500,5 +4517,5 @@ function solve_lp!(
             ),
         ),
     )
-    return result, removed, _lp_workspace_bytes(workspace)
+    return result, removed, _lp_workspace_bytes(workspace), plan
 end

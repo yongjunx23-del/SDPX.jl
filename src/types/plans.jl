@@ -1,17 +1,3 @@
-# ---------------------------------------------------------------------------
-# KKT storage is an execution dimension independent of formulation and LA
-# provider.  The small descriptors below are intentionally immutable and carry
-# only structural facts; numeric factors live in the sparse execution layer.
-# ---------------------------------------------------------------------------
-
-abstract type AbstractKKTStorage end
-
-"""Dense KKT storage marker used by the planner and diagnostics."""
-struct DenseKKTStorage <: AbstractKKTStorage end
-
-"""Frozen CSC storage marker used by sparse KKT execution."""
-struct SparseCSCStorage <: AbstractKKTStorage end
-
 """
     KKTStoragePlan
 
@@ -58,11 +44,6 @@ end
 
 KKTStoragePlan(storage::Symbol, dimension::Integer, input_nnz::Integer) =
     KKTStoragePlan(storage; dimension=dimension, input_nnz=input_nnz)
-KKTStoragePlan(::DenseKKTStorage; kwargs...) = KKTStoragePlan(:dense; kwargs...)
-KKTStoragePlan(::SparseCSCStorage; kwargs...) = KKTStoragePlan(:sparse; kwargs...)
-storage_symbol(::DenseKKTStorage) = :dense
-storage_symbol(::SparseCSCStorage) = :sparse
-storage_symbol(plan::KKTStoragePlan) = plan.storage
 
 @inline function _normalize_kkt_storage_request(value)
     value isa Bool && return value ? :sparse : :dense
@@ -240,6 +221,42 @@ struct LPRoutePlan <: AbstractExecutionPlanPayload
     inequalities::Int
 end
 
+"""Build a typed storage descriptor for historical plan constructors.
+
+Modern planners pass a `KKTStoragePlan` directly.  This adapter is retained at
+the construction boundary only so qualified callers using the former
+`parameters.storage_*` convention receive the same plan without making those
+loose parameters a second runtime authority.
+"""
+function _compat_storage_plan(
+    classification::ProblemClassification,
+    parameters::NamedTuple,
+)
+    requested = hasproperty(parameters, :storage_policy) ?
+                parameters.storage_policy : :auto
+    requested = _normalize_kkt_storage_request(requested)
+    selected = hasproperty(parameters, :storage_selected) ?
+               parameters.storage_selected : classification.storage
+    selected in (:dense, :sparse) || (selected = classification.storage)
+    dimension = hasproperty(parameters, :storage_dimension) ?
+                parameters.storage_dimension : classification.variables
+    input_nnz = hasproperty(parameters, :storage_input_nnz) ?
+                parameters.storage_input_nnz : 0
+    density = hasproperty(parameters, :storage_density) ?
+              parameters.storage_density : classification.expected_schur_density
+    reason = hasproperty(parameters, :storage_reason) ?
+             parameters.storage_reason : :route_storage_policy
+    return KKTStoragePlan(
+        selected;
+        dimension,
+        input_nnz,
+        density,
+        reason,
+        provenance=:compatibility_constructor,
+        requested,
+    )
+end
+
 """
     ExecutionPlan
 
@@ -251,10 +268,10 @@ struct ExecutionPlan{F<:AbstractKKTFormulation}
     classification::ProblemClassification
     algorithm::Symbol
     scaling::Symbol
-    kkt_backend::Symbol
     backend_config::BackendConfiguration
     formulation_plan::FormulationPlan{F}
     la_config::LABackendConfiguration
+    storage_plan::KKTStoragePlan
     gram_kernel::Symbol
     schedule::Symbol
     threads::Int
@@ -275,6 +292,7 @@ struct ExecutionPlan{F<:AbstractKKTFormulation}
         backend_config::BackendConfiguration,
         formulation_plan::FormulationPlan{F},
         la_config::LABackendConfiguration,
+        storage_plan::KKTStoragePlan,
         gram_kernel::Symbol,
         schedule::Symbol,
         threads::Int,
@@ -283,14 +301,57 @@ struct ExecutionPlan{F<:AbstractKKTFormulation}
         parameters::NamedTuple,
         payload::Union{Nothing,AbstractExecutionPlanPayload},
     ) where {F<:AbstractKKTFormulation}
+        backend_config.route === kkt_backend || throw(ArgumentError(
+            "execution plan backend configuration $(backend_config.route) " *
+            "does not match compatibility kkt_backend $(kkt_backend)",
+        ))
+        if payload isa LPRoutePlan
+            algorithm === :lp_primal_dual || throw(ArgumentError(
+                "LP route payload requires algorithm=:lp_primal_dual",
+            ))
+            backend_config.deferred && throw(ArgumentError(
+                "finalized LP route payload cannot carry a deferred backend",
+            ))
+            payload.route in (
+                :diagonal_reduced_cholesky,
+                :positive_definite_cholesky,
+                :dense_lu,
+                :sparse_normal,
+            ) || throw(ArgumentError(
+                "unknown finalized LP route $(payload.route)",
+            ))
+            expected_storage = payload.route === :sparse_normal ?
+                               :sparse : :dense
+            payload.storage === expected_storage || throw(ArgumentError(
+                "LP route $(payload.route) requires $(expected_storage) " *
+                "storage, got $(payload.storage)",
+            ))
+            backend_config.route === payload.route || throw(ArgumentError(
+                "execution-plan route $(backend_config.route) does not " *
+                "match LP payload route $(payload.route)",
+            ))
+            storage_plan.storage === payload.storage || throw(ArgumentError(
+                "execution-plan storage $(storage_plan.storage) does not " *
+                "match LP payload storage $(payload.storage)",
+            ))
+            if payload.storage === :sparse
+                payload.provider in (:cholmod, :generic) || throw(ArgumentError(
+                    "unknown sparse LP provider $(payload.provider)",
+                ))
+                la_config.provider === payload.provider || throw(ArgumentError(
+                    "execution-plan LA provider $(la_config.provider) does " *
+                    "not match sparse LP provider $(payload.provider)",
+                ))
+            end
+        end
         return new{F}(
             classification,
             algorithm,
             scaling,
-            kkt_backend,
             backend_config,
             formulation_plan,
             la_config,
+            storage_plan,
             gram_kernel,
             schedule,
             threads,
@@ -303,57 +364,95 @@ struct ExecutionPlan{F<:AbstractKKTFormulation}
 end
 
 
+"""Canonical `ExecutionPlan` constructor with typed route authorities."""
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    backend_config::BackendConfiguration,
+    formulation_plan::FormulationPlan{F},
+    la_config::LABackendConfiguration,
+    storage_plan::KKTStoragePlan,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+    payload::Union{Nothing,AbstractExecutionPlanPayload}=nothing,
+) where {F<:AbstractKKTFormulation}
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        backend_config.route,
+        backend_config,
+        formulation_plan,
+        la_config,
+        storage_plan,
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+        payload,
+    )
+end
+
+# Compatibility for the former typed constructor, where storage facts lived
+# inside the loose `parameters` NamedTuple.
+function ExecutionPlan(
+    classification::ProblemClassification,
+    algorithm::Symbol,
+    scaling::Symbol,
+    kkt_backend::Symbol,
+    backend_config::BackendConfiguration,
+    formulation_plan::FormulationPlan{F},
+    la_config::LABackendConfiguration,
+    gram_kernel::Symbol,
+    schedule::Symbol,
+    threads::Int,
+    parameter_profile::Symbol,
+    memory_budget_bytes::Int,
+    parameters::NamedTuple,
+    payload::Union{Nothing,AbstractExecutionPlanPayload},
+) where {F<:AbstractKKTFormulation}
+    return ExecutionPlan(
+        classification,
+        algorithm,
+        scaling,
+        kkt_backend,
+        backend_config,
+        formulation_plan,
+        la_config,
+        _compat_storage_plan(classification, parameters),
+        gram_kernel,
+        schedule,
+        threads,
+        parameter_profile,
+        memory_budget_bytes,
+        parameters,
+        payload,
+    )
+end
+
+
 function Base.getproperty(plan::ExecutionPlan, name::Symbol)
-    name === :kkt_formulation &&
-        return formulation_symbol(getfield(plan, :formulation_plan))
-    if name === :storage_plan
-        classification = getfield(plan, :classification)
-        parameters = getfield(plan, :parameters)
-        requested = hasproperty(parameters, :storage_policy) ?
-                    parameters.storage_policy : :auto
-        requested = _normalize_kkt_storage_request(requested)
-        selected = hasproperty(parameters, :storage_selected) ?
-                   parameters.storage_selected : classification.storage
-        selected in (:dense, :sparse) || (selected = classification.storage)
-        dimension = hasproperty(parameters, :storage_dimension) ?
-                    parameters.storage_dimension : classification.variables
-        input_nnz = hasproperty(parameters, :storage_input_nnz) ?
-                    parameters.storage_input_nnz : 0
-        density = hasproperty(parameters, :storage_density) ?
-                  parameters.storage_density : classification.expected_schur_density
-        reason = hasproperty(parameters, :storage_reason) ?
-                 parameters.storage_reason : :route_storage_policy
-        return KKTStoragePlan(
-            selected;
-            dimension=dimension,
-            input_nnz=input_nnz,
-            density=density,
-            reason=reason,
-            provenance=:execution_plan,
-            requested=requested,
-        )
-    end
-    if name === :chordal_plan
-        parameters = getfield(plan, :parameters)
-        return (
-            policy=hasproperty(parameters, :chordal_policy) ?
-                   parameters.chordal_policy : :off,
-            selected=hasproperty(parameters, :chordal_selected) ?
-                     parameters.chordal_selected : false,
-            reason=hasproperty(parameters, :chordal_reason) ?
-                   parameters.chordal_reason : :chordal_disabled,
-            beneficial_blocks=hasproperty(parameters, :chordal_beneficial_blocks) ?
-                              parameters.chordal_beneficial_blocks : 0,
-            transformation=:none,
-            provenance=:execution_plan,
-        )
+    name === :kkt_backend &&
+        return getfield(getfield(plan, :backend_config), :route)
+    if name === :kkt_formulation
+        payload = getfield(plan, :payload)
+        return payload isa LPRoutePlan ?
+               payload.route :
+               formulation_symbol(getfield(plan, :formulation_plan))
     end
     return getfield(plan, name)
 end
 
 function Base.propertynames(plan::ExecutionPlan, private::Bool=false)
     names = fieldnames(typeof(plan))
-    return (names..., :kkt_formulation, :storage_plan, :chordal_plan)
+    return (names..., :kkt_backend, :kkt_formulation)
 end
 
 """Immutable copy of `plan` carrying the given solver-family payload.
@@ -367,10 +466,10 @@ function ExecutionPlan(
         plan.classification,
         plan.algorithm,
         plan.scaling,
-        plan.kkt_backend,
         plan.backend_config,
         plan.formulation_plan,
         plan.la_config,
+        plan.storage_plan,
         plan.gram_kernel,
         plan.schedule,
         plan.threads,

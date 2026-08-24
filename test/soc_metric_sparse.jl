@@ -5,10 +5,11 @@ using Test
 const _SOC_METRIC_TYPES = let types = Any[Float64, BigFloat]
     try
         @eval import MultiFloats
-        push!(types, MultiFloats.Float64x4)
+        SDPX.is_supported_arithmetic(MultiFloats.Float64x4) &&
+            push!(types, MultiFloats.Float64x4)
     catch
         # Float64 and BigFloat are the required coverage.  Float64x4 is
-        # exercised whenever its optional arithmetic package is installed.
+        # exercised whenever its optional arithmetic extension is active.
     end
     types
 end
@@ -44,7 +45,7 @@ function _soc_metric_workspace(A, ::Type{T}) where {T}
     plan = SDPX.build_execution_plan(
         SDPX.AutoPlanner(), problem, options; specialization=:off,
     )
-    workspace = SDPX.NativeSOCWorkspace(problem, plan.payload, options)
+    workspace = SDPX.NativeSOCWorkspace(problem, plan, options)
     # Valid Lorentz-interior NT state: w₁=2 and small typed tail entries.
     @inbounds for index in eachindex(workspace.nt_w[1])
         workspace.nt_w[1][index] = index == 1 ? T(2) : T(index) / T(100)

@@ -1056,17 +1056,17 @@ end
     # Comfortably resolvable at every width: both columns are kept.
     for T in (Float64, BigFloat)
         prob = near_dependent(T, 1e-8)
-        @test length(SDPX._equality_rank_indices(prob.B, 0)) == 2
+        @test length(SDPX._equality_rank_analysis(prob.B, 0).keep) == 2
     end
 
     # Below Float64's resolution: Float64 must call it dependent...
     narrow = near_dependent(Float64, 1e-20)
-    @test length(SDPX._equality_rank_indices(narrow.B, 0)) == 1
+    @test length(SDPX._equality_rank_analysis(narrow.B, 0).keep) == 1
 
     # ...while BigFloat, whose eps is ~1e-77, must not.
     setprecision(BigFloat, 256) do
         wide = near_dependent(BigFloat, 1e-20)
-        @test length(SDPX._equality_rank_indices(wide.B, 0)) == 2
+        @test length(SDPX._equality_rank_analysis(wide.B, 0).keep) == 2
     end
 end
 
@@ -1233,15 +1233,14 @@ end
     @test SDPX.select_backend(d.ws) isa SDPX.DenseCholeskyBackend
 
     # An all-scalar-cone model is dispatched to the dedicated LP solver, which
-    # factorizes its own dense `K` and never builds an SDP `Workspace`. Its
-    # backend is therefore selected separately, and the plan reports that one.
+    # factorizes its own `K` and never builds an SDP `Workspace`. Its initial
+    # plan is deliberately deferred: row presolve and the sparse-pattern probe
+    # must finish before one LPRoutePlan becomes the sole route authority.
     lp = analytic_lp_problem()
     lp_plan = SDPX.build_execution_plan(lp, SDPX.SolverOptions{Float64}())
-    lp_backend = SDPX.select_lp_backend(lp.dims.n)
-    @test string(lp_plan.kkt_backend) == string(SDPX.backend_name(lp_backend))
+    @test lp_plan.backend_config.deferred
+    @test lp_plan.payload === nothing
     @test lp_plan.kkt_formulation === :not_applicable
-    @test SDPX.backend_name(SDPX.select_lp_backend(0)) === :positive_definite_cholesky
-    @test SDPX.backend_name(SDPX.select_lp_backend(3)) === :dense_lu
 
     arrow = unbalanced_arrow_problem(blocks=4, shared=2)
     a = backends_for(arrow)
@@ -1968,11 +1967,6 @@ end
         @test plan.parameters.chordal_policy === :off
         @test plan.parameters.chordal_selected === false
         @test plan.parameters.chordal_reason === :chordal_disabled
-        @test plan.chordal_plan.policy === :off
-        @test plan.chordal_plan.selected === false
-        @test plan.chordal_plan.reason === :chordal_disabled
-        @test plan.chordal_plan.transformation === :none
-        @test :chordal_plan in propertynames(plan)
     end
 
     @testset "compatibility delegates have no estimate to consult" begin
@@ -2057,7 +2051,7 @@ end
         result = SDPX.solve!(deepcopy(banded), opts)
         @test result.diagnostics.plan.parameters.chordal_reason ===
               :analysis_only_beneficial
-        @test result.diagnostics.plan.chordal_plan.selected === false
+        @test result.diagnostics.plan.parameters.chordal_selected === false
     end
 
     @testset "chordal policy never changes the numerics" begin

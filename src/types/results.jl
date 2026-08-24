@@ -1,4 +1,21 @@
 # ---------------------------------------------------------------------------
+# Internal result protocol.
+#
+# LP/SDP and NativeSOC retain family-specific iterate layouts, but they share
+# one typed lifecycle boundary. Public adapters consume `AbstractCoreResult`
+# implementations and are the only layer that constructs the exported
+# `Result`; numerical cores never return that public wrapper directly.
+# ---------------------------------------------------------------------------
+
+abstract type AbstractCoreResult{T} end
+abstract type AbstractCoreDiagnostics end
+
+core_status(result::AbstractCoreResult) = result.status
+core_message(result::AbstractCoreResult) = result.message
+core_iterations(result::AbstractCoreResult) = result.iterations
+core_diagnostics(result::AbstractCoreResult) = result.diagnostics
+
+# ---------------------------------------------------------------------------
 # A0 — first-class execution-attempt records.
 #
 # One solve is one attempt: a single immutable snapshot of the planned route,
@@ -255,7 +272,7 @@ Structured metadata accompanying a solve. `timings` contains phase-level
 seconds, `memory` contains estimated solver workspace and process peak RSS,
 and `warnings` records non-fatal fallbacks or numerical caveats.
 """
-struct SolveDiagnostics
+struct SolveDiagnostics <: AbstractCoreDiagnostics
     classification::ProblemClassification
     plan::ExecutionPlan
     presolve::PresolveReport
@@ -323,7 +340,7 @@ Typed replacement for the old `Dict{String,Any}` return value (A1).
 `Base.getindex` methods below, so existing callers are unaffected;
 new code should prefer the typed fields.
 """
-struct SDPResult{T}
+struct SDPResult{T} <: AbstractCoreResult{T}
     status::SolveStatus
     message::String
     x::Vector{T}

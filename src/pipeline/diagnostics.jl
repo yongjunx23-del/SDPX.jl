@@ -1,84 +1,3 @@
-"""
-    _lp_sparse_diagnostics_la_config(plan, payload)
-
-Return the LA descriptor for a finalized sparse LP route.  The ordinary LA
-planner runs before LP row presolve and cannot know that this route will use
-CHOLMOD (or the arithmetic-generic sparse provider), so copying its BLAS
-descriptor into the post-execution diagnostics plan would make planned and
-executed provider facts disagree.  This descriptor is diagnostics-only: the
-sparse factor/solve path never instantiates it or uses it for numerical
-fallback.
-"""
-function _lp_sparse_diagnostics_la_config(
-    plan::ExecutionPlan,
-    payload::LPRoutePlan,
-)
-    payload.storage === :sparse || return plan.la_config
-    payload.route === :sparse_normal || throw(ArgumentError(
-        "sparse LP diagnostics payload must use :sparse_normal",
-    ))
-    provider = payload.provider
-    provider in (:cholmod, :generic) || throw(ArgumentError(
-        "unknown sparse LP diagnostics provider $(provider)",
-    ))
-    implementation = provider === :cholmod ?
-                     :cholmod_sparse_cholesky : :generic_sparse_cholesky
-    # The sparse layer has its own capability registry.  This compact LA
-    # projection is only for the immutable diagnostics descriptor and keeps
-    # the provider-owned factor/solve and sparse-factorization requirements
-    # explicit without claiming dense BLAS/LAPACK ownership.
-    capabilities = LAProviderCapabilities(
-        cholesky=true,
-        factor_solve=true,
-        multi_rhs=true,
-        sparse_factorization=true,
-    )
-    return LABackendConfiguration(
-        plan.la_config.arithmetic,
-        plan.la_config.requested,
-        :sparse,
-        provider,
-        la_capability_symbols(capabilities),
-        capabilities,
-        (:cholesky, :factor_solve, :multi_rhs, :sparse_factorization),
-        implementation,
-        (),
-        :none,
-        :provider_owned,
-    )
-end
-"""Build the canonical diagnostics plan for one finalized LP route.
-
-Dense and reduced payloads deliberately preserve the pre-existing
-`ExecutionPlan(plan, payload)` copy.  Sparse routes replace only the LA
-descriptor so the payload provider is the planned provider as well as the
-executed provider; mathematical formulation, backend deferment, and all
-numerical settings remain untouched.
-"""
-function _lp_finalized_diagnostics_plan(
-    plan::ExecutionPlan,
-    payload::LPRoutePlan,
-)
-    payload.storage === :sparse || return ExecutionPlan(plan, payload)
-    la_config = _lp_sparse_diagnostics_la_config(plan, payload)
-    return ExecutionPlan(
-        plan.classification,
-        plan.algorithm,
-        plan.scaling,
-        plan.kkt_backend,
-        plan.backend_config,
-        plan.formulation_plan,
-        la_config,
-        plan.gram_kernel,
-        plan.schedule,
-        plan.threads,
-        plan.parameter_profile,
-        plan.memory_budget_bytes,
-        plan.parameters,
-        payload,
-    )
-end
-
 function _attach_diagnostics(
     result::SDPResult{T},
     plan::ExecutionPlan,
@@ -104,10 +23,24 @@ function _attach_diagnostics(
         nothing,
     )
     diagnostics_plan = if lp_route_payload isa LPRoutePlan
-        _lp_finalized_diagnostics_plan(plan, lp_route_payload)
+        if plan.payload isa LPRoutePlan
+            isequal(plan.payload, lp_route_payload) || throw(ArgumentError(
+                "finalized LP execution plan payload differs from the " *
+                "executed route payload",
+            ))
+            plan
+        else
+            # Compatibility for an older direct `solve_lp!` caller that
+            # supplied the deferred plan and then invoked this helper.
+            _lp_finalized_execution_plan(plan, lp_route_payload)
+        end
     else
         plan
     end
+    # From this point on every planned field must come from the same finalized
+    # object.  Mixing the deferred pre-row LP plan with its finalized LA route
+    # can otherwise produce a self-contradictory diagnostics record.
+    plan = diagnostics_plan
     core_time = result.timings === nothing ? NaN :
                 get(result.timings, :total, NaN)
     timings = result.timings === nothing ?

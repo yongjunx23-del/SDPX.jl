@@ -18,7 +18,7 @@ set -euo pipefail
 JULIA=${CSDR_JULIA:-julia}
 DEPOT=${SDPX_SHARED_DEPOT:-${JULIA_DEPOT_PATH:-}}
 DRIVER="${CSDR_RELEASE}/scripts/benchmark_functional_arrow.jl"
-DETAILED_DRIVER="${SDPX_CANDIDATE}/bench/soc_fixed_trace/csdr_detailed.jl"
+DETAILED_DRIVER="${SDPX_CANDIDATE}/docs/evidence/bench/soc_fixed_trace/csdr_detailed.jl"
 DETAILED=${CSDR_DETAILED:-false}
 THREADS=${SDPX_THREADS:-16}
 

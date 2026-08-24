@@ -39,7 +39,7 @@ function _parse_args(args)
     samples = DEFAULT_SAMPLES
     for arg in args
         if arg == "--help" || arg == "-h"
-            println("usage: julia --project=. bench/soc_metric_assembly/benchmark.jl [--output=DIR] [--samples=N]")
+            println("usage: julia --project=. docs/evidence/bench/soc_metric_assembly/benchmark.jl [--output=DIR] [--samples=N]")
             exit(0)
         elseif startswith(arg, "--output=")
             value = arg[length("--output=") + 1:end]

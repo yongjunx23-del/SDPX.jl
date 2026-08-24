@@ -20,9 +20,9 @@ The archived model path can be supplied explicitly:
 
 ```bash
 julia --project=<prepared-environment> \
-  benchmark/bootstrap/Full-unitraity-EFT/run.jl \
+  docs/evidence/bench/bootstrap/full_unitarity_eft/run.jl \
   /path/to/study/results/generate/model.bin \
-  benchmark/out/bootstrap_full_unitraity_eft
+  benchmark/out/bootstrap_full_unitarity_eft
 ```
 
 When the archived serialized `SDPProblem` predates the current SDPX layout,
@@ -31,7 +31,7 @@ environment:
 
 ```bash
 julia --project=/path/to/archived/share/sdpx_c00_mac_singlecore \
-  benchmark/bootstrap/Full-unitraity-EFT/export_reduced.jl \
+  docs/evidence/bench/bootstrap/full_unitarity_eft/export_reduced.jl \
   /path/to/study/results/generate/model.bin \
   /tmp/csdr-fixedtrace-reduced-neutral.bin
 ```
@@ -65,7 +65,7 @@ solver run:
 
 ```bash
 julia -t 1 --project=<prepared-environment> \
-  benchmark/bootstrap/Full-unitraity-EFT/gram_ab.jl \
+  docs/evidence/bench/bootstrap/full_unitarity_eft/gram_ab.jl \
   /tmp/csdr-fixedtrace-reduced-neutral.bin /tmp/gram-t1.toml
 ```
 

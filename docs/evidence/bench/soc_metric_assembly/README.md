@@ -31,7 +31,7 @@ machine-readable skip row.
 Run from the repository root:
 
 ```sh
-julia --project=. bench/soc_metric_assembly/benchmark.jl \
+julia --project=. docs/evidence/bench/soc_metric_assembly/benchmark.jl \
   --output=work/baseline/soc_metric_assembly
 ```
 

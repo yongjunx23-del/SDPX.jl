@@ -14,8 +14,6 @@ using LinearAlgebra
         SDPX._soc_jordan!(right_alias, left, right_alias)
         @test right_alias ≈ reference
 
-        @test_throws ArgumentError SDPX._soc_inverse!(zeros(2), [-2.0, 0.0])
-        @test_throws DimensionMismatch SDPX._soc_inverse!(zeros(3), [2.0, 0.0])
     end
 
     @testset "scaled stable boundary root" begin

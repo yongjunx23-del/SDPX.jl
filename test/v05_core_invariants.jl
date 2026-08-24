@@ -138,6 +138,10 @@ end
         @test dense_plan.formulation_plan.provenance ===
               :automatic_formulation_planner
         @test dense_plan.kkt_formulation === :dense_normal_equations
+        @test !(:kkt_backend in fieldnames(typeof(dense_plan)))
+        @test dense_plan.kkt_backend === dense_plan.backend_config.route
+        @test dense_plan.storage_plan isa SDPX.KKTStoragePlan
+        @test !hasproperty(dense_plan.parameters, :storage_selected)
         @test dense_plan.parameters.formulation_decision.requested === :auto
         @test dense_plan.parameters.formulation_decision.selected ===
               :dense_normal_equations
@@ -463,6 +467,8 @@ end
 
     @testset "certification=false keeps the minimal Optimal gate" begin
         problem, invalid = v05_scalar_certificate_fixture()
+        @test invalid isa SDPX.AbstractCoreResult{Float64}
+        @test SDPX.core_status(invalid) === SDPX.Optimal
         options = SDPX.SolverOptions{Float64}(
             ϵ_gap=1e-8,
             ϵ_primal=1e-8,

@@ -402,5 +402,5 @@ end
     @test payload.storage === record.executed.storage
     @test payload.provider === record.executed.provider
     @test payload.route !== :not_applicable
-    @test record.planned.formulation === :not_applicable
+    @test record.planned.formulation === payload.route
 end

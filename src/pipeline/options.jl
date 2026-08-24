@@ -74,8 +74,6 @@ function _validate_solver_options(opts::SolverOptions{T}) where {T}
         throw(ArgumentError(
             "presolve_tolerance must be finite and in [0, 1)",
         ))
-    opts.termination in (:relative, :legacy) ||
-        throw(ArgumentError("termination must be :relative or :legacy"))
     opts.algorithm in (:auto, :lp, :socp, :sdp) ||
         throw(ArgumentError("algorithm must be :auto, :lp, :socp, or :sdp"))
     _validate_scaling_option(opts.scaling)

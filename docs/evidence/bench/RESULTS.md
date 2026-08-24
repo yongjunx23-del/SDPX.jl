@@ -76,6 +76,7 @@ certificates, spectrum export, provider factor reuse, and threaded scheduling.
 
 The exact `Task_Low08` structure and Float64/Float64x4 kernel measurements are
 reported in
-[Adaptive Dense/Sparse Optimization for SDPX](../docs/adaptive-dense-sparse-optimization.md).
+[Adaptive Dense/Sparse Optimization for SDPX](../../src/adaptive-dense-sparse-optimization.md).
 The reproducible drivers and raw JSON/CSV outputs are under
-`bench/lattice_bootstrap` and `bench/adaptive_structure`.
+`docs/evidence/bench/lattice_bootstrap` and
+`docs/evidence/bench/adaptive_structure`.

@@ -43,7 +43,7 @@ as a certified reference row.
 Example:
 
 ```bash
-julia --project=. bench/soc_fixed_trace/reference/benchmark_float64.jl \
+julia --project=. docs/evidence/bench/soc_fixed_trace/reference/benchmark_float64.jl \
   --solver=clarabel --model=/data/J40.bin --release=/data/CSDR \
   --expected-hash="$J40_SHA" --reps=1 --warmup=0 \
   --output=/results/j40-clarabel-float64.toml

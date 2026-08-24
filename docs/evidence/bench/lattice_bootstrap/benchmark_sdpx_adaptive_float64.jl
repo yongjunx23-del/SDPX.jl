@@ -230,13 +230,19 @@ function main(arguments)
     regularization_attempts = 0
     if T === Float64
         options = SDPX.SolverOptions{T}(verbosity=0)
+        backend = SDPX.select_backend(workspace)
         precompile(
-            SDPX.factor_kkt!,
-            (typeof(workspace), typeof(problem), typeof(options)),
+            SDPX.factorize!,
+            (
+                typeof(backend),
+                typeof(workspace),
+                typeof(problem),
+                typeof(options),
+            ),
         )
         factor_result = nothing
         factor_seconds = @elapsed factor_result =
-            SDPX.factor_kkt!(workspace, problem, options)
+            SDPX.factorize!(backend, workspace, problem, options)
         factor_ok = factor_result.ok
         equality_factor_pivoted = factor_result.q_pivoted
         regularization_attempts = factor_result.reg_attempts

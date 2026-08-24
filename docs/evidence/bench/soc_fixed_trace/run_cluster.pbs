@@ -10,7 +10,7 @@
 # mutable symlinks are touched by this template.
 set -euo pipefail
 : "${SDPX_SOURCE:?set SDPX_SOURCE to the isolated candidate source}"
-HERE="$SDPX_SOURCE/bench/soc_fixed_trace"
+HERE="$SDPX_SOURCE/docs/evidence/bench/soc_fixed_trace"
 export SDPX_CASE="${SDPX_CASE:-J40}"
 export SDPX_MODE="${SDPX_MODE:-socp}"
 export SDPX_ARITHMETIC="${SDPX_ARITHMETIC:-Float64x4}"

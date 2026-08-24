@@ -124,8 +124,7 @@ iterate-update loops.
 
 The sparse layer is a separate provider-neutral seam. Float64 uses CHOLMOD
 through Julia's SuiteSparse. `Float64x2`/`Float64x3`/`Float64x4` and BigFloat
-use the arithmetic-generic simplicial sparse Cholesky. Capabilities and
-ownership are explicit (`CHOLMOD_SPARSE_CAPABILITIES`,
-`GENERIC_SPARSE_CAPABILITIES`); a changed CSC pattern fails closed, while
-unchanged patterns support numeric refactorization without repeating symbolic
-ordering. See [sparse-execution.md](sparse-execution.md).
+use the arithmetic-generic simplicial sparse Cholesky. Provider selection and
+ownership are explicit; a changed CSC pattern fails closed, while unchanged
+patterns support numeric refactorization without repeating symbolic ordering.
+See [sparse-execution.md](sparse-execution.md).

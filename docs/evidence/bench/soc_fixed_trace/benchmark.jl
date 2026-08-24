@@ -13,12 +13,12 @@ tests; it never pretends to be a J40/J80 measurement.
 
 Examples (run on a compute node):
 
-    julia --project=. -t 16 bench/soc_fixed_trace/benchmark.jl \
+    julia --project=. -t 16 docs/evidence/bench/soc_fixed_trace/benchmark.jl \
       --case=J40 --model=/data/J40.bin --mode=socp \
       --arithmetic=Float64x4 --reps=3 --warmup=1 \
       --expected-hash=... --output=/results/j40-socp.toml
 
-    julia --project=. -t 1 bench/soc_fixed_trace/benchmark.jl \
+    julia --project=. -t 1 docs/evidence/bench/soc_fixed_trace/benchmark.jl \
       --synthetic --case=synthetic --mode=sdp --reps=1
 """
 

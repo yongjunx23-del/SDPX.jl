@@ -53,26 +53,23 @@ function _round7_chordal_fixture(edges; dimension=4)
     )
 end
 
-@testset "Round-7 chordal analysis-only plans" begin
+@testset "Round-7 chordal analysis" begin
     path = _round7_chordal_fixture([(1, 2), (2, 3), (3, 4)])
-    candidate = SDPX.chordal_plan(path, 1)
-    @test candidate.is_chordal
+    candidate = SDPX.analyze_chordal_structure(path, 1)
+    @test candidate.chordal
     @test candidate.beneficial
-    @test candidate.candidate
-    @test !candidate.selected
-    @test candidate.transformation === :none
 
     complete = _round7_chordal_fixture([
         (1, 2), (1, 3), (1, 4), (2, 3), (2, 4), (3, 4),
     ])
-    not_beneficial = SDPX.chordal_plan(complete, 1)
-    @test not_beneficial.is_chordal
+    not_beneficial = SDPX.analyze_chordal_structure(complete, 1)
+    @test not_beneficial.chordal
     @test !not_beneficial.beneficial
 
     cycle = _round7_chordal_fixture([(1, 2), (2, 3), (3, 4), (4, 1)])
-    non_chordal = SDPX.chordal_plan(cycle, 1)
-    @test !non_chordal.is_chordal
-    @test !non_chordal.selected
+    non_chordal = SDPX.analyze_chordal_structure(cycle, 1)
+    @test !non_chordal.chordal
+    @test !non_chordal.beneficial
 end
 
 @testset "Round-7 generic sparse Schur primitive ownership" begin

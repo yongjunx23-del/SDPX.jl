@@ -44,8 +44,9 @@ Git history; this notice records the maintained release boundary.
 
 ### What is original to SDPX
 
-Everything else in `src/` is new: `types.jl`, `ingest.jl`, `pipeline.jl`,
-`workspace.jl`, `schur.jl`, `kkt.jl`, `step.jl`, `solve.jl`, `stagnation.jl`,
+Everything else in `src/` is new: `types/`, `ingest.jl`, `pipeline/`,
+`workspace.jl`, `schur.jl`, `kkt.jl`, `step.jl`,
+`solver/interior_point.jl`, `stagnation.jl`,
 `adaptive_parameters.jl`, `validation.jl`, `lp_solver.jl`, `moi_wrapper.jl`,
 `spectrum.jl`, all of `kernels/` (including
 `kernels/extended_precision_blas/`), and all package extensions. Upstream had

@@ -59,16 +59,6 @@ remaining equality Gram matrix."""
 struct LPReducedCholeskyBackend <: KKTBackend end
 
 """
-    select_lp_backend(equalities) -> KKTBackend
-
-Backend for the dedicated LP path, which factorizes its own dense `K` rather
-than the SDP Schur complement. Mirrors `_lp_factor_kkt!`: Cholesky when there
-are no equality rows, LU otherwise.
-"""
-select_lp_backend(equalities::Integer) =
-    equalities == 0 ? LPCholeskyBackend() : LPLUBackend()
-
-"""
     select_backend(ws) -> KKTBackend
 
 The single place that decides which KKT path is active.
@@ -174,7 +164,7 @@ end
     factorize!(backend, ws, prob, opts) -> NamedTuple
 
 Factor the current KKT system. Returns `(ok, reg_attempts, q_pivoted)` — the
-shape `factor_kkt!` already produces, so callers are unaffected.
+common factorization result shape consumed by the solver loop.
 """
 function _record_backend_execution!(
     ws::Workspace,

@@ -21,6 +21,18 @@ Set up their environment once from the repository root:
 julia --project=examples -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
 ```
 
+## Command-line JSON examples
+
+The two checked-in bridge-schema v1 inputs exercise the command-line frontend.
+The high-precision variant stores coefficients as strings so parsing does not
+discard digits before BigFloat conversion:
+
+```bash
+julia bin/setup_cli.jl
+./bin/sdpx examples/cli_problem.json /tmp/sdpx-cli-result.json
+./bin/sdpx examples/cli_problem_high_precision.json /tmp/sdpx-cli-high-precision-result.json
+```
+
 ## 1. The quartic integral
 
 For `g>0`, define

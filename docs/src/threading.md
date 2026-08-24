@@ -239,12 +239,11 @@ libblastrampoline. Load it explicitly before solving:
 using SDPX
 using AppleAccelerate
 
-SDPX.set_blas_threads!(1)
-@assert SDPX.blas_backend() == :apple_accelerate
-@assert SDPX.blas_threads() == 1
+AppleAccelerate.set_num_threads(1)
+@assert AppleAccelerate.get_num_threads() == 1
 ```
 
-Use `SDPX.set_blas_threads!`, rather than
+Use `AppleAccelerate.set_num_threads`, rather than
 `LinearAlgebra.BLAS.set_num_threads`, when Apple Accelerate is loaded.
 Accelerate uses `BLASSetThreading`; the ordinary libblastrampoline setter does
 not switch it into strict single-threaded mode. AppleAccelerate remains an
@@ -254,14 +253,15 @@ backend for every Julia package in the process.
 ### Linux BLAS backends
 
 Linux deployments can benchmark alternative libblastrampoline backends in a
-release-specific environment. Load the backend before SDPX, then use the same
-backend-aware thread controller:
+release-specific environment. Load the backend before SDPX, then use
+libblastrampoline's standard thread controller:
 
 ```julia
 using MKL                 # or: using BLISBLAS
+using LinearAlgebra
 using SDPX
 
-SDPX.set_blas_threads!(16)
+LinearAlgebra.BLAS.set_num_threads(16)
 ```
 
 Do not assume that a vendor backend is faster on every CPU. On the cluster's
@@ -443,7 +443,7 @@ reduced calling-task allocations to 768 bytes. Maximum relative Schur errors
 were `2.67e-16` for dense Float64, `3.57e-65` for dense Float64x4,
 `1.67e-15` for sparse Float64, and `1.33e-64` for sparse Float64x4.
 
-See [`bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md) for the full
+See [`docs/evidence/bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md) for the full
 protocol, all 1/2/4/8-worker rows, reduction timings, memory estimates, and
 reproduction commands.
 

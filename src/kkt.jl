@@ -217,40 +217,6 @@ function _authoritative_cholesky_preserves_exact_rank(
     return !_has_exact_proportional_columns(original_B)
 end
 
-function _legacy_factor_has_numerical_rank(
-    factor::LegacyLACholeskyFactor{T},
-    Btil::AbstractMatrix{T},
-    opts::SolverOptions{T},
-) where {T}
-    la_cholesky_rank_authoritative(factor) && return true
-    return _cholesky_has_numerical_rank(
-        la_factor_handle_matrix(factor),
-        Btil,
-        opts,
-    )
-end
-
-# Compatibility probe used by la_backend_regressions without a workspace.
-# It applies the same explicit-precision policy with default SolverOptions.
-function _legacy_factor_has_numerical_rank(
-    factor::LegacyLACholeskyFactor{T},
-) where {T}
-    handle = la_factor_handle_matrix(factor)
-    return _cholesky_has_numerical_rank(
-        handle,
-        handle,
-        SolverOptions{T}(),
-    )
-end
-
-# Legacy BigFloat factors own an explicit rank declaration; a provider that
-# declares the rank authoritative is trusted without diagonal polling.
-function _legacy_factor_has_numerical_rank(
-    factor::LegacyLACholeskyFactor{BigFloat},
-)
-    return la_cholesky_rank_authoritative(factor)
-end
-
 function _la_factor_has_numerical_rank(
     factor::AbstractLACholeskyFactor{T},
     Btil::AbstractMatrix{T},
@@ -2615,7 +2581,8 @@ end
 """
     _solve_Q!(dy_out, Qchol, rhs, scratch) -> dy_out
 
-Solve `Q·dy = rhs` using the factorization from [`factor_kkt!`](@ref).
+Solve `Q·dy = rhs` using the factorization from the selected backend's
+[`factorize!`](@ref) call.
 For a plain `Cholesky`, `\\` is exact and used directly. For a
 `CholeskyPivoted` (rank-deficient `Q` — §T3), `\\` is **not** safe to
 use as-is: verified during development that on the rank-deficient
@@ -2718,15 +2685,6 @@ function _solve_Q!(
     return la_factor_solve!(factor, dy_out, permuted)
 end
 
-"""
-    solve_kkt!(ws, n, r, p_rhs, dx_out, dy_out) -> (dx_out, dy_out)
-
-Solve the eliminated KKT system for right-hand side `(r, p_rhs)` using
-the factorization already in `ws` (from [`factor_kkt!`](@ref)),
-writing into caller-supplied `dx_out`/`dy_out` — so the same
-factorization serves the predictor, the corrector, and (via
-[`refine_kkt!`](@ref)) the refinement correction without recomputation.
-"""
 function _solve_arrow_kkt_owned!(
     ws::Workspace{T},
     n::Int,
@@ -2862,46 +2820,8 @@ end
 
 function _solve_kkt_owned!(ws::Workspace{T}, n::Int, r::AbstractVector{T}, p_rhs::AbstractVector{T},
     dx_out::AbstractVector{T}, dy_out::AbstractVector{T}) where {T}
-    ws.arrow === nothing || return _solve_arrow_kkt_owned!(
-        ws,
-        n,
-        r,
-        p_rhs,
-        dx_out,
-        dy_out,
-    )
-    if ws.mixed_precision !== nothing &&
-       ws.mixed_precision.active
-        return _solve_mixed_kkt_owned!(
-            ws,
-            n,
-            r,
-            p_rhs,
-            dx_out,
-            dy_out,
-        )
-    end
-    if ws.sparse_kkt !== nothing
-        if T === Float64
-            return _solve_sparse_schur_kkt_owned!(
-                ws::Workspace{Float64},
-                n,
-                r::AbstractVector{Float64},
-                p_rhs::AbstractVector{Float64},
-                dx_out::AbstractVector{Float64},
-                dy_out::AbstractVector{Float64},
-            )
-        end
-        return _solve_sparse_schur_kkt_owned!(
-            ws,
-            n,
-            r,
-            p_rhs,
-            dx_out,
-            dy_out,
-        )
-    end
-    return _solve_dense_kkt_owned!(
+    return solve!(
+        select_backend(ws),
         ws,
         n,
         r,
@@ -3014,6 +2934,15 @@ function solve_block_diagonal_equality_kkt!(
     _recover_original_equality_multiplier!(dy_out, ws.equality_scale)
     return dx_out, dy_out
 end
+
+"""
+    solve_kkt!(ws, n, r, p_rhs, dx_out, dy_out) -> (dx_out, dy_out)
+
+Solve the eliminated KKT system for right-hand side `(r, p_rhs)` using the
+factorization already stored in `ws` by the selected backend's `factorize!`
+call. Results are written into caller-supplied arrays so predictor, corrector,
+and refinement corrections reuse that factorization.
+"""
 
 # Public/internal diagnostic calls may supply `zeros(BigFloat, n)`, whose
 # entries all reference one mutable MPFR object. Repair those arbitrary output

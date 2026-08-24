@@ -476,9 +476,6 @@ function _dense_gram_add!(
     return S
 end
 
-_dense_gram_lower_only(::Type) = false
-_dense_gram_lower_only(::Type{<:Union{Float32,Float64}}) = true
-
 function _mirror_schur_lower!(S::AbstractMatrix)
     @inbounds for column in axes(S, 2), row in (column + 1):size(S, 1)
         S[column, row] = S[row, column]
@@ -1732,7 +1729,7 @@ function sparse_schur_diagnostics(
     analysis = prob.structure.schur_analysis
     # Chordal conversion remains analysis-only.  Keep a cheap, inspectable
     # marker here rather than scanning every PSD coefficient at finalization.
-    # Callers can use `chordal_plans(prob)` when detailed clique facts are
+    # Callers can use `chordal_summary(prob)` when detailed clique facts are
     # explicitly requested.
     return merge(
         base,

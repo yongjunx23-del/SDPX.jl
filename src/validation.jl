@@ -1008,11 +1008,7 @@ function result_certificate(
         primal_block_backward_error <= opts.ϵ_primal
     dual_ok = dual_scaled <= opts.ϵ_dual
     dual_backward_ok = dual_backward_error <= opts.ϵ_dual
-    gap_ok = if opts.termination === :legacy
-        zero(T) <= gap <= opts.ϵ_gap
-    else
-        gap_relative <= opts.ϵ_gap
-    end
+    gap_ok = gap_relative <= opts.ϵ_gap
 
     primal_finite = isfinite(p_objective) &&
                     isfinite(p_residual) &&
@@ -1554,9 +1550,7 @@ function _minimal_sdp_optimality_gate(
     dual_scale = one(T) + knrmInf(prob.c)
     primal_scaled = primal_residual / primal_scale
     dual_scaled = dual_residual / dual_scale
-    gap_ok = opts.termination === :legacy ?
-             zero(T) <= gap <= opts.ϵ_gap :
-             gap_relative <= opts.ϵ_gap
+    gap_ok = gap_relative <= opts.ϵ_gap
     finite =
         isfinite(primal_objective) &&
         isfinite(dual_objective_value) &&
