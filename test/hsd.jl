@@ -147,3 +147,15 @@ end
         @test isapprox(Float64(r.pobj), 1.0; atol=1e-6)
     end
 end
+
+@testset "Phase 6 HSD path-following 3-variable LP" begin
+    # min x1+x2+x3 s.t. x1+x2+x3=1, x>=0 => optimum 1.0.
+    A = reshape([1.0, 1.0, 1.0], 1, 3)
+    b = [1.0]
+    c = [1.0, 1.0, 1.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :optimal
+    @test isapprox(r.pobj, 1.0; atol=1e-6)
+    xp = r.x ./ r.tau
+    @test isapprox(sum(xp), 1.0; atol=1e-6)
+end
