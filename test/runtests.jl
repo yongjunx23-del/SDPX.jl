@@ -46,6 +46,7 @@ const QUICK_TESTS = (
     "allocation_contract.jl",
     "fixed_precision_contract.jl",
     "cone_algebra.jl",
+    "symmetry_reduction.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -133,6 +134,7 @@ const FULL_TESTS = (
     "allocation_contract.jl",
     "fixed_precision_contract.jl",
     "cone_algebra.jl",
+    "symmetry_reduction.jl",
 )
 
 function _test_profile()
