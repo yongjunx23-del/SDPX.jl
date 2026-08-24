@@ -13,11 +13,22 @@
     position::Int,
 ) where {T}
     linear_indices = coo.lin
+    rows = coo.row
+    columns = coo.col
     values = coo.val
+    dimension = size(matrix, 1)
     accumulator = zero(T)
     @inbounds for entry in
         coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
-        accumulator += matrix[linear_indices[entry]] * values[entry]
+        linear_index = linear_indices[entry]
+        matrix_value = if linear_index > 0
+            matrix[linear_index]
+        else
+            row = Int(rows[entry])
+            column = Int(columns[entry])
+            matrix[-linear_index] + matrix[(row - 1) * dimension + column]
+        end
+        accumulator += matrix_value * values[entry]
     end
     return accumulator
 end

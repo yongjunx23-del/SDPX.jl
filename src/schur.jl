@@ -571,11 +571,22 @@ each entry costs one flat load from `M` rather than a 2-D index computation.
     position::Int,
 ) where {T}
     lin = coo.lin
+    rows = coo.row
+    columns = coo.col
     val = coo.val
     Mflat = vec(M)
+    dimension = size(M, 1)
     acc = zero(T)
     @inbounds for t in coo.ptr[position]:(coo.ptr[position+1]-Int32(1))
-        acc += Mflat[lin[t]] * val[t]
+        linear_index = lin[t]
+        matrix_value = if linear_index > 0
+            Mflat[linear_index]
+        else
+            row = Int(rows[t])
+            column = Int(columns[t])
+            Mflat[-linear_index] + Mflat[(row - 1) * dimension + column]
+        end
+        acc += matrix_value * val[t]
     end
     return acc
 end
@@ -586,7 +597,9 @@ end
 `dest = left * A * right` for a coefficient in flat coordinate storage.
 
 With `A = Σ_t a_t E_{r_t,c_t}` this is `Σ_t a_t · left[:,r_t] · right[c_t,:]`,
-a sum of `nnz` rank-one updates, costing `O(nnz · k²)`.
+a sum of `nnz` rank-one updates, costing `O(nnz · k²)`. An off-diagonal
+negative-`lin` record represents both entries of an exactly symmetric pair;
+the two rank-one terms share one traversal and writeback of `dest`.
 
 A gather-then-`gemm` variant of this was implemented and measured, on the
 theory that accumulating rank-one terms re-reads the whole `k×k` output once
@@ -617,23 +630,57 @@ function _two_sided_coo_product!(
     rows = coo.row
     cols = coo.col
     vals = coo.val
+    linear_indices = coo.lin
     @inbounds for entry in first_entry:last_entry
         row = Int(rows[entry])
         column = Int(cols[entry])
         coefficient = vals[entry]
+        symmetric_pair = linear_indices[entry] < 0
         if entry == first_entry
-            for output_column in 1:dimension
-                scaled = coefficient * right[column, output_column]
-                for output_row in 1:dimension
-                    dest[output_row, output_column] = left[output_row, row] * scaled
+            if symmetric_pair
+                for output_column in 1:dimension
+                    scaled_upper =
+                        coefficient * right[column, output_column]
+                    scaled_transpose =
+                        coefficient * right[row, output_column]
+                    for output_row in 1:dimension
+                        dest[output_row, output_column] =
+                            left[output_row, row] * scaled_upper +
+                            left[output_row, column] * scaled_transpose
+                    end
+                end
+            else
+                for output_column in 1:dimension
+                    scaled = coefficient * right[column, output_column]
+                    for output_row in 1:dimension
+                        dest[output_row, output_column] =
+                            left[output_row, row] * scaled
+                    end
                 end
             end
         else
-            for output_column in 1:dimension
-                scaled = coefficient * right[column, output_column]
-                iszero(scaled) && continue
-                for output_row in 1:dimension
-                    dest[output_row, output_column] += left[output_row, row] * scaled
+            if symmetric_pair
+                for output_column in 1:dimension
+                    scaled_upper =
+                        coefficient * right[column, output_column]
+                    scaled_transpose =
+                        coefficient * right[row, output_column]
+                    iszero(scaled_upper) && iszero(scaled_transpose) &&
+                        continue
+                    for output_row in 1:dimension
+                        dest[output_row, output_column] +=
+                            left[output_row, row] * scaled_upper +
+                            left[output_row, column] * scaled_transpose
+                    end
+                end
+            else
+                for output_column in 1:dimension
+                    scaled = coefficient * right[column, output_column]
+                    iszero(scaled) && continue
+                    for output_row in 1:dimension
+                        dest[output_row, output_column] +=
+                            left[output_row, row] * scaled
+                    end
                 end
             end
         end
@@ -643,14 +690,18 @@ end
 
 struct _BigFloatCOOContractionScratch
     scaled::BigFloat
+    transpose_scaled::BigFloat
     multiplication_buffer::BigFloat
     dot_accumulator::BigFloat
+    dot_pair::BigFloat
     dot_buffer::BigFloat
 end
 
 _coo_contraction_scratch(::Type) = nothing
 _coo_contraction_scratch(::Type{BigFloat}) =
     _BigFloatCOOContractionScratch(
+        BigFloat(),
+        BigFloat(),
         BigFloat(),
         BigFloat(),
         BigFloat(),
@@ -695,12 +746,15 @@ function _two_sided_coo_product_owned!(
     rows = coo.row
     columns = coo.col
     values = coo.val
+    linear_indices = coo.lin
     scaled = scratch.scaled
+    transpose_scaled = scratch.transpose_scaled
     multiplication_buffer = scratch.multiplication_buffer
     @inbounds for entry in first_entry:last_entry
         row = Int(rows[entry])
         column = Int(columns[entry])
         coefficient = values[entry]
+        symmetric_pair = linear_indices[entry] < 0
         for output_column in 1:dimension
             MA.operate_to!(
                 scaled,
@@ -708,6 +762,14 @@ function _two_sided_coo_product_owned!(
                 coefficient,
                 right[column, output_column],
             )
+            if symmetric_pair
+                MA.operate_to!(
+                    transpose_scaled,
+                    *,
+                    coefficient,
+                    right[row, output_column],
+                )
+            end
             if entry == first_entry
                 for output_row in 1:dimension
                     MA.operate_to!(
@@ -715,6 +777,13 @@ function _two_sided_coo_product_owned!(
                         *,
                         left[output_row, row],
                         scaled,
+                    )
+                    symmetric_pair && MA.buffered_operate!(
+                        multiplication_buffer,
+                        MA.add_mul,
+                        dest[output_row, output_column],
+                        left[output_row, column],
+                        transpose_scaled,
                     )
                 end
             else
@@ -725,6 +794,13 @@ function _two_sided_coo_product_owned!(
                         dest[output_row, output_column],
                         left[output_row, row],
                         scaled,
+                    )
+                    symmetric_pair && MA.buffered_operate!(
+                        multiplication_buffer,
+                        MA.add_mul,
+                        dest[output_row, output_column],
+                        left[output_row, column],
+                        transpose_scaled,
                     )
                 end
             end
@@ -746,6 +822,42 @@ end
     return destination[destination_index]
 end
 
+@inline function _dot_dense_coo_owned!(
+    accumulator::BigFloat,
+    matrix::AbstractMatrix{BigFloat},
+    coo::SparseBlockCOO{BigFloat},
+    position::Int,
+    scratch::_BigFloatCOOContractionScratch,
+)
+    MA.operate!(zero, accumulator)
+    matrix_values = vec(matrix)
+    dimension = size(matrix, 1)
+    @inbounds for entry in
+        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
+        linear_index = coo.lin[entry]
+        matrix_value = if linear_index > 0
+            matrix_values[linear_index]
+        else
+            row = Int(coo.row[entry])
+            column = Int(coo.col[entry])
+            MA.operate_to!(
+                scratch.dot_pair,
+                +,
+                matrix_values[-linear_index],
+                matrix_values[(row - 1) * dimension + column],
+            )
+        end
+        MA.buffered_operate!(
+            scratch.dot_buffer,
+            MA.add_mul,
+            accumulator,
+            matrix_value,
+            coo.val[entry],
+        )
+    end
+    return accumulator
+end
+
 @inline function _dot_dense_coo_store!(
     destination::AbstractVector{BigFloat},
     destination_index::Int,
@@ -754,20 +866,13 @@ end
     position::Int,
     scratch::_BigFloatCOOContractionScratch,
 )
-    accumulator = destination[destination_index]
-    MA.operate!(zero, accumulator)
-    matrix_values = vec(matrix)
-    @inbounds for entry in
-        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
-        MA.buffered_operate!(
-            scratch.dot_buffer,
-            MA.add_mul,
-            accumulator,
-            matrix_values[coo.lin[entry]],
-            coo.val[entry],
-        )
-    end
-    return accumulator
+    return _dot_dense_coo_owned!(
+        destination[destination_index],
+        matrix,
+        coo,
+        position,
+        scratch,
+    )
 end
 
 @inline function _dot_dense_coo_value!(
@@ -785,20 +890,13 @@ end
     position::Int,
     scratch::_BigFloatCOOContractionScratch,
 )
-    accumulator = scratch.dot_accumulator
-    MA.operate!(zero, accumulator)
-    matrix_values = vec(matrix)
-    @inbounds for entry in
-        coo.ptr[position]:(coo.ptr[position + 1] - Int32(1))
-        MA.buffered_operate!(
-            scratch.dot_buffer,
-            MA.add_mul,
-            accumulator,
-            matrix_values[coo.lin[entry]],
-            coo.val[entry],
-        )
-    end
-    return accumulator
+    return _dot_dense_coo_owned!(
+        scratch.dot_accumulator,
+        matrix,
+        coo,
+        position,
+        scratch,
+    )
 end
 
 @inline function _add_owned_entry!(

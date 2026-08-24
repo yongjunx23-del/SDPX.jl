@@ -31,7 +31,12 @@ end
     SparseBlockCOO{T}
 
 Flat coordinate storage for one PSD block's affine coefficients, laid out in
-`schur_order` position order.
+`schur_order` position order.  An exactly symmetric coefficient stores only
+its upper triangle.  A negative `lin` marks an off-diagonal entry whose
+transpose is implicit; the magnitude remains the column-major index of the
+stored upper entry.  A coefficient that is not exactly symmetric retains the
+full positive-`lin` representation, so callers that disable input validation
+do not silently lose data.
 
 Why this exists alongside `Asp`: the Schur pair loop evaluates
 `⟨W, A_j⟩` for every `j` in the block's active set, once per `i`. Reading that
@@ -43,11 +48,11 @@ Measured on the `Task_Low08` lattice benchmark (32 blocks, `k` 23–74,
 1815–5290 active variables per block, but only **2.4–6.4 stored entries per
 coefficient**), that pattern accounted for roughly 80% of solve time.
 
-The flat form stores exactly the stored entries, contiguously, so the inner
-loop streams `ptr[j]:ptr[j+1]-1` with no empty-column scanning and no pointer
-chasing. `lin` is the precomputed column-major linear index into the `k×k`
-dense workspace, so the dot product indexes a flat array once per entry
-instead of computing a 2-D index.
+The flat form stores the independent entries contiguously, so the inner loop
+streams `ptr[j]:ptr[j+1]-1` with no empty-column scanning and no pointer
+chasing. Positive `lin` values are precomputed column-major indices into the
+`k×k` dense workspace. For a negative symmetric-pair marker, `row` and `col`
+also identify the transposed workspace entry.
 
 Built for every block size. `2×2` blocks still take the packed three-scalar
 hot path in `packed2` and gain nothing from this form, but building it
@@ -80,9 +85,19 @@ function build_block_coo(
     k::Int,
 ) where {T}
     na = length(order)
+    symmetric = BitVector(undef, na)
     total = 0
-    @inbounds for i in order
-        total += nnz(blocks[i])
+    @inbounds for (position, variable) in pairs(order)
+        matrix = blocks[variable]
+        symmetric[position] = issymmetric(matrix)
+        if symmetric[position]
+            rows = rowvals(matrix)
+            for column in axes(matrix, 2), index in nzrange(matrix, column)
+                rows[index] <= column && (total += 1)
+            end
+        else
+            total += nnz(matrix)
+        end
     end
     ptr = Vector{Int32}(undef, na + 1)
     lin = Vector{Int32}(undef, total)
@@ -97,9 +112,13 @@ function build_block_coo(
         values = nonzeros(matrix)
         for column in 1:size(matrix, 2), index in nzrange(matrix, column)
             r = rows[index]
+            symmetric[position] && r > column && continue
             row[cursor] = Int32(r)
             col[cursor] = Int32(column)
-            lin[cursor] = Int32((column - 1) * k + r)
+            linear_index = Int32((column - 1) * k + r)
+            lin[cursor] =
+                symmetric[position] && r < column ?
+                -linear_index : linear_index
             val[cursor] = _coo_owned_scalar(values[index])
             cursor += 1
         end
