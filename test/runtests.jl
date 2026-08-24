@@ -42,6 +42,7 @@ const QUICK_TESTS = (
     "sparse_schur_round7.jl",
     "coo_contraction_regression.jl",
     "precision_ladder_plan.jl",
+    "factor_cache.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -125,6 +126,7 @@ const FULL_TESTS = (
     "precision_ladder_plan.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
+    "factor_cache.jl",
 )
 
 function _test_profile()
