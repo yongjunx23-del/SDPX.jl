@@ -7,11 +7,16 @@ modify src/lp_solver.jl or the interior-point hot loop; it is the blueprint
 for a dedicated integration session.
 
 ## Current state
-- src/hsd.jl provides the mathematical core: hsd_skew_embedding(A,b,c),
-  primal_infeasibility_certificate (Farkas), dual_infeasibility_certificate
-  (double-ray), hsd_status, and the new hsd_bordered_system prototype.
-- The LP solver detects infeasibility via ray certificates; its termination
-  flag homogeneous_self_dual_embedding is currently false.
+- src/hsd.jl provides: hsd_skew_embedding(A,b,c), primal/dual infeasibility
+  certificates (Farkas / double-ray), hsd_status, hsd_classify, the
+  hsd_bordered_system prototype, and - since this round - a WORKING dense
+  path-following Newton solver **hsd_lp_solve(A,b,c)** that drives the
+  tau/kappa embedding to a classified status (optimal / primal-infeasible)
+  end-to-end on small LPs, verified across Float64/x2/x3/x4/BigFloat.
+- The main LP solver still detects infeasibility via ray certificates; its
+  termination flag homogeneous_self_dual_embedding is currently false. The
+  remaining integration step is wiring hsd_lp_solve (or the bordered-system
+  KKT-reuse form below) into that loop.
 
 ## Proposed solver integration (next steps)
 
