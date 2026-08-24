@@ -59,11 +59,14 @@ after JIT warm-up). These are Julia heap bytes per iteration (BigFloat excludes 
 
 | arithmetic | per-iteration Julia alloc (B) |
 |---|---|
-| Float64 | 9 264 |
-| Float64x2 | 13 280 |
-| Float64x3 | 14 816 |
-| Float64x4 | 17 696 |
-| BigFloat256 | 104 944 |
+| Float64 | 9 184 |
+| Float64x2 | 13 200 |
+| Float64x3 | 14 736 |
+| Float64x4 | 17 616 |
+| BigFloat256 | 104 864 |
+
+(After commit `d481dff`: destructuring the `factorize!` result in `newton_step!` saved ~80 B/iter
+across the family; previously Float64 9 264 / Float64x2 13 280 / Float64x3 14 816 / Float64x4 17 696 / BigFloat 104 944.)
 
 So the hot loop is **not yet zero-allocation** (the Phase-4 target). `test/allocation_contract.jl`
 registers a Float64 per-iteration regression ceiling (64 KB) plus an Optimal/certificate semantic gate.
