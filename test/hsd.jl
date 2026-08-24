@@ -98,3 +98,16 @@ end
         @test SDPX.is_skew_symmetric(sys.matrix - Diagonal(sys.matrix))
     end
 end
+
+@testset "Phase 6 HSD path-following solve" begin
+    A = reshape([1.0, 1.0], 1, 2)
+    b = [1.0]
+    c = [1.0, 1.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :optimal
+    @test r.valid
+    @test isapprox(r.pobj, 1.0; atol=1e-6)
+    @test r.tau > 0
+    xp = r.x ./ r.tau
+    @test isapprox(sum(A[1, :] .* xp), 1.0; atol=1e-6)
+end

@@ -141,3 +141,100 @@ function hsd_classify(A::AbstractMatrix{T}, b::AbstractVector{T},
     end
     return (status=:undetermined, valid=false, primal_residual=zero(T), dual_residual=zero(T))
 end
+
+"""Standalone path-following HSD solver for a small LP (Phase-6 prototype).
+Solves min c'x s.t. Ax=b, x>=0 via the homogeneous self-dual embedding
+(tau, kappa) with a dense path-following Newton method.  Returns a NamedTuple
+with the HSD solution (x, y, s, tau, kappa), the classified status via
+`hsd_classify`, the primal objective c'x/tau, and the iteration count."""
+function hsd_lp_solve(A::AbstractMatrix{T}, b::AbstractVector{T},
+    c::AbstractVector{T}; iter_max::Int=300, tol::T=T(1e-10)) where {T}
+    m, n = size(A)
+    x = ones(T, n)
+    s = ones(T, n)
+    y = zeros(T, m)
+    tau = one(T)
+    kappa = one(T)
+    iterations = 0
+    for _ in 1:iter_max
+        iterations += 1
+        r_p = A * x - b * tau
+        r_d = transpose(A) * y + s - c * tau
+        r_g = -dot(c, x) + dot(b, y) - kappa
+        mu = (dot(x, s) + tau * kappa) / (n + 1)
+        residual = norm(r_p, Inf) + norm(r_d, Inf) + abs(r_g)
+        if mu <= tol && residual < T(1e-6)
+            break
+        end
+        sigma = T(0.1)
+        dimension = 2 * n + m + 2
+        M = zeros(T, dimension, dimension)
+        rhs = zeros(T, dimension)
+        tau_i = 2 * n + m + 1
+        kap_i = 2 * n + m + 2
+        # Primal rows: A dx - b dtau = -r_p.
+        for j in 1:m
+            for i in 1:n
+                M[j, i] = A[j, i]
+            end
+            M[j, tau_i] = -b[j]
+            rhs[j] = -r_p[j]
+        end
+        # Dual rows: A' dy + ds - c dtau = -r_d.
+        for k in 1:n
+            row = m + k
+            for j in 1:m
+                M[row, n + j] = A[j, k]
+            end
+            M[row, m + n + k] = one(T)
+            M[row, tau_i] = -c[k]
+            rhs[row] = -r_d[k]
+        end
+        # Gap row: -c' dx + b' dy - dkappa = -r_g.
+        gap_row = m + n + 1
+        for i in 1:n
+            M[gap_row, i] = -c[i]
+        end
+        for j in 1:m
+            M[gap_row, n + j] = b[j]
+        end
+        M[gap_row, kap_i] = -one(T)
+        rhs[gap_row] = -r_g
+        # Complementarity (x): S dx + X ds = -(X s - sigma mu e).
+        for k in 1:n
+            row = m + n + 1 + k
+            M[row, k] = s[k]
+            M[row, n + m + k] = x[k]
+            rhs[row] = -(x[k] * s[k] - sigma * mu)
+        end
+        # Complementarity (tau kappa): kappa dtau + tau dkappa = -(tau kappa - sigma mu).
+        cap_row = m + 2 * n + 2
+        M[cap_row, tau_i] = kappa
+        M[cap_row, kap_i] = tau
+        rhs[cap_row] = -(tau * kappa - sigma * mu)
+        delta = M \ rhs
+        dx = delta[1:n]
+        dy = delta[n+1:n+m]
+        ds = delta[n+m+1:n+m+n]
+        dtau = delta[tau_i]
+        dkappa = delta[kap_i]
+        # Step to keep all variables strictly positive.
+        alpha = one(T)
+        for i in 1:n
+            dx[i] < zero(T) && (alpha = min(alpha, -x[i] / dx[i]))
+            ds[i] < zero(T) && (alpha = min(alpha, -s[i] / ds[i]))
+        end
+        dtau < zero(T) && (alpha = min(alpha, -tau / dtau))
+        dkappa < zero(T) && (alpha = min(alpha, -kappa / dkappa))
+        alpha = min(one(T), T(0.995) * alpha)
+        x .+= alpha .* dx
+        s .+= alpha .* ds
+        y .+= alpha .* dy
+        tau += alpha * dtau
+        kappa += alpha * dkappa
+    end
+    classified = hsd_classify(A, b, c, x, y, s, tau, kappa)
+    pobj = tau > zero(T) ? dot(c, x) / tau : T(Inf)
+    return (status=classified.status, valid=classified.valid, x=x, y=y, s=s,
+            tau=tau, kappa=kappa, pobj=pobj, iterations=iterations)
+end
