@@ -1,6 +1,6 @@
 # Refactor status — branch refactor/zeroalloc-factorcache-hsd
 
-Authoritative snapshot of the committed work on this branch (39 commits ahead of
+Authoritative snapshot of the committed work on this branch (53 commits ahead of
 main at time of writing) and the precise remaining roadmap. All changes are
 gated: every hot-loop change was measured with benchmark/allocation_profile.jl
 and kept under the full-family allocation contract; every feature has tests;
@@ -37,9 +37,14 @@ quick (4308) and full (11240) suites are green.
 
 ### HSD (Phase 6)
 - src/hsd.jl: hsd_skew_embedding, is_skew_symmetric, primal/dual infeasibility
-  certificates, hsd_status, hsd_bordered_system (prototype), hsd_classify.
-- test: infeasibility-certificate contract gate (60) + hsd tests (35).
-- hsd-integration-design.md: plan to wire tau/kappa into the LP loop.
+  certificates, hsd_status, hsd_classify, hsd_bordered_system (prototype), and a
+  WORKING dense path-following Newton solver **hsd_lp_solve(A,b,c)** that drives
+  the tau/kappa embedding to a classified status end-to-end (optimal,
+  primal-infeasible, dual-infeasible), verified across Float64/x2/x3/x4/BigFloat
+  and multiple LP sizes/constraint shapes.
+- test: infeasibility-certificate contract gate (60) + hsd tests (70).
+- hsd-integration-design.md: plan to wire tau/kappa into the main LP loop; the
+  solver core is now implemented, the LP-format integration remains.
 
 ### Structural reduction (Phase 7)
 - ConeAlgebra: PSD (psd_*) + orthant (orthant_*) + Lorentz (soc_*) ops (29 tests).
