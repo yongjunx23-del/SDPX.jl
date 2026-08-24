@@ -662,8 +662,17 @@ function newton_step!(
     # below re-enables the full width for its single large call.
     parallel_blas = ws.thread_count > 1 ? 1 : blas_threads()
 
-    p_res, d_res, blocks_ok = _with_blas_threads(parallel_blas) do
+    _blas_prev_res = blas_threads()
+    _blas_tgt_res = parallel_blas
+    p_res, d_res, blocks_ok = if _blas_tgt_res == _blas_prev_res
         threaded_compute_residuals!(ws, prob, x, X, y, Y, μ, opts; factor=true)
+    else
+        set_blas_threads!(_blas_tgt_res)
+        try
+            threaded_compute_residuals!(ws, prob, x, X, y, Y, μ, opts; factor=true)
+        finally
+            set_blas_threads!(_blas_prev_res)
+        end
     end
 
     blocks_ok ||
@@ -677,8 +686,17 @@ function newton_step!(
     # the full width back (see `schur_blas_threads` for the measurements).
     schur_blas = schur_blas_threads(ws, prob, cons, parallel_blas,
         blas_threads())
-    _with_blas_threads(schur_blas) do
+    _blas_prev_schur = blas_threads()
+    _blas_tgt_schur = schur_blas
+    if _blas_tgt_schur == _blas_prev_schur
         threaded_schur_build!(ws, prob, cons, X, Y)
+    else
+        set_blas_threads!(_blas_tgt_schur)
+        try
+            threaded_schur_build!(ws, prob, cons, X, Y)
+        finally
+            set_blas_threads!(_blas_prev_schur)
+        end
     end
     schur_finished = time_ns()
 
@@ -720,8 +738,17 @@ function newton_step!(
     kph_equality_factorization = kkt_phases.equality_factorization
 
     # ---- Predictor ----
-    _with_blas_threads(parallel_blas) do
+    _blas_prev_rhs = blas_threads()
+    _blas_tgt_rhs = parallel_blas
+    if _blas_tgt_rhs == _blas_prev_rhs
         threaded_predictor_corrector_rhs!(ws, prob, Y)
+    else
+        set_blas_threads!(_blas_tgt_rhs)
+        try
+            threaded_predictor_corrector_rhs!(ws, prob, Y)
+        finally
+            set_blas_threads!(_blas_prev_rhs)
+        end
     end
     r = ws.rhs
     @inbounds for i in eachindex(r)
@@ -744,8 +771,17 @@ function newton_step!(
         reg_attempts=ws.mixed_precision.native_regularization_attempts,
         q_pivoted=false,
     )
-    _with_blas_threads(parallel_blas) do
+    _blas_prev_db = blas_threads()
+    _blas_tgt_db = parallel_blas
+    if _blas_tgt_db == _blas_prev_db
         threaded_direction_blocks!(ws, prob, Y)
+    else
+        set_blas_threads!(_blas_tgt_db)
+        try
+            threaded_direction_blocks!(ws, prob, Y)
+        finally
+            set_blas_threads!(_blas_prev_db)
+        end
     end
     predictor_finished = time_ns()
 
@@ -867,7 +903,9 @@ function newton_step!(
     complementarity_finished = time_ns()
 
     # ---- Corrector ----
-    _with_blas_threads(parallel_blas) do
+    _blas_prev_corr = blas_threads()
+    _blas_tgt_corr = parallel_blas
+    if _blas_tgt_corr == _blas_prev_corr
         if adaptive && !iteration_parameters.fallback
             threaded_mehrotra_corrector_rhs!(
                 ws,
@@ -881,6 +919,26 @@ function newton_step!(
             )
         else
             threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)
+        end
+    else
+        set_blas_threads!(_blas_tgt_corr)
+        try
+            if adaptive && !iteration_parameters.fallback
+                threaded_mehrotra_corrector_rhs!(
+                    ws,
+                    prob,
+                    X,
+                    Y,
+                    iteration_parameters.sigma,
+                    predictor_diagnostics.mu,
+                    block_local_target=
+                        !predictor_diagnostics.uniform_complementarity,
+                )
+            else
+                threaded_corrector_rhs!(ws, prob, opts, X, Y, μ)
+            end
+        finally
+            set_blas_threads!(_blas_prev_corr)
         end
     end
     @inbounds for i in eachindex(r)
@@ -955,8 +1013,17 @@ function newton_step!(
     block_primal_residual = _block_primal_residual_norm(ws)
     refinement_finished = time_ns()
 
-    _with_blas_threads(parallel_blas) do
+    _blas_prev_db = blas_threads()
+    _blas_tgt_db = parallel_blas
+    if _blas_tgt_db == _blas_prev_db
         threaded_direction_blocks!(ws, prob, Y)
+    else
+        set_blas_threads!(_blas_tgt_db)
+        try
+            threaded_direction_blocks!(ws, prob, Y)
+        finally
+            set_blas_threads!(_blas_prev_db)
+        end
     end
     corrector_finished = time_ns()
     kkt_total = (factor_finished - schur_finished) / 1.0e9
