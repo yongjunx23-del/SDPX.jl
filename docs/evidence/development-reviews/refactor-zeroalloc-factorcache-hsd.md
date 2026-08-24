@@ -91,10 +91,14 @@ deliverable) by attributing every `Profile.Allocs` byte to its producing phase (
 
 | phase | bytes/iter | share |
 |---|---|---|
-| orchestration / diagnostics (newton_step NamedTuples, IterationDiagnostics, parameter records) | 7 920 | 83.2% |
-| KKT assembly (schur / block kernels incl. `vec`/`reshape`) | 800 | 8.4% |
-| factorize (fresh Cholesky factor handle per iteration) | 768 | 8.1% |
-| KKT solve (predictor / corrector / refinement) | 32 | 0.3% |
+| orchestration / diagnostics (newton_step return NamedTuple, IterationDiagnostics, parameter records) | ~3 900 | ~53% |
+| KKT assembly + factorize (equality gram 512 B, fresh factor handle) | ~1 300 | ~18% |
+| KKT solve (predictor / corrector / refinement) | ~50 | <1% |
+
+(Updated after the closure-inlining commits `ebc4358`/`bbf22a5`: the `_with_blas_threads` closures
+are gone. `Profile.Allocs` total dropped from 9 296 to ~7 480 B; the dominant remaining source is now the
+`newton_step!` return NamedTuple + `IterationDiagnostics` (~2.8 KB), then the equality-gram/factor
+buffers.)
 
 So the numerical solve path is already essentially allocation-free; the Phase-4b win is to eliminate the
 Newton orchestration/diagnostic NamedTuple construction (move it to cold state per the spec), and to reuse
