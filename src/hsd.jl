@@ -156,6 +156,17 @@ function hsd_lp_solve(A::AbstractMatrix{T}, b::AbstractVector{T},
     tau = one(T)
     kappa = one(T)
     iterations = 0
+    # Degenerate rank-zero A: the Newton system is singular. If c has a
+    # negative entry the LP is unbounded below (dual infeasible).
+    if iszero(A)
+        for j in 1:n
+            if c[j] < -tol
+                ray = zeros(T, n); ray[j] = one(T)
+                return (status=:dual_infeasible, valid=true, x=ray, y=y, s=s,
+                        tau=zero(T), kappa=one(T), pobj=T(-Inf), iterations=iterations)
+            end
+        end
+    end
     for _ in 1:iter_max
         iterations += 1
         r_p = A * x - b * tau

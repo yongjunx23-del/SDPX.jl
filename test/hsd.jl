@@ -159,3 +159,13 @@ end
     xp = r.x ./ r.tau
     @test isapprox(sum(xp), 1.0; atol=1e-6)
 end
+
+@testset "Phase 6 HSD degenerate A=0 unbounded detection" begin
+    A = zeros(1, 1)
+    b = [0.0]
+    c = [-1.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :dual_infeasible
+    @test r.valid
+    @test r.pobj == -Inf
+end
