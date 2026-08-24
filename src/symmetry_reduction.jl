@@ -300,3 +300,33 @@ function invariant_matrix_dimension(g::SymmetryGroup)
     end
     return dimension
 end
+
+"""Orthogonal block-diagonalizing basis for the full symmetric group S_n on
+an orbit: the trivial (all-ones) direction forms a 1x1 block, and its
+orthogonal complement forms one (n-1)-dimensional block.  For any matrix
+invariant under all permutations (i.e. `lambda*I + mu*J`), `Q' A Q` is
+block-diagonal with blocks `[1, n-1]`."""
+function symmetric_group_block_basis(n::Int)
+    n >= 2 || return Matrix{Float64}(I, 1, 1)
+    Q = zeros(Float64, n, n)
+    for i in 1:n
+        Q[i, 1] = 1 / sqrt(n)
+    end
+    # Gram-Schmidt an orthonormal basis of the complement of span(ones).
+    working = Matrix{Float64}(I, n, n - 1)
+    for col in 1:(n - 1)
+        vector = copy(working[:, col])
+        vector .-= Q[:, 1] * (dot(Q[:, 1], vector))
+        for k in 2:col
+            vector .-= Q[:, k] * (dot(Q[:, k], vector))
+        end
+        norm(vector) == 0 && error("degenerate symmetric basis")
+        Q[:, col + 1] = vector ./ norm(vector)
+    end
+    return Q
+end
+
+"""Block sizes for the full symmetric group on `n` indices: `[1, n-1]`."""
+function symmetric_group_block_sizes(n::Int)
+    return n == 1 ? [1] : [1, n - 1]
+end

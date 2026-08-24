@@ -99,3 +99,17 @@ end
     g4 = SDPX.SymmetryGroup([[2, 1, 4, 3]], 4)
     @test SDPX.invariant_matrix_dimension(g4) == 6
 end
+
+@testset "Phase 7 SymmetryReduction symmetric-group (S_n) block-diagonalization" begin
+    Q = SDPX.symmetric_group_block_basis(3)
+    @test isapprox(transpose(Q) * Q, Matrix{Float64}(I, 3, 3); atol=1e-12)
+    # A matrix invariant under all of S_3: constant diagonal a, off-diagonal b.
+    a, b = 4.0, 2.0
+    A = [a b b; b a b; b b a]
+    B = SDPX.block_diagonalize(A, Q)
+    @test SDPX.is_block_diagonal(B, SDPX.symmetric_group_block_sizes(3))
+    @test isapprox(B[1, 1], a + 2 * b; atol=1e-10)
+    @test isapprox(B[2, 2], a - b; atol=1e-10)
+    @test SDPX.symmetric_group_block_sizes(3) == [1, 2]
+    @test isapprox(SDPX.reconstruct_matrix(B, Q), A; atol=1e-10)
+end
