@@ -113,3 +113,11 @@ end
     @test SDPX.symmetric_group_block_sizes(3) == [1, 2]
     @test isapprox(SDPX.reconstruct_matrix(B, Q), A; atol=1e-10)
 end
+
+@testset "Phase 7 SymmetryReduction reduce/reconstruct round-trip" begin
+    g = SDPX.SymmetryGroup([[2, 1, 3]], 3)
+    perm = SDPX.reduction_permutation(g)
+    x = [1.0, 2.0, 3.0]
+    reduced = SDPX.reduce(x, perm)
+    @test SDPX.reconstruct(reduced, perm) == x
+end

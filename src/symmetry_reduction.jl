@@ -330,3 +330,10 @@ end
 function symmetric_group_block_sizes(n::Int)
     return n == 1 ? [1] : [1, n - 1]
 end
+
+"""Apply a reduction permutation to a vector: `reduced[k] = x[perm[k]]`.
+The inverse of [`reconstruct`](@ref)."""
+function reduce(x::AbstractVector{T}, perm::Vector{Int}) where {T}
+    length(x) == length(perm) || throw(DimensionMismatch)
+    return x[perm]
+end
