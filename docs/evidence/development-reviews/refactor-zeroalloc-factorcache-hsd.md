@@ -79,6 +79,20 @@ registers a Float64 per-iteration regression ceiling (64 KB) plus an Optimal/cer
 
 These are the concrete Phase-4b targets for driving the iteration toward zero allocation.
 
+`benchmark/allocation_phase_profile.jl` produces the **per-phase staged profile** (Phase-1b
+deliverable) by attributing every `Profile.Allocs` byte to its producing phase (Float64):
+
+| phase | bytes/iter | share |
+|---|---|---|
+| orchestration / diagnostics (newton_step NamedTuples, IterationDiagnostics, parameter records) | 7 920 | 83.2% |
+| KKT assembly (schur / block kernels incl. `vec`/`reshape`) | 800 | 8.4% |
+| factorize (fresh Cholesky factor handle per iteration) | 768 | 8.1% |
+| KKT solve (predictor / corrector / refinement) | 32 | 0.3% |
+
+So the numerical solve path is already essentially allocation-free; the Phase-4b win is to eliminate the
+Newton orchestration/diagnostic NamedTuple construction (move it to cold state per the spec), and to reuse
+the factor handle across iterations (Phase-3 FactorCache wiring).
+
 ## 3. Phase 3 increment — provider-neutral FactorCache (this branch)
 
 Added a provider-neutral factor-cache interface and a reference dense implementation
