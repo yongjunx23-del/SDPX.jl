@@ -123,3 +123,15 @@ end
     @test r.tau < 1e-6
     @test r.kappa > 1e-6
 end
+
+@testset "Phase 6 HSD path-following non-symmetric optimum" begin
+    # min 1*x1+3*x2 s.t. x1+x2=1, x>=0 => optimum 1 (x1=1,x2=0).
+    A = reshape([1.0, 1.0], 1, 2)
+    b = [1.0]
+    c = [1.0, 3.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :optimal
+    @test isapprox(r.pobj, 1.0; atol=1e-6)
+    xp = r.x ./ r.tau
+    @test isapprox(xp[2], 0.0; atol=1e-5)
+end
