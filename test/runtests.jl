@@ -45,6 +45,7 @@ const QUICK_TESTS = (
     "factor_cache.jl",
     "allocation_contract.jl",
     "fixed_precision_contract.jl",
+    "cone_algebra.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
@@ -131,6 +132,7 @@ const FULL_TESTS = (
     "factor_cache.jl",
     "allocation_contract.jl",
     "fixed_precision_contract.jl",
+    "cone_algebra.jl",
 )
 
 function _test_profile()
