@@ -1,23 +1,33 @@
-# Phase 4 allocation-contract regression gate.
+# Phase 4 allocation-contract regression gate (full arithmetic family).
 #
-# One full predictor-corrector Newton iteration (SDP route, Float64) in
-# steady state must stay below a documented allocation ceiling. This is a
+# One full predictor-corrector Newton iteration (SDP route) in steady state
+# must stay below a documented per-precision allocation ceiling. This is a
 # regression gate (fail on serious allocation blowups), not the final
 # zero-allocation target: benchmark/allocation_profile.jl reports the actual
-# per-iteration value across the full arithmetic family (currently Float64
-# ~9 KB/iter). The semantic gate (Optimal + valid certificate) pins the
-# objective/iteration/residual/gap/certificate side of the CI contract.
+# per-iteration value (Float64 ~9.3 KB, Float64x2 ~13 KB, Float64x3 ~15 KB,
+# Float64x4 ~18 KB, BigFloat256 ~105 KB). The semantic gate (Optimal + valid
+# certificate) pins the objective/iteration/residual/gap/certificate side.
 using SDPX
 using Test
 using LinearAlgebra
 
-# Comfortable headroom over the current ~9.3 KB/iter Float64 steady-state
-# measurement so minor GC/compiler noise cannot fail the gate, while a real
-# hot-loop allocation regression is still caught.
-const ALLOC_PER_ITER_CEILING = 64_000
+const _MULTIFLOATS = try
+    @eval import MultiFloats
+    true
+catch
+    false
+end
 
-function _gate_sdp_problem()
-    T = Float64
+# Comfortable headroom over the current steady-state measurements so minor
+# GC/compiler noise cannot fail the gate, while a real hot-loop allocation
+# regression is still caught. Ceilings are documented per arithmetic.
+const ALLOC_CEILINGS = Dict{Type,Int}(
+    Float64 => 64_000,
+    BigFloat => 512_000,
+)
+const _MULTIFLOAT_CEILING = 128_000
+
+function _gate_sdp_problem(::Type{T}) where {T}
     k = 3
     m = k * (k + 1) ÷ 2
     c = zeros(T, m)
@@ -35,8 +45,8 @@ function _gate_sdp_problem()
         T=T, sparse=false, verbosity=0)
 end
 
-function _steady_state_iteration_alloc(T::Type)
-    prob = _gate_sdp_problem()
+function _steady_state_iteration_alloc(::Type{T}) where {T}
+    prob = _gate_sdp_problem(T)
     opts = SDPX.SolverOptions{T}(
         algorithm=:sdp, presolve=false, scaling=:none, verbosity=0,
         iter_max=200,
@@ -52,8 +62,26 @@ function _steady_state_iteration_alloc(T::Type)
     )
 end
 
-@testset "allocation contract (Float64 SDP Newton iteration)" begin
-    alloc = _steady_state_iteration_alloc(Float64)
-    @test alloc < ALLOC_PER_ITER_CEILING
-    @info "Float64 per-iteration Julia allocation" alloc_bytes=alloc ceiling=ALLOC_PER_ITER_CEILING
+@testset "allocation contract (full arithmetic family)" begin
+    @testset "Float64" begin
+        alloc = _steady_state_iteration_alloc(Float64)
+        @test alloc < ALLOC_CEILINGS[Float64]
+        @info "Float64 per-iteration Julia allocation" alloc_bytes=alloc ceiling=ALLOC_CEILINGS[Float64]
+    end
+    @testset "BigFloat256" begin
+        setprecision(BigFloat, 256) do
+            alloc = _steady_state_iteration_alloc(BigFloat)
+            @test alloc < ALLOC_CEILINGS[BigFloat]
+            @info "BigFloat256 per-iteration Julia allocation" alloc_bytes=alloc ceiling=ALLOC_CEILINGS[BigFloat]
+        end
+    end
+    if _MULTIFLOATS
+        for T in (MultiFloats.Float64x2, MultiFloats.Float64x3, MultiFloats.Float64x4)
+            @testset "$T" begin
+                alloc = _steady_state_iteration_alloc(T)
+                @test alloc < _MULTIFLOAT_CEILING
+                @info "$T per-iteration Julia allocation" alloc_bytes=alloc ceiling=_MULTIFLOAT_CEILING
+            end
+        end
+    end
 end
