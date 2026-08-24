@@ -146,3 +146,79 @@ function is_constant_on_pair_orbits(A::AbstractMatrix, orbits::Vector{<:Abstract
     end
     return true
 end
+
+"""Orthogonal block-diagonalizing basis for disjoint transposition swaps.
+Each pair `(i,j)` is reduced by the Hadamard-like basis (sum/difference of the
+two coordinates); untouched indices keep the standard basis.  For any matrix
+invariant under these swaps, `Q' A Q` is block-diagonal."""
+function transposition_block_basis(pairs::Vector{<:Tuple{Int,Int}}, n::Int)
+    # Column ordering: (1) sum components of every swap, (2) unpaired indices,
+    # (3) difference components. This groups the coupled trivial components
+    # into one leading block so Q' A Q is block-diagonal for invariant A.
+    Q = zeros(Float64, n, n)
+    column = 1
+    for (i, j) in pairs
+        i != j || continue
+        Q[i, column] = 1 / sqrt(2.0)
+        Q[j, column] = 1 / sqrt(2.0)
+        column += 1
+    end
+    used = falses(n)
+    for (i, j) in pairs
+        used[i] = true
+        used[j] = true
+    end
+    for i in 1:n
+        used[i] && continue
+        Q[i, column] = 1.0
+        column += 1
+    end
+    for (i, j) in pairs
+        i != j || continue
+        Q[i, column] = 1 / sqrt(2.0)
+        Q[j, column] = -1 / sqrt(2.0)
+        column += 1
+    end
+    column == n + 1 || error("inconsistent pair set")
+    return Q
+end
+
+"""Conjugate a matrix to block-diagonal form: `Q' A Q`."""
+function block_diagonalize(A::AbstractMatrix, Q::AbstractMatrix)
+    return transpose(Q) * A * Q
+end
+
+"""Whether `A` is (numerically) block-diagonal with the given block sizes."""
+function is_block_diagonal(A::AbstractMatrix, block_sizes::Vector{Int};
+    tol::Real=1e-10)
+    n = size(A, 1)
+    sum(block_sizes) == n || return false
+    block_of = zeros(Int, n)
+    index = 1
+    for (block, size) in enumerate(block_sizes)
+        for _ in 1:size
+            block_of[index] = block
+            index += 1
+        end
+    end
+    @inbounds for i in 1:n, j in 1:n
+        if block_of[i] != block_of[j] && abs(A[i, j]) > tol
+            return false
+        end
+    end
+    return true
+end
+
+"""Block sizes produced by [`transposition_block_basis`]: one leading block
+holding all sum components plus unpaired indices, then a 1x1 block per swap."""
+function transposition_block_sizes(pairs::Vector{<:Tuple{Int,Int}}, n::Int)
+    effective = [p for p in pairs if p[1] != p[2]]
+    used = Set{Int}()
+    for (i, j) in effective
+        push!(used, i)
+        push!(used, j)
+    end
+    unpaired = count(i -> !(i in used), 1:n)
+    leading = length(effective) + unpaired
+    return vcat([leading], ones(Int, length(effective)))
+end

@@ -1,6 +1,7 @@
 # Phase 7 SymmetryReduction foundation tests.
 using SDPX
 using Test
+using LinearAlgebra
 
 @testset "Phase 7 SymmetryReduction" begin
     # Swap of indices 1 and 2 on n = 3.
@@ -46,4 +47,24 @@ end
     @test has_key
     cross = any(orb -> (1,2) in orb && (2,1) in orb, orbits)
     @test cross
+end
+
+@testset "Phase 7 SymmetryReduction block-diagonalization" begin
+    # Swap (1,2) on n=3; an invariant matrix reduces to block-diagonal.
+    Q = SDPX.transposition_block_basis([(1, 2)], 3)
+    @test Q isa Matrix{Float64}
+    @test isapprox(transpose(Q) * Q, Matrix{Float64}(I, 3, 3); atol=1e-12)
+    A = [1.0 2.0 3.0; 2.0 1.0 3.0; 3.0 3.0 5.0]
+    B = SDPX.block_diagonalize(A, Q)
+    @test SDPX.is_block_diagonal(B, SDPX.transposition_block_sizes([(1, 2)], 3))
+    # The reduced form has the expected (sum, difference, fixed) entries.
+    @test isapprox(B[1, 1], A[1, 1] + A[1, 2]; atol=1e-10)  # sum block
+    @test isapprox(B[2, 2], A[3, 3]; atol=1e-10)              # unpaired index
+    @test isapprox(B[3, 3], A[1, 1] - A[1, 2]; atol=1e-10)    # difference block
+
+    # Two disjoint swaps (1,2),(3,4) on n=4 -> four 1x1 blocks.
+    Q2 = SDPX.transposition_block_basis([(1, 2), (3, 4)], 4)
+    C = [1.0 2.0 5.0 5.0; 2.0 1.0 5.0 5.0; 5.0 5.0 3.0 4.0; 5.0 5.0 4.0 3.0]
+    D = SDPX.block_diagonalize(C, Q2)
+    @test SDPX.is_block_diagonal(D, SDPX.transposition_block_sizes([(1, 2), (3, 4)], 4))
 end
