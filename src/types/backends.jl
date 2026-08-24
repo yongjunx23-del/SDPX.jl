@@ -10,6 +10,11 @@
 
 abstract type AbstractLABackend end
 
+"""Which linear-system path a solve is using. Defined before `Workspace` so the
+hot-read `Workspace.backend` field can be typed (Phase-2b); concrete backend
+structs and their methods live in `kkt_backend.jl`."""
+abstract type KKTBackend end
+
 """
     LAProviderCapabilities
 

@@ -507,11 +507,10 @@ mutable struct Workspace{T}
     equality_gram_kernel::Symbol
     thread_count::Int
     backend_config::BackendConfiguration
-    # KKTBackend is included after Workspace because its methods accept a
-    # Workspace.  The value stored here is nevertheless one concrete backend
-    # instance selected once from `backend_config`; `Any` only breaks that
-    # include-order cycle and is never re-used for structural selection.
-    backend::Any
+    # The concrete backend instance selected once from `backend_config`. The
+    # `KKTBackend` abstract type is defined in types/backends.jl (before
+    # Workspace) so this hot-read field is typed, not `Any`.
+    backend::Union{Nothing,KKTBackend}
     executed_backend::Symbol
     # Last non-`:none` fallback observed during this solve.  It is deliberately
     # cumulative so a later successful retry cannot erase fallback provenance.

@@ -15,14 +15,6 @@
     can be trusted before anything is built on top of it.
 =====================================================================#
 
-"""
-    KKTBackend
-
-Which linear-system path a solve is using. `analyze`/`factorize`/`solve`/
-`refine`/`statistics` dispatch on this rather than on repeated `nothing` checks.
-"""
-abstract type KKTBackend end
-
 """Dense Cholesky of the Schur complement, with pivoted Cholesky on `Q` when the
 equality block is rank deficient. The general-purpose path."""
 struct DenseCholeskyBackend <: KKTBackend end
