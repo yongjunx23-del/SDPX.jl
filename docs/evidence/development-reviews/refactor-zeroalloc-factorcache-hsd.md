@@ -53,8 +53,20 @@ precision and at Float64x4 / BigFloat256. This is a numeric-behavior divergence 
 dedicated regression gate before changing any hot-loop code (a candidate for Phase 5
 fixed-precision and Phase 6 HSD work).
 
-allocB is a whole-solve figure; per-iteration and per-phase **allocation profiles** are not yet
-measured and are the Phase-1/Phase-4 deliverable.
+allocB is a whole-solve figure. **Per-iteration steady-state allocation is now measured** by
+benchmark/allocation_profile.jl (one full predictor-corrector `newton_step!`, SDP route, min-of-3
+after JIT warm-up). These are Julia heap bytes per iteration (BigFloat excludes MPFR-native heap):
+
+| arithmetic | per-iteration Julia alloc (B) |
+|---|---|
+| Float64 | 9 264 |
+| Float64x2 | 13 280 |
+| Float64x3 | 14 816 |
+| Float64x4 | 17 696 |
+| BigFloat256 | 104 944 |
+
+So the hot loop is **not yet zero-allocation** (the Phase-4 target). `test/allocation_contract.jl`
+registers a Float64 per-iteration regression ceiling (64 KB) plus an Optimal/certificate semantic gate.
 
 ## 3. Phase 3 increment — provider-neutral FactorCache (this branch)
 
