@@ -101,3 +101,12 @@ end
     w = x + t * dx
     @test w[1] > norm(w[2:3]) - 1e-8
 end
+
+@testset "Phase 7 ConeAlgebra PSD identity" begin
+    # Jordan product with the identity is the identity.
+    X = [3.0 1.0; 1.0 2.0]
+    I2 = Matrix{Float64}(I, 2, 2)
+    @test isapprox(SDPX.psd_jordan_product(I2, X), X; atol=1e-12)
+    # sqrt^2 == X for a PSD matrix.
+    @test isapprox(SDPX.psd_sqrt(X) * SDPX.psd_sqrt(X), X; atol=1e-10)
+end
