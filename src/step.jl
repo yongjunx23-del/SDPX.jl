@@ -683,8 +683,19 @@ function newton_step!(
     schur_finished = time_ns()
 
     backend = select_backend(ws)
-    kkt = _with_blas_threads(_kkt_blas_threads(m)) do
+    # Inline the BLAS-thread save/restore for the KKT factorization to avoid
+    # a heap-allocated do-block closure (which would capture SolverOptions).
+    _blas_previous = blas_threads()
+    _blas_target = _kkt_blas_threads(m)
+    kkt = if _blas_target == _blas_previous
         factorize!(backend, ws, prob, opts)
+    else
+        set_blas_threads!(_blas_target)
+        try
+            factorize!(backend, ws, prob, opts)
+        finally
+            set_blas_threads!(_blas_previous)
+        end
     end
     # Destructure the factorize! result once so its fields are not re-read
     # through boxing `getproperty` on every subsequent access.
