@@ -120,8 +120,10 @@ allocation-profiled against this baseline.
   (assemble_kkt! / factorize_cached! / predictor / corrector / refinement / line search)
   across the five arithmetics; not yet measured. Must report Julia-alloc vs MPFR-native separately.
 - Phase 2 (ExecutionPlan freeze): mostly present; audit Any/abstract fields in hot state.
-- Phase 5 (fixed-precision contract): working_precision_policy still defaults to :auto,
-  the spec target is :fixed; changing it needs a regression pass (ladder suite depends on :auto).
+- Phase 5 (fixed-precision contract): `test/fixed_precision_contract.jl` (added this branch)
+  gates that `working_precision_policy=:fixed` uses one precision end-to-end (no ladder for
+  fixed-width types, one rung at requested bits for BigFloat, valid certificate, no unauthorized
+  fallback). The default is still `:auto`; flipping it to `:fixed` needs a ladder regression pass.
 - Phase 6 (HSD): LP path already uses tau/kappa; no full bordered-system HSD embedding yet.
 - Phase 7 (reduction): chordal.jl exists; no SymmetryReduction or ConeAlgebra layer yet.
 - Known baseline anomaly to track: soc_q3 @ Float64x2 stalls.
