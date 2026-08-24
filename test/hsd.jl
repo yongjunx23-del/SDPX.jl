@@ -67,4 +67,12 @@ end
     r2 = SDPX.hsd_classify(A2, b2, c2, [0.0], [-1.0, 1.0], [0.0], 0.0, 1.0)
     @test r2.status === :primal_infeasible
     @test r2.valid
+
+    # Dual-infeasible / unbounded: min -x s, 0*x=0, x>=0 (ray x=1).
+    A3 = zeros(1, 1)
+    b3 = [0.0]
+    c3 = [-1.0]
+    r3 = SDPX.hsd_classify(A3, b3, c3, [1.0], [0.0], [0.0], 0.0, 1.0)
+    @test r3.status === :dual_infeasible
+    @test r3.valid
 end
