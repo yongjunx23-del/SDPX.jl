@@ -94,3 +94,19 @@ function hsd_status(x::AbstractVector{T}, y::AbstractVector{T},
     end
     return :undetermined
 end
+
+"""Minimal HSD bordered-system prototype.  Builds the (1+m+n)-square
+self-dual embedding and returns it with the diagonal barrier/centering term
+`mu*I` added, so the bordered system is symmetric (skew part + positive
+diagonal) and ready to be factorized by the main KKT path.  Pure prototype:
+does not drive the interior-point loop."""
+function hsd_bordered_system(A::AbstractMatrix{T}, b::AbstractVector{T},
+    c::AbstractVector{T}; mu::T=one(T)) where {T}
+    m, n = size(A)
+    M = hsd_skew_embedding(A, b, c)
+    N = size(M, 1)
+    for i in 1:N
+        M[i, i] += mu
+    end
+    return (matrix=M, m=m, n=n, dim=N)
+end

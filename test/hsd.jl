@@ -35,3 +35,18 @@ using LinearAlgebra
     @test SDPX.hsd_status([0.5, 0.5], [1.0], [0.0, 0.0], 1.0, 1e-12) === :optimal
     @test SDPX.hsd_status([0.0, 0.0], [1.0], [1.0, 1.0], 0.0, 1.0) === :infeasible
 end
+
+@testset "Phase 6 HSD bordered-system prototype" begin
+    A = reshape([1.0, 1.0], 1, 2)
+    b = [1.0]
+    c = [1.0, 1.0]
+    system = SDPX.hsd_bordered_system(A, b, c)
+    @test system.dim == 1 + 1 + 2
+    @test system.m == 1
+    @test system.n == 2
+    # Skew part is skew-symmetric; the diagonal barrier term mu is added.
+    M = system.matrix
+    skew = M - Diagonal(M)
+    @test SDPX.is_skew_symmetric(skew)
+    @test all(isapprox(diag(M), ones(system.dim); atol=1e-12))
+end
