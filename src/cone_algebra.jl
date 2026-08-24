@@ -9,7 +9,7 @@
 # soc.jl / soc_lorentz_kernels.jl.
 =#
 
-using LinearAlgebra: eigen, eigvals, Symmetric, Diagonal
+using LinearAlgebra: eigen, eigvals, Symmetric, Diagonal, norm, dot
 
 """Jordan product `X ∘ Y = (X*Y + Y*X)/2` for symmetric matrices."""
 function psd_jordan_product(X::AbstractMatrix{T}, Y::AbstractMatrix{T}) where {T}
@@ -98,4 +98,79 @@ function orthant_boundary_step(x::AbstractVector{T}, dx::AbstractVector{T}) wher
         t = min(t, -x[i] / dx[i])
     end
     return t
+end
+
+# --- Lorentz (second-order / SOC) cone ---
+
+"""Lorentz Jordan product, wrapping the route-specific `_soc_jordan!`."""
+function soc_jordan_product(x::AbstractVector{T}, y::AbstractVector{T}) where {T}
+    destination = similar(x)
+    _soc_jordan!(destination, x, y)
+    return destination
+end
+
+"""Lorentz Jordan solve `left o result = right`, wrapping `_soc_jordan_solve!`."""
+function soc_jordan_solve(left::AbstractVector{T}, right::AbstractVector{T}) where {T}
+    destination = similar(right)
+    _soc_jordan_solve!(destination, left, right)
+    return destination
+end
+
+"""Lorentz inverse of an interior point, wrapping `_soc_inverse!`."""
+function soc_inverse(x::AbstractVector{T}) where {T}
+    destination = similar(x)
+    _soc_inverse!(destination, x)
+    return destination
+end
+
+"""Lorentz spectral decomposition: returns the two eigenvalues `t±|u|` and the
+primitive idempotents `c1,c2` such that `x = λ1*c1 + λ2*c2` and `ci∘cj = 0`."""
+function soc_spectral(x::AbstractVector{T}) where {T}
+    t = x[1]
+    u = view(x, 2:length(x))
+    norm_u = norm(u)
+    if norm_u == zero(T)
+        c = T(1) / 2
+        return (t, t), hcat(vcat(c, zeros(T, length(x) - 1)), vcat(c, zeros(T, length(x) - 1)))
+    end
+    direction = u ./ norm_u
+    c1 = vcat(T(1) / 2, direction ./ 2)
+    c2 = vcat(T(1) / 2, -direction ./ 2)
+    return (t + norm_u, t - norm_u), hcat(c1, c2)
+end
+
+"""Lorentz square root of an interior point: `w` such that `w∘w = x`."""
+function soc_sqrt(x::AbstractVector{T}) where {T}
+    t = x[1]
+    u = view(x, 2:length(x))
+    delta = t * t - dot(u, u)
+    head = sqrt((t + sqrt(max(delta, zero(T)))) / 2)
+    destination = similar(x)
+    destination[1] = head
+    if head == zero(T)
+        fill!(view(destination, 2:length(x)), zero(T))
+    else
+        copyto!(view(destination, 2:length(x)), u ./ (2 * head))
+    end
+    return destination
+end
+
+"""Largest step `t` keeping `x + t*dx` in the Lorentz cone; `Inf` if no bound."""
+function soc_boundary_step(x::AbstractVector{T}, dx::AbstractVector{T}) where {T}
+    head = dx[1]
+    u = view(x, 2:length(x))
+    du = view(dx, 2:length(x))
+    norm_du = norm(du)
+    a = head * head - norm_du * norm_du
+    b = 2 * (x[1] * head - dot(u, du))
+    c = x[1] * x[1] - dot(u, u)
+    if a <= zero(T) && b >= zero(T)
+        return T(Inf)
+    end
+    discriminant = b * b - 4 * a * c
+    discriminant <= zero(T) && return T(Inf)
+    # Smallest positive root is the boundary step (the larger root crosses to the
+    # opposite side of the cone).
+    root = (-b - sqrt(discriminant)) / (2 * a)
+    return max(zero(T), root)
 end
