@@ -111,3 +111,15 @@ end
     xp = r.x ./ r.tau
     @test isapprox(sum(A[1, :] .* xp), 1.0; atol=1e-6)
 end
+
+@testset "Phase 6 HSD path-following infeasibility detection" begin
+    # Infeasible LP: x1+x2=1 and x1+x2=2. HSD drives tau -> 0, kappa > 0.
+    A = reshape([1.0, 1.0], 2, 1)
+    b = [1.0, 2.0]
+    c = [0.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :primal_infeasible
+    @test r.valid
+    @test r.tau < 1e-6
+    @test r.kappa > 1e-6
+end
