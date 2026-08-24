@@ -18,14 +18,15 @@ catch
     false
 end
 
-# Comfortable headroom over the current steady-state measurements so minor
-# GC/compiler noise cannot fail the gate, while a real hot-loop allocation
-# regression is still caught. Ceilings are documented per arithmetic.
+# Ceilings keep ~3-4x headroom over the current steady-state measurements
+# (Float64 ~6.5 KB, Float64x2/x3/x4 ~10-15 KB, BigFloat256 ~102 KB) so minor
+# GC/compiler noise cannot fail the gate while a real hot-loop allocation
+# regression is caught. Ceilings are documented per arithmetic.
 const ALLOC_CEILINGS = Dict{Type,Int}(
-    Float64 => 64_000,
-    BigFloat => 512_000,
+    Float64 => 24_000,
+    BigFloat => 256_000,
 )
-const _MULTIFLOAT_CEILING = 128_000
+const _MULTIFLOAT_CEILING = 48_000
 
 function _gate_sdp_problem(::Type{T}) where {T}
     k = 3
