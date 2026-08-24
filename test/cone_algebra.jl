@@ -48,3 +48,19 @@ end
     @test t < Inf
     @test minimum(eigvals(Symmetric(X + t * dX))) <= 1e-8
 end
+
+@testset "Phase 7 ConeAlgebra (orthant)" begin
+    x = [1.0, 4.0, 9.0]
+    y = [2.0, 3.0, 4.0]
+    @test SDPX.orthant_jordan_product(x, y) == [2.0, 12.0, 36.0]
+    @test SDPX.orthant_sqrt(x) == [1.0, 2.0, 3.0]
+    @test SDPX.orthant_inverse(x) ≈ [1.0, 0.25, 1.0/9.0]
+    values, _ = SDPX.orthant_spectral(x)
+    @test values == x
+    @test SDPX.orthant_nt_scaling(x) ≈ [1.0, 0.5, 1.0/3.0]
+    # Boundary step along a negative direction.
+    dx = [-1.0, 1.0, 0.0]
+    @test SDPX.orthant_boundary_step(x, dx) ≈ 1.0
+    # Positive direction gives Inf.
+    @test SDPX.orthant_boundary_step(x, [1.0, 1.0, 1.0]) == Inf
+end

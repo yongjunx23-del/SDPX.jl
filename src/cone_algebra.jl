@@ -62,3 +62,40 @@ function psd_boundary_step(X::AbstractMatrix{T}, dX::AbstractMatrix{T}) where {T
     lambda_min >= 0 && return T(Inf)
     return -inv(lambda_min)
 end
+
+# --- Orthant (LP / nonnegative) cone ---
+
+"""Orthant Jordan product = componentwise product."""
+function orthant_jordan_product(x::AbstractVector{T}, y::AbstractVector{T}) where {T}
+    return x .* y
+end
+
+"""Orthant square root (elementwise), valid on the interior."""
+function orthant_sqrt(x::AbstractVector{T}) where {T}
+    return sqrt.(x)
+end
+
+"""Orthant inverse (elementwise reciprocal), valid on the interior."""
+function orthant_inverse(x::AbstractVector{T}) where {T}
+    return inv.(x)
+end
+
+"""Orthant spectral decomposition: the values are the coordinates themselves."""
+function orthant_spectral(x::AbstractVector{T}) where {T}
+    return (copy(x), Matrix{T}(I, length(x), length(x)))
+end
+
+"""Orthant NT scaling point `1 ./ sqrt.(x)`."""
+function orthant_nt_scaling(x::AbstractVector{T}) where {T}
+    return inv.(sqrt.(x))
+end
+
+"""Largest `t` such that `x + t*dx` stays nonnegative; `Inf` if `dx >= 0`."""
+function orthant_boundary_step(x::AbstractVector{T}, dx::AbstractVector{T}) where {T}
+    t = T(Inf)
+    for i in eachindex(dx)
+        dx[i] < zero(T) || continue
+        t = min(t, -x[i] / dx[i])
+    end
+    return t
+end
