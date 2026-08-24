@@ -212,7 +212,12 @@ function hsd_lp_solve(A::AbstractMatrix{T}, b::AbstractVector{T},
         M[cap_row, tau_i] = kappa
         M[cap_row, kap_i] = tau
         rhs[cap_row] = -(tau * kappa - sigma * mu)
-        delta = M \ rhs
+        delta = try
+            M \ rhs
+        catch err
+            err isa LinearAlgebra.SingularException || rethrow()
+            break  # degenerate system (e.g. rank-deficient A); classify current iterate
+        end
         dx = delta[1:n]
         dy = delta[n+1:n+m]
         ds = delta[n+m+1:n+m+n]
