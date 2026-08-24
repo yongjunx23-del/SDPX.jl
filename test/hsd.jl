@@ -169,3 +169,13 @@ end
     @test r.valid
     @test r.pobj == -Inf
 end
+
+@testset "Phase 6 HSD path-following 2-constraint LP" begin
+    # min x1+x2 s.t. x1=1, x2=1, x>=0 => optimum 2.0.
+    A = [1.0 0.0; 0.0 1.0]
+    b = [1.0, 1.0]
+    c = [1.0, 1.0]
+    r = SDPX.hsd_lp_solve(A, b, c)
+    @test r.status === :optimal
+    @test isapprox(r.pobj, 2.0; atol=1e-6)
+end
