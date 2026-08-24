@@ -3672,7 +3672,7 @@ function solve(
     formulation::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:adaptive,
-    working_precision_policy::Symbol=:auto,
+    working_precision_policy::Symbol=:fixed,
     minimum_working_precision_bits::Int=192,
 ) where {T}
     if T === BigFloat &&
@@ -3795,7 +3795,7 @@ function solve(
     formulation::Symbol=:auto,
     algorithm::Symbol=:auto,
     parameter_strategy::Symbol=:adaptive,
-    working_precision_policy::Symbol=:auto,
+    working_precision_policy::Symbol=:fixed,
     minimum_working_precision_bits::Int=192,
     sparse::Union{Bool,Symbol}=:auto,
 )
