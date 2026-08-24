@@ -222,3 +222,9 @@ function transposition_block_sizes(pairs::Vector{<:Tuple{Int,Int}}, n::Int)
     leading = length(effective) + unpaired
     return vcat([leading], ones(Int, length(effective)))
 end
+
+"""Reconstruct an invariant matrix from its block-diagonal form: `Q R Q'`,
+the inverse of [`block_diagonalize`](@ref)."""
+function reconstruct_matrix(R::AbstractMatrix, Q::AbstractMatrix)
+    return Q * R * transpose(Q)
+end

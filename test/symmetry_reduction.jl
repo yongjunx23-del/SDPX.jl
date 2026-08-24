@@ -68,3 +68,10 @@ end
     D = SDPX.block_diagonalize(C, Q2)
     @test SDPX.is_block_diagonal(D, SDPX.transposition_block_sizes([(1, 2), (3, 4)], 4))
 end
+
+@testset "Phase 7 SymmetryReduction block-diagonalization round-trip" begin
+    Q = SDPX.transposition_block_basis([(1, 2)], 3)
+    A = [1.0 2.0 3.0; 2.0 1.0 3.0; 3.0 3.0 5.0]
+    B = SDPX.block_diagonalize(A, Q)
+    @test isapprox(SDPX.reconstruct_matrix(B, Q), A; atol=1e-10)
+end
