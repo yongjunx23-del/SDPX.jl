@@ -59,11 +59,11 @@ after JIT warm-up). These are Julia heap bytes per iteration (BigFloat excludes 
 
 | arithmetic | per-iteration Julia alloc (B) |
 |---|---|
-| Float64 | 7 360 |
-| Float64x2 | 11 264 |
-| Float64x3 | 12 720 |
-| Float64x4 | 15 520 |
-| BigFloat256 | 103 040 |
+| Float64 | 6 464 |
+| Float64x2 | 10 336 |
+| Float64x3 | 11 856 |
+| Float64x4 | 14 688 |
+| BigFloat256 | 102 144 |
 
 (Phase-4b destructuring reductions, measured per commit: `d481dff` (factorize! result) and
 `db1cf53` (KKT phase timings) each saved ~80 B/iter across the family; cumulative Float64
