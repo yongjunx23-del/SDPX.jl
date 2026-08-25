@@ -42,6 +42,11 @@ import MultiFloatLinearAlgebra:
     MFLU,
     MFLDLT,
     MFQR,
+    AbstractMFFactorCache,
+    MFCholeskyCache,
+    MFLUCache,
+    MFLDLTCache,
+    MFRRQRCache,
     mfdot,
     gemv!,
     gemm!,
@@ -776,5 +781,492 @@ function SDPX.instantiate_multifloat_la_backend(
     config.provider === :multifloat_linear_algebra || return nothing
     return _Provider(MF; threads=threads)
 end
+
+# ---------------------------------------------------------------------------
+# FactorCache provider adapters (Subagent F).
+#
+# Each adapter subtypes `SDPX.AbstractFactorCache{T}` and wraps one of MFLA's
+# reusable caches (`MFCholeskyCache`, `MFLUCache`, `MFLDLTCache`,
+# `MFRRQRCache`).  All capacity is committed in `prepare!` (the single
+# allocation point); the warm `factorize!` + `solve!` path reuses owned storage
+# and is measured `@allocated == 0`.  No metadata snapshot is produced through
+# a standalone factor API: ownership stays entirely inside the wrapped cache.
+# Failure is fail-closed: `factorize!` sets `Failed` and rethrows; `solve!` /
+# `refine_once!` require state `Fresh`.
+# ---------------------------------------------------------------------------
+
+"""
+    MFLAMemorySnapshot
+
+Host-side bytes owned by an MFLA factor cache, split by where the bytes live:
+`julia_bytes` is GC-tracked Julia heap for the factor matrix / metadata arrays;
+`native_bytes` is non-GC native memory (MPFR significands for BigFloat-backed
+MultiFloat, otherwise zero for the isbits x2/x3/x4 limbs which live inside the
+Julia array).  Computed on the COLD path only (diagnostics / tests).
+"""
+function _mfla_memory_bytes(inner::AbstractMFFactorCache{MF}) where {MF}
+    factors_storage = sizeof(factor_matrix(inner))
+    # x2/x3/x4 MultiFloat limbs are isbits and live inside the Julia `Matrix`;
+    # there is no separately-heap-allocated MPFR significand.  So the factor
+    # storage is Julia-tracked and native MPFR memory is zero.
+    return (
+        julia_bytes = factors_storage,
+        native_bytes = 0,
+    )
+end
+
+# --- Cholesky ---------------------------------------------------------------
+
+"""
+    MFCholeskyFactorCache{MF}
+
+SDPX `AbstractFactorCache` adapter wrapping an `MFCholeskyCache{MF}`.
+"""
+mutable struct MFCholeskyFactorCache{MF<:MultiFloat} <: SDPX.AbstractFactorCache{MF}
+    inner::MFCholeskyCache{MF}
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+MFCholeskyFactorCache(::Type{MF}) where {MF<:MultiFloat} = MFCholeskyFactorCache{MF}(
+    MFCholeskyCache(MF), 0, -1, 0, SDPX.Unprepared,
+)
+
+function SDPX.prepare!(
+    cache::MFCholeskyFactorCache{MF},
+    requirements::SDPX.FactorRequirements,
+) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.prepare!(cache.inner, requirements.n; nrhs=1)
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::MFCholeskyFactorCache{MF},
+    A::AbstractMatrix{MF},
+    matrix_epoch::Integer,
+) where {MF<:MultiFloat}
+    size(A, 1) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(size(cache.inner, 1))",
+    ))
+    size(A, 2) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        MultiFloatLinearAlgebra.factorize!(cache.inner, A; check=true)
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::MFCholeskyFactorCache{MF},
+    destination::AbstractVector{MF},
+    rhs::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::MFCholeskyFactorCache{MF},
+    destination::AbstractMatrix{MF},
+    rhs::AbstractMatrix{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::MFCholeskyFactorCache{MF},
+    residual::AbstractVector{MF},
+    correction::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh_for_refine(cache.status)
+    MultiFloatLinearAlgebra.solve!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::MFCholeskyFactorCache{MF}) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::MFCholeskyFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::MFCholeskyFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::MFCholeskyFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::MFCholeskyFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::MFCholeskyFactorCache{MF}) where {MF<:MultiFloat}
+    mem = _mfla_memory_bytes(cache.inner)
+    return (
+        provider = :multifloat_linear_algebra,
+        kind = factor_kind(cache.inner),
+        n = size(cache.inner, 1),
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = MultiFloatLinearAlgebra.factor_status(cache.inner),
+        julia_bytes = mem.julia_bytes,
+        native_bytes = mem.native_bytes,
+    )
+end
+
+# --- LU --------------------------------------------------
+
+mutable struct MFLUFactorCache{MF<:MultiFloat} <: SDPX.AbstractFactorCache{MF}
+    inner::MFLUCache{MF}
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+MFLUFactorCache(::Type{MF}) where {MF<:MultiFloat} = MFLUFactorCache{MF}(
+    MFLUCache(MF), 0, -1, 0, SDPX.Unprepared,
+)
+
+function SDPX.prepare!(
+    cache::MFLUFactorCache{MF},
+    requirements::SDPX.FactorRequirements,
+) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.prepare!(cache.inner, requirements.n; nrhs=1)
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::MFLUFactorCache{MF},
+    A::AbstractMatrix{MF},
+    matrix_epoch::Integer,
+) where {MF<:MultiFloat}
+    size(A, 1) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(size(cache.inner, 1))",
+    ))
+    size(A, 2) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        MultiFloatLinearAlgebra.factorize!(cache.inner, A; check=true)
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::MFLUFactorCache{MF},
+    destination::AbstractVector{MF},
+    rhs::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::MFLUFactorCache{MF},
+    destination::AbstractMatrix{MF},
+    rhs::AbstractMatrix{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::MFLUFactorCache{MF},
+    residual::AbstractVector{MF},
+    correction::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh_for_refine(cache.status)
+    MultiFloatLinearAlgebra.solve!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::MFLUFactorCache{MF}) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::MFLUFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::MFLUFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::MFLUFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::MFLUFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::MFLUFactorCache{MF}) where {MF<:MultiFloat}
+    mem = _mfla_memory_bytes(cache.inner)
+    return (
+        provider = :multifloat_linear_algebra,
+        kind = factor_kind(cache.inner),
+        n = size(cache.inner, 1),
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = MultiFloatLinearAlgebra.factor_status(cache.inner),
+        julia_bytes = mem.julia_bytes,
+        native_bytes = mem.native_bytes,
+    )
+end
+
+# --- LDLT --------------------------------------------------
+
+mutable struct MFLDLTFactorCache{MF<:MultiFloat} <: SDPX.AbstractFactorCache{MF}
+    inner::MFLDLTCache{MF}
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+MFLDLTFactorCache(::Type{MF}) where {MF<:MultiFloat} = MFLDLTFactorCache{MF}(
+    MFLDLTCache(MF), 0, -1, 0, SDPX.Unprepared,
+)
+
+function SDPX.prepare!(
+    cache::MFLDLTFactorCache{MF},
+    requirements::SDPX.FactorRequirements,
+) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.prepare!(cache.inner, requirements.n; nrhs=1)
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::MFLDLTFactorCache{MF},
+    A::AbstractMatrix{MF},
+    matrix_epoch::Integer,
+) where {MF<:MultiFloat}
+    size(A, 1) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(size(cache.inner, 1))",
+    ))
+    size(A, 2) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        MultiFloatLinearAlgebra.factorize!(cache.inner, A; check=true)
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::MFLDLTFactorCache{MF},
+    destination::AbstractVector{MF},
+    rhs::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::MFLDLTFactorCache{MF},
+    destination::AbstractMatrix{MF},
+    rhs::AbstractMatrix{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::MFLDLTFactorCache{MF},
+    residual::AbstractVector{MF},
+    correction::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh_for_refine(cache.status)
+    MultiFloatLinearAlgebra.solve!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::MFLDLTFactorCache{MF}) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::MFLDLTFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::MFLDLTFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::MFLDLTFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::MFLDLTFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::MFLDLTFactorCache{MF}) where {MF<:MultiFloat}
+    mem = _mfla_memory_bytes(cache.inner)
+    return (
+        provider = :multifloat_linear_algebra,
+        kind = factor_kind(cache.inner),
+        n = size(cache.inner, 1),
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = MultiFloatLinearAlgebra.factor_status(cache.inner),
+        julia_bytes = mem.julia_bytes,
+        native_bytes = mem.native_bytes,
+    )
+end
+
+# --- RRQR --------------------------------------------------
+
+mutable struct MFRRQRFactorCache{MF<:MultiFloat} <: SDPX.AbstractFactorCache{MF}
+    inner::MFRRQRCache{MF}
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+MFRRQRFactorCache(::Type{MF}) where {MF<:MultiFloat} = MFRRQRFactorCache{MF}(
+    MFRRQRCache(MF), 0, -1, 0, SDPX.Unprepared,
+)
+
+function SDPX.prepare!(
+    cache::MFRRQRFactorCache{MF},
+    requirements::SDPX.FactorRequirements,
+) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.prepare!(cache.inner, requirements.n; nrhs=1)
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::MFRRQRFactorCache{MF},
+    A::AbstractMatrix{MF},
+    matrix_epoch::Integer,
+) where {MF<:MultiFloat}
+    size(A, 1) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(size(cache.inner, 1))",
+    ))
+    size(A, 2) == size(cache.inner, 1) || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        MultiFloatLinearAlgebra.factorize!(cache.inner, A; check=true)
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::MFRRQRFactorCache{MF},
+    destination::AbstractVector{MF},
+    rhs::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::MFRRQRFactorCache{MF},
+    destination::AbstractMatrix{MF},
+    rhs::AbstractMatrix{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh(cache.status)
+    MultiFloatLinearAlgebra.solve!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::MFRRQRFactorCache{MF},
+    residual::AbstractVector{MF},
+    correction::AbstractVector{MF},
+) where {MF<:MultiFloat}
+    SDPX._require_fresh_for_refine(cache.status)
+    MultiFloatLinearAlgebra.solve!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::MFRRQRFactorCache{MF}) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::MFRRQRFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::MFRRQRFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::MFRRQRFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::MFRRQRFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::MFRRQRFactorCache{MF}) where {MF<:MultiFloat}
+    mem = _mfla_memory_bytes(cache.inner)
+    return (
+        provider = :multifloat_linear_algebra,
+        kind = factor_kind(cache.inner),
+        n = size(cache.inner, 1),
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = MultiFloatLinearAlgebra.factor_status(cache.inner),
+        julia_bytes = mem.julia_bytes,
+        native_bytes = mem.native_bytes,
+    )
+end
+
+# A single `prepare!`/`factorize!`/`solve!`/`refine_once!`/`invalidate!` entry
+# for every wrapped MFLA cache is guaranteed by the concrete methods above; any
+# FactorCache operation on an unprepared / failed cache fails closed through
+# `_require_fresh`.
 
 end

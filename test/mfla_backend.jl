@@ -742,12 +742,12 @@ if _MFLA_LOADED
         ext = Base.get_extension(SDPX, :SDPXMultiFloatLinearAlgebraExt)
         capacity_before = MultiFloatLinearAlgebra.workspace_capacity(
             backend.provider.workspace,
-        ).factor
+        ).factor_capacity
         wider = Matrix{T}(I, 7, 7) + T(0.05) .* ones(T, 7, 7)
         second = SDPX.la_lu_factor!(backend, copy(wider))
         capacity_after = MultiFloatLinearAlgebra.workspace_capacity(
             backend.provider.workspace,
-        ).factor
+        ).factor_capacity
         @test first !== nothing
         @test second !== nothing
         @test capacity_after >= 7

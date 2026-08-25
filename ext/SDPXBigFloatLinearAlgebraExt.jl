@@ -495,4 +495,540 @@ function SDPX.la_bfla_axpby!(provider::_Provider, alpha, x, beta, y)
     return y
 end
 
+# ---------------------------------------------------------------------------
+# FactorCache provider adapters (Subagent F).
+#
+# Each adapter subtypes `SDPX.AbstractFactorCache{BigFloat}` and wraps one of
+# BFLA's owned, precision-specific reusable caches (`BFLACholeskyCache`,
+# `BFLALUCache`, `BFLALDLTCache`, `BFLARRQRCache`).  `prepare!` is the single
+# allocation point; it commits the owned factor matrix, scalar scratch, and the
+# BFLA workspace at an explicit `precision_bits`.  The warm `factorize!` +
+# `solve!` path writes into the cache's existing owned BigFloat destinations and
+# into caller-owned solution buffers (`solve_trusted!`), so no new BigFloat
+# objects are created on the hot path.  No metadata snapshot is produced through
+# a standalone factor API; ownership stays inside the wrapped cache.  Failure is
+# fail-closed: `factorize!` sets `Failed` and rethrows; `solve!`/`refine_once!`
+# require state `Fresh`.
+# ---------------------------------------------------------------------------
+
+"""
+    BigFloatFactorRequirements
+
+Provider requirements for a BigFloat factor cache: matrix dimension `n`, the
+symbolic `symbolic_epoch`, and the exact working `precision_bits`.  Carries the
+big float precision that the stock `SDPX.FactorRequirements` does not.
+"""
+struct BigFloatFactorRequirements <: SDPX.AbstractFactorRequirements
+    n::Int
+    symbolic_epoch::Int
+    precision_bits::Int
+    workspace_workers::Int
 end
+
+BigFloatFactorRequirements(n::Int, precision_bits::Int) =
+    BigFloatFactorRequirements(n, 0, precision_bits, 1)
+
+"""
+    _bfla_native_bytes(precision_bits, element_count) -> Int
+
+Native (non-GC) MPFR significand bytes owned by a `BigFloat` factor matrix: each
+BigFloat at `precision_bits` carries `ceil(precision_bits/64)` 64-bit MPFR limbs
+(plus per-object MPFR overhead, omitted here for a stable floor estimate).
+Julia-GC bytes are reported separately in `factor_diagnostics`.
+"""
+function _bfla_native_bytes(precision_bits::Int, element_count::Int)
+    limbs_per = cld(precision_bits, 64)
+    return max(limbs_per, 1) * sizeof(UInt) * element_count
+end
+
+# --- Cholesky ---------------------------------------------------------------
+
+"""
+    BFLCholeskyFactorCache
+
+SDPX `AbstractFactorCache{BigFloat}` adapter wrapping a `BFLACholeskyCache`.
+"""
+mutable struct BFLCholeskyFactorCache <: SDPX.AbstractFactorCache{BigFloat}
+    inner::BFLA.BFLACholeskyCache
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+BFLCholeskyFactorCache(backend::BFLA.AbstractBFLABackend=BFLA.NativeBackend()) =
+    BFLCholeskyFactorCache(BFLA.BFLACholeskyCache(backend), 0, -1, 0, SDPX.Unprepared)
+
+function SDPX.prepare!(
+    cache::BFLCholeskyFactorCache,
+    requirements::BigFloatFactorRequirements,
+)
+    BFLA.prepare!(
+        cache.inner,
+        requirements.n,
+        requirements.precision_bits;
+        nrhs=1,
+        workspace_workers=requirements.workspace_workers,
+    )
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::BFLCholeskyFactorCache,
+    A::AbstractMatrix{BigFloat},
+    matrix_epoch::Integer,
+)
+    size(A, 1) == cache.inner.n || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(cache.inner.n)",
+    ))
+    size(A, 2) == cache.inner.n || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        BFLA.factorize!(cache.inner, A)
+        BFLA.issuccess(cache.inner) || throw(ArgumentError(
+            "BFLA Cholesky factorization failed: status $(BFLA.factor_status(cache.inner))",
+        ))
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::BFLCholeskyFactorCache,
+    destination::AbstractVector{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::BFLCholeskyFactorCache,
+    destination::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::BFLCholeskyFactorCache,
+    residual::AbstractVector{BigFloat},
+    correction::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh_for_refine(cache.status)
+    BFLA.solve_trusted!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::BFLCholeskyFactorCache)
+    BFLA.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::BFLCholeskyFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::BFLCholeskyFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::BFLCholeskyFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::BFLCholeskyFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::BFLCholeskyFactorCache)
+    p = cache.inner.precision_bits
+    n = cache.inner.n
+    return (
+        provider = :bigfloat_linear_algebra,
+        kind = BFLA.factor_kind(cache.inner),
+        n = n,
+        precision_bits = p,
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = BFLA.factor_status(cache.inner).kind,
+        julia_bytes = n * n * sizeof(BigFloat),
+        native_bytes = _bfla_native_bytes(p, n * n),
+    )
+end
+
+# --- LU --------------------------------------------------
+
+mutable struct BFLALUFactorCache <: SDPX.AbstractFactorCache{BigFloat}
+    inner::BFLA.BFLALUCache
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+BFLALUFactorCache(backend::BFLA.AbstractBFLABackend=BFLA.NativeBackend()) =
+    BFLALUFactorCache(BFLA.BFLALUCache(backend), 0, -1, 0, SDPX.Unprepared)
+
+function SDPX.prepare!(
+    cache::BFLALUFactorCache,
+    requirements::BigFloatFactorRequirements,
+)
+    BFLA.prepare!(
+        cache.inner,
+        requirements.n,
+        requirements.precision_bits;
+        nrhs=1,
+        workspace_workers=requirements.workspace_workers,
+    )
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::BFLALUFactorCache,
+    A::AbstractMatrix{BigFloat},
+    matrix_epoch::Integer,
+)
+    size(A, 1) == cache.inner.n || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(cache.inner.n)",
+    ))
+    size(A, 2) == cache.inner.n || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        BFLA.factorize!(cache.inner, A)
+        BFLA.issuccess(cache.inner) || throw(ErrorException(
+            "BFLA LU factorization failed: $(BFLA.factor_status(cache.inner))",
+        ))
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::BFLALUFactorCache,
+    destination::AbstractVector{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::BFLALUFactorCache,
+    destination::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::BFLALUFactorCache,
+    residual::AbstractVector{BigFloat},
+    correction::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh_for_refine(cache.status)
+    BFLA.solve_trusted!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::BFLALUFactorCache)
+    BFLA.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::BFLALUFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::BFLALUFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::BFLALUFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::BFLALUFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::BFLALUFactorCache)
+    p = cache.inner.precision_bits
+    n = cache.inner.n
+    return (
+        provider = :bigfloat_linear_algebra,
+        kind = BFLA.factor_kind(cache.inner),
+        n = n,
+        precision_bits = p,
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = BFLA.factor_status(cache.inner).kind,
+        julia_bytes = n * n * sizeof(BigFloat),
+        native_bytes = _bfla_native_bytes(p, n * n),
+    )
+end
+
+# --- LDLT --------------------------------------------------
+
+mutable struct BFLALDLTFactorCache <: SDPX.AbstractFactorCache{BigFloat}
+    inner::BFLA.BFLALDLTCache
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+BFLALDLTFactorCache(backend::BFLA.AbstractBFLABackend=BFLA.NativeBackend()) =
+    BFLALDLTFactorCache(BFLA.BFLALDLTCache(backend), 0, -1, 0, SDPX.Unprepared)
+
+function SDPX.prepare!(
+    cache::BFLALDLTFactorCache,
+    requirements::BigFloatFactorRequirements,
+)
+    BFLA.prepare!(
+        cache.inner,
+        requirements.n,
+        requirements.precision_bits;
+        nrhs=1,
+        workspace_workers=requirements.workspace_workers,
+    )
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::BFLALDLTFactorCache,
+    A::AbstractMatrix{BigFloat},
+    matrix_epoch::Integer,
+)
+    size(A, 1) == cache.inner.n || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(cache.inner.n)",
+    ))
+    size(A, 2) == cache.inner.n || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        BFLA.factorize!(cache.inner, A)
+        BFLA.issuccess(cache.inner) || throw(ErrorException(
+            "BFLA LDLT factorization failed: $(BFLA.factor_status(cache.inner))",
+        ))
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::BFLALDLTFactorCache,
+    destination::AbstractVector{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::BFLALDLTFactorCache,
+    destination::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::BFLALDLTFactorCache,
+    residual::AbstractVector{BigFloat},
+    correction::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh_for_refine(cache.status)
+    BFLA.solve_trusted!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::BFLALDLTFactorCache)
+    BFLA.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::BFLALDLTFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::BFLALDLTFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::BFLALDLTFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::BFLALDLTFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::BFLALDLTFactorCache)
+    p = cache.inner.precision_bits
+    n = cache.inner.n
+    return (
+        provider = :bigfloat_linear_algebra,
+        kind = BFLA.factor_kind(cache.inner),
+        n = n,
+        precision_bits = p,
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = BFLA.factor_status(cache.inner).kind,
+        julia_bytes = n * n * sizeof(BigFloat),
+        native_bytes = _bfla_native_bytes(p, n * n),
+    )
+end
+
+# --- RRQR --------------------------------------------------
+
+mutable struct BFLARRQRFactorCache <: SDPX.AbstractFactorCache{BigFloat}
+    inner::BFLA.BFLARRQRCache
+    symbolic_epoch::Int
+    matrix_epoch::Int
+    factor_epoch::Int
+    status::SDPX.FactorCacheState
+end
+
+BFLARRQRFactorCache(backend::BFLA.AbstractBFLABackend=BFLA.NativeBackend()) =
+    BFLARRQRFactorCache(BFLA.BFLARRQRCache(backend), 0, -1, 0, SDPX.Unprepared)
+
+function SDPX.prepare!(
+    cache::BFLARRQRFactorCache,
+    requirements::BigFloatFactorRequirements,
+)
+    BFLA.prepare!(
+        cache.inner,
+        requirements.n,
+        requirements.precision_bits;
+        nrhs=1,
+        workspace_workers=requirements.workspace_workers,
+    )
+    cache.symbolic_epoch = requirements.symbolic_epoch
+    cache.matrix_epoch = -1
+    cache.factor_epoch = 0
+    cache.status = SDPX.Prepared
+    return cache
+end
+
+function SDPX.factorize!(
+    cache::BFLARRQRFactorCache,
+    A::AbstractMatrix{BigFloat},
+    matrix_epoch::Integer,
+)
+    size(A, 1) == cache.inner.n || throw(DimensionMismatch(
+        "matrix dimension $(size(A, 1)) does not match cache dimension $(cache.inner.n)",
+    ))
+    size(A, 2) == cache.inner.n || throw(DimensionMismatch(
+        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+    ))
+    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
+        return cache
+    end
+    cache.status = SDPX.Factoring
+    try
+        BFLA.factorize!(cache.inner, A)
+        BFLA.issuccess(cache.inner) || throw(ErrorException(
+            "BFLA RRQR factorization failed: $(BFLA.factor_status(cache.inner))",
+        ))
+        cache.matrix_epoch = Int(matrix_epoch)
+        cache.factor_epoch += 1
+        cache.status = SDPX.Fresh
+    catch
+        cache.status = SDPX.Failed
+        rethrow()
+    end
+    return cache
+end
+
+function SDPX.solve!(
+    cache::BFLARRQRFactorCache,
+    destination::AbstractVector{BigFloat},
+    rhs::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.solve_multi!(
+    cache::BFLARRQRFactorCache,
+    destination::AbstractMatrix{BigFloat},
+    rhs::AbstractMatrix{BigFloat},
+)
+    SDPX._require_fresh(cache.status)
+    BFLA.solve_trusted!(destination, cache.inner, rhs)
+    return destination
+end
+
+function SDPX.refine_once!(
+    cache::BFLARRQRFactorCache,
+    residual::AbstractVector{BigFloat},
+    correction::AbstractVector{BigFloat},
+)
+    SDPX._require_fresh_for_refine(cache.status)
+    BFLA.solve_trusted!(correction, cache.inner, residual)
+    return correction
+end
+
+function SDPX.invalidate!(cache::BFLARRQRFactorCache)
+    BFLA.invalidate!(cache.inner)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Invalid
+    return cache
+end
+
+SDPX.factor_status(cache::BFLARRQRFactorCache) = cache.status
+SDPX.factor_matrix_epoch(cache::BFLARRQRFactorCache) = cache.matrix_epoch
+SDPX.factor_symbolic_epoch(cache::BFLARRQRFactorCache) = cache.symbolic_epoch
+SDPX.factor_epoch(cache::BFLARRQRFactorCache) = cache.factor_epoch
+
+function SDPX.factor_diagnostics(cache::BFLARRQRFactorCache)
+    p = cache.inner.precision_bits
+    n = cache.inner.n
+    return (
+        provider = :bigfloat_linear_algebra,
+        kind = BFLA.factor_kind(cache.inner),
+        n = n,
+        precision_bits = p,
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        factor_status_code = BFLA.factor_status(cache.inner).kind,
+        julia_bytes = n * n * sizeof(BigFloat),
+        native_bytes = _bfla_native_bytes(p, n * n),
+    )
+end
+
+end
+
