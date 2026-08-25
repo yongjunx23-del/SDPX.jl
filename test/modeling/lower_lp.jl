@@ -282,8 +282,8 @@ Test.@testset "L7 mixed and non-LP rejected" begin
         equalities=[],
     )
     err = _caught_lp_error(() -> SDPX.lower_lp_native(mixed))
-    @test err isa SDPX.UnsupportedNativeConeRoute
-    @test err.detected_families == [:lp_family, :soc_family]
+    @test err isa SDPX.LPLoweringError
+    @test err.reason === :non_lp_route
 
     psd = _lp_program(products=((SDPX.PSDCone(), 2),), equalities=[])
     err2 = _caught_lp_error(() -> SDPX.lower_lp_native(psd))

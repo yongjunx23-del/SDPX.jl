@@ -88,17 +88,17 @@ end
     @test SDPX.RowBlock(SDPX.ExponentialCone(), 1, 3).shape == 3
 end
 
-@testset "exponential plus any other family fails closed" begin
+@testset "exponential plus any other family is a first-class mixed layout" begin
     mixed_cases = (
-        (((SDPX.ExponentialCone(), 3), (SDPX.Nonnegative(), 2)), [:lp_family, :exp_family]),
-        (((SDPX.LorentzCone(), 3), (SDPX.ExponentialCone(), 3)), [:soc_family, :exp_family]),
-        (((SDPX.PSDCone(), 2), (SDPX.ExponentialCone(), 3)), [:sdp_family, :exp_family]),
+        (((SDPX.ExponentialCone(), 3), (SDPX.Nonnegative(), 2)), :mixed_family),
+        (((SDPX.LorentzCone(), 3), (SDPX.ExponentialCone(), 3)), :mixed_family),
+        (((SDPX.PSDCone(), 2), (SDPX.ExponentialCone(), 3)), :mixed_family),
     )
     for (products, expected) in mixed_cases
         program = _route_program_helper(products=products)
-        error_value = _exp_error(() -> SDPX.classify_native_cone_program(program))
-        @test error_value isa SDPX.UnsupportedNativeConeRoute
-        @test error_value.detected_families == expected
+        route = SDPX.classify_native_cone_program(program)
+        @test route isa SDPX.NativeConeRoute
+        @test route.route === expected
     end
 end
 

@@ -186,16 +186,16 @@ Test.@testset "S5 mixed and unsupported routes fail closed" begin
         objective=zeros(4),
     )
     err = _caught_sdp_error(() -> SDPX.lower_sdp_native(mixed))
-    @test err isa SDPX.UnsupportedNativeConeRoute
-    @test err.detected_families == [:soc_family, :sdp_family]
+    @test err isa SDPX.SDPLoweringError
+    @test err.reason === :non_sdp_route
 
     lp = _sdp_program(
         ((SDPX.PSDCone(), 1), (SDPX.Nonnegative(), 1));
         objective=zeros(2),
     )
     err2 = _caught_sdp_error(() -> SDPX.lower_sdp_native(lp))
-    @test err2 isa SDPX.UnsupportedNativeConeRoute
-    @test err2.detected_families == [:lp_family, :sdp_family]
+    @test err2 isa SDPX.SDPLoweringError
+    @test err2.reason === :non_sdp_route
 end
 
 Test.@testset "S6 BigFloat ownership and typed result" begin

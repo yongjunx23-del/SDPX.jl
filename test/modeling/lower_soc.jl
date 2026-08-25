@@ -243,7 +243,7 @@ end
 
     mixed = _soc_fixture(((SDPX.LorentzCone(), 2), (SDPX.PSDCone(), 2)))
     @test (err = _soc_caught(() -> SDPX.lower_soc_native(mixed));
-           err isa SDPX.UnsupportedNativeConeRoute)
+           err isa SDPX.SOCLoweringError && err.reason === :non_soc_route)
 
     psd = _soc_fixture(((SDPX.PSDCone(), 2),))
     @test (err = _soc_caught(() -> SDPX.lower_soc_native(psd));

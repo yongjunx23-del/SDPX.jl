@@ -1,0 +1,6 @@
+test(ir): update mixed-family expectations to first-class layout (Subagent A)
+
+- exp_route_phase_a: mixed exp families now classify as :mixed_family.
+- lower_lp/lower_soc/lower_sdp: mixed programs now fail closed with the
+  family lowerer error (:non_lp_route / :non_soc_route / :non_sdp_route)
+  instead of UnsupportedNativeConeRoute.
