@@ -66,9 +66,10 @@ end
     c2 = [1.0, 0.0]
     # Farkas ray y = [1, -1]: A'y = [0, -2] <= 0, b'y = -1 < 0 (no)
     # y = [-1, 1]: A'y = [0, 2] > 0 (no)
-    # This needs a careful ray; just check the function runs.
+    # This problem is actually FEASIBLE (x1 = x2 = 0.5 satisfies both rows),
+    # so no Farkas ray exists and verification must reject every candidate.
     state2 = SDPX.HSDState([0.0, 0.0], [0.0, 0.0], 1.0, 0.0, A2, b2, c2)
-    @test SDPX.verify_primal_infeasibility!(state2, [1.0, -1.0]) || true
+    @test !SDPX.verify_primal_infeasibility!(state2, [1.0, -1.0])
 end
 
 @testset "verify_dual_infeasibility!" begin
@@ -91,4 +92,34 @@ end
     x = [0.0, 5.0]
     SDPX.normalize_dual_ray!(x)
     @test norm(x) ≈ 1.0
+end
+
+@testset "rectangular HSD fixture (m != n)" begin
+    # Rectangular equality map with m = 2 rows and n = 3 columns (m != n).
+    # Any HSD residual helper that relies on `dot(s, x)` is only dimensionally
+    # valid when m == n (s is m-dim, x is n-dim), so it must be rejected on a
+    # rectangular state. This fixture makes such an accidental `dot(s, x)`
+    # fail immediately instead of silently producing garbage.
+    A = [1.0 2.0 3.0; 0.0 1.0 -1.0]
+    b = [1.0, 5.0]
+    c = [1.0, -1.0, 0.5]
+    x = [0.5, 0.5, 1.0]
+    s = [1.0, 2.0]
+    state = SDPX.HSDState(x, s, 1.0, 0.0, sparse(A), b, c)
+
+    # The fixture is genuinely rectangular: s (m=2) and x (n=3) differ in length.
+    @test size(state.A) == (2, 3)
+    @test length(state.x) == 3
+    @test length(state.s) == 2
+    @test length(state.s) != length(state.x)
+
+    # Every dimensionally-valid residual helper works with the rectangular A.
+    # Primal residual A*x + s - b*tau (m-dim).
+    @test SDPX.hsd_primal_residual(state) ≈ [4.5, -3.5]
+    # Dual residual -c'x - b's + kappa.
+    @test SDPX.hsd_dual_residual(state) ≈ -11.5
+    # Optimality gap c'x + b's.
+    @test SDPX.hsd_optimality_gap(state) ≈ 11.5
+    # Normalized residual is a well-defined nonnegative scalar.
+    @test SDPX.hsd_normalized_residual(state) >= 0
 end

@@ -26,6 +26,31 @@ runs one full profile on the current Julia/Ubuntu/four-thread configuration.
 The full profile preserves the prior test-file order and coverage; the quick
 profile only changes which files run by default.
 
+## Gate taxonomy
+
+The suite distinguishes four gate kinds. They fail for different reasons and
+must not be conflated:
+
+- **`allocation_regression_gate`** — `test/allocation_contract.jl`. Ceiling-based:
+  steady-state per-iteration Julia allocation must stay below a documented
+  ceiling per arithmetic. This is the gate that must remain **green** while the
+  hot loop is being optimized. It runs in both the quick and full profiles.
+- **`allocation_zero_gate`** — `benchmark/allocation_zero_gate.jl`. The
+  aspirational hard gate: 10 consecutive warm samples of one full Newton step
+  must **all** equal 0 Julia bytes (`all(sample == 0)`, no `minimum`, no
+  tolerance). BigFloat/MPFR-native memory is tracked separately. It is expected
+  to fail (exit non-zero) until the zero-allocation work lands, so it is a
+  standalone script rather than a blocking test-suite gate.
+- **`numerical_semantic_gate`** — `test/gates.jl` (+ `benchmark/gates.jl` and
+  `benchmark/baselines/gates.json`). Acceptance gate: status, iteration count,
+  objective, and residuals must match the recorded baseline within tight
+  cross-platform tolerances.
+- **`certificate_gate`** — `test/result_certificate.jl` and
+  `test/hsd_certificates.jl`. Verifies original-coordinate certificates:
+  optimal / primal-infeasible / dual-infeasible status is only reported from a
+  verified certificate, and the HSD residual helpers agree with the frozen
+  canonical form.
+
 ## Explicit provider smoke
 
 `test/provider_smoke.jl` is intentionally not part of `runtests.jl` or the

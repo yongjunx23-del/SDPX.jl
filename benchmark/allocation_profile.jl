@@ -90,5 +90,10 @@ function _run()
     return rows
 end
 
-_run()
-exit()
+rows = _run()
+any_failure = any(row -> !row.ok, rows)
+if any_failure
+    println("ALLOCATION PROFILE: at least one arithmetic failed")
+end
+# A failure must exit non-zero — never swallow it.
+exit(any_failure ? 1 : 0)

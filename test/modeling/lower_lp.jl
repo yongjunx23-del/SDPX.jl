@@ -153,9 +153,16 @@ Test.@testset "L2 product orthants and zero" begin
     @test low.primal_refs == program.primal_reconstruction
 
     core = low.core
-    G = Matrix(core.cons.Asp isa SDPX.DenseCons ? core.cons.Asp[1] : core.cons.Asp[1][1])
-    # G has 3 inequality rows: x1>=0, x2>=0, -x3>=0. x4 is free.
-    @test size(core.cons.Asp[1]) == (1, 4) || true  # DenseCons differences
+    # The sparse core stores one block per inequality row, and within each
+    # block one 1x1 coefficient per variable. This lowering produces 3
+    # inequality rows (x1>=0, x2>=0, -x3>=0) over 5 variables (x5 is a Reals
+    # block, so it is free and gets no inequality row).
+    @test length(core.cons.Asp) == 3
+    @test all(row -> length(row) == 5, core.cons.Asp)
+    @test all(row -> all(col -> size(col) == (1, 1), row), core.cons.Asp)
+    @test Matrix(core.cons.Asp[1][1]) == [1.0;;]   # x1 >= 0
+    @test Matrix(core.cons.Asp[2][2]) == [1.0;;]   # x2 >= 0
+    @test Matrix(core.cons.Asp[3][3]) == [-1.0;;]  # -x3 >= 0
     @test low.inequality_duals == [
         SDPX.CoreLPInequalityDual(false, 1),
         SDPX.CoreLPInequalityDual(false, 1),
