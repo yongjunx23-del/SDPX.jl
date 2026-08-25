@@ -4,6 +4,7 @@ using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, 
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("cone_algebra.jl")
+include("cones/symmetric/SymmetricCones.jl")
 include("cones/exponential.jl")
 include("cones/power.jl")
 include("hsd/hsd.jl")
@@ -112,5 +113,10 @@ export status, value, dual, dual_slack
 export primal_objective, dual_objective
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
+
+# Symmetric-cone algebra (Subagent I) lives in the nested module
+# `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of
+# the frozen public export set; callers reach it as `SDPX.SymmetricCones`.
+import .SymmetricCones
 
 end
