@@ -715,7 +715,7 @@ canonical reconstruction chain).  Tolerance derives from the element type
 `T` unless `tol` is given.
 """
 function hsd_solve!(state::HSDState{T}; max_iters::Integer=300, tol::Union{Nothing,T}=nothing) where {T}
-    tol = tol === nothing ? default_certificate_tol(T) : tol
+    tol = tol === nothing ? T(default_certificate_tol(T)) : tol
     # output buffers in original coordinates (same lengths as canonical here)
     x_orig = Vector{T}(undef, state.n)
     s_orig = Vector{T}(undef, state.m)
@@ -790,26 +790,29 @@ function hsd_solve!(state::HSDState{T}; max_iters::Integer=300, tol::Union{Nothi
 end
 
 # Search for a primal-infeasibility Farkas ray, verify it in original
-# coordinates, and write the reconstructed ray into `y_orig`.  Restores `state.y`
-# afterwards so the caller's iterate is left untouched.
+# coordinates, and write the reconstructed ray into `y_orig`.  On success the
+# certified ray remains in `state.y`, so a terminal status always leaves an
+# independently re-verifiable certificate.  A failed candidate restores the
+# previous iterate.
 function _try_farkas!(state::HSDState{T}, y_orig, tol::T) where {T}
     y_ray = Vector{T}(undef, state.m)
     _farkas_primal!(state, y_ray; tol=tol) || return false
     saved_y = copy(state.y)
     copyto!(state.y, y_ray)
     ok = verify_primal_infeasibility!(state.canonical, state, y_orig; tol=tol)
-    copyto!(state.y, saved_y)
+    ok || copyto!(state.y, saved_y)
     return ok
 end
 
 # Search for a dual-infeasibility (primal-unbounded) ray, verify it in original
-# coordinates, and write the reconstructed ray into `x_orig`/`s_orig`.
+# coordinates, and write the reconstructed ray into `x_orig`/`s_orig`.  As for
+# the primal ray, a successful certificate remains in the terminal state.
 function _try_dual_ray!(state::HSDState{T}, x_orig, s_orig, tol::T) where {T}
     x_ray = Vector{T}(undef, state.n)
     _farkas_dual!(state, x_ray; tol=tol) || return false
     saved_x = copy(state.x)
     copyto!(state.x, x_ray)
     ok = verify_dual_infeasibility!(state.canonical, state, x_orig, s_orig; tol=tol)
-    copyto!(state.x, saved_x)
+    ok || copyto!(state.x, saved_x)
     return ok
 end

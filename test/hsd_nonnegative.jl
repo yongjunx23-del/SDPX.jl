@@ -70,10 +70,10 @@ end
     status, st = _solve(A, b, c)
     @test status === :primal_infeasible
     yo = zeros(2)
-    saved = copy(st.y)
-    copyto!(st.y, [0.5, 0.5])
+    # A terminal certificate status must leave the accepted ray in the state,
+    # not merely report that a temporary fallback vector once verified.
     @test SDPX.verify_primal_infeasibility!(_lp_canonical(A, b, c), st, yo)
-    copyto!(st.y, saved)
+    @test yo ≈ [0.5, 0.5]
 end
 
 @testset "rank-deficient primal-infeasible LP certificate uses full scratch" begin

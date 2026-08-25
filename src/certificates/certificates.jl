@@ -30,8 +30,8 @@
 A problem-free default certificate tolerance for the element type `T`.
 """
 default_certificate_tol(::Type{Float64}) = 1e-6
-default_certificate_tol(::Type{BigFloat}) = 1e-14
-default_certificate_tol(::Type{T}) where {T} = 1e-8
+default_certificate_tol(::Type{BigFloat}) = parse(BigFloat, "1e-14")
+default_certificate_tol(::Type{T}) where {T} = one(T) / T(100_000_000)
 
 # ---------------------------------------------------------------------------
 # Small linear-algebra helpers (defined BEFORE the verifiers: Julia binds a

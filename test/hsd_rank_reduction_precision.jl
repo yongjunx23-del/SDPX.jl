@@ -29,3 +29,13 @@ end
         @test !reduction.incompatible
     end
 end
+
+@testset "HSD default certificate tolerances preserve arithmetic type" begin
+    for T in (Float64, Float64x2, Float64x3, Float64x4)
+        @test SDPX.default_certificate_tol(T) isa T
+    end
+    setprecision(BigFloat, 256) do
+        @test SDPX.default_certificate_tol(BigFloat) isa BigFloat
+        @test precision(SDPX.default_certificate_tol(BigFloat)) == 256
+    end
+end
