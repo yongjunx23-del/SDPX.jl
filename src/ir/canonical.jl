@@ -1,0 +1,583 @@
+#=====================================================================#
+#    Canonical conic program IR and canonicalizer (v0.6, Subagent C).
+#
+#    The FROZEN canonical conic form (docs/design/CANONICAL_FORM.md):
+#
+#        minimize c'x   s.t.   A x + s = b,   s in K
+#
+#    with `x` free in `R^n`, `s` and `y` in `R^m`, and the product cone
+#    `K = K_1 x ... x K_q` built from the canonical SLACK rows (the
+#    rows of `A` / entries of `b`). Dual: `maximize -b'y` s.t.
+#    `A'y + c = 0`, `y in K*`.
+#
+#    `CanonicalConicProgram{T}` is the solver-neutral canonical IR. It
+#    is produced from the frontend source IR (`NativeConeProgram`) by
+#    `canonicalize`. It carries the objective `c`, the equality map
+#    `A`, the right-hand side `b`, the canonical slack `cone_layout`,
+#    the arithmetic/precision, and the `reconstruction_chain` used to
+#    recover original-coordinate values and certificates.
+#
+#    Canonicalization rules (each maps a frontend source to a canonical
+#    slack block, keeping `x` in frontend order — free variables stay
+#    free):
+#
+#    - Reals variable / affine row  -> free `x`, no slack block.
+#    - v in K (variable block)      -> identity cone row: canonical
+#        slack `s = v` (or `s = -v` for Nonpositive; `s = M v` with the
+#        exact RSOC->SOC map for RotatedLorentzCone). Canonical row
+#        `-D v + s = 0`.
+#    - Affine conic constraint      -> cone row: canonical slack
+#        `s = D (A0 x - b0) in K`; canonical row `-D A0 x + s = -D b0`.
+#    - ZeroCone variable / affine   -> plain equality (a `:zero` slack
+#        block, no barrier degree).
+#    - Nonpositive                  -> sign map to `:nonnegative`.
+#    - RotatedLorentzCone (RSOC)    -> exact linear map `M` to SOC
+#        (symmetric, self-inverse; `M' == M`).
+#    - PSD                          -> unified lower-packed slack block.
+#    - PowerCone                    -> `:power` block; `alpha` is
+#        carried at the canonical precision `T` (never forced to
+#        Float64). Conversion to a *different* target arithmetic is
+#        deferred to the ExecutionPlan stage.
+#
+#    Family labels are fast-path hints only; any mix of native cones is
+#    a first-class canonical program (mixed LP+SOC, SOC+PSD, LP+PSD).
+#
+#    Include order: after src/ir/types.jl, src/ir/storage.jl and
+#    src/ir/layout.jl.
+#=====================================================================#
+
+using SparseArrays: sparse, spzeros, dropzeros!
+
+# ---------------------------------------------------------------------------
+# Exact RotatedLorentzCone -> SecondOrderCone linear map (frozen)
+# ---------------------------------------------------------------------------
+
+"""
+    _rsoc_to_soc_map(::Type{T}, dimension, bits) -> Matrix{T}
+
+The exact linear map `M : RSOC(n) -> SOC(n)` with
+
+    M(u, v, w) = ( (u+v)/sqrt(2), (u-v)/sqrt(2), w ),
+
+so that `(u,v,w) in RSOC(n) <=> M(u,v,w) in SOC(n)`. `M` is symmetric
+and an involution (`M' == M`, `M^2 == I`), so a single matrix serves
+for the primal, the dual (adjoint) and the inverse reconstruction.
+"""
+function _rsoc_to_soc_map(::Type{T}, dimension::Integer, bits::Int) where {T<:AbstractFloat}
+    dimension >= 3 || throw(ArgumentError("RotatedLorentzCone dimension must be >= 3, got $dimension"))
+    inv_sqrt_two = _owned_arithmetic_eval(
+        T,
+        () -> inv(sqrt(owned_arithmetic_copy(T, 2; precision_bits=bits)));
+        precision_bits=bits,
+    )
+    map = zeros(T, Int(dimension), Int(dimension))
+    map[1, 1] = inv_sqrt_two
+    map[1, 2] = inv_sqrt_two
+    map[2, 1] = inv_sqrt_two
+    map[2, 2] = -inv_sqrt_two
+    for i in 3:Int(dimension)
+        map[i, i] = owned_arithmetic_copy(T, 1; precision_bits=bits)
+    end
+    return map
+end
+
+# ---------------------------------------------------------------------------
+# Reconstruction chain
+# ---------------------------------------------------------------------------
+
+"""
+    SDPX.CanonicalReconstructionChain{T<:AbstractFloat}
+
+Immutable metadata that maps a [`CanonicalConicProgram`](@ref) back to
+the frontend source IR (`NativeConeProgram`) coordinates, so later
+waves can reconstruct original-coordinate values and verified
+certificates (never from raw `tau`/`kappa` alone — see
+docs/design/HSD_FORMULATION.md §7/§8).
+
+Fields
+- `objective_sign::Int` — `+1` for `Minimize`, `-1` for `Maximize`
+  (the canonical `c` is always minimization coefficients).
+- `objective_constant::T` — the original objective constant.
+- `primal_refs::Vector{VariableRef}` — frontend variable, in `x`
+  order.
+- `constraint_refs::Vector{ConstraintRef}` — frontend constraint dual,
+  in original row order.
+- `variable_dual_slack_refs::Vector{VariableRef}` — frontend variable
+  used for variable dual-slack reconstruction.
+- `source_model::UInt64` — the owning frontend model identity.
+
+The per-block reconstruction maps (`sign` / exact linear `M`) live on
+each [`ConeBlockDescriptor`](@ref); the chain adds the objective / ref
+provenance.
+"""
+struct CanonicalReconstructionChain{T<:AbstractFloat}
+    objective_sign::Int
+    objective_constant::T
+    primal_refs::Vector{VariableRef}
+    constraint_refs::Vector{ConstraintRef}
+    variable_dual_slack_refs::Vector{VariableRef}
+    source_model::UInt64
+end
+
+# ---------------------------------------------------------------------------
+# Canonical program type
+# ---------------------------------------------------------------------------
+
+"""
+    SDPX.CanonicalConicProgram{T<:AbstractFloat}
+
+The frozen canonical conic program `min c'x s.t. A x + s = b, s in K`.
+This is the solver-neutral IR consumed by the later solver waves; it
+carries the arithmetic/precision, the objective, the equality map, the
+right-hand side, the canonical slack layout, and the reconstruction
+chain back to the frontend. It holds no KKT factor, no HSD state, no
+provider and no formulation choice.
+"""
+struct CanonicalConicProgram{T<:AbstractFloat}
+    arithmetic::ArithmeticSpec{T}
+    precision_bits::Int
+    c::Vector{T}
+    A::SparseMatrixCSC{T,Int}
+    b::Vector{T}
+    cone_layout::ConeProductLayout
+    reconstruction_chain::CanonicalReconstructionChain{T}
+end
+
+program_arithmetic(canonical::CanonicalConicProgram) = canonical.arithmetic
+program_precision_bits(canonical::CanonicalConicProgram) = canonical.precision_bits
+canonical_objective(canonical::CanonicalConicProgram) = canonical.c
+canonical_equality(canonical::CanonicalConicProgram) = canonical.A
+canonical_rhs(canonical::CanonicalConicProgram) = canonical.b
+canonical_num_variables(canonical::CanonicalConicProgram) = length(canonical.c)
+canonical_num_slack(canonical::CanonicalConicProgram) = canonical.cone_layout.dimension
+canonical_reconstruction_chain(canonical::CanonicalConicProgram) = canonical.reconstruction_chain
+
+"""
+    canonical_layout(canonical::CanonicalConicProgram) -> ConeProductLayout
+
+The canonical slack layout of a [`CanonicalConicProgram`](@ref),
+re-using the already-frozen layout blocks so the hot path never
+rebuilds it.
+"""
+canonical_layout(canonical::CanonicalConicProgram) = canonical.cone_layout
+
+# ---------------------------------------------------------------------------
+# Canonicalizer: NativeConeProgram -> CanonicalConicProgram
+# ---------------------------------------------------------------------------
+
+# For a frontend *variable* block return `nothing` (Reals) or a tuple
+# (canonical_cone, apref, recon_sign, linear, param):
+#   - canonical A entries on this block's columns are `apref * (I or M)`
+#   - `recon_sign` maps canonical slack -> original variable (sigma)
+#   - `linear` is `nothing` (identity) or the RSOC->SOC map `M`
+function _variable_block_spec(block::NativeBlock)
+    cone = block.cone
+    cone === :free && return nothing
+    cone === :nonnegative && return (:nonnegative, -1, 1, nothing, nothing)
+    cone === :nonpositive && return (:nonnegative, 1, -1, nothing, nothing)
+    cone === :zero && return (:zero, -1, 1, nothing, nothing)
+    cone === :soc && return (:soc, -1, 1, nothing, nothing)
+    cone === :rsoc && return (:soc, -1, 1, nothing, nothing)
+    cone === :psd && return (:psd, -1, 1, nothing, nothing)
+    cone === :exp && return (:exp, -1, 1, nothing, nothing)
+    cone === :power && return (:power, -1, 1, nothing, block.domain.alpha)
+    throw(ArgumentError("unhandled variable cone kind $cone in canonicalizer"))
+end
+
+# For a frontend *affine row block* domain return `nothing` (Reals) or
+# a tuple (canonical_cone, apref, recon_sign, linear, param).
+function _row_block_spec(domain)
+    cone = _domain_cone(domain)
+    cone === :free && return nothing
+    cone === :nonnegative && return (:nonnegative, -1, 1, nothing, nothing)
+    cone === :nonpositive && return (:nonnegative, 1, -1, nothing, nothing)
+    cone === :zero && return (:zero, -1, 1, nothing, nothing)
+    cone === :soc && return (:soc, -1, 1, nothing, nothing)
+    cone === :rsoc && return (:soc, -1, 1, nothing, nothing)
+    cone === :psd && return (:psd, -1, 1, nothing, nothing)
+    cone === :exp && return (:exp, -1, 1, nothing, nothing)
+    cone === :power && return (:power, -1, 1, nothing, domain.alpha)
+    throw(ArgumentError("unhandled row cone kind $cone in canonicalizer"))
+end
+
+# Emit canonical slack rows for one *affine* cone block:
+#   canonical A row = apref * (D * A0 row),  canonical b = apref * (D * rhs).
+function _emit_affine_rows!(
+    A_rows, A_cols, A_vals, b_vals, rowcount,
+    source_rows, rhs_ref, At, apref, Dmap,
+    ::Type{T}, bits,
+) where {T<:AbstractFloat}
+    owned(v) = _owned_arithmetic_eval(T, v; precision_bits=bits)
+    if Dmap === nothing
+        for p in eachindex(source_rows)
+            r = source_rows[p]
+            newrow = rowcount + 1
+            for q in nzrange(At, r)
+                col = At.rowval[q]
+                val = At.nzval[q]
+                iszero(val) && continue
+                push!(A_rows, newrow)
+                push!(A_cols, col)
+                push!(A_vals, owned(() -> apref * val))
+            end
+            push!(b_vals, owned(() -> apref * rhs_ref[r]))
+            rowcount += 1
+        end
+    else
+        for k in 1:size(Dmap, 1)
+            newrow = rowcount + 1
+            acc = Dict{Int,T}()
+            bsum = zero(T)
+            for p in eachindex(source_rows)
+                mcoef = Dmap[k, p]
+                iszero(mcoef) && continue
+                r = source_rows[p]
+                for q in nzrange(At, r)
+                    col = At.rowval[q]
+                    val = At.nzval[q]
+                    iszero(val) && continue
+                    acc[col] = owned(() -> get(acc, col, zero(T)) + apref * mcoef * val)
+                end
+                bsum = owned(() -> bsum + apref * mcoef * rhs_ref[r])
+            end
+            for (col, v) in acc
+                iszero(v) && continue
+                push!(A_rows, newrow)
+                push!(A_cols, col)
+                push!(A_vals, v)
+            end
+            push!(b_vals, bsum)
+            rowcount += 1
+        end
+    end
+    return rowcount
+end
+
+"""
+    canonicalize(program::NativeConeProgram{T}) -> CanonicalConicProgram{T}
+
+Canonicalize the frontend source IR into the frozen canonical conic
+program. The canonical slack layout is derived from the canonical SLACK
+rows — never from the original product-variable blocks. `x` is kept in
+frontend order (free variables remain free). Every scalar is copied at
+the canonical arithmetic `T`/`precision_bits`. The reconstruction chain
+retains objective sign/constant and the frontend refs for
+original-coordinate certificate recovery.
+"""
+function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
+    bits = program.precision_bits
+    n = program_num_variables(program)
+
+    # ---- objective (frozen: minimize c'x) ----
+    c = Vector{T}(undef, n)
+    obj_sign = 1
+    for i in 1:n
+        c[i] = owned_arithmetic_copy(T, program.objective_vector[i]; precision_bits=bits)
+    end
+    if program.objective_sense isa Maximize
+        for i in 1:n
+            c[i] = _owned_arithmetic_eval(T, () -> -c[i]; precision_bits=bits)
+        end
+        obj_sign = -1
+    end
+    objective_constant = owned_arithmetic_copy(T, program.objective_constant; precision_bits=bits)
+
+    # ---- accumulation ----
+    A_rows = Int[]
+    A_cols = Int[]
+    A_vals = T[]
+    b_vals = T[]
+    descriptors = ConeBlockDescriptor{T}[]
+    rowcount = 0
+    owned_one = owned_arithmetic_copy(T, 1; precision_bits=bits)
+
+    at = SparseArrays.sparse(transpose(program.equality_matrix))
+    rhs = program.rhs
+
+    # ---- 1. product-variable blocks (variable-in-cone rows) ----
+    for (block_number, block) in enumerate(program.blocks)
+        spec = _variable_block_spec(block)
+        spec === nothing && continue            # Reals -> free x, no slack
+        canonical_cone, apref, recon_sign, linear, param = spec
+        dimension = block.shape
+        if block.cone === :rsoc
+            linear = _rsoc_to_soc_map(T, dimension, bits)
+        end
+        map = CanonicalBlockMap(
+            :variable, block_number, 1, Int(recon_sign),
+            linear, linear === nothing ? nothing : copy(linear),
+        )
+        push!(descriptors, ConeBlockDescriptor(
+            T, canonical_cone, dimension;
+            offset=rowcount + 1,
+            parameter=param === nothing ? zero(T) :
+                owned_arithmetic_copy(T, param; precision_bits=bits),
+            reconstruction=map,
+        ))
+        if linear === nothing
+            for position in 1:block.length
+                newrow = rowcount + 1
+                col = block.offset + position - 1
+                push!(A_rows, newrow)
+                push!(A_cols, col)
+                push!(A_vals, _owned_arithmetic_eval(
+                    T, () -> apref * owned_one; precision_bits=bits))
+                push!(b_vals, owned_arithmetic_copy(T, 0; precision_bits=bits))
+                rowcount += 1
+            end
+        else
+            for k in 1:dimension
+                newrow = rowcount + 1
+                for p in 1:dimension
+                    mcoef = linear[k, p]
+                    iszero(mcoef) && continue
+                    col = block.offset + p - 1
+                    push!(A_rows, newrow)
+                    push!(A_cols, col)
+                    push!(A_vals, _owned_arithmetic_eval(
+                        T, () -> -mcoef; precision_bits=bits))
+                end
+                push!(b_vals, owned_arithmetic_copy(T, 0; precision_bits=bits))
+                rowcount += 1
+            end
+        end
+    end
+
+    # ---- 2. affine row blocks (affine-cone constraints) ----
+    for (block_number, row_block) in enumerate(program.row_blocks)
+        spec = _row_block_spec(row_block.domain)
+        spec === nothing && continue            # Reals affine rows are vacuous
+        canonical_cone, apref, recon_sign, linear, param = spec
+        dimension = row_block.shape
+        if row_block.domain isa RotatedLorentzCone
+            linear = _rsoc_to_soc_map(T, dimension, bits)
+        end
+        map = CanonicalBlockMap(
+            :constraint, block_number, 1, Int(recon_sign),
+            linear, linear === nothing ? nothing : copy(linear),
+        )
+        push!(descriptors, ConeBlockDescriptor(
+            T, canonical_cone, dimension;
+            offset=rowcount + 1,
+            parameter=param === nothing ? zero(T) :
+                owned_arithmetic_copy(T, param; precision_bits=bits),
+            reconstruction=map,
+        ))
+        rowcount = _emit_affine_rows!(
+            A_rows, A_cols, A_vals, b_vals, rowcount,
+            row_block.rows, rhs, at, apref, linear, T, bits,
+        )
+    end
+
+    # ---- assemble sparse equality map ----
+    m = rowcount
+    A = SparseArrays.sparse(A_rows, A_cols, A_vals, m, n)
+    A = owned_sparse_copy(T, A; precision_bits=bits)
+    dropzeros!(A)
+    layout = canonical_layout(descriptors)
+    chain = CanonicalReconstructionChain(
+        obj_sign, objective_constant,
+        copy(program.primal_reconstruction),
+        copy(program.constraint_dual_reconstruction),
+        copy(program.variable_dual_slack_reconstruction),
+        program.source_model,
+    )
+    return CanonicalConicProgram(program.arithmetic, bits, c, A, b_vals, layout, chain)
+end
+
+# ---------------------------------------------------------------------------
+# Blockwise reconstruction maps (forward / backward), wired to the chain
+# ---------------------------------------------------------------------------
+
+"""
+    _block_forward!(canonical, dest, src, block)
+
+Apply one canonical block's forward reconstruction map
+(`original = sign * L * canonical`, `L = M` for RSOC else identity) to
+the slice of `src` owned by `block`, writing into `dest`.
+"""
+function _block_forward!(canonical::CanonicalConicProgram{T}, dest, src, block) where {T}
+    bits = canonical.precision_bits
+    off = block.offset
+    len = block.length
+    rmap = block.reconstruction
+    σ = rmap.sign
+    L = rmap.linear
+    if L === nothing
+        for i in 1:len
+            dest[off + i - 1] = _owned_arithmetic_eval(
+                T, () -> σ * src[off + i - 1]; precision_bits=bits)
+        end
+    else
+        for i in 1:len
+            acc = zero(T)
+            for j in 1:len
+                m = L[i, j]
+                iszero(m) && continue
+                acc = _owned_arithmetic_eval(
+                    T, () -> acc + m * src[off + j - 1]; precision_bits=bits)
+            end
+            dest[off + i - 1] = _owned_arithmetic_eval(
+                T, () -> σ * acc; precision_bits=bits)
+        end
+    end
+    return dest
+end
+
+"""
+    _block_backward!(canonical, dest, src, block)
+
+Inverse of [`_block_forward!`](@ref):
+`canonical = sign * (L' * original)`. For RSOC `L' == M`; identity
+otherwise, so the round-trip is exact.
+"""
+function _block_backward!(canonical::CanonicalConicProgram{T}, dest, src, block) where {T}
+    bits = canonical.precision_bits
+    off = block.offset
+    len = block.length
+    rmap = block.reconstruction
+    σ = rmap.sign
+    Ladj = rmap.linear_adjoint
+    if Ladj === nothing
+        for i in 1:len
+            dest[off + i - 1] = _owned_arithmetic_eval(
+                T, () -> σ * src[off + i - 1]; precision_bits=bits)
+        end
+    else
+        for i in 1:len
+            acc = zero(T)
+            for j in 1:len
+                m = Ladj[i, j]
+                iszero(m) && continue
+                acc = _owned_arithmetic_eval(
+                    T, () -> acc + m * src[off + j - 1]; precision_bits=bits)
+            end
+            dest[off + i - 1] = _owned_arithmetic_eval(
+                T, () -> σ * acc; precision_bits=bits)
+        end
+    end
+    return dest
+end
+
+"""
+    primal_forward!(canonical, x_out, s_out, x_canonical, s_canonical)
+
+Reconstruct original-coordinate variables `x_out` (length `n`) and the
+original-coordinate slack/departure `s_out` (length `m`) from a
+canonical point `(x_canonical, s_canonical)`. `x` is free and stays in
+frontend order (identity); `s` is mapped blockwise through each block's
+sign and exact linear map. Later solver waves use this to report primal
+values in original coordinates.
+"""
+function primal_forward!(
+    canonical::CanonicalConicProgram,
+    x_out, s_out, x_canonical, s_canonical,
+)
+    length(x_out) == canonical_num_variables(canonical) ||
+        throw(DimensionMismatch("x_out length $(length(x_out)) != n $(canonical_num_variables(canonical))"))
+    length(s_out) == canonical_num_slack(canonical) ||
+        throw(DimensionMismatch("s_out length $(length(s_out)) != m $(canonical_num_slack(canonical))"))
+    length(x_canonical) == length(x_out) ||
+        throw(DimensionMismatch("x_canonical length mismatch"))
+    length(s_canonical) == length(s_out) ||
+        throw(DimensionMismatch("s_canonical length mismatch"))
+    copyto!(x_out, x_canonical)
+    for block in canonical.cone_layout.blocks
+        _block_forward!(canonical, s_out, s_canonical, block)
+    end
+    return x_out, s_out
+end
+
+"""
+    primal_backward!(canonical, x_canonical, s_canonical, x_original)
+
+Build a canonical point from original variable values `x_original`:
+`x_canonical = x_original` and `s_canonical = b - A x`. This maps an
+original-coordinate primal into the canonical slack cone (used, e.g.,
+to seed or verify a primal certificate).
+"""
+function primal_backward!(
+    canonical::CanonicalConicProgram, x_canonical, s_canonical, x_original,
+)
+    n = length(x_original)
+    length(x_canonical) == n ||
+        throw(DimensionMismatch("x_canonical length $(length(x_canonical)) != n $n"))
+    length(s_canonical) == canonical_num_slack(canonical) ||
+        throw(DimensionMismatch("s_canonical length mismatch"))
+    copyto!(x_canonical, x_original)
+    LinearAlgebra.mul!(s_canonical, canonical.A, x_canonical)
+    @. s_canonical = canonical.b - s_canonical
+    return x_canonical, s_canonical
+end
+
+"""
+    dual_forward!(canonical, dest, y_canonical)
+
+Reconstruct original-coordinate duals (constraint duals for affine
+blocks, variable dual slacks for variable-in-cone blocks) from the
+canonical dual `y`. Mapped blockwise through each block's sign and
+exact linear map. The output is indexed by canonical slack row; a later
+wave assigns it to the frontend `ConstraintRef` / `VariableRef` via the
+reconstruction chain.
+"""
+function dual_forward!(canonical::CanonicalConicProgram, dest, y_canonical)
+    length(dest) == canonical_num_slack(canonical) ||
+        throw(DimensionMismatch("dest length mismatch"))
+    length(y_canonical) == length(dest) ||
+        throw(DimensionMismatch("y_canonical length mismatch"))
+    for block in canonical.cone_layout.blocks
+        _block_forward!(canonical, dest, y_canonical, block)
+    end
+    return dest
+end
+
+"""
+    dual_backward!(canonical, y_canonical, y_original)
+
+Inverse of [`dual_forward!`](@ref): map original-coordinate duals into
+the canonical dual `y`, blockwise through `sign` and the adjoint map.
+"""
+function dual_backward!(canonical::CanonicalConicProgram, y_canonical, y_original)
+    length(y_canonical) == canonical_num_slack(canonical) ||
+        throw(DimensionMismatch("y_canonical length mismatch"))
+    length(y_original) == length(y_canonical) ||
+        throw(DimensionMismatch("y_original length mismatch"))
+    for block in canonical.cone_layout.blocks
+        _block_backward!(canonical, y_canonical, y_original, block)
+    end
+    return y_canonical
+end
+
+"""
+    certificate_backward!(canonical, dest, ray; ray_kind)
+
+Reconstruct an original-coordinate Farkas certificate from a canonical
+certificate ray (frozen conventions, docs/design/HSD_FORMULATION.md §7):
+
+- `ray_kind = :dual_infeasible` — the ray is a canonical `x`; the
+  original variable ray is the same vector (identity, `x` is free and
+  in frontend order), written into `dest` (length `n`).
+- `ray_kind = :primal_infeasible` — the ray is a canonical `y`; the
+  original-coordinate constraint-dual / variable-dual-slack ray is the
+  blockwise reconstruction (length `m`).
+
+Ray normalization (`-b'y = 1` / `-c'x = 1`) and status assignment happen
+in a later wave from these original-coordinate certificates.
+"""
+function certificate_backward!(
+    canonical::CanonicalConicProgram, dest, ray; ray_kind::Symbol,
+)
+    if ray_kind === :dual_infeasible
+        length(dest) == canonical_num_variables(canonical) ||
+            throw(DimensionMismatch("dest must be length n for a dual-infeasible ray"))
+        length(ray) == length(dest) ||
+            throw(DimensionMismatch("ray length mismatch"))
+        copyto!(dest, ray)
+    elseif ray_kind === :primal_infeasible
+        dual_forward!(canonical, dest, ray)
+    else
+        throw(ArgumentError("unknown certificate ray_kind $(repr(ray_kind)); " *
+                            "expected :dual_infeasible or :primal_infeasible"))
+    end
+    return dest
+end

@@ -121,7 +121,8 @@ Classify an ordered native program into exactly one route family:
   is allowed).
 - `:mixed_family` — the program spans more than one family. A
   heterogeneous cone product is a first-class layout (see
-  [`cone_product_layout`](@ref)), not an error: the single-family
+  [`canonical_layout`](@ref) / [`canonicalize`](@ref)), not an error:
+  the single-family
   lowering paths fail closed at lowering time, while the unified HSD
   path consumes the layout.
 

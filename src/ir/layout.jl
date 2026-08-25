@@ -1,78 +1,156 @@
 #=====================================================================#
-#    Heterogeneous cone product layout (v0.5, Subagent A).
+#    Canonical slack-cone product layout (v0.6, Subagent C).
 #
 #    A `ConeProductLayout` is the solver-neutral description of an
-#    ordered product of native cone blocks. It is the IR that lets a
-#    single canonical program carry ANY mix of native cones (LP + SOC,
-#    SOC + PSD, LP + Exp, SOC + Power, PSD + Exp, ...) without a
+#    ordered product of native cone blocks. In the canonical conic form
+#
+#        minimize c'x   s.t.   A x + s = b,   s in K
+#
+#    the layout describes the block partition of the canonical SLACK
+#    `s` (and its conjugate dual `y`): the blocks are the rows of `A` /
+#    entries of `b`, NOT the original product-variable blocks. `x` is
+#    free (`R^n`); `s` and `y` are `m`-dimensional and live in the
+#    product cone `K = K_1 x ... x K_q`. This is the FROZEN convention
+#    of docs/design/CANONICAL_FORM.md §4.
+#
+#    The layout is the IR that lets a single canonical program carry
+#    ANY mix of native cones (LP + SOC, SOC + PSD, ...) without a
 #    per-family solver. It carries NO linear-algebra provider, NO KKT
 #    factorization, NO barrier implementation, and NO formulation
-#    choice: it only records the block geometry, cone parameters, dual
-#    orientation and reconstruction metadata.
+#    choice: it only records the block geometry, cone parameters, the
+#    dual orientation and per-block reconstruction metadata.
 #
-#    The layout is arithmetic-agnostic: the same layout describes a
-#    Float64, MultiFloat or BigFloat program.
+#    Layout is arithmetic-carried on the canonical element type `T`
+#    (the power-cone parameter must preserve the source precision — it
+#    is stored at `T`, never forced to Float64; conversion to a
+#    *different* target arithmetic happens only at ExecutionPlan time).
+#    `global_to_block` / `block_to_global` are pure offset arithmetic
+#    (allocation-free); `barrier_degree` gives `nu = sum(block
+#    barrier_degree)`.
 #
-#    Include order: after src/ir/types.jl (uses `NativeConeProgram`,
-#    `NativeBlock`, `block_*` accessors).
+#    Include order: after src/ir/types.jl and src/ir/storage.jl (uses
+#    `NativeConeProgram`, `NativeBlock`, `RowBlock`, and the PSD packed
+#    helpers).
 #=====================================================================#
+
+# ---------------------------------------------------------------------------
+# Per-block reconstruction metadata (source of each canonical slack block)
+# ---------------------------------------------------------------------------
+
+"""
+    SDPX.CanonicalBlockMap
+
+Reconstruction metadata of ONE canonical slack block back to the
+frontend source that produced it. `n`-dimensional `x` stays in the
+frontend order (identity); only the `m` slack rows are partitioned by
+the layout, and each slack block either enforces a frontend
+variable-in-cone membership or an affine-cone constraint.
+
+Fields
+- `source::Symbol` — `:variable` (from a frontend product `NativeBlock`)
+  or `:constraint` (from a frontend affine `RowBlock`).
+- `source_block::Int` — 1-based frontend block number owning this
+  block's rows (`NativeBlock` or `RowBlock` index).
+- `within_offset::Int` — 1-based first within-source position this
+  block's rows correspond to.
+- `sign::Int` — `±1` multiplier mapping a canonical slack coordinate to
+  the original coordinate. `-1` for a `Nonpositive`-source block that
+  was mapped to `:nonnegative` (`v <= 0` <-> `s = -v >= 0`), `+1`
+  otherwise.
+- `linear::Any` — the exact linear map applied to a source
+  `RotatedLorentzCone` (`:rsoc`) to reach `:soc` (`M : RSOC -> SOC`,
+  `s = M v`), or `nothing` when the block is an identity map.
+- `linear_adjoint::Any` — the adjoint `M'` (for the dual), or
+  `nothing`.
+"""
+struct CanonicalBlockMap
+    source::Symbol
+    source_block::Int
+    within_offset::Int
+    sign::Int
+    linear::Any
+    linear_adjoint::Any
+end
+
+CanonicalBlockMap(source::Symbol, source_block::Integer, within_offset::Integer, sign::Integer) =
+    CanonicalBlockMap(source, Int(source_block), Int(within_offset), Int(sign), nothing, nothing)
 
 # ---------------------------------------------------------------------------
 # Per-block descriptor
 # ---------------------------------------------------------------------------
 
 """
-    SDPX.ConeBlockDescriptor
+    SDPX.ConeBlockDescriptor{T<:AbstractFloat}
 
-Immutable descriptor of ONE block in a heterogeneous cone product.
+Immutable descriptor of ONE block in the canonical slack product cone.
 
 Fields
-- `cone::Symbol` — `:free`, `:nonnegative`, `:nonpositive`,
-  `:zero`, `:soc`, `:rsoc`, `:psd`, `:exp` or `:power`.
-- `offset::Int` — 1-based first scalar variable position of this
-  block in the global column vector.
-- `dimension::Int` — matrix dimension `n` for `:psd`, vector
-  dimension otherwise (fixed 3 for `:exp` and `:power`).
+- `cone::Symbol` — native cone kind: `:nonnegative`, `:soc`, `:psd`,
+  `:zero`, `:free`, `:exp` or `:power` (the canonical layout never
+  stores `:nonpositive`/`:rsoc`; those are canonicalized away by a
+  sign / exact-linear map).
+- `offset::Int` — 1-based first scalar canonical-slack row of this
+  block in the global row vector.
+- `dimension::Int` — matrix dimension `n` for `:psd`, vector dimension
+  otherwise (fixed 3 for `:exp` and `:power`).
 - `length::Int` — stored scalar count: `n` for vector cones,
   `n(n+1)/2` for a `:psd` block.
-- `storage::Symbol` — `:packed_lower` for `:psd`, `:vector`
-  otherwise.
-- `parameter::Float64` — cone parameter (`alpha` for `:power`,
-  `0.0` otherwise).
-- `dual_orientation::Symbol` — `:primal` or `:dual`.
-- `reconstruction::UInt64` — opaque block identity used by the
-  reconstruction maps to recover the source block.
+- `storage::Symbol` — `:packed_lower` for `:psd`, `:vector` otherwise.
+- `parameter::T` — cone parameter at the canonical precision (`alpha`
+  for `:power`, `zero(T)` otherwise).
+- `reconstruction::CanonicalBlockMap` — source map used to recover the
+  frontend variable / constraint-coordinate from this canonical block.
 """
-struct ConeBlockDescriptor
+struct ConeBlockDescriptor{T<:AbstractFloat}
     cone::Symbol
     offset::Int
     dimension::Int
     length::Int
     storage::Symbol
-    parameter::Float64
-    dual_orientation::Symbol
-    reconstruction::UInt64
+    parameter::T
+    reconstruction::CanonicalBlockMap
 end
 
 """
-    SDPX.ConeProductLayout{Blocks}
+    ConeBlockDescriptor{T}(cone, dimension, offset; parameter=zero(T),
+                           reconstruction=...)
 
-Ordered product-cone layout. `Blocks` is a `Tuple` of
-[`ConeBlockDescriptor`](@ref) (compile-time-known, used by the
-fast-path executors) or a `Vector{ConeBlockDescriptor}` (runtime
-programs).
-
-Fields
-- `blocks::Blocks` — the ordered block descriptors.
-- `dimension::Int` — total stored scalar dimension (sum of block
-  lengths).
-- `barrier_degree::Int` — sum of per-block barrier degrees (the
-  IPM complexity parameter `ν`).
+Build a canonical slack block descriptor at canonical arithmetic `T`,
+computing `length`/`storage` from `cone`/`dimension`.
 """
-struct ConeProductLayout{Blocks}
-    blocks::Blocks
-    dimension::Int
-    barrier_degree::Int
+function ConeBlockDescriptor(
+    ::Type{T},
+    cone::Symbol,
+    dimension::Integer;
+    offset::Integer=1,
+    parameter=zero(T),
+    reconstruction::CanonicalBlockMap=CanonicalBlockMap(:none, 0, 0, 1),
+) where {T<:AbstractFloat}
+    cone in (:nonnegative, :soc, :psd, :zero, :free, :exp, :power) ||
+        throw(ArgumentError("canonical cone kind $cone is not native; " *
+                            "canonicalize :nonpositive/:rsoc to :nonnegative/:soc first"))
+    dimension >= 1 || throw(ArgumentError("canonical block dimension must be >= 1, got $dimension"))
+    length_ = variable_length(PSDCone(), Int(dimension))
+    storage = cone === :psd ? :packed_lower : :vector
+    if cone === :psd
+        length_ = variable_length(PSDCone(), Int(dimension))
+    elseif cone === :exp || cone === :power
+        Int(dimension) == EXPONENTIAL_CONE_DIMENSION || throw(ArgumentError(
+            "canonical $cone block dimension must be $EXPONENTIAL_CONE_DIMENSION, got $dimension",
+        ))
+        length_ = Int(dimension)
+    else
+        length_ = Int(dimension)
+    end
+    return ConeBlockDescriptor{T}(
+        cone,
+        Int(offset),
+        Int(dimension),
+        length_,
+        storage,
+        parameter,
+        reconstruction,
+    )
 end
 
 # ---------------------------------------------------------------------------
@@ -89,14 +167,10 @@ Barrier degree (complexity parameter) of one native cone block:
 - `:exp` → `3`
 - `:power` → `2`
 - `:free`, `:zero` → `0` (no barrier)
-- `:nonpositive` → `n` (via −1 × nonnegative)
-- `:rsoc` → `2` (via exact map to SOC)
 """
 function barrier_degree(cone::Symbol, dimension::Integer)
     cone === :nonnegative && return Int(dimension)
-    cone === :nonpositive && return Int(dimension)
     cone === :soc && return 2
-    cone === :rsoc && return 2
     cone === :psd && return Int(dimension)
     cone === :exp && return 3
     cone === :power && return 2
@@ -106,70 +180,62 @@ function barrier_degree(cone::Symbol, dimension::Integer)
 end
 
 # ---------------------------------------------------------------------------
-# Layout construction from a NativeConeProgram
+# Layout construction from canonical slack descriptors
 # ---------------------------------------------------------------------------
 
 """
-    cone_parameter(domain) -> Float64
+    SDPX.ConeProductLayout{Blocks}
 
-Cone parameter of a native domain (`alpha` for `PowerCone`,
-`0.0` otherwise).
+Ordered canonical slack-cone layout. `Blocks` is a `Vector` of
+[`ConeBlockDescriptor`](@ref) (runtime programs) or a `Tuple` of them
+(compile-time-known, used by fast-path executors).
+
+Fields
+- `blocks::Blocks` — the ordered canonical slack-block descriptors.
+- `dimension::Int` — total stored scalar canonical-slack dimension
+  `m` (sum of block lengths; also the length of `s` and `y`).
+- `barrier_degree::Int` — `nu = sum(block barrier_degree)`, the IPM
+  complexity parameter used by the frozen `mu = (s'y + tau*kappa) /
+  (nu + 1)` central-path denominator.
 """
-cone_parameter(domain::PowerCone) = domain.alpha
-cone_parameter(domain) = 0.0
+struct ConeProductLayout{Blocks}
+    blocks::Blocks
+    dimension::Int
+    barrier_degree::Int
+end
 
 """
-    cone_storage(cone) -> Symbol
+    canonical_layout(blocks::Vector{ConeBlockDescriptor{T}}) -> ConeProductLayout
 
-Storage kind of a native cone block: `:packed_lower` for `:psd`,
-`:vector` otherwise.
+Build the canonical slack layout from an ordered list of canonical
+block descriptors, computing the total slack dimension `m` and the
+`nu = sum(barrier_degree)` over the canonical blocks. The block
+offsets are required to be contiguous (validated); a later wave may
+also build this from a [`CanonicalConicProgram`](@ref) directly.
 """
-cone_storage(::Symbol) = :vector
-cone_storage(::Val{:psd}) = :packed_lower
-
-"""
-    cone_product_layout(program) -> ConeProductLayout{Vector{ConeBlockDescriptor}}
-
-Build the heterogeneous cone-product layout of a
-[`NativeConeProgram`](@ref). Block order is the program block order
-(reproducible). The layout is arithmetic-agnostic and carries no
-provider/factorization/formulation decision. It never throws on a
-mixed family: any mix of native cones is a valid layout.
-"""
-function cone_product_layout(program::NativeConeProgram{T}) where {T<:AbstractFloat}
-    blocks = program.blocks
-    descriptors = Vector{ConeBlockDescriptor}(undef, length(blocks))
+function canonical_layout(blocks::Vector{ConeBlockDescriptor{T}}) where {T<:AbstractFloat}
+    expected = 1
     total_dimension = 0
     total_barrier = 0
-    for (index, block) in enumerate(blocks)
-        cone = block.cone
-        storage = cone === :psd ? :packed_lower : :vector
-        parameter = cone_parameter(block.domain)
-        descriptor = ConeBlockDescriptor(
-            cone,
-            block.offset,
-            block.shape,
-            block.length,
-            storage,
-            parameter,
-            :primal,
-            UInt64(index),
-        )
-        descriptors[index] = descriptor
+    for block in blocks
+        block.offset == expected ||
+            throw(ArgumentError("canonical block offset $(block.offset) != expected $expected " *
+                                "(blocks must be ordered and contiguous)"))
         total_dimension += block.length
-        total_barrier += barrier_degree(cone, block.shape)
+        total_barrier += barrier_degree(block.cone, block.dimension)
+        expected += block.length
     end
-    return ConeProductLayout(descriptors, total_dimension, total_barrier)
+    return ConeProductLayout(blocks, total_dimension, total_barrier)
 end
 
 # ---------------------------------------------------------------------------
-# Coordinate mapping (forward / backward)
+# Coordinate mapping (forward / backward), pure offset arithmetic
 # ---------------------------------------------------------------------------
 
 """
     global_to_block(layout, global_index) -> (block_index, within_index)
 
-Map a global scalar variable index to its owning block number and
+Map a global canonical-slack row index to its owning block number and
 1-based within-block position. Blocks are contiguous, so this is pure
 offset arithmetic (allocation-free).
 """
@@ -191,7 +257,7 @@ end
 """
     block_to_global(layout, block_index, within_index) -> Int
 
-Inverse of [`global_to_block`](@ref): global scalar index of
+Inverse of [`global_to_block`](@ref): global canonical-slack row of
 `within_index` inside block `block_index`.
 """
 function block_to_global(layout::ConeProductLayout, block_index::Integer, within_index::Integer)
@@ -216,5 +282,4 @@ block_dimension(descriptor::ConeBlockDescriptor) = descriptor.dimension
 block_length(descriptor::ConeBlockDescriptor) = descriptor.length
 block_storage(descriptor::ConeBlockDescriptor) = descriptor.storage
 block_parameter(descriptor::ConeBlockDescriptor) = descriptor.parameter
-block_dual_orientation(descriptor::ConeBlockDescriptor) = descriptor.dual_orientation
 block_reconstruction(descriptor::ConeBlockDescriptor) = descriptor.reconstruction
