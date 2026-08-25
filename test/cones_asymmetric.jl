@@ -95,3 +95,40 @@ end
         @test Float64(fb) ≈ f rtol=1e-12
     end
 end
+
+@testset "dual exponential cone membership" begin
+    # Dual: -u * exp(v/u - 1) <= w, u < 0
+    # For (u, v, w) = (-1.0, 1.0, exp(0) = 1.0): 1 * exp(0) = 1 <= 1.0 (boundary)
+    @test SDPX.exp_dual_membership(-1.0, 1.0, 1.0)
+    @test SDPX.exp_dual_membership(-1.0, 1.0, 0.5)
+    @test !SDPX.exp_dual_membership(-1.0, 1.0, 0.05)
+    # limit face u == 0: v >= 0, w >= 0
+    @test SDPX.exp_dual_membership(0.0, 1.0, 1.0)
+    @test SDPX.exp_dual_membership(0.0, 0.0, 0.0)
+    @test !SDPX.exp_dual_membership(0.0, -1.0, 1.0)
+    @test !SDPX.exp_dual_membership(1.0, 1.0, 1.0)
+end
+
+@testset "dual power cone membership" begin
+    # Dual: (u/alpha)^alpha * (v/(1-alpha))^(1-alpha) >= |w|, u >= 0, v >= 0
+    alpha = 0.5
+    # For u=0.5, v=0.5: (1)^0.5 * (1)^0.5 = 1 >= |w|
+    @test SDPX.power_dual_membership(0.5, 0.5, 1.0, alpha)
+    @test SDPX.power_dual_membership(0.5, 0.5, 0.5, alpha)
+    @test !SDPX.power_dual_membership(0.5, 0.5, 1.5, alpha)
+    @test !SDPX.power_dual_membership(-0.5, 0.5, 0.0, alpha)
+    @test SDPX.power_dual_membership(0.0, 0.0, 0.0, alpha)
+end
+
+@testset "in-place barrier Hessians" begin
+    # Exp cone in-place
+    x, y, z = 0.5, 1.0, 3.0
+    H_exp = zeros(Float64, 3, 3)
+    SDPX.exp_barrier_hessian!(H_exp, x, y, z)
+    @test H_exp ≈ SDPX.exp_barrier_hessian(x, y, z)
+
+    # Power cone in-place
+    H_pow = zeros(Float64, 3, 3)
+    SDPX.power_barrier_hessian!(H_pow, 2.0, 2.0, 1.0, 0.5)
+    @test H_pow ≈ SDPX.power_barrier_hessian(2.0, 2.0, 1.0, 0.5)
+end

@@ -84,6 +84,25 @@ function exp_barrier_hessian(x, y, z)
 end
 
 """
+    exp_dual_membership(u, v, w; tol=0) -> Bool
+
+Whether `(u, v, w)` lies in the dual exponential cone:
+    K_exp* = { (u, v, w) : -u * exp(v / u - 1) <= w, u < 0 }
+           ∪ { (0, v, w) : v >= 0, w >= 0 }
+"""
+function exp_dual_membership(u, v, w; tol=zero(u))
+    T = typeof(u)
+    z = zero(T)
+    if u < -tol
+        return (-u) * exp(v / u - one(T)) <= w + tol
+    elseif abs(u) <= tol
+        return v >= -tol && w >= -tol
+    else
+        return false
+    end
+end
+
+"""
     exp_scaling_point(x, y, z) -> (sx, sy, sz)
 
 A scaling point for the exponential cone at an interior point: the
@@ -91,3 +110,31 @@ gradient of the barrier (used as the dual scaling in the primal-dual
 method).
 """
 exp_scaling_point(x, y, z) = exp_barrier_gradient(x, y, z)
+
+"""
+    exp_barrier_hessian!(H, x, y, z)
+
+In-place 3×3 Hessian of the exponential-cone barrier at interior point `(x, y, z)`.
+"""
+function exp_barrier_hessian!(H::AbstractMatrix{T}, x::T, y::T, z::T) where {T}
+    u = y * exp(x / y)
+    u < z || throw(ArgumentError("exp_barrier_hessian! requires y*exp(x/y) < z"))
+    A = z - u
+    e = exp(x / y)
+    ux = e
+    uy = e * (one(x) - x / y)
+    uxx = e / y
+    uxy = -e * x / (y * y)
+    uyy = e * x * x / (y * y * y)
+    A2 = A * A
+    h11 = (uxx * A + ux * ux) / A2
+    h12 = (uxy * A + ux * uy) / A2
+    h13 = -ux / A2
+    h22 = (uyy * A + uy * uy) / A2 + one(y) / (y * y)
+    h23 = -uy / A2
+    h33 = one(z) / A2 + one(z) / (z * z)
+    H[1, 1] = h11; H[1, 2] = h12; H[1, 3] = h13
+    H[2, 1] = h12; H[2, 2] = h22; H[2, 3] = h23
+    H[3, 1] = h13; H[3, 2] = h23; H[3, 3] = h33
+    return H
+end

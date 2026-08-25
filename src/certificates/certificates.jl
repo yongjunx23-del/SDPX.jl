@@ -162,11 +162,13 @@ function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) wh
     elseif cone === :psd
         return _packed_psd_membership(v, block.dimension, tol, T)
     elseif cone === :exp
-        return exp_membership(v[1], v[2], v[3])
+        return dual ? exp_dual_membership(v[1], v[2], v[3]; tol=tol) : exp_membership(v[1], v[2], v[3])
     elseif cone === :power
-        return power_membership(v[1], v[2], v[3], block.parameter)
-    elseif cone === :free || cone === :zero
-        return true
+        return dual ? power_dual_membership(v[1], v[2], v[3], block.parameter; tol=tol) : power_membership(v[1], v[2], v[3], block.parameter)
+    elseif cone === :free
+        return !dual # free dual is zero cone
+    elseif cone === :zero
+        return true  # zero dual is free cone
     end
     return false
 end

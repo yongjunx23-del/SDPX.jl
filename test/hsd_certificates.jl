@@ -83,6 +83,24 @@ end
         zeros(1), sparse([1.0 0.0 0.0]), zeros(3), layout, chain)
     @test SDPX.in_canonical_cone(soc, [2.0, 1.0, 1.0]; dual=false)
     @test !SDPX.in_canonical_cone(soc, [1.0, 2.0, 0.0]; dual=false)
+
+    # an Exp cone block distinguishes primal and dual cones
+    exp_desc = SDPX.ConeBlockDescriptor(Float64, :exp, 3; offset=1)
+    exp_layout = SDPX.canonical_layout([exp_desc])
+    exp_prog = SDPX.CanonicalConicProgram(SDPX.ArithmeticSpec(Float64), 53,
+        zeros(1), sparse([1.0 0.0 0.0]), zeros(3), exp_layout, chain)
+    @test SDPX.in_canonical_cone(exp_prog, [0.0, 1.0, 1.0]; dual=false)
+    @test SDPX.in_canonical_cone(exp_prog, [-1.0, 1.0, 1.0]; dual=true)
+    @test !SDPX.in_canonical_cone(exp_prog, [-1.0, 1.0, 0.05]; dual=true)
+
+    # a Power cone block distinguishes primal and dual cones
+    pow_desc = SDPX.ConeBlockDescriptor(Float64, :power, 3; offset=1, parameter=0.5)
+    pow_layout = SDPX.canonical_layout([pow_desc])
+    pow_prog = SDPX.CanonicalConicProgram(SDPX.ArithmeticSpec(Float64), 53,
+        zeros(1), sparse([1.0 0.0 0.0]), zeros(3), pow_layout, chain)
+    @test SDPX.in_canonical_cone(pow_prog, [1.0, 1.0, 1.0]; dual=false)
+    @test SDPX.in_canonical_cone(pow_prog, [0.5, 0.5, 1.0]; dual=true)
+    @test !SDPX.in_canonical_cone(pow_prog, [0.5, 0.5, 1.5]; dual=true)
 end
 
 @testset "verify_optimal! (original-coordinate recovery)" begin
