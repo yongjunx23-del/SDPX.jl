@@ -132,3 +132,14 @@ end
         end
     end
 end
+
+@testset "ConeAlgebra PSD inverse identity" begin
+    for T in (Float64, BigFloat)
+        T === BigFloat && setprecision(BigFloat, 256)
+        X = T[3 1; 1 2]
+        I2 = Matrix{T}(I, 2, 2)
+        Xi = _CA.psd_inverse(X)
+        @test isapprox(Xi * X, I2; atol=T(1e-10))
+        @test isapprox(_CA.psd_jordan_product(Xi, X), I2; atol=T(1e-10))
+    end
+end
