@@ -143,3 +143,16 @@ end
         @test isapprox(_CA.psd_jordan_product(Xi, X), I2; atol=T(1e-10))
     end
 end
+
+@testset "ConeAlgebra SOC commutativity + inverse identity" begin
+    for T in (Float64, BigFloat)
+        T === BigFloat && setprecision(BigFloat, 256)
+        x = T[2, 1, 0]
+        y = T[3, -1, 1]
+        # Jordan product is commutative.
+        @test isapprox(_CA.soc_jordan_product(x, y), _CA.soc_jordan_product(y, x); atol=T(1e-10))
+        # x o x^{-1} = e = (1,0,0).
+        e = T[1, 0, 0]
+        @test isapprox(_CA.soc_jordan_product(x, _CA.soc_inverse(x)), e; atol=T(1e-10))
+    end
+end
