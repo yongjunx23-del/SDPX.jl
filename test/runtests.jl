@@ -42,6 +42,8 @@ const QUICK_TESTS = (
     "sparse_schur_round7.jl",
     "coo_contraction_regression.jl",
     "precision_ladder_plan.jl",
+    "fixed_precision_contract.jl",
+    "allocation_contract.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
