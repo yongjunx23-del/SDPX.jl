@@ -164,3 +164,24 @@ using LinearAlgebra
         @test diag.info == 0
     end
 end
+
+@testset "FactorCache buffer reuse on same-shape refactor" begin
+    # A same-shape changed-A refactor (new epoch) must reuse the Cholesky
+    # buffer: no new Matrix allocation in factorize!.
+    n = 8
+    cache = SDPX.DenseFactorCache{Float64}(n)
+    A1 = Matrix{Float64}(I, n, n) .+ 0.1
+    A2 = Matrix{Float64}(I, n, n) .+ 0.2
+    SDPX.factorize!(cache, A1, 1)
+    # Warm up the JIT, then measure the refactor allocation.
+    SDPX.factorize!(cache, A2, 2)
+    alloc = @allocated SDPX.factorize!(cache, A2, 3)
+    @test alloc < 512  # reuses the buffer; no new Matrix/Cholesky storage
+    @test SDPX.factor_status(cache) === :fresh
+    @test SDPX.factor_matrix_epoch(cache) == 3
+    # Correctness after refactor: solve recovers x from A2*x=b.
+    b = ones(n)
+    x = zeros(n)
+    SDPX.solve!(cache, x, b)
+    @test isapprox(A2 * x, b; atol=1e-10)
+end
