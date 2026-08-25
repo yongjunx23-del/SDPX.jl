@@ -45,7 +45,7 @@ struct NativeConeRoute
 end
 
 const NATIVE_ROUTE_FAMILY_ORDER =
-    (:lp_family, :soc_family, :sdp_family, :exp_family)
+    (:lp_family, :soc_family, :sdp_family, :exp_family, :power_family)
 
 """
     SDPX.UnsupportedNativeConeRoute <: Exception
@@ -89,6 +89,7 @@ function _route_family(kind::Symbol)
     kind in (:soc, :rsoc) && return :soc_family
     kind in (:psd, :psd_scaled) && return :sdp_family
     kind === :exp && return :exp_family
+    kind === :power && return :power_family
     throw(ArgumentError("unsupported cone kind $kind in route classification"))
 end
 
@@ -116,8 +117,13 @@ Classify an ordered native program into exactly one route family:
   (`Reals` is allowed). The exponential solver root lands with the
   Phase B native kernels; until then classification succeeds while
   any lowering attempt fails closed.
-- otherwise it throws [`UnsupportedNativeConeRoute`](@ref) (mixed
-  families) before constructing any route result.
+- `:power_family` — every nonfree cone is PowerCone/Zero (`Reals`
+  is allowed).
+- `:mixed_family` — the program spans more than one family. A
+  heterogeneous cone product is a first-class layout (see
+  [`cone_product_layout`](@ref)), not an error: the single-family
+  lowering paths fail closed at lowering time, while the unified HSD
+  path consumes the layout.
 
 Affine PSD [`RowBlock`](@ref)s count as PSD for family detection. The
 classifier validates structural counts — product-block variables,
@@ -138,6 +144,7 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
     saw_soc = false
     saw_sdp = false
     saw_exp = false
+    saw_power = false
     for block in blocks
         total_variables += block.length
         family = _route_family(block.domain)
@@ -145,6 +152,7 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
         saw_soc |= family === :soc_family
         saw_sdp |= family === :sdp_family
         saw_exp |= family === :exp_family
+        saw_power |= family === :power_family
     end
     for row_block in row_blocks
         total_rows += row_block.length
@@ -153,6 +161,7 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
         saw_soc |= family === :soc_family
         saw_sdp |= family === :sdp_family
         saw_exp |= family === :exp_family
+        saw_power |= family === :power_family
     end
 
     total_variables == program_num_variables(program) ||
@@ -169,19 +178,18 @@ function classify_native_cone_program(program::NativeConeProgram{T}) where {T<:A
         ))
 
     detected_count = (saw_lp ? 1 : 0) + (saw_soc ? 1 : 0) + (saw_sdp ? 1 : 0) +
-                     (saw_exp ? 1 : 0)
+                     (saw_exp ? 1 : 0) + (saw_power ? 1 : 0)
     if detected_count > 1
-        detected = (saw_lp, saw_soc, saw_sdp, saw_exp)
-        families = Symbol[
-            family for (family, present) in
-            zip(NATIVE_ROUTE_FAMILY_ORDER, detected) if present
-        ]
-        throw(UnsupportedNativeConeRoute(families))
+        # A heterogeneous cone product is a first-class layout, not an
+        # error. The single-family lowering paths still fail closed at
+        # lowering time; the unified HSD path consumes the layout.
+        return NativeConeRoute(:mixed_family)
     end
     route = saw_lp ? :lp_family :
             saw_soc ? :soc_family :
             saw_sdp ? :sdp_family :
             saw_exp ? :exp_family :
+            saw_power ? :power_family :
             :lp_family
 
     return NativeConeRoute(route)

@@ -83,6 +83,23 @@ data and remains one block — it is never split or lifted.
 struct ExponentialCone end
 
 """
+    SDPX.PowerCone
+
+The power cone of parameter `alpha` in `(0, 1)`:
+`K_pow(alpha) = { (x, y, z) : x^alpha * y^(1-alpha) >= |z|, x >= 0, y >= 0 }`.
+The dimension is fixed at 3. `alpha` is an immutable block parameter stored
+in the block descriptor, never in this type (which is a pure mathematical
+value). This type carries no data and remains one block.
+"""
+struct PowerCone
+    alpha::Float64
+    function PowerCone(alpha::Real)
+        0 < alpha < 1 || throw(ArgumentError("PowerCone alpha must be in (0,1), got $(alpha)"))
+        return new(Float64(alpha))
+    end
+end
+
+"""
     SDPX.PSDCone
 
 The positive semidefinite cone over real symmetric matrices. This type
@@ -113,7 +130,7 @@ struct Maximize end
 
 # Type unions used by the native IR for well-typed fields. Affine cone
 # blocks use the same mathematical domains as product-variable blocks.
-const ProductConeDomain = Union{Reals,Nonnegative,Nonpositive,ZeroCone,LorentzCone,RotatedLorentzCone,PSDCone,ExponentialCone}
+const ProductConeDomain = Union{Reals,Nonnegative,Nonpositive,ZeroCone,LorentzCone,RotatedLorentzCone,PSDCone,ExponentialCone,PowerCone}
 const AffineConeDomain = ProductConeDomain
 
 is_product_cone(domain) = domain isa ProductConeDomain

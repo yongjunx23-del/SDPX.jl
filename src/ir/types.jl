@@ -70,7 +70,7 @@ packed_length(metadata::PSDStorageMetadata) = metadata.packed_length
 # Native product-cone block
 # ---------------------------------------------------------------------------
 
-const PRODUCT_CONES = (:free, :nonnegative, :nonpositive, :zero, :soc, :rsoc, :psd, :exp)
+const PRODUCT_CONES = (:free, :nonnegative, :nonpositive, :zero, :soc, :rsoc, :psd, :exp, :power)
 
 _domain_cone(::Reals) = :free
 _domain_cone(::Nonnegative) = :nonnegative
@@ -80,6 +80,7 @@ _domain_cone(::LorentzCone) = :soc
 _domain_cone(::RotatedLorentzCone) = :rsoc
 _domain_cone(::PSDCone) = :psd
 _domain_cone(::ExponentialCone) = :exp
+_domain_cone(::PowerCone) = :power
 
 """Fixed vector dimension of one exponential-cone block."""
 const EXPONENTIAL_CONE_DIMENSION = 3

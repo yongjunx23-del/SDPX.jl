@@ -95,19 +95,19 @@ end
     @test SDPX.NativeConeRoute(:lp_family) != SDPX.NativeConeRoute(:sdp_family)
 end
 
-@testset "mixed native cone families return one clear error" begin
+@testset "mixed native cone families classify as a first-class layout" begin
     cases = (
         (
             ((SDPX.Nonnegative(), 2), (SDPX.LorentzCone(), 3)),
-            [:lp_family, :soc_family],
+            :mixed_family,
         ),
         (
             ((SDPX.Nonpositive(), 1), (SDPX.PSDCone(), 2)),
-            [:lp_family, :sdp_family],
+            :mixed_family,
         ),
         (
             ((SDPX.PSDCone(), 2), (SDPX.LorentzCone(), 3)),
-            [:soc_family, :sdp_family],
+            :mixed_family,
         ),
         (
             (
@@ -115,38 +115,39 @@ end
                 (SDPX.LorentzCone(), 3),
                 (SDPX.PSDCone(), 2),
             ),
-            [:lp_family, :soc_family, :sdp_family],
+            :mixed_family,
+        ),
+        (
+            ((SDPX.Nonnegative(), 1), (SDPX.PowerCone(0.5), 3)),
+            :mixed_family,
+        ),
+        (
+            ((SDPX.PowerCone(0.5), 3),),
+            :power_family,
         ),
     )
 
     for (products, expected) in cases
-        error_value = _route_error(() -> SDPX.classify_native_cone_program(
+        route = SDPX.classify_native_cone_program(
             _route_program(products=products),
-        ))
-        @test error_value isa SDPX.UnsupportedNativeConeRoute
-        @test error_value.detected_families == expected
-        @test sprint(showerror, error_value) ==
-              "model combines unsupported cone families $expected"
+        )
+        @test route isa SDPX.NativeConeRoute
+        @test route.route === expected
     end
 
     cross = _route_program(
         products=((SDPX.Nonnegative(), 1),),
         rows=((SDPX.LorentzCone(), 3), (SDPX.PSDCone(), 2)),
     )
-    cross_error = _route_error(
-        () -> SDPX.classify_native_cone_program(cross),
-    )
-    @test cross_error.detected_families ==
-          [:lp_family, :soc_family, :sdp_family]
+    @test SDPX.classify_native_cone_program(cross).route === :mixed_family
 
     for products in (
         ((SDPX.Nonnegative(), 1), (SDPX.LorentzCone(), 3)),
         ((SDPX.LorentzCone(), 3), (SDPX.Nonnegative(), 1)),
     )
-        error_value = _route_error(() -> SDPX.classify_native_cone_program(
+        @test SDPX.classify_native_cone_program(
             _route_program(products=products),
-        ))
-        @test error_value.detected_families == [:lp_family, :soc_family]
+        ).route === :mixed_family
     end
 end
 
