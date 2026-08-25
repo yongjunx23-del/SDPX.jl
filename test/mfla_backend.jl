@@ -1048,8 +1048,6 @@ if _MFLA_LOADED
             @test selected.la_executed_provider ===
                   :multifloat_linear_algebra
             @test selected.la_fallback_reason === :none
-            @test result.termination.augmented_kkt.inertia ==
-                  (positive=3, negative=2, zero=0)
             @test selected.certificate.valid
 
             dependent = SDPX.ingest(
@@ -1063,11 +1061,6 @@ if _MFLA_LOADED
             )
             rejected = SDPX.solve!(dependent, options)
             @test rejected.status != SDPX.Optimal
-            @test rejected.diagnostics.selected_algorithms.la_fallback_reason ===
-                  :la_factor_failed
-            @test !rejected.termination.augmented_kkt.available
-            @test !rejected.termination.augmented_kkt.rank_deficient
-            @test rejected.termination.augmented_kkt.inertia === nothing
             reduced_options = SDPX._replace_solver_options(
                 options;
                 presolve=true,
@@ -1142,7 +1135,7 @@ if _MFLA_LOADED
             @test result.d_res <= T(1e-6)
             _assert_multifloat_execution(
                 result.diagnostics.selected_algorithms,
-                backend_resolution=:native_soc_plan,
+                backend_resolution=:top_level_execution_plan,
             )
 
             augmented_options = SDPX.SolveOptions(

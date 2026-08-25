@@ -96,6 +96,7 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     canonical::CanonicalConicProgram{T}
     # aliases for hot-path access
     A::SparseMatrixCSC{T,Int}
+    At::SparseMatrixCSC{T,Int}         # transposed sparse matrix for sparse Schur assembly
     Ad::Matrix{T}                  # dense copy for the LP Schur kernel
     b::Vector{T}
     c::Vector{T}
@@ -182,11 +183,12 @@ function HSDState(
     size(A, 2) == n || throw(DimensionMismatch("size(A,2) != n"))
     driver.n == n || throw(DimensionMismatch(
         "route cache n=$(driver.n) does not match matrix n=$n"))
+    At = SparseArrays.sparse(transpose(A))
     Ad = Matrix{T}(A)
     z = zero(T); o = one(T)
     return HSDState{T, R}(
         canonical,
-        A, Ad, b, c, n, m, nu,
+        A, At, Ad, b, c, n, m, nu,
         zeros(T, n), zeros(T, m), zeros(T, m), o, o,      # x, y, s, τ, κ
         zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx, dy, ds, dτ, dκ
         zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx_a, dy_a, ds_a, dτ_a, dκ_a

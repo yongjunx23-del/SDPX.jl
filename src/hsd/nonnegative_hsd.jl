@@ -65,17 +65,24 @@ end
 # rank-deficient (the Schur is PSD-singular but not SPD); it does not disturb
 # well-conditioned rows (the shift is ~1e-10 of the largest diagonal entry).
 @inline function _hsd_form_schur!(state::HSDState{T}) where {T}
-    H = state.H; A = state.Ad; g = state.g
+    H = state.H; A = state.A; At = state.At; g = state.g
     m = state.m; n = state.n
     fill!(H, zero(T))
     @inbounds for j in 1:n
-        for i in 1:j
-            acc = zero(T)
-            for k in 1:m
-                acc += g[k] * A[k, i] * A[k, j]
+        for ptr_j in nzrange(A, j)
+            k = A.rowval[ptr_j]
+            val_j = g[k] * A.nzval[ptr_j]
+            iszero(val_j) && continue
+            for ptr_i in nzrange(At, k)
+                i = At.rowval[ptr_i]
+                i > j && break
+                H[i, j] += val_j * At.nzval[ptr_i]
             end
-            H[i, j] = acc
-            H[j, i] = acc
+        end
+    end
+    @inbounds for j in 1:n
+        for i in 1:(j - 1)
+            H[j, i] = H[i, j]
         end
     end
     # relative diagonal shift for the singular (rank-deficient) case
@@ -95,12 +102,13 @@ end
 # and the scalar g = κ + τ·b'diag(g)b.  These depend only on the iterate, so
 # they are shared by the predictor and the corrector.
 @inline function _hsd_border!(state::HSDState{T}) where {T}
-    A = state.Ad; g = state.g; b = state.b; c = state.c
+    A = state.A; g = state.g; b = state.b; c = state.c
     n = state.n; m = state.m
     @inbounds for j in 1:n
         a = zero(T)
-        for k in 1:m
-            a += g[k] * A[k, j] * b[k]
+        for ptr in nzrange(A, j)
+            k = A.rowval[ptr]
+            a += g[k] * A.nzval[ptr] * b[k]
         end
         state.q[j] = c[j] - a
         state.rvec[j] = state.tau * (c[j] + a)
@@ -115,12 +123,13 @@ end
 # Right-hand side (n) for the D-equation and the scalar b'(g .* (v + rP)),
 # for one Newton sub-step with C1 target v.
 @inline function _hsd_rhs!(state::HSDState{T}, v::AbstractVector{T}) where {T}
-    A = state.Ad; g = state.g; b = state.b
+    A = state.A; g = state.g; b = state.b
     n = state.n; m = state.m
     @inbounds for j in 1:n
         acc = zero(T)
-        for k in 1:m
-            acc += A[k, j] * g[k] * (v[k] + state.rP[k])
+        for ptr in nzrange(A, j)
+            k = A.rowval[ptr]
+            acc += A.nzval[ptr] * g[k] * (v[k] + state.rP[k])
         end
         state.rhs[j] = -state.rD[j] - acc
     end
@@ -149,13 +158,15 @@ end
 
 # Recover ds, dy, dκ from dx, dτ and the C1 target v (Nonnegative cone).
 @inline function _hsd_recover!(state::HSDState{T}, v::AbstractVector{T}) where {T}
-    A = state.Ad; g = state.g; theta = state.theta
+    A = state.A; g = state.g; theta = state.theta
     n = state.n; m = state.m
     fill!(state.ax, zero(T))
     @inbounds for j in 1:n
         a = state.dx[j]
-        for k in 1:m
-            state.ax[k] += A[k, j] * a
+        iszero(a) && continue
+        for ptr in nzrange(A, j)
+            k = A.rowval[ptr]
+            state.ax[k] += A.nzval[ptr] * a
         end
     end
     @inbounds for k in 1:m
@@ -185,13 +196,15 @@ end
 
 # Trial residual rPt = A xt + st − b τt, rDt = A' yt + c τt (for the guard).
 @inline function _hsd_trial_residual!(state::HSDState{T}) where {T}
-    A = state.Ad
+    A = state.A
     m = state.m; n = state.n
     fill!(state.rPt, zero(T))
     @inbounds for j in 1:n
         a = state.xt[j]
-        for k in 1:m
-            state.rPt[k] += A[k, j] * a
+        iszero(a) && continue
+        for ptr in nzrange(A, j)
+            k = A.rowval[ptr]
+            state.rPt[k] += A.nzval[ptr] * a
         end
     end
     @inbounds for k in 1:m
@@ -200,8 +213,9 @@ end
     fill!(state.rDt, zero(T))
     @inbounds for j in 1:n
         acc = zero(T)
-        for k in 1:m
-            acc += A[k, j] * state.yt[k]
+        for ptr in nzrange(A, j)
+            k = A.rowval[ptr]
+            acc += A.nzval[ptr] * state.yt[k]
         end
         state.rDt[j] = acc + state.c[j] * state.tau_t
     end
