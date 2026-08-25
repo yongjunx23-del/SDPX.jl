@@ -15,7 +15,6 @@ using LinearAlgebra
         struct _NoopCache{T} <: SDPX.AbstractFactorCache{T} end
         c = _NoopCache{Float64}()
         @test_throws MethodError SDPX.prepare!(c, nothing)
-        @test_throws MethodError SDPX.reserve!(c, nothing)
         @test_throws MethodError SDPX.factorize!(c, nothing, 1)
         @test_throws MethodError SDPX.solve!(c, nothing, nothing)
         @test_throws MethodError SDPX.solve_multi!(c, nothing, nothing)
@@ -24,6 +23,20 @@ using LinearAlgebra
         @test_throws MethodError SDPX.factor_status(c)
         @test_throws MethodError SDPX.factor_diagnostics(c)
         @test_throws MethodError SDPX.factor_matrix_epoch(c)
+        @test_throws MethodError SDPX.factor_symbolic_epoch(c)
+        @test_throws MethodError SDPX.factor_epoch(c)
+    end
+
+    @testset "state enum is isbits" begin
+        @test isbitstype(SDPX.FactorCacheState)
+        # Distinct states.
+        @test SDPX.Unprepared != SDPX.Prepared
+        @test SDPX.Prepared != SDPX.Factoring
+        @test SDPX.Factoring != SDPX.Fresh
+        @test SDPX.Fresh != SDPX.Failed
+        @test SDPX.Failed != SDPX.Invalid
+        # @inferred must not allocate.
+        @test @allocated(SDPX.factor_status(SDPX.DenseFactorCache{Float64}(2))) == 0
     end
 
     @testset "concrete storage structs" begin
@@ -33,11 +46,16 @@ using LinearAlgebra
         @test isconcretetype(SDPX.SolveScratch{Float64})
         @test isconcretetype(SDPX.DenseFactorCache{Float64})
 
+        # Requirements is the single exact capacity source.
+        @test SDPX.FactorRequirements(4).n == 4
+        @test SDPX.FactorRequirements(4).symbolic_epoch == 0
+        @test SDPX.FactorRequirements(4, 7).symbolic_epoch == 7
+
         cache = SDPX.DenseFactorCache{Float64}(4)
         @test cache.symbolic.n == 4
         @test cache.numeric.factor isa Cholesky{Float64,Matrix{Float64}}
-        @test cache.numeric.status === :invalid
-        @test cache.numeric.matrix_epoch == -1
+        @test cache.numeric.status === SDPX.Prepared
+        @test cache.numeric.matrix_epoch == 0
         @test length(cache.scratch.rhs) == 4
         @test length(cache.scratch.solution) == 4
     end
@@ -46,22 +64,26 @@ using LinearAlgebra
         n = 5
         cache = SDPX.DenseFactorCache{Float64}(n)
 
-        # Initial state: invalid, no epoch.
-        @test SDPX.factor_status(cache) === :invalid
-        @test SDPX.factor_matrix_epoch(cache) == -1
+        # prepare! has run (via constructor): Prepared, no factor produced.
+        @test SDPX.factor_status(cache) === SDPX.Prepared
+        @test SDPX.factor_epoch(cache) == 0
 
-        # prepare! / reserve! are no-ops for the dense reference.
-        @test SDPX.prepare!(cache, n) === cache
-        @test SDPX.reserve!(cache, nothing) === cache
+        # Re-prepare! from a FactorRequirements is the allocation point.
+        req = SDPX.FactorRequirements(n, 42)
+        @test SDPX.prepare!(cache, req) === cache
+        @test cache.symbolic.n == n
+        @test SDPX.factor_symbolic_epoch(cache) == 42
+        @test SDPX.factor_status(cache) === SDPX.Prepared
 
         # Build a symmetric positive-definite matrix.
         M = randn(n, n)
         A1 = M * M' + n * I
 
-        # factorize! at epoch 1 -> fresh.
+        # factorize! at epoch 1 -> Fresh.
         SDPX.factorize!(cache, A1, 1)
-        @test SDPX.factor_status(cache) === :fresh
+        @test SDPX.factor_status(cache) === SDPX.Fresh
         @test SDPX.factor_matrix_epoch(cache) == 1
+        @test SDPX.factor_epoch(cache) == 1
 
         # solve! recovers x from A*x = b.
         x_true = randn(n)
@@ -70,18 +92,20 @@ using LinearAlgebra
         SDPX.solve!(cache, x_sol, b)
         @test norm(x_sol - x_true) < 1e-10
 
-        # factorize! at epoch 2 with a changed matrix -> re-factor, still fresh.
+        # factorize! at epoch 2 with a changed matrix -> re-factor, still Fresh.
         A2 = A1 + 0.5 * I
         SDPX.factorize!(cache, A2, 2)
-        @test SDPX.factor_status(cache) === :fresh
+        @test SDPX.factor_status(cache) === SDPX.Fresh
         @test SDPX.factor_matrix_epoch(cache) == 2
+        @test SDPX.factor_epoch(cache) == 2
         b2 = A2 * x_true
         SDPX.solve!(cache, x_sol, b2)
         @test norm(x_sol - x_true) < 1e-10
 
-        # invalidate! -> :invalid.
+        # invalidate! -> Invalid, solve rejected.
         SDPX.invalidate!(cache)
-        @test SDPX.factor_status(cache) === :invalid
+        @test SDPX.factor_status(cache) === SDPX.Invalid
+        @test_throws SDPX.FactorCacheStateError SDPX.solve!(cache, x_sol, b)
     end
 
     @testset "same-epoch reuse" begin
@@ -92,18 +116,21 @@ using LinearAlgebra
 
         # First factorization at epoch 1.
         SDPX.factorize!(cache, A, 1)
-        @test SDPX.factor_status(cache) === :fresh
+        @test SDPX.factor_status(cache) === SDPX.Fresh
         @test SDPX.factor_matrix_epoch(cache) == 1
+        @test SDPX.factor_epoch(cache) == 1
 
-        # Second factorization with the SAME epoch must not re-factor: the
-        # stored epoch is unchanged and status stays :fresh.
+        # Second factorization with the SAME epoch must not re-factor: stored
+        # epoch unchanged, status stays Fresh, factor_epoch NOT bumped.
         SDPX.factorize!(cache, A, 1)
-        @test SDPX.factor_status(cache) === :fresh
+        @test SDPX.factor_status(cache) === SDPX.Fresh
         @test SDPX.factor_matrix_epoch(cache) == 1
+        @test SDPX.factor_epoch(cache) == 1
 
-        # A different epoch forces a re-factor.
+        # A different epoch forces a re-factor (factor_epoch bumped).
         SDPX.factorize!(cache, A, 2)
         @test SDPX.factor_matrix_epoch(cache) == 2
+        @test SDPX.factor_epoch(cache) == 2
     end
 
     @testset "type stability" begin
@@ -118,6 +145,8 @@ using LinearAlgebra
         @inferred SDPX.solve!(cache, dest, b)
         @inferred SDPX.factor_status(cache)
         @inferred SDPX.factor_matrix_epoch(cache)
+        @inferred SDPX.factor_symbolic_epoch(cache)
+        @inferred SDPX.factor_epoch(cache)
         @inferred SDPX.factor_diagnostics(cache)
         @inferred SDPX.invalidate!(cache)
     end
@@ -160,7 +189,8 @@ using LinearAlgebra
         diag = SDPX.factor_diagnostics(cache)
         @test diag.n == n
         @test diag.matrix_epoch == 7
-        @test diag.status === :fresh
+        @test diag.factor_epoch == 1
+        @test diag.status === SDPX.Fresh
         @test diag.info == 0
     end
 end
@@ -177,7 +207,7 @@ end
     SDPX.factorize!(cache, A2, 2)
     alloc = @allocated SDPX.factorize!(cache, A2, 3)
     @test alloc < 512  # reuses the buffer; no new Matrix/Cholesky storage
-    @test SDPX.factor_status(cache) === :fresh
+    @test SDPX.factor_status(cache) === SDPX.Fresh
     @test SDPX.factor_matrix_epoch(cache) == 3
     # Correctness after refactor: solve recovers x from A2*x=b.
     b = ones(n)
