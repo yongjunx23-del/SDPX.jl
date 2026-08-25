@@ -241,8 +241,13 @@ const MOIVectorConicSet = Union{
     MOI.Nonpositives,
     MOI.Zeros,
     MOI.SecondOrderCone,
-    MOI.ExponentialCone,
     MOI.RotatedSecondOrderCone,
+    # NOTE (R1): ExponentialCone / PowerCone are deliberately NOT declared
+    # supported. Their primitives (src/cones/exponential.jl, src/cones/power.jl)
+    # are differential-rule prototypes only — not production barriers/scaling
+    # wired into the HSD solver. Declaring support here would be a false claim
+    # (no hidden fallback). Restored only in R2 once the asymmetric-cone HSD is
+    # implemented and verified.
 }
 
 function MOI.supports_constraint(

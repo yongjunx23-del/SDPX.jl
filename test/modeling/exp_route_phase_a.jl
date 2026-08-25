@@ -111,19 +111,25 @@ end
     @test error_value.reason === :exp_lowerer_unavailable
 end
 
-@testset "MOI bridge accepts and ingests ExponentialCone rows" begin
+@testset "ExponentialCone is not supported in R1 (fail-closed, no hidden fallback)" begin
     MOI = SDPX.MOI
     optimizer = SDPX.Optimizer{Float64}()
-    @test MOI.supports_constraint(
+    # R1: ExpCone primitives are differential-rule prototypes only and are NOT
+    # wired into the HSD solver. Declaring support would be a false claim, so
+    # supports_constraint must return false for every function set.
+    @test !MOI.supports_constraint(
         optimizer,
         MOI.VectorOfVariables,
         MOI.ExponentialCone,
     )
-    @test MOI.supports_constraint(
+    @test !MOI.supports_constraint(
         optimizer,
         MOI.VectorAffineFunction{Float64},
         MOI.ExponentialCone,
     )
+    # A model containing an ExponentialCone constraint must be REJECTED on copy
+    # (fail-closed) rather than silently accepted or routed through an unverified
+    # fallback path.
     x = MOI.Utilities.Model{Float64}()
     variables = MOI.add_variables(x, 3)
     MOI.add_constraint(
@@ -131,7 +137,5 @@ end
         MOI.VectorOfVariables(variables),
         MOI.ExponentialCone(),
     )
-    MOI.copy_to(optimizer, x)
-    bridge = SDPX.bridge_plan(optimizer)
-    @test bridge.route === :exp_family
+    @test_throws MOI.UnsupportedConstraint MOI.copy_to(optimizer, x)
 end
