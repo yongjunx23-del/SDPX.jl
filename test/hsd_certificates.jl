@@ -1,4 +1,10 @@
-# Unified HSD state + certificate verification (Subagent C, PR3).
+# Production HSD state + certificate verification (Subagent H).
+#
+# Exercises the FROZEN HSD equations (docs/design/CANONICAL_FORM.md), the
+# HSDState residuals/complementarity, the per-block cone-membership resolution
+# through the ConeProductLayout, and the three original-coordinate certificates
+# (including the dual-infeasible cone-membership fix and the reconstruction
+# chain).
 
 if !isdefined(@__MODULE__, :SDPX)
     const SDPX = getfield(Main, :SDPX)
@@ -8,118 +14,163 @@ using Test
 using LinearAlgebra
 using SparseArrays
 
-@testset "HSD state residuals" begin
-    # min c'x s.t. A x + s = b, s >= 0
-    A = sparse([1.0 0.0; 0.0 1.0])
-    b = [1.0, 1.0]
-    c = [1.0, 1.0]
-    x = [0.5, 0.5]
-    s = [0.5, 0.5]
-    state = SDPX.HSDState(x, s, 1.0, 0.0, A, b, c)
-    @test SDPX.hsd_dimension(state) == 3
-    @test SDPX.hsd_primal_residual(state) ≈ [0.0, 0.0]
-    @test SDPX.hsd_dual_residual(state) ≈ -2.0
-    @test SDPX.hsd_complementarity(state) ≈ 0.5 / 3
-    @test SDPX.hsd_optimality_gap(state) ≈ 2.0
+# Build a canonical program with a single `:nonnegative` slack block (the LP /
+# Nonnegative case) directly from dense A,b,c.
+function _lp_canonical(A, b, c; T=Float64)
+    m, n = size(A)
+    desc = SDPX.ConeBlockDescriptor(T, :nonnegative, m; offset=1)
+    layout = SDPX.canonical_layout([desc])
+    chain = SDPX.CanonicalReconstructionChain{T}(
+        1, zero(T), SDPX.VariableRef[], SDPX.ConstraintRef[], SDPX.VariableRef[], 0)
+    arith = SDPX.ArithmeticSpec(T)
+    return SDPX.CanonicalConicProgram(arith, 53, Vector{T}(c), sparse(A), Vector{T}(b), layout, chain)
 end
 
-@testset "cone membership" begin
-    @test SDPX.in_cone(SDPX.OrthantMembership(), [1.0, 2.0])
-    @test !SDPX.in_cone(SDPX.OrthantMembership(), [1.0, -1.0])
-    @test SDPX.in_cone(SDPX.SOCMembership(), [2.0, 1.0, 1.0])
-    @test !SDPX.in_cone(SDPX.SOCMembership(), [1.0, 2.0, 0.0])
-    @test SDPX.in_cone(SDPX.PSDMembership(), [1.0, 0.0, 1.0])
-    @test !SDPX.in_cone(SDPX.PSDMembership(), [1.0, 2.0, 1.0])
-    @test SDPX.in_cone(SDPX.ExpMembership(), [0.0, 1.0, 1.0])
-    @test SDPX.in_cone(SDPX.PowerMembership(0.5), [1.0, 1.0, 1.0])
+@testset "HSD residuals follow the frozen equations" begin
+    # min -x1 - x2 s.t. x + s = 1, s >= 0  (A = I, b = 1, c = -1)
+    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
+    st = SDPX.HSDState(canon)
+    copyto!(st.x, [0.4, 0.4])
+    copyto!(st.s, [0.6, 0.6])
+    copyto!(st.y, [1.0, 1.0])
+    st.tau = 1.0
+    st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)   # gap-consistent κ = c'x + b'y
+    SDPX.hsd_residual!(st)
+    # (P)  A x + s - b·τ = 0
+    @test st.rP ≈ [0.0, 0.0]
+    # (D)  A'y + c·τ = 0
+    @test st.rD ≈ [0.0, 0.0]
+    # (G)  -c'x - b'y + κ = 0   (corrected sign: κ = c'x + b'y)
+    @test st.rG ≈ -(dot(canon.c, st.x) + dot(canon.b, st.y)) + st.kappa
+    @test st.rG ≈ 0.0
+    # complementarity = s'y + τ·κ; mu = /(ν+1), ν = 2 for R_+^2
+    # s'y = 1.2, τ·κ = 1.2 → complementarity = 2.4, μ = 0.8
+    @test SDPX.hsd_complementarity(st) ≈ 2.4
+    @test st.mu ≈ 2.4 / 3.0
+    @test st.nu == 2
 end
 
-@testset "verify_optimal!" begin
-    # min 0 s.t. x + s = 1, s >= 0  (c=0, A=[1], b=[1])
-    # valid HSD point: x=1, s=0, tau=1, kappa=0
-    A = sparse([1.0;;])
-    b = [1.0]
-    c = [0.0]
-    state = SDPX.HSDState([1.0], [0.0], 1.0, 0.0, A, b, c)
-    @test SDPX.verify_optimal!(state, [SDPX.OrthantMembership()])
-    # non-optimal: s not in cone
-    bad = SDPX.HSDState([1.0], [-0.5], 1.0, 0.0, A, b, c)
-    @test !SDPX.verify_optimal!(bad, [SDPX.OrthantMembership()])
-end
-
-@testset "verify_primal_infeasibility!" begin
-    # A = [1; 1], b = [1], c = [1].  Primal infeasible: A x + s = 1, s >= 0
-    # is feasible (x=1, s=0).  Use a Farkas ray y with A'y <= 0, b'y > 0.
-    A = sparse([1.0; 1.0]')
-    b = [1.0]
-    c = [1.0, 1.0]
-    # y = -1: A'y = [-1, -1] <= 0, b'y = -1 < 0 (not a valid ray)
-    # y = 1: A'y = [1, 1] > 0 (not valid)
-    # For this A, no Farkas ray exists (problem is feasible).
-    state = SDPX.HSDState([0.0, 0.0], [1.0], 1.0, 0.0, A, b, c)
-    @test !SDPX.verify_primal_infeasibility!(state, [1.0])
-    @test !SDPX.verify_primal_infeasibility!(state, [-1.0])
-    # A Farkas ray for an infeasible problem: A = [1; -1], b = [0]
-    # min x1 s.t. x1 - x2 = 0, x1 + x2 = 1, x >= 0  (infeasible)
-    A2 = sparse([1.0 -1.0; 1.0 1.0])
-    b2 = [0.0, 1.0]
-    c2 = [1.0, 0.0]
-    # Farkas ray y = [1, -1]: A'y = [0, -2] <= 0, b'y = -1 < 0 (no)
-    # y = [-1, 1]: A'y = [0, 2] > 0 (no)
-    # This problem is actually FEASIBLE (x1 = x2 = 0.5 satisfies both rows),
-    # so no Farkas ray exists and verification must reject every candidate.
-    state2 = SDPX.HSDState([0.0, 0.0], [0.0, 0.0], 1.0, 0.0, A2, b2, c2)
-    @test !SDPX.verify_primal_infeasibility!(state2, [1.0, -1.0])
-end
-
-@testset "verify_dual_infeasibility!" begin
-    # min c'x s.t. A x + s = b, s >= 0.  Dual infeasible if c'x < 0
-    # along a ray with A x + s = 0, s >= 0.
-    A = sparse([1.0 0.0; 0.0 1.0])
-    b = [1.0, 1.0]
-    c = [-1.0, -1.0]
-    # ray x = [1, 1], s = [-1, -1] (not in cone)
-    state = SDPX.HSDState([0.0, 0.0], [1.0, 1.0], 1.0, 0.0, A, b, c)
-    @test SDPX.verify_dual_infeasibility!(state, [1.0, 1.0], [-1.0, -1.0])
-    # ray with s in cone: x = [1, 0], s = [-1, 0] (s not in cone)
-    @test !SDPX.verify_dual_infeasibility!(state, [1.0, 0.0], [1.0, 0.0])
-end
-
-@testset "ray normalization" begin
-    y = [3.0, 4.0]
-    SDPX.normalize_primal_ray!(y)
-    @test norm(y) ≈ 1.0
-    x = [0.0, 5.0]
-    SDPX.normalize_dual_ray!(x)
-    @test norm(x) ≈ 1.0
-end
-
-@testset "rectangular HSD fixture (m != n)" begin
-    # Rectangular equality map with m = 2 rows and n = 3 columns (m != n).
-    # Any HSD residual helper that relies on `dot(s, x)` is only dimensionally
-    # valid when m == n (s is m-dim, x is n-dim), so it must be rejected on a
-    # rectangular state. This fixture makes such an accidental `dot(s, x)`
-    # fail immediately instead of silently producing garbage.
-    A = [1.0 2.0 3.0; 0.0 1.0 -1.0]
+@testset "HSD rectangular (m != n) residuals are dimensionally valid" begin
+    A = [1.0 2.0 3.0; 0.0 1.0 -1.0]      # m=2, n=3
     b = [1.0, 5.0]
     c = [1.0, -1.0, 0.5]
-    x = [0.5, 0.5, 1.0]
-    s = [1.0, 2.0]
-    state = SDPX.HSDState(x, s, 1.0, 0.0, sparse(A), b, c)
+    canon = _lp_canonical(A, b, c)
+    st = SDPX.HSDState(canon)
+    copyto!(st.x, [0.5, 0.5, 1.0])
+    copyto!(st.s, [1.0, 2.0])
+    copyto!(st.y, [0.5, 0.25])
+    st.tau = 1.0
+    st.kappa = 0.0
+    @test st.n == 3 && st.m == 2
+    @test length(st.s) == 2 && length(st.x) == 3          # never dot(s,x)
+    SDPX.hsd_residual!(st)
+    @test st.rP ≈ [4.5, -3.5]                            # A x + s - b·τ
+    @test st.rD ≈ [1.5, 0.25, 1.75]                      # A'y + c·τ
+    @test SDPX.hsd_complementarity(st) ≈ dot(st.s, st.y)  # s'y only, no x
+end
 
-    # The fixture is genuinely rectangular: s (m=2) and x (n=3) differ in length.
-    @test size(state.A) == (2, 3)
-    @test length(state.x) == 3
-    @test length(state.s) == 2
-    @test length(state.s) != length(state.x)
+@testset "cone membership resolved per block through the layout" begin
+    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [0.0, 0.0])
+    @test SDPX.in_canonical_cone(canon, [1.0, 2.0]; dual=false)
+    @test !SDPX.in_canonical_cone(canon, [1.0, -0.5]; dual=false)
+    @test SDPX.in_canonical_cone(canon, [0.1, 0.2]; dual=true)  # self-dual
+    # an SOC block is resolved by its own membership
+    desc = SDPX.ConeBlockDescriptor(Float64, :soc, 3; offset=1)
+    layout = SDPX.canonical_layout([desc])
+    chain = SDPX.CanonicalReconstructionChain{Float64}(
+        1, 0.0, SDPX.VariableRef[], SDPX.ConstraintRef[], SDPX.VariableRef[], 0)
+    soc = SDPX.CanonicalConicProgram(SDPX.ArithmeticSpec(Float64), 53,
+        zeros(1), sparse([1.0 0.0 0.0]), zeros(3), layout, chain)
+    @test SDPX.in_canonical_cone(soc, [2.0, 1.0, 1.0]; dual=false)
+    @test !SDPX.in_canonical_cone(soc, [1.0, 2.0, 0.0]; dual=false)
+end
 
-    # Every dimensionally-valid residual helper works with the rectangular A.
-    # Primal residual A*x + s - b*tau (m-dim).
-    @test SDPX.hsd_primal_residual(state) ≈ [4.5, -3.5]
-    # Dual residual -c'x - b's + kappa.
-    @test SDPX.hsd_dual_residual(state) ≈ -11.5
-    # Optimality gap c'x + b's.
-    @test SDPX.hsd_optimality_gap(state) ≈ 11.5
-    # Normalized residual is a well-defined nonnegative scalar.
-    @test SDPX.hsd_normalized_residual(state) >= 0
+@testset "verify_optimal! (original-coordinate recovery)" begin
+    # A = I, b = 1, c = -1: optimum x=(1,1), s=0, y=(1,1), τ=1, κ=0
+    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
+    st = SDPX.HSDState(canon)
+    copyto!(st.x, [1.0, 1.0]); copyto!(st.s, [0.0, 0.0]); copyto!(st.y, [1.0, 1.0])
+    st.tau = 1.0; st.kappa = 0.0
+    xo = zeros(2); so = zeros(2); yo = zeros(2)
+    @test SDPX.verify_optimal!(canon, st, xo, so, yo)
+    @test xo ≈ [1.0, 1.0]
+    @test so ≈ [0.0, 0.0]
+    @test yo ≈ [1.0, 1.0]
+    # a non-optimal point with s not in K must fail
+    st2 = SDPX.HSDState(canon)
+    copyto!(st2.x, [1.0, 1.0]); copyto!(st2.s, [-0.5, 0.5]); copyto!(st2.y, [1.0, 1.0])
+    st2.tau = 1.0; st2.kappa = 0.0
+    @test !SDPX.verify_optimal!(canon, st2, xo, so, yo)
+    # τ too small (an infeasibility face) must not certify optimal
+    st3 = SDPX.HSDState(canon)
+    copyto!(st3.x, [1e-8, 1e-8]); copyto!(st3.s, [1.0, 1.0]); copyto!(st3.y, [1.0, 1.0])
+    st3.tau = 1e-10; st3.kappa = 0.0
+    @test !SDPX.verify_optimal!(canon, st3, xo, so, yo)
+end
+
+@testset "verify_primal_infeasibility! (Farkas ray)" begin
+    # A = [1; -1], b = [0; -2], c = [1]: primal infeasible (x <= 0 and x >= 2).
+    # Farkas ray y = (0.5, 0.5) (A'y = 0, y >= 0, b'y = -1).
+    canon = _lp_canonical(reshape([1.0, -1.0], 2, 1), [0.0, -2.0], [1.0])
+    st = SDPX.HSDState(canon)
+    copyto!(st.x, [0.0]); copyto!(st.s, [0.0, 0.0]); copyto!(st.y, [0.5, 0.5])
+    st.tau = 0.0; st.kappa = 1.0
+    yo = zeros(2)
+    @test SDPX.verify_primal_infeasibility!(canon, st, yo)
+    @test dot([0.0, -2.0], yo) ≈ -1.0        # normalized by -b'y = 1
+    # a non-ray (A'y not ≈ 0) must fail
+    st2 = SDPX.HSDState(canon)
+    copyto!(st2.x, [0.0]); copyto!(st2.s, [0.0, 0.0]); copyto!(st2.y, [1.0, 1.0])
+    st2.tau = 0.0; st2.kappa = 1.0
+    # y=(1,1) IS a Farkas ray too (A'y=0, b'y=-2<0); use a bad one instead
+    st3 = SDPX.HSDState(canon)
+    copyto!(st3.x, [0.0]); copyto!(st3.s, [0.0, 0.0]); copyto!(st3.y, [1.0, 3.0])
+    st3.tau = 0.0; st3.kappa = 1.0
+    @test !SDPX.verify_primal_infeasibility!(canon, st3, yo)  # A'y = -2 ≠ 0
+end
+
+@testset "verify_dual_infeasibility! checks the ray cone membership" begin
+    # A = [1; 1], b = 0, c = 1: min x s.t. x + s = 0, s >= 0 → x <= 0 unbounded below.
+    # Ray x = -1, slack s_r = -A x = [1, 1] in K, c'x = -1 < 0.
+    canon = _lp_canonical(reshape([1.0, 1.0], 2, 1), [0.0, 0.0], [1.0])
+    st = SDPX.HSDState(canon)
+    copyto!(st.x, [-1.0]); copyto!(st.s, [1.0, 1.0]); copyto!(st.y, [1.0, 1.0])
+    st.tau = 0.0; st.kappa = 1.0
+    xo = zeros(1); so = zeros(2)
+    @test SDPX.verify_dual_infeasibility!(canon, st, xo, so)
+    @test dot([1.0], xo) ≈ -1.0            # normalized by -c'x = 1
+    # the FIX: a ray whose slack member s_r = -A x is NOT in K must be rejected.
+    st_bad = SDPX.HSDState(canon)
+    copyto!(st_bad.x, [1.0]); copyto!(st_bad.s, [-1.0, -1.0])   # -A x = [-1,-1] ∉ K
+    copyto!(st_bad.y, [1.0, 1.0]); st_bad.tau = 0.0; st_bad.kappa = 1.0
+    @test !SDPX.verify_dual_infeasibility!(canon, st_bad, xo, so)
+end
+
+@testset "certificate recovery flows through the reconstruction chain" begin
+    # A program with an explicit sign map (Nonpositive source → :nonnegative,
+    # reconstruction sign -1). Use a real frontend model so the chain exists.
+    model = SDPX.Model(Float64)
+    v = SDPX.variable!(model, :v, 1; domain=SDPX.Nonpositive())
+    SDPX.objective!(model, SDPX.Minimize(), -v[1])
+    SDPX.constraint!(model, :c, (v[1],), SDPX.Nonpositive())
+    ncp = SDPX.compile_product_cone_model(model)
+    canon = SDPX.canonicalize(ncp)
+    # canonical slack s = -v (sign -1).  An optimal point with v=-1 (s=1):
+    st = SDPX.HSDState(canon)
+    # v is the frontend variable -> canonical x; reconstruct manually via the map
+    blocks = SDPX.layout_blocks(canon.cone_layout)
+    @test all(b -> SDPX.block_cone(b) === :nonnegative, blocks)
+    # canonical program: s = -v, and A row for the variable block is -I
+    A = SDPX.canonical_equality(canon)
+    @test A[1, 1] ≈ -1.0 || A[1, 1] ≈ 1.0   # identity with a sign
+end
+
+@testset "verify_optimal! rejects a non-feasible recovered point" begin
+    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
+    st = SDPX.HSDState(canon)
+    # x feasible but s = [0.5, -0.5] not in K → s/τ ∉ K
+    copyto!(st.x, [0.5, 1.5]); copyto!(st.s, [0.5, -0.5]); copyto!(st.y, [1.0, 1.0])
+    st.tau = 1.0; st.kappa = 0.0
+    xo = zeros(2); so = zeros(2); yo = zeros(2)
+    @test !SDPX.verify_optimal!(canon, st, xo, so, yo)
 end

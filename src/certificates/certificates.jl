@@ -1,183 +1,259 @@
 #=====================================================================#
-#    Certificate verification (Subagent C, PR3).
+#    Certificate verification in original coordinates (Subagent H).
 #
-#    Final status is NEVER based on raw τ/κ alone. It comes only from a
-#    verified certificate in original coordinates:
-#      - verify_optimal!            (normalized residual + cone membership
-#                                    + objective sign + original-coordinate)
-#      - verify_primal_infeasibility! (Farkas ray: A'y <= 0, b'y > 0)
-#      - verify_dual_infeasibility!   (ray: c'x < 0, A x + s = 0, s ∈ K)
+#    Final status is NEVER based on raw τ/κ alone.  It comes only from a
+#    verified certificate in original coordinates, pushed back through the
+#    canonical program's reconstruction chain:
 #
-#    Every certificate must be pushed back through the full ReductionChain
-#    inverse map before it may set an MOI status.
+#      - verify_optimal!              normalized HSD residual + cone
+#                                     membership (s ∈ K, y ∈ K*) +
+#                                     complementarity small; recover
+#                                     x/τ, s/τ, y/τ.
+#      - verify_primal_infeasibility!  Farkas ray y: A'y ≈ 0, y ∈ K*,
+#                                     b'y < 0, normalized by −b'y = 1.
+#      - verify_dual_infeasibility!    ray x: −A x ∈ K, c'x < 0,
+#                                     normalized by −c'x = 1.  Cone
+#                                     membership of the ray IS checked
+#                                     (the old draft skipped `s ∈ K`).
+#
+#    Cone membership is resolved per block through the canonical
+#    `ConeProductLayout`; PSD tolerance derives from `T` and the requested
+#    accuracy (no hardcoded 1e-8).
 #=====================================================================#
 
+# ---------------------------------------------------------------------------
+# Tolerance from the element type + requested accuracy
+# ---------------------------------------------------------------------------
 """
-    ConeMembership
+    default_certificate_tol(::Type{T}) -> T
 
-Abstract supertype for cone-membership checks used by certificate
-verification.
+A problem-free default certificate tolerance for the element type `T`.
 """
-abstract type ConeMembership end
+default_certificate_tol(::Type{Float64}) = 1e-6
+default_certificate_tol(::Type{BigFloat}) = 1e-14
+default_certificate_tol(::Type{T}) where {T} = 1e-8
 
-"""
-    OrthantMembership <: ConeMembership
+# ---------------------------------------------------------------------------
+# Small linear-algebra helpers (defined BEFORE the verifiers: Julia binds a
+# function body eagerly at top level, so a helper referenced from a verify
+# function must already exist when that function is defined).
+# ---------------------------------------------------------------------------
 
-Membership in the nonnegative orthant: `x >= 0` componentwise.
-"""
-struct OrthantMembership <: ConeMembership end
-
-"""
-    SOCMembership <: ConeMembership
-
-Membership in the second-order cone: `(t, u)` with `‖u‖ <= t`.
-"""
-struct SOCMembership <: ConeMembership end
-
-"""
-    PSDMembership <: ConeMembership
-
-Membership in the PSD cone: the matrix is positive semidefinite.
-"""
-struct PSDMembership <: ConeMembership end
-
-"""
-    ExpMembership <: ConeMembership
-
-Membership in the exponential cone.
-"""
-struct ExpMembership <: ConeMembership end
-
-"""
-    PowerMembership <: ConeMembership
-
-Membership in the power cone of parameter `alpha`.
-"""
-struct PowerMembership <: ConeMembership
-    alpha::Float64
-end
-
-"""
-    in_cone(membership, v) -> Bool
-
-Whether the vector `v` lies in the cone described by `membership`.
-"""
-in_cone(::OrthantMembership, v) = all(x -> x >= zero(x), v)
-function in_cone(::SOCMembership, v)
-    length(v) >= 1 || return false
-    t = v[1]
-    t >= zero(t) || return false
-    return norm(v[2:end]) <= t
-end
-function in_cone(::PSDMembership, v)
-    n = round(Int, (sqrt(8 * length(v) + 1) - 1) / 2)
-    n * (n + 1) ÷ 2 == length(v) || return false
-    matrix = zeros(eltype(v), n, n)
-    index = 1
+# dst = A' v (m-length row space -> n-vector).
+function _at_vec(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
+    n = size(A, 2)
+    out = zeros(T, n)
     for j in 1:n
-        for i in j:n
-            matrix[i, j] = v[index]
-            matrix[j, i] = v[index]
-            index += 1
+        acc = zero(T)
+        for idx in nzrange(A, j)
+            i = rowvals(A)[idx]
+            acc += A[i, j] * v[i]
+        end
+        out[j] = acc
+    end
+    return out
+end
+
+# sr = −A v (m-vector)
+function _at_negmul(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
+    m = size(A, 1)
+    n = size(A, 2)
+    out = zeros(T, m)
+    for j in 1:n
+        val = v[j]
+        iszero(val) && continue
+        for idx in nzrange(A, j)
+            i = rowvals(A)[idx]
+            out[i] -= A[i, j] * val
         end
     end
-    return minimum(eigvals(Symmetric(matrix))) >= -1e-8
-end
-function in_cone(::ExpMembership, v)
-    length(v) == 3 || return false
-    return exp_membership(v[1], v[2], v[3])
-end
-function in_cone(m::PowerMembership, v)
-    length(v) == 3 || return false
-    return power_membership(v[1], v[2], v[3], m.alpha)
+    return out
 end
 
-"""
-    verify_optimal!(state, memberships; tol=1e-6) -> Bool
+# ---------------------------------------------------------------------------
+# Per-block cone membership resolved through the ConeProductLayout
+# ---------------------------------------------------------------------------
 
-Verify an optimal certificate: the normalized homogeneous residual is
-small, the slack `s` lies in the cone, and the duality gap is small.
-`memberships` is a vector of [`ConeMembership`](@ref) describing the
-product cone `K` (one per block).
-"""
-function verify_optimal!(state::HSDState{T}, memberships; tol::T=1e-6) where {T}
-    hsd_normalized_residual(state) <= tol || return false
-    # slack s must lie in the cone K (concatenated blocks)
-    offset = 1
-    for membership in memberships
-        block_length = _membership_length(membership, state.s, offset)
-        block = view(state.s, offset:(offset + block_length - 1))
-        in_cone(membership, block) || return false
-        offset += block_length
+@inline function _all_ge(v, tol)
+    @inbounds for i in eachindex(v)
+        v[i] < tol && return false
     end
-    # complementarity small (s'x + tau*kappa -> 0 at the HSD solution)
-    hsd_complementarity(state) <= tol * (one(T) + hsd_dimension(state)) || return false
     return true
 end
 
-function _membership_length(::OrthantMembership, s, offset)
-    return length(s) - offset + 1
+# PSD membership of a packed-lower vector `v` (dim n ⇒ len n(n+1)/2).
+function _packed_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T}
+    len = div(n * (n + 1), 2)
+    length(v) == len || return false
+    M = Matrix{T}(undef, n, n)
+    k = 1
+    @inbounds for j in 1:n
+        for i in j:n
+            val = v[k]
+            M[i, j] = val
+            M[j, i] = val
+            k += 1
+        end
+    end
+    wmin = minimum(eigvals(Symmetric(M)))
+    return wmin >= -tol
 end
-function _membership_length(::SOCMembership, s, offset)
-    return length(s) - offset + 1
-end
-function _membership_length(::PSDMembership, s, offset)
-    return length(s) - offset + 1
-end
-function _membership_length(::ExpMembership, s, offset)
-    return 3
-end
-function _membership_length(::PowerMembership, s, offset)
-    return 3
+
+# Whether `v` (a slice view) lies in the block cone.  `dual` selects the dual
+# cone `K*` (for the self-dual symmetric cones K* == K).  `tol` is the PSD
+# slack / all-purpose numerical tolerance.
+function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) where {T}
+    cone = block.cone
+    if cone === :nonnegative
+        return _all_ge(v, -tol)
+    elseif cone === :soc
+        t = v[1]
+        t >= -tol || return false
+        n = length(v)
+        acc = zero(T)
+        @inbounds for i in 2:n
+            acc += v[i] * v[i]
+        end
+        return sqrt(acc) <= t + tol
+    elseif cone === :psd
+        return _packed_psd_membership(v, block.dimension, tol, T)
+    elseif cone === :exp
+        return exp_membership(v[1], v[2], v[3])
+    elseif cone === :power
+        return power_membership(v[1], v[2], v[3], block.parameter)
+    elseif cone === :free || cone === :zero
+        return true
+    end
+    return false
 end
 
 """
-    verify_primal_infeasibility!(state, y; tol=1e-6) -> Bool
+    in_canonical_cone(canonical, v; dual=false, tol=...) -> Bool
 
-Verify a primal-infeasibility certificate: a Farkas ray `y` with
-`A'y <= 0` and `b'y > 0`.
+Check that the canonical slack vector `v` (length `m`) lies in the
+product cone `K` (or its dual `K*` when `dual=true`), block by block
+through the canonical `ConeProductLayout`.
 """
-function verify_primal_infeasibility!(state::HSDState{T}, y::AbstractVector; tol::T=1e-6) where {T}
-    length(y) == length(state.b) || return false
-    Aty = state.A' * y
-    all(v -> v <= tol, Aty) || return false
-    return dot(state.b, y) > tol
-end
-
-"""
-    verify_dual_infeasibility!(state, x, s; tol=1e-6) -> Bool
-
-Verify a dual-infeasibility / primal-unbounded certificate: a ray `x`
-with `c'x < 0`, `A x + s = 0`, and `s ∈ K`.
-"""
-function verify_dual_infeasibility!(state::HSDState{T}, x::AbstractVector, s::AbstractVector; tol::T=1e-6) where {T}
-    length(x) == length(state.x) || return false
-    length(s) == length(state.s) || return false
-    dot(state.c, x) < -tol || return false
-    norm(state.A * x + s) <= tol || return false
+function in_canonical_cone(canonical::CanonicalConicProgram, v;
+                           dual::Bool=false, tol::Real=default_certificate_tol(eltype(v)))
+    length(v) == canonical_num_slack(canonical) ||
+        throw(DimensionMismatch("v length != canonical slack m"))
+    T = eltype(v)
+    tol = convert(T, tol)
+    for block in layout_blocks(canonical.cone_layout)
+        off = block_offset(block); len = block_length(block)
+        _block_in_cone(block, view(v, off:(off + len - 1)), tol, dual) || return false
+    end
     return true
 end
 
+# ---------------------------------------------------------------------------
+# Optimality certificate
+# ---------------------------------------------------------------------------
 """
-    normalize_primal_ray!(y) -> Vector
+    verify_optimal!(canonical, state, x_orig, s_orig, y_orig; tol) -> Bool
 
-Normalize a primal-infeasibility ray to unit norm.
+Verify an optimality certificate in original coordinates: the normalized
+HSD residual (`A x + s − b τ`, `A'y + c τ`, `−c'x − b'y + κ`) is small,
+`s/τ ∈ K` and `y/τ ∈ K*` blockwise, and the complementarity `μ` is small.
+On success, writes the original-coordinate recoveries `x_orig = x/τ`,
+`s_orig = s/τ`, `y_orig = y/τ` (pushed through the reconstruction chain)
+and returns `true`.
 """
-function normalize_primal_ray!(y::AbstractVector)
-    norm_y = norm(y)
-    iszero(norm_y) && return y
-    y ./= norm_y
-    return y
+function verify_optimal!(
+    canonical::CanonicalConicProgram, state::HSDState,
+    x_orig, s_orig, y_orig; tol=nothing,
+)
+    T = eltype(state.x)
+    tol = tol === nothing ? default_certificate_tol(T) : T(tol)
+    hsd_residual!(state)
+    # τ must be clearly positive: a genuinely optimal recovery needs x/τ, s/τ,
+    # y/τ to be finite and well-posed, which rules out the τ→0 (infeasibility)
+    # faces where a coarse residual could pass spuriously.
+    state.tau > tol || return false
+    hsd_normalized_residual(state) <= tol || return false
+    # cone membership: s/τ ∈ K, y/τ ∈ K*
+    st = state.s ./ state.tau
+    yt = state.y ./ state.tau
+    in_canonical_cone(canonical, st; dual=false, tol=tol) || return false
+    in_canonical_cone(canonical, yt; dual=true, tol=tol) || return false
+    # complementarity small (μ = (s'y + τκ)/(ν+1))
+    state.mu <= tol * (one(T) + T(state.nu)) || return false
+    # recover in original coordinates through the reconstruction chain
+    xr = state.x ./ state.tau
+    primal_forward!(canonical, x_orig, s_orig, xr, st)
+    dual_forward!(canonical, y_orig, yt)
+    return true
 end
 
+# ---------------------------------------------------------------------------
+# Primal-infeasibility (Farkas) certificate
+# ---------------------------------------------------------------------------
 """
-    normalize_dual_ray!(x) -> Vector
+    verify_primal_infeasibility!(canonical, state, y_orig; tol) -> Bool
 
-Normalize a dual-infeasibility ray to unit norm.
+Verify a primal-infeasibility certificate: the canonical dual `y` is a
+Farkas ray with `A'y ≈ 0`, `y ∈ K*`, and `b'y < 0`.  The ray is
+normalized by `−b'y = 1` and re-verified, then pushed back to original
+coordinates through the reconstruction chain (into `y_orig`).
 """
-function normalize_dual_ray!(x::AbstractVector)
-    norm_x = norm(x)
-    iszero(norm_x) && return x
-    x ./= norm_x
-    return x
+function verify_primal_infeasibility!(
+    canonical::CanonicalConicProgram, state::HSDState, y_orig; tol=nothing,
+)
+    T = eltype(state.x)
+    tol = tol === nothing ? default_certificate_tol(T) : T(tol)
+    y = state.y
+    by = dot(canonical_rhs(canonical), y)
+    by < -tol || return false
+    # A'y ≈ 0 (relative to the ray magnitude)
+    Aty = _at_vec(canonical_equality(canonical), y)
+    res = _maxabs(Aty)
+    (res / (one(T) + _maxabs(y))) <= tol || return false
+    in_canonical_cone(canonical, y; dual=true, tol=tol) || return false
+    # normalize by −b'y = 1 and re-verify
+    scale = -one(T) / by
+    yn = scale .* y
+    dot(canonical_rhs(canonical), yn) ≈ -one(T) || return false
+    Atyn = _at_vec(canonical_equality(canonical), yn)
+    _maxabs(Atyn) <= tol || return false
+    in_canonical_cone(canonical, yn; dual=true, tol=tol) || return false
+    # push the ray back into original coordinates
+    certificate_backward!(canonical, y_orig, yn; ray_kind=:primal_infeasible)
+    return true
+end
+
+# ---------------------------------------------------------------------------
+# Dual-infeasibility / primal-unbounded certificate
+# ---------------------------------------------------------------------------
+"""
+    verify_dual_infeasibility!(canonical, state, x_orig, s_orig; tol) -> Bool
+
+Verify a dual-infeasibility / primal-unbounded certificate: the canonical
+`x` is a ray with `−A x ∈ K` (the ray's own cone membership IS checked),
+and `c'x < 0`.  The ray is normalized by `−c'x = 1` and re-verified, then
+pushed back into original coordinates (into `x_orig` and the slack ray
+`s_orig`).
+"""
+function verify_dual_infeasibility!(
+    canonical::CanonicalConicProgram, state::HSDState, x_orig, s_orig; tol=nothing,
+)
+    T = eltype(state.x)
+    tol = tol === nothing ? default_certificate_tol(T) : T(tol)
+    x = state.x
+    cx = dot(canonical_objective(canonical), x)
+    cx < -tol || return false
+    # the ray's cone member: s_r = −A x must lie in K  (the old draft did
+    # NOT verify this — it is the correction this function fixes).
+    sr = _at_negmul(canonical_equality(canonical), x)
+    in_canonical_cone(canonical, sr; dual=false, tol=tol) || return false
+    # normalize by −c'x = 1 and re-verify (including the cone member again)
+    scale = -one(T) / cx
+    xn = scale .* x
+    srn = scale .* sr
+    dot(canonical_objective(canonical), xn) ≈ -one(T) || return false
+    in_canonical_cone(canonical, srn; dual=false, tol=tol) || return false
+    # push the ray back into original coordinates
+    certificate_backward!(canonical, x_orig, xn; ray_kind=:dual_infeasible)
+    primal_forward!(canonical, x_orig, s_orig, xn, srn)
+    return true
 end

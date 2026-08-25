@@ -7,8 +7,6 @@ include("cone_algebra.jl")
 include("cones/symmetric/SymmetricCones.jl")
 include("cones/exponential.jl")
 include("cones/power.jl")
-include("hsd/hsd.jl")
-include("certificates/certificates.jl")
 include("modeling/domains.jl")
 include("modeling/refs.jl")
 include("modeling/types.jl")
@@ -48,6 +46,13 @@ include("factor_cache/api.jl")
 include("factor_cache/routes.jl")
 include("kkt_route.jl")
 include("step_hot.jl")
+# HSD state, Nonnegative (LP) HSD predictor/corrector, and certificate
+# verification. Included here (after the IR, factor-cache routes and the KKT
+# route driver) so they can reference CanonicalConicProgram, ConeProductLayout,
+# AbstractFactorCache and HotRouteCache.
+include("hsd/hsd.jl")
+include("hsd/nonnegative_hsd.jl")
+include("certificates/certificates.jl")
 include("ingest.jl")
 include("lp_api.jl")
 include("ir/lower_lp.jl")
