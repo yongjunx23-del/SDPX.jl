@@ -32,12 +32,23 @@ Dimensions are always consistent: `x:n`, `y:m`, `s:m`.
 
     A x + s - b tau = 0
     A' y + c tau = 0
-    c' x + b' y + kappa = 0
+    -c' x - b' y + kappa = 0
 
     s in K
     y in K*
     tau >= 0
     kappa >= 0
+
+**Sign note (Lead correction of the initial freeze).** The third equation must
+carry **negative** coefficients on `c'x` and `b'y`. Reason: weak duality with
+`s in K`, `y in K*` gives `c'x + b'y = s'y >= 0` (verified from `A'y + c tau = 0`
+and `A x + s = b tau`), so the gap equation `-c'x - b'y + kappa = 0` yields
+`kappa = c'x + b'y = s'y >= 0`, consistent with `kappa >= 0`. The sign as first
+frozen (`c'x + b'y + kappa = 0`) forced `kappa <= 0` at feasible points and
+admitted no strictly-interior central point; it is corrected here. This matches
+the skew system `Q (x;y;tau) = (0; s; kappa)` with
+`Q = [[0, A', c]; [-A, 0, b]; [-c', -b', 0]]`, `Q = -Q'`.
+See `docs/design/HSD_FORMULATION.md` §10.1 for the full analysis.
 
 **Central path:**
 
