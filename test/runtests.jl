@@ -44,6 +44,7 @@ const QUICK_TESTS = (
     "precision_ladder_plan.jl",
     "fixed_precision_contract.jl",
     "allocation_contract.jl",
+    "factor_cache.jl",
 )
 
 # Keep this list in the historical full-suite order. Some older tests share
