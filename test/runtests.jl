@@ -5,6 +5,7 @@ const QUICK_TESTS = (
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
     "dense_augmented_kkt.jl",
+    "cone_algebra.jl",
     "soc_native_algebra.jl",
     "soc_metric_sparse.jl",
     "soc_singleton_presolve.jl",

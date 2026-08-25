@@ -3,6 +3,7 @@ module SDPX
 using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, Serialization
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
+include("cone_algebra.jl")
 include("modeling/domains.jl")
 include("modeling/refs.jl")
 include("modeling/types.jl")
