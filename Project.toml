@@ -4,8 +4,10 @@ version = "0.5.0-DEV"
 authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
 
 [deps]
+GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 MutableArithmetics = "d8a4904e-b15c-11e9-3269-09a3773c0cb0"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
@@ -15,11 +17,9 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 [weakdeps]
 AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
 BigFloatLinearAlgebra = "44d352a4-380e-4c6a-9c2a-31e5bfe329aa"
-GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
 MultiFloatLinearAlgebra = "642d9d30-8e28-45ca-9d81-256429ea358f"
-MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
 SciMLBase = "0bca4576-84f4-4d90-8ffe-ffa030f20462"
 
 [extensions]

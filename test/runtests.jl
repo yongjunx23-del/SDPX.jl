@@ -55,6 +55,8 @@ const QUICK_TESTS = (
     "factor_cache.jl",
     "factor_cache_state.jl",
     "factorizations_gate.jl",
+    "kkt_route.jl",
+    "hot_step_zeroalloc.jl",
     "reduction_plan.jl",
 )
 
@@ -146,6 +148,8 @@ const FULL_TESTS = (
     "precision_ladder_plan.jl",
     "sparse_execution_round6.jl",
     "sparse_schur_round7.jl",
+    "kkt_route.jl",
+    "hot_step_zeroalloc.jl",
 )
 
 function _test_profile()
