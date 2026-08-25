@@ -547,6 +547,9 @@ mutable struct Workspace{T}
     executed_la_ownership::Symbol
     la_fallback_reason::Symbol
     la_fallback_chain::Tuple{Vararg{Symbol}}
+    # Wave C gate: number of factorize! calls performed so far. Incremented
+    # once per newton_step in the hot loop; asserted == 1 per iteration.
+    factorizations::Int
 end
 
 function _use_sparse_schur_sdp(prob::SDPProblem{T}) where {T}
@@ -1270,7 +1273,7 @@ function Workspace(
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         :not_run, false, selected_threads, config, nothing, :not_executed, :none,
         la_backend, :not_executed, :not_executed, :not_executed, :none,
-        plan.la_config.fallback_chain)
+        plan.la_config.fallback_chain, 0)
     workspace.backend = _backend_from_configuration(
         workspace,
         formulation_plan,

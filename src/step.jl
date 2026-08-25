@@ -686,6 +686,7 @@ function newton_step!(
     kkt = _with_blas_threads(_kkt_blas_threads(m)) do
         factorize!(backend, ws, prob, opts)
     end
+    ws.factorizations += 1
     kkt.ok || return (status=:breakdown,
         reason=backend isa DenseAugmentedKKTBackend ?
             "pivoted LDLT factorization of the dense augmented KKT system failed after $(kkt.reg_attempts) SDPX regularization attempt(s)" :
