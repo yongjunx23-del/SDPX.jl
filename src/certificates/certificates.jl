@@ -43,11 +43,13 @@ default_certificate_tol(::Type{T}) where {T} = 1e-8
 function _at_vec(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
     n = size(A, 2)
     out = zeros(T, n)
+    vals = nonzeros(A)
+    rows = rowvals(A)
     for j in 1:n
         acc = zero(T)
         for idx in nzrange(A, j)
-            i = rowvals(A)[idx]
-            acc += A[i, j] * v[i]
+            i = rows[idx]
+            acc += vals[idx] * v[i]
         end
         out[j] = acc
     end
@@ -59,12 +61,14 @@ function _at_negmul(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
     m = size(A, 1)
     n = size(A, 2)
     out = zeros(T, m)
+    vals = nonzeros(A)
+    rows = rowvals(A)
     for j in 1:n
         val = v[j]
         iszero(val) && continue
         for idx in nzrange(A, j)
-            i = rowvals(A)[idx]
-            out[i] -= A[i, j] * val
+            i = rows[idx]
+            out[i] -= vals[idx] * val
         end
     end
     return out
@@ -85,18 +89,46 @@ end
 function _packed_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T}
     len = div(n * (n + 1), 2)
     length(v) == len || return false
-    M = Matrix{T}(undef, n, n)
-    k = 1
-    @inbounds for j in 1:n
-        for i in j:n
-            val = v[k]
-            M[i, j] = val
-            M[j, i] = val
-            k += 1
+    n == 0 && return true
+    if T === Float64
+        M = Matrix{Float64}(undef, n, n)
+        k = 1
+        @inbounds for j in 1:n
+            for i in j:n
+                val = v[k]
+                M[i, j] = val
+                M[j, i] = val
+                k += 1
+            end
+        end
+        wmin = minimum(eigvals(Symmetric(M)))
+        return wmin >= -tol
+    else
+        A = Matrix{T}(undef, n, n)
+        V = Matrix{T}(undef, n, n)
+        w = Vector{T}(undef, n)
+        k = 1
+        @inbounds for j in 1:n
+            for i in j:n
+                val = v[k]
+                A[i, j] = val
+                A[j, i] = val
+                k += 1
+            end
+        end
+        for j in 1:n, i in 1:n
+            V[i, j] = i == j ? one(T) : zero(T)
+        end
+        try
+            SymmetricCones._jacobi_eigen!(A, V, w; maxsweeps=100)
+            return minimum(w) >= -tol
+        catch e
+            if e isa SymmetricCones._SymmetricEigenFailed
+                return false
+            end
+            rethrow(e)
         end
     end
-    wmin = minimum(eigvals(Symmetric(M)))
-    return wmin >= -tol
 end
 
 # Whether `v` (a slice view) lies in the block cone.  `dual` selects the dual

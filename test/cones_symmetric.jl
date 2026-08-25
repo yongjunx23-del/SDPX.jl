@@ -151,6 +151,22 @@ function _sym_soc(::Type{T}) where {T}
         gnum = T[(F(x + hfd * onehot(T, 4, i)) - F(x - hfd * onehot(T, 4, i))) / (2hfd) for i in 1:4]
         @test g ≈ gnum rtol=1e-3 atol=1e-4
 
+        # barrier hessian product
+        d = T[0.5, -0.2, 0.1, 0.3]
+        h = zeros(T, 4)
+        SC.barrier_hessian_product!(cone, h, x, d)
+        g_plus = zeros(T, 4)
+        g_minus = zeros(T, 4)
+        SC.barrier_gradient!(cone, g_plus, x + hfd * d)
+        SC.barrier_gradient!(cone, g_minus, x - hfd * d)
+        hnum = (g_plus - g_minus) / (2hfd)
+        @test h ≈ hnum rtol=1e-3 atol=1e-4
+
+        # third-order correction
+        w_soc = zeros(T, 4)
+        SC.third_order_correction!(cone, w_soc, T[1, 0.2, 0.1, 0], T[0.5, 0.1, 0, 0.2], T[1, 0, 0.1, 0.1])
+        @test all(isfinite, w_soc)
+
         ref = Ref(zero(T))
         a = SC.boundary_step!(cone, T[2, 0, 0, 0], ref, T[-1, 0, 0, 0])
         @test a ≈ T(2)

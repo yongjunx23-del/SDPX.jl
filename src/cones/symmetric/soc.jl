@@ -268,8 +268,8 @@ function barrier_hessian_product!(cone::SOCone, h::AbstractVector, x::AbstractVe
         det -= x[i] * x[i]
         s -= x[i] * d[i]
     end
-    s *= two  # s = 2(t d₁ - Σ uᵢ dᵢ)
     two = one(T) + one(T)
+    s *= two  # s = 2(t d₁ - Σ uᵢ dᵢ)
     invdet2 = one(T) / (det * det)
     h[1] = two * (t * s - det * d[1]) * invdet2
     @inbounds for i in 2:cone.dim

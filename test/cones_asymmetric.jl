@@ -12,8 +12,12 @@ using LinearAlgebra
     @test SDPX.exp_membership(1.0, 1.0, exp(1.0))
     @test SDPX.exp_membership(1.0, 1.0, exp(1.0) + 1.0)
     @test !SDPX.exp_membership(1.0, 1.0, exp(1.0) - 1.0)
-    # limit face (0, y, z) with y, z >= 0
+    # limit face (x, 0, z) with x <= 0, z >= 0
     @test SDPX.exp_membership(0.0, 0.0, 1.0)
+    @test SDPX.exp_membership(-1.0, 0.0, 1.0)
+    @test SDPX.exp_membership(-2.5, 0.0, 0.0)
+    @test !SDPX.exp_membership(1.0, 0.0, 1.0)
+    @test !SDPX.exp_membership(-1.0, 0.0, -1.0)
     @test !SDPX.exp_membership(0.0, 1.0, 0.0)  # 1*exp(0)=1 <= 0 is false
     @test !SDPX.exp_membership(0.0, -1.0, 1.0)
 end
@@ -76,7 +80,13 @@ end
     @test g[2] ≈ gy_num rtol=1e-4
     @test g[3] ≈ gz_num rtol=1e-4
     hxx = (SDPX.power_barrier_gradient(x + h, y, z, alpha)[1] - SDPX.power_barrier_gradient(x - h, y, z, alpha)[1]) / (2h)
+    hxz = (SDPX.power_barrier_gradient(x, y, z + h, alpha)[1] - SDPX.power_barrier_gradient(x, y, z - h, alpha)[1]) / (2h)
+    hyz = (SDPX.power_barrier_gradient(x, y, z + h, alpha)[2] - SDPX.power_barrier_gradient(x, y, z - h, alpha)[2]) / (2h)
     @test H[1, 1] ≈ hxx rtol=1e-3
+    @test H[1, 3] ≈ hxz rtol=1e-3
+    @test H[2, 3] ≈ hyz rtol=1e-3
+    @test abs(H[1, 3]) > 1e-4  # Ensure non-zero
+    @test abs(H[2, 3]) > 1e-4
     # BigFloat
     setprecision(BigFloat, 256) do
         xb, yb, zb = BigFloat(2.0), BigFloat(2.0), BigFloat(1.0)

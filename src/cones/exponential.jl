@@ -2,7 +2,7 @@
 #    Exponential cone primitives (Subagent E).
 #
 #    K_exp = { (x, y, z) : y * exp(x / y) <= z, y > 0 }
-#           ∪ { (0, y, z) : y >= 0, z >= 0 }
+#           ∪ { (x, 0, z) : x <= 0, z >= 0 }
 #
 #    Self-concordant barrier:
 #        f(x, y, z) = -log(z - y*exp(x/y)) - log(y) - log(z)
@@ -17,14 +17,14 @@
     exp_membership(x, y, z) -> Bool
 
 Whether `(x, y, z)` lies in the exponential cone (including the
-limit face `(0, y, z)` with `y >= 0, z >= 0`).
+limit face `(x, 0, z)` with `x <= 0, z >= 0`).
 """
 function exp_membership(x, y, z)
     if y > zero(y)
         return y * exp(x / y) <= z
     else
-        # limit face: x == 0, y >= 0, z >= 0
-        return iszero(x) && y >= zero(y) && z >= zero(z)
+        # limit face: x <= 0, y >= 0, z >= 0
+        return x <= zero(x) && y >= zero(y) && z >= zero(z)
     end
 end
 

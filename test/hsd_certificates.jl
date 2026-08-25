@@ -16,7 +16,7 @@ using SparseArrays
 
 # Build a canonical program with a single `:nonnegative` slack block (the LP /
 # Nonnegative case) directly from dense A,b,c.
-function _lp_canonical(A, b, c; T=Float64)
+function _lp_canonical_cert(A, b, c; T=Float64)
     m, n = size(A)
     desc = SDPX.ConeBlockDescriptor(T, :nonnegative, m; offset=1)
     layout = SDPX.canonical_layout([desc])
@@ -28,7 +28,7 @@ end
 
 @testset "HSD residuals follow the frozen equations" begin
     # min -x1 - x2 s.t. x + s = 1, s >= 0  (A = I, b = 1, c = -1)
-    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
+    canon = _lp_canonical_cert([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
     st = SDPX.HSDState(canon)
     copyto!(st.x, [0.4, 0.4])
     copyto!(st.s, [0.6, 0.6])
@@ -54,7 +54,7 @@ end
     A = [1.0 2.0 3.0; 0.0 1.0 -1.0]      # m=2, n=3
     b = [1.0, 5.0]
     c = [1.0, -1.0, 0.5]
-    canon = _lp_canonical(A, b, c)
+    canon = _lp_canonical_cert(A, b, c)
     st = SDPX.HSDState(canon)
     copyto!(st.x, [0.5, 0.5, 1.0])
     copyto!(st.s, [1.0, 2.0])
@@ -70,7 +70,7 @@ end
 end
 
 @testset "cone membership resolved per block through the layout" begin
-    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [0.0, 0.0])
+    canon = _lp_canonical_cert([1.0 0.0; 0.0 1.0], [1.0, 1.0], [0.0, 0.0])
     @test SDPX.in_canonical_cone(canon, [1.0, 2.0]; dual=false)
     @test !SDPX.in_canonical_cone(canon, [1.0, -0.5]; dual=false)
     @test SDPX.in_canonical_cone(canon, [0.1, 0.2]; dual=true)  # self-dual
@@ -87,7 +87,7 @@ end
 
 @testset "verify_optimal! (original-coordinate recovery)" begin
     # A = I, b = 1, c = -1: optimum x=(1,1), s=0, y=(1,1), τ=1, κ=0
-    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
+    canon = _lp_canonical_cert([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
     st = SDPX.HSDState(canon)
     copyto!(st.x, [1.0, 1.0]); copyto!(st.s, [0.0, 0.0]); copyto!(st.y, [1.0, 1.0])
     st.tau = 1.0; st.kappa = 0.0
@@ -111,7 +111,7 @@ end
 @testset "verify_primal_infeasibility! (Farkas ray)" begin
     # A = [1; -1], b = [0; -2], c = [1]: primal infeasible (x <= 0 and x >= 2).
     # Farkas ray y = (0.5, 0.5) (A'y = 0, y >= 0, b'y = -1).
-    canon = _lp_canonical(reshape([1.0, -1.0], 2, 1), [0.0, -2.0], [1.0])
+    canon = _lp_canonical_cert(reshape([1.0, -1.0], 2, 1), [0.0, -2.0], [1.0])
     st = SDPX.HSDState(canon)
     copyto!(st.x, [0.0]); copyto!(st.s, [0.0, 0.0]); copyto!(st.y, [0.5, 0.5])
     st.tau = 0.0; st.kappa = 1.0
@@ -132,7 +132,7 @@ end
 @testset "verify_dual_infeasibility! checks the ray cone membership" begin
     # A = [1; 1], b = 0, c = 1: min x s.t. x + s = 0, s >= 0 → x <= 0 unbounded below.
     # Ray x = -1, slack s_r = -A x = [1, 1] in K, c'x = -1 < 0.
-    canon = _lp_canonical(reshape([1.0, 1.0], 2, 1), [0.0, 0.0], [1.0])
+    canon = _lp_canonical_cert(reshape([1.0, 1.0], 2, 1), [0.0, 0.0], [1.0])
     st = SDPX.HSDState(canon)
     copyto!(st.x, [-1.0]); copyto!(st.s, [1.0, 1.0]); copyto!(st.y, [1.0, 1.0])
     st.tau = 0.0; st.kappa = 1.0
@@ -166,11 +166,24 @@ end
 end
 
 @testset "verify_optimal! rejects a non-feasible recovered point" begin
-    canon = _lp_canonical([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
+    canon = _lp_canonical_cert([1.0 0.0; 0.0 1.0], [1.0, 1.0], [-1.0, -1.0])
     st = SDPX.HSDState(canon)
     # x feasible but s = [0.5, -0.5] not in K → s/τ ∉ K
     copyto!(st.x, [0.5, 1.5]); copyto!(st.s, [0.5, -0.5]); copyto!(st.y, [1.0, 1.0])
     st.tau = 1.0; st.kappa = 0.0
     xo = zeros(2); so = zeros(2); yo = zeros(2)
     @test !SDPX.verify_optimal!(canon, st, xo, so, yo)
+end
+
+@testset "PSD cone membership in certificates (BigFloat / Float64)" begin
+    # 2x2 positive definite matrix [2.0 1.0; 1.0 2.0] packed: [2.0, 1.0, 2.0]
+    @test SDPX._packed_psd_membership([2.0, 1.0, 2.0], 2, 1e-8, Float64)
+    @test !SDPX._packed_psd_membership([1.0, 2.0, 1.0], 2, 1e-8, Float64)
+
+    setprecision(BigFloat, 256) do
+        v_psd = [BigFloat(2), BigFloat(1), BigFloat(2)]
+        v_not_psd = [BigFloat(1), BigFloat(2), BigFloat(1)]
+        @test SDPX._packed_psd_membership(v_psd, 2, BigFloat(1e-14), BigFloat)
+        @test !SDPX._packed_psd_membership(v_not_psd, 2, BigFloat(1e-14), BigFloat)
+    end
 end

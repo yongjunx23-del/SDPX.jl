@@ -71,12 +71,12 @@ function power_barrier_hessian(x, y, z, alpha)
     wxx = alpha * (alpha - one(alpha)) * w / (x * x)
     wyy = (one(alpha) - alpha) * (-alpha) * w / (y * y)
     wxy = alpha * (one(alpha) - alpha) * w / (x * y)
-    # f_xx = -wxx/A + wx^2/A^2 - wxx/B + wx^2/B^2 + 1/x^2
     h11 = -wxx / A + wx * wx / (A * A) - wxx / B + wx * wx / (B * B) + one(x) / (x * x)
     h12 = -wxy / A + wx * wy / (A * A) - wxy / B + wx * wy / (B * B)
-    h13 = zero(z)
+    inv_sq_diff = one(z) / (A * A) - one(z) / (B * B)
+    h13 = -wx * inv_sq_diff
     h22 = -wyy / A + wy * wy / (A * A) - wyy / B + wy * wy / (B * B) + one(y) / (y * y)
-    h23 = zero(z)
+    h23 = -wy * inv_sq_diff
     h33 = one(z) / (A * A) + one(z) / (B * B)
     return [h11 h12 h13; h12 h22 h23; h13 h23 h33]
 end
