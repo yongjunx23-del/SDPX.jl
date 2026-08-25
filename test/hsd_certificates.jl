@@ -194,14 +194,21 @@ end
 end
 
 @testset "PSD cone membership in certificates (BigFloat / Float64)" begin
-    # 2x2 positive definite matrix [2.0 1.0; 1.0 2.0] packed: [2.0, 1.0, 2.0]
-    @test SDPX._packed_psd_membership([2.0, 1.0, 2.0], 2, 1e-8, Float64)
-    @test !SDPX._packed_psd_membership([1.0, 2.0, 1.0], 2, 1e-8, Float64)
+    sqrt2 = sqrt(2.0)
+    # Canonical PSD coordinates are svec, not raw packed lower entries.
+    # [1, 1.2, 1] is a useful regression: it is indefinite if the middle
+    # coordinate is incorrectly read as a raw off-diagonal, but positive
+    # definite when correctly reconstructed as 1.2/sqrt(2).
+    @test SDPX._svec_psd_membership([1.0, 1.2, 1.0], 2, 1e-8, Float64)
+    @test SDPX._svec_psd_membership([2.0, sqrt2, 2.0], 2, 1e-8, Float64)
+    @test !SDPX._svec_psd_membership([1.0, 2sqrt2, 1.0], 2, 1e-8, Float64)
 
     setprecision(BigFloat, 256) do
-        v_psd = [BigFloat(2), BigFloat(1), BigFloat(2)]
-        v_not_psd = [BigFloat(1), BigFloat(2), BigFloat(1)]
-        @test SDPX._packed_psd_membership(v_psd, 2, BigFloat(1e-14), BigFloat)
-        @test !SDPX._packed_psd_membership(v_not_psd, 2, BigFloat(1e-14), BigFloat)
+        sqrt2_big = sqrt(BigFloat(2))
+        v_psd = [BigFloat(2), sqrt2_big, BigFloat(2)]
+        v_not_psd = [BigFloat(1), 2sqrt2_big, BigFloat(1)]
+        tol = parse(BigFloat, "1e-14")
+        @test SDPX._svec_psd_membership(v_psd, 2, tol, BigFloat)
+        @test !SDPX._svec_psd_membership(v_not_psd, 2, tol, BigFloat)
     end
 end

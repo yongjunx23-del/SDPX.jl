@@ -97,9 +97,14 @@ end
     return true
 end
 
-# PSD membership of a packed-lower vector `v` (dim n ⇒ len n(n+1)/2).
-function _packed_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T}
-    len = div(n * (n + 1), 2)
+# PSD membership of an HSD svec vector `v` (dim n => len n(n+1)/2).
+# Off-diagonal coordinates must be mapped back by 1/sqrt(2) before the
+# eigenvalue check; treating svec as raw packed coordinates changes the cone.
+function _svec_psd_membership(
+    v, map::PSDCoordinateMap{T}, tol::Real, ::Type{T},
+) where {T}
+    n = map.dimension
+    len = map.length
     length(v) == len || return false
     n == 0 && return true
     if T === Float64
@@ -107,7 +112,7 @@ function _packed_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T}
         k = 1
         @inbounds for j in 1:n
             for i in j:n
-                val = v[k]
+                val = v[k] * map.primal_inverse[k]
                 M[i, j] = val
                 M[j, i] = val
                 k += 1
@@ -122,7 +127,7 @@ function _packed_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T}
         k = 1
         @inbounds for j in 1:n
             for i in j:n
-                val = v[k]
+                val = v[k] * map.primal_inverse[k]
                 A[i, j] = val
                 A[j, i] = val
                 k += 1
@@ -143,6 +148,13 @@ function _packed_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T}
     end
 end
 
+function _svec_psd_membership(v, n::Int, tol::Real, ::Type{T}) where {T<:AbstractFloat}
+    bits = _psd_default_precision_bits(T, v)
+    return _svec_psd_membership(
+        v, PSDCoordinateMap(T, n; precision_bits=bits), tol, T,
+    )
+end
+
 # Whether `v` (a slice view) lies in the block cone.  `dual` selects the dual
 # cone `K*` (for the self-dual symmetric cones K* == K).  `tol` is the PSD
 # slack / all-purpose numerical tolerance.
@@ -160,7 +172,12 @@ function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) wh
         end
         return sqrt(acc) <= t + tol
     elseif cone === :psd
-        return _packed_psd_membership(v, block.dimension, tol, T)
+        map = _canonical_psd_coordinate_map(
+            block,
+            T;
+            precision_bits=_psd_default_precision_bits(T, v),
+        )
+        return _svec_psd_membership(v, map, tol, T)
     elseif cone === :exp
         return dual ? exp_dual_membership(v[1], v[2], v[3]; tol=tol) : exp_membership(v[1], v[2], v[3])
     elseif cone === :power
