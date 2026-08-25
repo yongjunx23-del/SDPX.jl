@@ -1,9 +1,0 @@
-feat(cones): ExpCone + PowerCone barrier primitives (Subagent E, PR10)
-
-- src/cones/exponential.jl: membership, self-concordant barrier,
-  gradient, Hessian, scaling point for K_exp.
-- src/cones/power.jl: membership, smooth barrier, gradient, Hessian,
-  scaling point for K_pow(alpha).
-- Generic in element type (Float64 / Float64x2 / Float64x4 / BigFloat).
-- test/cones_asymmetric.jl: membership + finite-difference gradient/
-  Hessian checks + BigFloat reference (32 tests).

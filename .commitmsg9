@@ -1,0 +1,5 @@
+docs(moi): document MOI conformance status and incremental-interface limitation (PR11)
+
+- docs/moi_conformance.md: existing test/moi.jl covers supported cones via
+  copy_to; MOI.Test.runtests requires the incremental interface which SDPX
+  does not implement (supports_incremental_interface=false).
