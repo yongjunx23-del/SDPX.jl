@@ -347,10 +347,7 @@ end
 end
 
 @inline function _hsd_orthant_only(state::HSDState)
-    for block in layout_blocks(state.canonical.cone_layout)
-        block.cone === :nonnegative || return false
-    end
-    return true
+    return state.orthant_only
 end
 
 @inline function _hsd_matrix_finite(H::Matrix{T}) where {T}

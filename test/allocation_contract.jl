@@ -3,9 +3,10 @@
 # One full predictor-corrector Newton iteration (SDP route) in steady state
 # must stay below a documented per-precision allocation ceiling. This is a
 # regression gate (fail on serious allocation blowups), not the final
-# zero-allocation target: benchmark/allocation_profile.jl reports the actual
-# per-iteration value (Float64 ~9.3 KB, Float64x2 ~13 KB, Float64x3 ~15 KB,
-# Float64x4 ~18 KB, BigFloat256 ~105 KB). The semantic gate (Optimal + valid
+# zero-allocation target. This file retains a bounded-allocation regression for
+# the legacy SDP route; the real native-HSD hard gate is
+# `test/hsd_zeroalloc.jl`, reproducible with
+# `benchmark/hsd_allocation.jl --check`. The semantic gate (Optimal + valid
 # certificate) pins the objective/iteration/residual/gap/certificate side.
 using SDPX
 using Test

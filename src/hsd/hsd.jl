@@ -110,6 +110,7 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     nr::Int
     m::Int
     nu::Int
+    orthant_only::Bool
     rank_columns::Vector{Int}
     rank_dependent::Vector{Int}
     rank_transfer::Matrix{T}
@@ -331,6 +332,13 @@ function HSDState(
     n = canonical_num_variables(canonical)
     m = canonical_num_slack(canonical)
     nu = layout_barrier_degree(canonical.cone_layout)
+    orthant_only = true
+    for block in layout_blocks(canonical.cone_layout)
+        if block.cone !== :nonnegative
+            orthant_only = false
+            break
+        end
+    end
     A = canonical_equality(canonical)
     b = canonical_rhs(canonical)
     c = canonical_objective(canonical)
@@ -348,7 +356,7 @@ function HSDState(
     z = zero(T); o = one(T)
     return HSDState{T, R}(
         canonical,
-        A, At, Ad, Ar, Atr, b, c, n, nr, m, nu,
+        A, At, Ad, Ar, Atr, b, c, n, nr, m, nu, orthant_only,
         reduction.cols, reduction.dependent, reduction.transfer,
         reduction.ambiguous, reduction.incompatible, reduction.ray,
         zeros(T, n), zeros(T, m), zeros(T, m), o, o,      # x, y, s, τ, κ

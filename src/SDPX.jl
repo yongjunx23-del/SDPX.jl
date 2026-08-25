@@ -13,6 +13,9 @@ include("modeling/types.jl")
 include("ir/types.jl")
 include("ir/storage.jl")
 include("ir/layout.jl")
+include("cones/runtime/types.jl")
+include("cones/runtime/product.jl")
+include("cones/runtime/symmetric_api.jl")
 include("ir/canonical.jl")
 include("modeling/model.jl")
 include("modeling/affine.jl")
@@ -121,6 +124,9 @@ export status, value, dual, dual_slack
 export primal_objective, dual_objective
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
+export ProductConeRuntime
+export initialize_primal_dual!, update_scaling!, cone_inner_product
+export apply_G!, apply_Theta!, max_step_primal!, max_step_dual!
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of

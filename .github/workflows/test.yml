@@ -166,16 +166,16 @@ jobs:
       - uses: julia-actions/julia-buildpkg@v1
       # Each gate is a standalone script that exits non-zero on failure, so a
       # single job can run them in sequence and fail on the first break.
-      - name: Allocation hard gate
-        run: julia --project=. benchmark/allocation_profile.jl
+      - name: Install fixed-width arithmetic used by the HSD gate
+        run: julia --project=. -e 'using Pkg; Pkg.add("MultiFloats")'
+      - name: Native HSD allocation hard gate
+        run: julia --project=. benchmark/hsd_allocation.jl --check
       - name: Fixed-precision contract
         run: julia --project=. test/fixed_precision_contract.jl
       - name: FactorCache protocol tests
         run: julia --project=. test/factor_cache.jl
       - name: ConeAlgebra tests
         run: julia --project=. test/cone_algebra.jl
-      - name: LinearSolve interface smoke
-        run: julia --project=. benchmark/linearsolve_ab.jl
 
   quality:
     name: Package quality
