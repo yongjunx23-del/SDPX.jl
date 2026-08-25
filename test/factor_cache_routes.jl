@@ -12,12 +12,14 @@ using SparseArrays
     A = [4.0 3.0; 6.0 3.0]
     cache = SDPX.LPLUCache{Float64}(2)
     SDPX.factorize!(cache, A, 1)
-    @test SDPX.factor_status(cache) === :factored
+    @test SDPX.factor_status(cache) === SDPX.Fresh
     @test SDPX.factor_matrix_epoch(cache) == 1
     b = [1.0, 2.0]
     x = zeros(2)
     SDPX.solve!(cache, x, b)
     @test A * x ≈ b
+    # solve before factorize is rejected (fail-closed).
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(SDPX.LPLUCache{Float64}(2), x, b)
     # epoch reuse: same epoch does not re-factorize
     SDPX.factorize!(cache, A, 1)
     @test SDPX.factor_matrix_epoch(cache) == 1
@@ -25,14 +27,14 @@ using SparseArrays
     SDPX.factorize!(cache, A, 2)
     @test SDPX.factor_matrix_epoch(cache) == 2
     SDPX.invalidate!(cache)
-    @test SDPX.factor_status(cache) === :unprepared
+    @test SDPX.factor_status(cache) === SDPX.Invalid
 end
 
 @testset "DenseSchurCholeskyCache factorize + solve" begin
     A = [4.0 1.0; 1.0 3.0]
     cache = SDPX.DenseSchurCholeskyCache{Float64}(2)
     SDPX.factorize!(cache, A, 1)
-    @test SDPX.factor_status(cache) === :factored
+    @test SDPX.factor_status(cache) === SDPX.Fresh
     b = [1.0, 2.0]
     x = zeros(2)
     SDPX.solve!(cache, x, b)
@@ -50,7 +52,7 @@ end
     A = [D B; B' C]
     cache = SDPX.ArrowFactorCache{Float64}(3, 2)
     SDPX.factorize!(cache, A, 1)
-    @test SDPX.factor_status(cache) === :factored
+    @test SDPX.factor_status(cache) === SDPX.Fresh
     b = [1.0, 2.0, 3.0]
     x = zeros(3)
     SDPX.solve!(cache, x, b)

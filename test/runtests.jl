@@ -50,6 +50,7 @@ const QUICK_TESTS = (
     "fixed_precision_contract.jl",
     "allocation_contract.jl",
     "factor_cache.jl",
+    "factor_cache_state.jl",
     "factorizations_gate.jl",
     "reduction_plan.jl",
 )
