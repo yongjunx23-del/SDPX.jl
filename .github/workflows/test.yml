@@ -152,6 +152,31 @@ jobs:
           julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 test/provider_smoke.jl
           julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 test/multifloat_linear_algebra_integration.jl
 
+  v2-gates:
+    name: v2 acceptance gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: julia-depot
+      - uses: julia-actions/julia-buildpkg@v1
+      # Each gate is a standalone script that exits non-zero on failure, so a
+      # single job can run them in sequence and fail on the first break.
+      - name: Allocation hard gate
+        run: julia --project=. benchmark/allocation_profile.jl
+      - name: Fixed-precision contract
+        run: julia --project=. test/fixed_precision_contract.jl
+      - name: FactorCache protocol tests
+        run: julia --project=. test/factor_cache.jl
+      - name: ConeAlgebra tests
+        run: julia --project=. test/cone_algebra.jl
+      - name: LinearSolve interface smoke
+        run: julia --project=. benchmark/linearsolve_ab.jl
+
   quality:
     name: Package quality
     runs-on: ubuntu-latest
