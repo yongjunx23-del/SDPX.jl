@@ -8,6 +8,7 @@ const QUICK_TESTS = (
     "cone_algebra.jl",
     "cones_asymmetric.jl",
     "hsd_certificates.jl",
+    "factor_cache_routes.jl",
     "soc_native_algebra.jl",
     "soc_metric_sparse.jl",
     "soc_singleton_presolve.jl",

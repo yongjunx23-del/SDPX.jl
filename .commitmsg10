@@ -1,8 +1,0 @@
-feat(hsd): unified HSD state + certificate verification (Subagent C, PR3)
-
-- src/hsd/hsd.jl: HSDState (x, s, tau, kappa), primal/dual residuals,
-  complementarity, normalized residual, optimality gap.
-- src/certificates/certificates.jl: ConeMembership (orthant/SOC/PSD/exp/
-  power), verify_optimal!, verify_primal_infeasibility! (Farkas ray),
-  verify_dual_infeasibility!, normalize_primal_ray!/normalize_dual_ray!.
-- test/hsd_certificates.jl: 22 tests (residuals, membership, certificates).
