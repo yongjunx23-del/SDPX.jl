@@ -1641,6 +1641,42 @@ function MOI.get(
     return dual_objective(result)
 end
 
+function MOI.get(
+    optimizer::Optimizer{T},
+    attribute::MOI.ObjectiveBound,
+) where {T<:AbstractFloat}
+    # The best certified bound on the optimal objective value.
+    #
+    # At a certified optimum the HSD gap certificate ties the primal and
+    # dual objectives, so the tightest known bound is the dual objective.
+    # For a verified infeasible/unbounded certificate the standard MOI
+    # convention applies: a primal-infeasible problem has no primal
+    # solution and the bound is the signed infinity of the objective sense
+    # (±Inf), while a dual-infeasible (primal unbounded) problem reports
+    # the opposing signed infinity. Every other non-optimal status has no
+    # certified primal point, so the best certified bound is the
+    # corresponding signed infinity rather than a fabricated finite value.
+    result = _moi_public_result(optimizer)
+    result === nothing && throw(MOI.GetAttributeNotAllowed(attribute))
+    _moi_check_public_result(optimizer, attribute)
+    status = _moi_result_status_value(result)
+    if status in (Optimal, FeasibleCert, AlmostOptimal, InsufficientPrecision)
+        return dual_objective(result)
+    end
+    model = optimizer.model::Model{T}
+    bits = precision_bits(model)
+    lower_bound = optimizer.sense == MOI.MIN_SENSE
+    sign = if status in (PrimalInfeasible, InfeasibleCert)
+        # no primal point exists: objective is +Inf for MIN, -Inf for MAX
+        lower_bound ? 1 : -1
+    else
+        # dual-infeasible (primal unbounded) or no certificate: best known
+        # finite bound is the trivial -Inf (MIN) / +Inf (MAX) ray
+        lower_bound ? -1 : 1
+    end
+    return owned_arithmetic_copy(T, sign * Inf; precision_bits=bits)
+end
+
 function MOI.get(optimizer::Optimizer, attribute::MOI.RelativeGap)
     result = _moi_public_result(optimizer)
     result === nothing && throw(MOI.GetAttributeNotAllowed(attribute))
@@ -1892,6 +1928,7 @@ for attribute in (
     :DualStatus,
     :ObjectiveValue,
     :DualObjectiveValue,
+    :ObjectiveBound,
     :RelativeGap,
     :VariablePrimal,
     :ConstraintPrimal,
