@@ -1,63 +1,3 @@
-const RESULT_COLUMNS = (
-    :schema_version, :source_commit, :source_dirty, :julia_version, :os,
-    :cpu_name, :hostname, :pbs_job_id, :julia_threads, :blas_threads,
-    :project_sha256, :manifest_sha256, :benchmark_driver_sha256,
-    :solver_source_sha256,
-    :mfla_commit, :bfla_commit,
-    :solver_name, :solver_version,
-    :suite, :problem_id, :name, :family,
-    :problem_type, :conic_formulation, :source, :purpose, :seed, :arithmetic,
-    :precision_bits, :requested_provider, :status, :reference_status,
-    :reference_absolute_tolerance, :reference_relative_tolerance,
-    :skip_reason, :termination_reason, :termination_stage,
-    :variables, :equalities, :blocks, :block_sizes, :planned_formulation,
-    :executed_formulation, :planned_backend, :executed_backend,
-    :planned_provider, :executed_provider, :executed_specialization,
-    :psd_lift_used, :fallback_reason,
-    :la_fallback_reason, :iterations, :objective, :reference_objective,
-    :physical_objective, :objective_interval_lower, :objective_interval_upper,
-    :objective_in_reference_interval, :benchmark_scale,
-    :input_generation_precision_bits, :original_equalities, :source_parameters,
-    :objective_error, :dual_objective, :absolute_gap,
-    :primal_tolerance, :dual_tolerance, :gap_tolerance,
-    :certificate_kind, :certificate_failures,
-    :primal_affine_residual, :dual_affine_residual,
-    :primal_cone_violation, :dual_cone_violation,
-    :primal_residual_scaled, :dual_residual_scaled,
-    :complementarity, :relative_complementarity,
-    :primal_residual, :dual_residual, :relative_gap,
-    :certificate_policy, :certificate_available, :certificate_valid,
-    :provider_match, :unexpected_fallback,
-    :production_invariants_valid, :full_numerical_gate_valid,
-    :semantic_pass, :semantic_failures, :total_seconds, :seconds_per_iteration,
-    :allocated_bytes, :gc_seconds,
-    :setup_seconds, :frontend_seconds, :preprocess_seconds,
-    :presolve_seconds, :core_seconds, :certification_seconds,
-    :workspace_bytes, :process_peak_rss_bytes, :memory_budget_bytes,
-    :restarts, :regularizations, :refinement_solves,
-    :numeric_factorizations,
-    :factorization_attempts, :factorization_successes,
-    :factorization_failures,
-    :sample_count, :sample_seconds, :sample_semantic_pass,
-    :sample_status, :sample_iterations, :sample_objective,
-    :sample_certificate_valid, :sample_route,
-    :sample_semantic_parity, :sample_parity_failures,
-    :sample_median_seconds, :sample_min_seconds, :sample_max_seconds,
-    :sample_mad_seconds, :sample_spread_seconds,
-    :assembly_seconds, :factor_seconds, :solve_seconds,
-    :refinement_seconds, :local_metric_seconds, :local_factor_seconds,
-    :panel_transform_seconds, :equality_gram_seconds, :equality_factor_seconds,
-    :predictor_rhs_seconds, :corrector_rhs_seconds, :block_residual_seconds,
-    :block_recovery_seconds, :local_metric_preparations,
-    :equality_gram_assemblies, :equality_factorizations, :rhs_solves,
-    :input_fingerprint, :external_checksum,
-)
-
-const RESULT_SCHEMA_VERSION = 6
-
-_cell(value) = value === missing || value === nothing ? "" :
-               replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')
-
 function _source_commit()
     return try
         readchomp(`git -C $REPOSITORY rev-parse HEAD`)
@@ -285,27 +225,18 @@ function _problem_facts(problem)
     ))
 end
 
-function _problem_fingerprint(spec, built, arithmetic)
+function _problem_fingerprint(catalog, spec, built, arithmetic)
     facts = _problem_facts(built.problem)
-    builder_paths = if spec.external !== nothing
-        external_loader_source_files(spec.loader)
-    elseif startswith(string(spec.loader), "pathological_")
-        (joinpath(ROOT, "generators", "pathological.jl"),)
-    else
-        (joinpath(ROOT, "generators", "problems.jl"),)
-    end
-    builder_identity = join((
-        string(relpath(path, ROOT), ":", bytes2hex(SHA.sha256(read(path))))
-        for path in builder_paths
-    ), "|")
     payload = join((
+        string(catalog.name),
+        catalog.version,
         spec.id,
         string(arithmetic),
         string(spec.seed),
         repr(spec.parameters),
         repr(facts),
         string(_built_value(built, :external_checksum, "")),
-        builder_identity,
+        spec.fingerprint,
     ), "|")
     return bytes2hex(SHA.sha256(payload))
 end
@@ -505,7 +436,7 @@ function _reference_interval(built, ::Type{T}) where {T}
 end
 
 function _result_row(
-    spec, suite, arithmetic, provider, built, result, elapsed;
+    catalog, spec, suite, arithmetic, provider, built, result, elapsed;
     allocated_bytes=missing,
     gc_seconds=missing,
 )
@@ -594,6 +525,19 @@ function _result_row(
         provider_match,
         unexpected_fallback,
     )
+    catalog_failures = validate_result(
+        catalog, spec, built, result,
+        (
+            status=trace.final.status,
+            objective,
+            expected,
+            primal_residual,
+            dual_residual,
+            relative_gap,
+            certificate,
+        ),
+    )
+    append!(failures, catalog_failures)
     specialization = _specialization(result)
     required_specialization = _built_value(
         built, :required_specialization, nothing,
@@ -654,6 +598,8 @@ function _result_row(
         bfla_commit=_package_commit("BigFloatLinearAlgebra"),
         solver_name=_string_metric(_trace_value(trace.setup.solver)),
         solver_version=_solver_version(),
+        catalog_name=catalog.name,
+        catalog_version=catalog.version,
         suite=suite,
         problem_id=spec.id,
         name=spec.name,
@@ -732,6 +678,8 @@ function _result_row(
         unexpected_fallback=unexpected_fallback,
         production_invariants_valid=production_invariants,
         full_numerical_gate_valid=isempty(failures),
+        catalog_validation_pass=isempty(catalog_failures),
+        catalog_validation_failures=join(catalog_failures, ","),
         semantic_pass=isempty(failures),
         semantic_failures=join(failures, ","),
         total_seconds=elapsed,
@@ -802,7 +750,7 @@ function _result_row(
         equality_factorizations=
             _trace_field(trace.counters, :equality_factorizations),
         rhs_solves=_trace_field(trace.counters, :rhs_solves),
-        input_fingerprint=_problem_fingerprint(spec, built, arithmetic),
+        input_fingerprint=_problem_fingerprint(catalog, spec, built, arithmetic),
         external_checksum=_built_value(built, :external_checksum, missing),
     )
 end
@@ -995,7 +943,14 @@ function _sampling_row(rows, sample_seconds; sample_count=length(rows))
     )
 end
 
-function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
+function _selection_fingerprint(catalog, spec, arithmetic)
+    return bytes2hex(SHA.sha256(join((
+        string(catalog.name), catalog.version, spec.id, string(arithmetic),
+        spec.fingerprint,
+    ), "|")))
+end
+
+function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
     values = Dict{Symbol,Any}(field => missing for field in RESULT_COLUMNS)
     merge!(values, Dict(
         :schema_version => RESULT_SCHEMA_VERSION,
@@ -1014,6 +969,8 @@ function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
         :solver_source_sha256 => _solver_source_sha256(),
         :mfla_commit => _package_commit("MultiFloatLinearAlgebra"),
         :bfla_commit => _package_commit("BigFloatLinearAlgebra"),
+        :catalog_name => catalog.name,
+        :catalog_version => catalog.version,
         :suite => suite,
         :problem_id => spec.id,
         :name => spec.name,
@@ -1031,22 +988,14 @@ function _skip_row(spec, suite, arithmetic, provider, reason, checksum=missing)
         :reference_relative_tolerance => spec.reference.relative_tolerance,
         :certificate_policy => :original_coordinate_required,
         :skip_reason => reason,
-        :external_checksum => checksum === missing && spec.external !== nothing ?
-                              something(spec.external.sha256, missing) : checksum,
-        :input_fingerprint => spec.external === nothing ? missing :
-                              bytes2hex(SHA.sha256(join((
-                                  spec.id,
-                                  spec.external.authoritative_url,
-                                  string(spec.external.sha256),
-                                  string(spec.external.format),
-                              ), "|"))),
+        :input_fingerprint => _selection_fingerprint(catalog, spec, arithmetic),
     ))
     return NamedTuple{RESULT_COLUMNS}(Tuple(values[field] for field in RESULT_COLUMNS))
 end
 
-function _error_row(spec, suite, arithmetic, provider, exception)
+function _error_row(catalog, spec, suite, arithmetic, provider, exception)
     skipped = _skip_row(
-        spec, suite, arithmetic, provider,
+        catalog, spec, suite, arithmetic, provider,
         "execution_error: " * sprint(showerror, exception),
     )
     values = Dict{Symbol,Any}(
@@ -1061,49 +1010,15 @@ function _error_row(spec, suite, arithmetic, provider, exception)
     )
 end
 
-function _write_tsv(path, rows)
-    open(path, "w") do io
-        println(io, join(string.(RESULT_COLUMNS), '\t'))
-        for row in rows
-            println(io, join((_cell(getproperty(row, field)) for field in RESULT_COLUMNS), '\t'))
-        end
-    end
-end
-
-function _toml_value(value)
-    if value === missing || value === nothing
-        return ""
-    end
-    value isa Symbol && return string(value)
-    value isa Tuple && return join(string.(value), ",")
-    return value
-end
-
-function write_results(path::AbstractString, rows)
-    root, extension = splitext(path)
-    tsv = extension == ".tsv" ? path : root * ".tsv"
-    toml = extension == ".toml" ? path : root * ".toml"
-    mkpath(dirname(tsv))
-    _write_tsv(tsv, rows)
-    document = Dict(
-        "schema_version" => RESULT_SCHEMA_VERSION,
-        "generated_at" => string(Dates.now()),
-        "result" => [Dict(string(field) => _toml_value(getproperty(row, field))
-                         for field in RESULT_COLUMNS) for row in rows],
-    )
-    open(toml, "w") do io
-        TOML.print(io, document; sorted=true)
-    end
-    return (tsv=tsv, toml=toml)
-end
-
-function _selected_entries(suite, problem, arithmetic, provider)
-    entries = suite_entries(suite)
+function _selected_entries(catalog, suite, problem, arithmetic, provider)
+    entries = catalog_entries(catalog, suite)
     problem !== nothing && (entries = filter(e -> e.problem_id == problem, entries))
-    arithmetic !== nothing && (entries = [SuiteEntry(e.problem_id, arithmetic,
-                                                     e.provider) for e in entries])
-    provider !== nothing && (entries = [SuiteEntry(e.problem_id, e.arithmetic,
-                                                   provider) for e in entries])
+    arithmetic !== nothing && (entries = [PhysicsBenchmarkEntry(
+        e.problem_id, arithmetic, e.provider,
+    ) for e in entries])
+    provider !== nothing && (entries = [PhysicsBenchmarkEntry(
+        e.problem_id, e.arithmetic, provider,
+    ) for e in entries])
     seen = Set{Tuple{String,Symbol,Symbol}}()
     entries = filter(entries) do entry
         key = (entry.problem_id, entry.arithmetic, entry.provider)
@@ -1116,6 +1031,7 @@ function _selected_entries(suite, problem, arithmetic, provider)
 end
 
 function run_suite(
+    catalog::PhysicsBenchmarkCatalog,
     suite::Symbol;
     problem=nothing,
     arithmetic=nothing,
@@ -1125,17 +1041,12 @@ function run_suite(
     warmup=true,
     strict_semantics=true,
     samples=3,
-    cache_dir=DEFAULT_CACHE,
+    cache_dir=nothing,
     allow_large=false,
 )
-    suite === :heavy && throw(ArgumentError(
-        "the heavy suite is register-only and cannot be executed",
-    ))
-    suite === :large && !(allow_large || haskey(ENV, "PBS_JOBID")) &&
-        throw(ArgumentError(
-            "the large suite is cluster-only; run it inside PBS or pass " *
-            "allow_large=true for an explicitly authorized non-cluster diagnostic",
-        ))
+    # `cache_dir` and `allow_large` remain accepted so the canonical child CLI
+    # used by fresh-process campaigns stays stable. Catalogs own any related
+    # policy and may capture storage locations in their injected build closure.
     samples isa Integer || throw(ArgumentError(
         "samples must be an integer count of timed solves, got $samples",
     ))
@@ -1143,25 +1054,15 @@ function run_suite(
         "samples must be 1 (explicit single run) or >= 3 timed solves; " *
         "got $samples; a two-run observation cannot support a timing statistic",
     ))
-    entries = _selected_entries(suite, problem, arithmetic, provider)
+    entries = _selected_entries(catalog, suite, problem, arithmetic, provider)
     rows = NamedTuple[]
     for entry in entries
-        spec = benchmark_spec(entry.problem_id)
-        cache = spec.external === nothing ? nothing :
-                external_cache_status(spec; cache_dir=cache_dir)
-        if cache !== nothing && !cache.loadable
-            push!(rows, _skip_row(
-                spec, suite, entry.arithmetic, entry.provider,
-                cache.reason, something(cache.checksum, missing),
-            ))
-            verbose && println("skip ", spec.id, ": ", cache.reason)
-            continue
-        end
+        spec = catalog_spec(catalog, entry.problem_id)
         T = try
             _arithmetic_type(entry.arithmetic)
         catch exception
             push!(rows, _skip_row(
-                spec, suite, entry.arithmetic, entry.provider,
+                catalog, spec, suite, entry.arithmetic, entry.provider,
                 :arithmetic_unavailable,
             ))
             verbose && println("skip ", spec.id, ": ", exception)
@@ -1171,14 +1072,14 @@ function run_suite(
             _load_requested_provider(entry.provider)
         catch exception
             push!(rows, _skip_row(
-                spec, suite, entry.arithmetic, entry.provider,
+                catalog, spec, suite, entry.arithmetic, entry.provider,
                 :provider_unavailable,
             ))
             verbose && println("skip ", spec.id, ": ", exception)
             continue
         end
         run = function ()
-            built = build_problem(spec, T; cache_dir)
+            built = build_problem(catalog, spec, T)
             result = _solve_built(
                 built, T, entry.provider; verbose=verbose,
             )
@@ -1194,7 +1095,7 @@ function run_suite(
                     # keeps problem generation out of the measurement while
                     # preserving identical problem fingerprints.
                     built = Base.invokelatest(
-                        build_problem, spec, T; cache_dir=cache_dir,
+                        build_problem, catalog, spec, T,
                     )
                     measurement = @timed Base.invokelatest(
                         _solve_built, built, T, entry.provider;
@@ -1202,7 +1103,7 @@ function run_suite(
                     )
                     result = measurement.value
                     row = _result_row(
-                        spec, suite, entry.arithmetic, entry.provider,
+                        catalog, spec, suite, entry.arithmetic, entry.provider,
                         built, result, measurement.time;
                         allocated_bytes=measurement.bytes,
                         gc_seconds=measurement.gctime,
@@ -1246,7 +1147,7 @@ function run_suite(
                     warmup && Base.invokelatest(run)
                     measurement = @timed Base.invokelatest(run)
                     built, result = measurement.value
-                    _result_row(spec, suite, entry.arithmetic, entry.provider,
+                    _result_row(catalog, spec, suite, entry.arithmetic, entry.provider,
                                 built, result, measurement.time;
                                 allocated_bytes=measurement.bytes,
                                 gc_seconds=measurement.gctime)
@@ -1256,7 +1157,7 @@ function run_suite(
                 measurement = @timed Base.invokelatest(run)
                 built, result = measurement.value
                 row = _result_row(
-                    spec, suite, entry.arithmetic, entry.provider,
+                    catalog, spec, suite, entry.arithmetic, entry.provider,
                     built, result, measurement.time;
                     allocated_bytes=measurement.bytes,
                     gc_seconds=measurement.gctime,
@@ -1265,7 +1166,7 @@ function run_suite(
             end
         catch exception
             rows_for_entry = [_error_row(
-                spec, suite, entry.arithmetic, entry.provider, exception,
+                catalog, spec, suite, entry.arithmetic, entry.provider, exception,
             )]
         end
         append!(rows, rows_for_entry)
@@ -1322,7 +1223,8 @@ function _parse_cli(args)
     arithmetic = nothing
     provider = nothing
     output = nothing
-    cache_dir = DEFAULT_CACHE
+    cache_dir = nothing
+    catalog_path = nothing
     verbose = false
     prepare = false
     allow_large = false
@@ -1340,12 +1242,16 @@ function _parse_cli(args)
             output = split(argument, "="; limit=2)[2]
         elseif startswith(argument, "--cache-dir=")
             cache_dir = abspath(split(argument, "="; limit=2)[2])
+        elseif startswith(argument, "--catalog=")
+            catalog_path = abspath(split(argument, "="; limit=2)[2])
         elseif startswith(argument, "--samples=")
             samples = parse(Int, split(argument, "="; limit=2)[2])
         elseif argument == "--verbose"
             verbose = true
         elseif argument == "--prepare"
-            prepare = true
+            throw(ArgumentError(
+                "--prepare belonged to removed external loaders; prepare physics inputs outside the harness",
+            ))
         elseif argument == "--allow-large"
             allow_large = true
         elseif argument == "--no-warmup"
@@ -1358,29 +1264,20 @@ function _parse_cli(args)
     end
     !isempty(positional) && (suite = Symbol(lowercase(first(positional))))
     length(positional) > 1 && problem === nothing && (problem = positional[2])
-    return (; suite, problem, arithmetic, provider, output, cache_dir, verbose,
+    return (; suite, problem, arithmetic, provider, output, cache_dir, catalog_path, verbose,
             prepare, allow_large, samples, warmup)
 end
 
-function main(args=ARGS)
+function main(args=ARGS; catalog::PhysicsBenchmarkCatalog)
     options = _parse_cli(args)
-    if options.prepare
-        options.suite === :heavy && throw(ArgumentError(
-            "the heavy suite is register-only; prepare selected non-heavy cases explicitly",
-        ))
-        ids = options.problem === nothing ?
-              [entry.problem_id for entry in suite_entries(options.suite)
-               if benchmark_spec(entry.problem_id).external !== nothing] :
-              [options.problem]
-        return prepare_external!(
-            ids; cache_dir=options.cache_dir, verbose=options.verbose,
-        )
-    end
+    selected_catalog = options.catalog_path === nothing ? catalog :
+                       load_catalog(options.catalog_path)
     output = something(
         options.output,
         joinpath(ROOT, "out", string(options.suite), "rows.toml"),
     )
     result = run_suite(
+        selected_catalog,
         options.suite;
         problem=options.problem,
         arithmetic=options.arithmetic,

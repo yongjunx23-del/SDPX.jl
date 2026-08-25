@@ -76,6 +76,132 @@ function nt_scaling!(cone::NonnegativeCone, W::AbstractVector, x::AbstractVector
     return inverse!(cone, W, x)
 end
 
+"""
+    nt_scaling!(cone, state::OrthantNTScaling, s, y)
+
+Update the pair-dependent NT state with the frozen orientation
+`Theta(y) = s`, `G(s) = y`, and `R(y) = R^{-1}(s) = lambda`.
+Throws `DomainError` unless both inputs are finite strict-interior points.
+"""
+function nt_scaling!(
+    cone::NonnegativeCone,
+    state::OrthantNTScaling{T},
+    s::AbstractVector,
+    y::AbstractVector,
+) where {T}
+    state.valid[1] = false
+    length(s) == length(y) == cone.dim == state.dim || throw(DimensionMismatch())
+    # Validate the whole pair before mutating the state, so a rejected update
+    # cannot leave a partially refreshed scaling object.
+    @inbounds for i in 1:cone.dim
+        si = T(s[i])
+        yi = T(y[i])
+        (isfinite(si) && isfinite(yi) && si > zero(T) && yi > zero(T)) ||
+            throw(DomainError((si, yi), "orthant NT pair must be finite and strictly interior"))
+    end
+    @inbounds for i in 1:cone.dim
+        si = T(s[i])
+        yi = T(y[i])
+        theta = si / yi
+        root = sqrt(theta)
+        state.theta[i] = theta
+        state.g[i] = yi / si
+        state.root[i] = root
+        state.rootinv[i] = one(T) / root
+        state.lambda[i] = root * yi
+    end
+    @inbounds for i in 1:cone.dim
+        si = T(s[i])
+        yi = T(y[i])
+        theta_y = state.theta[i] * yi
+        g_s = state.g[i] * si
+        rinv_s = state.rootinv[i] * si
+        scale = max(one(T), abs(si), abs(yi), abs(state.lambda[i]))
+        tol = eps(T) * scale * T(1000 * cone.dim)
+        (
+            abs(theta_y - si) <= tol &&
+            abs(g_s - yi) <= tol &&
+            abs(state.root[i] * state.root[i] - state.theta[i]) <= tol &&
+            abs(rinv_s - state.lambda[i]) <= tol
+        ) || throw(DomainError(i, "orthant NT orientation residual exceeded tolerance"))
+    end
+    state.valid[1] = true
+    return state
+end
+
+function theta_apply!(
+    cone::NonnegativeCone,
+    out::AbstractVector,
+    state::OrthantNTScaling,
+    x::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(out) == length(x) == cone.dim == state.dim || throw(DimensionMismatch())
+    @inbounds for i in 1:cone.dim
+        out[i] = state.theta[i] * x[i]
+    end
+    return out
+end
+
+function g_apply!(
+    cone::NonnegativeCone,
+    out::AbstractVector,
+    state::OrthantNTScaling,
+    x::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(out) == length(x) == cone.dim == state.dim || throw(DimensionMismatch())
+    @inbounds for i in 1:cone.dim
+        out[i] = state.g[i] * x[i]
+    end
+    return out
+end
+
+function r_apply!(
+    cone::NonnegativeCone,
+    out::AbstractVector,
+    state::OrthantNTScaling,
+    x::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(out) == length(x) == cone.dim == state.dim || throw(DimensionMismatch())
+    @inbounds for i in 1:cone.dim
+        out[i] = state.root[i] * x[i]
+    end
+    return out
+end
+
+function r_inverse_apply!(
+    cone::NonnegativeCone,
+    out::AbstractVector,
+    state::OrthantNTScaling,
+    x::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(out) == length(x) == cone.dim == state.dim || throw(DimensionMismatch())
+    @inbounds for i in 1:cone.dim
+        out[i] = state.rootinv[i] * x[i]
+    end
+    return out
+end
+
+"""Solve `L_lambda(out) = rhs` in the orthant scaled frame."""
+function solve_Llambda!(
+    cone::NonnegativeCone,
+    out::AbstractVector,
+    state::OrthantNTScaling,
+    rhs::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(out) == length(rhs) == cone.dim == state.dim || throw(DimensionMismatch())
+    @inbounds for i in 1:cone.dim
+        li = state.lambda[i]
+        li > zero(li) || throw(DomainError(li, "NT lambda must be positive"))
+        out[i] = rhs[i] / li
+    end
+    return out
+end
+
 """`y = W x` (componentwise), i.e. `y_i = W_i x_i`."""
 function scaling_apply!(cone::NonnegativeCone, y::AbstractVector, W::AbstractVector, x::AbstractVector)
     length(y) == length(W) == length(x) == cone.dim || throw(DimensionMismatch())

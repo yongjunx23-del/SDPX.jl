@@ -98,11 +98,24 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     A::SparseMatrixCSC{T,Int}
     At::SparseMatrixCSC{T,Int}         # transposed sparse matrix for sparse Schur assembly
     Ad::Matrix{T}                  # dense copy for the LP Schur kernel
+    # setup-time column-rank reduction used only by the LP Schur route.  The
+    # public state remains in canonical/original coordinates (`n`, `x`, `dx`);
+    # the bordered Newton solve works in the independent-column coordinates
+    # (`nr`, `Ar`, `cr`) and scatters directions back before recovery.
+    Ar::SparseMatrixCSC{T,Int}
+    Atr::SparseMatrixCSC{T,Int}
     b::Vector{T}
     c::Vector{T}
     n::Int
+    nr::Int
     m::Int
     nu::Int
+    rank_columns::Vector{Int}
+    rank_dependent::Vector{Int}
+    rank_transfer::Matrix{T}
+    rank_ambiguous::Bool
+    rank_incompatible::Bool
+    rank_ray::Vector{T}
     # iterate
     x::Vector{T}
     y::Vector{T}
@@ -124,6 +137,7 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     # residuals
     rP::Vector{T}
     rD::Vector{T}
+    rDr::Vector{T}                    # reduced-column dual residual
     rG::T
     # cone scaling + complementarity (Nonnegative path)
     theta::Vector{T}               # s./y
@@ -134,13 +148,15 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     complementarity::T             # s'y + τ·κ
     # KKT route + Schur
     driver::HotRouteCache{T, R}
-    H::Matrix{T}                   # n×n Schur M = A' diag(g) A
-    rhs::Vector{T}                 # n-length bordered RHS (Eq1)
+    H::Matrix{T}                   # nr×nr Schur M = Ar' diag(g) Ar
+    rhs::Vector{T}                 # nr-length bordered RHS (Eq1)
     # bordered solve scratch
-    q::Vector{T}                   # n×1 border column q = c − A'diag(g)b
-    rvec::Vector{T}                # n-vector form of the row r' = τ(c' + b'diag(g)A)
+    q::Vector{T}                   # full-n certificate scratch (A'·y)
+    qr::Vector{T}                  # nr×1 border column q = cr − Ar'diag(g)b
+    rvec::Vector{T}                # nr-vector form of the row r' = τ(cr' + b'diag(g)Ar)
     u::Vector{T}                   # H u = q
     w::Vector{T}                   # H w = rhs
+    dxr::Vector{T}                 # reduced-column Newton direction
     # trial / scratch buffers
     xt::Vector{T}
     yt::Vector{T}
@@ -158,6 +174,145 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
 end
 
 # ---------------------------------------------------------------------------
+# Setup-time column-rank reduction
+# ---------------------------------------------------------------------------
+
+"""
+    _hsd_column_reduction(A, c) -> NamedTuple
+
+Compute a deterministic independent-column representation of the equality
+map before any HSD iteration.  `A[:, dependent] = A[:, independent] * T` is
+formed with a column-pivoted QR.  If the objective is compatible with the
+same representation (`c_dependent = T' * c_independent`), dependent variables
+can be fixed to zero without changing the primal image or objective.  If it
+is not compatible, the null direction encoded by the offending column is an
+original-coordinate dual-infeasibility ray; it is retained for certificate
+verification and the HSD route fails closed before factorization.
+
+This is setup work: allocations and a dense QR are intentional here.  The
+iteration hot path receives only the reduced sparse map and preallocated
+buffers.
+"""
+function _hsd_column_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat}
+    m, n = size(A)
+    n == length(c) || throw(DimensionMismatch("canonical A/c dimensions disagree"))
+    if n == 0
+        return (
+            Ar = SparseArrays.sparse(zeros(T, m, 0)),
+            cr = Vector{T}(undef, 0),
+            cols = Int[], dependent = Int[], transfer = zeros(T, 0, 0),
+            ambiguous = false, incompatible = false, ray = zeros(T, 0),
+        )
+    end
+
+    Af = Matrix{T}(A)
+    F = LinearAlgebra.qr(Af, LinearAlgebra.ColumnNorm())
+    R = Matrix(F.R)
+    kmax = min(m, n)
+    scaleA = max(norm(Af, Inf), one(T))
+    rank_tol = T(max(m, n)) * eps(T) * scaleA
+    r = 0
+    if kmax > 0
+        dmax = zero(T)
+        for i in 1:kmax
+            d = abs(R[i, i])
+            d > dmax && (dmax = d)
+        end
+        if dmax > zero(T)
+            cutoff = max(rank_tol, rank_tol * dmax / scaleA)
+            for i in 1:kmax
+                abs(R[i, i]) > cutoff || break
+                r += 1
+            end
+        end
+    end
+
+    # A diagonal close to the numerical cutoff is not allowed to be silently
+    # classified as either rank or nullspace.  Such a setup is explicitly
+    # rejected and must be rerun with a user-selected scaling/precision.
+    rank_ambiguous = false
+    # QR of an exact duplicate can leave a residual of a few ulps (especially
+    # for BigFloat), so that numerical-zero band is a clear nullspace rather
+    # than an ambiguity.  Values just above the cutoff, or genuinely
+    # resolvable values just below it, are rejected explicitly.
+    noise_hi = T(10) * eps(T) * scaleA
+    amb_hi = rank_tol * T(4)
+    if kmax > 0
+        for i in 1:kmax
+            d = abs(R[i, i])
+            if (d > rank_tol && d <= amb_hi) || (d > noise_hi && d < rank_tol)
+                rank_ambiguous = true
+                break
+            end
+        end
+    end
+
+    # Keep a full-rank map in its original order.  Besides preserving public
+    # coordinate ordering, this makes the no-reduction path bitwise-stable.
+    if r == n
+        return (
+            Ar = A, cr = copy(c), cols = collect(1:n), dependent = Int[],
+            transfer = zeros(T, n, 0), ambiguous = rank_ambiguous,
+            incompatible = false, ray = zeros(T, n),
+        )
+    end
+
+    cols = collect(Int, F.p[1:r])
+    selected = falses(n)
+    selected[cols] .= true
+    dependent = Int[i for i in 1:n if !selected[i]]
+    Ar = SparseArrays.sparse(A[:, cols])
+    cr = Vector{T}(c[cols])
+    transfer = zeros(T, r, length(dependent))
+    if r > 0 && !isempty(dependent)
+        # `Ar` has full column rank by construction.  Use a dense setup-only
+        # QR solve so this remains valid for BigFloat and custom Float types.
+        Fbase = LinearAlgebra.qr(Matrix{T}(Ar))
+        for (q, j) in enumerate(dependent)
+            transfer[:, q] .= Fbase \ Vector{T}(A[:, j])
+        end
+    end
+
+    scaleC = max(norm(c, Inf), one(T))
+    compat_tol = max(T(100) * eps(T) * scaleC, rank_tol)
+    incompatible = false
+    bad_q = 0
+    bad_residual = zero(T)
+    for q in eachindex(dependent)
+        j = dependent[q]
+        residual = c[j]
+        for i in 1:r
+            residual -= transfer[i, q] * cr[i]
+        end
+        if abs(residual) > compat_tol && abs(residual) > abs(bad_residual)
+            incompatible = true
+            bad_q = q
+            bad_residual = residual
+        end
+    end
+
+    ray = zeros(T, n)
+    if incompatible
+        # v_independent = -T[:,q] * alpha, v_dependent = alpha, so A*v=0
+        # and c'v = residual*alpha.  Pick alpha to make c'v strictly negative.
+        alpha = bad_residual > zero(T) ? -one(T) : one(T)
+        j = dependent[bad_q]
+        ray[j] = alpha
+        for i in 1:r
+            ray[cols[i]] = -transfer[i, bad_q] * alpha
+        end
+    end
+    return (
+        Ar = Ar, cr = cr, cols = cols, dependent = dependent,
+        transfer = transfer, ambiguous = rank_ambiguous,
+        incompatible = incompatible, ray = ray,
+    )
+end
+
+_hsd_column_reduction(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat} =
+    _hsd_column_reduction(canonical_equality(canonical), canonical_objective(canonical))
+
+# ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
 
@@ -165,7 +320,8 @@ end
     HSDState(canonical::CanonicalConicProgram{T}, driver::HotRouteCache{T,R})
 
 Build a production HSD state from the canonical program and a prepared
-KKT route driver whose matrix dimension is `n = size(A, 2)`.  All
+KKT route driver whose matrix dimension is the setup-time independent-column
+rank `nr`.  Public iterates remain in the original `n = size(A, 2)` coordinates.  All
 iteration storage is allocated up front.
 """
 function HSDState(
@@ -181,23 +337,30 @@ function HSDState(
     length(b) == m || throw(DimensionMismatch("length(b) != m"))
     length(c) == n || throw(DimensionMismatch("length(c) != n"))
     size(A, 2) == n || throw(DimensionMismatch("size(A,2) != n"))
-    driver.n == n || throw(DimensionMismatch(
-        "route cache n=$(driver.n) does not match matrix n=$n"))
+    reduction = _hsd_column_reduction(canonical)
+    nr = length(reduction.cols)
+    driver.n == nr || throw(DimensionMismatch(
+        "route cache n=$(driver.n) does not match reduced matrix n=$nr"))
     At = SparseArrays.sparse(transpose(A))
     Ad = Matrix{T}(A)
+    Ar = reduction.Ar
+    Atr = SparseArrays.sparse(transpose(Ar))
     z = zero(T); o = one(T)
     return HSDState{T, R}(
         canonical,
-        A, At, Ad, b, c, n, m, nu,
+        A, At, Ad, Ar, Atr, b, c, n, nr, m, nu,
+        reduction.cols, reduction.dependent, reduction.transfer,
+        reduction.ambiguous, reduction.incompatible, reduction.ray,
         zeros(T, n), zeros(T, m), zeros(T, m), o, o,      # x, y, s, τ, κ
         zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx, dy, ds, dτ, dκ
         zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx_a, dy_a, ds_a, dτ_a, dκ_a
-        zeros(T, m), zeros(T, n), z,                       # rP, rD, rG
+        zeros(T, m), zeros(T, n), zeros(T, nr), z,         # rP, rD, rDr, rG
         zeros(T, m), zeros(T, m), zeros(T, m),             # theta, g, comp
         z, z, z,                                          # mu, mu_aff, complementarity
         driver,
-        Matrix{T}(undef, n, n), zeros(T, n),              # H, rhs
-        zeros(T, n), zeros(T, n), zeros(T, n), zeros(T, n),  # q, r, u, w
+        Matrix{T}(undef, nr, nr), zeros(T, nr),            # H, rhs
+        zeros(T, n), zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr),  # q, qr, r, u, w
+        zeros(T, nr),                                      # dxr
         zeros(T, n), zeros(T, m), zeros(T, m), zeros(T, m),  # xt, yt, st, ax
         zeros(T, m),                                       # e
         z, z,                                              # tau_t, kappa_t
@@ -214,9 +377,9 @@ Construct a production HSD state with a default dense Schur Cholesky
 route for the LP Schur `A' diag(y/s) A`.
 """
 function HSDState(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat}
-    n = canonical_num_variables(canonical)
-    cache = DenseSchurCholeskyCache{T}(n)
-    driver = HotRouteCache(cache; n=n)
+    nr = length(_hsd_column_reduction(canonical).cols)
+    cache = DenseSchurCholeskyCache{T}(nr)
+    driver = HotRouteCache(cache; n=nr)
     return HSDState(canonical, driver)
 end
 
@@ -226,6 +389,7 @@ end
 
 hsd_nu(state::HSDState) = state.nu
 hsd_has_variables(state::HSDState) = state.n
+hsd_effective_variables(state::HSDState) = state.nr
 hsd_num_slack(state::HSDState) = state.m
 
 """
@@ -256,6 +420,12 @@ function hsd_dual_residual!(state::HSDState{T}) where {T}
             acc += A[k, j] * state.y[k]
         end
         state.rD[j] = acc + state.c[j] * state.tau
+    end
+    # The reduced Newton system only enforces the independent-column rows.
+    # Keep the full residual for certificates/diagnostics and mirror those
+    # rows into a preallocated reduced buffer for the bordered RHS.
+    @inbounds for j in 1:state.nr
+        state.rDr[j] = state.rD[state.rank_columns[j]]
     end
     return state.rD
 end
@@ -316,7 +486,7 @@ function hsd_residual!(state::HSDState{T}) where {T}
     state.rG = hsd_gap_residual(state)
     state.complementarity = hsd_complementarity(state)
     state.mu = hsd_mu(state)
-    return nothing
+    return nothing::Nothing
 end
 
 # Inf-norm of a dense matrix = max over rows of Σ_j |M[i,j]|.

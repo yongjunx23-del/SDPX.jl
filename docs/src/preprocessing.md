@@ -129,7 +129,7 @@ individual coefficient matrices are sparse. Consequently:
 
 This distinction matters: individual coefficient sparsity is not evidence that
 a PSD block or its final Schur complement is sparse. The canonical medium
-CSDR model contains 1,700 dense-pattern `2×2` PSD blocks and no explicit
+medium reduced-arrow model contains 1,700 dense-pattern `2×2` PSD blocks and no explicit
 equalities or scalar bounds, so preprocessing is a no-change regression path
 there; its optimized reduced-arrow and SIMD kernels remain responsible for
 performance.

@@ -223,6 +223,29 @@ function _emit_affine_rows!(
             push!(b_vals, owned(() -> apref * rhs_ref[r]))
             rowcount += 1
         end
+    elseif Dmap isa AbstractVector
+        # PSD rows use a diagonal raw-lower -> svec map.  Keep this as a
+        # vector of row factors rather than materialising a dense diagonal
+        # matrix: the factor is frozen at setup and each sparse coefficient
+        # is scaled exactly once while the canonical rows are emitted.
+        length(Dmap) == length(source_rows) || throw(DimensionMismatch(
+            "PSD row scaling length $(length(Dmap)) != source-row length $(length(source_rows))",
+        ))
+        for p in eachindex(source_rows)
+            row_scale = Dmap[p]
+            r = source_rows[p]
+            newrow = rowcount + 1
+            for q in nzrange(At, r)
+                col = At.rowval[q]
+                val = At.nzval[q]
+                iszero(val) && continue
+                push!(A_rows, newrow)
+                push!(A_cols, col)
+                push!(A_vals, owned(() -> apref * row_scale * val))
+            end
+            push!(b_vals, owned(() -> apref * row_scale * rhs_ref[r]))
+            rowcount += 1
+        end
     else
         for k in 1:size(Dmap, 1)
             newrow = rowcount + 1
@@ -303,9 +326,12 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         if block.cone === :rsoc
             linear = _rsoc_to_soc_map(T, dimension, bits)
         end
+        coordinate_map = block.cone === :psd ?
+            PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
         map = CanonicalBlockMap(
             :variable, block_number, 1, Int(recon_sign),
             linear, linear === nothing ? nothing : copy(linear),
+            coordinate_map,
         )
         push!(descriptors, ConeBlockDescriptor(
             T, canonical_cone, dimension;
@@ -320,8 +346,10 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
                 col = block.offset + position - 1
                 push!(A_rows, newrow)
                 push!(A_cols, col)
+                row_scale = coordinate_map === nothing ? owned_one :
+                    coordinate_map.primal_scale[position]
                 push!(A_vals, _owned_arithmetic_eval(
-                    T, () -> apref * owned_one; precision_bits=bits))
+                    T, () -> apref * row_scale; precision_bits=bits))
                 push!(b_vals, owned_arithmetic_copy(T, 0; precision_bits=bits))
                 rowcount += 1
             end
@@ -352,9 +380,12 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         if row_block.domain isa RotatedLorentzCone
             linear = _rsoc_to_soc_map(T, dimension, bits)
         end
+        coordinate_map = _domain_cone(row_block.domain) === :psd ?
+            PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
         map = CanonicalBlockMap(
             :constraint, block_number, 1, Int(recon_sign),
             linear, linear === nothing ? nothing : copy(linear),
+            coordinate_map,
         )
         push!(descriptors, ConeBlockDescriptor(
             T, canonical_cone, dimension;
@@ -365,7 +396,9 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         ))
         rowcount = _emit_affine_rows!(
             A_rows, A_cols, A_vals, b_vals, rowcount,
-            row_block.rows, rhs, at, apref, linear, T, bits,
+            row_block.rows, rhs, at, apref,
+            coordinate_map === nothing ? linear : coordinate_map.primal_scale,
+            T, bits,
         )
     end
 
@@ -386,8 +419,180 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
 end
 
 # ---------------------------------------------------------------------------
+# PSD row scaling and matrix reconstruction contracts
+# ---------------------------------------------------------------------------
+
+@inline function _canonical_psd_coordinate_map(block::ConeBlockDescriptor, ::Type{T};
+                                                precision_bits::Int=precision(T)) where {T<:AbstractFloat}
+    map = block.reconstruction.coordinate_map
+    return map isa PSDCoordinateMap ? map : PSDCoordinateMap(
+        T, block.dimension; precision_bits=precision_bits,
+    )
+end
+
+@inline function _psd_owned_product(::Type{T}, value, factor; precision_bits::Int) where {T<:AbstractFloat}
+    return _owned_arithmetic_eval(
+        T,
+        () -> value * factor;
+        precision_bits=precision_bits,
+    )
+end
+
+"""
+    apply_psd_row_scaling!(A, b, block)
+
+Apply the canonical PSD primal row map `D` to the rows and right-hand side
+owned by `block`: `(A,b) <- (D*A,D*b)`.  The operation mutates caller-owned
+storage and is setup-oriented; canonicalization normally applies the same
+map while emitting sparse rows so it does not need a second pass.
+"""
+function apply_psd_row_scaling!(A, b, block::ConeBlockDescriptor)
+    block.cone === :psd || throw(ArgumentError(
+        "PSD row scaling requires a :psd block, got $(block.cone)",
+    ))
+    size(A, 1) >= block.offset + block.length - 1 || throw(DimensionMismatch(
+        "PSD row block exceeds equality-map rows",
+    ))
+    length(b) >= block.offset + block.length - 1 || throw(DimensionMismatch(
+        "PSD row block exceeds rhs length",
+    ))
+    map = _canonical_psd_coordinate_map(block, eltype(A))
+    precision_bits = map isa PSDCoordinateMap{BigFloat} ?
+        precision(map.primal_scale[1]) : precision(eltype(A))
+    first_row = block.offset
+    last_row = block.offset + block.length - 1
+    if A isa SparseMatrixCSC
+        @inbounds for column in axes(A, 2)
+            for pointer in nzrange(A, column)
+                row = A.rowval[pointer]
+                if first_row <= row <= last_row
+                    factor = map.primal_scale[row - first_row + 1]
+                    A.nzval[pointer] = _psd_owned_product(
+                        eltype(A), A.nzval[pointer], factor;
+                        precision_bits=precision_bits,
+                    )
+                end
+            end
+        end
+    else
+        @inbounds for row in first_row:last_row
+            factor = map.primal_scale[row - first_row + 1]
+            for column in axes(A, 2)
+                A[row, column] = _psd_owned_product(
+                    eltype(A), A[row, column], factor;
+                    precision_bits=precision_bits,
+                )
+            end
+        end
+    end
+    @inbounds for position in 1:block.length
+        row = first_row + position - 1
+        factor = map.primal_scale[position]
+        b[row] = _psd_owned_product(
+            eltype(b), b[row], factor;
+            precision_bits=precision_bits,
+        )
+    end
+    return A, b
+end
+
+"""Pull an execution dual row multiplier back to raw coordinates via `Dᵀ`."""
+function pullback_psd_row_dual!(raw_multiplier, execution_dual, block::ConeBlockDescriptor)
+    block.cone === :psd || throw(ArgumentError(
+        "PSD dual pullback requires a :psd block, got $(block.cone)",
+    ))
+    map = _canonical_psd_coordinate_map(
+        block,
+        eltype(raw_multiplier);
+        precision_bits=_psd_default_precision_bits(eltype(raw_multiplier), execution_dual),
+    )
+    local_buffers = length(raw_multiplier) == block.length &&
+                    length(execution_dual) == block.length
+    if local_buffers
+        return svec_dual_to_raw!(raw_multiplier, execution_dual, map)
+    end
+    length(raw_multiplier) >= block.offset + block.length - 1 || throw(DimensionMismatch(
+        "raw multiplier is neither local nor large enough for PSD block",
+    ))
+    length(execution_dual) >= block.offset + block.length - 1 || throw(DimensionMismatch(
+        "execution dual is neither local nor large enough for PSD block",
+    ))
+    @inbounds for position in 1:block.length
+        index = block.offset + position - 1
+        raw_multiplier[index] = execution_dual[index] * map.dual_pullback[position]
+    end
+    return raw_multiplier
+end
+
+function _reconstruct_psd_matrix!(matrix, execution_svec, map::PSDCoordinateMap)
+    n = map.dimension
+    size(matrix, 1) == n && size(matrix, 2) == n || throw(DimensionMismatch(
+        "PSD matrix destination has size $(size(matrix)); expected ($n, $n)",
+    ))
+    _validate_psd_coordinate_buffers(execution_svec, execution_svec, map.length)
+    fill!(matrix, zero(eltype(matrix)))
+    bits = eltype(execution_svec) === BigFloat ?
+        precision(map.primal_inverse[1]) : precision(eltype(execution_svec))
+    @inbounds for position in 1:map.length
+        row = psd_packed_row(position, n)
+        column = psd_packed_column(position, n)
+        value = _owned_arithmetic_eval(
+            eltype(execution_svec),
+            () -> execution_svec[position] * map.primal_inverse[position];
+            precision_bits=bits,
+        )
+        matrix[row, column] = value
+        matrix[column, row] = value
+    end
+    return matrix
+end
+
+"""Reconstruct a full raw primal PSD matrix from execution `svec`."""
+function reconstruct_psd_primal_matrix!(matrix, execution_svec, block::ConeBlockDescriptor)
+    block.cone === :psd || throw(ArgumentError(
+        "PSD primal reconstruction requires a :psd block, got $(block.cone)",
+    ))
+    map = _canonical_psd_coordinate_map(
+        block,
+        eltype(execution_svec);
+        precision_bits=_psd_default_precision_bits(eltype(execution_svec), execution_svec),
+    )
+    return _reconstruct_psd_matrix!(matrix, execution_svec, map)
+end
+
+"""Reconstruct a full raw dual PSD matrix from execution `svec`."""
+function reconstruct_psd_dual_matrix!(matrix, execution_svec, block::ConeBlockDescriptor)
+    block.cone === :psd || throw(ArgumentError(
+        "PSD dual reconstruction requires a :psd block, got $(block.cone)",
+    ))
+    map = _canonical_psd_coordinate_map(
+        block,
+        eltype(execution_svec);
+        precision_bits=_psd_default_precision_bits(eltype(execution_svec), execution_svec),
+    )
+    return _reconstruct_psd_matrix!(matrix, execution_svec, map)
+end
+
+function reconstruct_psd_primal_matrix!(matrix, execution_svec, n::Integer;
+                                        precision_bits::Int=precision(eltype(execution_svec)))
+    map = PSDCoordinateMap(eltype(execution_svec), n; precision_bits=precision_bits)
+    return _reconstruct_psd_matrix!(matrix, execution_svec, map)
+end
+
+function reconstruct_psd_dual_matrix!(matrix, execution_svec, n::Integer;
+                                      precision_bits::Int=precision(eltype(execution_svec)))
+    map = PSDCoordinateMap(eltype(execution_svec), n; precision_bits=precision_bits)
+    return _reconstruct_psd_matrix!(matrix, execution_svec, map)
+end
+
+# ---------------------------------------------------------------------------
 # Blockwise reconstruction maps (forward / backward), wired to the chain
 # ---------------------------------------------------------------------------
+
+# These helpers are deliberately on the certificate/result reconstruction
+# path.  `hsd_step!` consumes the already row-scaled canonical A,b and the
+# execution cone buffers directly; it does not call them or inspect the
+# `CanonicalBlockMap.coordinate_map::Any` metadata.
 
 """
     _block_forward!(canonical, dest, src, block)
@@ -396,14 +601,70 @@ Apply one canonical block's forward reconstruction map
 (`original = sign * L * canonical`, `L = M` for RSOC else identity) to
 the slice of `src` owned by `block`, writing into `dest`.
 """
-function _block_forward!(canonical::CanonicalConicProgram{T}, dest, src, block) where {T}
+function _block_primal_forward!(canonical::CanonicalConicProgram{T}, dest, src, block) where {T}
     bits = canonical.precision_bits
     off = block.offset
     len = block.length
     rmap = block.reconstruction
     σ = rmap.sign
+    coordinate_map = rmap.coordinate_map
     L = rmap.linear
-    if L === nothing
+    if coordinate_map isa PSDCoordinateMap
+        # Canonical PSD slacks are execution svec; primal reconstruction is
+        # the matrix-coordinate inverse D⁻¹.  Keep the loop index global so
+        # no view/slice object is allocated on the hot path.
+        factors = coordinate_map.primal_inverse
+        @inbounds for i in 1:len
+            value = _owned_arithmetic_eval(
+                T, () -> src[off + i - 1] * factors[i]; precision_bits=bits)
+            dest[off + i - 1] = σ == 1 ? value : _owned_arithmetic_eval(
+                T, () -> σ * value; precision_bits=bits)
+        end
+    elseif L === nothing
+        for i in 1:len
+            dest[off + i - 1] = _owned_arithmetic_eval(
+                T, () -> σ * src[off + i - 1]; precision_bits=bits)
+        end
+    else
+        for i in 1:len
+            acc = zero(T)
+            for j in 1:len
+                m = L[i, j]
+                iszero(m) && continue
+                acc = _owned_arithmetic_eval(
+                    T, () -> acc + m * src[off + j - 1]; precision_bits=bits)
+            end
+            dest[off + i - 1] = _owned_arithmetic_eval(
+                T, () -> σ * acc; precision_bits=bits)
+        end
+    end
+    return dest
+end
+
+"""Alias retained for older internal callers; primal semantics are explicit."""
+_block_forward!(canonical::CanonicalConicProgram, dest, src, block) =
+    _block_primal_forward!(canonical, dest, src, block)
+
+"""Map execution dual coordinates back to raw row/dual coordinates."""
+function _block_dual_forward!(canonical::CanonicalConicProgram{T}, dest, src, block) where {T}
+    bits = canonical.precision_bits
+    off = block.offset
+    len = block.length
+    rmap = block.reconstruction
+    σ = rmap.sign
+    coordinate_map = rmap.coordinate_map
+    L = rmap.linear
+    if coordinate_map isa PSDCoordinateMap
+        # Dual row multipliers use the adjoint pullback Dᵀ, not the matrix
+        # reconstruction D⁻¹ used above for primal PSD values.
+        factors = coordinate_map.dual_pullback
+        @inbounds for i in 1:len
+            value = _owned_arithmetic_eval(
+                T, () -> src[off + i - 1] * factors[i]; precision_bits=bits)
+            dest[off + i - 1] = σ == 1 ? value : _owned_arithmetic_eval(
+                T, () -> σ * value; precision_bits=bits)
+        end
+    elseif L === nothing
         for i in 1:len
             dest[off + i - 1] = _owned_arithmetic_eval(
                 T, () -> σ * src[off + i - 1]; precision_bits=bits)
@@ -437,8 +698,18 @@ function _block_backward!(canonical::CanonicalConicProgram{T}, dest, src, block)
     len = block.length
     rmap = block.reconstruction
     σ = rmap.sign
+    coordinate_map = rmap.coordinate_map
     Ladj = rmap.linear_adjoint
-    if Ladj === nothing
+    if coordinate_map isa PSDCoordinateMap
+        # Raw dual coordinates carry the doubled off-diagonals.  Pull them
+        # into execution covectors with D⁻¹ before the HSD step.
+        factors = coordinate_map.dual_to_execution
+        @inbounds for i in 1:len
+            value = _owned_arithmetic_eval(
+                T, () -> σ * src[off + i - 1] * factors[i]; precision_bits=bits)
+            dest[off + i - 1] = value
+        end
+    elseif Ladj === nothing
         for i in 1:len
             dest[off + i - 1] = _owned_arithmetic_eval(
                 T, () -> σ * src[off + i - 1]; precision_bits=bits)
@@ -483,7 +754,7 @@ function primal_forward!(
         throw(DimensionMismatch("s_canonical length mismatch"))
     copyto!(x_out, x_canonical)
     for block in canonical.cone_layout.blocks
-        _block_forward!(canonical, s_out, s_canonical, block)
+        _block_primal_forward!(canonical, s_out, s_canonical, block)
     end
     return x_out, s_out
 end
@@ -526,7 +797,7 @@ function dual_forward!(canonical::CanonicalConicProgram, dest, y_canonical)
     length(y_canonical) == length(dest) ||
         throw(DimensionMismatch("y_canonical length mismatch"))
     for block in canonical.cone_layout.blocks
-        _block_forward!(canonical, dest, y_canonical, block)
+        _block_dual_forward!(canonical, dest, y_canonical, block)
     end
     return dest
 end

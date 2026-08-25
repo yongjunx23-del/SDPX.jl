@@ -62,6 +62,12 @@ Fields
   `s = M v`), or `nothing` when the block is an identity map.
 - `linear_adjoint::Any` — the adjoint `M'` (for the dual), or
   `nothing`.
+- `coordinate_map::Any` — setup-frozen PSD raw/svec maps for a `:psd`
+  block, or `nothing` for vector cones.  The map stores primal row
+  scaling, dual row pullback and matrix reconstruction separately.  It is
+  cold reconstruction metadata: canonicalization has already applied `D`
+  to `A,b`, and the HSD numerical hot path consumes those execution rows
+  without inspecting this `Any`-typed field.
 """
 struct CanonicalBlockMap
     source::Symbol
@@ -70,10 +76,35 @@ struct CanonicalBlockMap
     sign::Int
     linear::Any
     linear_adjoint::Any
+    coordinate_map::Any
 end
 
-CanonicalBlockMap(source::Symbol, source_block::Integer, within_offset::Integer, sign::Integer) =
-    CanonicalBlockMap(source, Int(source_block), Int(within_offset), Int(sign), nothing, nothing)
+CanonicalBlockMap(
+    source::Symbol,
+    source_block::Integer,
+    within_offset::Integer,
+    sign::Integer,
+    linear,
+    linear_adjoint,
+) = CanonicalBlockMap(
+    source, Int(source_block), Int(within_offset), Int(sign),
+    linear, linear_adjoint, nothing,
+)
+
+function CanonicalBlockMap(
+    source::Symbol,
+    source_block::Integer,
+    within_offset::Integer,
+    sign::Integer;
+    linear=nothing,
+    linear_adjoint=nothing,
+    coordinate_map=nothing,
+)
+    return CanonicalBlockMap(
+        source, Int(source_block), Int(within_offset), Int(sign),
+        linear, linear_adjoint, coordinate_map,
+    )
+end
 
 # ---------------------------------------------------------------------------
 # Per-block descriptor
@@ -283,3 +314,11 @@ block_length(descriptor::ConeBlockDescriptor) = descriptor.length
 block_storage(descriptor::ConeBlockDescriptor) = descriptor.storage
 block_parameter(descriptor::ConeBlockDescriptor) = descriptor.parameter
 block_reconstruction(descriptor::ConeBlockDescriptor) = descriptor.reconstruction
+
+"""Return the execution coordinate storage of a canonical block."""
+block_execution_storage(descriptor::ConeBlockDescriptor) =
+    descriptor.cone === :psd ? :svec : descriptor.storage
+
+"""Return the setup-frozen PSD coordinate map, if this block has one."""
+block_coordinate_map(descriptor::ConeBlockDescriptor) =
+    descriptor.reconstruction.coordinate_map

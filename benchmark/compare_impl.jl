@@ -124,7 +124,7 @@ end
 function _comparison_evidence(before, after, status_match,
                               semantic_pass_match, certificate_match,
                               sample_parity_match, before_samples_valid,
-                              after_samples_valid, schema_v6,
+                              after_samples_valid, schema_v7,
                               solver_source_hash_valid)
     evidence = String[]
     status_match || push!(evidence, "status_mismatch")
@@ -143,7 +143,7 @@ function _comparison_evidence(before, after, status_match,
     sample_parity_match === false && push!(evidence, "sample_parity_mismatch")
     before_samples_valid || push!(evidence, "baseline_samples_not_valid")
     after_samples_valid || push!(evidence, "candidate_samples_not_valid")
-    schema_v6 || push!(evidence, "legacy_schema_version")
+    schema_v7 || push!(evidence, "legacy_schema_version")
     solver_source_hash_valid ||
         push!(evidence, "solver_source_sha256_invalid")
     isempty(evidence) ? "" : join(evidence, ",")
@@ -160,8 +160,8 @@ function compare_result_files(
     get(baseline_document, "schema_version", nothing) ==
         get(candidate_document, "schema_version", nothing) ||
         throw(ArgumentError("result schema versions differ"))
-    document_schema_v6 =
-        get(baseline_document, "schema_version", nothing) === 6
+    document_schema_v7 =
+        get(baseline_document, "schema_version", nothing) === 7
     baseline = baseline_document["result"]
     candidate = candidate_document["result"]
     baseline_by_key = Dict(_result_key(row) => row for row in baseline)
@@ -173,17 +173,23 @@ function compare_result_files(
     for key in sort!(collect(keys(baseline_by_key)))
         before = baseline_by_key[key]
         after = candidate_by_key[key]
-        schema_v6 = document_schema_v6 &&
-            get(before, "schema_version", missing) === 6 &&
-            get(after, "schema_version", missing) === 6
+        schema_v7 = document_schema_v7 &&
+            get(before, "schema_version", missing) === 7 &&
+            get(after, "schema_version", missing) === 7
         fingerprint = get(before, "input_fingerprint", "")
         isempty(string(fingerprint)) && throw(ArgumentError(
             "input fingerprint is missing for $(key[1])",
         ))
         fingerprint == get(after, "input_fingerprint", "") ||
             throw(ArgumentError("input fingerprint differs for $(key[1])"))
+        for field in ("catalog_name", "catalog_version")
+            isempty(strip(string(get(before, field, "")))) && throw(ArgumentError(
+                "$field is missing for $(key[1])",
+            ))
+        end
         for field in (
-            "suite", "julia_version", "os", "cpu_name", "julia_threads",
+            "suite", "catalog_name", "catalog_version",
+            "julia_version", "os", "cpu_name", "julia_threads",
             "blas_threads", "conic_formulation", "precision_bits",
             "reference_status", "reference_objective",
             "reference_absolute_tolerance", "reference_relative_tolerance",
@@ -251,7 +257,7 @@ function compare_result_files(
             _valid_solver_source_sha256(
                 get(after, "solver_source_sha256", missing),
             )
-        solver_source_hash_valid = schema_v6 &&
+        solver_source_hash_valid = schema_v7 &&
             baseline_solver_source_hash_valid &&
             candidate_solver_source_hash_valid
         evidence = _comparison_evidence(
@@ -263,7 +269,7 @@ function compare_result_files(
             sample_parity_match,
             before_samples_valid,
             after_samples_valid,
-            schema_v6,
+            schema_v7,
             solver_source_hash_valid,
         )
         push!(rows, (

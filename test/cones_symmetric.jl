@@ -138,10 +138,21 @@ function _sym_soc(::Type{T}) where {T}
         lam1, lam2, c1, c2 = SC.spectrum(cone, xb)
         @test lam2 ≈ zero(T)                     # eigenvalue treated as 0
         @test lam1 * c1 + lam2 * c2 ≈ xb
-        # zero tail: both idempotents (1/2, 0, …)
+        # A zero tail has a degenerate eigenspace.  Freeze the first tail axis
+        # as a deterministic basis so the two outputs remain distinct,
+        # primitive, orthogonal idempotents (never duplicate half-identities).
         lam1, lam2, c1, c2 = SC.spectrum(cone, T[4, 0, 0, 0])
-        @test c1 ≈ T[0.5, 0, 0, 0]
-        @test c2 ≈ T[0.5, 0, 0, 0]
+        @test c1 ≈ T[0.5, 0.5, 0, 0]
+        @test c2 ≈ T[0.5, -0.5, 0, 0]
+        idem1 = zeros(T, 4)
+        idem2 = zeros(T, 4)
+        orth = zeros(T, 4)
+        SC.jordan_product!(cone, idem1, c1, c1)
+        SC.jordan_product!(cone, idem2, c2, c2)
+        SC.jordan_product!(cone, orth, c1, c2)
+        @test idem1 ≈ c1
+        @test idem2 ≈ c2
+        @test orth ≈ zeros(T, 4)
 
         # barrier gradient finite difference
         g = zeros(T, 4)

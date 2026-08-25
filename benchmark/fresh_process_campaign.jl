@@ -110,7 +110,8 @@ const PAIRING_FIELDS = (
     # Problem identity and formulation/tolerance are part of the experiment,
     # not merely labels.  A mismatch means the rows cannot form a timing
     # sample, even when all processes happened to exit successfully.
-    "suite", "problem_id", "name", "family", "problem_type", "source",
+    "suite", "catalog_name", "catalog_version",
+    "problem_id", "name", "family", "problem_type", "source",
     "arithmetic", "precision_bits", "requested_provider",
     "reference_status", "reference_absolute_tolerance",
     "reference_relative_tolerance", "conic_formulation",
@@ -131,6 +132,10 @@ function _pairing_failures(rows)
     failures = String[]
     isempty(rows) && return ["no_rows"]
     first_row = first(rows)
+    for field in ("catalog_name", "catalog_version")
+        any(isempty(_text(get(row, field, ""))) for row in rows) &&
+            push!(failures, "$(field)_missing")
+    end
     for field in PAIRING_FIELDS
         values = [_text(get(row, field, "")) for row in rows]
         length(unique(values)) == 1 || push!(failures, "pairing:$field")
@@ -421,6 +426,7 @@ function run_campaign(
     campaign_dir::AbstractString=joinpath(ROOT, "out", "fresh_process"),
     project::AbstractString=REPOSITORY,
     cache_dir::Union{Nothing,AbstractString}=nothing,
+    catalog::Union{Nothing,AbstractString}=nothing,
     threads::Integer=Threads.nthreads(),
     blas_threads::Integer=_default_blas_threads(),
     allow_large::Bool=false,
@@ -448,6 +454,7 @@ function run_campaign(
             "--output=$(base).toml",
         ]
         cache_dir === nothing || push!(arguments, "--cache-dir=$(abspath(cache_dir))")
+        catalog === nothing || push!(arguments, "--catalog=$(abspath(catalog))")
         allow_large && push!(arguments, "--allow-large")
         verbose && push!(arguments, "--verbose")
         # The runner's default is warmup=true.  We deliberately do not expose
@@ -482,6 +489,7 @@ function campaign_main(args=ARGS)
     campaign_dir = joinpath(ROOT, "out", "fresh_process")
     project = REPOSITORY
     cache_dir = nothing
+    catalog = nothing
     threads = Threads.nthreads()
     blas_threads = _default_blas_threads()
     allow_large = false
@@ -503,6 +511,8 @@ function campaign_main(args=ARGS)
         value !== nothing && (project = value; continue)
         value = _option_value(argument, "--cache-dir=", nothing)
         value !== nothing && (cache_dir = value; continue)
+        value = _option_value(argument, "--catalog=", nothing)
+        value !== nothing && (catalog = value; continue)
         value = _option_value(argument, "--threads=", nothing)
         value !== nothing && (threads = parse(Int, value); continue)
         value = _option_value(argument, "--blas-threads=", nothing)
@@ -527,6 +537,7 @@ function campaign_main(args=ARGS)
         campaign_dir,
         project,
         cache_dir,
+        catalog,
         threads,
         blas_threads,
         allow_large,

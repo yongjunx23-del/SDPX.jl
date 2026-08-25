@@ -134,29 +134,183 @@ function nt_scaling!(cone::SOCone, W::AbstractVector, x::AbstractVector)
     return inverse!(cone, W, x)
 end
 
+@inline function _soc_strict_interior(cone::SOCone, x::AbstractVector)
+    length(x) == cone.dim || throw(DimensionMismatch())
+    T = eltype(x)
+    t = T(x[1])
+    isfinite(t) || return false
+    det = t * t
+    @inbounds for i in 2:cone.dim
+        xi = T(x[i])
+        isfinite(xi) || return false
+        det -= xi * xi
+    end
+    return t > zero(T) && det > zero(T) && isfinite(det)
+end
+
+@inline function _soc_nt_close(a::AbstractVector{T}, b::AbstractVector, n::Int) where {T}
+    residual = zero(T)
+    scale = one(T)
+    @inbounds for i in 1:n
+        ai = T(a[i])
+        bi = T(b[i])
+        ri = abs(ai - bi)
+        residual = ri > residual ? ri : residual
+        aa = abs(ai)
+        ab = abs(bi)
+        scale = aa > scale ? aa : scale
+        scale = ab > scale ? ab : scale
+    end
+    return residual <= eps(T) * scale * T(2000 * n)
+end
+
+"""
+    quadratic_apply!(cone, out, w, z)
+
+Apply the Euclidean-Jordan quadratic representation `Q_w(z)`. The frozen NT
+orientation uses `Theta = Q_w` with `Q_w(y) = s`.
+"""
+function quadratic_apply!(
+    cone::SOCone,
+    out::AbstractVector,
+    w::AbstractVector,
+    z::AbstractVector,
+)
+    length(out) == length(w) == length(z) == cone.dim || throw(DimensionMismatch())
+    T = promote_type(eltype(out), eltype(w), eltype(z))
+    w0 = T(w[1])
+    z0 = T(z[1])
+    ww = zero(T)
+    wz = zero(T)
+    @inbounds for i in 2:cone.dim
+        wi = T(w[i])
+        ww += wi * wi
+        wz += wi * T(z[i])
+    end
+    two = one(T) + one(T)
+    out0 = (w0 * w0 + ww) * z0 + two * w0 * wz
+    tail_diag = w0 * w0 - ww
+    @inbounds for i in 2:cone.dim
+        wi = T(w[i])
+        zi = T(z[i])
+        out[i] = two * w0 * z0 * wi + tail_diag * zi + two * wi * wz
+    end
+    out[1] = out0
+    return out
+end
+
+"""Apply `Q_{w^{-1}}`; `winv` must be the Jordan inverse of the NT parameter."""
+quadratic_inverse_apply!(
+    cone::SOCone,
+    out::AbstractVector,
+    winv::AbstractVector,
+    z::AbstractVector,
+) = quadratic_apply!(cone, out, winv, z)
+
+"""
+    nt_scaling!(cone, state::SOCNTScaling, s, y)
+
+Compute the pair-dependent NT point
+`w = Q_{y^{-1/2}}((Q_{y^{1/2}}s)^{1/2})`, then freeze
+`Theta=Q_w`, `G=Q_{w^{-1}}`, `R=Q_{sqrt(w)}`, and
+`lambda=R(y)=R^{-1}(s)` in caller-owned storage.
+"""
+function nt_scaling!(
+    cone::SOCone,
+    state::SOCNTScaling{T},
+    s::AbstractVector,
+    y::AbstractVector,
+) where {T}
+    state.valid[1] = false
+    length(s) == length(y) == cone.dim == state.dim || throw(DimensionMismatch())
+    _soc_strict_interior(cone, s) ||
+        throw(DomainError(s, "SOC primal NT point must be finite and strictly interior"))
+    _soc_strict_interior(cone, y) ||
+        throw(DomainError(y, "SOC dual NT point must be finite and strictly interior"))
+
+    sqrt!(cone, state.tmp1, y)                         # y^(1/2)
+    inverse!(cone, state.tmp2, state.tmp1)             # y^(-1/2)
+    quadratic_apply!(cone, state.tmp3, state.tmp1, s)  # Q_yhalf(s)
+    _soc_strict_interior(cone, state.tmp3) ||
+        throw(DomainError(state.tmp3, "SOC NT geometric mean left the interior"))
+    sqrt!(cone, state.w, state.tmp3)
+    quadratic_apply!(cone, state.w, state.tmp2, state.w)
+    _soc_strict_interior(cone, state.w) ||
+        throw(DomainError(state.w, "SOC NT scaling point is not strictly interior"))
+    inverse!(cone, state.winv, state.w)
+    sqrt!(cone, state.root, state.w)
+    inverse!(cone, state.rootinv, state.root)
+    quadratic_apply!(cone, state.lambda, state.root, y)
+    _soc_strict_interior(cone, state.lambda) ||
+        throw(DomainError(state.lambda, "SOC scaled lambda is not strictly interior"))
+    quadratic_apply!(cone, state.tmp1, state.w, y)
+    quadratic_inverse_apply!(cone, state.tmp2, state.winv, s)
+    quadratic_inverse_apply!(cone, state.tmp3, state.rootinv, s)
+    (
+        _soc_nt_close(state.tmp1, s, cone.dim) &&
+        _soc_nt_close(state.tmp2, y, cone.dim) &&
+        _soc_nt_close(state.tmp3, state.lambda, cone.dim)
+    ) || throw(DomainError(state.w, "SOC NT orientation residual exceeded tolerance"))
+    quadratic_apply!(cone, state.tmp1, state.root, state.lambda)
+    _soc_nt_close(state.tmp1, s, cone.dim) ||
+        throw(DomainError(state.root, "SOC NT square-root residual exceeded tolerance"))
+    state.valid[1] = true
+    return state
+end
+
+function theta_apply!(cone::SOCone, out::AbstractVector, state::SOCNTScaling, x::AbstractVector)
+    _require_nt_valid(state)
+    return quadratic_apply!(cone, out, state.w, x)
+end
+
+function g_apply!(cone::SOCone, out::AbstractVector, state::SOCNTScaling, x::AbstractVector)
+    _require_nt_valid(state)
+    return quadratic_inverse_apply!(cone, out, state.winv, x)
+end
+
+function r_apply!(cone::SOCone, out::AbstractVector, state::SOCNTScaling, x::AbstractVector)
+    _require_nt_valid(state)
+    return quadratic_apply!(cone, out, state.root, x)
+end
+
+function r_inverse_apply!(cone::SOCone, out::AbstractVector, state::SOCNTScaling, x::AbstractVector)
+    _require_nt_valid(state)
+    return quadratic_inverse_apply!(cone, out, state.rootinv, x)
+end
+
 """`y = W x = W ∘ x` (Jordan product by the scaling point)."""
 function scaling_apply!(cone::SOCone, y::AbstractVector, W::AbstractVector, x::AbstractVector)
     return jordan_product!(cone, y, W, x)
 end
 
-"""
-`y = W^{-1} x`. Since `W = L_{x^{-1}}`, `W^{-1} = L_x` and so
-`y = x ∘ x = x²` (the Jordan square of `x`).
-"""
+"""Solve `L_W(y) = x`, where `L_W(y) = W ∘ y` is the SOC Jordan multiplication operator."""
 function scaling_inverse_apply!(cone::SOCone, y::AbstractVector, W::AbstractVector, x::AbstractVector)
-    length(y) == length(x) == cone.dim || throw(DimensionMismatch())
-    T = eltype(x)
-    xh = x[1]
-    two = one(T) + one(T)
-    head = xh * xh
+    length(y) == length(W) == length(x) == cone.dim || throw(DimensionMismatch())
+    _soc_strict_interior(cone, W) ||
+        throw(DomainError(W, "L_W inverse requires a finite strict-interior W"))
+    T = promote_type(eltype(y), eltype(W), eltype(x))
+    a = T(W[1])
+    b = T(x[1])
+    det = a * a
+    ux = zero(T)
     @inbounds for i in 2:cone.dim
-        head += x[i] * x[i]
+        wi = T(W[i])
+        det -= wi * wi
+        ux += wi * T(x[i])
     end
-    y[1] = head
+    t = (a * b - ux) / det
+    ia = one(T) / a
     @inbounds for i in 2:cone.dim
-        y[i] = two * xh * x[i]
+        y[i] = (T(x[i]) - t * T(W[i])) * ia
     end
+    y[1] = t
     return y
+end
+
+"""Solve `L_lambda(out) = rhs` in the SOC scaled frame."""
+function solve_Llambda!(cone::SOCone, out::AbstractVector, state::SOCNTScaling, rhs::AbstractVector)
+    _require_nt_valid(state)
+    return scaling_inverse_apply!(cone, out, state.lambda, rhs)
 end
 
 # ---------------------------------------------------------------------------
@@ -281,13 +435,85 @@ end
 # ---------------------------------------------------------------------------
 # Third-order correction
 # ---------------------------------------------------------------------------
-"""`w = d1 ∘ (d2 ∘ d3)` (allocates one temporary; not on the zero-alloc list)."""
+"""
+Legacy compatibility overload for `w = d1 ∘ (d2 ∘ d3)`. It allocates one
+temporary and is not a hot API; production code must pass `SOCNTScaling` (or
+an explicit scratch vector) to the preallocated overload below.
+"""
 function third_order_correction!(cone::SOCone, w::AbstractVector, d1::AbstractVector, d2::AbstractVector, d3::AbstractVector)
     length(w) == length(d1) == length(d2) == length(d3) == cone.dim || throw(DimensionMismatch())
     tmp = similar(d2)
     jordan_product!(cone, tmp, d2, d3)
     return jordan_product!(cone, w, d1, tmp)
 end
+
+"""Preallocated SOC third-order correction."""
+function third_order_correction!(
+    cone::SOCone,
+    w::AbstractVector,
+    d1::AbstractVector,
+    d2::AbstractVector,
+    d3::AbstractVector,
+    tmp::AbstractVector,
+)
+    length(tmp) == cone.dim || throw(DimensionMismatch())
+    jordan_product!(cone, tmp, d2, d3)
+    return jordan_product!(cone, w, d1, tmp)
+end
+
+function third_order_correction!(
+    cone::SOCone,
+    state::SOCNTScaling,
+    w::AbstractVector,
+    d1::AbstractVector,
+    d2::AbstractVector,
+    d3::AbstractVector,
+)
+    _require_nt_valid(state)
+    return third_order_correction!(cone, w, d1, d2, d3, state.tmp1)
+end
+
+"""
+    spectral_basis!(cone, c1, c2, x) -> (lambda1, lambda2)
+
+Write deterministic primitive idempotents. For a zero tail, use the first tail
+axis rather than returning two identical non-idempotent half-identities.
+"""
+function spectral_basis!(
+    cone::SOCone,
+    c1::AbstractVector,
+    c2::AbstractVector,
+    x::AbstractVector,
+)
+    length(c1) == length(c2) == length(x) == cone.dim || throw(DimensionMismatch())
+    T = promote_type(eltype(c1), eltype(c2), eltype(x))
+    t = T(x[1])
+    r2 = zero(T)
+    @inbounds for i in 2:cone.dim
+        r2 += T(x[i]) * T(x[i])
+    end
+    r = sqrt(r2)
+    half = one(T) / (one(T) + one(T))
+    c1[1] = half
+    c2[1] = half
+    if iszero(r)
+        @inbounds for i in 2:cone.dim
+            c1[i] = i == 2 ? half : zero(T)
+            c2[i] = i == 2 ? -half : zero(T)
+        end
+    else
+        f = half / r
+        @inbounds for i in 2:cone.dim
+            tail = f * T(x[i])
+            c1[i] = tail
+            c2[i] = -tail
+        end
+    end
+    return t + r, t - r
+end
+
+spectral_basis!(cone::SOCone, state::SOCNTScaling, x::AbstractVector) =
+    spectral_basis!(cone, state.basis1, state.basis2, x)
 
 # ---------------------------------------------------------------------------
 # Spectral decomposition (allocating, test/analysis oriented)
@@ -297,37 +523,15 @@ end
 
 Spectral decomposition `x = λ₁ c₁ + λ₂ c₂` of a Lorentz element with primitive
 idempotents `c₁, c₂`. Boundary elements (`‖u‖ = t`) yield `λ₂ = 0` with no
-division by the tail norm; a zero tail (`‖u‖ = 0`) gives both idempotents
-`(½, 0, …, 0)`.
+division by the tail norm. For a zero tail (`‖u‖ = 0`), the decomposition uses
+the deterministic first tail axis, so `c₁` and `c₂` remain distinct primitive
+idempotents even though the two eigenvalues coincide.
 """
 function spectrum(cone::SOCone, x::AbstractVector)
     length(x) == cone.dim || throw(DimensionMismatch())
     T = eltype(x)
-    t = T(x[1])
-    r2 = zero(T)
-    @inbounds for i in 2:cone.dim
-        r2 += x[i] * x[i]
-    end
-    r = sqrt(r2)
-    lam1 = t + r
-    lam2 = t - r
     c1 = Vector{T}(undef, cone.dim)
     c2 = Vector{T}(undef, cone.dim)
-    half = one(T) / 2
-    two = one(T) + one(T)
-    c1[1] = half
-    c2[1] = half
-    if iszero(r)
-        @inbounds for i in 2:cone.dim
-            c1[i] = zero(T)
-            c2[i] = zero(T)
-        end
-    else
-        f = one(T) / (two * r)
-        @inbounds for i in 2:cone.dim
-            c1[i] = f * x[i]
-            c2[i] = -f * x[i]
-        end
-    end
+    lam1, lam2 = spectral_basis!(cone, c1, c2, x)
     return lam1, lam2, c1, c2
 end

@@ -29,7 +29,7 @@
 #        [ r'  g ] [dτ ] = [ rho  ]
 #
 #    with `M = A'diag(g)A`, `q = c − A'diag(g)b`, `g = y/s`,
-#    `r' = τ(c' + b'diag(g)A)`, `g = κ + τ·b'diag(g)b`.  Solving via the
+#    `r' = τ(c' + b'diag(g)A)`, `d = κ − τ·b'diag(g)b`.  Solving via the
 #    Schur complement of `M` needs only `H u = q` and `H w = rhs1`:
 #
 #        dτ = (rho − r'w) / (g − r'u),   dx = w − u·dτ.
@@ -50,23 +50,25 @@
 
 # theta = s./y, g = y./s (the LP NT scaling point), comp = s.*y.
 @inline function _hsd_cone_state!(state::HSDState{T}) where {T}
+    z = zero(T)
     @inbounds for k in 1:state.m
         s = state.s[k]
         y = state.y[k]
+        (isfinite(s) && isfinite(y) && s > z && y > z) || return false
         state.g[k] = y / s
         state.theta[k] = s / y
         state.comp[k] = s * y
     end
-    return nothing
+    return true
 end
 
-# Assemble the LP Schur M = A' diag(g) A (dense n×n).  A small relative
-# diagonal regularization keeps the Cholesky factor defined when A is
-# rank-deficient (the Schur is PSD-singular but not SPD); it does not disturb
-# well-conditioned rows (the shift is ~1e-10 of the largest diagonal entry).
+# Assemble the LP Schur M = Ar' diag(g) Ar (dense nr×nr).  No diagonal
+# regularization is permitted: setup-time column reduction guarantees that a
+# compatible reduced map has full column rank, and a failed factorization must
+# be reported rather than silently solving a perturbed Newton system.
 @inline function _hsd_form_schur!(state::HSDState{T}) where {T}
-    H = state.H; A = state.A; At = state.At; g = state.g
-    m = state.m; n = state.n
+    H = state.H; A = state.Ar; At = state.Atr; g = state.g
+    m = state.m; n = state.nr
     fill!(H, zero(T))
     @inbounds for j in 1:n
         for ptr_j in nzrange(A, j)
@@ -85,53 +87,50 @@ end
             H[j, i] = H[i, j]
         end
     end
-    # relative diagonal shift for the singular (rank-deficient) case
-    dmax = zero(T)
-    @inbounds for i in 1:n
-        a = H[i, i] < zero(T) ? -H[i, i] : H[i, i]
-        a > dmax && (dmax = a)
-    end
-    δ = (dmax * T(1e-10) + T(1e-12)) * one(T)
-    @inbounds for i in 1:n
-        H[i, i] += δ
-    end
     return H
 end
 
 # Form the shared border column q = c − A'diag(g)b and row r = τ(c + A'diag(g)b),
-# and the scalar g = κ + τ·b'diag(g)b.  These depend only on the iterate, so
-# they are shared by the predictor and the corrector.
+# and the scalar d = κ − τ·b'diag(g)b.  These depend only on the iterate, so
+# they are shared by the predictor and the corrector.  (The sign on the scalar
+# is derived from the corrected HSD gap equation −c'x − b'y + κ = 0: combining
+# (G) with the scalar complementarity τ·dκ + κ·dτ = hτ gives
+# d = κ − τ·b'diag(g)b.  The earlier κ + τ·b'diag(g)b was a sign error that
+# violated the scalar complementarity (C2).)
 @inline function _hsd_border!(state::HSDState{T}) where {T}
-    A = state.A; g = state.g; b = state.b; c = state.c
-    n = state.n; m = state.m
+    A = state.Ar; g = state.g; b = state.b; c = state.c
+    n = state.nr; m = state.m
+    cols = state.rank_columns
     @inbounds for j in 1:n
         a = zero(T)
         for ptr in nzrange(A, j)
             k = A.rowval[ptr]
             a += g[k] * A.nzval[ptr] * b[k]
         end
-        state.q[j] = c[j] - a
-        state.rvec[j] = state.tau * (c[j] + a)
+        cj = c[cols[j]]
+        state.qr[j] = cj - a
+        state.rvec[j] = state.tau * (cj + a)
     end
     gb = zero(T)
     @inbounds for k in 1:m
         gb += g[k] * b[k] * b[k]
     end
-    return state.kappa + state.tau * gb
+    return state.kappa - state.tau * gb
 end
 
 # Right-hand side (n) for the D-equation and the scalar b'(g .* (v + rP)),
 # for one Newton sub-step with C1 target v.
 @inline function _hsd_rhs!(state::HSDState{T}, v::AbstractVector{T}) where {T}
-    A = state.A; g = state.g; b = state.b
-    n = state.n; m = state.m
+    A = state.Ar; g = state.g; b = state.b
+    n = state.nr; m = state.m
+    cols = state.rank_columns
     @inbounds for j in 1:n
         acc = zero(T)
         for ptr in nzrange(A, j)
             k = A.rowval[ptr]
             acc += A.nzval[ptr] * g[k] * (v[k] + state.rP[k])
         end
-        state.rhs[j] = -state.rD[j] - acc
+        state.rhs[j] = -state.rDr[j] - acc
     end
     bsum = zero(T)
     @inbounds for k in 1:m
@@ -142,14 +141,25 @@ end
 
 # Solve the bordered system given H u = q (state.u) and H w = rhs (state.w).
 @inline function _hsd_border_solve!(state::HSDState{T}, g_scalar::T, rho::T, dx::Vector{T}) where {T}
-    n = state.n
+    n = state.nr
     ru = zero(T); rw = zero(T)
     @inbounds for i in 1:n
         ru += state.rvec[i] * state.u[i]
         rw += state.rvec[i] * state.w[i]
     end
     ghat = g_scalar - ru
+    # Scale by the denominator itself (not the two large terms whose
+    # subtraction forms it): badly-scaled but valid LPs can have
+    # `|g_scalar-ru| << |g_scalar|` without being numerically singular.
+    scale = max(one(T), abs(ghat))
+    # The homogeneous border naturally becomes small as κ→0 at an optimum;
+    # a sqrt(eps) threshold would reject perfectly valid late iterations.  We
+    # only fail closed when cancellation reaches arithmetic-resolution scale.
+    if !(isfinite(ghat) && isfinite(rho) && abs(ghat) > T(100) * eps(T) * scale)
+        return T(NaN)
+    end
     dtau = (rho - rw) / ghat
+    isfinite(dtau) || return T(NaN)
     @inbounds for i in 1:n
         dx[i] = state.w[i] - state.u[i] * dtau
     end
@@ -183,6 +193,18 @@ end
     end
     state.dkappa = -state.rG + cd + bd
     return nothing
+end
+
+# Scatter a reduced-column Newton direction into canonical/original
+# coordinates.  Dependent columns are fixed to zero; compatibility of the
+# objective (checked at setup) makes this a lossless representative modulo
+# the nullspace of A.
+@inline function _hsd_scatter_dx!(state::HSDState{T}) where {T}
+    fill!(state.dx, zero(T))
+    @inbounds for j in 1:state.nr
+        state.dx[state.rank_columns[j]] = state.dxr[j]
+    end
+    return state.dx
 end
 
 @inline function _hsd_maxinf(v::AbstractVector{T}) where {T}
@@ -259,9 +281,9 @@ end
 # One Mehrotra predictor/corrector direction, reusing the single factor.
 @inline function _hsd_direction!(state::HSDState{T}) where {T}
     z = zero(T)
-    _hsd_cone_state!(state)
+    _hsd_cone_state!(state) || return false
     g_scalar = _hsd_border!(state)
-    kkt_solve!(state.driver, state.u, state.q)   # H u = q once
+    kkt_solve!(state.driver, state.u, state.qr)   # H u = q once
 
     # ---- predictor (σ = 0): v = −s, rc2 = −τ·κ ----
     @inbounds for k in 1:state.m
@@ -271,8 +293,11 @@ end
     rho_t = -state.tau * state.kappa + state.tau * state.rG
     rho = rho_t - state.tau * bsum
     kkt_solve!(state.driver, state.w, state.rhs)   # H w = rhs1
-    state.dtau = _hsd_border_solve!(state, g_scalar, rho, state.dx)
+    state.dtau = _hsd_border_solve!(state, g_scalar, rho, state.dxr)
+    isfinite(state.dtau) || return false
+    _hsd_scatter_dx!(state)
     _hsd_recover!(state, state.st)
+    _hsd_direction_finite(state) || return false
     copyto!(state.dx_a, state.dx); copyto!(state.dy_a, state.dy); copyto!(state.ds_a, state.ds)
     state.dtau_a = state.dtau; state.dkappa_a = state.dkappa
 
@@ -288,13 +313,13 @@ end
     ma < z && (ma = z)
     state.mu_aff = ma / T(state.nu + 1)
 
-    # ---- Mehrotra σ = (μ_aff/μ)³, with a positive centering floor so the
-    #      corrector never collapses the (τ,κ) scalar cone to zero.
+    # ---- Mehrotra σ = (μ_aff/μ)³.  There is intentionally no positive
+    #      centering floor: the standard predictor/corrector target is the
+    #      only residual homotopy, and a floor would perturb the Newton system.
     rat = state.mu_aff / state.mu
     rat < z && (rat = z)
     sigma = rat * rat * rat
     sigma > one(T) && (sigma = one(T))
-    sigma < T(0.2) && (sigma = T(0.2))
 
     # ---- Corrector (combined): v = (σμ − s∘y − ds_a∘dy_a)/y ----
     @inbounds for k in 1:state.m
@@ -304,19 +329,67 @@ end
     rho_t = (sigma * state.mu - state.tau * state.kappa - state.dtau_a * state.dkappa_a) + state.tau * state.rG
     rho = rho_t - state.tau * bsum
     kkt_solve!(state.driver, state.w, state.rhs)   # H w = rhs1 (corrector)
-    state.dtau = _hsd_border_solve!(state, g_scalar, rho, state.dx)
+    state.dtau = _hsd_border_solve!(state, g_scalar, rho, state.dxr)
+    isfinite(state.dtau) || return false
+    _hsd_scatter_dx!(state)
     _hsd_recover!(state, state.st)
-    return nothing
+    return _hsd_direction_finite(state)
+end
+
+@inline function _hsd_direction_finite(state::HSDState{T}) where {T}
+    @inbounds for j in 1:state.n
+        isfinite(state.dx[j]) || return false
+    end
+    @inbounds for k in 1:state.m
+        (isfinite(state.dy[k]) && isfinite(state.ds[k])) || return false
+    end
+    return isfinite(state.dtau) && isfinite(state.dkappa)
+end
+
+@inline function _hsd_orthant_only(state::HSDState)
+    for block in layout_blocks(state.canonical.cone_layout)
+        block.cone === :nonnegative || return false
+    end
+    return true
+end
+
+@inline function _hsd_matrix_finite(H::Matrix{T}) where {T}
+    @inbounds for v in H
+        isfinite(v) || return false
+    end
+    return true
 end
 
 # Fraction-to-boundary line search + backtracking.  Never factorizes.
 #
-# The cone step (x, s, y) is limited by the slack/dual fractions; the scalar
-# (τ, κ) pair is limited by its own fraction.  This decouples the two so that a
-# collapsing κ (which correctly heads to 0 at an optimal point, or to a large
-# value at a certificate) cannot stall the cone progress — otherwise the κ
-# fraction becomes the binding constraint and every subsequent step shrinks to
-# machine zero before the complementarity is resolved.
+# The admissible step is the minimum of the cone and scalar
+# fraction-to-boundary limits.  That one value is applied to every component
+# `(x, s, y, τ, κ)`, preserving the affine residual homotopy
+# `r(α) = (1-α)r(0)` up to the arithmetic tolerance checked below.
+@inline function _hsd_residual_homotopy_ok(
+    state::HSDState{T}, alpha::T, p2::T, d2::T, gap2::T,
+) where {T}
+    weight = one(T) - alpha
+    scale = max(
+        one(T),
+        _hsd_maxinf(state.rP),
+        _hsd_maxinf(state.rD),
+        abs(state.rG),
+        p2,
+        d2,
+        abs(gap2),
+    )
+    tol = T(256) * sqrt(eps(T)) * scale
+    isfinite(tol) || return false
+    @inbounds for k in 1:state.m
+        abs(state.rPt[k] - weight * state.rP[k]) <= tol || return false
+    end
+    @inbounds for j in 1:state.n
+        abs(state.rDt[j] - weight * state.rD[j]) <= tol || return false
+    end
+    return abs(gap2 - weight * state.rG) <= tol
+end
+
 @inline function _hsd_line_search!(state::HSDState{T}) where {T}
     T_ = T
     z = zero(T_); o = one(T_)
@@ -347,51 +420,58 @@ end
         a = -state.kappa / state.dkappa
         a < alpha_k && (alpha_k = a)
     end
-    alpha_cone = min(alpha_p, alpha_d) * safety
-    alpha_scalar = min(alpha_t, alpha_k) * safety
-    alpha_cone < z && (alpha_cone = z)
-    alpha_scalar < z && (alpha_scalar = z)
-    alpha = alpha_cone
+    # One global step is used for x, s, y, τ and κ.  Separate cone/scalar
+    # steps break the affine residual homotopy and can accept a state whose
+    # two parts correspond to different Newton points.
+    alpha = safety * min(min(alpha_p, alpha_d), min(alpha_t, alpha_k))
+    (isfinite(alpha) && alpha > z) || return false
 
     p_norm = _hsd_maxinf(state.rP)
     d_norm = _hsd_maxinf(state.rD)
+    g_norm = abs(state.rG)
+    (isfinite(p_norm) && isfinite(d_norm) && isfinite(g_norm)) || return false
     backtracking = 0
     accepted = false
     while !accepted
-        alpha_tk = min(alpha_cone, alpha_scalar)
         @inbounds for j in 1:state.n
-            state.xt[j] = state.x[j] + alpha_cone * state.dx[j]
+            state.xt[j] = state.x[j] + alpha * state.dx[j]
         end
         @inbounds for k in 1:state.m
-            state.st[k] = state.s[k] + alpha_cone * state.ds[k]
-            state.yt[k] = state.y[k] + alpha_cone * state.dy[k]
+            state.st[k] = state.s[k] + alpha * state.ds[k]
+            state.yt[k] = state.y[k] + alpha * state.dy[k]
         end
-        state.tau_t = state.tau + alpha_tk * state.dtau
-        state.kappa_t = state.kappa + alpha_tk * state.dkappa
+        state.tau_t = state.tau + alpha * state.dtau
+        state.kappa_t = state.kappa + alpha * state.dkappa
         ok = true
         @inbounds for k in 1:state.m
-            (state.st[k] > z && state.yt[k] > z) || (ok = false; break)
+            (isfinite(state.st[k]) && isfinite(state.yt[k]) &&
+             state.st[k] > z && state.yt[k] > z) || (ok = false; break)
         end
-        ok = ok && (state.tau_t > z && state.kappa_t > z)
+        ok = ok && isfinite(state.tau_t) && isfinite(state.kappa_t) &&
+            state.tau_t > z && state.kappa_t > z
         if ok
             _hsd_trial_residual!(state)
             p2 = _hsd_maxinf(state.rPt)
             d2 = _hsd_maxinf(state.rDt)
-            base = max(p_norm, max(d_norm, o))
-            if max(p2, d2) <= base * T_(1.0005) + T_(1e-12)
+            gap2 = -dot(state.c, state.xt) - dot(state.b, state.yt) + state.kappa_t
+            base = max(p_norm, max(d_norm, max(g_norm, o)))
+            guard_tol = T_(256) * sqrt(eps(T_)) * base
+            if isfinite(p2) && isfinite(d2) && isfinite(gap2) &&
+               _hsd_residual_homotopy_ok(state, alpha, p2, d2, gap2) &&
+               max(p2, max(d2, abs(gap2))) <= base * T_(1.0005) + guard_tol
                 accepted = true
             end
         end
         if !accepted
-            alpha_cone *= T_(0.5)
-            alpha_scalar *= T_(0.5)
+            alpha *= T_(0.5)
             backtracking += 1
             backtracking >= 16 && break
         end
     end
+    accepted || return false
     state.record.backtracking = backtracking
-    state.record.primal_step = alpha_p * safety
-    state.record.dual_step = alpha_d * safety
+    state.record.primal_step = alpha
+    state.record.dual_step = alpha
     @inbounds for j in 1:state.n
         state.x[j] = state.xt[j]
     end
@@ -429,23 +509,35 @@ bordered solves reuse that single factor; the line search never
 factorizes.
 """
 function hsd_step!(state::HSDState{T, R}) where {T, R}
+    _hsd_orthant_only(state) || return HSDStepDirectionFailed
+    state.rank_ambiguous && return HSDStepDirectionFailed
+    state.rank_incompatible && return HSDStepDirectionFailed
     hsd_residual!(state)
-    _hsd_cone_state!(state)
-    if state.mu <= zero(T)
+    _hsd_cone_state!(state) || return HSDStepDirectionFailed
+    if !isfinite(state.mu)
+        return HSDStepDirectionFailed
+    elseif state.mu <= zero(T)
         state.record.step_size = zero(T)
         return HSDStepAlreadyOptimal
     end
     _hsd_form_schur!(state)
+    _hsd_matrix_finite(state.H) || return HSDStepDirectionFailed
     state.epoch += 1
     try
         kkt_epoch_factorize!(state.driver, state.H)
     catch
         return HSDStepSingularKKT
     end
-    _hsd_direction!(state)
+    direction_ok = try
+        _hsd_direction!(state)
+    catch
+        false
+    end
+    direction_ok || return HSDStepDirectionFailed
     accepted = _hsd_line_search!(state)
+    accepted || return HSDStepBreakdown
     hsd_residual!(state)
-    _hsd_cone_state!(state)
+    _hsd_cone_state!(state) || return HSDStepDirectionFailed
     _hsd_update_record!(state)
     state.record.iterations += 1
     return accepted ? HSDStepOK : HSDStepBreakdown
@@ -615,9 +707,9 @@ end
 
 Drive the Nonnegative HSD predictor/corrector, then certify the result
 in original coordinates.  Status is assigned ONLY from a verified
-certificate (never from raw `τ`/`κ`).  Returns one of `:Optimal`,
-`:PrimalInfeasible`, `:DualInfeasible`, `:MaxIterations`,
-`:Singular`, `:Breakdown`.
+certificate (never from raw `τ`/`κ`).  Returns one of `:optimal`,
+`:primal_infeasible`, `:dual_infeasible`, `:max_iterations`,
+`:singular`, `:breakdown`, `:rank_ambiguous`, or `:unsupported_cone`.
 
 The three certificates are verified by [`verify_optimal!`](@ref),
 [`verify_primal_infeasibility!`](@ref) and
@@ -631,6 +723,18 @@ function hsd_solve!(state::HSDState{T}; max_iters::Integer=300, tol::Union{Nothi
     x_orig = Vector{T}(undef, state.n)
     s_orig = Vector{T}(undef, state.m)
     y_orig = Vector{T}(undef, state.m)
+    _hsd_orthant_only(state) || return :unsupported_cone
+    state.rank_ambiguous && return :rank_ambiguous
+    if state.rank_incompatible
+        # The setup-time null ray is already expressed in canonical/original
+        # coordinates.  Validate it through the ordinary certificate path;
+        # never infer status from the objective mismatch alone.
+        copyto!(state.x, state.rank_ray)
+        if verify_dual_infeasibility!(state.canonical, state, x_orig, s_orig; tol=tol)
+            return :dual_infeasible
+        end
+        return :breakdown
+    end
     hsd_cold_start!(state)
     for _ in 1:max_iters
         code = hsd_step!(state)
@@ -642,6 +746,9 @@ function hsd_solve!(state::HSDState{T}; max_iters::Integer=300, tol::Union{Nothi
         if code === HSDStepBreakdown
             _try_farkas!(state, y_orig, tol) && return :primal_infeasible
             _try_dual_ray!(state, x_orig, s_orig, tol) && return :dual_infeasible
+            return :breakdown
+        end
+        if code === HSDStepDirectionFailed
             return :breakdown
         end
         if code === HSDStepAlreadyOptimal

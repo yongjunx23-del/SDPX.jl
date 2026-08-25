@@ -155,7 +155,7 @@ matrix work has been removed.
 
 For Float64x4 and BigFloat, the two local Cholesky pivot reciprocals are
 computed once per cone and reused across every equality column plus both
-predictor/corrector triangular solves. Float64x4 CSDR layouts with exact
+predictor/corrector triangular solves. Float64x4 reduced-arrow layouts with exact
 adjacent two-row ownership additionally fuse the panel copy and local
 transform, so each worker reads immutable source rows and writes a disjoint
 destination range. Broader layouts and BigFloat keep the copy-then-transform
@@ -204,11 +204,9 @@ residuals, stationarity, primal and dual Lorentz margins, objectives, gap,
 and complementarity. Pure-SOC MOI input stays on the native route.
 
 Lightweight development evidence for the native routes is summarized in
-[benchmarks.md](benchmarks.md). The current fixed-trace CSDR campaign is
-registered in
-[`benchmark/registry/full_unitarity_eft.jl`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/benchmark/registry/full_unitarity_eft.jl);
-the older PSD2-versus-Q3 scripts remain under
-[`docs/evidence/bench/soc_fixed_trace/`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/soc_fixed_trace/README.md).
+[benchmarks.md](benchmarks.md). Active physics workloads are supplied through
+the injected catalog interface; historical application registries and result
+archives are not part of the source tree.
 
 ### Native-SOC implementation references
 
@@ -217,7 +215,7 @@ rather than proprietary behavior. Clarabel's native SOC implementation stores
 the Nesterov--Todd point and applies `W'W` as a rank-one Lorentz update; for
 Q3 its dense packed scaling block has only six entries. Clarabel and ECOS use
 a rank-two KKT expansion for larger SOCs, but adding two extension variables
-per Q3 cell is not automatically advantageous for fixed-trace CSDR.
+per Q3 cell is not automatically advantageous for fixed-trace reduced-arrow models.
 
 - [Clarabel.rs SOC operations](https://github.com/oxfordcontrol/Clarabel.rs/blob/main/src/solver/core/cones/socone.rs)
 - [Clarabel.rs KKT numeric maps](https://github.com/oxfordcontrol/Clarabel.rs/blob/main/src/solver/core/kktsolvers/direct/quasidef/datamaps.rs)

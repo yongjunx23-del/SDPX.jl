@@ -62,7 +62,7 @@ fixed-width extended sum(k[l]^3):   at least   100,000
 ```
 
 This dimension-aware route matters for dense lattice SDPs that have a small
-number of moderately large blocks. Task_Low08 has 32 blocks of dimensions
+number of moderately large blocks. A maintained dense workload has 32 blocks of dimensions
 23--74 and `sum(k[l]^3) = 3,977,757`; the former count-only policy therefore
 left all block-local phases serial. On one node125 run with 16 OpenBLAS
 threads, the retained scheduler measured median solve times of 36.708 /
@@ -82,7 +82,7 @@ requested workers:     at least 16
 available memory:      at least 16 GiB
 ```
 
-On Task_Low08 with a 28 GiB explicit ceiling this selects 25 of the 32
+On that workload with a 28 GiB explicit ceiling this selects 25 of the 32
 possible bins. A same-node controlled run reduced median Schur assembly from
 8.140 to 6.701 seconds and the stable solve from 27.449 to 25.965 seconds.
 Increasing the share to 35% produced only a noisy 1.7% median change, made the
@@ -114,7 +114,7 @@ crossovers. A narrow shared triangle may expose fewer independent tiles than
 requested workers, while its thousands of local `2x2` blocks can still use a
 wider team. SDPX therefore selects Schur/SYRK workers separately from short
 block-local tasks and reports the executed value as `schur_threads`. On the
-measured 1,700-block, 144-shared-variable CSDR model, 48--95 Schur workers use
+measured 1,700-block, 144-shared-variable reduced-arrow model, 48--95 Schur workers use
 an eight-column tile only when the default twelve-column triangle has fewer
 than two jobs per worker. Requests of 96 or more use at most 64 Schur workers
 for this narrow geometry and at most 32 tasks for synchronization-sensitive
@@ -144,7 +144,7 @@ own disjoint linear ranges; blocked Cholesky panel solves own disjoint rows;
 trailing and equality SYRK tasks own complete lower-triangular tiles; and
 `L^-1 B` plus recovery products own disjoint right-hand-side columns or
 output ranges. This path respects `SolverOptions.threads`, leaves BLAS at one
-thread, and allocates its 0.596 GiB Task_Low08 workspace lazily. Native
+thread, and allocates its 0.596 GiB dense-workload workspace lazily. Native
 `Float64x4` remains the final serial fallback.
 
 ## BigFloat policy
@@ -177,7 +177,7 @@ and a work crossover caps the task count when the panel cannot amortize
 startup. Fine-grained all-local block, triangular, GEMV, predictor/corrector,
 line-search, and update phases are additionally capped at 64 ownership tasks;
 the disjoint equality Gram tiles may use the full requested width. On a
-512-bit 16,400-by-230 synthetic CSDR-shaped system, the equality
+512-bit 16,400-by-230 synthetic reduced-arrow-shaped system, the equality
 Gram scaled from 58.618 seconds at one worker to 1.339 seconds at 128 workers
 on a dual-socket EPYC 7742 node while retaining a `5.64e-152` relative KKT
 residual. Use `numactl --interleave=all` on that eight-NUMA-domain node and
@@ -209,13 +209,13 @@ the reduced shared system in Float64x4, checks residuals and refines in
 BigFloat, and automatically falls back to native BigFloat if correction is
 unsafe. Only the Float64x4 panel/factorization uses the requested workers; the
 native MPFR phases remain serial. This mode did not deliver a clear
-end-to-end improvement on the medium CSDR benchmark and therefore remains off
+end-to-end improvement on the medium reduced-arrow benchmark and therefore remains off
 by default.
 
 For general non-arrow arbitrary precision, run independent BigFloat instances
 as separate processes or scheduler-array elements.
 
-On the medium exact-arrow CSDR model at 256 bits, the ownership-safe native
+On the medium exact-arrow model at 256 bits, the ownership-safe native
 path measured 205.202 / 191.701 / 110.741 / 86.752 seconds with
 1 / 2 / 4 / 8 Julia threads. The matched one-thread legacy path took
 280.011 seconds. All thread counts produced the same 41-iteration certified
@@ -265,7 +265,7 @@ LinearAlgebra.BLAS.set_num_threads(16)
 ```
 
 Do not assume that a vendor backend is faster on every CPU. On the cluster's
-dual-socket AMD EPYC 7742 node, equal eight-core, eight-iteration Task_Low08
+dual-socket AMD EPYC 7742 node, equal eight-core, eight-iteration dense-workload
 jobs took 10.816 seconds with OpenBLAS, 13.018 seconds with MKL, and 21.999
 seconds with BLIS. OpenBLAS therefore remains the selected backend there.
 MKL and BLIS are benchmark-only environment dependencies, not SDPX
@@ -278,7 +278,7 @@ are not a supported way to obtain parallelism; use separate processes.
 
 ### Medium reduced-arrow affinity and NUMA result
 
-The `J/K/Na/Nmu = 32/4/16/100` Float64x4 CSDR model has 1,700 uniform `2x2`
+The measured Float64x4 reduced-arrow model has 1,700 uniform `2x2`
 blocks and a 144-column reduced shared system. On a dual-socket, eight-NUMA-
 domain AMD EPYC 7742 node, keep BLAS at one thread and start Julia with an
 exact compute pool (`--threads=N,0 --gcthreads=1,0`). Setting
@@ -443,9 +443,8 @@ reduced calling-task allocations to 768 bytes. Maximum relative Schur errors
 were `2.67e-16` for dense Float64, `3.57e-65` for dense Float64x4,
 `1.67e-15` for sparse Float64, and `1.33e-64` for sparse Float64x4.
 
-See [`docs/evidence/bench/threading/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/threading/RESULTS.md) for the full
-protocol, all 1/2/4/8-worker rows, reduction timings, memory estimates, and
-reproduction commands.
+Revalidate these historical crossover values with a versioned catalog through
+the current [benchmark protocol](benchmarks.md) before changing a default.
 
 ## Memory limits
 

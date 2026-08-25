@@ -1,264 +1,78 @@
-# SDPX canonical benchmark registry and runner
+# SDPX physics benchmark harness
 
-`benchmark/runner.jl` is the canonical benchmark runner. It loads
-`benchmark/SDPXBenchmarkRegistry.jl`, which owns the registry, suites,
-generators, cache, result schema, and comparison. Every suite writes one
-machine-readable result convention and no benchmark hook is added to numerical
-code.
+This directory contains a problem-agnostic measurement harness. Physics
+catalogs own problem selection, coefficient construction, and independent
+validation. The harness owns process isolation, solver measurement, schema-v7
+serialization, and paired comparison. It does not turn a finite benchmark
+catalog into a general correctness or physics claim.
 
-## Suites and fixed campaigns
+## Catalog contract
 
-- `micro`: eleven tiny generated LP/SOCP/SDP, rank/conditioning, and typed
-  pathological cases.
-- `representative`: broader generated/pathological coverage plus executable
-  checksum-pinned public cases when their local cache is present.
-- `local_full`: every small/medium registered case, mostly Float64, with a
-  deliberately small Float64x2/x3/x4 and BigFloat-256 sample.
-- `large`: executable cluster-only public/application anchors. It contains the
-  native-CBF CBLIB `nql30` SOCP in Float64 and the pinned Full-unitarity-EFT
-  J40/Na15/Nmu200/Nx2/Nalpha2 NativeSOC case in Float64x2 and Float64x4. The
-  runner refuses this suite outside PBS unless `--allow-large` is explicitly
-  supplied for a diagnostic.
-- `heavy`: full NETLIB/SDPLIB/CBLIB, Mittelmann, large sparse, bootstrap and
-  precision sweeps. It is register-only and the runner refuses to execute it.
-- `ladder`: per-class scaling ladders, three rungs each — LP box
-  (100/300/1000 variables), single SOC cone (128/512/2048), block-diagonal SDP
-  (250/500/750 variables, dense Schur complement). Float64/auto, reference
-  objectives empirically verified. The rung grows the dimension that stresses
-  each class's core linear algebra, so a regression surfaces as a phase ratio;
-  the whole suite runs on a laptop in about two minutes and makes no
-  production-scale claim.
-- `core_matrix`: the fixed benchmark-driven-development campaign. It runs
-  `synthetic/lp_box`, `synthetic/soc_q3`, and `synthetic/sdp_dense` in
-  Float64/auto, Float64x4/MFLA, and BigFloat256/BFLA, for exactly nine rows.
-  Missing optional providers become structured `provider_unavailable` skips;
-  they never silently fall back to an incomparable legacy implementation.
+`PhysicsBenchmarkHarness.jl` defines four public data types:
 
-`core_matrix` is deliberately listed as a campaign rather than broad suite. It
-is the stable smoke/per-change matrix required before numerical work, not a
-claim that three small synthetic problems establish production performance.
-Relevant structural, pathological, public, and scale-ladder rows remain
-mandatory for an accepted optimization.
+- `PhysicsBenchmarkSpec` describes identity, provenance, reference tolerances,
+  and a mandatory deterministic input fingerprint;
+- `PhysicsBenchmarkEntry` selects one problem, arithmetic, and provider;
+- `PhysicsBenchmarkReference` states the expected status/objective policy;
+- `PhysicsBenchmarkCatalog` supplies suites plus injected `build` and
+  `validate` callbacks.
 
-## Local commands
+`build(spec, T)` returns a named tuple with at least `problem`, `expected`, and
+`kind`. `validate(spec, built, result, metrics)` returns no failures on success
+or stable failure labels on rejection. Catalog files passed on the command line
+must define `physics_benchmark_catalog()` and return a
+`PhysicsBenchmarkCatalog`.
+
+The bundled `fixtures/smoke_catalog.jl` is only a harness smoke test. It is not
+a scientific benchmark suite.
+
+## Canonical runner
 
 ```sh
-julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
-julia --project=. benchmark/runner.jl representative --verbose
-julia --project=. benchmark/runner.jl local_full
-julia --project=. benchmark/runner.jl micro --problem=synthetic/sdp_dense
-julia --project=. benchmark/runner.jl micro \
-  --problem=synthetic/sdp_dense --arithmetic=bigfloat256 --provider=bfla
-
-# Fixed LP/SOCP/SDP × precision campaign. Three samples are a local hot-state
-# development gate; use the fresh-process protocol below for performance claims.
-julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
-  --samples=3 --verbose \
-  --output=work/baseline/core-matrix.toml
-
-# Per-class scaling ladders (LP/SOC/SDP), laptop-scale phase-scaling evidence.
-julia --project=. benchmark/runner.jl ladder --samples=3 --verbose \
-  --output=work/baseline/ladder.toml
-
-# Append a result file to the per-commit performance log, then read trends.
-julia --project=. benchmark/history_log.jl record work/baseline/ladder.toml \
-  --suite=ladder
-julia --project=. benchmark/history_log.jl trend ladder/lp_1000 --last=10
+julia --project=. benchmark/runner.jl smoke \
+  --problem=smoke/lp_box --arithmetic=float64 --provider=auto \
+  --samples=1 --output=/tmp/sdpx-smoke.toml
 ```
 
-## Performance history
+Use `--catalog=/absolute/path/catalog.jl` to inject a physics catalog. The CLI
+contract is intentionally stable for fresh-process children:
 
-`benchmark/history/performance-log.csv` is an append-only, one-row-per-problem
-log stamped with the commit, UTC time, and tree cleanliness. `record` appends
-from any runner output file; `trend` prints the median-time sequence per
-problem with the ratio against the first recorded entry -- the direct answer
-to "is this branch actually faster than where we started". Rows recorded from
-a dirty tree are marked and should not be used for claims.
-
-Results are written as matching TOML and TSV files. Semantic facts (status,
-objective, residuals, certificate, iterations, planned/executed route/provider,
-and fallback) are primary. A solved row carries `semantic_pass`, a compact list
-of `semantic_failures`, and an explicit `unexpected_fallback` flag. The runner
-writes the complete artifact before failing on a semantic regression. Timings
-are post-warmup observations and are never an ordinary CI failure threshold.
-
-The canonical result schema records the metrics needed by the core campaign:
-
-- runtime: total solve time and exposed frontend, setup, preprocessing,
-  presolve, core, factorization, refinement, reconstruction, certification, and
-  other phase timings;
-- memory: Julia allocated bytes, GC time, solver-owned workspace bytes, and
-  fresh-process peak RSS when the fresh-process wrapper is used;
-- accuracy: primal/dual objective, absolute/relative gap, primal/dual and affine
-  residuals, cone/PSD violations, complementarity, semantic failures, and the
-  original-coordinate certificate;
-- convergence: iterations, restarts, regularization attempts, refinement solves,
-  factorization counters, selected formulation, requested/planned/executed
-  provider, and fallback reason;
-- stability: repeated-sample status, objective, iteration, route, provider,
-  input and semantic parity together with median, MAD, range, and spread.
-
-Current SOCP cases exercise the native Lorentz frontend. Rows record the
-executed specialization and whether a PSD lift was present; the Full-unitarity
-case requires `fixed_trace_q3`, an original-coordinate Lorentz certificate,
-MFLA provenance, and `psd_lift_used=false`. LP and SDP rows are labeled
-`lp_native` and `sdp_native`, while the separate planned/executed formulation
-columns retain the KKT formulation selected inside the solver.
-
-## Baseline/candidate loop
-
-The loop is automated: `julia benchmark/optimize.jl loop` runs baseline
-(parent worktree), candidate, phase-ratio comparison, and history recording
-in one command. The narrative and decision rules live in
-`benchmark/WORKFLOW.md`.
-
-Create artifacts from clean, commit-pinned worktrees using identical Julia,
-project/manifest, thread, BLAS, provider, input, and environment settings:
-
-```sh
-# Baseline worktree / commit
-JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-  julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
-  --samples=3 --output=work/baseline/core-matrix.toml
-
-# Candidate worktree / commit
-JULIA_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 \
-  julia --project=benchmark/benchenv benchmark/runner.jl core_matrix \
-  --samples=3 --output=work/candidate/core-matrix.toml
-
-julia --project=. benchmark/compare.jl \
-  work/baseline/core-matrix.toml \
-  work/candidate/core-matrix.toml \
-  work/comparison/core-matrix.tsv
+```text
+runner.jl SUITE --problem=ID --arithmetic=TYPE --provider=PROVIDER \
+  --samples=1 --output=RESULT.toml [--catalog=CATALOG.jl]
 ```
 
-The in-process `--samples=3` path is a fast local gate and driver-validation
-step. It rebuilds identical problem data for each timed solve but shares one
-Julia process. Do not use it alone for an end-to-end speed claim. Freeze a
-microbenchmark for the suspected phase and use at least three independent
-fresh processes for the affected end-to-end rows.
+Each selection produces one schema-v7 result row. Rows record catalog identity,
+input fingerprint, source/environment hashes, solver route, certificate,
+catalog validation, timing, allocation, and sampling parity. A strict run
+writes its artifacts before reporting a semantic failure.
 
-## Compare
-
-```sh
-julia --project=. benchmark/compare.jl baseline.toml candidate.toml comparison.tsv
-```
-
-The comparator requires identical selections and input fingerprints before it
-reports semantic agreement or timing ratios. It also rejects mismatched Julia,
-OS, CPU, thread counts, BLAS threads, precision and conic formulation. Every
-row records the source commit and whether the source tree was dirty. Schema-v6
-rows must carry canonical 64-hex `solver_source_sha256` values on
-both sides; the values may differ for an optimization candidate. Missing or
-legacy hashes fail closed with comparison evidence instead of producing a
-timing claim. For repeated samples, `total_seconds` is the reported aggregate
-median (the arithmetic mean of the two middle observations for an even sample
-count), so the scalar timing and `sample_median_seconds` are consistent.
-
-For timing claims, use the fresh-process campaign wrapper. Every repetition
-starts a separate Julia process, performs an untimed warmup, writes its own raw
-TOML/TSV/log, and is aggregated only when status, objective, iterations,
-certificate, route, input fingerprint, and environment agree:
+## Fresh-process campaigns
 
 ```sh
-julia --project=. benchmark/fresh_process_runner.jl micro \
-  --problem=synthetic/lp_box --arithmetic=float64 --provider=auto \
+julia --project=. benchmark/fresh_process_runner.jl smoke \
+  --problem=smoke/lp_box --arithmetic=float64 --provider=auto \
   --repetitions=3 --threads=1 --blas-threads=1 \
-  --campaign-dir=work/baseline/lp_box_float64
+  --campaign-dir=/tmp/sdpx-fresh
 ```
 
-Run the same command for the affected `core_matrix` rows by replacing the
-problem, arithmetic, and provider arguments. A numerical optimization is not
-accepted until its relevant rows pass fresh-process parity and the strict
-baseline/candidate comparison.
+Add the same `--catalog=...` option for an injected catalog. Every repetition
+starts a new Julia process, performs its own untimed warm-up, and must emit
+exactly one result row. Aggregation fails closed unless selection, catalog,
+input, environment, route, status, objective, iterations, certificate, and
+semantic result pair across all children.
 
-`process_peak_rss_bytes` is the peak of the complete child Julia process. It
-includes the runtime, package loading, compilation caches, and allocator
-arenas, so use it for same-environment regression detection rather than as a
-solver-workspace measurement. `workspace_bytes` is the separate solver-owned
-storage estimate.
-
-## Public data and provenance
-
-The registry curates NETLIB LP, SDPLIB, DIMACS continuous conic and CBLIB
-continuous instances. Data are not vendored. Downloads occur only under an
-explicit `--prepare` request, use authoritative URLs, and verify SHA-256:
+## Paired comparison
 
 ```sh
-julia --project=. benchmark/runner.jl representative \
-  --prepare --problem=netlib/afiro
+julia --project=. benchmark/compare.jl \
+  baseline.toml candidate.toml comparison.tsv
 ```
 
-Ordinary tests and solves never access the network. Missing data or a missing
-or unsupported loader produces a structured `skipped` result. The canonical
-runner implements Netlib compressed MPS, historical SDPLIB compact SDPpack,
-and DIMACS sparse SDPA. CBF support is deliberately limited to cone families
-that SDPX can execute without changing the published formulation. CBLIB
-`nql30` is the native continuous-SOCP anchor; CBF instances containing integer,
-PSD, rotated-quadratic, exponential, or power-cone constructs fail closed or
-remain metadata-only.
+The comparator accepts schema-v7 files only for a valid claim. It uses scoped
+`BigFloat` parsing for objective differences and rejects mismatched selections,
+catalog identity, fingerprints, environments, formulations, or references.
+Dirty-tree comparisons require the explicit diagnostic override in the API.
 
-`nql30` is a completed native-SOCP anchor. On the accepted local one-thread
-campaign, three fresh processes all return `Optimal` in 13 iterations with an
-original-coordinate certificate, objective `-0.9460283775140597`, and matching
-input/route/source identities. The median post-warmup solve time is 14.814 s
-and solver workspace is 186,614,568 bytes. These numbers are historical local
-evidence from the recorded campaign, not a cross-machine or current-branch
-reference; reproduce them through the Large suite before comparing another
-candidate.
-
-Fresh-process campaigns for an explicitly authorized Large-suite diagnostic
-must also pass `--allow-large` to `fresh_process_runner.jl`; the flag is
-forwarded unchanged to each canonical child.
-
-The Full-unitarity input is the neutral
-`csdr_fixed_trace_reduced_v1` payload, not an archived `SDPXProblem`. Copy the
-payload into the configured cache root under `csdr/`; its pinned SHA-256 is
-verified before deserialization. It is not downloaded automatically and is not
-tracked by Git. A PBS template is provided at
-`benchmark/cluster/full_unitarity_eft.pbs`; submit Float64x2 and Float64x4 as
-separate jobs so their timings remain directly attributable.
-
-## Full-unitarity scaling ladder
-
-The executable anchor is J40/Na15/Nmu200/Nx2/Nalpha2. Heavy metadata also
-records the next two source-model rungs:
-
-- scale 2: J80/Na30/Nmu400/Nx4/Nalpha4;
-- scale 4: J160/Na60/Nmu800/Nx8/Nalpha8.
-
-Those rungs are register-only until the source generator creates independent
-neutral payloads and their checksums are pinned. Doubling means regenerating
-the physical model with all five resolution parameters doubled; copying the
-J40 matrices or repeating cones is forbidden. The J40 payload is the certified
-application holdout. Algorithm tuning uses synthetic fixed-trace proxies and
-bounded 1/5/20-iteration diagnostics, not repeated full holdout solves.
-
-`docs/evidence/bench/public_conic_suite/` is retained as an archived
-provenance/catalogue layer:
-manifests, tier configs, pathological generators, the on-demand downloader,
-and data placeholders. It has no runner of its own.
-
-## Precision sampling
-
-Float64 is the default. Local Full adds selected LP/SDP/stress cases in
-Float64x2/x3/x4 and BigFloat-256; it never forms a Cartesian product of cases,
-providers and arithmetic. Representative and Local Full each contain one
-explicit MFLA and one explicit BFLA smoke; they become structured skips when
-the corresponding optional package is unavailable. Loading an arithmetic type
-alone does not opt `:auto` into an optional provider.
-
-The `core_matrix` campaign is the deliberate exception to sparse precision
-sampling: it is a fixed three-family by three-arithmetic matrix used to prevent
-Float64-only optimization. Its nine rows are small enough for development but
-must be augmented by structural and scale-specific evidence before a claim is
-made.
-
-## Specialized campaigns
-
-Historical application/cluster campaigns live under `docs/evidence/` (moved
-from the former `bench/` tree) and the scoreboards under `benchmark/`
-(`round3_augmented_ab.jl`, `round4_formulation_scoreboard.jl`,
-`round5_soc_scoreboard.jl`) remain specialized and outside the canonical
-runner. `benchmark/gates.jl` with `benchmark/baselines/gates.json` remains the
-correctness acceptance gate.
+Generated inputs, result files, historical baselines, and evidence are not
+stored in this directory. Keep campaign artifacts in an external work area.

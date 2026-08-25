@@ -12,6 +12,8 @@ function _fresh_fixture_row(; seconds="1.0", iterations="8",
                             fingerprint="fixture-fingerprint", route="sdp_native")
     return Dict{String,Any}(
         "suite" => "micro",
+        "catalog_name" => "fixture",
+        "catalog_version" => "1",
         "problem_id" => "synthetic/lp_box",
         "name" => "fixture",
         "family" => "lp",

@@ -103,6 +103,249 @@ Packed-lower length `n(n+1)/2` of an `n × n` PSD block, matching
 """
 psd_packed_length(n::Integer) = variable_length(PSDCone(), n)
 
+# ---------------------------------------------------------------------------
+# PSD raw-lower <-> HSD svec coordinate contract
+# ---------------------------------------------------------------------------
+
+"""
+    PSDCoordinateMap{T}
+
+Setup-time, caller-owned coordinate map for one PSD block.  The frontend
+stores a symmetric matrix in lower-column-major *raw* coordinates, while
+the HSD core stores the Euclidean `svec` coordinates
+
+    svec(S)[ii] = S[ii],       svec(S)[ij] = sqrt(2) S[ij] (i > j).
+
+The four vectors are kept separately even though this particular map is
+diagonal and self-adjoint.  Keeping the semantic names explicit prevents a
+row-covector pullback from being confused with reconstruction of a matrix
+entry.  In particular:
+
+* `primal_scale` is the primal row map `D`;
+* `primal_inverse` is the matrix reconstruction `D⁻¹`;
+* `dual_pullback` is `Dᵀ`, taking an execution dual row multiplier back to
+  raw row coordinates;
+* `dual_to_execution` is the inverse pullback, taking a raw dual coordinate
+  to an execution dual.
+
+All vectors are allocated once during setup.  The `!` conversion helpers
+below accept this map so warmed fixed-width calls perform no allocation.
+"""
+struct PSDCoordinateMap{T<:AbstractFloat}
+    dimension::Int
+    length::Int
+    primal_scale::Vector{T}
+    primal_inverse::Vector{T}
+    dual_pullback::Vector{T}
+    dual_to_execution::Vector{T}
+end
+
+"""Build the setup-time PSD raw/svec map at model-owned arithmetic."""
+function PSDCoordinateMap(
+    ::Type{T},
+    dimension::Integer;
+    precision_bits::Int=precision(T),
+) where {T<:AbstractFloat}
+    dimension >= 1 || throw(ArgumentError("PSD dimension must be >= 1, got $dimension"))
+    n = Int(dimension)
+    len = psd_packed_length(n)
+    sqrt_two = _owned_sqrt_two(T, precision_bits)
+    inv_sqrt_two = _owned_arithmetic_eval(
+        T,
+        () -> inv(sqrt_two);
+        precision_bits=precision_bits,
+    )
+    scale = Vector{T}(undef, len)
+    inverse = Vector{T}(undef, len)
+    pullback = Vector{T}(undef, len)
+    to_execution = Vector{T}(undef, len)
+    @inbounds for position in 1:len
+        row = psd_packed_row(position, n)
+        column = psd_packed_column(position, n)
+        if row == column
+            one_value = owned_arithmetic_copy(T, 1; precision_bits=precision_bits)
+            scale[position] = one_value
+            inverse[position] = one_value
+            pullback[position] = one_value
+            to_execution[position] = one_value
+        else
+            scale[position] = sqrt_two
+            inverse[position] = inv_sqrt_two
+            pullback[position] = sqrt_two
+            to_execution[position] = inv_sqrt_two
+        end
+    end
+    return PSDCoordinateMap{T}(n, len, scale, inverse, pullback, to_execution)
+end
+
+psd_coordinate_map(::Type{T}, dimension::Integer; kwargs...) where {T<:AbstractFloat} =
+    PSDCoordinateMap(T, dimension; kwargs...)
+
+@inline psd_coordinate_dimension(map::PSDCoordinateMap) = map.dimension
+@inline psd_coordinate_length(map::PSDCoordinateMap) = map.length
+@inline psd_primal_scale(map::PSDCoordinateMap) = map.primal_scale
+@inline psd_primal_inverse(map::PSDCoordinateMap) = map.primal_inverse
+@inline psd_dual_pullback(map::PSDCoordinateMap) = map.dual_pullback
+@inline psd_dual_to_execution(map::PSDCoordinateMap) = map.dual_to_execution
+
+@inline function _validate_psd_coordinate_buffers(dst, src, len::Int)
+    length(dst) == len || throw(DimensionMismatch(
+        "PSD coordinate destination length $(length(dst)) != expected $len",
+    ))
+    length(src) == len || throw(DimensionMismatch(
+        "PSD coordinate source length $(length(src)) != expected $len",
+    ))
+    return nothing
+end
+
+@inline function _psd_default_precision_bits(::Type{T}, src) where {T<:AbstractFloat}
+    T === BigFloat || return precision(T)
+    bits = 0
+    @inbounds for value in src
+        bits = max(bits, precision(value))
+    end
+    return max(bits, precision(BigFloat))
+end
+
+"""Apply a prebuilt diagonal map to caller-owned vectors, alias-safely."""
+@inline function _apply_psd_diagonal_map!(dst, src, factors, len::Int)
+    _validate_psd_coordinate_buffers(dst, src, len)
+    T = eltype(dst)
+    precision_bits = T === BigFloat ? precision(factors[1]) : precision(T)
+    @inbounds for position in 1:len
+        dst[position] = _owned_arithmetic_eval(
+            T,
+            () -> src[position] * factors[position];
+            precision_bits=precision_bits,
+        )
+    end
+    return dst
+end
+
+"""
+    matrix_raw_lower_to_svec!(dst, src, n)
+    matrix_raw_lower_to_svec!(dst, src, map)
+
+Convert a lower-column-major raw matrix coordinate to HSD `svec`.  `dst`
+is caller-owned and may alias `src`; each coordinate is independent.
+"""
+function matrix_raw_lower_to_svec!(dst, src, map::PSDCoordinateMap)
+    return _apply_psd_diagonal_map!(dst, src, map.primal_scale, map.length)
+end
+
+function matrix_raw_lower_to_svec!(dst, src, n::Integer;
+                                   precision_bits::Union{Nothing,Int}=nothing)
+    bits = precision_bits === nothing ?
+        _psd_default_precision_bits(eltype(dst), src) : precision_bits
+    map = PSDCoordinateMap(eltype(dst), n; precision_bits=bits)
+    return matrix_raw_lower_to_svec!(dst, src, map)
+end
+
+"""
+    svec_to_matrix_raw_lower!(dst, src, n)
+    svec_to_matrix_raw_lower!(dst, src, map)
+
+Reconstruct lower-column-major raw matrix entries from execution `svec`
+coordinates.  This is a matrix-coordinate reconstruction (`D⁻¹`), not a
+dual row-covector pullback.
+"""
+function svec_to_matrix_raw_lower!(dst, src, map::PSDCoordinateMap)
+    return _apply_psd_diagonal_map!(dst, src, map.primal_inverse, map.length)
+end
+
+function svec_to_matrix_raw_lower!(dst, src, n::Integer;
+                                   precision_bits::Union{Nothing,Int}=nothing)
+    bits = precision_bits === nothing ?
+        _psd_default_precision_bits(eltype(dst), src) : precision_bits
+    map = PSDCoordinateMap(eltype(dst), n; precision_bits=bits)
+    return svec_to_matrix_raw_lower!(dst, src, map)
+end
+
+"""
+    raw_dual_to_svec!(dst, src, n)
+    raw_dual_to_svec!(dst, src, map)
+
+Convert a raw PSD dual coordinate (diagonal entries once, off-diagonal
+entries doubled) to the execution dual covector.  This is `D⁻¹`, the
+inverse of the row-multiplier pullback, and is alias-safe.
+"""
+function raw_dual_to_svec!(dst, src, map::PSDCoordinateMap)
+    return _apply_psd_diagonal_map!(dst, src, map.dual_to_execution, map.length)
+end
+
+function raw_dual_to_svec!(dst, src, n::Integer;
+                           precision_bits::Union{Nothing,Int}=nothing)
+    bits = precision_bits === nothing ?
+        _psd_default_precision_bits(eltype(dst), src) : precision_bits
+    map = PSDCoordinateMap(eltype(dst), n; precision_bits=bits)
+    return raw_dual_to_svec!(dst, src, map)
+end
+
+"""
+    svec_dual_to_raw!(dst, src, n)
+    svec_dual_to_raw!(dst, src, map)
+
+Pull an execution dual row multiplier back to raw row coordinates via
+`Dᵀ`.  For a symmetric PSD block this doubles each off-diagonal matrix
+coordinate, which is exactly the raw dual convention used by the frontend.
+"""
+function svec_dual_to_raw!(dst, src, map::PSDCoordinateMap)
+    return _apply_psd_diagonal_map!(dst, src, map.dual_pullback, map.length)
+end
+
+function svec_dual_to_raw!(dst, src, n::Integer;
+                           precision_bits::Union{Nothing,Int}=nothing)
+    bits = precision_bits === nothing ?
+        _psd_default_precision_bits(eltype(dst), src) : precision_bits
+    map = PSDCoordinateMap(eltype(dst), n; precision_bits=bits)
+    return svec_dual_to_raw!(dst, src, map)
+end
+
+# User-facing aliases retained beside the explicit plan names.  They make
+# the coordinate direction apparent at call sites without changing the
+# frozen `matrix_*` API used by the canonicalizer.
+raw_lower_to_svec!(dst, src, n::Integer; kwargs...) =
+    matrix_raw_lower_to_svec!(dst, src, n; kwargs...)
+raw_lower_to_svec!(dst, src, map::PSDCoordinateMap) =
+    matrix_raw_lower_to_svec!(dst, src, map)
+svec_to_raw_lower!(dst, src, n::Integer; kwargs...) =
+    svec_to_matrix_raw_lower!(dst, src, n; kwargs...)
+svec_to_raw_lower!(dst, src, map::PSDCoordinateMap) =
+    svec_to_matrix_raw_lower!(dst, src, map)
+
+"""MOI's upper-triangle column-major order -> SDPX raw lower order."""
+function moi_upper_to_raw_lower!(dst, src, n::Integer)
+    n >= 1 || throw(ArgumentError("PSD dimension must be >= 1, got $n"))
+    len = psd_packed_length(n)
+    _validate_psd_coordinate_buffers(dst, src, len)
+    @inbounds for position in 1:len
+        row = psd_packed_row(position, n)
+        column = psd_packed_column(position, n)
+        # Upper-column-major index of (min(row,column), max(row,column)).
+        upper_row = min(row, column)
+        upper_column = max(row, column)
+        upper_index = (upper_column - 1) * upper_column ÷ 2 + upper_row
+        dst[position] = src[upper_index]
+    end
+    return dst
+end
+
+"""SDPX raw lower order -> MOI's upper-triangle column-major order."""
+function raw_lower_to_moi_upper!(dst, src, n::Integer)
+    n >= 1 || throw(ArgumentError("PSD dimension must be >= 1, got $n"))
+    len = psd_packed_length(n)
+    _validate_psd_coordinate_buffers(dst, src, len)
+    @inbounds for position in 1:len
+        row = psd_packed_row(position, n)
+        column = psd_packed_column(position, n)
+        upper_row = min(row, column)
+        upper_column = max(row, column)
+        upper_index = (upper_column - 1) * upper_column ÷ 2 + upper_row
+        dst[upper_index] = src[position]
+    end
+    return dst
+end
+
 """
     is_stored_psd_metadata(psd, cone) -> Bool
 

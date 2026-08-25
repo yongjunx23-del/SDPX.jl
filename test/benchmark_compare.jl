@@ -1,12 +1,11 @@
 using Test
 using TOML
 
-# The normal test runner includes benchmark_registry.jl first.  Keeping this
-# fallback makes the focused file useful on its own as well.
-if !isdefined(Main, :SDPXBenchmarkRegistry)
-    include(joinpath(@__DIR__, "..", "benchmark", "SDPXBenchmarkRegistry.jl"))
+# Keep the focused file useful on its own as well as through runtests.jl.
+if !isdefined(Main, :PhysicsBenchmarkHarness)
+    include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
 end
-using .SDPXBenchmarkRegistry
+using .PhysicsBenchmarkHarness
 
 function _compare_fixture(path; objective, total_seconds=1.0,
                           iterations=8, allocated_bytes=nothing,
@@ -14,10 +13,12 @@ function _compare_fixture(path; objective, total_seconds=1.0,
                           workspace_bytes=nothing, semantic_pass=true,
                           certificate_valid=true, input_fingerprint="fixture",
                           sample_count=1, sample_semantic_parity=nothing,
-                          schema_version=6,
+                          schema_version=7,
                           solver_source_sha256=repeat("a", 64))
     row = Dict{String,Any}(
         "suite" => "fixture",
+        "catalog_name" => "fixture",
+        "catalog_version" => "1",
         "problem_id" => "fixture/case",
         "arithmetic" => "float64",
         "requested_provider" => "auto",
@@ -175,7 +176,7 @@ end
     @test changed_row.comparison_valid
 end
 
-@testset "schema-v6 solver source hash gate" begin
+@testset "schema-v7 solver source hash gate" begin
     baseline = tempname() * ".toml"
     candidate = tempname() * ".toml"
     _compare_fixture(baseline; objective="1.0")

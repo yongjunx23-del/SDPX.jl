@@ -135,6 +135,245 @@ end
 """`W = X^{-1}` — the NT scaling point for the interior point `X`; `L_W` maps `X` to `I`."""
 nt_scaling!(cone::PSDTriangleCone, W::AbstractVector, x::AbstractVector) = inverse!(cone, W, x)
 
+@inline function _allfinite_matrix(A::AbstractMatrix)
+    @inbounds for j in axes(A, 2), i in axes(A, 1)
+        isfinite(A[i, j]) || return false
+    end
+    return true
+end
+
+@inline function _psd_eigen_route!(
+    A::AbstractMatrix,
+    V::AbstractMatrix,
+    values::AbstractVector,
+    route::Symbol,
+)
+    route === :setup_jacobi || throw(ArgumentError(
+        "PSD NT eigensolver route $(repr(route)) is unavailable; no fallback is permitted",
+    ))
+    return _jacobi_eigen!(A, V, values)
+end
+
+@inline function _psd_nt_close(A::AbstractMatrix{T}, B::AbstractMatrix, n::Int) where {T}
+    residual = zero(T)
+    scale = one(T)
+    @inbounds for j in 1:n, i in 1:n
+        aij = T(A[i, j])
+        bij = T(B[i, j])
+        rij = abs(aij - bij)
+        residual = rij > residual ? rij : residual
+        aa = abs(aij)
+        ab = abs(bij)
+        scale = aa > scale ? aa : scale
+        scale = ab > scale ? ab : scale
+    end
+    return residual <= eps(T) * scale * T(10000 * n)
+end
+
+"""Compute the SPD square root and inverse square root without allocation."""
+function _spd_sqrt_invsqrt!(
+    root::AbstractMatrix{T},
+    invroot::AbstractMatrix{T},
+    X::AbstractMatrix{T},
+    work::AbstractMatrix{T},
+    V::AbstractMatrix{T},
+    values::AbstractVector{T},
+    eigen_route::Symbol,
+) where {T}
+    n = size(X, 1)
+    size(X, 2) == n || throw(DimensionMismatch())
+    _allfinite_matrix(X) || throw(DomainError(X, "SPD matrix contains non-finite entries"))
+    copyto!(work, X)
+    _identity!(V, n)
+    _psd_eigen_route!(work, V, values, eigen_route)
+    _orthonormalize!(V, n)
+    fill!(root, zero(T))
+    fill!(invroot, zero(T))
+    @inbounds for k in 1:n
+        value = values[k]
+        (isfinite(value) && value > zero(T)) ||
+            throw(DomainError(value, "PSD NT pair must be strictly positive definite"))
+        rk = sqrt(value)
+        ik = one(T) / rk
+        for j in 1:n
+            vjk = V[j, k]
+            for i in 1:n
+                vv = V[i, k] * vjk
+                root[i, j] += rk * vv
+                invroot[i, j] += ik * vv
+            end
+        end
+    end
+    return root, invroot
+end
+
+"""
+    nt_scaling!(cone, state::PSDNTScaling, s, y)
+
+Update the pair-dependent PSD NT state from HSD `svec` coordinates. Computes
+`P = Y^{-1/2}(Y^{1/2} S Y^{1/2})^{1/2}Y^{-1/2}`, so
+`Theta[Z]=P*Z*P`, `Theta(Y)=S`, and `G=Theta^{-1}`. Any non-finite input,
+non-positive eigenvalue, or Jacobi non-convergence throws and is never silently
+accepted.
+"""
+function nt_scaling!(
+    cone::PSDTriangleCone{T},
+    state::PSDNTScaling{T},
+    svec_s::AbstractVector,
+    svec_y::AbstractVector,
+) where {T}
+    state.valid[1] = false
+    length(svec_s) == length(svec_y) == cone.len == state.len ||
+        throw(DimensionMismatch())
+    cone.dim == state.dim || throw(DimensionMismatch())
+    n = state.dim
+    _unpack_svec!(state.S, svec_s, n, state.invsqrt2)
+    _unpack_svec!(state.Y, svec_y, n, state.invsqrt2)
+
+    # work1 = Y^(1/2), work2 = Y^(-1/2)
+    _spd_sqrt_invsqrt!(
+        state.work1,
+        state.work2,
+        state.Y,
+        state.work3,
+        state.U,
+        state.lambda,
+        state.eigen_route,
+    )
+    # work4 = Y^(1/2) S Y^(1/2)
+    mul!(state.work3, state.work1, state.S)
+    mul!(state.work4, state.work3, state.work1)
+    # Lambda is temporary core sqrt; Pinv is temporary inverse-core sqrt.
+    _spd_sqrt_invsqrt!(
+        state.Lambda,
+        state.Pinv,
+        state.work4,
+        state.work3,
+        state.U,
+        state.lambda,
+        state.eigen_route,
+    )
+    # P = Y^(-1/2) core Y^(-1/2)
+    mul!(state.work3, state.work2, state.Lambda)
+    mul!(state.P, state.work3, state.work2)
+
+    # Freeze the square-root automorphism and its inverse.
+    _spd_sqrt_invsqrt!(
+        state.Proot,
+        state.Prootinv,
+        state.P,
+        state.work3,
+        state.U,
+        state.lambda,
+        state.eigen_route,
+    )
+    mul!(state.Pinv, state.Prootinv, state.Prootinv)
+
+    # Lambda = R(Y) = P^(1/2) Y P^(1/2), then freeze its eigenbasis.
+    mul!(state.work3, state.Proot, state.Y)
+    mul!(state.Lambda, state.work3, state.Proot)
+    copyto!(state.work3, state.Lambda)
+    _identity!(state.U, n)
+    _psd_eigen_route!(state.work3, state.U, state.lambda, state.eigen_route)
+    _orthonormalize!(state.U, n)
+    @inbounds for k in 1:n
+        lk = state.lambda[k]
+        (isfinite(lk) && lk > zero(T)) ||
+            throw(DomainError(lk, "PSD scaled Lambda must be positive definite"))
+    end
+    # Fail closed unless the frozen dual->primal orientation and its square
+    # root are numerically verified in the same precision as the state.
+    mul!(state.work1, state.P, state.Y)
+    mul!(state.work2, state.work1, state.P)
+    _psd_nt_close(state.work2, state.S, n) ||
+        throw(DomainError(state.P, "PSD NT Theta(Y)=S residual exceeded tolerance"))
+    mul!(state.work1, state.Pinv, state.S)
+    mul!(state.work2, state.work1, state.Pinv)
+    _psd_nt_close(state.work2, state.Y, n) ||
+        throw(DomainError(state.Pinv, "PSD NT G(S)=Y residual exceeded tolerance"))
+    mul!(state.work1, state.Prootinv, state.S)
+    mul!(state.work2, state.work1, state.Prootinv)
+    _psd_nt_close(state.work2, state.Lambda, n) ||
+        throw(DomainError(state.Proot, "PSD NT scaled-Lambda residual exceeded tolerance"))
+    mul!(state.work1, state.Proot, state.Proot)
+    _psd_nt_close(state.work1, state.P, n) ||
+        throw(DomainError(state.Proot, "PSD NT R^2=Theta residual exceeded tolerance"))
+    state.valid[1] = true
+    return state
+end
+
+@inline function _psd_congruence_svec!(
+    out::AbstractVector,
+    state::PSDNTScaling,
+    P::AbstractMatrix,
+    x::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(out) == length(x) == state.len || throw(DimensionMismatch())
+    n = state.dim
+    _unpack_svec!(state.work1, x, n, state.invsqrt2)
+    mul!(state.work2, P, state.work1)
+    mul!(state.work1, state.work2, P)
+    _pack_svec!(out, state.work1, n, state.sqrt2)
+    return out
+end
+
+theta_apply!(
+    ::PSDTriangleCone,
+    out::AbstractVector,
+    state::PSDNTScaling,
+    x::AbstractVector,
+) = _psd_congruence_svec!(out, state, state.P, x)
+
+g_apply!(
+    ::PSDTriangleCone,
+    out::AbstractVector,
+    state::PSDNTScaling,
+    x::AbstractVector,
+) = _psd_congruence_svec!(out, state, state.Pinv, x)
+
+r_apply!(
+    ::PSDTriangleCone,
+    out::AbstractVector,
+    state::PSDNTScaling,
+    x::AbstractVector,
+) = _psd_congruence_svec!(out, state, state.Proot, x)
+
+r_inverse_apply!(
+    ::PSDTriangleCone,
+    out::AbstractVector,
+    state::PSDNTScaling,
+    x::AbstractVector,
+) = _psd_congruence_svec!(out, state, state.Prootinv, x)
+
+"""Solve `L_Lambda(out)=rhs` in the frozen eigenbasis, in `svec` coordinates."""
+function solve_Llambda!(
+    cone::PSDTriangleCone{T},
+    out::AbstractVector,
+    state::PSDNTScaling{T},
+    rhs::AbstractVector,
+) where {T}
+    _require_nt_valid(state)
+    length(out) == length(rhs) == cone.len == state.len || throw(DimensionMismatch())
+    n = state.dim
+    two = one(T) + one(T)
+    _unpack_svec!(state.work1, rhs, n, state.invsqrt2)
+    mul!(state.work2, transpose(state.U), state.work1)
+    mul!(state.work3, state.work2, state.U)
+    @inbounds for j in 1:n
+        for i in 1:n
+            denom = state.lambda[i] + state.lambda[j]
+            (isfinite(denom) && denom > zero(T)) ||
+                throw(DomainError(denom, "L_Lambda is not positive definite"))
+            state.work3[i, j] *= two / denom
+        end
+    end
+    mul!(state.work2, state.U, state.work3)
+    mul!(state.work1, state.work2, transpose(state.U))
+    _pack_svec!(out, state.work1, n, state.sqrt2)
+    return out
+end
+
 """`y = W X = (W X + X W)/2` (Jordan product by the scaling point), packed."""
 function scaling_apply!(cone::PSDTriangleCone{T}, y::AbstractVector, W::AbstractVector, x::AbstractVector) where {T}
     n = cone.dim
@@ -153,16 +392,29 @@ function scaling_apply!(cone::PSDTriangleCone{T}, y::AbstractVector, W::Abstract
     return y
 end
 
-"""
-`y = W^{-1} x`. Since `W = L_{X^{-1}}`, `W^{-1} = L_X`, so `y = X ∘ X = X²`
-(the Jordan square).
-"""
+"""Solve `L_W(Y) = X`, where `L_W(Y) = (WY + YW)/2`, in raw packed coordinates."""
 function scaling_inverse_apply!(cone::PSDTriangleCone{T}, y::AbstractVector, W::AbstractVector, x::AbstractVector) where {T}
+    length(y) == length(W) == length(x) == cone.len || throw(DimensionMismatch())
     n = cone.dim
     s = cone.scratch
-    _unpack!(s.A, x, n)
-    mul!(s.C, s.A, s.A)
-    _pack!(y, s.C, n)
+    _eigen!(s, W)
+    @inbounds for k in 1:n
+        wk = s.w[k]
+        (isfinite(wk) && wk > zero(T)) ||
+            throw(DomainError(wk, "L_W inverse requires a positive-definite W"))
+    end
+    _unpack!(s.B, x, n)
+    mul!(s.C, transpose(s.V), s.B)
+    mul!(s.A, s.C, s.V)
+    two = one(T) + one(T)
+    @inbounds for j in 1:n
+        for i in 1:n
+            s.A[i, j] *= two / (s.w[i] + s.w[j])
+        end
+    end
+    mul!(s.C, s.V, s.A)
+    mul!(s.B, s.C, transpose(s.V))
+    _pack!(y, s.B, n)
     return y
 end
 
@@ -269,11 +521,50 @@ end
 # ---------------------------------------------------------------------------
 # Third-order correction
 # ---------------------------------------------------------------------------
-"""`w = d1 ∘ (d2 ∘ d3)` (allocates one temporary; not on the zero-alloc list)."""
+"""
+Legacy raw-packed compatibility overload for `w = d1 ∘ (d2 ∘ d3)`. It
+allocates one temporary and is not a hot API; production svec code must use
+the `PSDNTScaling` overload below.
+"""
 function third_order_correction!(cone::PSDTriangleCone, w::AbstractVector, d1::AbstractVector, d2::AbstractVector, d3::AbstractVector)
     tmp = similar(d2)
     jordan_product!(cone, tmp, d2, d3)
     return jordan_product!(cone, w, d1, tmp)
+end
+
+@inline function _psd_jordan_svec!(
+    out::AbstractVector,
+    state::PSDNTScaling{T},
+    x::AbstractVector,
+    y::AbstractVector,
+) where {T}
+    n = state.dim
+    _unpack_svec!(state.work1, x, n, state.invsqrt2)
+    _unpack_svec!(state.work2, y, n, state.invsqrt2)
+    mul!(state.work3, state.work1, state.work2)
+    mul!(state.work4, state.work2, state.work1)
+    half = one(T) / (one(T) + one(T))
+    @inbounds for j in 1:n, i in 1:n
+        state.work3[i, j] = (state.work3[i, j] + state.work4[i, j]) * half
+    end
+    _pack_svec!(out, state.work3, n, state.sqrt2)
+    return out
+end
+
+"""Preallocated PSD third-order correction in HSD `svec` coordinates."""
+function third_order_correction!(
+    cone::PSDTriangleCone,
+    state::PSDNTScaling,
+    w::AbstractVector,
+    d1::AbstractVector,
+    d2::AbstractVector,
+    d3::AbstractVector,
+)
+    _require_nt_valid(state)
+    length(w) == length(d1) == length(d2) == length(d3) == state.len == cone.len ||
+        throw(DimensionMismatch())
+    _psd_jordan_svec!(w, state, d2, d3)
+    return _psd_jordan_svec!(w, state, d1, w)
 end
 
 # ---------------------------------------------------------------------------

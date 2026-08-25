@@ -44,9 +44,9 @@ original-coordinate certification succeeds. Precision exhaustion, stagnation,
 an almost-optimal status, or a numerical failure advances to the requested
 model precision when the predeclared policy and remaining wall time allow it.
 
-The policy defaults to `:auto`; `:fixed` remains the expert override. See the
-[native BigFloat report](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/opt2026/BIGFLOAT_NATIVE_OPTIMIZATION_2026-07-26.md)
-for measured staged-precision behavior.
+The policy defaults to `:auto`; `:fixed` remains the expert override. Any
+precision-policy performance claim must be reproduced with the current
+[benchmark protocol](benchmarks.md).
 
 ## Guarded mixed-precision KKT solves
 
@@ -65,9 +65,8 @@ direction. Explicit `:on` for fixed-width arithmetic is a measured expert
 mode. BigFloat and `:auto` retain static cutoffs. Repeated rejection is
 cooled down and eventually disabled for that solve. Exact singleton-local
 `2×2` BigFloat arrows have a separate guarded path when `MultiFloats` is
-loaded. See
-[`docs/evidence/bench/mixed_precision_kkt/RESULTS.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/bench/mixed_precision_kkt/RESULTS.md)
-for the current promotion evidence and exact thresholds.
+loaded. Changes to its promotion thresholds require paired catalog evidence
+under the current [benchmark protocol](benchmarks.md).
 
 ## Tolerance vs. precision
 

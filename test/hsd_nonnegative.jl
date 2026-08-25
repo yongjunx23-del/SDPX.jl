@@ -33,11 +33,35 @@ end
     A = [1.0 0.0; 0.0 1.0]; b = [1.0, 1.0]; c = [-1.0, -1.0]
     status, st = _solve(A, b, c)
     @test status === :optimal
+    @test st.record.primal_step == st.record.dual_step == st.record.step_size
     x, s, y = SDPX.hsd_conic_iterate(st)
     @test x ≈ [1.0, 1.0] atol = 1e-4
     @test dot(c, x) ≈ -2.0 atol = 1e-4
     @test all(s .> -1e-6)                      # s/tau in K
     @test st.A * st.x .+ st.s .- st.b * st.tau |> norm < 1e-5
+end
+
+@testset "one global step preserves all three affine residual homotopies" begin
+    A = [1.0 0.5; -0.3 2.0; 0.7 1.1]
+    b = [0.5, -1.0, 2.0]
+    c = [0.3, -0.4]
+    st = SDPX.HSDState(_lp_canonical(A, b, c))
+    copyto!(st.x, [0.4, 0.4])
+    copyto!(st.s, [1.0, 1.0, 1.0])
+    copyto!(st.y, [1.0, 0.5, 1.5])
+    st.tau = 1.0
+    st.kappa = dot(st.c, st.x) + dot(st.b, st.y)
+    SDPX.hsd_residual!(st)
+    rP0 = copy(st.rP)
+    rD0 = copy(st.rD)
+    rG0 = st.rG
+
+    @test SDPX.hsd_step!(st) === SDPX.HSDStepOK
+    alpha = st.record.step_size
+    @test st.record.primal_step == st.record.dual_step == alpha
+    @test st.rP ≈ (1 - alpha) .* rP0 rtol = 1e-10 atol = 1e-11
+    @test st.rD ≈ (1 - alpha) .* rD0 rtol = 1e-10 atol = 1e-11
+    @test st.rG ≈ (1 - alpha) * rG0 rtol = 1e-10 atol = 1e-11
 end
 
 @testset "primal-infeasible LP → PrimalInfeasible" begin
@@ -52,6 +76,15 @@ end
     copyto!(st.y, saved)
 end
 
+@testset "rank-deficient primal-infeasible LP certificate uses full scratch" begin
+    A = [1.0 1.0; -1.0 -1.0]; b = [0.0, -2.0]; c = [0.0, 0.0]
+    status, st = _solve(A, b, c)
+    @test status === :primal_infeasible
+    @test st.nr == 1
+    yo = zeros(2)
+    @test SDPX.verify_primal_infeasibility!(_lp_canonical(A, b, c), st, yo)
+end
+
 @testset "dual-infeasible / unbounded LP → DualInfeasible" begin
     # A=[1;1], b=0, c=1: x<=0 unbounded below → ray x=-1
     A = reshape([1.0, 1.0], 2, 1); b = [0.0, 0.0]; c = [1.0]
@@ -60,11 +93,34 @@ end
 end
 
 @testset "rank-deficient A (feasible) → Optimal" begin
-    # A rank 1 (rows collinear): the Schur A'diag(y/s)A is PSD-singular; the
-    # solver regularizes and converges to the (feasible) optimum.
+    # A rank 1 (rows/columns collinear): setup RRQR reduces the Schur to one
+    # independent column and the solver converges without diagonal shifting.
     A = [1.0 1.0; -1.0 -1.0]; b = [1.0, 2.0]; c = [0.0, 0.0]
     status, st = _solve(A, b, c)
     @test status === :optimal
+    @test st.nr == 1
+    @test st.rank_columns == [1]
+    @test all(iszero, st.dx[2:2])
+end
+
+@testset "rank-deficient A with incompatible objective → verified dual ray" begin
+    # The null direction (1,-1) has A*v=0 and a strictly negative objective
+    # orientation, so setup reduction must fail closed with an original-space
+    # dual-infeasibility certificate instead of perturbing the Schur matrix.
+    A = [1.0 1.0; -1.0 -1.0]; b = [1.0, 2.0]; c = [0.0, 1.0]
+    status, st = _solve(A, b, c)
+    @test status === :dual_infeasible
+    @test st.rank_incompatible
+    @test st.nr == 1
+    @test dot(c, st.rank_ray) < 0
+    @test maximum(abs.(A * st.rank_ray)) < 1e-8
+end
+
+@testset "numerically ambiguous rank → explicit fail-closed status" begin
+    A = [1.0 0.0; 0.0 1e-15]; b = [1.0, 1e-15]; c = [0.0, 0.0]
+    status, st = _solve(A, b, c)
+    @test status === :rank_ambiguous
+    @test st.rank_ambiguous
 end
 
 @testset "badly-scaled LP → Optimal" begin
@@ -111,8 +167,9 @@ end
     chain = SDPX.CanonicalReconstructionChain{Float64}(
         1, 0.0, SDPX.VariableRef[], SDPX.ConstraintRef[], SDPX.VariableRef[], 0)
     soc = SDPX.CanonicalConicProgram(SDPX.ArithmeticSpec(Float64), 53,
-        zeros(1), sparse([1.0 0.0 0.0]), zeros(3), layout, chain)
+        zeros(3), sparse([1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0]), zeros(3), layout, chain)
     # membership resolved through the layout for the SOC block
     @test SDPX.in_canonical_cone(soc, [2.0, 1.0, 1.0]; dual=false)
     @test !SDPX.in_canonical_cone(soc, [1.0, 2.0, 0.0]; dual=false)
+    @test SDPX.hsd_solve!(SDPX.HSDState(soc); max_iters=2) === :unsupported_cone
 end

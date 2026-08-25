@@ -10,9 +10,10 @@ This runs the **quick** profile. `Pkg.test()` selects the same profile, but may
 still spend time resolving every package listed in the full test environment.
 Quick checks the LA backend, planner and public API boundaries,
 canonical/problem-feature IR, prepared reuse, diagnostics, plus one small LP,
-SOCP, and SDP solve. It also validates benchmark registry and scoreboard
-contracts, sparse LP/Schur execution, and one tiny runner/serialization path;
-public benchmark files are never downloaded.
+SOCP, and SDP solve. It also validates the schema-v7 benchmark catalog,
+runner/comparator/fresh-process contracts, sparse LP/Schur execution, and one
+tiny runner/serialization path; scientific benchmark files are never
+downloaded.
 
 Run the complete numerical, precision, extension, threading, integration, and
 quality suite before release or after a solver-hot-path change:
@@ -35,16 +36,16 @@ must not be conflated:
   steady-state per-iteration Julia allocation must stay below a documented
   ceiling per arithmetic. This is the gate that must remain **green** while the
   hot loop is being optimized. It runs in both the quick and full profiles.
-- **`allocation_zero_gate`** — `benchmark/allocation_zero_gate.jl`. The
-  aspirational hard gate: 10 consecutive warm samples of one full Newton step
-  must **all** equal 0 Julia bytes (`all(sample == 0)`, no `minimum`, no
-  tolerance). BigFloat/MPFR-native memory is tracked separately. It is expected
-  to fail (exit non-zero) until the zero-allocation work lands, so it is a
-  standalone script rather than a blocking test-suite gate.
-- **`numerical_semantic_gate`** — `test/gates.jl` (+ `benchmark/gates.jl` and
-  `benchmark/baselines/gates.json`). Acceptance gate: status, iteration count,
-  objective, and residuals must match the recorded baseline within tight
-  cross-platform tolerances.
+- **`allocation_zero_gate`** — the HSD/cone allocation tests and the current
+  phase-specific benchmark script. Ten consecutive warm samples of one full
+  Newton step must **all** equal 0 Julia bytes (`all(sample == 0)`, no
+  `minimum`, no tolerance). BigFloat/MPFR-native memory is tracked separately.
+- **`numerical_semantic_gate`** — `test/benchmark_runner.jl`,
+  `test/benchmark_compare.jl`, and `test/benchmark_fresh_process.jl`. A physics
+  catalog additionally supplies its own independent validator. Strict fresh
+  campaigns require at least three source-identical child processes and reject
+  status, objective, iteration, route, certificate, fingerprint, or catalog
+  drift.
 - **`certificate_gate`** — `test/result_certificate.jl` and
   `test/hsd_certificates.jl`. Verifies original-coordinate certificates:
   optimal / primal-infeasible / dual-infeasible status is only reported from a
