@@ -1574,18 +1574,17 @@ function _factor_dense_kkt_native!(
         phase_schur_factorization += _elapsed_seconds(started)
     end
     if !ok
+        ws.phase_times.schur_copy = phase_schur_copy
+        ws.phase_times.schur_factorization = phase_schur_factorization
+        ws.phase_times.constraint_triangular_solve =
+            phase_constraint_triangular_solve
+        ws.phase_times.equality_gram = phase_equality_gram
+        ws.phase_times.equality_factorization =
+            phase_equality_factorization
         return (
             ok=false,
             reg_attempts=reg_attempts,
             q_pivoted=false,
-            phase_times=(
-                schur_copy=phase_schur_copy,
-                schur_factorization=phase_schur_factorization,
-                constraint_triangular_solve=
-                    phase_constraint_triangular_solve,
-                equality_gram=phase_equality_gram,
-                equality_factorization=phase_equality_factorization,
-            ),
         )
     end
     if opts.verbosity >= 2 && reg_attempts > 0
@@ -1854,6 +1853,13 @@ function _factor_dense_kkt_native!(
                 _elapsed_seconds(started)
         end
     end
+    ws.phase_times.schur_copy = phase_schur_copy
+    ws.phase_times.schur_factorization = phase_schur_factorization
+    ws.phase_times.constraint_triangular_solve =
+        phase_constraint_triangular_solve
+    ws.phase_times.equality_gram = phase_equality_gram
+    ws.phase_times.equality_factorization =
+        phase_equality_factorization
     return (
         ok=true,
         reg_attempts=reg_attempts,
@@ -1862,14 +1868,6 @@ function _factor_dense_kkt_native!(
         equality_solver=
             ws.Qchol isa EqualityQRFactor{T} ?
             :rank_revealing_qr : :normal_equations,
-        phase_times=(
-            schur_copy=phase_schur_copy,
-            schur_factorization=phase_schur_factorization,
-            constraint_triangular_solve=
-                phase_constraint_triangular_solve,
-            equality_gram=phase_equality_gram,
-            equality_factorization=phase_equality_factorization,
-        ),
     )
 end
 

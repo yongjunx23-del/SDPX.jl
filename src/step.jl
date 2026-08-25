@@ -695,7 +695,8 @@ function newton_step!(
     factor_finished = time_ns()
     kkt_phases = hasproperty(kkt, :phase_times) ?
                  kkt.phase_times :
-                 _empty_kkt_phase_times()
+                 (backend isa DenseCholeskyBackend ?
+                  ws.phase_times : _empty_kkt_phase_times())
 
     # ---- Predictor ----
     _with_blas_threads(parallel_blas) do

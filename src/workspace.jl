@@ -460,6 +460,19 @@ function ensure_arrow_schur_partials!(
     return arrow.Sredpartial
 end
 
+"""Preallocated per-iteration KKT phase timings (cold diagnostics).
+
+Written by the dense KKT factorize path and read by `newton_step!` so the
+factorize! result does not need to carry a boxed phase-times NamedTuple."""
+mutable struct KKTPhaseTimes
+    schur_copy::Float64
+    schur_factorization::Float64
+    constraint_triangular_solve::Float64
+    equality_gram::Float64
+    equality_factorization::Float64
+end
+KKTPhaseTimes() = KKTPhaseTimes(0.0, 0.0, 0.0, 0.0, 0.0)
+
 """
     Workspace{T}
 
@@ -550,6 +563,7 @@ mutable struct Workspace{T}
     # Wave C gate: number of factorize! calls performed so far. Incremented
     # once per newton_step in the hot loop; asserted == 1 per iteration.
     factorizations::Int
+    phase_times::KKTPhaseTimes
 end
 
 function _use_sparse_schur_sdp(prob::SDPProblem{T}) where {T}
@@ -1273,7 +1287,7 @@ function Workspace(
         alloc_zeros(T, L), ones(Bool, L), extended_precision, mixed_precision,
         :not_run, false, selected_threads, config, nothing, :not_executed, :none,
         la_backend, :not_executed, :not_executed, :not_executed, :none,
-        plan.la_config.fallback_chain, 0)
+        plan.la_config.fallback_chain, 0, KKTPhaseTimes())
     workspace.backend = _backend_from_configuration(
         workspace,
         formulation_plan,
