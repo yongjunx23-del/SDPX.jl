@@ -43,9 +43,15 @@ default_certificate_tol(::Type{T}) where {T} = 1e-8
 function _at_vec(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
     n = size(A, 2)
     out = zeros(T, n)
+    _at_vec!(out, A, v)
+    return out
+end
+
+function _at_vec!(out::AbstractVector{T}, A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
+    n = size(A, 2)
     vals = nonzeros(A)
     rows = rowvals(A)
-    for j in 1:n
+    @inbounds for j in 1:n
         acc = zero(T)
         for idx in nzrange(A, j)
             i = rows[idx]
@@ -59,11 +65,17 @@ end
 # sr = −A v (m-vector)
 function _at_negmul(A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
     m = size(A, 1)
-    n = size(A, 2)
     out = zeros(T, m)
+    _at_negmul!(out, A, v)
+    return out
+end
+
+function _at_negmul!(out::AbstractVector{T}, A::SparseMatrixCSC{T}, v::AbstractVector) where {T}
+    fill!(out, zero(T))
+    n = size(A, 2)
     vals = nonzeros(A)
     rows = rowvals(A)
-    for j in 1:n
+    @inbounds for j in 1:n
         val = v[j]
         iszero(val) && continue
         for idx in nzrange(A, j)
@@ -204,17 +216,22 @@ function verify_optimal!(
     # faces where a coarse residual could pass spuriously.
     state.tau > tol || return false
     hsd_normalized_residual(state) <= tol || return false
-    # cone membership: s/τ ∈ K, y/τ ∈ K*
-    st = state.s ./ state.tau
-    yt = state.y ./ state.tau
-    in_canonical_cone(canonical, st; dual=false, tol=tol) || return false
-    in_canonical_cone(canonical, yt; dual=true, tol=tol) || return false
+    # cone membership: s/τ ∈ K, y/τ ∈ K* (using pre-allocated scratch buffers)
+    inv_tau = inv(state.tau)
+    @inbounds for k in 1:state.m
+        state.st[k] = state.s[k] * inv_tau
+        state.yt[k] = state.y[k] * inv_tau
+    end
+    @inbounds for j in 1:state.n
+        state.xt[j] = state.x[j] * inv_tau
+    end
+    in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
+    in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # complementarity small (μ = (s'y + τκ)/(ν+1))
     state.mu <= tol * (one(T) + T(state.nu)) || return false
     # recover in original coordinates through the reconstruction chain
-    xr = state.x ./ state.tau
-    primal_forward!(canonical, x_orig, s_orig, xr, st)
-    dual_forward!(canonical, y_orig, yt)
+    primal_forward!(canonical, x_orig, s_orig, state.xt, state.st)
+    dual_forward!(canonical, y_orig, state.yt)
     return true
 end
 
@@ -238,19 +255,21 @@ function verify_primal_infeasibility!(
     by = dot(canonical_rhs(canonical), y)
     by < -tol || return false
     # A'y ≈ 0 (relative to the ray magnitude)
-    Aty = _at_vec(canonical_equality(canonical), y)
-    res = _maxabs(Aty)
+    _at_vec!(state.q, canonical_equality(canonical), y)
+    res = _maxabs(state.q)
     (res / (one(T) + _maxabs(y))) <= tol || return false
     in_canonical_cone(canonical, y; dual=true, tol=tol) || return false
     # normalize by −b'y = 1 and re-verify
     scale = -one(T) / by
-    yn = scale .* y
-    dot(canonical_rhs(canonical), yn) ≈ -one(T) || return false
-    Atyn = _at_vec(canonical_equality(canonical), yn)
-    _maxabs(Atyn) <= tol || return false
-    in_canonical_cone(canonical, yn; dual=true, tol=tol) || return false
+    @inbounds for k in 1:state.m
+        state.yt[k] = scale * y[k]
+    end
+    dot(canonical_rhs(canonical), state.yt) ≈ -one(T) || return false
+    _at_vec!(state.q, canonical_equality(canonical), state.yt)
+    _maxabs(state.q) <= tol || return false
+    in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # push the ray back into original coordinates
-    certificate_backward!(canonical, y_orig, yn; ray_kind=:primal_infeasible)
+    certificate_backward!(canonical, y_orig, state.yt; ray_kind=:primal_infeasible)
     return true
 end
 
@@ -274,18 +293,21 @@ function verify_dual_infeasibility!(
     x = state.x
     cx = dot(canonical_objective(canonical), x)
     cx < -tol || return false
-    # the ray's cone member: s_r = −A x must lie in K  (the old draft did
-    # NOT verify this — it is the correction this function fixes).
-    sr = _at_negmul(canonical_equality(canonical), x)
-    in_canonical_cone(canonical, sr; dual=false, tol=tol) || return false
+    # the ray's cone member: s_r = −A x must lie in K
+    _at_negmul!(state.e, canonical_equality(canonical), x)
+    in_canonical_cone(canonical, state.e; dual=false, tol=tol) || return false
     # normalize by −c'x = 1 and re-verify (including the cone member again)
     scale = -one(T) / cx
-    xn = scale .* x
-    srn = scale .* sr
-    dot(canonical_objective(canonical), xn) ≈ -one(T) || return false
-    in_canonical_cone(canonical, srn; dual=false, tol=tol) || return false
+    @inbounds for j in 1:state.n
+        state.xt[j] = scale * x[j]
+    end
+    @inbounds for k in 1:state.m
+        state.st[k] = scale * state.e[k]
+    end
+    dot(canonical_objective(canonical), state.xt) ≈ -one(T) || return false
+    in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
     # push the ray back into original coordinates
-    certificate_backward!(canonical, x_orig, xn; ray_kind=:dual_infeasible)
-    primal_forward!(canonical, x_orig, s_orig, xn, srn)
+    certificate_backward!(canonical, x_orig, state.xt; ray_kind=:dual_infeasible)
+    primal_forward!(canonical, x_orig, s_orig, state.xt, state.st)
     return true
 end
