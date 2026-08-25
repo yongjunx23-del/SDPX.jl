@@ -4,6 +4,8 @@ using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, 
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("cone_algebra.jl")
+include("cones/exponential.jl")
+include("cones/power.jl")
 include("modeling/domains.jl")
 include("modeling/refs.jl")
 include("modeling/types.jl")

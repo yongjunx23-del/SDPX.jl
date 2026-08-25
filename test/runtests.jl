@@ -6,6 +6,7 @@ const QUICK_TESTS = (
     "generic_la_backend.jl",
     "dense_augmented_kkt.jl",
     "cone_algebra.jl",
+    "cones_asymmetric.jl",
     "soc_native_algebra.jl",
     "soc_metric_sparse.jl",
     "soc_singleton_presolve.jl",
