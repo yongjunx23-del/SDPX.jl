@@ -297,6 +297,16 @@ function _public_lower_native(
             sparse=sparse,
             verbosity=settings.verbosity,
         )
+    elseif route.route === :mixed_family
+        # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD)
+        # is a first-class executable program. Lift every native cone block
+        # to a single block-diagonal PSD cone and solve the resulting pure
+        # SDP program through the existing algorithm=:sdp path.
+        return lower_mixed_psd_native(
+            program;
+            sparse=sparse,
+            verbosity=settings.verbosity,
+        )
     end
     throw(PublicOptimizeError(
         route.route,
@@ -1048,6 +1058,103 @@ function _public_result_from_sdp(
     )
 end
 
+# ---------------------------------------------------------------------------
+# Mixed (PSD-lift) native result reconstruction
+# ---------------------------------------------------------------------------
+
+"""
+    _public_mixed_reconstruct(model, program, lowering, core_result)
+
+Reconstruct original-coordinate primal `x`, constraint duals and variable
+dual slacks from a solved lifted-PSD `SDPResult`. Each lifted PSD block is
+mapped back through the universal lift to its native cone coordinate (see
+`_lift_dual_slack`): nonnegative diagonal duals, SOC trace/first-row duals,
+and PSD packed duals. Equality duals map from `core_result.y`.
+"""
+function _public_mixed_reconstruct(
+    model::Model{T},
+    program::NativeConeProgram{T},
+    lowering::MixedPSDLowering{T},
+    core_result::SDPResult{T},
+) where {T<:AbstractFloat}
+    variables = program_num_variables(program)
+    primal = _public_owned_vector(T, core_result.x, variables)
+    constraint_dual = zeros(T, num_constraints(model))
+    dual_slack = zeros(T, variables)
+
+    for origin in lowering.psd_origins
+        mapped = _lift_dual_slack(
+            T,
+            core_result.Y[origin.core_block],
+            origin.cone,
+            origin.dimension,
+        )
+        if origin.origin === :product
+            block = model.variable_blocks[origin.block]
+            length(mapped) == block.length || throw(DimensionMismatch(
+                "mixed PSD product dual length $(length(mapped)) != block length $(block.length)",
+            ))
+            @inbounds for index in eachindex(mapped)
+                dual_slack[block.offset + index - 1] = mapped[index]
+            end
+        elseif origin.origin === :affine
+            refs = model.constraint_blocks[origin.block].refs
+            length(mapped) == length(refs) || throw(DimensionMismatch(
+                "mixed PSD affine dual length $(length(mapped)) != refs length $(length(refs))",
+            ))
+            @inbounds for index in eachindex(mapped)
+                constraint_dual[_result_constraint_index(model, refs[index])] = mapped[index]
+            end
+        else
+            throw(ArgumentError("unknown mixed PSD origin kind $(origin.origin)"))
+        end
+    end
+
+    length(core_result.y) == length(lowering.equality_origins) || throw(
+        DimensionMismatch(
+            "mixed equality dual count $(length(core_result.y)) != " *
+            "lowering map count $(length(lowering.equality_origins))",
+        ),
+    )
+    @inbounds for (index, origin) in enumerate(lowering.equality_origins)
+        mapped = core_result.y[index]
+        if origin.kind === :product_zero
+            block = model.variable_blocks[origin.block]
+            dual_slack[block.offset + origin.index - 1] = mapped
+        elseif origin.kind === :affine_zero
+            refs = model.constraint_blocks[origin.block].refs
+            constraint_dual[_result_constraint_index(model, refs[origin.index])] = mapped
+        else
+            throw(ArgumentError("unknown mixed equality origin kind $(origin.kind)"))
+        end
+    end
+
+    sign = lowering.objective_sign
+    primal_objective = lowering.objective_constant + sign * core_result.pObj
+    dual_objective = lowering.objective_constant + sign * core_result.dObj
+    return primal, constraint_dual, dual_slack, primal_objective, dual_objective
+end
+
+function _public_result_from_mixed(
+    model::Model{T},
+    program::NativeConeProgram{T},
+    lowering::MixedPSDLowering{T},
+    core_result::SDPResult{T},
+    settings::Settings{T},
+    outputs::Outputs,
+) where {T<:AbstractFloat}
+    primal, constraint_dual, dual_slack, primal_obj, dual_obj =
+        _public_mixed_reconstruct(model, program, lowering, core_result)
+    return _public_result_from_core(
+        model, program, core_result, settings, outputs,
+        primal, constraint_dual, dual_slack, primal_obj, dual_obj;
+        family=:mixed_family,
+        diagnostics_type=SolveDiagnostics,
+        termination_info=core_result.termination,
+        history=outputs.history ? copy(core_result.parameter_history) : nothing,
+    )
+end
+
 function _public_identity_start(::Type{T}, dimension::Int) where {T<:AbstractFloat}
     matrix = zeros(T, dimension, dimension)
     @inbounds for index in 1:dimension
@@ -1431,6 +1538,13 @@ function _public_result_from_lowering(
             _public_lp_starts(model, lowering),
         )
         return _public_result_from_lp(model, program, lowering, core_result, settings, outputs)
+    elseif lowering isa MixedPSDLowering{T}
+        core_result = _public_solve_sdp_core(lowering.core, options, (
+            x0=nothing, X0=nothing, y0=nothing, Y0=nothing,
+            continuation_requested=false, continuation_accepted=false,
+            continuation_reason=:not_requested,
+        ))
+        return _public_result_from_mixed(model, program, lowering, core_result, settings, outputs)
     elseif lowering isa SOCLowering
         core_result = _public_solve_soc_core(
             lowering.core,

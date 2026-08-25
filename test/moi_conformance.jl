@@ -255,10 +255,11 @@ end
         @test MOI.get(opt, MOI.DualStatus()) == MOI.NO_SOLUTION
     end
 
-    @testset "mixed symmetric-cone models fail explicitly in R1" begin
-        # The symmetric-cone lanes execute only as single-family programs in
-        # R1: there is no unified mixed-route HSD lowerer yet.  The wrapper
-        # must fail closed (truthful) rather than silently mis-solve.
+    @testset "mixed symmetric-cone models execute via the PSD lift" begin
+        # Mixed symmetric-cone programs (LP+SOC, SOC+PSD, LP+PSD) are a
+        # first-class executable layout. The wrapper copies them into a Model
+        # (no fail-closed rejection) and routes them through the universal PSD
+        # lift to the SDP solver.
         for (name, build) in (
             ("LP + SOC", () -> begin
                 src = MOI.Utilities.Model{Float64}()
@@ -286,9 +287,9 @@ end
             end),
         )
             opt = SDPX.Optimizer(verbosity=0)
-            @test_throws SDPX.UnsupportedNativeConeRoute MOI.copy_to(opt, build())
-            @test opt.model === nothing
-            @test opt.public_result === nothing
+            MOI.copy_to(opt, build())
+            @test opt.model !== nothing
+            @test MOI.get(opt, MOI.RawOptimizerAttribute("bridge_plan")).route === :mixed_family
         end
     end
 end

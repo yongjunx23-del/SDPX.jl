@@ -688,13 +688,18 @@ function _moi_psd_vector_from_matrix(
 end
 
 function _moi_validate_family_set(constraint_types)
-    families = Symbol[]
+    # Mixed symmetric-cone families (LP+SOC, SOC+PSD, LP+PSD) are a
+    # first-class executable layout via the universal PSD lift; this
+    # validation only guards the supported cone kinds, never rejects a
+    # mixed family.
     for (_, set_type) in constraint_types
         family = _moi_route_family(set_type)
-        family === nothing && continue
-        family in families || push!(families, family)
+        # :exp/:power kinds are classification-only in this build; reject
+        # them explicitly rather than letting them reach a mixed lift.
+        if family in (:exp_family, :power_family)
+            throw(UnsupportedNativeConeRoute([family]))
+        end
     end
-    length(families) > 1 && throw(UnsupportedNativeConeRoute(families))
     return nothing
 end
 
@@ -1306,8 +1311,9 @@ function MOI.copy_to(optimizer::Optimizer{T}, source::MOI.ModelLike) where {T<:A
     _check_copy_attributes(optimizer, source)
 
     # Route-family detection intentionally precedes Model allocation.  A
-    # mixed LP/SOC/SDP source fails closed before any numerical buffers or
-    # native solver object can be created.
+    # mixed LP/SOC/SDP source is a first-class executable layout (universal
+    # PSD lift); only exponential/power families fail closed here before any
+    # numerical buffer or native solver object can be created.
     constraint_types = MOI.get(source, MOI.ListOfConstraintTypesPresent())
     _moi_validate_family_set(constraint_types)
 
@@ -1784,7 +1790,15 @@ function bridge_plan(optimizer::Optimizer)
         family = _route_family(record.domain)
         family === :free || family === :zero || (family in families || push!(families, family))
     end
-    route = isempty(families) ? :lp_family : only(families)
+    route = if isempty(families)
+        :lp_family
+    elseif length(families) == 1
+        only(families)
+    else
+        # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD)
+        # is a first-class executable program via the universal PSD lift.
+        :mixed_family
+    end
     return (
         constraints=[_constraint_bridge_metadata(info) for info in values(optimizer.model_constraint_records)],
         route=route,

@@ -26,7 +26,7 @@ using Test
         @test optimizer.public_result === nothing
     end
 
-    @testset "mixed families fail closed before Model allocation" begin
+    @testset "mixed families are a first-class executable layout" begin
         source = MOI.Utilities.Model{Float64}()
         lp_variables = MOI.add_variables(source, 2)
         soc_variables = MOI.add_variables(source, 3)
@@ -41,9 +41,11 @@ using Test
             MOI.SecondOrderCone(3),
         )
         optimizer = SDPX.Optimizer(verbosity=0)
-        @test_throws SDPX.UnsupportedNativeConeRoute MOI.copy_to(optimizer, source)
-        @test optimizer.model === nothing
-        @test optimizer.public_result === nothing
+        # A mixed LP+SOC source is copied into an executable model (universal
+        # PSD lift); the bridge plan reports the :mixed_family route.
+        MOI.copy_to(optimizer, source)
+        @test optimizer.model !== nothing
+        @test MOI.get(optimizer, MOI.RawOptimizerAttribute("bridge_plan")).route === :mixed_family
     end
 
     @testset "sparse affine rows and typed maps are preserved" begin
