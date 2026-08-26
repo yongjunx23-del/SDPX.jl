@@ -7,9 +7,12 @@ serialization, and paired comparison. It does not turn a finite benchmark
 catalog into a general correctness or physics claim.
 
 Bundled paper-grounded catalogs currently cover Hellerman modular LP, Paulos
-sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP, and Kazakov--Zheng
-finite-N lattice-bootstrap SDP under `benchmark/physics/`. Each is explicitly
-versioned and carries its own provenance and semantic validator.
+sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP, Kazakov--Zheng
+finite-N lattice-bootstrap SDP, a finite-level Gibbs/KL exponential-cone
+model, and a Giudice maximum-Rényi power-cone model under
+`benchmark/physics/`. Each is explicitly versioned and carries its own
+provenance and semantic validator. The EXP and Power catalogs are deliberately
+build-only until their native solver routes pass the product-HSD gates.
 
 ## Catalog contract
 

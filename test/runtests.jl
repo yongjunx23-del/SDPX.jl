@@ -164,6 +164,7 @@ const FULL_TESTS = (
     "physics_matrix_bootstrap.jl",
     "physics_modular_lp.jl",
     "physics_smatrix_soc.jl",
+    "physics_thermal_exp.jl",
     "physics_thermal_power.jl",
     "moi_regressions.jl",
     "extended_blas_regressions.jl",
