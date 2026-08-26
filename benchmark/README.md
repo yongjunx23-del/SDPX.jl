@@ -6,6 +6,11 @@ validation. The harness owns process isolation, solver measurement, schema-v7
 serialization, and paired comparison. It does not turn a finite benchmark
 catalog into a general correctness or physics claim.
 
+Bundled paper-grounded catalogs currently cover Hellerman modular LP, Paulos
+sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP, and Kazakov--Zheng
+finite-N lattice-bootstrap SDP under `benchmark/physics/`. Each is explicitly
+versioned and carries its own provenance and semantic validator.
+
 ## Catalog contract
 
 `PhysicsBenchmarkHarness.jl` defines four public data types:
@@ -22,6 +27,12 @@ catalog into a general correctness or physics claim.
 or stable failure labels on rejection. Catalog files passed on the command line
 must define `physics_benchmark_catalog()` and return a
 `PhysicsBenchmarkCatalog`.
+
+Catalog entries tagged `:build_only` with reference status `:build_only` or
+`:sampled_build_only` take a separate construction path. The runner times
+problem generation/lowering and validates the artifact fingerprint, but never
+loads a linear-algebra provider or calls a solver. This state is not treated as
+an optimality claim.
 
 The bundled `fixtures/smoke_catalog.jl` is only a harness smoke test. It is not
 a scientific benchmark suite.
