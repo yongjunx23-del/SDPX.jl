@@ -124,6 +124,34 @@ end
     copyto!(st3.x, [1e-8, 1e-8]); copyto!(st3.s, [1.0, 1.0]); copyto!(st3.y, [1.0, 1.0])
     st3.tau = 1e-10; st3.kappa = 0.0
     @test !SDPX.verify_optimal!(canon, st3, xo, so, yo)
+
+    # Certificate decisions must be invariant under the positive HSD scale.
+    # This exact optimal point remains certifiable after a small homogeneous
+    # rescaling (provided tau itself is still resolvable).
+    scale = 1e-4
+    scaled_optimal = SDPX.HSDState(canon)
+    copyto!(scaled_optimal.x, scale .* [1.0, 1.0])
+    copyto!(scaled_optimal.s, scale .* [0.0, 0.0])
+    copyto!(scaled_optimal.y, scale .* [1.0, 1.0])
+    scaled_optimal.tau = scale
+    scaled_optimal.kappa = 0.0
+    @test SDPX.verify_optimal!(canon, scaled_optimal, xo, so, yo)
+
+    # A primal/dual feasible but non-complementary normalized point has gap
+    # 1.2.  Scaling every HSD coordinate makes the *absolute* mu tiny while
+    # leaving the recovered gap unchanged; it must never certify optimal.
+    degenerate = SDPX.HSDState(canon)
+    copyto!(degenerate.x, scale .* [0.4, 0.4])
+    copyto!(degenerate.s, scale .* [0.6, 0.6])
+    copyto!(degenerate.y, scale .* [1.0, 1.0])
+    degenerate.tau = scale
+    degenerate.kappa = scale * 1.2
+    SDPX.hsd_residual!(degenerate)
+    @test maximum(abs, degenerate.rP) <= eps(Float64)
+    @test maximum(abs, degenerate.rD) <= eps(Float64)
+    @test abs(degenerate.rG) <= eps(Float64)
+    @test degenerate.mu < SDPX.default_certificate_tol(Float64)
+    @test !SDPX.verify_optimal!(canon, degenerate, xo, so, yo)
 end
 
 @testset "verify_primal_infeasibility! (Farkas ray)" begin

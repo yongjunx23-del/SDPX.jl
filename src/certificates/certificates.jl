@@ -234,9 +234,13 @@ function verify_optimal!(
     # y/τ to be finite and well-posed, which rules out the τ→0 (infeasibility)
     # faces where a coarse residual could pass spuriously.
     state.tau > tol || return false
-    hsd_normalized_residual(state) <= tol || return false
-    # cone membership: s/τ ∈ K, y/τ ∈ K* (using pre-allocated scratch buffers)
+    # HSD iterates are homogeneous: multiplying every iterate coordinate by
+    # a positive scalar must not make a non-optimal point easier to certify.
+    # Residuals therefore have to be measured after recovery (division by
+    # tau), not in the arbitrarily scaled embedding coordinates.
     inv_tau = inv(state.tau)
+    hsd_normalized_residual(state) * inv_tau <= tol || return false
+    # cone membership: s/τ ∈ K, y/τ ∈ K* (using pre-allocated scratch buffers)
     @inbounds for k in 1:state.m
         state.st[k] = state.s[k] * inv_tau
         state.yt[k] = state.y[k] * inv_tau
@@ -246,8 +250,19 @@ function verify_optimal!(
     end
     in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
-    # complementarity small (μ = (s'y + τκ)/(ν+1))
-    state.mu <= tol * (one(T) + T(state.nu)) || return false
+    # Check the recovered primal-dual gap explicitly.  The old absolute-mu
+    # check admitted degenerate sequences with tau,kappa -> 0 but a finite
+    # kappa/tau (and hence a finite recovered duality gap).
+    primal_objective = dot(canonical_objective(canonical), state.xt)
+    dual_pairing = dot(canonical_rhs(canonical), state.yt)
+    gap_scale = one(T) + abs(primal_objective) + abs(dual_pairing)
+    abs(primal_objective + dual_pairing) <= tol * gap_scale || return false
+    kappa_recovered = state.kappa * inv_tau
+    abs(kappa_recovered) <= tol * gap_scale || return false
+    # mu is quadratic under homogeneous rescaling.  Normalize by tau^2 so
+    # this centrality gate is invariant under the same embedding symmetry.
+    normalized_mu = state.mu * inv_tau * inv_tau
+    normalized_mu <= tol * (one(T) + T(state.nu)) || return false
     # recover in original coordinates through the reconstruction chain
     primal_forward!(canonical, x_orig, s_orig, state.xt, state.st)
     dual_forward!(canonical, y_orig, state.yt)
