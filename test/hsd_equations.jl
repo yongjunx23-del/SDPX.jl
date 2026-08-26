@@ -31,6 +31,10 @@ function soc_member(v)                 # (t, u), t ≥ ‖u‖
     length(v) >= 1 || return false
     return v[1] >= -TOL && norm(v[2:end]) <= v[1] + TOL
 end
+function soc_interior(v)               # (t, u), t > ‖u‖ (strict, no boundary band)
+    length(v) >= 1 || return false
+    return v[1] > zero(eltype(v)) && norm(v[2:end]) < v[1]
+end
 function psd_member(v)                 # packed lower triangle (a,b,c) of [[a,b],[b,c]]
     n = round(Int, (sqrt(8 * length(v) + 1) - 1) / 2)
     n * (n + 1) ÷ 2 == length(v) || return false
@@ -53,7 +57,8 @@ end
 # ---------------------------------------------------------------------------
 function hsd_Q(A, b, c)
     m, n = size(A)
-    Q = zeros(n + m + 1, n + m + 1)     # all blocks 0 by construction
+    T = promote_type(eltype(A), eltype(b), eltype(c))
+    Q = zeros(T, n + m + 1, n + m + 1)  # all blocks 0 by construction
     Q[1:n, n+1:n+m]     = A'
     Q[1:n, n+m+1]       = c
     Q[n+1:n+m, 1:n]     = -A
@@ -122,19 +127,29 @@ end
     @test (dot(s, y) + τ*κ) / (ν + 1) ≈ 0 atol = TOL
     @test soc_member(s) && soc_member(y)
 
-    # interior-feasible point; κ from (G) = −(−c'x − b'y) = c'x + b'y = s'y ≥ 0
-    x = [0.5]; y = [0.5, 0.5]; s = [0.5, 0.5]; τ = 1.0
-    gap = dot(c, x) + dot(b, y)          # = −0.5 + 1.0 = 0.5 = s'y
-    κ = gap
-    @test A*x + s - b*τ ≈ zeros(2) atol = TOL
-    @test A'*y + c*τ    ≈ zeros(1) atol = TOL
-    @test -dot(c, x) - dot(b, y) + κ ≈ 0 atol = TOL
-    @test soc_member(s) && soc_member(y) && τ > 0 && κ > 0
+    # Strictly interior infeasible-start point from HSD_FORMULATION.md §9.2.
+    # Its residuals are intentionally nonzero; unlike (0.5,0.5), both cone
+    # variables below satisfy the strict inequality t > |u|.
+    x = [0.0]; y = [1.0, 0.2]; s = [2.0, 0.25]; τ = 1.0; κ = 1.0
+    rP = A*x + s - b*τ
+    rD = A'*y + c*τ
+    rG = -dot(c, x) - dot(b, y) + κ
+    @test rP ≈ [1.0, -0.75] atol = TOL
+    @test rD ≈ [0.2] atol = TOL
+    @test rG ≈ -0.2 atol = TOL
+    @test soc_interior(s) && soc_interior(y) && τ > 0 && κ > 0
 
-    # skew-symmetry + action on this exact point
+    # SOC membership is closed: the old (0.5,0.5) vector is a valid boundary
+    # member, but it must never be described or tested as a strict interior point.
+    boundary = [0.5, 0.5]
+    @test soc_member(boundary)
+    @test !soc_interior(boundary)
+
+    # Skew-symmetry + arbitrary-iterate action with frozen residual signs:
+    # Qz = (rD; s-rP; rG-κ), not (0; s; -κ) away from a solution.
     Q = hsd_Q(A, b, c)
     @test Q + Q' ≈ zeros(size(Q)) atol = TOL
-    @test Q * [x; y; τ] ≈ [zeros(1); s; -κ] atol = TOL
+    @test Q * [x; y; τ] ≈ [rD; s-rP; rG-κ] atol = TOL
 end
 
 # ---------------------------------------------------------------------------
@@ -201,6 +216,70 @@ end
 
     # The forbidden pairing dot(s,x) is dimensionally impossible here.
     @test_throws DimensionMismatch dot(s, x)
+end
+
+# ---------------------------------------------------------------------------
+# 4b. Arbitrary (non-solution) rectangular iterate.  Q is assembled from its
+#     frozen blocks, while every residual and Qz component below is an
+#     independently hand-computed dyadic rational.  This prevents a shared
+#     residual helper from reproducing the same sign error on both sides.
+# ---------------------------------------------------------------------------
+function check_arbitrary_rectangular_skew(::Type{T}) where {T<:AbstractFloat}
+    q(n, d=1) = T(n) / T(d)
+    tol = T(64) * eps(T)
+
+    # m=3, n=2 and all entries are exactly representable in binary.
+    A = T[1 2; -1 0; 0 3]
+    b = T[2, -1, 4]
+    c = T[-3, 5]
+    x = T[q(1, 2), -1]
+    y = T[2, q(1, 4), q(3, 2)]
+    s = T[q(5, 4), 2, q(3, 4)]
+    τ = q(3, 4)
+    κ = q(3, 2)
+
+    # Independently hand-computed canonical residuals (all are nonzero).
+    rP_expected = T[q(-7, 4), q(9, 4), q(-21, 4)]
+    rD_expected = T[q(-1, 2), q(49, 4)]
+    rG_expected = q(-7, 4)
+    @test A*x + s - b*τ ≈ rP_expected atol=tol rtol=zero(T)
+    @test A'*y + c*τ ≈ rD_expected atol=tol rtol=zero(T)
+    @test -dot(c, x) - dot(b, y) + κ ≈ rG_expected atol=tol rtol=zero(T)
+    @test !iszero(norm(rP_expected)) && !iszero(norm(rD_expected)) && !iszero(rG_expected)
+
+    Q = hsd_Q(A, b, c)
+    z = [x; y; τ]
+    Qz_expected = T[
+        q(-1, 2), q(49, 4),       # rD
+        3, q(-1, 4), 6,           # s - rP
+        q(-13, 4),                # rG - κ
+    ]
+    @test size(A) == (3, 2)
+    @test eltype(Q) === T
+    @test Q + Q' ≈ zeros(T, size(Q)) atol=tol rtol=zero(T)
+    @test Q*z ≈ Qz_expected atol=tol rtol=zero(T)
+    @test Qz_expected ≈ [rD_expected; s-rP_expected; rG_expected-κ] atol=tol rtol=zero(T)
+
+    # The skew identity holds at every iterate, not only at a zero-residual
+    # solution.  Both zero and the diagnostic value 3 are hand-computed.
+    @test dot(z, Q*z) ≈ zero(T) atol=tol rtol=zero(T)
+    lhs = dot(s, y) - τ*κ
+    rhs = -dot(x, rD_expected) + dot(y, rP_expected) - τ*rG_expected
+    @test lhs ≈ T(3) atol=tol rtol=zero(T)
+    @test rhs ≈ T(3) atol=tol rtol=zero(T)
+    @test lhs ≈ rhs atol=tol rtol=zero(T)
+end
+
+@testset "arbitrary rectangular skew identity (Float64 / BigFloat256)" begin
+    @testset "Float64" begin
+        check_arbitrary_rectangular_skew(Float64)
+    end
+    @testset "BigFloat256" begin
+        setprecision(BigFloat, 256) do
+            @test precision(BigFloat) == 256
+            check_arbitrary_rectangular_skew(BigFloat)
+        end
+    end
 end
 
 # ---------------------------------------------------------------------------
