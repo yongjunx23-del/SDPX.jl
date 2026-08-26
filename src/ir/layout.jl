@@ -196,7 +196,7 @@ Barrier degree (complexity parameter) of one native cone block:
 - `:soc` of dim `n` → `2`
 - `:psd` of `n×n` → `n`
 - `:exp` → `3`
-- `:power` → `2`
+- `:power` → `3`
 - `:free`, `:zero` → `0` (no barrier)
 """
 function barrier_degree(cone::Symbol, dimension::Integer)
@@ -204,7 +204,7 @@ function barrier_degree(cone::Symbol, dimension::Integer)
     cone === :soc && return 2
     cone === :psd && return Int(dimension)
     cone === :exp && return 3
-    cone === :power && return 2
+    cone === :power && return 3
     cone === :free && return 0
     cone === :zero && return 0
     throw(ArgumentError("no barrier degree for cone kind $(cone)"))

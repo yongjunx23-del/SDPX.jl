@@ -84,7 +84,7 @@ end
     @test SDPX.barrier_degree(:soc, 3) == 2
     @test SDPX.barrier_degree(:psd, 3) == 3
     @test SDPX.barrier_degree(:exp, 3) == 3
-    @test SDPX.barrier_degree(:power, 3) == 2
+    @test SDPX.barrier_degree(:power, 3) == 3
     @test SDPX.barrier_degree(:zero, 3) == 0
     @test SDPX.barrier_degree(:free, 3) == 0
     layout = _layout(((:nonnegative, 2), (:soc, 3), (:psd, 2)))

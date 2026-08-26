@@ -5,6 +5,7 @@ using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul
 
 include("cone_algebra.jl")
 include("cones/symmetric/SymmetricCones.jl")
+include("cones/nonsymmetric/dense3.jl")
 include("cones/exponential.jl")
 include("cones/power.jl")
 include("modeling/domains.jl")
@@ -125,9 +126,6 @@ export status, value, dual, dual_slack
 export primal_objective, dual_objective
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
-export ProductConeRuntime
-export initialize_primal_dual!, update_scaling!, cone_inner_product
-export apply_G!, apply_Theta!, max_step_primal!, max_step_dual!
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of
