@@ -10,7 +10,7 @@ This runs the **quick** profile. `Pkg.test()` selects the same profile, but may
 still spend time resolving every package listed in the full test environment.
 Quick checks the LA backend, planner and public API boundaries,
 canonical/problem-feature IR, prepared reuse, diagnostics, plus one small LP,
-SOCP, and SDP solve. It also validates the schema-v7 benchmark catalog,
+SOCP, and SDP solve. It also validates the schema-v8 benchmark catalog,
 runner/comparator/fresh-process contracts, sparse LP/Schur execution, and one
 tiny runner/serialization path; scientific benchmark files are never
 downloaded.
@@ -44,8 +44,12 @@ must not be conflated:
   `test/benchmark_compare.jl`, and `test/benchmark_fresh_process.jl`. A physics
   catalog additionally supplies its own independent validator. Strict fresh
   campaigns require at least three source-identical child processes and reject
-  status, objective, iteration, route, certificate, fingerprint, or catalog
-  drift.
+  status, objective, iteration, route, certificate, fingerprint/checksum,
+  content-hash, or catalog drift. Focused tests also cover latest-world
+  callable functors, independent build/solve references, the fail-closed
+  requested-to-executed engine matrix, identical one/multi-sample timing
+  boundaries, schema-v8 single-sample children, canonical shards, and duplicate
+  comparison keys.
 - **`certificate_gate`** — `test/result_certificate.jl` and
   `test/hsd_certificates.jl`. Verifies original-coordinate certificates:
   optimal / primal-infeasible / dual-infeasible status is only reported from a

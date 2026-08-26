@@ -11,6 +11,7 @@ function _fresh_fixture_row(; seconds="1.0", iterations="8",
                             semantic_pass=true, certificate_valid=true,
                             fingerprint="fixture-fingerprint", route="sdp_native")
     return Dict{String,Any}(
+        "schema_version" => 8,
         "suite" => "micro",
         "catalog_name" => "fixture",
         "catalog_version" => "1",
@@ -22,6 +23,19 @@ function _fresh_fixture_row(; seconds="1.0", iterations="8",
         "arithmetic" => "float64",
         "precision_bits" => "53",
         "requested_provider" => "auto",
+        "execution_mode" => "solve",
+        "requested_engine" => "auto",
+        "executed_engine" => "sdpx_legacy",
+        "campaign_id" => "fixture-campaign",
+        "shard_id" => "shard-1-of-1",
+        "shard_index" => "1",
+        "shard_count" => "1",
+        "pbs_job_id" => "",
+        "pbs_array_index" => "",
+        "pbs_queue" => "",
+        "pbs_node" => "fixture-node",
+        "scaling" => "tiny",
+        "layout" => "lp",
         "reference_status" => "optimal",
         "reference_absolute_tolerance" => "1e-8",
         "reference_relative_tolerance" => "1e-8",
@@ -37,16 +51,20 @@ function _fresh_fixture_row(; seconds="1.0", iterations="8",
         "fallback_reason" => "none",
         "la_fallback_reason" => "none",
         "input_fingerprint" => fingerprint,
-        "external_checksum" => "",
+        "external_checksum" => "fixture-checksum",
         "julia_version" => "1.12.6",
         "os" => "macos",
         "cpu_name" => "fixture-cpu",
         "julia_threads" => "1",
         "blas_threads" => "1",
-        "project_sha256" => "project",
-        "manifest_sha256" => "manifest",
-        "benchmark_driver_sha256" => "driver",
-        "solver_source_sha256" => "solver-source",
+        "project_sha256" => repeat("1", 64),
+        "manifest_sha256" => repeat("2", 64),
+        "benchmark_driver_sha256" => repeat("3", 64),
+        "solver_source_sha256" => repeat("4", 64),
+        "catalog_source_sha256" => repeat("5", 64),
+        "harness_source_sha256" => repeat("6", 64),
+        "schema_source_sha256" => repeat("7", 64),
+        "contract_fingerprint" => repeat("8", 64),
         "mfla_commit" => "",
         "bfla_commit" => "",
         "status" => status,
@@ -57,7 +75,9 @@ function _fresh_fixture_row(; seconds="1.0", iterations="8",
         "total_seconds" => seconds,
         "allocated_bytes" => "1000",
         "process_peak_rss_bytes" => "2000",
+        "rss_bytes" => "2000",
         "workspace_bytes" => "3000",
+        "sample_count" => 1,
     )
 end
 
@@ -92,6 +112,9 @@ end
     @test isapprox(result["total_seconds_spread"], 0.3)
     @test result["iterations_median"] == 8.0
     @test result["allocated_bytes_median"] == 1000.0
+    @test result["rss_bytes_median"] == 2000.0
+    @test result["rss_iqr_bytes"] == 0.0
+    @test result["total_seconds_iqr"] > 0
 
     prefix = repeat("1", 160)
     precise = [_fresh_fixture_row(
@@ -136,11 +159,25 @@ end
         _fresh_records(base);
         repetitions=3,
         expected=(suite="micro", problem_id="synthetic/not_selected",
-                  arithmetic="float64", provider="auto"),
+                  arithmetic="float64", provider="auto",
+                  campaign_id="fixture-campaign", shard_id="shard-1-of-1",
+                  shard_index=1, shard_count=1),
     )
     selection_result = only(selection_document["result"])
     @test !selection_document["campaign"]["aggregation_valid"]
     @test occursin("selection:problem_id", selection_result["failure_reasons"])
+
+    wrong_identity = aggregate_campaign(
+        _fresh_records(base);
+        repetitions=3,
+        expected=(suite="micro", problem_id="synthetic/lp_box",
+                  arithmetic="float64", provider="auto",
+                  campaign_id="other-campaign", shard_id="other-shard",
+                  shard_index=2, shard_count=2),
+    )
+    @test !wrong_identity["campaign"]["aggregation_valid"]
+    @test occursin("selection:campaign_id", only(wrong_identity["result"])["failure_reasons"])
+    @test occursin("selection:shard_index", only(wrong_identity["result"])["failure_reasons"])
 
     failed = [_fresh_fixture_row() for _ in 1:3]
     failed[2]["semantic_pass"] = false
@@ -180,4 +217,132 @@ end
         _fresh_records(base);
         repetitions=2,
     )
+
+    invalid_contract = deepcopy(base)
+    invalid_contract[2]["contract_fingerprint"] = "not-a-sha"
+    invalid_contract_document = aggregate_campaign(
+        _fresh_records(invalid_contract); repetitions=3,
+    )
+    @test !invalid_contract_document["campaign"]["aggregation_valid"]
+    @test occursin(
+        "contract_fingerprint_invalid",
+        only(invalid_contract_document["result"])["failure_reasons"],
+    )
+
+    missing_route = deepcopy(base)
+    missing_route[1]["executed_engine"] = ""
+    missing_route_document = aggregate_campaign(
+        _fresh_records(missing_route); repetitions=3,
+    )
+    @test !missing_route_document["campaign"]["aggregation_valid"]
+    @test occursin(
+        "executed_engine_missing",
+        only(missing_route_document["result"])["failure_reasons"],
+    )
+
+    invalid_source = deepcopy(base)
+    invalid_source[2]["project_sha256"] = "not-a-sha"
+    invalid_source_document = aggregate_campaign(
+        _fresh_records(invalid_source); repetitions=3,
+    )
+    @test !invalid_source_document["campaign"]["aggregation_valid"]
+    @test occursin(
+        "project_sha256_invalid",
+        only(invalid_source_document["result"])["failure_reasons"],
+    )
+
+    wrong_schema = deepcopy(base)
+    wrong_schema[1]["schema_version"] = 7
+    wrong_schema_document = aggregate_campaign(
+        _fresh_records(wrong_schema); repetitions=3,
+    )
+    @test !wrong_schema_document["campaign"]["aggregation_valid"]
+    @test occursin("schema_version", only(wrong_schema_document["result"])["failure_reasons"])
+
+    wrong_samples = deepcopy(base)
+    wrong_samples[3]["sample_count"] = 3
+    wrong_samples_document = aggregate_campaign(
+        _fresh_records(wrong_samples); repetitions=3,
+    )
+    @test !wrong_samples_document["campaign"]["aggregation_valid"]
+    @test occursin("sample_count", only(wrong_samples_document["result"])["failure_reasons"])
+
+    canonical_shards = deepcopy(base)
+    canonical_shards[2]["shard_index"] = "01"
+    canonical_shards[2]["shard_count"] = "001"
+    canonical_document = aggregate_campaign(
+        _fresh_records(canonical_shards); repetitions=3,
+    )
+    @test canonical_document["campaign"]["aggregation_valid"]
+end
+
+@testset "build campaign aggregation uses catalog validation" begin
+    rows = [_fresh_fixture_row(seconds=string(value)) for value in (1.0, 1.2, 0.9)]
+    for row in rows
+        row["execution_mode"] = "build"
+        row["requested_engine"] = "auto"
+        row["executed_engine"] = "none"
+        row["objective"] = ""
+        row["certificate_valid"] = ""
+        row["catalog_validation_pass"] = true
+    end
+    document = aggregate_campaign(
+        _fresh_records(rows);
+        repetitions=3,
+        expected=(suite="micro", problem_id="synthetic/lp_box",
+                  arithmetic="float64", provider="auto",
+                  execution_mode="build", requested_engine="auto"),
+    )
+    result = only(document["result"])
+    @test document["campaign"]["aggregation_valid"]
+    @test result["execution_mode"] == "build"
+    @test result["certificate_valid"] == ""
+    @test result["semantic_pass"]
+end
+
+@testset "fresh aggregation validates canonical route matrix and timing" begin
+    aliases = [_fresh_fixture_row() for _ in 1:3]
+    for row in aliases
+        row["requested_engine"] = "sdpx_legacy"
+    end
+    alias_document = aggregate_campaign(
+        _fresh_records(aliases); repetitions=3, campaign_dir="/tmp",
+        expected=(suite="micro", problem_id="synthetic/lp_box",
+                  arithmetic="float64", provider="auto",
+                  execution_mode="solve", requested_engine="legacy"),
+    )
+    @test alias_document["campaign"]["aggregation_valid"]
+
+    invalid = [_fresh_fixture_row() for _ in 1:3]
+    invalid[2]["requested_engine"] = "native_hsd"
+    invalid_document = aggregate_campaign(
+        _fresh_records(invalid); repetitions=3, campaign_dir="/tmp",
+    )
+    @test !invalid_document["campaign"]["aggregation_valid"]
+    @test occursin(
+        "native_requested_engine_invalid",
+        only(invalid_document["result"])["failure_reasons"],
+    )
+
+    invalid = [_fresh_fixture_row() for _ in 1:3]
+    invalid[1]["executed_engine"] = "none"
+    invalid_document = aggregate_campaign(
+        _fresh_records(invalid); repetitions=3, campaign_dir="/tmp",
+    )
+    @test !invalid_document["campaign"]["aggregation_valid"]
+    @test occursin(
+        "solve_executed_engine_invalid",
+        only(invalid_document["result"])["failure_reasons"],
+    )
+
+    invalid = [_fresh_fixture_row() for _ in 1:3]
+    invalid[3]["total_seconds"] = "Inf"
+    invalid[2]["setup_seconds"] = "-0.1"
+    invalid_document = aggregate_campaign(
+        _fresh_records(invalid); repetitions=3, campaign_dir="/tmp",
+    )
+    @test !invalid_document["campaign"]["aggregation_valid"]
+    failures = only(invalid_document["result"])["failure_reasons"]
+    @test occursin("total_seconds_invalid", failures)
+    @test occursin("setup_seconds_invalid", failures)
 end

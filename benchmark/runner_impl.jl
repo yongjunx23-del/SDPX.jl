@@ -45,6 +45,126 @@ function _manifest_sha256()
 end
 
 const _SOLVER_SOURCE_SHA256_CACHE = Ref{Union{Nothing,String}}(nothing)
+const _SHA256_HEX64 = r"^[0-9a-f]{64}$"
+
+_valid_sha256(value) = value isa AbstractString &&
+    occursin(_SHA256_HEX64, strip(value))
+
+_harness_source_sha256() = _sha256_file(joinpath(ROOT, "PhysicsBenchmarkHarness.jl"))
+_schema_source_sha256() = _sha256_file(joinpath(ROOT, "result_schema.jl"))
+
+function _callable_source_files(callable)
+    files = String[]
+    method_list = try
+        methods(callable)
+    catch
+        nothing
+    end
+    method_list === nothing && return files
+    for method in method_list
+        file = String(method.file)
+        (isempty(file) || file == "none") && continue
+        absolute = isabspath(file) ? file : abspath(file)
+        isfile(absolute) && push!(files, realpath(absolute))
+    end
+    return sort!(unique!(files))
+end
+
+function _catalog_source_sha256(catalog)
+    injected = get(_CATALOG_FILE_CONTEXT, catalog, nothing)
+    injected === nothing || return _catalog_manifest_sha256(injected)
+    files = unique!(vcat(
+        _callable_source_files(catalog.build),
+        _callable_source_files(catalog.validate),
+    ))
+    payload = IOBuffer()
+    write(payload, string(catalog.name), UInt8(0), catalog.version, UInt8(0))
+    for id in sort!(collect(keys(catalog.specs)))
+        spec = catalog.specs[id]
+        write(payload, id, UInt8(0), spec.fingerprint, UInt8(0), repr(spec), UInt8(0))
+    end
+    for suite in sort!(collect(keys(catalog.suites)); by=string)
+        write(payload, string(suite), UInt8(0), repr(catalog.suites[suite]), UInt8(0))
+    end
+    for path in sort!(files)
+        write(payload, replace(path, '\\' => '/'), UInt8(0), read(path), UInt8(0xff))
+    end
+    return bytes2hex(SHA.sha256(take!(payload)))
+end
+
+function _callable_contract_sources(catalog, built)
+    callables = Any[catalog.build]
+    contract = _solve_contract(built)
+    contract === nothing || push!(callables, contract)
+    files = String[]
+    for callable in callables
+        append!(files, _callable_source_files(callable))
+    end
+    return sort!(unique!(files))
+end
+
+function _contract_source_payload(catalog, spec, built)
+    files = _callable_contract_sources(catalog, built)
+    isempty(files) && throw(ArgumentError(
+        "contract fingerprint for $(spec.id) cannot verify callable source",
+    ))
+    context = get(_CATALOG_FILE_CONTEXT, catalog, nothing)
+    if context !== nothing
+        for file in files
+            _path_under_root(file, context.root) || throw(ArgumentError(
+                "contract callable source escapes catalog root: $file",
+            ))
+        end
+    end
+    payload = IOBuffer()
+    for file in files
+        write(payload, replace(file, '\\' => '/'), UInt8(0), read(file), UInt8(0xff))
+    end
+    return bytes2hex(SHA.sha256(take!(payload)))
+end
+
+function _derived_contract_fingerprint(catalog, spec, built, route)
+    checksum = _built_value(built, :external_checksum, spec.fingerprint)
+    declared = _built_value(built, :contract_fingerprint, nothing)
+    declared === nothing || (_valid_sha256(declared) || throw(ArgumentError(
+        "contract_fingerprint for $(spec.id) must be lowercase SHA-256",
+    )))
+    solve_reference = _built_value(built, :solve_reference, nothing)
+    solve_settings = _solve_settings(built)
+    source_payload = _contract_source_payload(catalog, spec, built)
+    payload = join((
+        "sdpx-benchmark-contract-v2",
+        source_payload,
+        _catalog_source_sha256(catalog),
+        spec.id,
+        spec.fingerprint,
+        string(checksum),
+        repr(solve_reference),
+        repr(solve_settings),
+        string(route),
+        declared === nothing ? "" : strip(String(declared)),
+    ), "|")
+    return bytes2hex(SHA.sha256(payload))
+end
+
+function _contract_fingerprint(catalog, spec, built, route)
+    return _derived_contract_fingerprint(catalog, spec, built, route)
+end
+
+function _safe_contract_fingerprint(catalog, spec, built, route)
+    built === nothing && return missing
+    return try
+        _contract_fingerprint(catalog, spec, built, route)
+    catch
+        missing
+    end
+end
+
+_safe_catalog_source_sha256(catalog) = try
+    _catalog_source_sha256(catalog)
+catch
+    missing
+end
 
 """Hash the exact Julia solver source tree used by this process.
 
@@ -98,6 +218,201 @@ _built_value(built, name::Symbol, default) =
 
 function _solve_settings(built)
     return _built_value(built, :solve_settings, (;))
+end
+
+const _EXECUTION_MODES = (:build, :solve, :profile)
+
+function _normalize_execution_mode(mode)
+    value = Symbol(lowercase(replace(string(mode), '-' => '_', ' ' => '_')))
+    value in _EXECUTION_MODES || throw(ArgumentError(
+        "execution_mode must be one of $(_EXECUTION_MODES), got $(repr(mode))",
+    ))
+    return value
+end
+
+function _normalize_engine(engine)
+    value = Symbol(lowercase(replace(string(engine), '-' => '_', ' ' => '_')))
+    # Native HSD labels are accepted for construction-only rows so a future
+    # catalog can reserve an engine identity without importing an unstable
+    # public API.  Solve/profile reject those labels at the run boundary.
+    value in (:auto, :legacy, :sdpx_legacy, :catalog_contract,
+              :native, :native_hsd, :product_hsd) ||
+        throw(ArgumentError("unsupported benchmark engine $(repr(engine))"))
+    return value
+end
+
+_metadata_value(value, environment_key, default) =
+    value === nothing ? get(ENV, environment_key, default) : value
+
+function _execution_identity(; campaign_id=nothing, shard_id=nothing,
+                             shard_index=nothing, shard_count=nothing)
+    identity = (
+        campaign_id=_metadata_value(campaign_id, "SDPX_CAMPAIGN_ID", "standalone"),
+        shard_id=_metadata_value(shard_id, "SDPX_SHARD_ID", "local"),
+        shard_index=_metadata_value(shard_index, "SDPX_SHARD_INDEX", "1"),
+        shard_count=_metadata_value(shard_count, "SDPX_SHARD_COUNT", "1"),
+        pbs_array_index=get(ENV, "PBS_ARRAY_INDEX", missing),
+        pbs_queue=get(ENV, "PBS_QUEUE", missing),
+        pbs_node=get(ENV, "PBS_NODENUM", get(ENV, "HOSTNAME", missing)),
+    )
+    for name in (:campaign_id, :shard_id, :shard_index, :shard_count)
+        isempty(strip(string(getproperty(identity, name)))) && throw(ArgumentError(
+            "$(name) must be non-empty for reproducible benchmark identity",
+        ))
+    end
+    return identity
+end
+
+function _validate_shard_identity(identity)
+    parse_positive(name) = try
+        value = parse(Int, string(getproperty(identity, name)))
+        value > 0 || throw(ArgumentError("$name must be a positive integer"))
+        value
+    catch exception
+        exception isa ArgumentError && rethrow()
+        throw(ArgumentError(
+            "$name must be a positive integer, got $(repr(getproperty(identity, name)))",
+        ))
+    end
+    index = parse_positive(:shard_index)
+    count = parse_positive(:shard_count)
+    index <= count || throw(ArgumentError(
+        "shard_index must be <= shard_count (got $index > $count)",
+    ))
+    return (;
+        identity...,
+        shard_index=index,
+        shard_count=count,
+    )
+end
+
+function _solve_contract(built)
+    contract = _built_value(built, :solve_contract, nothing)
+    contract === nothing && return nothing
+    return contract
+end
+
+_latest_applicable(callable, arguments...) =
+    Base.invokelatest(applicable, callable, arguments...)
+
+function _solve_contract_applicable(contract, built, ::Type{T}, provider, mode) where {T}
+    return _latest_applicable(contract, built, T, provider, mode) ||
+           _latest_applicable(contract, built, T, provider) ||
+           _latest_applicable(contract, built, T)
+end
+
+function _invoke_solve_contract(contract, built, ::Type{T}, provider, mode) where {T}
+    result = if _latest_applicable(contract, built, T, provider, mode)
+        Base.invokelatest(contract, built, T, provider, mode)
+    elseif _latest_applicable(contract, built, T, provider)
+        Base.invokelatest(contract, built, T, provider)
+    elseif _latest_applicable(contract, built, T)
+        Base.invokelatest(contract, built, T)
+    else
+        throw(ArgumentError(
+            "solve_contract must accept (built, T, provider, execution_mode), " *
+            "(built, T, provider), or (built, T)",
+        ))
+    end
+    # A contract may return `(result=..., metadata=...)` or `(built, result)`
+    # so catalog authors can attach independent oracle metadata without
+    # changing the harness route.  The common case is a solver result itself.
+    if result isa Tuple && length(result) == 2
+        return result[2]
+    elseif hasproperty(result, :result)
+        return getproperty(result, :result)
+    end
+    return result
+end
+
+function _solve_reference(built, spec)
+    raw = _built_value(built, :solve_reference, nothing)
+    raw === nothing && throw(ArgumentError(
+        "catalog solve_contract for $(spec.id) must declare solve_reference",
+    ))
+    reference = if raw isa PhysicsBenchmarkReference
+        raw
+    elseif raw isa NamedTuple && hasproperty(raw, :status)
+        PhysicsBenchmarkReference(
+            status=raw.status,
+            objective=get(raw, :objective, nothing),
+            absolute_tolerance=Float64(get(raw, :absolute_tolerance, 1.0e-8)),
+            relative_tolerance=Float64(get(raw, :relative_tolerance, 1.0e-8)),
+            note=String(get(raw, :note, "")),
+        )
+    else
+        throw(ArgumentError(
+            "solve_reference for $(spec.id) must be PhysicsBenchmarkReference " *
+            "or a named tuple containing status",
+        ))
+    end
+    reference.status in (:build_only, :sampled_build_only) && throw(ArgumentError(
+        "solve_reference for $(spec.id) must describe a solve result, not " *
+        "$(reference.status)",
+    ))
+    return reference
+end
+
+function _validate_build_only_declaration(spec, built)
+    tagged = :build_only in spec.tags
+    referenced = spec.reference.status in (:build_only, :sampled_build_only)
+    setting = get(_solve_settings(built), :build_only, false)
+    setting isa Bool || throw(ArgumentError(
+        "solve_settings.build_only for $(spec.id) must be Bool",
+    ))
+    tagged == referenced == setting || throw(ArgumentError(
+        "benchmark $(spec.id) must declare build-only consistently in tags, " *
+        "reference.status, and solve_settings.build_only",
+    ))
+    return tagged
+end
+
+function _resolve_engine_route(catalog, built, spec, execution_mode,
+                               requested_engine, declared_build_only)
+    execution_mode === :build && return :none
+    contract = _solve_contract(built)
+    has_contract = contract !== nothing
+    route = if requested_engine === :auto
+        has_contract ? :catalog_contract : :sdpx_legacy
+    elseif requested_engine === :catalog_contract
+        has_contract || throw(ArgumentError(
+            "requested_engine=:catalog_contract requires solve_contract",
+        ))
+        :catalog_contract
+    elseif requested_engine in (:legacy, :sdpx_legacy)
+        declared_build_only && throw(ArgumentError(
+            "build-only benchmark cannot execute the legacy solver route",
+        ))
+        :sdpx_legacy
+    elseif requested_engine in (:native, :native_hsd, :product_hsd)
+        throw(ArgumentError(
+            "requested engine $(repr(requested_engine)) has no benchmark solve adapter yet",
+        ))
+    else
+        throw(ArgumentError("unsupported benchmark engine $(repr(requested_engine))"))
+    end
+    if declared_build_only && route !== :catalog_contract
+        throw(ArgumentError(
+            "benchmark is build-only and has no catalog solve contract route",
+        ))
+    end
+    if route === :catalog_contract
+        _solve_reference(built, spec)
+        _contract_fingerprint(catalog, spec, built, route)
+    end
+    return route
+end
+
+function _scaling_label(built)
+    value = _built_value(built, :scaling, nothing)
+    value === nothing && (value = _built_value(built, :benchmark_scale, missing))
+    return value === nothing || value === missing ? :unspecified : value
+end
+
+function _layout_label(built)
+    value = _built_value(built, :layout, nothing)
+    value === nothing && (value = _built_value(built, :kind, missing))
+    return value === nothing || value === missing ? :unspecified : value
 end
 
 function _arithmetic_label(::Type{T}) where {T}
@@ -255,7 +570,7 @@ function _problem_fingerprint(catalog, spec, built, arithmetic)
         string(spec.seed),
         repr(spec.parameters),
         repr(facts),
-        string(_built_value(built, :external_checksum, "")),
+        string(_built_value(built, :external_checksum, spec.fingerprint)),
         spec.fingerprint,
     ), "|")
     return bytes2hex(SHA.sha256(payload))
@@ -351,6 +666,7 @@ end
 
 function _semantic_failures(
     spec,
+    reference,
     status,
     objective,
     expected,
@@ -362,7 +678,7 @@ function _semantic_failures(
     unexpected_fallback,
 )
     failures = String[]
-    _normalized_status(status) === _normalized_status(spec.reference.status) ||
+    _normalized_status(status) === _normalized_status(reference.status) ||
         push!(failures, "status")
     normalized_status = _normalized_status(status)
     actual_optimal = normalized_status === :optimal
@@ -372,13 +688,13 @@ function _semantic_failures(
     )
     if actual_optimal && expected !== nothing
         error = abs(objective - expected)
-        allowed = spec.reference.absolute_tolerance +
-                  spec.reference.relative_tolerance * max(one(error), abs(expected))
+        allowed = reference.absolute_tolerance +
+                  reference.relative_tolerance * max(one(error), abs(expected))
         (!isfinite(error) || error > allowed) && push!(failures, "objective")
     end
     residual_limit = 10 * max(
-        spec.reference.absolute_tolerance,
-        spec.reference.relative_tolerance,
+        reference.absolute_tolerance,
+        reference.relative_tolerance,
     )
     if actual_optimal
         for (name, value) in (
@@ -459,7 +775,23 @@ function _result_row(
     catalog, spec, suite, arithmetic, provider, built, result, elapsed;
     allocated_bytes=missing,
     gc_seconds=missing,
+    execution_mode=:solve,
+    requested_engine=:auto,
+    executed_engine,
+    reference,
+    campaign_id="standalone",
+    shard_id="local",
+    shard_index="1",
+    shard_count="1",
+    pbs_array_index=missing,
+    pbs_queue=missing,
+    pbs_node=missing,
 )
+    execution_mode = _normalize_execution_mode(execution_mode)
+    requested_engine = _normalize_engine(requested_engine)
+    executed_engine in (:sdpx_legacy, :catalog_contract) || throw(ArgumentError(
+        "solve/profile rows require an explicitly resolved executed_engine",
+    ))
     trace = SDPX.performance_trace(result)
     T = eltype(built.problem)
     certificate = _safe_certificate(built.problem, result, T, built)
@@ -519,7 +851,8 @@ function _result_row(
     interval = _reference_interval(built, T)
     interval_pass = interval === nothing ? missing :
                     interval.lower <= objective <= interval.upper
-    expected = built.expected === nothing ? spec.reference.objective : built.expected
+    expected = executed_engine === :catalog_contract ? reference.objective :
+               (built.expected === nothing ? reference.objective : built.expected)
     objective_error = expected === nothing ? missing : abs(objective - expected)
     primal_residual = trace.final.primal_residual
     dual_residual = trace.final.dual_residual
@@ -535,6 +868,7 @@ function _result_row(
     )
     failures = _semantic_failures(
         spec,
+        reference,
         trace.final.status,
         objective,
         expected,
@@ -594,6 +928,9 @@ function _result_row(
         production_invariants &= exact_no_fallback
     end
     facts = _problem_facts(built.problem)
+    contract_fingerprint = _contract_fingerprint(
+        catalog, spec, built, executed_engine,
+    )
     solve_seconds = begin
         predictor = _trace_value(trace.iteration.predictor_solve_seconds)
         corrector = _trace_value(trace.iteration.corrector_solve_seconds)
@@ -614,6 +951,10 @@ function _result_row(
         manifest_sha256=_manifest_sha256(),
         benchmark_driver_sha256=_sha256_file(joinpath(ROOT, "runner_impl.jl")),
         solver_source_sha256=_solver_source_sha256(),
+        catalog_source_sha256=_catalog_source_sha256(catalog),
+        harness_source_sha256=_harness_source_sha256(),
+        schema_source_sha256=_schema_source_sha256(),
+        contract_fingerprint,
         mfla_commit=_package_commit("MultiFloatLinearAlgebra"),
         bfla_commit=_package_commit("BigFloatLinearAlgebra"),
         solver_name=_string_metric(_trace_value(trace.setup.solver)),
@@ -633,10 +974,22 @@ function _result_row(
         arithmetic=arithmetic,
         precision_bits=_precision_bits(eltype(built.problem)),
         requested_provider=provider,
+        campaign_id,
+        shard_id,
+        shard_index,
+        shard_count,
+        pbs_array_index,
+        pbs_queue,
+        pbs_node,
+        execution_mode,
+        requested_engine,
+        executed_engine,
+        scaling=_scaling_label(built),
+        layout=_layout_label(built),
         status=trace.final.status,
-        reference_status=spec.reference.status,
-        reference_absolute_tolerance=spec.reference.absolute_tolerance,
-        reference_relative_tolerance=spec.reference.relative_tolerance,
+        reference_status=reference.status,
+        reference_absolute_tolerance=reference.absolute_tolerance,
+        reference_relative_tolerance=reference.relative_tolerance,
         skip_reason=missing,
         termination_reason=_trace_value(trace.final.termination_reason),
         termination_stage=_trace_value(trace.final.termination_stage),
@@ -704,8 +1057,10 @@ function _result_row(
         semantic_failures=join(failures, ","),
         total_seconds=elapsed,
         seconds_per_iteration=elapsed / max(trace.counters.iterations, 1),
+        total_seconds_iqr=missing,
         allocated_bytes,
         gc_seconds,
+        allocated_bytes_iqr=missing,
         setup_seconds=_trace_value(trace.setup.setup_seconds),
         frontend_seconds=_trace_value(trace.setup.frontend_seconds),
         preprocess_seconds=_trace_value(trace.setup.preprocess_seconds),
@@ -714,6 +1069,10 @@ function _result_row(
         certification_seconds=_trace_value(trace.final.certification_seconds),
         workspace_bytes=_trace_value(trace.final.workspace_bytes),
         process_peak_rss_bytes=_trace_value(trace.final.process_peak_rss_bytes),
+        rss_bytes=_trace_value(trace.final.process_peak_rss_bytes),
+        workspace_bytes_iqr=missing,
+        process_peak_rss_bytes_iqr=missing,
+        rss_iqr_bytes=missing,
         memory_budget_bytes=_trace_value(trace.final.memory_budget_bytes),
         restarts=_trace_field(trace.counters, :restarts),
         regularizations=_trace_field(trace.counters, :regularizations),
@@ -771,7 +1130,7 @@ function _result_row(
             _trace_field(trace.counters, :equality_factorizations),
         rhs_solves=_trace_field(trace.counters, :rhs_solves),
         input_fingerprint=_problem_fingerprint(catalog, spec, built, arithmetic),
-        external_checksum=_built_value(built, :external_checksum, missing),
+        external_checksum=_built_value(built, :external_checksum, spec.fingerprint),
     )
 end
 
@@ -812,11 +1171,26 @@ function _sampling_summary(sample_seconds)
         max_seconds=last(ordered),
         mad_seconds=_median(deviations),
         spread_seconds=last(ordered) - first(ordered),
+        iqr_seconds=quantile(ordered, 0.75) - quantile(ordered, 0.25),
     )
+end
+
+function _sample_iqr(rows, field)
+    values = Float64[]
+    for row in rows
+        value = getproperty(row, field)
+        value isa Real && isfinite(value) && value >= 0 || return missing
+        push!(values, Float64(value))
+    end
+    isempty(values) && return missing
+    ordered = sort!(values)
+    return quantile(ordered, 0.75) - quantile(ordered, 0.25)
 end
 
 function _sample_route_key(row)
     fields = (
+        :execution_mode, :requested_engine, :executed_engine,
+        :scaling, :layout,
         :conic_formulation, :planned_formulation, :executed_formulation,
         :planned_backend, :executed_backend, :planned_provider,
         :executed_provider, :executed_specialization, :psd_lift_used,
@@ -824,6 +1198,31 @@ function _sample_route_key(row)
     )
     return join((_cell(getproperty(row, field)) for field in fields), "|")
 end
+
+const _SAMPLE_IDENTITY_FIELDS = (
+    :input_fingerprint, :external_checksum,
+    :catalog_name, :catalog_version,
+    :project_sha256, :manifest_sha256,
+    :benchmark_driver_sha256, :solver_source_sha256,
+    :catalog_source_sha256, :harness_source_sha256,
+    :schema_source_sha256, :contract_fingerprint,
+    :execution_mode, :requested_engine, :executed_engine,
+    :scaling, :layout,
+    :campaign_id, :shard_id, :shard_index, :shard_count,
+    :pbs_job_id, :pbs_array_index, :pbs_queue, :pbs_node,
+)
+
+const _SAMPLE_REQUIRED_NONEMPTY_FIELDS = (
+    :input_fingerprint, :external_checksum,
+    :catalog_name, :catalog_version,
+    :project_sha256, :manifest_sha256,
+    :benchmark_driver_sha256, :solver_source_sha256,
+    :catalog_source_sha256, :harness_source_sha256,
+    :schema_source_sha256, :contract_fingerprint,
+    :execution_mode, :requested_engine, :executed_engine,
+    :scaling, :layout, :campaign_id, :shard_id,
+    :shard_index, :shard_count,
+)
 
 function _reference_tolerance(row)
     absolute = getproperty(row, :reference_absolute_tolerance)
@@ -917,6 +1316,23 @@ function _sample_parity(rows)
     objective_parity.ok || push!(failures, objective_parity.message)
     length(unique(certificates)) == 1 || push!(failures, "certificate")
     length(unique(routes)) == 1 || push!(failures, "route")
+    for field in _SAMPLE_IDENTITY_FIELDS
+        values = [_cell(getproperty(row, field)) for row in rows]
+        length(unique(values)) == 1 || push!(failures, string(field))
+    end
+    for field in _SAMPLE_REQUIRED_NONEMPTY_FIELDS
+        any(isempty, (_cell(getproperty(row, field)) for row in rows)) &&
+            push!(failures, string(field) * "_missing")
+    end
+    for field in (
+        :project_sha256, :manifest_sha256,
+        :benchmark_driver_sha256, :solver_source_sha256,
+        :catalog_source_sha256, :harness_source_sha256,
+        :schema_source_sha256, :contract_fingerprint,
+    )
+        all(row -> _valid_sha256(_cell(getproperty(row, field))), rows) ||
+            push!(failures, string(field) * "_invalid")
+    end
     all(row -> row.semantic_pass, rows) || push!(failures, "semantic_pass")
     return (
         parity=isempty(failures),
@@ -952,6 +1368,12 @@ function _sampling_row(rows, sample_seconds; sample_count=length(rows))
         :sample_max_seconds => summary.max_seconds,
         :sample_mad_seconds => summary.mad_seconds,
         :sample_spread_seconds => summary.spread_seconds,
+        :total_seconds_iqr => summary.iqr_seconds,
+        :allocated_bytes_iqr => _sample_iqr(rows, :allocated_bytes),
+        :process_peak_rss_bytes_iqr =>
+            _sample_iqr(rows, :process_peak_rss_bytes),
+        :rss_iqr_bytes => _sample_iqr(rows, :rss_bytes),
+        :workspace_bytes_iqr => _sample_iqr(rows, :workspace_bytes),
         # The aggregate row represents the sample distribution.  Keep the
         # legacy scalar timing field aligned with the reported median even
         # when an even number of samples requires averaging the two middle
@@ -976,17 +1398,29 @@ function _selection_fingerprint(catalog, spec, arithmetic)
     ), "|")))
 end
 
-function _declared_build_only(spec)
-    :build_only in spec.tags || return false
-    spec.reference.status in (:build_only, :sampled_build_only) ||
-        throw(ArgumentError(
-            "benchmark $(spec.id) is tagged :build_only but declares " *
-            "reference status $(spec.reference.status)",
-        ))
-    return true
+function _safe_problem_fingerprint(catalog, spec, built, arithmetic)
+    built === nothing && return _selection_fingerprint(catalog, spec, arithmetic)
+    return try
+        _problem_fingerprint(catalog, spec, built, arithmetic)
+    catch
+        _selection_fingerprint(catalog, spec, arithmetic)
+    end
 end
 
-function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
+function _skip_row(catalog, spec, suite, arithmetic, provider, reason;
+                   execution_mode=:solve,
+                   requested_engine=:auto,
+                   campaign_id="standalone",
+                   shard_id="local",
+                   shard_index="1",
+                   shard_count="1",
+                   pbs_array_index=missing,
+                   pbs_queue=missing,
+                   pbs_node=missing,
+                   executed_engine=:none,
+                   built=nothing)
+    execution_mode = _normalize_execution_mode(execution_mode)
+    requested_engine = _normalize_engine(requested_engine)
     values = Dict{Symbol,Any}(field => missing for field in RESULT_COLUMNS)
     merge!(values, Dict(
         :schema_version => RESULT_SCHEMA_VERSION,
@@ -1003,6 +1437,12 @@ function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
         :manifest_sha256 => _manifest_sha256(),
         :benchmark_driver_sha256 => _sha256_file(joinpath(ROOT, "runner_impl.jl")),
         :solver_source_sha256 => _solver_source_sha256(),
+        :catalog_source_sha256 => _safe_catalog_source_sha256(catalog),
+        :harness_source_sha256 => _harness_source_sha256(),
+        :schema_source_sha256 => _schema_source_sha256(),
+        :contract_fingerprint => _safe_contract_fingerprint(
+            catalog, spec, built, executed_engine,
+        ),
         :mfla_commit => _package_commit("MultiFloatLinearAlgebra"),
         :bfla_commit => _package_commit("BigFloatLinearAlgebra"),
         :catalog_name => catalog.name,
@@ -1017,6 +1457,18 @@ function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
         :purpose => spec.purpose,
         :seed => spec.seed,
         :arithmetic => arithmetic,
+        :campaign_id => campaign_id,
+        :shard_id => shard_id,
+        :shard_index => shard_index,
+        :shard_count => shard_count,
+        :pbs_array_index => pbs_array_index,
+        :pbs_queue => pbs_queue,
+        :pbs_node => pbs_node,
+        :execution_mode => execution_mode,
+        :requested_engine => requested_engine,
+        :executed_engine => executed_engine,
+        :scaling => built === nothing ? missing : _scaling_label(built),
+        :layout => built === nothing ? missing : _layout_label(built),
         :requested_provider => provider,
         :status => :skipped,
         :reference_status => spec.reference.status,
@@ -1024,28 +1476,55 @@ function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
         :reference_relative_tolerance => spec.reference.relative_tolerance,
         :certificate_policy => :original_coordinate_required,
         :skip_reason => reason,
-        :input_fingerprint => _selection_fingerprint(catalog, spec, arithmetic),
+        :input_fingerprint => _safe_problem_fingerprint(
+            catalog, spec, built, arithmetic,
+        ),
+        :external_checksum => built === nothing ? missing :
+            _built_value(built, :external_checksum, spec.fingerprint),
     ))
     return NamedTuple{RESULT_COLUMNS}(Tuple(values[field] for field in RESULT_COLUMNS))
 end
 
-function _build_only_row(
+function _construction_row(
     catalog, spec, suite, arithmetic, provider, built, elapsed;
     allocated_bytes=missing,
     gc_seconds=missing,
+    execution_mode=:build,
+    requested_engine=:auto,
+    campaign_id="standalone",
+    shard_id="local",
+    shard_index="1",
+    shard_count="1",
+    pbs_array_index=missing,
+    pbs_queue=missing,
+    pbs_node=missing,
+    declared_build_only=false,
 )
-    settings = _solve_settings(built)
-    get(settings, :build_only, false) === true || throw(ArgumentError(
-        "benchmark $(spec.id) declares :build_only but its builder does not " *
-        "return solve_settings=(build_only=true,)",
+    execution_mode = _normalize_execution_mode(execution_mode)
+    execution_mode === :build || throw(ArgumentError(
+        "construction rows require execution_mode=:build",
     ))
+    requested_engine = _normalize_engine(requested_engine)
+    _contract_fingerprint(catalog, spec, built, :none)
     facts = _problem_facts(built.problem)
     catalog_failures = validate_result(
         catalog, spec, built, nothing,
-        (status=spec.reference.status, build_only=true),
+        (status=spec.reference.status, build_only=declared_build_only,
+         execution_mode=execution_mode),
     )
     base = _skip_row(
-        catalog, spec, suite, arithmetic, provider, :build_only,
+        catalog, spec, suite, arithmetic, provider, :build_only;
+        execution_mode=execution_mode,
+        requested_engine=requested_engine,
+        campaign_id=campaign_id,
+        shard_id=shard_id,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        pbs_array_index=pbs_array_index,
+        pbs_queue=pbs_queue,
+        pbs_node=pbs_node,
+        executed_engine=:none,
+        built=built,
     )
     formulation = built.kind === :socp ? :native_lorentz :
                   built.kind === :exp ? :native_exponential :
@@ -1054,7 +1533,7 @@ function _build_only_row(
                   spec.family === :lp ? :lp_native : :sdp_native
     values = Dict{Symbol,Any}(
         :skip_reason => missing,
-        :status => spec.reference.status,
+        :status => declared_build_only ? spec.reference.status : :built,
         :termination_reason => :model_built,
         :termination_stage => :construction,
         :precision_bits => _precision_bits(_problem_eltype(built.problem)),
@@ -1063,7 +1542,9 @@ function _build_only_row(
         :equalities => facts.equalities,
         :blocks => facts.blocks,
         :block_sizes => facts.block_sizes,
-        :certificate_policy => :not_applicable_build_only,
+        :certificate_policy => declared_build_only ?
+                               :not_applicable_build_only :
+                               :not_applicable_build,
         :catalog_validation_pass => isempty(catalog_failures),
         :catalog_validation_failures => join(catalog_failures, ","),
         :semantic_pass => isempty(catalog_failures),
@@ -1071,15 +1552,33 @@ function _build_only_row(
         :full_numerical_gate_valid => missing,
         :production_invariants_valid => missing,
         :total_seconds => elapsed,
+        :total_seconds_iqr => missing,
         :allocated_bytes => allocated_bytes,
         :gc_seconds => gc_seconds,
+        :allocated_bytes_iqr => missing,
         :setup_seconds => elapsed,
         :sample_count => 1,
+        :execution_mode => execution_mode,
+        :requested_engine => requested_engine,
+        :executed_engine => :none,
+        :campaign_id => campaign_id,
+        :shard_id => shard_id,
+        :shard_index => shard_index,
+        :shard_count => shard_count,
+        :pbs_array_index => pbs_array_index,
+        :pbs_queue => pbs_queue,
+        :pbs_node => pbs_node,
+        :scaling => _scaling_label(built),
+        :layout => _layout_label(built),
+        :rss_bytes => missing,
+        :workspace_bytes_iqr => missing,
+        :process_peak_rss_bytes_iqr => missing,
+        :rss_iqr_bytes => missing,
         :input_fingerprint => _problem_fingerprint(
             catalog, spec, built, arithmetic,
         ),
         :external_checksum => _built_value(
-            built, :external_checksum, missing,
+            built, :external_checksum, spec.fingerprint,
         ),
     )
     return NamedTuple{RESULT_COLUMNS}(Tuple(
@@ -1088,10 +1587,32 @@ function _build_only_row(
     ))
 end
 
-function _error_row(catalog, spec, suite, arithmetic, provider, exception)
+function _error_row(catalog, spec, suite, arithmetic, provider, exception;
+                    execution_mode=:solve,
+                    requested_engine=:auto,
+                    campaign_id="standalone",
+                    shard_id="local",
+                    shard_index="1",
+                    shard_count="1",
+                    pbs_array_index=missing,
+                    pbs_queue=missing,
+                    pbs_node=missing,
+                    executed_engine=:none,
+                    built=nothing)
     skipped = _skip_row(
         catalog, spec, suite, arithmetic, provider,
-        "execution_error: " * sprint(showerror, exception),
+        "execution_error: " * sprint(showerror, exception);
+        execution_mode=execution_mode,
+        requested_engine=requested_engine,
+        campaign_id=campaign_id,
+        shard_id=shard_id,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        pbs_array_index=pbs_array_index,
+        pbs_queue=pbs_queue,
+        pbs_node=pbs_node,
+        executed_engine=executed_engine,
+        built=built,
     )
     values = Dict{Symbol,Any}(
         field => getproperty(skipped, field) for field in RESULT_COLUMNS
@@ -1138,6 +1659,12 @@ function run_suite(
     samples=3,
     cache_dir=nothing,
     allow_large=false,
+    execution_mode=:solve,
+    requested_engine=:auto,
+    campaign_id=nothing,
+    shard_id=nothing,
+    shard_index=nothing,
+    shard_count=nothing,
 )
     # `cache_dir` and `allow_large` remain accepted so the canonical child CLI
     # used by fresh-process campaigns stays stable. Catalogs own any related
@@ -1149,6 +1676,15 @@ function run_suite(
         "samples must be 1 (explicit single run) or >= 3 timed solves; " *
         "got $samples; a two-run observation cannot support a timing statistic",
     ))
+    execution_mode = _normalize_execution_mode(execution_mode)
+    requested_engine = _normalize_engine(requested_engine)
+    identity = _execution_identity(
+        campaign_id=campaign_id,
+        shard_id=shard_id,
+        shard_index=shard_index,
+        shard_count=shard_count,
+    )
+    identity = _validate_shard_identity(identity)
     entries = _selected_entries(catalog, suite, problem, arithmetic, provider)
     rows = NamedTuple[]
     for entry in entries
@@ -1158,29 +1694,55 @@ function run_suite(
         catch exception
             push!(rows, _skip_row(
                 catalog, spec, suite, entry.arithmetic, entry.provider,
-                :arithmetic_unavailable,
+                :arithmetic_unavailable;
+                execution_mode=execution_mode,
+                  requested_engine=requested_engine,
+                  campaign_id=identity.campaign_id,
+                  shard_id=identity.shard_id,
+                  shard_index=identity.shard_index,
+                  shard_count=identity.shard_count,
+                  pbs_array_index=identity.pbs_array_index,
+                  pbs_queue=identity.pbs_queue,
+                  pbs_node=identity.pbs_node,
             ))
             verbose && println("skip ", spec.id, ": ", exception)
             continue
         end
-        if _declared_build_only(spec)
-            build_once = () -> Base.invokelatest(
-                build_problem, catalog, spec, T,
-            )
+        local last_built = nothing
+        local last_route = :none
+        if execution_mode === :build
             local rows_for_entry
             try
                 measure = function ()
-                    measurement = @timed build_once()
-                    row = _build_only_row(
+                    measurement = @timed build_problem(catalog, spec, T)
+                    built = measurement.value
+                    last_built = built
+                    declared_build_only = _validate_build_only_declaration(
+                        spec, built,
+                    )
+                    row = _construction_row(
                         catalog, spec, suite, entry.arithmetic, entry.provider,
-                        measurement.value, measurement.time;
+                        built, measurement.time;
                         allocated_bytes=measurement.bytes,
                         gc_seconds=measurement.gctime,
+                        execution_mode=execution_mode,
+                        requested_engine=requested_engine,
+                        campaign_id=identity.campaign_id,
+                        shard_id=identity.shard_id,
+                        shard_index=identity.shard_index,
+                        shard_count=identity.shard_count,
+                        pbs_array_index=identity.pbs_array_index,
+                        pbs_queue=identity.pbs_queue,
+                        pbs_node=identity.pbs_node,
+                        declared_build_only=declared_build_only,
                     )
                     return row, measurement.time
                 end
                 execute = function ()
-                    warmup && build_once()
+                    if warmup
+                        warm_built = build_problem(catalog, spec, T)
+                        _validate_build_only_declaration(spec, warm_built)
+                    end
                     if samples >= 3
                         sample_rows = NamedTuple[]
                         timed = Float64[]
@@ -1209,7 +1771,18 @@ function run_suite(
             catch exception
                 rows_for_entry = [_error_row(
                     catalog, spec, suite, entry.arithmetic, entry.provider,
-                    exception,
+                    exception;
+                    execution_mode=execution_mode,
+                      requested_engine=requested_engine,
+                      campaign_id=identity.campaign_id,
+                      shard_id=identity.shard_id,
+                      shard_index=identity.shard_index,
+                      shard_count=identity.shard_count,
+                      pbs_array_index=identity.pbs_array_index,
+                      pbs_queue=identity.pbs_queue,
+                      pbs_node=identity.pbs_node,
+                      executed_engine=last_route,
+                      built=last_built,
                 )]
             end
             append!(rows, rows_for_entry)
@@ -1224,100 +1797,120 @@ function run_suite(
         catch exception
             push!(rows, _skip_row(
                 catalog, spec, suite, entry.arithmetic, entry.provider,
-                :provider_unavailable,
+                :provider_unavailable;
+                execution_mode=execution_mode,
+                  requested_engine=requested_engine,
+                  campaign_id=identity.campaign_id,
+                  shard_id=identity.shard_id,
+                  shard_index=identity.shard_index,
+                  shard_count=identity.shard_count,
+                  pbs_array_index=identity.pbs_array_index,
+                  pbs_queue=identity.pbs_queue,
+                  pbs_node=identity.pbs_node,
             ))
             verbose && println("skip ", spec.id, ": ", exception)
             continue
         end
-        run = function ()
+        solve_route = function (built, route)
+            if route === :catalog_contract
+                return _invoke_solve_contract(
+                    _solve_contract(built), built, T, entry.provider,
+                    execution_mode,
+                )
+            elseif route === :sdpx_legacy
+                return _solve_built(built, T, entry.provider; verbose=verbose)
+            end
+            throw(ArgumentError("unsupported resolved solve route $route"))
+        end
+        prepare = function ()
             built = build_problem(catalog, spec, T)
-            result = _solve_built(
-                built, T, entry.provider; verbose=verbose,
+            last_built = built
+            declared_build_only = _validate_build_only_declaration(spec, built)
+            route = _resolve_engine_route(
+                catalog, built, spec, execution_mode, requested_engine,
+                declared_build_only,
             )
-            return built, result
+            last_route = route
+            reference = route === :catalog_contract ?
+                        _solve_reference(built, spec) : spec.reference
+            if route === :catalog_contract && !_solve_contract_applicable(
+                _solve_contract(built), built, T, entry.provider, execution_mode,
+            )
+                throw(ArgumentError(
+                    "solve_contract for $(spec.id) is not applicable in latest world",
+                ))
+            end
+            return built, route, reference
+        end
+        warmup_once = function ()
+            built, route, _ = prepare()
+            Base.invokelatest(solve_route, built, route)
+            return nothing
+        end
+        measure_sample = function ()
+            # Canonical O0 timing boundary for every sample count: deterministic
+            # model construction, route resolution, and reference validation
+            # are outside; only the selected solver contract is timed.
+            built, route, reference = prepare()
+            measurement = @timed Base.invokelatest(solve_route, built, route)
+            row = _result_row(
+                catalog, spec, suite, entry.arithmetic, entry.provider,
+                built, measurement.value, measurement.time;
+                allocated_bytes=measurement.bytes,
+                gc_seconds=measurement.gctime,
+                execution_mode=execution_mode,
+                requested_engine=requested_engine,
+                executed_engine=route,
+                reference=reference,
+                campaign_id=identity.campaign_id,
+                shard_id=identity.shard_id,
+                shard_index=identity.shard_index,
+                shard_count=identity.shard_count,
+                pbs_array_index=identity.pbs_array_index,
+                pbs_queue=identity.pbs_queue,
+                pbs_node=identity.pbs_node,
+            )
+            return row, measurement.time
+        end
+        execute = function ()
+            warmup && warmup_once()
+            if samples >= 3
+                sample_rows = NamedTuple[]
+                timed = Float64[]
+                for _ in 1:samples
+                    row, elapsed = measure_sample()
+                    push!(sample_rows, row)
+                    push!(timed, elapsed)
+                end
+                return [_sampling_row(sample_rows, timed; sample_count=samples)]
+            end
+            row, _ = measure_sample()
+            return [row]
         end
         local rows_for_entry
         try
-            if samples >= 3
-                _measure_sample = function ()
-                    # Canonical O0 boundary: problem build, JIT compilation,
-                    # and the untimed warm-up run are excluded from every
-                    # timed sample. A fresh deterministic build per sample
-                    # keeps problem generation out of the measurement while
-                    # preserving identical problem fingerprints.
-                    built = Base.invokelatest(
-                        build_problem, catalog, spec, T,
-                    )
-                    measurement = @timed Base.invokelatest(
-                        _solve_built, built, T, entry.provider;
-                        verbose=verbose,
-                    )
-                    result = measurement.value
-                    row = _result_row(
-                        catalog, spec, suite, entry.arithmetic, entry.provider,
-                        built, result, measurement.time;
-                        allocated_bytes=measurement.bytes,
-                        gc_seconds=measurement.gctime,
-                    )
-                    return row, measurement.time
-                end
-                timed = Float64[]
-                if T === BigFloat
-                    bits = parse(Int, replace(string(entry.arithmetic), "bigfloat" => ""))
-                    rows_for_entry = setprecision(BigFloat, bits) do
-                        warmup && Base.invokelatest(run)
-                        sample_rows = NamedTuple[]
-                        for _ in 1:samples
-                            row, elapsed = _measure_sample()
-                            push!(sample_rows, row)
-                            push!(timed, elapsed)
-                        end
-                        [_sampling_row(
-                            sample_rows,
-                            timed,
-                            sample_count=samples,
-                        )]
-                    end
-                else
-                    warmup && Base.invokelatest(run)
-                    sample_rows = NamedTuple[]
-                    for _ in 1:samples
-                        row, elapsed = _measure_sample()
-                        push!(sample_rows, row)
-                        push!(timed, elapsed)
-                    end
-                    rows_for_entry = [_sampling_row(
-                        sample_rows,
-                        timed,
-                        sample_count=samples,
-                    )]
-                end
-            elseif T === BigFloat
+            if T === BigFloat
                 bits = parse(Int, replace(string(entry.arithmetic), "bigfloat" => ""))
-                rows_for_entry = [setprecision(BigFloat, bits) do
-                    warmup && Base.invokelatest(run)
-                    measurement = @timed Base.invokelatest(run)
-                    built, result = measurement.value
-                    _result_row(catalog, spec, suite, entry.arithmetic, entry.provider,
-                                built, result, measurement.time;
-                                allocated_bytes=measurement.bytes,
-                                gc_seconds=measurement.gctime)
-                end]
+                rows_for_entry = setprecision(BigFloat, bits) do
+                    execute()
+                end
             else
-                warmup && Base.invokelatest(run)
-                measurement = @timed Base.invokelatest(run)
-                built, result = measurement.value
-                row = _result_row(
-                    catalog, spec, suite, entry.arithmetic, entry.provider,
-                    built, result, measurement.time;
-                    allocated_bytes=measurement.bytes,
-                    gc_seconds=measurement.gctime,
-                )
-                rows_for_entry = [row]
+                rows_for_entry = execute()
             end
         catch exception
             rows_for_entry = [_error_row(
-                catalog, spec, suite, entry.arithmetic, entry.provider, exception,
+                catalog, spec, suite, entry.arithmetic, entry.provider, exception;
+                execution_mode=execution_mode,
+                requested_engine=requested_engine,
+                campaign_id=identity.campaign_id,
+                shard_id=identity.shard_id,
+                shard_index=identity.shard_index,
+                shard_count=identity.shard_count,
+                pbs_array_index=identity.pbs_array_index,
+                pbs_queue=identity.pbs_queue,
+                pbs_node=identity.pbs_node,
+                executed_engine=last_route,
+                built=last_built,
             )]
         end
         append!(rows, rows_for_entry)
@@ -1381,6 +1974,12 @@ function _parse_cli(args)
     allow_large = false
     samples = 3
     warmup = true
+    execution_mode = :solve
+    requested_engine = :auto
+    campaign_id = nothing
+    shard_id = nothing
+    shard_index = nothing
+    shard_count = nothing
     positional = String[]
     for argument in args
         if startswith(argument, "--problem=")
@@ -1397,6 +1996,19 @@ function _parse_cli(args)
             catalog_path = abspath(split(argument, "="; limit=2)[2])
         elseif startswith(argument, "--samples=")
             samples = parse(Int, split(argument, "="; limit=2)[2])
+        elseif startswith(argument, "--execution-mode=")
+            execution_mode = _parse_symbol(split(argument, "="; limit=2)[2])
+        elseif startswith(argument, "--engine=") ||
+               startswith(argument, "--requested-engine=")
+            requested_engine = _parse_symbol(split(argument, "="; limit=2)[2])
+        elseif startswith(argument, "--campaign-id=")
+            campaign_id = split(argument, "="; limit=2)[2]
+        elseif startswith(argument, "--shard-id=")
+            shard_id = split(argument, "="; limit=2)[2]
+        elseif startswith(argument, "--shard-index=")
+            shard_index = split(argument, "="; limit=2)[2]
+        elseif startswith(argument, "--shard-count=")
+            shard_count = split(argument, "="; limit=2)[2]
         elseif argument == "--verbose"
             verbose = true
         elseif argument == "--prepare"
@@ -1416,7 +2028,8 @@ function _parse_cli(args)
     !isempty(positional) && (suite = Symbol(lowercase(first(positional))))
     length(positional) > 1 && problem === nothing && (problem = positional[2])
     return (; suite, problem, arithmetic, provider, output, cache_dir, catalog_path, verbose,
-            prepare, allow_large, samples, warmup)
+            prepare, allow_large, samples, warmup, execution_mode,
+            requested_engine, campaign_id, shard_id, shard_index, shard_count)
 end
 
 function main(args=ARGS; catalog::PhysicsBenchmarkCatalog)
@@ -1439,14 +2052,21 @@ function main(args=ARGS; catalog::PhysicsBenchmarkCatalog)
         warmup=options.warmup,
         cache_dir=options.cache_dir,
         allow_large=options.allow_large,
+        execution_mode=options.execution_mode,
+        requested_engine=options.requested_engine,
+        campaign_id=options.campaign_id,
+        shard_id=options.shard_id,
+        shard_index=options.shard_index,
+        shard_count=options.shard_count,
     )
-    built = count(row -> row.status in (:build_only, :sampled_build_only), result.rows)
+    built = count(row -> row.status in (:built, :build_only, :sampled_build_only), result.rows)
     solved = count(row -> !(row.status in (
-        :skipped, :error, :build_only, :sampled_build_only,
+        :skipped, :error, :built, :build_only, :sampled_build_only,
     )), result.rows)
     errors = count(row -> row.status === :error, result.rows)
     skipped = count(row -> row.status === :skipped, result.rows)
-    println("suite=", options.suite, " built=", built, " solved=", solved,
+    println("suite=", options.suite, " mode=", options.execution_mode,
+            " built=", built, " solved=", solved,
             " skipped=", skipped, " errors=", errors,
             " output=", result.paths.toml)
     return result

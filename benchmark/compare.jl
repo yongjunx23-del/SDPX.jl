@@ -7,3 +7,8 @@ using .PhysicsBenchmarkHarness
 output = length(ARGS) == 3 ? ARGS[3] : nothing
 rows = PhysicsBenchmarkHarness.compare_result_files(ARGS[1], ARGS[2]; output=output)
 println("compared ", length(rows), " rows")
+invalid = count(row -> getproperty(row, :comparison_valid) !== true, rows)
+invalid == 0 || begin
+    println("comparison_valid=false rows=", invalid)
+    exit(2)
+end

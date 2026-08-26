@@ -1,6 +1,6 @@
 name: Optimization benchmark (reusable)
 
-# Schema-v7 candidate benchmark pipeline called by optimization-loop.yml. The
+# Schema-v8 candidate benchmark pipeline called by optimization-loop.yml. The
 # caller records evidence in git history and posts the
 # `sdpx/optimization-loop` commit status.
 #
@@ -86,7 +86,7 @@ jobs:
             Pkg.precompile()
           ' 2>&1 | tee "$OUT_DIR/benchmark-environment.log"
 
-      - name: Run schema-v7 deterministic smoke suite
+      - name: Run schema-v8 deterministic smoke suite
         shell: bash
         run: |
           set -euo pipefail
@@ -112,6 +112,8 @@ jobs:
             --problem=smoke/lp_box \
             --arithmetic=float64 \
             --provider=auto \
+            --execution-mode=solve \
+            --engine=auto \
             --catalog=benchmark/fixtures/smoke_catalog.jl \
             --project="$CANDIDATE_ENV" \
             --repetitions=3 \
@@ -120,6 +122,12 @@ jobs:
             --campaign-dir="$OUT_DIR/fresh-smoke" \
             --verbose \
             2>&1 | tee "$OUT_DIR/fresh-smoke.log"
+          julia --startup-file=no --project="$CANDIDATE_ENV" -e '
+            using TOML
+            summary = TOML.parsefile(ARGS[1])
+            @assert summary["campaign"]["aggregation_valid"] === true
+            @assert summary["campaign"]["pairing_valid"] === true
+          ' "$OUT_DIR/fresh-smoke/summary.toml"
 
       - name: Record source and environment identity
         if: always()

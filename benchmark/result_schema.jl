@@ -2,11 +2,20 @@ const RESULT_COLUMNS = (
     :schema_version, :source_commit, :source_dirty, :julia_version, :os,
     :cpu_name, :hostname, :pbs_job_id, :julia_threads, :blas_threads,
     :project_sha256, :manifest_sha256, :benchmark_driver_sha256,
-    :solver_source_sha256, :mfla_commit, :bfla_commit,
+    :solver_source_sha256, :catalog_source_sha256,
+    :harness_source_sha256, :schema_source_sha256,
+    :contract_fingerprint, :mfla_commit, :bfla_commit,
     :solver_name, :solver_version, :catalog_name, :catalog_version,
     :suite, :problem_id, :name, :family,
     :problem_type, :conic_formulation, :source, :purpose, :seed, :arithmetic,
     :precision_bits, :requested_provider, :status, :reference_status,
+    # Immutable campaign/shard identity and execution route.  These fields
+    # are independent of the source commit so PBS shards remain attributable
+    # when several observations share one solver build.
+    :campaign_id, :shard_id, :shard_index, :shard_count,
+    :pbs_array_index, :pbs_queue, :pbs_node,
+    :execution_mode, :requested_engine, :executed_engine,
+    :scaling, :layout,
     :reference_absolute_tolerance, :reference_relative_tolerance,
     :skip_reason, :termination_reason, :termination_stage,
     :variables, :equalities, :blocks, :block_sizes, :planned_formulation,
@@ -30,10 +39,14 @@ const RESULT_COLUMNS = (
     :production_invariants_valid, :full_numerical_gate_valid,
     :catalog_validation_pass, :catalog_validation_failures,
     :semantic_pass, :semantic_failures, :total_seconds, :seconds_per_iteration,
+    :total_seconds_iqr,
     :allocated_bytes, :gc_seconds,
+    :allocated_bytes_iqr,
     :setup_seconds, :frontend_seconds, :preprocess_seconds,
     :presolve_seconds, :core_seconds, :certification_seconds,
-    :workspace_bytes, :process_peak_rss_bytes, :memory_budget_bytes,
+    :workspace_bytes, :process_peak_rss_bytes, :rss_bytes,
+    :workspace_bytes_iqr, :process_peak_rss_bytes_iqr, :rss_iqr_bytes,
+    :memory_budget_bytes,
     :restarts, :regularizations, :refinement_solves,
     :numeric_factorizations, :factorization_attempts, :factorization_successes,
     :factorization_failures,
@@ -52,7 +65,7 @@ const RESULT_COLUMNS = (
     :input_fingerprint, :external_checksum,
 )
 
-const RESULT_SCHEMA_VERSION = 7
+const RESULT_SCHEMA_VERSION = 8
 
 _cell(value) = value === missing || value === nothing ? "" :
                replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')
@@ -74,6 +87,9 @@ function _toml_value(value)
 end
 
 function write_results(path::AbstractString, rows)
+    isempty(rows) && throw(ArgumentError(
+        "result document must contain at least one benchmark row",
+    ))
     root, extension = splitext(path)
     tsv = extension == ".tsv" ? path : root * ".tsv"
     toml = extension == ".toml" ? path : root * ".toml"

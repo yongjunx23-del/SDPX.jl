@@ -4,6 +4,7 @@ using SDPX
 using Dates
 using LinearAlgebra
 using SHA
+using Statistics
 using TOML
 
 export PhysicsBenchmarkReference, PhysicsBenchmarkSpec, PhysicsBenchmarkEntry
@@ -62,13 +63,13 @@ and `kind`. `validate(spec, built, result, metrics)` returns `nothing`, `true`,
 or an empty collection on success; `false`, a string, or a collection of
 strings reports catalog-specific semantic failures.
 """
-struct PhysicsBenchmarkCatalog
+struct PhysicsBenchmarkCatalog{B,V}
     name::Symbol
     version::String
     specs::Dict{String,PhysicsBenchmarkSpec}
     suites::Dict{Symbol,Vector{PhysicsBenchmarkEntry}}
-    build::Function
-    validate::Function
+    build::B
+    validate::V
 end
 
 function PhysicsBenchmarkCatalog(
@@ -76,8 +77,8 @@ function PhysicsBenchmarkCatalog(
     version::AbstractString,
     specs::AbstractVector{PhysicsBenchmarkSpec},
     suites::AbstractDict,
-    build::Function;
-    validate::Function=(spec, built, result, metrics) -> nothing,
+    build;
+    validate=(spec, built, result, metrics) -> nothing,
 )
     table = Dict{String,PhysicsBenchmarkSpec}()
     for spec in specs
@@ -122,7 +123,7 @@ function catalog_spec(catalog::PhysicsBenchmarkCatalog, id::AbstractString)
 end
 
 build_problem(catalog::PhysicsBenchmarkCatalog, spec::PhysicsBenchmarkSpec,
-              ::Type{T}) where {T} = catalog.build(spec, T)
+              ::Type{T}) where {T} = Base.invokelatest(catalog.build, spec, T)
 
 function validate_result(catalog::PhysicsBenchmarkCatalog, spec, built, result, metrics)
     # Catalogs are loaded into a fresh anonymous module at runtime.  Julia
@@ -143,13 +144,127 @@ _sha256_file(path::AbstractString) = open(path, "r") do io
     bytes2hex(SHA.sha256(io))
 end
 
+# `load_catalog` records the injected catalog's exact source closure.  A
+# directory-wide tree hash is deliberately not used: an unrelated file added
+# beside a catalog must not change a benchmark identity, while a transitive
+# include (including one with a non-`.jl` suffix) must change it.
+mutable struct _CatalogIncludeContext
+    host::Module
+    root::String
+    files::Vector{String}
+    stack::Vector{String}
+end
+
+const _CATALOG_FILE_CONTEXT = IdDict{Any,_CatalogIncludeContext}()
+
+function _path_under_root(path::AbstractString, root::AbstractString)
+    relative = relpath(path, root)
+    return relative == "." ||
+           (relative != ".." && !startswith(relative, "../") &&
+            !startswith(relative, "..\\"))
+end
+
+function _catalog_argument_error(exception)
+    exception isa ArgumentError && return exception
+    exception isa LoadError || return nothing
+    return _catalog_argument_error(exception.error)
+end
+
+function _tracked_include(context::_CatalogIncludeContext, raw_path)
+    raw_path isa AbstractString || throw(ArgumentError(
+        "catalog include path must be a string, got $(typeof(raw_path))",
+    ))
+    base = isempty(context.stack) ? context.root : dirname(last(context.stack))
+    candidate = isabspath(raw_path) ? String(raw_path) : joinpath(base, raw_path)
+    isfile(candidate) || throw(ArgumentError(
+        "catalog include does not name a file: $(abspath(candidate))",
+    ))
+    absolute = realpath(candidate)
+    _path_under_root(absolute, context.root) || throw(ArgumentError(
+        "catalog include escapes canonical root $(context.root): $absolute",
+    ))
+    absolute in context.files || push!(context.files, absolute)
+    push!(context.stack, absolute)
+    try
+        # `mapexpr` rewrites both `include(...)` and explicit
+        # `Base.include(...)` calls in the included source before evaluation.
+        return Base.include(
+            expression -> _rewrite_catalog_includes(
+                expression, context,
+            ),
+            context.host,
+            absolute,
+        )
+    catch exception
+        argument_error = _catalog_argument_error(exception)
+        argument_error === nothing || throw(argument_error)
+        rethrow()
+    finally
+        pop!(context.stack)
+    end
+end
+
+function _include_callee(callee)
+    callee === :include && return true
+    callee isa Expr && callee.head === :. || return false
+    text = string(callee)
+    return text == "Base.include" || text == "Core.include"
+end
+
+function _rewrite_catalog_includes(expression, context::_CatalogIncludeContext)
+    expression isa Expr || return expression
+    if expression.head === :call && !isempty(expression.args) &&
+       _include_callee(expression.args[1])
+        isempty(expression.args) && return expression
+        path = _rewrite_catalog_includes(last(expression.args), context)
+        return Expr(:call, :_sdpx_tracked_include, path)
+    end
+    return Expr(
+        expression.head,
+        (_rewrite_catalog_includes(argument, context)
+         for argument in expression.args)...,
+    )
+end
+
+function _catalog_manifest_sha256(context::_CatalogIncludeContext)
+    paths = sort!(unique!(copy(context.files)))
+    payload = IOBuffer()
+    for source in paths
+        current = realpath(source)
+        _path_under_root(current, context.root) || throw(ArgumentError(
+            "catalog source escaped canonical root $(context.root): $current",
+        ))
+        isfile(current) || throw(ArgumentError(
+            "catalog source disappeared after load: $current",
+        ))
+        write(payload, replace(relpath(current, context.root), '\\' => '/'))
+        write(payload, UInt8(0), read(current), UInt8(0xff))
+    end
+    return bytes2hex(SHA.sha256(take!(payload)))
+end
+
 """Load an injected catalog file defining `physics_benchmark_catalog()`."""
 function load_catalog(path::AbstractString)
     absolute = abspath(path)
     isfile(absolute) || throw(ArgumentError("catalog file does not exist: $absolute"))
+    canonical = realpath(absolute)
+    root = realpath(dirname(canonical))
     host = Module(gensym(:InjectedPhysicsBenchmarkCatalog))
     Core.eval(host, :(import Main.PhysicsBenchmarkHarness))
-    Base.include(host, absolute)
+    context = _CatalogIncludeContext(host, root, String[], String[])
+    Core.eval(host, :(
+        _sdpx_tracked_include(path) =
+            PhysicsBenchmarkHarness._tracked_include(
+                __catalog_include_context__, path,
+            )
+    ))
+    # Bind the context through a private host method.  A function body may be
+    # world-age delayed, whereas a module constant is available to all mapped
+    # expressions as soon as the first include is evaluated.
+    Core.eval(host, :(
+        const __catalog_include_context__ = $context
+    ))
+    _tracked_include(context, canonical)
     isdefined(host, :physics_benchmark_catalog) || throw(ArgumentError(
         "catalog file must define physics_benchmark_catalog()",
     ))
@@ -159,6 +274,7 @@ function load_catalog(path::AbstractString)
     catalog isa PhysicsBenchmarkCatalog || throw(ArgumentError(
         "physics_benchmark_catalog() returned $(typeof(catalog)), expected PhysicsBenchmarkCatalog",
     ))
+    _CATALOG_FILE_CONTEXT[catalog] = context
     return catalog
 end
 
