@@ -47,6 +47,53 @@ function _ncep_program(
     )
 end
 
+function _ncep_public_certificate(kind::Symbol, tolerance::Float64)
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals())
+    domain = kind === :exp ? SDPX.ExponentialCone() : SDPX.PowerCone(0.5)
+    constants = kind === :exp ? [0.0, 1.0] : [1.0, 1.0]
+    SDPX.constraint!(
+        model, Symbol(kind, :_row),
+        [constants[1], constants[2], x[1]], domain,
+    )
+    SDPX.objective!(model, SDPX.Minimize(), x[1])
+
+    program = SDPX.compile_product_cone_model(model)
+    canonical = SDPX.canonicalize(program)
+    reduction = SDPX.hsd_equality_reduce(canonical)
+    state = SDPX.ProductConeHSDState(reduction.reduced)
+    product = SDPX.product_hsd_solve!(
+        state; max_iterations=400, tol=tolerance,
+    )
+    x_full = zeros(Float64, 1)
+    s_full = zeros(Float64, 3)
+    y_full = zeros(Float64, 3)
+    recovered = SDPX.hsd_recover_optimal_source!(
+        x_full, s_full, y_full, reduction,
+        product.x, product.s, product.y; tol=tolerance,
+    )
+    recovered || return product, recovered, nothing
+
+    constraint_dual, dual_slack = SDPX._native_hsd_frontend_dual(
+        model, canonical, y_full,
+    )
+    row_dual = SDPX._native_hsd_row_dual(model, program, constraint_dual)
+    primal_objective = SDPX._public_original_primal_objective(program, x_full)
+    dual_objective = SDPX._public_original_dual_objective(program, row_dual)
+    settings = SDPX.Settings(
+        Float64;
+        tolerances=SDPX.Tolerances(
+            Float64; primal=tolerance, dual=tolerance, gap=tolerance,
+        ),
+        engine=:native_hsd,
+    )
+    certificate = SDPX._public_original_certificate(
+        model, program, x_full, constraint_dual, dual_slack,
+        primal_objective, dual_objective, settings, SDPX.Optimal,
+    )
+    return product, recovered, certificate
+end
+
 @testset "nonsymmetric Exp/Power production convergence (P1-4)" begin
     # Simple Exp release fixture: min x s.t. (0,1,0) - (0,0,-1) x in ExpCone.
     exp_program = _ncep_program(
@@ -92,4 +139,22 @@ end
     @test power_result.normalized_residual <= 1.0e-8
     @test power_result.x[1] ≈ -1.0 rtol=1.0e-6 atol=1.0e-6
     @test power_result.iterations > 0
+end
+
+@testset "Exp/Power refinement reaches the original-coordinate target" begin
+    for tolerance in (1.0e-8, 1.0e-10), kind in (:exp, :power)
+        @testset "$kind tol=$tolerance" begin
+            product, recovered, certificate =
+                _ncep_public_certificate(kind, tolerance)
+            @test product.status === SDPX.ProductHSDOptimal
+            @test product.normalized_residual <= tolerance
+            @test recovered
+            @test certificate !== nothing
+            @test certificate.valid
+            @test certificate.reason === :valid
+            @test certificate.primal_residual <= tolerance
+            @test certificate.dual_residual <= tolerance
+            @test certificate.relative_gap <= tolerance
+        end
+    end
 end

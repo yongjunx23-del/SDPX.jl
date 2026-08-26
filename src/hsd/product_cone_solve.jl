@@ -119,10 +119,11 @@ function _product_hsd_verified_result(
     tol::T,
     reason::ProductHSDSolveReason,
     last_step::HSDStepCode,
-    terminal_alpha::T=zero(T),
+    terminal_alpha::T=zero(T);
+    check_optimal::Bool=true,
 ) where {T}
     canonical = state.base.canonical
-    if verify_optimal!(
+    if check_optimal && verify_optimal!(
         canonical, state.base, x_original, s_original, y_original; tol=tol,
     )
         return _product_hsd_make_result(
@@ -147,6 +148,179 @@ function _product_hsd_verified_result(
         )
     end
     return nothing
+end
+
+@inline function _product_hsd_refinement_maxabs(values::AbstractVector{T}) where {T}
+    magnitude_max = zero(T)
+    @inbounds for value in values
+        magnitude = abs(value)
+        magnitude > magnitude_max && (magnitude_max = magnitude)
+    end
+    return magnitude_max
+end
+
+@inline function _product_hsd_refinement_scale(values::AbstractVector{T}) where {T}
+    return max(one(T), _product_hsd_refinement_maxabs(values))
+end
+
+"""
+Try one cold-path affine certificate refinement of an accepted nonsymmetric
+HSD iterate. The cone variables are held fixed while the primal variable is
+corrected in `A*dx = -rP`; the dual is then corrected in the joint
+stationarity/gap equations `[A'; b']*dy = [-rD; -gap]`. This removes the
+homogeneous residual amplification which otherwise lets the data-normalized
+HSD gate stop before the recovered original-coordinate gate is satisfied.
+
+The refinement is fail closed: it is adopted only when the unchanged strict
+optimal verifier accepts at the caller's requested tolerance. Exp dual blocks
+also admit the exact `u=v` boundary representative when `u` is structurally
+free in both affine equations; this removes a second-order cone residual
+without altering stationarity or the gap. No cone-membership check or
+tolerance is relaxed.
+"""
+function _product_hsd_refined_optimal_result!(
+    state::ProductConeHSDState{T},
+    x_original::Vector{T},
+    s_original::Vector{T},
+    y_original::Vector{T},
+    tol::T,
+    reason::ProductHSDSolveReason,
+    last_step::HSDStepCode,
+    terminal_alpha::T=zero(T),
+) where {T}
+    _product_hsd_has_nonsymmetric(state) || return nothing
+    base = state.base
+    base.tau > tol || return nothing
+    hsd_residual!(base)
+    recovered_residual = hsd_normalized_residual(base) / base.tau
+    recovered_residual <= sqrt(tol) || return nothing
+
+    canonical = base.canonical
+    # Reuse the dense canonical matrix already owned by HSDState; the cold
+    # refinement must not create a second sparse-to-dense copy.
+    A = base.Ad
+    x = base.x ./ base.tau
+    s = base.s ./ base.tau
+    y = base.y ./ base.tau
+    primal_residual = A * x + s - canonical.b
+
+    try
+        if base.n == 0
+            _product_hsd_refinement_maxabs(primal_residual) <= tol || return nothing
+        else
+            x .+= A \ (-primal_residual)
+        end
+
+        dual_residual = transpose(A) * y + canonical.c
+        gap = dot(canonical.c, x) + dot(canonical.b, y)
+        affine_dual = Matrix{T}(undef, base.n + 1, base.m)
+        @inbounds for column in 1:base.m
+            for row in 1:base.n
+                affine_dual[row, column] = A[column, row]
+            end
+            affine_dual[end, column] = canonical.b[column]
+        end
+        rhs = Vector{T}(undef, base.n + 1)
+        @inbounds for row in 1:base.n
+            rhs[row] = -dual_residual[row]
+        end
+        rhs[end] = -gap
+        y .+= affine_dual \ rhs
+
+        # For K_exp^*, L_E(u,v,w)=(u-v,-u,w). When the u coordinate is
+        # structurally absent from A' and b', replacing u by v preserves both
+        # affine equations and selects the stable x=0 boundary representative.
+        if !in_canonical_cone(canonical, y; dual=true, tol=tol)
+            for block in canonical.cone_layout.blocks
+                block.cone === :exp || continue
+                u = block.offset
+                structurally_free = true
+                @inbounds for row in axes(affine_dual, 1)
+                    if !iszero(affine_dual[row, u])
+                        structurally_free = false
+                        break
+                    end
+                end
+                structurally_free && (y[u] = y[u + 1])
+            end
+        end
+    catch exception
+        exception isa LinearAlgebra.SingularException ||
+            exception isa LinearAlgebra.PosDefException ||
+            exception isa LinearAlgebra.RankDeficientException || rethrow()
+        return nothing
+    end
+
+    primal_residual = A * x + s - canonical.b
+    dual_residual = transpose(A) * y + canonical.c
+    primal_scale = max(
+        _product_hsd_refinement_scale(x),
+        _product_hsd_refinement_scale(s),
+        _product_hsd_refinement_scale(canonical.b),
+    )
+    dual_scale = max(
+        _product_hsd_refinement_scale(y),
+        _product_hsd_refinement_scale(canonical.c),
+    )
+    _product_hsd_refinement_maxabs(primal_residual) <= tol * primal_scale ||
+        return nothing
+    _product_hsd_refinement_maxabs(dual_residual) <= tol * dual_scale ||
+        return nothing
+    abs(dot(canonical.c, x) + dot(canonical.b, y)) <=
+        tol * (one(T) + abs(dot(canonical.c, x)) + abs(dot(canonical.b, y))) ||
+        return nothing
+    in_canonical_cone(canonical, s; dual=false, tol=tol) || return nothing
+    in_canonical_cone(canonical, y; dual=true, tol=tol) || return nothing
+
+    saved_x = copy(base.x)
+    saved_y = copy(base.y)
+    saved_kappa = base.kappa
+    @inbounds for index in eachindex(base.x)
+        base.x[index] = base.tau * x[index]
+    end
+    @inbounds for index in eachindex(base.y)
+        base.y[index] = base.tau * y[index]
+    end
+    # Once primal feasibility, stationarity, and the recovered gap have been
+    # refined, the scalar HSD equation has the exact solution kappa=0. Keep a
+    # small positive representative so the homogeneous point remains valid.
+    base.kappa = min(base.kappa, base.tau * tol / T(8))
+    hsd_residual!(base)
+    if verify_optimal!(
+        canonical, base, x_original, s_original, y_original; tol=tol,
+    )
+        return _product_hsd_make_result(
+            state, ProductHSDOptimal, reason, last_step, terminal_alpha,
+            x_original, s_original, y_original,
+        )
+    end
+
+    copyto!(base.x, saved_x)
+    copyto!(base.y, saved_y)
+    base.kappa = saved_kappa
+    hsd_residual!(base)
+    return nothing
+end
+
+@inline function _product_hsd_candidate_result!(
+    state::ProductConeHSDState{T},
+    x_original::Vector{T},
+    s_original::Vector{T},
+    y_original::Vector{T},
+    tol::T,
+    reason::ProductHSDSolveReason,
+    last_step::HSDStepCode,
+    terminal_alpha::T=zero(T),
+) where {T}
+    refined = _product_hsd_refined_optimal_result!(
+        state, x_original, s_original, y_original, tol, reason, last_step,
+        terminal_alpha,
+    )
+    refined === nothing || return refined
+    return _product_hsd_verified_result(
+        state, x_original, s_original, y_original, tol, reason, last_step,
+        terminal_alpha; check_optimal=!_product_hsd_has_nonsymmetric(state),
+    )
 end
 
 @inline function _product_hsd_terminal_alpha(
@@ -233,7 +407,7 @@ function _product_hsd_terminal_verified_result!(
     base.tau = base.tau_t
     base.kappa = base.kappa_t
 
-    result = _product_hsd_verified_result(
+    result = _product_hsd_candidate_result!(
         state, x_original, s_original, y_original, tol,
         ProductHSDVerifiedTerminalNewtonTrial, last_step, alpha,
     )
@@ -314,7 +488,7 @@ function product_hsd_solve!(
     end
 
     product_hsd_cold_start!(state)
-    initial = _product_hsd_verified_result(
+    initial = _product_hsd_candidate_result!(
         state, x_original, s_original, y_original, certificate_tol,
         ProductHSDVerifiedInitialPoint, HSDStepOK,
     )
@@ -350,7 +524,7 @@ function product_hsd_solve!(
                 code, zero(T), x_original, s_original, y_original,
             )
         elseif code === HSDStepAlreadyOptimal
-            verified = _product_hsd_verified_result(
+            verified = _product_hsd_candidate_result!(
                 state, x_original, s_original, y_original, certificate_tol,
                 ProductHSDVerifiedAcceptedStep, code,
             )
@@ -362,7 +536,7 @@ function product_hsd_solve!(
             )
         end
 
-        verified = _product_hsd_verified_result(
+        verified = _product_hsd_candidate_result!(
             state, x_original, s_original, y_original, certificate_tol,
             ProductHSDVerifiedAcceptedStep, code,
         )

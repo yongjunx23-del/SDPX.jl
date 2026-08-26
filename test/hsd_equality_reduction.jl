@@ -328,6 +328,76 @@ end
     @test all(isfinite, xfull) && all(isfinite, sfull) && all(isfinite, yfull)
 end
 
+@testset "optimal recovery uses the certificate data scale without admitting bad points" begin
+    T = Float64
+    tolerance = T(1e-6)
+    program = _eq_program(
+        reshape(T[-1], 1, 1),
+        T[100],
+        T[1],
+        ((:nonnegative, 1, :constraint),),
+    )
+    reduction = SDPX.hsd_equality_reduce(program)
+    @test reduction.status === SDPX.HSDEqualityReady
+    data_scale = SDPX._hsd_eq_source_data_scale(program)
+    @test data_scale == T(103)
+
+    function recovery_and_certificate(x_value, s_value, y_value)
+        x = zeros(T, 1)
+        s = zeros(T, 1)
+        y = zeros(T, 1)
+        recovered = SDPX.hsd_recover_optimal!(
+            x, s, y, reduction,
+            T[x_value], T[s_value], T[y_value]; tol=tolerance,
+        )
+
+        state = SDPX.HSDState(program)
+        state.x[1] = T(x_value)
+        state.s[1] = T(s_value)
+        state.y[1] = T(y_value)
+        state.tau = one(T)
+        state.kappa = zero(T)
+        certified = SDPX.verify_optimal!(
+            program, state, zeros(T, 1), zeros(T, 1), zeros(T, 1);
+            tol=tolerance,
+        )
+        return recovered, certified
+    end
+
+    # The recovered gap is 1.5e-6. The former absolute complementarity
+    # scale rejected it at 1e-6, while the certificate's objective gap scale
+    # is 1 + |p| + |d| ≈ 201 and genuinely certifies the normalized point.
+    aligned_delta = T(1.5e-6)
+    @test recovery_and_certificate(
+        -T(100) + aligned_delta, aligned_delta, one(T),
+    ) == (true, true)
+
+    # Each malformed point exceeds even the shared normalized data/gap scale.
+    # Recovery and the independent certificate must therefore both reject it.
+    normalized_limit = tolerance * data_scale
+    bad_primal = (-T(100), T(1e-2), one(T))
+    @test abs(only(program.A * T[bad_primal[1]]) + bad_primal[2] - only(program.b)) >
+          normalized_limit
+    @test recovery_and_certificate(bad_primal...) == (false, false)
+
+    bad_dual = (-T(100), zero(T), T(0.99))
+    @test abs(only(transpose(program.A) * T[bad_dual[3]]) + only(program.c)) >
+          normalized_limit
+    @test recovery_and_certificate(bad_dual...) == (false, false)
+
+    bad_cone = (-T(100.01), -T(1e-2), one(T))
+    @test !SDPX.in_canonical_cone(
+        program, T[bad_cone[2]]; dual=false, tol=normalized_limit,
+    )
+    @test recovery_and_certificate(bad_cone...) == (false, false)
+
+    bad_complementarity = (-T(100) + T(1e-3), T(1e-3), one(T))
+    bad_gap_scale = one(T) + abs(bad_complementarity[1]) + only(program.b)
+    @test abs(bad_complementarity[2] * bad_complementarity[3]) >
+          tolerance * bad_gap_scale
+    @test recovery_and_certificate(bad_complementarity...) == (false, false)
+end
+
 @testset "ZeroCone primal membership is equality, dual is free" begin
     T = Float64
     zero_program = _eq_program(
