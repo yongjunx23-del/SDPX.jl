@@ -162,13 +162,15 @@ function phase0_rows()
             push!(rows, phase0_case(case, T, label))
         end
     end
-    setprecision(BigFloat, 256) do
-        warm = phase0_canonical(first(PHASE0_CASES), BigFloat)
-        SDPX.product_hsd_solve!(
-            SDPX.ProductConeHSDState(warm); max_iterations=2,
-        )
-        for case in PHASE0_CASES
-            push!(rows, phase0_case(case, BigFloat, "BigFloat256"))
+    for bits in (256, 512, 1024)
+        setprecision(BigFloat, bits) do
+            warm = phase0_canonical(first(PHASE0_CASES), BigFloat)
+            SDPX.product_hsd_solve!(
+                SDPX.ProductConeHSDState(warm); max_iterations=2,
+            )
+            for case in PHASE0_CASES
+                push!(rows, phase0_case(case, BigFloat, "BigFloat$(bits)"))
+            end
         end
     end
     return rows

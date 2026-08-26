@@ -73,6 +73,65 @@ function allocation_audit(::Type{T}; samples::Int=10) where {T<:AbstractFloat}
     )
 end
 
+"""Measure whether reclaimed BigFloat step temporaries cause RSS to grow by
+roughly the same material amount after every batch.  `Sys.maxrss()` is a peak
+counter, so the samples are allowed to be nondecreasing; the gate rejects a
+material, sustained per-batch increase rather than requiring the peak to fall
+after `GC.gc(true)`.
+
+The state and all audit buffers are constructed before the first sample.  A
+cold restart reuses that same storage, which keeps this check focused on the
+iteration path instead of repeatedly charging setup matrices and factors.
+"""
+function bigfloat_memory_audit(; batches::Int=6, steps_per_batch::Int=10)
+    batches >= 4 || throw(ArgumentError("BigFloat RSS audit needs at least four batches"))
+    steps_per_batch >= 1 || throw(ArgumentError("steps_per_batch must be positive"))
+
+    state = SDPX.HSDState(allocation_problem(BigFloat))
+    SDPX.hsd_cold_start!(state)
+    warm = Vector{SDPX.HSDStepCode}(undef, 1)
+    audited_step!(warm, 1, state)
+    warm[1] === SDPX.HSDStepOK || error(
+        "warm BigFloat HSD step failed before RSS audit: $(warm[1])",
+    )
+
+    codes = Matrix{SDPX.HSDStepCode}(undef, steps_per_batch, batches)
+    rss = Vector{Int}(undef, batches + 1)
+    GC.gc(true)
+    rss[1] = Int(Sys.maxrss())
+    @inbounds for batch in 1:batches
+        SDPX.hsd_cold_start!(state)
+        for step in 1:steps_per_batch
+            audited_step!(view(codes, :, batch), step, state)
+        end
+        GC.gc(true)
+        rss[batch + 1] = Int(Sys.maxrss())
+    end
+
+    # Ignore sub-megabyte allocator noise.  A genuine linear-growth signal
+    # must both persist through the last half of the batches and exceed a
+    # conservative process-size-relative allowance.
+    material_increment = 1 << 20
+    increments = diff(rss)
+    tail_first = max(1, length(increments) ÷ 2)
+    tail = view(increments, tail_first:length(increments))
+    allowance = max(32 << 20, rss[1] ÷ 20)
+    sustained = all(delta -> delta >= material_increment, tail)
+    drift = rss[end] - rss[1]
+    stable = !(sustained && drift > allowance)
+    return (
+        rss_samples=rss,
+        rss_increments=increments,
+        rss_drift_bytes=drift,
+        rss_allowance_bytes=allowance,
+        sustained_material_growth=sustained,
+        stable=stable,
+        codes=string.(codes),
+        batches=batches,
+        steps_per_batch=steps_per_batch,
+    )
+end
+
 function main(args=ARGS)
     check = "--check" in args
     rows = Any[]
@@ -109,6 +168,21 @@ function main(args=ARGS)
             )
             maximum(row.allocation_samples) - minimum(row.allocation_samples) <= 4096 ||
                 error("BigFloat256 allocation samples are unstable")
+        end
+
+        memory = bigfloat_memory_audit()
+        @printf("%-28s rss=%s drift=%d allowance=%d stable=%s\n",
+            "BigFloat256 memory", repr(memory.rss_samples),
+            memory.rss_drift_bytes, memory.rss_allowance_bytes,
+            string(memory.stable))
+        if check
+            all(==("HSDStepOK"), memory.codes) || error(
+                "BigFloat256 RSS audit encountered a failed HSD step: $(memory.codes)",
+            )
+            memory.stable || error(
+                "BigFloat256 RSS grows materially in every tail batch: " *
+                "samples=$(memory.rss_samples), allowance=$(memory.rss_allowance_bytes)",
+            )
         end
     end
     return rows
