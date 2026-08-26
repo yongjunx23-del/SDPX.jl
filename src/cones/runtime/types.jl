@@ -70,3 +70,17 @@ mutable struct ProductConeRuntime{T,O,S,P,E,W}
     valid::Bool
     last_mu::T
 end
+
+"""Setup-owned work vectors for `assemble_schur!`.
+
+The scratch is deliberately separate from the cone runtime: callers may own
+more than one Schur assembly context while every hot call remains concrete
+and allocation-free.
+"""
+struct ProductSchurScratch{T}
+    input::Vector{T}
+    output::Vector{T}
+end
+
+ProductSchurScratch(runtime::ProductConeRuntime{T}) where {T} =
+    ProductSchurScratch{T}(zeros(T, runtime.dimension), zeros(T, runtime.dimension))

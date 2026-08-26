@@ -799,7 +799,7 @@ end
     # reused here: the pair-dependent state owns all scaling information.
     _runtime_copy_lambda!(block.dual, block)
     _runtime_jordan_local!(block.primal, block, block.dual, block.dual)
-    SymmetricCones.identity!(block.cone, block.direction)
+    _runtime_central_target!(block.direction, block)
     @inbounds for i in 1:len
         block.input[i] = sigma_mu * block.direction[i] - block.primal[i] - block.input[i]
     end
@@ -813,17 +813,39 @@ end
     return nothing
 end
 
+@inline function _runtime_central_target!(target, block::OrthantRuntimeBlock)
+    SymmetricCones.identity!(block.cone, target)
+    return target
+end
+
+
+@inline function _runtime_central_target!(target, block::SOCRuntimeBlock)
+    SymmetricCones.identity!(block.cone, target)
+    # Canonical SOC coordinates use the ordinary Euclidean dot product.
+    # For F(t,u)=-log(t^2-||u||^2), -grad(F)(e)=2e and nu=2.
+    target[1] += target[1]
+    return target
+end
+
+
+@inline function _runtime_central_target!(target, block::PSDRuntimeBlock)
+    SymmetricCones.identity!(block.cone, target)
+    return target
+end
+
 """
     symmetric_corrector_shift!(runtime, h, ds_hat, dy_hat,
                                ds_aff, dy_aff, sigma_mu)
 
 Build the combined Mehrotra symmetric-cone shift
 
-`h = R L_lambda^{-1}(sigma_mu*e - lambda∘lambda - ds_hat∘dy_hat)`,
+`h = R L_lambda^{-1}(sigma_mu*(-grad(F)(e)) - lambda∘lambda -
+ds_hat∘dy_hat)`,
 
 where `ds_hat = R^{-1} ds_aff` and `dy_hat = R dy_aff`.  The two scaled
 directions are also written to caller-owned buffers for independent equation
-checks and profiling.
+checks and profiling. In ordinary canonical coordinates `-grad(F)(e)` is
+`2e` for SOC and `e` for orthant/PSD blocks.
 """
 function symmetric_corrector_shift!(
     runtime::ProductConeRuntime{T}, h, ds_hat, dy_hat,
@@ -848,4 +870,174 @@ function symmetric_corrector_shift!(
     end
     _runtime_finite(h) || throw(DomainError(h, "corrector complementarity shift is non-finite"))
     return h
+end
+
+
+# ---------------------------------------------------------------------------
+# Frozen product-runtime API names
+# ---------------------------------------------------------------------------
+
+"""Build the affine complementarity shift for the current scaled pair.
+
+`s` and `y` make the pair orientation explicit at the call boundary. Scaling
+must already have been updated for that pair; this routine performs only
+shape/type/finiteness checks and never silently refreshes the metric.
+"""
+function affine_shift!(runtime::ProductConeRuntime, h, s, y)
+    _runtime_check_vectors(runtime, s, y)
+    _runtime_finite(s) || throw(DomainError(s, "affine-shift primal point is non-finite"))
+    _runtime_finite(y) || throw(DomainError(y, "affine-shift dual point is non-finite"))
+    return symmetric_affine_shift!(runtime, h)
+end
+
+
+@inline function _runtime_corrector_shift_noscratch!(
+    h, ds_aff, dy_aff, sigma_mu, block,
+)
+    len = _runtime_block_length(block)
+    _runtime_copy_in!(block.input, ds_aff, block.offset, len)
+    SymmetricCones.r_inverse_apply!(
+        block.cone, block.output, block.state, block.input,
+    )
+    _runtime_copy_in!(block.input, dy_aff, block.offset, len)
+    SymmetricCones.r_apply!(
+        block.cone, block.direction, block.state, block.input,
+    )
+    # input = ds_hat o dy_hat. The two sources are block.output/direction.
+    _runtime_jordan_local!(block.input, block, block.output, block.direction)
+    _runtime_copy_lambda!(block.dual, block)
+    _runtime_jordan_local!(block.primal, block, block.dual, block.dual)
+    _runtime_central_target!(block.direction, block)
+    @inbounds for index in 1:len
+        block.input[index] = sigma_mu * block.direction[index] -
+                             block.primal[index] - block.input[index]
+    end
+    SymmetricCones.solve_Llambda!(
+        block.cone, block.output, block.state, block.input,
+    )
+    SymmetricCones.r_apply!(
+        block.cone, block.direction, block.state, block.output,
+    )
+    _runtime_copy_out!(h, block.offset, block.direction, len)
+    return nothing
+end
+
+
+"""Build the combined corrector shift through the frozen public-shaped API."""
+function corrector_shift!(
+    runtime::ProductConeRuntime{T}, h, s, y, ds_aff, dy_aff, sigma_mu,
+) where {T}
+    _runtime_check_vectors(runtime, s, y)
+    _runtime_check_vector(runtime, h)
+    _runtime_check_vector(runtime, ds_aff)
+    _runtime_check_vector(runtime, dy_aff)
+    _runtime_require_valid(runtime)
+    _runtime_finite(s) || throw(DomainError(s, "corrector primal point is non-finite"))
+    _runtime_finite(y) || throw(DomainError(y, "corrector dual point is non-finite"))
+    _runtime_finite(ds_aff) || throw(DomainError(ds_aff, "affine primal direction is non-finite"))
+    _runtime_finite(dy_aff) || throw(DomainError(dy_aff, "affine dual direction is non-finite"))
+    target = T(sigma_mu)
+    isfinite(target) || throw(DomainError(sigma_mu, "corrector target must be finite"))
+    for block in runtime.orthant
+        _runtime_corrector_shift_noscratch!(h, ds_aff, dy_aff, target, block)
+    end
+    for block in runtime.soc
+        _runtime_corrector_shift_noscratch!(h, ds_aff, dy_aff, target, block)
+    end
+    for block in runtime.psd
+        _runtime_corrector_shift_noscratch!(h, ds_aff, dy_aff, target, block)
+    end
+    _runtime_finite(h) || throw(DomainError(h, "corrector shift is non-finite"))
+    return h
+end
+
+
+@inline function _runtime_fill_column!(dst, A::SparseMatrixCSC, column::Int)
+    fill!(dst, zero(eltype(dst)))
+    @inbounds for pointer in nzrange(A, column)
+        dst[A.rowval[pointer]] = A.nzval[pointer]
+    end
+    return dst
+end
+
+
+@inline function _runtime_fill_column!(dst, A::AbstractMatrix, column::Int)
+    @inbounds for row in axes(A, 1)
+        dst[row] = A[row, column]
+    end
+    return dst
+end
+
+
+@inline function _runtime_column_dot(A::SparseMatrixCSC, column::Int, x)
+    value = zero(eltype(x))
+    @inbounds for pointer in nzrange(A, column)
+        value += A.nzval[pointer] * x[A.rowval[pointer]]
+    end
+    return value
+end
+
+
+@inline function _runtime_column_dot(A::AbstractMatrix, column::Int, x)
+    value = zero(eltype(x))
+    @inbounds for row in axes(A, 1)
+        value += A[row, column] * x[row]
+    end
+    return value
+end
+
+
+"""Assemble `H=A'GA` without materialising the global block-diagonal `G`."""
+function assemble_schur!(
+    runtime::ProductConeRuntime{T},
+    H::AbstractMatrix{T},
+    A::AbstractMatrix{T},
+    scratch::ProductSchurScratch{T},
+) where {T}
+    size(A, 1) == runtime.dimension || throw(DimensionMismatch(
+        "Schur row count $(size(A, 1)) != runtime dimension $(runtime.dimension)",
+    ))
+    size(H) == (size(A, 2), size(A, 2)) || throw(DimensionMismatch(
+        "Schur destination has size $(size(H)), expected $(size(A, 2))x$(size(A, 2))",
+    ))
+    _runtime_check_vector(runtime, scratch.input)
+    _runtime_check_vector(runtime, scratch.output)
+    _runtime_require_valid(runtime)
+    fill!(H, zero(T))
+    @inbounds for column in axes(A, 2)
+        _runtime_fill_column!(scratch.input, A, column)
+        apply_G!(runtime, scratch.output, scratch.input)
+        for row in 1:column
+            value = _runtime_column_dot(A, row, scratch.output)
+            H[row, column] = value
+            H[column, row] = value
+        end
+    end
+    _runtime_matrix_finite(H) || throw(DomainError(H, "Schur assembly is non-finite"))
+    return H
+end
+
+
+"""Recover the block directions `dy=G(primal_rhs)`, `ds=h-Theta(dy)`."""
+function recover_direction!(
+    runtime::ProductConeRuntime,
+    ds,
+    dy,
+    h,
+    primal_rhs,
+    theta_scratch,
+)
+    _runtime_check_vector(runtime, ds)
+    _runtime_check_vector(runtime, dy)
+    _runtime_check_vector(runtime, h)
+    _runtime_check_vector(runtime, primal_rhs)
+    _runtime_check_vector(runtime, theta_scratch)
+    _runtime_require_valid(runtime)
+    apply_G!(runtime, dy, primal_rhs)
+    apply_Theta!(runtime, theta_scratch, dy)
+    @inbounds for index in 1:runtime.dimension
+        ds[index] = h[index] - theta_scratch[index]
+    end
+    _runtime_finite(ds) || throw(DomainError(ds, "recovered primal direction is non-finite"))
+    return ds, dy
 end
