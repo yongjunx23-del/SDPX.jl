@@ -55,6 +55,7 @@ include("step_hot.jl")
 # AbstractFactorCache and HotRouteCache.
 include("hsd/hsd.jl")
 include("hsd/nonnegative_hsd.jl")
+include("hsd/product_cone_hsd.jl")
 include("certificates/certificates.jl")
 include("ingest.jl")
 include("lp_api.jl")
