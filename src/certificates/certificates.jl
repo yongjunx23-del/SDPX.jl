@@ -185,7 +185,10 @@ function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) wh
     elseif cone === :free
         return !dual # free dual is zero cone
     elseif cone === :zero
-        return true  # zero dual is free cone
+        # ZeroCone itself contains only the origin; its dual is the full free
+        # space.  Treating the primal as free would let an equality-violating
+        # slack pass a canonical certificate.
+        return dual || _all_ge(v, -tol) && _all_ge(-v, -tol)
     end
     return false
 end
