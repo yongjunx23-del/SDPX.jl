@@ -125,7 +125,10 @@ build_problem(catalog::PhysicsBenchmarkCatalog, spec::PhysicsBenchmarkSpec,
               ::Type{T}) where {T} = catalog.build(spec, T)
 
 function validate_result(catalog::PhysicsBenchmarkCatalog, spec, built, result, metrics)
-    verdict = catalog.validate(spec, built, result, metrics)
+    # Catalogs are loaded into a fresh anonymous module at runtime.  Julia
+    # 1.12's strict world-age rules therefore require the same dynamic-call
+    # boundary here that the runner already uses for injected builders.
+    verdict = Base.invokelatest(catalog.validate, spec, built, result, metrics)
     (verdict === nothing || verdict === true) && return String[]
     verdict === false && return ["catalog_validation"]
     verdict isa AbstractString && return [String(verdict)]

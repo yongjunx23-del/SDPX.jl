@@ -1417,10 +1417,13 @@ function main(args=ARGS; catalog::PhysicsBenchmarkCatalog)
         cache_dir=options.cache_dir,
         allow_large=options.allow_large,
     )
-    solved = count(row -> !(row.status in (:skipped, :error)), result.rows)
+    built = count(row -> row.status in (:build_only, :sampled_build_only), result.rows)
+    solved = count(row -> !(row.status in (
+        :skipped, :error, :build_only, :sampled_build_only,
+    )), result.rows)
     errors = count(row -> row.status === :error, result.rows)
     skipped = count(row -> row.status === :skipped, result.rows)
-    println("suite=", options.suite, " solved=", solved,
+    println("suite=", options.suite, " built=", built, " solved=", solved,
             " skipped=", skipped, " errors=", errors,
             " output=", result.paths.toml)
     return result

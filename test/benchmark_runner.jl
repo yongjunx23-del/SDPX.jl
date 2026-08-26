@@ -79,8 +79,11 @@ end
     @test :catalog_validation_pass in RESULT_COLUMNS
 
     output = tempname() * ".toml"
+    injected_catalog = load_catalog(joinpath(
+        @__DIR__, "..", "benchmark", "fixtures", "smoke_catalog.jl",
+    ))
     run = run_suite(
-        physics_benchmark_catalog(),
+        injected_catalog,
         :smoke;
         problem="smoke/lp_box",
         samples=1,
