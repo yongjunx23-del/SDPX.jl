@@ -40,3 +40,7 @@ from the declared spec before lowering.
 
 Reflection-positivity matrices, irrep projectors, repeated-link split/rejoin
 terms, and the exact paper hierarchy remain explicit follow-on work.
+
+The injected catalog is deliberately `:build_only`. Its smoke/scaling suites
+measure deterministic model construction and lowering, not an optimization or
+a claim that the based-length objective reproduces a paper bound.

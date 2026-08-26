@@ -267,8 +267,10 @@ end
     @test length(harness.catalog_entries(catalog, :scaling)) == 3
     entry = only(harness.catalog_entries(catalog, :smoke))
     spec = harness.catalog_spec(catalog, entry.problem_id)
+    @test spec.reference.status == :build_only
     built = harness.build_problem(catalog, spec, Float64)
     @test built.kind == :sdp
     @test built.problem isa SDPX.SDPProblem
-    @test built.external_checksum == built.artifact.fingerprint
+    @test built.external_checksum == built.artifact.fingerprint == spec.fingerprint
+    @test built.solve_settings.build_only
 end

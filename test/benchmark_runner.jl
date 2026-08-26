@@ -1,5 +1,6 @@
 using Test
 using TOML
+using SDPX
 
 if !isdefined(Main, :PhysicsBenchmarkHarness)
     include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
@@ -24,6 +25,51 @@ using .PhysicsBenchmarkHarness
     ))
     @test loaded.name === :smoke
     @test only(catalog_entries(loaded, :smoke)).problem_id == "smoke/lp_box"
+end
+
+@testset "build-only catalog never calls the solver" begin
+    spec = PhysicsBenchmarkSpec(
+        id="build-only/lp",
+        name="build-only LP fixture",
+        family=:lp,
+        problem_type=:linear_program,
+        tags=(:build_only,),
+        reference=PhysicsBenchmarkReference(status=:build_only),
+        fingerprint="build-only-fixture-v1",
+    )
+    builder = function (_, ::Type{T}) where {T}
+        problem = SDPX.linear_program(
+            zeros(T, 1), ones(T, 1, 1), zeros(T, 1); T,
+        )
+        return (
+            problem,
+            expected=nothing,
+            kind=:lp,
+            external_checksum="build-only-fixture-v1",
+            solve_settings=(build_only=true,),
+        )
+    end
+    catalog = PhysicsBenchmarkCatalog(
+        :build_only_fixture, "1", [spec],
+        Dict(:smoke => [PhysicsBenchmarkEntry(
+            spec.id, :float64, :auto,
+        )]),
+        builder,
+    )
+    output = tempname() * ".toml"
+    run = run_suite(
+        catalog, :smoke; samples=3, warmup=false, output,
+    )
+    row = only(run.rows)
+    @test row.status == :build_only
+    @test row.termination_stage == :construction
+    @test row.termination_reason == :model_built
+    @test row.semantic_pass
+    @test row.iterations === missing
+    @test row.sample_count == 3
+    @test row.sample_semantic_parity
+    @test row.certificate_policy == :not_applicable_build_only
+    @test row.external_checksum == "build-only-fixture-v1"
 end
 
 @testset "schema-v7 runner one-row contract" begin

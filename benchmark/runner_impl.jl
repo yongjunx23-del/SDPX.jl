@@ -832,9 +832,15 @@ function _objective_parity(rows)
     # objective values fail closed. Precision is derived from the decimal
     # string lengths (>=256 bits) and scoped locally, so long BigFloat
     # objectives are never collapsed at the ambient working precision.
+    raw_objectives = [getproperty(row, :objective) for row in rows]
+    unavailable(value) = value === missing || value === nothing
+    all(unavailable, raw_objectives) && return (ok=true, message="")
+    any(unavailable, raw_objectives) && return (
+        ok=false, message="objective_missing",
+    )
     try
         objective_strings = [
-            string(getproperty(row, :objective)) for row in rows
+            string(value) for value in raw_objectives
         ]
         absolute, relative = _reference_tolerance(first(rows))
         bits = _parity_precision_bits(
@@ -950,6 +956,11 @@ function _selection_fingerprint(catalog, spec, arithmetic)
     ), "|")))
 end
 
+function _declared_build_only(spec)
+    return :build_only in spec.tags &&
+           spec.reference.status in (:build_only, :sampled_build_only)
+end
+
 function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
     values = Dict{Symbol,Any}(field => missing for field in RESULT_COLUMNS)
     merge!(values, Dict(
@@ -991,6 +1002,62 @@ function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
         :input_fingerprint => _selection_fingerprint(catalog, spec, arithmetic),
     ))
     return NamedTuple{RESULT_COLUMNS}(Tuple(values[field] for field in RESULT_COLUMNS))
+end
+
+function _build_only_row(
+    catalog, spec, suite, arithmetic, provider, built, elapsed;
+    allocated_bytes=missing,
+    gc_seconds=missing,
+)
+    settings = _solve_settings(built)
+    get(settings, :build_only, false) === true || throw(ArgumentError(
+        "benchmark $(spec.id) declares :build_only but its builder does not " *
+        "return solve_settings=(build_only=true,)",
+    ))
+    facts = _problem_facts(built.problem)
+    catalog_failures = validate_result(
+        catalog, spec, built, nothing,
+        (status=spec.reference.status, build_only=true),
+    )
+    base = _skip_row(
+        catalog, spec, suite, arithmetic, provider, :build_only,
+    )
+    formulation = built.kind === :socp ? :native_lorentz :
+                  spec.family === :lp ? :lp_native : :sdp_native
+    values = Dict{Symbol,Any}(
+        :skip_reason => missing,
+        :status => spec.reference.status,
+        :termination_reason => :model_built,
+        :termination_stage => :construction,
+        :precision_bits => _precision_bits(eltype(built.problem)),
+        :conic_formulation => formulation,
+        :variables => facts.variables,
+        :equalities => facts.equalities,
+        :blocks => facts.blocks,
+        :block_sizes => facts.block_sizes,
+        :certificate_policy => :not_applicable_build_only,
+        :catalog_validation_pass => isempty(catalog_failures),
+        :catalog_validation_failures => join(catalog_failures, ","),
+        :semantic_pass => isempty(catalog_failures),
+        :semantic_failures => join(catalog_failures, ","),
+        :full_numerical_gate_valid => missing,
+        :production_invariants_valid => missing,
+        :total_seconds => elapsed,
+        :allocated_bytes => allocated_bytes,
+        :gc_seconds => gc_seconds,
+        :setup_seconds => elapsed,
+        :sample_count => 1,
+        :input_fingerprint => _problem_fingerprint(
+            catalog, spec, built, arithmetic,
+        ),
+        :external_checksum => _built_value(
+            built, :external_checksum, missing,
+        ),
+    )
+    return NamedTuple{RESULT_COLUMNS}(Tuple(
+        haskey(values, field) ? values[field] : getproperty(base, field)
+        for field in RESULT_COLUMNS
+    ))
 end
 
 function _error_row(catalog, spec, suite, arithmetic, provider, exception)
@@ -1066,6 +1133,62 @@ function run_suite(
                 :arithmetic_unavailable,
             ))
             verbose && println("skip ", spec.id, ": ", exception)
+            continue
+        end
+        if _declared_build_only(spec)
+            build_once = () -> Base.invokelatest(
+                build_problem, catalog, spec, T,
+            )
+            local rows_for_entry
+            try
+                measure = function ()
+                    measurement = @timed build_once()
+                    row = _build_only_row(
+                        catalog, spec, suite, entry.arithmetic, entry.provider,
+                        measurement.value, measurement.time;
+                        allocated_bytes=measurement.bytes,
+                        gc_seconds=measurement.gctime,
+                    )
+                    return row, measurement.time
+                end
+                execute = function ()
+                    warmup && build_once()
+                    if samples >= 3
+                        sample_rows = NamedTuple[]
+                        timed = Float64[]
+                        for _ in 1:samples
+                            row, elapsed = measure()
+                            push!(sample_rows, row)
+                            push!(timed, elapsed)
+                        end
+                        return [_sampling_row(
+                            sample_rows, timed; sample_count=samples,
+                        )]
+                    end
+                    row, _ = measure()
+                    return [row]
+                end
+                if T === BigFloat
+                    bits = parse(Int, replace(
+                        string(entry.arithmetic), "bigfloat" => "",
+                    ))
+                    rows_for_entry = setprecision(BigFloat, bits) do
+                        execute()
+                    end
+                else
+                    rows_for_entry = execute()
+                end
+            catch exception
+                rows_for_entry = [_error_row(
+                    catalog, spec, suite, entry.arithmetic, entry.provider,
+                    exception,
+                )]
+            end
+            append!(rows, rows_for_entry)
+            verbose && println(
+                spec.id, " status=", first(rows_for_entry).status,
+                " build=", first(rows_for_entry).total_seconds, "s",
+            )
             continue
         end
         try
