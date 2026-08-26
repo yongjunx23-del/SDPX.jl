@@ -21,7 +21,9 @@ const PHASE0_CASES = (
      A=reshape([1, 1], 2, 1), b=[0, 0], c=[1]),
     (name=:rank_deficient, expected=:optimal,
      A=[1 1; -1 -1], b=[1, 2], c=[0, 0]),
-    (name=:badly_scaled, expected=:optimal,
+    # Float64 must fail closed on an unresolved bordered cancellation; the
+    # fixed-width extended and BigFloat routes resolve the same denominator.
+    (name=:badly_scaled, expected=:precision_dependent,
      A=[10_000 0; 0 1], b=[10_000, 1], c=[-10_000, -1]),
     (name=:rectangular, expected=:dual_infeasible,
      A=[1 2 3; 0 1 -1], b=[5, 0], c=[1, 0, 0]),
@@ -44,23 +46,40 @@ function phase0_canonical(case, ::Type{T}) where {T<:AbstractFloat}
 end
 
 @inline function phase0_step_noreturn!(code, state)
-    code[] = SDPX.hsd_step!(state)
+    code[] = SDPX.product_hsd_step!(state)
     return nothing
 end
 
-function phase0_certificate_valid(canonical, state, status)
-    T = eltype(state.x)
-    x = zeros(T, state.n)
-    s = zeros(T, state.m)
-    y = zeros(T, state.m)
-    if status === :optimal
-        return SDPX.verify_optimal!(canonical, state, x, s, y)
-    elseif status === :primal_infeasible
-        return SDPX.verify_primal_infeasibility!(canonical, state, y)
-    elseif status === :dual_infeasible
-        return SDPX.verify_dual_infeasibility!(canonical, state, x, s)
+function phase0_certificate_valid(canonical, result)
+    T = eltype(result.hsd_x)
+    state = SDPX.ProductConeHSDState(canonical)
+    base = state.base
+    copyto!(base.x, result.hsd_x)
+    copyto!(base.s, result.hsd_s)
+    copyto!(base.y, result.hsd_y)
+    base.tau = result.tau
+    base.kappa = result.kappa
+    x = zeros(T, base.n)
+    s = zeros(T, base.m)
+    y = zeros(T, base.m)
+    if result.status === SDPX.ProductHSDOptimal
+        return SDPX.verify_optimal!(canonical, base, x, s, y)
+    elseif result.status === SDPX.ProductHSDPrimalInfeasible
+        return SDPX.verify_primal_infeasibility!(canonical, base, y)
+    elseif result.status === SDPX.ProductHSDDualInfeasible
+        return SDPX.verify_dual_infeasibility!(canonical, base, x, s)
     end
     return false
+end
+
+function phase0_expected(case, ::Type{T}) where {T}
+    case.expected === :optimal && return SDPX.ProductHSDOptimal
+    case.expected === :primal_infeasible && return SDPX.ProductHSDPrimalInfeasible
+    case.expected === :dual_infeasible && return SDPX.ProductHSDDualInfeasible
+    if case.expected === :precision_dependent
+        return T === Float64 ? SDPX.ProductHSDBreakdown : SDPX.ProductHSDOptimal
+    end
+    error("unknown Phase-0 expectation $(case.expected)")
 end
 
 function phase0_input_fingerprint(canonical)
@@ -72,33 +91,40 @@ end
 function phase0_case(case, ::Type{T}, arithmetic::String) where {T<:AbstractFloat}
     canonical = phase0_canonical(case, T)
 
-    setup = @timed SDPX.HSDState(canonical)
-    step_state = SDPX.HSDState(canonical)
-    SDPX.hsd_cold_start!(step_state)
+    setup = @timed SDPX.ProductConeHSDState(canonical)
+    step_state = SDPX.ProductConeHSDState(canonical)
+    SDPX.product_hsd_cold_start!(step_state)
     code = Ref(SDPX.HSDStepDirectionFailed)
     phase0_step_noreturn!(code, step_state) # compile/warm an unmeasured state
-    step_state = SDPX.HSDState(canonical)
-    SDPX.hsd_cold_start!(step_state)
+    step_state = SDPX.ProductConeHSDState(canonical)
+    SDPX.product_hsd_cold_start!(step_state)
     step = @timed phase0_step_noreturn!(code, step_state)
 
-    solve_state = SDPX.HSDState(canonical)
-    solve = @timed SDPX.hsd_solve!(solve_state; max_iters=500)
-    status = solve.value
-    SDPX.hsd_residual!(solve_state)
-    certificate_valid = phase0_certificate_valid(canonical, solve_state, status)
-    semantic_pass = status === case.expected && certificate_valid
+    solve_state = SDPX.ProductConeHSDState(canonical)
+    solve = @timed SDPX.product_hsd_solve!(solve_state; max_iterations=500)
+    result = solve.value
+    base = solve_state.base
+    status = result.status
+    SDPX.hsd_residual!(base)
+    certificate_valid = phase0_certificate_valid(canonical, result)
+    expected = phase0_expected(case, T)
+    # A precision-resolved failure is itself the required evidence: it must
+    # carry no certificate and must not be promoted to success.
+    expected_failure = expected === SDPX.ProductHSDBreakdown
+    semantic_pass = status === expected &&
+        (expected_failure ? !certificate_valid : certificate_valid)
     return (
         case=string(case.name),
         arithmetic=arithmetic,
         precision_bits=(T === BigFloat ? precision(BigFloat) : SDPX.sig_bits(T)),
-        expected_status=string(case.expected),
+        expected_status=string(expected),
         status=string(status),
         semantic_pass=semantic_pass,
         certificate_valid=certificate_valid,
         input_fingerprint=phase0_input_fingerprint(canonical),
-        variables=solve_state.n,
-        reduced_variables=solve_state.nr,
-        equalities=solve_state.m,
+        variables=base.n,
+        reduced_variables=base.nr,
+        equalities=base.m,
         setup_seconds=setup.time,
         setup_bytes=setup.bytes,
         first_step_seconds=step.time,
@@ -106,14 +132,16 @@ function phase0_case(case, ::Type{T}, arithmetic::String) where {T<:AbstractFloa
         first_step_code=string(code[]),
         solve_seconds=solve.time,
         solve_bytes=solve.bytes,
-        iterations=solve_state.record.iterations,
-        matrix_epoch=solve_state.record.matrix_epoch,
-        factor_epoch=solve_state.record.factor_epoch,
-        numeric_factorizations=SDPX.kkt_factor_count(solve_state.driver),
-        primal_residual=string(solve_state.record.p_res),
-        dual_residual=string(solve_state.record.d_res),
-        gap_residual=string(abs(solve_state.rG)),
-        mu=string(solve_state.mu),
+        iterations=result.iterations,
+        matrix_epoch=base.record.matrix_epoch,
+        factor_epoch=base.record.factor_epoch,
+        numeric_factorizations=result.factorizations,
+        primal_residual=string(base.record.p_res),
+        dual_residual=string(base.record.d_res),
+        gap_residual=string(abs(base.rG)),
+        mu=string(result.mu),
+        termination_reason=string(result.reason),
+        fallback_reason="none",
     )
 end
 
@@ -127,14 +155,18 @@ function phase0_rows()
         (Float64x4, "Float64x4"),
     )
         warm = phase0_canonical(first(PHASE0_CASES), T)
-        SDPX.hsd_solve!(SDPX.HSDState(warm); max_iters=2)
+        SDPX.product_hsd_solve!(
+            SDPX.ProductConeHSDState(warm); max_iterations=2,
+        )
         for case in PHASE0_CASES
             push!(rows, phase0_case(case, T, label))
         end
     end
     setprecision(BigFloat, 256) do
         warm = phase0_canonical(first(PHASE0_CASES), BigFloat)
-        SDPX.hsd_solve!(SDPX.HSDState(warm); max_iters=2)
+        SDPX.product_hsd_solve!(
+            SDPX.ProductConeHSDState(warm); max_iterations=2,
+        )
         for case in PHASE0_CASES
             push!(rows, phase0_case(case, BigFloat, "BigFloat256"))
         end
