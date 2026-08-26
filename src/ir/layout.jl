@@ -20,10 +20,10 @@
 #    choice: it only records the block geometry, cone parameters, the
 #    dual orientation and per-block reconstruction metadata.
 #
-#    Layout is arithmetic-carried on the canonical element type `T`
-#    (the power-cone parameter must preserve the source precision — it
-#    is stored at `T`, never forced to Float64; conversion to a
-#    *different* target arithmetic happens only at ExecutionPlan time).
+#    Layout is arithmetic-carried on the canonical element type `T`.
+#    The power-cone parameter is stored directly at `T`, after the
+#    canonicalizer's single source-to-working-arithmetic conversion; it is
+#    never routed through Float64.
 #    `global_to_block` / `block_to_global` are pure offset arithmetic
 #    (allocation-free); `barrier_degree` gives `nu = sum(block
 #    barrier_degree)`.
@@ -166,8 +166,10 @@ function ConeBlockDescriptor(
     if cone === :psd
         length_ = variable_length(PSDCone(), Int(dimension))
     elseif cone === :exp || cone === :power
-        Int(dimension) == EXPONENTIAL_CONE_DIMENSION || throw(ArgumentError(
-            "canonical $cone block dimension must be $EXPONENTIAL_CONE_DIMENSION, got $dimension",
+        expected_dimension = cone === :exp ?
+            EXPONENTIAL_CONE_DIMENSION : POWER_CONE_DIMENSION
+        Int(dimension) == expected_dimension || throw(ArgumentError(
+            "canonical $cone block dimension must be $expected_dimension, got $dimension",
         ))
         length_ = Int(dimension)
     else

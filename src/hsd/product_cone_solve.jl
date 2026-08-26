@@ -46,7 +46,10 @@ it into a fresh state and invoke the strict verifier a second time.
 
 For a verified terminal Newton trial, the result owns the trial buffers while
 the mutable input state is restored to its last runtime-consistent accepted
-iterate.  `terminal_alpha > 0` records that case.
+iterate.  `terminal_alpha > 0` records that case.  For an optimal result,
+`normalized_residual` is the scale-invariant recovered residual used by
+[`verify_optimal!`](@ref), namely the normalized homogeneous residual divided
+by `tau`; it therefore reports the quantity which actually passed `tol`.
 """
 struct ProductHSDSolveResult{T}
     status::ProductHSDSolveStatus
@@ -79,17 +82,25 @@ end
 ) where {T}
     base = state.base
     hsd_residual!(base)
+    normalized_residual = hsd_normalized_residual(base)
+    if status === ProductHSDOptimal
+        # Optimality was promoted only after `verify_optimal!` proved tau > 0
+        # and checked this recovered, homogeneous-scale-invariant residual.
+        # Reporting the unscaled embedding residual here made a certified solve
+        # appear looser whenever tau > 1 (the Exp release point has tau ≈ 2.29).
+        normalized_residual /= base.tau
+    end
     return ProductHSDSolveResult{T}(
         status,
         reason,
         last_step,
         base.record.iterations,
-        kkt_factor_count(base.driver),
+        product_hsd_factor_count(state),
         terminal_alpha,
         base.tau,
         base.kappa,
         base.mu,
-        hsd_normalized_residual(base),
+        normalized_residual,
         copy(x_original),
         copy(s_original),
         copy(y_original),

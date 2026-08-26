@@ -39,6 +39,14 @@ end
     NS_CONJUGATE_ITERATION_LIMIT = 0x09
     NS_CONJUGATE_INVERSE_HESSIAN_FAILED = 0x0a
     NS_CONJUGATE_NONFINITE_RESULT = 0x0b
+    NS_CONJUGATE_ROOT_RESOLUTION_LIMIT = 0x0c
+    NS_CONJUGATE_FACTOR_FAILED = 0x0d
+    NS_CONJUGATE_FACTOR_MISMATCH = 0x0e
+end
+
+@enum NonsymmetricConjugateSeedMode::UInt8 begin
+    NS_CONJUGATE_MAPPED_COLD_SEED = 0x00
+    NS_CONJUGATE_PREDICTED_WARM_SEED = 0x01
 end
 
 """Allocation-free result record returned by `conjugate_shadow!`."""
@@ -49,6 +57,8 @@ struct NonsymmetricConjugateResult{T}
     backtracks::Int
     residual::T
     step::T
+    seed_mode::NonsymmetricConjugateSeedMode
+    restored::Bool
 end
 
 """Numerical policy for one deterministic three-dimensional Newton solve."""
@@ -61,6 +71,10 @@ struct NonsymmetricConjugateSettings{T}
     max_bisections::Int
 end
 
+@inline _ns_conjugate_default_bisections(::Type{T}) where {T} = 512
+@inline _ns_conjugate_default_bisections(::Type{BigFloat}) =
+    max(512, precision(BigFloat) + precision(BigFloat))
+
 function NonsymmetricConjugateSettings(
     ::Type{T};
     residual_tolerance=T(256) * eps(one(T)),
@@ -68,7 +82,7 @@ function NonsymmetricConjugateSettings(
     step_safety=T(99) / T(100),
     max_iterations::Integer=64,
     max_backtracks::Integer=64,
-    max_bisections::Integer=512,
+    max_bisections::Integer=_ns_conjugate_default_bisections(T),
 ) where {T<:AbstractFloat}
     return NonsymmetricConjugateSettings{T}(
         convert(T, residual_tolerance),
@@ -83,8 +97,13 @@ end
 """
     NonsymmetricConjugateWorkspace{T}
 
-Preallocated Newton state.  After a successful call, `shadow` stores
-`-gradient(F_*, y)` and `inverse_hessian` stores `hessian(F_*, y)`.
+Preallocated inverse-gradient state.  `valid` certifies the current `shadow`,
+diagnostic primal `hessian`, and authoritative `hessian_factor`;
+`inverse_valid` separately certifies `inverse_hessian`.  A successful public
+`conjugate_shadow!` sets both flags, whereas strict double-secant scaling
+intentionally commits only the former.  The corresponding accepted flags
+prevent a restored shadow or factor from ever silently belonging to a
+different dual point.
 `mapped_gradient` exists only to form a primal-interior cold seed from the
 already validated mapped dual barrier; it is never returned as a Fenchel
 shadow and never supplies the conjugate Hessian.
@@ -99,9 +118,27 @@ mutable struct NonsymmetricConjugateWorkspace{T}
     trial::Vector{T}
     trial_gradient::Vector{T}
     hessian::Matrix{T}
+    hessian_factor::Matrix{T}
     factor::Matrix{T}
     inverse_hessian::Matrix{T}
+    accepted_dual::Vector{T}
+    accepted_shadow::Vector{T}
+    warm_shadow::Vector{T}
+    accepted_hessian::Matrix{T}
+    accepted_hessian_factor::Matrix{T}
+    accepted_inverse_hessian::Matrix{T}
+    hessian_factor_error::T
+    accepted_hessian_factor_error::T
+    gap::T
+    accepted_gap::T
+    accepted_valid::Bool
+    accepted_hessian_factor_valid::Bool
+    accepted_inverse_valid::Bool
+    last_seed_mode::NonsymmetricConjugateSeedMode
     valid::Bool
+    hessian_factor_valid::Bool
+    inverse_valid::Bool
+    root_resolution_limited::Bool
 end
 
 function NonsymmetricConjugateWorkspace(
@@ -120,6 +157,24 @@ function NonsymmetricConjugateWorkspace(
         zeros(T, 3, 3),
         zeros(T, 3, 3),
         zeros(T, 3, 3),
+        zeros(T, 3, 3),
+        zeros(T, 3),
+        zeros(T, 3),
+        zeros(T, 3),
+        zeros(T, 3, 3),
+        zeros(T, 3, 3),
+        zeros(T, 3, 3),
+        T(Inf),
+        T(Inf),
+        zero(T),
+        zero(T),
+        false,
+        false,
+        false,
+        NS_CONJUGATE_MAPPED_COLD_SEED,
+        false,
+        false,
+        false,
         false,
     )
 end

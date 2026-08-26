@@ -91,6 +91,14 @@ function _normalize_constraint_expression(
     domain isa RotatedLorentzCone && shape < 3 && throw(ArgumentError(
         "RotatedLorentzCone constraint dimension must be at least 3",
     ))
+    domain isa ExponentialCone && shape != EXPONENTIAL_CONE_DIMENSION &&
+        throw(ArgumentError(
+            "ExponentialCone constraint dimension must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+        ))
+    domain isa PowerCone && shape != POWER_CONE_DIMENSION &&
+        throw(ArgumentError(
+            "PowerCone constraint dimension must be exactly $POWER_CONE_DIMENSION, got $shape",
+        ))
     expressions = Vector{ScalarAffine{T}}(undef, shape)
     for index in 1:shape
         expressions[index] = _as_affine(model, values[index])

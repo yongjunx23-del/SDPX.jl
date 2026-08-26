@@ -27,6 +27,7 @@ include("ir/layout.jl")
 include("cones/runtime/types.jl")
 include("cones/runtime/product.jl")
 include("cones/runtime/symmetric_api.jl")
+include("cones/runtime/nonsymmetric_api.jl")
 include("ir/canonical.jl")
 include("modeling/model.jl")
 include("modeling/affine.jl")
@@ -66,6 +67,7 @@ include("step_hot.jl")
 # AbstractFactorCache and HotRouteCache.
 include("hsd/hsd.jl")
 include("hsd/nonnegative_hsd.jl")
+include("hsd/nonsymmetric_coupled.jl")
 include("hsd/product_cone_hsd.jl")
 include("hsd/nonsymmetric_schur3.jl")
 include("hsd/product_cone_solve.jl")
@@ -132,7 +134,7 @@ export Model
 export variable!, constraint!, objective!
 export set_start!, set_dual_start!, set_dual_slack_start!
 export Reals, Nonnegative, Nonpositive, ZeroCone
-export LorentzCone, RotatedLorentzCone, PSDCone, ExponentialCone
+export LorentzCone, RotatedLorentzCone, PSDCone, ExponentialCone, PowerCone
 export Minimize, Maximize
 export Settings, Tolerances, Limits, Outputs
 export optimize!, execution_plan

@@ -22,6 +22,7 @@ ZeroCone
 LorentzCone
 RotatedLorentzCone
 ExponentialCone
+PowerCone
 PSDCone
 Minimize
 Maximize

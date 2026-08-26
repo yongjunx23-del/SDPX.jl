@@ -1,17 +1,18 @@
 #=====================================================================#
 #    Public mathematical domain types for the v0.5 Model frontend.
 #
-#    These types are pure mathematical values: they describe the set a
+#    These types are mathematical values: they describe the set a
 #    variable or product-cone block lives in, and the sense of an
-#    objective. They carry no dimension, no data, and no state. A PSD
+#    objective. Cone dimensions remain block metadata; `PowerCone` alone
+#    carries its immutable exponent. A PSD
 #    cone is deliberately dimension-less at this level: the matrix
 #    dimension `n` belongs to the variable / block shape and is recorded
 #    by `SDPX.NativeBlock` (see src/ir/types.jl), never by `PSDCone`
 #    itself. No free/± split, no scalarization, no SOC→PSD lift is
 #    performed anywhere in this file.
 #
-#    Every concrete type below is a singleton immutable value; instances
-#    compare equal exactly when their types are identical.
+#    Every concrete type below is immutable. Parameter-free domains are
+#    singletons, while `PowerCone` values also compare through their exponent.
 #
 #    Include order: this file must be included before refs.jl and
 #    types.jl (which reference these types only via docstrings) and
@@ -74,8 +75,9 @@ struct RotatedLorentzCone end
     SDPX.ExponentialCone
 
 The 3-dimensional exponential cone
-`K_exp = { (x, y, z) : y * exp(x / y) <= z, y > 0 }` together with its
-limit `{ (0, y, z) : y >= 0, z >= 0 }`. The dimension is fixed at 3 and
+`K_exp = { (x, y, z) : y * exp(x / y) <= z, y > 0 }` together with the
+closed limit face `{ (x, 0, z) : x <= 0, z >= 0 }` (that is, the union
+of these two sets). The dimension is fixed at 3 and
 is validated at block construction: an exponential block always has
 vector shape `n == 3`, never more and never less. This type carries no
 data and remains one block — it is never split or lifted.
@@ -87,17 +89,21 @@ struct ExponentialCone end
 
 The power cone of parameter `alpha` in `(0, 1)`:
 `K_pow(alpha) = { (x, y, z) : x^alpha * y^(1-alpha) >= |z|, x >= 0, y >= 0 }`.
-The dimension is fixed at 3. `alpha` is an immutable block parameter stored
-in the block descriptor, never in this type (which is a pure mathematical
-value). This type carries no data and remains one block.
+The dimension is fixed at 3. `alpha` is retained in its source arithmetic
+type and is converted only when the model is canonicalized into the solver's
+working arithmetic.
 """
-struct PowerCone
-    alpha::Float64
-    function PowerCone(alpha::Real)
-        0 < alpha < 1 || throw(ArgumentError("PowerCone alpha must be in (0,1), got $(alpha)"))
-        return new(Float64(alpha))
+struct PowerCone{A<:Real}
+    alpha::A
+    function PowerCone(alpha::A) where {A<:Real}
+        isfinite(alpha) && zero(alpha) < alpha < one(alpha) ||
+            throw(ArgumentError("PowerCone alpha must be finite and in (0,1), got $(alpha)"))
+        return new{A}(alpha)
     end
 end
+
+"""Fixed vector dimension of one power-cone block."""
+const POWER_CONE_DIMENSION = 3
 
 """
     SDPX.PSDCone

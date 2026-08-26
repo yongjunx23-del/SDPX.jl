@@ -128,13 +128,40 @@ const _NH_SYMMETRIC_CASES = (
             @test plan.backend_config.fallback_chain === ()
             @test plan.la_config.fallback_chain === ()
             @test plan.payload isa SDPX.NativeHSDPlan
-            @test plan.payload.formulation === :dense_variable_space_schur
+            @test plan.payload.formulation isa SDPX.DenseHomogeneousBordered
+            @test plan.payload.formulation.layout === :equality_reduced
+            @test plan.payload.formulation.row_scaling ===
+                  :exact_binary_row_scaling
+            @test plan.payload.formulation.border_structure ===
+                  :full_homogeneous_border
+            @test plan.payload.formulation.factorization === :lu
+            @test plan.payload.formulation.pivoting === :partial
+            @test plan.payload.formulation.factor_reuse ===
+                  :factor_once_predictor_corrector_refinement
+            @test plan.payload.formulation.gram_or_metric ===
+                  :native_product_metric
+            @test plan.payload.formulation.backend ===
+                  :native_hsd_binary_row_scaled_border
+            @test plan.payload.formulation.route ===
+                  :dense_homogeneous_bordered
+            @test plan.payload.formulation.dimension ==
+                  plan.payload.product_rank + 1
+            @test plan.payload.formulation.reduced_rank ==
+                  plan.payload.product_rank
+            @test plan.storage_plan.dimension ==
+                  plan.payload.formulation.dimension
+            @test plan.la_config.capability_model.lu
+            @test !plan.la_config.capability_model.cholesky
             @test plan.payload.factorization_reuse ===
-                  :factor_once_predictor_corrector
+                  :factor_once_predictor_corrector_refinement
             @test plan.payload.provider === :native_serial
             @test plan.payload.fallback_chain === ()
             @test SDPX.diagnostics(result) isa SDPX.NativeHSDDiagnostics
             @test SDPX.diagnostics(result).plan === plan
+            selected = SDPX.diagnostics(result).selected_algorithms
+            @test selected.formulation === :dense_homogeneous_bordered
+            @test selected.backend === :native_hsd_binary_row_scaled_border
+            @test selected.factorization_kernel === :lapack_getrf_getrs
         end
     end
 end
@@ -201,6 +228,10 @@ end
     )
     @test SDPX.status(timed) === :time_limit
     @test !SDPX.certificate(timed).valid
+    timed_selected = SDPX.diagnostics(timed).selected_algorithms
+    @test timed_selected.planned_factorization === :lu
+    @test timed_selected.executed_factorization === :not_executed
+    @test timed_selected.executed_factorization_kernel === :not_executed
 
     # H=1 factors, but the homogeneous border is exactly unsafe.  The direct
     # route must expose a finite numerical breakdown, not retry or lift.
@@ -214,7 +245,7 @@ end
         outputs=_nh_outputs(),
     )
     @test SDPX.status(broken_result) === :numerical_breakdown
-    @test broken_result.termination.reason === :direction_breakdown
+    @test broken_result.termination.reason === :singular_kkt
     @test broken_result.iterations == 0
     @test all(isfinite, SDPX.value(broken_result))
     @test all(isfinite, SDPX.dual(broken_result))
@@ -260,6 +291,13 @@ end
     @test inconsistent_result.iterations == 0
     @test SDPX.execution_plan(inconsistent_result).payload.equality_status ===
           SDPX.HSDEqualityInconsistent
+    inconsistent_selected =
+        SDPX.diagnostics(inconsistent_result).selected_algorithms
+    @test inconsistent_selected.planned_factorization === :not_applicable
+    @test inconsistent_selected.executed_factorization === :not_executed
+    @test inconsistent_selected.execution_path === :native_hsd
+    @test SDPX.diagnostics(inconsistent_result).termination.stage ===
+          :equality_reduction
 
     equality_only = SDPX.Model(Float64)
     ex = SDPX.variable!(equality_only, :x, 1; domain=SDPX.Reals())
@@ -272,6 +310,20 @@ end
     @test SDPX.status(equality_only_result) === :optimal
     @test SDPX.certificate(equality_only_result).valid
     @test equality_only_result.termination.reason === :verified_affine_space_optimum
+    equality_only_plan = SDPX.execution_plan(equality_only_result)
+    equality_only_descriptor = equality_only_plan.payload.formulation
+    @test equality_only_descriptor isa SDPX.DenseHomogeneousBordered
+    @test !equality_only_descriptor.available
+    @test equality_only_descriptor.reason === :equality_only
+    @test equality_only_descriptor.dimension == 0
+    @test equality_only_plan.storage_plan.dimension == 0
+    @test equality_only_plan.classification.cone === :lp
+    @test equality_only_plan.classification.size === :small
+    equality_only_selected =
+        SDPX.diagnostics(equality_only_result).selected_algorithms
+    @test equality_only_selected.planned_factorization === :not_applicable
+    @test equality_only_selected.executed_factorization === :not_applicable
+    @test equality_only_selected.execution_path === :affine_space
 
     all_free_ray = SDPX.Model(Float64)
     rx = SDPX.variable!(all_free_ray, :x, 1; domain=SDPX.Reals())
@@ -298,6 +350,8 @@ end
     @test ambiguous_result.termination.reason === :equality_rank_ambiguous
     @test !SDPX.certificate(ambiguous_result).valid
     @test ambiguous_result.iterations == 0
+    @test SDPX.diagnostics(ambiguous_result).termination.stage ===
+          :equality_reduction
 
     product_ambiguous = SDPX.Model(Float64)
     pax = SDPX.variable!(product_ambiguous, :x, 2; domain=SDPX.Reals())
@@ -378,6 +432,8 @@ end
     for (reason, settings) in (
         (:native_hsd_formulation_unavailable,
          _nh_settings(Float64; formulation=:dense_augmented_kkt)),
+        (:native_hsd_formulation_unavailable,
+         _nh_settings(Float64; formulation=:variable_space_schur)),
         (:native_hsd_equilibration_unavailable,
          _nh_settings(Float64; scaling=:equilibrate)),
         (:native_hsd_presolve_unavailable,
@@ -462,6 +518,123 @@ end
     end
     @test exp_error isa SDPX.PublicOptimizeError
     @test exp_error.reason === :native_hsd_nonsymmetric_unavailable
+
+    power_model = SDPX.Model(Float64)
+    p = SDPX.variable!(power_model, :p, 3; domain=SDPX.PowerCone(0.5))
+    SDPX.objective!(power_model, SDPX.Minimize(), p[1])
+    power_error = try
+        SDPX.optimize!(
+            power_model;
+            settings=_nh_settings(Float64),
+            outputs=_nh_outputs(),
+        )
+        nothing
+    catch exception
+        exception
+    end
+    @test power_error isa SDPX.PublicOptimizeError
+    @test power_error.reason === :native_hsd_nonsymmetric_unavailable
+end
+
+@testset "native HSD future hybrid descriptor remains truthful and internal" begin
+    exp_model = SDPX.Model(Float64)
+    e = SDPX.variable!(exp_model, :e, 3; domain=SDPX.ExponentialCone())
+    SDPX.objective!(exp_model, SDPX.Minimize(), e[1])
+    program = SDPX.compile_product_cone_model(exp_model)
+    canonical = SDPX.canonicalize(program)
+    reduction = SDPX.hsd_equality_reduce(canonical)
+    @test reduction.status === SDPX.HSDEqualityReady
+    reduced = reduction.reduced
+    row_reduction = SDPX._hsd_rowspace_reduction(reduced)
+    descriptor = SDPX._native_hsd_formulation_descriptor(
+        canonical,
+        reduction,
+        row_reduction.rank,
+        false,
+        false,
+    )
+    @test descriptor isa SDPX.DenseHybridCoupled
+    @test descriptor.available
+    @test descriptor.dimension === row_reduction.rank +
+          descriptor.nonsymmetric_dimension + 2
+    @test descriptor.reduced_rank === row_reduction.rank
+    @test descriptor.nonsymmetric_dimension === 3
+    @test descriptor.nonsymmetric_blocks === 1
+    @test descriptor.row_scaling === :nonsymmetric_factor_coordinates
+    @test descriptor.coordinate_system === :factor_coordinate
+    @test descriptor.factorization === :lu
+    @test descriptor.pivoting === :partial
+    @test descriptor.factor_reuse ===
+          :factor_once_predictor_corrector_refinement
+    @test descriptor.gram_or_metric === :hybrid_factor_coordinate_metric
+    @test descriptor.metric === :hybrid_factor_coordinate_metric
+    @test descriptor.backend === :native_hsd_factor_coordinate_coupled
+    @test SDPX.formulation_symbol(descriptor) === :dense_hybrid_coupled
+    hybrid_plan = SDPX.FormulationPlan(
+        descriptor,
+        :ready,
+        :native_hsd_typed_formulation,
+    )
+    @test SDPX.kkt_backend_from_formulation(hybrid_plan, :native_hsd, 1) ===
+          descriptor.backend
+
+    # The numerical product-HSD core and original-coordinate certificate are
+    # exercised internally for a fixed Exp model, while the public policy gate
+    # remains closed until the hybrid route is formally enabled.
+    certificate_model = SDPX.Model(Float64)
+    z = SDPX.variable!(certificate_model, :z, 3;
+                       domain=SDPX.ExponentialCone())
+    SDPX.constraint!(certificate_model, :z1, z[1] - 1, SDPX.ZeroCone())
+    SDPX.constraint!(certificate_model, :z2, z[2] - 1, SDPX.ZeroCone())
+    SDPX.objective!(certificate_model, SDPX.Minimize(), z[3])
+    certificate_program = SDPX.compile_product_cone_model(certificate_model)
+    certificate_route = SDPX.classify_native_cone_program(certificate_program)
+    certificate_settings = _nh_settings(
+        Float64;
+        tolerances=_nh_tolerances(Float64, 1e-7),
+    )
+    certificate_canonical, _, core = SDPX._public_native_hsd_core(
+        certificate_model,
+        certificate_program,
+        certificate_route,
+        certificate_settings,
+    )
+    @test core.status === SDPX.Optimal
+    @test core.product_status === SDPX.ProductHSDOptimal
+    @test core.recovery_valid
+    @test all(isfinite, core.x)
+    internal_result = SDPX._public_result_from_native_hsd(
+        certificate_model,
+        certificate_program,
+        certificate_canonical,
+        core,
+        certificate_settings,
+        _nh_outputs(),
+    )
+    @test SDPX.status(internal_result) === :optimal
+    @test SDPX.certificate(internal_result).valid
+    @test SDPX.certificate(internal_result).method === :original_coordinates
+    @test SDPX.value(internal_result)[3] ≈ exp(1.0) atol=2e-5
+    internal_plan = SDPX.execution_plan(internal_result)
+    @test internal_plan.payload.formulation isa SDPX.DenseHybridCoupled
+    @test internal_plan.backend_config.route ===
+          :native_hsd_factor_coordinate_coupled
+    @test internal_plan.gram_kernel === :hybrid_factor_coordinate_metric
+    internal_selected = SDPX.diagnostics(internal_result).selected_algorithms
+    @test internal_selected.metric === :hybrid_factor_coordinate_metric
+    @test internal_selected.backend === :native_hsd_factor_coordinate_coupled
+    public_error = try
+        SDPX.optimize!(
+            certificate_model;
+            settings=certificate_settings,
+            outputs=_nh_outputs(),
+        )
+        nothing
+    catch exception
+        exception
+    end
+    @test public_error isa SDPX.PublicOptimizeError
+    @test public_error.reason === :native_hsd_nonsymmetric_unavailable
 end
 
 @testset "native mixed route cannot call lowerer or PSD lift" begin

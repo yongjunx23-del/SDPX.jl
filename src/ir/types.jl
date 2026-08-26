@@ -92,12 +92,14 @@ Descriptor of ONE native product-cone block.
 
 Fields
 - `cone::Symbol` — cone kind: `:free`, `:nonnegative`,
-  `:nonpositive`, `:zero`, `:soc`, `:rsoc`, `:psd` or `:exp`.
-- `domain` — the matching mathematical singleton (`Reals()`,
-  `Nonnegative()`, …, `PSDCone()`, `ExponentialCone()`).
+  `:nonpositive`, `:zero`, `:soc`, `:rsoc`, `:psd`, `:exp` or
+  `:power`.
+- `domain` — the matching mathematical domain (`Reals()`,
+  `Nonnegative()`, …, `PSDCone()`, `ExponentialCone()` or
+  `PowerCone(alpha)`).
 - `shape::Int` — block shape: matrix dimension `n` for `:psd`,
   vector dimension `n` for every other cone (fixed at 3 for
-  `:exp`).
+  `:exp` and `:power`).
 - `offset::Int` — 1-based first scalar variable position of this
   block in the global column vector (`blocks` are concatenated in
   order; `offset` is validated to be exactly one past the previous
@@ -128,6 +130,11 @@ struct NativeBlock
         if cone === :exp && Int(shape) != EXPONENTIAL_CONE_DIMENSION
             throw(ArgumentError(
                 "ExponentialCone block shape must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+            ))
+        end
+        if cone === :power && Int(shape) != POWER_CONE_DIMENSION
+            throw(ArgumentError(
+                "PowerCone block shape must be exactly $POWER_CONE_DIMENSION, got $shape",
             ))
         end
         offset >= 1 || throw(ArgumentError("block offset must be >= 1, got $offset"))
@@ -164,9 +171,9 @@ Ordered affine-cone block over the rows of the equality map.
 Fields
 - `domain` — the affine-cone domain of the block (`Reals`,
   `Nonnegative`, `Nonpositive`, `ZeroCone`, `LorentzCone`,
-  `RotatedLorentzCone`, `PSDCone` or `ExponentialCone`; the
-  exponential cone's shape is fixed at
-  `EXPONENTIAL_CONE_DIMENSION`).
+  `RotatedLorentzCone`, `PSDCone`, `ExponentialCone` or
+  `PowerCone(alpha)`); the exponential and power cone shapes are fixed
+  at 3 (`EXPONENTIAL_CONE_DIMENSION` and `POWER_CONE_DIMENSION`).
 - `shape::Int` — vector dimension for vector cones and matrix dimension
   for a PSD block.
 - `offset::Int` — 1-based first global row of this block.
@@ -190,6 +197,11 @@ struct RowBlock
         if domain isa ExponentialCone && Int(shape) != EXPONENTIAL_CONE_DIMENSION
             throw(ArgumentError(
                 "ExponentialCone row block shape must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
+            ))
+        end
+        if domain isa PowerCone && Int(shape) != POWER_CONE_DIMENSION
+            throw(ArgumentError(
+                "PowerCone row block shape must be exactly $POWER_CONE_DIMENSION, got $shape",
             ))
         end
         block_length = variable_length(domain, shape)

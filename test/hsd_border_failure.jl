@@ -91,7 +91,7 @@ end
         @test all(iszero, state.dxr)
     end
 
-    @testset "product caller propagates the same finite failure" begin
+    @testset "product caller classifies the singular full border" begin
         base_state = _p0b_border_state(Float64)
         product = SDPX.ProductConeHSDState(base_state.canonical)
         SDPX.product_hsd_cold_start!(product)
@@ -100,8 +100,9 @@ end
 
         code = SDPX.product_hsd_step!(product)
 
-        @test code === SDPX.HSDStepDirectionFailed
-        @test SDPX.kkt_factor_count(base.driver) == 1
+        @test code === SDPX.HSDStepSingularKKT
+        @test SDPX.product_hsd_factor_count(product) == 1
+        @test SDPX.kkt_factor_count(base.driver) == 0
         @test base.record.iterations == 0
         @test _p0b_iterate_unchanged(base, snapshot)
         @test _p0b_all_directions_finite(base)

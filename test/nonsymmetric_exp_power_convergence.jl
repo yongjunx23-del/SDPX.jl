@@ -63,10 +63,10 @@ end
         SDPX.ProductHSDVerifiedAcceptedStep,
         SDPX.ProductHSDVerifiedTerminalNewtonTrial,
     )
-    # The verified optimal certificate holds and the objective is accurate to
-    # ~4e-8.  `normalized_residual` reflects the same verified convergence;
-    # assert the tight physical level the solver actually reaches (~2e-8).
-    @test exp_result.normalized_residual <= 1.0e-7
+    # `normalized_residual` is the recovered, homogeneous-scale-invariant
+    # quantity checked by the optimality verifier, not the raw embedding
+    # residual whose magnitude changes with tau.
+    @test exp_result.normalized_residual <= 1.0e-8
     @test exp_result.x[1] ≈ 1.0 rtol=1.0e-6 atol=1.0e-6
     @test all(isfinite, exp_result.hsd_x)
     @test all(isfinite, exp_result.hsd_s)
@@ -89,7 +89,7 @@ end
         SDPX.ProductHSDVerifiedAcceptedStep,
         SDPX.ProductHSDVerifiedTerminalNewtonTrial,
     )
-    @test power_result.normalized_residual < 1.0e-7
+    @test power_result.normalized_residual <= 1.0e-8
     @test power_result.x[1] ≈ -1.0 rtol=1.0e-6 atol=1.0e-6
     @test power_result.iterations > 0
 end

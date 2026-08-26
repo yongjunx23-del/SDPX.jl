@@ -111,6 +111,23 @@ function _ns3_dense_oracle(A_dense, offsets, metrics, b, rhs)
     )
 end
 
+function _ns3_theta_dense_oracle(A_dense, offsets, thetas, b, rhs)
+    T = eltype(A_dense)
+    blocks = length(offsets)
+    metrics = zeros(T, 3, 3, blocks)
+    @inbounds for block in 1:blocks
+        theta = Matrix{T}(undef, 3, 3)
+        for column in 1:3, row in 1:3
+            theta[row, column] = thetas[row, column, block]
+        end
+        metric = inv(Symmetric(theta))
+        for column in 1:3, row in 1:3
+            metrics[row, column, block] = metric[row, column]
+        end
+    end
+    return _ns3_dense_oracle(A_dense, offsets, metrics, b, rhs)
+end
+
 function _ns3_effective_dense(A::SparseMatrixCSC{T}) where {T}
     dense = zeros(T, size(A))
     @inbounds for column in axes(A, 2)
@@ -193,6 +210,50 @@ end
     return total, maximum_call
 end
 
+@noinline function _ns3_theta_compiled_call!(fixture)
+    return SDPX.try_assemble_nonsymmetric_schur3_theta!(
+        fixture.workspace,
+        fixture.H,
+        fixture.at_g_b,
+        fixture.bt_g_a,
+        fixture.at_g_rhs,
+        fixture.metrics,
+        fixture.b,
+        fixture.rhs,
+    )
+end
+
+function _ns3_check_theta_fixture(::Type{T}) where {T<:AbstractFloat}
+    fixture = _ns3_fixture(T)
+    result = _ns3_theta_compiled_call!(fixture)
+    oracle = _ns3_theta_dense_oracle(
+        fixture.dense_a,
+        fixture.offsets,
+        fixture.metrics,
+        fixture.b,
+        fixture.rhs,
+    )
+    tolerance = T(1_048_576) * eps(one(T))
+    @test result.status === SDPX.NS_SCHUR3_ASSEMBLED
+    @test result.reason === SDPX.NS_SCHUR3_CONVERGED
+    @test fixture.H == transpose(fixture.H)
+    @test isapprox(fixture.H, oracle.H; atol=tolerance, rtol=tolerance)
+    @test isapprox(
+        fixture.at_g_b, oracle.at_g_b; atol=tolerance, rtol=tolerance,
+    )
+    @test isapprox(
+        fixture.bt_g_a, oracle.bt_g_a; atol=tolerance, rtol=tolerance,
+    )
+    @test isapprox(
+        fixture.at_g_rhs, oracle.at_g_rhs; atol=tolerance, rtol=tolerance,
+    )
+    @test isapprox(result.b_g_b, oracle.b_g_b; atol=tolerance, rtol=tolerance)
+    @test isapprox(
+        result.b_g_rhs, oracle.b_g_rhs; atol=tolerance, rtol=tolerance,
+    )
+    return fixture, result
+end
+
 @testset "nonsymmetric Schur3 typed ABI" begin
     @test isbitstype(SDPX.NonsymmetricSchur3Status)
     @test isbitstype(SDPX.NonsymmetricSchur3Reason)
@@ -222,6 +283,57 @@ end
         @test all(precision(value) == 256 for value in fixture.at_g_b)
         @test all(precision(value) == 256 for value in fixture.at_g_rhs)
     end
+end
+
+@testset "factor-space Theta Schur matches independent inverse oracle" begin
+    for T in (
+        Float64,
+        _NS3_MF.Float64x2,
+        _NS3_MF.Float64x3,
+        _NS3_MF.Float64x4,
+    )
+        @testset "$T" begin
+            fixture, result = _ns3_check_theta_fixture(T)
+            @test isbits(result)
+            _ns3_theta_compiled_call!(fixture)
+            total = 0
+            maximum_call = 0
+            for _ in 1:10
+                bytes = @allocated _ns3_theta_compiled_call!(fixture)
+                total += bytes
+                maximum_call = max(maximum_call, bytes)
+            end
+            @test total == 0
+            @test maximum_call == 0
+        end
+    end
+    setprecision(BigFloat, 256) do
+        fixture, _ = _ns3_check_theta_fixture(BigFloat)
+        @test all(value -> precision(value) == 256, fixture.H)
+    end
+
+    # A structurally zero column remains exactly zero in every contraction.
+    fixture = _ns3_fixture(Float64)
+    zero_A = copy(fixture.A)
+    zero_A[:, 5] .= 0.0
+    dropzeros!(zero_A)
+    workspace = SDPX.NonsymmetricSchur3Workspace(zero_A, fixture.offsets)
+    result = SDPX.try_assemble_nonsymmetric_schur3_theta!(
+        workspace,
+        fixture.H,
+        fixture.at_g_b,
+        fixture.bt_g_a,
+        fixture.at_g_rhs,
+        fixture.metrics,
+        fixture.b,
+        fixture.rhs,
+    )
+    @test result.status === SDPX.NS_SCHUR3_ASSEMBLED
+    @test all(iszero, fixture.H[:, 5])
+    @test all(iszero, fixture.H[5, :])
+    @test iszero(fixture.at_g_b[5])
+    @test iszero(fixture.bt_g_a[5])
+    @test iszero(fixture.at_g_rhs[5])
 end
 
 @testset "raw duplicate CSC rows preserve linear-operator semantics" begin
@@ -280,6 +392,62 @@ function _ns3_failure_call(fixture, metrics, b, rhs; H=fixture.H)
     @test iszero(result.b_g_b)
     @test iszero(result.b_g_rhs)
     return result
+end
+
+function _ns3_theta_failure_call(fixture, thetas, b, rhs)
+    fill!(fixture.H, 9)
+    fill!(fixture.at_g_b, 9)
+    fill!(fixture.bt_g_a, 9)
+    fill!(fixture.at_g_rhs, 9)
+    result = SDPX.try_assemble_nonsymmetric_schur3_theta!(
+        fixture.workspace,
+        fixture.H,
+        fixture.at_g_b,
+        fixture.bt_g_a,
+        fixture.at_g_rhs,
+        thetas,
+        b,
+        rhs,
+    )
+    @test all(iszero, fixture.H)
+    @test all(iszero, fixture.at_g_b)
+    @test all(iszero, fixture.bt_g_a)
+    @test all(iszero, fixture.at_g_rhs)
+    @test iszero(result.b_g_b)
+    @test iszero(result.b_g_rhs)
+    return result
+end
+
+@testset "factor-space Theta Schur failures are typed and closed" begin
+    fixture = _ns3_fixture(Float64)
+
+    nonfinite = copy(fixture.metrics)
+    nonfinite[1, 1, 1] = Inf
+    result = _ns3_theta_failure_call(
+        fixture, nonfinite, fixture.b, fixture.rhs,
+    )
+    @test result.reason === SDPX.NS_SCHUR3_NONFINITE_METRIC
+
+    nonsymmetric = copy(fixture.metrics)
+    nonsymmetric[1, 2, 1] += 1e-5
+    result = _ns3_theta_failure_call(
+        fixture, nonsymmetric, fixture.b, fixture.rhs,
+    )
+    @test result.reason === SDPX.NS_SCHUR3_NONSYMMETRIC_METRIC
+
+    indefinite = copy(fixture.metrics)
+    indefinite[:, :, 1] .= [1.0 2.0 0.0; 2.0 1.0 0.0; 0.0 0.0 1.0]
+    result = _ns3_theta_failure_call(
+        fixture, indefinite, fixture.b, fixture.rhs,
+    )
+    @test result.reason === SDPX.NS_SCHUR3_METRIC_NOT_SPD
+
+    huge_b = copy(fixture.b)
+    huge_b[fixture.offsets[1]] = floatmax(Float64)
+    result = _ns3_theta_failure_call(
+        fixture, fixture.metrics, huge_b, fixture.rhs,
+    )
+    @test result.reason === SDPX.NS_SCHUR3_NONFINITE_RESULT
 end
 
 @testset "typed fail-closed numerical and structural gates" begin

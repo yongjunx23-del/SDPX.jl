@@ -19,6 +19,7 @@ const FINAL_PUBLIC_EXPORTS = Set((
     :RotatedLorentzCone,
     :PSDCone,
     :ExponentialCone,
+    :PowerCone,
     :Minimize,
     :Maximize,
     :Settings,

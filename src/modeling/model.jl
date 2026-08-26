@@ -29,6 +29,10 @@ function _validate_variable_shape(domain::ProductConeDomain, shape::Int)
         throw(ArgumentError(
             "ExponentialCone variable dimension must be exactly $EXPONENTIAL_CONE_DIMENSION, got $shape",
         ))
+    domain isa PowerCone && shape != POWER_CONE_DIMENSION &&
+        throw(ArgumentError(
+            "PowerCone variable dimension must be exactly $POWER_CONE_DIMENSION, got $shape",
+        ))
     return shape
 end
 

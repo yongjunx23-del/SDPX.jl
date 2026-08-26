@@ -179,9 +179,12 @@ function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) wh
         )
         return _svec_psd_membership(v, map, tol, T)
     elseif cone === :exp
-        return dual ? exp_dual_membership(v[1], v[2], v[3]; tol=tol) : exp_membership(v[1], v[2], v[3])
+        return dual ? exp_dual_membership(v[1], v[2], v[3]; tol=tol) :
+               exp_membership(v[1], v[2], v[3]; tol=tol)
     elseif cone === :power
-        return dual ? power_dual_membership(v[1], v[2], v[3], block.parameter; tol=tol) : power_membership(v[1], v[2], v[3], block.parameter)
+        return dual ?
+               power_dual_membership(v[1], v[2], v[3], block.parameter; tol=tol) :
+               power_membership(v[1], v[2], v[3], block.parameter; tol=tol)
     elseif cone === :free
         return !dual # free dual is zero cone
     elseif cone === :zero

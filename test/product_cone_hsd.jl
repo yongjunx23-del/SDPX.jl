@@ -387,10 +387,12 @@ end
             scalar_aff = -tau0 * kappa0
             affine_ref, Jaff, rhsaff = _pch_full_newton(base, Theta, h_aff, scalar_aff)
 
-            fact0 = SDPX.kkt_factor_count(base.driver)
+            fact0 = SDPX.product_hsd_factor_count(state)
+            old_h_fact0 = SDPX.kkt_factor_count(base.driver)
             @test SDPX.product_hsd_step!(state) === SDPX.HSDStepOK
-            fact1 = SDPX.kkt_factor_count(base.driver)
+            fact1 = SDPX.product_hsd_factor_count(state)
             @test fact1 - fact0 == 1
+            @test SDPX.kkt_factor_count(base.driver) == old_h_fact0 == 0
             affine = _pch_direction_vector(base; affine=true)
             @test affine ≈ affine_ref rtol=3e-8 atol=3e-9
             @test maximum(abs.(Jaff * affine - rhsaff)) < 3e-8
@@ -450,6 +452,426 @@ end
     return nothing
 end
 
+function _pch_prime_roundtrip!(state)
+    base = state.base
+    SDPX.hsd_residual!(base)
+    SDPX.try_update_scaling!(state.runtime, base.s, base.y, base.mu) ||
+        return false
+    @inbounds for k in 1:base.m
+        state.g_input[k] = (isodd(k) ? -1.0 : 1.0) * (k + 2) / 17
+    end
+    SDPX.apply_G!(state.runtime, base.dy, state.g_input)
+    SDPX.apply_Theta!(state.runtime, base.e, base.dy)
+    return true
+end
+
+"""Prepare a deterministic pre-line-search terminal-authority direction.
+
+The ordinary public step refreshes `base.rD` after line search, so its
+post-step iterate no longer carries the Newton RHS that belongs to the saved
+bordered solve.  The strict bordered authority is intentionally exercised at
+the same point as the production caller: after the two bounded corrections,
+before the accepted pair is committed by line search.
+"""
+function _pch_authority_direction!()
+    state = _pch_state(
+        Float64, [(:nonnegative, 2), (:soc, 3), (:psd, 2)],
+    )
+    for _ in 1:7
+        SDPX.product_hsd_step!(state) === SDPX.HSDStepOK || return nothing
+    end
+    base = state.base
+    SDPX.hsd_residual!(base)
+    SDPX.try_update_scaling!(state.runtime, base.s, base.y, base.mu) ||
+        return nothing
+    base.epoch += 1
+    border_scalar = SDPX._product_hsd_form_schur_border!(state)
+    isfinite(border_scalar) || return nothing
+    SDPX._product_hsd_assemble_bordered!(state, border_scalar) ||
+        return nothing
+    SDPX._product_hsd_factor_bordered!(state) || return nothing
+    SDPX._product_hsd_direction!(state) || return nothing
+    ratio = base.mu_aff / base.mu
+    sigma = min(ratio * ratio * ratio, 1.0)
+    scalar_rhs = sigma * base.mu - base.tau * base.kappa -
+                 base.dtau_a * base.dkappa_a
+    return state, scalar_rhs
+end
+
+@testset "symmetric bordered step-8 factor and certificate regression" begin
+    state = _pch_state(
+        Float64, [(:nonnegative, 2), (:soc, 3), (:psd, 2)],
+    )
+    @test all(1:7) do _
+        SDPX.product_hsd_step!(state) === SDPX.HSDStepOK
+    end
+    workspace = state.symmetric_bordered
+    factors_before = SDPX.product_hsd_factor_count(state)
+    old_h_factors = SDPX.kkt_factor_count(state.base.driver)
+
+    @test SDPX.product_hsd_step!(state) === SDPX.HSDStepOK
+    @test SDPX.product_hsd_factor_count(state) == factors_before + 1
+    @test SDPX.kkt_factor_count(state.base.driver) == old_h_factors == 0
+    @test workspace.factor_epoch == workspace.assembly_epoch == state.base.epoch
+    @test workspace.factor_certified
+    # Predictor, two bounded correction solves, and corrector all reused the
+    # single epoch factor. No monotonicity of the first correction is assumed.
+    @test workspace.solves == 4
+    @test workspace.refinements == 2
+    @test workspace.accumulations == 2
+    @test cond(workspace.matrix) > 1e12
+    @test cond(workspace.factor_matrix) < 1e6
+    @test SDPX._product_bordered_transform_matrix_ok(workspace)
+    @test SDPX._product_bordered_factor_certificate!(workspace)
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+    @test SDPX._product_bordered_original_solution_ok!(workspace)
+    @test all(abs.(workspace.residual) .<= workspace.bound)
+
+    # A further solve with the retained corrector RHS must consume no factor.
+    retained_factor_count = SDPX.product_hsd_factor_count(state)
+    @test SDPX._product_bordered_staged_solve!(workspace)
+    @test SDPX.product_hsd_factor_count(state) == retained_factor_count
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+    @test SDPX._product_bordered_original_solution_ok!(workspace)
+end
+
+@testset "symmetric bordered transform and corruption gates" begin
+    state = _pch_state(
+        Float64, [(:nonnegative, 2), (:soc, 3), (:psd, 2)],
+    )
+    @test SDPX.product_hsd_step!(state) === SDPX.HSDStepOK
+    workspace = state.symmetric_bordered
+    factor_count = SDPX.product_hsd_factor_count(state)
+
+    saved_matrix_entry = workspace.factor_matrix[1, 1]
+    workspace.factor_matrix[1, 1] = nextfloat(saved_matrix_entry)
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.factor_matrix[1, 1] = saved_matrix_entry
+
+    saved_scale = workspace.row_scale[1]
+    workspace.row_scale[1] = 0.0
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.row_scale[1] = saved_scale
+    workspace.row_scale[1] = ldexp(saved_scale, 10)
+    @test isfinite(workspace.row_scale[1])
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.row_scale[1] = saved_scale
+
+    saved_original_matrix_entry = workspace.matrix[1, 1]
+    workspace.matrix[1, 1] = saved_original_matrix_entry +
+        1024 * max(1.0, abs(saved_original_matrix_entry))
+    @test isfinite(workspace.matrix[1, 1])
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.matrix[1, 1] = saved_original_matrix_entry
+
+    saved_exponent = workspace.row_exponent[1]
+    workspace.row_exponent[1] = saved_exponent + 1
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    workspace.row_exponent[1] = saved_exponent
+
+    saved_order = workspace.transform_order
+    workspace.transform_order = 0x00
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    workspace.transform_order = saved_order
+
+    saved_rhs = workspace.factor_rhs[1]
+    workspace.factor_rhs[1] = nextfloat(saved_rhs)
+    @test !SDPX._product_bordered_transform_rhs_ok(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.factor_rhs[1] = saved_rhs
+
+    workspace.factor_matrix[1, 1] = NaN
+    @test !SDPX._product_bordered_transform_matrix_ok(workspace)
+    workspace.factor_matrix[1, 1] = saved_matrix_entry
+
+    factors = workspace.driver.route.factors
+    saved_factor_entry = factors[1, 1]
+    factors[1, 1] = saved_factor_entry +
+        1024 * max(1.0, abs(saved_factor_entry))
+    @test isfinite(factors[1, 1])
+    @test !SDPX._product_bordered_factor_certificate!(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    factors[1, 1] = saved_factor_entry
+    @test SDPX._product_bordered_factor_certificate!(workspace)
+
+    saved_lower_entry = factors[2, 1]
+    factors[2, 1] = saved_lower_entry +
+        1024 * max(1.0, abs(saved_lower_entry))
+    @test isfinite(factors[2, 1])
+    @test !SDPX._product_bordered_factor_certificate!(workspace)
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    factors[2, 1] = saved_lower_entry
+    @test SDPX._product_bordered_factor_certificate!(workspace)
+
+    saved_factor_epoch = workspace.factor_epoch
+    workspace.factor_epoch += 1
+    @test !SDPX._product_hsd_prepare_bordered_rhs!(state, -1.0)
+    @test workspace.last_reason === SDPX.SYMMETRIC_BORDERED_EPOCH_MISMATCH
+    workspace.factor_epoch = saved_factor_epoch
+
+    saved_solution = copy(workspace.solution)
+    workspace.solution[1] += 1024 * max(1.0, abs(workspace.solution[1]))
+    @test !SDPX._product_bordered_triangular_solution_ok!(
+        workspace, workspace.solution, workspace.factor_rhs,
+        8 * workspace.dimension,
+    )
+    corrupted_factor_ok =
+        SDPX._product_bordered_factor_solution_ok!(workspace)
+    corrupted_original_ok =
+        SDPX._product_bordered_original_solution_ok!(workspace)
+    @test !(corrupted_factor_ok && corrupted_original_ok)
+    copyto!(workspace.solution, saved_solution)
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+    @test SDPX._product_bordered_original_solution_ok!(workspace)
+
+    saved_snapshot = workspace.certified_solution[1]
+    workspace.certified_solution[1] = saved_snapshot +
+        1024 * max(1.0, abs(saved_snapshot))
+    @test isfinite(workspace.certified_solution[1])
+    @test !SDPX._product_bordered_factor_solution_ok!(workspace)
+    workspace.certified_solution[1] = saved_snapshot
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+
+    saved_bound = workspace.bound[1]
+    saved_certified_bound = workspace.certified_factor_bound[1]
+    workspace.bound[1] = saved_bound + 1024 * max(1.0, abs(saved_bound))
+    @test isfinite(workspace.bound[1])
+    @test !SDPX._product_bordered_original_solution_ok!(workspace)
+    workspace.bound[1] = saved_bound
+    workspace.certified_factor_bound[1] = saved_certified_bound +
+        1024 * max(1.0, abs(saved_certified_bound))
+    @test isfinite(workspace.certified_factor_bound[1])
+    @test !SDPX._product_bordered_original_solution_ok!(workspace)
+    workspace.certified_factor_bound[1] = saved_certified_bound
+    @test SDPX._product_bordered_original_solution_ok!(workspace)
+    @test SDPX._product_bordered_physical_snapshot_ok(workspace)
+
+    saved_physical_bound = workspace.bound[1]
+    saved_physical_snapshot = workspace.certified_physical_bound[1]
+    workspace.bound[1] = saved_physical_bound +
+        1024 * max(1.0, abs(saved_physical_bound))
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.bound[1] = saved_physical_bound
+    workspace.certified_physical_bound[1] = saved_physical_snapshot +
+        1024 * max(1.0, abs(saved_physical_snapshot))
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.certified_physical_bound[1] = saved_physical_snapshot
+    workspace.original_solution_certified = false
+    @test !SDPX._product_bordered_physical_snapshot_ok(workspace)
+    workspace.original_solution_certified = true
+    @test SDPX._product_bordered_physical_snapshot_ok(workspace)
+
+    prepared = _pch_authority_direction!()
+    @test prepared !== nothing
+    authority_state, authority_scalar_rhs = prepared
+    authority_workspace = authority_state.symmetric_bordered
+    @test authority_workspace.solves == 4
+    @test authority_workspace.refinements == 2
+    @test SDPX._product_bordered_physical_snapshot_ok(
+        authority_workspace,
+    )
+    saved_refinements = authority_workspace.refinements
+    authority_workspace.refinements = 1
+    @test !SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
+    @test !SDPX._product_hsd_symmetric_scalar_residual_ok(
+        authority_state, authority_scalar_rhs,
+    )
+    authority_workspace.refinements = saved_refinements
+    @test SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
+    saved_dy = authority_state.base.dy[1]
+    authority_state.base.dy[1] = saved_dy +
+        1024 * max(1.0, abs(saved_dy))
+    @test isfinite(authority_state.base.dy[1])
+    @test !SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
+    authority_state.base.dy[1] = saved_dy
+    @test SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
+
+    @test SDPX._product_hsd_symmetric_scalar_residual_ok(
+        authority_state, authority_scalar_rhs,
+    )
+    saved_dkappa = authority_state.base.dkappa
+    authority_state.base.dkappa = saved_dkappa +
+        1024 * max(1.0, abs(saved_dkappa))
+    @test isfinite(authority_state.base.dkappa)
+    @test !SDPX._product_hsd_symmetric_scalar_residual_ok(
+        authority_state, authority_scalar_rhs,
+    )
+    authority_state.base.dkappa = saved_dkappa
+    @test SDPX._product_hsd_symmetric_scalar_residual_ok(
+        authority_state, authority_scalar_rhs,
+    )
+
+    # A retained accumulated candidate is accepted only while it exactly
+    # matches the preallocated sum snapshot made from certified raw solves.
+    copyto!(workspace.previous_solution, workspace.solution)
+    fill!(workspace.correction_solution, 0.0)
+    copyto!(workspace.certified_solution, workspace.solution)
+    workspace.accumulated_candidate = true
+    workspace.candidate_epoch = workspace.factor_epoch
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+    workspace.solution[1] += 1024 * max(1.0, abs(workspace.solution[1]))
+    @test !SDPX._product_bordered_factor_solution_ok!(workspace)
+    copyto!(workspace.solution, workspace.certified_solution)
+
+    saved_previous = workspace.previous_solution[1]
+    workspace.previous_solution[1] = saved_previous +
+        1024 * max(1.0, abs(saved_previous))
+    @test !SDPX._product_bordered_factor_solution_ok!(workspace)
+    workspace.previous_solution[1] = saved_previous
+
+    saved_correction = workspace.correction_solution[1]
+    workspace.correction_solution[1] = saved_correction + 1024.0
+    @test !SDPX._product_bordered_factor_solution_ok!(workspace)
+    workspace.correction_solution[1] = saved_correction
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+
+    workspace.accumulated_candidate = false
+    @test SDPX._product_bordered_factor_solution_ok!(workspace)
+    @test SDPX._product_bordered_original_solution_ok!(workspace)
+    @test SDPX.product_hsd_factor_count(state) == factor_count
+
+    # A zero-work row has an exact certificate: no nonzero residual is
+    # admitted through a relative or absolute residual floor.
+    @test SDPX._product_bordered_zero_safe_close(0.0, 0.0)
+    @test !SDPX._product_bordered_zero_safe_close(nextfloat(0.0), 0.0)
+
+    # Exact binary equilibration must reject, rather than erase, a nonzero
+    # coefficient that would underflow after scaling a floatmax-sized row.
+    loss = _pch_state(Float64, [(:nonnegative, 3)])
+    loss.base.epoch = 1
+    fill!(loss.base.H, 0.0)
+    @inbounds for i in 1:loss.base.nr
+        loss.base.H[i, i] = 1.0
+        loss.base.qr[i] = 1.0
+        loss.base.rvec[i] = 1.0
+    end
+    loss.base.H[1, 1] = floatmax(Float64) / 2
+    loss.base.qr[1] = nextfloat(0.0)
+    @test !SDPX._product_hsd_assemble_bordered!(loss, 1.0)
+    @test loss.symmetric_bordered.last_reason ===
+          SDPX.SYMMETRIC_BORDERED_TRANSFORM_FAILED
+    @test SDPX.product_hsd_factor_count(loss) == 0
+
+    zero_row = _pch_state(Float64, [(:nonnegative, 3)])
+    zero_row.base.epoch = 1
+    fill!(zero_row.base.H, 0.0)
+    fill!(zero_row.base.qr, 1.0)
+    fill!(zero_row.base.rvec, 1.0)
+    zero_row.base.qr[1] = 0.0
+    @test !SDPX._product_hsd_assemble_bordered!(zero_row, 1.0)
+    @test zero_row.symmetric_bordered.last_reason ===
+          SDPX.SYMMETRIC_BORDERED_ZERO_ROW
+    @test SDPX.product_hsd_factor_count(zero_row) == 0
+end
+
+@testset "roundtrip PSD-inconclusive fallback is family-specific" begin
+    orthant = _pch_state(Float64, [(:nonnegative, 3)])
+    @test _pch_prime_roundtrip!(orthant)
+    @test SDPX._product_hsd_roundtrip_backward_status(orthant) ==
+          (true, false)
+    orthant.runtime.orthant[1].output[1] += 1.0
+    @test SDPX._product_hsd_roundtrip_backward_status(orthant) ==
+          (false, false)
+    @test !SDPX._product_hsd_psd_cone_newton_residual_ok(orthant)
+
+    soc = _pch_state(Float64, [(:soc, 3)])
+    @test _pch_prime_roundtrip!(soc)
+    @test SDPX._product_hsd_roundtrip_backward_status(soc) == (true, false)
+    soc_block = soc.runtime.soc[1]
+    soc_budget = SDPX._product_hsd_soc_condition_budget(
+        soc_block.state.w, soc_block.dim,
+    )
+    @test isfinite(soc_budget) && 0 < soc_budget < 0.01
+    dot_work = sum(abs(
+        soc_block.state.w[i] * soc_block.input[i],
+    ) for i in 1:soc_block.dim)
+    radius = hypot(soc_block.state.w[2], soc_block.state.w[3])
+    determinant = (soc_block.state.w[1] - radius) *
+                  (soc_block.state.w[1] + radius)
+    row_work = 2 * abs(soc_block.state.w[1]) * dot_work +
+               abs(determinant) * abs(soc_block.input[1]) +
+               abs(soc.g_input[1])
+    allowance = soc_budget * row_work
+    @test isfinite(allowance) && allowance > 0
+    saved_soc_output = soc_block.output[1]
+    soc_block.output[1] = soc.g_input[1] + 1024 * allowance
+    @test isfinite(soc_block.output[1])
+    @test abs(soc_block.output[1] - soc.g_input[1]) > allowance
+    @test SDPX._product_hsd_roundtrip_backward_status(soc) == (false, false)
+    soc_block.output[1] = saved_soc_output
+
+    saved_w = copy(soc_block.state.w)
+    soc_block.state.w[1] = 1.0
+    soc_block.state.w[2] = 1.0 - 1e-8
+    soc_block.state.w[3] = 0.0
+    capped_budget = SDPX._product_hsd_soc_condition_budget(
+        soc_block.state.w, soc_block.dim,
+    )
+    @test isfinite(capped_budget) && capped_budget >= 0.01
+    @test !SDPX.SymmetricCones._soc_q_condition_reliable(
+        soc_block.state.w, soc_block.dim,
+    )
+    @test SDPX._product_hsd_roundtrip_backward_status(soc) == (false, false)
+
+    soc_block.state.w[1] = Inf
+    @test !isfinite(SDPX._product_hsd_soc_condition_budget(
+        soc_block.state.w, soc_block.dim,
+    ))
+    @test SDPX._product_hsd_roundtrip_backward_status(soc) == (false, false)
+    copyto!(soc_block.state.w, saved_w)
+    @test SDPX._product_hsd_roundtrip_backward_status(soc) == (true, false)
+
+    soc.runtime.soc[1].output[1] = NaN
+    @test SDPX._product_hsd_roundtrip_backward_status(soc) == (false, false)
+    @test !SDPX._product_hsd_psd_cone_newton_residual_ok(soc)
+
+    exp_state = SDPX.ProductConeHSDState(_pch_canonical(Float64, [(:exp, 3)]))
+    SDPX.product_hsd_cold_start!(exp_state)
+    @test _pch_prime_roundtrip!(exp_state)
+    @test SDPX._product_hsd_roundtrip_backward_status(exp_state) ==
+          (true, false)
+    exp_state.runtime.exp[1].output[1] += 1.0
+    @test SDPX._product_hsd_roundtrip_backward_status(exp_state) ==
+          (false, false)
+    @test !SDPX._product_hsd_psd_cone_newton_residual_ok(exp_state)
+end
+
+@testset "symmetric bordered nr=0 and custom base-driver semantics" begin
+    T = Float64
+    layout = _pch_layout(T, [(:nonnegative, 1)])
+    chain = SDPX.CanonicalReconstructionChain{T}(
+        1, 0.0, SDPX.VariableRef[], SDPX.ConstraintRef[],
+        SDPX.VariableRef[], 0,
+    )
+    canonical = SDPX.CanonicalConicProgram(
+        SDPX.ArithmeticSpec(T), 53, T[], sparse(zeros(T, 1, 0)), T[0],
+        layout, chain,
+    )
+    nr0 = SDPX.ProductConeHSDState(canonical)
+    SDPX.product_hsd_cold_start!(nr0)
+    @test nr0.base.nr == 0
+    @test nr0.symmetric_bordered.dimension == 1
+    @test SDPX.product_hsd_step!(nr0) === SDPX.HSDStepOK
+    @test SDPX.product_hsd_factor_count(nr0) == 1
+    @test SDPX.kkt_factor_count(nr0.base.driver) == 0
+
+    ordinary = _pch_canonical(
+        Float64, [(:nonnegative, 2), (:soc, 3), (:psd, 2)],
+    )
+    custom_base = SDPX.HotRouteCache(SDPX.LPLUCache{Float64}(2); n=2)
+    custom = SDPX.ProductConeHSDState(ordinary, custom_base)
+    _pch_set_pair!(custom)
+    @test custom.base.nr == 2
+    @test SDPX.product_hsd_step!(custom) === SDPX.HSDStepOK
+    @test SDPX.kkt_factor_count(custom_base) == 0
+    @test SDPX.product_hsd_factor_count(custom) == 1
+    @test custom.symmetric_bordered.driver !== custom_base
+end
+
 @testset "product HSD warm Float64 steps allocate zero bytes" begin
     allocation_cases = (
         ("LP", [(:nonnegative, 3)]),
@@ -463,17 +885,25 @@ end
             warm = Vector{SDPX.HSDStepCode}(undef, 1)
             _pch_step_noreturn!(warm, 1, state)
             @test warm[1] === SDPX.HSDStepOK
-            codes = Vector{SDPX.HSDStepCode}(undef, 10)
-            samples = Vector{Int}(undef, 10)
-            factors0 = SDPX.kkt_factor_count(state.base.driver)
-            @inbounds for sample in 1:10
+            # The mixed seven-sample lane includes the formerly failing step
+            # 8.  The pure-SOC synthetic lane reaches its deliberate
+            # near-machine-singular continuation at step 6, so its measured
+            # allocation window stops at step 5.
+            sample_count = label == "SOC" ? 4 : 7
+            codes = Vector{SDPX.HSDStepCode}(undef, sample_count)
+            samples = Vector{Int}(undef, sample_count)
+            factors0 = SDPX.product_hsd_factor_count(state)
+            old_h_factors = SDPX.kkt_factor_count(state.base.driver)
+            @inbounds for sample in 1:sample_count
                 samples[sample] = @allocated _pch_step_noreturn!(
                     codes, sample, state,
                 )
             end
             @test all(==(SDPX.HSDStepOK), codes)
-            @test samples == zeros(Int, 10)
-            @test SDPX.kkt_factor_count(state.base.driver) - factors0 == 10
+            @test samples == zeros(Int, sample_count)
+            @test SDPX.product_hsd_factor_count(state) - factors0 ==
+                  sample_count
+            @test SDPX.kkt_factor_count(state.base.driver) == old_h_factors == 0
         end
     end
 end
@@ -491,11 +921,13 @@ end
     outside = _pch_state(Float64, [(:nonnegative, 2), (:soc, 3)])
     outside.base.s[1] = 0.0
     @test SDPX.product_hsd_step!(outside) === SDPX.HSDStepDirectionFailed
+    @test SDPX.product_hsd_factor_count(outside) == 0
     @test SDPX.kkt_factor_count(outside.base.driver) == 0
 
     nonfinite = _pch_state(Float64, [(:nonnegative, 3)])
     nonfinite.base.Ar.nzval[1] = NaN
     @test SDPX.product_hsd_step!(nonfinite) === SDPX.HSDStepDirectionFailed
+    @test SDPX.product_hsd_factor_count(nonfinite) == 0
     @test SDPX.kkt_factor_count(nonfinite.base.driver) == 0
 
     singular = _pch_state(Float64, [(:nonnegative, 3)])
@@ -522,6 +954,7 @@ end
         affine = _pch_direction_vector(base; affine=true)
         @test affine ≈ reference rtol=big"1e-45" atol=big"1e-45"
         @test maximum(abs.(J * affine - rhs)) < big"1e-45"
-        @test SDPX.kkt_factor_count(base.driver) == 1
+        @test SDPX.product_hsd_factor_count(state) == 1
+        @test SDPX.kkt_factor_count(base.driver) == 0
     end
 end

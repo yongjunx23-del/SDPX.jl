@@ -50,6 +50,13 @@ struct NonsymmetricSchur3Workspace{T}
     column_indices::Vector{Int}
     coefficients::Vector{T}
     packed_metrics::Matrix{T}
+    theta3::Matrix{T}
+    factor::Matrix{T}
+    factor_a::Matrix{T}
+    factor_b::Vector{T}
+    factor_rhs::Vector{T}
+    input3::Vector{T}
+    output3::Vector{T}
     setup_valid::Bool
     setup_reason::NonsymmetricSchur3Reason
 end
@@ -123,6 +130,13 @@ function NonsymmetricSchur3Workspace(
         column_indices,
         coefficients,
         zeros(T, 6, blocks),
+        zeros(T, 3, 3),
+        zeros(T, 3, 3),
+        zeros(T, 3, columns_count),
+        zeros(T, 3),
+        zeros(T, 3),
+        zeros(T, 3),
+        zeros(T, 3),
         setup_valid,
         setup_reason,
     )
@@ -332,6 +346,191 @@ end
         isfinite(value) || return false
     end
     return isfinite(b_g_b) && isfinite(b_g_rhs)
+end
+
+"""
+    try_assemble_nonsymmetric_schur3_theta!(...)
+
+Assemble the six nonsymmetric Schur contractions directly in the Cholesky
+factor space of each accepted `Theta = L*L'` block.  For the selected rows
+`A_b`, `b_b`, and `r_b`, the workspace forms
+
+```text
+W  = solve(L, A_b),   wb = solve(L, b_b),   wr = solve(L, r_b),
+H += W'W,        A'Gb += W'wb,   b'Gb += wb'wb,
+A'Gr += W'wr,    b'Gr += wb'wr.
+```
+
+This is the same `G = Theta^-1` operator used by recovery, but never forms an
+explicit inverse and produces a symmetric positive-semidefinite Schur block
+by construction.  Every factor and forward solve is independently guarded by
+a componentwise, scale-free backward-error test.
+"""
+function try_assemble_nonsymmetric_schur3_theta!(
+    workspace::NonsymmetricSchur3Workspace{T},
+    H::AbstractMatrix{T},
+    at_g_b::AbstractVector{T},
+    bt_g_a::AbstractVector{T},
+    at_g_rhs::AbstractVector{T},
+    thetas::AbstractArray{T,3},
+    b::AbstractVector{T},
+    rhs::AbstractVector{T},
+) where {T<:AbstractFloat}
+    if !_ns_schur3_dimensions_ok(
+        workspace, H, at_g_b, bt_g_a, at_g_rhs, thetas, b, rhs,
+    )
+        _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+        return _ns_schur3_result(
+            T, NS_SCHUR3_FAILED, NS_SCHUR3_INVALID_DIMENSION,
+        )
+    end
+    if !workspace.setup_valid
+        _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+        return _ns_schur3_result(
+            T, NS_SCHUR3_FAILED, workspace.setup_reason,
+        )
+    end
+    if !_ns_schur3_vectors_finite(workspace, b, rhs)
+        _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+        return _ns_schur3_result(
+            T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_VECTOR,
+        )
+    end
+
+    _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+    b_g_b = zero(T)
+    b_g_rhs = zero(T)
+    n = workspace.columns_count
+    theta = workspace.theta3
+    factor = workspace.factor
+    factor_a = workspace.factor_a
+    factor_b = workspace.factor_b
+    factor_rhs = workspace.factor_rhs
+    input = workspace.input3
+    output = workspace.output3
+
+    @inbounds for block in eachindex(workspace.offsets)
+        for j in 1:3, i in 1:3
+            value = thetas[i, j, block]
+            if !isfinite(value)
+                _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+                return _ns_schur3_result(
+                    T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_METRIC,
+                )
+            end
+            theta[i, j] = value
+        end
+        if !(theta[1, 2] == theta[2, 1] &&
+             theta[1, 3] == theta[3, 1] &&
+             theta[2, 3] == theta[3, 2])
+            _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+            return _ns_schur3_result(
+                T, NS_SCHUR3_FAILED, NS_SCHUR3_NONSYMMETRIC_METRIC,
+            )
+        end
+        if !_runtime_nonsymmetric_theta_factor3!(factor, theta)
+            _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+            return _ns_schur3_result(
+                T, NS_SCHUR3_FAILED, NS_SCHUR3_METRIC_NOT_SPD,
+            )
+        end
+
+        row1 = 3 * (block - 1) + 1
+        fill!(factor_a, zero(T))
+        for coordinate in 1:3
+            local_row = row1 + coordinate - 1
+            first = workspace.rowptr[local_row]
+            last = workspace.rowptr[local_row + 1] - 1
+            for pointer in first:last
+                column = workspace.column_indices[pointer]
+                factor_a[coordinate, column] +=
+                    workspace.coefficients[pointer]
+            end
+        end
+        for column in 1:n
+            input[1] = factor_a[1, column]
+            input[2] = factor_a[2, column]
+            input[3] = factor_a[3, column]
+            if !_runtime_nonsymmetric_forward_solve3!(
+                output, factor, input,
+            )
+                _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+                return _ns_schur3_result(
+                    T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_RESULT,
+                )
+            end
+            factor_a[1, column] = output[1]
+            factor_a[2, column] = output[2]
+            factor_a[3, column] = output[3]
+        end
+
+        offset = workspace.offsets[block]
+        input[1] = b[offset]
+        input[2] = b[offset + 1]
+        input[3] = b[offset + 2]
+        if !_runtime_nonsymmetric_forward_solve3!(
+            factor_b, factor, input,
+        )
+            _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+            return _ns_schur3_result(
+                T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_RESULT,
+            )
+        end
+        input[1] = rhs[offset]
+        input[2] = rhs[offset + 1]
+        input[3] = rhs[offset + 2]
+        if !_runtime_nonsymmetric_forward_solve3!(
+            factor_rhs, factor, input,
+        )
+            _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+            return _ns_schur3_result(
+                T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_RESULT,
+            )
+        end
+
+        for column in 1:n
+            ag_b = factor_a[1, column] * factor_b[1] +
+                   factor_a[2, column] * factor_b[2] +
+                   factor_a[3, column] * factor_b[3]
+            ag_rhs = factor_a[1, column] * factor_rhs[1] +
+                     factor_a[2, column] * factor_rhs[2] +
+                     factor_a[3, column] * factor_rhs[3]
+            at_g_b[column] += ag_b
+            # G is represented by one factor-space Gram operator, so the two
+            # border orientations are the same arithmetic value.
+            bt_g_a[column] += ag_b
+            at_g_rhs[column] += ag_rhs
+            for row in column:n
+                H[row, column] +=
+                    factor_a[1, row] * factor_a[1, column] +
+                    factor_a[2, row] * factor_a[2, column] +
+                    factor_a[3, row] * factor_a[3, column]
+            end
+        end
+        b_g_b += factor_b[1] * factor_b[1] +
+                 factor_b[2] * factor_b[2] +
+                 factor_b[3] * factor_b[3]
+        b_g_rhs += factor_b[1] * factor_rhs[1] +
+                   factor_b[2] * factor_rhs[2] +
+                   factor_b[3] * factor_rhs[3]
+    end
+
+    @inbounds for column in 1:n
+        for row in (column + 1):n
+            H[column, row] = H[row, column]
+        end
+    end
+    if !_ns_schur3_outputs_finite(
+        H, at_g_b, bt_g_a, at_g_rhs, b_g_b, b_g_rhs,
+    )
+        _ns_schur3_clear!(H, at_g_b, bt_g_a, at_g_rhs)
+        return _ns_schur3_result(
+            T, NS_SCHUR3_FAILED, NS_SCHUR3_NONFINITE_RESULT,
+        )
+    end
+    return _ns_schur3_result(
+        T, NS_SCHUR3_ASSEMBLED, NS_SCHUR3_CONVERGED, b_g_b, b_g_rhs,
+    )
 end
 
 """

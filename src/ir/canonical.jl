@@ -34,10 +34,10 @@
 #    - RotatedLorentzCone (RSOC)    -> exact linear map `M` to SOC
 #        (symmetric, self-inverse; `M' == M`).
 #    - PSD                          -> unified lower-packed slack block.
-#    - PowerCone                    -> `:power` block; `alpha` is
-#        carried at the canonical precision `T` (never forced to
-#        Float64). Conversion to a *different* target arithmetic is
-#        deferred to the ExecutionPlan stage.
+#    - PowerCone                    -> `:power` block; the source `alpha`
+#        is retained by the frontend IR and converted exactly once at this
+#        canonical boundary into the working arithmetic `T` (never forced
+#        through Float64).
 #
 #    Family labels are fast-path hints only; any mix of native cones is
 #    a first-class canonical program (mixed LP+SOC, SOC+PSD, LP+PSD).
@@ -200,6 +200,22 @@ function _row_block_spec(domain)
     throw(ArgumentError("unhandled row cone kind $cone in canonicalizer"))
 end
 
+@inline function _canonical_block_parameter(
+    ::Type{T}, cone::Symbol, parameter, precision_bits::Int,
+) where {T<:AbstractFloat}
+    parameter === nothing && return zero(T)
+    owned = owned_arithmetic_copy(
+        T, parameter; precision_bits=precision_bits,
+    )
+    if cone === :power
+        isfinite(owned) && zero(T) < owned < one(T) || throw(ArgumentError(
+            "PowerCone alpha $(parameter) is not representable in the " *
+            "canonical arithmetic $T as a finite value strictly in (0,1)",
+        ))
+    end
+    return owned
+end
+
 # Emit canonical slack rows for one *affine* cone block:
 #   canonical A row = apref * (D * A0 row),  canonical b = apref * (D * rhs).
 function _emit_affine_rows!(
@@ -336,8 +352,9 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         push!(descriptors, ConeBlockDescriptor(
             T, canonical_cone, dimension;
             offset=rowcount + 1,
-            parameter=param === nothing ? zero(T) :
-                owned_arithmetic_copy(T, param; precision_bits=bits),
+            parameter=_canonical_block_parameter(
+                T, canonical_cone, param, bits,
+            ),
             reconstruction=map,
         ))
         if linear === nothing
@@ -390,8 +407,9 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         push!(descriptors, ConeBlockDescriptor(
             T, canonical_cone, dimension;
             offset=rowcount + 1,
-            parameter=param === nothing ? zero(T) :
-                owned_arithmetic_copy(T, param; precision_bits=bits),
+            parameter=_canonical_block_parameter(
+                T, canonical_cone, param, bits,
+            ),
             reconstruction=map,
         ))
         rowcount = _emit_affine_rows!(

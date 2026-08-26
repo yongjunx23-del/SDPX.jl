@@ -1,7 +1,8 @@
 #=====================================================================#
-# Direct public opt-in for the native symmetric product-cone HSD engine.
+# Direct public opt-in for the native product-cone HSD engine.
 #
-# This file owns one deliberately narrow route:
+# This file owns one deliberately narrow symmetric route and its typed
+# descriptor for the future hybrid route:
 #
 #     NativeConeProgram -> canonicalize -> equality reduction
 #                       -> product_hsd_solve!
@@ -15,7 +16,7 @@
 
 """Authoritative family payload for one direct native-HSD execution."""
 struct NativeHSDPlan <: AbstractExecutionPlanPayload
-    formulation::Symbol
+    formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled}
     storage::Symbol
     factorization::Symbol
     factorization_reuse::Symbol
@@ -95,12 +96,13 @@ function _public_validate_native_hsd_policy(
         "optimize: engine=:native_hsd does not accept model primal, dual, " *
         "or dual-slack starts",
     )
-    settings.formulation in (:auto, :variable_space_schur) ||
+    settings.formulation === :auto ||
         _native_hsd_public_error(
             route.route,
             :native_hsd_formulation_unavailable,
-            "optimize: engine=:native_hsd executes only the dense " *
-            "variable-space Schur formulation",
+            "optimize: engine=:native_hsd accepts only formulation=:auto; " *
+            "the native route selects its dense homogeneous bordered " *
+            "formulation internally",
         )
     settings.scaling in (:auto, :none) || _native_hsd_public_error(
         route.route,
@@ -116,8 +118,8 @@ function _public_validate_native_hsd_policy(
     settings.sparse in (:auto, :off) || _native_hsd_public_error(
         route.route,
         :native_hsd_sparse_unavailable,
-        "optimize: engine=:native_hsd executes a dense Schur factorization; " *
-        "sparse=:on is unavailable",
+        "optimize: engine=:native_hsd executes a dense homogeneous bordered " *
+        "factorization; sparse=:on is unavailable",
     )
     settings.provider in (:auto, :standard) || _native_hsd_public_error(
         route.route,
@@ -188,6 +190,135 @@ end
     return route.route
 end
 
+@inline function _native_hsd_cone_family(cone::Symbol)
+    cone in (:free, :zero) && return :none
+    cone in (:nonnegative, :nonpositive, :interval) && return :lp
+    cone in (:soc, :rsoc) && return :socp
+    cone in (:psd, :psd_scaled) && return :sdp
+    cone === :exp && return :exp
+    cone === :power && return :power
+    return cone
+end
+
+"""Derive the native classification from the canonical layout, not route text."""
+function _native_hsd_classification_cone(
+    canonical::CanonicalConicProgram,
+)
+    seen = Set{Symbol}()
+    for block in canonical.cone_layout.blocks
+        family = _native_hsd_cone_family(block.cone)
+        family === :none || push!(seen, family)
+    end
+    isempty(seen) && return :lp
+    length(seen) == 1 && return first(seen)
+    any(family -> family in (:exp, :power), seen) && return :mixed_nonsymmetric
+    return :mixed_symmetric
+end
+
+@inline function _native_hsd_size_class(
+    canonical::CanonicalConicProgram,
+    active_rows::Int,
+    product_rank::Int,
+)
+    scale = max(
+        canonical_num_variables(canonical),
+        canonical_num_slack(canonical),
+        active_rows,
+        product_rank,
+        1,
+    )
+    return scale <= 128 ? :small : scale <= 2_000 ? :medium : :large
+end
+
+@inline function _native_hsd_descriptor_reason(
+    reduction::HSDEqualityReduction,
+    active_rows::Int,
+    product_rank_ambiguous::Bool,
+    product_rank_incompatible::Bool,
+)
+    reduction.status === HSDEqualityReady || return reduction.status ===
+        HSDEqualityInconsistent ? :equality_inconsistent :
+        reduction.status === HSDEqualityRankAmbiguous ? :equality_rank_ambiguous :
+        :equality_reduction_not_ready
+    product_rank_ambiguous && return :product_rank_ambiguous
+    product_rank_incompatible && return :product_rank_incompatible
+    active_rows == 0 && return :equality_only
+    return :ready
+end
+
+"""Build the typed HSD formulation descriptor from the reduced layout."""
+function _native_hsd_formulation_descriptor(
+    canonical::CanonicalConicProgram,
+    reduction::HSDEqualityReduction,
+    product_rank::Int,
+    product_rank_ambiguous::Bool,
+    product_rank_incompatible::Bool,
+)
+    product_rank >= 0 || throw(ArgumentError("native HSD product rank must be nonnegative"))
+    ready = reduction.status === HSDEqualityReady && reduction.reduced !== nothing
+    reduced = ready ? reduction.reduced::CanonicalConicProgram : nothing
+    active_rows = ready ? length(reduction.reduced_to_full) : 0
+    blocks = ready ? reduced.cone_layout.blocks : ()
+    nonsymmetric_blocks = count(
+        block -> block.cone in (:exp, :power),
+        blocks,
+    )
+    nonsymmetric_dimension = sum(
+        block.length for block in blocks if block.cone in (:exp, :power);
+        init=0,
+    )
+    reason = _native_hsd_descriptor_reason(
+        reduction,
+        active_rows,
+        product_rank_ambiguous,
+        product_rank_incompatible,
+    )
+    factor_available = ready && active_rows > 0 &&
+                       !product_rank_ambiguous && !product_rank_incompatible
+    factorization = factor_available ? :lu : :not_applicable
+    pivoting = factor_available ? :partial : :not_applicable
+    factorization_reuse = factor_available ?
+        :factor_once_predictor_corrector_refinement : :not_applicable
+    descriptor_layout = !ready ? :not_applicable :
+                        active_rows == 0 ? :affine_space : :equality_reduced
+    if nonsymmetric_dimension > 0
+        matrix_dimension = factor_available ? product_rank + nonsymmetric_dimension + 2 : 0
+        return DenseHybridCoupled(
+            factor_available ? product_rank : 0,
+            active_rows;
+            matrix_dimension=matrix_dimension,
+            layout=descriptor_layout,
+            symmetric_dimension=factor_available ? product_rank : 0,
+            nonsymmetric_dimension=nonsymmetric_dimension,
+            nonsymmetric_blocks=nonsymmetric_blocks,
+            row_scaling=factor_available ? :nonsymmetric_factor_coordinates : :none,
+            border_structure=factor_available ? :full_homogeneous_border : :none,
+            factorization,
+            pivoting,
+            coordinate_system=factor_available ? :factor_coordinate : :none,
+            factor_reuse=factorization_reuse,
+            reason,
+            backend=factor_available ? :native_hsd_factor_coordinate_coupled : :not_applicable,
+            available=factor_available,
+        )
+    end
+    matrix_dimension = factor_available ? product_rank + 1 : 0
+    return DenseHomogeneousBordered(
+        factor_available ? product_rank : 0,
+        active_rows;
+        matrix_dimension=matrix_dimension,
+        layout=descriptor_layout,
+        row_scaling=factor_available ? :exact_binary_row_scaling : :none,
+        border_structure=factor_available ? :full_homogeneous_border : :none,
+        factorization,
+        pivoting,
+        factor_reuse=factorization_reuse,
+        reason,
+        backend=factor_available ? :native_hsd_binary_row_scaled_border : :not_applicable,
+        available=factor_available,
+    )
+end
+
 function _native_hsd_plan(
     program::NativeConeProgram{T},
     canonical::CanonicalConicProgram{T},
@@ -204,11 +335,19 @@ function _native_hsd_plan(
     active_blocks = reduced === nothing ? 0 : length(reduced.cone_layout.blocks)
     zero_blocks = count(block -> block.cone === :zero, canonical.cone_layout.blocks)
     cones = reduced === nothing ? () : Tuple(block.cone for block in reduced.cone_layout.blocks)
+    descriptor = _native_hsd_formulation_descriptor(
+        canonical,
+        reduction,
+        product_rank,
+        product_rank_ambiguous,
+        product_rank_incompatible,
+    )
+    factor_dimension = descriptor.available ? descriptor.matrix_dimension : 0
     payload = NativeHSDPlan(
-        :dense_variable_space_schur,
+        descriptor,
         :dense,
-        :cholesky,
-        :factor_once_predictor_corrector,
+        descriptor.factorization,
+        descriptor.factorization_reuse,
         :serial,
         :native_serial,
         (),
@@ -227,26 +366,29 @@ function _native_hsd_plan(
         product_rank_incompatible,
     )
 
-    entries = reduced === nothing ? 0 : nnz(reduced.A)
-    dimension = max(reduced_variables, 1)
-    rows = max(active_rows, 1)
-    density = Float64(entries) / Float64(dimension * rows)
-    max_block = reduced === nothing || isempty(reduced.cone_layout.blocks) ? 0 :
-                maximum(block.dimension for block in reduced.cone_layout.blocks)
+    classification_layout = reduced === nothing ? canonical : reduced
+    entries = nnz(classification_layout.A)
+    dimension = canonical_num_variables(classification_layout)
+    rows = canonical_num_slack(classification_layout)
+    density = dimension == 0 || rows == 0 ? 0.0 :
+              Float64(entries) / Float64(dimension * rows)
+    max_block = isempty(classification_layout.cone_layout.blocks) ? 0 :
+                maximum(block.dimension for block in classification_layout.cone_layout.blocks)
     classification = ProblemClassification(
-        _native_hsd_route_cone(route),
+        _native_hsd_classification_cone(canonical),
         :dense,
         _arithmetic_symbol(T),
-        :direct,
-        reduced_variables,
+        _native_hsd_size_class(canonical, active_rows, product_rank),
+        reduced === nothing ? canonical_num_variables(canonical) : reduced_variables,
         reduction.rank,
-        active_rows,
+        reduced === nothing ? canonical_num_slack(canonical) : active_rows,
         max_block,
         density,
-        1.0,
+        density,
     )
+    backend_route = descriptor.backend
     backend = BackendConfiguration(
-        :native_hsd_dense_variable_space_schur,
+        backend_route,
         :pivoted_qr,
         false,
         false,
@@ -255,12 +397,14 @@ function _native_hsd_plan(
         false,
     )
     capabilities = LAProviderCapabilities(
-        cholesky=true,
+        lu=true,
         qr=true,
         rank_revealing_qr=true,
-        factor_solve=true,
+        factor_solve=descriptor.available,
+        multi_rhs=descriptor.available,
+        iterative_refinement=descriptor.available,
     )
-    capability_symbols = (:cholesky, :qr, :rank_revealing_qr, :factor_solve)
+    capability_symbols = la_capability_symbols(capabilities)
     la = LABackendConfiguration(
         _arithmetic_symbol(T),
         settings.provider,
@@ -268,18 +412,23 @@ function _native_hsd_plan(
         :native_serial,
         capability_symbols,
         capabilities,
-        (:cholesky, :factor_solve, :rank_revealing_qr),
-        :native_hsd_dense_schur,
+        descriptor.available ? (:lu, :factor_solve) : (),
+        descriptor.available ?
+            (descriptor isa DenseHybridCoupled ?
+             :native_hsd_dense_hybrid_lu_partial_pivot :
+             :native_hsd_dense_bordered_lu_partial_pivot) :
+            :not_applicable,
         (),
         :none,
         T === Float64 ? :immutable_scalars : :owned_mutable_scalars,
     )
     storage = KKTStoragePlan(
         :dense;
-        dimension=product_rank,
+        dimension=factor_dimension,
         input_nnz=entries,
-        density=1.0,
-        reason=:native_hsd_variable_space_schur,
+        density=factor_dimension == 0 ? 0.0 :
+                Float64(entries) / Float64(factor_dimension * factor_dimension),
+        reason=descriptor.reason,
         provenance=:native_hsd,
         requested=settings.sparse,
     )
@@ -292,7 +441,7 @@ function _native_hsd_plan(
         product_rank=product_rank,
         original_rows=canonical_num_slack(canonical),
         reduced_rows=active_rows,
-        factorization_reuse=:factor_once_predictor_corrector,
+        factorization_reuse=descriptor.factorization_reuse,
         requested_provider=settings.provider,
         executed_provider=:native_serial,
         requested_threads=settings.limits.threads,
@@ -305,13 +454,13 @@ function _native_hsd_plan(
         :none,
         backend,
         FormulationPlan(
-            DenseNormalEquations(),
-            :native_hsd_dense_variable_space_schur,
+            descriptor,
+            :native_hsd_typed_formulation,
             :native_hsd,
         ),
         la,
         storage,
-        :native_product_nt,
+        descriptor.gram_or_metric,
         :serial,
         1,
         :native_hsd,
@@ -359,10 +508,42 @@ function _native_hsd_diagnostics(
     recovery_seconds::Float64,
 )
     payload = plan.payload::NativeHSDPlan
+    descriptor = payload.formulation
+    equality_ready = reduction.status === HSDEqualityReady
+    equality_only = equality_ready && payload.active_rows == 0
+    planned_factorization = descriptor.available ? descriptor.factorization :
+                            :not_applicable
+    executed_factorization = !equality_ready ? :not_executed :
+                             factorizations > 0 ? descriptor.factorization :
+                             equality_only ? :not_applicable : :not_executed
+    planned_formulation = descriptor.available ? formulation_symbol(descriptor) :
+                          :not_applicable
+    executed_formulation = !equality_ready ? :not_executed :
+                            factorizations > 0 ? formulation_symbol(descriptor) :
+                            equality_only ? :not_applicable : :not_executed
+    planned_backend = descriptor.available ? descriptor.backend : :not_applicable
+    executed_backend = !equality_ready ? :not_executed :
+                       factorizations > 0 ? descriptor.backend :
+                       equality_only ? :not_applicable : :not_executed
+    planned_reuse = descriptor.available ? descriptor.factor_reuse :
+                    :not_applicable
+    executed_reuse = !equality_ready ? :not_executed :
+                     factorizations > 0 ? descriptor.factor_reuse :
+                     equality_only ? :not_applicable : :not_executed
+    execution_path = equality_only ? :affine_space : :native_hsd
+    termination_stage = reduction.status !== HSDEqualityReady ? :equality_reduction :
+                        status in (Optimal, PrimalInfeasible, DualInfeasible) ?
+                        :original_coordinate_certification : :native_hsd
+    arithmetic = plan.la_config.arithmetic
+    factorization_kernel = arithmetic in (:float32, :float64) ?
+                           :lapack_getrf_getrs : :generic_partial_lu
+    planned_kernel = descriptor.available ? factorization_kernel : :not_applicable
+    executed_kernel = !equality_ready ? :not_executed :
+                      factorizations > 0 ? factorization_kernel :
+                      equality_only ? :not_applicable : :not_executed
     termination = (
         reason=reason,
-        stage=status in (Optimal, PrimalInfeasible, DualInfeasible) ?
-              :original_coordinate_certification : :native_hsd,
+        stage=termination_stage,
         iterations=iterations,
         factorizations=factorizations,
     )
@@ -371,18 +552,35 @@ function _native_hsd_diagnostics(
         engine=:native_hsd,
         planned_algorithm=:native_hsd,
         executed_algorithm=:native_hsd,
-        requested_kkt_formulation=:variable_space_schur,
-        planned_kkt_formulation=:dense_variable_space_schur,
-        executed_kkt_formulation=:dense_variable_space_schur,
-        planned_factorization=:cholesky,
-        executed_factorization=:cholesky,
-        factorization_reuse=:factor_once_predictor_corrector,
+        requested_kkt_formulation=:auto,
+        planned_kkt_formulation=planned_formulation,
+        executed_kkt_formulation=executed_formulation,
+        planned_factorization,
+        executed_factorization,
+        factorization_reuse=planned_reuse,
+        factor_reuse=planned_reuse,
+        executed_factorization_reuse=executed_reuse,
+        factorization_kernel=planned_kernel,
+        planned_factorization_kernel=planned_kernel,
+        executed_factorization_kernel=executed_kernel,
+        row_scaling=descriptor.row_scaling,
+        transform=descriptor.row_scaling,
+        border_structure=descriptor.border_structure,
+        pivoting=descriptor.pivoting,
+        gram_or_metric=descriptor.gram_or_metric,
+        metric=descriptor.gram_or_metric,
+        formulation=planned_formulation,
+        route=descriptor.route,
+        execution_path,
         planned_scaling=:none,
         executed_scaling=:none,
-        planned_backend=:native_hsd_dense_variable_space_schur,
-        executed_backend=:native_hsd_dense_variable_space_schur,
-        planned_la_provider=:native_serial,
-        la_executed_provider=:native_serial,
+        planned_backend,
+        executed_backend,
+        backend=planned_backend,
+        planned_la_provider=descriptor.available ? :native_serial : :not_applicable,
+        la_executed_provider=!equality_ready ? :not_executed :
+                             factorizations > 0 ? :native_serial :
+                             equality_only ? :not_applicable : :not_executed,
         fallback_reason=:none,
         fallback_chain=(),
         planned_threads=1,

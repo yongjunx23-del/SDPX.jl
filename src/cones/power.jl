@@ -20,12 +20,18 @@ const POWER_BARRIER_DEGREE = 3
 @inline _power_finite3(x, y, z) = isfinite(x) && isfinite(y) && isfinite(z)
 
 @inline function _power_alpha(alpha, x, y, z)
-    T = promote_type(typeof(x), typeof(y), typeof(z))
+    T = promote_type(typeof(float(x)), typeof(float(y)), typeof(float(z)))
     a = convert(T, alpha)
     isfinite(a) && zero(a) < a < one(a) || throw(ArgumentError(
         "power-cone alpha must be finite and in (0,1)",
     ))
     return a, one(a) - a
+end
+
+@inline function _power_log_abs_rho(a, b, x, y, z)
+    absolute_z = abs(z)
+    return a * _nonsymmetric_positive_log_ratio(absolute_z, x) +
+           b * _nonsymmetric_positive_log_ratio(absolute_z, y)
 end
 
 @inline function _power_primal_terms(x, y, z, alpha)
@@ -40,10 +46,10 @@ end
     isfinite(log_w) || throw(ArgumentError(
         "power-cone oracle produced a non-finite weighted log",
     ))
-    rho = if iszero(z)
-        zero(log_w)
+    rho, delta = if iszero(z)
+        zero(log_w), one(log_w)
     else
-        log_abs_rho = log(abs(z)) - log_w
+        log_abs_rho = _power_log_abs_rho(a, b, x, y, z)
         tolerance = _nonsymmetric_log_tolerance(
             log(abs(z)), log_w,
         )
@@ -51,9 +57,10 @@ end
             throw(ArgumentError(
                 "power-cone oracle requires a resolvable |z| < x^alpha*y^(1-alpha) gap",
             ))
-        copysign(exp(log_abs_rho), z)
+        rho = copysign(exp(log_abs_rho), z)
+        delta = -_nonsymmetric_stable_expm1(log_abs_rho + log_abs_rho)
+        rho, delta
     end
-    delta = one(rho) - rho * rho
     isfinite(rho) && delta > zero(delta) || throw(ArgumentError(
         "power-cone oracle could not resolve a strict interior gap",
     ))
@@ -61,24 +68,67 @@ end
 end
 
 """
-    power_membership(x, y, z, alpha) -> Bool
+    power_primal_residual(x, y, z, alpha)
 
-Whether `(x, y, z)` lies in the power cone of parameter `alpha`.
+Degree-one violation of the closed power cone.  The curved branch uses
+`abs(z) * max(0, log(abs(z)/(x^alpha*y^(1-alpha))))`; this is homogeneous,
+does not form the weighted monomial, and has the same coordinate units as the
+original-certificate tolerance.
 """
-function power_membership(x, y, z, alpha)
-    _power_finite3(x, y, z) || return false
+function power_primal_residual(x, y, z, alpha)
+    T = promote_type(typeof(float(x)), typeof(float(y)), typeof(float(z)))
+    infinity = T(Inf)
+    _power_finite3(x, y, z) || return infinity
+    a, b = try
+        _power_alpha(alpha, x, y, z)
+    catch
+        return infinity
+    end
+    zero_value = zero(T)
+    orthant_violation = max(zero_value, -x, -y)
+    iszero(z) && return orthant_violation
+    if x <= zero_value || y <= zero_value
+        return max(orthant_violation, abs(z))
+    end
+    log_abs_rho = _power_log_abs_rho(a, b, x, y, z)
+    isfinite(log_abs_rho) || return infinity
+    width_violation = log_abs_rho <= zero_value ? zero_value :
+                      abs(z) * log_abs_rho
+    isfinite(width_violation) || return infinity
+    return max(orthant_violation, width_violation)
+end
+
+"""
+    power_membership(x, y, z, alpha; tol=0) -> Bool
+
+Whether `(x, y, z)` lies in the power cone of parameter `alpha`.  `tol` is an
+optional absolute, degree-one certificate tolerance; logarithmic boundary
+roundoff is accounted for independently.
+"""
+function power_membership(x, y, z, alpha; tol=zero(x))
+    T = promote_type(
+        typeof(float(x)), typeof(float(y)), typeof(float(z)),
+        typeof(float(tol)),
+    )
+    tolerance = convert(T, tol)
+    _power_finite3(x, y, z) && isfinite(tolerance) &&
+        tolerance >= zero(T) || return false
     a, b = try
         _power_alpha(alpha, x, y, z)
     catch
         return false
     end
-    x >= zero(x) && y >= zero(y) || return false
-    iszero(z) && return true
-    (iszero(x) || iszero(y)) && return false
-    log_w = a * log(x) + b * log(y)
-    log_abs_z = log(abs(z))
-    tolerance = _nonsymmetric_log_tolerance(log_w, log_abs_z)
-    return !isnan(log_w) && log_w - log_abs_z >= -tolerance
+    residual = power_primal_residual(x, y, z, a)
+    isfinite(residual) || return false
+    allowance = tolerance
+    if x > zero(T) && y > zero(T) && !iszero(z)
+        log_abs_rho = _power_log_abs_rho(a, b, x, y, z)
+        roundoff = abs(z) *
+            _nonsymmetric_log_tolerance(log_abs_rho, zero(log_abs_rho))
+        isfinite(roundoff) || return false
+        allowance += roundoff
+    end
+    return isfinite(allowance) && residual <= allowance
 end
 
 """Whether `(x,y,z)` lies in the strict primal power-cone interior."""
@@ -91,10 +141,11 @@ function power_primal_interior(x, y, z, alpha)
     end
     x > zero(x) && y > zero(y) || return false
     iszero(z) && return true
-    log_w = a * log(x) + b * log(y)
-    log_abs_z = log(abs(z))
-    tolerance = _nonsymmetric_log_tolerance(log_w, log_abs_z)
-    return !isnan(log_w) && log_w - log_abs_z > tolerance
+    log_abs_rho = _power_log_abs_rho(a, b, x, y, z)
+    tolerance = _nonsymmetric_log_tolerance(
+        log_abs_rho, zero(log_abs_rho),
+    )
+    return !isnan(log_abs_rho) && log_abs_rho < -tolerance
 end
 
 """
@@ -104,9 +155,9 @@ Value of the smooth self-concordant barrier of the power cone at an
 interior point.
 """
 function power_barrier(x, y, z, alpha)
-    a, b, log_w, rho, _ = _power_primal_terms(x, y, z, alpha)
+    a, b, log_w, _, delta = _power_primal_terms(x, y, z, alpha)
     return -(one(log_w) + one(log_w)) * log_w -
-           log1p(-(rho * rho)) - b * log(x) - a * log(y)
+           log(delta) - b * log(x) - a * log(y)
 end
 
 power_primal_barrier(x, y, z, alpha) = power_barrier(x, y, z, alpha)
@@ -170,12 +221,13 @@ function power_dual_membership(u, v, w, alpha; tol=zero(u))
     vc = v < zero(v) ? zero(v) : v
     (iszero(uc) || iszero(vc)) && return false
     required = abs(w) - tol
-    log_dual_width = a * (log(uc) - log(a)) +
-                     b * (log(vc) - log(b))
-    log_required = log(required)
-    tolerance = _nonsymmetric_log_tolerance(log_dual_width, log_required)
-    return !isnan(log_dual_width) &&
-           log_dual_width - log_required >= -tolerance
+    log_abs_rho = _power_log_abs_rho(
+        a, b, uc / a, vc / b, required,
+    )
+    tolerance = _nonsymmetric_log_tolerance(
+        log_abs_rho, zero(log_abs_rho),
+    )
+    return !isnan(log_abs_rho) && log_abs_rho <= tolerance
 end
 
 """
@@ -198,9 +250,9 @@ end
 
 In-place 3×3 Hessian of the power-cone barrier at interior point `(x, y, z)`.
 """
-function power_primal_hessian!(hessian, x, y, z, alpha)
-    _require_dense3_matrix(hessian, "hessian")
-    a, b, log_w, rho, delta = _power_primal_terms(x, y, z, alpha)
+@inline function _power_primal_hessian_from_terms!(
+    hessian, a, b, log_w, rho, delta, x, y,
+)
     inv_delta = inv(delta)
     inv_delta2 = inv_delta * inv_delta
     inv_w = exp(-log_w)
@@ -233,6 +285,15 @@ function power_primal_hessian!(hessian, x, y, z, alpha)
     hessian[3, 2] = h23
     hessian[3, 3] = h33
     return hessian
+end
+
+
+function power_primal_hessian!(hessian, x, y, z, alpha)
+    _require_dense3_matrix(hessian, "hessian")
+    a, b, log_w, rho, delta = _power_primal_terms(x, y, z, alpha)
+    return _power_primal_hessian_from_terms!(
+        hessian, a, b, log_w, rho, delta, x, y,
+    )
 end
 
 power_barrier_hessian!(hessian, x, y, z, alpha) =

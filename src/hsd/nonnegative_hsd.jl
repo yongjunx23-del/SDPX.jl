@@ -155,10 +155,11 @@ end
     # Scale by the two quantities whose subtraction forms the denominator.
     # This catches a small residual produced by cancellation of large terms;
     # scaling only by `ghat` would incorrectly accept that case.
-    scale = max(one(T), abs(g_scalar), sumabs_ru)
+    scale = max(abs(g_scalar), sumabs_ru)
     if !(isfinite(g_scalar) && isfinite(ru) && isfinite(rw) &&
          isfinite(sumabs_ru) && isfinite(ghat) && isfinite(rho) &&
-         isfinite(scale) && abs(ghat) > T(100) * eps(T) * scale)
+         isfinite(scale) && scale > zero(T) &&
+         abs(ghat) > T(100) * eps(T) * scale)
         return false, zero(T)
     end
     numerator = rho - rw

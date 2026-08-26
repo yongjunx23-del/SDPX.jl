@@ -364,7 +364,12 @@ end
     @test MOI.get(breakdown, MOI.PrimalStatus()) === MOI.UNKNOWN_RESULT_STATUS
     @test MOI.get(breakdown, MOI.DualStatus()) === MOI.UNKNOWN_RESULT_STATUS
     @test MOI.get(breakdown, MOI.ObjectiveBound()) == -Inf
-    @test occursin("direction_breakdown", MOI.get(breakdown, MOI.RawStatusString()))
+    # This fixture is an exactly singular *bordered* matrix.  The native
+    # bordered route classifies that factor failure directly, so the typed
+    # reason is `singular_kkt`; it no longer factors H first and then
+    # rediscovers the failure as a zero scalar Schur complement.  See the
+    # matching expectation in `test/product_cone_solver.jl`.
+    @test occursin("singular_kkt", MOI.get(breakdown, MOI.RawStatusString()))
 
     ambiguous = MOI.Utilities.Model{Float64}()
     variables = MOI.add_variables(ambiguous, 2)
@@ -557,6 +562,17 @@ end
         SDPX.lower_mixed_psd_native,
         (SDPX.NativeConeProgram{Float64},),
     )
+    # `lower_mixed_psd_native` takes keyword arguments, so the injection above
+    # adds *two* methods: the positional wrapper and a `Core.kwcall` entry.
+    # Deleting only the wrapper leaves every keyword call -- which is how
+    # production actually invokes it -- dispatching to the fault stub for the
+    # rest of the session, and later files (`mixed_cones.jl`) then die on a
+    # fault this testset was supposed to have cleaned up.
+    lift_kwcall_method = which(
+        Core.kwcall,
+        (NamedTuple, typeof(SDPX.lower_mixed_psd_native),
+         SDPX.NativeConeProgram{Float64}),
+    )
     try
         source, _, _ = _mnh_optimal_source(
             Float64,
@@ -569,6 +585,7 @@ end
     finally
         Base.delete_method(lower_method)
         Base.delete_method(lift_method)
+        Base.delete_method(lift_kwcall_method)
     end
     @test which(
         SDPX._public_lower_native,
@@ -579,4 +596,19 @@ end
         SDPX.lower_mixed_psd_native,
         (SDPX.NativeConeProgram{Float64},),
     ) !== lift_method
+    # Restoring the positional wrapper is not evidence that the keyword entry
+    # was restored; assert the path production uses directly.
+    @test which(
+        Core.kwcall,
+        (NamedTuple, typeof(SDPX.lower_mixed_psd_native),
+         SDPX.NativeConeProgram{Float64}),
+    ) !== lift_kwcall_method
+    @test which(
+        Core.kwcall,
+        (NamedTuple, typeof(SDPX.lower_mixed_psd_native),
+         SDPX.NativeConeProgram{Float64}),
+    ).file === which(
+        SDPX.lower_mixed_psd_native,
+        (SDPX.NativeConeProgram{Float64},),
+    ).file
 end

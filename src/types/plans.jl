@@ -65,6 +65,267 @@ struct SparseNormalEquations <: AbstractKKTFormulation end
 struct BlockArrowElimination <: AbstractKKTFormulation end
 struct NoKKTFormulation <: AbstractKKTFormulation end
 
+"""
+    AbstractNativeHSDFormulation
+
+Family-specific formulation descriptors for the native homogeneous
+self-dual route.  These are deliberately separate from the mature SDP KKT
+formulations above: a native HSD system contains the homogeneous border and
+its factorization/recovery contract, so reporting it as a normal-equation or
+Cholesky route is misleading.
+"""
+abstract type AbstractNativeHSDFormulation <: AbstractKKTFormulation end
+
+"""
+    DenseHomogeneousBordered
+
+Descriptor for the symmetric native-HSD route.  `matrix_dimension` is the
+actual full bordered matrix dimension (the reduced variable rank plus the
+homogeneous scalar border), or zero when equality reduction is unavailable or
+the reduced problem has no product-cone rows.  `row_scaling`, `factorization`,
+`pivoting`, and `factorization_reuse` are execution facts, not requests.
+"""
+struct DenseHomogeneousBordered <: AbstractNativeHSDFormulation
+    dimension::Int
+    reduced_rank::Int
+    active_rows::Int
+    layout::Symbol
+    row_scaling::Symbol
+    border_structure::Symbol
+    factorization::Symbol
+    pivoting::Symbol
+    factor_reuse::Symbol
+    gram_or_metric::Symbol
+    backend::Symbol
+    route::Symbol
+    reason::Symbol
+    available::Bool
+end
+
+"""
+    DenseHybridCoupled
+
+Descriptor for the future mixed symmetric/nonsymmetric native-HSD route.  The
+descriptor records the factor-coordinate contract used by Exp/Power blocks,
+while keeping the public policy fail-closed until that route is enabled.
+`matrix_dimension` is the full coupled matrix dimension, including the
+nonsymmetric rows and the two homogeneous scalar columns/rows.
+"""
+struct DenseHybridCoupled <: AbstractNativeHSDFormulation
+    dimension::Int
+    reduced_rank::Int
+    active_rows::Int
+    layout::Symbol
+    symmetric_dimension::Int
+    nonsymmetric_dimension::Int
+    nonsymmetric_blocks::Int
+    row_scaling::Symbol
+    border_structure::Symbol
+    factorization::Symbol
+    pivoting::Symbol
+    coordinate_system::Symbol
+    factor_reuse::Symbol
+    gram_or_metric::Symbol
+    backend::Symbol
+    route::Symbol
+    reason::Symbol
+    available::Bool
+end
+
+@inline function _native_hsd_nonnegative_dimension(value::Integer, label::Symbol)
+    value >= 0 || throw(ArgumentError("native HSD $label must be nonnegative"))
+    return Int(value)
+end
+
+function DenseHomogeneousBordered(
+    reduced_variables::Integer,
+    active_rows::Integer;
+    dimension::Union{Nothing,Integer}=nothing,
+    matrix_dimension::Union{Nothing,Integer}=nothing,
+    layout::Symbol=:equality_reduced,
+    row_scaling::Symbol=:exact_binary_row_scaling,
+    border_structure::Symbol=:full_homogeneous_border,
+    factorization::Symbol=:lu,
+    pivoting::Symbol=:partial,
+    factor_reuse::Symbol=:factor_once_predictor_corrector_refinement,
+    gram_or_metric::Symbol=:native_product_metric,
+    backend::Symbol=:native_hsd_binary_row_scaled_border,
+    route::Symbol=:dense_homogeneous_bordered,
+    reason::Symbol=:ready,
+    available::Bool=true,
+)
+    nr = _native_hsd_nonnegative_dimension(reduced_variables, :reduced_variables)
+    rows = _native_hsd_nonnegative_dimension(active_rows, :active_rows)
+    matrix_dim = dimension === nothing ?
+                 (matrix_dimension === nothing ?
+                  (active_rows > 0 && available ? reduced_variables + 1 : 0) :
+                  matrix_dimension) :
+                 dimension
+    dimension !== nothing && matrix_dimension !== nothing &&
+        Int(dimension) == Int(matrix_dimension) ||
+        (dimension === nothing || matrix_dimension === nothing) ||
+        throw(ArgumentError("native HSD dimension and matrix_dimension disagree"))
+    matrix_dim = _native_hsd_nonnegative_dimension(matrix_dim, :matrix_dimension)
+    if !available
+        matrix_dim = 0
+        row_scaling = :none
+        border_structure = :none
+        factorization = :not_applicable
+        pivoting = :not_applicable
+        factor_reuse = :not_applicable
+        gram_or_metric = :not_applicable
+        backend = :not_applicable
+    end
+    return DenseHomogeneousBordered(
+        matrix_dim, nr, rows, layout, row_scaling, border_structure,
+        factorization, pivoting, factor_reuse, gram_or_metric, backend, route,
+        reason, available,
+    )
+end
+
+function DenseHomogeneousBordered()
+    return DenseHomogeneousBordered(
+        0,
+        0;
+        matrix_dimension=0,
+        layout=:not_applicable,
+        row_scaling=:none,
+        border_structure=:none,
+        factorization=:not_applicable,
+        pivoting=:not_applicable,
+        factor_reuse=:not_applicable,
+        gram_or_metric=:not_applicable,
+        backend=:not_applicable,
+        route=:dense_homogeneous_bordered,
+        reason=:not_applicable,
+        available=false,
+    )
+end
+
+function DenseHybridCoupled(
+    reduced_variables::Integer,
+    active_rows::Integer;
+    dimension::Union{Nothing,Integer}=nothing,
+    matrix_dimension::Union{Nothing,Integer}=nothing,
+    layout::Symbol=:equality_reduced,
+    symmetric_dimension::Integer=0,
+    nonsymmetric_dimension::Integer=0,
+    nonsymmetric_blocks::Integer=0,
+    row_scaling::Symbol=:nonsymmetric_factor_coordinates,
+    border_structure::Symbol=:full_homogeneous_border,
+    factorization::Symbol=:lu,
+    pivoting::Symbol=:partial,
+    coordinate_system::Symbol=:factor_coordinate,
+    factor_reuse::Symbol=:factor_once_predictor_corrector_refinement,
+    gram_or_metric::Symbol=:hybrid_factor_coordinate_metric,
+    backend::Symbol=:native_hsd_factor_coordinate_coupled,
+    route::Symbol=:dense_hybrid_coupled,
+    reason::Symbol=:ready,
+    available::Bool=true,
+)
+    nr = _native_hsd_nonnegative_dimension(reduced_variables, :reduced_variables)
+    rows = _native_hsd_nonnegative_dimension(active_rows, :active_rows)
+    matrix_dim = dimension === nothing ?
+                 (matrix_dimension === nothing ?
+                  (active_rows > 0 && nonsymmetric_dimension > 0 && available ?
+                   reduced_variables + nonsymmetric_dimension + 2 : 0) :
+                  matrix_dimension) :
+                 dimension
+    dimension !== nothing && matrix_dimension !== nothing &&
+        Int(dimension) == Int(matrix_dimension) ||
+        (dimension === nothing || matrix_dimension === nothing) ||
+        throw(ArgumentError("native HSD dimension and matrix_dimension disagree"))
+    matrix_dim = _native_hsd_nonnegative_dimension(matrix_dim, :matrix_dimension)
+    symmetric = _native_hsd_nonnegative_dimension(symmetric_dimension, :symmetric_dimension)
+    nonsymmetric = _native_hsd_nonnegative_dimension(
+        nonsymmetric_dimension, :nonsymmetric_dimension,
+    )
+    blocks = _native_hsd_nonnegative_dimension(nonsymmetric_blocks, :nonsymmetric_blocks)
+    if !available
+        matrix_dim = 0
+        row_scaling = :none
+        border_structure = :none
+        factorization = :not_applicable
+        pivoting = :not_applicable
+        coordinate_system = :not_applicable
+        factor_reuse = :not_applicable
+        gram_or_metric = :not_applicable
+        backend = :not_applicable
+    end
+    return DenseHybridCoupled(
+        matrix_dim, nr, rows, layout, symmetric, nonsymmetric, blocks,
+        row_scaling, border_structure, factorization, pivoting,
+        coordinate_system, factor_reuse, gram_or_metric, backend, route,
+        reason, available,
+    )
+end
+
+function DenseHybridCoupled()
+    return DenseHybridCoupled(
+        0,
+        0;
+        matrix_dimension=0,
+        layout=:not_applicable,
+        symmetric_dimension=0,
+        nonsymmetric_dimension=0,
+        nonsymmetric_blocks=0,
+        row_scaling=:none,
+        border_structure=:none,
+        factorization=:not_applicable,
+        pivoting=:not_applicable,
+        coordinate_system=:not_applicable,
+        factor_reuse=:not_applicable,
+        gram_or_metric=:not_applicable,
+        backend=:not_applicable,
+        route=:dense_hybrid_coupled,
+        reason=:not_applicable,
+        available=false,
+    )
+end
+
+function Base.getproperty(
+    descriptor::DenseHomogeneousBordered,
+    name::Symbol,
+)
+    name === :formulation && return getfield(descriptor, :route)
+    name === :matrix_dimension && return getfield(descriptor, :dimension)
+    name === :reduced_variables && return getfield(descriptor, :reduced_rank)
+    name === :reduced_layout && return getfield(descriptor, :layout)
+    name === :border && return getfield(descriptor, :border_structure)
+    name === :factorization_reuse && return getfield(descriptor, :factor_reuse)
+    name === :transform && return getfield(descriptor, :row_scaling)
+    name === :metric && return getfield(descriptor, :gram_or_metric)
+    name === :pivoting_strategy && return getfield(descriptor, :pivoting)
+    name === :reuse && return getfield(descriptor, :factor_reuse)
+    return getfield(descriptor, name)
+end
+
+function Base.getproperty(
+    descriptor::DenseHybridCoupled,
+    name::Symbol,
+)
+    name === :formulation && return getfield(descriptor, :route)
+    name === :matrix_dimension && return getfield(descriptor, :dimension)
+    name === :reduced_variables && return getfield(descriptor, :reduced_rank)
+    name === :reduced_layout && return getfield(descriptor, :layout)
+    name === :border && return getfield(descriptor, :border_structure)
+    name === :factorization_reuse && return getfield(descriptor, :factor_reuse)
+    name === :transform && return getfield(descriptor, :row_scaling)
+    name === :metric && return getfield(descriptor, :gram_or_metric)
+    name === :pivoting_strategy && return getfield(descriptor, :pivoting)
+    name === :reuse && return getfield(descriptor, :factor_reuse)
+    return getfield(descriptor, name)
+end
+
+function Base.propertynames(
+    descriptor::Union{DenseHomogeneousBordered,DenseHybridCoupled},
+    private::Bool=false,
+)
+    return (fieldnames(typeof(descriptor))..., :matrix_dimension,
+            :formulation, :reduced_variables, :reduced_layout, :border,
+            :factorization_reuse, :transform, :metric, :pivoting_strategy, :reuse)
+end
+
 """Compatibility marker retained only so malformed old plans fail in setup."""
 struct UnsupportedKKTFormulation <: AbstractKKTFormulation
     name::Symbol
@@ -88,6 +349,8 @@ formulation_symbol(::DenseAugmentedKKT) = :dense_augmented_kkt
 formulation_symbol(::SparseNormalEquations) = :sparse_normal_equations
 formulation_symbol(::BlockArrowElimination) = :block_arrow
 formulation_symbol(::NoKKTFormulation) = :not_applicable
+formulation_symbol(::DenseHomogeneousBordered) = :dense_homogeneous_bordered
+formulation_symbol(::DenseHybridCoupled) = :dense_hybrid_coupled
 formulation_symbol(formulation::UnsupportedKKTFormulation) = formulation.name
 formulation_symbol(plan::FormulationPlan) =
     formulation_symbol(plan.formulation)
@@ -117,6 +380,10 @@ function kkt_backend_from_formulation(
     equalities::Integer,
 )
     formulation = plan.formulation
+    formulation isa DenseHomogeneousBordered &&
+        return formulation.backend
+    formulation isa DenseHybridCoupled &&
+        return formulation.backend
     sdp_algorithms = (:sdp_primal_dual,)
     if formulation isa Union{
         DenseNormalEquations,

@@ -116,14 +116,25 @@ end
     SDPX.apply_Theta!(runtime, out, y)
     @test out == s
 
-    # The constructor has no asymmetric fallback and rejects every
-    # unsupported canonical family.
-    @test_throws ArgumentError SDPX.ProductConeRuntime(
+    # Exp/Power are now first-class runtime families: the constructor builds
+    # their typed block storage and leaves the symmetric families empty.  It
+    # still has no fallback for a family it cannot execute.
+    exp_runtime = SDPX.ProductConeRuntime(
         _pcr_layout(Float64, [(:exp, 3)]), Float64,
     )
-    @test_throws ArgumentError SDPX.ProductConeRuntime(
+    @test length(exp_runtime.exp) == 1
+    @test isempty(exp_runtime.power)
+    @test isempty(exp_runtime.orthant) && isempty(exp_runtime.soc) &&
+          isempty(exp_runtime.psd)
+
+    power_runtime = SDPX.ProductConeRuntime(
         _pcr_layout(Float64, [(:power, 3)]), Float64,
     )
+    @test length(power_runtime.power) == 1
+    @test isempty(power_runtime.exp)
+    @test isempty(power_runtime.orthant) && isempty(power_runtime.soc) &&
+          isempty(power_runtime.psd)
+
     @test_throws ArgumentError SDPX.ProductConeRuntime(
         _pcr_layout(Float64, [(:zero, 1)]), Float64,
     )

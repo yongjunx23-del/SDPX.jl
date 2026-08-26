@@ -6,6 +6,13 @@ using LinearAlgebra
 using SparseArrays
 using MultiFloats
 
+# A direct invocation of this file is the full precision gate. The repository
+# quick profile keeps the expensive SOC-HSD ladder at BigFloat256; the full
+# profile retains BigFloat512/1024 coverage.
+const PCS_EXTENDED_BIG_PRECISION =
+    !isdefined(@__MODULE__, :TEST_PROFILE) ||
+    getfield(@__MODULE__, :TEST_PROFILE) === :full
+
 if !isdefined(SDPX, :ProductHSDSolveStatus)
     Base.include(
         SDPX,
@@ -183,6 +190,21 @@ function _pcs_reverify(program, result; tol)
     return false
 end
 
+function _pcs_retained_bordered_certificate_ok(state)
+    workspace = state.symmetric_bordered
+    workspace.factor_certified || return false
+    workspace.accumulated_candidate && return false
+    factors = SDPX.product_hsd_factor_count(state)
+    SDPX._product_bordered_triangular_solution_ok!(
+        workspace, workspace.solution, workspace.factor_rhs,
+        8 * workspace.dimension,
+    ) || return false
+    SDPX._product_bordered_factor_solution_ok!(workspace) || return false
+    SDPX._product_bordered_original_solution_ok!(workspace) || return false
+    return SDPX.product_hsd_factor_count(state) == factors &&
+           SDPX.kkt_factor_count(state.base.driver) == 0
+end
+
 @testset "typed product-HSD optimal solve matrix" begin
     for (label, specs) in PCS_CASES
         @testset "$label" begin
@@ -332,8 +354,9 @@ end
     @test ambiguous_result.reason === SDPX.ProductHSDRankAmbiguousSetup
     @test ambiguous_result.factorizations == 0
 
-    # H=1 factors, but the homogeneous border denominator is exactly zero.
-    # The solve must fail closed after one factor, never divide through it.
+    # The full bordered matrix is exactly singular. The native bordered route
+    # classifies that factor failure directly instead of first factoring H and
+    # discovering a zero scalar Schur complement.
     e = _pcs_identity(Float64, [(:soc, 3)])
     unsafe_border = _pcs_program(
         Float64, [(:soc, 3)], reshape(-e, 3, 1), zeros(3), [-1.0],
@@ -341,18 +364,22 @@ end
     border_result = SDPX.product_hsd_solve!(
         SDPX.ProductConeHSDState(unsafe_border); max_iterations=5,
     )
-    @test border_result.status === SDPX.ProductHSDBreakdown
-    @test border_result.reason === SDPX.ProductHSDDirectionBreakdown
+    @test border_result.status === SDPX.ProductHSDSingular
+    @test border_result.reason === SDPX.ProductHSDSingularKKTReason
     @test border_result.factorizations == 1
     @test all(isfinite, border_result.hsd_x)
     @test all(isfinite, border_result.hsd_s)
     @test all(isfinite, border_result.hsd_y)
 
-    singular_state = SDPX.ProductConeHSDState(one_column)
-    fill!(singular_state.base.Ar.nzval, 0.0)
-    singular_result = SDPX.product_hsd_solve!(singular_state)
-    @test singular_result.status === SDPX.ProductHSDSingular
-    @test singular_result.reason === SDPX.ProductHSDSingularKKTReason
+    zero_h_state = SDPX.ProductConeHSDState(one_column)
+    fill!(zero_h_state.base.Ar.nzval, 0.0)
+    zero_h_result = SDPX.product_hsd_solve!(zero_h_state)
+    # A zero H block alone does not imply that [H q; r' d] is singular. The
+    # one full-border factor succeeds and the original equations then reject
+    # the injected, post-RRQR inconsistent direction.
+    @test zero_h_result.status === SDPX.ProductHSDBreakdown
+    @test zero_h_result.reason === SDPX.ProductHSDDirectionBreakdown
+    @test zero_h_result.factorizations == 1
 
     mild = _pcs_fixture(Float64, specs, :optimal; scale=10.0)
     mild_result = SDPX.product_hsd_solve!(
@@ -410,13 +437,15 @@ end
         @testset "$T" begin
             for specs in smoke_specs
                 program = _pcs_fixture(T, specs, :optimal)
+                state = SDPX.ProductConeHSDState(program)
                 result = SDPX.product_hsd_solve!(
-                    SDPX.ProductConeHSDState(program); max_iterations=100,
+                    state; max_iterations=100,
                 )
                 @test result.status === SDPX.ProductHSDOptimal
                 @test _pcs_reverify(
                     program, result; tol=SDPX.default_certificate_tol(T),
                 )
+                @test _pcs_retained_bordered_certificate_ok(state)
             end
         end
     end
@@ -426,22 +455,32 @@ end
     setprecision(BigFloat, 256) do
         for specs in smoke_specs
             program = _pcs_fixture(BigFloat, specs, :optimal)
+            state = SDPX.ProductConeHSDState(program)
             result = SDPX.product_hsd_solve!(
-                SDPX.ProductConeHSDState(program);
+                state;
                 max_iterations=100, tol=big"1e-8",
             )
             @test result.status === SDPX.ProductHSDOptimal
             @test _pcs_reverify(program, result; tol=big"1e-8")
+            @test _pcs_retained_bordered_certificate_ok(state)
         end
         default_program = _pcs_fixture(BigFloat, [(:soc, 3)], :optimal)
+        default_state = SDPX.ProductConeHSDState(default_program)
         default_result = SDPX.product_hsd_solve!(
-            SDPX.ProductConeHSDState(default_program); max_iterations=100,
+            default_state; max_iterations=100,
         )
         @test default_result.status === SDPX.ProductHSDOptimal
         @test _pcs_reverify(
             default_program, default_result;
             tol=SDPX.default_certificate_tol(BigFloat),
         )
+        @test _pcs_retained_bordered_certificate_ok(default_state)
+        for block in default_state.runtime.soc
+            budget = SDPX._product_hsd_soc_condition_budget(
+                block.state.w, block.dim,
+            )
+            @test isfinite(budget) && 0 < budget < 0.01
+        end
 
         strict_program = _pcs_program(
             BigFloat,
@@ -474,23 +513,33 @@ end
         @test abs(second_result.x[1] - 1) < big"1e-28"
     end
 
-    for (bits, tolerance_text) in ((512, "1e-51"), (1024, "1e-102"))
-        setprecision(BigFloat, bits) do
-            tolerance = BigFloat(tolerance_text)
-            program = _pcs_program(
-                BigFloat,
-                [(:soc, 3)],
-                reshape(BigFloat[-1, 0, 0], 3, 1),
-                BigFloat[0, 1, 0],
-                BigFloat[1],
-            )
-            result = SDPX.product_hsd_solve!(
-                SDPX.ProductConeHSDState(program);
-                max_iterations=150, tol=tolerance,
-            )
-            @test result.status === SDPX.ProductHSDOptimal
-            @test _pcs_reverify(program, result; tol=tolerance)
-            @test abs(result.x[1] - 1) < sqrt(tolerance)
+    if PCS_EXTENDED_BIG_PRECISION
+        for (bits, tolerance_text) in ((512, "1e-51"), (1024, "1e-102"))
+            setprecision(BigFloat, bits) do
+                tolerance = BigFloat(tolerance_text)
+                program = _pcs_program(
+                    BigFloat,
+                    [(:soc, 3)],
+                    reshape(BigFloat[-1, 0, 0], 3, 1),
+                    BigFloat[0, 1, 0],
+                    BigFloat[1],
+                )
+                state = SDPX.ProductConeHSDState(program)
+                result = SDPX.product_hsd_solve!(
+                    state;
+                    max_iterations=150, tol=tolerance,
+                )
+                @test result.status === SDPX.ProductHSDOptimal
+                @test _pcs_reverify(program, result; tol=tolerance)
+                @test abs(result.x[1] - 1) < sqrt(tolerance)
+                @test _pcs_retained_bordered_certificate_ok(state)
+                for block in state.runtime.soc
+                    budget = SDPX._product_hsd_soc_condition_budget(
+                        block.state.w, block.dim,
+                    )
+                    @test isfinite(budget) && 0 < budget < 0.01
+                end
+            end
         end
     end
 end
@@ -537,16 +586,19 @@ end
         warm = Vector{SDPX.HSDStepCode}(undef, 1)
         _pcs_step_noreturn!(warm, 1, state)
         @test warm[1] === SDPX.HSDStepOK
-        codes = Vector{SDPX.HSDStepCode}(undef, 10)
-        samples = Vector{Int}(undef, 10)
-        factors_before = SDPX.kkt_factor_count(state.base.driver)
-        @inbounds for sample in 1:10
+        # Seven measured epochs include the Float64 mixed step-8 regression.
+        codes = Vector{SDPX.HSDStepCode}(undef, 7)
+        samples = Vector{Int}(undef, 7)
+        factors_before = SDPX.product_hsd_factor_count(state)
+        old_h_factors = SDPX.kkt_factor_count(state.base.driver)
+        @inbounds for sample in 1:7
             samples[sample] = @allocated _pcs_step_noreturn!(
                 codes, sample, state,
             )
         end
         @test all(==(SDPX.HSDStepOK), codes)
-        @test samples == zeros(Int, 10)
-        @test SDPX.kkt_factor_count(state.base.driver) - factors_before == 10
+        @test samples == zeros(Int, 7)
+        @test SDPX.product_hsd_factor_count(state) - factors_before == 7
+        @test SDPX.kkt_factor_count(state.base.driver) == old_h_factors == 0
     end
 end

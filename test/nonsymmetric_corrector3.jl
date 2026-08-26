@@ -136,6 +136,90 @@ end
     @test isbitstype(SDPX.NonsymmetricCorrectorStatus)
     @test isbitstype(SDPX.NonsymmetricCorrectorReason)
     @test isbitstype(SDPX.NonsymmetricCorrectorResult{Float64})
+    @test SDPX.NS_CORRECTOR_LINEAR_SOLVE_MISMATCH isa
+          SDPX.NonsymmetricCorrectorReason
+    @test SDPX.NS_CORRECTOR_THIRD_SYMMETRY_MISMATCH isa
+          SDPX.NonsymmetricCorrectorReason
+    @test SDPX.NS_CORRECTOR_PROJECTION_TOO_LARGE isa
+          SDPX.NonsymmetricCorrectorReason
+    @test SDPX.NS_CORRECTOR_FACTOR_FAILED isa
+          SDPX.NonsymmetricCorrectorReason
+    @test SDPX.NS_CORRECTOR_FACTOR_MISMATCH isa
+          SDPX.NonsymmetricCorrectorReason
+end
+
+function _nsc_composed_cancellation_fixture(::Type{T}) where {T}
+    workspace = SDPX.NonsymmetricCorrectorWorkspace(T)
+    scaling = SDPX.NonsymmetricScalingWorkspace(T)
+    condition = sqrt(inv(eps(one(T))))
+    twenty_five = T(25)
+    g11 = (T(9) * condition + T(16)) / twenty_five
+    g12 = T(12) * (condition - one(T)) / twenty_five
+    g22 = (T(16) * condition + T(9)) / twenty_five
+    inverse_condition = inv(condition)
+    t11 = (T(9) * inverse_condition + T(16)) / twenty_five
+    t12 = T(12) * (inverse_condition - one(T)) / twenty_five
+    t22 = (T(16) * inverse_condition + T(9)) / twenty_five
+    two = one(T) + one(T)
+    fill!(scaling.g, zero(T))
+    fill!(scaling.theta, zero(T))
+    scaling.g[1, 1] = g11
+    scaling.g[1, 2] = g12
+    scaling.g[2, 1] = g12
+    scaling.g[2, 2] = g22
+    scaling.g[3, 3] = inv(two)
+    scaling.theta[1, 1] = t11
+    scaling.theta[1, 2] = t12
+    scaling.theta[2, 1] = t12
+    scaling.theta[2, 2] = t22
+    scaling.theta[3, 3] = two
+    workspace.rho .= (one(T), one(T), T(3) / T(10))
+    SDPX._ns_scaling_matvec!(workspace.h, scaling.theta, workspace.rho)
+    SDPX._ns_scaling_matvec!(workspace.work, scaling.g, workspace.h)
+    return workspace, scaling
+end
+
+@testset "composed-map cancellation gate and corruption rejection" begin
+    for T in (
+        Float64,
+        _NS_CORRECTOR_MF.Float64x2,
+        _NS_CORRECTOR_MF.Float64x3,
+        _NS_CORRECTOR_MF.Float64x4,
+    )
+        workspace, scaling = _nsc_composed_cancellation_fixture(T)
+        naive_error = maximum(abs, workspace.work - workspace.rho)
+        @test naive_error > workspace.validation_tolerance
+        accepted, reported = SDPX._ns_corrector_composed_map_gate!(
+            workspace, scaling,
+        )
+        @test accepted
+        @test isfinite(reported) && reported <= workspace.validation_tolerance
+
+        scaling.g[1, 1] *= T(2)
+        SDPX._ns_scaling_matvec!(workspace.h, scaling.theta, workspace.rho)
+        SDPX._ns_scaling_matvec!(workspace.work, scaling.g, workspace.h)
+        corrupted, _ = SDPX._ns_corrector_composed_map_gate!(
+            workspace, scaling,
+        )
+        @test !corrupted
+    end
+    setprecision(BigFloat, 256) do
+        workspace, scaling = _nsc_composed_cancellation_fixture(BigFloat)
+        naive_error = maximum(abs, workspace.work - workspace.rho)
+        @test naive_error > workspace.validation_tolerance
+        accepted, reported = SDPX._ns_corrector_composed_map_gate!(
+            workspace, scaling,
+        )
+        @test accepted
+        @test isfinite(reported) && reported <= workspace.validation_tolerance
+        scaling.theta[1, 1] *= BigFloat(2)
+        SDPX._ns_scaling_matvec!(workspace.h, scaling.theta, workspace.rho)
+        SDPX._ns_scaling_matvec!(workspace.work, scaling.g, workspace.h)
+        corrupted, _ = SDPX._ns_corrector_composed_map_gate!(
+            workspace, scaling,
+        )
+        @test !corrupted
+    end
 end
 
 @testset "Exp/Power correction identities and fixed-width zero allocation" begin
@@ -181,6 +265,8 @@ end
                 @test combined.status === SDPX.NS_CORRECTOR_COMBINED_READY
                 @test combined.reason === SDPX.NS_CORRECTOR_CONVERGED
                 @test isbits(combined)
+                @test workspace.factor_valid
+                @test isfinite(workspace.factor_error)
                 @test isapprox(
                     dot(collect(primal), workspace.chi),
                     dot(collect(ds), collect(dy));
@@ -211,6 +297,303 @@ end
                     workspace, scaling, tag, primal, dual,
                     ds, dy, target,
                 ) == 0
+            end
+        end
+    end
+end
+
+@inline function _nsc_near_boundary_cases(::Type{T}) where {T}
+    margin = T(1) / T(10_000)
+    return (
+        (SDPX.ExpConjugateTag(), (zero(T), one(T), exp(margin))),
+        (
+            SDPX.PowerConjugateTag(T(1) / T(10)),
+            (one(T), one(T), exp(-margin)),
+        ),
+        (
+            SDPX.PowerConjugateTag(T(1) / T(2)),
+            (one(T), one(T), exp(-margin)),
+        ),
+        (
+            SDPX.PowerConjugateTag(T(9) / T(10)),
+            (one(T), one(T), exp(-margin)),
+        ),
+    )
+end
+
+@inline function _nsc_hessian(tag, point)
+    return tag isa SDPX.ExpConjugateTag ?
+        SDPX.exp_barrier_hessian(point...) :
+        SDPX.power_barrier_hessian(point..., tag.alpha)
+end
+
+@testset "near-boundary directional jet, Euler gate, and zero allocation" begin
+    for T in (
+        Float64,
+        _NS_CORRECTOR_MF.Float64x2,
+        _NS_CORRECTOR_MF.Float64x3,
+        _NS_CORRECTOR_MF.Float64x4,
+    )
+        ds, dy = _nsc_directions(T)
+        for (tag, primal) in _nsc_near_boundary_cases(T)
+            workspace = SDPX.NonsymmetricCorrectorWorkspace(T)
+            result = SDPX.try_nonsymmetric_higher_correction!(
+                workspace, tag, primal, ds, dy,
+            )
+            @test result.status === SDPX.NS_CORRECTOR_COMBINED_READY
+            @test result.euler_error <= T(1024) * sqrt(eps(one(T)))
+            @test workspace.solve_error <= T(128) *
+                  (T(3) * eps(one(T)) / (one(T) - T(3) * eps(one(T))))
+            @test workspace.symmetry_error <= T(512) * sqrt(eps(one(T)))
+            @test _nsc_higher_allocated(
+                workspace, tag, primal, ds, dy,
+            ) == 0
+        end
+    end
+
+    for bits in (256, 512, 1024)
+        setprecision(BigFloat, bits) do
+            ds, dy = _nsc_directions(BigFloat)
+            margin = inv(BigFloat(10_000))
+            step = margin * sqrt(sqrt(eps(BigFloat)))
+            tolerance = BigFloat(4096) * sqrt(eps(BigFloat))
+            for (tag, primal) in _nsc_near_boundary_cases(BigFloat)
+                workspace = SDPX.NonsymmetricCorrectorWorkspace(BigFloat)
+                result = SDPX.try_nonsymmetric_higher_correction!(
+                    workspace, tag, primal, ds, dy,
+                )
+                @test result.status === SDPX.NS_CORRECTOR_COMBINED_READY
+                hessian = _nsc_hessian(tag, primal)
+                u_reference = hessian \ collect(dy)
+                plus = ntuple(i -> primal[i] + step * ds[i], 3)
+                minus = ntuple(i -> primal[i] - step * ds[i], 3)
+                hessian_plus = _nsc_hessian(tag, plus)
+                hessian_minus = _nsc_hessian(tag, minus)
+                chi_reference = -(
+                    (hessian_plus - hessian_minus) * u_reference
+                ) / (step + step + step + step)
+                chi_scale = max(one(BigFloat), maximum(abs, chi_reference))
+                @test maximum(abs, workspace.chi - chi_reference) <=
+                      tolerance * chi_scale
+                @test result.euler_error <= tolerance
+                @test precision(workspace.chi[1]) == bits
+            end
+        end
+    end
+end
+
+function _nsc_raw_contractions(::Type{T}, tag, primal, ds, dy) where {T}
+    hessian = _nsc_hessian(tag, primal)
+    u = hessian \ T[dy[1], dy[2], dy[3]]
+    primary = zeros(T, 3)
+    swapped = zeros(T, 3)
+    SDPX._ns_corrector_third_contraction!(
+        primary, tag, primal, ds, u,
+    )
+    SDPX._ns_corrector_third_contraction!(
+        swapped, tag, primal, u, ds,
+    )
+    return primary, swapped
+end
+
+function _nsc_structural_raw_contractions(
+    ::Type{T}, tag, primal, ds, dy,
+) where {T}
+    factor = zeros(T, 3, 3)
+    @assert SDPX._ns_structural_hessian_factor!(
+        factor, tag, primal[1], primal[2], primal[3],
+    )
+    u = zeros(T, 3)
+    forward = zeros(T, 3)
+    @assert SDPX._ns_structural_hessian_solve!(
+        u, factor, T[dy[1], dy[2], dy[3]], forward,
+    )
+    primary = zeros(T, 3)
+    swapped = zeros(T, 3)
+    SDPX._ns_corrector_third_contraction!(
+        primary, tag, primal, ds, u,
+    )
+    SDPX._ns_corrector_third_contraction!(
+        swapped, tag, primal, u, ds,
+    )
+    return primary, swapped
+end
+
+function _nsc_bigfloat_hessian_difference(tag, primal, ds, dy)
+    return setprecision(BigFloat, 256) do
+        big_tag = tag isa SDPX.ExpConjugateTag ?
+                  SDPX.ExpConjugateTag() :
+                  SDPX.PowerConjugateTag(BigFloat(tag.alpha))
+        sb = BigFloat.(primal)
+        dsb = BigFloat.(ds)
+        dyb = BigFloat.(dy)
+        hessian = _nsc_hessian(big_tag, sb)
+        u = hessian \ collect(dyb)
+        step = BigFloat(2)^(-100) /
+               max(one(BigFloat), maximum(abs, dsb))
+        plus = ntuple(i -> sb[i] + step * dsb[i], 3)
+        minus = ntuple(i -> sb[i] - step * dsb[i], 3)
+        hessian_plus = _nsc_hessian(big_tag, plus)
+        hessian_minus = _nsc_hessian(big_tag, minus)
+        return Float64.(-((hessian_plus - hessian_minus) * u) /
+                        (step + step + step + step))
+    end
+end
+
+@testset "release-state jets match independent BigFloat Hessian differences" begin
+    fixtures = (
+        (
+            SDPX.ExpConjugateTag(),
+            (0.0, 2.468472436326448, 2.4684801888833774),
+            (-0.0, -4.469527126192585e-12, -0.00010133351089104937),
+            (-0.006861126333914458, -0.00019674454689309846,
+             3.2453886527072154e-11),
+        ),
+        (
+            SDPX.PowerConjugateTag(0.5),
+            (0.44702688968365784, 0.44702688968365784,
+             -0.44702580381560175),
+            (-1.085644632050869e-6, -1.085644632050869e-6,
+             -2.221716217883298e-10),
+            (-5.60062303807507e-7, -5.600599004666737e-7,
+             -3.138694380843711e-7),
+        ),
+    )
+    for (tag, primal, ds, dy) in fixtures
+        # These pre-projection jets use production's structural solve.  The
+        # reference remains independent: it forms BigFloat analytic Hessians
+        # at two displaced primal points and takes a centered difference; it
+        # never calls the factor builder or analytic third contraction.
+        primary, swapped = _nsc_structural_raw_contractions(
+            Float64, tag, primal, ds, dy,
+        )
+        workspace = SDPX.NonsymmetricCorrectorWorkspace(Float64)
+        result = SDPX.try_nonsymmetric_higher_correction!(
+            workspace, tag, primal, ds, dy,
+        )
+        @test result.status === SDPX.NS_CORRECTOR_COMBINED_READY
+        @test workspace.solve_error <= 128 *
+              (3eps(Float64) / (1 - 3eps(Float64)))
+        @test workspace.symmetry_error <= 512sqrt(eps(Float64))
+        @test workspace.raw_euler_error <= 1024sqrt(eps(Float64))
+
+        reference = _nsc_bigfloat_hessian_difference(
+            tag, primal, ds, dy,
+        )
+        primary_error = maximum(abs, primary - reference)
+        swapped_error = maximum(abs, swapped - reference)
+        midpoint_error = maximum(abs, (primary + swapped) / 2 - reference)
+        projected_error = maximum(abs, workspace.chi - reference)
+        reference_scale = maximum(abs, reference)
+        @test primary_error <= 1e-4 * reference_scale
+        @test swapped_error <= 1e-4 * reference_scale
+        @test midpoint_error <= 1e-4 * reference_scale
+        @test projected_error <= 1e-4 * reference_scale
+    end
+end
+
+@testset "structural factors survive release-state dense SPD loss" begin
+    # Frozen pre-step primal points from the analytic Exp/Power release
+    # trajectories.  The independently formed Float64 dense Hessians have
+    # lost numerical positive definiteness, although the exact barriers are
+    # strictly convex.  The certified analytic L must remain authoritative.
+    fixtures = (
+        (
+            SDPX.ExpConjugateTag(),
+            (0.0, 3.255596693374307, 3.2555967067500338),
+        ),
+        (
+            SDPX.PowerConjugateTag(0.5),
+            (0.47214176985044354, 0.47214176985044354,
+             -0.47214176737485286),
+        ),
+    )
+    ds, dy = _nsc_directions(Float64)
+    for (tag, primal) in fixtures
+        dense = _nsc_hessian(tag, primal)
+        @test !isposdef(Symmetric(dense))
+        workspace = SDPX.NonsymmetricCorrectorWorkspace(Float64)
+        result = SDPX.try_nonsymmetric_higher_correction!(
+            workspace, tag, primal, ds, dy,
+        )
+        @test result.status === SDPX.NS_CORRECTOR_COMBINED_READY
+        @test result.reason === SDPX.NS_CORRECTOR_CONVERGED
+        @test workspace.factor_valid
+        @test SDPX._ns_structural_factor_finite_lower(workspace.factor)
+        factor_ok, error =
+            SDPX._ns_structural_hessian_factor_certificate!(
+                workspace.factor, tag,
+                primal[1], primal[2], primal[3],
+            )
+        @test factor_ok
+        @test error == workspace.factor_error
+    end
+end
+
+@testset "rational directions match independent BigFloat Hessian differences" begin
+    for (case_index, (tag, primal, _)) in enumerate(_nsc_cases(Float64))
+        for sample in 1:6
+            ds = ntuple(i -> Float64(
+                mod(7sample + 11i + 3case_index, 29) - 14,
+            ) / 37, 3)
+            dy = ntuple(i -> Float64(
+                mod(13sample + 5i + case_index, 31) - 15,
+            ) / 41, 3)
+            workspace = SDPX.NonsymmetricCorrectorWorkspace(Float64)
+            result = SDPX.try_nonsymmetric_higher_correction!(
+                workspace, tag, primal, ds, dy,
+            )
+            @test result.status === SDPX.NS_CORRECTOR_COMBINED_READY
+            reference = _nsc_bigfloat_hessian_difference(
+                tag, primal, ds, dy,
+            )
+            scale = max(maximum(abs, reference), floatmin(Float64))
+            @test maximum(abs, workspace.chi - reference) <= 1e-10 * scale
+        end
+    end
+end
+
+@testset "pre-projection corruption is rejected" begin
+    tag, primal, _ = _nsc_cases(Float64)[2]
+    ds, dy = _nsc_directions(Float64)
+    workspace = SDPX.NonsymmetricCorrectorWorkspace(Float64)
+    result = SDPX.try_nonsymmetric_higher_correction!(
+        workspace, tag, primal, ds, dy,
+    )
+    @test result.status === SDPX.NS_CORRECTOR_COMBINED_READY
+    scale = maximum(abs, workspace.chi)
+    workspace.chi[1] += scale
+    reason = SDPX._ns_corrector_euler_projection!(
+        workspace, primal..., ds,
+    )
+    @test reason === SDPX.NS_CORRECTOR_PROJECTION_TOO_LARGE
+end
+
+@testset "Euler backward gate is homogeneous in affine directions" begin
+    T = Float64
+    ds, dy = _nsc_directions(T)
+    for (tag, primal) in _nsc_near_boundary_cases(T)
+        workspace = SDPX.NonsymmetricCorrectorWorkspace(T)
+        baseline = SDPX.try_nonsymmetric_higher_correction!(
+            workspace, tag, primal, ds, dy,
+        )
+        @test baseline.status === SDPX.NS_CORRECTOR_COMBINED_READY
+        baseline_error = baseline.euler_error
+        for exponent in (-40, 40)
+            scale = ldexp(one(T), exponent)
+            scaled_ds = ntuple(i -> scale * ds[i], 3)
+            scaled_dy = ntuple(i -> scale * dy[i], 3)
+            scaled = SDPX.try_nonsymmetric_higher_correction!(
+                workspace, tag, primal, scaled_ds, scaled_dy,
+            )
+            @test scaled.status === SDPX.NS_CORRECTOR_COMBINED_READY
+            if iszero(baseline_error)
+                @test iszero(scaled.euler_error)
+            else
+                @test isapprox(
+                    scaled.euler_error, baseline_error;
+                    atol=zero(T), rtol=T(4096) * eps(T),
+                )
             end
         end
     end
@@ -452,16 +835,18 @@ end
     )
     @test bad_target.reason === SDPX.NS_CORRECTOR_INVALID_PARAMETER
 
-    not_spd = SDPX.try_nonsymmetric_higher_correction!(
+    factor_failure = SDPX.try_nonsymmetric_higher_correction!(
         workspace, tag, (0.0, 1.0e200, 2.0e200), ds, dy,
     )
-    @test not_spd.status === SDPX.NS_CORRECTOR_FAILED
-    @test not_spd.reason === SDPX.NS_CORRECTOR_HESSIAN_NOT_SPD
+    @test factor_failure.status === SDPX.NS_CORRECTOR_FAILED
+    @test factor_failure.reason === SDPX.NS_CORRECTOR_FACTOR_FAILED
     third_failure = SDPX.try_nonsymmetric_higher_correction!(
         workspace, tag, primal, (1.0e308, 1.0e308, 1.0e308), dy,
     )
     @test third_failure.status === SDPX.NS_CORRECTOR_FAILED
     @test third_failure.reason === SDPX.NS_CORRECTOR_THIRD_DERIVATIVE_FAILED
+    @test !workspace.factor_valid
+    @test isinf(workspace.factor_error)
 
     saved_theta = scaling.theta[1, 1]
     scaling.theta[1, 1] = NaN

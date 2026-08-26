@@ -8,6 +8,7 @@ using Test
 using LinearAlgebra
 
 @testset "exponential cone membership" begin
+    @test SDPX.exp_membership(0, 1, 1)
     @test SDPX.exp_membership(0.0, 1.0, 1.0)
     @test SDPX.exp_membership(1.0, 1.0, exp(1.0))
     @test SDPX.exp_membership(1.0, 1.0, exp(1.0) + 1.0)
@@ -52,6 +53,7 @@ end
 
 @testset "power cone membership" begin
     alpha = 0.5
+    @test SDPX.power_membership(1, 1, 1, alpha)
     # x^0.5 y^0.5 >= |z|
     @test SDPX.power_membership(1.0, 1.0, 1.0, alpha)
     @test SDPX.power_membership(4.0, 1.0, 2.0, alpha)
