@@ -118,6 +118,7 @@ include("spectrum.jl")
 include("frontend/high_level_solve.jl")
 include("performance_trace.jl")
 include("public/result.jl")
+include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
 include("moi_wrapper.jl")
 

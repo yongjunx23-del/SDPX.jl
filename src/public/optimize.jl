@@ -1614,6 +1614,21 @@ function _optimize_impl(
     # compile_product_cone_model owns the one model validation boundary.
     program = compile_product_cone_model(model)
     route = classify_native_cone_program(program)
+    if resolved_settings.engine === :native_hsd
+        # The explicit native-HSD opt-in is a separate direct route.  Its
+        # policy gate rejects unsupported requests before canonicalization;
+        # critically, this branch cannot reach `_public_lower_native`, a PSD
+        # lift, a legacy solver, or a fallback/retry chain.
+        _public_validate_algorithm(route, resolved_settings)
+        return _public_optimize_native_hsd(
+            model,
+            program,
+            route,
+            resolved_settings,
+            resolved_outputs,
+            warm_start,
+        )
+    end
     if warm_start !== nothing
         warm_start isa Result || throw(ArgumentError(
             "warm_start must be a previous SDPX Result or nothing",

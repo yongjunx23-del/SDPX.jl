@@ -107,7 +107,7 @@ struct Result{T<:AbstractFloat}
     dual_slack_data::Union{Nothing,_ResultData{VariableRef,T}}
     primal_objective_data::Union{Nothing,T}
     dual_objective_data::Union{Nothing,T}
-    diagnostics::Union{Nothing,SolveDiagnostics,NativeSOCDiagnostics}
+    diagnostics::Union{Nothing,AbstractCoreDiagnostics}
     iteration_history::Union{Nothing,Vector{NamedTuple}}
     performance_trace::Union{Nothing,PerformanceTrace}
     objective_sense::Union{Minimize,Maximize}
