@@ -56,6 +56,11 @@ Common raw keywords include `tolerance`, `max_iterations`, `time_limit`,
 """
 mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     options::SolverOptions{T}
+    # Public engine selector.  This is deliberately separate from the
+    # historical SolverOptions record: SolverOptions predates the direct HSD
+    # route, while Settings owns the authoritative `:auto/:native_hsd/:legacy`
+    # policy consumed by public optimize!.
+    engine::Symbol
     # v0.5 authoritative builder/result seam.  The adapter is included after
     # public/result.jl, so this field is the concrete public Result boundary.
     model::Union{Nothing,Model{T}}
@@ -74,6 +79,7 @@ mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
         _require_supported_arithmetic_type(T)
         optimizer = new{T}(
             SolverOptions{T}(sparse=:auto),
+            :auto,
             nothing,
             nothing,
             VariableEntry{T}[],
@@ -163,6 +169,14 @@ function _option_symbol(options::SolverOptions, name::String)
 end
 
 function _set_raw_option!(optimizer::Optimizer, name::String, value)
+    if name == "engine"
+        value isa Symbol && value in (:auto, :native_hsd, :legacy) ||
+            throw(ArgumentError(
+                "MOI engine must be :auto, :native_hsd, or :legacy",
+            ))
+        optimizer.engine = value
+        return nothing
+    end
     if name == "tolerance"
         for field in (:ϵ_gap, :ϵ_primal, :ϵ_dual)
             optimizer.options = _replace_option(optimizer.options, field, value)
@@ -955,6 +969,7 @@ function MOI.supports(
 )
     # bridge_plan is a read-only diagnostic attribute, not a settable option.
     attribute.name == "bridge_plan" && return false
+    attribute.name == "engine" && return true
     attribute.name == "tolerance" && return true
     try
         _option_symbol(optimizer.options, attribute.name)
@@ -975,6 +990,7 @@ MOI.supports(::Optimizer, ::MOI.ConstraintDualStart, ::Type{<:MOI.ConstraintInde
 
 function MOI.get(optimizer::Optimizer, attribute::MOI.RawOptimizerAttribute)
     attribute.name == "bridge_plan" && return bridge_plan(optimizer)
+    attribute.name == "engine" && return optimizer.engine
     if attribute.name == "tolerance"
         gap = optimizer.options.ϵ_gap
         primal = optimizer.options.ϵ_primal
@@ -1193,7 +1209,7 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
     return Settings{T}(
         tolerances,
         limits,
-        :auto,
+        optimizer.engine,
         _moi_option_symbol(options.scaling, :equilibrate, :none),
         options.formulation === :normal_equations ? :variable_space_schur :
             options.formulation === :augmented ? :dense_augmented_kkt : :auto,
@@ -1215,7 +1231,10 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
     )
 end
 
-function _moi_require_executable_cone(model::Model)
+function _moi_require_executable_cone(model::Model, engine::Symbol=:auto)
+    # The direct native HSD route has an analytic equality/all-free path and
+    # must not inherit the legacy lowerer's dummy-cone restriction.
+    engine === :native_hsd && return nothing
     # The pure LP lowerer intentionally does not synthesize a dummy
     # inequality for an all-free/equality-only model.  Detect that case at
     # the MOI seam so callers receive a typed adapter error before any public
@@ -1445,7 +1464,7 @@ function MOI.optimize!(optimizer::Optimizer{T}) where {T<:AbstractFloat}
         throw(MOIAdapterError(reason, message))
     end
 
-    _moi_require_executable_cone(model)
+    _moi_require_executable_cone(model, optimizer.engine)
 
     settings = _moi_settings(optimizer)
     outputs = Outputs(
@@ -1460,7 +1479,9 @@ function MOI.optimize!(optimizer::Optimizer{T}) where {T<:AbstractFloat}
     )
     optimizer.solve_time = @elapsed begin
         # This is the sole active MOI numerical path.  The public Model
-        # optimizer performs compile → classify → lower → solve exactly once.
+        # optimizer consumes the explicit Settings engine exactly once;
+        # native_hsd therefore takes its direct canonical route and cannot
+        # reach a family lowerer/lift/legacy fallback.
         result = optimize!(model; settings=settings, outputs=outputs)
         optimizer.public_result = result
     end
@@ -1570,6 +1591,10 @@ end
 function MOI.get(optimizer::Optimizer, ::MOI.TerminationStatus)
     result = _moi_public_result(optimizer)
     result === nothing && return MOI.OPTIMIZE_NOT_CALLED
+    if optimizer.engine === :native_hsd &&
+       _moi_result_status_value(result) == InsufficientPrecision
+        return MOI.NUMERICAL_ERROR
+    end
     return _moi_termination_status(_moi_result_status_value(result))
 end
 
@@ -1667,7 +1692,8 @@ function MOI.get(
     result === nothing && throw(MOI.GetAttributeNotAllowed(attribute))
     _moi_check_public_result(optimizer, attribute)
     status = _moi_result_status_value(result)
-    if status in (Optimal, FeasibleCert, AlmostOptimal, InsufficientPrecision)
+    if status in (Optimal, FeasibleCert, AlmostOptimal) ||
+       (status == InsufficientPrecision && optimizer.engine !== :native_hsd)
         return dual_objective(result)
     end
     model = optimizer.model::Model{T}
