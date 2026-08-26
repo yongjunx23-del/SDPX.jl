@@ -8,7 +8,7 @@ Changes to a route must be verified at three levels:
 
 1. algebraic correctness and original-coordinate certificates;
 2. structural regression tests covering the affected block/equality geometry;
-3. a versioned physics catalog run through the schema-v7 benchmark harness.
+3. a versioned physics catalog run through the schema-v8 benchmark harness.
 
 The benchmark result must record the planned and executed formulation,
 backend, provider, fallback reason, workspace estimate, and input fingerprint.

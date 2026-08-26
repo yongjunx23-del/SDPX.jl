@@ -6,7 +6,7 @@ registries, external-data loaders, or historical result tables.
 
 The active entry points are:
 
-- `benchmark/runner.jl` for in-process runs and schema-v7 result rows;
+- `benchmark/runner.jl` for in-process runs and schema-v8 result rows;
 - `benchmark/fresh_process_runner.jl` for independent-process repetitions;
 - `benchmark/compare.jl` for paired baseline/candidate comparisons;
 - `benchmark/PhysicsBenchmarkHarness.jl` for the catalog/build/validate API.

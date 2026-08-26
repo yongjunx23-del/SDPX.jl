@@ -36,6 +36,6 @@ Operational references are kept as focused documents: the
 [adaptive dense/sparse optimization](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-dense-sparse-optimization.md),
 [adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md),
 and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/threading.md)
-guides. New measured results use the versioned catalog and schema-v7 protocol
+guides. New measured results use the versioned catalog and schema-v8 protocol
 described in [benchmarks.md](benchmarks.md); generated evidence is stored
 outside the source tree.

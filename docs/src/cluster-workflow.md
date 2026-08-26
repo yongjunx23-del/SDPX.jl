@@ -33,6 +33,6 @@ only when aggregation reports matching catalog, fingerprint, route, status,
 objective, iterations, certificate, semantic verdict, and environment.
 
 Run baseline and candidate jobs with identical scheduler resources and compare
-their schema-v7 files using `benchmark/compare.jl`. A failed, dirty, unpaired,
+their schema-v8 files using `benchmark/compare.jl`. A failed, dirty, unpaired,
 or diagnostic campaign is useful for investigation but is not performance
 evidence.
