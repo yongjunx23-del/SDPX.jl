@@ -14,6 +14,26 @@
 
 const MOI = MathOptInterface
 
+"""Typed coordinate metadata reserved for the future MOI asymmetric bridge.
+
+The R1 adapter remains fail-closed for Exp/Power sets; this identity metadata
+is retained on existing records only so the later mapping can be added
+without changing their storage shape.
+"""
+struct MOIAsymmetricMap{T<:AbstractFloat}
+    kind::Symbol
+    alpha::T
+
+    function MOIAsymmetricMap{T}(kind::Symbol, alpha::T) where {T<:AbstractFloat}
+        kind in (:identity, :dual_exp, :dual_power) ||
+            throw(ArgumentError("unknown MOI asymmetric map kind $kind"))
+        return new{T}(kind, alpha)
+    end
+end
+
+@inline _moi_identity_map(::Type{T}) where {T<:AbstractFloat} =
+    MOIAsymmetricMap{T}(:identity, zero(T))
+
 # The v0.5 MOI bridge stores source constraints as identities in the public
 # `Model` builder.  These records deliberately contain only typed Model refs
 # and original affine expressions; no second SDP/SOC/LP canonicalizer is
@@ -28,6 +48,9 @@ struct MOIModelConstraintInfo{T<:AbstractFloat}
     entries::Vector{VariableEntry{T}}
     variable_block::Union{Nothing,VariableBlockRef{T}}
     scaled::Bool
+    # Reserved typed metadata for a future asymmetric MOI bridge.  R1 does
+    # not expose Exp/Power constraints and therefore never consumes a map.
+    asym_map::MOIAsymmetricMap{T}
 end
 
 struct MOIAdapterError <: Exception
@@ -257,11 +280,10 @@ const MOIVectorConicSet = Union{
     MOI.SecondOrderCone,
     MOI.RotatedSecondOrderCone,
     # NOTE (R1): ExponentialCone / PowerCone are deliberately NOT declared
-    # supported. Their primitives (src/cones/exponential.jl, src/cones/power.jl)
-    # are differential-rule prototypes only — not production barriers/scaling
-    # wired into the HSD solver. Declaring support here would be a false claim
-    # (no hidden fallback). Restored only in R2 once the asymmetric-cone HSD is
-    # implemented and verified.
+    # supported. Their primitives are differential-rule prototypes only —
+    # not production barriers/scaling wired into the HSD solver. Declaring
+    # support here would be a false claim; keep all four asymmetric sets
+    # fail-closed until the Phase-5 bridge is implemented and verified.
 }
 
 function MOI.supports_constraint(
@@ -779,11 +801,11 @@ function _moi_vector_variable_groups(
             elseif kind === :rsoc
                 variable!(model, _moi_model_name("moi_rsoc", source_index),
                           length(variables); domain=RotatedLorentzCone())
-            elseif kind === :exp
-                length(variables) == EXPONENTIAL_CONE_DIMENSION ||
-                    throw(MOI.UnsupportedConstraint{F,S}())
-                variable!(model, _moi_model_name("moi_exp", source_index),
-                          length(variables); domain=ExponentialCone())
+            # `:exp`/`:power` deliberately fall through to the
+            # `UnsupportedConstraint` below.  The asymmetric cone solver is not
+            # wired into this adapter, so a VectorOfVariables Exp/Power block
+            # must never be constructed here: doing so would silently create an
+            # unsolvable cone block instead of failing closed.
             elseif kind === :free
                 variable!(model, _moi_model_name("moi_free_product", source_index),
                           length(variables); domain=Reals())
@@ -884,24 +906,30 @@ function _moi_add_vector_constraint!(
         info = MOIModelConstraintInfo{T}(
             :psd, kind, expressions, _moi_model_constraint_refs(block),
             ConstraintRef[], VariableEntry{T}[], nothing, scaled,
+            _moi_identity_map(T),
         )
     elseif kind === :free
         info = MOIModelConstraintInfo{T}(
             :free, kind, expressions, ConstraintRef[],
             ConstraintRef[], VariableEntry{T}[], nothing, false,
+            _moi_identity_map(T),
         )
     elseif kind === :nonnegative || kind === :nonpositive || kind === :zero ||
-           kind === :soc || kind === :rsoc || kind === :exp
+           kind === :soc || kind === :rsoc
+        # `:exp`/`:power` are intentionally absent: the asymmetric solver is
+        # not wired into this adapter, so such a VectorAffineFunction block
+        # must fail closed (the `UnsupportedConstraint` branch below) rather
+        # than construct an ExponentialCone block that no solver can solve.
         domain = kind === :nonnegative ? Nonnegative() :
                  kind === :nonpositive ? Nonpositive() :
                  kind === :zero ? ZeroCone() :
-                 kind === :soc ? LorentzCone() :
-                 kind === :rsoc ? RotatedLorentzCone() : ExponentialCone()
+                 kind === :soc ? LorentzCone() : RotatedLorentzCone()
         block = constraint!(model, _moi_model_name("moi_vector_constraint", source_index),
                             expressions, domain)
         info = MOIModelConstraintInfo{T}(
             :vector, kind, expressions, _moi_model_constraint_refs(block),
             ConstraintRef[], VariableEntry{T}[], nothing, false,
+            _moi_identity_map(T),
         )
     else
         throw(MOI.UnsupportedConstraint{F,S}())
@@ -932,6 +960,7 @@ function _moi_add_scalar_constraint!(
             _moi_model_constraint_refs(lower_block),
             _moi_model_constraint_refs(upper_block),
             VariableEntry{T}[], nothing, false,
+            _moi_identity_map(T),
         )
     else
         domain = kind === :nonnegative ? Nonnegative() :
@@ -949,6 +978,7 @@ function _moi_add_scalar_constraint!(
             :scalar, kind, ScalarAffine{T}[expression],
             _moi_model_constraint_refs(block), ConstraintRef[],
             VariableEntry{T}[], nothing, false,
+            _moi_identity_map(T),
         )
     end
     return _moi_register_info!(optimizer, source_index, info, counts, index_map)
@@ -1314,6 +1344,7 @@ function _moi_constraint_metadata(
         copy(group.entries),
         group.block,
         group.scaled,
+        _moi_identity_map(T),
     )
 end
 
@@ -1822,8 +1853,10 @@ function bridge_plan(optimizer::Optimizer)
     elseif length(families) == 1
         only(families)
     else
-        # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD)
-        # is a first-class executable program via the universal PSD lift.
+        # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD).
+        # Under the non-direct `:auto`/`:legacy` engine this is served by the
+        # universal PSD lift as a *fallback* route (plan §2.4/§5.11); the
+        # preferred native mixed route is `engine=:native_hsd`.
         :mixed_family
     end
     return (

@@ -143,7 +143,10 @@ Fields
   `:dual` are deliberately not part of the public surface and are
   rejected.  `:sparse_normal_equations` is also not exposed: the existing
   policy space has no exact sparse-formulation name (sparse storage is
-  selected separately by the `sparse` field).
+  selected separately by the `sparse` field).  An explicit
+  `formulation=:psd_lift` is accepted for mixed symmetric products to
+  force the universal PSD-lift route (the plan's explicit, non-default
+  fallback; the default `:auto` keeps the family lowerer's mixed behavior).
 - `provider::Symbol` — `:auto` / `:standard` / `:bfla` / `:multifloat` /
   `:legacy` dense linear-algebra provider policy (documented metadata
   carried to `SolveOptions.linear_algebra_backend`; this file never
@@ -209,7 +212,7 @@ struct Settings{T<:AbstractFloat}
         _validate_symbol(scaling, (:auto, :none, :equilibrate), "scaling")
         _validate_symbol(
             formulation,
-            (:auto, :variable_space_schur, :dense_augmented_kkt),
+            (:auto, :variable_space_schur, :dense_augmented_kkt, :psd_lift),
             "formulation",
         )
         _validate_symbol(provider, (:auto, :standard, :bfla, :multifloat, :legacy), "provider")
@@ -371,6 +374,10 @@ function _map_formulation(value::Symbol)
     value === :auto && return :auto
     value === :variable_space_schur && return :normal_equations
     value === :dense_augmented_kkt && return :augmented
+    # `:psd_lift` is a public *routing* request (universal PSD lift for mixed
+    # symmetric), not a numerical KKT formulation; it selects the numerical
+    # formulation automatically.
+    value === :psd_lift && return :auto
     throw(ArgumentError("unknown formulation $(repr(value))"))
 end
 

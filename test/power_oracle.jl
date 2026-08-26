@@ -1,6 +1,6 @@
 # Independent differential and logarithmic-homogeneity gates for the
-# power-cone primal/dual degree-3 barrier oracle.  This file is intentionally
-# not mounted into runtests.jl by Phase 3; the integration owner mounts it.
+# power-cone primal/dual degree-3 barrier oracle.  Registered in both the
+# QUICK and FULL test profiles (test/runtests.jl).
 
 if !isdefined(@__MODULE__, :SDPX)
     const SDPX = getfield(Main, :SDPX)
@@ -8,6 +8,19 @@ end
 
 using LinearAlgebra
 using Test
+
+const _POWER_ORACLE_MF = Base.require(Base.PkgId(
+    Base.UUID("bdf0d083-296b-4888-a5b6-7498122e68a5"),
+    "MultiFloats",
+))
+
+@noinline function _power_near_boundary_hot!(
+    gradient, hessian, x, y, z, alpha,
+)
+    SDPX.power_primal_gradient!(gradient, x, y, z, alpha)
+    SDPX.power_primal_hessian!(hessian, x, y, z, alpha)
+    return nothing
+end
 
 function _power_fd_gradient(f, point, step)
     result = similar(point)
@@ -193,6 +206,68 @@ end
     end
 end
 
+@testset "POW stable near-boundary delta, z=0, and fixed-width hot path" begin
+    for T in (
+        Float64,
+        _POWER_ORACLE_MF.Float64x2,
+        _POWER_ORACLE_MF.Float64x3,
+        _POWER_ORACLE_MF.Float64x4,
+    )
+        margin = T(1) / T(10_000)
+        point = (one(T), one(T), exp(-margin))
+        for alpha in (T(1) / T(10), T(1) / T(2), T(9) / T(10))
+            _, _, _, _, delta = SDPX._power_primal_terms(point..., alpha)
+            a = alpha
+            b = one(T) - a
+            log_abs_rho = SDPX._power_log_abs_rho(a, b, point...)
+            reference = -SDPX._nonsymmetric_stable_expm1(
+                log_abs_rho + log_abs_rho,
+            )
+            @test delta > zero(T)
+            @test isapprox(delta, reference; rtol=T(64) * eps(one(T)), atol=zero(T))
+            gradient = zeros(T, 3)
+            hessian = zeros(T, 3, 3)
+            _power_near_boundary_hot!(gradient, hessian, point..., alpha)
+            @test @allocated(
+                _power_near_boundary_hot!(gradient, hessian, point..., alpha),
+            ) == 0
+            tolerance = T(1_048_576) * eps(one(T))
+            @test isapprox(dot(gradient, collect(point)), -T(3); rtol=tolerance, atol=tolerance)
+            @test isapprox(hessian * collect(point), -gradient; rtol=tolerance, atol=tolerance)
+
+            _, _, _, rho0, delta0 = SDPX._power_primal_terms(
+                one(T), one(T), zero(T), alpha,
+            )
+            @test iszero(rho0)
+            @test delta0 == one(T)
+        end
+    end
+end
+
+@testset "POW BigFloat256/512/1024 near-boundary precision" begin
+    for bits in (256, 512, 1024)
+        setprecision(BigFloat, bits) do
+            margin = inv(BigFloat(10_000))
+            point = (one(BigFloat), one(BigFloat), exp(-margin))
+            for alpha in (BigFloat("0.1"), BigFloat("0.5"), BigFloat("0.9"))
+                _, _, _, _, delta = SDPX._power_primal_terms(point..., alpha)
+                log_abs_rho = SDPX._power_log_abs_rho(
+                    alpha, one(BigFloat) - alpha, point...,
+                )
+                @test precision(delta) == bits
+                @test delta == -expm1(log_abs_rho + log_abs_rho)
+                @test abs(log_abs_rho + margin) <=
+                      BigFloat(8) * eps(BigFloat)
+                gradient = collect(SDPX.power_barrier_gradient(point..., alpha))
+                hessian = SDPX.power_barrier_hessian(point..., alpha)
+                tolerance = BigFloat(1_048_576) * eps(BigFloat)
+                @test isapprox(dot(gradient, collect(point)), -BigFloat(3); rtol=tolerance, atol=tolerance)
+                @test isapprox(hessian * collect(point), -gradient; rtol=tolerance, atol=tolerance)
+            end
+        end
+    end
+end
+
 @testset "POW membership and barrier fail closed" begin
     for alpha in (0.01, 0.1, 0.5, 0.9, 0.99)
         width = exp(alpha * log(2.0) + (1.0 - alpha) * log(3.0))
@@ -211,6 +286,14 @@ end
     @test_throws ArgumentError SDPX.power_barrier_gradient(
         1.0, 1.0, Inf, 0.5,
     )
+
+    rounded = (1.0, 1.0, 1.0 + 1.0e-7)
+    violation = SDPX.power_primal_residual(rounded..., 0.5)
+    @test 0.0 < violation < 1.0e-6
+    @test SDPX.power_membership(rounded..., 0.5; tol=1.0e-6)
+    @test !SDPX.power_membership(rounded..., 0.5; tol=1.0e-9)
+    @test SDPX.power_primal_residual(-1.0e-7, 1.0, 0.0, 0.5) == 1.0e-7
+    @test SDPX.power_membership(-1.0e-7, 1.0, 0.0, 0.5; tol=1.0e-6)
 
     @test SDPX.power_dual_membership(0.3, 0.7, 1.0, 0.3)
     @test !SDPX.power_dual_membership(-0.1, 0.7, 0.0, 0.3)

@@ -57,13 +57,22 @@ function _public_validate_algorithm(route::NativeConeRoute, settings::Settings)
     allowed = route.route === :lp_family ? (:auto, :lp) :
               route.route === :soc_family ? (:auto, :socp) :
               route.route === :sdp_family ? (:auto, :sdp) :
-              route.route === :exp_family ? (:auto,) :
+              route.route in (:exp_family, :power_family) ? (:auto,) :
               (:auto,)
     settings.algorithm in allowed || throw(ArgumentError(
         "settings.algorithm=$(settings.algorithm) is incompatible with " *
         "the classified native route $(route.route); expected one of $allowed",
     ))
     return nothing
+end
+
+"""Whether a compiled program contains an asymmetric cone block."""
+@inline function _public_program_has_nonsymmetric(program::NativeConeProgram)
+    any(block -> block.cone in (:exp, :power), program.blocks) && return true
+    return any(
+        block -> _domain_cone(block.domain) in (:exp, :power),
+        program.row_blocks,
+    )
 end
 
 @inline function _public_start_copy(::Type{T}, values, bits::Int) where {T<:AbstractFloat}
@@ -269,16 +278,27 @@ function _public_lower_native(
     route::NativeConeRoute,
     settings::Settings,
 )
-    # Phase A fail-closed contract: the exponential route classifies and
-    # compiles, but no native exponential lowering exists yet. The named
-    # error keeps the failure explicit instead of silently routing exp
-    # programs into the SOC or SDP lowerers.
-    route.route === :exp_family && throw(PublicOptimizeError(
+    # Exp/Power are intentionally absent from the family lowerers.  This
+    # guard keeps both the default and explicit legacy policies fail-closed;
+    # no family lowerer or PSD-lift fallback may claim asymmetric support.
+    route.route in (:exp_family, :power_family) && throw(PublicOptimizeError(
         route.route,
-        :exp_lowerer_unavailable,
+        route.route === :exp_family ? :exp_lowerer_unavailable :
+                                      :power_lowerer_unavailable,
+        route.route === :exp_family ?
         "optimize: native exponential-cone lowering is not available yet; " *
-        "the :exp_family route is classification-only in this build",
+        "the :exp_family route is classification-only in this build" :
+        "optimize: native power-cone lowering is not available yet; " *
+        "the :power_family route is classification-only in this build",
     ))
+    if route.route === :mixed_family && _public_program_has_nonsymmetric(program)
+        throw(PublicOptimizeError(
+            route.route,
+            :nonsymmetric_lowerer_unavailable,
+            "optimize: mixed Exp/Power lowering is not available; " *
+            "the legacy mixed PSD lift does not represent asymmetric cones",
+        ))
+    end
     sparse = _public_lowering_sparse(settings.sparse)
     # LP and SDP receive the single mapped storage request. NativeSOC owns its
     # structural storage inside the SOC execution plan and takes no lowering
@@ -298,10 +318,16 @@ function _public_lower_native(
             verbosity=settings.verbosity,
         )
     elseif route.route === :mixed_family
-        # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD)
-        # is a first-class executable program. Lift every native cone block
-        # to a single block-diagonal PSD cone and solve the resulting pure
-        # SDP program through the existing algorithm=:sdp path.
+        # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD).
+        # Per the execution plan this is the *fallback* lift route (plan §2.4 /
+        # §5.11): it lifts every native cone block to a single block-diagonal
+        # PSD cone and solves through the algorithm=:sdp path.  It is the
+        # current default for the non-direct `:auto`/`:legacy` engine only;
+        # the preferred native mixed route is reached explicitly with
+        # `engine=:native_hsd`, which bypasses this lift entirely.  This branch
+        # is retained as the pre-Phase-2 reference path and must be demoted to
+        # an explicit `formulation=:psd_lift` opt-in (and eventually removed at
+        # Phase 6) rather than silently claiming to be the first-class route.
         return lower_mixed_psd_native(
             program;
             sparse=sparse,
@@ -492,6 +518,16 @@ end
             _blocks_psd_certificate((matrix,), zero(eltype(values))),
             eltype(values),
         )
+    elseif domain isa ExponentialCone
+        length(values) == EXPONENTIAL_CONE_DIMENSION ||
+            return eltype(values)(Inf)
+        return exp_primal_residual(values[1], values[2], values[3])
+    elseif domain isa PowerCone
+        length(values) == POWER_CONE_DIMENSION ||
+            return eltype(values)(Inf)
+        return power_primal_residual(
+            values[1], values[2], values[3], domain.alpha,
+        )
     end
     return eltype(values)(Inf)
 end
@@ -514,6 +550,27 @@ self-dual under the native coordinates used by the lowerers.
             _blocks_psd_certificate((matrix,), zero(eltype(values))),
             eltype(values),
         )
+    elseif domain isa ExponentialCone
+        length(values) == EXPONENTIAL_CONE_DIMENSION ||
+            return eltype(values)(Inf)
+        u, v, w = values
+        # L_E(u,v,w)=(u-v,-u,w) maps K_exp^* exactly to K_exp.
+        mapped = (u - v, -u, w)
+        return _public_primal_cone_residual(mapped, domain, shape)
+    elseif domain isa PowerCone
+        length(values) == POWER_CONE_DIMENSION ||
+            return eltype(values)(Inf)
+        T = eltype(values)
+        a = try
+            convert(T, domain.alpha)
+        catch
+            return T(Inf)
+        end
+        isfinite(a) && zero(T) < a < one(T) || return T(Inf)
+        b = one(T) - a
+        # L_P(u,v,w)=(u/a,v/(1-a),w) maps K_pow(a)^* to K_pow(a).
+        mapped = (values[1] / a, values[2] / b, values[3])
+        return _public_primal_cone_residual(mapped, domain, shape)
     end
     return _public_primal_cone_residual(values, domain, shape)
 end
@@ -698,6 +755,15 @@ function _public_result_from_core(
     result_status = core_status_value
     termination_reason = get(termination_info, :reason, :none)
     termination_stage = get(termination_info, :stage, :core)
+    # Original-coordinate certificate gate.  For `Optimal` this public seam
+    # re-verifies the recovered point and downgrades to `NumericalFailure` if
+    # it fails.  `PrimalInfeasible` / `DualInfeasible` are NOT re-gated here
+    # because the family cores (solver/interior_point.jl, validation.jl) only
+    # promote those statuses AFTER an independently normalized homogeneous ray
+    # has passed the original-coordinate affine / cone / sign / finite checks
+    # (see types/core.jl `SolveStatus`).  The native-HSD route additionally
+    # gates all three in `_public_result_from_native_hsd`; the default family
+    # route relies on the core's original-coordinate ray certificate.
     if core_status_value === Optimal && !certificate_summary.valid
         result_status = NumericalFailure
         termination_reason = :original_coordinate_certificate_failed
@@ -1629,6 +1695,52 @@ function _optimize_impl(
             warm_start,
         )
     end
+    if resolved_settings.formulation === :psd_lift
+        # An explicit `formulation=:psd_lift` request routes a mixed symmetric
+        # product through the universal PSD lift.  This is the plan's explicit
+        # (non-default) fallback; the default `:auto` keeps the family
+        # lowerer's mixed behavior.  It is never reached by `engine=:native_hsd`
+        # (which is fail-closed above) and cannot claim asymmetric support.
+        route.route === :mixed_family || throw(PublicOptimizeError(
+            route.route,
+            :psd_lift_route_unavailable,
+            "optimize: formulation=:psd_lift is only meaningful for a mixed " *
+            "symmetric product; the $(route.route) route has no lift",
+        ))
+        _public_program_has_nonsymmetric(program) && throw(PublicOptimizeError(
+            route.route,
+            :psd_lift_nonsymmetric_unavailable,
+            "optimize: formulation=:psd_lift cannot represent asymmetric " *
+            "(Exp/Power) blocks; no universal lift exists for them",
+        ))
+        warm_start === nothing || throw(PublicOptimizeError(
+            route.route,
+            :psd_lift_warm_start_unavailable,
+            "optimize: formulation=:psd_lift does not accept warm_start",
+        ))
+        _public_validate_algorithm(route, resolved_settings)
+        sparse = _public_lowering_sparse(resolved_settings.sparse)
+        lowering = lower_mixed_psd_native(
+            program;
+            sparse=sparse,
+            verbosity=resolved_settings.verbosity,
+        )
+        return _public_result_from_lowering(
+            model,
+            program,
+            lowering,
+            resolved_settings,
+            resolved_outputs,
+            warm_start,
+        )
+    end
+    # `engine=:auto` and `engine=:legacy` both select the native family-lowering
+    # path below (`_public_lower_native` -> LP/SOC/SDP/mixed-PSD-lift).  There is
+    # intentionally no separate legacy Mehrotra engine wired at this seam: the
+    # two values are aliases for the same non-direct route, and neither can
+    # silently fall back to `:native_hsd`.  The distinction is retained only as
+    # the plan's temporary marker for the pre-native default until Phase-5's
+    # default-route switch retires the family path.
     if warm_start !== nothing
         warm_start isa Result || throw(ArgumentError(
             "warm_start must be a previous SDPX Result or nothing",
