@@ -219,11 +219,31 @@ function _problem_facts(problem)
             blocks=length(problem.cones),
             block_sizes=Tuple(size(cone.A, 1) for cone in problem.cones),
         )
+    elseif problem isa SDPX.CanonicalConicProgram
+        barrier_blocks = filter(
+            block -> !(SDPX.block_cone(block) in (:zero, :free)),
+            SDPX.layout_blocks(problem.cone_layout),
+        )
+        equality_rows = sum(
+            SDPX.block_length(block)
+            for block in SDPX.layout_blocks(problem.cone_layout)
+            if SDPX.block_cone(block) === :zero
+        )
+        return (
+            variables=SDPX.canonical_num_variables(problem),
+            equalities=equality_rows,
+            blocks=length(barrier_blocks),
+            block_sizes=Tuple(SDPX.block_length(block) for block in barrier_blocks),
+        )
     end
     throw(ArgumentError(
-        "benchmark facts require SDPProblem or ConicProblem, got $(typeof(problem))",
+        "benchmark facts require SDPProblem, ConicProblem, or " *
+        "CanonicalConicProgram, got $(typeof(problem))",
     ))
 end
+
+_problem_eltype(problem::SDPX.CanonicalConicProgram) = eltype(problem.c)
+_problem_eltype(problem) = eltype(problem)
 
 function _problem_fingerprint(catalog, spec, built, arithmetic)
     facts = _problem_facts(built.problem)
@@ -1028,13 +1048,16 @@ function _build_only_row(
         catalog, spec, suite, arithmetic, provider, :build_only,
     )
     formulation = built.kind === :socp ? :native_lorentz :
+                  built.kind === :exp ? :native_exponential :
+                  built.kind === :power ? :native_power :
+                  built.kind === :product ? :native_product :
                   spec.family === :lp ? :lp_native : :sdp_native
     values = Dict{Symbol,Any}(
         :skip_reason => missing,
         :status => spec.reference.status,
         :termination_reason => :model_built,
         :termination_stage => :construction,
-        :precision_bits => _precision_bits(eltype(built.problem)),
+        :precision_bits => _precision_bits(_problem_eltype(built.problem)),
         :conic_formulation => formulation,
         :variables => facts.variables,
         :equalities => facts.equalities,
