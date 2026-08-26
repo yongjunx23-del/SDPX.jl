@@ -131,6 +131,9 @@ absence.
 Fields
 - `tolerances::Tolerances{T}` — primal/dual/gap stopping targets.
 - `limits::Limits` — iterations, wall time, per-solve threads.
+- `engine::Symbol` — solver engine selector: `:auto`, `:native_hsd`, or
+  `:legacy`.  An explicit `:native_hsd` request is fail-closed and is never
+  retried through a legacy solver or PSD lift.
 - `scaling::Symbol` — `:auto` or `:none` / `:equilibrate`.
 - `formulation::Symbol` — numerical formulation selector.  Public names
   are `:auto`, `:variable_space_schur` (variable-space Schur complement;
@@ -169,6 +172,7 @@ selects the arithmetic (`SDPProblem`, `ConicProblem`, `Model`).
 struct Settings{T<:AbstractFloat}
     tolerances::Tolerances{T}
     limits::Limits
+    engine::Symbol
     scaling::Symbol
     formulation::Symbol
     provider::Symbol
@@ -186,6 +190,7 @@ struct Settings{T<:AbstractFloat}
     function Settings{T}(
         tolerances::Tolerances{T},
         limits::Limits,
+        engine::Symbol,
         scaling::Symbol,
         formulation::Symbol,
         provider::Symbol,
@@ -200,6 +205,7 @@ struct Settings{T<:AbstractFloat}
         certification::Bool,
         blas_threads::Union{Nothing,Int},
     ) where {T<:AbstractFloat}
+        _validate_symbol(engine, (:auto, :native_hsd, :legacy), "engine")
         _validate_symbol(scaling, (:auto, :none, :equilibrate), "scaling")
         _validate_symbol(
             formulation,
@@ -220,6 +226,7 @@ struct Settings{T<:AbstractFloat}
         return new{T}(
             tolerances,
             limits,
+            engine,
             scaling,
             formulation,
             provider,
@@ -247,6 +254,7 @@ function Settings(
     ::Type{T};
     tolerances::Tolerances{T}=Tolerances{T}(),
     limits::Limits=Limits(),
+    engine::Symbol=:auto,
     scaling::Symbol=:auto,
     formulation::Symbol=:auto,
     provider::Symbol=:auto,
@@ -264,6 +272,7 @@ function Settings(
     return Settings{T}(
         tolerances,
         limits,
+        engine,
         scaling,
         formulation,
         provider,
@@ -326,6 +335,8 @@ Mapping (typed -> existing):
 - `settings.timing`              -> `timing`
 - `settings.certification`       -> `certification`
 
+`settings.engine` is consumed by the public execution router and is
+intentionally not lowered into the legacy `SolveOptions` policy object.
 `settings.blas_threads` is request metadata and is intentionally NOT part
 of `SolveOptions`; the resolver surfaces it only in the summary NamedTuple
 so integration code can apply it through the existing BLAS seam.
@@ -393,6 +404,8 @@ function Base.show(io::IO, settings::Settings{T}) where {T}
     print(
         io,
         "Settings{", T, "}(",
+        "engine=", settings.engine,
+        ", ",
         "formulation=", settings.formulation,
         ", provider=", settings.provider,
         ", blas_threads=", settings.blas_threads,

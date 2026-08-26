@@ -1193,6 +1193,7 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
     return Settings{T}(
         tolerances,
         limits,
+        :auto,
         _moi_option_symbol(options.scaling, :equilibrate, :none),
         options.formulation === :normal_equations ? :variable_space_schur :
             options.formulation === :augmented ? :dense_augmented_kkt : :auto,

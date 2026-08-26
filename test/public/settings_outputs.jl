@@ -15,6 +15,7 @@ Base.eltype(::_FakeModel{T}) where {T} = T
     @test settings.tolerances.primal === nothing
     @test settings.tolerances.dual === nothing
     @test settings.tolerances.gap === nothing
+    @test settings.engine === :auto
     @test settings.scaling === :auto
     @test settings.formulation === :auto
     @test settings.provider === :auto
@@ -45,6 +46,7 @@ Base.eltype(::_FakeModel{T}) where {T} = T
 end
 
 @testset "typed Settings: validation of policies and limits" begin
+    @test_throws ArgumentError SDPX.Settings{Float64}(engine=:bogus)
     @test_throws ArgumentError SDPX.Settings{Float64}(scaling=:bogus)
     @test_throws ArgumentError SDPX.Settings{Float64}(formulation=:primal)
     @test_throws ArgumentError SDPX.Settings{Float64}(formulation=:dual)
@@ -63,6 +65,7 @@ end
 
     # Policy-level names are accepted and preserved as the public contract.
     custom = SDPX.Settings{Float64}(
+        engine=:native_hsd,
         presolve=:off,
         sparse=:on,
         diagnostics=:none,
@@ -70,12 +73,14 @@ end
         formulation=:variable_space_schur,
         provider=:multifloat,
     )
+    @test custom.engine === :native_hsd
     @test custom.presolve === :off
     @test custom.sparse === :on
     @test custom.diagnostics === :none
     @test custom.scaling === :equilibrate
     @test custom.formulation === :variable_space_schur
     @test custom.provider === :multifloat
+    @test SDPX.Settings{Float64}(engine=:legacy).engine === :legacy
 
     @test_throws ArgumentError SDPX.Limits(iterations=-1)
     @test_throws ArgumentError SDPX.Limits(time=-0.1)
@@ -139,6 +144,7 @@ end
         timing=false,
         certification=false,
         blas_threads=2,
+        engine=:native_hsd,
     )
     options = SDPX.SolveOptions(settings)
     @test options.precision === :auto
@@ -160,6 +166,8 @@ end
     @test options.verbosity == 0
     @test options.timing === false
     @test options.certification === false
+    @test settings.engine === :native_hsd
+    @test !hasproperty(options, :engine)
 
     augmented = SDPX.SolveOptions(SDPX.Settings{Float64}(formulation=:dense_augmented_kkt))
     @test augmented.formulation === :augmented
