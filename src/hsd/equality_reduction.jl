@@ -551,16 +551,29 @@ function hsd_recover_optimal!(
 
     primal_residual = original.A * x + s - original.b
     dual_residual = transpose(original.A) * y + original.c
-    primal_scale = max(one(T), _hsd_eq_maxabs(original.b), _hsd_eq_maxabs(x), _hsd_eq_maxabs(s))
-    dual_scale = max(one(T), _hsd_eq_maxabs(original.c), _hsd_eq_maxabs(y))
+    # Use the same normalized problem-data scale as the source-coordinate
+    # match above. The product certificate's HSD residual is normalized by
+    # the affine operator/RHS/objective data; switching to a max-entry-only
+    # scale during source recovery would reject the identical certificate.
+    data_scale = _hsd_eq_source_data_scale(original)
     complementarity = abs(dot(s, y))
-    complementarity_scale = max(one(T), _hsd_eq_maxabs(s) * _hsd_eq_maxabs(y))
+    # Match `verify_optimal!`'s original-coordinate objective-gap scale.
+    # Equality recovery and final certification inspect the same recovered
+    # conic gap and must not disagree solely because recovery used an
+    # absolute/max-entry scale while certification used objective scale.
+    primal_objective = dot(original.c, x)
+    dual_pairing = dot(original.b, y)
+    complementarity_scale = one(T) + abs(primal_objective) + abs(dual_pairing)
     valid = _hsd_eq_all_finite(x) && _hsd_eq_all_finite(s) && _hsd_eq_all_finite(y) &&
-            _hsd_eq_scaled_residual_ok(primal_residual, primal_scale, tolerance) &&
-            _hsd_eq_scaled_residual_ok(dual_residual, dual_scale, tolerance) &&
+            _hsd_eq_scaled_residual_ok(primal_residual, data_scale, tolerance) &&
+            _hsd_eq_scaled_residual_ok(dual_residual, data_scale, tolerance) &&
             complementarity <= tolerance * complementarity_scale &&
-            in_canonical_cone(original, s; dual=false, tol=tolerance) &&
-            in_canonical_cone(original, y; dual=true, tol=tolerance)
+            in_canonical_cone(
+                original, s; dual=false, tol=tolerance * data_scale,
+            ) &&
+            in_canonical_cone(
+                original, y; dual=true, tol=tolerance * data_scale,
+            )
     valid || return false
     copyto!(x_full, x)
     copyto!(s_full, s)
