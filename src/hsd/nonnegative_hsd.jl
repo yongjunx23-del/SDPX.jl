@@ -11,7 +11,7 @@
 #        (G)  −c'x − b'y + κ = 0
 #        μ = (s'y + τ·κ) / (m + 1)          (ν = m for R_+^m)
 #
-#    The full Newton system is reduced to an `n×n` Schur complement
+#    The full Newton system is reduced to an `nr×nr` Schur complement
 #    `M = A' diag(y/s) A` (the LP Schur) plus a ONE-dimensional
 #    homogeneous border `(τ,κ)`.  `M` is factored exactly once per KKT
 #    epoch through the route FactorCache (HotRouteCache /
@@ -98,16 +98,15 @@ end
 # d = κ − τ·b'diag(g)b.  The earlier κ + τ·b'diag(g)b was a sign error that
 # violated the scalar complementarity (C2).)
 @inline function _hsd_border!(state::HSDState{T}) where {T}
-    A = state.Ar; g = state.g; b = state.b; c = state.c
+    A = state.Ar; g = state.g; b = state.b; cr = state.cr
     n = state.nr; m = state.m
-    cols = state.rank_columns
     @inbounds for j in 1:n
         a = zero(T)
         for ptr in nzrange(A, j)
             k = A.rowval[ptr]
             a += g[k] * A.nzval[ptr] * b[k]
         end
-        cj = c[cols[j]]
+        cj = cr[j]
         state.qr[j] = cj - a
         state.rvec[j] = state.tau * (cj + a)
     end
@@ -123,7 +122,6 @@ end
 @inline function _hsd_rhs!(state::HSDState{T}, v::AbstractVector{T}) where {T}
     A = state.Ar; g = state.g; b = state.b
     n = state.nr; m = state.m
-    cols = state.rank_columns
     @inbounds for j in 1:n
         acc = zero(T)
         for ptr in nzrange(A, j)
@@ -205,14 +203,19 @@ end
     return nothing
 end
 
-# Scatter a reduced-column Newton direction into canonical/original
-# coordinates.  Dependent columns are fixed to zero; compatibility of the
-# objective (checked at setup) makes this a lossless representative modulo
-# the nullspace of A.
+# Map a reduced row-space Newton direction into canonical/original
+# coordinates.  Since `rank_basis` has orthonormal columns spanning
+# `range(A')`, `V_r*dxr` is the unique minimum-norm representative of the
+# reduced equality-map direction.  No original coordinate is selected or
+# forced to zero.
 @inline function _hsd_scatter_dx!(state::HSDState{T}) where {T}
-    fill!(state.dx, zero(T))
-    @inbounds for j in 1:state.nr
-        state.dx[state.rank_columns[j]] = state.dxr[j]
+    V = state.rank_basis
+    @inbounds for i in 1:state.n
+        acc = zero(T)
+        for j in 1:state.nr
+            acc += V[i, j] * state.dxr[j]
+        end
+        state.dx[i] = acc
     end
     return state.dx
 end

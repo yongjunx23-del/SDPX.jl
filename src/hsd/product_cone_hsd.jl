@@ -41,7 +41,13 @@ function ProductConeHSDState(
     driver::HotRouteCache{T,R},
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     base = HSDState(canonical, driver)
-    runtime = ProductConeRuntime(canonical.cone_layout, T)
+    return _product_cone_hsd_state(base)
+end
+
+function _product_cone_hsd_state(
+    base::HSDState{T,R},
+) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
+    runtime = ProductConeRuntime(base.canonical.cone_layout, T)
     m = base.m
     return ProductConeHSDState{T,R,typeof(runtime)}(
         base,
@@ -58,10 +64,11 @@ end
 function ProductConeHSDState(
     canonical::CanonicalConicProgram{T},
 ) where {T<:AbstractFloat}
-    nr = length(_hsd_column_reduction(canonical).cols)
-    cache = DenseSchurCholeskyCache{T}(nr)
-    driver = HotRouteCache(cache; n=nr)
-    return ProductConeHSDState(canonical, driver)
+    reduction = _hsd_rowspace_reduction(canonical)
+    cache = DenseSchurCholeskyCache{T}(reduction.rank)
+    driver = HotRouteCache(cache; n=reduction.rank)
+    base = _hsd_state_from_reduction(canonical, driver, reduction)
+    return _product_cone_hsd_state(base)
 end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
@@ -119,13 +126,12 @@ through the block runtime independently.
 
     copyto!(state.g_input, base.b)
     apply_G!(state.runtime, state.gb, state.g_input)
-    cols = base.rank_columns
     @inbounds for j in 1:nr
         atgb = zero(T)
         for ptr in nzrange(A, j)
             atgb += A.nzval[ptr] * state.gb[A.rowval[ptr]]
         end
-        cj = base.c[cols[j]]
+        cj = base.cr[j]
         base.qr[j] = cj - atgb
         base.rvec[j] = base.tau * (cj + atgb)
     end

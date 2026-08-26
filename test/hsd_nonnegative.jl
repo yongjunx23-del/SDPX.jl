@@ -103,13 +103,16 @@ end
 
 @testset "rank-deficient A (feasible) → Optimal" begin
     # A rank 1 (rows/columns collinear): setup RRQR reduces the Schur to one
-    # independent column and the solver converges without diagonal shifting.
+    # orthogonal row-space coordinate and the solver converges without a
+    # diagonal shift or a selected-coordinate representative.
     A = [1.0 1.0; -1.0 -1.0]; b = [1.0, 2.0]; c = [0.0, 0.0]
     status, st = _solve(A, b, c)
     @test status === :optimal
     @test st.nr == 1
-    @test st.rank_columns == [1]
-    @test all(iszero, st.dx[2:2])
+    @test size(st.rank_basis) == (2, 1)
+    @test transpose(st.rank_basis) * st.rank_basis ≈ ones(1, 1)
+    @test st.dx ≈ st.rank_basis * (transpose(st.rank_basis) * st.dx)
+    @test st.dx[1] ≈ st.dx[2]
 end
 
 @testset "rank-deficient A with incompatible objective → verified dual ray" begin

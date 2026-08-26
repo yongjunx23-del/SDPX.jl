@@ -98,22 +98,22 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     A::SparseMatrixCSC{T,Int}
     At::SparseMatrixCSC{T,Int}         # transposed sparse matrix for sparse Schur assembly
     Ad::Matrix{T}                  # dense copy for the LP Schur kernel
-    # setup-time column-rank reduction used only by the LP Schur route.  The
-    # public state remains in canonical/original coordinates (`n`, `x`, `dx`);
-    # the bordered Newton solve works in the independent-column coordinates
-    # (`nr`, `Ar`, `cr`) and scatters directions back before recovery.
+    # Setup-time orthogonal row-space reduction.  The public state remains in
+    # canonical/original coordinates (`n`, `x`, `dx`); the bordered Newton
+    # solve works in coordinates of the orthonormal basis `rank_basis = V_r`,
+    # with `Ar=A*V_r`, `cr=V_r'*c`, and maps back through `dx=V_r*dxr`.
     Ar::SparseMatrixCSC{T,Int}
     Atr::SparseMatrixCSC{T,Int}
     b::Vector{T}
     c::Vector{T}
+    cr::Vector{T}
     n::Int
     nr::Int
     m::Int
     nu::Int
     orthant_only::Bool
-    rank_columns::Vector{Int}
-    rank_dependent::Vector{Int}
-    rank_transfer::Matrix{T}
+    rank_basis::Matrix{T}
+    rank_null_objective::Vector{T}
     rank_ambiguous::Bool
     rank_incompatible::Bool
     rank_ray::Vector{T}
@@ -138,7 +138,7 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     # residuals
     rP::Vector{T}
     rD::Vector{T}
-    rDr::Vector{T}                    # reduced-column dual residual
+    rDr::Vector{T}                    # row-space-coordinate dual residual
     rG::T
     # cone scaling + complementarity (Nonnegative path)
     theta::Vector{T}               # s./y
@@ -157,7 +157,7 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     rvec::Vector{T}                # nr-vector form of the row r' = τ(cr' + b'diag(g)Ar)
     u::Vector{T}                   # H u = q
     w::Vector{T}                   # H w = rhs
-    dxr::Vector{T}                 # reduced-column Newton direction
+    dxr::Vector{T}                 # row-space-coordinate Newton direction
     # trial / scratch buffers
     xt::Vector{T}
     yt::Vector{T}
@@ -175,43 +175,51 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
 end
 
 # ---------------------------------------------------------------------------
-# Setup-time column-rank reduction
+# Setup-time orthogonal row-space reduction
 # ---------------------------------------------------------------------------
 
 """
-    _hsd_column_reduction(A, c) -> NamedTuple
+    _hsd_rowspace_reduction(A, c) -> NamedTuple
 
-Compute a deterministic independent-column representation of the equality
-map before any HSD iteration.  `A[:, dependent] = A[:, independent] * T` is
-formed with a column-pivoted QR.  If the objective is compatible with the
-same representation (`c_dependent = T' * c_independent`), dependent variables
-can be fixed to zero without changing the primal image or objective.  If it
-is not compatible, the null direction encoded by the offending column is an
-original-coordinate dual-infeasibility ray; it is retained for certificate
-verification and the HSD route fails closed before factorization.
+Compute an orthonormal basis `V_r` for `range(A')`, using a pivoted QR of
+`A'`, before any HSD iteration.  The reduced equality map and objective are
+
+    Ar = A * V_r,             cr = V_r' * c.
+
+When `c` is compatible with the row space, every Newton direction is mapped
+back as `dx = V_r * dxr`, the unique minimum-Euclidean-norm representative of
+its equality-map image.  No original coordinate is selected or forced to
+zero.  The orthogonal null component `c_N = c - V_r*cr` is retained.  If it
+is significant, `-c_N` is only a candidate original-coordinate
+dual-infeasibility ray; the solve loop must still pass the ordinary
+certificate verifier before assigning a successful status.
 
 This is setup work: allocations and a dense QR are intentional here.  The
 iteration hot path receives only the reduced sparse map and preallocated
 buffers.
 """
-function _hsd_column_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat}
+function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat}
     m, n = size(A)
     n == length(c) || throw(DimensionMismatch("canonical A/c dimensions disagree"))
     if n == 0
         return (
             Ar = SparseArrays.sparse(zeros(T, m, 0)),
             cr = Vector{T}(undef, 0),
-            cols = Int[], dependent = Int[], transfer = zeros(T, 0, 0),
+            V = zeros(T, 0, 0), cnull = zeros(T, 0), rank = 0,
+            rank_tolerance = zero(T), objective_tolerance = zero(T),
             ambiguous = false, incompatible = false, ray = zeros(T, 0),
         )
     end
 
     Af = Matrix{T}(A)
-    F = LinearAlgebra.qr(Af, LinearAlgebra.ColumnNorm())
+    # RRQR is applied to A': its leading Q columns therefore span range(A'),
+    # which is the row space in the original n-dimensional x coordinates.
+    F = LinearAlgebra.qr(Matrix(transpose(Af)), LinearAlgebra.ColumnNorm())
     R = Matrix(F.R)
     kmax = min(m, n)
     scaleA = max(norm(Af, Inf), one(T))
     rank_tol = T(max(m, n)) * eps(T) * scaleA
+    cutoff = rank_tol
     r = 0
     if kmax > 0
         dmax = zero(T)
@@ -237,97 +245,108 @@ function _hsd_column_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where
     # than an ambiguity.  Values just above the cutoff, or genuinely
     # resolvable values just below it, are rejected explicitly.
     noise_hi = T(10) * eps(T) * scaleA
-    amb_hi = rank_tol * T(4)
+    amb_hi = cutoff * T(4)
     if kmax > 0
         for i in 1:kmax
             d = abs(R[i, i])
-            if (d > rank_tol && d <= amb_hi) || (d > noise_hi && d < rank_tol)
+            if (d > cutoff && d <= amb_hi) || (d > noise_hi && d <= cutoff)
                 rank_ambiguous = true
                 break
             end
         end
     end
 
-    # Keep a full-rank map in its original order.  Besides preserving public
-    # coordinate ordering, this makes the no-reduction path bitwise-stable.
+    # Keep the full-rank path in the original coordinates.  Identity is an
+    # orthonormal row-space basis and preserves the established bitwise path.
     if r == n
+        V = Matrix{T}(I, n, n)
         return (
-            Ar = A, cr = copy(c), cols = collect(1:n), dependent = Int[],
-            transfer = zeros(T, n, 0), ambiguous = rank_ambiguous,
-            incompatible = false, ray = zeros(T, n),
+            Ar = SparseArrays.sparse(A), cr = copy(c), V = V,
+            cnull = zeros(T, n), rank = r,
+            rank_tolerance = cutoff,
+            objective_tolerance = T(100 * max(m, n)) * eps(T) *
+                                  max(norm(c, Inf), one(T)),
+            ambiguous = rank_ambiguous, incompatible = false,
+            ray = zeros(T, n),
         )
     end
 
-    cols = collect(Int, F.p[1:r])
-    selected = falses(n)
-    selected[cols] .= true
-    dependent = Int[i for i in 1:n if !selected[i]]
-    Ar = SparseArrays.sparse(A[:, cols])
-    cr = Vector{T}(c[cols])
-    transfer = zeros(T, r, length(dependent))
-    if r > 0 && !isempty(dependent)
-        # `Ar` has full column rank by construction.  Use a dense setup-only
-        # QR solve so this remains valid for BigFloat and custom Float types.
-        Fbase = LinearAlgebra.qr(Matrix{T}(Ar))
-        for (q, j) in enumerate(dependent)
-            transfer[:, q] .= Fbase \ Vector{T}(A[:, j])
+    seed = zeros(T, n, r)
+    @inbounds for j in 1:r
+        seed[j, j] = one(T)
+    end
+    V = r == 0 ? seed : Matrix{T}(F.Q * seed)
+    Ar_dense = Af * V
+    Ar = SparseArrays.sparse(Ar_dense)
+    cr = zeros(T, r)
+    @inbounds for j in 1:r
+        acc = zero(T)
+        for i in 1:n
+            acc += V[i, j] * c[i]
         end
+        cr[j] = acc
     end
 
     scaleC = max(norm(c, Inf), one(T))
-    compat_tol = max(T(100) * eps(T) * scaleC, rank_tol)
-    incompatible = false
-    bad_q = 0
-    bad_residual = zero(T)
-    for q in eachindex(dependent)
-        j = dependent[q]
-        residual = c[j]
-        for i in 1:r
-            residual -= transfer[i, q] * cr[i]
+    compat_tol = T(100 * max(m, n)) * eps(T) * scaleC
+    compat_noise = T(10) * eps(T) * scaleC
+    cnull = copy(c)
+    cnull_norm = zero(T)
+    @inbounds for i in 1:n
+        projected = zero(T)
+        for j in 1:r
+            projected += V[i, j] * cr[j]
         end
-        if abs(residual) > compat_tol && abs(residual) > abs(bad_residual)
-            incompatible = true
-            bad_q = q
-            bad_residual = residual
-        end
+        cnull[i] -= projected
+        abs(cnull[i]) > cnull_norm && (cnull_norm = abs(cnull[i]))
     end
+    if cnull_norm > compat_noise && cnull_norm <= compat_tol
+        rank_ambiguous = true
+    end
+    incompatible = cnull_norm > compat_tol
 
     ray = zeros(T, n)
     if incompatible
-        # v_independent = -T[:,q] * alpha, v_dependent = alpha, so A*v=0
-        # and c'v = residual*alpha.  Pick alpha to make c'v strictly negative.
-        alpha = bad_residual > zero(T) ? -one(T) : one(T)
-        j = dependent[bad_q]
-        ray[j] = alpha
-        for i in 1:r
-            ray[cols[i]] = -transfer[i, bad_q] * alpha
+        # Mathematically A*c_N=0 and c'*(-c_N)=-||c_N||².  Numerical setup
+        # only stages this candidate; original-coordinate cone/objective
+        # verification remains the sole authority for terminal success.
+        @inbounds for i in 1:n
+            ray[i] = -cnull[i]
         end
     end
     return (
-        Ar = Ar, cr = cr, cols = cols, dependent = dependent,
-        transfer = transfer, ambiguous = rank_ambiguous,
-        incompatible = incompatible, ray = ray,
+        Ar = Ar, cr = cr, V = V, cnull = cnull, rank = r,
+        rank_tolerance = cutoff, objective_tolerance = compat_tol,
+        ambiguous = rank_ambiguous, incompatible = incompatible, ray = ray,
     )
 end
 
+_hsd_rowspace_reduction(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat} =
+    _hsd_rowspace_reduction(canonical_equality(canonical), canonical_objective(canonical))
+
+# Transitional internal spelling retained for callers from the earlier
+# independent-column setup.  Both methods now return the orthogonal row-space
+# representation; no selected-column path remains.
+_hsd_column_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat} =
+    _hsd_rowspace_reduction(A, c)
 _hsd_column_reduction(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat} =
-    _hsd_column_reduction(canonical_equality(canonical), canonical_objective(canonical))
+    _hsd_rowspace_reduction(canonical)
 
 # ---------------------------------------------------------------------------
 # Construction
 # ---------------------------------------------------------------------------
 
 """
-    HSDState(canonical::CanonicalConicProgram{T}, driver::HotRouteCache{T,R})
+    _hsd_state_from_reduction(canonical, driver, reduction)
 
-Build a production HSD state from the canonical program and a prepared
-KKT route driver whose matrix dimension is the setup-time independent-column
-rank `nr`.  Public iterates remain in the original `n = size(A, 2)` coordinates.  All
-iteration storage is allocated up front.
+Cold setup helper that consumes an already-computed row-space reduction.
+This keeps the convenience constructors to one RRQR while preserving the
+same pre-sized driver check.
 """
-function HSDState(
+function _hsd_state_from_reduction(
     canonical::CanonicalConicProgram{T},
     driver::HotRouteCache{T, R},
+    reduction,
 ) where {T, R<:AbstractFactorCache{T}}
     n = canonical_num_variables(canonical)
     m = canonical_num_slack(canonical)
@@ -345,8 +364,7 @@ function HSDState(
     length(b) == m || throw(DimensionMismatch("length(b) != m"))
     length(c) == n || throw(DimensionMismatch("length(c) != n"))
     size(A, 2) == n || throw(DimensionMismatch("size(A,2) != n"))
-    reduction = _hsd_column_reduction(canonical)
-    nr = length(reduction.cols)
+    nr = reduction.rank
     driver.n == nr || throw(DimensionMismatch(
         "route cache n=$(driver.n) does not match reduced matrix n=$nr"))
     At = SparseArrays.sparse(transpose(A))
@@ -356,8 +374,9 @@ function HSDState(
     z = zero(T); o = one(T)
     return HSDState{T, R}(
         canonical,
-        A, At, Ad, Ar, Atr, b, c, n, nr, m, nu, orthant_only,
-        reduction.cols, reduction.dependent, reduction.transfer,
+        A, At, Ad, Ar, Atr, b, c, reduction.cr,
+        n, nr, m, nu, orthant_only,
+        reduction.V, reduction.cnull,
         reduction.ambiguous, reduction.incompatible, reduction.ray,
         zeros(T, n), zeros(T, m), zeros(T, m), o, o,      # x, y, s, τ, κ
         zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx, dy, ds, dτ, dκ
@@ -379,16 +398,32 @@ function HSDState(
 end
 
 """
+    HSDState(canonical::CanonicalConicProgram{T}, driver::HotRouteCache{T,R})
+
+Build a production HSD state from the canonical program and a prepared KKT
+route driver whose matrix dimension is the setup-time row-space rank `nr`.
+Public iterates remain in the original `n = size(A, 2)` coordinates.  All
+iteration storage is allocated up front.
+"""
+function HSDState(
+    canonical::CanonicalConicProgram{T},
+    driver::HotRouteCache{T, R},
+) where {T, R<:AbstractFactorCache{T}}
+    reduction = _hsd_rowspace_reduction(canonical)
+    return _hsd_state_from_reduction(canonical, driver, reduction)
+end
+
+"""
     HSDState(canonical::CanonicalConicProgram{T}) → HSDState{T, DenseSchurCholeskyCache{T}}
 
 Construct a production HSD state with a default dense Schur Cholesky
 route for the LP Schur `A' diag(y/s) A`.
 """
 function HSDState(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloat}
-    nr = length(_hsd_column_reduction(canonical).cols)
-    cache = DenseSchurCholeskyCache{T}(nr)
-    driver = HotRouteCache(cache; n=nr)
-    return HSDState(canonical, driver)
+    reduction = _hsd_rowspace_reduction(canonical)
+    cache = DenseSchurCholeskyCache{T}(reduction.rank)
+    driver = HotRouteCache(cache; n=reduction.rank)
+    return _hsd_state_from_reduction(canonical, driver, reduction)
 end
 
 # ---------------------------------------------------------------------------
@@ -429,11 +464,14 @@ function hsd_dual_residual!(state::HSDState{T}) where {T}
         end
         state.rD[j] = acc + state.c[j] * state.tau
     end
-    # The reduced Newton system only enforces the independent-column rows.
-    # Keep the full residual for certificates/diagnostics and mirror those
-    # rows into a preallocated reduced buffer for the bordered RHS.
+    # Keep the full residual for certificates/diagnostics and project it onto
+    # the orthonormal row-space coordinates for the bordered Newton RHS.
     @inbounds for j in 1:state.nr
-        state.rDr[j] = state.rD[state.rank_columns[j]]
+        acc = zero(T)
+        for i in 1:state.n
+            acc += state.rank_basis[i, j] * state.rD[i]
+        end
+        state.rDr[j] = acc
     end
     return state.rD
 end
