@@ -16,6 +16,7 @@
     ProductHSDSingular
     ProductHSDBreakdown
     ProductHSDRankAmbiguous
+    ProductHSDTimeLimit
 end
 
 """Typed, inspectable reason for a product-HSD terminal status."""
@@ -30,6 +31,7 @@ end
     ProductHSDUnverifiedZeroComplementarity
     ProductHSDRankAmbiguousSetup
     ProductHSDRankRayVerificationFailed
+    ProductHSDTimeLimitReached
 end
 
 """
@@ -246,7 +248,7 @@ function _product_hsd_terminal_verified_result!(
 end
 
 """
-    product_hsd_solve!(state; max_iterations=300, tol=nothing)
+    product_hsd_solve!(state; max_iterations=300, max_time=Inf, tol=nothing)
 
 Drive the internal native LP/SOC/PSD HSD step and return a typed cold-path
 result.  Status promotion is certificate-only.  This routine never calls the
@@ -256,11 +258,16 @@ formulation, and it is intentionally not connected to a public solver route.
 function product_hsd_solve!(
     state::ProductConeHSDState{T};
     max_iterations::Integer=300,
+    max_time::Real=Inf,
     tol::Union{Nothing,T}=nothing,
 ) where {T}
     max_iterations >= 0 || throw(ArgumentError(
         "max_iterations must be nonnegative, got $max_iterations",
     ))
+    time_limit = Float64(max_time)
+    (isfinite(time_limit) || isinf(time_limit)) && time_limit >= 0.0 ||
+        throw(ArgumentError("max_time must be nonnegative and finite, or Inf"))
+    started_ns = time_ns()
     certificate_tol = tol === nothing ? T(default_certificate_tol(T)) : tol
     (isfinite(certificate_tol) && certificate_tol > zero(T)) ||
         throw(ArgumentError("tol must be finite and positive"))
@@ -303,6 +310,13 @@ function product_hsd_solve!(
     initial === nothing || return initial
 
     for _ in 1:Int(max_iterations)
+        elapsed_seconds = Float64(time_ns() - started_ns) * 1.0e-9
+        if elapsed_seconds >= time_limit
+            return _product_hsd_make_result(
+                state, ProductHSDTimeLimit, ProductHSDTimeLimitReached,
+                HSDStepOK, zero(T), x_original, s_original, y_original,
+            )
+        end
         code = product_hsd_step!(state)
         if code === HSDStepSingularKKT
             return _product_hsd_make_result(
