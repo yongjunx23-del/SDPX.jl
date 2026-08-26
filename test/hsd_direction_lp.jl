@@ -262,8 +262,13 @@ end
         SDPX.hsd_residual!(st)
         code = SDPX.hsd_step!(st)
         code === SDPX.HSDStepAlreadyOptimal && break
-        # predictor + corrector share ONE factor per epoch.
+        # Every attempted matrix epoch performs exactly one factorization.
+        # A fail-closed border can reject after factorization but before the
+        # accepted-step record advances, so `record.matrix_epoch` may trail
+        # the attempted epoch by one.
+        @test SDPX.kkt_factor_count(st.driver) == st.epoch
         @test SDPX.kkt_factor_count(st.driver) <= st.record.matrix_epoch + 1
+        code === SDPX.HSDStepDirectionFailed && break
     end
 end
 

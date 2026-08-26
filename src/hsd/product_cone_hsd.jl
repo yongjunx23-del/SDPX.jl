@@ -202,8 +202,9 @@ end
     bsum = _product_hsd_rhs!(state)
     rho = scalar_rhs + base.tau * base.rG - base.tau * bsum
     kkt_solve!(base.driver, base.w, base.rhs)
-    base.dtau = _hsd_border_solve!(base, border_scalar, rho, base.dxr)
-    isfinite(base.dtau) || return false
+    border_ok, dtau = _hsd_border_solve!(base, border_scalar, rho, base.dxr)
+    border_ok || return false
+    base.dtau = dtau
     _hsd_scatter_dx!(base)
     _product_hsd_recover!(state)
     return _hsd_direction_finite(base)

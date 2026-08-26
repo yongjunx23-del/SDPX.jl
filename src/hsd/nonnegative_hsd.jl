@@ -140,30 +140,40 @@ end
 end
 
 # Solve the bordered system given H u = q (state.u) and H w = rhs (state.w).
+# The typed `(ok, dtau)` result is deliberately finite on every failure path;
+# callers assign `state.dtau` only after `ok`.  `dx` is validated in a first
+# pass and written in a second pass, so an overflow cannot leave a partial
+# direction behind.
 @inline function _hsd_border_solve!(state::HSDState{T}, g_scalar::T, rho::T, dx::Vector{T}) where {T}
     n = state.nr
-    ru = zero(T); rw = zero(T)
+    ru = zero(T); rw = zero(T); sumabs_ru = zero(T)
     @inbounds for i in 1:n
-        ru += state.rvec[i] * state.u[i]
+        term = state.rvec[i] * state.u[i]
+        ru += term
+        sumabs_ru += abs(term)
         rw += state.rvec[i] * state.w[i]
     end
     ghat = g_scalar - ru
-    # Scale by the denominator itself (not the two large terms whose
-    # subtraction forms it): badly-scaled but valid LPs can have
-    # `|g_scalar-ru| << |g_scalar|` without being numerically singular.
-    scale = max(one(T), abs(ghat))
-    # The homogeneous border naturally becomes small as κ→0 at an optimum;
-    # a sqrt(eps) threshold would reject perfectly valid late iterations.  We
-    # only fail closed when cancellation reaches arithmetic-resolution scale.
-    if !(isfinite(ghat) && isfinite(rho) && abs(ghat) > T(100) * eps(T) * scale)
-        return T(NaN)
+    # Scale by the two quantities whose subtraction forms the denominator.
+    # This catches a small residual produced by cancellation of large terms;
+    # scaling only by `ghat` would incorrectly accept that case.
+    scale = max(one(T), abs(g_scalar), sumabs_ru)
+    if !(isfinite(g_scalar) && isfinite(ru) && isfinite(rw) &&
+         isfinite(sumabs_ru) && isfinite(ghat) && isfinite(rho) &&
+         isfinite(scale) && abs(ghat) > T(100) * eps(T) * scale)
+        return false, zero(T)
     end
-    dtau = (rho - rw) / ghat
-    isfinite(dtau) || return T(NaN)
+    numerator = rho - rw
+    isfinite(numerator) || return false, zero(T)
+    dtau = numerator / ghat
+    isfinite(dtau) || return false, zero(T)
+    @inbounds for i in 1:n
+        isfinite(state.w[i] - state.u[i] * dtau) || return false, zero(T)
+    end
     @inbounds for i in 1:n
         dx[i] = state.w[i] - state.u[i] * dtau
     end
-    return dtau
+    return true, dtau
 end
 
 # Recover ds, dy, dκ from dx, dτ and the C1 target v (Nonnegative cone).
@@ -293,8 +303,9 @@ end
     rho_t = -state.tau * state.kappa + state.tau * state.rG
     rho = rho_t - state.tau * bsum
     kkt_solve!(state.driver, state.w, state.rhs)   # H w = rhs1
-    state.dtau = _hsd_border_solve!(state, g_scalar, rho, state.dxr)
-    isfinite(state.dtau) || return false
+    border_ok, dtau = _hsd_border_solve!(state, g_scalar, rho, state.dxr)
+    border_ok || return false
+    state.dtau = dtau
     _hsd_scatter_dx!(state)
     _hsd_recover!(state, state.st)
     _hsd_direction_finite(state) || return false
@@ -329,8 +340,9 @@ end
     rho_t = (sigma * state.mu - state.tau * state.kappa - state.dtau_a * state.dkappa_a) + state.tau * state.rG
     rho = rho_t - state.tau * bsum
     kkt_solve!(state.driver, state.w, state.rhs)   # H w = rhs1 (corrector)
-    state.dtau = _hsd_border_solve!(state, g_scalar, rho, state.dxr)
-    isfinite(state.dtau) || return false
+    border_ok, dtau = _hsd_border_solve!(state, g_scalar, rho, state.dxr)
+    border_ok || return false
+    state.dtau = dtau
     _hsd_scatter_dx!(state)
     _hsd_recover!(state, state.st)
     return _hsd_direction_finite(state)

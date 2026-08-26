@@ -11,6 +11,7 @@ end
 using Test
 using LinearAlgebra
 using SparseArrays
+using MultiFloats
 
 function _lp_canonical(A, b, c; T=Float64)
     m, n = size(A)
@@ -19,7 +20,15 @@ function _lp_canonical(A, b, c; T=Float64)
     chain = SDPX.CanonicalReconstructionChain{T}(
         1, zero(T), SDPX.VariableRef[], SDPX.ConstraintRef[], SDPX.VariableRef[], 0)
     arith = SDPX.ArithmeticSpec(T)
-    return SDPX.CanonicalConicProgram(arith, 53, Vector{T}(c), sparse(A), Vector{T}(b), layout, chain)
+    return SDPX.CanonicalConicProgram(
+        arith,
+        SDPX.sig_bits(T),
+        Vector{T}(c),
+        sparse(A),
+        Vector{T}(b),
+        layout,
+        chain,
+    )
 end
 
 function _solve(A, b, c; max_iters=500)
@@ -123,12 +132,30 @@ end
     @test st.rank_ambiguous
 end
 
-@testset "badly-scaled LP → Optimal" begin
+@testset "badly-scaled LP fails closed in unresolved precision" begin
     A = [1e4 0.0; 0.0 1.0]; b = [1e4, 1.0]; c = [-1e4, -1.0]
     status, st = _solve(A, b, c)
-    @test status === :optimal
-    x, _, _ = SDPX.hsd_conic_iterate(st)
-    @test x ≈ [1.0, 1.0] atol = 1e-3
+    # The Float64 border denominator loses its sign to cancellation.  The
+    # production gate must reject that direction instead of clamping it or
+    # reporting an uncertified optimum.
+    @test status === :breakdown
+    @test all(isfinite, st.x)
+    @test all(isfinite, st.s)
+    @test all(isfinite, st.y)
+    @test isfinite(st.tau)
+    @test isfinite(st.kappa)
+
+    # The identical mathematical problem is resolved by every fixed-width
+    # extended type without changing the safety threshold or solver route.
+    for T in (Float64x2, Float64x3, Float64x4)
+        At = T[1e4 0; 0 1]
+        bt = T[1e4, 1]
+        ct = T[-1e4, -1]
+        extended = SDPX.HSDState(_lp_canonical(At, bt, ct; T=T))
+        @test SDPX.hsd_solve!(extended; max_iters=500) === :optimal
+        x, _, _ = SDPX.hsd_conic_iterate(extended)
+        @test x ≈ T[1, 1] atol = T(1e-8)
+    end
 end
 
 @testset "nearly-infeasible LP → Optimal (tiny feasible interval)" begin
