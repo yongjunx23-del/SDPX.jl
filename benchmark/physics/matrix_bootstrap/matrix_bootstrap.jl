@@ -26,8 +26,8 @@ export canonical_trace_word, canonical_moment, affine_moment_reduction, enumerat
 export AffineMomentReduction
 export AffineTerm, AffineEntry, AffineVariable, SparseAffineRow, PSDBlock
 export MatrixBootstrapSpec, SDPSliceArtifact
-export build_matrix_bootstrap, build_lin_zheng, build_kazakov_zheng_lambda4
-export build_kz_lambda4, to_sdp_problem, affine_matrix, evaluate_affine
+export build_matrix_bootstrap, build_lin_zheng
+export to_sdp_problem, affine_matrix, evaluate_affine
 export moment_value, eom_terms, eom_residual, published_counts, published_intervals
 export validate_artifact
 
@@ -43,10 +43,8 @@ const LETTER_MOMENTUM = (false, false, true, true)
 
 const _LIN_SOURCE = :lin_zheng_o2
 const _LIN_VERSION = "arXiv:2507.21007v3"
+const _LIN_DOI = "10.1103/cyq8-4sd7"
 const _LIN_STATUS = :build_only
-const _KZ_SOURCE = :kazakov_zheng_lambda4
-const _KZ_VERSION = "arXiv:2108.04830 Appendix E (Lambda=4 relaxation)"
-const _KZ_STATUS = :cross_check_only
 const _SUPPORTED_LEVEL_SCOPES = Dict(4 => :tiny, 6 => :small, 8 => :medium)
 
 const _PUBLISHED_FREE = Dict(
@@ -677,25 +675,17 @@ function _with_fingerprint(a::SDPSliceArtifact)
 end
 
 function _validate_spec(spec::MatrixBootstrapSpec)
-    if spec.source == _LIN_SOURCE
-        spec.source_version == _LIN_VERSION ||
-            throw(ArgumentError("Lin--Zheng source_version must be exactly $_LIN_VERSION"))
-        spec.reference_status == _LIN_STATUS ||
-            throw(ArgumentError("Lin--Zheng artifacts are build-only; reference_status must be :build_only"))
-        spec.D == 2 || throw(ArgumentError("the low-order Lin--Zheng generator supports D=2 only"))
-        haskey(_SUPPORTED_LEVEL_SCOPES, spec.level) ||
-            throw(ArgumentError("supported build-first scopes are level 4 (:tiny), 6 (:small), and 8 (:medium); higher levels require the unpublished full quotient"))
-        spec.scan_observable in (:x2, :energy, :z2barz2) ||
-            throw(ArgumentError("unsupported scan observable $(spec.scan_observable)"))
-    elseif spec.source == _KZ_SOURCE
-        spec.source_version == _KZ_VERSION ||
-            throw(ArgumentError("Kazakov--Zheng source_version must be exactly $_KZ_VERSION"))
-        spec.reference_status == _KZ_STATUS ||
-            throw(ArgumentError("Kazakov--Zheng fixture reference_status must be :cross_check_only"))
-        spec.level == 4 || throw(ArgumentError("the Kazakov--Zheng fixture is fixed at Lambda=4"))
-    else
-        throw(ArgumentError("unsupported matrix-bootstrap source $(spec.source); allowed sources are $_LIN_SOURCE and $_KZ_SOURCE"))
-    end
+    spec.source == _LIN_SOURCE ||
+        throw(ArgumentError("unsupported matrix-bootstrap source $(spec.source); only $_LIN_SOURCE is retained"))
+    spec.source_version == _LIN_VERSION ||
+        throw(ArgumentError("Lin--Zheng source_version must be exactly $_LIN_VERSION"))
+    spec.reference_status == _LIN_STATUS ||
+        throw(ArgumentError("Lin--Zheng artifacts are build-only; reference_status must be :build_only"))
+    spec.D == 2 || throw(ArgumentError("the low-order Lin--Zheng generator supports D=2 only"))
+    haskey(_SUPPORTED_LEVEL_SCOPES, spec.level) ||
+        throw(ArgumentError("supported build-first scopes are level 4 (:tiny), 6 (:small), and 8 (:medium); higher levels require the unpublished full quotient"))
+    spec.scan_observable in (:x2, :energy, :z2barz2) ||
+        throw(ArgumentError("unsupported scan observable $(spec.scan_observable)"))
     return nothing
 end
 
@@ -754,24 +744,14 @@ itself is not an objective: `objective` and `reference_objective` are always
 `nothing`.
 """
 function build_matrix_bootstrap(; source::Symbol=_LIN_SOURCE,
-                                source_version::AbstractString=(source == _LIN_SOURCE ? _LIN_VERSION : _KZ_VERSION),
-                                D::Integer=2, mass2=(source == _LIN_SOURCE ? 1 : 0), level::Integer=4,
+                                source_version::AbstractString=_LIN_VERSION,
+                                D::Integer=2, mass2=1, level::Integer=4,
                                 scan_observable::Symbol=:x2,
                                 scan_value=nothing,
-                                reference_status::Symbol=(source == _LIN_SOURCE ? _LIN_STATUS : _KZ_STATUS),
+                                reference_status::Symbol=_LIN_STATUS,
                                 relaxation::Bool=true)
-    source in (_LIN_SOURCE, _KZ_SOURCE) ||
+    source == _LIN_SOURCE ||
         throw(ArgumentError("unsupported matrix-bootstrap source $source"))
-    if source == _KZ_SOURCE
-        D == 2 || throw(ArgumentError("the independent Kazakov--Zheng fixture uses its fixed two-matrix alphabet"))
-        level == 4 || throw(ArgumentError("the independent Kazakov--Zheng fixture is fixed at Lambda=4"))
-        _rat(mass2) == Rat(0) || throw(ArgumentError("KZ Lambda=4 uses the source's g=h=1 two-matrix integral"))
-        scan_value === nothing || throw(ArgumentError("KZ Lambda=4 has no fixed scan parameter in this build-only fixture"))
-        scan_observable == :x2 || throw(ArgumentError("KZ Lambda=4 exposes no O(2) scan observable"))
-        relaxation || throw(ArgumentError("KZ Lambda=4 requires its Appendix-E relaxation block"))
-        return _build_kazakov_zheng_lambda4(
-            source_version=String(source_version), reference_status=reference_status)
-    end
     m2 = _rat(mass2)
     sv = scan_value === nothing ? nothing : _rat(scan_value)
     spec = MatrixBootstrapSpec(source=source, source_version=String(source_version),
@@ -884,7 +864,8 @@ function build_matrix_bootstrap(; source::Symbol=_LIN_SOURCE,
               scan_observable=spec.scan_observable, scan_value=spec.scan_value,
               relaxation=spec.relaxation,
               scope=_SUPPORTED_LEVEL_SCOPES[Int(level)],
-              paper_source=true, paper_equivalent=false,
+              paper_source=true, primary_doi=_LIN_DOI,
+              paper_equivalent=false,
               independent_oracle=false)
     metadata = (is_affine=true,
         scan_is_slice=(sv !== nothing),
@@ -918,6 +899,7 @@ function build_matrix_bootstrap(; source::Symbol=_LIN_SOURCE,
             :full_ground_state_positivity_hierarchy,
             :published_Table_1_2_reproduction),
         production_quotient_available=false,
+        primary_doi=_LIN_DOI,
         raw_moment_count=length(moment_words),
         decision_variable_count=length(variables),
         eom_equation_count=count(label -> label == :eom, labels),
@@ -935,161 +917,6 @@ end
 build_matrix_bootstrap(level::Integer; kwargs...) = build_matrix_bootstrap(; level=level, kwargs...)
 build_lin_zheng(; kwargs...) = build_matrix_bootstrap(; source=:lin_zheng_o2, kwargs...)
 build_lin_zheng(level::Integer; kwargs...) = build_lin_zheng(; level=level, kwargs...)
-
-const _KZ_WORD_STRINGS = (
-    "A2", "A4", "A2B2", "ABAB", "A6", "A4B2", "A3BAB", "A2BA2B",
-    "A8", "A6B2", "A5BAB", "A4BA2B", "A4B4", "A3BA3B", "A3BAB3",
-    "A3B2AB2", "A2BABAB2", "A2BAB2AB", "A2B2A2B2", "ABABABAB",
-)
-
-function _kz_word(s::AbstractString)
-    out = UInt8[]
-    for c in s
-        c == 'A' && push!(out, UInt8(1))
-        c == 'B' && push!(out, UInt8(2))
-        isdigit(c) || continue
-        n = Int(c - '0')
-        # The compact names above use decimal exponents only as notation;
-        # expand them into the corresponding binary word.
-        last = out[end]
-        for _ in 2:n
-            push!(out, last)
-        end
-    end
-    return Tuple(out)
-end
-
-function _kz_swap(w::Word)
-    return Tuple(x == UInt8(1) ? UInt8(2) : UInt8(1) for x in w)
-end
-
-function _kz_canonical(w::Word)
-    candidates = Word[]
-    append!(candidates, _rotations(w))
-    append!(candidates, _rotations(_word_reverse(w)))
-    append!(candidates, _rotations(_kz_swap(w)))
-    append!(candidates, _rotations(_kz_swap(_word_reverse(w))))
-    sort!(candidates)
-    return first(candidates)
-end
-
-function _kz_entry_moment(w1::Word, w2::Word, indices::Dict{Word,Int})
-    key = _kz_canonical(_concat_words(_word_reverse(w1), w2))
-    key == Word(()) && return AffineEntry(Rat(1))
-    id = get(indices, key, 0)
-    id > 0 || throw(KeyError("KZ Lambda=4 moment $(key) is absent"))
-    return AffineEntry(Rat(0), [AffineTerm(id, Rat(1))])
-end
-
-function _kz_add!(d::Dict{Int,Rat}, id::Int, c)
-    d[id] = get(d, id, Rat(0)) + _rat(c)
-    iszero(d[id]) && delete!(d, id)
-    return d
-end
-
-function _build_kazakov_zheng_lambda4(; source_version=_KZ_VERSION,
-                                      reference_status::Symbol=_KZ_STATUS)
-    words = Word[_kz_canonical(_kz_word(s)) for s in _KZ_WORD_STRINGS]
-    words = unique(words)
-    length(words) == 20 || throw(ArgumentError("KZ Lambda=4 word list lost an orbit"))
-    variables = AffineVariable[]
-    indices = Dict{Word,Int}()
-    for (i, w) in enumerate(words)
-        indices[w] = _new_variable!(variables, "mu[" * _KZ_WORD_STRINGS[i] * "]", :moment; word=w)
-    end
-    beta = _new_variable!(variables, "beta", :quadratic)
-    rows = Dict{Int,Rat}[]
-    rhsv = Rat[]
-    function row(terms; rhs=0)
-        d = Dict{Int,Rat}()
-        for (s, c) in terms
-            if s === :beta
-                _kz_add!(d, beta, c)
-            else
-                _kz_add!(d, indices[_kz_canonical(_kz_word(s))], c)
-            end
-        end
-        push!(rows, d); push!(rhsv, _rat(rhs))
-    end
-    # Appendix-E Eq. (14) at g=h=1, with every quadratic product represented
-    # by beta.  These are exact loop equations, not numerically fitted rows.
-    row(("A2"=>1, "A4"=>1, "A2B2"=>2, "ABAB"=>-2); rhs=1)
-    row(("A2"=>-2, "A4"=>1, "A3BAB"=>-2, "A4B2"=>2, "A6"=>1))
-    row(("A2"=>-1, "A2B2"=>1, "A2BA2B"=>1, "A3BAB"=>-2, "A4B2"=>2))
-    row(("A2BA2B"=>-2, "A3BAB"=>3, "ABAB"=>1))
-    row((:beta=>1, "A4"=>2, "A6"=>-1, "A5BAB"=>2, "A6B2"=>-2, "A8"=>-1))
-    row((:beta=>1, "A2B2"=>1, "A4B2"=>-1, "A3B2AB2"=>-1, "A3BAB3"=>2, "A4B4"=>-1, "A6B2"=>-1))
-    row(("A2B2"=>-2, "A2B2A2B2"=>1, "A2BABAB2"=>-2, "A3B2AB2"=>1, "A4B2"=>1, "A6B2"=>1))
-    row(("A4"=>-1, "A4B2"=>1, "A4B4"=>1, "A4BA2B"=>1, "A5BAB"=>-2, "A6B2"=>1))
-    row(("A3BAB"=>1, "A2BAB2AB"=>-2, "A2BABAB2"=>1, "A3BAB3"=>1, "A5BAB"=>1, "ABAB"=>-1))
-    row(("A3BAB"=>1, "A5BAB"=>1, "ABAB"=>-2, "A2BABAB2"=>2, "ABABABAB"=>-2))
-    row(("A3BAB"=>1, "A3BAB3"=>1, "A3BA3B"=>1, "A4BA2B"=>-2, "A5BAB"=>1))
-    row(("A3BA3B"=>1, "A3BAB"=>1, "A3B2AB2"=>-2, "A3BAB3"=>2))
-    row(("A2B2"=>-1, "A2BA2B"=>1, "A2BAB2AB"=>1, "A2BABAB2"=>-2, "A3B2AB2"=>1, "A4BA2B"=>1))
-    row((:beta=>1, "A2BA2B"=>-1, "A3B2AB2"=>-1, "A3BA3B"=>2, "A4BA2B"=>-2))
-
-    I = Int[]; J = Int[]; V = Rat[]
-    for (r, d) in enumerate(rows), c in sort!(collect(keys(d)))
-        push!(I, r); push!(J, c); push!(V, d[c])
-    end
-    B = sparse(I, J, V, length(rows), length(variables))
-    labels = fill(:loop_equation, length(rows))
-    basis_even = [_kz_word(s) for s in ("", "AA", "BB", "AAAA", "AABB", "ABAB", "ABBA", "BAAB", "BABA", "BBAA", "BBBB")]
-    basis_odd = [_kz_word(s) for s in ("AB", "BA", "AAAB", "AABA", "ABAA", "ABBB", "BAAA", "BABB", "BBAB", "BBBA")]
-    basis_mixed = [_kz_word(s) for s in ("B", "AAB", "ABA", "BAA", "BBB")]
-    blocks = PSDBlock[]
-    for (name, basis, kind) in ((:M_even_even, basis_even, :correlation_even),
-                                (:M_odd_odd, basis_odd, :correlation_odd),
-                                (:M_even_odd, basis_mixed, :correlation_mixed))
-        n = length(basis)
-        entries = Matrix{AffineEntry}(undef, n, n)
-        for i in 1:n, j in 1:n
-            entries[i, j] = _kz_entry_moment(basis[i], basis[j], indices)
-        end
-        push!(blocks, _block(name, kind, basis, entries;
-            metadata=(alphabet=(:A, :B), symmetry=:Z2_cubed, cutoff=4,
-                      source_equation=:correlation_positivity)))
-    end
-    liftbasis = Word[Word(()), _kz_word("AA")]
-    lift = Matrix{AffineEntry}(undef, 2, 2)
-    lift[1, 1] = AffineEntry(Rat(1))
-    lift[1, 2] = lift[2, 1] = AffineEntry(Rat(0), [AffineTerm(indices[_kz_canonical(_kz_word("AA"))], Rat(1))])
-    lift[2, 2] = _entry_q(beta)
-    push!(blocks, _block(:Q_lift, :nonlinear_relaxation, liftbasis, lift;
-        metadata=(alphabet=(:A, :B), symmetry=:Z2_cubed, cutoff=4,
-                  source_equation=:relaxation_matrix)))
-    spec = MatrixBootstrapSpec(source=:kazakov_zheng_lambda4,
-        source_version=String(source_version), D=2, mass2=Rat(0), level=4,
-        scan_observable=:x2, scan_value=nothing,
-        reference_status=reference_status, relaxation=true)
-    _validate_spec(spec)
-    params = (alphabet=(:A, :B), g=Rat(1), h=Rat(1), cutoff=4,
-              symmetry=:Z2_cubed, beta_definition=:(TrA2^2))
-    metadata = (is_affine=true, scan_is_slice=false,
-        fixed_scan_semantics=:one_slice_one_affine_sdp,
-        no_objective_oracle=true, construction=:kazakov_zheng_lambda4,
-        alphabet=(:A, :B), symmetry=:Z2_cubed, couplings=(g=Rat(1), h=Rat(1)),
-        operator_count=20, loop_equation_count=14, quadratic_variables=1,
-        paper_interval=(Rat(393566, 1_000_000), Rat(431148, 1_000_000)),
-        production_quotient_available=true, build_only_level=false,
-        source_scope=:kazakov_zheng_relaxation)
-    artifact = SDPSliceArtifact(spec, :kazakov_zheng_lambda4, String(source_version),
-        :kazakov_zheng_lambda4, 4, params, words, variables, indices,
-        reshape([beta], 1, 1), B, rhsv, labels, blocks, reference_status,
-        nothing, nothing, metadata, "")
-    return _with_fingerprint(artifact)
-end
-
-"Independent small cross-check fixture; it is not the 2025 Lin--Zheng model."
-function build_kazakov_zheng_lambda4(; level::Integer=4, mass2=0,
-                                      reference_status::Symbol=_KZ_STATUS,
-                                      kwargs...)
-    level == 4 || throw(ArgumentError("the independent Kazakov--Zheng fixture is fixed at Lambda=4"))
-    isempty(kwargs) || throw(ArgumentError("unsupported KZ Lambda=4 options: $(collect(keys(kwargs)))"))
-    _rat(mass2) == Rat(0) || throw(ArgumentError("KZ Lambda=4 fixture uses the source's g=h=1 two-matrix integral, not mass2"))
-    return _build_kazakov_zheng_lambda4(reference_status=reference_status)
-end
-build_kz_lambda4(; kwargs...) = build_kazakov_zheng_lambda4(; kwargs...)
 
 "Optional conversion to SDPX's user-facing SDPProblem representation."
 function to_sdp_problem(a::SDPSliceArtifact, ::Type{T}=Float64) where {T}

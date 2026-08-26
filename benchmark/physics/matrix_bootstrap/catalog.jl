@@ -18,6 +18,7 @@ function _catalog_spec(scale::Symbol, level::Int)
         parameters=(
             dimension=2,
             mass_squared="1",
+            primary_doi="10.1103/cyq8-4sd7",
             hierarchy_level=level,
             supported_scope=artifact.metadata.supported_scope,
             decision_variables=length(artifact.variables),

@@ -227,6 +227,10 @@ Base.@kwdef struct LatticeBenchmarkSpec{T}
     operator_max_length::Int
     equation_max_length::Int
     hierarchy::Symbol = :based_length
+    scope::Symbol = :based_length_edge_simple_subset
+    reference_status::Symbol = :build_only
+    paper_equivalent::Bool = false
+    publication_claim::Symbol = :none
 end
 
 """A scalar affine expression used in a Gram entry.
@@ -294,6 +298,18 @@ function _validate_spec(spec::LatticeBenchmarkSpec)
     ))
     spec.hierarchy === :based_length || throw(ArgumentError(
         "paper Λ hierarchy is not reconstructed; use hierarchy=:based_length",
+    ))
+    spec.scope === :based_length_edge_simple_subset || throw(ArgumentError(
+        "only the based-length edge-simple subset is implemented",
+    ))
+    spec.reference_status === :build_only || throw(ArgumentError(
+        "lattice artifacts are build-only; reference_status must be :build_only",
+    ))
+    spec.paper_equivalent === false || throw(ArgumentError(
+        "the based-length edge-simple subset is not paper-equivalent",
+    ))
+    spec.publication_claim === :none || throw(ArgumentError(
+        "the based-length edge-simple subset cannot carry a publication claim",
     ))
     isfinite(spec.coupling) && spec.coupling > zero(spec.coupling) ||
         throw(ArgumentError("coupling λ must be finite and strictly positive"))
@@ -477,6 +493,10 @@ function _provenance()
         authors=("Vladimir Kazakov", "Zechuan Zheng"),
         arxiv=PRIMARY_ARXIV,
         doi=PRIMARY_DOI,
+        reference_status=:build_only,
+        paper_equivalent=false,
+        publication_claim=:none,
+        scope=:based_length_edge_simple_subset,
         convention="Tr=tr/N; lambda=2N^2/beta; N=2; D=2",
         derivation_context=(
             "2.26 (action variation)",
@@ -504,6 +524,7 @@ function _provenance()
             "reflection positivity is not generated",
             "paper recursive Lambda hierarchy is not generated",
             "Table 2 Lambda=3 census is not claimed reproduced",
+            "the based-length edge-simple subset is not paper-equivalent",
         ),
     )
 end
@@ -579,6 +600,7 @@ function build_lattice_bootstrap(spec::LatticeBenchmarkSpec{T}) where {T}
         maximum_moment_length=maximum(length, variables; init=0),
         equation_scope=:edge_simple_Aid_Avar,
         hierarchy=:based_length_not_paper_Lambda,
+        scope=:based_length_edge_simple_subset_not_paper_lambda,
     )
     provisional = LatticeBootstrapArtifact{T}(
         ARTIFACT_SCHEMA_VERSION,
@@ -626,6 +648,10 @@ function canonical_text(artifact::LatticeBootstrapArtifact)
     println(io, "operator-max-length=", spec.operator_max_length)
     println(io, "equation-max-length=", spec.equation_max_length)
     println(io, "hierarchy=", spec.hierarchy)
+    println(io, "scope=", spec.scope)
+    println(io, "reference-status=", spec.reference_status)
+    println(io, "paper-equivalent=", spec.paper_equivalent)
+    println(io, "publication-claim=", spec.publication_claim)
     for (name, value) in pairs(artifact.counts)
         println(io, "count.", name, '=', repr(value))
     end
@@ -676,6 +702,17 @@ function validate_artifact(artifact::LatticeBootstrapArtifact)
         valid_spec = false
         push!(failures, "spec")
     end
+    artifact.spec.reference_status === :build_only || push!(failures, "reference_status")
+    artifact.spec.paper_equivalent === false || push!(failures, "paper_equivalent")
+    artifact.spec.publication_claim === :none || push!(failures, "publication_claim")
+    get(artifact.provenance, :reference_status, nothing) === :build_only ||
+        push!(failures, "provenance_reference_status")
+    get(artifact.provenance, :paper_equivalent, nothing) === false ||
+        push!(failures, "provenance_paper_equivalent")
+    get(artifact.provenance, :publication_claim, nothing) === :none ||
+        push!(failures, "provenance_publication_claim")
+    get(artifact.provenance, :scope, nothing) === :based_length_edge_simple_subset ||
+        push!(failures, "provenance_scope")
     variable_count = length(artifact.variables)
     issorted(_word_key.(artifact.variables)) || push!(failures, "variable_order")
     length(unique(artifact.variables)) == variable_count || push!(failures, "duplicate_variables")

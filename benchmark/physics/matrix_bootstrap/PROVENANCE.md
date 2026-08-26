@@ -10,7 +10,9 @@ input files or their post-quotient free-variable basis.
   Quantum Mechanics*, arXiv:2507.21007v3 (11 June 2026; the arXiv HTML page
   displays the manuscript date 24 August 2026),
   <https://arxiv.org/abs/2507.21007> and
-  <https://arxiv.org/html/2507.21007>.
+  <https://arxiv.org/html/2507.21007>.  Published as *Phys. Rev. Lett.*
+  **136**, 181603 (2026), DOI
+  <https://doi.org/10.1103/cyq8-4sd7>.
 - The source TeX was obtained from the arXiv e-print on 26 August 2026 and
   inspected from `BosonicBFSS_arxiv.tex` and `Sup_body.tex`.
 - The authors' example generator is the Mathematica notebook at
@@ -82,17 +84,3 @@ fixed-slice objective oracles.  The artifact therefore defaults to
 `reference_status=:build_only`, with `objective=nothing` and
 `reference_objective=nothing`.  No numerical solve is used as a correctness
 proof.
-
-## Independent small cross-check
-
-`build_kazakov_zheng_lambda4` labels the optional fixture as
-`source=:kazakov_zheng_lambda4`, source
-`arXiv:2108.04830 Appendix E (Lambda=4 relaxation)`, and
-`reference_status=:cross_check_only`.  It is the Kazakov--Zheng Lambda=4
-relaxation associated with the earlier proposal; it is not the 2025
-Lin--Zheng model and its metadata/fingerprint are intentionally distinct.
-The Appendix-E `g=h=1` model has 20 symmetry-reduced moments, 14 exact loop
-equations, three correlation blocks of sizes 11, 10, and 5, and one
-relaxation block of size 2.  Its paper reports the Lambda=4 interval
-`0.393566 <= Tr(A^2) <= 0.431148`; that interval is stored as provenance
-metadata only, with no objective or solve certificate.

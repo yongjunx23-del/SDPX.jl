@@ -37,7 +37,7 @@ The raw word counts are therefore not the published post-quotient counts.
 Those counts and intervals are retained only as fail-closed provenance
 metadata; they are not acceptance oracles.  See
 [`PROVENANCE.md`](PROVENANCE.md) for the paper equations, source versions,
-interval semantics, and the separate Kazakov--Zheng Lambda=4 fixture.
+stable PRL citation, and interval semantics.
 
 `catalog.jl` registers levels 4/6/8 with the shared benchmark harness. Their
 reference status is `:build_only`: the runner measures construction and

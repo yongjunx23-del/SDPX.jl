@@ -6,27 +6,33 @@ using .KZFiniteNLatticeBootstrap
 
 const _KZ25_SCALES = (:tiny, :small, :medium)
 const _KZ25_ARTIFACT_FINGERPRINTS = Dict(
-    :tiny => "16535195fc5d7251d16fe66c4adf66116fcc70b9f2c07475e0075a0636c796d3",
-    :small => "d23db325412efe3624c7bcf5b8054a5bbb74e3d590a912bad84f24682293166e",
-    :medium => "2dcbd9b91591b9f9d4aaea5a5500852251954c519a124387712a3b6377d3f576",
+    :tiny => "ca58c9d39cb6cd237325f58df65ec44eab762ae4d2903fa188f7079a2637b855",
+    :small => "4c20e1f0b4da93110e390719f0efc36b7f9187971ae1fa0fd0e750ada7aaa235",
+    :medium => "310af7bf2976e1665a967a5da5190474ef7e153196e2cd30fccd9d06cd211abd",
 )
 
 function _catalog_spec(scale::Symbol)
     local_spec = getproperty(lattice_benchmark_specs(Float64), scale)
     return PhysicsBenchmarkSpec(
         id=local_spec.id,
-        name="KZ finite-N SU(2) D=2 lattice bootstrap ($(scale))",
+        name="KZ finite-N SU(2) D=2 based-length edge-simple subset, not paper Lambda ($(scale))",
         family=:sdp,
         problem_type=:semidefinite_program,
         source=:physics,
         purpose=:lattice_bootstrap_scaling,
         parameters=(
             coupling="2",
+            doi="10.1007/JHEP03(2025)099",
             dimension=2,
             gauge_group=:SU2,
             operator_max_length=local_spec.operator_max_length,
             equation_max_length=local_spec.equation_max_length,
             hierarchy=:based_length,
+            scope=:based_length_edge_simple_subset_not_paper_lambda,
+            equation_scope=:edge_simple_Aid_Avar,
+            reference_status=:build_only,
+            paper_equivalent=false,
+            publication_claim=:none,
         ),
         tags=(
             :physics,

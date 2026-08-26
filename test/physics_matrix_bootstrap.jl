@@ -98,6 +98,7 @@ end
     @test a.metadata.is_affine
     @test !a.metadata.paper_equivalent
     @test a.metadata.publication_claim == :none
+    @test a.metadata.primary_doi == "10.1103/cyq8-4sd7"
     @test a.metadata.published_census_status == :metadata_only_fail_closed
     @test a.metadata.kinematic_constraints.canonical_commutator ==
           :appendix_E34_affine_reduction
@@ -244,32 +245,11 @@ end
     end
 end
 
-@testset "matrix-bootstrap provenance whitelist and independent fixture" begin
+@testset "matrix-bootstrap provenance whitelist" begin
     @test_throws ArgumentError build_matrix_bootstrap(source=:unknown_source)
     @test_throws ArgumentError build_lin_zheng(source_version="arXiv:2507.21007v2")
     @test_throws ArgumentError build_lin_zheng(reference_status=:published_interval)
     @test_throws ArgumentError build_lin_zheng(reference_status=:cross_check_only)
-    @test_throws ArgumentError build_kazakov_zheng_lambda4(reference_status=:build_only)
-    @test_throws ArgumentError build_matrix_bootstrap(source=:kazakov_zheng_lambda4, D=3)
-    @test_throws ArgumentError build_matrix_bootstrap(source=:kazakov_zheng_lambda4,
-        source_version="arXiv:2108.04830 Appendix E")
-
-    kz = build_kazakov_zheng_lambda4()
-    @test kz.source == :kazakov_zheng_lambda4
-    @test kz.source_version ==
-          "arXiv:2108.04830 Appendix E (Lambda=4 relaxation)"
-    @test kz.reference_status == :cross_check_only
-    @test kz.metadata.source_scope == :kazakov_zheng_relaxation
-    @test length(kz.words) == 20
-    @test size(kz.equalities) == (14, 21)
-    @test [size(block, 1) for block in kz.psd_blocks] == [11, 10, 5, 2]
-    @test kz.metadata.paper_interval ==
-          (Rat(393566, 1000000), Rat(431148, 1000000))
-    @test kz.objective === nothing
-    @test validate_artifact(kz)
-
-    lin = build_lin_zheng(level=4)
-    @test kz.fingerprint != lin.fingerprint
 
     # Mutable artifact storage must not be silently accepted after hashing.
     tampered = build_lin_zheng(level=4)
@@ -290,6 +270,7 @@ end
     entry = only(harness.catalog_entries(catalog, :smoke))
     spec = harness.catalog_spec(catalog, entry.problem_id)
     @test spec.reference.status == :build_only
+    @test spec.parameters.primary_doi == "10.1103/cyq8-4sd7"
     built = harness.build_problem(catalog, spec, Float64)
     @test built.kind == :sdp
     @test built.problem isa SDPX.SDPProblem

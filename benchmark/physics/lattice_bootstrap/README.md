@@ -1,8 +1,15 @@
-# Kazakov–Zheng finite-N lattice bootstrap benchmark
+# Kazakov–Zheng finite-N lattice bootstrap build benchmark
 
-This directory contains a deterministic, build-first affine SDP benchmark
-derived from Vladimir Kazakov and Zechuan Zheng, *Bootstrap for finite N
-lattice Yang-Mills theory*, arXiv:2404.16925v4 / JHEP 03 (2025) 099.
+This directory contains a deterministic, build-first affine SDP artifact based
+on Vladimir Kazakov and Zechuan Zheng, *Bootstrap for finite N lattice
+Yang-Mills theory*, arXiv:2404.16925v4 / *JHEP* 03 (2025) 099,
+DOI [10.1007/JHEP03(2025)099](https://doi.org/10.1007/JHEP03(2025)099).
+
+The registered model is explicitly the **based-length edge-simple subset**.
+It is not the paper's recursive `Lambda` hierarchy, is not
+paper-equivalent, carries `reference_status=:build_only` and
+`publication_claim=:none`, and is never presented as a reproduced paper
+bound or census.
 
 Implemented physics:
 
@@ -43,4 +50,4 @@ terms, and the exact paper hierarchy remain explicit follow-on work.
 
 The injected catalog is deliberately `:build_only`. Its smoke/scaling suites
 measure deterministic model construction and lowering, not an optimization or
-a claim that the based-length objective reproduces a paper bound.
+a claim that the based-length edge-simple objective reproduces a paper bound.

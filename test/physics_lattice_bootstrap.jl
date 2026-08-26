@@ -90,6 +90,14 @@ end
         @test isempty(verdict.failures)
         @test artifact.fingerprint == stable_fingerprint(artifact)
         @test length(artifact.fingerprint) == 64
+        @test artifact.spec.reference_status === :build_only
+        @test artifact.spec.paper_equivalent === false
+        @test artifact.spec.publication_claim === :none
+        @test artifact.spec.scope === :based_length_edge_simple_subset
+        @test artifact.provenance.reference_status === :build_only
+        @test artifact.provenance.paper_equivalent === false
+        @test artifact.provenance.publication_claim === :none
+        @test artifact.provenance.scope === :based_length_edge_simple_subset
         @test all(isfinite, (artifact.oracle.exact_value,))
         @test all(row -> all(isfinite, row.coefficients), artifact.equations)
         @test all(block -> block.entries == permutedims(block.entries), artifact.gram_blocks)
@@ -108,6 +116,7 @@ end
         maximum_moment_length=8,
         equation_scope=:edge_simple_Aid_Avar,
         hierarchy=:based_length_not_paper_Lambda,
+        scope=:based_length_edge_simple_subset_not_paper_lambda,
     )
     @test artifacts[:small].counts.variables == 55
     @test artifacts[:small].counts.equations == 3
@@ -157,11 +166,11 @@ end
     @test repeated.fingerprint == tiny.fingerprint
     @test canonical_text(repeated) == canonical_text(tiny)
     @test tiny.fingerprint ==
-          "16535195fc5d7251d16fe66c4adf66116fcc70b9f2c07475e0075a0636c796d3"
+          "ca58c9d39cb6cd237325f58df65ec44eab762ae4d2903fa188f7079a2637b855"
     @test artifacts[:small].fingerprint ==
-          "d23db325412efe3624c7bcf5b8054a5bbb74e3d590a912bad84f24682293166e"
+          "4c20e1f0b4da93110e390719f0efc36b7f9187971ae1fa0fd0e750ada7aaa235"
     @test artifacts[:medium].fingerprint ==
-          "2dcbd9b91591b9f9d4aaea5a5500852251954c519a124387712a3b6377d3f576"
+          "310af7bf2976e1665a967a5da5190474ef7e153196e2cd30fccd9d06cd211abd"
     @test build_lattice_bootstrap(LatticeBenchmarkSpec{Float64}(
         id="lambda3",
         scale=:tiny,
@@ -236,6 +245,30 @@ end
         equation_max_length=4,
         hierarchy=:paper_lambda,
     ))
+    @test_throws ArgumentError build_lattice_bootstrap(LatticeBenchmarkSpec{Float64}(
+        id="claimed-optimal",
+        scale=:tiny,
+        coupling=2.0,
+        operator_max_length=4,
+        equation_max_length=4,
+        reference_status=:optimal,
+    ))
+    @test_throws ArgumentError build_lattice_bootstrap(LatticeBenchmarkSpec{Float64}(
+        id="claimed-paper-equivalent",
+        scale=:tiny,
+        coupling=2.0,
+        operator_max_length=4,
+        equation_max_length=4,
+        paper_equivalent=true,
+    ))
+    @test_throws ArgumentError build_lattice_bootstrap(LatticeBenchmarkSpec{Float64}(
+        id="claimed-publication",
+        scale=:tiny,
+        coupling=2.0,
+        operator_max_length=4,
+        equation_max_length=4,
+        publication_claim=:reproduced,
+    ))
 
     @info "KZ lattice build evidence" build_times counts=Dict(
         scale => artifacts[scale].counts for scale in keys(artifacts)
@@ -255,7 +288,7 @@ end
     @test_throws ArgumentError assert_paper_lambda3_reproduced!()
 end
 
-@testset "KZ injected physics catalog" begin
+@testset "KZ injected build-only physics catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
         include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
     end
@@ -268,6 +301,13 @@ end
     entry = only(harness.catalog_entries(catalog, :smoke))
     spec = harness.catalog_spec(catalog, entry.problem_id)
     @test spec.reference.status == :build_only
+    @test spec.parameters.doi == "10.1007/JHEP03(2025)099"
+    @test occursin("based-length edge-simple subset, not paper Lambda", spec.name)
+    @test spec.parameters.scope == :based_length_edge_simple_subset_not_paper_lambda
+    @test spec.parameters.equation_scope == :edge_simple_Aid_Avar
+    @test spec.parameters.reference_status == :build_only
+    @test spec.parameters.paper_equivalent === false
+    @test spec.parameters.publication_claim == :none
     built = harness.build_problem(catalog, spec, Float64)
     @test built.kind == :sdp
     @test built.problem isa SDPX.SDPProblem
