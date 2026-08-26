@@ -144,6 +144,7 @@ const FULL_TESTS = (
     "benchmark_compare.jl",
     "benchmark_fresh_process.jl",
     "prepared_structure.jl",
+    "physics_lattice_bootstrap.jl",
     "moi_regressions.jl",
     "extended_blas_regressions.jl",
     "bigfloat_kernel_regressions.jl",
