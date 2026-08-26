@@ -350,15 +350,12 @@ end
         @test SDPX.certificate(result).valid
         @test all(isfinite, SDPX.value(result))
 
-        # Current symmetric-product core blocker, retained at its ordinary
-        # BigFloat certificate tolerance rather than hidden by a relaxed
-        # public target.  Canonical data are A=[-1;1;0], b=[1,1,0], c=[2]
-        # with one SOC(3) block.  The core presently reaches a finite line-
-        # search breakdown after ten accepted iterations.
+        # Strict high-precision boundary optimum.  Canonical data are
+        # A=[-1;1;0], b=[1,1,0], c=[2] with one SOC(3) block.
         soc_model, _, _ = _nh_optimal_model(BigFloat, (:soc,))
         strict_settings = SDPX.Settings{BigFloat}(
             engine=:native_hsd,
-            tolerances=_nh_tolerances(BigFloat, big"1e-14"),
+            tolerances=_nh_tolerances(BigFloat, big"1e-30"),
             limits=SDPX.Limits(iterations=100, time=30.0, threads=1),
             verbosity=0,
         )
@@ -367,10 +364,9 @@ end
             settings=strict_settings,
             outputs=_nh_outputs(),
         )
-        @test_broken SDPX.status(soc_result) === :optimal
-        @test SDPX.status(soc_result) === :numerical_breakdown
-        @test soc_result.termination.reason === :line_search_breakdown
-        @test soc_result.iterations == 10
+        @test SDPX.status(soc_result) === :optimal
+        @test SDPX.certificate(soc_result).valid
+        @test abs(SDPX.value(soc_result)[1]) < big"1e-30"
         @test all(isfinite, SDPX.value(soc_result))
         @test all(isfinite, SDPX.dual(soc_result))
         @test SDPX.execution_plan(soc_result).payload.fallback_chain === ()

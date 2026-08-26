@@ -136,6 +136,80 @@ function _socnt_seeded_pairs(n::Int, rng::AbstractRNG)
     end
 end
 
+@testset "SOC NT condition-aware boundary precision" begin
+    setprecision(BigFloat, 256) do
+        T = BigFloat
+        cone = SOCNT_SC.SOCone(3)
+        state = SOCNT_SC.SOCNTScaling{T}(3)
+        delta = T("1e-30")
+        s = T[1, 1 - delta, 0]
+        y = T[1, -1 + delta, 0]
+        mapped = zeros(T, 3)
+        recovered = zeros(T, 3)
+
+        SOCNT_SC.nt_scaling!(cone, state, s, y)
+        SOCNT_SC.theta_apply!(cone, mapped, state, y)
+        SOCNT_SC.g_apply!(cone, recovered, state, s)
+        @test SOCNT_SC._soc_q_backward_close(mapped, state.w, y, s, 3)
+        @test SOCNT_SC._soc_q_backward_close(recovered, state.winv, s, y, 3)
+        @test SOCNT_SC._soc_q_condition_reliable(state.w, 3)
+
+        corrupted = copy(mapped)
+        corrupted[1] += T("1e-20")
+        @test !SOCNT_SC._soc_q_backward_close(corrupted, state.w, y, s, 3)
+
+        # The rationalized square-root tail remains accurate for a tiny but
+        # nonzero tail; direct `sqrt(lambda+)-sqrt(lambda-)` cancellation does
+        # not satisfy this gate.
+        small_tail = T[1, T("1e-20"), -T("2e-20")]
+        root = zeros(T, 3)
+        square = zeros(T, 3)
+        SOCNT_SC.sqrt!(cone, root, small_tail)
+        SOCNT_SC.jordan_product!(cone, square, root, root)
+        @test SOCNT_SC._soc_jordan_backward_close(
+            square, root, root, small_tail, 3,
+        )
+    end
+
+    # The exact same centered pair is too ill-conditioned at 256 bits but is
+    # resolved cleanly at 512 bits.  This is a precision gate, not a relaxed
+    # residual tolerance.
+    setprecision(BigFloat, 256) do
+        T = BigFloat
+        delta = T("1e-50")
+        cone = SOCNT_SC.SOCone(3)
+        state = SOCNT_SC.SOCNTScaling{T}(3)
+        @test_throws DomainError SOCNT_SC.nt_scaling!(
+            cone, state, T[1, 1 - delta, 0], T[1, -1 + delta, 0],
+        )
+        @test !state.valid[1]
+    end
+    setprecision(BigFloat, 512) do
+        T = BigFloat
+        delta = T("1e-50")
+        cone = SOCNT_SC.SOCone(3)
+        state = SOCNT_SC.SOCNTScaling{T}(3)
+        s = T[1, 1 - delta, 0]
+        y = T[1, -1 + delta, 0]
+        SOCNT_SC.nt_scaling!(cone, state, s, y)
+        @test state.valid[1]
+        @test SOCNT_SC._soc_q_condition_reliable(state.w, 3)
+    end
+
+    setprecision(BigFloat, 256) do
+        T = BigFloat
+        cone = SOCNT_SC.SOCone(4)
+        state = SOCNT_SC.SOCNTScaling{T}(4)
+        radius = T(4) / T(5)
+        s = T[1, T(4) * radius / T(5), T(3) * radius / T(5), 0]
+        y = T[1, -T(3) * radius / T(5), T(4) * radius / T(5), 0]
+        mapped = zeros(T, 4)
+        SOCNT_SC.nt_scaling!(cone, state, s, y)
+        SOCNT_SC.theta_apply!(cone, mapped, state, y)
+        @test SOCNT_SC._soc_q_backward_close(mapped, state.w, y, s, 4)
+    end
+end
+
 @testset "pair-dependent SOC NT reference" begin
     _orthantnt_reference_case(Float64; rtol=2e-15, atol=2e-15)
     orthant = SOCNT_SC.NonnegativeCone(2)

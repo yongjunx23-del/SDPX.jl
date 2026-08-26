@@ -370,31 +370,56 @@ end
     state.valid[1] = false
     SymmetricCones._soc_strict_interior(cone, s) || return false
     SymmetricCones._soc_strict_interior(cone, y) || return false
+    SymmetricCones._soc_spectral_gap_reliable(s, cone.dim) || return false
+    SymmetricCones._soc_spectral_gap_reliable(y, cone.dim) || return false
 
     SymmetricCones.sqrt!(cone, state.tmp1, y)
-    SymmetricCones._soc_strict_interior(cone, state.tmp1) || return false
+    SymmetricCones.jordan_product!(cone, state.tmp3, state.tmp1, state.tmp1)
+    SymmetricCones._soc_jordan_backward_close(
+        state.tmp3, state.tmp1, state.tmp1, y, cone.dim,
+    ) || return false
     SymmetricCones.inverse!(cone, state.tmp2, state.tmp1)
+    SymmetricCones.jordan_product!(cone, state.tmp3, state.tmp1, state.tmp2)
+    SymmetricCones._soc_jordan_identity_backward_close(
+        state.tmp3, state.tmp1, state.tmp2, cone.dim,
+    ) || return false
     SymmetricCones.quadratic_apply!(cone, state.tmp3, state.tmp1, s)
     SymmetricCones._soc_strict_interior(cone, state.tmp3) || return false
+    SymmetricCones._soc_spectral_gap_reliable(state.tmp3, cone.dim) || return false
     SymmetricCones.sqrt!(cone, state.w, state.tmp3)
     SymmetricCones.quadratic_apply!(cone, state.w, state.tmp2, state.w)
     SymmetricCones._soc_strict_interior(cone, state.w) || return false
+    SymmetricCones._soc_spectral_gap_reliable(state.w, cone.dim) || return false
+    SymmetricCones._soc_q_condition_reliable(state.w, cone.dim) || return false
     SymmetricCones.inverse!(cone, state.winv, state.w)
     SymmetricCones.sqrt!(cone, state.root, state.w)
-    SymmetricCones._soc_strict_interior(cone, state.root) || return false
     SymmetricCones.inverse!(cone, state.rootinv, state.root)
+
+    SymmetricCones.jordan_product!(cone, state.tmp1, state.root, state.root)
+    SymmetricCones._soc_jordan_backward_close(
+        state.tmp1, state.root, state.root, state.w, cone.dim,
+    ) || return false
+    SymmetricCones.jordan_product!(cone, state.tmp2, state.w, state.winv)
+    SymmetricCones._soc_jordan_identity_backward_close(
+        state.tmp2, state.w, state.winv, cone.dim,
+    ) || return false
+    SymmetricCones.jordan_product!(cone, state.tmp3, state.root, state.rootinv)
+    SymmetricCones._soc_jordan_identity_backward_close(
+        state.tmp3, state.root, state.rootinv, cone.dim,
+    ) || return false
+
     SymmetricCones.quadratic_apply!(cone, state.lambda, state.root, y)
     SymmetricCones._soc_strict_interior(cone, state.lambda) || return false
     SymmetricCones.quadratic_apply!(cone, state.tmp1, state.w, y)
     SymmetricCones.quadratic_inverse_apply!(cone, state.tmp2, state.winv, s)
     SymmetricCones.quadratic_inverse_apply!(cone, state.tmp3, state.rootinv, s)
     (
-        SymmetricCones._soc_nt_close(state.tmp1, s, cone.dim) &&
-        SymmetricCones._soc_nt_close(state.tmp2, y, cone.dim) &&
-        SymmetricCones._soc_nt_close(state.tmp3, state.lambda, cone.dim)
+        SymmetricCones._soc_q_backward_close(state.tmp1, state.w, y, s, cone.dim) &&
+        SymmetricCones._soc_q_backward_close(state.tmp2, state.winv, s, y, cone.dim) &&
+        SymmetricCones._soc_q_backward_close(
+            state.tmp3, state.rootinv, s, state.lambda, cone.dim,
+        )
     ) || return false
-    SymmetricCones.quadratic_apply!(cone, state.tmp1, state.root, state.lambda)
-    SymmetricCones._soc_nt_close(state.tmp1, s, cone.dim) || return false
     state.valid[1] = true
     return true
 end

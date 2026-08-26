@@ -95,6 +95,79 @@ end
     return true
 end
 
+"""Map-aware backward gate for the frozen `Theta*(G*q)` round trip.
+
+The residual is measured against the arithmetic work of each block map, not
+against a cancellation-small `q`.  This is essential at cone-boundary
+solutions, where a forward/output-relative test rejects a backward-stable
+Lorentz or PSD map solely because its condition number is large.
+"""
+@inline function _product_hsd_roundtrip_backward_ok(
+    state::ProductConeHSDState{T},
+) where {T}
+    runtime = state.runtime
+    target = state.g_input
+
+    @inbounds for block in runtime.orthant
+        gamma = T(5) * eps(T) / (one(T) - T(5) * eps(T))
+        isfinite(gamma) || return false
+        for i in 1:block.dim
+            k = block.offset + i - 1
+            ti = target[k]
+            work = abs(block.state.theta[i] * block.input[i]) + abs(ti)
+            allowance = T(64) * gamma * work
+            isfinite(allowance) && abs(block.output[i] - ti) <= allowance ||
+                return false
+        end
+    end
+
+    @inbounds for block in runtime.soc
+        for i in 1:block.dim
+            block.direction[i] = target[block.offset + i - 1]
+        end
+        SymmetricCones._soc_q_condition_reliable(block.state.w, block.dim) ||
+            return false
+        SymmetricCones._soc_q_roundtrip_close(
+            block.output,
+            block.state.w,
+            block.direction,
+            block.dim,
+        ) || return false
+    end
+
+    @inbounds for block in runtime.psd
+        n = block.dim
+        for i in 1:block.len
+            block.direction[i] = target[block.offset + i - 1]
+        end
+        pnorm = zero(T)
+        pinvnorm = zero(T)
+        for i in 1:n
+            rowsum = zero(T)
+            invrowsum = zero(T)
+            for j in 1:n
+                rowsum += abs(block.state.P[i, j])
+                invrowsum += abs(block.state.Pinv[i, j])
+            end
+            pnorm = max(pnorm, rowsum)
+            pinvnorm = max(pinvnorm, invrowsum)
+        end
+        qnorm = zero(T)
+        residual = zero(T)
+        for i in 1:block.len
+            qnorm = max(qnorm, abs(block.direction[i]))
+            residual = max(residual, abs(block.output[i] - block.direction[i]))
+        end
+        gamma = T(2n + 8) * eps(T) / (one(T) - T(2n + 8) * eps(T))
+        condition_bound = pnorm * pinvnorm
+        budget = T(64) * gamma * condition_bound * condition_bound
+        isfinite(budget) && budget < one(T) / T(100) ||
+            return false
+        residual <= budget * qnorm || return false
+    end
+    return true
+end
+
 """
 Assemble `H=Ar'GAr` and the shared homogeneous border without materialising
 the global `m x m` operator `G`.  Each reduced column and `b` are passed
@@ -165,8 +238,16 @@ end
 end
 
 """
-Recover the full Newton direction from `(dx,dtau)` using exactly
-`dy=G(A dx+h+rP-b dtau)` and `ds=h-Theta dy`.
+Recover the full Newton direction from `(dx,dtau)`.
+
+Let `q=A*dx+h+rP-b*dtau`.  The eliminated equations give `dy=G*q` and the
+algebraically equivalent primal recovery
+`ds=h-q=-A*dx-rP+b*dtau`.  The latter avoids feeding the round-trip error of
+`Theta*(G*q)` back into the primal Newton equation when a cone map is strongly
+conditioned.  To preserve the established Float64 trajectory, the ordinary
+round-trip formula is retained for binary64.  Wider arithmetic uses the stable
+formula only after a condition-aware backward gate validates the composed
+`Theta*G` map.
 """
 @inline function _product_hsd_recover!(state::ProductConeHSDState{T}) where {T}
     base = state.base
@@ -184,8 +265,31 @@ Recover the full Newton direction from `(dx,dtau)` using exactly
     end
     apply_G!(state.runtime, base.dy, state.g_input)
     apply_Theta!(state.runtime, base.e, base.dy)
-    @inbounds for k in 1:base.m
-        base.ds[k] = state.h[k] - base.e[k]
+
+    # Keep the historical binary64 path bit-for-bit.  Wider arithmetic uses
+    # the algebraically exact primal recovery throughout; delaying the switch
+    # until the terminal boundary creates an avoidable trajectory discontinuity.
+    if T === Float64
+        @inbounds for k in 1:base.m
+            base.ds[k] = state.h[k] - base.e[k]
+        end
+    else
+        _product_hsd_roundtrip_backward_ok(state) || return false
+        @inbounds for k in 1:base.m
+            base.ds[k] = -base.ax[k] - base.rP[k] + base.b[k] * base.dtau
+        end
+
+        # Independent primal Newton residual gate for the stable recovery.
+        gamma = T(6) * eps(T) / (one(T) - T(6) * eps(T))
+        isfinite(gamma) || return false
+        @inbounds for k in 1:base.m
+            residual = base.ax[k] + base.ds[k] - base.b[k] * base.dtau + base.rP[k]
+            work = abs(base.ax[k]) + abs(base.ds[k]) +
+                   abs(base.b[k] * base.dtau) + abs(base.rP[k])
+            allowance = T(64) * gamma * work
+            isfinite(residual) && isfinite(allowance) &&
+                abs(residual) <= allowance || return false
+        end
     end
     cd = zero(T)
     bd = zero(T)
@@ -196,7 +300,7 @@ Recover the full Newton direction from `(dx,dtau)` using exactly
         bd += base.b[k] * base.dy[k]
     end
     base.dkappa = -base.rG + cd + bd
-    return nothing
+    return isfinite(base.dkappa)
 end
 
 @inline function _product_hsd_solve_shift!(
@@ -212,7 +316,7 @@ end
     border_ok || return false
     base.dtau = dtau
     _hsd_scatter_dx!(base)
-    _product_hsd_recover!(state)
+    _product_hsd_recover!(state) || return false
     return _hsd_direction_finite(base)
 end
 

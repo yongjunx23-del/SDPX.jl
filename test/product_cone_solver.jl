@@ -421,9 +421,8 @@ end
         end
     end
 
-    # BigFloat256 at 1e-8 is a smoke test only, not a high-precision
-    # convergence gate.  The following default-1e-14 test records the current
-    # condition-insensitive NT orientation limitation explicitly.
+    # BigFloat256 smoke matrix plus a strict boundary-optimum SOC certificate.
+    # The latter used to stop at the condition-insensitive NT orientation gate.
     setprecision(BigFloat, 256) do
         for specs in smoke_specs
             program = _pcs_fixture(BigFloat, specs, :optimal)
@@ -438,11 +437,61 @@ end
         default_result = SDPX.product_hsd_solve!(
             SDPX.ProductConeHSDState(default_program); max_iterations=100,
         )
-        @test default_result.status === SDPX.ProductHSDBreakdown
-        @test default_result.reason === SDPX.ProductHSDLineSearchBreakdown
-        @test all(isfinite, default_result.hsd_x)
-        @test all(isfinite, default_result.hsd_s)
-        @test all(isfinite, default_result.hsd_y)
+        @test default_result.status === SDPX.ProductHSDOptimal
+        @test _pcs_reverify(
+            default_program, default_result;
+            tol=SDPX.default_certificate_tol(BigFloat),
+        )
+
+        strict_program = _pcs_program(
+            BigFloat,
+            [(:soc, 3)],
+            reshape(BigFloat[-1, 1, 0], 3, 1),
+            BigFloat[1, 1, 0],
+            BigFloat[2],
+        )
+        strict_result = SDPX.product_hsd_solve!(
+            SDPX.ProductConeHSDState(strict_program);
+            max_iterations=100, tol=big"1e-30",
+        )
+        @test strict_result.status === SDPX.ProductHSDOptimal
+        @test _pcs_reverify(strict_program, strict_result; tol=big"1e-30")
+        @test abs(strict_result.x[1]) < big"1e-30"
+
+        second_program = _pcs_program(
+            BigFloat,
+            [(:soc, 3)],
+            reshape(BigFloat[-1, 0, 0], 3, 1),
+            BigFloat[0, 1, 0],
+            BigFloat[1],
+        )
+        second_result = SDPX.product_hsd_solve!(
+            SDPX.ProductConeHSDState(second_program);
+            max_iterations=100, tol=big"1e-30",
+        )
+        @test second_result.status === SDPX.ProductHSDOptimal
+        @test _pcs_reverify(second_program, second_result; tol=big"1e-30")
+        @test abs(second_result.x[1] - 1) < big"1e-28"
+    end
+
+    for (bits, tolerance_text) in ((512, "1e-51"), (1024, "1e-102"))
+        setprecision(BigFloat, bits) do
+            tolerance = BigFloat(tolerance_text)
+            program = _pcs_program(
+                BigFloat,
+                [(:soc, 3)],
+                reshape(BigFloat[-1, 0, 0], 3, 1),
+                BigFloat[0, 1, 0],
+                BigFloat[1],
+            )
+            result = SDPX.product_hsd_solve!(
+                SDPX.ProductConeHSDState(program);
+                max_iterations=150, tol=tolerance,
+            )
+            @test result.status === SDPX.ProductHSDOptimal
+            @test _pcs_reverify(program, result; tol=tolerance)
+            @test abs(result.x[1] - 1) < sqrt(tolerance)
+        end
     end
 end
 

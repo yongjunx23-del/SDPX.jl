@@ -645,12 +645,29 @@ end
     expected::AbstractVector{T},
     supplied::AbstractVector{T},
     tolerance::T,
+    scale_hint::T=one(T),
 ) where {T}
     length(expected) == length(supplied) || return false
     _hsd_eq_all_finite(expected) && _hsd_eq_all_finite(supplied) || return false
     residual = expected - supplied
-    scale = max(one(T), _hsd_eq_maxabs(expected), _hsd_eq_maxabs(supplied))
+    isfinite(scale_hint) && scale_hint >= one(T) || return false
+    scale = max(
+        one(T), scale_hint,
+        _hsd_eq_maxabs(expected), _hsd_eq_maxabs(supplied),
+    )
     return _hsd_eq_maxabs(residual) <= tolerance * scale
+end
+
+@inline function _hsd_eq_source_data_scale(
+    canonical::CanonicalConicProgram{T},
+) where {T}
+    # Match the normalization used by `hsd_normalized_residual`: a product
+    # certificate accepted at tolerance `tol` must not be rejected merely
+    # because source recovery silently switches back to an unscaled absolute
+    # primal-residual test.
+    return opnorm(canonical.A, Inf) +
+           _hsd_eq_maxabs(canonical.b) +
+           _hsd_eq_maxabs(canonical.c) + one(T)
 end
 
 """
@@ -692,7 +709,9 @@ function hsd_recover_optimal_source!(
     primal_forward!(
         reduced, expected_x, expected_s, x_canonical, s_canonical,
     )
-    _hsd_eq_source_match(expected_s, s_source, tolerance) || return false
+    source_scale = _hsd_eq_source_data_scale(reduced)
+    _hsd_eq_source_match(expected_s, s_source, tolerance, source_scale) ||
+        return false
     y_canonical = zeros(T, length(y_source))
     dual_backward!(reduced, y_canonical, y_source)
     return hsd_recover_optimal!(
@@ -744,7 +763,9 @@ function hsd_recover_dual_ray_source!(
     primal_forward!(
         reduced, expected_x, expected_s, x_canonical, s_canonical,
     )
-    _hsd_eq_source_match(expected_s, s_source, tolerance) || return false
+    source_scale = _hsd_eq_source_data_scale(reduced)
+    _hsd_eq_source_match(expected_s, s_source, tolerance, source_scale) ||
+        return false
     return hsd_recover_dual_ray!(
         x_full, s_full, reduction, x_canonical, s_canonical; tol=tolerance,
     )

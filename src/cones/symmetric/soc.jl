@@ -118,8 +118,15 @@ function sqrt!(cone::SOCone, z::AbstractVector, x::AbstractVector)
     s1 = sqrt(max(l1, zero(T)))
     s2 = sqrt(max(l2, zero(T)))
     z[1] = (s1 + s2) / two
-    inv2r = one(T) / (two * r)
-    f = (s1 - s2) * inv2r
+    # Rationalize `s1-s2` in wider arithmetic: the direct subtraction loses
+    # relative accuracy for a small nonzero tail even when the element is far
+    # from the boundary.  Preserve the established binary64 trajectory, whose
+    # public certificate baselines are intentionally bit-stable.
+    f = if T === Float64
+        (s1 - s2) / (two * r)
+    else
+        one(T) / (s1 + s2)
+    end
     @inbounds for i in 2:cone.dim
         z[i] = f * x[i]
     end
@@ -148,20 +155,203 @@ end
     return t > zero(T) && det > zero(T) && isfinite(det)
 end
 
-@inline function _soc_nt_close(a::AbstractVector{T}, b::AbstractVector, n::Int) where {T}
-    residual = zero(T)
-    scale = one(T)
-    @inbounds for i in 1:n
-        ai = T(a[i])
-        bi = T(b[i])
-        ri = abs(ai - bi)
-        residual = ri > residual ? ri : residual
-        aa = abs(ai)
-        ab = abs(bi)
-        scale = aa > scale ? aa : scale
-        scale = ab > scale ? ab : scale
+@inline function _soc_roundoff_gamma(::Type{T}, operations::Int) where {T}
+    u = eps(T)
+    ku = T(operations) * u
+    isfinite(ku) && ku < one(T) || return T(Inf)
+    return ku / (one(T) - ku)
+end
+
+"""Whether the quadratic map is still reliable at the working precision.
+
+For a Lorentz element `w`, the spectral condition of `Q_w` is
+`((w0 + norm(wtail)) / (w0 - norm(wtail)))^2`.  A backward-stable map is not
+useful once that condition amplifies its roundoff to an ordinary inexact
+Newton forcing term.  The one-percent cap is deliberately independent of a
+requested certificate tolerance: crossing it fails closed and asks for more
+working precision.
+"""
+@inline function _soc_q_condition_reliable(w::AbstractVector{T}, n::Int) where {T}
+    w0 = T(w[1])
+    tail2 = zero(T)
+    @inbounds for i in 2:n
+        wi = T(w[i])
+        isfinite(wi) || return false
+        tail2 += wi * wi
     end
-    return residual <= eps(T) * scale * T(2000 * n)
+    r = sqrt(tail2)
+    lambda_plus = w0 + r
+    # Form the determinant as a product of spectral factors.  Dividing it by
+    # lambda_plus gives the small factor without a second independent
+    # cancellation formula.
+    determinant = (w0 - r) * lambda_plus
+    lambda_minus = determinant / lambda_plus
+    isfinite(lambda_plus) && isfinite(lambda_minus) &&
+        lambda_plus > zero(T) && lambda_minus > zero(T) || return false
+    ratio = lambda_plus / lambda_minus
+    kappa_theta = ratio * ratio
+    gamma = _soc_roundoff_gamma(T, 3n + 12)
+    budget = T(64) * gamma * kappa_theta
+    return isfinite(budget) && budget < one(T) / T(100)
+end
+
+"""Reject a strict-interior spectral gap that is unresolved in type `T`."""
+@inline function _soc_spectral_gap_reliable(x::AbstractVector{T}, n::Int) where {T}
+    t = T(x[1])
+    tail2 = zero(T)
+    @inbounds for i in 2:n
+        xi = T(x[i])
+        isfinite(xi) || return false
+        tail2 += xi * xi
+    end
+    r = sqrt(tail2)
+    gap = t - r
+    scale = abs(t) + r
+    gamma = _soc_roundoff_gamma(T, n + 4)
+    return isfinite(gap) && gap > T(64) * gamma * scale
+end
+
+"""Backward-error gate for one evaluated Lorentz quadratic map.
+
+Using `J=diag(1,-I)`, `Q_w z = 2w(w'z) - det(w)Jz`.  Comparing its forward
+residual only with the (possibly tiny) output is invalid near the boundary:
+large, individually accurate terms may cancel.  This gate instead bounds the
+residual by the absolute work of the map, including the cancelled determinant
+and dot-product reductions.  A separate spectral-condition gate above limits
+how much that backward error may be amplified.
+"""
+@inline function _soc_q_backward_close(
+    computed::AbstractVector{T},
+    w::AbstractVector,
+    z::AbstractVector,
+    target::AbstractVector,
+    n::Int,
+) where {T}
+    length(computed) == length(w) == length(z) == length(target) == n ||
+        throw(DimensionMismatch())
+    w0 = T(w[1])
+    dot_work = abs(w0 * T(z[1]))
+    tail2 = zero(T)
+    @inbounds for i in 2:n
+        wi = T(w[i])
+        zi = T(z[i])
+        isfinite(wi) && isfinite(zi) || return false
+        dot_work += abs(wi * zi)
+        tail2 += wi * wi
+    end
+    r = sqrt(tail2)
+    determinant = (w0 - r) * (w0 + r)
+    determinant_scale = abs(w0 * w0) + tail2
+    gamma_dot = _soc_roundoff_gamma(T, n + 2)
+    gamma_map = _soc_roundoff_gamma(T, 3n + 12)
+    isfinite(determinant) && isfinite(dot_work) && isfinite(gamma_map) ||
+        return false
+    two = one(T) + one(T)
+    @inbounds for i in 1:n
+        ci = T(computed[i])
+        ti = T(target[i])
+        wi = abs(T(w[i]))
+        zi = abs(T(z[i]))
+        isfinite(ci) && isfinite(ti) || return false
+        map_work = two * wi * dot_work + abs(determinant) * zi + abs(ti)
+        reduction_error = gamma_dot * (
+            two * wi * dot_work + determinant_scale * zi
+        )
+        allowance = T(64) * (gamma_map * map_work + reduction_error)
+        isfinite(allowance) && abs(ci - ti) <= allowance || return false
+    end
+    return true
+end
+
+"""Condition-aware gate for the composed `Q_w(Q_winv(q))` round trip.
+
+Unlike a single-map backward check, the first map's rounding error is amplified
+by the condition number of `Q_w`.  The same one-percent reliability budget used
+when freezing the scaling therefore bounds the composed forward residual.
+"""
+@inline function _soc_q_roundtrip_close(
+    computed::AbstractVector{T},
+    w::AbstractVector,
+    q::AbstractVector,
+    n::Int,
+) where {T}
+    length(computed) == length(w) == length(q) == n || throw(DimensionMismatch())
+    w0 = T(w[1])
+    tail2 = zero(T)
+    qnorm = zero(T)
+    residual = zero(T)
+    @inbounds for i in 1:n
+        qi = T(q[i])
+        ci = T(computed[i])
+        isfinite(qi) && isfinite(ci) || return false
+        qnorm = max(qnorm, abs(qi))
+        residual = max(residual, abs(ci - qi))
+        if i > 1
+            wi = T(w[i])
+            isfinite(wi) || return false
+            tail2 += wi * wi
+        end
+    end
+    r = sqrt(tail2)
+    lambda_plus = w0 + r
+    determinant = (w0 - r) * lambda_plus
+    lambda_minus = determinant / lambda_plus
+    isfinite(lambda_plus) && isfinite(lambda_minus) &&
+        lambda_plus > zero(T) && lambda_minus > zero(T) || return false
+    ratio = lambda_plus / lambda_minus
+    kappa_theta = ratio * ratio
+    gamma = _soc_roundoff_gamma(T, 6n + 24)
+    budget = T(64) * gamma * kappa_theta
+    isfinite(budget) && budget < one(T) / T(100) || return false
+    return residual <= budget * qnorm
+end
+
+@inline function _soc_jordan_backward_close(
+    computed::AbstractVector{T},
+    x::AbstractVector,
+    y::AbstractVector,
+    target::AbstractVector,
+    n::Int,
+) where {T}
+    gamma = _soc_roundoff_gamma(T, n + 4)
+    head_work = zero(T)
+    @inbounds for i in 1:n
+        head_work += abs(T(x[i]) * T(y[i]))
+    end
+    @inbounds for i in 1:n
+        target_i = T(target[i])
+        work = if i == 1
+            head_work
+        else
+            abs(T(x[1]) * T(y[i])) + abs(T(y[1]) * T(x[i]))
+        end
+        allowance = T(64) * gamma * (work + abs(target_i))
+        isfinite(allowance) &&
+            abs(T(computed[i]) - target_i) <= allowance || return false
+    end
+    return true
+end
+
+@inline function _soc_jordan_identity_backward_close(
+    computed::AbstractVector{T}, x::AbstractVector, y::AbstractVector, n::Int,
+) where {T}
+    gamma = _soc_roundoff_gamma(T, n + 4)
+    head_work = zero(T)
+    @inbounds for i in 1:n
+        head_work += abs(T(x[i]) * T(y[i]))
+    end
+    @inbounds for i in 1:n
+        target_i = i == 1 ? one(T) : zero(T)
+        work = if i == 1
+            head_work
+        else
+            abs(T(x[1]) * T(y[i])) + abs(T(y[1]) * T(x[i]))
+        end
+        allowance = T(64) * gamma * (work + abs(target_i))
+        isfinite(allowance) &&
+            abs(T(computed[i]) - target_i) <= allowance || return false
+    end
+    return true
 end
 
 """
@@ -227,19 +417,48 @@ function nt_scaling!(
         throw(DomainError(s, "SOC primal NT point must be finite and strictly interior"))
     _soc_strict_interior(cone, y) ||
         throw(DomainError(y, "SOC dual NT point must be finite and strictly interior"))
+    _soc_spectral_gap_reliable(s, cone.dim) ||
+        throw(DomainError(s, "SOC primal NT spectral gap is unresolved at the working precision"))
+    _soc_spectral_gap_reliable(y, cone.dim) ||
+        throw(DomainError(y, "SOC dual NT spectral gap is unresolved at the working precision"))
 
     sqrt!(cone, state.tmp1, y)                         # y^(1/2)
+    jordan_product!(cone, state.tmp3, state.tmp1, state.tmp1)
+    _soc_jordan_backward_close(state.tmp3, state.tmp1, state.tmp1, y, cone.dim) ||
+        throw(DomainError(y, "SOC dual square root failed its backward-error gate"))
     inverse!(cone, state.tmp2, state.tmp1)             # y^(-1/2)
+    jordan_product!(cone, state.tmp3, state.tmp1, state.tmp2)
+    _soc_jordan_identity_backward_close(state.tmp3, state.tmp1, state.tmp2, cone.dim) ||
+        throw(DomainError(y, "SOC dual square-root inverse failed its backward-error gate"))
     quadratic_apply!(cone, state.tmp3, state.tmp1, s)  # Q_yhalf(s)
     _soc_strict_interior(cone, state.tmp3) ||
         throw(DomainError(state.tmp3, "SOC NT geometric mean left the interior"))
+    _soc_spectral_gap_reliable(state.tmp3, cone.dim) ||
+        throw(DomainError(state.tmp3, "SOC NT geometric-mean spectral gap is unresolved at the working precision"))
     sqrt!(cone, state.w, state.tmp3)
     quadratic_apply!(cone, state.w, state.tmp2, state.w)
     _soc_strict_interior(cone, state.w) ||
         throw(DomainError(state.w, "SOC NT scaling point is not strictly interior"))
+    _soc_spectral_gap_reliable(state.w, cone.dim) ||
+        throw(DomainError(state.w, "SOC NT scaling spectral gap is unresolved at the working precision"))
+    _soc_q_condition_reliable(state.w, cone.dim) ||
+        throw(DomainError(state.w, "SOC NT quadratic map is too ill-conditioned at the working precision"))
     inverse!(cone, state.winv, state.w)
     sqrt!(cone, state.root, state.w)
     inverse!(cone, state.rootinv, state.root)
+
+    # Validate the spectral primitive chain with backward errors measured
+    # against the arithmetic work, never against a cancellation-small output.
+    jordan_product!(cone, state.tmp1, state.root, state.root)
+    _soc_jordan_backward_close(state.tmp1, state.root, state.root, state.w, cone.dim) ||
+        throw(DomainError(state.root, "SOC NT square root failed its backward-error gate"))
+    jordan_product!(cone, state.tmp2, state.w, state.winv)
+    _soc_jordan_identity_backward_close(state.tmp2, state.w, state.winv, cone.dim) ||
+        throw(DomainError(state.winv, "SOC NT inverse failed its backward-error gate"))
+    jordan_product!(cone, state.tmp3, state.root, state.rootinv)
+    _soc_jordan_identity_backward_close(state.tmp3, state.root, state.rootinv, cone.dim) ||
+        throw(DomainError(state.rootinv, "SOC NT square-root inverse failed its backward-error gate"))
+
     quadratic_apply!(cone, state.lambda, state.root, y)
     _soc_strict_interior(cone, state.lambda) ||
         throw(DomainError(state.lambda, "SOC scaled lambda is not strictly interior"))
@@ -247,13 +466,10 @@ function nt_scaling!(
     quadratic_inverse_apply!(cone, state.tmp2, state.winv, s)
     quadratic_inverse_apply!(cone, state.tmp3, state.rootinv, s)
     (
-        _soc_nt_close(state.tmp1, s, cone.dim) &&
-        _soc_nt_close(state.tmp2, y, cone.dim) &&
-        _soc_nt_close(state.tmp3, state.lambda, cone.dim)
+        _soc_q_backward_close(state.tmp1, state.w, y, s, cone.dim) &&
+        _soc_q_backward_close(state.tmp2, state.winv, s, y, cone.dim) &&
+        _soc_q_backward_close(state.tmp3, state.rootinv, s, state.lambda, cone.dim)
     ) || throw(DomainError(state.w, "SOC NT orientation residual exceeded tolerance"))
-    quadratic_apply!(cone, state.tmp1, state.root, state.lambda)
-    _soc_nt_close(state.tmp1, s, cone.dim) ||
-        throw(DomainError(state.root, "SOC NT square-root residual exceeded tolerance"))
     state.valid[1] = true
     return state
 end
