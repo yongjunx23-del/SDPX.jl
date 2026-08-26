@@ -957,8 +957,13 @@ function _selection_fingerprint(catalog, spec, arithmetic)
 end
 
 function _declared_build_only(spec)
-    return :build_only in spec.tags &&
-           spec.reference.status in (:build_only, :sampled_build_only)
+    :build_only in spec.tags || return false
+    spec.reference.status in (:build_only, :sampled_build_only) ||
+        throw(ArgumentError(
+            "benchmark $(spec.id) is tagged :build_only but declares " *
+            "reference status $(spec.reference.status)",
+        ))
+    return true
 end
 
 function _skip_row(catalog, spec, suite, arithmetic, provider, reason)
