@@ -163,13 +163,21 @@ function _pch_dense_theta(state::SDPX.ProductConeHSDState{T}) where {T}
     return Theta
 end
 
-function _pch_identity(::Type{T}, layout) where {T}
+"""
+Independent central target `-∇F(e)` in canonical dot coordinates.
+
+For the Lorentz barrier `F(t,u)=-log(t^2-‖u‖^2)`, `ν_Q=2` and
+`-∇F(e)=2e`.  Orthant and PSD/svec blocks have the usual identity target.
+Thus `dot(e, target) == ν` for every block, including an RSOC after its
+orthogonal canonical map to SOC.
+"""
+function _pch_central_target(::Type{T}, layout) where {T}
     e = zeros(T, layout.dimension)
     for block in SDPX.layout_blocks(layout)
         if block.cone === :nonnegative
             e[block.offset:block.offset + block.length - 1] .= one(T)
         elseif block.cone === :soc
-            e[block.offset] = one(T)
+            e[block.offset] = T(2)
         elseif block.cone === :psd
             @inbounds for j in 1:block.dimension
                 # packed-lower column-major diagonal index
@@ -178,6 +186,15 @@ function _pch_identity(::Type{T}, layout) where {T}
                 e[idx] = one(T)
             end
         end
+    end
+    return e
+end
+
+
+function _pch_jordan_identity(::Type{T}, layout) where {T}
+    e = _pch_central_target(T, layout)
+    for block in SDPX.layout_blocks(layout)
+        block.cone === :soc && (e[block.offset] /= T(2))
     end
     return e
 end
@@ -310,6 +327,36 @@ const PCH_CASES = (
     ("LP+SOC+PSD", [(:nonnegative, 2), (:soc, 3), (:psd, 2)]),
 )
 
+@testset "product HSD barrier-metric central target" begin
+    mu = 3.0 / 7.0
+    for (label, specs) in PCH_CASES
+        @testset "$label" begin
+            layout = _pch_layout(Float64, specs)
+            e = _pch_jordan_identity(Float64, layout)
+            minus_gradient = _pch_central_target(Float64, layout)
+            nu = SDPX.layout_barrier_degree(layout)
+            # With SDPX's ordinary coordinate dot (and svec for PSD), the
+            # barrier-gradient target contributes exactly nu*mu.
+            @test dot(e, minus_gradient) ≈ nu atol=2e-14
+            tau = 1.0
+            kappa = mu
+            y = mu .* minus_gradient
+            @test (dot(e, y) + tau * kappa) / (nu + 1) ≈ mu atol=2e-14
+        end
+    end
+
+    # The exact RSOC -> SOC canonicalization is orthogonal.  It therefore
+    # transports the raw rotated-cone identity and its `-∇F=2e` target to
+    # the same canonical Lorentz target without changing the dot pairing.
+    M = SDPX._rsoc_to_soc_map(Float64, 3, 53)
+    e_soc = [1.0, 0.0, 0.0]
+    e_rsoc = M * e_soc
+    minus_gradient_rsoc = 2.0 .* e_rsoc
+    @test transpose(M) * M ≈ Matrix{Float64}(I, 3, 3) atol=2e-15
+    @test M * minus_gradient_rsoc ≈ [2.0, 0.0, 0.0] atol=2e-15
+    @test dot(e_rsoc, minus_gradient_rsoc) ≈ 2.0 atol=2e-15
+end
+
 @testset "native product HSD independent full-Newton directions" begin
     for (label, specs) in PCH_CASES
         @testset "$label" begin
@@ -363,7 +410,7 @@ const PCH_CASES = (
             sigma = min(ratio^3, 1.0)
             ds_hat = R \ base.ds_a
             dy_hat = R * base.dy_a
-            rc = sigma * mu0 .* _pch_identity(Float64, layout) .-
+            rc = sigma * mu0 .* _pch_central_target(Float64, layout) .-
                  _pch_jordan(layout, lambda, lambda) .-
                  _pch_jordan(layout, ds_hat, dy_hat)
             h = R * (Llambda \ rc)

@@ -245,6 +245,45 @@ end
     return base.mu_aff
 end
 
+"""
+Build the metric-consistent symmetric-cone corrector shift.
+
+Canonical SOC coordinates use the ordinary Euclidean pairing, while the
+Lorentz barrier `-log(t^2-‖u‖^2)` has degree two and
+`-∇F(e) = 2e`.  Its central target is consequently `2σμe`; orthant and
+PSD/svec blocks retain `σμe`.  This block weighting is what makes
+`dot(s,y) = νμ` at a product-cone central point and is preserved by the
+orthogonal RSOC-to-SOC canonical map.
+
+All operands use state-owned product-runtime scratch.  In particular, this
+does not materialise a product-cone matrix or allocate a block view.
+"""
+@inline function _product_hsd_corrector_shift!(
+    state::ProductConeHSDState{T}, sigma_mu::T,
+) where {T}
+    runtime = state.runtime
+    base = state.base
+
+    apply_Rinv!(runtime, state.ds_hat, base.ds_a)
+    apply_R!(runtime, state.dy_hat, base.dy_a)
+    product_jordan!(runtime, state.h, state.ds_hat, state.dy_hat)
+
+    # g_input = lambda, g_output = lambda∘lambda, gb = -∇F(e).
+    apply_R!(runtime, state.g_input, base.y)
+    product_jordan!(runtime, state.g_output, state.g_input, state.g_input)
+    product_identity!(runtime, state.gb)
+    @inbounds for block in runtime.soc
+        state.gb[block.offset] += state.gb[block.offset]
+    end
+    @inbounds for k in 1:base.m
+        state.g_input[k] = sigma_mu * state.gb[k] -
+                           state.g_output[k] - state.h[k]
+    end
+    product_solve_Llambda!(runtime, state.g_output, state.g_input)
+    apply_R!(runtime, state.h, state.g_output)
+    return state.h
+end
+
 """Predictor/corrector directions sharing the current Schur factor."""
 @inline function _product_hsd_direction!(
     state::ProductConeHSDState{T}, border_scalar::T,
@@ -268,15 +307,7 @@ end
     sigma > one(T) && (sigma = one(T))
     sigma_mu = sigma * base.mu
 
-    symmetric_corrector_shift!(
-        state.runtime,
-        state.h,
-        state.ds_hat,
-        state.dy_hat,
-        base.ds_a,
-        base.dy_a,
-        sigma_mu,
-    )
+    _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
     return _product_hsd_solve_shift!(state, border_scalar, corrector_scalar)
