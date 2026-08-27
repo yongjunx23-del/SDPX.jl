@@ -102,8 +102,12 @@ function _target_sector(::Type{T}, degree::Int, dimension::Int, bound::T) where 
     identity = _identity(T, dimension)
     coefficients[1] .= bound .* identity
     coefficients[end] .+= identity
-    variable = [_zero_matrix(T, dimension) for _ in 0:degree]
-    variable[1] .= -identity
+    # The decision variable only contributes to the constant coefficient.
+    # Keep its polynomial representation at that degree instead of padding
+    # with zero matrices through `degree`: PMP2SDP's basis conversion uses
+    # the supplied coefficient extent when allocating monomial output, so
+    # padded trailing zeros can make a sparse variable index past that output.
+    variable = [-identity]
     return coefficients, [variable]
 end
 
