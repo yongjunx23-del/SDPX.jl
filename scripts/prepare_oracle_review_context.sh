@@ -17,6 +17,17 @@ CANDIDATE_SHA="$(git rev-parse HEAD)"
 CANDIDATE_TREE="$(git rev-parse HEAD^{tree})"
 BASE_TREE="$(git rev-parse "${BASE_SHA}^{tree}")"
 
+if ! UPSTREAM="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
+  echo "candidate branch has no GitHub upstream; push it before oracle review" >&2
+  exit 1
+fi
+REMOTE_SHA="$(git rev-parse '@{u}')"
+REMOTE_URL="$(git remote get-url "${UPSTREAM%%/*}")"
+if [ "$REMOTE_SHA" != "$CANDIDATE_SHA" ]; then
+  echo "candidate is not pushed: local=$CANDIDATE_SHA upstream=$REMOTE_SHA ($UPSTREAM)" >&2
+  exit 1
+fi
+
 if ! git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"; then
   echo "base SHA is not an ancestor of candidate: $BASE_SHA -> $CANDIDATE_SHA" >&2
   exit 1
@@ -55,6 +66,9 @@ mkdir -p "$(dirname "$OUTPUT")"
   echo "- Candidate SHA: \`$CANDIDATE_SHA\`"
   echo "- Candidate tree: \`$CANDIDATE_TREE\`"
   echo "- Branch: \`$(git branch --show-current)\`"
+  echo "- GitHub upstream: \`$UPSTREAM\`"
+  echo "- GitHub remote URL: \`$REMOTE_URL\`"
+  echo "- Upstream SHA: \`$REMOTE_SHA\`"
   echo "- Worktree clean before context generation: yes"
   echo "- Text diff bytes: \`$DIFF_BYTES\`"
   echo

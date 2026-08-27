@@ -56,6 +56,7 @@ tmp/
 # Generated pi-oracle review inputs/receipts. Templates under .pi/ remain tracked.
 .pi/oracle-review-context.md
 .pi/oracle-review-receipt.json
+.pi/WAVE.yaml
 core
 /core.*
 LocalPreferences.toml
