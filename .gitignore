@@ -59,6 +59,8 @@ tmp/
 .pi/oracle-tree-manifest
 .pi/oracle-review-receipt.json
 .pi/oracle-receipts/
+.pi/oracle-archive/
+.pi/oracle-archive-manifest
 .pi/WAVE.yaml
 core
 /core.*
