@@ -7,7 +7,7 @@
 > 来源：用户整体计划（wholeplan，2026-08-28）+ GPT Pro 重构审阅与成熟度审计，
 > 由 Lead Agent 审阅采纳并标注当前进度。
 
-最后更新：2026-08-28（P1.5 稳定化 + 清理审阅合并后）
+最后更新：2026-08-28（Wave B/C/D/E/F 全部落地；Phase 0 缺口清零）
 
 ## 进度快照（与本计划 Phase 对照）
 
@@ -17,8 +17,8 @@
 | Phase 1 transforms 接管 | 🔄 ~70% | P1 additive + integration 已落地（单一层级、生产 Nonpositive/RSOC 接线、栈危险已修）；剩余：`::Any` 收编、变维 reduction、栈 objective 组合、PSD metric |
 | Phase 2 NewtonSystem | 🔄 ~50% | P2 已实现 NewtonSystem/NewtonRHS/expanded 会话/KKT 冷启动；剩余：spec 文档 + Python/BigFloat oracle + 手工 fixture 形式化 |
 | Phase 3 dense expanded KKT | 🔄 ~50% | expanded_quasidefinite.jl + 正则化/精化已在（P2）；剩余：惯性检查、动态 pivot 正则化、零分配验证 |
-| Phase 4 equilibration/预解/等式/冷启动 | ⏳ 未开始（KKT 冷启动已由 P2 提前落地） |
-| Phase 5 统一 HSD 状态机 | ⏳ 未开始 |
+| Phase 4 equilibration/预解/等式/冷启动 | 🔄 ~80%（equilibration/预解/策略 prepared；接线默认路径待大模型验证；KKT 冷启动已落地） |
+| Phase 5 统一 HSD 状态机 | ⏳ 未开始（门项：:expanded 简单模型 iteration-0 缺陷） |
 | Phase 6 sparse / Phase 7 多精度 / Phase 8 assembly+fixq3 | ⏳ v0.8 |
 | Phase 9 API / Phase 10 legacy 删除 | ⏳ v0.9 |
 | **v1.0** | 完成态 = Phase 0–10 全部 + 发布门 |
@@ -925,6 +925,12 @@ mixed free/equality/PSD      → 默认保留在 expanded KKT
 7–12 天。
 
 ---
+
+> **Wave F 评估结论（2026-08-28）**：:bordered 保持默认；equilibration 保持
+> opt-in（小探针条件数恶化：2.88→4.42、5.34→21.90）。**新增 Phase 5 门项**：
+> :expanded 在简单模型（LP/SOCP/Matrix）上 iteration-0 breakdown——统一 HSD
+> 迁移必须让 expanded 路由同时覆盖简单模型，不得只在缺口模型上工作。
+> 数据与决策记录：test/wave_f_defaults.jl。
 
 ### Phase 5 — 迁移并重写唯一 HSD 状态机
 
