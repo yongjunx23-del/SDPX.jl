@@ -44,6 +44,12 @@ end
     @test SDPX.solve_expanded!(solution, session, rhs)
     @test SDPX.refine_expanded!(solution, session, rhs)
     @test session.status == SDPX.EXPANDED_KKT_UNREGULARIZED_CERTIFIED
+    @test session.backward_error <= session.backward_target
+    @test session.unregularized_residual_norm <=
+          session.backward_target * (
+              SDPX._expanded_operator_scale(session.unregularized) *
+              max(norm(solution, Inf), 1.0) + max(norm(rhs, Inf), 1.0)
+          )
     direction = SDPX.recover_expanded_direction(system, solution)
     residual = SDPX.NewtonResidual(system)
     SDPX.newton_residual!(residual, system, direction)
@@ -134,20 +140,65 @@ end
     )
 end
 
-@testset "expanded generic precision fallback" begin
+@testset "expanded unregularized refinement contract" begin
+    system, _ = expanded_fixture(Float64)
+    session = SDPX.ExpandedKKTSession(Float64, 2, 3)
+    @test SDPX.factor_expanded_kkt!(session, system)
+    rhs = zeros(Float64, session.dimension)
+    SDPX.expanded_rhs!(rhs, system)
+
+    # Deliberately replace the accepted factor by a strongly regularized one.
+    # Its finite solve is still rejected when the original equations do not
+    # satisfy the same-precision backward-error contract.
+    SDPX._assemble_regularized!(session, 1.0)
+    @test SDPX.factorize_pivoted_lu!(
+        session.factor, session.regularized; threshold=eps(Float64),
+    )
+    session.status = SDPX.EXPANDED_KKT_FACTORED
+    solution = similar(rhs)
+    @test SDPX.solve_expanded!(solution, session, rhs)
+    @test !SDPX.refine_expanded!(solution, session, rhs; max_refinements=0)
+    @test session.status == SDPX.EXPANDED_KKT_REFINEMENT_STAGNATED
+    @test session.backward_error > session.backward_target
+    @test session.unregularized_residual_norm > 0
+    @test_throws ArgumentError SDPX.refine_expanded!(
+        solution, session, rhs; max_refinements=-1,
+    )
+end
+
+@testset "expanded BigFloat provider dispatch" begin
     setprecision(BigFloat, 192) do
         system, expected = expanded_fixture(BigFloat)
-        session = SDPX.ExpandedKKTSession(BigFloat, 2, 3)
-        @test SDPX.factor_expanded_kkt!(session, system)
-        rhs = zeros(BigFloat, session.dimension)
-        SDPX.expanded_rhs!(rhs, system)
-        solution = similar(rhs)
-        @test SDPX.solve_expanded!(solution, session, rhs)
-        @test SDPX.refine_expanded!(solution, session, rhs)
-        direction = SDPX.recover_expanded_direction(system, solution)
-        residual = SDPX.NewtonResidual(system)
-        SDPX.newton_residual!(residual, system, direction)
-        @test SDPX.max_newton_residual(residual) < big"1e-45"
-        @test direction.dx ≈ expected.dx rtol=big"1e-45" atol=big"1e-45"
+        descriptor = SDPX.la_provider_descriptor(BigFloat)
+        if descriptor.available &&
+           descriptor.provider == :bigfloat_linear_algebra
+            session = SDPX.ExpandedKKTSession(BigFloat, 2, 3)
+            @test session.la_backend isa SDPX.BFLALABackend
+            @test SDPX.factor_expanded_kkt!(session, system)
+            @test session.provider_inertia_factor !== nothing
+            @test session.provider_exact_factor !== nothing
+            rhs = SDPX.alloc_zeros(BigFloat, session.dimension)
+            SDPX.expanded_rhs!(rhs, system)
+            solution = SDPX.alloc_zeros(BigFloat, session.dimension)
+            @test SDPX.solve_expanded!(solution, session, rhs)
+            @test SDPX.refine_expanded!(solution, session, rhs)
+            direction = SDPX.recover_expanded_direction(system, solution)
+            residual = SDPX.NewtonResidual(system)
+            SDPX.newton_residual!(residual, system, direction)
+            @test SDPX.max_newton_residual(residual) < big"1e-45"
+            @test direction.dx ≈ expected.dx rtol=big"1e-45" atol=big"1e-45"
+        else
+            # Binding provider policy: no private arbitrary-precision LDLT/LU.
+            # An environment without the BFLA extension is a visible provider
+            # gap and must fail before constructing a factorization session.
+            exception = try
+                SDPX.ExpandedKKTSession(BigFloat, 2, 3)
+                nothing
+            catch error
+                error
+            end
+            @test exception isa ArgumentError
+            @test occursin("pivoted_symmetric_ldlt", sprint(showerror, exception))
+        end
     end
 end

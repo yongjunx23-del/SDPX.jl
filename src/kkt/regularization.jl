@@ -45,7 +45,7 @@ function _assemble_dynamic_signed_regularization!(
     positive_dimension::Int, magnitude::T, operator_scale::T,
     pivot_floor::T, failed_pivot::Int,
 ) where {T<:AbstractFloat}
-    copyto!(destination, unregularized)
+    copy_owned!(destination, unregularized)
     maximum_shift = zero(T)
     @inbounds for index in axes(destination, 1)
         local_scale = max(

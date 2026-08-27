@@ -303,7 +303,7 @@ function solve_pivoted_lu!(
     return true
 end
 
-mutable struct ExpandedKKTSession{T<:AbstractFloat}
+mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     n::Int
     m::Int
     dimension::Int
@@ -312,14 +312,45 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat}
     symmetric_companion::Matrix{T}
     factor::GenericPivotedLU{T}
     inertia_factor::GenericPivotedLDL{T}
+    la_backend::B
+    provider_inertia_factor::Union{Nothing,AbstractLAFactorization{T}}
+    provider_exact_factor::Union{Nothing,AbstractLAFactorization{T}}
+    provider_inertia_matrix::Matrix{T}
+    provider_exact_matrix::Matrix{T}
     expected_inertia::KKTInertia
     regularization::T
     regularization_attempts::Int
     attempts::Vector{ExpandedKKTAttempt{T}}
     refinements::Int
+    unregularized_residual_norm::T
+    backward_error::T
+    backward_target::T
+    residual_vector::Vector{T}
+    correction_vector::Vector{T}
     residual::Matrix{T}
     correction::Matrix{T}
     status::ExpandedKKTStatus
+end
+
+function _expanded_la_backend(::Type{T}) where {T<:AbstractFloat}
+    T === Float64 && return nothing
+    (T === BigFloat || is_multifloat_arithmetic(T)) || throw(ArgumentError(
+        "expanded KKT has no authorized factor provider for arithmetic $(T)",
+    ))
+    config = plan_la_backend(
+        T; requested=:auto, route=:dense_augmented_ldlt,
+    )
+    backend = instantiate_la_backend(config, T)
+    capabilities = la_backend_capabilities(backend)
+    for capability in (
+        :pivoted_symmetric_ldlt, :ldlt_inertia, :lu, :factor_solve,
+        :multi_rhs,
+    )
+        la_provider_supports(capabilities, capability) || throw(ArgumentError(
+            "expanded KKT provider lacks required capability $(capability)",
+        ))
+    end
+    return backend
 end
 
 function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {T<:AbstractFloat}
@@ -327,12 +358,20 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
     rhs_count >= 1 || throw(ArgumentError("expanded KKT requires at least one RHS"))
     attempts = ExpandedKKTAttempt{T}[]
     sizehint!(attempts, 16)
-    return ExpandedKKTSession{T}(
-        n, m, dimension, zeros(T, dimension, dimension),
-        zeros(T, dimension, dimension), zeros(T, dimension, dimension),
+    backend = _expanded_la_backend(T)
+    return ExpandedKKTSession{T,typeof(backend)}(
+        n, m, dimension, alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension, dimension),
         GenericPivotedLU(T, dimension), GenericPivotedLDL(T, dimension),
+        backend, nothing, nothing,
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension, dimension),
         KKTInertia(0, 0, dimension), zero(T), 0, attempts, 0,
-        zeros(T, dimension, rhs_count), zeros(T, dimension, rhs_count),
+        T(Inf), T(Inf), T(256) * eps(T),
+        alloc_zeros(T, dimension), alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension, rhs_count),
+        alloc_zeros(T, dimension, rhs_count),
         EXPANDED_KKT_READY,
     )
 end
@@ -358,7 +397,7 @@ function assemble_expanded_kkt!(
         "expanded session/system dimensions disagree",
     ))
     K = session.unregularized
-    fill!(K, zero(T))
+    zero_owned!(K)
     xrows = 1:n
     yrows = (n + 1):(n + m)
     tau_index = n + m + 1
@@ -409,7 +448,7 @@ function _freeze_symmetric_companion!(session::ExpandedKKTSession)
     # The symmetric companion mirrors the upper x/tau coupling. It is an
     # inertia diagnostic for signed regularization, not the solved frozen-sign
     # operator (whose lower x/tau block has the opposite sign).
-    copyto!(session.symmetric_companion, session.regularized)
+    copy_owned!(session.symmetric_companion, session.regularized)
     tau_index = session.dimension
     @inbounds for index in 1:session.n
         session.symmetric_companion[tau_index, index] =
@@ -421,7 +460,7 @@ end
 function _assemble_regularized!(
     session::ExpandedKKTSession{T}, regularization::T,
 ) where {T<:AbstractFloat}
-    copyto!(session.regularized, session.unregularized)
+    copy_owned!(session.regularized, session.unregularized)
     n, m = session.n, session.m
     @inbounds for index in 1:n
         session.regularized[index, index] += regularization
@@ -443,6 +482,84 @@ function _assemble_dynamic_regularized!(
     )
     _freeze_symmetric_companion!(session)
     return applied
+end
+
+function _expanded_provider_inertia(inertia)
+    counts = if inertia isa NamedTuple
+        (inertia.positive, inertia.negative, inertia.zero)
+    else
+        length(inertia) == 3 || throw(ArgumentError(
+            "expanded KKT provider returned invalid inertia",
+        ))
+        (inertia[1], inertia[2], inertia[3])
+    end
+    converted = KKTInertia(Int(counts[1]), Int(counts[2]), Int(counts[3]))
+    min(converted.positive, converted.negative, converted.zero) >= 0 ||
+        throw(ArgumentError("expanded KKT provider returned negative inertia"))
+    return converted
+end
+
+function _factor_expanded_inertia!(
+    session::ExpandedKKTSession{T}, pivot_floor::T,
+) where {T<:AbstractFloat}
+    if session.la_backend === nothing
+        return factorize_pivoted_ldl!(
+            session.inertia_factor, session.symmetric_companion;
+            threshold=pivot_floor,
+        )
+    end
+    copy_owned!(session.provider_inertia_matrix, session.symmetric_companion)
+    provider_factor = la_ldlt_factor!(
+        session.la_backend, session.provider_inertia_matrix,
+    )
+    session.provider_inertia_factor = provider_factor
+    if provider_factor === nothing
+        session.inertia_factor.inertia = KKTInertia(0, 0, session.dimension)
+        session.inertia_factor.minimum_pivot = zero(T)
+        session.inertia_factor.failed_pivot = 1
+        session.inertia_factor.success = false
+        return false
+    end
+    session.inertia_factor.inertia = _expanded_provider_inertia(
+        la_ldlt_inertia(provider_factor),
+    )
+    session.inertia_factor.minimum_pivot = T(NaN)
+    session.inertia_factor.failed_pivot = 0
+    session.inertia_factor.success = true
+    return true
+end
+
+function _factor_expanded_exact!(
+    session::ExpandedKKTSession{T}, pivot_floor::T,
+) where {T<:AbstractFloat}
+    if session.la_backend === nothing
+        return factorize_pivoted_lu!(
+            session.factor, session.regularized; threshold=pivot_floor,
+        )
+    end
+    copy_owned!(session.provider_exact_matrix, session.regularized)
+    provider_factor = la_lu_factor!(
+        session.la_backend, session.provider_exact_matrix,
+    )
+    session.provider_exact_factor = provider_factor
+    session.factor.minimum_pivot = T(NaN)
+    session.factor.failed_pivot = provider_factor === nothing ? 1 : 0
+    session.factor.success = provider_factor !== nothing
+    return provider_factor !== nothing
+end
+
+function _solve_expanded_factor!(
+    destination::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
+    rhs::AbstractVecOrMat{T},
+) where {T<:AbstractFloat}
+    if session.la_backend === nothing
+        return solve_pivoted_lu!(destination, session.factor, rhs)
+    end
+    factor = session.provider_exact_factor
+    factor === nothing && return false
+    copy_owned!(destination, rhs)
+    la_factor_solve!(factor, destination)
+    return all(isfinite, destination)
 end
 
 @inline function _record_expanded_attempt!(
@@ -487,6 +604,8 @@ function factor_expanded_kkt!(
     session.regularization_attempts = 0
     session.factor.success = false
     session.inertia_factor.success = false
+    session.provider_inertia_factor = nothing
+    session.provider_exact_factor = nothing
     empty!(session.attempts)
     failed_pivot = 0
 
@@ -512,10 +631,7 @@ function factor_expanded_kkt!(
         end
         session.regularization_attempts = attempt
 
-        inertia_factored = factorize_pivoted_ldl!(
-            session.inertia_factor, session.symmetric_companion;
-            threshold=pivot_floor,
-        )
+        inertia_factored = _factor_expanded_inertia!(session, pivot_floor)
         if !inertia_factored
             failed_pivot = session.inertia_factor.failed_pivot
             reason = failed_pivot == 0 ?
@@ -539,9 +655,7 @@ function factor_expanded_kkt!(
             continue
         end
 
-        if !factorize_pivoted_lu!(
-            session.factor, session.regularized; threshold=pivot_floor,
-        )
+        if !_factor_expanded_exact!(session, pivot_floor)
             failed_pivot = session.factor.failed_pivot
             reason = failed_pivot == 0 ?
                 EXPANDED_ATTEMPT_EXACT_FACTOR_FAILED :
@@ -576,7 +690,7 @@ function solve_expanded!(
     session.status in (
         EXPANDED_KKT_FACTORED, EXPANDED_KKT_UNREGULARIZED_CERTIFIED,
     ) || return false
-    solved = solve_pivoted_lu!(destination, session.factor, rhs)
+    solved = _solve_expanded_factor!(destination, session, rhs)
     solved || (session.status = EXPANDED_KKT_SOLVE_FAILED)
     return solved
 end
@@ -589,6 +703,8 @@ end
     return value
 end
 
+include("refinement.jl")
+
 """
     refine_expanded!(solution, session, rhs)
 
@@ -597,56 +713,89 @@ residual with the unregularized operator. Stagnation is fail-closed; a
 regularized direction is accepted only after the unregularized backward-error
 contract passes.
 """
-function refine_expanded!(
-    solution::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
-    rhs::AbstractVecOrMat{T}; max_refinements::Int=4,
+function _refine_expanded!(
+    solution::AbstractVecOrMat{T}, residual::AbstractVecOrMat{T},
+    correction::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
+    rhs::AbstractVecOrMat{T}, max_refinements::Int,
 ) where {T<:AbstractFloat}
-    solution_matrix = solution isa AbstractVector ? reshape(solution, :, 1) : solution
-    rhs_matrix = rhs isa AbstractVector ? reshape(rhs, :, 1) : rhs
-    columns = size(rhs_matrix, 2)
-    size(session.residual, 2) >= columns || throw(DimensionMismatch(
-        "expanded refinement workspace has too few RHS columns",
-    ))
-    residual = @view session.residual[:, 1:columns]
-    correction = @view session.correction[:, 1:columns]
-    operator_scale = _expanded_operator_scale(session.unregularized)
-    rhs_scale = max(_matrix_infinity_norm(rhs_matrix), one(T))
-    solution_scale = max(_matrix_infinity_norm(solution_matrix), one(T))
-    tolerance = T(256) * eps(T) *
-                (operator_scale * solution_scale + rhs_scale)
     previous = T(Inf)
     session.refinements = 0
+    session.unregularized_residual_norm = T(Inf)
+    session.backward_error = T(Inf)
+    session.backward_target = T(256) * eps(T)
     for iteration in 0:max_refinements
-        mul!(residual, session.unregularized, solution_matrix)
-        @inbounds for index in eachindex(residual, rhs_matrix)
-            residual[index] = rhs_matrix[index] - residual[index]
-        end
-        residual_norm = _matrix_infinity_norm(residual)
-        isfinite(residual_norm) || begin
+        report = expanded_unregularized_backward_error!(
+            residual, session.unregularized, solution, rhs,
+        )
+        session.unregularized_residual_norm = report.residual_norm
+        session.backward_error = report.normalized
+        session.backward_target = report.target
+        isfinite(report.residual_norm) && isfinite(report.normalized) || begin
             session.status = EXPANDED_KKT_REFINEMENT_STAGNATED
             return false
         end
-        if residual_norm <= tolerance
+        if report.normalized <= report.target
             session.status = EXPANDED_KKT_UNREGULARIZED_CERTIFIED
             session.refinements = iteration
             return true
         end
         iteration == max_refinements && break
-        residual_norm < previous || begin
+        report.residual_norm < previous || begin
             session.status = EXPANDED_KKT_REFINEMENT_STAGNATED
             return false
         end
-        previous = residual_norm
-        solve_pivoted_lu!(correction, session.factor, residual) || begin
+        previous = report.residual_norm
+        _solve_expanded_factor!(correction, session, residual) || begin
             session.status = EXPANDED_KKT_SOLVE_FAILED
             return false
         end
-        @inbounds for index in eachindex(solution_matrix, correction)
-            solution_matrix[index] += correction[index]
+        @inbounds for index in eachindex(solution, correction)
+            solution[index] += correction[index]
         end
     end
     session.status = EXPANDED_KKT_REFINEMENT_STAGNATED
     return false
+end
+
+function refine_expanded!(
+    solution::AbstractVector{T}, session::ExpandedKKTSession{T},
+    rhs::AbstractVector{T}; max_refinements::Int=4,
+) where {T<:AbstractFloat}
+    max_refinements >= 0 || throw(ArgumentError(
+        "max_refinements must be nonnegative",
+    ))
+    length(solution) == length(rhs) == session.dimension ||
+        throw(DimensionMismatch(
+            "expanded refinement vector dimensions disagree",
+        ))
+    return _refine_expanded!(
+        solution, session.residual_vector, session.correction_vector,
+        session, rhs, max_refinements,
+    )
+end
+
+function refine_expanded!(
+    solution::AbstractMatrix{T}, session::ExpandedKKTSession{T},
+    rhs::AbstractMatrix{T}; max_refinements::Int=4,
+) where {T<:AbstractFloat}
+    max_refinements >= 0 || throw(ArgumentError(
+        "max_refinements must be nonnegative",
+    ))
+    size(solution) == size(rhs) || throw(DimensionMismatch(
+        "expanded refinement solution/RHS dimensions disagree",
+    ))
+    size(solution, 1) == session.dimension || throw(DimensionMismatch(
+        "expanded refinement panel dimension mismatch",
+    ))
+    columns = size(rhs, 2)
+    size(session.residual, 2) >= columns || throw(DimensionMismatch(
+        "expanded refinement workspace has too few RHS columns",
+    ))
+    residual = @view session.residual[:, 1:columns]
+    correction = @view session.correction[:, 1:columns]
+    return _refine_expanded!(
+        solution, residual, correction, session, rhs, max_refinements,
+    )
 end
 
 """Recover all five semantic direction variables from the condensed solve."""
