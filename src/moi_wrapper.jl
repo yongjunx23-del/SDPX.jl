@@ -1983,7 +1983,8 @@ function MOI.get(
 end
 
 MOI.get(optimizer::Optimizer, ::MOI.ListOfModelAttributesSet) = MOI.AbstractModelAttribute[]
-MOI.get(optimizer::Optimizer, ::MOI.ListOfVariableAttributesSet) = MOI.AbstractVariableAttribute[]
+MOI.get(optimizer::Optimizer, ::MOI.ListOfVariableAttributesSet) =
+    MOI.AbstractVariableAttribute[MOI.VariablePrimalStart(), MOI.VariableName()]
 function MOI.get(
     optimizer::Optimizer,
     ::MOI.ListOfConstraintAttributesSet{F,S},

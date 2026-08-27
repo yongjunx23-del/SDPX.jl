@@ -82,9 +82,13 @@ end
         # hidden fallback):
         #  * test_conic_PositiveSemidefiniteConeTriangle_VectorOfVariables /
         #    _VectorAffineFunction: their unique optimum is a rank-1
-        #    (singular) PSD matrix; SDPX's HSD needs an interior point and
-        #    honestly returns NUMERICAL_ERROR/UNKNOWN rather than faking
-        #    OPTIMAL.
+        #    (singular) PSD matrix; SDPX's HSD on the default :bordered route
+        #    needs an interior point and honestly returns NUMERICAL_ERROR/
+        #    UNKNOWN rather than faking OPTIMAL. NOTE: the :expanded route
+        #    (kkt_route=:expanded) DOES solve rank-1 PSD correctly (Wave B/C
+        #    closed that gap); this exclusion applies only to the default
+        #    :bordered route that MOI uses. Revisit when :expanded becomes the
+        #    default.
         #  * test_conic_SecondOrderCone_INFEASIBLE: an SOC+Nonnegative (mixed
         #    LP/SOC) model, rejected fail-closed (see the mixed testset).
         #  * test_linear_integration_Interval: queries VariableBasisStatus /
