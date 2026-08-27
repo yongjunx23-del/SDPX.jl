@@ -29,6 +29,10 @@ include("cones/runtime/product.jl")
 include("cones/runtime/symmetric_api.jl")
 include("cones/runtime/nonsymmetric_api.jl")
 include("ir/canonical.jl")
+# Typed canonical transforms are additive: production lowerers continue to
+# use the frozen IR maps until the P1 migration is complete.
+include("program/transforms.jl")
+include("program/transforms_rsoc.jl")
 include("modeling/model.jl")
 include("modeling/affine.jl")
 include("modeling/constraints.jl")
