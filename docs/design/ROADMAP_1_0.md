@@ -1,4 +1,7 @@
 # SDPX.jl 1.0 路线图 — 成熟求解器对标缺口分析（2026-08-27）
+> [!NOTE]
+> SUPERSEDED by docs/PLAN.md (2026-08-28). Kept as historical gap analysis.
+
 
 对标对象：Clarabel（HSDE/齐次嵌入、presolve、equilibration、chordal、精化、
 多 KKT 后端、MOI conformance、三态几乎解状态）、SDPA-GMP（多精度）、

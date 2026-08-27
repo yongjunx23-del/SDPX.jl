@@ -1,4 +1,7 @@
 # GPT Pro kernel restructure review — 2026-08-27
+> [!NOTE]
+> SUPERSEDED as planning authority by docs/PLAN.md; retained as the original Pro plan with merge-timeline notes.
+
 
 Source: ChatGPT conversation `6a90013f-8410-83ec-9d2f-3f7125dd798d` (GPT-5.6 Sol Pro,
 pro_extended, worked 76m 22s). Oracle job `6f5c9ceb-81d8-4a96-9db1-6895de056a65`
