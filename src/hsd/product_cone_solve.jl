@@ -24,6 +24,7 @@ end
     ProductHSDVerifiedInitialPoint
     ProductHSDVerifiedAcceptedStep
     ProductHSDVerifiedTerminalNewtonTrial
+    ProductHSDVerifiedTerminationRay
     ProductHSDIterationLimitReached
     ProductHSDSingularKKTReason
     ProductHSDLineSearchBreakdown
@@ -149,6 +150,66 @@ function _product_hsd_verified_result(
         )
     end
     return nothing
+end
+
+"""
+Return whether the current homogeneous state must be treated as a
+τ-collapse ray candidate.  The setup-time floor
+`max(tol, sqrt(eps(T)))` separates a resolvable positive τ from the numerical
+zero regime.  Collapse additionally requires `κ/τ >= 1/floor` (with positive
+κ and nonpositive τ treated as an infinite ratio).  These conditions only
+trigger certificate verification; they never promote a status themselves.
+"""
+@inline function _product_hsd_tau_collapsed(base::HSDState{T}, tol::T) where {T}
+    floor = max(tol, sqrt(eps(T)))
+    isfinite(base.tau) && isfinite(base.kappa) || return false
+    base.tau <= floor || return false
+    base.kappa > zero(T) || return false
+    return base.tau <= zero(T) || base.kappa >= base.tau / floor
+end
+
+@inline function _product_hsd_finite_ray_candidate(x::AbstractVector{T}) where {T}
+    nonzero = false
+    @inbounds for value in x
+        isfinite(value) || return false
+        nonzero |= !iszero(value)
+    end
+    return nonzero
+end
+
+"""
+Run the authoritative original-coordinate dual-infeasibility verifier before
+returning a terminal non-certificate status.  A collapsed τ/κ state and every
+finite nonzero primal-ray candidate are both checked.  The requested failure,
+time, or iteration status is preserved unless the unchanged verifier accepts
+the ray; no HSD ratio or internal residual can promote DualInfeasible.
+"""
+function _product_hsd_termination_or_dual_ray!(
+    state::ProductConeHSDState{T},
+    x_original::Vector{T},
+    s_original::Vector{T},
+    y_original::Vector{T},
+    tol::T,
+    status::ProductHSDSolveStatus,
+    reason::ProductHSDSolveReason,
+    last_step::HSDStepCode,
+) where {T}
+    base = state.base
+    candidate = _product_hsd_tau_collapsed(base, tol) ||
+                _product_hsd_finite_ray_candidate(base.x)
+    if candidate && verify_dual_infeasibility!(
+        base.canonical, base, x_original, s_original; tol=tol,
+    )
+        return _product_hsd_make_result(
+            state, ProductHSDDualInfeasible,
+            ProductHSDVerifiedTerminationRay, last_step, zero(T),
+            x_original, s_original, y_original,
+        )
+    end
+    return _product_hsd_make_result(
+        state, status, reason, last_step, zero(T),
+        x_original, s_original, y_original,
+    )
 end
 
 @inline function _product_hsd_refinement_maxabs(values::AbstractVector{T}) where {T}
@@ -541,10 +602,10 @@ function product_hsd_solve!(
         (state.kkt_route === :expanded ? :kkt : :identity) : initialization
     if selected_initialization === :kkt
         start_report = kkt_derived_start!(state)
-        start_report.ok || return _product_hsd_make_result(
-            state, ProductHSDBreakdown, ProductHSDKKTInitializationFailed,
-            HSDStepDirectionFailed, zero(T), x_original, s_original,
-            y_original,
+        start_report.ok || return _product_hsd_termination_or_dual_ray!(
+            state, x_original, s_original, y_original, certificate_tol,
+            ProductHSDBreakdown, ProductHSDKKTInitializationFailed,
+            HSDStepDirectionFailed,
         )
     else
         product_hsd_cold_start!(state)
@@ -558,16 +619,16 @@ function product_hsd_solve!(
     for _ in 1:Int(max_iterations)
         elapsed_seconds = Float64(time_ns() - started_ns) * 1.0e-9
         if elapsed_seconds >= time_limit
-            return _product_hsd_make_result(
-                state, ProductHSDTimeLimit, ProductHSDTimeLimitReached,
-                HSDStepOK, zero(T), x_original, s_original, y_original,
+            return _product_hsd_termination_or_dual_ray!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDTimeLimit, ProductHSDTimeLimitReached, HSDStepOK,
             )
         end
         code = product_hsd_step!(state)
         if code === HSDStepSingularKKT
-            return _product_hsd_make_result(
-                state, ProductHSDSingular, ProductHSDSingularKKTReason, code,
-                zero(T), x_original, s_original, y_original,
+            return _product_hsd_termination_or_dual_ray!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDSingular, ProductHSDSingularKKTReason, code,
             )
         elseif code === HSDStepBreakdown
             terminal = _product_hsd_terminal_verified_result!(
@@ -575,9 +636,9 @@ function product_hsd_solve!(
                 code,
             )
             terminal === nothing || return terminal
-            return _product_hsd_make_result(
-                state, ProductHSDBreakdown, ProductHSDLineSearchBreakdown,
-                code, zero(T), x_original, s_original, y_original,
+            return _product_hsd_termination_or_dual_ray!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDBreakdown, ProductHSDLineSearchBreakdown, code,
             )
         elseif code === HSDStepDirectionFailed
             # A failed *next* Newton direction does not invalidate the current
@@ -594,9 +655,9 @@ function product_hsd_solve!(
                 code,
             )
             terminal === nothing || return terminal
-            return _product_hsd_make_result(
-                state, ProductHSDBreakdown, ProductHSDDirectionBreakdown,
-                code, zero(T), x_original, s_original, y_original,
+            return _product_hsd_termination_or_dual_ray!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDBreakdown, ProductHSDDirectionBreakdown, code,
             )
         elseif code === HSDStepAlreadyOptimal
             verified = _product_hsd_candidate_result!(
@@ -604,10 +665,10 @@ function product_hsd_solve!(
                 ProductHSDVerifiedAcceptedStep, code,
             )
             verified === nothing || return verified
-            return _product_hsd_make_result(
-                state, ProductHSDBreakdown,
-                ProductHSDUnverifiedZeroComplementarity, code, zero(T),
-                x_original, s_original, y_original,
+            return _product_hsd_termination_or_dual_ray!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDBreakdown,
+                ProductHSDUnverifiedZeroComplementarity, code,
             )
         end
 
@@ -618,9 +679,9 @@ function product_hsd_solve!(
         verified === nothing || return verified
     end
 
-    return _product_hsd_make_result(
-        state, ProductHSDMaxIterations, ProductHSDIterationLimitReached,
-        HSDStepOK, zero(T), x_original, s_original, y_original,
+    return _product_hsd_termination_or_dual_ray!(
+        state, x_original, s_original, y_original, certificate_tol,
+        ProductHSDMaxIterations, ProductHSDIterationLimitReached, HSDStepOK,
     )
 end
 
