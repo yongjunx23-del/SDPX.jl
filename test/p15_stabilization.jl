@@ -82,6 +82,13 @@ end
     @test direct.status === SDPX.ProductHSDOptimal
 end
 
+@testset "P1.5 ray unit normalization uses certificate tolerance" begin
+    value = -1.0 + 1e-8
+    @test SDPX._certificate_unit_normalization_ok(value, 2e-8)
+    @test !SDPX._certificate_unit_normalization_ok(value, 5e-9)
+    @test !SDPX._certificate_unit_normalization_ok(Inf, 1.0)
+end
+
 @testset "P1.5 RSOC transform is compact, precise, and alias-safe" begin
     transform = SDPX.RotatedSOCToSOC(4, Float32)
     @test transform.precision_bits == precision(Float32)
