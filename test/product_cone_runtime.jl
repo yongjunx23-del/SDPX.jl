@@ -85,6 +85,32 @@ end
     @test alias ≈ s rtol=2e-10 atol=2e-10
 end
 
+@testset "ProductConeRuntime Cholesky-stable PSD pair update" begin
+    layout = _pcr_layout(Float64, [(:psd, 3)])
+    runtime = SDPX.ProductConeRuntime(layout, Float64)
+
+    # Misaligned SPD eigenspaces with cond(Y)≈2e9 reproduce the old runtime
+    # path's explicit Y^(-1/2) orientation rejection. The Cholesky congruence
+    # remains fail-closed but certifies the pair in factorized coordinates.
+    Q = Matrix(qr([1.0 2.0 3.0; 4.0 1.0 2.0; 2.0 5.0 1.0]).Q)
+    R = Matrix(qr([2.0 1.0 4.0; 1.0 3.0 2.0; 5.0 2.0 1.0]).Q)
+    Y = Q * Diagonal([1e-9, 0.7, 2.0]) * transpose(Q)
+    S = R * Diagonal([3e-8, 0.4, 1.5]) * transpose(R)
+    s = zeros(6)
+    y = zeros(6)
+    PCR_SC._pack_svec!(s, S, 3, sqrt(2.0))
+    PCR_SC._pack_svec!(y, Y, 3, sqrt(2.0))
+
+    @test cond(Y) > 1e9
+    @test SDPX.try_update_scaling!(runtime, s, y, 1.0)
+    theta_y = similar(s)
+    g_s = similar(s)
+    SDPX.apply_Theta!(runtime, theta_y, y)
+    SDPX.apply_G!(runtime, g_s, s)
+    @test theta_y ≈ s rtol=1e-9 atol=1e-9
+    @test g_s ≈ y rtol=1e-9 atol=1e-9
+end
+
 @testset "ProductConeRuntime global boundary steps" begin
     layout = _pcr_layout(Float64, [(:nonnegative, 2), (:soc, 3), (:psd, 2)])
     runtime = SDPX.ProductConeRuntime(layout, Float64)

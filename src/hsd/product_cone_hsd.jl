@@ -2153,6 +2153,16 @@ end
     return true
 end
 
+@inline function _product_hsd_recover_dkappa!(base, scalar_rhs)
+    # The scalar complementarity equation is well-conditioned because HSD
+    # keeps tau strictly positive. Recover dkappa from it directly; computing
+    # dkappa from the gap equation loses digits as the homogeneous border
+    # becomes ill-conditioned near an SDP optimum. The independent gap
+    # equation remains part of the strict five-equation direction certificate.
+    base.dkappa = (scalar_rhs - base.kappa * base.dtau) / base.tau
+    return isfinite(base.dkappa)
+end
+
 @inline function _product_hsd_solve_shift_raw!(
     state::ProductConeHSDState{T},
     scalar_rhs::T,
@@ -2178,6 +2188,10 @@ end
     base.dtau = workspace.solution[end]
     _hsd_scatter_dx!(base)
     _product_hsd_recover!(state) || begin
+        workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
+        return false
+    end
+    _product_hsd_recover_dkappa!(base, scalar_rhs) || begin
         workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
         return false
     end
@@ -2444,6 +2458,14 @@ end
             workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
             return false
         end
+        _product_hsd_recover_dkappa!(base, scalar_rhs) || begin
+            workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
+            return false
+        end
+        _hsd_direction_finite(base) || begin
+            workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
+            return false
+        end
         workspace.refinements += 1
 
         _product_hsd_bordered_candidate_ok!(state, scalar_rhs) || return false
@@ -2705,6 +2727,10 @@ end
     base = state.base
     alpha = _product_hsd_boundary_alpha!(state)
     (isfinite(alpha) && alpha > zero(T)) || return false
+    # Keep accepted iterates away from numerically unresolved PSD faces.  The
+    # predictor still uses the aggressive 0.995 boundary estimate for the
+    # frozen Mehrotra centering contract; only the accepted trial is damped.
+    alpha *= T(0.9)
     p_norm = _hsd_maxinf(base.rP)
     d_norm = _hsd_maxinf(base.rD)
     g_norm = abs(base.rG)
@@ -2712,7 +2738,15 @@ end
     backtracking = 0
     has_nonsymmetric = !isempty(state.runtime.exp) ||
                        !isempty(state.runtime.power)
-    max_backtracking = has_nonsymmetric ? 64 : 16
+    # PSD NT scaling can reject a strictly-interior trial until roundoff in a
+    # near-boundary eigensystem is reduced below its backward-error gates (a
+    # valid Lattice direction first becomes certifiable after 16 halvings),
+    # so PSD- or nonsymmetric-containing products use the 64-trial budget.
+    # Pure LP/SOC problems never needed more than the original 16 and the
+    # wider budget over-damped their Mehrotra convergence (SOCP regression:
+    # iteration_limit where 13 iterations previously converged).
+    has_psd = !isempty(state.runtime.psd)
+    max_backtracking = (has_psd || has_nonsymmetric) ? 64 : 16
     if has_nonsymmetric
         checkpoint_nonsymmetric_scaling!(state.runtime) || return false
     end

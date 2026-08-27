@@ -167,7 +167,72 @@ end
         scale = aa > scale ? aa : scale
         scale = ab > scale ? ab : scale
     end
+    # This is an internal same-precision orientation gate, not a solution or
+    # certificate tolerance.  The factor covers the three eigensolver/
+    # congruence stages used to construct P and Pinv; final Newton equations
+    # and original-coordinate certificates remain independently verified.
     return residual <= eps(T) * scale * T(10000 * n)
+end
+
+"""In-place unpivoted Cholesky `L` with `L*L' = X` (lower factor stored in
+`L`). Throws `DomainError` for a non-strictly-positive-definite input; the
+HSD caller has already verified strict interiority, and failing closed is
+the contract — no pivoted or fallback variant is permitted."""
+function _chol_unpivoted!(L::AbstractMatrix{T}, X::AbstractMatrix, n::Int) where {T}
+    @inbounds for j in 1:n
+        for i in j:n
+            value = X[i, j]
+            for k in 1:(j - 1)
+                value -= L[i, k] * L[j, k]
+            end
+            if i == j
+                (isfinite(value) && value > zero(T)) || throw(DomainError(
+                    value, "PSD NT Cholesky requires a strictly positive definite pair",
+                ))
+                L[j, j] = sqrt(value)
+            else
+                value /= L[j, j]
+                isfinite(value) || throw(DomainError(
+                    value, "PSD NT Cholesky produced a non-finite factor",
+                ))
+                L[i, j] = value
+            end
+        end
+    end
+    return L
+end
+
+"""`W = L⁻¹` for a lower-triangular `L`, via forward substitution against the
+identity columns. No explicit inverse is formed anywhere else in the NT
+construction; this is the single triangular inverse the Cholesky route needs."""
+function _l_inverse!(W::AbstractMatrix{T}, L::AbstractMatrix, n::Int) where {T}
+    @inbounds for j in 1:n
+        for i in 1:n
+            value = i == j ? one(T) : zero(T)
+            for k in 1:(i - 1)
+                value -= L[i, k] * W[k, j]
+            end
+            value /= L[i, i]
+            isfinite(value) || throw(DomainError(
+                value, "PSD NT Cholesky inverse produced a non-finite entry",
+            ))
+            W[i, j] = value
+        end
+    end
+    return W
+end
+
+"""Symmetrize in place: `A = (A + A')/2`. Roundoff in chained triangular
+congruences need not be bitwise symmetric; downstream eigensolvers and gates
+require one authoritative symmetric matrix."""
+function _symmetrize!(A::AbstractMatrix{T}, n::Int) where {T}
+    half = one(T) / (one(T) + one(T))
+    @inbounds for j in 1:n, i in (j + 1):n
+        value = (A[i, j] + A[j, i]) * half
+        A[i, j] = value
+        A[j, i] = value
+    end
+    return A
 end
 
 """Compute the SPD square root and inverse square root without allocation."""
@@ -210,11 +275,11 @@ end
 """
     nt_scaling!(cone, state::PSDNTScaling, s, y)
 
-Update the pair-dependent PSD NT state from HSD `svec` coordinates. Computes
-`P = Y^{-1/2}(Y^{1/2} S Y^{1/2})^{1/2}Y^{-1/2}`, so
-`Theta[Z]=P*Z*P`, `Theta(Y)=S`, and `G=Theta^{-1}`. Any non-finite input,
-non-positive eigenvalue, or Jacobi non-convergence throws and is never silently
-accepted.
+Update the pair-dependent PSD NT state from HSD `svec` coordinates. With
+`Y = L*L'` and `M = L' S L`, computes the congruence-form NT scaling
+`P = L^{-T} M^{1/2} L^{-1}`, so `Theta[Z]=P*Z*P`, `Theta(Y)=S`, and
+`G=Theta^{-1}`. Any non-finite input, non-positive eigenvalue, Cholesky
+failure, or Jacobi non-convergence throws and is never silently accepted.
 """
 function nt_scaling!(
     cone::PSDTriangleCone{T},
@@ -230,32 +295,34 @@ function nt_scaling!(
     _unpack_svec!(state.S, svec_s, n, state.invsqrt2)
     _unpack_svec!(state.Y, svec_y, n, state.invsqrt2)
 
-    # work1 = Y^(1/2), work2 = Y^(-1/2)
+    # Cholesky-stable NT construction.  The textbook form
+    # `P = Y^{-1/2}(Y^{1/2} S Y^{1/2})^{1/2}Y^{-1/2}` builds `P` through an
+    # explicit `Y^(-1/2)` eigensystem whose roundoff grows like `cond(Y)`;
+    # near the PSD boundary that residual can cross the same-precision
+    # orientation gate even for exactly representable iterates.  With
+    # `Y = L*L'` and `M = L' S L`, the congruence form
+    #     P = L^{-T} M^{1/2} L^{-1}
+    # satisfies `P*Y*P = S` identically, replaces the ill-conditioned
+    # eigensystem by backward-stable triangular solves, and keeps the same
+    # fail-closed orientation gates below.
+    _chol_unpivoted!(state.chol, state.Y, n)
+    mul!(state.work1, state.chol', state.S)
+    mul!(state.work2, state.work1, state.chol)
+    # core = M^(1/2), coreinv = M^(-1/2) via the same eigen route as before.
     _spd_sqrt_invsqrt!(
-        state.work1,
-        state.work2,
-        state.Y,
-        state.work3,
-        state.U,
-        state.lambda,
-        state.eigen_route,
-    )
-    # work4 = Y^(1/2) S Y^(1/2)
-    mul!(state.work3, state.work1, state.S)
-    mul!(state.work4, state.work3, state.work1)
-    # Lambda is temporary core sqrt; Pinv is temporary inverse-core sqrt.
-    _spd_sqrt_invsqrt!(
-        state.Lambda,
-        state.Pinv,
         state.work4,
         state.work3,
+        state.work2,
+        state.work1,
         state.U,
         state.lambda,
         state.eigen_route,
     )
-    # P = Y^(-1/2) core Y^(-1/2)
-    mul!(state.work3, state.work2, state.Lambda)
-    mul!(state.P, state.work3, state.work2)
+    _l_inverse!(state.chol_inv, state.chol, n)
+    # P = W' core W with W = L^{-1}.
+    mul!(state.work1, state.work4, state.chol_inv)
+    mul!(state.P, state.chol_inv', state.work1)
+    _symmetrize!(state.P, n)
 
     # Freeze the square-root automorphism and its inverse.
     _spd_sqrt_invsqrt!(
@@ -285,16 +352,19 @@ function nt_scaling!(
     # root are numerically verified in the same precision as the state.
     mul!(state.work1, state.P, state.Y)
     mul!(state.work2, state.work1, state.P)
-    _psd_nt_close(state.work2, state.S, n) ||
-        throw(DomainError(state.P, "PSD NT Theta(Y)=S residual exceeded tolerance"))
+    _psd_nt_close(state.work2, state.S, n) || throw(DomainError(
+        state.P, "PSD NT Theta(Y)=S residual exceeded tolerance",
+    ))
     mul!(state.work1, state.Pinv, state.S)
     mul!(state.work2, state.work1, state.Pinv)
-    _psd_nt_close(state.work2, state.Y, n) ||
-        throw(DomainError(state.Pinv, "PSD NT G(S)=Y residual exceeded tolerance"))
+    _psd_nt_close(state.work2, state.Y, n) || throw(DomainError(
+        state.Pinv, "PSD NT G(S)=Y residual exceeded tolerance",
+    ))
     mul!(state.work1, state.Prootinv, state.S)
     mul!(state.work2, state.work1, state.Prootinv)
-    _psd_nt_close(state.work2, state.Lambda, n) ||
-        throw(DomainError(state.Proot, "PSD NT scaled-Lambda residual exceeded tolerance"))
+    _psd_nt_close(state.work2, state.Lambda, n) || throw(DomainError(
+        state.Proot, "PSD NT scaled-Lambda residual exceeded tolerance",
+    ))
     mul!(state.work1, state.Proot, state.Proot)
     _psd_nt_close(state.work1, state.P, n) ||
         throw(DomainError(state.Proot, "PSD NT R^2=Theta residual exceeded tolerance"))
@@ -424,30 +494,73 @@ end
 """
     boundary_step!(cone, x, alpha, p)
 
-Largest `α ≥ 0` such that `X + α p` stays PSD, using
-`α = -1/min λ(X^{-1/2} p X^{-1/2})` (`Inf` when the direction never leaves).
-Stores the value into `Ref` `alpha` and returns it.
+Largest `α ≥ 0` such that `X + α p` stays PSD, using the generalized
+eigenvalues of `(p, X)`.  For strictly positive-definite `X = L*L'`, these
+are the ordinary eigenvalues of `L⁻¹*p*L⁻ᵀ`, and
+`α = -1/min λ` (`Inf` when the direction never leaves).  The Cholesky frame is
+used directly: unlike an explicit eigendecomposition of a near-singular `X`,
+it never turns a positive pivot into a zero inverse square root. Stores the
+value into `Ref` `alpha` and returns it.
 """
 function boundary_step!(cone::PSDTriangleCone{T}, x::AbstractVector, alpha::Base.RefValue, p::AbstractVector) where {T}
     length(x) == length(p) == cone.len || throw(DimensionMismatch())
     n = cone.dim
     s = cone.scratch
-    # X^{-1/2} in s.C
-    _eigen!(s, x)
-    fill!(s.C, zero(T))
-    @inbounds for k in 1:n
-        wk = s.w[k]
-        rk = wk <= zero(T) ? zero(T) : one(T) / sqrt(wk)
-        for j in 1:n
-            for i in 1:n
-                s.C[i, j] += rk * s.V[i, k] * s.V[j, k]
+    _unpack!(s.A, x, n)
+
+    # In-place unpivoted Cholesky X=L*L'.  HSD calls this kernel only from a
+    # strict-interior point; returning zero is the conservative boundary for
+    # a direct caller that supplies a non-SPD point.
+    @inbounds for j in 1:n
+        for i in j:n
+            value = s.A[i, j]
+            for k in 1:(j - 1)
+                value -= s.A[i, k] * s.A[j, k]
+            end
+            if i == j
+                if !(isfinite(value) && value > zero(T))
+                    alpha[] = zero(T)
+                    return zero(T)
+                end
+                s.A[j, j] = sqrt(value)
+            else
+                value /= s.A[j, j]
+                if !isfinite(value)
+                    alpha[] = zero(T)
+                    return zero(T)
+                end
+                s.A[i, j] = value
             end
         end
     end
+
     _unpack!(s.B, p, n)
-    mul!(s.A, s.C, s.B)   # X^{-1/2} p
-    mul!(s.B, s.A, s.C)   # X^{-1/2} p X^{-1/2}  (symmetric)
-    copyto!(s.A, s.B)
+    # C=L⁻¹*p (forward solve, one right-hand side per column).
+    @inbounds for j in 1:n
+        for i in 1:n
+            value = s.B[i, j]
+            for k in 1:(i - 1)
+                value -= s.A[i, k] * s.C[k, j]
+            end
+            s.C[i, j] = value / s.A[i, i]
+        end
+    end
+    # B=C*L⁻ᵀ.  Each row is another forward solve by L.
+    @inbounds for i in 1:n
+        for j in 1:n
+            value = s.C[i, j]
+            for k in 1:(j - 1)
+                value -= s.B[i, k] * s.A[j, k]
+            end
+            s.B[i, j] = value / s.A[j, j]
+        end
+    end
+    # Roundoff in the two triangular solves need not be bitwise symmetric.
+    # Jacobi requires one authoritative symmetric matrix, so average the pair.
+    half = one(T) / (one(T) + one(T))
+    @inbounds for j in 1:n, i in 1:n
+        s.A[i, j] = (s.B[i, j] + s.B[j, i]) * half
+    end
     _identity!(s.V, n)
     _jacobi_eigen!(s.A, s.V, s.w)
     mu_min = s.w[1]

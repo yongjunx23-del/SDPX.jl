@@ -49,9 +49,10 @@ is copied into `w` (both `A` and `V` are the caller's preallocated workspace).
 
 Convergence criterion: the sum of `|A[i,j]|` over `i>j` must be at most
 `tol = eps(T)*max(1, n)*10*norm_scale` where `norm_scale` is the maximum
-absolute diagonal entry of the initial `A`. The iteration throws
-[`_SymmetricEigenFailed`](@ref) if it has not converged after `maxiter`
-full sweeps.
+absolute diagonal entry of the initial `A`.  A rotation may be skipped only
+below `tol / (n*(n-1)/2)`, so skipped entries cannot collectively violate the
+same aggregate convergence test. The iteration throws [`_SymmetricEigenFailed`](@ref)
+if it has not converged after `maxiter` full sweeps.
 """
 function _jacobi_eigen!(
     A::AbstractMatrix{T},
@@ -75,6 +76,8 @@ function _jacobi_eigen!(
     end
     scale = scale > o ? scale : o
     tol = eps(T) * scale * T(max(1, n)) * T(10)
+    off_count = max(1, div(n * (n - 1), 2))
+    rotation_tol = tol / T(off_count)
 
     # --- initial sweep detection of exact diagonal/zero matrix ---
     off = z
@@ -92,11 +95,23 @@ function _jacobi_eigen!(
         @inbounds for p in 1:(n - 1)
             for q in (p + 1):n
                 apq = A[p, q]
-                abs(apq) <= tol && continue
+                abs(apq) <= rotation_tol && continue
                 app = A[p, p]
                 aqq = A[q, q]
                 theta = (aqq - app) / (two * apq)
-                t = iszero(theta) ? o : sign(theta) / (abs(theta) + sqrt(theta * theta + o))
+                abs_theta = abs(theta)
+                # The usual `sqrt(theta^2 + 1)` formula overflows for a tiny
+                # off-diagonal beside separated diagonal entries.  The
+                # reciprocal branch is algebraically identical and bounded.
+                t = if iszero(theta)
+                    o
+                elseif abs_theta <= o
+                    sign(theta) / (abs_theta + sqrt(abs_theta * abs_theta + o))
+                else
+                    inv_theta = o / abs_theta
+                    sign(theta) * inv_theta /
+                    (o + sqrt(o + inv_theta * inv_theta))
+                end
                 c = o / sqrt(t * t + o)
                 s = t * c
                 for k in 1:n

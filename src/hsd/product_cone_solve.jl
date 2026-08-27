@@ -164,8 +164,8 @@ end
 end
 
 """
-Try one cold-path affine certificate refinement of an accepted nonsymmetric
-HSD iterate. The cone variables are held fixed while the primal variable is
+Try one cold-path affine certificate refinement of an accepted HSD iterate.
+The cone variables are held fixed while the primal variable is
 corrected in `A*dx = -rP`; the dual is then corrected in the joint
 stationarity/gap equations `[A'; b']*dy = [-rD; -gap]`. This removes the
 homogeneous residual amplification which otherwise lets the data-normalized
@@ -188,7 +188,6 @@ function _product_hsd_refined_optimal_result!(
     last_step::HSDStepCode,
     terminal_alpha::T=zero(T),
 ) where {T}
-    _product_hsd_has_nonsymmetric(state) || return nothing
     base = state.base
     base.tau > tol || return nothing
     hsd_residual!(base)
@@ -519,6 +518,20 @@ function product_hsd_solve!(
                 code, zero(T), x_original, s_original, y_original,
             )
         elseif code === HSDStepDirectionFailed
+            # A failed *next* Newton direction does not invalidate the current
+            # accepted iterate. First run the authoritative original-coordinate
+            # gates, then the existing finite terminal-trial verifier; only an
+            # unverified pair may be reported as direction breakdown.
+            current = _product_hsd_candidate_result!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDVerifiedAcceptedStep, code,
+            )
+            current === nothing || return current
+            terminal = _product_hsd_terminal_verified_result!(
+                state, x_original, s_original, y_original, certificate_tol,
+                code,
+            )
+            terminal === nothing || return terminal
             return _product_hsd_make_result(
                 state, ProductHSDBreakdown, ProductHSDDirectionBreakdown,
                 code, zero(T), x_original, s_original, y_original,

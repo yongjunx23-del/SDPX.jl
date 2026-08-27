@@ -475,33 +475,113 @@ end
 end
 
 
+@inline function _runtime_psd_cholesky!(
+    L::AbstractMatrix{T}, X::AbstractMatrix, n::Int,
+) where {T}
+    fill!(L, zero(T))
+    @inbounds for j in 1:n
+        for i in j:n
+            value = X[i, j]
+            for k in 1:(j - 1)
+                value -= L[i, k] * L[j, k]
+            end
+            if i == j
+                (isfinite(value) && value > zero(T)) || return false
+                L[j, j] = sqrt(value)
+            else
+                value /= L[j, j]
+                isfinite(value) || return false
+                L[i, j] = value
+            end
+        end
+    end
+    return true
+end
+
+@inline function _runtime_chol_congruence_solve!(
+    P::AbstractMatrix{T}, core::AbstractMatrix, L::AbstractMatrix,
+    work::AbstractMatrix{T}, n::Int,
+) where {T}
+    # Right solve Z*L=core (equivalently L'*Z'=core') by back substitution.
+    @inbounds for row in 1:n
+        for column in n:-1:1
+            value = core[row, column]
+            for k in (column + 1):n
+                value -= work[row, k] * L[k, column]
+            end
+            value /= L[column, column]
+            isfinite(value) || return false
+            work[row, column] = value
+        end
+    end
+    # Left solve L'*P=Z by back substitution, one RHS per column.
+    @inbounds for column in 1:n
+        for row in n:-1:1
+            value = work[row, column]
+            for k in (row + 1):n
+                value -= L[k, row] * P[k, column]
+            end
+            value /= L[row, row]
+            isfinite(value) || return false
+            P[row, column] = value
+        end
+    end
+    SymmetricCones._symmetrize!(P, n)
+    return true
+end
+
+@inline _runtime_psd_nt_fail(::Symbol, ::Int) = false
+
 @inline function _runtime_try_nt!(block::PSDRuntimeBlock{T}) where {T}
-    # Boolean form of the PSD pair update.  In particular, orientation loss
-    # from a near-boundary trial returns `false` without allocating a
-    # DomainError for every line-search backtrack.
+    # Boolean form of the same Cholesky-stable congruence construction used by
+    # `SymmetricCones.nt_scaling!`. Expected near-boundary rejection returns
+    # `false` without allocating a DomainError for every line-search backtrack.
     state = block.state
     n = state.dim
     state.valid[1] = false
     SymmetricCones._unpack_svec!(state.S, block.primal, n, state.invsqrt2)
     SymmetricCones._unpack_svec!(state.Y, block.dual, n, state.invsqrt2)
 
+    _runtime_psd_cholesky!(state.chol, state.Y, n) ||
+        return _runtime_psd_nt_fail(:cholesky, n)
+    mul!(state.work1, state.chol', state.S)
+    mul!(state.work2, state.work1, state.chol)
     _runtime_psd_sqrt_invsqrt!(
-        state.work1, state.work2, state.Y, state.work3,
+        state.work4, state.work3, state.work2, state.work1,
         state.U, state.lambda, state.eigen_route,
-    ) || return false
-    mul!(state.work3, state.work1, state.S)
-    mul!(state.work4, state.work3, state.work1)
-    _runtime_psd_sqrt_invsqrt!(
-        state.Lambda, state.Pinv, state.work4, state.work3,
-        state.U, state.lambda, state.eigen_route,
-    ) || return false
-    mul!(state.work3, state.work2, state.Lambda)
-    mul!(state.P, state.work3, state.work2)
+    ) || return _runtime_psd_nt_fail(:core_sqrt, n)
+    _runtime_chol_congruence_solve!(
+        state.P, state.work4, state.chol, state.work1, n,
+    ) || return _runtime_psd_nt_fail(:congruence_solve, n)
+
+    # Certify the NT orientation in the Cholesky frame. These equations are
+    # algebraically equivalent to P*Y*P=S but avoid forming that ill-conditioned
+    # triple product: core^2=M, L'*P*L=core, and core*coreinv=I.
+    mul!(state.work1, state.work4, state.work4)
+    SymmetricCones._psd_nt_close(state.work1, state.work2, n) ||
+        return _runtime_psd_nt_fail(:core_square, n)
+    mul!(state.work1, state.P, state.chol)
+    mul!(state.chol_inv, state.chol', state.work1)
+    SymmetricCones._psd_nt_close(state.chol_inv, state.work4, n) ||
+        return _runtime_psd_nt_fail(:factorized_orientation, n)
+    mul!(state.work1, state.work4, state.work3)
+    fill!(state.chol_inv, zero(T))
+    @inbounds for i in 1:n
+        state.chol_inv[i, i] = one(T)
+    end
+    SymmetricCones._psd_nt_close(state.work1, state.chol_inv, n) ||
+        return _runtime_psd_nt_fail(:core_inverse, n)
 
     _runtime_psd_sqrt_invsqrt!(
         state.Proot, state.Prootinv, state.P, state.work3,
         state.U, state.lambda, state.eigen_route,
-    ) || return false
+    ) || return _runtime_psd_nt_fail(:p_sqrt, n)
+    # The root and inverse root share one frozen orthonormal eigenbasis. Check
+    # their better-conditioned inverse identity rather than comparing two
+    # separately formed ill-conditioned inverse squares.
+    mul!(state.work1, state.Proot, state.Prootinv)
+    SymmetricCones._psd_nt_close(state.work1, state.chol_inv, n) ||
+        return _runtime_psd_nt_fail(:root_inverse, n)
     mul!(state.Pinv, state.Prootinv, state.Prootinv)
 
     mul!(state.work3, state.Proot, state.Y)
@@ -516,24 +596,21 @@ end
     catch
         false
     end
-    converged || return false
+    converged || return _runtime_psd_nt_fail(:lambda_eigen, n)
     SymmetricCones._orthonormalize!(state.U, n)
     @inbounds for k in 1:n
         value = state.lambda[k]
-        (isfinite(value) && value > zero(T)) || return false
+        (isfinite(value) && value > zero(T)) ||
+            return _runtime_psd_nt_fail(:lambda_positive, n)
     end
 
-    mul!(state.work1, state.P, state.Y)
-    mul!(state.work2, state.work1, state.P)
-    SymmetricCones._psd_nt_close(state.work2, state.S, n) || return false
-    mul!(state.work1, state.Pinv, state.S)
-    mul!(state.work2, state.work1, state.Pinv)
-    SymmetricCones._psd_nt_close(state.work2, state.Y, n) || return false
     mul!(state.work1, state.Prootinv, state.S)
     mul!(state.work2, state.work1, state.Prootinv)
-    SymmetricCones._psd_nt_close(state.work2, state.Lambda, n) || return false
+    SymmetricCones._psd_nt_close(state.work2, state.Lambda, n) ||
+        return _runtime_psd_nt_fail(:scaled_lambda, n)
     mul!(state.work1, state.Proot, state.Proot)
-    SymmetricCones._psd_nt_close(state.work1, state.P, n) || return false
+    SymmetricCones._psd_nt_close(state.work1, state.P, n) ||
+        return _runtime_psd_nt_fail(:proot_square, n)
     state.valid[1] = true
     return true
 end

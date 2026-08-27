@@ -371,6 +371,19 @@ function _sym_eigen_convergence()
         SC._identity!(s.V, n)
         SC._jacobi_eigen!(s.A, s.V, s.w; maxsweeps=50)
         @test sort(s.w) ≈ sort(eigvals(Symmetric(Matrix{Float64}(X)))) rtol=1e-10
+
+        # The convergence norm is the sum of all off-diagonal magnitudes.
+        # Several entries can each be smaller than that aggregate tolerance
+        # while their sum remains larger; the per-rotation threshold must not
+        # skip all of them and deterministically exhaust the sweep budget.
+        aggregate_tol = eps(Float64) * 3.0 * n * 10.0
+        X_stalled = Matrix(Diagonal([1.0, 2.0, 3.0]))
+        X_stalled[1, 2] = X_stalled[2, 1] = 0.75 * aggregate_tol
+        X_stalled[1, 3] = X_stalled[3, 1] = 0.75 * aggregate_tol
+        copyto!(s.A, X_stalled)
+        SC._identity!(s.V, n)
+        SC._jacobi_eigen!(s.A, s.V, s.w; maxsweeps=50)
+        @test sort(s.w) ≈ sort(eigvals(Symmetric(X_stalled))) rtol=1e-14
     end
 end
 
