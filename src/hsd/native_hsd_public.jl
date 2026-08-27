@@ -1,8 +1,8 @@
 #=====================================================================#
 # Direct public opt-in for the native product-cone HSD engine.
 #
-# This file owns one deliberately narrow symmetric route and its typed
-# descriptor for the future hybrid route:
+# This file owns the direct native route for symmetric and primal
+# nonsymmetric product-cone programs, together with its typed descriptors:
 #
 #     NativeConeProgram -> canonicalize -> equality reduction
 #                       -> product_hsd_solve!
@@ -75,7 +75,12 @@ end
     throw(PublicOptimizeError(route, reason, message))
 end
 
-"""Reject every public policy the direct route cannot execute exactly."""
+"""Reject public policies the direct route cannot execute exactly.
+
+The native nonsymmetric kernels are production-ready for primal Exp/Power
+blocks.  MOI support remains intentionally separate: this policy gate only
+controls the public `Model` route and does not make an adapter capability claim.
+"""
 function _public_validate_native_hsd_policy(
     model::Model,
     program::NativeConeProgram,
@@ -148,22 +153,24 @@ function _public_validate_native_hsd_policy(
         "optimize: engine=:native_hsd does not publish PerformanceTrace",
     )
 
-    symmetric = (:free, :nonnegative, :nonpositive, :zero, :soc, :rsoc, :psd)
+    supported = (
+        :free, :nonnegative, :nonpositive, :zero, :soc, :rsoc, :psd,
+        :exp, :power,
+    )
     for block in program.blocks
-        block.cone in symmetric || _native_hsd_public_error(
+        block.cone in supported || _native_hsd_public_error(
             route.route,
-            :native_hsd_nonsymmetric_unavailable,
-            "optimize: engine=:native_hsd supports only LP/SOC/RSOC/PSD " *
-            "symmetric blocks; $(block.cone) is unavailable",
+            :native_hsd_cone_unavailable,
+            "optimize: engine=:native_hsd does not support cone " *
+            "$(block.cone)",
         )
     end
     for block in program.row_blocks
         cone = _domain_cone(block.domain)
-        cone in symmetric || _native_hsd_public_error(
+        cone in supported || _native_hsd_public_error(
             route.route,
-            :native_hsd_nonsymmetric_unavailable,
-            "optimize: engine=:native_hsd supports only LP/SOC/RSOC/PSD " *
-            "symmetric blocks; $cone is unavailable",
+            :native_hsd_cone_unavailable,
+            "optimize: engine=:native_hsd does not support cone $cone",
         )
     end
     return nothing

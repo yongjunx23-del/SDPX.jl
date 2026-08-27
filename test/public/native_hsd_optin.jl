@@ -504,36 +504,34 @@ end
     @test warm_error.reason === :native_hsd_warm_start_unavailable
 
     exp_model = SDPX.Model(Float64)
-    e = SDPX.variable!(exp_model, :e, 3; domain=SDPX.ExponentialCone())
+    e = SDPX.variable!(exp_model, :e, 1; domain=SDPX.Reals())
+    SDPX.constraint!(
+        exp_model, :exp_row, (0.0, 1.0, e[1]), SDPX.ExponentialCone(),
+    )
     SDPX.objective!(exp_model, SDPX.Minimize(), e[1])
-    exp_error = try
-        SDPX.optimize!(
-            exp_model;
-            settings=_nh_settings(Float64),
-            outputs=_nh_outputs(),
-        )
-        nothing
-    catch exception
-        exception
-    end
-    @test exp_error isa SDPX.PublicOptimizeError
-    @test exp_error.reason === :native_hsd_nonsymmetric_unavailable
+    exp_result = SDPX.optimize!(
+        exp_model;
+        settings=_nh_settings(Float64; iterations=400),
+        outputs=_nh_outputs(),
+    )
+    @test SDPX.status(exp_result) === :optimal
+    @test SDPX.certificate(exp_result).valid
+    @test SDPX.certificate(exp_result).primal_objective ≈ 1.0 atol=2e-5
 
     power_model = SDPX.Model(Float64)
-    p = SDPX.variable!(power_model, :p, 3; domain=SDPX.PowerCone(0.5))
+    p = SDPX.variable!(power_model, :p, 1; domain=SDPX.Reals())
+    SDPX.constraint!(
+        power_model, :power_row, (1.0, 1.0, p[1]), SDPX.PowerCone(0.5),
+    )
     SDPX.objective!(power_model, SDPX.Minimize(), p[1])
-    power_error = try
-        SDPX.optimize!(
-            power_model;
-            settings=_nh_settings(Float64),
-            outputs=_nh_outputs(),
-        )
-        nothing
-    catch exception
-        exception
-    end
-    @test power_error isa SDPX.PublicOptimizeError
-    @test power_error.reason === :native_hsd_nonsymmetric_unavailable
+    power_result = SDPX.optimize!(
+        power_model;
+        settings=_nh_settings(Float64; iterations=400),
+        outputs=_nh_outputs(),
+    )
+    @test SDPX.status(power_result) === :optimal
+    @test SDPX.certificate(power_result).valid
+    @test SDPX.certificate(power_result).primal_objective ≈ -1.0 atol=2e-5
 end
 
 @testset "native HSD future hybrid descriptor remains truthful and internal" begin
@@ -579,8 +577,7 @@ end
           descriptor.backend
 
     # The numerical product-HSD core and original-coordinate certificate are
-    # exercised internally for a fixed Exp model, while the public policy gate
-    # remains closed until the hybrid route is formally enabled.
+    # exercised through the public route for a fixed Exp model.
     certificate_model = SDPX.Model(Float64)
     z = SDPX.variable!(certificate_model, :z, 3;
                        domain=SDPX.ExponentialCone())
@@ -623,18 +620,14 @@ end
     internal_selected = SDPX.diagnostics(internal_result).selected_algorithms
     @test internal_selected.metric === :hybrid_factor_coordinate_metric
     @test internal_selected.backend === :native_hsd_factor_coordinate_coupled
-    public_error = try
-        SDPX.optimize!(
-            certificate_model;
-            settings=certificate_settings,
-            outputs=_nh_outputs(),
-        )
-        nothing
-    catch exception
-        exception
-    end
-    @test public_error isa SDPX.PublicOptimizeError
-    @test public_error.reason === :native_hsd_nonsymmetric_unavailable
+    public_result = SDPX.optimize!(
+        certificate_model;
+        settings=certificate_settings,
+        outputs=_nh_outputs(),
+    )
+    @test SDPX.status(public_result) === :optimal
+    @test SDPX.certificate(public_result).valid
+    @test SDPX.value(public_result)[3] ≈ exp(1.0) atol=2e-5
 end
 
 @testset "native mixed route cannot call lowerer or PSD lift" begin
