@@ -31,6 +31,7 @@ end
     ProductHSDUnverifiedZeroComplementarity
     ProductHSDRankAmbiguousSetup
     ProductHSDRankRayVerificationFailed
+    ProductHSDKKTInitializationFailed
     ProductHSDTimeLimitReached
 end
 
@@ -444,7 +445,11 @@ function product_hsd_solve!(
     max_iterations::Integer=300,
     max_time::Real=Inf,
     tol::Union{Nothing,T}=nothing,
+    initialization::Symbol=:auto,
 ) where {T}
+    initialization in (:auto, :identity, :kkt) || throw(ArgumentError(
+        "initialization must be :auto, :identity, or :kkt",
+    ))
     max_iterations >= 0 || throw(ArgumentError(
         "max_iterations must be nonnegative, got $max_iterations",
     ))
@@ -486,7 +491,18 @@ function product_hsd_solve!(
         )
     end
 
-    product_hsd_cold_start!(state)
+    selected_initialization = initialization === :auto ?
+        (state.kkt_route === :expanded ? :kkt : :identity) : initialization
+    if selected_initialization === :kkt
+        start_report = kkt_derived_start!(state)
+        start_report.ok || return _product_hsd_make_result(
+            state, ProductHSDBreakdown, ProductHSDKKTInitializationFailed,
+            HSDStepDirectionFailed, zero(T), x_original, s_original,
+            y_original,
+        )
+    else
+        product_hsd_cold_start!(state)
+    end
     initial = _product_hsd_candidate_result!(
         state, x_original, s_original, y_original, certificate_tol,
         ProductHSDVerifiedInitialPoint, HSDStepOK,
@@ -564,8 +580,9 @@ end
 
 """Construct an internal product-HSD state and solve it."""
 function product_hsd_solve(
-    canonical::CanonicalConicProgram{T}; kwargs...,
+    canonical::CanonicalConicProgram{T};
+    kkt_route::Symbol=:bordered, kwargs...,
 ) where {T<:AbstractFloat}
-    state = ProductConeHSDState(canonical)
+    state = ProductConeHSDState(canonical; kkt_route=kkt_route)
     return product_hsd_solve!(state; kwargs...)
 end

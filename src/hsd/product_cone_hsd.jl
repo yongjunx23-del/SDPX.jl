@@ -139,6 +139,7 @@ mutable struct ProductConeHSDState{
     NS,
     CW,
     SB,
+    EW,
 }
     base::HSDState{T,R}
     runtime::RT
@@ -162,19 +163,25 @@ mutable struct ProductConeHSDState{
     ns_zero_rhs::Vector{T}
     coupled::CW
     symmetric_bordered::SB
+    kkt_route::Symbol
+    expanded::EW
 end
 
 function ProductConeHSDState(
     canonical::CanonicalConicProgram{T},
-    driver::HotRouteCache{T,R},
+    driver::HotRouteCache{T,R};
+    kkt_route::Symbol=:bordered,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     base = HSDState(canonical, driver)
-    return _product_cone_hsd_state(base)
+    return _product_cone_hsd_state(base; kkt_route=kkt_route)
 end
 
 function _product_cone_hsd_state(
-    base::HSDState{T,R},
+    base::HSDState{T,R}; kkt_route::Symbol=:bordered,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
+    kkt_route in (:bordered, :expanded) || throw(ArgumentError(
+        "product HSD kkt_route must be :bordered or :expanded",
+    ))
     runtime = ProductConeRuntime(base.canonical.cone_layout, T)
     m = base.m
     block_count = length(runtime.exp) + length(runtime.power)
@@ -194,9 +201,10 @@ function _product_cone_hsd_state(
     # LPLU. `base.driver` remains part of the generic HSD storage contract but
     # is never factored by this route, even when a caller supplied it.
     symmetric_bordered = SymmetricBorderedWorkspace(T, base.nr)
+    expanded = ExpandedKKTSession(T, base.n, base.m; rhs_count=2)
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
-        typeof(symmetric_bordered),
+        typeof(symmetric_bordered),typeof(expanded),
     }(
         base,
         runtime,
@@ -220,23 +228,26 @@ function _product_cone_hsd_state(
         zeros(T, m),
         coupled,
         symmetric_bordered,
+        kkt_route,
+        expanded,
     )
 end
 
 function ProductConeHSDState(
-    canonical::CanonicalConicProgram{T},
+    canonical::CanonicalConicProgram{T}; kkt_route::Symbol=:bordered,
 ) where {T<:AbstractFloat}
     reduction = _hsd_rowspace_reduction(canonical)
     cache = DenseSchurCholeskyCache{T}(reduction.rank)
     driver = HotRouteCache(cache; n=reduction.rank)
     base = _hsd_state_from_reduction(canonical, driver, reduction)
-    return _product_cone_hsd_state(base)
+    return _product_cone_hsd_state(base; kkt_route=kkt_route)
 end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
 
 """Numeric factorizations performed by the active product-HSD route."""
 @inline function product_hsd_factor_count(state::ProductConeHSDState)
+    state.kkt_route === :expanded && return state.base.epoch
     if state.coupled.nonsymmetric_dimension > 0
         return factor_epoch(state.coupled.cache)
     end
@@ -2688,6 +2699,129 @@ does not materialise a product-cone matrix or allocate a block view.
     return state.h
 end
 
+function _product_hsd_expanded_linearization(
+    state::ProductConeHSDState{T}, corrector_rhs::AbstractVector{T},
+) where {T}
+    m = state.base.m
+    operator = zeros(T, m, m)
+    basis = zeros(T, m)
+    image = zeros(T, m)
+    @inbounds for column in 1:m
+        fill!(basis, zero(T))
+        basis[column] = one(T)
+        apply_Theta!(state.runtime, image, basis)
+        for row in 1:m
+            operator[row, column] = image[row]
+        end
+    end
+    # Cone kernels promise a self-adjoint map. Independently materialized
+    # columns can differ by their operation-order roundoff; certify that
+    # skew part componentwise, then freeze the lower triangle as the single
+    # self-adjoint authority. This is a setup backward-error check, not a
+    # solver stopping tolerance.
+    forcing = T(64) * eps(T)
+    @inbounds for column in 1:m
+        for row in (column + 1):m
+            lower = operator[row, column]
+            upper = operator[column, row]
+            work = abs(lower) + abs(upper)
+            discrepancy = abs(lower - upper)
+            if !(isfinite(work) && isfinite(discrepancy)) ||
+               (!iszero(work) && discrepancy > forcing * work) ||
+               (iszero(work) && !iszero(discrepancy))
+                return nothing
+            end
+            operator[column, row] = lower
+        end
+    end
+    local_contribution = LocalConeLinearization(
+        1:m, operator, copy(corrector_rhs),
+    )
+    return assemble_cone_linearization(T, m, [local_contribution])
+end
+
+function _product_hsd_expanded_system(
+    state::ProductConeHSDState{T}, cone, scalar_rhs::T,
+) where {T}
+    base = state.base
+    rhs = residual_newton_rhs(
+        base.rP, base.rD, base.rG, cone.corrector_rhs, scalar_rhs,
+    )
+    return NewtonSystem(
+        base.A, base.b, base.c, cone, base.tau, base.kappa, rhs,
+    )
+end
+
+function _product_hsd_expanded_solve_shift!(
+    state::ProductConeHSDState{T}, cone, scalar_rhs::T,
+) where {T}
+    system = _product_hsd_expanded_system(state, cone, scalar_rhs)
+    rhs = zeros(T, state.expanded.dimension)
+    expanded_rhs!(rhs, system)
+    solution = similar(rhs)
+    # Predictor certification changes only the semantic status; the same
+    # factor remains numerically valid for the corrector RHS.
+    state.expanded.status = EXPANDED_KKT_FACTORED
+    solve_expanded!(solution, state.expanded, rhs) || return false
+    refine_expanded!(solution, state.expanded, rhs) || return false
+    direction = recover_expanded_direction(system, solution)
+    base = state.base
+    copyto!(base.dx, direction.dx)
+    copyto!(base.dy, direction.dy)
+    copyto!(base.ds, direction.ds)
+    base.dtau = direction.dtau
+    base.dkappa = direction.dkappa
+    _hsd_direction_finite(base) || return false
+    semantic_residual = NewtonResidual(system)
+    newton_residual!(semantic_residual, system, direction)
+    scale = max(
+        norm(rhs, Inf), norm(solution, Inf) *
+        _expanded_operator_scale(state.expanded.unregularized), one(T),
+    )
+    return max_newton_residual(semantic_residual) <=
+           T(512) * eps(T) * scale
+end
+
+"""Predictor/corrector directions sharing one expanded KKT factor."""
+function _product_hsd_expanded_direction!(
+    state::ProductConeHSDState{T},
+) where {T}
+    base = state.base
+    affine_shift!(state.runtime, state.h, base.s, base.y)
+    predictor_scalar = -base.tau * base.kappa
+    cone = _product_hsd_expanded_linearization(state, state.h)
+    cone === nothing && return false
+    predictor_system = _product_hsd_expanded_system(
+        state, cone, predictor_scalar,
+    )
+    factor_expanded_kkt!(state.expanded, predictor_system) || return false
+    _product_hsd_expanded_solve_shift!(
+        state, cone, predictor_scalar,
+    ) || return false
+    copyto!(base.dx_a, base.dx)
+    copyto!(base.dy_a, base.dy)
+    copyto!(base.ds_a, base.ds)
+    base.dtau_a = base.dtau
+    base.dkappa_a = base.dkappa
+
+    alpha_aff = _product_hsd_boundary_alpha!(state)
+    (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
+    mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
+    (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
+    ratio = base.mu_aff / base.mu
+    sigma = min(one(T), ratio * ratio * ratio)
+    sigma_mu = sigma * base.mu
+    _product_hsd_corrector_shift!(state, sigma_mu)
+    corrector_scalar = sigma_mu - base.tau * base.kappa -
+                       base.dtau_a * base.dkappa_a
+    corrector_cone = ProductConeLinearization{T}(
+        cone.operator, copy(state.h), cone.block_ranges,
+    )
+    return _product_hsd_expanded_solve_shift!(
+        state, corrector_cone, corrector_scalar,
+    )
+end
+
 """Predictor/corrector directions sharing one pivoted bordered factor."""
 @inline function _product_hsd_direction!(
     state::ProductConeHSDState{T},
@@ -2837,7 +2971,13 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     scaling_ok || return HSDStepDirectionFailed
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
-    direction_ok = if has_nonsymmetric
+    direction_ok = if state.kkt_route === :expanded
+        try
+            _product_hsd_expanded_direction!(state)
+        catch
+            false
+        end
+    elseif has_nonsymmetric
         assembled = try
             _product_hsd_form_coupled_matrix!(state)
         catch

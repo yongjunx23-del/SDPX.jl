@@ -366,13 +366,14 @@ function _assemble_regularized!(
     @inbounds for index in (n + 1):(n + m + 1)
         session.regularized[index, index] -= regularization
     end
-    # The symmetric companion drops only the frozen skew x/tau pair. It is an
-    # inertia diagnostic for signed regularization, not the solved operator.
+    # The symmetric companion mirrors the upper x/tau coupling. It is an
+    # inertia diagnostic for signed regularization, not the solved frozen-sign
+    # operator (whose lower x/tau block has the opposite sign).
     copyto!(session.symmetric_companion, session.regularized)
     tau_index = session.dimension
     @inbounds for index in 1:n
-        session.symmetric_companion[index, tau_index] = zero(T)
-        session.symmetric_companion[tau_index, index] = zero(T)
+        session.symmetric_companion[tau_index, index] =
+            session.symmetric_companion[index, tau_index]
     end
     return session.regularized
 end
@@ -425,7 +426,9 @@ function solve_expanded!(
     destination::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVecOrMat{T},
 ) where {T<:AbstractFloat}
-    session.status == EXPANDED_KKT_FACTORED || return false
+    session.status in (
+        EXPANDED_KKT_FACTORED, EXPANDED_KKT_UNREGULARIZED_CERTIFIED,
+    ) || return false
     solved = solve_pivoted_lu!(destination, session.factor, rhs)
     solved || (session.status = EXPANDED_KKT_SOLVE_FAILED)
     return solved

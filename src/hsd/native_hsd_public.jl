@@ -500,6 +500,7 @@ end
     reason === ProductHSDUnverifiedZeroComplementarity && return :unverified_zero_complementarity
     reason === ProductHSDRankAmbiguousSetup && return :rank_ambiguous
     reason === ProductHSDRankRayVerificationFailed && return :rank_ray_verification_failed
+    reason === ProductHSDKKTInitializationFailed && return :kkt_initialization_failed
     return :unknown
 end
 
@@ -825,7 +826,7 @@ function _public_native_hsd_core(
         )
     end
 
-    state = ProductConeHSDState(reduced)
+    state = ProductConeHSDState(reduced; kkt_route=settings.kkt_route)
     base = state.base
     plan = _native_hsd_plan(
         program,
