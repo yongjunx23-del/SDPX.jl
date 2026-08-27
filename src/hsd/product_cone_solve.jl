@@ -347,14 +347,17 @@ end
     last_step::HSDStepCode,
     terminal_alpha::T=zero(T),
 ) where {T}
-    refined = _product_hsd_refined_optimal_result!(
-        state, x_original, s_original, y_original, tol, reason, last_step,
-        terminal_alpha,
-    )
-    refined === nothing || return refined
-    return _product_hsd_verified_result(
+    # The unchanged accepted HSD point is always the first certificate
+    # candidate, including Exp/Power products. Refinement is a recovery step,
+    # never a prerequisite for invoking the authoritative verifier.
+    direct = _product_hsd_verified_result(
         state, x_original, s_original, y_original, tol, reason, last_step,
         terminal_alpha; check_optimal=true,
+    )
+    direct === nothing || return direct
+    return _product_hsd_refined_optimal_result!(
+        state, x_original, s_original, y_original, tol, reason, last_step,
+        terminal_alpha,
     )
 end
 

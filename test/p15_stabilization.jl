@@ -62,6 +62,26 @@ end
     @test all(block.scaling.mu == mu_t for block in state.runtime.exp)
 end
 
+@testset "P1.5 direct nonsymmetric optimal verification precedes refinement" begin
+    state = _p15_exp_state()
+    solved = SDPX.product_hsd_solve!(state; max_iterations=400, tol=1e-8)
+    @test solved.status === SDPX.ProductHSDOptimal
+
+    replay = SDPX.ProductConeHSDState(state.base.canonical)
+    copyto!(replay.base.x, solved.hsd_x)
+    copyto!(replay.base.s, solved.hsd_s)
+    copyto!(replay.base.y, solved.hsd_y)
+    replay.base.tau = solved.tau
+    replay.base.kappa = solved.kappa
+    SDPX.hsd_residual!(replay.base)
+    direct = SDPX._product_hsd_verified_result(
+        replay, similar(solved.x), similar(solved.s), similar(solved.y), 1e-8,
+        SDPX.ProductHSDVerifiedAcceptedStep, SDPX.HSDStepOK,
+    )
+    @test direct !== nothing
+    @test direct.status === SDPX.ProductHSDOptimal
+end
+
 @testset "P1.5 verified terminal result owns its copied data" begin
     state = _p15_exp_state()
     marker = (:immutable_verified_result, [1.0])
