@@ -152,6 +152,8 @@ struct PSDNTScaling{T}
     work2::Matrix{T}
     work3::Matrix{T}
     work4::Matrix{T}
+    chol::Matrix{T}
+    chol_inv::Matrix{T}
 end
 
 function PSDNTScaling{T}(dim::Int; eigen_route::Symbol=:setup_jacobi) where {T}
@@ -162,7 +164,7 @@ function PSDNTScaling{T}(dim::Int; eigen_route::Symbol=:setup_jacobi) where {T}
     len = packed_len(dim)
     sqrt2 = sqrt(one(T) + one(T))
     invsqrt2 = one(T) / sqrt2
-    matrices = ntuple(_ -> zeros(T, dim, dim), 11)
+    matrices = ntuple(_ -> zeros(T, dim, dim), 14)
     return PSDNTScaling{T}(
         dim,
         len,
@@ -182,7 +184,9 @@ function PSDNTScaling{T}(dim::Int; eigen_route::Symbol=:setup_jacobi) where {T}
         matrices[9],
         matrices[10],
         matrices[11],
-        zeros(T, dim, dim),
+        matrices[12],
+        matrices[13],
+        matrices[14],
     )
 end
 

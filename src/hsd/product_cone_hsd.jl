@@ -2705,6 +2705,10 @@ end
     base = state.base
     alpha = _product_hsd_boundary_alpha!(state)
     (isfinite(alpha) && alpha > zero(T)) || return false
+    # Keep accepted iterates away from numerically unresolved PSD faces.  The
+    # predictor still uses the aggressive 0.995 boundary estimate for the
+    # frozen Mehrotra centering contract; only the accepted trial is damped.
+    alpha *= T(0.9)
     p_norm = _hsd_maxinf(base.rP)
     d_norm = _hsd_maxinf(base.rD)
     g_norm = abs(base.rG)
@@ -2712,7 +2716,11 @@ end
     backtracking = 0
     has_nonsymmetric = !isempty(state.runtime.exp) ||
                        !isempty(state.runtime.power)
-    max_backtracking = has_nonsymmetric ? 64 : 16
+    # PSD NT scaling can reject a strictly-interior trial until roundoff in a
+    # near-boundary eigensystem is reduced below its backward-error gates.  A
+    # valid Lattice direction first becomes certifiable after 16 halvings, so
+    # use the same finite 64-trial budget for every product family.
+    max_backtracking = 64
     if has_nonsymmetric
         checkpoint_nonsymmetric_scaling!(state.runtime) || return false
     end
