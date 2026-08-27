@@ -165,6 +165,7 @@ mutable struct ProductConeHSDState{
     symmetric_bordered::SB
     kkt_route::Symbol
     expanded::EW
+    diagnostic::Symbol
 end
 
 function ProductConeHSDState(
@@ -234,6 +235,7 @@ function _product_cone_hsd_state(
         symmetric_bordered,
         kkt_route,
         expanded,
+        :none,
     )
 end
 

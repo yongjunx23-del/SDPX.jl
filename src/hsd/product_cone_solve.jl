@@ -423,6 +423,14 @@ and changes neither the direction nor the HSD equations.  A single global
 strict-interior trial is promoted only if residual homotopy and an ordinary
 original-coordinate certificate verifier both pass.
 """
+@inline function _product_hsd_finish_terminal_restore!(state, result, restored::Bool)
+    if !restored
+        state.runtime.valid = false
+        state.diagnostic = :post_result_state_restore_failed
+    end
+    return result
+end
+
 function _product_hsd_terminal_verified_result!(
     state::ProductConeHSDState{T},
     x_original::Vector{T},
@@ -461,15 +469,10 @@ function _product_hsd_terminal_verified_result!(
     base.kappa = saved_kappa
     hsd_residual!(base)
     restored = try_update_scaling!(state.runtime, base.s, base.y, base.mu)
-    if !restored
-        # Do not let a discarded verified trial leak through the output
-        # buffers of the ensuing fail-closed breakdown result.
-        fill!(x_original, zero(T))
-        fill!(s_original, zero(T))
-        fill!(y_original, zero(T))
-        return nothing
-    end
-    return result
+    # `_product_hsd_make_result` has copied every verified coordinate. A
+    # failure to restore this reusable mutable runtime cannot revoke that
+    # immutable result; retain it and invalidate only the abandoned state.
+    return _product_hsd_finish_terminal_restore!(state, result, restored)
 end
 
 """

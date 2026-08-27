@@ -61,3 +61,12 @@ end
     @test state.runtime.last_mu == mu_t
     @test all(block.scaling.mu == mu_t for block in state.runtime.exp)
 end
+
+@testset "P1.5 verified terminal result owns its copied data" begin
+    state = _p15_exp_state()
+    marker = (:immutable_verified_result, [1.0])
+    returned = SDPX._product_hsd_finish_terminal_restore!(state, marker, false)
+    @test returned === marker
+    @test !state.runtime.valid
+    @test state.diagnostic === :post_result_state_restore_failed
+end
