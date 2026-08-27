@@ -10,8 +10,9 @@
 # duplicating those numerical-kernel tests.
 #
 # This suite deliberately records the current public behavior of the native
-# HSD route.  The cases that expose the restructure's known gaps are only run
-# when SDPX_RUN_KNOWN_GAPS=1, and remain visible as @test_broken assertions.
+# HSD route.  Remaining gaps are only run when SDPX_RUN_KNOWN_GAPS=1;
+# regressions closed by later waves remain in that matrix as ordinary strict
+# assertions so the opt-in report cannot silently reopen them.
 
 using SDPX
 using Test
@@ -205,17 +206,17 @@ end
         end
 
         @testset "mixed free/equality/PSD" begin
-            result = _p0_optimize(_p0_mixed_free_psd(), :native_hsd)
-            @test_broken SDPX.status(result) === :optimal &&
-                SDPX.certificate(result).valid &&
-                isapprox(SDPX.primal_objective(result), 1.0; atol=2e-6)
+            result = _p0_optimize(
+                _p0_mixed_free_psd(), :native_hsd; kkt_route=:expanded,
+            )
+            _p0_assert_optimal(result, 1.0; atol=2e-6)
         end
 
         @testset "bounded Nonpositive affine rows" begin
-            result = _p0_optimize(_p0_bounded_nonpositive(), :native_hsd)
-            @test_broken SDPX.status(result) === :optimal &&
-                SDPX.certificate(result).valid &&
-                isapprox(SDPX.primal_objective(result), 2.0; atol=2e-6)
+            result = _p0_optimize(
+                _p0_bounded_nonpositive(), :native_hsd; kkt_route=:expanded,
+            )
+            _p0_assert_optimal(result, 2.0; atol=2e-6)
         end
 
         @testset "bounded capped affine rows" begin
