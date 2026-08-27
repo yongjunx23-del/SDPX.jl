@@ -166,6 +166,7 @@ mutable struct ProductConeHSDState{
     kkt_route::Symbol
     expanded::EW
     diagnostic::Symbol
+    tau_collapse_recoveries::Int
 end
 
 function ProductConeHSDState(
@@ -236,6 +237,7 @@ function _product_cone_hsd_state(
         kkt_route,
         expanded,
         :none,
+        0,
     )
 end
 

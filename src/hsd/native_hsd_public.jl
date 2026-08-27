@@ -499,7 +499,8 @@ end
     status === ProductHSDDualInfeasible && return DualInfeasible
     status === ProductHSDMaxIterations && return IterLimit
     status === ProductHSDTimeLimit && return TimeLimit
-    status === ProductHSDRankAmbiguous && return InsufficientPrecision
+    status in (ProductHSDRankAmbiguous, ProductHSDInsufficientPrecision) &&
+        return InsufficientPrecision
     status in (ProductHSDSingular, ProductHSDBreakdown) && return NumericalBreakdown
     return NumericalFailure
 end
@@ -518,6 +519,8 @@ end
     reason === ProductHSDRankAmbiguousSetup && return :rank_ambiguous
     reason === ProductHSDRankRayVerificationFailed && return :rank_ray_verification_failed
     reason === ProductHSDKKTInitializationFailed && return :kkt_initialization_failed
+    reason === ProductHSDTauCollapseRecoveryExhausted &&
+        return :tau_collapse_recovery_exhausted
     return :unknown
 end
 
