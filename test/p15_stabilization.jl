@@ -82,6 +82,18 @@ end
     @test direct.status === SDPX.ProductHSDOptimal
 end
 
+@testset "P1.5 package include graph is unique" begin
+    root = normpath(joinpath(@__DIR__, ".."))
+    module_source = read(joinpath(root, "src", "SDPX.jl"), String)
+    includes = String[]
+    for matched in eachmatch(r"(?m)^\s*include\(\"([^\"]+)\"\)", module_source)
+        push!(includes, matched.captures[1])
+    end
+    @test !isempty(includes)
+    @test length(includes) == length(unique(includes))
+    @test all(isfile(joinpath(root, "src", path)) for path in includes)
+end
+
 @testset "P1.5 ray unit normalization uses certificate tolerance" begin
     value = -1.0 + 1e-8
     @test SDPX._certificate_unit_normalization_ok(value, 2e-8)

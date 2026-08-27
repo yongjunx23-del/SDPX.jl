@@ -22,6 +22,31 @@
 # not hidden as a fallback.
 using SDPX
 using Test
+using SHA
+
+function _quick_gate_provenance()
+    root = normpath(joinpath(@__DIR__, ".."))
+    source_sha = readchomp(`git -C $root rev-parse HEAD`)
+    source_state = success(`git -C $root diff --quiet HEAD --`) ? "clean" : "dirty"
+    project = Base.active_project()
+    manifest = joinpath(dirname(project), "Manifest.toml")
+    manifest_sha = isfile(manifest) ? bytes2hex(sha256(read(manifest))) : "missing"
+    report = join((
+        "source_sha=$source_sha",
+        "source_state=$source_state",
+        "active_project=$project",
+        "test_manifest_sha256=$manifest_sha",
+    ), '\n') * '\n'
+    artifact = get(
+        ENV, "SDPX_QUICK_GATE_ARTIFACT",
+        joinpath(tempdir(), "sdpx-quick-gate-provenance.txt"),
+    )
+    write(artifact, report)
+    println("SDPX quick-gate provenance:\n", report, "artifact=", artifact)
+    return artifact
+end
+
+const _QUICK_GATE_PROVENANCE = _quick_gate_provenance()
 
 include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.jl"))
 
