@@ -514,12 +514,13 @@ end
     @test SDPX.kkt_factor_count(state.base.driver) == old_h_factors == 0
     @test workspace.factor_epoch == workspace.assembly_epoch == state.base.epoch
     @test workspace.factor_certified
-    # Predictor, two bounded correction solves, and corrector all reused the
-    # single epoch factor. No monotonicity of the first correction is assumed.
-    @test workspace.solves == 4
-    @test workspace.refinements == 2
-    @test workspace.accumulations == 2
-    @test cond(workspace.matrix) > 1e12
+    # Stable scalar recovery makes both predictor and corrector pass directly;
+    # each reuses the single epoch factor and no bounded correction solve is
+    # needed on this formerly ill-conditioned step-8 regression.
+    @test workspace.solves == 2
+    @test workspace.refinements == 0
+    @test workspace.accumulations == 0
+    @test cond(workspace.matrix) > 1e6
     @test cond(workspace.factor_matrix) < 1e6
     @test SDPX._product_bordered_transform_matrix_ok(workspace)
     @test SDPX._product_bordered_factor_certificate!(workspace)
@@ -669,39 +670,43 @@ end
     @test prepared !== nothing
     authority_state, authority_scalar_rhs = prepared
     authority_workspace = authority_state.symmetric_bordered
-    @test authority_workspace.solves == 4
-    @test authority_workspace.refinements == 2
+    @test authority_workspace.solves == 2
+    @test authority_workspace.refinements == 0
     @test SDPX._product_bordered_physical_snapshot_ok(
         authority_workspace,
     )
-    saved_refinements = authority_workspace.refinements
+    # A direct strict five-equation certificate is authoritative. Merely
+    # spoofing one refinement cannot activate the separate conditioned route.
     authority_workspace.refinements = 1
     @test !SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
     @test !SDPX._product_hsd_symmetric_scalar_residual_ok(
         authority_state, authority_scalar_rhs,
     )
-    authority_workspace.refinements = saved_refinements
-    @test SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
+    authority_workspace.refinements = 0
+    @test SDPX._product_hsd_newton_residual_ok(
+        authority_state, authority_scalar_rhs,
+    )
     saved_dy = authority_state.base.dy[1]
     authority_state.base.dy[1] = saved_dy +
         1024 * max(1.0, abs(saved_dy))
     @test isfinite(authority_state.base.dy[1])
-    @test !SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
-    authority_state.base.dy[1] = saved_dy
-    @test SDPX._product_hsd_symmetric_dual_residual_ok(authority_state)
-
-    @test SDPX._product_hsd_symmetric_scalar_residual_ok(
+    @test !SDPX._product_hsd_newton_residual_ok(
         authority_state, authority_scalar_rhs,
     )
+    authority_state.base.dy[1] = saved_dy
+    @test SDPX._product_hsd_newton_residual_ok(
+        authority_state, authority_scalar_rhs,
+    )
+
     saved_dkappa = authority_state.base.dkappa
     authority_state.base.dkappa = saved_dkappa +
         1024 * max(1.0, abs(saved_dkappa))
     @test isfinite(authority_state.base.dkappa)
-    @test !SDPX._product_hsd_symmetric_scalar_residual_ok(
+    @test !SDPX._product_hsd_newton_residual_ok(
         authority_state, authority_scalar_rhs,
     )
     authority_state.base.dkappa = saved_dkappa
-    @test SDPX._product_hsd_symmetric_scalar_residual_ok(
+    @test SDPX._product_hsd_newton_residual_ok(
         authority_state, authority_scalar_rhs,
     )
 

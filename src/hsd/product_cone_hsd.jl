@@ -2153,6 +2153,16 @@ end
     return true
 end
 
+@inline function _product_hsd_recover_dkappa!(base, scalar_rhs)
+    # The scalar complementarity equation is well-conditioned because HSD
+    # keeps tau strictly positive. Recover dkappa from it directly; computing
+    # dkappa from the gap equation loses digits as the homogeneous border
+    # becomes ill-conditioned near an SDP optimum. The independent gap
+    # equation remains part of the strict five-equation direction certificate.
+    base.dkappa = (scalar_rhs - base.kappa * base.dtau) / base.tau
+    return isfinite(base.dkappa)
+end
+
 @inline function _product_hsd_solve_shift_raw!(
     state::ProductConeHSDState{T},
     scalar_rhs::T,
@@ -2178,6 +2188,10 @@ end
     base.dtau = workspace.solution[end]
     _hsd_scatter_dx!(base)
     _product_hsd_recover!(state) || begin
+        workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
+        return false
+    end
+    _product_hsd_recover_dkappa!(base, scalar_rhs) || begin
         workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
         return false
     end
@@ -2441,6 +2455,14 @@ end
         workspace.accumulations += 1
         _product_hsd_restore_refinement_equations!(state, original_rG)
         _product_hsd_rebuild_refined_direction!(state, true) || begin
+            workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
+            return false
+        end
+        _product_hsd_recover_dkappa!(base, scalar_rhs) || begin
+            workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
+            return false
+        end
+        _hsd_direction_finite(base) || begin
             workspace.last_reason = SYMMETRIC_BORDERED_RECOVERY_FAILED
             return false
         end

@@ -2,6 +2,7 @@ using SDPX
 using Test
 
 const QUICK_TESTS = (
+    "a1_mixed_psd_hsd.jl",
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
     "dense_augmented_kkt.jl",
@@ -93,6 +94,7 @@ const QUICK_TESTS = (
 # Keep this list in the historical full-suite order. Some older tests share
 # helpers through that order (notably correctness.jl -> sparse.jl).
 const FULL_TESTS = (
+    "a1_mixed_psd_hsd.jl",
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
     "dense_augmented_kkt.jl",
