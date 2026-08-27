@@ -33,7 +33,9 @@ end
     session = SDPX.ExpandedKKTSession(Float64, 2, 3; rhs_count=2)
     @test SDPX.factor_expanded_kkt!(session, system)
     @test session.status == SDPX.EXPANDED_KKT_FACTORED
-    @test session.inertia_factor.inertia == SDPX.KKTInertia(2, 4, 0)
+    @test SDPX.expected_expanded_inertia(system) == SDPX.KKTInertia(2, 4, 0)
+    @test session.expected_inertia == SDPX.KKTInertia(2, 4, 0)
+    @test session.inertia_factor.inertia == session.expected_inertia
     @test session.regularization_attempts >= 0
 
     rhs = zeros(Float64, session.dimension)
@@ -75,9 +77,13 @@ end
     rhs = SDPX.HSDNewtonRHS(zeros(T, 1), zeros(T, 1), zero(T), zeros(T, 1), zero(T))
     system = SDPX.NewtonSystem(A, b, c, cone, one(T), one(T), rhs)
     session = SDPX.ExpandedKKTSession(T, 1, 1)
+    # The expected inertia is a structure-derived authority, not mutable input.
+    session.expected_inertia = SDPX.KKTInertia(3, 0, 0)
     @test !SDPX.factor_expanded_kkt!(session, system; max_regularization_attempts=3)
+    @test session.expected_inertia == SDPX.KKTInertia(1, 2, 0)
     @test session.status == SDPX.EXPANDED_KKT_WRONG_INERTIA
     @test session.inertia_factor.inertia != session.expected_inertia
+    @test !session.factor.success
 end
 
 @testset "expanded generic precision fallback" begin

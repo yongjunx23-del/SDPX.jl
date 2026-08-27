@@ -33,6 +33,22 @@ Base.:(==)(left::KKTInertia, right::KKTInertia) =
     left.positive == right.positive && left.negative == right.negative &&
     left.zero == right.zero
 
+"""
+    expected_expanded_inertia(system)
+
+Return the inertia forced by the signed quasidefinite block structure.  The
+`x` block receives the positive-semidefinite `Rx` contribution and the
+combined `(y, tau)` block receives the negative-semidefinite `Ry`
+contribution.  Signed regularization makes those contributions definite, so
+a nonsingular companion has exactly `n` positive and `m + 1` negative
+directions.  This authority is recomputed from each `NewtonSystem`; it is not
+a caller-provided hint and is never inferred from the observed factor.
+"""
+function expected_expanded_inertia(system::NewtonSystem)
+    m, n = size(system.A)
+    return KKTInertia(n, m + 1, 0)
+end
+
 """Generic diagonal-pivoted `L*D*L'` used for inertia certification."""
 mutable struct GenericPivotedLDL{T<:AbstractFloat}
     schur::Matrix{T}
@@ -281,7 +297,7 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         n, m, dimension, zeros(T, dimension, dimension),
         zeros(T, dimension, dimension), zeros(T, dimension, dimension),
         GenericPivotedLU(T, dimension), GenericPivotedLDL(T, dimension),
-        KKTInertia(n, m + 1, 0), zero(T), 0, 0,
+        KKTInertia(0, 0, dimension), zero(T), 0, 0,
         zeros(T, dimension, rhs_count), zeros(T, dimension, rhs_count),
         EXPANDED_KKT_READY,
     )
@@ -391,6 +407,10 @@ function factor_expanded_kkt!(
     max_regularization_attempts::Int=6,
 ) where {T<:AbstractFloat}
     assemble_expanded_kkt!(session, system)
+    # Recompute the target from the semantic system on every factorization.
+    # A stale or caller-mutated diagnostic can therefore never authorize a
+    # wrong-inertia factor.
+    session.expected_inertia = expected_expanded_inertia(system)
     scale = _expanded_operator_scale(session.unregularized)
     base_regularization = sqrt(eps(T)) * scale
     pivot_floor = T(32) * eps(T) * scale
