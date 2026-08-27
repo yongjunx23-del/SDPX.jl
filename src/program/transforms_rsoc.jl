@@ -10,7 +10,7 @@
 #=====================================================================#
 
 """A typed orthogonal map from `RotatedLorentzCone` coordinates to SOC."""
-struct RotatedSOCToSOC{T<:AbstractFloat} <: AbstractProgramTransform{T}
+struct RotatedSOCToSOC{T<:AbstractFloat} <: AbstractCoordinateTransform{T}
     dimension::Int
     precision_bits::Int
     inv_sqrt_two::T
@@ -55,6 +55,8 @@ end
 
 RotatedSOCToSOC(dimension::Integer, ::Type{T}; kwargs...) where {T<:AbstractFloat} =
     RotatedSOCToSOC{T}(dimension; kwargs...)
+
+SDPX.dimension(transform::RotatedSOCToSOC) = transform.dimension
 
 @inline function _rsoc_transform_apply!(
     destination, source, dimension::Int, inv_sqrt_two,
