@@ -162,6 +162,7 @@ const FULL_TESTS = (
     "kkt_sparse_backend.jl",
     "sparse_sdp_kkt.jl",
     "mixed_precision_kkt_regressions.jl",
+    "kernel_failure_regressions.jl",
     "result_certificate.jl",
     "infeasibility_diagnostics.jl",
     "options_interface.jl",
