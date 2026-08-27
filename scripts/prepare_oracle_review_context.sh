@@ -32,7 +32,28 @@ BASE_TREE="$(git rev-parse "${BASE_SHA}^{tree}")"
 [ -f "$REQUIRED_CONTRACT" ] || { echo "required review contract missing: $REQUIRED_CONTRACT" >&2; exit 1; }
 CONTRACT_BLOB="$(git rev-parse "HEAD:.pi/ORACLE_REVIEW_PROMPT.md")"
 CONTRACT_SHA="$(shasum -a 256 "$REQUIRED_CONTRACT" | awk '{print $1}')"
-CONTRACT_TREE_SHA="$(printf '%s' "$CONTRACT_BLOB" | shasum -a 256 | awk '{print $1}')"
+
+# --- B2: reject any contract blob that differs from the trusted external pin ---
+: "${ORACLE_CONTRACT_PIN:=$ROOT/../.oracle-contract-pin.json}"
+if [ -f "$ORACLE_CONTRACT_PIN" ]; then
+  PIN_BLOB="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["approved_contract_blob"])' "$ORACLE_CONTRACT_PIN" 2>/dev/null || echo '')"
+  if [ -n "$PIN_BLOB" ] && [ "$PIN_BLOB" != "$CONTRACT_BLOB" ]; then
+    echo "review contract blob $CONTRACT_BLOB does not match trusted pin $PIN_BLOB; update the pin (Human Lead) or revert the contract" >&2
+    exit 1
+  fi
+fi
+
+# --- B2: bind external loop docs (agent.md, plan) by SHA-256 in the identity ---
+EXTERNAL_DOCS=(
+  "$ROOT/../agent.md"
+  "$ROOT/../SDPX_EXECUTION_PLAN_v4.md"
+)
+EXT_DOC_HASHES=""
+for doc in "${EXTERNAL_DOCS[@]}"; do
+  if [ -f "$doc" ]; then
+    EXT_DOC_HASHES+="$(basename "$doc") $(shasum -a 256 "$doc" | awk '{print $1}')\n"
+  fi
+  done
 
 # --- B1: candidate must be pushed and upstream must equal local -------------
 if ! UPSTREAM="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
@@ -117,7 +138,9 @@ chmod 600 "$OUT_MANIFEST"
   echo "- Review contract path: \`.pi/ORACLE_REVIEW_PROMPT.md\`"
   echo "- Review contract blob (in candidate tree): \`$CONTRACT_BLOB\`"
   echo "- Review contract SHA-256 (working file): \`$CONTRACT_SHA\`"
-  echo "- Review contract tree-hash: \`$CONTRACT_TREE_SHA\`"
+  echo "- Review contract pin: \`$ORACLE_CONTRACT_PIN\`"
+  echo "- External loop doc SHA-256:"
+  printf '%b' "$EXT_DOC_HASHES" | sed 's/^/  - /'
   echo "- Tree manifest: \`.pi/oracle-tree-manifest\`"
   echo "- Worktree clean before context generation: yes"
   echo "- Text diff bytes: \`$DIFF_BYTES\`"
