@@ -2170,14 +2170,71 @@ end
     return true
 end
 
+@inline function _product_hsd_dkappa_equation_error(base, scalar_rhs, candidate)
+    cd_bd = zero(candidate)
+    @inbounds for j in 1:base.n
+        cd_bd += base.c[j] * base.dx[j]
+    end
+    @inbounds for k in 1:base.m
+        cd_bd += base.b[k] * base.dy[k]
+    end
+    gap_residual = base.rG + candidate - cd_bd
+    gap_work = abs(base.rG) + abs(candidate) + abs(cd_bd)
+    scalar_residual = muladd(
+        base.tau, candidate,
+        muladd(base.kappa, base.dtau, -scalar_rhs),
+    )
+    scalar_work = abs(base.tau * candidate) +
+                  abs(base.kappa * base.dtau) + abs(scalar_rhs)
+    return max(
+        _product_hsd_normalized_error(gap_residual, gap_work),
+        _product_hsd_normalized_error(scalar_residual, scalar_work),
+    )
+end
+
 @inline function _product_hsd_recover_dkappa!(base, scalar_rhs)
-    # The scalar complementarity equation is well-conditioned because HSD
-    # keeps tau strictly positive. Recover dkappa from it directly; computing
-    # dkappa from the gap equation loses digits as the homogeneous border
-    # becomes ill-conditioned near an SDP optimum. The independent gap
-    # equation remains part of the strict five-equation direction certificate.
-    base.dkappa = (scalar_rhs - base.kappa * base.dtau) / base.tau
-    return isfinite(base.dkappa)
+    # Strict positivity of tau does not make division by tau well conditioned
+    # near a homogeneous infeasibility certificate. Compare the candidates
+    # implied by the scalar-complementarity and gap equations in both original
+    # (unregularized) scalar Newton equations, and retain the lower-residual
+    # candidate. If tau is numerically unresolved, only a gap candidate which
+    # also certifies the scalar equation is admissible; otherwise the caller
+    # escalates through refinement/regularization.
+    cd_bd = zero(scalar_rhs)
+    @inbounds for j in 1:base.n
+        cd_bd += base.c[j] * base.dx[j]
+    end
+    @inbounds for k in 1:base.m
+        cd_bd += base.b[k] * base.dy[k]
+    end
+    gap_candidate = -base.rG + cd_bd
+    isfinite(gap_candidate) || return false
+    gap_error = _product_hsd_dkappa_equation_error(
+        base, scalar_rhs, gap_candidate,
+    )
+    isfinite(gap_error) || return false
+
+    tau_scale = max(
+        one(scalar_rhs), abs(base.kappa), abs(base.dtau), abs(scalar_rhs),
+    )
+    tau_resolved = abs(base.tau) > sqrt(eps(typeof(scalar_rhs))) * tau_scale
+    if tau_resolved
+        scalar_candidate =
+            (scalar_rhs - base.kappa * base.dtau) / base.tau
+        if isfinite(scalar_candidate)
+            scalar_error = _product_hsd_dkappa_equation_error(
+                base, scalar_rhs, scalar_candidate,
+            )
+            if isfinite(scalar_error) && scalar_error < gap_error
+                base.dkappa = scalar_candidate
+                return true
+            end
+        end
+    elseif gap_error > typeof(scalar_rhs)(256) * sqrt(eps(typeof(scalar_rhs)))
+        return false
+    end
+    base.dkappa = gap_candidate
+    return true
 end
 
 @inline function _product_hsd_solve_shift_raw!(

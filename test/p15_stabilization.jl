@@ -82,6 +82,29 @@ end
     @test direct.status === SDPX.ProductHSDOptimal
 end
 
+@testset "P1.5 tiny-tau dkappa recovery is residual-selected" begin
+    consistent = _p15_exp_state().base
+    fill!(consistent.dx, 0.0)
+    fill!(consistent.dy, 0.0)
+    consistent.rG = -2.0
+    consistent.tau = 1e-20
+    consistent.kappa = 1.0
+    consistent.dtau = 0.5
+    scalar_rhs = consistent.kappa * consistent.dtau +
+                 consistent.tau * 2.0
+    @test SDPX._product_hsd_recover_dkappa!(consistent, scalar_rhs)
+    @test consistent.dkappa == 2.0
+
+    inconsistent = _p15_exp_state().base
+    fill!(inconsistent.dx, 0.0)
+    fill!(inconsistent.dy, 0.0)
+    inconsistent.rG = -2.0
+    inconsistent.tau = 1e-20
+    inconsistent.kappa = 1.0
+    inconsistent.dtau = 0.5
+    @test !SDPX._product_hsd_recover_dkappa!(inconsistent, 0.501)
+end
+
 @testset "P1.5 verified terminal result owns its copied data" begin
     state = _p15_exp_state()
     marker = (:immutable_verified_result, [1.0])
