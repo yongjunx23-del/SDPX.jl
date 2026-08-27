@@ -5,67 +5,28 @@
 #
 #       M(u,v,w) = ((u+v)/sqrt(2), (u-v)/sqrt(2), w).
 #
-#    M is symmetric and involutory.  We nevertheless store the primal map,
-#    its inverse, the dual inverse-adjoint, and the dual adjoint as explicit
-#    fields.  This makes the pairing contract visible and prevents a future
-#    non-orthogonal convention from accidentally reusing the wrong map.
+#    M is symmetric, orthogonal, and involutory, so primal, inverse-primal,
+#    dual inverse-adjoint, and dual-adjoint application share one O(n) map.
 #=====================================================================#
 
 """A typed orthogonal map from `RotatedLorentzCone` coordinates to SOC."""
 struct RotatedSOCToSOC{T<:AbstractFloat} <: AbstractProgramTransform{T}
     dimension::Int
     precision_bits::Int
-    primal_map::Matrix{T}
-    inverse_primal_map::Matrix{T}
-    dual_inverse_adjoint::Matrix{T}
-    dual_adjoint::Matrix{T}
+    inv_sqrt_two::T
     pairing_scale::T
 end
 
 @inline function _rsoc_transform_precision_bits(::Type{T}) where {T<:AbstractFloat}
-    return T === BigFloat ? precision(BigFloat) : 53
-end
-
-function _rsoc_transform_map(::Type{T}, dimension::Int, bits::Int) where {T<:AbstractFloat}
-    dimension >= 3 || throw(ArgumentError(
-        "RotatedSOCToSOC requires dimension >= 3, got $dimension",
-    ))
-    if T === BigFloat
-        return setprecision(BigFloat, bits) do
-            inv_sqrt_two = inv(sqrt(BigFloat(2)))
-            one_value = BigFloat(1)
-            zero_value = BigFloat(0)
-            map = fill(zero_value, dimension, dimension)
-            map[1, 1] = inv_sqrt_two
-            map[1, 2] = inv_sqrt_two
-            map[2, 1] = inv_sqrt_two
-            map[2, 2] = -inv_sqrt_two
-            for index in 3:dimension
-                map[index, index] = one_value
-            end
-            map
-        end
-    end
-    inv_sqrt_two = inv(sqrt(T(2)))
-    map = zeros(T, dimension, dimension)
-    map[1, 1] = inv_sqrt_two
-    map[1, 2] = inv_sqrt_two
-    map[2, 1] = inv_sqrt_two
-    map[2, 2] = -inv_sqrt_two
-    for index in 3:dimension
-        map[index, index] = one(T)
-    end
-    return map
+    return precision(T)
 end
 
 """
     RotatedSOCToSOC{T}(dimension; precision_bits=...)
 
-Construct the exact (at the selected arithmetic precision) orthogonal
-RSOC-to-SOC isometry.  The canonical primal and dual maps are
-`M` and `M⁻ᵀ`, respectively.  Since this convention has `M=M⁻¹=Mᵀ`,
-all four stored maps currently have the same entries, but they remain
-separate named fields to make their mathematical roles explicit.
+Construct the orthogonal RSOC-to-SOC isometry at the selected arithmetic
+precision. Since `M=M⁻¹=Mᵀ`, all primal and dual directions use the same
+allocation-free map and pairing scale is exactly one.
 """
 function RotatedSOCToSOC{T}(
     dimension::Integer;
@@ -77,95 +38,109 @@ function RotatedSOCToSOC{T}(
     ))
     bits = Int(precision_bits)
     bits > 0 || throw(ArgumentError("precision_bits must be positive, got $bits"))
-    map = _rsoc_transform_map(T, dimension_int, bits)
-    # These copies are intentional: each field is an independently owned
-    # contract object, so later non-orthogonal transforms cannot accidentally
-    # alias and mutate another side of the pairing map.
-    inverse = copy(map)
-    dual_inverse_adjoint = copy(map)
-    dual_adjoint = copy(map)
-    pairing_scale = if T === BigFloat
+    inv_sqrt_two, pairing_scale = if T === BigFloat
         setprecision(BigFloat, bits) do
-            BigFloat(1)
+            inv(sqrt(BigFloat(2))), BigFloat(1)
         end
     else
-        one(T)
+        inv(sqrt(T(2))), one(T)
     end
+    pairing_scale == one(pairing_scale) || throw(AssertionError(
+        "orthogonal RSOC transform must preserve pairing with scale one",
+    ))
     return RotatedSOCToSOC{T}(
-        dimension_int,
-        bits,
-        map,
-        inverse,
-        dual_inverse_adjoint,
-        dual_adjoint,
-        pairing_scale,
+        dimension_int, bits, inv_sqrt_two, pairing_scale,
     )
 end
 
 RotatedSOCToSOC(dimension::Integer, ::Type{T}; kwargs...) where {T<:AbstractFloat} =
     RotatedSOCToSOC{T}(dimension; kwargs...)
 
-@inline function _rsoc_transform_apply!(destination, map, source, dimension::Int)
+@inline function _rsoc_transform_apply!(
+    destination, source, dimension::Int, inv_sqrt_two,
+)
     length(source) == dimension || throw(DimensionMismatch(
         "RSOC transform source length $(length(source)) != $dimension",
     ))
     length(destination) == dimension || throw(DimensionMismatch(
         "RSOC transform destination length $(length(destination)) != $dimension",
     ))
-    @inbounds for row in 1:dimension
-        value = zero(eltype(map))
-        for column in 1:dimension
-            coefficient = map[row, column]
-            iszero(coefficient) && continue
-            value += coefficient * source[column]
+    # Save the coupled coordinates before either output write so in-place
+    # application (`destination === source`) is valid.
+    @inbounds begin
+        u = source[1]
+        v = source[2]
+        destination[1] = (u + v) * inv_sqrt_two
+        destination[2] = (u - v) * inv_sqrt_two
+        for index in 3:dimension
+            destination[index] = source[index]
         end
-        destination[row] = value
     end
     return destination
+end
+
+@inline function _rsoc_transform_apply!(destination, transform::RotatedSOCToSOC, source)
+    return _rsoc_transform_apply!(
+        destination, source, transform.dimension, transform.inv_sqrt_two,
+    )
+end
+
+"""Materialize the setup-time row map for canonical sparse assembly only."""
+function _rsoc_transform_matrix(transform::RotatedSOCToSOC{T}) where {T}
+    matrix = zeros(T, transform.dimension, transform.dimension)
+    @inbounds begin
+        a = transform.inv_sqrt_two
+        matrix[1, 1] = a
+        matrix[1, 2] = a
+        matrix[2, 1] = a
+        matrix[2, 2] = -a
+        for index in 3:transform.dimension
+            matrix[index, index] = one(T)
+        end
+    end
+    return matrix
 end
 
 """Map an original RSOC primal vector into canonical SOC coordinates."""
 function forward_primal!(
     transform::RotatedSOCToSOC{T}, destination::AbstractVector{T}, source::AbstractVector{T},
 ) where {T<:AbstractFloat}
-    return _rsoc_transform_apply!(destination, transform.primal_map, source, transform.dimension)
+    return _rsoc_transform_apply!(destination, transform, source)
 end
 
 """Reconstruct an original RSOC primal vector from canonical SOC coordinates."""
 function backward_primal!(
     transform::RotatedSOCToSOC{T}, destination::AbstractVector{T}, source::AbstractVector{T},
 ) where {T<:AbstractFloat}
-    return _rsoc_transform_apply!(destination, transform.inverse_primal_map, source, transform.dimension)
+    return _rsoc_transform_apply!(destination, transform, source)
 end
 
 """Map an original RSOC dual vector into canonical SOC dual coordinates."""
 function forward_dual!(
     transform::RotatedSOCToSOC{T}, destination::AbstractVector{T}, source::AbstractVector{T},
 ) where {T<:AbstractFloat}
-    return _rsoc_transform_apply!(
-        destination, transform.dual_inverse_adjoint, source, transform.dimension,
-    )
+    return _rsoc_transform_apply!(destination, transform, source)
 end
 
-"""Reconstruct an original RSOC dual vector from canonical SOC dual coordinates."""
+"""Reconstruct an original RSOC dual vector from canonical SOC coordinates."""
 function backward_dual!(
     transform::RotatedSOCToSOC{T}, destination::AbstractVector{T}, source::AbstractVector{T},
 ) where {T<:AbstractFloat}
-    return _rsoc_transform_apply!(destination, transform.dual_adjoint, source, transform.dimension)
+    return _rsoc_transform_apply!(destination, transform, source)
 end
 
 """Reconstruct an original primal infeasibility ray."""
 function backward_primal_ray!(
     transform::RotatedSOCToSOC{T}, destination::AbstractVector{T}, source::AbstractVector{T},
 ) where {T<:AbstractFloat}
-    return _rsoc_transform_apply!(destination, transform.inverse_primal_map, source, transform.dimension)
+    return _rsoc_transform_apply!(destination, transform, source)
 end
 
 """Reconstruct an original dual infeasibility ray."""
 function backward_dual_ray!(
     transform::RotatedSOCToSOC{T}, destination::AbstractVector{T}, source::AbstractVector{T},
 ) where {T<:AbstractFloat}
-    return _rsoc_transform_apply!(destination, transform.dual_adjoint, source, transform.dimension)
+    return _rsoc_transform_apply!(destination, transform, source)
 end
 
 """RSOC coordinate changes do not add a scalar objective constant."""
@@ -262,7 +237,7 @@ function verify_stationarity_invariant(
     size(A, 2) == length(objective) || throw(DimensionMismatch(
         "stationarity objective length $(length(objective)) != $(size(A, 2))",
     ))
-    canonical_A = transform.primal_map * A
+    canonical_A = _rsoc_transform_matrix(transform) * A
     canonical_dual = similar(dual)
     forward_dual!(transform, canonical_dual, dual)
     original_residual = transpose(A) * dual + objective

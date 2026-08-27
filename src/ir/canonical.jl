@@ -66,7 +66,8 @@ for the primal, the dual (adjoint) and the inverse reconstruction.
 function _rsoc_to_soc_map(::Type{T}, dimension::Integer, bits::Int) where {T<:AbstractFloat}
     # Compatibility helper retained for lower-level tests; the typed transform
     # owns the canonical RSOC convention and precision construction.
-    return RotatedSOCToSOC{T}(dimension; precision_bits=bits).primal_map
+    transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
+    return _rsoc_transform_matrix(transform)
 end
 
 # ---------------------------------------------------------------------------
@@ -365,7 +366,7 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
             push_transform!(transform_stack, block_transform)
         elseif block.cone === :rsoc
             block_transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
-            linear = block_transform.primal_map
+            linear = _rsoc_transform_matrix(block_transform)
             push_transform!(transform_stack, block_transform)
         end
         coordinate_map = block.cone === :psd ?
@@ -426,7 +427,7 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
             push_transform!(transform_stack, block_transform)
         elseif row_block.domain isa RotatedLorentzCone
             block_transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
-            linear = block_transform.primal_map
+            linear = _rsoc_transform_matrix(block_transform)
             push_transform!(transform_stack, block_transform)
         end
         coordinate_map = _domain_cone(row_block.domain) === :psd ?

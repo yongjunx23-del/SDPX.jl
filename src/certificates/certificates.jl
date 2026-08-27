@@ -279,6 +279,11 @@ function verify_optimal!(
     return true
 end
 
+@inline function _certificate_unit_normalization_ok(value::T, tol::T) where {T}
+    isfinite(value) || return false
+    return abs(value + one(T)) <= tol * max(one(T), abs(value))
+end
+
 # ---------------------------------------------------------------------------
 # Primal-infeasibility (Farkas) certificate
 # ---------------------------------------------------------------------------
@@ -308,7 +313,9 @@ function verify_primal_infeasibility!(
     @inbounds for k in 1:state.m
         state.yt[k] = scale * y[k]
     end
-    dot(canonical_rhs(canonical), state.yt) ≈ -one(T) || return false
+    _certificate_unit_normalization_ok(
+        dot(canonical_rhs(canonical), state.yt), tol,
+    ) || return false
     _at_vec!(state.q, canonical_equality(canonical), state.yt)
     _maxabs(state.q) <= tol || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
@@ -348,7 +355,9 @@ function verify_dual_infeasibility!(
     @inbounds for k in 1:state.m
         state.st[k] = scale * state.e[k]
     end
-    dot(canonical_objective(canonical), state.xt) ≈ -one(T) || return false
+    _certificate_unit_normalization_ok(
+        dot(canonical_objective(canonical), state.xt), tol,
+    ) || return false
     in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
     # push the ray back into original coordinates
     certificate_backward!(canonical, x_orig, state.xt; ray_kind=:dual_infeasible)
