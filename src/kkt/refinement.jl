@@ -36,9 +36,11 @@ function expanded_unregularized_backward_error!(
     end
     residual_norm = _matrix_infinity_norm(residual)
     operator_scale = _expanded_operator_scale(operator)
-    rhs_scale = max(_matrix_infinity_norm(rhs), one(T))
-    solution_scale = max(_matrix_infinity_norm(solution), one(T))
-    denominator = operator_scale * solution_scale + rhs_scale
+    rhs_scale = _matrix_infinity_norm(rhs)
+    solution_scale = _matrix_infinity_norm(solution)
+    denominator = max(
+        operator_scale * solution_scale + rhs_scale, one(T),
+    )
     target = T(256) * eps(T)
     normalized = residual_norm / denominator
     return ExpandedBackwardError(
@@ -66,12 +68,41 @@ function expanded_unregularized_backward_error!(
     end
     residual_norm = _matrix_infinity_norm(residual)
     operator_scale = _expanded_operator_scale(operator)
-    rhs_scale = max(_matrix_infinity_norm(rhs), one(T))
-    solution_scale = max(_matrix_infinity_norm(solution), one(T))
-    denominator = operator_scale * solution_scale + rhs_scale
+    rhs_scale = _matrix_infinity_norm(rhs)
+    solution_scale = _matrix_infinity_norm(solution)
+    denominator = max(
+        operator_scale * solution_scale + rhs_scale, one(T),
+    )
     target = T(256) * eps(T)
     normalized = residual_norm / denominator
     return ExpandedBackwardError(
         residual_norm, denominator, normalized, target,
+    )
+end
+
+function expanded_unregularized_backward_error!(
+    residual::AbstractVecOrMat{T}, operator::AbstractMatrix{T},
+    solution::AbstractVecOrMat{T}, rhs::AbstractVecOrMat{T},
+    backend::AbstractLABackend,
+) where {T<:AbstractFloat}
+    size(solution) == size(rhs) == size(residual) || throw(DimensionMismatch(
+        "expanded provider backward-error dimensions disagree",
+    ))
+    la_residual!(backend, :N, operator, solution, rhs, residual)
+    normalized = T(la_normwise_backward_error(
+        backend, :N, operator, solution, rhs, residual,
+    ))
+    residual_norm = _matrix_infinity_norm(residual)
+    denominator = if iszero(normalized)
+        max(
+            _expanded_operator_scale(operator) *
+            _matrix_infinity_norm(solution) + _matrix_infinity_norm(rhs),
+            one(T),
+        )
+    else
+        residual_norm / normalized
+    end
+    return ExpandedBackwardError(
+        residual_norm, denominator, normalized, T(256) * eps(T),
     )
 end

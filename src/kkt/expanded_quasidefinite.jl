@@ -724,9 +724,16 @@ function _refine_expanded!(
     session.backward_error = T(Inf)
     session.backward_target = T(256) * eps(T)
     for iteration in 0:max_refinements
-        report = expanded_unregularized_backward_error!(
-            residual, session.unregularized, solution, rhs,
-        )
+        report = if session.la_backend === nothing
+            expanded_unregularized_backward_error!(
+                residual, session.unregularized, solution, rhs,
+            )
+        else
+            expanded_unregularized_backward_error!(
+                residual, session.unregularized, solution, rhs,
+                session.la_backend,
+            )
+        end
         session.unregularized_residual_norm = report.residual_norm
         session.backward_error = report.normalized
         session.backward_target = report.target
@@ -749,6 +756,7 @@ function _refine_expanded!(
             session.status = EXPANDED_KKT_SOLVE_FAILED
             return false
         end
+        session.refinements = iteration + 1
         @inbounds for index in eachindex(solution, correction)
             solution[index] += correction[index]
         end

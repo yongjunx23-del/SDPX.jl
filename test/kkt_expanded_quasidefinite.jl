@@ -46,9 +46,9 @@ end
     @test session.status == SDPX.EXPANDED_KKT_UNREGULARIZED_CERTIFIED
     @test session.backward_error <= session.backward_target
     @test session.unregularized_residual_norm <=
-          session.backward_target * (
+          session.backward_target * max(
               SDPX._expanded_operator_scale(session.unregularized) *
-              max(norm(solution, Inf), 1.0) + max(norm(rhs, Inf), 1.0)
+              norm(solution, Inf) + norm(rhs, Inf), 1.0,
           )
     direction = SDPX.recover_expanded_direction(system, solution)
     residual = SDPX.NewtonResidual(system)
@@ -164,6 +164,28 @@ end
     @test_throws ArgumentError SDPX.refine_expanded!(
         solution, session, rhs; max_refinements=-1,
     )
+end
+
+function expanded_hot_allocation_counts()
+    system, _ = expanded_fixture(Float64)
+    session = SDPX.ExpandedKKTSession(Float64, 2, 3)
+    rhs = zeros(Float64, session.dimension)
+    solution = similar(rhs)
+    SDPX.expanded_rhs!(rhs, system)
+    SDPX.factor_expanded_kkt!(session, system)
+    SDPX.solve_expanded!(solution, session, rhs)
+    SDPX.refine_expanded!(solution, session, rhs)
+    GC.gc()
+    factor_bytes = @allocated SDPX.factor_expanded_kkt!(session, system)
+    SDPX.expanded_rhs!(rhs, system)
+    session.status = SDPX.EXPANDED_KKT_FACTORED
+    solve_bytes = @allocated SDPX.solve_expanded!(solution, session, rhs)
+    refine_bytes = @allocated SDPX.refine_expanded!(solution, session, rhs)
+    return factor_bytes, solve_bytes, refine_bytes
+end
+
+@testset "expanded Float64 hot route allocation contract" begin
+    @test expanded_hot_allocation_counts() == (0, 0, 0)
 end
 
 @testset "expanded BigFloat provider dispatch" begin
