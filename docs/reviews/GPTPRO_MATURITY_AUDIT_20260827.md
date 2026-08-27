@@ -1,3 +1,13 @@
+> **HISTORICAL SNAPSHOT — read with the merge timeline in mind.** This audit
+> inspected an archive frozen at job `cc4d7986` (pre-P1-integration). Three of its
+> blocking findings are ALREADY FIXED on `wave/v4-a0`: the duplicate
+> `program/transforms.jl` include (B0), the dual transform hierarchy (B2 —
+> `RotatedSOCToSOC` now subtypes `AbstractProgramTransform`), and partial
+> Exp/Power verification ordering (B4 — see also the P1.5 merge `0aab730`,
+> which landed trial-mu (F2), terminal-result ownership (F3), verification
+> ordering (F4), dkappa dual-candidate (F5), RSOC O(n) (F6), ray tolerance
+> (F7), and provenance (F8). Read the remaining findings as still-open.
+
 # SDPX.jl follow-up maturity audit
 
 I accept the reported local and cluster outcomes as authoritative: the A1 changes resolved the mixed free/equality/PSD origin stall; Phase 0 was frozen with a fast gate; P1 added typed Nonpositive and RSOC transforms but has not yet rewired the production lowerers; RSOC, Exp, and Power have native working cases. 

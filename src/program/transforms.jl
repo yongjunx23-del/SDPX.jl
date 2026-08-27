@@ -149,17 +149,22 @@ end
 Base.pop!(stack::ReconstructionStack) = pop_transform!(stack)
 
 # Forward application is useful while assembling a normalized program.
+#
+# SAFETY CONTRACT: these whole-vector apply methods are only valid while the
+# stack holds AT MOST ONE block-local transform, because the registered
+# transforms are block-scoped maps, not whole-vector maps. Multi-block models
+# must reconstruct through the per-block `CanonicalBlockMap.block_transform`
+# instead. The multi-entry guard turns a silent double-application into an
+# explicit error.
 function _stack_forward!(operation!, stack::ReconstructionStack, dest, src)
     isempty(stack) && (copyto!(dest, src); return dest)
-    current = src
-    buffer_a = similar(dest)
-    buffer_b = similar(dest)
-    count = length(stack)
-    for (index, transform) in enumerate(stack.transforms)
-        target = index == count ? dest : (isodd(index) ? buffer_a : buffer_b)
-        operation!(transform, target, current)
-        current = target
-    end
+    length(stack) == 1 || throw(ArgumentError(
+        "ReconstructionStack holds $(length(stack)) block-local transforms; " *
+        "whole-vector application requires a single-block stack. Reconstruct " *
+        "through the per-block CanonicalBlockMap transforms instead.",
+    ))
+    transform = stack.transforms[1]
+    operation!(transform, dest, src)
     return dest
 end
 
@@ -174,16 +179,13 @@ forward_dual!(stack::ReconstructionStack, dest, src) =
 # consuming either one transform or a complete chain has identical semantics.
 function _stack_backward!(operation!, stack::ReconstructionStack, dest, src)
     isempty(stack) && (copyto!(dest, src); return dest)
-    current = src
-    buffer_a = similar(dest)
-    buffer_b = similar(dest)
-    count = length(stack)
-    for index in count:-1:1
-        transform = stack.transforms[index]
-        target = index == 1 ? dest : (isodd(index) ? buffer_a : buffer_b)
-        operation!(transform, target, current)
-        current = target
-    end
+    length(stack) == 1 || throw(ArgumentError(
+        "ReconstructionStack holds $(length(stack)) block-local transforms; " *
+        "whole-vector application requires a single-block stack. Reconstruct " *
+        "through the per-block CanonicalBlockMap transforms instead.",
+    ))
+    transform = stack.transforms[1]
+    operation!(transform, dest, src)
     return dest
 end
 

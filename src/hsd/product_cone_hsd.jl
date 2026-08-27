@@ -924,7 +924,10 @@ end
     factors_before = kkt_factor_count(workspace.driver)
     try
         kkt_epoch_factorize!(workspace.driver, workspace.factor_matrix)
-    catch
+    catch err
+        # Only expected numerical failures may become a typed bordered failure;
+        # programmer errors (bounds, methods, workspace misuse) must propagate.
+        _product_numerical_exception(err) || rethrow()
         workspace.last_reason = SYMMETRIC_BORDERED_FACTOR_FAILED
         return false
     end
@@ -1912,7 +1915,8 @@ end
     factors_before = kkt_factor_count(workspace.driver)
     try
         kkt_solve!(workspace.driver, z, workspace.factor_rhs)
-    catch
+    catch err
+        _product_numerical_exception(err) || rethrow()
         return false
     end
     kkt_factor_count(workspace.driver) == factors_before || return false
@@ -2937,6 +2941,16 @@ end
     mu_t = _product_hsd_trial_mu(base)
     isfinite(mu_t) && mu_t > zero(mu_t) || return false
     return try_update_scaling!(state.runtime, base.st, base.yt, mu_t)
+end
+
+"""Whether `err` is an expected numerical failure of a KKT factor/solve.
+Only these may be converted into a typed bordered-failure state; every other
+exception (bounds, methods, workspace misuse) is a programmer error and must
+propagate to the caller."""
+@inline function _product_numerical_exception(err)::Bool
+    return err isa DomainError || err isa InexactError ||
+           err isa OverflowError || err isa LinearAlgebra.SingularException ||
+           err isa LinearAlgebra.PosDefException
 end
 
 """Single-alpha product-cone fraction-to-boundary line search."""
