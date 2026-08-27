@@ -14,12 +14,12 @@
 #   * affine orthant slack rows with positive rhs, including Nonpositive rows
 #
 # The last gap has a precise minimal repro: free x, x1+x2=1, and
-# x1<=1/x2<=1 as Nonpositive rows. It is unbounded unless x>=0 is also
-# imposed; adding x>=0 makes the intended optimum 2.0, but native HSD still
-# breaks down around iteration 128. An exact slack-variable formulation
-# (u>=0, x+u=1) currently solves, but is intentionally not hidden as a
-# fallback. Opt-in @test_broken repros live below and are omitted by default
-# to keep this per-commit gate below one minute.
+# x1<=1/x2<=1 as Nonpositive rows. The equality and both caps imply
+# 0<=x1,x2<=1, so this is a bounded LP with optimum 2.0 (an earlier audit
+# incorrectly called it unbounded). The bordered route still breaks down;
+# the opt-in expanded route now returns the certified optimum. An exact
+# slack-variable formulation (u>=0, x+u=1) also solves, but is intentionally
+# not hidden as a fallback.
 using SDPX
 using Test
 
@@ -57,17 +57,19 @@ end
 
 @testset "known native gaps (documented)" begin
     if get(ENV, "SDPX_RUN_KNOWN_GAPS", "0") == "1"
-        # Exact original repro: this model is unbounded (x1 -> -Inf,
-        # x2=1-x1), so the correct fail-closed outcome is dual_infeasible.
-        unbounded = SDPX.Model(Float64)
-        x = SDPX.variable!(unbounded, :x, 2; domain=SDPX.Reals())
-        SDPX.constraint!(unbounded, :eq, x[1] + x[2] - 1.0, SDPX.ZeroCone())
-        SDPX.constraint!(unbounded, :upper1, x[1] - 1.0, SDPX.Nonpositive())
-        SDPX.constraint!(unbounded, :upper2, x[2] - 1.0, SDPX.Nonpositive())
-        SDPX.objective!(unbounded, SDPX.Maximize(), x[1] + 2 * x[2])
-        result = SDPX.optimize!(unbounded;
+        # Bounded capped LP: x2=1-x1 together with x2<=1 implies x1>=0,
+        # and symmetrically x2>=0. The optimum is therefore 2 at (0,1).
+        capped = SDPX.Model(Float64)
+        x = SDPX.variable!(capped, :x, 2; domain=SDPX.Reals())
+        SDPX.constraint!(capped, :eq, x[1] + x[2] - 1.0, SDPX.ZeroCone())
+        SDPX.constraint!(capped, :upper1, x[1] - 1.0, SDPX.Nonpositive())
+        SDPX.constraint!(capped, :upper2, x[2] - 1.0, SDPX.Nonpositive())
+        SDPX.objective!(capped, SDPX.Maximize(), x[1] + 2 * x[2])
+        result = SDPX.optimize!(capped;
             settings=SDPX.Settings{Float64}(engine=:native_hsd))
-        @test_broken SDPX.status(result) === :dual_infeasible
+        @test_broken SDPX.status(result) === :optimal &&
+            result.certificate.valid &&
+            isapprox(SDPX.primal_objective(result), 2.0; atol=1e-6)
 
         # Bounded mixed-family repro: lower Nonnegative and upper Nonpositive
         # affine rows, with the upper bounds redundant but semantically valid.

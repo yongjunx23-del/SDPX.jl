@@ -86,8 +86,8 @@ function _p0_bounded_nonpositive()
     return model
 end
 
-"""Unbounded affine-orthant repro used by the native Nonpositive audit."""
-function _p0_unbounded_capped()
+"""Bounded capped LP: equality plus both upper caps imply 0 <= x_i <= 1."""
+function _p0_bounded_capped()
     model = SDPX.Model(Float64)
     x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
     SDPX.constraint!(model, :sum, x[1] + x[2] - 1.0, SDPX.ZeroCone())
@@ -136,11 +136,10 @@ function _p0_primal_infeasible()
     return model
 end
 
-"""Free x with x≥1 and min x; this is unbounded below."""
+"""Genuinely unbounded problem: minimize a free variable without constraints."""
 function _p0_dual_infeasible()
     model = SDPX.Model(Float64)
     x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals())
-    SDPX.constraint!(model, :lower_bound, x[1] - 1.0, SDPX.Nonnegative())
     SDPX.objective!(model, SDPX.Minimize(), x[1])
     return model
 end
@@ -177,13 +176,10 @@ end
         @test SDPX.certificate(result).valid
     end
 
-    @testset "dual-infeasible status probe" begin
-        # Current native behavior is numerical_breakdown (singular_kkt), not
-        # a dual-infeasibility certificate.  Keep this exact probe visible so
-        # a future classification change is deliberate rather than silent.
+    @testset "dual-infeasible certificate baseline" begin
         result = _p0_optimize(_p0_dual_infeasible(), :native_hsd)
-        @test SDPX.status(result) === :numerical_breakdown
-        @test !SDPX.certificate(result).valid
+        @test SDPX.status(result) === :dual_infeasible
+        @test SDPX.certificate(result).valid
     end
 end
 
@@ -217,11 +213,13 @@ end
                 isapprox(SDPX.primal_objective(result), 2.0; atol=2e-6)
         end
 
-        @testset "unbounded capped affine rows" begin
-            result = _p0_optimize(_p0_unbounded_capped(), :native_hsd)
-            # Correct outcome is dual_infeasible; current native result is a
-            # numerical direction breakdown.
-            @test_broken SDPX.status(result) === :dual_infeasible
+        @testset "bounded capped affine rows" begin
+            result = _p0_optimize(_p0_bounded_capped(), :native_hsd)
+            # The equality and both upper caps imply nonnegative lower bounds;
+            # this is a bounded LP with optimum 2, not an infeasibility probe.
+            @test_broken SDPX.status(result) === :optimal &&
+                SDPX.certificate(result).valid &&
+                isapprox(SDPX.primal_objective(result), 2.0; atol=2e-6)
         end
     else
         @test true # Known gaps are intentionally opt-in, never silently hidden.
