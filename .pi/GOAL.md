@@ -45,6 +45,13 @@
 - **GPT Pro（pi-oracle）**：只读对抗性 reviewer；不直接改代码。
 - **机器 gate + 集群 holdout + oracle receipt**：是唯一能提升 status 的证据。
 
+## Review 边界
+
+- 每个 stage 最多 2 次 Oracle review；第 2 次仍非 approve → ESCALATED/BLOCKED，上报 Human Lead。
+- `APPROVE_WITH_CHANGES` 需所有影响当前验收的重要 finding 已 FIXED（或 Human Lead 显式 DEFER）才能过 G5。
+- 永不因 review 预算耗尽而 merge。
+- 用 `scripts/oracle_receipt.sh` 持久化 PENDING/COMPLETE receipt；verdict 必须匹配 receipt 与冻结 candidate 的身份哈希。
+
 ## 停止条件（避免无界循环）
 
 - 外部：Human 喊停 / 改变 scope / 决定 release / 要求暂停。
