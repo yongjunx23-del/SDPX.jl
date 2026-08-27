@@ -58,6 +58,7 @@ tmp/
 .pi/oracle-review-context.sha256
 .pi/oracle-tree-manifest
 .pi/oracle-review-receipt.json
+.pi/oracle-receipts/
 .pi/WAVE.yaml
 core
 /core.*
