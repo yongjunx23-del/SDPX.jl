@@ -375,7 +375,7 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         end
         coordinate_map = block.cone === :psd ?
             PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
-        map = CanonicalBlockMap(
+        map = CanonicalBlockMap{T}(
             :variable, block_number, 1, Int(recon_sign),
             linear, linear === nothing ? nothing : copy(linear),
             coordinate_map, block_transform,
@@ -434,7 +434,7 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         end
         coordinate_map = _domain_cone(row_block.domain) === :psd ?
             PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
-        map = CanonicalBlockMap(
+        map = CanonicalBlockMap{T}(
             :constraint, block_number, 1, Int(recon_sign),
             linear, linear === nothing ? nothing : copy(linear),
             coordinate_map, block_transform,

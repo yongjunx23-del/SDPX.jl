@@ -57,52 +57,73 @@ Fields
   the original coordinate. `-1` for a `Nonpositive`-source block that
   was mapped to `:nonnegative` (`v <= 0` <-> `s = -v >= 0`), `+1`
   otherwise.
-- `linear::Any` — the exact linear map applied to a source
+- `linear::Union{Matrix{T},Nothing}` — the exact linear map applied to a source
   `RotatedLorentzCone` (`:rsoc`) to reach `:soc` (`M : RSOC -> SOC`,
   `s = M v`), or `nothing` when the block is an identity map.
-- `linear_adjoint::Any` — the adjoint `M'` (for the dual), or
+- `linear_adjoint::Union{Matrix{T},Nothing}` — the adjoint `M'` (for the dual), or
   `nothing`.
-- `coordinate_map::Any` — setup-frozen PSD raw/svec maps for a `:psd`
-  block, or `nothing` for vector cones.  The map stores primal row
-  scaling, dual row pullback and matrix reconstruction separately.  It is
-  cold reconstruction metadata: canonicalization has already applied `D`
-  to `A,b`, and the HSD numerical hot path consumes those execution rows
-  without inspecting this `Any`-typed field.
+- `coordinate_map::Union{PSDCoordinateMap{T},Nothing}` — setup-frozen PSD
+  raw/svec maps for a `:psd` block, or `nothing` for vector cones.  The map
+  stores primal row scaling, dual row pullback and matrix reconstruction
+  separately.  It is cold reconstruction metadata: canonicalization has already
+  applied `D` to `A,b`, and the HSD numerical hot path consumes those execution
+  rows without inspecting this field.
+- `transform::Union{AbstractProgramTransform{T},Nothing}` — the typed
+  coordinate transform owning primal/dual/ray reconstruction for this block
+  (Nonpositive/RSOC), or `nothing` for identity blocks.
 """
-struct CanonicalBlockMap
+struct CanonicalBlockMap{T}
     source::Symbol
     source_block::Int
     within_offset::Int
     sign::Int
-    linear::Any
-    linear_adjoint::Any
-    coordinate_map::Any
-    transform::Any
+    linear::Union{Matrix{T},Nothing}
+    linear_adjoint::Union{Matrix{T},Nothing}
+    coordinate_map::Union{PSDCoordinateMap{T},Nothing}
+    transform::Union{AbstractProgramTransform{T},Nothing}
+
+    function CanonicalBlockMap{T}(
+        source::Symbol,
+        source_block::Integer,
+        within_offset::Integer,
+        sign::Integer,
+        linear::Union{Matrix{T},Nothing},
+        linear_adjoint::Union{Matrix{T},Nothing},
+        coordinate_map::Union{PSDCoordinateMap{T},Nothing},
+        transform::Union{AbstractProgramTransform{T},Nothing},
+    ) where {T}
+        return new{T}(
+            source, Int(source_block), Int(within_offset), Int(sign),
+            linear, linear_adjoint, coordinate_map, transform,
+        )
+    end
 end
 
-CanonicalBlockMap(
+# Identity-block constructor (all maps absent): the arithmetic type must be
+# supplied explicitly because no typed field can infer it.
+function CanonicalBlockMap{T}(
     source::Symbol,
     source_block::Integer,
     within_offset::Integer,
     sign::Integer,
-    linear,
-    linear_adjoint,
-) = CanonicalBlockMap(
-    source, Int(source_block), Int(within_offset), Int(sign),
-    linear, linear_adjoint, nothing, nothing,
-)
+) where {T}
+    return CanonicalBlockMap{T}(
+        source, Int(source_block), Int(within_offset), Int(sign),
+        nothing, nothing, nothing, nothing,
+    )
+end
 
 function CanonicalBlockMap(
     source::Symbol,
     source_block::Integer,
     within_offset::Integer,
     sign::Integer;
-    linear=nothing,
-    linear_adjoint=nothing,
-    coordinate_map=nothing,
-    transform=nothing,
-)
-    return CanonicalBlockMap(
+    linear::Union{Matrix{T},Nothing}=nothing,
+    linear_adjoint::Union{Matrix{T},Nothing}=nothing,
+    coordinate_map::Union{PSDCoordinateMap{T},Nothing}=nothing,
+    transform::Union{AbstractProgramTransform{T},Nothing}=nothing,
+) where {T}
+    return CanonicalBlockMap{T}(
         source, Int(source_block), Int(within_offset), Int(sign),
         linear, linear_adjoint, coordinate_map, transform,
     )
