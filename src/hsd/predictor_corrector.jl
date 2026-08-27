@@ -152,7 +152,15 @@ function _product_hsd_expanded_solve_shift!(
     # factor remains numerically valid for the corrector RHS.
     state.expanded.status = EXPANDED_KKT_FACTORED
     solve_expanded!(solution, state.expanded, rhs) || return false
-    refine_expanded!(solution, state.expanded, rhs) || return false
+    refined = refine_expanded!(solution, state.expanded, rhs)
+    if !refined
+        # A regularized factor can expose the adjacent homogeneous-border
+        # inertia only during refinement. Retry the same RHS once with the
+        # exact unregularized operator under the narrow diagnosed gate below.
+        _product_hsd_factor_exact_expanded_border!(state, system) || return false
+        solve_expanded!(solution, state.expanded, rhs) || return false
+        refine_expanded!(solution, state.expanded, rhs) || return false
+    end
     direction = recover_expanded_direction(system, solution)
     base = state.base
     copyto!(base.dx, direction.dx)
@@ -171,6 +179,59 @@ function _product_hsd_expanded_solve_shift!(
            T(512) * eps(T) * scale
 end
 
+"""
+Factor the expanded HSD condensation without mistaking the homogeneous border
+for a cone-curvature inertia failure. The generic session expects `(n,m+1)`;
+for a positive cone operator the unregularized symmetric companion can instead
+have the finite adjacent inertia `(n+1,m)` solely because the tau border is not
+a definite member of the y block. In that one diagnosed case, factor the exact
+unregularized frozen-sign operator and retain the ordinary refinement plus
+five-equation semantic checks as authority. Any zero pivot, other inertia, or
+non-positive cone operator still fails closed.
+"""
+function _product_hsd_factor_exact_expanded_border!(
+    state::ProductConeHSDState{T}, system::NewtonSystem{T},
+) where {T}
+    session = state.expanded
+    observed = session.inertia_factor.inertia
+    adjacent_border = observed == KKTInertia(session.n + 1, session.m, 0)
+    diagnosed_border = adjacent_border || any(
+        attempt -> attempt.reason === EXPANDED_ATTEMPT_WRONG_INERTIA &&
+                   attempt.observed_inertia ==
+                       KKTInertia(session.n + 1, session.m, 0),
+        session.attempts,
+    )
+    diagnosed_border || return false
+    try
+        LinearAlgebra.cholesky(
+            LinearAlgebra.Symmetric(system.cone.operator); check=true,
+        )
+    catch exception
+        exception isa LinearAlgebra.PosDefException || rethrow()
+        return false
+    end
+
+    copy_owned!(session.regularized, session.unregularized)
+    # The generic ladder's scale-relative pivot floor can reject an exact
+    # homogeneous border whose small pivot is still resolvable componentwise.
+    # Use the scalar arithmetic floor here; the subsequent unregularized
+    # refinement and semantic Newton residual remain the acceptance gates.
+    pivot_floor = T(32) * eps(T)
+    _factor_expanded_exact!(session, pivot_floor) || return false
+    session.regularization = zero(T)
+    session.status = EXPANDED_KKT_FACTORED
+    state.diagnostic = :expanded_exact_border_inertia
+    return true
+end
+
+function _product_hsd_factor_expanded!(
+    state::ProductConeHSDState{T}, system::NewtonSystem{T},
+) where {T}
+    factor_expanded_kkt!(state.expanded, system) && return true
+    state.expanded.status === EXPANDED_KKT_WRONG_INERTIA || return false
+    return _product_hsd_factor_exact_expanded_border!(state, system)
+end
+
 """Predictor/corrector directions sharing one expanded KKT factor."""
 function _product_hsd_expanded_direction!(
     state::ProductConeHSDState{T},
@@ -183,7 +244,7 @@ function _product_hsd_expanded_direction!(
     predictor_system = _product_hsd_expanded_system(
         state, cone, predictor_scalar,
     )
-    factor_expanded_kkt!(state.expanded, predictor_system) || return false
+    _product_hsd_factor_expanded!(state, predictor_system) || return false
     _product_hsd_expanded_solve_shift!(
         state, cone, predictor_scalar,
     ) || return false

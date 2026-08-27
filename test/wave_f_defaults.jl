@@ -1,11 +1,11 @@
 # Wave F — default-route and equilibration decisions (data-driven, recorded).
 #
-# D2 (:expanded default): MEASURED on quick-gate models (LP/SOCP/Matrix) that
-#   :expanded returns numerical_breakdown at iteration 0 with cert=false on ALL
-#   three, while :bordered returns :optimal with valid certificates (LP 9 iters
-#   -10.346, SOCP 13 iters 2.7272, Matrix 9 iters 7.1e-10). Decision: :bordered
-#   remains the default; :expanded stays opt-in until its standard-model
-#   iteration-0 breakdown is fixed. Assertions below encode this.
+# D2 (:expanded default): Wave F originally measured iteration-0 breakdowns on
+#   LP/SOCP/Matrix. Wave G diagnosed premature rejection of the finite adjacent
+#   homogeneous-border inertia and repaired the HSD adapter. Both routes now
+#   return certificate-backed optimal results on all three models. :bordered
+#   remains the default pending the complete Phase 5 matrix; the former simple-
+#   model gate item is closed. Assertions below encode the repaired behavior.
 #
 # D1 (equilibration default): MEASURED that cone-preserving Ruiz equilibration
 #   does NOT improve the canonical-A 2-norm condition number on small probes:
@@ -32,9 +32,8 @@ const _BB = Main.BootstrapBenchmark
         rb = SDPX.optimize!(m; settings=SDPX.Settings{Float64}(engine=:native_hsd, kkt_route=:bordered))
         @test SDPX.status(rb) === :optimal
         @test rb.certificate.valid
-        # :expanded currently fails at iteration 0 on standard models — record, do not assert
         re = SDPX.optimize!(m; settings=SDPX.Settings{Float64}(engine=:native_hsd, kkt_route=:expanded))
-        @test SDPX.status(re) === :numerical_breakdown
-        @test re.iterations == 0
+        @test SDPX.status(re) === :optimal
+        @test re.certificate.valid
     end
 end
