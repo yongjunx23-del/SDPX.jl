@@ -42,7 +42,7 @@ materialized `Theta` map (`src/hsd/product_cone_hsd.jl:2769-2807`).
 
 The authoritative list is declared at `src/kkt/system.jl:119-139`, and the
 unregularized verifier evaluates it componentwise at
-`src/kkt/system.jl:235-295`.
+`src/kkt/system.jl:235-293`.
 
 ### 1. Primal affine equation
 
@@ -196,8 +196,8 @@ unregularized residual groups (`src/kkt/system.jl:217-233`), and
   directly, solves them through the production expanded route, recomputes every
   equation independently, checks affine residual homotopy, verifies shared
   predictor/corrector affine RHS, and repeats residual evaluation in BigFloat.
-- `docs/design/newton_system_oracle.py` is a dependency-free NumPy script that
-  independently assembles the five-equation Jacobian and checks a direction.
+- `docs/design/newton_system_oracle.py` is a standard-library-only Python script
+  that independently assembles the five-equation Jacobian and checks a direction.
   It documents the equations but is intentionally not part of Julia CI.
 
 ## Known integration boundary
