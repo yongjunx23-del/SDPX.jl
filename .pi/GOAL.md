@@ -13,6 +13,8 @@
 
 ## 运行优先级（每轮按此选择"下一步动作"）
 
+**模型调度（按复杂度）**：T1 简单= luna-high；T2 中等 = luna-max；T3 复杂数值 = sol-high（`gpt-5.6-sol`，显式传 model）；T4 大 wave 评审 = GPT Pro web（pi-oracle）。数值核心改动（HSD/schur/证书/KKT 鲁棒性）必须走 T3 sol-high；luna 超时未解的复杂数值优先重派 sol，不用 luna 无限重试。详见 agent.md §4.2。
+
 1. **推进 V4 当前 wave**：A0 → A1 → A2 → A3 → A4 → B → C，逐项实现、本地 gate、push、Oracle review、修 findings、集成。
 2. **Loop 自改进（每 K 轮 retro）**：移除摩擦、硬化脚本/脚本化 gate、收紧证据、更新 `agent.md`。
 3. **精度看门**：保持 Float64 与 BigFloat256 gate 全绿；Human 偶尔检查精度，agent 每 wave 输出一份简短精度摘要。
