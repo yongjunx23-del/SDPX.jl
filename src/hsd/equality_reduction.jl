@@ -148,6 +148,7 @@ function _hsd_eq_reduced_chain(
         copy(chain.constraint_refs),
         copy(chain.variable_dual_slack_refs),
         chain.source_model,
+        chain.transform_stack,
     )
 end
 

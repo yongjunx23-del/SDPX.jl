@@ -77,6 +77,7 @@ struct CanonicalBlockMap
     linear::Any
     linear_adjoint::Any
     coordinate_map::Any
+    transform::Any
 end
 
 CanonicalBlockMap(
@@ -88,7 +89,7 @@ CanonicalBlockMap(
     linear_adjoint,
 ) = CanonicalBlockMap(
     source, Int(source_block), Int(within_offset), Int(sign),
-    linear, linear_adjoint, nothing,
+    linear, linear_adjoint, nothing, nothing,
 )
 
 function CanonicalBlockMap(
@@ -99,10 +100,11 @@ function CanonicalBlockMap(
     linear=nothing,
     linear_adjoint=nothing,
     coordinate_map=nothing,
+    transform=nothing,
 )
     return CanonicalBlockMap(
         source, Int(source_block), Int(within_offset), Int(sign),
-        linear, linear_adjoint, coordinate_map,
+        linear, linear_adjoint, coordinate_map, transform,
     )
 end
 

@@ -29,6 +29,9 @@ function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
     @test recovered_primal ≈ primal
     @test recovered_dual ≈ dual
     @test dot(primal, dual) ≈ transform.pairing_scale * dot(canonical_primal, canonical_dual)
+    @test SDPX.verify_pairing_invariant(
+        transform, primal, dual, canonical_primal, canonical_dual; atol=zero(T),
+    )
     @test SDPX.verify_pairing_invariant(transform, primal, dual; atol=zero(T))
 
     # Rays use the same inverse-adjoint contract, but are kept as distinct
@@ -51,6 +54,14 @@ function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
         1 -1 0 2;
     ]
     objective = T[1, -2, 3, 4]
+    A_hat = transform.primal_map * A
+    c_hat = copy(objective)
+    y_hat = similar(dual)
+    SDPX.forward_dual!(transform, y_hat, dual)
+    @test SDPX.verify_stationarity_invariant(
+        transform, A, objective, dual, one(T), A_hat, c_hat, y_hat;
+        atol=zero(T),
+    )
     @test SDPX.verify_stationarity_invariant(transform, A, dual, objective; atol=zero(T))
     @test SDPX.objective_shift(transform) == zero(T)
     @test SDPX.objective_shift(transform, T(7)) == T(7)
@@ -67,6 +78,16 @@ function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
     reconstruction = SDPX.block_reconstruction(rsoc_block)
     @test reconstruction.linear ≈ transform.primal_map[1:3, 1:3]
     @test reconstruction.linear_adjoint ≈ transform.dual_inverse_adjoint[1:3, 1:3]
+    @test reconstruction.transform isa SDPX.RotatedSOCToSOC{T}
+    @test length(SDPX.canonical_reconstruction_stack(canonical)) == 1
+    @test only(SDPX.canonical_reconstruction_stack(canonical).transforms) isa
+          SDPX.RotatedSOCToSOC{T}
+    # ProductConeRuntime is deliberately downstream of canonicalization and
+    # therefore cannot receive a raw :rsoc block.
+    runtime = SDPX.ProductConeRuntime(canonical.cone_layout, T)
+    @test runtime.valid == false
+    @test all(block.cone in (:nonnegative, :soc, :psd, :exp, :power, :zero, :free)
+              for block in blocks)
 
     # Current native support solves this bounded RSOC model and certifies it in
     # original coordinates.  The test is intentionally Float64-only below;

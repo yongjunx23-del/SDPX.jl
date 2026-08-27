@@ -64,21 +64,9 @@ and an involution (`M' == M`, `M^2 == I`), so a single matrix serves
 for the primal, the dual (adjoint) and the inverse reconstruction.
 """
 function _rsoc_to_soc_map(::Type{T}, dimension::Integer, bits::Int) where {T<:AbstractFloat}
-    dimension >= 3 || throw(ArgumentError("RotatedLorentzCone dimension must be >= 3, got $dimension"))
-    inv_sqrt_two = _owned_arithmetic_eval(
-        T,
-        () -> inv(sqrt(owned_arithmetic_copy(T, 2; precision_bits=bits)));
-        precision_bits=bits,
-    )
-    map = zeros(T, Int(dimension), Int(dimension))
-    map[1, 1] = inv_sqrt_two
-    map[1, 2] = inv_sqrt_two
-    map[2, 1] = inv_sqrt_two
-    map[2, 2] = -inv_sqrt_two
-    for i in 3:Int(dimension)
-        map[i, i] = owned_arithmetic_copy(T, 1; precision_bits=bits)
-    end
-    return map
+    # Compatibility helper retained for lower-level tests; the typed transform
+    # owns the canonical RSOC convention and precision construction.
+    return RotatedSOCToSOC{T}(dimension; precision_bits=bits).primal_map
 end
 
 # ---------------------------------------------------------------------------
@@ -117,6 +105,35 @@ struct CanonicalReconstructionChain{T<:AbstractFloat}
     constraint_refs::Vector{ConstraintRef}
     variable_dual_slack_refs::Vector{VariableRef}
     source_model::UInt64
+    transform_stack::ReconstructionStack{T}
+end
+
+function CanonicalReconstructionChain(
+    objective_sign::Int,
+    objective_constant::T,
+    primal_refs::Vector{VariableRef},
+    constraint_refs::Vector{ConstraintRef},
+    variable_dual_slack_refs::Vector{VariableRef},
+    source_model::Integer,
+) where {T<:AbstractFloat}
+    return CanonicalReconstructionChain{T}(
+        objective_sign, objective_constant, primal_refs, constraint_refs,
+        variable_dual_slack_refs, UInt64(source_model), ReconstructionStack{T}(),
+    )
+end
+
+function CanonicalReconstructionChain{T}(
+    objective_sign::Int,
+    objective_constant::T,
+    primal_refs::Vector{VariableRef},
+    constraint_refs::Vector{ConstraintRef},
+    variable_dual_slack_refs::Vector{VariableRef},
+    source_model::Integer,
+) where {T<:AbstractFloat}
+    return CanonicalReconstructionChain{T}(
+        objective_sign, objective_constant, primal_refs, constraint_refs,
+        variable_dual_slack_refs, UInt64(source_model), ReconstructionStack{T}(),
+    )
 end
 
 # ---------------------------------------------------------------------------
@@ -151,6 +168,8 @@ canonical_rhs(canonical::CanonicalConicProgram) = canonical.b
 canonical_num_variables(canonical::CanonicalConicProgram) = length(canonical.c)
 canonical_num_slack(canonical::CanonicalConicProgram) = canonical.cone_layout.dimension
 canonical_reconstruction_chain(canonical::CanonicalConicProgram) = canonical.reconstruction_chain
+canonical_reconstruction_stack(canonical::CanonicalConicProgram) =
+    canonical.reconstruction_chain.transform_stack
 
 """
     canonical_layout(canonical::CanonicalConicProgram) -> ConeProductLayout
@@ -327,6 +346,7 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
     A_vals = T[]
     b_vals = T[]
     descriptors = ConeBlockDescriptor{T}[]
+    transform_stack = ReconstructionStack{T}()
     rowcount = 0
     owned_one = owned_arithmetic_copy(T, 1; precision_bits=bits)
 
@@ -339,15 +359,21 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         spec === nothing && continue            # Reals -> free x, no slack
         canonical_cone, apref, recon_sign, linear, param = spec
         dimension = block.shape
-        if block.cone === :rsoc
-            linear = _rsoc_to_soc_map(T, dimension, bits)
+        block_transform = nothing
+        if block.cone === :nonpositive
+            block_transform = NonpositiveToNonnegative(T)
+            push_transform!(transform_stack, block_transform)
+        elseif block.cone === :rsoc
+            block_transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
+            linear = block_transform.primal_map
+            push_transform!(transform_stack, block_transform)
         end
         coordinate_map = block.cone === :psd ?
             PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
         map = CanonicalBlockMap(
             :variable, block_number, 1, Int(recon_sign),
             linear, linear === nothing ? nothing : copy(linear),
-            coordinate_map,
+            coordinate_map, block_transform,
         )
         push!(descriptors, ConeBlockDescriptor(
             T, canonical_cone, dimension;
@@ -394,15 +420,21 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         spec === nothing && continue            # Reals affine rows are vacuous
         canonical_cone, apref, recon_sign, linear, param = spec
         dimension = row_block.shape
-        if row_block.domain isa RotatedLorentzCone
-            linear = _rsoc_to_soc_map(T, dimension, bits)
+        block_transform = nothing
+        if row_block.domain isa Nonpositive
+            block_transform = NonpositiveToNonnegative(T)
+            push_transform!(transform_stack, block_transform)
+        elseif row_block.domain isa RotatedLorentzCone
+            block_transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
+            linear = block_transform.primal_map
+            push_transform!(transform_stack, block_transform)
         end
         coordinate_map = _domain_cone(row_block.domain) === :psd ?
             PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
         map = CanonicalBlockMap(
             :constraint, block_number, 1, Int(recon_sign),
             linear, linear === nothing ? nothing : copy(linear),
-            coordinate_map,
+            coordinate_map, block_transform,
         )
         push!(descriptors, ConeBlockDescriptor(
             T, canonical_cone, dimension;
@@ -432,6 +464,7 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         copy(program.constraint_dual_reconstruction),
         copy(program.variable_dual_slack_reconstruction),
         program.source_model,
+        transform_stack,
     )
     return CanonicalConicProgram(program.arithmetic, bits, c, A, b_vals, layout, chain)
 end
@@ -627,7 +660,10 @@ function _block_primal_forward!(canonical::CanonicalConicProgram{T}, dest, src, 
     σ = rmap.sign
     coordinate_map = rmap.coordinate_map
     L = rmap.linear
-    if coordinate_map isa PSDCoordinateMap
+    if rmap.transform isa AbstractProgramTransform
+        return backward_primal!(rmap.transform,
+            view(dest, off:(off + len - 1)), view(src, off:(off + len - 1)))
+    elseif coordinate_map isa PSDCoordinateMap
         # Canonical PSD slacks are execution svec; primal reconstruction is
         # the matrix-coordinate inverse D⁻¹.  Keep the loop index global so
         # no view/slice object is allocated on the hot path.
@@ -672,7 +708,10 @@ function _block_dual_forward!(canonical::CanonicalConicProgram{T}, dest, src, bl
     σ = rmap.sign
     coordinate_map = rmap.coordinate_map
     L = rmap.linear
-    if coordinate_map isa PSDCoordinateMap
+    if rmap.transform isa AbstractProgramTransform
+        return backward_dual!(rmap.transform,
+            view(dest, off:(off + len - 1)), view(src, off:(off + len - 1)))
+    elseif coordinate_map isa PSDCoordinateMap
         # Dual row multipliers use the adjoint pullback Dᵀ, not the matrix
         # reconstruction D⁻¹ used above for primal PSD values.
         factors = coordinate_map.dual_pullback
@@ -718,7 +757,10 @@ function _block_backward!(canonical::CanonicalConicProgram{T}, dest, src, block)
     σ = rmap.sign
     coordinate_map = rmap.coordinate_map
     Ladj = rmap.linear_adjoint
-    if coordinate_map isa PSDCoordinateMap
+    if rmap.transform isa AbstractProgramTransform
+        return forward_dual!(rmap.transform,
+            view(dest, off:(off + len - 1)), view(src, off:(off + len - 1)))
+    elseif coordinate_map isa PSDCoordinateMap
         # Raw dual coordinates carry the doubled off-diagonals.  Pull them
         # into execution covectors with D⁻¹ before the HSD step.
         factors = coordinate_map.dual_to_execution
