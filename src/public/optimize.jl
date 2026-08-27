@@ -278,9 +278,9 @@ function _public_lower_native(
     route::NativeConeRoute,
     settings::Settings,
 )
-    # Exp/Power are intentionally absent from the family lowerers.  This
-    # guard keeps both the default and explicit legacy policies fail-closed;
-    # no family lowerer or PSD-lift fallback may claim asymmetric support.
+    # Exp/Power have no family lowerer.  The public native-HSD route is the
+    # only executable path for these asymmetric blocks; the default and
+    # explicit legacy policies remain fail-closed.
     route.route in (:exp_family, :power_family) && throw(PublicOptimizeError(
         route.route,
         route.route === :exp_family ? :exp_lowerer_unavailable :
@@ -1734,13 +1734,24 @@ function _optimize_impl(
             warm_start,
         )
     end
-    # `engine=:auto` and `engine=:legacy` both select the native family-lowering
-    # path below (`_public_lower_native` -> LP/SOC/SDP/mixed-PSD-lift).  There is
-    # intentionally no separate legacy Mehrotra engine wired at this seam: the
-    # two values are aliases for the same non-direct route, and neither can
-    # silently fall back to `:native_hsd`.  The distinction is retained only as
-    # the plan's temporary marker for the pre-native default until Phase-5's
-    # default-route switch retires the family path.
+    # `engine=:auto` uses the direct native-HSD route for every model with an
+    # Exp/Power block.  No family lowerer or asymmetric fallback represents
+    # these cones, so this dispatch is explicit rather than a retry.
+    if resolved_settings.engine === :auto && _public_program_has_nonsymmetric(program)
+        _public_validate_algorithm(route, resolved_settings)
+        return _public_optimize_native_hsd(
+            model,
+            program,
+            route,
+            resolved_settings,
+            resolved_outputs,
+            warm_start,
+        )
+    end
+    # `engine=:auto` and `engine=:legacy` otherwise select the native
+    # family-lowering path below.  There is intentionally no separate legacy
+    # Mehrotra engine wired at this seam; legacy remains an explicit symmetric
+    # compatibility policy.
     if warm_start !== nothing
         warm_start isa Result || throw(ArgumentError(
             "warm_start must be a previous SDPX Result or nothing",
@@ -1772,8 +1783,9 @@ end
 """
     optimize!(model; settings=nothing, outputs=Outputs(), warm_start=nothing) -> Result
 
-Compile and solve `model` through its single classified native LP, SOC, or SDP
-route. `settings` controls the numerical solve, while `outputs` controls which
+Compile and solve `model` through its single classified native LP, SOC, SDP,
+or primal Exp/Power HSD route. `settings` controls the numerical solve, while
+`outputs` controls which
 result data are retained. The returned `Result` is expressed in the
 original model coordinates.
 

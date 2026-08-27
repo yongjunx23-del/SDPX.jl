@@ -102,13 +102,27 @@ end
     end
 end
 
-@testset "optimize on an exp-only model fails closed with a named reason" begin
+@testset "optimize on a primal exp block uses native HSD" begin
     model = SDPX.Model(Float64)
-    x = SDPX.variable!(model, :x, 3; domain=SDPX.ExponentialCone())
-    SDPX.objective!(model, SDPX.Minimize(), sum(x[i] for i in 1:3))
-    error_value = _exp_error(() -> SDPX.optimize!(model))
-    @test error_value isa SDPX.PublicOptimizeError
-    @test error_value.reason === :exp_lowerer_unavailable
+    x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals())
+    SDPX.constraint!(
+        model, :exp_row, (0.0, 1.0, x[1]), SDPX.ExponentialCone(),
+    )
+    SDPX.objective!(model, SDPX.Minimize(), x[1])
+    result = SDPX.optimize!(
+        model;
+        settings=SDPX.Settings{Float64}(
+            engine=:auto,
+            tolerances=SDPX.Tolerances{Float64}(
+                primal=1e-8, dual=1e-8, gap=1e-8,
+            ),
+            limits=SDPX.Limits(iterations=400, time=60.0, threads=1),
+            verbosity=0,
+        ),
+    )
+    @test SDPX.status(result) === :optimal
+    @test SDPX.certificate(result).valid
+    @test SDPX.certificate(result).primal_objective ≈ 1.0 atol=2e-6
 end
 
 @testset "ExponentialCone is not supported in R1 (fail-closed, no hidden fallback)" begin

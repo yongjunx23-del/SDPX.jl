@@ -279,11 +279,10 @@ const MOIVectorConicSet = Union{
     MOI.Zeros,
     MOI.SecondOrderCone,
     MOI.RotatedSecondOrderCone,
-    # NOTE (R1): ExponentialCone / PowerCone are deliberately NOT declared
-    # supported. Their primitives are differential-rule prototypes only —
-    # not production barriers/scaling wired into the HSD solver. Declaring
-    # support here would be a false claim; keep all four asymmetric sets
-    # fail-closed until the Phase-5 bridge is implemented and verified.
+    # ExponentialCone / PowerCone remain deliberately absent from the MOI
+    # capability claim.  The public Model route now executes primal
+    # Exp/Power blocks through native HSD, but the MOI adapter still stays
+    # fail-closed until its standard MOI.Test coverage is green.
 }
 
 function MOI.supports_constraint(
@@ -730,8 +729,9 @@ function _moi_validate_family_set(constraint_types)
     # mixed family.
     for (_, set_type) in constraint_types
         family = _moi_route_family(set_type)
-        # :exp/:power kinds are classification-only in this build; reject
-        # them explicitly rather than letting them reach a mixed lift.
+        # The direct public Model route supports these families, but this MOI
+        # adapter does not claim them yet; reject them rather than letting
+        # them reach a mixed lift.
         if family in (:exp_family, :power_family)
             throw(UnsupportedNativeConeRoute([family]))
         end
