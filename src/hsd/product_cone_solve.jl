@@ -211,6 +211,36 @@ function _product_hsd_refined_optimal_result!(
             x .+= A \ (-primal_residual)
         end
 
+        # Near the x=0 exposed face of K_exp, the exact boundary relation is
+        # z=y. Scaling failure can occur a few ulps before that representative
+        # is reached. Form it only as a cold certificate candidate, then
+        # restore affine primal feasibility. The candidate is adopted below
+        # only if every strict original-coordinate gate accepts it.
+        exp_boundary_changed = false
+        for block in canonical.cone_layout.blocks
+            block.cone === :exp || continue
+            u = block.offset
+            v = u + 1
+            w = u + 2
+            scale = max(one(T), abs(s[u]), abs(s[v]), abs(s[w]))
+            neighborhood = sqrt(tol) * scale
+            if abs(s[u]) <= neighborhood &&
+               abs(s[w] - s[v]) <= neighborhood && s[v] > zero(T)
+                s[u] = zero(T)
+                s[w] = s[v]
+                exp_boundary_changed = true
+            end
+        end
+        if exp_boundary_changed
+            primal_residual = A * x + s - canonical.b
+            if base.n == 0
+                _product_hsd_refinement_maxabs(primal_residual) <= tol ||
+                    return nothing
+            else
+                x .+= A \ (-primal_residual)
+            end
+        end
+
         dual_residual = transpose(A) * y + canonical.c
         gap = dot(canonical.c, x) + dot(canonical.b, y)
         affine_dual = Matrix{T}(undef, base.n + 1, base.m)
@@ -273,10 +303,14 @@ function _product_hsd_refined_optimal_result!(
     in_canonical_cone(canonical, y; dual=true, tol=tol) || return nothing
 
     saved_x = copy(base.x)
+    saved_s = copy(base.s)
     saved_y = copy(base.y)
     saved_kappa = base.kappa
     @inbounds for index in eachindex(base.x)
         base.x[index] = base.tau * x[index]
+    end
+    @inbounds for index in eachindex(base.s)
+        base.s[index] = base.tau * s[index]
     end
     @inbounds for index in eachindex(base.y)
         base.y[index] = base.tau * y[index]
@@ -296,6 +330,7 @@ function _product_hsd_refined_optimal_result!(
     end
 
     copyto!(base.x, saved_x)
+    copyto!(base.s, saved_s)
     copyto!(base.y, saved_y)
     base.kappa = saved_kappa
     hsd_residual!(base)
@@ -319,7 +354,7 @@ end
     refined === nothing || return refined
     return _product_hsd_verified_result(
         state, x_original, s_original, y_original, tol, reason, last_step,
-        terminal_alpha; check_optimal=!_product_hsd_has_nonsymmetric(state),
+        terminal_alpha; check_optimal=true,
     )
 end
 
@@ -327,6 +362,11 @@ end
     state::ProductConeHSDState{T}, tol::T,
 ) where {T}
     base = state.base
+    # A failed nonsymmetric scaling update invalidates the runtime factor.
+    # There is then no authoritative cone metric from which to compute a
+    # terminal boundary step; fail closed instead of calling the throwing
+    # max-step API on invalid state.
+    state.runtime.valid || return T(NaN)
     ap = max_step_primal!(state.runtime, base.s, base.ds)
     ad = max_step_dual!(state.runtime, base.y, base.dy)
     (isfinite(ap) || ap == T(Inf)) || return T(NaN)

@@ -186,6 +186,20 @@ end
     return min(primal, dual, gap)
 end
 
+@inline function _native_hsd_internal_certificate_tol(
+    program::NativeConeProgram{T}, requested::T,
+) where {T<:AbstractFloat}
+    # The legacy RSOC canonical map reconstructs each source residual from a
+    # sum/difference of two SOC coordinates. Triangle inequality therefore
+    # permits a factor-two amplification between canonical certification and
+    # the authoritative source-coordinate certificate. Tighten only the
+    # internal stopping gate; the public requested tolerance is unchanged.
+    has_rsoc = any(block -> block.cone === :rsoc, program.blocks) || any(
+        block -> _domain_cone(block.domain) === :rsoc, program.row_blocks,
+    )
+    return has_rsoc ? requested / T(2) : requested
+end
+
 @inline _native_hsd_max_iterations(settings::Settings) =
     settings.limits.iterations == 0 ? 200 : settings.limits.iterations
 
@@ -758,7 +772,8 @@ function _public_native_hsd_core(
     end
 
     reduced = reduction.reduced::CanonicalConicProgram{T}
-    tol = _native_hsd_tol(model, settings)
+    requested_tol = _native_hsd_tol(model, settings)
+    tol = _native_hsd_internal_certificate_tol(program, requested_tol)
 
     # Empty product cones are an exact affine-space problem.  The ordinary
     # HSD row-space reduction supplies the null-objective/ray fact, while the

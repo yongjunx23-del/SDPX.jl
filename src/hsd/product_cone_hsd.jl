@@ -201,7 +201,11 @@ function _product_cone_hsd_state(
     # LPLU. `base.driver` remains part of the generic HSD storage contract but
     # is never factored by this route, even when a caller supplied it.
     symmetric_bordered = SymmetricBorderedWorkspace(T, base.nr)
-    expanded = ExpandedKKTSession(T, base.n, base.m; rhs_count=2)
+    # Expanded storage is opt-in ownership, not an eager shadow workspace.
+    # The default bordered route must not pay the dense O((n+m)^2) memory cost
+    # of a factorization session it can never execute.
+    expanded = kkt_route === :expanded ?
+        ExpandedKKTSession(T, base.n, base.m; rhs_count=2) : nothing
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),
