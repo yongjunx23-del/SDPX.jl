@@ -157,13 +157,78 @@ end
     session.status = SDPX.EXPANDED_KKT_FACTORED
     solution = similar(rhs)
     @test SDPX.solve_expanded!(solution, session, rhs)
-    @test !SDPX.refine_expanded!(solution, session, rhs; max_refinements=0)
+
+    # With recovery disabled, the deliberately poor factor remains a typed,
+    # fail-closed refinement failure above the unchanged strict target.
+    @test !SDPX.refine_expanded!(
+        solution, session, rhs;
+        max_refinements=0, max_dynamic_attempts=0,
+    )
     @test session.status == SDPX.EXPANDED_KKT_REFINEMENT_STAGNATED
     @test session.backward_error > session.backward_target
     @test session.unregularized_residual_norm > 0
+
+    # Reopen the same deliberately poor starting factor.  The default policy
+    # must resume on a dynamic signed factor and re-refine from the original
+    # RHS rather than failing immediately after the static factor stagnates.
+    SDPX._assemble_regularized!(session, 1.0)
+    @test SDPX.factorize_pivoted_lu!(
+        session.factor, session.regularized; threshold=eps(Float64),
+    )
+    session.status = SDPX.EXPANDED_KKT_FACTORED
+    @test SDPX.solve_expanded!(solution, session, rhs)
+    @test SDPX.refine_expanded!(
+        solution, session, rhs;
+        max_refinements=2, max_dynamic_attempts=3,
+    )
+    @test session.refinement_recovery_attempts >= 1
+    @test any(
+        attempt.stage == SDPX.EXPANDED_REGULARIZATION_DYNAMIC &&
+        attempt.reason == SDPX.EXPANDED_ATTEMPT_ACCEPTED
+        for attempt in session.attempts
+    )
+    @test session.backward_error <= session.backward_target
+    @test session.status == SDPX.EXPANDED_KKT_UNREGULARIZED_CERTIFIED
+    @test any(
+        isfinite(step.reduction_ratio) && step.reduction_ratio < 1
+        for step in session.refinement_trajectory
+    )
+    @test length(unique(
+        step.factor_attempt for step in session.refinement_trajectory
+    )) >= 2
+
     @test_throws ArgumentError SDPX.refine_expanded!(
         solution, session, rhs; max_refinements=-1,
     )
+    @test_throws ArgumentError SDPX.refine_expanded!(
+        solution, session, rhs; max_dynamic_attempts=-1,
+    )
+end
+
+@testset "expanded arithmetic floor is diagnostic, not authority" begin
+    system, _ = expanded_fixture(Float64)
+    session = SDPX.ExpandedKKTSession(Float64, 2, 3)
+    @test SDPX.factor_expanded_kkt!(session, system)
+    rhs = zeros(Float64, session.dimension)
+    SDPX.expanded_rhs!(rhs, system)
+    solution = zeros(Float64, session.dimension)
+
+    # Force only the condition diagnostic to its conservative branch.  The
+    # direction still fails because the original-equation backward error is
+    # above 256eps; the floor cannot relax that contract.
+    session.factor.minimum_pivot = eps(Float64) *
+                                   SDPX._expanded_operator_scale(
+                                       session.unregularized,
+                                   )
+    session.status = SDPX.EXPANDED_KKT_FACTORED
+    @test !SDPX.refine_expanded!(
+        solution, session, rhs;
+        max_refinements=0, max_dynamic_attempts=0,
+    )
+    @test session.at_arithmetic_floor
+    @test session.status == SDPX.EXPANDED_KKT_REFINEMENT_AT_FLOOR
+    @test session.attainable_floor >= session.backward_error
+    @test session.backward_error > session.backward_target
 end
 
 function expanded_hot_allocation_counts()
