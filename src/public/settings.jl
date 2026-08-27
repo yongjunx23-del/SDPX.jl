@@ -178,6 +178,7 @@ struct Settings{T<:AbstractFloat}
     engine::Symbol
     scaling::Symbol
     formulation::Symbol
+    kkt_route::Symbol
     provider::Symbol
     presolve::Symbol
     algorithm::Symbol
@@ -196,6 +197,7 @@ struct Settings{T<:AbstractFloat}
         engine::Symbol,
         scaling::Symbol,
         formulation::Symbol,
+        kkt_route::Symbol,
         provider::Symbol,
         presolve::Symbol,
         algorithm::Symbol,
@@ -215,6 +217,7 @@ struct Settings{T<:AbstractFloat}
             (:auto, :variable_space_schur, :dense_augmented_kkt, :psd_lift),
             "formulation",
         )
+        _validate_symbol(kkt_route, (:bordered, :expanded), "kkt_route")
         _validate_symbol(provider, (:auto, :standard, :bfla, :multifloat, :legacy), "provider")
         _validate_symbol(algorithm, (:auto, :lp, :socp, :sdp), "algorithm")
         _validate_symbol(presolve, (:auto, :on, :off), "presolve")
@@ -232,6 +235,7 @@ struct Settings{T<:AbstractFloat}
             engine,
             scaling,
             formulation,
+            kkt_route,
             provider,
             presolve,
             algorithm,
@@ -260,6 +264,7 @@ function Settings(
     engine::Symbol=:auto,
     scaling::Symbol=:auto,
     formulation::Symbol=:auto,
+    kkt_route::Symbol=:bordered,
     provider::Symbol=:auto,
     presolve::Symbol=:auto,
     algorithm::Symbol=:auto,
@@ -278,6 +283,7 @@ function Settings(
         engine,
         scaling,
         formulation,
+        kkt_route,
         provider,
         presolve,
         algorithm,
@@ -402,7 +408,7 @@ function resolve_solve_options(::Type{T}, settings::Settings{T}) where {T<:Abstr
     resolved = resolve_solve_options(T, SolveOptions(settings))
     summary = merge(
         resolved.summary,
-        (blas_threads=settings.blas_threads,),
+        (blas_threads=settings.blas_threads, kkt_route=settings.kkt_route,),
     )
     return ResolvedSolveOptions{T}(resolved.core, resolved.certification, summary)
 end
@@ -414,6 +420,7 @@ function Base.show(io::IO, settings::Settings{T}) where {T}
         "engine=", settings.engine,
         ", ",
         "formulation=", settings.formulation,
+        ", kkt_route=", settings.kkt_route,
         ", provider=", settings.provider,
         ", blas_threads=", settings.blas_threads,
         ")",

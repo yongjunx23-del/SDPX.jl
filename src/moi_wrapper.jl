@@ -1243,6 +1243,7 @@ function _moi_settings(optimizer::Optimizer{T}) where {T<:AbstractFloat}
         _moi_option_symbol(options.scaling, :equilibrate, :none),
         options.formulation === :normal_equations ? :variable_space_schur :
             options.formulation === :augmented ? :dense_augmented_kkt : :auto,
+        :bordered,
         options.linear_algebra_backend,
         _moi_model_has_starts(optimizer.model::Model{T}) ? :off :
             _moi_option_symbol(options.presolve, :on, :off),
