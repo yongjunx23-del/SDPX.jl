@@ -26,6 +26,38 @@ end
     return try_update_scaling!(state.runtime, base.st, base.yt, mu_t)
 end
 
+"""Common strict-interior/scaling neighborhood gate for every cone product."""
+@inline function _product_hsd_trial_in_neighborhood!(
+    state::ProductConeHSDState{T},
+) where {T}
+    base = state.base
+    return isfinite(base.tau_t) && isfinite(base.kappa_t) &&
+           base.tau_t > zero(T) && base.kappa_t > zero(T) &&
+           _product_hsd_trial_scaling!(state)
+end
+
+"""
+Require a trial to make resolvable max-inf progress along the frozen residual
+homotopy. The comparison is arithmetic-relative rather than cone-family
+relative: a trial whose predicted reduction is below roundoff may preserve the
+current residual neighborhood, while every resolvable trial must realize at
+least one quarter of its predicted `alpha * current` reduction.
+"""
+@inline function _product_hsd_useful_trial_progress(
+    current::T, trial::T, alpha::T, scale::T,
+) where {T}
+    isfinite(current) && isfinite(trial) && isfinite(alpha) || return false
+    resolution = T(256) * eps(T) * scale
+    predicted = alpha * current
+    minimum_fraction = T(2) * cbrt(eps(T))
+    if current > resolution && predicted < minimum_fraction * current
+        return false
+    elseif predicted <= resolution
+        return trial <= current + resolution
+    end
+    return trial <= current - predicted / T(4) + resolution
+end
+
 """Whether `err` is an expected numerical failure of a KKT factor/solve.
 Only these may be converted into a typed bordered-failure state; every other
 exception (bounds, methods, workspace misuse) is a programmer error and must
@@ -49,18 +81,14 @@ end
     d_norm = _hsd_maxinf(base.rD)
     g_norm = abs(base.rG)
     (isfinite(p_norm) && isfinite(d_norm) && isfinite(g_norm)) || return false
+    current_merit = max(p_norm, d_norm, g_norm)
+    scale = max(one(T), current_merit)
     backtracking = 0
     has_nonsymmetric = !isempty(state.runtime.exp) ||
                        !isempty(state.runtime.power)
-    # PSD NT scaling can reject a strictly-interior trial until roundoff in a
-    # near-boundary eigensystem is reduced below its backward-error gates (a
-    # valid Lattice direction first becomes certifiable after 16 halvings),
-    # so PSD- or nonsymmetric-containing products use the 64-trial budget.
-    # Pure LP/SOC problems never needed more than the original 16 and the
-    # wider budget over-damped their Mehrotra convergence (SOCP regression:
-    # iteration_limit where 13 iterations previously converged).
-    has_psd = !isempty(state.runtime.psd)
-    max_backtracking = (has_psd || has_nonsymmetric) ? 64 : 16
+    # One arithmetic budget serves every cone family. Progress and the common
+    # scaling neighborhood, rather than family identity, decide acceptance.
+    max_backtracking = 64
     if has_nonsymmetric
         checkpoint_nonsymmetric_scaling!(state.runtime) || return false
     end
@@ -75,19 +103,20 @@ end
         end
         base.tau_t = base.tau + alpha * base.dtau
         base.kappa_t = base.kappa + alpha * base.dkappa
-        ok = isfinite(base.tau_t) && isfinite(base.kappa_t) &&
-             base.tau_t > zero(T) && base.kappa_t > zero(T) &&
-             _product_hsd_trial_scaling!(state)
+        ok = _product_hsd_trial_in_neighborhood!(state)
         if ok
             _hsd_trial_residual!(base)
             p2 = _hsd_maxinf(base.rPt)
             d2 = _hsd_maxinf(base.rDt)
             gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t
-            scale = max(one(T), p_norm, d_norm, g_norm)
+            trial_merit = max(p2, d2, abs(gap2))
             tol = T(256) * sqrt(eps(T)) * scale
             accepted = isfinite(p2) && isfinite(d2) && isfinite(gap2) &&
                        _hsd_residual_homotopy_ok(base, alpha, p2, d2, gap2) &&
-                       max(p2, d2, abs(gap2)) <= scale * T(1.0005) + tol
+                       _product_hsd_useful_trial_progress(
+                           current_merit, trial_merit, alpha, scale,
+                       ) &&
+                       trial_merit <= scale * T(1.0005) + tol
         end
         if !accepted
             # A failed nonsymmetric trial may leave the conjugate/scaling
@@ -105,6 +134,9 @@ end
         end
     end
     if !accepted
+        # The solve driver runs current/trial certificate verification before
+        # it may publish this exhausted line search as a breakdown.
+        state.diagnostic = :line_search_progress_exhausted
         # Leave the pair runtime consistent with the unchanged base iterate.
         if has_nonsymmetric
             restore_nonsymmetric_scaling_checkpoint!(state.runtime)
@@ -122,6 +154,7 @@ end
     end
     base.tau = base.tau_t
     base.kappa = base.kappa_t
+    state.diagnostic = :none
     base.record.backtracking = backtracking
     base.record.primal_step = alpha
     base.record.dual_step = alpha
