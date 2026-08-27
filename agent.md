@@ -23,7 +23,7 @@
 |---|---|---|---|
 | **Explore** 调研/根因 | 定位数值失败根因、环境差异、算法文献 | 本地 Julia probe（每个 agent 自建 testenv 并验证 Manifest 指向）；`scripts/run_test_file.sh`；`ucas-hpc` skill 集群复现（PBS，≤48gb/90min 免批）；`pi-web-access`/feynman MCP 查文献 | recon `luna-high`；深挖 `luna-max`；数值根因 `sol-high` |
 | **Planner** 计划固化 | 产出显式 DAG：每节点带文件域、验收门、回滚边界 | Lead Agent 亲自写任务书；大设计咨询 `pi-oracle`（`scripts/build_oracle_archive.sh` 冻结 SHA + `oracle_receipt.sh`）或 `gpt56solpro-consult`；计划落 `docs/design/`、`docs/reviews/` | **前沿**：`sol-high`(max) 设计；大 wave GPT Pro（Pro effort） |
-| **Worker** 逐节点实现 | 独立 worktree/分支实现 DAG 节点 | `pi-subagents` `runs.run`（worktree:true + 自建 testenv + `steer` 纠偏 + supervisor 决策）；长数值跑集群 PBS | **商品**：T1 `luna-high`、T2 `luna-max`；数值内核 T3 `sol-high`（prewalk 省前沿用量） |
+| **Worker** 逐节点实现 | 独立 worktree/分支实现 DAG 节点 | `pi-subagents` `runs.run`（worktree:true + 自建 testenv + `steer` 纠偏 + supervisor 决策）；长数值跑集群 PBS | **商品**：T1/T2 `deepseek-high`（`ollama/deepseek-v4-flash:0731`，比 luna 快一个量级；重任务 thinking=max，两轮未解直接升 `sol-high`）；数值内核 T3 `sol-high`（prewalk 省前沿用量） |
 | **Critic** 质疑/返工 | 机器证据复核，可触发返工 | 四层：① 机器证据（quick gate 9/9 + `test/kernel_failure_regressions.jl` + 目标值 + git SHA，零成本）② `sol-high` 交叉审 ③ council-mode（重大取舍）④ GPT Pro 全仓审阅（每 wave 1 次 + 1 follow-up） | Lead 机器验证（零）；`sol-high`；T4 Pro |
 | **Promoter** 传播完成 | 合并主线、集群同步、状态存档 | 机械执行：merge → quick gate 复核 → `git archive`+SHA-256 → 集群 release（`ucas-hpc` release layout）→ `.pi/WAVE.yaml`/`docs/design/ROADMAP_1_0.md` 更新 → `check_release_metadata.jl` | 无模型（脚本优先） |
 
