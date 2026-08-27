@@ -249,6 +249,13 @@ function SDPX.la_bfla_ldlt_factor!(
     return _FactorHandle(factor, workspace)
 end
 
+@inline _bfla_transpose_op(trans::BFLA.TransposeOp) = trans
+@inline function _bfla_transpose_op(trans::Symbol)
+    trans in (:N, :NoTrans) && return BFLA.NoTrans
+    trans in (:T, :Trans, :Transpose) && return BFLA.Trans
+    throw(ArgumentError("unsupported BFLA transpose operation $(repr(trans))"))
+end
+
 function SDPX.la_bfla_residual!(
     provider::_Provider,
     trans,
@@ -259,7 +266,7 @@ function SDPX.la_bfla_residual!(
 )
     return BFLA.residual!(
         provider.backend,
-        trans,
+        _bfla_transpose_op(trans),
         A,
         x,
         b,
@@ -276,7 +283,7 @@ SDPX.la_bfla_normwise_backward_error(
     b,
     residual,
 ) = BFLA.normwise_backward_error(
-    provider.backend, trans, A, x, b, residual,
+    provider.backend, _bfla_transpose_op(trans), A, x, b, residual,
 )
 
 function SDPX.la_bfla_higher_precision_residual!(
@@ -291,7 +298,7 @@ function SDPX.la_bfla_higher_precision_residual!(
 )
     return BFLA.higher_precision_residual!(
         provider.backend,
-        trans,
+        _bfla_transpose_op(trans),
         A,
         x,
         b,

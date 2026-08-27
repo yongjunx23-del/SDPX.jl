@@ -18,9 +18,10 @@ using Test
 
 const _P0_KNOWN_GAPS = get(ENV, "SDPX_RUN_KNOWN_GAPS", "0") == "1"
 
-function _p0_settings(engine::Symbol)
+function _p0_settings(engine::Symbol; kkt_route::Symbol=:bordered)
     return SDPX.Settings{Float64}(
         engine=engine,
+        kkt_route=kkt_route,
         tolerances=SDPX.Tolerances{Float64}(
             primal=1e-8, dual=1e-8, gap=1e-8,
         ),
@@ -29,8 +30,12 @@ function _p0_settings(engine::Symbol)
     )
 end
 
-function _p0_optimize(model, engine::Symbol=:native_hsd)
-    return SDPX.optimize!(model; settings=_p0_settings(engine))
+function _p0_optimize(
+    model, engine::Symbol=:native_hsd; kkt_route::Symbol=:bordered,
+)
+    return SDPX.optimize!(
+        model; settings=_p0_settings(engine; kkt_route=kkt_route),
+    )
 end
 
 function _p0_assert_optimal(result, objective; atol=2e-6)
@@ -193,10 +198,10 @@ end
         end
 
         @testset "two-by-two rank-one PSD boundary" begin
-            result = _p0_optimize(_p0_rank_one_psd(), :native_hsd)
-            @test_broken SDPX.status(result) === :optimal &&
-                SDPX.certificate(result).valid &&
-                isapprox(SDPX.primal_objective(result), -0.5; atol=2e-6)
+            result = _p0_optimize(
+                _p0_rank_one_psd(), :native_hsd; kkt_route=:expanded,
+            )
+            _p0_assert_optimal(result, -0.5; atol=2e-6)
         end
 
         @testset "mixed free/equality/PSD" begin
