@@ -1015,6 +1015,15 @@ RSOC 和 Nonpositive 在原坐标中单独验证 reconstruction。
 
 # 七、v0.8：Sparse、多精度与硬件性能
 
+> **LA 后端政策（2026-08-28，约束性，适用于 Phase 6/7/8 全部）**：MFLA
+> （MultiFloatLinearAlgebra）与 BFLA（BigFloatLinearAlgebra）是项目所有者自研库，
+> 是**首选线性代数提供者**。任何阶段不得重复实现它们已覆盖的能力（MF 稠密
+> LDL/Cholesky/RRQR/TRSM/GEMM、BigFloat 因子化等）。集成通过既有
+> `la_backend.jl` 能力层 + `ext/` 适配；缺失的能力以 provider gap 上报，
+> 而不是私写内核。现有资产：`ext/SDPXMultiFloatLinearAlgebraExt.jl`（1272 行，
+> capability-fact 驱动 + MFWorkspace 复用）、`ext/SDPXBigFloatLinearAlgebraExt.jl`
+> （1034 行，因子化 API 带有限性验证）。
+
 ## Phase 6 — Sparse KKT 路线
 
 当前 `sparse_la.jl` 和 `factor_cache/routes/sparse_symbolic_numeric.jl` 的 symbolic/numeric 分离应保留，但要接入新的 `NewtonSystem`。
