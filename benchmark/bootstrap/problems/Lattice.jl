@@ -8,9 +8,12 @@ Eqs. (S.2), and the 9×9 correlation matrix is Eq. (S.1); the two reflection
 matrices are included as the site/link and diagonal reflection-positive
 relaxations displayed immediately below that equation.
 
-The published SU(2) upper-bound target at lambda=2 is 0.75755.  It is kept as
-an external benchmark oracle rather than inserted as a constraint: solving
-this model and comparing its certificate to the oracle is the validation step.
+This truncated six-moment fixture has conic optimum 0.693 (cross-validated by
+independent native-HSD and legacy solves).  The published SU(2) level-2
+physical target at lambda=2 is 0.75755, but reproducing it requires the fuller
+finite-N trace identities / larger moment basis which this fixture does not
+encode.  Consequently 0.75755 is retained as follow-up benchmark context, not
+as a pass/fail oracle for this conic model.
 
 Reference: V. Kazakov and Z. Zheng, "Bootstrap for Finite N Lattice Yang-Mills
 Theory", JHEP 03 (2025) 099, arXiv:2404.16925, supplementary Eq. (S.1)--(S.2)
@@ -41,7 +44,9 @@ end
 
 BootstrapBenchmark.name(::LatticeProblem) = :lattice
 
+# External physical target for a future full finite-N SU(2) benchmark rebuild.
 const _PUBLISHED_SU2_LAMBDA2_BOUND = 0.75755
+# Comparable conic objective of the shipped truncated six-moment fixture.
 const _PUBLISHED_U_N_LAMBDA2_BOUND = 0.693
 
 function _parameter(params, key::Symbol, default)
@@ -134,12 +139,18 @@ function BootstrapBenchmark.build(
     return model
 end
 
+"""Comparable optimum of the shipped truncated six-moment conic fixture.
+
+The published SU(2) target `_PUBLISHED_SU2_LAMBDA2_BOUND == 0.75755` belongs
+to a future benchmark with the full finite-N identities/basis and must not be
+used to grade this smaller model.
+"""
 function BootstrapBenchmark.known_optimum(p::LatticeProblem, params)
     _validate_params(p, params)
-    return _PUBLISHED_SU2_LAMBDA2_BOUND
+    return _PUBLISHED_U_N_LAMBDA2_BOUND
 end
 
-"""Translation-size labels for the fixed six-variable local relaxation."""
+"""Translation-size labels for the fixed truncated six-variable relaxation."""
 function BootstrapBenchmark.scale_params(p::LatticeProblem)
     return [
         (lattice_size=1, variables=6, level=2, dimension=2, gauge_group=:SU2, coupling=2),
