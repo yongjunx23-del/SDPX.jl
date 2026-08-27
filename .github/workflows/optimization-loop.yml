@@ -23,10 +23,11 @@ permissions:
 
 jobs:
   benchmark:
-    name: Correctness and candidate benchmarks
+    name: Correctness and base-vs-candidate benchmarks
     uses: ./.github/workflows/optimization-benchmark.yml
     with:
       post_status: true
+      base_sha: ${{ inputs.base_sha }}
     permissions:
       contents: read
       actions: read
@@ -45,17 +46,25 @@ jobs:
         with:
           name: sdpx-optimization-${{ github.sha }}
           path: optimization-artifacts
-      - name: Validate base_sha ancestry and persist evidence off-branch
+      - name: Validate base_sha and persist evidence off-branch
         shell: bash
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+          CANDIDATE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if ! git merge-base --is-ancestor "${{ inputs.base_sha }}" "${{ github.sha }}"; then
-            echo "base_sha '${{ inputs.base_sha }}' is not an ancestor of '${{ github.sha }}'" >&2
+          # I4: treat dispatch input as data, never as shell syntax.
+          case "$BASE_SHA" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "base_sha must be exactly 40 hex chars" >&2; exit 1 ;;
+          esac
+          if ! git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"; then
+            echo "base_sha '$BASE_SHA' is not an ancestor of '$CANDIDATE_SHA'" >&2
             exit 1
           fi
-          short_sha="${GITHUB_SHA:0:12}"
-          base_sha_full="$(git rev-parse "${{ inputs.base_sha }}"^{commit})"
-          record_dir="evidence/${{ github.sha }}"
+          base_sha_full="$(git rev-parse "$BASE_SHA"^{commit})"
+          short_sha="${CANDIDATE_SHA:0:12}"
+          record_dir="evidence/$CANDIDATE_SHA"
           mkdir -p "$record_dir"
           # Persist exactly the artifacts the benchmark workflow actually emits.
           cp optimization-artifacts/quick-tests.log "$record_dir/quick-tests.log"
@@ -66,15 +75,19 @@ jobs:
           cp optimization-artifacts/source-commit.txt "$record_dir/source-commit.txt"
           cp optimization-artifacts/source-status.txt "$record_dir/source-status.txt"
           cp optimization-artifacts/julia-version.txt "$record_dir/julia-version.txt"
+          if [ -f optimization-artifacts/base-vs-candidate-comparison.toml ]; then
+            cp optimization-artifacts/base-vs-candidate-comparison.toml "$record_dir/base-vs-candidate-comparison.toml"
+          fi
           cat > "$record_dir/README.md" <<EOF
-          # Optimization evidence for ${GITHUB_SHA}
+          # Optimization evidence for ${CANDIDATE_SHA}
 
-          - Tested commit (candidate): \`${GITHUB_SHA}\`
+          - Tested commit (candidate): \`${CANDIDATE_SHA}\`
           - Base SHA (explicit input): \`$base_sha_full\`
           - Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           - Quick correctness suite: passed
           - Schema-v8 smoke suite and native HSD allocation gate: passed
           - Fresh-process stability matrix: passed
+          - Base-vs-candidate comparison: present when the benchmark emitted it
           - Evidence is immutable on this ref keyed by candidate SHA.
           EOF
           git config user.name "github-actions[bot]"
@@ -83,7 +96,7 @@ jobs:
           git commit -qm "perf: record optimization evidence for ${short_sha}"
           # Never push onto the candidate branch (that would mutate the frozen
           # candidate SHA). Push to a separate evidence ref keyed by candidate SHA.
-          git push origin "HEAD:refs/heads/evidence/${{ github.sha }}"
+          git push origin "HEAD:refs/heads/evidence/$CANDIDATE_SHA"
 
   publish-status:
     name: Publish optimization gate status
