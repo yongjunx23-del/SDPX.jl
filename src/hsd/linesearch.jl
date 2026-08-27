@@ -50,7 +50,9 @@ least one quarter of its predicted `alpha * current` reduction.
     resolution = T(256) * eps(T) * scale
     predicted = alpha * current
     minimum_fraction = T(2) * cbrt(eps(T))
-    if current > resolution && predicted < minimum_fraction * current
+    arithmetic_neighborhood = T(16) * sqrt(eps(T)) * scale
+    if current > arithmetic_neighborhood &&
+       predicted < minimum_fraction * current
         return false
     elseif predicted <= resolution
         return trial <= current + resolution
