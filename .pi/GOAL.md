@@ -7,7 +7,9 @@
 
 ## 北极星
 
-`time-to-verified-certificate at a specified tolerance and precision`：任意精度、多锥（LP/SOC/RSOC/SDP/Exp/Power）、原生多锥 HSD、原坐标证书、MOI 可验证、集群可复现、遗留冗余退役、文档收敛。
+**打造一个高精度的 Julia 凸优化求解器，主要为 numerical bootstrap 服务。**
+
+核心 KPI：`time-to-verified-certificate at a specified tolerance and precision`——任意精度、多锥（LP/SOC/RSOC/SDP/Exp/Power）、原生多锥 HSD、原坐标证书、MOI 可验证、集群可复现、遗留冗余退役、文档收敛。v1.0 路线图见 `docs/design/ROADMAP_1_0.md`；工程角色弧见仓库 `agent.md`。
 
 ---
 
