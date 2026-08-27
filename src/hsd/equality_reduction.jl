@@ -784,3 +784,90 @@ function hsd_recover_dual_ray_source!(
         x_full, s_full, reduction, x_canonical, s_canonical; tol=tolerance,
     )
 end
+
+# ---------------------------------------------------------------------------
+# Equality policy selection (Phase 4, D3)
+# ---------------------------------------------------------------------------
+
+"""
+    EqualityPolicy
+    EqualityPolicyRetain
+    EqualityPolicyRRQR
+    EqualityPolicySparseQR
+
+Cost-based equality-reduction policy markers. The selector below maps a
+problem to one of these; each policy is prepared infrastructure and the
+current default behavior is unchanged.
+"""
+struct EqualityPolicyRetain end
+struct EqualityPolicyRRQR end
+struct EqualityPolicySparseQR end
+
+"""
+    select_equality_policy(canonical; small_dense_threshold=64, sparse_fill_budget=...)
+        -> (policy, reason::Symbol)
+
+Choose the equality-reduction policy for a canonical program.
+
+- `:retain` — keep equalities in the expanded KKT (the current default for
+  mixed free/equality/PSD systems; returned whenever the equality subsystem
+  is small relative to the active system).
+- `:small_dense_rrqr` — the current dense pivoted-QR null-space reduction
+  (`hsd_equality_reduce`), selected for small dense equality systems with
+  obvious dimension reduction.
+- `:sparse_qr` — a prepared sparse-QR route; NOT yet wired into
+  `hsd_equality_reduce`. Selecting it returns the policy marker and a reason,
+  but the caller must not rely on it being executable yet.
+
+The default behavior is unchanged: the existing public path keeps using
+`:retain`/`:small_dense_rrqr` as before. This function is the single hook a
+future route planner uses.
+"""
+function select_equality_policy(
+    canonical::CanonicalConicProgram{T};
+    small_dense_threshold::Int=64,
+) where {T<:AbstractFloat}
+    m = canonical_num_slack(canonical)
+    n = canonical_num_variables(canonical)
+    # count zero (equality) rows
+    me = 0
+    for block in canonical.cone_layout.blocks
+        block.cone === :zero && (me += block.length)
+    end
+    ma = m - me  # active (cone) rows
+
+    if me == 0
+        return EqualityPolicyRetain(), :no_equalities
+    end
+
+    # Sparse-QR prepared route: available only when the active system is
+    # small enough that fill is bounded; not yet executable, so we only
+    # surface the marker.
+    fill_estimate = me * ma
+    if fill_estimate <= small_dense_threshold * small_dense_threshold
+        # small dense system: RRQR is the current executable route
+        return EqualityPolicyRRQR(), :small_dense
+    end
+
+    # Mixed free/equality/PSD with non-trivial equality count: retain.
+    # The sparse-QR route is prepared but not executable; fall back to retain
+    # with a diagnostic reason rather than silently selecting an unimplemented
+    # route.
+    if me <= n && ma >= me
+        return EqualityPolicyRetain(), :retain_mixed
+    end
+
+    # Otherwise surface the sparse-QR marker with a diagnostic; it is not
+    # executable yet, so a caller must not dispatch on it.
+    return EqualityPolicySparseQR(), :sparse_qr_prepared_not_executable
+end
+
+"""
+    equality_policy_reason(policy) -> Symbol
+
+Return the symbolic reason carried by a selected policy (used in tests and
+route diagnostics).
+"""
+equality_policy_reason(::EqualityPolicyRetain) = :retain
+equality_policy_reason(::EqualityPolicyRRQR) = :small_dense_rrqr
+equality_policy_reason(::EqualityPolicySparseQR) = :sparse_qr
