@@ -214,6 +214,7 @@ function lower_lp_native(
     equality_origins = CoreLPRecordOrigin[]
     inequality_duals = CoreLPInequalityDual[]
     equality_duals = CoreLPEqualityDual[]
+    nonpositive_transform = NonpositiveToNonnegative(T)
 
     # Product blocks first, in program order.
     for (block_number, block) in enumerate(program.blocks)
@@ -242,7 +243,9 @@ function lower_lp_native(
                 col = offset + position - 1
                 push!(G_rows, length(h_values) + 1)
                 push!(G_columns, col)
-                push!(G_values, owned_neg(owned_one()))
+                push!(G_values, owned_scalar(forward_affine_coefficient(
+                    nonpositive_transform, owned_one(),
+                )))
                 push!(h_values, owned_zero())
                 push!(inequality_origins, CoreLPRecordOrigin(
                     :variable_dual_slack,
@@ -328,9 +331,13 @@ function lower_lp_native(
                     iszero(coefficient) && continue
                     push!(G_rows, length(h_values) + 1)
                     push!(G_columns, variable)
-                    push!(G_values, owned_neg(coefficient))
+                    push!(G_values, owned_scalar(forward_affine_coefficient(
+                        nonpositive_transform, coefficient,
+                    )))
                 end
-                push!(h_values, owned_neg(rhs[source_row]))
+                push!(h_values, owned_scalar(forward_affine_rhs(
+                    nonpositive_transform, rhs[source_row],
+                )))
                 push!(inequality_origins, CoreLPRecordOrigin(
                     :inequality,
                     row_index,

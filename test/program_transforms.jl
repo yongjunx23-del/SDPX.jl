@@ -110,6 +110,15 @@ end
     blocks = SDPX.layout_blocks(canonical.cone_layout)
     @test all(SDPX.block_cone(block) === :nonnegative for block in blocks)
     @test all(SDPX.block_reconstruction(block).sign == -1 for block in blocks)
+    @test length(SDPX.canonical_reconstruction_stack(canonical)) == 2
+    @test all(transform isa SDPX.NonpositiveToNonnegative for
+              transform in SDPX.canonical_reconstruction_stack(canonical))
+    # Runtime setup receives only canonical families; the source Nonpositive
+    # family is represented by a typed transform in the reconstruction stack.
+    runtime = SDPX.ProductConeRuntime(canonical.cone_layout, Float64)
+    @test runtime.valid == false # setup succeeds; execution validity is later
+    @test all(block.cone in (:nonnegative, :soc, :psd, :exp, :power, :zero, :free)
+              for block in canonical.cone_layout.blocks)
 
     t = SDPX.NonpositiveToNonnegative(Float64)
     A = Matrix(native.equality_matrix)

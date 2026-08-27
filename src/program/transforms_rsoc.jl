@@ -12,7 +12,7 @@
 #=====================================================================#
 
 """A typed orthogonal map from `RotatedLorentzCone` coordinates to SOC."""
-struct RotatedSOCToSOC{T<:AbstractFloat} <: AbstractConeTransform{T}
+struct RotatedSOCToSOC{T<:AbstractFloat} <: AbstractProgramTransform{T}
     dimension::Int
     precision_bits::Int
     primal_map::Matrix{T}
@@ -194,7 +194,7 @@ though it is one for the orthogonal convention.
 """
 function verify_pairing_invariant(
     transform::RotatedSOCToSOC{T}, primal::AbstractVector{T}, dual::AbstractVector{T};
-    atol=nothing, rtol=nothing,
+    atol=nothing, rtol=nothing, tol=nothing,
 ) where {T<:AbstractFloat}
     canonical_primal = similar(primal)
     canonical_dual = similar(dual)
@@ -202,8 +202,39 @@ function verify_pairing_invariant(
     forward_dual!(transform, canonical_dual, dual)
     original_pairing = dot(primal, dual)
     canonical_pairing = transform.pairing_scale * dot(canonical_primal, canonical_dual)
+    if tol !== nothing
+        atol = atol === nothing ? tol : atol
+        rtol = rtol === nothing ? tol : rtol
+    end
     return _rsoc_transform_isapprox(
         [original_pairing], [canonical_pairing]; atol=atol, rtol=rtol,
+    )
+end
+
+function verify_pairing_invariant(
+    transform::RotatedSOCToSOC{T}, primal::AbstractVector{T}, dual::AbstractVector{T},
+    transformed_primal::AbstractVector{T}, transformed_dual::AbstractVector{T};
+    atol=nothing, rtol=nothing, tol=nothing,
+) where {T<:AbstractFloat}
+    expected_primal = similar(primal)
+    expected_dual = similar(dual)
+    forward_primal!(transform, expected_primal, primal)
+    forward_dual!(transform, expected_dual, dual)
+    size(expected_primal) == size(transformed_primal) || throw(DimensionMismatch(
+        "transformed primal size mismatch",
+    ))
+    size(expected_dual) == size(transformed_dual) || throw(DimensionMismatch(
+        "transformed dual size mismatch",
+    ))
+    atol_value, rtol_value = _transform_tolerances(T;
+        atol=atol, rtol=rtol, tol=tol,
+    )
+    all(isapprox.(expected_primal, transformed_primal;
+                  atol=atol_value, rtol=rtol_value)) || return false
+    all(isapprox.(expected_dual, transformed_dual;
+                  atol=atol_value, rtol=rtol_value)) || return false
+    return verify_pairing_invariant(
+        transform, primal, dual; atol=atol, rtol=rtol, tol=tol,
     )
 end
 
@@ -238,5 +269,30 @@ function verify_stationarity_invariant(
     canonical_residual = transpose(canonical_A) * canonical_dual + objective
     return _rsoc_transform_isapprox(
         original_residual, canonical_residual; atol=atol, rtol=rtol,
+    )
+end
+
+function verify_stationarity_invariant(
+    transform::RotatedSOCToSOC{T},
+    A, c, y, tau, A_hat, c_hat, y_hat;
+    atol=nothing, rtol=nothing, tol=nothing,
+) where {T<:AbstractFloat}
+    size(A, 1) == transform.dimension || throw(DimensionMismatch(
+        "stationarity matrix has $(size(A, 1)) rows, expected $(transform.dimension)",
+    ))
+    size(A_hat) == size(A) || throw(DimensionMismatch(
+        "transformed stationarity matrix size mismatch",
+    ))
+    length(y) == transform.dimension == length(y_hat) || throw(DimensionMismatch(
+        "stationarity dual lengths do not match transform dimension",
+    ))
+    size(A, 2) == length(c) == length(c_hat) || throw(DimensionMismatch(
+        "stationarity objective lengths do not match matrix columns",
+    ))
+    original_residual = transpose(A) * y + tau .* c
+    canonical_residual = transpose(A_hat) * y_hat + tau .* c_hat
+    return _rsoc_transform_isapprox(
+        original_residual, canonical_residual; atol=atol === nothing ? tol : atol,
+        rtol=rtol === nothing ? tol : rtol,
     )
 end
