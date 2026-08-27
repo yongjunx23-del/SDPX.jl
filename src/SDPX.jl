@@ -66,6 +66,7 @@ include("factor_cache/api.jl")
 include("factor_cache/routes.jl")
 include("kkt_route.jl")
 include("kkt/system.jl")
+include("kkt/expanded_quasidefinite.jl")
 include("step_hot.jl")
 # HSD state, Nonnegative (LP) HSD predictor/corrector, and certificate
 # verification. Included here (after the IR, factor-cache routes and the KKT
