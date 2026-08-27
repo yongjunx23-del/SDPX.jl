@@ -158,6 +158,7 @@ const FULL_TESTS = (
     "moi_native_soc.jl",
     "moi_native_hsd.jl",
     "moi_conformance.jl",
+    "wave_e_moi.jl",
     "moi.jl",
     "threads.jl",
     "pipeline.jl",
