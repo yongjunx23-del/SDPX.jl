@@ -17,6 +17,7 @@
     ProductHSDBreakdown
     ProductHSDRankAmbiguous
     ProductHSDTimeLimit
+    ProductHSDInsufficientPrecision
 end
 
 """Typed, inspectable reason for a product-HSD terminal status."""
@@ -34,6 +35,7 @@ end
     ProductHSDRankRayVerificationFailed
     ProductHSDKKTInitializationFailed
     ProductHSDTimeLimitReached
+    ProductHSDTauCollapseRecoveryExhausted
 end
 
 """
@@ -64,12 +66,29 @@ struct ProductHSDSolveResult{T}
     kappa::T
     mu::T
     normalized_residual::T
+    tau_collapse_recoveries::Int
     x::Vector{T}
     s::Vector{T}
     y::Vector{T}
     hsd_x::Vector{T}
     hsd_s::Vector{T}
     hsd_y::Vector{T}
+end
+
+"""
+Return the recovered homogeneous residual without forming an unbounded
+`inv(tau)`.  For a resolvable tau this is bit-for-bit the historical
+`hsd_normalized_residual/tau` expression.  At or below the arithmetic floor
+there is no numerically authoritative recovered point, so `Inf` is returned
+instead of amplifying embedding roundoff into an overflow.
+"""
+@inline function _product_hsd_recovered_residual(
+    base::HSDState{T}, floor::T=sqrt(eps(T)),
+) where {T}
+    hsd_residual!(base)
+    (isfinite(base.tau) && base.tau > floor) || return T(Inf)
+    recovered = hsd_normalized_residual(base) / base.tau
+    return isfinite(recovered) ? recovered : T(Inf)
 end
 
 @inline function _product_hsd_make_result(
@@ -84,14 +103,8 @@ end
 ) where {T}
     base = state.base
     hsd_residual!(base)
-    normalized_residual = hsd_normalized_residual(base)
-    if status === ProductHSDOptimal
-        # Optimality was promoted only after `verify_optimal!` proved tau > 0
-        # and checked this recovered, homogeneous-scale-invariant residual.
-        # Reporting the unscaled embedding residual here made a certified solve
-        # appear looser whenever tau > 1 (the Exp release point has tau ≈ 2.29).
-        normalized_residual /= base.tau
-    end
+    normalized_residual = status === ProductHSDOptimal ?
+        _product_hsd_recovered_residual(base) : hsd_normalized_residual(base)
     return ProductHSDSolveResult{T}(
         status,
         reason,
@@ -103,6 +116,7 @@ end
         base.kappa,
         base.mu,
         normalized_residual,
+        state.tau_collapse_recoveries,
         copy(x_original),
         copy(s_original),
         copy(y_original),
@@ -124,8 +138,13 @@ function _product_hsd_verified_result(
     terminal_alpha::T=zero(T);
     check_optimal::Bool=true,
 ) where {T}
-    canonical = state.base.canonical
-    if check_optimal && verify_optimal!(
+    base = state.base
+    canonical = base.canonical
+    # Do not send an arithmetically unresolved tau to the recovered-point
+    # verifier. Ray gates below still run and remain the only infeasibility
+    # authority. Healthy tau follows the unchanged verifier path.
+    tau_floor = max(tol, sqrt(eps(T)))
+    if check_optimal && base.tau > tau_floor && verify_optimal!(
         canonical, state.base, x_original, s_original, y_original; tol=tol,
     )
         return _product_hsd_make_result(
@@ -166,6 +185,65 @@ trigger certificate verification; they never promote a status themselves.
     base.tau <= floor || return false
     base.kappa > zero(T) || return false
     return base.tau <= zero(T) || base.kappa >= base.tau / floor
+end
+
+"""
+A collapse is recoverable only after the embedding equations and global
+complementarity have converged to the arithmetic neighborhood.  This avoids
+mistaking an ordinary early iterate with small tau for an infeasibility face.
+The ratio predicate is shared with termination-ray handling; neither predicate
+can publish a certificate status.
+"""
+@inline function _product_hsd_tau_collapse_ready(
+    base::HSDState{T}, tol::T,
+) where {T}
+    _product_hsd_tau_collapsed(base, tol) || return false
+    hsd_residual!(base)
+    floor = max(tol, sqrt(eps(T)))
+    residual_converged = hsd_normalized_residual(base) <= floor
+    complementarity_converged = base.mu <=
+        floor * max(one(T), abs(base.kappa))
+    return residual_converged && complementarity_converged
+end
+
+"""
+Restore one tau-collapsed trajectory to a centered KKT-derived interior point.
+The sign audit found no family-specific border defect: the frozen gap row is
+`-c'dx-b'dy+dκ=-rG` (gap coefficient `+1` on dκ) and the scalar row is
+`κ*dτ+τ*dκ=scalar_rhs`; `_product_hsd_recover_dkappa!` evaluates candidates
+against both equations. Mixed-sign orthants are already canonicalized to the
+same nonnegative pairing, and PSD svec uses the Euclidean trace pairing.
+
+The cone cross-centering pass in `kkt_derived_start!` changes the observed
+global mu after it initially sets kappa=1.  One scalar cross-centering update,
+`kappa <- mu/tau`, balances the scalar pair with that observed global mu and
+changes the projective drive which selected the tau=0 face.  Recovery is
+bounded by the solve loop and the attempt count is retained in the result.
+"""
+function _product_hsd_tau_collapse_recenter!(
+    state::ProductConeHSDState{T},
+) where {T}
+    report = kkt_derived_start!(state)
+    report.ok || begin
+        state.diagnostic = :tau_collapse_recenter_initialization_failed
+        return false
+    end
+    base = state.base
+    hsd_residual!(base)
+    scalar_center = base.mu / base.tau
+    (isfinite(scalar_center) && scalar_center > zero(T)) || begin
+        state.diagnostic = :tau_collapse_recenter_nonfinite
+        return false
+    end
+    base.kappa = scalar_center
+    hsd_residual!(base)
+    (isfinite(base.mu) && base.mu > zero(T)) || begin
+        state.diagnostic = :tau_collapse_recenter_nonfinite
+        return false
+    end
+    state.tau_collapse_recoveries += 1
+    state.diagnostic = :tau_collapse_recentered
+    return true
 end
 
 @inline function _product_hsd_finite_ray_candidate(x::AbstractVector{T}) where {T}
@@ -251,9 +329,9 @@ function _product_hsd_refined_optimal_result!(
     terminal_alpha::T=zero(T),
 ) where {T}
     base = state.base
-    base.tau > tol || return nothing
-    hsd_residual!(base)
-    recovered_residual = hsd_normalized_residual(base) / base.tau
+    recovered_floor = max(tol, sqrt(eps(T)))
+    recovered_residual = _product_hsd_recovered_residual(base, recovered_floor)
+    isfinite(recovered_residual) || return nothing
     recovered_residual <= sqrt(tol) || return nothing
 
     canonical = base.canonical
@@ -553,12 +631,16 @@ function product_hsd_solve!(
     max_time::Real=Inf,
     tol::Union{Nothing,T}=nothing,
     initialization::Symbol=:auto,
+    max_tau_collapse_recoveries::Integer=1,
 ) where {T}
     initialization in (:auto, :identity, :kkt) || throw(ArgumentError(
         "initialization must be :auto, :identity, or :kkt",
     ))
     max_iterations >= 0 || throw(ArgumentError(
         "max_iterations must be nonnegative, got $max_iterations",
+    ))
+    max_tau_collapse_recoveries >= 0 || throw(ArgumentError(
+        "max_tau_collapse_recoveries must be nonnegative",
     ))
     time_limit = Float64(max_time)
     (isfinite(time_limit) || isinf(time_limit)) && time_limit >= 0.0 ||
@@ -569,6 +651,7 @@ function product_hsd_solve!(
         throw(ArgumentError("tol must be finite and positive"))
 
     base = state.base
+    state.tau_collapse_recoveries = 0
     x_original = zeros(T, base.n)
     s_original = zeros(T, base.m)
     y_original = zeros(T, base.m)
@@ -622,6 +705,27 @@ function product_hsd_solve!(
             return _product_hsd_termination_or_dual_ray!(
                 state, x_original, s_original, y_original, certificate_tol,
                 ProductHSDTimeLimit, ProductHSDTimeLimitReached, HSDStepOK,
+            )
+        end
+        if _product_hsd_tau_collapse_ready(base, certificate_tol)
+            # The preceding accepted-point candidate gate already checked all
+            # three certificate classes. Re-run the ray-only gates explicitly
+            # before numerical recovery so a genuine infeasibility face is
+            # never redirected into an optimal-face restoration.
+            ray = _product_hsd_verified_result(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDVerifiedTerminationRay, HSDStepOK;
+                check_optimal=false,
+            )
+            ray === nothing || return ray
+            if state.tau_collapse_recoveries < max_tau_collapse_recoveries &&
+               _product_hsd_tau_collapse_recenter!(state)
+                continue
+            end
+            return _product_hsd_termination_or_dual_ray!(
+                state, x_original, s_original, y_original, certificate_tol,
+                ProductHSDInsufficientPrecision,
+                ProductHSDTauCollapseRecoveryExhausted, HSDStepOK,
             )
         end
         code = product_hsd_step!(state)
@@ -679,6 +783,19 @@ function product_hsd_solve!(
         verified === nothing || return verified
     end
 
+    if _product_hsd_tau_collapse_ready(base, certificate_tol)
+        ray = _product_hsd_verified_result(
+            state, x_original, s_original, y_original, certificate_tol,
+            ProductHSDVerifiedTerminationRay, HSDStepOK;
+            check_optimal=false,
+        )
+        ray === nothing || return ray
+        return _product_hsd_termination_or_dual_ray!(
+            state, x_original, s_original, y_original, certificate_tol,
+            ProductHSDInsufficientPrecision,
+            ProductHSDTauCollapseRecoveryExhausted, HSDStepOK,
+        )
+    end
     return _product_hsd_termination_or_dual_ray!(
         state, x_original, s_original, y_original, certificate_tol,
         ProductHSDMaxIterations, ProductHSDIterationLimitReached, HSDStepOK,
