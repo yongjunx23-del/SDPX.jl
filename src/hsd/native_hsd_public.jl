@@ -508,6 +508,7 @@ end
     reason === ProductHSDVerifiedInitialPoint && return :verified_initial_point
     reason === ProductHSDVerifiedAcceptedStep && return :verified_accepted_step
     reason === ProductHSDVerifiedTerminalNewtonTrial && return :verified_terminal_newton_trial
+    reason === ProductHSDVerifiedTerminationRay && return :verified_termination_ray
     reason === ProductHSDIterationLimitReached && return :iteration_limit
     reason === ProductHSDTimeLimitReached && return :time_limit
     reason === ProductHSDSingularKKTReason && return :singular_kkt
