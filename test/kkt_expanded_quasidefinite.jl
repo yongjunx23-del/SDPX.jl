@@ -203,6 +203,16 @@ end
             SDPX.expanded_rhs!(rhs, system)
             solution = SDPX.alloc_zeros(BigFloat, session.dimension)
             @test SDPX.solve_expanded!(solution, session, rhs)
+            provider_residual = SDPX.alloc_zeros(BigFloat, session.dimension)
+            SDPX.la_residual!(
+                session.la_backend, :N, session.unregularized,
+                solution, rhs, provider_residual,
+            )
+            @test all(isfinite, provider_residual)
+            @test isfinite(SDPX.la_normwise_backward_error(
+                session.la_backend, :N, session.unregularized,
+                solution, rhs, provider_residual,
+            ))
             @test SDPX.refine_expanded!(solution, session, rhs)
             direction = SDPX.recover_expanded_direction(system, solution)
             residual = SDPX.NewtonResidual(system)
