@@ -186,7 +186,11 @@ function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) wh
                power_dual_membership(v[1], v[2], v[3], block.parameter; tol=tol) :
                power_membership(v[1], v[2], v[3], block.parameter; tol=tol)
     elseif cone === :free
-        return !dual # free dual is zero cone
+        # The primal free cone contains every finite coordinate, while its
+        # dual is the zero cone.  A blanket `false` for the dual incorrectly
+        # rejects the valid zero dual slack and makes certificates containing
+        # free primal blocks impossible to verify.
+        return !dual || _all_ge(v, -tol) && _all_ge(-v, -tol)
     elseif cone === :zero
         # ZeroCone itself contains only the origin; its dual is the full free
         # space.  Treating the primal as free would let an equality-violating

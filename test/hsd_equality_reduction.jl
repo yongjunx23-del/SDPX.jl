@@ -398,17 +398,37 @@ end
     @test recovery_and_certificate(bad_complementarity...) == (false, false)
 end
 
-@testset "ZeroCone primal membership is equality, dual is free" begin
-    T = Float64
-    zero_program = _eq_program(
-        zeros(T, 2, 1),
-        zeros(T, 2),
-        zeros(T, 1),
-        ((:zero, 2, :constraint),),
-    )
-    tol = 1e-9
-    @test SDPX.in_canonical_cone(zero_program, T[0, 0]; dual=false, tol)
-    @test SDPX.in_canonical_cone(zero_program, T[tol / 2, -tol / 2]; dual=false, tol)
-    @test !SDPX.in_canonical_cone(zero_program, T[2tol, 0]; dual=false, tol)
-    @test SDPX.in_canonical_cone(zero_program, T[1e100, -1e100]; dual=true, tol)
+@testset "Zero/Free primal-dual membership semantics" begin
+    function check_membership(::Type{T}, tol::T) where {T<:AbstractFloat}
+        zero_program = _eq_program(
+            zeros(T, 2, 1),
+            zeros(T, 2),
+            zeros(T, 1),
+            ((:zero, 2, :constraint),),
+        )
+        @test SDPX.in_canonical_cone(zero_program, T[0, 0]; dual=false, tol)
+        @test SDPX.in_canonical_cone(
+            zero_program, T[tol / 2, -tol / 2]; dual=false, tol,
+        )
+        @test !SDPX.in_canonical_cone(zero_program, T[2tol, 0]; dual=false, tol)
+        @test SDPX.in_canonical_cone(zero_program, T[1e100, -1e100]; dual=true, tol)
+
+        free_program = _eq_program(
+            zeros(T, 2, 1),
+            zeros(T, 2),
+            zeros(T, 1),
+            ((:free, 2, :variable),),
+        )
+        @test SDPX.in_canonical_cone(free_program, T[1e10, -1e10]; dual=false, tol)
+        @test SDPX.in_canonical_cone(free_program, T[0, 0]; dual=true, tol)
+        @test SDPX.in_canonical_cone(
+            free_program, T[tol / 2, -tol / 2]; dual=true, tol,
+        )
+        @test !SDPX.in_canonical_cone(free_program, T[2tol, 0]; dual=true, tol)
+    end
+
+    check_membership(Float64, 1e-9)
+    setprecision(BigFloat, 256) do
+        check_membership(BigFloat, BigFloat("1e-40"))
+    end
 end
