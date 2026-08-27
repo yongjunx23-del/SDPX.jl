@@ -347,6 +347,12 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
     A_vals = T[]
     b_vals = T[]
     descriptors = ConeBlockDescriptor{T}[]
+    # Block-local transforms are owned by each `CanonicalBlockMap.block_transform`
+    # and applied per block by reconstruction. They are deliberately NOT pushed
+    # into a shared `ReconstructionStack`: the stack's apply methods operate on
+    # whole vectors, so per-block entries would double-apply on multi-block
+    # models. The stack remains reserved for future single-chain coordinate
+    # changes and is left empty here.
     transform_stack = ReconstructionStack{T}()
     rowcount = 0
     owned_one = owned_arithmetic_copy(T, 1; precision_bits=bits)
@@ -363,11 +369,9 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         block_transform = nothing
         if block.cone === :nonpositive
             block_transform = NonpositiveToNonnegative(T)
-            push_transform!(transform_stack, block_transform)
         elseif block.cone === :rsoc
             block_transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
             linear = _rsoc_transform_matrix(block_transform)
-            push_transform!(transform_stack, block_transform)
         end
         coordinate_map = block.cone === :psd ?
             PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing
@@ -424,11 +428,9 @@ function canonicalize(program::NativeConeProgram{T}) where {T<:AbstractFloat}
         block_transform = nothing
         if row_block.domain isa Nonpositive
             block_transform = NonpositiveToNonnegative(T)
-            push_transform!(transform_stack, block_transform)
         elseif row_block.domain isa RotatedLorentzCone
             block_transform = RotatedSOCToSOC{T}(dimension; precision_bits=bits)
             linear = _rsoc_transform_matrix(block_transform)
-            push_transform!(transform_stack, block_transform)
         end
         coordinate_map = _domain_cone(row_block.domain) === :psd ?
             PSDCoordinateMap(T, dimension; precision_bits=bits) : nothing

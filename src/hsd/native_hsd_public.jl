@@ -36,6 +36,7 @@ struct NativeHSDPlan <: AbstractExecutionPlanPayload
     equality_status::HSDEqualityReductionStatus
     product_rank_ambiguous::Bool
     product_rank_incompatible::Bool
+    kkt_route::Symbol
 end
 
 """Typed diagnostics for the direct native-HSD public route."""
@@ -385,6 +386,7 @@ function _native_hsd_plan(
         reduction.status,
         product_rank_ambiguous,
         product_rank_incompatible,
+        settings.kkt_route,
     )
 
     classification_layout = reduced === nothing ? canonical : reduced
