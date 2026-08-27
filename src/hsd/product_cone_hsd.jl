@@ -2739,10 +2739,14 @@ end
     has_nonsymmetric = !isempty(state.runtime.exp) ||
                        !isempty(state.runtime.power)
     # PSD NT scaling can reject a strictly-interior trial until roundoff in a
-    # near-boundary eigensystem is reduced below its backward-error gates.  A
-    # valid Lattice direction first becomes certifiable after 16 halvings, so
-    # use the same finite 64-trial budget for every product family.
-    max_backtracking = 64
+    # near-boundary eigensystem is reduced below its backward-error gates (a
+    # valid Lattice direction first becomes certifiable after 16 halvings),
+    # so PSD- or nonsymmetric-containing products use the 64-trial budget.
+    # Pure LP/SOC problems never needed more than the original 16 and the
+    # wider budget over-damped their Mehrotra convergence (SOCP regression:
+    # iteration_limit where 13 iterations previously converged).
+    has_psd = !isempty(state.runtime.psd)
+    max_backtracking = (has_psd || has_nonsymmetric) ? 64 : 16
     if has_nonsymmetric
         checkpoint_nonsymmetric_scaling!(state.runtime) || return false
     end
