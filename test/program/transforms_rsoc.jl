@@ -5,16 +5,15 @@ using LinearAlgebra
 function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
     n = 5
     transform = SDPX.RotatedSOCToSOC{T}(n; precision_bits=bits)
-    M = transform.primal_map
+    M = SDPX._rsoc_transform_matrix(transform)
 
     @test transform.dimension == n
     @test transform.precision_bits == bits
     @test transform.pairing_scale == one(T)
+    @test !any(fieldtype(typeof(transform), index) <: AbstractMatrix for
+              index in 1:fieldcount(typeof(transform)))
     @test M ≈ transpose(M)
     @test M * M ≈ Matrix{T}(I, n, n)
-    @test transform.inverse_primal_map ≈ M
-    @test transform.dual_inverse_adjoint ≈ transpose(inv(M))
-    @test transform.dual_adjoint ≈ transpose(M)
 
     primal = T[4, 1, 1 / 3, -2 / 5, 7 / 11]
     dual = T[3, -2, 5 / 7, -3 / 8, 2 / 9]
@@ -54,7 +53,7 @@ function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
         1 -1 0 2;
     ]
     objective = T[1, -2, 3, 4]
-    A_hat = transform.primal_map * A
+    A_hat = M * A
     c_hat = copy(objective)
     y_hat = similar(dual)
     SDPX.forward_dual!(transform, y_hat, dual)
@@ -76,8 +75,8 @@ function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
     blocks = SDPX.layout_blocks(canonical.cone_layout)
     rsoc_block = only(block for block in blocks if SDPX.block_cone(block) === :soc)
     reconstruction = SDPX.block_reconstruction(rsoc_block)
-    @test reconstruction.linear ≈ transform.primal_map[1:3, 1:3]
-    @test reconstruction.linear_adjoint ≈ transform.dual_inverse_adjoint[1:3, 1:3]
+    @test reconstruction.linear ≈ M[1:3, 1:3]
+    @test reconstruction.linear_adjoint ≈ M[1:3, 1:3]
     @test reconstruction.transform isa SDPX.RotatedSOCToSOC{T}
     @test length(SDPX.canonical_reconstruction_stack(canonical)) == 1
     @test only(SDPX.canonical_reconstruction_stack(canonical).transforms) isa

@@ -82,6 +82,23 @@ end
     @test direct.status === SDPX.ProductHSDOptimal
 end
 
+@testset "P1.5 RSOC transform is compact, precise, and alias-safe" begin
+    transform = SDPX.RotatedSOCToSOC(4, Float32)
+    @test transform.precision_bits == precision(Float32)
+    @test transform.pairing_scale === one(Float32)
+    @test !any(fieldtype(typeof(transform), index) <: AbstractMatrix for
+              index in 1:fieldcount(typeof(transform)))
+
+    source = Float32[2, 8, 3, -4]
+    expected = similar(source)
+    SDPX.forward_primal!(transform, expected, source)
+    in_place = copy(source)
+    @test SDPX.forward_primal!(transform, in_place, in_place) === in_place
+    @test in_place == expected
+    SDPX.backward_primal!(transform, in_place, in_place)
+    @test isapprox(in_place, source; atol=8eps(Float32), rtol=8eps(Float32))
+end
+
 @testset "P1.5 tiny-tau dkappa recovery is residual-selected" begin
     consistent = _p15_exp_state().base
     fill!(consistent.dx, 0.0)
