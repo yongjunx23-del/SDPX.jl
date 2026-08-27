@@ -16,6 +16,10 @@ on:
         required: false
         type: boolean
         default: false
+      base_sha:
+        description: 'Explicit 40-hex base commit for the base-vs-candidate comparison.'
+        required: true
+        type: string
 
 # No permissions block here on purpose: a called workflow's explicit
 # permissions would narrow the caller's grant, breaking the status step. The
@@ -128,6 +132,63 @@ jobs:
             @assert summary["campaign"]["aggregation_valid"] === true
             @assert summary["campaign"]["pairing_valid"] === true
           ' "$OUT_DIR/fresh-smoke/summary.toml"
+
+      - name: Validate base SHA and ancestry
+        shell: bash
+        env:
+          BASE_SHA: ${{ inputs.base_sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "base_sha must be exactly 40 hexadecimal characters" >&2
+            exit 1
+          fi
+          candidate_sha="$(git rev-parse --verify HEAD^{commit})"
+          base_sha="$(git rev-parse --verify "${BASE_SHA}^{commit}")"
+          if ! git merge-base --is-ancestor "$base_sha" "$candidate_sha"; then
+            echo "base_sha '$base_sha' is not an ancestor of candidate '$candidate_sha'" >&2
+            exit 1
+          fi
+          {
+            printf 'SDPX_BASE_SHA=%s\n' "$base_sha"
+            printf 'SDPX_CANDIDATE_SHA=%s\n' "$candidate_sha"
+          } >> "$GITHUB_ENV"
+
+      - name: Run base schema-v8 smoke suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          restore_candidate() {
+            git checkout --detach "$SDPX_CANDIDATE_SHA"
+          }
+          trap restore_candidate EXIT
+          git checkout --detach "$SDPX_BASE_SHA"
+          julia --startup-file=no --project="$CANDIDATE_ENV" \
+            benchmark/runner.jl smoke \
+            --samples=3 --output="$OUT_DIR/base-smoke.toml" --verbose \
+            2>&1 | tee "$OUT_DIR/base-smoke.log"
+          trap - EXIT
+          git checkout --detach "$SDPX_CANDIDATE_SHA"
+
+      - name: Write base-vs-candidate comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          julia --startup-file=no --project="$CANDIDATE_ENV" -e '
+            using TOML
+            base = TOML.parsefile(ARGS[1])
+            candidate = TOML.parsefile(ARGS[2])
+            document = Dict(
+              "base_sha" => ARGS[3],
+              "candidate_sha" => ARGS[4],
+              "base_smoke" => base,
+              "candidate_smoke" => candidate,
+            )
+            open(ARGS[5], "w") do io
+              TOML.print(io, document; sorted=true)
+            end
+          ' "$OUT_DIR/base-smoke.toml" "$OUT_DIR/candidate-smoke.toml" \
+            "$SDPX_BASE_SHA" "$SDPX_CANDIDATE_SHA" "$OUT_DIR/base-vs-candidate-comparison.toml"
 
       - name: Record source and environment identity
         if: always()
