@@ -99,6 +99,7 @@ const QUICK_TESTS = (
 # helpers through that order (notably correctness.jl -> sparse.jl).
 const FULL_TESTS = (
     "program_transforms.jl",
+    "p15_stabilization.jl",
     "a1_mixed_psd_hsd.jl",
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
