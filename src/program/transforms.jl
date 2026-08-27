@@ -367,3 +367,4 @@ function verify_stationarity_invariant(transform::AbstractConeTransform, A, dual
         verify_stationarity_invariant,
         (transform, A, dual, objective),
     ))
+end
