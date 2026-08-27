@@ -93,6 +93,7 @@ const QUICK_TESTS = (
 # Keep this list in the historical full-suite order. Some older tests share
 # helpers through that order (notably correctness.jl -> sparse.jl).
 const FULL_TESTS = (
+    "program_transforms.jl",
     "la_backend_regressions.jl",
     "generic_la_backend.jl",
     "dense_augmented_kkt.jl",
