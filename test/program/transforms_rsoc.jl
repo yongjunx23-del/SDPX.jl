@@ -78,9 +78,9 @@ function _test_typed_rsoc_transform(::Type{T}, bits) where {T<:AbstractFloat}
     @test reconstruction.linear ≈ M[1:3, 1:3]
     @test reconstruction.linear_adjoint ≈ M[1:3, 1:3]
     @test reconstruction.transform isa SDPX.RotatedSOCToSOC{T}
-    @test length(SDPX.canonical_reconstruction_stack(canonical)) == 1
-    @test only(SDPX.canonical_reconstruction_stack(canonical).transforms) isa
-          SDPX.RotatedSOCToSOC{T}
+    # D4: the shared stack stays EMPTY — the block-local RSOC transform is
+    # owned by the CanonicalBlockMap, not the whole-vector stack.
+    @test length(SDPX.canonical_reconstruction_stack(canonical)) == 0
     # ProductConeRuntime is deliberately downstream of canonicalization and
     # therefore cannot receive a raw :rsoc block.
     runtime = SDPX.ProductConeRuntime(canonical.cone_layout, T)

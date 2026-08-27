@@ -28,7 +28,7 @@ function _eq_program(
     for (source_block, spec) in enumerate(block_specs)
         cone, dimension, source = spec[1], spec[2], spec[3]
         sign = length(spec) == 4 ? spec[4] : 1
-        map = SDPX.CanonicalBlockMap(source, source_block, 1, sign)
+        map = SDPX.CanonicalBlockMap{T}(source, source_block, 1, sign)
         push!(blocks, SDPX.ConeBlockDescriptor(
             T, cone, dimension; offset, reconstruction=map,
         ))

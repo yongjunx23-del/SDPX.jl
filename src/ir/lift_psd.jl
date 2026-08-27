@@ -572,7 +572,7 @@ function lift_to_psd(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloa
         source, redundant_zero, redundant_head = _psd_lift_positions(cone, nd)
         push!(descriptors, ConeBlockDescriptor(
             T, :psd, nd; offset=rowcount + 1,
-            reconstruction=CanonicalBlockMap(:lift, 0, 0, 1),
+            reconstruction=CanonicalBlockMap{T}(:lift, 0, 0, 1),
         ))
         packed = length(source)
         for p in 1:packed
@@ -601,7 +601,7 @@ function lift_to_psd(canonical::CanonicalConicProgram{T}) where {T<:AbstractFloa
     for i in 1:m
         push!(descriptors, ConeBlockDescriptor(
             T, :zero, 1; offset=rowcount + 1,
-            reconstruction=CanonicalBlockMap(:lift, 0, 0, 1),
+            reconstruction=CanonicalBlockMap{T}(:lift, 0, 0, 1),
         ))
         newrow = rowcount + 1
         for stored in nzrange(A, i)   # A is m x n; iterate row i's columns

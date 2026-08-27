@@ -36,6 +36,17 @@ A transform is immutable and owns no iterate or factorization state.
 """
 abstract type AbstractProgramTransform{T} end
 
+"""Dimension-preserving coordinate map (Nonpositive, RSOC, future PSD metric).
+Source and target primal/dual dimensions coincide; the map is applied to one
+block of the vector it acts on."""
+abstract type AbstractCoordinateTransform{T<:AbstractFloat} <: AbstractProgramTransform{T} end
+
+"""Dimension-changing program reduction (future equality elimination, singleton
+substitution, duplicate-row removal). Declares explicit source/target dimensions
+and its own scratch requirements; it must not pretend to share scratch shape
+with a coordinate transform."""
+abstract type AbstractProgramReduction{T<:AbstractFloat} <: AbstractProgramTransform{T} end
+
 # Required interface declarations.  Keeping these as explicit methods gives
 # incomplete transform implementations an immediate, source-named error
 # instead of allowing an unimplemented operation to pass through a stack.
@@ -74,6 +85,57 @@ function verify_stationarity_invariant(
     throw(MethodError(verify_stationarity_invariant,
                       (transform, A, c, y, tau, A_hat, c_hat, y_hat)))
 end
+
+# ---------------------------------------------------------------------------
+# Dimension and scratch contract
+# ---------------------------------------------------------------------------
+
+"""Source primal dimension of a transform (before application)."""
+function source_primal_dimension(transform::AbstractProgramTransform)
+    throw(MethodError(source_primal_dimension, (transform,)))
+end
+
+"""Target primal dimension of a transform (after application)."""
+function target_primal_dimension(transform::AbstractProgramTransform)
+    throw(MethodError(target_primal_dimension, (transform,)))
+end
+
+"""Source dual dimension of a transform (before application)."""
+function source_dual_dimension(transform::AbstractProgramTransform)
+    throw(MethodError(source_dual_dimension, (transform,)))
+end
+
+"""Target dual dimension of a transform (after application)."""
+function target_dual_dimension(transform::AbstractProgramTransform)
+    throw(MethodError(target_dual_dimension, (transform,)))
+end
+
+"""Setup-time scratch requirements of a transform, as a NamedTuple with
+`primal` and `dual` buffer counts. Coordinate transforms are in-place capable
+and default to zero scratch; reductions declare their own."""
+function scratch_requirements(transform::AbstractProgramTransform)
+    throw(MethodError(scratch_requirements, (transform,)))
+end
+
+# Dimension-preserving coordinate transforms: source == target, and the
+# concrete type declares its block dimension through `dimension`.
+source_primal_dimension(transform::AbstractCoordinateTransform) =
+    target_primal_dimension(transform)
+source_dual_dimension(transform::AbstractCoordinateTransform) =
+    target_dual_dimension(transform)
+target_primal_dimension(transform::AbstractCoordinateTransform) =
+    dimension(transform)
+target_dual_dimension(transform::AbstractCoordinateTransform) =
+    dimension(transform)
+
+"""Block dimension of a coordinate transform. A length-agnostic sign map such as
+[`NonpositiveToNonnegative`](@ref) does not pin a dimension (its dimension is
+block-scoped); concrete maps with a fixed shape (e.g. RSOC) implement this."""
+function dimension(transform::AbstractCoordinateTransform)
+    throw(MethodError(dimension, (transform,)))
+end
+
+scratch_requirements(::AbstractCoordinateTransform) = (primal=0, dual=0)
 
 # A compact tolerance helper.  `tol` is the caller-facing single tolerance;
 # explicit atol/rtol take precedence when supplied.  The default is only for
@@ -147,6 +209,24 @@ function pop_transform!(stack::ReconstructionStack)
 end
 
 Base.pop!(stack::ReconstructionStack) = pop_transform!(stack)
+
+"""Compose the objective shifts of all transforms in chain order (source to
+canonical). The canonical objective constant is the source constant plus this
+sum; reconstruction subtracts it again."""
+function objective_shift(stack::ReconstructionStack{T}) where {T}
+    shift = zero(T)
+    for transform in stack.transforms
+        shift += objective_shift(transform)
+    end
+    return shift
+end
+
+"""Setup-time scratch plan for the stack: one entry per transform, sized from
+its declared `scratch_requirements`. The plan is computed once at setup; the
+hot path never re-derives it."""
+function scratch_plan(stack::ReconstructionStack)
+    return Tuple(scratch_requirements(transform) for transform in stack.transforms)
+end
 
 # Forward application is useful while assembling a normalized program.
 #
@@ -245,7 +325,7 @@ Exact sign transform for one nonpositive vector block.  Forward maps are
 The inverse adjoint is the same map because `T = -I`; this preserves the
 Euclidean pairing and the HSD stationarity expression exactly.
 """
-struct NonpositiveToNonnegative{T<:AbstractFloat} <: AbstractProgramTransform{T}
+struct NonpositiveToNonnegative{T<:AbstractFloat} <: AbstractCoordinateTransform{T}
 end
 
 NonpositiveToNonnegative(::Type{T}) where {T<:AbstractFloat} = NonpositiveToNonnegative{T}()
