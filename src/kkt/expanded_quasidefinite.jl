@@ -20,6 +20,7 @@
     EXPANDED_KKT_WRONG_INERTIA
     EXPANDED_KKT_SOLVE_FAILED
     EXPANDED_KKT_REFINEMENT_STAGNATED
+    EXPANDED_KKT_REFINEMENT_AT_FLOOR
     EXPANDED_KKT_UNREGULARIZED_CERTIFIED
 end
 
@@ -321,10 +322,14 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     regularization::T
     regularization_attempts::Int
     attempts::Vector{ExpandedKKTAttempt{T}}
+    refinement_trajectory::Vector{ExpandedRefinementStep{T}}
     refinements::Int
+    refinement_recovery_attempts::Int
     unregularized_residual_norm::T
     backward_error::T
     backward_target::T
+    attainable_floor::T
+    at_arithmetic_floor::Bool
     residual_vector::Vector{T}
     correction_vector::Vector{T}
     residual::Matrix{T}
@@ -358,6 +363,8 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
     rhs_count >= 1 || throw(ArgumentError("expanded KKT requires at least one RHS"))
     attempts = ExpandedKKTAttempt{T}[]
     sizehint!(attempts, 16)
+    refinement_trajectory = ExpandedRefinementStep{T}[]
+    sizehint!(refinement_trajectory, 128)
     backend = _expanded_la_backend(T)
     return ExpandedKKTSession{T,typeof(backend)}(
         n, m, dimension, alloc_zeros(T, dimension, dimension),
@@ -367,8 +374,9 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         backend, nothing, nothing,
         alloc_zeros(T, dimension, dimension),
         alloc_zeros(T, dimension, dimension),
-        KKTInertia(0, 0, dimension), zero(T), 0, attempts, 0,
-        T(Inf), T(Inf), T(256) * eps(T),
+        KKTInertia(0, 0, dimension), zero(T), 0, attempts,
+        refinement_trajectory, 0, 0,
+        T(Inf), T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         alloc_zeros(T, dimension), alloc_zeros(T, dimension),
         alloc_zeros(T, dimension, rhs_count),
         alloc_zeros(T, dimension, rhs_count),
@@ -607,6 +615,7 @@ function factor_expanded_kkt!(
     session.provider_inertia_factor = nothing
     session.provider_exact_factor = nothing
     empty!(session.attempts)
+    empty!(session.refinement_trajectory)
     failed_pivot = 0
 
     for attempt in 0:max_regularization_attempts
@@ -679,6 +688,10 @@ function factor_expanded_kkt!(
         )
         return true
     end
+    # Preserve the strongest typed structural diagnosis across the exhausted
+    # ladder; a later tiny pivot must not erase an observed wrong inertia.
+    any(attempt -> attempt.reason === EXPANDED_ATTEMPT_WRONG_INERTIA,
+        session.attempts) && (session.status = EXPANDED_KKT_WRONG_INERTIA)
     return false
 end
 
@@ -706,14 +719,110 @@ end
 include("refinement.jl")
 
 """
-    refine_expanded!(solution, session, rhs)
-
-Reuse the same regularized factor for residual corrections, but form every
-residual with the unregularized operator. Stagnation is fail-closed; a
-regularized direction is accepted only after the unregularized backward-error
-contract passes.
+Estimate the same-precision refinement floor without changing the strict
+backward-error gate.  The pivot ratio is an operational condition proxy for
+the accepted regularized solve.  Squaring that ratio and multiplying by a
+Higham-style `gamma_k = k*eps/(1-k*eps)` gives a deliberately conservative
+`gamma*kappa` budget.  It is diagnostic only: a direction above `256*eps(T)`
+is never accepted, even when it is at this estimated arithmetic floor.
 """
-function _refine_expanded!(
+function expanded_refinement_attainable_floor(
+    session::ExpandedKKTSession{T},
+) where {T<:AbstractFloat}
+    scale = _expanded_operator_scale(session.unregularized)
+    minimum_pivot = session.factor.minimum_pivot
+    if !(isfinite(minimum_pivot) && minimum_pivot > zero(T))
+        minimum_pivot = sqrt(eps(T)) * scale
+    end
+    pivot_ratio = max(one(T), scale / minimum_pivot)
+    condition_proxy = min(inv(eps(T)), pivot_ratio * pivot_ratio)
+    operations = T(4 * session.dimension + 8)
+    denominator = one(T) - operations * eps(T)
+    denominator > zero(T) || return one(T)
+    gamma = operations * eps(T) / denominator
+    return min(one(T), T(8) * gamma * condition_proxy)
+end
+
+@inline function _expanded_refinement_failure_status!(
+    session::ExpandedKKTSession{T},
+) where {T<:AbstractFloat}
+    session.attainable_floor = expanded_refinement_attainable_floor(session)
+    session.at_arithmetic_floor =
+        isfinite(session.backward_error) &&
+        session.backward_error <= session.attainable_floor
+    session.status = session.at_arithmetic_floor ?
+        EXPANDED_KKT_REFINEMENT_AT_FLOOR :
+        EXPANDED_KKT_REFINEMENT_STAGNATED
+    return false
+end
+
+function _try_expanded_dynamic_factor!(
+    session::ExpandedKKTSession{T}, dynamic_index::Int,
+) where {T<:AbstractFloat}
+    scale = _expanded_operator_scale(session.unregularized)
+    pivot_floor = T(32) * eps(T) * scale
+    magnitude = sqrt(eps(T)) * scale * T(10)^dynamic_index
+    failed_pivot = 0
+    if !isempty(session.attempts)
+        previous = session.attempts[end]
+        previous.reason in (
+            EXPANDED_ATTEMPT_TINY_PIVOT,
+            EXPANDED_ATTEMPT_EXACT_FACTOR_FAILED,
+        ) && (failed_pivot = session.factor.failed_pivot)
+    end
+    regularization = _assemble_dynamic_regularized!(
+        session, magnitude, scale, pivot_floor, failed_pivot,
+    )
+    attempt = isempty(session.attempts) ? 0 : session.attempts[end].index + 1
+    session.regularization_attempts = attempt
+
+    if !_factor_expanded_inertia!(session, pivot_floor)
+        reason = session.inertia_factor.failed_pivot == 0 ?
+            EXPANDED_ATTEMPT_INERTIA_FACTOR_FAILED :
+            EXPANDED_ATTEMPT_TINY_PIVOT
+        _record_expanded_attempt!(
+            session, attempt, EXPANDED_REGULARIZATION_DYNAMIC,
+            regularization, pivot_floor, session.inertia_factor.minimum_pivot,
+            reason,
+        )
+        session.status = EXPANDED_KKT_FACTOR_FAILED
+        return false
+    end
+    if session.inertia_factor.inertia != session.expected_inertia
+        _record_expanded_attempt!(
+            session, attempt, EXPANDED_REGULARIZATION_DYNAMIC,
+            regularization, pivot_floor, session.inertia_factor.minimum_pivot,
+            EXPANDED_ATTEMPT_WRONG_INERTIA,
+        )
+        session.status = EXPANDED_KKT_WRONG_INERTIA
+        return false
+    end
+    if !_factor_expanded_exact!(session, pivot_floor)
+        reason = session.factor.failed_pivot == 0 ?
+            EXPANDED_ATTEMPT_EXACT_FACTOR_FAILED :
+            EXPANDED_ATTEMPT_TINY_PIVOT
+        _record_expanded_attempt!(
+            session, attempt, EXPANDED_REGULARIZATION_DYNAMIC,
+            regularization, pivot_floor,
+            min(session.inertia_factor.minimum_pivot,
+                session.factor.minimum_pivot),
+            reason,
+        )
+        session.status = EXPANDED_KKT_FACTOR_FAILED
+        return false
+    end
+    session.regularization = regularization
+    session.status = EXPANDED_KKT_FACTORED
+    _record_expanded_attempt!(
+        session, attempt, EXPANDED_REGULARIZATION_DYNAMIC,
+        regularization, pivot_floor,
+        min(session.inertia_factor.minimum_pivot, session.factor.minimum_pivot),
+        EXPANDED_ATTEMPT_ACCEPTED,
+    )
+    return true
+end
+
+function _refine_current_expanded!(
     solution::AbstractVecOrMat{T}, residual::AbstractVecOrMat{T},
     correction::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVecOrMat{T}, max_refinements::Int,
@@ -723,6 +832,9 @@ function _refine_expanded!(
     session.unregularized_residual_norm = T(Inf)
     session.backward_error = T(Inf)
     session.backward_target = T(256) * eps(T)
+    session.attainable_floor = expanded_refinement_attainable_floor(session)
+    session.at_arithmetic_floor = false
+    factor_attempt = isempty(session.attempts) ? -1 : session.attempts[end].index
     for iteration in 0:max_refinements
         report = if session.la_backend === nothing
             expanded_unregularized_backward_error!(
@@ -734,23 +846,28 @@ function _refine_expanded!(
                 session.la_backend,
             )
         end
+        ratio = isfinite(previous) ? report.residual_norm / previous : T(NaN)
+        push!(session.refinement_trajectory, ExpandedRefinementStep(
+            factor_attempt, iteration, report.residual_norm,
+            report.normalized, ratio,
+        ))
         session.unregularized_residual_norm = report.residual_norm
         session.backward_error = report.normalized
         session.backward_target = report.target
-        isfinite(report.residual_norm) && isfinite(report.normalized) || begin
-            session.status = EXPANDED_KKT_REFINEMENT_STAGNATED
-            return false
-        end
+        isfinite(report.residual_norm) && isfinite(report.normalized) ||
+            return _expanded_refinement_failure_status!(session)
         if report.normalized <= report.target
             session.status = EXPANDED_KKT_UNREGULARIZED_CERTIFIED
             session.refinements = iteration
+            # The arithmetic floor is a failure diagnosis, never an alternate
+            # success authority.  Certification here came from the unchanged
+            # strict backward-error contract.
+            session.at_arithmetic_floor = false
             return true
         end
         iteration == max_refinements && break
-        report.residual_norm < previous || begin
-            session.status = EXPANDED_KKT_REFINEMENT_STAGNATED
-            return false
-        end
+        report.residual_norm < previous ||
+            return _expanded_refinement_failure_status!(session)
         previous = report.residual_norm
         _solve_expanded_factor!(correction, session, residual) || begin
             session.status = EXPANDED_KKT_SOLVE_FAILED
@@ -761,33 +878,84 @@ function _refine_expanded!(
             solution[index] += correction[index]
         end
     end
-    session.status = EXPANDED_KKT_REFINEMENT_STAGNATED
+    return _expanded_refinement_failure_status!(session)
+end
+
+function _refine_expanded_with_recovery!(
+    solution::AbstractVecOrMat{T}, residual::AbstractVecOrMat{T},
+    correction::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
+    rhs::AbstractVecOrMat{T}, max_refinements::Int,
+    max_dynamic_attempts::Int,
+) where {T<:AbstractFloat}
+    session.refinement_recovery_attempts = 0
+    _refine_current_expanded!(
+        solution, residual, correction, session, rhs, max_refinements,
+    ) && return true
+    max_dynamic_attempts == 0 && return false
+
+    # Resume after an accepted static (or earlier dynamic) factor instead of
+    # discarding a recoverable direction.  Every candidate is rebuilt from the
+    # immutable unregularized operator, solved from the original RHS, and
+    # independently re-refined against the original equations.
+    dynamic_used = count(
+        attempt -> attempt.stage === EXPANDED_REGULARIZATION_DYNAMIC,
+        session.attempts,
+    )
+    for recovery in 0:(max_dynamic_attempts - 1)
+        dynamic_index = dynamic_used + recovery
+        _try_expanded_dynamic_factor!(session, dynamic_index) || continue
+        session.refinement_recovery_attempts += 1
+        _solve_expanded_factor!(solution, session, rhs) || begin
+            session.status = EXPANDED_KKT_SOLVE_FAILED
+            continue
+        end
+        _refine_current_expanded!(
+            solution, residual, correction, session, rhs, max_refinements,
+        ) && return true
+    end
     return false
 end
 
+"""
+    refine_expanded!(solution, session, rhs)
+
+Reuse an accepted regularized factor for corrections while forming every
+residual with the unregularized operator.  If strict refinement stagnates,
+resume on progressively stronger dynamic signed regularization candidates.
+The public direction remains fail-closed unless the original operator meets
+the unchanged `256*eps(T)` backward-error contract.
+"""
 function refine_expanded!(
     solution::AbstractVector{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVector{T}; max_refinements::Int=4,
+    max_dynamic_attempts::Int=3,
 ) where {T<:AbstractFloat}
     max_refinements >= 0 || throw(ArgumentError(
         "max_refinements must be nonnegative",
+    ))
+    max_dynamic_attempts >= 0 || throw(ArgumentError(
+        "max_dynamic_attempts must be nonnegative",
     ))
     length(solution) == length(rhs) == session.dimension ||
         throw(DimensionMismatch(
             "expanded refinement vector dimensions disagree",
         ))
-    return _refine_expanded!(
+    return _refine_expanded_with_recovery!(
         solution, session.residual_vector, session.correction_vector,
-        session, rhs, max_refinements,
+        session, rhs, max_refinements, max_dynamic_attempts,
     )
 end
 
 function refine_expanded!(
     solution::AbstractMatrix{T}, session::ExpandedKKTSession{T},
     rhs::AbstractMatrix{T}; max_refinements::Int=4,
+    max_dynamic_attempts::Int=3,
 ) where {T<:AbstractFloat}
     max_refinements >= 0 || throw(ArgumentError(
         "max_refinements must be nonnegative",
+    ))
+    max_dynamic_attempts >= 0 || throw(ArgumentError(
+        "max_dynamic_attempts must be nonnegative",
     ))
     size(solution) == size(rhs) || throw(DimensionMismatch(
         "expanded refinement solution/RHS dimensions disagree",
@@ -801,8 +969,9 @@ function refine_expanded!(
     ))
     residual = @view session.residual[:, 1:columns]
     correction = @view session.correction[:, 1:columns]
-    return _refine_expanded!(
+    return _refine_expanded_with_recovery!(
         solution, residual, correction, session, rhs, max_refinements,
+        max_dynamic_attempts,
     )
 end
 

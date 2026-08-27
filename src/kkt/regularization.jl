@@ -15,6 +15,15 @@ end
     EXPANDED_ATTEMPT_EXACT_FACTOR_FAILED
 end
 
+"""One refinement observation, keyed to its factorization attempt."""
+struct ExpandedRefinementStep{T<:AbstractFloat}
+    factor_attempt::Int
+    iteration::Int
+    residual_norm::T
+    backward_error::T
+    reduction_ratio::T
+end
+
 """One auditable attempt in the expanded KKT regularization ladder."""
 struct ExpandedKKTAttempt{T<:AbstractFloat}
     index::Int
@@ -48,9 +57,14 @@ function _assemble_dynamic_signed_regularization!(
     copy_owned!(destination, unregularized)
     maximum_shift = zero(T)
     @inbounds for index in axes(destination, 1)
+        # `magnitude` is already scaled by the global operator norm.  Retain
+        # the row fraction here (rather than clamping it to one, which made
+        # every dynamic attempt identical to a static diagonal shift).  The
+        # square-root-epsilon floor prevents a structurally zero row from
+        # receiving a rounded zero shift.
         local_scale = max(
             _expanded_row_absolute_sum(unregularized, index) / operator_scale,
-            one(T),
+            sqrt(eps(T)),
         )
         shift = magnitude * local_scale
         if index == failed_pivot
