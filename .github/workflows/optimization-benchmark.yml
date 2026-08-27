@@ -138,7 +138,9 @@ jobs:
           git rev-parse HEAD > "$OUT_DIR/source-commit.txt"
           git status --porcelain=v1 > "$OUT_DIR/source-status.txt"
           git diff --check > "$OUT_DIR/diff-check.txt"
-          julia --version > "$OUT_DIR/julia-version.txt" 2>&1 || true
+          if julia --version > "$OUT_DIR/julia-version.txt" 2>&1; then :; else
+            echo 'julia --version unavailable (unexpected for this workflow)' > "$OUT_DIR/julia-version.txt"
+          fi
           uname -a > "$OUT_DIR/uname.txt"
 
       - name: Upload complete optimization evidence
