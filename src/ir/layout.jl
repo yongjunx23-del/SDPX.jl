@@ -178,7 +178,7 @@ function ConeBlockDescriptor(
     dimension::Integer;
     offset::Integer=1,
     parameter=zero(T),
-    reconstruction::CanonicalBlockMap=CanonicalBlockMap(:none, 0, 0, 1),
+    reconstruction::CanonicalBlockMap=CanonicalBlockMap{Float64}(:none, 0, 0, 1, nothing, nothing, nothing, nothing),
 ) where {T<:AbstractFloat}
     cone in (:nonnegative, :soc, :psd, :zero, :free, :exp, :power) ||
         throw(ArgumentError("canonical cone kind $cone is not native; " *
