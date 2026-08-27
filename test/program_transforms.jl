@@ -66,13 +66,12 @@ end
     @test SDPX.push_transform!(stack, t) === stack
     @test push!(stack, t) === stack
     @test length(stack) == 2
+    # Whole-vector application is only valid for a single-block stack; a
+    # multi-block stack must reconstruct through per-block CanonicalBlockMap
+    # transforms instead (see the safety contract in transforms.jl).
     canonical = [1.0, -2.0, 3.0]
     original = zeros(3)
-    SDPX.backward_primal!(stack, original, canonical)
-    @test original == canonical # two sign maps cancel
-    ray = zeros(3)
-    SDPX.backward_primal_ray!(stack, ray, canonical)
-    @test ray == canonical
+    @test_throws ArgumentError SDPX.backward_primal!(stack, original, canonical)
     popped = pop!(stack)
     @test popped === t
     @test length(stack) == 1
@@ -93,6 +92,10 @@ end
     SDPX.reconstruct_rays!(stack, primal_ray, dual_ray, mapped, mapped)
     @test primal_ray == source
     @test dual_ray == source
+
+    # Stack-level objective-shift composition and scratch plan.
+    @test SDPX.objective_shift(stack) == 0.0
+    @test SDPX.scratch_plan(stack) == ((primal=0, dual=0),)
 end
 
 @testset "compiled Nonpositive demonstration lowering" begin
@@ -110,9 +113,14 @@ end
     blocks = SDPX.layout_blocks(canonical.cone_layout)
     @test all(SDPX.block_cone(block) === :nonnegative for block in blocks)
     @test all(SDPX.block_reconstruction(block).sign == -1 for block in blocks)
-    @test length(SDPX.canonical_reconstruction_stack(canonical)) == 2
-    @test all(transform isa SDPX.NonpositiveToNonnegative for
-              transform in SDPX.canonical_reconstruction_stack(canonical))
+    # D4: the shared stack stays EMPTY — block-local transforms are owned by
+    # each CanonicalBlockMap (whole-vector stack application would double-apply
+    # on multi-block models).
+    @test length(SDPX.canonical_reconstruction_stack(canonical)) == 0
+    @test all(
+        SDPX.block_reconstruction(block).transform isa SDPX.NonpositiveToNonnegative
+        for block in blocks
+    )
     # Runtime setup receives only canonical families; the source Nonpositive
     # family is represented by a typed transform in the reconstruction stack.
     runtime = SDPX.ProductConeRuntime(canonical.cone_layout, Float64)
@@ -141,15 +149,17 @@ end
     @test recovered == original
 
     # A bounded, deliberately data-light smoke model exercises the native HSD
-    # result/certificate seam without relying on the still-unwired production
-    # lowerer.  Its zero objective makes the strict interior start a verified
-    # optimum, and the direct canonical model has the identical solution.
+    # result/certificate seam with a NONZERO objective, asserting objective-
+    # sign reconstruction through the transform: source v<=0 maps to canonical
+    # s=-v>=0, so the source minimum is the negative of the canonical maximum.
     source = SDPX.Model(Float64)
     source_v = SDPX.variable!(source, :v, 1; domain=SDPX.Nonpositive())
-    SDPX.objective!(source, SDPX.Minimize(), 0.0 * source_v[1])
+    SDPX.objective!(source, SDPX.Minimize(), source_v[1])
+    SDPX.constraint!(source, :fix, source_v[1] + 1.0, SDPX.ZeroCone())
     direct = SDPX.Model(Float64)
     direct_v = SDPX.variable!(direct, :v, 1; domain=SDPX.Nonnegative())
-    SDPX.objective!(direct, SDPX.Minimize(), 0.0 * direct_v[1])
+    SDPX.objective!(direct, SDPX.Maximize(), direct_v[1])
+    SDPX.constraint!(direct, :fix, direct_v[1] - 1.0, SDPX.ZeroCone())
     source_result = SDPX.optimize!(source;
         settings=SDPX.Settings{Float64}(engine=:native_hsd),
     )
@@ -160,5 +170,12 @@ end
     @test SDPX.status(direct_result) === :optimal
     @test source_result.certificate.valid
     @test direct_result.certificate.valid
-    @test SDPX.primal_objective(source_result) == SDPX.primal_objective(direct_result)
+    # v = -s: source min v == -1  <=>  canonical max s == 1.
+    @test isapprox(SDPX.primal_objective(source_result), -1.0; atol=1e-6)
+    @test isapprox(SDPX.primal_objective(direct_result), 1.0; atol=1e-6)
+    @test isapprox(
+        SDPX.primal_objective(source_result),
+        -SDPX.primal_objective(direct_result);
+        atol=1e-6,
+    )
 end

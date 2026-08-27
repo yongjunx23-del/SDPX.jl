@@ -167,7 +167,7 @@ end
 
     bad_desc = SDPX.ConeBlockDescriptor{Float64}(
         :psd, 1, 2, 4, :packed_lower, 0.0,
-        SDPX.CanonicalBlockMap(:none, 0, 0, 1),
+        SDPX.CanonicalBlockMap{Float64}(:none, 0, 0, 1),
     )
     bad_layout = SDPX.ConeProductLayout([bad_desc], 4, 2)
     @test_throws ArgumentError SDPX.ProductConeRuntime(bad_layout, Float64)
