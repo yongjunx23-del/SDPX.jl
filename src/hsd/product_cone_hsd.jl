@@ -2855,9 +2855,29 @@ end
     return _product_hsd_solve_shift!(state, corrector_scalar)
 end
 
+@inline function _product_hsd_trial_mu(base)
+    return (dot(base.st, base.yt) + base.tau_t * base.kappa_t) /
+           typeof(base.mu)(base.nu + 1)
+end
+
+@inline function _product_hsd_runtime_mu_matches(state::ProductConeHSDState)
+    runtime = state.runtime
+    mu = state.base.mu
+    runtime.last_mu == mu || return false
+    @inbounds for block in runtime.exp
+        block.scaling.mu == mu || return false
+    end
+    @inbounds for block in runtime.power
+        block.scaling.mu == mu || return false
+    end
+    return true
+end
+
 @inline function _product_hsd_trial_scaling!(state::ProductConeHSDState)
     base = state.base
-    return try_update_scaling!(state.runtime, base.st, base.yt, base.mu)
+    mu_t = _product_hsd_trial_mu(base)
+    isfinite(mu_t) && mu_t > zero(mu_t) || return false
+    return try_update_scaling!(state.runtime, base.st, base.yt, mu_t)
 end
 
 """Single-alpha product-cone fraction-to-boundary line search."""
@@ -3051,9 +3071,13 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     accepted || return state.runtime.valid ?
                        HSDStepBreakdown : HSDStepDirectionFailed
     hsd_residual!(base)
-    # The NT operators already correspond to the accepted `(s,y)` pair;
-    # refresh the scalar metadata after recomputing the accepted-point gap.
-    state.runtime.last_mu = base.mu
+    # The NT operators and every nonsymmetric block must have been built with
+    # the accepted point's global embedding complementarity. Never repair a
+    # mismatch by relabeling stale scaling metadata.
+    if !_product_hsd_runtime_mu_matches(state)
+        state.runtime.valid = false
+        return HSDStepDirectionFailed
+    end
     _hsd_update_record!(base)
     base.record.iterations += 1
     return HSDStepOK

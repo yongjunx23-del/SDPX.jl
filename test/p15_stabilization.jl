@@ -1,5 +1,6 @@
 using SDPX
 using Test
+using LinearAlgebra
 
 function _p15_bounded_capped_lp()
     model = SDPX.Model(Float64)
@@ -18,6 +19,17 @@ function _p15_genuinely_unbounded_lp()
     return model
 end
 
+function _p15_exp_state()
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals())
+    SDPX.constraint!(model, :exp_row, (0.0, 1.0, x[1]), SDPX.ExponentialCone())
+    SDPX.objective!(model, SDPX.Minimize(), x[1])
+    canonical = SDPX.canonicalize(SDPX.compile_product_cone_model(model))
+    state = SDPX.ProductConeHSDState(SDPX.hsd_equality_reduce(canonical).reduced)
+    SDPX.product_hsd_cold_start!(state)
+    return state
+end
+
 @testset "P1.5 corrected bounded and unbounded classification" begin
     settings = SDPX.Settings{Float64}(
         engine=:native_hsd,
@@ -33,4 +45,19 @@ end
     unbounded = SDPX.optimize!(_p15_genuinely_unbounded_lp(); settings=settings)
     @test SDPX.status(unbounded) === :dual_infeasible
     @test SDPX.certificate(unbounded).valid
+end
+
+@testset "P1.5 nonsymmetric trial uses trial complementarity" begin
+    state = _p15_exp_state()
+    base = state.base
+    base.st .= 1.25 .* base.s
+    base.yt .= 0.75 .* base.y
+    base.tau_t = 0.6 * base.tau
+    base.kappa_t = 0.5 * base.kappa
+    mu_t = (dot(base.st, base.yt) + base.tau_t * base.kappa_t) /
+           (base.nu + 1)
+    @test abs(mu_t / base.mu - 1.0) > 0.05
+    @test SDPX._product_hsd_trial_scaling!(state)
+    @test state.runtime.last_mu == mu_t
+    @test all(block.scaling.mu == mu_t for block in state.runtime.exp)
 end
