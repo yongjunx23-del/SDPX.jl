@@ -49,6 +49,8 @@ function expected_expanded_inertia(system::NewtonSystem)
     return KKTInertia(n, m + 1, 0)
 end
 
+include("regularization.jl")
+
 """Generic diagonal-pivoted `L*D*L'` used for inertia certification."""
 mutable struct GenericPivotedLDL{T<:AbstractFloat}
     schur::Matrix{T}
@@ -57,6 +59,8 @@ mutable struct GenericPivotedLDL{T<:AbstractFloat}
     permutation::Vector{Int}
     inertia::KKTInertia
     threshold::T
+    minimum_pivot::T
+    failed_pivot::Int
     success::Bool
 end
 
@@ -64,7 +68,7 @@ function GenericPivotedLDL(::Type{T}, dimension::Int) where {T<:AbstractFloat}
     return GenericPivotedLDL{T}(
         zeros(T, dimension, dimension), Matrix{T}(I, dimension, dimension),
         zeros(T, dimension), collect(1:dimension), KKTInertia(0, 0, dimension),
-        zero(T), false,
+        zero(T), T(Inf), 0, false,
     )
 end
 
@@ -103,6 +107,8 @@ function factorize_pivoted_ldl!(
         factor.permutation[index] = index
     end
     factor.threshold = threshold
+    factor.minimum_pivot = T(Inf)
+    factor.failed_pivot = 0
     factor.success = false
 
     positive = 0
@@ -118,7 +124,9 @@ function factorize_pivoted_ldl!(
                 selected_magnitude = magnitude
             end
         end
+        factor.minimum_pivot = min(factor.minimum_pivot, selected_magnitude)
         if !(isfinite(selected_magnitude) && selected_magnitude > threshold)
+            factor.failed_pivot = pivot_index
             zeros_count += dimension - pivot_index + 1
             factor.inertia = KKTInertia(positive, negative, zeros_count)
             return false
@@ -134,7 +142,9 @@ function factorize_pivoted_ldl!(
         end
 
         pivot = factor.schur[pivot_index, pivot_index]
+        factor.minimum_pivot = min(factor.minimum_pivot, abs(pivot))
         isfinite(pivot) && abs(pivot) > threshold || begin
+            factor.failed_pivot = pivot_index
             zeros_count += dimension - pivot_index + 1
             factor.inertia = KKTInertia(positive, negative, zeros_count)
             return false
@@ -147,14 +157,20 @@ function factorize_pivoted_ldl!(
         end
         for row in (pivot_index + 1):dimension
             factor.L[row, pivot_index] = factor.schur[row, pivot_index] / pivot
-            isfinite(factor.L[row, pivot_index]) || return false
+            isfinite(factor.L[row, pivot_index]) || begin
+                factor.failed_pivot = pivot_index
+                return false
+            end
         end
         for column in (pivot_index + 1):dimension
             coefficient = factor.L[column, pivot_index] * pivot
             for row in column:dimension
                 value = factor.schur[row, column] -
                         factor.L[row, pivot_index] * coefficient
-                isfinite(value) || return false
+                isfinite(value) || begin
+                    factor.failed_pivot = pivot_index
+                    return false
+                end
                 factor.schur[row, column] = value
                 factor.schur[column, row] = value
             end
@@ -170,12 +186,15 @@ mutable struct GenericPivotedLU{T<:AbstractFloat}
     factors::Matrix{T}
     row_permutation::Vector{Int}
     threshold::T
+    minimum_pivot::T
+    failed_pivot::Int
     success::Bool
 end
 
 function GenericPivotedLU(::Type{T}, dimension::Int) where {T<:AbstractFloat}
     return GenericPivotedLU{T}(
-        zeros(T, dimension, dimension), collect(1:dimension), zero(T), false,
+        zeros(T, dimension, dimension), collect(1:dimension), zero(T),
+        T(Inf), 0, false,
     )
 end
 
@@ -194,6 +213,8 @@ function factorize_pivoted_lu!(
         factor.row_permutation[index] = index
     end
     factor.threshold = threshold
+    factor.minimum_pivot = T(Inf)
+    factor.failed_pivot = 0
     factor.success = false
 
     @inbounds for column in 1:dimension
@@ -206,7 +227,11 @@ function factorize_pivoted_lu!(
                 pivot_magnitude = magnitude
             end
         end
-        isfinite(pivot_magnitude) && pivot_magnitude > threshold || return false
+        factor.minimum_pivot = min(factor.minimum_pivot, pivot_magnitude)
+        isfinite(pivot_magnitude) && pivot_magnitude > threshold || begin
+            factor.failed_pivot = column
+            return false
+        end
         if pivot_row != column
             for j in 1:dimension
                 factor.factors[column, j], factor.factors[pivot_row, j] =
@@ -219,10 +244,16 @@ function factorize_pivoted_lu!(
         for row in (column + 1):dimension
             factor.factors[row, column] /= pivot
             multiplier = factor.factors[row, column]
-            isfinite(multiplier) || return false
+            isfinite(multiplier) || begin
+                factor.failed_pivot = column
+                return false
+            end
             for j in (column + 1):dimension
                 factor.factors[row, j] -= multiplier * factor.factors[column, j]
-                isfinite(factor.factors[row, j]) || return false
+                isfinite(factor.factors[row, j]) || begin
+                    factor.failed_pivot = column
+                    return false
+                end
             end
         end
     end
@@ -284,6 +315,7 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat}
     expected_inertia::KKTInertia
     regularization::T
     regularization_attempts::Int
+    attempts::Vector{ExpandedKKTAttempt{T}}
     refinements::Int
     residual::Matrix{T}
     correction::Matrix{T}
@@ -293,11 +325,13 @@ end
 function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {T<:AbstractFloat}
     dimension = n + m + 1
     rhs_count >= 1 || throw(ArgumentError("expanded KKT requires at least one RHS"))
+    attempts = ExpandedKKTAttempt{T}[]
+    sizehint!(attempts, 16)
     return ExpandedKKTSession{T}(
         n, m, dimension, zeros(T, dimension, dimension),
         zeros(T, dimension, dimension), zeros(T, dimension, dimension),
         GenericPivotedLU(T, dimension), GenericPivotedLDL(T, dimension),
-        KKTInertia(0, 0, dimension), zero(T), 0, 0,
+        KKTInertia(0, 0, dimension), zero(T), 0, attempts, 0,
         zeros(T, dimension, rhs_count), zeros(T, dimension, rhs_count),
         EXPANDED_KKT_READY,
     )
@@ -371,6 +405,19 @@ function expanded_rhs!(
     return destination
 end
 
+function _freeze_symmetric_companion!(session::ExpandedKKTSession)
+    # The symmetric companion mirrors the upper x/tau coupling. It is an
+    # inertia diagnostic for signed regularization, not the solved frozen-sign
+    # operator (whose lower x/tau block has the opposite sign).
+    copyto!(session.symmetric_companion, session.regularized)
+    tau_index = session.dimension
+    @inbounds for index in 1:session.n
+        session.symmetric_companion[tau_index, index] =
+            session.symmetric_companion[index, tau_index]
+    end
+    return session.symmetric_companion
+end
+
 function _assemble_regularized!(
     session::ExpandedKKTSession{T}, regularization::T,
 ) where {T<:AbstractFloat}
@@ -382,30 +429,50 @@ function _assemble_regularized!(
     @inbounds for index in (n + 1):(n + m + 1)
         session.regularized[index, index] -= regularization
     end
-    # The symmetric companion mirrors the upper x/tau coupling. It is an
-    # inertia diagnostic for signed regularization, not the solved frozen-sign
-    # operator (whose lower x/tau block has the opposite sign).
-    copyto!(session.symmetric_companion, session.regularized)
-    tau_index = session.dimension
-    @inbounds for index in 1:n
-        session.symmetric_companion[tau_index, index] =
-            session.symmetric_companion[index, tau_index]
-    end
+    _freeze_symmetric_companion!(session)
     return session.regularized
+end
+
+function _assemble_dynamic_regularized!(
+    session::ExpandedKKTSession{T}, magnitude::T, operator_scale::T,
+    pivot_floor::T, failed_pivot::Int,
+) where {T<:AbstractFloat}
+    applied = _assemble_dynamic_signed_regularization!(
+        session.regularized, session.unregularized, session.n, magnitude,
+        operator_scale, pivot_floor, failed_pivot,
+    )
+    _freeze_symmetric_companion!(session)
+    return applied
+end
+
+@inline function _record_expanded_attempt!(
+    session::ExpandedKKTSession{T}, index::Int,
+    stage::ExpandedRegularizationStage, regularization::T,
+    pivot_floor::T, minimum_pivot::T, reason::ExpandedKKTAttemptReason,
+) where {T<:AbstractFloat}
+    push!(session.attempts, ExpandedKKTAttempt(
+        index, stage, regularization, pivot_floor, minimum_pivot,
+        session.inertia_factor.inertia, reason,
+    ))
+    return reason
 end
 
 """
     factor_expanded_kkt!(session, system)
 
-Regularization ladder: unregularized attempt, then norm-scaled signed static
-regularization increased by one decade per retry. A retry is accepted only if
-(1) the symmetric companion has the exact expected inertia and (2) pivoted LU
-of the exact frozen-sign operator succeeds. Wrong inertia is never accepted.
+Regularization ladder: planned unregularized factorization, norm-scaled signed
+static retries, then coordinate-wise dynamic signed retries.  Every attempt is
+recorded.  A retry is accepted only if (1) the symmetric companion has the
+exact structure-derived inertia and (2) pivoted LU of the exact frozen-sign
+operator succeeds.  Wrong inertia and tiny pivots always advance the ladder.
 """
 function factor_expanded_kkt!(
     session::ExpandedKKTSession{T}, system::NewtonSystem{T};
     max_regularization_attempts::Int=6,
 ) where {T<:AbstractFloat}
+    max_regularization_attempts >= 0 || throw(ArgumentError(
+        "max_regularization_attempts must be nonnegative",
+    ))
     assemble_expanded_kkt!(session, system)
     # Recompute the target from the semantic system on every factorization.
     # A stale or caller-mutated diagnostic can therefore never authorize a
@@ -414,29 +481,89 @@ function factor_expanded_kkt!(
     scale = _expanded_operator_scale(session.unregularized)
     base_regularization = sqrt(eps(T)) * scale
     pivot_floor = T(32) * eps(T) * scale
+    static_attempts = min(3, max_regularization_attempts)
     session.status = EXPANDED_KKT_FACTOR_FAILED
+    session.regularization = zero(T)
     session.regularization_attempts = 0
+    session.factor.success = false
+    session.inertia_factor.success = false
+    empty!(session.attempts)
+    failed_pivot = 0
+
     for attempt in 0:max_regularization_attempts
-        regularization = attempt == 0 ? zero(T) :
-            base_regularization * T(10)^(attempt - 1)
-        _assemble_regularized!(session, regularization)
-        inertia_ok = factorize_pivoted_ldl!(
+        stage = if attempt == 0
+            EXPANDED_REGULARIZATION_NONE
+        elseif attempt <= static_attempts
+            EXPANDED_REGULARIZATION_STATIC
+        else
+            EXPANDED_REGULARIZATION_DYNAMIC
+        end
+        stage_index = stage === EXPANDED_REGULARIZATION_DYNAMIC ?
+            attempt - static_attempts - 1 : attempt - 1
+        magnitude = attempt == 0 ? zero(T) :
+            base_regularization * T(10)^stage_index
+        regularization = if stage === EXPANDED_REGULARIZATION_DYNAMIC
+            _assemble_dynamic_regularized!(
+                session, magnitude, scale, pivot_floor, failed_pivot,
+            )
+        else
+            _assemble_regularized!(session, magnitude)
+            magnitude
+        end
+        session.regularization_attempts = attempt
+
+        inertia_factored = factorize_pivoted_ldl!(
             session.inertia_factor, session.symmetric_companion;
             threshold=pivot_floor,
-        ) && session.inertia_factor.inertia == session.expected_inertia
-        if !inertia_ok
+        )
+        if !inertia_factored
+            failed_pivot = session.inertia_factor.failed_pivot
+            reason = failed_pivot == 0 ?
+                EXPANDED_ATTEMPT_INERTIA_FACTOR_FAILED :
+                EXPANDED_ATTEMPT_TINY_PIVOT
+            _record_expanded_attempt!(
+                session, attempt, stage, regularization, pivot_floor,
+                session.inertia_factor.minimum_pivot, reason,
+            )
+            session.status = EXPANDED_KKT_FACTOR_FAILED
+            continue
+        end
+        if session.inertia_factor.inertia != session.expected_inertia
+            failed_pivot = 0
+            _record_expanded_attempt!(
+                session, attempt, stage, regularization, pivot_floor,
+                session.inertia_factor.minimum_pivot,
+                EXPANDED_ATTEMPT_WRONG_INERTIA,
+            )
             session.status = EXPANDED_KKT_WRONG_INERTIA
             continue
         end
-        if factorize_pivoted_lu!(
+
+        if !factorize_pivoted_lu!(
             session.factor, session.regularized; threshold=pivot_floor,
         )
-            session.regularization = regularization
-            session.regularization_attempts = attempt
-            session.status = EXPANDED_KKT_FACTORED
-            return true
+            failed_pivot = session.factor.failed_pivot
+            reason = failed_pivot == 0 ?
+                EXPANDED_ATTEMPT_EXACT_FACTOR_FAILED :
+                EXPANDED_ATTEMPT_TINY_PIVOT
+            _record_expanded_attempt!(
+                session, attempt, stage, regularization, pivot_floor,
+                min(session.inertia_factor.minimum_pivot,
+                    session.factor.minimum_pivot), reason,
+            )
+            session.status = EXPANDED_KKT_FACTOR_FAILED
+            continue
         end
-        session.status = EXPANDED_KKT_FACTOR_FAILED
+
+        session.regularization = regularization
+        session.status = EXPANDED_KKT_FACTORED
+        _record_expanded_attempt!(
+            session, attempt, stage, regularization, pivot_floor,
+            min(session.inertia_factor.minimum_pivot,
+                session.factor.minimum_pivot),
+            EXPANDED_ATTEMPT_ACCEPTED,
+        )
+        return true
     end
     return false
 end

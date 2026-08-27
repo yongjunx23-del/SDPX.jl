@@ -86,6 +86,54 @@ end
     @test !session.factor.success
 end
 
+@testset "expanded structured regularization ladder" begin
+    T = Float64
+    A = zeros(T, 1, 1)
+    b = zeros(T, 1)
+    c = zeros(T, 1)
+    cone = SDPX.assemble_cone_linearization(
+        T, 1,
+        [SDPX.LocalConeLinearization(1:1, reshape(T[1], 1, 1), zeros(T, 1))],
+    )
+    rhs = SDPX.HSDNewtonRHS(
+        zeros(T, 1), zeros(T, 1), zero(T), zeros(T, 1), zero(T),
+    )
+    system = SDPX.NewtonSystem(A, b, c, cone, one(T), one(T), rhs)
+    session = SDPX.ExpandedKKTSession(T, 1, 1)
+    @test SDPX.factor_expanded_kkt!(session, system)
+    @test length(session.attempts) == 2
+    @test session.attempts[1].stage == SDPX.EXPANDED_REGULARIZATION_NONE
+    @test session.attempts[1].reason == SDPX.EXPANDED_ATTEMPT_TINY_PIVOT
+    @test session.attempts[2].stage == SDPX.EXPANDED_REGULARIZATION_STATIC
+    @test session.attempts[2].reason == SDPX.EXPANDED_ATTEMPT_ACCEPTED
+    @test session.attempts[2].observed_inertia == session.expected_inertia
+    @test session.attempts[2].minimum_pivot > session.attempts[2].pivot_threshold
+
+    # An operator with a genuinely contradictory cone-block sign exhausts
+    # both static and dynamic signed retries without accepting wrong inertia.
+    wrong_cone = SDPX.assemble_cone_linearization(
+        T, 1,
+        [SDPX.LocalConeLinearization(1:1, reshape(T[-1], 1, 1), zeros(T, 1))],
+    )
+    wrong = SDPX.NewtonSystem(A, b, c, wrong_cone, one(T), one(T), rhs)
+    rejected = SDPX.ExpandedKKTSession(T, 1, 1)
+    @test !SDPX.factor_expanded_kkt!(
+        rejected, wrong; max_regularization_attempts=5,
+    )
+    @test any(
+        attempt.stage == SDPX.EXPANDED_REGULARIZATION_DYNAMIC
+        for attempt in rejected.attempts
+    )
+    @test all(
+        attempt.reason != SDPX.EXPANDED_ATTEMPT_ACCEPTED
+        for attempt in rejected.attempts
+    )
+    @test rejected.status == SDPX.EXPANDED_KKT_WRONG_INERTIA
+    @test_throws ArgumentError SDPX.factor_expanded_kkt!(
+        session, system; max_regularization_attempts=-1,
+    )
+end
+
 @testset "expanded generic precision fallback" begin
     setprecision(BigFloat, 192) do
         system, expected = expanded_fixture(BigFloat)
