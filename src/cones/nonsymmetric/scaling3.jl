@@ -1472,3 +1472,151 @@ end
     workspace.valid || throw(ArgumentError("nonsymmetric scaling is invalid"))
     return _ns_scaling_matvec!(destination, workspace.theta, source)
 end
+
+# ---------------------------------------------------------------------------
+# Fixed-size Exp/Power 3x3 scaling/contribution path (GPT Pro plan P4/C3).
+#
+# Each scaling epoch freezes the accepted 3x3 Theta and its certified lower
+# factor `workspace.factor`.  The local KKT contribution is assembled from
+# that accepted state only: no generic dense factor call per block and no
+# global inverse are ever formed.  The generic reference path
+# (`apply_nonsymmetric_Theta!` / `apply_nonsymmetric_G!`) remains callable
+# unchanged.
+# ---------------------------------------------------------------------------
+
+"""
+    nonsymmetric_scaling_contribution_symbol() -> Symbol
+
+Specialization symbol of the fixed-size Exp/Power 3x3 contribution path,
+registered in the KKT specialization registry.
+"""
+@inline function nonsymmetric_scaling_contribution_symbol()
+    return _nonsymmetric_scaling_contribution_symbol()
+end
+
+"""
+    nonsymmetric_scaling_accepted_factor(workspace) -> Matrix{T}
+
+Return the accepted lower 3x3 Cholesky factor of the accepted block Theta
+(block-owned storage; not copied, not re-factorized).  Throws on an invalid
+scaling state, mirroring `apply_nonsymmetric_Theta!`.
+"""
+@inline function nonsymmetric_scaling_accepted_factor(
+    workspace::NonsymmetricScalingWorkspace{T},
+) where {T<:AbstractFloat}
+    workspace.valid || throw(ArgumentError("nonsymmetric scaling is invalid"))
+    return workspace.factor
+end
+
+"""
+    _ns_scaling_factor_g_backward_ok(workspace, destination, source) -> Bool
+
+Componentwise, scale-free backward-error gate for the factor-based `G` action:
+certifies `Theta * destination == source` against the stored accepted Theta
+with the same forcing constant as the runtime Theta-solve gate.
+"""
+@inline function _ns_scaling_factor_g_backward_ok(
+    workspace::NonsymmetricScalingWorkspace{T},
+    destination::AbstractVector{T},
+    source::AbstractVector{T},
+) where {T<:AbstractFloat}
+    theta = workspace.theta
+    three_eps = T(3) * eps(one(T))
+    three_eps < one(T) || return false
+    forcing = T(128) * three_eps / (one(T) - three_eps)
+    isfinite(forcing) || return false
+    @inbounds for i in 1:3
+        action = theta[i, 1] * destination[1] +
+                 theta[i, 2] * destination[2] +
+                 theta[i, 3] * destination[3]
+        work = abs(source[i]) +
+               abs(theta[i, 1]) * abs(destination[1]) +
+               abs(theta[i, 2]) * abs(destination[2]) +
+               abs(theta[i, 3]) * abs(destination[3])
+        residual = action - source[i]
+        isfinite(residual) && isfinite(work) || return false
+        if iszero(work)
+            iszero(residual) || return false
+        elseif abs(residual) > forcing * work
+            return false
+        end
+    end
+    return true
+end
+
+"""
+    try_apply_nonsymmetric_factor_G_reason!(destination, workspace, source)
+
+Apply `G = Theta^-1` for one accepted Exp/Power block through the accepted
+block factor only: `(L*L') x = source` with the certified lower factor, then
+a componentwise backward-error check against the stored accepted Theta.  No
+re-factorization of Theta and no generic dense factor call per block occur;
+`source` may alias `destination` (the forward solve captures the RHS first).
+"""
+@inline function try_apply_nonsymmetric_factor_G_reason!(
+    destination::Vector{T},
+    workspace::NonsymmetricScalingWorkspace{T},
+    source::Vector{T},
+) where {T<:AbstractFloat}
+    workspace.valid || return NS_SCALING_INVALID_PARAMETER
+    length(destination) == length(source) == 3 ||
+        return NS_SCALING_INVALID_PARAMETER
+    isfinite(source[1]) && isfinite(source[2]) && isfinite(source[3]) ||
+        return NS_SCALING_NONFINITE_INPUT
+    _ns_scaling_factor_solve!(
+        destination, workspace.factor, source, workspace.work3,
+    ) || return NS_SCALING_INVERSE_MISMATCH
+    _ns_scaling_factor_g_backward_ok(workspace, destination, source) ||
+        return NS_SCALING_INVERSE_MISMATCH
+    return NS_SCALING_CONVERGED
+end
+
+"""
+    try_apply_nonsymmetric_factor_G!(destination, workspace, source) -> Bool
+
+Boolean wrapper of the reason-returning factor-based `G` action.
+"""
+@inline function try_apply_nonsymmetric_factor_G!(
+    destination::Vector{T},
+    workspace::NonsymmetricScalingWorkspace{T},
+    source::Vector{T},
+) where {T<:AbstractFloat}
+    return try_apply_nonsymmetric_factor_G_reason!(
+        destination, workspace, source,
+    ) === NS_SCALING_CONVERGED
+end
+
+"""
+    nonsymmetric_scaling_contribution3!(
+        operator, corrector, workspace, corrector_rhs,
+    ) -> NonsymmetricScalingReason
+
+Assemble the fixed-size 3x3 local KKT contribution for one accepted Exp/Power
+block into caller-owned block scratch: the self-adjoint local linearization
+`operator` is the accepted Theta and `corrector` receives the block slice of
+the caller's corrector right-hand side.  Uses only the accepted block scaling
+state; no factorization and no global inverse are formed.
+"""
+@inline function nonsymmetric_scaling_contribution3!(
+    operator::AbstractMatrix{T},
+    corrector::AbstractVector{T},
+    workspace::NonsymmetricScalingWorkspace{T},
+    corrector_rhs::AbstractVector{T},
+) where {T<:AbstractFloat}
+    workspace.valid || return NS_SCALING_INVALID_PARAMETER
+    size(operator) == (3, 3) || return NS_SCALING_INVALID_PARAMETER
+    length(corrector) == 3 && length(corrector_rhs) == 3 ||
+        return NS_SCALING_INVALID_PARAMETER
+    theta = workspace.theta
+    @inbounds for j in 1:3, i in 1:3
+        value = theta[i, j]
+        isfinite(value) || return NS_SCALING_NONFINITE_RESULT
+        operator[i, j] = value
+    end
+    @inbounds for i in 1:3
+        value = corrector_rhs[i]
+        isfinite(value) || return NS_SCALING_NONFINITE_RESULT
+        corrector[i] = value
+    end
+    return NS_SCALING_CONVERGED
+end
