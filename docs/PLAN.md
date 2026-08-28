@@ -1083,6 +1083,20 @@ SparseExpandedQuasidefiniteLDLT
 
 它是最终面向大规模 bootstrap 的关键路线，但不必阻塞最初的 HSD-only v1。
 
+### 高精度 sparse provider 路线
+
+高精度稀疏分解不进入 MFLA/BFLA 内部，也不在 SDPX 重写：
+
+* symmetric quasi-definite expanded KKT：优先评估纯 Julia `QDLDL.jl`；
+* general/nonsymmetric reduced Schur：优先评估纯 Julia `PureKLU.jl`；
+* `LDLFactorizations.jl` 仅作为 generic no-pivot reference/benchmark，未经过鲁棒性门不得成为首选生产 fallback；
+* MFLA/BFLA 只承担显式内存预算许可后的 dense fallback；
+* provider adapter 直接调用上述包，不重新引入 `LinearSolve`/`SciMLBase`；
+* BigFloat、Float64x2、Float64x4 必须保持原 scalar type，并通过 unregularized Newton residual 与原坐标证书。
+
+完整决策、实测兼容性和 promotion gates：
+`docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md`。
+
 **文件**
 
 ```text
