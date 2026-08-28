@@ -55,6 +55,9 @@ mutable struct SymmetricBorderedWorkspace{
     original_solution_certified::Bool
     assembly_epoch::Int
     factor_epoch::Int
+    factor_receipt::Union{Nothing,FactorReceipt{T}}
+    receipt_build_count::Int
+    factor_attempt_count::Int
     transform_order::UInt8
     accumulated_candidate::Bool
     candidate_epoch::Int
@@ -99,6 +102,9 @@ function SymmetricBorderedWorkspace(::Type{T}, nr::Integer) where {T}
         driver,
         false,
         false,
+        0,
+        0,
+        nothing,
         0,
         0,
         _SYMMETRIC_BORDERED_TRANSFORM_ORDER,
@@ -266,7 +272,8 @@ end
 
 """Numeric factorizations performed by the active product-HSD route."""
 @inline function product_hsd_factor_count(state::ProductConeHSDState)
-    state.kkt_route === :expanded && return state.base.epoch
+    state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
+        state.expanded.numeric_factor_count
     state.kkt_route === :sparse_schur &&
         return state.sparse_schur === nothing ? 0 :
                state.sparse_schur.numeric_factor_count
@@ -274,6 +281,27 @@ end
         return factor_epoch(state.coupled.cache)
     end
     return kkt_factor_count(state.symmetric_bordered.driver)
+end
+
+@inline function product_hsd_receipt_build_count(state::ProductConeHSDState)
+    state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
+        state.expanded.receipt_build_count
+    state.kkt_route === :sparse_schur &&
+        return state.sparse_schur === nothing ? 0 :
+               state.sparse_schur.receipt_build_count
+    state.coupled.nonsymmetric_dimension > 0 &&
+        return state.coupled.receipt_build_count
+    return state.symmetric_bordered.receipt_build_count
+end
+
+@inline function product_hsd_factor_receipt(state::ProductConeHSDState)
+    state.kkt_route === :expanded && return state.expanded === nothing ? nothing :
+        state.expanded.factor_receipt
+    state.kkt_route === :sparse_schur && return
+        state.sparse_schur === nothing ? nothing : state.sparse_schur.factor_receipt
+    state.coupled.nonsymmetric_dimension > 0 &&
+        return state.coupled.factor_receipt
+    return state.symmetric_bordered.factor_receipt
 end
 
 """
@@ -794,6 +822,7 @@ end
     workspace.last_reason = SYMMETRIC_BORDERED_READY
     workspace.assembly_epoch = 0
     workspace.factor_epoch = 0
+    workspace.factor_receipt = nothing
     workspace.accumulated_candidate = false
     workspace.candidate_epoch = 0
     workspace.accumulations = 0
@@ -929,6 +958,11 @@ end
     base = state.base
     workspace = state.symmetric_bordered
     workspace.factor_certified = false
+    workspace.factor_receipt = nothing
+    # Count every bordered numeric-factor attempt before any early exit so
+    # failed/uncertified attempts are separately observable and never counted
+    # as successfully certified factors.
+    workspace.factor_attempt_count += 1
     workspace.assembly_epoch == base.epoch || begin
         workspace.last_reason = SYMMETRIC_BORDERED_EPOCH_MISMATCH
         return false
@@ -964,7 +998,50 @@ end
     end
     workspace.factor_epoch = base.epoch
     workspace.factor_certified = true
+    proof_scale = max(
+        maximum(abs, workspace.factor_matrix),
+        one(eltype(workspace.factor_matrix)),
+    )
+    proof_bound = maximum(abs, workspace.factor_error) / proof_scale
+    receipt_factor_epoch = factor_epoch(workspace.driver.route)
+    workspace.factor_receipt = FactorReceipt(
+        workspace.assembly_epoch,
+        receipt_factor_epoch,
+        dense_factor_pattern_signature(
+            workspace.dimension, workspace.dimension, :bordered,
+        ),
+        :bordered,
+        :standard_pivoted_lu,
+        eltype(workspace.factor_matrix),
+        factor_receipt_precision(eltype(workspace.factor_matrix)),
+        zero(eltype(workspace.factor_matrix)),
+        :none,
+        :factored,
+        proof_bound,
+        true,
+        0, 0,
+    )
+    workspace.receipt_build_count += 1
     return true
+end
+
+@inline function _product_bordered_factor_receipt_current(
+    workspace::SymmetricBorderedWorkspace{T},
+) where {T}
+    workspace.factor_certified || return false
+    workspace.factor_epoch == workspace.assembly_epoch || return false
+    return factor_receipt_owned(
+        workspace.factor_receipt;
+        matrix_epoch=workspace.assembly_epoch,
+        factor_epoch=factor_epoch(workspace.driver.route),
+        pattern_signature=dense_factor_pattern_signature(
+            workspace.dimension, workspace.dimension, :bordered,
+        ),
+        route=:bordered,
+        provider=:standard_pivoted_lu,
+        regularization=zero(T),
+        require_proof=true,
+    )
 end
 
 @inline function _product_bordered_physical_snapshot_ok(
@@ -975,7 +1052,7 @@ end
         workspace.factor_epoch == workspace.assembly_epoch || return false
     _product_bordered_transform_matrix_ok(workspace) || return false
     _product_bordered_transform_rhs_ok(workspace) || return false
-    _product_bordered_factor_certificate!(workspace) || return false
+    _product_bordered_factor_receipt_current(workspace) || return false
     n = workspace.dimension
     @inbounds for i in 1:n
         workspace.solution[i] == workspace.certified_solution[i] ||
@@ -1014,6 +1091,10 @@ inverse.
     base = state.base
     runtime = state.runtime
     workspace = state.coupled
+    # The coupled matrix rewrite starts here: revoke any receipt from the
+    # previous epoch before the first write, so a later assembly or factor
+    # failure can never leave the old factor looking current.
+    workspace.factor_receipt = nothing
     K = workspace.matrix
     nr = base.nr
     nsdim = workspace.nonsymmetric_dimension
@@ -1926,7 +2007,7 @@ end
     workspace.factor_epoch == workspace.assembly_epoch || return false
     _product_bordered_transform_matrix_ok(workspace) || return false
     _product_bordered_transform_rhs_ok(workspace) || return false
-    _product_bordered_factor_certificate!(workspace) || return false
+    _product_bordered_factor_receipt_current(workspace) || return false
     z = workspace.solution
     factors_before = kkt_factor_count(workspace.driver)
     try
@@ -1958,7 +2039,7 @@ end
     workspace.factor_epoch == workspace.assembly_epoch || return false
     _product_bordered_transform_matrix_ok(workspace) || return false
     _product_bordered_transform_rhs_ok(workspace) || return false
-    _product_bordered_factor_certificate!(workspace) || return false
+    _product_bordered_factor_receipt_current(workspace) || return false
     if workspace.accumulated_candidate
         workspace.candidate_epoch == workspace.factor_epoch || return false
         @inbounds for i in 1:n

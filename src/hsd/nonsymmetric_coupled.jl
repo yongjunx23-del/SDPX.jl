@@ -67,6 +67,11 @@ mutable struct NonsymmetricCoupledWorkspace{T}
     factor_coordinate_rhs_valid::Bool
     transform_epoch::Int
     transform_order::UInt8
+    # Route-local factor ownership: one immutable receipt per successfully
+    # certified numeric factor, validated on every coupled solve.
+    factor_receipt::Union{Nothing,FactorReceipt{T}}
+    receipt_build_count::Int
+    factor_attempt_count::Int
 end
 
 function NonsymmetricCoupledWorkspace(
@@ -137,6 +142,9 @@ function NonsymmetricCoupledWorkspace(
         false,
         0,
         _PRODUCT_COUPLED_TRANSFORM_ORDER,
+        nothing,
+        0,
+        0,
     )
 end
 
@@ -841,6 +849,11 @@ end
 ) where {T}
     workspace.factor_certified = false
     workspace.last_reason = COUPLED_READY
+    # A factor attempt (successful or not) replaces the numeric factor.  Revoke
+    # the previous receipt and count the attempt before any early exit so a
+    # failed or uncertified attempt can never masquerade as reusable.
+    workspace.factor_receipt = nothing
+    workspace.factor_attempt_count += 1
     if workspace.transform_valid
         workspace.transform_epoch == epoch || begin
             workspace.last_reason = COUPLED_TRANSFORM_EPOCH_MISMATCH
@@ -883,6 +896,27 @@ end
         return false
     end
     workspace.factor_certified = true
+    active_matrix = _product_coupled_active_matrix(workspace)
+    proof_scale = max(maximum(abs, active_matrix), one(T))
+    proof_bound = maximum(abs, workspace.factor_error) / proof_scale
+    workspace.factor_receipt = FactorReceipt(
+        factor_matrix_epoch(workspace.cache),
+        factor_epoch(workspace.cache),
+        dense_factor_pattern_signature(
+            workspace.dimension, workspace.dimension, :coupled,
+        ),
+        :coupled,
+        :standard_pivoted_lu,
+        T,
+        factor_receipt_precision(T),
+        zero(T),
+        :none,
+        :factored,
+        proof_bound,
+        true,
+        0, 0,
+    )
+    workspace.receipt_build_count += 1
     return true
 end
 
@@ -1134,12 +1168,37 @@ output-relative residual test on a strongly conditioned coupled matrix.
     return true, worst
 end
 
+@inline function _product_coupled_factor_receipt_current(
+    workspace::NonsymmetricCoupledWorkspace{T},
+) where {T}
+    workspace.factor_certified || return false
+    return factor_receipt_owned(
+        workspace.factor_receipt;
+        matrix_epoch=factor_matrix_epoch(workspace.cache),
+        factor_epoch=factor_epoch(workspace.cache),
+        pattern_signature=dense_factor_pattern_signature(
+            workspace.dimension, workspace.dimension, :coupled,
+        ),
+        route=:coupled,
+        provider=:standard_pivoted_lu,
+        regularization=zero(T),
+        require_proof=true,
+    )
+end
+
 @inline function _product_coupled_solve!(
     workspace::NonsymmetricCoupledWorkspace{T},
     destination::Vector{T},
     rhs::Vector{T},
 ) where {T}
     workspace.factor_certified || begin
+        workspace.last_reason = COUPLED_EPOCH_MISMATCH
+        return false, T(Inf)
+    end
+    # Every coupled solve validates route-local factor ownership first: a
+    # stale or revoked receipt rejects the solve even when a factor object is
+    # still physically present.
+    _product_coupled_factor_receipt_current(workspace) || begin
         workspace.last_reason = COUPLED_EPOCH_MISMATCH
         return false, T(Inf)
     end

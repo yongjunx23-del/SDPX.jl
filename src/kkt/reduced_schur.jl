@@ -46,7 +46,10 @@ combines symbolic and numeric work; therefore `symbolic_reuse_supported` is
 honestly false.  SDPX still freezes one deterministic CSC pattern per session
 and reuses its `colptr`, `rowval`, `nzval`, RHS, residual and block workspaces.
 `structural_assembly_count` must remain one while `numeric_factor_count`
-increments once for each sparse predictor/corrector epoch.
+increments once for each *successfully certified* sparse predictor/corrector
+epoch.  `factor_attempt_count` counts every numeric attempt (including failed
+or condition-rejected ones); a failed attempt never increments
+`numeric_factor_count` and never builds a receipt.
 """
 mutable struct SparseSchurSession{T<:AbstractFloat}
     n::Int
@@ -60,6 +63,8 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     factor::Union{Nothing,Any}
     factor_numeric_epoch::Int
     factor_pattern_signature::UInt64
+    factor_receipt::Union{Nothing,FactorReceipt{T}}
+    receipt_build_count::Int
     rhs::Vector{T}
     solution_vector::Vector{T}
     residual_vector::Vector{T}
@@ -80,6 +85,7 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     numeric_assembly_count::Int
     rhs_assembly_count::Int
     numeric_factor_count::Int
+    factor_attempt_count::Int
     pattern_reuse_count::Int
     regularization::T
     reciprocal_condition::T
@@ -100,13 +106,13 @@ function SparseSchurSession(::Type{T}, n::Int, m::Int) where {T<:AbstractFloat}
         n, m, dimension,
         spzeros(T, dimension, dimension),
         Dict{Tuple{Int,Int},Int}(),
-        zero(UInt64), false, nothing, nothing, 0, zero(UInt64),
+        zero(UInt64), false, nothing, nothing, 0, zero(UInt64), nothing, 0,
         zeros(T, dimension), zeros(T, dimension), zeros(T, dimension),
         zeros(T, dimension),
         Matrix{T}[], zeros(T, 0, 0),
         T[], T[], T[], T[], 0,
         zeros(T, n), zeros(T, n), Int[], Int[], Int[],
-        0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
         zero(T), zero(T), sqrt(eps(T)),
         T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         SPARSE_SCHUR_READY, :none,
@@ -121,6 +127,7 @@ end
     session.factor = nothing
     session.factor_numeric_epoch = 0
     session.factor_pattern_signature = zero(UInt64)
+    session.factor_receipt = nothing
     session.status = status
     session.last_reason = reason
     return false
@@ -521,6 +528,7 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
     session.factor = nothing
     session.factor_numeric_epoch = 0
     session.factor_pattern_signature = zero(UInt64)
+    session.factor_receipt = nothing
     if !sparse_schur_factorization_supported(T)
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED,
@@ -532,7 +540,7 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
             session, SPARSE_SCHUR_FACTOR_FAILED,
             :sparse_operator_not_assembled,
         )
-    session.numeric_factor_count += 1
+    session.factor_attempt_count += 1
     try
         factor = lu(session.schur; check=false)
         LinearAlgebra.issuccess(factor) ||
@@ -556,12 +564,32 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
             )
         end
         session.reciprocal_condition = T(info[rcond_index])
+        # Only a factor that passes every capability/condition gate counts as
+        # a numeric factor; failed attempts are visible via
+        # `factor_attempt_count` only.
+        session.numeric_factor_count += 1
         session.factor = factor
         session.symbolic = nothing
         session.factor_numeric_epoch = session.numeric_assembly_count
         session.factor_pattern_signature = session.pattern_signature
         session.status = SPARSE_SCHUR_FACTORED
         session.last_reason = :none
+        session.factor_receipt = FactorReceipt(
+            session.factor_numeric_epoch,
+            session.numeric_factor_count,
+            session.pattern_signature,
+            :sparse_schur,
+            :sparsearrays_umfpack,
+            T,
+            factor_receipt_precision(T),
+            session.regularization,
+            iszero(session.regularization) ? :none : :diagonal,
+            :factored,
+            T(Inf),
+            false,
+            0, 0,
+        )
+        session.receipt_build_count += 1
         return true
     catch exception
         exception isa InterruptException && rethrow()
@@ -599,7 +627,16 @@ function solve_sparse_schur!(
     current_factor = session.status === SPARSE_SCHUR_FACTORED &&
         session.factor !== nothing &&
         session.factor_numeric_epoch == session.numeric_assembly_count &&
-        session.factor_pattern_signature == session.pattern_signature
+        session.factor_pattern_signature == session.pattern_signature &&
+        factor_receipt_owned(
+            session.factor_receipt;
+            matrix_epoch=session.factor_numeric_epoch,
+            factor_epoch=session.numeric_factor_count,
+            pattern_signature=session.pattern_signature,
+            route=:sparse_schur,
+            provider=:sparsearrays_umfpack,
+            regularization=session.regularization,
+        )
     current_factor || return _invalidate_sparse_schur_factor!(
         session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_factor_stale,
     )

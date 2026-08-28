@@ -322,6 +322,15 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     regularization::T
     regularization_attempts::Int
     attempts::Vector{ExpandedKKTAttempt{T}}
+    matrix_epoch::Int
+    factor_epoch::Int
+    pattern_signature::UInt64
+    numeric_factor_count::Int
+    factor_receipt::Union{Nothing,FactorReceipt{T}}
+    receipt_build_count::Int
+    factor_attempt_count::Int
+    operator_generation::Int
+    factor_generation::Int
     refinement_trajectory::Vector{ExpandedRefinementStep{T}}
     refinements::Int
     refinement_recovery_attempts::Int
@@ -375,6 +384,8 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         alloc_zeros(T, dimension, dimension),
         alloc_zeros(T, dimension, dimension),
         KKTInertia(0, 0, dimension), zero(T), 0, attempts,
+        0, 0, dense_factor_pattern_signature(dimension, dimension, :expanded),
+        0, nothing, 0, 0, 0, 0,
         refinement_trajectory, 0, 0,
         T(Inf), T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         alloc_zeros(T, dimension), alloc_zeros(T, dimension),
@@ -405,6 +416,12 @@ function assemble_expanded_kkt!(
         "expanded session/system dimensions disagree",
     ))
     K = session.unregularized
+    # Every assembly is an owned operator rewrite.  Bump the mutation token
+    # and revoke the receipt before any write, so a partial or non-finite
+    # assembly can never leave the previous receipt current.
+    session.matrix_epoch += 1
+    session.operator_generation += 1
+    session.factor_receipt = nothing
     zero_owned!(K)
     xrows = 1:n
     yrows = (n + 1):(n + m)
@@ -468,6 +485,8 @@ end
 function _assemble_regularized!(
     session::ExpandedKKTSession{T}, regularization::T,
 ) where {T<:AbstractFloat}
+    session.operator_generation += 1
+    session.factor_receipt = nothing
     copy_owned!(session.regularized, session.unregularized)
     n, m = session.n, session.m
     @inbounds for index in 1:n
@@ -484,6 +503,8 @@ function _assemble_dynamic_regularized!(
     session::ExpandedKKTSession{T}, magnitude::T, operator_scale::T,
     pivot_floor::T, failed_pivot::Int,
 ) where {T<:AbstractFloat}
+    session.operator_generation += 1
+    session.factor_receipt = nothing
     applied = _assemble_dynamic_signed_regularization!(
         session.regularized, session.unregularized, session.n, magnitude,
         operator_scale, pivot_floor, failed_pivot,
@@ -540,26 +561,83 @@ end
 function _factor_expanded_exact!(
     session::ExpandedKKTSession{T}, pivot_floor::T,
 ) where {T<:AbstractFloat}
-    if session.la_backend === nothing
-        return factorize_pivoted_lu!(
+    # Every exact-factor call replaces (or fails to replace) the numeric
+    # factor.  Bump the factor generation and count the attempt before any
+    # numeric work, so a failed attempt can never masquerade as the previous
+    # certified factor.
+    session.factor_generation += 1
+    session.factor_attempt_count += 1
+    session.factor_receipt = nothing
+    success = if session.la_backend === nothing
+        factorize_pivoted_lu!(
             session.factor, session.regularized; threshold=pivot_floor,
         )
+    else
+        copy_owned!(session.provider_exact_matrix, session.regularized)
+        provider_factor = la_lu_factor!(
+            session.la_backend, session.provider_exact_matrix,
+        )
+        session.provider_exact_factor = provider_factor
+        session.factor.minimum_pivot = T(NaN)
+        session.factor.failed_pivot = provider_factor === nothing ? 1 : 0
+        session.factor.success = provider_factor !== nothing
+        provider_factor !== nothing
     end
-    copy_owned!(session.provider_exact_matrix, session.regularized)
-    provider_factor = la_lu_factor!(
-        session.la_backend, session.provider_exact_matrix,
+    if success
+        session.factor_epoch += 1
+        session.numeric_factor_count += 1
+    end
+    return success
+end
+
+@inline function _expanded_factor_receipt_current(
+    session::ExpandedKKTSession{T},
+) where {T<:AbstractFloat}
+    provider = session.la_backend === nothing ?
+        :standard_pivoted_lu : la_backend_provider(session.la_backend)
+    return factor_receipt_owned(
+        session.factor_receipt;
+        matrix_epoch=session.matrix_epoch,
+        factor_epoch=session.factor_epoch,
+        pattern_signature=session.pattern_signature,
+        route=:expanded,
+        provider=provider,
+        regularization=session.regularization,
+        operator_generation=session.operator_generation,
+        factor_generation=session.factor_generation,
     )
-    session.provider_exact_factor = provider_factor
-    session.factor.minimum_pivot = T(NaN)
-    session.factor.failed_pivot = provider_factor === nothing ? 1 : 0
-    session.factor.success = provider_factor !== nothing
-    return provider_factor !== nothing
+end
+
+@inline function _build_expanded_factor_receipt!(
+    session::ExpandedKKTSession{T},
+) where {T<:AbstractFloat}
+    provider = session.la_backend === nothing ?
+        :standard_pivoted_lu : la_backend_provider(session.la_backend)
+    session.factor_receipt = FactorReceipt(
+        session.matrix_epoch,
+        session.factor_epoch,
+        session.pattern_signature,
+        :expanded,
+        provider,
+        T,
+        factor_receipt_precision(T),
+        session.regularization,
+        iszero(session.regularization) ? :none : :signed_diagonal,
+        :factored,
+        T(Inf),
+        false,
+        session.operator_generation,
+        session.factor_generation,
+    )
+    session.receipt_build_count += 1
+    return session.factor_receipt
 end
 
 function _solve_expanded_factor!(
     destination::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVecOrMat{T},
 ) where {T<:AbstractFloat}
+    _expanded_factor_receipt_current(session) || return false
     if session.la_backend === nothing
         return solve_pivoted_lu!(destination, session.factor, rhs)
     end
@@ -686,6 +764,7 @@ function factor_expanded_kkt!(
                 session.factor.minimum_pivot),
             EXPANDED_ATTEMPT_ACCEPTED,
         )
+        _build_expanded_factor_receipt!(session)
         return true
     end
     # Preserve the strongest typed structural diagnosis across the exhausted
@@ -819,6 +898,7 @@ function _try_expanded_dynamic_factor!(
         min(session.inertia_factor.minimum_pivot, session.factor.minimum_pivot),
         EXPANDED_ATTEMPT_ACCEPTED,
     )
+    _build_expanded_factor_receipt!(session)
     return true
 end
 
