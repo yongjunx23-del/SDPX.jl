@@ -340,7 +340,6 @@ src/
 ext/
 ├── SDPXMultiFloatLinearAlgebraExt.jl
 ├── SDPXBigFloatLinearAlgebraExt.jl
-├── SDPXLinearSolveExt.jl
 └── SDPXAppleAccelerateExt.jl
 ```
 
@@ -1236,7 +1235,6 @@ src/kernels/bigfloat.jl
 src/la_backend.jl
 ext/SDPXMultiFloatLinearAlgebraExt.jl
 ext/SDPXBigFloatLinearAlgebraExt.jl
-ext/SDPXLinearSolveExt.jl
 ```
 
 **验收**
