@@ -263,9 +263,9 @@ if TEST_PROFILE === :full
     using JLD2
 end
 
-# The e2e profile runs only the sole end-to-end suite on the deterministic
-# generic small-subset conic matrix (LP optimal/infeasible/unbounded, SOCP,
-# SDP, Exp, Power) plus the shared cold-start helpers.
+# The e2e profile runs only the sole black-box solve-to-result suite on the
+# deterministic general small subset (LP optimal/infeasible/unbounded, SOCP,
+# SDP, Exp, Power). It intentionally excludes internal cold-start helpers.
 const E2E_TESTS = ("e2e.jl",)
 
 const SELECTED_TESTS =
@@ -274,8 +274,10 @@ const SELECTED_TESTS =
 
 @info "SDPX test profile" profile=TEST_PROFILE files=length(SELECTED_TESTS)
 
-@testset "cold-start math helpers" begin
-    include(joinpath(@__DIR__, "cold_start.jl"))
+if TEST_PROFILE !== :e2e
+    @testset "cold-start math helpers" begin
+        include(joinpath(@__DIR__, "cold_start.jl"))
+    end
 end
 
 @testset "SDPX.jl ($(TEST_PROFILE))" begin

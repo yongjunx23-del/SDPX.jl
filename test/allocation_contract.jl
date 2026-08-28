@@ -6,7 +6,7 @@
 # zero-allocation target. This file retains a bounded-allocation regression for
 # the legacy SDP route; the real native-HSD hard gate is
 # `test/hsd_zeroalloc.jl`, reproducible with
-# `benchmark/bootstrap/hsd_allocation.jl --check`. The semantic gate (Optimal + valid
+# `benchmark/general/performance/hsd_allocation.jl --check`. The semantic gate (Optimal + valid
 # certificate) pins the objective/iteration/residual/gap/certificate side.
 using SDPX
 using Test

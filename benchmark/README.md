@@ -7,7 +7,7 @@
   `docs/design/GENERAL_BENCHMARK.md` for sources and contracts.
 - `bootstrap/` — the problem-agnostic measurement harness together with the
   paper-grounded application catalogs. The harness owns process isolation,
-  solver measurement, schema-v8 serialization, and paired comparison; each
+  solver measurement, schema-v9 serialization, and paired comparison; each
   application catalog owns problem selection, coefficient construction, and
   independent validation. It does not turn a finite benchmark catalog into a
   general correctness or physics claim.
@@ -16,14 +16,14 @@ Every run has an explicit `execution_mode`: `:build` constructs and validates
 the catalog artifact only, `:solve` executes one solver route, and `:profile`
 executes the same solve route while retaining the phase telemetry exposed by
 the solver. Rows also carry `requested_engine` and `executed_engine` plus
-immutable campaign/shard/PBS identity. The native HSD engine is currently a
-schema extension only; requesting it for `:solve`/`:profile` fails closed
-until a public adapter and independent certificate contract are accepted.
+immutable campaign/shard/PBS identity. Harness engine labels are provenance
+metadata for the resolved solve contract; they do not expose an alternative
+public SDPX solver engine or override certificate validation.
 
-Bundled paper-grounded catalogs currently cover Hellerman modular LP, Paulos
-sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP, Kazakov--Zheng
-finite-N lattice-bootstrap SDP, a finite-level Gibbs/KL exponential-cone
-model, and a Giudice maximum-Rényi power-cone model under
+Bundled catalogs currently cover a build-only CFT/PMP surrogate, Hellerman
+modular LP, Paulos sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP,
+Kazakov--Zheng finite-N lattice-bootstrap SDP, a finite-level Gibbs/KL
+exponential-cone model, and a Giudice maximum-Rényi power-cone model under
 `benchmark/bootstrap/physics/`. Each is explicitly versioned and carries
 its own provenance and semantic validator. The EXP and Power catalogs are
 deliberately build-only until their native solver routes pass the product-HSD gates.
@@ -109,7 +109,7 @@ runner.jl SUITE --problem=ID --arithmetic=TYPE --provider=PROVIDER \
   --samples=1 --output=RESULT.toml [--catalog=CATALOG.jl]
 ```
 
-Each selection produces one schema-v8 result row. Rows record catalog identity,
+Each selection produces one schema-v9 result row. Rows record catalog identity,
 input fingerprint, source/environment hashes, solver route, certificate (only
 for solve/profile), catalog validation, scaling/layout, timing, allocation,
 RSS, IQR, and sampling parity. A strict run writes its artifacts before
@@ -142,7 +142,7 @@ exactly one result row. Aggregation fails closed unless selection, catalog,
 input, environment, route, immutable campaign/shard identity, status, and
 semantic result pair across all children. Solve/profile campaigns additionally
 pair objective, iterations, and certificate evidence; build campaigns pair
-catalog validation instead. Every child must be a schema-v8 row with
+catalog validation instead. Every child must be a schema-v9 row with
 `sample_count=1` and must match the campaign/shard identity requested by the
 parent. Required route/source fields are non-empty and all content identity
 fields (`project`, manifest, driver, solver, catalog, harness, schema, and
@@ -155,7 +155,7 @@ julia --project=. benchmark/bootstrap/compare.jl \
   baseline.toml candidate.toml comparison.tsv
 ```
 
-The comparator accepts schema-v8 files for a valid claim. It uses scoped
+The comparator accepts schema-v9 files for a valid claim. It uses scoped
 `BigFloat` parsing for objective differences and rejects mismatched selections,
 catalog identity, fingerprints, environments, formulations, references,
 execution routes, or shard topology. Campaign IDs and PBS job IDs are retained
@@ -167,8 +167,8 @@ the comparator recomputes timing statistics and semantic parity instead of
 trusting the aggregate parity flag. The command writes the requested TSV
 diagnostic and returns a nonzero exit status if any row is not
 `comparison_valid=true`.
-v7 and older files produce an explicit `legacy_schema_version` diagnostic and
-can never set `comparison_valid=true`. Dirty-tree comparisons require the
+Any non-v9 file produces an explicit schema-version diagnostic and can never
+set `comparison_valid=true`. Dirty-tree comparisons require the
 explicit diagnostic override in the API.
 
 Generated inputs, result files, historical baselines, and evidence are not

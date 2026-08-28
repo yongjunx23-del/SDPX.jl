@@ -3,7 +3,10 @@ using SparseArrays
 using LinearAlgebra
 using SDPX
 
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "applications", "matrix_bootstrap", "matrix_bootstrap.jl"))
+include(joinpath(
+    @__DIR__, "..", "benchmark", "bootstrap", "physics",
+    "matrix_bootstrap", "matrix_bootstrap.jl",
+))
 using .MatrixBootstrap
 
 function _entry_signature(entry::AffineEntry)

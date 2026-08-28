@@ -4,7 +4,7 @@
 # predictor/corrector (ProductConeHSDState + product_hsd_cold_start! +
 # product_hsd_step!).  Run from the repository root:
 #
-#   julia --project=. benchmark/hsd_allocation.jl --check
+#   julia --project=. benchmark/general/performance/hsd_allocation.jl --check
 
 using SDPX
 using SparseArrays

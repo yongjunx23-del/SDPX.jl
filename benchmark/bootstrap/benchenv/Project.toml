@@ -10,6 +10,6 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
 MultiFloats = "3"
-SDPX = "0.2, 0.3, 0.4, 0.5"
+SDPX = "0.5"
 SHA = "0.7"
 julia = "1.10"

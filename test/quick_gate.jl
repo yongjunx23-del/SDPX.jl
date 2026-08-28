@@ -2,7 +2,7 @@
 #
 # Covers one representative native-HSD solve per currently-green family
 # (LP / SOCP / PSD) plus the certificate-promotion invariant, reusing the
-# bootstrap benchmark fixtures. Full suites remain authoritative for
+# deterministic general benchmark fixtures. Full suites remain authoritative for
 # merges; this gate gives structural/performance refactors honest signal
 # in about a minute. No tolerance is loosened: shipped default Tolerances
 # and certificate gates only.
@@ -48,36 +48,46 @@ end
 
 const _QUICK_GATE_PROVENANCE = _quick_gate_provenance()
 
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.jl"))
+if !isdefined(Main, :GenericConicBenchmark)
+    include(joinpath(
+        @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+    ))
+end
+const _QUICK_GENERAL = Main.GenericConicBenchmark
 
-const _BB = Main.BootstrapBenchmark
+function _quick_general_model(id::Symbol)
+    spec = only(filter(
+        candidate -> candidate.id === id,
+        _QUICK_GENERAL.inventory(; tier=:small),
+    ))
+    return _QUICK_GENERAL.build(spec.problem, Float64, spec.params)
+end
 
-function _native_solve(problem, params)
-    model = _BB.build(_BB.PROBLEMS[problem], Float64, params)
-    result = SDPX.optimize!(model;
-        settings=SDPX.Settings{Float64}(engine=:native_hsd))
-    return result
+function _native_solve(id::Symbol)
+    return SDPX.optimize!(
+        _quick_general_model(id);
+        settings=SDPX.Settings{Float64}(engine=:native_hsd),
+    )
 end
 
 @testset "quick gate" begin
     # --- LP: free variables + nonnegativity + equality (native HSD) ---
-    r = _native_solve(:lp, (sites=4,))
+    r = _native_solve(:lp_afiro_style)
     @test SDPX.status(r) === :optimal
     @test r.certificate.valid
-    @test isapprox(SDPX.primal_objective(r), -10.346; atol=1e-6)
+    @test isapprox(SDPX.primal_objective(r), 9.0; atol=1e-6)
 
     # --- SOCP: second-order blocks (native HSD) ---
-    r = _native_solve(:socp,
-        (partial_waves=2, grid_points=4, analytic_coefficients=2))
+    r = _native_solve(:socp_portfolio_small)
     @test SDPX.status(r) === :optimal
     @test r.certificate.valid
-    @test isapprox(SDPX.primal_objective(r), 2.7272; atol=1e-5)
+    @test isapprox(SDPX.primal_objective(r), 1.0; atol=1e-5)
 
-    # --- PSD: semidefinite moment matrix (native HSD) ---
-    r = _native_solve(:matrix, (sites=4,))
+    # --- PSD: semidefinite block (native HSD) ---
+    r = _native_solve(:sdp_maxcut_k4)
     @test SDPX.status(r) === :optimal
     @test r.certificate.valid
-    @test SDPX.primal_objective(r) < 1e-8
+    @test isapprox(SDPX.primal_objective(r), 4.0; atol=1e-5)
 end
 
 @testset "known native gaps (documented)" begin

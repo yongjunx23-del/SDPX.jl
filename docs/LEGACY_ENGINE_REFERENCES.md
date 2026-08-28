@@ -245,7 +245,7 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
 Migrated to native product HSD (`ProductConeHSDState` +
 `product_hsd_cold_start!`/`product_hsd_step!`/`product_hsd_solve!`):
 
-- `benchmark/bootstrap/hsd_allocation.jl`
+- `benchmark/general/performance/hsd_allocation.jl`
 - `test/hsd_zeroalloc.jl`
 - `test/hsd_direction_lp.jl`
 - `test/hsd_full_newton_oracle.jl`

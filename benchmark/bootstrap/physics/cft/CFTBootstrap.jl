@@ -11,41 +11,39 @@ paper-generated block table for a production Ising-island reproduction.
 The returned object is a `PMP2SDP.StrictPMP`; callers compile it with
 `PMP2SDP.compile_to_sdp` and then solve the resulting SDP with SDPX.
 """
-module CFT
+module CFTBootstrap
 
 import LinearAlgebra
+import SHA
 
-# The benchmark files are normally included after BootstrapBenchmark.jl from
-# the top-level benchmark driver.  Resolve both that layout and inclusion from
-# inside BootstrapBenchmark without adding a package dependency on the driver.
-const BootstrapBenchmark = let parent = parentmodule(@__MODULE__)
-    if isdefined(parent, :BootstrapBenchmark)
-        getfield(parent, :BootstrapBenchmark)
-    elseif isdefined(Main, :BootstrapBenchmark)
-        getfield(Main, :BootstrapBenchmark)
-    else
-        error("CFT.jl must be loaded with BootstrapBenchmark.jl")
+# PMP2SDP is optional and loaded only when this catalog is requested.
+function _load_pmp2sdp()
+    isdefined(Main, :PMP2SDP) && return getfield(Main, :PMP2SDP)
+
+    package_source = Base.find_package("PMP2SDP")
+    if package_source !== nothing
+        Core.eval(Main, :(import PMP2SDP))
+        return getfield(Main, :PMP2SDP)
     end
-end
 
-# PMP2SDP is intentionally loaded from the sibling source tree so this
-# benchmark remains runnable before PMP2SDP is registered in the depot.
-const PMP2SDP = let
-    if isdefined(Main, :PMP2SDP)
-        getfield(Main, :PMP2SDP)
-    else
-        root = "/Users/xuyongjun/Desktop/project/SDPX/PMP2SDP.jl"
+    roots = String[]
+    haskey(ENV, "SDPX_PMP2SDP_ROOT") && push!(roots, ENV["SDPX_PMP2SDP_ROOT"])
+    # Developer convenience only: SDPX.jl and PMP2SDP.jl may be sibling
+    # checkouts. No absolute workstation path is embedded in the benchmark.
+    push!(roots, normpath(joinpath(@__DIR__, "..", "..", "..", "..", "..", "PMP2SDP.jl")))
+    for root in roots
         source = joinpath(root, "src", "PMP2SDP.jl")
-        isfile(source) || error("PMP2SDP source tree not found at $root")
-        Base.include(Main, source)
-        getfield(Main, :PMP2SDP)
+        if isfile(source)
+            Base.include(Main, source)
+            return getfield(Main, :PMP2SDP)
+        end
     end
+    error("CFT bootstrap requires PMP2SDP.jl; install it or set SDPX_PMP2SDP_ROOT")
 end
 
-export CFTProblem
+const PMP2SDP = _load_pmp2sdp()
 
-"""Configuration marker for the 3d conformal-bootstrap benchmark."""
-struct CFTProblem <: BootstrapBenchmark.AbstractBootstrapProblem end
+export build_cft_pmp, cft_scale_params, cft_fingerprint
 
 const _REFERENCE_BOUND = 10.9293
 
@@ -133,11 +131,7 @@ The objective maximizes the single functional coefficient `y`; the target
 half-line block is `(target_bound-y+x^degree) I`, so its exact SDP optimum is
 the stated benchmark bound.
 """
-function BootstrapBenchmark.build(
-    ::CFTProblem,
-    ::Type{T},
-    params,
-) where {T<:AbstractFloat}
+function build_cft_pmp(::Type{T}, params) where {T<:AbstractFloat}
     degree = _positive_int(params, :derivative_order, 6)
     num_blocks = _positive_int(params, :num_blocks, 3)
     dimension = _dimension(params)
@@ -158,16 +152,8 @@ function BootstrapBenchmark.build(
     return pmp
 end
 
-"""Published stress-tensor benchmark target from arXiv:2411.15300.
-
-The paper's directly reproducible gap bound is `Delta_- <= 10.9293` at
-`Lambda=27`; this low-order fixture uses the value as its reference target.
-"""
-BootstrapBenchmark.known_optimum(::CFTProblem, ::Any) = _REFERENCE_BOUND
-BootstrapBenchmark.name(::CFTProblem) = :cft
-
 """Scale-up settings: derivative order, sector count, and mixed-block size."""
-function BootstrapBenchmark.scale_params(::CFTProblem)
+function cft_scale_params()
     return [
         (derivative_order=4, num_blocks=2, matrix_dimension=1,
             target_bound=_REFERENCE_BOUND),
@@ -180,7 +166,15 @@ function BootstrapBenchmark.scale_params(::CFTProblem)
     ]
 end
 
-const DEFAULT_PROBLEM = CFTProblem()
-BootstrapBenchmark.register(DEFAULT_PROBLEM)
+function cft_fingerprint(params)
+    payload = join((
+        "cft-pmp-v1",
+        string(_param(params, :derivative_order, 6)),
+        string(_param(params, :num_blocks, 3)),
+        string(_param(params, :matrix_dimension, 1)),
+        string(_param(params, :target_bound, _REFERENCE_BOUND)),
+    ), ":")
+    return bytes2hex(SHA.sha256(payload))
+end
 
-end # module CFT
+end # module CFTBootstrap

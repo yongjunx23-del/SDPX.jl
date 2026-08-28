@@ -4,8 +4,20 @@
 using SDPX
 using Test
 
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.jl"))
-const _WAVE_G_BB = Main.BootstrapBenchmark
+if !isdefined(Main, :GenericConicBenchmark)
+    include(joinpath(
+        @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+    ))
+end
+const _WAVE_G_GENERAL = Main.GenericConicBenchmark
+
+function _wave_g_model(id::Symbol)
+    spec = only(filter(
+        candidate -> candidate.id === id,
+        _WAVE_G_GENERAL.inventory(; tier=:small),
+    ))
+    return _WAVE_G_GENERAL.build(spec.problem, Float64, spec.params)
+end
 
 @testset "Wave G HSD structural split and progress control" begin
     hsd_dir = joinpath(@__DIR__, "..", "src", "hsd")
@@ -28,16 +40,12 @@ end
 @testset "Wave G expanded simple-model gate" begin
     # Wave H retained bordered after LP+SOC and SOC+PSD expanded regressions.
     @test SDPX.Settings{Float64}().kkt_route === :bordered
-    for (problem, parameters) in [
-        (:lp, (sites=4,)),
-        (:socp, (
-            partial_waves=2, grid_points=4, analytic_coefficients=2,
-        )),
-        (:matrix, (sites=4,)),
-    ]
-        model = _WAVE_G_BB.build(
-            _WAVE_G_BB.PROBLEMS[problem], Float64, parameters,
-        )
+    for id in (
+        :lp_afiro_style,
+        :socp_portfolio_small,
+        :sdp_maxcut_k4,
+    )
+        model = _wave_g_model(id)
         bordered = SDPX.optimize!(model; settings=SDPX.Settings{Float64}(
             engine=:native_hsd, kkt_route=:bordered,
         ))

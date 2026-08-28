@@ -172,7 +172,7 @@ jobs:
       # product_hsd_step!) allocation audit; legacy engine entry points are
       # not exercised.
       - name: Native product-HSD allocation hard gate
-        run: julia --project=. benchmark/bootstrap/hsd_allocation.jl --check
+        run: julia --project=. benchmark/general/performance/hsd_allocation.jl --check
       - name: Fixed-precision contract
         run: julia --project=. test/fixed_precision_contract.jl
       - name: FactorCache protocol tests

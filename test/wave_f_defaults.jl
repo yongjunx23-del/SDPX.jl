@@ -24,18 +24,30 @@
 using SDPX
 using Test
 
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.jl"))
-const _BB = Main.BootstrapBenchmark
+if !isdefined(Main, :GenericConicBenchmark)
+    include(joinpath(
+        @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+    ))
+end
+const _WAVE_F_GENERAL = Main.GenericConicBenchmark
+
+function _wave_f_model(id::Symbol)
+    spec = only(filter(
+        candidate -> candidate.id === id,
+        _WAVE_F_GENERAL.inventory(; tier=:small),
+    ))
+    return _WAVE_F_GENERAL.build(spec.problem, Float64, spec.params)
+end
 
 @testset "wave f defaults" begin
     @test SDPX.Settings{Float64}().kkt_route === :bordered
     # Both routes remain working on the quick-gate subset after G3.
-    for (pname, params) in [
-        (:lp, (sites=4,)),
-        (:socp, (partial_waves=2, grid_points=4, analytic_coefficients=2)),
-        (:matrix, (sites=4,)),
-    ]
-        m = _BB.build(_BB.PROBLEMS[pname], Float64, params)
+    for id in (
+        :lp_afiro_style,
+        :socp_portfolio_small,
+        :sdp_maxcut_k4,
+    )
+        m = _wave_f_model(id)
         rb = SDPX.optimize!(m; settings=SDPX.Settings{Float64}(engine=:native_hsd, kkt_route=:bordered))
         @test SDPX.status(rb) === :optimal
         @test rb.certificate.valid

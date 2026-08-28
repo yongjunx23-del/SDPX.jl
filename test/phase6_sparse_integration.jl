@@ -3,8 +3,20 @@ using Test
 using SparseArrays
 using LinearAlgebra
 
-include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.jl"))
-const _P6_BB = Main.BootstrapBenchmark
+if !isdefined(Main, :GenericConicBenchmark)
+    include(joinpath(
+        @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+    ))
+end
+const _P6_GENERAL = Main.GenericConicBenchmark
+
+function _p6_general_model(id::Symbol)
+    spec = only(filter(
+        candidate -> candidate.id === id,
+        _P6_GENERAL.inventory(; tier=:small),
+    ))
+    return _P6_GENERAL.build(spec.problem, Float64, spec.params)
+end
 
 const _P6_SETTINGS = SDPX.Settings{Float64}(
     engine=:native_hsd,
@@ -14,16 +26,8 @@ const _P6_SETTINGS = SDPX.Settings{Float64}(
     verbosity=0,
 )
 
-function _p6_lp()
-    return _P6_BB.build(_P6_BB.PROBLEMS[:lp], Float64, (sites=4,))
-end
-
-function _p6_socp()
-    return _P6_BB.build(
-        _P6_BB.PROBLEMS[:socp], Float64,
-        (partial_waves=2, grid_points=4, analytic_coefficients=2),
-    )
-end
+_p6_lp() = _p6_general_model(:lp_afiro_style)
+_p6_socp() = _p6_general_model(:socp_portfolio_small)
 
 function _p6_rank_one_psd()
     model = SDPX.Model(Float64)
@@ -129,8 +133,8 @@ end
     @test SDPX.Settings{Float64}().kkt_route === :bordered
 
     @testset "public solve parity and original-coordinate certificates" begin
-        lp_result = _p6_assert_optimal(_p6_lp(), -10.346; atol=3e-6)
-        _p6_assert_optimal(_p6_socp(), 2.7272; atol=3e-6)
+        lp_result = _p6_assert_optimal(_p6_lp(), 9.0; atol=3e-6)
+        _p6_assert_optimal(_p6_socp(), 1.0; atol=3e-6)
         rank_one_result = _p6_assert_optimal(_p6_rank_one_psd(), -0.5)
         _p6_assert_optimal(_p6_mixed_psd(), 1.0)
         _p6_assert_optimal(_p6_bounded_nonpositive(), 2.0)

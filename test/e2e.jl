@@ -11,7 +11,11 @@
 using Test
 using SDPX
 
-include(joinpath(@__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl"))
+if !isdefined(Main, :GenericConicBenchmark)
+    include(joinpath(
+        @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+    ))
+end
 using .GenericConicBenchmark
 
 const _E2E_CASE_IDS = (

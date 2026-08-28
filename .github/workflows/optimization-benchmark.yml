@@ -90,7 +90,7 @@ jobs:
             Pkg.precompile()
           ' 2>&1 | tee "$OUT_DIR/benchmark-environment.log"
 
-      - name: Run schema-v8 deterministic smoke suite
+      - name: Run schema-v9 deterministic smoke suite
         shell: bash
         run: |
           set -euo pipefail
@@ -106,7 +106,7 @@ jobs:
           # Native product-cone HSD allocation audit (product_hsd_cold_start! /
           # product_hsd_step!); legacy engine entry points are not exercised.
           julia --startup-file=no --project="$CANDIDATE_ENV" \
-            benchmark/bootstrap/hsd_allocation.jl --check \
+            benchmark/general/performance/hsd_allocation.jl --check \
             2>&1 | tee "$OUT_DIR/hsd-allocation.log"
 
       - name: Run fresh-process stability matrix on candidate
@@ -156,7 +156,7 @@ jobs:
             printf 'SDPX_CANDIDATE_SHA=%s\n' "$candidate_sha"
           } >> "$GITHUB_ENV"
 
-      - name: Run base schema-v8 smoke suite
+      - name: Run base schema-v9 smoke suite
         shell: bash
         run: |
           set -euo pipefail
