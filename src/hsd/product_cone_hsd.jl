@@ -165,6 +165,7 @@ mutable struct ProductConeHSDState{
     coupled::CW
     symmetric_bordered::SB
     kkt_route::Symbol
+    kkt_route_attempts::Vector{Symbol}
     expanded::EW
     sparse_schur::SW
     diagnostic::Symbol
@@ -243,6 +244,7 @@ function _product_cone_hsd_state(
         coupled,
         symmetric_bordered,
         kkt_route,
+        Symbol[kkt_route],
         expanded,
         sparse_schur,
         :none,
@@ -2768,9 +2770,23 @@ end
     )
 end
 
+@inline function _product_hsd_record_route_attempt!(
+    state::ProductConeHSDState, route::Symbol,
+)
+    route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
+        "unknown product-HSD route attempt $route",
+    ))
+    if isempty(state.kkt_route_attempts) ||
+       last(state.kkt_route_attempts) !== route
+        push!(state.kkt_route_attempts, route)
+    end
+    return Tuple(state.kkt_route_attempts)
+end
+
 @inline function _product_hsd_retry_bordered_same_iterate!(
     state::ProductConeHSDState, has_nonsymmetric::Bool,
 )
+    _product_hsd_record_route_attempt!(state, :bordered)
     state.kkt_route = :bordered
     state.diagnostic = :expanded_to_bordered_same_iterate_fallback
     return _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
@@ -2790,6 +2806,7 @@ end
     state::ProductConeHSDState, has_nonsymmetric::Bool,
 )
     state.expanded === nothing && return HSDStepDirectionFailed
+    _product_hsd_record_route_attempt!(state, :expanded)
     state.kkt_route = :expanded
     state.diagnostic = :sparse_to_expanded_same_iterate_fallback
     direction_ok = try

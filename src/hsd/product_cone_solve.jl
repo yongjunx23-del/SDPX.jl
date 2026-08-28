@@ -416,6 +416,8 @@ function product_hsd_solve!(
 
     base = state.base
     state.tau_collapse_recoveries = 0
+    empty!(state.kkt_route_attempts)
+    push!(state.kkt_route_attempts, state.kkt_route)
     x_original = zeros(T, base.n)
     s_original = zeros(T, base.m)
     y_original = zeros(T, base.m)

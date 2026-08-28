@@ -519,7 +519,7 @@ function _native_hsd_plan(
         product_rank=product_rank,
         original_rows=canonical_num_slack(canonical),
         reduced_rows=active_rows,
-        factorization_reuse=descriptor.factorization_reuse,
+        factorization_reuse=kkt_execution.factorization_reuse,
         requested_provider=settings.provider,
         executed_provider=kkt_execution.provider,
         requested_threads=settings.limits.threads,
@@ -603,6 +603,7 @@ function _native_hsd_diagnostics(
     core_seconds::Float64,
     recovery_seconds::Float64;
     executed_kkt_route::Union{Nothing,Symbol}=nothing,
+    executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
 )
     payload = plan.payload::NativeHSDPlan
     descriptor = payload.formulation
@@ -617,6 +618,19 @@ function _native_hsd_diagnostics(
         actual_route, mathematical_formulation,
     )
     did_execute = equality_ready && factorizations > 0
+    route_attempts = if !did_execute
+        ()
+    elseif isempty(executed_kkt_attempts)
+        (actual_route,)
+    else
+        first(executed_kkt_attempts) === payload.kkt_route || throw(ArgumentError(
+            "native HSD route attempts must begin with the requested route",
+        ))
+        last(executed_kkt_attempts) === actual_route || throw(ArgumentError(
+            "native HSD route attempts must end with the executed route",
+        ))
+        executed_kkt_attempts
+    end
     planned_factorization = descriptor.available ? planned_kkt.factorization :
                             :not_applicable
     executed_factorization = !equality_ready ? :not_executed :
@@ -703,8 +717,8 @@ function _native_hsd_diagnostics(
         la_executed_provider=executed_provider,
         fallback_reason,
         fallback_chain=planned_kkt.fallback_chain,
-        executed_fallback_chain=payload.kkt_route === actual_route ? () :
-            (actual_route,),
+        attempted_kkt_routes=route_attempts,
+        executed_fallback_chain=route_attempts,
         planned_threads=1,
         executed_threads=1,
         retained_ray_coordinates=(
@@ -767,6 +781,7 @@ function _native_hsd_core_result(
     core_seconds::Float64,
     recovery_seconds::Float64;
     executed_kkt_route::Union{Nothing,Symbol}=nothing,
+    executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
 ) where {T<:AbstractFloat}
     diagnostics = _native_hsd_diagnostics(
         plan,
@@ -779,6 +794,7 @@ function _native_hsd_core_result(
         core_seconds,
         recovery_seconds;
         executed_kkt_route,
+        executed_kkt_attempts,
     )
     message = "native HSD terminated with $(status) ($(reason))"
     return NativeHSDCoreResult{T}(
@@ -1031,6 +1047,7 @@ function _public_native_hsd_core(
         core_seconds,
         recovery_seconds;
         executed_kkt_route=state.kkt_route,
+        executed_kkt_attempts=Tuple(state.kkt_route_attempts),
     )
 end
 
