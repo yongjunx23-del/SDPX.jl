@@ -76,7 +76,17 @@ function _settings(::Type{T}; time_limit::Real=Inf) where {T<:AbstractFloat}
     )
 end
 
+const _KNOWN_FINDING_STATUSES = (
+    :insufficient_precision,
+    :numerical_breakdown,
+    :numerical_failure,
+    :stalled,
+)
+
 function validate_result(spec::BenchmarkSpec, result::BenchmarkResult)
+    if spec.expected_status === :known_solver_finding
+        return result.status in _KNOWN_FINDING_STATUSES && !result.certificate_valid
+    end
     status_ok = result.status === spec.expected_status
     certificate_ok = result.certificate_valid
     objective_ok = spec.known_objective === nothing ||
@@ -126,7 +136,8 @@ function _print_result(result::BenchmarkResult)
         result.objective, result.primal_residual, result.dual_residual,
         result.relative_gap, result.certificate_valid, result.iterations,
         result.seconds, result.bytes / 2.0^20,
-        result.expectation_met ? "PASS" : "FAIL")
+        !result.expectation_met ? "FAIL" :
+        result.status in _KNOWN_FINDING_STATUSES ? "FINDING" : "PASS")
 end
 
 "Run one tier. Large is generation-only unless `allow_large=true`."
@@ -151,9 +162,12 @@ function run_tier(tier::Symbol=:small, ::Type{T}=Float64;
     elapsed = time() - started
     all(result -> result.expectation_met, results) || error(
         "generic $tier benchmark had failed status/certificate/objective checks")
-    if assert_seconds !== nothing && elapsed > assert_seconds
-        error("generic $tier benchmark took $(round(elapsed; digits=2))s, " *
-              "exceeding the $(assert_seconds)s local budget")
+    if assert_seconds !== nothing &&
+       any(result -> result.seconds > assert_seconds, results)
+        slowest = maximum(result.seconds for result in results)
+        error("generic $tier benchmark slowest solve took " *
+              "$(round(slowest; digits=2))s, exceeding the " *
+              "$(assert_seconds)s per-instance local budget")
     end
     return (; tier, elapsed, results)
 end

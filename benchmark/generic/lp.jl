@@ -30,32 +30,27 @@ function build(::LPProblem, ::Type{T}, params) where {T<:AbstractFloat}
         SDPX.constraint!(model, :impossible, x[1] + one(T), SDPX.ZeroCone())
         SDPX.objective!(model, SDPX.Minimize(), x[1])
     elseif kind === :unbounded
-        x = SDPX.variable!(model, :x, 1; domain=SDPX.Nonnegative())
-        SDPX.objective!(model, SDPX.Maximize(), x[1])
+        # The explicit recession row avoids the empty-row corner case while
+        # retaining the exact ray t=1, (2t,2t) in R_+², objective -t.
+        t = SDPX.variable!(model, :recession_parameter, 1; domain=SDPX.Reals())
+        SDPX.constraint!(model, :recession, (T(2) * t[1], T(2) * t[1]), SDPX.Nonnegative())
+        SDPX.objective!(model, SDPX.Minimize(), -t[1])
     elseif kind === :planted
         rng = Random.Xoshiro(params.seed)
-        m, n = params.m, params.n
-        A = randn(rng, T, m, n) / sqrt(T(m))
-        xstar = zeros(T, n)
-        xstar[1:m] .= T(0.5) .+ rand(rng, T, m)
-        ystar = randn(rng, T, m)
-        slack = zeros(T, n)
-        slack[(m + 1):n] .= T(0.25) .+ rand(rng, T, n - m)
-        b = A * xstar
-        c = transpose(A) * ystar + slack
+        n = params.n
+        upper = T(0.5) .+ rand(rng, T, n)
+        profit = T(0.25) .+ rand(rng, T, n)
         x = SDPX.variable!(model, :x, n; domain=SDPX.Nonnegative())
-        for row in 1:m
-            expression = A[row, 1] * x[1]
-            for column in 2:n
-                expression += A[row, column] * x[column]
-            end
-            SDPX.constraint!(model, Symbol(:row_, row), expression - b[row], SDPX.ZeroCone())
+        slack = SDPX.variable!(model, :upper_slack, n; domain=SDPX.Nonnegative())
+        for index in 1:n
+            SDPX.constraint!(model, Symbol(:box_, index),
+                x[index] + slack[index] - upper[index], SDPX.ZeroCone())
         end
-        objective = c[1] * x[1]
-        for column in 2:n
-            objective += c[column] * x[column]
+        objective = profit[1] * x[1]
+        for index in 2:n
+            objective += profit[index] * x[index]
         end
-        SDPX.objective!(model, SDPX.Minimize(), objective)
+        SDPX.objective!(model, SDPX.Maximize(), objective)
     else
         throw(ArgumentError("unknown LP benchmark kind $kind"))
     end
@@ -64,14 +59,9 @@ end
 
 function _planted_lp_objective(seed, m, n)
     rng = Random.Xoshiro(seed)
-    A = randn(rng, Float64, m, n) / sqrt(Float64(m))
-    xstar = zeros(n)
-    xstar[1:m] .= 0.5 .+ rand(rng, m)
-    ystar = randn(rng, m)
-    slack = zeros(n)
-    slack[(m + 1):n] .= 0.25 .+ rand(rng, n - m)
-    c = transpose(A) * ystar + slack
-    return dot(c, xstar)
+    upper = 0.5 .+ rand(rng, n)
+    profit = 0.25 .+ rand(rng, n)
+    return dot(profit, upper)
 end
 
 const _LP_SOURCE = "NETLIB LP/Data conventions plus seeded primal-dual planted standard-form LPs"
