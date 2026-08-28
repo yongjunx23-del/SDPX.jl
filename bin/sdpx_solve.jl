@@ -13,7 +13,10 @@
     1.  The solver core must not grow a JSON dependency. This script
         lives outside `src/` with its own environment (`bin/Project.toml`)
         and touches only the public API (`ingest`, `SolverOptions`,
-        `solve!`, `solve_summary`).
+        `_bridge_sdp_solve`, `result_certificate`).  `_bridge_sdp_solve`
+        builds a typed `Model`/`Settings`/`Outputs` and calls the public
+        native product-HSD `optimize!` path; the legacy `solve!`
+        entrypoint is not used.
     2.  Numbers cross the boundary as *strings* whenever the precision
         exceeds Float64, because JSON numbers are IEEE doubles in most
         parsers and silently round anything wider. Plain JSON numbers
@@ -284,7 +287,7 @@ function solve_specification(spec)
         c, A, C, B, b = _build_problem(T, spec)
         problem = SDPX.ingest(c, A, C, B, b; verbosity=0)
         resolved = _solver_options(T, settings)
-        result = SDPX.solve!(problem, resolved.core)
+        result = SDPX._bridge_sdp_solve(problem, resolved.core)
         return problem, resolved, result
     end
     # BigFloat data must be *parsed* at the working precision, not converted

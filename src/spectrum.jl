@@ -35,6 +35,8 @@ function _spectrum_is_certified(result::SDPResult)
     return result.status in (Optimal, FeasibleCert)
 end
 
+_spectrum_is_certified(status::SolveStatus) = status in (Optimal, FeasibleCert)
+
 function _spectrum_warnings(
     result::SDPResult{T},
     precision::Symbol,

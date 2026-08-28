@@ -475,28 +475,16 @@ end
 
 function _solve_built(built, ::Type{T}, provider; verbose=false) where {T}
     options = _options(provider, T, built; verbose=verbose)
+    # Native product-HSD production path: the harness builds a typed
+    # Model/Settings/Outputs through the SDPX entrypoint bridge and calls the
+    # public `optimize!` seam (engine=:native_hsd); the result is adapted back
+    # to the legacy SDPResult/ConicResult schema in original coordinates.
+    # No legacy solve!/interior_point/lp_solver route is reachable here, and
+    # the executed route/provider is reported through the adapted diagnostics.
     if built.kind === :socp
-        settings = _solve_settings(built)
-        specialization = get(settings, :specialization, :auto)
-        if specialization !== :auto
-            tolerance = parse(T, string(settings.tolerance))
-            return SDPX.solve_socp(
-                built.problem;
-                specialization,
-                tolerance,
-                maximum_iterations=get(settings, :maximum_iterations, 200),
-                max_time=get(settings, :max_time, Inf),
-                verbosity=0,
-                timing=true,
-                diagnostics=true,
-                certification=true,
-                linear_algebra_backend=provider,
-                threads=Threads.nthreads(),
-            )
-        end
-        return SDPX.solve_socp(built.problem, options)
+        return SDPX._bridge_conic_solve(built.problem, options)
     end
-    return SDPX.solve(built.problem, options)
+    return SDPX._bridge_sdp_solve(built.problem, options)
 end
 
 function _safe_certificate(problem, result, ::Type{T}, built=nothing) where {T}
@@ -900,13 +888,16 @@ function _result_row(
         specialization !== required_specialization &&
         push!(failures, "specialization")
     # NativeSOCDiagnostics is the positive evidence that a ConicResult came
-    # from direct Lorentz execution. Test/reference PSD helpers deliberately
-    # retain SDP diagnostics, so the benchmark gate remains able to detect a
-    # reference lift without restoring the removed compatibility payload.
+    # from direct Lorentz execution; NativeHSDDiagnostics is the positive
+    # evidence that it came from the native product-HSD bridge. Test/reference
+    # PSD helpers deliberately retain SDP diagnostics, so the benchmark gate
+    # remains able to detect a reference lift without restoring the removed
+    # compatibility payload.
     psd_lift_used =
         result isa SDPX.ConicResult &&
         result.diagnostics !== nothing &&
-        !(result.diagnostics isa SDPX.NativeSOCDiagnostics)
+        !(result.diagnostics isa SDPX.NativeSOCDiagnostics) &&
+        !(result.diagnostics isa SDPX.NativeHSDDiagnostics)
     _built_value(built, :forbid_psd_lift, false) && psd_lift_used &&
         push!(failures, "psd_lift")
     interval_pass === false && push!(failures, "objective_interval")

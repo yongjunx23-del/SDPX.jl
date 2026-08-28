@@ -923,19 +923,19 @@ function _solve_prepared!(
             objective=selected_objective,
             rhs=selected_rhs,
         )
-        start = _prepared_warm_start(prepared, warm_start)
-        result = start === nothing ?
-            solve!(
-                solve_problem,
-                prepared.options;
-                _prepared_data=prepared_data,
-            ) :
-            solve!(
-                solve_problem,
-                prepared.options;
-                start...,
-                _prepared_data=prepared_data,
-            )
+        # The native product-HSD production path: the prepared session builds
+        # a typed Model/Settings/Outputs through the entrypoint bridge and
+        # calls the public `optimize!` seam (engine=:native_hsd).  The direct
+        # route is cold-start only, so the legacy warm-start keyword is
+        # validated for API compatibility (`_prepared_warm_start` raises on
+        # invalid values) and then the deterministic cold initialization is
+        # used; results are unchanged in original coordinates.  The
+        # preprocessed/reduced data from `_prepared_problem` remains the
+        # authoritative structural validation and state bookkeeping; the
+        # native route performs its own canonical equality reduction.  No
+        # interior_point solve! is reachable from a prepared session.
+        _prepared_warm_start(prepared, warm_start)
+        result = _bridge_sdp_solve(solve_problem, prepared.options)
         state.previous = result
         state.solve_count += 1
         state.structure_reuses += 1
