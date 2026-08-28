@@ -375,3 +375,505 @@ function materialize_dense(pattern::SymmetricCorePattern{T}) where {T<:AbstractF
     end
     return K
 end
+
+#=====================================================================#
+#    SymmetricCoreWorkspace — type-stable test-only HSD direction
+#    recovery on the symmetric augmented core.
+#
+#        K = [ 0    Ar' ]
+#            [ Ar  -Theta ]
+#
+#    Consumes the frozen `SymmetricCorePattern`, a concrete
+#    `AbstractFactorCache` (Float64 CHOLMOD lifecycle), the orthonormal
+#    rank-reduction basis `V`, and a `NewtonSystem`.  Per factor epoch it
+#    solves the homogeneous core once, then solves each variable core RHS
+#    sequentially (predictor, then dependent corrector) with the same
+#    factor and no refactor.
+#
+#    CHOLMOD's nonpivoting LDL cannot factor the structurally-zero primal
+#    diagonal block of `K`, so the caller factors a signed static-shifted
+#    core `Kε = K + δ*diag(dsigns)` (nonzero δ).  Every core solve is then
+#    refined against the retained *original* `K` with the same `Kε` factor:
+#    at most two correction solves per RHS, each accepted only on strict
+#    normalized original-core residual contraction.  The recovered HSD
+#    direction is accepted only through the frozen `newton_residual!`.
+#
+#    This is a test-only API: it does not dispatch the production HSD
+#    route, does not own a sign convention, and never regularizes the
+#    acceptance equations.
+#=====================================================================#
+
+"""
+    SymmetricCoreWorkspace{T}
+
+Preallocated direction-recovery workspace over the symmetric augmented
+core.  `pattern` owns the frozen CSC structure and numeric buffer; `cache`
+is the concrete factor cache (Float64 CHOLMOD lifecycle).  `V` is the
+orthonormal `n × nr` rank-reduction basis and `system` is the semantic
+`NewtonSystem`.  Owned buffers:
+
+- `rhs_core` / `sol_core`: full `(nr+m)`-vector core RHS/solution buffers;
+- `dr`: reduced dual affine `V' * system.rhs.dual_affine`;
+- `wx`, `wy`, `ux`, `uy`: reduced-x and y halves of the variable and
+  homogeneous solutions;
+- `core_work`, `core_residual`, `core_correction`: original-core `K*x`,
+  backward residual `rhs - K*x`, and the `Kε⁻¹ * residual` correction;
+- `dxr`, `dx`, `dy`, `ds`, `dkappa`: recovered direction buffers;
+- `residual`: preallocated `NewtonResidual`;
+- counters: `factor_epoch`, `homogeneous_solves`, `variable_solves`,
+  `directions`, `refinements`, and the last scalar denominator.
+
+`nr = size(V, 2)`, `n = length(system.c)`, `m = length(system.b)`,
+`dimension = nr + m`; the constructor validates every dimension and the
+isometry `V'V = I`.
+"""
+mutable struct SymmetricCoreWorkspace{
+    T<:AbstractFloat,
+    P<:SymmetricCorePattern{T},
+    FC<:AbstractFactorCache{T},
+    VV<:AbstractMatrix{T},
+    S<:NewtonSystem{T},
+}
+    pattern::P
+    cache::FC
+    V::VV
+    system::S
+    nr::Int
+    n::Int
+    m::Int
+    dimension::Int
+    cr::Vector{T}          # V' * system.c
+    rhs_core::Vector{T}
+    sol_core::Vector{T}
+    dr::Vector{T}          # V' * system.rhs.dual_affine (preallocated)
+    wx::Vector{T}
+    wy::Vector{T}
+    ux::Vector{T}
+    uy::Vector{T}
+    core_work::Vector{T}          # K_original * x
+    core_residual::Vector{T}      # rhs - K_original * x
+    core_correction::Vector{T}    # Kε⁻¹ * core_residual
+    dxr::Vector{T}
+    dx::Vector{T}
+    dy::Vector{T}
+    ds::Vector{T}
+    dkappa::T
+    residual::NewtonResidual{T}
+    factor_epoch::Int
+    homogeneous_solves::Int
+    variable_solves::Int
+    directions::Int
+    refinements::Int
+    denominator::T
+    original_scale::T   # max(1, ‖K_original‖_∞) fixed at construction
+end
+
+function SymmetricCoreWorkspace(
+    pattern::SymmetricCorePattern{T},
+    cache::FC,
+    V::AbstractMatrix{T},
+    system::NewtonSystem{T},
+) where {T<:AbstractFloat,FC<:AbstractFactorCache{T}}
+    nr = size(V, 2)
+    n = length(system.c)
+    m = length(system.b)
+    size(V, 1) == n || throw(DimensionMismatch(
+        "rank-reduction basis rows $n do not match V rows $(size(V, 1))",
+    ))
+    pattern.nr == nr || throw(DimensionMismatch(
+        "pattern reduced dimension $(pattern.nr) disagrees with V columns $nr",
+    ))
+    pattern.m == m || throw(DimensionMismatch(
+        "pattern cone dimension $(pattern.m) disagrees with system rows $m",
+    ))
+    # V'V = I (orthonormal rank-reduction basis to roundoff).
+    VV = Matrix{T}(V') * Matrix{T}(V)
+    isometry_tol = T(64) * eps(one(T))
+    for j in 1:nr, i in 1:nr
+        expected = i == j ? one(T) : zero(T)
+        abs(VV[i, j] - expected) <= isometry_tol || throw(ArgumentError(
+            "symmetric core workspace requires V'V = I " *
+            "(deviation $(abs(VV[i, j] - expected)))",
+        ))
+    end
+    dimension = nr + m
+    cr = zeros(T, nr)
+    for j in 1:n
+        for r in 1:nr
+            cr[r] += V[j, r] * system.c[j]
+        end
+    end
+    original_scale = max(one(T), maximum(abs, pattern.nzval; init=zero(T)))
+    return SymmetricCoreWorkspace{
+        T,typeof(pattern),FC,typeof(V),typeof(system),
+    }(
+        pattern, cache, V, system,
+        nr, n, m, dimension, cr,
+        zeros(T, dimension), zeros(T, dimension), zeros(T, nr),
+        zeros(T, nr), zeros(T, m), zeros(T, nr), zeros(T, m),
+        zeros(T, dimension), zeros(T, dimension), zeros(T, dimension),
+        zeros(T, nr), zeros(T, n), zeros(T, m), zeros(T, m), zero(T),
+        NewtonResidual(system),
+        0, 0, 0, 0, 0, zero(T), original_scale,
+    )
+end
+
+"""Stash the cache's current factor epoch as this workspace's epoch.
+
+Call after a successful `factorize!` of the core cache.  Guards require
+`factor_epoch(cache) == workspace.factor_epoch` before any core solve, so
+an intervening refactor or invalidation is detected without a stale solve.
+"""
+function sync_core_factor_epoch!(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T}
+    workspace.factor_epoch = SDPX.factor_epoch(workspace.cache)
+    return workspace
+end
+
+"""Evaluate `destination = K_original * source` over the frozen lower
+CSC triangle, expanding the symmetry so the product is exact for the
+stored original core values (never the regularized factor view)."""
+function _core_apply!(
+    workspace::SymmetricCoreWorkspace{T},
+    destination::AbstractVector{T},
+    source::AbstractVector{T},
+) where {T}
+    d = workspace.dimension
+    length(destination) == d || throw(DimensionMismatch(
+        "core apply destination dimension mismatch",
+    ))
+    length(source) == d || throw(DimensionMismatch(
+        "core apply source dimension mismatch",
+    ))
+    colptr = workspace.pattern.colptr
+    rowval = workspace.pattern.rowval
+    nzval = workspace.pattern.nzval
+    fill!(destination, zero(T))
+    # Lower triangle: for column j, rows i >= j with entry K[i,j];
+    # the symmetric upper entry is K[j,i] = K[i,j].
+    @inbounds for j in 1:d
+        value = source[j]
+        for pointer in colptr[j]:(colptr[j + 1] - 1)
+            row = rowval[pointer]
+            entry = nzval[pointer]
+            destination[row] += entry * value
+            row == j || (destination[j] += entry * source[row])
+        end
+    end
+    return destination
+end
+
+"""Normalized original-core backward error `‖rhs - K*x‖ / (‖K‖‖x‖ + ‖rhs‖)`.
+The `‖K‖` factor is fixed once per workspace from the original CSC values."""
+
+"""Normalized residual `‖r‖_∞ / (K_scale * ‖x‖_∞ + ‖rhs‖_∞)`."""
+function _core_normalized_residual(
+    workspace::SymmetricCoreWorkspace{T},
+    rhs::AbstractVector{T},
+    x::AbstractVector{T},
+    residual::AbstractVector{T},
+) where {T}
+    norm_r = maximum(abs, residual; init=zero(T))
+    norm_x = maximum(abs, x; init=zero(T))
+    norm_rhs = maximum(abs, rhs; init=zero(T))
+    scale = workspace.original_scale * norm_x + norm_rhs
+    isfinite(scale) && scale > zero(T) || return T(Inf)
+    return norm_r / scale
+end
+
+"""Solve `Kε⁻¹ * rhs` into `x` through the (regularized) factor cache."""
+function _core_solve_with_cache!(
+    workspace::SymmetricCoreWorkspace{T},
+    x::AbstractVector{T},
+    rhs::AbstractVector{T},
+) where {T}
+    solve!(workspace.cache, x, rhs)
+    all(isfinite, x) || throw(ArgumentError(
+        "symmetric core refined solve produced non-finite data",
+    ))
+    return x
+end
+
+"""Iterative refinement of `x` against the original core `K`.
+
+    x₀ = Kε⁻¹ rhs
+    for k in 1:2
+        r = rhs - K*xₖ₋₁
+        ηₖ = ‖r‖ / (K_scale*‖xₖ₋₁‖ + ‖rhs‖)
+        ηₖ == 0 → accept
+        ηₖ ≥ ηₖ₋₁ → reject (no contraction, with η₀ the unrefined error)
+        xₖ = xₖ₋₁ + Kε⁻¹ r
+    end
+
+Returns `(x, refinements)`; the caller then re-evaluates the frozen
+five-equation residual on the refined direction.  The final direction is
+accepted only if that production residual passes.  A correction that does
+not strictly contract the normalized original-core residual fails closed.
+"""
+function _core_refine!(
+    workspace::SymmetricCoreWorkspace{T},
+    x::AbstractVector{T},
+    rhs::AbstractVector{T},
+) where {T}
+    # initial normalized error
+    _core_apply!(workspace, workspace.core_residual, x)
+    @inbounds for i in 1:workspace.dimension
+        workspace.core_residual[i] = rhs[i] - workspace.core_residual[i]
+    end
+    previous = _core_normalized_residual(
+        workspace, rhs, x, workspace.core_residual,
+    )
+    isfinite(previous) || throw(ArgumentError(
+        "symmetric core refinement initial residual is non-finite",
+    ))
+    iszero(previous) && return (x, 0)
+    for _ in 1:2
+        _core_solve_with_cache!(
+            workspace, workspace.core_correction, workspace.core_residual,
+        )
+        @inbounds for i in 1:workspace.dimension
+            x[i] += workspace.core_correction[i]
+        end
+        workspace.refinements += 1
+        _core_apply!(workspace, workspace.core_residual, x)
+        @inbounds for i in 1:workspace.dimension
+            workspace.core_residual[i] = rhs[i] - workspace.core_residual[i]
+        end
+        current = _core_normalized_residual(
+            workspace, rhs, x, workspace.core_residual,
+        )
+        isfinite(current) || throw(ArgumentError(
+            "symmetric core refinement produced a non-finite residual",
+        ))
+        current < previous || throw(ArgumentError(
+            "symmetric core refinement did not strictly contract the " *
+            "original-core residual (η=$(current) >= η_prev=$(previous))",
+        ))
+        previous = current
+        iszero(previous) && break
+    end
+    return (x, workspace.refinements)
+end
+
+"""Reduced dual affine `V' * system.rhs.dual_affine` into `dr`."""
+function _core_dr!(workspace::SymmetricCoreWorkspace{T}) where {T}
+    dr = workspace.dr
+    fill!(dr, zero(T))
+    system = workspace.system
+    V = workspace.V
+    @inbounds for j in 1:workspace.n
+        value = system.rhs.dual_affine[j]
+        for r in 1:workspace.nr
+            dr[r] += V[j, r] * value
+        end
+    end
+    return dr
+end
+
+"""Pack the full core RHS `[ dr; p - h ]`."""
+function _core_pack_rhs!(
+    rhs_core::AbstractVector{T}, dr::AbstractVector{T},
+    system, nr::Int,
+) where {T}
+    m = length(system.b)
+    @inbounds for r in 1:nr
+        rhs_core[r] = dr[r]
+    end
+    @inbounds for i in 1:m
+        rhs_core[nr + i] = system.rhs.primal_affine[i] -
+                           system.rhs.cone_corrector[i]
+    end
+    return rhs_core
+end
+
+"""Split a core solution into its reduced-x and y halves."""
+function _core_split!(
+    xr::AbstractVector{T}, y::AbstractVector{T}, sol::AbstractVector{T},
+    nr::Int, m::Int,
+) where {T}
+    @inbounds for r in 1:nr
+        xr[r] = sol[r]
+    end
+    @inbounds for i in 1:m
+        y[i] = sol[nr + i]
+    end
+    return (xr, y)
+end
+
+"""Solve the homogeneous core once for the current factor epoch."""
+function solve_core_homogeneous!(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T}
+    system = workspace.system
+    nr = workspace.nr
+    factor_epoch_now = SDPX.factor_epoch(workspace.cache)
+    factor_epoch_now == workspace.factor_epoch || throw(ArgumentError(
+        "symmetric core homogeneous solve requires a fresh factor epoch " *
+        "$factor_epoch_now, got stored $(workspace.factor_epoch)",
+    ))
+    # RHS: [ -V'c ; b ]
+    @inbounds for r in 1:nr
+        workspace.rhs_core[r] = -workspace.cr[r]
+    end
+    @inbounds for i in 1:workspace.m
+        workspace.rhs_core[nr + i] = system.b[i]
+    end
+    all(isfinite, workspace.rhs_core) || throw(ArgumentError(
+        "symmetric core homogeneous RHS is non-finite",
+    ))
+    solve!(workspace.cache, workspace.sol_core, workspace.rhs_core)
+    all(isfinite, workspace.sol_core) || throw(ArgumentError(
+        "symmetric core homogeneous solve produced non-finite data",
+    ))
+    # Refine the homogeneous solution against the original core with the
+    # same Kε factor; non-contraction fails closed.
+    _core_refine!(workspace, workspace.sol_core, workspace.rhs_core)
+    _core_split!(workspace.ux, workspace.uy, workspace.sol_core, nr,
+        workspace.m)
+    workspace.homogeneous_solves += 1
+    return workspace
+end
+
+"""Scalar denominator `κ + τ*(cr'ux + b'uy)` for the current epoch."""
+function _core_denominator(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T}
+    system = workspace.system
+    nr = workspace.nr
+    eta = zero(T)
+    @inbounds for r in 1:nr
+        eta += workspace.cr[r] * workspace.ux[r]
+    end
+    @inbounds for i in 1:workspace.m
+        eta += system.b[i] * workspace.uy[i]
+    end
+    return system.kappa + system.tau * eta
+end
+
+"""Solve one variable core RHS and recover a full HSD direction.
+
+Performs, for the current factor epoch:
+
+    K*w = [ V'*dual_affine ; primal_affine - cone_corrector ]
+    dtau = (tau_kappa - tau*(g + cr'wx + b'wy))
+             / (kappa + tau*(cr'ux + b'uy))
+    dxr  = wx + dtau*ux ; dx = V*dxr
+    dy   = wy + dtau*uy
+    ds   = p - A*dx + b*dtau
+    dkappa = g + c'*dx + b'*dy
+
+then evaluates the frozen five-equation residual through
+`newton_residual!`.  The denominator must be finite and nonzero; a
+non-finite or exact-zero value is rejected without clamping.  The
+well-conditioned fixtures used by C4a must use zero regularization and
+produce a denominator well above `sqrt(eps(T))` in magnitude; a
+type-scaled near-zero denominator (|den| <= sqrt(eps(T))) is rejected as a
+numerical failure so the caller may escalate.
+"""
+function solve_core_direction!(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T}
+    system = workspace.system
+    nr = workspace.nr
+    cache = workspace.cache
+    SDPX.factor_status(cache) === Fresh || throw(FactorCacheStateError(
+        :solve_core_direction, Fresh, SDPX.factor_status(cache),
+    ))
+    factor_epoch_now = SDPX.factor_epoch(cache)
+    factor_epoch_now == workspace.factor_epoch || throw(ArgumentError(
+        "symmetric core direction solve requires factor epoch " *
+        "$factor_epoch_now, got stored $(workspace.factor_epoch)",
+    ))
+    # Pack the variable RHS [ V'*dual ; primal - cone ].
+    _core_dr!(workspace)
+    _core_pack_rhs!(workspace.rhs_core, workspace.dr, system, nr)
+    all(isfinite, workspace.rhs_core) || throw(ArgumentError(
+        "symmetric core variable RHS is non-finite",
+    ))
+    solve!(cache, workspace.sol_core, workspace.rhs_core)
+    all(isfinite, workspace.sol_core) || throw(ArgumentError(
+        "symmetric core variable solve produced non-finite data",
+    ))
+    # Refine the variable solution against the original core with the same
+    # Kε factor.
+    _core_refine!(workspace, workspace.sol_core, workspace.rhs_core)
+    _core_split!(workspace.wx, workspace.wy, workspace.sol_core, nr,
+        workspace.m)
+
+    # Scalar recovery.
+    eta_w = zero(T)
+    @inbounds for r in 1:nr
+        eta_w += workspace.cr[r] * workspace.wx[r]
+    end
+    @inbounds for i in 1:workspace.m
+        eta_w += system.b[i] * workspace.wy[i]
+    end
+    denominator = _core_denominator(workspace)
+    isfinite(denominator) || throw(ArgumentError(
+        "symmetric core scalar denominator is non-finite",
+    ))
+    iszero(denominator) && throw(ArgumentError(
+        "symmetric core scalar denominator is exactly zero",
+    ))
+    denominator_scale = max(
+        one(T), abs(system.kappa), abs(system.tau),
+        maximum(abs, workspace.cr; init=one(T)),
+        maximum(abs, system.b; init=one(T)),
+        maximum(abs, workspace.ux; init=one(T)),
+        maximum(abs, workspace.uy; init=one(T)),
+    )
+    sqrt_eps = sqrt(eps(one(T)))
+    abs(denominator) <= sqrt_eps * denominator_scale && throw(
+        ArgumentError(
+            "symmetric core scalar denominator is type-scaled near-zero",
+        ),
+    )
+    workspace.denominator = denominator
+    numerator = system.rhs.tau_kappa - system.tau *
+                (system.rhs.homogeneous_gap + eta_w)
+    dtau = numerator / denominator
+    isfinite(dtau) || throw(ArgumentError(
+        "symmetric core scalar recovery produced non-finite dtau",
+    ))
+    @inbounds for r in 1:nr
+        workspace.dxr[r] = workspace.wx[r] + dtau * workspace.ux[r]
+    end
+    @inbounds for i in 1:workspace.m
+        workspace.dy[i] = workspace.wy[i] + dtau * workspace.uy[i]
+    end
+    # dx = V * dxr
+    fill!(workspace.dx, zero(T))
+    @inbounds for r in 1:nr
+        for j in 1:workspace.n
+            workspace.dx[j] += workspace.V[j, r] * workspace.dxr[r]
+        end
+    end
+    # ds = p - A*dx + b*dtau  (frozen primal affine equation)
+    for i in 1:workspace.m
+        acc = system.rhs.primal_affine[i] + system.b[i] * dtau
+        for j in 1:workspace.n
+            acc -= system.A[i, j] * workspace.dx[j]
+        end
+        workspace.ds[i] = acc
+    end
+    # dkappa = g + c'*dx + b'*dy
+    dk = system.rhs.homogeneous_gap
+    @inbounds for j in 1:workspace.n
+        dk += system.c[j] * workspace.dx[j]
+    end
+    @inbounds for i in 1:workspace.m
+        dk += system.b[i] * workspace.dy[i]
+    end
+    workspace.dkappa = dk
+    direction = NewtonDirection(
+        workspace.dx, workspace.dy, workspace.ds,
+        dtau, workspace.dkappa,
+    )
+    newton_residual!(
+        workspace.residual, system, direction,
+    )
+    workspace.variable_solves += 1
+    workspace.directions += 1
+    return (direction, workspace.residual)
+end

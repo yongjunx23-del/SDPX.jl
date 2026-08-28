@@ -308,6 +308,43 @@ rows, `-1` for y rows) and a static regularization magnitude.
   the unregularized five-equation residual and, at termination, the
   original-coordinate certificate.
 
+## Symmetric augmented-core direction recovery with original-core refinement
+
+`SymmetricCoreWorkspace` (`src/kkt/symmetric_core.jl`) is a test-only,
+type-stable direction-recovery layer over `K = [0 Ar'; Ar -Theta]`.  It
+consumes a `SymmetricCorePattern`, a concrete `AbstractFactorCache` (the
+Float64 CHOLMOD lifecycle), an orthonormal `V`, and the frozen
+`NewtonSystem`.  Per factor epoch:
+
+```text
+factor Kε once                  (nonzero signed static shift δ)
+solve homogeneous core once:     Kε*u = [ -V'c ; b ]
+for each sequential variable RHS (predictor, then dependent corrector):
+    Kε*w = [ V'*dual_affine ; primal_affine - cone_corrector ]
+    refine w and u against the retained original K (same Kε factor)
+    dτ = (tau_kappa - τ*(g + cr'wx + b'wy))
+           / (κ + τ*(cr'ux + b'uy))
+    dxr = wx + dτ*ux ; dx = V*dxr
+    dy = wy + dτ*uy
+    ds = p - A*dx + b*dτ
+    dκ = g + c'*dx + b'*dy
+    frozen five-equation residual gate
+```
+
+CHOLMOD's nonpivoting LDL cannot factor the structurally-zero primal
+diagonal block of `K`, so the caller factors the signed static-shifted
+`Kε = K + δ*diag(+1_x, -1_y)` with a nonzero δ.  Every core solve is
+refined against the **retained original `K`** (never the regularized view)
+with the same `Kε` factor: at most two correction solves per RHS, each
+accepted only on strict normalized original-core residual contraction
+(`η_current < η_previous`); a non-contracting or non-finite correction
+fails closed.  The recovered HSD direction is accepted only through the
+frozen `newton_residual!`; the denominator must be finite, nonzero, and
+above `sqrt(eps(T))` times a type scale, and the cache factor epoch must
+match the workspace epoch.  One factor, one homogeneous solve, and two
+sequential variable solves (predictor then corrector) — no refactor in
+between.
+
 ## Known integration boundary
 
 `src/kkt/system.jl:1-6` declares the semantic layer as the sign authority, but

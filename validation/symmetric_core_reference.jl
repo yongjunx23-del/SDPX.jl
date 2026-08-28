@@ -827,3 +827,142 @@ end
         frs.cache, zeros(7), ones(7),
     )
 end
+
+# ---------------------------------------------------------------------
+# C4: symmetric augmented-core HSD direction recovery with original-core
+# refinement.  Factors the signed static-shifted core Kε (nonzero δ, since
+# CHOLMOD's nonpivoting LDL cannot factor the structural-zero primal
+# diagonal), solves the homogeneous core once per factor epoch, then
+# predictor/corrector variable RHS sequentially with the same factor, and
+# refines each core solve against the retained original K with the same
+# Kε factor (at most two strict-contraction corrections).  Recovered
+# directions are compared with the direct full/reduced five-equation
+# solves at the scale-aware bound after refinement.
+# ---------------------------------------------------------------------
+
+"""Build a C4 fixture bundle from the C1 `_Fixture` family name."""
+function _c4_bundle(family::Symbol; delta::Float64=1e-6)
+    fx = _fixture(family)
+    V = fx.V
+    A = fx.A
+    b = fx.b
+    c = fx.c
+    Theta = fx.Theta
+    m, n = size(A)
+    nr = size(V, 2)
+
+    # NewtonSystem over the frozen five-equation RHS.
+    lin = SDPX.ProductConeLinearization{Float64}(
+        Theta, fx.rhs.cone_corrector, [1:m],
+    )
+    rhs = SDPX.HSDNewtonRHS{Float64, Vector{Float64}, Vector{Float64},
+        Vector{Float64}}(
+        fx.rhs.primal_affine, fx.rhs.dual_affine, fx.rhs.homogeneous_gap,
+        fx.rhs.cone_corrector, fx.rhs.tau_kappa,
+    )
+    system = SDPX.NewtonSystem(A, b, c, lin, fx.tau, fx.kappa, rhs)
+
+    # Core pattern from Ar = A*V (all cone rows in one dense-lower block).
+    Ar = sparse(A * V)
+    pattern = SDPX.SymmetricCorePattern{Float64}(Ar, [1:m], [:dense_lower])
+    SDPX.refill!(pattern, Ar, Theta)
+    K = SDPX.symmetric_core_lower_sparse(pattern)
+
+    req = SDPX.SparseSymbolicRequirements(
+        K; symbolic_epoch=1,
+        dsigns=SDPX.symmetric_core_dsigns(pattern),
+        regularization=delta,
+    )
+    cache = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(cache, req)
+    SDPX.factorize!(cache, K, 1)
+    @assert SDPX.factor_status(cache) === SDPX.Fresh
+
+    ws = SDPX.SymmetricCoreWorkspace(pattern, cache, V, system)
+    SDPX.sync_core_factor_epoch!(ws)
+    return (; fx, system, pattern, cache, ws)
+end
+
+@testset "C4 symmetric core direction recovery with refinement" begin
+    for family in (:identity, :rotated, :rank_reduced)
+        @testset "$family" begin
+            bundle = _c4_bundle(family)
+            fx = bundle.fx
+            ws = bundle.ws
+            scale = _scale(fx)
+            tol = 1e-9 * scale
+
+            # Homogeneous solve (once per factor epoch).
+            SDPX.solve_core_homogeneous!(ws)
+            @test ws.homogeneous_solves == 1
+
+            # Predictor direction; residual must pass the frozen
+            # five-equation gate at the scale-aware bound.
+            dir1, res1 = SDPX.solve_core_direction!(ws)
+            maxres1 = maximum(abs, vcat(
+                res1.primal_affine, res1.dual_affine,
+                [res1.homogeneous_gap], res1.cone_complementarity,
+                [res1.tau_kappa],
+            ))
+            @test maxres1 <= tol
+
+            # Corrector direction (sequential, same factor).
+            dir2, res2 = SDPX.solve_core_direction!(ws)
+            maxres2 = maximum(abs, vcat(
+                res2.primal_affine, res2.dual_affine,
+                [res2.homogeneous_gap], res2.cone_complementarity,
+                [res2.tau_kappa],
+            ))
+            @test maxres2 <= tol
+
+            # One factor, one homogeneous solve, two variable solves,
+            # no refactor between predictor and corrector.
+            @test SDPX.factor_diagnostics(bundle.cache).numeric_count == 1
+            @test SDPX.factor_diagnostics(bundle.cache).symbolic_count == 1
+            @test ws.homogeneous_solves == 1
+            @test ws.variable_solves == 2
+            @test ws.directions == 2
+
+            # Recovered directions agree with the direct five-equation
+            # solves at the scale-aware bound (after refinement).
+            if family === :rank_reduced
+                ref = _direct_reduced(fx)
+                @test dir1.dx ≈ fx.V * ref.dxr atol=tol rtol=0
+            else
+                ref = _direct_full(fx)
+            end
+            _compare_directions(dir1, ref, tol)
+            _compare_directions(dir2, ref, tol)
+        end
+    end
+
+    # --- denominator gates fail closed -----------------------------
+    # Exact-zero denominator: choose u such that
+    #   kappa + tau*(cr'ux + b'uy) == 0.
+    bundle = _c4_bundle(:identity)
+    ws = bundle.ws
+    SDPX.solve_core_homogeneous!(ws)
+    cr = ws.cr
+    fill!(ws.ux, 0.0)
+    fill!(ws.uy, 0.0)
+    ws.ux[1] = -ws.system.kappa / (ws.system.tau * cr[1])
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws)
+
+    # Non-finite denominator.
+    bundle2 = _c4_bundle(:identity)
+    ws2 = bundle2.ws
+    SDPX.solve_core_homogeneous!(ws2)
+    ws2.ux[1] = NaN
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws2)
+
+    # Type-scaled near-zero denominator: |den| <= sqrt(eps(T)) * scale.
+    bundle3 = _c4_bundle(:identity)
+    ws3 = bundle3.ws
+    SDPX.solve_core_homogeneous!(ws3)
+    fill!(ws3.ux, 0.0)
+    fill!(ws3.uy, 0.0)
+    ws3.ux[1] = -(ws3.system.kappa - sqrt(eps(Float64)) *
+                  max(1.0, ws3.system.kappa, ws3.system.tau)) /
+                (ws3.system.tau * cr[1])
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws3)
+end
