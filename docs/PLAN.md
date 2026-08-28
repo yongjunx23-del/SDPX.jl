@@ -1118,8 +1118,19 @@ src/program/route_plan.jl
 * ✅ stdlib Float32 sparse LU 会隐式转换 Float64，BigFloat/MultiFloat 无原生
   sparse LU；故 sparse factor 仅对 Float64 开放，其余精度 fail-closed 到显式
   expanded/bordered capability 路线，绝不 downcast；
+* ✅ P1 review closeout：sparse 路线的 cone linearization、inverse、augmented
+  scratch 全部按真实 cone block 分配；最大单块 dense workspace 为
+  `O(max_block²)`，无 `m×m H` 或 global inverse；
+* ✅ sparse factor 带 numeric epoch + source-pattern signature authority；任何
+  singular/condition/exception/stale 出口清空 factor，RHS reuse 前重验签名；
+* ✅ 单一 block-range validator 在 construction 和 NewtonSystem use boundary
+  拒绝 gap、overlap、越界、维度不符和 pattern drift；
+* ✅ public plan/diagnostics 以 typed `NativeHSDKKTDescriptor` 分别报告 planned
+  与 executed route/storage/backend/factorization/provider，fallback 后不得继续
+  冒充 sparse execution；
 * ✅ LP、SOCP、rank-one PSD、mixed PSD、bounded Nonpositive、dependent/
-  ill-scaled equality 的公共解与原坐标证书已进入 `phase6_sparse_integration`；
+  ill-scaled equality 的公共解与原坐标证书已进入 `phase6_sparse_integration`，
+  且该文件在 quick/full 标准 profile 中各恰好执行一次；
 * ⏳ `SparseExpandedQuasidefiniteLDLT`、provider-owned sparse symbolic/numeric
   分离、fill/RSS budget 仍属于 Phase 6 后续完整目标，不由本增量伪装完成。
 

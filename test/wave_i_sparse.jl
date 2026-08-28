@@ -12,7 +12,7 @@ function _manufactured_system(::Type{T}; n=3, m=5, scale=1.0) where {T}
     tau = T(1.3)
     kappa = T(0.9)
     # Block-diagonal SPD cone linearization H (SOC-style blocks) covering m.
-    dims = m == 5 ? [2, 3] : [3, 3]
+    dims = m == 5 ? [2, 3] : m == 6 ? [3, 3] : [m ÷ 2, m - m ÷ 2]
     H = zeros(T, m, m)
     off = 0
     ranges = UnitRange{Int}[]
