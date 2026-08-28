@@ -1002,27 +1002,43 @@ function result_certificate(
     primal_block_backward_error =
         primal_block_backward_errors.mixed
     dual_backward_error = dual_backward_errors.mixed
-    primal_ok = primal_scaled <= opts.ϵ_primal
-    equality_ok = equality_backward_error <= opts.ϵ_primal
-    primal_backward_ok =
-        primal_block_backward_error <= opts.ϵ_primal
-    dual_ok = dual_scaled <= opts.ϵ_dual
-    dual_backward_ok = dual_backward_error <= opts.ϵ_dual
-    gap_ok = gap_relative <= opts.ϵ_gap
-
     primal_finite = isfinite(p_objective) &&
+                    isfinite(p_affine_residual) &&
+                    isfinite(primal_cone_violation) &&
                     isfinite(p_residual) &&
+                    isfinite(primal_scale) &&
+                    isfinite(primal_scaled) &&
                     isfinite(equality_backward_error) &&
+                    isfinite(primal_block_backward_error) &&
                     all(isfinite, result.x) &&
                     all(block -> all(isfinite, block), result.X)
     dual_finite = isfinite(d_objective) &&
+                  isfinite(d_affine_residual) &&
+                  isfinite(dual_cone_violation) &&
                   isfinite(d_residual) &&
+                  isfinite(dual_scale) &&
+                  isfinite(dual_scaled) &&
+                  isfinite(dual_backward_error) &&
                   all(isfinite, result.y) &&
                   all(block -> all(isfinite, block), result.Y)
     finite = primal_finite &&
              dual_finite &&
+             isfinite(gap) &&
+             isfinite(objective_scale) &&
              isfinite(gap_relative) &&
-             isfinite(complementarity)
+             isfinite(complementarity) &&
+             isfinite(complementarity_relative)
+
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data.  NaN/Inf must fail the certificate closed before any
+    # tolerance comparison runs (B1).
+    primal_ok = primal_finite && primal_scaled <= opts.ϵ_primal
+    equality_ok = primal_finite && equality_backward_error <= opts.ϵ_primal
+    primal_backward_ok =
+        primal_finite && primal_block_backward_error <= opts.ϵ_primal
+    dual_ok = dual_finite && dual_scaled <= opts.ϵ_dual
+    dual_backward_ok = dual_finite && dual_backward_error <= opts.ϵ_dual
+    gap_ok = finite && gap_relative <= opts.ϵ_gap
 
     structural_infeasibility =
         result.status === InfeasibleCert &&
@@ -1256,15 +1272,34 @@ function result_certificate(
     primal_scaled = primal_residual / primal_scale
     dual_scaled = dual_residual / dual_scale
     failures = Symbol[]
+    complementarity_relative = abs(complementarity) / objective_scale
     finite &= isfinite(primal_objective) && isfinite(dual_objective) &&
-              isfinite(gap_relative) && isfinite(complementarity)
+              isfinite(primal_affine_residual) &&
+              isfinite(dual_affine_residual) &&
+              isfinite(primal_cone_violation) &&
+              isfinite(dual_cone_violation) &&
+              isfinite(primal_residual) && isfinite(dual_residual) &&
+              isfinite(primal_scale) && isfinite(dual_scale) &&
+              isfinite(primal_scaled) && isfinite(dual_scaled) &&
+              isfinite(objective_scale) && isfinite(gap) &&
+              isfinite(gap_relative) && isfinite(complementarity) &&
+              isfinite(complementarity_relative) &&
+              all(isfinite, equality_residual) && all(isfinite, dual_affine) &&
+              all(isfinite, primal_margins) && all(isfinite, dual_margins) &&
+              all(isfinite, primal_block_residuals)
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data.  NaN/Inf must fail the certificate closed before any
+    # tolerance comparison runs (B1).
     finite || push!(failures, :nonfinite)
-    primal_scaled <= options.ϵ_primal || push!(failures, :primal_residual)
-    dual_scaled <= options.ϵ_dual || push!(failures, :dual_residual)
-    gap_relative <= options.ϵ_gap || push!(failures, :duality_gap)
-    primal_cone_violation <= options.ϵ_primal ||
+    (finite && primal_scaled <= options.ϵ_primal) ||
+        push!(failures, :primal_residual)
+    (finite && dual_scaled <= options.ϵ_dual) ||
+        push!(failures, :dual_residual)
+    (finite && gap_relative <= options.ϵ_gap) ||
+        push!(failures, :duality_gap)
+    (finite && primal_cone_violation <= options.ϵ_primal) ||
         push!(failures, :primal_lorentz_cone)
-    dual_cone_violation <= options.ϵ_dual ||
+    (finite && dual_cone_violation <= options.ϵ_dual) ||
         push!(failures, :dual_lorentz_cone)
     return (
         available=true,
@@ -1285,7 +1320,7 @@ function result_certificate(
         primal_residual_scaled=primal_scaled,
         dual_residual_scaled=dual_scaled,
         complementarity,
-        complementarity_relative=abs(complementarity) / objective_scale,
+        complementarity_relative,
         primal_residual_limit=options.ϵ_primal,
         dual_residual_limit=options.ϵ_dual,
         gap_limit=options.ϵ_gap,
@@ -1550,22 +1585,33 @@ function _minimal_sdp_optimality_gate(
     dual_scale = one(T) + knrmInf(prob.c)
     primal_scaled = primal_residual / primal_scale
     dual_scaled = dual_residual / dual_scale
-    gap_ok = gap_relative <= opts.ϵ_gap
     finite =
         isfinite(primal_objective) &&
         isfinite(dual_objective_value) &&
+        isfinite(gap) &&
+        isfinite(objective_scale) &&
         isfinite(gap_relative) &&
+        isfinite(primal_affine_residual) &&
+        isfinite(dual_affine_residual) &&
         isfinite(primal_residual) &&
         isfinite(dual_residual) &&
+        isfinite(primal_scale) && isfinite(dual_scale) &&
+        isfinite(primal_scaled) && isfinite(dual_scaled) &&
         all(isfinite, result.x) &&
         all(block -> all(isfinite, block), result.X) &&
         all(isfinite, result.y) &&
         all(block -> all(isfinite, block), result.Y)
 
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data (B1).
+    gap_ok = finite && gap_relative <= opts.ϵ_gap
+
     failures = Symbol[]
     finite || push!(failures, :nonfinite)
-    primal_scaled <= opts.ϵ_primal || push!(failures, :primal_residual)
-    dual_scaled <= opts.ϵ_dual || push!(failures, :dual_residual)
+    (finite && primal_scaled <= opts.ϵ_primal) ||
+        push!(failures, :primal_residual)
+    (finite && dual_scaled <= opts.ϵ_dual) ||
+        push!(failures, :dual_residual)
     gap_ok || push!(failures, :duality_gap)
     primal_psd.ok || push!(failures, :primal_psd)
     dual_psd.ok || push!(failures, :dual_psd)

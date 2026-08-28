@@ -87,10 +87,28 @@ function _at_negmul!(out::AbstractVector{T}, A::SparseMatrixCSC{T}, v::AbstractV
 end
 
 # ---------------------------------------------------------------------------
+# Centralized finite gate
+# ---------------------------------------------------------------------------
+# The finite gate must run before every tolerance comparison used for cone
+# membership or certificate validity.  Under IEEE semantics `NaN < -tol` and
+# `NaN > tol` are both `false`, so a non-finite coordinate would otherwise
+# bypass every "reject when the tolerance is violated" branch (B1).
+@inline function _all_finite(values)
+    @inbounds for value in values
+        isfinite(value) || return false
+    end
+    return true
+end
+
+@inline _valid_certificate_tolerance(tol) =
+    isfinite(tol) && tol >= zero(tol)
+
+# ---------------------------------------------------------------------------
 # Per-block cone membership resolved through the ConeProductLayout
 # ---------------------------------------------------------------------------
 
 @inline function _all_ge(v, tol)
+    _all_finite(v) || return false
     @inbounds for i in eachindex(v)
         v[i] < tol && return false
     end
@@ -106,7 +124,9 @@ function _svec_psd_membership(
     n = map.dimension
     len = map.length
     length(v) == len || return false
+    _valid_certificate_tolerance(tol) || return false
     n == 0 && return true
+    _all_finite(v) || return false
     if T === Float64
         M = Matrix{Float64}(undef, n, n)
         k = 1
@@ -159,6 +179,10 @@ end
 # cone `K*` (for the self-dual symmetric cones K* == K).  `tol` is the PSD
 # slack / all-purpose numerical tolerance.
 function _block_in_cone(block::ConeBlockDescriptor{T}, v, tol::T, dual::Bool) where {T}
+    # The free cone's primal and the zero cone's dual accept every finite
+    # coordinate, so they must be gated explicitly: NaN/Inf are never valid
+    # finite-dimensional cone certificate coordinates.
+    _all_finite(v) || return false
     cone = block.cone
     if cone === :nonnegative
         return _all_ge(v, -tol)
@@ -213,6 +237,8 @@ function in_canonical_cone(canonical::CanonicalConicProgram, v;
         throw(DimensionMismatch("v length != canonical slack m"))
     T = eltype(v)
     tol = convert(T, tol)
+    _valid_certificate_tolerance(tol) || return false
+    _all_finite(v) || return false
     for block in layout_blocks(canonical.cone_layout)
         off = block_offset(block); len = block_length(block)
         _block_in_cone(block, view(v, off:(off + len - 1)), tol, dual) || return false
@@ -239,7 +265,16 @@ function verify_optimal!(
 )
     T = eltype(state.x)
     tol = tol === nothing ? default_certificate_tol(T) : T(tol)
+    _valid_certificate_tolerance(tol) || return false
+    # Centralized finite gate: no tolerance comparison may run on non-finite
+    # data.  NaN/Inf in any iterate coordinate or embedding scalar fails the
+    # certificate closed before any residual or cone-membership check.
+    _all_finite(state.x) && _all_finite(state.s) && _all_finite(state.y) &&
+        isfinite(state.tau) && isfinite(state.kappa) && isfinite(state.mu) ||
+        return false
     hsd_residual!(state)
+    _all_finite(state.rP) && _all_finite(state.rD) && isfinite(state.rG) ||
+        return false
     # τ must be clearly positive: a genuinely optimal recovery needs x/τ, s/τ,
     # y/τ to be finite and well-posed, which rules out the τ→0 (infeasibility)
     # faces where a coarse residual could pass spuriously.
@@ -249,7 +284,9 @@ function verify_optimal!(
     # Residuals therefore have to be measured after recovery (division by
     # tau), not in the arbitrarily scaled embedding coordinates.
     inv_tau = inv(state.tau)
-    hsd_normalized_residual(state) * inv_tau <= tol || return false
+    isfinite(inv_tau) || return false
+    normalized_residual = hsd_normalized_residual(state) * inv_tau
+    isfinite(normalized_residual) && normalized_residual <= tol || return false
     # cone membership: s/τ ∈ K, y/τ ∈ K* (using pre-allocated scratch buffers)
     @inbounds for k in 1:state.m
         state.st[k] = state.s[k] * inv_tau
@@ -258,6 +295,8 @@ function verify_optimal!(
     @inbounds for j in 1:state.n
         state.xt[j] = state.x[j] * inv_tau
     end
+    _all_finite(state.xt) && _all_finite(state.st) && _all_finite(state.yt) ||
+        return false
     in_canonical_cone(canonical, state.st; dual=false, tol=tol) || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # Check the recovered primal-dual gap explicitly.  The old absolute-mu
@@ -265,22 +304,31 @@ function verify_optimal!(
     # kappa/tau (and hence a finite recovered duality gap).
     primal_objective = dot(canonical_objective(canonical), state.xt)
     dual_pairing = dot(canonical_rhs(canonical), state.yt)
+    isfinite(primal_objective) && isfinite(dual_pairing) || return false
     gap_scale = one(T) + abs(primal_objective) + abs(dual_pairing)
-    abs(primal_objective + dual_pairing) <= tol * gap_scale || return false
+    isfinite(gap_scale) || return false
+    gap_residual = abs(primal_objective + dual_pairing)
+    gap_limit = tol * gap_scale
+    isfinite(gap_residual) && isfinite(gap_limit) && gap_residual <= gap_limit ||
+        return false
     kappa_recovered = state.kappa * inv_tau
-    abs(kappa_recovered) <= tol * gap_scale || return false
+    kappa_limit = tol * gap_scale
+    isfinite(kappa_recovered) && isfinite(kappa_limit) &&
+        abs(kappa_recovered) <= kappa_limit || return false
     # mu is quadratic under homogeneous rescaling.  Normalize by tau^2 so
     # this centrality gate is invariant under the same embedding symmetry.
     normalized_mu = state.mu * inv_tau * inv_tau
-    normalized_mu <= tol * (one(T) + T(state.nu)) || return false
+    mu_limit = tol * (one(T) + T(state.nu))
+    isfinite(normalized_mu) && isfinite(mu_limit) && normalized_mu <= mu_limit ||
+        return false
     # recover in original coordinates through the reconstruction chain
     primal_forward!(canonical, x_orig, s_orig, state.xt, state.st)
     dual_forward!(canonical, y_orig, state.yt)
-    return true
+    return _all_finite(x_orig) && _all_finite(s_orig) && _all_finite(y_orig)
 end
 
 @inline function _certificate_unit_normalization_ok(value::T, tol::T) where {T}
-    isfinite(value) || return false
+    isfinite(value) && _valid_certificate_tolerance(tol) || return false
     return abs(value + one(T)) <= tol * max(one(T), abs(value))
 end
 
@@ -300,28 +348,39 @@ function verify_primal_infeasibility!(
 )
     T = eltype(state.x)
     tol = tol === nothing ? default_certificate_tol(T) : T(tol)
+    _valid_certificate_tolerance(tol) || return false
     y = state.y
+    # Centralized finite gate: a Farkas ray must be a finite vector and its
+    # derived scalars must be finite before any tolerance comparison runs.
+    _all_finite(y) || return false
     by = dot(canonical_rhs(canonical), y)
+    isfinite(by) || return false
     by < -tol || return false
     # A'y ≈ 0 (relative to the ray magnitude)
     _at_vec!(state.q, canonical_equality(canonical), y)
     res = _maxabs(state.q)
-    (res / (one(T) + _maxabs(y))) <= tol || return false
+    ray_scale = one(T) + _maxabs(y)
+    isfinite(res) && isfinite(ray_scale) || return false
+    relative_residual = res / ray_scale
+    isfinite(relative_residual) && relative_residual <= tol || return false
     in_canonical_cone(canonical, y; dual=true, tol=tol) || return false
     # normalize by −b'y = 1 and re-verify
     scale = -one(T) / by
+    isfinite(scale) || return false
     @inbounds for k in 1:state.m
         state.yt[k] = scale * y[k]
     end
+    _all_finite(state.yt) || return false
     _certificate_unit_normalization_ok(
         dot(canonical_rhs(canonical), state.yt), tol,
     ) || return false
     _at_vec!(state.q, canonical_equality(canonical), state.yt)
-    _maxabs(state.q) <= tol || return false
+    normalized_residual = _maxabs(state.q)
+    isfinite(normalized_residual) && normalized_residual <= tol || return false
     in_canonical_cone(canonical, state.yt; dual=true, tol=tol) || return false
     # push the ray back into original coordinates
     certificate_backward!(canonical, y_orig, state.yt; ray_kind=:primal_infeasible)
-    return true
+    return _all_finite(y_orig)
 end
 
 # ---------------------------------------------------------------------------
@@ -341,20 +400,28 @@ function verify_dual_infeasibility!(
 )
     T = eltype(state.x)
     tol = tol === nothing ? default_certificate_tol(T) : T(tol)
+    _valid_certificate_tolerance(tol) || return false
     x = state.x
+    # Centralized finite gate: a recession ray must be a finite vector and its
+    # derived scalars must be finite before any tolerance comparison runs.
+    _all_finite(x) || return false
     cx = dot(canonical_objective(canonical), x)
+    isfinite(cx) || return false
     cx < -tol || return false
     # the ray's cone member: s_r = −A x must lie in K
     _at_negmul!(state.e, canonical_equality(canonical), x)
+    _all_finite(state.e) || return false
     in_canonical_cone(canonical, state.e; dual=false, tol=tol) || return false
     # normalize by −c'x = 1 and re-verify (including the cone member again)
     scale = -one(T) / cx
+    isfinite(scale) || return false
     @inbounds for j in 1:state.n
         state.xt[j] = scale * x[j]
     end
     @inbounds for k in 1:state.m
         state.st[k] = scale * state.e[k]
     end
+    _all_finite(state.xt) && _all_finite(state.st) || return false
     _certificate_unit_normalization_ok(
         dot(canonical_objective(canonical), state.xt), tol,
     ) || return false
@@ -362,5 +429,5 @@ function verify_dual_infeasibility!(
     # push the ray back into original coordinates
     certificate_backward!(canonical, x_orig, state.xt; ray_kind=:dual_infeasible)
     primal_forward!(canonical, x_orig, s_orig, state.xt, state.st)
-    return true
+    return _all_finite(x_orig) && _all_finite(s_orig)
 end

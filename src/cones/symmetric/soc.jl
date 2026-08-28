@@ -23,10 +23,15 @@ function membership(cone::SOCone, v::AbstractVector)
     length(v) == cone.dim || throw(DimensionMismatch())
     T = eltype(v)
     t = T(v[1])
+    # Fail closed on non-finite coordinates: `+Inf` in the head would make
+    # `t >= 0` and `t^2 >= ||tail||^2` pass vacuously (B1).
+    isfinite(t) || return false
     t < zero(T) && return false
     tt = t * t
     @inbounds for i in 2:cone.dim
-        tt -= v[i] * v[i]
+        vi = T(v[i])
+        isfinite(vi) || return false
+        tt -= vi * vi
     end
     return tt >= zero(T)
 end
