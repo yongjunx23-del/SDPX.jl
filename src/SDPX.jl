@@ -90,6 +90,10 @@ include("ir/lower_lp.jl")
 include("ir/lower_sdp.jl")
 include("ir/lift_psd.jl")
 include("soc.jl")
+# P4 direct fixed-dimension KKT local contributions.  Included after
+# soc.jl (ConicProblem/SOCConstraint) and before soc_native.jl, which
+# delegates its fixed-trace Q3 execution to this specialization.
+include("kkt/specializations/fixed_trace_q3.jl")
 include("ir/lower_soc.jl")
 include("soc_lorentz_kernels.jl")
 include("cold_start.jl")

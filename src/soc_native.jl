@@ -13,46 +13,6 @@ struct FixedTraceQ3Execution{P} <: AbstractSOCExecution
     payload::P
 end
 
-struct FixedTraceQ3Reduction{T}
-    # Immutable plan object with owned structure-of-arrays storage.  The
-    # arrays are populated once during planning and are never borrowed from
-    # the caller's cone matrices; this is important for mutable BigFloat
-    # scalars as well as for the fixed-trace hot path.
-    active_ids::Matrix{Int}
-    tail_map::Array{T,3}
-    fixed_head::Vector{T}
-    offset::Matrix{T}
-    ownership::Symbol
-end
-
-function _fixed_trace_q3_active_variables(A::SparseMatrixCSC)
-    active = Int[]
-    sizehint!(active, 2)
-    @inbounds for column in axes(A, 2)
-        tail_active = false
-        for pointer in nzrange(A, column)
-            iszero(A.nzval[pointer]) && continue
-            row = A.rowval[pointer]
-            row == 1 && return nothing
-            tail_active |= row == 2 || row == 3
-        end
-        tail_active || continue
-        length(active) == 2 && return nothing
-        push!(active, column)
-    end
-    return active
-end
-
-function _fixed_trace_q3_active_variables(A::AbstractMatrix)
-    all(iszero, view(A, 1, :)) || return nothing
-    active = Int[]
-    @inbounds for variable in axes(A, 2)
-        (!iszero(A[2, variable]) || !iszero(A[3, variable])) &&
-            push!(active, variable)
-    end
-    return active
-end
-
 struct NativeSOCFixedTraceFactor{T}
     reduction::FixedTraceQ3Reduction{T}
     factors::Matrix{T}
@@ -240,57 +200,6 @@ Lorentz runs the generic dense normal-equations kernel.
     augmented ? :pivoted_symmetric_ldlt :
     fixed_trace ? :native_local_cholesky : :cholesky
 
-function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
-    length(problem.cones) > 0 || return nothing
-    problem.variables == 2 * length(problem.cones) || return nothing
-    used = falses(problem.variables)
-    block_count = length(problem.cones)
-    active_ids = Matrix{Int}(undef, 2, block_count)
-    tail_map = alloc_zeros(T, 2, 2, block_count)
-    fixed_head = alloc_zeros(T, block_count)
-    offset = alloc_zeros(T, 2, block_count)
-    @inbounds for (block, cone) in pairs(problem.cones)
-        length(cone.b) == 3 || return nothing
-        isfinite(cone.b[1]) && cone.b[1] > zero(T) || return nothing
-        active = _fixed_trace_q3_active_variables(cone.A)
-        active === nothing && return nothing
-        length(active) == 2 || return nothing
-        first, second = active
-        scale = max(
-            one(T),
-            abs(cone.A[2, first]),
-            abs(cone.A[2, second]),
-            abs(cone.A[3, first]),
-            abs(cone.A[3, second]),
-        )
-        determinant = cone.A[2, first] * cone.A[3, second] -
-                      cone.A[2, second] * cone.A[3, first]
-        abs(determinant) > sqrt(eps(T)) * scale * scale || return nothing
-        (used[first] || used[second]) && return nothing
-        used[first] = true
-        used[second] = true
-        active_ids[1, block] = first
-        active_ids[2, block] = second
-        # Tail map rows are (u₁,u₂), columns are the two active variables.
-        # Every scalar is ingested into planner-owned storage so an MPFR
-        # mutation in the input cone cannot corrupt a future solve.
-        tail_map[1, 1, block] = _ingest_owned_scalar(T, cone.A[2, first])
-        tail_map[1, 2, block] = _ingest_owned_scalar(T, cone.A[2, second])
-        tail_map[2, 1, block] = _ingest_owned_scalar(T, cone.A[3, first])
-        tail_map[2, 2, block] = _ingest_owned_scalar(T, cone.A[3, second])
-        fixed_head[block] = _ingest_owned_scalar(T, cone.b[1])
-        offset[1, block] = _ingest_owned_scalar(T, cone.b[2])
-        offset[2, block] = _ingest_owned_scalar(T, cone.b[3])
-    end
-    return FixedTraceQ3Reduction(
-        active_ids,
-        tail_map,
-        fixed_head,
-        offset,
-        :owned,
-    )
-end
-
 function _native_soc_cone_plan(
     problem::ConicProblem;
     specialization::Symbol=:auto,
@@ -311,6 +220,9 @@ function _native_soc_cone_plan(
             "and no shared variables",
         ))
     if reduction !== nothing
+        kkt_specialization_supported(:fixed_trace_q3) || throw(ArgumentError(
+            "fixed-trace Q3 is not registered in the KKT specialization registry",
+        ))
         return ConeRepresentationPlan(
             :native_lorentz,
             FixedTraceQ3Execution(reduction),
@@ -1223,37 +1135,17 @@ function _native_soc_assemble_factor!(
             zero_owned!(workspace.local_metric_regularization)
             regularization = attempt == 1 ? zero(T) :
                              sqrt(eps(T)) * T(10)^(attempt - 2)
-            successful = true
-            @inbounds for block in axes(reduction.active_ids, 2)
-                a = workspace.local_metric[1, block]
-                b = workspace.local_metric[2, block]
-                c = workspace.local_metric[3, block]
-                if attempt > 1
-                    a += regularization * max(abs(a), one(T))
-                    c += regularization * max(abs(c), one(T))
-                    workspace.local_metric_regularization[1, block] =
-                        regularization * max(abs(workspace.local_metric[1, block]), one(T))
-                    workspace.local_metric_regularization[3, block] =
-                        regularization * max(abs(workspace.local_metric[3, block]), one(T))
-                end
-                if !(isfinite(a) && isfinite(b) && isfinite(c) && a > zero(T))
-                    successful = false
-                    break
-                end
-                l11 = sqrt(a)
-                l21 = b / l11
-                pivot = c - l21 * l21
-                if !(isfinite(pivot) && pivot > zero(T))
-                    successful = false
-                    break
-                end
-                workspace.local_factor[1, block] = l11
-                workspace.local_factor[2, block] = l21
-                workspace.local_factor[3, block] = sqrt(pivot)
-                workspace.local_inverse[1, block] = one(T) / l11
-                workspace.local_inverse[2, block] =
-                    one(T) / workspace.local_factor[3, block]
-            end
+            # Fixed-trace Q3 local 2x2 elimination is owned by the KKT
+            # specialization (`kkt/specializations/fixed_trace_q3.jl`); the
+            # workspace buffers are the block-owned scratch.
+            successful = fixed_trace_q3_local_elimination(
+                reduction,
+                workspace.local_metric,
+                workspace.local_metric_regularization,
+                workspace.local_factor,
+                workspace.local_inverse,
+                regularization,
+            )
             if successful
                 if attempt > 1
                     workspace.regularizations += attempt - 1
@@ -1297,47 +1189,29 @@ function _native_soc_fixed_trsv_lower!(
     factor::NativeSOCFixedTraceFactor{T},
     values::AbstractVector{T},
 ) where {T}
-    @inbounds for block in axes(factor.factors, 2)
-        first = factor.reduction.active_ids[1, block]
-        second = factor.reduction.active_ids[2, block]
-        l11 = factor.factors[1, block]
-        l21 = factor.factors[2, block]
-        inverse_l11 = factor.inverse_pivots[1, block]
-        inverse_l22 = factor.inverse_pivots[2, block]
-        first_value = values[first] * inverse_l11
-        values[first] = first_value
-        values[second] =
-            (values[second] - l21 * first_value) * inverse_l22
-    end
-    return values
+    # Delegates to the KKT specialization local-elimination kernel; the
+    # generic SOC reference path is untouched.
+    return fixed_trace_q3_trsv_lower!(
+        factor.reduction, factor.factors, factor.inverse_pivots, values,
+    )
 end
 
 function _native_soc_fixed_trsv_transpose!(
     factor::NativeSOCFixedTraceFactor{T},
     values::AbstractVector{T},
 ) where {T}
-    @inbounds for block in axes(factor.factors, 2)
-        first = factor.reduction.active_ids[1, block]
-        second = factor.reduction.active_ids[2, block]
-        l21 = factor.factors[2, block]
-        inverse_l11 = factor.inverse_pivots[1, block]
-        inverse_l22 = factor.inverse_pivots[2, block]
-        second_value = values[second] * inverse_l22
-        values[second] = second_value
-        values[first] =
-            (values[first] - l21 * second_value) * inverse_l11
-    end
-    return values
+    return fixed_trace_q3_trsv_transpose!(
+        factor.reduction, factor.factors, factor.inverse_pivots, values,
+    )
 end
 
 function _native_soc_fixed_trsm_lower!(
     factor::NativeSOCFixedTraceFactor{T},
     values::AbstractMatrix{T},
 ) where {T}
-    @inbounds for column in axes(values, 2)
-        _native_soc_fixed_trsv_lower!(factor, view(values, :, column))
-    end
-    return values
+    return fixed_trace_q3_trsm_lower!(
+        factor.reduction, factor.factors, factor.inverse_pivots, values,
+    )
 end
 
 function _native_soc_transform_equality_panel!(
