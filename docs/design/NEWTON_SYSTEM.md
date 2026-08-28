@@ -261,6 +261,38 @@ Refill rejects dimension/range mismatch, asymmetric or non-finite `Theta`,
 pattern drift, and a numeric `Ar` whose CSC structure differs.  No
 factorization, regularization, or solve lives in this file.
 
+## Float64 CHOLMOD symmetric-core lifecycle
+
+`src/factor_cache/routes/sparse_symbolic_numeric.jl` provides
+`SparseSymbolicNumericCache{Float64}` — the single sparse cache for the
+symmetric augmented core.  It consumes the frozen lower-triangle CSC from
+`SymmetricCorePattern` plus a signed diagonal descriptor (`+1` for reduced-x
+rows, `-1` for y rows) and a static regularization magnitude.
+
+- `prepare!` owns a factor-view `SparseMatrixCSC` with exactly the frozen
+  `colptr`/`rowval`, an independently retained copy of the original `K`
+  values, and the fixed `symbolic_epoch` + pattern signature.  No CHOLMOD
+  object exists yet.
+- the first `factorize!` calls public `ldlt(Symmetric(K, :L); check=false)`
+  and records `symbolic_count == 1`, `numeric_count == 1`.
+- every later same-pattern `factorize!` calls public
+  `ldlt!(factor, Symmetric(K, :L))` on the same CHOLMOD factor object and
+  increments only `numeric_count`.
+- signed static regularization is written only to the factor view diagonal
+  (`K[diag] += sign*δ`); the retained original `K` values are never
+  modified.  After a successful factor the view is restored to the original
+  values so it mirrors the unmodified operator.
+- `solve!`/`refine_once!` use the public `factor \ rhs`, which allocates a
+  result object for CHOLMOD and is then copied into the caller-owned
+  destination; diagnostics report `solve_allocation_policy =
+  :allocating_factor_backslash_copy`.  No allocation-free claim is made.
+- pattern drift, non-finite data, a `dsigns` mismatch, a failed refactor,
+  and any stale factor revoke the usable state; `solve!` from any state
+  other than `Fresh` is rejected.  CHOLMOD `Factor` `success` is a provider
+  fact, not a mathematical certificate; the direction is accepted only by
+  the unregularized five-equation residual and, at termination, the
+  original-coordinate certificate.
+
 ## Known integration boundary
 
 `src/kkt/system.jl:1-6` declares the semantic layer as the sign authority, but

@@ -216,6 +216,41 @@ symmetric_core_signature(pattern::SymmetricCorePattern) = pattern.signature
 """Lower-triangle CSC value buffer (owned, numeric)."""
 symmetric_core_nzval(pattern::SymmetricCorePattern) = pattern.nzval
 
+
+"""
+    symmetric_core_lower_sparse(pattern) -> SparseMatrixCSC{T,Int}
+
+Return a lower-triangle CSC matrix that shares the frozen colptr/rowval and
+references the owned numeric `nzval` buffer.  This is the factor-view input
+consumed by the Float64 CHOLMOD lifecycle cache.  Callers must not mutate
+the returned structure.
+"""
+function symmetric_core_lower_sparse(pattern::SymmetricCorePattern{T}) where {T}
+    return SparseMatrixCSC{T, Int}(
+        pattern.dimension, pattern.dimension,
+        Vector{Int}(pattern.colptr), Vector{Int}(pattern.rowval),
+        pattern.nzval,
+    )
+end
+
+"""
+    symmetric_core_dsigns(pattern) -> Vector{Int}
+
+Signed diagonal descriptor for the augmented core: `+1` for the reduced-x
+rows and `-1` for the y / cone rows.  This is the sign vector consumed by
+the signed static regularization of the CHOLMOD lifecycle.
+"""
+function symmetric_core_dsigns(pattern::SymmetricCorePattern{T}) where {T}
+    dsigns = Vector{Int}(undef, pattern.dimension)
+    @inbounds for j in 1:pattern.nr
+        dsigns[j] = 1
+    end
+    @inbounds for j in (pattern.nr + 1):pattern.dimension
+        dsigns[j] = -1
+    end
+    return dsigns
+end
+
 """Frozen lower-triangle CSC colptr."""
 symmetric_core_colptr(pattern::SymmetricCorePattern) = pattern.colptr
 

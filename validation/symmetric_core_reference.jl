@@ -418,3 +418,169 @@ end
         Ar, ranges, [:dense_lower, :unsupported_shape],
     )
 end
+
+# ---------------------------------------------------------------------
+# C3: truthful Float64 CHOLMOD signed-LDL lifecycle.
+# Exercises SDPX.SparseSymbolicNumericCache against the frozen core
+# pattern: one symbolic analysis, same-object numeric refactor reuse,
+# signed static regularization confined to the factor view, honest
+# allocating `factor \ rhs` solves, and fail-closed rejection paths.
+# ---------------------------------------------------------------------
+
+"""nsr=2 core fixture (same helper as the C2 testset)."""
+function _core_cache_fixture(regularization::Float64)
+    ranges, shapes = _core_blocks()
+    Ar = _core_ar()
+    Theta = _core_theta()
+    pattern = SDPX.SymmetricCorePattern(Ar, ranges, shapes)
+    SDPX.refill!(pattern, Ar, Theta)
+    K = SDPX.symmetric_core_lower_sparse(pattern)
+    req = SDPX.SparseSymbolicRequirements(
+        K; symbolic_epoch=7, dsigns=SDPX.symmetric_core_dsigns(pattern),
+        regularization=regularization,
+    )
+    cache = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(cache, req)
+    return (; pattern, K, cache)
+end
+
+"""Singular nr=1 core fixture: the structural zero x diagonal is a genuine
+zero pivot when CHOLMOD keeps it on the diagonal, so the unregularized
+factor honestly fails and signed regularization recovers it."""
+function _core_singular_fixture(regularization::Float64)
+    Ar = sparse([1, 2], [1, 1], [1.0, 2.0], 2, 1)
+    Theta = [2.0 0.2; 0.2 1.3]
+    pattern = SDPX.SymmetricCorePattern(Ar, [1:2], [:dense_lower])
+    SDPX.refill!(pattern, Ar, Theta)
+    K = SDPX.symmetric_core_lower_sparse(pattern)
+    req = SDPX.SparseSymbolicRequirements(
+        K; symbolic_epoch=1,
+        dsigns=SDPX.symmetric_core_dsigns(pattern),
+        regularization=regularization,
+    )
+    cache = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(cache, req)
+    return (; pattern, K, cache)
+end
+
+@testset "CHOLMOD symmetric augmented core lifecycle" begin
+    # --- unregularized zero-pivot failure is honest ------------------
+    fx = _core_singular_fixture(0.0)
+    cache = fx.cache
+    @test SDPX.factor_status(cache) === SDPX.Prepared
+    original_nzval = copy(fx.pattern.nzval)
+    # Structural zero x diagonal → numerically singular core.  CHOLMOD
+    # reports failure; the cache must revoke any usable factor.
+    @test_throws ArgumentError SDPX.factorize!(cache, fx.K, 1)
+    @test SDPX.factor_status(cache) === SDPX.Failed
+    @test SDPX.factor_epoch(cache) == 0
+    @test SDPX.factor_diagnostics(cache).numeric_count == 0
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        cache, zeros(3), ones(3),
+    )
+    @test fx.pattern.nzval == original_nzval   # pattern never touched
+
+    # --- signed regularized singular core succeeds -------------------
+    fr = _core_singular_fixture(1e-6)
+    cache = fr.cache
+    original_nzval = copy(fr.pattern.nzval)
+    SDPX.factorize!(cache, fr.K, 1)
+    @test SDPX.factor_status(cache) === SDPX.Fresh
+    @test SDPX.factor_epoch(cache) == 1
+    @test SDPX.factor_symbolic_epoch(cache) == 1
+    d = SDPX.factor_diagnostics(cache)
+    @test d.symbolic_count == 1
+    @test d.numeric_count == 1
+    @test d.provider === :cholmod
+    @test d.kind === :symmetric_ldl
+    @test d.solve_allocation_policy == :allocating_factor_backslash_copy
+    @test fr.pattern.nzval == original_nzval   # original K untouched
+    factor_object = cache.factor
+    @test factor_object !== nothing
+
+    # Solve against the regularized factor view.
+    rhs = [1.0, -0.5, 2.0]
+    destination = zeros(3)
+    SDPX.solve!(cache, destination, rhs)
+    @test all(isfinite, destination)
+    Kreg = SDPX.materialize_dense(fr.pattern)
+    for j in 1:3
+        Kreg[j, j] += (j == 1 ? 1 : -1) * 1e-6
+    end
+    @test norm(Kreg * destination - rhs, Inf) <= 1e-8
+    # A tiny signed shift on a zero pivot can be absorbed into the LDL
+    # scaling, so the regularized solution may still nearly solve the
+    # unmodified singular K.  We therefore never assert that the
+    # regularized solve solves the original K exactly (and never use the
+    # unmodified K residual to accept a direction in the production gate).
+    original_residual = norm(
+        SDPX.materialize_dense(fr.pattern) * destination - rhs, Inf,
+    )
+    @test isfinite(original_residual)
+
+    # Same matrix epoch is a no-op; factor object survives.
+    SDPX.factorize!(cache, fr.K, 1)
+    @test SDPX.factor_epoch(cache) == 1
+    @test SDPX.factor_diagnostics(cache).numeric_count == 1
+    @test cache.factor === factor_object
+
+    # --- second matrix epoch reuses the same CHOLMOD object ----------
+    f2 = _core_cache_fixture(1e-6)
+    cache = f2.cache
+    SDPX.factorize!(cache, f2.K, 11)
+    @test SDPX.factor_diagnostics(cache).symbolic_count == 1
+    @test SDPX.factor_diagnostics(cache).numeric_count == 1
+    factor_object = cache.factor
+    Ar2 = _core_ar(2.5)
+    Theta2 = _core_theta(3.0)
+    SDPX.refill!(f2.pattern, Ar2, Theta2)
+    K2 = SDPX.symmetric_core_lower_sparse(f2.pattern)
+    SDPX.factorize!(cache, K2, 12)
+    @test SDPX.factor_status(cache) === SDPX.Fresh
+    @test SDPX.factor_epoch(cache) == 2
+    d2 = SDPX.factor_diagnostics(cache)
+    @test d2.symbolic_count == 1       # symbolic analysis happened once
+    @test d2.numeric_count == 2
+    @test cache.factor === factor_object   # same object, refactored in place
+
+    # Refinement reuses the same factor.
+    correction = zeros(7)
+    SDPX.refine_once!(cache, ones(7), correction)
+    @test SDPX.factor_diagnostics(cache).refine_count == 1
+    @test SDPX.factor_diagnostics(cache).numeric_count == 2
+    @test cache.factor === factor_object
+
+    # --- stale solve after invalidate is rejected --------------------
+    SDPX.invalidate!(cache)
+    @test SDPX.factor_status(cache) === SDPX.Invalid
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        cache, zeros(7), ones(7),
+    )
+
+    # --- pattern drift is rejected without reanalysis ---------------
+    f3 = _core_cache_fixture(1e-6)
+    cache3 = f3.cache
+    SDPX.factorize!(cache3, f3.K, 1)
+    @test SDPX.factor_diagnostics(cache3).symbolic_count == 1
+    drifted_ar = sparse([1, 2, 2, 4, 5], [1, 1, 2, 2, 2],
+        [1.0, 0.0, 2.0, -1.5, 0.5], 5, 2)   # column 1 rows {1,2} instead of {1,3}
+    ranges, shapes = _core_blocks()
+    drifted_pattern = SDPX.SymmetricCorePattern(drifted_ar, ranges, shapes)
+    SDPX.refill!(drifted_pattern, drifted_ar, _core_theta())
+    driftedK = SDPX.symmetric_core_lower_sparse(drifted_pattern)
+    @test_throws ArgumentError SDPX.factorize!(cache3, driftedK, 2)
+    @test SDPX.factor_status(cache3) === SDPX.Failed
+    @test SDPX.factor_diagnostics(cache3).symbolic_count == 1
+
+    # --- dsigns length/value rejection ------------------------------
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        f3.K; symbolic_epoch=0, dsigns=Int[1, -1, 1, -1, 1, -1, 0],
+    )
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        f3.K; symbolic_epoch=0, dsigns=Int[1, -1],
+    )
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        f3.K; symbolic_epoch=0, dsigns=Int[1, -1, 1, -1, 1, -1, 1],
+        regularization=-1.0,
+    )
+end

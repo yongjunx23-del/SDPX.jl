@@ -1,189 +1,389 @@
 #=====================================================================#
-#    SparseSymbolicNumericCache — sparse symbolic analysis reused across
-#    epochs + numeric factor.  (Subagent E.)
+#    SparseSymbolicNumericCache — Float64 CHOLMOD signed-LDL lifecycle.
 #
-#    `prepare!` runs a sparse symbolic analysis on the sparsity pattern
-#    (a fill-reducing symmetric ordering via `amd`), fixes `symbolic_epoch`,
-#    and allocates the numeric factor buffer once.  `factorize!` reuses that
-#    buffer: it permutes the incoming sparse matrix by the fixed ordering and
-#    performs the numeric Cholesky into the preallocated buffer.  Because the
-#    ordering is fixed by `symbolic_epoch` (not recomputed per epoch) and the
-#    buffer is owned, a warm factorize/solve cycle is allocation-free.
+#    This cache is the provider-neutral home for a truthful sparse
+#    symmetric-LDL lifecycle used by the symmetric augmented core
+#    `K = [0 Ar'; Ar -Theta]` (see src/kkt/symmetric_core.jl).  It is the
+#    single sparse cache; there is no second sparse route cache.
+#
+#    Facts (no allocation-free claims):
+#      * `prepare!` copies the frozen lower-triangle CSC pattern into an
+#        owned factor view with exactly the same colptr/rowval, and records
+#        a fixed `symbolic_epoch` + pattern signature.  No CHOLMOD object is
+#        created yet.
+#      * the first `factorize!` calls the public `ldlt(Symmetric(K, :L);
+#        check=false)` and stores the resulting CHOLMOD.Factor.  This is the
+#        only symbolic analysis: `symbolic_count == 1`.
+#      * every later `factorize!` with the same pattern reuses the same
+#        CHOLMOD.Factor object through the public `ldlt!(factor,
+#        Symmetric(K, :L))`; `symbolic_count` stays 1 and `numeric_count`
+#        increments.
+#      * signed static regularization is applied only to the factor view
+#        diagonal (fixed sign vector: + for reduced-x rows, - for y rows);
+#        the retained original K values are never modified.
+#      * after a successful factor the original retained K values are
+#        restored into the factor view so the view always mirrors the
+#        original operator; the CHOLMOD factor holds the regularized copy.
+#      * `solve!`/`refine_once!` use the public `factor \ rhs`, which for
+#        CHOLMOD allocates a result object that is then copied into the
+#        caller-owned destination.  This is documented; we do not claim an
+#        allocation-free solve.
 #=====================================================================#
 
 """
     SparseSymbolicRequirements
 
-Capacity + symbolic requirements for `SparseSymbolicNumericCache`.  Carries
-the total dimension `n`, the `symbolic_epoch`, and a `pattern`
-(`SparseMatrixCSC`) describing the fixed sparsity structure used to derive
-the symbolic ordering in `prepare!`.
+Capacity + symbolic requirements for `SparseSymbolicNumericCache`.
+Carries the total dimension `n`, the fixed `symbolic_epoch`, the frozen
+lower-triangle CSC `pattern`, the signed diagonal block descriptor
+`dsigns` (`+1` for reduced-x rows, `-1` for y rows), and the static
+regularization magnitude `regularization`.
 """
 struct SparseSymbolicRequirements <: AbstractFactorRequirements
     n::Int
     symbolic_epoch::Int
     pattern::SparseMatrixCSC{Float64, Int}
+    dsigns::Vector{Int}
+    regularization::Float64
 end
 
-function SparseSymbolicRequirements(A::SparseMatrixCSC{Tv, Ti}; symbolic_epoch::Integer = 0) where {Tv, Ti}
-    n = size(A, 1)
-    size(A, 2) == n || throw(ArgumentError("sparse pattern must be square"))
-    return SparseSymbolicRequirements(Int(n), Int(symbolic_epoch),
-        SparseMatrixCSC{Float64, Int}(A))
+function SparseSymbolicRequirements(
+    pattern::SparseMatrixCSC{Float64, Int};
+    symbolic_epoch::Integer=0,
+    dsigns::AbstractVector{Int}=Int[],
+    regularization::Real=0.0,
+)
+    n = size(pattern, 1)
+    size(pattern, 2) == n || throw(ArgumentError(
+        "sparse pattern must be square",
+    ))
+    length(dsigns) == n || throw(ArgumentError(
+        "signed diagonal descriptor length $(length(dsigns)) != n=$n",
+    ))
+    all(sign -> sign == 1 || sign == -1, dsigns) || throw(ArgumentError(
+        "signed diagonal descriptor must contain only +1/-1",
+    ))
+    isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
+        "regularization must be finite and nonnegative",
+    ))
+    return SparseSymbolicRequirements(
+        Int(n), Int(symbolic_epoch),
+        SparseMatrixCSC{Float64, Int}(pattern),
+        Int[sign for sign in dsigns], Float64(regularization),
+    )
 end
 
 """
     SparseSymbolicNumericCache{T}
 
-A sparse route factor cache: derives a fill-reducing symmetric ordering from
-the sparsity pattern once (`symbolic_epoch`), and reuses a preallocated
-numeric Cholesky buffer across matrix epochs.  Owns the ordering `perm`
-(and its inverse `pinv`), the factor buffer `U`, and a solve scratch, plus
-the `matrix_epoch` / `factor_epoch` counters and `FactorCacheState`.
+A sparse symmetric-LDL factor cache with a single retained CHOLMOD factor
+object, an owned factor-view CSC with the same colptr/rowval as the frozen
+pattern, and an independently retained copy of the original K values.
 """
 mutable struct SparseSymbolicNumericCache{T} <: AbstractFactorCache{T}
     n::Int
-    perm::Vector{Int}            # owned symbolic ordering (fixed by symbolic_epoch)
-    pinv::Vector{Int}            # inverse ordering
-    U::Matrix{T}                 # owned numeric factor buffer
-    scratch::Vector{T}           # preallocated solve scratch
+    colptr::Vector{Int}            # frozen lower-triangle CSC colptr
+    rowval::Vector{Int}            # frozen lower-triangle CSC rowval
+    factor_view::SparseMatrixCSC{T, Int}   # same structure; numeric buffer
+    original_values::Vector{T}     # retained original K values (unmodified)
+    dsigns::Vector{Int}            # signed diagonal descriptor
+    regularization::T              # signed static regularization magnitude
+    factor::Union{Nothing,LinearAlgebra.Factorization{T}}
     symbolic_epoch::Int
     matrix_epoch::Int
     factor_epoch::Int
+    symbolic_count::Int
+    numeric_count::Int
+    solve_count::Int
+    refine_count::Int
+    signature::UInt64
     status::FactorCacheState
 end
 
 function SparseSymbolicNumericCache{T}() where {T}
-    return SparseSymbolicNumericCache{T}(0, Vector{Int}(undef, 0), Vector{Int}(undef, 0),
-        Matrix{T}(undef, 0, 0), Vector{T}(undef, 0), 0, 0, 0, Unprepared)
+    return SparseSymbolicNumericCache{T}(
+        0, Vector{Int}(undef, 0), Vector{Int}(undef, 0),
+        spzeros(T, 0, 0), Vector{T}(undef, 0), Int[], zero(T), nothing,
+        0, 0, 0, 0, 0, 0, 0, UInt64(0), Unprepared,
+    )
 end
 
-function SparseSymbolicNumericCache{T}(pattern::SparseMatrixCSC; symbolic_epoch::Integer = 0) where {T}
+function SparseSymbolicNumericCache{T}(
+    pattern::SparseMatrixCSC{Float64, Int};
+    symbolic_epoch::Integer=0,
+    dsigns::AbstractVector{Int}=Int[],
+    regularization::Real=0.0,
+) where {T}
     cache = SparseSymbolicNumericCache{T}()
-    return prepare!(cache, SparseSymbolicRequirements(pattern; symbolic_epoch = symbolic_epoch))
+    return prepare!(cache, SparseSymbolicRequirements(
+        pattern;
+        symbolic_epoch=symbolic_epoch,
+        dsigns=dsigns,
+        regularization=regularization,
+    ))
 end
 
-function prepare!(cache::SparseSymbolicNumericCache{T}, req::SparseSymbolicRequirements) where {T}
+function _sparse_pattern_signature(
+    colptr::AbstractVector{Int}, rowval::AbstractVector{Int},
+)
+    signature = UInt64(0xcbf29ce484222325)
+    for value in colptr
+        signature = (signature ⊻ UInt64(value)) * UInt64(0x100000001b3)
+    end
+    for value in rowval
+        signature = (signature ⊻ UInt64(value)) * UInt64(0x100000001b3)
+    end
+    return signature
+end
+
+function prepare!(
+    cache::SparseSymbolicNumericCache{T},
+    req::SparseSymbolicRequirements,
+) where {T}
     n = req.n
     n >= 0 || throw(ArgumentError("dimension must be non-negative, got $n"))
-    # Symbolic analysis: a fill-reducing symmetric ordering from the pattern,
-    # obtained once (cold path) from a CHOLMOD symbolic factorization.  The
-    # ordering is fixed by `symbolic_epoch` and reused across matrix epochs.
-    perm = Vector{Int}(cholesky(Symmetric(req.pattern)).p)
-    length(perm) == n || throw(ArgumentError("ordering length $(length(perm)) != n=$n"))
-    pinv = Vector{Int}(undef, n)
-    @inbounds for i in 1:n
-        pinv[perm[i]] = i
+    pattern = req.pattern
+    size(pattern) == (n, n) || throw(DimensionMismatch(
+        "SparseSymbolicNumericCache pattern dimension mismatch",
+    ))
+    length(req.dsigns) == n || throw(ArgumentError(
+        "signed diagonal descriptor length mismatch",
+    ))
+    # Owned factor view: copy the frozen structure exactly.
+    colptr = Vector{Int}(pattern.colptr)
+    rowval = Vector{Int}(pattern.rowval)
+    nzval = Vector{T}(undef, length(rowval))
+    factor_view = SparseMatrixCSC{T, Int}(n, n, colptr, rowval, nzval)
+    # Every column must have a structural diagonal (the core pattern
+    # guarantees this for the x diagonal and the -Theta triangle).
+    @inbounds for j in 1:n
+        lo = colptr[j]
+        hi = colptr[j + 1] - 1
+        has_diagonal = false
+        for pointer in lo:hi
+            rowval[pointer] == j && (has_diagonal = true; break)
+        end
+        has_diagonal || throw(ArgumentError(
+            "sparse pattern column $j has no structural diagonal",
+        ))
     end
     cache.n = n
-    cache.perm = perm
-    cache.pinv = pinv
-    cache.U = Matrix{T}(undef, n, n)
-    cache.scratch = Vector{T}(undef, n)
+    cache.colptr = colptr
+    cache.rowval = rowval
+    cache.factor_view = factor_view
+    cache.original_values = Vector{T}(undef, length(rowval))
+    cache.dsigns = Int[sign for sign in req.dsigns]
+    cache.regularization = T(req.regularization)
+    cache.factor = nothing
     cache.symbolic_epoch = req.symbolic_epoch
     cache.matrix_epoch = 0
     cache.factor_epoch = 0
+    cache.symbolic_count = 0
+    cache.numeric_count = 0
+    cache.solve_count = 0
+    cache.refine_count = 0
+    cache.signature = _sparse_pattern_signature(colptr, rowval)
     cache.status = Prepared
     return cache
 end
 
-function factorize!(cache::SparseSymbolicNumericCache{T}, A::AbstractMatrix{T}, matrix_epoch::Integer) where {T}
-    size(A) == (cache.n, cache.n) || throw(DimensionMismatch(
-        "SparseSymbolicNumericCache factorize! dimension mismatch"))
+"""
+    _copy_values_into_view!(cache, K)
+
+Copy the caller's lower-triangle sparse `K` values into the owned factor
+view (same structure).  `K` must already be a validated `SymmetricCorePattern`
+matrix with matching colptr/rowval; a drift check is performed.
+"""
+function _copy_values_into_view!(
+    cache::SparseSymbolicNumericCache{T}, K::SparseMatrixCSC{T, Int},
+) where {T}
+    size(K) == (cache.n, cache.n) || throw(DimensionMismatch(
+        "factorize! dimension mismatch",
+    ))
+    K.colptr == cache.colptr || throw(ArgumentError(
+        "factorize! matrix colptr drifted from the frozen pattern",
+    ))
+    K.rowval == cache.rowval || throw(ArgumentError(
+        "factorize! matrix rowval drifted from the frozen pattern",
+    ))
+    all(isfinite, K.nzval) || throw(ArgumentError(
+        "factorize! matrix contains non-finite data",
+    ))
+    cache.original_values .= K.nzval
+    cache.factor_view.nzval .= K.nzval
+    return cache
+end
+
+"""
+    _apply_signed_regularization!(cache)
+
+Add `regularization * dsign[i]` to each structural diagonal entry of the
+factor view.  Mutates only the factor view; `original_values` is untouched.
+"""
+function _apply_signed_regularization!(
+    cache::SparseSymbolicNumericCache{T},
+) where {T}
+    colptr = cache.colptr
+    rowval = cache.rowval
+    nzval = cache.factor_view.nzval
+    dsigns = cache.dsigns
+    delta = cache.regularization
+    @inbounds for j in 1:cache.n
+        found = false
+        for pointer in colptr[j]:(colptr[j + 1] - 1)
+            if rowval[pointer] == j
+                nzval[pointer] += T(dsigns[j]) * delta
+                found = true
+                break
+            end
+        end
+        found || throw(ArgumentError(
+            "regularization cannot locate structural diagonal of column $j",
+        ))
+    end
+    return cache
+end
+
+"""
+    _restore_original_values!(cache)
+
+Restore the retained original K values into the factor view so the view
+always mirrors the unmodified operator after a successful factor.
+"""
+function _restore_original_values!(
+    cache::SparseSymbolicNumericCache{T},
+) where {T}
+    cache.factor_view.nzval .= cache.original_values
+    return cache
+end
+
+function factorize!(
+    cache::SparseSymbolicNumericCache{T},
+    K::AbstractMatrix{T},
+    matrix_epoch::Integer,
+) where {T}
+    K isa SparseMatrixCSC{T, Int} || throw(ArgumentError(
+        "SparseSymbolicNumericCache factorize! requires a SparseMatrixCSC",
+    ))
     if cache.status === Fresh && cache.matrix_epoch == Int(matrix_epoch)
         return cache
     end
     cache.status = Factoring
     try
-        _fill_permuted!(cache.U, A, cache.perm, cache.pinv)
-        _chol_factor!(cache.U)
+        _copy_values_into_view!(cache, K)
+        _apply_signed_regularization!(cache)
+        if cache.factor === nothing
+            # First numeric factor: also performs the sole symbolic analysis.
+            factor = ldlt(Symmetric(cache.factor_view, :L); check=false)
+            cache.factor = factor
+            cache.symbolic_count += 1
+        else
+            # Same pattern: reuse the same CHOLMOD factor object.
+            LinearAlgebra.ldlt!(
+                cache.factor, Symmetric(cache.factor_view, :L),
+            )
+        end
+        issuccess(cache.factor) || throw(ArgumentError(
+            "CHOLMOD LDL factorization reported failure",
+        ))
+        # The factor owns the regularized copy; restore the view to the
+        # original values so it mirrors the unmodified operator.
+        _restore_original_values!(cache)
         cache.matrix_epoch = Int(matrix_epoch)
         cache.factor_epoch += 1
+        cache.numeric_count += 1
         cache.status = Fresh
     catch
+        cache.factor = nothing
         cache.status = Failed
         rethrow()
     end
     return cache
 end
 
-# U ← P A Pᵀ (P is the symmetric ordering), stored as a dense symmetric copy
-# (both triangles) so `_chol_factor!` sees a valid symmetric matrix.
-function _fill_permuted!(U::Matrix{T}, A::AbstractMatrix{T}, perm::Vector{Int}, pinv::Vector{Int}) where {T}
-    n = length(perm)
-    fill!(U, zero(T))
-    if A isa SparseMatrixCSC
-        colptr = A.colptr; rowval = A.rowval; nzval = A.nzval
-        @inbounds for j in 1:n
-            pj = pinv[j]
-            for p in colptr[j]:colptr[j+1]-1
-                i = rowval[p]
-                pi = pinv[i]
-                U[pi, pj] = nzval[p]
-                U[pj, pi] = nzval[p]
-            end
-        end
-    else
-        @inbounds for j in 1:n
-            pj = pinv[j]
-            for i in 1:n
-                v = A[i, j]
-                pi = pinv[i]
-                U[pi, pj] = v
-                U[pj, pi] = v
-            end
-        end
-    end
-    return U
-end
-
-function solve!(cache::SparseSymbolicNumericCache{T}, destination::AbstractVector{T}, rhs::AbstractVector{T}) where {T}
+function solve!(
+    cache::SparseSymbolicNumericCache{T},
+    destination::AbstractVector{T},
+    rhs::AbstractVector{T},
+) where {T}
     _require_fresh(cache.status)
-    length(rhs) == cache.n || throw(DimensionMismatch("solve rhs length != n"))
-    length(destination) == cache.n || throw(DimensionMismatch("solve dest length != n"))
-    n = cache.n
-    @inbounds for k in 1:n
-        cache.scratch[k] = rhs[cache.perm[k]]
-    end
-    _chol_solve!(cache.scratch, cache.U, cache.scratch)
-    @inbounds for i in 1:n
-        destination[i] = cache.scratch[cache.pinv[i]]
-    end
+    cache.factor === nothing && throw(FactorCacheStateError(:solve, Fresh, Failed))
+    length(rhs) == cache.n || throw(DimensionMismatch(
+        "solve rhs length != n",
+    ))
+    length(destination) == cache.n || throw(DimensionMismatch(
+        "solve dest length != n",
+    ))
+    all(isfinite, rhs) || throw(ArgumentError(
+        "solve right-hand side contains non-finite data",
+    ))
+    # Public CHOLMOD `\` allocates a result object; copy it into the
+    # caller-owned destination.  Deliberately honest: no allocation-free
+    # claim is made for this sparse solve.
+    result = cache.factor \ rhs
+    copyto!(destination, result)
+    all(isfinite, destination) || throw(ArgumentError(
+        "solve produced non-finite data",
+    ))
+    cache.solve_count += 1
     return destination
 end
 
-function solve_multi!(cache::SparseSymbolicNumericCache{T}, destination::AbstractMatrix{T}, rhs::AbstractMatrix{T}) where {T}
+function solve_multi!(
+    cache::SparseSymbolicNumericCache{T},
+    destination::AbstractMatrix{T},
+    rhs::AbstractMatrix{T},
+) where {T}
     _require_fresh(cache.status)
-    size(rhs, 1) == cache.n || throw(DimensionMismatch("rhs rows != n"))
-    size(destination, 1) == cache.n || throw(DimensionMismatch("dest rows != n"))
-    size(destination, 2) == size(rhs, 2) || throw(DimensionMismatch("dest cols != rhs cols"))
-    for j in 1:size(rhs, 2)
-        @inbounds for k in 1:cache.n
-            cache.scratch[k] = rhs[cache.perm[k], j]
-        end
-        _chol_solve!(cache.scratch, cache.U, cache.scratch)
-        @inbounds for i in 1:cache.n
-            destination[i, j] = cache.scratch[cache.pinv[i]]
-        end
-    end
+    cache.factor === nothing && throw(FactorCacheStateError(:solve, Fresh, Failed))
+    size(rhs, 1) == cache.n || throw(DimensionMismatch(
+        "solve rhs rows != n",
+    ))
+    size(destination, 1) == cache.n || throw(DimensionMismatch(
+        "solve dest rows != n",
+    ))
+    size(destination, 2) == size(rhs, 2) || throw(DimensionMismatch(
+        "solve dest cols != rhs cols",
+    ))
+    all(isfinite, rhs) || throw(ArgumentError(
+        "solve right-hand side contains non-finite data",
+    ))
+    result = cache.factor \ rhs
+    copyto!(destination, result)
+    all(isfinite, destination) || throw(ArgumentError(
+        "solve produced non-finite data",
+    ))
+    cache.solve_count += 1
     return destination
 end
 
-function refine_once!(cache::SparseSymbolicNumericCache{T}, residual::AbstractVector{T}, correction::AbstractVector{T}) where {T}
+function refine_once!(
+    cache::SparseSymbolicNumericCache{T},
+    residual::AbstractVector{T},
+    correction::AbstractVector{T},
+) where {T}
     _require_fresh_for_refine(cache.status)
-    length(residual) == cache.n || throw(DimensionMismatch("refine residual length != n"))
-    length(correction) == cache.n || throw(DimensionMismatch("refine correction length != n"))
-    @inbounds for k in 1:cache.n
-        cache.scratch[k] = residual[cache.perm[k]]
-    end
-    _chol_solve!(cache.scratch, cache.U, cache.scratch)
-    @inbounds for i in 1:cache.n
-        correction[i] = cache.scratch[cache.pinv[i]]
-    end
+    cache.factor === nothing && throw(FactorCacheStateError(:refine, Fresh, Failed))
+    length(residual) == cache.n || throw(DimensionMismatch(
+        "refine residual length != n",
+    ))
+    length(correction) == cache.n || throw(DimensionMismatch(
+        "refine correction length != n",
+    ))
+    all(isfinite, residual) || throw(ArgumentError(
+        "refine residual contains non-finite data",
+    ))
+    result = cache.factor \ residual
+    copyto!(correction, result)
+    all(isfinite, correction) || throw(ArgumentError(
+        "refine produced non-finite data",
+    ))
+    cache.refine_count += 1
     return correction
 end
 
 function invalidate!(cache::SparseSymbolicNumericCache{T}) where {T}
+    cache.factor = nothing
     cache.matrix_epoch = 0
     cache.status = Invalid
     return cache
@@ -195,7 +395,20 @@ factor_symbolic_epoch(cache::SparseSymbolicNumericCache) = cache.symbolic_epoch
 factor_epoch(cache::SparseSymbolicNumericCache) = cache.factor_epoch
 
 function factor_diagnostics(cache::SparseSymbolicNumericCache{T}) where {T}
-    return (n = cache.n, symbolic_epoch = cache.symbolic_epoch,
-        matrix_epoch = cache.matrix_epoch, factor_epoch = cache.factor_epoch,
-        status = cache.status, ordering = cache.perm)
+    return (
+        provider = :cholmod,
+        kind = :symmetric_ldl,
+        n = cache.n,
+        symbolic_epoch = cache.symbolic_epoch,
+        matrix_epoch = cache.matrix_epoch,
+        factor_epoch = cache.factor_epoch,
+        status = cache.status,
+        symbolic_count = cache.symbolic_count,
+        numeric_count = cache.numeric_count,
+        solve_count = cache.solve_count,
+        refine_count = cache.refine_count,
+        regularization = cache.regularization,
+        signature = cache.signature,
+        solve_allocation_policy = :allocating_factor_backslash_copy,
+    )
 end
