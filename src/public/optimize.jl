@@ -479,6 +479,14 @@ function _public_original_dual_objective(
 end
 
 @inline function _public_primal_cone_residual(values, domain, shape::Union{Nothing,Int}=nothing)
+    # Centralized finite gate: a non-finite coordinate is never a valid cone
+    # certificate residual.  Return +Inf so the caller's finite gate rejects
+    # the certificate closed (B1).  This matters for the free cone (Reals),
+    # whose residual is otherwise identically zero, and for a Lorentz head of
+    # +Inf, whose margin would otherwise be `max(0, -Inf) == 0`.
+    @inbounds for value in values
+        isfinite(value) || return eltype(values)(Inf)
+    end
     if domain isa Reals
         return zero(eltype(values))
     elseif domain isa Nonnegative
@@ -539,6 +547,12 @@ free space.  Orthants, Lorentz/rotated-Lorentz cones, and PSD cones are
 self-dual under the native coordinates used by the lowerers.
 """
 @inline function _public_dual_cone_residual(values, domain, shape::Union{Nothing,Int}=nothing)
+    # Centralized finite gate: the dual of ZeroCone is the full free space,
+    # whose residual is otherwise identically zero, so NaN/Inf must be
+    # rejected explicitly (B1).
+    @inbounds for value in values
+        isfinite(value) || return eltype(values)(Inf)
+    end
     if domain isa Reals
         return maximum(abs, values; init=zero(eltype(values)))
     elseif domain isa ZeroCone
@@ -661,14 +675,22 @@ function _public_original_certificate(
     primal_residual_scaled = primal_residual / primal_scale
     dual_residual_scaled = dual_residual / dual_scale
 
-    finite = all(isfinite, primal) && all(isfinite, constraint_dual) &&
-             all(isfinite, dual_slack) && isfinite(primal_objective) &&
-             isfinite(dual_objective) && isfinite(primal_residual) &&
-             isfinite(dual_residual) && isfinite(relative_gap)
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data. NaN/Inf in inputs, transformed coordinates, derived scales,
+    # or compared residuals must fail closed before any comparison runs (B1).
     automatic = auto_tolerance(T, precision_bits(model))
     primal_limit = settings.tolerances.primal === nothing ? automatic : settings.tolerances.primal
     dual_limit = settings.tolerances.dual === nothing ? automatic : settings.tolerances.dual
     gap_limit = settings.tolerances.gap === nothing ? automatic : settings.tolerances.gap
+    finite = all(isfinite, primal) && all(isfinite, constraint_dual) &&
+             all(isfinite, dual_slack) && all(isfinite, row_values) &&
+             all(isfinite, row_dual) && all(isfinite, stationarity) &&
+             isfinite(primal_objective) && isfinite(dual_objective) &&
+             isfinite(primal_residual) && isfinite(dual_residual) &&
+             isfinite(relative_gap) && isfinite(primal_scale) &&
+             isfinite(dual_scale) && isfinite(primal_residual_scaled) &&
+             isfinite(dual_residual_scaled) && isfinite(primal_limit) &&
+             isfinite(dual_limit) && isfinite(gap_limit)
     numerical_valid = finite && primal_residual_scaled <= primal_limit &&
                       dual_residual_scaled <= dual_limit && relative_gap <= gap_limit
     valid = core_status === Optimal && numerical_valid

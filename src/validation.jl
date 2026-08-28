@@ -78,6 +78,12 @@ function _ray_diagnostic_tolerance(
     return max(T(128) * eps(T), min(requested, T(1e-8)))
 end
 
+@inline function _certificate_tolerances_valid(opts::SolverOptions)
+    return isfinite(opts.ϵ_gap) && opts.ϵ_gap >= zero(opts.ϵ_gap) &&
+           isfinite(opts.ϵ_primal) && opts.ϵ_primal >= zero(opts.ϵ_primal) &&
+           isfinite(opts.ϵ_dual) && opts.ϵ_dual >= zero(opts.ϵ_dual)
+end
+
 """
     infeasibility_diagnosis(prob, result, options=SolverOptions{T}())
 
@@ -950,6 +956,10 @@ function result_certificate(
     result::SDPResult{T},
     opts::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
+    tolerances_valid = _certificate_tolerances_valid(opts)
+    primal_tolerance = tolerances_valid ? opts.ϵ_primal : zero(T)
+    dual_tolerance = tolerances_valid ? opts.ϵ_dual : zero(T)
+    gap_tolerance = tolerances_valid ? opts.ϵ_gap : zero(T)
     p_objective = LinearAlgebra.dot(prob.c, result.x)
     d_objective = dual_objective(prob, result.y, result.Y)
     p_affine_residual, d_affine_residual = solution_residuals(
@@ -971,11 +981,11 @@ function result_certificate(
 
     primal_psd = _blocks_psd_certificate(
         result.X,
-        max(opts.ϵ_primal, opts.ϵ_gap),
+        max(primal_tolerance, gap_tolerance),
     )
     dual_psd = _blocks_psd_certificate(
         result.Y,
-        max(opts.ϵ_dual, opts.ϵ_gap),
+        max(dual_tolerance, gap_tolerance),
     )
     primal_cone_violation = _psd_violation(primal_psd, T)
     dual_cone_violation = _psd_violation(dual_psd, T)
@@ -1002,27 +1012,47 @@ function result_certificate(
     primal_block_backward_error =
         primal_block_backward_errors.mixed
     dual_backward_error = dual_backward_errors.mixed
-    primal_ok = primal_scaled <= opts.ϵ_primal
-    equality_ok = equality_backward_error <= opts.ϵ_primal
-    primal_backward_ok =
-        primal_block_backward_error <= opts.ϵ_primal
-    dual_ok = dual_scaled <= opts.ϵ_dual
-    dual_backward_ok = dual_backward_error <= opts.ϵ_dual
-    gap_ok = gap_relative <= opts.ϵ_gap
-
     primal_finite = isfinite(p_objective) &&
+                    isfinite(p_affine_residual) &&
+                    isfinite(primal_cone_violation) &&
                     isfinite(p_residual) &&
+                    isfinite(primal_scale) &&
+                    isfinite(primal_scaled) &&
                     isfinite(equality_backward_error) &&
+                    isfinite(primal_block_backward_error) &&
                     all(isfinite, result.x) &&
                     all(block -> all(isfinite, block), result.X)
     dual_finite = isfinite(d_objective) &&
+                  isfinite(d_affine_residual) &&
+                  isfinite(dual_cone_violation) &&
                   isfinite(d_residual) &&
+                  isfinite(dual_scale) &&
+                  isfinite(dual_scaled) &&
+                  isfinite(dual_backward_error) &&
                   all(isfinite, result.y) &&
                   all(block -> all(isfinite, block), result.Y)
     finite = primal_finite &&
              dual_finite &&
+             isfinite(gap) &&
+             isfinite(objective_scale) &&
              isfinite(gap_relative) &&
-             isfinite(complementarity)
+             isfinite(complementarity) &&
+             isfinite(complementarity_relative)
+
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data.  NaN/Inf must fail the certificate closed before any
+    # tolerance comparison runs (B1).
+    primal_ok = tolerances_valid && primal_finite &&
+                primal_scaled <= primal_tolerance
+    equality_ok = tolerances_valid && primal_finite &&
+                  equality_backward_error <= primal_tolerance
+    primal_backward_ok = tolerances_valid && primal_finite &&
+                         primal_block_backward_error <= primal_tolerance
+    dual_ok = tolerances_valid && dual_finite &&
+              dual_scaled <= dual_tolerance
+    dual_backward_ok = tolerances_valid && dual_finite &&
+                       dual_backward_error <= dual_tolerance
+    gap_ok = tolerances_valid && finite && gap_relative <= gap_tolerance
 
     structural_infeasibility =
         result.status === InfeasibleCert &&
@@ -1031,9 +1061,9 @@ function result_certificate(
             :structural_presolve_infeasibility,
         )
     optimize_infeasibility =
-        result.status in (PrimalInfeasible, DualInfeasible) ?
+        tolerances_valid && result.status in (PrimalInfeasible, DualInfeasible) ?
         infeasibility_diagnosis(prob, result, opts) :
-        (available=false, kind=:not_applicable)
+        (available=false, kind=tolerances_valid ? :not_applicable : :invalid_tolerance)
     certificate_kind = if structural_infeasibility
         :structural_infeasibility
     elseif result.status === PrimalInfeasible
@@ -1048,6 +1078,7 @@ function result_certificate(
         :optimality
     end
     failures = Symbol[]
+    tolerances_valid || push!(failures, :invalid_tolerance)
     if certificate_kind === :structural_infeasibility
         # The exact zero-row contradiction is its own presolve witness:
         # `0'x >= h` with `h > 0`. It does not require an iterate-based dual
@@ -1159,6 +1190,10 @@ function result_certificate(
     result::ConicResult{T},
     options::SolverOptions{T}=SolverOptions{T}(),
 ) where {T}
+    tolerances_valid = _certificate_tolerances_valid(options)
+    primal_tolerance = tolerances_valid ? options.ϵ_primal : zero(T)
+    dual_tolerance = tolerances_valid ? options.ϵ_dual : zero(T)
+    gap_tolerance = tolerances_valid ? options.ϵ_gap : zero(T)
     length(result.x) == problem.variables || throw(DimensionMismatch(
         "SOCP result has the wrong primal dimension",
     ))
@@ -1256,15 +1291,37 @@ function result_certificate(
     primal_scaled = primal_residual / primal_scale
     dual_scaled = dual_residual / dual_scale
     failures = Symbol[]
+    tolerances_valid || push!(failures, :invalid_tolerance)
+    complementarity_relative = abs(complementarity) / objective_scale
     finite &= isfinite(primal_objective) && isfinite(dual_objective) &&
-              isfinite(gap_relative) && isfinite(complementarity)
+              isfinite(primal_affine_residual) &&
+              isfinite(dual_affine_residual) &&
+              isfinite(primal_cone_violation) &&
+              isfinite(dual_cone_violation) &&
+              isfinite(primal_residual) && isfinite(dual_residual) &&
+              isfinite(primal_scale) && isfinite(dual_scale) &&
+              isfinite(primal_scaled) && isfinite(dual_scaled) &&
+              isfinite(objective_scale) && isfinite(gap) &&
+              isfinite(gap_relative) && isfinite(complementarity) &&
+              isfinite(complementarity_relative) &&
+              all(isfinite, equality_residual) && all(isfinite, dual_affine) &&
+              all(isfinite, primal_margins) && all(isfinite, dual_margins) &&
+              all(isfinite, primal_block_residuals)
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data.  NaN/Inf must fail the certificate closed before any
+    # tolerance comparison runs (B1).
     finite || push!(failures, :nonfinite)
-    primal_scaled <= options.ϵ_primal || push!(failures, :primal_residual)
-    dual_scaled <= options.ϵ_dual || push!(failures, :dual_residual)
-    gap_relative <= options.ϵ_gap || push!(failures, :duality_gap)
-    primal_cone_violation <= options.ϵ_primal ||
+    (tolerances_valid && finite && primal_scaled <= primal_tolerance) ||
+        push!(failures, :primal_residual)
+    (tolerances_valid && finite && dual_scaled <= dual_tolerance) ||
+        push!(failures, :dual_residual)
+    (tolerances_valid && finite && gap_relative <= gap_tolerance) ||
+        push!(failures, :duality_gap)
+    (tolerances_valid && finite &&
+     primal_cone_violation <= primal_tolerance) ||
         push!(failures, :primal_lorentz_cone)
-    dual_cone_violation <= options.ϵ_dual ||
+    (tolerances_valid && finite &&
+     dual_cone_violation <= dual_tolerance) ||
         push!(failures, :dual_lorentz_cone)
     return (
         available=true,
@@ -1285,7 +1342,7 @@ function result_certificate(
         primal_residual_scaled=primal_scaled,
         dual_residual_scaled=dual_scaled,
         complementarity,
-        complementarity_relative=abs(complementarity) / objective_scale,
+        complementarity_relative,
         primal_residual_limit=options.ϵ_primal,
         dual_residual_limit=options.ϵ_dual,
         gap_limit=options.ϵ_gap,
@@ -1511,6 +1568,15 @@ function _minimal_sdp_optimality_gate(
     result::SDPResult{T},
     opts::SolverOptions{T},
 ) where {T}
+    # Same validated local tolerance semantics as both result_certificate
+    # overloads: comparisons and PSD certification only run with finite,
+    # non-negative tolerances, and NaN/+Inf/-Inf/negative options fail the
+    # gate closed before any tolerance comparison or PSD check can observe
+    # them.
+    tolerances_valid = _certificate_tolerances_valid(opts)
+    primal_tolerance = tolerances_valid ? opts.ϵ_primal : zero(T)
+    dual_tolerance = tolerances_valid ? opts.ϵ_dual : zero(T)
+    gap_tolerance = tolerances_valid ? opts.ϵ_gap : zero(T)
     primal_objective = LinearAlgebra.dot(prob.c, result.x)
     dual_objective_value = dual_objective(prob, result.y, result.Y)
     primal_affine_residual, dual_affine_residual = solution_residuals(
@@ -1528,10 +1594,10 @@ function _minimal_sdp_optimality_gate(
     gap_relative = abs(gap) / objective_scale
 
     primal_psd = _blocks_psd_certificate(
-        result.X, max(opts.ϵ_primal, opts.ϵ_gap),
+        result.X, max(primal_tolerance, gap_tolerance),
     )
     dual_psd = _blocks_psd_certificate(
-        result.Y, max(opts.ϵ_dual, opts.ϵ_gap),
+        result.Y, max(dual_tolerance, gap_tolerance),
     )
     primal_residual = max(
         primal_affine_residual, _psd_violation(primal_psd, T),
@@ -1550,22 +1616,35 @@ function _minimal_sdp_optimality_gate(
     dual_scale = one(T) + knrmInf(prob.c)
     primal_scaled = primal_residual / primal_scale
     dual_scaled = dual_residual / dual_scale
-    gap_ok = gap_relative <= opts.ϵ_gap
     finite =
         isfinite(primal_objective) &&
         isfinite(dual_objective_value) &&
+        isfinite(gap) &&
+        isfinite(objective_scale) &&
         isfinite(gap_relative) &&
+        isfinite(primal_affine_residual) &&
+        isfinite(dual_affine_residual) &&
         isfinite(primal_residual) &&
         isfinite(dual_residual) &&
+        isfinite(primal_scale) && isfinite(dual_scale) &&
+        isfinite(primal_scaled) && isfinite(dual_scaled) &&
         all(isfinite, result.x) &&
         all(block -> all(isfinite, block), result.X) &&
         all(isfinite, result.y) &&
         all(block -> all(isfinite, block), result.Y)
 
+    # Centralized finite gate: tolerance comparisons are only meaningful on
+    # finite data (B1) and only with validated tolerances (P1).
+    gap_ok = tolerances_valid && finite &&
+             gap_relative <= gap_tolerance
+
     failures = Symbol[]
+    tolerances_valid || push!(failures, :invalid_tolerance)
     finite || push!(failures, :nonfinite)
-    primal_scaled <= opts.ϵ_primal || push!(failures, :primal_residual)
-    dual_scaled <= opts.ϵ_dual || push!(failures, :dual_residual)
+    (tolerances_valid && finite && primal_scaled <= primal_tolerance) ||
+        push!(failures, :primal_residual)
+    (tolerances_valid && finite && dual_scaled <= dual_tolerance) ||
+        push!(failures, :dual_residual)
     gap_ok || push!(failures, :duality_gap)
     primal_psd.ok || push!(failures, :primal_psd)
     dual_psd.ok || push!(failures, :dual_psd)

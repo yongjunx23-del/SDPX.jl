@@ -22,6 +22,11 @@ Uses the converged eigendecomposition on the preallocated workspace.
 """
 function membership(cone::PSDTriangleCone{T}, v::AbstractVector) where {T}
     length(v) == cone.len || throw(DimensionMismatch())
+    # Fail closed on non-finite coordinates before the eigensolver runs: an
+    # eigendecomposition of a NaN/Inf matrix is not a cone-membership verdict.
+    @inbounds for index in eachindex(v)
+        isfinite(v[index]) || return false
+    end
     s = cone.scratch
     _eigen!(s, v)
     n = cone.dim

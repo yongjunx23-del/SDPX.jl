@@ -17,6 +17,9 @@
 function membership(cone::NonnegativeCone, v::AbstractVector)
     length(v) == cone.dim || throw(DimensionMismatch())
     @inbounds for i in 1:cone.dim
+        # Fail closed on non-finite coordinates: `NaN < 0` is `false`, so a
+        # NaN would otherwise bypass the rejection branch (B1).
+        isfinite(v[i]) || return false
         v[i] < 0 && return false
     end
     return true
