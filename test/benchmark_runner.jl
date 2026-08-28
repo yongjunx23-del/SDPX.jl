@@ -230,13 +230,16 @@ end
     @test sampled.sample_semantic_parity
     @test sampled.sample_median_seconds < builder.delay
 
-    legacy = only(run_suite(
-        catalog, :smoke; execution_mode=:solve, requested_engine=:legacy,
+    # The legacy engine token is retired: an explicit native-HSD engine
+    # request on this build-only injected catalog fail-closes at the run
+    # boundary (no native solve adapter is registered in the harness yet).
+    native = only(run_suite(
+        catalog, :smoke; execution_mode=:solve, requested_engine=:native_hsd,
         samples=1, warmup=false, strict_semantics=false,
         output=tempname() * ".toml",
     ).rows)
-    @test legacy.status == :error
-    @test legacy.executed_engine == :none
+    @test native.status == :error
+    @test native.executed_engine == :none
 
     for (label, override) in (
         ("solve_reference", (solve_reference=nothing,)),
@@ -583,7 +586,7 @@ end
         catalog_version="2",
         scaling=:different_scale,
         layout=:different_layout,
-        requested_engine=:legacy,
+        requested_engine=:native_hsd,
         campaign_id="different-campaign",
         catalog_source_sha256=repeat("d", 64),
     )
@@ -604,13 +607,18 @@ end
     @test length(document["result"]) == 1
     @test only(document["result"])["problem_id"] == "smoke/lp_box"
 
-    explicit_legacy = only(run_suite(
-        injected_catalog, :smoke; requested_engine=:legacy,
-        samples=1, warmup=false, output=tempname() * ".toml",
+    # Explicit legacy-engine execution is retired with the legacy engine:
+    # the harness accepts the native-HSD engine identity for construction-only
+    # rows and fail-closes at the solve boundary until a native solve adapter
+    # is registered (the Phase 10 migration target for this harness).
+    explicit_native = only(run_suite(
+        injected_catalog, :smoke; requested_engine=:native_hsd,
+        samples=1, warmup=false, strict_semantics=false,
+        output=tempname() * ".toml",
     ).rows)
-    @test explicit_legacy.requested_engine == :legacy
-    @test explicit_legacy.executed_engine == :sdpx_legacy
-    @test explicit_legacy.semantic_pass
+    @test explicit_native.requested_engine == :native_hsd
+    @test explicit_native.executed_engine == :none
+    @test explicit_native.status == :error
 
     unavailable = only(run_suite(
         injected_catalog, :smoke; requested_engine=:catalog_contract,

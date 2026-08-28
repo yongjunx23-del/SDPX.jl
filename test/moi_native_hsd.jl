@@ -459,8 +459,11 @@ end
     @test MOI.get(optimizer, MOI.RawOptimizerAttribute("engine")) === :auto
     MOI.set(optimizer, MOI.RawOptimizerAttribute("engine"), :native_hsd)
     @test optimizer.engine === :native_hsd
-    MOI.set(optimizer, MOI.RawOptimizerAttribute("engine"), :legacy)
-    @test optimizer.engine === :legacy
+    # The legacy engine selector is not exercised: Phase 10 deletes the legacy
+    # engine, so the raw-attribute surface is tested with the native and
+    # default selectors only.
+    MOI.set(optimizer, MOI.RawOptimizerAttribute("engine"), :auto)
+    @test optimizer.engine === :auto
     @test_throws ArgumentError MOI.set(
         optimizer,
         MOI.RawOptimizerAttribute("engine"),
@@ -524,18 +527,18 @@ end
     @test !(MOI.get(default_optimizer, MOI.RawSolver()).execution_plan.payload isa
             SDPX.NativeHSDPlan)
 
-    legacy_source, _, _ = _mnh_optimal_source(Float64, (:nonnegative,))
-    legacy_optimizer = SDPX.Optimizer(
-        engine=:legacy,
+    native_source, _, _ = _mnh_optimal_source(Float64, (:nonnegative,))
+    native_optimizer = SDPX.Optimizer(
+        engine=:native_hsd,
         tolerance=1e-6,
         max_iterations=100,
         verbosity=0,
     )
-    MOI.copy_to(legacy_optimizer, legacy_source)
-    MOI.optimize!(legacy_optimizer)
-    @test legacy_optimizer.engine === :legacy
-    @test !(MOI.get(legacy_optimizer, MOI.RawSolver()).execution_plan.payload isa
-            SDPX.NativeHSDPlan)
+    MOI.copy_to(native_optimizer, native_source)
+    MOI.optimize!(native_optimizer)
+    @test native_optimizer.engine === :native_hsd
+    @test MOI.get(native_optimizer, MOI.RawSolver()).execution_plan.payload isa
+          SDPX.NativeHSDPlan
 end
 
 @testset "MOI native mixed does not call legacy lowerer or PSD lift" begin

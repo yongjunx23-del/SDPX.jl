@@ -75,20 +75,29 @@ end
     @testset "exact full-step denominator fault" begin
         # At this point G=H=q=r=d=u=1, hence delta=d-r'u=0 exactly.
         # The predictor numerator is 2, so this is not a benign 0/0 case.
-        state = _p0b_border_state(Float64)
-        snapshot = _p0b_iterate_snapshot(state)
-        @test SDPX.kkt_factor_count(state.driver) == 0
+        # The native product caller classifies the singular full border:
+        # the base HSDState driver is never factored (the bordered route owns
+        # its own pivoted-LU driver), and one numeric factor attempt is
+        # observed on the product route before the typed failure.
+        base_state = _p0b_border_state(Float64)
+        state = SDPX.ProductConeHSDState(base_state.canonical)
+        SDPX.product_hsd_cold_start!(state)
+        base = state.base
+        snapshot = _p0b_iterate_snapshot(base)
+        @test SDPX.product_hsd_factor_count(state) == 0
+        @test SDPX.kkt_factor_count(base.driver) == 0
 
-        code = SDPX.hsd_step!(state)
+        code = SDPX.product_hsd_step!(state)
 
-        @test code === SDPX.HSDStepDirectionFailed
-        @test SDPX.kkt_factor_count(state.driver) == 1
-        @test state.record.iterations == 0
-        @test state.record.step_size == 0.0
-        @test _p0b_iterate_unchanged(state, snapshot)
-        @test _p0b_all_directions_finite(state)
-        @test state.dtau == 0.0
-        @test all(iszero, state.dxr)
+        @test code === SDPX.HSDStepSingularKKT
+        @test SDPX.product_hsd_factor_count(state) == 1
+        @test SDPX.kkt_factor_count(base.driver) == 0
+        @test base.record.iterations == 0
+        @test base.record.step_size == 0.0
+        @test _p0b_iterate_unchanged(base, snapshot)
+        @test _p0b_all_directions_finite(base)
+        @test base.dtau == 0.0
+        @test all(iszero, base.dxr)
     end
 
     @testset "product caller classifies the singular full border" begin
