@@ -608,6 +608,19 @@ function _check_solve_multi(::Type{T}, rng; label::String) where {T<:AbstractFlo
         @test dest_panel[:, 2] ≈ 2 .* dest atol=T(1024) * eps(T)
         @test dest_panel[:, 3] ≈ 3 .* dest atol=T(1024) * eps(T)
 
+        # Non-unit-leading-stride destinations are supported through an owned
+        # dense provider buffer; the view is written only after a valid solve.
+        parent_panel = zeros(T, 2 * dimension, 3)
+        strided_view = @view parent_panel[1:2:end, :]
+        @test stride(strided_view, 1) != 1
+        @test PK.solve_multi!(session, strided_view, panel)
+        @test strided_view ≈ dest_panel atol=T(1024) * eps(T)
+        parent_vector = zeros(T, 2 * dimension)
+        strided_vector = @view parent_vector[1:2:end]
+        @test stride(strided_vector, 1) != 1
+        @test PK.solve_multi!(session, strided_vector, rhs)
+        @test strided_vector ≈ dest atol=T(1024) * eps(T)
+
         # size mismatch -> DimensionMismatch (matches solve!)
         @test_throws DimensionMismatch PK.solve_multi!(session, zeros(T, dimension - 1), rhs)
         @test_throws DimensionMismatch PK.solve_multi!(session, dest, vcat(rhs, one(T)))

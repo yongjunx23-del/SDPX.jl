@@ -528,19 +528,23 @@ function solve_multi!(
     end
     _solve_guard(session, destination, rhs) || return false
     K = session.factor
-    copyto!(destination, rhs)
+    # PureKLU requires a strided, unit-leading-stride solve destination.
+    # Solve into an owned dense buffer so arbitrary views cannot be partially
+    # overwritten before the provider rejects their layout.
+    work = rhs isa AbstractVector ? Vector{T}(rhs) : Matrix{T}(rhs)
     try
-        solve!(K, destination)
+        solve!(K, work)
     catch
         session.status = PUREKLU_FAILED
         session.last_reason = :solve_failed
         return false
     end
-    all(isfinite, destination) || begin
+    all(isfinite, work) || begin
         session.status = PUREKLU_FAILED
         session.last_reason = :nonfinite_solution
         return false
     end
+    copyto!(destination, work)
     return true
 end
 
