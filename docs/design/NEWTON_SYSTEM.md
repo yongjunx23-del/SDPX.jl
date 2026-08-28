@@ -238,6 +238,29 @@ operator is generally **non-symmetric** (`q ≠ r`).  Consequently the augmented
 core is the LDL-eligible object; the old bordered and reduced-Schur operators
 remain LU-only.
 
+## Symmetric augmented-core CSC pattern contract
+
+`src/kkt/symmetric_core.jl` owns a setup-built `SymmetricCorePattern{T}`:
+the frozen lower-triangle CSC structure of
+
+```text
+K = [ 0    Ar' ]
+    [ Ar  -Theta ]
+```
+
+in rank-reduced coordinates `x = V*xr`.  The `x` diagonal (columns
+`1..nr`) is structurally present as numerical zeros; `Ar` occupies rows
+`nr+1..nr+m` of the x columns; `-Theta` occupies the lower triangle of the
+y block with a dense lower triangle per ordered cone block range.  The
+pattern signature depends only on Ar `colptr`/`rowval`, the dimensions, the
+ordered cone block ranges, and the declared per-block shape (`:dense_lower`
+only).  Numeric refills (`refill!`) write only `nzval` through frozen
+`ar_slots`, `theta_slots`, and `x_diag_slots`; they never change
+`colptr`/`rowval`/`signature` and never allocate a new global matrix.
+Refill rejects dimension/range mismatch, asymmetric or non-finite `Theta`,
+pattern drift, and a numeric `Ar` whose CSC structure differs.  No
+factorization, regularization, or solve lives in this file.
+
 ## Known integration boundary
 
 `src/kkt/system.jl:1-6` declares the semantic layer as the sign authority, but

@@ -26,6 +26,7 @@
 using Test
 using LinearAlgebra
 using SparseArrays
+using SDPX
 
 struct _Fixture
     V::Matrix{Float64}       # n x nr rank-reduction basis, V'V = I
@@ -298,4 +299,122 @@ end
             @test maximum(abs, KB - KB') > 1e-10 * scale
         end
     end
+end
+
+# ---------------------------------------------------------------------
+# C2: frozen symmetric augmented-core CSC pattern and in-place refill.
+# Exercises the production `SDPX.SymmetricCorePattern` from
+# src/kkt/symmetric_core.jl (loaded through `using SDPX` above).
+# ---------------------------------------------------------------------
+
+"""Two dense cone blocks (rows 1:2 and 3:5) for m = 5."""
+function _core_blocks()
+    return ([1:2, 3:5], [:dense_lower, :dense_lower])
+end
+
+"""Ar with an explicit structural numeric zero at (3, 1)."""
+function _core_ar(scale::Float64 = 1.0)
+    return sparse(
+        [1, 3, 2, 4, 5],            # rows
+        [1, 1, 2, 2, 2],            # columns
+        scale .* [1.0, 0.0, 2.0, -1.5, 0.5],   # (3,1) is a stored zero
+        5, 2,
+    )
+end
+
+"""Block-diagonal symmetric Theta over [1:2, 3:5]."""
+function _core_theta(scale::Float64 = 1.0)
+    Theta = zeros(5, 5)
+    Theta[1, 1] = 2.0; Theta[1, 2] = 0.4; Theta[2, 2] = 1.3
+    Theta[2, 1] = Theta[1, 2]
+    Theta[3, 3] = 3.0; Theta[3, 4] = 0.1; Theta[3, 5] = 0.2
+    Theta[4, 3] = Theta[3, 4]; Theta[4, 4] = 2.5; Theta[4, 5] = 0.3
+    Theta[5, 3] = Theta[3, 5]; Theta[5, 4] = Theta[4, 5]; Theta[5, 5] = 1.8
+    return scale .* Theta
+end
+
+function _direct_core_dense(Ar, Theta)
+    nr = size(Ar, 2)
+    return [zeros(nr, nr) Matrix(Ar'); Matrix(Ar) -Theta]
+end
+
+"""Theta whose off-diagonal copy disagrees with its mirror."""
+function _core_theta_asymmetric()
+    Theta = _core_theta()
+    Theta[1, 2] = 0.4
+    Theta[2, 1] = 0.7
+    return Theta
+end
+
+"""Theta containing a non-finite entry."""
+function _core_theta_nan()
+    Theta = _core_theta()
+    Theta[3, 3] = NaN
+    return Theta
+end
+
+@testset "Symmetric augmented-core CSC pattern and refill" begin
+    ranges, shapes = _core_blocks()
+    Ar = _core_ar()
+    Theta = _core_theta()
+    pattern = SDPX.SymmetricCorePattern(Ar, ranges, shapes)
+
+    @test pattern.nr == 2
+    @test pattern.m == 5
+    @test SDPX.symmetric_core_dimension(pattern) == 7
+    expected_slots = pattern.nr + nnz(Ar) +
+                     (3 + 6)          # blocks of size 2 and 3 lower triangles
+    @test length(SDPX.symmetric_core_nzval(pattern)) == expected_slots
+    @test length(SDPX.symmetric_core_rowval(pattern)) == expected_slots
+
+    # Numeric values never change the frozen signature.
+    Ar2 = _core_ar(2.5)
+    Theta2 = _core_theta(3.0)
+    pattern2 = SDPX.SymmetricCorePattern(Ar2, ranges, shapes)
+    @test SDPX.symmetric_core_signature(pattern2) ==
+          SDPX.symmetric_core_signature(pattern)
+    drifted = sparse([1, 2, 2, 4, 5], [1, 1, 2, 2, 2],
+        [1.0, 0.0, 2.0, -1.5, 0.5], 5, 2)  # column 1 rows {1,2} instead of {1,3}
+    pattern_drift = SDPX.SymmetricCorePattern(drifted, ranges, shapes)
+    @test SDPX.symmetric_core_signature(pattern_drift) !=
+          SDPX.symmetric_core_signature(pattern)
+
+    # First refill: expanded dense K equals the direct augmented core.
+    cp = pattern.colptr
+    rv = pattern.rowval
+    sig = SDPX.symmetric_core_signature(pattern)
+    SDPX.refill!(pattern, Ar, Theta)
+    @test pattern.colptr === cp && pattern.rowval === rv
+    @test SDPX.symmetric_core_signature(pattern) == sig
+    K = SDPX.materialize_dense(pattern)
+    @test size(K) == (7, 7)
+    @test K == _direct_core_dense(Ar, Theta)   # elementwise, incl. stored zeros
+    @test all(K .== transpose(K))              # expanded triangle is symmetric
+
+    # Second numeric refill with changed values: pattern must be unchanged.
+    SDPX.refill!(pattern, Ar2, Theta2)
+    @test pattern.colptr === cp && pattern.rowval === rv
+    @test SDPX.symmetric_core_signature(pattern) == sig
+    K2 = SDPX.materialize_dense(pattern)
+    @test K2 == _direct_core_dense(Ar2, Theta2)
+    @test all(K2 .== transpose(K2))
+
+    # Rejections ----------------------------------------------------
+    @test_throws ArgumentError SDPX.refill!(
+        pattern, Ar, _core_theta_asymmetric(),
+    )
+    @test_throws ArgumentError SDPX.refill!(pattern, Ar, _core_theta_nan())
+    @test_throws DimensionMismatch SDPX.refill!(
+        pattern, sparse([1], [1], [1.0], 5, 3), Theta,
+    )
+    @test_throws ArgumentError SDPX.refill!(pattern, drifted, Theta)
+    @test_throws ArgumentError SDPX.SymmetricCorePattern(
+        Ar, [1:2, 4:5], shapes,           # gap at row 3
+    )
+    @test_throws ArgumentError SDPX.SymmetricCorePattern(
+        Ar, [1:2, 2:5], shapes,           # overlap at row 2
+    )
+    @test_throws ArgumentError SDPX.SymmetricCorePattern(
+        Ar, ranges, [:dense_lower, :unsupported_shape],
+    )
 end
