@@ -12,7 +12,12 @@ function _solve_sdp_with_frontend(problem::SDPProblem{T}, options::SolveOptions)
     frontend_started = time_ns()
     resolved = resolve_solve_options(T, options)
     frontend_seconds = (time_ns() - frontend_started) / 1.0e9
-    result = solve!(problem, resolved.core)
+    # Native product-HSD production path: the all-auto frontend builds a
+    # typed Model/Settings/Outputs and calls the public `optimize!` seam
+    # (engine=:native_hsd) through the entrypoint bridge; the returned
+    # result is adapted back to the legacy SDPResult schema in original
+    # coordinates. No interior_point solve! is reachable from here.
+    result = _bridge_sdp_solve(problem, resolved.core)
     return _with_frontend_timing(
         result,
         frontend_seconds,

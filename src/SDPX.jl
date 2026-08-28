@@ -145,6 +145,7 @@ include("performance_trace.jl")
 include("public/result.jl")
 include("hsd/native_hsd_public.jl")
 include("public/optimize.jl")
+include("entrypoint_bridge.jl")
 include("moi_wrapper.jl")
 
 # v0.5 has one public modeling/solve interface.  Mature problem, workspace,
