@@ -1026,8 +1026,11 @@ RSOC 和 Nonpositive 在原坐标中单独验证 reconstruction。
 * ✅ `IterLimit`、`TimeLimit`、`InsufficientPrecision`、`NumericalFailure` 等
   typed failure 贯穿 product/public termination；证书仍只在原坐标晋升状态；
 * ✅ expanded 默认重评：quick/Phase-0/Wave-D 子集无退化且关闭 tiny SOC/rank-one
-  PSD，但完整 opt-in 矩阵出现 SOC=`NumericalFailure`、LP+SOC=`IterLimit`、
-  SOC+PSD=`NumericalFailure`（287/9，bordered 基线 290/6），故 **bordered 保持默认**；
+  PSD；完整 opt-in 矩阵中 LP+SOC 从 certified optimal（dual 3.29e-11、gap
+  1.19e-11）退化为 `IterLimit`，SOC+PSD 从 certified optimal（dual 4.10e-11、
+  gap 1.81e-13）退化为 iteration-0 `NumericalFailure`。Expanded 同时关闭
+  bordered 的 RSOC failure，并改变已失败 SOC 的退出类型，净结果 287/9，
+  bordered 基线 290/6，故 **bordered 保持默认**；
 * ✅ Ruiz 已以 `equilibration=:ruiz` 接线但保持 `:off` 默认：mixed probe
   cond(A) 2.0→√2 且 18/18 迭代等价；CFT probe cond(A) 2.0→10.9293，
   `:off` 12 迭代 certified optimal，`:ruiz` 400 次 IterLimit。

@@ -5,10 +5,12 @@
 #   Wave H reran Phase 0 and Wave D under both routes: every previously green
 #   quick/Phase-0/Wave-D case remains certificate-backed; expanded additionally
 #   closes tiny SOC and rank-one PSD. The complete native opt-in matrix exposes
-#   three regressions versus bordered: SOC -> NumericalFailure, LP+SOC ->
-#   IterLimit, and SOC+PSD -> NumericalFailure (nine strict assertions; 287/9
-#   versus the bordered 290/6 baseline). Therefore bordered remains the public
-#   default; expanded remains explicitly selectable for its closed gaps.
+#   two regressions on bordered-green cases: LP+SOC goes from certified optimal
+#   (dual residual 3.29e-11, gap 1.19e-11) to IterLimit, and SOC+PSD goes from
+#   certified optimal (dual residual 4.10e-11, gap 1.81e-13) to iteration-0
+#   NumericalFailure. Expanded closes the bordered RSOC failure and changes the
+#   already-failing SOC exit, yielding 287/9 versus the bordered 290/6 baseline.
+#   Therefore bordered remains default; expanded stays selectable for gaps.
 #
 # D3 (equilibration default, Wave H rerun after correcting frozen row-scale
 #   ownership): reduced mixed free/PSD cond(A) improves 2.0 -> sqrt(2), with

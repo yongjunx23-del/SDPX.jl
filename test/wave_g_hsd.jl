@@ -26,7 +26,7 @@ const _WAVE_G_BB = Main.BootstrapBenchmark
 end
 
 @testset "Wave G expanded simple-model gate" begin
-    # Wave H retained bordered after three complete-matrix expanded regressions.
+    # Wave H retained bordered after LP+SOC and SOC+PSD expanded regressions.
     @test SDPX.Settings{Float64}().kkt_route === :bordered
     for (problem, parameters) in [
         (:lp, (sites=4,)),
