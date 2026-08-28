@@ -26,6 +26,8 @@ const _WAVE_G_BB = Main.BootstrapBenchmark
 end
 
 @testset "Wave G expanded simple-model gate" begin
+    # Wave H promoted the repaired expanded route after full route parity data.
+    @test SDPX.Settings{Float64}().kkt_route === :expanded
     for (problem, parameters) in [
         (:lp, (sites=4,)),
         (:socp, (

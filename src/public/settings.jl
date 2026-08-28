@@ -263,8 +263,9 @@ function Settings(
     limits::Limits=Limits(),
     engine::Symbol=:auto,
     scaling::Symbol=:auto,
+    equilibration::Symbol=:off,
     formulation::Symbol=:auto,
-    kkt_route::Symbol=:bordered,
+    kkt_route::Symbol=:expanded,
     provider::Symbol=:auto,
     presolve::Symbol=:auto,
     algorithm::Symbol=:auto,
@@ -277,11 +278,15 @@ function Settings(
     certification::Bool=true,
     blas_threads::Union{Nothing,Int}=nothing,
 ) where {T<:AbstractFloat}
+    _validate_symbol(equilibration, (:off, :ruiz), "equilibration")
+    equilibration === :ruiz && !(scaling in (:auto, :equilibrate)) &&
+        throw(ArgumentError("equilibration=:ruiz conflicts with scaling=$scaling"))
+    effective_scaling = equilibration === :ruiz ? :equilibrate : scaling
     return Settings{T}(
         tolerances,
         limits,
         engine,
-        scaling,
+        effective_scaling,
         formulation,
         kkt_route,
         provider,
@@ -299,6 +304,19 @@ function Settings(
 end
 
 Settings{T}(; kwargs...) where {T<:AbstractFloat} = Settings(T; kwargs...)
+
+# `scaling` predates the prepared Phase-4 map and remains ABI-compatible.
+# The narrow `equilibration` view gives the native route one unambiguous public
+# spelling without adding a duplicate stored policy field.
+@inline function Base.getproperty(settings::Settings, name::Symbol)
+    if name === :equilibration
+        return getfield(settings, :scaling) === :equilibrate ? :ruiz : :off
+    end
+    return getfield(settings, name)
+end
+@inline function Base.propertynames(settings::Settings, private::Bool=false)
+    return (fieldnames(typeof(settings))..., :equilibration)
+end
 
 """
     Settings(model; kwargs...)

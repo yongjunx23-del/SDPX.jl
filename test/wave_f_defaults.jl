@@ -1,11 +1,12 @@
 # Wave F — default-route and equilibration decisions (data-driven, recorded).
 #
 # D2 (:expanded default): Wave F originally measured iteration-0 breakdowns on
-#   LP/SOCP/Matrix. Wave G diagnosed premature rejection of the finite adjacent
-#   homogeneous-border inertia and repaired the HSD adapter. Both routes now
-#   return certificate-backed optimal results on all three models. :bordered
-#   remains the default pending the complete Phase 5 matrix; the former simple-
-#   model gate item is closed. Assertions below encode the repaired behavior.
+#   LP/SOCP/Matrix. Wave G repaired the adjacent homogeneous-border inertia.
+#   Wave H reran Phase 0 and Wave D under both routes: every previously green
+#   case remains certificate-backed; expanded additionally closes tiny SOC and
+#   rank-one PSD, while the bounded-capped historical gap fails identically at
+#   iteration 0 under both routes. Expanded is therefore the public default;
+#   bordered remains explicitly selectable and allocation-tested.
 #
 # D1 (equilibration default): MEASURED that cone-preserving Ruiz equilibration
 #   does NOT improve the canonical-A 2-norm condition number on small probes:
@@ -22,7 +23,8 @@ include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.j
 const _BB = Main.BootstrapBenchmark
 
 @testset "wave f defaults" begin
-    # --- D2: :bordered must remain the working default on quick-gate models ---
+    @test SDPX.Settings{Float64}().kkt_route === :expanded
+    # Both routes remain working on quick-gate models after default promotion.
     for (pname, params) in [
         (:lp, (sites=4,)),
         (:socp, (partial_waves=2, grid_points=4, analytic_coefficients=2)),
