@@ -149,6 +149,10 @@ end
         @test executed.executed_factorization === :sparse_lu
         @test executed.la_executed_provider === :suitesparse_umfpack
         @test executed.fallback_reason === :none
+        @test executed.attempted_kkt_routes === (:sparse_schur,)
+        @test executed.executed_fallback_chain === (:sparse_schur,)
+        @test lp_result.diagnostics.plan.parameters.factorization_reuse ===
+              :one_numeric_factor_per_predictor_corrector_epoch
 
         fallback = rank_one_result.diagnostics.selected_algorithms
         @test fallback.planned_kkt_route === :sparse_schur
@@ -159,6 +163,39 @@ end
         @test fallback.executed_factorization === :quasidefinite_ldlt
         @test fallback.fallback_reason ===
               :sparse_factor_or_refinement_failure
+        @test fallback.attempted_kkt_routes ===
+              (:sparse_schur, :expanded)
+        @test fallback.executed_fallback_chain ===
+              (:sparse_schur, :expanded)
+
+        bordered_result = SDPX.optimize!(
+            _p6_lp(); settings=SDPX.Settings{Float64}(
+                engine=:native_hsd, kkt_route=:bordered,
+                limits=SDPX.Limits(iterations=400, time=60.0, threads=1),
+                verbosity=0,
+            ),
+        )
+        bordered_metadata = bordered_result.diagnostics.selected_algorithms
+        @test bordered_metadata.executed_kkt_route === :bordered
+        @test bordered_metadata.attempted_kkt_routes === (:bordered,)
+        @test bordered_metadata.executed_fallback_chain === (:bordered,)
+
+        canonical = SDPX.canonicalize(
+            SDPX.compile_product_cone_model(_p6_lp()),
+        )
+        reduction = SDPX.hsd_equality_reduce(canonical)
+        triple = SDPX._native_hsd_diagnostics(
+            lp_result.diagnostics.plan, reduction, SDPX.Optimal,
+            :verified_accepted_step, 1, 1, 0.0, 0.0, 0.0;
+            executed_kkt_route=:bordered,
+            executed_kkt_attempts=(:sparse_schur, :expanded, :bordered),
+        ).selected_algorithms
+        @test triple.executed_kkt_route === :bordered
+        @test triple.attempted_kkt_routes ===
+              (:sparse_schur, :expanded, :bordered)
+        @test triple.executed_fallback_chain ===
+              (:sparse_schur, :expanded, :bordered)
+        @test triple.fallback_reason === :sparse_and_expanded_failure
     end
 
     @testset "per-state pattern ownership and epoch counters" begin
@@ -295,7 +332,35 @@ end
         @test state.base.tau == snapshot[4]
         @test state.base.kappa == snapshot[5]
         @test state.kkt_route === :expanded
+        @test state.kkt_route_attempts == [:sparse_schur, :expanded]
         @test state.diagnostic === :sparse_to_expanded_same_iterate_fallback
+    end
+
+    @testset "sparse expanded bordered attempt sequence preserves iterate" begin
+        reduced = _p6_reduced(_p6_socp())
+        state = SDPX.ProductConeHSDState(reduced; kkt_route=:sparse_schur)
+        SDPX.product_hsd_cold_start!(state)
+        SDPX.hsd_residual!(state.base)
+        @test SDPX.try_update_scaling!(
+            state.runtime, state.base.s, state.base.y, state.base.mu,
+        )
+        snapshot = (
+            copy(state.base.x), copy(state.base.s), copy(state.base.y),
+            state.base.tau, state.base.kappa,
+        )
+        @test SDPX._product_hsd_record_route_attempt!(state, :expanded) ===
+              (:sparse_schur, :expanded)
+        state.kkt_route = :expanded
+        code = SDPX._product_hsd_retry_bordered_same_iterate!(state, false)
+        @test code === SDPX.HSDStepOK
+        @test Tuple(state.kkt_route_attempts) ===
+              (:sparse_schur, :expanded, :bordered)
+        @test state.kkt_route === :bordered
+        @test state.base.x == snapshot[1]
+        @test state.base.s == snapshot[2]
+        @test state.base.y == snapshot[3]
+        @test state.base.tau == snapshot[4]
+        @test state.base.kappa == snapshot[5]
     end
 
     @testset "unsupported arithmetic never downcasts" begin

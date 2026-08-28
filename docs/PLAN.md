@@ -1127,7 +1127,10 @@ src/program/route_plan.jl
   拒绝 gap、overlap、越界、维度不符和 pattern drift；
 * ✅ public plan/diagnostics 以 typed `NativeHSDKKTDescriptor` 分别报告 planned
   与 executed route/storage/backend/factorization/provider，fallback 后不得继续
-  冒充 sparse execution；
+  冒充 sparse execution；`attempted_kkt_routes` / `executed_fallback_chain`
+  保留完整尝试序列（direct、sparse→expanded、sparse→expanded→bordered），
+  `ExecutionPlan.parameters.factorization_reuse` 取 route descriptor 而非 dense
+  mathematical descriptor；
 * ✅ LP、SOCP、rank-one PSD、mixed PSD、bounded Nonpositive、dependent/
   ill-scaled equality 的公共解与原坐标证书已进入 `phase6_sparse_integration`，
   且该文件在 quick/full 标准 profile 中各恰好执行一次；
