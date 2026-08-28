@@ -175,5 +175,6 @@ unavailable certificate data fail closed.
 - No hidden PSD lift or legacy-engine retry is permitted.
 
 Current implementation work and release gates are tracked in
-[`docs/PLAN.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/PLAN.md). Remaining legacy source dependencies are tracked in the
-[legacy reference manifest](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/LEGACY_ENGINE_REFERENCES.md).
+[`docs/PLAN.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/PLAN.md).
+Legacy solver sources have been retired; compatibility entrypoints adapt to the
+same product-HSD engine.

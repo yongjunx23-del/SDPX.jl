@@ -20,10 +20,6 @@ julia --project=docs docs/make.jl
 `docs/PLAN.md` is the current roadmap. It is concise by design and does not
 retain completed wave transcripts.
 
-`docs/LEGACY_ENGINE_REFERENCES.md` is temporary operational evidence for Phase
-10 source retirement. Remove it only after every listed legacy file and caller
-has been retired and verified.
-
 ## Frozen design contracts
 
 `docs/design/` contains mathematical or architectural contracts that production

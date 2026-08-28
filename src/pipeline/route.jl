@@ -36,8 +36,8 @@ function resolve_execution_route(
     elseif opts.algorithm === :socp
         throw(ArgumentError(
             "algorithm=:socp is unavailable for SDPProblem; use the public " *
-            "Model/ConicProblem NativeSOC route (for example, second_order_program " *
-            "or solve_socp)",
+            "Model/ConicProblem product-HSD route (for example, " *
+            "second_order_program or solve_socp)",
         ))
     else
         # `algorithm=:sdp` is the stable reference/rollback path even when

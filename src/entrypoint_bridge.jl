@@ -6,7 +6,7 @@
 #    v0.5 `Model`/`Settings`/`Outputs` and call the public `optimize!`
 #    seam with `engine=:native_hsd`, then adapt the public `Result` back
 #    to the legacy `SDPResult`/`ConicResult`-shaped schema those callers
-#    expose.  No legacy `solve!` (solver/interior_point.jl) or
+#    expose. No retired solver loop or
 #    `lp_solver` route is reachable from these entrypoints.
 #
 #    The adapter preserves original-coordinate results: primal PSD

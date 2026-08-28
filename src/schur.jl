@@ -5,9 +5,8 @@
     constraints are stored:
       buildP!(P, cons, l, x)        : P = Σᵢ xᵢ A_i^{(l)}
       accumulate_v!(v, cons, l, M, s): v[i] += s·⟨A_i^{(l)}, M⟩  ∀i
-    Dispatching these on `cons::AbstractCons` is what lets one
-    `newton_step!` (step.jl) serve both DenseCons and SparseCons (§1.6),
-    replacing the ~80%-duplicated NewtonStep/NewtonStepSparse pair.
+    Dispatching these on `cons::AbstractCons` keeps dense and sparse
+    compatibility contractions behind one implementation seam.
 
     schur_build! is where the two representations genuinely differ:
       DenseCons  — symmetric-square form S = P̂P̂ᵀ, P_i = L_X⁻¹A_iM_Y

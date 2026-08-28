@@ -1,6 +1,4 @@
-# --- Constraint representation (Phase 1.6): one newton_step! kernel is
-#     parameterized over this, replacing the ~80%-duplicated dense/sparse
-#     code paths in the original NewtonStep / NewtonStepSparse. ---
+# Dense/sparse constraint storage shares one contraction interface.
 
 """
     AbstractCons{T}

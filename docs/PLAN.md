@@ -109,20 +109,13 @@ The unified verification campaign has not yet been run on the final SHA.
 
 ## 4. Current implementation work
 
-### A. Retire remaining legacy code
+### A. Legacy source retirement — complete
 
-The standalone nonnegative HSD, LP, sparse-LP, SDP interior-point, and legacy
-Newton-step engines have been deleted after their still-required generic helpers
-were moved to native owners. Public `engine=:auto` and qualified SDP entrypoints
-now execute product HSD.
-
-The remaining retirement target is:
-
-```text
-src/soc_native.jl
-```
-
-Its exact source callers are tracked in `docs/LEGACY_ENGINE_REFERENCES.md`.
+The standalone nonnegative HSD, LP, sparse-LP, SDP interior-point, legacy
+Newton-step, and standalone NativeSOC engines have been deleted. Still-required
+generic helpers were moved to native owners; public `engine=:auto` and
+qualified SDP/Conic entrypoints now execute product HSD. No legacy solver file
+is included or compiled.
 
 ### B. Complete production provider dispatch
 
@@ -139,8 +132,9 @@ Connect PureKLU and QDLDL to the production HSD route with:
 - extend the now-wired fused predictor/corrector residual evaluation to
   terminal certificate inputs;
 - apply deterministic `ThreadBudget` at pipeline entry;
-- move the remaining fixq3 ownership out of `soc_native.jl`; Exp/Power 3x3
-  contributions are wired for expanded and sparse-Schur assembly;
+- wire the retained fixq3 `NewtonSystem` contribution into product-HSD
+  planning; Exp/Power 3x3 contributions are wired for expanded and
+  sparse-Schur assembly;
 - verify compact workspace and PSD panel use in actual hot paths;
 - calibrate route selection only from measured evidence.
 

@@ -452,11 +452,9 @@ formulation_plan_from_backend(kkt_backend::Symbol) = FormulationPlan(
 """
     AbstractExecutionPlanPayload
 
-Optional solver-family payload carried by one top-level `ExecutionPlan`.
-Subtypes (for example `NativeSOCPlan`) freeze family-specific planning inside
-the single authoritative execution-plan object.  The abstract type lives in
-`types.jl` so `ExecutionPlan` can hold the field without any include-order
-dependency on the family modules that define concrete payload types.
+Optional typed payload carried by one top-level `ExecutionPlan`. Concrete
+payloads freeze route-specific implementation facts inside the single
+execution-plan object without changing the product-HSD equations.
 """
 abstract type AbstractExecutionPlanPayload end
 
@@ -547,7 +545,7 @@ struct ExecutionPlan{F<:AbstractKKTFormulation}
     parameters::NamedTuple
     # Optional solver-family payload. `nothing` for plans that describe a
     # generic SDP/LP route; solver families that need a typed specialization
-    # (NativeSOC) carry their exact plan here so the ExecutionPlan remains the
+    # Specialized compatibility adapters carry their exact plan here so the ExecutionPlan remains the
     # sole top-level planning authority.
     payload::Union{Nothing,AbstractExecutionPlanPayload}
 

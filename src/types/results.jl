@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Internal result protocol.
 #
-# LP/SDP and NativeSOC retain family-specific iterate layouts, but they share
+# Compatibility result adapters retain family-specific layouts, but they share
 # one typed lifecycle boundary. Public adapters consume `AbstractCoreResult`
 # implementations and are the only layer that constructs the exported
 # `Result`; numerical cores never return that public wrapper directly.

@@ -887,16 +887,12 @@ function _result_row(
     required_specialization !== nothing &&
         specialization !== required_specialization &&
         push!(failures, "specialization")
-    # NativeSOCDiagnostics is the positive evidence that a ConicResult came
-    # from direct Lorentz execution; NativeHSDDiagnostics is the positive
-    # evidence that it came from the native product-HSD bridge. Test/reference
-    # PSD helpers deliberately retain SDP diagnostics, so the benchmark gate
-    # remains able to detect a reference lift without restoring the removed
-    # compatibility payload.
+    # NativeHSDDiagnostics is the positive evidence that a ConicResult came
+    # from the product-HSD bridge. Reference PSD helpers retain SDP diagnostics,
+    # so the benchmark gate can still detect a lift.
     psd_lift_used =
         result isa SDPX.ConicResult &&
         result.diagnostics !== nothing &&
-        !(result.diagnostics isa SDPX.NativeSOCDiagnostics) &&
         !(result.diagnostics isa SDPX.NativeHSDDiagnostics)
     _built_value(built, :forbid_psd_lift, false) && psd_lift_used &&
         push!(failures, "psd_lift")

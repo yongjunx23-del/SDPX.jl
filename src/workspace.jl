@@ -462,8 +462,8 @@ end
 
 """Preallocated per-iteration KKT phase timings (cold diagnostics).
 
-Written by the dense KKT factorize path and read by `newton_step!` so the
-factorize! result does not need to carry a boxed phase-times NamedTuple."""
+Written by dense KKT compatibility paths so factorization results do not need
+to carry boxed phase-time tuples."""
 mutable struct KKTPhaseTimes
     schur_copy::Float64
     schur_factorization::Float64

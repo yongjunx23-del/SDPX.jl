@@ -42,9 +42,9 @@ end
 Base.eltype(::ConicProblem{T}) where {T} = T
 
 """
-Result in original Lorentz coordinates. Production NativeSOC results set
-timings, termination, and diagnostics directly; no PSD `SDPResult` is stored.
-Test/reference PSD helpers return their own `SDPResult` separately.
+Compatibility result in original Lorentz coordinates. Qualified ConicProblem
+entrypoints adapt product-HSD results into this layout; no PSD lift or separate
+SOC solver result is stored.
 """
 struct ConicResult{T,D} <: AbstractCoreResult{T}
     status::SolveStatus

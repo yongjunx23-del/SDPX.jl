@@ -1,15 +1,12 @@
 # Fixed-trace Q3 direct KKT local contribution (GPT Pro plan P4).
 #
-# This file ports the legacy NativeSOC fixed-trace Q3 detection and the local
-# 2x2 tail elimination (formerly inline in src/soc_native.jl) into a
-# NewtonSystem local contribution/assembly specialization.  Together with the
+# Fixed-trace Q3 detection and local 2x2 tail elimination are expressed as a
+# NewtonSystem contribution/assembly specialization. Together with the
 # fixed-size Exp/Power 3x3 contribution path in
-# `src/cones/nonsymmetric/scaling3.jl` it forms the KKT specialization
-# registry: every registered entry is a *contribution*, never a solver.  It
-# owns no iterate, no termination, no certificate and no HSD state, and it
-# does not change the HSD state machine.  The generic SOC reference path in
-# `soc_native.jl` (GeneralLorentzExecution) remains the explicitly callable
-# fallback.
+# `src/cones/nonsymmetric/scaling3.jl`, every registered entry is a
+# *contribution*, never a solver. It owns no iterate, termination, certificate,
+# or HSD state. The general product-cone Lorentz runtime remains the reference
+# path.
 
 """
     FixedTraceQ3Reduction{T}
