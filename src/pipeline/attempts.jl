@@ -341,3 +341,242 @@ function _build_execution_attempt_record(
         elapsed_seconds,
     )
 end
+
+# ---------------------------------------------------------------------------
+# Working-precision selection and the BigFloat precision-ladder authority.
+#
+# These helpers own the generic precision/retry policy shared by the ladder
+# orchestrator and the diagnostics report builder; they never touch solver
+# iterates or the Newton loop.
+# ---------------------------------------------------------------------------
+
+"""
+    _tolerance_precision_diagnostic(T, tolerance)
+
+Estimate the significand width needed by a requested tolerance without
+narrowing extended-precision values through `Float64`. The result is used only
+for diagnostics; it never changes solver tolerances.
+"""
+function _tolerance_precision_diagnostic(
+    ::Type{T},
+    tolerance::T,
+) where {T}
+    threshold = T(100) * eps(T)
+    needed_bits = tolerance <= zero(T) ?
+                  typemax(Int) :
+                  _nonnegative_int_saturating(
+                      -log2(tolerance),
+                      RoundUp,
+                  )
+    return (
+        warn=tolerance < threshold,
+        needed_bits=needed_bits,
+        threshold=threshold,
+    )
+end
+
+"""
+    adaptive_working_precision_bits(problem, options) -> Int
+
+Choose the first precision for a staged BigFloat solve. The requested
+`precision_bits` remains a hard upper bound and fallback precision. The guard
+combines the smallest requested tolerance with 96 safety bits and a
+dimension-dependent term, rounds upward to a 32-bit boundary, and never drops
+below `minimum_working_precision_bits`.
+
+The deliberately large guard is appropriate for an interior-point Newton
+system: this selector is intended to skip obviously unnecessary MPFR limbs,
+not to estimate the fewest bits with which a problem might happen to solve.
+"""
+function adaptive_working_precision_bits(
+    prob::SDPProblem{BigFloat},
+    opts::SolverOptions{BigFloat},
+)
+    requested = opts.precision_bits
+    opts.working_precision_policy === :auto || return requested
+    tolerances = (opts.ϵ_gap, opts.ϵ_primal, opts.ϵ_dual)
+    any(iszero, tolerances) && return requested
+    tolerance = min(tolerances...)
+    isfinite(tolerance) && tolerance > zero(BigFloat) ||
+        return requested
+    accuracy_bits = max(0, ceil(Int, -log2(tolerance)))
+    problem_dimension = max(
+        prob.dims.m,
+        prob.dims.n,
+        sum(prob.dims.k),
+        2,
+    )
+    dimension_guard = ceil(Int, log2(problem_dimension))
+    guarded_bits = accuracy_bits + 96 + dimension_guard
+    rounded_bits = 32 * cld(guarded_bits, 32)
+    minimum_bits = min(
+        opts.minimum_working_precision_bits,
+        requested,
+    )
+    return clamp(rounded_bits, minimum_bits, requested)
+end
+
+@inline _working_precision_success(status::SolveStatus) =
+    status in (
+        Optimal,
+        FeasibleCert,
+        InfeasibleCert,
+        PrimalInfeasible,
+        DualInfeasible,
+    )
+
+function _record_working_precision!(
+    result::SDPResult,
+    message::String,
+)
+    result.diagnostics === nothing ||
+        push!(result.diagnostics.warnings, message)
+    return result
+end
+
+"""Build the immutable pre-execution ladder authority for a BigFloat solve.
+The ladder is built unconditionally before the first rung executes. The
+selector semantics are unchanged: `:fixed` and resume use exactly the
+requested rung; `:auto` selects at most two rungs (the adaptive lower choice
+plus the requested upper rung)."""
+function _build_precision_ladder_plan(
+    prob::SDPProblem{BigFloat},
+    opts::SolverOptions{BigFloat};
+    resume::AbstractString="",
+)
+    requested_bits = opts.precision_bits
+    resume_bypass = !isempty(resume)
+    selected_bits = resume_bypass ?
+                    requested_bits :
+                    adaptive_working_precision_bits(prob, opts)
+    rungs = if selected_bits == requested_bits
+        (
+            PrecisionAttemptSpec(1, requested_bits, :requested),
+        )
+    else
+        (
+            PrecisionAttemptSpec(1, selected_bits, :selected),
+            PrecisionAttemptSpec(2, requested_bits, :requested),
+        )
+    end
+    selection_reason = resume_bypass ? :resume :
+                       opts.working_precision_policy === :fixed ? :fixed :
+                       selected_bits < requested_bits ? :adaptive_lower :
+                       :adaptive_requested
+    return PrecisionLadderPlan(
+        opts.working_precision_policy,
+        requested_bits,
+        selected_bits,
+        min(opts.minimum_working_precision_bits, requested_bits),
+        resume_bypass,
+        selection_reason,
+        rungs,
+        (
+            AlmostOptimal,
+            InsufficientPrecision,
+            Stalled,
+            NumericalBreakdown,
+            NumericalFailure,
+            MaxRestartsExceeded,
+        ),
+        :shared_wall_clock,
+    )
+end
+
+"""The ladder's own retry decision for a completed rung, driven exclusively
+by the ladder plan's retry-eligibility set and the shared remaining budget —
+never by a separate authority."""
+@inline function _ladder_retry_decision(
+    plan::PrecisionLadderPlan,
+    rung::Int,
+    status::SolveStatus,
+    remaining_budget_seconds::Float64,
+)
+    # There is no next rung: the ladder stops regardless of the outcome.
+    rung >= length(plan.rungs) && return :terminal
+    _working_precision_success(status) && return :success
+    status in plan.retry_statuses || return :ineligible_status
+    remaining_budget_seconds > 0 || return :no_time
+    return :retry
+end
+
+"""Patch the just-completed rung's report with the orchestrator's
+authoritative retry decision and shared remaining budget. The report built
+inside `_attach_diagnostics` records the same rule provisionally; the
+orchestrator owns the final gate and the true remaining wall-clock budget
+(which includes inter-rung overhead such as the release/GC step)."""
+function _patch_ladder_report!(
+    context::PrecisionLadderContext,
+    decision::Symbol,
+    remaining_budget_seconds::Float64,
+)
+    old = context.reports[end]
+    facts = old.facts
+    context.reports[end] = PrecisionAttemptReport(
+        old.spec,
+        old.child_plan,
+        old.record,
+        PrecisionAttemptScalarFacts(
+            facts.status,
+            facts.termination_reason,
+            facts.elapsed_seconds,
+            facts.success,
+            decision,
+            remaining_budget_seconds,
+        ),
+    )
+    return context
+end
+
+"""Flatten the per-rung A0 records into the final diagnostics. `result` is
+the final rung's result; its diagnostics already carry the full ladder report
+(every rung, in order) and the final child plan. `attempts` is replaced with
+the flattened per-rung records; every other diagnostics field is preserved."""
+function _merge_ladder_result(
+    result::SDPResult{T},
+    ladder_context::PrecisionLadderContext,
+) where {T}
+    # Diagnostics-disabled runs never build attempt records; there is nothing
+    # to merge and the result already carries the final rung's payload.
+    result.diagnostics === nothing && return result
+    attempts = Tuple(
+        report.record for report in ladder_context.reports
+    )
+    diagnostics = result.diagnostics
+    merged_diagnostics = SolveDiagnostics(
+        diagnostics.classification,
+        diagnostics.plan,
+        diagnostics.presolve,
+        diagnostics.timings,
+        diagnostics.memory,
+        diagnostics.selected_algorithms,
+        diagnostics.parameter_history,
+        diagnostics.warnings,
+        diagnostics.termination,
+        attempts,
+        PrecisionLadderReport(
+            ladder_context.plan,
+            Tuple(copy(ladder_context.reports)),
+        ),
+    )
+    return SDPResult{T}(
+        result.status,
+        result.message,
+        result.x,
+        result.X,
+        result.y,
+        result.Y,
+        result.pObj,
+        result.dObj,
+        result.gap_rel,
+        result.p_res,
+        result.d_res,
+        result.iterations,
+        result.restarts,
+        result.regularizations,
+        result.timings,
+        result.parameter_history,
+        merged_diagnostics,
+        result.termination,
+    )
+end

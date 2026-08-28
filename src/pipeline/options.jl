@@ -183,3 +183,31 @@ function _is_soc_arrow_block(prob::SDPProblem{T}, block::Int) where {T}
     end
     return true
 end
+# ---------------------------------------------------------------------------
+# SolverOptions value-transform helpers (shared by the legacy engine, the
+# adaptive parameter policies, and the pipeline).
+# ---------------------------------------------------------------------------
+
+function _replace_solver_options(
+    options::SolverOptions{T};
+    kwargs...,
+) where {T}
+    names = fieldnames(typeof(options))
+    values = NamedTuple{names}(Tuple(getfield(options, field) for field in names))
+    return SolverOptions{T}(; merge(values, (; kwargs...))...)
+end
+
+function _reround_solver_options(
+    options::SolverOptions{BigFloat},
+    bits::Int;
+    kwargs...,
+)
+    names = fieldnames(typeof(options))
+    values = map(names) do field
+        value = getfield(options, field)
+        value isa BigFloat ?
+        BigFloat(value; precision=bits) : value
+    end
+    typed = NamedTuple{names}(Tuple(values))
+    return SolverOptions{BigFloat}(; merge(typed, (; kwargs...))...)
+end
