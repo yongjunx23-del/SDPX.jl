@@ -1,9 +1,11 @@
 # PureKLU provider spike — exact nonsymmetric sparse LU adapter prototype
 
-Status: **prototype evidence, not production.** Adapter file
-`ext/SDPXPureKLUExt.jl` is a narrow, self-contained spike module. It is not a
-weak dependency, is not wired into any KKT route, does not touch `src/`,
-`Project.toml`, or HSD dispatch, and must not be treated as production code.
+Status: **spike evidence; the adapter is now a registered candidate.**
+PureKLU 1.4.x is an optional SDPX weak dependency / extension in
+`Project.toml` (branch `agent/highprecision-sparse-capabilities`), and
+`ext/SDPXPureKLUExt.jl` is the candidate adapter. It is still not wired into
+any KKT route or HSD dispatch and must not be treated as production code;
+this section below documents the original prototype spike evidence.
 
 Reference: `docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md` (decision and
 promotion gates 1–7, 9). Sign authority: `src/kkt/expanded_quasidefinite.jl`

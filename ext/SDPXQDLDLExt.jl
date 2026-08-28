@@ -1,10 +1,12 @@
 #=
-    SDPX <-> QDLDL symmetric companion inertia prototype (parallel spike).
+    SDPX <-> QDLDL symmetric companion inertia candidate adapter.
 
-    Prototype scope — docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md:
-      * QDLDL 0.4.1 provides the generic sparse LDLT used to certify the
-        inertia of the *symmetric signed-regularized quasidefinite companion*
-        of the frozen HSD Newton system (src/kkt/system.jl and
+    Candidate-adapter scope — docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md:
+      * QDLDL 0.4.x is registered as an optional SDPX weak dependency /
+        extension in Project.toml, and this module is the candidate adapter:
+        QDLDL provides the generic sparse LDLT used to certify the inertia
+        of the *symmetric signed-regularized quasidefinite companion* of the
+        frozen HSD Newton system (src/kkt/system.jl and
         src/kkt/expanded_quasidefinite.jl).
       * This module is inertia/regularization evidence ONLY. It never solves
         the exact nonsymmetric condensed operator, whose (x,tau) blocks are
@@ -17,10 +19,11 @@
       * The expected inertia is recomputed from each `NewtonSystem` through
         `SDPX.expected_expanded_inertia`; it is never inferred from the
         observed factor.
-      * Parallel prototype only: this file is not registered in Project.toml,
-        is not loaded by SDPX, and does not modify src/, docs/PLAN.md, or the
-        HSD dispatch. The spike driver loads it with `include` and calls the
-        package directly (no LinearSolve/SciMLBase).
+      * The adapter is still NOT wired into any SDPX KKT or HSD route and is
+        not part of the public API; this registration task adds the
+        Project.toml weakdep/extension entries and the capability facts in
+        src/la/sparse_capabilities.jl only. The extension calls the package
+        directly (no LinearSolve/SciMLBase).
 
     QDLDL 0.4.1 API facts this adapter pins (see the evidence doc):
       * `qdldl(A; Dsigns, regularize_eps, regularize_delta)` preserves the
@@ -45,6 +48,11 @@ using SDPX
 using QDLDL
 using SparseArrays
 using LinearAlgebra
+
+# Registered in src/la/sparse_capabilities.jl: loading this extension is
+# the only way the QDLDL provider becomes available; until then core
+# reports it absent (fail closed / honest unavailable).
+SDPX.sparse_provider_loaded(::Val{:qdldl}) = true
 
 export QDLDLCompanion,
     QDLDL_COMPANION_READY,
