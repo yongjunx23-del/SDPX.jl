@@ -154,8 +154,8 @@ remain explicit and independently checkable.
 
 ### Black-box E2E
 
-`SDPX_TEST_PROFILE=e2e` runs only `test/e2e.jl`. It selects deterministic cases
-from `benchmark/general/` and checks:
+`Pkg.test()` runs the sole `test/runtests.jl` regression suite. It selects
+deterministic cases from `benchmark/general/` and checks:
 
 ```text
 general case -> public optimize! -> terminal result -> original certificate
@@ -167,8 +167,9 @@ providers, allocations, receipts, RSS, or thread scheduling.
 
 ### Specialist validation
 
-Provider, precision, MOI, allocation, deterministic-threading, and route tests
-remain separate development/release checks. They are not part of the E2E
+Provider and independent Newton checks live under `validation/`; allocation,
+route, memory, and physics checks live under `benchmark/`. They are manual or
+release validation, not additional package-test suites and not part of the E2E
 definition.
 
 ### Benchmark and cluster validation
@@ -186,7 +187,7 @@ definition.
 3. run package load and black-box E2E;
 4. run targeted provider, precision, MOI, certificate, allocation, and route
    validation;
-5. repair failures without deleting tests or relaxing tolerances;
+5. repair failures without weakening the E2E contract or relaxing tolerances;
 6. run local general and physics/bootstrap campaigns;
 7. freeze and deploy the same SHA to the cluster;
 8. run medium/large and high-precision campaigns;

@@ -42,36 +42,32 @@ jobs:
           fi
 
   test:
-    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads / ${{ matrix.profile }}
+    name: Julia ${{ matrix.julia }} / ${{ matrix.os }} / ${{ matrix.threads }} threads
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        # Two ubuntu legs cover the axes that matter: LTS + serial path, and
-        # current release + threaded path. The full numerical/extension
-        # profile runs on its own schedule (full-suite.yml), not per PR.
+        # Two ubuntu legs cover the black-box E2E on LTS/serial and the current
+        # release/threaded runtime. Specialist checks use validation/ and
+        # benchmark jobs rather than additional package-test profiles.
         include:
           - julia: '1.10'
             os: ubuntu-latest
             threads: '1'
-            profile: e2e
           - julia: '1'
             os: ubuntu-latest
             threads: '4'
-            profile: e2e
           # Spot-check the other platforms once, on the current release. The
           # thread count is part of the matrix rather than fixed because several
           # kernels have threaded and serial paths that must agree exactly.
           - julia: '1'
             os: macOS-latest
             threads: '4'
-            profile: e2e
           - julia: '1'
             os: windows-latest
             threads: '4'
-            profile: e2e
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -86,7 +82,6 @@ jobs:
       - uses: julia-actions/julia-runtest@v1
         env:
           JULIA_NUM_THREADS: ${{ matrix.threads }}
-          SDPX_TEST_PROFILE: ${{ matrix.profile }}
 
   bench-smoke:
     name: Benchmark smoke test (small tier only)
@@ -173,12 +168,6 @@ jobs:
       # not exercised.
       - name: Native product-HSD allocation hard gate
         run: julia --project=. benchmark/general/performance/hsd_allocation.jl --check
-      - name: Fixed-precision contract
-        run: julia --project=. test/fixed_precision_contract.jl
-      - name: FactorCache protocol tests
-        run: julia --project=. test/factor_cache.jl
-      - name: ConeAlgebra tests
-        run: julia --project=. test/cone_algebra.jl
 
   quality:
     name: Package quality

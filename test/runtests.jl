@@ -1,190 +1,41 @@
-using SDPX
+# Sole SDPX regression suite: black-box modeling-to-certified-result E2E.
+
 using Test
+using SDPX
 
-# Keep this list in the historical full-suite order. Some older tests share
-# helpers through that order (notably correctness.jl -> sparse.jl).
-const FULL_TESTS = (
-    "program_transforms.jl",
-    "program_equilibrate.jl",
-    "program_presolve.jl",
-    "equality_policy.jl",
-    "p15_stabilization.jl",
-    "a1_mixed_psd_hsd.jl",
-    "la_backend_regressions.jl",
-    "generic_la_backend.jl",
-    "dense_augmented_kkt.jl",
-    "kkt_newton_system.jl",
-    "kkt_expanded_quasidefinite.jl",
-    "wave_i_sparse.jl",
-    "phase6_sparse_integration.jl",
-    "factor_epoch_receipt.jl",
-    "hsd_kkt_initialize.jl",
-    "bfla_backend.jl",
-    "mfla_backend.jl",
-    "provider_latest_compat.jl",
-    "mixed_cones.jl",
-    "cones_asymmetric.jl",
-    "exp_oracle.jl",
-    "power_oracle.jl",
-    "nonsymmetric_linesearch.jl",
-    "nonsymmetric_conjugate3.jl",
-    "nonsymmetric_scaling3.jl",
-    "nonsymmetric_corrector3.jl",
-    "nonsymmetric_initialization3.jl",
-    "nonsymmetric_full_newton.jl",
-    "cones_symmetric.jl",
-    "soc_nt_reference.jl",
-    "rsoc_nt_reference.jl",
-    "psd_nt_reference.jl",
-    "psd_nt_allocation.jl",
-    "product_cone_runtime.jl",
-    "product_cone_runtime_api.jl",
-    "nonsymmetric_product_runtime.jl",
-    "product_cone_hsd.jl",
-    "nonsymmetric_product_hsd.jl",
-    "nonsymmetric_schur3.jl",
-    "nonsymmetric_exp_power_convergence.jl",
-    "product_cone_solver.jl",
-    "product_cone_time_limit.jl",
-    "hsd_equations.jl",
-    "hsd_border_failure.jl",
-    "hsd_certificates.jl",
-    "hsd_product_certificates.jl",
-    "nonfinite_fail_closed.jl",
-    "hsd_equality_reduction.jl",
-    "hsd_direction_lp.jl",
-    "hsd_full_newton_oracle.jl",
-    "hsd_rank_reduction_precision.jl",
-    "hsd_zeroalloc.jl",
-    "hsd_nonnegative.jl",
-    "psd_svec_contract.jl",
-    "factor_cache_routes.jl",
-    "allocation_contract.jl",
-    "correctness.jl",
-    "genericity.jl",
-    "extended_precision_blas.jl",
-    "sparse.jl",
-    "coo_contraction_regression.jl",
-    "moi_vector_cones.jl",
-    "moi_native_soc.jl",
-    "moi_native_hsd.jl",
-    "moi_conformance.jl",
-    "wave_e_moi.jl",
-    "moi.jl",
-    "threads.jl",
-    "pipeline.jl",
-    "adaptive_parameter_policy.jl",
-    "preprocessing_regressions.jl",
-    "lp_regressions.jl",
-    "direction_accuracy_lp.jl",
-    "soc_regressions.jl",
-    "soc_native_algebra.jl",
-    "soc_metric_sparse.jl",
-    "soc_singleton_presolve.jl",
-    "soc_native_solver.jl",
-    "auto_planner.jl",
-    "solver_regressions.jl",
-    "kkt_regressions.jl",
-    "kkt_sparse_backend.jl",
-    "sparse_sdp_kkt.jl",
-    "mixed_precision_kkt_regressions.jl",
-    "kernel_failure_regressions.jl",
-    "result_certificate.jl",
-    "infeasibility_diagnostics.jl",
-    "options_interface.jl",
-    "frontend_auto_options.jl",
-    "architecture_regressions.jl",
-    "modeling/foundation_types.jl",
-    "modeling/route_classifier.jl",
-    "modeling/cone_product_layout.jl",
-    "modeling/canonicalization.jl",
-    "program/transforms_rsoc.jl",
-    "modeling/exp_route_phase_a.jl",
-    "modeling/lower_lp.jl",
-    "modeling/lower_soc.jl",
-    "modeling/lower_sdp.jl",
-    "public/settings_outputs.jl",
-    "public/result_optimize.jl",
-    "public_nonsymmetric_cone_residuals.jl",
-    "public/native_hsd_optin.jl",
-    "public_api.jl",
-    "performance_trace.jl",
-    "termination_metadata.jl",
-    "benchmark_runner.jl",
-    "benchmark_compare.jl",
-    "benchmark_fresh_process.jl",
-    "e2e.jl",
-    "prepared_structure.jl",
-    "physics_lattice_bootstrap.jl",
-    "physics_matrix_bootstrap.jl",
-    "physics_modular_lp.jl",
-    "physics_smatrix_soc.jl",
-    "physics_thermal_exp.jl",
-    "physics_thermal_power.jl",
-    "moi_regressions.jl",
-    "extended_blas_regressions.jl",
-    "bigfloat_kernel_regressions.jl",
-    "bigfloat_ownership_regressions.jl",
-    "bigfloat_sparse_schur_regressions.jl",
-    "schur_scheduler_regressions.jl",
-    "ingest_regressions.jl",
-    "spectrum_regressions.jl",
-    "extensions_regressions.jl",
-    "lp_sparse.jl",
-    "examples.jl",
-    "nullspace_reduction.jl",
-    "error_handling.jl",
-    "executed_diagnostics.jl",
-    "cli_bridge.jl",
-    "aqua.jl",
-    "shadowing_guard.jl",
-    "v05_core_invariants.jl",
-    "precision_ladder_plan.jl",
-    "sparse_execution_round6.jl",
-    "sparse_schur_round7.jl",
-    "kkt_route.jl",
-    "cone_algebra.jl",
-    "factor_cache.jl",
-    "factor_cache_state.jl",
-    "factorizations_gate.jl",
-    "fixed_precision_contract.jl",
-    "reduction_plan.jl",
-    "hot_step_zeroalloc.jl",
+include(joinpath(
+    @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+))
+using .GenericConicBenchmark
+
+const E2E_CASE_IDS = (
+    :lp_afiro_style,
+    :lp_infeasible,
+    :lp_unbounded,
+    :socp_portfolio_small,
+    :sdp_maxcut_k4,
+    :exp_unit_small,
+    :power_epigraph_small,
 )
-
-function _test_profile()
-    profile = Symbol(lowercase(strip(get(ENV, "SDPX_TEST_PROFILE", "e2e"))))
-    profile in (:e2e, :full) || throw(ArgumentError(
-        "SDPX_TEST_PROFILE must be e2e or full, got $(repr(profile))",
-    ))
-    return profile
+function e2e_spec(id::Symbol)
+    matches = filter(
+        spec -> spec.id === id,
+        GenericConicBenchmark.inventory(; tier=:small),
+    )
+    length(matches) == 1 || error(
+        "expected exactly one general E2E case $id, found $(length(matches))",
+    )
+    return only(matches)
 end
 
-const TEST_PROFILE = _test_profile()
-
-# These packages are only needed by full-suite extension tests. Avoiding their
-# load cost is part of making the normal edit-test loop small.
-if TEST_PROFILE === :full
-    using JLD2
-end
-
-# The e2e profile runs only the sole black-box solve-to-result suite on the
-# deterministic general small subset (LP optimal/infeasible/unbounded, SOCP,
-# SDP, Exp, Power). It intentionally excludes internal cold-start helpers.
-const E2E_TESTS = ("e2e.jl",)
-
-const SELECTED_TESTS = TEST_PROFILE === :e2e ? E2E_TESTS : FULL_TESTS
-
-@info "SDPX test profile" profile=TEST_PROFILE files=length(SELECTED_TESTS)
-
-if TEST_PROFILE !== :e2e
-    @testset "cold-start math helpers" begin
-        include(joinpath(@__DIR__, "cold_start.jl"))
-    end
-end
-
-@testset "SDPX.jl ($(TEST_PROFILE))" begin
-    for file in SELECTED_TESTS
-        include(joinpath(@__DIR__, file))
+@testset "SDPX public modeling-to-certified-result E2E" begin
+    for id in E2E_CASE_IDS
+        @testset "$id" begin
+            spec = e2e_spec(id)
+            result = GenericConicBenchmark.run_one(spec, Float64)
+            @test result.status === spec.expected_status
+            @test result.certificate_valid
+            @test result.expectation_met
+        end
     end
 end

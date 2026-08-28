@@ -36,7 +36,7 @@ Current work is tracked in `docs/PLAN.md`. Mathematical contracts live in
 - `ext/` — optional provider extensions;
 - `benchmark/general/` — general solver cases and public-data readers;
 - `benchmark/bootstrap/physics/` — provenance-backed physical catalogs;
-- `test/` — black-box E2E plus explicitly retained internal regression suite;
+- `test/` — the sole black-box modeling-to-certified-result E2E;
 - `validation/` — manual provider and independent mathematical checks;
 - `docs/src/` — current user manual;
 - `docs/design/` — frozen mathematical/design contracts.
@@ -59,11 +59,6 @@ Current work is tracked in `docs/PLAN.md`. Mathematical contracts live in
 
 `Pkg.test()` runs the deterministic black-box solve-to-result E2E from
 `benchmark/general/`.
-
-### Internal regression suite
-
-Set `SDPX_TEST_PROFILE=full` only when running the retained implementation
-regressions. These tests are not the definition of black-box E2E.
 
 ### Manual validation
 

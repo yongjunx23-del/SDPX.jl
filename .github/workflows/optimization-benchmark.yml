@@ -33,7 +33,6 @@ jobs:
       JULIA_NUM_THREADS: '1'
       OPENBLAS_NUM_THREADS: '1'
       MKL_NUM_THREADS: '1'
-      SDPX_TEST_PROFILE: e2e
       OUT_DIR: ${{ github.workspace }}/optimization-artifacts
     steps:
       - uses: actions/checkout@v4

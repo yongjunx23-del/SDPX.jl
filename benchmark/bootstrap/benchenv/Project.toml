@@ -9,7 +9,12 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
+Dates = "1"
+LinearAlgebra = "1"
 MultiFloats = "3"
+Printf = "1"
 SDPX = "0.5"
 SHA = "0.7"
+Statistics = "1"
+TOML = "1"
 julia = "1.10"

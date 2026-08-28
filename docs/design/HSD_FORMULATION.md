@@ -3,25 +3,20 @@
 **Status:** Math / design reference (Subagent B). Companion to
 `CANONICAL_FORM.md` (frozen). This document is **not** production code; it is
 the review-ready derivation of the HSD formulation used by the SDPX conic
-kernel, together with hand-computed fixtures that the independent tests must
-check in `test/hsd_equations.jl`.
+kernel, together with hand-computed fixtures for independent verification.
 
 **Convention authority.** The sign and equation conventions below follow the
 **frozen HSD spec** of `docs/design/CANONICAL_FORM.md` §2 (the corrected gap
 sign `−c'x − b'y + κ = 0` with `κ = c'x+b'y` and, at exact
 feasibility, `s'y=τκ`).  This is the
 authoritative implementation target for `src/hsd/hsd.jl`,
-`src/hsd/common_runtime.jl`, and the product-cone HSD files, and the target
-checked by `test/hsd_equations.jl`. The rejected earlier convention and its
-contradiction are summarized in this document; the sign is **not** an open
-question.
+`src/hsd/common_runtime.jl`, and the product-cone HSD files. The rejected
+earlier convention and its contradiction are summarized in this document; the
+sign is **not** an open question.
 
-**Mechanical verification.** The worked fixtures of §9 are checked numerically
-by `SDPX/test/hsd_equations.jl` (self-contained, no SDPX dependency):
-
-```
-JULIA_DEPOT_PATH=<repo>/.julia-depot julia --project=<repo> test/hsd_equations.jl
-```
+**Mechanical verification.** The worked fixtures of §9 are self-contained and
+can be reproduced directly from the displayed equations. Historical dedicated
+fixture code remains available in Git history and the project test archive.
 
 ---
 

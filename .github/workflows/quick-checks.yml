@@ -88,24 +88,20 @@ jobs:
       - name: Release metadata consistency
         run: julia --startup-file=no scripts/check_release_metadata.jl
 
-      - name: Test suite list integrity
+      - name: Sole E2E test layout
         run: |
           julia --startup-file=no -e '
-          listed = Set{String}()
-          for line in eachline("test/runtests.jl")
-              for m in eachmatch(r"\"([a-z0-9_]+\.jl)\"", line)
-                  push!(listed, m.captures[1])
-            end
-          end
-          on_disk = Set{String}(filter(endswith(".jl"), readdir("test")))
-          pop!(on_disk, "runtests.jl")
-          missing = sort!(collect(setdiff(listed, on_disk)))
-          isempty(missing) ||
-              error("runtests.jl references missing files: " * join(missing, ", "))
-          unmounted = sort!(collect(setdiff(on_disk, listed)))
-          isempty(unmounted) || error(
-              "test files mounted nowhere: " * join(unmounted, ", "))
-          println("runtests lists ", length(listed), " files; disk and list agree")'
+          actual = sort(readdir("test"))
+          expected = ["README.md", "runtests.jl"]
+          actual == expected || error(
+              "test/ must contain only README.md and runtests.jl; got " *
+              join(actual, ", "))
+          source = read("test/runtests.jl", String)
+          occursin("GenericConicBenchmark.jl", source) || error(
+              "sole E2E must source cases from benchmark/general")
+          occursin("SDPX public modeling-to-certified-result E2E", source) ||
+              error("sole E2E contract marker missing")
+          println("sole black-box E2E layout is intact")'
 
       - name: Documentation page integrity
         run: |
