@@ -168,13 +168,19 @@ end
     @test session.backward_error > session.backward_target
     @test session.unregularized_residual_norm > 0
 
-    # Reopen the same deliberately poor starting factor.  The default policy
-    # must resume on a dynamic signed factor and re-refine from the original
-    # RHS rather than failing immediately after the static factor stagnates.
+    # Reopen the same deliberately poor starting factor.  The operator
+    # rewrite again revokes the receipt; rebuild it through the owned factor
+    # seam.  The default policy must then resume on a dynamic signed factor
+    # and re-refine from the original RHS rather than failing immediately
+    # after the static factor stagnates.
     SDPX._assemble_regularized!(session, 1.0)
     @test SDPX.factorize_pivoted_lu!(
         session.factor, session.regularized; threshold=eps(Float64),
     )
+    @test !SDPX._expanded_factor_receipt_current(session)
+    @test !SDPX.solve_expanded!(solution, session, rhs)
+    @test SDPX._factor_expanded_exact!(session, eps(Float64))
+    @test SDPX._build_expanded_factor_receipt!(session) !== nothing
     session.status = SDPX.EXPANDED_KKT_FACTORED
     @test SDPX.solve_expanded!(solution, session, rhs)
     @test SDPX.refine_expanded!(

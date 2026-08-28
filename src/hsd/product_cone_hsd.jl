@@ -57,6 +57,7 @@ mutable struct SymmetricBorderedWorkspace{
     factor_epoch::Int
     factor_receipt::Union{Nothing,FactorReceipt{T}}
     receipt_build_count::Int
+    factor_attempt_count::Int
     transform_order::UInt8
     accumulated_candidate::Bool
     candidate_epoch::Int
@@ -104,6 +105,7 @@ function SymmetricBorderedWorkspace(::Type{T}, nr::Integer) where {T}
         0,
         0,
         nothing,
+        0,
         0,
         _SYMMETRIC_BORDERED_TRANSFORM_ORDER,
         false,
@@ -287,7 +289,8 @@ end
     state.kkt_route === :sparse_schur &&
         return state.sparse_schur === nothing ? 0 :
                state.sparse_schur.receipt_build_count
-    state.coupled.nonsymmetric_dimension > 0 && return 0
+    state.coupled.nonsymmetric_dimension > 0 &&
+        return state.coupled.receipt_build_count
     return state.symmetric_bordered.receipt_build_count
 end
 
@@ -296,7 +299,8 @@ end
         state.expanded.factor_receipt
     state.kkt_route === :sparse_schur && return
         state.sparse_schur === nothing ? nothing : state.sparse_schur.factor_receipt
-    state.coupled.nonsymmetric_dimension > 0 && return nothing
+    state.coupled.nonsymmetric_dimension > 0 &&
+        return state.coupled.factor_receipt
     return state.symmetric_bordered.factor_receipt
 end
 
@@ -955,6 +959,10 @@ end
     workspace = state.symmetric_bordered
     workspace.factor_certified = false
     workspace.factor_receipt = nothing
+    # Count every bordered numeric-factor attempt before any early exit so
+    # failed/uncertified attempts are separately observable and never counted
+    # as successfully certified factors.
+    workspace.factor_attempt_count += 1
     workspace.assembly_epoch == base.epoch || begin
         workspace.last_reason = SYMMETRIC_BORDERED_EPOCH_MISMATCH
         return false
@@ -1011,6 +1019,7 @@ end
         :factored,
         proof_bound,
         true,
+        0, 0,
     )
     workspace.receipt_build_count += 1
     return true
@@ -1082,6 +1091,10 @@ inverse.
     base = state.base
     runtime = state.runtime
     workspace = state.coupled
+    # The coupled matrix rewrite starts here: revoke any receipt from the
+    # previous epoch before the first write, so a later assembly or factor
+    # failure can never leave the old factor looking current.
+    workspace.factor_receipt = nothing
     K = workspace.matrix
     nr = base.nr
     nsdim = workspace.nonsymmetric_dimension

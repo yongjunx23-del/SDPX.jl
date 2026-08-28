@@ -260,6 +260,12 @@ function _product_hsd_factor_exact_expanded_border!(
         return false
     end
 
+    # The exact-border retry rewrites the active operator in place while the
+    # session may still own a receipt from the accepted regularized factor.
+    # Bump the mutation token and revoke the receipt before the rewrite; the
+    # rebuilt receipt below is the only ownership for the new factor.
+    session.operator_generation += 1
+    session.factor_receipt = nothing
     copy_owned!(session.regularized, session.unregularized)
     # The generic ladder's scale-relative pivot floor can reject an exact
     # homogeneous border whose small pivot is still resolvable componentwise.

@@ -46,7 +46,10 @@ combines symbolic and numeric work; therefore `symbolic_reuse_supported` is
 honestly false.  SDPX still freezes one deterministic CSC pattern per session
 and reuses its `colptr`, `rowval`, `nzval`, RHS, residual and block workspaces.
 `structural_assembly_count` must remain one while `numeric_factor_count`
-increments once for each sparse predictor/corrector epoch.
+increments once for each *successfully certified* sparse predictor/corrector
+epoch.  `factor_attempt_count` counts every numeric attempt (including failed
+or condition-rejected ones); a failed attempt never increments
+`numeric_factor_count` and never builds a receipt.
 """
 mutable struct SparseSchurSession{T<:AbstractFloat}
     n::Int
@@ -82,6 +85,7 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     numeric_assembly_count::Int
     rhs_assembly_count::Int
     numeric_factor_count::Int
+    factor_attempt_count::Int
     pattern_reuse_count::Int
     regularization::T
     reciprocal_condition::T
@@ -108,7 +112,7 @@ function SparseSchurSession(::Type{T}, n::Int, m::Int) where {T<:AbstractFloat}
         Matrix{T}[], zeros(T, 0, 0),
         T[], T[], T[], T[], 0,
         zeros(T, n), zeros(T, n), Int[], Int[], Int[],
-        0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
         zero(T), zero(T), sqrt(eps(T)),
         T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         SPARSE_SCHUR_READY, :none,
@@ -536,7 +540,7 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
             session, SPARSE_SCHUR_FACTOR_FAILED,
             :sparse_operator_not_assembled,
         )
-    session.numeric_factor_count += 1
+    session.factor_attempt_count += 1
     try
         factor = lu(session.schur; check=false)
         LinearAlgebra.issuccess(factor) ||
@@ -560,6 +564,10 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
             )
         end
         session.reciprocal_condition = T(info[rcond_index])
+        # Only a factor that passes every capability/condition gate counts as
+        # a numeric factor; failed attempts are visible via
+        # `factor_attempt_count` only.
+        session.numeric_factor_count += 1
         session.factor = factor
         session.symbolic = nothing
         session.factor_numeric_epoch = session.numeric_assembly_count
@@ -579,6 +587,7 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
             :factored,
             T(Inf),
             false,
+            0, 0,
         )
         session.receipt_build_count += 1
         return true

@@ -17,6 +17,12 @@ struct FactorReceipt{T<:AbstractFloat}
     factor_status::Symbol
     factor_backward_bound::T
     proof_valid::Bool
+    # Explicit mutation tokens: every in-place rewrite of the operator or of
+    # the numeric factor buffer bumps the corresponding generation *before*
+    # any early exit, so a receipt can never survive a mutation that its
+    # epoch counters cannot observe (e.g. an exact-border operator rewrite).
+    operator_generation::Int
+    factor_generation::Int
 end
 
 @inline function factor_receipt_precision(::Type{T}) where {T<:AbstractFloat}
@@ -51,6 +57,8 @@ end
     regularization::T,
     factor_status::Symbol=:factored,
     require_proof::Bool=false,
+    operator_generation::Int=0,
+    factor_generation::Int=0,
 ) where {T<:AbstractFloat}
     receipt === nothing && return false
     receipt.matrix_epoch == matrix_epoch || return false
@@ -64,5 +72,7 @@ end
     receipt.factor_status === factor_status || return false
     require_proof && !receipt.proof_valid && return false
     receipt.proof_valid && !isfinite(receipt.factor_backward_bound) && return false
+    receipt.operator_generation == operator_generation || return false
+    receipt.factor_generation == factor_generation || return false
     return true
 end

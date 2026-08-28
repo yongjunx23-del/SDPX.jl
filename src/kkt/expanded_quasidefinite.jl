@@ -328,6 +328,9 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     numeric_factor_count::Int
     factor_receipt::Union{Nothing,FactorReceipt{T}}
     receipt_build_count::Int
+    factor_attempt_count::Int
+    operator_generation::Int
+    factor_generation::Int
     refinement_trajectory::Vector{ExpandedRefinementStep{T}}
     refinements::Int
     refinement_recovery_attempts::Int
@@ -382,7 +385,7 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         alloc_zeros(T, dimension, dimension),
         KKTInertia(0, 0, dimension), zero(T), 0, attempts,
         0, 0, dense_factor_pattern_signature(dimension, dimension, :expanded),
-        0, nothing, 0,
+        0, nothing, 0, 0, 0, 0,
         refinement_trajectory, 0, 0,
         T(Inf), T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         alloc_zeros(T, dimension), alloc_zeros(T, dimension),
@@ -413,7 +416,11 @@ function assemble_expanded_kkt!(
         "expanded session/system dimensions disagree",
     ))
     K = session.unregularized
+    # Every assembly is an owned operator rewrite.  Bump the mutation token
+    # and revoke the receipt before any write, so a partial or non-finite
+    # assembly can never leave the previous receipt current.
     session.matrix_epoch += 1
+    session.operator_generation += 1
     session.factor_receipt = nothing
     zero_owned!(K)
     xrows = 1:n
@@ -478,6 +485,8 @@ end
 function _assemble_regularized!(
     session::ExpandedKKTSession{T}, regularization::T,
 ) where {T<:AbstractFloat}
+    session.operator_generation += 1
+    session.factor_receipt = nothing
     copy_owned!(session.regularized, session.unregularized)
     n, m = session.n, session.m
     @inbounds for index in 1:n
@@ -494,6 +503,8 @@ function _assemble_dynamic_regularized!(
     session::ExpandedKKTSession{T}, magnitude::T, operator_scale::T,
     pivot_floor::T, failed_pivot::Int,
 ) where {T<:AbstractFloat}
+    session.operator_generation += 1
+    session.factor_receipt = nothing
     applied = _assemble_dynamic_signed_regularization!(
         session.regularized, session.unregularized, session.n, magnitude,
         operator_scale, pivot_floor, failed_pivot,
@@ -550,6 +561,12 @@ end
 function _factor_expanded_exact!(
     session::ExpandedKKTSession{T}, pivot_floor::T,
 ) where {T<:AbstractFloat}
+    # Every exact-factor call replaces (or fails to replace) the numeric
+    # factor.  Bump the factor generation and count the attempt before any
+    # numeric work, so a failed attempt can never masquerade as the previous
+    # certified factor.
+    session.factor_generation += 1
+    session.factor_attempt_count += 1
     session.factor_receipt = nothing
     success = if session.la_backend === nothing
         factorize_pivoted_lu!(
@@ -586,6 +603,8 @@ end
         route=:expanded,
         provider=provider,
         regularization=session.regularization,
+        operator_generation=session.operator_generation,
+        factor_generation=session.factor_generation,
     )
 end
 
@@ -607,6 +626,8 @@ end
         :factored,
         T(Inf),
         false,
+        session.operator_generation,
+        session.factor_generation,
     )
     session.receipt_build_count += 1
     return session.factor_receipt
