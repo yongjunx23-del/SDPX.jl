@@ -79,9 +79,8 @@ A provider may own an internal threaded factorization only when its capability
 and thread contract are registered. Provider threads are included in the same
 budget and cannot be combined blindly with outer block workers.
 
-MFLA/BFLA factor state remains provider-owned. PureKLU and QDLDL production
-promotion must also establish their thread-safety and workspace-ownership
-contracts.
+MFLA/BFLA factor state remains provider-owned. Their thread-safety and
+workspace-ownership contracts bound high-precision parallel execution.
 
 ## BigFloat and mutable values
 

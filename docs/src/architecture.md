@@ -133,16 +133,17 @@ certification. Providers own factor/solve operations:
 
 - Julia/SuiteSparse for supported Float64 dense and sparse routes;
 - MultiFloatLinearAlgebra for fixed-width extended dense/local solves;
-- BigFloatLinearAlgebra for BigFloat dense/local solves;
-- PureKLU for exact nonsymmetric high-precision sparse LU;
-- QDLDL for applicable symmetric-companion inertia evidence.
+- BigFloatLinearAlgebra for BigFloat dense/local solves.
+
+High-precision sparse factorization is currently disabled. Unsupported sparse
+requests fail closed or use an explicitly planned dense/bordered route in the
+same arithmetic; they never downcast.
 
 A `FactorReceipt` binds factor generation, operator generation, route,
 provider, and factor outcome. It does not certify a mathematical solution.
 Every right-hand side still requires finite checks and residual verification.
 
-See [Linear-algebra providers](providers.md) and the
-[high-precision sparse provider decision](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md).
+See [Linear-algebra providers](providers.md).
 
 ## Arithmetic ownership
 

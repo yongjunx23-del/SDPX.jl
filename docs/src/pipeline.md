@@ -96,9 +96,10 @@ Float64, MultiFloat, and BigFloat use the same equations. Providers are selected
 only after capability checks. BigFloat workspaces own independent mutable
 values; narrowing is forbidden.
 
-PureKLU is intended for exact nonsymmetric high-precision sparse solves. QDLDL
-is limited to applicable symmetric-companion inertia evidence. MFLA and BFLA
-remain provider-owned dense/local-block implementations.
+MFLA and BFLA are the active high-precision providers for dense and local-block
+factorization. High-precision sparse factorization is not currently promoted;
+unsupported requests remain in the same arithmetic and fail closed or use an
+explicit dense/bordered plan.
 
 ## Thread budget
 

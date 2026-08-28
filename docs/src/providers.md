@@ -56,25 +56,12 @@ BFLA owns BigFloat dense/local kernels and precision-preserving factor state.
 SDPX must preserve independent MPFR ownership and uniform configured precision
 through every input, workspace, and destination.
 
-### PureKLU
+### Current high-precision policy
 
-PureKLU is the exact nonsymmetric sparse-LU provider intended for
-MultiFloat/BigFloat expanded or reduced operators. Its contract includes full
-CSC validation, owned contiguous solve buffers, transpose and multi-RHS solves,
-alias safety, and factor epochs.
-
-Registration or a reviewed prototype is not the same as production promotion;
-the HSD dispatch path must still pass memory and exact-operator residual gates.
-
-### QDLDL
-
-QDLDL factors a symmetric quasidefinite companion. Its inertia evidence is
-usable only when the companion, scaling, congruence, sign, and regularization
-assumptions are proved for the current operator. Unavailable or inapplicable
-inertia cannot reject an exact direction whose original-operator residual has
-passed.
-
-QDLDL does not replace the exact nonsymmetric HSD solve.
+MultiFloat and BigFloat use MFLA/BFLA dense or block-local factors. Generic
+high-precision sparse factorization is not currently a production capability.
+A sparse request without a supported exact provider fails closed or follows an
+explicit same-arithmetic dense/bordered plan; it never selects Float64.
 
 ## Factor receipts
 
@@ -115,13 +102,6 @@ provider. Provider threads are accounted for by the shared `ThreadBudget`.
 Float64, MultiFloat, and BigFloat use the same Newton equations. A missing
 high-precision provider yields an unsupported/fallback decision in the same
 arithmetic; it never triggers a silent Float64 solve.
-
-## Design evidence
-
-The active provider decision is the
-[high-precision sparse provider contract](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md).
-Detailed prototype transcripts remain in Git history rather than the shipped
-manual.
 
 Production defaults change only after end-to-end certificate, accuracy,
 allocation, RSS, and benchmark evidence on one frozen source SHA.

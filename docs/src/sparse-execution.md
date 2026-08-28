@@ -59,19 +59,10 @@ Float64 sparse exact solves may use SuiteSparse/UMFPACK. High-precision sparse
 storage and multiplication use Julia sparse arrays, but the standard UMFPACK
 factorization is not a MultiFloat/BigFloat solver.
 
-The intended high-precision responsibilities are:
-
-- PureKLU: exact nonsymmetric sparse LU for the expanded/reduced operator;
-- QDLDL: symmetric-companion factorization and inertia evidence when the
-  companion contract is applicable;
-- MFLA/BFLA: dense or local-block fallback, not copied sparse symbolic code.
-
-Provider registration alone does not prove production dispatch. The selected
-provider must pass capability, memory, epoch, finite-value, solve-status, and
-original-operator residual gates. No route may downcast to Float64 silently.
-
-See the frozen decision record:
-[High-precision sparse providers](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md).
+MultiFloat and BigFloat currently use MFLA/BFLA dense or block-local factors.
+No generic high-precision sparse factor is promoted. Unsupported sparse
+requests fail closed or use an explicitly planned dense/bordered route in the
+same arithmetic. No route may downcast to Float64 silently.
 
 ## Factor and fallback receipts
 

@@ -74,9 +74,8 @@ it does not replace the exact solve or residual check.
 ### Provider ownership
 
 - SuiteSparse/UMFPACK: Float64 sparse exact solves;
-- PureKLU: exact nonsymmetric high-precision sparse LU;
-- QDLDL: symmetric-companion inertia and regularization evidence;
-- MultiFloatLinearAlgebra and BigFloatLinearAlgebra: dense and local-block
+- MultiFloatLinearAlgebra and BigFloatLinearAlgebra: high-precision dense and
+  local-block
   factor/solve providers;
 - SDPX: canonicalization, cone algebra, assembly, route policy, refinement,
   fallback, reconstruction, and certification.
@@ -98,7 +97,7 @@ The local integration line currently contains:
 - sparse reduced-Schur session, pattern/epoch ownership, block incidence maps,
   fallback receipts, and phase timings;
 - fail-closed nonfinite/tolerance/certificate checks;
-- MFLA/BFLA adapters and reviewed PureKLU/QDLDL prototypes;
+- MFLA/BFLA adapters with provider-owned factor and solve state;
 - public native-only API and one-shot MOI path;
 - separate `benchmark/general/` and `benchmark/bootstrap/physics/` trees;
 - removal of Mathematica/WSTP integration and the standalone
@@ -117,15 +116,17 @@ generic helpers were moved to native owners; public `engine=:auto` and
 qualified SDP/Conic entrypoints now execute product HSD. No legacy solver file
 is included or compiled.
 
-### B. Complete production provider dispatch
+### B. Complete high-precision provider qualification
 
-Connect PureKLU and QDLDL to the production HSD route with:
+Use MFLA for MultiFloat and BFLA for BigFloat dense/local execution. Generic
+high-precision sparse factorization is disabled until a simpler backend is
+justified. Remaining provider work is:
 
-- exact operator and factor-generation receipts;
-- memory preflight;
-- no arithmetic narrowing;
-- original-operator residual checks for every right-hand side; and
-- same-iterate fallback to accepted dense routes.
+- connect provider factors to every active product-HSD dense/local route;
+- retain exact operator and factor-generation receipts;
+- add memory preflight without arithmetic narrowing;
+- verify every right-hand side against the original operator; and
+- fail closed or use an explicit same-arithmetic bordered route when unsupported.
 
 ### C. Finish performance wiring
 

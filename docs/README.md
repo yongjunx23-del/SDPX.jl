@@ -29,7 +29,6 @@ code must respect:
 - `HSD_FORMULATION.md`
 - `NEWTON_SYSTEM.md`
 - `NONSYMMETRIC_SCALING.md`
-- `HIGH_PRECISION_SPARSE_PROVIDERS.md`
 - `GENERAL_BENCHMARK.md`
 
 `newton_system_oracle.py` is the independent small-system oracle associated
