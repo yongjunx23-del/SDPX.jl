@@ -13,7 +13,7 @@ Deliverables (this branch `agent/qdldl-provider-spike`):
 
 - `ext/SDPXQDLDLExt.jl` — narrow adapter prototype (parallel only, not
   registered in `Project.toml`; loaded by the spike driver with `include`).
-- `test/provider_spikes/qdldl_sparse.jl` — validation driver (205 tests).
+- `test/provider_spikes/qdldl_sparse.jl` — validation driver (322 tests).
 - This evidence document.
 
 ## Frozen contract consumed
@@ -114,10 +114,12 @@ only (see API gaps).
 
 ## Benchmark evidence (small dense MFLA/BFLA)
 
-Same companion data, minimum over 7 runs after warmup. QDLDL sparse factor =
+Same companion data, minimum over 5 runs after warmup (the driver
+uses `minimum([... for _ in 1:5])`). QDLDL sparse factor =
 symbolic + numeric; refactor = `update_values!` + `refactor!`. Dense rows are
 `la_ldlt_factor!` on the dense companion through the SDPX provider seam.
-Sparse A density ~10%; H dense (the production cone map is dense).
+Sparse A density ~80% (`sprandn(rng, T, m, n, 0.8)`); H dense (the
+production cone map is dense).
 
 ### dimension 16 (m=9, n=6)
 
@@ -156,7 +158,7 @@ Reading for these small dense sizes: at dimension 16 the dense providers are
 faster for the first factor; the QDLDL fixed-pattern refactor becomes the
 cheaper per-epoch path already at dimension 41 for Float64x2 (7 µs vs 28 µs)
 and at dimension 82 for BigFloat256 (3.1 ms vs 7.6 ms), and the sparse first
-factor overtakes dense MFLA/BFLA at dimension 82 even with 10% sparse A. This
+factor overtakes dense MFLA/BFLA at dimension 82 even with 80% sparse A. This
 is per-epoch evidence only; the production memory-budget gate
 (`docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md` §Densification gate) still
 decides dense vs sparse routing.
@@ -198,6 +200,31 @@ decides dense vs sparse routing.
 8. No matrix-shaped D accessor, no explicit triangular-solve surface, no
    transpose solve, no combined factor+inertia report: all adapter-side
    composition.
+
+## Reviewer closeout (2026-08-28)
+
+- `companion_update!` invalidates the factor and inertia authority **before**
+  any mutation: the status drops to `QDLDL_COMPANION_READY` with
+  `failure = :stale_factor`, so a solve between update and refactor fails
+  closed and `companion_inertia`/`companion_dsigns_match` report nothing
+  until `companion_refactor!` re-certifies. The factor object is retained
+  (refactor needs it) but its authority is revoked.
+- Zero numeric updates preserve the explicit CSC pattern and both linear-index
+  maps: `companion_update!` writes through `nzval` at the recorded positions
+  (never `setindex!`, which deletes stored entries on some Julia versions),
+  and keeps both triangles of the full symmetric matrix in sync. `nnz` and
+  `entry_index` are invariant under zero updates.
+- The multi-RHS panel solve is safe under `dest`/`rhs` overlap: it solves
+  from an owned copy of the RHS panel, so shifted/aliased views of one buffer
+  cannot corrupt unconsumed RHS columns.
+- The coupling fixture `_first_coupling_entry` now selects a genuine
+  `(x_j, y_i)` A-coupling entry (rows `1..n`, columns `n+1..n+m`); the old
+  `key[2] <= n + m` test matched the x-block diagonal `(1, 1)` instead.
+- The spike fixture is deterministic: every `randn` in system construction
+  draws from the seeded `MersenneTwister` (previously `H`, `b`, `c`, `shift`
+  came from the global RNG, making runs non-reproducible).
+- Test count is 322 + 1 (benchmark evidence), all four scalar types
+  (Float64, Float64x2, Float64x4, BigFloat256).
 
 ## Findings and risks
 

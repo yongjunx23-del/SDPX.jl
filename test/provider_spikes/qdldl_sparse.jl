@@ -10,10 +10,16 @@
       2. expected positive/negative inertia via D signs/counts
       3. QDLDL Dsigns signed regularization
       4. update_values! + refactor! fixed-pattern reuse
-      5. vector and multi-RHS solve
+      5. vector and multi-RHS solve (overlap-safe panel solve)
       6. factor residual in the original scalar type
       7. no global BigFloat precision mutation
       8. fail-closed non-quasidefinite / zero-pivot / nonsymmetric inputs
+      9. update invalidates factor and inertia authority until refactor
+         (stale solves fail closed)
+     10. zero numeric updates preserve the explicit CSC pattern and the
+         linear-index maps
+     11. the coupling fixture selects a genuine (x_j, y_i) A coupling, not
+         the x-block diagonal
 
     The QDLDL factor certifies companion inertia only; it never solves the
     exact nonsymmetric condensed operator, and the cross-check at the bottom
@@ -37,7 +43,7 @@ const SPIKE_TYPES = (Float64, Float64x2, Float64x4)
 
 """Dense PSD cone operator that is exactly symmetric in every scalar type."""
 function _psd_operator(::Type{T}, rng::AbstractRNG, m::Int) where {T}
-    R = randn(T, m, m)
+    R = randn(rng, T, m, m)
     H = transpose(R) * R + Matrix{T}(I, m, m)
     @inbounds for i in 1:m, j in 1:i
         value = (H[i, j] + H[j, i]) / T(2)
@@ -55,10 +61,10 @@ function make_newton_system(
     @inbounds for j in 1:n
         nnz(view(A, :, j)) == 0 && (A[mod1(j, m), j] = one(T))
     end
-    b = randn(T, m)
-    c = randn(T, n)
+    b = randn(rng, T, m)
+    c = randn(rng, T, n)
     H = _psd_operator(T, rng, m)
-    shift = randn(T, m)
+    shift = randn(rng, T, m)
     cone = SDPX.assemble_cone_linearization(
         T, m, [SDPX.LocalConeLinearization(1:m, H, shift)],
     )
@@ -94,10 +100,18 @@ function exact_nonsymmetric_operator(
     return sparse(K)
 end
 
-"""First (x_j, y_i) coupling coordinate present in the fixed pattern."""
+"""First (x_j, y_i) A-coupling coordinate present in the fixed pattern.
+
+The x block occupies rows/columns 1..n and carries only diagonal entries
+(from the signed regularization), so the old `key[2] <= n + m` test matched
+the x diagonal (1, 1) instead of a coupling. A genuine A coupling lives in
+rows 1..n and columns n+1..n+m (the (x, tau) coupling at column n+m+1 is
+excluded on purpose).
+"""
 function _first_coupling_entry(companion::QX.QDLDLCompanion)
     for key in sort!(collect(keys(companion.entry_index)))
-        if key[1] <= companion.n && key[2] <= companion.n + companion.m
+        if key[1] <= companion.n && key[2] > companion.n &&
+           key[2] <= companion.n + companion.m
             return key
         end
     end
@@ -263,6 +277,82 @@ end
         end
     end
 
+    @testset "update invalidates factor and inertia authority until refactor" begin
+        for T in SPIKE_TYPES
+            rng = MersenneTwister(UInt(hash(T)) % UInt32 + 5)
+            system = make_newton_system(T, rng)
+            companion = QX.qdldl_companion(system; regularization=T(1e-3))
+            @test QX.companion_status(companion) === QX.QDLDL_COMPANION_FACTORED
+            b = randn(T, companion.dimension)
+            x = similar(b)
+            @test QX.companion_solve!(x, companion, b)
+            coupling = _first_coupling_entry(companion)
+            @test QX.companion_update!(
+                companion, [(coupling[1], coupling[2], T(0.75))],
+            )
+            # The factor and inertia authority are invalidated BEFORE the
+            # mutation: a stale solve must fail closed and no inertia may be
+            # reported from the pre-update factor.
+            @test QX.companion_status(companion) === QX.QDLDL_COMPANION_READY
+            @test QX.companion_failure(companion) === :stale_factor
+            @test QX.companion_solve!(similar(b), companion, b) === false
+            @test QX.companion_inertia(companion) ==
+                  SDPX.KKTInertia(0, 0, companion.dimension)
+            @test !QX.companion_dsigns_match(companion)
+            # refactor restores the certified factor
+            @test QX.companion_refactor!(companion)
+            @test QX.companion_status(companion) === QX.QDLDL_COMPANION_FACTORED
+            @test QX.companion_solve!(x, companion, b)
+            @test QX.companion_residual(companion, x, b) <= _residual_bound(T)
+        end
+    end
+
+    @testset "zero numeric updates preserve the explicit CSC pattern" begin
+        for T in SPIKE_TYPES
+            rng = MersenneTwister(UInt(hash(T)) % UInt32 + 6)
+            system = make_newton_system(T, rng)
+            companion = QX.qdldl_companion(system; regularization=T(1e-3))
+            @test QX.companion_status(companion) === QX.QDLDL_COMPANION_FACTORED
+            pattern_before = collect(keys(companion.entry_index))
+            nnz_triu_before = nnz(companion.triu_matrix)
+            nnz_matrix_before = nnz(companion.matrix)
+            coupling = _first_coupling_entry(companion)
+            # Zeroing a stored A-coupling entry must keep the explicit entry
+            # (and its linear index) so update_values! and the index maps stay
+            # valid; the pattern must never shrink.
+            @test QX.companion_update!(
+                companion, [(coupling[1], coupling[2], zero(T))],
+            )
+            @test collect(keys(companion.entry_index)) == pattern_before
+            @test nnz(companion.triu_matrix) == nnz_triu_before
+            @test nnz(companion.matrix) == nnz_matrix_before
+            @test companion.triu_matrix[coupling[1], coupling[2]] == zero(T)
+            @test companion.matrix[coupling[1], coupling[2]] == zero(T)
+            # the zeroed entry still refactors and solves at type residual
+            @test QX.companion_refactor!(companion)
+            @test QX.companion_status(companion) === QX.QDLDL_COMPANION_FACTORED
+            b = randn(T, companion.dimension)
+            x = similar(b)
+            @test QX.companion_solve!(x, companion, b)
+            @test QX.companion_residual(companion, x, b) <= _residual_bound(T)
+        end
+    end
+
+    @testset "coupling fixture selects an A coupling, not the x diagonal" begin
+        for T in SPIKE_TYPES
+            rng = MersenneTwister(UInt(hash(T)) % UInt32 + 8)
+            system = make_newton_system(T, rng)
+            companion = QX.qdldl_companion(system; regularization=T(1e-3))
+            coupling = _first_coupling_entry(companion)
+            @test coupling[1] <= companion.n
+            @test companion.n < coupling[2] <= companion.n + companion.m
+            # a genuine coupling is off-diagonal and backed by a stored A entry
+            @test coupling[1] != coupling[2]
+            @test system.A[coupling[2] - companion.n, coupling[1]] != zero(T)
+            @test haskey(companion.entry_index, coupling)
+        end
+    end
+
     @testset "vector and multi-RHS solve" begin
         for T in SPIKE_TYPES
             rng = MersenneTwister(UInt(hash(T)) % UInt32 + 4)
@@ -290,7 +380,8 @@ end
             unfactored = QX.QDLDLCompanion{T}(
                 companion.n, companion.m, companion.dimension,
                 companion.matrix, companion.triu_matrix,
-                companion.entry_index, nothing, companion.Dsigns,
+                companion.entry_index, companion.matrix_entry_index,
+                nothing, companion.Dsigns,
                 companion.regularize_eps, companion.regularize_delta,
                 companion.expected, QX.QDLDL_COMPANION_READY, :none, 0,
             )
@@ -298,6 +389,39 @@ end
             @test QX.companion_refactor!(unfactored) === false
             @test QX.companion_inertia(unfactored) ==
                   SDPX.KKTInertia(0, 0, dimension)
+        end
+    end
+
+    @testset "multi-RHS solve is safe under dest/rhs overlap" begin
+        for T in SPIKE_TYPES
+            rng = MersenneTwister(UInt(hash(T)) % UInt32 + 7)
+            system = make_newton_system(T, rng; m=6, n=5)
+            companion = QX.qdldl_companion(system; regularization=T(1e-3))
+            @test QX.companion_status(companion) === QX.QDLDL_COMPANION_FACTORED
+            dimension = companion.dimension
+            B = randn(T, dimension, 3)
+            X_ref = similar(B)
+            @test QX.companion_solve!(X_ref, companion, B)
+            # Overlapping shifted views of one buffer: destination columns
+            # 2..4 read RHS columns 1..3, so a per-column in-place loop would
+            # overwrite RHS column 3 before it is consumed. The owned-copy
+            # panel solve must match the reference exactly.
+            buffer = randn(T, dimension, 4)
+            dest = view(buffer, :, 2:4)
+            rhs = view(buffer, :, 1:3)
+            copyto!(rhs, B)
+            @test QX.companion_solve!(dest, companion, rhs)
+            @inbounds for column in 1:3
+                @test QX.companion_residual(
+                    companion, view(dest, :, column), view(B, :, column),
+                ) <= _residual_bound(T)
+                @test norm(view(dest, :, column) - view(X_ref, :, column), Inf) <=
+                      _residual_bound(T)
+            end
+            # exact aliasing (destination === rhs) is also safe
+            alias = copy(B)
+            @test QX.companion_solve!(alias, companion, alias)
+            @test norm(alias - X_ref, Inf) <= _residual_bound(T)
         end
     end
 

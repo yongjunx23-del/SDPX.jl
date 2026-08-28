@@ -89,6 +89,7 @@ mutable struct QDLDLCompanion{T<:AbstractFloat}
     matrix::SparseMatrixCSC{T,Int}
     triu_matrix::SparseMatrixCSC{T,Int}
     entry_index::Dict{Tuple{Int,Int},Int}
+    matrix_entry_index::Dict{Tuple{Int,Int},Int}
     factor::Union{Nothing,QDLDL.QDLDLFactorisation{T,Int}}
     Dsigns::Vector{Int}
     regularize_eps::T
@@ -227,8 +228,18 @@ function companion_matrix(
             entry_index[(triu_matrix.rowval[position], column)] = position
         end
     end
+    # Same linear-index map for the full symmetric matrix, used by
+    # companion_update! to keep the residual-certification matrix in sync
+    # without ever changing the explicit CSC pattern.
+    matrix_entry_index = Dict{Tuple{Int,Int},Int}()
+    @inbounds for column in axes(matrix, 2)
+        for position in matrix.colptr[column]:(matrix.colptr[column + 1] - 1)
+            matrix_entry_index[(matrix.rowval[position], column)] = position
+        end
+    end
     return (
         matrix=matrix, triu_matrix=triu_matrix, entry_index=entry_index,
+        matrix_entry_index=matrix_entry_index,
         scale=scale, regularization=regularization_value,
     )
 end
@@ -350,7 +361,8 @@ function qdldl_companion(
     Dsigns = [ones(Int, n); -ones(Int, m + 1)]
     companion = QDLDLCompanion{T}(
         n, m, dimension, assembled.matrix, assembled.triu_matrix,
-        assembled.entry_index, nothing, Dsigns, eps_value, delta_value,
+        assembled.entry_index, assembled.matrix_entry_index, nothing,
+        Dsigns, eps_value, delta_value,
         SDPX.expected_expanded_inertia(system),
         QDLDL_COMPANION_READY, :none, 0,
     )
@@ -364,6 +376,13 @@ end
 Apply (row, col, value) upper-triangle updates to the fixed pattern, then
 hand the linear indices to `QDLDL.update_values!`. A coordinate outside the
 captured pattern fails closed instead of silently changing the sparsity.
+
+The factor and inertia authority are invalidated **before** any mutation:
+the status drops to `QDLDL_COMPANION_READY` with `failure = :stale_factor`,
+so solves and inertia reads fail closed until `companion_refactor!`
+re-certifies. Values are written through `nzval` at the recorded linear
+indices so that zero updates never delete stored entries (the explicit CSC
+pattern and both index maps are invariant).
 """
 function companion_update!(
     companion::QDLDLCompanion{T}, changes::AbstractVector,
@@ -371,6 +390,13 @@ function companion_update!(
     F = companion.factor
     F === nothing && return false
     isempty(changes) && return true
+    # Invalidate factor and inertia authority BEFORE any mutation: between an
+    # update and the next refactor the factor values are stale, so solves and
+    # inertia reads must fail closed instead of reporting the pre-update
+    # factor. The factor object is retained (refactor! needs it) but its
+    # authority is revoked until companion_refactor! re-certifies.
+    companion.status = QDLDL_COMPANION_READY
+    companion.failure = :stale_factor
     indices = Int[]
     values = T[]
     @inbounds for change in changes
@@ -383,9 +409,25 @@ function companion_update!(
         converted = T(value)
         push!(indices, index)
         push!(values, converted)
-        companion.matrix[row, col] = converted
-        companion.matrix[col, row] = converted
-        companion.triu_matrix[key[1], key[2]] = converted
+        # Direct nzval assignment preserves the explicit CSC pattern and the
+        # linear-index maps: sparse setindex! with a zero value deletes the
+        # stored entry on some Julia versions, which would shift every later
+        # linear index consumed by QDLDL.update_values!.
+        companion.triu_matrix.nzval[index] = converted
+        # The full symmetric matrix stores both triangles; keep both stored
+        # entries in sync (the diagonal maps to itself).
+        matrix_index = get(companion.matrix_entry_index, key, 0)
+        matrix_index == 0 && throw(ArgumentError(
+            "update coordinate ($row, $col) is not in the full companion pattern",
+        ))
+        companion.matrix.nzval[matrix_index] = converted
+        if key[1] != key[2]
+            mirror_index = get(companion.matrix_entry_index, (key[2], key[1]), 0)
+            mirror_index == 0 && throw(ArgumentError(
+                "update coordinate ($row, $col) mirror is not in the full companion pattern",
+            ))
+            companion.matrix.nzval[mirror_index] = converted
+        end
     end
     QDLDL.update_values!(F, indices, values)
     return true
@@ -413,6 +455,11 @@ end
 
 """Certified inertia `(positive, negative, zero)` from the QDLDL D signs."""
 function companion_inertia(companion::QDLDLCompanion)
+    # Inertia authority is revoked between update and refactor: only a
+    # certified factor may report inertia.
+    companion.status == QDLDL_COMPANION_FACTORED || return SDPX.KKTInertia(
+        0, 0, companion.dimension,
+    )
     F = companion.factor
     F === nothing && return SDPX.KKTInertia(0, 0, companion.dimension)
     positive = QDLDL.positive_inertia(F)
@@ -427,6 +474,7 @@ QDLDL's internal post-permutation order. This is the D-sign evidence that the
 signed regularization enforced the expected block signs.
 """
 function companion_dsigns_match(companion::QDLDLCompanion)
+    companion.status == QDLDL_COMPANION_FACTORED || return false
     F = companion.factor
     F === nothing && return false
     D = F.workspace.D
@@ -473,9 +521,14 @@ function companion_solve!(
     size(rhs, 1) == companion.dimension || throw(DimensionMismatch(
         "companion solve panel row dimension mismatch",
     ))
+    # Owned copy of the RHS panel: destination and rhs may alias or overlap
+    # (e.g. shifted views of one buffer), and a per-column in-place solve
+    # would otherwise read RHS columns that an earlier column already
+    # overwrote. The vector solve! is unaffected (copyto! handles overlap).
+    rhs_owned = copy(rhs)
     @inbounds for column in axes(rhs, 2)
         destination_view = view(destination, :, column)
-        rhs_view = view(rhs, :, column)
+        rhs_view = view(rhs_owned, :, column)
         copyto!(destination_view, rhs_view)
         QDLDL.solve!(F, destination_view)
     end
