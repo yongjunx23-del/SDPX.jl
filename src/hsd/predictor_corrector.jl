@@ -129,6 +129,55 @@ function _product_hsd_expanded_linearization(
     return assemble_cone_linearization(T, m, [local_contribution])
 end
 
+"""Materialize only independent dense cone blocks for sparse Schur assembly."""
+function _product_hsd_sparse_linearization(
+    state::ProductConeHSDState{T}, corrector_rhs::AbstractVector{T},
+) where {T}
+    m = state.base.m
+    length(corrector_rhs) == m || throw(DimensionMismatch(
+        "sparse cone corrector dimension mismatch",
+    ))
+    ranges = UnitRange{Int}[
+        block.offset:(block.offset + block.length - 1)
+        for block in state.base.canonical.cone_layout.blocks
+    ]
+    validate_product_cone_block_ranges(m, ranges)
+    operators = Matrix{T}[]
+    basis = state.g_input
+    image = state.g_output
+    forcing = T(64) * eps(T)
+    for rows in ranges
+        dimension = length(rows)
+        operator = zeros(T, dimension, dimension)
+        @inbounds for local_column in 1:dimension
+            fill!(basis, zero(T))
+            basis[rows[local_column]] = one(T)
+            apply_Theta!(state.runtime, image, basis)
+            for local_row in 1:dimension
+                operator[local_row, local_column] = image[rows[local_row]]
+            end
+        end
+        @inbounds for column in 1:dimension
+            for row in (column + 1):dimension
+                lower = operator[row, column]
+                upper = operator[column, row]
+                work = abs(lower) + abs(upper)
+                discrepancy = abs(lower - upper)
+                if !(isfinite(work) && isfinite(discrepancy)) ||
+                   (!iszero(work) && discrepancy > forcing * work) ||
+                   (iszero(work) && !iszero(discrepancy))
+                    return nothing
+                end
+                operator[column, row] = lower
+            end
+        end
+        push!(operators, operator)
+    end
+    return BlockProductConeLinearization{T}(
+        operators, copy(corrector_rhs), ranges,
+    )
+end
+
 function _product_hsd_expanded_system(
     state::ProductConeHSDState{T}, cone, scalar_rhs::T,
 ) where {T}
@@ -289,12 +338,12 @@ function _product_hsd_sparse_solve_shift!(
     solution = session.solution_vector
     solve_sparse_schur!(session, solution) || return false
     direction = try
-        recover_reduced_direction(system, solution)
+        recover_reduced_direction(system, solution, session)
     catch exception
         exception isa InterruptException && rethrow()
-        session.status = SPARSE_SCHUR_SOLVE_FAILED
-        session.last_reason = :sparse_recovery_failed
-        return false
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_recovery_failed,
+        )
     end
     base = state.base
     copyto!(base.dx, direction.dx)
@@ -303,9 +352,10 @@ function _product_hsd_sparse_solve_shift!(
     base.dtau = direction.dtau
     base.dkappa = direction.dkappa
     if !_hsd_direction_finite(base)
-        session.status = SPARSE_SCHUR_SOLVE_FAILED
-        session.last_reason = :sparse_direction_nonfinite
-        return false
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_SOLVE_FAILED,
+            :sparse_direction_nonfinite,
+        )
     end
     semantic_residual = NewtonResidual(system)
     newton_residual!(semantic_residual, system, direction)
@@ -314,11 +364,13 @@ function _product_hsd_sparse_solve_shift!(
         _schur_operator_scale(session.schur) * norm(solution, Inf), one(T),
     )
     if max_newton_residual(semantic_residual) > T(512) * eps(T) * scale
-        session.status = SPARSE_SCHUR_REFINEMENT_STAGNATED
-        session.last_reason = :sparse_semantic_residual_failed
-        return false
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_REFINEMENT_STAGNATED,
+            :sparse_semantic_residual_failed,
+        )
     end
-    session.status = SPARSE_SCHUR_UNREGULARIZED_CERTIFIED
+    session.status = factor_operator ? SPARSE_SCHUR_FACTORED :
+                     SPARSE_SCHUR_UNREGULARIZED_CERTIFIED
     session.last_reason = :none
     return true
 end
@@ -329,12 +381,11 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     affine_shift!(state.runtime, state.h, base.s, base.y)
     predictor_scalar = -base.tau * base.kappa
-    cone = _product_hsd_expanded_linearization(state, state.h)
-    cone === nothing && begin
-        state.sparse_schur.status = SPARSE_SCHUR_FACTOR_FAILED
-        state.sparse_schur.last_reason = :sparse_cone_linearization_failed
-        return false
-    end
+    cone = _product_hsd_sparse_linearization(state, state.h)
+    cone === nothing && return _invalidate_sparse_schur_factor!(
+        state.sparse_schur, SPARSE_SCHUR_FACTOR_FAILED,
+        :sparse_cone_linearization_failed,
+    )
     _product_hsd_sparse_solve_shift!(
         state, cone, predictor_scalar; factor_operator=true,
     ) || return false
@@ -345,25 +396,25 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     base.dkappa_a = base.dkappa
 
     alpha_aff = _product_hsd_boundary_alpha!(state)
-    (isfinite(alpha_aff) && alpha_aff > zero(T)) || begin
-        state.sparse_schur.status = SPARSE_SCHUR_REFINEMENT_STAGNATED
-        state.sparse_schur.last_reason = :sparse_affine_boundary_failed
-        return false
-    end
+    (isfinite(alpha_aff) && alpha_aff > zero(T)) ||
+        return _invalidate_sparse_schur_factor!(
+            state.sparse_schur, SPARSE_SCHUR_REFINEMENT_STAGNATED,
+            :sparse_affine_boundary_failed,
+        )
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
-    (isfinite(mu_aff) && mu_aff >= zero(T)) || begin
-        state.sparse_schur.status = SPARSE_SCHUR_REFINEMENT_STAGNATED
-        state.sparse_schur.last_reason = :sparse_affine_mu_failed
-        return false
-    end
+    (isfinite(mu_aff) && mu_aff >= zero(T)) ||
+        return _invalidate_sparse_schur_factor!(
+            state.sparse_schur, SPARSE_SCHUR_REFINEMENT_STAGNATED,
+            :sparse_affine_mu_failed,
+        )
     ratio = base.mu_aff / base.mu
     sigma = min(one(T), ratio * ratio * ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
-    corrector_cone = ProductConeLinearization{T}(
-        cone.operator, copy(state.h), cone.block_ranges,
+    corrector_cone = BlockProductConeLinearization{T}(
+        cone.operators, copy(state.h), cone.block_ranges,
     )
     return _product_hsd_sparse_solve_shift!(
         state, corrector_cone, corrector_scalar; factor_operator=false,

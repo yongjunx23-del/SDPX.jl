@@ -58,16 +58,19 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     symbolic_reuse_supported::Bool
     symbolic::Union{Nothing,Any}
     factor::Union{Nothing,Any}
+    factor_numeric_epoch::Int
+    factor_pattern_signature::UInt64
     rhs::Vector{T}
     solution_vector::Vector{T}
     residual_vector::Vector{T}
     correction_vector::Vector{T}
-    block_inverse::Matrix{T}
+    block_inverses::Vector{Matrix{T}}
     block_augmented::Matrix{T}
-    rhs_delta::Vector{T}
-    hinv_b::Vector{T}
-    hinv_delta::Vector{T}
-    column_work::Vector{T}
+    block_rhs_delta::Vector{T}
+    block_hinv_b::Vector{T}
+    block_hinv_delta::Vector{T}
+    block_column_work::Vector{T}
+    maximum_block_dimension::Int
     atb::Vector{T}
     at_delta::Vector{T}
     active_columns::Vector{Int}
@@ -97,17 +100,30 @@ function SparseSchurSession(::Type{T}, n::Int, m::Int) where {T<:AbstractFloat}
         n, m, dimension,
         spzeros(T, dimension, dimension),
         Dict{Tuple{Int,Int},Int}(),
-        zero(UInt64), false, nothing, nothing,
+        zero(UInt64), false, nothing, nothing, 0, zero(UInt64),
         zeros(T, dimension), zeros(T, dimension), zeros(T, dimension),
         zeros(T, dimension),
-        zeros(T, m, m), zeros(T, 0, 0),
-        zeros(T, m), zeros(T, m), zeros(T, m),
-        zeros(T, m), zeros(T, n), zeros(T, n), Int[], Int[], Int[],
+        Matrix{T}[], zeros(T, 0, 0),
+        T[], T[], T[], T[], 0,
+        zeros(T, n), zeros(T, n), Int[], Int[], Int[],
         0, 0, 0, 0, 0,
         zero(T), zero(T), sqrt(eps(T)),
         T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         SPARSE_SCHUR_READY, :none,
     )
+end
+
+@inline function _invalidate_sparse_schur_factor!(
+    session::SparseSchurSession,
+    status::SparseSchurStatus,
+    reason::Symbol,
+)
+    session.factor = nothing
+    session.factor_numeric_epoch = 0
+    session.factor_pattern_signature = zero(UInt64)
+    session.status = status
+    session.last_reason = reason
+    return false
 end
 
 @inline function _schur_operator_scale(matrix::AbstractMatrix{T}) where {T}
@@ -234,10 +250,12 @@ function _setup_sparse_schur_pattern!(
     session::SparseSchurSession{T}, system::NewtonSystem{T},
 ) where {T<:AbstractFloat}
     session.structural_assembly_count == 0 || return true
+    validate_cone_linearization(system.cone)
+    ranges = product_cone_block_ranges(system.cone)
     n = session.n
     empty!(session.pattern_i)
     empty!(session.pattern_j)
-    for block in system.cone.block_ranges
+    for block in ranges
         active = _sparse_schur_active_columns!(
             session.active_columns, system.A, block,
         )
@@ -267,11 +285,18 @@ function _setup_sparse_schur_pattern!(
             session.pattern_lookup[(session.schur.rowval[slot], column)] = slot
         end
     end
-    maximum_block_dimension = isempty(system.cone.block_ranges) ? 0 :
-        maximum(length, system.cone.block_ranges)
+    maximum_block_dimension = isempty(ranges) ? 0 : maximum(length, ranges)
+    session.maximum_block_dimension = maximum_block_dimension
+    session.block_inverses = [
+        zeros(T, length(rows), length(rows)) for rows in ranges
+    ]
     session.block_augmented = zeros(
         T, maximum_block_dimension, 2 * maximum_block_dimension,
     )
+    session.block_rhs_delta = zeros(T, maximum_block_dimension)
+    session.block_hinv_b = zeros(T, maximum_block_dimension)
+    session.block_hinv_delta = zeros(T, maximum_block_dimension)
+    session.block_column_work = zeros(T, maximum_block_dimension)
     session.pattern_signature = _sparse_schur_source_signature(system)
     session.structural_assembly_count = 1
     return true
@@ -303,143 +328,164 @@ function assemble_sparse_schur_operator!(
     size(system.A) == (m, n) || throw(DimensionMismatch(
         "sparse session/system dimensions disagree",
     ))
-    size(system.cone.operator) == (m, m) || throw(DimensionMismatch(
+    cone_dimension(system.cone) == m || throw(DimensionMismatch(
         "cone operator dimension does not match rows of A",
     ))
+    validate_cone_linearization(system.cone)
     _setup_sparse_schur_pattern!(session, system)
-    if _sparse_schur_source_signature(system) != session.pattern_signature
-        session.status = SPARSE_SCHUR_FACTOR_FAILED
-        session.last_reason = :sparse_pattern_drift
-        return false
-    end
+    signature = _sparse_schur_source_signature(system)
+    signature == session.pattern_signature ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+        )
+
+    # A new numeric operator invalidates every prior factor before any write.
+    _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_READY, :numeric_operator_changed,
+    )
     session.numeric_assembly_count > 0 && (session.pattern_reuse_count += 1)
     fill!(session.schur.nzval, zero(T))
-    fill!(session.block_inverse, zero(T))
-    fill!(session.hinv_b, zero(T))
-    fill!(session.hinv_delta, zero(T))
-
-    H = system.cone.operator
     fill!(session.atb, zero(T))
     atb = session.atb
     btHb = zero(T)
-    for block in system.cone.block_ranges
+    ranges = product_cone_block_ranges(system.cone)
+
+    for (block_index, block) in enumerate(ranges)
         dimension = length(block)
-        block_H = @view H[block, block]
-        block_inverse = @view session.block_inverse[block, block]
+        block_H = product_cone_block_operator(system.cone, block_index)
+        block_inverse = session.block_inverses[block_index]
         _invert_cone_block(
             block_H, block_inverse, session.block_augmented,
-        ) || begin
-            session.status = SPARSE_SCHUR_FACTOR_FAILED
-            session.last_reason = :cone_block_singular
-            return false
-        end
+        ) || return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :cone_block_singular,
+        )
         @inbounds for local_row in 1:dimension
-            row = block[local_row]
             value_b = zero(T)
             for local_column in 1:dimension
                 value_b += block_inverse[local_row, local_column] *
                            system.b[block[local_column]]
             end
-            session.hinv_b[row] = value_b
+            session.block_hinv_b[local_row] = value_b
         end
         active = _sparse_schur_active_columns!(
             session.active_columns, system.A, block,
         )
         for column_j in active
             @inbounds for local_row in 1:dimension
-                row = block[local_row]
                 value = zero(T)
                 for local_column in 1:dimension
                     value += block_inverse[local_row, local_column] *
                              system.A[block[local_column], column_j]
                 end
-                session.column_work[row] = value
+                session.block_column_work[local_row] = value
             end
             for column_i in active
                 value = zero(T)
-                @inbounds for row in block
-                    value += system.A[row, column_i] * session.column_work[row]
+                @inbounds for local_row in 1:dimension
+                    value += system.A[block[local_row], column_i] *
+                             session.block_column_work[local_row]
                 end
                 _add_sparse_schur_value!(
                     session, column_i, column_j, value,
-                ) || begin
-                    session.status = SPARSE_SCHUR_FACTOR_FAILED
-                    session.last_reason = :sparse_pattern_drift
-                    return false
-                end
+                ) || return _invalidate_sparse_schur_factor!(
+                    session, SPARSE_SCHUR_FACTOR_FAILED,
+                    :sparse_pattern_drift,
+                )
             end
             value_b = zero(T)
-            @inbounds for row in block
-                value_b += system.A[row, column_j] * session.hinv_b[row]
+            @inbounds for local_row in 1:dimension
+                value_b += system.A[block[local_row], column_j] *
+                           session.block_hinv_b[local_row]
             end
             atb[column_j] += value_b
         end
-        @inbounds for row in block
-            btHb += system.b[row] * session.hinv_b[row]
+        @inbounds for local_row in 1:dimension
+            btHb += system.b[block[local_row]] *
+                    session.block_hinv_b[local_row]
         end
     end
     @inbounds for column in 1:n
         _set_sparse_schur_value!(
             session, column, n + 1, system.c[column] - atb[column],
-        ) || return false
+        ) || return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+        )
         _set_sparse_schur_value!(
             session, n + 1, column, system.c[column] + atb[column],
-        ) || return false
+        ) || return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+        )
     end
     _set_sparse_schur_value!(
         session, n + 1, n + 1,
         system.kappa / system.tau - btHb,
-    ) || return false
-    all(isfinite, session.schur.nzval) || begin
-        session.status = SPARSE_SCHUR_FACTOR_FAILED
-        session.last_reason = :sparse_operator_nonfinite
-        return false
-    end
+    ) || return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+    )
+    all(isfinite, session.schur.nzval) ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED,
+            :sparse_operator_nonfinite,
+        )
     session.numeric_assembly_count += 1
     session.status = SPARSE_SCHUR_ASSEMBLED
     session.last_reason = :none
     return true
 end
 
-"""Assemble only the reduced RHS, reusing the current block inverses."""
+"""Assemble only the reduced RHS, reusing per-block inverse storage."""
 function assemble_sparse_schur_rhs!(
     session::SparseSchurSession{T}, system::NewtonSystem{T},
 ) where {T<:AbstractFloat}
     session.numeric_assembly_count > 0 || throw(ArgumentError(
         "sparse Schur operator must be assembled before its RHS",
     ))
-    n, m = session.n, session.m
+    validate_cone_linearization(system.cone)
+    signature = _sparse_schur_source_signature(system)
+    signature == session.pattern_signature ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+        )
+    ranges = product_cone_block_ranges(system.cone)
+    length(ranges) == length(session.block_inverses) ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+        )
+
+    n = session.n
     fill!(session.at_delta, zero(T))
     at_delta = session.at_delta
     bt_delta = zero(T)
-    @inbounds for row in 1:m
-        session.rhs_delta[row] = system.rhs.cone_corrector[row] -
-                                 system.rhs.primal_affine[row]
-    end
-    for block in system.cone.block_ranges
+    for (block_index, block) in enumerate(ranges)
         dimension = length(block)
-        block_inverse = @view session.block_inverse[block, block]
+        block_inverse = session.block_inverses[block_index]
         @inbounds for local_row in 1:dimension
-            row = block[local_row]
+            delta = system.rhs.cone_corrector[block[local_row]] -
+                    system.rhs.primal_affine[block[local_row]]
+            session.block_rhs_delta[local_row] = delta
+        end
+        @inbounds for local_row in 1:dimension
             value = zero(T)
             for local_column in 1:dimension
                 value += block_inverse[local_row, local_column] *
-                         session.rhs_delta[block[local_column]]
+                         session.block_rhs_delta[local_column]
             end
-            session.hinv_delta[row] = value
+            session.block_hinv_delta[local_row] = value
         end
         active = _sparse_schur_active_columns!(
             session.active_columns, system.A, block,
         )
         for column in active
             value = zero(T)
-            @inbounds for row in block
-                value += system.A[row, column] * session.hinv_delta[row]
+            @inbounds for local_row in 1:dimension
+                value += system.A[block[local_row], column] *
+                         session.block_hinv_delta[local_row]
             end
             at_delta[column] += value
         end
-        @inbounds for row in block
-            bt_delta += system.b[row] * session.hinv_delta[row]
+        @inbounds for local_row in 1:dimension
+            bt_delta += system.b[block[local_row]] *
+                        session.block_hinv_delta[local_row]
         end
     end
     @inbounds for column in 1:n
@@ -448,8 +494,9 @@ function assemble_sparse_schur_rhs!(
     session.rhs[n + 1] = -system.rhs.homogeneous_gap - bt_delta +
                          system.rhs.tau_kappa / system.tau
     all(isfinite, session.rhs) || begin
-        session.status = SPARSE_SCHUR_SOLVE_FAILED
-        session.last_reason = :sparse_rhs_nonfinite
+        _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_rhs_nonfinite,
+        )
         return false
     end
     session.rhs_assembly_count += 1
@@ -470,21 +517,29 @@ Factor the sparse operator.  Julia's stdlib UMFPACK route is accepted only for
 unsupported, so both must fail closed into the caller's explicit route ladder.
 """
 function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:AbstractFloat}
+    # Clear stale ownership before capability checks or numeric work.
+    session.factor = nothing
+    session.factor_numeric_epoch = 0
+    session.factor_pattern_signature = zero(UInt64)
     if !sparse_schur_factorization_supported(T)
-        session.status = SPARSE_SCHUR_FACTOR_FAILED
-        session.last_reason = :sparse_factor_type_unsupported
-        return false
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED,
+            :sparse_factor_type_unsupported,
+        )
     end
+    session.status === SPARSE_SCHUR_ASSEMBLED ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED,
+            :sparse_operator_not_assembled,
+        )
+    session.numeric_factor_count += 1
     try
         factor = lu(session.schur; check=false)
-        LinearAlgebra.issuccess(factor) || begin
-            session.status = SPARSE_SCHUR_FACTOR_FAILED
-            session.last_reason = :sparse_factor_singular
-            return false
-        end
-        session.factor = factor
-        session.symbolic = nothing
-        session.numeric_factor_count += 1
+        LinearAlgebra.issuccess(factor) ||
+            return _invalidate_sparse_schur_factor!(
+                session, SPARSE_SCHUR_FACTOR_FAILED,
+                :sparse_factor_singular,
+            )
         # SuiteSparse UMFPACK publishes reciprocal condition in its numeric
         # info vector. SparseArrays exposes neither a public accessor nor a
         # standalone symbolic API, so this is a deliberately isolated stdlib
@@ -495,19 +550,24 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
            info[rcond_index] <= session.condition_floor
             session.reciprocal_condition = length(info) >= rcond_index ?
                 T(info[rcond_index]) : zero(T)
-            session.status = SPARSE_SCHUR_FACTOR_FAILED
-            session.last_reason = :sparse_condition_rejected
-            return false
+            return _invalidate_sparse_schur_factor!(
+                session, SPARSE_SCHUR_FACTOR_FAILED,
+                :sparse_condition_rejected,
+            )
         end
         session.reciprocal_condition = T(info[rcond_index])
+        session.factor = factor
+        session.symbolic = nothing
+        session.factor_numeric_epoch = session.numeric_assembly_count
+        session.factor_pattern_signature = session.pattern_signature
         session.status = SPARSE_SCHUR_FACTORED
         session.last_reason = :none
         return true
     catch exception
         exception isa InterruptException && rethrow()
-        session.status = SPARSE_SCHUR_FACTOR_FAILED
-        session.last_reason = :sparse_factor_failed
-        return false
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_factor_failed,
+        )
     end
 end
 
@@ -529,81 +589,89 @@ function _sparse_schur_backward_error!(
     return session.backward_error
 end
 
-"""Solve and refine against the unregularized sparse operator."""
+"""Solve and refine against the current unregularized sparse factor."""
 function solve_sparse_schur!(
     session::SparseSchurSession{T}, solution::AbstractVector{T},
 ) where {T<:AbstractFloat}
     length(solution) == session.dimension || throw(DimensionMismatch(
         "sparse reduced solution dimension mismatch",
     ))
-    session.factor === nothing && return false
+    current_factor = session.status === SPARSE_SCHUR_FACTORED &&
+        session.factor !== nothing &&
+        session.factor_numeric_epoch == session.numeric_assembly_count &&
+        session.factor_pattern_signature == session.pattern_signature
+    current_factor || return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_factor_stale,
+    )
     try
         copyto!(solution, session.factor \ session.rhs)
     catch exception
         exception isa InterruptException && rethrow()
-        session.status = SPARSE_SCHUR_SOLVE_FAILED
-        session.last_reason = :sparse_solve_failed
-        return false
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_solve_failed,
+        )
     end
-    all(isfinite, solution) || begin
-        session.status = SPARSE_SCHUR_SOLVE_FAILED
-        session.last_reason = :sparse_solution_nonfinite
-        return false
-    end
+    all(isfinite, solution) || return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_solution_nonfinite,
+    )
     previous = _sparse_schur_backward_error!(session, solution)
-    if previous <= session.backward_target
-        return true
-    end
+    previous <= session.backward_target && return true
     for _ in 1:3
         try
-            copyto!(session.correction_vector,
-                    session.factor \ session.residual_vector)
+            copyto!(
+                session.correction_vector,
+                session.factor \ session.residual_vector,
+            )
         catch exception
             exception isa InterruptException && rethrow()
-            session.status = SPARSE_SCHUR_SOLVE_FAILED
-            session.last_reason = :sparse_refinement_solve_failed
-            return false
+            return _invalidate_sparse_schur_factor!(
+                session, SPARSE_SCHUR_SOLVE_FAILED,
+                :sparse_refinement_solve_failed,
+            )
         end
-        all(isfinite, session.correction_vector) || begin
-            session.status = SPARSE_SCHUR_SOLVE_FAILED
-            session.last_reason = :sparse_refinement_nonfinite
-            return false
-        end
+        all(isfinite, session.correction_vector) ||
+            return _invalidate_sparse_schur_factor!(
+                session, SPARSE_SCHUR_SOLVE_FAILED,
+                :sparse_refinement_nonfinite,
+            )
         @inbounds for index in eachindex(solution)
             solution[index] += session.correction_vector[index]
         end
         current = _sparse_schur_backward_error!(session, solution)
         current <= session.backward_target && return true
         if current >= previous
-            session.status = session.at_arithmetic_floor ?
+            status = session.at_arithmetic_floor ?
                 SPARSE_SCHUR_REFINEMENT_AT_FLOOR :
                 SPARSE_SCHUR_REFINEMENT_STAGNATED
-            session.last_reason = session.at_arithmetic_floor ?
+            reason = session.at_arithmetic_floor ?
                 :sparse_refinement_at_floor : :sparse_refinement_stagnated
-            return false
+            return _invalidate_sparse_schur_factor!(session, status, reason)
         end
         previous = current
     end
-    session.status = session.at_arithmetic_floor ?
+    status = session.at_arithmetic_floor ?
         SPARSE_SCHUR_REFINEMENT_AT_FLOOR :
         SPARSE_SCHUR_REFINEMENT_STAGNATED
-    session.last_reason = session.at_arithmetic_floor ?
+    reason = session.at_arithmetic_floor ?
         :sparse_refinement_at_floor : :sparse_refinement_budget_exhausted
-    return false
+    return _invalidate_sparse_schur_factor!(session, status, reason)
 end
 
-"""Recover the full semantic direction from `(dx,dτ)`."""
-function recover_reduced_direction(
+"""Recover a full semantic direction using caller-owned block inverses."""
+function _recover_reduced_direction(
     system::NewtonSystem{T}, condensed::AbstractVector{T},
+    block_inverses::AbstractVector{<:AbstractMatrix{T}},
 ) where {T<:AbstractFloat}
     m, n = size(system.A)
     length(condensed) == n + 1 || throw(DimensionMismatch(
         "reduced solution dimension mismatch",
     ))
+    ranges = product_cone_block_ranges(system.cone)
+    length(block_inverses) == length(ranges) || throw(DimensionMismatch(
+        "reduced recovery block inverse count mismatch",
+    ))
     dx = copy(@view condensed[1:n])
     dtau = condensed[n + 1]
-    H = system.cone.operator
-    block_inverse = zeros(T, m, m)
     rhs_for_dy = zeros(T, m)
     @inbounds for i in 1:m
         rhs_for_dy[i] = system.rhs.cone_corrector[i] -
@@ -614,28 +682,61 @@ function recover_reduced_direction(
         rhs_for_dy[i] -= system.b[i] * dtau
     end
     dy = zeros(T, m)
-    for block in system.cone.block_ranges
-        block_H = @view H[block, block]
-        block_inv = @view block_inverse[block, block]
-        _invert_cone_block(block_H, block_inv) || throw(ArgumentError(
-            "reduced recovery cone block singular",
-        ))
-        @inbounds for local_row in eachindex(block)
+    for (block_index, block) in enumerate(ranges)
+        block_inverse = block_inverses[block_index]
+        dimension = length(block)
+        size(block_inverse) == (dimension, dimension) ||
+            throw(DimensionMismatch(
+                "reduced recovery block inverse dimensions disagree",
+            ))
+        @inbounds for local_row in 1:dimension
             value = zero(T)
-            for local_column in eachindex(block)
-                value += block_inv[local_row, local_column] *
+            for local_column in 1:dimension
+                value += block_inverse[local_row, local_column] *
                          rhs_for_dy[block[local_column]]
             end
             dy[block[local_row]] = value
         end
     end
     ds = zeros(T, m)
-    mul!(ds, H, dy)
+    apply_cone_linearization!(ds, system.cone, dy)
     @inbounds for i in 1:m
         ds[i] = system.rhs.cone_corrector[i] - ds[i]
     end
     dkappa = (system.rhs.tau_kappa - system.kappa * dtau) / system.tau
     return NewtonDirection(dx, dy, ds, dtau, dkappa)
+end
+
+function recover_reduced_direction(
+    system::NewtonSystem{T}, condensed::AbstractVector{T},
+    session::SparseSchurSession{T},
+) where {T<:AbstractFloat}
+    _sparse_schur_source_signature(system) == session.pattern_signature ||
+        throw(ArgumentError("reduced recovery source pattern drift"))
+    return _recover_reduced_direction(
+        system, condensed, session.block_inverses,
+    )
+end
+
+function recover_reduced_direction(
+    system::NewtonSystem{T}, condensed::AbstractVector{T},
+) where {T<:AbstractFloat}
+    validate_cone_linearization(system.cone)
+    ranges = product_cone_block_ranges(system.cone)
+    maximum_block_dimension = isempty(ranges) ? 0 : maximum(length, ranges)
+    augmented = zeros(
+        T, maximum_block_dimension, 2 * maximum_block_dimension,
+    )
+    block_inverses = Matrix{T}[]
+    for (block_index, rows) in enumerate(ranges)
+        dimension = length(rows)
+        inverse = zeros(T, dimension, dimension)
+        operator = product_cone_block_operator(system.cone, block_index)
+        _invert_cone_block(operator, inverse, augmented) ||
+            throw(ArgumentError("reduced recovery cone block singular"))
+        push!(block_inverses, inverse)
+    end
+    return _recover_reduced_direction(system, condensed, block_inverses)
 end
 
 """
