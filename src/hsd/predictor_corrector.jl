@@ -262,13 +262,18 @@ function _product_hsd_expanded_solve_shift!(
     base.dtau = direction.dtau
     base.dkappa = direction.dkappa
     _hsd_direction_finite(base) || return false
+    residual_workspace = product_hsd_residual_workspace(state)
+    residual_workspace === nothing && return false
+    evaluate_direction!(residual_workspace, system, direction)
     semantic_residual = session.newton_residual
-    newton_residual!(semantic_residual, system, direction)
+    newton_residual!(
+        semantic_residual, system, direction, residual_workspace,
+    )
     scale = max(
         norm(rhs, Inf), norm(solution, Inf) *
         _expanded_operator_scale(session.unregularized), one(T),
     )
-    return max_newton_residual(semantic_residual) <=
+    return fused_max_newton_residual(residual_workspace) <=
            T(512) * eps(T) * scale
 end
 
@@ -416,13 +421,18 @@ function _product_hsd_sparse_solve_shift!(
             :sparse_direction_nonfinite,
         )
     end
-    semantic_residual = NewtonResidual(system)
-    newton_residual!(semantic_residual, system, direction)
+    residual_workspace = product_hsd_residual_workspace(state)
+    residual_workspace === nothing && return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_SOLVE_FAILED,
+        :sparse_residual_workspace_unavailable,
+    )
+    evaluate_direction!(residual_workspace, system, direction)
     scale = max(
         norm(session.rhs, Inf),
         _schur_operator_scale(session.schur) * norm(solution, Inf), one(T),
     )
-    if max_newton_residual(semantic_residual) > T(512) * eps(T) * scale
+    if fused_max_newton_residual(residual_workspace) >
+       T(512) * eps(T) * scale
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_REFINEMENT_STAGNATED,
             :sparse_semantic_residual_failed,

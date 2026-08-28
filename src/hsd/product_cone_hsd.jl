@@ -235,6 +235,26 @@ function _product_cone_hsd_state(
     sparse_schur = kkt_route === :sparse_schur &&
         sparse_schur_factorization_supported(T) ?
         SparseSchurSession(T, base.n, base.m) : nothing
+
+    # Product-HSD direction validation is currently serial.  Own one fused
+    # workspace for the lifetime of the state so expanded/sparse predictor and
+    # corrector acceptance form A*dx, A'*dy, and the cone action exactly once
+    # per candidate without claiming parallel execution that does not exist.
+    residual_budget = ThreadBudget()
+    residual_hook = ProductHSDResidualHook(T; budget=residual_budget)
+    residual_ranges = UnitRange{Int}[
+        block.offset:(block.offset + block.length - 1)
+        for block in base.canonical.cone_layout.blocks
+    ]
+    attach_residual_workspace!(
+        residual_hook,
+        DirectionEvaluationWorkspace(
+            T, base.m, base.n, residual_ranges, residual_budget,
+        ),
+    )
+    record_thread_budget!(
+        residual_hook, thread_budget_record(residual_budget),
+    )
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
@@ -267,7 +287,7 @@ function _product_cone_hsd_state(
         sparse_schur,
         :none,
         0,
-        ProductHSDResidualHook(T),
+        residual_hook,
     )
 end
 

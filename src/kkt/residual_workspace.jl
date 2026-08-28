@@ -451,7 +451,7 @@ function evaluate_direction!(
     ws.c_dx = c_dx
     ws.b_dy = b_dy
     ws.tau_kappa = system.kappa * direction.dtau +
-                   system.tau * direction.dkappa
+                   system.tau * direction.dkappa - system.rhs.tau_kappa
 
     # Fixed virtual-bin norm partials for the primal and cone complementarity
     # groups.  The block→bin map is a pure function of the block index, so it
@@ -511,7 +511,8 @@ function newton_residual!(
     scalar_gap = ws.c_dx + ws.b_dy
     newton_residual_from_terms!(
         residual, system, direction,
-        ws.adx, ws.atdy, ws.cone_action, scalar_gap, ws.tau_kappa,
+        ws.adx, ws.atdy, ws.cone_action, scalar_gap,
+        ws.tau_kappa + system.rhs.tau_kappa,
     )
     ws.metadata.newton_residual_count += 1
     ws.metadata.last_scalar_gap = scalar_gap
