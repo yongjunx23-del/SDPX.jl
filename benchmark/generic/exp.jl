@@ -50,7 +50,7 @@ for (id, params, objective, tolerance) in (
         _logsumexp(_exp_coefficients(0x0e0002, 3)), 3e-5),
 )
     _register!(BenchmarkSpec(id, :exp, :small, ExpProblem(), params,
-        :optimal, objective, tolerance, _EXP_SOURCE))
+        :known_solver_finding, objective, tolerance, _EXP_SOURCE))
 end
 for (tier, seed, n, tol) in (
     (:medium, 0x0e0003, 12, 5e-5),
@@ -59,5 +59,5 @@ for (tier, seed, n, tol) in (
     params = (kind=:logsumexp, name=Symbol(:exp_logsumexp_, tier), seed, n)
     objective = _logsumexp(_exp_coefficients(seed, n))
     _register!(BenchmarkSpec(Symbol(:exp_logsumexp_, tier), :exp, tier,
-        ExpProblem(), params, :optimal, objective, tol, _EXP_SOURCE))
+        ExpProblem(), params, :known_solver_finding, objective, tol, _EXP_SOURCE))
 end

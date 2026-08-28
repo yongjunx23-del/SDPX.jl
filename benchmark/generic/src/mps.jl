@@ -66,3 +66,40 @@ function read_mps(path::AbstractString)
     end
     return MPSData(name, objective_row, senses, columns, rhs, lower, upper)
 end
+
+"Lower a continuous MPS instance to the public SDPX Model API."
+function mps_model(data::MPSData, ::Type{T}=Float64) where {T<:AbstractFloat}
+    variables = sort!(collect(keys(data.columns)))
+    all(variable -> data.lower[variable] == 0.0 && isinf(data.upper[variable]), variables) ||
+        throw(ArgumentError("the curated native MPS lowerer currently requires standard nonnegative variables"))
+    model = SDPX.Model(T; name=data.name)
+    x = SDPX.variable!(model, :mps_variables, length(variables); domain=SDPX.Nonnegative())
+    index = Dict(variable => position for (position, variable) in enumerate(variables))
+    rows = sort!(collect(keys(data.row_sense)))
+    for row in rows
+        sense = data.row_sense[row]
+        sense == 'N' && continue
+        expression = zero(T)
+        for variable in variables
+            coefficient = get(data.columns[variable], row, 0.0)
+            iszero(coefficient) || (expression += T(coefficient) * x[index[variable]])
+        end
+        right = T(get(data.rhs, row, 0.0))
+        if sense == 'E'
+            SDPX.constraint!(model, Symbol(:mps_, row), expression - right, SDPX.ZeroCone())
+        elseif sense == 'L'
+            SDPX.constraint!(model, Symbol(:mps_, row), right - expression, SDPX.Nonnegative())
+        elseif sense == 'G'
+            SDPX.constraint!(model, Symbol(:mps_, row), expression - right, SDPX.Nonnegative())
+        else
+            throw(ArgumentError("unsupported MPS row sense $sense"))
+        end
+    end
+    objective = zero(T)
+    for variable in variables
+        coefficient = get(data.columns[variable], data.objective_row, 0.0)
+        iszero(coefficient) || (objective += T(coefficient) * x[index[variable]])
+    end
+    SDPX.objective!(model, SDPX.Minimize(), objective)
+    return model
+end

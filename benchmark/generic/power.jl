@@ -41,16 +41,16 @@ function build(::PowerProblem, ::Type{T}, params) where {T<:AbstractFloat}
 end
 
 const _POWER_SOURCE = "Mosek Modeling Cookbook power-cone p-norm and weighted geometric-mean formulations"
-for (id, params, objective, tolerance) in (
+for (id, params, status, objective, tolerance) in (
     (:power_geomean_small,
         (kind=:geomean, name=:power_geomean_small, alpha=0.35, left=2.0, right=0.5),
-        2.0^0.35 * 0.5^0.65, 3e-5),
+        :known_solver_finding, 2.0^0.35 * 0.5^0.65, 3e-5),
     (:power_epigraph_small,
         (kind=:epigraph, name=:power_epigraph_small, seed=0x900001, n=3, alpha=0.5),
-        _power_epigraph_objective(0x900001, 3, 0.5), 3e-5),
+        :optimal, _power_epigraph_objective(0x900001, 3, 0.5), 3e-5),
 )
     _register!(BenchmarkSpec(id, :power, :small, PowerProblem(), params,
-        :optimal, objective, tolerance, _POWER_SOURCE))
+        status, objective, tolerance, _POWER_SOURCE))
 end
 for (tier, seed, n, alpha, tol) in (
     (:medium, 0x900002, 12, 0.5, 5e-5),
@@ -59,5 +59,5 @@ for (tier, seed, n, alpha, tol) in (
     params = (kind=:epigraph, name=Symbol(:power_epigraph_, tier), seed, n, alpha)
     objective = _power_epigraph_objective(seed, n, alpha)
     _register!(BenchmarkSpec(Symbol(:power_epigraph_, tier), :power, tier,
-        PowerProblem(), params, :optimal, objective, tol, _POWER_SOURCE))
+        PowerProblem(), params, :known_solver_finding, objective, tol, _POWER_SOURCE))
 end
