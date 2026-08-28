@@ -456,3 +456,14 @@ function max_newton_residual(residual::NewtonResidual{T}) where {T}
     end
     return maximum_residual
 end
+
+"""
+    block_incidence_plan(system::NewtonSystem) -> BlockIncidencePlan
+
+Freeze the immutable structural `BlockIncidencePlan` for `system` (implemented
+in `src/kkt/block_incidence.jl`).  The NewtonSystem remains the only authority
+for the five-equation signs and for the product-cone block ranges; the plan
+only freezes structure derived from them so numeric epochs can reuse slots
+without re-discovering layout or rebuilding on numeric zeros.
+"""
+block_incidence_plan(system::NewtonSystem) = build_block_incidence_plan(system)

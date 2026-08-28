@@ -43,8 +43,9 @@ end
 
 Per-solve sparse reduced-Schur storage.  Julia's public `SparseArrays.lu` API
 combines symbolic and numeric work; therefore `symbolic_reuse_supported` is
-honestly false.  SDPX still freezes one deterministic CSC pattern per session
-and reuses its `colptr`, `rowval`, `nzval`, RHS, residual and block workspaces.
+honestly false.  SDPX still freezes one deterministic `BlockIncidencePlan` per
+session at first assembly and reuses its frozen Schur CSC `colptr`, `rowval`,
+`nzval` slots, RHS, residual and block workspaces in every numeric epoch.
 `structural_assembly_count` must remain one while `numeric_factor_count`
 increments once for each *successfully certified* sparse predictor/corrector
 epoch.  `factor_attempt_count` counts every numeric attempt (including failed
@@ -56,7 +57,7 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     m::Int
     dimension::Int
     schur::SparseMatrixCSC{T,Int}
-    pattern_lookup::Dict{Tuple{Int,Int},Int}
+    plan::Union{Nothing,BlockIncidencePlan}
     pattern_signature::UInt64
     symbolic_reuse_supported::Bool
     symbolic::Union{Nothing,Any}
@@ -78,9 +79,6 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     maximum_block_dimension::Int
     atb::Vector{T}
     at_delta::Vector{T}
-    active_columns::Vector{Int}
-    pattern_i::Vector{Int}
-    pattern_j::Vector{Int}
     structural_assembly_count::Int
     numeric_assembly_count::Int
     rhs_assembly_count::Int
@@ -105,13 +103,12 @@ function SparseSchurSession(::Type{T}, n::Int, m::Int) where {T<:AbstractFloat}
     return SparseSchurSession{T}(
         n, m, dimension,
         spzeros(T, dimension, dimension),
-        Dict{Tuple{Int,Int},Int}(),
-        zero(UInt64), false, nothing, nothing, 0, zero(UInt64), nothing, 0,
+        nothing, zero(UInt64), false, nothing, nothing, 0, zero(UInt64), nothing, 0,
         zeros(T, dimension), zeros(T, dimension), zeros(T, dimension),
         zeros(T, dimension),
         Matrix{T}[], zeros(T, 0, 0),
         T[], T[], T[], T[], 0,
-        zeros(T, n), zeros(T, n), Int[], Int[], Int[],
+        zeros(T, n), zeros(T, n),
         0, 0, 0, 0, 0, 0,
         zero(T), zero(T), sqrt(eps(T)),
         T(Inf), T(256) * eps(T), T(256) * eps(T), false,
@@ -144,30 +141,6 @@ end
     end
     return max(scale, one(T))
 end
-
-@inline function _sparse_pattern_mix(signature::UInt64, value::Integer)
-    signature ⊻= UInt64(value)
-    return signature * UInt64(0x100000001b3)
-end
-
-"""Deterministic signature of A's structural nonzeros and cone block ranges."""
-function _sparse_schur_source_signature(system::NewtonSystem)
-    signature = UInt64(0xcbf29ce484222325)
-    m, n = size(system.A)
-    signature = _sparse_pattern_mix(signature, m)
-    signature = _sparse_pattern_mix(signature, n)
-    @inbounds for column in 1:n, row in 1:m
-        iszero(system.A[row, column]) && continue
-        signature = _sparse_pattern_mix(signature, row)
-        signature = _sparse_pattern_mix(signature, column)
-    end
-    for block in system.cone.block_ranges
-        signature = _sparse_pattern_mix(signature, first(block))
-        signature = _sparse_pattern_mix(signature, last(block))
-    end
-    return signature
-end
-
 """Invert one diagonal cone block into caller-owned storage."""
 function _invert_cone_block(
     operator_block::AbstractMatrix{T}, inverse::AbstractMatrix{T},
@@ -235,67 +208,23 @@ function _invert_cone_block(
     )
 end
 
-function _sparse_schur_active_columns!(
-    destination::Vector{Int}, A::AbstractMatrix, rows::UnitRange{Int},
-)
-    empty!(destination)
-    @inbounds for column in axes(A, 2)
-        active = false
-        for row in rows
-            if !iszero(A[row, column])
-                active = true
-                break
-            end
-        end
-        active && push!(destination, column)
-    end
-    return destination
-end
-
-"""Freeze one structural CSC pattern for the life of `session`."""
-function _setup_sparse_schur_pattern!(
+"""Freeze the immutable block incidence plan and its CSC slots once per session."""
+function _setup_block_incidence_plan!(
     session::SparseSchurSession{T}, system::NewtonSystem{T},
 ) where {T<:AbstractFloat}
     session.structural_assembly_count == 0 || return true
     validate_cone_linearization(system.cone)
-    ranges = product_cone_block_ranges(system.cone)
-    n = session.n
-    empty!(session.pattern_i)
-    empty!(session.pattern_j)
-    for block in ranges
-        active = _sparse_schur_active_columns!(
-            session.active_columns, system.A, block,
-        )
-        for column in active, row in active
-            push!(session.pattern_i, row)
-            push!(session.pattern_j, column)
-        end
-    end
-    # Border structure is frozen independently of current numerical zeros.
-    for column in 1:n
-        push!(session.pattern_i, column)
-        push!(session.pattern_j, n + 1)
-        push!(session.pattern_i, n + 1)
-        push!(session.pattern_j, column)
-    end
-    push!(session.pattern_i, n + 1)
-    push!(session.pattern_j, n + 1)
-    marker = ones(T, length(session.pattern_i))
-    session.schur = sparse(
-        session.pattern_i, session.pattern_j, marker,
-        session.dimension, session.dimension,
+    plan = build_block_incidence_plan(system)
+    session.plan = plan
+    session.schur = SparseMatrixCSC{T,Int}(
+        plan.dimension, plan.dimension, plan.schur_colptr,
+        plan.schur_rowval, zeros(T, length(plan.schur_rowval)),
     )
-    fill!(session.schur.nzval, zero(T))
-    empty!(session.pattern_lookup)
-    for column in 1:session.dimension
-        for slot in nzrange(session.schur, column)
-            session.pattern_lookup[(session.schur.rowval[slot], column)] = slot
-        end
-    end
-    maximum_block_dimension = isempty(ranges) ? 0 : maximum(length, ranges)
+    maximum_block_dimension = isempty(plan.block_ranges) ?
+        0 : maximum(length, plan.block_ranges)
     session.maximum_block_dimension = maximum_block_dimension
     session.block_inverses = [
-        zeros(T, length(rows), length(rows)) for rows in ranges
+        zeros(T, length(rows), length(rows)) for rows in plan.block_ranges
     ]
     session.block_augmented = zeros(
         T, maximum_block_dimension, 2 * maximum_block_dimension,
@@ -304,30 +233,12 @@ function _setup_sparse_schur_pattern!(
     session.block_hinv_b = zeros(T, maximum_block_dimension)
     session.block_hinv_delta = zeros(T, maximum_block_dimension)
     session.block_column_work = zeros(T, maximum_block_dimension)
-    session.pattern_signature = _sparse_schur_source_signature(system)
+    session.pattern_signature = plan.signature
     session.structural_assembly_count = 1
     return true
 end
 
-@inline function _add_sparse_schur_value!(
-    session::SparseSchurSession{T}, row::Int, column::Int, value::T,
-) where {T}
-    slot = get(session.pattern_lookup, (row, column), 0)
-    slot == 0 && return false
-    session.schur.nzval[slot] += value
-    return true
-end
-
-@inline function _set_sparse_schur_value!(
-    session::SparseSchurSession{T}, row::Int, column::Int, value::T,
-) where {T}
-    slot = get(session.pattern_lookup, (row, column), 0)
-    slot == 0 && return false
-    session.schur.nzval[slot] = value
-    return true
-end
-
-"""Assemble numeric reduced operator values into the frozen CSC pattern."""
+"""Assemble numeric reduced operator values into the frozen plan slots."""
 function assemble_sparse_schur_operator!(
     session::SparseSchurSession{T}, system::NewtonSystem{T},
 ) where {T<:AbstractFloat}
@@ -339,9 +250,12 @@ function assemble_sparse_schur_operator!(
         "cone operator dimension does not match rows of A",
     ))
     validate_cone_linearization(system.cone)
-    _setup_sparse_schur_pattern!(session, system)
-    signature = _sparse_schur_source_signature(system)
-    signature == session.pattern_signature ||
+    _setup_block_incidence_plan!(session, system)
+    plan = session.plan
+    plan === nothing && return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_unavailable,
+    )
+    _block_incidence_source_signature(system) == plan.signature ||
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
         )
@@ -355,9 +269,10 @@ function assemble_sparse_schur_operator!(
     fill!(session.atb, zero(T))
     atb = session.atb
     btHb = zero(T)
-    ranges = product_cone_block_ranges(system.cone)
+    schur_nzval = session.schur.nzval
 
-    for (block_index, block) in enumerate(ranges)
+    for (block_index, descriptor) in enumerate(plan.descriptors)
+        block = descriptor.rows
         dimension = length(block)
         block_H = product_cone_block_operator(system.cone, block_index)
         block_inverse = session.block_inverses[block_index]
@@ -374,10 +289,128 @@ function assemble_sparse_schur_operator!(
             end
             session.block_hinv_b[local_row] = value_b
         end
-        active = _sparse_schur_active_columns!(
-            session.active_columns, system.A, block,
+        active = descriptor.active_columns
+        colptr = descriptor.colptr
+        local_rows = descriptor.local_rows
+        tile_slots = descriptor.tile_slots
+        nj = length(active)
+        for j_pos in 1:nj
+            column_j = active[j_pos]
+            # H_b^{-1} A[R_b, j] from the frozen A-block CSC positions.
+            @inbounds for local_row in 1:dimension
+                value = zero(T)
+                for pointer in colptr[j_pos]:(colptr[j_pos + 1] - 1)
+                    local_column = local_rows[pointer]
+                    value += block_inverse[local_row, local_column] *
+                             system.A[block[local_column], column_j]
+                end
+                session.block_column_work[local_row] = value
+            end
+            for i_pos in 1:nj
+                column_i = active[i_pos]
+                value = zero(T)
+                @inbounds for pointer in colptr[i_pos]:(colptr[i_pos + 1] - 1)
+                    local_row = local_rows[pointer]
+                    value += system.A[block[local_row], column_i] *
+                             session.block_column_work[local_row]
+                end
+                schur_nzval[tile_slots[(i_pos - 1) * nj + j_pos]] += value
+            end
+            value_b = zero(T)
+            @inbounds for pointer in colptr[j_pos]:(colptr[j_pos + 1] - 1)
+                local_row = local_rows[pointer]
+                value_b += system.A[block[local_row], column_j] *
+                           session.block_hinv_b[local_row]
+            end
+            atb[column_j] += value_b
+        end
+        @inbounds for local_row in 1:dimension
+            btHb += system.b[block[local_row]] *
+                    session.block_hinv_b[local_row]
+        end
+    end
+    @inbounds for column in 1:n
+        schur_nzval[plan.border_column_slots[column]] =
+            system.c[column] - atb[column]
+        schur_nzval[plan.border_row_slots[column]] =
+            system.c[column] + atb[column]
+    end
+    schur_nzval[plan.border_diagonal_slot] =
+        system.kappa / system.tau - btHb
+    all(isfinite, session.schur.nzval) ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED,
+            :sparse_operator_nonfinite,
         )
-        for column_j in active
+    session.numeric_assembly_count += 1
+    session.status = SPARSE_SCHUR_ASSEMBLED
+    session.last_reason = :none
+    return true
+end
+
+"""
+Explicit reference numeric assembly for later E2E parity.
+
+Recomputes every block contribution from the original dense scans of `A`
+(reading every block row, including structural zeros) and writes into the same
+frozen plan slots.  This is intentionally NOT a runtime fallback: the
+production `assemble_sparse_schur_operator!` always uses the frozen A-block
+CSC positions, and callers may invoke this reference explicitly to compare
+operators elementwise in parity tests.
+"""
+function assemble_sparse_schur_operator_reference!(
+    session::SparseSchurSession{T}, system::NewtonSystem{T},
+) where {T<:AbstractFloat}
+    n, m = session.n, session.m
+    size(system.A) == (m, n) || throw(DimensionMismatch(
+        "sparse session/system dimensions disagree",
+    ))
+    cone_dimension(system.cone) == m || throw(DimensionMismatch(
+        "cone operator dimension does not match rows of A",
+    ))
+    validate_cone_linearization(system.cone)
+    _setup_block_incidence_plan!(session, system)
+    plan = session.plan
+    plan === nothing && return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_unavailable,
+    )
+    _block_incidence_source_signature(system) == plan.signature ||
+        return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
+        )
+
+    _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_READY, :numeric_operator_changed,
+    )
+    session.numeric_assembly_count > 0 && (session.pattern_reuse_count += 1)
+    fill!(session.schur.nzval, zero(T))
+    fill!(session.atb, zero(T))
+    atb = session.atb
+    btHb = zero(T)
+    schur_nzval = session.schur.nzval
+
+    for (block_index, block) in enumerate(plan.block_ranges)
+        dimension = length(block)
+        block_H = product_cone_block_operator(system.cone, block_index)
+        block_inverse = session.block_inverses[block_index]
+        _invert_cone_block(
+            block_H, block_inverse, session.block_augmented,
+        ) || return _invalidate_sparse_schur_factor!(
+            session, SPARSE_SCHUR_FACTOR_FAILED, :cone_block_singular,
+        )
+        @inbounds for local_row in 1:dimension
+            value_b = zero(T)
+            for local_column in 1:dimension
+                value_b += block_inverse[local_row, local_column] *
+                           system.b[block[local_column]]
+            end
+            session.block_hinv_b[local_row] = value_b
+        end
+        descriptor = plan.descriptors[block_index]
+        active = descriptor.active_columns
+        tile_slots = descriptor.tile_slots
+        nj = length(active)
+        for (j_pos, column_j) in enumerate(active)
             @inbounds for local_row in 1:dimension
                 value = zero(T)
                 for local_column in 1:dimension
@@ -386,18 +419,13 @@ function assemble_sparse_schur_operator!(
                 end
                 session.block_column_work[local_row] = value
             end
-            for column_i in active
+            for (i_pos, column_i) in enumerate(active)
                 value = zero(T)
                 @inbounds for local_row in 1:dimension
                     value += system.A[block[local_row], column_i] *
                              session.block_column_work[local_row]
                 end
-                _add_sparse_schur_value!(
-                    session, column_i, column_j, value,
-                ) || return _invalidate_sparse_schur_factor!(
-                    session, SPARSE_SCHUR_FACTOR_FAILED,
-                    :sparse_pattern_drift,
-                )
+                schur_nzval[tile_slots[(i_pos - 1) * nj + j_pos]] += value
             end
             value_b = zero(T)
             @inbounds for local_row in 1:dimension
@@ -412,23 +440,13 @@ function assemble_sparse_schur_operator!(
         end
     end
     @inbounds for column in 1:n
-        _set_sparse_schur_value!(
-            session, column, n + 1, system.c[column] - atb[column],
-        ) || return _invalidate_sparse_schur_factor!(
-            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
-        )
-        _set_sparse_schur_value!(
-            session, n + 1, column, system.c[column] + atb[column],
-        ) || return _invalidate_sparse_schur_factor!(
-            session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
-        )
+        schur_nzval[plan.border_column_slots[column]] =
+            system.c[column] - atb[column]
+        schur_nzval[plan.border_row_slots[column]] =
+            system.c[column] + atb[column]
     end
-    _set_sparse_schur_value!(
-        session, n + 1, n + 1,
-        system.kappa / system.tau - btHb,
-    ) || return _invalidate_sparse_schur_factor!(
-        session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
-    )
+    schur_nzval[plan.border_diagonal_slot] =
+        system.kappa / system.tau - btHb
     all(isfinite, session.schur.nzval) ||
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED,
@@ -440,7 +458,7 @@ function assemble_sparse_schur_operator!(
     return true
 end
 
-"""Assemble only the reduced RHS, reusing per-block inverse storage."""
+"""Assemble only the reduced RHS, reusing frozen plan positions and inverses."""
 function assemble_sparse_schur_rhs!(
     session::SparseSchurSession{T}, system::NewtonSystem{T},
 ) where {T<:AbstractFloat}
@@ -448,13 +466,15 @@ function assemble_sparse_schur_rhs!(
         "sparse Schur operator must be assembled before its RHS",
     ))
     validate_cone_linearization(system.cone)
-    signature = _sparse_schur_source_signature(system)
-    signature == session.pattern_signature ||
+    plan = session.plan
+    plan === nothing && return _invalidate_sparse_schur_factor!(
+        session, SPARSE_SCHUR_SOLVE_FAILED, :sparse_pattern_unavailable,
+    )
+    _block_incidence_source_signature(system) == plan.signature ||
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
         )
-    ranges = product_cone_block_ranges(system.cone)
-    length(ranges) == length(session.block_inverses) ||
+    length(plan.block_ranges) == length(session.block_inverses) ||
         return _invalidate_sparse_schur_factor!(
             session, SPARSE_SCHUR_FACTOR_FAILED, :sparse_pattern_drift,
         )
@@ -463,7 +483,8 @@ function assemble_sparse_schur_rhs!(
     fill!(session.at_delta, zero(T))
     at_delta = session.at_delta
     bt_delta = zero(T)
-    for (block_index, block) in enumerate(ranges)
+    for (block_index, descriptor) in enumerate(plan.descriptors)
+        block = descriptor.rows
         dimension = length(block)
         block_inverse = session.block_inverses[block_index]
         @inbounds for local_row in 1:dimension
@@ -479,12 +500,13 @@ function assemble_sparse_schur_rhs!(
             end
             session.block_hinv_delta[local_row] = value
         end
-        active = _sparse_schur_active_columns!(
-            session.active_columns, system.A, block,
-        )
-        for column in active
+        active = descriptor.active_columns
+        colptr = descriptor.colptr
+        local_rows = descriptor.local_rows
+        for (j_pos, column) in enumerate(active)
             value = zero(T)
-            @inbounds for local_row in 1:dimension
+            @inbounds for pointer in colptr[j_pos]:(colptr[j_pos + 1] - 1)
+                local_row = local_rows[pointer]
                 value += system.A[block[local_row], column] *
                          session.block_hinv_delta[local_row]
             end
@@ -748,7 +770,11 @@ function recover_reduced_direction(
     system::NewtonSystem{T}, condensed::AbstractVector{T},
     session::SparseSchurSession{T},
 ) where {T<:AbstractFloat}
-    _sparse_schur_source_signature(system) == session.pattern_signature ||
+    plan = session.plan
+    plan === nothing && throw(ArgumentError(
+        "reduced recovery requires a frozen block incidence plan",
+    ))
+    _block_incidence_source_signature(system) == plan.signature ||
         throw(ArgumentError("reduced recovery source pattern drift"))
     return _recover_reduced_direction(
         system, condensed, session.block_inverses,
