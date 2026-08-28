@@ -1085,14 +1085,15 @@ SparseExpandedQuasidefiniteLDLT
 
 ### 高精度 sparse provider 路线
 
-高精度稀疏分解不进入 MFLA/BFLA 内部，也不在 SDPX 重写。为避免功能重复，只新增一个候选 provider：
+高精度稀疏分解不进入 MFLA/BFLA 内部，也不在 SDPX 重写。冻结 HSD exact expanded operator 的 `(x,tau)` 块为 skew adjoints，reduced Schur 也含 `c-g`/`c+g`，因此 exact Newton solve 确实非对称；对称 companion 只提供 inertia 证据，不能替代 exact solve。
 
-* all-precision symmetric quasi-definite expanded KKT：评估纯 Julia `QDLDL.jl`，它是唯一拟新增的 sparse weakdep；
-* Float64 general/nonsymmetric reduced Schur：继续使用 Julia `SparseArrays`/UMFPACK，不新增包；
-* 不提供 high-precision nonsymmetric reduced-Schur 路线；该请求必须 fail closed 或通过显式内存预算转 dense MFLA/BFLA；
-* `PureKLU.jl` 已验证 generic scalar 可用，但因不提供 inertia 且会形成第二套 sparse 路由，不作为运行时依赖；
+* Float64 exact nonsymmetric sparse solve：继续使用 Julia `SparseArrays`/UMFPACK；
+* BigFloat/MultiFloat exact nonsymmetric sparse solve：评估纯 Julia `PureKLU.jl`；
+* signed-regularized symmetric quasi-definite companion inertia：独立评估纯 Julia `QDLDL.jl`；
+* PureKLU 与 QDLDL 在 SDPX 中职责互补而非重复：前者产生 physical Newton direction，后者提供 inertia/sign 证据；
+* 如果硬性限制只能新增一个包，必须保留 PureKLU，因为 exact equation solve 是必需项；此时 sparse inertia capability 必须标为 unsupported，不得宣称完整 expanded robustness；
 * `LDLFactorizations.jl` 仅作为 generic no-pivot benchmark reference，不作为运行时依赖；
-* QDLDL adapter 直接调用包，不重新引入 `LinearSolve`/`SciMLBase`；
+* provider adapter 直接调用包，不重新引入 `LinearSolve`/`SciMLBase`；
 * BigFloat、Float64x2、Float64x4 必须保持原 scalar type，并通过 unregularized Newton residual 与原坐标证书。
 
 完整决策、实测兼容性和 promotion gates：
