@@ -103,7 +103,8 @@ end
 companion_status(companion::QDLDLCompanion) = companion.status
 companion_failure(companion::QDLDLCompanion) = companion.failure
 companion_regularized_entries(companion::QDLDLCompanion) =
-    companion.regularized_entries
+    companion.status == QDLDL_COMPANION_FACTORED &&
+    companion.factor !== nothing ? companion.regularized_entries : nothing
 
 function _classify_qdldl_error(err)
     message = sprint(showerror, err)

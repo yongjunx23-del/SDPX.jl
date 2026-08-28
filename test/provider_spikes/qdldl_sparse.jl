@@ -299,9 +299,11 @@ end
             @test QX.companion_inertia(companion) ==
                   SDPX.KKTInertia(0, 0, companion.dimension)
             @test !QX.companion_dsigns_match(companion)
-            # refactor restores the certified factor
+            @test QX.companion_regularized_entries(companion) === nothing
+            # refactor restores all certified factor metadata
             @test QX.companion_refactor!(companion)
             @test QX.companion_status(companion) === QX.QDLDL_COMPANION_FACTORED
+            @test QX.companion_regularized_entries(companion) isa Int
             @test QX.companion_solve!(x, companion, b)
             @test QX.companion_residual(companion, x, b) <= _residual_bound(T)
         end
