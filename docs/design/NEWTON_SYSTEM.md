@@ -286,9 +286,24 @@ rows, `-1` for y rows) and a static regularization magnitude.
   result object for CHOLMOD and is then copied into the caller-owned
   destination; diagnostics report `solve_allocation_policy =
   :allocating_factor_backslash_copy`.  No allocation-free claim is made.
+- the cache is operationally **Float64-only**: construction, `prepare!`, and
+  `factorize!` reject any other element type (Float32/BigFloat) before any
+  CHOLMOD factorization.  High-precision arithmetic uses MFLA/BFLA dense
+  symmetric LDL instead; this sparse CHOLMOD cache never narrows a
+  higher-precision matrix.
+- `SparseSymbolicRequirements` enforces square/dimension, `dsigns`
+  length/values, and finite nonnegative regularization in its inner
+  constructor, and `prepare!` re-validates defensively.  The cache signature
+  includes the D-sign vector and the regularization magnitude, so opposite
+  signs or a different shift never share an identity.
 - pattern drift, non-finite data, a `dsigns` mismatch, a failed refactor,
   and any stale factor revoke the usable state; `solve!` from any state
-  other than `Fresh` is rejected.  CHOLMOD `Factor` `success` is a provider
+  other than `Fresh` is rejected, and `Invalid` requires a re-`prepare!`
+  before any factorization.  A failed numeric factor detaches the CHOLMOD
+  object (`factor === nothing`) and restores the factor view to the original
+  values, so `Failed` can never solve stale data; recovery re-runs the sole
+  symbolic analysis on the next same-pattern attempt and is not claimed as
+  symbolic reuse across a failure.  CHOLMOD `Factor` `success` is a provider
   fact, not a mathematical certificate; the direction is accepted only by
   the unregularized five-equation residual and, at termination, the
   original-coordinate certificate.

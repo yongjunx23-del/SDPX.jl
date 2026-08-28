@@ -12,7 +12,10 @@
 #      * stamps a real `factor_epoch` (and a monotone actual-factorization
 #        counter) at each numeric factor call;
 #      * is fail-closed (any exception → `Failed`, solve rejected);
-#      * never uses `\` on the hot path — only owned factor solves.
+#      * uses owned factor solves where the backend exposes a public in-place
+#        solve; the Float64 CHOLMOD `SparseSymbolicNumericCache` explicitly
+#        uses the public allocating `factor \ rhs` (see that file), so the
+#        allocation-free claim is cache-specific and never asserted there.
 #====================================================================#
 include("routes/common.jl")
 include("routes/dense_schur_cholesky.jl")

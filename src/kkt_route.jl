@@ -11,8 +11,11 @@
 #        the same epoch, but a new epoch always re-factors).
 #      * the predictor solve, corrector solve, and zero-or-more refinement
 #        solves then all run through the SAME cache (shared factor identity).
-#        `kkt_solve!` / `kkt_refine!` are thin, allocation-free wrappers over
-#        the cache's own `solve!` / `refine_once!`.
+#        `kkt_solve!` / `kkt_refine!` are thin wrappers over the cache's own
+#        `solve!` / `refine_once!`; allocation behavior is cache-specific
+#        (e.g. the Float64 CHOLMOD cache uses a public allocating
+#        `factor \ rhs`), so the driver itself does not promise
+#        allocation-free solves.
 #      * `factorizations(driver)` is the actual-factorization-count statistic:
 #        it counts REAL numeric factor calls (the route's `factor_epoch`
 #        delta), so per KKT epoch it is exactly 1.

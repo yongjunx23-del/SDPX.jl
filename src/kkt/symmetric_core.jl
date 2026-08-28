@@ -291,6 +291,22 @@ function validate_symmetric_core(
             ))
         end
     end
+    # Every cross-declared-block entry of Theta must be exactly zero.  The
+    # frozen CSC pattern stores one dense lower triangle per declared cone
+    # block range; any nonzero entry between distinct block ranges has no
+    # structural slot and would be silently omitted by `refill!`.  Reject
+    # it here so a semantic cone-coupling never disappears from the core.
+    for (index, rows) in enumerate(pattern.block_ranges)
+        for column in 1:(first(rows) - 1)
+            for row in rows
+                iszero(Theta[row, column]) &&
+                iszero(Theta[column, row]) || throw(ArgumentError(
+                    "symmetric core Theta has a non-zero cross-block entry " *
+                    "at ($row, $column) between declared cone block ranges",
+                ))
+            end
+        end
+    end
     return true
 end
 

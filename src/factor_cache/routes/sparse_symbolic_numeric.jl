@@ -28,6 +28,12 @@
 #        CHOLMOD allocates a result object that is then copied into the
 #        caller-owned destination.  This is documented; we do not claim an
 #        allocation-free solve.
+#      * the cache is Float64-only (CHOLMOD); every other element type is
+#        rejected before any factorization.
+#      * a failed numeric factor detaches the CHOLMOD object and restores
+#        the factor view to the original values; `Failed` never solves stale
+#        data and recovery re-runs the sole symbolic analysis on the next
+#        same-pattern attempt.  `Invalid` requires a re-`prepare!`.
 #=====================================================================#
 
 """
@@ -45,32 +51,34 @@ struct SparseSymbolicRequirements <: AbstractFactorRequirements
     pattern::SparseMatrixCSC{Float64, Int}
     dsigns::Vector{Int}
     regularization::Float64
-end
 
-function SparseSymbolicRequirements(
-    pattern::SparseMatrixCSC{Float64, Int};
-    symbolic_epoch::Integer=0,
-    dsigns::AbstractVector{Int}=Int[],
-    regularization::Real=0.0,
-)
-    n = size(pattern, 1)
-    size(pattern, 2) == n || throw(ArgumentError(
-        "sparse pattern must be square",
-    ))
-    length(dsigns) == n || throw(ArgumentError(
-        "signed diagonal descriptor length $(length(dsigns)) != n=$n",
-    ))
-    all(sign -> sign == 1 || sign == -1, dsigns) || throw(ArgumentError(
-        "signed diagonal descriptor must contain only +1/-1",
-    ))
-    isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
-        "regularization must be finite and nonnegative",
-    ))
-    return SparseSymbolicRequirements(
-        Int(n), Int(symbolic_epoch),
-        SparseMatrixCSC{Float64, Int}(pattern),
-        Int[sign for sign in dsigns], Float64(regularization),
+    # Inner constructor: every invariant is enforced here so no positional or
+    # keyword construction path can bypass validation.
+    function SparseSymbolicRequirements(
+        pattern::SparseMatrixCSC{Float64, Int};
+        symbolic_epoch::Integer=0,
+        dsigns::AbstractVector{Int}=Int[],
+        regularization::Real=0.0,
     )
+        n = size(pattern, 1)
+        size(pattern, 2) == n || throw(ArgumentError(
+            "sparse pattern must be square",
+        ))
+        length(dsigns) == n || throw(ArgumentError(
+            "signed diagonal descriptor length $(length(dsigns)) != n=$n",
+        ))
+        all(sign -> sign == 1 || sign == -1, dsigns) || throw(ArgumentError(
+            "signed diagonal descriptor must contain only +1/-1",
+        ))
+        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
+            "regularization must be finite and nonnegative",
+        ))
+        return new(
+            Int(n), Int(symbolic_epoch),
+            SparseMatrixCSC{Float64, Int}(pattern),
+            Int[sign for sign in dsigns], Float64(regularization),
+        )
+    end
 end
 
 """
@@ -101,6 +109,9 @@ mutable struct SparseSymbolicNumericCache{T} <: AbstractFactorCache{T}
 end
 
 function SparseSymbolicNumericCache{T}() where {T}
+    T === Float64 || throw(ArgumentError(
+        "SparseSymbolicNumericCache is Float64-only (CHOLMOD); got $T",
+    ))
     return SparseSymbolicNumericCache{T}(
         0, Vector{Int}(undef, 0), Vector{Int}(undef, 0),
         spzeros(T, 0, 0), Vector{T}(undef, 0), Int[], zero(T), nothing,
@@ -125,6 +136,7 @@ end
 
 function _sparse_pattern_signature(
     colptr::AbstractVector{Int}, rowval::AbstractVector{Int},
+    dsigns::AbstractVector{Int}, regularization::Float64,
 )
     signature = UInt64(0xcbf29ce484222325)
     for value in colptr
@@ -133,6 +145,13 @@ function _sparse_pattern_signature(
     for value in rowval
         signature = (signature ⊻ UInt64(value)) * UInt64(0x100000001b3)
     end
+    for sign in dsigns
+        # re-interpret the (possibly negative) signed Int bit pattern.
+        mixed = reinterpret(UInt64, Int64(sign))
+        signature = (signature ⊻ mixed) * UInt64(0x100000001b3)
+    end
+    signature = (signature ⊻ reinterpret(UInt64, regularization)) *
+                UInt64(0x100000001b3)
     return signature
 end
 
@@ -140,15 +159,36 @@ function prepare!(
     cache::SparseSymbolicNumericCache{T},
     req::SparseSymbolicRequirements,
 ) where {T}
+    T === Float64 || throw(ArgumentError(
+        "SparseSymbolicNumericCache is Float64-only (CHOLMOD); got $T",
+    ))
+    cache.status in (Unprepared, Invalid) || throw(FactorCacheStateError(
+        :prepare, Unprepared, cache.status,
+    ))
     n = req.n
     n >= 0 || throw(ArgumentError("dimension must be non-negative, got $n"))
     pattern = req.pattern
     size(pattern) == (n, n) || throw(DimensionMismatch(
         "SparseSymbolicNumericCache pattern dimension mismatch",
     ))
+    size(pattern) == (req.n, req.n) || throw(DimensionMismatch(
+        "SparseSymbolicNumericCache requirements dimension disagrees " *
+        "with pattern",
+    ))
+    eltype(pattern) === Float64 || throw(ArgumentError(
+        "SparseSymbolicNumericCache requires a Float64 pattern; got " *
+        "$(eltype(pattern))",
+    ))
     length(req.dsigns) == n || throw(ArgumentError(
         "signed diagonal descriptor length mismatch",
     ))
+    all(sign -> sign == 1 || sign == -1, req.dsigns) || throw(ArgumentError(
+        "signed diagonal descriptor must contain only +1/-1",
+    ))
+    isfinite(req.regularization) && req.regularization >= 0 ||
+        throw(ArgumentError(
+            "regularization must be finite and nonnegative",
+        ))
     # Owned factor view: copy the frozen structure exactly.
     colptr = Vector{Int}(pattern.colptr)
     rowval = Vector{Int}(pattern.rowval)
@@ -182,7 +222,9 @@ function prepare!(
     cache.numeric_count = 0
     cache.solve_count = 0
     cache.refine_count = 0
-    cache.signature = _sparse_pattern_signature(colptr, rowval)
+    cache.signature = _sparse_pattern_signature(
+        colptr, rowval, cache.dsigns, Float64(cache.regularization),
+    )
     cache.status = Prepared
     return cache
 end
@@ -262,23 +304,41 @@ function factorize!(
     K::AbstractMatrix{T},
     matrix_epoch::Integer,
 ) where {T}
+    T === Float64 || throw(ArgumentError(
+        "SparseSymbolicNumericCache factorize! is Float64-only; got $T",
+    ))
     K isa SparseMatrixCSC{T, Int} || throw(ArgumentError(
         "SparseSymbolicNumericCache factorize! requires a SparseMatrixCSC",
+    ))
+    # Invalid requires an explicit re-prepare before any factorization.
+    cache.status === Invalid && throw(FactorCacheStateError(
+        :factorize, Prepared, Invalid,
     ))
     if cache.status === Fresh && cache.matrix_epoch == Int(matrix_epoch)
         return cache
     end
+    # Fail-closed on entry: a stale (Prepared/Fresh/Failed) usable factor is
+    # never carried across a new factorization attempt.  The state machine
+    # guarantees `Failed` → re-factorize recovers via the retained CHOLMOD
+    # object only when the same pattern is presented again; any pattern drift
+    # or structural rejection below throws and leaves `Failed` with the old
+    # object detached, so no stale solve is possible.
     cache.status = Factoring
     try
         _copy_values_into_view!(cache, K)
         _apply_signed_regularization!(cache)
         if cache.factor === nothing
             # First numeric factor: also performs the sole symbolic analysis.
+            # `check=false` reports failure via `issuccess` without throwing.
             factor = ldlt(Symmetric(cache.factor_view, :L); check=false)
             cache.factor = factor
             cache.symbolic_count += 1
         else
-            # Same pattern: reuse the same CHOLMOD factor object.
+            # Same pattern: reuse the same CHOLMOD factor object.  Public
+            # `ldlt!` throws `ZeroPivotException` on a genuine zero pivot and
+            # can be retried on the same object with a regularized matrix
+            # (verified against Julia 1.12 CHOLMOD); we still detach the
+            # object on any throw so `Failed` never solves stale data.
             LinearAlgebra.ldlt!(
                 cache.factor, Symmetric(cache.factor_view, :L),
             )
@@ -294,6 +354,15 @@ function factorize!(
         cache.numeric_count += 1
         cache.status = Fresh
     catch
+        # Always restore the original values so the factor view never leaks a
+        # regularized matrix, and detach the CHOLMOD object so no stale solve
+        # is possible from the `Failed` state.  Recovering requires presenting
+        # the same pattern again (a fresh `ldlt` on the next attempt); we do
+        # not claim symbolic reuse across a failed factor.
+        try
+            _restore_original_values!(cache)
+        catch
+        end
         cache.factor = nothing
         cache.status = Failed
         rethrow()

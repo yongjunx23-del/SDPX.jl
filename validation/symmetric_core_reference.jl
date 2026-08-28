@@ -584,3 +584,200 @@ end
         regularization=-1.0,
     )
 end
+
+# ---------------------------------------------------------------------
+# C3 hardening: reviewer-blocked contract defects.
+# ---------------------------------------------------------------------
+
+"""Deterministically singular core: a zero `Ar` column makes the x block
+column (and thus the whole core) genuinely rank-deficient, so the
+unregularized factorization honestly fails and the signed static shift
+deterministically repairs it (no dependence on CHOLMOD ordering)."""
+function _singular_core_fixture(regularization::Float64)
+    Ar = sparse([1, 2], [1, 1], [0.0, 0.0], 2, 1)   # zero column 1
+    Theta = [2.0 0.2; 0.2 1.3]
+    pattern = SDPX.SymmetricCorePattern(Ar, [1:2], [:dense_lower])
+    SDPX.refill!(pattern, Ar, Theta)
+    K = SDPX.symmetric_core_lower_sparse(pattern)
+    req = SDPX.SparseSymbolicRequirements(
+        K; symbolic_epoch=5,
+        dsigns=SDPX.symmetric_core_dsigns(pattern),
+        regularization=regularization,
+    )
+    cache = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(cache, req)
+    return (; pattern, K, cache)
+end
+
+@testset "C3 hardened contracts" begin
+    # --- cross-block Theta rejection --------------------------------
+    ranges, shapes = _core_blocks()
+    Ar = _core_ar()
+    pattern = SDPX.SymmetricCorePattern(Ar, ranges, shapes)
+    Theta = _core_theta()
+    @test SDPX.validate_symmetric_core(pattern, Ar, Theta)
+    cross = copy(Theta)
+    cross[1, 3] = 0.99   # between block 1 (1:2) and block 2 (3:5)
+    cross[3, 1] = 0.99
+    @test_throws ArgumentError SDPX.validate_symmetric_core(
+        pattern, Ar, cross,
+    )
+    @test_throws ArgumentError SDPX.refill!(pattern, Ar, cross)
+
+    # --- non-Float64 rejection before factorization -----------------
+    Kf = _core_cache_fixture(1e-6).K
+    @test_throws ArgumentError SDPX.SparseSymbolicNumericCache{Float32}()
+    @test_throws ArgumentError SDPX.SparseSymbolicNumericCache{BigFloat}()
+    try
+        SDPX.SparseSymbolicNumericCache{Float32}(Kf; symbolic_epoch=0,
+            dsigns=Int[1, -1, 1, -1, 1, -1, 1], regularization=1e-6)
+        @test false
+    catch
+        @test true
+    end
+    # prepare! from a Float64 cache still enforces Float64.
+    cache32 = SDPX.SparseSymbolicNumericCache{Float32}
+    @test_throws ArgumentError cache32()
+
+    # --- malformed positional/requirements invariants ---------------
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        _core_cache_fixture(1e-6).K;
+        symbolic_epoch=0, dsigns=Int[1, -1, 1, -1, 1, -1, 0],
+    )
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        _core_cache_fixture(1e-6).K;
+        symbolic_epoch=0, dsigns=Int[1, -1],
+    )
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        _core_cache_fixture(1e-6).K;
+        symbolic_epoch=0, dsigns=Int[1, -1, 1, -1, 1, -1, 1],
+        regularization=-1.0,
+    )
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        _core_cache_fixture(1e-6).K;
+        symbolic_epoch=0, dsigns=Int[1, -1, 1, -1, 1, -1, 1],
+        regularization=NaN,
+    )
+    # non-square pattern rejection
+    nonsquare = sparse([1, 2], [1, 1], [1.0, 2.0], 2, 3)
+    @test_throws ArgumentError SDPX.SparseSymbolicRequirements(
+        nonsquare; symbolic_epoch=0, dsigns=Int[1, -1], regularization=0.0,
+    )
+
+    # --- D-sign / regularization identity in the signature ----------
+    Kf = _core_cache_fixture(1e-6).K
+    req_a = SDPX.SparseSymbolicRequirements(
+        Kf; symbolic_epoch=0,
+        dsigns=Int[1, -1, 1, -1, 1, -1, 1], regularization=1e-6,
+    )
+    req_b = SDPX.SparseSymbolicRequirements(
+        Kf; symbolic_epoch=0,
+        dsigns=Int[1, -1, 1, -1, 1, -1, -1], regularization=1e-6,
+    )
+    req_c = SDPX.SparseSymbolicRequirements(
+        Kf; symbolic_epoch=0,
+        dsigns=Int[1, -1, 1, -1, 1, -1, 1], regularization=2e-6,
+    )
+    c1 = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(c1, req_a)
+    c2 = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(c2, req_b)
+    c3 = SDPX.SparseSymbolicNumericCache{Float64}()
+    SDPX.prepare!(c3, req_c)
+    @test SDPX.factor_diagnostics(c1).signature !=
+          SDPX.factor_diagnostics(c2).signature
+    @test SDPX.factor_diagnostics(c1).signature !=
+          SDPX.factor_diagnostics(c3).signature
+    @test SDPX.factor_diagnostics(c2).signature !=
+          SDPX.factor_diagnostics(c3).signature
+
+    # --- deterministic singular + regularized recovery --------------
+    fu = _singular_core_fixture(0.0)
+    @test_throws ArgumentError SDPX.factorize!(fu.cache, fu.K, 1)
+    @test SDPX.factor_status(fu.cache) === SDPX.Failed
+    @test SDPX.factor_diagnostics(fu.cache).numeric_count == 0
+
+    fr = _singular_core_fixture(1e-6)
+    orig = copy(fr.pattern.nzval)
+    SDPX.factorize!(fr.cache, fr.K, 1)
+    @test SDPX.factor_status(fr.cache) === SDPX.Fresh
+    d = SDPX.factor_diagnostics(fr.cache)
+    @test d.symbolic_count == 1
+    @test d.numeric_count == 1
+    @test fr.pattern.nzval == orig   # original K untouched by regularization
+
+    # --- failed refactor detaches object; recovery via fresh ldlt -----
+    factor_before = fr.cache.factor
+    @test factor_before !== nothing
+    Kbad = copy(fr.K)
+    Kbad.nzval[1] = Inf
+    @test_throws ArgumentError SDPX.factorize!(fr.cache, Kbad, 2)
+    @test SDPX.factor_status(fr.cache) === SDPX.Failed
+    @test fr.cache.factor === nothing          # no stale object
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        fr.cache, zeros(3), ones(3),
+    )
+    @test fr.pattern.nzval == orig             # view restored on failure
+    # Recovery on the same pattern via a fresh symbolic factor is legal.
+    SDPX.factorize!(fr.cache, fr.K, 3)
+    @test SDPX.factor_status(fr.cache) === SDPX.Fresh
+    @test SDPX.factor_diagnostics(fr.cache).numeric_count == 2
+    @test fr.cache.factor !== factor_before     # fresh object, not stale
+
+    # --- pre-transition bad input fails closed -----------------------
+    fz = _core_cache_fixture(1e-6)
+    SDPX.factorize!(fz.cache, fz.K, 1)
+    @test SDPX.factor_status(fz.cache) === SDPX.Fresh
+    bad = copy(fz.K)
+    bad.nzval[2] = NaN
+    @test_throws ArgumentError SDPX.factorize!(fz.cache, bad, 2)
+    @test SDPX.factor_status(fz.cache) === SDPX.Failed
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        fz.cache, zeros(7), ones(7),
+    )
+    @test fz.cache.factor === nothing
+
+    # --- Invalid requires re-prepare, cannot factor ------------------
+    fv = _core_cache_fixture(1e-6)
+    SDPX.factorize!(fv.cache, fv.K, 1)
+    @test SDPX.factor_status(fv.cache) === SDPX.Fresh
+    SDPX.invalidate!(fv.cache)
+    @test SDPX.factor_status(fv.cache) === SDPX.Invalid
+    @test_throws SDPX.FactorCacheStateError SDPX.factorize!(
+        fv.cache, fv.K, 2,
+    )
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        fv.cache, zeros(7), ones(7),
+    )
+    # re-prepare from Invalid is allowed
+    SDPX.prepare!(fv.cache, SDPX.SparseSymbolicRequirements(
+        fv.K; symbolic_epoch=9,
+        dsigns=SDPX.symmetric_core_dsigns(fv.pattern),
+        regularization=1e-6,
+    ))
+    @test SDPX.factor_status(fv.cache) === SDPX.Prepared
+    SDPX.factorize!(fv.cache, fv.K, 10)
+    @test SDPX.factor_status(fv.cache) === SDPX.Fresh
+
+    # --- two-RHS solve_multi (homogeneous + variable seam) -----------
+    fm = _core_cache_fixture(1e-6)
+    SDPX.factorize!(fm.cache, fm.K, 1)
+    fobj = fm.cache.factor
+    R = [1.0 -0.5; 2.0 1.0; 3.0 0.25; 4.0 0.1; 5.0 0.7; 6.0 -0.3; 7.0 1.1]
+    X = zeros(7, 2)
+    SDPX.solve_multi!(fm.cache, X, R)
+    @test all(isfinite, X)
+    @test fm.cache.factor === fobj
+    @test SDPX.factor_diagnostics(fm.cache).numeric_count == 1
+    # check both columns against the regularized K
+    Kreg = SDPX.materialize_dense(fm.pattern)
+    for j in 1:7
+        Kreg[j, j] += (j == 1 ? 1 : -1) * 1e-6
+    end
+    # A 1e-6 signed shift on a structurally singular x-diagonal bounds the
+    # regularized solve accuracy at ~O(sqrt(reg)); assert the honest bound
+    # rather than pretending the regularized factor solves exactly.
+    @test norm(Kreg * X - R, Inf) <= 1e-4
+    @test SDPX.factor_diagnostics(fm.cache).solve_count == 1
+    @test SDPX.factor_diagnostics(fm.cache).numeric_count == 1
+end
