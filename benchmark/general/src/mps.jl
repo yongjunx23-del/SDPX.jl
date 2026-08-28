@@ -25,7 +25,7 @@ end
 
 "Read fixed- or free-field continuous MPS (ROWS/COLUMNS/RHS/BOUNDS)."
 function read_mps(path::AbstractString)
-    isfile(path) || throw(ArgumentError("missing MPS file $path; run benchmark/generic/scripts/fetch_generic_benchmarks.sh"))
+    isfile(path) || throw(ArgumentError("missing MPS file $path; run benchmark/general/scripts/fetch_generic_benchmarks.sh"))
     section = ""
     name = basename(path)
     objective_row = ""

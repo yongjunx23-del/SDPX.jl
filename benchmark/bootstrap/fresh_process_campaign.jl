@@ -11,7 +11,7 @@ export ChildRecord, run_campaign, aggregate_campaign, write_summary,
        campaign_main
 
 const ROOT = @__DIR__
-const REPOSITORY = normpath(joinpath(ROOT, ".."))
+const REPOSITORY = normpath(joinpath(ROOT, "..", ".."))
 const FRESH_SCHEMA_VERSION = 1
 const CHILD_RESULT_SCHEMA_VERSION = 9
 const _SHA256_HEX64_RE = r"^[0-9a-f]{64}$"

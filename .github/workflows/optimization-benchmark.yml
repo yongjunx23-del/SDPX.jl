@@ -95,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           julia --startup-file=no --project="$CANDIDATE_ENV" \
-            benchmark/runner.jl smoke \
+            benchmark/bootstrap/runner.jl smoke \
             --samples=3 --output="$OUT_DIR/candidate-smoke.toml" --verbose \
             2>&1 | tee "$OUT_DIR/candidate-smoke.log"
 
@@ -106,7 +106,7 @@ jobs:
           # Native product-cone HSD allocation audit (product_hsd_cold_start! /
           # product_hsd_step!); legacy engine entry points are not exercised.
           julia --startup-file=no --project="$CANDIDATE_ENV" \
-            benchmark/hsd_allocation.jl --check \
+            benchmark/bootstrap/hsd_allocation.jl --check \
             2>&1 | tee "$OUT_DIR/hsd-allocation.log"
 
       - name: Run fresh-process stability matrix on candidate
@@ -114,13 +114,13 @@ jobs:
         run: |
           set -euo pipefail
           julia --startup-file=no --project="$CANDIDATE_ENV" \
-            benchmark/fresh_process_runner.jl smoke \
+            benchmark/bootstrap/fresh_process_runner.jl smoke \
             --problem=smoke/lp_box \
             --arithmetic=float64 \
             --provider=auto \
             --execution-mode=solve \
             --engine=auto \
-            --catalog=benchmark/fixtures/smoke_catalog.jl \
+            --catalog=benchmark/bootstrap/fixtures/smoke_catalog.jl \
             --project="$CANDIDATE_ENV" \
             --repetitions=3 \
             --threads=1 \
@@ -166,7 +166,7 @@ jobs:
           trap restore_candidate EXIT
           git checkout --detach "$SDPX_BASE_SHA"
           julia --startup-file=no --project="$CANDIDATE_ENV" \
-            benchmark/runner.jl smoke \
+            benchmark/bootstrap/runner.jl smoke \
             --samples=3 --output="$OUT_DIR/base-smoke.toml" --verbose \
             2>&1 | tee "$OUT_DIR/base-smoke.log"
           trap - EXIT

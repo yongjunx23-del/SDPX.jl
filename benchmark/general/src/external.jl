@@ -30,7 +30,7 @@ function external_path(spec::ExternalBenchmark)
     path = joinpath(@__DIR__, "..", "data", spec.relative_path)
     isfile(path) || throw(ArgumentError(
         "generic benchmark data $(spec.relative_path) is missing; run " *
-        "benchmark/generic/scripts/fetch_generic_benchmarks.sh"))
+        "benchmark/general/scripts/fetch_generic_benchmarks.sh"))
     return normpath(path)
 end
 

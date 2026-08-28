@@ -6,7 +6,7 @@ build-first: each fixed `scan_value` is one affine SDP slice, while the
 nonlinear scan is never exposed as a single linear objective.
 
 ```julia
-include("benchmark/physics/matrix_bootstrap/matrix_bootstrap.jl")
+include("benchmark/bootstrap/physics/matrix_bootstrap/matrix_bootstrap.jl")
 using .MatrixBootstrap
 
 artifact = build_lin_zheng(

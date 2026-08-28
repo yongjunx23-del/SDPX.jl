@@ -14,7 +14,7 @@ export RESULT_COLUMNS, RESULT_SCHEMA_VERSION, write_results
 export run_suite, compare_result_files, main
 
 const ROOT = @__DIR__
-const REPOSITORY = normpath(joinpath(ROOT, ".."))
+const REPOSITORY = normpath(joinpath(ROOT, "..", ".."))
 
 const MULTIFLOAT_TYPES = let types = Dict{Symbol,DataType}()
     try

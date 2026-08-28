@@ -177,7 +177,7 @@ function phase0_rows()
 end
 
 git_read(args...) = try
-    repository = normpath(joinpath(@__DIR__, ".."))
+    repository = normpath(joinpath(@__DIR__, "..", ".."))
     readchomp(Cmd(vcat(["git", "-C", repository], collect(string.(args)))))
 catch
     "unknown"

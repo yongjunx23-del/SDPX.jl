@@ -17,7 +17,7 @@ julia --project=docs docs/make.jl
 Only the small benchmark tier belongs in routine CI:
 
 ```bash
-julia --project=benchmark/benchenv benchmark/runner.jl micro --output=/tmp/sdpx-micro.toml
+julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl micro --output=/tmp/sdpx-micro.toml
 ```
 
 Performance changes must state the model, arithmetic, tolerances, hardware,

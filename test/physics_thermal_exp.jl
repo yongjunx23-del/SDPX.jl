@@ -4,7 +4,7 @@ using MultiFloats
 using SDPX
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "physics", "thermal_exp",
+    @__DIR__, "..", "benchmark", "bootstrap", "applications", "thermal_exp",
     "GibbsRelativeEntropyEXP.jl",
 ))
 import .GibbsRelativeEntropyEXP
@@ -318,11 +318,11 @@ end
 
 @testset "injected Gibbs EXP build-only catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
-        include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+        include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
     harness = Main.PhysicsBenchmarkHarness
     catalog_path = joinpath(
-        @__DIR__, "..", "benchmark", "physics", "thermal_exp", "catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "applications", "thermal_exp", "catalog.jl",
     )
     catalog = harness.load_catalog(catalog_path)
     @test catalog.name === :finite_gibbs_relative_entropy_exp

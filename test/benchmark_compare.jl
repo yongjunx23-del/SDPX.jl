@@ -3,7 +3,7 @@ using TOML
 
 # Keep the focused file useful on its own as well as through runtests.jl.
 if !isdefined(Main, :PhysicsBenchmarkHarness)
-    include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+    include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
 end
 using .PhysicsBenchmarkHarness
 
@@ -199,7 +199,7 @@ end
     _compare_fixture(baseline; objective="1.0")
     _compare_fixture(candidate; objective="1.0", semantic_pass=false)
     project = normpath(joinpath(@__DIR__, ".."))
-    compare_script = joinpath(project, "benchmark", "compare.jl")
+    compare_script = joinpath(project, "benchmark", "bootstrap", "compare.jl")
     julia = Base.julia_cmd()
     command(arguments) = Cmd(vcat(
         julia.exec,

@@ -85,6 +85,7 @@ const QUICK_TESTS = (
     "benchmark_runner.jl",
     "benchmark_compare.jl",
     "benchmark_fresh_process.jl",
+    "e2e.jl",
     "prepared_structure.jl",
     "v05_core_invariants.jl",
     "sparse_execution_round6.jl",
@@ -213,6 +214,7 @@ const FULL_TESTS = (
     "benchmark_runner.jl",
     "benchmark_compare.jl",
     "benchmark_fresh_process.jl",
+    "e2e.jl",
     "prepared_structure.jl",
     "physics_lattice_bootstrap.jl",
     "physics_matrix_bootstrap.jl",
@@ -247,8 +249,8 @@ const FULL_TESTS = (
 
 function _test_profile()
     profile = Symbol(lowercase(strip(get(ENV, "SDPX_TEST_PROFILE", "quick"))))
-    profile in (:quick, :full) || throw(ArgumentError(
-        "SDPX_TEST_PROFILE must be quick or full, got $(repr(profile))",
+    profile in (:quick, :full, :e2e) || throw(ArgumentError(
+        "SDPX_TEST_PROFILE must be quick, full, or e2e, got $(repr(profile))",
     ))
     return profile
 end
@@ -261,7 +263,14 @@ if TEST_PROFILE === :full
     using JLD2
 end
 
-const SELECTED_TESTS = TEST_PROFILE === :quick ? QUICK_TESTS : FULL_TESTS
+# The e2e profile runs only the sole end-to-end suite on the deterministic
+# generic small-subset conic matrix (LP optimal/infeasible/unbounded, SOCP,
+# SDP, Exp, Power) plus the shared cold-start helpers.
+const E2E_TESTS = ("e2e.jl",)
+
+const SELECTED_TESTS =
+    TEST_PROFILE === :quick ? QUICK_TESTS :
+    TEST_PROFILE === :e2e ? E2E_TESTS : FULL_TESTS
 
 @info "SDPX test profile" profile=TEST_PROFILE files=length(SELECTED_TESTS)
 

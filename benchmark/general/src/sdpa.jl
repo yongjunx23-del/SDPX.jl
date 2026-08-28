@@ -23,7 +23,7 @@ end
 
 "Read and validate SDPLIB's sparse SDPA format without dense block matrices."
 function read_sdpa(path::AbstractString)
-    isfile(path) || throw(ArgumentError("missing SDPA file $path; run benchmark/generic/scripts/fetch_generic_benchmarks.sh"))
+    isfile(path) || throw(ArgumentError("missing SDPA file $path; run benchmark/general/scripts/fetch_generic_benchmarks.sh"))
     lines = String[]
     for raw in eachline(path)
         line = strip(first(split(raw, r"[\*\"]"; limit=2)))

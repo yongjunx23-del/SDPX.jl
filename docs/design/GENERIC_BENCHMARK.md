@@ -2,7 +2,7 @@
 
 Status: implemented on `agent/bench-generic` (2026-08-28)
 Scope: general-purpose LP/SOCP/SDP/EXP/POWER behavior, deliberately separate from
-`benchmark/bootstrap/` and `benchmark/physics/`.
+`benchmark/bootstrap/` and `benchmark/bootstrap/physics/`.
 
 ## Why these sources
 
@@ -28,10 +28,10 @@ available and the native CBF-to-`Model` lowering is reviewed.
 Run once:
 
 ```bash
-benchmark/generic/scripts/fetch_generic_benchmarks.sh
+benchmark/general/scripts/fetch_generic_benchmarks.sh
 ```
 
-Downloads go under the gitignored `benchmark/generic/data/` cache. The committed
+Downloads go under the gitignored `benchmark/general/data/` cache. The committed
 `data/MANIFEST.sha256` is authoritative and the script fails on any byte change.
 The current manifest contains:
 
@@ -116,7 +116,7 @@ promoted to a reference. These are benchmark discoveries, not generator fixes:
 
 In contrast, generated Max-Cut K4, all five local LP cases, all three local SOCP
 cases, and the small power epigraph return certificate-backed expected results:
-10 certificate-backed cases and 6 explicit findings in the 16-case small tier.
+11 certificate-backed cases and 6 explicit findings in the 17-case small tier.
 On the validation host, a fresh Julia process took 74.6 s wall time including
 compilation; cumulative measured solver calls were about 1.46 s and the slowest
 individual solve was 1.38 s. This is why the seconds gate is per solve.
@@ -125,19 +125,19 @@ individual solve was 1.38 s. This is why the seconds gate is per solve.
 
 ```bash
 # Local default (small only, large guard active)
-julia --project=. benchmark/generic/GenericConicBenchmark.jl
+julia --project=. benchmark/general/GenericConicBenchmark.jl
 
 # One family
-julia --project=. benchmark/generic/GenericConicBenchmark.jl small socp
+julia --project=. benchmark/general/GenericConicBenchmark.jl small socp
 
 # Medium report lane
-julia --project=. benchmark/generic/GenericConicBenchmark.jl medium
+julia --project=. benchmark/general/GenericConicBenchmark.jl medium
 
 # Tests (including PASS/FINDING counts and reader/reference contracts)
-julia --project=. benchmark/generic/test_small.jl
+julia --project=. benchmark/general/test_small.jl
 
 # Cluster
-qsub benchmark/generic/pbs/run_large.pbs
+qsub benchmark/general/pbs/run_large.pbs
 ```
 
 The runner reports status, original-coordinate certificate validity, primal and

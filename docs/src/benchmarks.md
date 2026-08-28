@@ -6,10 +6,10 @@ registries, external-data loaders, or historical result tables.
 
 The active entry points are:
 
-- `benchmark/runner.jl` for in-process runs and schema-v8 result rows;
-- `benchmark/fresh_process_runner.jl` for independent-process repetitions;
-- `benchmark/compare.jl` for paired baseline/candidate comparisons;
-- `benchmark/PhysicsBenchmarkHarness.jl` for the catalog/build/validate API.
+- `benchmark/bootstrap/runner.jl` for in-process runs and schema-v8 result rows;
+- `benchmark/bootstrap/fresh_process_runner.jl` for independent-process repetitions;
+- `benchmark/bootstrap/compare.jl` for paired baseline/candidate comparisons;
+- `benchmark/bootstrap/PhysicsBenchmarkHarness.jl` for the catalog/build/validate API.
 
 A catalog must provide deterministic problem identities and fingerprints, a
 typed builder, reference tolerances, and an independent validation callback.

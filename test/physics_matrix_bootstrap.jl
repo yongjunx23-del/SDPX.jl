@@ -3,7 +3,7 @@ using SparseArrays
 using LinearAlgebra
 using SDPX
 
-include(joinpath(@__DIR__, "..", "benchmark", "physics", "matrix_bootstrap", "matrix_bootstrap.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "applications", "matrix_bootstrap", "matrix_bootstrap.jl"))
 using .MatrixBootstrap
 
 function _entry_signature(entry::AffineEntry)
@@ -259,11 +259,11 @@ end
 
 @testset "matrix-bootstrap injected build-only catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
-        include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+        include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
     harness = Main.PhysicsBenchmarkHarness
     catalog = harness.load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "physics", "matrix_bootstrap", "catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "applications", "matrix_bootstrap", "catalog.jl",
     ))
     @test catalog.name == :lin_zheng26_matrix_bootstrap
     @test length(harness.catalog_entries(catalog, :scaling)) == 3
