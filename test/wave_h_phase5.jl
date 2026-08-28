@@ -1,6 +1,7 @@
 using SDPX
 using Test
 using SparseArrays
+using LinearAlgebra
 
 function _wave_h_nonnegative_program()
     model = SDPX.Model(Float64)
@@ -88,4 +89,25 @@ end
     @test state.base.s == before.s
     @test state.base.tau == before.tau
     @test state.base.kappa == before.kappa
+end
+
+@testset "Wave H typed public exhaustion statuses" begin
+    model = _wave_h_mixed_model()
+    iteration_limited = SDPX.optimize!(model; settings=SDPX.Settings{Float64}(
+        engine=:native_hsd,
+        limits=SDPX.Limits(iterations=1, time=Inf, threads=1),
+        verbosity=0,
+    ))
+    @test iteration_limited.status === SDPX.IterLimit
+    @test SDPX.status(iteration_limited) === :iteration_limit
+    @test !iteration_limited.certificate.valid
+
+    time_limited = SDPX.optimize!(model; settings=SDPX.Settings{Float64}(
+        engine=:native_hsd,
+        limits=SDPX.Limits(iterations=400, time=0.0, threads=1),
+        verbosity=0,
+    ))
+    @test time_limited.status === SDPX.TimeLimit
+    @test SDPX.status(time_limited) === :time_limit
+    @test !time_limited.certificate.valid
 end
