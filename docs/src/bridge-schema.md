@@ -1,10 +1,9 @@
 # SDPX bridge schema (version 1)
 
-The language-independent contract between SDPX and foreign runtimes. The first
-transport is a command-line bridge (`bin/sdpx_solve.jl`, used by
-`mathematica/SDPXLink.wl`); the schema — not the transport — is the stable
-part, and it is versioned so a future persistent-server or LibraryLink
-transport can speak the same files.
+The language-independent contract between SDPX and external runtimes. The
+current transport is the command-line bridge `bin/sdpx_solve.jl`; the schema —
+not the transport — is the stable part, and it is versioned so a future
+persistent server can speak the same files.
 
 ```
 consumer ── problem.json ──▶  julia --project=bin bin/sdpx_solve.jl in.json out.json  ──▶ result.json
@@ -106,10 +105,10 @@ ones. When that matters, the planned steps — in order, each speaking this
 same schema — are:
 
 1. **Persistent server**: a long-lived Julia process reading length-prefixed
-   schema-v1 JSON over stdin/stdout or a socket; the Mathematica side keeps
-   `RunProcess` semantics behind the same `SDPXOptimize` signature.
-2. **LibraryLink / WSTP**: in-process transport for zero-copy of large dense
-   blocks; the schema then only describes the *layout*, not the bytes.
+   schema-v1 JSON over stdin/stdout or a socket.
+2. **Binary payload transport**: an optional language-neutral transport for
+   large dense blocks; the schema then describes the layout rather than the
+   bytes.
 
 Consumers that stick to the file contract above will not notice the change.
 

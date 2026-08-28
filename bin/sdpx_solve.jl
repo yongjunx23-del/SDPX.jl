@@ -5,8 +5,7 @@
         julia --project=bin bin/sdpx_solve.jl problem.json result.json
 
     A language-independent entry point: any environment that can write
-    a JSON file and run a process can use the solver. The first
-    consumer is the Mathematica package in `mathematica/SDPXLink.wl`.
+    a JSON file and run a process can use the solver.
 
     Design constraints, in order:
 
@@ -28,8 +27,8 @@
     The schema is documented in `docs/src/bridge-schema.md`. This is a
     subprocess bridge by design — one process per solve, no state. The
     documented upgrade path (same document) is a persistent server or
-    LibraryLink once the schema has proven itself; the schema is the
-    part meant to outlive the transport.
+    language-neutral binary payload transport once the schema has proven
+    itself; the schema is the part meant to outlive the transport.
 =====================================================================#
 
 module SDPXSolveCLI

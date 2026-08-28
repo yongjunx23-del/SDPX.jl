@@ -5,7 +5,7 @@ using Test
 
 # The CLI script defines its logic in a module and only runs main() when
 # invoked as a program, so the schema handling is testable in-process — no
-# subprocess, no bin/ environment, and no Mathematica. Deployment scripts may
+# subprocess and no bin/ environment. Deployment scripts may
 # exercise the executable separately.
 include(joinpath(@__DIR__, "..", "bin", "sdpx_solve.jl"))
 using .SDPXSolveCLI
