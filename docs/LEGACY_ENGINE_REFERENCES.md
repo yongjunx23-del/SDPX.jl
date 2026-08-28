@@ -1,6 +1,6 @@
 # Legacy engine remaining-reference manifest (Phase 10 prep)
 
-> **Status:** maintained by the test/CI migration wave (`agent/legacy-test-ci-migration`).
+> **Status:** verified at the Phase 10 fifth wave (`agent/legacy-source-deletion`).
 > **Purpose:** Phase 10 deletes the legacy engines.  This manifest records every
 > remaining reference to the six legacy engine files so the deletion work can be
 > planned file-by-file without a repository-wide archaeology pass.  It is a
@@ -9,21 +9,29 @@
 > **Scope:** `src/lp_solver.jl`, `src/lp_sparse.jl`,
 > `src/solver/interior_point.jl`, `src/step.jl` (+ `src/step_hot.jl`),
 > `src/hsd/nonnegative_hsd.jl`, `src/soc_native.jl`.
+>
+> **Fifth-wave finding:** none of the six files was deletable at this wave.
+> Every file still hosts symbols required by remaining production `src` code
+> and/or by active tests in `test/runtests.jl` (quick and full profiles).
+> Section 11 lists the exact blocking symbols per file.  The include sites,
+> the `Printf` runtime dependency, and the legacy `solve!`/`solve_lp!`
+> reachability were all verified and are unchanged.
 
 ## 1. Load order / include sites
 
-`src/SDPX.jl` includes the legacy files in this order:
+`src/SDPX.jl` includes the legacy files in this order (line numbers verified at
+the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
 
 | Line | Include |
 |---|---|
-| 76  | `include("step_hot.jl")` |
-| 83  | `include("hsd/nonnegative_hsd.jl")` |
-| 102 | `include("cold_start.jl")` (shared, NOT legacy) |
-| 107 | `include("soc_native.jl")` |
-| 133 | `include("step.jl")` |
-| 135 | `include("lp_sparse.jl")` |
-| 136 | `include("lp_solver.jl")` |
-| 137 | `include("solver/interior_point.jl")` |
+| 77  | `include("step_hot.jl")` |
+| 84  | `include("hsd/nonnegative_hsd.jl")` |
+| 103 | `include("cold_start.jl")` (shared, NOT legacy) |
+| 108 | `include("soc_native.jl")` |
+| 134 | `include("step.jl")` |
+| 136 | `include("lp_sparse.jl")` |
+| 137 | `include("lp_solver.jl")` |
+| 138 | `include("solver/interior_point.jl")` |
 
 ## 2. `src/lp_solver.jl` — dedicated legacy LP solver (`solve_lp!`)
 
@@ -33,27 +41,49 @@
 - **src callers:**
   - `src/solver/interior_point.jl` — calls `solve_lp!` for LP blocks inside the
     legacy SDP path (also calls `_scale_lp!` before it).
-  - `src/pipeline/diagnostics.jl` — comment references `_scale_lp!`.
-  - `src/types/plans.jl` — comment references `_scale_lp!`.
-- **Public-API wrappers still exposing legacy LP entry points:**
-  - `src/frontend/high_level_solve.jl` — `solve_lp` / `solve_socp` compatibility
-    wrappers.
-  - `src/lp_api.jl` — `solve_lp` wrapper.
-  - `bin/sdpx_solve.jl` — CLI bridge over `ingest`/`SolverOptions`/`solve!`.
-- **Tests:** `test/lp_regressions.jl` (legacy LP solver regression suite, uses
-  `solve_lp`, `_resolve_lp_backend!`, `_presolve_lp_rows`); `test/solver_regressions.jl`;
-  `test/preprocessing_regressions.jl`; `test/options_interface.jl`
-  (`SolverOptions`); `test/cli_bridge.jl` (legacy CLI); `test/pipeline.jl`.
+  - `src/pipeline/diagnostics.jl` — comment references only (`solve_lp!`,
+    `_scale_lp!`).
+  - `src/types/plans.jl` — comment reference only (`_scale_lp!`).
+  - `src/public/optimize.jl` — comment reference only (`solve_lp!`).
+- **Public-API wrappers (now native):** `src/frontend/high_level_solve.jl`
+  (`solve_lp` / `solve_socp` compatibility wrappers call the native LP
+  frontend), `src/lp_api.jl` (`solve_lp` wrapper), `bin/sdpx_solve.jl` (CLI
+  bridge over the native entrypoint bridge).
+- **Tests (legacy LP regression/kernel gates, retained; all in the active
+  suite):** `test/lp_regressions.jl` (`LPWorkspace`, `_lp_assemble_hessian!`,
+  `_resolve_lp_backend!`, `_lp_solve_factor!`, `_lp_populate_kkt!`,
+  `_extract_lp_diagonal_nonnegative`, `_presolve_lp_rows`, `LPScaling`,
+  `_lp_cold_start_failure_result`, `_lp_auto_parameter_resolution`,
+  `_lp_regularization_floor`, `_extract_lp_rows`, `LPDiagonalMatrix`,
+  `LPReducedFactor`, `LPStandardFormSystem`, `_lp_executed_backend`);
+  `test/direction_accuracy_lp.jl` (`LPWorkspace`, `LPDiagonalMatrix`,
+  `LPStandardFormSystem`, `_lp_direction_accuracy_gate!`,
+  `_lp_direction_acceptance_tolerance`, `_lp_populate_kkt!`,
+  `_lp_regularization_floor`, `_lp_dense_k0_infinity_norm`,
+  `_lp_reduced_k0_infinity_norm`, `_lp_sparse_k0_infinity_norm`,
+  `_lp_sparse_regularized_action!`, `_lp_sparse_assemble`, `LPSparseSystem`);
+  `test/architecture_regressions.jl` (`LPWorkspace`, `_resolve_lp_backend!`,
+  `_lp_executed_backend`); `test/lp_sparse.jl` (`LPWorkspace`,
+  `_lp_workspace_bytes`, `_extract_lp_rows`, `_extract_lp_rows_sparse`);
+  `test/bigfloat_ownership_regressions.jl` (`_extract_lp_rows`);
+  `test/sparse_execution_round6.jl`; `test/kkt_sparse_backend.jl`;
+  plus `test/solver_regressions.jl`, `test/preprocessing_regressions.jl`,
+  `test/options_interface.jl`, `test/cli_bridge.jl`, `test/pipeline.jl`
+  (legacy `solve!`/`SolverOptions` surface).
 - **Docs:** `docs/PLAN.md`, `docs/design/ROADMAP_1_0.md`, review/audit evidence
   documents (historical).
 
 ## 3. `src/lp_sparse.jl` — legacy sparse LP system
 
 - Defines: `select_lp_formulation`, `LP_SPARSE_*`, `lp_sparse_candidate`,
-  `lp_sparse_factor!`, `lp_sparse_solve!`.
-- **src callers:** `src/lp_solver.jl` (lines 452/480/2282/2316).
-- **Tests:** `test/lp_sparse.jl` (full file); `test/sparse_execution_round6.jl`
-  (`lp_sparse_candidate`/`lp_sparse_factor!`); `test/direction_accuracy_lp.jl`
+  `lp_sparse_factor!`, `lp_sparse_solve!`, `LPSparseSystem`,
+  `_lp_sparse_assemble`, `formulation_backend`.
+- **src callers:** `src/lp_solver.jl` (lines 452/480/2282/2316, unchanged).
+  No remaining production `src` caller outside the legacy LP pair.
+- **Tests (retained):** `test/lp_sparse.jl` (full file);
+  `test/sparse_execution_round6.jl` (`lp_sparse_candidate`/
+  `lp_sparse_factor!`/`select_lp_formulation`); `test/kkt_sparse_backend.jl`
+  (`select_lp_formulation`); `test/direction_accuracy_lp.jl`
   (`_lp_sparse_assemble`, `_lp_sparse_k0_infinity_norm`,
   `_lp_sparse_regularized_action!`).
 - **Docs:** `docs/PLAN.md`, review evidence (historical).
@@ -62,43 +92,99 @@
 
 - Defines: `SDPProblem`, `SolverOptions`, `Workspace`, `solve!`, `ingest`,
   `newton_step!` orchestration inputs, `_kkt_cold_start_initialization`,
-  `_solve_sdp_core!`, `block_norm_stats`.
-- **src callers:** 61 files mention `SDPProblem`/`SolverOptions`/`Workspace`
-  (types, pipeline, kernels, la_backend, frontend, public).  Representative:
-  `src/pipeline/*.jl`, `src/kernels/*.jl`, `src/types/*.jl`,
-  `src/public/optimize.jl`, `src/schur.jl`, `src/workspace.jl`.
+  `_solve_sdp_core!`, `block_norm_stats`, checkpoint API
+  (`save_checkpoint`/`load_checkpoint`), precision-ladder machinery.
+  (`ingest` itself is defined in `src/ingest.jl`, which is NOT legacy.)
+- **Remaining production `src` callers of its symbols (real calls, not
+  comments):**
+  - `src/public/optimize.jl:1483` — calls `_scaled_identity` (defined
+    `src/solver/interior_point.jl:453/461`).
+  - `src/pipeline/diagnostics.jl:276` — calls `_ladder_retry_decision`
+    (defined `src/solver/interior_point.jl:3137`).
+  - `src/adaptive_parameters.jl:775` — calls `_replace_solver_options`
+    (defined `src/solver/interior_point.jl:135`).
+  - `src/preprocessing.jl:2118` and `src/validation.jl:151/373/964` — call
+    `dual_objective(prob::SDPProblem, y, Y)` (defined
+    `src/solver/interior_point.jl:7`).
+  - `src/kernels/threaded.jl` calls `step.jl` symbols that `interior_point.jl`
+    in turn drives (see §5).
 - **Tests:** `test/result_certificate.jl`, `test/nonfinite_fail_closed.jl`,
   `test/performance_trace.jl`, `test/correctness.jl`, `test/sparse.jl`,
   `test/genericity.jl`, `test/extended_precision_blas.jl`, `test/mixed_cones.jl`,
   `test/error_handling.jl`, `test/examples.jl`, `test/moi_regressions.jl`,
   `test/executed_diagnostics.jl`, `test/termination_metadata.jl`,
   `test/infeasibility_diagnostics.jl`, `test/ingest_regressions.jl`,
-  `test/threads.jl`, `test/mixed_precision_kkt_regressions.jl`, and others.
+  `test/threads.jl`, `test/mixed_precision_kkt_regressions.jl`,
+  `test/solver_regressions.jl` (`_solve_sdp_core!`),
+  `test/factorizations_gate.jl` and `test/allocation_contract.jl`
+  (`_kkt_cold_start_initialization`), `test/precision_ladder_plan.jl`
+  (`_build_precision_ladder_plan`, `adaptive_working_precision_bits`),
+  `test/extensions_regressions.jl` (`save_checkpoint`/`load_checkpoint`),
+  `test/dense_augmented_kkt.jl`, `test/kkt_regressions.jl`,
+  `test/bigfloat_sparse_schur_regressions.jl`, `test/pipeline.jl`,
+  `test/adaptive_parameter_policy.jl`, `test/v05_core_invariants.jl`,
+  `test/fixed_precision_contract.jl`, `test/bfla_backend.jl`, and others
+  (27 active test files in `test/runtests.jl` call `SDPX.solve!`; the external
+  `test/provider_smoke.jl` harness is intentionally not part of `runtests.jl`).
 - **Docs:** `docs/PLAN.md`, `docs/design/ROADMAP_1_0.md`, review evidence.
 
 ## 5. `src/step.jl` / `src/step_hot.jl` — legacy Newton step orchestration
 
-- `src/step.jl` defines `newton_step!`, `compute_residuals!`, KKT phase helpers
-  for the legacy SDP engine.
-- **src callers:** `src/solver/interior_point.jl`, `src/workspace.jl`,
-  `src/schur.jl` (comment), `src/types/constraints.jl`.
+- `src/step.jl` defines `newton_step!`, `compute_residuals!`, `factor_blocks!`,
+  `_predictor_corrector_rhs!`, `fraction_to_boundary_search!`, `line_search!`,
+  `_has_owned_bigfloat_equality_arrow`, and the KKT phase helpers for the
+  legacy SDP engine.
+- **Remaining production `src` callers (real calls, not comments):**
+  - `src/kernels/threaded.jl` — calls `_has_owned_bigfloat_equality_arrow`
+    (lines 310/331), `compute_residuals!` (512), `factor_blocks!` (513),
+    `_predictor_corrector_rhs!` (623/926/1075), `fraction_to_boundary_search!`
+    (1686), `line_search!` (1801).
+  - `src/solver/interior_point.jl` — calls `newton_step!` and the other step
+    kernels (legacy pair).
+  - `src/workspace.jl`, `src/schur.jl`, `src/types/constraints.jl` — comment
+    references only.
 - `src/step_hot.jl` defines `HotStepState` + `step!` (zero-alloc LP hot step;
-  superseded by `ProductConeHSDState`).
-- **Tests:** `test/hot_step_zeroalloc.jl` (whole file); `test/factorizations_gate.jl`
-  (whole file — runs `newton_step!` / `_kkt_cold_start_initialization`).
+  superseded by `ProductConeHSDState`; NOT part of this wave's deletion list).
+- **Tests:** `test/hot_step_zeroalloc.jl` (whole file);
+  `test/factorizations_gate.jl` (whole file — runs `newton_step!` /
+  `_kkt_cold_start_initialization`); `test/solver_regressions.jl`,
+  `test/bigfloat_sparse_schur_regressions.jl` (`_affine_predictor_diagnostics!`,
+  `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`,
+  `_skip_automatic_refinement`, `compute_residuals!`, `factor_blocks!`);
+  `test/extended_precision_blas.jl`, `test/schur_scheduler_regressions.jl`,
+  `test/allocation_contract.jl`, `test/sparse.jl`, `test/mfla_backend.jl`,
+  `test/pipeline.jl`, `test/kkt_regressions.jl`, `test/sparse_schur_round7.jl`,
+  `test/coo_contraction_regression.jl` (`factor_blocks!`).
 - **Docs:** `docs/PLAN.md`, review evidence.
 
 ## 6. `src/hsd/nonnegative_hsd.jl` — legacy Nonnegative (LP-only) HSD engine
 
 - Defines: `hsd_step!`, `hsd_cold_start!`, `hsd_solve!`, `_hsd_border_solve!`,
   `_hsd_form_schur!`, `_hsd_direction!`, `_hsd_line_search!`, infeasibility
-  fallbacks.
-- **src callers:** none after this migration wave — only docstring/comment
-  cross-references remain in `src/hsd/hsd.jl`, `src/hsd/native_hsd_public.jl`,
-  `src/ir/canonical.jl` (comment), `src/hsd/product_cone_solve.jl` (comment).
+  fallbacks (`_farkas_*`, `_try_farkas!`, `_try_dual_ray!`), AND the shared
+  `HSDState` kernels listed below.
+- **Remaining production `src` callers (real calls, NOT docstring-only; this
+  corrects the earlier "no src callers" claim):** the native product-cone HSD
+  path calls seven kernels defined here:
+  - `_hsd_matrix_finite` — `src/hsd/product_cone_hsd.jl:1206,2834`
+  - `_hsd_direction_finite` — `src/hsd/product_cone_hsd.jl:1347,2389,2501,2656`;
+    `src/hsd/predictor_corrector.jl:264,413`
+  - `_hsd_maxinf` — `src/hsd/product_cone_solve.jl:313,314,319`;
+    `src/hsd/linesearch.jl:82,83,111,112`
+  - `_hsd_residual_homotopy_ok` — `src/hsd/product_cone_solve.jl:317`;
+    `src/hsd/linesearch.jl:117`
+  - `_hsd_scatter_dx!` — `src/hsd/product_cone_hsd.jl:1316,2380,2456`
+  - `_hsd_update_record!` — `src/hsd/product_cone_hsd.jl:3009`
+  - `_hsd_trial_residual!` — `src/hsd/product_cone_solve.jl:312`;
+    `src/hsd/linesearch.jl:110`
+  - Docstring/comment cross-references also remain in `src/hsd/hsd.jl`,
+    `src/hsd/native_hsd_public.jl`, `src/ir/canonical.jl` (comment),
+    `src/hsd/product_cone_solve.jl` (comment).
 - **Tests (kernel-level, deliberately retained as unit gates):**
-  - `test/hsd_border_failure.jl` — `_p0b_border_call_noreturn!` still calls
-    `SDPX._hsd_border_solve!` (low-level fail-closed/zero-alloc kernel gate).
+  - `test/hsd_border_failure.jl` (quick profile) — `_p0b_border_call_noreturn!`
+    calls `SDPX._hsd_border_solve!` (lines 70/130/146/158/171).
+  - `test/hsd_rank_reduction_precision.jl` (quick profile) — calls
+    `SDPX.hsd_solve!` (lines 127/157/163/179).
 - **Docs:** `docs/design/HSD_FORMULATION.md`, `docs/PLAN.md`, review evidence.
 - **Note:** `ProductConeHSDState` reuses `HSDState` (defined in
   `src/hsd/hsd.jl`, which is NOT legacy) and the shared `hsd_residual!`,
@@ -106,19 +192,30 @@
 
 ## 7. `src/soc_native.jl` — NativeSOCPlan Lorentz execution
 
-- Defines: `NativeSOCPlan`, `NativeSOCWorkspace`, `_native_soc_*` kernels
-  (cold start, direction, assembly, solve).
-- **src callers:** `src/pipeline/plan.jl`, `src/types/plans.jl` (payload types),
-  `src/public/optimize.jl`, `src/frontend/high_level_solve.jl`,
-  `src/soc_presolve.jl`, `src/validation.jl`, `src/ir/lower_soc.jl` (lowering),
-  `src/kkt/specializations/fixed_trace_q3.jl`.
+- Defines: `NativeSOCPlan`, `NativeSOCWorkspace`, `NativeSOCDiagnostics`,
+  `_native_soc_*` kernels (cold start, direction, assembly, solve),
+  `GeneralLorentzExecution`, `FixedTraceQ3Execution`,
+  `_build_native_soc_payload`, `_solve_native_soc_core`.
+- **Reachability:** NativeSOC is still the production SOC engine for the
+  `ConicProblem` path.  `src/public/optimize.jl` (`_public_solve_soc_core` →
+  `_run_native_soc_frontend`) and `src/frontend/high_level_solve.jl`
+  (`solve_socp`) both call `_solve_native_soc_core`
+  (`src/frontend/high_level_solve.jl:165,202`); `src/pipeline/plan.jl` builds
+  the payload through `_build_native_soc_payload` and carries
+  `NativeSOCPlan`/`FixedTraceQ3Execution`; `src/soc_presolve.jl`,
+  `src/validation.jl`, `src/public/optimize.jl` and
+  `src/frontend/high_level_solve.jl` construct/dispatch on
+  `NativeSOCDiagnostics`; `src/kkt/specializations/fixed_trace_q3.jl` mentions
+  `GeneralLorentzExecution` in a docstring only.  (`lower_soc_native` lives in
+  `src/ir/lower_soc.jl`, NOT here.)
 - **Tests:** `test/soc_native_solver.jl`, `test/soc_regressions.jl`,
   `test/moi_native_soc.jl`, `test/moi.jl`, `test/soc_metric_sparse.jl`,
-  `test/soc_singleton_presolve.jl`, `test/public/result_optimize.jl`
+  `test/soc_singleton_presolve.jl`, `test/provider_smoke.jl`
+  (`_solve_native_soc_core`), `test/public/result_optimize.jl`
   (`lower_soc_native`), `test/modeling/lower_soc.jl` (`lower_soc_native`).
 - **Docs:** `docs/PLAN.md`, review evidence.
 
-## 8. Migration status after this wave (test/CI only)
+## 8. Migration status after the test/CI and entrypoint waves (historical)
 
 Migrated to native product HSD (`ProductConeHSDState` +
 `product_hsd_cold_start!`/`product_hsd_step!`/`product_hsd_solve!`):
@@ -127,7 +224,8 @@ Migrated to native product HSD (`ProductConeHSDState` +
 - `test/hsd_zeroalloc.jl`
 - `test/hsd_direction_lp.jl`
 - `test/hsd_full_newton_oracle.jl`
-- `test/hsd_border_failure.jl` (legacy `hsd_step!` testset → product caller)
+- `test/hsd_border_failure.jl` (legacy `hsd_step!` testset → product caller;
+  low-level `_hsd_border_solve!` kernel gates retained, see §6)
 - `test/hsd_nonnegative.jl`
 
 `engine=:legacy` references removed from:
@@ -145,6 +243,14 @@ Workflows:
 
 - `.github/workflows/test.yml`, `.github/workflows/optimization-benchmark.yml`
   (step names/comments now name the native product-HSD allocation gate).
+
+Production entrypoints (prepared sessions, all-auto frontend, CLI bridge,
+benchmark harness) were migrated to the native entrypoint bridge
+(`src/entrypoint_bridge.jl`) and call the public `optimize!` seam with
+`engine=:native_hsd`; no legacy `solve!`/`solve_lp!` route is reachable from
+them.  The legacy `solve!`/`solve_lp!`/`_solve_sdp_core!` surfaces remain
+package-internal and are exercised only by the retained kernel/regression
+tests listed in §2–§5.
 
 ## 9. Known product-path translation risks (preserved assertions)
 
@@ -176,3 +282,30 @@ benchmark harness route label `:sdpx_legacy` are separate namespaces from the
 `benchmark/compare_impl.jl`, and `benchmark/README.md`.  These are out of scope
 for the `engine=:legacy` deletion unless the LA-backend vocabulary is also
 retired.
+
+## 11. Fifth-wave source-deletion verdict (this wave)
+
+Verified at the fifth wave (`agent/legacy-source-deletion`): **none of the six
+files was deleted**, because each still hosts symbols required by remaining
+production `src` code or by active tests.  Deleting any file now would break
+`SDPX.jl` loading and/or the active `test/runtests.jl` suites (CI default is
+`SDPX_TEST_PROFILE=quick`), which the Phase 10 contract forbids removing.
+
+| File | Blocking production `src` references | Blocking active-test references |
+|---|---|---|
+| `src/lp_solver.jl` | none (comments only; `solve_lp!` called only from `solver/interior_point.jl`) | `LPWorkspace`, `LPScaling`, `LPReducedFactor`, `LPStandardFormSystem`, `LPDiagonalMatrix`, `_lp_*` kernels, `_resolve_lp_backend!`, `_presolve_lp_rows`, `_extract_lp_rows`, `_lp_workspace_bytes` in `test/lp_regressions.jl`, `test/direction_accuracy_lp.jl`, `test/architecture_regressions.jl`, `test/lp_sparse.jl`, `test/bigfloat_ownership_regressions.jl` |
+| `src/lp_sparse.jl` | none outside the legacy LP pair | `select_lp_formulation`, `lp_sparse_candidate`, `lp_sparse_factor!`, `lp_sparse_solve!`, `LPSparseSystem`, `_lp_sparse_assemble` in `test/lp_sparse.jl`, `test/sparse_execution_round6.jl`, `test/kkt_sparse_backend.jl`, `test/direction_accuracy_lp.jl` |
+| `src/solver/interior_point.jl` | `_scaled_identity` (`public/optimize.jl:1483`), `_ladder_retry_decision` (`pipeline/diagnostics.jl:276`), `_replace_solver_options` (`adaptive_parameters.jl:775`), `dual_objective(prob,y,Y)` (`preprocessing.jl:2118`, `validation.jl:151/373/964`) | `solve!` (27 active files), `_solve_sdp_core!`, `_kkt_cold_start_initialization`, `save_checkpoint`/`load_checkpoint`, `recommended_parameters`, `adaptive_working_precision_bits`, `block_norm_stats`, `_equality_factor_diagnostics`, `_build_precision_ladder_plan`, `_solve_pipeline!`, `_sdp_newton_termination_metadata`, `BestIterateWorkspace`, `_store_best_iterate!`, `_accepted_sdp_trial_residuals!` |
+| `src/step.jl` | `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, `fraction_to_boundary_search!`, `line_search!`, `_has_owned_bigfloat_equality_arrow` in `src/kernels/threaded.jl:310/331/512/513/623/926/1075/1686/1801` | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in `test/factorizations_gate.jl`, `test/allocation_contract.jl`, `test/solver_regressions.jl`, `test/bigfloat_sparse_schur_regressions.jl`, `test/extended_precision_blas.jl`, `test/schur_scheduler_regressions.jl` and others |
+| `src/hsd/nonnegative_hsd.jl` | shared `HSDState` kernels used by the production product-cone HSD path: `_hsd_matrix_finite`, `_hsd_direction_finite`, `_hsd_maxinf`, `_hsd_residual_homotopy_ok`, `_hsd_scatter_dx!`, `_hsd_update_record!`, `_hsd_trial_residual!` (see §6) | `hsd_solve!` (`test/hsd_rank_reduction_precision.jl`, quick), `_hsd_border_solve!` (`test/hsd_border_failure.jl`, quick) |
+| `src/soc_native.jl` | production SOC engine for the `ConicProblem` path: `NativeSOCPlan`, `FixedTraceQ3Execution`, `_build_native_soc_payload` (`pipeline/plan.jl`), `_solve_native_soc_core` (`frontend/high_level_solve.jl:165,202`), `NativeSOCDiagnostics` (`soc_presolve.jl`, `validation.jl`, `public/optimize.jl`, `frontend/high_level_solve.jl`) | `test/soc_native_solver.jl`, `test/moi_native_soc.jl`, `test/soc_metric_sparse.jl`, `test/soc_singleton_presolve.jl`, `test/soc_regressions.jl`, `test/provider_smoke.jl` |
+
+Ancillary checks performed this wave (no change needed):
+
+- `engine=:legacy` selectors: already removed from the public surface
+  (`src/public/settings.jl` `_validate_engine`, `src/moi_wrapper.jl`) and
+  rejected with migration errors; the `:legacy` tokens that remain are the
+  linear-algebra backend/provider vocabulary of §10.
+- `Printf`: still used by `src/solver/interior_point.jl` (`print_iter`,
+  lines 27/29), so the `Printf` runtime dependency is retained.
+- Exports (`src/SDPX.jl`): the public export set is native-only and unchanged.
