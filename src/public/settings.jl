@@ -134,7 +134,9 @@ Fields
 - `engine::Symbol` — solver engine selector: `:auto`, `:native_hsd`, or
   `:legacy`.  An explicit `:native_hsd` request is fail-closed and is never
   retried through a legacy solver or PSD lift.
-- `scaling::Symbol` — `:auto` or `:none` / `:equilibrate`.
+- `scaling::Symbol` — compatibility storage: `:auto`, `:none`, or `:equilibrate`.
+- `equilibration` — public policy view/keyword: `:off` (default) or `:ruiz`;
+  `:ruiz` is stored as `scaling=:equilibrate` without a duplicate field.
 - `formulation::Symbol` — numerical formulation selector.  Public names
   are `:auto`, `:variable_space_schur` (variable-space Schur complement;
   lowers to the existing `:normal_equations` policy) and
