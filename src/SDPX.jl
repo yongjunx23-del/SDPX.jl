@@ -74,6 +74,7 @@ include("step_hot.jl")
 # verification. Included here (after the IR, factor-cache routes and the KKT
 # route driver) so they can reference CanonicalConicProgram, ConeProductLayout,
 # AbstractFactorCache and HotRouteCache.
+include("hsd/equality_reduction_sparse.jl")
 include("hsd/hsd.jl")
 include("hsd/nonnegative_hsd.jl")
 include("hsd/nonsymmetric_coupled.jl")
