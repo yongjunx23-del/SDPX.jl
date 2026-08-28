@@ -52,18 +52,140 @@ struct LocalConeLinearization{
     end
 end
 
-"""Setup-owned block-diagonal product-cone linearization."""
+"""
+Validate ordered, contiguous, full product-cone block coverage and optional
+block operator dimensions. This is the single range authority shared by dense
+and block-owned product linearizations.
+"""
+function validate_product_cone_block_ranges(
+    dimension::Int,
+    block_ranges::AbstractVector{<:UnitRange{Int}},
+    block_operators::Union{Nothing,AbstractVector}=nothing,
+)
+    dimension >= 0 || throw(ArgumentError(
+        "product-cone dimension must be nonnegative",
+    ))
+    block_operators === nothing ||
+        length(block_operators) == length(block_ranges) ||
+        throw(DimensionMismatch(
+            "product-cone block range/operator counts disagree",
+        ))
+    expected = 1
+    for (index, rows) in enumerate(block_ranges)
+        isempty(rows) && throw(ArgumentError(
+            "product-cone block ranges must be nonempty",
+        ))
+        first(rows) == expected || throw(ArgumentError(
+            "product-cone block coverage gap or overlap: expected row " *
+            "$expected, got $rows",
+        ))
+        last(rows) <= dimension || throw(DimensionMismatch(
+            "product-cone block $rows exceeds dimension $dimension",
+        ))
+        if block_operators !== nothing
+            block_dimension = length(rows)
+            size(block_operators[index]) == (block_dimension, block_dimension) ||
+                throw(DimensionMismatch(
+                    "product-cone block operator $index dimensions disagree " *
+                    "with rows $rows",
+                ))
+        end
+        expected = last(rows) + 1
+    end
+    expected == dimension + 1 || throw(ArgumentError(
+        "product-cone block coverage ends at $(expected - 1), expected " *
+        "$dimension",
+    ))
+    return true
+end
+
+"""Setup-owned dense block-diagonal product-cone linearization."""
 struct ProductConeLinearization{T<:AbstractFloat} <:
        AbstractConeLinearization{T}
     operator::Matrix{T}
     corrector_rhs::Vector{T}
     block_ranges::Vector{UnitRange{Int}}
+
+    function ProductConeLinearization{T}(
+        operator::Matrix{T}, corrector_rhs::Vector{T},
+        block_ranges::Vector{UnitRange{Int}},
+    ) where {T<:AbstractFloat}
+        dimension = length(corrector_rhs)
+        size(operator) == (dimension, dimension) || throw(DimensionMismatch(
+            "dense product-cone operator dimensions disagree with RHS",
+        ))
+        validate_product_cone_block_ranges(dimension, block_ranges)
+        return new{T}(operator, corrector_rhs, block_ranges)
+    end
+end
+
+"""Product linearization whose dense storage is owned per cone block."""
+struct BlockProductConeLinearization{T<:AbstractFloat} <:
+       AbstractConeLinearization{T}
+    operators::Vector{Matrix{T}}
+    corrector_rhs::Vector{T}
+    block_ranges::Vector{UnitRange{Int}}
+
+    function BlockProductConeLinearization{T}(
+        operators::Vector{Matrix{T}}, corrector_rhs::Vector{T},
+        block_ranges::Vector{UnitRange{Int}},
+    ) where {T<:AbstractFloat}
+        dimension = length(corrector_rhs)
+        validate_product_cone_block_ranges(
+            dimension, block_ranges, operators,
+        )
+        for operator in operators
+            issymmetric(operator) || throw(ArgumentError(
+                "product-cone block operator must be self-adjoint",
+            ))
+            all(isfinite, operator) || throw(ArgumentError(
+                "product-cone block operator contains non-finite data",
+            ))
+        end
+        all(isfinite, corrector_rhs) || throw(ArgumentError(
+            "product-cone corrector right-hand side contains non-finite data",
+        ))
+        return new{T}(operators, corrector_rhs, block_ranges)
+    end
 end
 
 cone_dimension(linearization::LocalConeLinearization) =
     length(linearization.rows)
-cone_dimension(linearization::ProductConeLinearization) =
-    length(linearization.corrector_rhs)
+cone_dimension(linearization::Union{
+    ProductConeLinearization,BlockProductConeLinearization,
+}) = length(linearization.corrector_rhs)
+
+validate_cone_linearization(::AbstractConeLinearization) = true
+function validate_cone_linearization(linearization::ProductConeLinearization)
+    dimension = cone_dimension(linearization)
+    size(linearization.operator) == (dimension, dimension) ||
+        throw(DimensionMismatch(
+            "dense product-cone operator dimensions disagree with RHS",
+        ))
+    return validate_product_cone_block_ranges(
+        dimension, linearization.block_ranges,
+    )
+end
+function validate_cone_linearization(
+    linearization::BlockProductConeLinearization,
+)
+    return validate_product_cone_block_ranges(
+        cone_dimension(linearization), linearization.block_ranges,
+        linearization.operators,
+    )
+end
+
+@inline product_cone_block_ranges(linearization::Union{
+    ProductConeLinearization,BlockProductConeLinearization,
+}) = linearization.block_ranges
+@inline product_cone_block_operator(
+    linearization::ProductConeLinearization, index::Int,
+) = @view linearization.operator[
+    linearization.block_ranges[index], linearization.block_ranges[index],
+]
+@inline product_cone_block_operator(
+    linearization::BlockProductConeLinearization, index::Int,
+) = linearization.operators[index]
 
 """
     assemble_cone_linearization(T, dimension, contributions)
@@ -100,11 +222,10 @@ function assemble_cone_linearization(
     return ProductConeLinearization{T}(operator, corrector_rhs, ranges)
 end
 
-function apply_cone_linearization!(
-    destination::AbstractVector{T},
-    linearization::AbstractConeLinearization{T},
-    source::AbstractVector{T},
-) where {T<:AbstractFloat}
+function _validate_cone_apply_dimensions(
+    destination::AbstractVector, linearization::AbstractConeLinearization,
+    source::AbstractVector,
+)
     dimension = cone_dimension(linearization)
     length(destination) == dimension || throw(DimensionMismatch(
         "cone destination length does not match linearization",
@@ -112,7 +233,33 @@ function apply_cone_linearization!(
     length(source) == dimension || throw(DimensionMismatch(
         "cone source length does not match linearization",
     ))
+    return dimension
+end
+
+function apply_cone_linearization!(
+    destination::AbstractVector{T},
+    linearization::Union{LocalConeLinearization{T},ProductConeLinearization{T}},
+    source::AbstractVector{T},
+) where {T<:AbstractFloat}
+    _validate_cone_apply_dimensions(destination, linearization, source)
+    validate_cone_linearization(linearization)
     mul!(destination, linearization.operator, source)
+    return destination
+end
+
+function apply_cone_linearization!(
+    destination::AbstractVector{T},
+    linearization::BlockProductConeLinearization{T},
+    source::AbstractVector{T},
+) where {T<:AbstractFloat}
+    _validate_cone_apply_dimensions(destination, linearization, source)
+    validate_cone_linearization(linearization)
+    for (index, rows) in enumerate(linearization.block_ranges)
+        mul!(
+            @view(destination[rows]), linearization.operators[index],
+            @view(source[rows]),
+        )
+    end
     return destination
 end
 
@@ -182,6 +329,7 @@ struct NewtonSystem{
         cone_dimension(cone) == m || throw(DimensionMismatch(
             "cone linearization dimension does not match rows of A",
         ))
+        validate_cone_linearization(cone)
         length(rhs.primal_affine) == m || throw(DimensionMismatch(
             "primal Newton RHS dimension does not match rows of A",
         ))
