@@ -310,7 +310,6 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     dimension::Int
     unregularized::Matrix{T}
     regularized::Matrix{T}
-    symmetric_companion::Matrix{T}
     factor::GenericPivotedLU{T}
     inertia_factor::GenericPivotedLDL{T}
     la_backend::B
@@ -343,6 +342,27 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     correction_vector::Vector{T}
     residual::Matrix{T}
     correction::Matrix{T}
+    # Compact predictor/corrector/refinement workspace. Every RHS, solution,
+    # correction, recovery and cone-linearization buffer is sized once here;
+    # the provider destructive scratch above remains provider-owned.
+    predictor_rhs::Vector{T}
+    corrector_rhs::Vector{T}
+    solution::Vector{T}
+    negated_primal::Vector{T}
+    negated_dual::Vector{T}
+    recovery_dx::Vector{T}
+    recovery_dy::Vector{T}
+    recovery_ds::Vector{T}
+    recovery_cone_action::Vector{T}
+    cone_operator::Matrix{T}
+    cone_corrector_rhs::Vector{T}
+    cone_block_ranges::Vector{UnitRange{Int}}
+    newton_residual::NewtonResidual{T}
+    # Layout metadata and solve counters. Diagnostic only; no numeric gate.
+    rhs_count::Int
+    predictor_solve_count::Int
+    corrector_solve_count::Int
+    recovery_count::Int
     status::ExpandedKKTStatus
 end
 
@@ -375,9 +395,9 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
     refinement_trajectory = ExpandedRefinementStep{T}[]
     sizehint!(refinement_trajectory, 128)
     backend = _expanded_la_backend(T)
+    cone_ranges = UnitRange{Int}[1:m]
     return ExpandedKKTSession{T,typeof(backend)}(
         n, m, dimension, alloc_zeros(T, dimension, dimension),
-        alloc_zeros(T, dimension, dimension),
         alloc_zeros(T, dimension, dimension),
         GenericPivotedLU(T, dimension), GenericPivotedLDL(T, dimension),
         backend, nothing, nothing,
@@ -391,6 +411,17 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         alloc_zeros(T, dimension), alloc_zeros(T, dimension),
         alloc_zeros(T, dimension, rhs_count),
         alloc_zeros(T, dimension, rhs_count),
+        alloc_zeros(T, dimension), alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, m), alloc_zeros(T, n),
+        alloc_zeros(T, n), alloc_zeros(T, m),
+        alloc_zeros(T, m), alloc_zeros(T, m),
+        alloc_zeros(T, m, m), alloc_zeros(T, m), cone_ranges,
+        NewtonResidual{T}(
+            alloc_zeros(T, m), alloc_zeros(T, n), zero(T),
+            alloc_zeros(T, m), zero(T), alloc_zeros(T, m),
+        ),
+        rhs_count, 0, 0, 0,
         EXPANDED_KKT_READY,
     )
 end
@@ -472,14 +503,18 @@ end
 function _freeze_symmetric_companion!(session::ExpandedKKTSession)
     # The symmetric companion mirrors the upper x/tau coupling. It is an
     # inertia diagnostic for signed regularization, not the solved frozen-sign
-    # operator (whose lower x/tau block has the opposite sign).
-    copy_owned!(session.symmetric_companion, session.regularized)
+    # operator (whose lower x/tau block has the opposite sign). It is frozen
+    # into the inertia-factor LDL workspace (standard route) or the
+    # provider-owned inertia scratch (provider route); no long-lived duplicate
+    # dimension-by-dimension matrix is retained.
+    target = session.la_backend === nothing ?
+        session.inertia_factor.schur : session.provider_inertia_matrix
+    copy_owned!(target, session.regularized)
     tau_index = session.dimension
     @inbounds for index in 1:session.n
-        session.symmetric_companion[tau_index, index] =
-            session.symmetric_companion[index, tau_index]
+        target[tau_index, index] = target[index, tau_index]
     end
-    return session.symmetric_companion
+    return target
 end
 
 function _assemble_regularized!(
@@ -532,12 +567,16 @@ function _factor_expanded_inertia!(
     session::ExpandedKKTSession{T}, pivot_floor::T,
 ) where {T<:AbstractFloat}
     if session.la_backend === nothing
+        # The symmetric companion was frozen into the LDL workspace by
+        # `_freeze_symmetric_companion!` during assembly; the factor routine
+        # re-copies it in place (a no-op) before elimination.
         return factorize_pivoted_ldl!(
-            session.inertia_factor, session.symmetric_companion;
+            session.inertia_factor, session.inertia_factor.schur;
             threshold=pivot_floor,
         )
     end
-    copy_owned!(session.provider_inertia_matrix, session.symmetric_companion)
+    # Provider route: the companion already lives in the provider-owned
+    # inertia scratch; `la_ldlt_factor!` consumes it destructively there.
     provider_factor = la_ldlt_factor!(
         session.la_backend, session.provider_inertia_matrix,
     )
@@ -1074,4 +1113,76 @@ function recover_expanded_direction(
     end
     dkappa = (system.rhs.tau_kappa - system.kappa * dtau) / system.tau
     return NewtonDirection(dx, dy, ds, dtau, dkappa)
+end
+
+"""
+    recover_expanded_direction!(session, system, condensed)
+
+Zero-allocation recovery of all five semantic direction variables from the
+condensed solve. Numeric semantics are identical to `recover_expanded_direction`;
+the results are written into the session-owned recovery buffers, which are
+overwritten on every call, and wrapped in the immutable `NewtonDirection`.
+"""
+function recover_expanded_direction!(
+    session::ExpandedKKTSession{T}, system::NewtonSystem{T},
+    condensed::AbstractVector{T},
+) where {T<:AbstractFloat}
+    m, n = size(system.A)
+    length(condensed) == n + m + 1 || throw(DimensionMismatch(
+        "expanded solution dimension mismatch",
+    ))
+    length(session.recovery_dx) == n || throw(DimensionMismatch(
+        "expanded recovery dx dimension mismatch",
+    ))
+    length(session.recovery_dy) == m || throw(DimensionMismatch(
+        "expanded recovery dy dimension mismatch",
+    ))
+    dx = session.recovery_dx
+    dy = session.recovery_dy
+    copyto!(dx, @view condensed[1:n])
+    copyto!(dy, @view condensed[(n + 1):(n + m)])
+    dtau = condensed[end]
+    cone_action = session.recovery_cone_action
+    apply_cone_linearization!(cone_action, system.cone, dy)
+    ds = session.recovery_ds
+    @inbounds for i in 1:m
+        ds[i] = system.rhs.cone_corrector[i] - cone_action[i]
+    end
+    dkappa = (system.rhs.tau_kappa - system.kappa * dtau) / system.tau
+    session.recovery_count += 1
+    return NewtonDirection(dx, dy, ds, dtau, dkappa)
+end
+
+"""
+    expanded_workspace_layout(session)
+
+Layout metadata for the compact expanded workspace: sizes of every
+preallocated predictor/corrector/refinement RHS, solution, correction,
+recovery and cone-linearization buffer, plus the solve counters. Diagnostic
+only; no numeric behavior is gated on this data.
+"""
+function expanded_workspace_layout(session::ExpandedKKTSession)
+    return (;
+        n=session.n, m=session.m, dimension=session.dimension,
+        rhs_count=session.rhs_count,
+        predictor_rhs=length(session.predictor_rhs),
+        corrector_rhs=length(session.corrector_rhs),
+        solution=length(session.solution),
+        negated_primal=length(session.negated_primal),
+        negated_dual=length(session.negated_dual),
+        recovery_dx=length(session.recovery_dx),
+        recovery_dy=length(session.recovery_dy),
+        recovery_ds=length(session.recovery_ds),
+        recovery_cone_action=length(session.recovery_cone_action),
+        cone_operator=size(session.cone_operator),
+        cone_corrector_rhs=length(session.cone_corrector_rhs),
+        cone_block_ranges=length(session.cone_block_ranges),
+        newton_residual_primal=length(session.newton_residual.primal_affine),
+        newton_residual_dual=length(session.newton_residual.dual_affine),
+        residual_panel=size(session.residual),
+        correction_panel=size(session.correction),
+        predictor_solve_count=session.predictor_solve_count,
+        corrector_solve_count=session.corrector_solve_count,
+        recovery_count=session.recovery_count,
+    )
 end

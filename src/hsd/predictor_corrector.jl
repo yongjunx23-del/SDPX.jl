@@ -91,10 +91,13 @@ end
 function _product_hsd_expanded_linearization(
     state::ProductConeHSDState{T}, corrector_rhs::AbstractVector{T},
 ) where {T}
+    session = state.expanded
     m = state.base.m
-    operator = zeros(T, m, m)
-    basis = zeros(T, m)
-    image = zeros(T, m)
+    # Dense route: the full product operator and the corrector RHS live in the
+    # session-owned compact workspace and are refilled every call.
+    operator = session.cone_operator
+    basis = state.g_input
+    image = state.g_output
     @inbounds for column in 1:m
         fill!(basis, zero(T))
         basis[column] = one(T)
@@ -123,10 +126,22 @@ function _product_hsd_expanded_linearization(
             operator[column, row] = lower
         end
     end
-    local_contribution = LocalConeLinearization(
-        1:m, operator, copy(corrector_rhs),
+    # Assemble into the session-owned product linearization. The same
+    # self-adjointness/finite-data checks that the LocalConeLinearization and
+    # assemble_cone_linearization seam ran are preserved verbatim below.
+    copyto!(session.cone_corrector_rhs, corrector_rhs)
+    issymmetric(operator) || throw(ArgumentError(
+        "cone linearization must be self-adjoint",
+    ))
+    all(isfinite, operator) || throw(ArgumentError(
+        "cone linearization contains non-finite data",
+    ))
+    all(isfinite, session.cone_corrector_rhs) || throw(ArgumentError(
+        "cone corrector right-hand side contains non-finite data",
+    ))
+    return ProductConeLinearization{T}(
+        operator, session.cone_corrector_rhs, session.cone_block_ranges,
     )
-    return assemble_cone_linearization(T, m, [local_contribution])
 end
 
 """Materialize only independent dense cone blocks for sparse Schur assembly."""
@@ -173,8 +188,11 @@ function _product_hsd_sparse_linearization(
         end
         push!(operators, operator)
     end
+    # The product corrector RHS is copied once into the session-owned compact
+    # workspace buffer shared with the dense expanded fallback route.
+    copyto!(state.expanded.cone_corrector_rhs, corrector_rhs)
     return BlockProductConeLinearization{T}(
-        operators, copy(corrector_rhs), ranges,
+        operators, state.expanded.cone_corrector_rhs, ranges,
     )
 end
 
@@ -182,8 +200,22 @@ function _product_hsd_expanded_system(
     state::ProductConeHSDState{T}, cone, scalar_rhs::T,
 ) where {T}
     base = state.base
-    rhs = residual_newton_rhs(
-        base.rP, base.rD, base.rG, cone.corrector_rhs, scalar_rhs,
+    session = state.expanded
+    # `residual_newton_rhs` semantics are reproduced exactly (including its
+    # fail-closed non-finite gate) but the negated residual vectors are
+    # written into session-owned buffers instead of being allocated.
+    all(isfinite, base.rP) && all(isfinite, base.rD) && isfinite(base.rG) &&
+    all(isfinite, cone.corrector_rhs) && isfinite(scalar_rhs) ||
+        throw(ArgumentError("HSD Newton RHS contains non-finite data"))
+    @inbounds for index in 1:base.m
+        session.negated_primal[index] = -base.rP[index]
+    end
+    @inbounds for index in 1:base.n
+        session.negated_dual[index] = -base.rD[index]
+    end
+    rhs = HSDNewtonRHS(
+        session.negated_primal, session.negated_dual, -base.rG,
+        cone.corrector_rhs, scalar_rhs,
     )
     return NewtonSystem(
         base.A, base.b, base.c, cone, base.tau, base.kappa, rhs,
@@ -191,26 +223,38 @@ function _product_hsd_expanded_system(
 end
 
 function _product_hsd_expanded_solve_shift!(
-    state::ProductConeHSDState{T}, cone, scalar_rhs::T,
+    state::ProductConeHSDState{T}, cone, scalar_rhs::T;
+    stage::Symbol=:predictor,
 ) where {T}
+    session = state.expanded
+    rhs = stage === :predictor ? session.predictor_rhs : session.corrector_rhs
     system = _product_hsd_expanded_system(state, cone, scalar_rhs)
-    rhs = zeros(T, state.expanded.dimension)
+    # The condensed RHS is constructed here, strictly after the previous
+    # predictor solve has completed and been certified. Predictor and
+    # corrector RHS are never built or solved simultaneously; each solve
+    # reuses the single factorization (and its immutable receipt) below.
     expanded_rhs!(rhs, system)
-    solution = similar(rhs)
+    if stage === :predictor
+        session.predictor_solve_count += 1
+    else
+        session.corrector_solve_count += 1
+    end
+    solution = session.solution
     # Predictor certification changes only the semantic status; the same
-    # factor remains numerically valid for the corrector RHS.
-    state.expanded.status = EXPANDED_KKT_FACTORED
-    solve_expanded!(solution, state.expanded, rhs) || return false
-    refined = refine_expanded!(solution, state.expanded, rhs)
+    # factor remains numerically valid for the corrector RHS, so no
+    # re-factorization and no receipt rebuild happen between the solves.
+    session.status = EXPANDED_KKT_FACTORED
+    solve_expanded!(solution, session, rhs) || return false
+    refined = refine_expanded!(solution, session, rhs)
     if !refined
         # A regularized factor can expose the adjacent homogeneous-border
         # inertia only during refinement. Retry the same RHS once with the
         # exact unregularized operator under the narrow diagnosed gate below.
         _product_hsd_factor_exact_expanded_border!(state, system) || return false
-        solve_expanded!(solution, state.expanded, rhs) || return false
-        refine_expanded!(solution, state.expanded, rhs) || return false
+        solve_expanded!(solution, session, rhs) || return false
+        refine_expanded!(solution, session, rhs) || return false
     end
-    direction = recover_expanded_direction(system, solution)
+    direction = recover_expanded_direction!(session, system, solution)
     base = state.base
     copyto!(base.dx, direction.dx)
     copyto!(base.dy, direction.dy)
@@ -218,11 +262,11 @@ function _product_hsd_expanded_solve_shift!(
     base.dtau = direction.dtau
     base.dkappa = direction.dkappa
     _hsd_direction_finite(base) || return false
-    semantic_residual = NewtonResidual(system)
+    semantic_residual = session.newton_residual
     newton_residual!(semantic_residual, system, direction)
     scale = max(
         norm(rhs, Inf), norm(solution, Inf) *
-        _expanded_operator_scale(state.expanded.unregularized), one(T),
+        _expanded_operator_scale(session.unregularized), one(T),
     )
     return max_newton_residual(semantic_residual) <=
            T(512) * eps(T) * scale
@@ -323,11 +367,16 @@ function _product_hsd_expanded_direction!(
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
+    # The corrector RHS is constructed only after the predictor direction has
+    # been solved and certified: the corrected shift is copied into the
+    # session-owned cone buffer and the predictor cone operator is shared.
+    copyto!(state.expanded.cone_corrector_rhs, state.h)
     corrector_cone = ProductConeLinearization{T}(
-        cone.operator, copy(state.h), cone.block_ranges,
+        state.expanded.cone_operator, state.expanded.cone_corrector_rhs,
+        state.expanded.cone_block_ranges,
     )
     return _product_hsd_expanded_solve_shift!(
-        state, corrector_cone, corrector_scalar,
+        state, corrector_cone, corrector_scalar; stage=:corrector,
     )
 end
 
@@ -423,8 +472,12 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
+    # The corrected shift is copied into the session-owned cone buffer; the
+    # sparse block operators are shared with the predictor cone and the same
+    # reduced-Schur factor is reused for the corrector solve.
+    copyto!(state.expanded.cone_corrector_rhs, state.h)
     corrector_cone = BlockProductConeLinearization{T}(
-        cone.operators, copy(state.h), cone.block_ranges,
+        cone.operators, state.expanded.cone_corrector_rhs, cone.block_ranges,
     )
     return _product_hsd_sparse_solve_shift!(
         state, corrector_cone, corrector_scalar; factor_operator=false,
