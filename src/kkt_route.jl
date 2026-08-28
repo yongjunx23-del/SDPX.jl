@@ -2,7 +2,7 @@
 #    Route-cache KKT driver (Subagent G).
 #
 #    Wires the real route FactorCaches (src/factor_cache/routes) into the
-#    production KKT solve.  The contract is deliberately small and zero-alloc:
+#    production KKT solve.  The contract is deliberately small:
 #
 #      * `kkt_epoch_factorize!` bumps the matrix epoch and asks the route
 #        cache to `factorize!` the assembled matrix ONCE.  Because every step
@@ -14,7 +14,7 @@
 #        `kkt_solve!` / `kkt_refine!` are thin wrappers over the cache's own
 #        `solve!` / `refine_once!`; allocation behavior is cache-specific
 #        (e.g. the Float64 CHOLMOD cache uses a public allocating
-#        `factor \ rhs`), so the driver itself does not promise
+#        `factor \\ rhs`), so the driver itself does not promise
 #        allocation-free solves.
 #      * `factorizations(driver)` is the actual-factorization-count statistic:
 #        it counts REAL numeric factor calls (the route's `factor_epoch`
@@ -68,7 +68,9 @@ end
 
 Solve the (shared) factorized system for one right-hand side.  Legal only when
 the route cache is `Fresh` (fail-closed); reuses the factor produced by
-[`kkt_epoch_factorize!`](@ref).  Never allocates on the warm path.
+[`kkt_epoch_factorize!`](@ref).  Allocation behavior is cache-specific (for
+    example the Float64 CHOLMOD cache uses a public allocating `factor \\ rhs`);
+    this driver does not promise an allocation-free solve.
 """
 @inline function kkt_solve!(
     driver::HotRouteCache{T, R}, destination::AbstractVector{T}, rhs::AbstractVector{T},
@@ -81,7 +83,8 @@ end
 
 One step of iterative refinement through the shared factor.  Legal only when
 the route is `Fresh`; reuses the factor produced by
-[`kkt_epoch_factorize!`](@ref).  Zero allocations on the warm path.
+[`kkt_epoch_factorize!`](@ref).  Allocation behavior is cache-specific; this
+    driver does not promise an allocation-free refinement.
 """
 @inline function kkt_refine!(
     driver::HotRouteCache{T, R}, correction::AbstractVector{T}, residual::AbstractVector{T},

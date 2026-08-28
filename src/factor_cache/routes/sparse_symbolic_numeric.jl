@@ -307,24 +307,38 @@ function factorize!(
     T === Float64 || throw(ArgumentError(
         "SparseSymbolicNumericCache factorize! is Float64-only; got $T",
     ))
-    K isa SparseMatrixCSC{T, Int} || throw(ArgumentError(
-        "SparseSymbolicNumericCache factorize! requires a SparseMatrixCSC",
-    ))
-    # Invalid requires an explicit re-prepare before any factorization.
-    cache.status === Invalid && throw(FactorCacheStateError(
-        :factorize, Prepared, Invalid,
-    ))
-    if cache.status === Fresh && cache.matrix_epoch == Int(matrix_epoch)
-        return cache
+    # State admission precedes every potentially throwing new-attempt
+    # validation.  `Unprepared` (no plan yet) and `Invalid` (requires an
+    # explicit re-prepare) cannot factor at all and stay unchanged.
+    state = cache.status
+    if state === Unprepared
+        throw(FactorCacheStateError(:factorize, Prepared, state))
+    elseif state === Invalid
+        throw(FactorCacheStateError(:factorize, Prepared, state))
+    elseif state in (Prepared, Fresh, Failed)
+        # admissible new-attempt states
+    else
+        throw(FactorCacheStateError(:factorize, Prepared, state))
     end
-    # Fail-closed on entry: a stale (Prepared/Fresh/Failed) usable factor is
-    # never carried across a new factorization attempt.  The state machine
-    # guarantees `Failed` → re-factorize recovers via the retained CHOLMOD
-    # object only when the same pattern is presented again; any pattern drift
-    # or structural rejection below throws and leaves `Failed` with the old
-    # object detached, so no stale solve is possible.
+    # Commit to the attempt before any validation that can throw: a
+    # Fresh/Failed usable factor is revoked for the duration of this attempt
+    # so a later rejection can never leave a stale factor in a solvable
+    # state.
     cache.status = Factoring
     try
+        # Validated finite integer epoch conversion before any matrix
+        # inspection.  An unconvertible epoch fails closed (status `Failed`).
+        epoch = Int(matrix_epoch)
+        if state === Fresh && cache.matrix_epoch == epoch
+            # Same-epoch re-factorization is a no-op: keep the existing
+            # factor and matrix epoch.  The caller's matrix is deliberately
+            # NOT inspected on this path.
+            cache.status = Fresh
+            return cache
+        end
+        K isa SparseMatrixCSC{T, Int} || throw(ArgumentError(
+            "SparseSymbolicNumericCache factorize! requires a SparseMatrixCSC",
+        ))
         _copy_values_into_view!(cache, K)
         _apply_signed_regularization!(cache)
         if cache.factor === nothing
@@ -335,13 +349,21 @@ function factorize!(
             cache.symbolic_count += 1
         else
             # Same pattern: reuse the same CHOLMOD factor object.  Public
-            # `ldlt!` throws `ZeroPivotException` on a genuine zero pivot and
-            # can be retried on the same object with a regularized matrix
-            # (verified against Julia 1.12 CHOLMOD); we still detach the
-            # object on any throw so `Failed` never solves stale data.
-            LinearAlgebra.ldlt!(
-                cache.factor, Symmetric(cache.factor_view, :L),
-            )
+            # `ldlt!` throws `ZeroPivotException` on a genuine zero pivot;
+            # translate it into the cache's typed `ArgumentError` failure
+            # contract so callers observe one uniform failure type.  The
+            # object is detached by the catch below so `Failed` never solves
+            # stale data.
+            try
+                LinearAlgebra.ldlt!(
+                    cache.factor, Symmetric(cache.factor_view, :L),
+                )
+            catch err
+                err isa LinearAlgebra.ZeroPivotException || rethrow()
+                throw(ArgumentError(
+                    "CHOLMOD LDL refactorization reported a zero pivot",
+                ))
+            end
         end
         issuccess(cache.factor) || throw(ArgumentError(
             "CHOLMOD LDL factorization reported failure",
@@ -349,7 +371,7 @@ function factorize!(
         # The factor owns the regularized copy; restore the view to the
         # original values so it mirrors the unmodified operator.
         _restore_original_values!(cache)
-        cache.matrix_epoch = Int(matrix_epoch)
+        cache.matrix_epoch = epoch
         cache.factor_epoch += 1
         cache.numeric_count += 1
         cache.status = Fresh

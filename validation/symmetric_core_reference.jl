@@ -444,11 +444,11 @@ function _core_cache_fixture(regularization::Float64)
     return (; pattern, K, cache)
 end
 
-"""Singular nr=1 core fixture: the structural zero x diagonal is a genuine
-zero pivot when CHOLMOD keeps it on the diagonal, so the unregularized
-factor honestly fails and signed regularization recovers it."""
-function _core_singular_fixture(regularization::Float64)
-    Ar = sparse([1, 2], [1, 1], [1.0, 2.0], 2, 1)
+"""Deterministically singular nr=1 core fixture: a zero `Ar` column makes the
+first core column exactly zero, so the unregularized factor fails regardless
+of the CHOLMOD ordering; the signed static shift repairs it."""
+function _singular_core_fixture(regularization::Float64)
+    Ar = sparse([1, 2], [1, 1], [0.0, 0.0], 2, 1)
     Theta = [2.0 0.2; 0.2 1.3]
     pattern = SDPX.SymmetricCorePattern(Ar, [1:2], [:dense_lower])
     SDPX.refill!(pattern, Ar, Theta)
@@ -465,7 +465,7 @@ end
 
 @testset "CHOLMOD symmetric augmented core lifecycle" begin
     # --- unregularized zero-pivot failure is honest ------------------
-    fx = _core_singular_fixture(0.0)
+    fx = _singular_core_fixture(0.0)
     cache = fx.cache
     @test SDPX.factor_status(cache) === SDPX.Prepared
     original_nzval = copy(fx.pattern.nzval)
@@ -481,7 +481,7 @@ end
     @test fx.pattern.nzval == original_nzval   # pattern never touched
 
     # --- signed regularized singular core succeeds -------------------
-    fr = _core_singular_fixture(1e-6)
+    fr = _singular_core_fixture(1e-6)
     cache = fr.cache
     original_nzval = copy(fr.pattern.nzval)
     SDPX.factorize!(cache, fr.K, 1)
@@ -589,25 +589,7 @@ end
 # C3 hardening: reviewer-blocked contract defects.
 # ---------------------------------------------------------------------
 
-"""Deterministically singular core: a zero `Ar` column makes the x block
-column (and thus the whole core) genuinely rank-deficient, so the
-unregularized factorization honestly fails and the signed static shift
-deterministically repairs it (no dependence on CHOLMOD ordering)."""
-function _singular_core_fixture(regularization::Float64)
-    Ar = sparse([1, 2], [1, 1], [0.0, 0.0], 2, 1)   # zero column 1
-    Theta = [2.0 0.2; 0.2 1.3]
-    pattern = SDPX.SymmetricCorePattern(Ar, [1:2], [:dense_lower])
-    SDPX.refill!(pattern, Ar, Theta)
-    K = SDPX.symmetric_core_lower_sparse(pattern)
-    req = SDPX.SparseSymbolicRequirements(
-        K; symbolic_epoch=5,
-        dsigns=SDPX.symmetric_core_dsigns(pattern),
-        regularization=regularization,
-    )
-    cache = SDPX.SparseSymbolicNumericCache{Float64}()
-    SDPX.prepare!(cache, req)
-    return (; pattern, K, cache)
-end
+
 
 @testset "C3 hardened contracts" begin
     # --- cross-block Theta rejection --------------------------------
@@ -717,7 +699,8 @@ end
     @test_throws SDPX.FactorCacheStateError SDPX.solve!(
         fr.cache, zeros(3), ones(3),
     )
-    @test fr.pattern.nzval == orig             # view restored on failure
+    @test fr.pattern.nzval == orig             # source pattern unchanged
+    @test fr.cache.factor_view.nzval == orig   # factor view restored too
     # Recovery on the same pattern via a fresh symbolic factor is legal.
     SDPX.factorize!(fr.cache, fr.K, 3)
     @test SDPX.factor_status(fr.cache) === SDPX.Fresh
@@ -771,13 +754,72 @@ end
     @test SDPX.factor_diagnostics(fm.cache).numeric_count == 1
     # check both columns against the regularized K
     Kreg = SDPX.materialize_dense(fm.pattern)
+    dsigns = SDPX.symmetric_core_dsigns(fm.pattern)
     for j in 1:7
-        Kreg[j, j] += (j == 1 ? 1 : -1) * 1e-6
+        Kreg[j, j] += dsigns[j] * 1e-6
     end
-    # A 1e-6 signed shift on a structurally singular x-diagonal bounds the
-    # regularized solve accuracy at ~O(sqrt(reg)); assert the honest bound
-    # rather than pretending the regularized factor solves exactly.
-    @test norm(Kreg * X - R, Inf) <= 1e-4
+    # Scale-aware backward residual against the exact regularized operator
+    # for BOTH columns.  The regularized factor solves Kreg (never the
+    # unmodified, structurally singular K).
+    residual_scale = norm(Kreg, Inf) * norm(X, Inf) + norm(R, Inf)
+    @test norm(Kreg * X - R, Inf) / residual_scale <= 1e-9
     @test SDPX.factor_diagnostics(fm.cache).solve_count == 1
     @test SDPX.factor_diagnostics(fm.cache).numeric_count == 1
+
+    # --- factorize! state-admission policy --------------------------
+    # Unprepared cannot factor and stays Unprepared (no factor exists).
+    fun = SDPX.SparseSymbolicNumericCache{Float64}()
+    @test SDPX.factor_status(fun) === SDPX.Unprepared
+    @test_throws SDPX.FactorCacheStateError SDPX.factorize!(
+        fun, _core_cache_fixture(1e-6).K, 1,
+    )
+    @test SDPX.factor_status(fun) === SDPX.Unprepared
+
+    # Fresh + dense input: the stale factor is revoked, solve rejected.
+    fd = _core_cache_fixture(1e-6)
+    SDPX.factorize!(fd.cache, fd.K, 1)
+    @test SDPX.factor_status(fd.cache) === SDPX.Fresh
+    @test_throws ArgumentError SDPX.factorize!(
+        fd.cache, Matrix(fd.K), 2,
+    )
+    @test SDPX.factor_status(fd.cache) === SDPX.Failed
+    @test fd.cache.factor === nothing
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        fd.cache, zeros(7), ones(7),
+    )
+
+    # Fresh + unconvertible epoch: fails closed, stale solve rejected.
+    fe = _core_cache_fixture(1e-6)
+    SDPX.factorize!(fe.cache, fe.K, 1)
+    @test SDPX.factor_status(fe.cache) === SDPX.Fresh
+    @test_throws InexactError SDPX.factorize!(
+        fe.cache, fe.K, typemax(UInt128),
+    )
+    @test SDPX.factor_status(fe.cache) === SDPX.Failed
+    @test fe.cache.factor === nothing
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        fe.cache, zeros(7), ones(7),
+    )
+
+    # --- factor-view restoration after a post-regularization failure --
+    # A same-pattern matrix that reaches CHOLMOD failure after the signed
+    # regularization was applied: the first epoch succeeds (nr=2, nonzero
+    # Ar), the second epoch uses a numerically rank-deficient Ar (all-zero
+    # first column) which `ldlt!` rejects with ZeroPivotException.
+    frs = _core_cache_fixture(0.0)
+    SDPX.factorize!(frs.cache, frs.K, 1)
+    @test SDPX.factor_status(frs.cache) === SDPX.Fresh
+    @test frs.cache.factor !== nothing
+    Ars = _core_ar(0.0)                 # frozen structure, zero values
+    SDPX.refill!(frs.pattern, Ars, _core_theta())
+    Ks = SDPX.symmetric_core_lower_sparse(frs.pattern)
+    attempted = copy(frs.pattern.nzval)
+    @test_throws ArgumentError SDPX.factorize!(frs.cache, Ks, 2)
+    @test SDPX.factor_status(frs.cache) === SDPX.Failed
+    @test frs.cache.factor === nothing
+    @test frs.cache.factor_view.nzval == attempted   # view restored
+    @test frs.pattern.nzval == attempted             # source unchanged
+    @test_throws SDPX.FactorCacheStateError SDPX.solve!(
+        frs.cache, zeros(7), ones(7),
+    )
 end
