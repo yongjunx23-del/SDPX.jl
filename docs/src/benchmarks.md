@@ -1,12 +1,18 @@
-# Physics benchmarks
+# Benchmarks and evidence
 
-SDPX provides a generic harness for reproducible solver measurements. Physics
+SDPX keeps solver-oriented and physics-oriented evidence separate:
+
+- `benchmark/general/` contains deterministic LP/SOCP/SDP/Exp/Power cases and
+  public-data readers. The black-box E2E selects a small subset from here.
+- `benchmark/bootstrap/physics/` contains provenance-backed physical catalogs.
+
+The bootstrap harness provides reproducible physical measurements. Physics
 decisions live in injected catalogs; the harness does not embed application
 registries, external-data loaders, or historical result tables.
 
 The active entry points are:
 
-- `benchmark/bootstrap/runner.jl` for in-process runs and schema-v8 result rows;
+- `benchmark/bootstrap/runner.jl` for in-process runs and schema-v9 result rows;
 - `benchmark/bootstrap/fresh_process_runner.jl` for independent-process repetitions;
 - `benchmark/bootstrap/compare.jl` for paired baseline/candidate comparisons;
 - `benchmark/bootstrap/PhysicsBenchmarkHarness.jl` for the catalog/build/validate API.

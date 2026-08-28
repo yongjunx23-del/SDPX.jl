@@ -33,9 +33,9 @@ for provenance.
 Operational references are kept as focused documents: the
 [bridge schema](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/bridge-schema.md),
 [cluster workflow](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/cluster-workflow.md),
-[adaptive dense/sparse optimization](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-dense-sparse-optimization.md),
-[adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md),
+[adaptive predictor-corrector policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md),
+[sparse execution](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/sparse-execution.md),
 and [threading](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/threading.md)
-guides. New measured results use the versioned catalog and schema-v8 protocol
+guides. New measured results use the versioned catalog and schema-v9 protocol
 described in [benchmarks.md](benchmarks.md); generated evidence is stored
 outside the source tree.

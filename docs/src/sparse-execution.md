@@ -1,68 +1,122 @@
 # Sparse execution
 
-Sparse execution keeps formulation, storage, arithmetic, and factorization as
-separate decisions. `KKTStoragePlan` records `:dense` or `:sparse`; sparse
-matrices are owned as frozen CSC (`SparseKKTStorage`) and numeric iterations
-update only `nzval`. `SparseSymbolicAnalysis` stores a pattern-only ordering,
-elimination tree, and factor row structure, so the same symbolic object can be
-reused for Float64, MultiFloat, and BigFloat values.
+Sparse storage is an implementation choice inside the shared product-cone HSD
+engine. It does not select a different solver or certificate path.
 
-## Providers
+## Reduced sparse Schur route
 
-Float64 uses the CHOLMOD provider through Julia's SuiteSparse.
-`Float64x2`/`Float64x3`/`Float64x4` and BigFloat use the provider-neutral
-simplicial generic sparse Cholesky. Generic factors retain only their CSC
-factor pattern and values; they never construct an `n×n` dense factor.
-BigFloat operands are checked for uniform precision and factor/workspace
-destinations are independently owned MPFR objects.
+`kkt_route=:sparse_schur` builds the same five-equation `NewtonSystem` used by
+the bordered and expanded routes, then applies the accepted reduced-Schur
+elimination. Eligibility is conservative and depends on:
 
-`analyze_sparse_pattern`, `numeric_factorize!`, `sparse_factor_solve!`, and
-`sparse_factor_diagnostics` form the provider-neutral API. A changed CSC
-pattern fails closed, while unchanged patterns support numeric
-refactorization without repeating symbolic ordering. Sparse augmented/
-indefinite LDL is not part of the generic route; explicit unsupported requests
-report an error instead of silently falling back to dense.
+- canonical dimensions and equality rank;
+- cone-block incidence;
+- the CSC pattern and estimated fill;
+- arithmetic and provider capabilities;
+- condition/risk diagnostics;
+- memory preflight; and
+- the active thread budget.
 
-The current generic ordering is a deterministic approximate minimum-degree
-ordering for small patterns (natural order for very large setup graphs). The
-CHOLMOD numeric provider retains SuiteSparse's AMD ordering. Fill diagnostics
-include dimension, input/factor nonzeros, fill ratio, ordering, provider,
-refactorization count, and (where available) minimum factor diagonal.
+If these facts are unavailable or incompatible, the route is ineligible rather
+than guessed.
 
-## Dedicated LP sparse path
+## Pattern ownership
 
-The dedicated LP path forms `H = G' * Diagonal(z ./ s) * G` and may select a
-sparse Newton system when `G` really is sparse. `select_lp_formulation` uses
-`:auto`, `:dense`, or `:sparse`; the crossover is a property of the fill-in of
-`G'*D*G` rather than of `G`, so a sparse factorization is used only when it is
-predicted to pay for itself:
+Sparse matrices use frozen CSC structure. Symbolic ownership includes:
 
-- explicit `:dense` always selects `:dense_lu`;
-- generic extended arithmetic remains explicit-first: package availability
-  must not silently change an `:auto` execution plan;
-- `storage=:sparse` with equalities raises because sparse execution supports
-  only SPD normal equations (the sparse augmented LDL route is retired);
-- otherwise `:auto` selects `:sparse_normal` only at or above the dimension
-  and density crossover.
+- cone block ranges;
+- active variable columns per block;
+- positions of canonical `A` entries;
+- Schur output slots;
+- pattern signature and generation; and
+- numeric factor generation.
 
-The equality-free sparse Newton system is positive definite, so SDPX freezes
-its CSC pattern, computes a fill-reducing ordering and elimination tree once,
-and refactors only numeric values in later iterations. The final LP
-`termination.sparse_schur_backend` payload reports actual input/factor counts
-and reuse counters; factorization elapsed time remains the separate
-`kkt_factorization` timing.
+Numeric iterations update values without changing the pattern. A structural
+mutation invalidates symbolic and factor receipts immediately. Stale factors
+are cleared before another attempt.
 
-## SDP sparse Schur
+`BlockIncidencePlan` avoids global dense cone workspaces: cone-local scratch is
+bounded by the largest active block, while Schur values are scattered through
+precomputed slots.
 
-For eligible SDP models, the provider-neutral sparse-Schur path is selected
-before workspace allocation. `ExecutionPlan.storage_plan` is created before
-the post-presolve pattern exists, so `storage_plan.input_nnz == 0` and its
-density field are explicit "estimate unavailable" markers, not measured
-matrix counts.
+## Assembly specializations
 
-## Scope
+The sparse route may use block-local optimizations without changing the
+operator:
 
-Sparse code remains inside SDPX. A future extraction boundary would be the
-pattern/order/assembly-map and provider-neutral factor/solve API; formulation
-planning, LP/SDP assembly policy, scaling, refinement, and certification
-should remain SDPX-owned.
+- PSD panel transforms and packed symmetric contractions;
+- fixed-size Lorentz, exponential, and power kernels;
+- fused predictor/corrector right-hand-side evaluation;
+- deterministic block reductions; and
+- reusable numeric slots for unchanged scaling structure.
+
+Every specialization is checked against a reference implementation and retains
+original-operator residual verification.
+
+## Providers and arithmetic
+
+Float64 sparse exact solves may use SuiteSparse/UMFPACK. High-precision sparse
+storage and multiplication use Julia sparse arrays, but the standard UMFPACK
+factorization is not a MultiFloat/BigFloat solver.
+
+The intended high-precision responsibilities are:
+
+- PureKLU: exact nonsymmetric sparse LU for the expanded/reduced operator;
+- QDLDL: symmetric-companion factorization and inertia evidence when the
+  companion contract is applicable;
+- MFLA/BFLA: dense or local-block fallback, not copied sparse symbolic code.
+
+Provider registration alone does not prove production dispatch. The selected
+provider must pass capability, memory, epoch, finite-value, solve-status, and
+original-operator residual gates. No route may downcast to Float64 silently.
+
+See the frozen decision record:
+[High-precision sparse providers](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md).
+
+## Factor and fallback receipts
+
+A sparse attempt records:
+
+- planned and executed route;
+- operator and factor generations;
+- symbolic and numeric factor attempts;
+- certified factor success or failure;
+- refinement results;
+- fallback reason and elapsed time; and
+- the complete same-iterate route chain.
+
+An accepted chain may be
+
+```text
+sparse_schur -> expanded -> bordered
+```
+
+but the iterate cannot change between attempts. A `FactorReceipt` proves only
+what factor was built for which operator generation. It never substitutes for
+an optimality or infeasibility certificate.
+
+## Memory and performance evidence
+
+The planner estimates sparse matrix, symbolic, factor, block workspace, panel,
+and fallback memory before allocation. Runtime diagnostics separately record
+symbolic setup, assembly, numeric factorization, predictor/corrector solves,
+refinement, line search, and certification.
+
+Sparse promotion requires measured fill, RSS, solve time, certificate parity,
+and fallback-rate evidence on general and physics/bootstrap benchmarks.
+`:bordered` remains the default until that matrix is complete.
+
+## Failure policy
+
+Sparse execution fails closed on:
+
+- invalid CSC structure or changed pattern;
+- unavailable arithmetic/provider capability;
+- memory preflight failure;
+- nonfinite assembly or factor data;
+- stale generation tokens;
+- factor or refinement failure; or
+- unacceptable exact-operator residual.
+
+Fallback, when authorized, is explicit and recorded. There is no hidden dense,
+legacy-engine, PSD-lift, or lower-precision retry.

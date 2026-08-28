@@ -2,9 +2,9 @@
 
 SDPX provides a non-incremental [MathOptInterface](https://jump.dev/MathOptInterface.jl/stable/)
 optimizer. JuMP builds a cached model, then SDPX converts the completed model
-into the same typed cone representation used by the public `Model` route before
-solving it. The wrapper performs one route classification and one family
-lowering; it does not create a second modeling or numerical route.
+into the same canonical product-cone program used by the public `Model` route.
+The wrapper is a one-shot frontend; it does not create a second numerical
+engine.
 
 ```julia
 using JuMP, LinearAlgebra, SDPX
@@ -63,8 +63,8 @@ The wrapper supports:
 - scalar affine and single-variable objectives;
 - free scalar variables;
 - scalar affine or single-variable constraints in `MOI.EqualTo`,
-  `MOI.GreaterThan`, `MOI.LessThan`, and `MOI.Interval`; pure scalar-cone
-  models use the dedicated LP engine;
+  `MOI.GreaterThan`, `MOI.LessThan`, and `MOI.Interval`; scalar rows become
+  product-cone blocks in the shared HSD engine;
 - vector affine or vector-of-variables constraints in
   `MOI.Nonnegatives`, `MOI.Nonpositives`, and `MOI.Zeros` (through batched
   linear rows);
@@ -160,10 +160,9 @@ qualified low-level interface when a fixed expert trajectory is required. See
 the
 [adaptive parameter policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).
 
-Native SDP checkpoints are iterate-level warm restarts, not full execution
-snapshots. The dedicated LP path does not currently support checkpoint
-resume. Julia must be started with at least as many threads as a solve may
-request (`julia -t 4`).
+Checkpoint helpers are qualified compatibility utilities rather than a second
+MOI solve path. Julia must be started with at least as many threads as a solve
+may request (`julia -t 4`).
 
 ## Current limitations
 
@@ -177,18 +176,17 @@ request (`julia -t 4`).
   green for it.
 - At least one scalar, SOC, or PSD cone constraint is required.
 - Rotated SOC constraints use the exact sparse map
-  `(u,v,w) -> (u+v,u-v,sqrt(2)w)` into NativeSOC; MOI primal and dual getters
-  apply the inverse and adjoint maps. `Nonnegatives`, `Nonpositives`, and
-  `Zeros` vector sets are lowered in batches. General Lorentz SOC constraints
-  use NativeSOC directly; strict local fixed-trace Q3 products may select the
-  compact specialization. Mixed PSD+SOC models fail clearly rather than
-  silently lifting one cone family, and other nonsymmetric cones remain
-  unsupported.
+  `(u,v,w) -> (u+v,u-v,sqrt(2)w)` into a canonical Lorentz block; MOI primal
+  and dual getters apply the inverse and adjoint maps. `Nonnegatives`,
+  `Nonpositives`, and `Zeros` vector sets are lowered in batches. Verified
+  fixed-trace Q3 structure may select a local specialization inside the shared
+  product-cone runtime. Mixed supported cone blocks retain their native
+  coordinates; no cone is silently lifted to PSD.
 - Sparse and dense coefficient storage both support internal equilibration;
   sparse derived caches are rebuilt after scaling.
 - LP unboundedness and general conic infeasibility certificates are not yet
   available in every numerical-breakdown case.
 
-Bootstrap integrations that already have final block arrays may continue to use
-the qualified `SDPProblem`/loader internals, but new native code should use the
-typed `Model` route. No production route converts SOC blocks into PSD blocks.
+Integrations that already have final block arrays may use qualified loader
+internals, but new code should use the typed `Model` route. No production route
+converts SOC blocks into PSD blocks.

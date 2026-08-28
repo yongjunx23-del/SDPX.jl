@@ -8,8 +8,9 @@
 - 长时间自主循环 Goal：`.pi/GOAL.md`
 - Oracle 审阅合同：`.pi/ORACLE_REVIEW_PROMPT.md`
 - 当前 wave 状态：`.pi/WAVE.yaml`
-- 1.0 路线图：`docs/design/ROADMAP_1_0.md`
-- GPT Pro 权威计划：`docs/reviews/GPTPRO_KERNEL_RESTRUCTURE_REVIEW_20260827.md`
+- 当前 1.0 路线图：`docs/PLAN.md`
+- 冻结数学合同：`docs/design/CANONICAL_FORM.md`、`HSD_FORMULATION.md`、`NEWTON_SYSTEM.md`
+- 当前 GPT Pro 问题/性能审阅：`docs/reviews/GPTPRO_BUG_KERNEL_REVIEW_20260828.md`、`GPTPRO_PERFORMANCE_PLAN_20260828.md`
 - 父级通用 Harness 模式：`../agent.md` §4.3
 
 ---
@@ -25,7 +26,7 @@
 | **Planner** 计划固化 | 产出显式 DAG：每节点带文件域、验收门、回滚边界 | Lead Agent 亲自写任务书；大设计咨询 `pi-oracle`（`scripts/build_oracle_archive.sh` 冻结 SHA + `oracle_receipt.sh`）或 `gpt56solpro-consult`；计划落 `docs/design/`、`docs/reviews/` | **前沿**：`sol-high`(max) 设计；大 wave GPT Pro（Pro effort） |
 | **Worker** 逐节点实现 | 独立 worktree/分支实现 DAG 节点 | `pi-subagents` `runs.run`（worktree:true + 自建 testenv + `steer` 纠偏 + supervisor 决策）；长数值跑集群 PBS | **商品**：T1/T2 `deepseek-high`（`merge/deepseek/deepseek-v4-flash-0731`，比 luna 快一个量级；重任务 thinking=max，两轮未解直接升 `sol-high`）；数值内核 T3 `sol-high`（prewalk 省前沿用量） |
 | **Critic** 质疑/返工（sol 任务超时预算 120 分钟，见父级 agent.md）| 机器证据复核，可触发返工 | 四层：① 机器证据（quick gate 9/9 + `test/kernel_failure_regressions.jl` + 目标值 + git SHA，零成本）② `sol-high` 交叉审 ③ council-mode（重大取舍）④ GPT Pro 全仓审阅（每 wave 1 次 + 1 follow-up） | Lead 机器验证（零）；`sol-high`；T4 Pro |
-| **Promoter** 传播完成 | 合并主线、集群同步、状态存档 | 机械执行：merge → quick gate 复核 → `git archive`+SHA-256 → 集群 release（`ucas-hpc` release layout）→ `.pi/WAVE.yaml`/`docs/design/ROADMAP_1_0.md` 更新 → `check_release_metadata.jl` | 无模型（脚本优先） |
+| **Promoter** 传播完成 | 合并主线、集群同步、状态存档 | 机械执行：merge → E2E/专项门复核 → `git archive`+SHA-256 → 集群 release（`ucas-hpc` release layout）→ `.pi/WAVE.yaml`/`docs/PLAN.md` 更新 → `check_release_metadata.jl` | 无模型（脚本优先） |
 
 ## 超时预算
 
@@ -41,8 +42,6 @@
 4. **每个原子任务**：独立 worktree/分支 + 独立提交 + 可回滚 + 推送 SHA。
 5. **Critic 独立于 Worker**：Worker 自报完成不算数。
 
-## 当前执行序（详见 ROADMAP_1_0.md）
+## 当前执行序（详见 `docs/PLAN.md`）
 
-P2 expanded KKT（进行中）→ P1 集成收尾 → P4 单 HSD 状态机迁移 → P5 精简
-→ P7 批次删除 legacy → MOI.Test LP/SOC/PSD 子集 → **v1.0-MVP（约 6 周）**
-→ P6 精度阶梯 → 可选项（chordal/warm start/JSON）→ v1.0
+legacy 调用迁移与原子删除 → PureKLU/QDLDL 生产接线 → fused residual、线程预算与固定尺寸 hot path → general benchmark findings → 黑盒 E2E 与专项 provider/MOI/precision 门 → 本地/集群 campaign → 最终独立审阅 → 一次性 push。

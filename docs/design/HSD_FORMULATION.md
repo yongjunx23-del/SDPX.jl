@@ -10,11 +10,11 @@ check in `test/hsd_equations.jl`.
 **frozen HSD spec** of `docs/design/CANONICAL_FORM.md` §2 (the corrected gap
 sign `−c'x − b'y + κ = 0` with `κ = c'x+b'y` and, at exact
 feasibility, `s'y=τκ`).  This is the
-authoritative implementation target for `src/hsd/hsd.jl` and
-`src/hsd/nonnegative_hsd.jl`, and the target checked by `test/hsd_equations.jl`.
-The historical reasoning behind the sign correction (and why the *earlier*
-`c'x + b'y + κ = 0` convention was rejected) lives in
-`docs/reviews/HSD_SIGN_HISTORY.md` and is **not** an open question here.
+authoritative implementation target for `src/hsd/hsd.jl`,
+`src/hsd/common_runtime.jl`, and the product-cone HSD files, and the target
+checked by `test/hsd_equations.jl`. The rejected earlier convention and its
+contradiction are summarized in this document; the sign is **not** an open
+question.
 
 **Mechanical verification.** The worked fixtures of §9 are checked numerically
 by `SDPX/test/hsd_equations.jl` (self-contained, no SDPX dependency):
@@ -112,8 +112,8 @@ Interpretations:
 - `(G)` is the homogeneous gap equation: at an exact homogeneous-feasible
   point, rearranging and using `(P)`/`(D)` gives `κ = c'x+b'y = s'y/τ ≥ 0`
   for `τ>0`.  Thus `κ ≥ 0` is consistent.  This is the **corrected** sign; the earlier
-  `c'x + b'y + κ = 0` forced `κ = −s'y ≤ 0` and is rejected
-  (see `docs/reviews/HSD_SIGN_HISTORY.md`).
+  `c'x + b'y + κ = 0` forced `κ = −s'y ≤ 0` and is rejected by the
+  derivation below.
 
 A zero-residual point `(x, y, s, τ, κ)` with `τ > 0` yields a feasible primal
 `(x/τ, s/τ)` and a feasible dual `y/τ`, and `(G)` becomes the closed duality gap
@@ -545,7 +545,8 @@ paths, and at limit points that are only *numerically* on a boundary. The only
 trustworthy signal is a **verified certificate in original coordinates**
 (§7): normalized homogeneous residual + cone membership + objective sign +
 original-coordinate verification, pushed through the full ReductionChain inverse
-map before any MOI status is set. This matches FINAL_ARCHITECTURE.md §2.
+map before any MOI status is set. This is the authoritative terminal-status
+contract.
 
 ---
 
@@ -649,13 +650,13 @@ strictly interior embedding points; it does not create the contradictory
 positive exact central-path manifold rejected in §3.1.
 The earlier `c'x + b'y + κ = 0` is **rejected** because it forces
 `κ = −s'y ≤ 0` at every feasible point, contradicting `κ ≥ 0`. The full
-reasoning and the skew-operator consequence are recorded in
-`docs/reviews/HSD_SIGN_HISTORY.md`.
+reasoning and the skew-operator consequence are recorded in the preceding
+sections and numerical fixtures.
 
 ### 10.2 Production HSD state follows the corrected frozen sign
 
-`src/hsd/hsd.jl` and `src/hsd/nonnegative_hsd.jl` must implement the corrected
-frozen convention: `hsd_gap_residual` returns `−c'x − b'y + κ`, the
+`src/hsd/hsd.jl`, `src/hsd/common_runtime.jl`, and the product-cone HSD
+implementation must use the corrected frozen convention: `hsd_gap_residual` returns `−c'x − b'y + κ`, the
 complementarity is `s'y + τκ`, and the implementation field `mu` is the observable
 `μ̄ = (s'y + τκ)/(ν+1)`, with `ν` the canonical
 barrier degree (from `ConeProductLayout`).  The forbidden pairings `dot(s, x)`,

@@ -1,180 +1,179 @@
 # Architecture
 
-SDPX is organized as a canonical cone frontend, a deterministic midend, and a
-typed numerical backend behind one `ExecutionPlan`.
+SDPX has one production mathematical path:
 
 ```text
-                 Frontend
-   Model builder / JuMP-MOI / CLI / file loaders
-                       |
-                       v
-             Canonical cone semantics
-          Linear | Lorentz | PositiveSemidefinite
-                       |
-                       v
-                  Midend
- analyze -> presolve -> scale -> formulate -> plan
-                       |
-                  ExecutionPlan
-                       |
-            +----------+----------+
-            |          |          |
-            v          v          v
-           LP         SOCP        SDP
-          kernel     kernel      kernel
-            \          |          /
-             +---------+---------+
-                       v
-             system assembly / KKT
-                       v
-        factorization -> refinement
-                       v
-          original-coordinate certificate
+Model / MOI / CLI
+        |
+        v
+canonical product-cone program
+        |
+        v
+presolve + exact reconstruction stack
+        |
+        v
+product-cone HSD state (x, s, y, tau, kappa)
+        |
+        v
+five-equation NewtonSystem
+        |
+        +-- bordered
+        +-- expanded exact operator
+        +-- sparse reduced Schur
+        |
+        v
+same-iterate fallback + refinement
+        |
+        v
+original-coordinate certificate
+        |
+        v
+Result / MOI status
 ```
 
-## Frontend boundaries
+LP, SOC, RSOC, PSD, exponential, and power models are not separate solver
+engines. They are different block compositions in the same canonical program.
+KKT routes and linear-algebra providers may change implementation details, but
+they may not change the Newton equations or certificate policy.
 
-The public boundary is one typed `Model` builder. `variable!`, `constraint!`,
+## Frontends
+
+The typed `Model` API is the direct public frontend. `variable!`, `constraint!`,
 and `objective!` record affine expressions and cone domains; `optimize!`
-compiles that model once, classifies its native cone family, and dispatches to
-the corresponding typed lowerer. The public domains are `Reals`, the scalar
-orthants and `ZeroCone` (LP), `LorentzCone`/`RotatedLorentzCone` (SOC), and
-`PSDCone` (SDP). `Settings` and `Outputs` carry the typed solve policy and
-retention policy; result accessors read the single typed result boundary.
+compiles and solves the completed model.
 
-JuMP and MathOptInterface remain adapters over the same boundary: MOI caches a
-completed model and `copy_to` finalizes cone incidence before the SDPX
-optimizer lowers it. The CLI parses JSON through the mature qualified loader
-into the same numerical pipeline; it is not a separate solver route.
+The MathOptInterface optimizer and JSON CLI are adapters over the same
+canonicalization and solve path. They do not own alternative numerical
+engines. The public legacy-engine selector is rejected with a migration error.
 
-Route classification is fail-closed. A model containing more than one nonfree
-family (for example LP + SOC, LP + SDP, or SOC + SDP) raises a typed error
-before lowering. There is no production conversion from a Lorentz block to a
-PSD block; SOC models stay in native Lorentz coordinates.
+## Canonical program
 
-## Midend: presolve, scale, formulate, plan
-
-Every public `optimize!` runs a conservative preparation pipeline:
-
-1. classify cone, storage, arithmetic, size, and predicted Schur density;
-2. rank-revealing equality presolve in the problem arithmetic;
-3. merge scalar bounds and eliminate exactly fixed variables;
-4. select scaling or Ruiz equilibration;
-5. estimate formulation, kernel, factorization, memory, and scheduling costs;
-6. build an immutable `ExecutionPlan` that freezes the mathematical
-   formulation, storage plan, LA backend, provider, and thread schedule;
-7. solve; and
-8. reconstruct and certify the result in the original coordinates.
-
-`ExecutionPlan` is authoritative. Deterministic choices made after plan
-construction are architecture bugs. Runtime numerical fallback is allowed only
-where the plan authorized it, and it must be recorded as planned-versus-
-executed backend, formulation, and fallback reason. The original-coordinate
-certificate remains the final status authority.
-
-## Cone formulation ownership
-
-Cone family and numerical formulation are separate decisions. Native SOC and
-the arrow-specialized Q3 implementation share one Lorentz semantic IR; the
-specialization is selected only inside the native SOC route. A PSD model stays
-on the SDP route even when its blocks have a structure that admits a Lorentz
-interpretation. Derivation and test fixtures may compare the two mathematical
-cones, but execution never silently changes family.
-
-The automatic planner uses structure facts first, then checks backend
-feasibility. Providers and arithmetic names never choose the mathematical
-formulation; execution uses the provider/formulation pair frozen in the plan.
-
-## KKT formulations
-
-For the general dense SDP path, `formulation=:auto` makes a real pre-execution
-choice between two implemented mathematical formulations:
-
-- `DenseNormalEquations`, followed by Cholesky;
-- `DenseAugmentedKKT`, followed by pivoted symmetric LDLT.
-
-The planner is deliberately small, conservative, and deterministic. It does
-not add a third formulation and never changes formulation after numerical
-execution begins. The first policy uses only two numerical-risk indicators:
-
-1. the scale spread of retained equality rows; and
-2. the relative diagonal quality from the normalized RRQR that equality
-   presolve already performs for correctness.
-
-It does not compute a condition number, SVD, eigendecomposition, or a second
-RRQR. If a verified retained equality basis is unavailable, auto planning
-conservatively keeps dense normal equations. Augmented KKT is selected only
-when strong normal-equation risk is present and the candidate passes
-structural, backend, and memory feasibility.
-
-Explicit requests are never overridden. Public `Settings.formulation` accepts
-`:auto`, `:variable_space_schur`, and `:dense_augmented_kkt`; a request that is
-incompatible with the classified route fails during planning. The first two
-names lower to the mature normal-equation and augmented-KKT implementations.
-Qualified low-level option records retain additional compatibility spellings,
-but those records are internal and are not a second public modeling API.
-
-The dense augmented KKT system is the equality-augmented Schur system
+Every accepted model lowers to
 
 ```text
-K = [ S   -B ]       rhs = [ r ]
-    [-B'   0 ]             [-p]
+minimize    c'x
+subject to  A*x + s = b
+            s in K
 ```
 
-with unknowns `u = [dx; dy]`, not the much larger full cone KKT matrix
-containing explicit `dX_l` and `dY_l` unknowns. Solving it produces the same
-`dx` and `dy` as the dense normal-equation elimination; block recovery and
-certification are formulation-independent. Only the lower triangle of `K` is
-authoritative. On LDLT failure the augmented route regularizes only the
-primal `S` block; the equality block remains exactly zero, residual and
-refinement always evaluate the original unregularized `K`, and failure never
-switches formulation, provider, or precision.
+`K` is an ordered product of native blocks. Free variables stay free. Zero
+blocks represent equalities. Nonpositive rows and rotated Lorentz rows use
+exact typed transforms. Every transform records enough information to recover
+primal points, dual points, slacks, and rays in the original model coordinates.
 
-`SDPX.plan_formulation` is a qualified internal dense-KKT formulation step used
-by `build_execution_plan`; it returns a `FormulationDecision` with
-requested/preferred/selected formulation, reasons, required capabilities,
-feasibility, equality scale/RRQR evidence, and memory estimates. The execution
-plan and result diagnostics expose the summary through
-`parameters.formulation_decision` and
-`selected_algorithms.formulation_decision`.
+The detailed contract is the repository's [canonical-form design](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/CANONICAL_FORM.md).
 
-## Dedicated routes
+## Product-cone HSD state
 
-The dedicated LP path owns scalar-cone preprocessing, its normal matrix and
-Cholesky/LU choices, and the sparse normal-equation backend. NativeSOC owns
-Lorentz algebra, the Q3 reduction, its equality Gram, and original-Lorentz
-certification. Block-arrow elimination, sparse Schur assembly, fixed-trace Q3,
-native SOC kernels, reduced LP systems, mixed-precision KKT logic, and
-structured refinement are solver algorithms, not duplicate provider linear
-algebra. They stay SDPX-owned even when a provider supplies the underlying
-factor operations.
+The production iterate is `(x,s,y,tau,kappa)`. One state machine owns:
 
-## Validation boundary
+- cold start;
+- cone scaling and local metrics;
+- affine predictor and Mehrotra corrector;
+- neighborhood/progress line search;
+- recovery and typed exhaustion;
+- terminal candidate construction; and
+- original-coordinate certificate verification.
 
-The `certificate(result)` accessor exposes a post-solve check that recomputes
-objectives, affine residuals, componentwise backward errors, complementarity,
-and PSD margins in the original coordinates. A solver status is not
-authoritative when this independent check fails. The direct primal-dual
-iteration is not a full homogeneous self-dual embedding, so infeasibility
-certificates are produced only when a validated homogeneous ray is found. See
-[diagnostics.md](diagnostics.md).
+The HSD sign and complementarity conventions are frozen in the
+[HSD formulation](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HSD_FORMULATION.md). Raw `tau`, `kappa`, iteration
+limits, or factorization success never establish a terminal mathematical
+status.
 
-## Current limitations
+## Newton system
 
-- The public API is experimental and may change before 1.0.
-- LP, native SOC/RSOC, and SDP are implemented as separate typed routes.
-- The direct primal-dual iteration does not carry HSD `τ`/`κ` variables, so it
-  may fail to produce a ray for some infeasible models.
-- Equality-constrained LPs use dense LU; null-space/range-space selection is
-  future work.
-- Sparse augmented/indefinite LDL is not implemented.
-- General BigFloat work is serial; ownership-safe independent blocks and exact
-  local arrow phases may use workers.
-- Nested solves in one process are not supported because BLAS thread count is
-  process-global.
+All KKT implementations consume the same five-equation `NewtonSystem`. The
+right-hand side contains primal affine, dual affine, homogeneous-gap, cone
+complementarity, and scalar `tau*kappa` equations.
 
-Operational details and measured trade-offs live in
-[providers.md](providers.md), [benchmarks.md](benchmarks.md),
-[preprocessing.md](preprocessing.md), and the root research notes
-[`docs/adaptive-dense-sparse-optimization.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-dense-sparse-optimization.md)
-and [`docs/adaptive-parameter-policy.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).
+Available implementation routes are:
+
+- `:bordered`: conservative default;
+- `:expanded`: exact nonsymmetric expanded operator;
+- `:sparse_schur`: reduced sparse Schur route with frozen pattern ownership.
+
+The exact expanded HSD operator is nonsymmetric. A symmetric quasidefinite
+companion may provide inertia evidence only when its assumptions are verified;
+it does not replace the exact solve or exact-operator residual check.
+
+Same-iterate fallback is explicit and recorded. A route failure cannot silently
+change arithmetic, model coordinates, or certificate requirements. See
+the [Newton-system design](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/NEWTON_SYSTEM.md).
+
+## Cone runtime
+
+Each block supplies dimension-preserving cone operations and local scaling:
+
+- nonnegative orthants;
+- Lorentz cones;
+- packed PSD cones;
+- exponential cones;
+- power cones.
+
+RSOC-to-SOC and Nonpositive-to-Nonnegative are exact canonical transforms.
+PSD panel kernels, fixed-size 3x3 kernels, and fixed-trace/Q3 reductions are
+structural specializations inside the shared runtime; they are not separate
+solvers.
+
+## Presolve and reconstruction
+
+Presolve is conservative and typed. Equality reduction, exact fixed-variable
+handling, row normalization, optional equilibration, and sparse setup each
+produce reversible metadata. If a reduction cannot justify its rank or
+consistency decision in the active arithmetic, it keeps the original system or
+fails closed.
+
+Every candidate certificate is reconstructed through the complete inverse
+stack before terminal status promotion.
+
+## Linear algebra and providers
+
+SDPX owns equations, assembly, route planning, refinement, fallback, and
+certification. Providers own factor/solve operations:
+
+- Julia/SuiteSparse for supported Float64 dense and sparse routes;
+- MultiFloatLinearAlgebra for fixed-width extended dense/local solves;
+- BigFloatLinearAlgebra for BigFloat dense/local solves;
+- PureKLU for exact nonsymmetric high-precision sparse LU;
+- QDLDL for applicable symmetric-companion inertia evidence.
+
+A `FactorReceipt` binds factor generation, operator generation, route,
+provider, and factor outcome. It does not certify a mathematical solution.
+Every right-hand side still requires finite checks and residual verification.
+
+See [Linear-algebra providers](providers.md) and the
+[high-precision sparse provider decision](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md).
+
+## Arithmetic ownership
+
+Float64, MultiFloat, and BigFloat follow the same mathematical path. Conversion
+to Float64 is never an implicit fallback. BigFloat workspaces own independent
+mutable MPFR values, and fixed-width provider state remains provider-owned.
+
+Threading is governed by a deterministic thread budget: Julia outer workers,
+BLAS threads, and provider threads may not all own the same parallel region.
+
+## Certification boundary
+
+A terminal result is authoritative only after independent verification in the
+original coordinates:
+
+- optimality: primal/dual feasibility, cone membership, objective gap, and
+  complementarity;
+- primal infeasibility: a normalized original-coordinate dual ray;
+- dual infeasibility: a normalized original-coordinate primal recession ray.
+
+NaN, infinity, overflow-hidden residuals, invalid tolerances, stale factors, or
+unavailable certificate data fail closed.
+
+## Deliberate defaults
+
+- `:bordered` remains the default KKT route until a complete benchmark and
+  certificate matrix justifies promotion of another route.
+- Ruiz equilibration remains opt-in while physical probes show regressions.
+- Sparse and high-precision routes require capability and memory preflight.
+- No hidden PSD lift or legacy-engine retry is permitted.
+
+Current implementation work and release gates are tracked in
+[`docs/PLAN.md`](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/PLAN.md). Remaining legacy source dependencies are tracked in the
+[legacy reference manifest](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/LEGACY_ENGINE_REFERENCES.md).

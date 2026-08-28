@@ -51,7 +51,7 @@ genuine contribution — it stops the next person repeating it.
 ## Benchmarks
 
 The canonical benchmark runner is `benchmark/bootstrap/runner.jl`, backed by the
-schema-v7 `PhysicsBenchmarkHarness`. Problem selection and independent physics
+schema-v9 `PhysicsBenchmarkHarness`. Problem selection and independent physics
 validation live in injected catalog files; the harness owns process isolation,
 measurement, serialization, and paired comparison. CI runs only the bundled
 deterministic smoke catalog. Scientific catalogs and generated inputs are run

@@ -3,10 +3,10 @@
 [![CI](https://github.com/yongjunx23-del/SDPX.jl/actions/workflows/test.yml/badge.svg)](https://github.com/yongjunx23-del/SDPX.jl/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-SDPX.jl is a native Julia solver for linear programs, second-order cone
-programs, and semidefinite programs. It provides a typed modeling API,
-extended-precision arithmetic, parallel numerical kernels, and
-original-coordinate result certificates.
+SDPX.jl is a native Julia product-cone optimizer for LP, SOC, rotated SOC,
+SDP, exponential-cone, and power-cone models. One homogeneous self-dual engine
+supports typed modeling, extended-precision arithmetic, parallel numerical
+kernels, and original-coordinate certificates.
 
 > SDPX is experimental and pre-1.0. See [CHANGELOG.md](CHANGELOG.md) when
 > upgrading between minor versions.
@@ -56,7 +56,6 @@ objective!(model, Maximize(), w[2])
 
 settings = Settings(
     model;
-    algorithm=:sdp,
     limits=Limits(iterations=200, time=60.0, threads=1),
     verbosity=0,
 )

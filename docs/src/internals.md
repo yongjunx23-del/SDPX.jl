@@ -1,56 +1,73 @@
 # Qualified internals
 
-These names support inspection, custom preprocessing, and solver research.
-Use them with explicit `SDPX.name` qualification; they are intentionally not
-exported and their result layouts may change before 1.0.
+The public API is the typed model/result surface described in
+[Quick start](quickstart.md). The names on this page are implementation details
+for solver development and diagnostics; use explicit `SDPX.name` qualification
+and expect them to change before 1.0.
 
-The `SDPX` module itself exports only the stable v0.5 modeling and result
-surface. The entries below document selected qualified implementation records
-that are useful for diagnostics and solver development.
+## Canonical layer
 
-## Problem and execution descriptions
+The principal internal records are:
 
-```@docs
-SDPX.SDPProblem
-SDPX.SolveMode
-SDPX.ActiveSparseCoefficientVector
-SDPX.StructureAnalysis
-SDPX.ProblemClassification
-SDPX.PresolveReport
-SDPX.ExecutionPlan
-SDPX.SolveDiagnostics
-```
+- `CanonicalConicProgram` — typed `A*x+s=b`, objective, cone layout, and
+  reconstruction ownership;
+- `ConeProductLayout` and cone block descriptors — ordered canonical blocks;
+- canonical transform/reconstruction records — primal, dual, slack, objective,
+  and ray inverse maps;
+- equality, presolve, and equilibration maps.
 
-## Adaptive controller
+The canonical layer is the semantic boundary. A provider or KKT route may not
+reinterpret its coordinates.
 
-```@docs
-SDPX.FixedParameterPolicy
-SDPX.AdaptiveParameterPolicy
-SDPX.IterationDiagnostics
-SDPX.IterationParameters
-SDPX.select_parameters
-```
+## Product-HSD runtime
 
-## Preprocessing
+`ProductConeHSDState` owns the five homogeneous variables, cone runtime,
+accepted iterate, Newton workspaces, route sessions, receipts, and performance
+trace. The iteration entry points are internal state-machine operations, not a
+second public solve API.
 
-```@docs
-SDPX.preprocess
-SDPX.PreprocessReport
-SDPX.PreprocessStageReport
-SDPX.ReconstructionMap
-```
+Termination helpers produce candidates only. Original-coordinate verification
+remains the authority for `Optimal`, `PrimalInfeasible`, and
+`DualInfeasible`.
 
-## Formulation and sparse planning
+## Newton and KKT layer
 
-The static formulation planner and provider-neutral sparse layer are exposed
-through their diagnostic entry points; see [architecture.md](architecture.md),
-[providers.md](providers.md), and [sparse-execution.md](sparse-execution.md).
+`NewtonSystem` and its right-hand side freeze the five equations. Internal
+sessions implement bordered, expanded, and sparse-Schur realizations.
 
-## Spectrum and BLAS inspection
+`FactorReceipt` records factor-wide evidence and generations. Direction checks
+still evaluate the exact operator and all five equations for each right-hand
+side.
 
-```@docs
-SDPX.SpectrumResult
-SDPX.blas_backend
-SDPX.blas_threads
-SDPX.set_blas_threads!
-```
+## Cone runtime
+
+The product runtime contains block-specific operations for nonnegative,
+Lorentz, PSD, exponential, and power cones. Exact canonical transforms handle
+nonpositive and rotated Lorentz coordinates. Local PSD panels and fixed-size
+3x3/Q3 kernels are specializations of these operations, not public solver
+families.
+
+## Planning and diagnostics
+
+Internal plan/trace records expose:
+
+- planned and executed KKT routes;
+- provider and specialization;
+- symbolic/operator/factor generations;
+- fallback attempts;
+- memory and fill estimates; and
+- phase timings.
+
+These records explain execution but cannot override certificate status.
+
+## Provider extensions
+
+Provider extensions register capabilities and factor/solve hooks. They must
+preserve arithmetic and obey invalidation, multi-RHS, transpose, alias, and
+thread-ownership contracts. See [Providers](providers.md).
+
+## Development rule
+
+Do not build application code against internal field layouts. If a diagnostic
+or control is broadly useful, add a typed public accessor rather than exporting
+an HSD, cone, KKT, or provider workspace.

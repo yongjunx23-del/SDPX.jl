@@ -57,17 +57,20 @@ This is the `g=1` two-by-two moment truncation of the quartic integral:
 precision_bits=256)` and loaded `MultiFloats` types provide the other typed
 arithmetic choices; all model data is converted and owned in that arithmetic.
 
-## The three pure routes
+## Native product-cone blocks
 
-The route classifier looks only at the non-free cone families in the model.
-Use one family per model, with `Reals` and `ZeroCone` allowed as auxiliary
-blocks:
+The canonical program stores an ordered product of supported blocks. A model
+may combine supported families; `Reals` and `ZeroCone` provide free coordinates
+and equalities:
 
-| Route | Product/constraint domains |
+| Block family | Product/constraint domains |
 |---|---|
-| LP | `Nonnegative`, `Nonpositive`, `ZeroCone` |
-| native SOC/RSOC | `LorentzCone`, `RotatedLorentzCone`, `ZeroCone` |
-| SDP | `PSDCone`, `ZeroCone` |
+| Scalar | `Nonnegative`, `Nonpositive`, `ZeroCone` |
+| Lorentz | `LorentzCone`, `RotatedLorentzCone` |
+| Semidefinite | `PSDCone` |
+| Nonsymmetric | `ExponentialCone`, `PowerCone` |
+
+All combinations use the same product-HSD state and certificate path.
 
 For a native Lorentz model, keep the cone block in Lorentz coordinates:
 
@@ -101,9 +104,8 @@ sdp_result = optimize!(sdp; settings=Settings(sdp; verbosity=0))
 ```
 
 The default `Settings(; algorithm=:auto)` (the only accepted value)
-asks SDPX to select the matching native route. Algorithm-family selectors
-(`algorithm=:lp`, `:socp`, `:sdp`) are deprecated since Phase 9 and are
-rejected with a migration error: native product HSD is the only public
+uses native product HSD and selects only implementation details. Algorithm-family selectors
+(`algorithm=:lp`, `:socp`, `:sdp`) are rejected with a migration error: native product HSD is the only public
 engine, and `algorithm` is now a read-only diagnostic label that never
 changes the correctness path.
 

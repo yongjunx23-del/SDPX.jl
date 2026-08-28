@@ -8,8 +8,11 @@ mkdir -p "$OUT"
 git archive "$SHA" --prefix=source/ | gzip > "$OUT/context-$SHA.tar.gz"
 shasum -a 256 "$OUT/context-$SHA.tar.gz" > "$OUT/context-$SHA.sha256"
 cp docs/PLAN.md "$OUT/PLAN.md"
-cp docs/reviews/GPTPRO_KERNEL_RESTRUCTURE_REVIEW_20260827.md "$OUT/" 2>/dev/null || true
-cp docs/reviews/GPTPRO_MATURITY_AUDIT_20260827.md "$OUT/" 2>/dev/null || true
+cp docs/design/CANONICAL_FORM.md "$OUT/"
+cp docs/design/HSD_FORMULATION.md "$OUT/"
+cp docs/design/NEWTON_SYSTEM.md "$OUT/"
+cp docs/reviews/GPTPRO_BUG_KERNEL_REVIEW_20260828.md "$OUT/" 2>/dev/null || true
+cp docs/reviews/GPTPRO_PERFORMANCE_PLAN_20260828.md "$OUT/" 2>/dev/null || true
 cat > "$OUT/PROGRESS_SINCE_LAST_AUDIT.md" <<EOF
 # Progress since the 6.0/10 maturity audit
 

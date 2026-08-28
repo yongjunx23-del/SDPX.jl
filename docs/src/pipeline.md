@@ -1,188 +1,135 @@
 # Automatic pipeline
 
-Every public `optimize!` call compiles one typed model and builds an
-inspectable `ExecutionPlan`. The pipeline performs:
+Every public `optimize!` call follows the same product-cone HSD pipeline.
+Options may change preprocessing, KKT implementation, provider, precision, or
+retained output, but they do not select a different mathematical solver.
 
-1. cone, storage, arithmetic, and size classification;
-2. rank-revealing equality presolve with a consistency check and dual
-   reconstruction map;
-3. redundant scalar-cone row elimination for LPs;
-4. automatic scaling and equilibration selection;
-5. solver, Gram/Schur kernel, KKT backend, thread schedule, and memory-budget
-   selection;
-6. guarded adaptive interior-point parameter control with a fixed fallback;
-7. phase timing, workspace estimation, warnings, and result reconstruction.
+```text
+Model / MOI / CLI
+  -> compile affine expressions and cone incidence
+  -> canonicalize to A*x + s = b, s in K
+  -> presolve and build reconstruction maps
+  -> optional equilibration
+  -> analyze structure and provider capabilities
+  -> freeze route, memory, and thread plan
+  -> allocate product-HSD state
+  -> predictor/corrector iterations
+  -> reconstruct terminal candidate
+  -> verify original-coordinate certificate
+  -> Result
+```
 
-Pure scalar-cone models are lowered once to the dedicated Mehrotra LP engine.
-Pure SOC/RSOC models use NativeSOC in original Lorentz coordinates; general
-Lorentz blocks use the Nesterov--Todd path, while exactly certified fixed-trace
-Q3 cells use the compact HKM specialization (see [socp.md](socp.md)). Pure PSD
-models use the SDP engine. Mixed cone families fail during classification;
-there is no production SOC-to-PSD lift or model retry.
+## Canonicalization
+
+The compiler preserves the ordered product-cone layout and free-variable
+coordinates. Nonpositive and rotated-Lorentz rows use exact transforms. The
+reconstruction stack owns objective constants, eliminated coordinates, dual
+maps, and ray maps.
+
+No cone family is silently lifted to another cone. Structural specializations
+such as PSD panels or fixed-size Lorentz/Exp/Power kernels operate after
+canonicalization and retain the same cone semantics.
 
 ## Presolve
 
-Equality columns in `B` are normalized independently and reduced using
-column-pivoted QR in the problem's arithmetic type. This avoids narrowing away
-a direction that is meaningful to Float64x4 or BigFloat. Discarded columns are
-checked against both the retained basis and their right-hand sides in the same
-arithmetic; an ambiguous rank decision keeps all equalities. An inconsistent
-system returns `InfeasibleCert` before factorization. Reduced dual multipliers
-are mapped back to the original equality ordering, with zero assigned to
-non-unique discarded multipliers.
+Presolve performs only transformations with explicit reconstruction data. Its
+main responsibilities are:
 
-The LP presolver additionally removes:
+- equality consistency and rank policy;
+- exact removal of fixed variables or redundant rows when proved;
+- sparse-preserving setup for eligible routes;
+- scale diagnostics; and
+- construction of original-coordinate inverse maps.
 
-- zero rows that are always satisfied;
-- infeasible zero rows;
-- positive scalar multiples with the same left-hand side, retaining the
-  strongest lower bound.
+Ambiguous arithmetic decisions keep the unreduced representation or fail
+closed. See [Preprocessing](preprocessing.md).
 
-## Dedicated LP kernels and multicore scheduling
+## Equilibration
 
-The LP normal matrix is
+Ruiz equilibration is reversible and recorded in an `EquilibrationMap`. It is
+currently opt-in because conditioning improvements on small algebraic probes do
+not yet outweigh regressions on every physical benchmark. Reconstruction and
+certification always use original coordinates.
 
-```text
-H = G' * Diagonal(z ./ s) * G.
-```
+## Route planning
 
-For Float64 and one thread, SDPX packs `sqrt(z ./ s) .* G` once and calls BLAS
-`syrk`. For sufficiently large models with single-threaded BLAS and more than
-one requested Julia thread, variables are split into coarse column panels.
-Each worker performs one independent BLAS-3 GEMM into a disjoint output panel.
-There are no partial-matrix reductions, atomics, or locks. BigFloat remains
-serial.
+The planner observes dimensions, block layout, equality rank, sparse pattern,
+precision, estimated fill, provider capabilities, memory limits, and the
+thread budget. It records planned and executed choices separately.
 
-For `Float64xN` and `BigFloat`, `extended_precision_blas=:auto` permits the
-planner to choose the packed blocked triangular `syrk!` path only when its
-predicted benefit exceeds packing cost and it fits the memory budget.
-`extended_precision_blas=:on` is intended for diagnostics and still cannot
-override the memory-safety check. Float64 is never redirected by this option.
+The production KKT routes are:
 
-The equality-free LP Newton matrix is positive definite after regularization,
-so SDPX factors it with Cholesky and reuses the kernel triangular solves.
-Equality-constrained LPs retain dense LU because their augmented KKT matrix is
-indefinite. Small Float64 SDPs containing only `1×1`/`2×2` blocks and fewer
-than 1,000 variables are kept serial because repeated task barriers cost more
-than the block kernels. Fixed-width extended arithmetic retains multicore
-block scheduling.
+- `:bordered` — default;
+- `:expanded` — exact nonsymmetric expanded solve;
+- `:sparse_schur` — reduced sparse Schur solve.
 
-## High-precision ownership and allocation policy
+A route is eligible only when its structural, arithmetic, provider, and memory
+contracts are satisfied. Missing evidence does not trigger guessed thresholds.
 
-Julia `BigFloat` values are mutable. Solver workspaces are therefore created
-with independent scalar objects instead of relying on `zeros(BigFloat, ...)`
-or `fill!`, which can install the same object into multiple slots. Internal
-`*_owned!` operations may mutate destinations only after that ownership
-invariant has been established.
+## Product-HSD iteration
 
-The dedicated BigFloat layer covers copying, zeroing, fused vector updates,
-matrix products, triangular solves, Cholesky factorization/solve, Schur and
-KKT right-hand sides, weighted LP Hessian/KKT assembly, and blocked triangular
-`syrk!`/`gemm!` paths. Input conversion, result construction, and operations
-that must create independent output values may still allocate.
+One state owns `(x,s,y,tau,kappa)`, cone scaling, Newton workspaces, accepted
+iterate records, route sessions, and performance counters. Each iteration:
 
-## Extended-precision crossover and memory budget
+1. prepares block metrics and the Newton operator;
+2. solves the affine predictor;
+3. verifies direction finiteness and five-equation residuals;
+4. builds and solves the corrector with the same operator epoch;
+5. performs a unified neighborhood/progress line search;
+6. commits the new iterate transactionally; and
+7. evaluates termination candidates.
 
-The packed-kernel selector uses arithmetic family, dimensions, active density,
-average nonzeros, expected Schur density, requested threads, and packing
-bytes. The current conservative automatic gates are:
+Factor reuse is tied to immutable operator/factor generations. A cached factor
+receipt never exempts a new right-hand side from residual checks.
 
-| Gate | Fixed-width extended | BigFloat |
-|---|---:|---:|
-| Minimum columns | 32 | 20 |
-| Minimum pair-row work | 200,000 | 50,000 |
-| Minimum expected Schur density | 0.20 | 0.05 |
-| Minimum predicted speedup | 1.18x | 1.12x |
-| Sparse average fill required | 0.42 | 0.62 |
+## Same-iterate fallback
 
-Fixed-width sparse blocks of dimension at most two retain their specialized
-small-block path. Every packed block must also fit its cumulative memory
-budget.
+Authorized fallback occurs before the iterate changes. For example, a sparse
+Schur attempt may fall back to expanded and then bordered execution using the
+same Newton right-hand side and state epoch. Every attempt and reason is
+recorded. There is no hidden model-family, PSD-lift, legacy-engine, or Float64
+fallback.
 
-Available memory is the minimum usable signal from host free memory, Linux
-cgroup v1/v2 counters, and the optional `SDPX_MEMORY_LIMIT_BYTES` ceiling.
-The requested packing budget is
-`extended_precision_memory_fraction × available` (default `0.10 ×`), capped at
-half of the available amount so at least half remains as general headroom. If
-no reliable signal exists, optional packing is disabled instead of risking an
-out-of-memory kill.
+## Precision and providers
 
-For the fused exact-arrow `2×2` SDP path, transformed panels and packed pair
-buffers are not allocated because the compute-and-scatter kernel consumes
-neither. This specialization takes precedence over optional packed extended
-BLAS for both Float64x4 and BigFloat. Execution diagnostics report
-`gram_kernel=:fused_arrow_2x2` and
-`gram_kernel_reason=:fused_arrow_specialized`.
+Float64, MultiFloat, and BigFloat use the same equations. Providers are selected
+only after capability checks. BigFloat workspaces own independent mutable
+values; narrowing is forbidden.
 
-## Automatic cold-start parameters
+PureKLU is intended for exact nonsymmetric high-precision sparse solves. QDLDL
+is limited to applicable symmetric-companion inertia evidence. MFLA and BFLA
+remain provider-owned dense/local-block implementations.
 
-`parameter_policy=:auto` runs one generic automatic Mehrotra controller before
-the first iteration. It selects no benchmark-, size-, cone-, or
-precision-specific parameter profile: `beta`, `gamma`, `predictor`, and
-`parameter_strategy` come from the `SolverOptions` defaults or user choices.
-After presolve and scaling, the selected formulation/provider factors an
-identity-metric initialization system once and solves its primal and dual
-right-hand sides. Cone-native strict-interior shifts are followed by the
-smallest aggregate identity shift that raises orthant/PSD starts, and Lorentz
-sides still within the typed cone-vertex envelope, to unit identity mass, then
-by deterministic complementarity cross-centering. This floor prevents a valid
-affine point at the cone vertex from remaining at machine-epsilon scale without
-renormalizing an already balanced Lorentz point; it is separate from barrier
-degree. An
-accepted regularized or mixed-precision SDP factor is reused for bounded
-structured residual corrections when either original-KKT right-hand side is
-above the existing cold-start gate. `Omega_p` and
-`Omega_d` are not read by this automatic path. The public resolver reports
-`profile=:post_scaling_mehrotra`; the controller is deferred in the plan as
-`:automatic_mehrotra` and resolved exactly once after scaling as
-`:post_scaling_mehrotra`; and the adaptive iteration controller uses the
-generic 0.50 sigma cap (`adaptive_sigma_max` remains the expert override).
-`parameter_policy=:fixed` uses the supplied values exactly and records
-`:user_fixed`.
+## Thread budget
 
-This is separate from the storage/structure classification reported by
-`StructureAnalysis.profile`, which describes data layout and kernel selection
-rather than iteration parameters.
+The pipeline chooses one active parallel layer for each phase: Julia workers,
+BLAS, or a provider. Fixed-bin/fixed-tree reductions preserve deterministic
+combination order where outer parallelism is used. See [Threading](threading.md).
 
-## Adaptive Newton parameters
+## Recovery and terminal status
 
-`parameter_strategy=:adaptive` selects a bounded Mehrotra `sigma` from the
-affine complementarity ratio, centrality, factor quality, and recent progress.
-It separately selects primal and dual fraction-to-boundary values, the
-backtracking contraction, and the refinement target/cap. The complete fixed
-predictor/corrector path is restored after non-finite diagnostics,
-rank-revealing equality factorization, or unstable progress.
+Termination first constructs a candidate in canonical coordinates, then applies
+all inverse transformations. Only the original-coordinate verifier may return:
 
-When history retention is enabled, `iteration_history(result)` contains every
-accepted iteration, including `sigma`, `mu`, `mu_aff`, affine and accepted
-steps, the separate step safeguards, residual progress, factor/PSD-margin
-proxies, regularization, refinement, and fallback provenance. See
-[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md) for
-the audit, equations, exact bounds, and arithmetic-specific behavior.
+- `:optimal`;
+- `:primal_infeasible`; or
+- `:dual_infeasible`.
 
-## Result and diagnostics
+Iteration exhaustion, numerical breakdown, unavailable inertia, or provider
+failure remains nonterminal evidence unless an independent certificate passes.
+NaN, infinity, invalid tolerances, and overflow-hidden residuals fail closed.
 
-The public result exposes terminal status, objectives, certificate residuals,
-the immutable execution plan, and retained primal/dual data through the v0.5
-accessors. Full diagnostics add classification, presolve facts, analytical
-workspace estimates, process peak RSS, selected algorithms, timings, warnings,
-and refinement/fallback provenance. See [diagnostics](diagnostics.md) for the
-retention and accessor contract.
+## Diagnostics
 
-## Remaining bottlenecks
+Results expose the terminal status, retained values, objectives, certificate,
+and selected diagnostics. Detailed diagnostics distinguish:
 
-1. Large dense SDP Schur matrices and their factorization dominate the heavy
-   benchmark models; the Float64 numerical path is intentionally unchanged.
-2. Equality-constrained LPs use dense LU. A null-space/range-space selector
-   remains future work; sparse execution is intentionally restricted to
-   equality-free frozen-CSC normal equations with provider-native Cholesky.
-3. LP panel GEMM computes full output panels. A lower-triangle-only blocked
-   BLAS-3 kernel would reduce arithmetic further.
-4. General-dimensional native SOCP is production; general BigFloat work is
-   serial, while exact singleton-local `2×2` arrows may use ownership-safe
-   panel preparation and disjoint Schur tiles.
-5. Presolve removes equality dependence and scalar-row redundancy; bound
-   propagation, singleton substitution, coefficient strengthening, and chordal
-   SDP decomposition remain future work.
-6. Nested solves in one process are not supported because BLAS thread count is
-   process-global. Use separate processes for concurrent instances.
+- planned and executed KKT route;
+- provider and factor generations;
+- fallback attempts;
+- setup, assembly, factor, solve, refinement, line-search, state-update, and
+  certificate timings; and
+- memory/fill estimates when available.
+
+These diagnostics explain execution; they do not override the certificate.
+See [Diagnostics and certificates](diagnostics.md).

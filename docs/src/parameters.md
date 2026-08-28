@@ -1,164 +1,127 @@
 # Parameters
 
-The public policy is typed and attached to the same `Model` that is passed to
-`optimize!`:
+Public solve policy is typed and attached to the model passed to `optimize!`.
+Unknown keywords fail; there is no catch-all option sink.
 
 ```julia
-model = SDPX.Model(Float64)
-x = SDPX.variable!(model, :x, 1; domain=SDPX.Nonnegative())
-SDPX.constraint!(model, :lower, x[1] - 1, SDPX.Nonnegative())
-SDPX.objective!(model, SDPX.Minimize(), x[1])
-settings = SDPX.Settings(
+using SDPX
+
+model = Model(Float64)
+x = variable!(model, :x, 1; domain=Nonnegative())
+constraint!(model, :lower, x[1] - 1, Nonnegative())
+objective!(model, Minimize(), x[1])
+
+settings = Settings(
     model;
-    tolerances=SDPX.Tolerances(Float64; primal=1e-8, dual=1e-8, gap=1e-8),
-    limits=SDPX.Limits(iterations=200, time=Inf, threads=1),
-    algorithm=:auto,
-    presolve=:auto,
-    scaling=:auto,
-    sparse=:auto,
+    tolerances=Tolerances(Float64; primal=1e-8, dual=1e-8, gap=1e-8),
+    limits=Limits(iterations=200, time=60.0, threads=1),
+    kkt_route=:bordered,
     diagnostics=:summary,
     certification=true,
-    verbosity=1,
+    verbosity=0,
 )
-result = SDPX.optimize!(model; settings=settings)
+
+result = optimize!(model; settings=settings)
 ```
 
-`Settings{T}` accepts only typed policy fields: `tolerances`, `limits`,
-`scaling`, `formulation`, `provider`, `presolve`, `algorithm`, `sparse`,
-`equality_solver`, `working_precision_policy`, `diagnostics`, `verbosity`,
-`timing`, `certification`, and `blas_threads`. Since Phase 9, native product
-HSD is the only public engine: `engine` accepts only `:auto` or
-`:native_hsd` (the historical `:legacy` selector is rejected with a
-migration error), and `algorithm` is a read-only diagnostic label whose only
-accepted value is `:auto` — family selectors `:lp`, `:socp`, and `:sdp` are
-deprecated and rejected. The `:auto` engine routes the classified family
-internally; it never selects a legacy Mehrotra engine and there is no hidden
-fallback. Public formulation values are `:auto`,
-`:variable_space_schur`, and `:dense_augmented_kkt`.
+## Tolerances
 
-The default controller adapts centering, fraction-to-boundary values,
-backtracking, and refinement from the measured Newton iteration. Presolve,
-scaling, kernel selection, working precision, and scheduling also default to
-automatic policies. The detailed tables below retain the mature
-`SolverOptions{T}` field names for algorithm and compatibility notes only;
-that qualified low-level record is not the public quickstart interface.
+`Tolerances{T}` stores optional primal, dual, and gap targets in arithmetic `T`.
+An omitted field requests the deterministic automatic target. Explicit values
+must be finite and strictly positive.
 
-## Interior-point method and initialization
+Tolerance values do not bypass certification. Nonfinite data, overflow-hidden
+residuals, or invalid tolerances fail closed.
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `β` | `0.1` | Fixed SDP centering/complementarity reduction target and the safe fallback for adaptive `sigma`. |
-| `γ` | `0.9` | Fixed backtracking reduction factor and exact fraction-to-boundary safety. |
-| `Ωp` | `1` | Expert fixed-policy primal PSD identity scale. Ignored by the default automatic KKT cold start. |
-| `Ωd` | `1` | Expert fixed-policy dual PSD identity scale. Ignored by the default automatic KKT cold start. |
-| `predictor` | `:classic` | Predictor rule: `:classic` or `:sdpb`. |
-| `refine_steps` | `1` | Number of iterative-refinement passes for the KKT predictor/corrector solutions. |
-| `step_rule` | `:auto` | `:backtrack`, exact `2x2`-optimized `:fraction_to_boundary`, or `:auto`. |
-| `parameter_policy` | `:auto` | Automatic cold-start Mehrotra controller; `:fixed` preserves supplied values exactly. |
-| `parameter_strategy` | `:adaptive` | Guarded per-iteration Mehrotra policy with fixed fallback when cold-start or stability diagnostics are unreliable. |
-| `adaptive_sigma_max` | `0` | Expert adaptive-centering cap; zero uses the generic 0.5 maximum. |
-| `refine_policy` | `:auto` | `:auto`/`:adaptive` stop KKT refinement from its residual; `:fixed` runs exactly `refine_steps` passes. |
+## Limits
 
-With `parameter_policy=:auto`, the automatic Mehrotra controller keeps `β`,
-`γ`, `predictor`, and `parameter_strategy` from the defaults or user choices.
-After presolve and scaling, the solver builds an identity-metric KKT system,
-solves one primal and one dual affine right-hand side with the same factor,
-then shifts the cone variables in their native coordinates. A minimal identity
-shift raises orthant/PSD starts, and Lorentz sides still at the typed
-cone-vertex envelope, to unit identity mass before complementarity
-cross-centering; bounded structured correction reuses an accepted SDP factor
-when an original-KKT residual remains above the existing gate.
-`Ωp` and `Ωd` do not participate in this path. The public compatibility
-resolver reports `profile=:post_scaling_mehrotra`, the plan records the deferred
-identity `:automatic_mehrotra`, and executed diagnostics record
-`:post_scaling_mehrotra` plus the separate cold-start report.
-`parameter_policy=:fixed` uses the supplied values exactly and records
-`:user_fixed`.
+`Limits` contains:
 
-## Convergence and stopping
+| Field | Meaning |
+|---|---|
+| `iterations` | maximum outer iterations; `0`/omitted selects the automatic default |
+| `time` | end-to-end wall-clock limit in seconds; `Inf` means unlimited |
+| `threads` | maximum Julia threads requested by one solve |
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `ϵ_gap` | `1e-10` | Relative primal-dual gap tolerance. |
-| `ϵ_primal` | `1e-10` | Primal residual tolerance. |
-| `ϵ_dual` | `1e-10` | Dual residual tolerance. |
-| `iter_max` | `200` | Maximum outer iterations (legacy keyword `iterMax`). |
-| `max_time` | `Inf` | End-to-end wall-clock limit in seconds, including automatic-pipeline setup and model compilation. |
-| `callback` | `nothing` | Called after every iteration; returning `true` stops with `UserStopped`. |
+A time or iteration limit produces an exhaustion status unless an independent
+terminal certificate has already passed.
 
-## Restarts and numerical safeguards
+## Settings fields
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `restart` | `true` | Rescale the collapsed side and continue after step-size collapse. |
-| `min_step` | `1e-10` | A backtracking step below this value triggers a convergence-tail check or restart. |
-| `omega_step` | `1e5` | Per-restart multiplier applied to the collapsed `X` or `Y` side. |
-| `max_restarts` | `5` | Maximum restarts in the new API. |
-| `max_omega` | `1e50` | Compatibility field for the qualified legacy engine; public `Settings` has no equivalent. |
+| Field | Accepted public values | Purpose |
+|---|---|---|
+| `engine` | `:auto`, `:native_hsd` | native product HSD only; `:legacy` is rejected |
+| `algorithm` | `:auto` | diagnostic label; family selectors are rejected |
+| `kkt_route` | `:bordered`, `:expanded`, `:sparse_schur` | implementation of the frozen Newton system |
+| `scaling` | `:auto`, `:none`, `:equilibrate` | scaling/equilibration policy |
+| `equilibration` keyword | `:off`, `:ruiz` | public view of reversible Ruiz equilibration |
+| `formulation` | `:auto`, `:variable_space_schur`, `:dense_augmented_kkt`, `:psd_lift` | formulation policy; `:psd_lift` is explicit, never hidden |
+| `provider` | `:auto`, `:standard`, `:bfla`, `:multifloat`, `:legacy` | dense LA provider namespace; `:legacy` here is not a solver engine |
+| `presolve` | `:auto`, `:on`, `:off` | structural presolve |
+| `sparse` | `:auto`, `:on`, `:off` | sparse storage preference |
+| `equality_solver` | `:auto`, `:normal_equations`, `:qr` | equality policy |
+| `working_precision_policy` | `:auto`, `:fixed` | precision policy without arithmetic narrowing |
+| `diagnostics` | `:none`, `:summary`, `:full` | retained diagnostic detail |
+| `verbosity` | nonnegative integer | textual output level |
+| `timing` | `Bool` | retain phase timings |
+| `certification` | `Bool` | run/retain certificate verification |
+| `blas_threads` | `nothing` or positive integer | requested BLAS thread metadata |
 
-For fixed-exponent types such as `Float64x4`, SDPX limits the effective
-restart multiplier and returns `NumericalBreakdown` when an iterate becomes
-non-finite.
+The provider value `:legacy` denotes the bundled LA-backend compatibility
+namespace. It cannot select the removed public legacy solver.
 
-## Precision, equilibration, and storage
+## KKT route policy
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `precision_bits` | `997` | Working precision for `BigFloat` only. |
-| `working_precision_policy` | `:auto` | May start lower and retry at `precision_bits` unless certification passes. |
-| `minimum_working_precision_bits` | `192` | Lower bound for the staged BigFloat selector. |
-| `convert_inputs` | `false` | Normalize independent `BigFloat` storage to `precision_bits`; cannot recover lost digits. |
-| `scaling` | `:auto` | LP geometric scaling and adaptive-pass Ruiz congruence/variable scaling for SDP. |
-| `sparse` | `:auto` | Storage selection during model compilation; distinguishes sparse coefficients from aggregate PSD/Schur density. |
-| `formulation` | `:auto` | Static dense KKT formulation selection (`:normal_equations`, `:augmented`, `:primal`). |
-| `linear_algebra_backend` | `:auto` | Resolves once during planning: `:standard`, `:bfla`, `:multifloat`, `:legacy`. |
-| `extended_precision_blas` | type-dependent | Conservative `:auto` for fixed-width extended types and BigFloat, `:off` for Float64. |
-| `extended_precision_memory_fraction` | `0.10` | Maximum fraction of available memory for packed extended-precision panels. |
-| `mixed_precision_kkt` | type-dependent | `:auto` for BigFloat and fixed-width extended arithmetic, `:off` for Float64. |
-| `mixed_precision_condition_limit` | type-dependent | `1e14` for `Float64x4`, `1e8` otherwise. |
-| `mixed_precision_refine_max_steps` | `32` | Maximum correction solves before native fallback. |
-| `mixed_precision_memory_fraction` | `0.10` | Maximum fraction of available memory for Float64 factors and conversion scratch. |
-| `equality_solver` | `:auto` | Normal equations with rank-revealing QR fallback when factor diagnostics justify it. |
-| `force_gc` | `false` | Run a full collection after each accepted iteration and return free allocator pages where supported. |
+`:bordered` is the conservative default. `:expanded` and `:sparse_schur` are
+expert implementation choices for the same five-equation `NewtonSystem`.
 
-Unless `refine_tol` is explicitly positive, dense mixed-precision refinement
-uses `max(64 * eps(T), min(ϵ_gap, ϵ_primal, ϵ_dual)^2)`. Native KKT refinement
-normally targets `64 * eps(T)`; the large regularized sparse Float64 SDP route
-uses a looser tolerance retaining two guard digits beyond the requested
-certificate. A positive user-supplied `refine_tol` always takes precedence.
+An explicit route request fails if its structural, provider, arithmetic, or
+memory contract is unavailable. Authorized fallback occurs on the same iterate
+and is recorded; it cannot silently change arithmetic or solver engine.
 
-Sparse equilibration rebuilds derived sparse caches after scaling. On the
-public route, request it with `Settings(model; scaling=:equilibrate)`; the
-model and all warm-start values remain in their original coordinates:
+## Scaling and reconstruction
+
+Ruiz equilibration is reversible. Model data, warm starts, returned values, and
+certificates remain in original coordinates. Equilibration is currently
+opt-in while physical benchmark regressions remain under evaluation.
+
+## Precision
+
+The model element type selects Float64, MultiFloat, or BigFloat arithmetic.
+`working_precision_policy` may control supported staged precision behavior, but
+a missing provider never triggers silent Float64 execution.
+
+BigFloat input conversion cannot recover digits already lost before model
+construction. Use strings or exact typed values when loading high-precision
+coefficients.
+
+## Thread ownership
+
+`Limits.threads` and `blas_threads` are requests consumed by the pipeline
+thread budget. Julia outer workers, BLAS, and provider threads must not all own
+the same parallel region.
+
+## Diagnostics and outputs
+
+`Settings` controls solve policy. `Outputs` controls retained result data. Use
+result accessors rather than depending on internal field layouts:
 
 ```julia
-settings = SDPX.Settings(model; scaling=:equilibrate)
-result = SDPX.optimize!(model; settings=settings)
+status(result)
+primal_objective(result)
+value(result, x)
+certificate(result)
+iteration_history(result)
 ```
 
-Warm starts use the exported modeling API: `set_start!` sets a variable block,
-`set_dual_start!` sets a constraint block, and `set_dual_slack_start!` sets a
-variable block's dual slack. A layout-compatible SDP can also continue from a
-previous certified result with
-`optimize!(model; settings=settings, warm_start=previous_result)`. Values are
-always supplied in original input coordinates; callers should not pre-scale
-them.
+Detailed execution metadata explains planning, provider selection, fallback,
+and timing. It cannot override the original-coordinate certificate.
 
-## Output and timing
+## Low-level compatibility options
 
-| Parameter | Default | Meaning |
-|---|---:|---|
-| `verbosity` | `1` | `0` is silent; values of `1` or higher print iteration information. |
-| `timing` | `false` | Records total and phase-level timing. |
+Qualified records such as `SolverOptions` remain implementation compatibility
+surfaces while legacy source is retired. They are not additional public solve
+engines. New applications should use `Settings`, `Tolerances`, and `Limits`.
 
-## Qualified compatibility defaults
-
-The mature low-level engine retains historical names such as `sdp`,
-`SolverOptions`, `β`, `γ`, `Ωp`, and `Ωd` for compatibility and algorithm
-audits. Those names are qualified implementation details; they are not
-additional v0.5 public entry points. Public code should express stopping and
-resource policy with `Tolerances`, `Limits`, and `Settings` as shown above.
-
-The full Newton-method audit, exact diagnostic fields, controller bounds,
-fallback rules, arithmetic behavior, and fixed-versus-adaptive results are in
-[Adaptive Interior-Point Parameter Policy](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/src/adaptive-parameter-policy.md).
+See [Adaptive predictor-corrector policy](adaptive-parameter-policy.md) for the
+shared controller and [Architecture](architecture.md) for route ownership.

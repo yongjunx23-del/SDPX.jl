@@ -72,7 +72,7 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
   plus `test/solver_regressions.jl`, `test/preprocessing_regressions.jl`,
   `test/options_interface.jl`, `test/cli_bridge.jl`, `test/pipeline.jl`
   (legacy `solve!`/`SolverOptions` surface).
-- **Docs:** `docs/PLAN.md`, `docs/design/ROADMAP_1_0.md`, review/audit evidence
+- **Docs:** `docs/PLAN.md`; historical review/audit evidence remains in Git history
   documents (historical).
 
 ## 3. `src/lp_sparse.jl` — legacy sparse LP system
@@ -141,7 +141,7 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
   `test/fixed_precision_contract.jl`, `test/bfla_backend.jl`, and others
   (27 active test files in `test/runtests.jl` call `SDPX.solve!`; the external
   `test/provider_smoke.jl` harness is intentionally not part of `runtests.jl`).
-- **Docs:** `docs/PLAN.md`, `docs/design/ROADMAP_1_0.md`, review evidence.
+- **Docs:** `docs/PLAN.md`; historical review evidence remains in Git history.
 
 ## 5. `src/step.jl` / `src/step_hot.jl` — legacy Newton step orchestration
 

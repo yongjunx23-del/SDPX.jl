@@ -4,7 +4,7 @@
 
 - `general/` — the general conic benchmark suite (LP/SOCP/SDP/EXP/POWER
   corpora, deterministic generators, external-data readers). See
-  `docs/design/GENERIC_BENCHMARK.md` for sources and contracts.
+  `docs/design/GENERAL_BENCHMARK.md` for sources and contracts.
 - `bootstrap/` — the problem-agnostic measurement harness together with the
   paper-grounded application catalogs. The harness owns process isolation,
   solver measurement, schema-v8 serialization, and paired comparison; each
