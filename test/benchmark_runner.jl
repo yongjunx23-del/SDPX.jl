@@ -3,11 +3,11 @@ using TOML
 using SDPX
 
 if !isdefined(Main, :PhysicsBenchmarkHarness)
-    include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+    include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
 end
 if !isdefined(Main, :physics_benchmark_catalog)
     include(joinpath(
-        @__DIR__, "..", "benchmark", "fixtures", "smoke_catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "fixtures", "smoke_catalog.jl",
     ))
 end
 using .PhysicsBenchmarkHarness
@@ -70,7 +70,7 @@ end
     @test_throws ArgumentError catalog_entries(catalog, :unknown)
     @test validate_result(catalog, nothing, nothing, nothing, (;)) == String[]
     loaded = load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "fixtures", "smoke_catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "fixtures", "smoke_catalog.jl",
     ))
     @test loaded.name === :smoke
     @test only(catalog_entries(loaded, :smoke)).problem_id == "smoke/lp_box"
@@ -506,7 +506,7 @@ end
 
 @testset "benchmark shard identity is a positive bounded topology" begin
     injected_catalog = load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "fixtures", "smoke_catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "fixtures", "smoke_catalog.jl",
     ))
     for (index, count) in ((0, 1), (1, 0), (2, 1), (-1, 2))
         @test_throws ArgumentError run_suite(
@@ -550,7 +550,7 @@ end
 
     output = tempname() * ".toml"
     injected_catalog = load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "fixtures", "smoke_catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "fixtures", "smoke_catalog.jl",
     ))
     run = run_suite(
         injected_catalog,

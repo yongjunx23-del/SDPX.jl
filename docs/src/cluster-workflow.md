@@ -21,18 +21,18 @@ For one canonical child:
 
 ```sh
 julia --startup-file=no --project=/path/to/environment \
-  /path/to/source/benchmark/runner.jl SUITE \
+  /path/to/source/benchmark/bootstrap/runner.jl SUITE \
   --catalog=/path/to/catalog.jl \
   --problem=PROBLEM_ID --arithmetic=float64 --provider=auto \
   --samples=1 --output=/path/to/results/child.toml
 ```
 
-For timing evidence, use `benchmark/fresh_process_runner.jl` with at least
+For timing evidence, use `benchmark/bootstrap/fresh_process_runner.jl` with at least
 three repetitions. Keep every child TOML, TSV, and log. Accept the campaign
 only when aggregation reports matching catalog, fingerprint, route, status,
 objective, iterations, certificate, semantic verdict, and environment.
 
 Run baseline and candidate jobs with identical scheduler resources and compare
-their schema-v8 files using `benchmark/compare.jl`. A failed, dirty, unpaired,
+their schema-v8 files using `benchmark/bootstrap/compare.jl`. A failed, dirty, unpaired,
 or diagnostic campaign is useful for investigation but is not performance
 evidence.

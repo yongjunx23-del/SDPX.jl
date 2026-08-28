@@ -220,7 +220,7 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
 Migrated to native product HSD (`ProductConeHSDState` +
 `product_hsd_cold_start!`/`product_hsd_step!`/`product_hsd_solve!`):
 
-- `benchmark/hsd_allocation.jl`
+- `benchmark/bootstrap/hsd_allocation.jl`
 - `test/hsd_zeroalloc.jl`
 - `test/hsd_direction_lp.jl`
 - `test/hsd_full_newton_oracle.jl`
@@ -278,8 +278,8 @@ benchmark harness route label `:sdpx_legacy` are separate namespaces from the
 `test/la_backend_regressions.jl`, `test/v05_core_invariants.jl`,
 `test/mfla_backend.jl`, `test/dense_augmented_kkt.jl`,
 `test/generic_la_backend.jl`, `test/benchmark_runner.jl` (via `:auto`),
-`benchmark/runner_impl.jl`, `benchmark/fresh_process_campaign.jl`,
-`benchmark/compare_impl.jl`, and `benchmark/README.md`.  These are out of scope
+`benchmark/bootstrap/runner_impl.jl`, `benchmark/bootstrap/fresh_process_campaign.jl`,
+`benchmark/bootstrap/compare_impl.jl`, and `benchmark/README.md`.  These are out of scope
 for the `engine=:legacy` deletion unless the LA-backend vocabulary is also
 retired.
 

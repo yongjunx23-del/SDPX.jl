@@ -4,7 +4,7 @@ using MultiFloats
 using SDPX
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "physics", "smatrix_soc",
+    @__DIR__, "..", "benchmark", "bootstrap", "applications", "smatrix_soc",
     "PaulosSMatrixSOC.jl",
 ))
 using .PaulosSMatrixSOC
@@ -141,11 +141,11 @@ end
 
 @testset "Paulos injected sampled-build-only catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
-        include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+        include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
     harness = Main.PhysicsBenchmarkHarness
     catalog = harness.load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "physics", "smatrix_soc", "catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "applications", "smatrix_soc", "catalog.jl",
     ))
     @test catalog.name == :paulos16_sampled_smatrix_soc
     @test length(harness.catalog_entries(catalog, :scaling)) == 3

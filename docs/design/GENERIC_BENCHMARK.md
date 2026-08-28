@@ -2,7 +2,7 @@
 
 Status: implemented on `agent/bench-generic` (2026-08-28)
 Scope: general-purpose LP/SOCP/SDP/EXP/POWER behavior, deliberately separate from
-`benchmark/bootstrap/` and `benchmark/physics/`.
+`benchmark/bootstrap/` and `benchmark/bootstrap/applications/`.
 
 ## Why these sources
 

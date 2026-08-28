@@ -3,7 +3,7 @@ using SHA
 using SDPX
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "physics", "lattice_bootstrap",
+    @__DIR__, "..", "benchmark", "bootstrap", "applications", "lattice_bootstrap",
     "KZFiniteNLatticeBootstrap.jl",
 ))
 using .KZFiniteNLatticeBootstrap
@@ -290,11 +290,11 @@ end
 
 @testset "KZ injected build-only physics catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
-        include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+        include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
     harness = Main.PhysicsBenchmarkHarness
     catalog = harness.load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "physics", "lattice_bootstrap", "catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "applications", "lattice_bootstrap", "catalog.jl",
     ))
     @test catalog.name == :kz25_finite_n_lattice
     @test length(harness.catalog_entries(catalog, :scaling)) == 3

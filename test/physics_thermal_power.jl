@@ -4,7 +4,7 @@ using MultiFloats
 using SDPX
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "physics", "thermal_power",
+    @__DIR__, "..", "benchmark", "bootstrap", "applications", "thermal_power",
     "GiudiceRenyiPower.jl",
 ))
 using .GiudiceRenyiPower
@@ -147,11 +147,11 @@ end
 
 @testset "Giudice injected build-only catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
-        include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+        include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
     harness = Main.PhysicsBenchmarkHarness
     catalog = harness.load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "physics", "thermal_power", "catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "applications", "thermal_power", "catalog.jl",
     ))
     @test catalog.name == :giudice21_renyi_power
     @test length(harness.catalog_entries(catalog, :scaling)) == 3

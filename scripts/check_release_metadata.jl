@@ -27,7 +27,7 @@ citation_match.captures[1] == VERSION || error(
 
 for relative in (
     "examples/Project.toml",
-    "benchmark/benchenv/Project.toml",
+    "benchmark/bootstrap/benchenv/Project.toml",
     "bin/Project.toml",
     "docs/Project.toml",
 )

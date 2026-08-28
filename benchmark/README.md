@@ -1,10 +1,16 @@
-# SDPX physics benchmark harness
+# SDPX benchmark layout
 
-This directory contains a problem-agnostic measurement harness. Physics
-catalogs own problem selection, coefficient construction, and independent
-validation. The harness owns process isolation, solver measurement, schema-v8
-serialization, and paired comparison. It does not turn a finite benchmark
-catalog into a general correctness or physics claim.
+`benchmark/` holds exactly two top-level directories:
+
+- `generic/` — the generic conic benchmark suite (LP/SOCP/SDP/EXP/POWER
+  corpora, deterministic generators, external-data readers). See
+  `docs/design/GENERIC_BENCHMARK.md` for sources and contracts.
+- `bootstrap/` — the problem-agnostic measurement harness together with the
+  paper-grounded application catalogs. The harness owns process isolation,
+  solver measurement, schema-v8 serialization, and paired comparison; each
+  application catalog owns problem selection, coefficient construction, and
+  independent validation. It does not turn a finite benchmark catalog into a
+  general correctness or physics claim.
 
 Every run has an explicit `execution_mode`: `:build` constructs and validates
 the catalog artifact only, `:solve` executes one solver route, and `:profile`
@@ -18,9 +24,9 @@ Bundled paper-grounded catalogs currently cover Hellerman modular LP, Paulos
 sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP, Kazakov--Zheng
 finite-N lattice-bootstrap SDP, a finite-level Gibbs/KL exponential-cone
 model, and a Giudice maximum-Rényi power-cone model under
-`benchmark/physics/`. Each is explicitly versioned and carries its own
-provenance and semantic validator. The EXP and Power catalogs are deliberately
-build-only until their native solver routes pass the product-HSD gates.
+`benchmark/bootstrap/applications/`. Each is explicitly versioned and carries
+its own provenance and semantic validator. The EXP and Power catalogs are
+deliberately build-only until their native solver routes pass the product-HSD gates.
 
 ## Catalog contract
 
@@ -78,7 +84,7 @@ a scientific benchmark suite.
 ## Canonical runner
 
 ```sh
-julia --project=. benchmark/runner.jl smoke \
+julia --project=. benchmark/bootstrap/runner.jl smoke \
   --problem=smoke/lp_box --arithmetic=float64 --provider=auto \
   --samples=1 --output=/tmp/sdpx-smoke.toml
 ```
@@ -87,7 +93,7 @@ The default is `--execution-mode=solve --engine=auto`, preserving the legacy
 smoke solve. Construction-only validation is explicit:
 
 ```sh
-julia --project=. benchmark/runner.jl smoke \
+julia --project=. benchmark/bootstrap/runner.jl smoke \
   --problem=smoke/lp_box --execution-mode=build --samples=3 \
   --campaign-id=local-build --shard-id=local --output=/tmp/sdpx-build.toml
 ```
@@ -119,7 +125,7 @@ engine route, and campaign/shard identity.
 ## Fresh-process campaigns
 
 ```sh
-julia --project=. benchmark/fresh_process_runner.jl smoke \
+julia --project=. benchmark/bootstrap/fresh_process_runner.jl smoke \
   --problem=smoke/lp_box --arithmetic=float64 --provider=auto \
   --repetitions=3 --threads=1 --blas-threads=1 \
   --campaign-dir=/tmp/sdpx-fresh
@@ -145,7 +151,7 @@ contract) are validated as SHA-256 values.
 ## Paired comparison
 
 ```sh
-julia --project=. benchmark/compare.jl \
+julia --project=. benchmark/bootstrap/compare.jl \
   baseline.toml candidate.toml comparison.tsv
 ```
 

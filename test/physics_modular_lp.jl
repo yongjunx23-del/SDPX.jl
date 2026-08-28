@@ -5,7 +5,7 @@ using MultiFloats
 using SDPX
 
 include(joinpath(
-    @__DIR__, "..", "benchmark", "physics", "modular_lp",
+    @__DIR__, "..", "benchmark", "bootstrap", "applications", "modular_lp",
     "HellermanModularLP.jl",
 ))
 using .HellermanModularLP
@@ -168,11 +168,11 @@ end
 
 @testset "Hellerman injected build-only catalog" begin
     if !isdefined(Main, :PhysicsBenchmarkHarness)
-        include(joinpath(@__DIR__, "..", "benchmark", "PhysicsBenchmarkHarness.jl"))
+        include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "PhysicsBenchmarkHarness.jl"))
     end
     harness = Main.PhysicsBenchmarkHarness
     catalog = harness.load_catalog(joinpath(
-        @__DIR__, "..", "benchmark", "physics", "modular_lp", "catalog.jl",
+        @__DIR__, "..", "benchmark", "bootstrap", "applications", "modular_lp", "catalog.jl",
     ))
     @test catalog.name == :hellerman09_modular_lp
     @test length(harness.catalog_entries(catalog, :scaling)) == 3

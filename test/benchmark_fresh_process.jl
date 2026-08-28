@@ -2,7 +2,7 @@ using Test
 using TOML
 
 if !isdefined(Main, :FreshProcessCampaign)
-    include(joinpath(@__DIR__, "..", "benchmark", "fresh_process_campaign.jl"))
+    include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "fresh_process_campaign.jl"))
 end
 using .FreshProcessCampaign
 

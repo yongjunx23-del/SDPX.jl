@@ -50,7 +50,7 @@ genuine contribution — it stops the next person repeating it.
 
 ## Benchmarks
 
-The canonical benchmark runner is `benchmark/runner.jl`, backed by the
+The canonical benchmark runner is `benchmark/bootstrap/runner.jl`, backed by the
 schema-v7 `PhysicsBenchmarkHarness`. Problem selection and independent physics
 validation live in injected catalog files; the harness owns process isolation,
 measurement, serialization, and paired comparison. CI runs only the bundled
@@ -58,15 +58,15 @@ deterministic smoke catalog. Scientific catalogs and generated inputs are run
 manually and are never downloaded by CI.
 
 ```bash
-julia --project=. benchmark/runner.jl smoke \
+julia --project=. benchmark/bootstrap/runner.jl smoke \
   --problem=smoke/lp_box --arithmetic=float64 --provider=auto \
   --samples=1 --output=/tmp/sdpx-smoke.toml
 ```
 
 Scientific runs must use `--catalog=/absolute/path/catalog.jl`; every catalog
 entry carries provenance, an input fingerprint, a reference policy, and an
-independent semantic validator. Use `benchmark/fresh_process_runner.jl` for at
-least three fresh repetitions and `benchmark/compare.jl` for strict paired
+independent semantic validator. Use `benchmark/bootstrap/fresh_process_runner.jl` for at
+least three fresh repetitions and `benchmark/bootstrap/compare.jl` for strict paired
 comparison. See `benchmark/README.md` for the catalog and result contracts.
 
 ## Comparisons with other solvers
