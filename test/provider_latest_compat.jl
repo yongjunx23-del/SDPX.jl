@@ -241,17 +241,26 @@ end
         end
     end
 
-    @testset "no Float64 downcast on BigFloat provider" begin
-        setprecision(BigFloat, 256) do
-            backend = _expect_bfla_backend()
-            A = _spd(BigFloat, MersenneTwister(0x7114), 4)
-            factor = SDPX.la_cholesky_factor!(
-                backend, SDPX._owned_array_copy(BigFloat, A),
-            )
-            # handle storage must remain BigFloat, never Float64
-            @test SDPX.la_factor_handle_matrix(factor) isa
-                  AbstractMatrix{BigFloat}
-            @test eltype(SDPX.la_factor_handle_matrix(factor)) === BigFloat
+    if _BFLA_LOADED
+        @testset "no Float64 downcast on BigFloat provider" begin
+            setprecision(BigFloat, 256) do
+                backend = _expect_bfla_backend()
+                A = _spd(BigFloat, MersenneTwister(0x7114), 4)
+                factor = SDPX.la_cholesky_factor!(
+                    backend, SDPX._owned_array_copy(BigFloat, A),
+                )
+                # handle storage must remain BigFloat, never Float64
+                @test SDPX.la_factor_handle_matrix(factor) isa
+                      AbstractMatrix{BigFloat}
+                @test eltype(SDPX.la_factor_handle_matrix(factor)) === BigFloat
+            end
+        end
+    else
+        # Honest skip: the no-downcast assertions require a live BFLA
+        # backend, so without the optional provider we must not fabricate a
+        # pass (and must not invoke BFLA planning at all).
+        @testset "no Float64 downcast on BigFloat provider (skipped)" begin
+            @test_skip "BigFloatLinearAlgebra extension not loaded"
         end
     end
 end
