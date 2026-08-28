@@ -18,7 +18,7 @@
 | Phase 2 NewtonSystem | 🔄 ~50% | P2 已实现 NewtonSystem/NewtonRHS/expanded 会话/KKT 冷启动；剩余：spec 文档 + Python/BigFloat oracle + 手工 fixture 形式化 |
 | Phase 3 dense expanded KKT | 🔄 ~50% | expanded_quasidefinite.jl + 正则化/精化已在（P2）；剩余：惯性检查、动态 pivot 正则化、零分配验证 |
 | Phase 4 equilibration/预解/等式/冷启动 | 🔄 ~80%（equilibration/预解/策略 prepared；接线默认路径待大模型验证；KKT 冷启动已落地） |
-| Phase 5 统一 HSD 状态机 | ⏳ 未开始（门项：:expanded 简单模型 iteration-0 缺陷） |
+| Phase 5 统一 HSD 状态机 | ✅ 完成（Wave G/H：状态瘦身、统一邻域/进度、同迭代 route fallback、typed exhaustion；:bordered 仍默认） |
 | Phase 6 sparse / Phase 7 多精度 / Phase 8 assembly+fixq3 | ⏳ v0.8 |
 | Phase 9 API / Phase 10 legacy 删除 | ⏳ v0.9 |
 | **v1.0** | 完成态 = Phase 0–10 全部 + 发布门 |
@@ -1012,6 +1012,28 @@ RSOC 和 Nonpositive 在原坐标中单独验证 reconstruction。
 **周期**
 
 10–15 天。
+
+**Wave G/H closeout（2026-08-28）**
+
+* ✅ `HSDState` 只拥有 embedding 数学状态、方向、残差、trial、计数与诊断；
+  dense/reduced/rank/Schur storage 归 `BorderedHSDWorkspace`，expanded factor
+  storage 归 `ExpandedKKTSession`；
+* ✅ symmetric/nonsymmetric 保留同一 common-step 接受路径；family-gated
+  backtracking 已由统一 64-trial、neighborhood 和 useful-progress 判据替代；
+* ✅ direction/scaling/line-search/耗尽出口维持 certificate-first authority；
+* ✅ expanded factor/solve/refinement 失败可在**同一 HSD iterate**切换 bordered，
+  不重启、不改 frozen equations；
+* ✅ `IterLimit`、`TimeLimit`、`InsufficientPrecision`、`NumericalFailure` 等
+  typed failure 贯穿 product/public termination；证书仍只在原坐标晋升状态；
+* ✅ expanded 默认重评：quick/Phase-0/Wave-D 子集无退化且关闭 tiny SOC/rank-one
+  PSD；完整 opt-in 矩阵中 LP+SOC 从 certified optimal（dual 3.29e-11、gap
+  1.19e-11）退化为 `IterLimit`，SOC+PSD 从 certified optimal（dual 4.10e-11、
+  gap 1.81e-13）退化为 iteration-0 `NumericalFailure`。Expanded 同时关闭
+  bordered 的 RSOC failure，并改变已失败 SOC 的退出类型，净结果 287/9，
+  bordered 基线 290/6，故 **bordered 保持默认**；
+* ✅ Ruiz 已以 `equilibration=:ruiz` 接线但保持 `:off` 默认：mixed probe
+  cond(A) 2.0→√2 且 18/18 迭代等价；CFT probe cond(A) 2.0→10.9293，
+  `:off` 12 迭代 certified optimal，`:ruiz` 400 次 IterLimit。
 
 **并行限制**
 

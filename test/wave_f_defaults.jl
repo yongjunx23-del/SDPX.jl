@@ -1,19 +1,25 @@
 # Wave F — default-route and equilibration decisions (data-driven, recorded).
 #
 # D2 (:expanded default): Wave F originally measured iteration-0 breakdowns on
-#   LP/SOCP/Matrix. Wave G diagnosed premature rejection of the finite adjacent
-#   homogeneous-border inertia and repaired the HSD adapter. Both routes now
-#   return certificate-backed optimal results on all three models. :bordered
-#   remains the default pending the complete Phase 5 matrix; the former simple-
-#   model gate item is closed. Assertions below encode the repaired behavior.
+#   LP/SOCP/Matrix. Wave G repaired the adjacent homogeneous-border inertia.
+#   Wave H reran Phase 0 and Wave D under both routes: every previously green
+#   quick/Phase-0/Wave-D case remains certificate-backed; expanded additionally
+#   closes tiny SOC and rank-one PSD. The complete native opt-in matrix exposes
+#   two regressions on bordered-green cases: LP+SOC goes from certified optimal
+#   (dual residual 3.29e-11, gap 1.19e-11) to IterLimit, and SOC+PSD goes from
+#   certified optimal (dual residual 4.10e-11, gap 1.81e-13) to iteration-0
+#   NumericalFailure. Expanded closes the bordered RSOC failure and changes the
+#   already-failing SOC exit, yielding 287/9 versus the bordered 290/6 baseline.
+#   Therefore bordered remains default; expanded stays selectable for gaps.
 #
-# D1 (equilibration default): MEASURED that cone-preserving Ruiz equilibration
-#   does NOT improve the canonical-A 2-norm condition number on small probes:
-#     - mixed free/PSD/ZeroCone: cond 2.88 -> 4.42
-#     - CFT compiled SDP (42x28, 55 nnz): cond 5.34 -> 21.90
-#   Decision: equilibration stays opt-in; do NOT wire it as default until it
-#   demonstrates conditioning gain on a large bootstrap-scale model. cond(A) is
-#   not a full proxy for KKT conditioning; large-scale validation is required.
+# D3 (equilibration default, Wave H rerun after correcting frozen row-scale
+#   ownership): reduced mixed free/PSD cond(A) improves 2.0 -> sqrt(2), with
+#   both :off/:ruiz optimal at 1.0000000010 in 18 iterations. The compiled CFT
+#   adapter probe regresses: cond(A) 2.0 -> 10.9293; :off is certified optimal
+#   at 10.9292999906 in 12 iterations, while :ruiz reaches IterLimit at 400
+#   without a certificate. Decision: equilibration is wired as explicit
+#   `equilibration=:ruiz` but remains :off by default. One probe regression is
+#   sufficient to fail closed; cond(A) alone is not status authority.
 
 using SDPX
 using Test
@@ -22,7 +28,8 @@ include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.j
 const _BB = Main.BootstrapBenchmark
 
 @testset "wave f defaults" begin
-    # --- D2: :bordered must remain the working default on quick-gate models ---
+    @test SDPX.Settings{Float64}().kkt_route === :bordered
+    # Both routes remain working on the quick-gate subset after G3.
     for (pname, params) in [
         (:lp, (sites=4,)),
         (:socp, (partial_waves=2, grid_points=4, analytic_coefficients=2)),

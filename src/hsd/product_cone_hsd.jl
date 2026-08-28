@@ -2691,6 +2691,79 @@ Execute one native LP/SOC/PSD/Exp/Power product-cone predictor/corrector epoch.
 This is an explicit core API only: it does not assign solver status, recover a
 public result, or fall back to a legacy/lifted route.
 """
+@inline function _product_hsd_bordered_route_direction!(
+    state::ProductConeHSDState{T}, has_nonsymmetric::Bool,
+) where {T}
+    base = state.base
+    if has_nonsymmetric
+        assembled = try
+            _product_hsd_form_coupled_matrix!(state)
+        catch
+            state.coupled.last_reason = COUPLED_ASSEMBLY_NONFINITE
+            false
+        end
+        assembled || return HSDStepDirectionFailed
+        factor_ok = _product_coupled_factorize!(state.coupled, base.epoch)
+        factor_ok || return state.coupled.last_reason === COUPLED_FACTOR_FAILED ?
+                            HSDStepSingularKKT : HSDStepDirectionFailed
+        direction_ok = try
+            _product_hsd_coupled_direction!(state)
+        catch
+            state.coupled.last_reason = COUPLED_FIVE_EQUATION_FAILED
+            false
+        end
+        return direction_ok ? HSDStepOK : HSDStepDirectionFailed
+    end
+
+    border_scalar = try
+        _product_hsd_form_schur_border!(state)
+    catch
+        return HSDStepDirectionFailed
+    end
+    (_hsd_matrix_finite(base.H) && isfinite(border_scalar) &&
+     _product_hsd_vector_finite(base.qr) &&
+     _product_hsd_vector_finite(base.rvec)) || return HSDStepDirectionFailed
+    assembled = try
+        _product_hsd_assemble_bordered!(state, border_scalar)
+    catch
+        state.symmetric_bordered.last_reason =
+            SYMMETRIC_BORDERED_ASSEMBLY_NONFINITE
+        false
+    end
+    assembled || return HSDStepDirectionFailed
+    factor_ok = _product_hsd_factor_bordered!(state)
+    factor_ok || return state.symmetric_bordered.last_reason ===
+                        SYMMETRIC_BORDERED_FACTOR_FAILED ?
+                        HSDStepSingularKKT : HSDStepDirectionFailed
+    direction_ok = try
+        _product_hsd_direction!(state)
+    catch
+        state.symmetric_bordered.last_reason =
+            SYMMETRIC_BORDERED_FIVE_EQUATION_FAILED
+        false
+    end
+    return direction_ok ? HSDStepOK : HSDStepDirectionFailed
+end
+
+@inline function _product_hsd_expanded_fallback_allowed(state::ProductConeHSDState)
+    state.expanded === nothing && return false
+    return state.expanded.status in (
+        EXPANDED_KKT_FACTOR_FAILED,
+        EXPANDED_KKT_WRONG_INERTIA,
+        EXPANDED_KKT_SOLVE_FAILED,
+        EXPANDED_KKT_REFINEMENT_STAGNATED,
+        EXPANDED_KKT_REFINEMENT_AT_FLOOR,
+    )
+end
+
+@inline function _product_hsd_retry_bordered_same_iterate!(
+    state::ProductConeHSDState, has_nonsymmetric::Bool,
+)
+    state.kkt_route = :bordered
+    state.diagnostic = :expanded_to_bordered_same_iterate_fallback
+    return _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
+end
+
 function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     base.rank_ambiguous && return HSDStepDirectionFailed
@@ -2706,67 +2779,27 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     scaling_ok || return HSDStepDirectionFailed
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
-    direction_ok = if state.kkt_route === :expanded
-        try
+    direction_code = if state.kkt_route === :expanded
+        direction_ok = try
             _product_hsd_expanded_direction!(state)
         catch
             false
         end
-    elseif has_nonsymmetric
-        assembled = try
-            _product_hsd_form_coupled_matrix!(state)
-        catch
-            state.coupled.last_reason = COUPLED_ASSEMBLY_NONFINITE
-            false
-        end
-        assembled ||
-            return HSDStepDirectionFailed
-        factor_ok = _product_coupled_factorize!(
-            state.coupled, base.epoch,
-        )
-        if !factor_ok
-            return state.coupled.last_reason === COUPLED_FACTOR_FAILED ?
-                   HSDStepSingularKKT : HSDStepDirectionFailed
-        end
-        try
-            _product_hsd_coupled_direction!(state)
-        catch
-            state.coupled.last_reason = COUPLED_FIVE_EQUATION_FAILED
-            false
+        if direction_ok
+            HSDStepOK
+        elseif _product_hsd_expanded_fallback_allowed(state)
+            # No iterate component has been accepted or mutated at this point:
+            # retry the same residual/scaling epoch through the bordered route.
+            _product_hsd_retry_bordered_same_iterate!(
+                state, has_nonsymmetric,
+            )
+        else
+            HSDStepDirectionFailed
         end
     else
-        border_scalar = try
-            _product_hsd_form_schur_border!(state)
-        catch
-            return HSDStepDirectionFailed
-        end
-        (_hsd_matrix_finite(base.H) && isfinite(border_scalar) &&
-         _product_hsd_vector_finite(base.qr) &&
-         _product_hsd_vector_finite(base.rvec)) ||
-            return HSDStepDirectionFailed
-        assembled = try
-            _product_hsd_assemble_bordered!(state, border_scalar)
-        catch
-            state.symmetric_bordered.last_reason =
-                SYMMETRIC_BORDERED_ASSEMBLY_NONFINITE
-            false
-        end
-        assembled || return HSDStepDirectionFailed
-        factor_ok = _product_hsd_factor_bordered!(state)
-        if !factor_ok
-            return state.symmetric_bordered.last_reason ===
-                   SYMMETRIC_BORDERED_FACTOR_FAILED ?
-                   HSDStepSingularKKT : HSDStepDirectionFailed
-        end
-        try
-            _product_hsd_direction!(state)
-        catch
-            state.symmetric_bordered.last_reason =
-                SYMMETRIC_BORDERED_FIVE_EQUATION_FAILED
-            false
-        end
+        _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
     end
-    direction_ok || return HSDStepDirectionFailed
+    direction_code === HSDStepOK || return direction_code
     accepted = try
         _product_hsd_line_search!(state)
     catch
