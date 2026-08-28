@@ -54,14 +54,16 @@ function _public_normalize_settings(model::Model{T}, settings) where {T<:Abstrac
 end
 
 function _public_validate_algorithm(route::NativeConeRoute, settings::Settings)
-    allowed = route.route === :lp_family ? (:auto, :lp) :
-              route.route === :soc_family ? (:auto, :socp) :
-              route.route === :sdp_family ? (:auto, :sdp) :
-              route.route in (:exp_family, :power_family) ? (:auto,) :
-              (:auto,)
+    # Phase 9: algorithm-family selection is removed from the public surface.
+    # The field is a read-only diagnostic label whose only accepted value is
+    # `:auto`, so this guard is a defensive invariant rather than a routing
+    # decision: it documents that `algorithm` can never change the executed
+    # route or correctness path.
+    allowed = (:auto,)
     settings.algorithm in allowed || throw(ArgumentError(
-        "settings.algorithm=$(settings.algorithm) is incompatible with " *
-        "the classified native route $(route.route); expected one of $allowed",
+        "settings.algorithm=$(settings.algorithm) is deprecated and no " *
+        "longer selectable; expected one of $allowed.  Every public solve " *
+        "executes the native product-HSD engine.",
     ))
     return nothing
 end
@@ -279,8 +281,9 @@ function _public_lower_native(
     settings::Settings,
 )
     # Exp/Power have no family lowerer.  The public native-HSD route is the
-    # only executable path for these asymmetric blocks; the default and
-    # explicit legacy policies remain fail-closed.
+    # only executable path for these asymmetric blocks; the `:auto` default
+    # remains fail-closed for them (the historical `:legacy` engine selector
+    # was removed in Phase 9).
     route.route in (:exp_family, :power_family) && throw(PublicOptimizeError(
         route.route,
         route.route === :exp_family ? :exp_lowerer_unavailable :
@@ -296,7 +299,7 @@ function _public_lower_native(
             route.route,
             :nonsymmetric_lowerer_unavailable,
             "optimize: mixed Exp/Power lowering is not available; " *
-            "the legacy mixed PSD lift does not represent asymmetric cones",
+            "the mixed PSD lift does not represent asymmetric cones",
         ))
     end
     sparse = _public_lowering_sparse(settings.sparse)
@@ -322,11 +325,12 @@ function _public_lower_native(
         # Per the execution plan this is the *fallback* lift route (plan §2.4 /
         # §5.11): it lifts every native cone block to a single block-diagonal
         # PSD cone and solves through the algorithm=:sdp path.  It is the
-        # current default for the non-direct `:auto`/`:legacy` engine only;
-        # the preferred native mixed route is reached explicitly with
-        # `engine=:native_hsd`, which bypasses this lift entirely.  This branch
-        # is retained as the pre-Phase-2 reference path and must be demoted to
-        # an explicit `formulation=:psd_lift` opt-in (and eventually removed at
+        # current default for the non-direct `:auto` engine only (Phase 9
+        # removed the historical `:legacy` engine selector); the preferred
+        # native mixed route is reached explicitly with `engine=:native_hsd`,
+        # which bypasses this lift entirely.  This branch is retained as the
+        # pre-Phase-2 reference path and must be demoted to an explicit
+        # `formulation=:psd_lift` opt-in (and eventually removed at
         # Phase 6) rather than silently claiming to be the first-class route.
         return lower_mixed_psd_native(
             program;
@@ -738,6 +742,16 @@ Family-specific behavior enters only through the reconstructed
 original-coordinate values, the expected diagnostics type, the
 termination info source (core result for LP/SDP, solver diagnostics for
 the native SOC route), and the history payload.
+
+EXECUTION-RECEIPT CONTRACT: every public terminal fact in the returned
+`Result` — `status`, `termination.reason`, `termination.stage`,
+`termination.message`, `iterations`, `execution_plan`, and the compact
+`certificate` summary — is derived exclusively from the single final
+`core_result` returned by the executed solve.  No planning-only value,
+draft result, or speculative fact is consumed here; the certificate is
+recomputed from the actually recovered original-coordinate point and the
+executed core status, and a missing executed termination reason fails
+closed instead of defaulting to a fabricated value.
 """
 function _public_result_from_core(
     model::Model{T},
@@ -775,7 +789,17 @@ function _public_result_from_core(
         core_status_value,
     )
     result_status = core_status_value
-    termination_reason = get(termination_info, :reason, :none)
+    # The executed termination receipt must publish a reason.  Failing closed
+    # here (rather than silently defaulting to :none) keeps the public
+    # termination facts tied to the actual final execution receipt.
+    haskey(termination_info, :reason) || throw(PublicOptimizeError(
+        family,
+        :termination_receipt_incomplete,
+        "optimize: the executed $(family) core result did not publish a " *
+        "termination reason, so public termination facts cannot be derived " *
+        "from the final execution receipt",
+    ))
+    termination_reason = termination_info.reason
     termination_stage = get(termination_info, :stage, :core)
     # Original-coordinate certificate gate.  For `Optimal` this public seam
     # re-verifies the recovered point and downgrades to `NumericalFailure` if
@@ -1770,10 +1794,11 @@ function _optimize_impl(
             warm_start,
         )
     end
-    # `engine=:auto` and `engine=:legacy` otherwise select the native
-    # family-lowering path below.  There is intentionally no separate legacy
-    # Mehrotra engine wired at this seam; legacy remains an explicit symmetric
-    # compatibility policy.
+    # `engine=:auto` otherwise selects the native family-lowering path below.
+    # Phase 9 removed the `:legacy` engine selector from the public surface,
+    # so this branch is reached only by the `:auto` default.  There is
+    # intentionally no separate legacy Mehrotra engine wired at this seam and
+    # no hidden fallback; every executed route is a native route.
     if warm_start !== nothing
         warm_start isa Result || throw(ArgumentError(
             "warm_start must be a previous SDPX Result or nothing",
@@ -1807,9 +1832,16 @@ end
 
 Compile and solve `model` through its single classified native LP, SOC, SDP,
 or primal Exp/Power HSD route. `settings` controls the numerical solve, while
-`outputs` controls which
-result data are retained. The returned `Result` is expressed in the
-original model coordinates.
+`outputs` controls which result data are retained. The returned `Result` is
+expressed in the original model coordinates.
+
+Native product HSD is the only public engine (Phase 9): `engine=:auto` (the
+default) or `engine=:native_hsd` select native execution routes, and the
+historical `:legacy` engine selector is rejected with a migration error.
+`algorithm` is a read-only diagnostic label whose only accepted value is
+`:auto`; it never changes the executed route or correctness path. Public
+`status`, `termination`, and `certificate` facts are derived exclusively
+from the single final execution receipt produced by the executed solve.
 
 For a layout-compatible SDP model whose numerical coefficients have changed,
 `warm_start=previous_result` requests non-mutating continuation from a previous

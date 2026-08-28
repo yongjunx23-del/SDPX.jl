@@ -13,7 +13,7 @@ constraint!(model, :fix_tail, [q[2] - 3, q[3] - 4], ZeroCone())
 objective!(model, Minimize(), q[1])
 result = optimize!(
     model;
-    settings=Settings(model; algorithm=:socp, verbosity=0),
+    settings=Settings(model; verbosity=0),
     outputs=Outputs(:all, :all, :all; objectives=true, certificate=:summary),
 )
 ```

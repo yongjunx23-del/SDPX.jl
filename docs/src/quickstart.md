@@ -36,7 +36,6 @@ objective!(model, Maximize(), w[2])
 
 settings = Settings(
     model;
-    algorithm=:sdp,
     limits=Limits(iterations=200, time=60.0, threads=1),
     verbosity=0,
 )
@@ -64,11 +63,11 @@ The route classifier looks only at the non-free cone families in the model.
 Use one family per model, with `Reals` and `ZeroCone` allowed as auxiliary
 blocks:
 
-| Route | Product/constraint domains | `Settings.algorithm` |
-|---|---|---|
-| LP | `Nonnegative`, `Nonpositive`, `ZeroCone` | `:auto` or `:lp` |
-| native SOC/RSOC | `LorentzCone`, `RotatedLorentzCone`, `ZeroCone` | `:auto` or `:socp` |
-| SDP | `PSDCone`, `ZeroCone` | `:auto` or `:sdp` |
+| Route | Product/constraint domains |
+|---|---|
+| LP | `Nonnegative`, `Nonpositive`, `ZeroCone` |
+| native SOC/RSOC | `LorentzCone`, `RotatedLorentzCone`, `ZeroCone` |
+| SDP | `PSDCone`, `ZeroCone` |
 
 For a native Lorentz model, keep the cone block in Lorentz coordinates:
 
@@ -79,7 +78,7 @@ constraint!(soc, :fix_tail, [q[2] - 3, q[3] - 4], ZeroCone())
 objective!(soc, Minimize(), q[1])
 soc_result = optimize!(
     soc;
-    settings=Settings(soc; algorithm=:socp, verbosity=0),
+    settings=Settings(soc; verbosity=0),
     outputs=Outputs(:all, :all, :all; objectives=true, certificate=:summary),
 )
 @assert status(soc_result) == :optimal
@@ -98,11 +97,15 @@ constraint!(
     PSDCone(),
 )
 objective!(sdp, Minimize(), 2 * X[1, 1] + 3 * X[2, 2])
-sdp_result = optimize!(sdp; settings=Settings(sdp; algorithm=:sdp, verbosity=0))
+sdp_result = optimize!(sdp; settings=Settings(sdp; verbosity=0))
 ```
 
-Choose `algorithm=:lp`, `:socp`, or `:sdp` to match the model family shown in
-the table. `:auto` asks SDPX to select the matching implemented route.
+The default `Settings(; algorithm=:auto)` (the only accepted value)
+asks SDPX to select the matching native route. Algorithm-family selectors
+(`algorithm=:lp`, `:socp`, `:sdp`) are deprecated since Phase 9 and are
+rejected with a migration error: native product HSD is the only public
+engine, and `algorithm` is now a read-only diagnostic label that never
+changes the correctness path.
 
 ## Nearby SDP continuation
 
@@ -160,11 +163,13 @@ initialization. It cannot be combined with explicit starts attached through
 
 `Settings{T}` is the typed policy boundary. The most useful fields are
 `tolerances=Tolerances{T}(; primal=..., dual=..., gap=...)`,
-`limits=Limits(; iterations=..., time=..., threads=...)`, `algorithm`,
+`limits=Limits(; iterations=..., time=..., threads=...)`, `engine`,
 `presolve`, `scaling`, `sparse`, `formulation`, `provider`,
 `equality_solver`, `working_precision_policy`, `diagnostics`, `verbosity`,
-`timing`, `certification`, and `blas_threads`. Public formulation names are
-`:auto`, `:variable_space_schur`, and `:dense_augmented_kkt`; unsupported
+`timing`, `certification`, and `blas_threads`. `engine` accepts only
+`:auto` or `:native_hsd`; `algorithm` is a read-only diagnostic label whose
+only accepted value is `:auto`. Public formulation names are `:auto`,
+`:variable_space_schur`, and `:dense_augmented_kkt`; unsupported
 combinations fail closed.
 
 `Outputs` controls `:all`/`:none` (or typed reference vectors) for `primal`,

@@ -76,13 +76,23 @@ pass.
 
 Common raw keywords include `tolerance`, `max_iterations`, `time_limit`,
 `threads`, `precision`, `verbosity`, and `sparse`.
+
+Phase-9 engine policy: the wrapper is one-shot and non-incremental
+(`MOI.supports_incremental_interface` is `false`), and native product HSD is
+the only engine.  The raw `"engine"` attribute accepts only `:auto` (the
+default) or `:native_hsd`; the historical `:legacy` selector is rejected with
+a migration error.  The raw `"algorithm"` attribute accepts only `:auto`;
+family selectors (`:lp`, `:socp`, `:sdp`) are deprecated and rejected.
+Exponential- and power-cone constraints stay fail-closed: they are not part
+of the supported MOI function/set surface and fail during discovery or copy.
 """
 mutable struct Optimizer{T<:AbstractFloat} <: MOI.AbstractOptimizer
     options::SolverOptions{T}
     # Public engine selector.  This is deliberately separate from the
     # historical SolverOptions record: SolverOptions predates the direct HSD
-    # route, while Settings owns the authoritative `:auto/:native_hsd/:legacy`
-    # policy consumed by public optimize!.
+    # route, while Settings owns the authoritative `:auto/:native_hsd`
+    # policy consumed by public optimize!.  Phase 9 removed the `:legacy`
+    # engine selector from the public surface.
     engine::Symbol
     # v0.5 authoritative builder/result seam.  The adapter is included after
     # public/result.jl, so this field is the concrete public Result boundary.
@@ -193,10 +203,20 @@ end
 
 function _set_raw_option!(optimizer::Optimizer, name::String, value)
     if name == "engine"
-        value isa Symbol && value in (:auto, :native_hsd, :legacy) ||
+        value isa Symbol || throw(ArgumentError(
+            "MOI engine must be a Symbol (:auto or :native_hsd)",
+        ))
+        if value == :legacy
             throw(ArgumentError(
-                "MOI engine must be :auto, :native_hsd, or :legacy",
+                "engine=:legacy is deprecated and no longer selectable: " *
+                "native product HSD is the only public engine.  Use " *
+                "engine=:auto or engine=:native_hsd.  There is no hidden " *
+                "legacy fallback on the MOI surface.",
             ))
+        end
+        value in (:auto, :native_hsd) || throw(ArgumentError(
+            "MOI engine must be :auto or :native_hsd, got $(repr(value))",
+        ))
         optimizer.engine = value
         return nothing
     end
@@ -207,6 +227,14 @@ function _set_raw_option!(optimizer::Optimizer, name::String, value)
         return nothing
     end
     symbol = _option_symbol(optimizer.options, name)
+    if symbol === :algorithm && value !== :auto
+        throw(ArgumentError(
+            "algorithm=$(repr(value)) is deprecated: algorithm-family " *
+            "selection no longer exists because every MOI solve executes " *
+            "the native product-HSD engine.  Use algorithm=:auto (the only " *
+            "accepted value).",
+        ))
+    end
     if symbol === :threads
         value isa Integer && value > 0 ||
             throw(ArgumentError("threads must be a positive integer"))
@@ -1855,9 +1883,9 @@ function bridge_plan(optimizer::Optimizer)
         only(families)
     else
         # A heterogeneous symmetric-cone product (LP+SOC, SOC+PSD, LP+PSD).
-        # Under the non-direct `:auto`/`:legacy` engine this is served by the
-        # universal PSD lift as a *fallback* route (plan §2.4/§5.11); the
-        # preferred native mixed route is `engine=:native_hsd`.
+        # Under the non-direct `:auto` engine this is served by the universal
+        # PSD lift as a *fallback* route (plan §2.4/§5.11); the preferred
+        # native mixed route is `engine=:native_hsd`.
         :mixed_family
     end
     return (
