@@ -8,8 +8,9 @@
 #                       -> product_hsd_solve!
 #
 # It never invokes a family lowerer, PSD lift, legacy solver, presolve,
-# sparse route, provider retry, or hidden fallback. Frozen Ruiz equilibration
-# is available only through the explicit native setting. The
+# provider retry, or hidden fallback. The explicit sparse KKT route remains
+# inside this native engine and reports its typed same-iterate fallback. Frozen
+# Ruiz equilibration is available only through the explicit native setting. The
 # exported public entry point remains in `public/optimize.jl`; this file owns
 # the typed plan/core records, policy gate, direct execution, reconstruction,
 # and original-coordinate ray certificates used by that entry point.
