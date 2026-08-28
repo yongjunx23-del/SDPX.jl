@@ -34,6 +34,13 @@ struct BlockIncidenceDescriptor
     # maps the tile entry (active_columns[i_pos], active_columns[j_pos]) to
     # its frozen slot in the Schur CSC `nzval`.
     tile_slots::Vector{Int}
+    # PSD congruence dimension: `k >= 3` when the block's row count is the
+    # triangular number k(k+1)/2 and therefore structurally eligible for the
+    # panelized congruence assembly; zero otherwise.  `k == 2` (row count 3)
+    # is excluded because a three-row block is ambiguous between a 2×2 PSD
+    # cone and a three-dimensional Lorentz cone.  Numeric verification of
+    # the congruence structure happens at assembly setup (structural epoch).
+    psd_k::Int
 end
 
 """
@@ -48,6 +55,9 @@ Immutable structural plan for one sparse reduced-Schur setup.  Fields:
   * `border_column_slots` — frozen slots of the border entries `(j, n+1)`;
   * `border_row_slots` — frozen slots of the border entries `(n+1, j)`;
   * `border_diagonal_slot` — frozen slot of `(n+1, n+1)`;
+  * `psd_blocks` — plan block indices whose descriptor carries `psd_k >= 3`
+    (PSD congruence assembly candidates; activation is gated by numeric
+    verification at structural-epoch setup);
   * `signature` — deterministic structural pattern signature.
 """
 struct BlockIncidencePlan
@@ -61,6 +71,7 @@ struct BlockIncidencePlan
     border_column_slots::Vector{Int}
     border_row_slots::Vector{Int}
     border_diagonal_slot::Int
+    psd_blocks::Vector{Int}
     signature::UInt64
 end
 
@@ -146,6 +157,19 @@ function _schur_slot_column(colptr::AbstractVector{Int}, slot::Int)
     return searchsortedlast(colptr, slot)
 end
 
+"""PSD congruence dimension of a block with `row_count` rows: the integer
+`k >= 2` with `row_count == k(k+1)/2`, or zero.  `k == 2` is structurally
+ambiguous with a three-dimensional Lorentz cone and is never eligible."""
+function _psd_congruence_k(row_count::Int)
+    row_count >= 1 || return 0
+    d = 8 * row_count + 1
+    s = isqrt(d)
+    s * s == d || return 0
+    (s - 1) % 2 == 0 || return 0
+    k = (s - 1) >>> 1
+    return k >= 2 ? k : 0
+end
+
 """
     build_block_incidence_plan(system::NewtonSystem) -> BlockIncidencePlan
 
@@ -183,7 +207,7 @@ function build_block_incidence_plan(system::NewtonSystem)
             push!(pattern_j, column)
         end
         descriptors[block_index] = BlockIncidenceDescriptor(
-            block, active, colptr, local_rows, Int[],
+            block, active, colptr, local_rows, Int[], _psd_congruence_k(length(block)),
         )
     end
     # Border structure is frozen independently of current numerical zeros.
@@ -221,16 +245,21 @@ function build_block_incidence_plan(system::NewtonSystem)
         descriptors[block_index] = BlockIncidenceDescriptor(
             descriptor.rows, descriptor.active_columns,
             descriptor.colptr, descriptor.local_rows, tile_slots,
+            descriptor.psd_k,
         )
     end
     border_column_slots = [lookup[(column, n + 1)] for column in 1:n]
     border_row_slots = [lookup[(n + 1, column)] for column in 1:n]
     border_diagonal_slot = lookup[(n + 1, n + 1)]
+    psd_blocks = Int[
+        block_index for (block_index, descriptor) in enumerate(descriptors)
+        if descriptor.psd_k >= 3
+    ]
     plan = BlockIncidencePlan(
         m, n, dimension, ranges, descriptors,
         schur_colptr, schur_rowval,
         border_column_slots, border_row_slots, border_diagonal_slot,
-        signature,
+        psd_blocks, signature,
     )
     validate_block_incidence_plan(plan, system)
     return plan
@@ -270,6 +299,10 @@ function validate_block_incidence_plan(
         descriptor.rows == plan.block_ranges[block_index] ||
             throw(ArgumentError(
                 "block descriptor rows drift from the frozen cone ranges",
+            ))
+        descriptor.psd_k == _psd_congruence_k(length(descriptor.rows)) ||
+            throw(ArgumentError(
+                "block descriptor PSD congruence dimension disagrees with its rows",
             ))
         active = descriptor.active_columns
         colptr = descriptor.colptr
@@ -333,6 +366,14 @@ function validate_block_incidence_plan(
             "border diagonal slot does not match (n+1, n+1)",
         ))
     covered[slot] = true
+    for block_index in plan.psd_blocks
+        1 <= block_index <= length(plan.descriptors) || throw(ArgumentError(
+            "plan PSD block index out of range",
+        ))
+        plan.descriptors[block_index].psd_k >= 3 || throw(ArgumentError(
+            "plan PSD block index does not reference an eligible descriptor",
+        ))
+    end
     all(covered) || throw(ArgumentError(
         "frozen Schur pattern has slots without a block tile or border owner",
     ))

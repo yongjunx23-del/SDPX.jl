@@ -51,6 +51,14 @@ increments once for each *successfully certified* sparse predictor/corrector
 epoch.  `factor_attempt_count` counts every numeric attempt (including failed
 or condition-rejected ones); a failed attempt never increments
 `numeric_factor_count` and never builds a receipt.
+
+PSD congruence panels are owned by the session: `psd_panels`/`psd_panel_blocks`
+hold one typed panel per verified PSD block (prepacked once at the structural
+epoch, keyed by the frozen plan signature), `psd_panel_epoch` is the current
+scaling epoch, and `psd_panel_slot` maps each plan block index to its panel
+slot (zero = generic assembly).  Every numeric assembly that changes the block
+operators advances `psd_panel_epoch`; panels rebuild their congruence only
+when their stored epoch differs.
 """
 mutable struct SparseSchurSession{T<:AbstractFloat}
     n::Int
@@ -85,6 +93,12 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     numeric_factor_count::Int
     factor_attempt_count::Int
     pattern_reuse_count::Int
+    psd_panels::Vector{PSDCongruencePanel{T}}
+    psd_panel_scratch::Vector{PSDPanelEpochScratch{T}}
+    psd_panel_blocks::Vector{Int}
+    psd_panel_slot::Vector{Int}
+    psd_panel_backend::Union{Nothing,AbstractLABackend}
+    psd_panel_epoch::Int
     regularization::T
     reciprocal_condition::T
     condition_floor::T
@@ -110,6 +124,8 @@ function SparseSchurSession(::Type{T}, n::Int, m::Int) where {T<:AbstractFloat}
         T[], T[], T[], T[], 0,
         zeros(T, n), zeros(T, n),
         0, 0, 0, 0, 0, 0,
+        PSDCongruencePanel{T}[], PSDPanelEpochScratch{T}[], Int[], Int[],
+        StandardLABackend(_la_arithmetic_symbol(T)), 0,
         zero(T), zero(T), sqrt(eps(T)),
         T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         SPARSE_SCHUR_READY, :none,
@@ -234,8 +250,74 @@ function _setup_block_incidence_plan!(
     session.block_hinv_delta = zeros(T, maximum_block_dimension)
     session.block_column_work = zeros(T, maximum_block_dimension)
     session.pattern_signature = plan.signature
+    _setup_psd_panels!(session, system, plan)
     session.structural_assembly_count = 1
     return true
+end
+
+"""
+    _setup_psd_panels!(session, system, plan)
+
+Structural-epoch PSD panel prepack (once per PSD block, keyed by the frozen
+plan): for every plan block whose descriptor is structurally eligible
+(`psd_k >= 3`), verify numerically that the block operator is a PSD
+congruence operator and prepack the panel from the frozen A-block CSC
+positions.  Blocks that fail verification keep the generic assembly
+(unchanged behavior); a verified PSD block is removed from the generic
+pair loop and assembled by the congruence panels in every later numeric
+epoch.  This is the only prepack site, so `psd_panel_epoch` still starts at
+zero and the first numeric assembly performs the first congruence rebuild.
+"""
+function _setup_psd_panels!(
+    session::SparseSchurSession{T}, system::NewtonSystem{T},
+    plan::BlockIncidencePlan,
+) where {T<:AbstractFloat}
+    panels = PSDCongruencePanel{T}[]
+    scratch = PSDPanelEpochScratch{T}[]
+    panel_blocks = Int[]
+    slot = zeros(Int, length(plan.descriptors))
+    for block_index in plan.psd_blocks
+        descriptor = plan.descriptors[block_index]
+        k = descriptor.psd_k
+        k >= 3 || continue
+        block_scratch = psd_panel_epoch_scratch(T, k)
+        block_H = product_cone_block_operator(system.cone, block_index)
+        psd_operator_congruence_verified!(block_scratch, block_H, k) ||
+            continue
+        panel = PSDCongruencePanel{T}(
+            block_index, k, copy(descriptor.active_columns),
+        )
+        prepack_psd_panel!(
+            panel, system.A, descriptor.rows,
+            descriptor.colptr, descriptor.local_rows, k,
+        )
+        slot[block_index] = length(panels) + 1
+        push!(panels, panel)
+        push!(scratch, block_scratch)
+        push!(panel_blocks, block_index)
+    end
+    session.psd_panels = panels
+    session.psd_panel_scratch = scratch
+    session.psd_panel_blocks = panel_blocks
+    session.psd_panel_slot = slot
+    session.psd_panel_epoch = 0
+    return true
+end
+
+"""Cumulative PSD panel accounting of one sparse session (prepacks, rebuilds,
+prepack/rebuild bytes, and Schur tile writes), for trace projection."""
+function sparse_schur_session_psd_panel_diagnostics(
+    session::SparseSchurSession,
+)
+    stats = psd_panel_stats(session.psd_panels)
+    return (
+        psd_panel_blocks=length(session.psd_panels),
+        psd_panel_prepacks=stats.prepacks,
+        psd_panel_rebuilds=stats.rebuilds,
+        psd_panel_prepack_bytes=stats.prepack_bytes,
+        psd_panel_rebuild_bytes=stats.rebuild_bytes,
+        psd_panel_tile_writes=stats.tiles,
+    )
 end
 
 """Assemble numeric reduced operator values into the frozen plan slots."""
@@ -272,6 +354,9 @@ function assemble_sparse_schur_operator!(
     schur_nzval = session.schur.nzval
 
     for (block_index, descriptor) in enumerate(plan.descriptors)
+        # PSD congruence panels own their block's tile, border, and recovery
+        # work; the generic dense pair loop below never touches those blocks.
+        session.psd_panel_slot[block_index] > 0 && continue
         block = descriptor.rows
         dimension = length(block)
         block_H = product_cone_block_operator(system.cone, block_index)
@@ -327,6 +412,66 @@ function assemble_sparse_schur_operator!(
         @inbounds for local_row in 1:dimension
             btHb += system.b[block[local_row]] *
                     session.block_hinv_b[local_row]
+        end
+    end
+
+    # PSD congruence panels: authoritative Schur tiles written directly into
+    # the frozen CSC slots plus the border contributions, without any block
+    # inverse.  Each numeric assembly is one scaling epoch; a panel rebuilds
+    # its congruence only when its stored epoch differs from the session's.
+    if !isempty(session.psd_panels)
+        backend = session.psd_panel_backend
+        session.psd_panel_epoch += 1
+        epoch = session.psd_panel_epoch
+        @inbounds for (slot, block_index) in enumerate(session.psd_panel_blocks)
+            descriptor = plan.descriptors[block_index]
+            panel = session.psd_panels[slot]
+            scratch = session.psd_panel_scratch[slot]
+            block = descriptor.rows
+            k = panel.k
+            block_H = product_cone_block_operator(system.cone, block_index)
+            if psd_panel_scaling_epoch(panel) != epoch
+                try
+                    P, Pinv = psd_operator_congruence_factors!(
+                        scratch, block_H, k,
+                    )
+                    update_psd_panel_congruence!(backend, panel, P, Pinv)
+                catch exception
+                    exception isa InterruptException && rethrow()
+                    exception isa DomainError || rethrow()
+                    return _invalidate_sparse_schur_factor!(
+                        session, SPARSE_SCHUR_FACTOR_FAILED,
+                        :cone_block_singular,
+                    )
+                end
+            end
+            psd_panel_schur_tile_slots!(
+                backend, schur_nzval, panel, descriptor.tile_slots,
+            )
+            # Border: svec(P⁻¹·b·P⁻¹) through the congruence inverse action,
+            # then the frozen-CSC svec dots (the same values the generic path
+            # obtains from block_hinv_b).
+            b_block = @view system.b[block]
+            psd_panel_apply_inverse!(
+                scratch, backend, scratch.svec_a, b_block, k,
+            )
+            active = descriptor.active_columns
+            colptr = descriptor.colptr
+            local_rows = descriptor.local_rows
+            for j_pos in eachindex(active)
+                column_j = active[j_pos]
+                value_b = zero(T)
+                @inbounds for pointer in
+                    colptr[j_pos]:(colptr[j_pos + 1] - 1)
+                    local_row = local_rows[pointer]
+                    value_b += system.A[block[local_row], column_j] *
+                               scratch.svec_a[local_row]
+                end
+                atb[column_j] += value_b
+            end
+            @inbounds for local_row in 1:length(block)
+                btHb += system.b[block[local_row]] * scratch.svec_a[local_row]
+            end
         end
     end
     @inbounds for column in 1:n
@@ -439,6 +584,7 @@ function assemble_sparse_schur_operator_reference!(
                     session.block_hinv_b[local_row]
         end
     end
+
     @inbounds for column in 1:n
         schur_nzval[plan.border_column_slots[column]] =
             system.c[column] - atb[column]
@@ -486,19 +632,31 @@ function assemble_sparse_schur_rhs!(
     for (block_index, descriptor) in enumerate(plan.descriptors)
         block = descriptor.rows
         dimension = length(block)
-        block_inverse = session.block_inverses[block_index]
         @inbounds for local_row in 1:dimension
             delta = system.rhs.cone_corrector[block[local_row]] -
                     system.rhs.primal_affine[block[local_row]]
             session.block_rhs_delta[local_row] = delta
         end
-        @inbounds for local_row in 1:dimension
-            value = zero(T)
-            for local_column in 1:dimension
-                value += block_inverse[local_row, local_column] *
-                         session.block_rhs_delta[local_column]
+        panel_slot = session.psd_panel_slot[block_index]
+        if panel_slot > 0
+            # PSD congruence panel: H_b⁻¹·delta = svec(P⁻¹·svec⁻¹(δ)·P⁻¹)
+            # through the panel's congruence factors (no block inverse).
+            scratch = session.psd_panel_scratch[panel_slot]
+            panel = session.psd_panels[panel_slot]
+            psd_panel_apply_inverse!(
+                scratch, session.psd_panel_backend,
+                session.block_hinv_delta, session.block_rhs_delta, panel.k,
+            )
+        else
+            block_inverse = session.block_inverses[block_index]
+            @inbounds for local_row in 1:dimension
+                value = zero(T)
+                for local_column in 1:dimension
+                    value += block_inverse[local_row, local_column] *
+                             session.block_rhs_delta[local_column]
+                end
+                session.block_hinv_delta[local_row] = value
             end
-            session.block_hinv_delta[local_row] = value
         end
         active = descriptor.active_columns
         colptr = descriptor.colptr
@@ -716,6 +874,23 @@ function solve_sparse_schur!(
     return _invalidate_sparse_schur_factor!(session, status, reason)
 end
 
+"""Shared `q = A·dx + h + rP - b·dτ` recovery source vector."""
+function _reduced_direction_rhs!(
+    rhs_for_dy::AbstractVector{T}, system::NewtonSystem{T},
+    dx::AbstractVector{T}, dtau::T,
+) where {T<:AbstractFloat}
+    m, n = size(system.A)
+    @inbounds for i in 1:m
+        rhs_for_dy[i] = system.rhs.cone_corrector[i] -
+                        system.rhs.primal_affine[i]
+        for j in 1:n
+            rhs_for_dy[i] += system.A[i, j] * dx[j]
+        end
+        rhs_for_dy[i] -= system.b[i] * dtau
+    end
+    return rhs_for_dy
+end
+
 """Recover a full semantic direction using caller-owned block inverses."""
 function _recover_reduced_direction(
     system::NewtonSystem{T}, condensed::AbstractVector{T},
@@ -732,14 +907,7 @@ function _recover_reduced_direction(
     dx = copy(@view condensed[1:n])
     dtau = condensed[n + 1]
     rhs_for_dy = zeros(T, m)
-    @inbounds for i in 1:m
-        rhs_for_dy[i] = system.rhs.cone_corrector[i] -
-                        system.rhs.primal_affine[i]
-        for j in 1:n
-            rhs_for_dy[i] += system.A[i, j] * dx[j]
-        end
-        rhs_for_dy[i] -= system.b[i] * dtau
-    end
+    _reduced_direction_rhs!(rhs_for_dy, system, dx, dtau)
     dy = zeros(T, m)
     for (block_index, block) in enumerate(ranges)
         block_inverse = block_inverses[block_index]
@@ -776,9 +944,54 @@ function recover_reduced_direction(
     ))
     _block_incidence_source_signature(system) == plan.signature ||
         throw(ArgumentError("reduced recovery source pattern drift"))
-    return _recover_reduced_direction(
-        system, condensed, session.block_inverses,
-    )
+    m, n = size(system.A)
+    length(condensed) == n + 1 || throw(DimensionMismatch(
+        "reduced solution dimension mismatch",
+    ))
+    ranges = product_cone_block_ranges(system.cone)
+    length(session.block_inverses) == length(ranges) || throw(DimensionMismatch(
+        "reduced recovery block inverse count mismatch",
+    ))
+    dx = copy(@view condensed[1:n])
+    dtau = condensed[n + 1]
+    rhs_for_dy = zeros(T, m)
+    _reduced_direction_rhs!(rhs_for_dy, system, dx, dtau)
+    dy = zeros(T, m)
+    for (block_index, block) in enumerate(ranges)
+        panel_slot = session.psd_panel_slot[block_index]
+        if panel_slot > 0
+            # PSD congruence panel: dy_block = H_b⁻¹·q_block through the
+            # panel's congruence factors (no block inverse).
+            scratch = session.psd_panel_scratch[panel_slot]
+            panel = session.psd_panels[panel_slot]
+            psd_panel_apply_inverse!(
+                scratch, session.psd_panel_backend,
+                @view(dy[block]), @view(rhs_for_dy[block]), panel.k,
+            )
+        else
+            block_inverse = session.block_inverses[block_index]
+            dimension = length(block)
+            size(block_inverse) == (dimension, dimension) ||
+                throw(DimensionMismatch(
+                    "reduced recovery block inverse dimensions disagree",
+                ))
+            @inbounds for local_row in 1:dimension
+                value = zero(T)
+                for local_column in 1:dimension
+                    value += block_inverse[local_row, local_column] *
+                             rhs_for_dy[block[local_column]]
+                end
+                dy[block[local_row]] = value
+            end
+        end
+    end
+    ds = zeros(T, m)
+    apply_cone_linearization!(ds, system.cone, dy)
+    @inbounds for i in 1:m
+        ds[i] = system.rhs.cone_corrector[i] - ds[i]
+    end
+    dkappa = (system.rhs.tau_kappa - system.kappa * dtau) / system.tau
+    return NewtonDirection(dx, dy, ds, dtau, dkappa)
 end
 
 function recover_reduced_direction(

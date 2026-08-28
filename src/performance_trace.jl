@@ -598,6 +598,12 @@ function _counter_facts(result::SDPResult)
         fixed_direction_recoveries=_project_field(
             result.termination, :fixed_direction_recoveries,
         ),
+        psd_panel_blocks=_project_field(sparse, :psd_panel_blocks),
+        psd_panel_prepacks=_project_field(sparse, :psd_panel_prepacks),
+        psd_panel_rebuilds=_project_field(sparse, :psd_panel_rebuilds),
+        psd_panel_prepack_bytes=_project_field(sparse, :psd_panel_prepack_bytes),
+        psd_panel_rebuild_bytes=_project_field(sparse, :psd_panel_rebuild_bytes),
+        psd_panel_tile_writes=_project_field(sparse, :psd_panel_tile_writes),
     )
 end
 
@@ -675,6 +681,14 @@ function _counter_facts(result::ConicResult)
         fixed_rhs_contractions=_project_field(termination, :fixed_rhs_contractions),
         fixed_direction_recoveries=
             _project_field(termination, :fixed_direction_recoveries),
+        psd_panel_blocks=_project_field(termination, :psd_panel_blocks),
+        psd_panel_prepacks=_project_field(termination, :psd_panel_prepacks),
+        psd_panel_rebuilds=_project_field(termination, :psd_panel_rebuilds),
+        psd_panel_prepack_bytes=
+            _project_field(termination, :psd_panel_prepack_bytes),
+        psd_panel_rebuild_bytes=
+            _project_field(termination, :psd_panel_rebuild_bytes),
+        psd_panel_tile_writes=_project_field(termination, :psd_panel_tile_writes),
     )
 end
 
