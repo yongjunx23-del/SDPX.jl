@@ -19,6 +19,8 @@ GenericLinearAlgebra = "14197337-ba66-59df-a3e3-ca00e7dcff7a"
 JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 MultiFloatLinearAlgebra = "642d9d30-8e28-45ca-9d81-256429ea358f"
 MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+PureKLU = "0c0d3e7f-3a8b-4f7e-b6f1-9a4d2e7c1f01"
+QDLDL = "bfc457fd-c171-5ab7-bd9e-d5dbfc242d63"
 
 [extensions]
 SDPXAppleAccelerateExt = "AppleAccelerate"
@@ -27,6 +29,8 @@ SDPXGenericLinearAlgebraExt = "GenericLinearAlgebra"
 SDPXJLD2Ext = "JLD2"
 SDPXMultiFloatLinearAlgebraExt = ["MultiFloats", "MultiFloatLinearAlgebra"]
 SDPXMultiFloatsExt = "MultiFloats"
+SDPXPureKLUExt = "PureKLU"
+SDPXQDLDLExt = "QDLDL"
 
 [compat]
 AppleAccelerate = "0.7"
@@ -43,6 +47,8 @@ MultiFloatLinearAlgebra = "0.1, 0.2, 0.3"
 MultiFloats = "3"
 MutableArithmetics = "1"
 Printf = "1"
+PureKLU = "1.4"
+QDLDL = "0.4"
 Random = "1"
 SHA = "0.7"
 Serialization = "1"

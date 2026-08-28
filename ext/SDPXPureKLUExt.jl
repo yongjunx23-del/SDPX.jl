@@ -1,12 +1,17 @@
 #=====================================================================
-    SDPXPureKLUExt — narrow PureKLU adapter prototype (provider spike)
+    SDPXPureKLUExt — narrow PureKLU candidate adapter
 
-    Prototype status: NOT a production provider. It is not registered as
-    a weak dependency, is not wired into any SDPX KKT route, and is not
-    part of the public API. It exists to validate PureKLU 1.4.1 against
-    the exact nonsymmetric sparse Newton operators described in
-    docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md (promotion gates 1–7,
-    9). See docs/evidence/pureklu_provider_spike.md for results.
+    Candidate-adapter status: PureKLU 1.4.x is registered as an optional
+    SDPX weak dependency / extension in Project.toml, and this module is
+    the candidate adapter for exact nonsymmetric sparse LU with generic
+    scalar arithmetic. It is still NOT wired into any SDPX KKT or HSD
+    route and is not part of the public API; this registration task adds
+    the Project.toml weakdep/extension entries and the capability facts
+    in src/la/sparse_capabilities.jl only. The adapter was validated
+    against PureKLU 1.4.1 on the exact nonsymmetric sparse Newton
+    operators described in docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md
+    (promotion gates 1–7, 9). See docs/evidence/pureklu_provider_spike.md
+    for results.
 
     Responsibilities (narrow):
       * exact general/nonsymmetric sparse LU with separated symbolic
@@ -54,6 +59,11 @@ using LinearAlgebra
 
 import PureKLU
 import PureKLU: klu, klu!, klu_analyze!, klu_factor!, solve!, KLUFactorization
+
+# Registered in src/la/sparse_capabilities.jl: loading this extension is
+# the only way the PureKLU provider becomes available; until then core
+# reports it absent (fail closed / honest unavailable).
+SDPX.sparse_provider_loaded(::Val{:pureklu}) = true
 
 export PureKLUSession,
     PUREKLU_READY, PUREKLU_ANALYZED, PUREKLU_FACTORED,

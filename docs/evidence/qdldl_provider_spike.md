@@ -1,7 +1,10 @@
 # QDLDL 0.4.1 sparse companion inertia provider spike
 
-Status: parallel prototype evidence, 2026-08-28, Julia 1.12.6, macos arm64.
-Base: `main` @ `c7a912dd91e12a25bd4b90b3eca2c2283ee41dd5`.
+Status: parallel spike evidence, 2026-08-28, Julia 1.12.6, macos arm64.
+Base: `main` @ `c7a912dd91e12a25bd4b90b3eca2c2283ee41dd5`. QDLDL 0.4.x is now
+an optional SDPX weak dependency / extension in `Project.toml` (branch
+`agent/highprecision-sparse-capabilities`), and `ext/SDPXQDLDLExt.jl` is the
+candidate adapter (still not wired into any KKT route or HSD dispatch).
 
 Scope: validate QDLDL 0.4.1 (`osqp/QDLDL.jl`) as the symmetric
 signed-regularized quasidefinite **companion inertia** provider for the
@@ -11,8 +14,9 @@ v0.2.2 (local checkout) only, as evidence. No provider library was modified.
 
 Deliverables (this branch `agent/qdldl-provider-spike`):
 
-- `ext/SDPXQDLDLExt.jl` — narrow adapter prototype (parallel only, not
-  registered in `Project.toml`; loaded by the spike driver with `include`).
+- `ext/SDPXQDLDLExt.jl` — narrow adapter (originally a parallel prototype
+  loaded by the spike driver with `include`; now registered as the
+  candidate adapter extension in `Project.toml`).
 - `test/provider_spikes/qdldl_sparse.jl` — validation driver (322 tests).
 - This evidence document.
 
