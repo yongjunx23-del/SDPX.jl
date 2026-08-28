@@ -311,6 +311,68 @@ function _dense_lp_matrix(::Type{T}) where {T}
     return G
 end
 
+function _owned_matrix(::Type{T}) where {T}
+    # Independent owned matrix with a nontrivial pivot pattern so the
+    # provider's row swaps are exercised.
+    A = SDPX.alloc_zeros(T, 3, 3)
+    A[1, 1] = T(1); A[1, 2] = T(2); A[1, 3] = T(3)
+    A[2, 1] = T(4); A[2, 2] = T(5); A[2, 3] = T(6)
+    A[3, 1] = T(7); A[3, 2] = T(8); A[3, 3] = T(10)
+    return A
+end
+
+function _exercise_provider_lp_lu(::Type{T}) where {T}
+    # Direct FactorCache protocol through the MFLA/BFLA-backed bordered route.
+    SDPX._provider_lp_lu_supported(T) || error("provider LU unsupported for $T")
+    route = SDPX.ProviderLPLUCache{T}(3)
+    SDPX.prepare!(route, SDPX.FactorRequirements(3))
+    A = _owned_matrix(T)
+    # Independent owned RHS vectors (BigFloat `T[...]` literals alias shared
+    # objects, so build them owned).
+    b1 = SDPX.alloc_zeros(T, 3)
+    b1[1] = T(14); b1[2] = T(32); b1[3] = T(50)
+    b2 = SDPX.alloc_zeros(T, 3)
+    b2[1] = T(1); b2[2] = T(2); b2[3] = T(3)
+    reference = _owned_matrix(T)
+    # BigFloat `\` mutates its matrix argument and `copy` is shallow, so a
+    # fresh owned copy is required for the reference solve.
+    reference_solver = SDPX.alloc_zeros(T, 3, 3)
+    SDPX.copy_owned!(reference_solver, reference)
+    ref1 = SDPX.alloc_zeros(T, 3); SDPX.copy_owned!(ref1, b1)
+    ref2 = SDPX.alloc_zeros(T, 3); SDPX.copy_owned!(ref2, b2)
+    x1 = SDPX.alloc_zeros(T, 3); x2 = SDPX.alloc_zeros(T, 3)
+    SDPX.factorize!(route, A, 1)
+    SDPX.solve!(route, x1, b1)
+    SDPX.solve_multi!(route, reshape(x2, 3, 1), reshape(b2, 3, 1))
+    expected1 = reference_solver \ ref1
+    expected2 = reference_solver \ ref2
+    @test isapprox(x1, expected1; atol=T(1e-8))
+    @test isapprox(x2, expected2; atol=T(1e-8))
+    @test SDPX.factor_epoch(route) == 1
+    return route
+end
+
+function _solve_product_hsd_bordered(::Type{T}) where {T<:AbstractFloat}
+    model = SDPX.Model(T)
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
+    s = SDPX.variable!(model, :s, 2; domain=SDPX.Nonnegative())
+    SDPX.constraint!(model, :c1, x[1] + x[2] + s[1] - T(4), SDPX.ZeroCone())
+    SDPX.constraint!(
+        model, :c2, T(2) * x[1] + x[2] + s[2] - T(5), SDPX.ZeroCone(),
+    )
+    SDPX.objective!(model, SDPX.Maximize(), T(3) * x[1] + T(2) * x[2])
+    result = SDPX.optimize!(model; settings=SDPX.Settings{T}(
+        kkt_route=:bordered,
+        limits=SDPX.Limits(iterations=400, time=120.0, threads=1),
+        verbosity=0,
+    ))
+    @test SDPX.status(result) === :optimal
+    @test SDPX.certificate(result).valid
+    @test isapprox(SDPX.primal_objective(result), T(9); atol=T(1e-6))
+    return result
+end
+
+
 @testset "installed provider smoke" begin
     if _REQUIRE_MFLA
         @testset "MFLA Float64x2/x3/x4 factors" begin
@@ -326,6 +388,13 @@ end
             _exercise_mfla_mixed_residual()
         end
 
+        @testset "MFLA provider bordered LU and product-HSD solve" begin
+            for T in (Float64x2, Float64x4)
+                _exercise_provider_lp_lu(T)
+                _solve_product_hsd_bordered(T)
+            end
+        end
+
     end
 
     if _REQUIRE_BFLA
@@ -334,6 +403,8 @@ end
                 _assert_provider_root("SDPX_BFLA_PROJECT", BigFloatLinearAlgebra)
                 _exercise_bfla_factors()
                 _exercise_bfla_repeated_solve_correction()
+                _exercise_provider_lp_lu(BigFloat)
+                _solve_product_hsd_bordered(BigFloat)
             end
         end
 

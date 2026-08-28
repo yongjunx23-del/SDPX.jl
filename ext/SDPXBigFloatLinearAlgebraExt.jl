@@ -184,6 +184,8 @@ SDPX.la_factor_provider_identity(::_FactorHandle) =
     :bigfloat_linear_algebra
 SDPX.la_provider_factor_matrix(handle::_FactorHandle) =
     BFLA.factor_matrix(handle.factor)
+SDPX.la_provider_lu_pivots(handle::_FactorHandle) =
+    BFLA.factor_pivots(handle.factor)
 SDPX.la_provider_factor_precision(handle::_FactorHandle) =
     BFLA.factor_precision(handle.factor)
 SDPX.la_provider_factor_diagnostics(handle::_FactorHandle) =

@@ -624,6 +624,7 @@ end
 function SDPX.la_provider_factor_matrix(payload::_LUPayload)
     return factor_matrix(payload.factor)
 end
+SDPX.la_provider_lu_pivots(payload::_LUPayload) = payload.factor.ipiv
 
 function SDPX.la_provider_factor_diagnostics(payload::_LUPayload)
     return factor_diagnostics(payload.factor)

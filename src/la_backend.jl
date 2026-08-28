@@ -1776,6 +1776,8 @@ la_provider_ldlt_inertia(::Any) =
     throw(ArgumentError("provider LDLT handle does not expose inertia"))
 la_provider_ldlt_permutation(::Any) =
     throw(ArgumentError("provider LDLT handle does not expose a permutation"))
+la_provider_lu_pivots(::Any) =
+    throw(ArgumentError("provider LU handle does not expose pivots"))
 la_provider_ldlt_blocks(::Any) =
     throw(ArgumentError("provider LDLT handle does not expose pivot blocks"))
 la_provider_refine_once!(::Any, args...) =

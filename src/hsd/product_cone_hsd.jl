@@ -71,34 +71,42 @@ function SymmetricBorderedWorkspace(::Type{T}, nr::Integer) where {T}
     reduced = Int(nr)
     reduced >= 0 || throw(ArgumentError("negative bordered reduced dimension"))
     dimension = reduced + 1
-    route = LPLUCache{T}(dimension)
+    # High-precision bordered LU uses the MFLA/BFLA provider through the same
+    # FactorCache protocol; Float64 keeps the built-in LAPACK route.  The
+    # provider cache owns independent BigFloat/MultiFloat objects so the
+    # in-place provider solve never aliases caller or operator storage.
+    route = T === Float64 ? LPLUCache{T}(dimension) :
+        _provider_lp_lu_supported(T) ? ProviderLPLUCache{T}(dimension) :
+        throw(ArgumentError(
+            "bordered route requires MFLA/BFLA for high precision, or Float64",
+        ))
     driver = HotRouteCache(route; n=dimension)
     return SymmetricBorderedWorkspace{T,typeof(driver)}(
         reduced,
         dimension,
-        zeros(T, dimension, dimension),
-        zeros(T, dimension, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
         zeros(Int, dimension),
         Vector{Int}(undef, dimension),
-        zeros(T, dimension, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
-        zeros(T, dimension),
+        alloc_zeros(T, dimension, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
+        alloc_zeros(T, dimension),
         driver,
         false,
         false,
@@ -1057,7 +1065,7 @@ end
             workspace.dimension, workspace.dimension, :bordered,
         ),
         :bordered,
-        :standard_pivoted_lu,
+        _product_bordered_provider(workspace),
         eltype(workspace.factor_matrix),
         factor_receipt_precision(eltype(workspace.factor_matrix)),
         zero(eltype(workspace.factor_matrix)),
@@ -1070,6 +1078,14 @@ end
     workspace.receipt_build_count += 1
     return true
 end
+
+"""Resolve the bordered LU provider label from the active route cache."""
+@inline function _product_bordered_provider(workspace::SymmetricBorderedWorkspace)
+    route = workspace.driver.route
+    route isa ProviderLPLUCache || return :standard_pivoted_lu
+    return la_backend_provider(route.backend)
+end
+
 
 @inline function _product_bordered_factor_receipt_current(
     workspace::SymmetricBorderedWorkspace{T},
@@ -1084,7 +1100,7 @@ end
             workspace.dimension, workspace.dimension, :bordered,
         ),
         route=:bordered,
-        provider=:standard_pivoted_lu,
+        provider=_product_bordered_provider(workspace),
         regularization=zero(T),
         require_proof=true,
     )
