@@ -8,6 +8,7 @@ const QUICK_TESTS = (
     "dense_augmented_kkt.jl",
     "kkt_newton_system.jl",
     "kkt_expanded_quasidefinite.jl",
+    "wave_i_sparse.jl",
     "hsd_kkt_initialize.jl",
     "cone_algebra.jl",
     "cones_asymmetric.jl",

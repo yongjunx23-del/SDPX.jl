@@ -130,6 +130,9 @@ function standard_la_provider_capabilities(::Type{T}) where {T}
         pivoted_symmetric_ldlt=false,
         factor_solve=true,
         multi_rhs=true,
+        # SparseArrays provides sparse LU/ldlt for Float32/Float64 in the
+        # standard library; the sparse reduced-Schur route consumes it.
+        sparse_factorization=blas_lapack,
         threading=blas_lapack,
         dot=true,
         norminf=true,
