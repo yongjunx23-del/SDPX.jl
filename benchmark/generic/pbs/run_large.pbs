@@ -1,0 +1,14 @@
+#!/bin/bash
+#PBS -N sdpx-generic-large
+#PBS -l select=1:ncpus=16:mem=128gb
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+cd "${PBS_O_WORKDIR:?submit from the SDPX.jl repository root}"
+export JULIA_NUM_THREADS="${PBS_NCPUS:-16}"
+export SDPX_GENERIC_ALLOW_LARGE=1
+: "${JULIA_DEPOT_PATH:=$HOME/.julia}"
+
+benchmark/generic/scripts/fetch_generic_benchmarks.sh
+julia --project=. benchmark/generic/GenericConicBenchmark.jl large
