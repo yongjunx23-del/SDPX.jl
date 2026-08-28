@@ -440,6 +440,76 @@ function newton_residual!(
     return residual
 end
 
+"""
+    newton_residual_from_terms!(
+        residual, system, direction, adx, atdy, cone_action, scalar_gap,
+        tau_kappa,
+    )
+
+Assemble the five-equation Newton residual from terms that were evaluated
+exactly once per candidate direction by a `DirectionEvaluationWorkspace`
+(see `src/kkt/residual_workspace.jl`): `adx = A*dx`, `atdy = A'*dy`,
+`cone_action = H*dy`, `scalar_gap = c'*dx + b'*dy` (fixed accumulation order),
+and `tau_kappa = κ*dτ + τ*dκ`.
+
+The per-equation formulas, signs and accumulation order are identical to the
+authoritative [`newton_residual!`](@ref); only the matrix-vector products and
+the cone action are supplied precomputed so the five-equation gate, the
+refinement acceptance, the route acceptance, and the terminal certificate
+inputs share one evaluation per candidate.  The scalar gap is assembled as
+`dκ - rG - (c'*dx) - (b'*dy)` with both sums formed in the fixed index order
+of the authoritative equations; this is a deterministic, explainable
+reproduction of the formula (the authoritative interleaved subtraction is
+retained in [`newton_residual!`](@ref) for parity).
+"""
+function newton_residual_from_terms!(
+    residual::NewtonResidual{T}, system::NewtonSystem{T},
+    direction::NewtonDirection{T},
+    adx::AbstractVector{T}, atdy::AbstractVector{T},
+    cone_action::AbstractVector{T}, scalar_gap::T, tau_kappa::T,
+) where {T<:AbstractFloat}
+    m, n = size(system.A)
+    length(direction.dx) == n || throw(DimensionMismatch("dx dimension mismatch"))
+    length(direction.dy) == m || throw(DimensionMismatch("dy dimension mismatch"))
+    length(direction.ds) == m || throw(DimensionMismatch("ds dimension mismatch"))
+    length(adx) == m || throw(DimensionMismatch("adx dimension mismatch"))
+    length(atdy) == n || throw(DimensionMismatch("atdy dimension mismatch"))
+    length(cone_action) == m || throw(DimensionMismatch(
+        "cone action dimension mismatch",
+    ))
+    length(residual.primal_affine) == m || throw(DimensionMismatch(
+        "primal residual workspace dimension mismatch",
+    ))
+    length(residual.dual_affine) == n || throw(DimensionMismatch(
+        "dual residual workspace dimension mismatch",
+    ))
+    length(residual.cone_complementarity) == m || throw(DimensionMismatch(
+        "cone residual workspace dimension mismatch",
+    ))
+
+    @inbounds for i in 1:m
+        residual.primal_affine[i] = adx[i] +
+            (direction.ds[i] - system.b[i] * direction.dtau -
+             system.rhs.primal_affine[i])
+    end
+
+    @inbounds for j in 1:n
+        residual.dual_affine[j] = atdy[j] +
+            (system.c[j] * direction.dtau - system.rhs.dual_affine[j])
+    end
+
+    residual.homogeneous_gap =
+        direction.dkappa - system.rhs.homogeneous_gap - scalar_gap
+
+    @inbounds for i in 1:m
+        residual.cone_complementarity[i] = direction.ds[i] +
+            cone_action[i] - system.rhs.cone_corrector[i]
+    end
+
+    residual.tau_kappa = tau_kappa - system.rhs.tau_kappa
+    return residual
+end
+
 """Infinity norm over all five unregularized Newton equation groups."""
 function max_newton_residual(residual::NewtonResidual{T}) where {T}
     maximum_residual = max(

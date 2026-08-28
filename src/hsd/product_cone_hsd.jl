@@ -176,6 +176,10 @@ mutable struct ProductConeHSDState{
     sparse_schur::SW
     diagnostic::Symbol
     tau_collapse_recoveries::Int
+    # P7 fused-residual/ThreadBudget hook: diagnostic metadata only, never a
+    # numeric gate.  Owned here so the product-HSD state machine can record
+    # route acceptance and thread-budget snapshots without a second registry.
+    residual_hook::ProductHSDResidualHook
 end
 
 function ProductConeHSDState(
@@ -255,6 +259,7 @@ function _product_cone_hsd_state(
         sparse_schur,
         :none,
         0,
+        ProductHSDResidualHook(T),
     )
 end
 
@@ -269,6 +274,17 @@ function ProductConeHSDState(
 end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
+
+# P7 minimal product-HSD hooks/metadata: diagnostic accessors for the
+# fused residual workspace, its metadata, and the deterministic thread
+# budget.  No numeric path reads these values.
+@inline product_hsd_residual_hook(state::ProductConeHSDState) = state.residual_hook
+@inline product_hsd_residual_metadata(state::ProductConeHSDState) =
+    product_hsd_residual_metadata(state.residual_hook)
+@inline product_hsd_residual_workspace(state::ProductConeHSDState) =
+    product_hsd_residual_workspace(state.residual_hook)
+@inline product_hsd_thread_budget(state::ProductConeHSDState) =
+    product_hsd_thread_budget(state.residual_hook)
 
 """Numeric factorizations performed by the active product-HSD route."""
 @inline function product_hsd_factor_count(state::ProductConeHSDState)
@@ -2978,6 +2994,10 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     end
     accepted || return state.runtime.valid ?
                        HSDStepBreakdown : HSDStepDirectionFailed
+    # P7 minimal hook: record that one candidate direction passed the route
+    # acceptance gate.  Diagnostic metadata only; the fused workspace is
+    # optional and nothing here promotes a status or changes a tolerance.
+    product_hsd_record_route_acceptance!(state.residual_hook)
     hsd_residual!(base)
     # The NT operators and every nonsymmetric block must have been built with
     # the accepted point's global embedding complementarity. Never repair a

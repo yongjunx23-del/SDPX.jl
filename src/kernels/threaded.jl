@@ -170,6 +170,79 @@ function schur_blas_threads(ws::Workspace{T}, prob::SDPProblem{T},
 end
 
 """
+    apply_thread_budget!(budget::ThreadBudget) -> ThreadBudgetRecord
+
+Apply the deterministic single-layer [`ThreadBudget`](@ref) and snapshot the
+requested and effective Julia, BLAS, and provider thread counts.  In
+`:julia_outer` mode the BLAS width is pinned to one (outer Julia block tasks
+own the parallelism); in `:provider_blas` mode outer Julia tasks are disabled
+and the provider/BLAS layer owns the parallelism.  Exactly one parallel layer
+is ever active; the returned [`ThreadBudgetRecord`](@ref) is independent of
+task scheduling order.
+
+The effective Julia count is the requested outer count capped by the running
+`Threads.nthreads()` pool; the effective BLAS count is read back from the
+active backend ([`blas_threads`](@ref)); the effective provider count is the
+configured width handed to the provider layer (providers do not expose a
+uniform thread getter).
+"""
+function apply_thread_budget!(budget::ThreadBudget)
+    requested_julia = budget.julia_outer_threads
+    requested_blas = budget.blas_threads
+    requested_provider = budget.provider_threads
+    set_blas_threads!(requested_blas)
+    effective_blas = blas_threads()
+    effective_julia = min(requested_julia, Threads.nthreads())
+    effective_provider = requested_provider
+    return thread_budget_record(
+        budget;
+        requested_julia=requested_julia,
+        requested_blas=requested_blas,
+        requested_provider=requested_provider,
+        effective_julia=effective_julia,
+        effective_blas=effective_blas,
+        effective_provider=effective_provider,
+    )
+end
+
+"""
+    thread_budget_from_workspace(ws, prob, cons; ambient_blas, requested_provider)
+        -> ThreadBudget
+
+Derive the deterministic single-layer [`ThreadBudget`](@ref) for a KKT
+phase from the existing Schur engagement rules (see
+[`schur_threading_engaged`](@ref) and [`schur_blas_threads`](@ref)).  Outer
+Julia block tasks and the provider/BLAS layer are mutually exclusive: exactly
+one is ever active, and the reduction-bin count is fixed from the workspace's
+block-bin geometry so every thread count shares the same mapping and tree.
+"""
+function thread_budget_from_workspace(
+    ws::Workspace{T}, prob::SDPProblem{T}, cons::AbstractCons{T};
+    ambient_blas::Int=blas_threads(),
+    requested_provider::Int=1,
+) where {T}
+    ambient = max(1, ambient_blas)
+    engaged = schur_threading_engaged(ws, prob, cons)
+    blas_width = schur_blas_threads(ws, prob, cons, 1, ambient)
+    if engaged
+        julia_threads = max(1, ws.thread_count)
+        reduction_bins = max(
+            1, min(length(ws.block_bins), julia_threads),
+        )
+        return ThreadBudget(
+            :julia_outer, julia_threads, blas_width,
+            requested_provider, reduction_bins,
+        )
+    elseif blas_width > 1
+        return ThreadBudget(
+            :provider_blas, 1, blas_width,
+            requested_provider, 1,
+        )
+    end
+    return ThreadBudget(:serial, 1, 1, requested_provider, 1)
+end
+
+"""
     _block_loop_threading_profitable(T, block_dimensions, workers)
 
 Select Julia task parallelism for the block-local residual, Cholesky,
