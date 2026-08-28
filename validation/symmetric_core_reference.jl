@@ -802,22 +802,26 @@ end
     )
 
     # --- factor-view restoration after a post-regularization failure --
-    # A same-pattern matrix that reaches CHOLMOD failure after the signed
-    # regularization was applied: the first epoch succeeds (nr=2, nonzero
-    # Ar), the second epoch uses a numerically rank-deficient Ar (all-zero
-    # first column) which `ldlt!` rejects with ZeroPivotException.
-    frs = _core_cache_fixture(0.0)
+    # Use a nonzero signed shift.  For the failing same-pattern update, set
+    # Ar numerically to zero and Theta=-delta*I.  The original y block is then
+    # +delta*I, while factorization adds -delta on every y diagonal; the
+    # regularized factor view becomes diag(+delta*I_x, 0_y), deterministically
+    # singular after a genuinely nonzero regularization mutation.  Failure
+    # must restore the owned factor view to the attempted unregularized K.
+    delta = 1e-6
+    frs = _core_cache_fixture(delta)
     SDPX.factorize!(frs.cache, frs.K, 1)
     @test SDPX.factor_status(frs.cache) === SDPX.Fresh
     @test frs.cache.factor !== nothing
-    Ars = _core_ar(0.0)                 # frozen structure, zero values
-    SDPX.refill!(frs.pattern, Ars, _core_theta())
+    Ars = _core_ar(0.0)                 # same frozen structure, zero values
+    Theta_cancel = -delta * Matrix{Float64}(I, frs.pattern.m, frs.pattern.m)
+    SDPX.refill!(frs.pattern, Ars, Theta_cancel)
     Ks = SDPX.symmetric_core_lower_sparse(frs.pattern)
     attempted = copy(frs.pattern.nzval)
     @test_throws ArgumentError SDPX.factorize!(frs.cache, Ks, 2)
     @test SDPX.factor_status(frs.cache) === SDPX.Failed
     @test frs.cache.factor === nothing
-    @test frs.cache.factor_view.nzval == attempted   # view restored
+    @test frs.cache.factor_view.nzval == attempted   # nonzero shift removed
     @test frs.pattern.nzval == attempted             # source unchanged
     @test_throws SDPX.FactorCacheStateError SDPX.solve!(
         frs.cache, zeros(7), ones(7),
