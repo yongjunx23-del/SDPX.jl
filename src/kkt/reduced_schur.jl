@@ -20,6 +20,12 @@ using LinearAlgebra
 """Whether stdlib sparse LU preserves the working scalar type exactly."""
 @inline sparse_schur_factorization_supported(::Type{T}) where {T} = T === Float64
 
+# SparseArrays has no public condition-estimate accessor for UmfpackLU. Its
+# bundled wrapper does define the SuiteSparse information index; isolate that
+# non-public capability seam here instead of scattering a magic literal.
+const _SPARSE_UMFPACK_RCOND_INFO_INDEX =
+    SparseArrays.LibSuiteSparse.UMFPACK_RCOND + 1
+
 """Status of a sparse reduced-Schur factor/solve epoch."""
 @enum SparseSchurStatus::UInt8 begin
     SPARSE_SCHUR_READY
@@ -456,17 +462,20 @@ function factor_sparse_schur!(session::SparseSchurSession{T}) where {T<:Abstract
         session.symbolic = nothing
         session.numeric_factor_count += 1
         # SuiteSparse UMFPACK publishes reciprocal condition in its numeric
-        # info vector (C index UMFPACK_RCOND=67; Julia vector index 68).
-        # SparseArrays exposes no named accessor or standalone symbolic API.
+        # info vector. SparseArrays exposes neither a public accessor nor a
+        # standalone symbolic API, so this is a deliberately isolated stdlib
+        # capability seam.
         info = getproperty(factor, :info)
-        if length(info) < 68 || !isfinite(info[68]) ||
-           info[68] <= session.condition_floor
-            session.reciprocal_condition = length(info) >= 68 ? T(info[68]) : zero(T)
+        rcond_index = _SPARSE_UMFPACK_RCOND_INFO_INDEX
+        if length(info) < rcond_index || !isfinite(info[rcond_index]) ||
+           info[rcond_index] <= session.condition_floor
+            session.reciprocal_condition = length(info) >= rcond_index ?
+                T(info[rcond_index]) : zero(T)
             session.status = SPARSE_SCHUR_FACTOR_FAILED
             session.last_reason = :sparse_condition_rejected
             return false
         end
-        session.reciprocal_condition = T(info[68])
+        session.reciprocal_condition = T(info[rcond_index])
         session.status = SPARSE_SCHUR_FACTORED
         session.last_reason = :none
         return true
