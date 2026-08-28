@@ -1,75 +1,15 @@
 #=====================================================================
-    Newton step orchestration: residuals, cached block factorizations,
-    the Mehrotra predictor/corrector (§2.2 of the review; §2.6 for the
-    optional SDPB-style affine predictor and the iteration-1 μ fix),
-    and the allocation-free backtracking line search (§2.4).
+    Legacy SDP Newton step orchestrator (`newton_step!`) for
+    `solver/interior_point.jl`.
 
-    One `newton_step!` serves both DenseCons and SparseCons (§1.6) —
-    the only place that dispatches on the constraint representation is
-    `schur_build!`/`buildP!`/`accumulate_v!` (schur.jl); everything
-    else here is representation-agnostic.
+    The still-used residual/factor/RHS helpers with native consumers in
+    `kernels/threaded.jl` were migrated to their owners; the remaining
+    symbols here (`newton_step!` and its private helpers) are consumed
+    only by the legacy SDP interior-point engine and its active tests.
+    This file is gated for atomic deletion together with
+    `solver/interior_point.jl` after the test/E2E migration
+    (see docs/LEGACY_ENGINE_REFERENCES.md §5).
 =====================================================================#
-
-"""
-    compute_residuals!(ws, prob, x, X, y, Y, μ, opts) -> (p_res, d_res)
-
-Fills `ws.blk[l].P`, `ws.blk[l].R`, `ws.d`, `ws.p` for the current
-iterate, and returns the sup-norm primal/dual residuals (P7: via
-`knrmInf`, no splatting). `ws.blk[l].R`'s target is `μ[l]·I − X·Y`
-(`:classic`) unless `opts.predictor == :sdpb` and both residuals are
-already below their tolerances, in which case it's the pure affine
-target `−X·Y` (§2.6) — decided here, inline, from the residuals this
-same call just computed, rather than threading last-iteration state
-through.
-"""
-function compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T}, x, X, y, Y, μ,
-    opts::SolverOptions{T}) where {T}
-    L, m, n, k = prob.dims
-    cons = prob.cons
-
-    for l in 1:L
-        bw = ws.blk[l]
-        buildP_owned!(bw.P, cons, l, x)
-        kaxpby!(-one(T), X[l], one(T), bw.P)
-        kaxpby!(-one(T), prob.C[l], one(T), bw.P)
-    end
-
-    copy_owned!(ws.d, prob.c)
-    for l in 1:L
-        accumulate_v_owned!(ws.d, cons, l, Y[l], -one(T))
-    end
-    n > 0 && kmul_owned!(ws.d, prob.B, y, -one(T), one(T))
-
-    copy_owned!(ws.p, prob.b)
-    n > 0 &&
-        kmul_owned!(ws.p, transpose(prob.B), x, -one(T), one(T))
-
-    p_res = zero(T)
-    @inbounds for l in 1:L
-        p_res = max(p_res, knrmInf(ws.blk[l].P))
-    end
-    n > 0 && (p_res = max(p_res, knrmInf(ws.p)))
-    d_res = knrmInf(ws.d)
-
-    use_affine =
-        opts.parameter_strategy === :adaptive ||
-        (
-            opts.predictor === :sdpb &&
-            p_res < opts.ϵ_primal &&
-            d_res < opts.ϵ_dual
-        )
-    for l in 1:L
-        bw = ws.blk[l]
-        kmul_owned!(bw.R, X[l], Y[l], -one(T), zero(T))
-        if !use_affine
-            @inbounds for i in 1:k[l]
-                bw.R[i, i] += μ[l]
-            end
-        end
-    end
-
-    return p_res, d_res
-end
 
 @inline function _block_primal_residual_norm(ws::Workspace{T}) where {T}
     residual = zero(T)
@@ -77,32 +17,6 @@ end
         residual = max(residual, knrmInf(block.P))
     end
     return residual
-end
-
-function factor_blocks!(ws::Workspace{T}, X, Y) where {T}
-    ok = true
-    for l in eachindex(X)
-        bw = ws.blk[l]
-        copy_owned!(bw.LX, X[l])
-        ok &= kchol!(bw.LX)
-        copy_owned!(bw.MY, Y[l])
-        ok &= kchol!(bw.MY)
-    end
-    return ok
-end
-
-# Z[l] ← X[l]⁻¹(P[l]Y[l] − R[l]) for every block, then v[i] += ⟨A_i, Z⟩ (sign +1)
-function _predictor_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T}, Y) where {T}
-    L = prob.dims.L
-    zero_owned!(ws.v)
-    for l in 1:L
-        bw = ws.blk[l]
-        kmul_owned!(bw.Z, bw.P, Y[l])
-        kaxpby_owned!(-one(T), bw.R, one(T), bw.Z)   # Z = P·Y − R
-        kcholsolve_owned!(bw.LX, bw.Z)          # Z = X⁻¹(P·Y − R)
-        accumulate_v_owned!(ws.v, prob.cons, l, bw.Z, one(T))
-    end
-    return ws.v
 end
 
 """
@@ -183,17 +97,6 @@ function _has_singleton_arrow_blocks(arrow::ArrowWorkspace)
         length(ids) == 1 || return false
     end
     return !isempty(arrow.local_ids)
-end
-
-function _has_owned_bigfloat_equality_arrow(
-    ws::Workspace{BigFloat},
-    arrow::ArrowWorkspace{BigFloat},
-)
-    arrow.mixed_reduced_ready && return false
-    isempty(arrow.global_ids) || return false
-    size(ws.Btil, 2) > 0 || return false
-    isempty(arrow.local_ids) && return false
-    return sum(length, arrow.local_ids) == length(ws.rtil)
 end
 
 function _skip_automatic_refinement(
@@ -624,7 +527,6 @@ function _legacy_predictor_diagnostics!(
         uniform_complementarity=false,
     )
 end
-
 
 """
     newton_step!(ws, prob, opts, x, X, y, Y, μ) -> NamedTuple
