@@ -1104,6 +1104,25 @@ src/program/route_plan.jl
 * route fallback 保留同一 HSD iterate；
 * deterministic ordering。
 
+**Phase 6 增量 2 closeout（2026-08-28）**
+
+* ✅ `kkt_route=:sparse_schur` 已接入 native product-cone solve loop，仍为
+  opt-in；默认保持 `:bordered`；
+* ✅ predictor/corrector 共享一次 sparse numeric factor，每个 session 只冻结
+  一次结构 CSC pattern，后续 epoch 只更新 `nzval` 与 RHS；
+* ✅ Julia stdlib `SparseArrays.lu` 不公开独立 symbolic/numeric API，因此
+  `symbolic_reuse_supported=false`；项目只声明真实的 pattern/buffer reuse，
+  不伪称复用了 UMFPACK symbolic analysis；
+* ✅ factor/refinement/condition gate 失败时，在同一 HSD iterate 执行
+  `:sparse_schur → :expanded → :bordered`，不重启、不触碰证书权威；
+* ✅ stdlib Float32 sparse LU 会隐式转换 Float64，BigFloat/MultiFloat 无原生
+  sparse LU；故 sparse factor 仅对 Float64 开放，其余精度 fail-closed 到显式
+  expanded/bordered capability 路线，绝不 downcast；
+* ✅ LP、SOCP、rank-one PSD、mixed PSD、bounded Nonpositive、dependent/
+  ill-scaled equality 的公共解与原坐标证书已进入 `phase6_sparse_integration`；
+* ⏳ `SparseExpandedQuasidefiniteLDLT`、provider-owned sparse symbolic/numeric
+  分离、fill/RSS budget 仍属于 Phase 6 后续完整目标，不由本增量伪装完成。
+
 **周期**
 
 15–25 天。
