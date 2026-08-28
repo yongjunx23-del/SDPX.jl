@@ -8,13 +8,14 @@
 #   iteration 0 under both routes. Expanded is therefore the public default;
 #   bordered remains explicitly selectable and allocation-tested.
 #
-# D1 (equilibration default): MEASURED that cone-preserving Ruiz equilibration
-#   does NOT improve the canonical-A 2-norm condition number on small probes:
-#     - mixed free/PSD/ZeroCone: cond 2.88 -> 4.42
-#     - CFT compiled SDP (42x28, 55 nnz): cond 5.34 -> 21.90
-#   Decision: equilibration stays opt-in; do NOT wire it as default until it
-#   demonstrates conditioning gain on a large bootstrap-scale model. cond(A) is
-#   not a full proxy for KKT conditioning; large-scale validation is required.
+# D3 (equilibration default, Wave H rerun after correcting frozen row-scale
+#   ownership): reduced mixed free/PSD cond(A) improves 2.0 -> sqrt(2), with
+#   both :off/:ruiz optimal at 1.0000000010 in 18 iterations. The compiled CFT
+#   adapter probe regresses: cond(A) 2.0 -> 10.9293; :off is certified optimal
+#   at 10.9292999906 in 12 iterations, while :ruiz reaches IterLimit at 400
+#   without a certificate. Decision: equilibration is wired as explicit
+#   `equilibration=:ruiz` but remains :off by default. One probe regression is
+#   sufficient to fail closed; cond(A) alone is not status authority.
 
 using SDPX
 using Test

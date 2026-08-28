@@ -1,9 +1,8 @@
 # Cone-preserving equilibration (Phase 4, D1).
 #
-# This is PREPARED program-layer infrastructure. It computes a frozen
-# `EquilibrationMap` for a canonical program and can apply/reconstruct it,
-# but it does NOT rewire the default native-HSD pipeline (that decision is
-# the lead's after both Wave C streams land).
+# This program-layer infrastructure computes a frozen `EquilibrationMap` and
+# applies/reconstructs it. Phase 5 wires it into native HSD only when
+# `Settings.equilibration == :ruiz`; the default remains `:off`.
 #
 # Convention: the canonical program is
 #
@@ -132,7 +131,8 @@ function equilibrate(
                     work[i, :] ./= s
                     bwork[i] /= s
                 end
-                row_scale[lo:hi] .*= s
+                # `work` is divided by `s`; the frozen left multiplier is 1/s.
+                row_scale[lo:hi] ./= s
             else
                 # Nonnegative / Zero: per-row
                 for i in lo:hi
@@ -144,7 +144,8 @@ function equilibrate(
                     s = clamp(s, min_scaling, max_scaling)
                     work[i, :] ./= s
                     bwork[i] /= s
-                    row_scale[i] *= s
+                    # `work` is divided by `s`; the frozen left multiplier is 1/s.
+                    row_scale[i] /= s
                 end
             end
         end
@@ -241,6 +242,29 @@ function reconstruct_dual(map::EquilibrationMap{T}, yhat::AbstractVector) where 
     ]
 end
 
-# Alias kept for symmetry with the reconstruction layer naming.
+"""Build a canonical program in the frozen equilibrated coordinates."""
+function equilibrated_program(
+    map::EquilibrationMap{T}, canonical::CanonicalConicProgram{T},
+) where {T<:AbstractFloat}
+    Ahat, bhat, chat = apply_equilibration(map, canonical)
+    return CanonicalConicProgram{T}(
+        canonical.arithmetic, canonical.precision_bits, chat, Ahat, bhat,
+        canonical.cone_layout, canonical.reconstruction_chain,
+    )
+end
+
+"""Recover original canonical slack coordinates, `s = Dᵣ⁻¹ ŝ`."""
+function reconstruct_slack(
+    map::EquilibrationMap{T}, shat::AbstractVector,
+) where {T<:AbstractFloat}
+    length(shat) == length(map.row_scale) || throw(DimensionMismatch("slack length"))
+    return [
+        owned_arithmetic_copy(T, shat[i] / map.row_scale[i];
+                              precision_bits=map.precision_bits)
+        for i in eachindex(shat)
+    ]
+end
+
+# Aliases kept for symmetry with the reconstruction layer naming.
 reconstruct_primal_coordinates(map::EquilibrationMap, xhat) = reconstruct_primal(map, xhat)
 reconstruct_dual_coordinates(map::EquilibrationMap, yhat) = reconstruct_dual(map, yhat)

@@ -8,7 +8,8 @@
 #                       -> product_hsd_solve!
 #
 # It never invokes a family lowerer, PSD lift, legacy solver, presolve,
-# equilibration, sparse route, provider retry, or hidden fallback.  The
+# sparse route, provider retry, or hidden fallback. Frozen Ruiz equilibration
+# is available only through the explicit native setting. The
 # exported public entry point remains in `public/optimize.jl`; this file owns
 # the typed plan/core records, policy gate, direct execution, reconstruction,
 # and original-coordinate ray certificates used by that entry point.
@@ -110,10 +111,10 @@ function _public_validate_native_hsd_policy(
             "the native route selects its dense homogeneous bordered " *
             "formulation internally",
         )
-    settings.scaling in (:auto, :none) || _native_hsd_public_error(
+    settings.scaling in (:auto, :none, :equilibrate) || _native_hsd_public_error(
         route.route,
         :native_hsd_equilibration_unavailable,
-        "optimize: engine=:native_hsd does not equilibrate the canonical program",
+        "optimize: unsupported native-HSD scaling policy",
     )
     settings.presolve in (:auto, :off) || _native_hsd_public_error(
         route.route,
@@ -778,6 +779,14 @@ function _public_native_hsd_core(
     end
 
     reduced = reduction.reduced::CanonicalConicProgram{T}
+    equilibration_map = if settings.equilibration === :ruiz &&
+                             canonical_num_slack(reduced) > 0
+        equilibrate(reduced)
+    else
+        nothing
+    end
+    solve_reduced = equilibration_map === nothing ? reduced :
+                    equilibrated_program(equilibration_map, reduced)
     requested_tol = _native_hsd_tol(model, settings)
     tol = _native_hsd_internal_certificate_tol(program, requested_tol)
 
@@ -847,7 +856,7 @@ function _public_native_hsd_core(
         )
     end
 
-    state = ProductConeHSDState(reduced; kkt_route=settings.kkt_route)
+    state = ProductConeHSDState(solve_reduced; kkt_route=settings.kkt_route)
     base = state.base
     plan = _native_hsd_plan(
         program,
@@ -871,22 +880,28 @@ function _public_native_hsd_core(
     reason = _native_hsd_product_reason(product.reason)
     recovery_valid = false
     recovery_started = time_ns()
+    product_x = equilibration_map === nothing ? product.x :
+                reconstruct_primal(equilibration_map, product.x)
+    product_s = equilibration_map === nothing ? product.s :
+                reconstruct_slack(equilibration_map, product.s)
+    product_y = equilibration_map === nothing ? product.y :
+                reconstruct_dual(equilibration_map, product.y)
     if status === Optimal
         recovery_valid = hsd_recover_optimal_source!(
             x_full,
             s_full,
             y_full,
             reduction,
-            product.x,
-            product.s,
-            product.y;
+            product_x,
+            product_s,
+            product_y;
             tol=tol,
         )
     elseif status === PrimalInfeasible
         recovery_valid = hsd_recover_primal_ray_source!(
             y_full,
             reduction,
-            product.y;
+            product_y;
             tol=tol,
         )
     elseif status === DualInfeasible
@@ -894,8 +909,8 @@ function _public_native_hsd_core(
             x_full,
             s_full,
             reduction,
-            product.x,
-            product.s;
+            product_x,
+            product_s;
             tol=tol,
         )
     end
