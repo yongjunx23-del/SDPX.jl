@@ -127,7 +127,7 @@ engine options; native v0.5 applications should use `Settings` instead:
 | `verbose` | `verbosity` | output level from 0 to 3 |
 | `scaling` | `scaling` | `:auto`, `:none`, or `:equilibrate` |
 | `presolve` | `presolve` | `:auto`, `:on`, or `:off` |
-| `algorithm` | `algorithm` | `:auto`, `:lp`, `:socp`, or `:sdp` |
+| `algorithm` | `algorithm` | `:auto` only; family values (`:lp`, `:socp`, `:sdp`) are deprecated and rejected |
 | `sparse` | `sparse` | sparse-storage policy |
 | `formulation` | `formulation` | `:auto`, `:normal_equations`, or `:augmented` |
 | `equality_solver` | `equality_solver` | `:auto`, `:normal_equations`, or `:qr` |
@@ -144,6 +144,11 @@ Settings mapping are rejected with `MOI.UnsupportedAttribute`. This includes
 expert interior-point controls such as `beta`, `gamma`, `omega_p`, `omega_d`,
 `predictor`, `parameter_strategy`, `refine_steps`, `max_restarts`,
 `extended_precision_blas`, `mixed_precision_kkt`, and `checkpoint_path`.
+
+The raw `"engine"` attribute accepts `:auto` (default) or `:native_hsd` only;
+the historical `:legacy` selector is rejected with a migration error because
+native product HSD is the only public engine. The raw `"algorithm"` attribute
+accepts `:auto` only; family selectors are rejected with a migration error.
 Use the qualified `SolverOptions` interface for those expert controls instead
 of silently falling back to defaults through JuMP.
 
@@ -162,8 +167,14 @@ request (`julia -t 4`).
 
 ## Current limitations
 
-- The wrapper is non-incremental. Modifying and re-solving a JuMP model
-  causes the finalized SDPX representation to be rebuilt.
+- The wrapper is non-incremental (`MOI.supports_incremental_interface`
+  returns `false`). Modifying and re-solving a JuMP model causes the
+  finalized SDPX representation to be rebuilt.
+- `MOI.ExponentialCone` and `MOI.PowerCone` constraints remain unsupported
+  and fail closed (during discovery or copy). The direct `Model` route can
+  execute primal Exp/Power blocks through native HSD, but the MOI adapter
+  does not claim that surface until the standard MOI conformance tests are
+  green for it.
 - At least one scalar, SOC, or PSD cone constraint is required.
 - Rotated SOC constraints use the exact sparse map
   `(u,v,w) -> (u+v,u-v,sqrt(2)w)` into NativeSOC; MOI primal and dual getters

@@ -131,9 +131,12 @@ absence.
 Fields
 - `tolerances::Tolerances{T}` — primal/dual/gap stopping targets.
 - `limits::Limits` — iterations, wall time, per-solve threads.
-- `engine::Symbol` — solver engine selector: `:auto`, `:native_hsd`, or
-  `:legacy`.  An explicit `:native_hsd` request is fail-closed and is never
-  retried through a legacy solver or PSD lift.
+- `engine::Symbol` — solver engine selector: `:auto` (the default) or
+  `:native_hsd`.  Native product HSD is the only public engine; the
+  historical `:legacy` selector is deprecated and rejected at construction
+  with a migration error (there is no hidden legacy fallback).  An explicit
+  `:native_hsd` request is fail-closed and is never retried through a
+  family lowerer, PSD lift, or legacy solver.
 - `scaling::Symbol` — compatibility storage: `:auto`, `:none`, or `:equilibrate`.
 - `equilibration` — public policy view/keyword: `:off` (default) or `:ruiz`;
   `:ruiz` is stored as `scaling=:equilibrate` without a duplicate field.
@@ -154,9 +157,11 @@ Fields
   carried to `SolveOptions.linear_algebra_backend`; this file never
   instantiates or probes a provider).
 - `presolve::Symbol` — structural presolve: `:auto`, `:on`, or `:off`.
-- `algorithm::Symbol` — `:auto` / `:lp` / `:socp` / `:sdp`.  Problems
-  routed to the exponential-cone family accept `:auto` only and fail
-  closed otherwise.
+- `algorithm::Symbol` — read-only diagnostic label; `:auto` is the only
+  accepted value.  Algorithm-family selection no longer exists because every
+  public solve executes the native product-HSD engine; the historical family
+  selectors `:lp`, `:socp`, and `:sdp` are deprecated and rejected at
+  construction with a migration error.
 - `sparse::Symbol` — sparse storage preference `:auto`, `:on`, or `:off`.
 - `equality_solver::Symbol` — `:auto` / `:normal_equations` / `:qr`.
 - `working_precision_policy::Symbol` — `:auto` / `:fixed`.
@@ -212,7 +217,7 @@ struct Settings{T<:AbstractFloat}
         certification::Bool,
         blas_threads::Union{Nothing,Int},
     ) where {T<:AbstractFloat}
-        _validate_symbol(engine, (:auto, :native_hsd, :legacy), "engine")
+        _validate_engine(engine)
         _validate_symbol(scaling, (:auto, :none, :equilibrate), "scaling")
         _validate_symbol(
             formulation,
@@ -221,7 +226,7 @@ struct Settings{T<:AbstractFloat}
         )
         _validate_symbol(kkt_route, (:bordered, :expanded, :sparse_schur), "kkt_route")
         _validate_symbol(provider, (:auto, :standard, :bfla, :multifloat, :legacy), "provider")
-        _validate_symbol(algorithm, (:auto, :lp, :socp, :sdp), "algorithm")
+        _validate_algorithm(algorithm)
         _validate_symbol(presolve, (:auto, :on, :off), "presolve")
         _validate_symbol(sparse, (:auto, :on, :off), "sparse")
         _validate_symbol(equality_solver, (:auto, :normal_equations, :qr), "equality_solver")
@@ -256,6 +261,46 @@ end
 function _validate_symbol(value::Symbol, allowed::Tuple, label::AbstractString)
     value in allowed ||
         throw(ArgumentError("$label must be one of $allowed, got $(repr(value))"))
+    return nothing
+end
+
+# ---------------------------------------------------------------------------
+# Phase-9 public API simplification: engine and algorithm selectors.
+#
+# Native product HSD is the only public engine.  `engine=:legacy` and the
+# algorithm-family selectors (`algorithm=:lp/:socp/:sdp`) are removed from
+# the user-facing surface: they are rejected with explicit migration errors
+# instead of being silently remapped, so no hidden fallback can be reached
+# through a deprecated spelling.  The `algorithm` field is retained as a
+# read-only diagnostic label (always `:auto`); `kkt_route` and `provider`
+# remain expert policy fields and are unchanged.
+# ---------------------------------------------------------------------------
+
+const _ENGINE_VALUES = (:auto, :native_hsd)
+const _ALGORITHM_VALUES = (:auto,)
+const _DEPRECATED_ENGINE_VALUES = (:legacy,)
+const _DEPRECATED_ALGORITHM_VALUES = (:lp, :socp, :sdp)
+
+function _validate_engine(value::Symbol)
+    value in _DEPRECATED_ENGINE_VALUES && throw(ArgumentError(
+        "engine=$(repr(value)) is deprecated and no longer selectable: " *
+        "native product HSD is the only public engine.  Use " *
+        "engine=:auto or engine=:native_hsd.  There is no hidden legacy " *
+        "fallback; legacy execution engines are not reachable through " *
+        "the public Settings surface.",
+    ))
+    _validate_symbol(value, _ENGINE_VALUES, "engine")
+    return nothing
+end
+
+function _validate_algorithm(value::Symbol)
+    value in _DEPRECATED_ALGORITHM_VALUES && throw(ArgumentError(
+        "algorithm=$(repr(value)) is deprecated: algorithm-family selection " *
+        "no longer exists because every public solve executes the native " *
+        "product-HSD engine.  Use algorithm=:auto (the only accepted " *
+        "value); the field is retained as a read-only diagnostic label.",
+    ))
+    _validate_symbol(value, _ALGORITHM_VALUES, "algorithm")
     return nothing
 end
 

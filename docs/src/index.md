@@ -34,7 +34,6 @@ objective!(model, Maximize(), w[2])
 
 settings = Settings(
     model;
-    algorithm=:sdp,
     limits=Limits(iterations=200, time=60.0, threads=1),
     verbosity=0,
 )

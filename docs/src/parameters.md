@@ -26,10 +26,14 @@ result = SDPX.optimize!(model; settings=settings)
 `Settings{T}` accepts only typed policy fields: `tolerances`, `limits`,
 `scaling`, `formulation`, `provider`, `presolve`, `algorithm`, `sparse`,
 `equality_solver`, `working_precision_policy`, `diagnostics`, `verbosity`,
-`timing`, `certification`, and `blas_threads`. Route selection is pure and
-fail-closed: `:lp` is valid only for a pure LP model, `:socp` only for a pure
-SOC/RSOC model, and `:sdp` only for a pure SDP model; `:auto` follows the
-classified family. Public formulation values are `:auto`,
+`timing`, `certification`, and `blas_threads`. Since Phase 9, native product
+HSD is the only public engine: `engine` accepts only `:auto` or
+`:native_hsd` (the historical `:legacy` selector is rejected with a
+migration error), and `algorithm` is a read-only diagnostic label whose only
+accepted value is `:auto` — family selectors `:lp`, `:socp`, and `:sdp` are
+deprecated and rejected. The `:auto` engine routes the classified family
+internally; it never selects a legacy Mehrotra engine and there is no hidden
+fallback. Public formulation values are `:auto`,
 `:variable_space_schur`, and `:dense_augmented_kkt`.
 
 The default controller adapts centering, fraction-to-boundary values,

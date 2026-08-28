@@ -1256,6 +1256,15 @@ end
 Ray retention is explicit: a primal-infeasibility ray occupies public
 `constraint_dual` plus `dual_slack`; a dual-infeasibility ray occupies public
 `primal`.  Fields not belonging to that ray kind are finite zero vectors.
+
+EXECUTION-RECEIPT CONTRACT (native-HSD route): `status`, `termination`,
+`iterations`, `execution_plan`, and `certificate` are derived exclusively
+from the single final `core::NativeHSDCoreResult` returned by
+`_public_native_hsd_core` — the executed product-HSD solve plus its verified
+full-canonical recovery.  A non-`Optimal`/ray core status can never be
+upgraded here, an `Optimal`/ray status is downgraded to `NumericalFailure`
+whenever the recomputed original-coordinate certificate fails, and no
+planning-only fact enters the public result.
 """
 function _public_result_from_native_hsd(
     model::Model{T},

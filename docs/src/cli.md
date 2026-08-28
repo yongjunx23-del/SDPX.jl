@@ -85,7 +85,7 @@ model = Model(Float64)
 x = variable!(model, :x, 1; domain=Nonnegative())
 constraint!(model, :lower, x[1] - 1, Nonnegative())
 objective!(model, Minimize(), x[1])
-settings = Settings(model; algorithm=:lp, verbosity=0)
+settings = Settings(model; verbosity=0)
 result = optimize!(model; settings=settings)
 ```
 
@@ -101,14 +101,17 @@ settings = Settings(
         dual=big"1e-80",
         gap=big"1e-80",
     ),
-    algorithm=:sdp,
 )
 ```
 
 The model's arithmetic is chosen at construction. A request for 840 bits
 therefore requires `Model(BigFloat; precision_bits=840)`, while the CLI parses
-JSON inside the requested precision scope. `Settings.algorithm` selects the
-LP, native SOC/RSOC, or SDP implementation used for the compiled model.
+JSON inside the requested precision scope. `Settings.algorithm` is a
+read-only diagnostic label whose only accepted value is `:auto`: native
+product HSD is the only public engine, and the family selectors `:lp`,
+`:socp`, and `:sdp` are deprecated and rejected. (The CLI's own
+`--algorithm` flag lowers into the qualified `SolveOptions` frontend record
+and is unchanged.)
 
 The CLI implementation lowers its JSON policy through qualified compatibility
 option records, but those records are not part of the public Julia quickstart

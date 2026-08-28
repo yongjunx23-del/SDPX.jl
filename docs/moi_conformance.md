@@ -17,6 +17,16 @@ optimizer through the **incremental** interface (`MOI.add_variable`,
 suite cannot run directly on SDPX: every incremental call raises
 `AddVariableNotAllowed` / `AddConstraintNotAllowed`.
 
+## Phase-9 API state
+
+- `MOI.supports_incremental_interface(::SDPX.Optimizer) = false` (one-shot
+  `copy_to`); incremental calls fail closed.
+- `MOI.ExponentialCone` / `MOI.PowerCone` are not claimed by
+  `supports_constraint` and fail closed during copy; the adapter stays
+  fail-closed until the standard MOI conformance surface for them is green.
+- Raw `"engine"` accepts `:auto` / `:native_hsd` only (`:legacy` rejected);
+  raw `"algorithm"` accepts `:auto` only (family selectors rejected).
+
 ## Path to full conformance
 
 Implementing the incremental interface (or a bridging layer that
