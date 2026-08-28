@@ -321,6 +321,27 @@ function _bridge_sdp_solve(
     return _bridge_sdp_solve(problem, resolved.core)
 end
 
+"""Qualified compatibility entrypoint backed exclusively by product HSD."""
+function solve!(
+    problem::SDPProblem{T}, options::SolverOptions{T}; kwargs...,
+) where {T<:AbstractFloat}
+    isempty(kwargs) || throw(ArgumentError(
+        "legacy SDP solve! start/continuation keywords are retired; " *
+        "construct a public Model and use optimize!",
+    ))
+    return _bridge_sdp_solve(problem, options)
+end
+
+function solve!(
+    problem::SDPProblem{T}, options::SolveOptions; kwargs...,
+) where {T<:AbstractFloat}
+    isempty(kwargs) || throw(ArgumentError(
+        "legacy SDP solve! start/continuation keywords are retired; " *
+        "construct a public Model and use optimize!",
+    ))
+    return _bridge_sdp_solve(problem, options)
+end
+
 function _bridge_conic_solve(
     problem::ConicProblem{T},
     options::SolverOptions{T},

@@ -1,6 +1,6 @@
 module SDPX
 
-using LinearAlgebra, Base.Threads, MathOptInterface, Printf, SHA, SparseArrays, Serialization
+using LinearAlgebra, Base.Threads, MathOptInterface, SHA, SparseArrays, Serialization
 using LinearAlgebra: LowerTriangular, UpperTriangular, Symmetric, issuccess, mul!
 
 include("cone_algebra.jl")
@@ -132,11 +132,7 @@ include("nullspace.jl")
 include("chordal.jl")
 include("reduction_plan.jl")
 include("preprocessing.jl")
-include("step.jl")
 include("kernels/threaded.jl")
-include("lp_sparse.jl")
-include("lp_solver.jl")
-include("solver/interior_point.jl")
 include("prepared.jl")
 include("validation.jl")
 include("soc_presolve.jl")
