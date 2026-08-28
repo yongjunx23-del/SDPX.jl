@@ -30,10 +30,13 @@ end
         @test data.objective_row == "OBJ"
         @test haskey(data.columns, "X")
     end
-    marker = replace(_VALID_MPS,
-        " X OBJ 1 EQ 1" => " MARK0000 'MARKER' 'INTORG'\n X OBJ 1 EQ 1")
-    _with_parser_file(marker) do path
-        @test_throws ArgumentError read_mps(path)
+    for integer_marker in ("INTORG", "INTEND")
+        marker = replace(_VALID_MPS,
+            " X OBJ 1 EQ 1" =>
+                " MARK0000 'MARKER' '$integer_marker'\n X OBJ 1 EQ 1")
+        _with_parser_file(marker) do path
+            @test_throws ArgumentError read_mps(path)
+        end
     end
     ranged = replace(_VALID_MPS, "ENDATA" => "RANGES\n RNG EQ 1\nENDATA")
     _with_parser_file(ranged) do path
@@ -74,6 +77,9 @@ F 1
         data = read_cbf(path)
         @test data.version == 2
         @test data.objective_sense == :minimize
+    end
+    _with_parser_file(replace(_VALID_CBF, "MIN" => "MAX")) do path
+        @test read_cbf(path).objective_sense == :maximize
     end
     for sense in ("min", "MAXIMIZE", "UNKNOWN")
         _with_parser_file(replace(_VALID_CBF, "MIN" => sense)) do path
