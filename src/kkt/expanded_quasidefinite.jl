@@ -10,8 +10,13 @@
 # the architecture review was schematic; forcing its row-three sign would
 # change the frozen homogeneous-gap equation. We therefore solve the exact
 # operator with generic pivoted LU, while certifying the expected inertia of
-# its signed-regularized symmetric quasidefinite companion. Every accepted
-# direction is still checked against `NewtonSystem`, never this condensation.
+# its signed-regularized symmetric quasidefinite companion. The companion
+# inertia is an additional protection only when its block-congruence premises
+# are proven for the current `NewtonSystem` (typed `InertiaApplicability`
+# receipt); otherwise it is diagnostic and the exact nonsymmetric operator
+# backward error, finite checks and refinement remain the primary acceptance.
+# Every accepted direction is still checked against `NewtonSystem`, never this
+# condensation.
 
 @enum ExpandedKKTStatus::UInt8 begin
     EXPANDED_KKT_READY
@@ -357,6 +362,19 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     cone_operator::Matrix{T}
     cone_corrector_rhs::Vector{T}
     cone_block_ranges::Vector{UnitRange{Int}}
+    # Companion-inertia applicability receipt plus its block-congruence proof
+    # workspace.  The receipt is recomputed for every ladder attempt from the
+    # current NewtonSystem and the regularization generation actually applied;
+    # the wrong-inertia gate is enforced only when it marks the expectation
+    # INERTIA_APPLICABLE.
+    inertia_applicability::InertiaApplicability{T}
+    inertia_proof_diagonal::Vector{T}
+    inertia_proof_operator::Matrix{T}
+    inertia_proof_gram::Matrix{T}
+    inertia_proof_u::Vector{T}
+    inertia_proof_work::Vector{T}
+    inertia_proof_shift::Vector{T}
+    inertia_proof_solve::Vector{T}
     newton_residual::NewtonResidual{T}
     # Layout metadata and solve counters. Diagnostic only; no numeric gate.
     rhs_count::Int
@@ -417,6 +435,13 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         alloc_zeros(T, n), alloc_zeros(T, m),
         alloc_zeros(T, m), alloc_zeros(T, m),
         alloc_zeros(T, m, m), alloc_zeros(T, m), cone_ranges,
+        InertiaApplicability{T}(
+            INERTIA_UNAVAILABLE, KKTInertia(0, 0, dimension),
+            false, false, false, false, zero(T), zero(T), :uninitialized,
+        ),
+        alloc_zeros(T, dimension), alloc_zeros(T, m, m),
+        alloc_zeros(T, n, n), alloc_zeros(T, m), alloc_zeros(T, m),
+        alloc_zeros(T, n), alloc_zeros(T, n),
         NewtonResidual{T}(
             alloc_zeros(T, m), alloc_zeros(T, n), zero(T),
             alloc_zeros(T, m), zero(T), alloc_zeros(T, m),
@@ -437,6 +462,206 @@ end
     end
     return max(scale, one(eltype(matrix)))
 end
+
+"""Read and verify the diagonal regularization shifts actually applied to the
+assembled companion.  The quasidefinite sign convention requires nonnegative
+`x` shifts, nonpositive `(y,tau)` shifts, and (for the unregularized attempt)
+exactly zero shifts.  Returns `nothing` when a shift is non-finite or the
+sign pattern is inconsistent; otherwise returns the verified shifts.
+"""
+function _read_verified_regularization_shifts(
+    session::ExpandedKKTSession{T}, regularization::T,
+) where {T<:AbstractFloat}
+    n = session.n
+    scale = _expanded_operator_scale(session.unregularized)
+    tolerance = T(16) * eps(T) * max(scale, one(T), abs(regularization))
+    shifts = session.inertia_proof_diagonal
+    @inbounds for index in 1:session.dimension
+        shift = session.regularized[index, index] -
+                session.unregularized[index, index]
+        isfinite(shift) || return nothing
+        shifts[index] = shift
+    end
+    if iszero(regularization)
+        @inbounds for index in 1:session.dimension
+            abs(shifts[index]) <= tolerance || return nothing
+        end
+    else
+        @inbounds for index in 1:n
+            shifts[index] > -tolerance || return nothing
+        end
+        @inbounds for index in (n + 1):session.dimension
+            shifts[index] < tolerance || return nothing
+        end
+    end
+    return shifts
+end
+
+"""
+    _companion_block_proof(session, system, shifts)
+
+Prove (or refute) the companion-inertia expectation by block congruence of
+the signed-regularized symmetric companion
+
+    [ Dx   A'   c ]
+    [ A   -G    -b ]
+    [ c'  -b'  -s ]
+
+with `G = H + Dy`, `s = kappa/tau - shift_tau`, using the shifts that were
+actually generated.  Returns `(sign_definite_blocks, congruence_contract,
+status, reason)`:
+
+- `G` must be positive definite (Cholesky), giving the negative-definite
+  `(y,tau)` pivot block;
+- the reduced `x` block `W = Dx + A'G^-1 A` must be positive definite (at
+  zero `x` shifts this is the full-column-rank condition on `A`);
+- the trailing bordered scalar must be negative, i.e. the congruence contract
+  `s > b'G^-1 b - c~'W^-1 c~` with `c~ = c - A'G^-1 b`.
+
+A refuted premise yields `INERTIA_NOT_APPLICABLE`; an uncompletable proof
+(non-finite arithmetic, unavailable factor) yields `INERTIA_UNAVAILABLE`.
+"""
+function _companion_block_proof(
+    session::ExpandedKKTSession{T}, system::NewtonSystem{T},
+    shifts::AbstractVector{T},
+) where {T<:AbstractFloat}
+    n, m = session.n, session.m
+    operator = session.inertia_proof_operator
+    copy_owned!(operator, system.cone.operator)
+    @inbounds for index in 1:m
+        operator[index, index] += shifts[n + index]
+    end
+    factor = try
+        cholesky!(Symmetric(operator); check=true)
+    catch
+        return false, false, INERTIA_NOT_APPLICABLE,
+            :y_block_not_positive_definite
+    end
+    u = session.inertia_proof_u
+    copy_owned!(u, system.b)
+    work = session.inertia_proof_work
+    try
+        ldiv!(factor, u)
+    catch
+        return false, false, INERTIA_UNAVAILABLE, :proof_unavailable
+    end
+    all(isfinite, u) || return false, false, INERTIA_UNAVAILABLE,
+        :proof_unavailable
+    A = system.A
+    gram = session.inertia_proof_gram
+    @inbounds for column in 1:n
+        for row in 1:m
+            work[row] = A[row, column]
+        end
+        try
+            ldiv!(factor, work)
+        catch
+            return false, false, INERTIA_UNAVAILABLE, :proof_unavailable
+        end
+        for local_row in 1:n
+            value = local_row == column ? shifts[column] : zero(T)
+            for row in 1:m
+                value += A[row, local_row] * work[row]
+            end
+            gram[local_row, column] = value
+        end
+    end
+    @inbounds for column in 1:n, row in 1:(column - 1)
+        average = (gram[row, column] + gram[column, row]) / 2
+        gram[row, column] = average
+        gram[column, row] = average
+    end
+    gram_factor = try
+        cholesky!(Symmetric(gram); check=true)
+    catch
+        positive_x = true
+        @inbounds for index in 1:n
+            shifts[index] > zero(T) || (positive_x = false; break)
+        end
+        if positive_x
+            return false, false, INERTIA_UNAVAILABLE, :proof_unavailable
+        end
+        return false, false, INERTIA_NOT_APPLICABLE, :x_block_reduced_rank
+    end
+    shift_vector = session.inertia_proof_shift
+    @inbounds for local_row in 1:n
+        value = system.c[local_row]
+        for row in 1:m
+            value -= A[row, local_row] * u[row]
+        end
+        shift_vector[local_row] = value
+    end
+    solve_vector = session.inertia_proof_solve
+    copy_owned!(solve_vector, shift_vector)
+    try
+        ldiv!(gram_factor, solve_vector)
+    catch
+        return false, false, INERTIA_UNAVAILABLE, :proof_unavailable
+    end
+    all(isfinite, solve_vector) || return false, false, INERTIA_UNAVAILABLE,
+        :proof_unavailable
+    bordered = dot(system.b, u) - dot(shift_vector, solve_vector)
+    contract = (system.kappa / system.tau) - shifts[session.dimension] >
+               bordered
+    contract || return true, false, INERTIA_NOT_APPLICABLE,
+        :bordered_contract_violated
+    return true, true, INERTIA_APPLICABLE, :proven
+end
+
+"""
+    inertia_applicability(session, system, regularization, scale)
+
+Build the typed `InertiaApplicability` receipt for the current attempt:
+expected inertia recomputed from the actual dimensions/signs, scaling and
+regularization generation verified against the assembled operator, and the
+block-congruence proof run on the current `NewtonSystem`.  The receipt never
+depends on the observed factor.
+"""
+function inertia_applicability(
+    session::ExpandedKKTSession{T}, system::NewtonSystem{T},
+    regularization::T, scale::T,
+) where {T<:AbstractFloat}
+    expected = expected_expanded_inertia(system)
+    scaling_proven = isfinite(scale) && scale > zero(T)
+    if !scaling_proven
+        return InertiaApplicability{T}(
+            INERTIA_UNAVAILABLE, expected, false, false, false, false,
+            scale, regularization, :nonfinite_scale,
+        )
+    end
+    shifts = _read_verified_regularization_shifts(session, regularization)
+    if shifts === nothing
+        return InertiaApplicability{T}(
+            INERTIA_NOT_APPLICABLE, expected, false, false, true, false,
+            scale, regularization, :regularization_sign_mismatch,
+        )
+    end
+    sign_definite, contract, status, reason = _companion_block_proof(
+        session, system, shifts,
+    )
+    return InertiaApplicability{T}(
+        status, expected, sign_definite, contract, true, true,
+        scale, regularization, reason,
+    )
+end
+
+"""
+    inertia_applicability_unavailable(session, regularization, reason)
+
+Receipt for paths where the current `NewtonSystem` is not available (dynamic
+recovery invoked without a system).  The expectation is marked
+`INERTIA_UNAVAILABLE` so the wrong-inertia gate stays off and the exact
+backward-error authority decides.
+"""
+function inertia_applicability_unavailable(
+    session::ExpandedKKTSession{T}, regularization::T, reason::Symbol,
+) where {T<:AbstractFloat}
+    return InertiaApplicability{T}(
+        INERTIA_UNAVAILABLE, session.expected_inertia,
+        false, false, false, false, zero(T), regularization, reason,
+    )
+end
+
 
 """Assemble the exact unregularized condensation of `NewtonSystem`."""
 function assemble_expanded_kkt!(
@@ -694,7 +919,8 @@ end
 ) where {T<:AbstractFloat}
     push!(session.attempts, ExpandedKKTAttempt(
         index, stage, regularization, pivot_floor, minimum_pivot,
-        session.inertia_factor.inertia, reason,
+        session.inertia_factor.inertia,
+        session.inertia_applicability.status, reason,
     ))
     return reason
 end
@@ -704,9 +930,13 @@ end
 
 Regularization ladder: planned unregularized factorization, norm-scaled signed
 static retries, then coordinate-wise dynamic signed retries.  Every attempt is
-recorded.  A retry is accepted only if (1) the symmetric companion has the
-exact structure-derived inertia and (2) pivoted LU of the exact frozen-sign
-operator succeeds.  Wrong inertia and tiny pivots always advance the ladder.
+recorded with its `InertiaApplicability` status.  A retry is accepted only if
+pivoted LU of the exact frozen-sign operator succeeds and the unregularized
+backward-error refinement later certifies the direction.  The symmetric
+companion inertia is enforced only when the typed applicability receipt marks
+it `INERTIA_APPLICABLE`; otherwise an observed mismatch is recorded
+diagnostically and the exact factor is attempted at the same rung.  When
+applicable, wrong inertia and tiny pivots advance the ladder as before.
 """
 function factor_expanded_kkt!(
     session::ExpandedKKTSession{T}, system::NewtonSystem{T};
@@ -756,6 +986,12 @@ function factor_expanded_kkt!(
             magnitude
         end
         session.regularization_attempts = attempt
+        # Prove (or record as unprovable) the companion-inertia expectation
+        # for this system and generation before consulting the observed
+        # factor.  The receipt is never inferred from the LDL result.
+        session.inertia_applicability = inertia_applicability(
+            session, system, regularization, scale,
+        )
 
         inertia_factored = _factor_expanded_inertia!(session, pivot_floor)
         if !inertia_factored
@@ -771,14 +1007,29 @@ function factor_expanded_kkt!(
             continue
         end
         if session.inertia_factor.inertia != session.expected_inertia
-            failed_pivot = 0
+            if session.inertia_applicability.status === INERTIA_APPLICABLE
+                # The expected inertia was proven for this system/generation:
+                # a mismatch is a genuine anomaly and retains the wrong-inertia
+                # protection (ladder advance, typed status, border retry).
+                failed_pivot = 0
+                _record_expanded_attempt!(
+                    session, attempt, stage, regularization, pivot_floor,
+                    session.inertia_factor.minimum_pivot,
+                    EXPANDED_ATTEMPT_WRONG_INERTIA,
+                )
+                session.status = EXPANDED_KKT_WRONG_INERTIA
+                continue
+            end
+            # The companion-inertia expectation was not proven for this
+            # system/generation.  Record the observed mismatch as a diagnostic
+            # and proceed: the exact nonsymmetric operator factorization and
+            # the unregularized backward-error refinement below remain the
+            # acceptance authority for this attempt.
             _record_expanded_attempt!(
                 session, attempt, stage, regularization, pivot_floor,
                 session.inertia_factor.minimum_pivot,
-                EXPANDED_ATTEMPT_WRONG_INERTIA,
+                EXPANDED_ATTEMPT_INERTIA_NOT_APPLICABLE,
             )
-            session.status = EXPANDED_KKT_WRONG_INERTIA
-            continue
         end
 
         if !_factor_expanded_exact!(session, pivot_floor)
@@ -876,6 +1127,7 @@ end
 
 function _try_expanded_dynamic_factor!(
     session::ExpandedKKTSession{T}, dynamic_index::Int,
+    system::Union{Nothing,NewtonSystem{T}},
 ) where {T<:AbstractFloat}
     scale = _expanded_operator_scale(session.unregularized)
     pivot_floor = T(32) * eps(T) * scale
@@ -893,6 +1145,10 @@ function _try_expanded_dynamic_factor!(
     )
     attempt = isempty(session.attempts) ? 0 : session.attempts[end].index + 1
     session.regularization_attempts = attempt
+    session.inertia_applicability = system === nothing ?
+        inertia_applicability_unavailable(session, regularization,
+            :system_unavailable) :
+        inertia_applicability(session, system, regularization, scale)
 
     if !_factor_expanded_inertia!(session, pivot_floor)
         reason = session.inertia_factor.failed_pivot == 0 ?
@@ -907,13 +1163,23 @@ function _try_expanded_dynamic_factor!(
         return false
     end
     if session.inertia_factor.inertia != session.expected_inertia
+        if session.inertia_applicability.status === INERTIA_APPLICABLE
+            _record_expanded_attempt!(
+                session, attempt, EXPANDED_REGULARIZATION_DYNAMIC,
+                regularization, pivot_floor,
+                session.inertia_factor.minimum_pivot,
+                EXPANDED_ATTEMPT_WRONG_INERTIA,
+            )
+            session.status = EXPANDED_KKT_WRONG_INERTIA
+            return false
+        end
+        # Not proven: diagnostic only; the exact factor below remains the
+        # authority and the caller's backward-error refinement decides.
         _record_expanded_attempt!(
             session, attempt, EXPANDED_REGULARIZATION_DYNAMIC,
             regularization, pivot_floor, session.inertia_factor.minimum_pivot,
-            EXPANDED_ATTEMPT_WRONG_INERTIA,
+            EXPANDED_ATTEMPT_INERTIA_NOT_APPLICABLE,
         )
-        session.status = EXPANDED_KKT_WRONG_INERTIA
-        return false
     end
     if !_factor_expanded_exact!(session, pivot_floor)
         reason = session.factor.failed_pivot == 0 ?
@@ -1004,7 +1270,7 @@ function _refine_expanded_with_recovery!(
     solution::AbstractVecOrMat{T}, residual::AbstractVecOrMat{T},
     correction::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVecOrMat{T}, max_refinements::Int,
-    max_dynamic_attempts::Int,
+    max_dynamic_attempts::Int, system::Union{Nothing,NewtonSystem{T}},
 ) where {T<:AbstractFloat}
     session.refinement_recovery_attempts = 0
     _refine_current_expanded!(
@@ -1022,7 +1288,9 @@ function _refine_expanded_with_recovery!(
     )
     for recovery in 0:(max_dynamic_attempts - 1)
         dynamic_index = dynamic_used + recovery
-        _try_expanded_dynamic_factor!(session, dynamic_index) || continue
+        _try_expanded_dynamic_factor!(
+            session, dynamic_index, system,
+        ) || continue
         session.refinement_recovery_attempts += 1
         _solve_expanded_factor!(solution, session, rhs) || begin
             session.status = EXPANDED_KKT_SOLVE_FAILED
@@ -1036,18 +1304,22 @@ function _refine_expanded_with_recovery!(
 end
 
 """
-    refine_expanded!(solution, session, rhs)
+    refine_expanded!(solution, session, rhs; system=nothing)
 
 Reuse an accepted regularized factor for corrections while forming every
 residual with the unregularized operator.  If strict refinement stagnates,
 resume on progressively stronger dynamic signed regularization candidates.
-The public direction remains fail-closed unless the original operator meets
-the unchanged `256*eps(T)` backward-error contract.
+The optional `system` supplies the current `NewtonSystem` so dynamic recovery
+can apply the same `InertiaApplicability` semantics as the main ladder; when
+absent the companion inertia is marked unavailable and the exact backward
+error decides.  The public direction remains fail-closed unless the original
+operator meets the unchanged `256*eps(T)` backward-error contract.
 """
 function refine_expanded!(
     solution::AbstractVector{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVector{T}; max_refinements::Int=4,
     max_dynamic_attempts::Int=3,
+    system::Union{Nothing,NewtonSystem{T}}=nothing,
 ) where {T<:AbstractFloat}
     max_refinements >= 0 || throw(ArgumentError(
         "max_refinements must be nonnegative",
@@ -1061,7 +1333,7 @@ function refine_expanded!(
         ))
     return _refine_expanded_with_recovery!(
         solution, session.residual_vector, session.correction_vector,
-        session, rhs, max_refinements, max_dynamic_attempts,
+        session, rhs, max_refinements, max_dynamic_attempts, system,
     )
 end
 
@@ -1069,6 +1341,7 @@ function refine_expanded!(
     solution::AbstractMatrix{T}, session::ExpandedKKTSession{T},
     rhs::AbstractMatrix{T}; max_refinements::Int=4,
     max_dynamic_attempts::Int=3,
+    system::Union{Nothing,NewtonSystem{T}}=nothing,
 ) where {T<:AbstractFloat}
     max_refinements >= 0 || throw(ArgumentError(
         "max_refinements must be nonnegative",
@@ -1090,7 +1363,7 @@ function refine_expanded!(
     correction = @view session.correction[:, 1:columns]
     return _refine_expanded_with_recovery!(
         solution, residual, correction, session, rhs, max_refinements,
-        max_dynamic_attempts,
+        max_dynamic_attempts, system,
     )
 end
 
@@ -1177,6 +1450,8 @@ function expanded_workspace_layout(session::ExpandedKKTSession)
         cone_operator=size(session.cone_operator),
         cone_corrector_rhs=length(session.cone_corrector_rhs),
         cone_block_ranges=length(session.cone_block_ranges),
+        inertia_proof_operator=size(session.inertia_proof_operator),
+        inertia_proof_gram=size(session.inertia_proof_gram),
         newton_residual_primal=length(session.newton_residual.primal_affine),
         newton_residual_dual=length(session.newton_residual.dual_affine),
         residual_panel=size(session.residual),

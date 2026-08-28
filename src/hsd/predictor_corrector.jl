@@ -245,14 +245,14 @@ function _product_hsd_expanded_solve_shift!(
     # re-factorization and no receipt rebuild happen between the solves.
     session.status = EXPANDED_KKT_FACTORED
     solve_expanded!(solution, session, rhs) || return false
-    refined = refine_expanded!(solution, session, rhs)
+    refined = refine_expanded!(solution, session, rhs; system=system)
     if !refined
         # A regularized factor can expose the adjacent homogeneous-border
         # inertia only during refinement. Retry the same RHS once with the
         # exact unregularized operator under the narrow diagnosed gate below.
         _product_hsd_factor_exact_expanded_border!(state, system) || return false
         solve_expanded!(solution, session, rhs) || return false
-        refine_expanded!(solution, session, rhs) || return false
+        refine_expanded!(solution, session, rhs; system=system) || return false
     end
     direction = recover_expanded_direction!(session, system, solution)
     base = state.base

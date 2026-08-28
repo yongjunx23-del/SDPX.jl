@@ -71,7 +71,7 @@ end
     @test solution_panel[:, 2] ≈ 2solution_panel[:, 1] atol=2e-12
 end
 
-@testset "expanded route rejects wrong signed inertia" begin
+@testset "expanded expected inertia is derived and gated by applicability" begin
     T = Float64
     A = zeros(T, 1, 1)
     b = zeros(T, 1)
@@ -85,11 +85,22 @@ end
     session = SDPX.ExpandedKKTSession(T, 1, 1)
     # The expected inertia is a structure-derived authority, not mutable input.
     session.expected_inertia = SDPX.KKTInertia(3, 0, 0)
-    @test !SDPX.factor_expanded_kkt!(session, system; max_regularization_attempts=3)
+    @test SDPX.factor_expanded_kkt!(session, system; max_regularization_attempts=3)
     @test session.expected_inertia == SDPX.KKTInertia(1, 2, 0)
-    @test session.status == SDPX.EXPANDED_KKT_WRONG_INERTIA
+    # The negative cone operator refutes the sign-definite-block premise, so
+    # the companion-inertia expectation is not applicable: the observed
+    # mismatch is recorded diagnostically and the exact factor proceeds (the
+    # backward-error authority still gates any direction).
+    @test session.status == SDPX.EXPANDED_KKT_FACTORED
     @test session.inertia_factor.inertia != session.expected_inertia
-    @test !session.factor.success
+    @test session.inertia_applicability.status == SDPX.INERTIA_NOT_APPLICABLE
+    @test session.inertia_applicability.reason ===
+          :y_block_not_positive_definite
+    @test any(
+        attempt.reason == SDPX.EXPANDED_ATTEMPT_INERTIA_NOT_APPLICABLE
+        for attempt in session.attempts
+    )
+    @test session.factor.success
 end
 
 @testset "expanded structured regularization ladder" begin
@@ -115,26 +126,30 @@ end
     @test session.attempts[2].observed_inertia == session.expected_inertia
     @test session.attempts[2].minimum_pivot > session.attempts[2].pivot_threshold
 
-    # An operator with a genuinely contradictory cone-block sign exhausts
-    # both static and dynamic signed retries without accepting wrong inertia.
+    # A negative cone operator refutes the sign-definite-block premise of the
+    # companion-inertia expectation: the mismatch is recorded diagnostically
+    # and the exact factor proceeds instead of exhausting the ladder on a
+    # wrong-inertia gate that is not applicable.
     wrong_cone = SDPX.assemble_cone_linearization(
         T, 1,
         [SDPX.LocalConeLinearization(1:1, reshape(T[-1], 1, 1), zeros(T, 1))],
     )
     wrong = SDPX.NewtonSystem(A, b, c, wrong_cone, one(T), one(T), rhs)
-    rejected = SDPX.ExpandedKKTSession(T, 1, 1)
-    @test !SDPX.factor_expanded_kkt!(
-        rejected, wrong; max_regularization_attempts=5,
+    accepted = SDPX.ExpandedKKTSession(T, 1, 1)
+    @test SDPX.factor_expanded_kkt!(
+        accepted, wrong; max_regularization_attempts=5,
+    )
+    @test accepted.status == SDPX.EXPANDED_KKT_FACTORED
+    @test accepted.inertia_applicability.status == SDPX.INERTIA_NOT_APPLICABLE
+    @test any(
+        attempt.reason == SDPX.EXPANDED_ATTEMPT_INERTIA_NOT_APPLICABLE
+        for attempt in accepted.attempts
     )
     @test any(
-        attempt.stage == SDPX.EXPANDED_REGULARIZATION_DYNAMIC
-        for attempt in rejected.attempts
+        attempt.reason == SDPX.EXPANDED_ATTEMPT_ACCEPTED
+        for attempt in accepted.attempts
     )
-    @test all(
-        attempt.reason != SDPX.EXPANDED_ATTEMPT_ACCEPTED
-        for attempt in rejected.attempts
-    )
-    @test rejected.status == SDPX.EXPANDED_KKT_WRONG_INERTIA
+    @test accepted.factor_receipt !== nothing
     @test_throws ArgumentError SDPX.factor_expanded_kkt!(
         session, system; max_regularization_attempts=-1,
     )
