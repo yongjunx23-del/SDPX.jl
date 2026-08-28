@@ -1129,6 +1129,37 @@ function _result_row(
         equality_factorizations=
             _trace_field(trace.counters, :equality_factorizations),
         rhs_solves=_trace_field(trace.counters, :rhs_solves),
+        phase_cold_setup_seconds=_trace_value(trace.phases.cold_setup_seconds),
+        phase_equality_rank_seconds=
+            _trace_value(trace.phases.equality_rank_seconds),
+        phase_symbolic_seconds=_trace_value(trace.phases.symbolic_seconds),
+        phase_assembly_seconds=_trace_value(trace.phases.assembly_seconds),
+        phase_numeric_factor_seconds=
+            _trace_value(trace.phases.numeric_factor_seconds),
+        phase_predictor_solve_seconds=
+            _trace_value(trace.phases.predictor_solve_seconds),
+        phase_corrector_rhs_seconds=
+            _trace_value(trace.phases.corrector_rhs_seconds),
+        phase_corrector_solve_seconds=
+            _trace_value(trace.phases.corrector_solve_seconds),
+        phase_refinement_seconds=
+            _trace_value(trace.phases.refinement_seconds),
+        phase_line_search_seconds=
+            _trace_value(trace.phases.line_search_seconds),
+        phase_state_update_seconds=
+            _trace_value(trace.phases.state_update_seconds),
+        phase_certificate_seconds=
+            _trace_value(trace.phases.certificate_seconds),
+        phase_reference_seconds=_trace_value(trace.phases.reference_seconds),
+        phase_accounted_seconds=_trace_value(trace.phases.accounted_seconds),
+        phase_unaccounted_seconds=
+            _trace_value(trace.phases.unaccounted_seconds),
+        phase_consistent=_trace_value(trace.phases.consistent),
+        attempt_count=_trace_value(trace.attempts.count),
+        attempt_elapsed_seconds=
+            _trace_value(trace.attempts.elapsed_seconds_total),
+        attempt_fallback_events=
+            _trace_value(trace.attempts.fallback_events_total),
         input_fingerprint=_problem_fingerprint(catalog, spec, built, arithmetic),
         external_checksum=_built_value(built, :external_checksum, spec.fingerprint),
     )

@@ -111,6 +111,11 @@ struct ExecutionAttemptRecord
     reuse::PreparedReuseFacts
     status::SolveStatus
     termination_reason::Symbol
+    # A0 per-attempt wall-clock timing (seconds). Recorded exactly once per
+    # attempt inside diagnostics-enabled `_attach_diagnostics` from the
+    # pipeline wall clock; a fallback attempt chain must report timing for
+    # every attempt, never a fabricated zero.
+    elapsed_seconds::Float64
 end
 
 # ---------------------------------------------------------------------------

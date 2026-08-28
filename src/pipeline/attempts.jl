@@ -322,6 +322,7 @@ function _build_execution_attempt_record(
     executed::NamedTuple,
     termination::NamedTuple,
     certificate::NamedTuple,
+    elapsed_seconds::Float64,
     explicit_bits::Union{Nothing,Int}=nothing,
     attempt_id::Int=1,
     plan_id::Int=1,
@@ -337,5 +338,6 @@ function _build_execution_attempt_record(
         _attempt_prepared_reuse_facts(),
         result.status,
         get(termination, :reason, :none),
+        elapsed_seconds,
     )
 end

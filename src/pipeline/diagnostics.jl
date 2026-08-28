@@ -255,6 +255,7 @@ function _attach_diagnostics(
         executed,
         effective_termination,
         certificate,
+        pipeline_time,
         explicit_bits,
         attempt_id,
         attempt_id,

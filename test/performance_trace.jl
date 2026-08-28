@@ -26,7 +26,8 @@ using Test
 
         trace = SDPX.performance_trace(result)
         @test trace isa SDPX.PerformanceTrace
-        @test propertynames(trace) == (:setup, :iteration, :final, :counters)
+        @test propertynames(trace) ==
+            (:setup, :iteration, :final, :counters, :phases, :attempts)
 
         # Terminal quality is projected directly from the solve record.
         @test trace.final.status === :Optimal
@@ -236,6 +237,26 @@ using Test
         marker = trace.final.total_seconds
         @test marker === SDPX.unavailable
         @test string(marker) == "unavailable"
+
+        # The phase receipt and per-attempt facts follow the same marker
+        # contract: no timing source means unavailable, never zero.
+        for name in (
+            :cold_setup_seconds, :equality_rank_seconds, :symbolic_seconds,
+            :assembly_seconds, :numeric_factor_seconds,
+            :predictor_solve_seconds, :corrector_rhs_seconds,
+            :corrector_solve_seconds, :refinement_seconds,
+            :line_search_seconds, :state_update_seconds,
+            :certificate_seconds, :reference_seconds, :accounted_seconds,
+            :unaccounted_seconds, :consistent,
+        )
+            @test !SDPX.isavailable(getproperty(trace.phases, name))
+        end
+        for name in (
+            :count, :elapsed_seconds, :fallback_event_counts,
+            :elapsed_seconds_total, :fallback_events_total,
+        )
+            @test !SDPX.isavailable(getproperty(trace.attempts, name))
+        end
     end
 
     @testset "sparse structural and factor nonzeros stay distinct" begin
@@ -539,7 +560,176 @@ using Test
         end
     end
 
-    @testset "experimental namespace mirrors the surface" begin
+    
+    @testset "phase-separated receipt and per-attempt facts" begin
+        coefficients = zeros(2, 2, 2)
+        coefficients[1, 1, 1] = 1.0
+        coefficients[2, 2, 2] = 1.0
+        problem = SDPX.ingest(
+            [2.0, 3.0],
+            [coefficients],
+            [[0.0 1.0; 1.0 0.0]],
+            Matrix{Float64}(undef, 2, 0),
+            Float64[];
+            verbosity=0,
+        )
+        result = SDPX.solve(
+            problem;
+            tolerance=1e-8,
+            diagnostics=true,
+            timing=true,
+            verbosity=0,
+        )
+        trace = SDPX.performance_trace(result)
+
+        # Traced phases are present, never fabricated zeros, and the receipt
+        # accounts them against a wall-clock reference without exceeding it.
+        for name in (
+            :cold_setup_seconds, :assembly_seconds, :numeric_factor_seconds,
+            :predictor_solve_seconds, :corrector_rhs_seconds,
+            :corrector_solve_seconds, :refinement_seconds,
+            :line_search_seconds, :state_update_seconds,
+        )
+            @test SDPX.isavailable(getproperty(trace.phases, name))
+            @test getproperty(trace.phases, name) >= 0.0
+        end
+        @test SDPX.isavailable(trace.phases.reference_seconds)
+        @test trace.phases.reference_seconds >= 0.0
+        @test SDPX.isavailable(trace.phases.accounted_seconds)
+        @test SDPX.isavailable(trace.phases.unaccounted_seconds)
+        @test trace.phases.unaccounted_seconds >= 0.0
+        @test trace.phases.consistent === true
+
+        # One execution attempt with its own wall-clock timing.
+        @test SDPX.isavailable(trace.attempts.count)
+        @test trace.attempts.count == 1
+        @test SDPX.isavailable(trace.attempts.elapsed_seconds_total)
+        @test trace.attempts.elapsed_seconds_total >= 0.0
+        @test SDPX.isavailable(trace.attempts.fallback_events_total)
+        @test trace.attempts.fallback_events_total >= 0
+        @test trace.attempts.elapsed_seconds isa Tuple
+        @test length(trace.attempts.elapsed_seconds) == 1
+        @test trace.attempts.fallback_event_counts isa Tuple
+        @test length(trace.attempts.fallback_event_counts) == 1
+    end
+
+    @testset "phase receipt projects exact sources and flags inconsistency" begin
+        # A purpose-built receipt with every canonical phase recorded.
+        rich_timings = (
+            total=1.0,
+            pipeline=2.0,
+            setup=0.05,
+            equality_presolve=0.06,
+            structural_analysis=0.07,
+            schur_assembly=0.10,
+            kkt_factorization=0.12,
+            predictor_linear_solve=0.14,
+            corrector_rhs=0.15,
+            corrector_linear_solve=0.16,
+            refinement=0.17,
+            line_search=0.18,
+            accepted_update=0.19,
+            certification=0.20,
+        )
+        rich_diagnostics = (
+            timings=rich_timings,
+            memory=(workspace_bytes=1, process_peak_rss_bytes=2,
+                memory_budget_bytes=0),
+            selected_algorithms=(certificate=(available=true,),),
+            warnings=String[],
+            termination=(reason=:converged, stage=:native_soc),
+        )
+        rich = SDPX.ConicResult{Float64}(
+            SDPX.Optimal,
+            "ok",
+            [1.0],
+            [[1.0]],
+            [[1.0]],
+            [0.0],
+            5.0,
+            5.0,
+            0.0,
+            0.0,
+            0.0,
+            8,
+            rich_diagnostics,
+        )
+        trace = SDPX.performance_trace(rich)
+        @test trace.phases.cold_setup_seconds == 0.05
+        @test trace.phases.equality_rank_seconds == 0.06
+        @test trace.phases.symbolic_seconds == 0.07
+        @test trace.phases.assembly_seconds == 0.10
+        @test trace.phases.numeric_factor_seconds == 0.12
+        @test trace.phases.predictor_solve_seconds == 0.14
+        @test trace.phases.corrector_rhs_seconds == 0.15
+        @test trace.phases.corrector_solve_seconds == 0.16
+        @test trace.phases.refinement_seconds == 0.17
+        @test trace.phases.line_search_seconds == 0.18
+        @test trace.phases.state_update_seconds == 0.19
+        @test trace.phases.certificate_seconds == 0.20
+        @test trace.phases.reference_seconds == 2.0
+        @test trace.phases.accounted_seconds == 1.59
+        @test isapprox(trace.phases.unaccounted_seconds, 0.41; atol=1e-12)
+        @test trace.phases.consistent === true
+
+        # Phases that exceed the wall-clock reference are flagged, never
+        # silently clamped to look consistent.
+        inconsistent_timings = merge(
+            rich_timings,
+            (pipeline=1.0, setup=2.0),
+        )
+        poor = SDPX.ConicResult{Float64}(
+            SDPX.Optimal,
+            "ok",
+            [1.0],
+            [[1.0]],
+            [[1.0]],
+            [0.0],
+            5.0,
+            5.0,
+            0.0,
+            0.0,
+            0.0,
+            8,
+            merge(rich_diagnostics, (timings=inconsistent_timings,)),
+        )
+        inconsistent = SDPX.performance_trace(poor)
+        @test inconsistent.phases.consistent === false
+        @test inconsistent.phases.unaccounted_seconds < 0.0
+
+        # Partial sources: the accounted sum stays unavailable instead of
+        # pretending the missing phase was zero.
+        partial = SDPX.ConicResult{Float64}(
+            SDPX.Optimal,
+            "ok",
+            [1.0],
+            [[1.0]],
+            [[1.0]],
+            [0.0],
+            5.0,
+            5.0,
+            0.0,
+            0.0,
+            0.0,
+            8,
+            merge(rich_diagnostics, (timings=(total=1.0,),)),
+        )
+        partial_trace = SDPX.performance_trace(partial)
+        @test !SDPX.isavailable(partial_trace.phases.accounted_seconds)
+        @test !SDPX.isavailable(partial_trace.phases.unaccounted_seconds)
+        @test !SDPX.isavailable(partial_trace.phases.consistent)
+        @test partial_trace.phases.reference_seconds == 1.0
+
+        # Conic diagnostics carry no attempt records.
+        for name in (
+            :count, :elapsed_seconds, :fallback_event_counts,
+            :elapsed_seconds_total, :fallback_events_total,
+        )
+            @test !SDPX.isavailable(getproperty(trace.attempts, name))
+        end
+    end
+
+@testset "experimental namespace mirrors the surface" begin
         @test SDPX.PerformanceTrace === SDPX.PerformanceTrace
         @test SDPX.performance_trace === SDPX.performance_trace
         @test SDPX.unavailable === SDPX.unavailable

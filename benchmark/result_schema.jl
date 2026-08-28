@@ -62,10 +62,19 @@ const RESULT_COLUMNS = (
     :predictor_rhs_seconds, :corrector_rhs_seconds, :block_residual_seconds,
     :block_recovery_seconds, :local_metric_preparations,
     :equality_gram_assemblies, :equality_factorizations, :rhs_solves,
+    :phase_cold_setup_seconds, :phase_equality_rank_seconds,
+    :phase_symbolic_seconds, :phase_assembly_seconds,
+    :phase_numeric_factor_seconds, :phase_predictor_solve_seconds,
+    :phase_corrector_rhs_seconds, :phase_corrector_solve_seconds,
+    :phase_refinement_seconds, :phase_line_search_seconds,
+    :phase_state_update_seconds, :phase_certificate_seconds,
+    :phase_reference_seconds, :phase_accounted_seconds,
+    :phase_unaccounted_seconds, :phase_consistent,
+    :attempt_count, :attempt_elapsed_seconds, :attempt_fallback_events,
     :input_fingerprint, :external_checksum,
 )
 
-const RESULT_SCHEMA_VERSION = 8
+const RESULT_SCHEMA_VERSION = 9
 
 _cell(value) = value === missing || value === nothing ? "" :
                replace(string(value), '\t' => ' ', '\n' => ' ', '\r' => ' ')

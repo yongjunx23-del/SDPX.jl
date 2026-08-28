@@ -13,7 +13,7 @@ export ChildRecord, run_campaign, aggregate_campaign, write_summary,
 const ROOT = @__DIR__
 const REPOSITORY = normpath(joinpath(ROOT, ".."))
 const FRESH_SCHEMA_VERSION = 1
-const CHILD_RESULT_SCHEMA_VERSION = 8
+const CHILD_RESULT_SCHEMA_VERSION = 9
 const _SHA256_HEX64_RE = r"^[0-9a-f]{64}$"
 const _EXECUTION_MODES = (:build, :solve, :profile)
 const _REQUESTED_ENGINES = (
@@ -135,6 +135,14 @@ const _OPTIONAL_TIMING_FIELDS = (
     "equality_factor_seconds", "predictor_rhs_seconds",
     "corrector_rhs_seconds", "block_residual_seconds",
     "block_recovery_seconds",
+    "phase_cold_setup_seconds", "phase_equality_rank_seconds",
+    "phase_symbolic_seconds", "phase_assembly_seconds",
+    "phase_numeric_factor_seconds", "phase_predictor_solve_seconds",
+    "phase_corrector_rhs_seconds", "phase_corrector_solve_seconds",
+    "phase_refinement_seconds", "phase_line_search_seconds",
+    "phase_state_update_seconds", "phase_certificate_seconds",
+    "phase_reference_seconds", "phase_accounted_seconds",
+    "phase_unaccounted_seconds",
 )
 
 function _timing_failures(row, label)
