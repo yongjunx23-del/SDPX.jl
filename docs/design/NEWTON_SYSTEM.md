@@ -200,6 +200,44 @@ unregularized residual groups (`src/kkt/system.jl:217-233`), and
   that independently assembles the five-equation Jacobian and checks a direction.
   It documents the equations but is intentionally not part of Julia CI.
 
+## Symmetric augmented-core oracle (Clarabel style)
+
+`validation/symmetric_core_reference.jl` is a self-contained Julia-Base oracle
+that proves the Clarabel-style symmetric elimination reproduces the unique
+direction of the frozen five-equation system.  In rank-reduced coordinates
+`x = V*xr` it forms the symmetric augmented core
+
+```text
+K = [ 0    Ar' ]
+    [ Ar  -Theta ]
+```
+
+and solves, per scaling epoch, the variable and homogeneous right-hand sides
+
+```text
+K*w = [ dr; p - h ],        K*u = [ -cr; b ],
+```
+
+where `p = rhs.primal_affine`, `d = V'*rhs.dual_affine`, `h = cone_corrector`,
+`cr = V'*c`, and `dr = V'*dual_affine`.  The one-dimensional homogeneous
+elimination then closes
+
+```text
+dτ  = (t - τ*(g + cr'*wx + b'*wy)) / (κ + τ*(cr'*ux + b'*uy))
+dxr = wx + dτ*ux,        dx = V*dxr
+dy  = wy + dτ*uy
+ds  = p - A*dx + b*dτ
+dκ  = g + c'*dx + b'*dy.
+```
+
+The oracle compares this against a direct dense solve of the full five-equation
+Jacobian (and, for the rank-reduced fixture, a direct five-equation solve in
+reduced coordinates), evaluates all five residual groups independently, asserts
+the symmetry of `K`, and asserts that the current `(nr+1)`-square scalar-bordered
+operator is generally **non-symmetric** (`q ≠ r`).  Consequently the augmented
+core is the LDL-eligible object; the old bordered and reduced-Schur operators
+remain LU-only.
+
 ## Known integration boundary
 
 `src/kkt/system.jl:1-6` declares the semantic layer as the sign authority, but
