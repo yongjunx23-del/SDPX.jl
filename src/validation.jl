@@ -1568,6 +1568,15 @@ function _minimal_sdp_optimality_gate(
     result::SDPResult{T},
     opts::SolverOptions{T},
 ) where {T}
+    # Same validated local tolerance semantics as both result_certificate
+    # overloads: comparisons and PSD certification only run with finite,
+    # non-negative tolerances, and NaN/+Inf/-Inf/negative options fail the
+    # gate closed before any tolerance comparison or PSD check can observe
+    # them.
+    tolerances_valid = _certificate_tolerances_valid(opts)
+    primal_tolerance = tolerances_valid ? opts.ϵ_primal : zero(T)
+    dual_tolerance = tolerances_valid ? opts.ϵ_dual : zero(T)
+    gap_tolerance = tolerances_valid ? opts.ϵ_gap : zero(T)
     primal_objective = LinearAlgebra.dot(prob.c, result.x)
     dual_objective_value = dual_objective(prob, result.y, result.Y)
     primal_affine_residual, dual_affine_residual = solution_residuals(
@@ -1585,10 +1594,10 @@ function _minimal_sdp_optimality_gate(
     gap_relative = abs(gap) / objective_scale
 
     primal_psd = _blocks_psd_certificate(
-        result.X, max(opts.ϵ_primal, opts.ϵ_gap),
+        result.X, max(primal_tolerance, gap_tolerance),
     )
     dual_psd = _blocks_psd_certificate(
-        result.Y, max(opts.ϵ_dual, opts.ϵ_gap),
+        result.Y, max(dual_tolerance, gap_tolerance),
     )
     primal_residual = max(
         primal_affine_residual, _psd_violation(primal_psd, T),
@@ -1625,14 +1634,16 @@ function _minimal_sdp_optimality_gate(
         all(block -> all(isfinite, block), result.Y)
 
     # Centralized finite gate: tolerance comparisons are only meaningful on
-    # finite data (B1).
-    gap_ok = finite && gap_relative <= opts.ϵ_gap
+    # finite data (B1) and only with validated tolerances (P1).
+    gap_ok = tolerances_valid && finite &&
+             gap_relative <= gap_tolerance
 
     failures = Symbol[]
+    tolerances_valid || push!(failures, :invalid_tolerance)
     finite || push!(failures, :nonfinite)
-    (finite && primal_scaled <= opts.ϵ_primal) ||
+    (tolerances_valid && finite && primal_scaled <= primal_tolerance) ||
         push!(failures, :primal_residual)
-    (finite && dual_scaled <= opts.ϵ_dual) ||
+    (tolerances_valid && finite && dual_scaled <= dual_tolerance) ||
         push!(failures, :dual_residual)
     gap_ok || push!(failures, :duality_gap)
     primal_psd.ok || push!(failures, :primal_psd)

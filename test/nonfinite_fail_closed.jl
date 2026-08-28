@@ -504,6 +504,75 @@ end
             ).valid
         end
     end
+
+    @testset "minimal gate and disabled-certification final result fail closed on invalid tolerances" begin
+        # P1 regression: with `certification=false` the minimal
+        # original-coordinate success gate must use the same validated local
+        # tolerance semantics as both result_certificate overloads. A finite
+        # but badly infeasible result must fail the gate, and an otherwise
+        # valid finite result must also fail closed, whenever any tolerance
+        # option is NaN, +Inf, -Inf, or negative — +Inf previously passed
+        # every comparison and PSD check.
+        finite_bad_sdp = _nf_scalar_result(Float64; slack=1.0)
+        finite_good_sdp = _nf_scalar_result(Float64)
+        for field in (:gap, :primal, :dual), bad in (NaN, Inf, -Inf, -1.0)
+            invalid = _nf_invalid_options(field, bad)
+            bad_gate = SDPX._minimal_sdp_optimality_gate(
+                problem, finite_bad_sdp, invalid,
+            )
+            @test !bad_gate.valid
+            @test :invalid_tolerance in bad_gate.failures
+            good_gate = SDPX._minimal_sdp_optimality_gate(
+                problem, finite_good_sdp, invalid,
+            )
+            @test !good_gate.valid
+            @test :invalid_tolerance in good_gate.failures
+
+            disabled = SDPX.SolverOptions{Float64}(
+                ϵ_gap=invalid.ϵ_gap,
+                ϵ_primal=invalid.ϵ_primal,
+                ϵ_dual=invalid.ϵ_dual,
+                verbosity=0,
+                certification=false,
+            )
+            downgraded, certificate, warning =
+                SDPX.certify_final_result(problem, finite_bad_sdp, disabled)
+            @test downgraded.status === SDPX.Stalled
+            @test certificate.available === false
+            @test certificate.reason === :certification_disabled
+            @test !certificate.minimal_gate.valid
+            @test :invalid_tolerance in certificate.minimal_gate.failures
+            @test warning !== nothing
+            downgraded_good, certificate_good, warning_good =
+                SDPX.certify_final_result(problem, finite_good_sdp, disabled)
+            @test downgraded_good.status === SDPX.Stalled
+            @test !certificate_good.minimal_gate.valid
+            @test warning_good !== nothing
+        end
+        # Valid finite tolerances keep the finite invalid result failing and
+        # the finite valid result passing exactly as before.
+        valid_disabled = SDPX.SolverOptions{Float64}(
+            ϵ_gap=1e-8,
+            ϵ_primal=1e-8,
+            ϵ_dual=1e-8,
+            verbosity=0,
+            certification=false,
+        )
+        @test !SDPX._minimal_sdp_optimality_gate(
+            problem, finite_bad_sdp, valid_disabled,
+        ).valid
+        @test SDPX._minimal_sdp_optimality_gate(
+            problem, finite_good_sdp, valid_disabled,
+        ).valid
+        bad_final, _, bad_warning =
+            SDPX.certify_final_result(problem, finite_bad_sdp, valid_disabled)
+        good_final, _, good_warning =
+            SDPX.certify_final_result(problem, finite_good_sdp, valid_disabled)
+        @test bad_final.status === SDPX.Stalled
+        @test bad_warning !== nothing
+        @test good_final.status === SDPX.Optimal
+        @test good_warning === nothing
+    end
 end
 
 # ---------------------------------------------------------------------------
