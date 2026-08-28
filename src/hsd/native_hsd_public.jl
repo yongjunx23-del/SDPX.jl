@@ -15,6 +15,48 @@
 # and original-coordinate ray certificates used by that entry point.
 #=====================================================================#
 
+"""Typed planned or executed native-HSD KKT route facts."""
+struct NativeHSDKKTDescriptor
+    route::Symbol
+    formulation::Symbol
+    storage::Symbol
+    backend::Symbol
+    factorization::Symbol
+    factorization_reuse::Symbol
+    kernel::Symbol
+    provider::Symbol
+    fallback_chain::Tuple{Vararg{Symbol}}
+end
+
+function _native_hsd_kkt_descriptor(route::Symbol, formulation::Symbol)
+    if route === :sparse_schur
+        return NativeHSDKKTDescriptor(
+            route, :sparse_reduced_schur, :sparse,
+            :sparse_reduced_schur, :sparse_lu,
+            :one_numeric_factor_per_predictor_corrector_epoch,
+            :suitesparse_umfpack, :suitesparse_umfpack,
+            (:expanded, :bordered),
+        )
+    elseif route === :expanded
+        return NativeHSDKKTDescriptor(
+            route, :dense_expanded_quasidefinite, :dense,
+            :native_hsd_expanded_quasidefinite, :quasidefinite_ldlt,
+            :factor_once_predictor_corrector_refinement,
+            :native_expanded_ldlt, :native_serial, (:bordered,),
+        )
+    elseif route === :bordered
+        return NativeHSDKKTDescriptor(
+            route, formulation, :dense,
+            formulation === :dense_hybrid_coupled ?
+                :native_hsd_factor_coordinate_coupled :
+                :native_hsd_binary_row_scaled_border,
+            :lu, :factor_once_predictor_corrector_refinement,
+            :lapack_getrf_getrs, :native_serial, (),
+        )
+    end
+    throw(ArgumentError("unknown native HSD KKT route $route"))
+end
+
 """Authoritative family payload for one direct native-HSD execution."""
 struct NativeHSDPlan <: AbstractExecutionPlanPayload
     formulation::Union{DenseHomogeneousBordered,DenseHybridCoupled}
@@ -23,7 +65,7 @@ struct NativeHSDPlan <: AbstractExecutionPlanPayload
     factorization_reuse::Symbol
     schedule::Symbol
     provider::Symbol
-    fallback_chain::Tuple{}
+    fallback_chain::Tuple{Vararg{Symbol}}
     original_variables::Int
     reduced_variables::Int
     original_rows::Int
@@ -38,6 +80,7 @@ struct NativeHSDPlan <: AbstractExecutionPlanPayload
     product_rank_ambiguous::Bool
     product_rank_incompatible::Bool
     kkt_route::Symbol
+    kkt_execution::NativeHSDKKTDescriptor
 end
 
 """Typed diagnostics for the direct native-HSD public route."""
@@ -365,15 +408,22 @@ function _native_hsd_plan(
         product_rank_ambiguous,
         product_rank_incompatible,
     )
-    factor_dimension = descriptor.available ? descriptor.matrix_dimension : 0
+    factor_dimension = !descriptor.available ? 0 :
+        settings.kkt_route === :sparse_schur ? product_rank + 1 :
+        descriptor.matrix_dimension
+    mathematical_formulation = descriptor.available ?
+        formulation_symbol(descriptor) : :not_applicable
+    kkt_execution = _native_hsd_kkt_descriptor(
+        settings.kkt_route, mathematical_formulation,
+    )
     payload = NativeHSDPlan(
         descriptor,
-        :dense,
-        descriptor.factorization,
-        descriptor.factorization_reuse,
+        kkt_execution.storage,
+        descriptor.available ? kkt_execution.factorization : :not_applicable,
+        descriptor.available ? kkt_execution.factorization_reuse : :not_applicable,
         :serial,
-        :native_serial,
-        (),
+        descriptor.available ? kkt_execution.provider : :not_applicable,
+        descriptor.available ? kkt_execution.fallback_chain : (),
         canonical_num_variables(canonical),
         reduced_variables,
         canonical_num_slack(canonical),
@@ -388,6 +438,7 @@ function _native_hsd_plan(
         product_rank_ambiguous,
         product_rank_incompatible,
         settings.kkt_route,
+        kkt_execution,
     )
 
     classification_layout = reduced === nothing ? canonical : reduced
@@ -410,7 +461,8 @@ function _native_hsd_plan(
         density,
         density,
     )
-    backend_route = descriptor.backend
+    backend_route = descriptor.available ? kkt_execution.backend :
+                    :not_applicable
     backend = BackendConfiguration(
         backend_route,
         :pivoted_qr,
@@ -427,27 +479,28 @@ function _native_hsd_plan(
         factor_solve=descriptor.available,
         multi_rhs=descriptor.available,
         iterative_refinement=descriptor.available,
+        sparse_factorization=descriptor.available &&
+            settings.kkt_route === :sparse_schur,
     )
     capability_symbols = la_capability_symbols(capabilities)
     la = LABackendConfiguration(
         _arithmetic_symbol(T),
         settings.provider,
         :native,
-        :native_serial,
+        descriptor.available ? kkt_execution.provider : :not_applicable,
         capability_symbols,
         capabilities,
-        descriptor.available ? (:lu, :factor_solve) : (),
         descriptor.available ?
-            (descriptor isa DenseHybridCoupled ?
-             :native_hsd_dense_hybrid_lu_partial_pivot :
-             :native_hsd_dense_bordered_lu_partial_pivot) :
-            :not_applicable,
+            (settings.kkt_route === :sparse_schur ?
+                (:sparse_factorization, :factor_solve) :
+                (:lu, :factor_solve)) : (),
+        descriptor.available ? kkt_execution.kernel : :not_applicable,
         (),
         :none,
         T === Float64 ? :immutable_scalars : :owned_mutable_scalars,
     )
     storage = KKTStoragePlan(
-        :dense;
+        kkt_execution.storage;
         dimension=factor_dimension,
         input_nnz=entries,
         density=factor_dimension == 0 ? 0.0 :
@@ -467,10 +520,10 @@ function _native_hsd_plan(
         reduced_rows=active_rows,
         factorization_reuse=descriptor.factorization_reuse,
         requested_provider=settings.provider,
-        executed_provider=:native_serial,
+        executed_provider=kkt_execution.provider,
         requested_threads=settings.limits.threads,
         executed_threads=1,
-        fallback_chain=(),
+        fallback_chain=kkt_execution.fallback_chain,
     )
     return ExecutionPlan(
         classification,
@@ -525,6 +578,19 @@ end
     return :unknown
 end
 
+@inline function _native_hsd_fallback_reason(
+    requested::Symbol, executed::Symbol,
+)
+    requested === executed && return :none
+    requested === :sparse_schur && executed === :expanded &&
+        return :sparse_factor_or_refinement_failure
+    requested === :sparse_schur && executed === :bordered &&
+        return :sparse_and_expanded_failure
+    requested === :expanded && executed === :bordered &&
+        return :expanded_factor_or_refinement_failure
+    return :route_changed_fail_closed
+end
+
 function _native_hsd_diagnostics(
     plan::ExecutionPlan,
     reduction::HSDEqualityReduction,
@@ -534,42 +600,63 @@ function _native_hsd_diagnostics(
     factorizations::Int,
     setup_seconds::Float64,
     core_seconds::Float64,
-    recovery_seconds::Float64,
+    recovery_seconds::Float64;
+    executed_kkt_route::Union{Nothing,Symbol}=nothing,
 )
     payload = plan.payload::NativeHSDPlan
     descriptor = payload.formulation
     equality_ready = reduction.status === HSDEqualityReady
     equality_only = equality_ready && payload.active_rows == 0
-    planned_factorization = descriptor.available ? descriptor.factorization :
+    mathematical_formulation = descriptor.available ?
+        formulation_symbol(descriptor) : :not_applicable
+    planned_kkt = payload.kkt_execution
+    actual_route = executed_kkt_route === nothing ? payload.kkt_route :
+                   executed_kkt_route
+    executed_kkt = _native_hsd_kkt_descriptor(
+        actual_route, mathematical_formulation,
+    )
+    did_execute = equality_ready && factorizations > 0
+    planned_factorization = descriptor.available ? planned_kkt.factorization :
                             :not_applicable
     executed_factorization = !equality_ready ? :not_executed :
-                             factorizations > 0 ? descriptor.factorization :
+                             did_execute ? executed_kkt.factorization :
                              equality_only ? :not_applicable : :not_executed
-    planned_formulation = descriptor.available ? formulation_symbol(descriptor) :
+    planned_formulation = descriptor.available ? planned_kkt.formulation :
                           :not_applicable
     executed_formulation = !equality_ready ? :not_executed :
-                            factorizations > 0 ? formulation_symbol(descriptor) :
+                            did_execute ? executed_kkt.formulation :
                             equality_only ? :not_applicable : :not_executed
-    planned_backend = descriptor.available ? descriptor.backend : :not_applicable
+    planned_backend = descriptor.available ? planned_kkt.backend :
+                      :not_applicable
     executed_backend = !equality_ready ? :not_executed :
-                       factorizations > 0 ? descriptor.backend :
+                       did_execute ? executed_kkt.backend :
                        equality_only ? :not_applicable : :not_executed
-    planned_reuse = descriptor.available ? descriptor.factor_reuse :
+    planned_reuse = descriptor.available ? planned_kkt.factorization_reuse :
                     :not_applicable
     executed_reuse = !equality_ready ? :not_executed :
-                     factorizations > 0 ? descriptor.factor_reuse :
+                     did_execute ? executed_kkt.factorization_reuse :
                      equality_only ? :not_applicable : :not_executed
+    planned_kernel = descriptor.available ? planned_kkt.kernel : :not_applicable
+    executed_kernel = !equality_ready ? :not_executed :
+                      did_execute ? executed_kkt.kernel :
+                      equality_only ? :not_applicable : :not_executed
+    planned_provider = descriptor.available ? planned_kkt.provider :
+                       :not_applicable
+    executed_provider = !equality_ready ? :not_executed :
+                        did_execute ? executed_kkt.provider :
+                        equality_only ? :not_applicable : :not_executed
+    planned_storage = descriptor.available ? planned_kkt.storage :
+                      :not_applicable
+    executed_storage = !equality_ready ? :not_executed :
+                       did_execute ? executed_kkt.storage :
+                       equality_only ? :not_applicable : :not_executed
+    fallback_reason = did_execute ? _native_hsd_fallback_reason(
+        payload.kkt_route, actual_route,
+    ) : :none
     execution_path = equality_only ? :affine_space : :native_hsd
     termination_stage = reduction.status !== HSDEqualityReady ? :equality_reduction :
                         status in (Optimal, PrimalInfeasible, DualInfeasible) ?
                         :original_coordinate_certification : :native_hsd
-    arithmetic = plan.la_config.arithmetic
-    factorization_kernel = arithmetic in (:float32, :float64) ?
-                           :lapack_getrf_getrs : :generic_partial_lu
-    planned_kernel = descriptor.available ? factorization_kernel : :not_applicable
-    executed_kernel = !equality_ready ? :not_executed :
-                      factorizations > 0 ? factorization_kernel :
-                      equality_only ? :not_applicable : :not_executed
     termination = (
         reason=reason,
         stage=termination_stage,
@@ -584,6 +671,11 @@ function _native_hsd_diagnostics(
         requested_kkt_formulation=:auto,
         planned_kkt_formulation=planned_formulation,
         executed_kkt_formulation=executed_formulation,
+        requested_kkt_route=payload.kkt_route,
+        planned_kkt_route=planned_kkt.route,
+        executed_kkt_route=did_execute ? executed_kkt.route : :not_executed,
+        planned_kkt_storage=planned_storage,
+        executed_kkt_storage=executed_storage,
         planned_factorization,
         executed_factorization,
         factorization_reuse=planned_reuse,
@@ -599,19 +691,19 @@ function _native_hsd_diagnostics(
         gram_or_metric=descriptor.gram_or_metric,
         metric=descriptor.gram_or_metric,
         formulation=planned_formulation,
-        route=descriptor.route,
+        route=did_execute ? executed_kkt.route : planned_kkt.route,
         execution_path,
         planned_scaling=:none,
         executed_scaling=:none,
         planned_backend,
         executed_backend,
-        backend=planned_backend,
-        planned_la_provider=descriptor.available ? :native_serial : :not_applicable,
-        la_executed_provider=!equality_ready ? :not_executed :
-                             factorizations > 0 ? :native_serial :
-                             equality_only ? :not_applicable : :not_executed,
-        fallback_reason=:none,
-        fallback_chain=(),
+        backend=did_execute ? executed_backend : planned_backend,
+        planned_la_provider=planned_provider,
+        la_executed_provider=executed_provider,
+        fallback_reason,
+        fallback_chain=planned_kkt.fallback_chain,
+        executed_fallback_chain=payload.kkt_route === actual_route ? () :
+            (actual_route,),
         planned_threads=1,
         executed_threads=1,
         retained_ray_coordinates=(
@@ -672,7 +764,8 @@ function _native_hsd_core_result(
     y::Vector{T},
     setup_seconds::Float64,
     core_seconds::Float64,
-    recovery_seconds::Float64,
+    recovery_seconds::Float64;
+    executed_kkt_route::Union{Nothing,Symbol}=nothing,
 ) where {T<:AbstractFloat}
     diagnostics = _native_hsd_diagnostics(
         plan,
@@ -683,7 +776,8 @@ function _native_hsd_core_result(
         factorizations,
         setup_seconds,
         core_seconds,
-        recovery_seconds,
+        recovery_seconds;
+        executed_kkt_route,
     )
     message = "native HSD terminated with $(status) ($(reason))"
     return NativeHSDCoreResult{T}(
@@ -934,7 +1028,8 @@ function _public_native_hsd_core(
         y_full,
         setup_seconds,
         core_seconds,
-        recovery_seconds,
+        recovery_seconds;
+        executed_kkt_route=state.kkt_route,
     )
 end
 
