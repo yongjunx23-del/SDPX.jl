@@ -13,7 +13,7 @@
 #   (The sign note: the FIRST frozen convention c'x + b'y + κ = 0 forced
 #    κ = −(c'x+b'y) ≤ 0 at feasible points and admitted no strictly-interior
 #    central point.  It is corrected here.  The historical analysis lives in
-#    docs/reviews/HSD_SIGN_HISTORY.md.)
+#    docs/design/HSD_FORMULATION.md.)
 #
 # This file is intentionally self-contained (no SDPX dependency): it verifies
 # the *algebra* of the formulation on small, hand-computable fixtures, so it

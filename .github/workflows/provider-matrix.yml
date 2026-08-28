@@ -63,5 +63,5 @@ jobs:
           VER: ${{ matrix.version }}
       - name: Run quick test profile
         env:
-          SDPX_TEST_PROFILE: quick
+          SDPX_TEST_PROFILE: e2e
         run: julia --project=. -e 'using Pkg; Pkg.test()'

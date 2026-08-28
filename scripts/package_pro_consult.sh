@@ -3,7 +3,11 @@
 # Usage: scripts/package_pro_consult.sh <output-dir>
 set -euo pipefail
 SHA=$(git rev-parse HEAD)
-OUT="${1:-/Users/xuyongjun/Desktop/project/SDPX/pro-consult-r3}"
+if [ "$#" -ne 1 ]; then
+  echo "usage: scripts/package_pro_consult.sh <output-dir>" >&2
+  exit 2
+fi
+OUT="$1"
 mkdir -p "$OUT"
 git archive "$SHA" --prefix=source/ | gzip > "$OUT/context-$SHA.tar.gz"
 shasum -a 256 "$OUT/context-$SHA.tar.gz" > "$OUT/context-$SHA.sha256"
@@ -11,8 +15,6 @@ cp docs/PLAN.md "$OUT/PLAN.md"
 cp docs/design/CANONICAL_FORM.md "$OUT/"
 cp docs/design/HSD_FORMULATION.md "$OUT/"
 cp docs/design/NEWTON_SYSTEM.md "$OUT/"
-cp docs/reviews/GPTPRO_BUG_KERNEL_REVIEW_20260828.md "$OUT/" 2>/dev/null || true
-cp docs/reviews/GPTPRO_PERFORMANCE_PLAN_20260828.md "$OUT/" 2>/dev/null || true
 cat > "$OUT/PROGRESS_SINCE_LAST_AUDIT.md" <<EOF
 # Progress since the 6.0/10 maturity audit
 

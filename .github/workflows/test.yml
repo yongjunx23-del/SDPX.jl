@@ -37,7 +37,7 @@ jobs:
           echo "changed files:"
           echo "$changed"
           if echo "$changed" | grep -qE \
-            '^(ext/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|test/provider_smoke\.jl|test/multifloat_linear_algebra_integration\.jl|Project\.toml)'; then
+            '^(ext/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|validation/providers/|Project\.toml)'; then
             echo "providers=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -56,22 +56,22 @@ jobs:
           - julia: '1.10'
             os: ubuntu-latest
             threads: '1'
-            profile: quick
+            profile: e2e
           - julia: '1'
             os: ubuntu-latest
             threads: '4'
-            profile: quick
+            profile: e2e
           # Spot-check the other platforms once, on the current release. The
           # thread count is part of the matrix rather than fixed because several
           # kernels have threaded and serial paths that must agree exactly.
           - julia: '1'
             os: macOS-latest
             threads: '4'
-            profile: quick
+            profile: e2e
           - julia: '1'
             os: windows-latest
             threads: '4'
-            profile: quick
+            profile: e2e
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -149,8 +149,8 @@ jobs:
           SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
           SDPX_PROVIDER_SMOKE_TARGET: all
         run: |
-          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 test/provider_smoke.jl
-          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 test/multifloat_linear_algebra_integration.jl
+          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/provider_smoke.jl
+          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/multifloat_linear_algebra_integration.jl
 
   v2-gates:
     name: v2 acceptance gates

@@ -39,21 +39,17 @@ code must respect:
 `newton_system_oracle.py` is the independent small-system oracle associated
 with the Newton-system contract.
 
-## Evidence
+## Evidence and historical material
 
-`docs/evidence/` keeps current provider-spike evidence. `docs/reviews/` keeps
-current blocking review summaries. Evidence records do not supersede the
-current source, frozen design contracts, or `docs/PLAN.md`.
-
-## Historical material
-
-Completed wave plans, superseded architecture reviews, old maturity reports,
-and resolved bug diaries are not part of the shipped documentation tree. They
-remain recoverable from Git history. A local convenience copy created during
-the 2026-08-28 cleanup is stored outside the repository at:
+Provider spikes, review transcripts, completed wave plans, superseded
+architecture reviews, old maturity reports, and resolved bug diaries are not
+part of the shipped documentation tree. They remain recoverable from Git
+history. Local convenience copies created during the 2026-08-28 cleanup are
+stored outside the repository at:
 
 ```text
 ../local-archives/SDPX.jl-docs-20260828/
+../local-archives/SDPX.jl-cleanup-20260828/
 ```
 
 That local path is not a package dependency and is not referenced by builds or

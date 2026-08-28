@@ -61,7 +61,7 @@ jobs:
           julia --startup-file=no -e '
           root = pwd()
           files = String[]
-          for dir in ("src", "test", "benchmark", "bin",
+          for dir in ("src", "test", "validation", "benchmark", "bin",
                       "scripts", "ext", "examples", "docs")
               path = joinpath(root, dir)
               isdir(path) || continue
@@ -99,19 +99,12 @@ jobs:
           end
           on_disk = Set{String}(filter(endswith(".jl"), readdir("test")))
           pop!(on_disk, "runtests.jl")
-          # Manual-only entry points that are intentionally not mounted in
-          # runtests.jl; each has a documented driver outside the suite.
-          manual_only = Set{String}([
-              "provider_smoke.jl",                    # scripts/dev_v05_provider_smoke.sh
-              "multifloat_linear_algebra_integration.jl", # manual MFLA integration probe
-          ])
           missing = sort!(collect(setdiff(listed, on_disk)))
           isempty(missing) ||
               error("runtests.jl references missing files: " * join(missing, ", "))
-          unmounted = sort!(collect(setdiff(on_disk, listed, manual_only)))
+          unmounted = sort!(collect(setdiff(on_disk, listed)))
           isempty(unmounted) || error(
-              "test files mounted nowhere (add to runtests.jl or the " *
-              "manual-only allowlist): " * join(unmounted, ", "))
+              "test files mounted nowhere: " * join(unmounted, ", "))
           println("runtests lists ", length(listed), " files; disk and list agree")'
 
       - name: Documentation page integrity

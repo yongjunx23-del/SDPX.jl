@@ -14,10 +14,10 @@ set -euo pipefail
 #                            unset a temporary environment is used and removed
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOCAL_PROVIDERS_ROOT="$(cd "$ROOT/../.." && pwd)"
+LOCAL_PROVIDERS_ROOT="$(cd "$ROOT/.." && pwd)"
 
-: "${SDPX_MFLA_PROJECT:=$LOCAL_PROVIDERS_ROOT/MFLA}"
-: "${SDPX_BFLA_PROJECT:=$LOCAL_PROVIDERS_ROOT/BFLA}"
+: "${SDPX_MFLA_PROJECT:=$LOCAL_PROVIDERS_ROOT/MultiFloatLinearAlgebra.jl}"
+: "${SDPX_BFLA_PROJECT:=$LOCAL_PROVIDERS_ROOT/BigFloatLinearAlgebra.jl}"
 
 if [ ! -d "$SDPX_MFLA_PROJECT" ]; then
   echo "MFLA checkout not found at $SDPX_MFLA_PROJECT (set SDPX_MFLA_PROJECT)" >&2
@@ -57,6 +57,6 @@ Pkg.add(["MultiFloats", "GenericLinearAlgebra"])
 ' "$ROOT" "$SDPX_MFLA_PROJECT" "$SDPX_BFLA_PROJECT"
 
 julia --startup-file=no --project="$SMOKE_ENV" -t1 \
-  "$ROOT/test/provider_smoke.jl"
+  "$ROOT/validation/providers/provider_smoke.jl"
 
 echo "provider smoke completed: mfla=$SDPX_MFLA_PROJECT bfla=$SDPX_BFLA_PROJECT"

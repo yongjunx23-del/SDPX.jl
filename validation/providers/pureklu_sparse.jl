@@ -20,12 +20,12 @@
     is false and the module has no inertia symbol), no certificate or
     terminal-status authority, no LinearSolve/SciMLBase loaded, and no
     HSD dispatch. This file is not part of the ordinary Pkg.test target;
-    it is an extension-gated spike (see docs/evidence/
-    pureklu_provider_spike.md for the driver).
+    it is an extension-gated validation of the high-precision sparse-provider
+    contract in docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md.
 
     Run (spike environment with SDPX dev'd + PureKLU + MultiFloats):
       julia --project=/tmp/sdpx-pureklu-env \
-            test/provider_spikes/pureklu_sparse.jl
+            validation/providers/pureklu_sparse.jl
 =====================================================================#
 using Test
 using LinearAlgebra

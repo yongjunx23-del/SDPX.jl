@@ -118,9 +118,10 @@ arithmetic; it never triggers a silent Float64 solve.
 
 ## Design evidence
 
-- [High-precision sparse provider decision](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md)
-- [PureKLU prototype evidence](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/pureklu_provider_spike.md)
-- [QDLDL prototype evidence](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/evidence/qdldl_provider_spike.md)
+The active provider decision is the
+[high-precision sparse provider contract](https://github.com/yongjunx23-del/SDPX.jl/blob/main/docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md).
+Detailed prototype transcripts remain in Git history rather than the shipped
+manual.
 
 Production defaults change only after end-to-end certificate, accuracy,
 allocation, RSS, and benchmark evidence on one frozen source SHA.

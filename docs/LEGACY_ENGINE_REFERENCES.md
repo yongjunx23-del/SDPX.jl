@@ -140,7 +140,7 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
   `test/adaptive_parameter_policy.jl`, `test/v05_core_invariants.jl`,
   `test/fixed_precision_contract.jl`, `test/bfla_backend.jl`, and others
   (27 active test files in `test/runtests.jl` call `SDPX.solve!`; the external
-  `test/provider_smoke.jl` harness is intentionally not part of `runtests.jl`).
+  `validation/providers/provider_smoke.jl` harness is intentionally not part of `runtests.jl`).
 - **Docs:** `docs/PLAN.md`; historical review evidence remains in Git history.
 
 ## 5. `src/step.jl` / `src/step_hot.jl` — legacy Newton step orchestration
@@ -235,7 +235,7 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
   `src/ir/lower_soc.jl`, NOT here.)
 - **Tests:** `test/soc_native_solver.jl`, `test/soc_regressions.jl`,
   `test/moi_native_soc.jl`, `test/moi.jl`, `test/soc_metric_sparse.jl`,
-  `test/soc_singleton_presolve.jl`, `test/provider_smoke.jl`
+  `test/soc_singleton_presolve.jl`, `validation/providers/provider_smoke.jl`
   (`_solve_native_soc_core`), `test/public/result_optimize.jl`
   (`lower_soc_native`), `test/modeling/lower_soc.jl` (`lower_soc_native`).
 - **Docs:** `docs/PLAN.md`, review evidence.
@@ -324,7 +324,7 @@ active `test/runtests.jl` suites.
 | `src/solver/interior_point.jl` | none remaining outside the legacy engine itself — cross-file consumers now resolve against certificates, checkpoint, and pipeline owner files after the sixth-wave helper migration | `solve!` (27 active files), `_solve_sdp_core!`, `_kkt_cold_start_initialization`, `recommended_parameters`, `block_norm_stats`, `_equality_factor_diagnostics`, `_solve_pipeline!`, `_sdp_newton_termination_metadata`, `BestIterateWorkspace`, `_store_best_iterate!`, `_accepted_sdp_trial_residuals!` and other loop-owned symbols |
 | `src/step.jl` | after the helper-migration wave, `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, and `_has_owned_bigfloat_equality_arrow` live in `src/kernels/threaded.jl`; `step.jl` retains `newton_step!` and private legacy helpers consumed by `src/solver/interior_point.jl`, plus retained line-search helpers called by the threaded legacy path | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in active legacy regression tests |
 | `src/hsd/nonnegative_hsd.jl` | **DELETED** — shared kernels moved to `src/hsd/common_runtime.jl`; no production `src` references remain | old `hsd_solve!` and `_hsd_border_solve!` tests are owned by the test/E2E migration wave |
-| `src/soc_native.jl` | production SOC engine for the `ConicProblem` path: `NativeSOCPlan`, `FixedTraceQ3Execution`, `_build_native_soc_payload` (`pipeline/plan.jl`), `_solve_native_soc_core` (`frontend/high_level_solve.jl:165,202`), `NativeSOCDiagnostics` (`soc_presolve.jl`, `validation.jl`, `public/optimize.jl`, `frontend/high_level_solve.jl`) | `test/soc_native_solver.jl`, `test/moi_native_soc.jl`, `test/soc_metric_sparse.jl`, `test/soc_singleton_presolve.jl`, `test/soc_regressions.jl`, `test/provider_smoke.jl` |
+| `src/soc_native.jl` | production SOC engine for the `ConicProblem` path: `NativeSOCPlan`, `FixedTraceQ3Execution`, `_build_native_soc_payload` (`pipeline/plan.jl`), `_solve_native_soc_core` (`frontend/high_level_solve.jl:165,202`), `NativeSOCDiagnostics` (`soc_presolve.jl`, `validation.jl`, `public/optimize.jl`, `frontend/high_level_solve.jl`) | `test/soc_native_solver.jl`, `test/moi_native_soc.jl`, `test/soc_metric_sparse.jl`, `test/soc_singleton_presolve.jl`, `test/soc_regressions.jl`, `validation/providers/provider_smoke.jl` |
 
 Ancillary checks performed this wave (no change needed):
 

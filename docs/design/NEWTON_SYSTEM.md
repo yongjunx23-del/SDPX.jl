@@ -192,7 +192,7 @@ unregularized residual groups (`src/kkt/system.jl:217-233`), and
 
 ## Independent oracles
 
-- `test/newton_system_reference.jl` constructs LP, SOC, and PSD/svec fixtures
+- `validation/newton_system_reference.jl` constructs LP, SOC, and PSD/svec fixtures
   directly, solves them through the production expanded route, recomputes every
   equation independently, checks affine residual homotopy, verifies shared
   predictor/corrector affine RHS, and repeats residual evaluation in BigFloat.

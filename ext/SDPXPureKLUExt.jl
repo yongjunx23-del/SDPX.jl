@@ -10,7 +10,7 @@
     in src/la/sparse_capabilities.jl only. The adapter was validated
     against PureKLU 1.4.1 on the exact nonsymmetric sparse Newton
     operators described in docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md
-    (promotion gates 1–7, 9). See docs/evidence/pureklu_provider_spike.md
+    (promotion gates 1–7, 9). See docs/design/HIGH_PRECISION_SPARSE_PROVIDERS.md
     for results.
 
     Responsibilities (narrow):

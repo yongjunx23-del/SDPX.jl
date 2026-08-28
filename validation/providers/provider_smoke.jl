@@ -4,7 +4,7 @@
     This file is intentionally outside the ordinary `Pkg.test` target:
     `test/runtests.jl` does not include it, and the default test environment
     never clones or resolves MultiFloatLinearAlgebra or BigFloatLinearAlgebra.
-    Run it through `scripts/dev_v05_provider_smoke.sh` (or an equivalent
+    Run it through `scripts/provider_smoke.sh` (or an equivalent
     environment that has SDPX, MultiFloatLinearAlgebra,
     BigFloatLinearAlgebra, and GenericLinearAlgebra loaded together). CI may
     set `SDPX_PROVIDER_SMOKE_TARGET=mfla` to exercise the public MFLA provider
@@ -58,11 +58,11 @@ const _REQUIRE_BFLA = _SMOKE_TARGET in (:all, :bfla)
 
 _REQUIRE_MFLA && !_MFLA_LOADED && error(
     "provider smoke target $(_SMOKE_TARGET) requires " *
-    "MultiFloatLinearAlgebra; run scripts/dev_v05_provider_smoke.sh",
+    "MultiFloatLinearAlgebra; run scripts/provider_smoke.sh",
 )
 _REQUIRE_BFLA && !_BFLA_LOADED && error(
     "provider smoke target $(_SMOKE_TARGET) requires " *
-    "BigFloatLinearAlgebra; run scripts/dev_v05_provider_smoke.sh",
+    "BigFloatLinearAlgebra; run scripts/provider_smoke.sh",
 )
 
 const _PROVIDERS_LOADED =
