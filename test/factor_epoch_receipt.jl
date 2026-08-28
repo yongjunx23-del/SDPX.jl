@@ -235,10 +235,14 @@ end
     @test session.n == 1 && session.m == 1
     system = _expanded_border_system(T)
 
-    # Production seam: the regularization ladder diagnoses the adjacent
-    # border inertia and the exact unregularized factor is certified once.
+    # Production seam: the violated bordered contract makes the
+    # companion-inertia expectation not applicable, so the ladder records the
+    # mismatch diagnostically and certifies the exact unregularized factor
+    # directly (the border retry remains for the enforced-applicable case).
     @test SDPX._product_hsd_factor_expanded!(state, system)
-    @test state.diagnostic === :expanded_exact_border_inertia
+    @test session.inertia_applicability.status === SDPX.INERTIA_NOT_APPLICABLE
+    @test session.inertia_applicability.reason === :bordered_contract_violated
+    @test iszero(session.regularization)
     @test session.status === SDPX.EXPANDED_KKT_FACTORED
     @test session.factor_receipt !== nothing
     @test session.factor_receipt.route === :expanded
@@ -415,7 +419,9 @@ end
     @test sparse_session.receipt_build_count == 0
     @test sparse_session.factor_receipt === nothing
 
-    # Expanded: a wrong-inertia ladder builds no receipt and no factor.
+    # Expanded: a negative cone operator refutes the sign-definite premise,
+    # so the companion-inertia mismatch is diagnostic; only the exact factor
+    # epoch that actually succeeded builds a receipt.
     T = Float64
     A = zeros(T, 1, 1)
     b = zeros(T, 1)
@@ -428,11 +434,16 @@ end
         zeros(T, 1), zeros(T, 1), zero(T), zeros(T, 1), zero(T),
     )
     wrong = SDPX.NewtonSystem(A, b, c, wrong_cone, one(T), one(T), rhs)
-    rejected = SDPX.ExpandedKKTSession(T, 1, 1)
-    @test !SDPX.factor_expanded_kkt!(rejected, wrong; max_regularization_attempts=5)
-    @test rejected.status == SDPX.EXPANDED_KKT_WRONG_INERTIA
-    @test rejected.factor_receipt === nothing
-    @test rejected.numeric_factor_count == 0
-    @test rejected.receipt_build_count == 0
-    @test rejected.factor_attempt_count == 0
+    accepted = SDPX.ExpandedKKTSession(T, 1, 1)
+    @test SDPX.factor_expanded_kkt!(accepted, wrong; max_regularization_attempts=5)
+    @test accepted.status == SDPX.EXPANDED_KKT_FACTORED
+    @test accepted.inertia_applicability.status == SDPX.INERTIA_NOT_APPLICABLE
+    @test any(
+        attempt.reason == SDPX.EXPANDED_ATTEMPT_INERTIA_NOT_APPLICABLE
+        for attempt in accepted.attempts
+    )
+    @test accepted.factor_receipt !== nothing
+    @test accepted.numeric_factor_count == 1
+    @test accepted.receipt_build_count == 1
+    @test accepted.factor_attempt_count == 1
 end
