@@ -87,6 +87,11 @@ mutable struct BorderedHSDWorkspace{T,R<:AbstractFactorCache{T}}
     rank_ambiguous::Bool
     rank_incompatible::Bool
     rank_ray::Vector{T}
+    # Typed policy/result metadata of the setup-time equality reduction:
+    # :dense_rrqr | :preserve_original | :expanded_original and the
+    # sparse-preserving setup status (sparse path) / ready (dense path).
+    equality_mode::Symbol
+    equality_status::SparseEqualityReductionStatus
     rDr::Vector{T}
     driver::HotRouteCache{T,R}
     H::Matrix{T}
@@ -160,6 +165,7 @@ const _HSD_BORDERED_PROPERTIES = (
     :At, :Ad, :Ar, :Atr, :cr, :nr, :orthant_only, :rank_basis,
     :rank_null_objective, :rank_ambiguous, :rank_incompatible, :rank_ray,
     :rDr, :driver, :H, :rhs, :q, :qr, :rvec, :u, :w, :dxr,
+    :equality_mode, :equality_status,
 )
 @inline function Base.getproperty(state::HSDState, name::Symbol)
     if name in _HSD_BORDERED_PROPERTIES
@@ -196,6 +202,11 @@ certificate verifier before assigning a successful status.
 This is setup work: allocations and a dense QR are intentional here.  The
 iteration hot path receives only the reduced sparse map and preallocated
 buffers.
+
+This method is the explicitly-dense route: it is dispatched only for dense
+`AbstractMatrix` input.  Sparse input (`SparseMatrixCSC`) is handled by the
+sparse-preserving dispatch in `src/hsd/equality_reduction_sparse.jl`, which
+never materializes `Matrix(A)` or a dense null-space basis.
 """
 function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) where {T<:AbstractFloat}
     m, n = size(A)
@@ -371,7 +382,9 @@ function _hsd_state_from_reduction(
         SparseArrays.sparse(transpose(A)), Matrix{T}(A), Ar,
         SparseArrays.sparse(transpose(Ar)), reduction.cr, nr, orthant_only,
         reduction.V, reduction.cnull, reduction.ambiguous,
-        reduction.incompatible, reduction.ray, zeros(T, nr), driver,
+        reduction.incompatible, reduction.ray,
+        _hsd_reduction_mode(reduction), _hsd_reduction_status(reduction),
+        zeros(T, nr), driver,
         Matrix{T}(undef, nr, nr), zeros(T, nr), zeros(T, n),
         zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr),
     )
