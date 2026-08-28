@@ -5,7 +5,7 @@ using LinearAlgebra
 using SparseArrays
 using Random
 
-const _WAVE_I_RNG = Random.Xoshiro(0x57a25e)
+const _WAVE_I_RNG = Random.Xoshiro(1)
 
 # Build a manufactured SDPX.NewtonSystem with a block-diagonal cone linearization.
 function _manufactured_system(::Type{T}; n=3, m=5, scale=1.0) where {T}
