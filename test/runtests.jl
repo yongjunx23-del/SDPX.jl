@@ -9,8 +9,9 @@ const QUICK_TESTS = (
     "kkt_newton_system.jl",
     "kkt_expanded_quasidefinite.jl",
     "wave_i_sparse.jl",
-    # Phase 6 production route belongs in both standard profiles exactly once.
+    # Phase 6 production route and factor receipt gate belong in both profiles.
     "phase6_sparse_integration.jl",
+    "factor_epoch_receipt.jl",
     "hsd_kkt_initialize.jl",
     "cone_algebra.jl",
     "cones_asymmetric.jl",
@@ -115,6 +116,7 @@ const FULL_TESTS = (
     "kkt_expanded_quasidefinite.jl",
     "wave_i_sparse.jl",
     "phase6_sparse_integration.jl",
+    "factor_epoch_receipt.jl",
     "hsd_kkt_initialize.jl",
     "bfla_backend.jl",
     "mfla_backend.jl",

@@ -269,6 +269,10 @@ function _product_hsd_factor_exact_expanded_border!(
     _factor_expanded_exact!(session, pivot_floor) || return false
     session.regularization = zero(T)
     session.status = EXPANDED_KKT_FACTORED
+    # The exact-border exception is still an ordinary numeric factor epoch.
+    # Build only its immutable receipt; all RHS-dependent refinement and
+    # five-equation acceptance checks remain unchanged below this seam.
+    _build_expanded_factor_receipt!(session)
     state.diagnostic = :expanded_exact_border_inertia
     return true
 end

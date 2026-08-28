@@ -322,6 +322,12 @@ mutable struct ExpandedKKTSession{T<:AbstractFloat,B}
     regularization::T
     regularization_attempts::Int
     attempts::Vector{ExpandedKKTAttempt{T}}
+    matrix_epoch::Int
+    factor_epoch::Int
+    pattern_signature::UInt64
+    numeric_factor_count::Int
+    factor_receipt::Union{Nothing,FactorReceipt{T}}
+    receipt_build_count::Int
     refinement_trajectory::Vector{ExpandedRefinementStep{T}}
     refinements::Int
     refinement_recovery_attempts::Int
@@ -375,6 +381,8 @@ function ExpandedKKTSession(::Type{T}, n::Int, m::Int; rhs_count::Int=2) where {
         alloc_zeros(T, dimension, dimension),
         alloc_zeros(T, dimension, dimension),
         KKTInertia(0, 0, dimension), zero(T), 0, attempts,
+        0, 0, dense_factor_pattern_signature(dimension, dimension, :expanded),
+        0, nothing, 0,
         refinement_trajectory, 0, 0,
         T(Inf), T(Inf), T(256) * eps(T), T(256) * eps(T), false,
         alloc_zeros(T, dimension), alloc_zeros(T, dimension),
@@ -405,6 +413,8 @@ function assemble_expanded_kkt!(
         "expanded session/system dimensions disagree",
     ))
     K = session.unregularized
+    session.matrix_epoch += 1
+    session.factor_receipt = nothing
     zero_owned!(K)
     xrows = 1:n
     yrows = (n + 1):(n + m)
@@ -540,26 +550,73 @@ end
 function _factor_expanded_exact!(
     session::ExpandedKKTSession{T}, pivot_floor::T,
 ) where {T<:AbstractFloat}
-    if session.la_backend === nothing
-        return factorize_pivoted_lu!(
+    session.factor_receipt = nothing
+    success = if session.la_backend === nothing
+        factorize_pivoted_lu!(
             session.factor, session.regularized; threshold=pivot_floor,
         )
+    else
+        copy_owned!(session.provider_exact_matrix, session.regularized)
+        provider_factor = la_lu_factor!(
+            session.la_backend, session.provider_exact_matrix,
+        )
+        session.provider_exact_factor = provider_factor
+        session.factor.minimum_pivot = T(NaN)
+        session.factor.failed_pivot = provider_factor === nothing ? 1 : 0
+        session.factor.success = provider_factor !== nothing
+        provider_factor !== nothing
     end
-    copy_owned!(session.provider_exact_matrix, session.regularized)
-    provider_factor = la_lu_factor!(
-        session.la_backend, session.provider_exact_matrix,
+    if success
+        session.factor_epoch += 1
+        session.numeric_factor_count += 1
+    end
+    return success
+end
+
+@inline function _expanded_factor_receipt_current(
+    session::ExpandedKKTSession{T},
+) where {T<:AbstractFloat}
+    provider = session.la_backend === nothing ?
+        :standard_pivoted_lu : la_backend_provider(session.la_backend)
+    return factor_receipt_owned(
+        session.factor_receipt;
+        matrix_epoch=session.matrix_epoch,
+        factor_epoch=session.factor_epoch,
+        pattern_signature=session.pattern_signature,
+        route=:expanded,
+        provider=provider,
+        regularization=session.regularization,
     )
-    session.provider_exact_factor = provider_factor
-    session.factor.minimum_pivot = T(NaN)
-    session.factor.failed_pivot = provider_factor === nothing ? 1 : 0
-    session.factor.success = provider_factor !== nothing
-    return provider_factor !== nothing
+end
+
+@inline function _build_expanded_factor_receipt!(
+    session::ExpandedKKTSession{T},
+) where {T<:AbstractFloat}
+    provider = session.la_backend === nothing ?
+        :standard_pivoted_lu : la_backend_provider(session.la_backend)
+    session.factor_receipt = FactorReceipt(
+        session.matrix_epoch,
+        session.factor_epoch,
+        session.pattern_signature,
+        :expanded,
+        provider,
+        T,
+        factor_receipt_precision(T),
+        session.regularization,
+        iszero(session.regularization) ? :none : :signed_diagonal,
+        :factored,
+        T(Inf),
+        false,
+    )
+    session.receipt_build_count += 1
+    return session.factor_receipt
 end
 
 function _solve_expanded_factor!(
     destination::AbstractVecOrMat{T}, session::ExpandedKKTSession{T},
     rhs::AbstractVecOrMat{T},
 ) where {T<:AbstractFloat}
+    _expanded_factor_receipt_current(session) || return false
     if session.la_backend === nothing
         return solve_pivoted_lu!(destination, session.factor, rhs)
     end
@@ -686,6 +743,7 @@ function factor_expanded_kkt!(
                 session.factor.minimum_pivot),
             EXPANDED_ATTEMPT_ACCEPTED,
         )
+        _build_expanded_factor_receipt!(session)
         return true
     end
     # Preserve the strongest typed structural diagnosis across the exhausted
@@ -819,6 +877,7 @@ function _try_expanded_dynamic_factor!(
         min(session.inertia_factor.minimum_pivot, session.factor.minimum_pivot),
         EXPANDED_ATTEMPT_ACCEPTED,
     )
+    _build_expanded_factor_receipt!(session)
     return true
 end
 
