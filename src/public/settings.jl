@@ -265,7 +265,7 @@ function Settings(
     scaling::Symbol=:auto,
     equilibration::Symbol=:off,
     formulation::Symbol=:auto,
-    kkt_route::Symbol=:expanded,
+    kkt_route::Symbol=:bordered,
     provider::Symbol=:auto,
     presolve::Symbol=:auto,
     algorithm::Symbol=:auto,

@@ -3,10 +3,12 @@
 # D2 (:expanded default): Wave F originally measured iteration-0 breakdowns on
 #   LP/SOCP/Matrix. Wave G repaired the adjacent homogeneous-border inertia.
 #   Wave H reran Phase 0 and Wave D under both routes: every previously green
-#   case remains certificate-backed; expanded additionally closes tiny SOC and
-#   rank-one PSD, while the bounded-capped historical gap fails identically at
-#   iteration 0 under both routes. Expanded is therefore the public default;
-#   bordered remains explicitly selectable and allocation-tested.
+#   quick/Phase-0/Wave-D case remains certificate-backed; expanded additionally
+#   closes tiny SOC and rank-one PSD. The complete native opt-in matrix exposes
+#   three regressions versus bordered: SOC -> NumericalFailure, LP+SOC ->
+#   IterLimit, and SOC+PSD -> NumericalFailure (nine strict assertions; 287/9
+#   versus the bordered 290/6 baseline). Therefore bordered remains the public
+#   default; expanded remains explicitly selectable for its closed gaps.
 #
 # D3 (equilibration default, Wave H rerun after correcting frozen row-scale
 #   ownership): reduced mixed free/PSD cond(A) improves 2.0 -> sqrt(2), with
@@ -24,8 +26,8 @@ include(joinpath(@__DIR__, "..", "benchmark", "bootstrap", "BootstrapBenchmark.j
 const _BB = Main.BootstrapBenchmark
 
 @testset "wave f defaults" begin
-    @test SDPX.Settings{Float64}().kkt_route === :expanded
-    # Both routes remain working on quick-gate models after default promotion.
+    @test SDPX.Settings{Float64}().kkt_route === :bordered
+    # Both routes remain working on the quick-gate subset after G3.
     for (pname, params) in [
         (:lp, (sites=4,)),
         (:socp, (partial_waves=2, grid_points=4, analytic_coefficients=2)),
