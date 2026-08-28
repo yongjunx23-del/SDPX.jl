@@ -76,7 +76,6 @@ end
 function _settings(::Type{T}; time_limit::Real=Inf) where {T<:AbstractFloat}
     limits = isfinite(time_limit) ? SDPX.Limits(time=time_limit) : SDPX.Limits()
     return SDPX.Settings{T}(
-        engine=:native_hsd,
         limits=limits,
         verbosity=0,
         certification=true,

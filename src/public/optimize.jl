@@ -1726,101 +1726,14 @@ function _optimize_impl(
     # compile_product_cone_model owns the one model validation boundary.
     program = compile_product_cone_model(model)
     route = classify_native_cone_program(program)
-    if resolved_settings.engine === :native_hsd
-        # The explicit native-HSD opt-in is a separate direct route.  Its
-        # policy gate rejects unsupported requests before canonicalization;
-        # critically, this branch cannot reach `_public_lower_native`, a PSD
-        # lift, a legacy solver, or a fallback/retry chain.
-        _public_validate_algorithm(route, resolved_settings)
-        return _public_optimize_native_hsd(
-            model,
-            program,
-            route,
-            resolved_settings,
-            resolved_outputs,
-            warm_start,
-        )
-    end
-    if resolved_settings.formulation === :psd_lift
-        # An explicit `formulation=:psd_lift` request routes a mixed symmetric
-        # product through the universal PSD lift.  This is the plan's explicit
-        # (non-default) fallback; the default `:auto` keeps the family
-        # lowerer's mixed behavior.  It is never reached by `engine=:native_hsd`
-        # (which is fail-closed above) and cannot claim asymmetric support.
-        route.route === :mixed_family || throw(PublicOptimizeError(
-            route.route,
-            :psd_lift_route_unavailable,
-            "optimize: formulation=:psd_lift is only meaningful for a mixed " *
-            "symmetric product; the $(route.route) route has no lift",
-        ))
-        _public_program_has_nonsymmetric(program) && throw(PublicOptimizeError(
-            route.route,
-            :psd_lift_nonsymmetric_unavailable,
-            "optimize: formulation=:psd_lift cannot represent asymmetric " *
-            "(Exp/Power) blocks; no universal lift exists for them",
-        ))
-        warm_start === nothing || throw(PublicOptimizeError(
-            route.route,
-            :psd_lift_warm_start_unavailable,
-            "optimize: formulation=:psd_lift does not accept warm_start",
-        ))
-        _public_validate_algorithm(route, resolved_settings)
-        sparse = _public_lowering_sparse(resolved_settings.sparse)
-        lowering = lower_mixed_psd_native(
-            program;
-            sparse=sparse,
-            verbosity=resolved_settings.verbosity,
-        )
-        return _public_result_from_lowering(
-            model,
-            program,
-            lowering,
-            resolved_settings,
-            resolved_outputs,
-            warm_start,
-        )
-    end
-    # `engine=:auto` uses the direct native-HSD route for every model with an
-    # Exp/Power block.  No family lowerer or asymmetric fallback represents
-    # these cones, so this dispatch is explicit rather than a retry.
-    if resolved_settings.engine === :auto && _public_program_has_nonsymmetric(program)
-        _public_validate_algorithm(route, resolved_settings)
-        return _public_optimize_native_hsd(
-            model,
-            program,
-            route,
-            resolved_settings,
-            resolved_outputs,
-            warm_start,
-        )
-    end
-    # `engine=:auto` otherwise selects the native family-lowering path below.
-    # Phase 9 removed the `:legacy` engine selector from the public surface,
-    # so this branch is reached only by the `:auto` default.  There is
-    # intentionally no separate legacy Mehrotra engine wired at this seam and
-    # no hidden fallback; every executed route is a native route.
-    if warm_start !== nothing
-        warm_start isa Result || throw(ArgumentError(
-            "warm_start must be a previous SDPX Result or nothing",
-        ))
-        route.route === :sdp_family || throw(PublicOptimizeError(
-            route.route,
-            :continuation_route_unavailable,
-            "optimize: Result continuation warm starts are currently " *
-            "available only for the native SDP route",
-        ))
-        _public_model_has_explicit_starts(model) && throw(ArgumentError(
-            "warm_start=Result cannot be combined with explicit model " *
-            "starts set by set_start!, set_dual_start!, or " *
-            "set_dual_slack_start!",
-        ))
-    end
+    # `:auto` and explicit `:native_hsd` are the same public execution path.
+    # Family lowerers, the explicit PSD lift, and legacy solve loops remain
+    # qualified compatibility code only; none is reachable from `Model`.
     _public_validate_algorithm(route, resolved_settings)
-    lowering = _public_lower_native(program, route, resolved_settings)
-    return _public_result_from_lowering(
+    return _public_optimize_native_hsd(
         model,
         program,
-        lowering,
+        route,
         resolved_settings,
         resolved_outputs,
         warm_start,
@@ -1835,7 +1748,7 @@ or primal Exp/Power HSD route. `settings` controls the numerical solve, while
 `outputs` controls which result data are retained. The returned `Result` is
 expressed in the original model coordinates.
 
-Native product HSD is the only public engine (Phase 9): `engine=:auto` (the
+Native product HSD is the only public engine: `engine=:auto` (the
 default) or `engine=:native_hsd` select native execution routes, and the
 historical `:legacy` engine selector is rejected with a migration error.
 `algorithm` is a read-only diagnostic label whose only accepted value is
@@ -1843,14 +1756,8 @@ historical `:legacy` engine selector is rejected with a migration error.
 `status`, `termination`, and `certificate` facts are derived exclusively
 from the single final execution receipt produced by the executed solve.
 
-For a layout-compatible SDP model whose numerical coefficients have changed,
-`warm_start=previous_result` requests non-mutating continuation from a previous
-optimal, certified result. The source result must retain all primal,
-constraint-dual, and dual-slack components. SDPX rebuilds the primal PSD slack
-from the current model after preprocessing and scaling; it never reuses the
-previous Schur matrix, factorization, presolve map, or scaling. Continuation
-requires target Ruiz equilibration; `scaling=:none` safely uses ordinary cold
-initialization.
+Warm starts and explicit model starts are not accepted by the public
+product-HSD route; unsupported requests fail before canonical solve setup.
 """
 function optimize!(
     model::Model{T};
