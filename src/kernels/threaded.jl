@@ -290,14 +290,34 @@ function use_threaded_block_loops(ws::Workspace{T}, prob::SDPProblem{T}) where {
 end
 
 """
-    use_owned_bigfloat_block_loops(ws, prob) -> Bool
+    _has_owned_bigfloat_equality_arrow(ws, arrow) -> Bool
 
-Select the narrow BigFloat block scheduler used by the exact all-local
-equality-arrow path. Every Schur variable belongs to exactly one PSD block,
-so a worker that owns a complete block also owns every `d`/`v` destination
-that block updates. Block workspaces and status slots are disjoint, while
-`x`, `X`, `Y`, coefficients, and scalar targets are read-only. This is not a
-general permission to thread mutable BigFloat arithmetic.
+Whether the exact all-local block-diagonal equality-arrow representation is
+active: no mixed-precision reduced factor, no global equality columns, a
+non-empty equality right-hand side, and every Schur variable owned by exactly
+one local block. All native BigFloat block-parallel schedulers gate on this
+predicate; general BigFloat models never qualify.
+"""
+function _has_owned_bigfloat_equality_arrow(
+    ws::Workspace{BigFloat},
+    arrow::ArrowWorkspace{BigFloat},
+)
+    arrow.mixed_reduced_ready && return false
+    isempty(arrow.global_ids) || return false
+    size(ws.Btil, 2) > 0 || return false
+    isempty(arrow.local_ids) && return false
+    return sum(length, arrow.local_ids) == length(ws.rtil)
+end
+
+"""
+    use_owned_bigfloat_residual_path(ws, prob) -> Bool
+
+Select the narrow BigFloat residual scheduler for the exact all-local
+equality-arrow representation. Every Schur variable belongs to exactly one
+PSD block, so a worker that owns a complete block also owns every `d`/`v`
+destination that block updates. Block workspaces and status slots are
+disjoint, while `x`, `X`, `Y`, coefficients, and scalar targets are read-only.
+This is not a general permission to thread mutable BigFloat arithmetic.
 """
 function use_owned_bigfloat_residual_path(
     ws::Workspace{T},
@@ -491,6 +511,93 @@ function _owned_bigfloat_compute_residuals!(
         dual_residual,
         !factor || all(ws.block_ok),
     )
+end
+
+"""
+    compute_residuals!(ws, prob, x, X, y, Y, μ, opts) -> (p_res, d_res)
+
+Fills `ws.blk[l].P`, `ws.blk[l].R`, `ws.d`, `ws.p` for the current
+iterate, and returns the sup-norm primal/dual residuals (P7: via
+`knrmInf`, no splatting). `ws.blk[l].R`'s target is `μ[l]·I − X·Y`
+(`:classic`) unless `opts.predictor == :sdpb` and both residuals are
+already below their tolerances, in which case it's the pure affine
+target `−X·Y` (§2.6) — decided here, inline, from the residuals this
+same call just computed, rather than threading last-iteration state
+through.
+"""
+function compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T}, x, X, y, Y, μ,
+    opts::SolverOptions{T}) where {T}
+    L, m, n, k = prob.dims
+    cons = prob.cons
+
+    for l in 1:L
+        bw = ws.blk[l]
+        buildP_owned!(bw.P, cons, l, x)
+        kaxpby!(-one(T), X[l], one(T), bw.P)
+        kaxpby!(-one(T), prob.C[l], one(T), bw.P)
+    end
+
+    copy_owned!(ws.d, prob.c)
+    for l in 1:L
+        accumulate_v_owned!(ws.d, cons, l, Y[l], -one(T))
+    end
+    n > 0 && kmul_owned!(ws.d, prob.B, y, -one(T), one(T))
+
+    copy_owned!(ws.p, prob.b)
+    n > 0 &&
+        kmul_owned!(ws.p, transpose(prob.B), x, -one(T), one(T))
+
+    p_res = zero(T)
+    @inbounds for l in 1:L
+        p_res = max(p_res, knrmInf(ws.blk[l].P))
+    end
+    n > 0 && (p_res = max(p_res, knrmInf(ws.p)))
+    d_res = knrmInf(ws.d)
+
+    use_affine =
+        opts.parameter_strategy === :adaptive ||
+        (
+            opts.predictor === :sdpb &&
+            p_res < opts.ϵ_primal &&
+            d_res < opts.ϵ_dual
+        )
+    for l in 1:L
+        bw = ws.blk[l]
+        kmul_owned!(bw.R, X[l], Y[l], -one(T), zero(T))
+        if !use_affine
+            @inbounds for i in 1:k[l]
+                bw.R[i, i] += μ[l]
+            end
+        end
+    end
+
+    return p_res, d_res
+end
+
+function factor_blocks!(ws::Workspace{T}, X, Y) where {T}
+    ok = true
+    for l in eachindex(X)
+        bw = ws.blk[l]
+        copy_owned!(bw.LX, X[l])
+        ok &= kchol!(bw.LX)
+        copy_owned!(bw.MY, Y[l])
+        ok &= kchol!(bw.MY)
+    end
+    return ok
+end
+
+# Z[l] ← X[l]⁻¹(P[l]Y[l] − R[l]) for every block, then v[i] += ⟨A_i, Z⟩ (sign +1)
+function _predictor_corrector_rhs!(ws::Workspace{T}, prob::SDPProblem{T}, Y) where {T}
+    L = prob.dims.L
+    zero_owned!(ws.v)
+    for l in 1:L
+        bw = ws.blk[l]
+        kmul_owned!(bw.Z, bw.P, Y[l])
+        kaxpby_owned!(-one(T), bw.R, one(T), bw.Z)   # Z = P·Y − R
+        kcholsolve_owned!(bw.LX, bw.Z)          # Z = X⁻¹(P·Y − R)
+        accumulate_v_owned!(ws.v, prob.cons, l, bw.Z, one(T))
+    end
+    return ws.v
 end
 
 function threaded_compute_residuals!(ws::Workspace{T}, prob::SDPProblem{T},

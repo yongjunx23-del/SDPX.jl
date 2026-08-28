@@ -130,17 +130,33 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
 
 ## 5. `src/step.jl` / `src/step_hot.jl` — legacy Newton step orchestration
 
-- `src/step.jl` defines `newton_step!`, `compute_residuals!`, `factor_blocks!`,
-  `_predictor_corrector_rhs!`, `fraction_to_boundary_search!`, `line_search!`,
-  `_has_owned_bigfloat_equality_arrow`, and the KKT phase helpers for the
-  legacy SDP engine.
+> **Helper-migration wave status (this wave):** the residual/factor/RHS
+> helpers with native consumers were moved to their owners:
+> `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, and
+> `_has_owned_bigfloat_equality_arrow` now live in
+> `src/kernels/threaded.jl`. `src/step.jl` is **legacy-only**: every symbol
+> it still defines (`newton_step!` and its private helpers) is consumed only
+> by `src/solver/interior_point.jl` and its active tests. It is gated for
+> **atomic deletion together with `src/solver/interior_point.jl`** after the
+> test/E2E migration; the `include("step.jl")` site is retained until then.
+
+- `src/step.jl` defines `newton_step!` and its private helpers
+  (`_block_primal_residual_norm`, `_with_blas_threads`, `_kkt_blas_threads`,
+  `_skip_automatic_refinement`, `_cholesky_diagonal_quality`,
+  `_block_factorization_margins`, `_kkt_factorization_quality`,
+  `_relative_regularization_from_attempts`,
+  `_same_normalized_complementarity`,
+  `_predictor_complementarity_diagnostics!`,
+  `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`,
+  `line_search!`, `fraction_to_boundary_search!`) for the legacy SDP engine.
 - **Remaining production `src` callers (real calls, not comments):**
-  - `src/kernels/threaded.jl` — calls `_has_owned_bigfloat_equality_arrow`
-    (lines 310/331), `compute_residuals!` (512), `factor_blocks!` (513),
-    `_predictor_corrector_rhs!` (623/926/1075), `fraction_to_boundary_search!`
-    (1686), `line_search!` (1801).
-  - `src/solver/interior_point.jl` — calls `newton_step!` and the other step
-    kernels (legacy pair).
+  - `src/solver/interior_point.jl` — calls `newton_step!` and the step
+    helpers (legacy pair).
+  - `src/kernels/threaded.jl` — consumes the migrated kernels
+    (`fraction_to_boundary_search!` / `line_search!` remain in `step.jl`
+    and are called from `threaded_line_search!`; `compute_residuals!`,
+    `factor_blocks!`, `_predictor_corrector_rhs!`,
+    `_has_owned_bigfloat_equality_arrow` are now defined there).
   - `src/workspace.jl`, `src/schur.jl`, `src/types/constraints.jl` — comment
     references only.
 - `src/step_hot.jl` defines `HotStepState` + `step!` (zero-alloc LP hot step;
@@ -296,7 +312,7 @@ production `src` code or by active tests.  Deleting any file now would break
 | `src/lp_solver.jl` | none (comments only; `solve_lp!` called only from `solver/interior_point.jl`) | `LPWorkspace`, `LPScaling`, `LPReducedFactor`, `LPStandardFormSystem`, `LPDiagonalMatrix`, `_lp_*` kernels, `_resolve_lp_backend!`, `_presolve_lp_rows`, `_extract_lp_rows`, `_lp_workspace_bytes` in `test/lp_regressions.jl`, `test/direction_accuracy_lp.jl`, `test/architecture_regressions.jl`, `test/lp_sparse.jl`, `test/bigfloat_ownership_regressions.jl` |
 | `src/lp_sparse.jl` | none outside the legacy LP pair | `select_lp_formulation`, `lp_sparse_candidate`, `lp_sparse_factor!`, `lp_sparse_solve!`, `LPSparseSystem`, `_lp_sparse_assemble` in `test/lp_sparse.jl`, `test/sparse_execution_round6.jl`, `test/kkt_sparse_backend.jl`, `test/direction_accuracy_lp.jl` |
 | `src/solver/interior_point.jl` | `_scaled_identity` (`public/optimize.jl:1483`), `_ladder_retry_decision` (`pipeline/diagnostics.jl:276`), `_replace_solver_options` (`adaptive_parameters.jl:775`), `dual_objective(prob,y,Y)` (`preprocessing.jl:2118`, `validation.jl:151/373/964`) | `solve!` (27 active files), `_solve_sdp_core!`, `_kkt_cold_start_initialization`, `save_checkpoint`/`load_checkpoint`, `recommended_parameters`, `adaptive_working_precision_bits`, `block_norm_stats`, `_equality_factor_diagnostics`, `_build_precision_ladder_plan`, `_solve_pipeline!`, `_sdp_newton_termination_metadata`, `BestIterateWorkspace`, `_store_best_iterate!`, `_accepted_sdp_trial_residuals!` |
-| `src/step.jl` | `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, `fraction_to_boundary_search!`, `line_search!`, `_has_owned_bigfloat_equality_arrow` in `src/kernels/threaded.jl:310/331/512/513/623/926/1075/1686/1801` | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in `test/factorizations_gate.jl`, `test/allocation_contract.jl`, `test/solver_regressions.jl`, `test/bigfloat_sparse_schur_regressions.jl`, `test/extended_precision_blas.jl`, `test/schur_scheduler_regressions.jl` and others |
+| `src/step.jl` | legacy-only after the helper-migration wave: `newton_step!` + private helpers consumed only by `src/solver/interior_point.jl`; `kernels/threaded.jl` still calls the retained `line_search!`/`fraction_to_boundary_search!` | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in `test/factorizations_gate.jl`, `test/allocation_contract.jl`, `test/solver_regressions.jl`, `test/bigfloat_sparse_schur_regressions.jl`, `test/extended_precision_blas.jl`, `test/schur_scheduler_regressions.jl` and others |
 | `src/hsd/nonnegative_hsd.jl` | shared `HSDState` kernels used by the production product-cone HSD path: `_hsd_matrix_finite`, `_hsd_direction_finite`, `_hsd_maxinf`, `_hsd_residual_homotopy_ok`, `_hsd_scatter_dx!`, `_hsd_update_record!`, `_hsd_trial_residual!` (see §6) | `hsd_solve!` (`test/hsd_rank_reduction_precision.jl`, quick), `_hsd_border_solve!` (`test/hsd_border_failure.jl`, quick) |
 | `src/soc_native.jl` | production SOC engine for the `ConicProblem` path: `NativeSOCPlan`, `FixedTraceQ3Execution`, `_build_native_soc_payload` (`pipeline/plan.jl`), `_solve_native_soc_core` (`frontend/high_level_solve.jl:165,202`), `NativeSOCDiagnostics` (`soc_presolve.jl`, `validation.jl`, `public/optimize.jl`, `frontend/high_level_solve.jl`) | `test/soc_native_solver.jl`, `test/moi_native_soc.jl`, `test/soc_metric_sparse.jl`, `test/soc_singleton_presolve.jl`, `test/soc_regressions.jl`, `test/provider_smoke.jl` |
 
