@@ -99,10 +99,12 @@ jobs:
             --samples=3 --output="$OUT_DIR/candidate-smoke.toml" --verbose \
             2>&1 | tee "$OUT_DIR/candidate-smoke.log"
 
-      - name: Run native HSD allocation gate
+      - name: Run native product-HSD allocation gate
         shell: bash
         run: |
           set -euo pipefail
+          # Native product-cone HSD allocation audit (product_hsd_cold_start! /
+          # product_hsd_step!); legacy engine entry points are not exercised.
           julia --startup-file=no --project="$CANDIDATE_ENV" \
             benchmark/hsd_allocation.jl --check \
             2>&1 | tee "$OUT_DIR/hsd-allocation.log"

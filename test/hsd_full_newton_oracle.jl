@@ -3,7 +3,7 @@
 # This test intentionally accepts raw fixture data rather than an HSDState.  The
 # oracle does not call production residual, scaling, Schur, border, recovery, or
 # factor-cache helpers.  Its only contact with production is the final comparison
-# against the directions retained by `hsd_step!`.
+# against the directions retained by `product_hsd_step!`.
 
 using SDPX
 using Test
@@ -302,21 +302,23 @@ end
 function _p0b_compare_production(raw, ::Type{T}) where {T<:AbstractFloat}
     oracle = _p0b_full_newton_oracle(raw)
     canonical = _p0b_oracle_canonical(raw.A, raw.b, raw.c)
-    state = SDPX.HSDState(canonical)
-    copyto!(state.x, raw.x)
-    copyto!(state.s, raw.s)
-    copyto!(state.y, raw.y)
-    state.tau = raw.tau
-    state.kappa = raw.kappa
+    state = SDPX.ProductConeHSDState(canonical)
+    copyto!(state.base.x, raw.x)
+    copyto!(state.base.s, raw.s)
+    copyto!(state.base.y, raw.y)
+    state.base.tau = raw.tau
+    state.base.kappa = raw.kappa
 
-    code = SDPX.hsd_step!(state)
+    code = SDPX.product_hsd_step!(state)
     @test code === SDPX.HSDStepOK
     production_affine = _p0b_big_direction(
-        state.dx_a, state.dy_a, state.ds_a, state.dtau_a, state.dkappa_a,
+        state.base.dx_a, state.base.dy_a, state.base.ds_a,
+        state.base.dtau_a, state.base.dkappa_a,
         oracle.V,
     )
     production_corrector = _p0b_big_direction(
-        state.dx, state.dy, state.ds, state.dtau, state.dkappa, oracle.V,
+        state.base.dx, state.base.dy, state.base.ds,
+        state.base.dtau, state.base.dkappa, oracle.V,
     )
 
     N = size(oracle.J, 1)

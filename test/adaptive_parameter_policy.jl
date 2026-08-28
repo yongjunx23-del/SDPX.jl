@@ -374,15 +374,18 @@ end
         for symbol in required
             @test occursin(symbol, combined)
         end
-        # The LP path must keep its geometric post-scale resolver and never
-        # probe SDP cone data (`block_norm_stats`) to derive Ω.
-        lp_source = read(
-            normpath(joinpath(src_root, "lp_solver.jl")),
+        # The native product-HSD path must keep its arithmetic Mehrotra
+        # predictor/corrector scalar rule in the product-cone kernels and
+        # never probe SDP cone data (`block_norm_stats`) to derive Ω.
+        product_source = read(
+            normpath(joinpath(src_root, "hsd", "product_cone_hsd.jl")),
             String,
         )
-        @test occursin("_lp_auto_parameter_resolution", lp_source)
-        @test occursin("_scale_lp!", lp_source)
-        @test !occursin("block_norm_stats(prob", lp_source)
+        @test occursin("function product_hsd_step!", product_source)
+        @test occursin("predictor_scalar = -base.tau * base.kappa",
+                       product_source)
+        @test occursin("sigma = ratio * ratio * ratio", product_source)
+        @test !occursin("block_norm_stats(prob", product_source)
 
         # Restrict benchmark-name rejection to the production cold-start and
         # parameter-selector bodies. Other source files retain dated kernel
@@ -394,22 +397,29 @@ end
             @test last_range !== nothing
             return source[first(first_range):prevind(source, first(last_range))]
         end
+        product_solve_source = read(
+            normpath(joinpath(src_root, "hsd", "product_cone_solve.jl")),
+            String,
+        )
         cold_regions = String[
             read(normpath(joinpath(src_root, "cold_start.jl")), String),
             source_region(
-                lp_source,
-                "function _lp_phase2_cold_start!",
-                "function _lp_initialization_record",
+                product_source,
+                "function product_hsd_cold_start!",
+                "@inline function _product_hsd_vector_finite",
             ),
             source_region(
-                sources[normpath(joinpath(src_root, "solver", "interior_point.jl"))],
-                "function _kkt_cold_start_initialization",
-                "function _solve_sdp_core!",
+                read(
+                    normpath(joinpath(src_root, "hsd", "initialize.jl")),
+                    String,
+                ),
+                "function kkt_derived_start!",
+                "initialize_primal_dual!(state.runtime, central_s, central_y)",
             ),
             source_region(
-                sources[normpath(joinpath(src_root, "soc_native.jl"))],
-                "function _native_soc_cold_start_init!",
-                "function _native_soc_direction!",
+                product_solve_source,
+                "function product_hsd_solve!(",
+                "function product_hsd_solve(\n    canonical::CanonicalConicProgram{T}",
             ),
         ]
         for fingerprint in ("Task_Low08", "CSDR")

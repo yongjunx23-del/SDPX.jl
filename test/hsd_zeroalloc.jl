@@ -1,4 +1,6 @@
-# Actual HSD hot-step allocation gate (not the legacy HotStepState gate).
+# Actual native product-cone HSD hot-step allocation gate
+# (ProductConeHSDState + product_hsd_cold_start! + product_hsd_step!, not the
+# legacy HotStepState or HSDState/nonnegative_hsd step gates).
 
 if !isdefined(@__MODULE__, :SDPX)
     const SDPX = getfield(Main, :SDPX)
@@ -41,35 +43,38 @@ end
 # Returning an enum to an interpreted top-level `@allocated` expression boxes
 # the return value by 16 bytes.  The production caller consumes the code in
 # compiled code, so this gate stores it in caller-owned memory and returns
-# `nothing`; all allocations measured below are therefore from `hsd_step!`.
+# `nothing`; all allocations measured below are therefore from `product_hsd_step!`.
 @inline function _hsdza_step_noreturn!(codes, index::Int, state)
-    codes[index] = SDPX.hsd_step!(state)
+    codes[index] = SDPX.product_hsd_step!(state)
     return nothing
 end
 
 @testset "actual HSD fixed-width step is allocation-free" begin
     for T in (Float64, Float64x2, Float64x3, Float64x4)
-        state = SDPX.HSDState(_hsdza_program(T))
-        SDPX.hsd_cold_start!(state)
+        state = SDPX.ProductConeHSDState(_hsdza_program(T))
+        SDPX.product_hsd_cold_start!(state)
         warm = Vector{SDPX.HSDStepCode}(undef, 1)
         _hsdza_step_noreturn!(warm, 1, state)
         @test warm[1] === SDPX.HSDStepOK
 
         codes = Vector{SDPX.HSDStepCode}(undef, 10)
         samples = Vector{Int}(undef, 10)
-        factors_before = SDPX.kkt_factor_count(state.driver)
-        epoch_before = state.record.matrix_epoch
+        factors_before = SDPX.product_hsd_factor_count(state)
+        epoch_before = state.base.epoch
         @inbounds for sample in 1:10
             samples[sample] = @allocated _hsdza_step_noreturn!(codes, sample, state)
         end
 
         @test all(==(SDPX.HSDStepOK), codes)
         @test samples == zeros(Int, 10)
-        @test SDPX.kkt_factor_count(state.driver) - factors_before == 10
-        @test state.record.matrix_epoch - epoch_before == 10
-        @test state.record.factor_epoch == state.record.matrix_epoch
-        @test isfinite(state.record.p_res)
-        @test isfinite(state.record.d_res)
-        @test isfinite(state.record.mu)
+        @test SDPX.product_hsd_factor_count(state) - factors_before == 10
+        @test state.base.epoch - epoch_before == 10
+        # The active bordered route keeps its own factor epoch, and the
+        # numeric factor must be current for the epoch that assembled it.
+        @test state.symmetric_bordered.factor_epoch ==
+              state.symmetric_bordered.assembly_epoch == state.base.epoch
+        @test isfinite(state.base.record.p_res)
+        @test isfinite(state.base.record.d_res)
+        @test isfinite(state.base.record.mu)
     end
 end

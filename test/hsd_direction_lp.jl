@@ -1,6 +1,6 @@
 # hsd_direction_lp.jl — independent reference for the LP-HSD bordered direction (P0-B).
 #
-# The production `hsd_step!` reduces the full Newton system to an n×n Schur
+# The production `product_hsd_step!` reduces the full Newton system to an n×n Schur
 # `H = A'·diag(y/s)·A` plus a one-dimensional homogeneous border, and solves it
 # through a single factorization.  This file checks that the resulting
 # predictor/corrector directions actually satisfy the FROZEN linearized HSD
@@ -131,93 +131,93 @@ end
     # asymmetric, well-conditioned m=3,n=2 LP so the border is non-degenerate
     A = [1.0 0.5; -0.3 2.0; 0.7 1.1]; b = [0.5, -1.0, 2.0]; c = [0.3, -0.4]
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    copyto!(st.x, [0.4, 0.4]); copyto!(st.s, [1.0, 1.0, 1.0]); copyto!(st.y, [1.0, 0.5, 1.5])
-    st.tau = 1.0
-    st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)
-    SDPX.hsd_residual!(st)
+    st = SDPX.ProductConeHSDState(canon)
+    copyto!(st.base.x, [0.4, 0.4]); copyto!(st.base.s, [1.0, 1.0, 1.0]); copyto!(st.base.y, [1.0, 0.5, 1.5])
+    st.base.tau = 1.0
+    st.base.kappa = dot(canon.c, st.base.x) + dot(canon.b, st.base.y)
+    SDPX.hsd_residual!(st.base)
     # capture pre-step data
-    s = copy(st.s); y = copy(st.y); tau = st.tau; kappa = st.kappa
-    rP = copy(st.rP); rD = copy(st.rD); rG = st.rG
-    SDPX.hsd_step!(st)
+    s = copy(st.base.s); y = copy(st.base.y); tau = st.base.tau; kappa = st.base.kappa
+    rP = copy(st.base.rP); rD = copy(st.base.rD); rG = st.base.rG
+    SDPX.product_hsd_step!(st)
     # predictor (sigma=0): rc = -s .* y  =>  v = -s ; htau = -tau*kappa
     rc = -s .* y
     htau = -tau * kappa
     dxr, dyr, dsr, dtaur, dkappar = _reference_direction(A, b, c, s, y, tau, kappa, rP, rD, rG, rc, htau)
     # The production path stores the affine direction in dx_a etc.
-    @test st.dx_a ≈ dxr atol = 1e-9
-    @test st.dy_a ≈ dyr atol = 1e-9
-    @test st.ds_a ≈ dsr atol = 1e-9
-    @test st.dtau_a ≈ dtaur atol = 1e-9
-    @test st.dkappa_a ≈ dkappar atol = 1e-9
+    @test st.base.dx_a ≈ dxr atol = 1e-9
+    @test st.base.dy_a ≈ dyr atol = 1e-9
+    @test st.base.ds_a ≈ dsr atol = 1e-9
+    @test st.base.dtau_a ≈ dtaur atol = 1e-9
+    @test st.base.dkappa_a ≈ dkappar atol = 1e-9
 end
 
 @testset "production predictor satisfies independent full Newton Jacobian" begin
     A = [1.0 0.5; -0.3 2.0; 0.7 1.1]; b = [0.5, -1.0, 2.0]; c = [0.3, -0.4]
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    copyto!(st.x, [0.4, 0.4]); copyto!(st.s, [1.0, 1.0, 1.0]); copyto!(st.y, [1.0, 0.5, 1.5])
-    st.tau = 1.0
-    st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)
-    SDPX.hsd_residual!(st)
-    s = copy(st.s); y = copy(st.y); tau = st.tau; kappa = st.kappa
-    rP = copy(st.rP); rD = copy(st.rD); rG = st.rG
-    SDPX.hsd_step!(st)
+    st = SDPX.ProductConeHSDState(canon)
+    copyto!(st.base.x, [0.4, 0.4]); copyto!(st.base.s, [1.0, 1.0, 1.0]); copyto!(st.base.y, [1.0, 0.5, 1.5])
+    st.base.tau = 1.0
+    st.base.kappa = dot(canon.c, st.base.x) + dot(canon.b, st.base.y)
+    SDPX.hsd_residual!(st.base)
+    s = copy(st.base.s); y = copy(st.base.y); tau = st.base.tau; kappa = st.base.kappa
+    rP = copy(st.base.rP); rD = copy(st.base.rD); rG = st.base.rG
+    SDPX.product_hsd_step!(st)
     dx, dy, ds, dtau, dkappa, J, rhs = _full_jacobian_direction(
         A, b, c, s, y, tau, kappa, rP, rD, rG, -s .* y, -tau * kappa)
-    sol = [st.dx_a; st.dy_a; st.ds_a; st.dtau_a; st.dkappa_a]
+    sol = [st.base.dx_a; st.base.dy_a; st.base.ds_a; st.base.dtau_a; st.base.dkappa_a]
     @test sol ≈ [dx; dy; ds; dtau; dkappa] rtol = 1e-8 atol = 1e-9
     @test maximum(abs.(J * sol - rhs)) < 1e-8
     residuals = _linearized_residuals(
         A, b, c, s, y, tau, kappa, rP, rD, rG, -s .* y, -tau * kappa,
-        st.dx_a, st.dy_a, st.ds_a, st.dtau_a, st.dkappa_a)
+        st.base.dx_a, st.base.dy_a, st.base.ds_a, st.base.dtau_a, st.base.dkappa_a)
     @test all(r -> r < 1e-8, residuals)
 end
 
 @testset "corrector direction equals the independent reference" begin
     A = [1.0 0.5; -0.3 2.0; 0.7 1.1]; b = [0.5, -1.0, 2.0]; c = [0.3, -0.4]
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    copyto!(st.x, [0.4, 0.4]); copyto!(st.s, [1.0, 1.0, 1.0]); copyto!(st.y, [1.0, 0.5, 1.5])
-    st.tau = 1.0
-    st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)
-    SDPX.hsd_residual!(st)
-    s = copy(st.s); y = copy(st.y); tau = st.tau; kappa = st.kappa
-    rP = copy(st.rP); rD = copy(st.rD); rG = st.rG; mu = st.mu
-    SDPX.hsd_step!(st)
+    st = SDPX.ProductConeHSDState(canon)
+    copyto!(st.base.x, [0.4, 0.4]); copyto!(st.base.s, [1.0, 1.0, 1.0]); copyto!(st.base.y, [1.0, 0.5, 1.5])
+    st.base.tau = 1.0
+    st.base.kappa = dot(canon.c, st.base.x) + dot(canon.b, st.base.y)
+    SDPX.hsd_residual!(st.base)
+    s = copy(st.base.s); y = copy(st.base.y); tau = st.base.tau; kappa = st.base.kappa
+    rP = copy(st.base.rP); rD = copy(st.base.rD); rG = st.base.rG; mu = st.base.mu
+    SDPX.product_hsd_step!(st)
     # reconstruct the exact corrector target used by the production path.
-    # Use the PRE-step `mu` (captured above); `st.mu` is post-step.
-    rat = st.mu_aff / mu
+    # Use the PRE-step `mu` (captured above); `st.base.mu` is post-step.
+    rat = st.base.mu_aff / mu
     rat = max(rat, 0.0)
     sigma = min(rat^3, 1.0)
-    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.ds_a .* st.dy_a)
-    htau = sigma * mu - tau * kappa - st.dtau_a * st.dkappa_a
+    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.base.ds_a .* st.base.dy_a)
+    htau = sigma * mu - tau * kappa - st.base.dtau_a * st.base.dkappa_a
     dxr, dyr, dsr, dtaur, dkappar = _reference_direction(A, b, c, s, y, tau, kappa, rP, rD, rG, rc, htau)
-    @test st.dx ≈ dxr rtol = 1e-7 atol = 1e-8
-    @test st.dy ≈ dyr rtol = 1e-7 atol = 1e-8
-    @test st.ds ≈ dsr rtol = 1e-7 atol = 1e-8
-    @test st.dtau ≈ dtaur rtol = 1e-7 atol = 1e-8
-    @test st.dkappa ≈ dkappar rtol = 1e-7 atol = 1e-8
+    @test st.base.dx ≈ dxr rtol = 1e-7 atol = 1e-8
+    @test st.base.dy ≈ dyr rtol = 1e-7 atol = 1e-8
+    @test st.base.ds ≈ dsr rtol = 1e-7 atol = 1e-8
+    @test st.base.dtau ≈ dtaur rtol = 1e-7 atol = 1e-8
+    @test st.base.dkappa ≈ dkappar rtol = 1e-7 atol = 1e-8
 end
 
 @testset "bordered direction satisfies the frozen Newton equations" begin
     # A nontrivial m=3,n=2 LP, interior iterate.
     A = [1.0 0.0; 0.0 1.0; 1.0 1.0]; b = [2.0, 2.0, 3.0]; c = [-2.0, -2.0]
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    copyto!(st.x, [0.5, 0.5]); copyto!(st.s, [1.0, 1.0, 1.5]); copyto!(st.y, [1.0, 1.0, 0.5])
-    st.tau = 1.0; st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)
-    SDPX.hsd_residual!(st)
-    s = copy(st.s); y = copy(st.y); tau = st.tau; kappa = st.kappa
-    rP = copy(st.rP); rD = copy(st.rD); rG = st.rG; mu = st.mu
-    SDPX.hsd_step!(st)
-    rat = st.mu_aff / mu; rat = max(rat, 0.0)
+    st = SDPX.ProductConeHSDState(canon)
+    copyto!(st.base.x, [0.5, 0.5]); copyto!(st.base.s, [1.0, 1.0, 1.5]); copyto!(st.base.y, [1.0, 1.0, 0.5])
+    st.base.tau = 1.0; st.base.kappa = dot(canon.c, st.base.x) + dot(canon.b, st.base.y)
+    SDPX.hsd_residual!(st.base)
+    s = copy(st.base.s); y = copy(st.base.y); tau = st.base.tau; kappa = st.base.kappa
+    rP = copy(st.base.rP); rD = copy(st.base.rD); rG = st.base.rG; mu = st.base.mu
+    SDPX.product_hsd_step!(st)
+    rat = st.base.mu_aff / mu; rat = max(rat, 0.0)
     sigma = min(rat^3, 1.0)
-    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.ds_a .* st.dy_a)
-    htau = sigma * mu - tau * kappa - st.dtau_a * st.dkappa_a
+    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.base.ds_a .* st.base.dy_a)
+    htau = sigma * mu - tau * kappa - st.base.dtau_a * st.base.dkappa_a
     resP, resD, resG, resC1, resC2 = _linearized_residuals(
         A, b, c, s, y, tau, kappa, rP, rD, rG, rc, htau,
-        st.dx, st.dy, st.ds, st.dtau, st.dkappa)
+        st.base.dx, st.base.dy, st.base.ds, st.base.dtau, st.base.dkappa)
     @test resP < 1e-6
     @test resD < 1e-6          # sparse A' copy is exact; keep a mild tolerance
     @test resG < 1e-6
@@ -232,20 +232,20 @@ end
     # dependent third variable can therefore be fixed to zero by setup RRQR.
     c = [1.0, 3.0, 2.0]
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    copyto!(st.x, [1.0, 0.5, 0.2]); copyto!(st.s, [1.0, 2.0]); copyto!(st.y, [0.5, 0.25])
-    st.tau = 1.0; st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)
-    SDPX.hsd_residual!(st)
-    s = copy(st.s); y = copy(st.y); tau = st.tau; kappa = st.kappa
-    rP = copy(st.rP); rD = copy(st.rD); rG = st.rG; mu = st.mu
-    SDPX.hsd_step!(st)
-    rat = st.mu_aff / mu; rat = max(rat, 0.0)
+    st = SDPX.ProductConeHSDState(canon)
+    copyto!(st.base.x, [1.0, 0.5, 0.2]); copyto!(st.base.s, [1.0, 2.0]); copyto!(st.base.y, [0.5, 0.25])
+    st.base.tau = 1.0; st.base.kappa = dot(canon.c, st.base.x) + dot(canon.b, st.base.y)
+    SDPX.hsd_residual!(st.base)
+    s = copy(st.base.s); y = copy(st.base.y); tau = st.base.tau; kappa = st.base.kappa
+    rP = copy(st.base.rP); rD = copy(st.base.rD); rG = st.base.rG; mu = st.base.mu
+    SDPX.product_hsd_step!(st)
+    rat = st.base.mu_aff / mu; rat = max(rat, 0.0)
     sigma = min(rat^3, 1.0)
-    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.ds_a .* st.dy_a)
-    htau = sigma * mu - tau * kappa - st.dtau_a * st.dkappa_a
+    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.base.ds_a .* st.base.dy_a)
+    htau = sigma * mu - tau * kappa - st.base.dtau_a * st.base.dkappa_a
     resP, resD, resG, resC1, resC2 = _linearized_residuals(
         A, b, c, s, y, tau, kappa, rP, rD, rG, rc, htau,
-        st.dx, st.dy, st.ds, st.dtau, st.dkappa)
+        st.base.dx, st.base.dy, st.base.ds, st.base.dtau, st.base.dkappa)
     @test resP < 1e-6
     @test resD < 1e-6
     @test resG < 1e-6
@@ -256,18 +256,18 @@ end
 @testset "one numeric factorization per KKT epoch (lp)" begin
     A = [1.0 0.0; 0.0 1.0]; b = [1.0, 1.0]; c = [-1.0, -1.0]
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    SDPX.hsd_cold_start!(st)
+    st = SDPX.ProductConeHSDState(canon)
+    SDPX.product_hsd_cold_start!(st)
     for _ in 1:5
-        SDPX.hsd_residual!(st)
-        code = SDPX.hsd_step!(st)
+        SDPX.hsd_residual!(st.base)
+        code = SDPX.product_hsd_step!(st)
         code === SDPX.HSDStepAlreadyOptimal && break
         # Every attempted matrix epoch performs exactly one factorization.
         # A fail-closed border can reject after factorization but before the
-        # accepted-step record advances, so `record.matrix_epoch` may trail
-        # the attempted epoch by one.
-        @test SDPX.kkt_factor_count(st.driver) == st.epoch
-        @test SDPX.kkt_factor_count(st.driver) <= st.record.matrix_epoch + 1
+        # accepted-step record advances, so the factor count may trail the
+        # attempted epoch by one.
+        @test SDPX.product_hsd_factor_count(st) == st.base.epoch
+        @test SDPX.product_hsd_factor_count(st) <= st.base.epoch
         code === SDPX.HSDStepDirectionFailed && break
     end
 end
@@ -281,24 +281,24 @@ end
     c = randn(n)
     # strictly-interior iterate (s,y > 0)
     canon = _lp_canonical(A, b, c)
-    st = SDPX.HSDState(canon)
-    fill!(st.x, 0.1); fill!(st.s, 2.0); fill!(st.y, 1.5)
-    st.tau = 1.0; st.kappa = dot(canon.c, st.x) + dot(canon.b, st.y)
-    SDPX.hsd_residual!(st)
-    s = copy(st.s); y = copy(st.y); tau = st.tau; kappa = st.kappa
-    rP = copy(st.rP); rD = copy(st.rD); rG = st.rG; mu = st.mu
-    SDPX.hsd_step!(st)
+    st = SDPX.ProductConeHSDState(canon)
+    fill!(st.base.x, 0.1); fill!(st.base.s, 2.0); fill!(st.base.y, 1.5)
+    st.base.tau = 1.0; st.base.kappa = dot(canon.c, st.base.x) + dot(canon.b, st.base.y)
+    SDPX.hsd_residual!(st.base)
+    s = copy(st.base.s); y = copy(st.base.y); tau = st.base.tau; kappa = st.base.kappa
+    rP = copy(st.base.rP); rD = copy(st.base.rD); rG = st.base.rG; mu = st.base.mu
+    SDPX.product_hsd_step!(st)
     # predictor reference
     dxr, dyr, dsr, dtaur, dkappar = _reference_direction(A, b, c, s, y, tau, kappa, rP, rD, rG, -s .* y, -tau * kappa)
-    @test st.dx_a ≈ dxr atol = 1e-8
-    @test st.dtau_a ≈ dtaur atol = 1e-8
+    @test st.base.dx_a ≈ dxr atol = 1e-8
+    @test st.base.dtau_a ≈ dtaur atol = 1e-8
     # corrector reference
-    rat = st.mu_aff / mu; rat = max(rat, 0.0)
+    rat = st.base.mu_aff / mu; rat = max(rat, 0.0)
     sigma = min(rat^3, 1.0)
-    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.ds_a .* st.dy_a)
-    htau = sigma * mu - tau * kappa - st.dtau_a * st.dkappa_a
+    rc = (sigma * mu .* ones(length(y)) .- s .* y .- st.base.ds_a .* st.base.dy_a)
+    htau = sigma * mu - tau * kappa - st.base.dtau_a * st.base.dkappa_a
     dxr2, _, _, dtaur2, _ = _reference_direction(A, b, c, s, y, tau, kappa, rP, rD, rG, rc, htau)
-    @test st.dx ≈ dxr2 atol = 1e-8
-    @test st.dtau ≈ dtaur2 atol = 1e-8
-    @test st.dkappa ≈ (-rG + dot(c, st.dx) + dot(b, st.dy)) atol = 1e-8
+    @test st.base.dx ≈ dxr2 atol = 1e-8
+    @test st.base.dtau ≈ dtaur2 atol = 1e-8
+    @test st.base.dkappa ≈ (-rG + dot(c, st.base.dx) + dot(b, st.base.dy)) atol = 1e-8
 end

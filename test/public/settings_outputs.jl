@@ -80,7 +80,9 @@ end
     @test custom.scaling === :equilibrate
     @test custom.formulation === :variable_space_schur
     @test custom.provider === :multifloat
-    @test SDPX.Settings{Float64}(engine=:legacy).engine === :legacy
+    # Phase 10 deletes the legacy engine selector; the Settings surface is
+    # exercised with the native selector instead.
+    @test SDPX.Settings{Float64}(engine=:native_hsd).engine === :native_hsd
 
     @test_throws ArgumentError SDPX.Limits(iterations=-1)
     @test_throws ArgumentError SDPX.Limits(time=-0.1)

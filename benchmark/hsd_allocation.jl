@@ -1,7 +1,8 @@
 #!/usr/bin/env julia
 
-# Reproducible Phase-0 allocation audit for the real HSD predictor/corrector.
-# Run from the repository root:
+# Reproducible Phase-0 allocation audit for the native product-cone HSD
+# predictor/corrector (ProductConeHSDState + product_hsd_cold_start! +
+# product_hsd_step!).  Run from the repository root:
 #
 #   julia --project=. benchmark/hsd_allocation.jl --check
 
@@ -37,13 +38,13 @@ function allocation_problem(::Type{T}) where {T<:AbstractFloat}
 end
 
 @inline function audited_step!(codes, index::Int, state)
-    codes[index] = SDPX.hsd_step!(state)
+    codes[index] = SDPX.product_hsd_step!(state)
     return nothing
 end
 
 function allocation_audit(::Type{T}; samples::Int=10) where {T<:AbstractFloat}
-    state = SDPX.HSDState(allocation_problem(T))
-    SDPX.hsd_cold_start!(state)
+    state = SDPX.ProductConeHSDState(allocation_problem(T))
+    SDPX.product_hsd_cold_start!(state)
     warm = Vector{SDPX.HSDStepCode}(undef, 1)
     audited_step!(warm, 1, state)
     warm[1] === SDPX.HSDStepOK || error("warm HSD step failed for $T: $(warm[1])")
@@ -51,25 +52,26 @@ function allocation_audit(::Type{T}; samples::Int=10) where {T<:AbstractFloat}
     codes = Vector{SDPX.HSDStepCode}(undef, samples)
     bytes = Vector{Int}(undef, samples)
     seconds = Vector{Float64}(undef, samples)
-    factors_before = SDPX.kkt_factor_count(state.driver)
-    epoch_before = state.record.matrix_epoch
+    factors_before = SDPX.product_hsd_factor_count(state)
+    epoch_before = state.base.epoch
     @inbounds for sample in 1:samples
         started = time_ns()
         bytes[sample] = @allocated audited_step!(codes, sample, state)
         seconds[sample] = (time_ns() - started) / 1.0e9
     end
+    receipt = SDPX.product_hsd_factor_receipt(state)
     return (
         arithmetic=string(T),
         precision_bits=(T === BigFloat ? precision(BigFloat) : SDPX.sig_bits(T)),
         allocation_samples=bytes,
         timing_samples=seconds,
         codes=string.(codes),
-        matrix_epochs=state.record.matrix_epoch - epoch_before,
-        factorization_count=SDPX.kkt_factor_count(state.driver) - factors_before,
-        factor_epoch=state.record.factor_epoch,
-        primal_residual=string(state.record.p_res),
-        dual_residual=string(state.record.d_res),
-        mu=string(state.record.mu),
+        matrix_epochs=state.base.epoch - epoch_before,
+        factorization_count=SDPX.product_hsd_factor_count(state) - factors_before,
+        factor_epoch=receipt === nothing ? 0 : receipt.factor_epoch,
+        primal_residual=string(state.base.record.p_res),
+        dual_residual=string(state.base.record.d_res),
+        mu=string(state.base.record.mu),
     )
 end
 
@@ -87,8 +89,8 @@ function bigfloat_memory_audit(; batches::Int=6, steps_per_batch::Int=10)
     batches >= 4 || throw(ArgumentError("BigFloat RSS audit needs at least four batches"))
     steps_per_batch >= 1 || throw(ArgumentError("steps_per_batch must be positive"))
 
-    state = SDPX.HSDState(allocation_problem(BigFloat))
-    SDPX.hsd_cold_start!(state)
+    state = SDPX.ProductConeHSDState(allocation_problem(BigFloat))
+    SDPX.product_hsd_cold_start!(state)
     warm = Vector{SDPX.HSDStepCode}(undef, 1)
     audited_step!(warm, 1, state)
     warm[1] === SDPX.HSDStepOK || error(
@@ -100,7 +102,7 @@ function bigfloat_memory_audit(; batches::Int=6, steps_per_batch::Int=10)
     GC.gc(true)
     rss[1] = Int(Sys.maxrss())
     @inbounds for batch in 1:batches
-        SDPX.hsd_cold_start!(state)
+        SDPX.product_hsd_cold_start!(state)
         for step in 1:steps_per_batch
             audited_step!(view(codes, :, batch), step, state)
         end

@@ -168,7 +168,10 @@ jobs:
       # single job can run them in sequence and fail on the first break.
       - name: Install fixed-width arithmetic used by the HSD gate
         run: julia --project=. -e 'using Pkg; Pkg.add("MultiFloats")'
-      - name: Native HSD allocation hard gate
+      # The gate runs the native product-cone HSD (product_hsd_cold_start! /
+      # product_hsd_step!) allocation audit; legacy engine entry points are
+      # not exercised.
+      - name: Native product-HSD allocation hard gate
         run: julia --project=. benchmark/hsd_allocation.jl --check
       - name: Fixed-precision contract
         run: julia --project=. test/fixed_precision_contract.jl

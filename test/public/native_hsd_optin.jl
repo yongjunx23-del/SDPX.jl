@@ -686,7 +686,9 @@ end
         @test fieldtype(SDPX.NativeHSDCoreResult{Float64}, name) !== Any
     end
     @test SDPX.Settings{Float64}().engine === :auto
-    @test SDPX.Settings{Float64}(engine=:legacy).engine === :legacy
+    # Phase 10 deletes the legacy engine selector; the Settings surface is
+    # exercised with the native selector instead.
+    @test SDPX.Settings{Float64}(engine=:native_hsd).engine === :native_hsd
 
     hidden_model, _, _ = _nh_optimal_model(Float64, (:lp,))
     hidden = SDPX.Outputs(
