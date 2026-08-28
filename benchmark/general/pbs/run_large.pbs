@@ -10,5 +10,5 @@ export JULIA_NUM_THREADS="${PBS_NCPUS:-16}"
 export SDPX_GENERIC_ALLOW_LARGE=1
 : "${JULIA_DEPOT_PATH:=$HOME/.julia}"
 
-benchmark/generic/scripts/fetch_generic_benchmarks.sh
-julia --project=. benchmark/generic/GenericConicBenchmark.jl large
+benchmark/general/scripts/fetch_generic_benchmarks.sh
+julia --project=. benchmark/general/GenericConicBenchmark.jl large

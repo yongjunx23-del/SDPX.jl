@@ -13,7 +13,7 @@ const _CBF_KEYS = Set([
 
 "Read continuous CBF 2 sections, preserving sparse coordinate records verbatim."
 function read_cbf(path::AbstractString)
-    isfile(path) || throw(ArgumentError("missing CBF file $path; run benchmark/generic/scripts/fetch_generic_benchmarks.sh"))
+    isfile(path) || throw(ArgumentError("missing CBF file $path; run benchmark/general/scripts/fetch_generic_benchmarks.sh"))
     io = endswith(path, ".gz") ? open(`gzip -cd $path`) : open(path)
     sections = Dict{String,Vector{String}}()
     current = ""

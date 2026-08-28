@@ -2,7 +2,7 @@
 
 `benchmark/` holds exactly two top-level directories:
 
-- `generic/` — the generic conic benchmark suite (LP/SOCP/SDP/EXP/POWER
+- `general/` — the general conic benchmark suite (LP/SOCP/SDP/EXP/POWER
   corpora, deterministic generators, external-data readers). See
   `docs/design/GENERIC_BENCHMARK.md` for sources and contracts.
 - `bootstrap/` — the problem-agnostic measurement harness together with the
@@ -24,7 +24,7 @@ Bundled paper-grounded catalogs currently cover Hellerman modular LP, Paulos
 sampled S-matrix SOCP, Lin--Zheng matrix-bootstrap SDP, Kazakov--Zheng
 finite-N lattice-bootstrap SDP, a finite-level Gibbs/KL exponential-cone
 model, and a Giudice maximum-Rényi power-cone model under
-`benchmark/bootstrap/applications/`. Each is explicitly versioned and carries
+`benchmark/bootstrap/physics/`. Each is explicitly versioned and carries
 its own provenance and semantic validator. The EXP and Power catalogs are
 deliberately build-only until their native solver routes pass the product-HSD gates.
 
