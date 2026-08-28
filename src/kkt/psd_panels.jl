@@ -44,7 +44,8 @@ the current scaling epoch; `work` is the batched right-congruence scratch;
 
 Rebuild accounting is cumulative and per panel: `prepacks`/`prepack_bytes`
 count structural-epoch coefficient prepacks, `rebuilds`/`rebuild_bytes` count
-scaling-epoch congruence rebuilds and the panel bytes written by them.
+scaling-epoch congruence rebuilds and the panel bytes written by them, and
+`tiles` counts Schur tile writes performed by the panel.
 """
 mutable struct PSDCongruencePanel{T}
     block::Int
@@ -60,6 +61,7 @@ mutable struct PSDCongruencePanel{T}
     rebuilds::Base.RefValue{Int}
     prepack_bytes::Base.RefValue{Int}
     rebuild_bytes::Base.RefValue{Int}
+    tiles::Base.RefValue{Int}
     structural_epoch::Base.RefValue{Int}
     scaling_epoch::Base.RefValue{Int}
 end
@@ -78,6 +80,7 @@ function PSDCongruencePanel{T}(block::Int, k::Int, active::Vector{Int}) where {T
         alloc_zeros(T, na, na),
         alloc_zeros(T, k, k),
         alloc_zeros(T, k, k),
+        Ref(0),
         Ref(0),
         Ref(0),
         Ref(0),
@@ -380,6 +383,7 @@ function psd_panel_schur_tile!(
             i != j && (S[Sj, ids[i]] += value)
         end
     end
+    panel.tiles[] += 1
     return S
 end
 
@@ -481,6 +485,9 @@ psd_panel_prepack_bytes(panel::PSDCongruencePanel) = panel.prepack_bytes[]
 """Bytes written by scaling-epoch congruence rebuilds of `panel`."""
 psd_panel_rebuild_bytes(panel::PSDCongruencePanel) = panel.rebuild_bytes[]
 
+"""Cumulative Schur tile writes performed by `panel`."""
+psd_panel_tile_count(panel::PSDCongruencePanel) = panel.tiles[]
+
 """Structural epoch currently represented by `panel`."""
 psd_panel_structural_epoch(panel::PSDCongruencePanel) =
     panel.structural_epoch[]
@@ -503,6 +510,7 @@ struct PSDPanelStats
     rebuilds::Int
     prepack_bytes::Int
     rebuild_bytes::Int
+    tiles::Int
 end
 
 """
@@ -519,6 +527,7 @@ function psd_panel_stats(panels::AbstractVector{<:PSDCongruencePanel})
     rebuilds = 0
     prepack_bytes = 0
     rebuild_bytes = 0
+    tiles = 0
     for panel in panels
         na = length(panel.active)
         k = panel.k
@@ -531,6 +540,7 @@ function psd_panel_stats(panels::AbstractVector{<:PSDCongruencePanel})
         rebuilds += panel.rebuilds[]
         prepack_bytes += panel.prepack_bytes[]
         rebuild_bytes += panel.rebuild_bytes[]
+        tiles += panel.tiles[]
     end
     return PSDPanelStats(
         blocks,
@@ -540,5 +550,388 @@ function psd_panel_stats(panels::AbstractVector{<:PSDCongruencePanel})
         rebuilds,
         prepack_bytes,
         rebuild_bytes,
+        tiles,
     )
+end
+
+# ---------------------------------------------------------------------------
+# BlockIncidencePlan-backed hot-path wiring (reduced-Schur numeric assembly)
+# ---------------------------------------------------------------------------
+#
+# The reduced-Schur numeric assembly (kkt/reduced_schur.jl) freezes one
+# BlockIncidencePlan per session.  For a PSD congruence block the frozen
+# A-block CSC positions give the structural-epoch prepack below; the scaling
+# pair is derived from the block's dense operator every scaling epoch:
+#
+#     H_b[svec(Z)] = svec(P·Z·P)   ⟹   M = svec⁻¹(H_b·svec(I)) = P²,
+#     X = P = M^{1/2},   Y = P⁻¹ = M^{-1/2},
+#
+# so `psd_panel_schur_tile_slots!` writes the tile
+# `tr(A_p' X⁻¹ A_r Y) = tr(A_p' P⁻¹ A_r P⁻¹)` straight into the frozen Schur
+# CSC slots — the identical canonical value the generic assembly computes as
+# `svec(A_p)' H_b⁻¹ svec(A_r)`, with no explicit block inverse anywhere.
+# The svec conventions are the runtime's own (`SymmetricCones` packing:
+# diagonal scale one, off-diagonal scale `sqrt(2)`).
+
+"""`(i, j)` matrix coordinates (`j ≤ i`) of the `p`-th packed lower-triangle
+position, in the column-major `svec` order used by `SymmetricCones`:
+`for j = 1:n, i = j:n`."""
+@inline function _svec_matrix_position(n::Int, p::Int)
+    j = 1
+    remaining = p - 1
+    while remaining >= n - j + 1
+        remaining -= n - j + 1
+        j += 1
+    end
+    return j + remaining, j
+end
+
+"""Packed `svec` position of the `(j, j)` diagonal entry (`j ≤ n`)."""
+@inline _svec_diagonal_position(j::Int, n::Int) =
+    1 + div((j - 1) * (2 * n - j + 2), 2)
+
+"""
+    PSDPanelEpochScratch{T}
+
+Per-PSD-block scratch for the reduced-Schur hot path: the congruence pair
+extraction (`M = P²` plus its SPD root/inverse root), the border/inverse
+action `svec(P⁻¹·Z·P⁻¹)` used by the RHS and recovery routes, and the
+frozen `svec` position tables shared by every panel transform.
+"""
+struct PSDPanelEpochScratch{T}
+    k::Int
+    sqrt2::T
+    invsqrt2::T
+    rowpos::Vector{Int}
+    colpos::Vector{Int}
+    M::Matrix{T}
+    P::Matrix{T}
+    Pinv::Matrix{T}
+    work::Matrix{T}
+    V::Matrix{T}
+    values::Vector{T}
+    b_full::Matrix{T}
+    border::Matrix{T}
+    svec_a::Vector{T}
+    svec_b::Vector{T}
+    hvec::Vector{T}
+end
+
+function psd_panel_epoch_scratch(::Type{T}, k::Int) where {T}
+    k >= 1 || throw(ArgumentError("PSD panel scratch dimension must be >= 1"))
+    L = div(k * (k + 1), 2)
+    sqrt2 = sqrt(one(T) + one(T))
+    invsqrt2 = one(T) / sqrt2
+    rowpos = Vector{Int}(undef, L)
+    colpos = Vector{Int}(undef, L)
+    position = 0
+    @inbounds for j in 1:k
+        for i in j:k
+            position += 1
+            rowpos[position] = i
+            colpos[position] = j
+        end
+    end
+    return PSDPanelEpochScratch{T}(
+        k,
+        sqrt2,
+        invsqrt2,
+        rowpos,
+        colpos,
+        alloc_zeros(T, k, k),
+        alloc_zeros(T, k, k),
+        alloc_zeros(T, k, k),
+        alloc_zeros(T, k, k),
+        alloc_zeros(T, k, k),
+        zeros(T, k),
+        alloc_zeros(T, k, k),
+        alloc_zeros(T, k, k),
+        zeros(T, L),
+        zeros(T, L),
+        zeros(T, L),
+    )
+end
+
+@inline function _psd_svec_unpack!(
+    scratch::PSDPanelEpochScratch{T}, matrix::AbstractMatrix{T},
+    vector::AbstractVector{T},
+) where {T}
+    rowpos = scratch.rowpos
+    colpos = scratch.colpos
+    invsqrt2 = scratch.invsqrt2
+    @inbounds for p in eachindex(rowpos)
+        i = rowpos[p]
+        j = colpos[p]
+        value = i == j ? vector[p] : vector[p] * invsqrt2
+        matrix[i, j] = value
+        matrix[j, i] = value
+    end
+    return matrix
+end
+
+@inline function _psd_svec_pack!(
+    scratch::PSDPanelEpochScratch{T}, vector::AbstractVector{T},
+    matrix::AbstractMatrix{T},
+) where {T}
+    rowpos = scratch.rowpos
+    colpos = scratch.colpos
+    sqrt2 = scratch.sqrt2
+    @inbounds for p in eachindex(rowpos)
+        i = rowpos[p]
+        j = colpos[p]
+        vector[p] = i == j ? matrix[i, j] : matrix[i, j] * sqrt2
+    end
+    return vector
+end
+
+"""
+    psd_operator_congruence_factors!(scratch, backend, H, k) -> (P, Pinv)
+
+Recover the scaling pair `(X, Y) = (P, P⁻¹)` of a PSD congruence block from
+its dense block operator `H` (`H[svec(Z)] = svec(P·Z·P)`): `M = svec⁻¹(H·svec(I))`
+is `P²`, and `_spd_sqrt_invsqrt!` supplies `P = M^{1/2}` and `P⁻¹ = M^{-1/2}`.
+Throws `DomainError` when `M` is not strictly positive definite (the caller
+fails closed exactly like the generic cone-block-singular route).
+"""
+function psd_operator_congruence_factors!(
+    scratch::PSDPanelEpochScratch{T},
+    H::AbstractMatrix{T},
+    k::Int,
+) where {T}
+    L = length(scratch.rowpos)
+    size(H) == (L, L) || throw(DimensionMismatch(
+        "PSD congruence operator must be $(L)×$(L), got $(size(H))",
+    ))
+    M = scratch.M
+    @inbounds for p in 1:L
+        acc = zero(T)
+        for j in 1:k
+            acc += H[p, _svec_diagonal_position(j, k)]
+        end
+        i = scratch.rowpos[p]
+        column = scratch.colpos[p]
+        value = i == column ? acc : acc * scratch.invsqrt2
+        M[i, column] = value
+        M[column, i] = value
+    end
+    SymmetricCones._spd_sqrt_invsqrt!(
+        scratch.P, scratch.Pinv, M, scratch.work, scratch.V,
+        scratch.values, :setup_jacobi,
+    )
+    return scratch.P, scratch.Pinv
+end
+
+"""
+    psd_operator_congruence_verified!(scratch, H, k) -> Bool
+
+Structural-epoch test that one dense block operator is a PSD congruence
+operator (`H[svec(Z)] = svec(P·Z·P)`).  The block row count must already be
+triangular (`k(k+1)/2`, `k ≥ 3`); this routine then verifies `H·svec(I)`
+yields an SPD `M = P²`, `H·svec(M) = svec(M²)`, and `H·svec(E_ii)` matches
+`svec(P·E_ii·P)` on the leading diagonals.  Any failure returns `false` and
+the block keeps the generic assembly (behavior unchanged); a genuine PSD
+congruence operator passes with an `eps`-scale margin.
+"""
+function psd_operator_congruence_verified!(
+    scratch::PSDPanelEpochScratch{T},
+    H::AbstractMatrix{T},
+    k::Int,
+) where {T}
+    L = length(scratch.rowpos)
+    size(H) == (L, L) || return false
+    try
+        psd_operator_congruence_factors!(scratch, H, k)
+    catch exception
+        exception isa InterruptException && rethrow()
+        return false
+    end
+    M = scratch.M
+    # M² = M·M (plain loops; structural-epoch one-time cost).
+    @inbounds for column in 1:k
+        for row in 1:k
+            acc = zero(T)
+            for t in 1:k
+                acc += M[row, t] * M[t, column]
+            end
+            scratch.work[row, column] = acc
+        end
+    end
+    _psd_svec_pack!(scratch, scratch.svec_a, M)
+    _psd_svec_pack!(scratch, scratch.svec_b, scratch.work)
+    residual = zero(T)
+    scale = zero(T)
+    @inbounds for row in 1:L
+        acc = zero(T)
+        for column in 1:L
+            acc += H[row, column] * scratch.svec_a[column]
+        end
+        scratch.hvec[row] = acc
+        scale = max(scale, abs(acc), abs(scratch.svec_b[row]))
+        residual = max(residual, abs(acc - scratch.svec_b[row]))
+    end
+    allowance = T(256) * eps(T) * max(one(T), T(L)) * max(one(T), scale)
+    residual <= allowance || return false
+    # Diagonal congruences: H·svec(E_ii) == svec(P·E_ii·P) for the leading
+    # diagonals.  P·E_ii·P is the symmetric outer product of column i of P.
+    P = scratch.P
+    diagonals = min(k, 4)
+    @inbounds for d in 1:diagonals
+        diagonal_position = _svec_diagonal_position(d, k)
+        for row in 1:k
+            pdi = P[row, d]
+            for column in 1:k
+                scratch.work[row, column] = pdi * P[column, d]
+            end
+        end
+        _psd_svec_pack!(scratch, scratch.svec_b, scratch.work)
+        residual = zero(T)
+        scale = zero(T)
+        for row in 1:L
+            scale = max(scale, abs(H[row, diagonal_position]),
+                        abs(scratch.svec_b[row]))
+            residual = max(residual,
+                           abs(H[row, diagonal_position] -
+                               scratch.svec_b[row]))
+        end
+        allowance = T(256) * eps(T) * max(one(T), T(L)) *
+                    max(one(T), scale)
+        residual <= allowance || return false
+    end
+    return true
+end
+
+"""
+    prepack_psd_panel!(panel, A, rows, colptr, local_rows, k)
+
+Structural-epoch prepack of one PSD panel from the frozen `BlockIncidencePlan`
+A-block CSC: `colptr`/`local_rows` are the descriptor's frozen positions
+(ascending local `svec` rows) and `rows` is the descriptor's cone row range
+into the constraint matrix `A`.  Each stored entry is interpreted in the
+runtime's `svec` convention (diagonal scale one, off-diagonal `sqrt(2)`) and
+written into both mirror positions of the full symmetric `k×k` coefficient
+stack, so the panelized `P'P` Gram equals the canonical
+`tr(A_p' X⁻¹ A_r Y)` entry for entry.  Counts as one structural-epoch
+prepack and records the panel bytes written.
+"""
+function prepack_psd_panel!(
+    panel::PSDCongruencePanel{T},
+    A::AbstractMatrix{T},
+    rows::AbstractVector{Int},
+    colptr::AbstractVector{Int},
+    local_rows::AbstractVector{Int},
+    k::Int,
+) where {T}
+    panel.k == k || throw(DimensionMismatch(
+        "PSD panel dimension $(panel.k) does not match block dimension $k",
+    ))
+    na = length(panel.active)
+    L = div(k * (k + 1), 2)
+    length(colptr) == na + 1 || throw(DimensionMismatch(
+        "PSD panel A-block CSC colptr does not match the active set",
+    ))
+    colptr[1] == 1 && colptr[end] - 1 == length(local_rows) ||
+        throw(ArgumentError("PSD panel A-block CSC structure is inconsistent"))
+    length(rows) == L || throw(DimensionMismatch(
+        "PSD panel cone row range must have $(L) svec rows, got $(length(rows))",
+    ))
+    invsqrt2 = one(T) / sqrt(one(T) + one(T))
+    @inbounds for position in 1:na
+        column = @view panel.coeff[:, position]
+        fill!(column, zero(T))
+        variable = panel.active[position]
+        for entry in colptr[position]:(colptr[position + 1] - 1)
+            p = local_rows[entry]
+            1 <= p <= L || throw(ArgumentError(
+                "PSD panel A-block local row out of svec range",
+            ))
+            i, j = _svec_matrix_position(k, p)
+            value = A[rows[p], variable]
+            scaled = i == j ? value : value * invsqrt2
+            panel.coeff[(j - 1) * k + i, position] = scaled
+            panel.coeff[(i - 1) * k + j, position] = scaled
+        end
+    end
+    panel.prepacks[] += 1
+    panel.prepack_bytes[] += sizeof(T) * (k * k * na)
+    panel.structural_epoch[] += 1
+    return panel
+end
+
+"""
+    psd_panel_schur_tile_slots!(backend, nzval, panel, tile_slots, α=one(T))
+
+Accumulate the block's Schur tile into the frozen sparse Schur CSC slots:
+`nzval[tile_slots[...]] += α·P'P`.  `tile_slots` is the descriptor's frozen
+full-tile slot map (linear index `(i_pos - 1)·na + j_pos` for
+`(active[i_pos], active[j_pos])`).  The Gram is computed by `la_syrk!` into
+the panel-owned accumulator; the lower triangle is authoritative and only
+strict off-diagonals are mirrored, exactly matching the canonical Schur
+scatter (`schur.jl`) and the dense panel tile writer.  Counts one tile write.
+"""
+function psd_panel_schur_tile_slots!(
+    backend::AbstractLABackend,
+    nzval::AbstractVector{T},
+    panel::PSDCongruencePanel{T},
+    tile_slots::AbstractVector{Int},
+    alpha::T=one(T),
+) where {T}
+    na = length(panel.active)
+    length(tile_slots) == na * na || throw(DimensionMismatch(
+        "PSD panel tile slot count must be $(na * na), got $(length(tile_slots))",
+    ))
+    gram = panel.gram
+    la_syrk!(backend, gram, panel.panel, alpha, zero(T))
+    @inbounds for j in 1:na
+        for i in j:na
+            value = gram[i, j]
+            nzval[tile_slots[(i - 1) * na + j]] += value
+            # Authoritative lower; only strict off-diagonals are mirrored.
+            i != j && (nzval[tile_slots[(j - 1) * na + i]] += value)
+        end
+    end
+    panel.tiles[] += 1
+    return nzval
+end
+
+"""
+    psd_panel_apply_inverse!(scratch, backend, dst, src, k)
+
+`dst = svec(P⁻¹·svec⁻¹(src)·P⁻¹)` for the current congruence pair, the
+inverse action of the block operator `H_b` on one `svec` vector.  This is
+the panelized replacement for the generic block-inverse matvecs used by the
+reduced-Schur RHS assembly and direction recovery; it forms no explicit
+inverse and reuses the panel scratch buffers through the provider `la_gemm!`
+seam.  `dst` must have length `k(k+1)/2` (it may alias `src`'s storage only
+if the caller re-reads `dst` after both gemms; the scratch buffers are
+distinct from both).
+"""
+function psd_panel_apply_inverse!(
+    scratch::PSDPanelEpochScratch{T},
+    backend::AbstractLABackend,
+    dst::AbstractVector{T},
+    src::AbstractVector{T},
+    k::Int,
+) where {T}
+    L = length(scratch.rowpos)
+    # Session-owned buffers are sized to the session's maximum block
+    # dimension; only the first L entries are read or written.
+    length(dst) >= L || throw(DimensionMismatch(
+        "PSD panel inverse destination must hold at least $L entries",
+    ))
+    length(src) >= L || throw(DimensionMismatch(
+        "PSD panel inverse source must hold at least $L entries",
+    ))
+    _psd_svec_unpack!(scratch, scratch.b_full, src)
+    # border = Pinv·b_full, then border = border·Pinv (separate buffers so
+    # the second gemm never aliases its own output operand).
+    la_gemm!(
+        backend, scratch.border, scratch.Pinv, scratch.b_full,
+        one(T), zero(T),
+    )
+    la_gemm!(
+        backend, scratch.work, scratch.border, scratch.Pinv,
+        one(T), zero(T),
+    )
+    _psd_svec_pack!(scratch, dst, scratch.work)
+    return dst
 end
