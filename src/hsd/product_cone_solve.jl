@@ -416,6 +416,8 @@ function product_hsd_solve!(
 
     base = state.base
     state.tau_collapse_recoveries = 0
+    empty!(state.kkt_route_attempts)
+    push!(state.kkt_route_attempts, state.kkt_route)
     x_original = zeros(T, base.n)
     s_original = zeros(T, base.m)
     y_original = zeros(T, base.m)
@@ -446,7 +448,8 @@ function product_hsd_solve!(
     end
 
     selected_initialization = initialization === :auto ?
-        (state.kkt_route === :expanded ? :kkt : :identity) : initialization
+        (state.kkt_route in (:expanded, :sparse_schur) ? :kkt : :identity) :
+        initialization
     if selected_initialization === :kkt
         start_report = kkt_derived_start!(state)
         start_report.ok || return _product_hsd_termination_or_dual_ray!(

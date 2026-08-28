@@ -9,6 +9,8 @@ const QUICK_TESTS = (
     "kkt_newton_system.jl",
     "kkt_expanded_quasidefinite.jl",
     "wave_i_sparse.jl",
+    # Phase 6 production route belongs in both standard profiles exactly once.
+    "phase6_sparse_integration.jl",
     "hsd_kkt_initialize.jl",
     "cone_algebra.jl",
     "cones_asymmetric.jl",
@@ -111,6 +113,8 @@ const FULL_TESTS = (
     "dense_augmented_kkt.jl",
     "kkt_newton_system.jl",
     "kkt_expanded_quasidefinite.jl",
+    "wave_i_sparse.jl",
+    "phase6_sparse_integration.jl",
     "hsd_kkt_initialize.jl",
     "bfla_backend.jl",
     "mfla_backend.jl",

@@ -140,6 +140,7 @@ mutable struct ProductConeHSDState{
     CW,
     SB,
     EW,
+    SW,
 }
     base::HSDState{T,R}
     runtime::RT
@@ -164,7 +165,9 @@ mutable struct ProductConeHSDState{
     coupled::CW
     symmetric_bordered::SB
     kkt_route::Symbol
+    kkt_route_attempts::Vector{Symbol}
     expanded::EW
+    sparse_schur::SW
     diagnostic::Symbol
     tau_collapse_recoveries::Int
 end
@@ -181,8 +184,8 @@ end
 function _product_cone_hsd_state(
     base::HSDState{T,R}; kkt_route::Symbol=:bordered,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
-    kkt_route in (:bordered, :expanded) || throw(ArgumentError(
-        "product HSD kkt_route must be :bordered or :expanded",
+    kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
+        "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
     ))
     runtime = ProductConeRuntime(base.canonical.cone_layout, T)
     m = base.m
@@ -206,11 +209,17 @@ function _product_cone_hsd_state(
     # Expanded storage is opt-in ownership, not an eager shadow workspace.
     # The default bordered route must not pay the dense O((n+m)^2) memory cost
     # of a factorization session it can never execute.
-    expanded = kkt_route === :expanded ?
+    # A sparse request owns its explicit dense-expanded fallback at setup;
+    # unsupported arithmetic never enters SparseArrays' implicit Float64
+    # conversion and instead starts the same-iterate expanded→bordered ladder.
+    expanded = kkt_route in (:expanded, :sparse_schur) ?
         ExpandedKKTSession(T, base.n, base.m; rhs_count=2) : nothing
+    sparse_schur = kkt_route === :sparse_schur &&
+        sparse_schur_factorization_supported(T) ?
+        SparseSchurSession(T, base.n, base.m) : nothing
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
-        typeof(symmetric_bordered),typeof(expanded),
+        typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
     }(
         base,
         runtime,
@@ -235,7 +244,9 @@ function _product_cone_hsd_state(
         coupled,
         symmetric_bordered,
         kkt_route,
+        Symbol[kkt_route],
         expanded,
+        sparse_schur,
         :none,
         0,
     )
@@ -256,6 +267,9 @@ end
 """Numeric factorizations performed by the active product-HSD route."""
 @inline function product_hsd_factor_count(state::ProductConeHSDState)
     state.kkt_route === :expanded && return state.base.epoch
+    state.kkt_route === :sparse_schur &&
+        return state.sparse_schur === nothing ? 0 :
+               state.sparse_schur.numeric_factor_count
     if state.coupled.nonsymmetric_dimension > 0
         return factor_epoch(state.coupled.cache)
     end
@@ -2756,12 +2770,59 @@ end
     )
 end
 
+@inline function _product_hsd_record_route_attempt!(
+    state::ProductConeHSDState, route::Symbol,
+)
+    route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
+        "unknown product-HSD route attempt $route",
+    ))
+    if isempty(state.kkt_route_attempts) ||
+       last(state.kkt_route_attempts) !== route
+        push!(state.kkt_route_attempts, route)
+    end
+    return Tuple(state.kkt_route_attempts)
+end
+
 @inline function _product_hsd_retry_bordered_same_iterate!(
     state::ProductConeHSDState, has_nonsymmetric::Bool,
 )
+    _product_hsd_record_route_attempt!(state, :bordered)
     state.kkt_route = :bordered
     state.diagnostic = :expanded_to_bordered_same_iterate_fallback
     return _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
+end
+
+@inline function _product_hsd_sparse_fallback_allowed(state::ProductConeHSDState)
+    state.sparse_schur === nothing && return true
+    return state.sparse_schur.status in (
+        SPARSE_SCHUR_FACTOR_FAILED,
+        SPARSE_SCHUR_SOLVE_FAILED,
+        SPARSE_SCHUR_REFINEMENT_STAGNATED,
+        SPARSE_SCHUR_REFINEMENT_AT_FLOOR,
+    )
+end
+
+@inline function _product_hsd_retry_expanded_same_iterate!(
+    state::ProductConeHSDState, has_nonsymmetric::Bool,
+)
+    state.expanded === nothing && return HSDStepDirectionFailed
+    _product_hsd_record_route_attempt!(state, :expanded)
+    state.kkt_route = :expanded
+    state.diagnostic = :sparse_to_expanded_same_iterate_fallback
+    direction_ok = try
+        _product_hsd_expanded_direction!(state)
+    catch
+        false
+    end
+    if direction_ok
+        state.diagnostic = :sparse_to_expanded_same_iterate_fallback
+        return HSDStepOK
+    end
+    _product_hsd_expanded_fallback_allowed(state) ||
+        return HSDStepDirectionFailed
+    return _product_hsd_retry_bordered_same_iterate!(
+        state, has_nonsymmetric,
+    )
 end
 
 function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
@@ -2779,7 +2840,29 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     scaling_ok || return HSDStepDirectionFailed
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
-    direction_code = if state.kkt_route === :expanded
+    direction_code = if state.kkt_route === :sparse_schur
+        direction_ok = try
+            _product_hsd_sparse_direction!(state)
+        catch exception
+            exception isa InterruptException && rethrow()
+            if state.sparse_schur !== nothing
+                state.sparse_schur.status = SPARSE_SCHUR_SOLVE_FAILED
+                state.sparse_schur.last_reason = :sparse_dispatch_exception
+            end
+            false
+        end
+        if direction_ok
+            HSDStepOK
+        elseif _product_hsd_sparse_fallback_allowed(state)
+            # Sparse, expanded and bordered routes see the same accepted HSD
+            # iterate. Only direction/factor scratch has been touched here.
+            _product_hsd_retry_expanded_same_iterate!(
+                state, has_nonsymmetric,
+            )
+        else
+            HSDStepDirectionFailed
+        end
+    elseif state.kkt_route === :expanded
         direction_ok = try
             _product_hsd_expanded_direction!(state)
         catch

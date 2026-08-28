@@ -3,21 +3,25 @@ using SDPX
 using Test
 using LinearAlgebra
 using SparseArrays
+using Random
+
+const _WAVE_I_RNG = Random.Xoshiro(1)
 
 # Build a manufactured SDPX.NewtonSystem with a block-diagonal cone linearization.
 function _manufactured_system(::Type{T}; n=3, m=5, scale=1.0) where {T}
-    A = T(scale) .* Matrix{T}(randn(T, m, n))
-    b = T(scale) .* randn(T, m)
-    c = T(scale) .* randn(T, n)
+    A = T(scale) .* Matrix{T}(randn(_WAVE_I_RNG, T, m, n))
+    b = T(scale) .* randn(_WAVE_I_RNG, T, m)
+    c = T(scale) .* randn(_WAVE_I_RNG, T, n)
     tau = T(1.3)
     kappa = T(0.9)
     # Block-diagonal SPD cone linearization H (SOC-style blocks) covering m.
-    dims = m == 5 ? [2, 3] : [3, 3]
+    dims = m == 5 ? [2, 3] : m == 6 ? [3, 3] : [m ÷ 2, m - m ÷ 2]
     H = zeros(T, m, m)
     off = 0
     ranges = UnitRange{Int}[]
     for d in dims
-        block = T(2.0) .* Matrix{T}(I, d, d) .+ T(0.5) .* randn(T, d, d)
+        block = T(2.0) .* Matrix{T}(I, d, d) .+
+                T(0.5) .* randn(_WAVE_I_RNG, T, d, d)
         block = (block + block') / 2
         block .+= T(3.0) .* Matrix{T}(I, d, d)
         H[(off+1):(off+d), (off+1):(off+d)] .= block
@@ -26,7 +30,8 @@ function _manufactured_system(::Type{T}; n=3, m=5, scale=1.0) where {T}
     end
     lin = SDPX.ProductConeLinearization{T}(H, zeros(T, m), ranges)
     rhs = SDPX.HSDNewtonRHS(
-        randn(T, m), randn(T, n), T(0.3), randn(T, m), T(0.4),
+        randn(_WAVE_I_RNG, T, m), randn(_WAVE_I_RNG, T, n), T(0.3),
+        randn(_WAVE_I_RNG, T, m), T(0.4),
     )
     return SDPX.NewtonSystem(A, b, c, lin, tau, kappa, rhs)
 end
