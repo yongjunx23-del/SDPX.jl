@@ -431,3 +431,11 @@ function verify_dual_infeasibility!(
     primal_forward!(canonical, x_orig, s_orig, state.xt, state.st)
     return _all_finite(x_orig) && _all_finite(s_orig)
 end
+function dual_objective(prob::SDPProblem{T}, y, Y) where {T}
+    d = zero(T)
+    for l in 1:prob.dims.L
+        d += kdot(prob.C[l], Y[l])
+    end
+    prob.dims.n > 0 && (d += LinearAlgebra.dot(prob.b, y))
+    return d
+end

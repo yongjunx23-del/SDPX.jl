@@ -100,3 +100,28 @@ function EqualityPresolveMap(
         EqualityPlanningEvidence(original_count; reason=:compatibility),
     )
 end
+# ---------------------------------------------------------------------------
+# Scaled identity construction with independent BigFloat scalar ownership.
+# ---------------------------------------------------------------------------
+
+import MutableArithmetics as MA
+
+function _scaled_identity(
+    ::Type{T},
+    scale::T,
+    dimension::Int,
+) where {T}
+    return Matrix{T}(scale * I, dimension, dimension)
+end
+
+function _scaled_identity(
+    ::Type{BigFloat},
+    scale::BigFloat,
+    dimension::Int,
+)
+    matrix = alloc_zeros(BigFloat, dimension, dimension)
+    @inbounds for index in 1:dimension
+        MA.operate_to!(matrix[index, index], copy, scale)
+    end
+    return matrix
+end

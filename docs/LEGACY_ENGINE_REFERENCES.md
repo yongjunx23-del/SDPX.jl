@@ -1,9 +1,10 @@
 # Legacy engine remaining-reference manifest (Phase 10 prep)
 
-> **Status:** `src/hsd/nonnegative_hsd.jl` was DELETED in a later migration
-> wave (`commandcode-migration-wave.nonnegative`); see §6 and §11.  The other
-> five files were verified at the Phase 10 fifth wave
-> (`agent/legacy-source-deletion`).
+> **Status:** `src/hsd/nonnegative_hsd.jl` was deleted in the subsequent
+> nonnegative migration wave; generic helpers were migrated out of
+> `src/solver/interior_point.jl` in the sixth wave. The other legacy files remain
+> gated on removal of their production and active-test dependencies; see §4,
+> §6, and §11.
 > **Purpose:** Phase 10 deletes the legacy engines.  This manifest records every
 > remaining reference to the six legacy engine files so the deletion work can be
 > planned file-by-file without a repository-wide archaeology pass.  It is a
@@ -13,12 +14,11 @@
 > `src/solver/interior_point.jl`, `src/step.jl` (+ `src/step_hot.jl`),
 > `src/hsd/nonnegative_hsd.jl`, `src/soc_native.jl`.
 >
-> **Fifth-wave finding:** none of the six files was deletable at this wave.
-> Every file still hosts symbols required by remaining production `src` code
-> and/or by active tests in `test/runtests.jl` (quick and full profiles).
-> Section 11 lists the exact blocking symbols per file.  The include sites,
-> the `Printf` runtime dependency, and the legacy `solve!`/`solve_lp!`
-> reachability were all verified and are unchanged.
+> **Fifth-wave baseline:** all six files were referenced at the time of that
+> audit. Later waves deleted `src/hsd/nonnegative_hsd.jl` and extracted generic
+> helpers from `interior_point.jl` and `step.jl`. Section 11 records the current
+> blockers. The remaining legacy solve loops are not moved or renamed merely to
+> claim deletion.
 
 ## 1. Load order / include sites
 
@@ -94,20 +94,33 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
 
 - Defines: `SDPProblem`, `SolverOptions`, `Workspace`, `solve!`, `ingest`,
   `newton_step!` orchestration inputs, `_kkt_cold_start_initialization`,
-  `_solve_sdp_core!`, `block_norm_stats`, checkpoint API
-  (`save_checkpoint`/`load_checkpoint`), precision-ladder machinery.
+  `_solve_sdp_core!`, `block_norm_stats`.
   (`ingest` itself is defined in `src/ingest.jl`, which is NOT legacy.)
+- **Sixth-wave helper migration (`agent/commandcode-migration-interior`):**
+  the generic helper groups below were moved out of the legacy engine to
+  natural native owners, with byte-identical bodies and no behavior change.
+  `interior_point.jl` remains included (line 139) and still hosts the full
+  legacy solve loop, so all existing test references keep loading.
+  - `dual_objective(prob::SDPProblem, y, Y)` →
+    `src/certificates/certificates.jl` (objective/certificate seam).
+  - `save_checkpoint` / `load_checkpoint` / `save_checkpoint_jld2` /
+    `load_checkpoint_jld2` stubs → new `src/checkpoint.jl` (included right
+    after `types/problems.jl`, where `Checkpoint` is defined).
+  - `_replace_solver_options` / `_reround_solver_options` →
+    `src/pipeline/options.jl` (`SolverOptions` value transforms; used by
+    `src/adaptive_parameters.jl`, `src/step.jl`, and the legacy engine).
+  - `_scaled_identity` → `src/pipeline/helpers.jl` (owned-scalar allocation
+    utilities; used by `src/public/optimize.jl` and the legacy engine).
+  - `_tolerance_precision_diagnostic`, `adaptive_working_precision_bits`,
+    `_working_precision_success`, `_record_working_precision!`,
+    `_build_precision_ladder_plan`, `_ladder_retry_decision`,
+    `_patch_ladder_report!`, `_merge_ladder_result` →
+    `src/pipeline/attempts.jl` (A0/A1 execution-attempt and precision-ladder
+    authority; used by `src/pipeline/diagnostics.jl` and the legacy engine).
 - **Remaining production `src` callers of its symbols (real calls, not
   comments):**
-  - `src/public/optimize.jl:1483` — calls `_scaled_identity` (defined
-    `src/solver/interior_point.jl:453/461`).
-  - `src/pipeline/diagnostics.jl:276` — calls `_ladder_retry_decision`
-    (defined `src/solver/interior_point.jl:3137`).
-  - `src/adaptive_parameters.jl:775` — calls `_replace_solver_options`
-    (defined `src/solver/interior_point.jl:135`).
-  - `src/preprocessing.jl:2118` and `src/validation.jl:151/373/964` — call
-    `dual_objective(prob::SDPProblem, y, Y)` (defined
-    `src/solver/interior_point.jl:7`).
+  - none outside the legacy engine itself. The four cross-file callers listed
+    by earlier waves now resolve to the migrated homes above.
   - `src/kernels/threaded.jl` calls `step.jl` symbols that `interior_point.jl`
     in turn drives (see §5).
 - **Tests:** `test/result_certificate.jl`, `test/nonfinite_fail_closed.jl`,
@@ -308,9 +321,9 @@ active `test/runtests.jl` suites.
 |---|---|---|
 | `src/lp_solver.jl` | none (comments only; `solve_lp!` called only from `solver/interior_point.jl`) | `LPWorkspace`, `LPScaling`, `LPReducedFactor`, `LPStandardFormSystem`, `LPDiagonalMatrix`, `_lp_*` kernels, `_resolve_lp_backend!`, `_presolve_lp_rows`, `_extract_lp_rows`, `_lp_workspace_bytes` in `test/lp_regressions.jl`, `test/direction_accuracy_lp.jl`, `test/architecture_regressions.jl`, `test/lp_sparse.jl`, `test/bigfloat_ownership_regressions.jl` |
 | `src/lp_sparse.jl` | none outside the legacy LP pair | `select_lp_formulation`, `lp_sparse_candidate`, `lp_sparse_factor!`, `lp_sparse_solve!`, `LPSparseSystem`, `_lp_sparse_assemble` in `test/lp_sparse.jl`, `test/sparse_execution_round6.jl`, `test/kkt_sparse_backend.jl`, `test/direction_accuracy_lp.jl` |
-| `src/solver/interior_point.jl` | `_scaled_identity` (`public/optimize.jl:1483`), `_ladder_retry_decision` (`pipeline/diagnostics.jl:276`), `_replace_solver_options` (`adaptive_parameters.jl:775`), `dual_objective(prob,y,Y)` (`preprocessing.jl:2118`, `validation.jl:151/373/964`) | `solve!` (27 active files), `_solve_sdp_core!`, `_kkt_cold_start_initialization`, `save_checkpoint`/`load_checkpoint`, `recommended_parameters`, `adaptive_working_precision_bits`, `block_norm_stats`, `_equality_factor_diagnostics`, `_build_precision_ladder_plan`, `_solve_pipeline!`, `_sdp_newton_termination_metadata`, `BestIterateWorkspace`, `_store_best_iterate!`, `_accepted_sdp_trial_residuals!` |
-| `src/step.jl` | after the helper-migration wave, `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, and `_has_owned_bigfloat_equality_arrow` live in `src/kernels/threaded.jl`; `step.jl` retains `newton_step!` and private legacy helpers consumed by `src/solver/interior_point.jl`, plus retained line-search helpers called by the threaded legacy path | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in `test/factorizations_gate.jl`, `test/allocation_contract.jl`, `test/solver_regressions.jl`, `test/bigfloat_sparse_schur_regressions.jl`, `test/extended_precision_blas.jl`, `test/schur_scheduler_regressions.jl` and others |
-| `src/hsd/nonnegative_hsd.jl` | **DELETED** — shared kernels moved to `src/hsd/common_runtime.jl`; no production `src` references remain | `hsd_solve!` (`test/hsd_rank_reduction_precision.jl`, quick), `_hsd_border_solve!` (`test/hsd_border_failure.jl`, quick) — owned by the test/E2E migration wave |
+| `src/solver/interior_point.jl` | none remaining outside the legacy engine itself — cross-file consumers now resolve against certificates, checkpoint, and pipeline owner files after the sixth-wave helper migration | `solve!` (27 active files), `_solve_sdp_core!`, `_kkt_cold_start_initialization`, `recommended_parameters`, `block_norm_stats`, `_equality_factor_diagnostics`, `_solve_pipeline!`, `_sdp_newton_termination_metadata`, `BestIterateWorkspace`, `_store_best_iterate!`, `_accepted_sdp_trial_residuals!` and other loop-owned symbols |
+| `src/step.jl` | after the helper-migration wave, `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, and `_has_owned_bigfloat_equality_arrow` live in `src/kernels/threaded.jl`; `step.jl` retains `newton_step!` and private legacy helpers consumed by `src/solver/interior_point.jl`, plus retained line-search helpers called by the threaded legacy path | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in active legacy regression tests |
+| `src/hsd/nonnegative_hsd.jl` | **DELETED** — shared kernels moved to `src/hsd/common_runtime.jl`; no production `src` references remain | old `hsd_solve!` and `_hsd_border_solve!` tests are owned by the test/E2E migration wave |
 | `src/soc_native.jl` | production SOC engine for the `ConicProblem` path: `NativeSOCPlan`, `FixedTraceQ3Execution`, `_build_native_soc_payload` (`pipeline/plan.jl`), `_solve_native_soc_core` (`frontend/high_level_solve.jl:165,202`), `NativeSOCDiagnostics` (`soc_presolve.jl`, `validation.jl`, `public/optimize.jl`, `frontend/high_level_solve.jl`) | `test/soc_native_solver.jl`, `test/moi_native_soc.jl`, `test/soc_metric_sparse.jl`, `test/soc_singleton_presolve.jl`, `test/soc_regressions.jl`, `test/provider_smoke.jl` |
 
 Ancillary checks performed this wave (no change needed):
