@@ -1,6 +1,9 @@
 # Legacy engine remaining-reference manifest (Phase 10 prep)
 
-> **Status:** verified at the Phase 10 fifth wave (`agent/legacy-source-deletion`).
+> **Status:** `src/hsd/nonnegative_hsd.jl` was DELETED in a later migration
+> wave (`commandcode-migration-wave.nonnegative`); see §6 and §11.  The other
+> five files were verified at the Phase 10 fifth wave
+> (`agent/legacy-source-deletion`).
 > **Purpose:** Phase 10 deletes the legacy engines.  This manifest records every
 > remaining reference to the six legacy engine files so the deletion work can be
 > planned file-by-file without a repository-wide archaeology pass.  It is a
@@ -25,7 +28,6 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
 | Line | Include |
 |---|---|
 | 77  | `include("step_hot.jl")` |
-| 84  | `include("hsd/nonnegative_hsd.jl")` |
 | 103 | `include("cold_start.jl")` (shared, NOT legacy) |
 | 108 | `include("soc_native.jl")` |
 | 134 | `include("step.jl")` |
@@ -157,35 +159,29 @@ the fifth wave; they shifted by +1 when `entrypoint_bridge.jl` was added):
   `test/coo_contraction_regression.jl` (`factor_blocks!`).
 - **Docs:** `docs/PLAN.md`, review evidence.
 
-## 6. `src/hsd/nonnegative_hsd.jl` — legacy Nonnegative (LP-only) HSD engine
+## 6. `src/hsd/nonnegative_hsd.jl` — legacy Nonnegative (LP-only) HSD engine (DELETED)
 
-- Defines: `hsd_step!`, `hsd_cold_start!`, `hsd_solve!`, `_hsd_border_solve!`,
-  `_hsd_form_schur!`, `_hsd_direction!`, `_hsd_line_search!`, infeasibility
-  fallbacks (`_farkas_*`, `_try_farkas!`, `_try_dual_ray!`), AND the shared
-  `HSDState` kernels listed below.
-- **Remaining production `src` callers (real calls, NOT docstring-only; this
-  corrects the earlier "no src callers" claim):** the native product-cone HSD
-  path calls seven kernels defined here:
-  - `_hsd_matrix_finite` — `src/hsd/product_cone_hsd.jl:1206,2834`
-  - `_hsd_direction_finite` — `src/hsd/product_cone_hsd.jl:1347,2389,2501,2656`;
-    `src/hsd/predictor_corrector.jl:264,413`
-  - `_hsd_maxinf` — `src/hsd/product_cone_solve.jl:313,314,319`;
-    `src/hsd/linesearch.jl:82,83,111,112`
-  - `_hsd_residual_homotopy_ok` — `src/hsd/product_cone_solve.jl:317`;
-    `src/hsd/linesearch.jl:117`
-  - `_hsd_scatter_dx!` — `src/hsd/product_cone_hsd.jl:1316,2380,2456`
-  - `_hsd_update_record!` — `src/hsd/product_cone_hsd.jl:3009`
-  - `_hsd_trial_residual!` — `src/hsd/product_cone_solve.jl:312`;
-    `src/hsd/linesearch.jl:110`
-  - Docstring/comment cross-references also remain in `src/hsd/hsd.jl`,
-    `src/hsd/native_hsd_public.jl`, `src/ir/canonical.jl` (comment),
-    `src/hsd/product_cone_solve.jl` (comment).
-- **Tests (kernel-level, deliberately retained as unit gates):**
-  - `test/hsd_border_failure.jl` (quick profile) — `_p0b_border_call_noreturn!`
-    calls `SDPX._hsd_border_solve!` (lines 70/130/146/158/171).
-  - `test/hsd_rank_reduction_precision.jl` (quick profile) — calls
-    `SDPX.hsd_solve!` (lines 127/157/163/179).
-- **Docs:** `docs/design/HSD_FORMULATION.md`, `docs/PLAN.md`, review evidence.
+- **Deleted** by the `commandcode-migration-wave.nonnegative` wave.  The seven
+  shared `HSDState` kernels that the production product-cone HSD path calls
+  (`_hsd_matrix_finite`, `_hsd_direction_finite`, `_hsd_maxinf`,
+  `_hsd_residual_homotopy_ok`, `_hsd_scatter_dx!`, `_hsd_update_record!`,
+  `_hsd_trial_residual!`) moved verbatim to `src/hsd/common_runtime.jl`
+  (included from `src/SDPX.jl` immediately after `hsd/hsd.jl`).
+- The standalone legacy solver entry points `hsd_step!`, `hsd_cold_start!`,
+  `hsd_solve!` and the Farkas infeasibility fallbacks (`_farkas_*`,
+  `_try_farkas!`, `_try_dual_ray!`, `_hsd_border_solve!`, `_hsd_form_schur!`,
+  `_hsd_direction!`, `_hsd_line_search!`) had no production `src` callers and
+  were deleted without copying.  The production path uses
+  `product_hsd_step!`/`product_hsd_solve!` (`src/hsd/product_cone_hsd.jl`,
+  `src/hsd/product_cone_solve.jl`).
+- **Remaining references (owned by the separate test/E2E migration wave):**
+  - `test/hsd_rank_reduction_precision.jl` (quick profile) calls
+    `SDPX.hsd_solve!` (lines 127/157/163/179) — will fail to compile until that
+    file is translated or removed.
+  - `test/hsd_border_failure.jl` (quick profile) calls
+    `SDPX._hsd_border_solve!` (lines 70/130/146/158/171) — same.
+  - `test/hsd_zeroalloc.jl` and `docs/design/HSD_FORMULATION.md`,
+    `docs/PLAN.md` contain textual `nonnegative_hsd` references only.
 - **Note:** `ProductConeHSDState` reuses `HSDState` (defined in
   `src/hsd/hsd.jl`, which is NOT legacy) and the shared `hsd_residual!`,
   `hsd_conic_iterate`, `verify_*!` certificate machinery.
@@ -297,7 +293,7 @@ production `src` code or by active tests.  Deleting any file now would break
 | `src/lp_sparse.jl` | none outside the legacy LP pair | `select_lp_formulation`, `lp_sparse_candidate`, `lp_sparse_factor!`, `lp_sparse_solve!`, `LPSparseSystem`, `_lp_sparse_assemble` in `test/lp_sparse.jl`, `test/sparse_execution_round6.jl`, `test/kkt_sparse_backend.jl`, `test/direction_accuracy_lp.jl` |
 | `src/solver/interior_point.jl` | `_scaled_identity` (`public/optimize.jl:1483`), `_ladder_retry_decision` (`pipeline/diagnostics.jl:276`), `_replace_solver_options` (`adaptive_parameters.jl:775`), `dual_objective(prob,y,Y)` (`preprocessing.jl:2118`, `validation.jl:151/373/964`) | `solve!` (27 active files), `_solve_sdp_core!`, `_kkt_cold_start_initialization`, `save_checkpoint`/`load_checkpoint`, `recommended_parameters`, `adaptive_working_precision_bits`, `block_norm_stats`, `_equality_factor_diagnostics`, `_build_precision_ladder_plan`, `_solve_pipeline!`, `_sdp_newton_termination_metadata`, `BestIterateWorkspace`, `_store_best_iterate!`, `_accepted_sdp_trial_residuals!` |
 | `src/step.jl` | `compute_residuals!`, `factor_blocks!`, `_predictor_corrector_rhs!`, `fraction_to_boundary_search!`, `line_search!`, `_has_owned_bigfloat_equality_arrow` in `src/kernels/threaded.jl:310/331/512/513/623/926/1075/1686/1801` | `newton_step!`, `_affine_predictor_diagnostics!`, `_legacy_predictor_diagnostics!`, `_same_normalized_complementarity`, `_skip_automatic_refinement`, `factor_blocks!`, `compute_residuals!` in `test/factorizations_gate.jl`, `test/allocation_contract.jl`, `test/solver_regressions.jl`, `test/bigfloat_sparse_schur_regressions.jl`, `test/extended_precision_blas.jl`, `test/schur_scheduler_regressions.jl` and others |
-| `src/hsd/nonnegative_hsd.jl` | shared `HSDState` kernels used by the production product-cone HSD path: `_hsd_matrix_finite`, `_hsd_direction_finite`, `_hsd_maxinf`, `_hsd_residual_homotopy_ok`, `_hsd_scatter_dx!`, `_hsd_update_record!`, `_hsd_trial_residual!` (see §6) | `hsd_solve!` (`test/hsd_rank_reduction_precision.jl`, quick), `_hsd_border_solve!` (`test/hsd_border_failure.jl`, quick) |
+| `src/hsd/nonnegative_hsd.jl` | **DELETED** — shared kernels moved to `src/hsd/common_runtime.jl`; no production `src` references remain | `hsd_solve!` (`test/hsd_rank_reduction_precision.jl`, quick), `_hsd_border_solve!` (`test/hsd_border_failure.jl`, quick) — owned by the test/E2E migration wave |
 | `src/soc_native.jl` | production SOC engine for the `ConicProblem` path: `NativeSOCPlan`, `FixedTraceQ3Execution`, `_build_native_soc_payload` (`pipeline/plan.jl`), `_solve_native_soc_core` (`frontend/high_level_solve.jl:165,202`), `NativeSOCDiagnostics` (`soc_presolve.jl`, `validation.jl`, `public/optimize.jl`, `frontend/high_level_solve.jl`) | `test/soc_native_solver.jl`, `test/moi_native_soc.jl`, `test/soc_metric_sparse.jl`, `test/soc_singleton_presolve.jl`, `test/soc_regressions.jl`, `test/provider_smoke.jl` |
 
 Ancillary checks performed this wave (no change needed):

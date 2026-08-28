@@ -75,13 +75,13 @@ include("kkt/expanded_quasidefinite.jl")
 include("kkt/psd_panels.jl")
 include("kkt/reduced_schur.jl")
 include("step_hot.jl")
-# HSD state, Nonnegative (LP) HSD predictor/corrector, and certificate
-# verification. Included here (after the IR, factor-cache routes and the KKT
-# route driver) so they can reference CanonicalConicProgram, ConeProductLayout,
-# AbstractFactorCache and HotRouteCache.
+# HSD state and the shared/product-cone HSD state machine. Included here
+# (after the IR, factor-cache routes and the KKT route driver) so they can
+# reference CanonicalConicProgram, ConeProductLayout, AbstractFactorCache and
+# HotRouteCache.
 include("hsd/equality_reduction_sparse.jl")
 include("hsd/hsd.jl")
-include("hsd/nonnegative_hsd.jl")
+include("hsd/common_runtime.jl")
 include("hsd/nonsymmetric_coupled.jl")
 include("hsd/product_cone_hsd.jl")
 include("hsd/nonsymmetric_schur3.jl")
