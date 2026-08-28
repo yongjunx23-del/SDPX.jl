@@ -411,3 +411,81 @@ function estimate_sdp_workspace_bytes(
         WORKSPACE_ESTIMATE_PER_BLOCK_OVERHEAD_BYTES * L
     return saturating_sum_bytes(element_bound, object_overhead)
 end
+
+"""
+    conservative_memory_upper_bound_eligibility(estimate_bytes, limit_bytes, current_rss_bytes) -> MemoryUpperBoundEligibility
+
+Conservative memory upper-bound eligibility for the calibrated route planner.
+`estimate_bytes` is the workspace upper bound (already carrying the
+`WORKSPACE_ESTIMATE_MARGIN_*` margin above); the gate adds the current
+process peak RSS and requires the sum to fit `limit_bytes`. Any unknown input
+(no estimate, no RSS, or no limit) fails closed with a named reason: an
+unknown can certify nothing, and a route-change claim must never ride on a
+guess. `limit_bytes <= 0` is "no limit recorded", never a zero-byte budget.
+
+The eligibility type lives with the calibrated planner
+(`src/midend/formulation_planner.jl`); this file owns only the bound
+arithmetic.
+"""
+function conservative_memory_upper_bound_eligibility(
+    estimate_bytes::Integer,
+    limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+)
+    estimate = Int(estimate_bytes)
+    limit = limit_bytes === nothing ? nothing : Int(limit_bytes)
+    rss = current_rss_bytes === nothing ? nothing : Int(current_rss_bytes)
+    estimate <= 0 && return MemoryUpperBoundEligibility(
+        false,
+        :memory_estimate_unavailable,
+        0,
+        estimate,
+        rss === nothing ? 0 : rss,
+        limit === nothing ? 0 : limit,
+    )
+    rss === nothing && return MemoryUpperBoundEligibility(
+        false,
+        :current_rss_unavailable,
+        estimate,
+        estimate,
+        0,
+        limit === nothing ? 0 : limit,
+    )
+    if limit === nothing || limit <= 0
+        return MemoryUpperBoundEligibility(
+            false,
+            :memory_limit_unknown,
+            estimate,
+            estimate,
+            rss,
+            0,
+        )
+    end
+    upper_bound = saturating_sum_bytes(estimate, rss)
+    eligible = upper_bound <= limit
+    reason = eligible ? :memory_upper_bound_eligible : :memory_upper_bound_exceeded
+    return MemoryUpperBoundEligibility(
+        eligible,
+        reason,
+        upper_bound,
+        estimate,
+        rss,
+        limit,
+    )
+end
+
+"""
+    conservative_memory_upper_bound_eligibility(features, estimate_bytes) -> MemoryUpperBoundEligibility
+
+Feature-vector form: reads `memory_limit_bytes` and `current_rss_bytes` from
+the typed feature vector, with the same fail-closed semantics as the
+three-argument form.
+"""
+conservative_memory_upper_bound_eligibility(
+    features::RouteCalibrationFeatures,
+    estimate_bytes::Integer,
+) = conservative_memory_upper_bound_eligibility(
+    estimate_bytes,
+    features.memory_limit_bytes,
+    features.current_rss_bytes,
+)

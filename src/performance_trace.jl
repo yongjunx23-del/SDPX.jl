@@ -21,6 +21,12 @@ The sections are:
   * `phases`   - phase-separated timing receipt (one canonical slot per
                 traced phase plus wall-clock accounting).
   * `attempts` - per-attempt fallback timing and counts.
+  * `setup.planning` - planner reason facts: the formulation-planner
+                capability decision and, when the calibrated route planner
+                scaffold ran, its feature-vector summary, versioned
+                calibration receipt, prediction interval, residual
+                eligibility, memory gate, and route-change authorization.
+                Fields the solve never recorded stay `unavailable`.
 
 This is the typed backing record for the public `performance_trace(result)`
 accessor.  Callers reach it through the single v0.5 `Result` interface; there
@@ -254,6 +260,77 @@ _missing_attempt_facts() = (
 
 _setup_facts(result::SDPResult) = _setup_facts_for_record(result)
 
+
+"""
+    _planning_facts(selected) -> NamedTuple
+
+Planner reason facts projected from the retained `selected_algorithms`
+record. The capability decision (`reason`/`requested`/`preferred`/`selected`)
+comes from the `formulation_decision` key; the calibrated-planner facts come
+from its `calibration` sub-record when the calibrated scaffold ran. Any field
+the solve never recorded stays the `unavailable` marker — never a guessed
+route or threshold.
+"""
+function _planning_facts(selected)
+    decision = _project_field(selected, :formulation_decision)
+    calibration = _project_field(decision, :calibration)
+    features = _project_field(calibration, :features)
+    prediction = _project_field(calibration, :prediction)
+    receipt = _project_field(calibration, :receipt)
+    memory = _project_field(calibration, :memory)
+    return (
+        planner_reason=_project_field(decision, :reason),
+        planner_requested=_project_field(decision, :requested),
+        planner_preferred=_project_field(decision, :preferred),
+        planner_selected=_project_field(decision, :selected),
+        calibration_model_version=_project_field(receipt, :model_version),
+        calibration_feature_version=_project_field(receipt, :feature_version),
+        calibration_receipt_schema_version=
+            _project_field(receipt, :schema_version),
+        calibration_hardware_signature=
+            _project_field(receipt, :hardware_signature),
+        calibration_provider=_project_field(receipt, :provider),
+        calibration_fitted_samples=_project_field(receipt, :fitted_samples),
+        calibration_coverage=_project_field(receipt, :coverage),
+        calibration_source=_project_field(receipt, :source),
+        calibration_receipt_valid=_project_field(receipt, :valid),
+        calibration_prediction_available=_project_field(prediction, :available),
+        calibration_predicted_ratio=_project_field(prediction, :predicted_ratio),
+        calibration_interval_low=_project_field(prediction, :interval_low),
+        calibration_interval_high=_project_field(prediction, :interval_high),
+        calibration_residual_eligible=
+            _project_field(prediction, :residual_eligible),
+        calibration_preferred_route=_project_field(prediction, :preferred_route),
+        calibration_prediction_reason=_project_field(prediction, :reason),
+        calibration_decision_reason=_project_field(calibration, :reason),
+        calibration_route_change_allowed=
+            _project_field(calibration, :route_change_allowed),
+        calibration_selected=_project_field(calibration, :selected),
+        calibration_memory_eligible=_project_field(memory, :eligible),
+        calibration_memory_reason=_project_field(memory, :reason),
+        calibration_memory_upper_bound_bytes=
+            _project_field(memory, :upper_bound_bytes),
+        feature_variables=_project_field(features, :variables),
+        feature_equalities=_project_field(features, :equalities),
+        feature_rank=_project_field(features, :rank),
+        feature_normal_dimension=_project_field(features, :normal_dimension),
+        feature_reduced_dimension=_project_field(features, :reduced_dimension),
+        feature_expanded_dimension=_project_field(features, :expanded_dimension),
+        feature_input_nnz=_project_field(features, :input_nnz),
+        feature_kkt_nnz=_project_field(features, :kkt_nnz),
+        feature_predicted_fill=_project_field(features, :predicted_fill),
+        feature_precision_bits=_project_field(features, :precision_bits),
+        feature_condition_spread=_project_field(features, :condition_spread),
+        feature_condition_spread_available=
+            _project_field(features, :condition_spread_available),
+        feature_rrqr_quality=_project_field(features, :rrqr_quality),
+        feature_current_rss_bytes=_project_field(features, :current_rss_bytes),
+        feature_memory_limit_bytes=_project_field(features, :memory_limit_bytes),
+        feature_provider=_project_field(features, :provider),
+        feature_threads=_project_field(features, :threads),
+    )
+end
+
 _setup_facts(result::ConicResult) = _setup_facts_for_record(result)
 
 function _setup_facts_for_record(result)
@@ -319,6 +396,7 @@ function _setup_facts_for_record(result)
         parameter_resolution_count=
             _project_field(selected, :parameter_resolution_count),
         parameter_resolution_stage=_project_field(selected, :stage),
+        planning=_planning_facts(selected),
     )
 end
 
