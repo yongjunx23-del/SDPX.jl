@@ -1,6 +1,6 @@
 # Generic conic benchmark suite
 
-Status: implemented on `agent/bench-generic` (2026-08-28)  
+Status: implemented on `agent/bench-generic` (2026-08-28)
 Scope: general-purpose LP/SOCP/SDP/EXP/POWER behavior, deliberately separate from
 `benchmark/bootstrap/` and `benchmark/physics/`.
 
