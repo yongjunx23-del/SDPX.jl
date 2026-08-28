@@ -33,7 +33,7 @@ julia --project=/tmp/sdpx-pureklu-env \
       test/provider_spikes/pureklu_sparse.jl
 ```
 
-Result: **249 / 249 tests pass** (see §6).
+Result: **525 / 525 tests pass** (see §6).
 
 ## 2. What was validated (mapped to the design promotion gates)
 
@@ -81,7 +81,21 @@ The reduced-Schur shape `[A'H⁻¹A, c−g; (c+g)', κ/τ−q]` (the exact nonsy
   symbolic / numeric / in-place value refactor. `refactor!` requires the
   identical sparsity pattern and returns `false` (`:pattern_changed`) otherwise.
 - `solve!(session, dest, rhs)` / `solve(session, rhs)` (vector + matrix),
-  `solve_transpose!(…)` — in-place KLU `solve!` and `tsolve`.
+  `solve_transpose!(…)` — in-place KLU `solve!` and `tsolve`;
+- `solve_multi!(session, dest, rhs)` — exported full-check multi-RHS form:
+  vector/matrix signature and exact-eltype checks, size checks
+  (`DimensionMismatch`), status/epoch currency checks, and overlap-safe
+  ownership (destination must not alias the RHS, the factor `nzval`, or the
+  session matrix storage);
+- `validate_csc(A)` — complete fail-closed structural validator run before
+  every PureKLU/AMD call: square dimensions, 1-based `colptr`
+  (length/first/monotonic/terminal), row bounds, per-column sortedness and
+  duplicates, nnz consistency, finite values. A malformed matrix marks the
+  session `PUREKLU_FAILED` (`last_reason = :invalid_csc`) and no PureKLU
+  call is made;
+- session `epoch` / `factor_epoch` identity pair (bumped on operator
+  change and on every successful factor; solves require
+  `epoch == factor_epoch`).
 - `factor_residual(session, x, rhs)`, `semantic_max_residual(system, dir)`.
 - `fill_metrics(session)` — `lnz`, `unz`, `nzoff`, `nblocks`, `maxblock`,
   `status_code` (KLU status 0/1; a factorization status, never inertia).
@@ -121,12 +135,30 @@ Per scalar `Float64`, `Float64x2`, `Float64x4`, `BigFloat` (256 bits):
     semantic residual, direction error all pass the same gates;
 12. allocation/fill/wall time (Float64, 133-dim manufactured operator);
 13. no LinearSolve/SciMLBase loaded; no inertia symbol; no global precision
-    mutation.
+    mutation;
+14. `validate_csc` regression: all ten structural invariants (non-square,
+    colptr length/first/monotonic/terminal, row bounds, unsorted, duplicate,
+    nnz mismatch, non-finite) fail closed both directly and through the
+    session path (`set_operator!`/`analyze!`/`factor!` return `false` with
+    `:invalid_csc`, `factor === nothing` — no PureKLU call);
+15. nzval storage-order / copy / alias ownership: the factor's `nzval`
+    equals the matrix's `nzval` elementwise (CSC storage order), is a
+    distinct array (`klu!` aliases its argument, so the adapter passes a
+    copy), and in-place mutation of the session matrix marks the factor
+    stale without corrupting it;
+16. `solve_multi!` per scalar: vector and matrix forms, size mismatch
+    (`DimensionMismatch`), signature mismatch, eltype mismatch, overlap
+    rejection (RHS and session-matrix storage), stale rejection, and epoch
+    mismatch rejection;
+17. `colptr` convention assertion: `colptr[1] == 1` (1-based) on the running
+    Julia/SparseArrays, matching the corrected finding 9.
 
 ## 6. Observed results
 
 Same-precision normwise backward error `‖Kx−b‖∞/max(‖K‖∞‖x‖∞+‖b‖∞,1)` and
-five-equation semantic residual (worst observed over the manufactured route):
+five-equation semantic residual (worst observed over the manufactured route;
+unchanged by the review fixes — the exact nonsymmetric residual gates are
+preserved verbatim):
 
 | scalar | eps | factor backward error | semantic residual | 256·eps gate |
 |---|---:|---:|---:|---:|
@@ -180,30 +212,39 @@ solves to ~1e-64. This is exactly the design's "no downcast" requirement.
    storage order — see finding 6.)
 4. **`klu!` aliases the passed value vector** (`K.nzval = nzval`). The adapter
    passes a copy so the session's matrix storage stays independent; the
-   production adapter must keep that ownership rule.
-5. **Pattern invariants are trusted.** An invalid CSC pattern (e.g. unsorted
-   rowval produced by raw field mutation) can crash PureKLU's AMD rather than
-   fail gracefully (`ReadOnlyMemoryError` observed in probe). Callers must
-   supply valid `SparseMatrixCSC` values; the adapter does not re-validate.
+   production adapter must keep that ownership rule. **Closed**: regression
+   tests assert `factor.nzval !== matrix.nzval`, that in-place mutation of
+   the session matrix marks the factor stale (never silently wrong), and
+   that refactor recovers with the new values.
+5. **Pattern invariants are validated fail-closed.** An invalid CSC pattern
+   (e.g. unsorted rowval produced by raw field mutation) can crash PureKLU's
+   AMD rather than fail gracefully (`ReadOnlyMemoryError` observed in probe).
+   **Closed**: `validate_csc` now runs before every PureKLU/AMD call
+   (`set_operator!`, `analyze!`, `factor!`, `refactor!`, and every solve
+   guard) and rejects malformed matrices with `PUREKLU_FAILED` /
+   `:invalid_csc` without touching PureKLU; all ten structural invariants
+   have direct and session-path regression tests.
 6. **CSC storage-order contract.** `klu!` takes values in the matrix's exact
    CSC order; a caller reordering values independently of the pattern gets
    silently wrong factors (observed in probes). The adapter always passes
-   `A.nzval` from a pattern-checked matrix.
+   `A.nzval` from a pattern-checked matrix. **Closed**: regression tests
+   assert the factor's `nzval` equals the matrix's `nzval` elementwise
+   (same storage order) after refactor.
 7. **`solve!` requires `StridedVecOrMat` with exact eltype `Tv` and unit
    leading stride**; the adapter guards this by construction but the
    production route should not pass views with non-unit strides.
 8. **Generic-scalar JIT**: BigFloat/MultiFloat kernels are not precompiled by
    PureKLU (BLAS eltypes only); first-use latency and BigFloat MPFR
    allocation must be budgeted by the route planner (design gate 7).
-9. **SparseArrays colptr convention shift (environment finding).** Julia 1.12
-   / SparseArrays 1.12.0 emits a **1-based `colptr`** from `sparse()`
-   (`colptr[1] = 1`), whereas older Julia/SparseArrays versions emit 0-based.
-   The repo targets Julia 1.10 (`Project.toml`), so any adapter code that does
-   raw `colptr` arithmetic must use canonical accessors (`nzrange`,
-   whole-vector pattern comparison) or pin the convention. This spike uses
-   `nzrange` and vector-level comparisons and runs correctly on 1.12; PureKLU
-   handles the convention via its own `decrement`/`increment` shims, but the
-   production adapter should assert the convention it was compiled against.
+9. **SparseMatrixCSC `colptr` is 1-based in every Julia 1.x release
+   (correction).** The earlier spike evidence claimed a Julia 1.10-vs-1.12
+   convention shift (0-based on older Julia). That claim was **false**:
+   verified directly on Julia 1.10.11 / SparseArrays 1.10.0 and Julia 1.12.6
+   / SparseArrays 1.12.0 — both emit `colptr[1] == 1` and
+   `colptr[end] == nnz + 1`. `validate_csc` asserts the 1-based convention
+   before any PureKLU call, and the test suite asserts `colptr[1] == 1` on
+   the running Julia. Canonical accessors (`nzrange`, whole-vector pattern
+   comparison) remain the right style for adapter code.
 10. **No scaling/equilibration surface.** KLU row scaling (`scale=2`, max-row)
     is on by default in `KLUCommon`; the adapter exposes no toggle. Fine for
     the spike; a production provider descriptor should surface it.

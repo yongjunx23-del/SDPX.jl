@@ -41,16 +41,12 @@ end
 const PK = Main.SDPXPureKLUExt
 const PUREKLU_PKG = PK.PUREKLU_VERSION
 
-# Julia 1.12 (SparseArrays 1.12.0) emits 1-based `colptr` from `sparse()` while
-# earlier Julia emits 0-based. Everything here goes through `nzrange`/API or
-# whole-vector pattern comparison, so both conventions are covered; this is
-# recorded as an environment finding in the evidence document.
-const _SPARSE_COLPTR_BASE = try
-    S = sparse([1], [1], [1.0], 1, 1)
-    first(S.colptr)
-catch
-    0
-end
+# `SparseMatrixCSC` is 1-based in every Julia 1.x release (`colptr[1] == 1`,
+# `colptr[end] == nnz + 1`). The earlier spike evidence incorrectly claimed a
+# Julia 1.10-vs-1.12 convention shift; verified directly on Julia 1.10.11
+# (SparseArrays 1.10.0) and 1.12.6 (SparseArrays 1.12.0). The adapter's
+# `validate_csc` asserts the 1-based convention before any PureKLU call.
+const _SPARSE_COLPTR_BASE = first(sparse([1], [1], [1.0], 1, 1).colptr)
 
 # ---------------------------------------------------------------------------
 # fixtures
@@ -154,6 +150,7 @@ function _check_exact_expanded_route(::Type{T}, rng; label::String) where {T<:Ab
         dimension = n + m + 1
         @test size(K) == (dimension, dimension)
         @test eltype(K) === T
+        @test PK.validate_csc(K)          # fail-closed structural gate
         # genuine nonsymmetry: (x,τ) skew blocks and (y,τ) −b blocks
         @test !issymmetric(Matrix(K))
 
@@ -225,6 +222,25 @@ function _check_exact_expanded_route(::Type{T}, rng; label::String) where {T<:Ab
         @test yt2 !== nothing
         @test _kkt_backward_error(transpose(A2), yt2, rhs) <= T(256) * eps(T)
 
+        # --- nzval storage-order / copy / alias ownership ------------------
+        # `klu!` consumes values in the matrix's exact CSC storage order; the
+        # adapter passes `A.nzval` verbatim, so the factor's nzval equals the
+        # matrix's nzval elementwise (same order).
+        @test session.factor.nzval == A2.nzval
+        # `klu!` aliases the passed value vector; the adapter passes a copy so
+        # the session matrix storage stays independent (ownership rule).
+        @test session.factor.nzval !== A2.nzval
+        A2.nzval[1] += T(1)               # mutate the session matrix in place
+        @test !PK.is_fresh(session)       # stale, never silently wrong
+        @test PK.solve(session, rhs) === nothing
+        @test session.status == PK.PUREKLU_STALE
+        @test session.last_reason == :stale_values
+        @test PK.refactor!(session, A2)   # recovers with the new values
+        @test PK.is_factored(session) && PK.is_fresh(session)
+        x2b = PK.solve(session, rhs)
+        @test x2b !== nothing
+        @test _kkt_backward_error(A2, x2b, rhs) <= T(256) * eps(T)
+
         # --- stale factor rejection ---------------------------------------
         A3 = _perturbed(T, rng, K, 1e-4)          # same pattern, new values
         PK.set_operator!(session, A3)
@@ -243,8 +259,8 @@ function _check_exact_expanded_route(::Type{T}, rng; label::String) where {T<:Ab
         )
         # drop one structural entry: different pattern, same dimension.
         # NOTE: `nzrange` is used instead of raw colptr arithmetic because
-        # Julia 1.12's SparseArrays 1.12.0 emits a *1-based* colptr while
-        # earlier versions emit 0-based; `nzrange` is the canonical accessor.
+        # `nzrange` is the canonical accessor (SparseMatrixCSC `colptr` is
+        # 1-based in every Julia 1.x release; see `_SPARSE_COLPTR_BASE`).
         col = findfirst(c -> !isempty(nzrange(A4, c)), 1:dimension)
         drop_pos = first(nzrange(A4, col))
         for p in drop_pos:(length(A4.rowval) - 1)   # shift the whole tail down
@@ -464,6 +480,179 @@ function _check_metrics_and_time()
 end
 
 # ---------------------------------------------------------------------------
+# fail-closed CSC validation (malformed CSC regression)
+# ---------------------------------------------------------------------------
+
+function _check_csc_validation()
+    @testset "fail-closed CSC validation" begin
+        T = Float64
+        # base with multiple entries per column so per-column ordering and
+        # duplicate invariants are actually exercisable
+        base = sparse(T[1 0 0; 1 2 0; 0 2 3])
+        # colptr = [1,3,5,6], rowval = [1,2,2,3,3], nzval = [1,1,2,2,3]
+        @test PK.validate_csc(base)
+
+        # --- direct validator: every invariant fails closed ----------------
+        nonsquare = SparseMatrixCSC(4, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        @test !PK.validate_csc(nonsquare)
+
+        colptr_short = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        resize!(colptr_short.colptr, 3)          # length n instead of n+1
+        @test !PK.validate_csc(colptr_short)
+
+        colptr_first = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        colptr_first.colptr[1] = 0               # 0-based convention (invalid)
+        @test !PK.validate_csc(colptr_first)
+
+        colptr_nonmonotonic = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        colptr_nonmonotonic.colptr[3] = 2        # colptr[2]=3 > colptr[3]=2
+        @test !PK.validate_csc(colptr_nonmonotonic)
+
+        colptr_terminal = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        colptr_terminal.colptr[end] = 7          # != nnz + 1 (= 6)
+        @test !PK.validate_csc(colptr_terminal)
+
+        row_high = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        row_high.rowval[1] = 4                  # row index > n
+        @test !PK.validate_csc(row_high)
+
+        row_zero = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        row_zero.rowval[1] = 0                  # row index < 1
+        @test !PK.validate_csc(row_zero)
+
+        unsorted = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        unsorted.rowval[1] = 2; unsorted.rowval[2] = 1   # column 1: [2,1]
+        @test !PK.validate_csc(unsorted)
+
+        duplicate = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        duplicate.rowval[2] = 1                 # column 1: [1,1]
+        @test !PK.validate_csc(duplicate)
+
+        nnz_mismatch = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        resize!(nnz_mismatch.nzval, 4)         # length(rowval) != length(nzval)
+        @test !PK.validate_csc(nnz_mismatch)
+
+        nonfinite = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        nonfinite.nzval[1] = Inf
+        @test !PK.validate_csc(nonfinite)
+
+        nanval = SparseMatrixCSC(3, 3, copy(base.colptr), copy(base.rowval), copy(base.nzval))
+        nanval.nzval[2] = NaN
+        @test !PK.validate_csc(nanval)
+
+        # --- session path: fail closed before any PureKLU call -------------
+        for (label, bad) in [
+            ("colptr_short", colptr_short),
+            ("colptr_first", colptr_first),
+            ("colptr_nonmonotonic", colptr_nonmonotonic),
+            ("colptr_terminal", colptr_terminal),
+            ("row_high", row_high),
+            ("row_zero", row_zero),
+            ("unsorted", unsorted),
+            ("duplicate", duplicate),
+            ("nnz_mismatch", nnz_mismatch),
+            ("nonfinite", nonfinite),
+            ("nanval", nanval),
+        ]
+            s = PK.PureKLUSession(Float64, 3)
+            PK.set_operator!(s, bad)
+            @test s.status == PK.PUREKLU_FAILED
+            @test s.last_reason == :invalid_csc
+            @test !PK.analyze!(s)
+            @test s.last_reason == :invalid_csc
+            @test !PK.factor!(s)
+            @test s.last_reason == :invalid_csc
+            @test s.factor === nothing          # no PureKLU call happened
+            @test PK.solve(s, ones(3)) === nothing
+        end
+
+        # non-square operator is rejected at the dimension gate
+        s = PK.PureKLUSession(Float64, 3)
+        @test_throws DimensionMismatch PK.set_operator!(s, nonsquare)
+
+        # a valid operator recovers the session after the failed installs
+        s = PK.PureKLUSession(Float64, 3)
+        PK.set_operator!(s, base)
+        @test PK.factor!(s)
+        @test PK.is_factored(s)
+        x = PK.solve(s, ones(3))
+        @test x !== nothing
+        @test _kkt_backward_error(base, x, ones(3)) <= 256 * eps(Float64)
+    end
+end
+
+# ---------------------------------------------------------------------------
+# solve_multi! (exported full-check form)
+# ---------------------------------------------------------------------------
+
+function _check_solve_multi(::Type{T}, rng; label::String) where {T<:AbstractFloat}
+    @testset "solve_multi! ($label)" begin
+        system, _ = manufactured_system(T, rng)
+        K = PK.assemble_expanded_kkt_sparse(system)
+        dimension = size(K, 1)
+        session = PK.PureKLUSession(T, dimension)
+        PK.set_operator!(session, K)
+        @test PK.factor!(session)
+        rhs = PK.expanded_rhs_vector(system)
+
+        # vector form
+        dest = zeros(T, dimension)
+        @test PK.solve_multi!(session, dest, rhs)
+        @test _kkt_backward_error(K, dest, rhs) <= T(256) * eps(T)
+
+        # matrix form
+        panel = hcat(rhs, 2 * rhs, 3 * rhs)
+        dest_panel = zeros(T, dimension, 3)
+        @test PK.solve_multi!(session, dest_panel, panel)
+        @test _kkt_backward_error(K, dest_panel[:, 1], rhs) <= T(256) * eps(T)
+        @test dest_panel[:, 2] ≈ 2 .* dest atol=T(1024) * eps(T)
+        @test dest_panel[:, 3] ≈ 3 .* dest atol=T(1024) * eps(T)
+
+        # size mismatch -> DimensionMismatch (matches solve!)
+        @test_throws DimensionMismatch PK.solve_multi!(session, zeros(T, dimension - 1), rhs)
+        @test_throws DimensionMismatch PK.solve_multi!(session, dest, vcat(rhs, one(T)))
+
+        # overlap-safe ownership: destination aliasing RHS is rejected
+        @test !PK.solve_multi!(session, rhs, rhs)
+        @test session.last_reason == :overlapping_storage
+        @test PK.factor!(session)               # recover (fail-closed marks)
+        # destination aliasing the session matrix storage is rejected
+        @test !PK.solve_multi!(session, session.matrix.nzval, rhs)
+        @test session.last_reason == :overlapping_storage
+        @test PK.factor!(session)               # recover
+
+        # signature mismatch: vector destination vs matrix RHS
+        @test !PK.solve_multi!(session, dest, hcat(rhs, rhs))
+        @test session.last_reason == :signature_mismatch
+        @test PK.factor!(session)               # recover
+
+        # eltype mismatch
+        otherT = T === Float64 ? Float32 : Float64
+        @test !PK.solve_multi!(session, zeros(otherT, dimension), rhs)
+        @test session.last_reason == :eltype_mismatch
+        @test PK.factor!(session)               # recover
+
+        # status: stale factor rejected
+        A2 = _perturbed(T, rng, K, 1e-6)
+        PK.set_operator!(session, A2)
+        @test !PK.solve_multi!(session, dest, rhs)
+        @test session.status == PK.PUREKLU_STALE
+        @test PK.refactor!(session, A2)
+        @test PK.solve_multi!(session, dest, rhs)
+        @test _kkt_backward_error(A2, dest, rhs) <= T(256) * eps(T)
+
+        # epoch: factor epoch must match the session epoch
+        @test session.epoch == session.factor_epoch
+        session.epoch += 1                      # simulate a missed epoch bump
+        @test !PK.solve_multi!(session, dest, rhs)
+        @test session.last_reason == :epoch_mismatch
+        session.epoch -= 1
+        @test PK.factor!(session)               # re-establish FACTORED
+        @test PK.solve_multi!(session, dest, rhs)
+    end
+end
+
+# ---------------------------------------------------------------------------
 # harness
 # ---------------------------------------------------------------------------
 
@@ -476,6 +665,10 @@ end
     @test :certificate ∉ names(PK, all=true)
     ses = PK.PureKLUSession(Float64, 4)
     @test !PK.supports_inertia(ses)
+
+    # SparseMatrixCSC is 1-based in every Julia 1.x release
+    @test _SPARSE_COLPTR_BASE == 1
+    @test PK.validate_csc(sparse([1.0 0.0; 0.0 1.0]))
 
     # never loads LinearSolve/SciMLBase
     @test Base.get_extension(SDPX, :SDPXLinearSolveExt) === nothing
@@ -509,6 +702,13 @@ end
     _check_failure_ladder()
     _check_reduced_schur_shape()
     _check_metrics_and_time()
+    _check_csc_validation()
+    _check_solve_multi(Float64, MersenneTwister(0x5010); label="Float64")
+    _check_solve_multi(Float64x2, MersenneTwister(0x5012); label="Float64x2")
+    _check_solve_multi(Float64x4, MersenneTwister(0x5014); label="Float64x4")
+    setprecision(BigFloat, 256) do
+        _check_solve_multi(BigFloat, MersenneTwister(0x5018); label="BigFloat256")
+    end
 
     @info "PureKLU spike observed backward errors" results
 end

@@ -19,7 +19,11 @@
         Newton residual, both in the original scalar type;
       * stale-factor / stale-pattern rejection with a typed status;
       * singularity diagnosis (numerical rank / singular column), fill
-        metrics, and epoch bookkeeping for allocation experiments.
+        metrics, and epoch bookkeeping for allocation experiments;
+      * complete fail-closed CSC validation (`validate_csc`) before any
+        PureKLU/AMD call: square dimensions, 1-based `colptr`
+        (length/first/monotonic/terminal), row bounds, per-column
+        sortedness and duplicates, nnz consistency, finite values.
 
     Explicitly NOT provided (by design):
       * inertia. A general LU factor carries NO inertia information.
@@ -37,6 +41,10 @@
     `recover_expanded_direction`) and the five-equation residual is
     src/kkt/system.jl (`newton_residual!` / `max_newton_residual`).
     Signs are never rederived in this prototype.
+
+    CSC convention: `SparseMatrixCSC` is 1-based in every Julia 1.x
+    release (`colptr[1] == 1`, `colptr[end] == nnz + 1`); `validate_csc`
+    asserts that convention explicitly before any PureKLU call.
 =====================================================================#
 module SDPXPureKLUExt
 
@@ -54,7 +62,7 @@ export PureKLUSession,
     solve!, solve_transpose!, solve_multi!,
     is_analyzed, is_factored, is_singular, is_fresh,
     factor_residual, semantic_max_residual, supports_inertia,
-    fill_metrics, PUREKLU_VERSION,
+    fill_metrics, PUREKLU_VERSION, validate_csc,
     assemble_expanded_kkt_sparse, expanded_rhs_vector,
     recover_expanded_direction
 
@@ -80,8 +88,11 @@ end
 One reusable sparse-LU workspace. `matrix` holds the current exact
 operator values (the pattern is authoritative for refactor decisions);
 `factor` is the PureKLU factorization owning the symbolic analysis and
-the numeric factors. Epochs are not timers: they are the pattern and
-value identities that make stale-factor rejection fail closed.
+the numeric factors. Epochs are not timers: `epoch` is bumped whenever
+the operator changes relative to the factored state and on every
+successful factor, and `factor_epoch` records the epoch at which the
+current factor was established — the identity pair that makes
+stale-factor rejection fail closed.
 
 Field `inertia` is intentionally absent; see `supports_inertia`.
 """
@@ -100,6 +111,8 @@ mutable struct PureKLUSession{T<:AbstractFloat}
     nzoff::Int
     nblocks::Int
     maxblock::Int
+    epoch::UInt64
+    factor_epoch::UInt64
     last_reason::Symbol
 end
 
@@ -107,8 +120,59 @@ function PureKLUSession(::Type{T}, n::Int) where {T<:AbstractFloat}
     n >= 0 || throw(ArgumentError("session dimension must be nonnegative"))
     return PureKLUSession{T}(
         n, spzeros(T, n, n), nothing, PUREKLU_READY,
-        Int[], Int[], 0, 0, 0, 0, 0, 0, 0, 0, :none,
+        Int[], Int[], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, :none,
     )
+end
+
+# --- fail-closed CSC validation ------------------------------------------
+
+"""
+    validate_csc(A) -> Bool
+
+Complete fail-closed structural validation of a square `SparseMatrixCSC`
+before any PureKLU/AMD call. `SparseMatrixCSC` is 1-based in every Julia
+1.x release (`colptr[1] == 1`, `colptr[end] == nnz + 1`); the validator
+asserts that convention explicitly. Checks, in order:
+
+  * square dimensions (`m == n`);
+  * `colptr` length `n + 1`, first entry `1`, monotone non-decreasing,
+    terminal entry `length(rowval) + 1`;
+  * `length(rowval) == length(nzval)` (nnz consistency);
+  * every row index in `1:n`;
+  * per-column row indices strictly increasing (sorted, no duplicates);
+  * every `nzval` entry finite.
+
+Returns `false` (never throws) on the first violated invariant, so
+callers can fail closed before touching PureKLU. The session lifecycle
+(`set_operator!`, `analyze!`, `factor!`, `refactor!`, and every solve
+guard) runs this validator; a malformed matrix marks the session
+`PUREKLU_FAILED` with `last_reason = :invalid_csc` and no PureKLU call
+is made.
+"""
+function validate_csc(A::SparseMatrixCSC{T,Int}) where {T}
+    m, n = size(A)
+    m == n || return false
+    colptr = A.colptr
+    rowval = A.rowval
+    nzval = A.nzval
+    length(colptr) == n + 1 || return false
+    colptr[1] == 1 || return false
+    length(rowval) == length(nzval) || return false
+    colptr[end] == length(rowval) + 1 || return false
+    @inbounds for c in 1:n
+        lo = colptr[c]
+        hi = colptr[c + 1]
+        lo <= hi || return false
+        previous = 0
+        for p in lo:(hi - 1)
+            r = rowval[p]
+            1 <= r <= n || return false
+            r > previous || return false
+            previous = r
+            isfinite(nzval[p]) || return false
+        end
+    end
+    return true
 end
 
 # --- pattern / value identity -------------------------------------------
@@ -125,28 +189,51 @@ end
     return K.nzval == session.matrix.nzval
 end
 
+# --- overlap-safe ownership ---------------------------------------------
+
+"""
+    _overlaps(A, B) -> Bool
+
+True when `A` and `B` might share underlying storage (same data ids).
+Used for overlap-safe ownership: an in-place KLU solve must never write
+through a destination that aliases the RHS, the factor's `nzval`, or the
+session matrix storage.
+"""
+@inline _overlaps(A::AbstractArray, B::AbstractArray) = Base.mightalias(A, B)
+
 # --- operator update -----------------------------------------------------
 
 """
     set_operator!(session, A)
 
 Install `A` (square `SparseMatrixCSC{T,Int}`) as the current operator.
-If the installed matrix differs from the factored one (values and/or
-pattern), the session is marked `PUREKLU_STALE` and every solve is
-rejected until `factor!`/`refactor!` re-establishes a current factor.
+The matrix is validated fail-closed (`validate_csc`) before anything
+else; a malformed matrix marks the session `PUREKLU_FAILED` with
+`last_reason = :invalid_csc`. If the installed matrix differs from the
+factored one (values and/or pattern), the session is marked
+`PUREKLU_STALE` and every solve is rejected until
+`factor!`/`refactor!` re-establishes a current factor.
 """
 function set_operator!(session::PureKLUSession{T}, A::SparseMatrixCSC{T,Int}) where {T}
     size(A, 1) == size(A, 2) == session.n || throw(DimensionMismatch(
         "PureKLU session operator must be $(session.n)x$(session.n), got $(size(A))",
     ))
+    validate_csc(A) || begin
+        session.matrix = A
+        session.status = PUREKLU_FAILED
+        session.last_reason = :invalid_csc
+        return session
+    end
     session.matrix = A
     if session.factor !== nothing
         if !_pattern_matches(session, A)
             session.status = PUREKLU_STALE
             session.last_reason = :pattern_changed
+            session.epoch += 1
         elseif !_values_current(session)
             session.status = PUREKLU_STALE
             session.last_reason = :stale_values
+            session.epoch += 1
         end
     end
     return session
@@ -160,10 +247,16 @@ end
 Symbolic analysis only (BTF + per-block ordering). The pattern of the
 current operator is captured and reused by every later numeric
 factorization. Returns `false` on a PureKLU hard error (analyze is
-pattern-driven; it does not look at values).
+pattern-driven; it does not look at values) or on a fail-closed
+`validate_csc` rejection of the current operator.
 """
 function analyze!(session::PureKLUSession{T}) where {T}
     A = session.matrix
+    validate_csc(A) || begin
+        session.status = PUREKLU_FAILED
+        session.last_reason = :invalid_csc
+        return false
+    end
     K = KLUFactorization(A)
     try
         klu_analyze!(K)
@@ -192,9 +285,15 @@ unchanged; if the values changed since the last factor, the refactor
 path (`klu!`) is used automatically. On a numerical singularity the
 session enters `PUREKLU_SINGULAR` with `numerical_rank` /
 `singular_col` recorded, and `false` is returned (PureKLU never throws
-for `KLU_SINGULAR`). No inertia is ever reported.
+for `KLU_SINGULAR`). No inertia is ever reported. The current operator
+is validated fail-closed before any PureKLU call.
 """
 function factor!(session::PureKLUSession{T}) where {T}
+    validate_csc(session.matrix) || begin
+        session.status = PUREKLU_FAILED
+        session.last_reason = :invalid_csc
+        return false
+    end
     K = session.factor
     if K === nothing || !_pattern_matches(session, session.matrix)
         analyze!(session) || return false
@@ -206,7 +305,9 @@ function factor!(session::PureKLUSession{T}) where {T}
             klu_factor!(K)
         else
             # same pattern, new values: in-place refactor reuses symbolic
-            # analysis AND the preallocated numeric workspace.
+            # analysis AND the preallocated numeric workspace. `klu!`
+            # aliases the passed value vector, so a copy is passed to keep
+            # the session matrix storage independent (ownership rule).
             klu!(K, copy(session.matrix.nzval))
         end
     catch
@@ -220,6 +321,8 @@ function factor!(session::PureKLUSession{T}) where {T}
         session.lnz = K.lnz
         session.unz = K.unz
         session.nzoff = K.nzoff
+        session.epoch += 1
+        session.factor_epoch = session.epoch
         session.last_reason = :none
         return true
     end
@@ -237,13 +340,20 @@ end
 Install `A` and refactor its values in place. Requires the *exact same*
 sparsity pattern (and nonzero count) as the analyzed pattern; a pattern
 change returns `false` with `last_reason = :pattern_changed` — the
-caller must then re-analyze. This is the per-epoch Newton refactor path:
-symbolic analysis is fixed once, numeric values once per epoch.
+caller must then re-analyze. `A` is validated fail-closed first; a
+malformed matrix returns `false` with `last_reason = :invalid_csc`.
+This is the per-epoch Newton refactor path: symbolic analysis is fixed
+once, numeric values once per epoch.
 """
 function refactor!(session::PureKLUSession{T}, A::SparseMatrixCSC{T,Int}) where {T}
     size(A, 1) == size(A, 2) == session.n || throw(DimensionMismatch(
         "PureKLU refactor operator must be $(session.n)x$(session.n), got $(size(A))",
     ))
+    validate_csc(A) || begin
+        session.status = PUREKLU_FAILED
+        session.last_reason = :invalid_csc
+        return false
+    end
     session.factor === nothing && return factor!(set_operator!(session, A))
     if !_pattern_matches(session, A)
         session.status = PUREKLU_FAILED
@@ -270,6 +380,11 @@ function _solve_guard(session::PureKLUSession{T}, destination, rhs) where {T}
     end
     K = session.factor
     K === nothing && return false
+    validate_csc(session.matrix) || begin
+        session.status = PUREKLU_FAILED
+        session.last_reason = :invalid_csc
+        return false
+    end
     _values_current(session) || begin
         session.status = PUREKLU_STALE
         session.last_reason = :stale_values
@@ -278,6 +393,18 @@ function _solve_guard(session::PureKLUSession{T}, destination, rhs) where {T}
     _pattern_matches(session, session.matrix) || begin
         session.status = PUREKLU_STALE
         session.last_reason = :pattern_changed
+        return false
+    end
+    session.epoch == session.factor_epoch || begin
+        session.status = PUREKLU_STALE
+        session.last_reason = :epoch_mismatch
+        return false
+    end
+    if _overlaps(destination, rhs) ||
+       _overlaps(destination, K.nzval) ||
+       _overlaps(destination, session.matrix.nzval)
+        session.status = PUREKLU_FAILED
+        session.last_reason = :overlapping_storage
         return false
     end
     size(rhs, 1) == session.n || throw(DimensionMismatch(
@@ -365,6 +492,58 @@ function solve_transpose(session::PureKLUSession{T}, rhs::AbstractVector{T}) whe
     solve_transpose!(session, destination, rhs) ? destination : nothing
 end
 
+"""
+    solve_multi!(session, destination, rhs) -> Bool
+
+Multi-RHS in-place solve through the current factor with explicit
+fail-closed checks:
+
+  * signature: `destination` and `rhs` must both be vectors or both be
+    matrices, with exact eltype `T`;
+  * size: `size(destination) == size(rhs)` and `size(rhs, 1) == n`
+    (`DimensionMismatch` on violation, matching `solve!`);
+  * status: factor must be `PUREKLU_FACTORED` and current (values and
+    pattern unchanged);
+  * epoch: the factor must belong to the session's current epoch
+    (`epoch == factor_epoch`);
+  * overlap-safe ownership: `destination` must not alias `rhs`, the
+    factor's `nzval`, or the session matrix storage.
+
+On any check failure the session is marked and `false` is returned; no
+PureKLU call and no partial write to `destination` happens.
+"""
+function solve_multi!(
+    session::PureKLUSession{T}, destination::AbstractVecOrMat,
+    rhs::AbstractVecOrMat,
+) where {T<:AbstractFloat}
+    if (destination isa AbstractVector) != (rhs isa AbstractVector)
+        session.status = PUREKLU_FAILED
+        session.last_reason = :signature_mismatch
+        return false
+    end
+    if eltype(destination) !== T || eltype(rhs) !== T
+        session.status = PUREKLU_FAILED
+        session.last_reason = :eltype_mismatch
+        return false
+    end
+    _solve_guard(session, destination, rhs) || return false
+    K = session.factor
+    copyto!(destination, rhs)
+    try
+        solve!(K, destination)
+    catch
+        session.status = PUREKLU_FAILED
+        session.last_reason = :solve_failed
+        return false
+    end
+    all(isfinite, destination) || begin
+        session.status = PUREKLU_FAILED
+        session.last_reason = :nonfinite_solution
+        return false
+    end
+    return true
+end
+
 # --- status queries ------------------------------------------------------
 
 is_analyzed(session::PureKLUSession) =
@@ -375,7 +554,8 @@ is_fresh(session::PureKLUSession{T}) where {T} =
     session.status == PUREKLU_FACTORED &&
     session.factor !== nothing &&
     _values_current(session) &&
-    _pattern_matches(session, session.matrix)
+    _pattern_matches(session, session.matrix) &&
+    session.epoch == session.factor_epoch
 
 """
     supports_inertia(session) -> false
@@ -429,15 +609,17 @@ end
 
 Factor fill statistics from the numeric factor: `lnz`, `unz`, `nzoff`
 (L/U/off-diagonal nonzero counts), `nblocks`, `maxblock` (BTF block
-structure), and `status_code`. `status_code` is the PureKLU status
-(`0` = `KLU_OK`, `1` = `KLU_SINGULAR`); it is a factorization status,
-never an inertia claim.
+structure), `status_code`, and the session `epoch` / `factor_epoch`
+identity pair. `status_code` is the PureKLU status (`0` = `KLU_OK`,
+`1` = `KLU_SINGULAR`); it is a factorization status, never an inertia
+claim.
 """
 function fill_metrics(session::PureKLUSession)
     return (
         lnz=session.lnz, unz=session.unz, nzoff=session.nzoff,
         nblocks=session.nblocks, maxblock=session.maxblock,
         status_code=session.status_code,
+        epoch=session.epoch, factor_epoch=session.factor_epoch,
     )
 end
 
