@@ -88,22 +88,51 @@ does not materialise a product-cone matrix or allocate a block view.
     return state.h
 end
 
+@inline function _product_hsd_nonsymmetric_scaling(runtime, offset::Int)
+    @inbounds for block in runtime.exp
+        block.offset == offset && return block.scaling
+    end
+    @inbounds for block in runtime.power
+        block.offset == offset && return block.scaling
+    end
+    return nothing
+end
+
 function _product_hsd_expanded_linearization(
     state::ProductConeHSDState{T}, corrector_rhs::AbstractVector{T},
 ) where {T}
     session = state.expanded
     m = state.base.m
-    # Dense route: the full product operator and the corrector RHS live in the
-    # session-owned compact workspace and are refilled every call.
+    # Dense route: refill the block-diagonal product operator directly. Exp
+    # and Power blocks use their accepted fixed-size 3x3 contribution; other
+    # blocks retain the authoritative Theta action one local column at a time.
     operator = session.cone_operator
+    fill!(operator, zero(T))
+    copyto!(session.cone_corrector_rhs, corrector_rhs)
     basis = state.g_input
     image = state.g_output
-    @inbounds for column in 1:m
-        fill!(basis, zero(T))
-        basis[column] = one(T)
-        apply_Theta!(state.runtime, image, basis)
-        for row in 1:m
-            operator[row, column] = image[row]
+    for rows in session.cone_block_ranges
+        scaling = _product_hsd_nonsymmetric_scaling(
+            state.runtime, first(rows),
+        )
+        if scaling !== nothing
+            length(rows) == 3 || return nothing
+            reason = nonsymmetric_scaling_contribution3!(
+                view(operator, rows, rows),
+                view(session.cone_corrector_rhs, rows),
+                scaling,
+                view(corrector_rhs, rows),
+            )
+            reason === NS_SCALING_CONVERGED || return nothing
+            continue
+        end
+        @inbounds for column in rows
+            fill!(basis, zero(T))
+            basis[column] = one(T)
+            apply_Theta!(state.runtime, image, basis)
+            for row in rows
+                operator[row, column] = image[row]
+            end
         end
     end
     # Cone kernels promise a self-adjoint map. Independently materialized
@@ -129,7 +158,6 @@ function _product_hsd_expanded_linearization(
     # Assemble into the session-owned product linearization. The same
     # self-adjointness/finite-data checks that the LocalConeLinearization and
     # assemble_cone_linearization seam ran are preserved verbatim below.
-    copyto!(session.cone_corrector_rhs, corrector_rhs)
     issymmetric(operator) || throw(ArgumentError(
         "cone linearization must be self-adjoint",
     ))
@@ -161,15 +189,30 @@ function _product_hsd_sparse_linearization(
     basis = state.g_input
     image = state.g_output
     forcing = T(64) * eps(T)
+    copyto!(state.expanded.cone_corrector_rhs, corrector_rhs)
     for rows in ranges
         dimension = length(rows)
         operator = zeros(T, dimension, dimension)
-        @inbounds for local_column in 1:dimension
-            fill!(basis, zero(T))
-            basis[rows[local_column]] = one(T)
-            apply_Theta!(state.runtime, image, basis)
-            for local_row in 1:dimension
-                operator[local_row, local_column] = image[rows[local_row]]
+        scaling = _product_hsd_nonsymmetric_scaling(
+            state.runtime, first(rows),
+        )
+        if scaling !== nothing
+            dimension == 3 || return nothing
+            reason = nonsymmetric_scaling_contribution3!(
+                operator,
+                view(state.expanded.cone_corrector_rhs, rows),
+                scaling,
+                view(corrector_rhs, rows),
+            )
+            reason === NS_SCALING_CONVERGED || return nothing
+        else
+            @inbounds for local_column in 1:dimension
+                fill!(basis, zero(T))
+                basis[rows[local_column]] = one(T)
+                apply_Theta!(state.runtime, image, basis)
+                for local_row in 1:dimension
+                    operator[local_row, local_column] = image[rows[local_row]]
+                end
             end
         end
         @inbounds for column in 1:dimension
@@ -188,9 +231,6 @@ function _product_hsd_sparse_linearization(
         end
         push!(operators, operator)
     end
-    # The product corrector RHS is copied once into the session-owned compact
-    # workspace buffer shared with the dense expanded fallback route.
-    copyto!(state.expanded.cone_corrector_rhs, corrector_rhs)
     return BlockProductConeLinearization{T}(
         operators, state.expanded.cone_corrector_rhs, ranges,
     )
