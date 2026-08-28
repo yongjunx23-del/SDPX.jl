@@ -67,56 +67,49 @@ function HSDStepRecord{T}() where {T}
     return HSDStepRecord{T}(z, z, z, z, z, z, z, z, 0, 0, 0, 0, 0)
 end
 
-"""
-    HSDState{T, R<:AbstractFactorCache{T}}
+"""Route-owned storage for the dense bordered HSD implementation.
 
-The homogeneous self-dual state of a canonical conic program (frozen
-spec, docs/design/CANONICAL_FORM.md).
-
-Fields
-- `canonical::CanonicalConicProgram{T}` — the frozen canonical program
-  (carries `A`, `b`, `c`, the slack `cone_layout`, and the
-  reconstruction chain).
-- `A`, `b`, `c` — aliases of the canonical data for the hot path.
-- `n`, `m`, `nu` — variable count, slack count, and `ν` = barrier
-  degree of the canonical slack layout (the `μ` denominator).
-- iterate: `x`, `y`, `s`, `tau`, `kappa`.
-- directions: `dx`, `dy`, `ds`, `dtau`, `dkappa`.
-- residuals: `rP` (`A x + s − b·τ`), `rD` (`A' y + c·τ`), `rG`
-  (`−c'x − b'y + κ`).
-- cone scaling state (Nonnegative): `theta = s./y`, `g = y./s` (the LP
-  NT scaling point of the Schur `A' diag(g) A`), and `comp = s.*y`.
-- `mu`, `mu_aff`, `complementarity` — `μ` and the affine `μ`.
-- KKT: `driver :: HotRouteCache{T,R}`, the dense Schur `H` (`n×n`),
-  the RHS vector, and the bordered-solve scratch.
-- line-search trial buffers `xt`, `yt`, `st`, plus `Ax` / `b`-scaled
-  scratch.
+This object owns every setup reduction and factorization buffer.  Keeping it
+separate from `HSDState` is a Phase-5 ownership boundary: the mathematical
+iterate is route neutral, while a future sparse or provider route can replace
+this workspace without adding storage to the iterate itself.
 """
-mutable struct HSDState{T, R<:AbstractFactorCache{T}}
-    canonical::CanonicalConicProgram{T}
-    # aliases for hot-path access
-    A::SparseMatrixCSC{T,Int}
-    At::SparseMatrixCSC{T,Int}         # transposed sparse matrix for sparse Schur assembly
-    Ad::Matrix{T}                  # dense copy for the LP Schur kernel
-    # Setup-time orthogonal row-space reduction.  The public state remains in
-    # canonical/original coordinates (`n`, `x`, `dx`); the bordered Newton
-    # solve works in coordinates of the orthonormal basis `rank_basis = V_r`,
-    # with `Ar=A*V_r`, `cr=V_r'*c`, and maps back through `dx=V_r*dxr`.
+mutable struct BorderedHSDWorkspace{T,R<:AbstractFactorCache{T}}
+    At::SparseMatrixCSC{T,Int}
+    Ad::Matrix{T}
     Ar::SparseMatrixCSC{T,Int}
     Atr::SparseMatrixCSC{T,Int}
-    b::Vector{T}
-    c::Vector{T}
     cr::Vector{T}
-    n::Int
     nr::Int
-    m::Int
-    nu::Int
     orthant_only::Bool
     rank_basis::Matrix{T}
     rank_null_objective::Vector{T}
     rank_ambiguous::Bool
     rank_incompatible::Bool
     rank_ray::Vector{T}
+    rDr::Vector{T}
+    driver::HotRouteCache{T,R}
+    H::Matrix{T}
+    rhs::Vector{T}
+    q::Vector{T}
+    qr::Vector{T}
+    rvec::Vector{T}
+    u::Vector{T}
+    w::Vector{T}
+    dxr::Vector{T}
+end
+
+"""Route-neutral mathematical HSD iterate and residual state."""
+mutable struct HSDState{T, R<:AbstractFactorCache{T}}
+    canonical::CanonicalConicProgram{T}
+    # Mathematical embedding data.  Route copies/reductions live in `workspace`.
+    A::SparseMatrixCSC{T,Int}
+    b::Vector{T}
+    c::Vector{T}
+    n::Int
+    m::Int
+    nu::Int
+    workspace::BorderedHSDWorkspace{T,R}
     # iterate
     x::Vector{T}
     y::Vector{T}
@@ -129,49 +122,55 @@ mutable struct HSDState{T, R<:AbstractFactorCache{T}}
     ds::Vector{T}
     dtau::T
     dkappa::T
-    # affine (predictor) directions kept for the corrector cross-terms
+    # affine predictor
     dx_a::Vector{T}
     dy_a::Vector{T}
     ds_a::Vector{T}
     dtau_a::T
     dkappa_a::T
-    # residuals
+    # embedding residuals
     rP::Vector{T}
     rD::Vector{T}
-    rDr::Vector{T}                    # row-space-coordinate dual residual
     rG::T
-    # cone scaling + complementarity (Nonnegative path)
-    theta::Vector{T}               # s./y
-    g::Vector{T}                   # y./s  (NT scaling of the LP Schur)
-    comp::Vector{T}                # s .* y
+    # cone scaling and complementarity
+    theta::Vector{T}
+    g::Vector{T}
+    comp::Vector{T}
     mu::T
     mu_aff::T
-    complementarity::T             # s'y + τ·κ
-    # KKT route + Schur
-    driver::HotRouteCache{T, R}
-    H::Matrix{T}                   # nr×nr Schur M = Ar' diag(g) Ar
-    rhs::Vector{T}                 # nr-length bordered RHS (Eq1)
-    # bordered solve scratch
-    q::Vector{T}                   # full-n certificate scratch (A'·y)
-    qr::Vector{T}                  # nr×1 border column q = cr − Ar'diag(g)b
-    rvec::Vector{T}                # nr-vector form of the row r' = τ(cr' + b'diag(g)Ar)
-    u::Vector{T}                   # H u = q
-    w::Vector{T}                   # H w = rhs
-    dxr::Vector{T}                 # row-space-coordinate Newton direction
-    # trial / scratch buffers
+    complementarity::T
+    # trial and mathematical scratch
     xt::Vector{T}
     yt::Vector{T}
     st::Vector{T}
-    ax::Vector{T}                  # A·dx
-    e::Vector{T}                   # m-length scratch (A dx − b dτ + rP)
+    ax::Vector{T}
+    e::Vector{T}
     tau_t::T
     kappa_t::T
-    # trial-residual scratch (m + n) for the line-search residual guard
     rPt::Vector{T}
     rDt::Vector{T}
-    # iteration record
     record::HSDStepRecord{T}
     epoch::Int
+end
+
+# Source-compatible transition accessors.  The names intentionally are not
+# fields of HSDState; `fieldnames(HSDState)` therefore exposes the ownership
+# boundary while existing numerical kernels can migrate incrementally.
+const _HSD_BORDERED_PROPERTIES = (
+    :At, :Ad, :Ar, :Atr, :cr, :nr, :orthant_only, :rank_basis,
+    :rank_null_objective, :rank_ambiguous, :rank_incompatible, :rank_ray,
+    :rDr, :driver, :H, :rhs, :q, :qr, :rvec, :u, :w, :dxr,
+)
+@inline function Base.getproperty(state::HSDState, name::Symbol)
+    if name in _HSD_BORDERED_PROPERTIES
+        return getproperty(getfield(state, :workspace), name)
+    end
+    return getfield(state, name)
+end
+@inline function Base.propertynames(state::HSDState, private::Bool=false)
+    names = fieldnames(typeof(state))
+    return private ? (names..., _HSD_BORDERED_PROPERTIES...) :
+                     (names..., _HSD_BORDERED_PROPERTIES...)
 end
 
 # ---------------------------------------------------------------------------
@@ -367,33 +366,27 @@ function _hsd_state_from_reduction(
     nr = reduction.rank
     driver.n == nr || throw(DimensionMismatch(
         "route cache n=$(driver.n) does not match reduced matrix n=$nr"))
-    At = SparseArrays.sparse(transpose(A))
-    Ad = Matrix{T}(A)
     Ar = reduction.Ar
-    Atr = SparseArrays.sparse(transpose(Ar))
+    workspace = BorderedHSDWorkspace{T,R}(
+        SparseArrays.sparse(transpose(A)), Matrix{T}(A), Ar,
+        SparseArrays.sparse(transpose(Ar)), reduction.cr, nr, orthant_only,
+        reduction.V, reduction.cnull, reduction.ambiguous,
+        reduction.incompatible, reduction.ray, zeros(T, nr), driver,
+        Matrix{T}(undef, nr, nr), zeros(T, nr), zeros(T, n),
+        zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr),
+    )
     z = zero(T); o = one(T)
     return HSDState{T, R}(
-        canonical,
-        A, At, Ad, Ar, Atr, b, c, reduction.cr,
-        n, nr, m, nu, orthant_only,
-        reduction.V, reduction.cnull,
-        reduction.ambiguous, reduction.incompatible, reduction.ray,
+        canonical, A, b, c, n, m, nu, workspace,
         zeros(T, n), zeros(T, m), zeros(T, m), o, o,      # x, y, s, τ, κ
         zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx, dy, ds, dτ, dκ
-        zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # dx_a, dy_a, ds_a, dτ_a, dκ_a
-        zeros(T, m), zeros(T, n), zeros(T, nr), z,         # rP, rD, rDr, rG
+        zeros(T, n), zeros(T, m), zeros(T, m), z, z,      # affine directions
+        zeros(T, m), zeros(T, n), z,                      # rP, rD, rG
         zeros(T, m), zeros(T, m), zeros(T, m),             # theta, g, comp
-        z, z, z,                                          # mu, mu_aff, complementarity
-        driver,
-        Matrix{T}(undef, nr, nr), zeros(T, nr),            # H, rhs
-        zeros(T, n), zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr),  # q, qr, r, u, w
-        zeros(T, nr),                                      # dxr
-        zeros(T, n), zeros(T, m), zeros(T, m), zeros(T, m),  # xt, yt, st, ax
-        zeros(T, m),                                       # e
-        z, z,                                              # tau_t, kappa_t
-        zeros(T, m), zeros(T, n),                          # rPt, rDt
-        HSDStepRecord{T}(),
-        0,
+        z, z, z,                                           # mu, mu_aff, complementarity
+        zeros(T, n), zeros(T, m), zeros(T, m), zeros(T, m),
+        zeros(T, m), z, z, zeros(T, m), zeros(T, n),       # trial/scratch
+        HSDStepRecord{T}(), 0,
     )
 end
 
