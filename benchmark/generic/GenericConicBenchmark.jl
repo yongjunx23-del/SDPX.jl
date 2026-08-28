@@ -7,6 +7,8 @@ using SDPX
 
 export AbstractGenericProblem, BenchmarkSpec, BenchmarkResult
 export build, inventory, run_one, run_tier, validate_result, main
+export MPSData, SDPAData, CBFData, read_mps, read_sdpa, read_cbf
+export ExternalBenchmark, external_inventory, read_external, reference_matches
 
 abstract type AbstractGenericProblem end
 
@@ -45,6 +47,11 @@ end
 function build end
 const _SPECS = BenchmarkSpec[]
 _register!(spec::BenchmarkSpec) = (push!(_SPECS, spec); spec)
+
+include("src/mps.jl")
+include("src/sdpa.jl")
+include("src/cbf.jl")
+include("src/external.jl")
 
 include("lp.jl")
 include("socp.jl")
