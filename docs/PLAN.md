@@ -1133,7 +1133,7 @@ Provider：
 StandardLAProvider
 MultiFloatLAProvider
 BigFloatLAProvider
-LinearSolveAdapter
+LinearSolveAdapter（临时兼容面，Phase 7 closeout 退役候选）
 ```
 
 `LinearSolve` 只能适配 factor/solve，不应接管：
@@ -1142,6 +1142,18 @@ LinearSolveAdapter
 * inertia policy；
 * certificate；
 * HSD recovery。
+
+### 依赖精简门（Phase 7 closeout）
+
+依赖退役不能与数值修改混合，必须单独提交并运行 provider/MOI/quick gate：
+
+1. 删除未使用的 test extra `Downloads`；
+2. `SHA` 保留为 runtime dependency，但删除 `[extras]`/test target 中的重复声明；
+3. MFLA v0.3 / BFLA v0.2 最新适配门通过后，删除不进入生产热路径且历史 A/B 首次分解显著更慢的 `LinearSolve` / `SciMLBase` / `SDPXLinearSolveExt`；
+4. MFLA/BFLA 缺失路径已明确 fail closed 后，评估并删除仅作 reference-role 的 `GenericLinearAlgebra` weakdep/extension；
+5. 保留 `MultiFloats`、`MultiFloatLinearAlgebra`、`BigFloatLinearAlgebra` 与 macOS 可选的 `AppleAccelerate`；
+6. 保留 `JLD2`、`Serialization`、`SHA`，因为长时间集群任务需要 checkpoint、结果导出和 prepared-model 指纹；
+7. weakdep 删除的目标是减少安装树、API 和维护表面，不得冒充数值热路径加速。
 
 ### MultiFloat 优化顺序
 
@@ -1368,6 +1380,13 @@ v1 只需要可靠的 one-shot `copy_to`：
 * 一个 public success promotion 点；
 * 一套 NT/Jordan production kernels；
 * 一套 KKT factor session。
+
+### Legacy 依赖同步退役
+
+* 删除 `src/solver/interior_point.jl` 后同步删除仅供其迭代表格使用的 `Printf` runtime dependency；
+* 删除的是旧 `@printf` 文本日志，不是结果能力；公开结果继续通过 `Result`、`status(result)`、`value(result, variable)`、`primal_objective(result)`、`certificate(result)` 与 `diagnostics(result)` 查询；
+* `Base.show(result)`、结构化 benchmark 输出、MOI/JuMP 状态和证书接口必须在删除后继续通过测试；
+* 如果需要实时迭代进度，应由统一 HSD diagnostics/callback 或 Julia logging 接口提供，不得为显示重新保留 legacy solver。
 
 **周期**
 
