@@ -272,6 +272,104 @@ function _product_hsd_expanded_direction!(
     )
 end
 
+function _product_hsd_sparse_solve_shift!(
+    state::ProductConeHSDState{T}, cone, scalar_rhs::T;
+    factor_operator::Bool,
+) where {T}
+    session = state.sparse_schur
+    session === nothing && return false
+    system = _product_hsd_expanded_system(state, cone, scalar_rhs)
+    if factor_operator
+        assemble_sparse_schur_operator!(session, system) || return false
+        assemble_sparse_schur_rhs!(session, system) || return false
+        factor_sparse_schur!(session) || return false
+    else
+        assemble_sparse_schur_rhs!(session, system) || return false
+    end
+    solution = session.solution_vector
+    solve_sparse_schur!(session, solution) || return false
+    direction = try
+        recover_reduced_direction(system, solution)
+    catch exception
+        exception isa InterruptException && rethrow()
+        session.status = SPARSE_SCHUR_SOLVE_FAILED
+        session.last_reason = :sparse_recovery_failed
+        return false
+    end
+    base = state.base
+    copyto!(base.dx, direction.dx)
+    copyto!(base.dy, direction.dy)
+    copyto!(base.ds, direction.ds)
+    base.dtau = direction.dtau
+    base.dkappa = direction.dkappa
+    if !_hsd_direction_finite(base)
+        session.status = SPARSE_SCHUR_SOLVE_FAILED
+        session.last_reason = :sparse_direction_nonfinite
+        return false
+    end
+    semantic_residual = NewtonResidual(system)
+    newton_residual!(semantic_residual, system, direction)
+    scale = max(
+        norm(session.rhs, Inf),
+        _schur_operator_scale(session.schur) * norm(solution, Inf), one(T),
+    )
+    if max_newton_residual(semantic_residual) > T(512) * eps(T) * scale
+        session.status = SPARSE_SCHUR_REFINEMENT_STAGNATED
+        session.last_reason = :sparse_semantic_residual_failed
+        return false
+    end
+    session.status = SPARSE_SCHUR_UNREGULARIZED_CERTIFIED
+    session.last_reason = :none
+    return true
+end
+
+"""Predictor/corrector directions sharing one sparse reduced-Schur factor."""
+function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
+    state.sparse_schur === nothing && return false
+    base = state.base
+    affine_shift!(state.runtime, state.h, base.s, base.y)
+    predictor_scalar = -base.tau * base.kappa
+    cone = _product_hsd_expanded_linearization(state, state.h)
+    cone === nothing && begin
+        state.sparse_schur.status = SPARSE_SCHUR_FACTOR_FAILED
+        state.sparse_schur.last_reason = :sparse_cone_linearization_failed
+        return false
+    end
+    _product_hsd_sparse_solve_shift!(
+        state, cone, predictor_scalar; factor_operator=true,
+    ) || return false
+    copyto!(base.dx_a, base.dx)
+    copyto!(base.dy_a, base.dy)
+    copyto!(base.ds_a, base.ds)
+    base.dtau_a = base.dtau
+    base.dkappa_a = base.dkappa
+
+    alpha_aff = _product_hsd_boundary_alpha!(state)
+    (isfinite(alpha_aff) && alpha_aff > zero(T)) || begin
+        state.sparse_schur.status = SPARSE_SCHUR_REFINEMENT_STAGNATED
+        state.sparse_schur.last_reason = :sparse_affine_boundary_failed
+        return false
+    end
+    mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
+    (isfinite(mu_aff) && mu_aff >= zero(T)) || begin
+        state.sparse_schur.status = SPARSE_SCHUR_REFINEMENT_STAGNATED
+        state.sparse_schur.last_reason = :sparse_affine_mu_failed
+        return false
+    end
+    ratio = base.mu_aff / base.mu
+    sigma = min(one(T), ratio * ratio * ratio)
+    sigma_mu = sigma * base.mu
+    _product_hsd_corrector_shift!(state, sigma_mu)
+    corrector_scalar = sigma_mu - base.tau * base.kappa -
+                       base.dtau_a * base.dkappa_a
+    corrector_cone = ProductConeLinearization{T}(
+        cone.operator, copy(state.h), cone.block_ranges,
+    )
+    return _product_hsd_sparse_solve_shift!(
+        state, corrector_cone, corrector_scalar; factor_operator=false,
+    )
+end
+
 """Predictor/corrector directions sharing one pivoted bordered factor."""
 @inline function _product_hsd_direction!(
     state::ProductConeHSDState{T},

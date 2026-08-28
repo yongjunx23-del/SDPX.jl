@@ -446,7 +446,8 @@ function product_hsd_solve!(
     end
 
     selected_initialization = initialization === :auto ?
-        (state.kkt_route === :expanded ? :kkt : :identity) : initialization
+        (state.kkt_route in (:expanded, :sparse_schur) ? :kkt : :identity) :
+        initialization
     if selected_initialization === :kkt
         start_report = kkt_derived_start!(state)
         start_report.ok || return _product_hsd_termination_or_dual_ray!(
