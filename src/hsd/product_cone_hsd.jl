@@ -211,7 +211,15 @@ function _product_cone_hsd_state(
         offsets[block_index] = block.offset
     end
     ns_schur = NonsymmetricSchur3Workspace(base.Ar, offsets)
-    coupled = NonsymmetricCoupledWorkspace(base.Ar, base.nr, offsets)
+    # GPTPro I2: the cone traits (runtime Exp/Power block lists) are fixed at
+    # setup, so a model without nonsymmetric blocks is known never to execute
+    # the hybrid coupled Newton route.  Pure LP/SOC/PSD models keep `coupled`
+    # as typed `nothing` instead of an eagerly allocated dense session: the
+    # matrix, factor-coordinate and LPLU caches of NonsymmetricCoupledWorkspace
+    # are constructed only when Exp/Power blocks exist, and always before the
+    # hot loop (never on first use inside an epoch).
+    coupled = block_count > 0 ?
+        NonsymmetricCoupledWorkspace(base.Ar, base.nr, offsets) : nothing
     # The symmetric product route intentionally owns a pivoted full-border
     # LPLU. `base.driver` remains part of the generic HSD storage contract but
     # is never factored by this route, even when a caller supplied it.
@@ -293,7 +301,7 @@ end
     state.kkt_route === :sparse_schur &&
         return state.sparse_schur === nothing ? 0 :
                state.sparse_schur.numeric_factor_count
-    if state.coupled.nonsymmetric_dimension > 0
+    if state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
         return factor_epoch(state.coupled.cache)
     end
     return kkt_factor_count(state.symmetric_bordered.driver)
@@ -305,8 +313,9 @@ end
     state.kkt_route === :sparse_schur &&
         return state.sparse_schur === nothing ? 0 :
                state.sparse_schur.receipt_build_count
-    state.coupled.nonsymmetric_dimension > 0 &&
+    if state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
         return state.coupled.receipt_build_count
+    end
     return state.symmetric_bordered.receipt_build_count
 end
 
@@ -315,8 +324,9 @@ end
         state.expanded.factor_receipt
     state.kkt_route === :sparse_schur && return
         state.sparse_schur === nothing ? nothing : state.sparse_schur.factor_receipt
-    state.coupled.nonsymmetric_dimension > 0 &&
+    if state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
         return state.coupled.factor_receipt
+    end
     return state.symmetric_bordered.factor_receipt
 end
 
@@ -1090,7 +1100,7 @@ end
 @inline function _product_hsd_has_nonsymmetric(
     state::ProductConeHSDState,
 )
-    return state.coupled.nonsymmetric_dimension > 0
+    return state.coupled !== nothing && state.coupled.nonsymmetric_dimension > 0
 end
 
 """Assemble the frozen original-Theta hybrid coupled matrix.
