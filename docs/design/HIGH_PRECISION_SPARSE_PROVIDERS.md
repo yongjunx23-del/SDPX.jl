@@ -7,17 +7,21 @@ Status: accepted design direction; implementation and performance promotion rema
 Do not add sparse symbolic analysis or sparse LU/LDLT implementations to
 MultiFloatLinearAlgebra or BigFloatLinearAlgebra. Those libraries remain
 independent dense/fixed-width numerical providers. SDPX should consume existing
-pure-Julia sparse packages through narrow optional provider extensions:
+one narrow optional sparse-provider extension:
 
-| KKT structure | First candidate | Role |
+| KKT structure | Provider | Role |
 |---|---|---|
 | symmetric quasi-definite expanded KKT | QDLDL.jl | generic sparse LDLᵀ, inertia/sign regularization, value update + refactor |
-| general/nonsymmetric reduced Schur | PureKLU.jl | generic sparse LU, BTF/AMD, symbolic/numeric phases and value refactor |
-| symmetric no-pivot reference | LDLFactorizations.jl | validation/benchmark reference, not first production fallback |
+| Float64 general/nonsymmetric reduced Schur | Julia SparseArrays/UMFPACK | existing route; no new package |
+| high-precision general/nonsymmetric reduced Schur | unsupported | fail closed or use the explicit dense-memory gate |
+| symmetric no-pivot reference | LDLFactorizations.jl | benchmark-only reference, not a runtime dependency |
 | budget-approved dense fallback | MFLA/BFLA | dense factorization only |
 
-Adapters must call these packages directly; they must not reintroduce
-LinearSolve/SciMLBase.
+QDLDL is the sole proposed new runtime/weak dependency. PureKLU was evaluated
+and proved generic-scalar compatible, but is not retained because supporting a
+second general-LU provider would duplicate routing and would not provide the
+inertia contract required by the target expanded KKT. The QDLDL adapter must
+call QDLDL directly and must not reintroduce LinearSolve/SciMLBase.
 
 ## Evidence
 
@@ -45,12 +49,12 @@ performance.
 ## Production routing
 
 ```text
-Float64 sparse reduced Schur       -> SuiteSparse/UMFPACK
-BigFloat/MultiFloat quasi-definite -> QDLDL provider
-BigFloat/MultiFloat general LU     -> PureKLU provider
-factor/provider rejection          -> explicit memory-budget test
-budget permits dense               -> BFLA/MFLA dense fallback
-budget rejects dense               -> typed InsufficientPrecision/factor failure
+Float64 sparse reduced Schur             -> SuiteSparse/UMFPACK
+all-precision symmetric expanded KKT     -> QDLDL provider
+high-precision nonsymmetric reduced path -> not offered
+QDLDL/provider rejection                 -> explicit memory-budget test
+budget permits dense                     -> BFLA/MFLA dense fallback
+budget rejects dense                     -> typed InsufficientPrecision/factor failure
 ```
 
 No route may silently convert values to Float64. Every accepted direction must
@@ -66,7 +70,7 @@ configured memory budget admits the full factor and refinement workspaces.
 
 ## Promotion gates
 
-Before either package becomes an SDPX weak dependency/provider:
+Before QDLDL becomes an SDPX weak dependency/provider:
 
 1. manufactured Newton systems across Float64x2, Float64x4, BigFloat256;
 2. symbolic pattern fixed once and numeric refactor once per epoch;

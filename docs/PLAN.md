@@ -1085,13 +1085,14 @@ SparseExpandedQuasidefiniteLDLT
 
 ### 高精度 sparse provider 路线
 
-高精度稀疏分解不进入 MFLA/BFLA 内部，也不在 SDPX 重写：
+高精度稀疏分解不进入 MFLA/BFLA 内部，也不在 SDPX 重写。为避免功能重复，只新增一个候选 provider：
 
-* symmetric quasi-definite expanded KKT：优先评估纯 Julia `QDLDL.jl`；
-* general/nonsymmetric reduced Schur：优先评估纯 Julia `PureKLU.jl`；
-* `LDLFactorizations.jl` 仅作为 generic no-pivot reference/benchmark，未经过鲁棒性门不得成为首选生产 fallback；
-* MFLA/BFLA 只承担显式内存预算许可后的 dense fallback；
-* provider adapter 直接调用上述包，不重新引入 `LinearSolve`/`SciMLBase`；
+* all-precision symmetric quasi-definite expanded KKT：评估纯 Julia `QDLDL.jl`，它是唯一拟新增的 sparse weakdep；
+* Float64 general/nonsymmetric reduced Schur：继续使用 Julia `SparseArrays`/UMFPACK，不新增包；
+* 不提供 high-precision nonsymmetric reduced-Schur 路线；该请求必须 fail closed 或通过显式内存预算转 dense MFLA/BFLA；
+* `PureKLU.jl` 已验证 generic scalar 可用，但因不提供 inertia 且会形成第二套 sparse 路由，不作为运行时依赖；
+* `LDLFactorizations.jl` 仅作为 generic no-pivot benchmark reference，不作为运行时依赖；
+* QDLDL adapter 直接调用包，不重新引入 `LinearSolve`/`SciMLBase`；
 * BigFloat、Float64x2、Float64x4 必须保持原 scalar type，并通过 unregularized Newton residual 与原坐标证书。
 
 完整决策、实测兼容性和 promotion gates：
