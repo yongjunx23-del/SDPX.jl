@@ -1,6 +1,7 @@
 using Test
 include(joinpath(@__DIR__, "GenericConicBenchmark.jl"))
 using .GenericConicBenchmark
+include(joinpath(@__DIR__, "test_parsers.jl"))
 
 @testset "generic conic benchmark inventory and readers" begin
     small = inventory(tier=:small)
@@ -15,10 +16,16 @@ using .GenericConicBenchmark
 
     if isfile(joinpath(@__DIR__, "data", "netlib", "afiro.mps"))
         @test read_external(netlib) isa MPSData
+        @test read_external(only(filter(spec -> spec.id === :netlib_adlittle,
+            external_inventory()))) isa MPSData
         @test read_external(only(filter(spec -> spec.id === :sdplib_control1,
             external_inventory()))) isa SDPAData
-        @test read_external(only(filter(spec -> spec.id === :cblib_expdesign_reader,
-            external_inventory()))) isa CBFData
+        @test read_external(only(filter(spec -> spec.id === :sdplib_mcp100,
+            external_inventory()))) isa SDPAData
+        # The checksum-pinned CBLIB fixture contains INT declarations. The
+        # continuous reader must reject it rather than silently relax the MIP.
+        @test_throws ArgumentError read_external(only(filter(
+            spec -> spec.id === :cblib_expdesign_reader, external_inventory())))
     end
 end
 

@@ -44,9 +44,15 @@ The current manifest contains:
 | CBF reader fixture | `5b0aadaf1c121f6e32ca1c6d33d9f3d51aa8dfedcfed660ecb1cfc02e7aff0bf` | reader only (contains integer declarations) |
 
 `src/mps.jl`, `src/sdpa.jl`, and `src/cbf.jl` are dependency-free native
-readers. Missing data produces an instruction naming the fetch script. The MPS
-reader also lowers the curated standard-form continuous subset through SDPX's
-public `Model` API. External reference values live in `src/external.jl`; use
+readers. Missing data produces an instruction naming the fetch script. They are
+fail-closed format boundaries: MPS integer markers/bounds, RANGES, and unknown
+bound/extension sections are rejected; CBF accepts exactly version 2 with exact
+`MIN`/`MAX` sense and rejects `INT`; SDPA checks every dimension, index,
+upper-triangle coordinate, diagonal-block coordinate, duplicate, and finite
+numeric value. The checksum-pinned CBLIB fixture intentionally exercises the
+`INT` rejection and is never relaxed into a continuous model. The MPS reader
+also lowers the curated standard-form continuous subset through SDPX's public
+`Model` API. External reference values live in `src/external.jl`; use
 `reference_matches`, which applies a scaled absolute/relative check instead of
 a self-recorded baseline.
 
