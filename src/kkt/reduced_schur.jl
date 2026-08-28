@@ -63,6 +63,7 @@ mutable struct SparseSchurSession{T<:AbstractFloat}
     residual_vector::Vector{T}
     correction_vector::Vector{T}
     block_inverse::Matrix{T}
+    block_augmented::Matrix{T}
     rhs_delta::Vector{T}
     hinv_b::Vector{T}
     hinv_delta::Vector{T}
@@ -99,7 +100,8 @@ function SparseSchurSession(::Type{T}, n::Int, m::Int) where {T<:AbstractFloat}
         zero(UInt64), false, nothing, nothing,
         zeros(T, dimension), zeros(T, dimension), zeros(T, dimension),
         zeros(T, dimension),
-        zeros(T, m, m), zeros(T, m), zeros(T, m), zeros(T, m),
+        zeros(T, m, m), zeros(T, 0, 0),
+        zeros(T, m), zeros(T, m), zeros(T, m),
         zeros(T, m), zeros(T, n), zeros(T, n), Int[], Int[], Int[],
         0, 0, 0, 0, 0,
         zero(T), zero(T), sqrt(eps(T)),
@@ -146,13 +148,19 @@ end
 """Invert one diagonal cone block into caller-owned storage."""
 function _invert_cone_block(
     operator_block::AbstractMatrix{T}, inverse::AbstractMatrix{T},
+    augmented_storage::AbstractMatrix{T},
 ) where {T<:AbstractFloat}
     dimension = size(operator_block, 1)
     size(inverse) == (dimension, dimension) || throw(DimensionMismatch(
         "cone block inverse dimension mismatch",
     ))
+    size(augmented_storage, 1) >= dimension &&
+    size(augmented_storage, 2) >= 2 * dimension || throw(DimensionMismatch(
+        "cone block augmented workspace is too small",
+    ))
     # This setup-sized augmented panel is local to one cone block, never m×m G.
-    augmented = zeros(T, dimension, 2 * dimension)
+    augmented = @view augmented_storage[1:dimension, 1:(2 * dimension)]
+    fill!(augmented, zero(T))
     @inbounds for j in 1:dimension, i in 1:dimension
         augmented[i, j] = operator_block[i, j]
     end
@@ -193,6 +201,15 @@ function _invert_cone_block(
         inverse[i, j] = augmented[i, dimension + j]
     end
     return true
+end
+
+function _invert_cone_block(
+    operator_block::AbstractMatrix{T}, inverse::AbstractMatrix{T},
+) where {T<:AbstractFloat}
+    dimension = size(operator_block, 1)
+    return _invert_cone_block(
+        operator_block, inverse, zeros(T, dimension, 2 * dimension),
+    )
 end
 
 function _sparse_schur_active_columns!(
@@ -250,6 +267,11 @@ function _setup_sparse_schur_pattern!(
             session.pattern_lookup[(session.schur.rowval[slot], column)] = slot
         end
     end
+    maximum_block_dimension = isempty(system.cone.block_ranges) ? 0 :
+        maximum(length, system.cone.block_ranges)
+    session.block_augmented = zeros(
+        T, maximum_block_dimension, 2 * maximum_block_dimension,
+    )
     session.pattern_signature = _sparse_schur_source_signature(system)
     session.structural_assembly_count = 1
     return true
@@ -304,7 +326,9 @@ function assemble_sparse_schur_operator!(
         dimension = length(block)
         block_H = @view H[block, block]
         block_inverse = @view session.block_inverse[block, block]
-        _invert_cone_block(block_H, block_inverse) || begin
+        _invert_cone_block(
+            block_H, block_inverse, session.block_augmented,
+        ) || begin
             session.status = SPARSE_SCHUR_FACTOR_FAILED
             session.last_reason = :cone_block_singular
             return false
