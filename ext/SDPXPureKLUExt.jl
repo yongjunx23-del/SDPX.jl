@@ -430,19 +430,20 @@ function solve!(
 ) where {T<:AbstractFloat}
     _solve_guard(session, destination, rhs) || return false
     K = session.factor
-    copyto!(destination, rhs)
+    work = rhs isa AbstractVector ? Vector{T}(rhs) : Matrix{T}(rhs)
     try
-        solve!(K, destination)
+        solve!(K, work)
     catch
         session.status = PUREKLU_FAILED
         session.last_reason = :solve_failed
         return false
     end
-    all(isfinite, destination) || begin
+    all(isfinite, work) || begin
         session.status = PUREKLU_FAILED
         session.last_reason = :nonfinite_solution
         return false
     end
+    copyto!(destination, work)
     return true
 end
 
@@ -470,19 +471,20 @@ function solve_transpose!(
 ) where {T<:AbstractFloat}
     _solve_guard(session, destination, rhs) || return false
     K = session.factor
-    copyto!(destination, rhs)
+    work = rhs isa AbstractVector ? Vector{T}(rhs) : Matrix{T}(rhs)
     try
-        solve!(transpose(K), destination)
+        solve!(transpose(K), work)
     catch
         session.status = PUREKLU_FAILED
         session.last_reason = :transpose_solve_failed
         return false
     end
-    all(isfinite, destination) || begin
+    all(isfinite, work) || begin
         session.status = PUREKLU_FAILED
         session.last_reason = :nonfinite_solution
         return false
     end
+    copyto!(destination, work)
     return true
 end
 

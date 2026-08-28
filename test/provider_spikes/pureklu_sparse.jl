@@ -208,6 +208,24 @@ function _check_exact_expanded_route(::Type{T}, rng; label::String) where {T<:Ab
         @test eltype(yt) === T
         @test _kkt_backward_error(transpose(K), yt, rhs) <= T(256) * eps(T)
 
+        # All exported solve paths use an owned provider buffer before writing
+        # arbitrary destination views; provider layout rejection cannot cause
+        # partial destination writes.
+        vector_parent = zeros(T, 2 * dimension)
+        vector_view = @view vector_parent[1:2:end]
+        @test stride(vector_view, 1) != 1
+        @test PK.solve!(session, vector_view, rhs)
+        @test vector_view ≈ x atol=T(1024) * eps(T)
+        panel_parent = zeros(T, 2 * dimension, 2)
+        panel_view = @view panel_parent[1:2:end, :]
+        @test stride(panel_view, 1) != 1
+        @test PK.solve!(session, panel_view, rhs_panel)
+        @test panel_view ≈ x_panel atol=T(1024) * eps(T)
+        transpose_parent = zeros(T, 2 * dimension)
+        transpose_view = @view transpose_parent[1:2:end]
+        @test PK.solve_transpose!(session, transpose_view, rhs)
+        @test transpose_view ≈ yt atol=T(1024) * eps(T)
+
         # --- refactor reuse (same pattern, new values) --------------------
         A2 = _perturbed(T, rng, K, 1e-6)
         @test PK.refactor!(session, A2)
