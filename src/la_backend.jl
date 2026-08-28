@@ -1587,6 +1587,18 @@ la_mul_owned!(backend::BFLALABackend, C, A, B, α, β) =
 la_mul_owned!(backend::BFLALABackend, C, A, B) =
     la_bfla_mul_owned!(backend.provider, C, A, B)
 
+# la_gemm! is the level-3 matmul alias of the seam (provider operation :mul).
+# PSD panelization consumes it for batched congruence transforms so panel
+# kernels never depend on a provider-specific gemm name; the forwarder keeps
+# the owned/immutable-scalar routing of la_mul! exact for every backend.
+la_gemm!(backend::AbstractLABackend, C, A, B, α, β) =
+    la_mul!(backend, C, A, B, α, β)
+la_gemm!(backend::AbstractLABackend, C, A, B) = la_mul!(backend, C, A, B)
+la_gemm_owned!(backend::AbstractLABackend, C, A, B, α, β) =
+    la_mul_owned!(backend, C, A, B, α, β)
+la_gemm_owned!(backend::AbstractLABackend, C, A, B) =
+    la_mul_owned!(backend, C, A, B)
+
 """
 Form `P'P` into the authoritative lower triangle of `S`.
 

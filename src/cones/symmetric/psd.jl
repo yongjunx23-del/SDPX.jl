@@ -227,6 +227,40 @@ function _l_inverse!(W::AbstractMatrix{T}, L::AbstractMatrix, n::Int) where {T}
     return W
 end
 
+"""
+    psd_congruence_factors!(LX, MY, X, Y)
+
+Lower Cholesky factors `X = LX*LX'`, `Y = MY*MY'` used by the PSD Schur panel
+congruence, computed through the same fail-closed unpivoted route as the NT
+construction (`_chol_unpivoted!`).  This is the scalar/reference factor entry
+point: the panelized kernels route the identical factors through the LA
+provider seam (`la_chol!`) instead, and both sides of the parity comparison
+share the same factor semantics.
+"""
+function psd_congruence_factors!(
+    LX::AbstractMatrix{T},
+    MY::AbstractMatrix{T},
+    X::AbstractMatrix{T},
+    Y::AbstractMatrix{T},
+) where {T}
+    n = size(X, 1)
+    size(X, 2) == n || throw(DimensionMismatch(
+        "PSD congruence factor source X must be square",
+    ))
+    size(Y) == (n, n) || throw(DimensionMismatch(
+        "PSD congruence factor source Y must be n×n",
+    ))
+    size(LX) == (n, n) || throw(DimensionMismatch(
+        "PSD congruence factor buffer LX must be n×n",
+    ))
+    size(MY) == (n, n) || throw(DimensionMismatch(
+        "PSD congruence factor buffer MY must be n×n",
+    ))
+    _chol_unpivoted!(LX, X, n)
+    _chol_unpivoted!(MY, Y, n)
+    return LX, MY
+end
+
 """Symmetrize in place: `A = (A + A')/2`. Roundoff in chained triangular
 congruences need not be bitwise symmetric; downstream eigensolvers and gates
 require one authoritative symmetric matrix."""

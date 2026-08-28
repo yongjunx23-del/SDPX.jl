@@ -72,6 +72,7 @@ include("kkt/block_incidence.jl")
 include("kkt/factor_receipt.jl")
 include("kkt/expanded_quasidefinite.jl")
 include("kkt/reduced_schur.jl")
+include("kkt/psd_panels.jl")
 include("step_hot.jl")
 # HSD state, Nonnegative (LP) HSD predictor/corrector, and certificate
 # verification. Included here (after the IR, factor-cache routes and the KKT
