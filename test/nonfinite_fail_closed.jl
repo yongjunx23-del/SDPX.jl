@@ -268,6 +268,11 @@ end
         copyto!(st.x, [0.0]); copyto!(st.s, [0.0, 0.0])
         copyto!(st.y, [0.5, 0.5]); st.tau = 0.0; st.kappa = 1.0
         @test SDPX.verify_primal_infeasibility!(infeasible, st, yo)
+        for invalid_tolerance in (NaN, Inf, -Inf, -1.0)
+            @test !SDPX.verify_primal_infeasibility!(
+                infeasible, st, yo; tol=invalid_tolerance,
+            )
+        end
     end
 
     @testset "verify_dual_infeasibility! rejects non-finite rays" begin
@@ -295,6 +300,24 @@ end
         copyto!(st.x, [-1.0]); copyto!(st.s, [1.0, 1.0])
         copyto!(st.y, [1.0, 1.0]); st.tau = 0.0; st.kappa = 1.0
         @test SDPX.verify_dual_infeasibility!(unbounded, st, xo1, so2)
+        for invalid_tolerance in (NaN, Inf, -Inf, -1.0)
+            @test !SDPX.verify_dual_infeasibility!(
+                unbounded, st, xo1, so2; tol=invalid_tolerance,
+            )
+        end
+    end
+
+    @testset "overflowed HSD data norm cannot hide a residual" begin
+        forged = SDPX.HSDState(canon)
+        fill!(forged.x, 0.0); fill!(forged.s, 0.0); fill!(forged.y, 0.0)
+        forged.tau = 1.0; forged.kappa = 0.0
+        forged.Ad[1, 1] = floatmax(Float64)
+        forged.Ad[1, 2] = floatmax(Float64)
+        SDPX.hsd_residual!(forged)
+        @test all(isfinite, forged.rP)
+        @test maximum(abs, forged.rP) > 0.0
+        @test isinf(SDPX.hsd_normalized_residual(forged))
+        @test !SDPX.verify_optimal!(canon, forged, xo, so, yo)
     end
 end
 
@@ -340,6 +363,28 @@ function _nf_scalar_result(
         NamedTuple[],
         nothing,
         (reason=:none,),
+    )
+end
+
+function _nf_conic_problem_result(::Type{T}; bad::Bool=false) where {T}
+    cone = SDPX.SOCConstraint(Matrix{T}(I, 2, 2), zeros(T, 2))
+    problem = SDPX.ConicProblem{T}(
+        zeros(T, 2), [cone], zeros(T, 0, 2), T[], 2,
+    )
+    x = bad ? T[one(T), zero(T)] : zeros(T, 2)
+    result = SDPX.ConicResult{T}(
+        SDPX.Optimal, "fixture", x, [zeros(T, 2)], [zeros(T, 2)], T[],
+        zero(T), zero(T), zero(T), zero(T), zero(T), 0, nothing,
+    )
+    return problem, result
+end
+
+function _nf_invalid_options(field::Symbol, bad::T) where {T}
+    return SDPX.SolverOptions{T}(
+        ϵ_gap=field === :gap ? bad : T(1e-8),
+        ϵ_primal=field === :primal ? bad : T(1e-8),
+        ϵ_dual=field === :dual ? bad : T(1e-8),
+        verbosity=0,
     )
 end
 
@@ -425,6 +470,40 @@ end
             @test warning !== nothing
         end
     end
+
+    @testset "all SolverOptions tolerances fail closed" begin
+        finite_bad_sdp = _nf_scalar_result(Float64; slack=1.0)
+        @test !SDPX.result_certificate(problem, finite_bad_sdp, options).valid
+        conic_problem, finite_bad_conic =
+            _nf_conic_problem_result(Float64; bad=true)
+        conic_good_problem, finite_good_conic =
+            _nf_conic_problem_result(Float64; bad=false)
+        @test !SDPX.result_certificate(
+            conic_problem, finite_bad_conic, options,
+        ).valid
+        @test SDPX.result_certificate(
+            conic_good_problem, finite_good_conic, options,
+        ).valid
+
+        for field in (:gap, :primal, :dual), bad in (NaN, Inf, -Inf, -1.0)
+            invalid = _nf_invalid_options(field, bad)
+            sdp_certificate = SDPX.result_certificate(
+                problem, finite_bad_sdp, invalid,
+            )
+            @test !sdp_certificate.valid
+            @test :invalid_tolerance in sdp_certificate.failures
+            conic_certificate = SDPX.result_certificate(
+                conic_problem, finite_bad_conic, invalid,
+            )
+            @test !conic_certificate.valid
+            @test :invalid_tolerance in conic_certificate.failures
+            # An otherwise valid native-SOC result must also reject the
+            # invalid options rather than treating +Inf as permissive.
+            @test !SDPX.result_certificate(
+                conic_good_problem, finite_good_conic, invalid,
+            ).valid
+        end
+    end
 end
 
 # ---------------------------------------------------------------------------
@@ -487,6 +566,41 @@ end
             @test isinf(SDPX._public_dual_cone_residual(values, domain))
         end
     end
+
+    # Finite source coordinates can overflow during exact reconstruction.
+    # These are direct, valid production maps; the certificate owner must
+    # reject their derived non-finite output rather than trust finite inputs.
+    maxf = floatmax(Float64)
+    @test !isfinite(SDPX._public_primal_cone_residual(
+        [maxf, maxf, maxf], SDPX.RotatedLorentzCone(),
+    ))
+
+    nonpositive = SDPX.NonpositiveToNonnegative(Float64)
+    nonpositive_output = zeros(1)
+    SDPX.backward_primal!(nonpositive, nonpositive_output, [NaN])
+    @test !SDPX._all_finite(nonpositive_output)
+
+    rsoc_model = SDPX.Model(Float64)
+    q = SDPX.variable!(
+        rsoc_model, :q_overflow, 3; domain=SDPX.RotatedLorentzCone(),
+    )
+    SDPX.objective!(rsoc_model, SDPX.Minimize(), q[1])
+    rsoc_canonical = SDPX.canonicalize(
+        SDPX.compile_product_cone_model(rsoc_model),
+    )
+    rsoc_original = zeros(3)
+    SDPX.dual_forward!(rsoc_canonical, rsoc_original, [maxf, maxf, 0.0])
+    @test !SDPX._all_finite(rsoc_original)
+
+    psd_model = SDPX.Model(Float64)
+    X = SDPX.variable!(psd_model, :X_overflow, 2, 2; domain=SDPX.PSDCone())
+    SDPX.objective!(psd_model, SDPX.Minimize(), X[1, 1])
+    psd_canonical = SDPX.canonicalize(
+        SDPX.compile_product_cone_model(psd_model),
+    )
+    psd_original = zeros(3)
+    SDPX.dual_forward!(psd_canonical, psd_original, [0.0, maxf, 0.0])
+    @test !SDPX._all_finite(psd_original)
 end
 
 @testset "public original certificate fails closed on non-finite data" begin

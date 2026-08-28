@@ -560,22 +560,45 @@ The normalized homogeneous residual used by optimality certificates:
 `hsd_residual!`-driven callers; recomputes nothing.
 """
 function hsd_normalized_residual(state::HSDState{T}) where {T}
+    # Return +Inf on any non-finite input or derived scale. In particular, a
+    # finite matrix can overflow the row-sum accumulation in `_opnorm_inf`;
+    # dividing a nonzero residual by that +Inf would otherwise produce zero
+    # and certify the iterate fail-open.
     p = zero(T)
     @inbounds for k in 1:state.m
         v = state.rP[k]
-        a = v < zero(T) ? -v : v
+        isfinite(v) || return T(Inf)
+        a = abs(v)
+        isfinite(a) || return T(Inf)
         a > p && (p = a)
     end
     d = zero(T)
     @inbounds for i in 1:state.n
         v = state.rD[i]
-        a = v < zero(T) ? -v : v
+        isfinite(v) || return T(Inf)
+        a = abs(v)
+        isfinite(a) || return T(Inf)
         a > d && (d = a)
     end
-    g = state.rG
-    g = g < zero(T) ? -g : g
-    data_norm = _opnorm_inf(state.Ad) + _maxabs(state.b) + _maxabs(state.c) + one(T)
-    return max(p, max(d, g)) / data_norm
+    g = abs(state.rG)
+    isfinite(g) || return T(Inf)
+    numerator = max(p, max(d, g))
+    isfinite(numerator) || return T(Inf)
+
+    matrix_norm = _opnorm_inf(state.Ad)
+    rhs_norm = _maxabs(state.b)
+    objective_norm = _maxabs(state.c)
+    isfinite(matrix_norm) && isfinite(rhs_norm) && isfinite(objective_norm) ||
+        return T(Inf)
+    data_norm = matrix_norm + rhs_norm
+    isfinite(data_norm) || return T(Inf)
+    data_norm += objective_norm
+    isfinite(data_norm) || return T(Inf)
+    data_norm += one(T)
+    isfinite(data_norm) && data_norm > zero(T) || return T(Inf)
+
+    normalized = numerator / data_norm
+    return isfinite(normalized) ? normalized : T(Inf)
 end
 
 """
