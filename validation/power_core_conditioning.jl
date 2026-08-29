@@ -89,55 +89,37 @@ function _cond_rel_diff(a, b)
 end
 
 @testset "C8-det Power conditioning trace" begin
-    @testset "Power late-iterate fail-closed trajectory" begin
+    @testset "overall solve on independent fresh states" begin
         canonical = _cond_canonical(:power_epigraph_small)
+        # (A) authoritative old bordered route on a fresh state: must solve.
         old = SDPX.ProductConeHSDState(canonical; kkt_route=:bordered)
         SDPX.product_hsd_cold_start!(old)
-        core_state = _cond_core_state(canonical)
-
-        accepted = 0
-        reject_iterate = nothing
-        for it in 1:25
-            code_old = SDPX.product_hsd_step!(old)
-            @test code_old === SDPX.HSDStepOK
-            snap = _cond_snapshot(core_state)
-            code_core = SDPX.product_hsd_step!(core_state)
-            if code_core === SDPX.HSDStepOK
-                accepted += 1
-                if it <= 16
-                    # Same Newton basin as the authoritative route before the
-                    # ill-conditioning onset.
-                    @test _cond_rel_diff(
-                        _cond_snapshot(core_state), _cond_snapshot(old),
-                    ) <= 1.0e-5
-                end
-                continue
-            end
-            # Fail closed before any line search / state update.
-            @test code_core === SDPX.HSDStepDirectionFailed
-            @test _cond_rel_diff(_cond_snapshot(core_state), snap) == 0.0
-            @test core_state.base.record.iterations == snap.iterations
-            reject_iterate = (; it, snapshot=snap)
-            break
-        end
-
-        @test accepted >= 10
-        @test reject_iterate !== nothing
-        @test reject_iterate.it <= 25
-
-        # The old route alone completes to a valid optimal.
-        result = SDPX.product_hsd_solve!(
+        result_old = SDPX.product_hsd_solve!(
             old; max_iterations=200, max_time=30.0,
         )
-        @test result.status === SDPX.ProductHSDOptimal
-    end
+        @test result_old.status === SDPX.ProductHSDOptimal
 
-    @testset "One-step prepared core passes LP/SOC/PSD/Exp" begin
-        for id in _COND_IDS
-            @testset "$id" begin
-                core_state = _cond_core_state(_cond_canonical(id))
-                @test SDPX.product_hsd_step!(core_state) === SDPX.HSDStepOK
-            end
+        # (B) prepared raw-dy symmetric-core route on a fresh state: record
+        # its truthful terminal outcome.  No claim is made that the raw core
+        # alone is production-qualified; this asserts only what the existing
+        # solver (raw-core steps + terminal verifier) actually returns.
+        core = _cond_core_state(canonical)
+        result_core = SDPX.product_hsd_solve!(
+            core; max_iterations=200, max_time=30.0,
+        )
+        @test result_core.status === SDPX.ProductHSDOptimal
+        @test result_core.reason in (
+            SDPX.ProductHSDVerifiedAcceptedStep,
+            SDPX.ProductHSDVerifiedTerminalNewtonTrial,
+        )
+    end
+end
+
+@testset "One-step prepared core passes LP/SOC/PSD/Exp" begin
+    for id in _COND_IDS
+        @testset "$id" begin
+            core_state = _cond_core_state(_cond_canonical(id))
+            @test SDPX.product_hsd_step!(core_state) === SDPX.HSDStepOK
         end
     end
 end

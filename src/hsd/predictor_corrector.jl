@@ -588,10 +588,14 @@ Returns `true` on success; a non-converged or non-symmetric block fails closed.
 # Populate the state's fused residual scratch from the current core candidate.
 # The state's `_product_hsd_newton_residual_ok` gate consumes `base.ax`
 # (= A*dx), `base.e` (= Theta*dy) and `base.ds`; recompute them from the
-# current `base.dx`/`base.dy`.  The SOC cone gate also requires certified
-# roundtrip bounds for the current scaling; `apply_Theta!` populated the
-# runtime block input/output scratch, so the roundtrip backward status is
-# (re)certified here.  Returns the PSD-budget-inconclusive flag.
+# current `base.dx`/`base.dy`.  The core already enforces the frozen cone
+# equation `ds + Theta*dy = h`, so `base.dy` stays the raw core dual
+# direction and `base.e = Theta*dy` is formed from it directly (Clarabel
+# semantics: the augmented solve is the authority for the dual direction).
+# The `G(target)` recovery is a diagnostic scratch roundtrip only: it is
+# written into `g_output`/`gb` and the per-block runtime scratch so the SOC/
+# PSD/nonsymmetric roundtrip certificates can be (re)computed, but it never
+# overwrites `base.dy`/`base.e`.  Returns the PSD-budget-inconclusive flag.
 function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     fill!(base.ax, zero(T))
@@ -603,18 +607,22 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
                 base.A.nzval[pointer] * value
         end
     end
-    # Mirror the frozen bordered recovery exactly so the SOC/PSD roundtrip
-    # certificate and the five-equation gate evaluate the actual recovered
-    # direction: `target = A*dx + h + rP - b*dtau`, `dy = G(target)`, and
-    # `base.e = Theta*dy`.  Recovering `dy` through the accepted G map (rather
-    # than trusting the algebraically condensed `wy + dtau*uy`) is what the
-    # cone-membership roundtrip machinery certifies.
     @inbounds for row in 1:base.m
         state.g_input[row] = base.ax[row] + state.h[row] +
                              base.rP[row] - base.b[row] * base.dtau
     end
-    apply_G!(state.runtime, base.dy, state.g_input)
+    # The cone complementarity term for the frozen five-equation gate is
+    # Theta applied to the raw core dual direction.  Compute this first while
+    # the per-block input/output scratch still holds `dy`; the diagnostic G
+    # roundtrip below deliberately overwrites that scratch afterwards.
     apply_Theta!(state.runtime, base.e, base.dy)
+    # Diagnostic-only recovery: G(target) then Theta(G(target)) populate the
+    # runtime block scratch and `gb`/`g_output` so the existing roundtrip
+    # certificate machinery can be (re)evaluated.  The result is never copied
+    # into `base.dy` or `base.e`; the raw core direction stays authoritative
+    # for the five-equation gate and line search.
+    apply_G!(state.runtime, state.g_output, state.g_input)
+    apply_Theta!(state.runtime, state.gb, state.g_output)
     _, psd_inconclusive = _product_hsd_roundtrip_backward_status(state)
     return psd_inconclusive
 end

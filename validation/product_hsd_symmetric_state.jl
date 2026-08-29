@@ -480,4 +480,35 @@ end
     @test SDPX.product_hsd_receipt_build_count(core_state) == 2
 end
 
+@testset "E1 prepared core preserves raw dual direction" begin
+    canonical = _state_canonical(:lp_afiro_style)
+    m = SDPX.hsd_num_slack(SDPX.HSDState(canonical))
+    blocks = Int[
+        block.length for block in SDPX.layout_blocks(canonical.cone_layout)
+    ]
+    budget = _state_budget(Float64, size(canonical.A, 2) + m, blocks)
+    state = SDPX.ProductConeHSDState(
+        canonical; kkt_route=:bordered, prepare_symmetric_core=true,
+        symmetric_core_memory_limit=budget, symmetric_core_current_rss=0,
+    )
+    core = SDPX.product_hsd_symmetric_core(state)
+    @test core !== nothing
+    SDPX.product_hsd_cold_start!(state)
+    @test SDPX.product_hsd_step!(state) === SDPX.HSDStepOK
+    # After one accepted predictor/corrector epoch, the state's dual direction
+    # is the raw symmetric-core candidate (the last/corrector raw solve), not
+    # the G(target) recovery.  `dy_a` holds the earlier predictor raw solve and
+    # is not compared against the workspace's final corrector buffer.
+    @test state.base.dy == core.dy
+    # The state fused scratch must still be consistent with the raw dual
+    # direction (cone equation ds + Theta*dy = h holds at the gate).
+    @test maximum(abs, state.base.ds + state.base.e - state.h; init=0.0) <=
+          4096.0 * eps(Float64)
+    # SOC certified bounds remain valid when an SOC block exists; for this LP
+    # there is no SOC block, so the invariant is vacuous and must still hold.
+    @test state.soc_bounds_certified == true
+    @test SDPX.factor_diagnostics(core.cache).numeric_count == 1
+    @test core.factor_epoch == 1
+end
+
 end
