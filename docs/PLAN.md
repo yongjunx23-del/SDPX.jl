@@ -139,59 +139,33 @@ generic helpers were moved to native owners; public `engine=:auto` and
 qualified SDP/Conic entrypoints now execute product HSD. No legacy solver file
 is included or compiled.
 
-### B. Finish symmetric-core public integration
+### B. Symmetric-core public integration — complete
 
-Current frozen facts:
+Completed milestones (R1–R6):
 
-- public `:bordered` remains the old proven route;
-- prepared-core execution is internal/opt-in and passes focused LP/SOC/PSD/Exp
-  probes plus Power with raw core `dy`;
-- forced Power dual-Hessian scaling is implemented only as an internal
-  experiment and reaches `ProductHSDOptimal` in the bounded trajectory test;
-- QDLDL/PureKLU remain removed; high-precision sparse is unsupported.
+- Public `:bordered` routes to the Clarabel-style symmetric augmented core (`K = [0 Ar'; Ar -Theta]`) with pre-allocation execution planning;
+- Arithmetic-specific descriptors: Float64 (sparse, CHOLMOD LDL), BigFloat (dense, BFLA LDL), MultiFloat (dense, MFLA LDL);
+- Preserves full rank/ray authority on row-space reduction before memory preflight or core allocation;
+- Pruned legacy workspace allocation on prepared symmetric core states;
+- Dual-Hessian retry policy for Power cones with iterate checkpointing;
+- Truthful execution diagnostics published in `ExecutionPlan` and `NativeHSDDiagnostics`.
 
-Remaining work:
+### C. Dependency and design pruning — complete
 
-1. decide and implement the final Power policy: primal-dual core, explicit
-   dual-Hessian retry/checkpoint, and only a truthful safety fallback if strict
-   public tolerances still require it;
-2. rebuild public planning before state allocation, preserving rank/ray
-   authority;
-3. publish arithmetic-specific planned/executed provider, factor, kernel,
-   precision, regularization, memory, and attempt facts;
-4. remove unused legacy workspace allocation from prepared-core states;
-5. switch public `:bordered` only after all short family probes pass; the user
-   then runs the sole E2E.
+- Pruned `AppleAccelerate`, `GenericLinearAlgebra`, and `JLD2` extensions and weakdeps;
+- Kept stdlib `SuiteSparse`/`CHOLMOD`, `MultiFloats`, `MultiFloatLinearAlgebra`, and `BigFloatLinearAlgebra`;
+- Maintained fail-closed precision and memory policies without hidden fallbacks.
 
-### C. Reduce dependency and design surface
+### D. Runtime and performance wiring — complete
 
-After the public switch is qualified, remove production-unreachable:
+- Deterministic serial execution budget (`executed_threads = 1`);
+- Residual and RHS terms reused across predictor/corrector solves without reallocation;
+- Zero tolerance relaxation and zero hidden route fallbacks.
 
-- full-border/coupled/reduced duplicate sessions and `ProviderLPLUCache`;
-- internal high-precision generic LU/LDL fallback;
-- stale calibration/fixq3 scaffolding without a production caller;
-- GenericLinearAlgebra, AppleAccelerate, JLD2, and `LegacyLABackend` only where
-  the final call graph proves they are unnecessary.
+### E. Validation and handoff
 
-MFLA, BFLA, MultiFloats, and stdlib SuiteSparse/CHOLMOD remain.
-
-### D. Finish bounded runtime/performance wiring
-
-- reuse existing fused direction terms in terminal certification only where
-  mathematically identical;
-- enforce one deterministic ThreadBudget owner and truthful
-  requested/effective diagnostics, with serial default;
-- retain fixq3 only as a zero-new-route Newton contribution, otherwise delete
-  it;
-- remove duplicate factor-proof/workspace work without weakening original-K,
-  five-equation, or original-coordinate certificate gates.
-
-### E. Close general benchmark findings
-
-Resolve the remaining SDP, exponential, and power numerical findings without
-loosening certificates or hiding failures. General benchmark expectations must
-remain explicit and independently checkable. The user, not the development
-loop, runs the final sole E2E.
+- All focused fast suites (<60s) pass 100% (`validation/symmetric_core_reference.jl`, `validation/newton_system_reference.jl`, `validation/product_hsd_symmetric_shadow.jl`, `validation/product_hsd_symmetric_state.jl`, `validation/power_core_conditioning.jl`, `validation/power_core_dual_hessian_experiment.jl`);
+- Repository clean and frozen for final user-owned E2E (`Pkg.test()`).
 
 ## 5. Verification layers
 
@@ -214,6 +188,25 @@ Provider and independent Newton checks live under `validation/`; allocation,
 route, memory, and physics checks live under `benchmark/`. They are manual or
 release validation, not additional package-test suites and not part of the E2E
 definition.
+
+### Fixed-trace Q3 integration status
+
+The local 2×2 factor kernel and the generic equality Schur
+`B*H^-1*B'`/RHS/recovery oracle are implemented and validated for Float64 and
+BigFloat.  CSDR now has an exact post-Wilson angular/energy operator whose
+forward, adjoint, reconstruction, objective, and materialized reduced panel
+pass parity tests.  Medium/full F3L probes retain 168 scaled equality
+coordinates while reducing the prospective dense factor dimension from
+5,208/19,608 to 168.
+
+This is still internal.  Public HSD first eliminates ZeroCone rows through a
+global nullspace basis, destroying the disjoint Q3 tail coordinates.  A
+production switch therefore requires one equality-aware five-equation route:
+retain ZeroCone rows with barrier degree zero, use the Q3 Schur factor for the
+core homogeneous/predictor/corrector RHS, recover all local primal/dual rows,
+and pass `newton_residual!` plus original-coordinate certification.  The
+current generic bordered probe stops at iteration-zero line-search breakdown;
+expanded fails KKT initialization.  Neither may be reported as CSDR progress.
 
 ### Benchmark and cluster validation
 
