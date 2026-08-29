@@ -1,0 +1,37 @@
+using Test
+using SDPX
+
+model = SDPX.Model(Float64)
+x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
+SDPX.constraint!(model, :eq, x[1] + x[2], SDPX.ZeroCone())
+SDPX.constraint!(model, :soc, Any[1.0, x[1], x[2]], SDPX.LorentzCone())
+SDPX.objective!(model, SDPX.Minimize(), x[1])
+program = SDPX.compile_product_cone_model(model)
+canonical = SDPX.canonicalize(program)
+runtime = SDPX.ProductConeRuntime(canonical.cone_layout, Float64)
+zero_rows = only(runtime.zero_ranges)
+@test length(zero_rows) == 1
+@test length(runtime.soc) == 1
+s = fill(9.0, canonical.cone_layout.dimension)
+y = fill(8.0, canonical.cone_layout.dimension)
+SDPX.initialize_primal_dual!(runtime, s, y)
+@test all(iszero, s[zero_rows])
+@test all(iszero, y[zero_rows])
+source = collect(1.0:length(s))
+for action in (SDPX.apply_Theta!, SDPX.apply_G!, SDPX.apply_R!, SDPX.apply_Rinv!)
+    destination = fill(7.0, length(s))
+    action(runtime, destination, source)
+    @test all(iszero, destination[zero_rows])
+end
+identity = fill(7.0, length(s))
+SDPX.product_identity!(runtime, identity)
+@test all(iszero, identity[zero_rows])
+jordan = fill(7.0, length(s))
+SDPX.product_jordan!(runtime, jordan, s, y)
+@test all(iszero, jordan[zero_rows])
+shift = fill(7.0, length(s))
+SDPX.affine_shift!(runtime, shift, s, y)
+@test all(iszero, shift[zero_rows])
+corrector = fill(7.0, length(s))
+SDPX.corrector_shift!(runtime, corrector, s, y, zeros(length(s)), zeros(length(s)), 0.5)
+@test all(iszero, corrector[zero_rows])

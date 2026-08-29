@@ -30,10 +30,11 @@ module SDPXMultiFloatLinearAlgebraExt
 
 using SDPX
 using LinearAlgebra
+using SparseArrays
 using MultiFloats
 using MultiFloatLinearAlgebra
 
-import MultiFloats: MultiFloat
+import MultiFloats: MultiFloat, MultiFloatVec
 import MultiFloatLinearAlgebra:
     capabilities as mfla_capabilities,
     KernelConfig,
@@ -1283,6 +1284,31 @@ end
 # FactorCache operation on an unprepared / failed cache fails closed through
 # `_require_fresh`.
 
+function SDPX.factorize_symmetric_core_pattern!(
+    cache::MFLDLTFactorCache{MF},
+    pattern::SDPX.SymmetricCorePattern{MF},
+    matrix_epoch::Integer,
+) where {MF<:MultiFloat}
+    storage = factor_matrix(cache.inner)
+    size(storage) == (pattern.dimension, pattern.dimension) ||
+        throw(DimensionMismatch(
+            "prepared MFLA factor storage does not match the symmetric core",
+        ))
+    fill!(storage, zero(MF))
+    @inbounds for column in 1:pattern.dimension
+        for pointer in pattern.colptr[column]:(pattern.colptr[column + 1] - 1)
+            row = pattern.rowval[pointer]
+            value = pattern.nzval[pointer]
+            storage[row, column] = value
+            storage[column, row] = value
+        end
+    end
+    # MFLDLTCache owns this exact matrix capacity.  Its factorize! detects the
+    # prepared shape, invalidates first, and factors in place without growing
+    # storage; no per-epoch materialize_dense copy is created by SDPX.
+    return SDPX.factorize!(cache, storage, Int(matrix_epoch))
+end
+
 function SDPX.symmetric_core_provider_available(
     ::Type{MF}, precision_bits::Int,
 ) where {MF<:MultiFloat}
@@ -1291,6 +1317,11 @@ function SDPX.symmetric_core_provider_available(
     # exact fixed-width MultiFloat recognized by the loaded MFLA provider.
     SDPX.is_multifloat_arithmetic(MF) || throw(ArgumentError(
         "MFLA symmetric core requires a fixed-width MultiFloat, got $(MF)",
+    ))
+    expected_precision = SDPX.sig_bits(MF)
+    precision_bits == expected_precision || throw(ArgumentError(
+        "MFLA symmetric core precision hint $precision_bits disagrees with " *
+        "$(MF) precision $expected_precision",
     ))
     mfla_capabilities(MF)  # fails closed if the loaded MFLA cannot serve MF
     return :multifloat_linear_algebra
@@ -1307,6 +1338,47 @@ function SDPX._build_symmetric_core_ldlt_cache_provider(
         cache, SDPX.FactorRequirements(pattern.dimension, 0),
     )
     return cache
+end
+
+# ---------------------------------------------------------------------------
+# Optional QDLDL sparse signed-LDL provider (delegation seam).
+# MFLA exposes `sparse_ldlt_available` / `sparse_ldlt_cache` only when its
+# own QDLDL extension is loaded; otherwise SDPX fails closed.  The provided
+# pattern is the SDPX symmetric-core upper-triangular CSC with a +1/-1
+# D-sign descriptor (quasi-definite K), matching the QDLDL contract.
+# ---------------------------------------------------------------------------
+
+function SDPX.SparseQDLDLProviderAvailable(::Type{MF}) where {MF<:MultiFloat}
+    try
+        return MultiFloatLinearAlgebra.sparse_ldlt_available(MF)
+    catch
+        return false
+    end
+end
+
+function SDPX.SparseQDLDLProviderCache(
+    ::Type{MF},
+    pattern::SparseMatrixCSC{MF,Int},
+    dsigns::AbstractVector{<:Integer},
+) where {MF<:MultiFloat}
+    MultiFloatLinearAlgebra.sparse_ldlt_available(MF) || throw(ArgumentError(
+        "QDLDL extension for $(MF) is not loaded",
+    ))
+    return MultiFloatLinearAlgebra.sparse_ldlt_cache(
+        MF, pattern; dsigns=collect(Int, dsigns), nrhs=1,
+    )
+end
+
+function SDPX._qdldl_provider_factorize!(
+    provider, A::SparseMatrixCSC,
+)
+    return MultiFloatLinearAlgebra.factorize!(provider, A)
+end
+
+function SDPX._qdldl_provider_solve!(
+    provider, destination::AbstractVector, rhs::AbstractVector,
+)
+    return MultiFloatLinearAlgebra.solve!(provider, destination, rhs)
 end
 
 end
