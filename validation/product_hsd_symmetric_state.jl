@@ -481,3 +481,113 @@ end
 end
 
 end
+# ---------------------------------------------------------------------
+# C7.3: public `:bordered` executes the symmetric augmented core.
+#
+# Exercises the public Model -> optimize! path (engine auto/native-HSD with
+# kkt_route=:bordered): the execution plan is resolved before state
+# allocation, the state owns a prepared core, the legacy full-border driver
+# never factors, and the executed diagnostics derive from the actual core
+# receipt/provider rather than a static LU/native_serial descriptor.
+# ---------------------------------------------------------------------
+
+function _c73_lp_result(::Type{T}; kkt_route::Symbol=:bordered,
+                        precision_bits::Integer=0) where {T<:AbstractFloat}
+    model = SDPX.Model(T)
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
+    s = SDPX.variable!(model, :s, 2; domain=SDPX.Nonnegative())
+    SDPX.constraint!(
+        model, :c1, x[1] + x[2] + s[1] - T(4), SDPX.ZeroCone(),
+    )
+    SDPX.constraint!(
+        model, :c2, T(2) * x[1] + x[2] + s[2] - T(5), SDPX.ZeroCone(),
+    )
+    SDPX.objective!(model, SDPX.Maximize(), T(3) * x[1] + T(2) * x[2])
+    settings = SDPX.Settings{T}(
+        kkt_route=kkt_route,
+        verbosity=0,
+        limits=SDPX.Limits(iterations=200, time=60.0, threads=1),
+    )
+    return SDPX.optimize!(model; settings=settings)
+end
+
+@testset "C7.3 public bordered symmetric core dispatch" begin
+    result = _c73_lp_result(Float64)
+    @test SDPX.status(result) === :optimal
+    @test SDPX.certificate(result).valid
+    @test isapprox(SDPX.primal_objective(result), 9.0; atol=1e-6)
+
+    selected = result.diagnostics.selected_algorithms
+    @test selected.planned_kkt_formulation === :symmetric_augmented_hsd_core
+    @test selected.executed_kkt_formulation === :symmetric_augmented_hsd_core
+    @test selected.planned_kkt_storage === :sparse
+    @test selected.executed_kkt_storage === :sparse
+    @test selected.planned_factorization === :symmetric_ldl
+    @test selected.executed_factorization === :symmetric_ldl
+    @test selected.planned_factorization_kernel === :cholmod_symmetric_ldl
+    @test selected.executed_factorization_kernel === :cholmod
+    @test selected.planned_la_provider === :cholmod
+    @test selected.la_executed_provider === :cholmod
+    @test selected.factorization_reuse ===
+          :factor_once_homogeneous_predictor_corrector
+    @test selected.executed_factorization_reuse ===
+          :factor_once_homogeneous_predictor_corrector
+    @test selected.pivoting === :symmetric_pivoting
+    @test selected.row_scaling === :none
+    @test selected.border_structure === :none
+    @test selected.route === :bordered
+
+    memory = result.diagnostics.memory
+    @test memory.symmetric_core_dimension > 0
+    @test memory.symmetric_core_estimate_bytes > 0
+    @test memory.symmetric_core_actual_provider === :cholmod
+    @test memory.memory_budget_bytes > 0
+end
+
+@testset "C7.3 public default state owns core, legacy driver unfactored" begin
+    # The public path constructs the state with the low-level seam, so we
+    # re-run the exact Model->canonical->reduction path and inspect the
+    # state directly (the public Result does not expose the raw state).
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
+    s = SDPX.variable!(model, :s, 2; domain=SDPX.Nonnegative())
+    SDPX.constraint!(model, :c1, x[1] + x[2] + s[1] - 4.0, SDPX.ZeroCone())
+    SDPX.constraint!(
+        model, :c2, 2.0 * x[1] + x[2] + s[2] - 5.0, SDPX.ZeroCone(),
+    )
+    SDPX.objective!(model, SDPX.Maximize(), 3.0 * x[1] + 2.0 * x[2])
+    program = SDPX.compile_product_cone_model(model)
+    canonical = SDPX.canonicalize(program)
+    reduction = SDPX.hsd_equality_reduce(canonical)
+    reduced = reduction.reduced
+    row_reduction = SDPX._hsd_rowspace_reduction(reduced)
+    cache = SDPX.DenseSchurCholeskyCache{Float64}(row_reduction.rank)
+    driver = SDPX.HotRouteCache(cache; n=row_reduction.rank)
+    base = SDPX._hsd_state_from_reduction(reduced, driver, row_reduction)
+    free_bytes = SDPX.ExtendedPrecisionBLAS._system_free_memory_bytes()
+    usable = SDPX.ExtendedPrecisionBLAS._conservative_usable_memory_bytes(
+        free_bytes,
+    )
+    rss = try max(Int(Sys.maxrss()), 0) catch; 0 end
+    memory_limit = usable > 0 ?
+        SDPX.ExtendedPrecisionBLAS._nonnegative_saturating_int(
+            SDPX.saturating_sum_bytes(usable, rss),
+        ) : nothing
+    state = SDPX._product_cone_hsd_state(
+        base;
+        kkt_route=:bordered,
+        prepare_symmetric_core=true,
+        symmetric_core_memory_limit=memory_limit,
+        symmetric_core_current_rss=rss,
+    )
+    @test SDPX.product_hsd_symmetric_core(state) !== nothing
+    @test state.expanded === nothing
+    SDPX.product_hsd_cold_start!(state)
+    code = SDPX.product_hsd_step!(state)
+    @test code === SDPX.HSDStepOK
+    core = SDPX.product_hsd_symmetric_core(state)
+    @test core.factor_epoch == 1
+    @test core.homogeneous_solves == 1
+    @test core.variable_solves == 2
+    @test SDPX.kkt_factor_count(state.symmetric_bordered.driver) == 0
+end

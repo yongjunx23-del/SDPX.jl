@@ -603,12 +603,6 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
                 base.A.nzval[pointer] * value
         end
     end
-    # Mirror the frozen bordered recovery exactly so the SOC/PSD roundtrip
-    # certificate and the five-equation gate evaluate the actual recovered
-    # direction: `target = A*dx + h + rP - b*dtau`, `dy = G(target)`, and
-    # `base.e = Theta*dy`.  Recovering `dy` through the accepted G map (rather
-    # than trusting the algebraically condensed `wy + dtau*uy`) is what the
-    # cone-membership roundtrip machinery certifies.
     @inbounds for row in 1:base.m
         state.g_input[row] = base.ax[row] + state.h[row] +
                              base.rP[row] - base.b[row] * base.dtau
@@ -752,9 +746,7 @@ function _product_hsd_symmetric_core_direction!(
     base.dkappa = predictor_candidate.dkappa
     _product_hsd_core_scatter!(state)
     _hsd_direction_finite(base) || return false
-    if !_product_hsd_newton_residual_ok(state, predictor_scalar)
-        return false
-    end
+    _product_hsd_newton_residual_ok(state, predictor_scalar) || return false
     copyto!(base.dx_a, base.dx)
     copyto!(base.dy_a, base.dy)
     copyto!(base.ds_a, base.ds)

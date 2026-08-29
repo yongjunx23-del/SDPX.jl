@@ -46,13 +46,17 @@ function _native_hsd_kkt_descriptor(route::Symbol, formulation::Symbol)
             :native_expanded_ldlt, :native_serial, (:bordered,),
         )
     elseif route === :bordered
+        # Executed facts for the public `:bordered` route: the product-HSD
+        # state now dispatches the symmetric augmented core
+        # `K = [0 Ar'; Ar -Theta]` (CHOLMOD signed-LDL for Float64, MFLA/BFLA
+        # dense pivoted LDL for high precision).  The scalar border is gone;
+        # factor once + one homogeneous solve + predictor/corrector solves per
+        # scaling epoch.  No static LU/native_serial claim is made.
         return NativeHSDKKTDescriptor(
-            route, formulation, :dense,
-            formulation === :dense_hybrid_coupled ?
-                :native_hsd_factor_coordinate_coupled :
-                :native_hsd_binary_row_scaled_border,
-            :lu, :factor_once_predictor_corrector_refinement,
-            :lapack_getrf_getrs, :native_serial, (),
+            route, :symmetric_augmented_hsd_core, :sparse,
+            :symmetric_augmented_core, :symmetric_ldl,
+            :factor_once_homogeneous_predictor_corrector,
+            :cholmod_symmetric_ldl, :cholmod, (),
         )
     end
     throw(ArgumentError("unknown native HSD KKT route $route"))
@@ -395,6 +399,10 @@ function _native_hsd_plan(
     product_rank::Int=0,
     product_rank_ambiguous::Bool=false,
     product_rank_incompatible::Bool=false,
+    memory_limit_bytes::Union{Nothing,Integer}=nothing,
+    current_rss_bytes::Union{Nothing,Integer}=nothing,
+    core_dimension::Integer=0,
+    core_estimate_bytes::Integer=0,
 ) where {T<:AbstractFloat}
     reduced = reduction.reduced
     reduced_variables = reduced === nothing ? 0 : canonical_num_variables(reduced)
@@ -411,7 +419,9 @@ function _native_hsd_plan(
     )
     factor_dimension = !descriptor.available ? 0 :
         settings.kkt_route === :sparse_schur ? product_rank + 1 :
-        descriptor.matrix_dimension
+        settings.kkt_route === :bordered ?
+            product_rank + active_rows :
+            descriptor.matrix_dimension
     mathematical_formulation = descriptor.available ?
         formulation_symbol(descriptor) : :not_applicable
     kkt_execution = _native_hsd_kkt_descriptor(
@@ -481,7 +491,8 @@ function _native_hsd_plan(
         multi_rhs=descriptor.available,
         iterative_refinement=descriptor.available,
         sparse_factorization=descriptor.available &&
-            settings.kkt_route === :sparse_schur,
+            (settings.kkt_route === :sparse_schur ||
+             (settings.kkt_route === :bordered && T === Float64)),
     )
     capability_symbols = la_capability_symbols(capabilities)
     la = LABackendConfiguration(
@@ -494,7 +505,10 @@ function _native_hsd_plan(
         descriptor.available ?
             (settings.kkt_route === :sparse_schur ?
                 (:sparse_factorization, :factor_solve) :
-                (:lu, :factor_solve)) : (),
+                settings.kkt_route === :bordered ?
+                    (T === Float64 ? (:sparse_factorization, :factor_solve) :
+                                     (:factor_solve,)) :
+                    (:lu, :factor_solve)) : (),
         descriptor.available ? kkt_execution.kernel : :not_applicable,
         (),
         :none,
@@ -525,6 +539,11 @@ function _native_hsd_plan(
         requested_threads=settings.limits.threads,
         executed_threads=1,
         fallback_chain=kkt_execution.fallback_chain,
+        symmetric_core_dimension=factor_dimension,
+        symmetric_core_storage=kkt_execution.storage,
+        core_estimate_bytes=Int(core_estimate_bytes),
+        current_rss_bytes=Int(current_rss_bytes === nothing ? 0 :
+                              current_rss_bytes),
     )
     return ExecutionPlan(
         classification,
@@ -542,10 +561,24 @@ function _native_hsd_plan(
         :serial,
         1,
         :native_hsd,
-        0,
+        _native_hsd_memory_budget_bytes(
+            memory_limit_bytes, current_rss_bytes,
+        ),
         parameters,
         payload,
     )
+end
+
+@inline function _native_hsd_memory_budget_bytes(
+    memory_limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+)
+    limit = memory_limit_bytes === nothing ? 0 :
+        ExtendedPrecisionBLAS._nonnegative_saturating_int(Int(memory_limit_bytes))
+    rss = current_rss_bytes === nothing ? 0 :
+        ExtendedPrecisionBLAS._nonnegative_saturating_int(Int(current_rss_bytes))
+    limit > 0 && rss > 0 && return max(limit + rss, 0)
+    return limit > 0 ? limit : 0
 end
 
 @inline function _native_hsd_product_status(status::ProductHSDSolveStatus)
@@ -604,8 +637,34 @@ function _native_hsd_diagnostics(
     recovery_seconds::Float64;
     executed_kkt_route::Union{Nothing,Symbol}=nothing,
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
+    state::Union{Nothing,ProductConeHSDState}=nothing,
+    core_estimate_bytes::Integer=0,
+    core_dimension::Integer=0,
 )
     payload = plan.payload::NativeHSDPlan
+    # Executed provider/factor/precision/regularization/reuse facts come from
+    # the actual core receipt and provider diagnostics, never a static
+    # descriptor.  `state` is provided by the bordered caller.
+    executed_core = state === nothing ? nothing :
+                    product_hsd_symmetric_core(state)
+    executed_receipt = executed_core === nothing ? nothing :
+                       product_hsd_factor_receipt(state)
+    executed_core_diag = executed_core === nothing ? nothing :
+                         try
+                             factor_diagnostics(executed_core.cache)
+                         catch
+                             nothing
+                         end
+    executed_provider_fact = executed_receipt === nothing ? nothing :
+                             executed_receipt.provider
+    executed_factor_fact = executed_core_diag === nothing ? nothing :
+                           get(executed_core_diag, :kind, nothing)
+    executed_precision_fact = executed_core_diag === nothing ? nothing :
+                              get(executed_core_diag, :precision_bits, nothing)
+    executed_regularization_fact = executed_receipt === nothing ? nothing :
+                                   executed_receipt.regularization
+    executed_reuse_fact = executed_receipt === nothing ? nothing :
+                          executed_receipt.factor_epoch
     descriptor = payload.formulation
     equality_ready = reduction.status === HSDEqualityReady
     equality_only = equality_ready && payload.active_rows == 0
@@ -617,6 +676,26 @@ function _native_hsd_diagnostics(
     executed_kkt = _native_hsd_kkt_descriptor(
         actual_route, mathematical_formulation,
     )
+    # For the bordered core route, override the descriptor fields with the
+    # receipt/provider diagnostics so executed facts are truthful.
+    if actual_route === :bordered && executed_receipt !== nothing
+        executed_kkt = NativeHSDKKTDescriptor(
+            :bordered,
+            :symmetric_augmented_hsd_core,
+            executed_core_diag === nothing ? :sparse :
+                get(executed_core_diag, :provider, nothing) === :cholmod ?
+                :sparse : :dense,
+            :symmetric_augmented_core,
+            executed_factor_fact === nothing ? :symmetric_ldl :
+                executed_factor_fact,
+            :factor_once_homogeneous_predictor_corrector,
+            executed_provider_fact === nothing ? :symmetric_ldl :
+                executed_provider_fact,
+            executed_provider_fact === nothing ? :symmetric_ldl :
+                executed_provider_fact,
+            (),
+        )
+    end
     did_execute = equality_ready && factorizations > 0
     route_attempts = if !did_execute
         ()
@@ -634,7 +713,10 @@ function _native_hsd_diagnostics(
     planned_factorization = descriptor.available ? planned_kkt.factorization :
                             :not_applicable
     executed_factorization = !equality_ready ? :not_executed :
-                             did_execute ? executed_kkt.factorization :
+                             did_execute ?
+                                (executed_factor_fact === nothing ?
+                                    executed_kkt.factorization :
+                                    executed_factor_fact) :
                              equality_only ? :not_applicable : :not_executed
     planned_formulation = descriptor.available ? planned_kkt.formulation :
                           :not_applicable
@@ -658,7 +740,10 @@ function _native_hsd_diagnostics(
     planned_provider = descriptor.available ? planned_kkt.provider :
                        :not_applicable
     executed_provider = !equality_ready ? :not_executed :
-                        did_execute ? executed_kkt.provider :
+                        did_execute ?
+                            (executed_provider_fact === nothing ?
+                                executed_kkt.provider :
+                                executed_provider_fact) :
                         equality_only ? :not_applicable : :not_executed
     planned_storage = descriptor.available ? planned_kkt.storage :
                       :not_applicable
@@ -678,6 +763,15 @@ function _native_hsd_diagnostics(
         iterations=iterations,
         factorizations=factorizations,
     )
+    # The symmetric augmented core is the executed formulation for the
+    # public `:bordered` route: no partial pivoting, no binary row scaling and
+    # no homogeneous scalar border.  The typed mathematical HSD payload
+    # (`NativeHSDPlan.formulation`) is preserved untouched; these selected
+    # fields report the executed execution facts only.
+    core_executed = actual_route === :bordered && did_execute
+    executed_pivoting = core_executed ? :symmetric_pivoting : descriptor.pivoting
+    executed_row_scaling = core_executed ? :none : descriptor.row_scaling
+    executed_border = core_executed ? :none : descriptor.border_structure
     selected = (
         solver=:native_hsd,
         engine=:native_hsd,
@@ -699,10 +793,10 @@ function _native_hsd_diagnostics(
         factorization_kernel=planned_kernel,
         planned_factorization_kernel=planned_kernel,
         executed_factorization_kernel=executed_kernel,
-        row_scaling=descriptor.row_scaling,
-        transform=descriptor.row_scaling,
-        border_structure=descriptor.border_structure,
-        pivoting=descriptor.pivoting,
+        row_scaling=executed_row_scaling,
+        transform=executed_row_scaling,
+        border_structure=executed_border,
+        pivoting=executed_pivoting,
         gram_or_metric=descriptor.gram_or_metric,
         metric=descriptor.gram_or_metric,
         formulation=planned_formulation,
@@ -747,10 +841,22 @@ function _native_hsd_diagnostics(
         core=core_seconds,
         reconstruction=recovery_seconds,
     )
+    process_peak = try
+        max(Int(Sys.maxrss()), 0)
+    catch exception
+        _recoverable(exception) || rethrow()
+        0
+    end
     memory = (
-        workspace_bytes=0,
-        process_peak_rss_bytes=0,
-        memory_budget_bytes=0,
+        workspace_bytes=core_estimate_bytes,
+        process_peak_rss_bytes=process_peak,
+        memory_budget_bytes=plan.memory_budget_bytes,
+        symmetric_core_dimension=core_dimension,
+        symmetric_core_estimate_bytes=core_estimate_bytes,
+        symmetric_core_actual_provider=executed_provider_fact,
+        symmetric_core_actual_precision=executed_precision_fact,
+        symmetric_core_actual_regularization=executed_regularization_fact,
+        symmetric_core_actual_factor_epoch=executed_reuse_fact,
     )
     return NativeHSDDiagnostics(
         plan,
@@ -782,6 +888,9 @@ function _native_hsd_core_result(
     recovery_seconds::Float64;
     executed_kkt_route::Union{Nothing,Symbol}=nothing,
     executed_kkt_attempts::Tuple{Vararg{Symbol}}=(),
+    state::Union{Nothing,ProductConeHSDState}=nothing,
+    core_estimate_bytes::Integer=0,
+    core_dimension::Integer=0,
 ) where {T<:AbstractFloat}
     diagnostics = _native_hsd_diagnostics(
         plan,
@@ -795,6 +904,9 @@ function _native_hsd_core_result(
         recovery_seconds;
         executed_kkt_route,
         executed_kkt_attempts,
+        state,
+        core_estimate_bytes,
+        core_dimension,
     )
     message = "native HSD terminated with $(status) ($(reason))"
     return NativeHSDCoreResult{T}(
@@ -967,18 +1079,91 @@ function _public_native_hsd_core(
         )
     end
 
-    state = ProductConeHSDState(solve_reduced; kkt_route=settings.kkt_route)
-    base = state.base
-    plan = _native_hsd_plan(
-        program,
-        canonical,
-        reduction,
-        route,
-        settings;
-        product_rank=size(base.rank_basis, 2),
-        product_rank_ambiguous=base.rank_ambiguous,
-        product_rank_incompatible=base.rank_incompatible,
-    )
+    if settings.kkt_route === :bordered
+        # Public `:bordered` executes the symmetric augmented core.  Resolve
+        # the row-space reduction and conservative memory headroom BEFORE any
+        # state allocation, then construct the base/state through the
+        # low-level seam with `prepare_symmetric_core=true` so the old
+        # full-border driver is never factored.
+        row_reduction = _hsd_rowspace_reduction(solve_reduced)
+        product_rank = row_reduction.rank
+        core_dimension = saturating_sum_bytes(
+            product_rank, canonical_num_slack(solve_reduced),
+        )
+        block_sizes = Int[
+            block.length for block in layout_blocks(solve_reduced.cone_layout)
+        ]
+        effective_precision = T === BigFloat ? precision(BigFloat) : sig_bits(T)
+        # Conservative available memory: system/cgroup/config free memory minus
+        # current process peak RSS, halved (shared-host headroom).
+        free_bytes = ExtendedPrecisionBLAS._system_free_memory_bytes()
+        # `usable` is the half-free headroom the new core allocation may
+        # consume.  The eligibility gate charges the process peak RSS against
+        # the limit, so the limit must be `usable + rss`: the solver is
+        # granted the free headroom plus what the (JIT-warmed) process already
+        # holds.  This keeps the gate meaningful (new estimate <= usable)
+        # without rejecting tiny problems because cold-start compilation
+        # inflated `Sys.maxrss()`.
+        usable = ExtendedPrecisionBLAS._conservative_usable_memory_bytes(free_bytes)
+        peak_rss = try
+            max(Int(Sys.maxrss()), 0)
+        catch exception
+            _recoverable(exception) || rethrow()
+            0
+        end
+        memory_limit = usable > 0 ?
+            ExtendedPrecisionBLAS._nonnegative_saturating_int(
+                saturating_sum_bytes(usable, peak_rss),
+            ) : nothing
+        # Dimension-only provider + memory preflight (allocates nothing) so an
+        # absent high-precision provider or unknown/over-budget memory fails
+        # closed before any state/core allocation.  A missing free-memory
+        # report fails closed for every arithmetic (no silent dense guess).
+        symmetric_core_state_preflight(
+            T, core_dimension, block_sizes, effective_precision,
+            memory_limit, peak_rss,
+        )
+        cache = DenseSchurCholeskyCache{T}(product_rank)
+        driver = HotRouteCache(cache; n=product_rank)
+        base = _hsd_state_from_reduction(solve_reduced, driver, row_reduction)
+        state = _product_cone_hsd_state(
+            base;
+            kkt_route=:bordered,
+            prepare_symmetric_core=true,
+            symmetric_core_memory_limit=memory_limit,
+            symmetric_core_current_rss=peak_rss,
+            symmetric_core_precision_bits=effective_precision,
+        )
+        plan = _native_hsd_plan(
+            program,
+            canonical,
+            reduction,
+            route,
+            settings;
+            product_rank=product_rank,
+            product_rank_ambiguous=row_reduction.ambiguous,
+            product_rank_incompatible=row_reduction.incompatible,
+            memory_limit_bytes=memory_limit,
+            current_rss_bytes=peak_rss,
+            core_dimension=core_dimension,
+            core_estimate_bytes=symmetric_core_state_prepare_bytes(
+                T, core_dimension, block_sizes,
+            ),
+        )
+    else
+        state = ProductConeHSDState(solve_reduced; kkt_route=settings.kkt_route)
+        base = state.base
+        plan = _native_hsd_plan(
+            program,
+            canonical,
+            reduction,
+            route,
+            settings;
+            product_rank=size(base.rank_basis, 2),
+            product_rank_ambiguous=base.rank_ambiguous,
+            product_rank_incompatible=base.rank_incompatible,
+        )
+    end
     core_started = time_ns()
     product = product_hsd_solve!(
         state;
@@ -1030,6 +1215,12 @@ function _public_native_hsd_core(
         status = NumericalFailure
         reason = :full_canonical_recovery_failed
     end
+    core_dimension = settings.kkt_route === :bordered &&
+                      product_hsd_symmetric_core(state) !== nothing ?
+        product_hsd_symmetric_core(state).dimension : 0
+    core_estimate_bytes = settings.kkt_route === :bordered ? (
+        Int(get(plan.parameters, :core_estimate_bytes, 0))
+    ) : 0
     return canonical, reduction, _native_hsd_core_result(
         T,
         status,
@@ -1048,6 +1239,9 @@ function _public_native_hsd_core(
         recovery_seconds;
         executed_kkt_route=state.kkt_route,
         executed_kkt_attempts=Tuple(state.kkt_route_attempts),
+        state=settings.kkt_route === :bordered ? state : nothing,
+        core_estimate_bytes=core_estimate_bytes,
+        core_dimension=core_dimension,
     )
 end
 
