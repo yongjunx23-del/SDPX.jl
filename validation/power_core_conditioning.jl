@@ -1,24 +1,14 @@
-# Deterministic late-Power conditioning trace (detection-only evidence).
+# Deterministic late-Power raw-dual regression guard.
 #
-# The symmetric augmented-core route (`:bordered` with a prepared core) fails
-# closed on the late ill-conditioned `power_epigraph_small` iterate where the
-# frozen five-equation backward residual no longer proves forward accuracy,
-# while the authoritative old bordered route continues to a valid Optimal.
+# The symmetric augmented core owns the dual direction returned by its KKT
+# solve.  `G(target)` is now diagnostic roundtrip work only and never
+# overwrites that raw direction.  With this Clarabel-style ownership,
+# `power_epigraph_small` reaches ProductHSDOptimal on both independent old and
+# prepared-core states; LP/SOC/PSD/Exp one-step prepared-core probes also pass.
 #
-# This file documents that failure as a deterministic trajectory trace and a
-# fail-closed regression guard.  It does NOT add a new solver tolerance, does
-# NOT fall back to another route, does NOT enable the public core route, and
-# does NOT introduce QDLDL/PureKLU.  Detection is evidence from the existing
-# production gate (`_product_hsd_newton_residual_ok` + route fail-closed
-# path); the diagnostic counters observed here are the standard core workspace
-# counters.
-#
-#   * early accepted core iterates stay in the same Newton basin as the old
-#     bordered route (relative iterate drift < 1e-5 through iterate 16);
-#   * the core route fails closed (HSDStepDirectionFailed) at or before
-#     iterate 25 (observed ~22) with no line-search / state mutation;
-#   * the old bordered route alone still reaches a valid Optimal;
-#   * LP/SOC/PSD/Exp one-step prepared-core routes still pass.
+# This validation adds no tolerance, fallback, public route switch, QDLDL, or
+# PureKLU.  It records the factual fix for the former late-Power trajectory
+# regression and keeps the public default old bordered route authoritative.
 using Test
 using SDPX
 using LinearAlgebra
