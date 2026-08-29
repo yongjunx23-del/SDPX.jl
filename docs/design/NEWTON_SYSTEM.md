@@ -411,3 +411,25 @@ scalar type (no Float64 downcast).  It also exercises a real
 `BlockProductConeLinearization` multi-block case with exact block-diagonal
 Theta materialization and all five residual groups.  This is shadow validation
 only: no production route dispatches the core yet.
+
+## Product-HSD same-iterate symmetric-core shadow parity (C6b)
+
+`validation/product_hsd_symmetric_shadow.jl` drives the real
+`ProductConeHSDState` (production `hsd_equality_reduce` → reduced program →
+`kkt_route=:expanded`) on deterministic Float64 LP/SOCP/SDP/Exp/Power
+benchmark cases.  The expanded route produces the authoritative predictor
+and corrector; at the same iterate the symmetric augmented core (CHOLMOD
+signed-LDL with original-`K` refinement) recomputes both directions without
+updating `x/s/y/tau/kappa`.  Every case asserts:
+
+- the shadow predictor and corrector satisfy the frozen five-equation
+  residual gate;
+- direction parity against the expanded reference at a scale-aware bound;
+- one factor, one homogeneous solve, two variable solves, independent
+  snapshots;
+- the iterate and the reference direction/scratch are bitwise unchanged
+  after the comparison.
+
+Cases whose reference direction cannot be produced or whose core is not
+applicable are recorded explicitly with the exact family/reason; none are
+silently skipped or tolerance-loosened.
