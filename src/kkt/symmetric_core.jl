@@ -480,8 +480,12 @@ mutable struct SymmetricCoreWorkspace{
     row_sums::Vector{T}        # scratch for the exact symmetric row-sum norm
     pattern_signature::UInt64  # frozen structural Ar/block signature
     structure_signature::UInt64 # full frozen CSC structure signature
-    operator_signature::UInt64 # static numeric operator signature (no RHS)
+    operator_signature::UInt64 # static operator identity (A,b,c,V,structure)
+    theta_signature::UInt64    # numeric Theta signature frozen per factor epoch
+    epoch_tau::T               # tau frozen at the factor epoch
+    epoch_kappa::T             # kappa frozen at the factor epoch
     cache_signature::UInt64    # provider symbolic/factor signature, if exposed
+    factor_receipt::Union{Nothing,FactorReceipt{T}}
     matrix_epoch::Int
     factor_epoch::Int
     homogeneous_epoch::Int
@@ -569,7 +573,11 @@ function _core_mix_cone_signature(
     return signature
 end
 
-"""Content-based signature of the static Newton operator; deliberately no RHS."""
+"""Content-based signature of the full Newton operator; deliberately no RHS.
+
+Includes the current numeric `pattern.nzval` (Theta blocks), `tau`/`kappa`, and
+the cone numeric values.  Used by tests to prove a numeric mutation is visible.
+"""
 function _core_operator_signature(
     pattern::SymmetricCorePattern,
     V::AbstractMatrix,
@@ -586,6 +594,48 @@ function _core_operator_signature(
     signature = _core_mix_uint(signature, UInt64(hash(system.kappa)))
     return signature
 end
+
+"""Static symmetric-core identity: A, b, c, V and the frozen CSC structure.
+
+Deliberately excludes the numeric `Theta` (pattern.nzval), `tau`/`kappa`, and
+every RHS field.  This identity must be invariant across scaling/matrix epochs;
+only the Theta numeric values, tau/kappa and RHS may change.
+"""
+function _core_static_signature(
+    pattern::SymmetricCorePattern,
+    V::AbstractMatrix,
+    system::NewtonSystem,
+)
+    signature = _core_structure_signature(pattern)
+    signature = _core_mix_values(signature, V)
+    signature = _core_mix_values(signature, system.A)
+    signature = _core_mix_values(signature, system.b)
+    signature = _core_mix_values(signature, system.c)
+    return signature
+end
+
+"""Content signature of the current numeric Theta operator (K numeric values)."""
+function _core_pattern_theta_signature(pattern::SymmetricCorePattern)
+    return _core_mix_values(UInt64(0xcbf29ce484222325), pattern.nzval)
+end
+
+"""Content signature of the Theta numeric values of a semantic cone."""
+function _core_cone_theta_signature(
+    cone::Union{ProductConeLinearization,BlockProductConeLinearization},
+)
+    if cone isa ProductConeLinearization
+        return _core_mix_values(UInt64(0xcbf29ce484222325), cone.operator)
+    end
+    signature = UInt64(0xcbf29ce484222325)
+    signature = _core_mix_uint(signature, UInt64(length(cone.operators)))
+    for operator in cone.operators
+        signature = _core_mix_values(signature, operator)
+    end
+    return signature
+end
+_core_cone_theta_signature(::AbstractConeLinearization) = throw(ArgumentError(
+    "symmetric core requires a product or block-product cone linearization",
+))
 
 @inline _core_cache_signature(cache::SparseSymbolicNumericCache) = cache.signature
 @inline _core_cache_signature(::AbstractFactorCache) = UInt64(0)
@@ -677,7 +727,7 @@ function _symmetric_core_workspace_prevalidated(
     )
     pattern_signature = symmetric_core_signature(pattern)
     structure_signature = _core_structure_signature(pattern)
-    operator_signature = _core_operator_signature(pattern, V_owned, system)
+    operator_signature = _core_static_signature(pattern, V_owned, system)
     return SymmetricCoreWorkspace{
         T,typeof(pattern),FC,typeof(V_owned),typeof(system),
     }(
@@ -689,7 +739,8 @@ function _symmetric_core_workspace_prevalidated(
         alloc_zeros(T, nr), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m),
         zero(T), _core_newton_residual(T, m, n), original_nzval, row_sums,
         pattern_signature, structure_signature, operator_signature,
-        _core_cache_signature(cache), 0, 0, -1, false,
+        _core_cone_theta_signature(system.cone), system.tau, system.kappa,
+        _core_cache_signature(cache), nothing, 0, 0, -1, false,
         0, 0, 0, 0, zero(T), original_scale,
     )
 end
@@ -726,18 +777,19 @@ pattern without a new factorization therefore fails closed.  A successful new
 factor epoch resets the homogeneous solve seam.
 """
 function sync_core_factor_epoch!(
-    workspace::SymmetricCoreWorkspace{T},
+    workspace::SymmetricCoreWorkspace{T};
+    system::Union{Nothing,NewtonSystem{T}}=nothing,
 ) where {T}
     cache = workspace.cache
     SDPX.factor_status(cache) === Fresh || throw(FactorCacheStateError(
         :sync_core_factor_epoch, Fresh, SDPX.factor_status(cache),
     ))
+    epoch_system = system === nothing ? workspace.system : system
     pattern = workspace.pattern
     pattern_signature = symmetric_core_signature(pattern)
     structure_signature = _core_structure_signature(pattern)
-    operator_signature = _core_operator_signature(
-        pattern, workspace.V, workspace.system,
-    )
+    operator_signature = _core_static_signature(pattern, workspace.V, epoch_system)
+    theta_signature = _core_cone_theta_signature(epoch_system.cone)
     matrix_epoch = SDPX.factor_matrix_epoch(cache)
     factor_epoch = SDPX.factor_epoch(cache)
     cache_signature = _core_cache_signature(cache)
@@ -753,7 +805,10 @@ function sync_core_factor_epoch!(
             "symmetric core CSC structure changed without a new factor epoch",
         ))
         operator_signature == workspace.operator_signature || throw(ArgumentError(
-            "symmetric core operator changed without a new factor epoch",
+            "symmetric core static operator changed without a new factor epoch",
+        ))
+        theta_signature == workspace.theta_signature || throw(ArgumentError(
+            "symmetric core Theta numeric values changed without a new factor epoch",
         ))
         matrix_epoch == workspace.matrix_epoch || throw(ArgumentError(
             "symmetric core matrix epoch changed without a new factor epoch",
@@ -766,10 +821,6 @@ function sync_core_factor_epoch!(
         return workspace
     end
 
-    # A new numeric factor may be synchronized only when it still represents
-    # the same static operator.  A changed pattern/operator requires a new
-    # workspace (and, in particular, a new `cr`/homogeneous seam), rather than
-    # silently pairing an old NewtonSystem with a new matrix.
     if workspace.synchronized
         operator_signature == workspace.operator_signature || throw(ArgumentError(
             "symmetric core static operator changed; construct a new workspace",
@@ -793,12 +844,256 @@ function sync_core_factor_epoch!(
     workspace.pattern_signature = pattern_signature
     workspace.structure_signature = structure_signature
     workspace.operator_signature = operator_signature
+    workspace.theta_signature = theta_signature
+    workspace.epoch_tau = epoch_system.tau
+    workspace.epoch_kappa = epoch_system.kappa
     workspace.cache_signature = cache_signature
     workspace.matrix_epoch = matrix_epoch
     workspace.factor_epoch = factor_epoch
     workspace.homogeneous_epoch = -1
+    workspace.factor_receipt = _core_build_factor_receipt(workspace)
     workspace.synchronized = true
     return workspace
+end
+
+"""Build the minimal immutable FactorReceipt for one successful core epoch.
+
+Provider facts only: actual route/provider/scalar/precision/regularization and
+the pattern signature.  `proof_valid = false` because a provider receipt is
+implementation evidence, never a mathematical certificate; the direction is
+accepted only through the frozen five-equation residual and the original-K
+refinement gates.
+"""
+function _core_build_factor_receipt(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T<:AbstractFloat}
+    cache = workspace.cache
+    diag = try
+        SDPX.factor_diagnostics(cache)
+    catch
+        nothing
+    end
+    provider = diag === nothing ? :provider_unknown :
+        get(diag, :provider, :provider_unknown)
+    kind = diag === nothing ? :unknown : get(diag, :kind, :unknown)
+    precision_bits = diag === nothing ? factor_receipt_precision(T) :
+        Int(get(diag, :precision_bits, factor_receipt_precision(T)))
+    regularization = diag === nothing ? zero(T) :
+        T(get(diag, :regularization, zero(T)))
+    return FactorReceipt(
+        workspace.matrix_epoch,
+        workspace.factor_epoch,
+        workspace.pattern_signature,
+        :symmetric_augmented_core,
+        provider,
+        T,
+        precision_bits,
+        regularization,
+        kind === :ldlt ? :ldlt : :symmetric_ldl,
+        :factored,
+        zero(T),
+        false,
+        0,
+        0,
+    )
+end
+
+"""Refactor the symmetric core for a new scaling/matrix epoch.
+
+Validates that the static operator identity (A,b,c,V and the frozen CSC
+structure) is unchanged, refills the numeric `Theta` from the semantic cone,
+chooses/updates the Float64 signed δ from the current original-K scale,
+factors exactly once, syncs the frozen original snapshot, and solves the
+homogeneous core once.  MultiFloat/BigFloat use the unregularized pivoted-LDL
+cache path unchanged.  Predictor→corrector RHS changes within one epoch are
+handled by `solve_core_direction!` without this seam.
+"""
+function factor_symmetric_core_epoch!(
+    workspace::SymmetricCoreWorkspace{T},
+    system::NewtonSystem{T},
+    matrix_epoch::Integer,
+) where {T<:AbstractFloat}
+    cache = workspace.cache
+    _core_validate_static_identity(workspace, system)
+    _core_refill_from_system!(workspace, system)
+    epoch = Int(matrix_epoch)
+    if T === Float64
+        # Scale δ from the current original-K infinity norm.
+        delta = T(64) * eps(one(T)) * workspace.original_scale
+        isfinite(delta) && delta > zero(T) || throw(ArgumentError(
+            "symmetric core regularization scale is not usable",
+        ))
+        SDPX.set_regularization!(cache, delta)
+        SDPX.factorize!(
+            cache, symmetric_core_lower_sparse(workspace.pattern), epoch,
+        )
+    else
+        SDPX.factorize!(
+            cache, materialize_dense(workspace.pattern), epoch,
+        )
+    end
+    sync_core_factor_epoch!(workspace; system=system)
+    solve_core_homogeneous!(workspace, system)
+    return workspace
+end
+
+"""Validate that a system may reuse this workspace: static identity only.
+
+The numeric Theta, tau/kappa and all RHS fields may change per epoch; the
+static A,b,c,V and the frozen CSC structure must be identical.
+"""
+function _core_validate_static_identity(
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
+) where {T<:AbstractFloat}
+    pattern = workspace.pattern
+    symmetric_core_signature(pattern) == workspace.pattern_signature ||
+        throw(ArgumentError(
+            "symmetric core pattern signature changed across epochs",
+        ))
+    _core_structure_signature(pattern) == workspace.structure_signature ||
+        throw(ArgumentError(
+            "symmetric core CSC structure changed across epochs",
+        ))
+    _core_static_signature(pattern, workspace.V, system) ==
+        workspace.operator_signature || throw(ArgumentError(
+            "symmetric core static operator changed across epochs",
+        ))
+    return true
+end
+
+"""Refill the owned numeric K from a semantic cone without global Theta.
+
+`ProductConeLinearization` refills per declared dense block from its dense
+operator; `BlockProductConeLinearization` writes each block directly into the
+frozen theta slots (ownership-safe for BigFloat), never forming a global
+`Theta` matrix.
+"""
+function _core_refill_from_system!(
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
+) where {T<:AbstractFloat}
+    pattern = workspace.pattern
+    cone = system.cone
+    if cone isa ProductConeLinearization{T}
+        _core_validate_theta_blocks(pattern, cone.operator)
+        _core_write_theta_lower!(pattern, cone.operator)
+    elseif cone isa BlockProductConeLinearization{T}
+        _core_write_block_thetas!(pattern, cone)
+    else
+        throw(ArgumentError(
+            "symmetric core requires a product or block-product cone linearization",
+        ))
+    end
+    return pattern
+end
+
+"""Validate a dense Theta against the frozen block layout (no global copy).
+
+Enforces symmetry, finiteness, cross-block zero structure, and dimensions.
+"""
+function _core_validate_theta_blocks(
+    pattern::SymmetricCorePattern{T}, Theta::AbstractMatrix{T},
+) where {T}
+    size(Theta) == (pattern.m, pattern.m) || throw(DimensionMismatch(
+        "symmetric core Theta dimension $(size(Theta)) disagrees with frozen " *
+        "cone dimension $(pattern.m)",
+    ))
+    all(isfinite, Theta) || throw(ArgumentError(
+        "symmetric core Theta contains non-finite data",
+    ))
+    @inbounds for column in 1:pattern.m
+        for row in column:pattern.m
+            Theta[row, column] == Theta[column, row] || throw(ArgumentError(
+                "symmetric core Theta is not symmetric at ($row, $column)",
+            ))
+        end
+    end
+    for (index, rows) in enumerate(pattern.block_ranges)
+        for column in 1:(first(rows) - 1)
+            for row in rows
+                iszero(Theta[row, column]) &&
+                iszero(Theta[column, row]) || throw(ArgumentError(
+                    "symmetric core Theta has a non-zero cross-block entry " *
+                    "at ($row, $column) between declared cone block ranges",
+                ))
+            end
+        end
+    end
+    return true
+end
+
+"""Write only the Theta lower-triangle slots from a dense operator.
+
+The structural zero x diagonal and the static Ar values are left untouched
+(Ar depends only on the frozen A and V).  Each BigFloat store is an
+independent object.
+"""
+function _core_write_theta_lower!(
+    pattern::SymmetricCorePattern{T}, Theta::AbstractMatrix{T},
+) where {T}
+    nzval = pattern.nzval
+    slot_index = 0
+    for (index, rows) in enumerate(pattern.block_ranges)
+        last_row = last(rows)
+        for column in first(rows):last_row
+            for row in column:last_row
+                slot_index += 1
+                _core_store_owned!(
+                    nzval, pattern.theta_slots[slot_index], -Theta[row, column],
+                )
+            end
+        end
+    end
+    slot_index == length(pattern.theta_slots) || throw(ArgumentError(
+        "symmetric core theta slot coverage mismatch",
+    ))
+    return pattern
+end
+
+"""Write each declared block's lower triangle into the frozen theta slots.
+
+Never materializes a global `Theta`; each BigFloat store is an independent
+object.  Cross-block zeros are structural in the pattern and are enforced by
+the cone constructor.
+"""
+function _core_write_block_thetas!(
+    pattern::SymmetricCorePattern{T}, cone::BlockProductConeLinearization{T},
+) where {T}
+    length(cone.block_ranges) == length(pattern.block_ranges) || throw(ArgumentError(
+        "symmetric core block range count changed across epochs",
+    ))
+    nzval = pattern.nzval
+    slot_index = 0
+    for (index, rows) in enumerate(cone.block_ranges)
+        rows == pattern.block_ranges[index] || throw(ArgumentError(
+            "symmetric core block range changed across epochs",
+        ))
+        block = cone.operators[index]
+        length(rows) == size(block, 1) == size(block, 2) || throw(ArgumentError(
+            "symmetric core block operator dimension mismatch",
+        ))
+        all(isfinite, block) || throw(ArgumentError(
+            "symmetric core block Theta contains non-finite data",
+        ))
+        @inbounds for local_column in 1:length(rows)
+            for local_row in local_column:length(rows)
+                block[local_row, local_column] == block[local_column, local_row] ||
+                    throw(ArgumentError(
+                        "symmetric core block Theta is not symmetric",
+                    ))
+            end
+        end
+        for column in first(rows):last(rows)
+            for row in column:last(rows)
+                slot_index += 1
+                value = -block[row - first(rows) + 1, column - first(rows) + 1]
+                _core_store_owned!(nzval, pattern.theta_slots[slot_index], value)
+            end
+        end
+    end
+    slot_index == length(pattern.theta_slots) || throw(ArgumentError(
+        "symmetric core block refill slot coverage mismatch",
+    ))
+    return pattern
 end
 
 """Evaluate `destination = K_original * source` over the frozen lower
@@ -1022,11 +1317,34 @@ function _core_guard_ready!(
     structure_signature_now == workspace.structure_signature || throw(ArgumentError(
         "symmetric core CSC structure changed after synchronization",
     ))
-    operator_signature_now = _core_operator_signature(
+    # Static identity only: A,b,c,V and the frozen structure.  The numeric
+    # Theta/tau/kappa may change only through a new `factor_symmetric_core_epoch!`,
+    # which freezes a fresh theta_signature; RHS fields may change freely within
+    # one factor epoch.
+    operator_signature_now = _core_static_signature(
         workspace.pattern, workspace.V, system,
     )
     operator_signature_now == workspace.operator_signature || throw(ArgumentError(
         "symmetric core static operator changed; only RHS may change",
+    ))
+    # The live numeric K buffer must still equal the frozen original snapshot:
+    # any refill/Theta mutation without a new factor epoch is stale.
+    workspace.pattern.nzval == workspace.original_nzval || throw(ArgumentError(
+        "symmetric core Theta numeric values changed without a new factor epoch",
+    ))
+    # The Theta signature is taken from the semantic cone of the passed
+    # system.  Within one factor epoch only the RHS fields may change; a
+    # changed cone Theta (even before any refill) is rejected.  The
+    # pattern.nzval == original_nzval check above independently rejects an
+    # external mutation of the owned K buffer.
+    theta_signature_now = _core_cone_theta_signature(system.cone)
+    theta_signature_now == workspace.theta_signature || throw(ArgumentError(
+        "symmetric core Theta numeric values changed within one factor epoch",
+    ))
+    tau_kappa_changed = workspace.epoch_tau != system.tau ||
+                        workspace.epoch_kappa != system.kappa
+    tau_kappa_changed && throw(ArgumentError(
+        "symmetric core tau/kappa changed without a new factor epoch",
     ))
     cache_signature_now = _core_cache_signature(cache)
     (cache_signature_now == workspace.cache_signature ||
@@ -1037,11 +1355,16 @@ function _core_guard_ready!(
     return workspace
 end
 
-"""Solve the homogeneous core at most once for the synchronized factor epoch."""
+"""Solve the homogeneous core at most once for the synchronized factor epoch.
+
+`system` should be the epoch system whose `b` defines the homogeneous RHS; it
+defaults to the workspace's frozen static system.  Only `b`/`c` enter the
+homogeneous RHS, and both are static across epochs.
+"""
 function solve_core_homogeneous!(
     workspace::SymmetricCoreWorkspace{T},
+    system::NewtonSystem{T}=workspace.system,
 ) where {T}
-    system = workspace.system
     _core_guard_ready!(workspace, system)
     workspace.homogeneous_epoch == workspace.factor_epoch && return workspace
     nr = workspace.nr

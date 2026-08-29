@@ -136,7 +136,7 @@ end
 
 function _sparse_pattern_signature(
     colptr::AbstractVector{Int}, rowval::AbstractVector{Int},
-    dsigns::AbstractVector{Int}, regularization::Float64,
+    dsigns::AbstractVector{Int},
 )
     signature = UInt64(0xcbf29ce484222325)
     for value in colptr
@@ -150,8 +150,10 @@ function _sparse_pattern_signature(
         mixed = reinterpret(UInt64, Int64(sign))
         signature = (signature ⊻ mixed) * UInt64(0x100000001b3)
     end
-    signature = (signature ⊻ reinterpret(UInt64, regularization)) *
-                UInt64(0x100000001b3)
+    # The regularization magnitude is deliberately NOT part of the symbolic
+    # identity: changing δ invalidates only the numeric factor (see
+    # `set_regularization!`), preserving the CHOLMOD symbolic object and
+    # `symbolic_count`.  Dsigns remains part of the symbolic signature.
     return signature
 end
 
@@ -223,7 +225,7 @@ function prepare!(
     cache.solve_count = 0
     cache.refine_count = 0
     cache.signature = _sparse_pattern_signature(
-        colptr, rowval, cache.dsigns, Float64(cache.regularization),
+        colptr, rowval, cache.dsigns,
     )
     cache.status = Prepared
     return cache
@@ -477,6 +479,30 @@ function invalidate!(cache::SparseSymbolicNumericCache{T}) where {T}
     cache.factor = nothing
     cache.matrix_epoch = 0
     cache.status = Invalid
+    return cache
+end
+
+"""Update the static signed regularization magnitude for this cache.
+
+A changed δ invalidates only the numeric factor: the CHOLMOD symbolic object
+and its pattern are preserved and reused by the next `factorize!` numeric
+refactor (through public `ldlt!`), so `symbolic_count` never increments and no
+re-analysis runs.  `Fresh` is revoked so a stale solve is impossible; the
+caller must factorize again before solving.
+"""
+function set_regularization!(
+    cache::SparseSymbolicNumericCache{Float64}, delta::Real,
+)
+    isfinite(delta) && delta >= 0 || throw(ArgumentError(
+        "regularization must be finite and nonnegative",
+    ))
+    cache.regularization = Float64(delta)
+    if cache.status === Fresh
+        # Keep the CHOLMOD factor object (symbolic + last numeric), but revoke
+        # the usable numeric state so the next factorize! re-factors.
+        cache.matrix_epoch = 0
+        cache.status = Prepared
+    end
     return cache
 end
 

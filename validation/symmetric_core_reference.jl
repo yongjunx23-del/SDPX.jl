@@ -735,12 +735,22 @@ end
     SDPX.prepare!(c2, req_b)
     c3 = SDPX.SparseSymbolicNumericCache{Float64}()
     SDPX.prepare!(c3, req_c)
+    # Dsigns is part of the symbolic identity; the regularization magnitude is
+    # deliberately NOT (C7.1a): changing δ invalidates only the numeric factor
+    # through `set_regularization!`, preserving the CHOLMOD symbolic object.
     @test SDPX.factor_diagnostics(c1).signature !=
           SDPX.factor_diagnostics(c2).signature
-    @test SDPX.factor_diagnostics(c1).signature !=
+    @test SDPX.factor_diagnostics(c1).signature ==
           SDPX.factor_diagnostics(c3).signature
     @test SDPX.factor_diagnostics(c2).signature !=
           SDPX.factor_diagnostics(c3).signature
+
+    # set_regularization! changes δ without rebuilding symbolic identity.
+    SDPX.set_regularization!(c1, 2e-6)
+    @test SDPX.factor_diagnostics(c1).regularization == 2e-6
+    @test SDPX.factor_diagnostics(c1).signature ==
+          SDPX.factor_diagnostics(c3).signature
+    @test SDPX.factor_status(c1) === SDPX.Prepared   # Fresh revoked
 
     # --- deterministic singular + regularized recovery --------------
     fu = _singular_core_fixture(0.0)
@@ -1005,7 +1015,7 @@ end
                 tau_kappa=bundle.system.rhs.tau_kappa + 0.19,
             )
             corrector_system = _c4_rhs_system(bundle, corrected_rhs)
-            @test SDPX._core_operator_signature(
+            @test SDPX._core_static_signature(
                 bundle.pattern, ws.V, corrector_system,
             ) == ws.operator_signature
             dir2, res2 = SDPX.solve_core_direction!(ws, corrector_system)
@@ -1125,7 +1135,8 @@ end
     end
 
     # A numeric refill without a matching new factor is stale even though the
-    # structural pattern signature is unchanged.
+    # structural pattern signature is unchanged: the live K buffer now differs
+    # from the frozen original snapshot and the guard fails closed.
     bundle2 = _c4_bundle(:identity)
     SDPX.solve_core_homogeneous!(bundle2.ws)
     old_operator_signature = bundle2.ws.operator_signature
@@ -1135,13 +1146,16 @@ end
     SDPX.refill!(bundle2.pattern, Ar2, Theta2)
     @test SDPX.symmetric_core_signature(bundle2.pattern) ==
           bundle2.ws.pattern_signature
-    @test SDPX._core_operator_signature(
+    @test SDPX._core_static_signature(
         bundle2.pattern, bundle2.ws.V, bundle2.system,
-    ) != old_operator_signature
+    ) == old_operator_signature   # static identity unchanged
+    @test bundle2.ws.pattern.nzval != bundle2.ws.original_nzval
     @test_throws ArgumentError SDPX.solve_core_direction!(bundle2.ws, bundle2.system)
 
-    # A refactor is also stale until synchronized, and a changed operator
-    # cannot be attached to the old NewtonSystem/workspace.
+    # A refactor of the same static pattern is a legal new numeric epoch: the
+    # new factor and fresh original snapshot can be synchronized, which resets
+    # the homogeneous seam.  `solve_core_direction!` still rejects the stale
+    # pre-sync state.
     bundle3 = _c4_bundle(:identity)
     SDPX.solve_core_homogeneous!(bundle3.ws)
     Ar3 = sparse(bundle3.system.A * bundle3.ws.V)
@@ -1152,7 +1166,9 @@ end
     SDPX.factorize!(bundle3.cache, K3, 2)
     @test SDPX.factor_epoch(bundle3.cache) == bundle3.ws.factor_epoch + 1
     @test_throws ArgumentError SDPX.solve_core_direction!(bundle3.ws, bundle3.system)
-    @test_throws ArgumentError SDPX.sync_core_factor_epoch!(bundle3.ws)
+    SDPX.sync_core_factor_epoch!(bundle3.ws)   # legal after the new factor
+    @test bundle3.ws.pattern.nzval == bundle3.ws.original_nzval
+    @test bundle3.ws.homogeneous_epoch == -1
 
     # First synchronization must bind to the actual matrix represented by the
     # Fresh factor, not a pattern refilled after factorization.

@@ -446,3 +446,27 @@ tolerance is loosened.  Measured on the five Float64 catalog cases the
 predictor/corrector direction differences are at the `1e-15` level against a
 `1e-9` scale-aware bound, with `factor_epoch == 1`, one homogeneous solve and
 two variable solves.
+
+## Symmetric-core epoch refactor lifecycle (C7.1a)
+
+`SymmetricCoreWorkspace` is setup-owned and reusable across scaling/matrix
+epochs.  The static operator identity (A, b, c, V, and the frozen CSC
+structure) is fixed for the workspace lifetime; only the numeric Theta
+blocks, tau/kappa, and RHS fields may change between epochs.
+
+- `factor_symmetric_core_epoch!(workspace, system, matrix_epoch)` validates
+  the static identity, refills the owned numeric K from the semantic cone
+  (block-owned path for `BlockProductConeLinearization`, no global Theta),
+  chooses/updates the Float64 signed δ from the current original-K scale,
+  factors exactly once, syncs the frozen original-K snapshot, and solves the
+  homogeneous core once.  MultiFloat/BigFloat use the unregularized pivoted
+  LDL cache path unchanged.
+- CHOLMOD regularization is not part of the symbolic pattern signature.
+  `set_regularization!` changes δ, revoking only the numeric factor while
+  preserving the CHOLMOD symbolic object and `symbolic_count`.
+- The workspace builds one `FactorReceipt` per successful epoch with actual
+  provider/type/precision/regularization and `proof_valid = false`; a receipt
+  is implementation evidence, never a mathematical certificate.
+- Predictor→corrector RHS changes within one epoch are legal only when the
+  cone Theta numeric signature and the frozen tau/kappa are unchanged;
+  everything else is rejected by `_core_guard_ready!`.

@@ -368,3 +368,124 @@ end
     @test theta == fixture.H
     @test theta !== fixture.H
 end
+
+# ---------------------------------------------------------------------
+# C7.1a: epoch-refactorable symmetric core lifecycle.
+# ---------------------------------------------------------------------
+
+"""Build a fresh C7 fixture workspace from the LP family."""
+function _c71_bundle()
+    fixture = _ns_fixture(:lp)
+    system = fixture.system
+    V = Matrix{Float64}(I, size(system.A, 2), size(system.A, 2))
+    workspace = SDPX.build_symmetric_core_workspace(
+        system, V, 1, 53, typemax(Int), 0, 1e-6;
+        symbolic_epoch=0,
+    )
+    return (; fixture, system, V, workspace)
+end
+
+@testset "C7.1a symmetric core epoch refactor" begin
+    bundle = _c71_bundle()
+    ws = bundle.workspace
+    cache = ws.cache
+
+    # One factor, one homogeneous solve for the first epoch.
+    @test SDPX.factor_epoch(cache) == 1
+    @test ws.homogeneous_solves == 1
+    @test ws.homogeneous_epoch == ws.factor_epoch
+    @test ws.factor_receipt !== nothing
+    @test ws.factor_receipt.provider === :cholmod
+    @test ws.factor_receipt.matrix_epoch == 1
+    @test !ws.factor_receipt.proof_valid
+    @test ws.factor_receipt.regularization > 0
+
+    # Predictor + corrector share one factor, one homogeneous solve.
+    dir1, res1 = SDPX.solve_core_direction!(ws, bundle.system)
+    corrected = SDPX.HSDNewtonRHS(
+        copy(bundle.system.rhs.primal_affine),
+        copy(bundle.system.rhs.dual_affine),
+        bundle.system.rhs.homogeneous_gap,
+        bundle.system.rhs.cone_corrector .+ [0.13, -0.07],
+        bundle.system.rhs.tau_kappa + 0.19,
+    )
+    corrector_system = SDPX.NewtonSystem(
+        bundle.system.A, bundle.system.b, bundle.system.c,
+        bundle.system.cone, bundle.system.tau, bundle.system.kappa,
+        corrected,
+    )
+    dir2, res2 = SDPX.solve_core_direction!(ws, corrector_system)
+    @test SDPX.factor_epoch(cache) == 1
+    @test ws.homogeneous_solves == 1
+    @test ws.variable_solves == 2
+
+    # A changed Theta/tau/kappa is a new numeric epoch on the SAME static
+    # pattern: symbolic stays 1, numeric becomes 2, homogeneous resets to 2.
+    theta2 = bundle.system.cone.operator .* 1.1
+    lin2 = SDPX.ProductConeLinearization{Float64}(
+        theta2, copy(bundle.system.rhs.cone_corrector),
+        bundle.system.cone.block_ranges,
+    )
+    system2 = SDPX.NewtonSystem(
+        bundle.system.A, bundle.system.b, bundle.system.c, lin2,
+        bundle.system.tau * 1.05, bundle.system.kappa * 1.05,
+        bundle.system.rhs,
+    )
+    SDPX.factor_symmetric_core_epoch!(ws, system2, 2)
+    @test SDPX.factor_epoch(cache) == 2
+    @test SDPX.factor_diagnostics(cache).symbolic_count == 1
+    @test SDPX.factor_diagnostics(cache).numeric_count == 2
+    @test ws.homogeneous_solves == 2
+    @test ws.homogeneous_epoch == ws.factor_epoch
+    @test ws.factor_receipt.matrix_epoch == 2
+    @test ws.original_scale > 1.0
+
+    # Direction at the new epoch still passes the frozen five-equation gate.
+    dir3, res3 = SDPX.solve_core_direction!(ws, system2)
+    @test maximum(abs, res3.primal_affine) <= 4096 * eps(Float64)
+    @test SDPX.factor_epoch(cache) == 2
+
+    # A regularization delta change on the same pattern preserves symbolic and
+    # only revokes/refreshes the numeric factor.
+    symbolic_before = SDPX.factor_diagnostics(cache).symbolic_count
+    delta0 = cache.regularization
+    SDPX.set_regularization!(cache, 2 * delta0)
+    @test SDPX.factor_status(cache) === SDPX.Prepared
+    SDPX.factorize!(cache, SDPX.symmetric_core_lower_sparse(ws.pattern), 2)
+    @test SDPX.factor_status(cache) === SDPX.Fresh
+    @test SDPX.factor_diagnostics(cache).symbolic_count == symbolic_before
+    @test SDPX.factor_diagnostics(cache).regularization == 2 * delta0
+    @test SDPX.factor_epoch(cache) == 3
+
+    # Theta changed within the same factor epoch is rejected.
+    theta_bad = system2.cone.operator .* 1.3
+    lin_bad = SDPX.ProductConeLinearization{Float64}(
+        theta_bad, copy(system2.rhs.cone_corrector), system2.cone.block_ranges,
+    )
+    bad_system = SDPX.NewtonSystem(
+        system2.A, system2.b, system2.c, lin_bad,
+        system2.tau, system2.kappa, system2.rhs,
+    )
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws, bad_system)
+
+    # Static drift (A change) is rejected across epochs.
+    A_bad = copy(system2.A)
+    A_bad[1, 1] += 0.5
+    bad_A_system = SDPX.NewtonSystem(
+        A_bad, system2.b, system2.c, system2.cone,
+        system2.tau, system2.kappa, system2.rhs,
+    )
+    @test_throws ArgumentError SDPX.factor_symmetric_core_epoch!(ws, bad_A_system, 3)
+
+    # tau/kappa change without a new factor is rejected.
+    bad_tk = SDPX.NewtonSystem(
+        system2.A, system2.b, system2.c, system2.cone,
+        system2.tau * 2.0, system2.kappa, system2.rhs,
+    )
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws, bad_tk)
+
+    # Factor receipt facts are truthful.
+    @test ws.factor_receipt.scalar_type === Float64
+    @test ws.factor_receipt.factor_status === :factored
+    @test ws.factor_receipt.provider === :cholmod
+end
