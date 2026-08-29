@@ -1751,24 +1751,74 @@ end
 
 """Total conservative bytes for a prepared symmetric core + block Theta.
 
-Counts the sparse lower-triangle core values, the dense factor storage,
-and every per-block `Theta` matrix.  Used as the cold preflight before
-any block or global dense allocation.
+Counts the sparse lower-triangle core values, the dense factor storage, and
+every per-block `Theta` matrix, with each term saturated at `typemax(Int)`.
+Negative dimensions/sizes are rejected rather than masked to zero, because a
+masked negative could approve an allocation that must fail closed.  A
+saturated `typemax(Int)` result means the estimate is not a valid upper bound
+and the caller must treat the route as ineligible.
 """
 function symmetric_core_state_prepare_bytes(
-    ::Type{T}, dimension::Int, block_sizes::AbstractVector{Int},
+    ::Type{T}, dimension::Integer, block_sizes::AbstractVector{Int},
 ) where {T<:AbstractFloat}
-    d = max(Int(dimension), 0)
+    dimension < 0 && throw(ArgumentError(
+        "symmetric core state dimension must be nonnegative",
+    ))
+    dimension > typemax(Int) && return typemax(Int)
+    d = Int(dimension)
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     block_theta = 0
     for block_size in block_sizes
-        bs = max(Int(block_size), 0)
+        block_size < 0 && throw(ArgumentError(
+            "symmetric core state block sizes must be nonnegative",
+        ))
+        bs = Int(block_size)
         block_theta = saturating_sum_bytes(
             block_theta, saturating_bytes(scalar_bytes, bs, bs),
         )
     end
     core = symmetric_core_dense_bytes(T, d)
     return saturating_sum_bytes(core, block_theta)
+end
+
+"""Dimension-only symmetric-core state preflight.
+
+Validates arithmetic/provider availability and the conservative memory upper
+bound using only the dimensions, canonical block sizes, the scalar type, and
+the supplied budget/RSS facts.  It allocates nothing.  It throws fail-closed
+on a negative or out-of-range dimension, an absent provider, an unknown
+memory fact, an over-budget request, or a saturated (overflowing) byte
+estimate.  `dimension` must already be a checked/saturating `nr + m` sum; the
+caller computes it from base facts before this gate.
+"""
+function symmetric_core_state_preflight(
+    ::Type{T},
+    dimension::Integer,
+    block_sizes::AbstractVector{Int},
+    precision_bits::Int,
+    memory_limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+) where {T<:AbstractFloat}
+    dimension < 0 && throw(ArgumentError(
+        "symmetric core state dimension must be nonnegative",
+    ))
+    dimension > typemax(Int) && throw(ArgumentError(
+        "symmetric core state dimension exceeds the addressable range",
+    ))
+    T === Float64 || symmetric_core_provider_available(T, precision_bits)
+    estimate = symmetric_core_state_prepare_bytes(T, dimension, block_sizes)
+    # A saturated estimate cannot certify an upper bound, even against a
+    # typemax(Int) budget (which would otherwise compare as eligible).
+    estimate >= typemax(Int) && throw(ArgumentError(
+        "symmetric core state byte estimate saturated; route ineligible",
+    ))
+    eligibility = conservative_memory_upper_bound_eligibility(
+        estimate, memory_limit_bytes, current_rss_bytes,
+    )
+    eligibility.eligible || throw(ArgumentError(
+        "symmetric core state ineligible: $(eligibility.reason)",
+    ))
+    return nothing
 end
 
 """Build a numeric-factor-free prepared state workspace.
@@ -1803,20 +1853,13 @@ function prepare_symmetric_core_state(
             "with rows $rows",
         ))
     end
-    # Cold preflight before any allocation.
-    dimension = size(V, 2) + m
-    if T !== Float64
-        symmetric_core_provider_available(T, precision_bits)
-    end
-    estimate = symmetric_core_state_prepare_bytes(
-        T, dimension, collect(Int, block_sizes),
+    # Dimension-only preflight (provider + memory, checked/saturating nr+m)
+    # runs before ANY allocation below.
+    dimension = saturating_sum_bytes(size(V, 2), m)
+    symmetric_core_state_preflight(
+        T, dimension, block_sizes, precision_bits,
+        memory_limit_bytes, current_rss_bytes,
     )
-    eligibility = conservative_memory_upper_bound_eligibility(
-        estimate, memory_limit_bytes, current_rss_bytes,
-    )
-    eligibility.eligible || throw(ArgumentError(
-        "symmetric core state ineligible: $(eligibility.reason)",
-    ))
     # Range/isometry preconditions before materialization.
     _validate_core_preconditions(system, V)
 

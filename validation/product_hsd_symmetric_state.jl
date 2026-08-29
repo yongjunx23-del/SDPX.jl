@@ -59,6 +59,30 @@ function _state_budget(::Type{T}, dimension::Int, blocks::AbstractVector{Int}) w
     return estimate > typemax(Int) - 1024 ? typemax(Int) : estimate + 1024
 end
 
+"""Snapshot every base iterate and direction field preparation could touch."""
+function _base_snapshot(state)
+    base = state.base
+    return (
+        x=copy(base.x), s=copy(base.s), y=copy(base.y),
+        tau=base.tau, kappa=base.kappa,
+        dx=copy(base.dx), dy=copy(base.dy), ds=copy(base.ds),
+        dtau=base.dtau, dkappa=base.dkappa,
+        dx_a=copy(base.dx_a), dy_a=copy(base.dy_a), ds_a=copy(base.ds_a),
+        dtau_a=base.dtau_a, dkappa_a=base.dkappa_a,
+        epoch=base.epoch, h=copy(state.h), gb=copy(state.gb),
+    )
+end
+
+function _base_identical(a, b)
+    return a.x == b.x && a.s == b.s && a.y == b.y &&
+           a.tau == b.tau && a.kappa == b.kappa &&
+           a.dx == b.dx && a.dy == b.dy && a.ds == b.ds &&
+           a.dtau == b.dtau && a.dkappa == b.dkappa &&
+           a.dx_a == b.dx_a && a.dy_a == b.dy_a && a.ds_a == b.ds_a &&
+           a.dtau_a == b.dtau_a && a.dkappa_a == b.dkappa_a &&
+           a.epoch == b.epoch && a.h == b.h && a.gb == b.gb
+end
+
 @testset "C7.1b product HSD symmetric core state ownership" begin
     for id in _STATE_IDS
         @testset "$id" begin
@@ -113,16 +137,19 @@ end
                 @test size(cone.operators[index]) == (length(rows), length(rows))
             end
 
-            # No direction/iterate mutation by preparation alone: cold start
-            # only; the old route's step mutation behavior is covered by C6b.
+            # Non-vacuous mutation check: preparation must not change any base
+            # iterate/direction/scratch field relative to an identical
+            # UNPREPARED state constructed from the same canonical program.
+            unprepared = SDPX.ProductConeHSDState(canonical; kkt_route=:bordered)
+            @test SDPX.product_hsd_symmetric_core(unprepared) === nothing
+            before = _base_snapshot(unprepared)
+            @test _base_identical(_base_snapshot(state), before)
+
+            # Cold-start is deterministic for identical programs: both states
+            # evolve identically, and the prepared core still never factors.
+            SDPX.product_hsd_cold_start!(unprepared)
             SDPX.product_hsd_cold_start!(state)
-            base = state.base
-            snap = (
-                x=copy(base.x), s=copy(base.s), y=copy(base.y),
-                tau=base.tau, kappa=base.kappa,
-            )
-            @test base.x == snap.x && base.s == snap.s && base.y == snap.y
-            @test base.tau == snap.tau && base.kappa == snap.kappa
+            @test _base_identical(_base_snapshot(state), _base_snapshot(unprepared))
             @test SDPX.product_hsd_symmetric_core_prepared(state)
             @test core.factor_epoch == 0   # preparation never factored
             @test core.homogeneous_solves == 0
@@ -147,6 +174,61 @@ end
             symmetric_core_memory_limit=nothing,
             symmetric_core_current_rss=nothing,
         )
+        # The dimension-only gate itself must be allocation-free (scalar work
+        # only), so the tiny cap cannot have triggered any block/operator/RHS
+        # allocation before failing.  Warm the method first so compilation is
+        # excluded from the count.
+        blocks = Int[
+            block.length
+            for block in SDPX.layout_blocks(canonical.cone_layout)
+        ]
+        m = SDPX.hsd_num_slack(SDPX.HSDState(canonical))
+        dim = size(canonical.A, 2) + m
+        budget = _state_budget(Float64, dim, blocks)
+        SDPX.symmetric_core_state_preflight(Float64, dim, blocks, 0, budget, 0)
+        reject = () -> begin
+            try
+                SDPX.symmetric_core_state_preflight(
+                    Float64, dim, blocks, 0, 1, 0,
+                )
+                false
+            catch exception
+                exception isa ArgumentError && return true
+                rethrow()
+            end
+        end
+        @test reject()
+        bytes = @allocated reject()
+        @test bytes < 1 << 16   # no block/operator/RHS allocation before reject
+    end
+
+    @testset "dimension/overflow/saturation fail closed" begin
+        # Negative dimensions/sizes are rejected, never masked to zero.
+        @test_throws ArgumentError SDPX.symmetric_core_state_prepare_bytes(
+            Float64, -1, Int[],
+        )
+        @test_throws ArgumentError SDPX.symmetric_core_state_prepare_bytes(
+            Float64, 5, [-1],
+        )
+        @test_throws ArgumentError SDPX.symmetric_core_state_preflight(
+            Float64, -1, Int[], 0, typemax(Int), 0,
+        )
+        # Out-of-addressable dimension is rejected.
+        @test_throws ArgumentError SDPX.symmetric_core_state_preflight(
+            Float64, UInt128(typemax(Int)) + 1, Int[], 0, typemax(Int), 0,
+        )
+        # Saturated byte estimate is ineligible even against a typemax budget.
+        @test SDPX.symmetric_core_state_prepare_bytes(
+            Float64, typemax(UInt128), Int[],
+        ) == typemax(Int)
+        @test SDPX.symmetric_core_state_prepare_bytes(
+            Float64, typemax(Int), Int[],
+        ) == typemax(Int)
+        @test_throws ArgumentError SDPX.symmetric_core_state_preflight(
+            Float64, typemax(Int), Int[], 0, typemax(Int), 0,
+        )
+        # Checked/saturating nr+m never wraps (existing helper contract).
+        @test SDPX.saturating_sum_bytes(typemax(Int) - 5, 20) == typemax(Int)
     end
 
     @testset "Float32 / unsupported arithmetic fails closed" begin

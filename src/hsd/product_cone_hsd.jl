@@ -371,25 +371,35 @@ function _prepare_product_hsd_symmetric_core(
         block.offset:(block.offset + block.length - 1) for block in blocks
     ]
     block_sizes = Int[block.length for block in blocks]
+    effective_precision = precision_bits == 0 ? (
+        T === BigFloat ? precision(BigFloat) : sig_bits(T)
+    ) : Int(precision_bits)
+    # Dimension-only provider + memory preflight with base facts, before ANY
+    # allocation (RHS vectors, operators, cone, system, metadata arrays).
+    dimension = saturating_sum_bytes(nr, m)
+    symmetric_core_state_preflight(
+        T, dimension, block_sizes, effective_precision,
+        memory_limit_bytes, current_rss_bytes,
+    )
     # A setup-only semantic system: tau/kappa are still zero until cold start,
     # so use one for the layout placeholder.  The workspace is never
     # synchronized or factored here, and no direction solve reads these.
+    # All retained storage is ownership-safe (alloc_zeros for mutable scalars).
     rhs = HSDNewtonRHS(
-        zeros(T, m), zeros(T, n), zero(T), zeros(T, m), zero(T),
+        alloc_zeros(T, m), alloc_zeros(T, n), zero(T),
+        alloc_zeros(T, m), zero(T),
     )
     operators = Matrix{T}[]
     for rows in block_ranges
         push!(operators, alloc_zeros(T, length(rows), length(rows)))
     end
+    cone_rhs = alloc_zeros(T, m)
     cone = BlockProductConeLinearization{T}(
-        operators, zeros(T, m), block_ranges,
+        operators, cone_rhs, block_ranges,
     )
     system = NewtonSystem(
         base.A, base.b, base.c, cone, one(T), one(T), rhs,
     )
-    effective_precision = precision_bits == 0 ? (
-        T === BigFloat ? precision(BigFloat) : sig_bits(T)
-    ) : Int(precision_bits)
     return prepare_symmetric_core_state(
         system,
         base.rank_basis,

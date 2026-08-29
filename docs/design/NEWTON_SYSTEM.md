@@ -483,12 +483,16 @@ blocks, tau/kappa, and RHS fields may change between epochs.
 
 `ProductConeHSDState` may optionally own a prepared (unfactored)
 `symmetric_core` workspace when constructed with
-`prepare_symmetric_core=true`.  The cold seam allocates the frozen
-`symmetric augmented core` CSC pattern, state-owned per-block `Theta`
-operator matrices and cone RHS, and a semantic `BlockProductConeLinearization`
-(no global `m×m` Theta), then prepares the provider cache only.  It never
+`prepare_symmetric_core=true`.  The cold seam runs a dimension-only
+provider + memory preflight (`symmetric_core_state_preflight`) from base
+facts (`nr`, `m`, canonical block sizes, arithmetic, budget, RSS) before ANY
+allocation; a negative/out-of-range dimension, absent provider, unknown or
+over-budget memory fact, or saturated (overflowing) byte estimate fails
+closed.  Only after the gate are the frozen `symmetric augmented core` CSC
+pattern, state-owned per-block `Theta` operator matrices and cone RHS, and a
+semantic `BlockProductConeLinearization` (no global `m×m` Theta) allocated
+ownership-safely, then the provider cache is prepared only.  It never
 factors, never solves, and no direction dispatch reads the field; the old
-bordered/expanded/sparse routes remain authoritative.  A conservative
-memory preflight (core + per-block `Theta`) runs before any allocation, and
-unknown/over-budget memory facts fail closed.  `prepare_symmetric_core=false`
-(default) stores `nothing` and preserves all previous behavior.
+bordered/expanded/sparse routes remain authoritative.
+`prepare_symmetric_core=false` (default) stores `nothing` and preserves all
+previous behavior.

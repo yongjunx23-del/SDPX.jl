@@ -893,3 +893,93 @@ end
         end
     end
 end
+
+
+# C7.1b bounded BigFloat prepared-state ownership: the state-owned block
+# Theta operators, cone RHS, NewtonSystem placeholder arrays, core pattern
+# values, and workspace buffers must all be independent BigFloat objects at
+# the exact ambient precision, never aliasing canonical/base/operator/RHS
+# storage.  Uses the provider-backed dense LDL prepare path with a real
+# memory gate; no factorization is performed.
+function _exercise_prepared_state_bigfloat(::Type{BigFloat}, precision_bits::Int)
+    m, n = 5, 3
+    A = SDPX.alloc_zeros(BigFloat, m, n)
+    A[1, 1] = BigFloat(1); A[2, 2] = BigFloat(1); A[3, 1] = BigFloat(1)
+    A[3, 2] = BigFloat(1); A[4, 3] = BigFloat(1); A[5, 1] = BigFloat(1)
+    A[5, 3] = BigFloat(1)
+    b = SDPX.alloc_zeros(BigFloat, m)
+    c = SDPX.alloc_zeros(BigFloat, n)
+    for i in 1:m; b[i] = BigFloat(i) / BigFloat(m); end
+    for j in 1:n; c[j] = BigFloat(j) / BigFloat(n); end
+    block_ranges = UnitRange{Int}[1:2, 3:5]
+    block_sizes = Int[2, 3]
+    # Placeholder setup system (tau/kappa = 1) mirrors the state seam.
+    rhs = SDPX.HSDNewtonRHS(
+        SDPX.alloc_zeros(BigFloat, m), SDPX.alloc_zeros(BigFloat, n),
+        BigFloat(0), SDPX.alloc_zeros(BigFloat, m), BigFloat(0),
+    )
+    operators = Matrix{BigFloat}[
+        SDPX.alloc_zeros(BigFloat, length(rows), length(rows))
+        for rows in block_ranges
+    ]
+    cone_rhs = SDPX.alloc_zeros(BigFloat, m)
+    cone = SDPX.BlockProductConeLinearization{BigFloat}(
+        operators, cone_rhs, block_ranges,
+    )
+    system = SDPX.NewtonSystem(
+        A, b, c, cone, BigFloat(1), BigFloat(1), rhs,
+    )
+    V = Matrix{BigFloat}(I, n, n)
+    dimension = n + m
+    estimate = SDPX.symmetric_core_state_prepare_bytes(
+        BigFloat, dimension, block_sizes,
+    )
+    budget = estimate > typemax(Int) - 1024 ? typemax(Int) : estimate + 1024
+    # Provider + memory preflight must pass before any allocation.
+    SDPX.symmetric_core_state_preflight(
+        BigFloat, dimension, block_sizes, precision_bits, budget, 0,
+    )
+    workspace = SDPX.prepare_symmetric_core_state(
+        system, V, block_ranges, block_sizes, precision_bits, budget, 0, 0.0;
+        symbolic_epoch=0,
+    )
+    @test SDPX.factor_status(workspace.cache) === SDPX.Prepared
+    @test workspace.factor_epoch == 0
+    @test workspace.homogeneous_solves == 0
+    @test workspace.variable_solves == 0
+
+    # Block operators are independent, precision-exact, and never alias the
+    # canonical A/b/c/cone/RHS storage.
+    for op in workspace.system.cone.operators
+        @test all(i == j || op[i] !== op[j]
+                  for i in eachindex(op), j in eachindex(op))
+        @test all(precision(value) == precision_bits for value in op)
+        @test op !== A && op !== b && op !== c
+    end
+    @test all(i == j || workspace.system.cone.corrector_rhs[i] !==
+              workspace.system.cone.corrector_rhs[j]
+              for i in eachindex(workspace.system.cone.corrector_rhs),
+              j in eachindex(workspace.system.cone.corrector_rhs))
+    @test workspace.system.cone.corrector_rhs !== b
+    # Core pattern numeric values are owned at the exact precision.
+    nzval = workspace.pattern.nzval
+    @test all(i == j || nzval[i] !== nzval[j]
+              for i in eachindex(nzval), j in eachindex(nzval))
+    @test all(precision(value) == precision_bits for value in nzval)
+    # Workspace RHS/solution buffers are owned.
+    @test all(i == j || workspace.rhs_core[i] !== workspace.rhs_core[j]
+              for i in eachindex(workspace.rhs_core),
+              j in eachindex(workspace.rhs_core))
+    @test all(i == j || workspace.sol_core[i] !== workspace.sol_core[j]
+              for i in eachindex(workspace.sol_core),
+              j in eachindex(workspace.sol_core))
+    return workspace
+end
+
+@testset "C7.1b prepared-state BigFloat ownership" begin
+    if _REQUIRE_BFLA
+        setprecision(BigFloat, 256) do
+            _exercise_prepared_state_bigfloat(BigFloat, 256)
+        end
+    end
+end
