@@ -208,6 +208,16 @@ function assemble_fixed_trace_q3_contribution!(
     local_metric::AbstractMatrix{T},
     regularization::T,
 ) where {T}
+    blocks = size(contribution.reduction.active_ids, 2)
+    size(local_metric) == (3, blocks) || throw(DimensionMismatch(
+        "fixed-trace Q3 local metric must be 3×$blocks, got $(size(local_metric))",
+    ))
+    isfinite(regularization) && regularization >= zero(T) || throw(ArgumentError(
+        "fixed-trace Q3 regularization must be finite and nonnegative",
+    ))
+    # Each assembly is a complete numeric epoch.  In particular, a successful
+    # unregularized retry must not retain diagonal shifts from an earlier rung.
+    fill!(contribution.regularization_scratch, zero(T))
     return fixed_trace_q3_local_elimination(
         contribution.reduction,
         local_metric,
