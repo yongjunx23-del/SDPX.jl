@@ -637,41 +637,30 @@ function _core_operator_in_range(
 end
 
 function SymmetricCoreWorkspace(
-    pattern::SymmetricCorePattern{T},
-    cache::FC,
-    V::AbstractMatrix{T},
-    system::NewtonSystem{T},
+    pattern::SymmetricCorePattern{T}, cache::FC,
+    V::AbstractMatrix{T}, system::NewtonSystem{T},
+) where {T<:AbstractFloat,FC<:AbstractFactorCache{T}}
+    _validate_core_preconditions(system, V)
+    return _symmetric_core_workspace_prevalidated(pattern, cache, V, system)
+end
+
+# Internal path for callers that already ran `_validate_core_preconditions`
+# before any materialization.  It owns/copies workspace storage only and does
+# not repeat Gram/range validation.
+function _symmetric_core_workspace_prevalidated(
+    pattern::SymmetricCorePattern{T}, cache::FC,
+    V::AbstractMatrix{T}, system::NewtonSystem{T},
 ) where {T<:AbstractFloat,FC<:AbstractFactorCache{T}}
     nr = size(V, 2)
     n = length(system.c)
     m = length(system.b)
-    size(V, 1) == n || throw(DimensionMismatch(
-        "rank-reduction basis rows $n do not match V rows $(size(V, 1))",
-    ))
     pattern.nr == nr || throw(DimensionMismatch(
         "pattern reduced dimension $(pattern.nr) disagrees with V columns $nr",
     ))
     pattern.m == m || throw(DimensionMismatch(
         "pattern cone dimension $(pattern.m) disagrees with system rows $m",
     ))
-    # V'V = I (orthonormal rank-reduction basis to roundoff).
-    VV = Matrix{T}(V') * Matrix{T}(V)
-    isometry_tol = T(64) * eps(one(T))
-    for j in 1:nr, i in 1:nr
-        expected = i == j ? one(T) : zero(T)
-        abs(VV[i, j] - expected) <= isometry_tol || throw(ArgumentError(
-            "symmetric core workspace requires V'V = I " *
-            "(deviation $(abs(VV[i, j] - expected)))",
-        ))
-    end
     dimension = nr + m
-    range_work = alloc_zeros(T, n)
-    _core_operator_in_range(V, system.A, range_work) || throw(ArgumentError(
-        "symmetric core requires every row of A to lie in range(V)",
-    ))
-    _core_vector_in_range(V, system.c, range_work) || throw(ArgumentError(
-        "symmetric core requires c to lie in range(V)",
-    ))
     V_owned = alloc_zeros(T, size(V, 1), size(V, 2))
     copy_owned!(V_owned, V)
     cr = alloc_zeros(T, nr)
@@ -1515,7 +1504,9 @@ function build_symmetric_core_workspace(
         factorize!(cache, materialize_dense(pattern), Int(matrix_epoch))
         cache
     end
-    workspace = SymmetricCoreWorkspace(pattern, cache, V, system)
+    workspace = _symmetric_core_workspace_prevalidated(
+        pattern, cache, V, system,
+    )
     sync_core_factor_epoch!(workspace)
     solve_core_homogeneous!(workspace)
     return workspace
