@@ -349,3 +349,142 @@ symbol, or `nothing` for an unregistered specialization.
         return :nonsymmetric_scaling_contribution3
     return nothing
 end
+
+# ---------------------------------------------------------------------------
+# Equality-side Schur contribution for disjoint fixed-trace Q3 tails.
+# Internal/opt-in: public HSD dispatch must preserve explicit equality rows
+# before this workspace can become production reachable.
+# ---------------------------------------------------------------------------
+
+mutable struct FixedTraceQ3EqualitySchurWorkspace{T}
+    local_elimination::FixedTraceQ3LocalElimination{T}
+    panel::Matrix{T}              # equality × local-variable coordinates
+    transformed_panel::Matrix{T}  # L^-1 * panel'
+    schur::Matrix{T}
+    local_rhs::Vector{T}
+    local_solution::Vector{T}
+    equality_work::Vector{T}
+end
+
+function FixedTraceQ3EqualitySchurWorkspace(
+    reduction::FixedTraceQ3Reduction{T}, panel::AbstractMatrix{T},
+) where {T}
+    variables = size(reduction.active_ids, 2) * 2
+    size(panel, 2) == variables || throw(DimensionMismatch(
+        "fixed-trace equality panel must have $variables local columns",
+    ))
+    sort!(vec(copy(reduction.active_ids))) == collect(1:variables) ||
+        throw(ArgumentError(
+            "fixed-trace equality Schur requires a disjoint complete local-variable partition",
+        ))
+    all(isfinite, panel) || throw(ArgumentError(
+        "fixed-trace equality panel contains non-finite data",
+    ))
+    equalities = size(panel, 1)
+    panel_owned = alloc_zeros(T, equalities, variables)
+    copy_owned!(panel_owned, panel)
+    return FixedTraceQ3EqualitySchurWorkspace{T}(
+        FixedTraceQ3LocalElimination(reduction),
+        panel_owned,
+        alloc_zeros(T, variables, equalities),
+        alloc_zeros(T, equalities, equalities),
+        alloc_zeros(T, variables),
+        alloc_zeros(T, variables),
+        alloc_zeros(T, equalities),
+    )
+end
+
+function prepare_fixed_trace_q3_equality_schur!(
+    workspace::FixedTraceQ3EqualitySchurWorkspace{T},
+    local_metric::AbstractMatrix{T}, regularization::T=zero(T),
+) where {T}
+    assemble_fixed_trace_q3_contribution!(
+        workspace.local_elimination, local_metric, regularization,
+    ) || return false
+    copyto!(workspace.transformed_panel, transpose(workspace.panel))
+    fixed_trace_q3_trsm_lower!(
+        workspace.local_elimination.reduction,
+        workspace.local_elimination.factors,
+        workspace.local_elimination.inverse_pivots,
+        workspace.transformed_panel,
+    )
+    mul!(workspace.schur, transpose(workspace.transformed_panel),
+         workspace.transformed_panel)
+    all(isfinite, workspace.schur) || return false
+    return true
+end
+
+function _fixed_trace_q3_local_solve!(
+    destination::AbstractVector{T},
+    workspace::FixedTraceQ3EqualitySchurWorkspace{T},
+    rhs::AbstractVector{T},
+) where {T}
+    length(destination) == length(rhs) == size(workspace.panel, 2) ||
+        throw(DimensionMismatch("fixed-trace local solve dimension mismatch"))
+    copyto!(destination, rhs)
+    fixed_trace_q3_trsv_lower!(
+        workspace.local_elimination.reduction,
+        workspace.local_elimination.factors,
+        workspace.local_elimination.inverse_pivots, destination,
+    )
+    fixed_trace_q3_trsv_transpose!(
+        workspace.local_elimination.reduction,
+        workspace.local_elimination.factors,
+        workspace.local_elimination.inverse_pivots, destination,
+    )
+    return destination
+end
+
+function fixed_trace_q3_equality_schur_action!(
+    destination::AbstractVector{T},
+    workspace::FixedTraceQ3EqualitySchurWorkspace{T},
+    source::AbstractVector{T},
+) where {T}
+    length(source) == size(workspace.panel, 1) || throw(DimensionMismatch(
+        "fixed-trace equality source dimension mismatch",
+    ))
+    length(destination) == length(source) || throw(DimensionMismatch(
+        "fixed-trace equality destination dimension mismatch",
+    ))
+    mul!(workspace.local_rhs, transpose(workspace.panel), source)
+    _fixed_trace_q3_local_solve!(
+        workspace.local_solution, workspace, workspace.local_rhs,
+    )
+    mul!(destination, workspace.panel, workspace.local_solution)
+    return destination
+end
+
+"""Form `B*H^-1*q - g`, the RHS of `(B*H^-1*B')*y = ...`."""
+function fixed_trace_q3_equality_rhs!(
+    destination::AbstractVector{T},
+    workspace::FixedTraceQ3EqualitySchurWorkspace{T},
+    local_rhs::AbstractVector{T}, equality_rhs::AbstractVector{T},
+) where {T}
+    length(destination) == length(equality_rhs) == size(workspace.panel, 1) ||
+        throw(DimensionMismatch("fixed-trace equality RHS dimension mismatch"))
+    _fixed_trace_q3_local_solve!(
+        workspace.local_solution, workspace, local_rhs,
+    )
+    mul!(destination, workspace.panel, workspace.local_solution)
+    @inbounds for index in eachindex(destination, equality_rhs)
+        destination[index] -= equality_rhs[index]
+    end
+    return destination
+end
+
+"""Recover `x = H^-1*(q - B'*y)` after the equality Schur solve."""
+function recover_fixed_trace_q3_local_direction!(
+    destination::AbstractVector{T},
+    workspace::FixedTraceQ3EqualitySchurWorkspace{T},
+    local_rhs::AbstractVector{T}, equality_solution::AbstractVector{T},
+) where {T}
+    length(destination) == length(local_rhs) == size(workspace.panel, 2) ||
+        throw(DimensionMismatch("fixed-trace local recovery dimension mismatch"))
+    mul!(workspace.local_rhs, transpose(workspace.panel), equality_solution)
+    @inbounds for index in eachindex(workspace.local_rhs, local_rhs)
+        workspace.local_rhs[index] = local_rhs[index] - workspace.local_rhs[index]
+    end
+    return _fixed_trace_q3_local_solve!(
+        destination, workspace, workspace.local_rhs,
+    )
+end
