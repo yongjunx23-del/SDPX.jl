@@ -318,4 +318,53 @@ end
             @test predictor.ds !== corrector.ds
         end
     end
+
+    # Preflight validation must reject an invalid rank basis / operator before
+    # any Theta/A*V/pattern materialization or factorization work.
+    fixture = _ns_fixture(:soc)
+    V = Matrix{Float64}(I, size(fixture.A, 2), size(fixture.A, 2))
+    # Non-orthonormal V (columns not unit length) is rejected by isometry.
+    bad_V = 2.0 .* V
+    @test_throws ArgumentError SDPX.build_symmetric_core_workspace(
+        fixture.system, bad_V, 1, 256, typemax(Int), 0, 1e-6;
+        symbolic_epoch=0,
+    )
+    # Rank-reduced V: any A row or c with a component outside range(V) must
+    # fail closed before pattern construction.
+    V_reduced = reshape([1.0, 0.0], size(fixture.A, 2), 1)  # span e1
+    @test_throws ArgumentError SDPX.symmetric_core_pattern_from_system(
+        fixture.system, V_reduced,
+    )
+    # A system genuinely in range(V_reduced) passes preconditions.
+    A_reduced = [1.0 0; 0.5 0; -0.25 0]
+    c_reduced = [0.75, 0.0]
+    reduced_system = SDPX.NewtonSystem(
+        A_reduced, fixture.b, c_reduced, fixture.system.cone,
+        fixture.tau, fixture.kappa, fixture.rhs,
+    )
+    pattern_reduced = SDPX.symmetric_core_pattern_from_system(
+        reduced_system, V_reduced,
+    )
+    @test SDPX.symmetric_core_dimension(pattern_reduced) ==
+          size(V_reduced, 2) + length(fixture.b)
+
+    # Unsupported arithmetic has no dense LDL provider and fails closed.
+    @test_throws ArgumentError SDPX.symmetric_core_provider_available(
+        Float32, 24,
+    )
+    @test_throws ArgumentError SDPX.build_symmetric_core_ldlt_cache(
+        Float32, SDPX.SymmetricCorePattern{Float32}(
+            sparse(Float32.(Matrix(fixture.A))), [1:size(fixture.A, 1)],
+            [:dense_lower],
+        ), 24, typemax(Int), 0,
+    )
+
+    # BlockProduct Theta materialization is owned and block-diagonal.
+    m = size(fixture.A, 1)
+    block_lin = SDPX.BlockProductConeLinearization{Float64}(
+        [fixture.H], fixture.rhs.cone_corrector, [1:m],
+    )
+    theta = SDPX.symmetric_core_theta(block_lin)
+    @test theta == fixture.H
+    @test theta !== fixture.H
 end

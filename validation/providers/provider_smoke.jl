@@ -571,22 +571,50 @@ function _c6a_provider_directions(::Type{T}, precision_bits::Int) where {T}
         corrector, corrector_residual)
 end
 
+# Arithmetic-generic direct solve of the full five-equation Jacobian in the
+# provider's own scalar type.  The identity matrix and every block are built
+# in `T` (owned for BigFloat), so no Float64 downcast ever occurs and the
+# resulting reference direction is compared at provider precision.
 function _c6a_direct_five(A, b, c, H, tau, kappa, rhs)
+    T = eltype(A)
     m, n = size(A)
-    J = zeros(n + 2m + 2, n + 2m + 2)
+    J = SDPX.alloc_zeros(T, n + 2m + 2, n + 2m + 2)
+    identity = SDPX.alloc_zeros(T, m, m)
+    for i in 1:m
+        identity[i, i] = one(T)
+    end
     xc = 1:n; dyc = (n+1):(n+m); dsc = (n+m+1):(n+2m)
     dtc = n + 2m + 1; dc = n + 2m + 2
-    J[1:m, xc] .= A
-    J[1:m, dsc] .= Matrix{Float64}(I, m, m)
-    J[1:m, dtc] .= -b
-    J[(m+1):(m+n), dyc] .= Matrix(transpose(A))
-    J[(m+1):(m+n), dtc] .= c
+    @inbounds for i in 1:m, j in 1:n
+        J[i, xc[j]] = A[i, j]
+        J[i, dsc[i]] = one(T)
+    end
+    @inbounds for i in 1:m
+        J[i, dtc] = -b[i]
+    end
+    @inbounds for i in 1:m, j in 1:n
+        J[m + j, dyc[i]] = A[i, j]
+    end
+    @inbounds for j in 1:n
+        J[m + j, dtc] = c[j]
+    end
     r = m + n + 1
-    J[r, xc] .= -c; J[r, dyc] .= -b; J[r, dc] = 1
-    J[(m+n+2):(2m+n+1), dyc] .= H
-    J[(m+n+2):(2m+n+1), dsc] .= Matrix{Float64}(I, m, m)
+    @inbounds for j in 1:n
+        J[r, xc[j]] = -c[j]
+    end
+    @inbounds for i in 1:m
+        J[r, dyc[i]] = -b[i]
+    end
+    J[r, dc] = one(T)
+    @inbounds for i in 1:m, j in 1:m
+        J[m + n + 1 + i, dyc[j]] = H[i, j]
+    end
+    @inbounds for i in 1:m
+        J[m + n + 1 + i, dsc[i]] = one(T)
+    end
     r = 2m + n + 2
-    J[r, dtc] = kappa; J[r, dc] = tau
+    J[r, dtc] = kappa
+    J[r, dc] = tau
     rhs_v = vcat(
         rhs.primal_affine, rhs.dual_affine, rhs.homogeneous_gap,
         rhs.cone_corrector, rhs.tau_kappa,
@@ -611,24 +639,19 @@ function _exercise_c6a_provider(::Type{T}, precision_bits::Int) where {T}
     @test workspace.directions == 2
     @test workspace.homogeneous_epoch == workspace.factor_epoch
 
+    # Predictor reference: direct five-equation solve in the provider's own
+    # arithmetic (no Float64 downcast).
     ref = _c6a_direct_five(
-        Float64.(Matrix(fixture.system.A)), Float64.(fixture.system.b),
-        Float64.(fixture.system.c), Float64.(Matrix(fixture.system.cone.operator)),
-        Float64(fixture.system.tau), Float64(fixture.system.kappa),
-        (primal_affine=Float64.(fixture.system.rhs.primal_affine),
-         dual_affine=Float64.(fixture.system.rhs.dual_affine),
-         homogeneous_gap=Float64(fixture.system.rhs.homogeneous_gap),
-         cone_corrector=Float64.(fixture.system.rhs.cone_corrector),
-         tau_kappa=Float64(fixture.system.rhs.tau_kappa)),
+        Matrix(fixture.system.A), fixture.system.b, fixture.system.c,
+        Matrix(fixture.system.cone.operator),
+        fixture.system.tau, fixture.system.kappa, fixture.system.rhs,
     )
-    # Provider direction must match the direct five-equation solve in the
-    # provider's own precision.
     tol = T(4096) * sqrt(eps(one(T)))
-    @test isapprox(predictor.dx, T.(ref.dx); atol=tol, rtol=T(0))
-    @test isapprox(predictor.dy, T.(ref.dy); atol=tol, rtol=T(0))
-    @test isapprox(predictor.ds, T.(ref.ds); atol=tol, rtol=T(0))
-    @test isapprox(predictor.dtau, T(ref.dtau); atol=tol, rtol=T(0))
-    @test isapprox(predictor.dkappa, T(ref.dkappa); atol=tol, rtol=T(0))
+    @test isapprox(predictor.dx, ref.dx; atol=tol, rtol=T(0))
+    @test isapprox(predictor.dy, ref.dy; atol=tol, rtol=T(0))
+    @test isapprox(predictor.ds, ref.ds; atol=tol, rtol=T(0))
+    @test isapprox(predictor.dtau, ref.dtau; atol=tol, rtol=T(0))
+    @test isapprox(predictor.dkappa, ref.dkappa; atol=tol, rtol=T(0))
     @test maximum(abs, predictor_residual.primal_affine) <= tol
     @test maximum(abs, predictor_residual.dual_affine) <= tol
     @test abs(predictor_residual.homogeneous_gap) <= tol
@@ -640,7 +663,30 @@ function _exercise_c6a_provider(::Type{T}, precision_bits::Int) where {T}
                   for value in predictor.dx)
     end
 
-    # Corrected corrector: same factor, changed RHS, still small residual.
+    # Corrected corrector: independent direct reference with the changed RHS,
+    # compared field-by-field in the same provider arithmetic.
+    corrected_rhs = SDPX.HSDNewtonRHS(
+        copy(fixture.system.rhs.primal_affine),
+        copy(fixture.system.rhs.dual_affine),
+        fixture.system.rhs.homogeneous_gap,
+        fixture.system.rhs.cone_corrector .+ T[0.13, -0.07, 0.11],
+        fixture.system.rhs.tau_kappa + T(0.19),
+    )
+    corrector_system = SDPX.NewtonSystem(
+        fixture.system.A, fixture.system.b, fixture.system.c,
+        fixture.system.cone, fixture.system.tau, fixture.system.kappa,
+        corrected_rhs,
+    )
+    ref_corrected = _c6a_direct_five(
+        Matrix(corrector_system.A), corrector_system.b, corrector_system.c,
+        Matrix(corrector_system.cone.operator),
+        corrector_system.tau, corrector_system.kappa, corrector_system.rhs,
+    )
+    @test isapprox(corrector.dx, ref_corrected.dx; atol=tol, rtol=T(0))
+    @test isapprox(corrector.dy, ref_corrected.dy; atol=tol, rtol=T(0))
+    @test isapprox(corrector.ds, ref_corrected.ds; atol=tol, rtol=T(0))
+    @test isapprox(corrector.dtau, ref_corrected.dtau; atol=tol, rtol=T(0))
+    @test isapprox(corrector.dkappa, ref_corrected.dkappa; atol=tol, rtol=T(0))
     @test maximum(abs, corrector_residual.primal_affine) <= tol
     @test maximum(abs, corrector_residual.dual_affine) <= tol
     @test abs(corrector_residual.homogeneous_gap) <= tol
@@ -696,19 +742,41 @@ function _exercise_c6a_multi_block(::Type{T}, precision_bits::Int) where {T}
         SDPX.LocalConeLinearization(3:5, H[3:5,3:5], copy(cone[3:5])),
     ]
     lin = SDPX.assemble_cone_linearization(T, m, blocks)
-    system = SDPX.NewtonSystem(A, b, c, lin, tau, kappa, rhs)
+    # Use a true BlockProductConeLinearization so the per-block Theta path is
+    # exercised (distinct from the dense ProductConeLinearization path).
+    block_lin = SDPX.BlockProductConeLinearization{T}(
+        [H[1:2,1:2], H[3:5,3:5]], cone, [1:2, 3:5],
+    )
+    @test SDPX.product_cone_block_ranges(block_lin) == [1:2, 3:5]
+    system = SDPX.NewtonSystem(A, b, c, block_lin, tau, kappa, rhs)
     V = Matrix{T}(I, n, n)
     estimate = SDPX.symmetric_core_dense_bytes(T, n + m)
     workspace = SDPX.build_symmetric_core_workspace(
         system, V, 1, precision_bits, estimate + 1024, 0, 0.0;
         symbolic_epoch=0,
     )
+    # Materialized Theta must be exactly block-diagonal and owned.
+    theta = SDPX.symmetric_core_theta(system.cone)
+    @test theta[1:2, 1:2] == H[1:2, 1:2]
+    @test theta[3:5, 3:5] == H[3:5, 3:5]
+    @test maximum(abs, theta[3:5, 1:2]; init=zero(T)) == zero(T)
+    @test maximum(abs, theta[1:2, 3:5]; init=zero(T)) == zero(T)
+
     direction, residual = SDPX.solve_core_direction!(workspace, system)
-    @test maximum(abs, residual.primal_affine) <=
-          T(4096) * sqrt(eps(one(T)))
-    @test maximum(abs, residual.cone_complementarity) <=
-          T(4096) * sqrt(eps(one(T)))
-    @test workspace.block_count isa Any || true
+    tol = T(4096) * sqrt(eps(one(T)))
+    @test maximum(abs, residual.primal_affine) <= tol
+    @test maximum(abs, residual.dual_affine) <= tol
+    @test abs(residual.homogeneous_gap) <= tol
+    @test maximum(abs, residual.cone_complementarity) <= tol
+    @test abs(residual.tau_kappa) <= tol
+
+    # Independent direct five-equation reference in the same arithmetic.
+    ref = _c6a_direct_five(A, b, c, H, tau, kappa, rhs)
+    @test isapprox(direction.dx, ref.dx; atol=tol, rtol=T(0))
+    @test isapprox(direction.dy, ref.dy; atol=tol, rtol=T(0))
+    @test isapprox(direction.ds, ref.ds; atol=tol, rtol=T(0))
+    @test isapprox(direction.dtau, ref.dtau; atol=tol, rtol=T(0))
+    @test isapprox(direction.dkappa, ref.dkappa; atol=tol, rtol=T(0))
     return nothing
 end
 

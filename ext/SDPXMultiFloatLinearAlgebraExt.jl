@@ -1277,10 +1277,8 @@ end
 # FactorCache operation on an unprepared / failed cache fails closed through
 # `_require_fresh`.
 
-function SDPX._build_symmetric_core_ldlt_cache_provider(
-    ::Type{MF},
-    pattern::SDPX.SymmetricCorePattern{MF},
-    precision_bits::Int,
+function SDPX.symmetric_core_provider_available(
+    ::Type{MF}, precision_bits::Int,
 ) where {MF<:MultiFloat}
     # MultiFloat width is a type property; a caller-supplied precision hint
     # must not silently select a different arithmetic.  The width must be an
@@ -1289,6 +1287,15 @@ function SDPX._build_symmetric_core_ldlt_cache_provider(
         "MFLA symmetric core requires a fixed-width MultiFloat, got $(MF)",
     ))
     mfla_capabilities(MF)  # fails closed if the loaded MFLA cannot serve MF
+    return :multifloat_linear_algebra
+end
+
+function SDPX._build_symmetric_core_ldlt_cache_provider(
+    ::Type{MF},
+    pattern::SDPX.SymmetricCorePattern{MF},
+    precision_bits::Int,
+) where {MF<:MultiFloat}
+    SDPX.symmetric_core_provider_available(MF, precision_bits)
     cache = MFLDLTFactorCache(MF)
     SDPX.prepare!(
         cache, SDPX.FactorRequirements(pattern.dimension, 0),

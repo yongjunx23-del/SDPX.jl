@@ -378,23 +378,36 @@ introduced.
 `src/kkt/symmetric_core.jl` adds a cold/test-only bridge for the same
 symmetric augmented core:
 
+- `_validate_core_preconditions(system, V)` proves V dimensions/isometry,
+  every row of `A` in `range(V)`, and `c in range(V)` **before** any Theta,
+  `A*V`, pattern, or dense allocation;
+- `symmetric_core_provider_available(T, precision_bits)` is the provider
+  availability/precision gate overridden by the MFLA/BFLA extensions; the
+  base implementation fails closed so an absent provider is rejected before
+  any dense allocation;
 - `symmetric_core_block_ranges(cone)` extracts the ordered block ranges from
   a `ProductConeLinearization` or `BlockProductConeLinearization` and fails
   closed on any other linearization;
 - `symmetric_core_theta(cone)` materializes the exact block-diagonal `Theta`
-  operator;
-- `symmetric_core_pattern_from_system(system, V)` forms `Ar = A*V`, freezes
-  the CSC pattern, and refills it with the exact `Theta`;
-- `build_symmetric_core_workspace(system, V, ...)` prepares and factors the
-  provider cache (Float64 CHOLMOD with the signed static shift, or the dense
-  MFLA/BFLA LDL behind the memory eligibility gate), synchronizes the
-  workspace, and solves the homogeneous core once.
+  operator with owned per-block copies (no BigFloat aliasing);
+- `symmetric_core_pattern_from_system(system, V)` validates the documented
+  preconditions, forms `Ar = A*V`, freezes the CSC pattern, and refills it
+  with the exact `Theta`;
+- `build_symmetric_core_workspace(system, V, ...)` runs the precondition,
+  provider-availability, and dense-memory eligibility gates before any
+  materialization, then prepares and factors the provider cache (Float64
+  CHOLMOD with the signed static shift, or the dense MFLA/BFLA LDL),
+  synchronizes the workspace, and solves the homogeneous core once.
 
 `validation/newton_system_reference.jl` compares Float64 LP/SOC/PSD symmetric
 core predictor and changed corrector directions against the expanded exact
-route.  `validation/providers/provider_smoke.jl` drives the full workspace
-through the real MFLA (`Float64x2`/`Float64x4`) and BFLA (`BigFloat256`)
-providers, compares against a direct five-equation solve in the provider's own
-arithmetic, exercises a multi-block block-diagonal case, and asserts the
-memory gate and unsupported-linearization rejection.  This is shadow
-validation only: no production route dispatches the core yet.
+route and asserts that invalid rank bases, out-of-range `A`/`c`, and
+unsupported arithmetic fail closed before pattern/provider work.
+`validation/providers/provider_smoke.jl` drives the full workspace through the
+real MFLA (`Float64x2`/`Float64x4`) and BFLA (`BigFloat256`) providers, and
+compares **both** predictor and changed-corrector directions field-by-field
+against an arithmetic-generic direct five-equation solve in the provider's own
+scalar type (no Float64 downcast).  It also exercises a real
+`BlockProductConeLinearization` multi-block case with exact block-diagonal
+Theta materialization and all five residual groups.  This is shadow validation
+only: no production route dispatches the core yet.

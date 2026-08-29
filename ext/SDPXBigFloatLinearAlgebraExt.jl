@@ -1046,10 +1046,8 @@ function SDPX.factor_diagnostics(cache::BFLARRQRFactorCache)
     )
 end
 
-function SDPX._build_symmetric_core_ldlt_cache_provider(
-    ::Type{BigFloat},
-    pattern::SDPX.SymmetricCorePattern{BigFloat},
-    precision_bits::Int,
+function SDPX.symmetric_core_provider_available(
+    ::Type{BigFloat}, precision_bits::Int,
 )
     precision_bits >= 64 || throw(ArgumentError(
         "BFLA symmetric core requires explicit precision_bits >= 64, got $(precision_bits)",
@@ -1058,6 +1056,15 @@ function SDPX._build_symmetric_core_ldlt_cache_provider(
         "BFLA symmetric core precision $(precision_bits) must equal the " *
         "ambient BigFloat precision $(precision(BigFloat))",
     ))
+    return :bigfloat_linear_algebra
+end
+
+function SDPX._build_symmetric_core_ldlt_cache_provider(
+    ::Type{BigFloat},
+    pattern::SDPX.SymmetricCorePattern{BigFloat},
+    precision_bits::Int,
+)
+    SDPX.symmetric_core_provider_available(BigFloat, precision_bits)
     cache = BFLALDLTFactorCache()
     SDPX.prepare!(
         cache, BigFloatFactorRequirements(pattern.dimension, precision_bits),

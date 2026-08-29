@@ -1364,14 +1364,71 @@ function symmetric_core_theta(
     theta = alloc_zeros(T, m, m)
     for (index, rows) in enumerate(cone.block_ranges)
         block = cone.operators[index]
-        theta[rows, rows] = block
+        # Owned copy: BigFloat blocks are mutable, so a block view must not
+        # alias the returned operator or share objects within/across slots.
+        copy_owned!(view(theta, rows, rows), block)
     end
     return theta
 end
 
+"""Validate documented rank-reduction preconditions before any materialization.
+
+Checks V dimensions, `V'V = I`, `range(A') = range(V)` (every row of `A` in
+`range(V)`), and `c in range(V)`.  Uses only owned temporary work; fails
+closed on any violated precondition.  This is the single cold-path gate shared
+by `symmetric_core_pattern_from_system` and `build_symmetric_core_workspace`
+so a high-precision provider route never constructs/allocates `Theta`, `A*V`,
+or a pattern before the operator is provably representable.
+"""
+function _validate_core_preconditions(
+    system::NewtonSystem{T},
+    V::AbstractMatrix{T},
+) where {T<:AbstractFloat}
+    n = length(system.c)
+    nr = size(V, 2)
+    size(V, 1) == n || throw(DimensionMismatch(
+        "rank-reduction basis rows $n do not match V rows $(size(V, 1))",
+    ))
+    nr >= 0 || throw(ArgumentError(
+        "rank-reduction basis column count must be nonnegative",
+    ))
+    # V'V = I to roundoff.
+    VV = Matrix{T}(V') * Matrix{T}(V)
+    isometry_tol = T(64) * eps(one(T))
+    @inbounds for j in 1:nr, i in 1:nr
+        expected = i == j ? one(T) : zero(T)
+        abs(VV[i, j] - expected) <= isometry_tol || throw(ArgumentError(
+            "symmetric core requires V'V = I " *
+            "(deviation $(abs(VV[i, j] - expected)))",
+        ))
+    end
+    range_work = alloc_zeros(T, n)
+    _core_operator_in_range(V, system.A, range_work) || throw(ArgumentError(
+        "symmetric core requires every row of A to lie in range(V)",
+    ))
+    _core_vector_in_range(V, system.c, range_work) || throw(ArgumentError(
+        "symmetric core requires c to lie in range(V)",
+    ))
+    return nothing
+end
+
+"""Base provider availability/precision gate for the dense symmetric core.
+
+Concrete MFLA/BFLA extensions override this hook; the base implementation
+fails closed so an absent provider is rejected before any dense allocation.
+"""
+function symmetric_core_provider_available(
+    ::Type{T}, precision_bits::Int,
+) where {T<:AbstractFloat}
+    throw(ArgumentError(
+        "symmetric core dense LDL has no provider for arithmetic $(T); " *
+        "load MFLA for MultiFloat or BFLA for BigFloat",
+    ))
+end
+
 """Build a frozen `SymmetricCorePattern` from a semantic system + rank basis.
 
-Validates the range precondition on `A` and `c`, forms `Ar = A*V`, and
+Validates the documented rank/range preconditions, forms `Ar = A*V`, and
 freezes the block-diagonal lower-triangle pattern from the cone block ranges.
 The pattern is then refilled with the exact `Theta` blocks.
 """
@@ -1379,6 +1436,7 @@ function symmetric_core_pattern_from_system(
     system::NewtonSystem{T},
     V::AbstractMatrix{T},
 ) where {T<:AbstractFloat}
+    _validate_core_preconditions(system, V)
     m, n = size(system.A)
     nr = size(V, 2)
     size(V, 1) == n || throw(DimensionMismatch(
@@ -1411,6 +1469,21 @@ function build_symmetric_core_workspace(
     regularization::Real;
     symbolic_epoch::Integer=0,
 ) where {T<:AbstractFloat}
+    # Rank/range preconditions are validated before any Theta, A*V, pattern,
+    # or dense allocation, so an ineligible operator cannot be materialized.
+    _validate_core_preconditions(system, V)
+    if T !== Float64
+        # Dense memory eligibility and provider availability/precision must be
+        # proven before any dense K allocation or provider construction.
+        symmetric_core_provider_available(T, precision_bits)
+        eligibility = symmetric_core_dense_eligibility(
+            T, size(V, 2) + length(system.b), memory_limit_bytes,
+            current_rss_bytes,
+        )
+        eligibility.eligible || throw(ArgumentError(
+            "symmetric core dense factor ineligible: $(eligibility.reason)",
+        ))
+    end
     pattern = symmetric_core_pattern_from_system(system, V)
     cache = if T === Float64
         isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
@@ -1428,12 +1501,6 @@ function build_symmetric_core_workspace(
         factorize!(cache, k, Int(matrix_epoch))
         cache
     else
-        eligibility = symmetric_core_dense_eligibility(
-            T, pattern.dimension, memory_limit_bytes, current_rss_bytes,
-        )
-        eligibility.eligible || throw(ArgumentError(
-            "symmetric core dense factor ineligible: $(eligibility.reason)",
-        ))
         cache = build_symmetric_core_ldlt_cache(
             T, pattern, precision_bits, memory_limit_bytes, current_rss_bytes,
         )
