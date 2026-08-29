@@ -475,6 +475,12 @@ mutable struct SymmetricCoreWorkspace{
     dy::Vector{T}
     ds::Vector{T}
     dkappa::T
+    # Production raw-solve buffers: owned negated residual storage (semantic
+    # Newton RHS) and the last recovered dtau.  The public snapshot wrapper
+    # uses these too; the raw production path writes them in place.
+    negated_primal::Vector{T}
+    negated_dual::Vector{T}
+    last_dtau::T
     residual::NewtonResidual{T}
     original_nzval::Vector{T}  # independent snapshot of the unregularized K
     row_sums::Vector{T}        # scratch for the exact symmetric row-sum norm
@@ -776,7 +782,8 @@ function _symmetric_core_workspace_prevalidated(
         alloc_zeros(T, nr), alloc_zeros(T, m), alloc_zeros(T, nr), alloc_zeros(T, m),
         alloc_zeros(T, dimension), alloc_zeros(T, dimension), alloc_zeros(T, dimension),
         alloc_zeros(T, nr), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m),
-        zero(T), _core_newton_residual(T, m, n), original_nzval, row_sums,
+        zero(T), alloc_zeros(T, m), alloc_zeros(T, n), zero(T),
+        _core_newton_residual(T, m, n), original_nzval, row_sums,
         pattern_signature, structure_signature, operator_signature,
         _core_cone_theta_signature(system.cone), system.tau, system.kappa,
         _core_cache_signature(cache), nothing, 0, 0, -1, false,
@@ -1486,8 +1493,15 @@ function _core_snapshot(residual::NewtonResidual{T}) where {T<:AbstractFloat}
     )
 end
 
-"""Solve one variable RHS and recover an independent direction snapshot."""
-function solve_core_direction!(
+"""Solve one variable RHS in place; returns (candidate, residual, dtau).
+
+Internal production/raw path: writes `workspace.dx/dy/ds/dkappa` and records
+`workspace.last_dtau`.  The returned `candidate` references workspace-owned
+buffers; callers that need independent snapshots must use the public wrapper.
+Counters (`variable_solves`, `directions`, `refinements`) are updated here so
+both the raw production path and the snapshot wrapper share the same accounting.
+"""
+function _core_solve_raw!(
     workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
 ) where {T}
     _core_guard_ready!(workspace, system)
@@ -1570,13 +1584,21 @@ function solve_core_direction!(
         dk += system.b[i] * workspace.dy[i]
     end
     workspace.dkappa = _core_owned_value(dk)
+    workspace.last_dtau = dtau
     candidate = NewtonDirection(
         workspace.dx, workspace.dy, workspace.ds, dtau, workspace.dkappa,
     )
     newton_residual!(workspace.residual, system, candidate)
     workspace.variable_solves += 1
     workspace.directions += 1
+    return (candidate, workspace.residual, dtau)
+end
 
+"""Solve one variable RHS and recover an independent direction snapshot."""
+function solve_core_direction!(
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
+) where {T}
+    candidate, residual, dtau = _core_solve_raw!(workspace, system)
     # Never return workspace-owned arrays: predictor/corrector results must
     # remain immutable snapshots when the next RHS reuses all buffers.
     direction = NewtonDirection(

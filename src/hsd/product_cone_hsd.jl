@@ -449,6 +449,9 @@ end
 
 """Numeric factorizations performed by the active product-HSD route."""
 @inline function product_hsd_factor_count(state::ProductConeHSDState)
+    if state.symmetric_core !== nothing
+        return state.symmetric_core.factor_epoch
+    end
     state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
         state.expanded.numeric_factor_count
     state.kkt_route === :sparse_schur &&
@@ -461,6 +464,9 @@ end
 end
 
 @inline function product_hsd_receipt_build_count(state::ProductConeHSDState)
+    if state.symmetric_core !== nothing
+        return state.symmetric_core.factor_receipt === nothing ? 0 : 1
+    end
     state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
         state.expanded.receipt_build_count
     state.kkt_route === :sparse_schur &&
@@ -473,6 +479,9 @@ end
 end
 
 @inline function product_hsd_factor_receipt(state::ProductConeHSDState)
+    if state.symmetric_core !== nothing
+        return state.symmetric_core.factor_receipt
+    end
     state.kkt_route === :expanded && return state.expanded === nothing ? nothing :
         state.expanded.factor_receipt
     state.kkt_route === :sparse_schur && return
@@ -2977,6 +2986,19 @@ public result, or fall back to a legacy/lifted route.
     state::ProductConeHSDState{T}, has_nonsymmetric::Bool,
 ) where {T}
     base = state.base
+    # C7.2a: when the state owns a prepared symmetric-core workspace, the
+    # bordered route executes ONLY the symmetric augmented core.  A core
+    # failure is a typed step failure; the legacy full-border LU is never
+    # used as a fallback for a prepared-core state.
+    if state.symmetric_core !== nothing
+        direction_ok = try
+            _product_hsd_symmetric_core_direction!(state)
+        catch exception
+            exception isa InterruptException && rethrow()
+            false
+        end
+        return direction_ok ? HSDStepOK : HSDStepDirectionFailed
+    end
     if has_nonsymmetric
         assembled = try
             _product_hsd_form_coupled_matrix!(state)

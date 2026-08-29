@@ -237,4 +237,98 @@ end
             Float32, 24,
         )
     end
+
+@testset "C7.2a prepared symmetric-core production dispatch" begin
+    for id in _STATE_IDS
+        @testset "$id" begin
+            canonical = _state_canonical(id)
+            m = SDPX.hsd_num_slack(SDPX.HSDState(canonical))
+            blocks = Int[
+                block.length
+                for block in SDPX.layout_blocks(canonical.cone_layout)
+            ]
+            dim = size(canonical.A, 2) + m
+            budget = _state_budget(Float64, dim, blocks)
+
+            # Old bordered route (no core) is unchanged and authoritative.
+            old_state = SDPX.ProductConeHSDState(canonical; kkt_route=:bordered)
+            @test SDPX.product_hsd_symmetric_core(old_state) === nothing
+            SDPX.product_hsd_cold_start!(old_state)
+            old_code = SDPX.product_hsd_step!(old_state)
+            @test old_code === SDPX.HSDStepOK
+
+            # Prepared core state dispatches the symmetric core only.
+            core_state = SDPX.ProductConeHSDState(
+                canonical;
+                kkt_route=:bordered,
+                prepare_symmetric_core=true,
+                symmetric_core_memory_limit=budget,
+                symmetric_core_current_rss=0,
+            )
+            core = SDPX.product_hsd_symmetric_core(core_state)
+            @test core !== nothing
+            @test core_state.expanded === nothing
+            SDPX.product_hsd_cold_start!(core_state)
+
+            # First epoch: one factor, one homogeneous solve, predictor +
+            # corrector variable solves, one truthful receipt.
+            code1 = SDPX.product_hsd_step!(core_state)
+            @test code1 === SDPX.HSDStepOK
+            @test core.factor_epoch == 1
+            @test core.homogeneous_solves == 1
+            @test core.variable_solves == 2
+            @test core.directions == 2
+            @test SDPX.product_hsd_factor_count(core_state) == 1
+            @test SDPX.product_hsd_receipt_build_count(core_state) == 1
+            receipt = SDPX.product_hsd_factor_receipt(core_state)
+            @test receipt !== nothing
+            @test receipt.route === :symmetric_augmented_core
+            diag = SDPX.factor_diagnostics(core.cache)
+            @test diag.symbolic_count == 1
+            @test diag.numeric_count == 1
+
+            # Second epoch reuses the symbolic factor and refactors once.
+            code2 = SDPX.product_hsd_step!(core_state)
+            @test code2 === SDPX.HSDStepOK
+            @test core.factor_epoch == 2
+            @test core.homogeneous_solves == 2
+            @test core.variable_solves == 4
+            diag2 = SDPX.factor_diagnostics(core.cache)
+            @test diag2.symbolic_count == 1
+            @test diag2.numeric_count == 2
+            @test SDPX.product_hsd_factor_count(core_state) == 2
+            @test SDPX.product_hsd_receipt_build_count(core_state) == 1
+
+            # A fresh prepared-core state stepped exactly once must land on
+            # the same iterate as the old bordered route to roundoff.
+            core_once = SDPX.ProductConeHSDState(
+                canonical;
+                kkt_route=:bordered,
+                prepare_symmetric_core=true,
+                symmetric_core_memory_limit=budget,
+                symmetric_core_current_rss=0,
+            )
+            SDPX.product_hsd_cold_start!(core_once)
+            @test SDPX.product_hsd_step!(core_once) === SDPX.HSDStepOK
+            snap = (
+                x=copy(old_state.base.x), s=copy(old_state.base.s),
+                y=copy(old_state.base.y),
+                tau=old_state.base.tau, kappa=old_state.base.kappa,
+            )
+            scale = max(
+                1.0, maximum(abs, snap.x; init=0.0),
+                maximum(abs, snap.s; init=0.0),
+                maximum(abs, snap.y; init=0.0),
+                abs(snap.tau), abs(snap.kappa),
+            )
+            tol = 4096.0 * sqrt(eps(Float64)) * scale
+            @test maximum(abs, core_once.base.x - snap.x; init=0.0) <= tol
+            @test maximum(abs, core_once.base.s - snap.s; init=0.0) <= tol
+            @test maximum(abs, core_once.base.y - snap.y; init=0.0) <= tol
+            @test abs(core_once.base.tau - snap.tau) <= tol
+            @test abs(core_once.base.kappa - snap.kappa) <= tol
+        end
+    end
+end
+
 end

@@ -562,3 +562,240 @@ end
                        base.dtau_a * base.dkappa_a
     return _product_hsd_solve_shift!(state, corrector_scalar)
 end
+
+# =====================================================================
+#    C7.2a: prepared symmetric-core production dispatch.
+#
+#    When `ProductConeHSDState` owns a prepared `SymmetricCoreWorkspace`,
+#    the `:bordered` route executes the symmetric augmented core instead of
+#    the legacy full-border LU.  This section owns no sign convention: every
+#    Newton RHS is built from the frozen five-equation `residual_newton_rhs`
+#    semantics and every direction is validated through the original
+#    five-equation residual gate before line search/state update.
+# =====================================================================
+
+"""Fill the state-owned prepared core's block Theta operators and cone RHS.
+
+Symmetric blocks materialize the accepted `Theta` action one local column at a
+time through `apply_Theta!` (never a global m×m operator).  Exp/Power blocks
+use the accepted fixed-size 3x3 `nonsymmetric_scaling_contribution3!` with
+finite/symmetric/SPD acceptance.  The corrector stage may call this only to
+rewrite the cone RHS (the operator values must be unchanged, verified by the
+Theta signature guard in `_core_guard_ready!`).
+
+Returns `true` on success; a non-converged or non-symmetric block fails closed.
+"""
+# Populate the state's fused residual scratch from the current core candidate.
+# The state's `_product_hsd_newton_residual_ok` gate consumes `base.ax`
+# (= A*dx), `base.e` (= Theta*dy) and `base.ds`; recompute them from the
+# current `base.dx`/`base.dy`.  The SOC cone gate also requires certified
+# roundtrip bounds for the current scaling; `apply_Theta!` populated the
+# runtime block input/output scratch, so the roundtrip backward status is
+# (re)certified here.  Returns the PSD-budget-inconclusive flag.
+function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
+    base = state.base
+    fill!(base.ax, zero(T))
+    @inbounds for j in 1:base.n
+        value = base.dx[j]
+        iszero(value) && continue
+        for pointer in nzrange(base.A, j)
+            base.ax[base.A.rowval[pointer]] +=
+                base.A.nzval[pointer] * value
+        end
+    end
+    # Mirror the frozen bordered recovery exactly so the SOC/PSD roundtrip
+    # certificate and the five-equation gate evaluate the actual recovered
+    # direction: `target = A*dx + h + rP - b*dtau`, `dy = G(target)`, and
+    # `base.e = Theta*dy`.  Recovering `dy` through the accepted G map (rather
+    # than trusting the algebraically condensed `wy + dtau*uy`) is what the
+    # cone-membership roundtrip machinery certifies.
+    @inbounds for row in 1:base.m
+        state.g_input[row] = base.ax[row] + state.h[row] +
+                             base.rP[row] - base.b[row] * base.dtau
+    end
+    apply_G!(state.runtime, base.dy, state.g_input)
+    apply_Theta!(state.runtime, base.e, base.dy)
+    _, psd_inconclusive = _product_hsd_roundtrip_backward_status(state)
+    return psd_inconclusive
+end
+
+function _product_hsd_symmetric_core_linearization!(
+    state::ProductConeHSDState{T}, corrector_rhs::AbstractVector{T},
+) where {T}
+    core = state.symmetric_core
+    core === nothing && return false
+    cone = core.system.cone
+    cone isa BlockProductConeLinearization{T} || return false
+    m = state.base.m
+    length(corrector_rhs) == m || return false
+    basis = state.g_input
+    image = state.g_output
+    forcing = T(64) * eps(T)
+    for (index, rows) in enumerate(cone.block_ranges)
+        operator = cone.operators[index]
+        length(rows) == size(operator, 1) == size(operator, 2) || return false
+        scaling = _product_hsd_nonsymmetric_scaling(
+            state.runtime, first(rows),
+        )
+        if scaling !== nothing
+            length(rows) == 3 || return false
+            reason = nonsymmetric_scaling_contribution3!(
+                operator,
+                view(cone.corrector_rhs, rows),
+                scaling,
+                view(corrector_rhs, rows),
+            )
+            reason === NS_SCALING_CONVERGED || return false
+            continue
+        end
+        @inbounds for local_column in 1:length(rows)
+            fill!(basis, zero(T))
+            basis[rows[local_column]] = one(T)
+            apply_Theta!(state.runtime, image, basis)
+            for local_row in 1:length(rows)
+                operator[local_row, local_column] =
+                    _core_owned_value(image[rows[local_row]])
+            end
+            view(cone.corrector_rhs, rows)[local_column] =
+                _core_owned_value(corrector_rhs[rows[local_column]])
+        end
+    end
+    # Certify each block operator is finite and self-adjoint to roundoff and
+    # freeze the lower triangle as the single authority.
+    for (index, rows) in enumerate(cone.block_ranges)
+        operator = cone.operators[index]
+        all(isfinite, operator) || return false
+        @inbounds for local_column in 1:size(operator, 1)
+            for local_row in (local_column + 1):size(operator, 1)
+                lower = operator[local_row, local_column]
+                upper = operator[local_column, local_row]
+                work = abs(lower) + abs(upper)
+                discrepancy = abs(lower - upper)
+                if !(isfinite(work) && isfinite(discrepancy)) ||
+                   (!iszero(work) && discrepancy > forcing * work) ||
+                   (iszero(work) && !iszero(discrepancy))
+                    return false
+                end
+                operator[local_column, local_row] =
+                    _core_owned_value(lower)
+            end
+        end
+    end
+    return true
+end
+
+"""Build the semantic predictor/corrector NewtonSystem for the prepared core.
+
+`cone_corrector_rhs` is the already-written cone corrector vector (predictor
+`state.h` or the corrected shift).  Negated residuals are written into the
+core-owned buffers; the frozen `residual_newton_rhs` signs are reproduced
+exactly and no hidden sign convention exists.
+"""
+function _product_hsd_symmetric_core_system(
+    state::ProductConeHSDState{T}, scalar_rhs::T,
+) where {T}
+    core = state.symmetric_core
+    core === nothing && return nothing
+    base = state.base
+    all(isfinite, base.rP) && all(isfinite, base.rD) && isfinite(base.rG) &&
+    all(isfinite, core.system.cone.corrector_rhs) && isfinite(scalar_rhs) ||
+        throw(ArgumentError("HSD Newton RHS contains non-finite data"))
+    @inbounds for index in 1:base.m
+        _core_store_owned!(core.negated_primal, index, -base.rP[index])
+    end
+    @inbounds for index in 1:base.n
+        _core_store_owned!(core.negated_dual, index, -base.rD[index])
+    end
+    rhs = HSDNewtonRHS(
+        core.negated_primal, core.negated_dual, _core_owned_value(-base.rG),
+        core.system.cone.corrector_rhs, _core_owned_value(scalar_rhs),
+    )
+    return NewtonSystem(
+        base.A, base.b, base.c, core.system.cone,
+        base.tau, base.kappa, rhs,
+    )
+end
+
+"""Run one prepared-core predictor/corrector epoch.
+
+Factor the core once, solve the homogeneous RHS once, then solve the
+predictor and corrector variable RHS with the same factor.  The final
+direction must pass the original five-equation residual gate; no legacy
+bordered fallback is attempted when the core is present.
+"""
+function _product_hsd_symmetric_core_direction!(
+    state::ProductConeHSDState{T},
+) where {T}
+    core = state.symmetric_core
+    core === nothing && return false
+    base = state.base
+    affine_shift!(state.runtime, state.h, base.s, base.y)
+
+    # Predictor.
+    predictor_scalar = -base.tau * base.kappa
+    _product_hsd_symmetric_core_linearization!(
+        state, state.h,
+    ) || return false
+    predictor_system = _product_hsd_symmetric_core_system(
+        state, predictor_scalar,
+    )
+    predictor_system === nothing && return false
+    factor_symmetric_core_epoch!(
+        core, predictor_system, base.epoch,
+    )
+    predictor_candidate, predictor_residual, _ =
+        _core_solve_raw!(core, predictor_system)
+    copyto!(base.dx, predictor_candidate.dx)
+    copyto!(base.dy, predictor_candidate.dy)
+    copyto!(base.ds, predictor_candidate.ds)
+    base.dtau = predictor_candidate.dtau
+    base.dkappa = predictor_candidate.dkappa
+    _product_hsd_core_scatter!(state)
+    if !_hsd_direction_finite(base)
+        @info "C72A predictor nonfinite" base.dx base.dy base.ds base.dtau base.dkappa
+        return false
+    end
+    if !_product_hsd_newton_residual_ok(state, predictor_scalar)
+        return false
+    end
+    copyto!(base.dx_a, base.dx)
+    copyto!(base.dy_a, base.dy)
+    copyto!(base.ds_a, base.ds)
+    base.dtau_a = base.dtau
+    base.dkappa_a = base.dkappa
+
+    alpha_aff = _product_hsd_boundary_alpha!(state)
+    (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
+    mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
+    (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
+    ratio = base.mu_aff / base.mu
+    sigma = min(one(T), ratio * ratio * ratio)
+    sigma_mu = sigma * base.mu
+
+    # Corrector: only the cone RHS and scalar shift change; the operator
+    # values must be unchanged (verified by the Theta signature guard) and the
+    # same factor is reused.
+    _product_hsd_corrector_shift!(state, sigma_mu)
+    corrector_scalar = sigma_mu - base.tau * base.kappa -
+                       base.dtau_a * base.dkappa_a
+    _product_hsd_symmetric_core_linearization!(
+        state, state.h,
+    ) || return false
+    corrector_system = _product_hsd_symmetric_core_system(
+        state, corrector_scalar,
+    )
+    corrector_system === nothing && return false
+    corrector_candidate, corrector_residual, _ =
+        _core_solve_raw!(core, corrector_system)
+    copyto!(base.dx, corrector_candidate.dx)
+    copyto!(base.dy, corrector_candidate.dy)
+    copyto!(base.ds, corrector_candidate.ds)
+    base.dtau = corrector_candidate.dtau
+    base.dkappa = corrector_candidate.dkappa
+    _product_hsd_core_scatter!(state)
+    _hsd_direction_finite(base) || return false
+    if !_product_hsd_newton_residual_ok(state, corrector_scalar)
+        return false
+    end
+    return true
+end
