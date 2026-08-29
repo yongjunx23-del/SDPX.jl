@@ -61,6 +61,39 @@ function SDPX.refine_once!(
     return correction
 end
 
+# Deterministic fake factor for direct refinement-branch attestation.  A
+# correction is `gain * K\\residual`: gain=0 stagnates, while 0<gain<1 gives
+# a known geometric contraction without reaching the arithmetic floor in two
+# steps.
+mutable struct _CountingRefineCache <: SDPX.AbstractFactorCache{Float64}
+    K::Matrix{Float64}
+    gain::Float64
+    status::SDPX.FactorCacheState
+    matrix_epoch::Int
+    factor_epoch::Int
+    solve_count::Int
+    refine_count::Int
+end
+SDPX.factor_status(cache::_CountingRefineCache) = cache.status
+SDPX.factor_matrix_epoch(cache::_CountingRefineCache) = cache.matrix_epoch
+SDPX.factor_epoch(cache::_CountingRefineCache) = cache.factor_epoch
+function SDPX.solve!(
+    cache::_CountingRefineCache, destination::AbstractVector{Float64},
+    rhs::AbstractVector{Float64},
+)
+    copyto!(destination, cache.K \ rhs)
+    cache.solve_count += 1
+    return destination
+end
+function SDPX.refine_once!(
+    cache::_CountingRefineCache, residual::AbstractVector{Float64},
+    correction::AbstractVector{Float64},
+)
+    copyto!(correction, cache.gain .* (cache.K \ residual))
+    cache.refine_count += 1
+    return correction
+end
+
 struct _Fixture
     V::Matrix{Float64}       # n x nr rank-reduction basis, V'V = I
     A::Matrix{Float64}       # m x n original data
@@ -1230,4 +1263,54 @@ end
               for i in eachindex(ws.sol_core), j in eachindex(ws.sol_core))
     @test cache.solve_count == 2
     @test cache.refine_count >= 0
+end
+
+function _counting_refine_workspace(gain::Float64)
+    bundle = _c4_bundle(:identity)
+    K = SDPX.materialize_dense(bundle.pattern)
+    cache = _CountingRefineCache(K, gain, SDPX.Fresh, 1, 1, 0, 0)
+    workspace = SDPX.SymmetricCoreWorkspace(
+        bundle.pattern, cache, bundle.ws.V, bundle.system,
+    )
+    SDPX.sync_core_factor_epoch!(workspace)
+    return (; workspace, cache, K)
+end
+
+@testset "C4 deterministic refinement branches" begin
+    dimension = size(_counting_refine_workspace(0.5).K, 1)
+    rhs = collect(Float64, 1:dimension)
+
+    # An exact solution is already below the arithmetic floor: no correction
+    # call and no workspace/cache refinement count.
+    floor_case = _counting_refine_workspace(0.5)
+    exact = floor_case.K \ rhs
+    _, corrections = SDPX._core_refine!(floor_case.workspace, exact, rhs)
+    @test corrections == 0
+    @test floor_case.cache.refine_count == 0
+    @test floor_case.workspace.refinements == 0
+    @test floor_case.cache.solve_count == 0
+
+    # A zero correction leaves the residual unchanged and is rejected after
+    # exactly one refine_once! call.
+    stagnant = _counting_refine_workspace(0.0)
+    x_stagnant = zeros(dimension)
+    @test_throws ArgumentError SDPX._core_refine!(
+        stagnant.workspace, x_stagnant, rhs,
+    )
+    @test stagnant.cache.refine_count == 1
+    @test stagnant.workspace.refinements == 1
+    @test stagnant.cache.solve_count == 0
+
+    # A quarter Newton correction contracts geometrically but stays above the
+    # floor, so the hard cap is exactly two corrections.
+    slow = _counting_refine_workspace(0.25)
+    x_slow = zeros(dimension)
+    _, corrections_slow = SDPX._core_refine!(slow.workspace, x_slow, rhs)
+    @test corrections_slow == 2
+    @test slow.cache.refine_count == 2
+    @test slow.workspace.refinements == 2
+    @test slow.cache.solve_count == 0
+    residual = rhs - slow.K * x_slow
+    @test norm(residual, Inf) < norm(rhs, Inf)
+    @test norm(residual, Inf) > 256 * eps(Float64)
 end
