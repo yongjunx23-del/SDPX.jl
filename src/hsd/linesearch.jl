@@ -19,10 +19,51 @@ end
     return true
 end
 
+"""Fixed-trace trial neighborhood in the coordinates used by CSDR.
+
+The old NativeSOC FixQ3 route required strict Lorentz interiority at line
+search and built HKM only once at the next Newton epoch.  Repeating a complete
+3×3 HKM construction and inverse for every block at every rejected alpha is
+both redundant and dominant for thousands of Q3 cells.  Here the accepted
+trial must have finite, resolvable positive spectral gaps; predictor setup
+then builds the complete HKM map once and the unchanged five-equation gate
+remains authoritative.
+"""
+@inline function _product_hsd_fixed_trace_hkm_neighborhood!(
+    state::ProductConeHSDState{T}, s::AbstractVector{T},
+    y::AbstractVector{T}, mu::T,
+) where {T}
+    core = state.symmetric_core
+    core isa FixedTraceQ3CoreWorkspace{T} || return false
+    isfinite(mu) && mu > zero(T) || return false
+    @inbounds for block in core.plan.soc_blocks
+        row = block.offset
+        sx0, sx1, sx2 = s[row], s[row + 1], s[row + 2]
+        sy0, sy1, sy2 = y[row], y[row + 1], y[row + 2]
+        sx_tail = sqrt(sx1 * sx1 + sx2 * sx2)
+        sy_tail = sqrt(sy1 * sy1 + sy2 * sy2)
+        sx_gap = sx0 - sx_tail
+        sy_gap = sy0 - sy_tail
+        sx_det = sx_gap * (sx0 + sx_tail)
+        sy_det = sy_gap * (sy0 + sy_tail)
+        isfinite(sx_det) && isfinite(sy_det) &&
+            sx_gap > zero(T) && sy_gap > zero(T) &&
+            sx_det > zero(T) && sy_det > zero(T) || return false
+    end
+    state.runtime.last_mu = mu
+    state.runtime.valid = true
+    return true
+end
+
 @inline function _product_hsd_trial_scaling!(state::ProductConeHSDState)
     base = state.base
     mu_t = _product_hsd_trial_mu(base)
     isfinite(mu_t) && mu_t > zero(mu_t) || return false
+    if state.symmetric_core isa FixedTraceQ3CoreWorkspace
+        return _product_hsd_fixed_trace_hkm_neighborhood!(
+            state, base.st, base.yt, mu_t,
+        )
+    end
     return try_update_scaling!(state.runtime, base.st, base.yt, mu_t)
 end
 
@@ -113,12 +154,35 @@ end
             gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t
             trial_merit = max(p2, d2, abs(gap2))
             tol = T(256) * sqrt(eps(T)) * scale
+            homotopy_ok = _hsd_residual_homotopy_ok(
+                base, alpha, p2, d2, gap2,
+            )
+            progress_ok = _product_hsd_useful_trial_progress(
+                current_merit, trial_merit, alpha, scale,
+            )
+            merit_ok = trial_merit <= scale * T(1.0005) + tol
             accepted = isfinite(p2) && isfinite(d2) && isfinite(gap2) &&
-                       _hsd_residual_homotopy_ok(base, alpha, p2, d2, gap2) &&
-                       _product_hsd_useful_trial_progress(
-                           current_merit, trial_merit, alpha, scale,
-                       ) &&
-                       trial_merit <= scale * T(1.0005) + tol
+                       homotopy_ok && progress_ok && merit_ok
+            if get(ENV, "SDPX_DEBUG_LINE_SEARCH", "0") == "1" &&
+               (backtracking < 3 || backtracking == max_backtracking - 1)
+                println(stderr, (
+                    alpha=alpha, neighborhood=ok, p=p2, d=d2, gap=gap2,
+                    current=current_merit, trial=trial_merit,
+                    homotopy=homotopy_ok, progress=progress_ok,
+                    merit=merit_ok,
+                ))
+            end
+        end
+        if !ok && get(ENV, "SDPX_DEBUG_LINE_SEARCH", "0") == "1" &&
+           (backtracking < 3 || backtracking == max_backtracking - 1)
+            println(stderr, (
+                alpha=alpha, neighborhood=false,
+                tau=base.tau_t, kappa=base.kappa_t,
+                trial_mu=_product_hsd_trial_mu(base),
+                strict=product_strictly_interior(
+                    state.runtime, base.st, base.yt,
+                ),
+            ))
         end
         if !accepted
             # A failed nonsymmetric trial may leave the conjugate/scaling
@@ -142,6 +206,10 @@ end
         # Leave the pair runtime consistent with the unchanged base iterate.
         if has_nonsymmetric
             restore_nonsymmetric_scaling_checkpoint!(state.runtime)
+        elseif state.symmetric_core isa FixedTraceQ3CoreWorkspace
+            _product_hsd_fixed_trace_hkm_neighborhood!(
+                state, base.s, base.y, base.mu,
+            )
         else
             try_update_scaling!(state.runtime, base.s, base.y, base.mu)
         end

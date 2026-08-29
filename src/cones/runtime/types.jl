@@ -221,6 +221,7 @@ mutable struct ProductConeRuntime{T,O,S,P,E,W}
     psd::P
     exp::E
     power::W
+    zero_ranges::Vector{UnitRange{Int}}
     dimension::Int
     valid::Bool
     last_mu::T

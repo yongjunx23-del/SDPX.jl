@@ -56,7 +56,12 @@ end
 """Conservative per-block count (dense lower block Theta) + core margin."""
 function _state_budget(::Type{T}, dimension::Int, blocks::AbstractVector{Int}) where {T}
     estimate = SDPX.symmetric_core_state_prepare_bytes(T, dimension, blocks)
-    return estimate > typemax(Int) - 1024 ? typemax(Int) : estimate + 1024
+    padded = estimate > typemax(Int) - 1024 ? typemax(Int) : estimate + 1024
+    # Positive-path fixtures now exercise the structural-nnz-aware production
+    # estimate, which is intentionally larger than the dimension-only lower
+    # bound used by this helper.  Keep a bounded 1 GiB test budget; the tiny-cap
+    # cases below remain the fail-closed authority.
+    return max(padded, 1 << 30)
 end
 
 """Snapshot every base iterate and direction field preparation could touch."""
@@ -231,7 +236,53 @@ end
         @test SDPX.saturating_sum_bytes(typemax(Int) - 5, 20) == typemax(Int)
     end
 
-    @testset "Float32 / unsupported arithmetic fails closed" begin
+    @testset "zero-payload IdentityRankBasis" begin
+    basis = SDPX.IdentityRankBasis(Float64, 5)
+    @test basis isa AbstractMatrix{Float64}
+    @test size(basis) == (5, 5)
+    @test size(basis, 1) == 5 && size(basis, 2) == 5
+    @test SDPX._hsd_is_identity_basis(basis)
+    @test basis[1, 1] == 1.0
+    @test basis[2, 1] == 0.0
+    @test basis[4, 4] == 1.0
+    @test basis[5, 3] == 0.0
+    # No stored numerical payload: the struct owns only one Int dimension.
+    @test fieldnames(typeof(basis)) == (:dimension,)
+    @test sizeof(basis) <= 16  # Int payload only, no n-vector storage
+
+    # Sparse full-rank reduction stores the zero-payload marker, never a
+    # sparse or dense identity.
+    canonical = _state_canonical(:socp_portfolio_small)
+    reduced = SDPX.hsd_sparse_rowspace_reduction(
+        canonical.A, canonical.c,
+    )
+    @test reduced.status === SDPX.SparseEqualityReady
+    @test reduced.V isa SDPX.IdentityRankBasis
+    @test SDPX._hsd_is_identity_basis(reduced.V)
+    @test sizeof(reduced.V) <= 16
+
+    # Prepared sparse-core construction keeps the marker and never
+    # materializes a dense V.
+    blocks = Int[
+        block.length
+        for block in SDPX.layout_blocks(canonical.cone_layout)
+    ]
+    m = SDPX.hsd_num_slack(SDPX.HSDState(canonical))
+    dim = size(canonical.A, 2) + m
+    budget = _state_budget(Float64, dim, blocks)
+    state = SDPX.ProductConeHSDState(
+        canonical;
+        kkt_route=:bordered,
+        prepare_symmetric_core=true,
+        symmetric_core_memory_limit=budget,
+        symmetric_core_current_rss=0,
+    )
+    core = SDPX.product_hsd_symmetric_core(state)
+    @test core.V isa SDPX.IdentityRankBasis
+    @test SDPX._hsd_is_identity_basis(core.V)
+end
+
+@testset "Float32 / unsupported arithmetic fails closed" begin
         # No dense provider for Float32; only Float64 path is built-in sparse.
         @test_throws ArgumentError SDPX.symmetric_core_provider_available(
             Float32, 24,
@@ -329,13 +380,10 @@ end
             @test abs(core_once.base.kappa - snap.kappa) <= tol
 
             # Prepared-core route is authoritative: the legacy bordered driver
-            # and any coupled cache must never factor; the core is the only
+            # and any coupled cache must never allocate or factor; the core is the only
             # factor/receipt source.
-            @test SDPX.kkt_factor_count(core_state.symmetric_bordered.driver) == 0
-            if core_state.coupled !== nothing &&
-               core_state.coupled.nonsymmetric_dimension > 0
-                @test SDPX.factor_epoch(core_state.coupled.cache) == 0
-            end
+            @test core_state.symmetric_bordered === nothing
+            @test core_state.coupled === nothing
             @test SDPX.product_hsd_factor_count(core_state) ==
                   core.factor_epoch
 
@@ -398,11 +446,8 @@ end
             @test maximum(abs, core_once.certified_soc_roundtrip_bound -
                       old_state.certified_soc_roundtrip_bound; init=0.0) <= tol
             @test core_once.soc_bounds_certified == old_state.soc_bounds_certified
-            @test SDPX.kkt_factor_count(core_once.symmetric_bordered.driver) == 0
-            if core_once.coupled !== nothing &&
-               core_once.coupled.nonsymmetric_dimension > 0
-                @test SDPX.factor_epoch(core_once.coupled.cache) == 0
-            end
+            @test core_once.symmetric_bordered === nothing
+            @test core_once.coupled === nothing
         end
     end
 end

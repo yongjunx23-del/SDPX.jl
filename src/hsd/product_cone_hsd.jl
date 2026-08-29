@@ -205,6 +205,7 @@ function _product_cone_hsd_state(
     base::HSDState{T,R};
     kkt_route::Symbol=:bordered,
     prepare_symmetric_core::Bool=false,
+    fixed_trace_plan=nothing,
     symmetric_core_memory_limit::Union{Nothing,Integer}=nothing,
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
@@ -223,6 +224,7 @@ function _product_cone_hsd_state(
     symmetric_core = if prepare_symmetric_core
         _prepare_product_hsd_symmetric_core(
             base;
+            fixed_trace_plan,
             precision_bits=Int(symmetric_core_precision_bits),
             memory_limit_bytes=symmetric_core_memory_limit,
             current_rss_bytes=symmetric_core_current_rss,
@@ -244,7 +246,8 @@ function _product_cone_hsd_state(
         block_index += 1
         offsets[block_index] = block.offset
     end
-    ns_schur = NonsymmetricSchur3Workspace(base.Ar, offsets)
+    ns_schur = prepare_symmetric_core ? nothing :
+        NonsymmetricSchur3Workspace(base.Ar, offsets)
     # GPTPro I2: the cone traits (runtime Exp/Power block lists) are fixed at
     # setup, so a model without nonsymmetric blocks is known never to execute
     # the hybrid coupled Newton route.  Pure LP/SOC/PSD models keep `coupled`
@@ -252,22 +255,23 @@ function _product_cone_hsd_state(
     # matrix, factor-coordinate and LPLU caches of NonsymmetricCoupledWorkspace
     # are constructed only when Exp/Power blocks exist, and always before the
     # hot loop (never on first use inside an epoch).
-    coupled = block_count > 0 ?
+    coupled = (!prepare_symmetric_core && block_count > 0) ?
         NonsymmetricCoupledWorkspace(base.Ar, base.nr, offsets) : nothing
     # The symmetric product route intentionally owns a pivoted full-border
     # LPLU. `base.driver` remains part of the generic HSD storage contract but
     # is never factored by this route, even when a caller supplied it.
-    symmetric_bordered = SymmetricBorderedWorkspace(T, base.nr)
+    symmetric_bordered = prepare_symmetric_core ? nothing :
+        SymmetricBorderedWorkspace(T, base.nr)
     # Expanded storage is opt-in ownership, not an eager shadow workspace.
     # The default bordered route must not pay the dense O((n+m)^2) memory cost
     # of a factorization session it can never execute.
     # A sparse request owns its explicit dense-expanded fallback at setup;
     # unsupported arithmetic never enters SparseArrays' implicit Float64
     # conversion and instead starts the same-iterate expanded→bordered ladder.
-    expanded = kkt_route in (:expanded, :sparse_schur) ?
+    expanded = (!prepare_symmetric_core && kkt_route in (:expanded, :sparse_schur)) ?
         ExpandedKKTSession(T, base.n, base.m; rhs_count=2) : nothing
-    sparse_schur = kkt_route === :sparse_schur &&
-        sparse_schur_factorization_supported(T) ?
+    sparse_schur = (!prepare_symmetric_core && kkt_route === :sparse_schur &&
+        sparse_schur_factorization_supported(T)) ?
         SparseSchurSession(T, base.n, base.m) : nothing
 
     # Product-HSD direction validation is currently serial.  Own one fused
@@ -289,6 +293,18 @@ function _product_cone_hsd_state(
     record_thread_budget!(
         residual_hook, thread_budget_record(residual_budget),
     )
+    # The NonsymmetricSchur3 workspace coordinates Exp/Power 3D blocks only.
+    # A fixed-trace (or any prepared-symmetric-core) route owns no such blocks
+    # and sets `ns_schur === nothing`, so its `ns_H` / `ns_*` scratch would be a
+    # pure O(nr^2) allocation that the hot path never touches.  Only allocate
+    # them when a nonsymmetric Schur session actually exists.
+    has_ns_schur = ns_schur !== nothing
+    ns_H = has_ns_schur ? zeros(T, base.nr, base.nr) : Matrix{T}(undef, 0, 0)
+    ns_metrics = has_ns_schur ? zeros(T, 3, 3, block_count) : zeros(T, 3, 3, 0)
+    ns_at_g_b = has_ns_schur ? zeros(T, base.nr) : T[]
+    ns_bt_g_a = has_ns_schur ? zeros(T, base.nr) : T[]
+    ns_at_g_rhs = has_ns_schur ? zeros(T, base.nr) : T[]
+    ns_zero_rhs = has_ns_schur ? zeros(T, m) : T[]
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
@@ -308,12 +324,12 @@ function _product_cone_hsd_state(
         zeros(T, m),
         false,
         ns_schur,
-        zeros(T, 3, 3, block_count),
-        zeros(T, base.nr, base.nr),
-        zeros(T, base.nr),
-        zeros(T, base.nr),
-        zeros(T, base.nr),
-        zeros(T, m),
+        ns_metrics,
+        ns_H,
+        ns_at_g_b,
+        ns_bt_g_a,
+        ns_at_g_rhs,
+        ns_zero_rhs,
         coupled,
         symmetric_bordered,
         kkt_route,
@@ -364,6 +380,7 @@ known (fail closed otherwise) and are checked before any allocation.
 """
 function _prepare_product_hsd_symmetric_core(
     base::HSDState{T,R};
+    fixed_trace_plan=nothing,
     precision_bits::Integer=0,
     memory_limit_bytes::Union{Nothing,Integer}=nothing,
     current_rss_bytes::Union{Nothing,Integer}=nothing,
@@ -381,13 +398,21 @@ function _prepare_product_hsd_symmetric_core(
     effective_precision = precision_bits == 0 ? (
         T === BigFloat ? precision(BigFloat) : sig_bits(T)
     ) : Int(precision_bits)
+    fixed_trace_plan === nothing &&
+        (fixed_trace_plan = fixed_trace_q3_canonical_plan(base.canonical))
     # Dimension-only provider + memory preflight with base facts, before ANY
     # allocation (RHS vectors, operators, cone, system, metadata arrays).
     dimension = saturating_sum_bytes(nr, m)
-    symmetric_core_state_preflight(
-        T, dimension, block_sizes, effective_precision,
-        memory_limit_bytes, current_rss_bytes,
-    )
+    if fixed_trace_plan === nothing
+        symmetric_core_state_preflight(
+            T, dimension, block_sizes, effective_precision,
+            memory_limit_bytes, current_rss_bytes,
+        )
+    else
+        fixed_trace_q3_core_preflight(
+            T, fixed_trace_plan, memory_limit_bytes, current_rss_bytes,
+        )
+    end
     # A setup-only semantic system: tau/kappa are still zero until cold start,
     # so use one for the layout placeholder.  The workspace is never
     # synchronized or factored here, and no direction solve reads these.
@@ -406,6 +431,9 @@ function _prepare_product_hsd_symmetric_core(
     )
     system = NewtonSystem(
         base.A, base.b, base.c, cone, one(T), one(T), rhs,
+    )
+    fixed_trace_plan === nothing || return prepare_fixed_trace_q3_core_state(
+        system, fixed_trace_plan,
     )
     return prepare_symmetric_core_state(
         system,
@@ -1659,6 +1687,36 @@ end
     return isfinite(value) ? value : T(Inf)
 end
 
+"""Check the fixed-trace HKM cone equation using its exact Newton operator."""
+@inline function _product_hsd_fixed_trace_cone_newton_stats(
+    state::ProductConeHSDState{T}, core,
+) where {T}
+    base = state.base
+    cone = core.system.cone
+    cone isa BlockProductConeLinearization{T} ||
+        return false, T(Inf), zero(T), true
+    componentwise = true
+    group_residual = zero(T)
+    group_work = zero(T)
+    @inbounds for (block_index, rows) in enumerate(cone.block_ranges)
+        operator = cone.operators[block_index]
+        for local_row in eachindex(rows)
+            map_work = zero(T)
+            for local_column in eachindex(rows)
+                map_work += abs(operator[local_row,local_column]) *
+                            abs(base.dy[rows[local_column]])
+            end
+            row = rows[local_row]
+            residual = base.ds[row] + base.e[row] - state.h[row]
+            work = abs(base.ds[row]) + map_work + abs(state.h[row])
+            componentwise &= _product_hsd_cone_newton_close(residual, work)
+            group_residual = max(group_residual, abs(residual))
+            group_work = max(group_work, work)
+        end
+    end
+    return componentwise, group_residual, group_work, false
+end
+
 """Check `ds + Theta*dy = h` with the arithmetic work of `Theta*dy`.
 
 The output coordinate `Theta*dy` may be cancellation-small near a curved
@@ -1671,6 +1729,9 @@ a conservative congruence bound; the zero-work case remains exact.
 ) where {T}
     base = state.base
     runtime = state.runtime
+    core = state.symmetric_core
+    core isa FixedTraceQ3CoreWorkspace{T} &&
+        return _product_hsd_fixed_trace_cone_newton_stats(state, core)
     componentwise = true
     conditioned_family_failed = false
     group_residual = zero(T)
@@ -1719,19 +1780,24 @@ a conservative congruence bound; the zero-work case remains exact.
                        abs(determinant) * abs(base.dy[k])
             residual = base.ds[k] + base.e[k] - state.h[k]
             work = abs(base.ds[k]) + map_work + abs(state.h[k])
-            map_bound = state.soc_roundtrip_bound[k]
-            map_bound == state.certified_soc_roundtrip_bound[k] ||
-                return false, T(Inf), zero(T), true
-            recomputation = gamma * work
-            allowance = map_bound + recomputation
-            isfinite(map_bound) && map_bound >= zero(T) &&
-                isfinite(recomputation) && isfinite(allowance) ||
-                return false, T(Inf), zero(T), true
-            local_ok = _product_bordered_zero_safe_close(
-                residual, allowance,
-            )
-            componentwise &= local_ok
-            conditioned_family_failed |= !local_ok
+            if state.symmetric_core !== nothing
+                local_ok = _product_hsd_cone_newton_close(residual, work)
+                componentwise &= local_ok
+            else
+                map_bound = state.soc_roundtrip_bound[k]
+                map_bound == state.certified_soc_roundtrip_bound[k] ||
+                    return false, T(Inf), zero(T), true
+                recomputation = gamma * work
+                allowance = map_bound + recomputation
+                isfinite(map_bound) && map_bound >= zero(T) &&
+                    isfinite(recomputation) && isfinite(allowance) ||
+                    return false, T(Inf), zero(T), true
+                local_ok = _product_bordered_zero_safe_close(
+                    residual, allowance,
+                )
+                componentwise &= local_ok
+                conditioned_family_failed |= !local_ok
+            end
             group_residual = max(group_residual, abs(residual))
             group_work = max(group_work, work)
         end
@@ -1869,23 +1935,41 @@ end
     rhs_norm = zero(T)
     direction_norm = abs(base.dtau)
 
-    # `g_input` is dead after recovery's authoritative solve and is reused as
-    # a preallocated row-sum scratch for ||[A I -b]||_infinity.
-    @inbounds for k in 1:base.m
-        state.g_input[k] = one(T) + abs(base.b[k])
-        rhs_norm = max(rhs_norm, abs(base.rP[k]))
-        direction_norm = max(
-            direction_norm, abs(base.ds[k]),
-        )
-    end
-    @inbounds for j in 1:base.n
-        direction_norm = max(direction_norm, abs(base.dx[j]))
-        for ptr in nzrange(base.A, j)
-            state.g_input[base.A.rowval[ptr]] += abs(base.A.nzval[ptr])
+    # The operator norm of `[A I -b]` depends only on frozen data.  For the
+    # fixed-trace route it is cached at setup; recomputing it here would
+    # repeat a full sparse scan on every gate evaluation.
+    fixed_trace = state.symmetric_core isa FixedTraceQ3CoreWorkspace
+    if fixed_trace
+        operator_norm = state.symmetric_core.primal_operator_norm
+        @inbounds for k in 1:base.m
+            rhs_norm = max(rhs_norm, abs(base.rP[k]))
+            direction_norm = max(direction_norm, abs(base.ds[k]))
+        end
+        @inbounds for j in 1:base.n
+            direction_norm = max(direction_norm, abs(base.dx[j]))
+        end
+    else
+        # `g_input` is dead after recovery's authoritative solve and is reused as
+        # a preallocated row-sum scratch for ||[A I -b]||_infinity.
+        @inbounds for k in 1:base.m
+            state.g_input[k] = one(T) + abs(base.b[k])
+            rhs_norm = max(rhs_norm, abs(base.rP[k]))
+            direction_norm = max(
+                direction_norm, abs(base.ds[k]),
+            )
+        end
+        @inbounds for j in 1:base.n
+            direction_norm = max(direction_norm, abs(base.dx[j]))
+            for ptr in nzrange(base.A, j)
+                state.g_input[base.A.rowval[ptr]] += abs(base.A.nzval[ptr])
+            end
+        end
+        operator_norm = zero(T)
+        @inbounds for k in 1:base.m
+            operator_norm = max(operator_norm, state.g_input[k])
         end
     end
 
-    operator_norm = zero(T)
     @inbounds for k in 1:base.m
         bdt = base.b[k] * base.dtau
         residual = base.ax[k] + base.ds[k] - bdt + base.rP[k]
@@ -1893,7 +1977,6 @@ end
                      abs(base.rP[k])
         componentwise &= _product_hsd_newton_close(residual, local_work)
         group_residual = max(group_residual, abs(residual))
-        operator_norm = max(operator_norm, state.g_input[k])
     end
     group_work = operator_norm * direction_norm + rhs_norm
     return componentwise, group_residual, group_work
@@ -1984,13 +2067,19 @@ end
         end
         isfinite(residual) && isfinite(local_work) || return false
 
-        propagated = zero(T)
-        for j in 1:base.nr
-            term = abs(base.rank_basis[i, j]) *
-                   workspace.certified_physical_bound[j]
-            isfinite(term) || return false
-            propagated += term
+        propagated = if _hsd_is_identity_basis(base.rank_basis)
+            workspace.certified_physical_bound[i]
+        else
+            sum_terms = zero(T)
+            for j in 1:base.nr
+                term = abs(base.rank_basis[i, j]) *
+                       workspace.certified_physical_bound[j]
+                isfinite(term) || return false
+                sum_terms += term
+            end
+            sum_terms
         end
+        isfinite(propagated) || return false
         gamma = _product_bordered_gamma(T, operations + 2)
         recomputation = gamma * local_work
         allowance = propagated + conditioned + recomputation
@@ -2626,12 +2715,16 @@ end
     copyto!(base.rD, base.rDt)
     copyto!(state.h, base.st)
     base.rG = original_rG
-    @inbounds for j in 1:base.nr
-        acc = zero(T)
-        for i in 1:base.n
-            acc += base.rank_basis[i, j] * base.rD[i]
+    if _hsd_is_identity_basis(base.rank_basis)
+        copyto!(base.rDr, base.rD)
+    else
+        @inbounds for j in 1:base.nr
+            acc = zero(T)
+            for i in 1:base.n
+                acc += base.rank_basis[i, j] * base.rD[i]
+            end
+            base.rDr[j] = acc
         end
-        base.rDr[j] = acc
     end
     return nothing
 end
@@ -2650,12 +2743,16 @@ end
         end
     end
     if !reduced_authoritative
-        @inbounds for j in 1:base.nr
-            acc = zero(T)
-            for i in 1:base.n
-                acc += base.rank_basis[i, j] * base.dx[i]
+        if _hsd_is_identity_basis(base.rank_basis)
+            copyto!(base.dxr, base.dx)
+        else
+            @inbounds for j in 1:base.nr
+                acc = zero(T)
+                for i in 1:base.n
+                    acc += base.rank_basis[i, j] * base.dx[i]
+                end
+                base.dxr[j] = acc
             end
-            base.dxr[j] = acc
         end
     end
     @inbounds for k in 1:base.m
@@ -2756,12 +2853,16 @@ end
             end
             base.rD[j] = dual_residual
         end
-        @inbounds for j in 1:base.nr
-            acc = zero(T)
-            for i in 1:base.n
-                acc = muladd(base.rank_basis[i, j], base.rD[i], acc)
+        if _hsd_is_identity_basis(base.rank_basis)
+            copyto!(base.rDr, base.rD)
+        else
+            @inbounds for j in 1:base.nr
+                acc = zero(T)
+                for i in 1:base.n
+                    acc = muladd(base.rank_basis[i, j], base.rD[i], acc)
+                end
+                base.rDr[j] = acc
             end
-            base.rDr[j] = acc
         end
         gap_residual = original_rG + base.dkappa
         @inbounds for j in 1:base.n
@@ -3002,6 +3103,11 @@ public result, or fall back to a legacy/lifted route.
             _product_hsd_symmetric_core_direction!(state)
         catch exception
             exception isa InterruptException && rethrow()
+            state.diagnostic = :symmetric_core_dispatch_exception
+            if get(ENV, "SDPX_DEBUG_SYMMETRIC_CORE", "0") == "1"
+                showerror(stderr, exception, catch_backtrace())
+                println(stderr)
+            end
             false
         end
         return direction_ok ? HSDStepOK : HSDStepDirectionFailed
@@ -3133,7 +3239,13 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
         base.record.step_size = zero(T)
         return HSDStepAlreadyOptimal
     end
-    scaling_ok = try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+    scaling_ok = if state.symmetric_core isa FixedTraceQ3CoreWorkspace
+        _product_hsd_fixed_trace_hkm_neighborhood!(
+            state, base.s, base.y, base.mu,
+        )
+    else
+        try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+    end
     scaling_ok || return HSDStepDirectionFailed
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
@@ -3179,6 +3291,12 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     else
         _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
     end
+    if direction_code !== HSDStepOK && state.symmetric_core !== nothing &&
+       !isempty(state.runtime.power) && !all(block.force_dual_hessian for block in state.runtime.power)
+        if force_power_dual_hessian_scaling!(state.runtime, base.s, base.y, base.mu)
+            direction_code = _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
+        end
+    end
     direction_code === HSDStepOK || return direction_code
     accepted = try
         _product_hsd_line_search!(state)
@@ -3191,6 +3309,21 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
             try_update_scaling!(state.runtime, base.s, base.y, base.mu)
         end
         false
+    end
+    if !accepted && state.symmetric_core !== nothing &&
+       !isempty(state.runtime.power) && !all(block.force_dual_hessian for block in state.runtime.power)
+        restore_nonsymmetric_scaling_checkpoint!(state.runtime)
+        if force_power_dual_hessian_scaling!(state.runtime, base.s, base.y, base.mu)
+            direction_code = _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
+            if direction_code === HSDStepOK
+                accepted = try
+                    _product_hsd_line_search!(state)
+                catch
+                    restore_nonsymmetric_scaling_checkpoint!(state.runtime)
+                    false
+                end
+            end
+        end
     end
     accepted || return state.runtime.valid ?
                        HSDStepBreakdown : HSDStepDirectionFailed

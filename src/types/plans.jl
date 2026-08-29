@@ -102,6 +102,51 @@ struct DenseHomogeneousBordered <: AbstractNativeHSDFormulation
     available::Bool
 end
 
+"""Typed descriptor for `K = [0 Ar'; Ar -Theta]`."""
+struct SymmetricAugmentedHSD <: AbstractNativeHSDFormulation
+    dimension::Int
+    reduced_rank::Int
+    active_rows::Int
+    layout::Symbol
+    row_scaling::Symbol
+    border_structure::Symbol
+    factorization::Symbol
+    pivoting::Symbol
+    factor_reuse::Symbol
+    gram_or_metric::Symbol
+    backend::Symbol
+    route::Symbol
+    reason::Symbol
+    available::Bool
+end
+
+function SymmetricAugmentedHSD(
+    reduced_rank::Integer, active_rows::Integer, dimension::Integer;
+    storage::Symbol=:sparse,
+    reason::Symbol=:ready,
+    available::Bool=true,
+)
+    nr = _native_hsd_nonnegative_dimension(reduced_rank, :reduced_rank)
+    rows = _native_hsd_nonnegative_dimension(active_rows, :active_rows)
+    dim = _native_hsd_nonnegative_dimension(dimension, :matrix_dimension)
+    return SymmetricAugmentedHSD(
+        available ? dim : 0,
+        available ? nr : 0,
+        rows,
+        available ? :rank_reduced_product_rows : :not_applicable,
+        :none,
+        :none,
+        available ? :symmetric_ldl : :not_applicable,
+        available ? :symmetric_pivoting : :not_applicable,
+        available ? :factor_once_homogeneous_predictor_corrector : :not_applicable,
+        available ? :native_product_theta : :not_applicable,
+        available ? :symmetric_augmented_core : :not_applicable,
+        :symmetric_augmented_hsd_core,
+        reason,
+        available,
+    )
+end
+
 """
     DenseHybridCoupled
 
@@ -284,7 +329,7 @@ function DenseHybridCoupled()
 end
 
 function Base.getproperty(
-    descriptor::DenseHomogeneousBordered,
+    descriptor::Union{DenseHomogeneousBordered,SymmetricAugmentedHSD},
     name::Symbol,
 )
     name === :formulation && return getfield(descriptor, :route)
@@ -318,7 +363,7 @@ function Base.getproperty(
 end
 
 function Base.propertynames(
-    descriptor::Union{DenseHomogeneousBordered,DenseHybridCoupled},
+    descriptor::Union{DenseHomogeneousBordered,DenseHybridCoupled,SymmetricAugmentedHSD},
     private::Bool=false,
 )
     return (fieldnames(typeof(descriptor))..., :matrix_dimension,
@@ -350,6 +395,7 @@ formulation_symbol(::SparseNormalEquations) = :sparse_normal_equations
 formulation_symbol(::BlockArrowElimination) = :block_arrow
 formulation_symbol(::NoKKTFormulation) = :not_applicable
 formulation_symbol(::DenseHomogeneousBordered) = :dense_homogeneous_bordered
+formulation_symbol(::SymmetricAugmentedHSD) = :symmetric_augmented_hsd_core
 formulation_symbol(::DenseHybridCoupled) = :dense_hybrid_coupled
 formulation_symbol(formulation::UnsupportedKKTFormulation) = formulation.name
 formulation_symbol(plan::FormulationPlan) =
@@ -381,6 +427,8 @@ function kkt_backend_from_formulation(
 )
     formulation = plan.formulation
     formulation isa DenseHomogeneousBordered &&
+        return formulation.backend
+    formulation isa SymmetricAugmentedHSD &&
         return formulation.backend
     formulation isa DenseHybridCoupled &&
         return formulation.backend

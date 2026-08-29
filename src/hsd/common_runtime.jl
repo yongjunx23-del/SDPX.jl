@@ -10,6 +10,10 @@
 # forced to zero.
 @inline function _hsd_scatter_dx!(state::HSDState{T}) where {T}
     V = state.rank_basis
+    if _hsd_is_identity_basis(V)
+        copyto!(state.dx, state.dxr)
+        return state.dx
+    end
     @inbounds for i in 1:state.n
         acc = zero(T)
         for j in 1:state.nr

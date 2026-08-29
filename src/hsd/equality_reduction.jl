@@ -38,7 +38,7 @@ struct HSDEqualityReduction{T<:AbstractFloat}
     reduced_to_full::Vector{Int}
     full_to_reduced::Vector{Int}
     x_particular::Vector{T}
-    null_basis::Matrix{T}
+    null_basis::Union{Matrix{T},IdentityRankBasis{T}}
     range_basis::Matrix{T}
     upper::Matrix{T}
     pivots::Vector{Int}
@@ -49,6 +49,39 @@ struct HSDEqualityReduction{T<:AbstractFloat}
     rank_tolerance::T
     consistency_tolerance::T
     primal_infeasibility_ray::Vector{T}
+end
+
+"""Retain ZeroCone rows in the five-equation system without a nullspace map.
+
+Internal fixed-trace route only.  The identity basis preserves every primal
+coordinate; ZeroCone rows have barrier degree zero and are recovered in place.
+No rank claim is made by this record—the fixed-trace planner must separately
+certify the retained equality panel before numerical execution.
+"""
+function hsd_retain_equalities(
+    canonical::CanonicalConicProgram{T},
+) where {T<:AbstractFloat}
+    n = canonical_num_variables(canonical)
+    m = canonical_num_slack(canonical)
+    identity_rows = collect(1:m)
+    return HSDEqualityReduction{T}(
+        HSDEqualityReady,
+        canonical,
+        canonical,
+        Int[],
+        identity_rows,
+        copy(identity_rows),
+        zeros(T, n),
+        IdentityRankBasis(T, n),
+        zeros(T, n, 0),
+        zeros(T, 0, 0),
+        Int[], Int[], Int[],
+        zeros(T, 0, 0),
+        0,
+        zero(T),
+        T(100) * eps(T),
+        zeros(T, m),
+    )
 end
 
 @inline function _hsd_eq_all_finite(values)
@@ -565,16 +598,36 @@ function hsd_recover_optimal!(
     primal_objective = dot(original.c, x)
     dual_pairing = dot(original.b, y)
     complementarity_scale = one(T) + abs(primal_objective) + abs(dual_pairing)
-    valid = _hsd_eq_all_finite(x) && _hsd_eq_all_finite(s) && _hsd_eq_all_finite(y) &&
-            _hsd_eq_scaled_residual_ok(primal_residual, data_scale, tolerance) &&
-            _hsd_eq_scaled_residual_ok(dual_residual, data_scale, tolerance) &&
-            complementarity <= tolerance * complementarity_scale &&
-            in_canonical_cone(
-                original, s; dual=false, tol=tolerance * data_scale,
-            ) &&
-            in_canonical_cone(
-                original, y; dual=true, tol=tolerance * data_scale,
-            )
+    primal_ok = _hsd_eq_scaled_residual_ok(
+        primal_residual, data_scale, tolerance,
+    )
+    dual_ok = _hsd_eq_scaled_residual_ok(
+        dual_residual, data_scale, tolerance,
+    )
+    complementarity_ok =
+        complementarity <= tolerance * complementarity_scale
+    primal_cone_ok = in_canonical_cone(
+        original, s; dual=false, tol=tolerance * data_scale,
+    )
+    dual_cone_ok = in_canonical_cone(
+        original, y; dual=true, tol=tolerance * data_scale,
+    )
+    valid = _hsd_eq_all_finite(x) && _hsd_eq_all_finite(s) &&
+            _hsd_eq_all_finite(y) && primal_ok && dual_ok &&
+            complementarity_ok && primal_cone_ok && dual_cone_ok
+    if !valid && get(ENV, "SDPX_DEBUG_EQUALITY_RECOVERY", "0") == "1"
+        println(stderr, (
+            recovery=:optimal,
+            primal_normalized=_hsd_eq_maxabs(primal_residual) /
+                max(one(T), data_scale),
+            dual_normalized=_hsd_eq_maxabs(dual_residual) /
+                max(one(T), data_scale),
+            complementarity_normalized=complementarity /
+                max(one(T), complementarity_scale),
+            primal_ok, dual_ok, complementarity_ok,
+            primal_cone_ok, dual_cone_ok, tolerance,
+        ))
+    end
     valid || return false
     copyto!(x_full, x)
     copyto!(s_full, s)

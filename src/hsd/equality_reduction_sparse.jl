@@ -32,6 +32,7 @@
     SparseEqualityFailClosed           # planner refused (e.g., expanded route unavailable)
 end
 
+
 """Capability gate: SuiteSparse SPQR rank analysis is Float64-only."""
 @inline sparse_equality_rank_supported(::Type{T}) where {T<:AbstractFloat} =
     T === Float64
@@ -59,7 +60,7 @@ struct SparseEqualityReduction{T<:AbstractFloat}
     sparse_rank::Int
     Ar::SparseMatrixCSC{T,Int}
     cr::Vector{T}
-    V::Matrix{T}
+    V::Union{SparseMatrixCSC{T,Int},IdentityRankBasis{T}}
     cnull::Vector{T}
     rank::Int
     rank_tolerance::T
@@ -76,6 +77,8 @@ end
 @inline _hsd_reduction_status(::NamedTuple) = SparseEqualityReady
 @inline _hsd_reduction_mode(reduction::SparseEqualityReduction) = reduction.mode
 @inline _hsd_reduction_status(reduction::SparseEqualityReduction) = reduction.status
+
+@inline _hsd_is_identity_basis(::AbstractMatrix) = false
 
 @inline function _hsd_sparse_maxabs(values::AbstractVector{T}) where {T}
     scale = zero(T)
@@ -244,7 +247,7 @@ function hsd_sparse_rowspace_reduction(
             SparseEqualityReady, :preserve_original, 0,
             SparseArrays.sparse(zeros(T, m, 0)),
             Vector{T}(undef, 0),
-            zeros(T, 0, 0), zeros(T, 0), 0,
+            IdentityRankBasis(T, 0), zeros(T, 0), 0,
             zero(T), zero(T), false, false, zeros(T, 0),
         )
     end
@@ -257,7 +260,9 @@ function hsd_sparse_rowspace_reduction(
     # Original coordinates: identity is an orthonormal row-space basis that
     # preserves the established bitwise path for full-rank systems and keeps
     # every coordinate (no dense null-space basis) otherwise.
-    V = Matrix{T}(LinearAlgebra.I, n, n)
+    # A zero-payload IdentityRankBasis is stored: no O(n) sparse identity
+    # values/indices and no dense n×n identity are ever materialized.
+    V = IdentityRankBasis(T, n)
     Ar = SparseArrays.sparse(A)
     cr = copy(c)
     scaleC = max(_hsd_sparse_maxabs(c), one(T))
@@ -281,6 +286,29 @@ function hsd_sparse_rowspace_reduction(
         Ar, cr, V, zeros(T, n), n,
         rank_tolerance, objective_tolerance,
         ambiguous, false, zeros(T, n),
+    )
+end
+
+"""Construct a full-rank sparse reduction from an external structural proof.
+
+The caller must prove that the sparse operator has full column rank (the
+fixed-trace route does so from disjoint invertible local tail maps).  No
+numerical rank inference or precision downcast occurs here.
+"""
+function hsd_structural_full_rank_reduction(
+    A::SparseMatrixCSC{T,Int}, c::AbstractVector{T},
+) where {T<:AbstractFloat}
+    m, n = size(A)
+    length(c) == n || throw(DimensionMismatch("structural rank A/c"))
+    scaleA = max(_hsd_sparse_scaleA(A), one(T))
+    scaleC = max(_hsd_sparse_maxabs(c), one(T))
+    return SparseEqualityReduction{T}(
+        SparseEqualityReady, :preserve_original, n,
+        SparseArrays.sparse(A), copy(c), IdentityRankBasis(T, n),
+        zeros(T, n), n,
+        T(max(m,n)) * eps(T) * scaleA,
+        T(100 * max(m,n)) * eps(T) * scaleC,
+        false, false, zeros(T, n),
     )
 end
 

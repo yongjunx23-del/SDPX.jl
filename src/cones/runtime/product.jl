@@ -220,6 +220,13 @@ function _runtime_validate_block(block, expected::Int)
         block.length == _runtime_psd_length(block.dimension) || throw(ArgumentError(
             "PSD packed length $(block.length) does not match dimension $(block.dimension)",
         ))
+    elseif block.cone === :zero
+        block.storage === :vector || throw(ArgumentError(
+            "zero-cone runtime requires :vector storage, got $(block.storage)",
+        ))
+        block.length == block.dimension || throw(ArgumentError(
+            "zero-cone block length must equal dimension",
+        ))
     elseif block.cone === :nonnegative || block.cone === :soc
         block.storage === :vector || throw(ArgumentError(
             "$(block.cone) runtime requires :vector storage, got $(block.storage)",
@@ -236,7 +243,7 @@ function _runtime_validate_block(block, expected::Int)
         ))
     else
         throw(ArgumentError(
-            "ProductConeRuntime supports :nonnegative, :soc, :psd, :exp and :power; " *
+            "ProductConeRuntime supports :zero, :nonnegative, :soc, :psd, :exp and :power; " *
             "unsupported block $(repr(block.cone))",
         ))
     end
@@ -443,10 +450,13 @@ function ProductConeRuntime(layout::ConeProductLayout, ::Type{T}) where {T<:Abst
     psd = PSDRuntimeBlock{T}[]
     exp_blocks = ExpRuntimeBlock{T}[]
     power_blocks = PowerRuntimeBlock{T}[]
+    zero_ranges = UnitRange{Int}[]
     expected = 1
     for block in blocks
         expected = _runtime_validate_block(block, expected)
-        if block.cone === :nonnegative
+        if block.cone === :zero
+            push!(zero_ranges, block.offset:(block.offset + block.length - 1))
+        elseif block.cone === :nonnegative
             push!(orthant, _runtime_make_orthant(T, block))
         elseif block.cone === :soc
             push!(soc, _runtime_make_soc(T, block))
@@ -470,6 +480,7 @@ function ProductConeRuntime(layout::ConeProductLayout, ::Type{T}) where {T<:Abst
         psd,
         exp_blocks,
         power_blocks,
+        zero_ranges,
         layout.dimension,
         false,
         zero(T),

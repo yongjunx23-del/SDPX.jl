@@ -311,6 +311,13 @@ function verify_optimal!(
     gap_limit = tol * gap_scale
     isfinite(gap_residual) && isfinite(gap_limit) && gap_residual <= gap_limit ||
         return false
+    # The affine residuals are data-normalized and can be tiny while their
+    # pairing with a large primal/dual point still leaves a resolvable cone
+    # complementarity.  Check the recovered pairing directly so an internal
+    # HSD status can never outrun the full-canonical recovery authority.
+    cone_complementarity = abs(dot(state.st, state.yt))
+    isfinite(cone_complementarity) && cone_complementarity <= gap_limit ||
+        return false
     kappa_recovered = state.kappa * inv_tau
     kappa_limit = tol * gap_scale
     isfinite(kappa_recovered) && isfinite(kappa_limit) &&

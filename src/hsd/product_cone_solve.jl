@@ -99,9 +99,20 @@ function _product_hsd_refined_optimal_result!(
     recovered_residual <= sqrt(tol) || return nothing
 
     canonical = base.canonical
-    # Reuse the dense canonical matrix already owned by HSDState; the cold
-    # refinement must not create a second sparse-to-dense copy.
+    # Float64 sparse least squares is handled by SPQR. Julia's sparse `\\`
+    # does not support MultiFloat, so the cold terminal refinement makes an
+    # explicit target-arithmetic dense copy rather than silently lowering to
+    # Float64. The copy exists only for a terminal candidate; Newton epochs
+    # remain sparse. Oversized candidates fail closed before allocation.
     A = base.Ad
+    refinement_A = if A isa SparseMatrixCSC && T !== Float64
+        scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+        required = saturating_bytes(scalar_bytes, size(A,1), size(A,2))
+        required <= 512 * 1024^2 || return nothing
+        Matrix{T}(A)
+    else
+        A
+    end
     x = base.x ./ base.tau
     s = base.s ./ base.tau
     y = base.y ./ base.tau
@@ -111,7 +122,7 @@ function _product_hsd_refined_optimal_result!(
         if base.n == 0
             _product_hsd_refinement_maxabs(primal_residual) <= tol || return nothing
         else
-            x .+= A \ (-primal_residual)
+            x .+= refinement_A \ (-primal_residual)
         end
 
         # Near the x=0 exposed face of K_exp, the exact boundary relation is
@@ -140,7 +151,7 @@ function _product_hsd_refined_optimal_result!(
                 _product_hsd_refinement_maxabs(primal_residual) <= tol ||
                     return nothing
             else
-                x .+= A \ (-primal_residual)
+                x .+= refinement_A \ (-primal_residual)
             end
         end
 
@@ -374,7 +385,13 @@ function _product_hsd_terminal_verified_result!(
     base.tau = saved_tau
     base.kappa = saved_kappa
     hsd_residual!(base)
-    restored = try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+    restored = if state.symmetric_core isa FixedTraceQ3CoreWorkspace
+        _product_hsd_fixed_trace_hkm_neighborhood!(
+            state, base.s, base.y, base.mu,
+        )
+    else
+        try_update_scaling!(state.runtime, base.s, base.y, base.mu)
+    end
     # `_product_hsd_make_result` has copied every verified coordinate. A
     # failure to restore this reusable mutable runtime cannot revoke that
     # immutable result; retain it and invalidate only the abandoned state.

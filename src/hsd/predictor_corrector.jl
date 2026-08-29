@@ -598,6 +598,18 @@ Returns `true` on success; a non-converged or non-symmetric block fails closed.
 # overwrites `base.dy`/`base.e`.  Returns the PSD-budget-inconclusive flag.
 function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
     base = state.base
+    core = state.symmetric_core
+    if core isa FixedTraceQ3CoreWorkspace{T}
+        # The fixed-trace core already computed A*dx into `core.ax`;
+        # reuse it instead of a second full sparse scan.
+        copyto!(base.ax, core.ax)
+        @inbounds for row in 1:base.m
+            state.g_input[row] = base.ax[row] + state.h[row] +
+                                 base.rP[row] - base.b[row] * base.dtau
+        end
+        apply_cone_linearization!(base.e, core.system.cone, base.dy)
+        return false
+    end
     fill!(base.ax, zero(T))
     @inbounds for j in 1:base.n
         value = base.dx[j]
@@ -611,20 +623,107 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
         state.g_input[row] = base.ax[row] + state.h[row] +
                              base.rP[row] - base.b[row] * base.dtau
     end
-    # The cone complementarity term for the frozen five-equation gate is
-    # Theta applied to the raw core dual direction.  Compute this first while
-    # the per-block input/output scratch still holds `dy`; the diagnostic G
-    # roundtrip below deliberately overwrites that scratch afterwards.
+    # The cone complementarity term for the frozen five-equation gate must
+    # use the exact operator carried by this NewtonSystem.  Fixed-trace HKM
+    # intentionally differs from the runtime's generic SOC NT map.
     apply_Theta!(state.runtime, base.e, base.dy)
     # Diagnostic-only recovery: G(target) then Theta(G(target)) populate the
     # runtime block scratch and `gb`/`g_output` so the existing roundtrip
     # certificate machinery can be (re)evaluated.  The result is never copied
-    # into `base.dy` or `base.e`; the raw core direction stays authoritative
-    # for the five-equation gate and line search.
+    # into `base.dy` or `base.e`; the raw core direction stays authoritative.
     apply_G!(state.runtime, state.g_output, state.g_input)
     apply_Theta!(state.runtime, state.gb, state.g_output)
     _, psd_inconclusive = _product_hsd_roundtrip_backward_status(state)
     return psd_inconclusive
+end
+
+"""Prepare the exact HKM Q3 cone equation for one predictor/corrector RHS.
+
+The complete map `M` satisfies `dy = r_HKM - M*ds`.  The frozen Newton
+system therefore receives `Theta=M^-1` and `h=Theta*r_HKM`.  Predictor
+refreshes `M/Theta`; corrector changes only `r_HKM/h`, preserving the one
+factor and one homogeneous solve owned by the numeric epoch.
+"""
+
+function _product_hsd_fixed_trace_hkm_linearization!(
+    state::ProductConeHSDState{T}, target::T,
+    include_affine_product::Bool, refresh_metric::Bool,
+) where {T}
+    core = state.symmetric_core
+    core isa FixedTraceQ3CoreWorkspace{T} || return false
+    cone = core.system.cone
+    cone isa BlockProductConeLinearization{T} || return false
+    base = state.base
+    plan = core.plan
+    length(plan.soc_blocks) == length(plan.soc_operator_indices) || return false
+    fill!(state.h, zero(T))
+    fill!(cone.corrector_rhs, zero(T))
+    if refresh_metric
+        for operator in cone.operators
+            fill!(operator, zero(T))
+        end
+    elseif core.linearization_epoch != base.epoch
+        return false
+    end
+
+    blocks = plan.soc_blocks
+    next_block = Threads.Atomic{Int}(1)
+    failed = Threads.Atomic{Bool}(false)
+    run_block = function (block_index::Int)
+        block = blocks[block_index]
+        row0 = block.offset - 1
+        rows = block.offset:(block.offset + 2)
+        operator_index = plan.soc_operator_indices[block_index]
+        cone.block_ranges[operator_index] == rows ||
+            (failed[] = true; return)
+        operator = cone.operators[operator_index]
+        M = view(core.theta_inverse, :, :, block_index)
+        primal = view(base.s, rows)
+        dual = view(base.y, rows)
+        if refresh_metric
+            _soc_fixed_trace_hkm_full_metric!(M, primal, dual) ||
+                (failed[] = true; return)
+            _fixed_trace_spd3_inverse!(operator, M) ||
+                (failed[] = true; return)
+        end
+        all(isfinite, operator) || (failed[] = true; return)
+        affine_primal = view(base.ds_a, rows)
+        affine_dual = view(base.dy_a, rows)
+        r = view(core.hkm_rhs, :, block_index)
+        _soc_fixed_trace_hkm_rhs!(
+            r, primal, dual, affine_primal, affine_dual,
+            target, include_affine_product,
+        ) || (failed[] = true; return)
+        for i in 1:3
+            value = zero(T)
+            for j in 1:3
+                value += operator[i,j] * r[j]
+            end
+            isfinite(value) || (failed[] = true; return)
+            state.h[row0 + i] = value
+            cone.corrector_rhs[row0 + i] = _core_owned_value(value)
+        end
+        return
+    end
+    if Threads.nthreads() <= 1 || length(blocks) < 256
+        for block_index in eachindex(blocks)
+            run_block(block_index)
+            failed[] && return false
+        end
+    else
+        @sync for _ in 1:Threads.nthreads()
+            Threads.@spawn begin
+                while !failed[]
+                    block_index = Threads.atomic_add!(next_block, 1)
+                    block_index > length(blocks) && break
+                    run_block(block_index)
+                end
+            end
+        end
+        failed[] && return false
+    end
+    refresh_metric && (core.linearization_epoch = base.epoch)
+    return true
 end
 
 function _product_hsd_symmetric_core_linearization!(
@@ -737,13 +836,22 @@ function _product_hsd_symmetric_core_direction!(
     core = state.symmetric_core
     core === nothing && return false
     base = state.base
-    affine_shift!(state.runtime, state.h, base.s, base.y)
+    fixed_trace = core isa FixedTraceQ3CoreWorkspace{T}
 
     # Predictor.
     predictor_scalar = -base.tau * base.kappa
-    _product_hsd_symmetric_core_linearization!(
-        state, state.h,
-    ) || return false
+    predictor_linearized = if fixed_trace
+        _product_hsd_fixed_trace_hkm_linearization!(
+            state, zero(T), false, true,
+        )
+    else
+        affine_shift!(state.runtime, state.h, base.s, base.y)
+        _product_hsd_symmetric_core_linearization!(state, state.h)
+    end
+    predictor_linearized || begin
+        state.diagnostic = :fixed_trace_predictor_linearization_failed
+        return false
+    end
     predictor_system = _product_hsd_symmetric_core_system(
         state, predictor_scalar,
     )
@@ -751,7 +859,8 @@ function _product_hsd_symmetric_core_direction!(
     factor_symmetric_core_epoch!(
         core, predictor_system, base.epoch,
     )
-    predictor_candidate, predictor_residual, _ =
+    predictor_candidate, predictor_residual, _ = fixed_trace ?
+        _core_solve_raw!(core, predictor_system; compute_residual=false) :
         _core_solve_raw!(core, predictor_system)
     copyto!(base.dx, predictor_candidate.dx)
     copyto!(base.dy, predictor_candidate.dy)
@@ -759,8 +868,12 @@ function _product_hsd_symmetric_core_direction!(
     base.dtau = predictor_candidate.dtau
     base.dkappa = predictor_candidate.dkappa
     _product_hsd_core_scatter!(state)
-    _hsd_direction_finite(base) || return false
+    _hsd_direction_finite(base) || begin
+        state.diagnostic = :fixed_trace_predictor_nonfinite
+        return false
+    end
     if !_product_hsd_newton_residual_ok(state, predictor_scalar)
+        state.diagnostic = :fixed_trace_predictor_residual_failed
         return false
     end
     copyto!(base.dx_a, base.dx)
@@ -777,20 +890,28 @@ function _product_hsd_symmetric_core_direction!(
     sigma = min(one(T), ratio * ratio * ratio)
     sigma_mu = sigma * base.mu
 
-    # Corrector: only the cone RHS and scalar shift change; the operator
-    # values must be unchanged (verified by the Theta signature guard) and the
-    # same factor is reused.
-    _product_hsd_corrector_shift!(state, sigma_mu)
+    # Corrector: only the cone RHS and scalar shift change; the operator and
+    # local/equality factor remain the predictor epoch's authority.
+    corrector_linearized = if fixed_trace
+        _product_hsd_fixed_trace_hkm_linearization!(
+            state, sigma_mu, true, false,
+        )
+    else
+        _product_hsd_corrector_shift!(state, sigma_mu)
+        _product_hsd_symmetric_core_linearization!(state, state.h)
+    end
     corrector_scalar = sigma_mu - base.tau * base.kappa -
                        base.dtau_a * base.dkappa_a
-    _product_hsd_symmetric_core_linearization!(
-        state, state.h,
-    ) || return false
+    corrector_linearized || begin
+        state.diagnostic = :fixed_trace_corrector_linearization_failed
+        return false
+    end
     corrector_system = _product_hsd_symmetric_core_system(
         state, corrector_scalar,
     )
     corrector_system === nothing && return false
-    corrector_candidate, corrector_residual, _ =
+    corrector_candidate, corrector_residual, _ = fixed_trace ?
+        _core_solve_raw!(core, corrector_system; compute_residual=false) :
         _core_solve_raw!(core, corrector_system)
     copyto!(base.dx, corrector_candidate.dx)
     copyto!(base.dy, corrector_candidate.dy)
@@ -798,8 +919,12 @@ function _product_hsd_symmetric_core_direction!(
     base.dtau = corrector_candidate.dtau
     base.dkappa = corrector_candidate.dkappa
     _product_hsd_core_scatter!(state)
-    _hsd_direction_finite(base) || return false
+    _hsd_direction_finite(base) || begin
+        state.diagnostic = :fixed_trace_corrector_nonfinite
+        return false
+    end
     if !_product_hsd_newton_residual_ok(state, corrector_scalar)
+        state.diagnostic = :fixed_trace_corrector_residual_failed
         return false
     end
     return true

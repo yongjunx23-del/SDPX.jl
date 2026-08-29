@@ -76,13 +76,13 @@ this workspace without adding storage to the iterate itself.
 """
 mutable struct BorderedHSDWorkspace{T,R<:AbstractFactorCache{T}}
     At::SparseMatrixCSC{T,Int}
-    Ad::Matrix{T}
+    Ad::Union{Matrix{T},SparseMatrixCSC{T,Int}}
     Ar::SparseMatrixCSC{T,Int}
     Atr::SparseMatrixCSC{T,Int}
     cr::Vector{T}
     nr::Int
     orthant_only::Bool
-    rank_basis::Matrix{T}
+    rank_basis::Union{Matrix{T},SparseMatrixCSC{T,Int},IdentityRankBasis{T}}
     rank_null_objective::Vector{T}
     rank_ambiguous::Bool
     rank_incompatible::Bool
@@ -269,7 +269,7 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
     # Keep the full-rank path in the original coordinates.  Identity is an
     # orthonormal row-space basis and preserves the established bitwise path.
     if r == n
-        V = Matrix{T}(I, n, n)
+        V = IdentityRankBasis(T, n)
         return (
             Ar = SparseArrays.sparse(A), cr = copy(c), V = V,
             cnull = zeros(T, n), rank = r,
@@ -356,7 +356,9 @@ same pre-sized driver check.
 function _hsd_state_from_reduction(
     canonical::CanonicalConicProgram{T},
     driver::HotRouteCache{T, R},
-    reduction,
+    reduction;
+    retain_dense_operator::Bool=true,
+    retain_dense_schur::Bool=true,
 ) where {T, R<:AbstractFactorCache{T}}
     n = canonical_num_variables(canonical)
     m = canonical_num_slack(canonical)
@@ -378,14 +380,17 @@ function _hsd_state_from_reduction(
     driver.n == nr || throw(DimensionMismatch(
         "route cache n=$(driver.n) does not match reduced matrix n=$nr"))
     Ar = reduction.Ar
+    dense_or_sparse_A = retain_dense_operator ? Matrix{T}(A) : A
+    schur_storage = retain_dense_schur ? Matrix{T}(undef, nr, nr) :
+                    Matrix{T}(undef, 0, 0)
     workspace = BorderedHSDWorkspace{T,R}(
-        SparseArrays.sparse(transpose(A)), Matrix{T}(A), Ar,
+        SparseArrays.sparse(transpose(A)), dense_or_sparse_A, Ar,
         SparseArrays.sparse(transpose(Ar)), reduction.cr, nr, orthant_only,
         reduction.V, reduction.cnull, reduction.ambiguous,
         reduction.incompatible, reduction.ray,
         _hsd_reduction_mode(reduction), _hsd_reduction_status(reduction),
         zeros(T, nr), driver,
-        Matrix{T}(undef, nr, nr), zeros(T, nr), zeros(T, n),
+        schur_storage, zeros(T, nr), zeros(T, n),
         zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr), zeros(T, nr),
     )
     z = zero(T); o = one(T)
@@ -447,7 +452,7 @@ hsd_num_slack(state::HSDState) = state.m
 The frozen primal homogeneous residual `rP = A x + s − b·τ`.
 """
 function hsd_primal_residual!(state::HSDState{T}) where {T}
-    A = state.Ad
+    A = state.A
     mul!(state.ax, A, state.x)          # ax = A x
     @inbounds for k in 1:state.m
         state.rP[k] = state.s[k] - state.b[k] * state.tau + state.ax[k]
@@ -461,23 +466,27 @@ end
 The frozen dual homogeneous residual `rD = A'y + c·τ`.
 """
 function hsd_dual_residual!(state::HSDState{T}) where {T}
-    A = state.Ad
+    A = state.A
     fill!(state.rD, zero(T))
     @inbounds for j in 1:state.n
         acc = zero(T)
-        for k in 1:state.m
-            acc += A[k, j] * state.y[k]
+        for pointer in nzrange(A, j)
+            acc += A.nzval[pointer] * state.y[A.rowval[pointer]]
         end
         state.rD[j] = acc + state.c[j] * state.tau
     end
     # Keep the full residual for certificates/diagnostics and project it onto
     # the orthonormal row-space coordinates for the bordered Newton RHS.
-    @inbounds for j in 1:state.nr
-        acc = zero(T)
-        for i in 1:state.n
-            acc += state.rank_basis[i, j] * state.rD[i]
+    if _hsd_is_identity_basis(state.rank_basis)
+        copyto!(state.rDr, state.rD)
+    else
+        @inbounds for j in 1:state.nr
+            acc = zero(T)
+            for i in 1:state.n
+                acc += state.rank_basis[i, j] * state.rD[i]
+            end
+            state.rDr[j] = acc
         end
-        state.rDr[j] = acc
     end
     return state.rD
 end
@@ -541,8 +550,8 @@ function hsd_residual!(state::HSDState{T}) where {T}
     return nothing::Nothing
 end
 
-# Inf-norm of a dense matrix = max over rows of Σ_j |M[i,j]|.
-@inline function _opnorm_inf(M::Matrix{T}) where {T}
+# Inf-norm = max over rows of Σ_j |M[i,j]|.
+@inline function _opnorm_inf(M::AbstractMatrix{T}) where {T}
     m, n = size(M)
     a = zero(T)
     @inbounds for i in 1:m
@@ -554,6 +563,17 @@ end
         row > a && (a = row)
     end
     return a
+end
+
+@inline function _opnorm_inf(M::SparseMatrixCSC{T,Int}) where {T}
+    row_sums = zeros(T, size(M, 1))
+    @inbounds for column in axes(M, 2)
+        for pointer in nzrange(M, column)
+            row = M.rowval[pointer]
+            row_sums[row] += abs(M.nzval[pointer])
+        end
+    end
+    return maximum(row_sums; init=zero(T))
 end
 
 @inline function _maxabs(v::AbstractVector{T}) where {T}
@@ -598,7 +618,7 @@ function hsd_normalized_residual(state::HSDState{T}) where {T}
     numerator = max(p, max(d, g))
     isfinite(numerator) || return T(Inf)
 
-    matrix_norm = _opnorm_inf(state.Ad)
+    matrix_norm = _opnorm_inf(state.A)
     rhs_norm = _maxabs(state.b)
     objective_norm = _maxabs(state.c)
     isfinite(matrix_norm) && isfinite(rhs_norm) && isfinite(objective_norm) ||

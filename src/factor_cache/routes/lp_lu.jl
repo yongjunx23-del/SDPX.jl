@@ -157,16 +157,20 @@ mutable struct ProviderLPLUCache{T} <: AbstractFactorCache{T}
     provider_factor::Any
 end
 
-function _lp_lu_provider_backend(::Type{T}) where {T}
+function _lp_lu_provider_backend(
+    ::Type{T}; threads::Int=1,
+) where {T}
     T === Float64 && return nothing
     (T === BigFloat || is_multifloat_arithmetic(T)) || return nothing
     config = try
-        plan_la_backend(T; requested=:auto, route=:dense_lu, threads=1)
+        plan_la_backend(
+            T; requested=:auto, route=:dense_lu, threads=max(threads, 1),
+        )
     catch
         return nothing
     end
     backend = try
-        instantiate_la_backend(config, T)
+        instantiate_la_backend(config, T, max(threads, 1))
     catch
         return nothing
     end
@@ -183,9 +187,11 @@ function _provider_lp_lu_supported(::Type{T}) where {T}
 end
 
 
-function ProviderLPLUCache{T}(n::Int) where {T}
+function ProviderLPLUCache{T}(
+    n::Int; threads::Int=1,
+) where {T}
     n >= 0 || throw(ArgumentError("dimension must be non-negative, got $n"))
-    backend = _lp_lu_provider_backend(T)
+    backend = _lp_lu_provider_backend(T; threads=max(threads, 1))
     backend === nothing && throw(ArgumentError(
         "high-precision bordered LU requires MFLA or BFLA for arithmetic $(T)",
     ))

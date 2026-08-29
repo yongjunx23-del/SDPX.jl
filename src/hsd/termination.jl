@@ -138,7 +138,19 @@ function _product_hsd_verified_result(
     # verifier. Ray gates below still run and remain the only infeasibility
     # authority. Healthy tau follows the unchanged verifier path.
     tau_floor = max(tol, sqrt(eps(T)))
-    if check_optimal && base.tau > tau_floor && verify_optimal!(
+    optimal_probe_ready = true
+    if state.symmetric_core isa FixedTraceQ3CoreWorkspace
+        # Exact necessary condition from `verify_optimal!`: avoid scanning
+        # every Q3 block while normalized complementarity is still too large.
+        # This can only skip a verifier call that would certainly return false.
+        normalized_mu = base.tau > tau_floor ?
+            base.mu / (base.tau * base.tau) : T(Inf)
+        mu_limit = tol * (one(T) + T(base.nu))
+        optimal_probe_ready = isfinite(normalized_mu) &&
+                              isfinite(mu_limit) &&
+                              normalized_mu <= mu_limit
+    end
+    if check_optimal && optimal_probe_ready && base.tau > tau_floor && verify_optimal!(
         canonical, state.base, x_original, s_original, y_original; tol=tol,
     )
         return _product_hsd_make_result(
@@ -146,7 +158,9 @@ function _product_hsd_verified_result(
             x_original, s_original, y_original,
         )
     end
-    if verify_primal_infeasibility!(
+    ray_probe_ready = !(state.symmetric_core isa FixedTraceQ3CoreWorkspace) ||
+                      _product_hsd_tau_collapsed(base, tol)
+    if ray_probe_ready && verify_primal_infeasibility!(
         canonical, state.base, y_original; tol=tol,
     )
         return _product_hsd_make_result(
@@ -154,7 +168,7 @@ function _product_hsd_verified_result(
             terminal_alpha, x_original, s_original, y_original,
         )
     end
-    if verify_dual_infeasibility!(
+    if ray_probe_ready && verify_dual_infeasibility!(
         canonical, state.base, x_original, s_original; tol=tol,
     )
         return _product_hsd_make_result(

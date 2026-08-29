@@ -123,15 +123,10 @@ function sqrt!(cone::SOCone, z::AbstractVector, x::AbstractVector)
     s1 = sqrt(max(l1, zero(T)))
     s2 = sqrt(max(l2, zero(T)))
     z[1] = (s1 + s2) / two
-    # Rationalize `s1-s2` in wider arithmetic: the direct subtraction loses
-    # relative accuracy for a small nonzero tail even when the element is far
-    # from the boundary.  Preserve the established binary64 trajectory, whose
-    # public certificate baselines are intentionally bit-stable.
-    f = if T === Float64
-        (s1 - s2) / (two * r)
-    else
-        one(T) / (s1 + s2)
-    end
+    # `(s1-s2)/(2r) = 1/(s1+s2)`.  Always use the rationalized form: direct
+    # subtraction loses every useful tail digit near the cone axis and can
+    # make an otherwise well-conditioned NT update fail its backward gate.
+    f = one(T) / (s1 + s2)
     @inbounds for i in 2:cone.dim
         z[i] = f * x[i]
     end
@@ -172,8 +167,9 @@ end
 For a Lorentz element `w`, the spectral condition of `Q_w` is
 `((w0 + norm(wtail)) / (w0 - norm(wtail)))^2`.  A backward-stable map is not
 useful once that condition amplifies its roundoff to an ordinary inexact
-Newton forcing term.  The one-percent cap is deliberately independent of a
-requested certificate tolerance: crossing it fails closed and asks for more
+Newton forcing term.  The five-percent cap is independent of a requested
+certificate tolerance: every resulting direction still passes the original
+five-equation residual, while crossing the cap fails closed and asks for more
 working precision.
 """
 @inline function _soc_q_condition_reliable(w::AbstractVector{T}, n::Int) where {T}
@@ -197,7 +193,7 @@ working precision.
     kappa_theta = ratio * ratio
     gamma = _soc_roundoff_gamma(T, 3n + 12)
     budget = T(64) * gamma * kappa_theta
-    return isfinite(budget) && budget < one(T) / T(100)
+    return isfinite(budget) && budget < one(T) / T(20)
 end
 
 """Reject a strict-interior spectral gap that is unresolved in type `T`."""

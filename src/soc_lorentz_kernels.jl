@@ -260,8 +260,13 @@ guarantee strict interiority, so the determinant is positive. One shared
 formulation for the sign-sensitive triple that every 2×2 X⁻¹ contraction
 needs.
 """
+@inline function _soc_fixed_trace_determinant(x0, x1, x2)
+    tail_norm = sqrt(x1 * x1 + x2 * x2)
+    return (x0 - tail_norm) * (x0 + tail_norm)
+end
+
 @inline function _soc_sym2_inverse_entries(x0, x1, x2)
-    determinant = _soc_lorentz_determinant(x0, x1, x2)
+    determinant = _soc_fixed_trace_determinant(x0, x1, x2)
     return (x0 - x1) / determinant, -x2 / determinant, (x0 + x1) / determinant
 end
 
@@ -350,19 +355,105 @@ end
     x0, x1, x2 = primal
     z0, z1, z2 = dual
     # Interiority is decided by the stable head-versus-tail-norm comparison,
-    # not the raw determinant difference (which cancels near the boundary);
-    # the raw determinant is still what the metric divides by, so it must
-    # also be strictly positive in floating point. A reflected head
-    # (x0 < -||tail||) has a positive determinant but is outside the cone —
-    # the old determinant-only test accepted it.
+    # not the raw determinant difference (which cancels near the boundary).
     tail_norm = sqrt(x1 * x1 + x2 * x2)
     x0 > tail_norm || return false
-    determinant = _soc_lorentz_determinant(x0, x1, x2)
+    determinant = (x0 - tail_norm) * (x0 + tail_norm)
     determinant > zero(determinant) || return false
     destination[1] = (x0 * z0 - x1 * z1 + x2 * z2) / determinant
     destination[2] = -(x1 * z2 + x2 * z1) / determinant
     destination[3] = (x0 * z0 + x1 * z1 - x2 * z2) / determinant
     return true
+end
+
+"""Form the complete Q3 HKM map `M` in direct Lorentz coordinates.
+
+For the Sym2 representatives `X` of `primal`, `Y=Z/2` of `dual`, and a
+Lorentz direction `d`, this is the self-adjoint map
+
+    M*d = symcoord(X^-1 * D * Y).
+
+The fixed-trace local Schur uses its tail restriction `M[2:3,2:3]`; the full
+map is retained for the homogeneous `b*dτ` head coupling.  The formulas are
+provider-neutral and allocation-free.
+"""
+@inline function _soc_fixed_trace_hkm_full_metric!(destination, primal, dual)
+    size(destination) == (3, 3) || throw(DimensionMismatch(
+        "fixed-trace HKM metric destination must be 3×3",
+    ))
+    x0, x1, x2 = primal
+    z0, z1, z2 = dual
+    x_tail = sqrt(x1 * x1 + x2 * x2)
+    z_tail = sqrt(z1 * z1 + z2 * z2)
+    x0 > x_tail && z0 > z_tail || return false
+    determinant = (x0 - x_tail) * (x0 + x_tail)
+    isfinite(determinant) && determinant > zero(determinant) || return false
+
+    m11 = (x0 * z0 - x1 * z1 - x2 * z2) / determinant
+    m12 = (x0 * z1 - x1 * z0) / determinant
+    m13 = (x0 * z2 - x2 * z0) / determinant
+    m22 = (x0 * z0 - x1 * z1 + x2 * z2) / determinant
+    m23 = -(x1 * z2 + x2 * z1) / determinant
+    m33 = (x0 * z0 + x1 * z1 - x2 * z2) / determinant
+    all(isfinite, (m11, m12, m13, m22, m23, m33)) || return false
+    destination[1, 1] = m11
+    destination[2, 1] = m12
+    destination[3, 1] = m13
+    destination[1, 2] = m12
+    destination[2, 2] = m22
+    destination[3, 2] = m23
+    destination[1, 3] = m13
+    destination[2, 3] = m23
+    destination[3, 3] = m33
+    return true
+end
+
+"""Form the affine HKM recovery term `r` in `dy = r - M*ds`."""
+@inline function _soc_fixed_trace_hkm_rhs!(
+    destination,
+    primal,
+    dual,
+    affine_primal,
+    affine_dual,
+    target,
+    include_affine_product::Bool,
+)
+    x0, x1, x2 = primal
+    z0, z1, z2 = dual
+    x_tail = sqrt(x1 * x1 + x2 * x2)
+    x0 > x_tail || return false
+    determinant = (x0 - x_tail) * (x0 + x_tail)
+    isfinite(determinant) && determinant > zero(determinant) || return false
+    x11, x12, x22 = x0 + x1, x2, x0 - x1
+    y11, y12, y22 = (z0 + z1) / 2, z2 / 2, (z0 - z1) / 2
+
+    r11 = target - (x11 * y11 + x12 * y12)
+    r12 = -(x11 * y12 + x12 * y22)
+    r21 = -(x12 * y11 + x22 * y12)
+    r22 = target - (x12 * y12 + x22 * y22)
+    if include_affine_product
+        ax0, ax1, ax2 = affine_primal
+        az0, az1, az2 = affine_dual
+        ax11, ax12, ax22 = ax0 + ax1, ax2, ax0 - ax1
+        ay11, ay12, ay22 =
+            (az0 + az1) / 2, az2 / 2, (az0 - az1) / 2
+        r11 -= ax11 * ay11 + ax12 * ay12
+        r12 -= ax11 * ay12 + ax12 * ay22
+        r21 -= ax12 * ay11 + ax22 * ay12
+        r22 -= ax12 * ay12 + ax22 * ay22
+    end
+
+    inverse11 = (x0 - x1) / determinant
+    inverse12 = -x2 / determinant
+    inverse22 = (x0 + x1) / determinant
+    q11 = inverse11 * r11 + inverse12 * r21
+    q12 = inverse11 * r12 + inverse12 * r22
+    q21 = inverse12 * r11 + inverse22 * r21
+    q22 = inverse12 * r12 + inverse22 * r22
+    destination[1] = q11 + q22
+    destination[2] = q11 - q22
+    destination[3] = q12 + q21
+    return all(isfinite, destination)
 end
 
 @inline function _soc_fixed_trace_hkm_rhs_coordinates(

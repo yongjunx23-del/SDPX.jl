@@ -84,9 +84,18 @@ end
     return nothing
 end
 
+@inline function _runtime_zero_ranges!(runtime::ProductConeRuntime, vector)
+    @inbounds for rows in runtime.zero_ranges, index in rows
+        vector[index] = zero(eltype(vector))
+    end
+    return vector
+end
+
 function initialize_primal_dual!(runtime::ProductConeRuntime, s, y)
     _runtime_check_vectors(runtime, s, y)
     runtime.valid = false
+    _runtime_zero_ranges!(runtime, s)
+    _runtime_zero_ranges!(runtime, y)
     for block in runtime.orthant
         _runtime_copy_identity!(s, block.offset, block.dim, Val(:orthant))
         _runtime_copy_identity!(y, block.offset, block.dim, Val(:orthant))
@@ -152,6 +161,7 @@ function apply_Theta!(runtime::ProductConeRuntime, dst, src)
     _runtime_check_vector(runtime, src)
     _runtime_require_valid(runtime)
     _runtime_finite(src) || throw(DomainError(src, "Theta input contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_copy_in!(block.input, src, block.offset, block.dim)
         SymmetricCones.theta_apply!(block.cone, block.output, block.state, block.input)
@@ -176,6 +186,7 @@ function apply_G!(runtime::ProductConeRuntime, dst, src)
     _runtime_check_vector(runtime, src)
     _runtime_require_valid(runtime)
     _runtime_finite(src) || throw(DomainError(src, "G input contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_copy_in!(block.input, src, block.offset, block.dim)
         SymmetricCones.g_apply!(block.cone, block.output, block.state, block.input)
@@ -722,6 +733,7 @@ function apply_R!(runtime::ProductConeRuntime, dst, src)
     _runtime_check_vector(runtime, src)
     _runtime_require_valid(runtime)
     _runtime_finite(src) || throw(DomainError(src, "R input contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_r_block!(dst, src, block, Val(:forward))
     end
@@ -741,6 +753,7 @@ function apply_Rinv!(runtime::ProductConeRuntime, dst, src)
     _runtime_check_vector(runtime, src)
     _runtime_require_valid(runtime)
     _runtime_finite(src) || throw(DomainError(src, "R inverse input contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_r_block!(dst, src, block, Val(:inverse))
     end
@@ -764,6 +777,7 @@ end
 """Write the Euclidean-Jordan identity of every symmetric block."""
 function product_identity!(runtime::ProductConeRuntime, dst)
     _runtime_check_vector(runtime, dst)
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_identity_block!(dst, block)
     end
@@ -795,6 +809,7 @@ function product_jordan!(runtime::ProductConeRuntime, dst, x, y)
     _runtime_check_vector(runtime, y)
     _runtime_finite(x) || throw(DomainError(x, "Jordan left input contains non-finite data"))
     _runtime_finite(y) || throw(DomainError(y, "Jordan right input contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_jordan_block!(dst, x, y, block)
     end
@@ -824,6 +839,7 @@ function product_solve_Llambda!(runtime::ProductConeRuntime, dst, rhs)
     _runtime_check_vector(runtime, rhs)
     _runtime_require_valid(runtime)
     _runtime_finite(rhs) || throw(DomainError(rhs, "L_lambda RHS contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_llambda_block!(dst, rhs, block)
     end
@@ -865,6 +881,7 @@ shortcut.
 function symmetric_affine_shift!(runtime::ProductConeRuntime, h)
     _runtime_check_vector(runtime, h)
     _runtime_require_valid(runtime)
+    _runtime_zero_ranges!(runtime, h)
     for block in runtime.orthant
         _runtime_affine_shift_block!(h, block)
     end
@@ -961,6 +978,9 @@ function symmetric_corrector_shift!(
     _runtime_require_valid(runtime)
     target = T(sigma_mu)
     isfinite(target) || throw(DomainError(sigma_mu, "corrector target must be finite"))
+    _runtime_zero_ranges!(runtime, h)
+    _runtime_zero_ranges!(runtime, ds_hat)
+    _runtime_zero_ranges!(runtime, dy_hat)
     for block in runtime.orthant
         _runtime_corrector_shift_block!(h, ds_hat, dy_hat, ds_aff, dy_aff, target, block)
     end
@@ -1040,6 +1060,7 @@ function corrector_shift!(
     _runtime_finite(dy_aff) || throw(DomainError(dy_aff, "affine dual direction is non-finite"))
     target = T(sigma_mu)
     isfinite(target) || throw(DomainError(sigma_mu, "corrector target must be finite"))
+    _runtime_zero_ranges!(runtime, h)
     for block in runtime.orthant
         _runtime_corrector_shift_noscratch!(h, ds_aff, dy_aff, target, block)
     end

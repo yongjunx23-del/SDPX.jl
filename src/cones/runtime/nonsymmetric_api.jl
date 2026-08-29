@@ -690,6 +690,8 @@ function initialize_primal_dual!(
     _runtime_check_vectors(runtime, s, y)
     runtime.valid = false
     runtime.checkpoint_valid = false
+    _runtime_zero_ranges!(runtime, s)
+    _runtime_zero_ranges!(runtime, y)
     for block in runtime.exp
         block.checkpoint.valid = false
     end
@@ -965,7 +967,17 @@ function try_update_scaling!(
     for block in runtime.soc
         _runtime_copy_in!(block.primal, s, block.offset, block.dim)
         _runtime_copy_in!(block.dual, y, block.offset, block.dim)
-        _runtime_try_nt!(block) || return false
+        if !_runtime_try_nt!(block)
+            if get(ENV, "SDPX_DEBUG_LINE_SEARCH", "0") == "1"
+                println(stderr, (
+                    failed_soc_offset=block.offset,
+                    primal=copy(block.primal), dual=copy(block.dual),
+                    primal_margin=block.primal[1]^2 - sum(abs2, view(block.primal, 2:block.dim)),
+                    dual_margin=block.dual[1]^2 - sum(abs2, view(block.dual, 2:block.dim)),
+                ))
+            end
+            return false
+        end
     end
     for block in runtime.psd
         _runtime_copy_in!(block.primal, s, block.offset, block.len)
@@ -1053,6 +1065,7 @@ function apply_G!(runtime::_NonsymmetricProductRuntime, dst, src)
         )
         throw(DomainError(src, "G input contains non-finite data"))
     end
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_copy_in!(block.input, src, block.offset, block.dim)
         SymmetricCones.g_apply!(block.cone, block.output, block.state, block.input)
@@ -1094,6 +1107,7 @@ function apply_Theta!(runtime::_NonsymmetricProductRuntime, dst, src)
     _runtime_check_vector(runtime, src)
     _runtime_require_valid(runtime)
     _runtime_finite(src) || throw(DomainError(src, "Theta input contains non-finite data"))
+    _runtime_zero_ranges!(runtime, dst)
     for block in runtime.orthant
         _runtime_copy_in!(block.input, src, block.offset, block.dim)
         SymmetricCones.theta_apply!(block.cone, block.output, block.state, block.input)
@@ -1237,6 +1251,7 @@ function affine_shift!(runtime::_NonsymmetricProductRuntime, h, s, y)
     _runtime_require_valid(runtime)
     _runtime_finite(s) && _runtime_finite(y) ||
         throw(DomainError((s, y), "affine-shift pair is non-finite"))
+    _runtime_zero_ranges!(runtime, h)
     for block in runtime.orthant
         _runtime_affine_shift_block!(h, block)
     end
@@ -1332,6 +1347,7 @@ function corrector_shift!(
     isfinite(target) && target >= zero(T) || throw(DomainError(
         sigma_mu, "corrector target must be finite and nonnegative",
     ))
+    _runtime_zero_ranges!(runtime, h)
     for block in runtime.orthant
         _runtime_corrector_shift_noscratch!(
             h, ds_aff, dy_aff, target, block,

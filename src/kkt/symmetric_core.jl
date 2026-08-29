@@ -1,4 +1,57 @@
 #=====================================================================#
+#    IdentityRankBasis — zero-payload identity rank-reduction basis.
+#
+#    The full-rank sparse path preserves original coordinates, so its
+#    reduction basis is the identity with zero stored numerical values and
+#    zero stored indices: the struct holds only the dimension `n` and carries
+#    no Vector/Matrix payload at all.  Defined here (included before the HSD
+#    state files) so both `symmetric_core.jl` and the later-included sparse
+#    HSD files share one concrete type.
+#=====================================================================#
+
+"""
+    IdentityRankBasis{T} <: AbstractMatrix{T}
+
+Zero-payload typed identity rank-reduction basis.  The full-rank sparse
+path preserves original coordinates, so the reduction basis is the identity
+with zero stored numerical values and zero stored indices: this object holds
+only the dimension `n` and carries no `Vector`/`Matrix` payload at all.  It
+implements the minimal `AbstractMatrix` surface so generic code can call
+`size`, `axes`, and `getindex` without materializing an identity.
+
+Every hot/cold path that would otherwise iterate the `n×n` identity must
+branch on `_hsd_is_identity_basis` first and never touch `getindex` in a
+loop.  Concrete consumers (residual projection, direction scatter, `V'c` /
+`V'd`, range/isometry validation, operator signatures, `Ar` reuse, core
+recovery) use the identity fast paths in `hsd.jl`, `common_runtime.jl`, and
+`symmetric_core.jl`.
+"""
+struct IdentityRankBasis{T<:AbstractFloat} <: AbstractMatrix{T}
+    dimension::Int
+end
+
+IdentityRankBasis(::Type{T}, dimension::Integer) where {T<:AbstractFloat} =
+    IdentityRankBasis{T}(Int(dimension))
+
+Base.size(basis::IdentityRankBasis) = (basis.dimension, basis.dimension)
+Base.size(basis::IdentityRankBasis, d::Integer) =
+    d == 1 || d == 2 ? basis.dimension : 1
+Base.axes(basis::IdentityRankBasis) =
+    (Base.OneTo(basis.dimension), Base.OneTo(basis.dimension))
+Base.axes(basis::IdentityRankBasis, d::Integer) =
+    d == 1 || d == 2 ? Base.OneTo(basis.dimension) : Base.OneTo(1)
+@inline function Base.getindex(
+    ::IdentityRankBasis{T}, i::Integer, j::Integer,
+) where {T}
+    i == j && return one(T)
+    return zero(T)
+end
+
+Base.IndexStyle(::Type{<:IdentityRankBasis}) = IndexCartesian()
+
+@inline _hsd_is_identity_basis(::IdentityRankBasis) = true
+
+#=====================================================================#
 #    SymmetricCorePattern — frozen CSC pattern and in-place numeric
 #    refill for the Clarabel-style symmetric augmented HSD core.
 #
@@ -324,6 +377,34 @@ function validate_symmetric_core(
     return true
 end
 
+function _core_write_ar!(
+    pattern::SymmetricCorePattern{T}, Ar::SparseMatrixCSC{T},
+) where {T<:AbstractFloat}
+    size(Ar) == (pattern.m, pattern.nr) || throw(DimensionMismatch(
+        "symmetric core Ar dimensions $(size(Ar)) disagree with frozen " *
+        "$(pattern.m)×$(pattern.nr)",
+    ))
+    Ar.colptr == pattern.ar_colptr || throw(ArgumentError(
+        "symmetric core numeric Ar colptr drifted from the frozen pattern",
+    ))
+    Ar.rowval == pattern.ar_rowval || throw(ArgumentError(
+        "symmetric core numeric Ar rowval drifted from the frozen pattern",
+    ))
+    all(isfinite, Ar.nzval) || throw(ArgumentError(
+        "symmetric core numeric Ar contains non-finite data",
+    ))
+    nzval = pattern.nzval
+    @inbounds for index in pattern.x_diag_slots
+        zero_owned!(view(nzval, index:index))
+    end
+    @inbounds for (slot_index, pointer) in enumerate(eachindex(Ar.nzval))
+        _core_store_owned!(
+            nzval, pattern.ar_slots[slot_index], Ar.nzval[pointer],
+        )
+    end
+    return pattern
+end
+
 """
     refill!(pattern, Ar, Theta) -> pattern
 
@@ -339,18 +420,8 @@ function refill!(
     Theta::AbstractMatrix{T},
 ) where {T<:AbstractFloat}
     validate_symmetric_core(pattern, Ar, Theta)
+    _core_write_ar!(pattern, Ar)
     nzval = pattern.nzval
-    @inbounds for j in 1:pattern.nr
-        index = pattern.x_diag_slots[j]
-        zero_owned!(view(nzval, index:index))
-    end
-    slot_index = 0
-    @inbounds for j in 1:pattern.nr
-        for pointer in nzrange(Ar, j)
-            slot_index += 1
-            _core_store_owned!(nzval, pattern.ar_slots[slot_index], Ar.nzval[pointer])
-        end
-    end
     slot_index = 0
     for (index, rows) in enumerate(pattern.block_ranges)
         last_row = last(rows)
@@ -531,6 +602,28 @@ function _core_mix_values(
     return signature
 end
 
+function _core_mix_values(
+    signature::UInt64, basis::IdentityRankBasis,
+)
+    signature = _core_mix_uint(signature, UInt64(2))
+    signature = _core_mix_uint(signature, UInt64(size(basis, 1)))
+    signature = _core_mix_uint(signature, UInt64(size(basis, 2)))
+    # A zero-payload identity contributes no numerical values; its static
+    # identity is fully described by the type and the dimension.
+    return signature
+end
+
+function _core_mix_values(
+    signature::UInt64, values::SparseMatrixCSC,
+)
+    signature = _core_mix_uint(signature, UInt64(2))
+    signature = _core_mix_uint(signature, UInt64(size(values, 1)))
+    signature = _core_mix_uint(signature, UInt64(size(values, 2)))
+    signature = _core_mix_values(signature, values.colptr)
+    signature = _core_mix_values(signature, values.rowval)
+    return _core_mix_values(signature, values.nzval)
+end
+
 function _core_mix_ranges(
     signature::UInt64, ranges::AbstractVector{<:UnitRange{Int}},
 )
@@ -701,6 +794,7 @@ end
 function _core_vector_in_range(
     V::AbstractMatrix{T}, vector::AbstractVector{T}, work::AbstractVector{T},
 ) where {T}
+    _hsd_is_identity_basis(V) && return true
     zero_owned!(work)
     @inbounds for r in axes(V, 2)
         coefficient = zero(T)
@@ -757,12 +851,22 @@ function _symmetric_core_workspace_prevalidated(
         "pattern cone dimension $(pattern.m) disagrees with system rows $m",
     ))
     dimension = nr + m
-    V_owned = alloc_zeros(T, size(V, 1), size(V, 2))
-    copy_owned!(V_owned, V)
+    # A zero-payload identity basis is already immutable and owns no storage;
+    # keep it as-is instead of copying a payload that does not exist.  Dense
+    # RRQR bases are owned copies so a mutable BigFloat basis cannot be
+    # corrupted by the caller.
+    V_owned = V isa IdentityRankBasis ? V :
+        (V isa SparseMatrixCSC ?
+         owned_sparse_copy(T, V; precision_bits=factor_receipt_precision(T)) :
+         copy_owned!(alloc_zeros(T, size(V, 1), size(V, 2)), V))
     cr = alloc_zeros(T, nr)
-    for j in 1:n
-        for r in 1:nr
-            cr[r] += V_owned[j, r] * system.c[j]
+    if _hsd_is_identity_basis(V_owned)
+        copy_owned!(cr, system.c)
+    else
+        for j in 1:n
+            for r in 1:nr
+                cr[r] += V_owned[j, r] * system.c[j]
+            end
         end
     end
     original_nzval = alloc_zeros(T, length(pattern.nzval))
@@ -989,6 +1093,13 @@ function _core_revoke_epoch!(
     return workspace
 end
 
+function factorize_symmetric_core_pattern!(
+    cache::AbstractFactorCache{T}, pattern::SymmetricCorePattern{T},
+    matrix_epoch::Integer,
+) where {T<:AbstractFloat}
+    return factorize!(cache, materialize_dense(pattern), Int(matrix_epoch))
+end
+
 function factor_symmetric_core_epoch!(
     workspace::SymmetricCoreWorkspace{T},
     system::NewtonSystem{T},
@@ -1014,8 +1125,8 @@ function factor_symmetric_core_epoch!(
                 cache, symmetric_core_lower_sparse(workspace.pattern), epoch,
             )
         else
-            SDPX.factorize!(
-                cache, materialize_dense(workspace.pattern), epoch,
+            factorize_symmetric_core_pattern!(
+                cache, workspace.pattern, epoch,
             )
         end
         sync_core_factor_epoch!(workspace; system=system)
@@ -1339,8 +1450,12 @@ function _core_dr!(
         "symmetric core dual RHS has a discarded nullspace component",
     ))
     dr = workspace.dr
-    zero_owned!(dr)
     V = workspace.V
+    if _hsd_is_identity_basis(V)
+        copy_owned!(dr, system.rhs.dual_affine)
+        return dr
+    end
+    zero_owned!(dr)
     @inbounds for j in 1:workspace.n
         value = system.rhs.dual_affine[j]
         for r in 1:workspace.nr
@@ -1591,19 +1706,24 @@ function _core_solve_raw!(
             workspace.wy[i] + dtau * workspace.uy[i])
     end
     # dx = V * dxr.
-    zero_owned!(workspace.dx)
-    @inbounds for r in 1:nr
-        for j in 1:workspace.n
-            workspace.dx[j] += workspace.V[j, r] * workspace.dxr[r]
+    if _hsd_is_identity_basis(workspace.V)
+        copy_owned!(workspace.dx, workspace.dxr)
+    else
+        zero_owned!(workspace.dx)
+        @inbounds for r in 1:nr
+            for j in 1:workspace.n
+                workspace.dx[j] += workspace.V[j, r] * workspace.dxr[r]
+            end
         end
     end
     # ds = p - A*dx + b*dtau (frozen primal affine equation).
+    mul!(workspace.ds, system.A, workspace.dx)
     for i in 1:workspace.m
-        acc = system.rhs.primal_affine[i] + system.b[i] * dtau
-        for j in 1:workspace.n
-            acc -= system.A[i, j] * workspace.dx[j]
-        end
-        _core_store_owned!(workspace.ds, i, acc)
+        _core_store_owned!(
+            workspace.ds, i,
+            system.rhs.primal_affine[i] - workspace.ds[i] +
+            system.b[i] * dtau,
+        )
     end
     # dkappa = g + c'*dx + b'*dy.
     dk = system.rhs.homogeneous_gap
@@ -1811,7 +1931,11 @@ saturated `typemax(Int)` result means the estimate is not a valid upper bound
 and the caller must treat the route as ineligible.
 """
 function symmetric_core_state_prepare_bytes(
-    ::Type{T}, dimension::Integer, block_sizes::AbstractVector{Int},
+    ::Type{T}, dimension::Integer, block_sizes::AbstractVector{Int};
+    ar_nnz::Integer=0,
+    variable_dimension::Integer=0,
+    basis_nnz::Integer=0,
+    canonical_nnz::Integer=0,
 ) where {T<:AbstractFloat}
     dimension < 0 && throw(ArgumentError(
         "symmetric core state dimension must be nonnegative",
@@ -1829,7 +1953,49 @@ function symmetric_core_state_prepare_bytes(
             block_theta, saturating_bytes(scalar_bytes, bs, bs),
         )
     end
-    core = symmetric_core_dense_bytes(T, d)
+    ar_nnz >= 0 && variable_dimension >= 0 && basis_nnz >= 0 &&
+    canonical_nnz >= 0 || throw(ArgumentError(
+        "symmetric core structural counts must be nonnegative",
+    ))
+    core = if T === Float64
+        cone_dimension = sum(block_sizes; init=0)
+        reduced_dimension = d - cone_dimension
+        reduced_dimension >= 0 || throw(DimensionMismatch(
+            "symmetric core dimension is smaller than its cone blocks",
+        ))
+        theta_lower = 0
+        for block_size in block_sizes
+            theta_lower = saturating_sum_bytes(
+                theta_lower, div(block_size * (block_size + 1), 2),
+            )
+        end
+        structural_nnz = saturating_sum_bytes(
+            reduced_dimension, Int(ar_nnz), theta_lower,
+        )
+        # Original/pattern/factor-view snapshots plus a conservative CHOLMOD
+        # symbolic+numeric fill allowance tied to the actual frozen pattern.
+        csc_bytes = saturating_sum_bytes(
+            saturating_bytes(scalar_bytes + sizeof(Int), structural_nnz),
+            saturating_bytes(sizeof(Int), d + 1),
+        )
+        factor_and_snapshots = saturating_bytes(32, csc_bytes)
+        vectors = saturating_bytes(24, scalar_bytes, d)
+        basis_bytes = saturating_sum_bytes(
+            saturating_bytes(scalar_bytes + sizeof(Int), Int(basis_nnz)),
+            saturating_bytes(sizeof(Int), Int(variable_dimension) + 1),
+        )
+        canonical_bytes = saturating_bytes(
+            scalar_bytes + sizeof(Int), Int(canonical_nnz),
+        )
+        _workspace_estimate_with_margin(
+            saturating_sum_bytes(
+                factor_and_snapshots, vectors, basis_bytes, canonical_bytes,
+            ),
+            1,
+        )
+    else
+        symmetric_core_dense_bytes(T, d)
+    end
     return saturating_sum_bytes(core, block_theta)
 end
 
@@ -1849,7 +2015,11 @@ function symmetric_core_state_preflight(
     block_sizes::AbstractVector{Int},
     precision_bits::Int,
     memory_limit_bytes::Union{Nothing,Integer},
-    current_rss_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer};
+    ar_nnz::Integer=0,
+    variable_dimension::Integer=0,
+    basis_nnz::Integer=0,
+    canonical_nnz::Integer=0,
 ) where {T<:AbstractFloat}
     dimension < 0 && throw(ArgumentError(
         "symmetric core state dimension must be nonnegative",
@@ -1858,7 +2028,10 @@ function symmetric_core_state_preflight(
         "symmetric core state dimension exceeds the addressable range",
     ))
     T === Float64 || symmetric_core_provider_available(T, precision_bits)
-    estimate = symmetric_core_state_prepare_bytes(T, dimension, block_sizes)
+    estimate = symmetric_core_state_prepare_bytes(
+        T, dimension, block_sizes;
+        ar_nnz, variable_dimension, basis_nnz, canonical_nnz,
+    )
     # A saturated estimate cannot certify an upper bound, even against a
     # typemax(Int) budget (which would otherwise compare as eligible).
     estimate >= typemax(Int) && throw(ArgumentError(
@@ -1946,8 +2119,18 @@ function prepare_symmetric_core_state(
         prepare!(c, requirements)
         c
     else
+        # QDLDL-backed sparse signed-LDL provider is NOT used for the
+        # symmetric augmented core: K = [0 Ar'; Ar -Theta] stores a structural
+        # zero in every reduced-x diagonal, which violates QDLDL's
+        # quasi-definite precondition (and MFLA/BFLA adapters deliberately
+        # disable dynamic regularization).  Fabricating a positive x diagonal
+        # would change the Newton operator, so the dense MFLA/BFLA LDL stays
+        # the sole high-precision path; QDLDL remains an independently
+        # usable optional provider (see SparseQDLDLCache) for operators that
+        # are already strictly quasi-definite.
         build_symmetric_core_ldlt_cache(
-            T, pattern, precision_bits, memory_limit_bytes, current_rss_bytes,
+            T, pattern, precision_bits, memory_limit_bytes,
+            current_rss_bytes,
         )
     end
     # Build the state-owned block-cone NewtonSystem first so the workspace
@@ -1984,6 +2167,10 @@ function _validate_core_preconditions(
     nr >= 0 || throw(ArgumentError(
         "rank-reduction basis column count must be nonnegative",
     ))
+    # A structurally verified sparse identity is an exact isometry whose range
+    # is the full variable space.  Avoid O(n²) scalar sparse indexing and the
+    # O(n) projection scratch on the production full-rank sparse path.
+    _hsd_is_identity_basis(V) && return nothing
     # V'V = I to roundoff, evaluated with scalar dots so preflight never
     # allocates dense copies or an nr×nr Gram matrix.
     isometry_tol = T(64) * eps(one(T))
@@ -2037,12 +2224,23 @@ function _symmetric_core_pattern_from_validated(
         "rank-reduction basis rows $n do not match V rows $(size(V, 1))",
     ))
     ranges = symmetric_core_block_ranges(system.cone)
-    theta = symmetric_core_theta(system.cone)
-    ar = sparse(system.A * V)
+    ar = _hsd_is_identity_basis(V) ? SparseArrays.sparse(system.A) :
+         SparseArrays.sparse(system.A * V)
     pattern = SymmetricCorePattern{T}(
         ar, ranges, [:dense_lower for _ in ranges],
     )
-    refill!(pattern, ar, theta)
+    _core_write_ar!(pattern, ar)
+    cone = system.cone
+    if cone isa ProductConeLinearization{T}
+        _core_validate_theta_blocks(pattern, cone.operator)
+        _core_write_theta_lower!(pattern, cone.operator)
+    elseif cone isa BlockProductConeLinearization{T}
+        _core_write_block_thetas!(pattern, cone)
+    else
+        throw(ArgumentError(
+            "symmetric core requires a product or block-product cone linearization",
+        ))
+    end
     return pattern
 end
 
