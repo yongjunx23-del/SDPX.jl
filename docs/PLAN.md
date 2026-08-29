@@ -2,7 +2,7 @@
 
 **Status:** active implementation plan
 
-**Updated:** 2026-08-28
+**Updated:** 2026-08-29
 **Authority:** this file describes current work. Frozen mathematical contracts
 live in `docs/design/`; historical plans remain available in Git history and in
 the local project archive.
@@ -60,16 +60,27 @@ Only the original-coordinate verifier may do so.
 
 ### Newton system and KKT routes
 
-`docs/design/NEWTON_SYSTEM.md` defines the five equations. Implementations may
-choose:
+`docs/design/NEWTON_SYSTEM.md` defines the five equations. Implementations currently expose:
 
-- `:bordered` — conservative default;
+- `:bordered` — conservative public default, still using the proven legacy
+  full-border execution on the public path;
 - `:expanded` — exact nonsymmetric expanded solve;
 - `:sparse_schur` — reduced sparse Schur solve with same-iterate fallback.
 
-The exact expanded operator is nonsymmetric. A symmetric quasidefinite
-companion may provide inertia evidence only when its contract is applicable;
-it does not replace the exact solve or residual check.
+The integration branch also contains an internal, opt-in Clarabel-style
+symmetric augmented core
+
+```text
+K = [ 0   Ar'
+      Ar -Theta ]
+```
+
+with one factor epoch, one homogeneous solve, sequential predictor/corrector
+RHS solves, scalar `dτ` recovery, original-K refinement, and the frozen
+five-equation gate. It is not yet the public default: the attempted public
+switch was reverted pending final E2E and diagnostics/allocation cleanup.
+The exact expanded and legacy bordered operators remain nonsymmetric and must
+never be passed to LDL.
 
 ### Provider ownership
 
@@ -103,8 +114,20 @@ The local integration line currently contains:
 - removal of Mathematica/WSTP integration and the standalone
   `nonnegative_hsd.jl` solver.
 
+The local symmetric-core integration branch additionally contains:
+
+- an independent full-five-equation augmented-core oracle;
+- frozen block-aware CSC pattern/numeric refill;
+- Float64 CHOLMOD symbolic reuse and signed numeric refactor;
+- MFLA Float64x2/x4 and BFLA BigFloat256 dense pivoted-LDL factories;
+- state-owned, epoch-refactorable core workspaces and truthful receipts;
+- same-iterate LP/SOC/PSD/Exp/Power shadow parity against expanded reference;
+- internal prepared-core production steps with raw core `dy` ownership;
+- an opt-in forced Power dual-Hessian scaling experiment.
+
 This list records implementation presence, not final release qualification.
-The unified verification campaign has not yet been run on the final SHA.
+The user will run the sole black-box E2E only after the remaining development
+and final review are complete.
 
 ## 4. Current implementation work
 
@@ -116,34 +139,59 @@ generic helpers were moved to native owners; public `engine=:auto` and
 qualified SDP/Conic entrypoints now execute product HSD. No legacy solver file
 is included or compiled.
 
-### B. Complete high-precision provider qualification
+### B. Finish symmetric-core public integration
 
-Use MFLA for MultiFloat and BFLA for BigFloat dense/local execution. Generic
-high-precision sparse factorization is disabled until a simpler backend is
-justified. Remaining provider work is:
+Current frozen facts:
 
-- connect provider factors to every active product-HSD dense/local route;
-- retain exact operator and factor-generation receipts;
-- add memory preflight without arithmetic narrowing;
-- verify every right-hand side against the original operator; and
-- fail closed or use an explicit same-arithmetic bordered route when unsupported.
+- public `:bordered` remains the old proven route;
+- prepared-core execution is internal/opt-in and passes focused LP/SOC/PSD/Exp
+  probes plus Power with raw core `dy`;
+- forced Power dual-Hessian scaling is implemented only as an internal
+  experiment and reaches `ProductHSDOptimal` in the bounded trajectory test;
+- QDLDL/PureKLU remain removed; high-precision sparse is unsupported.
 
-### C. Finish performance wiring
+Remaining work:
 
-- extend the now-wired fused predictor/corrector residual evaluation to
-  terminal certificate inputs;
-- apply deterministic `ThreadBudget` at pipeline entry;
-- wire the retained fixq3 `NewtonSystem` contribution into product-HSD
-  planning; Exp/Power 3x3 contributions are wired for expanded and
-  sparse-Schur assembly;
-- verify compact workspace and PSD panel use in actual hot paths;
-- calibrate route selection only from measured evidence.
+1. decide and implement the final Power policy: primal-dual core, explicit
+   dual-Hessian retry/checkpoint, and only a truthful safety fallback if strict
+   public tolerances still require it;
+2. rebuild public planning before state allocation, preserving rank/ray
+   authority;
+3. publish arithmetic-specific planned/executed provider, factor, kernel,
+   precision, regularization, memory, and attempt facts;
+4. remove unused legacy workspace allocation from prepared-core states;
+5. switch public `:bordered` only after all short family probes pass; the user
+   then runs the sole E2E.
 
-### D. Close general benchmark findings
+### C. Reduce dependency and design surface
+
+After the public switch is qualified, remove production-unreachable:
+
+- full-border/coupled/reduced duplicate sessions and `ProviderLPLUCache`;
+- internal high-precision generic LU/LDL fallback;
+- stale calibration/fixq3 scaffolding without a production caller;
+- GenericLinearAlgebra, AppleAccelerate, JLD2, and `LegacyLABackend` only where
+  the final call graph proves they are unnecessary.
+
+MFLA, BFLA, MultiFloats, and stdlib SuiteSparse/CHOLMOD remain.
+
+### D. Finish bounded runtime/performance wiring
+
+- reuse existing fused direction terms in terminal certification only where
+  mathematically identical;
+- enforce one deterministic ThreadBudget owner and truthful
+  requested/effective diagnostics, with serial default;
+- retain fixq3 only as a zero-new-route Newton contribution, otherwise delete
+  it;
+- remove duplicate factor-proof/workspace work without weakening original-K,
+  five-equation, or original-coordinate certificate gates.
+
+### E. Close general benchmark findings
 
 Resolve the remaining SDP, exponential, and power numerical findings without
 loosening certificates or hiding failures. General benchmark expectations must
-remain explicit and independently checkable.
+remain explicit and independently checkable. The user, not the development
+loop, runs the final sole E2E.
 
 ## 5. Verification layers
 
@@ -177,17 +225,16 @@ definition.
 
 ## 6. Final integration sequence
 
-1. finish and review all active implementation branches;
-2. merge to one clean local integration SHA;
-3. run package load and black-box E2E;
-4. run targeted provider, precision, MOI, certificate, allocation, and route
-   validation;
-5. repair failures without weakening the E2E contract or relaxing tolerances;
-6. run local general and physics/bootstrap campaigns;
-7. freeze and deploy the same SHA to the cluster;
-8. run medium/large and high-precision campaigns;
-9. obtain a fresh independent code/math/performance review;
-10. fix every release blocker;
+1. complete Power scaling/retry policy and prepared-core public planning;
+2. qualify arithmetic-specific diagnostics and remove unused legacy ownership;
+3. prune optional dependencies and dead execution scaffolding;
+4. finish bounded terminal residual/thread/fixq3 wiring;
+5. run individual short family/provider/Newton validations;
+6. obtain one final independent code/math/performance review and fix blockers;
+7. freeze a clean handoff SHA;
+8. the user runs the sole black-box E2E;
+9. repair any E2E failure without weakening certificates or tolerances;
+10. run local/cluster campaigns on the same frozen SHA;
 11. push the complete batch to GitHub once; and
 12. continue optimization before declaring a formal 1.0 release.
 
