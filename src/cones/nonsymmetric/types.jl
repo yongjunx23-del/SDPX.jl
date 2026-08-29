@@ -194,6 +194,9 @@ struct StrictDoubleSecantScaling <: NonsymmetricScalingPolicy end
 """Explicitly permit a recorded one-secant conjugate-Hessian fallback."""
 struct DoubleSecantWithDualHessianFallback <: NonsymmetricScalingPolicy end
 
+"""Skip double-secant construction and require the certified dual-Hessian path."""
+struct ForcedDualHessianScaling <: NonsymmetricScalingPolicy end
+
 @enum NonsymmetricScalingStatus::UInt8 begin
     NS_SCALING_DOUBLE_SECANT = 0x00
     NS_SCALING_DUAL_HESSIAN_FALLBACK = 0x01
@@ -224,6 +227,7 @@ end
     NS_SCALING_FALLBACK_NOT_SPD = 0x14
     NS_SCALING_FALLBACK_SECANT_MISMATCH = 0x15
     NS_SCALING_NONFINITE_RESULT = 0x16
+    NS_SCALING_FORCED_DUAL_HESSIAN = 0x17
 end
 
 struct NonsymmetricScalingResult{T}

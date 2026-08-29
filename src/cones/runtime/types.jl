@@ -201,6 +201,8 @@ mutable struct PowerRuntimeBlock{T}
     output::Vector{T}
     direction::Vector{T}
     checkpoint::NonsymmetricRuntimeScalingCheckpoint{T}
+    force_dual_hessian::Bool
+    forced_dual_hessian_updates::Int
     last_scaling_status::NonsymmetricScalingStatus
     last_scaling_reason::NonsymmetricScalingReason
     last_fallback_reason::NonsymmetricScalingReason

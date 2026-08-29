@@ -810,6 +810,10 @@ function product_strictly_interior(
     return true
 end
 
+@inline _runtime_ns_policy(block) = block.policy
+@inline _runtime_ns_policy(block::PowerRuntimeBlock) =
+    block.force_dual_hessian ? ForcedDualHessianScaling() : block.policy
+
 @inline function _runtime_ns_update_block!(
     runtime, s, y, block, ::Nothing,
 )
@@ -817,7 +821,7 @@ end
     _runtime_copy_in!(block.dual, y, block.offset, 3)
     result = try_update_nonsymmetric_scaling!(
         block.scaling,
-        block.policy,
+        _runtime_ns_policy(block),
         block.tag,
         block.primal,
         block.dual,
@@ -833,7 +837,7 @@ end
     _runtime_copy_in!(block.dual, y, block.offset, 3)
     result = try_update_nonsymmetric_scaling!(
         block.scaling,
-        block.policy,
+        _runtime_ns_policy(block),
         block.tag,
         block.primal,
         block.dual,
@@ -972,6 +976,37 @@ function try_update_scaling!(
     runtime.valid = true
     _runtime_ns_success!(runtime, muT)
     return true
+end
+
+function set_power_dual_hessian_mode!(
+    runtime::_NonsymmetricProductRuntime, enabled::Bool,
+)
+    for block in runtime.power
+        block.force_dual_hessian = enabled
+    end
+    return runtime
+end
+
+function force_power_dual_hessian_scaling!(
+    runtime::_NonsymmetricProductRuntime{T}, s, y, mu,
+) where {T}
+    isempty(runtime.power) && return false
+    checkpoint_nonsymmetric_scaling!(runtime) || return false
+    previous = Bool[block.force_dual_hessian for block in runtime.power]
+    for block in runtime.power
+        block.force_dual_hessian = true
+    end
+    if try_update_scaling!(runtime, s, y, mu)
+        for block in runtime.power
+            block.forced_dual_hessian_updates += 1
+        end
+        return true
+    end
+    for (block, value) in zip(runtime.power, previous)
+        block.force_dual_hessian = value
+    end
+    restore_nonsymmetric_scaling_checkpoint!(runtime) || return false
+    return false
 end
 
 function update_scaling!(

@@ -628,6 +628,9 @@ end
 )
     return true
 end
+@inline _ns_scaling_valid_policy(::ForcedDualHessianScaling) = true
+@inline _ns_scaling_force_dual(::NonsymmetricScalingPolicy) = false
+@inline _ns_scaling_force_dual(::ForcedDualHessianScaling) = true
 
 @inline function _ns_scaling_fallback_allowed(::StrictDoubleSecantScaling)
     return false
@@ -637,6 +640,7 @@ end
 )
     return true
 end
+@inline _ns_scaling_fallback_allowed(::ForcedDualHessianScaling) = true
 
 @inline function _ns_scaling_primal_gradient_hessian!(
     workspace, tag::NonsymmetricConjugateTag,
@@ -1226,7 +1230,8 @@ end
            reason === NS_SCALING_AXIS_COEFFICIENT ||
            reason === NS_SCALING_METRIC_NOT_SPD ||
            reason === NS_SCALING_SECANT_MISMATCH ||
-           reason === NS_SCALING_INVERSE_MISMATCH
+           reason === NS_SCALING_INVERSE_MISMATCH ||
+           reason === NS_SCALING_FORCED_DUAL_HESSIAN
 end
 
 """
@@ -1335,7 +1340,9 @@ function _try_update_nonsymmetric_scaling!(
         return _ns_scaling_failure(workspace, NS_SCALING_NONFINITE_RESULT)
     end
 
-    primary_reason = _ns_scaling_double_secant!(workspace)
+    primary_reason = _ns_scaling_force_dual(policy) ?
+        NS_SCALING_FORCED_DUAL_HESSIAN :
+        _ns_scaling_double_secant!(workspace)
     if primary_reason === NS_SCALING_CONVERGED
         terminal_reason, secant_error, inverse_error =
             _ns_scaling_validate_metric!(workspace, true)

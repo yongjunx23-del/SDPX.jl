@@ -412,6 +412,8 @@ function _runtime_make_power(::Type{T}, block) where {T}
         zeros(T, 3),
         zeros(T, 3),
         _runtime_make_scaling_checkpoint(T),
+        false,
+        0,
         NS_SCALING_FAILED,
         NS_SCALING_INVALID_PARAMETER,
         NS_SCALING_NO_FALLBACK,
