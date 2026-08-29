@@ -1,0 +1,143 @@
+# Deterministic late-Power conditioning trace (detection-only evidence).
+#
+# The symmetric augmented-core route (`:bordered` with a prepared core) fails
+# closed on the late ill-conditioned `power_epigraph_small` iterate where the
+# frozen five-equation backward residual no longer proves forward accuracy,
+# while the authoritative old bordered route continues to a valid Optimal.
+#
+# This file documents that failure as a deterministic trajectory trace and a
+# fail-closed regression guard.  It does NOT add a new solver tolerance, does
+# NOT fall back to another route, does NOT enable the public core route, and
+# does NOT introduce QDLDL/PureKLU.  Detection is evidence from the existing
+# production gate (`_product_hsd_newton_residual_ok` + route fail-closed
+# path); the diagnostic counters observed here are the standard core workspace
+# counters.
+#
+#   * early accepted core iterates stay in the same Newton basin as the old
+#     bordered route (relative iterate drift < 1e-5 through iterate 16);
+#   * the core route fails closed (HSDStepDirectionFailed) at or before
+#     iterate 25 (observed ~22) with no line-search / state mutation;
+#   * the old bordered route alone still reaches a valid Optimal;
+#   * LP/SOC/PSD/Exp one-step prepared-core routes still pass.
+using Test
+using SDPX
+using LinearAlgebra
+using SparseArrays
+
+include(joinpath(
+    @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
+))
+using .GenericConicBenchmark
+
+const _COND_IDS = (
+    :lp_afiro_style,
+    :socp_portfolio_small,
+    :sdp_maxcut_k4,
+    :exp_unit_small,
+)
+
+function _cond_canonical(id::Symbol)
+    spec = only(filter(s -> s.id === id, inventory(; tier=:small)))
+    model = build(spec.problem, Float64, spec.params)
+    program = SDPX.compile_product_cone_model(model)
+    canonical = SDPX.canonicalize(program)
+    reduction = SDPX.hsd_equality_reduce(canonical)
+    reduction.status === SDPX.HSDEqualityReady || error(
+        "equality reduction failed for $id: $(reduction.status)",
+    )
+    return reduction.reduced
+end
+
+function _cond_core_state(canonical)
+    base0 = SDPX.HSDState(canonical)
+    m = SDPX.hsd_num_slack(base0)
+    blocks = Int[block.length for block in SDPX.layout_blocks(canonical.cone_layout)]
+    dim = size(canonical.A, 2) + m
+    estimate = SDPX.symmetric_core_state_prepare_bytes(Float64, dim, blocks)
+    state = SDPX.ProductConeHSDState(
+        canonical;
+        kkt_route=:bordered,
+        prepare_symmetric_core=true,
+        symmetric_core_memory_limit=estimate + 4096,
+        symmetric_core_current_rss=0,
+    )
+    SDPX.product_hsd_cold_start!(state)
+    return state
+end
+
+function _cond_snapshot(state)
+    base = state.base
+    return (
+        x=copy(base.x), s=copy(base.s), y=copy(base.y),
+        tau=base.tau, kappa=base.kappa,
+        iterations=base.record.iterations, epoch=base.epoch,
+    )
+end
+
+function _cond_rel_diff(a, b)
+    diff = max(
+        maximum(abs, a.x - b.x; init=0.0),
+        maximum(abs, a.s - b.s; init=0.0),
+        maximum(abs, a.y - b.y; init=0.0),
+        abs(a.tau - b.tau), abs(a.kappa - b.kappa),
+    )
+    scale = max(
+        1.0, maximum(abs, a.x; init=0.0), maximum(abs, a.s; init=0.0),
+        maximum(abs, a.y; init=0.0), abs(a.tau), abs(a.kappa),
+    )
+    return diff / scale
+end
+
+@testset "C8-det Power conditioning trace" begin
+    @testset "Power late-iterate fail-closed trajectory" begin
+        canonical = _cond_canonical(:power_epigraph_small)
+        old = SDPX.ProductConeHSDState(canonical; kkt_route=:bordered)
+        SDPX.product_hsd_cold_start!(old)
+        core_state = _cond_core_state(canonical)
+
+        accepted = 0
+        reject_iterate = nothing
+        for it in 1:25
+            code_old = SDPX.product_hsd_step!(old)
+            @test code_old === SDPX.HSDStepOK
+            snap = _cond_snapshot(core_state)
+            code_core = SDPX.product_hsd_step!(core_state)
+            if code_core === SDPX.HSDStepOK
+                accepted += 1
+                if it <= 16
+                    # Same Newton basin as the authoritative route before the
+                    # ill-conditioning onset.
+                    @test _cond_rel_diff(
+                        _cond_snapshot(core_state), _cond_snapshot(old),
+                    ) <= 1.0e-5
+                end
+                continue
+            end
+            # Fail closed before any line search / state update.
+            @test code_core === SDPX.HSDStepDirectionFailed
+            @test _cond_rel_diff(_cond_snapshot(core_state), snap) == 0.0
+            @test core_state.base.record.iterations == snap.iterations
+            reject_iterate = (; it, snapshot=snap)
+            break
+        end
+
+        @test accepted >= 10
+        @test reject_iterate !== nothing
+        @test reject_iterate.it <= 25
+
+        # The old route alone completes to a valid optimal.
+        result = SDPX.product_hsd_solve!(
+            old; max_iterations=200, max_time=30.0,
+        )
+        @test result.status === SDPX.ProductHSDOptimal
+    end
+
+    @testset "One-step prepared core passes LP/SOC/PSD/Exp" begin
+        for id in _COND_IDS
+            @testset "$id" begin
+                core_state = _cond_core_state(_cond_canonical(id))
+                @test SDPX.product_hsd_step!(core_state) === SDPX.HSDStepOK
+            end
+        end
+    end
+end
