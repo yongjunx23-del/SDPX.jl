@@ -637,6 +637,11 @@ function _product_hsd_core_scatter!(state::ProductConeHSDState{T}) where {T}
     return psd_inconclusive
 end
 
+# Fallback hook: the MultiFloat extension implements the 4-lane SIMD path.
+function _hkm_vec4_linearization!(args...)
+    return false
+end
+
 """Prepare the exact HKM Q3 cone equation for one predictor/corrector RHS.
 
 The complete map `M` satisfies `dy = r_HKM - M*ds`.  The frozen Newton
@@ -664,6 +669,16 @@ function _product_hsd_fixed_trace_hkm_linearization!(
         end
     elseif core.linearization_epoch != base.epoch
         return false
+    end
+
+    # Optional 4-lane SIMD fast path (MultiFloat extension).  It mirrors the
+    # scalar loop's fail-closed semantics exactly; returning false falls
+    # through to the scalar path below.
+    if _hkm_vec4_linearization!(
+        state, target, include_affine_product, refresh_metric,
+    )
+        refresh_metric && (core.linearization_epoch = base.epoch)
+        return true
     end
 
     blocks = plan.soc_blocks

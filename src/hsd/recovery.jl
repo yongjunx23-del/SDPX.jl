@@ -9,10 +9,11 @@ The ratio predicate is shared with termination-ray handling; neither predicate
 can publish a certificate status.
 """
 @inline function _product_hsd_tau_collapse_ready(
-    base::HSDState{T}, tol::T,
+    state::ProductConeHSDState{T}, tol::T,
 ) where {T}
+    base = state.base
     _product_hsd_tau_collapsed(base, tol) || return false
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     floor = max(tol, sqrt(eps(T)))
     residual_converged = hsd_normalized_residual(base) <= floor
     complementarity_converged = base.mu <=
@@ -43,14 +44,14 @@ function _product_hsd_tau_collapse_recenter!(
         return false
     end
     base = state.base
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     scalar_center = base.mu / base.tau
     (isfinite(scalar_center) && scalar_center > zero(T)) || begin
         state.diagnostic = :tau_collapse_recenter_nonfinite
         return false
     end
     base.kappa = scalar_center
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     (isfinite(base.mu) && base.mu > zero(T)) || begin
         state.diagnostic = :tau_collapse_recenter_nonfinite
         return false

@@ -94,7 +94,7 @@ function _product_hsd_refined_optimal_result!(
 ) where {T}
     base = state.base
     recovered_floor = max(tol, sqrt(eps(T)))
-    recovered_residual = _product_hsd_recovered_residual(base, recovered_floor)
+    recovered_residual = _product_hsd_recovered_residual(state, recovered_floor)
     isfinite(recovered_residual) || return nothing
     recovered_residual <= sqrt(tol) || return nothing
 
@@ -233,7 +233,7 @@ function _product_hsd_refined_optimal_result!(
     # refined, the scalar HSD equation has the exact solution kappa=0. Keep a
     # small positive representative so the homogeneous point remains valid.
     base.kappa = min(base.kappa, base.tau * tol / T(8))
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     if verify_optimal!(
         canonical, base, x_original, s_original, y_original; tol=tol,
     )
@@ -247,7 +247,7 @@ function _product_hsd_refined_optimal_result!(
     copyto!(base.s, saved_s)
     copyto!(base.y, saved_y)
     base.kappa = saved_kappa
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     return nothing
 end
 
@@ -320,7 +320,7 @@ end
         state.runtime, base.st, base.yt,
     ) || return false
 
-    _hsd_trial_residual!(base)
+    _product_hsd_trial_residual!(state)
     p2 = _hsd_maxinf(base.rPt)
     d2 = _hsd_maxinf(base.rDt)
     gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t
@@ -384,7 +384,7 @@ function _product_hsd_terminal_verified_result!(
     copyto!(base.y, saved_y)
     base.tau = saved_tau
     base.kappa = saved_kappa
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     restored = if state.symmetric_core isa FixedTraceQ3CoreWorkspace
         _product_hsd_fixed_trace_hkm_neighborhood!(
             state, base.s, base.y, base.mu,
@@ -491,7 +491,7 @@ function product_hsd_solve!(
                 ProductHSDTimeLimit, ProductHSDTimeLimitReached, HSDStepOK,
             )
         end
-        if _product_hsd_tau_collapse_ready(base, certificate_tol)
+        if _product_hsd_tau_collapse_ready(state, certificate_tol)
             # The preceding accepted-point candidate gate already checked all
             # three certificate classes. Re-run the ray-only gates explicitly
             # before numerical recovery so a genuine infeasibility face is
@@ -567,7 +567,7 @@ function product_hsd_solve!(
         verified === nothing || return verified
     end
 
-    if _product_hsd_tau_collapse_ready(base, certificate_tol)
+    if _product_hsd_tau_collapse_ready(state, certificate_tol)
         ray = _product_hsd_verified_result(
             state, x_original, s_original, y_original, certificate_tol,
             ProductHSDVerifiedTerminationRay, HSDStepOK;

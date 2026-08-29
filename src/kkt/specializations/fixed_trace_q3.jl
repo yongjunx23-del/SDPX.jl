@@ -660,6 +660,8 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E}
     refinements::Int
     factor_receipt::Union{Nothing,FactorReceipt{T}}
     receipt_build_count::Int
+    panel_action::Vector{T}       # scratch for structured A*v (equality rows)
+    structured_A::Bool            # zero rows precede every soc block row
 end
 
 function fixed_trace_q3_core_prepare_bytes(::Type{T}, plan) where {T<:AbstractFloat}
@@ -758,7 +760,146 @@ function prepare_fixed_trace_q3_core_state(
         zero(T), zero(T), zero(T),
         length(plan.zero_rows), -1, 0, 0, -1, 0, 0, 0, 0,
         nothing, 0,
+        alloc_zeros(T, length(plan.zero_rows)),
+        _fixed_trace_structured_A_eligible(plan),
     )
+end
+
+"""Layout gate for the structured A*v kernels: every equality (zero) row of
+`A` must precede every soc block row so the CSC accumulation order of one
+output element (equality terms, then the block's tail terms) is reproduced
+exactly by the panel gemv followed by the per-block tail updates."""
+function _fixed_trace_structured_A_eligible(plan)
+    isempty(plan.zero_rows) && return false
+    isempty(plan.soc_blocks) && return false
+    first_soc = minimum(block.offset for block in plan.soc_blocks)
+    return maximum(plan.zero_rows) < first_soc
+end
+
+"""Structured `ax = A*x` for the fixed-trace Q3 layout.
+
+Bit-identical to the sparse product: the equality rows come from the dense
+panel gemv (column order; structural zeros are exact no-ops), each soc head
+row is exactly zero, and each tail row is the two-term `tail_map` sum in
+active-variable (CSC column) order.
+"""
+function _fixed_trace_mul_A!(
+    ax::AbstractVector{T}, workspace::FixedTraceQ3CoreWorkspace{T},
+    x::AbstractVector{T},
+) where {T}
+    workspace.structured_A || return mul!(ax, workspace.system.A, x)
+    plan = workspace.plan
+    equality = workspace.equality
+    work = workspace.panel_action
+    la_mul!(equality.backend, work, equality.panel, x)
+    zero_rows = plan.zero_rows
+    @inbounds for i in eachindex(zero_rows)
+        ax[zero_rows[i]] = work[i]
+    end
+    reduction = plan.reduction
+    active = reduction.active_ids
+    tail_map = reduction.tail_map
+    for b in eachindex(plan.soc_blocks)
+        o = plan.soc_blocks[b].offset
+        a1 = active[1, b]
+        a2 = active[2, b]
+        ax[o] = zero(T)
+        ax[o + 1] = tail_map[1, 1, b] * x[a1] + tail_map[1, 2, b] * x[a2]
+        ax[o + 2] = tail_map[2, 1, b] * x[a1] + tail_map[2, 2, b] * x[a2]
+    end
+    return ax
+end
+
+"""Structured `rD = A'y + c·τ` for the fixed-trace Q3 layout.
+
+Bit-identical to the hand-rolled CSC accumulation in `hsd_dual_residual!`:
+per column the equality terms are summed in row order (dense panel gemv with
+exact zero no-ops), then the two tail terms in block row order, then `c·τ`.
+"""
+function _fixed_trace_mul_At_dual_residual!(
+    rD::AbstractVector{T}, workspace::FixedTraceQ3CoreWorkspace{T},
+    y::AbstractVector{T}, c::AbstractVector{T}, tau::T,
+) where {T}
+    workspace.structured_A || return false
+    plan = workspace.plan
+    equality = workspace.equality
+    work = workspace.panel_action
+    zero_rows = plan.zero_rows
+    @inbounds for i in eachindex(zero_rows)
+        work[i] = y[zero_rows[i]]
+    end
+    la_mul!(equality.backend, rD, transpose(equality.panel), work)
+    reduction = plan.reduction
+    active = reduction.active_ids
+    tail_map = reduction.tail_map
+    for b in eachindex(plan.soc_blocks)
+        o = plan.soc_blocks[b].offset
+        a1 = active[1, b]
+        a2 = active[2, b]
+        y1 = y[o + 1]
+        y2 = y[o + 2]
+        rD[a1] += tail_map[1, 1, b] * y1 + tail_map[2, 1, b] * y2
+        rD[a2] += tail_map[1, 2, b] * y1 + tail_map[2, 2, b] * y2
+    end
+    @inbounds for j in eachindex(rD)
+        rD[j] += c[j] * tau
+    end
+    return true
+end
+
+"""Fixed-trace fast path for the frozen per-epoch residual refresh.
+
+`rP = A x + s − b·τ` and `rD = A'y + c·τ` use the structured A kernels
+(bit-identical to the generic paths); the row-space projection, gap,
+complementarity, and μ follow the shared frozen equations unchanged.
+"""
+function _fixed_trace_hsd_residual!(
+    base::HSDState{T}, core::FixedTraceQ3CoreWorkspace{T},
+) where {T}
+    _fixed_trace_mul_A!(base.ax, core, base.x)
+    @inbounds for k in 1:base.m
+        base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
+    end
+    if core.structured_A
+        _fixed_trace_mul_At_dual_residual!(
+            base.rD, core, base.y, base.c, base.tau,
+        )
+        if _hsd_is_identity_basis(base.rank_basis)
+            copyto!(base.rDr, base.rD)
+        else
+            @inbounds for j in 1:base.nr
+                acc = zero(T)
+                for i in 1:base.n
+                    acc += base.rank_basis[i, j] * base.rD[i]
+                end
+                base.rDr[j] = acc
+            end
+        end
+    else
+        hsd_dual_residual!(base)
+    end
+    base.rG = hsd_gap_residual(base)
+    base.complementarity = hsd_complementarity(base)
+    base.mu = hsd_mu(base)
+    return nothing
+end
+
+"""Fixed-trace fast path for the line-search trial residual.
+
+`rPt = A·xt + st − b·τt` and `rDt = A'·yt + c·τt` reuse the structured
+(bit-identical) kernels; the accepted-point residual state is untouched.
+"""
+function _fixed_trace_trial_residual!(
+    base::HSDState{T}, core::FixedTraceQ3CoreWorkspace{T},
+) where {T}
+    _fixed_trace_mul_A!(base.rPt, core, base.xt)
+    @inbounds for k in 1:base.m
+        base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+    end
+    _fixed_trace_mul_At_dual_residual!(
+        base.rDt, core, base.yt, base.c, base.tau_t,
+    )
+    return nothing
 end
 
 """Invert one symmetric-positive 3×3 HKM map without heap scratch."""
@@ -1011,7 +1152,7 @@ function _core_solve_raw!(
     @inbounds for index in eachindex(workspace.dy)
         workspace.dy[index] = workspace.wy[index] + dtau * workspace.uy[index]
     end
-    mul!(workspace.ax, system.A, workspace.dx)
+    _fixed_trace_mul_A!(workspace.ax, workspace, workspace.dx)
     @inbounds for index in eachindex(workspace.ds)
         workspace.ds[index] = system.rhs.primal_affine[index] -
                               workspace.ax[index] + system.b[index] * dtau

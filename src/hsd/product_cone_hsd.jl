@@ -1926,6 +1926,20 @@ end
            _product_hsd_cone_newton_close(group_residual, group_work)
 end
 
+
+# Fallback hooks: the MultiFloat extension implements 4-lane SIMD paths.
+function _primal_newton_stats_vec4!(args...)
+    return nothing
+end
+
+function _trial_point_vec4!(args...)
+    return false
+end
+
+function _fixed_trace_neighborhood_vec4!(args...)
+    return nothing
+end
+
 @inline function _product_hsd_primal_newton_stats(
     state::ProductConeHSDState{T},
 ) where {T}
@@ -1940,6 +1954,10 @@ end
     # repeat a full sparse scan on every gate evaluation.
     fixed_trace = state.symmetric_core isa FixedTraceQ3CoreWorkspace
     if fixed_trace
+        vec4 = _primal_newton_stats_vec4!(
+            state, state.symmetric_core.primal_operator_norm,
+        )
+        vec4 === nothing || return vec4
         operator_norm = state.symmetric_core.primal_operator_norm
         @inbounds for k in 1:base.m
             rhs_norm = max(rhs_norm, abs(base.rP[k]))
@@ -3228,11 +3246,31 @@ end
     )
 end
 
+"""Per-epoch frozen residual refresh; the fixed-trace core supplies the
+structured (bit-identical) A kernels, every other route keeps `hsd_residual!`."""
+function _product_hsd_residual!(state::ProductConeHSDState{T}) where {T}
+    core = state.symmetric_core
+    if core isa FixedTraceQ3CoreWorkspace{T}
+        return _fixed_trace_hsd_residual!(state.base, core)
+    end
+    return hsd_residual!(state.base)
+end
+
+"""Line-search trial residual; the fixed-trace core supplies the structured
+(bit-identical) A kernels, every other route keeps `_hsd_trial_residual!`."""
+function _product_hsd_trial_residual!(state::ProductConeHSDState{T}) where {T}
+    core = state.symmetric_core
+    if core isa FixedTraceQ3CoreWorkspace{T}
+        return _fixed_trace_trial_residual!(state.base, core)
+    end
+    return _hsd_trial_residual!(state.base)
+end
+
 function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     base.rank_ambiguous && return HSDStepDirectionFailed
     base.rank_incompatible && return HSDStepDirectionFailed
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     if !isfinite(base.mu)
         return HSDStepDirectionFailed
     elseif base.mu <= zero(T)
@@ -3331,7 +3369,7 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     # acceptance gate.  Diagnostic metadata only; the fused workspace is
     # optional and nothing here promotes a status or changes a tolerance.
     product_hsd_record_route_acceptance!(state.residual_hook)
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     # The NT operators and every nonsymmetric block must have been built with
     # the accepted point's global embedding complementarity. Never repair a
     # mismatch by relabeling stale scaling metadata.

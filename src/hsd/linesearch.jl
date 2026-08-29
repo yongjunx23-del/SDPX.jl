@@ -36,6 +36,8 @@ remains authoritative.
     core = state.symmetric_core
     core isa FixedTraceQ3CoreWorkspace{T} || return false
     isfinite(mu) && mu > zero(T) || return false
+    vec4 = _fixed_trace_neighborhood_vec4!(state, s, y, mu)
+    vec4 === nothing || return vec4
     @inbounds for block in core.plan.soc_blocks
         row = block.offset
         sx0, sx1, sx2 = s[row], s[row + 1], s[row + 2]
@@ -137,18 +139,20 @@ end
     end
     accepted = false
     while !accepted
-        @inbounds for j in 1:base.n
-            base.xt[j] = base.x[j] + alpha * base.dx[j]
-        end
-        @inbounds for k in 1:base.m
-            base.st[k] = base.s[k] + alpha * base.ds[k]
-            base.yt[k] = base.y[k] + alpha * base.dy[k]
+        if !_trial_point_vec4!(state, alpha)
+            @inbounds for j in 1:base.n
+                base.xt[j] = base.x[j] + alpha * base.dx[j]
+            end
+            @inbounds for k in 1:base.m
+                base.st[k] = base.s[k] + alpha * base.ds[k]
+                base.yt[k] = base.y[k] + alpha * base.dy[k]
+            end
         end
         base.tau_t = base.tau + alpha * base.dtau
         base.kappa_t = base.kappa + alpha * base.dkappa
         ok = _product_hsd_trial_in_neighborhood!(state)
         if ok
-            _hsd_trial_residual!(base)
+            _product_hsd_trial_residual!(state)
             p2 = _hsd_maxinf(base.rPt)
             d2 = _hsd_maxinf(base.rDt)
             gap2 = -dot(base.c, base.xt) - dot(base.b, base.yt) + base.kappa_t

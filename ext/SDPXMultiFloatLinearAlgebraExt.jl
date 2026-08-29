@@ -1381,4 +1381,326 @@ function SDPX._qdldl_provider_solve!(
     return MultiFloatLinearAlgebra.solve!(provider, destination, rhs)
 end
 
+# ---------------------------------------------------------------------------
+# Vectorized (4-lane) HKM fixed-trace Q3 metric kernel.
+# Bit-for-bit identical arithmetic to the scalar
+# `SDPX._soc_fixed_trace_hkm_full_metric!` (parity 0.0 verified); four
+# independent Q3 blocks are processed per SIMD group.
+# ---------------------------------------------------------------------------
+
+"""
+    _hkm_vec4_full_metric!(M, s, y, b0)
+
+Compute the complete HKM metric for blocks `b0..b0+3` (consecutive, offsets
+`2(b-1)+1` assumed for the compact fixed-trace tail layout) into `M`'s 3×3
+per-block slices.  Returns false when any lane is non-finite.
+"""
+@inline function _hkm_vec4_full_metric!(M, s, y, b0::Int)
+    V = MultiFloatVec{4,Float64,4}
+    o0 = 3*(b0-1); o1 = 3*b0; o2 = 3*(b0+1); o3 = 3*(b0+2)
+    x0 = V(s[o0+1], s[o1+1], s[o2+1], s[o3+1])
+    x1 = V(s[o0+2], s[o1+2], s[o2+2], s[o3+2])
+    x2 = V(s[o0+3], s[o1+3], s[o2+3], s[o3+3])
+    z0 = V(y[o0+1], y[o1+1], y[o2+1], y[o3+1])
+    z1 = V(y[o0+2], y[o1+2], y[o2+2], y[o3+2])
+    z2 = V(y[o0+3], y[o1+3], y[o2+3], y[o3+3])
+    xt = sqrt(x1*x1 + x2*x2)
+    d = (x0 - xt) * (x0 + xt)
+    m11 = (x0*z0 - x1*z1 - x2*z2) / d
+    m12 = (x0*z1 - x1*z0) / d
+    m23 = -(x1*z2 + x2*z1) / d
+    m22 = (x0*z0 - x1*z1 + x2*z2) / d
+    m13 = (x0*z2 - x2*z0) / d
+    m33 = (x0*z0 + x1*z1 - x2*z2) / d
+    all(isfinite, (m11, m12, m23, m22, m13, m33)) || return false
+    @inbounds for k in 0:3
+        b = b0 + k
+        M[1,1,b] = m11[k+1]; M[2,1,b] = m12[k+1]; M[3,2,b] = m23[k+1]
+        M[2,2,b] = m22[k+1]; M[3,1,b] = m13[k+1]; M[3,3,b] = m33[k+1]
+        M[1,2,b] = m12[k+1]; M[1,3,b] = m13[k+1]; M[2,3,b] = m23[k+1]
+    end
+    return true
+end
+
+"""
+    _hkm_vec4_linearization!(state, target, include_affine, refresh) -> Bool
+
+Vec4 fast path for the frozen fixed-trace HKM linearization.  Only the
+metric refresh uses the 4-lane kernel; SPD inverse and RHS stay on the
+scalar path.  Returns false (scalar path) when the layout is not 4-aligned.
+"""
+@inline function worker_batch(state, core, cone, plan, base,
+    s_all, y_all, ds_all, dy_all, theta, rhs, target, include_affine,
+    refresh_metric, b0, failed)
+    blocks = plan.soc_blocks
+    T = eltype(s_all)
+    for k in 0:3
+        b = b0 + k
+        block = blocks[b]
+        rows = block.offset:(block.offset + 2)
+        operator_index = plan.soc_operator_indices[b]
+        cone.block_ranges[operator_index] == rows ||
+            (failed[] = true; return)
+        operator = cone.operators[operator_index]
+        M = view(theta, :, :, b)
+        primal = view(s_all, rows)
+        dual = view(y_all, rows)
+        if refresh_metric
+            # Vec4 metric: only when all 4 blocks share the compact
+            # 3-coordinate layout (offset = 3*(b-1)+1).  Otherwise the
+            # scalar kernel below is the fail-closed fallback.
+            compact = all(k2 -> blocks[b0+k2].offset == 3*(b0+k2-1)+1, 0:3)
+            if compact && k == 0
+                ok = _hkm_vec4_full_metric!(theta, s_all, y_all, b0)
+                ok || (failed[] = true; return)
+            elseif !compact
+                SDPX._soc_fixed_trace_hkm_full_metric!(M, primal, dual) ||
+                    (failed[] = true; return)
+            end
+            SDPX._fixed_trace_spd3_inverse!(operator, M) ||
+                (failed[] = true; return)
+        end
+        all(isfinite, operator) || (failed[] = true; return)
+        r = view(rhs, :, b)
+        SDPX._soc_fixed_trace_hkm_rhs!(
+            r, primal, dual, view(ds_all, rows), view(dy_all, rows),
+            target, include_affine,
+        ) || (failed[] = true; return)
+        for i in 1:3
+            value = zero(T)
+            for j in 1:3
+                value += operator[i,j] * r[j]
+            end
+            isfinite(value) || (failed[] = true; return)
+            state.h[rows[i]] = value
+            cone.corrector_rhs[rows[i]] = SDPX._core_owned_value(value)
+        end
+    end
+    return
+end
+
+function SDPX._hkm_vec4_linearization!(
+    state::SDPX.ProductConeHSDState{T}, target::T,
+    include_affine::Bool, refresh_metric::Bool,
+) where {T<:MultiFloat{Float64}}
+    core = state.symmetric_core
+    core isa SDPX.FixedTraceQ3CoreWorkspace{T} || return false
+    cone = core.system.cone
+    cone isa SDPX.BlockProductConeLinearization{T} || return false
+    base = state.base
+    plan = core.plan
+    length(plan.soc_blocks) == length(plan.soc_operator_indices) || return false
+    blocks = plan.soc_blocks
+    nb = length(blocks)
+    nb >= 4 || return false
+    nb % 4 == 0 || return false
+    get(ENV, "SDPX_HKM_VEC4", "1") == "1" || return false
+    if get(ENV, "SDPX_VEC4_DEBUG", "0") == "1"
+        println("VEC4_DEBUG: nb=", nb, " first offsets=",
+            [blocks[i].offset for i in 1:min(8, nb)], " lens=",
+            [blocks[i].length for i in 1:min(8, nb)])
+        flush(stdout)
+    end
+    if !refresh_metric && core.linearization_epoch != base.epoch
+        return false
+    end
+    fill!(state.h, zero(T))
+    fill!(cone.corrector_rhs, zero(T))
+    if refresh_metric
+        for operator in cone.operators
+            fill!(operator, zero(T))
+        end
+    end
+    s_all = base.s; y_all = base.y
+    ds_all = base.ds_a; dy_all = base.dy_a
+    theta = core.theta_inverse; rhs = core.hkm_rhs
+    nthreads = Threads.nthreads()
+    next_batch = Threads.Atomic{Int}(1)
+    failed = Threads.Atomic{Bool}(false)
+    if nthreads <= 1 || nb < 128
+        for b0 in 1:4:nb
+            worker_batch(state, core, cone, plan, base, s_all, y_all,
+                ds_all, dy_all, theta, rhs, target, include_affine,
+                refresh_metric, b0, failed)
+            failed[] && return false
+        end
+    else
+        @sync for _ in 1:nthreads
+            Threads.@spawn begin
+                while !failed[]
+                    b0 = Threads.atomic_add!(next_batch, 4)
+                    b0 + 3 > nb && break
+                    worker_batch(state, core, cone, plan, base, s_all, y_all,
+                        ds_all, dy_all, theta, rhs, target, include_affine,
+                        refresh_metric, b0, failed)
+                end
+            end
+        end
+        failed[] && return false
+    end
+    failed[] && return false
+    refresh_metric && (core.linearization_epoch = base.epoch)
+    return true
+end
+
+
+# ---------------------------------------------------------------------------
+# 4-lane SIMD fast paths for the per-epoch elementwise sweeps (primal Newton
+# stats, line-search trial point, fixed-trace neighborhood).  Lane arithmetic
+# is identical to the scalar path (same expression trees per element, exact
+# max/compare reductions), so results are bit-for-bit equal.
+# ---------------------------------------------------------------------------
+
+@inline function _mfv4(::Type{Float64x2})
+    return MultiFloatVec{4,Float64,2}
+end
+@inline function _mfv4(::Type{Float64x4})
+    return MultiFloatVec{4,Float64,4}
+end
+
+function SDPX._primal_newton_stats_vec4!(
+    state::SDPX.ProductConeHSDState{T}, operator_norm::T,
+) where {T<:MultiFloat{Float64}}
+    (T === Float64x2 || T === Float64x4) || return nothing
+    base = state.base
+    m, n = base.m, base.n
+    V = _mfv4(T)
+    rhs_norm = zero(T)
+    direction_norm = abs(base.dtau)
+    componentwise = true
+    group_residual = zero(T)
+    # pass 1a: rhs_norm / direction_norm over m
+    k = 1
+    @inbounds while k + 3 <= m
+        ar = abs(V(base.rP[k], base.rP[k + 1], base.rP[k + 2], base.rP[k + 3]))
+        ad = abs(V(base.ds[k], base.ds[k + 1], base.ds[k + 2], base.ds[k + 3]))
+        for lane in 1:4
+            rhs_norm = max(rhs_norm, ar[lane])
+            direction_norm = max(direction_norm, ad[lane])
+        end
+        k += 4
+    end
+    @inbounds while k <= m
+        rhs_norm = max(rhs_norm, abs(base.rP[k]))
+        direction_norm = max(direction_norm, abs(base.ds[k]))
+        k += 1
+    end
+    # pass 1b: direction_norm over n
+    j = 1
+    @inbounds while j + 3 <= n
+        ad = abs(V(base.dx[j], base.dx[j + 1], base.dx[j + 2], base.dx[j + 3]))
+        for lane in 1:4
+            direction_norm = max(direction_norm, ad[lane])
+        end
+        j += 4
+    end
+    @inbounds while j <= n
+        direction_norm = max(direction_norm, abs(base.dx[j]))
+        j += 1
+    end
+    # pass 2: componentwise residual / work over m
+    dt4 = V(base.dtau, base.dtau, base.dtau, base.dtau)
+    k = 1
+    @inbounds while k + 3 <= m
+        bx = V(base.ax[k], base.ax[k + 1], base.ax[k + 2], base.ax[k + 3])
+        bs = V(base.ds[k], base.ds[k + 1], base.ds[k + 2], base.ds[k + 3])
+        bb = V(base.b[k], base.b[k + 1], base.b[k + 2], base.b[k + 3])
+        br = V(base.rP[k], base.rP[k + 1], base.rP[k + 2], base.rP[k + 3])
+        bdt = bb * dt4
+        residual = bx + bs - bdt + br
+        work = abs(bx) + abs(bs) + abs(bdt) + abs(br)
+        for lane in 1:4
+            componentwise &= SDPX._product_hsd_newton_close(
+                residual[lane], work[lane],
+            )
+            group_residual = max(group_residual, abs(residual[lane]))
+        end
+        k += 4
+    end
+    @inbounds while k <= m
+        bdt = base.b[k] * base.dtau
+        residual = base.ax[k] + base.ds[k] - bdt + base.rP[k]
+        work = abs(base.ax[k]) + abs(base.ds[k]) + abs(bdt) + abs(base.rP[k])
+        componentwise &= SDPX._product_hsd_newton_close(residual, work)
+        group_residual = max(group_residual, abs(residual))
+        k += 1
+    end
+    group_work = operator_norm * direction_norm + rhs_norm
+    return (componentwise, group_residual, group_work)
+end
+
+function SDPX._trial_point_vec4!(
+    state::SDPX.ProductConeHSDState{T}, alpha::T,
+) where {T<:MultiFloat{Float64}}
+    (T === Float64x2 || T === Float64x4) || return false
+    base = state.base
+    n, m = base.n, base.m
+    V = _mfv4(T)
+    a4 = V(alpha, alpha, alpha, alpha)
+    @inbounds for j in 1:4:n
+        v = V(base.x[j], base.x[j + 1], base.x[j + 2], base.x[j + 3]) +
+            a4 * V(base.dx[j], base.dx[j + 1], base.dx[j + 2], base.dx[j + 3])
+        base.xt[j] = v[1]; base.xt[j + 1] = v[2]
+        base.xt[j + 2] = v[3]; base.xt[j + 3] = v[4]
+    end
+    k = 1
+    @inbounds while k + 3 <= m
+        vs = V(base.s[k], base.s[k + 1], base.s[k + 2], base.s[k + 3]) +
+             a4 * V(base.ds[k], base.ds[k + 1], base.ds[k + 2], base.ds[k + 3])
+        vy = V(base.y[k], base.y[k + 1], base.y[k + 2], base.y[k + 3]) +
+             a4 * V(base.dy[k], base.dy[k + 1], base.dy[k + 2], base.dy[k + 3])
+        base.st[k] = vs[1]; base.st[k + 1] = vs[2]
+        base.st[k + 2] = vs[3]; base.st[k + 3] = vs[4]
+        base.yt[k] = vy[1]; base.yt[k + 1] = vy[2]
+        base.yt[k + 2] = vy[3]; base.yt[k + 3] = vy[4]
+        k += 4
+    end
+    @inbounds while k <= m
+        base.st[k] = base.s[k] + alpha * base.ds[k]
+        base.yt[k] = base.y[k] + alpha * base.dy[k]
+        k += 1
+    end
+    return true
+end
+
+function SDPX._fixed_trace_neighborhood_vec4!(
+    state::SDPX.ProductConeHSDState{T}, s, y, mu::T,
+) where {T<:MultiFloat{Float64}}
+    (T === Float64x2 || T === Float64x4) || return nothing
+    core = state.symmetric_core
+    core isa SDPX.FixedTraceQ3CoreWorkspace{T} || return nothing
+    isfinite(mu) && mu > zero(T) || return false
+    blocks = core.plan.soc_blocks
+    nb = length(blocks)
+    nb >= 4 && nb % 4 == 0 || return nothing
+    V = _mfv4(T)
+    z = zero(T)
+    for b0 in 1:4:nb
+        r1 = blocks[b0].offset
+        r2 = blocks[b0 + 1].offset
+        r3 = blocks[b0 + 2].offset
+        r4 = blocks[b0 + 3].offset
+        sx0 = V(s[r1], s[r2], s[r3], s[r4])
+        sx1 = V(s[r1 + 1], s[r2 + 1], s[r3 + 1], s[r4 + 1])
+        sx2 = V(s[r1 + 2], s[r2 + 2], s[r3 + 2], s[r4 + 2])
+        sy0 = V(y[r1], y[r2], y[r3], y[r4])
+        sy1 = V(y[r1 + 1], y[r2 + 1], y[r3 + 1], y[r4 + 1])
+        sy2 = V(y[r1 + 2], y[r2 + 2], y[r3 + 2], y[r4 + 2])
+        sx_tail = sqrt(sx1 * sx1 + sx2 * sx2)
+        sy_tail = sqrt(sy1 * sy1 + sy2 * sy2)
+        sx_gap = sx0 - sx_tail
+        sy_gap = sy0 - sy_tail
+        sx_det = sx_gap * (sx0 + sx_tail)
+        sy_det = sy_gap * (sy0 + sy_tail)
+        for lane in 1:4
+            (isfinite(sx_det[lane]) && isfinite(sy_det[lane]) &&
+             sx_gap[lane] > z && sy_gap[lane] > z &&
+             sx_det[lane] > z && sy_det[lane] > z) || return false
+        end
+    end
+    state.runtime.last_mu = mu
+    state.runtime.valid = true
+    return true
+end
+
 end

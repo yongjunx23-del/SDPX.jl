@@ -77,9 +77,10 @@ there is no numerically authoritative recovered point, so `Inf` is returned
 instead of amplifying embedding roundoff into an overflow.
 """
 @inline function _product_hsd_recovered_residual(
-    base::HSDState{T}, floor::T=sqrt(eps(T)),
+    state::ProductConeHSDState{T}, floor::T=sqrt(eps(T)),
 ) where {T}
-    hsd_residual!(base)
+    base = state.base
+    _product_hsd_residual!(state)
     (isfinite(base.tau) && base.tau > floor) || return T(Inf)
     recovered = hsd_normalized_residual(base) / base.tau
     return isfinite(recovered) ? recovered : T(Inf)
@@ -96,9 +97,9 @@ end
     y_original::Vector{T},
 ) where {T}
     base = state.base
-    hsd_residual!(base)
+    _product_hsd_residual!(state)
     normalized_residual = status === ProductHSDOptimal ?
-        _product_hsd_recovered_residual(base) : hsd_normalized_residual(base)
+        _product_hsd_recovered_residual(state) : hsd_normalized_residual(base)
     return ProductHSDSolveResult{T}(
         status,
         reason,
