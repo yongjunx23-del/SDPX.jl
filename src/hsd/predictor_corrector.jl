@@ -751,10 +751,7 @@ function _product_hsd_symmetric_core_direction!(
     base.dtau = predictor_candidate.dtau
     base.dkappa = predictor_candidate.dkappa
     _product_hsd_core_scatter!(state)
-    if !_hsd_direction_finite(base)
-        @info "C72A predictor nonfinite" base.dx base.dy base.ds base.dtau base.dkappa
-        return false
-    end
+    _hsd_direction_finite(base) || return false
     if !_product_hsd_newton_residual_ok(state, predictor_scalar)
         return false
     end

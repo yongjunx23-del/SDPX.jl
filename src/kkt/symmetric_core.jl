@@ -492,6 +492,7 @@ mutable struct SymmetricCoreWorkspace{
     epoch_kappa::T             # kappa frozen at the factor epoch
     cache_signature::UInt64    # provider symbolic/factor signature, if exposed
     factor_receipt::Union{Nothing,FactorReceipt{T}}
+    receipt_build_count::Int
     matrix_epoch::Int
     factor_epoch::Int
     homogeneous_epoch::Int
@@ -786,7 +787,7 @@ function _symmetric_core_workspace_prevalidated(
         _core_newton_residual(T, m, n), original_nzval, row_sums,
         pattern_signature, structure_signature, operator_signature,
         _core_cone_theta_signature(system.cone), system.tau, system.kappa,
-        _core_cache_signature(cache), nothing, 0, 0, -1, false,
+        _core_cache_signature(cache), nothing, 0, 0, 0, -1, false,
         0, 0, 0, 0, zero(T), original_scale,
     )
 end
@@ -912,6 +913,7 @@ function sync_core_factor_epoch!(
     workspace.factor_epoch = factor_epoch
     workspace.homogeneous_epoch = -1
     workspace.factor_receipt = _core_build_factor_receipt(workspace)
+    workspace.receipt_build_count += 1
     workspace.synchronized = true
     return workspace
 end

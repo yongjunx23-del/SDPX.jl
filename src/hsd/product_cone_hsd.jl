@@ -465,7 +465,7 @@ end
 
 @inline function product_hsd_receipt_build_count(state::ProductConeHSDState)
     if state.symmetric_core !== nothing
-        return state.symmetric_core.factor_receipt === nothing ? 0 : 1
+        return state.symmetric_core.receipt_build_count
     end
     state.kkt_route === :expanded && return state.expanded === nothing ? 0 :
         state.expanded.receipt_build_count

@@ -297,7 +297,7 @@ end
             @test diag2.symbolic_count == 1
             @test diag2.numeric_count == 2
             @test SDPX.product_hsd_factor_count(core_state) == 2
-            @test SDPX.product_hsd_receipt_build_count(core_state) == 1
+            @test SDPX.product_hsd_receipt_build_count(core_state) == 2
 
             # A fresh prepared-core state stepped exactly once must land on
             # the same iterate as the old bordered route to roundoff.
@@ -321,7 +321,7 @@ end
                 maximum(abs, snap.y; init=0.0),
                 abs(snap.tau), abs(snap.kappa),
             )
-            tol = 4096.0 * sqrt(eps(Float64)) * scale
+            tol = 1.0e-9 * scale
             @test maximum(abs, core_once.base.x - snap.x; init=0.0) <= tol
             @test maximum(abs, core_once.base.s - snap.s; init=0.0) <= tol
             @test maximum(abs, core_once.base.y - snap.y; init=0.0) <= tol
