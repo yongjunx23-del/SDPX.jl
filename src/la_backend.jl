@@ -1517,6 +1517,19 @@ la_backend_ownership(backend::LegacyLABackend) =
     legacy_la_provider_ownership(backend.provider)
 la_backend_ownership(::MultiFloatLABackend) = :provider_owned
 la_backend_ownership(::BFLALABackend) = :provider_owned
+la_backend_factor_arithmetic(::MultiFloatLABackend) = :multifloat
+la_backend_factor_arithmetic(::BFLALABackend) = :bigfloat
+la_backend_factor_arithmetic(::AbstractLABackend) = :unsupported
+
+"""Exact working precision of the provider backend.
+
+MultiFloat width is a type property (`la_backend_provider_precision(T)`);
+BFLA operates at the current ambient `BigFloat` precision.
+"""
+la_backend_provider_precision(::MultiFloatLABackend) = :type_width
+la_backend_provider_precision(::BFLALABackend) = precision(BigFloat)
+la_backend_provider_precision(::AbstractLABackend) = 0
+
 
 la_factor_provider_identity(::Any) = :unknown
 

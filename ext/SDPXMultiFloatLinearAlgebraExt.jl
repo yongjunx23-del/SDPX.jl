@@ -1271,3 +1271,24 @@ end
 # `_require_fresh`.
 
 end
+
+function SDPX._build_symmetric_core_ldlt_cache_provider(
+    ::Type{MF},
+    pattern::SDPX.SymmetricCorePattern{MF},
+    precision_bits::Int,
+) where {MF<:MultiFloat}
+    # MultiFloat width is a type property; a caller-supplied precision hint
+    # must not silently select a different arithmetic.  The width must be an
+    # exact fixed-width MultiFloat recognized by the loaded MFLA provider.
+    is_multifloat_arithmetic(MF) || throw(ArgumentError(
+        "MFLA symmetric core requires a fixed-width MultiFloat, got $(MF)",
+    ))
+    mfla_capabilities(MF)  # fails closed if the loaded MFLA cannot serve MF
+    cache = SDPX.MFLDLTFactorCache(MF)
+    SDPX.prepare!(
+        cache, SDPX.FactorRequirements(pattern.dimension, 0),
+    )
+    return cache
+end
+
+end

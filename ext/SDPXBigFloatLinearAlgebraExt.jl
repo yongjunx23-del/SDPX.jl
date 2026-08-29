@@ -1041,3 +1041,23 @@ end
 
 end
 
+function SDPX._build_symmetric_core_ldlt_cache_provider(
+    ::Type{BigFloat},
+    pattern::SDPX.SymmetricCorePattern{BigFloat},
+    precision_bits::Int,
+)
+    precision_bits >= 64 || throw(ArgumentError(
+        "BFLA symmetric core requires explicit precision_bits >= 64, got $(precision_bits)",
+    ))
+    precision_bits == precision(BigFloat) || throw(ArgumentError(
+        "BFLA symmetric core precision $(precision_bits) must equal the " *
+        "ambient BigFloat precision $(precision(BigFloat))",
+    ))
+    cache = SDPX.BFLALDLTFactorCache()
+    SDPX.prepare!(
+        cache, BigFloatFactorRequirements(pattern.dimension, precision_bits),
+    )
+    return cache
+end
+
+end

@@ -353,3 +353,22 @@ at this SHA only the `:expanded` product-HSD route constructs a `NewtonSystem`
 assembles/recomputes equivalent signs directly. This is an implementation
 migration gap, not a second approved mathematical convention; later HSD-loop
 migration must make every route consume this semantic layer.
+
+## C5: MFLA/BFLA dense symmetric-core factor seam
+
+`SymmetricCoreWorkspace` is arithmetic-agnostic.  For MultiFloat and BigFloat
+the dense pivoted-LDL factor of the same symmetric augmented core is built by
+`build_symmetric_core_ldlt_cache`:
+
+- a conservative dense byte estimate (`symmetric_core_dense_bytes`) and the
+  existing `conservative_memory_upper_bound_eligibility` gate run before any
+  dense allocation or factorization;
+- the MFLA extension returns an `MFLDLTFactorCache` (fixed-width MultiFloat);
+- the BFLA extension returns a `BFLALDLTFactorCache` at an explicit
+  `precision_bits` equal to the ambient BigFloat precision;
+- a missing provider or a failed memory gate fails closed before allocation.
+
+The exact operator, homogeneous solve, sequential predictor/corrector solves,
+original-core refinement, and frozen five-equation residual remain unchanged;
+provider LDLT factors only the same `K`.  No new backend or dependency is
+introduced.

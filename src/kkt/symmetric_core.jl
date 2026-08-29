@@ -1224,3 +1224,88 @@ function solve_core_direction!(
 ) where {T}
     return solve_core_direction!(workspace, workspace.system)
 end
+
+#=====================================================================#
+#    C5: dense symmetric-core factor factory (MFLA/BFLA).
+#
+#    The direction workspace is arithmetic-agnostic.  This seam builds a
+#    dense pivoted-LDL `AbstractFactorCache{T}` for the same `K` operator
+#    through the existing MFLA/BFLA provider adapters, after a conservative
+#    memory gate.  SDPX owns no dense LDL kernel and no new backend.
+#=====================================================================#
+
+"""Conservative dense symmetric-core byte estimate for `dimension^2` K.
+
+The augmented core `K = [0 Ar'; Ar -Theta]` is stored once as a dense
+`dimension × dimension` matrix at the exact arithmetic `T`; the factor
+cache additionally owns its numeric factor/scratch.  This is an upper bound
+using the existing saturating product and margin helper, so it can be
+compared against a memory budget without overflow.
+"""
+function symmetric_core_dense_bytes(
+    ::Type{T}, dimension::Integer,
+) where {T<:AbstractFloat}
+    d = max(Int(dimension), 0)
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    counted = saturating_sum_bytes(
+        saturating_bytes(2, scalar_bytes, d, d),  # dense K + factor storage
+        saturating_bytes(8, scalar_bytes, d),
+    )
+    return _workspace_estimate_with_margin(counted, 1)
+end
+
+"""Eligibility gate for a dense symmetric-core solve.
+
+Runs before any dense allocation or factorization.  `memory_limit_bytes` may
+be `nothing` (unknown → fail closed) or a recorded budget; `current_rss_bytes`
+is the process peak RSS (unknown → fail closed).  Uses the existing
+`conservative_memory_upper_bound_eligibility` semantics unchanged.
+"""
+function symmetric_core_dense_eligibility(
+    ::Type{T},
+    dimension::Integer,
+    memory_limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+) where {T<:AbstractFloat}
+    estimate = symmetric_core_dense_bytes(T, dimension)
+    return conservative_memory_upper_bound_eligibility(
+        estimate, memory_limit_bytes, current_rss_bytes,
+    )
+end
+
+"""Provider-agnostic build seam; concrete providers implement this.
+
+`precision_bits` is exact for BigFloat and advisory-but-required for
+MultiFloat (the storage width is a type property, checked against the actual
+`T`).  Returns an already-prepared `AbstractFactorCache{T}` that owns a dense
+pivoted-LDL factor of the same `K` operator.
+"""
+function build_symmetric_core_ldlt_cache(
+    ::Type{T},
+    pattern::SymmetricCorePattern{T},
+    precision_bits::Int,
+    memory_limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+) where {T<:AbstractFloat}
+    eligibility = symmetric_core_dense_eligibility(
+        T, pattern.dimension, memory_limit_bytes, current_rss_bytes,
+    )
+    eligibility.eligible || throw(ArgumentError(
+        "symmetric core dense factor ineligible: $(eligibility.reason)",
+    ))
+    return _build_symmetric_core_ldlt_cache_provider(
+        T, pattern, precision_bits,
+    )
+end
+
+"""Dispatch to the provider extension; absent provider fails closed."""
+function _build_symmetric_core_ldlt_cache_provider(
+    ::Type{T},
+    pattern::SymmetricCorePattern{T},
+    precision_bits::Int,
+) where {T<:AbstractFloat}
+    throw(ArgumentError(
+        "symmetric core dense LDL has no provider for arithmetic $(T); " *
+        "load MFLA for MultiFloat or BFLA for BigFloat",
+    ))
+end

@@ -352,6 +352,31 @@ function _exercise_provider_lp_lu(::Type{T}) where {T}
     return route
 end
 
+
+
+function _exercise_symmetric_core_ldlt(::Type{T}, precision_bits::Int) where {T<:AbstractFloat}
+    # Small bounded symmetric augmented core: nr=2, m=3, dimension=5.
+    Ar = sparse([1, 2, 3], [1, 1, 2], [T(1), T(1), T(1)], 3, 2)
+    Theta = SDPX.alloc_zeros(T, 3, 3)
+    Theta[1, 1] = T(2); Theta[1, 2] = T(0.2); Theta[2, 1] = T(0.2)
+    Theta[2, 2] = T(1.4); Theta[2, 3] = T(0.1); Theta[3, 2] = T(0.1)
+    Theta[3, 3] = T(1.1)
+    pattern = SDPX.SymmetricCorePattern{T}(Ar, [1:3], [:dense_lower])
+    SDPX.refill!(pattern, Ar, Theta)
+    cache = SDPX.build_symmetric_core_ldlt_cache(
+        T, pattern, precision_bits, nothing, nothing,
+    )
+    @test SDPX.factor_status(cache) === SDPX.Prepared
+    diag = SDPX.factor_diagnostics(cache)
+    @test diag.kind === :ldlt
+    # Factor the same K exactly once and verify the provider fact.
+    SDPX.factorize!(cache, SDPX.materialize_dense(pattern), 1)
+    @test SDPX.factor_status(cache) === SDPX.Fresh
+    @test SDPX.factor_epoch(cache) == 1
+    @test SDPX.factor_diagnostics(cache).matrix_epoch == 1
+    return (; pattern, cache)
+end
+
 function _solve_product_hsd_bordered(::Type{T}) where {T<:AbstractFloat}
     model = SDPX.Model(T)
     x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
@@ -395,6 +420,12 @@ end
             end
         end
 
+        @testset "MFLA symmetric-core LDL factory" begin
+            for T in (Float64x2, Float64x4)
+                _exercise_symmetric_core_ldlt(T, 0)
+            end
+        end
+
     end
 
     if _REQUIRE_BFLA
@@ -405,6 +436,7 @@ end
                 _exercise_bfla_repeated_solve_correction()
                 _exercise_provider_lp_lu(BigFloat)
                 _solve_product_hsd_bordered(BigFloat)
+                _exercise_symmetric_core_ldlt(BigFloat, 256)
             end
         end
 
