@@ -515,33 +515,3 @@ while preserving the CHOLMOD symbolic object/pattern.  Any refill, scale,
 factor or synchronization failure therefore leaves no receipt, no Fresh
 solve and no stale homogeneous solution; a later valid same-pattern epoch
 recovers from `Prepared` with a fresh numeric factor and receipt.
-
-## Public `:bordered` symmetric-core execution (C7.3)
-
-The public `Settings(kkt_route=:bordered)` route now resolves the row-space
-reduction and a conservative memory headroom (from the existing
-system/cgroup/config free-memory helpers plus current process peak RSS)
-BEFORE any state allocation, then constructs the product-HSD state through
-the low-level seam with `prepare_symmetric_core=true`.  The state therefore
-owns a prepared `SymmetricCoreWorkspace` (`K = [0 Ar'; Ar -Theta]`), the
-legacy full-border LU driver is never factored, and the executed
-`NativeHSDKKTDescriptor` reports `:symmetric_augmented_hsd_core` with
-`:symmetric_ldl` factorization (CHOLMOD for Float64; MFLA/BFLA dense pivoted
-LDL for MultiFloat/BigFloat), storage `:sparse`/`:dense`, provider
-`:cholmod`/`:multifloat_linear_algebra`/`:bigfloat_linear_algebra`, and the
-reuse contract `factor_once_homogeneous_predictor_corrector`.
-
-Public diagnostics derive the executed provider/factor/precision/
-regularization/reuse from the actual `product_hsd_factor_receipt(state)` and
-`factor_diagnostics(core.cache)` rather than a static descriptor; memory
-reports the core dimension, conservative byte estimate, and actual provider
-facts.  Core construction/factorization failure is explicit and fail closed;
-no old-border fallback exists for a prepared-core state.
-
-Explicit `:expanded` and `:sparse_schur` behavior is unchanged in this
-commit (including their existing same-iterate fallback); their eventual
-cleanup is a later step.
-
-> Release note: the complete E2E/benchmark/BigFloat full-solve qualification
-> over the new public bordered route is deferred to the integration SHA and
-> is not claimed by this commit.
