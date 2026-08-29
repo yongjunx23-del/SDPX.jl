@@ -155,6 +155,7 @@ mutable struct ProductConeHSDState{
     SB,
     EW,
     SW,
+    SCW,
 }
     base::HSDState{T,R}
     runtime::RT
@@ -182,6 +183,7 @@ mutable struct ProductConeHSDState{
     kkt_route_attempts::Vector{Symbol}
     expanded::EW
     sparse_schur::SW
+    symmetric_core::SCW
     diagnostic::Symbol
     tau_collapse_recoveries::Int
     # P7 fused-residual/ThreadBudget hook: diagnostic metadata only, never a
@@ -200,11 +202,28 @@ function ProductConeHSDState(
 end
 
 function _product_cone_hsd_state(
-    base::HSDState{T,R}; kkt_route::Symbol=:bordered,
+    base::HSDState{T,R};
+    kkt_route::Symbol=:bordered,
+    prepare_symmetric_core::Bool=false,
+    symmetric_core_memory_limit::Union{Nothing,Integer}=nothing,
+    symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
+    symmetric_core_precision_bits::Integer=0,
+    symmetric_core_regularization::Real=0.0,
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
         "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
     ))
+    symmetric_core = if prepare_symmetric_core
+        _prepare_product_hsd_symmetric_core(
+            base;
+            precision_bits=Int(symmetric_core_precision_bits),
+            memory_limit_bytes=symmetric_core_memory_limit,
+            current_rss_bytes=symmetric_core_current_rss,
+            regularization=symmetric_core_regularization,
+        )
+    else
+        nothing
+    end
     runtime = ProductConeRuntime(base.canonical.cone_layout, T)
     m = base.m
     block_count = length(runtime.exp) + length(runtime.power)
@@ -266,6 +285,7 @@ function _product_cone_hsd_state(
     return ProductConeHSDState{
         T,R,typeof(runtime),typeof(ns_schur),typeof(coupled),
         typeof(symmetric_bordered),typeof(expanded),typeof(sparse_schur),
+        typeof(symmetric_core),
     }(
         base,
         runtime,
@@ -293,6 +313,7 @@ function _product_cone_hsd_state(
         Symbol[kkt_route],
         expanded,
         sparse_schur,
+        symmetric_core,
         :none,
         0,
         residual_hook,
@@ -300,16 +321,110 @@ function _product_cone_hsd_state(
 end
 
 function ProductConeHSDState(
-    canonical::CanonicalConicProgram{T}; kkt_route::Symbol=:bordered,
+    canonical::CanonicalConicProgram{T};
+    kkt_route::Symbol=:bordered,
+    prepare_symmetric_core::Bool=false,
+    symmetric_core_memory_limit::Union{Nothing,Integer}=nothing,
+    symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
+    symmetric_core_precision_bits::Integer=0,
+    symmetric_core_regularization::Real=0.0,
 ) where {T<:AbstractFloat}
     reduction = _hsd_rowspace_reduction(canonical)
     cache = DenseSchurCholeskyCache{T}(reduction.rank)
     driver = HotRouteCache(cache; n=reduction.rank)
     base = _hsd_state_from_reduction(canonical, driver, reduction)
-    return _product_cone_hsd_state(base; kkt_route=kkt_route)
+    return _product_cone_hsd_state(
+        base;
+        kkt_route=kkt_route,
+        prepare_symmetric_core=prepare_symmetric_core,
+        symmetric_core_memory_limit=symmetric_core_memory_limit,
+        symmetric_core_current_rss=symmetric_core_current_rss,
+        symmetric_core_precision_bits=symmetric_core_precision_bits,
+        symmetric_core_regularization=symmetric_core_regularization,
+    )
 end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
+
+"""Prepare an optional setup-owned symmetric-core workspace from base facts.
+
+Cold seam (C7.1b): allocates the frozen core pattern, state-owned per-block
+Theta operators/RHS and a semantic `BlockProductConeLinearization` from the
+canonical cone block layout, and prepares (never factors) the provider
+cache.  No direction dispatch reads this field yet; the old bordered route
+remains authoritative.  `memory_limit_bytes`/`current_rss_bytes` must be
+known (fail closed otherwise) and are checked before any allocation.
+"""
+function _prepare_product_hsd_symmetric_core(
+    base::HSDState{T,R};
+    precision_bits::Integer=0,
+    memory_limit_bytes::Union{Nothing,Integer}=nothing,
+    current_rss_bytes::Union{Nothing,Integer}=nothing,
+    regularization::Real=0.0,
+    symbolic_epoch::Integer=0,
+) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
+    m = base.m
+    n = base.n
+    nr = base.nr
+    blocks = layout_blocks(base.canonical.cone_layout)
+    block_ranges = UnitRange{Int}[
+        block.offset:(block.offset + block.length - 1) for block in blocks
+    ]
+    block_sizes = Int[block.length for block in blocks]
+    # A setup-only semantic system: tau/kappa are still zero until cold start,
+    # so use one for the layout placeholder.  The workspace is never
+    # synchronized or factored here, and no direction solve reads these.
+    rhs = HSDNewtonRHS(
+        zeros(T, m), zeros(T, n), zero(T), zeros(T, m), zero(T),
+    )
+    operators = Matrix{T}[]
+    for rows in block_ranges
+        push!(operators, alloc_zeros(T, length(rows), length(rows)))
+    end
+    cone = BlockProductConeLinearization{T}(
+        operators, zeros(T, m), block_ranges,
+    )
+    system = NewtonSystem(
+        base.A, base.b, base.c, cone, one(T), one(T), rhs,
+    )
+    effective_precision = precision_bits == 0 ? (
+        T === BigFloat ? precision(BigFloat) : sig_bits(T)
+    ) : Int(precision_bits)
+    return prepare_symmetric_core_state(
+        system,
+        base.rank_basis,
+        block_ranges,
+        block_sizes,
+        effective_precision,
+        memory_limit_bytes,
+        current_rss_bytes,
+        regularization;
+        symbolic_epoch=symbolic_epoch,
+    )
+end
+
+"""
+    product_hsd_symmetric_core(state) -> Union{Nothing,SymmetricCoreWorkspace}
+
+Return the state-owned (prepared, unfactored) symmetric-core workspace, or
+`nothing` when the state was constructed without `prepare_symmetric_core`.
+"""
+@inline product_hsd_symmetric_core(state::ProductConeHSDState) =
+    state.symmetric_core
+
+"""
+    product_hsd_symmetric_core_prepared(state) -> Bool
+
+`true` only when the state owns a prepared core workspace whose cache is
+`Prepared` and whose factor epoch is still zero (no factorization).
+"""
+function product_hsd_symmetric_core_prepared(state::ProductConeHSDState)
+    core = state.symmetric_core
+    core === nothing && return false
+    SDPX.factor_status(core.cache) === Prepared || return false
+    return core.factor_epoch == 0 && core.homogeneous_solves == 0 &&
+           core.variable_solves == 0
+end
 
 # P7 minimal product-HSD hooks/metadata: diagnostic accessors for the
 # fused residual workspace, its metadata, and the deterministic thread

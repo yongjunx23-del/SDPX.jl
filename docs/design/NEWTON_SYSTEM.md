@@ -478,3 +478,17 @@ blocks, tau/kappa, and RHS fields may change between epochs.
 - Predictor→corrector RHS changes within one epoch are legal only when the
   cone Theta numeric signature and the frozen tau/kappa are unchanged;
   everything else is rejected by `_core_guard_ready!`.
+
+## State-owned symmetric-core preparation (C7.1b)
+
+`ProductConeHSDState` may optionally own a prepared (unfactored)
+`symmetric_core` workspace when constructed with
+`prepare_symmetric_core=true`.  The cold seam allocates the frozen
+`symmetric augmented core` CSC pattern, state-owned per-block `Theta`
+operator matrices and cone RHS, and a semantic `BlockProductConeLinearization`
+(no global `m×m` Theta), then prepares the provider cache only.  It never
+factors, never solves, and no direction dispatch reads the field; the old
+bordered/expanded/sparse routes remain authoritative.  A conservative
+memory preflight (core + per-block `Theta`) runs before any allocation, and
+unknown/over-budget memory facts fail closed.  `prepare_symmetric_core=false`
+(default) stores `nothing` and preserves all previous behavior.

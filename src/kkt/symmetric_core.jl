@@ -1740,6 +1740,134 @@ function symmetric_core_theta(
     return theta
 end
 
+# -------------------------------------------------------------------
+# State-owned block preparation (C7.1b): allocate pattern, per-block
+# operators, cone RHS, and a semantic BlockProduct linearization from
+# canonical cone block ranges/sizes without any global m×m Theta, and
+# prepare (but do not factor) the provider cache.  The prepared
+# workspace is numeric-factor-free: factor_epoch/homogeneous/variable
+# stay 0.  BigFloat per-block objects are ownership-safe.
+# -------------------------------------------------------------------
+
+"""Total conservative bytes for a prepared symmetric core + block Theta.
+
+Counts the sparse lower-triangle core values, the dense factor storage,
+and every per-block `Theta` matrix.  Used as the cold preflight before
+any block or global dense allocation.
+"""
+function symmetric_core_state_prepare_bytes(
+    ::Type{T}, dimension::Int, block_sizes::AbstractVector{Int},
+) where {T<:AbstractFloat}
+    d = max(Int(dimension), 0)
+    scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
+    block_theta = 0
+    for block_size in block_sizes
+        bs = max(Int(block_size), 0)
+        block_theta = saturating_sum_bytes(
+            block_theta, saturating_bytes(scalar_bytes, bs, bs),
+        )
+    end
+    core = symmetric_core_dense_bytes(T, d)
+    return saturating_sum_bytes(core, block_theta)
+end
+
+"""Build a numeric-factor-free prepared state workspace.
+
+Allocates an owned `BlockProductConeLinearization` from ordered canonical
+block ranges and per-block owned operator/RHS storage (no global m×m
+Theta), freezes the core pattern, and prepares the provider cache only.
+`memory_limit_bytes`/`current_rss_bytes` must be known; an unknown or
+over-budget request fails closed before allocation.  The returned
+workspace is unsynchronized and unfactored (cache Prepared,
+factor_epoch/homogeneous_solves/variable_solves/directions == 0).
+"""
+function prepare_symmetric_core_state(
+    system::NewtonSystem{T},
+    V::AbstractMatrix{T},
+    block_ranges::AbstractVector{<:UnitRange{Int}},
+    block_sizes::AbstractVector{Int},
+    precision_bits::Int,
+    memory_limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+    regularization::Real;
+    symbolic_epoch::Integer=0,
+) where {T<:AbstractFloat}
+    length(block_ranges) == length(block_sizes) || throw(ArgumentError(
+        "symmetric core state block ranges/sizes counts disagree",
+    ))
+    m = length(system.b)
+    validate_product_cone_block_ranges(m, block_ranges)
+    for (index, rows) in enumerate(block_ranges)
+        length(rows) == block_sizes[index] || throw(DimensionMismatch(
+            "symmetric core block size $(block_sizes[index]) disagrees " *
+            "with rows $rows",
+        ))
+    end
+    # Cold preflight before any allocation.
+    dimension = size(V, 2) + m
+    if T !== Float64
+        symmetric_core_provider_available(T, precision_bits)
+    end
+    estimate = symmetric_core_state_prepare_bytes(
+        T, dimension, collect(Int, block_sizes),
+    )
+    eligibility = conservative_memory_upper_bound_eligibility(
+        estimate, memory_limit_bytes, current_rss_bytes,
+    )
+    eligibility.eligible || throw(ArgumentError(
+        "symmetric core state ineligible: $(eligibility.reason)",
+    ))
+    # Range/isometry preconditions before materialization.
+    _validate_core_preconditions(system, V)
+
+    # State-owned per-block Theta operators and cone RHS.
+    operators = Matrix{T}[]
+    for rows in block_ranges
+        dimension_block = length(rows)
+        push!(operators, alloc_zeros(T, dimension_block, dimension_block))
+    end
+    corrector_rhs = alloc_zeros(T, m)
+    cone = BlockProductConeLinearization{T}(
+        operators, corrector_rhs,
+        UnitRange{Int}[rows for rows in block_ranges],
+    )
+
+    pattern = _symmetric_core_pattern_from_validated(system, V)
+    pattern.block_ranges == block_ranges || throw(ArgumentError(
+        "symmetric core state block ranges drifted after pattern build",
+    ))
+    cache = if T === Float64
+        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
+            "symmetric core Float64 regularization must be finite and nonnegative",
+        ))
+        k = symmetric_core_lower_sparse(pattern)
+        requirements = SparseSymbolicRequirements(
+            k;
+            symbolic_epoch=Int(symbolic_epoch),
+            dsigns=symmetric_core_dsigns(pattern),
+            regularization=Float64(regularization),
+        )
+        c = SparseSymbolicNumericCache{Float64}()
+        prepare!(c, requirements)
+        c
+    else
+        build_symmetric_core_ldlt_cache(
+            T, pattern, precision_bits, memory_limit_bytes, current_rss_bytes,
+        )
+    end
+    # Build the state-owned block-cone NewtonSystem first so the workspace
+    # type parameter is the block-cone system from construction (no
+    # concrete-field reassignment) and no global Theta is ever referenced.
+    block_system = NewtonSystem(
+        system.A, system.b, system.c, cone,
+        system.tau, system.kappa, system.rhs,
+    )
+    workspace = _symmetric_core_workspace_prevalidated(
+        pattern, cache, V, block_system,
+    )
+    return workspace
+end
+
 """Validate documented rank-reduction preconditions before any materialization.
 
 Checks V dimensions, `V'V = I`, `range(A') = range(V)` (every row of `A` in
