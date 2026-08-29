@@ -430,6 +430,19 @@ updating `x/s/y/tau/kappa`.  Every case asserts:
 - the iterate and the reference direction/scratch are bitwise unchanged
   after the comparison.
 
-Cases whose reference direction cannot be produced or whose core is not
-applicable are recorded explicitly with the exact family/reason; none are
-silently skipped or tolerance-loosened.
+The reference driver replays the exact production expanded
+predictor/corrector sequence step by step and returns the exact predictor and
+corrector `NewtonSystem`s together with the reference `alpha_aff`, `mu_aff`,
+`sigma`, `sigma_mu`, and scalar RHS facts.  The shadow solves exactly those
+two systems (each frozen by an ownership-independent copy before the corrector
+stage rewrites the shared session buffers), compares the core predictor
+boundary/centering facts against the reference, and restores every
+reference field — iterate, direction/scratch arrays, runtime mutable state,
+expanded cone buffers and counters — to the pre-shadow snapshot.
+
+Every catalog case is mandatory: an equality/reference/linearization/
+workspace failure fails the test with a diagnostic; nothing is skipped and no
+tolerance is loosened.  Measured on the five Float64 catalog cases the
+predictor/corrector direction differences are at the `1e-15` level against a
+`1e-9` scale-aware bound, with `factor_epoch == 1`, one homogeneous solve and
+two variable solves.
