@@ -449,12 +449,36 @@ end
     # only revokes/refreshes the numeric factor.
     symbolic_before = SDPX.factor_diagnostics(cache).symbolic_count
     delta0 = cache.regularization
+    @test delta0 > 0
     SDPX.set_regularization!(cache, 2 * delta0)
     @test SDPX.factor_status(cache) === SDPX.Prepared
     SDPX.factorize!(cache, SDPX.symmetric_core_lower_sparse(ws.pattern), 2)
     @test SDPX.factor_status(cache) === SDPX.Fresh
     @test SDPX.factor_diagnostics(cache).symbolic_count == symbolic_before
     @test SDPX.factor_diagnostics(cache).regularization == 2 * delta0
+    @test SDPX.factor_epoch(cache) == 3
+
+    # The workspace guard is genuinely exercised after the direct refactor:
+    # the cache advanced to epoch 3 without the workspace knowing, so a solve
+    # before resynchronization must fail closed.
+    @test ws.factor_epoch == 2
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws, system2)
+    # Re-synchronize the workspace with the current system and solve the
+    # homogeneous core at the new epoch so every later guard is exercised
+    # against epoch 3, not a stale epoch 2 snapshot.
+    SDPX.sync_core_factor_epoch!(ws; system=system2)
+    @test ws.factor_epoch == 3
+    @test ws.homogeneous_epoch == -1
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws, system2)
+    SDPX.solve_core_homogeneous!(ws, system2)
+    @test ws.homogeneous_epoch == 3
+    @test ws.homogeneous_solves == 3
+    @test ws.factor_receipt !== nothing
+    @test ws.factor_receipt.matrix_epoch == 2
+    @test ws.factor_receipt.regularization == 2 * delta0
+    @test ws.factor_receipt.regularization_kind === :signed_diagonal
+    dir_epoch3, res_epoch3 = SDPX.solve_core_direction!(ws, system2)
+    @test maximum(abs, res_epoch3.primal_affine) <= 4096 * eps(Float64)
     @test SDPX.factor_epoch(cache) == 3
 
     # Theta changed within the same factor epoch is rejected.
@@ -468,6 +492,22 @@ end
     )
     @test_throws ArgumentError SDPX.solve_core_direction!(ws, bad_system)
 
+    # A changed block partition with the same dense operator values is a
+    # static-identity change and must be rejected across epochs.  The LP
+    # operator is diagonal, so splitting the single [1:2] block into
+    # [1:1, 2:2] leaves the dense operator values unchanged but changes the
+    # partition.
+    partition_bad = SDPX.ProductConeLinearization{Float64}(
+        system2.cone.operator, copy(system2.rhs.cone_corrector), [1:1, 2:2],
+    )
+    partition_system = SDPX.NewtonSystem(
+        system2.A, system2.b, system2.c, partition_bad,
+        system2.tau, system2.kappa, system2.rhs,
+    )
+    @test_throws ArgumentError SDPX.factor_symmetric_core_epoch!(
+        ws, partition_system, 4,
+    )
+
     # Static drift (A change) is rejected across epochs.
     A_bad = copy(system2.A)
     A_bad[1, 1] += 0.5
@@ -475,7 +515,7 @@ end
         A_bad, system2.b, system2.c, system2.cone,
         system2.tau, system2.kappa, system2.rhs,
     )
-    @test_throws ArgumentError SDPX.factor_symmetric_core_epoch!(ws, bad_A_system, 3)
+    @test_throws ArgumentError SDPX.factor_symmetric_core_epoch!(ws, bad_A_system, 4)
 
     # tau/kappa change without a new factor is rejected.
     bad_tk = SDPX.NewtonSystem(
@@ -488,4 +528,5 @@ end
     @test ws.factor_receipt.scalar_type === Float64
     @test ws.factor_receipt.factor_status === :factored
     @test ws.factor_receipt.provider === :cholmod
+    @test ws.factor_receipt.regularization_kind === :signed_diagonal
 end

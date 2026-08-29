@@ -607,6 +607,13 @@ function _core_static_signature(
     system::NewtonSystem,
 )
     signature = _core_structure_signature(pattern)
+    # The semantic cone block partition is part of the static identity: a
+    # changed partition (with the same dense operator values) must be
+    # rejected at factor/guard/refill even though the CSC structure is
+    # unchanged.
+    signature = _core_mix_uint(
+        signature, _core_cone_partition_signature(system.cone),
+    )
     signature = _core_mix_values(signature, V)
     signature = _core_mix_values(signature, system.A)
     signature = _core_mix_values(signature, system.b)
@@ -619,14 +626,46 @@ function _core_pattern_theta_signature(pattern::SymmetricCorePattern)
     return _core_mix_values(UInt64(0xcbf29ce484222325), pattern.nzval)
 end
 
-"""Content signature of the Theta numeric values of a semantic cone."""
+"""Block partition of a semantic product/block cone."""
+function _core_cone_block_ranges(
+    cone::Union{ProductConeLinearization,BlockProductConeLinearization},
+)
+    return product_cone_block_ranges(cone)
+end
+_core_cone_block_ranges(::AbstractConeLinearization) = throw(ArgumentError(
+    "symmetric core requires a product or block-product cone linearization",
+))
+
+"""Structural signature of a semantic cone block partition.
+
+Independent of numeric Theta values.  A changed partition with the same dense
+operator must be detected as a static identity change, so this signature is
+mixed into the static operator identity and compared at factor/guard/refill.
+"""
+function _core_cone_partition_signature(
+    cone::Union{ProductConeLinearization,BlockProductConeLinearization},
+)
+    return _core_mix_ranges(
+        UInt64(0xcbf29ce484222325), _core_cone_block_ranges(cone),
+    )
+end
+_core_cone_partition_signature(::AbstractConeLinearization) = throw(ArgumentError(
+    "symmetric core requires a product or block-product cone linearization",
+))
+
+"""Content signature of the Theta numeric values of a semantic cone.
+
+The block partition is mixed in first so a changed partition with the same
+operator values (e.g. merging two blocks) fails closed even though the dense
+numeric values are unchanged.
+"""
 function _core_cone_theta_signature(
     cone::Union{ProductConeLinearization,BlockProductConeLinearization},
 )
+    signature = _core_cone_partition_signature(cone)
     if cone isa ProductConeLinearization
-        return _core_mix_values(UInt64(0xcbf29ce484222325), cone.operator)
+        return _core_mix_values(signature, cone.operator)
     end
-    signature = UInt64(0xcbf29ce484222325)
     signature = _core_mix_uint(signature, UInt64(length(cone.operators)))
     for operator in cone.operators
         signature = _core_mix_values(signature, operator)
@@ -767,6 +806,20 @@ function _core_original_scale!(
     return max(one(T), maximum(row_sums; init=zero(T)))
 end
 
+"""Current exact symmetric infinity row-sum norm of the live pattern values.
+
+Used *before* synchronization so a new numeric epoch's regularization is
+scaled by the new Theta, not by the previously accepted epoch's scale.
+"""
+function _core_current_original_scale(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T}
+    return _core_original_scale!(
+        workspace.row_sums, workspace.pattern.colptr,
+        workspace.pattern.rowval, workspace.pattern.nzval,
+    )
+end
+
 """Synchronize factor/matrix stamps and retain an owned original-core snapshot.
 
 Synchronization is legal only for a fresh factor.  A first call captures the
@@ -880,6 +933,7 @@ function _core_build_factor_receipt(
         Int(get(diag, :precision_bits, factor_receipt_precision(T)))
     regularization = diag === nothing ? zero(T) :
         T(get(diag, :regularization, zero(T)))
+    regularization_kind = iszero(regularization) ? :none : :signed_diagonal
     return FactorReceipt(
         workspace.matrix_epoch,
         workspace.factor_epoch,
@@ -889,7 +943,7 @@ function _core_build_factor_receipt(
         T,
         precision_bits,
         regularization,
-        kind === :ldlt ? :ldlt : :symmetric_ldl,
+        regularization_kind,
         :factored,
         zero(T),
         false,
@@ -918,8 +972,11 @@ function factor_symmetric_core_epoch!(
     _core_refill_from_system!(workspace, system)
     epoch = Int(matrix_epoch)
     if T === Float64
-        # Scale δ from the current original-K infinity norm.
-        delta = T(64) * eps(one(T)) * workspace.original_scale
+        # Scale δ from the *current* refilled original-K infinity norm.  The
+        # prior accepted epoch's scale is deliberately not reused: the Theta
+        # numeric values may change arbitrarily between epochs.
+        current_scale = _core_current_original_scale(workspace)
+        delta = T(64) * eps(one(T)) * current_scale
         isfinite(delta) && delta > zero(T) || throw(ArgumentError(
             "symmetric core regularization scale is not usable",
         ))

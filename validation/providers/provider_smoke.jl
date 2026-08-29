@@ -781,6 +781,98 @@ function _exercise_c6a_multi_block(::Type{T}, precision_bits::Int) where {T}
     return nothing
 end
 
+"""Bounded BlockProduct epoch-refill test for the high-precision dense path.
+
+Refills the same frozen pattern with changed owned block values at a new
+matrix epoch and asserts one symbolic, two numeric factor epochs, two
+homogeneous solves, and non-aliasing of the refilled BigFloat slot objects.
+"""
+function _exercise_c6a_multi_block_epoch(::Type{T}, precision_bits::Int) where {T}
+    m, n = 5, 3
+    A = T[1 0 0; 0 1 0; 1 1 0; 0 0 1; 1 0 1]
+    b = T[0.5, -0.25, 0.3, 0.2, -0.1]
+    c = T[0.2, 0.3, -0.1]
+    H = SDPX.alloc_zeros(T, m, m)
+    H[1,1]=T(2); H[1,2]=T(.3); H[2,2]=T(1.5)
+    H[2,1]=H[1,2]
+    H[3,3]=T(3); H[3,4]=T(.1); H[3,5]=T(.2)
+    H[4,4]=T(2.5); H[4,5]=T(.3); H[5,5]=T(1.8)
+    H[4,3]=H[3,4]; H[5,3]=H[3,5]; H[5,4]=H[4,5]
+    tau, kappa = T(1.2), T(0.8)
+    dx = T[0.15, -0.2, 0.3]; dy = T[0.1, -0.1, 0.2, 0.05, -0.05]
+    ds = T[-0.2, 0.1, -0.3, 0.15, 0.1]; dtau = T(0.05); dkappa = T(-0.1)
+    primal = A * dx + ds - b * dtau
+    dual = transpose(A) * dy + c * dtau
+    gap = -dot(c, dx) - dot(b, dy) + dkappa
+    cone = ds + H * dy
+    scalar = kappa * dtau + tau * dkappa
+    rhs = SDPX.HSDNewtonRHS(primal, dual, gap, cone, scalar)
+    block_lin = SDPX.BlockProductConeLinearization{T}(
+        [H[1:2,1:2], H[3:5,3:5]], cone, [1:2, 3:5],
+    )
+    system1 = SDPX.NewtonSystem(A, b, c, block_lin, tau, kappa, rhs)
+    V = Matrix{T}(I, n, n)
+    estimate = SDPX.symmetric_core_dense_bytes(T, n + m)
+    workspace = SDPX.build_symmetric_core_workspace(
+        system1, V, 1, precision_bits, estimate + 1024, 0, 0.0;
+        symbolic_epoch=0,
+    )
+    cache = workspace.cache
+    @test SDPX.factor_epoch(cache) == 1
+    @test workspace.homogeneous_solves == 1
+
+    # Refill the *same* pattern with changed owned block values at a new epoch.
+    H2 = SDPX.alloc_zeros(T, m, m)
+    for i in 1:m, j in 1:m
+        H2[i, j] = T(1.2) * H[i, j]
+    end
+    cone2 = copy(cone)
+    for i in 1:m
+        cone2[i] = T(1.1) * cone[i]
+    end
+    block_lin2 = SDPX.BlockProductConeLinearization{T}(
+        [H2[1:2,1:2], H2[3:5,3:5]], cone2, [1:2, 3:5],
+    )
+    system2 = SDPX.NewtonSystem(A, b, c, block_lin2, tau, kappa, rhs)
+    SDPX.factor_symmetric_core_epoch!(workspace, system2, 2)
+    @test SDPX.factor_epoch(cache) == 2
+    @test workspace.homogeneous_solves == 2
+    @test workspace.homogeneous_epoch == workspace.factor_epoch
+
+    if T === BigFloat
+        # Every refilled theta slot must be an independent BigFloat object.
+        theta_slots = workspace.pattern.theta_slots
+        nzval = workspace.pattern.nzval
+        @test all(
+            i == j || nzval[theta_slots[i]] !== nzval[theta_slots[j]]
+            for i in eachindex(theta_slots), j in eachindex(theta_slots)
+        )
+    end
+
+    # Direction at the new epoch still passes the frozen five-equation gate.
+    direction2, residual2 = SDPX.solve_core_direction!(workspace, system2)
+    tol = T(4096) * sqrt(eps(one(T)))
+    @test maximum(abs, residual2.primal_affine) <= tol
+    @test maximum(abs, residual2.dual_affine) <= tol
+    @test abs(residual2.homogeneous_gap) <= tol
+    @test maximum(abs, residual2.cone_complementarity) <= tol
+    @test abs(residual2.tau_kappa) <= tol
+    ref2 = _c6a_direct_five(A, b, c, H2, tau, kappa, rhs)
+    @test isapprox(direction2.dx, ref2.dx; atol=tol, rtol=T(0))
+    @test isapprox(direction2.dy, ref2.dy; atol=tol, rtol=T(0))
+    @test isapprox(direction2.ds, ref2.ds; atol=tol, rtol=T(0))
+    @test isapprox(direction2.dtau, ref2.dtau; atol=tol, rtol=T(0))
+    @test isapprox(direction2.dkappa, ref2.dkappa; atol=tol, rtol=T(0))
+    @test workspace.factor_receipt !== nothing
+    @test workspace.factor_receipt.regularization_kind === :none
+    @test workspace.factor_receipt.regularization == zero(T)
+    @test workspace.factor_receipt.provider ===
+          (T === BigFloat ? :bigfloat_linear_algebra : :multifloat_linear_algebra)
+    @test workspace.factor_receipt.scalar_type === T
+    @test workspace.factor_receipt.factor_status === :factored
+    return nothing
+end
+
 @testset "C6a provider symmetric-core directions" begin
     if _REQUIRE_MFLA
         for T in (Float64x2, Float64x4)
@@ -788,6 +880,7 @@ end
                 _exercise_c6a_provider(T, 0)
                 _exercise_c6a_provider_rejections(T, 0)
                 _exercise_c6a_multi_block(T, 0)
+                _exercise_c6a_multi_block_epoch(T, 0)
             end
         end
     end
@@ -796,6 +889,7 @@ end
             _exercise_c6a_provider(BigFloat, 256)
             _exercise_c6a_provider_rejections(BigFloat, 256)
             _exercise_c6a_multi_block(BigFloat, 256)
+            _exercise_c6a_multi_block_epoch(BigFloat, 256)
         end
     end
 end
