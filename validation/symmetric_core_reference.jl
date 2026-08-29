@@ -1276,6 +1276,19 @@ function _counting_refine_workspace(gain::Float64)
     return (; workspace, cache, K)
 end
 
+@testset "C5 dense symmetric-core memory preflight" begin
+    @test_throws ArgumentError SDPX.symmetric_core_dense_bytes(Float64, -1)
+    @test SDPX.symmetric_core_dense_bytes(Float64, typemax(UInt128)) == typemax(Int)
+    estimate = SDPX.symmetric_core_dense_bytes(Float64, 5)
+    @test estimate > 0
+    unknown = SDPX.symmetric_core_dense_eligibility(Float64, 5, nothing, nothing)
+    @test !unknown.eligible
+    bounded = SDPX.symmetric_core_dense_eligibility(
+        Float64, 5, estimate + 1024, 0,
+    )
+    @test bounded.eligible
+end
+
 @testset "C4 deterministic refinement branches" begin
     dimension = size(_counting_refine_workspace(0.5).K, 1)
     rhs = collect(Float64, 1:dimension)

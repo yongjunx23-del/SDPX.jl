@@ -833,25 +833,32 @@ function SDPX.factorize!(
     A::AbstractMatrix{BigFloat},
     matrix_epoch::Integer,
 )
-    size(A, 1) == cache.inner.n || throw(DimensionMismatch(
-        "matrix dimension $(size(A, 1)) does not match cache dimension $(cache.inner.n)",
-    ))
-    size(A, 2) == cache.inner.n || throw(DimensionMismatch(
-        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
-    ))
-    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
-        return cache
-    end
+    previous = cache.status
+    previous in (SDPX.Prepared, SDPX.Fresh, SDPX.Failed) ||
+        throw(SDPX.FactorCacheStateError(:factorize, SDPX.Prepared, previous))
     cache.status = SDPX.Factoring
     try
+        epoch = Int(matrix_epoch)
+        size(A, 1) == cache.inner.n || throw(DimensionMismatch(
+            "matrix dimension $(size(A, 1)) does not match cache dimension $(cache.inner.n)",
+        ))
+        size(A, 2) == cache.inner.n || throw(DimensionMismatch(
+            "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+        ))
+        all(isfinite, A) || throw(ArgumentError("BFLA LDLT matrix is non-finite"))
+        if previous === SDPX.Fresh && cache.matrix_epoch == epoch
+            cache.status = SDPX.Fresh
+            return cache
+        end
         BFLA.factorize!(cache.inner, A)
         BFLA.issuccess(cache.inner) || throw(ErrorException(
             "BFLA LDLT factorization failed: $(BFLA.factor_status(cache.inner))",
         ))
-        cache.matrix_epoch = Int(matrix_epoch)
+        cache.matrix_epoch = epoch
         cache.factor_epoch += 1
         cache.status = SDPX.Fresh
     catch
+        BFLA.invalidate!(cache.inner)
         cache.status = SDPX.Failed
         rethrow()
     end
@@ -1039,8 +1046,6 @@ function SDPX.factor_diagnostics(cache::BFLARRQRFactorCache)
     )
 end
 
-end
-
 function SDPX._build_symmetric_core_ldlt_cache_provider(
     ::Type{BigFloat},
     pattern::SDPX.SymmetricCorePattern{BigFloat},
@@ -1053,7 +1058,7 @@ function SDPX._build_symmetric_core_ldlt_cache_provider(
         "BFLA symmetric core precision $(precision_bits) must equal the " *
         "ambient BigFloat precision $(precision(BigFloat))",
     ))
-    cache = SDPX.BFLALDLTFactorCache()
+    cache = BFLALDLTFactorCache()
     SDPX.prepare!(
         cache, BigFloatFactorRequirements(pattern.dimension, precision_bits),
     )

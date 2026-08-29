@@ -1074,22 +1074,29 @@ function SDPX.factorize!(
     A::AbstractMatrix{MF},
     matrix_epoch::Integer,
 ) where {MF<:MultiFloat}
-    size(A, 1) == size(cache.inner, 1) || throw(DimensionMismatch(
-        "matrix dimension $(size(A, 1)) does not match cache dimension $(size(cache.inner, 1))",
-    ))
-    size(A, 2) == size(cache.inner, 1) || throw(DimensionMismatch(
-        "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
-    ))
-    if cache.status === SDPX.Fresh && cache.matrix_epoch == Int(matrix_epoch)
-        return cache
-    end
+    previous = cache.status
+    previous in (SDPX.Prepared, SDPX.Fresh, SDPX.Failed) ||
+        throw(SDPX.FactorCacheStateError(:factorize, SDPX.Prepared, previous))
     cache.status = SDPX.Factoring
     try
+        epoch = Int(matrix_epoch)
+        size(A, 1) == size(cache.inner, 1) || throw(DimensionMismatch(
+            "matrix dimension $(size(A, 1)) does not match cache dimension $(size(cache.inner, 1))",
+        ))
+        size(A, 2) == size(cache.inner, 1) || throw(DimensionMismatch(
+            "matrix must be square, got $(size(A, 1))×$(size(A, 2))",
+        ))
+        all(isfinite, A) || throw(ArgumentError("MFLA LDLT matrix is non-finite"))
+        if previous === SDPX.Fresh && cache.matrix_epoch == epoch
+            cache.status = SDPX.Fresh
+            return cache
+        end
         MultiFloatLinearAlgebra.factorize!(cache.inner, A; check=true)
-        cache.matrix_epoch = Int(matrix_epoch)
+        cache.matrix_epoch = epoch
         cache.factor_epoch += 1
         cache.status = SDPX.Fresh
     catch
+        MultiFloatLinearAlgebra.invalidate!(cache.inner)
         cache.status = SDPX.Failed
         rethrow()
     end
@@ -1270,8 +1277,6 @@ end
 # FactorCache operation on an unprepared / failed cache fails closed through
 # `_require_fresh`.
 
-end
-
 function SDPX._build_symmetric_core_ldlt_cache_provider(
     ::Type{MF},
     pattern::SDPX.SymmetricCorePattern{MF},
@@ -1280,11 +1285,11 @@ function SDPX._build_symmetric_core_ldlt_cache_provider(
     # MultiFloat width is a type property; a caller-supplied precision hint
     # must not silently select a different arithmetic.  The width must be an
     # exact fixed-width MultiFloat recognized by the loaded MFLA provider.
-    is_multifloat_arithmetic(MF) || throw(ArgumentError(
+    SDPX.is_multifloat_arithmetic(MF) || throw(ArgumentError(
         "MFLA symmetric core requires a fixed-width MultiFloat, got $(MF)",
     ))
     mfla_capabilities(MF)  # fails closed if the loaded MFLA cannot serve MF
-    cache = SDPX.MFLDLTFactorCache(MF)
+    cache = MFLDLTFactorCache(MF)
     SDPX.prepare!(
         cache, SDPX.FactorRequirements(pattern.dimension, 0),
     )

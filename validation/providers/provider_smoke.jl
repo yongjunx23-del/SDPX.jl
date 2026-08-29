@@ -363,17 +363,67 @@ function _exercise_symmetric_core_ldlt(::Type{T}, precision_bits::Int) where {T<
     Theta[3, 3] = T(1.1)
     pattern = SDPX.SymmetricCorePattern{T}(Ar, [1:3], [:dense_lower])
     SDPX.refill!(pattern, Ar, Theta)
-    cache = SDPX.build_symmetric_core_ldlt_cache(
+    # Unknown memory facts fail closed before provider dispatch.
+    @test_throws ArgumentError SDPX.build_symmetric_core_ldlt_cache(
         T, pattern, precision_bits, nothing, nothing,
+    )
+    estimate = SDPX.symmetric_core_dense_bytes(T, pattern.dimension)
+    budget = estimate > typemax(Int) - 1024 ? typemax(Int) : estimate + 1024
+    cache = SDPX.build_symmetric_core_ldlt_cache(
+        T, pattern, precision_bits, budget, 0,
     )
     @test SDPX.factor_status(cache) === SDPX.Prepared
     diag = SDPX.factor_diagnostics(cache)
     @test diag.kind === :ldlt
-    # Factor the same K exactly once and verify the provider fact.
-    SDPX.factorize!(cache, SDPX.materialize_dense(pattern), 1)
+    @test diag.provider in (:multifloat_linear_algebra, :bigfloat_linear_algebra)
+    K = SDPX.materialize_dense(pattern)
+    SDPX.factorize!(cache, K, 1)
     @test SDPX.factor_status(cache) === SDPX.Fresh
     @test SDPX.factor_epoch(cache) == 1
-    @test SDPX.factor_diagnostics(cache).matrix_epoch == 1
+
+    xtrue = SDPX.alloc_zeros(T, pattern.dimension)
+    rhs = SDPX.alloc_zeros(T, pattern.dimension)
+    solution = SDPX.alloc_zeros(T, pattern.dimension)
+    residual = SDPX.alloc_zeros(T, pattern.dimension)
+    correction = SDPX.alloc_zeros(T, pattern.dimension)
+    @inbounds for i in eachindex(xtrue)
+        xtrue[i] = T(i) / T(pattern.dimension)
+    end
+    @inbounds for i in axes(K, 1)
+        value = zero(T)
+        for j in axes(K, 2)
+            value += K[i, j] * xtrue[j]
+        end
+        rhs[i] = value
+    end
+    SDPX.solve!(cache, solution, rhs)
+    @inbounds for i in axes(K, 1)
+        value = rhs[i]
+        for j in axes(K, 2)
+            value -= K[i, j] * solution[j]
+        end
+        residual[i] = value
+    end
+    @test maximum(abs, residual) <= T(4096) * sqrt(eps(one(T))) *
+          max(one(T), maximum(abs, rhs))
+    SDPX.refine_once!(cache, residual, correction)
+    @test all(isfinite, correction)
+
+    # A new numeric epoch reuses the prepared provider cache; same-epoch calls
+    # do not increment the factor epoch.
+    SDPX.factorize!(cache, K, 1)
+    @test SDPX.factor_epoch(cache) == 1
+    SDPX.factorize!(cache, K, 2)
+    @test SDPX.factor_epoch(cache) == 2
+    final_diag = SDPX.factor_diagnostics(cache)
+    @test final_diag.matrix_epoch == 2
+    @test final_diag.provider == diag.provider
+    if T === BigFloat
+        @test final_diag.precision_bits == precision_bits
+        @test all(precision(value) == precision_bits for value in solution)
+    else
+        @test eltype(solution) === T
+    end
     return (; pattern, cache)
 end
 

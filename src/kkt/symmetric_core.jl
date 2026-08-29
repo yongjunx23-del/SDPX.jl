@@ -1245,7 +1245,11 @@ compared against a memory budget without overflow.
 function symmetric_core_dense_bytes(
     ::Type{T}, dimension::Integer,
 ) where {T<:AbstractFloat}
-    d = max(Int(dimension), 0)
+    dimension < 0 && throw(ArgumentError(
+        "symmetric core dimension must be nonnegative",
+    ))
+    dimension > typemax(Int) && return typemax(Int)
+    d = Int(dimension)
     scalar_bytes = ExtendedPrecisionBLAS._element_storage_bytes(T)
     counted = saturating_sum_bytes(
         saturating_bytes(2, scalar_bytes, d, d),  # dense K + factor storage
