@@ -902,6 +902,12 @@ function SDPX.invalidate!(cache::BFLALDLTFactorCache)
     return cache
 end
 
+function SDPX.revoke_numeric!(cache::BFLALDLTFactorCache)
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Prepared
+    return cache
+end
+
 SDPX.factor_status(cache::BFLALDLTFactorCache) = cache.status
 SDPX.factor_matrix_epoch(cache::BFLALDLTFactorCache) = cache.matrix_epoch
 SDPX.factor_symbolic_epoch(cache::BFLALDLTFactorCache) = cache.symbolic_epoch

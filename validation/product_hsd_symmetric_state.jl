@@ -367,13 +367,24 @@ end
             @test maximum(abs, core_once.base.xt - old_state.base.xt; init=0.0) <= tol
             @test maximum(abs, core_once.base.yt - old_state.base.yt; init=0.0) <= tol
             @test maximum(abs, core_once.base.st - old_state.base.st; init=0.0) <= tol
+            @test abs(core_once.base.tau_t - old_state.base.tau_t) <= tol
+            @test abs(core_once.base.kappa_t - old_state.base.kappa_t) <= tol
+            @test maximum(abs, core_once.base.rPt - old_state.base.rPt; init=0.0) <= tol
+            @test maximum(abs, core_once.base.rDt - old_state.base.rDt; init=0.0) <= tol
             @test maximum(abs, core_once.h - old_state.h; init=0.0) <= tol
             @test abs(core_once.base.record.p_res - old_state.base.record.p_res) <= tol
             @test abs(core_once.base.record.d_res - old_state.base.record.d_res) <= tol
             @test abs(core_once.base.record.mu - old_state.base.record.mu) <= tol
             @test abs(core_once.base.record.mu_aff - old_state.base.record.mu_aff) <= tol
-            @test core_once.base.record.iterations == old_state.base.record.iterations
+            @test abs(core_once.base.record.complementarity - old_state.base.record.complementarity) <= tol
+            @test abs(core_once.base.record.primal_step - old_state.base.record.primal_step) <= tol
+            @test abs(core_once.base.record.dual_step - old_state.base.record.dual_step) <= tol
             @test abs(core_once.base.record.step_size - old_state.base.record.step_size) <= tol
+            @test core_once.base.record.backtracking == old_state.base.record.backtracking
+            @test core_once.base.record.matrix_epoch == old_state.base.record.matrix_epoch
+            @test core_once.base.record.factor_epoch == old_state.base.record.factor_epoch
+            @test core_once.base.record.factorizations == old_state.base.record.factorizations
+            @test core_once.base.record.iterations == old_state.base.record.iterations
             if !isempty(old_state.soc_g_error_bound)
                 @test maximum(abs, core_once.soc_g_error_bound -
                           old_state.soc_g_error_bound; init=0.0) <= tol
@@ -382,7 +393,16 @@ end
                 @test maximum(abs, core_once.soc_roundtrip_bound -
                           old_state.soc_roundtrip_bound; init=0.0) <= tol
             end
+            @test maximum(abs, core_once.certified_soc_g_error_bound -
+                      old_state.certified_soc_g_error_bound; init=0.0) <= tol
+            @test maximum(abs, core_once.certified_soc_roundtrip_bound -
+                      old_state.certified_soc_roundtrip_bound; init=0.0) <= tol
             @test core_once.soc_bounds_certified == old_state.soc_bounds_certified
+            @test SDPX.kkt_factor_count(core_once.symmetric_bordered.driver) == 0
+            if core_once.coupled !== nothing &&
+               core_once.coupled.nonsymmetric_dimension > 0
+                @test SDPX.factor_epoch(core_once.coupled.cache) == 0
+            end
         end
     end
 end

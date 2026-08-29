@@ -490,6 +490,12 @@ refactor (through public `ldlt!`), so `symbolic_count` never increments and no
 re-analysis runs.  `Fresh` is revoked so a stale solve is impossible; the
 caller must factorize again before solving.
 """
+function revoke_numeric!(cache::SparseSymbolicNumericCache{Float64})
+    cache.matrix_epoch = 0
+    cache.status = Prepared
+    return cache
+end
+
 function set_regularization!(
     cache::SparseSymbolicNumericCache{Float64}, delta::Real,
 )

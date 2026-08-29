@@ -982,20 +982,10 @@ function _core_revoke_epoch!(
     workspace.synchronized = false
     workspace.homogeneous_epoch = -1
     cache = workspace.cache
-    if cache isa SparseSymbolicNumericCache{Float64}
-        # Revoke the numeric factor while preserving the CHOLMOD symbolic
-        # object/pattern for the next same-pattern numeric refactor.
-        try
-            SDPX.set_regularization!(cache, cache.regularization)
-        catch
-            SDPX.invalidate!(cache)
-        end
-    else
-        try
-            SDPX.invalidate!(cache)
-        catch
-        end
-    end
+    # Revoke numeric validity while retaining prepared capacity and any
+    # symbolic structure. Provider-specific methods keep MFLA/BFLA workspaces
+    # Prepared and CHOLMOD's symbolic object reusable.
+    SDPX.revoke_numeric!(cache)
     return workspace
 end
 

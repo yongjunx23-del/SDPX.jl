@@ -1140,6 +1140,12 @@ function SDPX.invalidate!(cache::MFLDLTFactorCache{MF}) where {MF<:MultiFloat}
     return cache
 end
 
+function SDPX.revoke_numeric!(cache::MFLDLTFactorCache{MF}) where {MF<:MultiFloat}
+    cache.matrix_epoch = -1
+    cache.status = SDPX.Prepared
+    return cache
+end
+
 SDPX.factor_status(cache::MFLDLTFactorCache) = cache.status
 SDPX.factor_matrix_epoch(cache::MFLDLTFactorCache) = cache.matrix_epoch
 SDPX.factor_symbolic_epoch(cache::MFLDLTFactorCache) = cache.symbolic_epoch

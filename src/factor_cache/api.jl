@@ -112,6 +112,17 @@ function invalidate!(cache::AbstractFactorCache)
 end
 
 """
+    revoke_numeric!(cache)
+
+Revoke only the currently usable numeric factor while retaining prepared
+capacity/symbolic ownership for the next same-structure factorization.
+Concrete providers must leave solves illegal and the cache ready to refactor.
+"""
+function revoke_numeric!(cache::AbstractFactorCache)
+    return invalidate!(cache)
+end
+
+"""
     factor_status(cache) -> FactorCacheState
 
 Return the current `FactorCacheState` (`Unprepared`, `Prepared`, `Factoring`,
