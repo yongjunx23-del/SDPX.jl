@@ -755,6 +755,7 @@ function _exercise_c6a_multi_block(::Type{T}, precision_bits::Int) where {T}
         system, V, 1, precision_bits, estimate + 1024, 0, 0.0;
         symbolic_epoch=0,
     )
+    @test workspace.pattern.block_ranges == [1:2, 3:5]
     # Materialized Theta must be exactly block-diagonal and owned.
     theta = SDPX.symmetric_core_theta(system.cone)
     @test theta[1:2, 1:2] == H[1:2, 1:2]

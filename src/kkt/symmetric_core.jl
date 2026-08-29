@@ -1392,14 +1392,18 @@ function _validate_core_preconditions(
     nr >= 0 || throw(ArgumentError(
         "rank-reduction basis column count must be nonnegative",
     ))
-    # V'V = I to roundoff.
-    VV = Matrix{T}(V') * Matrix{T}(V)
+    # V'V = I to roundoff, evaluated with scalar dots so preflight never
+    # allocates dense copies or an nr×nr Gram matrix.
     isometry_tol = T(64) * eps(one(T))
     @inbounds for j in 1:nr, i in 1:nr
+        value = zero(T)
+        for k in 1:n
+            value += V[k, i] * V[k, j]
+        end
         expected = i == j ? one(T) : zero(T)
-        abs(VV[i, j] - expected) <= isometry_tol || throw(ArgumentError(
+        abs(value - expected) <= isometry_tol || throw(ArgumentError(
             "symmetric core requires V'V = I " *
-            "(deviation $(abs(VV[i, j] - expected)))",
+            "(deviation $(abs(value - expected)))",
         ))
     end
     range_work = alloc_zeros(T, n)
@@ -1432,11 +1436,9 @@ Validates the documented rank/range preconditions, forms `Ar = A*V`, and
 freezes the block-diagonal lower-triangle pattern from the cone block ranges.
 The pattern is then refilled with the exact `Theta` blocks.
 """
-function symmetric_core_pattern_from_system(
-    system::NewtonSystem{T},
-    V::AbstractMatrix{T},
+function _symmetric_core_pattern_from_validated(
+    system::NewtonSystem{T}, V::AbstractMatrix{T},
 ) where {T<:AbstractFloat}
-    _validate_core_preconditions(system, V)
     m, n = size(system.A)
     nr = size(V, 2)
     size(V, 1) == n || throw(DimensionMismatch(
@@ -1450,6 +1452,13 @@ function symmetric_core_pattern_from_system(
     )
     refill!(pattern, ar, theta)
     return pattern
+end
+
+function symmetric_core_pattern_from_system(
+    system::NewtonSystem{T}, V::AbstractMatrix{T},
+) where {T<:AbstractFloat}
+    _validate_core_preconditions(system, V)
+    return _symmetric_core_pattern_from_validated(system, V)
 end
 
 """Build a synchronized symmetric-core workspace for a frozen system + basis.
@@ -1469,12 +1478,9 @@ function build_symmetric_core_workspace(
     regularization::Real;
     symbolic_epoch::Integer=0,
 ) where {T<:AbstractFloat}
-    # Rank/range preconditions are validated before any Theta, A*V, pattern,
-    # or dense allocation, so an ineligible operator cannot be materialized.
-    _validate_core_preconditions(system, V)
     if T !== Float64
-        # Dense memory eligibility and provider availability/precision must be
-        # proven before any dense K allocation or provider construction.
+        # Provider and dimension-only memory eligibility are checked before
+        # even the bounded rank/isometry scratch is allocated.
         symmetric_core_provider_available(T, precision_bits)
         eligibility = symmetric_core_dense_eligibility(
             T, size(V, 2) + length(system.b), memory_limit_bytes,
@@ -1484,7 +1490,9 @@ function build_symmetric_core_workspace(
             "symmetric core dense factor ineligible: $(eligibility.reason)",
         ))
     end
-    pattern = symmetric_core_pattern_from_system(system, V)
+    # Rank/range preconditions precede Theta, A*V, pattern, and factor work.
+    _validate_core_preconditions(system, V)
+    pattern = _symmetric_core_pattern_from_validated(system, V)
     cache = if T === Float64
         isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
             "symmetric core Float64 regularization must be finite and nonnegative",
