@@ -327,8 +327,137 @@ end
             @test maximum(abs, core_once.base.y - snap.y; init=0.0) <= tol
             @test abs(core_once.base.tau - snap.tau) <= tol
             @test abs(core_once.base.kappa - snap.kappa) <= tol
+
+            # Prepared-core route is authoritative: the legacy bordered driver
+            # and any coupled cache must never factor; the core is the only
+            # factor/receipt source.
+            @test SDPX.kkt_factor_count(core_state.symmetric_bordered.driver) == 0
+            if core_state.coupled !== nothing &&
+               core_state.coupled.nonsymmetric_dimension > 0
+                @test SDPX.factor_epoch(core_state.coupled.cache) == 0
+            end
+            @test SDPX.product_hsd_factor_count(core_state) ==
+                  core.factor_epoch
+
+            # Direction parity: the first prepared-core step's predictor and
+            # corrector must match the legacy bordered route to roundoff.
+            old_dx_a = copy(old_state.base.dx_a)
+            old_dy_a = copy(old_state.base.dy_a)
+            old_ds_a = copy(old_state.base.ds_a)
+            old_dtau_a = old_state.base.dtau_a
+            old_dkappa_a = old_state.base.dkappa_a
+            old_dx = copy(old_state.base.dx)
+            old_dy = copy(old_state.base.dy)
+            old_ds = copy(old_state.base.ds)
+            old_dtau = old_state.base.dtau
+            old_dkappa = old_state.base.dkappa
+            @test maximum(abs, core_once.base.dx_a - old_dx_a; init=0.0) <= tol
+            @test maximum(abs, core_once.base.dy_a - old_dy_a; init=0.0) <= tol
+            @test maximum(abs, core_once.base.ds_a - old_ds_a; init=0.0) <= tol
+            @test abs(core_once.base.dtau_a - old_dtau_a) <= tol
+            @test abs(core_once.base.dkappa_a - old_dkappa_a) <= tol
+            @test maximum(abs, core_once.base.dx - old_dx; init=0.0) <= tol
+            @test maximum(abs, core_once.base.dy - old_dy; init=0.0) <= tol
+            @test maximum(abs, core_once.base.ds - old_ds; init=0.0) <= tol
+            @test abs(core_once.base.dtau - old_dtau) <= tol
+            @test abs(core_once.base.dkappa - old_dkappa) <= tol
+            # Scatter scratch (A*dx / Theta*dy) and the trial buffers.
+            @test maximum(abs, core_once.base.ax - old_state.base.ax; init=0.0) <= tol
+            @test maximum(abs, core_once.base.e - old_state.base.e; init=0.0) <= tol
+            @test maximum(abs, core_once.base.xt - old_state.base.xt; init=0.0) <= tol
+            @test maximum(abs, core_once.base.yt - old_state.base.yt; init=0.0) <= tol
+            @test maximum(abs, core_once.base.st - old_state.base.st; init=0.0) <= tol
+            @test maximum(abs, core_once.h - old_state.h; init=0.0) <= tol
+            @test abs(core_once.base.record.p_res - old_state.base.record.p_res) <= tol
+            @test abs(core_once.base.record.d_res - old_state.base.record.d_res) <= tol
+            @test abs(core_once.base.record.mu - old_state.base.record.mu) <= tol
+            @test abs(core_once.base.record.mu_aff - old_state.base.record.mu_aff) <= tol
+            @test core_once.base.record.iterations == old_state.base.record.iterations
+            @test abs(core_once.base.record.step_size - old_state.base.record.step_size) <= tol
+            if !isempty(old_state.soc_g_error_bound)
+                @test maximum(abs, core_once.soc_g_error_bound -
+                          old_state.soc_g_error_bound; init=0.0) <= tol
+            end
+            if !isempty(old_state.soc_roundtrip_bound)
+                @test maximum(abs, core_once.soc_roundtrip_bound -
+                          old_state.soc_roundtrip_bound; init=0.0) <= tol
+            end
+            @test core_once.soc_bounds_certified == old_state.soc_bounds_certified
         end
     end
+end
+
+@testset "C7.2a prepared core route authority" begin
+    canonical = _state_canonical(:lp_afiro_style)
+    m = SDPX.hsd_num_slack(SDPX.HSDState(canonical))
+    blocks = Int[
+        block.length for block in SDPX.layout_blocks(canonical.cone_layout)
+    ]
+    budget = _state_budget(Float64, size(canonical.A, 2) + m, blocks)
+
+    # prepare_symmetric_core is restricted to :bordered.
+    @test_throws ArgumentError SDPX.ProductConeHSDState(
+        canonical; kkt_route=:expanded, prepare_symmetric_core=true,
+        symmetric_core_memory_limit=budget, symmetric_core_current_rss=0,
+    )
+    @test_throws ArgumentError SDPX.ProductConeHSDState(
+        canonical; kkt_route=:sparse_schur, prepare_symmetric_core=true,
+        symmetric_core_memory_limit=budget, symmetric_core_current_rss=0,
+    )
+
+    # Epoch transaction: a failed refill/factor leaves no receipt, no Fresh
+    # solve and no stale homogeneous seam.
+    core_state = SDPX.ProductConeHSDState(
+        canonical; kkt_route=:bordered, prepare_symmetric_core=true,
+        symmetric_core_memory_limit=budget, symmetric_core_current_rss=0,
+    )
+    SDPX.product_hsd_cold_start!(core_state)
+    core = SDPX.product_hsd_symmetric_core(core_state)
+    system = SDPX._product_hsd_symmetric_core_system(
+        core_state, -core_state.base.tau * core_state.base.kappa,
+    )
+    system2 = SDPX.NewtonSystem(
+        system.A, system.b, system.c, system.cone,
+        system.tau, system.kappa, system.rhs,
+    )
+    # Successful epoch first.
+    SDPX.factor_symmetric_core_epoch!(core, system2, 1)
+    @test core.factor_receipt !== nothing
+    @test core.synchronized
+    @test core.homogeneous_epoch == core.factor_epoch
+    # Failed refill: asymmetric Theta inside a Product linearization.
+    # Build a full dense Theta for the asymmetric mutation test.  The block
+    # cone is only meaningful with a matching block partition, so we
+    # re-materialize the accepted operator and break symmetry of its top-left
+    # entry before wrapping it in a dense Product linearization.
+    bad_theta = zeros(Float64, length(system2.b), length(system2.b))
+    for (index, rows) in enumerate(system2.cone.block_ranges)
+        bad_theta[rows, rows] = system2.cone.operators[index]
+    end
+    bad_theta[1, 2] += 1.0
+    bad_lin = SDPX.ProductConeLinearization{Float64}(
+        bad_theta, copy(system2.rhs.cone_corrector), system2.cone.block_ranges,
+    )
+    bad_system = SDPX.NewtonSystem(
+        system2.A, system2.b, system2.c, bad_lin,
+        system2.tau, system2.kappa, system2.rhs,
+    )
+    @test_throws ArgumentError SDPX.factor_symmetric_core_epoch!(
+        core, bad_system, 2,
+    )
+    @test core.factor_receipt === nothing
+    @test !core.synchronized
+    @test core.homogeneous_epoch == -1
+    @test SDPX.product_hsd_factor_receipt(core_state) === nothing
+    @test SDPX.product_hsd_receipt_build_count(core_state) == 1
+    # The revoked workspace rejects a solve.
+    @test_throws Exception SDPX.solve_core_direction!(core, system2)
+    # A valid same-pattern epoch recovers transactionally.
+    SDPX.factor_symmetric_core_epoch!(core, system2, 2)
+    @test core.factor_receipt !== nothing
+    @test core.synchronized
+    @test core.homogeneous_epoch == core.factor_epoch
+    @test SDPX.product_hsd_receipt_build_count(core_state) == 2
 end
 
 end

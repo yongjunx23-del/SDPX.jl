@@ -971,6 +971,34 @@ homogeneous core once.  MultiFloat/BigFloat use the unregularized pivoted-LDL
 cache path unchanged.  Predictor→corrector RHS changes within one epoch are
 handled by `solve_core_direction!` without this seam.
 """
+function _core_revoke_epoch!(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T<:AbstractFloat}
+    # Transaction start: before any pattern/operator mutation or numeric
+    # factor, revoke every acceptance/ownership artifact of the previous
+    # epoch.  A failure anywhere in the epoch leaves no usable receipt, no
+    # Fresh solve, and no stale homogeneous solution.
+    workspace.factor_receipt = nothing
+    workspace.synchronized = false
+    workspace.homogeneous_epoch = -1
+    cache = workspace.cache
+    if cache isa SparseSymbolicNumericCache{Float64}
+        # Revoke the numeric factor while preserving the CHOLMOD symbolic
+        # object/pattern for the next same-pattern numeric refactor.
+        try
+            SDPX.set_regularization!(cache, cache.regularization)
+        catch
+            SDPX.invalidate!(cache)
+        end
+    else
+        try
+            SDPX.invalidate!(cache)
+        catch
+        end
+    end
+    return workspace
+end
+
 function factor_symmetric_core_epoch!(
     workspace::SymmetricCoreWorkspace{T},
     system::NewtonSystem{T},
@@ -978,28 +1006,38 @@ function factor_symmetric_core_epoch!(
 ) where {T<:AbstractFloat}
     cache = workspace.cache
     _core_validate_static_identity(workspace, system)
-    _core_refill_from_system!(workspace, system)
-    epoch = Int(matrix_epoch)
-    if T === Float64
-        # Scale δ from the *current* refilled original-K infinity norm.  The
-        # prior accepted epoch's scale is deliberately not reused: the Theta
-        # numeric values may change arbitrarily between epochs.
-        current_scale = _core_current_original_scale(workspace)
-        delta = T(64) * eps(one(T)) * current_scale
-        isfinite(delta) && delta > zero(T) || throw(ArgumentError(
-            "symmetric core regularization scale is not usable",
-        ))
-        SDPX.set_regularization!(cache, delta)
-        SDPX.factorize!(
-            cache, symmetric_core_lower_sparse(workspace.pattern), epoch,
-        )
-    else
-        SDPX.factorize!(
-            cache, materialize_dense(workspace.pattern), epoch,
-        )
+    _core_revoke_epoch!(workspace)
+    try
+        _core_refill_from_system!(workspace, system)
+        epoch = Int(matrix_epoch)
+        if T === Float64
+            # Scale δ from the *current* refilled original-K infinity norm.
+            # The prior accepted epoch's scale is deliberately not reused:
+            # the Theta numeric values may change arbitrarily between epochs.
+            current_scale = _core_current_original_scale(workspace)
+            delta = T(64) * eps(one(T)) * current_scale
+            isfinite(delta) && delta > zero(T) || throw(ArgumentError(
+                "symmetric core regularization scale is not usable",
+            ))
+            SDPX.set_regularization!(cache, delta)
+            SDPX.factorize!(
+                cache, symmetric_core_lower_sparse(workspace.pattern), epoch,
+            )
+        else
+            SDPX.factorize!(
+                cache, materialize_dense(workspace.pattern), epoch,
+            )
+        end
+        sync_core_factor_epoch!(workspace; system=system)
+        solve_core_homogeneous!(workspace, system)
+    catch
+        # Fail closed: the epoch never completes, so no receipt, no Fresh
+        # solve and no homogeneous seam may survive.
+        workspace.factor_receipt = nothing
+        workspace.synchronized = false
+        workspace.homogeneous_epoch = -1
+        rethrow()
     end
-    sync_core_factor_epoch!(workspace; system=system)
-    solve_core_homogeneous!(workspace, system)
     return workspace
 end
 

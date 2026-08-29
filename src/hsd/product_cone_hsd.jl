@@ -213,6 +213,13 @@ function _product_cone_hsd_state(
     kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
         "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
     ))
+    if prepare_symmetric_core && kkt_route !== :bordered
+        throw(ArgumentError(
+            "prepare_symmetric_core requires kkt_route === :bordered " *
+            "(prepared core is the authoritative bordered executor); " *
+            "got $(kkt_route)",
+        ))
+    end
     symmetric_core = if prepare_symmetric_core
         _prepare_product_hsd_symmetric_core(
             base;

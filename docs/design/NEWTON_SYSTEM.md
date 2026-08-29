@@ -496,3 +496,22 @@ factors, never solves, and no direction dispatch reads the field; the old
 bordered/expanded/sparse routes remain authoritative.
 `prepare_symmetric_core=false` (default) stores `nothing` and preserves all
 previous behavior.
+
+## Prepared-core route authority (C7.2a)
+
+`ProductConeHSDState(; prepare_symmetric_core=true)` is accepted **only** with
+`kkt_route === :bordered`.  In that configuration the prepared symmetric
+augmented core is the **authoritative** bordered executor: `product_hsd_step!`
+runs the core direction pipeline (one factor, one homogeneous solve,
+predictor + corrector variable solves per epoch) and the legacy full-border
+LU driver is never factored.  `product_hsd_factor_count`,
+`product_hsd_receipt_build_count` and `product_hsd_factor_receipt` report the
+core facts when a core is present.
+
+`factor_symmetric_core_epoch!` is transactional: before any pattern/operator
+mutation it revokes the previous receipt, marks the workspace unsynchronized,
+clears the homogeneous seam, and invalidates the usable numeric factor state
+while preserving the CHOLMOD symbolic object/pattern.  Any refill, scale,
+factor or synchronization failure therefore leaves no receipt, no Fresh
+solve and no stale homogeneous solution; a later valid same-pattern epoch
+recovers from `Prepared` with a fresh numeric factor and receipt.
