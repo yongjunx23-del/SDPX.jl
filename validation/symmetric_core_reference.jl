@@ -28,6 +28,39 @@ using LinearAlgebra
 using SparseArrays
 using SDPX
 
+# Small non-CHOLMOD cache used only for the bounded BigFloat ownership seam.
+# It is deliberately direct and provider-neutral: the production CHOLMOD
+# cache remains Float64-only, while this test proves that the workspace's
+# mutable MPFR buffers never alias one another or the returned snapshots.
+mutable struct _BigFloatCoreCache <: SDPX.AbstractFactorCache{BigFloat}
+    K::Matrix{BigFloat}
+    status::SDPX.FactorCacheState
+    matrix_epoch::Int
+    factor_epoch::Int
+    solve_count::Int
+    refine_count::Int
+end
+
+SDPX.factor_status(cache::_BigFloatCoreCache) = cache.status
+SDPX.factor_matrix_epoch(cache::_BigFloatCoreCache) = cache.matrix_epoch
+SDPX.factor_epoch(cache::_BigFloatCoreCache) = cache.factor_epoch
+function SDPX.solve!(
+    cache::_BigFloatCoreCache,
+    destination::AbstractVector{BigFloat}, rhs::AbstractVector{BigFloat},
+)
+    SDPX.copy_owned!(destination, cache.K \ rhs)
+    cache.solve_count += 1
+    return destination
+end
+function SDPX.refine_once!(
+    cache::_BigFloatCoreCache,
+    residual::AbstractVector{BigFloat}, correction::AbstractVector{BigFloat},
+)
+    SDPX.copy_owned!(correction, cache.K \ residual)
+    cache.refine_count += 1
+    return correction
+end
+
 struct _Fixture
     V::Matrix{Float64}       # n x nr rank-reduction basis, V'V = I
     A::Matrix{Float64}       # m x n original data
@@ -72,7 +105,10 @@ function _fixture(family::Symbol)
         # rank(Ar) = nr = 2.
         A = [1.0 1.0 1.0; 1.0 -1.0 -1.0; 0.0 1.0 1.0]
         b = [0.6, -0.4, 0.3]
-        c = [0.5, -0.25, 0.75]
+        # Solvable rank-reduced branch requires c in range(V); a significant
+        # nullspace component is handled by the dual-infeasibility candidate
+        # before the Newton core is constructed.
+        c = [0.5, 0.25, 0.25]
         Theta = [2.0 0.1 0.0; 0.1 1.5 0.0; 0.0 0.0 1.2]
         tau, kappa = 1.3, 0.7
         xr0 = [0.4, -0.25]
@@ -883,6 +919,18 @@ function _c4_bundle(family::Symbol; delta::Float64=1e-6)
     return (; fx, system, pattern, cache, ws)
 end
 
+"""Copy only the RHS fields into a fresh NewtonSystem with frozen static data."""
+function _c4_rhs_system(bundle, rhs)
+    old = bundle.system
+    copied_rhs = SDPX.HSDNewtonRHS{Float64,Vector{Float64},Vector{Float64},Vector{Float64}}(
+        copy(rhs.primal_affine), copy(rhs.dual_affine), rhs.homogeneous_gap,
+        copy(rhs.cone_corrector), rhs.tau_kappa,
+    )
+    return SDPX.NewtonSystem(
+        old.A, old.b, old.c, old.cone, old.tau, old.kappa, copied_rhs,
+    )
+end
+
 @testset "C4 symmetric core direction recovery with refinement" begin
     for family in (:identity, :rotated, :rank_reduced)
         @testset "$family" begin
@@ -895,10 +943,17 @@ end
             # Homogeneous solve (once per factor epoch).
             SDPX.solve_core_homogeneous!(ws)
             @test ws.homogeneous_solves == 1
+            homogeneous_cache_solves = SDPX.factor_diagnostics(bundle.cache).solve_count
+            SDPX.solve_core_homogeneous!(ws)  # idempotent within one epoch
+            @test ws.homogeneous_solves == 1
+            @test SDPX.factor_diagnostics(bundle.cache).solve_count ==
+                  homogeneous_cache_solves
 
             # Predictor direction; residual must pass the frozen
             # five-equation gate at the scale-aware bound.
-            dir1, res1 = SDPX.solve_core_direction!(ws)
+            dir1, res1 = SDPX.solve_core_direction!(ws, bundle.system)
+            dir1_dx = copy(dir1.dx)
+            dir1_primal = copy(res1.primal_affine)
             maxres1 = maximum(abs, vcat(
                 res1.primal_affine, res1.dual_affine,
                 [res1.homogeneous_gap], res1.cone_complementarity,
@@ -906,8 +961,21 @@ end
             ))
             @test maxres1 <= tol
 
-            # Corrector direction (sequential, same factor).
-            dir2, res2 = SDPX.solve_core_direction!(ws)
+            # Corrector direction: only cone/scalar RHS fields change, while
+            # A,b,c,Theta,tau,kappa and the factor remain frozen.
+            corrected_rhs = (
+                primal_affine=copy(bundle.system.rhs.primal_affine),
+                dual_affine=copy(bundle.system.rhs.dual_affine),
+                homogeneous_gap=bundle.system.rhs.homogeneous_gap,
+                cone_corrector=bundle.system.rhs.cone_corrector .+
+                                [0.13, -0.07, 0.11],
+                tau_kappa=bundle.system.rhs.tau_kappa + 0.19,
+            )
+            corrector_system = _c4_rhs_system(bundle, corrected_rhs)
+            @test SDPX._core_operator_signature(
+                bundle.pattern, ws.V, corrector_system,
+            ) == ws.operator_signature
+            dir2, res2 = SDPX.solve_core_direction!(ws, corrector_system)
             maxres2 = maximum(abs, vcat(
                 res2.primal_affine, res2.dual_affine,
                 [res2.homogeneous_gap], res2.cone_complementarity,
@@ -922,6 +990,16 @@ end
             @test ws.homogeneous_solves == 1
             @test ws.variable_solves == 2
             @test ws.directions == 2
+            @test SDPX.factor_diagnostics(bundle.cache).solve_count == 3
+            @test SDPX.factor_diagnostics(bundle.cache).refine_count >= 1
+
+            # Results are independent snapshots, not live workspace views.
+            @test dir1.dx !== dir2.dx
+            @test dir1.dy !== dir2.dy
+            @test dir1.ds !== dir2.ds
+            @test res1.primal_affine !== res2.primal_affine
+            @test dir1.dx == dir1_dx
+            @test res1.primal_affine == dir1_primal
 
             # Recovered directions agree with the direct five-equation
             # solves at the scale-aware bound (after refinement).
@@ -932,7 +1010,18 @@ end
                 ref = _direct_full(fx)
             end
             _compare_directions(dir1, ref, tol)
-            _compare_directions(dir2, ref, tol)
+            if family === :rank_reduced
+                ref2 = _direct_reduced(_Fixture(
+                    fx.V, fx.A, fx.b, fx.c, fx.Theta, fx.tau, fx.kappa,
+                    corrected_rhs, fx.direction,
+                ))
+            else
+                ref2 = _direct_full(_Fixture(
+                    fx.V, fx.A, fx.b, fx.c, fx.Theta, fx.tau, fx.kappa,
+                    corrected_rhs, fx.direction,
+                ))
+            end
+            _compare_directions(dir2, ref2, tol)
         end
     end
 
@@ -965,4 +1054,117 @@ end
                   max(1.0, ws3.system.kappa, ws3.system.tau)) /
                 (ws3.system.tau * cr[1])
     @test_throws ArgumentError SDPX.solve_core_direction!(ws3)
+end
+
+@testset "C4 epoch, operator identity, and original-core guards" begin
+    bundle = _c4_bundle(:identity)
+    ws = bundle.ws
+    @test ws.matrix_epoch == SDPX.factor_matrix_epoch(bundle.cache)
+    @test ws.factor_epoch == SDPX.factor_epoch(bundle.cache)
+    @test ws.pattern_signature == SDPX.symmetric_core_signature(bundle.pattern)
+    @test ws.homogeneous_epoch == -1
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws, bundle.system)
+
+    # The exact symmetric infinity norm counts each stored off-diagonal entry
+    # in both affected rows, unlike the old max-entry scale.
+    expected_scale = max(
+        1.0, opnorm(SDPX.materialize_dense(bundle.pattern), Inf),
+    )
+    @test ws.original_scale == expected_scale
+
+    SDPX.solve_core_homogeneous!(ws)
+    @test ws.homogeneous_epoch == ws.factor_epoch
+    @test_throws SDPX.FactorCacheStateError begin
+        SDPX.invalidate!(bundle.cache)
+        SDPX.solve_core_homogeneous!(ws)
+    end
+
+    # A numeric refill without a matching new factor is stale even though the
+    # structural pattern signature is unchanged.
+    bundle2 = _c4_bundle(:identity)
+    SDPX.solve_core_homogeneous!(bundle2.ws)
+    old_operator_signature = bundle2.ws.operator_signature
+    Ar2 = sparse(bundle2.system.A * bundle2.ws.V)
+    Ar2.nzval .*= 1.25
+    Theta2 = 1.1 .* bundle2.system.cone.operator
+    SDPX.refill!(bundle2.pattern, Ar2, Theta2)
+    @test SDPX.symmetric_core_signature(bundle2.pattern) ==
+          bundle2.ws.pattern_signature
+    @test SDPX._core_operator_signature(
+        bundle2.pattern, bundle2.ws.V, bundle2.system,
+    ) != old_operator_signature
+    @test_throws ArgumentError SDPX.solve_core_direction!(bundle2.ws, bundle2.system)
+
+    # A refactor is also stale until synchronized, and a changed operator
+    # cannot be attached to the old NewtonSystem/workspace.
+    bundle3 = _c4_bundle(:identity)
+    SDPX.solve_core_homogeneous!(bundle3.ws)
+    Ar3 = sparse(bundle3.system.A * bundle3.ws.V)
+    Ar3.nzval .*= 1.25
+    Theta3 = 1.1 .* bundle3.system.cone.operator
+    SDPX.refill!(bundle3.pattern, Ar3, Theta3)
+    K3 = SDPX.symmetric_core_lower_sparse(bundle3.pattern)
+    SDPX.factorize!(bundle3.cache, K3, 2)
+    @test SDPX.factor_epoch(bundle3.cache) == bundle3.ws.factor_epoch + 1
+    @test_throws ArgumentError SDPX.solve_core_direction!(bundle3.ws, bundle3.system)
+    @test_throws ArgumentError SDPX.sync_core_factor_epoch!(bundle3.ws)
+
+    # Zero residual with zero denominator scale is an exact zero, not Inf/NaN.
+    bundle4 = _c4_bundle(:identity)
+    ws4 = bundle4.ws
+    ws4.original_scale = 0.0
+    z = zeros(7)
+    @test SDPX._core_normalized_residual(ws4, z, z, z) == 0.0
+    @test isinf(SDPX._core_normalized_residual(ws4, z, z, [1.0, zeros(6)...]))
+end
+
+function _bigfloat_copy_array(source)
+    destination = SDPX.alloc_zeros(BigFloat, size(source)...)
+    for index in eachindex(source)
+        destination[index] = BigFloat(source[index])
+    end
+    return destination
+end
+
+@testset "C4 bounded BigFloat workspace ownership" begin
+    fx = _fixture(:identity)
+    A = _bigfloat_copy_array(fx.A)
+    V = _bigfloat_copy_array(fx.V)
+    b = _bigfloat_copy_array(fx.b)
+    c = _bigfloat_copy_array(fx.c)
+    Theta = _bigfloat_copy_array(fx.Theta)
+    primal = _bigfloat_copy_array(fx.rhs.primal_affine)
+    dual = _bigfloat_copy_array(fx.rhs.dual_affine)
+    gap = BigFloat(fx.rhs.homogeneous_gap)
+    cone_rhs = _bigfloat_copy_array(fx.rhs.cone_corrector)
+    scalar = BigFloat(fx.rhs.tau_kappa)
+    lin = SDPX.ProductConeLinearization{BigFloat}(
+        Theta, cone_rhs, [1:3],
+    )
+    rhs = SDPX.HSDNewtonRHS{BigFloat,Vector{BigFloat},Vector{BigFloat},Vector{BigFloat}}(
+        primal, dual, gap, cone_rhs, scalar,
+    )
+    system = SDPX.NewtonSystem(
+        A, b, c, lin, BigFloat(fx.tau), BigFloat(fx.kappa), rhs,
+    )
+    Ar = sparse(A * V)
+    pattern = SDPX.SymmetricCorePattern{BigFloat}(Ar, [1:3], [:dense_lower])
+    SDPX.refill!(pattern, Ar, Theta)
+    K = SDPX.materialize_dense(pattern)
+    cache = _BigFloatCoreCache(K, SDPX.Fresh, 4, 9, 0, 0)
+    ws = SDPX.SymmetricCoreWorkspace(pattern, cache, V, system)
+    SDPX.sync_core_factor_epoch!(ws)
+    @test ws.original_nzval[1] !== pattern.nzval[1]
+    @test all(i == j || ws.original_nzval[i] !== ws.original_nzval[j]
+              for i in eachindex(ws.original_nzval), j in eachindex(ws.original_nzval))
+    SDPX.solve_core_homogeneous!(ws)
+    direction, residual = SDPX.solve_core_direction!(ws, system)
+    @test direction.dx !== ws.dx
+    @test residual.primal_affine !== ws.residual.primal_affine
+    @test all(i == j || ws.rhs_core[i] !== ws.rhs_core[j]
+              for i in eachindex(ws.rhs_core), j in eachindex(ws.rhs_core))
+    @test all(i == j || ws.sol_core[i] !== ws.sol_core[j]
+              for i in eachindex(ws.sol_core), j in eachindex(ws.sol_core))
+    @test cache.solve_count == 2
+    @test cache.refine_count >= 0
 end

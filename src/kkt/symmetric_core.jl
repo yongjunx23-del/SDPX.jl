@@ -257,6 +257,20 @@ symmetric_core_colptr(pattern::SymmetricCorePattern) = pattern.colptr
 """Frozen lower-triangle CSC rowval."""
 symmetric_core_rowval(pattern::SymmetricCorePattern) = pattern.rowval
 
+# `BigFloat` is mutable. Assignment of one scalar into another array slot
+# aliases the MPFR object, so values copied into setup/workspace storage need
+# owned destination objects. The generic branch remains a plain store for
+# bitstypes and other immutable arithmetic types.
+@inline _core_owned_value(value::BigFloat) = MA.mutable_copy(value)
+@inline _core_owned_value(value) = value
+
+@inline function _core_store_owned!(
+    destination::AbstractArray{T}, index::Int, value,
+) where {T}
+    destination[index] = _core_owned_value(value)
+    return destination
+end
+
 """Validate the numeric `Ar`/`Theta` against the frozen pattern."""
 function validate_symmetric_core(
     pattern::SymmetricCorePattern{T},
@@ -327,13 +341,14 @@ function refill!(
     validate_symmetric_core(pattern, Ar, Theta)
     nzval = pattern.nzval
     @inbounds for j in 1:pattern.nr
-        nzval[pattern.x_diag_slots[j]] = zero(T)
+        index = pattern.x_diag_slots[j]
+        zero_owned!(view(nzval, index:index))
     end
     slot_index = 0
     @inbounds for j in 1:pattern.nr
         for pointer in nzrange(Ar, j)
             slot_index += 1
-            nzval[pattern.ar_slots[slot_index]] = Ar.nzval[pointer]
+            _core_store_owned!(nzval, pattern.ar_slots[slot_index], Ar.nzval[pointer])
         end
     end
     slot_index = 0
@@ -342,7 +357,9 @@ function refill!(
         for column in first(rows):last_row
             for row in column:last_row
                 slot_index += 1
-                nzval[pattern.theta_slots[slot_index]] = -Theta[row, column]
+                _core_store_owned!(
+                    nzval, pattern.theta_slots[slot_index], -Theta[row, column],
+                )
             end
         end
     end
@@ -365,12 +382,12 @@ function materialize_dense(pattern::SymmetricCorePattern{T}) where {T<:AbstractF
     @inbounds for j in 1:d
         for pointer in colptr[j]:(colptr[j + 1] - 1)
             row = rowval[pointer]
-            K[row, j] = nzval[pointer]
+            K[row, j] = _core_owned_value(nzval[pointer])
         end
     end
     @inbounds for j in 1:d
         for row in (j + 1):d
-            K[j, row] = K[row, j]
+            K[j, row] = _core_owned_value(K[row, j])
         end
     end
     return K
@@ -459,14 +476,119 @@ mutable struct SymmetricCoreWorkspace{
     ds::Vector{T}
     dkappa::T
     residual::NewtonResidual{T}
+    original_nzval::Vector{T}  # independent snapshot of the unregularized K
+    row_sums::Vector{T}        # scratch for the exact symmetric row-sum norm
+    pattern_signature::UInt64  # frozen structural Ar/block signature
+    structure_signature::UInt64 # full frozen CSC structure signature
+    operator_signature::UInt64 # static numeric operator signature (no RHS)
+    cache_signature::UInt64    # provider symbolic/factor signature, if exposed
+    matrix_epoch::Int
     factor_epoch::Int
+    homogeneous_epoch::Int
+    synchronized::Bool
     homogeneous_solves::Int
     variable_solves::Int
     directions::Int
     refinements::Int
     denominator::T
-    original_scale::T   # max(1, ‖K_original‖_∞) fixed at construction
+    original_scale::T   # max(1, ‖K_original‖_∞) fixed at synchronization
 end
+
+function _core_newton_residual(
+    ::Type{T}, m::Int, n::Int,
+) where {T<:AbstractFloat}
+    return NewtonResidual{T}(
+        alloc_zeros(T, m), alloc_zeros(T, n), zero(T), alloc_zeros(T, m),
+        zero(T), alloc_zeros(T, m),
+    )
+end
+
+@inline function _core_mix_uint(signature::UInt64, value::UInt64)
+    return (signature ⊻ value) * UInt64(0x100000001b3)
+end
+
+function _core_mix_values(
+    signature::UInt64, values::AbstractArray,
+)
+    signature = _core_mix_uint(signature, UInt64(ndims(values)))
+    for axis in axes(values)
+        signature = _core_mix_uint(signature, UInt64(length(axis)))
+    end
+    for value in values
+        signature = _core_mix_uint(signature, UInt64(hash(value)))
+    end
+    return signature
+end
+
+function _core_mix_ranges(
+    signature::UInt64, ranges::AbstractVector{<:UnitRange{Int}},
+)
+    signature = _core_mix_uint(signature, UInt64(length(ranges)))
+    for rows in ranges
+        signature = _core_mix_uint(signature, UInt64(first(rows)))
+        signature = _core_mix_uint(signature, UInt64(last(rows)))
+    end
+    return signature
+end
+
+"""Include every mutable frozen CSC structure field, not only its public hash."""
+function _core_structure_signature(pattern::SymmetricCorePattern)
+    signature = UInt64(0xcbf29ce484222325)
+    signature = _core_mix_uint(signature, pattern.signature)
+    signature = _core_mix_values(signature, pattern.ar_colptr)
+    signature = _core_mix_values(signature, pattern.ar_rowval)
+    signature = _core_mix_values(signature, pattern.colptr)
+    signature = _core_mix_values(signature, pattern.rowval)
+    signature = _core_mix_ranges(signature, pattern.block_ranges)
+    for shape in pattern.block_shapes
+        signature = _core_mix_uint(signature, UInt64(hash(shape)))
+    end
+    return signature
+end
+
+function _core_mix_cone_signature(
+    signature::UInt64, cone::AbstractConeLinearization,
+)
+    signature = _core_mix_uint(signature, UInt64(hash(typeof(cone))))
+    if hasproperty(cone, :operator)
+        signature = _core_mix_values(signature, getproperty(cone, :operator))
+    elseif hasproperty(cone, :operators)
+        operators = getproperty(cone, :operators)
+        signature = _core_mix_uint(signature, UInt64(length(operators)))
+        for operator in operators
+            signature = _core_mix_values(signature, operator)
+        end
+    end
+    if hasproperty(cone, :block_ranges)
+        signature = _core_mix_ranges(signature, getproperty(cone, :block_ranges))
+    elseif hasproperty(cone, :rows)
+        rows = getproperty(cone, :rows)
+        signature = _core_mix_uint(signature, UInt64(first(rows)))
+        signature = _core_mix_uint(signature, UInt64(last(rows)))
+    end
+    return signature
+end
+
+"""Content-based signature of the static Newton operator; deliberately no RHS."""
+function _core_operator_signature(
+    pattern::SymmetricCorePattern,
+    V::AbstractMatrix,
+    system::NewtonSystem,
+)
+    signature = _core_structure_signature(pattern)
+    signature = _core_mix_values(signature, pattern.nzval)
+    signature = _core_mix_values(signature, V)
+    signature = _core_mix_values(signature, system.A)
+    signature = _core_mix_values(signature, system.b)
+    signature = _core_mix_values(signature, system.c)
+    signature = _core_mix_cone_signature(signature, system.cone)
+    signature = _core_mix_uint(signature, UInt64(hash(system.tau)))
+    signature = _core_mix_uint(signature, UInt64(hash(system.kappa)))
+    return signature
+end
+
+@inline _core_cache_signature(cache::SparseSymbolicNumericCache) = cache.signature
+@inline _core_cache_signature(::AbstractFactorCache) = UInt64(0)
 
 function SymmetricCoreWorkspace(
     pattern::SymmetricCorePattern{T},
@@ -497,37 +619,140 @@ function SymmetricCoreWorkspace(
         ))
     end
     dimension = nr + m
-    cr = zeros(T, nr)
+    V_owned = alloc_zeros(T, size(V, 1), size(V, 2))
+    copy_owned!(V_owned, V)
+    cr = alloc_zeros(T, nr)
     for j in 1:n
         for r in 1:nr
-            cr[r] += V[j, r] * system.c[j]
+            cr[r] += V_owned[j, r] * system.c[j]
         end
     end
-    original_scale = max(one(T), maximum(abs, pattern.nzval; init=zero(T)))
+    original_nzval = alloc_zeros(T, length(pattern.nzval))
+    copy_owned!(original_nzval, pattern.nzval)
+    row_sums = alloc_zeros(T, dimension)
+    original_scale = _core_original_scale!(
+        row_sums, pattern.colptr, pattern.rowval, original_nzval,
+    )
+    pattern_signature = symmetric_core_signature(pattern)
+    structure_signature = _core_structure_signature(pattern)
+    operator_signature = _core_operator_signature(pattern, V_owned, system)
     return SymmetricCoreWorkspace{
-        T,typeof(pattern),FC,typeof(V),typeof(system),
+        T,typeof(pattern),FC,typeof(V_owned),typeof(system),
     }(
-        pattern, cache, V, system,
+        pattern, cache, V_owned, system,
         nr, n, m, dimension, cr,
-        zeros(T, dimension), zeros(T, dimension), zeros(T, nr),
-        zeros(T, nr), zeros(T, m), zeros(T, nr), zeros(T, m),
-        zeros(T, dimension), zeros(T, dimension), zeros(T, dimension),
-        zeros(T, nr), zeros(T, n), zeros(T, m), zeros(T, m), zero(T),
-        NewtonResidual(system),
-        0, 0, 0, 0, 0, zero(T), original_scale,
+        alloc_zeros(T, dimension), alloc_zeros(T, dimension), alloc_zeros(T, nr),
+        alloc_zeros(T, nr), alloc_zeros(T, m), alloc_zeros(T, nr), alloc_zeros(T, m),
+        alloc_zeros(T, dimension), alloc_zeros(T, dimension), alloc_zeros(T, dimension),
+        alloc_zeros(T, nr), alloc_zeros(T, n), alloc_zeros(T, m), alloc_zeros(T, m),
+        zero(T), _core_newton_residual(T, m, n), original_nzval, row_sums,
+        pattern_signature, structure_signature, operator_signature,
+        _core_cache_signature(cache), 0, 0, -1, false,
+        0, 0, 0, 0, zero(T), original_scale,
     )
 end
 
-"""Stash the cache's current factor epoch as this workspace's epoch.
+"""Compute `max(1, ‖K‖∞)` from the lower CSC triangle exactly."""
+function _core_original_scale!(
+    row_sums::AbstractVector{T},
+    colptr::AbstractVector{Int}, rowval::AbstractVector{Int},
+    nzval::AbstractVector{T},
+) where {T}
+    dimension = length(row_sums)
+    length(colptr) == dimension + 1 || throw(DimensionMismatch(
+        "core row-sum colptr dimension mismatch",
+    ))
+    zero_owned!(row_sums)
+    @inbounds for column in 1:dimension
+        for pointer in colptr[column]:(colptr[column + 1] - 1)
+            row = rowval[pointer]
+            value = abs(nzval[pointer])
+            row_sums[row] += value
+            row == column || (row_sums[column] += value)
+        end
+    end
+    return max(one(T), maximum(row_sums; init=zero(T)))
+end
 
-Call after a successful `factorize!` of the core cache.  Guards require
-`factor_epoch(cache) == workspace.factor_epoch` before any core solve, so
-an intervening refactor or invalidation is detected without a stale solve.
+"""Synchronize factor/matrix stamps and retain an owned original-core snapshot.
+
+Synchronization is legal only for a fresh factor.  A first call captures the
+current factor epoch, matrix epoch, structural signatures, original `K` values,
+and exact symmetric infinity row-sum norm.  Later calls with the same factor
+epoch are idempotent only if none of those identities changed; a refilled
+pattern without a new factorization therefore fails closed.  A successful new
+factor epoch resets the homogeneous solve seam.
 """
 function sync_core_factor_epoch!(
     workspace::SymmetricCoreWorkspace{T},
 ) where {T}
-    workspace.factor_epoch = SDPX.factor_epoch(workspace.cache)
+    cache = workspace.cache
+    SDPX.factor_status(cache) === Fresh || throw(FactorCacheStateError(
+        :sync_core_factor_epoch, Fresh, SDPX.factor_status(cache),
+    ))
+    pattern = workspace.pattern
+    pattern_signature = symmetric_core_signature(pattern)
+    structure_signature = _core_structure_signature(pattern)
+    operator_signature = _core_operator_signature(
+        pattern, workspace.V, workspace.system,
+    )
+    matrix_epoch = SDPX.factor_matrix_epoch(cache)
+    factor_epoch = SDPX.factor_epoch(cache)
+    cache_signature = _core_cache_signature(cache)
+
+    if workspace.synchronized && factor_epoch == workspace.factor_epoch
+        pattern_signature == workspace.pattern_signature || throw(ArgumentError(
+            "symmetric core pattern signature changed without a new factor epoch",
+        ))
+        structure_signature == workspace.structure_signature || throw(ArgumentError(
+            "symmetric core CSC structure changed without a new factor epoch",
+        ))
+        operator_signature == workspace.operator_signature || throw(ArgumentError(
+            "symmetric core operator changed without a new factor epoch",
+        ))
+        matrix_epoch == workspace.matrix_epoch || throw(ArgumentError(
+            "symmetric core matrix epoch changed without a new factor epoch",
+        ))
+        cache_signature == workspace.cache_signature ||
+            cache_signature == UInt64(0) || workspace.cache_signature == UInt64(0) ||
+            throw(ArgumentError(
+                "symmetric core factor signature changed without a new factor epoch",
+            ))
+        return workspace
+    end
+
+    # A new numeric factor may be synchronized only when it still represents
+    # the same static operator.  A changed pattern/operator requires a new
+    # workspace (and, in particular, a new `cr`/homogeneous seam), rather than
+    # silently pairing an old NewtonSystem with a new matrix.
+    if workspace.synchronized
+        operator_signature == workspace.operator_signature || throw(ArgumentError(
+            "symmetric core static operator changed; construct a new workspace",
+        ))
+        pattern_signature == workspace.pattern_signature || throw(ArgumentError(
+            "symmetric core pattern signature changed; construct a new workspace",
+        ))
+        structure_signature == workspace.structure_signature || throw(ArgumentError(
+            "symmetric core CSC structure changed; construct a new workspace",
+        ))
+    end
+
+    length(workspace.original_nzval) == length(pattern.nzval) || throw(
+        DimensionMismatch("symmetric core original-value snapshot dimension mismatch"),
+    )
+    copy_owned!(workspace.original_nzval, pattern.nzval)
+    workspace.original_scale = _core_original_scale!(
+        workspace.row_sums, pattern.colptr, pattern.rowval,
+        workspace.original_nzval,
+    )
+    workspace.pattern_signature = pattern_signature
+    workspace.structure_signature = structure_signature
+    workspace.operator_signature = operator_signature
+    workspace.cache_signature = cache_signature
+    workspace.matrix_epoch = matrix_epoch
+    workspace.factor_epoch = factor_epoch
+    workspace.homogeneous_epoch = -1
+    workspace.synchronized = true
     return workspace
 end
 
@@ -548,8 +773,8 @@ function _core_apply!(
     ))
     colptr = workspace.pattern.colptr
     rowval = workspace.pattern.rowval
-    nzval = workspace.pattern.nzval
-    fill!(destination, zero(T))
+    nzval = workspace.original_nzval
+    zero_owned!(destination)
     # Lower triangle: for column j, rows i >= j with entry K[i,j];
     # the symmetric upper entry is K[j,i] = K[i,j].
     @inbounds for j in 1:d
@@ -578,6 +803,7 @@ function _core_normalized_residual(
     norm_x = maximum(abs, x; init=zero(T))
     norm_rhs = maximum(abs, rhs; init=zero(T))
     scale = workspace.original_scale * norm_x + norm_rhs
+    iszero(norm_r) && iszero(scale) && return zero(T)
     isfinite(scale) && scale > zero(T) || return T(Inf)
     return norm_r / scale
 end
@@ -619,7 +845,9 @@ function _core_refine!(
     # initial normalized error
     _core_apply!(workspace, workspace.core_residual, x)
     @inbounds for i in 1:workspace.dimension
-        workspace.core_residual[i] = rhs[i] - workspace.core_residual[i]
+        _core_store_owned!(
+            workspace.core_residual, i, rhs[i] - workspace.core_residual[i],
+        )
     end
     previous = _core_normalized_residual(
         workspace, rhs, x, workspace.core_residual,
@@ -627,18 +855,27 @@ function _core_refine!(
     isfinite(previous) || throw(ArgumentError(
         "symmetric core refinement initial residual is non-finite",
     ))
-    iszero(previous) && return (x, 0)
+    # Do not solve a correction once the original-core residual is already at
+    # the arithmetic floor.  The recovered direction still faces the frozen
+    # five-equation gate; this only avoids demanding strict contraction of
+    # roundoff that cannot be represented.
+    residual_floor = T(256) * eps(one(T))
+    previous <= residual_floor && return (x, 0)
+    corrections = 0
     for _ in 1:2
-        _core_solve_with_cache!(
-            workspace, workspace.core_correction, workspace.core_residual,
+        SDPX.refine_once!(
+            workspace.cache, workspace.core_residual, workspace.core_correction,
         )
         @inbounds for i in 1:workspace.dimension
             x[i] += workspace.core_correction[i]
         end
+        corrections += 1
         workspace.refinements += 1
         _core_apply!(workspace, workspace.core_residual, x)
         @inbounds for i in 1:workspace.dimension
-            workspace.core_residual[i] = rhs[i] - workspace.core_residual[i]
+            _core_store_owned!(
+                workspace.core_residual, i, rhs[i] - workspace.core_residual[i],
+            )
         end
         current = _core_normalized_residual(
             workspace, rhs, x, workspace.core_residual,
@@ -646,21 +883,24 @@ function _core_refine!(
         isfinite(current) || throw(ArgumentError(
             "symmetric core refinement produced a non-finite residual",
         ))
-        current < previous || throw(ArgumentError(
-            "symmetric core refinement did not strictly contract the " *
-            "original-core residual (η=$(current) >= η_prev=$(previous))",
-        ))
+        if current > residual_floor
+            current < previous || throw(ArgumentError(
+                "symmetric core refinement did not strictly contract the " *
+                "original-core residual (η=$(current) >= η_prev=$(previous))",
+            ))
+        end
         previous = current
-        iszero(previous) && break
+        previous <= residual_floor && break
     end
-    return (x, workspace.refinements)
+    return (x, corrections)
 end
 
 """Reduced dual affine `V' * system.rhs.dual_affine` into `dr`."""
-function _core_dr!(workspace::SymmetricCoreWorkspace{T}) where {T}
+function _core_dr!(
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
+) where {T}
     dr = workspace.dr
-    fill!(dr, zero(T))
-    system = workspace.system
+    zero_owned!(dr)
     V = workspace.V
     @inbounds for j in 1:workspace.n
         value = system.rhs.dual_affine[j]
@@ -678,11 +918,13 @@ function _core_pack_rhs!(
 ) where {T}
     m = length(system.b)
     @inbounds for r in 1:nr
-        rhs_core[r] = dr[r]
+        _core_store_owned!(rhs_core, r, dr[r])
     end
     @inbounds for i in 1:m
-        rhs_core[nr + i] = system.rhs.primal_affine[i] -
-                           system.rhs.cone_corrector[i]
+        _core_store_owned!(
+            rhs_core, nr + i,
+            system.rhs.primal_affine[i] - system.rhs.cone_corrector[i],
+        )
     end
     return rhs_core
 end
@@ -693,53 +935,93 @@ function _core_split!(
     nr::Int, m::Int,
 ) where {T}
     @inbounds for r in 1:nr
-        xr[r] = sol[r]
+        _core_store_owned!(xr, r, sol[r])
     end
     @inbounds for i in 1:m
-        y[i] = sol[nr + i]
+        _core_store_owned!(y, i, sol[nr + i])
     end
     return (xr, y)
 end
 
-"""Solve the homogeneous core once for the current factor epoch."""
+function _core_guard_ready!(
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
+) where {T}
+    cache = workspace.cache
+    status = SDPX.factor_status(cache)
+    status === Fresh || throw(FactorCacheStateError(
+        :solve_core_direction, Fresh, status,
+    ))
+    workspace.synchronized || throw(ArgumentError(
+        "symmetric core workspace has not been synchronized with its factor",
+    ))
+    factor_epoch_now = SDPX.factor_epoch(cache)
+    factor_epoch_now == workspace.factor_epoch || throw(ArgumentError(
+        "symmetric core factor epoch changed: got $factor_epoch_now, " *
+        "expected $(workspace.factor_epoch)",
+    ))
+    matrix_epoch_now = SDPX.factor_matrix_epoch(cache)
+    matrix_epoch_now == workspace.matrix_epoch || throw(ArgumentError(
+        "symmetric core matrix epoch changed: got $matrix_epoch_now, " *
+        "expected $(workspace.matrix_epoch)",
+    ))
+    pattern_signature_now = symmetric_core_signature(workspace.pattern)
+    pattern_signature_now == workspace.pattern_signature || throw(ArgumentError(
+        "symmetric core pattern signature changed after synchronization",
+    ))
+    structure_signature_now = _core_structure_signature(workspace.pattern)
+    structure_signature_now == workspace.structure_signature || throw(ArgumentError(
+        "symmetric core CSC structure changed after synchronization",
+    ))
+    operator_signature_now = _core_operator_signature(
+        workspace.pattern, workspace.V, system,
+    )
+    operator_signature_now == workspace.operator_signature || throw(ArgumentError(
+        "symmetric core static operator changed; only RHS may change",
+    ))
+    cache_signature_now = _core_cache_signature(cache)
+    (cache_signature_now == workspace.cache_signature ||
+     cache_signature_now == UInt64(0) || workspace.cache_signature == UInt64(0)) ||
+        throw(ArgumentError(
+            "symmetric core factor signature changed after synchronization",
+        ))
+    return workspace
+end
+
+"""Solve the homogeneous core at most once for the synchronized factor epoch."""
 function solve_core_homogeneous!(
     workspace::SymmetricCoreWorkspace{T},
 ) where {T}
     system = workspace.system
+    _core_guard_ready!(workspace, system)
+    workspace.homogeneous_epoch == workspace.factor_epoch && return workspace
     nr = workspace.nr
-    factor_epoch_now = SDPX.factor_epoch(workspace.cache)
-    factor_epoch_now == workspace.factor_epoch || throw(ArgumentError(
-        "symmetric core homogeneous solve requires a fresh factor epoch " *
-        "$factor_epoch_now, got stored $(workspace.factor_epoch)",
-    ))
-    # RHS: [ -V'c ; b ]
+    # RHS: [ -V'c ; b ].
     @inbounds for r in 1:nr
-        workspace.rhs_core[r] = -workspace.cr[r]
+        _core_store_owned!(workspace.rhs_core, r, -workspace.cr[r])
     end
     @inbounds for i in 1:workspace.m
-        workspace.rhs_core[nr + i] = system.b[i]
+        _core_store_owned!(workspace.rhs_core, nr + i, system.b[i])
     end
     all(isfinite, workspace.rhs_core) || throw(ArgumentError(
         "symmetric core homogeneous RHS is non-finite",
     ))
-    solve!(workspace.cache, workspace.sol_core, workspace.rhs_core)
+    SDPX.solve!(workspace.cache, workspace.sol_core, workspace.rhs_core)
     all(isfinite, workspace.sol_core) || throw(ArgumentError(
         "symmetric core homogeneous solve produced non-finite data",
     ))
-    # Refine the homogeneous solution against the original core with the
-    # same Kε factor; non-contraction fails closed.
+    # Refine against the independent original K using the same factor.
     _core_refine!(workspace, workspace.sol_core, workspace.rhs_core)
     _core_split!(workspace.ux, workspace.uy, workspace.sol_core, nr,
         workspace.m)
+    workspace.homogeneous_epoch = workspace.factor_epoch
     workspace.homogeneous_solves += 1
     return workspace
 end
 
 """Scalar denominator `κ + τ*(cr'ux + b'uy)` for the current epoch."""
 function _core_denominator(
-    workspace::SymmetricCoreWorkspace{T},
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
 ) where {T}
-    system = workspace.system
     nr = workspace.nr
     eta = zero(T)
     @inbounds for r in 1:nr
@@ -751,52 +1033,42 @@ function _core_denominator(
     return system.kappa + system.tau * eta
 end
 
-"""Solve one variable core RHS and recover a full HSD direction.
+function _core_snapshot(source::AbstractVector{T}) where {T<:AbstractFloat}
+    destination = alloc_zeros(T, length(source))
+    copy_owned!(destination, source)
+    return destination
+end
 
-Performs, for the current factor epoch:
+function _core_snapshot(residual::NewtonResidual{T}) where {T<:AbstractFloat}
+    return NewtonResidual{T}(
+        _core_snapshot(residual.primal_affine),
+        _core_snapshot(residual.dual_affine),
+        _core_owned_value(residual.homogeneous_gap),
+        _core_snapshot(residual.cone_complementarity),
+        _core_owned_value(residual.tau_kappa),
+        _core_snapshot(residual.cone_work),
+    )
+end
 
-    K*w = [ V'*dual_affine ; primal_affine - cone_corrector ]
-    dtau = (tau_kappa - tau*(g + cr'wx + b'wy))
-             / (kappa + tau*(cr'ux + b'uy))
-    dxr  = wx + dtau*ux ; dx = V*dxr
-    dy   = wy + dtau*uy
-    ds   = p - A*dx + b*dtau
-    dkappa = g + c'*dx + b'*dy
-
-then evaluates the frozen five-equation residual through
-`newton_residual!`.  The denominator must be finite and nonzero; a
-non-finite or exact-zero value is rejected without clamping.  The
-well-conditioned fixtures used by C4a must use zero regularization and
-produce a denominator well above `sqrt(eps(T))` in magnitude; a
-type-scaled near-zero denominator (|den| <= sqrt(eps(T))) is rejected as a
-numerical failure so the caller may escalate.
-"""
+"""Solve one variable RHS and recover an independent direction snapshot."""
 function solve_core_direction!(
-    workspace::SymmetricCoreWorkspace{T},
+    workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
 ) where {T}
-    system = workspace.system
+    _core_guard_ready!(workspace, system)
+    workspace.homogeneous_epoch == workspace.factor_epoch || throw(ArgumentError(
+        "symmetric core homogeneous solution is stale or unavailable",
+    ))
     nr = workspace.nr
     cache = workspace.cache
-    SDPX.factor_status(cache) === Fresh || throw(FactorCacheStateError(
-        :solve_core_direction, Fresh, SDPX.factor_status(cache),
-    ))
-    factor_epoch_now = SDPX.factor_epoch(cache)
-    factor_epoch_now == workspace.factor_epoch || throw(ArgumentError(
-        "symmetric core direction solve requires factor epoch " *
-        "$factor_epoch_now, got stored $(workspace.factor_epoch)",
-    ))
-    # Pack the variable RHS [ V'*dual ; primal - cone ].
-    _core_dr!(workspace)
+    _core_dr!(workspace, system)
     _core_pack_rhs!(workspace.rhs_core, workspace.dr, system, nr)
     all(isfinite, workspace.rhs_core) || throw(ArgumentError(
         "symmetric core variable RHS is non-finite",
     ))
-    solve!(cache, workspace.sol_core, workspace.rhs_core)
+    SDPX.solve!(cache, workspace.sol_core, workspace.rhs_core)
     all(isfinite, workspace.sol_core) || throw(ArgumentError(
         "symmetric core variable solve produced non-finite data",
     ))
-    # Refine the variable solution against the original core with the same
-    # Kε factor.
     _core_refine!(workspace, workspace.sol_core, workspace.rhs_core)
     _core_split!(workspace.wx, workspace.wy, workspace.sol_core, nr,
         workspace.m)
@@ -809,7 +1081,7 @@ function solve_core_direction!(
     @inbounds for i in 1:workspace.m
         eta_w += system.b[i] * workspace.wy[i]
     end
-    denominator = _core_denominator(workspace)
+    denominator = _core_denominator(workspace, system)
     isfinite(denominator) || throw(ArgumentError(
         "symmetric core scalar denominator is non-finite",
     ))
@@ -837,27 +1109,29 @@ function solve_core_direction!(
         "symmetric core scalar recovery produced non-finite dtau",
     ))
     @inbounds for r in 1:nr
-        workspace.dxr[r] = workspace.wx[r] + dtau * workspace.ux[r]
+        _core_store_owned!(workspace.dxr, r,
+            workspace.wx[r] + dtau * workspace.ux[r])
     end
     @inbounds for i in 1:workspace.m
-        workspace.dy[i] = workspace.wy[i] + dtau * workspace.uy[i]
+        _core_store_owned!(workspace.dy, i,
+            workspace.wy[i] + dtau * workspace.uy[i])
     end
-    # dx = V * dxr
-    fill!(workspace.dx, zero(T))
+    # dx = V * dxr.
+    zero_owned!(workspace.dx)
     @inbounds for r in 1:nr
         for j in 1:workspace.n
             workspace.dx[j] += workspace.V[j, r] * workspace.dxr[r]
         end
     end
-    # ds = p - A*dx + b*dtau  (frozen primal affine equation)
+    # ds = p - A*dx + b*dtau (frozen primal affine equation).
     for i in 1:workspace.m
         acc = system.rhs.primal_affine[i] + system.b[i] * dtau
         for j in 1:workspace.n
             acc -= system.A[i, j] * workspace.dx[j]
         end
-        workspace.ds[i] = acc
+        _core_store_owned!(workspace.ds, i, acc)
     end
-    # dkappa = g + c'*dx + b'*dy
+    # dkappa = g + c'*dx + b'*dy.
     dk = system.rhs.homogeneous_gap
     @inbounds for j in 1:workspace.n
         dk += system.c[j] * workspace.dx[j]
@@ -865,15 +1139,27 @@ function solve_core_direction!(
     @inbounds for i in 1:workspace.m
         dk += system.b[i] * workspace.dy[i]
     end
-    workspace.dkappa = dk
-    direction = NewtonDirection(
-        workspace.dx, workspace.dy, workspace.ds,
-        dtau, workspace.dkappa,
+    workspace.dkappa = _core_owned_value(dk)
+    candidate = NewtonDirection(
+        workspace.dx, workspace.dy, workspace.ds, dtau, workspace.dkappa,
     )
-    newton_residual!(
-        workspace.residual, system, direction,
-    )
+    newton_residual!(workspace.residual, system, candidate)
     workspace.variable_solves += 1
     workspace.directions += 1
-    return (direction, workspace.residual)
+
+    # Never return workspace-owned arrays: predictor/corrector results must
+    # remain immutable snapshots when the next RHS reuses all buffers.
+    direction = NewtonDirection(
+        _core_snapshot(workspace.dx), _core_snapshot(workspace.dy),
+        _core_snapshot(workspace.ds), _core_owned_value(dtau),
+        _core_owned_value(workspace.dkappa),
+    )
+    return (direction, _core_snapshot(workspace.residual))
+end
+
+"""Compatibility wrapper consuming the workspace's original NewtonSystem."""
+function solve_core_direction!(
+    workspace::SymmetricCoreWorkspace{T},
+) where {T}
+    return solve_core_direction!(workspace, workspace.system)
 end
