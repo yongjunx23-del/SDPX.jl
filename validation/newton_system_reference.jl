@@ -217,3 +217,105 @@ end
         end
     end
 end
+
+# ---------------------------------------------------------------------
+# C6a: semantic shadow parity — symmetric augmented core vs expanded exact.
+# ---------------------------------------------------------------------
+
+"""Rebuild the RHS of a fixture with changed cone/scalar shifts."""
+function _c6a_corrected_rhs(fixture, cone_shift, scalar_shift)
+    rhs = fixture.rhs
+    return SDPX.HSDNewtonRHS(
+        copy(rhs.primal_affine), copy(rhs.dual_affine), rhs.homogeneous_gap,
+        rhs.cone_corrector .+ cone_shift, rhs.tau_kappa + scalar_shift,
+    )
+end
+
+"""Run predictor + changed corrector through the symmetric core."""
+function _c6a_symmetric_directions(system, V; delta=1e-6)
+    workspace = SDPX.build_symmetric_core_workspace(
+        system, V, 1, 256, typemax(Int), 0, delta;
+        symbolic_epoch=0,
+    )
+    predictor, predictor_residual = SDPX.solve_core_direction!(workspace, system)
+    m = length(system.rhs.cone_corrector)
+    cone_shift = [0.13, -0.07, 0.11, 0.05, -0.09][1:m]
+    corrected = SDPX.HSDNewtonRHS(
+        copy(system.rhs.primal_affine), copy(system.rhs.dual_affine),
+        system.rhs.homogeneous_gap,
+        system.rhs.cone_corrector .+ cone_shift,
+        system.rhs.tau_kappa + 0.19,
+    )
+    corrector_system = SDPX.NewtonSystem(
+        system.A, system.b, system.c, system.cone,
+        system.tau, system.kappa, corrected,
+    )
+    corrector, corrector_residual = SDPX.solve_core_direction!(
+        workspace, corrector_system,
+    )
+    return (workspace, predictor, predictor_residual, corrector, corrector_residual)
+end
+
+function _ns_residual_maximum(residual::SDPX.NewtonResidual)
+    return maximum((
+        maximum(abs, residual.primal_affine; init=zero(eltype(residual.primal_affine))),
+        maximum(abs, residual.dual_affine; init=zero(eltype(residual.dual_affine))),
+        abs(residual.homogeneous_gap),
+        maximum(abs, residual.cone_complementarity; init=zero(eltype(residual.cone_complementarity))),
+        abs(residual.tau_kappa),
+    ))
+end
+
+@testset "C6a symmetric-core semantic shadow parity" begin
+    for family in (:lp, :soc, :psd)
+        @testset "$family" begin
+            fixture = _ns_fixture(family)
+            V = Matrix{Float64}(I, size(fixture.A, 2), size(fixture.A, 2))
+            (workspace, predictor, predictor_residual, corrector, corrector_residual) =
+                _c6a_symmetric_directions(fixture.system, V)
+
+            # Predictor: direction must match the expanded exact route and the
+            # frozen five-equation residual must be small.
+            expanded = _ns_production_direction(fixture.system)
+            @test predictor.dx ≈ expanded.dx atol=2e-10 rtol=0
+            @test predictor.dy ≈ expanded.dy atol=2e-10 rtol=0
+            @test predictor.ds ≈ expanded.ds atol=2e-10 rtol=0
+            @test predictor.dtau ≈ expanded.dtau atol=2e-10 rtol=0
+            @test predictor.dkappa ≈ expanded.dkappa atol=2e-10 rtol=0
+            @test _ns_residual_maximum(predictor_residual) <= 2e-10
+
+            # Changed corrector: same factor and homogeneous solution reused.
+            m = length(fixture.rhs.cone_corrector)
+            cone_shift = [0.13, -0.07, 0.11, 0.05, -0.09][1:m]
+            corrected_rhs = SDPX.HSDNewtonRHS(
+                copy(fixture.rhs.primal_affine), copy(fixture.rhs.dual_affine),
+                fixture.rhs.homogeneous_gap,
+                fixture.rhs.cone_corrector .+ cone_shift,
+                fixture.rhs.tau_kappa + 0.19,
+            )
+            corrector_system = SDPX.NewtonSystem(
+                fixture.A, fixture.b, fixture.c, fixture.system.cone,
+                fixture.tau, fixture.kappa, corrected_rhs,
+            )
+            expanded_corrector = _ns_production_direction(corrector_system)
+            @test corrector.dx ≈ expanded_corrector.dx atol=2e-10 rtol=0
+            @test corrector.dy ≈ expanded_corrector.dy atol=2e-10 rtol=0
+            @test corrector.ds ≈ expanded_corrector.ds atol=2e-10 rtol=0
+            @test corrector.dtau ≈ expanded_corrector.dtau atol=2e-10 rtol=0
+            @test corrector.dkappa ≈ expanded_corrector.dkappa atol=2e-10 rtol=0
+            @test _ns_residual_maximum(corrector_residual) <= 2e-10
+
+            # One factor, one homogeneous solve, two variable solves, no
+            # refactor between predictor and corrector.
+            @test workspace.homogeneous_solves == 1
+            @test workspace.variable_solves == 2
+            @test workspace.directions == 2
+            @test workspace.homogeneous_epoch == workspace.factor_epoch
+
+            # Independent snapshots (not aliased workspace buffers).
+            @test predictor.dx !== corrector.dx
+            @test predictor.dy !== corrector.dy
+            @test predictor.ds !== corrector.ds
+        end
+    end
+end

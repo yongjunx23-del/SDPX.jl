@@ -1313,3 +1313,135 @@ function _build_symmetric_core_ldlt_cache_provider(
         "load MFLA for MultiFloat or BFLA for BigFloat",
     ))
 end
+
+#=====================================================================#
+#    C6a: semantic/provider shadow bridge (cold/test seam).
+#
+#    Builds the existing `SymmetricCorePattern` + provider cache +
+#    `SymmetricCoreWorkspace` directly from a frozen `NewtonSystem` and a
+#    rank-reduction basis `V`.  This is deliberately not a production
+#    dispatch: the caller keeps the old route authoritative and compares
+#    recovered directions in validation only.
+#=====================================================================#
+
+"""Extract ordered cone block ranges from a semantic cone linearization.
+
+Supports `ProductConeLinearization` and `BlockProductConeLinearization`.
+The returned ranges must exactly cover `1:m`; a linearization without an
+ordered block structure fails closed rather than guessing.
+"""
+function symmetric_core_block_ranges(
+    cone::Union{ProductConeLinearization,BlockProductConeLinearization},
+)
+    ranges = UnitRange{Int}[rows for rows in product_cone_block_ranges(cone)]
+    m = cone_dimension(cone)
+    validate_product_cone_block_ranges(m, ranges)
+    return ranges
+end
+symmetric_core_block_ranges(::AbstractConeLinearization) = throw(ArgumentError(
+    "symmetric core requires a product or block-product cone linearization",
+))
+
+"""Materialize the full symmetric `Theta` operator of a semantic cone.
+
+For a `ProductConeLinearization` the dense operator is used directly.  For a
+`BlockProductConeLinearization` the per-block operators are placed on the
+corresponding diagonal blocks (cross-block entries must be exactly zero, as
+enforced by `validate_symmetric_core`).  Returns an owned `Matrix{T}`.
+"""
+function symmetric_core_theta(
+    cone::ProductConeLinearization{T},
+) where {T<:AbstractFloat}
+    theta = alloc_zeros(T, size(cone.operator, 1), size(cone.operator, 2))
+    copy_owned!(theta, cone.operator)
+    return theta
+end
+
+function symmetric_core_theta(
+    cone::BlockProductConeLinearization{T},
+) where {T<:AbstractFloat}
+    m = cone_dimension(cone)
+    theta = alloc_zeros(T, m, m)
+    for (index, rows) in enumerate(cone.block_ranges)
+        block = cone.operators[index]
+        theta[rows, rows] = block
+    end
+    return theta
+end
+
+"""Build a frozen `SymmetricCorePattern` from a semantic system + rank basis.
+
+Validates the range precondition on `A` and `c`, forms `Ar = A*V`, and
+freezes the block-diagonal lower-triangle pattern from the cone block ranges.
+The pattern is then refilled with the exact `Theta` blocks.
+"""
+function symmetric_core_pattern_from_system(
+    system::NewtonSystem{T},
+    V::AbstractMatrix{T},
+) where {T<:AbstractFloat}
+    m, n = size(system.A)
+    nr = size(V, 2)
+    size(V, 1) == n || throw(DimensionMismatch(
+        "rank-reduction basis rows $n do not match V rows $(size(V, 1))",
+    ))
+    ranges = symmetric_core_block_ranges(system.cone)
+    theta = symmetric_core_theta(system.cone)
+    ar = sparse(system.A * V)
+    pattern = SymmetricCorePattern{T}(
+        ar, ranges, [:dense_lower for _ in ranges],
+    )
+    refill!(pattern, ar, theta)
+    return pattern
+end
+
+"""Build a synchronized symmetric-core workspace for a frozen system + basis.
+
+Float64 uses the signed-shifted CHOLMOD lifecycle cache; MultiFloat/BigFloat
+run the dense memory eligibility gate before the provider LDL factory.  The
+workspace is then synchronized with the factor and the homogeneous solution is
+solved once.  The caller compares directions against its own route.
+"""
+function build_symmetric_core_workspace(
+    system::NewtonSystem{T},
+    V::AbstractMatrix{T},
+    matrix_epoch::Integer,
+    precision_bits::Int,
+    memory_limit_bytes::Union{Nothing,Integer},
+    current_rss_bytes::Union{Nothing,Integer},
+    regularization::Real;
+    symbolic_epoch::Integer=0,
+) where {T<:AbstractFloat}
+    pattern = symmetric_core_pattern_from_system(system, V)
+    cache = if T === Float64
+        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
+            "symmetric core Float64 regularization must be finite and nonnegative",
+        ))
+        k = symmetric_core_lower_sparse(pattern)
+        requirements = SparseSymbolicRequirements(
+            k;
+            symbolic_epoch=Int(symbolic_epoch),
+            dsigns=symmetric_core_dsigns(pattern),
+            regularization=Float64(regularization),
+        )
+        cache = SparseSymbolicNumericCache{Float64}()
+        prepare!(cache, requirements)
+        factorize!(cache, k, Int(matrix_epoch))
+        cache
+    else
+        eligibility = symmetric_core_dense_eligibility(
+            T, pattern.dimension, memory_limit_bytes, current_rss_bytes,
+        )
+        eligibility.eligible || throw(ArgumentError(
+            "symmetric core dense factor ineligible: $(eligibility.reason)",
+        ))
+        cache = build_symmetric_core_ldlt_cache(
+            T, pattern, precision_bits, memory_limit_bytes, current_rss_bytes,
+        )
+        factorize!(cache, materialize_dense(pattern), Int(matrix_epoch))
+        cache
+    end
+    workspace = SymmetricCoreWorkspace(pattern, cache, V, system)
+    sync_core_factor_epoch!(workspace)
+    solve_core_homogeneous!(workspace)
+    return workspace
+end

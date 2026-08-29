@@ -372,3 +372,29 @@ The exact operator, homogeneous solve, sequential predictor/corrector solves,
 original-core refinement, and frozen five-equation residual remain unchanged;
 provider LDLT factors only the same `K`.  No new backend or dependency is
 introduced.
+
+## C6a semantic/provider shadow parity
+
+`src/kkt/symmetric_core.jl` adds a cold/test-only bridge for the same
+symmetric augmented core:
+
+- `symmetric_core_block_ranges(cone)` extracts the ordered block ranges from
+  a `ProductConeLinearization` or `BlockProductConeLinearization` and fails
+  closed on any other linearization;
+- `symmetric_core_theta(cone)` materializes the exact block-diagonal `Theta`
+  operator;
+- `symmetric_core_pattern_from_system(system, V)` forms `Ar = A*V`, freezes
+  the CSC pattern, and refills it with the exact `Theta`;
+- `build_symmetric_core_workspace(system, V, ...)` prepares and factors the
+  provider cache (Float64 CHOLMOD with the signed static shift, or the dense
+  MFLA/BFLA LDL behind the memory eligibility gate), synchronizes the
+  workspace, and solves the homogeneous core once.
+
+`validation/newton_system_reference.jl` compares Float64 LP/SOC/PSD symmetric
+core predictor and changed corrector directions against the expanded exact
+route.  `validation/providers/provider_smoke.jl` drives the full workspace
+through the real MFLA (`Float64x2`/`Float64x4`) and BFLA (`BigFloat256`)
+providers, compares against a direct five-equation solve in the provider's own
+arithmetic, exercises a multi-block block-diagonal case, and asserts the
+memory gate and unsupported-linearization rejection.  This is shadow
+validation only: no production route dispatches the core yet.

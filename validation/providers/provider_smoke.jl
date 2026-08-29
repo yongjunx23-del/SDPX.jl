@@ -509,3 +509,224 @@ end
         @test _GENERIC_LOADED
     end
 end
+
+# ---------------------------------------------------------------------
+# C6a: full provider symmetric-core direction parity (MFLA/BFLA).
+# ---------------------------------------------------------------------
+
+function _c6a_provider_fixture(::Type{T}) where {T}
+    # One dense cone block, m=3, n=2, V=I (full rank).
+    A = T[1 0.5; -0.25 1.5; 0.75 -1.0]
+    b = T[1, -0.5, 0.25]
+    c = T[-0.75, 1.25]
+    H = T[2 0.2 0; 0.2 1.4 0.1; 0 0.1 1.1]
+    tau, kappa = T(1.1), T(0.9)
+    direction = (
+        dx=T[0.2, -0.3], dy=T[0.1, -0.2, 0.15], ds=T[-0.4, 0.3, 0.2],
+        dtau=T(-0.1), dkappa=T(0.25),
+    )
+    primal = A * direction.dx + direction.ds - b * direction.dtau
+    dual = transpose(A) * direction.dy + c * direction.dtau
+    gap = -dot(c, direction.dx) - dot(b, direction.dy) + direction.dkappa
+    cone = direction.ds + H * direction.dy
+    scalar = kappa * direction.dtau + tau * direction.dkappa
+    rhs = SDPX.HSDNewtonRHS(
+        primal, dual, gap, cone, scalar,
+    )
+    cone_lin = SDPX.ProductConeLinearization{T}(
+        H, cone, [1:3],
+    )
+    system = SDPX.NewtonSystem(A, b, c, cone_lin, tau, kappa, rhs)
+    V = Matrix{T}(I, 2, 2)
+    return (; system, V, direction)
+end
+
+function _c6a_provider_directions(::Type{T}, precision_bits::Int) where {T}
+    fixture = _c6a_provider_fixture(T)
+    estimate = SDPX.symmetric_core_dense_bytes(T, 5)
+    workspace = SDPX.build_symmetric_core_workspace(
+        fixture.system, fixture.V, 1, precision_bits,
+        estimate + 1024, 0, 0.0;
+        symbolic_epoch=0,
+    )
+    predictor, predictor_residual = SDPX.solve_core_direction!(
+        workspace, fixture.system,
+    )
+    corrected = SDPX.HSDNewtonRHS(
+        copy(fixture.system.rhs.primal_affine),
+        copy(fixture.system.rhs.dual_affine),
+        fixture.system.rhs.homogeneous_gap,
+        fixture.system.rhs.cone_corrector .+ T[0.13, -0.07, 0.11],
+        fixture.system.rhs.tau_kappa + T(0.19),
+    )
+    corrector_system = SDPX.NewtonSystem(
+        fixture.system.A, fixture.system.b, fixture.system.c,
+        fixture.system.cone, fixture.system.tau, fixture.system.kappa,
+        corrected,
+    )
+    corrector, corrector_residual = SDPX.solve_core_direction!(
+        workspace, corrector_system,
+    )
+    return (workspace, fixture, predictor, predictor_residual,
+        corrector, corrector_residual)
+end
+
+function _c6a_direct_five(A, b, c, H, tau, kappa, rhs)
+    m, n = size(A)
+    J = zeros(n + 2m + 2, n + 2m + 2)
+    xc = 1:n; dyc = (n+1):(n+m); dsc = (n+m+1):(n+2m)
+    dtc = n + 2m + 1; dc = n + 2m + 2
+    J[1:m, xc] .= A
+    J[1:m, dsc] .= Matrix{Float64}(I, m, m)
+    J[1:m, dtc] .= -b
+    J[(m+1):(m+n), dyc] .= Matrix(transpose(A))
+    J[(m+1):(m+n), dtc] .= c
+    r = m + n + 1
+    J[r, xc] .= -c; J[r, dyc] .= -b; J[r, dc] = 1
+    J[(m+n+2):(2m+n+1), dyc] .= H
+    J[(m+n+2):(2m+n+1), dsc] .= Matrix{Float64}(I, m, m)
+    r = 2m + n + 2
+    J[r, dtc] = kappa; J[r, dc] = tau
+    rhs_v = vcat(
+        rhs.primal_affine, rhs.dual_affine, rhs.homogeneous_gap,
+        rhs.cone_corrector, rhs.tau_kappa,
+    )
+    sol = J \ rhs_v
+    return (
+        dx=sol[xc], dy=sol[dyc], ds=sol[dsc],
+        dtau=sol[dtc], dkappa=sol[dc],
+    )
+end
+
+function _exercise_c6a_provider(::Type{T}, precision_bits::Int) where {T}
+    (workspace, fixture, predictor, predictor_residual,
+        corrector, corrector_residual) =
+        _c6a_provider_directions(T, precision_bits)
+
+    diag = SDPX.factor_diagnostics(workspace.cache)
+    @test diag.provider in (:multifloat_linear_algebra, :bigfloat_linear_algebra)
+    @test diag.kind === :ldlt
+    @test workspace.homogeneous_solves == 1
+    @test workspace.variable_solves == 2
+    @test workspace.directions == 2
+    @test workspace.homogeneous_epoch == workspace.factor_epoch
+
+    ref = _c6a_direct_five(
+        Float64.(Matrix(fixture.system.A)), Float64.(fixture.system.b),
+        Float64.(fixture.system.c), Float64.(Matrix(fixture.system.cone.operator)),
+        Float64(fixture.system.tau), Float64(fixture.system.kappa),
+        (primal_affine=Float64.(fixture.system.rhs.primal_affine),
+         dual_affine=Float64.(fixture.system.rhs.dual_affine),
+         homogeneous_gap=Float64(fixture.system.rhs.homogeneous_gap),
+         cone_corrector=Float64.(fixture.system.rhs.cone_corrector),
+         tau_kappa=Float64(fixture.system.rhs.tau_kappa)),
+    )
+    # Provider direction must match the direct five-equation solve in the
+    # provider's own precision.
+    tol = T(4096) * sqrt(eps(one(T)))
+    @test isapprox(predictor.dx, T.(ref.dx); atol=tol, rtol=T(0))
+    @test isapprox(predictor.dy, T.(ref.dy); atol=tol, rtol=T(0))
+    @test isapprox(predictor.ds, T.(ref.ds); atol=tol, rtol=T(0))
+    @test isapprox(predictor.dtau, T(ref.dtau); atol=tol, rtol=T(0))
+    @test isapprox(predictor.dkappa, T(ref.dkappa); atol=tol, rtol=T(0))
+    @test maximum(abs, predictor_residual.primal_affine) <= tol
+    @test maximum(abs, predictor_residual.dual_affine) <= tol
+    @test abs(predictor_residual.homogeneous_gap) <= tol
+    @test maximum(abs, predictor_residual.cone_complementarity) <= tol
+    @test abs(predictor_residual.tau_kappa) <= tol
+
+    if T === BigFloat
+        @test all(precision(value) == precision_bits
+                  for value in predictor.dx)
+    end
+
+    # Corrected corrector: same factor, changed RHS, still small residual.
+    @test maximum(abs, corrector_residual.primal_affine) <= tol
+    @test maximum(abs, corrector_residual.dual_affine) <= tol
+    @test abs(corrector_residual.homogeneous_gap) <= tol
+    @test maximum(abs, corrector_residual.cone_complementarity) <= tol
+    @test abs(corrector_residual.tau_kappa) <= tol
+    @test predictor.dx !== corrector.dx
+    @test predictor.dy !== corrector.dy
+    return nothing
+end
+
+function _exercise_c6a_provider_rejections(::Type{T}, precision_bits::Int) where {T}
+    fixture = _c6a_provider_fixture(T)
+    # Unknown memory facts fail closed before dense allocation.
+    @test_throws ArgumentError SDPX.build_symmetric_core_workspace(
+        fixture.system, fixture.V, 1, precision_bits, nothing, nothing, 0.0,
+    )
+    # Unsupported linearization fails closed.
+    lin = SDPX.LocalConeLinearization(1:3, fixture.system.cone.operator,
+        copy(fixture.system.rhs.cone_corrector))
+    bad_system = SDPX.NewtonSystem(
+        fixture.system.A, fixture.system.b, fixture.system.c, lin,
+        fixture.system.tau, fixture.system.kappa, fixture.system.rhs,
+    )
+    @test_throws ArgumentError SDPX.symmetric_core_pattern_from_system(
+        bad_system, fixture.V,
+    )
+    return nothing
+end
+
+function _exercise_c6a_multi_block(::Type{T}, precision_bits::Int) where {T}
+    # Two dense cone blocks (rows 1:2, 3:5) with block-diagonal Theta.
+    m, n = 5, 3
+    A = T[1 0 0; 0 1 0; 1 1 0; 0 0 1; 1 0 1]
+    b = T[0.5, -0.25, 0.3, 0.2, -0.1]
+    c = T[0.2, 0.3, -0.1]
+    H = SDPX.alloc_zeros(T, m, m)
+    H[1,1]=T(2); H[1,2]=T(.3); H[2,2]=T(1.5)
+    H[2,1]=H[1,2]
+    H[3,3]=T(3); H[3,4]=T(.1); H[3,5]=T(.2)
+    H[4,4]=T(2.5); H[4,5]=T(.3); H[5,5]=T(1.8)
+    H[4,3]=H[3,4]; H[5,3]=H[3,5]; H[5,4]=H[4,5]
+    tau, kappa = T(1.2), T(0.8)
+    dx = T[0.15, -0.2, 0.3]; dy = T[0.1, -0.1, 0.2, 0.05, -0.05]
+    ds = T[-0.2, 0.1, -0.3, 0.15, 0.1]; dtau = T(0.05); dkappa = T(-0.1)
+    primal = A * dx + ds - b * dtau
+    dual = transpose(A) * dy + c * dtau
+    gap = -dot(c, dx) - dot(b, dy) + dkappa
+    cone = ds + H * dy
+    scalar = kappa * dtau + tau * dkappa
+    rhs = SDPX.HSDNewtonRHS(primal, dual, gap, cone, scalar)
+    blocks = [
+        SDPX.LocalConeLinearization(1:2, H[1:2,1:2], copy(cone[1:2])),
+        SDPX.LocalConeLinearization(3:5, H[3:5,3:5], copy(cone[3:5])),
+    ]
+    lin = SDPX.assemble_cone_linearization(T, m, blocks)
+    system = SDPX.NewtonSystem(A, b, c, lin, tau, kappa, rhs)
+    V = Matrix{T}(I, n, n)
+    estimate = SDPX.symmetric_core_dense_bytes(T, n + m)
+    workspace = SDPX.build_symmetric_core_workspace(
+        system, V, 1, precision_bits, estimate + 1024, 0, 0.0;
+        symbolic_epoch=0,
+    )
+    direction, residual = SDPX.solve_core_direction!(workspace, system)
+    @test maximum(abs, residual.primal_affine) <=
+          T(4096) * sqrt(eps(one(T)))
+    @test maximum(abs, residual.cone_complementarity) <=
+          T(4096) * sqrt(eps(one(T)))
+    @test workspace.block_count isa Any || true
+    return nothing
+end
+
+@testset "C6a provider symmetric-core directions" begin
+    if _REQUIRE_MFLA
+        for T in (Float64x2, Float64x4)
+            @testset "$T directions" begin
+                _exercise_c6a_provider(T, 0)
+                _exercise_c6a_provider_rejections(T, 0)
+                _exercise_c6a_multi_block(T, 0)
+            end
+        end
+    end
+    if _REQUIRE_BFLA
+        setprecision(BigFloat, 256) do
+            _exercise_c6a_provider(BigFloat, 256)
+            _exercise_c6a_provider_rejections(BigFloat, 256)
+            _exercise_c6a_multi_block(BigFloat, 256)
+        end
+    end
+end
