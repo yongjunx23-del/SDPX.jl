@@ -590,6 +590,52 @@ end
 @inline _core_cache_signature(cache::SparseSymbolicNumericCache) = cache.signature
 @inline _core_cache_signature(::AbstractFactorCache) = UInt64(0)
 
+@inline function _core_factor_matches_pattern(
+    cache::SparseSymbolicNumericCache, pattern::SymmetricCorePattern,
+)
+    return length(cache.original_values) == length(pattern.nzval) &&
+           cache.original_values == pattern.nzval
+end
+@inline _core_factor_matches_pattern(::AbstractFactorCache, ::SymmetricCorePattern) = true
+
+function _core_projection_tolerance(::Type{T}, dimension::Int, scale::T) where {T}
+    return T(256 * max(1, dimension)) * eps(one(T)) * max(one(T), scale)
+end
+
+function _core_vector_in_range(
+    V::AbstractMatrix{T}, vector::AbstractVector{T}, work::AbstractVector{T},
+) where {T}
+    zero_owned!(work)
+    @inbounds for r in axes(V, 2)
+        coefficient = zero(T)
+        for j in axes(V, 1)
+            coefficient += V[j, r] * vector[j]
+        end
+        for j in axes(V, 1)
+            work[j] += V[j, r] * coefficient
+        end
+    end
+    residual = zero(T)
+    scale = zero(T)
+    @inbounds for j in eachindex(vector, work)
+        residual = max(residual, abs(vector[j] - work[j]))
+        scale = max(scale, abs(vector[j]))
+    end
+    return residual <= _core_projection_tolerance(T, length(vector), scale)
+end
+
+function _core_operator_in_range(
+    V::AbstractMatrix{T}, A::AbstractMatrix{T}, work::AbstractVector{T},
+) where {T}
+    n = size(A, 2)
+    size(V, 1) == n || return false
+    @inbounds for i in axes(A, 1)
+        row = @view A[i, :]
+        _core_vector_in_range(V, row, work) || return false
+    end
+    return true
+end
+
 function SymmetricCoreWorkspace(
     pattern::SymmetricCorePattern{T},
     cache::FC,
@@ -619,6 +665,13 @@ function SymmetricCoreWorkspace(
         ))
     end
     dimension = nr + m
+    range_work = alloc_zeros(T, n)
+    _core_operator_in_range(V, system.A, range_work) || throw(ArgumentError(
+        "symmetric core requires every row of A to lie in range(V)",
+    ))
+    _core_vector_in_range(V, system.c, range_work) || throw(ArgumentError(
+        "symmetric core requires c to lie in range(V)",
+    ))
     V_owned = alloc_zeros(T, size(V, 1), size(V, 2))
     copy_owned!(V_owned, V)
     cr = alloc_zeros(T, nr)
@@ -699,6 +752,9 @@ function sync_core_factor_epoch!(
     matrix_epoch = SDPX.factor_matrix_epoch(cache)
     factor_epoch = SDPX.factor_epoch(cache)
     cache_signature = _core_cache_signature(cache)
+    _core_factor_matches_pattern(cache, pattern) || throw(ArgumentError(
+        "symmetric core pattern values do not match the fresh factor operator",
+    ))
 
     if workspace.synchronized && factor_epoch == workspace.factor_epoch
         pattern_signature == workspace.pattern_signature || throw(ArgumentError(
@@ -899,6 +955,11 @@ end
 function _core_dr!(
     workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
 ) where {T}
+    _core_vector_in_range(
+        workspace.V, system.rhs.dual_affine, workspace.dx,
+    ) || throw(ArgumentError(
+        "symmetric core dual RHS has a discarded nullspace component",
+    ))
     dr = workspace.dr
     zero_owned!(dr)
     V = workspace.V
@@ -1022,15 +1083,21 @@ end
 function _core_denominator(
     workspace::SymmetricCoreWorkspace{T}, system::NewtonSystem{T},
 ) where {T}
-    nr = workspace.nr
     eta = zero(T)
-    @inbounds for r in 1:nr
-        eta += workspace.cr[r] * workspace.ux[r]
+    eta_work = zero(T)
+    @inbounds for r in 1:workspace.nr
+        term = workspace.cr[r] * workspace.ux[r]
+        eta += term
+        eta_work += abs(term)
     end
     @inbounds for i in 1:workspace.m
-        eta += system.b[i] * workspace.uy[i]
+        term = system.b[i] * workspace.uy[i]
+        eta += term
+        eta_work += abs(term)
     end
-    return system.kappa + system.tau * eta
+    denominator = system.kappa + system.tau * eta
+    work = abs(system.kappa) + abs(system.tau) * eta_work
+    return denominator, work
 end
 
 function _core_snapshot(source::AbstractVector{T}) where {T<:AbstractFloat}
@@ -1081,20 +1148,14 @@ function solve_core_direction!(
     @inbounds for i in 1:workspace.m
         eta_w += system.b[i] * workspace.wy[i]
     end
-    denominator = _core_denominator(workspace, system)
-    isfinite(denominator) || throw(ArgumentError(
-        "symmetric core scalar denominator is non-finite",
+    denominator, denominator_work = _core_denominator(workspace, system)
+    isfinite(denominator) && isfinite(denominator_work) || throw(ArgumentError(
+        "symmetric core scalar denominator or absolute work is non-finite",
     ))
     iszero(denominator) && throw(ArgumentError(
         "symmetric core scalar denominator is exactly zero",
     ))
-    denominator_scale = max(
-        one(T), abs(system.kappa), abs(system.tau),
-        maximum(abs, workspace.cr; init=one(T)),
-        maximum(abs, system.b; init=one(T)),
-        maximum(abs, workspace.ux; init=one(T)),
-        maximum(abs, workspace.uy; init=one(T)),
-    )
+    denominator_scale = max(one(T), denominator_work)
     sqrt_eps = sqrt(eps(one(T)))
     abs(denominator) <= sqrt_eps * denominator_scale && throw(
         ArgumentError(

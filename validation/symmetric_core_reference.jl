@@ -1054,6 +1054,18 @@ end
                   max(1.0, ws3.system.kappa, ws3.system.tau)) /
                 (ws3.system.tau * cr[1])
     @test_throws ArgumentError SDPX.solve_core_direction!(ws3)
+
+    # Catastrophic cancellation: a modest nonzero denominator is still
+    # unresolved relative to the absolute product work and must fail closed.
+    bundle4 = _c4_bundle(:identity)
+    ws4 = bundle4.ws
+    SDPX.solve_core_homogeneous!(ws4)
+    fill!(ws4.ux, 0.0)
+    fill!(ws4.uy, 0.0)
+    large = 1.0e20
+    ws4.ux[1] = large / ws4.cr[1]
+    ws4.uy[1] = -large / ws4.system.b[1]
+    @test_throws ArgumentError SDPX.solve_core_direction!(ws4)
 end
 
 @testset "C4 epoch, operator identity, and original-core guards" begin
@@ -1108,6 +1120,57 @@ end
     @test SDPX.factor_epoch(bundle3.cache) == bundle3.ws.factor_epoch + 1
     @test_throws ArgumentError SDPX.solve_core_direction!(bundle3.ws, bundle3.system)
     @test_throws ArgumentError SDPX.sync_core_factor_epoch!(bundle3.ws)
+
+    # First synchronization must bind to the actual matrix represented by the
+    # Fresh factor, not a pattern refilled after factorization.
+    bundle_first = _c4_bundle(:identity)
+    Ar_first = sparse(bundle_first.system.A * bundle_first.ws.V)
+    Ar_first.nzval .*= 1.1
+    Theta_first = 1.05 .* bundle_first.system.cone.operator
+    SDPX.refill!(bundle_first.pattern, Ar_first, Theta_first)
+    ws_first = SDPX.SymmetricCoreWorkspace(
+        bundle_first.pattern, bundle_first.cache,
+        bundle_first.ws.V, bundle_first.system,
+    )
+    @test_throws ArgumentError SDPX.sync_core_factor_epoch!(ws_first)
+
+    # Rank-reduced production branch requires A rows, c, and every dual RHS
+    # to lie in range(V); discarded nullspace components fail closed.
+    rank_bundle = _c4_bundle(:rank_reduced)
+    nullvec = [0.0, -inv(sqrt(2.0)), inv(sqrt(2.0))]
+    bad_c = rank_bundle.system.c + nullvec
+    bad_c_system = SDPX.NewtonSystem(
+        rank_bundle.system.A, rank_bundle.system.b, bad_c,
+        rank_bundle.system.cone, rank_bundle.system.tau,
+        rank_bundle.system.kappa, rank_bundle.system.rhs,
+    )
+    @test_throws ArgumentError SDPX.SymmetricCoreWorkspace(
+        rank_bundle.pattern, rank_bundle.cache,
+        rank_bundle.ws.V, bad_c_system,
+    )
+    bad_A = copy(rank_bundle.system.A)
+    bad_A[1, :] .+= nullvec
+    bad_A_system = SDPX.NewtonSystem(
+        bad_A, rank_bundle.system.b, rank_bundle.system.c,
+        rank_bundle.system.cone, rank_bundle.system.tau,
+        rank_bundle.system.kappa, rank_bundle.system.rhs,
+    )
+    @test_throws ArgumentError SDPX.SymmetricCoreWorkspace(
+        rank_bundle.pattern, rank_bundle.cache,
+        rank_bundle.ws.V, bad_A_system,
+    )
+    SDPX.solve_core_homogeneous!(rank_bundle.ws)
+    bad_dual_rhs = (
+        primal_affine=copy(rank_bundle.system.rhs.primal_affine),
+        dual_affine=rank_bundle.system.rhs.dual_affine + nullvec,
+        homogeneous_gap=rank_bundle.system.rhs.homogeneous_gap,
+        cone_corrector=copy(rank_bundle.system.rhs.cone_corrector),
+        tau_kappa=rank_bundle.system.rhs.tau_kappa,
+    )
+    bad_dual_system = _c4_rhs_system(rank_bundle, bad_dual_rhs)
+    @test_throws ArgumentError SDPX.solve_core_direction!(
+        rank_bundle.ws, bad_dual_system,
+    )
 
     # Zero residual with zero denominator scale is an exact zero, not Inf/NaN.
     bundle4 = _c4_bundle(:identity)
