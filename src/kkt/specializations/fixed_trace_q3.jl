@@ -761,7 +761,7 @@ function prepare_fixed_trace_q3_core_state(
         length(plan.zero_rows), -1, 0, 0, -1, 0, 0, 0, 0,
         nothing, 0,
         alloc_zeros(T, length(plan.zero_rows)),
-        _fixed_trace_structured_A_eligible(plan),
+        _fixed_trace_structured_A_eligible(T, plan),
     )
 end
 
@@ -769,7 +769,11 @@ end
 `A` must precede every soc block row so the CSC accumulation order of one
 output element (equality terms, then the block's tail terms) is reproduced
 exactly by the panel gemv followed by the per-block tail updates."""
-function _fixed_trace_structured_A_eligible(plan)
+function _fixed_trace_structured_A_eligible(::Type{T}, plan) where {T}
+    # The structured gemv panels were parity-validated bit-for-bit against
+    # the sparse products for MultiFloat through MFLA only.  BigFloat (BFLA)
+    # and plain Float64 keep the original sparse accumulation paths.
+    is_multifloat_arithmetic(T) || return false
     isempty(plan.zero_rows) && return false
     isempty(plan.soc_blocks) && return false
     first_soc = minimum(block.offset for block in plan.soc_blocks)
@@ -892,14 +896,19 @@ end
 function _fixed_trace_trial_residual!(
     base::HSDState{T}, core::FixedTraceQ3CoreWorkspace{T},
 ) where {T}
-    _fixed_trace_mul_A!(base.rPt, core, base.xt)
-    @inbounds for k in 1:base.m
-        base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+    if core.structured_A
+        _fixed_trace_mul_A!(base.rPt, core, base.xt)
+        @inbounds for k in 1:base.m
+            base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+        end
+        _fixed_trace_mul_At_dual_residual!(
+            base.rDt, core, base.yt, base.c, base.tau_t,
+        )
+        return nothing
     end
-    _fixed_trace_mul_At_dual_residual!(
-        base.rDt, core, base.yt, base.c, base.tau_t,
-    )
-    return nothing
+    # Structured-A kernels are MultiFloat-only (parity-validated); every
+    # other arithmetic keeps the shared generic trial residual.
+    return _hsd_trial_residual!(base)
 end
 
 """Invert one symmetric-positive 3×3 HKM map without heap scratch."""
@@ -1044,7 +1053,10 @@ function _fixed_trace_core_solve!(
     )
     fill!(y, zero(T))
     @inbounds for (index, row) in enumerate(plan.zero_rows)
-        y[row] = workspace.equality_solution[index]
+        # Owned element copy: BFLA mutates `equality_solution` in place on
+        # every solve, so a plain assignment would alias the slot's MPFR
+        # and let the next solve write through this y vector.
+        _owned_setindex!(y, row, workspace.equality_solution[index])
     end
     recover_block = function (block_index::Int)
         block = plan.soc_blocks[block_index]

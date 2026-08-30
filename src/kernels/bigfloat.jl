@@ -36,6 +36,27 @@ import MutableArithmetics as MA
 
 @inline _coo_owned_scalar(value::BigFloat) = MA.mutable_copy(value)
 
+"""
+    _owned_setindex!(destination, index, value)
+
+Assign `value` into `destination[index]` with owned semantics: for BigFloat
+the value is copied into the slot's own MPFR object (never aliasing the
+source), so later in-place provider mutation of the source cannot write
+through.  Bitstype element types keep plain assignment.
+"""
+@inline _owned_setindex!(destination, index, value) =
+    (destination[index] = value; destination)
+@inline function _owned_setindex!(
+    destination::AbstractArray{BigFloat}, index, value::BigFloat,
+)
+    # A fresh MPFR object via mutable_copy: the slot is replaced (breaking
+    # any fill!/zeros shared-object aliasing) and never aliases the source
+    # (so later in-place provider mutation of the source cannot write
+    # through).
+    destination[index] = MA.mutable_copy(value)
+    return destination
+end
+
 # MutableArithmetics intentionally does not expose in-place division for
 # BigFloat yet. The second triangular pass in `kcholsolve!` owns independent
 # destination objects created by the first pass, so MPFR may safely reuse that
