@@ -687,21 +687,11 @@ function fixed_trace_q3_core_preflight(
     memory_limit_bytes::Union{Nothing,Integer},
     current_rss_bytes::Union{Nothing,Integer},
 ) where {T<:AbstractFloat}
-    estimate = fixed_trace_q3_core_prepare_bytes(T, plan)
-    estimate < typemax(Int) || throw(ArgumentError(
-        "fixed-trace core memory estimate saturated",
-    ))
-    eligibility = conservative_memory_upper_bound_eligibility(
-        estimate, memory_limit_bytes, current_rss_bytes,
-    )
-    eligibility.eligible || throw(ArgumentError(
-        "fixed-trace core ineligible: $(eligibility.reason) " *
-        "(estimate=$(eligibility.estimate_bytes), " *
-        "rss=$(eligibility.current_rss_bytes), " *
-        "upper=$(eligibility.upper_bound_bytes), " *
-        "limit=$(eligibility.limit_bytes))",
-    ))
-    return estimate
+    # Fixed-trace workspace estimates remain diagnostic-only.  Peak RSS is
+    # dominated by model construction and JIT compilation, so comparing it to
+    # currently free memory rejected CSDR workspaces that previously ran
+    # successfully.  Allocation/factorization failures still propagate.
+    return fixed_trace_q3_core_prepare_bytes(T, plan)
 end
 
 """Infinity row-sum norm of `[A I -b]` for the fixed-trace primal gate."""
