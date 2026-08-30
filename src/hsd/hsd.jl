@@ -221,7 +221,11 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
         )
     end
 
-    Af = Matrix{T}(A)
+    # RRQR overwrites its work matrix.  `Matrix(A)`/`copy(A)` preserve MPFR
+    # object references for BigFloat, so make an owned arithmetic copy before
+    # any factorization; fixed-width and ordinary floats retain the same values.
+    Af = alloc_zeros(T, m, n)
+    copy_owned!(Af, A)
     # RRQR is applied to A': its leading Q columns therefore span range(A'),
     # which is the row space in the original n-dimensional x coordinates.
     F = LinearAlgebra.qr(Matrix(transpose(Af)), LinearAlgebra.ColumnNorm())
@@ -270,8 +274,9 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
     # orthonormal row-space basis and preserves the established bitwise path.
     if r == n
         V = IdentityRankBasis(T, n)
+        cr = copy_owned!(alloc_zeros(T, n), c)
         return (
-            Ar = SparseArrays.sparse(A), cr = copy(c), V = V,
+            Ar = SparseArrays.sparse(A), cr = cr, V = V,
             cnull = zeros(T, n), rank = r,
             rank_tolerance = cutoff,
             objective_tolerance = T(100 * max(m, n)) * eps(T) *
@@ -300,7 +305,7 @@ function _hsd_rowspace_reduction(A::AbstractMatrix{T}, c::AbstractVector{T}) whe
     scaleC = max(norm(c, Inf), one(T))
     compat_tol = T(100 * max(m, n)) * eps(T) * scaleC
     compat_noise = T(10) * eps(T) * scaleC
-    cnull = copy(c)
+    cnull = copy_owned!(alloc_zeros(T, n), c)
     cnull_norm = zero(T)
     @inbounds for i in 1:n
         projected = zero(T)

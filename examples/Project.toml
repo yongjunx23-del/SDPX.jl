@@ -6,5 +6,5 @@ SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
 [compat]
 GenericLinearAlgebra = "0.3, 0.4"
 MultiFloats = "3"
-SDPX = "0.5"
+SDPX = "0.6"
 julia = "1.10"

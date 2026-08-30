@@ -56,7 +56,29 @@ Pkg.develop(path=ARGS[3])
 Pkg.add(["MultiFloats", "GenericLinearAlgebra"])
 ' "$ROOT" "$SDPX_MFLA_PROJECT" "$SDPX_BFLA_PROJECT"
 
-julia --startup-file=no --project="$SMOKE_ENV" -t1 \
-  "$ROOT/validation/providers/provider_smoke.jl"
+# Julia 1.12 can exhaust its inference compiler when the MFLA fixed-width
+# specializations and the BFLA/MPFR specialization are compiled in the same
+# process.  Each target is an independent provider contract, so run `all` as
+# two fresh processes.  This changes no solver/provider route and makes the
+# documented smoke command reproducible.
+TARGET="${SDPX_PROVIDER_SMOKE_TARGET:-all}"
+case "$TARGET" in
+  all)
+    for provider_target in mfla bfla; do
+      SDPX_PROVIDER_SMOKE_TARGET="$provider_target" \
+        julia --startup-file=no --project="$SMOKE_ENV" -t1 \
+          "$ROOT/validation/providers/provider_smoke.jl"
+    done
+    ;;
+  mfla|bfla)
+    SDPX_PROVIDER_SMOKE_TARGET="$TARGET" \
+      julia --startup-file=no --project="$SMOKE_ENV" -t1 \
+        "$ROOT/validation/providers/provider_smoke.jl"
+    ;;
+  *)
+    echo "SDPX_PROVIDER_SMOKE_TARGET must be all, mfla, or bfla" >&2
+    exit 2
+    ;;
+esac
 
-echo "provider smoke completed: mfla=$SDPX_MFLA_PROJECT bfla=$SDPX_BFLA_PROJECT"
+echo "provider smoke completed: target=$TARGET mfla=$SDPX_MFLA_PROJECT bfla=$SDPX_BFLA_PROJECT"

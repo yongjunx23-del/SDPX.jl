@@ -321,6 +321,22 @@ end
     return scale <= 128 ? :small : scale <= 2_000 ? :medium : :large
 end
 
+# Sparse QR rank authority is deliberately Float64-only.  For a bounded
+# high-precision bordered setup, an exact-arithmetic dense RRQR is instead a
+# valid rank authority: it neither downcasts nor selects another solver.  The
+# cap prevents a generic sparse high-precision model from silently becoming a
+# dense one; fixed-trace structural reduction keeps its specialized route.
+const _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES = 4_096
+
+@inline function _native_hsd_dense_rank_fallback_allowed(
+    A::SparseMatrixCSC{T,Int},
+) where {T<:AbstractFloat}
+    return T !== Float64 && length(A) <=
+           _NATIVE_HSD_DENSE_HIGH_PRECISION_RANK_MAX_ENTRIES
+end
+
+@inline _native_hsd_dense_rank_fallback_allowed(::AbstractMatrix) = false
+
 @inline function _native_hsd_descriptor_reason(
     reduction::HSDEqualityReduction,
     active_rows::Int,
@@ -1111,11 +1127,19 @@ function _public_native_hsd_core(
     end
 
     if settings.kkt_route === :bordered
-        row_reduction = fixed_trace_plan === nothing ?
-            _hsd_rowspace_reduction(solve_reduced) :
+        row_reduction = if fixed_trace_plan !== nothing
             hsd_structural_full_rank_reduction(
                 solve_reduced.A, solve_reduced.c,
             )
+        elseif _native_hsd_dense_rank_fallback_allowed(solve_reduced.A)
+            # Small high-precision sparse systems cannot use Float64 SPQR.
+            # This is an exact-arithmetic RRQR rank analysis only; the HSD
+            # solve, original-coordinate certificate, and all gates remain
+            # unchanged.
+            _hsd_rowspace_reduction(Matrix(solve_reduced.A), solve_reduced.c)
+        else
+            _hsd_rowspace_reduction(solve_reduced)
+        end
         if row_reduction isa SparseEqualityReduction &&
            (row_reduction.status !== SparseEqualityReady ||
             row_reduction.mode !== :preserve_original)

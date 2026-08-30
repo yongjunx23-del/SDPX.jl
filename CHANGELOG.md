@@ -4,6 +4,41 @@ All notable changes to SDPX.jl are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-08-30
+
+### User-facing
+
+- One production numerical path: all Model, MOI, CLI, compact conic, and
+  qualified compatibility solves compile to the product-cone HSD solver.  The
+  retired family lowerers, PSD lift, standalone NativeSOC frontend, and
+  standalone KKT engine are not reachable.
+- Compatibility calls using `ConicProblem` with `SolverOptions` remain
+  supported through `solve_socp` and are adapted directly to public Settings
+  and product HSD; no second solver is restored.
+- Scalar closure handles compatible singular gauges without violating the
+  frozen five-equation Newton acceptance gate.  Power-cone root certification
+  accepts the best representable root only after the full shadow/Hessian/
+  Fenchel certification checks pass.
+- CLI option values supplied as `--key=value` are validated against the
+  whitelist, and equality COO input rejects malformed lengths and duplicate
+  coordinates before construction.
+
+### Performance and provider integration
+
+- Float64x4 fixed-trace CSDR kernels use fused MFLA accumulation and SIMD
+  SYRK/GEMMT tails while preserving bit-identical certified results.
+- BigFloat fixed-trace paths own mutable MPFR values before in-place kernels;
+  the optional BFLA provider integration remains fail-closed.
+- The reproducible PackageCompiler workload can build a performance sysimage
+  for public E2E and fixed-trace workloads.
+
+### Internal
+
+- Phase 2 removes the unreachable family lowering/result stack, standalone
+  KKT implementation, and reduced-arrow MultiFloats extension code.  The
+  remaining bundled LinearAlgebra provider and legacy-shaped result/options
+  records are compatibility protocols only and bridge to product HSD.
+
 ## [0.5.0] — unreleased
 
 ### User-facing
