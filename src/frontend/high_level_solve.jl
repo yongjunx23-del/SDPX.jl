@@ -137,3 +137,14 @@ function solve_lp(
     )
     return solve(problem, options)
 end
+
+"""Compatibility overload: route legacy `SolverOptions` through the one
+product-HSD bridge.  No NativeSOC numerical engine is restored."""
+function solve_socp(
+    problem::ConicProblem{T}, options::SolverOptions{T},
+) where {T<:AbstractFloat}
+    return _bridge_conic_solve(problem, options)
+end
+
+solve(problem::ConicProblem{T}, options::SolverOptions{T}) where {T<:AbstractFloat} =
+    solve_socp(problem, options)
