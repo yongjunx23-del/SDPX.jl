@@ -90,13 +90,22 @@ function _take_option(arguments, index)
     token = arguments[index]
     startswith(token, "--") || error("internal CLI parser error")
     body = token[3:end]
+    inline_value = nothing
+    key = body
     if occursin('=', body)
         key, value = split(body, '='; limit=2)
-        return key, value, index + 1
+        inline_value = value
     end
-    key = body
-    key in ("help", "quiet") && return key, "true", index + 1
+    key in ("help", "quiet") && begin
+        inline_value === nothing || error(
+            "flag option --$key does not accept a value",
+        )
+        return key, "true", index + 1
+    end
     key in VALUE_OPTIONS || error("unknown option --$key")
+    if inline_value !== nothing
+        return key, inline_value, index + 1
+    end
     index < length(arguments) || error("--$key requires a value")
     return key, arguments[index + 1], index + 2
 end

@@ -135,10 +135,24 @@ function _build_problem(::Type{T}, spec) where {T}
         rhs = T[_number(T, v) for v in get(eq, "rhs", Any[])]
         n = length(rhs)
         B = zeros(T, m, n)
-        for (r, c, v) in zip(get(eq, "rows", Any[]), get(eq, "cols", Any[]),
-                             get(eq, "values", Any[]))
+        rows = get(eq, "rows", Any[])
+        cols = get(eq, "cols", Any[])
+        values = get(eq, "values", Any[])
+        lengths = unique((length(rows), length(cols), length(values)))
+        length(lengths) == 1 || error(
+            "equalities: rows/cols/values must have equal lengths, got " *
+            "$(length(rows)) / $(length(cols)) / $(length(values))",
+        )
+        seen = Set{Tuple{Int,Int}}()
+        for (r, c, v) in zip(rows, cols, values)
             (1 <= r <= m && 1 <= c <= n) ||
                 error("equalities: index ($r,$c) outside ($m,$n)")
+            coordinate = (Int(r), Int(c))
+            coordinate in seen && error(
+                "equalities: duplicate coordinate ($(r),$(c)); the schema " *
+                "describes one entry per coordinate",
+            )
+            push!(seen, coordinate)
             B[Int(r), Int(c)] = _number(T, v)
         end
     else
