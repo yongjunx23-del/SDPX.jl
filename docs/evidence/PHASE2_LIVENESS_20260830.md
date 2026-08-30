@@ -87,3 +87,20 @@ No downstream-qualified surface is deleted in the first Phase 2 batch.
   provider smoke fails if the include is removed.  It may be deleted only
   after splitting validation/legacy arrow methods out of the production MFLA
   extension and rerunning provider compatibility evidence.
+
+## Phase 3 P1 cold-start evidence
+
+A PackageCompiler incremental sysimage built by
+`scripts/build_performance_sysimage.jl` from
+`scripts/precompile_performance_workload.jl` (seven public E2E cases plus
+Float64x4/BigFloat256 fixed-trace paths) measured on this host:
+
+| measurement | result |
+|---|---:|
+| sysimage size | 647 MiB |
+| `using SDPX` with sysimage | 0.17 s |
+| public E2E process with sysimage | 15.73 s total; 6.8 s in-suite |
+| E2E result | 21/21 pass |
+
+The image is Julia-version, environment, source-SHA, and CPU-target specific.
+Changed methods fall back to ordinary JIT; rebuild after a performance batch.
