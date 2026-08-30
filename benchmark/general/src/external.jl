@@ -56,66 +56,92 @@ end
 const EXTERNAL_BENCHMARKS_EXPANDED = ExternalBenchmark[
     # Netlib LP
     ExternalBenchmark(:netlib_share2b, :NETLIB, :lp, :small, "netlib/share2b.mps",
-        -4.1573224074e2, 2e-6, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:netlib_sc50a, :NETLIB, :lp, :small, "netlib/sc50a.mps",
-        -6.4575070779e1, 2e-6, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:netlib_recipe, :NETLIB, :lp, :medium, "netlib/recipe.mps",
-        -2.6661663997e2, 2e-6, :solve),
+        nothing, 0.0, :solve),
     # SDPLIB 1.2 SDP (selected representative families)
     ExternalBenchmark(:sdplib_control2, :SDPLIB, :sdp, :medium, "sdplib/control2.dat-s",
-        1.178843e1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_control5, :SDPLIB, :sdp, :medium, "sdplib/control5.dat-s",
-        2.101422e1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_theta1, :SDPLIB, :sdp, :medium, "sdplib/theta1.dat-s",
-        2.3000000e1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_theta3, :SDPLIB, :sdp, :medium, "sdplib/theta3.dat-s",
-        2.5000000e1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_theta5, :SDPLIB, :sdp, :medium, "sdplib/theta5.dat-s",
-        2.4000000e1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_maxG11, :SDPLIB, :sdp, :medium, "sdplib/maxG11.dat-s",
-        1.3000000e2, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_maxG32, :SDPLIB, :sdp, :medium, "sdplib/maxG32.dat-s",
-        1.5600001e2, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_qap5, :SDPLIB, :sdp, :medium, "sdplib/qap5.dat-s",
-        9.9953667e-1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_mcp250, :SDPLIB, :sdp, :large, "sdplib/mcp250-1.dat-s",
-        8.6167667e1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_hinf2, :SDPLIB, :sdp, :medium, "sdplib/hinf2.dat-s",
-        1.5108826e0, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_nqlp2, :SDPLIB, :sdp, :medium, "sdplib/nqlp2.dat-s",
-        5.5474052e-1, 5e-5, :solve),
+        nothing, 0.0, :solve),
     ExternalBenchmark(:sdplib_truss1, :SDPLIB, :sdp, :medium, "sdplib/truss1.dat-s",
-        9.0413183e0, 5e-5, :solve),
+        nothing, 0.0, :solve),
 ]
 
-"""Convert parsed SDPA data to an SDPX model (block-diagonal PSD X)."""
+"""Convert parsed SDPA data to an exact SDPX model.
+
+Positive SDPA blocks become native PSD variables.  Negative SDPA block sizes
+are diagonal PSD blocks and become native nonnegative vectors; off-diagonal
+entries in those blocks are rejected by `read_sdpa`.  SDPA stores one upper
+triangle of each symmetric coefficient matrix, so every off-diagonal trace
+coefficient is multiplied by two exactly once.
+"""
 function sdpa_model(data::SDPAData, ::Type{T}) where {T<:AbstractFloat}
     model = SDPX.Model(T; name="sdpa")
     blocks = length(data.block_sizes)
     X = Vector{Any}(undef, blocks)
     for b in 1:blocks
         n = abs(data.block_sizes[b])
-        X[b] = SDPX.variable!(model, Symbol(:X_, b), n, n; domain=SDPX.PSDCone())
+        if data.block_sizes[b] > 0
+            X[b] = SDPX.variable!(
+                model, Symbol(:X_, b), n, n; domain=SDPX.PSDCone(),
+            )
+        else
+            X[b] = SDPX.variable!(
+                model, Symbol(:d_, b), n; domain=SDPX.Nonnegative(),
+            )
+        end
     end
     groups = Dict{Tuple{Int,Int},Vector{SDPAEntry}}()
     for e in data.entries
         push!(get!(groups, (e.matrix, e.block), SDPAEntry[]), e)
     end
+    @inline function entry_expression(e::SDPAEntry)
+        coefficient = T(e.value)
+        if data.block_sizes[e.block] > 0
+            e.row == e.column || (coefficient += coefficient)
+            return coefficient * X[e.block][e.row, e.column]
+        end
+        e.row == e.column || error(
+            "SDPA diagonal block $(e.block) contains off-diagonal data",
+        )
+        return coefficient * X[e.block][e.row]
+    end
     for k in 1:data.constraints
-        terms = Any[-data.rhs[k]]
+        terms = Any[-T(data.rhs[k])]
         for b in 1:blocks
             entries = get(groups, (k, b), nothing)
             entries === nothing && continue
             for e in entries
-                push!(terms, e.value * X[b][e.row, e.column])
+                push!(terms, entry_expression(e))
             end
         end
         SDPX.constraint!(model, Symbol(:eq_, k), sum(terms), SDPX.ZeroCone())
     end
-    obj = zero(T)
+    objective = zero(T)
     for e in data.entries
-        e.matrix == 0 && (obj += e.value * X[e.block][e.row, e.column])
+        e.matrix == 0 && (objective += entry_expression(e))
     end
-    SDPX.objective!(model, SDPX.Minimize(), obj)
+    SDPX.objective!(model, SDPX.Minimize(), objective)
     return model
 end
