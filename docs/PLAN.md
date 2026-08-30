@@ -241,3 +241,31 @@ expanded fails KKT initialization.  Neither may be reported as CSDR progress.
 - No silent Float64 downgrade is allowed.
 - No family-specific hidden fallback or legacy public selector is allowed.
 - Historical reviews are evidence, not current architecture specifications.
+
+## 8. Phase 1 execution status (2026-08-30)
+
+Phase 1 (C1-C6) is complete on this branch:
+
+| ID | Fix commit | Exit evidence |
+| --- | --- | --- |
+| C1 | 0f47d37 | `validation/scalar_closure.jl` (classification fixtures, public min x >= 0 -> Optimal with original-coordinate certification, scaled variants, 1x1 PSD edge); symmetric-core and fixed-trace share one classifier |
+| C2 | eb6645c | `validation/power_conjugate_root.jl` (captured-root representability fixture, 256-bit oracle sanity, fail-closed checks); power_epigraph_small default 1e-8 -> Optimal, certificate valid, objective within tolerance |
+| C3 | 18ac53b | QDLDL refine_once! via the provider seam; refine lifecycle validation (10 tests) with original-operator residual contraction |
+| C4 | 18ac53b | FactorRequirements <: AbstractFactorRequirements; frozen-shape ownership enforced and tested |
+| C5 | 48d951f | bin/test/runtests.jl CLI option validation (6 tests) |
+| C6 | 48d951f | equality COO length/duplicate validation (4 tests) |
+
+Additional state on this branch beyond the reviewed plan:
+
+- CSDR fixed-trace Q3 production solve: alpha3 Float64x4 21.7s and alpha9
+  76.8s (bit-identical trajectories), BigFloat256 alpha3 optimal/certified
+  (127s) — the BigFloat path required fixing the shared-MPFR aliasing traps
+  (fill!/zeros shared slots + in-place provider mutation) via
+  `_owned_setindex!` and a trial-residual fallback.
+- MFLA mulacc_x4 fused kernel (1,000,005-case adversarial bitwise validation)
+  and SIMD tail lanes for syrk/gemv remainders (bit-identical).
+- benchmark/general inventory expanded: 20 external specs (SDPLIB 14,
+  Netlib 5, CBLIB 1) with `sdpa_model` conversion and vendored data.
+
+The Phase 2 (ownership simplification) and Phase 3 (evidence-driven
+performance) work of the reviewed plan remain open on top of this branch.
