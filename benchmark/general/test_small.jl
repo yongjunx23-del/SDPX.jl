@@ -33,6 +33,11 @@ end
     run = run_tier(:small; assert_seconds=30.0)
     @test length(run.results) == 17
     @test all(result -> result.expectation_met, run.results)
-    @test count(result -> result.certificate_valid, run.results) == 10
+    # C2 representability-aware Power root termination promotes the checked-in
+    # power_epigraph case from its reviewed failure to a certified optimum.
+    @test count(result -> result.certificate_valid, run.results) == 11
     @test count(result -> !result.certificate_valid, run.results) == 6
+    power = only(filter(result -> result.id === :power_epigraph_small, run.results))
+    @test power.status === :optimal
+    @test power.certificate_valid
 end
