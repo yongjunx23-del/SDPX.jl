@@ -1,5 +1,5 @@
 #=====================================================================#
-#    FactorCache capacity requirements (Subagent D).
+#    FactorCache capacity requirements.
 #
 #    `FactorRequirements` is the single, exact source of capacity.  All storage
 #    allocation happens in `prepare!(cache, requirements)`; after `prepare!`
@@ -9,27 +9,28 @@
 #=====================================================================#
 
 """
-    FactorRequirements
+    AbstractFactorRequirements
 
-Exact capacity declaration for a factor cache.  Passed to `prepare!` and is the
-sole allocation source.  `n` is the matrix dimension; `symbolic_epoch` fixes the
+Supertype for provider-specific requirements objects.  `FactorRequirements`
+subtypes it so one protocol signature covers the standard and provider
+shapes; providers may add capacity fields beyond `n`.
+"""
+abstract type AbstractFactorRequirements end
+
+"""
+    struct FactorRequirements <: AbstractFactorRequirements
+
+Standard frozen-shape capacity declaration for a factor cache.  Passed to
+`prepare!`; `n` is the matrix dimension and `symbolic_epoch` fixes the
 identity of the symbolic structure so it can be reused across iterations.
 
-Providers with additional capacity needs (sparsity, arrow size, ...) may either
-extend this struct with more fields or subtype `AbstractFactorRequirements`.
+Providers with additional capacity needs (sparsity, arrow size, ...) may
+either extend this struct with more fields or subtype
+`AbstractFactorRequirements`.
 """
-struct FactorRequirements
+struct FactorRequirements <: AbstractFactorRequirements
     n::Int
     symbolic_epoch::Int
 end
 
 FactorRequirements(n::Integer) = FactorRequirements(Int(n), 0)
-
-"""
-    AbstractFactorRequirements
-
-Marker supertype for provider-specific requirements objects, should a provider
-need capacity fields beyond `n`.  The protocol accepts any object here; the
-reference and route caches use `FactorRequirements`.
-"""
-abstract type AbstractFactorRequirements end

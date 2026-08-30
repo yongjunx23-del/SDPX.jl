@@ -143,6 +143,17 @@ function prepare!(
 ) where {T}
     n = getproperty(requirements, :n)
     n >= 0 || throw(ArgumentError("SparseQDLDLCache dimension must be nonnegative"))
+    # Frozen-shape ownership: the provider was constructed for the pattern
+    # passed at build time.  A changed dimension or pattern must reject rather
+    # than silently re-prepare a provider built for a previous shape.
+    if cache.factor_epoch > 0 || cache.matrix_epoch > 0 || cache.status !== Unprepared
+        if cache.n != n || cache.prepared_shape != (n, n)
+            throw(ArgumentError(
+                "SparseQDLDLCache shape change requires a new cache; " *
+                "rebuild the provider",
+            ))
+        end
+    end
     cache.n = n
     cache.prepared_shape = (n, n)
     cache.symbolic_epoch = getproperty(requirements, :symbolic_epoch)
@@ -229,7 +240,21 @@ function refine_once!(
     correction::AbstractVector{T},
 ) where {T}
     _require_fresh_for_refine(cache.status)
-    solve!(cache.provider, correction, residual)
+    cache.factor_epoch > 0 ||
+        throw(ArgumentError("QDLDL refine_once! requires a factored cache"))
+    length(residual) == cache.n || throw(DimensionMismatch(
+        "QDLDL refine residual length != n",
+    ))
+    length(correction) == cache.n || throw(DimensionMismatch(
+        "QDLDL refine correction length != n",
+    ))
+    all(isfinite, residual) || throw(ArgumentError(
+        "QDLDL refine residual contains non-finite data",
+    ))
+    _qdldl_provider_solve!(cache.provider, correction, residual)
+    all(isfinite, correction) || throw(ArgumentError(
+        "QDLDL refine correction produced non-finite data",
+    ))
     cache.refine_count += 1
     return correction
 end
