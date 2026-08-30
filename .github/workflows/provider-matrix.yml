@@ -1,0 +1,77 @@
+name: Provider compatibility matrix
+
+on:
+  push:
+    branches:
+      - main
+    tags: ['*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# MFLA and BFLA are deliberately developed from source because they are not
+# registry dependencies. Each leg exercises one provider in an isolated
+# environment through scripts/provider_smoke.sh; the companion provider is
+# not installed unless the `all` target is requested.
+jobs:
+  provider:
+    name: ${{ matrix.provider }} ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: MFLA
+            package: MultiFloatLinearAlgebra
+            target: mfla
+            version: minimum
+            ref: c67f10780c8c414353f78034705b537f3a510cd7
+          - provider: MFLA
+            package: MultiFloatLinearAlgebra
+            target: mfla
+            version: latest
+            ref: b38dea165d0973ae06ce245dbdf11298b123c9ea
+          - provider: BFLA
+            package: BigFloatLinearAlgebra
+            target: bfla
+            version: minimum
+            ref: ed75f0ebd298f81ab99ede3e1d98d7ea87f42736
+          - provider: BFLA
+            package: BigFloatLinearAlgebra
+            target: bfla
+            version: latest
+            ref: f95d3e623990e8ae5848916ba92d93897dcb1e31
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: provider-${{ matrix.provider }}-${{ matrix.version }}
+      - name: Clone pinned provider checkout
+        env:
+          PROVIDER: ${{ matrix.provider }}
+          PROVIDER_REF: ${{ matrix.ref }}
+        run: |
+          if [ "$PROVIDER" = MFLA ]; then
+            git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
+            git -C "$RUNNER_TEMP/MFLA" checkout "$PROVIDER_REF"
+          else
+            git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
+            git -C "$RUNNER_TEMP/BFLA" checkout "$PROVIDER_REF"
+          fi
+      - name: Run isolated provider smoke
+        env:
+          SDPX_MFLA_PROJECT: ${{ runner.temp }}/MFLA
+          SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
+          SDPX_PROVIDER_SMOKE_ENV: ${{ runner.temp }}/provider-smoke
+          SDPX_PROVIDER_SMOKE_TARGET: ${{ matrix.target }}
+        run: ./scripts/provider_smoke.sh
+      - name: Run MFLA operation integration
+        if: matrix.target == 'mfla'
+        env:
+          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
+        run: julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/multifloat_linear_algebra_integration.jl

@@ -25,6 +25,17 @@ Minimize
 Maximize
 ```
 
+## Starts
+
+The native product-HSD route is cold-start only at present, but models retain
+typed start values for qualified integrations and future continuation routes:
+
+```@docs
+set_start!
+set_dual_start!
+set_dual_slack_start!
+```
+
 ## Settings and solve
 
 ```@docs

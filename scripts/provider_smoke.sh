@@ -19,13 +19,26 @@ LOCAL_PROVIDERS_ROOT="$(cd "$ROOT/.." && pwd)"
 : "${SDPX_MFLA_PROJECT:=$LOCAL_PROVIDERS_ROOT/MultiFloatLinearAlgebra.jl}"
 : "${SDPX_BFLA_PROJECT:=$LOCAL_PROVIDERS_ROOT/BigFloatLinearAlgebra.jl}"
 
-if [ ! -d "$SDPX_MFLA_PROJECT" ]; then
-  echo "MFLA checkout not found at $SDPX_MFLA_PROJECT (set SDPX_MFLA_PROJECT)" >&2
-  exit 1
+TARGET="${SDPX_PROVIDER_SMOKE_TARGET:-all}"
+case "$TARGET" in
+  all|mfla|bfla) ;;
+  *)
+    echo "SDPX_PROVIDER_SMOKE_TARGET must be all, mfla, or bfla" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$TARGET" = all ] || [ "$TARGET" = mfla ]; then
+  if [ ! -d "$SDPX_MFLA_PROJECT" ]; then
+    echo "MFLA checkout not found at $SDPX_MFLA_PROJECT (set SDPX_MFLA_PROJECT)" >&2
+    exit 1
+  fi
 fi
-if [ ! -d "$SDPX_BFLA_PROJECT" ]; then
-  echo "BFLA checkout not found at $SDPX_BFLA_PROJECT (set SDPX_BFLA_PROJECT)" >&2
-  exit 1
+if [ "$TARGET" = all ] || [ "$TARGET" = bfla ]; then
+  if [ ! -d "$SDPX_BFLA_PROJECT" ]; then
+    echo "BFLA checkout not found at $SDPX_BFLA_PROJECT (set SDPX_BFLA_PROJECT)" >&2
+    exit 1
+  fi
 fi
 
 SMOKE_ENV="${SDPX_PROVIDER_SMOKE_ENV:-}"
@@ -46,22 +59,33 @@ trap cleanup EXIT
 export SDPX_MFLA_PROJECT
 export SDPX_BFLA_PROJECT
 export JULIA_DEPOT_PATH="$SMOKE_ENV/depot:${JULIA_DEPOT_PATH:-$HOME/.julia}"
-export JULIA_PKG_OFFLINE=true
+
+# Local development may opt into an offline run when all dependencies are
+# already cached. CI and clean checkouts must resolve registered dependencies,
+# so online resolution is the default.
+export JULIA_PKG_OFFLINE="${JULIA_PKG_OFFLINE:-false}"
+
+DEVELOP_ARGS=("$ROOT")
+if [ "$TARGET" = all ] || [ "$TARGET" = mfla ]; then
+  DEVELOP_ARGS+=("$SDPX_MFLA_PROJECT")
+fi
+if [ "$TARGET" = all ] || [ "$TARGET" = bfla ]; then
+  DEVELOP_ARGS+=("$SDPX_BFLA_PROJECT")
+fi
 
 julia --startup-file=no --project="$SMOKE_ENV" -e '
 using Pkg
-Pkg.develop(path=ARGS[1])
-Pkg.develop(path=ARGS[2])
-Pkg.develop(path=ARGS[3])
+for path in ARGS
+    Pkg.develop(path=path)
+end
 Pkg.add(["MultiFloats", "GenericLinearAlgebra"])
-' "$ROOT" "$SDPX_MFLA_PROJECT" "$SDPX_BFLA_PROJECT"
+' "${DEVELOP_ARGS[@]}"
 
 # Julia 1.12 can exhaust its inference compiler when the MFLA fixed-width
 # specializations and the BFLA/MPFR specialization are compiled in the same
 # process.  Each target is an independent provider contract, so run `all` as
 # two fresh processes.  This changes no solver/provider route and makes the
 # documented smoke command reproducible.
-TARGET="${SDPX_PROVIDER_SMOKE_TARGET:-all}"
 case "$TARGET" in
   all)
     for provider_target in mfla bfla; do
@@ -74,10 +98,6 @@ case "$TARGET" in
     SDPX_PROVIDER_SMOKE_TARGET="$TARGET" \
       julia --startup-file=no --project="$SMOKE_ENV" -t1 \
         "$ROOT/validation/providers/provider_smoke.jl"
-    ;;
-  *)
-    echo "SDPX_PROVIDER_SMOKE_TARGET must be all, mfla, or bfla" >&2
-    exit 2
     ;;
 esac
 

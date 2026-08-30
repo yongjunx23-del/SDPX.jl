@@ -45,7 +45,11 @@ makedocs(;
         "Development" => "development.md",
     ],
     checkdocs=:exports,
-    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS],
+    # SymmetricCones is an explicitly qualified experimental namespace. Its
+    # exported algebra is not part of SDPX's frozen public API, so documenting
+    # the root API must not make that nested implementation namespace a build
+    # requirement.
+    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS, SDPX.SymmetricCones],
 )
 
 if get(ENV, "CI", "false") == "true"

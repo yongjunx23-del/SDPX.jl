@@ -578,10 +578,19 @@ function hsd_recover_optimal!(
     _hsd_eq_scatter_active!(s, reduction, s_reduced)
     _hsd_eq_scatter_active!(y, reduction, y_reduced)
 
-    dual_rhs = -original.c - transpose(original.A[reduction.reduced_to_full, :]) * y_reduced
-    equality_dual = zeros(T, length(reduction.zero_rows))
-    hsd_recover_equality_dual!(equality_dual, reduction, dual_rhs; tol=tolerance) || return false
-    y[reduction.zero_rows] .= equality_dual
+    # With no eliminated ZeroCone rows there is no equality multiplier to
+    # recover.  In particular, do not feed the residual of the active dual
+    # equation into the empty QR solve: that would test it against an
+    # unrelated absolute scale before the data-normalized dual residual gate
+    # below has a chance to verify the full canonical point.
+    if !isempty(reduction.zero_rows)
+        dual_rhs = -original.c -
+                   transpose(original.A[reduction.reduced_to_full, :]) * y_reduced
+        equality_dual = zeros(T, length(reduction.zero_rows))
+        hsd_recover_equality_dual!(equality_dual, reduction, dual_rhs; tol=tolerance) ||
+            return false
+        y[reduction.zero_rows] .= equality_dual
+    end
 
     primal_residual = original.A * x + s - original.b
     dual_residual = transpose(original.A) * y + original.c
@@ -654,10 +663,16 @@ function hsd_recover_primal_ray!(
     tolerance = _hsd_eq_recovery_tolerance(reduction, tol)
     y = zeros(T, canonical_num_slack(original))
     _hsd_eq_scatter_active!(y, reduction, y_reduced)
-    rhs = -transpose(original.A[reduction.reduced_to_full, :]) * y_reduced
-    equality_dual = zeros(T, length(reduction.zero_rows))
-    hsd_recover_equality_dual!(equality_dual, reduction, rhs; tol=tolerance) || return false
-    y[reduction.zero_rows] .= equality_dual
+    # See `hsd_recover_optimal!`: the full ray residual is checked below on
+    # the appropriate ray/data scale, so an empty equality panel must not
+    # impose a second absolute-scale check.
+    if !isempty(reduction.zero_rows)
+        rhs = -transpose(original.A[reduction.reduced_to_full, :]) * y_reduced
+        equality_dual = zeros(T, length(reduction.zero_rows))
+        hsd_recover_equality_dual!(equality_dual, reduction, rhs; tol=tolerance) ||
+            return false
+        y[reduction.zero_rows] .= equality_dual
+    end
     residual = transpose(original.A) * y
     pairing = dot(original.b, y)
     scale = max(one(T), _hsd_eq_maxabs(original.A.nzval) * max(_hsd_eq_maxabs(y), one(T)),

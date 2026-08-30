@@ -50,10 +50,13 @@ outputs = Outputs(
     objectives=true,
     certificate=:summary,
     diagnostics=:full,
-    history=true,
-    trace=true,
 )
 ```
+
+The direct native product-HSD route does not publish iteration history or a
+`PerformanceTrace`; requesting either with `history=true` or `trace=true`
+fails closed. Those retention flags remain available only to qualified
+compatibility routes that provide the corresponding payload.
 
 ## Execution provenance
 

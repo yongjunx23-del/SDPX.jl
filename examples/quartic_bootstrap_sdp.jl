@@ -13,22 +13,34 @@ produces the finite-order bootstrap interval.
 
 const QUARTIC_REFERENCE_W2 = "0.467919916973665188637421298330615640"
 
-function load_requested_provider(provider::Symbol)
-    provider === :multifloat && try
+function load_requested_provider(::Type{T}, provider::Symbol) where {T<:AbstractFloat}
+    provider in (:auto, :standard, :multifloat, :bfla) || error(
+        "provider must be auto, standard, multifloat, or bfla for the native SDP example",
+    )
+    if provider === :multifloat ||
+       (provider === :auto && T <: MultiFloats.MultiFloat)
+        T <: MultiFloats.MultiFloat || error(
+            "provider=:multifloat requires a fixed-width MultiFloat model",
+        )
+        try
         @eval import MultiFloatLinearAlgebra
-    catch error_value
-        error(
-            "provider=:multifloat requires MultiFloatLinearAlgebra in the active " *
-            "environment: $(sprint(showerror, error_value))",
-        )
+        catch error_value
+            error(
+                "provider=:multifloat requires MultiFloatLinearAlgebra in the active " *
+                "environment: $(sprint(showerror, error_value))",
+            )
+        end
     end
-    provider === :bfla && try
+    if provider === :bfla || (provider === :auto && T === BigFloat)
+        T === BigFloat || error("provider=:bfla requires a BigFloat model")
+        try
         @eval import BigFloatLinearAlgebra
-    catch error_value
-        error(
-            "provider=:bfla requires BigFloatLinearAlgebra in the active " *
-            "environment: $(sprint(showerror, error_value))",
-        )
+        catch error_value
+            error(
+                "provider=:bfla requires BigFloatLinearAlgebra in the active " *
+                "environment: $(sprint(showerror, error_value))",
+            )
+        end
     end
     return nothing
 end
@@ -110,12 +122,11 @@ function solve_quartic_bound(
     model, w = quartic_bootstrap_model(T, bits, g, order, sense)
     settings = Settings(
         model;
-        algorithm=:sdp,
-        formulation=:variable_space_schur,
-        provider=provider,
-        # This tutorial matrix is small and dense.  The optional MFLA/BFLA
-        # providers operate on the dense variable-space route, so keep the
-        # route explicit instead of turning this file into a planner demo.
+        # The public native route chooses the formulation and arithmetic
+        # provider from the model. `provider` is only a dependency-loading
+        # hint handled by `load_requested_provider` before this call.
+        formulation=:auto,
+        provider=:auto,
         sparse=:off,
         presolve=:off,
         limits=Limits(iterations=max_iterations, time=120.0, threads=threads),
@@ -131,7 +142,6 @@ function solve_quartic_bound(
         objectives=true,
         certificate=:summary,
         diagnostics=:summary,
-        trace=true,
     )
     result = nothing
     optimize_seconds = @elapsed result = optimize!(model; settings=settings, outputs=outputs)
@@ -145,7 +155,7 @@ function solve_quartic_bound(
         for i in 0:order, j in 0:order
     ]
     spectrum = eigvals(Symmetric(hankel))
-    trace = performance_trace(result)
+    solve_diagnostics = diagnostics(result)
     return (
         bound=moments[2],
         moments=moments,
@@ -153,8 +163,7 @@ function solve_quartic_bound(
         spectrum=spectrum,
         certificate=cert,
         plan=execution_plan(result),
-        diagnostics=diagnostics(result),
-        trace=trace,
+        diagnostics=solve_diagnostics,
         optimize_seconds=optimize_seconds,
         result=result,
     )
@@ -235,7 +244,7 @@ function main(args=ARGS)
     threads <= Base.Threads.nthreads() || error(
         "requested $threads SDPX threads, but Julia owns only $(Base.Threads.nthreads())",
     )
-    load_requested_provider(provider)
+    load_requested_provider(T, provider)
 
     # Optional provider extensions may have been loaded just above.  Enter the
     # latest method world before planning so their registered methods are
@@ -257,10 +266,11 @@ function main(args=ARGS)
         record === nothing && continue
         println("  $label W2 = ", record.bound)
         println("  $label min eigenvalue = ", minimum(record.spectrum))
-        println("  $label executed provider = ", record.trace.setup.executed_la_provider)
+        println("  $label executed provider = ",
+            record.diagnostics.selected_algorithms.la_executed_provider)
         println("  $label optimize! seconds = ", record.optimize_seconds)
-        println("  $label recorded core seconds = ", record.trace.final.total_seconds)
-        println("  $label iterations = ", record.trace.counters.iterations)
+        println("  $label recorded core seconds = ", record.diagnostics.timings.core)
+        println("  $label iterations = ", record.diagnostics.termination.iterations)
         println("  $label certificate residuals = (",
             record.certificate.primal_residual, ", ",
             record.certificate.dual_residual, ", ",

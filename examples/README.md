@@ -218,7 +218,6 @@ The mathematical model and the numerical execution policy are separate:
 ```julia
 settings = Settings(
     model;
-    algorithm=:sdp,
     formulation=:auto,
     provider=:auto,
     sparse=:auto,
@@ -237,7 +236,6 @@ outputs = Outputs(
     objectives=true,
     certificate=:summary,
     diagnostics=:summary,
-    trace=true,
 )
 
 result = optimize!(model; settings=settings, outputs=outputs)
@@ -256,7 +254,7 @@ tolerances = Tolerances(
     dual=1e-8,
     gap=1e-8,
 )
-settings = Settings(model; algorithm=:sdp, tolerances=tolerances)
+settings = Settings(model; tolerances=tolerances)
 ```
 
 ### Values, matrix spectrum, duals, and certification
@@ -429,12 +427,14 @@ Pkg.add(PackageSpec(
 ))
 ```
 
-Load the matching package and request its provider explicitly:
+Load the matching package before a high-precision run. The native public route
+selects the provider from the model arithmetic, so `Settings` keeps
+`provider=:auto` even when an optional provider package is loaded:
 
 ```julia
 using MultiFloats, MultiFloatLinearAlgebra
 model = Model(Float64x4)
-settings = Settings(model; algorithm=:sdp, provider=:multifloat)
+settings = Settings(model; provider=:auto)
 ```
 
 or
@@ -443,13 +443,13 @@ or
 using BigFloatLinearAlgebra
 setprecision(BigFloat, 256) do
     model = Model(BigFloat; precision_bits=256)
-    settings = Settings(model; algorithm=:sdp, provider=:bfla)
+    settings = Settings(model; provider=:auto)
     # Build all BigFloat data and call optimize! in this scope.
 end
 ```
 
-The SDP example performs the imports for explicit provider requests, so the
-same recommendation can be exercised directly:
+The SDP example performs the imports for provider hints, while the native
+route still selects the matching provider from the arithmetic type:
 
 ```bash
 julia --project=examples examples/quartic_bootstrap_sdp.jl \
@@ -466,7 +466,7 @@ compilation-dependent effects; they are diagnostics, not a provider ranking.
 high-precision eigensolvers used by this tutorial. Provider choice changes
 linear algebra, not the mathematical optimization problem.
 
-The tutorial fixes `formulation=:variable_space_schur`, `sparse=:off`, and
+The tutorial fixes `formulation=:auto`, `sparse=:off`, and
 `presolve=:off` because its equality system is already explicit and its moment
 matrix is small and dense. The two specialized providers implement that
 high-precision route. Large sparse models should choose preprocessing,
@@ -602,7 +602,7 @@ objective!(model, sense, w2) # sense is Minimize() or Maximize()
 ```
 
 Run the seven-recurrence convergence table with fixed-width extended
-precision:
+precision (after installing MultiFloatLinearAlgebra as described above):
 
 ```bash
 julia --project=examples examples/quartic_discrete_lp.jl \

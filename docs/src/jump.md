@@ -121,7 +121,7 @@ engine options; native v0.5 applications should use `Settings` instead:
 | `tol_primal` | `ϵ_primal` | primal residual tolerance |
 | `tol_dual` | `ϵ_dual` | dual residual tolerance |
 | `max_iter` / `max_iterations` | `iter_max` | iteration limit |
-| `time_limit` | `max_time` | end-to-end pipeline wall-clock limit in seconds |
+| `time_limit` | `max_time` | solve-phase wall-clock limit in seconds; setup time is reported separately |
 | `num_threads` | `threads` | maximum Julia tasks used by one solve |
 | `precision` | `precision_bits` | BigFloat working precision in bits |
 | `verbose` | `verbosity` | output level from 0 to 3 |

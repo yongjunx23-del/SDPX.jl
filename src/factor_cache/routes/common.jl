@@ -128,23 +128,61 @@ end
 # ---------------------------------------------------------------------------
 # Pivoted LU (LP route).
 #
-# Float32/64/Complex use LAPACK `getrf!`/`getrs!` (fast and zero-alloc on the
-# warm path with an owned `ipiv`); other element types fall back to a generic
-# in-place partial-pivoting LU so the cache stays type-generic like the rest
-# of the protocol.
+# Float32/64/Complex use the LAPACK `getrf`/`getrs` kernels (fast and
+# zero-alloc on the warm path with an owned `ipiv`); other element types fall
+# back to a generic in-place partial-pivoting LU so the cache stays
+# type-generic like the rest of the protocol.  Julia 1.10 only exposes the
+# allocating one-argument `LAPACK.getrf!` wrapper, so the factor path binds the
+# stable LAPACK ABI directly and keeps the pivot vector owned by the cache.
 # ---------------------------------------------------------------------------
 const _LAPACK_LU = Union{Float32, Float64, ComplexF32, ComplexF64}
+const _LAPACK_BLASINT = LinearAlgebra.BlasInt
 
-function _lu_factor!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
+@inline function _lu_lapack_info(info::_LAPACK_BLASINT)
+    info < 0 && throw(ArgumentError(
+        "invalid argument #$(-info) to LAPACK getrf!",
+    ))
+    info > 0 && throw(SingularException(Int(info)))
+    return nothing
+end
+
+for (T, getrf) in (
+    (Float32, :sgetrf_), (Float64, :dgetrf_),
+    (ComplexF32, :cgetrf_), (ComplexF64, :zgetrf_),
+)
+    @eval begin
+        @inline function _lu_factor_lapack!(
+            F::Matrix{$T}, ipiv::Vector{_LAPACK_BLASINT},
+        )
+            m = _LAPACK_BLASINT(size(F, 1))
+            n = _LAPACK_BLASINT(size(F, 2))
+            lda = _LAPACK_BLASINT(max(1, stride(F, 2)))
+            info = Ref{_LAPACK_BLASINT}()
+            ccall(
+                (LinearAlgebra.BLAS.@blasfunc($getrf),
+                 LinearAlgebra.LAPACK.libblastrampoline),
+                Cvoid,
+                (Ref{_LAPACK_BLASINT}, Ref{_LAPACK_BLASINT}, Ptr{$T},
+                 Ref{_LAPACK_BLASINT}, Ptr{_LAPACK_BLASINT},
+                 Ref{_LAPACK_BLASINT}),
+                m, n, F, lda, ipiv, info,
+            )
+            _lu_lapack_info(info[])
+            return nothing
+        end
+    end
+end
+
+function _lu_factor!(F::Matrix{T}, ipiv::Vector{_LAPACK_BLASINT}) where {T}
     if T <: _LAPACK_LU
-        LinearAlgebra.LAPACK.getrf!(F, ipiv)   # throws SingularException on a zero pivot
+        _lu_factor_lapack!(F, ipiv)
     else
         _lu_factor_generic!(F, ipiv)
     end
     return nothing
 end
 
-function _lu_factor_generic!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
+function _lu_factor_generic!(F::Matrix{T}, ipiv::Vector{_LAPACK_BLASINT}) where {T}
     n = size(F, 1)
     @inbounds for k in 1:n
         p = k
@@ -177,7 +215,7 @@ function _lu_factor_generic!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
 end
 
 # Solve LU x = b in place into `b` (single right-hand side).
-function _lu_solve!(A::Matrix{T}, ipiv::Vector{Int}, b::AbstractVector{T}) where {T}
+function _lu_solve!(A::Matrix{T}, ipiv::Vector{_LAPACK_BLASINT}, b::AbstractVector{T}) where {T}
     if T <: _LAPACK_LU
         LinearAlgebra.LAPACK.getrs!('N', A, ipiv, b)
     else
@@ -186,7 +224,7 @@ function _lu_solve!(A::Matrix{T}, ipiv::Vector{Int}, b::AbstractVector{T}) where
     return b
 end
 
-function _lu_solve_generic!(A::Matrix{T}, ipiv::Vector{Int}, b::AbstractVector{T}) where {T}
+function _lu_solve_generic!(A::Matrix{T}, ipiv::Vector{_LAPACK_BLASINT}, b::AbstractVector{T}) where {T}
     n = size(A, 1)
     @inbounds begin
         for k in 1:n

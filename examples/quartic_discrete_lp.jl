@@ -18,6 +18,31 @@ function lp_arithmetic_type(name::AbstractString)
     error("unknown arithmetic '$name'; choose f64, f64x2, or f64x4")
 end
 
+function load_requested_provider(::Type{T}, provider::Symbol) where {T<:AbstractFloat}
+    provider in (:auto, :standard, :multifloat) || error(
+        "provider must be auto, standard, or multifloat for the native LP example",
+    )
+    if T === Float64
+        provider === :multifloat && error(
+            "provider=:multifloat requires a MultiFloat arithmetic model",
+        )
+        return nothing
+    end
+    provider === :standard && error(
+        "provider=:standard is unavailable for fixed-width MultiFloat; " *
+        "use provider=:auto or :multifloat",
+    )
+    try
+        @eval import MultiFloatLinearAlgebra
+    catch error_value
+        error(
+            "MultiFloat arithmetic requires MultiFloatLinearAlgebra in the " *
+            "active environment: $(sprint(showerror, error_value))",
+        )
+    end
+    return nothing
+end
+
 lp_decimal(::Type{Float64}, text::AbstractString) = parse(Float64, text)
 
 function lp_decimal(::Type{T}, text::AbstractString) where {T<:AbstractFloat}
@@ -105,8 +130,9 @@ function solve_discrete_bound(
     )
     settings = Settings(
         model;
-        algorithm=:lp,
-        provider=provider,
+        # The public native route chooses the arithmetic provider from the
+        # model. `provider` is a dependency-loading hint handled by `main`.
+        provider=:auto,
         sparse=:auto,
         scaling=:auto,
         limits=Limits(iterations=max_iterations, time=120.0, threads=1),
@@ -202,20 +228,22 @@ end
 
 function print_help()
     println("quartic_discrete_lp.jl [--nodes 256]")
-    println("  --g 1 --lambda-scale 1 --recurrences 7 --arithmetic f64x2")
-    println("  --provider auto|standard|multifloat|legacy --max-iterations 300")
+    println("  --g 1 --lambda-scale 1 --recurrences 7 --arithmetic f64")
+    println("  --provider auto|standard|multifloat --max-iterations 300")
 end
 
 function main(args=ARGS)
     any(==("--help"), args) && return print_help()
     node_counts = parse_node_counts(option(args, "nodes", "256"))
-    arithmetic_name = lowercase(option(args, "arithmetic", "f64x2"))
+    arithmetic_name = lowercase(option(args, "arithmetic", "f64"))
     T = lp_arithmetic_type(arithmetic_name)
     g = lp_decimal(T, option(args, "g", "1"))
     lambda_scale = lp_decimal(T, option(args, "lambda-scale", "1"))
     recurrence_count = parse(Int, option(args, "recurrences", "7"))
     provider = Symbol(lowercase(option(args, "provider", "auto")))
     max_iterations = parse(Int, option(args, "max-iterations", "300"))
+
+    load_requested_provider(T, provider)
 
     records = [
         run_discrete_lp(

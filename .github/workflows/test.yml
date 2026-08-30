@@ -119,33 +119,20 @@ jobs:
       - name: Clone pinned provider checkouts
         run: |
           git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
-          git -C "$RUNNER_TEMP/MFLA" checkout 00ee8c76827dd69b04ae728a7542abe64bb35431
+          git -C "$RUNNER_TEMP/MFLA" checkout b38dea165d0973ae06ce245dbdf11298b123c9ea
           git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
-          git -C "$RUNNER_TEMP/BFLA" checkout b2aed396718d03c60faf017388c3e2fc30934513
-      - name: Build provider smoke environment
+          git -C "$RUNNER_TEMP/BFLA" checkout f95d3e623990e8ae5848916ba92d93897dcb1e31
+      - name: Run isolated installed-provider smoke entrypoint
         env:
-          SDPX_PROJECT: ${{ github.workspace }}
           SDPX_MFLA_PROJECT: ${{ runner.temp }}/MFLA
           SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
-          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
-        run: |
-          mkdir -p "$SDPX_PROVIDER_ENV"
-          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -e '
-            using Pkg
-            Pkg.develop(path=ENV["SDPX_PROJECT"])
-            Pkg.develop(path=ENV["SDPX_MFLA_PROJECT"])
-            Pkg.develop(path=ENV["SDPX_BFLA_PROJECT"])
-            Pkg.add(["MultiFloats", "GenericLinearAlgebra"])
-          '
-      - name: Run installed-provider smoke and extension gates
-        env:
-          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
-          SDPX_MFLA_PROJECT: ${{ runner.temp }}/MFLA
-          SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
+          SDPX_PROVIDER_SMOKE_ENV: ${{ runner.temp }}/provider-smoke
           SDPX_PROVIDER_SMOKE_TARGET: all
-        run: |
-          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/provider_smoke.jl
-          julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/multifloat_linear_algebra_integration.jl
+        run: ./scripts/provider_smoke.sh
+      - name: Run MultiFloat extension integration gate
+        env:
+          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
+        run: julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/multifloat_linear_algebra_integration.jl
 
   v2-gates:
     name: v2 acceptance gates
