@@ -259,7 +259,7 @@ function refine_once!(
     return correction
 end
 
-function invalidate!(cache::SparseQDLDLCache) where {T}
+function invalidate!(cache::SparseQDLDLCache)
     cache.matrix_epoch = 0
     cache.status = Invalid
     return cache

@@ -68,60 +68,6 @@ function _public_validate_algorithm(route::NativeConeRoute, settings::Settings)
     return nothing
 end
 
-"""Whether a compiled program contains an asymmetric cone block."""
-@inline function _public_program_has_nonsymmetric(program::NativeConeProgram)
-    any(block -> block.cone in (:exp, :power), program.blocks) && return true
-    return any(
-        block -> _domain_cone(block.domain) in (:exp, :power),
-        program.row_blocks,
-    )
-end
-
-@inline function _public_start_copy(::Type{T}, values, bits::Int) where {T<:AbstractFloat}
-    destination = Vector{T}(undef, length(values))
-    @inbounds for index in eachindex(destination)
-        destination[index] = owned_arithmetic_copy(T, values[index]; precision_bits=bits)
-    end
-    return destination
-end
-
-function _public_complete_primal_start(
-    model::Model{T},
-    route::Symbol,
-) where {T<:AbstractFloat}
-    starts = [record.primal_start for record in model.variable_blocks]
-    any(start -> start !== nothing, starts) || return nothing
-    all(start -> start !== nothing, starts) || throw(PublicOptimizeError(
-        route,
-        :warm_start_incomplete,
-        "optimize: a primal warm start must cover every native variable block",
-    ))
-    values = Vector{T}(undef, num_variables(model))
-    for (block, record) in enumerate(model.variable_blocks)
-        source = starts[block]::Vector{T}
-        copied = _public_start_copy(T, source, precision_bits(model))
-        values[record.offset:(record.offset + record.length - 1)] = copied
-    end
-    return values
-end
-
-function _public_solver_options(settings::Settings)
-    options = SolveOptions(settings)
-    names = fieldnames(SolveOptions)
-    values = ntuple(index -> getfield(options, index), length(names))
-    keywords = NamedTuple{names}(values)
-    forced = merge(keywords, (diagnostics=true,))
-    return SolveOptions(; forced...)
-end
-
-"""Map public sparse policy names to the native lowering storage contract.
-
-`Settings.sparse` intentionally exposes policy names (`:auto`, `:on`, and
-`:off`), while the native LP/SDP lowerers accept storage names (`:auto`,
-`:sparse`, and `:dense`).  Keep this conversion at the public lowering seam
-so the lowerers receive one explicit, authoritative request and never need to
-guess or retry when a public setting is used.
-"""
 function _public_result_data(
     spec,
     refs::Vector{R},
