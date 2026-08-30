@@ -1787,6 +1787,7 @@ function run_suite(
                     rows_for_entry = execute()
                 end
             catch exception
+                verbose && println("BUILD_EXC: ", sprint(showerror, exception)[1:min(end,400)])
                 rows_for_entry = [_error_row(
                     catalog, spec, suite, entry.arithmetic, entry.provider,
                     exception;
