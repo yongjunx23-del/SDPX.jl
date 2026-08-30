@@ -1275,6 +1275,44 @@ end
             (lower + upper) / (one(T) + one(T))
         end
         if !(isfinite(next) && lower < next < upper) || next == current
+            if get(ENV, "SDPX_DEBUG_C2", "0") == "1"
+                println("C2 ROOT: iter=", iteration,
+                    " current=", current,
+                    " lower=", lower, " upper=", upper,
+                    " phi=", phi, " derivative=", derivative,
+                    " roundoff_floor=", roundoff_floor,
+                    " work=", work,
+                    " y1=", y1, " y2=", y2, " y3=", y3,
+                    " tag=", tag, " next=", next,
+                    " best_gap=", best_gap, " best_res=", best_residual)
+            end
+            # Representability-limited certification: the bracket is so narrow
+            # that current and next float share a representable neighbor, while
+            # the observed Phi residual already satisfies the requested root
+            # tolerance against its arithmetic work and the interval radius is
+            # dominated by the Phi evaluation roundoff floor (not by an
+            # unresolved residual).  current is then the best representable
+            # root: accept it with a typed resolution-limited-but-certified
+            # outcome; the caller re-verifies Cartesian reconstruction,
+            # shadow/Fenchel identities, Hessian, secant, and the outer
+            # five-equation residual gate before promotion.
+            if next == current && lower < current < upper &&
+               abs(phi) <= target_floor
+                local_radius = (abs(phi) + roundoff_floor) /
+                               certificate_derivative_floor
+                candidate_radius = max(current - lower, upper - current)
+                representable_gap = max(
+                    current - prevfloat(current),
+                    nextfloat(current) - current,
+                )
+                if candidate_radius <= max(local_radius, representable_gap) +
+                                           local_radius
+                    workspace.root_resolution_limited = true
+                    workspace.root_certified_limited = true
+                    return true, current, iteration, bisections,
+                           normalized_residual
+                end
+            end
             next == current && (workspace.root_resolution_limited = true)
             return false, best_gap, iteration, bisections, best_residual
         end

@@ -139,6 +139,7 @@ mutable struct NonsymmetricConjugateWorkspace{T}
     hessian_factor_valid::Bool
     inverse_valid::Bool
     root_resolution_limited::Bool
+    root_certified_limited::Bool
 end
 
 function NonsymmetricConjugateWorkspace(
@@ -172,6 +173,7 @@ function NonsymmetricConjugateWorkspace(
         false,
         false,
         NS_CONJUGATE_MAPPED_COLD_SEED,
+        false,
         false,
         false,
         false,
