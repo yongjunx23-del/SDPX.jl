@@ -356,30 +356,7 @@ function _public_original_certificate(
     )
 end
 
-"""
-    _public_result_from_core(model, program, core_result, settings, outputs,
-                             primal, constraint_dual, dual_slack,
-                             primal_obj, dual_obj; family, diagnostics_type,
-                             termination_info, history) -> Result{T}
-
-Shared tail of the per-family result builders: original-coordinate
-certification, `Optimal` → `NumericalFailure` downgrade when that
-certificate fails, termination assembly, and `Result` construction.
-Family-specific behavior enters only through the reconstructed
-original-coordinate values, the expected diagnostics type, the
-termination info source (core result for LP/SDP, solver diagnostics for
-the native SOC route), and the history payload.
-
-EXECUTION-RECEIPT CONTRACT: every public terminal fact in the returned
-`Result` — `status`, `termination.reason`, `termination.stage`,
-`termination.message`, `iterations`, `execution_plan`, and the compact
-`certificate` summary — is derived exclusively from the single final
-`core_result` returned by the executed solve.  No planning-only value,
-draft result, or speculative fact is consumed here; the certificate is
-recomputed from the actually recovered original-coordinate point and the
-executed core status, and a missing executed termination reason fails
-closed instead of defaulting to a fabricated value.
-"""
+"""Whether any public variable/constraint block carries an explicit start."""
 @inline function _public_model_has_explicit_starts(model::Model)
     return any(
         record -> record.primal_start !== nothing ||
@@ -409,8 +386,8 @@ function _optimize_impl(
     program = compile_product_cone_model(model)
     route = classify_native_cone_program(program)
     # `:auto` and explicit `:native_hsd` are the same public execution path.
-    # Family lowerers, the explicit PSD lift, and legacy solve loops remain
-    # qualified compatibility code only; none is reachable from `Model`.
+    # The retired family lowerers and PSD-lift numerical stack are no longer
+    # loaded; qualified compatibility adapters also compile to this native path.
     _public_validate_algorithm(route, resolved_settings)
     return _public_optimize_native_hsd(
         model,

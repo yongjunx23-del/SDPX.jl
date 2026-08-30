@@ -74,3 +74,16 @@ No downstream-qualified surface is deleted in the first Phase 2 batch.
 7. fixed-trace Q3 references and CSDR alpha3 bit-identical certificate;
 8. direct proof that `_public_lower_native` and `_public_result_from_lowering`
    have no caller after the edit.
+
+## Execution update
+
+- **Completed (`c383ccc`):** old family lowering/result stack removed.  Four
+  lower/lift files and 1,049 lines of public dispatch/reconstruction were
+  deleted (3,462 production lines total). All required gates passed and CSDR
+  remained bit-identical.
+- **Retained after compile probe:** `src/kkt.jl`. Core public loading does not
+  execute it, but `SDPXMultiFloatsExt` still extends reduced-arrow and
+  intermediate-panel methods/types defined by that compatibility stack;
+  provider smoke fails if the include is removed.  It may be deleted only
+  after splitting validation/legacy arrow methods out of the production MFLA
+  extension and rerunning provider compatibility evidence.
