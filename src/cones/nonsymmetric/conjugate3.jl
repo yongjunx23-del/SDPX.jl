@@ -1148,6 +1148,7 @@ end
 ) where {T}
     settings = workspace.settings
     workspace.root_resolution_limited = false
+    workspace.root_certified_limited = false
     settings.max_iterations > 0 ||
         return false, zero(T), 0, 0, T(Inf)
 

@@ -1196,18 +1196,11 @@ function _core_solve_raw!(
     @inbounds for index in eachindex(workspace.dy)
         workspace.dy[index] = workspace.wy[index] + dtau * workspace.uy[index]
     end
-    if classification === :compatible_singular_gauge
-        scale = max(one(T), abs(system.kappa), abs(system.tau), eps(T))
-        dual_floor = T(512) * sqrt(eps(T)) * scale
-        dy_abs = zero(T)
+    if scalar_closure_zero_dual_gauge(
+        classification, dtau, system.rhs.dual_affine,
+    )
         @inbounds for i in eachindex(workspace.dy)
-            a = abs(workspace.dy[i])
-            a > dy_abs && (dy_abs = a)
-        end
-        if dy_abs <= dual_floor
-            @inbounds for i in eachindex(workspace.dy)
-                workspace.dy[i] = zero(T)
-            end
+            workspace.dy[i] = zero(T)
         end
     end
     _fixed_trace_mul_A!(workspace.ax, workspace, workspace.dx)

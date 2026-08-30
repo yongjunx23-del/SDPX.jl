@@ -1713,26 +1713,18 @@ function _core_solve_raw!(
         _core_store_owned!(workspace.dy, i,
             workspace.wy[i] + dtau * workspace.uy[i])
     end
-    # Compatible singular gauge: the dual closure coordinate is a gauge.
-    # Its KKT solve may carry roundoff-level noise that the five-equation
-    # relative gate would otherwise reject; when the dual contribution is
-    # below the arithmetic attainability floor of the whole system, zero it
-    # exactly (A'*0 = 0 satisfies the frozen dual equation to the same
-    # residual as the unregularized operator at the acceptance gate).
-    if classification === :compatible_singular_gauge
-        scale = max(one(T), abs(system.kappa), abs(system.tau), eps(T))
-        dual_floor = T(512) * sqrt(eps(T)) * scale
-        dy_abs = zero(T)
+    workspace.dy_gauged = false
+    # In the exact compatible scalar gauge, dy=0 is a deterministic valid
+    # dual representative when the frozen dual RHS is exactly zero.  This is
+    # not a tolerance relaxation: the unchanged five-equation gate below
+    # rejects the reconstructed direction if any other equation disagrees.
+    if scalar_closure_zero_dual_gauge(
+        classification, dtau, system.rhs.dual_affine,
+    )
         @inbounds for i in 1:workspace.m
-            a = abs(workspace.dy[i])
-            a > dy_abs && (dy_abs = a)
+            _core_store_owned!(workspace.dy, i, zero(T))
         end
-        if dy_abs <= dual_floor
-            @inbounds for i in 1:workspace.m
-                _core_store_owned!(workspace.dy, i, zero(T))
-            end
-            workspace.dy_gauged = true
-        end
+        workspace.dy_gauged = true
     end
     # dx = V * dxr.
     if _hsd_is_identity_basis(workspace.V)

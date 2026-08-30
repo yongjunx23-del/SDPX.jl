@@ -70,3 +70,24 @@ helper is reached.
         "scalar closure classification $classification has no resolution",
     ))
 end
+
+
+"""
+    scalar_closure_zero_dual_gauge(classification, dtau, dual_rhs) -> Bool
+
+The compatible singular scalar gauge may select `dy=0` only when `dτ=0` and
+the frozen dual Newton RHS is *exactly* zero.  No tolerance or scale is used:
+then `A' * 0 + c * 0 = 0` is an exact member of the dual equation's solution
+family.  The caller still reconstructs all remaining components and the
+unregularized five-equation gate remains authoritative.
+"""
+@inline function scalar_closure_zero_dual_gauge(
+    classification::Symbol, dtau::T, dual_rhs::AbstractVector{T},
+) where {T<:AbstractFloat}
+    classification === :compatible_singular_gauge || return false
+    iszero(dtau) || return false
+    @inbounds for value in dual_rhs
+        iszero(value) || return false
+    end
+    return true
+end

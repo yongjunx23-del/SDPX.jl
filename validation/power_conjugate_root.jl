@@ -37,23 +37,30 @@ end
 
 @testset "C2 256-bit BigFloat oracle confirms root location" begin
     setprecision(BigFloat, 256) do
-        # Re-evaluate the conjugate gap Phi at the captured Float64 root
-        # using 256-bit arithmetic through the SDPX power conjugate kernel.
-        tag = SDPX.PowerConjugateTag{Float64}(C2_CAPTURED.alpha)
-        # The evaluation kernel is type-generic only through its arithmetic
-        # parameter; verify via the geometric identity instead:
-        # for the power cone with alpha=0.5, the shadow gap satisfies
-        # Phi(g) = y1 * (g^alpha * (1-g)^(1-alpha)) - y3 - ... evaluated
-        # against the captured dual point.  Compare at 256-bit precision
-        # to confirm current is a root to far more digits than Float64
-        # can resolve.
-        g = BigFloat(C2_CAPTURED.current; precision=256)
-        a = C2_CAPTURED.alpha
-        # Phi for PowerConjugateTag: y1*g^a*(1-g)^(1-a) - (y3 + ...) after
-        # the y2 normalization.  We only assert monotonicity/residual scale
-        # here; the full oracle identity lives in `_ns_conjugate_gap_evaluation`.
-        @test zero(BigFloat) < g < one(BigFloat)
-        @test isfinite(g)
+        y1 = BigFloat(C2_CAPTURED.y1; precision=256)
+        y2 = BigFloat(C2_CAPTURED.y2; precision=256)
+        y3 = BigFloat(C2_CAPTURED.y3; precision=256)
+        tag = SDPX.PowerConjugateTag{BigFloat}(BigFloat(C2_CAPTURED.alpha))
+        oracle = SDPX.NonsymmetricConjugateWorkspace(
+            BigFloat;
+            residual_tolerance=BigFloat("1e-60"),
+            max_iterations=256,
+            max_bisections=256,
+        )
+        ok, gap, _, _, residual = SDPX._ns_conjugate_gap_root(
+            oracle, tag, y1, y2, y3,
+        )
+        @test ok
+        @test residual < big"1e-50"
+        captured = BigFloat(C2_CAPTURED.current; precision=256)
+        phi, _, _, _ = SDPX._ns_conjugate_gap_evaluation(
+            tag, y1, y2, y3, captured,
+        )
+        # Captured Float64 point is the nearest representable root: its
+        # high-precision residual and root displacement are both below the
+        # Float64 certified evaluation floor recorded from the failure tuple.
+        @test abs(gap - captured) < big"1e-16"
+        @test abs(phi) < BigFloat("1.066795373949549e-14")
     end
 end
 
