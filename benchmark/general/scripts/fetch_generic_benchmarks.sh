@@ -27,6 +27,12 @@ fetch https://raw.githubusercontent.com/vsdp/SDPLIB/master/data/control1.dat-s \
 fetch https://raw.githubusercontent.com/vsdp/SDPLIB/master/data/mcp100.dat-s \
   "$DATA/sdplib/mcp100.dat-s"
 
+# Expanded SDPLIB 1.2 selection (representatives of every family).
+for f in control2 control5 theta1 theta3 theta5 maxG11 maxG32 qap5 mcp250-1 hinf2 truss1; do
+  fetch "https://raw.githubusercontent.com/vsdp/SDPLIB/master/data/$f.dat-s" \
+    "$DATA/sdplib/$f.dat-s"
+done
+
 # CBLIB-format fixture vendored by Hypatia from its CBLIB campaign. It contains
 # integer declarations and is reader coverage only; SDPX does not claim MIP.
 fetch https://raw.githubusercontent.com/jump-dev/Hypatia.jl/master/examples/CBLIB/cblib_data/expdesign_D_8_4.cbf.gz \

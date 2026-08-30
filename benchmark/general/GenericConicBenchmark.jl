@@ -7,7 +7,7 @@ using SDPX
 
 export AbstractGenericProblem, BenchmarkSpec, BenchmarkResult
 export build, inventory, run_one, run_tier, validate_result, main
-export MPSData, SDPAData, CBFData, read_mps, mps_model, read_sdpa, read_cbf
+export MPSData, SDPAData, CBFData, read_mps, mps_model, read_sdpa, read_cbf, sdpa_model, EXTERNAL_BENCHMARKS_EXPANDED
 export ExternalBenchmark, external_inventory, read_external, reference_matches
 
 abstract type AbstractGenericProblem end
