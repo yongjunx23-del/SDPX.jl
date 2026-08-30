@@ -2166,17 +2166,8 @@ end
     # A*dx + ds - b*dτ = -rP.  Componentwise arithmetic-work backward
     # stability is preferred; the standard scale-free normwise alternative
     # handles a structurally near-null row without an absolute floor.
-    if get(ENV, "SDPX_DEBUG_GATE", "0") == "1"
-        println("GATE dir: |dx|=", maximum(abs, base.dx),
-            " |dy|=", maximum(abs, base.dy), " dτ=", base.dtau)
-    end
     primal_componentwise, primal_residual, primal_work =
         _product_hsd_primal_newton_stats(state)
-    if get(ENV, "SDPX_DEBUG_GATE", "0") == "1"
-        println("GATE primal: comp=", primal_componentwise,
-            " res=", primal_residual, " work=", primal_work,
-            " close=", _product_hsd_newton_close(primal_residual, primal_work))
-    end
     (primal_componentwise ||
      _product_hsd_newton_close(primal_residual, primal_work)) || return false
 
@@ -2184,14 +2175,6 @@ end
     if _product_hsd_has_nonsymmetric(state) || !conditioned_authority
         dual_componentwise, dual_residual, dual_work =
             _product_hsd_dual_newton_stats(state)
-        if get(ENV, "SDPX_DEBUG_GATE", "0") == "1"
-            println("GATE dual: comp=", dual_componentwise,
-                " res=", dual_residual, " work=", dual_work,
-                " close=", _product_hsd_newton_close(dual_residual, dual_work))
-            println("  dual n=", base.n, " rD_inf=", maximum(abs, base.rD),
-                " c_inf=", maximum(abs, base.c),
-                " dy_inf=", maximum(abs, base.dy))
-        end
         (dual_componentwise ||
          _product_hsd_newton_close(dual_residual, dual_work)) || return false
     else
@@ -2210,10 +2193,6 @@ end
         term = base.b[k] * base.dy[k]
         gap_residual = muladd(-base.b[k], base.dy[k], gap_residual)
         gap_work += abs(term)
-    end
-    if get(ENV, "SDPX_DEBUG_GATE", "0") == "1"
-        println("GATE gap: res=", gap_residual, " work=", gap_work,
-            " close=", _product_hsd_newton_close(gap_residual, gap_work))
     end
     _product_hsd_newton_close(gap_residual, gap_work) || return false
 

@@ -1275,17 +1275,6 @@ end
             (lower + upper) / (one(T) + one(T))
         end
         if !(isfinite(next) && lower < next < upper) || next == current
-            if get(ENV, "SDPX_DEBUG_C2", "0") == "1"
-                println("C2 ROOT: iter=", iteration,
-                    " current=", current,
-                    " lower=", lower, " upper=", upper,
-                    " phi=", phi, " derivative=", derivative,
-                    " roundoff_floor=", roundoff_floor,
-                    " work=", work,
-                    " y1=", y1, " y2=", y2, " y3=", y3,
-                    " tag=", tag, " next=", next,
-                    " best_gap=", best_gap, " best_res=", best_residual)
-            end
             # Representability-limited certification: the bracket is so narrow
             # that current and next float share a representable neighbor, while
             # the observed Phi residual already satisfies the requested root

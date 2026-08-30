@@ -933,10 +933,6 @@ function _product_hsd_symmetric_core_direction!(
     copyto!(base.ds, corrector_candidate.ds)
     base.dtau = corrector_candidate.dtau
     base.dkappa = corrector_candidate.dkappa
-    if get(ENV, "SDPX_DEBUG_C1", "0") == "1"
-        println("CORR candidate dy_inf=", maximum(abs, corrector_candidate.dy),
-            " dtau=", corrector_candidate.dtau)
-    end
     _product_hsd_core_scatter!(state)
     _hsd_direction_finite(base) || begin
         state.diagnostic = :fixed_trace_corrector_nonfinite

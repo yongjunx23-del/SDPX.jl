@@ -1699,11 +1699,6 @@ function _core_solve_raw!(
     classification === :incompatible_singular && throw(ArgumentError(
         "symmetric core scalar closure is incompatible rank-deficient",
     ))
-    if get(ENV, "SDPX_DEBUG_C1", "0") == "1"
-        println("C1: D=", denominator, " D_work=", denominator_work,
-            " N=", numerator, " N_work=", numerator_work,
-            " class=", classification)
-    end
     dtau = scalar_closure_resolution(classification, denominator, numerator)
     workspace.denominator = denominator
     workspace.scalar_closure = classification
