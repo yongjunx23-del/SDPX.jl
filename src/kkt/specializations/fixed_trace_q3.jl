@@ -649,6 +649,7 @@ mutable struct FixedTraceQ3CoreWorkspace{T,S,C,E}
     dkappa::T
     last_dtau::T
     denominator::T
+    scalar_closure::Symbol
     dimension::Int
     linearization_epoch::Int
     matrix_epoch::Int
@@ -757,7 +758,7 @@ function prepare_fixed_trace_q3_core_state(
         alloc_zeros(T, m), alloc_zeros(T, n),
         NewtonResidual(system),
         _fixed_trace_primal_operator_norm(system),
-        zero(T), zero(T), zero(T),
+        zero(T), zero(T), zero(T), :regular,
         length(plan.zero_rows), -1, 0, 0, -1, 0, 0, 0, 0,
         nothing, 0,
         alloc_zeros(T, length(plan.zero_rows)),
@@ -1153,16 +1154,61 @@ function _core_solve_raw!(
     eta_w = dot(workspace.cr, workspace.wx) + dot(system.b, workspace.wy)
     eta_u = dot(workspace.cr, workspace.ux) + dot(system.b, workspace.uy)
     denominator = system.kappa + system.tau * eta_u
-    abs(denominator) > sqrt(eps(T)) * max(one(T), abs(system.kappa), abs(system.tau*eta_u)) ||
-        throw(ArgumentError("fixed-trace scalar denominator is near zero"))
+    eta_w_work = zero(T)
+    @inbounds for r in eachindex(workspace.cr, workspace.wx)
+        term = workspace.cr[r] * workspace.wx[r]
+        eta_w_work += abs(term)
+    end
+    @inbounds for i in eachindex(system.b, workspace.wy)
+        term = system.b[i] * workspace.wy[i]
+        eta_w_work += abs(term)
+    end
+    eta_u_work = zero(T)
+    @inbounds for r in eachindex(workspace.cr, workspace.ux)
+        term = workspace.cr[r] * workspace.ux[r]
+        eta_u_work += abs(term)
+    end
+    @inbounds for i in eachindex(system.b, workspace.uy)
+        term = system.b[i] * workspace.uy[i]
+        eta_u_work += abs(term)
+    end
+    denominator_work = abs(system.kappa) + abs(system.tau) * eta_u_work
     numerator = system.rhs.tau_kappa - system.tau *
                 (system.rhs.homogeneous_gap + eta_w)
-    dtau = numerator / denominator
+    numerator_work = abs(system.rhs.tau_kappa) +
+        abs(system.tau) * (abs(system.rhs.homogeneous_gap) + eta_w_work)
+    classification = classify_scalar_closure(
+        denominator, numerator;
+        denominator_work=denominator_work,
+        numerator_work=numerator_work,
+    )
+    classification === :insufficient_precision && throw(ArgumentError(
+        "fixed-trace scalar closure is non-finite",
+    ))
+    classification === :incompatible_singular && throw(ArgumentError(
+        "fixed-trace scalar closure is incompatible rank-deficient",
+    ))
+    dtau = scalar_closure_resolution(classification, denominator, numerator)
+    workspace.scalar_closure = classification
     @inbounds for index in eachindex(workspace.dx)
         workspace.dx[index] = workspace.wx[index] + dtau * workspace.ux[index]
     end
     @inbounds for index in eachindex(workspace.dy)
         workspace.dy[index] = workspace.wy[index] + dtau * workspace.uy[index]
+    end
+    if classification === :compatible_singular_gauge
+        scale = max(one(T), abs(system.kappa), abs(system.tau), eps(T))
+        dual_floor = T(512) * sqrt(eps(T)) * scale
+        dy_abs = zero(T)
+        @inbounds for i in eachindex(workspace.dy)
+            a = abs(workspace.dy[i])
+            a > dy_abs && (dy_abs = a)
+        end
+        if dy_abs <= dual_floor
+            @inbounds for i in eachindex(workspace.dy)
+                workspace.dy[i] = zero(T)
+            end
+        end
     end
     _fixed_trace_mul_A!(workspace.ax, workspace, workspace.dx)
     @inbounds for index in eachindex(workspace.ds)

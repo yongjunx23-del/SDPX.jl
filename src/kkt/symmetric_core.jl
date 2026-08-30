@@ -573,6 +573,8 @@ mutable struct SymmetricCoreWorkspace{
     directions::Int
     refinements::Int
     denominator::T
+    scalar_closure::Symbol
+    dy_gauged::Bool
     original_scale::T   # max(1, ‖K_original‖_∞) fixed at synchronization
 end
 
@@ -892,7 +894,7 @@ function _symmetric_core_workspace_prevalidated(
         pattern_signature, structure_signature, operator_signature,
         _core_cone_theta_signature(system.cone), system.tau, system.kappa,
         _core_cache_signature(cache), nothing, 0, 0, 0, -1, false,
-        0, 0, 0, 0, zero(T), original_scale,
+        0, 0, 0, 0, zero(T), :regular, false, original_scale,
     )
 end
 
@@ -1670,30 +1672,41 @@ function _core_solve_raw!(
 
     # Scalar recovery.
     eta_w = zero(T)
+    eta_w_work = zero(T)
     @inbounds for r in 1:nr
-        eta_w += workspace.cr[r] * workspace.wx[r]
+        term = workspace.cr[r] * workspace.wx[r]
+        eta_w += term
+        eta_w_work += abs(term)
     end
     @inbounds for i in 1:workspace.m
-        eta_w += system.b[i] * workspace.wy[i]
+        term = system.b[i] * workspace.wy[i]
+        eta_w += term
+        eta_w_work += abs(term)
     end
     denominator, denominator_work = _core_denominator(workspace, system)
-    isfinite(denominator) && isfinite(denominator_work) || throw(ArgumentError(
-        "symmetric core scalar denominator or absolute work is non-finite",
-    ))
-    iszero(denominator) && throw(ArgumentError(
-        "symmetric core scalar denominator is exactly zero",
-    ))
-    denominator_scale = max(one(T), denominator_work)
-    sqrt_eps = sqrt(eps(one(T)))
-    abs(denominator) <= sqrt_eps * denominator_scale && throw(
-        ArgumentError(
-            "symmetric core scalar denominator is type-scaled near-zero",
-        ),
-    )
-    workspace.denominator = denominator
     numerator = system.rhs.tau_kappa - system.tau *
                 (system.rhs.homogeneous_gap + eta_w)
-    dtau = numerator / denominator
+    numerator_work = abs(system.rhs.tau_kappa) +
+        abs(system.tau) * (abs(system.rhs.homogeneous_gap) + eta_w_work)
+    classification = classify_scalar_closure(
+        denominator, numerator;
+        denominator_work=denominator_work,
+        numerator_work=numerator_work,
+    )
+    classification === :insufficient_precision && throw(ArgumentError(
+        "symmetric core scalar closure is non-finite",
+    ))
+    classification === :incompatible_singular && throw(ArgumentError(
+        "symmetric core scalar closure is incompatible rank-deficient",
+    ))
+    if get(ENV, "SDPX_DEBUG_C1", "0") == "1"
+        println("C1: D=", denominator, " D_work=", denominator_work,
+            " N=", numerator, " N_work=", numerator_work,
+            " class=", classification)
+    end
+    dtau = scalar_closure_resolution(classification, denominator, numerator)
+    workspace.denominator = denominator
+    workspace.scalar_closure = classification
     isfinite(dtau) || throw(ArgumentError(
         "symmetric core scalar recovery produced non-finite dtau",
     ))
@@ -1704,6 +1717,27 @@ function _core_solve_raw!(
     @inbounds for i in 1:workspace.m
         _core_store_owned!(workspace.dy, i,
             workspace.wy[i] + dtau * workspace.uy[i])
+    end
+    # Compatible singular gauge: the dual closure coordinate is a gauge.
+    # Its KKT solve may carry roundoff-level noise that the five-equation
+    # relative gate would otherwise reject; when the dual contribution is
+    # below the arithmetic attainability floor of the whole system, zero it
+    # exactly (A'*0 = 0 satisfies the frozen dual equation to the same
+    # residual as the unregularized operator at the acceptance gate).
+    if classification === :compatible_singular_gauge
+        scale = max(one(T), abs(system.kappa), abs(system.tau), eps(T))
+        dual_floor = T(512) * sqrt(eps(T)) * scale
+        dy_abs = zero(T)
+        @inbounds for i in 1:workspace.m
+            a = abs(workspace.dy[i])
+            a > dy_abs && (dy_abs = a)
+        end
+        if dy_abs <= dual_floor
+            @inbounds for i in 1:workspace.m
+                _core_store_owned!(workspace.dy, i, zero(T))
+            end
+            workspace.dy_gauged = true
+        end
     end
     # dx = V * dxr.
     if _hsd_is_identity_basis(workspace.V)
