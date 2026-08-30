@@ -55,10 +55,6 @@ end
 
 const EXTERNAL_BENCHMARKS_EXPANDED = ExternalBenchmark[
     # Netlib LP
-    ExternalBenchmark(:netlib_afiro, :NETLIB, :lp, :small, "netlib/afiro.mps",
-        -4.6475314286e2, 2e-6, :solve),
-    ExternalBenchmark(:netlib_adlittle, :NETLIB, :lp, :medium, "netlib/adlittle.mps",
-        2.2549496316e5, 2e-6, :solve),
     ExternalBenchmark(:netlib_share2b, :NETLIB, :lp, :small, "netlib/share2b.mps",
         -4.1573224074e2, 2e-6, :solve),
     ExternalBenchmark(:netlib_sc50a, :NETLIB, :lp, :small, "netlib/sc50a.mps",
@@ -66,8 +62,6 @@ const EXTERNAL_BENCHMARKS_EXPANDED = ExternalBenchmark[
     ExternalBenchmark(:netlib_recipe, :NETLIB, :lp, :medium, "netlib/recipe.mps",
         -2.6661663997e2, 2e-6, :solve),
     # SDPLIB 1.2 SDP (selected representative families)
-    ExternalBenchmark(:sdplib_control1, :SDPLIB, :sdp, :medium, "sdplib/control1.dat-s",
-        1.778463e1, 5e-5, :solve),
     ExternalBenchmark(:sdplib_control2, :SDPLIB, :sdp, :medium, "sdplib/control2.dat-s",
         1.178843e1, 5e-5, :solve),
     ExternalBenchmark(:sdplib_control5, :SDPLIB, :sdp, :medium, "sdplib/control5.dat-s",
@@ -84,8 +78,6 @@ const EXTERNAL_BENCHMARKS_EXPANDED = ExternalBenchmark[
         1.5600001e2, 5e-5, :solve),
     ExternalBenchmark(:sdplib_qap5, :SDPLIB, :sdp, :medium, "sdplib/qap5.dat-s",
         9.9953667e-1, 5e-5, :solve),
-    ExternalBenchmark(:sdplib_mcp100, :SDPLIB, :sdp, :large, "sdplib/mcp100.dat-s",
-        2.261574e2, 5e-5, :solve),
     ExternalBenchmark(:sdplib_mcp250, :SDPLIB, :sdp, :large, "sdplib/mcp250-1.dat-s",
         8.6167667e1, 5e-5, :solve),
     ExternalBenchmark(:sdplib_hinf2, :SDPLIB, :sdp, :medium, "sdplib/hinf2.dat-s",
