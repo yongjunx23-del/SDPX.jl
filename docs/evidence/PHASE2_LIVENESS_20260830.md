@@ -81,12 +81,27 @@ No downstream-qualified surface is deleted in the first Phase 2 batch.
   lower/lift files and 1,049 lines of public dispatch/reconstruction were
   deleted (3,462 production lines total). All required gates passed and CSDR
   remained bit-identical.
-- **Retained after compile probe:** `src/kkt.jl`. Core public loading does not
-  execute it, but `SDPXMultiFloatsExt` still extends reduced-arrow and
-  intermediate-panel methods/types defined by that compatibility stack;
-  provider smoke fails if the include is removed.  It may be deleted only
-  after splitting validation/legacy arrow methods out of the production MFLA
-  extension and rerunning provider compatibility evidence.
+- **Completed (Phase-2 KKT closure):** `src/kkt.jl` and the 800-line
+  reduced-arrow portion of `SDPXMultiFloatsExt` were removed.  The only
+  actual extension dependency was the standalone KKT/Arrow engine (including
+  its duplicate-column fingerprint); current product-HSD x4 kernels live in
+  `SDPXMultiFloatLinearAlgebraExt` and use the provider protocol instead.
+  `SDPXMultiFloatsExt` now contains only MultiFloat arithmetic traits.  A
+  clean load with both MultiFloats extensions, public E2E (21/21), the 163-case
+  MFLA integration suite, and C1/C2 public regressions all pass with no
+  `kkt.jl` include.
+
+## Phase-2 closure boundary
+
+The remaining files named `legacy` are not a reachable second solver:
+`la_backends/legacy.jl` is the bundled LinearAlgebra provider used by the
+current compatibility protocol, and `types/workspaces.jl` retains
+`SolverOptions`/`ConicProblem` schemas needed by the public bridge and
+qualified CSDR use.  The bridge maps those records directly to `Settings` and
+then to the one product-HSD implementation.  They are retained deliberately
+for the v0.6 compatibility release; no deleted lowering, PSD lift,
+standalone NativeSOC frontend, or standalone KKT engine is reachable from a
+public or qualified downstream solve entry point.
 
 ## Phase 3 P1 cold-start evidence
 

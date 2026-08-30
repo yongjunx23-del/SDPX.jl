@@ -138,7 +138,7 @@ end
         # M(u,v,w)=(u+v,u-v,sqrt(2)w).  Use the Lorentz margin in those
         # coordinates rather than the squared RSOC determinant: the latter
         # has quadratic units and cannot be compared with a linear residual
-        # tolerance.  This is also the map used by lower_soc_native.
+        # tolerance.  This is the canonical product-HSD coordinate map.
         second_squared = (values[1] - values[2])^2
         tail_squared = isempty(tail) ? zero(eltype(values)) : dot(tail, tail)
         mapped_tail_norm = sqrt(second_squared + 2 * tail_squared)
