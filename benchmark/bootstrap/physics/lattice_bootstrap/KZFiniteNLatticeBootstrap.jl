@@ -636,8 +636,7 @@ build_lattice_bootstrap(scale::Symbol, ::Type{T}=Float64) where {T} =
 
 _number_token(value) = string(value)
 
-function canonical_text(artifact::LatticeBootstrapArtifact)
-    io = IOBuffer()
+function _write_canonical(io::IO, artifact::LatticeBootstrapArtifact)
     spec = artifact.spec
     println(io, "kz-finite-n-lattice-bootstrap-schema=", artifact.schema_version)
     println(io, "id=", spec.id)
@@ -686,11 +685,42 @@ function canonical_text(artifact::LatticeBootstrapArtifact)
     for (name, value) in pairs(artifact.oracle)
         println(io, "oracle.", name, '=', repr(value))
     end
+    return io
+end
+
+function canonical_text(artifact::LatticeBootstrapArtifact)
+    io = IOBuffer()
+    _write_canonical(io, artifact)
     return String(take!(io))
 end
 
-stable_fingerprint(artifact::LatticeBootstrapArtifact) =
-    bytes2hex(SHA.sha256(codeunits(canonical_text(artifact))))
+# Write-only IO adapter that streams the exact canonical bytes into SHA-256.
+# `unsafe_wrap(...; own=false)` creates only a view of each print chunk; no
+# artifact-sized String or byte copy is materialized.
+mutable struct _SHA256WriteIO <: IO
+    context::SHA.SHA2_256_CTX
+    byte::Vector{UInt8}
+end
+Base.isopen(::_SHA256WriteIO) = true
+Base.iswritable(::_SHA256WriteIO) = true
+function Base.write(io::_SHA256WriteIO, byte::UInt8)
+    io.byte[1] = byte
+    SHA.update!(io.context, io.byte)
+    return 1
+end
+function Base.unsafe_write(
+    io::_SHA256WriteIO, pointer::Ptr{UInt8}, count::UInt,
+)
+    bytes = unsafe_wrap(Vector{UInt8}, pointer, Int(count); own=false)
+    SHA.update!(io.context, bytes)
+    return count
+end
+
+function stable_fingerprint(artifact::LatticeBootstrapArtifact)
+    io = _SHA256WriteIO(SHA.SHA2_256_CTX(), Vector{UInt8}(undef, 1))
+    _write_canonical(io, artifact)
+    return bytes2hex(SHA.digest!(io.context))
+end
 
 function validate_artifact(artifact::LatticeBootstrapArtifact)
     failures = String[]
