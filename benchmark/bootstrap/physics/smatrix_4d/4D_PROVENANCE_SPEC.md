@@ -1,17 +1,17 @@
 # 4D S-matrix provenance — EXPERIMENTAL SPEC ONLY
 
-**Primary source (verified from the v2 arXiv source archive):** Joan Elias
-Miro, Andrea Guerrieri and Mehmet Asim Gumus, *Bridging Positivity and
-S-matrix Bootstrap Bounds*, arXiv:2210.01502v2 (JHEP 05 (2023) 001).
-The paper's relevant equations are Eq. (2.6) (triple-rho crossing ansatz),
-Eq. (2.8) (4D partial-wave projection), Eq. (2.9) (full partial-wave disk),
-Eq. (2.10) (finite primal min/max), and Section 4 (linearised-unitarity/
-dual bounds). The ansatz and normalization are cross-checked against the
-source of Paulos et al., arXiv:1708.06765v1, but the Miro et al. paper is the
-main provenance for this experimental design.
+**Latest primary numerical source:** Joan Elias Miro, Andrea Guerrieri and
+Mehmet Asim Gumus, *The Phases of the Scalar S-Matrix Island*,
+arXiv:2605.06613v1, Appendix A. Predecessor/formalism references are
+arXiv:2210.01502v2, arXiv:1708.06765v1, and arXiv:2106.10257.
+The implementation remains experimental and unregistered: it uses A1--A6
+conventions and sampled primal rows, while A8--A15 dual parameters remain
+fail-closed placeholders. It does not claim the paper's numerical bounds.
 
 The proposed typed specification has three intentionally distinct formulation
-values:
+values. Its current diagnostic lowering uses one anchor triple-rho basis; the
+Appendix-A multi-wavelet centers are explicit metadata, not an unclaimed
+complete implementation:
 
 - `:primal_full_unitarity`: sampled triple-rho amplitude, exact Eq. (2.9)
   disk, lowerable as Q3 or equivalent 2x2 real PSD blocks;
@@ -21,9 +21,10 @@ values:
 - `:finite_conic_dual`: the exact finite-dimensional conic dual of the sampled
   primal, useful only for implementation weak/strong-duality checks.
 
-The current branch contains only an unregistered diagnostic implementation.
-No formulation is in the production physics catalog, and no optimization is
-run or claimed.
+The current branch contains only an unregistered spec-only diagnostic
+implementation. No formulation is in the production physics catalog, and no
+optimization is run or claimed. arXiv:2605.06613 is an S-matrix reference
+only and is unrelated to CSDR.
 
 ## Exact conventions
 

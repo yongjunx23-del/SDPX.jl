@@ -10,17 +10,35 @@ const S4 = SMatrix4DSpecDiagnostic
         id="diagnostic", scale=:tiny, external_mass=1.0,
         ansatz_degree=4, energy_samples=8, spin_max=4,
         quadrature_order=32, formulation=:primal_full_unitarity,
-        witness_mode=:none, reference_status=:experimental_build_only,
+        witness_mode=:none, reference_status=:sampled_build_only,
         paper_equivalent=false,
     )
     artifact = S4.build_smatrix_4d(spec)
     @test S4.validate_artifact(artifact).valid
     @test artifact.counts.dimension == 4
     @test artifact.counts.lorentz_cones == 24
-    @test size(artifact.projection_real) == (24, 35)
+    @test size(artifact.projection_real, 1) == 24
+    @test size(artifact.projection_real, 2) == length(artifact.basis_indices)
+    @test all(index -> index[1] >= index[2] >= index[3], artifact.basis_indices)
     @test artifact.fingerprint == S4.stable_fingerprint(artifact)
     @test !artifact.provenance.paper_equivalent
-    @test artifact.provenance.formulation_source == :miro_guerrieri_gumus_2210_01502v2
+    @test artifact.provenance.formulation_source == :miro_guerrieri_gumus_2605_06613v1
+    @test artifact.provenance.basis_implementation == :single_anchor_triple_rho_diagnostic
+    @test artifact.provenance.arxiv == "2605.06613"
+    @test artifact.provenance.predecessor_references == ("2210.01502v2", "1708.06765v1", "2106.10257")
+    @test artifact.spec.basis_kind === :multiwavelet_2605
+    @test artifact.spec.nmax_values == (10, 12, 14, 16, 18, 20)
+    @test artifact.spec.lmax_values == (16, 18)
+    @test artifact.spec.s_max == 300.0
+    @test artifact.spec.a7_t_grid[end] == 4.0
+    @test artifact.spec.dual_mu2 == 12.0
+    @test S4.alpha_threshold_value(artifact.spec) == 0.0
+    stress = S4.smatrix_4d_specs(Float64).stress
+    @test stress.ansatz_degree == 16
+    @test stress.spin_max == 32
+    @test stress.s_max == 300.0
+    @test stress.quadrature_order == 256
+    # The stress tier is metadata/profile-only; it is not registered or solved.
 end
 
 @testset "4D kinematics, crossing and projection normalization" begin
@@ -37,12 +55,36 @@ end
         @test m == S4.evaluate_amplitude(artifact, c, u, t, s)
         break
     end
-    # Constant M=1 has f_0=1/(16*pi); its odd/positive-spin projections
+    # Constant M=1 has f_0=1/(16*pi); its positive-spin projections
     # vanish under symmetric Gauss-Legendre quadrature.
     constant_column = findfirst(==( (0,0,0) ), artifact.basis_indices)
     @test isapprox(artifact.projection_real[1, constant_column], 1/(16pi); atol=1e-12)
     @test maximum(abs, artifact.projection_real[2:3, constant_column]) < 1e-8
     @test maximum(abs, artifact.projection_imag[:, constant_column]) < 1e-12
+
+    # All six permutations, including repeated exponents, are one orbit and
+    # evaluate identically after permutation of the rho coordinates.
+    rhos = (0.2 + 0.1im, -0.3 + 0.2im, 0.4 - 0.1im)
+    rho_permutations = ((rhos[1], rhos[2], rhos[3]),
+        (rhos[1], rhos[3], rhos[2]), (rhos[2], rhos[1], rhos[3]),
+        (rhos[2], rhos[3], rhos[1]), (rhos[3], rhos[1], rhos[2]),
+        (rhos[3], rhos[2], rhos[1]))
+    for index in ((2, 2, 0), (2, 1, 0), (3, 1, 1))
+        value = S4._orbit_value(rhos, index)
+        @test length(S4._orbit_permutations(index)) ==
+            (index[1] == index[2] == index[3] ? 1 :
+             (index[1] == index[2] || index[1] == index[3] || index[2] == index[3] ? 3 : 6))
+        for rho_permutation in rho_permutations
+            @test isapprox(value, S4._orbit_value(rho_permutation, index);
+                atol=1e-14, rtol=1e-14)
+        end
+    end
+    upper = S4.rho_coordinate(8.0, 1.0, 4 / 3; rim=:upper)
+    lower = S4.rho_coordinate(8.0, 1.0, 4 / 3; rim=:lower)
+    @test lower == conj(upper)
+    @test S4.rho_coordinate(4 / 3, 1.0, 4 / 3) == 0
+    @test isapprox(S4.rho_coordinate(4.0, 1.0, 4 / 3), 1; atol=1e-14)
+    @test_throws ArgumentError S4.rho_coordinate(4.0, 1.0, 4.0)
 end
 
 @testset "4D boundary, SOC/PSD equivalence and max-margin construction" begin
@@ -68,7 +110,26 @@ end
     @test length(p_margin.cones) == size(artifact.projection_real, 1) + 2
     @test length(p_margin.c) == length(artifact.basis_indices) + 1
     @test p_margin.c[end] == -1.0
+    @test p_soc.cones[1].b == [1.0, 1.0, 0.0]
+    @test p_margin.cones[1].b == [1.0, 1.0, 0.0]
+    @test sdp_blocks.constants[1] == [2.0 0.0; 0.0 0.0]
     @test_throws ArgumentError S4.require_strict_witness(artifact)
+    bad_spin = S4.SMatrix4DSpec{Float64}(
+        id="bad-spin", scale=:tiny, ansatz_degree=4, energy_samples=8,
+        spin_max=4, spin_set=(2, 0), quadrature_order=32)
+    @test_throws ArgumentError S4.build_smatrix_4d(bad_spin)
+    bad_center = S4.SMatrix4DSpec{Float64}(
+        id="bad-center", scale=:tiny, ansatz_degree=4, energy_samples=8,
+        spin_max=4, quadrature_order=32, basis_centers=(3.0,))
+    @test_throws ArgumentError S4.build_smatrix_4d(bad_center)
+    bad_dual = S4.SMatrix4DSpec{Float64}(
+        id="bad-dual", scale=:tiny, ansatz_degree=4, energy_samples=8,
+        spin_max=4, quadrature_order=32, dual_mu2=3.0)
+    @test_throws ArgumentError S4.build_smatrix_4d(bad_dual)
+    bad_objective = S4.SMatrix4DSpec{Float64}(
+        id="bad-objective", scale=:tiny, ansatz_degree=4, energy_samples=8,
+        spin_max=4, quadrature_order=32, objective=:c0)
+    @test_throws ArgumentError S4.build_smatrix_4d(bad_objective)
 
     # The paper's linearized dual and the implementation finite conic dual
     # are distinct parameterized formulations, not aliases of the primal.
@@ -76,7 +137,7 @@ end
         id="dual-diagnostic", scale=:tiny, ansatz_degree=4,
         energy_samples=8, spin_max=4, quadrature_order=32,
         formulation=:dual_linearized, witness_mode=:max_margin,
-        reference_status=:experimental_build_only,
+        reference_status=:sampled_build_only,
     )
     @test_throws ArgumentError S4.build_smatrix_4d(dual_spec)
     @test S4.SMatrix4DSpec{Float64}(

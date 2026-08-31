@@ -1,16 +1,20 @@
 # 4D identical-scalar S-matrix bootstrap — reviewed SPEC ONLY
 
 **Status: STOP-SHIP / NOT REGISTERED.** This directory intentionally contains
-no `catalog.jl`, no loader entry, and no solver-facing implementation. The
-existing `smatrix_soc/` catalog remains the only registered S-matrix catalog.
+no `catalog.jl` or loader entry. Its `spec_only/` code is an experimental
+representation/diagnostic layer, not a registered production implementation
+or benchmark. The existing `smatrix_soc/` catalog remains
+the only registered S-matrix catalog.
 
 ## Exact primary reference and conventions
 
-The main primary source was checked from the arXiv v2 source archive:
+The latest primary numerical source is:
 
-> Joan Elias Miro, Andrea Guerrieri and Mehmet Asim Gumus, *Bridging
-> Positivity and S-matrix Bootstrap Bounds*, arXiv:2210.01502v2, published
-> JHEP 05 (2023) 001.
+> Joan Elias Miro, Andrea Guerrieri and Mehmet Asim Gumus, *The Phases of the
+> Scalar S-Matrix Island*, arXiv:2605.06613v1 (2026), Appendix A.
+
+Predecessor/formalism references are Miro et al. arXiv:2210.01502v2,
+Paulos et al. arXiv:1708.06765v1, and Guerrieri--Sever arXiv:2106.10257.
 
 The triple-rho ansatz and historical four-dimensional conventions are also
 cross-checked against Paulos et al., *The S-matrix Bootstrap III: Higher
@@ -68,13 +72,18 @@ which is equivalent to `|1+i*beta_i*f_l|<=1`. The energy grid must satisfy
 `beta -> 0` collapses the disk to `S_l=1`. Only even spins are sampled for
 identical bosons, but individual partial waves are not crossing invariant.
 
-Suggested tiers were N=4/8/12/16, energy counts 8/24/64/192, even-spin
-cutoffs 4/8/16/32 and quadrature orders 32/64/128/256. Each parameterized spec
-also records `formulation=:primal_full_unitarity`, `:dual_linearized` (Miro
-Section 4, deliberately separate), or `:finite_conic_dual` (the exact finite
-conic dual of the sampled implementation), plus `witness_mode`, rho-map
-parameters, scaling, and an optional objective direction/range. They are not
-benchmark contracts until the witness gate below succeeds.
+The spec records the Appendix-A numerical defaults explicitly: `Nmax` in
+`{10,12,14,16,18,20}`, `Lmax` in `{16,18}`, `smax=300`, wavelet centers
+`{20/3,10,20,30,40,50,60,86}`, threshold branch `alpha_th`, and the A7
+`t` grid. It also parameterizes smaller diagnostic tiers, quadrature, spin
+sets, formulation (`:primal_full_unitarity`, `:dual_linearized`, or
+`:finite_conic_dual`), witness mode, and rho-map anchor. The current
+spec-only builder uses one anchor triple-rho diagnostic basis; the
+multi-wavelet centers are recorded metadata and are not silently presented
+as a complete A2--A4 implementation. The dual A8--A15
+parameters remain fail-closed placeholders; neither the paper dual nor an
+objective is implemented here. These are not benchmark contracts until the
+witness gate below succeeds.
 
 ## Stop-ship witness result
 
@@ -95,8 +104,9 @@ scale=medium: matrix=(576,455), least-squares candidate has negative rows;
 
 The HiGHS results are **numerical evidence, not an exact infeasibility proof**;
 no dual Farkas certificate is included. Tiny's margin is at machine epsilon
-and therefore also fails the robustness gate. Consequently no 4D artifact,
-cone program, objective, solve, or paper-equivalent claim is registered.
+and therefore also fails the robustness gate. Consequently no 4D artifact, objective, solve, or paper-equivalent claim is
+registered. The diagnostic can lower the sampled primal rows to SOCP/PSD
+representations, but it does not solve or register them.
 
 Run the bounded diagnostic with an isolated environment if dependencies are
 needed:
