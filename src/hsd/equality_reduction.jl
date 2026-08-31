@@ -38,8 +38,8 @@ struct HSDEqualityReduction{T<:AbstractFloat}
     reduced_to_full::Vector{Int}
     full_to_reduced::Vector{Int}
     x_particular::Vector{T}
-    null_basis::Union{Matrix{T},IdentityRankBasis{T}}
-    range_basis::Matrix{T}
+    null_basis::Union{Matrix{T},SparseMatrixCSC{T,Int},IdentityRankBasis{T}}
+    range_basis::Union{Matrix{T},SparseMatrixCSC{T,Int}}
     upper::Matrix{T}
     pivots::Vector{Int}
     independent::Vector{Int}
@@ -90,8 +90,12 @@ end
     end
     return true
 end
+@inline _hsd_eq_all_finite(values::SparseMatrixCSC)=
+    _hsd_eq_all_finite(values.nzval)
 
 @inline _hsd_eq_maxabs(values) = maximum(abs, values; init=zero(eltype(values)))
+@inline _hsd_eq_maxabs(values::SparseMatrixCSC)=
+    maximum(abs,values.nzval;init=zero(eltype(values)))
 
 function _hsd_eq_upper_solve!(
     destination::AbstractVector{T},
@@ -190,7 +194,7 @@ function _hsd_eq_build_reduced(
     active_rows::Vector{Int},
     active_blocks::Vector{ConeBlockDescriptor{T}},
     x_particular::Vector{T},
-    null_basis::Matrix{T},
+    null_basis::AbstractMatrix{T},
 ) where {T}
     active_A = canonical.A[active_rows, :]
     reduced_A = SparseArrays.sparse(active_A * null_basis)
@@ -228,6 +232,138 @@ function _hsd_eq_verified_equality_ray(
             isfinite(pairing) && _hsd_eq_maxabs(stationarity) <= tolerance * scale &&
             pairing < -tolerance * scale
     return valid, full_ray
+end
+
+function _hsd_eq_singleton_qr(E::Matrix{T}) where {T<:AbstractFloat}
+    me,n = size(E)
+    me <= n || return nothing
+    first_variable = Vector{Int}(undef,me)
+    second_variable = zeros(Int,me)
+    first_coefficient = Vector{T}(undef,me)
+    second_coefficient = zeros(T,me)
+    used = falses(n)
+    @inbounds for row in 1:me
+        count = 0
+        for column in 1:n
+            value = E[row,column]
+            iszero(value) && continue
+            count += 1
+            count <= 2 || return nothing
+            !used[column] || return nothing
+            used[column] = true
+            if count == 1
+                first_variable[row] = column
+                first_coefficient[row] = value
+            else
+                second_variable[row] = column
+                second_coefficient[row] = value
+            end
+        end
+        count >= 1 || return nothing
+    end
+    range_basis = zeros(T,n,me)
+    null_basis = zeros(T,n,n-me)
+    R = zeros(T,me,me)
+    next_null = 1
+    @inbounds for row in 1:me
+        first = first_variable[row]
+        second = second_variable[row]
+        a = first_coefficient[row]
+        if second == 0
+            sign = a > zero(T) ? one(T) : -one(T)
+            range_basis[first,row] = sign
+            R[row,row] = sign * a
+        else
+            b = second_coefficient[row]
+            scale = sqrt(a*a + b*b)
+            isfinite(scale) && scale > zero(T) || return nothing
+            inverse_scale = inv(scale)
+            range_basis[first,row] = a * inverse_scale
+            range_basis[second,row] = b * inverse_scale
+            null_basis[first,next_null] = -b * inverse_scale
+            null_basis[second,next_null] = a * inverse_scale
+            R[row,row] = scale
+            next_null += 1
+        end
+    end
+    @inbounds for variable in 1:n
+        used[variable] && continue
+        null_basis[variable,next_null] = one(T)
+        next_null += 1
+    end
+    next_null == size(null_basis,2)+1 || return nothing
+    return (pivots=collect(1:me),R,range_basis,null_basis)
+end
+
+function _hsd_eq_sparse_disjoint_qr(
+    A::SparseMatrixCSC{T,Int}, zero_rows::Vector{Int},
+) where {T<:AbstractFloat}
+    me = length(zero_rows)
+    n = size(A,2)
+    me <= n || return nothing
+    row_index = zeros(Int,size(A,1))
+    @inbounds for i in 1:me; row_index[zero_rows[i]] = i; end
+    first_variable = zeros(Int,me); second_variable = zeros(Int,me)
+    first_coefficient = zeros(T,me); second_coefficient = zeros(T,me)
+    counts = zeros(UInt8,me); used = falses(n)
+    @inbounds for column in 1:n
+        for pointer in nzrange(A,column)
+            row = row_index[A.rowval[pointer]]
+            row == 0 && continue
+            value = A.nzval[pointer]
+            iszero(value) && continue
+            counts[row] += 1
+            counts[row] <= 2 || return nothing
+            !used[column] || return nothing
+            used[column] = true
+            if counts[row] == 1
+                first_variable[row] = column; first_coefficient[row] = value
+            else
+                second_variable[row] = column; second_coefficient[row] = value
+            end
+        end
+    end
+    all(>(0),counts) || return nothing
+    range_nnz=sum((Int(count) for count in counts);init=0)
+    pair_count=count(==(UInt8(2)),counts)
+    null_nnz=Base.checked_add(
+        2*pair_count,n-range_nnz,
+    )
+    range_i=Int[]; range_j=Int[]; range_v=T[]
+    sizehint!(range_i,range_nnz); sizehint!(range_j,range_nnz)
+    sizehint!(range_v,range_nnz)
+    null_i=Int[]; null_j=Int[]; null_v=T[]
+    sizehint!(null_i,null_nnz); sizehint!(null_j,null_nnz)
+    sizehint!(null_v,null_nnz)
+    R=zeros(T,me,me); next_null=1; scaleE=one(T)
+    @inbounds for row in 1:me
+        first = first_variable[row]; second = second_variable[row]
+        a = first_coefficient[row]; scaleE = max(scaleE,abs(a))
+        if second == 0
+            sign = a > zero(T) ? one(T) : -one(T)
+            push!(range_i,first); push!(range_j,row); push!(range_v,sign)
+            R[row,row]=sign*a
+        else
+            b = second_coefficient[row]; scaleE = max(scaleE,abs(b))
+            scale = sqrt(a*a+b*b)
+            isfinite(scale) && scale > zero(T) || return nothing
+            inverse_scale = inv(scale)
+            push!(range_i,first); push!(range_j,row); push!(range_v,a*inverse_scale)
+            push!(range_i,second); push!(range_j,row); push!(range_v,b*inverse_scale)
+            push!(null_i,first); push!(null_j,next_null); push!(null_v,-b*inverse_scale)
+            push!(null_i,second); push!(null_j,next_null); push!(null_v,a*inverse_scale)
+            R[row,row] = scale; next_null += 1
+        end
+    end
+    @inbounds for variable in 1:n
+        used[variable] && continue
+        push!(null_i,variable); push!(null_j,next_null); push!(null_v,one(T))
+        next_null += 1
+    end
+    next_null == n-me+1 || return nothing
+    range_basis=sparse(range_i,range_j,range_v,n,me)
+    null_basis=sparse(null_i,null_j,null_v,n,n-me)
+    return (pivots=collect(1:me),R,range_basis,null_basis,row_index,scaleE)
 end
 
 """
@@ -277,54 +413,75 @@ function hsd_equality_reduce(
         )
     end
 
-    E = Matrix{T}(canonical.A[zero_rows, :])
+    structural = _hsd_eq_sparse_disjoint_qr(canonical.A,zero_rows)
+    E = structural === nothing ? Matrix{T}(canonical.A[zero_rows,:]) : nothing
     h = Vector{T}(canonical.b[zero_rows])
-    B = Matrix{T}(transpose(E))
-    kmax = min(n, me)
-    scaleE = max(norm(B, Inf), one(T))
+    B = structural === nothing ? Matrix{T}(transpose(E)) : nothing
+    kmax = min(n,me)
+    scaleE = structural === nothing ? max(norm(B,Inf),one(T)) : structural.scaleE
     rank_tol = T(max(n, me)) * eps(T) * scaleE
 
     if n == 0
         pivots = collect(1:me)
-        R = zeros(T, 0, me)
-        Q = zeros(T, 0, 0)
+        R = zeros(T,0,me)
+        Q = zeros(T,0,0)
     else
-        factor = LinearAlgebra.qr(B, LinearAlgebra.ColumnNorm())
-        pivots = collect(Int, factor.p)
-        R = Matrix{T}(factor.R)
-        Q = factor.Q * Matrix{T}(LinearAlgebra.I, n, n)
+        if structural === nothing
+            factor = LinearAlgebra.qr(B,LinearAlgebra.ColumnNorm())
+            pivots = collect(Int,factor.p)
+            R = Matrix{T}(factor.R)
+            Q = factor.Q * Matrix{T}(LinearAlgebra.I,n,n)
+        else
+            pivots = structural.pivots
+            R = structural.R
+            Q = zeros(T,0,0) # unused on the structural branch
+        end
     end
 
     rank = 0
-    dmax = zero(T)
-    @inbounds for i in 1:kmax
-        diagonal = abs(R[i, i])
-        diagonal > dmax && (dmax = diagonal)
-    end
-    if dmax > zero(T)
-        cutoff = max(rank_tol, rank_tol * dmax / scaleE)
-        @inbounds for i in 1:kmax
-            abs(R[i, i]) > cutoff || break
-            rank += 1
-        end
-    end
-
-    noise_hi = T(10) * eps(T) * scaleE
-    ambiguity_hi = rank_tol * T(4)
     ambiguous = false
-    @inbounds for i in 1:kmax
-        diagonal = abs(R[i, i])
-        if (diagonal > rank_tol && diagonal <= ambiguity_hi) ||
-           (diagonal > noise_hi && diagonal < rank_tol)
-            ambiguous = true
-            break
+    if structural === nothing
+        dmax = zero(T)
+        @inbounds for i in 1:kmax
+            diagonal = abs(R[i, i])
+            diagonal > dmax && (dmax = diagonal)
         end
+        if dmax > zero(T)
+            cutoff = max(rank_tol, rank_tol * dmax / scaleE)
+            @inbounds for i in 1:kmax
+                abs(R[i, i]) > cutoff || break
+                rank += 1
+            end
+        end
+
+        noise_hi = T(10) * eps(T) * scaleE
+        ambiguity_hi = rank_tol * T(4)
+        @inbounds for i in 1:kmax
+            diagonal = abs(R[i, i])
+            if (diagonal > rank_tol && diagonal <= ambiguity_hi) ||
+               (diagonal > noise_hi && diagonal < rank_tol)
+                ambiguous = true
+                break
+            end
+        end
+    else
+        # Every retained row has one or two nonzeros and no variable occurs
+        # in two rows. This is an exact structural full-row-rank proof;
+        # applying the unpivoted global RRQR cutoff here can truncate a later
+        # small-but-independent row while retaining full-size bases. Keep the
+        # proven rank and let the finite/original-residual gates below reject
+        # any numerically unsafe solve.
+        rank = me
     end
 
     independent = rank == 0 ? Int[] : Vector{Int}(pivots[1:rank])
     dependent = rank == me ? Int[] : Vector{Int}(pivots[(rank + 1):me])
-    range_basis = rank == 0 ? zeros(T, n, 0) : Matrix{T}(Q[:, 1:rank])
-    null_basis = rank == n ? zeros(T, n, 0) : Matrix{T}(Q[:, (rank + 1):n])
+    range_basis = structural === nothing ?
+        (rank == 0 ? zeros(T,n,0) : Matrix{T}(Q[:,1:rank])) :
+        structural.range_basis
+    null_basis = structural === nothing ?
+        (rank == n ? zeros(T,n,0) : Matrix{T}(Q[:,(rank+1):n])) :
+        structural.null_basis
     upper = rank == 0 ? zeros(T, 0, 0) : Matrix{T}(R[1:rank, 1:rank])
     transfer = zeros(T, rank, length(dependent))
     if rank > 0 && !isempty(dependent)
@@ -424,11 +581,22 @@ function hsd_equality_reduce(
         )
     end
 
-    equality_residual = E * x_particular - h
+    equality_residual = if structural === nothing
+        E*x_particular-h
+    else
+        residual = -copy(h)
+        @inbounds for column in axes(canonical.A,2)
+            for pointer in nzrange(canonical.A,column)
+                row = structural.row_index[canonical.A.rowval[pointer]]
+                row == 0 && continue
+                residual[row] += canonical.A.nzval[pointer]*x_particular[column]
+            end
+        end
+        residual
+    end
     equality_scale = max(
-        one(T),
-        _hsd_eq_maxabs(h),
-        _hsd_eq_maxabs(E) * max(_hsd_eq_maxabs(x_particular), one(T)),
+        one(T), _hsd_eq_maxabs(h),
+        scaleE * max(_hsd_eq_maxabs(x_particular),one(T)),
     )
     if !_hsd_eq_all_finite(x_particular) || !_hsd_eq_all_finite(null_basis) ||
        _hsd_eq_maxabs(equality_residual) > consistency_tol * equality_scale

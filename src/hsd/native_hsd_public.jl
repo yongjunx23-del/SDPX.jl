@@ -1234,9 +1234,9 @@ function _public_native_hsd_core(
         core_dimension = fixed_trace_plan === nothing ? saturating_sum_bytes(
             product_rank, canonical_num_slack(solve_reduced),
         ) : length(fixed_trace_plan.zero_rows)
-        block_sizes = Int[
-            block.length for block in layout_blocks(solve_reduced.cone_layout)
-        ]
+        block_sizes=_product_hsd_core_block_sizes(
+            solve_reduced,fixed_trace_plan,
+        )
         effective_precision = T === BigFloat ? precision(BigFloat) : sig_bits(T)
         free_bytes = ExtendedPrecisionBLAS._system_free_memory_bytes()
         usable = ExtendedPrecisionBLAS._conservative_usable_memory_bytes(free_bytes)

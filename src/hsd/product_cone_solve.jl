@@ -270,7 +270,7 @@ end
     )
     direct === nothing || return direct
     return _product_hsd_refined_optimal_result!(
-        state, x_original, s_original, y_original, tol, reason, last_step,
+        state,x_original,s_original,y_original,tol,reason,last_step,
         terminal_alpha,
     )
 end

@@ -32,7 +32,8 @@ benchmark/out/
 *.o[0-9]*
 *.e[0-9]*
 
-# Local scratch
+# Local scratch and autoresearch session state
+.auto/
 scratch/
 tmp/
 *.tmp

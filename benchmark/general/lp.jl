@@ -12,7 +12,7 @@ end
 
 function build(::LPProblem, ::Type{T}, params) where {T<:AbstractFloat}
     kind = params.kind
-    model = SDPX.Model(T; name="generic_$(params.name)")
+    model = _benchmark_model(T,params)
     if kind === :afiro_style
         x = SDPX.variable!(model, :x, 2; domain=SDPX.Nonnegative())
         s = SDPX.variable!(model, :slack, 2; domain=SDPX.Nonnegative())

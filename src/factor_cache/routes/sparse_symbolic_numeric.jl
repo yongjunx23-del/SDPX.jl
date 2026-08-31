@@ -92,8 +92,7 @@ mutable struct SparseSymbolicNumericCache{T} <: AbstractFactorCache{T}
     n::Int
     colptr::Vector{Int}            # frozen lower-triangle CSC colptr
     rowval::Vector{Int}            # frozen lower-triangle CSC rowval
-    factor_view::SparseMatrixCSC{T, Int}   # same structure; numeric buffer
-    original_values::Vector{T}     # retained original K values (unmodified)
+    factor_view::SparseMatrixCSC{T, Int}   # same structure; retained original values
     dsigns::Vector{Int}            # signed diagonal descriptor
     regularization::T              # signed static regularization magnitude
     factor::Union{Nothing,LinearAlgebra.Factorization{T}}
@@ -114,7 +113,7 @@ function SparseSymbolicNumericCache{T}() where {T}
     ))
     return SparseSymbolicNumericCache{T}(
         0, Vector{Int}(undef, 0), Vector{Int}(undef, 0),
-        spzeros(T, 0, 0), Vector{T}(undef, 0), Int[], zero(T), nothing,
+        spzeros(T, 0, 0), Int[], zero(T), nothing,
         0, 0, 0, 0, 0, 0, 0, UInt64(0), Unprepared,
     )
 end
@@ -157,9 +156,10 @@ function _sparse_pattern_signature(
     return signature
 end
 
-function prepare!(
+function _prepare_sparse_symbolic!(
     cache::SparseSymbolicNumericCache{T},
     req::SparseSymbolicRequirements,
+    transfer_owned::Bool,
 ) where {T}
     T === Float64 || throw(ArgumentError(
         "SparseSymbolicNumericCache is Float64-only (CHOLMOD); got $T",
@@ -191,11 +191,15 @@ function prepare!(
         throw(ArgumentError(
             "regularization must be finite and nonnegative",
         ))
-    # Owned factor view: copy the frozen structure exactly.
-    colptr = Vector{Int}(pattern.colptr)
-    rowval = Vector{Int}(pattern.rowval)
-    nzval = Vector{T}(undef, length(rowval))
-    factor_view = SparseMatrixCSC{T, Int}(n, n, colptr, rowval, nzval)
+    # Public preparation isolates the cache from a retained requirements
+    # object. The symmetric-core internal path may instead transfer the
+    # temporary requirements' already-owned arrays, avoiding a second CSC
+    # snapshot while preserving caller isolation.
+    colptr = transfer_owned ? pattern.colptr : Vector{Int}(pattern.colptr)
+    rowval = transfer_owned ? pattern.rowval : Vector{Int}(pattern.rowval)
+    factor_view = transfer_owned ? pattern : SparseMatrixCSC{T, Int}(
+        n,n,colptr,rowval,Vector{T}(undef,length(rowval)),
+    )
     # Every column must have a structural diagonal (the core pattern
     # guarantees this for the x diagonal and the -Theta triangle).
     @inbounds for j in 1:n
@@ -213,8 +217,7 @@ function prepare!(
     cache.colptr = colptr
     cache.rowval = rowval
     cache.factor_view = factor_view
-    cache.original_values = Vector{T}(undef, length(rowval))
-    cache.dsigns = Int[sign for sign in req.dsigns]
+    cache.dsigns = transfer_owned ? req.dsigns : Int[sign for sign in req.dsigns]
     cache.regularization = T(req.regularization)
     cache.factor = nothing
     cache.symbolic_epoch = req.symbolic_epoch
@@ -230,6 +233,13 @@ function prepare!(
     cache.status = Prepared
     return cache
 end
+
+prepare!(cache::SparseSymbolicNumericCache{T},req::SparseSymbolicRequirements) where {T} =
+    _prepare_sparse_symbolic!(cache,req,false)
+
+_prepare_owned_requirements!(
+    cache::SparseSymbolicNumericCache{T},req::SparseSymbolicRequirements,
+) where {T} = _prepare_sparse_symbolic!(cache,req,true)
 
 """
     _copy_values_into_view!(cache, K)
@@ -253,7 +263,6 @@ function _copy_values_into_view!(
     all(isfinite, K.nzval) || throw(ArgumentError(
         "factorize! matrix contains non-finite data",
     ))
-    cache.original_values .= K.nzval
     cache.factor_view.nzval .= K.nzval
     return cache
 end
@@ -262,7 +271,7 @@ end
     _apply_signed_regularization!(cache)
 
 Add `regularization * dsign[i]` to each structural diagonal entry of the
-factor view.  Mutates only the factor view; `original_values` is untouched.
+factor view. The validated caller matrix remains untouched.
 """
 function _apply_signed_regularization!(
     cache::SparseSymbolicNumericCache{T},
@@ -289,15 +298,16 @@ function _apply_signed_regularization!(
 end
 
 """
-    _restore_original_values!(cache)
+    _restore_original_values!(cache, K)
 
-Restore the retained original K values into the factor view so the view
+Restore the validated original K values into the factor view so the view
 always mirrors the unmodified operator after a successful factor.
 """
 function _restore_original_values!(
     cache::SparseSymbolicNumericCache{T},
+    K::SparseMatrixCSC{T,Int},
 ) where {T}
-    cache.factor_view.nzval .= cache.original_values
+    cache.factor_view.nzval .= K.nzval
     return cache
 end
 
@@ -327,6 +337,7 @@ function factorize!(
     # so a later rejection can never leave a stale factor in a solvable
     # state.
     cache.status = Factoring
+    copied_values=false
     try
         # Validated finite integer epoch conversion before any matrix
         # inspection.  An unconvertible epoch fails closed (status `Failed`).
@@ -342,6 +353,7 @@ function factorize!(
             "SparseSymbolicNumericCache factorize! requires a SparseMatrixCSC",
         ))
         _copy_values_into_view!(cache, K)
+        copied_values=true
         _apply_signed_regularization!(cache)
         if cache.factor === nothing
             # First numeric factor: also performs the sole symbolic analysis.
@@ -372,7 +384,7 @@ function factorize!(
         ))
         # The factor owns the regularized copy; restore the view to the
         # original values so it mirrors the unmodified operator.
-        _restore_original_values!(cache)
+        _restore_original_values!(cache,K)
         cache.matrix_epoch = epoch
         cache.factor_epoch += 1
         cache.numeric_count += 1
@@ -383,9 +395,11 @@ function factorize!(
         # is possible from the `Failed` state.  Recovering requires presenting
         # the same pattern again (a fresh `ldlt` on the next attempt); we do
         # not claim symbolic reuse across a failed factor.
-        try
-            _restore_original_values!(cache)
-        catch
+        if copied_values
+            try
+                _restore_original_values!(cache,K)
+            catch
+            end
         end
         cache.factor = nothing
         cache.status = Failed

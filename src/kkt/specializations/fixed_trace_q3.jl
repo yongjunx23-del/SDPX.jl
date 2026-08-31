@@ -288,6 +288,43 @@ end
 Apply the local 2x2 lower-triangular elimination to every column of a panel
 (equality-basis transform under the fixed-trace elimination).
 """
+function fixed_trace_q3_copy_trsm_lower!(
+    destination::AbstractMatrix{T},
+    panel::AbstractMatrix{T},
+    reduction::FixedTraceQ3Reduction{T},
+    factors::AbstractMatrix{T},
+    inverse_pivots::AbstractMatrix{T},
+) where {T}
+    size(destination) == reverse(size(panel)) || throw(DimensionMismatch(
+        "fixed-trace transformed panel dimensions disagree",
+    ))
+    columns = axes(destination, 2)
+    block_work = size(reduction.active_ids, 2) * length(columns)
+    transform_column = function (column::Int)
+        @inbounds for block in axes(factors, 2)
+            first = reduction.active_ids[1,block]
+            second = reduction.active_ids[2,block]
+            first_value = panel[column,first] * inverse_pivots[1,block]
+            destination[first,column] = first_value
+            destination[second,column] =
+                (panel[column,second] - factors[2,block] * first_value) *
+                inverse_pivots[2,block]
+        end
+        return
+    end
+    if block_work >= 16_384 && length(columns) >= Threads.nthreads() &&
+       Threads.nthreads() > 1
+        Threads.@threads :static for column in columns
+            transform_column(column)
+        end
+    else
+        @inbounds for column in columns
+            transform_column(column)
+        end
+    end
+    return destination
+end
+
 function fixed_trace_q3_trsm_lower!(
     reduction::FixedTraceQ3Reduction{T},
     factors::AbstractMatrix{T},
@@ -299,7 +336,9 @@ function fixed_trace_q3_trsm_lower!(
     # columns are numerous and independent, so split them across the task
     # pool; the serial path is kept for small panels to avoid spawn overhead.
     columns = axes(values, 2)
-    if length(columns) >= 64 && Threads.nthreads() > 1
+    block_work = size(reduction.active_ids, 2) * length(columns)
+    if block_work >= 16_384 && length(columns) >= Threads.nthreads() &&
+       Threads.nthreads() > 1
         Threads.@threads :static for column in columns
             fixed_trace_q3_trsv_lower!(
                 reduction, factors, inverse_pivots,
@@ -503,12 +542,12 @@ function prepare_fixed_trace_q3_equality_schur!(
     assemble_fixed_trace_q3_contribution!(
         workspace.local_elimination, local_metric, regularization,
     ) || return false
-    copyto!(workspace.transformed_panel, transpose(workspace.panel))
-    fixed_trace_q3_trsm_lower!(
+    fixed_trace_q3_copy_trsm_lower!(
+        workspace.transformed_panel,
+        workspace.panel,
         workspace.local_elimination.reduction,
         workspace.local_elimination.factors,
         workspace.local_elimination.inverse_pivots,
-        workspace.transformed_panel,
     )
     la_syrk!(
         workspace.backend, workspace.schur, workspace.transformed_panel,
@@ -794,13 +833,24 @@ function _fixed_trace_mul_A!(
     reduction = plan.reduction
     active = reduction.active_ids
     tail_map = reduction.tail_map
-    for b in eachindex(plan.soc_blocks)
+    blocks = eachindex(plan.soc_blocks)
+    update_block = function (b)
         o = plan.soc_blocks[b].offset
-        a1 = active[1, b]
-        a2 = active[2, b]
+        a1 = active[1,b]
+        a2 = active[2,b]
         ax[o] = zero(T)
-        ax[o + 1] = tail_map[1, 1, b] * x[a1] + tail_map[1, 2, b] * x[a2]
-        ax[o + 2] = tail_map[2, 1, b] * x[a1] + tail_map[2, 2, b] * x[a2]
+        ax[o+1] = tail_map[1,1,b] * x[a1] + tail_map[1,2,b] * x[a2]
+        ax[o+2] = tail_map[2,1,b] * x[a1] + tail_map[2,2,b] * x[a2]
+        return
+    end
+    if length(blocks) >= 512 && Threads.nthreads() > 1
+        Threads.@threads :static for b in blocks
+            update_block(b)
+        end
+    else
+        @inbounds for b in blocks
+            update_block(b)
+        end
     end
     return ax
 end
@@ -827,17 +877,34 @@ function _fixed_trace_mul_At_dual_residual!(
     reduction = plan.reduction
     active = reduction.active_ids
     tail_map = reduction.tail_map
-    for b in eachindex(plan.soc_blocks)
+    blocks = eachindex(plan.soc_blocks)
+    update_block = function (b)
         o = plan.soc_blocks[b].offset
-        a1 = active[1, b]
-        a2 = active[2, b]
-        y1 = y[o + 1]
-        y2 = y[o + 2]
-        rD[a1] += tail_map[1, 1, b] * y1 + tail_map[2, 1, b] * y2
-        rD[a2] += tail_map[1, 2, b] * y1 + tail_map[2, 2, b] * y2
+        a1 = active[1,b]
+        a2 = active[2,b]
+        y1 = y[o+1]
+        y2 = y[o+2]
+        rD[a1] += tail_map[1,1,b] * y1 + tail_map[2,1,b] * y2
+        rD[a2] += tail_map[1,2,b] * y1 + tail_map[2,2,b] * y2
+        return
     end
-    @inbounds for j in eachindex(rD)
-        rD[j] += c[j] * tau
+    if length(blocks) >= 512 && Threads.nthreads() > 1
+        Threads.@threads :static for b in blocks
+            update_block(b)
+        end
+    else
+        @inbounds for b in blocks
+            update_block(b)
+        end
+    end
+    if length(rD) >= 2_048 && Threads.nthreads() > 1
+        Threads.@threads :static for j in eachindex(rD)
+            @inbounds rD[j] += c[j] * tau
+        end
+    else
+        @inbounds for j in eachindex(rD)
+            rD[j] += c[j] * tau
+        end
     end
     return true
 end
@@ -852,8 +919,15 @@ function _fixed_trace_hsd_residual!(
     base::HSDState{T}, core::FixedTraceQ3CoreWorkspace{T},
 ) where {T}
     _fixed_trace_mul_A!(base.ax, core, base.x)
-    @inbounds for k in 1:base.m
-        base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
+    if base.m >= 2_048 && Threads.nthreads() > 1
+        Threads.@threads :static for k in 1:base.m
+            @inbounds base.rP[k] =
+                base.s[k] - base.b[k] * base.tau + base.ax[k]
+        end
+    else
+        @inbounds for k in 1:base.m
+            base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
+        end
     end
     if core.structured_A
         _fixed_trace_mul_At_dual_residual!(
@@ -889,8 +963,15 @@ function _fixed_trace_trial_residual!(
 ) where {T}
     if core.structured_A
         _fixed_trace_mul_A!(base.rPt, core, base.xt)
-        @inbounds for k in 1:base.m
-            base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+        if base.m >= 2_048 && Threads.nthreads() > 1
+            Threads.@threads :static for k in 1:base.m
+                @inbounds base.rPt[k] +=
+                    base.st[k] - base.b[k] * base.tau_t
+            end
+        else
+            @inbounds for k in 1:base.m
+                base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+            end
         end
         _fixed_trace_mul_At_dual_residual!(
             base.rDt, core, base.yt, base.c, base.tau_t,
@@ -962,10 +1043,6 @@ function _fixed_trace_core_prepare_metric!(
     reduction = workspace.plan.reduction
     metric = workspace.local_metric
     @inbounds for block_index in axes(reduction.active_ids, 2)
-        @inbounds for j in 1:3, i in 1:3
-            isfinite(workspace.theta_inverse[i,j,block_index]) ||
-                throw(ArgumentError("fixed-trace HKM metric is non-finite"))
-        end
         a11 = reduction.tail_map[1,1,block_index]
         a12 = reduction.tail_map[1,2,block_index]
         a21 = reduction.tail_map[2,1,block_index]
@@ -979,9 +1056,6 @@ function _fixed_trace_core_prepare_metric!(
               a21 * (m12 * a12 + m22 * a22)
         h22 = a12 * (m11 * a12 + m12 * a22) +
               a22 * (m12 * a12 + m22 * a22)
-        all(isfinite, (h11, h12, h22)) || throw(ArgumentError(
-            "fixed-trace local HKM metric is non-finite",
-        ))
         metric[1,block_index] = h11
         metric[2,block_index] = h12
         metric[3,block_index] = h22

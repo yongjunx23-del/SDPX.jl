@@ -187,10 +187,19 @@ function SymmetricCorePattern{T}(
     m, nr = size(Ar)
     _validate_core_blocks(m, block_ranges, block_shapes)
     dimension = nr + m
+    theta_nnz=0
+    for rows in block_ranges
+        block_size=length(rows)
+        triangle=div(Base.checked_mul(block_size,block_size+1),2)
+        theta_nnz=Base.checked_add(theta_nnz,triangle)
+    end
+    ar_nnz=nnz(Ar)
+    structural_nnz=Base.checked_add(Base.checked_add(nr,ar_nnz),theta_nnz)
 
     # ---- Frozen lower-triangle CSC structure ---------------------
     colptr = Vector{Int}(undef, dimension + 1)
     rowval = Int[]
+    sizehint!(rowval,structural_nnz)
     colptr[1] = 1
     @inbounds for j in 1:nr
         push!(rowval, j)  # structural zero x diagonal
@@ -217,8 +226,10 @@ function SymmetricCorePattern{T}(
 
     # ---- Slot maps -------------------------------------------------
     ar_slots = Int[]
+    sizehint!(ar_slots,ar_nnz)
     x_diag_slots = Vector{Int}(undef, nr)
     theta_slots = Int[]
+    sizehint!(theta_slots,theta_nnz)
     slot = 0
     @inbounds for j in 1:nr
         slot += 1
@@ -281,8 +292,7 @@ the returned structure.
 function symmetric_core_lower_sparse(pattern::SymmetricCorePattern{T}) where {T}
     return SparseMatrixCSC{T, Int}(
         pattern.dimension, pattern.dimension,
-        Vector{Int}(pattern.colptr), Vector{Int}(pattern.rowval),
-        pattern.nzval,
+        pattern.colptr, pattern.rowval, pattern.nzval,
     )
 end
 
@@ -784,8 +794,8 @@ _core_cone_theta_signature(::AbstractConeLinearization) = throw(ArgumentError(
 @inline function _core_factor_matches_pattern(
     cache::SparseSymbolicNumericCache, pattern::SymmetricCorePattern,
 )
-    return length(cache.original_values) == length(pattern.nzval) &&
-           cache.original_values == pattern.nzval
+    return length(cache.factor_view.nzval)==length(pattern.nzval) &&
+           cache.factor_view.nzval==pattern.nzval
 end
 @inline _core_factor_matches_pattern(::AbstractFactorCache, ::SymmetricCorePattern) = true
 
@@ -2067,6 +2077,27 @@ function symmetric_core_state_preflight(
     return nothing
 end
 
+function _build_float64_core_cache(
+    pattern::SymmetricCorePattern{Float64},
+    symbolic_epoch::Integer, regularization::Real,
+)
+    isfinite(regularization) && regularization>=0 || throw(ArgumentError(
+        "symmetric core Float64 regularization must be finite and nonnegative",
+    ))
+    k=symmetric_core_lower_sparse(pattern)
+    dsigns=symmetric_core_dsigns(pattern)
+    disconnected=DisconnectedLDLTCache(
+        k,dsigns;symbolic_epoch,regularization,max_size=4,
+    )
+    disconnected===nothing || return disconnected
+    requirements=SparseSymbolicRequirements(k;
+        symbolic_epoch=Int(symbolic_epoch),dsigns,
+        regularization=Float64(regularization))
+    cache=SparseSymbolicNumericCache{Float64}()
+    _prepare_owned_requirements!(cache,requirements)
+    return cache
+end
+
 """Build a numeric-factor-free prepared state workspace.
 
 Allocates an owned `BlockProductConeLinearization` from ordered canonical
@@ -2087,6 +2118,7 @@ function prepare_symmetric_core_state(
     current_rss_bytes::Union{Nothing,Integer},
     regularization::Real;
     symbolic_epoch::Integer=0,
+    take_cone_ownership::Bool=false,
 ) where {T<:AbstractFloat}
     length(block_ranges) == length(block_sizes) || throw(ArgumentError(
         "symmetric core state block ranges/sizes counts disagree",
@@ -2109,36 +2141,37 @@ function prepare_symmetric_core_state(
     # Range/isometry preconditions before materialization.
     _validate_core_preconditions(system, V)
 
-    # State-owned per-block Theta operators and cone RHS.
-    operators = Matrix{T}[]
-    for rows in block_ranges
-        dimension_block = length(rows)
-        push!(operators, alloc_zeros(T, dimension_block, dimension_block))
+    # State-owned per-block Theta operators and cone RHS. The internal HSD
+    # caller may transfer the just-created semantic cone; public/default
+    # preparation retains the isolating copy behavior.
+    cone = if take_cone_ownership
+        system.cone isa BlockProductConeLinearization{T} || throw(ArgumentError(
+            "owned symmetric-core cone must be block-product",
+        ))
+        system.cone.block_ranges==block_ranges || throw(ArgumentError(
+            "owned symmetric-core cone block ranges disagree",
+        ))
+        system.cone
+    else
+        operators = Matrix{T}[]
+        sizehint!(operators,length(block_ranges))
+        for rows in block_ranges
+            dimension_block = length(rows)
+            push!(operators, alloc_zeros(T, dimension_block, dimension_block))
+        end
+        corrector_rhs = alloc_zeros(T, m)
+        BlockProductConeLinearization{T}(
+            operators, corrector_rhs,
+            UnitRange{Int}[rows for rows in block_ranges],
+        )
     end
-    corrector_rhs = alloc_zeros(T, m)
-    cone = BlockProductConeLinearization{T}(
-        operators, corrector_rhs,
-        UnitRange{Int}[rows for rows in block_ranges],
-    )
 
     pattern = _symmetric_core_pattern_from_validated(system, V)
     pattern.block_ranges == block_ranges || throw(ArgumentError(
         "symmetric core state block ranges drifted after pattern build",
     ))
     cache = if T === Float64
-        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
-            "symmetric core Float64 regularization must be finite and nonnegative",
-        ))
-        k = symmetric_core_lower_sparse(pattern)
-        requirements = SparseSymbolicRequirements(
-            k;
-            symbolic_epoch=Int(symbolic_epoch),
-            dsigns=symmetric_core_dsigns(pattern),
-            regularization=Float64(regularization),
-        )
-        c = SparseSymbolicNumericCache{Float64}()
-        prepare!(c, requirements)
-        c
+        _build_float64_core_cache(pattern,symbolic_epoch,regularization)
     else
         # QDLDL-backed sparse signed-LDL provider is NOT used for the
         # symmetric augmented core: K = [0 Ar'; Ar -Theta] stores a structural
@@ -2157,7 +2190,7 @@ function prepare_symmetric_core_state(
     # Build the state-owned block-cone NewtonSystem first so the workspace
     # type parameter is the block-cone system from construction (no
     # concrete-field reassignment) and no global Theta is ever referenced.
-    block_system = NewtonSystem(
+    block_system = take_cone_ownership ? system : NewtonSystem(
         system.A, system.b, system.c, cone,
         system.tau, system.kappa, system.rhs,
     )
@@ -2305,19 +2338,8 @@ function build_symmetric_core_workspace(
     _validate_core_preconditions(system, V)
     pattern = _symmetric_core_pattern_from_validated(system, V)
     cache = if T === Float64
-        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
-            "symmetric core Float64 regularization must be finite and nonnegative",
-        ))
-        k = symmetric_core_lower_sparse(pattern)
-        requirements = SparseSymbolicRequirements(
-            k;
-            symbolic_epoch=Int(symbolic_epoch),
-            dsigns=symmetric_core_dsigns(pattern),
-            regularization=Float64(regularization),
-        )
-        cache = SparseSymbolicNumericCache{Float64}()
-        prepare!(cache, requirements)
-        factorize!(cache, k, Int(matrix_epoch))
+        cache=_build_float64_core_cache(pattern,symbolic_epoch,regularization)
+        factorize!(cache,symmetric_core_lower_sparse(pattern),Int(matrix_epoch))
         cache
     else
         cache = build_symmetric_core_ldlt_cache(

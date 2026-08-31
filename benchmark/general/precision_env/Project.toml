@@ -1,0 +1,12 @@
+[deps]
+SDPX = "9c19f76d-03c5-4610-b403-7c8fdd8897fd"
+MultiFloats = "bdf0d083-296b-4888-a5b6-7498122e68a5"
+MultiFloatLinearAlgebra = "642d9d30-8e28-45ca-9d81-256429ea358f"
+BigFloatLinearAlgebra = "44d352a4-380e-4c6a-9c2a-31e5bfe329aa"
+
+[compat]
+julia = "1.12"
+SDPX = "0.6"
+MultiFloats = "3"
+MultiFloatLinearAlgebra = "0.4"
+BigFloatLinearAlgebra = "0.2"

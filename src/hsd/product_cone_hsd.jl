@@ -369,6 +369,17 @@ end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
 
+function _product_hsd_core_block_sizes(canonical,fixed_trace_plan)
+    blocks=layout_blocks(canonical.cone_layout)
+    if fixed_trace_plan===nothing && all(
+        block->block.cone in (:nonnegative,:nonpositive),blocks,
+    )
+        dimension=sum((block.length for block in blocks);init=0)
+        return fill(1,dimension)
+    end
+    return Int[block.length for block in blocks]
+end
+
 """Prepare an optional setup-owned symmetric-core workspace from base facts.
 
 Cold seam (C7.1b): allocates the frozen core pattern, state-owned per-block
@@ -391,15 +402,32 @@ function _prepare_product_hsd_symmetric_core(
     n = base.n
     nr = base.nr
     blocks = layout_blocks(base.canonical.cone_layout)
-    block_ranges = UnitRange{Int}[
-        block.offset:(block.offset + block.length - 1) for block in blocks
-    ]
-    block_sizes = Int[block.length for block in blocks]
     effective_precision = precision_bits == 0 ? (
         T === BigFloat ? precision(BigFloat) : sig_bits(T)
     ) : Int(precision_bits)
     fixed_trace_plan === nothing &&
         (fixed_trace_plan = fixed_trace_q3_canonical_plan(base.canonical))
+    pure_orthant=all(
+        block->block.cone in (:nonnegative,:nonpositive),blocks,
+    )
+    block_count=pure_orthant ?
+        sum((block.length for block in blocks);init=0) : length(blocks)
+    block_ranges=UnitRange{Int}[]
+    block_sizes=Int[]
+    sizehint!(block_ranges,block_count)
+    sizehint!(block_sizes,block_count)
+    for block in blocks
+        rows=block.offset:(block.offset+block.length-1)
+        if fixed_trace_plan===nothing && pure_orthant
+            for row in rows
+                push!(block_ranges,row:row)
+                push!(block_sizes,1)
+            end
+        else
+            push!(block_ranges,rows)
+            push!(block_sizes,block.length)
+        end
+    end
     # Dimension-only provider + memory preflight with base facts, before ANY
     # allocation (RHS vectors, operators, cone, system, metadata arrays).
     dimension = saturating_sum_bytes(nr, m)
@@ -422,6 +450,7 @@ function _prepare_product_hsd_symmetric_core(
         alloc_zeros(T, m), zero(T),
     )
     operators = Matrix{T}[]
+    sizehint!(operators,length(block_ranges))
     for rows in block_ranges
         push!(operators, alloc_zeros(T, length(rows), length(rows)))
     end
@@ -445,6 +474,7 @@ function _prepare_product_hsd_symmetric_core(
         current_rss_bytes,
         regularization;
         symbolic_epoch=symbolic_epoch,
+        take_cone_ownership=true,
     )
 end
 

@@ -753,14 +753,26 @@ function _product_hsd_symmetric_core_linearization!(
     basis = state.g_input
     image = state.g_output
     forcing = T(64) * eps(T)
+    has_scalar_blocks=any(rows->length(rows)==1,cone.block_ranges)
+    if has_scalar_blocks
+        fill!(basis,one(T))
+        apply_Theta!(state.runtime,image,basis)
+    end
     for (index, rows) in enumerate(cone.block_ranges)
         operator = cone.operators[index]
-        length(rows) == size(operator, 1) == size(operator, 2) || return false
+        dimension=length(rows)
+        dimension == size(operator, 1) == size(operator, 2) || return false
+        if dimension==1
+            row=first(rows)
+            operator[1,1]=_core_owned_value(image[row])
+            cone.corrector_rhs[row]=_core_owned_value(corrector_rhs[row])
+            continue
+        end
         scaling = _product_hsd_nonsymmetric_scaling(
             state.runtime, first(rows),
         )
         if scaling !== nothing
-            length(rows) == 3 || return false
+            dimension == 3 || return false
             reason = nonsymmetric_scaling_contribution3!(
                 operator,
                 view(cone.corrector_rhs, rows),
@@ -770,15 +782,15 @@ function _product_hsd_symmetric_core_linearization!(
             reason === NS_SCALING_CONVERGED || return false
             continue
         end
-        @inbounds for local_column in 1:length(rows)
+        @inbounds for local_column in 1:dimension
             fill!(basis, zero(T))
             basis[rows[local_column]] = one(T)
             apply_Theta!(state.runtime, image, basis)
-            for local_row in 1:length(rows)
+            for local_row in 1:dimension
                 operator[local_row, local_column] =
                     _core_owned_value(image[rows[local_row]])
             end
-            view(cone.corrector_rhs, rows)[local_column] =
+            cone.corrector_rhs[rows[local_column]] =
                 _core_owned_value(corrector_rhs[rows[local_column]])
         end
     end

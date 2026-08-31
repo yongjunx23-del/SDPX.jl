@@ -18,7 +18,7 @@ end
 
 function build(::SDPProblem, ::Type{T}, params) where {T<:AbstractFloat}
     n = params.n
-    model = SDPX.Model(T; name="generic_$(params.name)")
+    model = _benchmark_model(T,params)
     X = SDPX.variable!(model, :X, n, n; domain=SDPX.PSDCone())
     if params.kind === :weighted_trace
         diagonal = T.(_random_diagonal(params.seed, n))
