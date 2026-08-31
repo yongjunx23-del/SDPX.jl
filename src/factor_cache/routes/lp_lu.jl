@@ -56,21 +56,34 @@ function prepare!(cache::LPLUCache{T}, req::FactorRequirements) where {T}
     return cache
 end
 
-# Julia 1.12's LinearAlgebra exposes a zero-allocation `getrf!(A, ipiv)`
-# overload, while the supported Julia 1.10 LTS only exposes `getrf!(A)` and
-# allocates a fresh pivot vector. Feature-detect the owned-pivot overload so
-# backported LinearAlgebra releases use it automatically. On runtimes without
-# that overload, use SDPX's in-place partial-pivoting kernel instead of the
-# allocating one-argument LAPACK wrapper. The packed LU and sequential pivot
-# layout are compatible with the existing LAPACK `getrs!` solve path.
+# Julia 1.12's LinearAlgebra exposes zero-allocation owned-pivot
+# `getrf!(A, ipiv)` / `getrs!` wrappers.  Julia 1.10 only exposes the
+# allocating one-argument `getrf!(A)`, and its `getrs!` wrapper also allocates
+# a small call buffer.  Resolve the capability once at module load so every
+# hot factor/solve call is a compile-time-stable branch.
+const _LP_LU_HAS_OWNED_LAPACK = applicable(
+    LinearAlgebra.LAPACK.getrf!,
+    Matrix{Float64}(undef, 0, 0),
+    Vector{Int}(undef, 0),
+)
+
 function _lp_lu_factor!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
-    if T <: _LAPACK_LU && applicable(LinearAlgebra.LAPACK.getrf!, F, ipiv)
+    if T <: _LAPACK_LU && _LP_LU_HAS_OWNED_LAPACK
         _, _, info = LinearAlgebra.LAPACK.getrf!(F, ipiv)
         info > 0 && throw(SingularException(info))
     else
         _lu_factor_generic!(F, ipiv)
     end
     return nothing
+end
+
+function _lp_lu_solve!(F::Matrix{T}, ipiv::Vector{Int}, rhs::AbstractVector{T}) where {T}
+    if T <: _LAPACK_LU && _LP_LU_HAS_OWNED_LAPACK
+        LinearAlgebra.LAPACK.getrs!('N', F, ipiv, rhs)
+    else
+        _lu_solve_generic!(F, ipiv, rhs)
+    end
+    return rhs
 end
 
 function factorize!(cache::LPLUCache{T}, A::AbstractMatrix{T}, matrix_epoch::Integer) where {T}
@@ -98,7 +111,7 @@ function solve!(cache::LPLUCache{T}, destination::AbstractVector{T}, rhs::Abstra
     length(rhs) == cache.n || throw(DimensionMismatch("solve rhs length != n"))
     length(destination) == cache.n || throw(DimensionMismatch("solve dest length != n"))
     copyto!(cache.scratch, rhs)
-    _lu_solve!(cache.factors, cache.ipiv, cache.scratch)
+    _lp_lu_solve!(cache.factors, cache.ipiv, cache.scratch)
     copyto!(destination, cache.scratch)
     return destination
 end
@@ -112,7 +125,7 @@ function solve_multi!(cache::LPLUCache{T}, destination::AbstractMatrix{T}, rhs::
         for i in 1:cache.n
             cache.scratch[i] = rhs[i, j]
         end
-        _lu_solve!(cache.factors, cache.ipiv, cache.scratch)
+        _lp_lu_solve!(cache.factors, cache.ipiv, cache.scratch)
         for i in 1:cache.n
             destination[i, j] = cache.scratch[i]
         end
@@ -127,7 +140,7 @@ function refine_once!(cache::LPLUCache{T}, residual::AbstractVector{T}, correcti
     for i in 1:cache.n
         correction[i] = residual[i]
     end
-    _lu_solve!(cache.factors, cache.ipiv, correction)
+    _lp_lu_solve!(cache.factors, cache.ipiv, correction)
     return correction
 end
 
