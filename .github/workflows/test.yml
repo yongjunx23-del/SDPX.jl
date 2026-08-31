@@ -96,10 +96,11 @@ jobs:
           cache-name: julia-depot
       - name: Instantiate benchmark environment
         run: julia --project=benchmark/bootstrap/benchenv -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-      # Only the canonical micro suite runs in CI. Larger registered suites
-      # need generated or downloaded inputs and are run manually.
-      - name: Run canonical micro benchmark smoke
-        run: julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl micro --samples=1 --output=/tmp/sdpx-micro.toml
+      # The fixture catalog exposes one canonical `smoke` suite. Larger
+      # registered physics suites need generated or downloaded inputs and are
+      # run manually with their explicit catalog paths.
+      - name: Run canonical benchmark smoke
+        run: julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl smoke --samples=1 --output=/tmp/sdpx-smoke.toml
 
   provider-smoke:
     name: MFLA/BFLA provider smoke
