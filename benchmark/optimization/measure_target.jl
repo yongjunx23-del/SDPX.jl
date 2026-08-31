@@ -88,14 +88,36 @@ function _validate_manifest_samples(row; fixture=false)
     receipt = get(row, "receipt", nothing)
     if receipt !== nothing && !fixture
         required = ("source_commit", "tree_fingerprint", "catalog", "family",
-            "instance", "input_fingerprint", "project_sha256",
-            "manifest_sha256", "environment_fingerprint", "provider_fingerprint",
-            "objective_interval", "actual_objective", "resolved_tolerances",
-            "certificate_kind", "certificate_failures", "warmup_excluded", "sample_count")
-        all(haskey(receipt, key) for key in required) ||
+            "instance", "input_fingerprint", "project_sha256", "manifest_sha256",
+            "catalog_run_id", "catalog_artifact_sha256", "environment_fingerprint",
+            "provider_fingerprint", "provider_version", "cpu", "julia_threads",
+            "blas_threads", "omp_threads", "gc_threads", "objective_interval",
+            "actual_objective", "resolved_tolerances", "requested_route",
+            "planned_route", "executed_route", "requested_formulation",
+            "planned_formulation", "executed_formulation", "requested_backend",
+            "planned_backend", "executed_backend", "requested_provider",
+            "planned_provider", "executed_provider", "requested_kernel",
+            "planned_kernel", "executed_kernel", "reuse", "certificate_kind",
+            "certificate_failures", "iterations", "trajectory_semantics",
+            "warmup_excluded", "sample_count")
+        all(haskey(receipt, key) && receipt[key] !== nothing &&
+            !(receipt[key] isa AbstractString && isempty(receipt[key])) for key in required) ||
             throw(ArgumentError("complete receipt missing fields"))
         receipt["warmup_excluded"] == 1 && receipt["sample_count"] == 3 ||
             throw(ArgumentError("receipt sample accounting invalid"))
+        interval = receipt["objective_interval"]
+        interval isa AbstractDict && haskey(interval, "lower") && haskey(interval, "upper") ||
+            throw(ArgumentError("objective interval must contain lower and upper"))
+        tolerance = receipt["resolved_tolerances"]
+        tolerance isa AbstractDict && all(haskey(tolerance, key) for key in ("primal", "dual", "gap")) ||
+            throw(ArgumentError("resolved tolerances must contain primal, dual, gap"))
+        semantics = String(receipt["trajectory_semantics"])
+        semantics in ("sha256", "validated", "not_applicable") ||
+            throw(ArgumentError("trajectory semantics invalid"))
+        trajectory = String(get(receipt, "trajectory_sha", ""))
+        semantics == "sha256" && occursin(r"^[0-9a-f]{64}$", trajectory) ||
+            semantics != "sha256" && semantics == "not_applicable" && isempty(trajectory) ||
+            throw(ArgumentError("trajectory SHA semantics invalid"))
     end
     return nothing
 end

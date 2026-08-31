@@ -43,6 +43,7 @@ SDPX_PROFILE_FIXTURE=1 \
   SDPX_PROFILE_OUTPUT=/tmp/profile.toml \
   julia --project=. benchmark/optimization/profile_catalog.jl
 SDPX_HOTSPOT_MANIFEST=/tmp/profile.toml SDPX_PROFILE_FIXTURE=1 \
+SDPX_OPTIMIZATION_TEST_MODE=1 \
   benchmark/optimization/measure_target.sh
 ```
 

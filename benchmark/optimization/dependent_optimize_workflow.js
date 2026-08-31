@@ -14,7 +14,21 @@ let consecutiveNoImprovement = 0;
 let terminationReason = "max_rounds";
 
 function remainingTimeoutMs() {
-  return Math.max(1000, deadlineAt - Date.now());
+  return Math.max(0, deadlineAt - Date.now());
+}
+function stageTimeoutMs(budgetMs) {
+  const remaining = remainingTimeoutMs();
+  if (remaining <= 0) throw new Error("hard 12h deadline exceeded");
+  return Math.min(remaining, budgetMs);
+}
+function validateTrajectory(receipt) {
+  if (!receipt || receipt.trajectory_semantics === undefined) return false;
+  if (receipt.trajectory_semantics === "sha256") return /^[0-9a-f]{64}$/.test(String(receipt.trajectory_sha || ""));
+  if (receipt.trajectory_semantics === "validated") return String(receipt.trajectory_sha || "").length > 0;
+  return receipt.trajectory_semantics === "not_applicable" && receipt.trajectory_sha === "";
+}
+function checkDeadline() {
+  if (remainingTimeoutMs() <= 0) throw new Error("hard 12h deadline exceeded");
 }
 
 const receiptProperties = {
@@ -26,10 +40,22 @@ const receiptProperties = {
   instance: { type: "string", minLength: 1 },
   input_fingerprint: { type: "string", minLength: 1 },
   environment_fingerprint: { type: "string", minLength: 1 },
-  provider_fingerprint: { type: "string", minLength: 1 },
-  objective_interval: { type: "object" },
-  resolved_tolerances: { type: "object" },
-  route_receipt: { type: "object" },
+  provider_fingerprint: { type: "string", pattern: "^[0-9a-f]{64}$" },
+  provider_version: { type: "string", minLength: 1 }, cpu: { type: "string", minLength: 1 },
+  julia_threads: { type: "integer", minimum: 1 }, blas_threads: { type: "integer", minimum: 1 },
+  omp_threads: { type: "integer", minimum: 1 }, gc_threads: { type: "integer", minimum: 1 },
+  catalog_run_id: { type: "string", minLength: 1 }, catalog_artifact_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+  project_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }, manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
+  actual_objective: { type: "number" },
+  objective_interval: { type: "object", additionalProperties: false, required: ["lower", "upper"], properties: { lower: { type: "number" }, upper: { type: "number" } } },
+  resolved_tolerances: { type: "object", additionalProperties: false, required: ["primal", "dual", "gap"], properties: { primal: { type: "number", minimum: 0 }, dual: { type: "number", minimum: 0 }, gap: { type: "number", minimum: 0 } } },
+  requested_route: { type: "string", minLength: 1 }, planned_route: { type: "string", minLength: 1 }, executed_route: { type: "string", minLength: 1 },
+  requested_formulation: { type: "string", minLength: 1 }, planned_formulation: { type: "string", minLength: 1 }, executed_formulation: { type: "string", minLength: 1 },
+  requested_backend: { type: "string", minLength: 1 }, planned_backend: { type: "string", minLength: 1 }, executed_backend: { type: "string", minLength: 1 },
+  requested_provider: { type: "string", minLength: 1 }, planned_provider: { type: "string", minLength: 1 }, executed_provider: { type: "string", minLength: 1 },
+  requested_kernel: { type: "string", minLength: 1 }, planned_kernel: { type: "string", minLength: 1 }, executed_kernel: { type: "string", minLength: 1 }, reuse: { type: "string", minLength: 1 },
+  certificate_kind: { type: "string", minLength: 1 }, certificate_failures: { type: "array", items: { type: "string" } }, iterations: { type: "integer", minimum: 0 },
+  route_receipt: { type: "object", minProperties: 1 },
   trajectory_sha: { type: "string" },
   trajectory_semantics: { type: "string", enum: ["sha256", "validated", "not_applicable"] },
   solver_median_seconds: { type: "number" },
@@ -58,11 +84,11 @@ const scoutSchema = {
 };
 const candidateSchema = {
   type: "object", additionalProperties: false,
-  required: ["candidate_id", "selected_commit", "selected_branch", "patch_files", "receipt", "sample_statuses", "sample_certificates", "sample_semantics", "sample_iterations", "sample_objectives", "solver_median_seconds", "core_median_seconds", "falsifying_test"],
+  required: ["candidate_id", "selected_commit", "selected_branch", "patch_files", "status", "exit_code", "receipt", "sample_statuses", "sample_certificates", "sample_semantics", "sample_iterations", "sample_objectives", "solver_median_seconds", "core_median_seconds", "falsifying_test"],
   properties: {
     candidate_id: { type: "string", minLength: 1 }, selected_commit: { type: "string", pattern: "^[0-9a-f]{40}$" },
-    selected_branch: { type: "string", minLength: 1 }, patch_files: { type: "array", items: { type: "string" } },
-    receipt: receiptSchema, sample_statuses: { type: "array", minItems: 3, maxItems: 3 },
+    selected_branch: { type: "string", minLength: 1 }, patch_files: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+    status: { const: "success" }, exit_code: { const: 0 }, receipt: receiptSchema, sample_statuses: { type: "array", minItems: 3, maxItems: 3 },
     sample_certificates: { type: "array", minItems: 3, maxItems: 3, items: { const: true } },
     sample_semantics: { type: "array", minItems: 3, maxItems: 3, items: { const: true } },
     sample_iterations: { type: "array", minItems: 3, maxItems: 3, items: { type: "integer" } },
@@ -78,22 +104,26 @@ const reviewSchema = {
     verdict: { type: "string", enum: ["accept", "reject"] }, selected_commit: { type: "string", pattern: "^$|^[0-9a-f]{40}$" },
     selected_branch: { type: "string" }, improvement_pct: { type: "number" }, baseline_median_seconds: { type: "number" }, candidate_median_seconds: { type: "number" },
     benchmark_identity_ok: { const: true }, objective_interval_ok: { const: true }, certificate_ok: { const: true }, semantic_ok: { const: true },
-    iteration_determinism_ok: { const: true }, source_identity_ok: { const: true }, environment_provider_ok: { const: true }, trajectory_sha_ok: { type: "boolean" },
+    iteration_determinism_ok: { const: true }, source_identity_ok: { const: true }, environment_provider_ok: { const: true }, trajectory_sha_ok: { const: true },
     rejection_reasons: { type: "array", items: { type: "string" } }
   }
 };
 const integrationSchema = {
   type: "object", additionalProperties: false,
-  required: ["selected_commit", "verdict", "improvement_pct", "baseline_median_seconds", "candidate_median_seconds", "all_three_samples_valid", "benchmark_identity_ok", "objective_interval_ok", "certificate_ok", "semantic_ok", "iteration_determinism_ok", "source_identity_ok", "environment_provider_ok", "trajectory_sha_ok", "evidence_paths"],
+  required: ["selected_commit", "verdict", "improvement_pct", "baseline_median_seconds", "candidate_median_seconds", "all_three_samples_valid", "benchmark_identity_ok", "objective_interval_ok", "certificate_ok", "semantic_ok", "iteration_determinism_ok", "source_identity_ok", "environment_provider_ok", "trajectory_sha_ok", "evidence_paths", "receipt", "sample_statuses", "sample_certificates", "sample_semantics", "sample_iterations", "sample_objectives"],
   properties: {
-    selected_commit: { type: "string", pattern: "^[0-9a-f]{40}$" }, verdict: { type: "string", enum: ["accept", "reject"] },
+    selected_commit: { type: "string", pattern: "^[0-9a-f]{40}$" }, verdict: { const: "accept" },
     improvement_pct: { type: "number" }, baseline_median_seconds: { type: "number" }, candidate_median_seconds: { type: "number" },
-    all_three_samples_valid: { const: true }, benchmark_identity_ok: { const: true }, objective_interval_ok: { const: true }, certificate_ok: { const: true }, semantic_ok: { const: true }, iteration_determinism_ok: { const: true }, source_identity_ok: { const: true }, environment_provider_ok: { const: true }, trajectory_sha_ok: { type: "boolean" }, evidence_paths: { type: "array", items: { type: "string" } }
+    all_three_samples_valid: { const: true }, benchmark_identity_ok: { const: true }, objective_interval_ok: { const: true }, certificate_ok: { const: true }, semantic_ok: { const: true }, iteration_determinism_ok: { const: true }, source_identity_ok: { const: true }, environment_provider_ok: { const: true }, trajectory_sha_ok: { const: true }, evidence_paths: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+    receipt: receiptSchema, sample_statuses: { type: "array", minItems: 3, maxItems: 3, items: { const: "optimal" } },
+    sample_certificates: { type: "array", minItems: 3, maxItems: 3, items: { const: true } }, sample_semantics: { type: "array", minItems: 3, maxItems: 3, items: { const: true } },
+    sample_iterations: { type: "array", minItems: 3, maxItems: 3, items: { type: "integer" } }, sample_objectives: { type: "array", minItems: 3, maxItems: 3, items: { type: "number" } }
   }
 };
 
+checkDeadline();
 const profile = await runs.run("profile-precondition", {
-  timeoutMs: remainingTimeoutMs(),
+  timeoutMs: stageTimeoutMs(30 * 60 * 1000),
   outputSchema: profileSchema,
   agent: "worker",
   worktree: false,
@@ -117,10 +147,11 @@ for (let round = 1; round <= maxRounds; round += 1) {
     break;
   }
 
+  checkDeadline();
   const scouts = await runs.all([
     {
       key: "phase-scout-" + round,
-      timeoutMs: remainingTimeoutMs(),
+      timeoutMs: stageTimeoutMs(30 * 60 * 1000),
       outputSchema: scoutSchema,
       agent: "worker",
       worktree: false,
@@ -128,7 +159,7 @@ for (let round = 1; round <= maxRounds; round += 1) {
     },
     {
       key: "allocation-scout-" + round,
-      timeoutMs: remainingTimeoutMs(),
+      timeoutMs: stageTimeoutMs(30 * 60 * 1000),
       outputSchema: scoutSchema,
       agent: "worker",
       worktree: false,
@@ -136,7 +167,7 @@ for (let round = 1; round <= maxRounds; round += 1) {
     },
     {
       key: "planner-scout-" + round,
-      timeoutMs: remainingTimeoutMs(),
+      timeoutMs: stageTimeoutMs(30 * 60 * 1000),
       outputSchema: scoutSchema,
       agent: "worker",
       worktree: false,
@@ -145,10 +176,11 @@ for (let round = 1; round <= maxRounds; round += 1) {
   ]);
   const scoutEvidence = JSON.stringify(scouts);
 
+  checkDeadline();
   const candidates = await runs.all([
     {
       key: "candidate-phase-" + round,
-      timeoutMs: remainingTimeoutMs(),
+      timeoutMs: stageTimeoutMs(30 * 60 * 1000),
       outputSchema: candidateSchema,
       agent: "worker",
       worktree: true,
@@ -156,7 +188,7 @@ for (let round = 1; round <= maxRounds; round += 1) {
     },
     {
       key: "candidate-allocation-" + round,
-      timeoutMs: remainingTimeoutMs(),
+      timeoutMs: stageTimeoutMs(30 * 60 * 1000),
       outputSchema: candidateSchema,
       agent: "worker",
       worktree: true,
@@ -164,7 +196,7 @@ for (let round = 1; round <= maxRounds; round += 1) {
     },
     {
       key: "candidate-planner-" + round,
-      timeoutMs: remainingTimeoutMs(),
+      timeoutMs: stageTimeoutMs(30 * 60 * 1000),
       outputSchema: candidateSchema,
       agent: "worker",
       worktree: true,
@@ -172,11 +204,18 @@ for (let round = 1; round <= maxRounds; round += 1) {
     }
   ]);
   const candidateEvidence = JSON.stringify(candidates);
-  const candidateReports = candidates.map((item) => item.structuredOutput || item.output || item);
-  const validCandidateCommits = candidateReports.filter((item) =>
-    /^[0-9a-f]{40}$/.test(String(item.selected_commit || "")));
-  if (validCandidateCommits.length > 0 &&
-      new Set(validCandidateCommits.map((item) => String(item.selected_commit))).size !== validCandidateCommits.length) {
+  const candidateReports = [];
+  for (const item of candidates) candidateReports.push(item.structuredOutput || item.output || item);
+  const validCandidateCommits = [];
+  const commitSet = new Set();
+  for (const item of candidateReports) {
+    const commit = String(item.selected_commit || "");
+    if (/^[0-9a-f]{40}$/.test(commit)) {
+      validCandidateCommits.push(item);
+      commitSet.add(commit);
+    }
+  }
+  if (validCandidateCommits.length > 0 && commitSet.size !== validCandidateCommits.length) {
     consecutiveNoImprovement += 1;
     rounds.push({ round: round, scouts: scouts, candidates: candidates,
       review: { verdict: "reject", rejection_reasons: ["duplicate_candidate_commit"] }, accepted: false });
@@ -184,8 +223,9 @@ for (let round = 1; round <= maxRounds; round += 1) {
     continue;
   }
 
+  checkDeadline();
   const review = await runs.run("independent-review-" + round, {
-    timeoutMs: remainingTimeoutMs(),
+    timeoutMs: stageTimeoutMs(30 * 60 * 1000),
     outputSchema: reviewSchema,
     agent: "worker",
     worktree: false,
@@ -197,8 +237,15 @@ for (let round = 1; round <= maxRounds; round += 1) {
   const reviewVerdict = String(reviewEvidence.verdict || "reject");
   const reportedImprovement = Number(reviewEvidence.improvement_pct);
 
-  const matchingCandidates = candidateReports.filter((item) =>
-    String(item.selected_commit || "") === selectedCommit);
+  const matchingCandidates = [];
+  for (const item of candidateReports) {
+    const samplesValid = Array.isArray(item.sample_certificates) && item.sample_certificates.length === 3 &&
+      item.sample_certificates.every(function (value) { return value === true; }) &&
+      Array.isArray(item.sample_semantics) && item.sample_semantics.length === 3 &&
+      item.sample_semantics.every(function (value) { return value === true; });
+    if (String(item.selected_commit || "") === selectedCommit && item.status === "success" &&
+        item.exit_code === 0 && samplesValid && validateTrajectory(item.receipt)) matchingCandidates.push(item);
+  }
   if (review.exitCode !== 0 || reviewVerdict !== "accept" || !/^[0-9a-f]{40}$/.test(selectedCommit) ||
       matchingCandidates.length !== 1 || !Number.isFinite(reportedImprovement) || reportedImprovement < 2) {
     consecutiveNoImprovement += 1;
@@ -210,8 +257,9 @@ for (let round = 1; round <= maxRounds; round += 1) {
     continue;
   }
 
+  checkDeadline();
   const integrate = await runs.run("integrate-" + round, {
-    timeoutMs: remainingTimeoutMs(),
+    timeoutMs: stageTimeoutMs(30 * 60 * 1000),
     outputSchema: integrationSchema,
     agent: "worker",
     worktree: true,
@@ -230,7 +278,8 @@ for (let round = 1; round <= maxRounds; round += 1) {
     integrationEvidence.iteration_determinism_ok === true &&
     integrationEvidence.source_identity_ok === true &&
     integrationEvidence.environment_provider_ok === true &&
-    integrationEvidence.trajectory_sha_ok !== false &&
+    integrationEvidence.trajectory_sha_ok === true &&
+    validateTrajectory(integrationEvidence.receipt) &&
     Number.isFinite(integrationImprovement) && integrationImprovement >= 2;
 
   rounds.push({ round: round, scouts: scouts, candidates: candidates, review: reviewEvidence,

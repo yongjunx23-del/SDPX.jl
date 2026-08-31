@@ -45,6 +45,12 @@ end
     @test run_fixture().id == "slow"
 end
 
+@testset "legacy V1 is not eligible without complete schema-v9 receipts" begin
+    cases = enumerate_cases(; include_physics=false, include_v2=false)
+    @test !isempty(cases)
+    @test all(!case.solve_eligible for case in cases)
+end
+
 @testset "exact three-sample correctness contract" begin
     good = only(filter(r -> r.id == "slow", fixture_rows()))
     @test validate_profile_row(good)

@@ -130,10 +130,14 @@ function _v1_cases()
     g = _generic_module()
     cases = ProfileCase[]
     for spec in Base.invokelatest(g.inventory)
-        eligible = spec.expected_status === :optimal &&
-                   spec.known_objective !== nothing &&
-                   spec.known_objective isa Real
-        transform = (exactness="identity", fingerprint=_sha((spec.source, spec.id)))
+        # V1's legacy adapter cannot currently produce the complete schema-v9
+        # receipt required by the dependent optimizer (exact input/tree,
+        # resolved tolerances, route/provider/kernel/reuse, and trajectory
+        # semantics). Keep V1 visible for catalog/profile diagnostics, but make
+        # it ineligible for live optimization until a V2/schema-v9 adapter
+        # supplies those fields. Never fabricate "unavailable" receipts.
+        eligible = false
+        transform = (exactness="v1_ineligible_pending_schema_v9", fingerprint=_sha((spec.source, spec.id)))
         key = _key("generic-v1", spec.id, spec.family, spec.tier, :float64)
         push!(cases, ProfileCase(key, :generic_v1, spec.id, spec.family, spec.tier,
             :float64, eligible, spec.expected_status,
@@ -425,18 +429,36 @@ function validate_profile_row(row::ProfileRow; live=false)
     if live
         occursin(r"^[0-9a-f]{40}$", row.source_commit) || return false
         occursin(r"^[0-9a-f]{40}$", row.tree_fingerprint) || return false
-        isempty(row.input_fingerprint) && return false
-        isempty(row.environment_fingerprint) && return false
-        isempty(row.provider_fingerprint) && return false
-        any(==("auto"), (row.requested_route, row.planned_route, row.executed_route)) && return false
+        all(occursin(r"^[0-9a-f]{64}$", x) for x in
+            (row.input_fingerprint, row.environment_fingerprint,
+             row.provider_fingerprint)) || return false
+        any(x -> isempty(x) || lowercase(x) in ("auto", "unavailable", "unknown", "none"),
+            (row.requested_route, row.planned_route, row.executed_route)) && return false
         required = ("source_commit", "tree_fingerprint", "case_key", "catalog",
             "family", "instance", "input_fingerprint", "project_sha256",
-            "manifest_sha256", "environment_fingerprint", "provider_fingerprint",
+            "manifest_sha256", "catalog_run_id", "catalog_artifact_sha256",
+            "environment_fingerprint", "provider_fingerprint", "provider_version",
+            "cpu", "julia_threads", "blas_threads", "omp_threads", "gc_threads",
             "objective_interval", "actual_objective", "resolved_tolerances",
             "requested_route", "planned_route", "executed_route", "certificate_kind",
-            "certificate_failures", "trajectory_semantics", "warmup_excluded", "sample_count")
+            "certificate_failures", "iterations", "trajectory_semantics",
+            "warmup_excluded", "sample_count")
         all(haskey(row.receipt, key) && !isempty(string(row.receipt[key])) for key in required) || return false
         row.receipt["warmup_excluded"] == 1 && row.receipt["sample_count"] == 3 || return false
+        route_fields = ("requested_formulation", "planned_formulation", "executed_formulation",
+            "requested_backend", "planned_backend", "executed_backend",
+            "requested_provider", "planned_provider", "executed_provider",
+            "requested_kernel", "planned_kernel", "executed_kernel", "reuse")
+        all(haskey(row.receipt, key) && !isempty(string(row.receipt[key])) for key in route_fields) || return false
+        semantics = string(row.receipt["trajectory_semantics"])
+        semantics in ("sha256", "validated", "not_applicable") || return false
+        sha = string(get(row.receipt, "trajectory_sha", ""))
+        semantics == "sha256" && !occursin(r"^[0-9a-f]{64}$", sha) && return false
+        semantics != "sha256" && !isempty(sha) && return false
+        interval = row.receipt["objective_interval"]
+        interval isa AbstractDict && haskey(interval, "lower") && haskey(interval, "upper") || return false
+        tolerance = row.receipt["resolved_tolerances"]
+        tolerance isa AbstractDict && all(haskey(tolerance, x) for x in ("primal", "dual", "gap")) || return false
     end
     length(row.sample_seconds) == 3 || return false
     length(row.sample_iterations) == 3 || return false
