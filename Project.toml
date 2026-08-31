@@ -29,12 +29,12 @@ SDPXMultiFloatsExt = "MultiFloats"
 
 [compat]
 AppleAccelerate = "0.7"
-BigFloatLinearAlgebra = "0.1, 0.2, 0.3"
+BigFloatLinearAlgebra = "0.3"
 GenericLinearAlgebra = "0.3, 0.4"
 JLD2 = "0.4, 0.5, 0.6"
 LinearAlgebra = "1"
 MathOptInterface = "1.38"
-MultiFloatLinearAlgebra = "0.1, 0.2, 0.3, 0.4"
+MultiFloatLinearAlgebra = "0.4"
 MultiFloats = "3"
 MutableArithmetics = "1"
 Printf = "1"
@@ -47,7 +47,7 @@ julia = "1.10"
 
 [extras]
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
-Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Random = "9a3f8284-a2c9-5f02-9a3773c0cb0"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [targets]
