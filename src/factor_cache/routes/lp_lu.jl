@@ -56,6 +56,33 @@ function prepare!(cache::LPLUCache{T}, req::FactorRequirements) where {T}
     return cache
 end
 
+# Julia 1.12's LinearAlgebra exposes a zero-allocation `getrf!(A, ipiv)`
+# overload, while the supported Julia 1.10 LTS only exposes `getrf!(A)` and
+# allocates its pivot vector internally.  Feature-detect the overload rather
+# than version-gating it so the cache remains compatible with backported
+# LinearAlgebra releases.  The fallback allocation happens only when a new
+# numeric factorization is required; same-epoch warm solves still reuse the
+# owned factor and remain allocation-free.
+function _lp_lu_factor!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
+    if T <: _LAPACK_LU
+        info = if applicable(LinearAlgebra.LAPACK.getrf!, F, ipiv)
+            _, _, lapack_info = LinearAlgebra.LAPACK.getrf!(F, ipiv)
+            lapack_info
+        else
+            _, pivots, lapack_info = LinearAlgebra.LAPACK.getrf!(F)
+            length(pivots) == length(ipiv) || throw(DimensionMismatch(
+                "LAPACK getrf! returned a pivot vector with unexpected length",
+            ))
+            copyto!(ipiv, pivots)
+            lapack_info
+        end
+        info > 0 && throw(SingularException(info))
+    else
+        _lu_factor_generic!(F, ipiv)
+    end
+    return nothing
+end
+
 function factorize!(cache::LPLUCache{T}, A::AbstractMatrix{T}, matrix_epoch::Integer) where {T}
     size(A) == (cache.n, cache.n) || throw(DimensionMismatch(
         "LPLUCache factorize! dimension mismatch"))
@@ -65,7 +92,7 @@ function factorize!(cache::LPLUCache{T}, A::AbstractMatrix{T}, matrix_epoch::Int
     cache.status = Factoring
     try
         copyto!(cache.factors, A)
-        _lu_factor!(cache.factors, cache.ipiv)
+        _lp_lu_factor!(cache.factors, cache.ipiv)
         cache.matrix_epoch = Int(matrix_epoch)
         cache.factor_epoch += 1
         cache.status = Fresh
