@@ -10,7 +10,8 @@ TOML = "fa267f1f-6049-4f14-aa54-33bafae1ed76"
 
 [compat]
 Dates = "1"
-LinearAlgebra = "1"MultiFloats = "3"
+LinearAlgebra = "1"
+MultiFloats = "3"
 Printf = "1"
 SDPX = "0.6"
 SHA = "0.7"
