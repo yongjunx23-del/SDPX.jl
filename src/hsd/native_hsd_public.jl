@@ -1233,7 +1233,8 @@ function _public_native_hsd_core(
         product_rank = row_reduction.rank
         core_dimension = fixed_trace_plan === nothing ? saturating_sum_bytes(
             product_rank, canonical_num_slack(solve_reduced),
-        ) : length(fixed_trace_plan.zero_rows)
+        ) : length(fixed_trace_plan.zero_rows) +
+            length(fixed_trace_plan.reduction.free_ids)
         block_sizes=_product_hsd_core_block_sizes(
             solve_reduced,fixed_trace_plan,
         )

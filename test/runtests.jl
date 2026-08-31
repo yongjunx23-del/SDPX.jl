@@ -164,6 +164,43 @@ end
     )
 end
 
+@testset "Fixed-trace Q3 admits barrier-free columns" begin
+    # One fixed-head Q3 pair (u,v) plus a free Wilson-style column f that
+    # appears only in the equality row.  Substituting f = u + 1/2 gives the
+    # same problem without the free column, so the pre-existing fixed-trace
+    # path is the trusted reference for the saddle-point border.
+    reference = begin
+        model = SDPX.Model(Float64)
+        x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
+        SDPX.constraint!(model, :unit,
+            Any[1.0, x[1] - 1.0, x[2]], SDPX.LorentzCone())
+        SDPX.objective!(model, SDPX.Maximize(), x[1] + 0.5)
+        SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
+    end
+    @test SDPX.status(reference) === :optimal
+    @test SDPX.certificate(reference).valid
+    @test SDPX.certificate(reference).primal_objective ≈ 2.5 atol=1e-8
+
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 3; domain=SDPX.Reals())
+    SDPX.constraint!(model, :link, x[3] - x[1] - 0.5, SDPX.ZeroCone())
+    SDPX.constraint!(model, :unit,
+        Any[1.0, x[1] - 1.0, x[2]], SDPX.LorentzCone())
+    SDPX.objective!(model, SDPX.Maximize(), x[3])
+    program = SDPX.compile_product_cone_model(model)
+    canonical = SDPX.canonicalize(program)
+    plan = SDPX.fixed_trace_q3_canonical_plan(canonical)
+    @test plan !== nothing
+    @test plan.free_ids == [3]
+    result = SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
+    certificate = SDPX.certificate(result)
+    @test SDPX.status(result) === :optimal
+    @test certificate.valid
+    @test certificate.primal_objective ≈ 2.5 atol=1e-8
+    @test result.diagnostics.termination.reason === :verified_terminal_newton_trial ||
+          result.diagnostics.termination.reason === :verified_accepted_step
+end
+
 @testset "Precision benchmark contract" begin
     precisions=precision_specs(Float64,Float64,Float64)
     @test length(precisions)==7
