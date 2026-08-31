@@ -37,7 +37,7 @@ jobs:
           echo "changed files:"
           echo "$changed"
           if echo "$changed" | grep -qE \
-            '^(ext/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|validation/providers/|Project\.toml)'; then
+            '^(\.github/workflows/test\.yml$|ext/|src/factor_cache/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|validation/providers/|Project\.toml$)'; then
             echo "providers=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -96,10 +96,19 @@ jobs:
           cache-name: julia-depot
       - name: Instantiate benchmark environment
         run: julia --project=benchmark/bootstrap/benchenv -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-      # Only the canonical micro suite runs in CI. Larger registered suites
-      # need generated or downloaded inputs and are run manually.
-      - name: Run canonical micro benchmark smoke
-        run: julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl micro --samples=1 --output=/tmp/sdpx-micro.toml
+      # The fixture catalog exposes one canonical `smoke` suite. Larger
+      # registered physics suites need generated or downloaded inputs and are
+      # run manually with their explicit catalog paths.
+      - name: Run canonical benchmark smoke
+        run: |
+          set +e
+          julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl smoke --samples=1 --output=/tmp/sdpx-smoke.toml
+          status=$?
+          if [ -f /tmp/sdpx-smoke.toml ]; then
+            echo "--- /tmp/sdpx-smoke.toml ---"
+            cat /tmp/sdpx-smoke.toml
+          fi
+          exit "$status"
 
   provider-smoke:
     name: MFLA/BFLA provider smoke
@@ -116,12 +125,14 @@ jobs:
       - uses: julia-actions/cache@v2
         with:
           cache-name: julia-depot
-      - name: Clone pinned provider checkouts
+      - name: Clone pinned released provider checkouts
         run: |
           git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
-          git -C "$RUNNER_TEMP/MFLA" checkout 00ee8c76827dd69b04ae728a7542abe64bb35431
+          # MultiFloatLinearAlgebra v0.4.0, matching SDPX [compat].
+          git -C "$RUNNER_TEMP/MFLA" checkout b38dea165d0973ae06ce245dbdf11298b123c9ea
           git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
-          git -C "$RUNNER_TEMP/BFLA" checkout b2aed396718d03c60faf017388c3e2fc30934513
+          # BigFloatLinearAlgebra v0.3.0, matching SDPX [compat].
+          git -C "$RUNNER_TEMP/BFLA" checkout f95d3e623990e8ae5848916ba92d93897dcb1e31
       - name: Build provider smoke environment
         env:
           SDPX_PROJECT: ${{ github.workspace }}
@@ -190,7 +201,7 @@ jobs:
                 error("Project.toml still carries the upstream SDPJSolver.jl UUID")
             (haskey(p, "compat") && haskey(p["compat"], "julia")) ||
                 error("Project.toml needs a [compat] entry for julia")
-            println("Project.toml OK: ", p["name"], " v", p["version"], " ", p["uuid"])'
+            println("Project.toml OK: ", p["name"], " v", p["version"], " ", p["uuid"] )'
       - name: Release metadata and auxiliary compat are consistent
         run: julia scripts/check_release_metadata.jl
       - name: Upstream solver implementation is not vendored
@@ -219,9 +230,6 @@ jobs:
 
   docs:
     name: Documentation build
-    # Page integrity is enforced per-PR by quick-checks.yml; the full
-    # Documenter build only runs where its output is used.
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -239,6 +247,7 @@ jobs:
       - name: Build the Documenter site
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SDPX_DEPLOY_DOCS: ${{ github.event_name == 'push' }}
         run: |
           julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
           julia --project=docs docs/make.jl

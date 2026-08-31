@@ -45,10 +45,14 @@ makedocs(;
         "Development" => "development.md",
     ],
     checkdocs=:exports,
-    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS],
+    # ExtendedPrecisionBLAS and SymmetricCones are explicitly internal
+    # implementation modules, not part of SDPX's frozen public export surface.
+    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS, SDPX.SymmetricCones],
 )
 
-if get(ENV, "CI", "false") == "true"
+# Pull requests must build the same site as main without attempting a deploy.
+# The workflow opts into deployment explicitly only for trusted push runs.
+if get(ENV, "SDPX_DEPLOY_DOCS", "false") == "true"
     deploydocs(
         ;
         repo="github.com/yongjunx23-del/SDPX.jl.git",
