@@ -197,6 +197,10 @@ struct Settings{T<:AbstractFloat}
     timing::Bool
     certification::Bool
     blas_threads::Union{Nothing,Int}
+    # Additive native product-HSD iteration controls.  `nothing` delegates
+    # exactly to the historical numeric path; predictor=:classic is the
+    # historical predictor policy.
+    iteration_knobs::NamedTuple
 
     function Settings{T}(
         tolerances::Tolerances{T},
@@ -216,6 +220,7 @@ struct Settings{T<:AbstractFloat}
         timing::Bool,
         certification::Bool,
         blas_threads::Union{Nothing,Int},
+        iteration_knobs::NamedTuple,
     ) where {T<:AbstractFloat}
         _validate_engine(engine)
         _validate_symbol(scaling, (:auto, :none, :equilibrate), "scaling")
@@ -232,6 +237,9 @@ struct Settings{T<:AbstractFloat}
         _validate_symbol(equality_solver, (:auto, :normal_equations, :qr), "equality_solver")
         _validate_symbol(working_precision_policy, (:auto, :fixed), "working_precision_policy")
         _validate_symbol(diagnostics, (:none, :summary, :full), "diagnostics")
+        iteration_knobs isa NamedTuple || throw(ArgumentError(
+            "iteration_knobs must be a NamedTuple",
+        ))
         verbosity >= 0 ||
             throw(ArgumentError("verbosity must be nonnegative, got $verbosity"))
         blas_threads === nothing || blas_threads >= 1 ||
@@ -254,6 +262,7 @@ struct Settings{T<:AbstractFloat}
             timing,
             certification,
             blas_threads,
+            iteration_knobs,
         )
     end
 end
@@ -304,6 +313,44 @@ function _validate_algorithm(value::Symbol)
     return nothing
 end
 
+const _ITERATION_KNOB_NAMES = (:sigma, :beta, :gamma, :predictor)
+const _DEFAULT_ITERATION_KNOBS = (
+    sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
+)
+
+function _normalize_iteration_knobs(::Type{T}, knobs::NamedTuple) where {T<:AbstractFloat}
+    unknown = setdiff(propertynames(knobs), _ITERATION_KNOB_NAMES)
+    isempty(unknown) || throw(ArgumentError(
+        "iteration_knobs has unsupported fields $(Tuple(unknown)); " *
+        "supported fields are $(_ITERATION_KNOB_NAMES)",
+    ))
+    sigma = get(knobs, :sigma, nothing)
+    beta = get(knobs, :beta, nothing)
+    gamma = get(knobs, :gamma, nothing)
+    predictor = get(knobs, :predictor, :classic)
+    for (name, value) in ((:sigma, sigma), (:beta, beta), (:gamma, gamma))
+        value === nothing && continue
+        value isa Real || throw(ArgumentError(
+            "iteration_knobs.$name must be nothing or a real number",
+        ))
+        valueT = try T(value) catch; throw(ArgumentError(
+            "iteration_knobs.$name is not representable in $(T)")) end
+        isfinite(valueT) || throw(ArgumentError(
+            "iteration_knobs.$name must be finite"))
+        lower_ok = name === :sigma ? valueT >= zero(T) : valueT > zero(T)
+        upper_ok = name === :sigma ? valueT <= one(T) : valueT < one(T)
+        lower_ok && upper_ok || throw(ArgumentError(
+            "iteration_knobs.$name must lie in the valid open/closed unit interval"))
+        if name === :sigma; sigma = valueT
+        elseif name === :beta; beta = valueT
+        else; gamma = valueT end
+    end
+    predictor in (:classic, :sdpb) || throw(ArgumentError(
+        "iteration_knobs.predictor must be :classic or :sdpb",
+    ))
+    return (sigma=sigma, beta=beta, gamma=gamma, predictor=predictor)
+end
+
 function Settings(
     ::Type{T};
     tolerances::Tolerances{T}=Tolerances{T}(),
@@ -324,11 +371,15 @@ function Settings(
     timing::Bool=true,
     certification::Bool=true,
     blas_threads::Union{Nothing,Int}=nothing,
+    iteration_knobs::NamedTuple=(;
+        sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
+    ),
 ) where {T<:AbstractFloat}
     _validate_symbol(equilibration, (:off, :ruiz), "equilibration")
     equilibration === :ruiz && !(scaling in (:auto, :equilibrate)) &&
         throw(ArgumentError("equilibration=:ruiz conflicts with scaling=$scaling"))
     effective_scaling = equilibration === :ruiz ? :equilibrate : scaling
+    iteration_knobs = _normalize_iteration_knobs(T, iteration_knobs)
     return Settings{T}(
         tolerances,
         limits,
@@ -347,6 +398,7 @@ function Settings(
         timing,
         certification,
         blas_threads,
+        iteration_knobs,
     )
 end
 
