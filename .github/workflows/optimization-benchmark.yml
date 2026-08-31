@@ -184,7 +184,7 @@ jobs:
           # compare.jl performs strict schema, identity, route, certificate,
           # sample, and semantic pairing checks and exits nonzero on any row.
           julia --startup-file=no --project="$CANDIDATE_ENV" \
-            benchmark/compare.jl "$OUT_DIR/base-smoke.toml" \
+            benchmark/bootstrap/compare.jl "$OUT_DIR/base-smoke.toml" \
             "$OUT_DIR/candidate-smoke.toml" \
             "$OUT_DIR/base-vs-candidate.tsv" \
             2>&1 | tee "$OUT_DIR/base-vs-candidate.log"

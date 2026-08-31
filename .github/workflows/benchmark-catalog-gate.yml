@@ -39,8 +39,13 @@ jobs:
       - uses: julia-actions/cache@v2
         with:
           cache-name: benchmark-catalog-v2
-      - name: Instantiate benchmark environment
-        run: julia --startup-file=no --project=benchmark/bootstrap/benchenv -e 'using Pkg; Pkg.instantiate()'
+      - name: Instantiate benchmark environment at the checked-out SDPX source
+        run: |
+          julia --startup-file=no --project=benchmark/bootstrap/benchenv -e '
+            using Pkg
+            Pkg.develop(path=pwd())
+            Pkg.instantiate()
+          '
       - name: Build and validate catalog manifest
         run: |
           set -euo pipefail

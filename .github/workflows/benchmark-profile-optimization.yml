@@ -39,6 +39,19 @@ jobs:
         with:
           fetch-depth: 0
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: benchmark-profile-v2
+      - name: Instantiate benchmark environment at the checked-out SDPX source
+        run: |
+          julia --startup-file=no --project=benchmark/bootstrap/benchenv -e '
+            using Pkg
+            Pkg.develop(path=pwd())
+            Pkg.instantiate()
+          '
       - name: Build catalog for manual dispatch
         if: github.event_name == 'workflow_dispatch'
         run: |
@@ -46,8 +59,8 @@ jobs:
           mkdir -p catalog-artifacts
           julia --startup-file=no --project=benchmark/bootstrap/benchenv \
             benchmark/optimization/catalog_build.jl
-          sha256sum catalog-manifest-v2.toml > catalog-manifest-v2.sha256
-          cp catalog-manifest-v2.toml catalog-manifest-v2.sha256 catalog-artifacts/
+          cp catalog-manifest-v2.toml catalog-artifacts/
+          (cd catalog-artifacts && sha256sum catalog-manifest-v2.toml > catalog-manifest-v2.sha256)
           printf '%s\n' "$(git rev-parse HEAD)" > catalog-artifacts/catalog-source-commit.txt
           printf '%s\n' "$(git rev-parse HEAD^{tree})" > catalog-artifacts/catalog-source-tree.txt
           printf '%s\n' "manual-${GITHUB_RUN_ID}" > catalog-artifacts/catalog-run-id.txt
@@ -60,22 +73,17 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
           path: catalog-artifacts
-      - uses: julia-actions/setup-julia@v2
-        with:
-          version: '1.10'
-      - uses: julia-actions/cache@v2
-        with:
-          cache-name: benchmark-profile-v2
       - name: Verify catalog artifact identity and checksum
         env:
           EXPECTED_HEAD: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || format('manual-{0}', github.run_id) }}
         run: |
           set -euo pipefail
-          sha256sum -c catalog-artifacts/catalog-manifest-v2.sha256
+          (cd catalog-artifacts && sha256sum -c catalog-manifest-v2.sha256)
           test "$(cat catalog-artifacts/catalog-source-commit.txt)" = "$EXPECTED_HEAD"
           test "$(cat catalog-artifacts/catalog-source-tree.txt)" = "$(git rev-parse HEAD^{tree})"
-          test -s catalog-artifacts/catalog-run-id.txt
-          echo "CATALOG_RUN_ID=$(cat catalog-artifacts/catalog-run-id.txt)" >> "$GITHUB_ENV"
+          test "$(cat catalog-artifacts/catalog-run-id.txt)" = "$EXPECTED_RUN_ID"
+          echo "CATALOG_RUN_ID=$EXPECTED_RUN_ID" >> "$GITHUB_ENV"
           echo "CATALOG_ARTIFACT_SHA256=$(sha256sum catalog-artifacts/catalog-manifest-v2.toml | cut -d' ' -f1)" >> "$GITHUB_ENV"
 
       - name: Instantiate isolated environment
