@@ -12,6 +12,9 @@ Model
 variable!
 constraint!
 objective!
+set_start!
+set_dual_start!
+set_dual_slack_start!
 Reals
 Nonnegative
 Nonpositive
