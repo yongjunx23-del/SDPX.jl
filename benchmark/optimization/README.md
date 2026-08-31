@@ -46,9 +46,11 @@ SDPX_HOTSPOT_MANIFEST=/tmp/profile.toml SDPX_PROFILE_FIXTURE=1 \
   benchmark/optimization/measure_target.sh
 ```
 
-The live profile uses one untimed warmup followed by three timed repetitions
-(the workflow may increase this to five). JIT/setup are reported separately
-and excluded from the solver metric. The selector uses the median core time
+The live profile uses one untimed warmup followed by exactly three timed
+repetitions. Every sample must independently pass status, certificate,
+semantic, objective/reference-interval, deterministic-iteration/objective,
+identity, route, provider, and declared-trajectory checks. JIT/setup are
+reported separately and excluded from the solver metric. The selector uses the median core time
 when available, otherwise the solver-call time. Build-only, xfail, uncertified,
 failed, fallback, and missing-metric rows cannot be selected. Ties are resolved
 by descending allocation telemetry and then lexical `case_key`.
@@ -99,7 +101,11 @@ hsd-allocation.log                 # secondary, non-blocking
 candidate/<round>/<candidate>/     # patch, logs, receipts, test output
 ```
 
-GitHub artifacts are named by exact source SHA and catalog run ID. To resume,
+GitHub artifacts are named by exact source SHA and catalog run ID. A live
+hotspot manifest is accepted only when its source/tree SHA equals checked-out
+HEAD; fixture manifests require explicit test mode. Optional CFT/PMP2SDP absence
+is recorded as `optional_unavailable` and controlled by
+`SDPX_REQUIRE_OPTIONAL_CFT`, never silently treated as a pass. To resume,
 redownload the successful catalog artifact, verify its source SHA and checksum,
 rerun profile selection, then invoke the Pi template with that immutable
 manifest. Never retarget from a candidate's result and never reuse an artifact

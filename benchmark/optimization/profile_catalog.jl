@@ -6,9 +6,9 @@ import SDPX
 
 export ProfileCase, ProfileRow, enumerate_cases, profile_catalog, select_max_target,
        write_manifest, read_manifest, write_profiles, read_profiles, fixture_rows,
-       run_fixture
+       run_fixture, validate_profile_row
 
-const PROFILE_SCHEMA = 1
+const PROFILE_SCHEMA = 2
 const ROOT = normpath(joinpath(@__DIR__, "..", ".."))
 const GENERAL = joinpath(ROOT, "benchmark", "general", "GenericConicBenchmark.jl")
 
@@ -60,6 +60,20 @@ Base.@kwdef struct ProfileRow
     executed_route::String = ""
     input_fingerprint::String = ""
     warmup_count::Int = 1
+    sample_status::Vector{String} = String[]
+    sample_certificate_valid::Vector{Bool} = Bool[]
+    sample_semantic_pass::Vector{Bool} = Bool[]
+    sample_objective::Vector{Float64} = Float64[]
+    sample_trajectory_sha::Vector{String} = String[]
+    reference_lower::Union{Nothing,Float64} = nothing
+    reference_upper::Union{Nothing,Float64} = nothing
+    source_commit::String = ""
+    tree_fingerprint::String = ""
+    catalog_fingerprint::String = ""
+    environment_fingerprint::String = ""
+    provider_fingerprint::String = ""
+    trajectory_sha::String = ""
+    resolved_tolerances::String = ""
 end
 
 _case_sort(c) = (String(c.catalog), String(c.family), String(c.tier), String(c.id), String(c.arithmetic))
@@ -191,6 +205,8 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
     model = build.value
     warmup && SDPX.optimize!(model; settings=Base.invokelatest(g._settings, T; threads))
     seconds = Float64[]; allocs = Int[]; sample_iters = Int[]
+    sample_status = String[]; sample_certificates = Bool[]; sample_semantics = Bool[]
+    sample_objectives = Float64[]
     iterations = 0; status = :not_run
     cert_valid = false; objective = nothing; semantic = false; core = Float64[]
     for _ in 1:samples
@@ -202,11 +218,14 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
         push!(seconds, Float64(solve.time)); push!(allocs, Int(solve.bytes)); push!(sample_iters, result.iterations)
         iterations = result.iterations; status = SDPX.status(result)
         cert_valid = cert.valid; objective = Float64(cert.primal_objective)
+        push!(sample_status, String(status)); push!(sample_certificates, cert.valid)
+        push!(sample_objectives, objective)
         br = g.BenchmarkResult(spec.id, spec.family, spec.tier, status, objective,
             Float64(cert.dual_objective), Float64(cert.primal_residual),
             Float64(cert.dual_residual), Float64(cert.relative_gap), cert.valid,
             result.iterations, solve.time, solve.bytes, solve.gctime, false)
         semantic = Base.invokelatest(g.validate_result, spec, br)
+        push!(sample_semantics, semantic)
         try
             t = getfield(SDPX.diagnostics(result), :timings)
             v = getproperty(t, :core)
@@ -222,18 +241,25 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
         objective=objective, iterations=iterations, sample_seconds=seconds,
         sample_core_seconds=core, setup_seconds=Float64(build.time),
         allocation_bytes=allocs, sample_iterations=sample_iters,
+        sample_status=sample_status, sample_certificate_valid=sample_certificates,
+        sample_semantic_pass=sample_semantics, sample_objective=sample_objectives,
         reference_status=String(case.reference_status),
         reference_objective=case.objective, objective_tolerance=case.objective_tolerance,
+        reference_lower=case.objective === nothing ? nothing : case.objective - case.objective_tolerance,
+        reference_upper=case.objective === nothing ? nothing : case.objective + case.objective_tolerance,
         transform_exactness=case.transform.exactness,
         transform_fingerprint=case.transform.fingerprint, failure_taxonomy=failed,
         requested_route="auto", planned_route="auto", executed_route="auto",
-        input_fingerprint=_sha(case.source), warmup_count=warmup ? 1 : 0)
+        input_fingerprint=_sha(case.source), source_commit=get(ENV, "GITHUB_SHA", "local"),
+        catalog_fingerprint=_sha(case.catalog), environment_fingerprint=_sha((VERSION, Sys.MACHINE)),
+        provider_fingerprint=_sha((SDPX,)), resolved_tolerances=string(case.objective_tolerance),
+        warmup_count=warmup ? 1 : 0)
 end
 
 function profile_catalog(cases=enumerate_cases(); samples=3, threads=1, warmup=true,
                         fixture=false, io=stdout)
     fixture && return fixture_rows()
-    samples >= 3 || throw(ArgumentError("samples must be at least 3"))
+    samples == 3 || throw(ArgumentError("optimization profiling requires exactly three samples"))
     rows = ProfileRow[]
     for case in cases
         if !case.solve_eligible
@@ -267,7 +293,11 @@ function fixture_rows()
             build_only=false, source="fixture", status="optimal", certificate_valid=true,
             semantic_pass=true, objective=0.0, iterations=4, sample_seconds=[5.0, 4.0, 6.0],
             sample_core_seconds=[3.0, 2.0, 4.0], allocation_bytes=[30, 30, 30],
-            reference_status="optimal", transform_exactness="identity", sample_iterations=[4, 4, 4]),
+            reference_status="optimal", reference_objective=0.0, objective_tolerance=1e-8,
+            transform_exactness="identity", sample_iterations=[4, 4, 4],
+            sample_status=["optimal", "optimal", "optimal"], sample_certificate_valid=[true, true, true],
+            sample_semantic_pass=[true, true, true], sample_objective=[0.0, 0.0, 0.0],
+            requested_route="auto", planned_route="auto", executed_route="auto"),
         ProfileRow(case_key="fixture|sdp|small|build", catalog="fixture", id="build",
             family="sdp", tier="small", arithmetic="Float64", solve_eligible=false,
             build_only=true, source="fixture", status="build_only", semantic_pass=true,
@@ -277,7 +307,11 @@ function fixture_rows()
             build_only=false, source="fixture", status="optimal", certificate_valid=true,
             semantic_pass=true, objective=0.0, iterations=3, sample_seconds=[1.0, 1.0, 1.0],
             sample_core_seconds=[0.5, 0.5, 0.5], allocation_bytes=[100, 100, 100],
-            reference_status="optimal", transform_exactness="identity", sample_iterations=[3, 3, 3]),
+            reference_status="optimal", reference_objective=0.0, objective_tolerance=1e-8,
+            transform_exactness="identity", sample_iterations=[3, 3, 3],
+            sample_status=["optimal", "optimal", "optimal"], sample_certificate_valid=[true, true, true],
+            sample_semantic_pass=[true, true, true], sample_objective=[0.0, 0.0, 0.0],
+            requested_route="auto", planned_route="auto", executed_route="auto"),
     ]
 end
 
@@ -285,7 +319,7 @@ function select_max_target(rows; metric=:core_seconds)
     candidates = ProfileRow[]
     for row in rows
         row.solve_eligible && !row.build_only && row.semantic_pass && row.certificate_valid || continue
-        length(row.sample_iterations) <= 1 || length(unique(row.sample_iterations)) == 1 || continue
+        validate_profile_row(row) || continue
         vals = metric === :core_seconds && !isempty(row.sample_core_seconds) ?
             row.sample_core_seconds : row.sample_seconds
         isempty(vals) && continue
@@ -297,6 +331,26 @@ function select_max_target(rows; metric=:core_seconds)
         row.sample_core_seconds : row.sample_seconds)
     sort!(candidates; by=row -> (-value(row), -(_median(row.allocation_bytes) === nothing ? 0 : _median(row.allocation_bytes)), row.case_key))
     return candidates[1], candidates
+end
+
+function validate_profile_row(row::ProfileRow)
+    row.solve_eligible && !row.build_only || return false
+    length(row.sample_seconds) == 3 || return false
+    length(row.sample_iterations) == 3 || return false
+    length(row.sample_status) == 3 || return false
+    length(row.sample_certificate_valid) == 3 || return false
+    length(row.sample_semantic_pass) == 3 || return false
+    length(row.sample_objective) == 3 || return false
+    all(isfinite, row.sample_seconds) && all(>(0), row.sample_seconds) || return false
+    all(==(row.status), row.sample_status) || return false
+    all(row.sample_certificate_valid) && all(row.sample_semantic_pass) || return false
+    length(unique(row.sample_iterations)) == 1 || return false
+    if row.reference_objective !== nothing
+        tol = something(row.objective_tolerance, Inf)
+        all(x -> isfinite(x) && abs(x - row.reference_objective) <= tol,
+            row.sample_objective) || return false
+    end
+    return true
 end
 
 function _row_dict(row::ProfileRow)
@@ -315,7 +369,16 @@ function _row_dict(row::ProfileRow)
         "transform_exactness"=>row.transform_exactness, "transform_fingerprint"=>row.transform_fingerprint,
         "failure_taxonomy"=>row.failure_taxonomy, "requested_route"=>row.requested_route,
         "planned_route"=>row.planned_route, "executed_route"=>row.executed_route,
-        "input_fingerprint"=>row.input_fingerprint, "warmup_count"=>row.warmup_count)
+        "input_fingerprint"=>row.input_fingerprint, "warmup_count"=>row.warmup_count,
+        "sample_status"=>row.sample_status, "sample_certificate_valid"=>row.sample_certificate_valid,
+        "sample_semantic_pass"=>row.sample_semantic_pass, "sample_objective"=>row.sample_objective,
+        "sample_trajectory_sha"=>row.sample_trajectory_sha,
+        "reference_lower"=>(row.reference_lower === nothing ? "" : row.reference_lower),
+        "reference_upper"=>(row.reference_upper === nothing ? "" : row.reference_upper),
+        "source_commit"=>row.source_commit, "tree_fingerprint"=>row.tree_fingerprint,
+        "catalog_fingerprint"=>row.catalog_fingerprint, "environment_fingerprint"=>row.environment_fingerprint,
+        "provider_fingerprint"=>row.provider_fingerprint, "trajectory_sha"=>row.trajectory_sha,
+        "resolved_tolerances"=>row.resolved_tolerances)
 end
 
 function write_profiles(path, rows; source_commit="unknown")
@@ -350,14 +413,19 @@ end
 end # module
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    rows = haskey(ENV, "SDPX_PROFILE_FIXTURE") ? ProfileCatalog.fixture_rows() : ProfileCatalog.profile_catalog()
+    source_commit = get(ENV, "SDPX_PROFILE_SOURCE_COMMIT", get(ENV, "GITHUB_SHA", ""))
+    isempty(source_commit) && (source_commit = try readchomp(`git rev-parse HEAD`) catch; "local" end)
+    fixture = get(ENV, "SDPX_PROFILE_FIXTURE", "0") == "1"
+    fixture && get(ENV, "SDPX_OPTIMIZATION_TEST_MODE", "0") != "1" &&
+        error("fixture mode requires explicit SDPX_OPTIMIZATION_TEST_MODE=1")
+    rows = fixture ? ProfileCatalog.fixture_rows() : ProfileCatalog.profile_catalog()
     out = get(ENV, "SDPX_PROFILE_OUTPUT", joinpath(pwd(), "profile-catalog.toml"))
-    source = get(ENV, "SDPX_PROFILE_SOURCE_COMMIT", get(ENV, "GITHUB_SHA", "local"))
+    source = source_commit
     ProfileCatalog.write_profiles(out, rows; source_commit=source)
     selected, _ = ProfileCatalog.select_max_target(rows)
     json_out = splitext(out)[1] * ".json"
     open(json_out, "w") do io
-        print(io, "{\"profile_schema\":1,\"source_commit\":\"", source,
+        print(io, "{\"profile_schema\":2,\"source_commit\":\"", source,
             "\",\"selected_case_key\":\"", selected.case_key,
             "\",\"selection_metric\":\"core_seconds\"}\n")
     end

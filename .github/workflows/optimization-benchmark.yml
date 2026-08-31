@@ -1,6 +1,6 @@
 name: Optimization benchmark (reusable)
 
-# Schema-v8 candidate benchmark pipeline called by optimization-loop.yml. The
+# Schema-v9 candidate benchmark pipeline called by optimization-loop.yml. The
 # caller records evidence in git history and posts the
 # `sdpx/optimization-loop` commit status.
 #

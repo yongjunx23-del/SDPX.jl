@@ -13,7 +13,7 @@ using .ProfileCatalog
     path = tempname()
     write_profiles(path, rows; source_commit="a"^40)
     parsed = read_profiles(path)
-    @test parsed["profile_schema"] == 1
+    @test parsed["profile_schema"] == 2
     @test parsed["source_commit"] == "a"^40
     @test length(parsed["row"]) == 3
     rm(path; force=true)
@@ -24,15 +24,39 @@ end
         arithmetic="Float64", solve_eligible=true, build_only=false, source="fixture",
         status="optimal", certificate_valid=true, semantic_pass=true,
         sample_seconds=[2.0, 2.0, 2.0], sample_core_seconds=[1.0, 1.0, 1.0],
-        allocation_bytes=[10, 10, 10], sample_iterations=[2, 2, 2])
+        allocation_bytes=[10, 10, 10], sample_iterations=[2, 2, 2],
+        sample_status=["optimal", "optimal", "optimal"], sample_certificate_valid=[true, true, true],
+        sample_semantic_pass=[true, true, true], sample_objective=[0.0, 0.0, 0.0])
     b = ProfileRow(case_key="a", catalog="fixture", id="a", family="lp", tier="small",
         arithmetic="Float64", solve_eligible=true, build_only=false, source="fixture",
         status="optimal", certificate_valid=true, semantic_pass=true,
         sample_seconds=[2.0, 2.0, 2.0], sample_core_seconds=[1.0, 1.0, 1.0],
-        allocation_bytes=[10, 10, 10], sample_iterations=[2, 2, 2])
+        allocation_bytes=[10, 10, 10], sample_iterations=[2, 2, 2],
+        sample_status=["optimal", "optimal", "optimal"], sample_certificate_valid=[true, true, true],
+        sample_semantic_pass=[true, true, true], sample_objective=[0.0, 0.0, 0.0])
     @test first(select_max_target([a, b]; metric=:core_seconds)[2]).case_key == "a"
 end
 
 @testset "fixture command" begin
     @test run_fixture().id == "slow"
+end
+
+@testset "exact three-sample correctness contract" begin
+    good = only(filter(r -> r.id == "slow", fixture_rows()))
+    @test validate_profile_row(good)
+    function altered(row; kwargs...)
+        names = fieldnames(ProfileRow)
+        values = NamedTuple{names}(Tuple(getfield(row, name) for name in names))
+        return ProfileRow(; merge(values, (; kwargs...))...)
+    end
+    for bad in (
+        altered(good; sample_seconds=[1.0, 2.0]),
+        altered(good; sample_certificate_valid=[true, true, false]),
+        altered(good; sample_semantic_pass=[true, false, true]),
+        altered(good; sample_iterations=[4, 5, 4]),
+        altered(good; sample_status=["optimal", "iteration_limit", "optimal"]),
+        altered(good; sample_objective=[0.0, 1.0, 0.0]),
+    )
+        @test !validate_profile_row(bad)
+    end
 end

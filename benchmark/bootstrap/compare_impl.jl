@@ -456,7 +456,9 @@ end
 # scripts; comparison internals now use the more explicit name above.
 _parsed_number(row, field) = _parsed_float(row, field)
 
-const _CURRENT_RESULT_SCHEMA_VERSION = 8
+# result_schema.jl has been v9 since the fresh-process identity/route
+# contract landed. Keep comparison strict: v8 is legacy, never current.
+const _CURRENT_RESULT_SCHEMA_VERSION = 9
 
 const _COMPARISON_PAIRING_FIELDS = (
     # A baseline and candidate must exercise the same semantic route and

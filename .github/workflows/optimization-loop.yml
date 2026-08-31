@@ -90,7 +90,8 @@ jobs:
           - Base SHA (explicit input): \`$base_sha_full\`
           - Actions run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           - Quick correctness suite: passed
-          - Schema-v8 smoke suite and native HSD allocation gate: passed
+          - Schema-v9 smoke suite: passed
+          - Native HSD allocation: evidence only; nonzero allocations do not affect correctness status
           - Fresh-process stability matrix: passed
           - Base-vs-candidate comparison: present when the benchmark emitted it
           - Evidence is immutable on this ref keyed by candidate SHA.
