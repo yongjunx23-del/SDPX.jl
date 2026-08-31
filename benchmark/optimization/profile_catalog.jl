@@ -2,9 +2,6 @@ module ProfileCatalog
 
 using SHA
 using TOML
-using Dates
-using Statistics
-using Printf
 import SDPX
 
 export ProfileCase, ProfileRow, enumerate_cases, profile_catalog, select_max_target,
