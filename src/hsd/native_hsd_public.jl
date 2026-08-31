@@ -1057,6 +1057,20 @@ function _public_native_hsd_core(
     end
     solve_reduced = equilibration_map === nothing ? reduced :
                     equilibrated_program(equilibration_map, reduced)
+    # The fixed-trace Q3 plan is built from the canonical program before
+    # equilibration.  Ruiz row/column scaling preserves the plan's structural
+    # data (zero rows, free ids, active variables) but rescales the numeric
+    # cone data (tail_map, fixed_head, offset) and the equality panel, so a
+    # plan built from the unscaled program is inconsistent with the scaled
+    # state and breaks the bordered core at iteration 0.  Rebuild the plan
+    # from the equilibrated program so every numeric datum matches the state.
+    if fixed_trace_plan !== nothing && equilibration_map !== nothing
+        scaled_plan = fixed_trace_q3_canonical_plan(solve_reduced)
+        scaled_plan === nothing && error(
+            "fixed-trace Q3 structure lost under Ruiz equilibration",
+        )
+        fixed_trace_plan = scaled_plan
+    end
     requested_tol = _native_hsd_tol(model, settings)
     tol = _native_hsd_internal_certificate_tol(program, requested_tol)
 
