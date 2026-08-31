@@ -29,8 +29,7 @@ SDPXMultiFloatsExt = "MultiFloats"
 
 [compat]
 AppleAccelerate = "0.7"
-BigFloatLinearAlgebra = "0.2, 0.3"
-GenericLinearAlgebra = "0.3, 0.4"
+BigFloatLinearAlgebra = "0.3"GenericLinearAlgebra = "0.3, 0.4"
 JLD2 = "0.4, 0.5, 0.6"
 LinearAlgebra = "1"
 MathOptInterface = "1.38"

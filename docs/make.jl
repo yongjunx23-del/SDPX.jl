@@ -45,14 +45,16 @@ makedocs(;
         "Development" => "development.md",
     ],
     checkdocs=:exports,
-    # SymmetricCones is an explicitly qualified experimental namespace. Its
-    # exported algebra is not part of SDPX's frozen public API, so documenting
-    # the root API must not make that nested implementation namespace a build
-    # requirement.
+    # SymmetricCones and ExtendedPrecisionBLAS are explicitly internal
+    # implementation modules; their exported algebra is not part of SDPX's
+    # frozen public API, so documenting the root API must not make those
+    # nested implementation namespaces a build requirement.
     checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS, SDPX.SymmetricCones],
 )
 
-if get(ENV, "CI", "false") == "true"
+# Pull requests must build the same site as main without attempting a deploy.
+# The workflow opts into deployment explicitly only for trusted push runs.
+if get(ENV, "SDPX_DEPLOY_DOCS", "false") == "true"
     deploydocs(
         ;
         repo="github.com/yongjunx23-del/SDPX.jl.git",
