@@ -46,23 +46,19 @@ program and no result is called a bound here.
 
 ## Current artifact and scope
 
-`ModularPMP.jl` provides typed specs/artifacts, exact rational witness data,
-parity-aware Gram dimensions, coefficient reconstruction, positivity of the
-factored character, and a canonical SDPX SDP lowering. The fixture uses a
-rational monomial basis with a strict Gram witness (`Q=I`, `R=I`) to validate
-the front end. It is an engineering/formula-interface fixture, not a full
-reproduction of Hellerman's eta Taylor data or a published numerical
-functional.
+`ModularPMP.jl` provides a typed original-equation front end: the basis is
+constructed from the literal `f_p` and `b_p` data implemented in
+`modular_lp/HellermanModularLP.jl`, including the 64-term eta product and odd
+fixed-point derivatives. The default fixed-gap specification currently has no
+independently certified strict witness. Accordingly, construction and SDP
+lowering fail closed rather than publish a synthetic monomial witness. This
+is an explicit research blocker, not a claim of infeasibility.
 
 The original finite-grid LP remains at
-[`../modular_lp/`](../modular_lp/). Future promotion requires a pinned formula
-coefficient table, independent primal/dual certificates, and exact published
-normalization checks. The current catalog intentionally stops before solving
-or claiming an objective.
-
-| tier | polynomial degree | Q dimension | R dimension | route |
-|---|---:|---:|---:|---|
-| fixed-gap fixture | 4 | 3 | 2 | build-only SDP |
+[`../modular_lp/`](../modular_lp/), with separate identity and semantics. Future
+promotion requires a strict witness, independent primal/dual certificates, and
+exact published normalization checks. The modular PMP catalog is intentionally
+unregistered while the witness gate is unsatisfied.
 
 See [`../PHYSICS_CATALOG_TEMPLATE.md`](../PHYSICS_CATALOG_TEMPLATE.md) for
 the common provenance, witness, claim-boundary, and scaling contract.
