@@ -58,24 +58,14 @@ end
 
 # Julia 1.12's LinearAlgebra exposes a zero-allocation `getrf!(A, ipiv)`
 # overload, while the supported Julia 1.10 LTS only exposes `getrf!(A)` and
-# allocates its pivot vector internally.  Feature-detect the overload rather
-# than version-gating it so the cache remains compatible with backported
-# LinearAlgebra releases.  The fallback allocation happens only when a new
-# numeric factorization is required; same-epoch warm solves still reuse the
-# owned factor and remain allocation-free.
+# allocates a fresh pivot vector. Feature-detect the owned-pivot overload so
+# backported LinearAlgebra releases use it automatically. On runtimes without
+# that overload, use SDPX's in-place partial-pivoting kernel instead of the
+# allocating one-argument LAPACK wrapper. The packed LU and sequential pivot
+# layout are compatible with the existing LAPACK `getrs!` solve path.
 function _lp_lu_factor!(F::Matrix{T}, ipiv::Vector{Int}) where {T}
-    if T <: _LAPACK_LU
-        info = if applicable(LinearAlgebra.LAPACK.getrf!, F, ipiv)
-            _, _, lapack_info = LinearAlgebra.LAPACK.getrf!(F, ipiv)
-            lapack_info
-        else
-            _, pivots, lapack_info = LinearAlgebra.LAPACK.getrf!(F)
-            length(pivots) == length(ipiv) || throw(DimensionMismatch(
-                "LAPACK getrf! returned a pivot vector with unexpected length",
-            ))
-            copyto!(ipiv, pivots)
-            lapack_info
-        end
+    if T <: _LAPACK_LU && applicable(LinearAlgebra.LAPACK.getrf!, F, ipiv)
+        _, _, info = LinearAlgebra.LAPACK.getrf!(F, ipiv)
         info > 0 && throw(SingularException(info))
     else
         _lu_factor_generic!(F, ipiv)
