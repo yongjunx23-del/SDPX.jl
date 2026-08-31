@@ -164,6 +164,43 @@ end
     )
 end
 
+@testset "Fixed-trace Q3 admits barrier-free columns" begin
+    # One fixed-head Q3 pair (u,v) plus a free Wilson-style column f that
+    # appears only in the equality row.  Substituting f = u + 1/2 gives the
+    # same problem without the free column, so the pre-existing fixed-trace
+    # path is the trusted reference for the saddle-point border.
+    reference = begin
+        model = SDPX.Model(Float64)
+        x = SDPX.variable!(model, :x, 2; domain=SDPX.Reals())
+        SDPX.constraint!(model, :unit,
+            Any[1.0, x[1] - 1.0, x[2]], SDPX.LorentzCone())
+        SDPX.objective!(model, SDPX.Maximize(), x[1] + 0.5)
+        SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
+    end
+    @test SDPX.status(reference) === :optimal
+    @test SDPX.certificate(reference).valid
+    @test SDPX.certificate(reference).primal_objective ≈ 2.5 atol=1e-8
+
+    model = SDPX.Model(Float64)
+    x = SDPX.variable!(model, :x, 3; domain=SDPX.Reals())
+    SDPX.constraint!(model, :link, x[3] - x[1] - 0.5, SDPX.ZeroCone())
+    SDPX.constraint!(model, :unit,
+        Any[1.0, x[1] - 1.0, x[2]], SDPX.LorentzCone())
+    SDPX.objective!(model, SDPX.Maximize(), x[3])
+    program = SDPX.compile_product_cone_model(model)
+    canonical = SDPX.canonicalize(program)
+    plan = SDPX.fixed_trace_q3_canonical_plan(canonical)
+    @test plan !== nothing
+    @test plan.free_ids == [3]
+    result = SDPX.optimize!(model; settings=SDPX.Settings(Float64; verbosity=0))
+    certificate = SDPX.certificate(result)
+    @test SDPX.status(result) === :optimal
+    @test certificate.valid
+    @test certificate.primal_objective ≈ 2.5 atol=1e-8
+    @test result.diagnostics.termination.reason === :verified_terminal_newton_trial ||
+          result.diagnostics.termination.reason === :verified_accepted_step
+end
+
 @testset "Precision benchmark contract" begin
     precisions=precision_specs(Float64,Float64,Float64)
     @test length(precisions)==7
@@ -191,4 +228,66 @@ end
             @test result.expectation_met
         end
     end
+end
+
+@testset "Symmetric-core structure cache lifecycle" begin
+    # Review slices 2/4: cross-solve structure cache. The cache stores ONLY
+    # the frozen structural arrays keyed by (type, structure signature); a
+    # hit must share the structure and allocate a FRESH zero numeric buffer.
+    # Structural changes (dimension, cone partition, sparsity pattern) and
+    # arithmetic-type changes must miss. clear_structure_cache! must drop
+    # every entry and the next build must be an owned rebuild.
+    SDPX.clear_structure_cache!()
+    build_A(n; shift=0) = begin
+        A = spzeros(Float64, n, 18)
+        for j in 1:4, i in 1:n
+            mod(i + 5 * j + shift, 11) == 0 && (A[i, j] = 0.25 * i + 0.5 * j)
+        end
+        sparse(A)
+    end
+    ranges = [1:60, 61:100, 101:120]
+    shapes = Symbol[:dense_lower, :dense_lower, :dense_lower]
+
+    Ar1 = build_A(120)
+    p1 = SDPX.SymmetricCorePattern{Float64}(Ar1, ranges, shapes)
+    st1 = SDPX.structure_cache_stats()
+    @test st1.misses >= 1
+
+    Ar1b = sparse(Ar1)  # identical structure
+    p2 = SDPX.SymmetricCorePattern{Float64}(Ar1b, ranges, shapes)
+    st2 = SDPX.structure_cache_stats()
+    @test st2.hits == st1.hits + 1
+    @test SDPX.symmetric_core_signature(p2) == SDPX.symmetric_core_signature(p1)
+    @test p2.colptr === p1.colptr        # frozen structure shared
+    @test p2.rowval === p1.rowval
+    @test p2.nzval !== p1.nzval          # numeric buffer NOT shared
+    @test all(iszero, p2.nzval)          # fresh zeros: no value survives reuse
+
+    # sparsity-pattern change: different structure => miss => different key
+    p3 = SDPX.SymmetricCorePattern{Float64}(build_A(120; shift=1), ranges, shapes)
+    @test SDPX.symmetric_core_signature(p3) != SDPX.symmetric_core_signature(p2)
+    @test SDPX.structure_cache_stats().misses > st2.misses
+
+    # cone-partition change: same Ar, different block ranges => miss
+    p4 = SDPX.SymmetricCorePattern{Float64}(Ar1, [1:50, 51:100, 101:120], shapes)
+    @test SDPX.symmetric_core_signature(p4) != SDPX.symmetric_core_signature(p2)
+
+    # arithmetic-type change: distinct (T, signature) key, hit on repeat
+    Ar1_big = SparseMatrixCSC{BigFloat,Int}(Ar1)
+    pbig1 = SDPX.SymmetricCorePattern{BigFloat}(Ar1_big, ranges, shapes)
+    pbig2 = SDPX.SymmetricCorePattern{BigFloat}(
+        SparseMatrixCSC{BigFloat,Int}(Ar1), ranges, shapes,
+    )
+    @test pbig2.colptr === pbig1.colptr
+    stats_big = SDPX.structure_cache_stats()
+    @test stats_big.hits == st2.hits + 1
+
+    # explicit invalidation drops every entry
+    SDPX.clear_structure_cache!()
+    @test SDPX.structure_cache_stats().entries == 0
+
+    # pattern built after clear is rebuilt (not shared) and still consistent
+    p5 = SDPX.SymmetricCorePattern{Float64}(Ar1, ranges, shapes)
+    @test SDPX.symmetric_core_signature(p5) == SDPX.symmetric_core_signature(p1)
+    @test p5.colptr !== p1.colptr
 end

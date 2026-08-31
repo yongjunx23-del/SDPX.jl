@@ -879,11 +879,23 @@ function _native_hsd_diagnostics(
         incompatible=payload.product_rank_incompatible,
         basis=:orthogonal_rowspace,
     )
-    timings = (
-        setup=setup_seconds,
-        core=core_seconds,
-        reconstruction=recovery_seconds,
-    )
+    timings = if state !== nothing
+        merge(
+            (
+                setup=setup_seconds,
+                core=core_seconds,
+                reconstruction=recovery_seconds,
+                total=core_seconds,
+            ),
+            phase_timings_snapshot(state.phase_timings),
+        )
+    else
+        (
+            setup=setup_seconds,
+            core=core_seconds,
+            reconstruction=recovery_seconds,
+        )
+    end
     process_peak = try
         max(Int(Sys.maxrss()), 0)
     catch exception
@@ -1057,6 +1069,20 @@ function _public_native_hsd_core(
     end
     solve_reduced = equilibration_map === nothing ? reduced :
                     equilibrated_program(equilibration_map, reduced)
+    # The fixed-trace Q3 plan is built from the canonical program before
+    # equilibration.  Ruiz row/column scaling preserves the plan's structural
+    # data (zero rows, free ids, active variables) but rescales the numeric
+    # cone data (tail_map, fixed_head, offset) and the equality panel, so a
+    # plan built from the unscaled program is inconsistent with the scaled
+    # state and breaks the bordered core at iteration 0.  Rebuild the plan
+    # from the equilibrated program so every numeric datum matches the state.
+    if fixed_trace_plan !== nothing && equilibration_map !== nothing
+        scaled_plan = fixed_trace_q3_canonical_plan(solve_reduced)
+        scaled_plan === nothing && error(
+            "fixed-trace Q3 structure lost under Ruiz equilibration",
+        )
+        fixed_trace_plan = scaled_plan
+    end
     requested_tol = _native_hsd_tol(model, settings)
     tol = _native_hsd_internal_certificate_tol(program, requested_tol)
 
@@ -1233,7 +1259,8 @@ function _public_native_hsd_core(
         product_rank = row_reduction.rank
         core_dimension = fixed_trace_plan === nothing ? saturating_sum_bytes(
             product_rank, canonical_num_slack(solve_reduced),
-        ) : length(fixed_trace_plan.zero_rows)
+        ) : length(fixed_trace_plan.zero_rows) +
+            length(fixed_trace_plan.reduction.free_ids)
         block_sizes=_product_hsd_core_block_sizes(
             solve_reduced,fixed_trace_plan,
         )

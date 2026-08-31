@@ -196,6 +196,32 @@ function SymmetricCorePattern{T}(
     ar_nnz=nnz(Ar)
     structural_nnz=Base.checked_add(Base.checked_add(nr,ar_nnz),theta_nnz)
 
+    signature = _symmetric_core_structure_signature(
+        nr, m, Ar.colptr, Ar.rowval, block_ranges, block_shapes,
+    )
+    # Review slice 2: cross-solve structure cache.  The key mixes the
+    # arithmetic type and the full CSC structural signature (dimensions,
+    # Ar pattern, block ranges, block shapes), so any change in dimension,
+    # cone partition, sparsity pattern, or formulation misses.  A hit
+    # shares ONLY the frozen structural arrays; the numeric buffer is a
+    # FRESH zero alloczation so no value can survive a reuse.
+    key = (T, signature)
+    cached = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+        get(_SYMMETRIC_CORE_STRUCTURE_CACHE.patterns, key, nothing)
+    end
+    if cached isa NamedTuple && haskey(cached, :colptr)
+        _structure_cache_record_hit!()
+        nzval = alloc_zeros(T, structural_nnz)
+        return SymmetricCorePattern{T}(
+            nr, m, dimension, cached.a_colptr, cached.a_rowval,
+            cached.block_ranges, cached.block_shapes,
+            cached.colptr, cached.rowval, cached.ar_slots,
+            cached.theta_slots, cached.x_diag_slots, nzval, signature,
+        )
+    elseif _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
+        _structure_cache_record_miss!()
+    end
+
     # ---- Frozen lower-triangle CSC structure ---------------------
     colptr = Vector{Int}(undef, dimension + 1)
     rowval = Int[]
@@ -252,9 +278,22 @@ function SymmetricCorePattern{T}(
         "symmetric core slot maps do not cover the frozen CSC buffer",
     ))
 
-    signature = _symmetric_core_structure_signature(
-        nr, m, Ar.colptr, Ar.rowval, block_ranges, block_shapes,
-    )
+    if _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
+        # Store the frozen structural content (no values).  The arrays are
+        # immutable by contract: colptr/rowval are never rewritten after
+        # construction, so sharing them across patterns is ownership-safe.
+        lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+            _SYMMETRIC_CORE_STRUCTURE_CACHE.patterns[key] = (
+                a_colptr=Vector{Int}(Ar.colptr),
+                a_rowval=Vector{Int}(Ar.rowval),
+                block_ranges=UnitRange{Int}[rows for rows in block_ranges],
+                block_shapes=Symbol[shape for shape in block_shapes],
+                colptr=colptr, rowval=rowval,
+                ar_slots=ar_slots, theta_slots=theta_slots,
+                x_diag_slots=x_diag_slots,
+            )
+        end
+    end
     nzval = alloc_zeros(T, slot)
     return SymmetricCorePattern{T}(
         nr, m, dimension, Vector{Int}(Ar.colptr), Vector{Int}(Ar.rowval),
@@ -586,6 +625,10 @@ mutable struct SymmetricCoreWorkspace{
     scalar_closure::Symbol
     dy_gauged::Bool
     original_scale::T   # max(1, ‖K_original‖_∞) fixed at synchronization
+    # Review slice 1: phase-level timing accumulator owned by the product-HSD
+    # state; the raw core solve writes the refinement wall bucket into it.
+    # `nothing` for setups outside the product-HSD hot route (zero overhead).
+    phase_timings::Union{Nothing,ProductHSDPhaseTimings}
 end
 
 function _core_newton_residual(
@@ -905,6 +948,7 @@ function _symmetric_core_workspace_prevalidated(
         _core_cone_theta_signature(system.cone), system.tau, system.kappa,
         _core_cache_signature(cache), nothing, 0, 0, 0, -1, false,
         0, 0, 0, 0, zero(T), :regular, false, original_scale,
+        nothing,
     )
 end
 
@@ -1393,12 +1437,16 @@ Returns `(x, refinements)`; the caller then re-evaluates the frozen
 five-equation residual on the refined direction.  The final direction is
 accepted only if that production residual passes.  A correction that does
 not strictly contract the normalized original-core residual fails closed.
+When `phase_timings !== nothing` the wall time of this function is added
+to its `refinement_seconds` bucket (review slice 1 telemetry).
 """
 function _core_refine!(
     workspace::SymmetricCoreWorkspace{T},
     x::AbstractVector{T},
     rhs::AbstractVector{T},
+    phase_timings::Union{Nothing,ProductHSDPhaseTimings}=nothing,
 ) where {T}
+    t_refine = time_ns()
     # initial normalized error
     _core_apply!(workspace, workspace.core_residual, x)
     @inbounds for i in 1:workspace.dimension
@@ -1417,7 +1465,11 @@ function _core_refine!(
     # five-equation gate; this only avoids demanding strict contraction of
     # roundoff that cannot be represented.
     residual_floor = T(256) * eps(one(T))
-    previous <= residual_floor && return (x, 0)
+    previous <= residual_floor && begin
+        phase_timings === nothing || (phase_timings.refinement_seconds +=
+            Float64(time_ns() - t_refine) * 1.0e-9)
+        return (x, 0)
+    end
     corrections = 0
     for _ in 1:2
         SDPX.refine_once!(
@@ -1449,6 +1501,8 @@ function _core_refine!(
         previous = current
         previous <= residual_floor && break
     end
+    phase_timings === nothing || (phase_timings.refinement_seconds +=
+        Float64(time_ns() - t_refine) * 1.0e-9)
     return (x, corrections)
 end
 
@@ -1676,7 +1730,10 @@ function _core_solve_raw!(
     all(isfinite, workspace.sol_core) || throw(ArgumentError(
         "symmetric core variable solve produced non-finite data",
     ))
-    _core_refine!(workspace, workspace.sol_core, workspace.rhs_core)
+    _core_refine!(
+        workspace, workspace.sol_core, workspace.rhs_core,
+        workspace.phase_timings,
+    )
     _core_split!(workspace.wx, workspace.wy, workspace.sol_core, nr,
         workspace.m)
 

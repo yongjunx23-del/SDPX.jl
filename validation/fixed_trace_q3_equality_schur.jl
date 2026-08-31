@@ -6,7 +6,7 @@ function q3_reduction(::Type{T}) where {T}
     return SDPX.FixedTraceQ3Reduction(
         [1 3; 2 4],
         reshape(T[1, 0, 0, 1, 1, 0, 0, 1], 2, 2, 2),
-        T[1, 1], zeros(T, 2, 2), :owned,
+        T[1, 1], zeros(T, 2, 2), Int[], :owned,
     )
 end
 

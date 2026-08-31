@@ -190,6 +190,9 @@ mutable struct ProductConeHSDState{
     # numeric gate.  Owned here so the product-HSD state machine can record
     # route acceptance and thread-budget snapshots without a second registry.
     residual_hook::ProductHSDResidualHook
+    # Phase-level timing accumulators (review slice 1): additive Float64
+    # fields, zero allocation on the hot path, disjoint wall-time intervals.
+    phase_timings::ProductHSDPhaseTimings
 end
 
 function ProductConeHSDState(
@@ -221,8 +224,9 @@ function _product_cone_hsd_state(
             "got $(kkt_route)",
         ))
     end
+    phase_timings = ProductHSDPhaseTimings()
     symmetric_core = if prepare_symmetric_core
-        _prepare_product_hsd_symmetric_core(
+        prepared_core = _prepare_product_hsd_symmetric_core(
             base;
             fixed_trace_plan,
             precision_bits=Int(symmetric_core_precision_bits),
@@ -230,6 +234,12 @@ function _product_cone_hsd_state(
             current_rss_bytes=symmetric_core_current_rss,
             regularization=symmetric_core_regularization,
         )
+        # Review slice 1: attach the timing accumulator to the generic core
+        # workspace so `_core_refine!` writes its wall bucket without any
+        # keyword plumbing through the production solve path.
+        prepared_core isa SymmetricCoreWorkspace &&
+            (prepared_core.phase_timings = phase_timings)
+        prepared_core
     else
         nothing
     end
@@ -340,6 +350,7 @@ function _product_cone_hsd_state(
         :none,
         0,
         residual_hook,
+        phase_timings,
     )
 end
 
@@ -3300,13 +3311,17 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     base.rank_ambiguous && return HSDStepDirectionFailed
     base.rank_incompatible && return HSDStepDirectionFailed
+    timings = state.phase_timings
+    t0 = time_ns()
     _product_hsd_residual!(state)
+    timings.residual_seconds += Float64(time_ns() - t0) * 1.0e-9
     if !isfinite(base.mu)
         return HSDStepDirectionFailed
     elseif base.mu <= zero(T)
         base.record.step_size = zero(T)
         return HSDStepAlreadyOptimal
     end
+    t0 = time_ns()
     scaling_ok = if state.symmetric_core isa FixedTraceQ3CoreWorkspace
         _product_hsd_fixed_trace_hkm_neighborhood!(
             state, base.s, base.y, base.mu,
@@ -3314,9 +3329,11 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     else
         try_update_scaling!(state.runtime, base.s, base.y, base.mu)
     end
+    timings.scaling_seconds += Float64(time_ns() - t0) * 1.0e-9
     scaling_ok || return HSDStepDirectionFailed
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
+    t0 = time_ns()
     direction_code = if state.kkt_route === :sparse_schur
         direction_ok = try
             _product_hsd_sparse_direction!(state)
@@ -3365,7 +3382,9 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
             direction_code = _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
         end
     end
+    timings.direction_seconds += Float64(time_ns() - t0) * 1.0e-9
     direction_code === HSDStepOK || return direction_code
+    t0 = time_ns()
     accepted = try
         _product_hsd_line_search!(state)
     catch
@@ -3378,6 +3397,7 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
         end
         false
     end
+    timings.line_search_seconds += Float64(time_ns() - t0) * 1.0e-9
     if !accepted && state.symmetric_core !== nothing &&
        !isempty(state.runtime.power) && !all(block.force_dual_hessian for block in state.runtime.power)
         restore_nonsymmetric_scaling_checkpoint!(state.runtime)
@@ -3399,7 +3419,9 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     # acceptance gate.  Diagnostic metadata only; the fused workspace is
     # optional and nothing here promotes a status or changes a tolerance.
     product_hsd_record_route_acceptance!(state.residual_hook)
+    t0 = time_ns()
     _product_hsd_residual!(state)
+    timings.residual_seconds += Float64(time_ns() - t0) * 1.0e-9
     # The NT operators and every nonsymmetric block must have been built with
     # the accepted point's global embedding complementarity. Never repair a
     # mismatch by relabeling stale scaling metadata.
@@ -3407,7 +3429,9 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
         state.runtime.valid = false
         return HSDStepDirectionFailed
     end
+    t0 = time_ns()
     _hsd_update_record!(base)
+    timings.accepted_update_seconds += Float64(time_ns() - t0) * 1.0e-9
     base.record.iterations += 1
     return HSDStepOK
 end

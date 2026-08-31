@@ -864,9 +864,12 @@ function _product_hsd_symmetric_core_direction!(
     core === nothing && return false
     base = state.base
     fixed_trace = core isa FixedTraceQ3CoreWorkspace{T}
+    timings = state.phase_timings
+    refinement_iter0 = core.refinements
 
     # Predictor.
     predictor_scalar = -base.tau * base.kappa
+    t0 = time_ns()
     predictor_linearized = if fixed_trace
         _product_hsd_fixed_trace_hkm_linearization!(
             state, zero(T), false, true,
@@ -883,12 +886,23 @@ function _product_hsd_symmetric_core_direction!(
         state, predictor_scalar,
     )
     predictor_system === nothing && return false
+    timings.schur_assembly_seconds += Float64(time_ns() - t0) * 1.0e-9
+    t0 = time_ns()
     factor_symmetric_core_epoch!(
         core, predictor_system, base.epoch,
     )
+    timings.kkt_factorization_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9
+    t0 = time_ns()
+    refinement_wall0 = timings.refinement_seconds
     predictor_candidate, predictor_residual, _ = fixed_trace ?
         _core_solve_raw!(core, predictor_system; compute_residual=false) :
         _core_solve_raw!(core, predictor_system)
+    # Disjoint phase partition: the refine wall share inside this call was
+    # accumulated directly into `refinement_seconds` by `_core_refine!`;
+    # the solve bucket keeps the remainder of the call wall, extended
+    # through direction materialization (copy/scatter/finite/residual
+    # gates) so every wall fraction of the direction is attributed.
     copyto!(base.dx, predictor_candidate.dx)
     copyto!(base.dy, predictor_candidate.dy)
     copyto!(base.ds, predictor_candidate.ds)
@@ -903,12 +917,17 @@ function _product_hsd_symmetric_core_direction!(
         state.diagnostic = :fixed_trace_predictor_residual_failed
         return false
     end
+    timings.predictor_linear_solve_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9 -
+        (timings.refinement_seconds - refinement_wall0)
     copyto!(base.dx_a, base.dx)
     copyto!(base.dy_a, base.dy)
     copyto!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
+    # Affine-step / centering-parameter computation feeds the corrector RHS.
+    t0 = time_ns()
     alpha_aff = _product_hsd_boundary_alpha!(state)
     (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
@@ -916,9 +935,11 @@ function _product_hsd_symmetric_core_direction!(
     ratio = base.mu_aff / base.mu
     sigma = min(one(T), ratio * ratio * ratio)
     sigma_mu = sigma * base.mu
+    timings.corrector_rhs_seconds += Float64(time_ns() - t0) * 1.0e-9
 
     # Corrector: only the cone RHS and scalar shift change; the operator and
     # local/equality factor remain the predictor epoch's authority.
+    t0 = time_ns()
     corrector_linearized = if fixed_trace
         _product_hsd_fixed_trace_hkm_linearization!(
             state, sigma_mu, true, false,
@@ -937,9 +958,14 @@ function _product_hsd_symmetric_core_direction!(
         state, corrector_scalar,
     )
     corrector_system === nothing && return false
+    timings.corrector_rhs_seconds += Float64(time_ns() - t0) * 1.0e-9
+    t0 = time_ns()
+    refinement_wall0 = timings.refinement_seconds
     corrector_candidate, corrector_residual, _ = fixed_trace ?
         _core_solve_raw!(core, corrector_system; compute_residual=false) :
         _core_solve_raw!(core, corrector_system)
+    timings.refinement_iterations =
+        core.refinements - refinement_iter0
     copyto!(base.dx, corrector_candidate.dx)
     copyto!(base.dy, corrector_candidate.dy)
     copyto!(base.ds, corrector_candidate.ds)
@@ -954,5 +980,8 @@ function _product_hsd_symmetric_core_direction!(
         state.diagnostic = :fixed_trace_corrector_residual_failed
         return false
     end
+    timings.corrector_linear_solve_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9 -
+        (timings.refinement_seconds - refinement_wall0)
     return true
 end
