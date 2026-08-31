@@ -88,38 +88,11 @@ jobs:
   # is not part of the E2E correctness contract. The canonical micro suite
   # remains runnable locally; canonical performance receipts are tracked in
   # benchmark/lifecycle/.
-  provider-smoke:
-    name: MFLA/BFLA provider smoke
-    needs: changes
-    # Provider installs are slow; only pay for them when the provider-facing
-    # surface changed, or on main pushes where the signal is recorded.
-    if: needs.changes.outputs.providers == 'true' || github.event_name == 'push'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v2
-        with:
-          version: '1'
-      - uses: julia-actions/cache@v2
-        with:
-          cache-name: julia-depot
-      - name: Clone pinned released provider checkouts
-        run: |
-          git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
-          git -C "$RUNNER_TEMP/MFLA" checkout b38dea165d0973ae06ce245dbdf11298b123c9ea
-          git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
-          git -C "$RUNNER_TEMP/BFLA" checkout f95d3e623990e8ae5848916ba92d93897dcb1e31
-      - name: Run isolated installed-provider smoke entrypoint
-        env:
-          SDPX_MFLA_PROJECT: ${{ runner.temp }}/MFLA
-          SDPX_BFLA_PROJECT: ${{ runner.temp }}/BFLA
-          SDPX_PROVIDER_SMOKE_ENV: ${{ runner.temp }}/provider-smoke
-          SDPX_PROVIDER_SMOKE_TARGET: all
-        run: ./scripts/provider_smoke.sh
-      - name: Run MultiFloat extension integration gate
-        env:
-          SDPX_PROVIDER_ENV: ${{ runner.temp }}/provider-smoke
-        run: julia --startup-file=no --project="$SDPX_PROVIDER_ENV" -t1 validation/providers/multifloat_linear_algebra_integration.jl
+  # Pinned MFLA/BFLA provider smoke is intentionally not a required CI job.
+  # It duplicates the manual Provider compatibility matrix and was the only
+  # indefinitely running job after every E2E/docs/quality gate passed. Run
+  # provider-matrix.yml via workflow_dispatch when provider compatibility is
+  # being changed or released.
 
   # v2-gates removed (2026-09-01): the native product-HSD allocation hard
   # gate has never been green on any CI run of this repository -- a constant
