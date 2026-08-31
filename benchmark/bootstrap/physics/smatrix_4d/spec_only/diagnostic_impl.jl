@@ -20,6 +20,11 @@ const WITNESS_MARGIN_FLOOR_FACTOR = 100
 # substituted into the implemented single-anchor diagnostic basis.
 const PAPER_DEFAULTS = (
     basis_centers=(20 / 3, 10, 20, 30, 40, 50, 60, 86),
+    # Appendix A4: N_sigma = Nmax at sigma=20/3 and Nmax-2 at every
+    # other wavelet center.  This is provenance-only metadata until the
+    # multiwavelet basis is implemented.
+    basis_power_rule=:nmax_plus_offset,
+    basis_power_offsets=(0, -2, -2, -2, -2, -2, -2, -2),
     nmax_values=(10, 12, 14, 16, 18, 20),
     lmax_values=(16, 18),
     s_max=300,
@@ -42,6 +47,8 @@ Base.@kwdef struct SMatrix4DSpec{T}
     # orbit basis.  The 2605 multi-wavelet basis is metadata only.
     basis_kind::Symbol = :single_anchor_triple_rho
     basis_centers::Tuple = PAPER_DEFAULTS.basis_centers
+    basis_power_rule::Symbol = PAPER_DEFAULTS.basis_power_rule
+    basis_power_offsets::Tuple{Vararg{Int}} = PAPER_DEFAULTS.basis_power_offsets
     nmax_values::Tuple{Vararg{Int}} = PAPER_DEFAULTS.nmax_values
     lmax_values::Tuple{Vararg{Int}} = PAPER_DEFAULTS.lmax_values
     s_max::T = T(PAPER_DEFAULTS.s_max)
@@ -94,7 +101,10 @@ struct SMatrix4DArtifact{T}
 end
 
 function _matches_paper_defaults(spec::SMatrix4DSpec)
+    T = typeof(spec.beta_min)
     return spec.basis_centers == PAPER_DEFAULTS.basis_centers &&
+           spec.basis_power_rule == PAPER_DEFAULTS.basis_power_rule &&
+           spec.basis_power_offsets == PAPER_DEFAULTS.basis_power_offsets &&
            spec.nmax_values == PAPER_DEFAULTS.nmax_values &&
            spec.lmax_values == PAPER_DEFAULTS.lmax_values &&
            spec.s_max == typeof(spec.s_max)(PAPER_DEFAULTS.s_max) &&
@@ -103,8 +113,8 @@ function _matches_paper_defaults(spec::SMatrix4DSpec)
            spec.dual_mu2 == typeof(spec.dual_mu2)(PAPER_DEFAULTS.dual_mu2) &&
            spec.dual_grid_count == PAPER_DEFAULTS.dual_grid_count &&
            spec.dual_spin_max == PAPER_DEFAULTS.dual_spin_max &&
-           spec.beta_min == typeof(spec.beta_min)(1 / 10) &&
-           spec.beta_max == typeof(spec.beta_max)(9 / 10) &&
+           spec.beta_min == T(1) / T(10) &&
+           spec.beta_max == T(9) / T(10) &&
            spec.rho_map_s0 === nothing
 end
 
@@ -134,6 +144,16 @@ function _validate_spec(spec::SMatrix4DSpec)
         all(>(4), spec.basis_centers) || throw(ArgumentError(
             "basis_centers must be nonempty finite centers above threshold in m^2 units",
         ))
+    spec.basis_power_rule === :nmax_plus_offset || throw(ArgumentError(
+        "basis_power_rule must be :nmax_plus_offset",
+    ))
+    length(spec.basis_power_offsets) == length(spec.basis_centers) &&
+        all(isa(offset, Int) for offset in spec.basis_power_offsets) ||
+        throw(ArgumentError("basis_power_offsets must have one integer per center"))
+    all(nmax + offset >= 0 for nmax in spec.nmax_values,
+        offset in spec.basis_power_offsets) || throw(ArgumentError(
+        "basis power offsets produce a negative per-center power",
+    ))
     all(>(0), spec.nmax_values) && issorted(spec.nmax_values) &&
         length(unique(spec.nmax_values)) == length(spec.nmax_values) ||
         throw(ArgumentError("nmax_values must be sorted and unique positive values"))
@@ -432,8 +452,10 @@ function build_smatrix_4d(spec::SMatrix4DSpec{T}) where {T}
     counts = (variables=length(basis), basis_width=length(basis), ansatz_degree=spec.ansatz_degree,
         energy_samples=length(betas), even_spins=length(spins), spin_max=effective_spin_max,
         spin_set=Tuple(spins), quadrature_order=spec.quadrature_order,
-        basis_centers=spec.basis_centers, nmax_values=spec.nmax_values,
-        lmax_values=spec.lmax_values, s_max=spec.s_max,
+        basis_centers=spec.basis_centers,
+        basis_power_rule=spec.basis_power_rule,
+        basis_power_offsets=spec.basis_power_offsets,
+        nmax_values=spec.nmax_values, lmax_values=spec.lmax_values, s_max=spec.s_max,
         alpha_th=spec.alpha_th, alpha_th_value=alpha_threshold_value(spec),
         a7_t_grid=spec.a7_t_grid, dual_mu2=spec.dual_mu2,
         dual_grid_count=spec.dual_grid_count, dual_spin_max=spec.dual_spin_max,
@@ -602,6 +624,8 @@ function canonical_text(artifact::SMatrix4DArtifact)
             ansatz_degree=spec.ansatz_degree, energy_samples=spec.energy_samples,
             spin_max=spec.spin_max, quadrature_order=spec.quadrature_order,
             basis_kind=spec.basis_kind, basis_centers=spec.basis_centers,
+            basis_power_rule=spec.basis_power_rule,
+            basis_power_offsets=spec.basis_power_offsets,
             nmax_values=spec.nmax_values, lmax_values=spec.lmax_values,
             s_max=spec.s_max, alpha_th=spec.alpha_th, a7_t_grid=spec.a7_t_grid,
             dual_mu2=spec.dual_mu2, dual_grid_count=spec.dual_grid_count,

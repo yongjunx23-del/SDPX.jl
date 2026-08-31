@@ -7,7 +7,10 @@ arXiv:2210.01502v2, arXiv:1708.06765v1, and arXiv:2106.10257.
 The implementation remains experimental and unregistered: it uses the A1
 partial-wave normalization and sampled A5--A6 primal rows. Its implemented
 basis is a single-anchor fully symmetric triple-rho orbit basis; the A2--A4
-multi-wavelet, threshold term and A7 t-grid are provenance-only metadata.
+multi-wavelet, threshold term and A7 t-grid are provenance-only metadata. The
+A4 center-power rule is stored explicitly as `N_(20/3)=Nmax` and
+`N_sigma=Nmax-2` elsewhere (offsets `(0,-2,-2,-2,-2,-2,-2,-2)`), so custom
+overrides change the artifact identity and cannot retain a paper-default flag.
 A8--A15 is recorded as a fixed-t dual placeholder and remains fail-closed. It
 does not claim the paper's numerical bounds.
 

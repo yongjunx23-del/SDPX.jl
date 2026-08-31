@@ -30,6 +30,10 @@ const S4 = SMatrix4DSpecDiagnostic
     @test artifact.spec.basis_kind === :single_anchor_triple_rho
     @test artifact.spec.matches_paper_defaults
     @test artifact.phase_space == artifact.betas
+    @test artifact.spec.basis_power_rule === :nmax_plus_offset
+    @test artifact.spec.basis_power_offsets == (0, -2, -2, -2, -2, -2, -2, -2)
+    @test artifact.counts.basis_power_rule === :nmax_plus_offset
+    @test artifact.counts.basis_power_offsets == artifact.spec.basis_power_offsets
     @test artifact.spec.nmax_values == (10, 12, 14, 16, 18, 20)
     @test artifact.spec.lmax_values == (16, 18)
     @test artifact.spec.s_max == 300.0
@@ -149,9 +153,25 @@ end
     custom = S4.SMatrix4DSpec{Float64}(
         id="custom", scale=:tiny, ansatz_degree=4, energy_samples=8,
         spin_max=4, quadrature_order=32, basis_centers=(7.0,),
-        matches_paper_defaults=false)
+        basis_power_offsets=(-1,), matches_paper_defaults=false)
     @test S4.validate_artifact(S4.build_smatrix_4d(custom)).valid
     @test !S4.build_smatrix_4d(custom).provenance.matches_paper_defaults
+    @test custom.basis_power_offsets == (-1,)
+    bad_offsets = S4.SMatrix4DSpec{Float64}(
+        id="bad-offsets", scale=:tiny, ansatz_degree=4, energy_samples=8,
+        spin_max=4, quadrature_order=32, basis_centers=(7.0,),
+        basis_power_offsets=(0, -2), matches_paper_defaults=false)
+    @test_throws ArgumentError S4.build_smatrix_4d(bad_offsets)
+
+    # Defaults are formed in T, not by converting pre-rounded Float64
+    # fractions; the advertised generic BigFloat spec therefore matches.
+    big_spec = S4.SMatrix4DSpec{BigFloat}(
+        id="big-default", scale=:tiny, ansatz_degree=4,
+        energy_samples=2, spin_max=0, quadrature_order=8)
+    @test big_spec.beta_min == BigFloat(1) / BigFloat(10)
+    @test big_spec.beta_max == BigFloat(9) / BigFloat(10)
+    @test S4._matches_paper_defaults(big_spec)
+    @test isnothing(S4._validate_spec(big_spec))
 
     # The paper's linearized dual and the implementation finite conic dual
     # are distinct parameterized formulations, not aliases of the primal.

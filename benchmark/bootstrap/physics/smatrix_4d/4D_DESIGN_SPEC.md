@@ -76,8 +76,10 @@ identical bosons, but individual partial waves are not crossing invariant.
 
 The spec records the Appendix-A numerical defaults explicitly: `Nmax` in
 `{10,12,14,16,18,20}`, `Lmax` in `{16,18}`, `smax=300`, wavelet centers
-`{20/3,10,20,30,40,50,60,86}`, threshold branch `alpha_th`, and the A7
-`t` grid. It also parameterizes smaller diagnostic tiers, quadrature, spin
+`{20/3,10,20,30,40,50,60,86}`, the structured Appendix-A4 power rule
+`N_(20/3)=Nmax` and `N_sigma=Nmax-2` at every other center (stored as
+`:nmax_plus_offset` with offsets `(0,-2,-2,-2,-2,-2,-2,-2)`), threshold
+branch `alpha_th`, and the A7 `t` grid. It also parameterizes smaller diagnostic tiers, quadrature, spin
 sets, formulation (`:primal_full_unitarity`, `:dual_linearized`, or
 `:finite_conic_dual`), witness mode, and rho-map anchor. The current
 spec-only builder uses one anchor triple-rho diagnostic basis; the
