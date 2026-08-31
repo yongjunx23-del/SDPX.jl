@@ -76,4 +76,50 @@
     @test !mp.validate_artifact(mp.ModularPMPArtifact(
         2, spec, dims, alpha, polynomial, Q + transpose(Q), R, true,
         provenance, "bad")).valid
+
+    # Gram checks preserve the element type and distinguish PSD from PD.
+    @test mp._validate_gram(Matrix{BigFloat}(I, 2, 2), false)
+    @test mp._validate_gram(zeros(BigFloat, 2, 2), false)
+    @test !mp._validate_gram(zeros(BigFloat, 2, 2), true)
+    tiny_negative = BigFloat[1 0; 0 big"-1e-1000"]
+    @test !mp._validate_gram(tiny_negative, false)
+    @test !mp._validate_gram(BigFloat[1 2; 0 1], false)
+    @test !mp._validate_gram(Matrix{Int}(I, 2, 2), false)
+
+    # Every lowered-data mutation is rejected without throwing.
+    @test !mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, (parity=:even, q=1, r=1, q_blocks=1, r_blocks=1),
+        alpha, polynomial, Q, R, false, mp._provenance(spec), "bad")).valid
+    @test "provenance" in mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, dims, alpha, polynomial, Q, R, false,
+        (wrong=true,), "bad")).failures
+    @test mp.stable_fingerprint(artifact) != mp.stable_fingerprint(
+        mp.ModularPMPArtifact(2, spec, (parity=:even, q=99, r=2,
+            q_blocks=3, r_blocks=2), alpha, polynomial, Q, R, true,
+            provenance, "bad"))
+    @test mp.stable_fingerprint(artifact) != mp.stable_fingerprint(
+        mp.ModularPMPArtifact(2, spec, dims, alpha, polynomial,
+            Q + Matrix{BigFloat}(I, dims.q_blocks, dims.q_blocks), R,
+            true, provenance, "bad"))
+    @test occursin("artifact.gram_dimensions", mp.canonical_text(artifact))
+
+    # Non-finite vectors, asymmetric/tiny-negative Gram data, and malformed
+    # dimensions all fail as explicit verdicts rather than validator throws.
+    nan_alpha = copy(alpha); nan_alpha[1] = BigFloat("NaN")
+    @test "alpha_finite" in mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, dims, nan_alpha, polynomial, Q, R, false, provenance, "bad")).failures
+    nan_poly = copy(polynomial); nan_poly[1] = BigFloat("NaN")
+    @test "polynomial_finite" in mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, dims, alpha, nan_poly, Q, R, false, provenance, "bad")).failures
+    asym = copy(Q); asym[1, 2] = one(BigFloat)
+    @test "Q_psd" in mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, dims, alpha, polynomial, asym, R, false, provenance, "bad")).failures
+    negative = copy(Q); negative[1, 1] = big"-1e-1000"
+    @test "Q_psd" in mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, dims, alpha, polynomial, negative, R, false, provenance, "bad")).failures
+    malformed_Q = ones(BigFloat, 1, 2)
+    malformed = mp.validate_artifact(mp.ModularPMPArtifact(
+        2, spec, dims, alpha, polynomial, malformed_Q, R, false, provenance, "bad"))
+    @test !malformed.valid
+    @test "Q_dimensions" in malformed.failures
 end

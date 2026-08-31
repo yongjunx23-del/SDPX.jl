@@ -19,10 +19,11 @@ chi(Delta) = exp(-2*pi*Delta).
 
 For a fixed `gap>0`, the factor is strictly positive on `Delta>=gap`, so the
 sign condition is exactly `p_alpha(x)>=0` for `x=Delta-gap>=0`. The current
-typed front end accepts the polynomial coefficient table produced by a future
-Hellerman formula adapter. Its checked fixture uses an exact rational monomial
-table, deliberately avoiding a claim that the eta Taylor data or a published
-bound has been reproduced.
+typed front end rebuilds its coefficient table from the literal
+`derivative_polynomial` and `vacuum_polynomial` implementations in
+`../modular_lp/HellermanModularLP.jl`. The validator independently recomputes
+that table and rejects any nonliteral basis, normalization, central charge,
+gap, derivative jet, or eta-term count.
 
 The scalar Markov--Lukacs lift is exact on the half-line. For degree `2d`,
 `p=V_d'QV_d+xV_(d-1)'RV_(d-1)`; for degree `2d+1`,
@@ -33,8 +34,10 @@ caller-level protocol and is not hidden inside the artifact.
 
 Status is `:build_only`, `paper_equivalent=false`. No published objective,
 continuum bound, or independent optimal functional is claimed. The current
-fixed-gap default has no independently certified strict witness, so artifact
-construction and SDP lowering fail closed; no synthetic witness is published.
+fixed-gap default has no independently certified strict or semidefinite witness,
+so artifact construction and SDP lowering fail closed; no synthetic witness is
+published. Gram validation preserves the artifact element type, including
+BigFloat, and fails closed when a native PSD test is unavailable.
 An ExpCone is not used for the factored character: it is relevant only when a
 decision variable itself appears in an exponent. A generic
 `exp(variable)*polynomial` constraint is not silently asserted to be convex.
