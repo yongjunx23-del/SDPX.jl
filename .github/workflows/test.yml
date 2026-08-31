@@ -37,7 +37,7 @@ jobs:
           echo "changed files:"
           echo "$changed"
           if echo "$changed" | grep -qE \
-            '^(ext/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|validation/providers/|Project\.toml)'; then
+            '^(\.github/workflows/test\.yml$|ext/|src/factor_cache/|src/la_backends/|src/kernels/extended_precision_blas/|src/kernels/mixed_precision_kkt\.jl|validation/providers/|Project\.toml$)'; then
             echo "providers=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -192,7 +192,7 @@ jobs:
                 error("Project.toml still carries the upstream SDPJSolver.jl UUID")
             (haskey(p, "compat") && haskey(p["compat"], "julia")) ||
                 error("Project.toml needs a [compat] entry for julia")
-            println("Project.toml OK: ", p["name"], " v", p["version"], " ", p["uuid"])'
+            println("Project.toml OK: ", p["name"], " v", p["version"], " ", p["uuid"] )'
       - name: Release metadata and auxiliary compat are consistent
         run: julia scripts/check_release_metadata.jl
       - name: Upstream solver implementation is not vendored
