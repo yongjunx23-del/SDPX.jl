@@ -196,6 +196,32 @@ function SymmetricCorePattern{T}(
     ar_nnz=nnz(Ar)
     structural_nnz=Base.checked_add(Base.checked_add(nr,ar_nnz),theta_nnz)
 
+    signature = _symmetric_core_structure_signature(
+        nr, m, Ar.colptr, Ar.rowval, block_ranges, block_shapes,
+    )
+    # Review slice 2: cross-solve structure cache.  The key mixes the
+    # arithmetic type and the full CSC structural signature (dimensions,
+    # Ar pattern, block ranges, block shapes), so any change in dimension,
+    # cone partition, sparsity pattern, or formulation misses.  A hit
+    # shares ONLY the frozen structural arrays; the numeric buffer is a
+    # FRESH zero alloczation so no value can survive a reuse.
+    key = (T, signature)
+    cached = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+        get(_SYMMETRIC_CORE_STRUCTURE_CACHE.patterns, key, nothing)
+    end
+    if cached isa NamedTuple && haskey(cached, :colptr)
+        _structure_cache_record_hit!()
+        nzval = alloc_zeros(T, structural_nnz)
+        return SymmetricCorePattern{T}(
+            nr, m, dimension, cached.a_colptr, cached.a_rowval,
+            cached.block_ranges, cached.block_shapes,
+            cached.colptr, cached.rowval, cached.ar_slots,
+            cached.theta_slots, cached.x_diag_slots, nzval, signature,
+        )
+    elseif _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
+        _structure_cache_record_miss!()
+    end
+
     # ---- Frozen lower-triangle CSC structure ---------------------
     colptr = Vector{Int}(undef, dimension + 1)
     rowval = Int[]
@@ -252,9 +278,22 @@ function SymmetricCorePattern{T}(
         "symmetric core slot maps do not cover the frozen CSC buffer",
     ))
 
-    signature = _symmetric_core_structure_signature(
-        nr, m, Ar.colptr, Ar.rowval, block_ranges, block_shapes,
-    )
+    if _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
+        # Store the frozen structural content (no values).  The arrays are
+        # immutable by contract: colptr/rowval are never rewritten after
+        # construction, so sharing them across patterns is ownership-safe.
+        lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+            _SYMMETRIC_CORE_STRUCTURE_CACHE.patterns[key] = (
+                a_colptr=Vector{Int}(Ar.colptr),
+                a_rowval=Vector{Int}(Ar.rowval),
+                block_ranges=UnitRange{Int}[rows for rows in block_ranges],
+                block_shapes=Symbol[shape for shape in block_shapes],
+                colptr=colptr, rowval=rowval,
+                ar_slots=ar_slots, theta_slots=theta_slots,
+                x_diag_slots=x_diag_slots,
+            )
+        end
+    end
     nzval = alloc_zeros(T, slot)
     return SymmetricCorePattern{T}(
         nr, m, dimension, Vector{Int}(Ar.colptr), Vector{Int}(Ar.rowval),
