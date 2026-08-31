@@ -879,11 +879,23 @@ function _native_hsd_diagnostics(
         incompatible=payload.product_rank_incompatible,
         basis=:orthogonal_rowspace,
     )
-    timings = (
-        setup=setup_seconds,
-        core=core_seconds,
-        reconstruction=recovery_seconds,
-    )
+    timings = if state !== nothing
+        merge(
+            (
+                setup=setup_seconds,
+                core=core_seconds,
+                reconstruction=recovery_seconds,
+                total=core_seconds,
+            ),
+            phase_timings_snapshot(state.phase_timings),
+        )
+    else
+        (
+            setup=setup_seconds,
+            core=core_seconds,
+            reconstruction=recovery_seconds,
+        )
+    end
     process_peak = try
         max(Int(Sys.maxrss()), 0)
     catch exception

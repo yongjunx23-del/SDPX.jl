@@ -135,6 +135,8 @@ function _product_hsd_verified_result(
 ) where {T}
     base = state.base
     canonical = base.canonical
+    timings = state.phase_timings
+    t_cert = time_ns()
     # Do not send an arithmetically unresolved tau to the recovered-point
     # verifier. Ray gates below still run and remain the only infeasibility
     # authority. Healthy tau follows the unchanged verifier path.
@@ -154,6 +156,7 @@ function _product_hsd_verified_result(
     if check_optimal && optimal_probe_ready && base.tau > tau_floor && verify_optimal!(
         canonical, state.base, x_original, s_original, y_original; tol=tol,
     )
+        timings.certification_seconds += Float64(time_ns() - t_cert) * 1.0e-9
         return _product_hsd_make_result(
             state, ProductHSDOptimal, reason, last_step, terminal_alpha,
             x_original, s_original, y_original,
@@ -164,6 +167,7 @@ function _product_hsd_verified_result(
     if ray_probe_ready && verify_primal_infeasibility!(
         canonical, state.base, y_original; tol=tol,
     )
+        timings.certification_seconds += Float64(time_ns() - t_cert) * 1.0e-9
         return _product_hsd_make_result(
             state, ProductHSDPrimalInfeasible, reason, last_step,
             terminal_alpha, x_original, s_original, y_original,
@@ -172,11 +176,13 @@ function _product_hsd_verified_result(
     if ray_probe_ready && verify_dual_infeasibility!(
         canonical, state.base, x_original, s_original; tol=tol,
     )
+        timings.certification_seconds += Float64(time_ns() - t_cert) * 1.0e-9
         return _product_hsd_make_result(
             state, ProductHSDDualInfeasible, reason, last_step,
             terminal_alpha, x_original, s_original, y_original,
         )
     end
+    timings.certification_seconds += Float64(time_ns() - t_cert) * 1.0e-9
     return nothing
 end
 

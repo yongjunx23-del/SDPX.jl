@@ -71,6 +71,9 @@ include("kkt/scalar_closure.jl")
 include("kkt/residual_workspace.jl")
 include("kkt/block_incidence.jl")
 include("kkt/factor_receipt.jl")
+# Review slice 1 phase-timing accumulator: defined before the symmetric-core
+# KKT workspace, whose raw solve writes the refinement wall bucket into it.
+include("hsd/phase_timings.jl")
 include("kkt/symmetric_core.jl")
 include("kkt/expanded_quasidefinite.jl")
 include("kkt/psd_panels.jl")
