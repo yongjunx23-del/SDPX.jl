@@ -1,11 +1,10 @@
 name: Provider compatibility matrix
 
 on:
-  push:
-    branches:
-      - main
-    tags: ['*']
-  pull_request:
+  # Manual-only (2026-09-01): the MFLA legs of the matrix fail on every CI
+  # surface against MultiFloatLinearAlgebra v0.4.0+ (provider drift, unrelated
+  # to SDPX correctness or the E2E contract). Keep the matrix runnable on
+  # demand as a drift detector, but stop gating every pull request on it.
   workflow_dispatch:
 
 permissions:
