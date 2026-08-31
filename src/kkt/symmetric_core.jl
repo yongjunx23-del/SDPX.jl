@@ -187,10 +187,45 @@ function SymmetricCorePattern{T}(
     m, nr = size(Ar)
     _validate_core_blocks(m, block_ranges, block_shapes)
     dimension = nr + m
+    theta_nnz=0
+    for rows in block_ranges
+        block_size=length(rows)
+        triangle=div(Base.checked_mul(block_size,block_size+1),2)
+        theta_nnz=Base.checked_add(theta_nnz,triangle)
+    end
+    ar_nnz=nnz(Ar)
+    structural_nnz=Base.checked_add(Base.checked_add(nr,ar_nnz),theta_nnz)
+
+    signature = _symmetric_core_structure_signature(
+        nr, m, Ar.colptr, Ar.rowval, block_ranges, block_shapes,
+    )
+    # Review slice 2: cross-solve structure cache.  The key mixes the
+    # arithmetic type and the full CSC structural signature (dimensions,
+    # Ar pattern, block ranges, block shapes), so any change in dimension,
+    # cone partition, sparsity pattern, or formulation misses.  A hit
+    # shares ONLY the frozen structural arrays; the numeric buffer is a
+    # FRESH zero alloczation so no value can survive a reuse.
+    key = (T, signature)
+    cached = lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+        get(_SYMMETRIC_CORE_STRUCTURE_CACHE.patterns, key, nothing)
+    end
+    if cached isa NamedTuple && haskey(cached, :colptr)
+        _structure_cache_record_hit!()
+        nzval = alloc_zeros(T, structural_nnz)
+        return SymmetricCorePattern{T}(
+            nr, m, dimension, cached.a_colptr, cached.a_rowval,
+            cached.block_ranges, cached.block_shapes,
+            cached.colptr, cached.rowval, cached.ar_slots,
+            cached.theta_slots, cached.x_diag_slots, nzval, signature,
+        )
+    elseif _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
+        _structure_cache_record_miss!()
+    end
 
     # ---- Frozen lower-triangle CSC structure ---------------------
     colptr = Vector{Int}(undef, dimension + 1)
     rowval = Int[]
+    sizehint!(rowval,structural_nnz)
     colptr[1] = 1
     @inbounds for j in 1:nr
         push!(rowval, j)  # structural zero x diagonal
@@ -217,8 +252,10 @@ function SymmetricCorePattern{T}(
 
     # ---- Slot maps -------------------------------------------------
     ar_slots = Int[]
+    sizehint!(ar_slots,ar_nnz)
     x_diag_slots = Vector{Int}(undef, nr)
     theta_slots = Int[]
+    sizehint!(theta_slots,theta_nnz)
     slot = 0
     @inbounds for j in 1:nr
         slot += 1
@@ -241,9 +278,22 @@ function SymmetricCorePattern{T}(
         "symmetric core slot maps do not cover the frozen CSC buffer",
     ))
 
-    signature = _symmetric_core_structure_signature(
-        nr, m, Ar.colptr, Ar.rowval, block_ranges, block_shapes,
-    )
+    if _SYMMETRIC_CORE_STRUCTURE_CACHE.enabled
+        # Store the frozen structural content (no values).  The arrays are
+        # immutable by contract: colptr/rowval are never rewritten after
+        # construction, so sharing them across patterns is ownership-safe.
+        lock(_SYMMETRIC_CORE_STRUCTURE_LOCK) do
+            _SYMMETRIC_CORE_STRUCTURE_CACHE.patterns[key] = (
+                a_colptr=Vector{Int}(Ar.colptr),
+                a_rowval=Vector{Int}(Ar.rowval),
+                block_ranges=UnitRange{Int}[rows for rows in block_ranges],
+                block_shapes=Symbol[shape for shape in block_shapes],
+                colptr=colptr, rowval=rowval,
+                ar_slots=ar_slots, theta_slots=theta_slots,
+                x_diag_slots=x_diag_slots,
+            )
+        end
+    end
     nzval = alloc_zeros(T, slot)
     return SymmetricCorePattern{T}(
         nr, m, dimension, Vector{Int}(Ar.colptr), Vector{Int}(Ar.rowval),
@@ -281,8 +331,7 @@ the returned structure.
 function symmetric_core_lower_sparse(pattern::SymmetricCorePattern{T}) where {T}
     return SparseMatrixCSC{T, Int}(
         pattern.dimension, pattern.dimension,
-        Vector{Int}(pattern.colptr), Vector{Int}(pattern.rowval),
-        pattern.nzval,
+        pattern.colptr, pattern.rowval, pattern.nzval,
     )
 end
 
@@ -576,6 +625,10 @@ mutable struct SymmetricCoreWorkspace{
     scalar_closure::Symbol
     dy_gauged::Bool
     original_scale::T   # max(1, ‖K_original‖_∞) fixed at synchronization
+    # Review slice 1: phase-level timing accumulator owned by the product-HSD
+    # state; the raw core solve writes the refinement wall bucket into it.
+    # `nothing` for setups outside the product-HSD hot route (zero overhead).
+    phase_timings::Union{Nothing,ProductHSDPhaseTimings}
 end
 
 function _core_newton_residual(
@@ -784,8 +837,8 @@ _core_cone_theta_signature(::AbstractConeLinearization) = throw(ArgumentError(
 @inline function _core_factor_matches_pattern(
     cache::SparseSymbolicNumericCache, pattern::SymmetricCorePattern,
 )
-    return length(cache.original_values) == length(pattern.nzval) &&
-           cache.original_values == pattern.nzval
+    return length(cache.factor_view.nzval)==length(pattern.nzval) &&
+           cache.factor_view.nzval==pattern.nzval
 end
 @inline _core_factor_matches_pattern(::AbstractFactorCache, ::SymmetricCorePattern) = true
 
@@ -895,6 +948,7 @@ function _symmetric_core_workspace_prevalidated(
         _core_cone_theta_signature(system.cone), system.tau, system.kappa,
         _core_cache_signature(cache), nothing, 0, 0, 0, -1, false,
         0, 0, 0, 0, zero(T), :regular, false, original_scale,
+        nothing,
     )
 end
 
@@ -1383,12 +1437,16 @@ Returns `(x, refinements)`; the caller then re-evaluates the frozen
 five-equation residual on the refined direction.  The final direction is
 accepted only if that production residual passes.  A correction that does
 not strictly contract the normalized original-core residual fails closed.
+When `phase_timings !== nothing` the wall time of this function is added
+to its `refinement_seconds` bucket (review slice 1 telemetry).
 """
 function _core_refine!(
     workspace::SymmetricCoreWorkspace{T},
     x::AbstractVector{T},
     rhs::AbstractVector{T},
+    phase_timings::Union{Nothing,ProductHSDPhaseTimings}=nothing,
 ) where {T}
+    t_refine = time_ns()
     # initial normalized error
     _core_apply!(workspace, workspace.core_residual, x)
     @inbounds for i in 1:workspace.dimension
@@ -1407,7 +1465,11 @@ function _core_refine!(
     # five-equation gate; this only avoids demanding strict contraction of
     # roundoff that cannot be represented.
     residual_floor = T(256) * eps(one(T))
-    previous <= residual_floor && return (x, 0)
+    previous <= residual_floor && begin
+        phase_timings === nothing || (phase_timings.refinement_seconds +=
+            Float64(time_ns() - t_refine) * 1.0e-9)
+        return (x, 0)
+    end
     corrections = 0
     for _ in 1:2
         SDPX.refine_once!(
@@ -1439,6 +1501,8 @@ function _core_refine!(
         previous = current
         previous <= residual_floor && break
     end
+    phase_timings === nothing || (phase_timings.refinement_seconds +=
+        Float64(time_ns() - t_refine) * 1.0e-9)
     return (x, corrections)
 end
 
@@ -1666,7 +1730,10 @@ function _core_solve_raw!(
     all(isfinite, workspace.sol_core) || throw(ArgumentError(
         "symmetric core variable solve produced non-finite data",
     ))
-    _core_refine!(workspace, workspace.sol_core, workspace.rhs_core)
+    _core_refine!(
+        workspace, workspace.sol_core, workspace.rhs_core,
+        workspace.phase_timings,
+    )
     _core_split!(workspace.wx, workspace.wy, workspace.sol_core, nr,
         workspace.m)
 
@@ -2067,6 +2134,27 @@ function symmetric_core_state_preflight(
     return nothing
 end
 
+function _build_float64_core_cache(
+    pattern::SymmetricCorePattern{Float64},
+    symbolic_epoch::Integer, regularization::Real,
+)
+    isfinite(regularization) && regularization>=0 || throw(ArgumentError(
+        "symmetric core Float64 regularization must be finite and nonnegative",
+    ))
+    k=symmetric_core_lower_sparse(pattern)
+    dsigns=symmetric_core_dsigns(pattern)
+    disconnected=DisconnectedLDLTCache(
+        k,dsigns;symbolic_epoch,regularization,max_size=4,
+    )
+    disconnected===nothing || return disconnected
+    requirements=SparseSymbolicRequirements(k;
+        symbolic_epoch=Int(symbolic_epoch),dsigns,
+        regularization=Float64(regularization))
+    cache=SparseSymbolicNumericCache{Float64}()
+    _prepare_owned_requirements!(cache,requirements)
+    return cache
+end
+
 """Build a numeric-factor-free prepared state workspace.
 
 Allocates an owned `BlockProductConeLinearization` from ordered canonical
@@ -2087,6 +2175,7 @@ function prepare_symmetric_core_state(
     current_rss_bytes::Union{Nothing,Integer},
     regularization::Real;
     symbolic_epoch::Integer=0,
+    take_cone_ownership::Bool=false,
 ) where {T<:AbstractFloat}
     length(block_ranges) == length(block_sizes) || throw(ArgumentError(
         "symmetric core state block ranges/sizes counts disagree",
@@ -2109,36 +2198,37 @@ function prepare_symmetric_core_state(
     # Range/isometry preconditions before materialization.
     _validate_core_preconditions(system, V)
 
-    # State-owned per-block Theta operators and cone RHS.
-    operators = Matrix{T}[]
-    for rows in block_ranges
-        dimension_block = length(rows)
-        push!(operators, alloc_zeros(T, dimension_block, dimension_block))
+    # State-owned per-block Theta operators and cone RHS. The internal HSD
+    # caller may transfer the just-created semantic cone; public/default
+    # preparation retains the isolating copy behavior.
+    cone = if take_cone_ownership
+        system.cone isa BlockProductConeLinearization{T} || throw(ArgumentError(
+            "owned symmetric-core cone must be block-product",
+        ))
+        system.cone.block_ranges==block_ranges || throw(ArgumentError(
+            "owned symmetric-core cone block ranges disagree",
+        ))
+        system.cone
+    else
+        operators = Matrix{T}[]
+        sizehint!(operators,length(block_ranges))
+        for rows in block_ranges
+            dimension_block = length(rows)
+            push!(operators, alloc_zeros(T, dimension_block, dimension_block))
+        end
+        corrector_rhs = alloc_zeros(T, m)
+        BlockProductConeLinearization{T}(
+            operators, corrector_rhs,
+            UnitRange{Int}[rows for rows in block_ranges],
+        )
     end
-    corrector_rhs = alloc_zeros(T, m)
-    cone = BlockProductConeLinearization{T}(
-        operators, corrector_rhs,
-        UnitRange{Int}[rows for rows in block_ranges],
-    )
 
     pattern = _symmetric_core_pattern_from_validated(system, V)
     pattern.block_ranges == block_ranges || throw(ArgumentError(
         "symmetric core state block ranges drifted after pattern build",
     ))
     cache = if T === Float64
-        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
-            "symmetric core Float64 regularization must be finite and nonnegative",
-        ))
-        k = symmetric_core_lower_sparse(pattern)
-        requirements = SparseSymbolicRequirements(
-            k;
-            symbolic_epoch=Int(symbolic_epoch),
-            dsigns=symmetric_core_dsigns(pattern),
-            regularization=Float64(regularization),
-        )
-        c = SparseSymbolicNumericCache{Float64}()
-        prepare!(c, requirements)
-        c
+        _build_float64_core_cache(pattern,symbolic_epoch,regularization)
     else
         # QDLDL-backed sparse signed-LDL provider is NOT used for the
         # symmetric augmented core: K = [0 Ar'; Ar -Theta] stores a structural
@@ -2157,7 +2247,7 @@ function prepare_symmetric_core_state(
     # Build the state-owned block-cone NewtonSystem first so the workspace
     # type parameter is the block-cone system from construction (no
     # concrete-field reassignment) and no global Theta is ever referenced.
-    block_system = NewtonSystem(
+    block_system = take_cone_ownership ? system : NewtonSystem(
         system.A, system.b, system.c, cone,
         system.tau, system.kappa, system.rhs,
     )
@@ -2305,19 +2395,8 @@ function build_symmetric_core_workspace(
     _validate_core_preconditions(system, V)
     pattern = _symmetric_core_pattern_from_validated(system, V)
     cache = if T === Float64
-        isfinite(regularization) && regularization >= 0 || throw(ArgumentError(
-            "symmetric core Float64 regularization must be finite and nonnegative",
-        ))
-        k = symmetric_core_lower_sparse(pattern)
-        requirements = SparseSymbolicRequirements(
-            k;
-            symbolic_epoch=Int(symbolic_epoch),
-            dsigns=symmetric_core_dsigns(pattern),
-            regularization=Float64(regularization),
-        )
-        cache = SparseSymbolicNumericCache{Float64}()
-        prepare!(cache, requirements)
-        factorize!(cache, k, Int(matrix_epoch))
+        cache=_build_float64_core_cache(pattern,symbolic_epoch,regularization)
+        factorize!(cache,symmetric_core_lower_sparse(pattern),Int(matrix_epoch))
         cache
     else
         cache = build_symmetric_core_ldlt_cache(

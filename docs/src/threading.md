@@ -18,13 +18,17 @@ Then request a per-solve limit:
 settings = Settings(
     model;
     limits=Limits(threads=8),
-    blas_threads=1,
 )
 ```
 
 `Limits.threads` is a ceiling, not a promise that every phase uses all workers.
 Small problems and phases dominated by one provider factorization may remain
 serial.
+
+The direct native product-HSD route is serial and therefore leaves
+`blas_threads` at its default `nothing`. Non-`nothing` BLAS requests are
+retained for qualified compatibility routes but are rejected by the native
+policy gate rather than mutating process-global BLAS state.
 
 ## Thread budget
 

@@ -14,7 +14,7 @@ function _soc_vector(::Type{T}, seed, n; ill_scaled=false) where {T}
 end
 
 function build(::SOCPProblem, ::Type{T}, params) where {T<:AbstractFloat}
-    model = SDPX.Model(T; name="generic_$(params.name)")
+    model = _benchmark_model(T,params)
     if params.kind === :nearest
         rng = Random.Xoshiro(params.seed)
         n = params.n

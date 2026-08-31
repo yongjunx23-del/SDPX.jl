@@ -126,7 +126,11 @@ falling back to another solver.
 `:auto` or `:native_hsd`; `algorithm` is a read-only diagnostic label whose
 only accepted value is `:auto`. Public formulation names are `:auto`,
 `:variable_space_schur`, and `:dense_augmented_kkt`; unsupported
-combinations fail closed.
+combinations fail closed. For the direct native route, use
+`formulation=:auto`, `provider=:auto`/`:standard`, `presolve=:auto`/`:off`,
+`sparse=:auto`/`:off`, `equality_solver=:auto`/`:qr`, and leave
+`blas_threads=nothing`; the other policy values are qualified compatibility
+controls and are rejected before setup when requested by native HSD.
 
 `Outputs` controls `:all`/`:none` (or typed reference vectors) for `primal`,
 `constraint_dual`, and `dual_slack`, plus `objectives`, `certificate`,

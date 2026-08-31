@@ -71,6 +71,10 @@ include("kkt/scalar_closure.jl")
 include("kkt/residual_workspace.jl")
 include("kkt/block_incidence.jl")
 include("kkt/factor_receipt.jl")
+# Cross-solve structure cache + phase-timing accumulator (review slices 1-2):
+# the symmetric-core KKT workspace and pattern constructor reference both.
+include("hsd/phase_timings.jl")
+include("factor_cache/structure_cache.jl")
 include("kkt/symmetric_core.jl")
 include("kkt/expanded_quasidefinite.jl")
 include("kkt/psd_panels.jl")
@@ -139,18 +143,12 @@ include("moi_wrapper.jl")
 # v0.5 has one public modeling/solve interface.  Mature problem, workspace,
 # provider, and legacy solve types remain package-internal implementation
 # details and are intentionally not re-exported as parallel entry points.
-export Model
-export variable!, constraint!, objective!
-export set_start!, set_dual_start!, set_dual_slack_start!
-export Reals, Nonnegative, Nonpositive, ZeroCone
-export LorentzCone, RotatedLorentzCone, PSDCone, ExponentialCone, PowerCone
-export Minimize, Maximize
-export Settings, Tolerances, Limits, Outputs
 export optimize!, execution_plan
 export status, value, dual, dual_slack
 export primal_objective, dual_objective
 export certificate, diagnostics, iteration_history, performance_trace
 export Optimizer
+export clear_structure_cache!, set_structure_cache_enabled!
 
 # Symmetric-cone algebra (Subagent I) lives in the nested module
 # `SymmetricCones` (Nonnegative / SOC / PSDTriangle kernels). It is not part of

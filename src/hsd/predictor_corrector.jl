@@ -407,7 +407,7 @@ function _product_hsd_expanded_direction!(
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
     (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
     ratio = base.mu_aff / base.mu
-    sigma = min(one(T), ratio * ratio * ratio)
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
@@ -517,7 +517,7 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
             :sparse_affine_mu_failed,
         )
     ratio = base.mu_aff / base.mu
-    sigma = min(one(T), ratio * ratio * ratio)
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
@@ -553,8 +553,7 @@ end
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
     (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
     ratio = base.mu_aff / base.mu
-    sigma = ratio * ratio * ratio
-    sigma > one(T) && (sigma = one(T))
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
 
     _product_hsd_corrector_shift!(state, sigma_mu)
@@ -753,14 +752,26 @@ function _product_hsd_symmetric_core_linearization!(
     basis = state.g_input
     image = state.g_output
     forcing = T(64) * eps(T)
+    has_scalar_blocks=any(rows->length(rows)==1,cone.block_ranges)
+    if has_scalar_blocks
+        fill!(basis,one(T))
+        apply_Theta!(state.runtime,image,basis)
+    end
     for (index, rows) in enumerate(cone.block_ranges)
         operator = cone.operators[index]
-        length(rows) == size(operator, 1) == size(operator, 2) || return false
+        dimension=length(rows)
+        dimension == size(operator, 1) == size(operator, 2) || return false
+        if dimension==1
+            row=first(rows)
+            operator[1,1]=_core_owned_value(image[row])
+            cone.corrector_rhs[row]=_core_owned_value(corrector_rhs[row])
+            continue
+        end
         scaling = _product_hsd_nonsymmetric_scaling(
             state.runtime, first(rows),
         )
         if scaling !== nothing
-            length(rows) == 3 || return false
+            dimension == 3 || return false
             reason = nonsymmetric_scaling_contribution3!(
                 operator,
                 view(cone.corrector_rhs, rows),
@@ -770,15 +781,15 @@ function _product_hsd_symmetric_core_linearization!(
             reason === NS_SCALING_CONVERGED || return false
             continue
         end
-        @inbounds for local_column in 1:length(rows)
+        @inbounds for local_column in 1:dimension
             fill!(basis, zero(T))
             basis[rows[local_column]] = one(T)
             apply_Theta!(state.runtime, image, basis)
-            for local_row in 1:length(rows)
+            for local_row in 1:dimension
                 operator[local_row, local_column] =
                     _core_owned_value(image[rows[local_row]])
             end
-            view(cone.corrector_rhs, rows)[local_column] =
+            cone.corrector_rhs[rows[local_column]] =
                 _core_owned_value(corrector_rhs[rows[local_column]])
         end
     end
@@ -852,9 +863,12 @@ function _product_hsd_symmetric_core_direction!(
     core === nothing && return false
     base = state.base
     fixed_trace = core isa FixedTraceQ3CoreWorkspace{T}
+    timings = state.phase_timings
+    refinement_iter0 = core.refinements
 
     # Predictor.
     predictor_scalar = -base.tau * base.kappa
+    t0 = time_ns()
     predictor_linearized = if fixed_trace
         _product_hsd_fixed_trace_hkm_linearization!(
             state, zero(T), false, true,
@@ -871,12 +885,23 @@ function _product_hsd_symmetric_core_direction!(
         state, predictor_scalar,
     )
     predictor_system === nothing && return false
+    timings.schur_assembly_seconds += Float64(time_ns() - t0) * 1.0e-9
+    t0 = time_ns()
     factor_symmetric_core_epoch!(
         core, predictor_system, base.epoch,
     )
+    timings.kkt_factorization_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9
+    t0 = time_ns()
+    refinement_wall0 = timings.refinement_seconds
     predictor_candidate, predictor_residual, _ = fixed_trace ?
         _core_solve_raw!(core, predictor_system; compute_residual=false) :
         _core_solve_raw!(core, predictor_system)
+    # Disjoint phase partition: the refine wall share inside this call was
+    # accumulated directly into `refinement_seconds` by `_core_refine!`;
+    # the solve bucket keeps the remainder of the call wall, extended
+    # through direction materialization (copy/scatter/finite/residual
+    # gates) so every wall fraction of the direction is attributed.
     copyto!(base.dx, predictor_candidate.dx)
     copyto!(base.dy, predictor_candidate.dy)
     copyto!(base.ds, predictor_candidate.ds)
@@ -891,22 +916,29 @@ function _product_hsd_symmetric_core_direction!(
         state.diagnostic = :fixed_trace_predictor_residual_failed
         return false
     end
+    timings.predictor_linear_solve_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9 -
+        (timings.refinement_seconds - refinement_wall0)
     copyto!(base.dx_a, base.dx)
     copyto!(base.dy_a, base.dy)
     copyto!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
+    # Affine-step / centering-parameter computation feeds the corrector RHS.
+    t0 = time_ns()
     alpha_aff = _product_hsd_boundary_alpha!(state)
     (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
     (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
     ratio = base.mu_aff / base.mu
-    sigma = min(one(T), ratio * ratio * ratio)
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
+    timings.corrector_rhs_seconds += Float64(time_ns() - t0) * 1.0e-9
 
     # Corrector: only the cone RHS and scalar shift change; the operator and
     # local/equality factor remain the predictor epoch's authority.
+    t0 = time_ns()
     corrector_linearized = if fixed_trace
         _product_hsd_fixed_trace_hkm_linearization!(
             state, sigma_mu, true, false,
@@ -925,9 +957,14 @@ function _product_hsd_symmetric_core_direction!(
         state, corrector_scalar,
     )
     corrector_system === nothing && return false
+    timings.corrector_rhs_seconds += Float64(time_ns() - t0) * 1.0e-9
+    t0 = time_ns()
+    refinement_wall0 = timings.refinement_seconds
     corrector_candidate, corrector_residual, _ = fixed_trace ?
         _core_solve_raw!(core, corrector_system; compute_residual=false) :
         _core_solve_raw!(core, corrector_system)
+    timings.refinement_iterations =
+        core.refinements - refinement_iter0
     copyto!(base.dx, corrector_candidate.dx)
     copyto!(base.dy, corrector_candidate.dy)
     copyto!(base.ds, corrector_candidate.ds)
@@ -942,5 +979,8 @@ function _product_hsd_symmetric_core_direction!(
         state.diagnostic = :fixed_trace_corrector_residual_failed
         return false
     end
+    timings.corrector_linear_solve_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9 -
+        (timings.refinement_seconds - refinement_wall0)
     return true
 end

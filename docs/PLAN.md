@@ -1,271 +1,406 @@
 # SDPX.jl roadmap to 1.0
 
-**Status:** active implementation plan
+**Status:** active correctness remediation; `v0.6.0` is not release-qualified
 
-**Updated:** 2026-08-29
+**Updated:** 2026-08-30
+
+**Reviewed baseline:** `bad117f7d8b8cc49b0fef08f30e22505f140360a`
+(`main`, `v0.6.0`)
+
 **Authority:** this file describes current work. Frozen mathematical contracts
-live in `docs/design/`; historical plans remain available in Git history and in
-the local project archive.
+live in `docs/design/`; completed historical plans and reviews remain in Git
+history and `docs/reviews/`.
 
 ## 1. Completion definition
 
-SDPX 1.0 is complete when all of the following hold:
+SDPX 1.0 is complete only when all of the following hold on one frozen source
+SHA:
 
 1. one product-cone homogeneous self-dual (HSD) state machine is the only
    production solver engine;
 2. one five-equation `NewtonSystem` defines every KKT route;
 3. LP, SOC, RSOC, PSD, exponential, power, free, zero, nonnegative, and
    nonpositive blocks share the same canonical program and certificate path;
-4. every terminal status is justified by an original-coordinate optimality or
-   infeasibility certificate;
+4. every `Optimal`, `PrimalInfeasible`, and `DualInfeasible` result has a
+   valid original-coordinate certificate;
 5. Float64, MultiFloat, and BigFloat execution never silently narrows values;
-6. KKT/linear-algebra providers are replaceable without changing the Newton
-   equations;
-7. the public API, MOI adapter, CLI, general benchmark, and physics/bootstrap
-   benchmark all call the same production engine;
-8. no hidden legacy solver or PSD-lift fallback remains; and
-9. the black-box E2E, provider checks, benchmark campaigns, cluster runs, and
-   final independent reviews pass on one frozen source SHA.
+6. KKT and linear-algebra providers are replaceable without changing the
+   Newton equations;
+7. the typed API, MOI adapter, CLI, general benchmarks, and physics/bootstrap
+   benchmarks call the same production engine;
+8. no hidden legacy solver or PSD-lift fallback is reachable;
+9. every supported Julia/OS job, documentation build, provider contract,
+   package test, CLI test, and release benchmark gate is green; and
+10. local and cluster campaigns reproduce on the same frozen SHA.
 
-No test may be deleted or weakened merely to obtain a green result. A provider
-factorization receipt is implementation evidence, not a mathematical
-certificate.
+Passing a narrow smoke suite is not release qualification. No test may be
+deleted, weakened, or reclassified as an expected numerical failure merely to
+obtain a green result. Provider receipts are implementation evidence, not
+mathematical certificates.
 
-## 2. Frozen architecture
+## 2. Current verified state
 
-### Canonical problem
+### Implemented foundation
 
-All frontends lower to
+- The public path uses the native product-cone HSD engine.
+- The symmetric augmented core is the production `:bordered` implementation;
+  the former standalone solver/KKT engines have been retired.
+- Canonicalization retains reconstruction data and the final public result is
+  checked in original coordinates.
+- Invalid public certificates downgrade otherwise terminal core statuses.
+- Reference tests for the frozen five-equation system, symmetric core, state
+  ownership, and factor epochs are extensive and currently pass locally.
+- Typed modeling, MOI, CLI, general benchmark, provider-extension, and
+  physics/bootstrap surfaces exist, but are not yet covered by one coherent
+  automated release gate.
 
-```text
-minimize    c'x
-subject to  A*x + s = b
-            s in K
-```
+### Review baseline evidence
 
-where `K` is an ordered product of native cone blocks. Exact transforms retain
-an inverse reconstruction map. Approximation or relaxation transforms must be
-labelled and may not produce an unconditional certificate for the original
-problem.
+The 2026-08-30 review of `bad117f` established:
 
-### Product-cone HSD
+- local Julia 1.12.6 `Pkg.test()` passes 21/21 assertions, covering only seven
+  selected Float64 E2E cases;
+- `benchmark/general/test_small.jl` runs 17 small cases but produces only 11
+  valid certificates and explicitly accepts six invalid certificates;
+- Julia 1.10.11 reproduces a hard LAPACK method error in the production LU
+  factor-cache route;
+- the documented scalar lower-bound LP, elementary unbounded models, and a
+  bounded rank-deficient model do not return the required certified results;
+- three small SDP, two exponential-cone, and one power-cone analytical cases
+  remain unresolved;
+- the release commit's main CI run has seven failed jobs out of ten, and the
+  tag CI run also fails;
+- documentation, benchmark-environment, and minimum-version provider gates do
+  not complete successfully; and
+- no false positive terminal certificate was observed: confirmed defects fail
+  closed as numerical/precision failures.
 
-The production state is `(x,s,y,tau,kappa)`. Predictor, corrector, recovery,
-termination, and certificate generation use the sign conventions frozen in
-`docs/design/HSD_FORMULATION.md`.
+Therefore `v0.6.0` is a failed release candidate, not evidence that the 1.0
+completion definition has been met.
 
-Raw `tau`, `kappa`, iteration limits, factorization success, or provider status
-never promote an `Optimal`, `PrimalInfeasible`, or `DualInfeasible` result.
-Only the original-coordinate verifier may do so.
+## 3. Frozen engineering invariants
 
-### Newton system and KKT routes
+All remediation must preserve these invariants:
 
-`docs/design/NEWTON_SYSTEM.md` defines the five equations. Implementations currently expose:
+- The canonical problem remains `min c'x` subject to `A*x + s = b`, `s in K`.
+- The production state remains `(x, s, y, tau, kappa)` with the signs and five
+  equations frozen in `docs/design/HSD_FORMULATION.md` and
+  `docs/design/NEWTON_SYSTEM.md`.
+- Only original-coordinate verification may publish a terminal mathematical
+  status.
+- Nonfinite values, invalid tolerances, failed factorization, and uncertain
+  cone or rank classifications fail closed.
+- Repairs must not weaken certificate tolerances, cone identities, root
+  certification, or third-derivative symmetry checks without an independent
+  higher-precision error proof.
+- No silent route, arithmetic, provider, or solver-engine fallback is allowed.
+- Every code change follows
+  `reproduce -> freeze regression -> surgical change -> verify`.
 
-- `:bordered` — conservative public default, still using the proven legacy
-  full-border execution on the public path;
-- `:expanded` — exact nonsymmetric expanded solve;
-- `:sparse_schur` — reduced sparse Schur solve with same-iterate fallback.
+## 4. Release-blocker register
 
-The integration branch also contains an internal, opt-in Clarabel-style
-symmetric augmented core
+### B0 — Restore the declared Julia 1.10 contract
 
-```text
-K = [ 0   Ar'
-      Ar -Theta ]
-```
+**Observed:** `src/factor_cache/routes/common.jl` calls
+`LinearAlgebra.LAPACK.getrf!(F, ipiv)`. Julia 1.10 exposes only the
+single-matrix signature, so the v2 acceptance gate throws a `MethodError`.
 
-with one factor epoch, one homogeneous solve, sequential predictor/corrector
-RHS solves, scalar `dτ` recovery, original-K refinement, and the frozen
-five-equation gate. It is not yet the public default: the attempted public
-switch was reverted pending final E2E and diagnostics/allocation cleanup.
-The exact expanded and legacy bordered operators remain nonsymmetric and must
-never be passed to LDL.
+**Work:**
 
-### Provider ownership
+1. add a factor-cache implementation compatible with every declared Julia
+   version, retaining owned pivot storage and warm-path allocation guarantees;
+2. add a direct Julia 1.10 regression for prepare/factorize/solve/refine; and
+3. test both the minimum Julia version and latest Julia in package and v2
+   gates.
 
-- SuiteSparse/UMFPACK: Float64 sparse exact solves;
-- MultiFloatLinearAlgebra and BigFloatLinearAlgebra: high-precision dense and
-  local-block
-  factor/solve providers;
-- SDPX: canonicalization, cone algebra, assembly, route policy, refinement,
-  fallback, reconstruction, and certification.
+**Exit:** Julia 1.10 and latest Julia solve the LP factor-cache fixture and the
+full public E2E suite without compatibility branches changing numerical
+semantics.
 
-MFLA/BFLA kernels are not copied into SDPX. LinearSolve/SciMLBase are retired.
+### B1 — Close basic LP, ray, and rank-reduction behavior
 
-## 3. Completed foundations
+Freeze public-API regressions for all four failures before changing recovery:
 
-The local integration line currently contains:
+1. the documented `min x` with `x >= 0` and `x - 1 >= 0` must return
+   `Optimal`, `x = 1`, and a valid certificate;
+2. `min x` for free `x` must return `DualInfeasible` with a valid ray;
+3. `max x` for `x >= 0` and `min x` for `x <= 0` must return
+   `DualInfeasible` with valid rays; and
+4. a bounded problem with an irrelevant free variable must be reduced and
+   solved, not rejected at iteration zero.
 
-- typed canonical storage and reconstruction transforms;
-- product-cone runtime for all claimed cone families;
-- PSD congruence/NT scaling, boundary steps, and panel kernels;
-- frozen `NewtonSystem`, bordered and expanded sessions, refinement, and
-  backward-error gates;
-- equality reduction, presolve maps, optional Ruiz equilibration, and KKT cold
-  starts;
-- unified predictor/corrector, line search, recovery, and termination;
-- sparse reduced-Schur session, pattern/epoch ownership, block incidence maps,
-  fallback receipts, and phase timings;
-- fail-closed nonfinite/tolerance/certificate checks;
-- MFLA/BFLA adapters with provider-owned factor and solve state;
-- public native-only API and one-shot MOI path;
-- separate `benchmark/general/` and `benchmark/bootstrap/physics/` trees;
-- removal of Mathematica/WSTP integration and the standalone
-  `nonnegative_hsd.jl` solver.
+Audit canonical recovery, sparse-rank authority, nullspace reconstruction,
+and exception preservation. Do not convert these fixtures into accepted
+numerical failures.
 
-The local symmetric-core integration branch additionally contains:
+**Exit:** every fixture returns the mathematically correct certified status
+through the typed API and MOI path on all supported platforms.
 
-- an independent full-five-equation augmented-core oracle;
-- frozen block-aware CSC pattern/numeric refill;
-- Float64 CHOLMOD symbolic reuse and signed numeric refactor;
-- MFLA Float64x2/x4 and BFLA BigFloat256 dense pivoted-LDL factories;
-- state-owned, epoch-refactorable core workspaces and truthful receipts;
-- same-iterate LP/SOC/PSD/Exp/Power shadow parity against expanded reference;
-- internal prepared-core production steps with raw core `dy` ownership;
-- an opt-in forced Power dual-Hessian scaling experiment.
+### B2 — Make the public certificate the stopping authority
 
-This list records implementation presence, not final release qualification.
-The user will run the sole black-box E2E only after the remaining development
-and final review are complete.
+**Observed:** `exp_entropy_small` reaches internal `Optimal` under a global
+canonical residual scale, then fails public certification because reconstructed
+stationarity uses a different scale (`1.5480679849e-8 > 1e-8`).
 
-## 4. Current implementation work
+**Work:**
 
-### A. Legacy source retirement — complete
+1. define one authoritative source-model residual map and normalization;
+2. either evaluate it at accepted-iterate stopping/refinement or prove a
+   conservative amplification bound for every lowering/reconstruction map;
+3. retain canonical five-equation verification as an independent internal
+   gate; and
+4. add a captured entropy trajectory regression at the requested tolerance.
 
-The standalone nonnegative HSD, LP, sparse-LP, SDP interior-point, legacy
-Newton-step, and standalone NativeSOC engines have been deleted. Still-required
-generic helpers were moved to native owners; public `engine=:auto` and
-qualified SDP/Conic entrypoints now execute product HSD. No legacy solver file
-is included or compiled.
+**Exit:** core terminal status and public certification cannot disagree merely
+because they normalize equivalent residuals differently.
 
-### B. Symmetric-core public integration — complete
+### B3 — Add a zero-dimensional reduced feasibility path
 
-Completed milestones (R1–R6):
+**Observed:** `sdp_theta_k4`, `sdp_rank1_boundary`, and `sdp_random_small`
+reduce to `variables = 0` and terminate with
+`tau_collapse_recovery_exhausted` instead of certifying fixed-cone solutions.
 
-- Public `:bordered` routes to the Clarabel-style symmetric augmented core (`K = [0 Ar'; Ar -Theta]`) with pre-allocation execution planning;
-- Arithmetic-specific descriptors: Float64 (sparse, CHOLMOD LDL), BigFloat (dense, BFLA LDL), MultiFloat (dense, MFLA LDL);
-- Preserves full rank/ray authority on row-space reduction before memory preflight or core allocation;
-- Pruned legacy workspace allocation on prepared symmetric core states;
-- Dual-Hessian retry policy for Power cones with iterate checkpointing;
-- Truthful execution diagnostics published in `ExecutionPlan` and `NativeHSDDiagnostics`.
+**Work:**
 
-### C. Dependency and design pruning — complete
+1. freeze exact reduced-width-zero PSD fixtures;
+2. directly verify fixed slack feasibility and construct/verify a compatible
+   dual without running an unnecessary projective HSD trajectory; and
+3. prove reconstruction through equality and cone maps.
 
-- Pruned `AppleAccelerate`, `GenericLinearAlgebra`, and `JLD2` extensions and weakdeps;
-- Kept stdlib `SuiteSparse`/`CHOLMOD`, `MultiFloats`, `MultiFloatLinearAlgebra`, and `BigFloatLinearAlgebra`;
-- Maintained fail-closed precision and memory policies without hidden fallbacks.
+**Exit:** all three small SDP cases return valid certificates and the general
+path remains unchanged for positive reduced dimension.
 
-### D. Runtime and performance wiring — complete
+### B4 — Repair nonsymmetric Exp/Power trajectory integration
 
-- Deterministic serial execution budget (`executed_threads = 1`);
-- Residual and RHS terms reused across predictor/corrector solves without reallocation;
-- Zero tolerance relaxation and zero hidden route fallbacks.
+**Observed:**
 
-### E. Validation and handoff
+- `exp_logsumexp_small` fails with
+  `NS_CORRECTOR_THIRD_SYMMETRY_MISMATCH`, currently collapsed to the generic
+  `symmetric_core_dispatch_exception` reason;
+- `power_geomean_small` fails with
+  `NS_CONJUGATE_ROOT_RESOLUTION_LIMIT`; and
+- the required `power_epigraph_small` passes on macOS but fails in current
+  Linux and Windows package jobs.
 
-- All focused fast suites (<60s) pass 100% (`validation/symmetric_core_reference.jl`, `validation/newton_system_reference.jl`, `validation/product_hsd_symmetric_shadow.jl`, `validation/product_hsd_symmetric_state.jl`, `validation/power_core_conditioning.jl`, `validation/power_core_dual_hessian_experiment.jl`);
-- Repository clean and frozen for final user-owned E2E (`Pkg.test()`).
+**Work:**
 
-## 5. Verification layers
+1. capture the last accepted nonsymmetric states and affine directions as
+   deterministic fixtures;
+2. compare Float64 third contractions, scaling, root brackets, and step
+   acceptance against a 256-bit oracle;
+3. preserve typed `NonsymmetricRuntimeResult` reasons through symmetric-core
+   dispatch; and
+4. remove platform dependence without weakening fail-closed checks.
 
-### Black-box E2E
+**Exit:** every checked-in small Exp and Power case is certificate-valid on
+Julia 1.10/latest across Linux, macOS, and Windows.
 
-`Pkg.test()` runs the sole `test/runtests.jl` regression suite. It selects
-deterministic cases from `benchmark/general/` and checks:
+### B5 — Repair optional-provider version and execution contracts
 
-```text
-general case -> public optimize! -> terminal result -> original certificate
-```
+**Observed:** declared compatibility permits MultiFloatLinearAlgebra 0.1 and
+BigFloatLinearAlgebra 0.1, while the extensions import cache APIs introduced in
+MFLA 0.4 and BFLA 0.2. The pinned-minimum CI environment therefore fails
+precompilation. The workflow also runs both providers in one process even
+though `scripts/provider_smoke.sh` deliberately isolates them.
 
-The suite covers LP optimal/primal-infeasible/dual-infeasible, SOCP, SDP,
-exponential, and power examples in Float64. It does not inspect KKT routes,
-providers, allocations, receipts, RSS, or thread scheduling.
+**Work:**
 
-### Specialist validation
+1. either raise compatible lower bounds or add explicit version adapters;
+2. test declared minimum and latest supported versions independently;
+3. make CI call the maintained provider smoke entrypoint; and
+4. restore full factor lifecycle, direction parity, precision ownership, and
+   public high-precision solve checks.
 
-Provider and independent Newton checks live under `validation/`; allocation,
-route, memory, and physics checks live under `benchmark/`. They are manual or
-release validation, not additional package-test suites and not part of the E2E
-definition.
+**Exit:** minimum/latest MFLA and BFLA matrices load, solve, refine, report
+truthful receipts, and pass public certificate tests without arithmetic
+narrowing.
 
-### Fixed-trace Q3 integration status
+### B6 — Reconcile the public API with executable documentation
 
-The local 2×2 factor kernel and the generic equality Schur
-`B*H^-1*B'`/RHS/recovery oracle are implemented and validated for Float64 and
-BigFloat.  CSDR now has an exact post-Wilson angular/energy operator whose
-forward, adjoint, reconstruction, objective, and materialized reduced panel
-pass parity tests.  Medium/full F3L probes retain 168 scaled equality
-coordinates while reducing the prospective dense factor dimension from
-5,208/19,608 to 168.
+**Observed:** `Settings` accepts and documentation advertises formulation,
+provider, presolve, sparse, equality-solver, and BLAS-thread values that the
+only public solver route categorically rejects. Checked-in examples still pass
+removed `algorithm=:lp`, `:socp`, and `:sdp` selectors. The documented time
+limit is described as end-to-end although the solver timer starts after setup.
 
-This is still internal.  Public HSD first eliminates ZeroCone rows through a
-global nullspace basis, destroying the disjoint Q3 tail coordinates.  A
-production switch therefore requires one equality-aware five-equation route:
-retain ZeroCone rows with barrier degree zero, use the Q3 Schur factor for the
-core homogeneous/predictor/corrector RHS, recover all local primal/dual rows,
-and pass `newton_residual!` plus original-coordinate certification.  The
-current generic bordered probe stops at iteration-zero line-search breakdown;
-expanded fails KKT initialization.  Neither may be reported as CSDR progress.
+**Work:**
 
-### Benchmark and cluster validation
+1. remove unsupported public choices or implement them with truthful execution
+   receipts;
+2. update every example to the native-only policy and run examples in CI;
+3. decide and test whether `Limits.time` includes canonicalization, planning,
+   solve, recovery, and certification; and
+4. test every public setting for accepted execution or an intentional,
+   documented construction-time rejection.
 
-- `benchmark/general/`: solver-oriented LP/SOCP/SDP/Exp/Power corpora;
-- `benchmark/bootstrap/physics/`: provenance-backed physical applications;
-- local small/medium campaigns before cluster submission;
-- medium/large general and physics/bootstrap campaigns on the UCAS PBS cluster;
-- local and cluster artifacts must name the same frozen SHA.
+**Exit:** all checked-in examples execute, and no documented accepted setting
+is unconditionally unusable on the sole production route.
 
-## 6. Final integration sequence
+### B7 — Make documentation, CLI, and benchmark gates runnable
 
-1. complete Power scaling/retry policy and prepared-core public planning;
-2. qualify arithmetic-specific diagnostics and remove unused legacy ownership;
-3. prune optional dependencies and dead execution scaffolding;
-4. finish bounded terminal residual/thread/fixq3 wiring;
-5. run individual short family/provider/Newton validations;
-6. obtain one final independent code/math/performance review and fix blockers;
-7. freeze a clean handoff SHA;
-8. the user runs the sole black-box E2E;
-9. repair any E2E failure without weakening certificates or tolerances;
-10. run local/cluster campaigns on the same frozen SHA;
-11. push the complete batch to GitHub once; and
-12. continue optimization before declaring a formal 1.0 release.
+**Observed:**
 
-## 7. Non-negotiable policies
+- Documenter fails `checkdocs=:exports` with 66 missing exported docstrings;
+- the benchmark environment contains unregistered `PMP2SDP` but CI does not
+  develop a source for it; and
+- CLI tests require a setup side effect and are not run by CI.
 
-- `:bordered` remains the default until another route wins a complete evidence
-  matrix.
-- Equilibration remains opt-in until regression-free on physical probes.
-- Nonfinite values and invalid tolerances fail closed.
-- Original-coordinate certificates are the sole terminal authority.
-- No silent Float64 downgrade is allowed.
-- No family-specific hidden fallback or legacy public selector is allowed.
-- Historical reviews are evidence, not current architecture specifications.
+**Work:** document or deliberately unexport the missing API, make benchmark
+dependencies reproducible from a clean checkout, and give the CLI an isolated
+test environment invoked by CI.
 
-## 8. Phase 1 execution status (2026-08-30)
+**Exit:** docs, CLI, and micro-benchmark jobs run from a fresh checkout with no
+unrecorded local state.
 
-Phase 1 (C1-C6) is complete on this branch:
+## 5. Test and release-gate redesign
 
-| ID | Fix commit | Exit evidence |
+The release gate must test behavior, not merely repository layout.
+
+### Required package coverage
+
+- Replace the seven-case selection with certificate-backed coverage of all 17
+  checked-in small analytical cases.
+- Add the B1 scalar/ray/rank fixtures permanently.
+- Add MOI conformance tests for every supported objective, variable domain,
+  constraint type, status, result accessor, and start-value contract.
+- Exercise CLI parsing and file I/O, JLD2 persistence if retained, examples,
+  and public non-Float64 paths.
+- Remove the quick-check rule that `test/` may contain only two files; require
+  instead that every test file is reachable from `runtests.jl` or is named on a
+  reviewed manual-validation allowlist.
+
+### Known-finding policy
+
+Development reports may retain a quarantined known-finding label, but:
+
+- an invalid certificate cannot satisfy a release-quality test;
+- the release job must visibly fail while a bounded analytical case remains
+  quarantined; and
+- status, typed reason, iteration, residuals, and certificate limits must be
+  retained as artifacts for every failure.
+
+### Required platform matrix
+
+Run at minimum:
+
+- Julia 1.10, Linux, one thread;
+- latest Julia, Linux, four threads;
+- latest Julia, macOS, four threads; and
+- latest Julia, Windows, four threads.
+
+Provider minimum/latest jobs and high-precision public solves are additional
+gates, not replacements for the standard matrix.
+
+## 6. Execution sequence
+
+### Phase A — Freeze regressions and restore scalar correctness
+
+1. add failing fixtures for B0 and B1 without changing solver behavior;
+2. repair Julia 1.10 factorization compatibility;
+3. repair scalar lower-bound reconstruction, unbounded rays, and redundant
+   free-variable reduction; and
+4. run package, MOI, and scalar validation on the full platform matrix.
+
+### Phase B — Close cone-family correctness
+
+1. unify stopping and public certificate authority (B2);
+2. implement the reduced-width-zero SDP certificate path (B3);
+3. repair Exp third-correction and Power root/scaling integration (B4); and
+4. require 17/17 valid certificates in the small analytical suite.
+
+### Phase C — Restore extension and public-contract integrity
+
+1. repair provider compatibility and minimum/latest CI (B5);
+2. reconcile settings, examples, limits, and documentation (B6);
+3. make docs, CLI, and benchmark environments clean-checkout reproducible
+   (B7); and
+4. run all specialist validations from CI or a required release workflow.
+
+### Phase D — Performance and application qualification
+
+Only after Phases A-C are green:
+
+1. benchmark cold/warm allocations and factor reuse without weakening checks;
+2. qualify fixed-trace Q3 and physics/bootstrap paths through the same public
+   HSD and certificate authority;
+3. run medium/large general and physics campaigns locally, then on UCAS PBS;
+4. compare runtime, memory, residuals, and certificate outcomes against the
+   frozen baseline; and
+5. optimize only regressions supported by retained benchmark artifacts.
+
+## 7. Evidence matrix
+
+| Gate at `bad117f` | Current evidence | Required state |
 | --- | --- | --- |
-| C1 | 0f47d37 | `validation/scalar_closure.jl` (classification fixtures, public min x >= 0 -> Optimal with original-coordinate certification, scaled variants, 1x1 PSD edge); symmetric-core and fixed-trace share one classifier |
-| C2 | eb6645c | `validation/power_conjugate_root.jl` (captured-root representability fixture, 256-bit oracle sanity, fail-closed checks); power_epigraph_small default 1e-8 -> Optimal, certificate valid, objective within tolerance |
-| C3 | 18ac53b | QDLDL refine_once! via the provider seam; refine lifecycle validation (10 tests) with original-operator residual contraction |
-| C4 | 18ac53b | FactorRequirements <: AbstractFactorRequirements; frozen-shape ownership enforced and tested |
-| C5 | 48d951f | bin/test/runtests.jl CLI option validation (6 tests) |
-| C6 | 48d951f | equality COO length/duplicate validation (4 tests) |
+| Local Julia 1.12 `Pkg.test()` | Pass, 21/21 narrow assertions | Pass with expanded public coverage |
+| General small tier | 11/17 valid certificates | 17/17 valid certificates |
+| Julia 1.10 compatibility | Fail, `getrf!` `MethodError` | Pass package and v2 gates |
+| Linux latest package job | Fail | Pass |
+| Windows latest package job | Fail | Pass |
+| macOS latest package job | Pass narrow suite | Pass expanded suite |
+| Fixed Newton/core references | Pass locally | Pass in required CI/release workflow |
+| MFLA/BFLA provider smoke | Fail declared minimum versions | Pass minimum and latest versions |
+| Documentation build | Fail missing exports | Pass `checkdocs=:exports` |
+| Benchmark smoke environment | Fail unregistered dependency | Instantiate and run cleanly |
+| CLI tests | Not in CI; setup-dependent | Clean-checkout CI pass |
+| MOI conformance | Not present | Required supported-surface pass |
+| Worktree/source identity | Clean at reviewed SHA | One clean frozen candidate SHA |
 
-Additional state on this branch beyond the reviewed plan:
+Update this matrix with command output or CI artifact links; do not change a
+cell to “Pass” based on implementation presence or an unexecuted plan.
 
-- CSDR fixed-trace Q3 production solve: alpha3 Float64x4 21.7s and alpha9
-  76.8s (bit-identical trajectories), BigFloat256 alpha3 optimal/certified
-  (127s) — the BigFloat path required fixing the shared-MPFR aliasing traps
-  (fill!/zeros shared slots + in-place provider mutation) via
-  `_owned_setindex!` and a trial-residual fallback.
-- MFLA mulacc_x4 fused kernel (1,000,005-case adversarial bitwise validation)
-  and SIMD tail lanes for syrk/gemv remainders (bit-identical).
-- benchmark/general inventory expanded: 20 external specs (SDPLIB 14,
-  Netlib 5, CBLIB 1) with `sdpa_model` conversion and vendored data.
+## 8. Standard verification commands
 
-The Phase 2 (ownership simplification) and Phase 3 (evidence-driven
-performance) work of the reviewed plan remain open on top of this branch.
+Run from the repository root in clean environments:
+
+```bash
+julia --startup-file=no --project=. -e 'using Pkg; Pkg.test()'
+julia --startup-file=no --project=. benchmark/general/test_small.jl
+julia --startup-file=no --project=. validation/newton_system_reference.jl
+julia --startup-file=no --project=. validation/symmetric_core_reference.jl
+julia --startup-file=no --project=. validation/product_hsd_symmetric_state.jl
+```
+
+Also run:
+
+- `scripts/provider_smoke.sh` against declared minimum and latest provider
+  checkouts in separate fresh environments;
+- the clean-checkout CLI suite;
+- `julia --project=docs docs/make.jl` after developing SDPX into the docs
+  environment; and
+- the benchmark micro runner after developing every unregistered dependency
+  explicitly.
+
+For each phase record command, Julia version, OS, thread count, commit SHA,
+exit code, assertion count, and retained failure artifact.
+
+## 9. Deferred work and historical evidence
+
+The following work remains valuable but cannot substitute for closing the
+release blockers:
+
+- fixed-trace Q3 equality-aware production integration;
+- Float64/MultiFloat/BigFloat performance tuning and allocation reduction;
+- external SDPLIB, Netlib, CBLIB, and physics/bootstrap campaigns;
+- cluster throughput and memory tuning; and
+- alternative KKT-route performance comparisons.
+
+Completed source-retirement, QDLDL lifecycle, factor-ownership, scalar/root
+oracle, fixed-trace, provider-kernel, and external-inventory work remains in
+Git history and validation artifacts. Historical “complete” labels describe
+their reviewed scope only; they do not override the current evidence matrix.
+
+## 10. Release protocol
+
+1. Close B0-B7 with regression-first commits.
+2. Make every row of the evidence matrix pass on one clean candidate SHA.
+3. Run local medium/large campaigns and inspect retained artifacts.
+4. Run the UCAS cluster campaign on the identical SHA.
+5. Obtain a final independent numerical, implementation, API, and packaging
+   review.
+6. Repair every release blocker without weakening certificates or tests.
+7. Re-run the entire matrix and campaigns on the new frozen SHA.
+8. Only then create a new version/tag and publish release notes.
+
+Do not use the existing `v0.6.0` tag as a qualified baseline, and do not create
+another release tag while any required job or analytical certificate is red.

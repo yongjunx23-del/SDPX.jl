@@ -190,6 +190,12 @@ mutable struct ProductConeHSDState{
     # numeric gate.  Owned here so the product-HSD state machine can record
     # route acceptance and thread-budget snapshots without a second registry.
     residual_hook::ProductHSDResidualHook
+    # Phase-level timing accumulators (review slice 1): additive Float64
+    # fields, zero allocation on the hot path, disjoint wall-time intervals.
+    phase_timings::ProductHSDPhaseTimings
+    # Public additive iteration controls; a normalized NamedTuple avoids any
+    # per-step allocation and defaults to the historical path.
+    iteration_knobs::NamedTuple
 end
 
 function ProductConeHSDState(
@@ -210,6 +216,9 @@ function _product_cone_hsd_state(
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
     symmetric_core_regularization::Real=0.0,
+    iteration_knobs::NamedTuple=(;
+        sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
+    ),
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
         "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
@@ -221,8 +230,9 @@ function _product_cone_hsd_state(
             "got $(kkt_route)",
         ))
     end
+    phase_timings = ProductHSDPhaseTimings()
     symmetric_core = if prepare_symmetric_core
-        _prepare_product_hsd_symmetric_core(
+        prepared_core = _prepare_product_hsd_symmetric_core(
             base;
             fixed_trace_plan,
             precision_bits=Int(symmetric_core_precision_bits),
@@ -230,6 +240,12 @@ function _product_cone_hsd_state(
             current_rss_bytes=symmetric_core_current_rss,
             regularization=symmetric_core_regularization,
         )
+        # Review slice 1: attach the timing accumulator to the generic core
+        # workspace so `_core_refine!` writes its wall bucket without any
+        # keyword plumbing through the production solve path.
+        prepared_core isa SymmetricCoreWorkspace &&
+            (prepared_core.phase_timings = phase_timings)
+        prepared_core
     else
         nothing
     end
@@ -340,6 +356,8 @@ function _product_cone_hsd_state(
         :none,
         0,
         residual_hook,
+        phase_timings,
+        iteration_knobs,
     )
 end
 
@@ -351,6 +369,9 @@ function ProductConeHSDState(
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
     symmetric_core_regularization::Real=0.0,
+    iteration_knobs::NamedTuple=(;
+        sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
+    ),
 ) where {T<:AbstractFloat}
     reduction = _hsd_rowspace_reduction(canonical)
     cache = DenseSchurCholeskyCache{T}(reduction.rank)
@@ -364,10 +385,33 @@ function ProductConeHSDState(
         symmetric_core_current_rss=symmetric_core_current_rss,
         symmetric_core_precision_bits=symmetric_core_precision_bits,
         symmetric_core_regularization=symmetric_core_regularization,
+        iteration_knobs=iteration_knobs,
     )
 end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
+
+# Native iteration controls.  The `nothing` fast path intentionally returns
+# the historical expression exactly; no allocation or alternate arithmetic
+# occurs when Settings leaves the knobs unused.
+@inline function _product_hsd_sigma(
+    state::ProductConeHSDState{T}, ratio::T,
+) where {T}
+    sigma = get(state.iteration_knobs, :sigma, nothing)
+    sigma === nothing && return min(one(T), ratio * ratio * ratio)
+    return sigma
+end
+
+function _product_hsd_core_block_sizes(canonical,fixed_trace_plan)
+    blocks=layout_blocks(canonical.cone_layout)
+    if fixed_trace_plan===nothing && all(
+        block->block.cone in (:nonnegative,:nonpositive),blocks,
+    )
+        dimension=sum((block.length for block in blocks);init=0)
+        return fill(1,dimension)
+    end
+    return Int[block.length for block in blocks]
+end
 
 """Prepare an optional setup-owned symmetric-core workspace from base facts.
 
@@ -391,15 +435,32 @@ function _prepare_product_hsd_symmetric_core(
     n = base.n
     nr = base.nr
     blocks = layout_blocks(base.canonical.cone_layout)
-    block_ranges = UnitRange{Int}[
-        block.offset:(block.offset + block.length - 1) for block in blocks
-    ]
-    block_sizes = Int[block.length for block in blocks]
     effective_precision = precision_bits == 0 ? (
         T === BigFloat ? precision(BigFloat) : sig_bits(T)
     ) : Int(precision_bits)
     fixed_trace_plan === nothing &&
         (fixed_trace_plan = fixed_trace_q3_canonical_plan(base.canonical))
+    pure_orthant=all(
+        block->block.cone in (:nonnegative,:nonpositive),blocks,
+    )
+    block_count=pure_orthant ?
+        sum((block.length for block in blocks);init=0) : length(blocks)
+    block_ranges=UnitRange{Int}[]
+    block_sizes=Int[]
+    sizehint!(block_ranges,block_count)
+    sizehint!(block_sizes,block_count)
+    for block in blocks
+        rows=block.offset:(block.offset+block.length-1)
+        if fixed_trace_plan===nothing && pure_orthant
+            for row in rows
+                push!(block_ranges,row:row)
+                push!(block_sizes,1)
+            end
+        else
+            push!(block_ranges,rows)
+            push!(block_sizes,block.length)
+        end
+    end
     # Dimension-only provider + memory preflight with base facts, before ANY
     # allocation (RHS vectors, operators, cone, system, metadata arrays).
     dimension = saturating_sum_bytes(nr, m)
@@ -422,6 +483,7 @@ function _prepare_product_hsd_symmetric_core(
         alloc_zeros(T, m), zero(T),
     )
     operators = Matrix{T}[]
+    sizehint!(operators,length(block_ranges))
     for rows in block_ranges
         push!(operators, alloc_zeros(T, length(rows), length(rows)))
     end
@@ -445,6 +507,7 @@ function _prepare_product_hsd_symmetric_core(
         current_rss_bytes,
         regularization;
         symbolic_epoch=symbolic_epoch,
+        take_cone_ownership=true,
     )
 end
 
@@ -3270,13 +3333,17 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     base = state.base
     base.rank_ambiguous && return HSDStepDirectionFailed
     base.rank_incompatible && return HSDStepDirectionFailed
+    timings = state.phase_timings
+    t0 = time_ns()
     _product_hsd_residual!(state)
+    timings.residual_seconds += Float64(time_ns() - t0) * 1.0e-9
     if !isfinite(base.mu)
         return HSDStepDirectionFailed
     elseif base.mu <= zero(T)
         base.record.step_size = zero(T)
         return HSDStepAlreadyOptimal
     end
+    t0 = time_ns()
     scaling_ok = if state.symmetric_core isa FixedTraceQ3CoreWorkspace
         _product_hsd_fixed_trace_hkm_neighborhood!(
             state, base.s, base.y, base.mu,
@@ -3284,9 +3351,11 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     else
         try_update_scaling!(state.runtime, base.s, base.y, base.mu)
     end
+    timings.scaling_seconds += Float64(time_ns() - t0) * 1.0e-9
     scaling_ok || return HSDStepDirectionFailed
     base.epoch += 1
     has_nonsymmetric = _product_hsd_has_nonsymmetric(state)
+    t0 = time_ns()
     direction_code = if state.kkt_route === :sparse_schur
         direction_ok = try
             _product_hsd_sparse_direction!(state)
@@ -3335,7 +3404,9 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
             direction_code = _product_hsd_bordered_route_direction!(state, has_nonsymmetric)
         end
     end
+    timings.direction_seconds += Float64(time_ns() - t0) * 1.0e-9
     direction_code === HSDStepOK || return direction_code
+    t0 = time_ns()
     accepted = try
         _product_hsd_line_search!(state)
     catch
@@ -3348,6 +3419,7 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
         end
         false
     end
+    timings.line_search_seconds += Float64(time_ns() - t0) * 1.0e-9
     if !accepted && state.symmetric_core !== nothing &&
        !isempty(state.runtime.power) && !all(block.force_dual_hessian for block in state.runtime.power)
         restore_nonsymmetric_scaling_checkpoint!(state.runtime)
@@ -3369,7 +3441,9 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
     # acceptance gate.  Diagnostic metadata only; the fused workspace is
     # optional and nothing here promotes a status or changes a tolerance.
     product_hsd_record_route_acceptance!(state.residual_hook)
+    t0 = time_ns()
     _product_hsd_residual!(state)
+    timings.residual_seconds += Float64(time_ns() - t0) * 1.0e-9
     # The NT operators and every nonsymmetric block must have been built with
     # the accepted point's global embedding complementarity. Never repair a
     # mismatch by relabeling stale scaling metadata.
@@ -3377,7 +3451,9 @@ function product_hsd_step!(state::ProductConeHSDState{T}) where {T}
         state.runtime.valid = false
         return HSDStepDirectionFailed
     end
+    t0 = time_ns()
     _hsd_update_record!(base)
+    timings.accepted_update_seconds += Float64(time_ns() - t0) * 1.0e-9
     base.record.iterations += 1
     return HSDStepOK
 end

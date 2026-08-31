@@ -22,7 +22,7 @@ A dense pivoted-LU factor cache for the LP route.  Owns the factor buffer
 mutable struct LPLUCache{T} <: AbstractFactorCache{T}
     n::Int
     factors::Matrix{T}           # owned LU factor buffer
-    ipiv::Vector{Int}            # owned pivot vector
+    ipiv::Vector{LinearAlgebra.BlasInt} # owned pivot vector
     scratch::Vector{T}           # preallocated solve scratch
     symbolic_epoch::Int
     matrix_epoch::Int
@@ -47,7 +47,7 @@ function prepare!(cache::LPLUCache{T}, req::FactorRequirements) where {T}
     n >= 0 || throw(ArgumentError("dimension must be non-negative, got $n"))
     cache.n = n
     cache.factors = Matrix{T}(undef, n, n)
-    cache.ipiv = Vector{Int}(undef, n)
+    cache.ipiv = Vector{LinearAlgebra.BlasInt}(undef, n)
     cache.scratch = Vector{T}(undef, n)
     cache.symbolic_epoch = req.symbolic_epoch
     cache.matrix_epoch = 0

@@ -1,5 +1,9 @@
 # API reference
 
+```@meta
+CurrentModule = SDPX
+```
+
 The v0.5 public surface is deliberately small: build one typed `Model`, solve
 it with `optimize!`, and inspect the returned result through the accessors
 below. Anything not documented here, and anything prefixed with `_`, is an
@@ -12,9 +16,6 @@ Model
 variable!
 constraint!
 objective!
-set_start!
-set_dual_start!
-set_dual_slack_start!
 Reals
 Nonnegative
 Nonpositive
@@ -28,6 +29,17 @@ Minimize
 Maximize
 ```
 
+## Starts
+
+The native product-HSD route is cold-start only at present, but models retain
+typed start values for qualified integrations and future continuation routes:
+
+```@docs
+set_start!
+set_dual_start!
+set_dual_slack_start!
+```
+
 ## Settings and solve
 
 ```@docs
@@ -37,6 +49,19 @@ Limits
 Outputs
 optimize!
 execution_plan
+```
+
+## Structure cache lifecycle
+
+The cross-solve cache stores only immutable symbolic structure; numeric values
+are always reallocated for each solve. These controls expose explicit cache
+invalidation and observability without relaxing solver or certificate
+semantics.
+
+```@docs
+set_structure_cache_enabled!
+clear_structure_cache!
+structure_cache_stats
 ```
 
 ## Results and diagnostics

@@ -40,7 +40,7 @@ residuals, or invalid tolerances fail closed.
 | Field | Meaning |
 |---|---|
 | `iterations` | maximum outer iterations; `0`/omitted selects the automatic default |
-| `time` | end-to-end wall-clock limit in seconds; `Inf` means unlimited |
+| `time` | solve-phase wall-clock limit in seconds; `Inf` means unlimited |
 | `threads` | maximum Julia threads requested by one solve |
 
 A time or iteration limit produces an exhaustion status unless an independent
@@ -69,6 +69,16 @@ terminal certificate has already passed.
 
 The provider value `:legacy` denotes the bundled LA-backend compatibility
 namespace. It cannot select the removed public legacy solver.
+
+The typed constructor records the complete policy namespace for qualified
+compatibility integrations, but the direct native product-HSD route currently
+executes only the following settings: `formulation=:auto`,
+`provider=:auto`/`:standard`, `presolve=:auto`/`:off`, `sparse=:auto`/`:off`,
+and `equality_solver=:auto`/`:qr`. `blas_threads` must remain `nothing` because
+the native route is serial. Other combinations are rejected before numerical
+setup with a structured unsupported-policy error; they do not silently fall
+back to another engine. `provider=:auto` selects the arithmetic-matched
+provider when its optional extension is loaded.
 
 ## KKT route policy
 

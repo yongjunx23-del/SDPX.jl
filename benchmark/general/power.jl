@@ -14,7 +14,7 @@ function _power_epigraph_objective(seed, n, alpha)
 end
 
 function build(::PowerProblem, ::Type{T}, params) where {T<:AbstractFloat}
-    model = SDPX.Model(T; name="generic_$(params.name)")
+    model = _benchmark_model(T,params)
     alpha = T(params.alpha)
     if params.kind === :epigraph
         n = params.n

@@ -21,7 +21,26 @@ struct FixedTraceQ3Reduction{T}
     tail_map::Array{T,3}
     fixed_head::Vector{T}
     offset::Matrix{T}
+    free_ids::Vector{Int}
     ownership::Symbol
+end
+
+"""Free (barrier-free) variable columns admitted beside the Q3 tails.
+
+A plan variable that is absent from every cone row carries no HKM barrier:
+its column equation `(A'y)_j = q_j` constrains the equality duals directly
+and augments the fixed-trace core with a saddle-point border (see
+`FixedTraceQ3EqualitySchurWorkspace`).  The per-block active-variable gates
+already reject any cone-row involvement of such a column, so `free_ids` is
+exactly the complement of the union of `active_ids`."""
+_fixed_trace_q3_free_ids(
+    active_ids::Matrix{Int}, variables::Integer,
+) = begin
+    used = falses(variables)
+    @inbounds for index in eachindex(active_ids)
+        used[active_ids[index]] = true
+    end
+    return findall(!, used)
 end
 
 """Detect the two active tail variables of one Q3 cone (CSC storage)."""
@@ -64,7 +83,6 @@ must be invertible.  All scalars are ingested into planner-owned storage.
 """
 function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
     length(problem.cones) > 0 || return nothing
-    problem.variables == 2 * length(problem.cones) || return nothing
     used = falses(problem.variables)
     block_count = length(problem.cones)
     active_ids = Matrix{Int}(undef, 2, block_count)
@@ -104,11 +122,13 @@ function _fixed_trace_q3_reduction(problem::ConicProblem{T}) where {T}
         offset[1, block] = _ingest_owned_scalar(T, cone.b[2])
         offset[2, block] = _ingest_owned_scalar(T, cone.b[3])
     end
+    free_ids = _fixed_trace_q3_free_ids(active_ids, problem.variables)
     return FixedTraceQ3Reduction(
         active_ids,
         tail_map,
         fixed_head,
         offset,
+        free_ids,
         :owned,
     )
 end
@@ -288,6 +308,43 @@ end
 Apply the local 2x2 lower-triangular elimination to every column of a panel
 (equality-basis transform under the fixed-trace elimination).
 """
+function fixed_trace_q3_copy_trsm_lower!(
+    destination::AbstractMatrix{T},
+    panel::AbstractMatrix{T},
+    reduction::FixedTraceQ3Reduction{T},
+    factors::AbstractMatrix{T},
+    inverse_pivots::AbstractMatrix{T},
+) where {T}
+    size(destination) == reverse(size(panel)) || throw(DimensionMismatch(
+        "fixed-trace transformed panel dimensions disagree",
+    ))
+    columns = axes(destination, 2)
+    block_work = size(reduction.active_ids, 2) * length(columns)
+    transform_column = function (column::Int)
+        @inbounds for block in axes(factors, 2)
+            first = reduction.active_ids[1,block]
+            second = reduction.active_ids[2,block]
+            first_value = panel[column,first] * inverse_pivots[1,block]
+            destination[first,column] = first_value
+            destination[second,column] =
+                (panel[column,second] - factors[2,block] * first_value) *
+                inverse_pivots[2,block]
+        end
+        return
+    end
+    if block_work >= 16_384 && length(columns) >= Threads.nthreads() &&
+       Threads.nthreads() > 1
+        Threads.@threads :static for column in columns
+            transform_column(column)
+        end
+    else
+        @inbounds for column in columns
+            transform_column(column)
+        end
+    end
+    return destination
+end
+
 function fixed_trace_q3_trsm_lower!(
     reduction::FixedTraceQ3Reduction{T},
     factors::AbstractMatrix{T},
@@ -299,7 +356,9 @@ function fixed_trace_q3_trsm_lower!(
     # columns are numerous and independent, so split them across the task
     # pool; the serial path is kept for small panels to avoid spawn overhead.
     columns = axes(values, 2)
-    if length(columns) >= 64 && Threads.nthreads() > 1
+    block_work = size(reduction.active_ids, 2) * length(columns)
+    if block_work >= 16_384 && length(columns) >= Threads.nthreads() &&
+       Threads.nthreads() > 1
         Threads.@threads :static for column in columns
             fixed_trace_q3_trsv_lower!(
                 reduction, factors, inverse_pivots,
@@ -388,7 +447,6 @@ function fixed_trace_q3_canonical_plan(
     isempty(zero_rows) && return nothing
     isempty(soc_blocks) && return nothing
     variables = canonical_num_variables(canonical)
-    variables == 2length(soc_blocks) || return nothing
     used = falses(variables)
     active_ids = Matrix{Int}(undef, 2, length(soc_blocks))
     tail_map = alloc_zeros(T, 2, 2, length(soc_blocks))
@@ -424,9 +482,14 @@ function fixed_trace_q3_canonical_plan(
         offset[1,index] = _ingest_owned_scalar(T, canonical.b[rows[2]])
         offset[2,index] = _ingest_owned_scalar(T, canonical.b[rows[3]])
     end
-    all(used) || return nothing
+    # Free (barrier-free) columns are exactly the variables absent from every
+    # cone row: the per-block active-variable gates above already reject any
+    # head-row entry and any third tail entry, so the unused complement is
+    # provably cone-free. Their column equations (A'y)_j = q_j join the core
+    # as a saddle-point border instead of an HKM block.
+    free_ids = _fixed_trace_q3_free_ids(active_ids, variables)
     reduction = FixedTraceQ3Reduction(
-        active_ids, tail_map, fixed_head, offset, :owned,
+        active_ids, tail_map, fixed_head, offset, free_ids, :owned,
     )
     panel = alloc_zeros(T, length(zero_rows), variables)
     copy_owned!(panel, canonical.A[zero_rows, :])
@@ -437,6 +500,7 @@ function fixed_trace_q3_canonical_plan(
         equality_rhs=_ingest_owned_array(T, canonical.b[zero_rows]),
         soc_blocks=soc_blocks,
         soc_operator_indices=soc_operator_indices,
+        free_ids=free_ids,
     )
 end
 
@@ -446,12 +510,75 @@ end
 # before this workspace can become production reachable.
 # ---------------------------------------------------------------------------
 
+function _fixed_trace_q3_free_whitening(
+    panel::AbstractMatrix{T}, free_ids::AbstractVector{Int},
+) where {T}
+    equalities = size(panel,1)
+    nfree = length(free_ids)
+    nfree == 0 && return alloc_zeros(T,equalities,0),alloc_zeros(T,0,0)
+    gram = alloc_zeros(T,nfree,nfree)
+    @inbounds for column in 1:nfree, row in column:nfree
+        value=zero(T)
+        for equality in 1:equalities
+            value += panel[equality,free_ids[row]] *
+                     panel[equality,free_ids[column]]
+        end
+        gram[row,column]=value
+        gram[column,row]=value
+    end
+    lower=alloc_zeros(T,nfree,nfree)
+    @inbounds for column in 1:nfree
+        pivot=gram[column,column]
+        for k in 1:(column-1); pivot -= lower[column,k]^2; end
+        isfinite(pivot) && pivot>zero(T) || throw(ArgumentError(
+            "fixed-trace free-column panel is rank deficient",
+        ))
+        lower[column,column]=sqrt(pivot)
+        for row in (column+1):nfree
+            value=gram[row,column]
+            for k in 1:(column-1)
+                value -= lower[row,k]*lower[column,k]
+            end
+            lower[row,column]=value/lower[column,column]
+        end
+    end
+    # P = inv(L'): x_free = P*z and Q = F*P, so Q'Q = I.
+    transform=alloc_zeros(T,nfree,nfree)
+    @inbounds for rhs_column in 1:nfree
+        for row in nfree:-1:1
+            value = row==rhs_column ? one(T) : zero(T)
+            for k in (row+1):nfree
+                value -= lower[k,row]*transform[k,rhs_column]
+            end
+            transform[row,rhs_column]=value/lower[row,row]
+        end
+    end
+    whitened=alloc_zeros(T,equalities,nfree)
+    @inbounds for column in 1:nfree, row in 1:equalities
+        value=zero(T)
+        for k in 1:nfree
+            value += panel[row,free_ids[k]]*transform[k,column]
+        end
+        whitened[row,column]=value
+    end
+    all(isfinite,whitened) && all(isfinite,transform) || throw(ArgumentError(
+        "fixed-trace free-column whitening is nonfinite",
+    ))
+    return whitened,transform
+end
+
 mutable struct FixedTraceQ3EqualitySchurWorkspace{T,B<:AbstractLABackend}
     local_elimination::FixedTraceQ3LocalElimination{T}
     backend::B
     panel::Matrix{T}              # equality × local-variable coordinates
     transformed_panel::Matrix{T}  # L^-1 * panel'
     schur::Matrix{T}
+    free_ids::Vector{Int}         # barrier-free variable columns
+    free_panel::Matrix{T}         # Q=F*P with Q'Q=I
+    free_transform::Matrix{T}     # P=inv(cholesky(F'F).U)
+    bordered::Matrix{T}           # [[S, -Q],[Q', 0]] saddle operator
+    augmented_rhs::Vector{T}      # saddle RHS [B H^-1 q - g; q_free]
+    augmented_solution::Vector{T}
     local_rhs::Vector{T}
     local_solution::Vector{T}
     equality_work::Vector{T}
@@ -462,18 +589,22 @@ function FixedTraceQ3EqualitySchurWorkspace(
     backend::B=StandardLABackend(_la_arithmetic_symbol(T));
     copy_panel::Bool=true,
 ) where {T,B<:AbstractLABackend}
-    variables = size(reduction.active_ids, 2) * 2
+    blocks = size(reduction.active_ids, 2)
+    variables = 2blocks + length(reduction.free_ids)
     size(panel, 2) == variables || throw(DimensionMismatch(
         "fixed-trace equality panel must have $variables local columns",
     ))
-    sort!(vec(copy(reduction.active_ids))) == collect(1:variables) ||
-        throw(ArgumentError(
-            "fixed-trace equality Schur requires a disjoint complete local-variable partition",
-        ))
+    partition = sort(vcat(vec(copy(reduction.active_ids)),
+                          copy(reduction.free_ids)))
+    partition == collect(1:variables) || throw(ArgumentError(
+        "fixed-trace equality Schur requires a disjoint complete " *
+        "local-variable partition",
+    ))
     all(isfinite, panel) || throw(ArgumentError(
         "fixed-trace equality panel contains non-finite data",
     ))
     equalities = size(panel, 1)
+    nfree = length(reduction.free_ids)
     panel_owned = if copy_panel
         owned = alloc_zeros(T, equalities, variables)
         copy_owned!(owned, panel)
@@ -484,12 +615,22 @@ function FixedTraceQ3EqualitySchurWorkspace(
         ))
         panel
     end
+    free_panel,free_transform = _fixed_trace_q3_free_whitening(
+        panel_owned,reduction.free_ids,
+    )
     return FixedTraceQ3EqualitySchurWorkspace{T,B}(
         FixedTraceQ3LocalElimination(reduction),
         backend,
         panel_owned,
         alloc_zeros(T, variables, equalities),
         alloc_zeros(T, equalities, equalities),
+        copy(reduction.free_ids),
+        free_panel,
+        free_transform,
+        nfree == 0 ? alloc_zeros(T, 0, 0) :
+            alloc_zeros(T, equalities + nfree, equalities + nfree),
+        alloc_zeros(T, nfree == 0 ? 0 : equalities + nfree),
+        alloc_zeros(T, nfree == 0 ? 0 : equalities + nfree),
         alloc_zeros(T, variables),
         alloc_zeros(T, variables),
         alloc_zeros(T, equalities),
@@ -503,12 +644,12 @@ function prepare_fixed_trace_q3_equality_schur!(
     assemble_fixed_trace_q3_contribution!(
         workspace.local_elimination, local_metric, regularization,
     ) || return false
-    copyto!(workspace.transformed_panel, transpose(workspace.panel))
-    fixed_trace_q3_trsm_lower!(
+    fixed_trace_q3_copy_trsm_lower!(
+        workspace.transformed_panel,
+        workspace.panel,
         workspace.local_elimination.reduction,
         workspace.local_elimination.factors,
         workspace.local_elimination.inverse_pivots,
-        workspace.transformed_panel,
     )
     la_syrk!(
         workspace.backend, workspace.schur, workspace.transformed_panel,
@@ -520,6 +661,29 @@ function prepare_fixed_trace_q3_equality_schur!(
         end
     end
     all(isfinite, workspace.schur) || return false
+    nfree = length(workspace.free_ids)
+    nfree == 0 && return true
+    # Saddle-point border for the barrier-free columns: their column
+    # equations (A'y)_free = q_free join the equality Schur system as
+    #   [[S, -F],[F', 0]] [y; x_free] = [B_soc H^-1 q_soc - g; q_free],
+    # with F the equality-panel columns of the free variables.  The S block
+    # is copied verbatim from the SYRK above; only the border is new.
+    bordered = workspace.bordered
+    equalities = size(workspace.schur, 1)
+    @inbounds for row in 1:equalities, column in 1:equalities
+        bordered[row,column] = workspace.schur[row,column]
+    end
+    @inbounds for j in 1:nfree
+        for row in 1:equalities
+            value = workspace.free_panel[row,j]
+            bordered[row,equalities + j] = -value
+            bordered[equalities + j,row] = value
+        end
+        for k in 1:nfree
+            bordered[equalities + j,equalities + k] = zero(T)
+        end
+    end
+    all(isfinite, bordered) || return false
     return true
 end
 
@@ -579,20 +743,53 @@ function fixed_trace_q3_equality_schur_action!(
     return destination
 end
 
-"""Form `B*H^-1*q - g`, the RHS of `(B*H^-1*B')*y = ...`."""
+"""Form `B*H^-1*q - g`, the RHS of `(B*H^-1*B')*y = ...`.
+
+With barrier-free columns the destination carries the saddle RHS
+`[B_soc H^-1 q_soc - g; q_free]`: the free entries of the local solution
+are excluded from the panel product (their column equations constrain
+the duals instead) and their `q` entries move to the border block."""
 function fixed_trace_q3_equality_rhs!(
     destination::AbstractVector{T},
     workspace::FixedTraceQ3EqualitySchurWorkspace{T},
     local_rhs::AbstractVector{T}, equality_rhs::AbstractVector{T},
 ) where {T}
-    length(destination) == length(equality_rhs) == size(workspace.panel, 1) ||
-        throw(DimensionMismatch("fixed-trace equality RHS dimension mismatch"))
+    equalities = size(workspace.panel, 1)
+    nfree = length(workspace.free_ids)
+    length(destination) == equalities + nfree || throw(DimensionMismatch(
+        "fixed-trace equality RHS dimension mismatch",
+    ))
+    length(equality_rhs) == equalities || throw(DimensionMismatch(
+        "fixed-trace equality RHS dimension mismatch",
+    ))
     _fixed_trace_q3_local_solve!(
         workspace.local_solution, workspace, local_rhs,
     )
-    la_mul!(workspace.backend, destination, workspace.panel, workspace.local_solution)
-    @inbounds for index in eachindex(destination, equality_rhs)
+    nfree == 0 && return begin
+        la_mul!(workspace.backend, destination,
+                workspace.panel, workspace.local_solution)
+        @inbounds for index in eachindex(destination, equality_rhs)
+            destination[index] -= equality_rhs[index]
+        end
+        destination
+    end
+    @inbounds for j in 1:nfree
+        # The free columns carry no HKM block: their passthrough value is
+        # the free equation RHS, not part of B H^-1 q.
+        workspace.local_solution[workspace.free_ids[j]] = zero(T)
+    end
+    la_mul!(workspace.backend, view(destination, 1:equalities),
+            workspace.panel, workspace.local_solution)
+    @inbounds for index in 1:equalities
         destination[index] -= equality_rhs[index]
+    end
+    @inbounds for j in 1:nfree
+        value=zero(T)
+        for k in 1:nfree
+            value += workspace.free_transform[k,j] *
+                     local_rhs[workspace.free_ids[k]]
+        end
+        destination[equalities + j]=value
     end
     return destination
 end
@@ -670,11 +867,14 @@ function fixed_trace_q3_core_prepare_bytes(::Type{T}, plan) where {T<:AbstractFl
     variables = size(plan.equality_panel, 2)
     equalities = size(plan.equality_panel, 1)
     blocks = size(plan.reduction.active_ids, 2)
+    nfree = length(plan.reduction.free_ids)
     scalars = saturating_sum_bytes(
         2equalities * variables,       # panel + transformed panel
         3equalities * equalities,      # Schur/factor/snapshot allowance
+        3equalities * nfree + 2nfree * nfree, # saddle border + whitening
         24variables,
         24equalities,
+        24nfree,
         32blocks,
     )
     return _workspace_estimate_with_margin(
@@ -687,21 +887,11 @@ function fixed_trace_q3_core_preflight(
     memory_limit_bytes::Union{Nothing,Integer},
     current_rss_bytes::Union{Nothing,Integer},
 ) where {T<:AbstractFloat}
-    estimate = fixed_trace_q3_core_prepare_bytes(T, plan)
-    estimate < typemax(Int) || throw(ArgumentError(
-        "fixed-trace core memory estimate saturated",
-    ))
-    eligibility = conservative_memory_upper_bound_eligibility(
-        estimate, memory_limit_bytes, current_rss_bytes,
-    )
-    eligibility.eligible || throw(ArgumentError(
-        "fixed-trace core ineligible: $(eligibility.reason) " *
-        "(estimate=$(eligibility.estimate_bytes), " *
-        "rss=$(eligibility.current_rss_bytes), " *
-        "upper=$(eligibility.upper_bound_bytes), " *
-        "limit=$(eligibility.limit_bytes))",
-    ))
-    return estimate
+    # Fixed-trace workspace estimates remain diagnostic-only.  Peak RSS is
+    # dominated by model construction and JIT compilation, so comparing it to
+    # currently free memory rejected CSDR workspaces that previously ran
+    # successfully.  Allocation/factorization failures still propagate.
+    return fixed_trace_q3_core_prepare_bytes(T, plan)
 end
 
 """Infinity row-sum norm of `[A I -b]` for the fixed-trace primal gate."""
@@ -731,11 +921,21 @@ function prepare_fixed_trace_q3_core_state(
     n, m = length(system.c), length(system.b)
     plan.equality_panel |> size == (length(plan.zero_rows), n) ||
         throw(DimensionMismatch("fixed-trace canonical equality panel"))
-    cache = T === Float64 ?
-        DenseSchurCholeskyCache{T}(length(plan.zero_rows)) :
+    equalities = length(plan.zero_rows)
+    nfree = length(plan.reduction.free_ids)
+    core_dimension = equalities + nfree
+    # The saddle-point border is indefinite, so barrier-free plans must use
+    # a pivoted LU cache in every arithmetic; pure fixed-trace plans keep
+    # the historical provider selection (Cholesky for Float64, provider LU
+    # for MultiFloat/BigFloat) byte-for-byte.
+    cache = if T === Float64
+        nfree == 0 ? DenseSchurCholeskyCache{T}(equalities) :
+            LPLUCache{T}(core_dimension)
+    else
         ProviderLPLUCache{T}(
-            length(plan.zero_rows); threads=Threads.nthreads(),
+            core_dimension; threads=Threads.nthreads(),
         )
+    end
     backend = cache isa ProviderLPLUCache ?
         cache.backend : StandardLABackend(_la_arithmetic_symbol(T))
     equality = FixedTraceQ3EqualitySchurWorkspace(
@@ -759,7 +959,7 @@ function prepare_fixed_trace_q3_core_state(
         NewtonResidual(system),
         _fixed_trace_primal_operator_norm(system),
         zero(T), zero(T), zero(T), :regular,
-        length(plan.zero_rows), -1, 0, 0, -1, 0, 0, 0, 0,
+        core_dimension, -1, 0, 0, -1, 0, 0, 0, 0,
         nothing, 0,
         alloc_zeros(T, length(plan.zero_rows)),
         _fixed_trace_structured_A_eligible(T, plan),
@@ -804,13 +1004,24 @@ function _fixed_trace_mul_A!(
     reduction = plan.reduction
     active = reduction.active_ids
     tail_map = reduction.tail_map
-    for b in eachindex(plan.soc_blocks)
+    blocks = eachindex(plan.soc_blocks)
+    update_block = function (b)
         o = plan.soc_blocks[b].offset
-        a1 = active[1, b]
-        a2 = active[2, b]
+        a1 = active[1,b]
+        a2 = active[2,b]
         ax[o] = zero(T)
-        ax[o + 1] = tail_map[1, 1, b] * x[a1] + tail_map[1, 2, b] * x[a2]
-        ax[o + 2] = tail_map[2, 1, b] * x[a1] + tail_map[2, 2, b] * x[a2]
+        ax[o+1] = tail_map[1,1,b] * x[a1] + tail_map[1,2,b] * x[a2]
+        ax[o+2] = tail_map[2,1,b] * x[a1] + tail_map[2,2,b] * x[a2]
+        return
+    end
+    if length(blocks) >= 512 && Threads.nthreads() > 1
+        Threads.@threads :static for b in blocks
+            update_block(b)
+        end
+    else
+        @inbounds for b in blocks
+            update_block(b)
+        end
     end
     return ax
 end
@@ -837,17 +1048,34 @@ function _fixed_trace_mul_At_dual_residual!(
     reduction = plan.reduction
     active = reduction.active_ids
     tail_map = reduction.tail_map
-    for b in eachindex(plan.soc_blocks)
+    blocks = eachindex(plan.soc_blocks)
+    update_block = function (b)
         o = plan.soc_blocks[b].offset
-        a1 = active[1, b]
-        a2 = active[2, b]
-        y1 = y[o + 1]
-        y2 = y[o + 2]
-        rD[a1] += tail_map[1, 1, b] * y1 + tail_map[2, 1, b] * y2
-        rD[a2] += tail_map[1, 2, b] * y1 + tail_map[2, 2, b] * y2
+        a1 = active[1,b]
+        a2 = active[2,b]
+        y1 = y[o+1]
+        y2 = y[o+2]
+        rD[a1] += tail_map[1,1,b] * y1 + tail_map[2,1,b] * y2
+        rD[a2] += tail_map[1,2,b] * y1 + tail_map[2,2,b] * y2
+        return
     end
-    @inbounds for j in eachindex(rD)
-        rD[j] += c[j] * tau
+    if length(blocks) >= 512 && Threads.nthreads() > 1
+        Threads.@threads :static for b in blocks
+            update_block(b)
+        end
+    else
+        @inbounds for b in blocks
+            update_block(b)
+        end
+    end
+    if length(rD) >= 2_048 && Threads.nthreads() > 1
+        Threads.@threads :static for j in eachindex(rD)
+            @inbounds rD[j] += c[j] * tau
+        end
+    else
+        @inbounds for j in eachindex(rD)
+            rD[j] += c[j] * tau
+        end
     end
     return true
 end
@@ -862,8 +1090,15 @@ function _fixed_trace_hsd_residual!(
     base::HSDState{T}, core::FixedTraceQ3CoreWorkspace{T},
 ) where {T}
     _fixed_trace_mul_A!(base.ax, core, base.x)
-    @inbounds for k in 1:base.m
-        base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
+    if base.m >= 2_048 && Threads.nthreads() > 1
+        Threads.@threads :static for k in 1:base.m
+            @inbounds base.rP[k] =
+                base.s[k] - base.b[k] * base.tau + base.ax[k]
+        end
+    else
+        @inbounds for k in 1:base.m
+            base.rP[k] = base.s[k] - base.b[k] * base.tau + base.ax[k]
+        end
     end
     if core.structured_A
         _fixed_trace_mul_At_dual_residual!(
@@ -899,8 +1134,15 @@ function _fixed_trace_trial_residual!(
 ) where {T}
     if core.structured_A
         _fixed_trace_mul_A!(base.rPt, core, base.xt)
-        @inbounds for k in 1:base.m
-            base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+        if base.m >= 2_048 && Threads.nthreads() > 1
+            Threads.@threads :static for k in 1:base.m
+                @inbounds base.rPt[k] +=
+                    base.st[k] - base.b[k] * base.tau_t
+            end
+        else
+            @inbounds for k in 1:base.m
+                base.rPt[k] += base.st[k] - base.b[k] * base.tau_t
+            end
         end
         _fixed_trace_mul_At_dual_residual!(
             base.rDt, core, base.yt, base.c, base.tau_t,
@@ -972,10 +1214,6 @@ function _fixed_trace_core_prepare_metric!(
     reduction = workspace.plan.reduction
     metric = workspace.local_metric
     @inbounds for block_index in axes(reduction.active_ids, 2)
-        @inbounds for j in 1:3, i in 1:3
-            isfinite(workspace.theta_inverse[i,j,block_index]) ||
-                throw(ArgumentError("fixed-trace HKM metric is non-finite"))
-        end
         a11 = reduction.tail_map[1,1,block_index]
         a12 = reduction.tail_map[1,2,block_index]
         a21 = reduction.tail_map[2,1,block_index]
@@ -989,9 +1227,6 @@ function _fixed_trace_core_prepare_metric!(
               a21 * (m12 * a12 + m22 * a22)
         h22 = a12 * (m11 * a12 + m12 * a22) +
               a22 * (m12 * a12 + m22 * a22)
-        all(isfinite, (h11, h12, h22)) || throw(ArgumentError(
-            "fixed-trace local HKM metric is non-finite",
-        ))
         metric[1,block_index] = h11
         metric[2,block_index] = h12
         metric[3,block_index] = h22
@@ -1042,22 +1277,52 @@ function _fixed_trace_core_solve!(
     @inbounds for (index, row) in enumerate(plan.zero_rows)
         workspace.equality_rhs[index] = rhs_rows[row]
     end
-    fixed_trace_q3_equality_rhs!(
-        workspace.equality_solution, workspace.equality,
-        workspace.local_q, workspace.equality_rhs,
-    )
-    solve!(workspace.cache, workspace.equality_solution,
-           workspace.equality_solution)
-    recover_fixed_trace_q3_local_direction!(
-        x, workspace.equality, workspace.local_q,
-        workspace.equality_solution,
-    )
-    fill!(y, zero(T))
-    @inbounds for (index, row) in enumerate(plan.zero_rows)
-        # Owned element copy: BFLA mutates `equality_solution` in place on
-        # every solve, so a plain assignment would alias the slot's MPFR
-        # and let the next solve write through this y vector.
-        _owned_setindex!(y, row, workspace.equality_solution[index])
+    equality = workspace.equality
+    nfree = length(equality.free_ids)
+    if nfree == 0
+        fixed_trace_q3_equality_rhs!(
+            workspace.equality_solution, equality,
+            workspace.local_q, workspace.equality_rhs,
+        )
+        solve!(workspace.cache, workspace.equality_solution,
+               workspace.equality_solution)
+        recover_fixed_trace_q3_local_direction!(
+            x, equality, workspace.local_q,
+            workspace.equality_solution,
+        )
+        fill!(y, zero(T))
+        @inbounds for (index, row) in enumerate(plan.zero_rows)
+            # Owned element copy: BFLA mutates `equality_solution` in place on
+            # every solve, so a plain assignment would alias the slot's MPFR
+            # and let the next solve write through this y vector.
+            _owned_setindex!(y, row, workspace.equality_solution[index])
+        end
+    else
+        equalities = length(plan.zero_rows)
+        fixed_trace_q3_equality_rhs!(
+            equality.augmented_rhs, equality,
+            workspace.local_q, workspace.equality_rhs,
+        )
+        solve!(workspace.cache, equality.augmented_solution,
+               equality.augmented_rhs)
+        recover_fixed_trace_q3_local_direction!(
+            x, equality, workspace.local_q,
+            view(equality.augmented_solution, 1:equalities),
+        )
+        # The free variables' directions come from the saddle solve; the
+        # local recovery above only owns the HKM-block columns.
+        @inbounds for i in 1:nfree
+            value=zero(T)
+            for j in 1:nfree
+                value += equality.free_transform[i,j] *
+                         equality.augmented_solution[equalities+j]
+            end
+            _owned_setindex!(x,equality.free_ids[i],value)
+        end
+        fill!(y, zero(T))
+        @inbounds for (index, row) in enumerate(plan.zero_rows)
+            _owned_setindex!(y, row, equality.augmented_solution[index])
+        end
     end
     recover_block = function (block_index::Int)
         block = plan.soc_blocks[block_index]
@@ -1104,13 +1369,18 @@ function factor_symmetric_core_epoch!(
         "fixed-trace HKM linearization epoch is stale",
     ))
     _fixed_trace_core_prepare_metric!(workspace, system)
-    factorize!(workspace.cache, workspace.equality.schur, Int(matrix_epoch))
+    nfree = length(workspace.equality.free_ids)
+    factorize!(workspace.cache,
+               nfree == 0 ? workspace.equality.schur :
+                            workspace.equality.bordered,
+               Int(matrix_epoch))
     workspace.matrix_epoch = Int(matrix_epoch)
     workspace.factor_epoch = factor_epoch(workspace.cache)
     workspace.system = system
     receipt_provider = workspace.cache isa ProviderLPLUCache ?
         la_backend_provider(workspace.cache.backend) : :native_serial
-    receipt_kernel = workspace.cache isa ProviderLPLUCache ?
+    receipt_kernel = nfree > 0 ? :fixed_trace_q3_equality_schur_bordered_lu :
+        workspace.cache isa ProviderLPLUCache ?
         :fixed_trace_q3_equality_schur_lu :
         :fixed_trace_q3_equality_schur_cholesky
     workspace.factor_receipt = FactorReceipt(

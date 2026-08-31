@@ -6,6 +6,7 @@ using Random
 using SDPX
 
 export AbstractGenericProblem, BenchmarkSpec, BenchmarkResult
+export PrecisionSpec, PrecisionBenchmarkResult, precision_specs, run_precision_case
 export build, inventory, run_one, run_tier, validate_result, main
 export MPSData, SDPAData, CBFData, read_mps, mps_model, read_sdpa, read_cbf, sdpa_model, EXTERNAL_BENCHMARKS_EXPANDED
 export ExternalBenchmark, external_inventory, read_external, reference_matches
@@ -45,6 +46,17 @@ struct BenchmarkResult
 end
 
 function build end
+
+function _benchmark_model(::Type{T},params) where {T<:AbstractFloat}
+    name="generic_$(params.name)"
+    if T===BigFloat
+        bits=haskey(params,:precision_bits) ? Int(params.precision_bits) :
+            precision(BigFloat)
+        return SDPX.Model(BigFloat;precision_bits=bits,name)
+    end
+    return SDPX.Model(T;name)
+end
+
 const _SPECS = BenchmarkSpec[]
 _register!(spec::BenchmarkSpec) = (push!(_SPECS, spec); spec)
 
@@ -58,8 +70,10 @@ include("socp.jl")
 include("sdp.jl")
 include("exp.jl")
 include("power.jl")
+include("mixed.jl")
+include("precision.jl")
 
-const _TIERS = (:small, :medium, :large)
+const _TIERS = (:small, :medium, :large, :extreme)
 
 function inventory(; tier::Union{Symbol,Nothing}=nothing,
                      family::Union{Symbol,Nothing}=nothing)
@@ -73,8 +87,12 @@ function inventory(; tier::Union{Symbol,Nothing}=nothing,
                                      String(spec.family), String(spec.id)))
 end
 
-function _settings(::Type{T}; time_limit::Real=Inf) where {T<:AbstractFloat}
-    limits = isfinite(time_limit) ? SDPX.Limits(time=time_limit) : SDPX.Limits()
+function _settings(
+    ::Type{T}; time_limit::Real=Inf, threads::Integer=1,
+) where {T<:AbstractFloat}
+    limits = isfinite(time_limit) ?
+        SDPX.Limits(time=time_limit,threads=threads) :
+        SDPX.Limits(threads=threads)
     return SDPX.Settings{T}(
         limits=limits,
         verbosity=0,
@@ -104,9 +122,10 @@ end
 
 "Build and solve one case through the public Model/optimize! API only."
 function run_one(spec::BenchmarkSpec, ::Type{T}=Float64;
-                 time_limit::Real=Inf) where {T<:AbstractFloat}
-    model = build(spec.problem, T, spec.params)
-    measurement = @timed SDPX.optimize!(model; settings=_settings(T; time_limit))
+                 time_limit::Real=Inf, threads::Integer=1) where {T<:AbstractFloat}
+    model = build(spec.problem,T,spec.params)
+    measurement = @timed SDPX.optimize!(model;
+        settings=_settings(T; time_limit,threads))
     solved = measurement.value
     certificate = SDPX.certificate(solved)
     result = BenchmarkResult(

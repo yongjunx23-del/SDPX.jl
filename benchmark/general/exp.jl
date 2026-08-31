@@ -14,7 +14,7 @@ end
 
 function build(::ExpProblem, ::Type{T}, params) where {T<:AbstractFloat}
     n = params.n
-    model = SDPX.Model(T; name="generic_$(params.name)")
+    model = _benchmark_model(T,params)
     if params.kind === :unit_epigraph
         # Minimal exact exponential-cone contract:
         # (0, 1, x) ∈ K_exp iff x ≥ exp(0) = 1.

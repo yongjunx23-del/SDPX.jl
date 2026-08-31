@@ -18,7 +18,7 @@ end
 
 function build(::SDPProblem, ::Type{T}, params) where {T<:AbstractFloat}
     n = params.n
-    model = SDPX.Model(T; name="generic_$(params.name)")
+    model = _benchmark_model(T,params)
     X = SDPX.variable!(model, :X, n, n; domain=SDPX.PSDCone())
     if params.kind === :weighted_trace
         diagonal = T.(_random_diagonal(params.seed, n))
@@ -59,6 +59,43 @@ function build(::SDPProblem, ::Type{T}, params) where {T<:AbstractFloat}
             objective += quarter * (X[row, row] + X[column, column] - T(2) * X[row, column])
         end
         SDPX.objective!(model, SDPX.Maximize(), objective)
+    elseif params.kind === :blockdiag_trace
+        # Four independent 3x3 PSD blocks represented in one 12x12 PSD
+        # variable. Fixing all entries to the block-diagonal identity makes
+        # the feasible matrix positive definite and gives trace optimum 12.
+        block = Int(params.block)
+        n == 3 * block || throw(ArgumentError("blockdiag dimensions disagree"))
+        for row in 1:n
+            SDPX.constraint!(model, Symbol(:blockdiag_diag_, row),
+                X[row, row] - one(T), SDPX.ZeroCone())
+            for column in 1:(row - 1)
+                SDPX.constraint!(model, Symbol(:blockdiag_offdiag_, row, :_, column),
+                    X[row, column], SDPX.ZeroCone())
+            end
+        end
+        SDPX.objective!(model, SDPX.Minimize(), _trace_expression(X, n, T))
+    elseif params.kind === :ill_scaled_trace
+        diagonal = T.(params.diagonal)
+        length(diagonal) == n || throw(ArgumentError("ill-scaled diagonal length mismatch"))
+        all(isfinite, diagonal) && all(>(zero(T)), diagonal) ||
+            throw(ArgumentError("ill-scaled diagonal must be positive and finite"))
+        # Keep the feasible PSD point strictly positive definite (I) while
+        # injecting a six-decade positive diagonal scaling into the linear
+        # objective. All matrix entries are fixed, so the optimum is the
+        # closed-form sum(diagonal), and certification is not boundary-based.
+        for row in 1:n
+            SDPX.constraint!(model, Symbol(:ill_scaled_diag_, row),
+                X[row, row] - one(T), SDPX.ZeroCone())
+            for column in 1:(row - 1)
+                SDPX.constraint!(model, Symbol(:ill_scaled_offdiag_, row, :_, column),
+                    X[row, column], SDPX.ZeroCone())
+            end
+        end
+        objective = zero(T)
+        for row in 1:n
+            objective += diagonal[row] * X[row, row]
+        end
+        SDPX.objective!(model, SDPX.Minimize(), objective)
     else
         throw(ArgumentError("unknown SDP benchmark kind $(params.kind)"))
     end
@@ -71,6 +108,16 @@ for (id, params, status, objective, tolerance) in (
         :known_solver_finding, 1.0, 2e-6),
     (:sdp_maxcut_k4, (kind=:maxcut_complete, name=:sdp_maxcut_k4, n=4),
         :optimal, 4.0, 2e-5),
+    (:psd_blockdiag_small,
+        (kind=:blockdiag_trace, name=:psd_blockdiag_small, block=4, n=12),
+        :optimal, 12.0, 2e-5),
+    (:psd_dense_maxcut_k5,
+        (kind=:maxcut_complete, name=:psd_dense_maxcut_k5, n=5),
+        :optimal, 6.25, 3e-5),
+    (:psd_ill_scaled_small,
+        (kind=:ill_scaled_trace, name=:psd_ill_scaled_small, n=7,
+         diagonal=(1.0e-6, 1.0e-4, 1.0e-2, 1.0, 1.0e2, 1.0e4, 1.0e6)),
+        :optimal, 1010101.010101, 3e-5),
     (:sdp_rank1_boundary,
         (kind=:weighted_trace, name=:sdp_rank1_boundary, seed=0x5d0001, n=2),
         :known_solver_finding, 1.0, 2e-6),

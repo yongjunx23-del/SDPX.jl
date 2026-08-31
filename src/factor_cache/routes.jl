@@ -20,6 +20,7 @@
 include("routes/common.jl")
 include("routes/dense_schur_cholesky.jl")
 include("routes/dense_augmented_ldlt.jl")
+include("routes/disconnected_ldlt.jl")
 include("routes/lp_lu.jl")
 include("routes/equality_rrqr.jl")
 include("routes/arrow_local.jl")

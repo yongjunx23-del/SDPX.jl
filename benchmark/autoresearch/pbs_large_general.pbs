@@ -1,0 +1,29 @@
+#!/bin/bash
+#PBS -N sdpx_general_large
+#PBS -q normal
+#PBS -l nodes=1:ppn=16
+#PBS -l mem=128gb
+#PBS -l walltime=06:00:00
+#PBS -j oe
+set -euo pipefail
+: "${CASE:?qsub -v CASE=lp_large|sdp_large}"
+: "${SDPX_RELEASE:?immutable release root required}"
+JULIA=${JULIA:-/public/home/yongjunxu/projects/csdr-clarabel-multifloat/julia/julia-1.12.6/bin/julia}
+OUT=${SDPX_RESULTS:-$HOME/projects/sdpx-general-results}/${CASE}/${PBS_JOBID%%.*}
+mkdir -p "$OUT"; cd "$OUT"
+export JULIA_DEPOT_PATH=${SDPX_DEPOT:-$HOME/projects/SDPX.jl/depot}
+export JULIA_PKG_OFFLINE=true
+export SDPX_BENCH_THREADS=16 SDPX_BLAS_THREADS=1
+{
+  echo "case=$CASE"
+  echo "job=$PBS_JOBID"
+  echo "source_commit=$(cat "$SDPX_RELEASE/metadata/commit.txt")"
+  echo "julia=$($JULIA --version)"
+  echo "threads=16"
+} > environment.txt
+/usr/bin/time -v -o time.txt "$JULIA" --startup-file=no --threads=16 \
+  --project="$SDPX_RELEASE/source" \
+  "$SDPX_RELEASE/source/benchmark/autoresearch/large_general.jl" "$CASE" \
+  > run.log 2>&1
+sha256sum environment.txt run.log time.txt > artifacts.sha256
+cat run.log

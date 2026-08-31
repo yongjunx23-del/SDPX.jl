@@ -45,8 +45,10 @@ makedocs(;
         "Development" => "development.md",
     ],
     checkdocs=:exports,
-    # ExtendedPrecisionBLAS and SymmetricCones are explicitly internal
-    # implementation modules, not part of SDPX's frozen public export surface.
+    # SymmetricCones and ExtendedPrecisionBLAS are explicitly internal
+    # implementation modules; their exported algebra is not part of SDPX's
+    # frozen public API, so documenting the root API must not make those
+    # nested implementation namespaces a build requirement.
     checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS, SDPX.SymmetricCones],
 )
 

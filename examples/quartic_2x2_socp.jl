@@ -22,7 +22,6 @@ function run_quartic_socp()
     model, w = quartic_socp_model()
     settings = Settings(
         model;
-        algorithm=:socp,
         formulation=:auto,
         provider=:auto,
         scaling=:auto,

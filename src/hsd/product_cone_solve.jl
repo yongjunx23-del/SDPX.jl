@@ -270,7 +270,7 @@ end
     )
     direct === nothing || return direct
     return _product_hsd_refined_optimal_result!(
-        state, x_original, s_original, y_original, tol, reason, last_step,
+        state,x_original,s_original,y_original,tol,reason,last_step,
         terminal_alpha,
     )
 end
@@ -433,6 +433,7 @@ function product_hsd_solve!(
 
     base = state.base
     state.tau_collapse_recoveries = 0
+    reset_phase_timings!(state.phase_timings)
     empty!(state.kkt_route_attempts)
     push!(state.kkt_route_attempts, state.kkt_route)
     x_original = zeros(T, base.n)
