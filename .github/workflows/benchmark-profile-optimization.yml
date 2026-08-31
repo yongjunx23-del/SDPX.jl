@@ -1,0 +1,94 @@
+name: Benchmark profile and optimization seed
+
+on:
+  workflow_run:
+    workflows: ["Benchmark catalog gate"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-profile-${{ github.event.workflow_run.head_branch || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  profile:
+    name: Profile certified solve targets and select hotspot
+    # A workflow_run job runs from the default branch; all identity must come
+    # from the triggering catalog run's head_sha, never github.sha.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.name == 'Benchmark catalog gate')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      JULIA_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      PROFILE_HEAD_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SDPX_PROFILE_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha || github.sha }}
+      CATALOG_RUN_ID: ${{ github.event.workflow_run.id }}
+      OUT_DIR: ${{ github.workspace }}/profile-artifacts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Download exact catalog artifact
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: sdpx-benchmark-catalog-v2-${{ github.event.workflow_run.head_sha }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: catalog-artifacts
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+        with:
+          cache-name: benchmark-profile-v2
+      - name: Instantiate isolated environment
+        run: julia --startup-file=no --project=. -e 'using Pkg; Pkg.instantiate()'
+      - name: Run warmup and bounded profile selector
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT_DIR"
+          manifest="${CATALOG_RUN_ID:+catalog-artifacts/catalog-manifest-v2.toml}"
+          manifest="${manifest:-catalog-manifest-v2.toml}"
+          test -f "$manifest"
+          # The profile script enumerates the checked-out head; the manifest is
+          # still verified below so a wrong workflow_run artifact fails closed.
+          grep -q "source_commit = \"${PROFILE_HEAD_SHA}\"" "$manifest"
+          SDPX_PROFILE_OUTPUT="$OUT_DIR/profile-catalog.toml" \
+            SDPX_PROFILE_V2_METADATA=1 julia --startup-file=no --gcthreads=1 --project=. \
+              benchmark/optimization/profile_catalog.jl
+          julia --startup-file=no --project=. -e '
+            include("benchmark/optimization/profile_catalog.jl"); using .ProfileCatalog
+            rows = ProfileCatalog.read_profiles(ARGS[1]);
+            @assert haskey(rows, "profile_schema")
+          ' "$OUT_DIR/profile-catalog.toml"
+      - name: Emit selected hotspot manifest
+        run: |
+          set -euo pipefail
+          cp "$OUT_DIR/profile-catalog.toml" "$OUT_DIR/hotspot-selection.toml"
+          cp "$OUT_DIR/profile-catalog.json" "$OUT_DIR/hotspot-selection.json"
+          printf '%s\n' "$PROFILE_HEAD_SHA" > "$OUT_DIR/profile-head-sha.txt"
+      - name: Run allocation audit as evidence only
+        continue-on-error: true
+        run: |
+          julia --startup-file=no --gcthreads=1 --project=. \
+            benchmark/general/performance/hsd_allocation.jl \
+            > "$OUT_DIR/hsd-allocation.log" 2>&1 || true
+      - name: Upload profile and optimization seed
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdpx-benchmark-profile-v2-${{ env.PROFILE_HEAD_SHA }}
+          path: profile-artifacts
+          if-no-files-found: error
+          retention-days: 30

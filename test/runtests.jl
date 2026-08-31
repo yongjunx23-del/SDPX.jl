@@ -360,3 +360,6 @@ end
             atol=1e-6, rtol=1e-4)
     end
 end
+
+# Dependent benchmark profiling/selection fixture tests.
+include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
