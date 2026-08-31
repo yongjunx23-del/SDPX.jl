@@ -407,7 +407,7 @@ function _product_hsd_expanded_direction!(
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
     (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
     ratio = base.mu_aff / base.mu
-    sigma = min(one(T), ratio * ratio * ratio)
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
@@ -517,7 +517,7 @@ function _product_hsd_sparse_direction!(state::ProductConeHSDState{T}) where {T}
             :sparse_affine_mu_failed,
         )
     ratio = base.mu_aff / base.mu
-    sigma = min(one(T), ratio * ratio * ratio)
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     _product_hsd_corrector_shift!(state, sigma_mu)
     corrector_scalar = sigma_mu - base.tau * base.kappa -
@@ -553,8 +553,7 @@ end
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
     (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
     ratio = base.mu_aff / base.mu
-    sigma = ratio * ratio * ratio
-    sigma > one(T) && (sigma = one(T))
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
 
     _product_hsd_corrector_shift!(state, sigma_mu)
@@ -933,7 +932,7 @@ function _product_hsd_symmetric_core_direction!(
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
     (isfinite(mu_aff) && mu_aff >= zero(T)) || return false
     ratio = base.mu_aff / base.mu
-    sigma = min(one(T), ratio * ratio * ratio)
+    sigma = _product_hsd_sigma(state, ratio)
     sigma_mu = sigma * base.mu
     timings.corrector_rhs_seconds += Float64(time_ns() - t0) * 1.0e-9
 

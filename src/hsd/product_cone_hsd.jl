@@ -193,6 +193,9 @@ mutable struct ProductConeHSDState{
     # Phase-level timing accumulators (review slice 1): additive Float64
     # fields, zero allocation on the hot path, disjoint wall-time intervals.
     phase_timings::ProductHSDPhaseTimings
+    # Public additive iteration controls; a normalized NamedTuple avoids any
+    # per-step allocation and defaults to the historical path.
+    iteration_knobs::NamedTuple
 end
 
 function ProductConeHSDState(
@@ -213,6 +216,9 @@ function _product_cone_hsd_state(
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
     symmetric_core_regularization::Real=0.0,
+    iteration_knobs::NamedTuple=(;
+        sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
+    ),
 ) where {T<:AbstractFloat,R<:AbstractFactorCache{T}}
     kkt_route in (:bordered, :expanded, :sparse_schur) || throw(ArgumentError(
         "product HSD kkt_route must be :bordered, :expanded, or :sparse_schur",
@@ -351,6 +357,7 @@ function _product_cone_hsd_state(
         0,
         residual_hook,
         phase_timings,
+        iteration_knobs,
     )
 end
 
@@ -362,6 +369,9 @@ function ProductConeHSDState(
     symmetric_core_current_rss::Union{Nothing,Integer}=nothing,
     symmetric_core_precision_bits::Integer=0,
     symmetric_core_regularization::Real=0.0,
+    iteration_knobs::NamedTuple=(;
+        sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic,
+    ),
 ) where {T<:AbstractFloat}
     reduction = _hsd_rowspace_reduction(canonical)
     cache = DenseSchurCholeskyCache{T}(reduction.rank)
@@ -375,10 +385,22 @@ function ProductConeHSDState(
         symmetric_core_current_rss=symmetric_core_current_rss,
         symmetric_core_precision_bits=symmetric_core_precision_bits,
         symmetric_core_regularization=symmetric_core_regularization,
+        iteration_knobs=iteration_knobs,
     )
 end
 
 @inline product_hsd_base(state::ProductConeHSDState) = state.base
+
+# Native iteration controls.  The `nothing` fast path intentionally returns
+# the historical expression exactly; no allocation or alternate arithmetic
+# occurs when Settings leaves the knobs unused.
+@inline function _product_hsd_sigma(
+    state::ProductConeHSDState{T}, ratio::T,
+) where {T}
+    sigma = get(state.iteration_knobs, :sigma, nothing)
+    sigma === nothing && return min(one(T), ratio * ratio * ratio)
+    return sigma
+end
 
 function _product_hsd_core_block_sizes(canonical,fixed_trace_plan)
     blocks=layout_blocks(canonical.cone_layout)

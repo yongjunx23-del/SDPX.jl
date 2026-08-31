@@ -294,3 +294,58 @@ end
     @test SDPX.symmetric_core_signature(p5) == SDPX.symmetric_core_signature(p1)
     @test p5.colptr !== p1.colptr
 end
+
+@testset "Iteration knobs API (review Phase 7)" begin
+    # Default knobs must be the exact historical iteration path.
+    default_settings = SDPX.Settings{Float64}()
+    @test default_settings.iteration_knobs ==
+          (sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic)
+
+    # Validation surface.
+    @test_throws ArgumentError SDPX.Settings{Float64}(iteration_knobs=(sigma=-0.5,))
+    @test_throws ArgumentError SDPX.Settings{Float64}(iteration_knobs=(sigma=1.5,))
+    @test_throws ArgumentError SDPX.Settings{Float64}(iteration_knobs=(beta=0.0,))
+    @test_throws ArgumentError SDPX.Settings{Float64}(iteration_knobs=(gamma=1.5,))
+    @test_throws ArgumentError SDPX.Settings{Float64}(iteration_knobs=(predictor=:bogus,))
+    @test_throws ArgumentError SDPX.Settings{Float64}(iteration_knobs=(bogus=1,))
+    # Explicitly restating the historical constants must still be legal.
+    historical = SDPX.Settings{Float64}(
+        iteration_knobs=(sigma=nothing, beta=0.9, gamma=0.5))
+    @test historical.iteration_knobs.beta == 0.9
+    @test historical.iteration_knobs.gamma == 0.5
+    # Values are stored in the element type.
+    @test SDPX.Settings{Float64}(iteration_knobs=(sigma=0.5,)).iteration_knobs.sigma === Float64(0.5)
+
+    # A fixed-sigma solve must still certify on a small product-SOC problem.
+    function _knob_soc_model(::Type{T}) where {T}
+        model = SDPX.Model(T; name="iteration_knobs_probe")
+        x = SDPX.variable!(model, :x, 6; domain=SDPX.Reals())
+        for cell in 1:3
+            r = x[2cell - 1]
+            q = x[2cell]
+            SDPX.constraint!(model, Symbol(:unitarity_, cell),
+                Any[one(T), q - one(T), r], SDPX.LorentzCone())
+        end
+        weights = T.([0.3, 0.1, 0.7, 0.2, 0.5, 0.4])
+        SDPX.constraint!(model, :anchor,
+            sum(x[i] - weights[i] for i in 1:6) - T(1.5), SDPX.ZeroCone())
+        SDPX.objective!(model, SDPX.Minimize(),
+            sum(weights[i] * x[i] for i in 1:6))
+        return model
+    end
+    for knobs in ((sigma=nothing, beta=nothing, gamma=nothing, predictor=:classic),
+                  (sigma=0.5, beta=nothing, gamma=nothing, predictor=:classic),
+                  (sigma=nothing, beta=0.9, gamma=0.5, predictor=:classic))
+        settings = SDPX.Settings{Float64}(iteration_knobs=knobs,
+            limits=SDPX.Limits(iterations=500, time=120.0))
+        result = SDPX.optimize!(_knob_soc_model(Float64); settings)
+        @test SDPX.status(result) === :optimal
+        cert = SDPX.certificate(result)
+        @test cert.valid
+        # All three knob settings converge to the same optimum (measured:
+        # 0.215505087 default, sigma=0.5 to 1.8e-8, historical beta/gamma
+        # bit-identical to default).
+        @test isapprox(Float64(cert.primal_objective), 0.2155050870183683;
+            atol=1e-6, rtol=1e-4)
+    end
+end

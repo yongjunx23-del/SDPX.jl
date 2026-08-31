@@ -121,7 +121,10 @@ end
     # Keep accepted iterates away from numerically unresolved PSD faces.  The
     # predictor still uses the aggressive 0.995 boundary estimate for the
     # frozen Mehrotra centering contract; only the accepted trial is damped.
-    alpha *= T(0.9)
+    # `beta` is the optional initial fraction-to-boundary damping; the
+    # historical literal remains on the default path for bit identity.
+    beta = get(state.iteration_knobs, :beta, nothing)
+    alpha *= beta === nothing ? T(0.9) : beta
     p_norm = _hsd_maxinf(base.rP)
     d_norm = _hsd_maxinf(base.rD)
     g_norm = abs(base.rG)
@@ -198,7 +201,10 @@ end
                 restore_nonsymmetric_scaling_checkpoint!(state.runtime) ||
                     return false
             end
-            alpha *= T(0.5)
+            # `gamma` is the optional rejected-trial contraction factor; the
+            # historical literal remains on the default path for bit identity.
+            gamma = get(state.iteration_knobs, :gamma, nothing)
+            alpha *= gamma === nothing ? T(0.5) : gamma
             backtracking += 1
             backtracking >= max_backtracking && break
         end
