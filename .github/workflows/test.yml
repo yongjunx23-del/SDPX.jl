@@ -116,12 +116,14 @@ jobs:
       - uses: julia-actions/cache@v2
         with:
           cache-name: julia-depot
-      - name: Clone pinned provider checkouts
+      - name: Clone pinned released provider checkouts
         run: |
           git clone https://github.com/yongjunx23-del/MultiFloatLinearAlgebra.jl.git "$RUNNER_TEMP/MFLA"
-          git -C "$RUNNER_TEMP/MFLA" checkout 00ee8c76827dd69b04ae728a7542abe64bb35431
+          # MultiFloatLinearAlgebra v0.4.0, matching SDPX [compat].
+          git -C "$RUNNER_TEMP/MFLA" checkout b38dea165d0973ae06ce245dbdf11298b123c9ea
           git clone https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl.git "$RUNNER_TEMP/BFLA"
-          git -C "$RUNNER_TEMP/BFLA" checkout b2aed396718d03c60faf017388c3e2fc30934513
+          # BigFloatLinearAlgebra v0.3.0, matching SDPX [compat].
+          git -C "$RUNNER_TEMP/BFLA" checkout f95d3e623990e8ae5848916ba92d93897dcb1e31
       - name: Build provider smoke environment
         env:
           SDPX_PROJECT: ${{ github.workspace }}
