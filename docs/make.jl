@@ -45,7 +45,9 @@ makedocs(;
         "Development" => "development.md",
     ],
     checkdocs=:exports,
-    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS],
+    # ExtendedPrecisionBLAS and SymmetricCones are explicitly internal
+    # implementation modules, not part of SDPX's frozen public export surface.
+    checkdocs_ignored_modules=[SDPX.ExtendedPrecisionBLAS, SDPX.SymmetricCones],
 )
 
 if get(ENV, "CI", "false") == "true"
