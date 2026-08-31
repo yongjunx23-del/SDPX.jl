@@ -100,7 +100,15 @@ jobs:
       # registered physics suites need generated or downloaded inputs and are
       # run manually with their explicit catalog paths.
       - name: Run canonical benchmark smoke
-        run: julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl smoke --samples=1 --output=/tmp/sdpx-smoke.toml
+        run: |
+          set +e
+          julia --project=benchmark/bootstrap/benchenv benchmark/bootstrap/runner.jl smoke --samples=1 --output=/tmp/sdpx-smoke.toml
+          status=$?
+          if [ -f /tmp/sdpx-smoke.toml ]; then
+            echo "--- /tmp/sdpx-smoke.toml ---"
+            cat /tmp/sdpx-smoke.toml
+          fi
+          exit "$status"
 
   provider-smoke:
     name: MFLA/BFLA provider smoke
@@ -222,9 +230,6 @@ jobs:
 
   docs:
     name: Documentation build
-    # Page integrity is enforced per-PR by quick-checks.yml; the full
-    # Documenter build only runs where its output is used.
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       actions: write
@@ -242,6 +247,7 @@ jobs:
       - name: Build the Documenter site
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SDPX_DEPLOY_DOCS: ${{ github.event_name == 'push' }}
         run: |
           julia --project=docs -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
           julia --project=docs docs/make.jl
