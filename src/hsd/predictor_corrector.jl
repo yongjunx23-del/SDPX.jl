@@ -900,10 +900,9 @@ function _product_hsd_symmetric_core_direction!(
         _core_solve_raw!(core, predictor_system)
     # Disjoint phase partition: the refine wall share inside this call was
     # accumulated directly into `refinement_seconds` by `_core_refine!`;
-    # the solve bucket keeps only the remainder of the call wall.
-    timings.predictor_linear_solve_seconds +=
-        Float64(time_ns() - t0) * 1.0e-9 -
-        (timings.refinement_seconds - refinement_wall0)
+    # the solve bucket keeps the remainder of the call wall, extended
+    # through direction materialization (copy/scatter/finite/residual
+    # gates) so every wall fraction of the direction is attributed.
     copyto!(base.dx, predictor_candidate.dx)
     copyto!(base.dy, predictor_candidate.dy)
     copyto!(base.ds, predictor_candidate.ds)
@@ -918,12 +917,17 @@ function _product_hsd_symmetric_core_direction!(
         state.diagnostic = :fixed_trace_predictor_residual_failed
         return false
     end
+    timings.predictor_linear_solve_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9 -
+        (timings.refinement_seconds - refinement_wall0)
     copyto!(base.dx_a, base.dx)
     copyto!(base.dy_a, base.dy)
     copyto!(base.ds_a, base.ds)
     base.dtau_a = base.dtau
     base.dkappa_a = base.dkappa
 
+    # Affine-step / centering-parameter computation feeds the corrector RHS.
+    t0 = time_ns()
     alpha_aff = _product_hsd_boundary_alpha!(state)
     (isfinite(alpha_aff) && alpha_aff > zero(T)) || return false
     mu_aff = _product_hsd_mu_aff!(state, alpha_aff)
@@ -931,6 +935,7 @@ function _product_hsd_symmetric_core_direction!(
     ratio = base.mu_aff / base.mu
     sigma = min(one(T), ratio * ratio * ratio)
     sigma_mu = sigma * base.mu
+    timings.corrector_rhs_seconds += Float64(time_ns() - t0) * 1.0e-9
 
     # Corrector: only the cone RHS and scalar shift change; the operator and
     # local/equality factor remain the predictor epoch's authority.
@@ -959,10 +964,6 @@ function _product_hsd_symmetric_core_direction!(
     corrector_candidate, corrector_residual, _ = fixed_trace ?
         _core_solve_raw!(core, corrector_system; compute_residual=false) :
         _core_solve_raw!(core, corrector_system)
-    # Disjoint phase partition (see the predictor block above).
-    timings.corrector_linear_solve_seconds +=
-        Float64(time_ns() - t0) * 1.0e-9 -
-        (timings.refinement_seconds - refinement_wall0)
     timings.refinement_iterations =
         core.refinements - refinement_iter0
     copyto!(base.dx, corrector_candidate.dx)
@@ -979,5 +980,8 @@ function _product_hsd_symmetric_core_direction!(
         state.diagnostic = :fixed_trace_corrector_residual_failed
         return false
     end
+    timings.corrector_linear_solve_seconds +=
+        Float64(time_ns() - t0) * 1.0e-9 -
+        (timings.refinement_seconds - refinement_wall0)
     return true
 end
