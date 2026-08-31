@@ -4,9 +4,12 @@
 Mehmet Asim Gumus, *The Phases of the Scalar S-Matrix Island*,
 arXiv:2605.06613v1, Appendix A. Predecessor/formalism references are
 arXiv:2210.01502v2, arXiv:1708.06765v1, and arXiv:2106.10257.
-The implementation remains experimental and unregistered: it uses A1--A6
-conventions and sampled primal rows, while A8--A15 dual parameters remain
-fail-closed placeholders. It does not claim the paper's numerical bounds.
+The implementation remains experimental and unregistered: it uses the A1
+partial-wave normalization and sampled A5--A6 primal rows. Its implemented
+basis is a single-anchor fully symmetric triple-rho orbit basis; the A2--A4
+multi-wavelet, threshold term and A7 t-grid are provenance-only metadata.
+A8--A15 is recorded as a fixed-t dual placeholder and remains fail-closed. It
+does not claim the paper's numerical bounds.
 
 The proposed typed specification has three intentionally distinct formulation
 values. Its current diagnostic lowering uses one anchor triple-rho basis; the
@@ -52,9 +55,10 @@ threshold limit is a separate test.
 `f_l=0` / `M=0` gives `S_l=1`, so the free amplitude is a boundary witness,
 never a strict interior witness. The diagnostic records the deterministic
 least-squares witness search and a max-margin SOCP constructor. Current
-numerical evidence is: tiny `(24,35)` reaches only approximately machine-zero
-margin (`~8.9e-16` in the original default diagnostic), while small `(120,165)`
-and medium `(576,455)` have negative least-squares rows; an independent HiGHS
+canonical widths are degree 4 -> 11, degree 8 -> 41, degree 12 -> 102, degree
+16 -> 204. Evidence is: tiny `(24,11)` reaches only approximately machine-zero
+margin (recorded 2.48e-13 for the canonical `(24,11)` diagnostic), while small `(120,41)`
+and medium `(576,102)` have negative least-squares rows; an independent HiGHS
 check of `A*v>=1` reported infeasible. This is numerical evidence only, not a
 dual infeasibility proof. Until a certified `delta>0` witness exists, no
 catalog registration, paper claim, objective, or solve is permitted.

@@ -16,6 +16,19 @@ const PREDECESSOR_REFERENCES = (
 const S_STAR_FACTOR = 4 / 3
 const WITNESS_MARGIN_FLOOR_FACTOR = 100
 
+# Immutable Appendix-A parameter provenance.  These values are not silently
+# substituted into the implemented single-anchor diagnostic basis.
+const PAPER_DEFAULTS = (
+    basis_centers=(20 / 3, 10, 20, 30, 40, 50, 60, 86),
+    nmax_values=(10, 12, 14, 16, 18, 20),
+    lmax_values=(16, 18),
+    s_max=300,
+    alpha_th=:zero,
+    a7_t_grid=(0.27, 1.0, 2.0, 3.0, 3.73, 3.99994, 3.99996, 3.99998, 3.99999, 4.0),
+    dual_mu2=12,
+    dual_grid_count=200,
+    dual_spin_max=32,
+)
 
 Base.@kwdef struct SMatrix4DSpec{T}
     id::String
@@ -25,16 +38,18 @@ Base.@kwdef struct SMatrix4DSpec{T}
     energy_samples::Int
     spin_max::Int
     quadrature_order::Int
-    basis_kind::Symbol = :multiwavelet_2605
-    basis_centers::Tuple = (20 / 3, 10, 20, 30, 40, 50, 60, 86)
-    nmax_values::Tuple{Vararg{Int}} = (10, 12, 14, 16, 18, 20)
-    lmax_values::Tuple{Vararg{Int}} = (16, 18)
-    s_max::T = T(300)
-    alpha_th::Symbol = :zero
-    a7_t_grid::Tuple = (0.27, 1.0, 2.0, 3.0, 3.73, 3.99994, 3.99996, 3.99998, 3.99999, 4.0)
-    dual_mu2::T = T(12)
-    dual_grid_count::Int = 200
-    dual_spin_max::Int = 32
+    # The implemented diagnostic is a single-anchor symmetric triple-rho
+    # orbit basis.  The 2605 multi-wavelet basis is metadata only.
+    basis_kind::Symbol = :single_anchor_triple_rho
+    basis_centers::Tuple = PAPER_DEFAULTS.basis_centers
+    nmax_values::Tuple{Vararg{Int}} = PAPER_DEFAULTS.nmax_values
+    lmax_values::Tuple{Vararg{Int}} = PAPER_DEFAULTS.lmax_values
+    s_max::T = T(PAPER_DEFAULTS.s_max)
+    alpha_th::Symbol = PAPER_DEFAULTS.alpha_th
+    a7_t_grid::Tuple = PAPER_DEFAULTS.a7_t_grid
+    dual_mu2::T = T(PAPER_DEFAULTS.dual_mu2)
+    dual_grid_count::Int = PAPER_DEFAULTS.dual_grid_count
+    dual_spin_max::Int = PAPER_DEFAULTS.dual_spin_max
     s_grid_min::Union{Nothing,T} = nothing
     s_grid_max::Union{Nothing,T} = nothing
     s_grid_count::Union{Nothing,Int} = nothing
@@ -52,12 +67,17 @@ Base.@kwdef struct SMatrix4DSpec{T}
     objective_max::Union{Nothing,T} = nothing
     reference_status::Symbol = SOURCE_STATUS
     paper_equivalent::Bool = false
+    # This flag is derived/checked against the immutable paper-default table;
+    # callers cannot claim that custom diagnostic tuples match the paper.
+    matches_paper_defaults::Bool = true
 end
 
 struct SMatrix4DArtifact{T}
     schema_version::Int
     spec::SMatrix4DSpec{T}
     betas::Vector{T}
+    # In this normalization beta is the two-body phase-space factor rho(s).
+    phase_space::Vector{T}
     energies_squared::Vector{T}
     quadrature_nodes::Vector{T}
     quadrature_weights::Vector{T}
@@ -71,6 +91,21 @@ struct SMatrix4DArtifact{T}
     provenance::NamedTuple
     counts::NamedTuple
     fingerprint::String
+end
+
+function _matches_paper_defaults(spec::SMatrix4DSpec)
+    return spec.basis_centers == PAPER_DEFAULTS.basis_centers &&
+           spec.nmax_values == PAPER_DEFAULTS.nmax_values &&
+           spec.lmax_values == PAPER_DEFAULTS.lmax_values &&
+           spec.s_max == typeof(spec.s_max)(PAPER_DEFAULTS.s_max) &&
+           spec.alpha_th == PAPER_DEFAULTS.alpha_th &&
+           spec.a7_t_grid == PAPER_DEFAULTS.a7_t_grid &&
+           spec.dual_mu2 == typeof(spec.dual_mu2)(PAPER_DEFAULTS.dual_mu2) &&
+           spec.dual_grid_count == PAPER_DEFAULTS.dual_grid_count &&
+           spec.dual_spin_max == PAPER_DEFAULTS.dual_spin_max &&
+           spec.beta_min == typeof(spec.beta_min)(1 / 10) &&
+           spec.beta_max == typeof(spec.beta_max)(9 / 10) &&
+           spec.rho_map_s0 === nothing
 end
 
 function _validate_spec(spec::SMatrix4DSpec)
@@ -89,8 +124,11 @@ function _validate_spec(spec::SMatrix4DSpec)
     ))
     0 <= spec.ansatz_degree <= 64 || throw(ArgumentError("ansatz_degree out of range"))
     spec.energy_samples >= 1 || throw(ArgumentError("energy_samples must be positive"))
-    spec.basis_kind === :multiwavelet_2605 || throw(ArgumentError(
-        "only basis_kind=:multiwavelet_2605 is specified",
+    spec.basis_kind === :single_anchor_triple_rho || throw(ArgumentError(
+        "only basis_kind=:single_anchor_triple_rho is implemented",
+    ))
+    spec.matches_paper_defaults == _matches_paper_defaults(spec) || throw(ArgumentError(
+        "matches_paper_defaults must agree with the immutable paper-default table",
     ))
     !isempty(spec.basis_centers) && all(isfinite, spec.basis_centers) &&
         all(>(4), spec.basis_centers) || throw(ArgumentError(
@@ -244,11 +282,11 @@ end
     zero(s_star) < s_star < threshold || throw(ArgumentError(
         "s_star must satisfy 0 < s_star < 4m^2",
     ))
+    rim in (:upper, :lower) || throw(ArgumentError(
+        "rim must be :upper or :lower",
+    ))
     root = if x > threshold
-        sign = rim === :upper ? -one(T) :
-               rim === :lower ? one(T) : throw(ArgumentError(
-                   "rim must be :upper or :lower",
-               ))
+        sign = rim === :upper ? -one(T) : one(T)
         complex(zero(T), sign * sqrt(x - threshold))
     else
         sqrt(complex(threshold - x, zero(T)))
@@ -282,7 +320,7 @@ end
     return T(64) * T(pi) / sqrt(T(2) / T(3))
 end
 
-function _provenance()
+function _provenance(spec::SMatrix4DSpec)
     return (
         title="The Phases of the Scalar S-Matrix Island",
         authors=("Joan Elias Miro", "Andrea Guerrieri", "Mehmet Asim Gumus"),
@@ -292,22 +330,28 @@ function _provenance()
         predecessor_references=PREDECESSOR_REFERENCES,
         formula_oracle_status=:verified_conventions_only,
         formulation_source=:miro_guerrieri_gumus_2605_06613v1,
-        equations=(ansatz="A2-A4", partial_wave="A1", unitarity="A5-A6", primal="A2-A6", linearized_dual="A8-A15_placeholder"),
+        equations=(ansatz="single-anchor triple-rho diagnostic; 2605 A2-A4 multi-wavelet is provenance-only",
+            partial_wave="A1", unitarity="A5-A6", primal="A1 plus sampled A5-A6",
+            fixed_t_dual="A8-A15_placeholder"),
         unitarity_level=:sampled_partial_wave,
         duality_relation=:finite_conic_dual_distinct_from_paper_linearized_dual,
         basis_implementation=:single_anchor_triple_rho_diagnostic,
+        paper_defaults=PAPER_DEFAULTS,
+        matches_paper_defaults=_matches_paper_defaults(spec),
+        primal_analyticity_assumption=:maximal_landau,
+        dual_analyticity_assumption=:axiomatic_fixed_t,
         paper_equivalent=false,
         dimension=4,
         implemented_equations=(
             "s+t+u=4m^2 and COM t,u kinematics",
             "rho_s,t,u uniformizer with explicit s_star anchor (A3)",
+            "single-anchor fully symmetric triple-rho orbit basis (implemented)",
             "M=16pi sum_l (2l+1) f_l P_l",
             "f_l=(32pi)^-1 integral P_l M (A1)",
             "S_l=1+i*sqrt((s-4m^2)/s)*f_l and A5-A6 disk",
-            "A2-A4 multi-wavelet centers/truncations recorded as explicit metadata",
-            "the implemented diagnostic uses a single-anchor triple-rho basis; full multi-wavelet A2-A4 lowering is not claimed",
-            "A7 subtracted-positivity t-grid recorded as metadata only",
-            "A8-A15 dual parameters (mu2, grid count, spin cutoff) recorded but not lowered here",
+            "2605 A2-A4 multi-wavelet centers/truncations and per-center N_sigma rule are provenance-only",
+            "A7 subtracted-positivity t-grid is provenance-only and not imposed",
+            "A8-A15 fixed-t dual parameters are recorded but not lowered here",
             "primal objective/maximization is not implemented; objective=:none only",
             "sampled |S_l|<=1 for even l",
         ),
@@ -380,7 +424,12 @@ function build_smatrix_4d(spec::SMatrix4DSpec{T}) where {T}
     end
     zero_coefficients = zeros(T, length(basis))
     margins = cone_margins_from_projection(betas, pr, pim, strict)
-    counts = (variables=length(basis), ansatz_degree=spec.ansatz_degree,
+    expected_width = Dict(4 => 11, 8 => 41, 12 => 102, 16 => 204)
+    if haskey(expected_width, spec.ansatz_degree)
+        length(basis) == expected_width[spec.ansatz_degree] ||
+            throw(ArgumentError("canonical basis width mismatch"))
+    end
+    counts = (variables=length(basis), basis_width=length(basis), ansatz_degree=spec.ansatz_degree,
         energy_samples=length(betas), even_spins=length(spins), spin_max=effective_spin_max,
         spin_set=Tuple(spins), quadrature_order=spec.quadrature_order,
         basis_centers=spec.basis_centers, nmax_values=spec.nmax_values,
@@ -392,11 +441,12 @@ function build_smatrix_4d(spec::SMatrix4DSpec{T}) where {T}
         dimension=4, crossing=:structural_symmetric_orbit,
         projection=:frozen_gauss_legendre, unitarity=:sampled_partial_wave_disk,
         paper_equivalent=false)
-    provisional = SMatrix4DArtifact(ARTIFACT_SCHEMA_VERSION, spec, betas, energies,
+    provisional = SMatrix4DArtifact(ARTIFACT_SCHEMA_VERSION, spec, betas, copy(betas), energies,
         nodes, weights, basis, pr, pim, strict, zero_coefficients, margins,
-        false, _provenance(), counts, "")
+        false, _provenance(spec), counts, "")
     return SMatrix4DArtifact(provisional.schema_version, provisional.spec,
-        provisional.betas, provisional.energies_squared, provisional.quadrature_nodes,
+        provisional.betas, provisional.phase_space, provisional.energies_squared,
+        provisional.quadrature_nodes,
         provisional.quadrature_weights, provisional.basis_indices,
         provisional.projection_real, provisional.projection_imag,
         provisional.strict_witness, provisional.zero_witness, provisional.strict_margins,
@@ -542,30 +592,43 @@ function build_max_margin_problem(artifact::SMatrix4DArtifact{T}) where {T}
 end
 
 function canonical_text(artifact::SMatrix4DArtifact)
-    io = IOBuffer()
-    print(io, artifact.schema_version, '|', artifact.spec.id, '|', artifact.spec.ansatz_degree,
-        '|', artifact.spec.energy_samples, '|', artifact.spec.spin_max, '|',
-        artifact.spec.quadrature_order, '|', artifact.spec.external_mass, '|',
-        artifact.spec.basis_kind, '|', artifact.spec.basis_centers, '|',
-        artifact.spec.nmax_values, '|', artifact.spec.lmax_values, '|',
-        artifact.spec.s_max, '|', artifact.spec.alpha_th, '|',
-        artifact.spec.s_grid_min, '|', artifact.spec.s_grid_max, '|',
-        artifact.spec.a7_t_grid, '|', artifact.spec.dual_mu2, '|',
-        artifact.spec.dual_grid_count, '|', artifact.spec.dual_spin_max, '|',
-        artifact.spec.spin_set, '|', artifact.spec.formulation, '|',
-        artifact.spec.witness_mode, '|', artifact.spec.objective, '|')
-    print(io, join(artifact.basis_indices, ';'), '|')
-    print(io, join(artifact.betas, ';'), '|', join(artifact.quadrature_nodes, ';'), '|',
-        join(artifact.quadrature_weights, ';'), '|')
-    for A in (artifact.projection_real, artifact.projection_imag)
-        for value in A
-            print(io, value, ';')
-        end
-        print(io, '|')
-    end
-    print(io, artifact.provenance, '|', artifact.counts, '|',
-        artifact.witness_certified, '|', artifact.strict_witness)
-    return String(take!(io))
+    # Every persisted field participates in the identity.  In particular this
+    # includes derived grids, phase space, witnesses, provenance and counts;
+    # changing any field cannot silently preserve an artifact fingerprint.
+    spec = artifact.spec
+    payload = (
+        schema_version=artifact.schema_version,
+        spec=(id=spec.id, scale=spec.scale, external_mass=spec.external_mass,
+            ansatz_degree=spec.ansatz_degree, energy_samples=spec.energy_samples,
+            spin_max=spec.spin_max, quadrature_order=spec.quadrature_order,
+            basis_kind=spec.basis_kind, basis_centers=spec.basis_centers,
+            nmax_values=spec.nmax_values, lmax_values=spec.lmax_values,
+            s_max=spec.s_max, alpha_th=spec.alpha_th, a7_t_grid=spec.a7_t_grid,
+            dual_mu2=spec.dual_mu2, dual_grid_count=spec.dual_grid_count,
+            dual_spin_max=spec.dual_spin_max, s_grid_min=spec.s_grid_min,
+            s_grid_max=spec.s_grid_max, s_grid_count=spec.s_grid_count,
+            spin_set=spec.spin_set, beta_min=spec.beta_min, beta_max=spec.beta_max,
+            source=spec.source, source_version=spec.source_version,
+            formulation=spec.formulation, witness_mode=spec.witness_mode,
+            scaling=spec.scaling, rho_map_s0=spec.rho_map_s0,
+            objective=spec.objective, objective_min=spec.objective_min,
+            objective_max=spec.objective_max, reference_status=spec.reference_status,
+            paper_equivalent=spec.paper_equivalent,
+            matches_paper_defaults=spec.matches_paper_defaults),
+        betas=artifact.betas, phase_space=artifact.phase_space,
+        energies_squared=artifact.energies_squared,
+        quadrature_nodes=artifact.quadrature_nodes,
+        quadrature_weights=artifact.quadrature_weights,
+        basis_indices=artifact.basis_indices,
+        projection_real=artifact.projection_real,
+        projection_imag=artifact.projection_imag,
+        strict_witness=artifact.strict_witness,
+        zero_witness=artifact.zero_witness,
+        strict_margins=artifact.strict_margins,
+        witness_certified=artifact.witness_certified,
+        provenance=artifact.provenance, counts=artifact.counts,
+    )
+    return repr(payload)
 end
 
 stable_fingerprint(artifact::SMatrix4DArtifact) =
@@ -575,36 +638,67 @@ function validate_artifact(artifact::SMatrix4DArtifact{T}) where {T}
     failures = String[]
     try
         _validate_spec(artifact.spec)
-        artifact.spec.reference_status === SOURCE_STATUS || push!(failures, "reference_status")
-        artifact.spec.paper_equivalent == false || push!(failures, "paper_equivalent")
+        spec = artifact.spec
+        artifact.schema_version == ARTIFACT_SCHEMA_VERSION || push!(failures, "schema_version")
+        expected_basis = _basis_indices(spec.ansatz_degree)
+        artifact.basis_indices == expected_basis || push!(failures, "basis_rebuild")
+        expected_spins = isempty(spec.spin_set) ? collect(0:2:spec.spin_max) : collect(spec.spin_set)
+        expected_rows = spec.energy_samples * length(expected_spins)
         artifact.counts.dimension == 4 || push!(failures, "dimension")
-        artifact.counts.lorentz_cones == size(artifact.projection_real, 1) ||
-            push!(failures, "cone_count")
-        length(artifact.basis_indices) == size(artifact.projection_real, 2) ||
-            push!(failures, "basis_count")
-        artifact.witness_certified == false || push!(failures, "uncertified_witness_flag")
+        artifact.counts.basis_width == length(expected_basis) || push!(failures, "basis_width")
+        artifact.counts.variables == length(expected_basis) || push!(failures, "variables")
+        artifact.counts.lorentz_cones == expected_rows || push!(failures, "cone_count")
+        size(artifact.projection_real) == (expected_rows, length(expected_basis)) ||
+            push!(failures, "projection_shape")
+        size(artifact.projection_imag) == size(artifact.projection_real) ||
+            push!(failures, "projection_imag_shape")
+        artifact.counts.spin_set == Tuple(expected_spins) || push!(failures, "spin_set_count")
+        (length(artifact.betas), length(artifact.phase_space), length(artifact.energies_squared)) ==
+            (spec.energy_samples, spec.energy_samples, spec.energy_samples) ||
+            push!(failures, "grid_lengths")
+        artifact.betas == artifact.phase_space || push!(failures, "phase_space")
         all(isfinite, artifact.projection_real) && all(isfinite, artifact.projection_imag) ||
             push!(failures, "finite_projection")
-        artifact.counts.spin_set == Tuple(isempty(artifact.spec.spin_set) ?
-            collect(0:2:artifact.spec.spin_max) : collect(artifact.spec.spin_set)) ||
-            push!(failures, "spin_set_count")
-        # Kinematic and crossing checks at every quadrature point.
-        mass2 = artifact.spec.external_mass^2
-        for (energy, z) in Iterators.product(artifact.energies_squared,
-                                               artifact.quadrature_nodes)
+        all(isfinite, artifact.betas) && all(beta -> zero(T) < beta < one(T), artifact.betas) ||
+            push!(failures, "beta_domain")
+        mass2 = spec.external_mass^2
+        expected_energies = T[4 * mass2 / (one(T) - beta^2) for beta in artifact.betas]
+        all(isapprox.(artifact.energies_squared, expected_energies;
+            atol=100eps(T), rtol=100eps(T))) || push!(failures, "energy_beta")
+        for energy in artifact.energies_squared
+            energy > 4 * mass2 || push!(failures, "threshold")
+        end
+        for (energy, z) in Iterators.product(artifact.energies_squared, artifact.quadrature_nodes)
             t = -(energy - 4 * mass2) * (one(T) - z) / 2
             u = -(energy - 4 * mass2) * (one(T) + z) / 2
             isapprox(energy + t + u, 4 * mass2; atol=100eps(T), rtol=100eps(T)) ||
                 push!(failures, "mandelstam_sum")
         end
-        # The zero coefficient vector is intentionally a boundary witness:
-        # M=0 gives f_l=0 and S_l=1, not a strict interior point.
+        # Compare every derived array against a deterministic rebuild, including
+        # projection matrices and the diagnostic witness/margin vectors.
+        rebuilt = build_smatrix_4d(spec)
+        artifact.provenance == rebuilt.provenance || push!(failures, "provenance_rebuild")
+        artifact.counts == rebuilt.counts || push!(failures, "counts_rebuild")
+        for (name, actual, expected) in (("betas", artifact.betas, rebuilt.betas),
+            ("phase_space", artifact.phase_space, rebuilt.phase_space),
+            ("energies_squared", artifact.energies_squared, rebuilt.energies_squared),
+            ("quadrature_nodes", artifact.quadrature_nodes, rebuilt.quadrature_nodes),
+            ("quadrature_weights", artifact.quadrature_weights, rebuilt.quadrature_weights),
+            ("basis_indices", artifact.basis_indices, rebuilt.basis_indices),
+            ("projection_real", artifact.projection_real, rebuilt.projection_real),
+            ("projection_imag", artifact.projection_imag, rebuilt.projection_imag),
+            ("strict_witness", artifact.strict_witness, rebuilt.strict_witness),
+            ("zero_witness", artifact.zero_witness, rebuilt.zero_witness),
+            ("strict_margins", artifact.strict_margins, rebuilt.strict_margins))
+            actual == expected || push!(failures, name * "_rebuild")
+        end
         all(iszero, artifact.zero_witness) || push!(failures, "zero_witness")
         all(isapprox.(cone_margins(artifact, artifact.zero_witness), zero(T);
-                    atol=100eps(T), rtol=100eps(T))) || push!(failures, "zero_boundary")
+            atol=100eps(T), rtol=100eps(T))) || push!(failures, "zero_boundary")
+        artifact.witness_certified == false || push!(failures, "uncertified_witness_flag")
         stable_fingerprint(artifact) == artifact.fingerprint || push!(failures, "fingerprint")
-    catch
-        push!(failures, "semantic_rebuild")
+    catch err
+        push!(failures, "semantic_rebuild:" * string(typeof(err)))
     end
     return (valid=isempty(failures), failures=sort!(unique(failures)))
 end

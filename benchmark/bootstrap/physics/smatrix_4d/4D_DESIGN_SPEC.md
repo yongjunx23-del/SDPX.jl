@@ -16,7 +16,9 @@ The latest primary numerical source is:
 Predecessor/formalism references are Miro et al. arXiv:2210.01502v2,
 Paulos et al. arXiv:1708.06765v1, and Guerrieri--Sever arXiv:2106.10257.
 
-The triple-rho ansatz and historical four-dimensional conventions are also
+The diagnostic's implemented basis is a single-anchor fully symmetric
+triple-rho orbit basis. It is not the paper's multi-wavelet ansatz. The
+triple-rho ansatz and historical four-dimensional conventions are also
 cross-checked against Paulos et al., *The S-matrix Bootstrap III: Higher
 Dimensional Amplitudes*, arXiv:1708.06765v1, Eqs. (6)--(16).
 
@@ -95,14 +97,20 @@ projection matrices and a deterministic least-squares search for positive
 imaginary partial waves:
 
 ```text
-scale=tiny:   matrix=(24,35),  min margin approximately 8.9e-16
-scale=small:  matrix=(120,165), least-squares candidate has negative rows;
+canonical basis widths: degree 4 -> 11, degree 8 -> 41, degree 12 -> 102,
+degree 16 -> 204 (derived from canonical S_3 orbit representatives).
+scale=tiny:   matrix=(24,11),  recorded strict-margin diagnostic 2.48e-13
+scale=small:  matrix=(120,41), least-squares candidate has negative rows;
               independent HiGHS diagnostic A*v>=1: infeasible
-scale=medium: matrix=(576,455), least-squares candidate has negative rows;
+scale=medium: matrix=(576,102), least-squares candidate has negative rows;
               independent HiGHS diagnostic A*v>=1: infeasible
+scale=stress: matrix=(3264,204), 170459136 orbit evaluations; construction/
+              profile-only; no witness solve is required or claimed.
 ```
 
-The HiGHS results are **numerical evidence, not an exact infeasibility proof**;
+The witness command records Julia version, thread count and exact canonical
+matrix dimensions. The HiGHS results are **numerical evidence, not an exact
+infeasibility proof**;
 no dual Farkas certificate is included. Tiny's margin is at machine epsilon
 and therefore also fails the robustness gate. Consequently no 4D artifact, objective, solve, or paper-equivalent claim is
 registered. The diagnostic can lower the sampled primal rows to SOCP/PSD

@@ -17,10 +17,12 @@ for scale in (:tiny, :small, :medium)
 end
 stress = getproperty(SMatrix4DSpecDiagnostic.smatrix_4d_specs(Float64), :stress)
 stress_rows = stress.energy_samples * (stress.spin_max ÷ 2 + 1)
-stress_ops = stress_rows * stress.quadrature_order *
-    binomial(stress.ansatz_degree + 3, 3)
+stress_width = length(SMatrix4DSpecDiagnostic._basis_indices(stress.ansatz_degree))
+stress_ops = stress_rows * stress.quadrature_order * stress_width
 println("stress_counts rows=", stress_rows, " quadrature=", stress.quadrature_order,
-        " variables=", binomial(stress.ansatz_degree + 3, 3),
+        " variables=", stress_width,
         " orbit_evaluations=", stress_ops,
         " mode=build/profile-only bounded; no stress build attempted")
+println("environment=julia", VERSION, " threads=", Threads.nthreads(),
+        " arithmetic=Float64; external LP/HiGHS is optional and not an exact proof")
 println("interpretation=diagnostic evidence only; no exact infeasibility claim")
