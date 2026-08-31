@@ -1356,9 +1356,13 @@ function _public_native_hsd_core(
             symmetric_core_memory_limit=memory_limit,
             symmetric_core_current_rss=peak_rss,
             symmetric_core_precision_bits=effective_precision,
+            iteration_knobs=settings.iteration_knobs,
         )
     else
-        state = ProductConeHSDState(solve_reduced; kkt_route=settings.kkt_route)
+        state = ProductConeHSDState(
+            solve_reduced; kkt_route=settings.kkt_route,
+            iteration_knobs=settings.iteration_knobs,
+        )
         base = state.base
         plan = _native_hsd_plan(
             program,
