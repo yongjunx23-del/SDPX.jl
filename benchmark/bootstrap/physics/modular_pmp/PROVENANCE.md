@@ -1,0 +1,35 @@
+# Provenance and claim boundary
+
+Primary source: Simeon Hellerman, *A Universal Inequality for CFT and Quantum
+Gravity*, arXiv:0902.2790v2. The source equations and normalization are the
+fixed-point modular setup in Sec. 2.2 and Eqs. (3.18)--(3.29), including the
+derivative polynomials and vacuum functional data.
+
+This catalog adds the original **functional problem shape** to the existing
+finite-grid `modular_lp` surrogate. A functional coefficient vector `alpha`
+acts on a non-vacuum character as
+
+```text
+alpha[F_Delta] = chi(Delta) p_alpha(Delta-gap),
+chi(Delta) = exp(-2*pi*Delta).
+```
+
+For a fixed `gap>0`, the factor is strictly positive on `Delta>=gap`, so the
+sign condition is exactly `p_alpha(x)>=0` for `x=Delta-gap>=0`. The current
+typed front end accepts the polynomial coefficient table produced by a future
+Hellerman formula adapter. Its checked fixture uses an exact rational monomial
+table, deliberately avoiding a claim that the eta Taylor data or a published
+bound has been reproduced.
+
+The scalar Markov--Lukacs lift is exact on the half-line. For degree `2d`,
+`p=V_d'QV_d+xV_(d-1)'RV_(d-1)`; for degree `2d+1`,
+`p=xV_d'QV_d+V_d'RV_d`. The coefficient maps include both Gram off-diagonal
+orientations, so symmetric off-diagonal multiplicities are explicit. The
+fixed-gap problem is a convex affine SDP; an outer gap bisection is a separate
+caller-level protocol and is not hidden inside the artifact.
+
+Status is `:build_only`, `paper_equivalent=false`. No published objective,
+continuum bound, or independent optimal functional is claimed. An ExpCone is
+not used for the factored character: it is relevant only when a decision
+variable itself appears in an exponent. A generic `exp(variable)*polynomial`
+constraint is not silently asserted to be convex.

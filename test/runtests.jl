@@ -10,6 +10,8 @@ include(joinpath(
 ))
 using .GenericConicBenchmark
 
+include(joinpath(@__DIR__, "physics_catalog_contracts.jl"))
+
 const E2E_CASE_IDS = (
     :lp_afiro_style,
     :lp_infeasible,
