@@ -13,6 +13,22 @@ using .ProfileCatalog
 _sha(path) = bytes2hex(SHA.sha256(read(path)))
 _optional_cft_required() = get(ENV, "SDPX_REQUIRE_OPTIONAL_CFT", "0") == "1"
 
+function _missing_optional_cft(err)
+    # Julia may wrap an ErrorException raised during catalog loading in a
+    # LoadError. Match only the exact stable dependency message, never the
+    # catalog name or a broad exception class.
+    text = sprint(showerror, err)
+    occursin("CFT bootstrap requires PMP2SDP.jl; install it or set SDPX_PMP2SDP_ROOT", text)
+end
+
+function _git_identity()
+    commit = readchomp(`git rev-parse HEAD`)
+    tree = readchomp(`git rev-parse 'HEAD^{tree}'`)
+    occursin(r"^[0-9a-f]{40}$", commit) || error("invalid git HEAD")
+    occursin(r"^[0-9a-f]{40}$", tree) || error("invalid git tree")
+    return (commit=commit, tree=tree)
+end
+
 function _unavailable_row(catalog_name, path, problem_id, family, reason)
     return Dict{String,Any}(
         "case_key" => join((catalog_name, String(family), String(problem_id), "Float64"), "|"),
@@ -63,25 +79,21 @@ function _build_physics()
                         "build_seconds" => (time_ns() - started) * 1e-9,
                         "failure_taxonomy" => join(string.(failures), ","), "transform_exactness" => "catalog"))
                 catch err
-                    optional = catalog_name == "cft"
-                    push!(rows, optional ? _unavailable_row(catalog_name, path, id, spec.family,
-                        "optional_dependency_unavailable:" * string(nameof(typeof(err)))) :
-                        Dict{String,Any}(
-                            "case_key" => join((catalog_name, String(spec.family), id, String(entry.arithmetic)), "|"),
-                            "catalog" => catalog_name, "catalog_version" => catalog.version,
-                            "problem_id" => id, "family" => String(spec.family),
-                            "arithmetic" => String(entry.arithmetic), "build_status" => "failed",
-                            "catalog_validation_pass" => false, "solve_eligible" => false,
-                            "optional_unavailable" => false, "reference_status" => String(spec.reference.status),
-                            "source" => String(path), "input_fingerprint" => spec.fingerprint,
-                            "build_seconds" => (time_ns() - started) * 1e-9,
-                            "failure_taxonomy" => string(nameof(typeof(err))), "transform_exactness" => "catalog"))
+                    # Only the precisely identified optional CFT dependency may
+                    # become an unavailable row. Every other build or validator
+                    # exception is a real catalog failure and must propagate.
+                    if catalog_name == "cft" && _missing_optional_cft(err)
+                        push!(rows, _unavailable_row(catalog_name, path, id, spec.family,
+                            "optional_dependency_unavailable:PMP2SDP"))
+                    else
+                        rethrow()
+                    end
                 end
             end
         catch err
-            if catalog_name == "cft"
+            if catalog_name == "cft" && _missing_optional_cft(err)
                 push!(rows, _unavailable_row(catalog_name, path, "catalog", :polynomial_matrix_program,
-                    "optional_dependency_unavailable:" * string(nameof(typeof(err)))))
+                    "optional_dependency_unavailable:PMP2SDP"))
             else
                 rethrow()
             end
@@ -92,7 +104,8 @@ end
 
 function main()
     out = get(ENV, "SDPX_CATALOG_OUTPUT", joinpath(pwd(), "catalog-manifest-v2.toml"))
-    commit = get(ENV, "GITHUB_SHA", "local")
+    identity = _git_identity()
+    commit = identity.commit
     rows = Dict{String,Any}[]
     for case in ProfileCatalog.enumerate_cases(; include_physics=false)
         status, failure = "pass", ""
@@ -120,6 +133,8 @@ function main()
     keys = [r["case_key"] for r in rows]
     length(unique(keys)) == length(keys) || error("duplicate catalog case key")
     doc = Dict("manifest_schema"=>2, "source_commit"=>commit,
+        "tree_fingerprint"=>identity.tree,
+        "catalog_run_id"=>get(ENV, "GITHUB_RUN_ID", "local"),
         "catalog_protocol_version"=>2, "catalog_source_sha256"=>_sha(@__FILE__),
         "catalog_artifact_sha256"=>_sha(joinpath(ROOT, "benchmark", "optimization", "profile_catalog.jl")),
         "require_optional_cft"=>_optional_cft_required(), "case"=>rows)

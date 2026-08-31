@@ -47,12 +47,16 @@ jobs:
           julia --startup-file=no --project=benchmark/bootstrap/benchenv \
             benchmark/optimization/catalog_build.jl
           test "$(grep -c '^source_commit' catalog-manifest-v2.toml)" -eq 1
-          grep -q "source_commit = \"${GITHUB_SHA}\"" catalog-manifest-v2.toml
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          grep -q "source_commit = \"$(git rev-parse HEAD)\"" catalog-manifest-v2.toml
+          grep -q "tree_fingerprint = \"$(git rev-parse HEAD^{tree})\"" catalog-manifest-v2.toml
       - name: Verify manifest identity
         run: |
           set -euo pipefail
           sha256sum catalog-manifest-v2.toml > catalog-manifest-v2.sha256
           printf '%s\n' "$GITHUB_SHA" > catalog-source-commit.txt
+          printf '%s\n' "$(git rev-parse HEAD^{tree})" > catalog-source-tree.txt
+          printf '%s\n' "$GITHUB_RUN_ID" > catalog-run-id.txt
       - name: Upload catalog manifest
         uses: actions/upload-artifact@v4
         with:
@@ -61,5 +65,7 @@ jobs:
             catalog-manifest-v2.toml
             catalog-manifest-v2.sha256
             catalog-source-commit.txt
+            catalog-source-tree.txt
+            catalog-run-id.txt
           if-no-files-found: error
           retention-days: 30

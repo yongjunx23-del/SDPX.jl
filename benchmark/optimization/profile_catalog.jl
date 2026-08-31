@@ -74,6 +74,10 @@ Base.@kwdef struct ProfileRow
     provider_fingerprint::String = ""
     trajectory_sha::String = ""
     resolved_tolerances::String = ""
+    # Canonical machine-readable receipt.  It is intentionally redundant with
+    # the typed fields above: profile consumers must not infer identity or
+    # semantics from display-only fields.
+    receipt::Dict{String,Any} = Dict{String,Any}()
 end
 
 _case_sort(c) = (String(c.catalog), String(c.family), String(c.tier), String(c.id), String(c.arithmetic))
@@ -81,6 +85,37 @@ _key(catalog, id, family, tier, arithmetic) = join((catalog, family, tier, id, a
 
 function _sha(value)
     io = IOBuffer(); print(io, value); return bytes2hex(SHA.sha256(take!(io)))
+end
+
+function _git_identity()
+    commit = readchomp(`git rev-parse HEAD`)
+    tree = readchomp(`git rev-parse 'HEAD^{tree}'`)
+    occursin(r"^[0-9a-f]{40}$", commit) || error("invalid git HEAD")
+    occursin(r"^[0-9a-f]{40}$", tree) || error("invalid git tree")
+    return (commit=commit, tree=tree)
+end
+
+function _route_receipt(result)
+    try
+        selected = getfield(SDPX.diagnostics(result), :selected_algorithms)
+        return (requested="auto",
+            planned=string(getproperty(selected, :planned_kkt_route)),
+            executed=string(getproperty(selected, :executed_kkt_route)))
+    catch
+        return nothing
+    end
+end
+
+function _environment_identity()
+    project = joinpath(ROOT, "Project.toml")
+    manifest = joinpath(ROOT, "Manifest.toml")
+    return (project=_sha(isfile(project) ? read(project) : "missing"),
+        manifest=_sha(isfile(manifest) ? read(manifest) : "missing"),
+        julia=string(VERSION), os=string(Sys.KERNEL), cpu=string(Sys.MACHINE),
+        julia_threads=Threads.nthreads(),
+        blas=get(ENV, "OPENBLAS_NUM_THREADS", "unknown"),
+        omp=get(ENV, "OMP_NUM_THREADS", "unknown"),
+        gc=get(ENV, "JULIA_NUM_GC_THREADS", "unknown"))
 end
 
 function _generic_module()
@@ -207,13 +242,18 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
     seconds = Float64[]; allocs = Int[]; sample_iters = Int[]
     sample_status = String[]; sample_certificates = Bool[]; sample_semantics = Bool[]
     sample_objectives = Float64[]
+    samples == 3 || throw(ArgumentError("profiling requires exactly three samples"))
     iterations = 0; status = :not_run
     cert_valid = false; objective = nothing; semantic = false; core = Float64[]
-    for _ in 1:samples
+    route_receipts = NamedTuple[]
+    for _ in 1:3
         # Rebuild before every measured run; setup is recorded separately and
         # never enters the solver metric.
         bm = @timed Base.invokelatest(g.build, spec.problem, T, spec.params)
-        solve = @timed SDPX.optimize!(bm.value; settings=Base.invokelatest(g._settings, T; threads))
+        solve = @timed SDPX.optimize!(bm.value;
+            settings=Base.invokelatest(g._settings, T; threads),
+            outputs=SDPX.Outputs(:all, :all, :all; diagnostics=:full,
+                certificate=:summary, objectives=true, history=false, trace=false))
         result = solve.value; cert = SDPX.certificate(result)
         push!(seconds, Float64(solve.time)); push!(allocs, Int(solve.bytes)); push!(sample_iters, result.iterations)
         iterations = result.iterations; status = SDPX.status(result)
@@ -224,16 +264,56 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
             Float64(cert.dual_objective), Float64(cert.primal_residual),
             Float64(cert.dual_residual), Float64(cert.relative_gap), cert.valid,
             result.iterations, solve.time, solve.bytes, solve.gctime, false)
-        semantic = Base.invokelatest(g.validate_result, spec, br)
-        push!(sample_semantics, semantic)
+        semantic_i = Base.invokelatest(g.validate_result, spec, br)
+        push!(sample_semantics, semantic_i)
+        semantic = semantic_i
+        receipt = _route_receipt(result)
+        receipt === nothing || push!(route_receipts, receipt)
         try
             t = getfield(SDPX.diagnostics(result), :timings)
             v = getproperty(t, :core)
-            v isa Real && push!(core, Float64(v))
+            v isa Real && isfinite(v) && push!(core, Float64(v))
         catch
         end
     end
+    semantic = length(sample_semantics) == 3 && all(sample_semantics)
+    length(core) in (0, 3) || throw(ArgumentError("core timing must be 3 samples or unavailable"))
+    length(unique(sample_iters)) == 1 || throw(ArgumentError("iteration nondeterminism"))
+    length(unique(sample_objectives)) == 1 || throw(ArgumentError("objective nondeterminism"))
+    length(route_receipts) in (0, 3) ||
+        throw(ArgumentError("route receipt must be present for all samples or none"))
+    !isempty(route_receipts) && !all(r -> r == first(route_receipts), route_receipts) &&
+        throw(ArgumentError("route receipt nondeterminism"))
+    route = isempty(route_receipts) ? nothing : first(route_receipts)
+    identity = _git_identity(); env = _environment_identity()
+    # No trajectory hash is invented here. Generic catalog runs have no
+    # published per-iterate trace; explicitly record not_applicable instead.
+    trajectory_sha = ""
     failed = !semantic ? (status == :iteration_limit ? "iteration_limit" : "semantic_or_certificate") : ""
+    receipt = Dict{String,Any}(
+        "source_commit" => identity.commit, "tree_fingerprint" => identity.tree,
+        "catalog" => String(case.catalog), "family" => String(case.family),
+        "instance" => String(case.id), "case_key" => case.key,
+        "input_fingerprint" => _sha((case.source, case.id, case.payload.spec.params)),
+        "project_sha256" => env.project, "manifest_sha256" => env.manifest,
+        "environment_fingerprint" => _sha(env), "cpu" => env.cpu,
+        "julia_threads" => env.julia_threads, "blas_threads" => env.blas,
+        "omp_threads" => env.omp, "gc_threads" => env.gc,
+        "provider_fingerprint" => _sha(Base.PkgId(SDPX)),
+        "provider_version" => string(Base.PkgId(SDPX).version),
+        "objective_interval" => Dict("lower" => case.objective - case.objective_tolerance,
+            "upper" => case.objective + case.objective_tolerance),
+        "actual_objective" => objective,
+        "resolved_tolerances" => Dict("primal" => case.objective_tolerance,
+            "dual" => case.objective_tolerance, "gap" => case.objective_tolerance),
+        "requested_route" => route === nothing ? "unavailable" : route.requested,
+        "planned_route" => route === nothing ? "unavailable" : route.planned,
+        "executed_route" => route === nothing ? "unavailable" : route.executed,
+        "certificate_kind" => "summary", "certificate_failures" => String[],
+        "trajectory_semantics" => isempty(trajectory_sha) ? "not_applicable" : "sha256",
+        "trajectory_sha" => trajectory_sha,
+        "warmup_excluded" => warmup ? 1 : 0, "sample_count" => 3,
+    )
     ProfileRow(case_key=case.key, catalog=String(case.catalog), id=String(case.id),
         family=String(case.family), tier=String(case.tier), arithmetic=String(case.arithmetic),
         solve_eligible=case.solve_eligible, build_only=!case.solve_eligible, source=case.source,
@@ -249,11 +329,16 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
         reference_upper=case.objective === nothing ? nothing : case.objective + case.objective_tolerance,
         transform_exactness=case.transform.exactness,
         transform_fingerprint=case.transform.fingerprint, failure_taxonomy=failed,
-        requested_route="auto", planned_route="auto", executed_route="auto",
-        input_fingerprint=_sha(case.source), source_commit=get(ENV, "GITHUB_SHA", "local"),
-        catalog_fingerprint=_sha(case.catalog), environment_fingerprint=_sha((VERSION, Sys.MACHINE)),
-        provider_fingerprint=_sha((SDPX,)), resolved_tolerances=string(case.objective_tolerance),
-        warmup_count=warmup ? 1 : 0)
+        requested_route=route === nothing ? "unavailable" : route.requested,
+        planned_route=route === nothing ? "unavailable" : route.planned,
+        executed_route=route === nothing ? "unavailable" : route.executed,
+        input_fingerprint=_sha((case.source, case.id, case.payload.spec.params)),
+        source_commit=identity.commit, tree_fingerprint=identity.tree,
+        catalog_fingerprint=_sha((case.catalog, case.id, case.transform)),
+        environment_fingerprint=_sha(env), provider_fingerprint=_sha(Base.PkgId(SDPX)),
+        resolved_tolerances=string((primal=case.objective_tolerance,
+            dual=case.objective_tolerance, gap=case.objective_tolerance)),
+        warmup_count=warmup ? 1 : 0, receipt=receipt)
 end
 
 function profile_catalog(cases=enumerate_cases(); samples=3, threads=1, warmup=true,
@@ -333,8 +418,25 @@ function select_max_target(rows; metric=:core_seconds)
     return candidates[1], candidates
 end
 
-function validate_profile_row(row::ProfileRow)
+function validate_profile_row(row::ProfileRow; live=false)
     row.solve_eligible && !row.build_only || return false
+    row.warmup_count == 1 || return false
+    if live
+        occursin(r"^[0-9a-f]{40}$", row.source_commit) || return false
+        occursin(r"^[0-9a-f]{40}$", row.tree_fingerprint) || return false
+        isempty(row.input_fingerprint) && return false
+        isempty(row.environment_fingerprint) && return false
+        isempty(row.provider_fingerprint) && return false
+        any(==("auto"), (row.requested_route, row.planned_route, row.executed_route)) && return false
+        required = ("source_commit", "tree_fingerprint", "case_key", "catalog",
+            "family", "instance", "input_fingerprint", "project_sha256",
+            "manifest_sha256", "environment_fingerprint", "provider_fingerprint",
+            "objective_interval", "actual_objective", "resolved_tolerances",
+            "requested_route", "planned_route", "executed_route", "certificate_kind",
+            "certificate_failures", "trajectory_semantics", "warmup_excluded", "sample_count")
+        all(haskey(row.receipt, key) && !isempty(string(row.receipt[key])) for key in required) || return false
+        row.receipt["warmup_excluded"] == 1 && row.receipt["sample_count"] == 3 || return false
+    end
     length(row.sample_seconds) == 3 || return false
     length(row.sample_iterations) == 3 || return false
     length(row.sample_status) == 3 || return false
@@ -345,11 +447,15 @@ function validate_profile_row(row::ProfileRow)
     all(==(row.status), row.sample_status) || return false
     all(row.sample_certificate_valid) && all(row.sample_semantic_pass) || return false
     length(unique(row.sample_iterations)) == 1 || return false
-    if row.reference_objective !== nothing
-        tol = something(row.objective_tolerance, Inf)
-        all(x -> isfinite(x) && abs(x - row.reference_objective) <= tol,
-            row.sample_objective) || return false
-    end
+    length(unique(row.sample_objective)) == 1 || return false
+    row.status == "optimal" || return false
+    row.reference_status == "optimal" || return false
+    row.reference_objective !== nothing || return false
+    row.objective_tolerance !== nothing && isfinite(row.objective_tolerance) && row.objective_tolerance >= 0 || return false
+    tol = row.objective_tolerance
+    all(x -> isfinite(x) && abs(x - row.reference_objective) <= tol,
+        row.sample_objective) || return false
+    length(row.sample_core_seconds) in (0, 3) || return false
     return true
 end
 
@@ -378,12 +484,25 @@ function _row_dict(row::ProfileRow)
         "source_commit"=>row.source_commit, "tree_fingerprint"=>row.tree_fingerprint,
         "catalog_fingerprint"=>row.catalog_fingerprint, "environment_fingerprint"=>row.environment_fingerprint,
         "provider_fingerprint"=>row.provider_fingerprint, "trajectory_sha"=>row.trajectory_sha,
-        "resolved_tolerances"=>row.resolved_tolerances)
+        "trajectory_semantics"=>(isempty(row.trajectory_sha) ? "not_applicable" : "sha256"),
+        "resolved_tolerances"=>row.resolved_tolerances, "receipt"=>row.receipt)
 end
 
 function write_profiles(path, rows; source_commit="unknown")
-    selected = try first(select_max_target(rows; metric=:core_seconds)).case_key catch; "" end
-    doc = Dict("profile_schema"=>PROFILE_SCHEMA, "source_commit"=>String(source_commit),
+    selected_row = try first(select_max_target(rows; metric=:core_seconds)) catch; nothing end
+    selected = selected_row === nothing ? "" : selected_row.case_key
+    identity = _git_identity()
+    fixture = get(ENV, "SDPX_PROFILE_FIXTURE", "0") == "1"
+    fixture || String(source_commit) == identity.commit || throw(ArgumentError(
+        "profile source_commit must equal checked-out git HEAD"))
+    effective_commit = fixture ? String(source_commit) : identity.commit
+    doc = Dict("profile_schema"=>PROFILE_SCHEMA, "source_commit"=>effective_commit,
+        "tree_fingerprint"=>identity.tree,
+        "catalog_run_id"=>get(ENV, "CATALOG_RUN_ID", ""),
+        "catalog_artifact_sha256"=>get(ENV, "CATALOG_ARTIFACT_SHA256", ""),
+        "catalog_fingerprint"=>selected_row === nothing ? "" : selected_row.catalog_fingerprint,
+        "environment_fingerprint"=>selected_row === nothing ? "" : selected_row.environment_fingerprint,
+        "provider_fingerprint"=>selected_row === nothing ? "" : selected_row.provider_fingerprint,
         "selected_case_key"=>selected,
         "warmup_excluded"=>true, "metric_policy"=>"core_median_then_solver_median",
         "row"=>[_row_dict(r) for r in rows])
@@ -393,7 +512,13 @@ end
 
 function write_manifest(path, rows; source_commit="unknown")
     eligible, _ = select_max_target(rows; metric=:core_seconds)
-    doc = Dict("manifest_schema"=>PROFILE_SCHEMA, "source_commit"=>String(source_commit),
+    identity = _git_identity()
+    fixture = get(ENV, "SDPX_PROFILE_FIXTURE", "0") == "1"
+    fixture || String(source_commit) == identity.commit || throw(ArgumentError(
+        "manifest source_commit must equal checked-out git HEAD"))
+    effective_commit = fixture ? String(source_commit) : identity.commit
+    doc = Dict("manifest_schema"=>PROFILE_SCHEMA, "source_commit"=>effective_commit,
+        "tree_fingerprint"=>identity.tree,
         "selected_case_key"=>eligible.case_key, "selection_metric"=>"core_seconds",
         "case"=>[_row_dict(r) for r in rows])
     open(path, "w") do io; TOML.print(io, doc; sorted=true); end
@@ -413,9 +538,11 @@ end
 end # module
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    source_commit = get(ENV, "SDPX_PROFILE_SOURCE_COMMIT", get(ENV, "GITHUB_SHA", ""))
-    isempty(source_commit) && (source_commit = try readchomp(`git rev-parse HEAD`) catch; "local" end)
     fixture = get(ENV, "SDPX_PROFILE_FIXTURE", "0") == "1"
+    source_commit = fixture ? get(ENV, "SDPX_PROFILE_SOURCE_COMMIT", "fixture") :
+        readchomp(`git rev-parse HEAD`)
+    occursin(r"^[0-9a-f]{40}$", source_commit) ||
+        (fixture || error("profile source_commit must come from git HEAD"))
     fixture && get(ENV, "SDPX_OPTIMIZATION_TEST_MODE", "0") != "1" &&
         error("fixture mode requires explicit SDPX_OPTIMIZATION_TEST_MODE=1")
     rows = fixture ? ProfileCatalog.fixture_rows() : ProfileCatalog.profile_catalog()

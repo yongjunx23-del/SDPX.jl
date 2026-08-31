@@ -177,25 +177,20 @@ jobs:
           trap - EXIT
           git checkout --detach "$SDPX_CANDIDATE_SHA"
 
-      - name: Write base-vs-candidate comparison
+      - name: Compare complete schema-v9 base and candidate files
         shell: bash
         run: |
           set -euo pipefail
-          julia --startup-file=no --project="$CANDIDATE_ENV" -e '
-            using TOML
-            base = TOML.parsefile(ARGS[1])
-            candidate = TOML.parsefile(ARGS[2])
-            document = Dict(
-              "base_sha" => ARGS[3],
-              "candidate_sha" => ARGS[4],
-              "base_smoke" => base,
-              "candidate_smoke" => candidate,
-            )
-            open(ARGS[5], "w") do io
-              TOML.print(io, document; sorted=true)
-            end
-          ' "$OUT_DIR/base-smoke.toml" "$OUT_DIR/candidate-smoke.toml" \
-            "$SDPX_BASE_SHA" "$SDPX_CANDIDATE_SHA" "$OUT_DIR/base-vs-candidate-comparison.toml"
+          # compare.jl performs strict schema, identity, route, certificate,
+          # sample, and semantic pairing checks and exits nonzero on any row.
+          julia --startup-file=no --project="$CANDIDATE_ENV" \
+            benchmark/compare.jl "$OUT_DIR/base-smoke.toml" \
+            "$OUT_DIR/candidate-smoke.toml" \
+            "$OUT_DIR/base-vs-candidate.tsv" \
+            2>&1 | tee "$OUT_DIR/base-vs-candidate.log"
+          test -s "$OUT_DIR/base-vs-candidate.tsv"
+          grep -q 'comparison_valid' "$OUT_DIR/base-vs-candidate.tsv"
+          ! grep -q $'comparison_valid\\tfalse' "$OUT_DIR/base-vs-candidate.tsv"
 
       - name: Record source and environment identity
         if: always()
@@ -206,6 +201,7 @@ jobs:
           git rev-parse HEAD > "$OUT_DIR/source-commit.txt"
           git status --porcelain=v1 > "$OUT_DIR/source-status.txt"
           git diff --check > "$OUT_DIR/diff-check.txt"
+          git rev-parse HEAD^{tree} > "$OUT_DIR/tree-fingerprint.txt"
           if julia --version > "$OUT_DIR/julia-version.txt" 2>&1; then :; else
             echo 'julia --version unavailable (unexpected for this workflow)' > "$OUT_DIR/julia-version.txt"
           fi

@@ -16,8 +16,15 @@ function _args(args)
 end
 
 function _head()
-    return get(ENV, "SDPX_EXPECTED_SOURCE_COMMIT", "") == "" ?
-        readchomp(`git rev-parse HEAD`) : ENV["SDPX_EXPECTED_SOURCE_COMMIT"]
+    commit = readchomp(`git rev-parse HEAD`)
+    occursin(r"^[0-9a-f]{40}$", commit) || throw(ArgumentError("invalid checked-out HEAD"))
+    return commit
+end
+
+function _tree()
+    tree = readchomp(`git rev-parse 'HEAD^{tree}'`)
+    occursin(r"^[0-9a-f]{40}$", tree) || throw(ArgumentError("invalid checked-out tree"))
+    return tree
 end
 
 function _row(manifest, selected)
@@ -35,12 +42,19 @@ function _require_live_identity(manifest, selected_row)
         throw(ArgumentError("live manifest source_commit must be an exact 40-hex SHA"))
     source == _head() || throw(ArgumentError(
         "hotspot manifest is stale: source=$source expected=$(_head())"))
+    tree = String(get(manifest, "tree_fingerprint", ""))
+    tree == _tree() || throw(ArgumentError("hotspot manifest tree identity mismatch"))
+    for field in ("catalog_run_id", "catalog_artifact_sha256", "catalog_fingerprint",
+                  "environment_fingerprint", "provider_fingerprint")
+        isempty(String(get(manifest, field, ""))) &&
+            throw(ArgumentError("manifest missing $field"))
+    end
     row_source = String(get(selected_row, "source_commit", source))
     row_source == source || throw(ArgumentError("row/source commit mismatch"))
     return nothing
 end
 
-function _validate_manifest_samples(row)
+function _validate_manifest_samples(row; fixture=false)
     for field in ("sample_seconds", "sample_iterations", "sample_status",
                   "sample_certificate_valid", "sample_semantic_pass", "sample_objective")
         haskey(row, field) || throw(ArgumentError("manifest missing $field"))
@@ -58,6 +72,8 @@ function _validate_manifest_samples(row)
         throw(ArgumentError("iteration nondeterminism"))
     reference = get(row, "reference_objective", "")
     tol = get(row, "objective_tolerance", "")
+    isempty(string(reference)) && throw(ArgumentError("missing reference objective"))
+    isempty(string(tol)) && throw(ArgumentError("missing objective tolerance"))
     if reference != "" && tol != ""
         ref, delta = parse(Float64, string(reference)), parse(Float64, string(tol))
         all(x -> abs(Float64(x) - ref) <= delta, row["sample_objective"]) ||
@@ -66,6 +82,21 @@ function _validate_manifest_samples(row)
     routes = [String(get(row, field, "")) for field in
         ("requested_route", "planned_route", "executed_route")]
     all(!isempty, routes) || throw(ArgumentError("route receipt incomplete"))
+    semantics = string(get(row, "trajectory_semantics", "not_applicable"))
+    semantics in ("sha256", "validated", "not_applicable") ||
+        throw(ArgumentError("trajectory semantics invalid"))
+    receipt = get(row, "receipt", nothing)
+    if receipt !== nothing && !fixture
+        required = ("source_commit", "tree_fingerprint", "catalog", "family",
+            "instance", "input_fingerprint", "project_sha256",
+            "manifest_sha256", "environment_fingerprint", "provider_fingerprint",
+            "objective_interval", "actual_objective", "resolved_tolerances",
+            "certificate_kind", "certificate_failures", "warmup_excluded", "sample_count")
+        all(haskey(receipt, key) for key in required) ||
+            throw(ArgumentError("complete receipt missing fields"))
+        receipt["warmup_excluded"] == 1 && receipt["sample_count"] == 3 ||
+            throw(ArgumentError("receipt sample accounting invalid"))
+    end
     return nothing
 end
 
@@ -81,7 +112,7 @@ function main(args=ARGS)
         throw(ArgumentError("fixture mode requires explicit SDPX_OPTIMIZATION_TEST_MODE=1"))
     selected_row = _row(manifest, selected)
     fixture || _require_live_identity(manifest, selected_row)
-    _validate_manifest_samples(selected_row)
+    _validate_manifest_samples(selected_row; fixture=fixture)
     solve_eligible = Bool(get(selected_row, "solve_eligible", false))
     build_only = Bool(get(selected_row, "build_only", true))
     solve_eligible && !build_only || throw(ArgumentError("selected case is build-only"))
@@ -104,12 +135,27 @@ function main(args=ARGS)
     isempty(out) || open(out, "w") do io
         TOML.print(io, Dict("metric_schema"=>2, "case_key"=>selected,
             "source_commit"=>String(get(manifest, "source_commit", "fixture")),
+            "tree_fingerprint"=>String(get(manifest, "tree_fingerprint", "")),
+            "catalog_run_id"=>String(get(manifest, "catalog_run_id", "")),
+            "catalog_artifact_sha256"=>String(get(manifest, "catalog_artifact_sha256", "")),
+            "catalog_fingerprint"=>String(get(manifest, "catalog_fingerprint", "")),
+            "environment_fingerprint"=>String(get(manifest, "environment_fingerprint", "")),
+            "provider_fingerprint"=>String(get(manifest, "provider_fingerprint", "")),
             "solver_median_seconds"=>solver_median, "core_median_seconds"=>median,
             "iterations"=>first(Int.(selected_row["sample_iterations"])),
             "certificate_valid"=>true, "semantic_pass"=>true,
             "sample_seconds"=>solver_values, "sample_core_seconds"=>metric_values,
             "sample_objective"=>Float64.(selected_row["sample_objective"]),
             "sample_trajectory_sha"=>get(selected_row, "sample_trajectory_sha", String[]),
+            "trajectory_semantics"=>get(selected_row, "trajectory_semantics", "not_applicable"),
+            "objective_interval"=>Dict("lower"=>get(selected_row, "reference_lower", ""), "upper"=>get(selected_row, "reference_upper", "")),
+            "resolved_tolerances"=>get(selected_row, "resolved_tolerances", ""),
+            "requested_route"=>get(selected_row, "requested_route", ""),
+            "planned_route"=>get(selected_row, "planned_route", ""),
+            "executed_route"=>get(selected_row, "executed_route", ""),
+            "certificate_kind"=>"summary", "certificate_failures"=>String[],
+            "warmup_excluded"=>1, "sample_count"=>3,
+            "receipt"=>get(selected_row, "receipt", Dict{String,Any}()),
             "objective_tolerance"=>get(selected_row, "objective_tolerance", ""),
             "allocation_bytes"=>Int.(get(selected_row, "allocation_bytes", [0]))))
     end
