@@ -582,8 +582,10 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     status_ok = SDPX.status(solved) === instance.reference.expected_status
     instance.reference.status === :build_only && (status_ok = true)
     validation_status = SDPX.status(solved)
-    reference_ok = oracle_ok && interval_ok && status_ok
-    semantic_ok = reference_ok && cert_ok
+    # The ordinary reference gate includes the independent certificate gate;
+    # XFAIL handling below explicitly preserves expected-failure semantics.
+    reference_ok = oracle_ok && interval_ok && status_ok && cert_ok
+    semantic_ok = reference_ok
     if instance.reference.disposition === :XFAIL
         if status_ok && oracle_ok
             # XFAIL means an expected, independently classified failure: it is
