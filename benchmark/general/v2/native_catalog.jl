@@ -963,18 +963,32 @@ function _lp_duplicate_artifact()
         dual_witness=Rational{Int}[-1, 0, 0], objective=-1//1)
 end
 
+function _lp_nonpositive_artifact()
+    # Sign-reconstruction sentinel: min x subject to x=-2 and x <= 0.
+    # Flipping z=-x gives the known nonnegative optimum z=2; the exact
+    # primal/dual pair x=-2, y=1 proves c'x=b'y=-2.
+    A = reshape(Rational{Int}[1], 1, 1)
+    b = Rational{Int}[-2]
+    c = Rational{Int}[1]
+    LPArtifact(:v2_lp_nonpositive_small, :nonpositive, A, b, c;
+        cone_partition=[:nonpositive], primal_witness=Rational{Int}[-2],
+        dual_witness=Rational{Int}[1], objective=-2//1)
+end
+
 function lp_tranche_catalog()
     # Only artifacts with an observed Float64 certificate may enter this
     # catalog.  The duplicate/rank-deficient construction is intentionally
     # left open: the current sparse route reports numerical_breakdown, so it
     # must not be mislabeled solve-eligible.
-    artifacts = [_lp_box_artifact(), _lp_sparse_planted_artifact()]
+    artifacts = [_lp_box_artifact(), _lp_sparse_planted_artifact(),
+        _lp_nonpositive_artifact()]
     transforms = V2Transform(:lp_small_artifact, :sdpx_cone_program,
         :lp_standard_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
     descriptions = [
         "box: x+s=u with c=(-1,-2,0,0); y=(-1,-2) proves c'x=b'y=-5",
         "sparse planted KKT: A'x dual inequality and y=(-1,-2) prove c'x=b'y=-4",
+        "nonpositive sign sentinel: x=-2 with y=1 is the sign-flipped nonnegative optimum",
     ]
     families = V2Family(:lp, V2Axis[],
         (instance, precision) -> begin
@@ -1001,7 +1015,7 @@ function lp_tranche_catalog()
              transform=transforms, solve_eligible=true), _hex(artifact),
             (wall_seconds=20, memory_bytes=4 * 1024^3), reference, artifact))
     end
-    V2Catalog(:general_v2_lp_tranche, 2, [families], instances,
+    V2Catalog(:general_v2_lp_tranche, 3, [families], instances,
         (train=[instance.id for instance in instances], holdout=Symbol[], sentinel=Symbol[]))
 end
 

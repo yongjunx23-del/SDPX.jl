@@ -202,10 +202,10 @@ end
 
 @testset "typed LP lowering has an independent certified oracle" begin
     catalog = lp_tranche_catalog()
-    @test length(catalog.instances) == 2
+    @test length(catalog.instances) == 3
     @test all(instance.payload isa LPArtifact for instance in catalog.instances)
     precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
-    expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0)
+    expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0, :nonpositive => -2.0)
     for instance in catalog.instances
         @test instance.reference.oracle isa V2LPOracle
         built, elapsed = build_instance(catalog, instance, precision)
@@ -221,6 +221,12 @@ end
         @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=1e-7, rtol=0)
         @test result.core_seconds !== nothing
     end
+    # The sign-oriented case must use the public Nonpositive domain rather
+    # than a silently flipped objective or a generic real variable.
+    nonpositive = only(filter(instance -> instance.payload.kind === :nonpositive, catalog.instances))
+    @test nonpositive.payload.cone_partition == [:nonpositive]
+    @test run_instance(catalog, nonpositive, precision).validation.failures == Symbol[]
+
     # A mutation of the lowered objective must fail the independent oracle,
     # even if a caller supplies a certificate with the expected objective.
     box = only(filter(instance -> instance.payload.kind === :box, catalog.instances))
