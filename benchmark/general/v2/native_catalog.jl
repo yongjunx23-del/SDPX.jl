@@ -934,7 +934,8 @@ function (oracle::V2LPOracle)(built, certificate)
     # uses that declared arithmetic allowance (not a solver-tolerance change),
     # matching the V2 rule that an objective interval is at least as wide as
     # the arithmetic certificate allowance.
-    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("5e-7")
+    # Objective accuracy is enforced centrally by run_instance.
+    true
 end
 
 function _lp_build(artifact::LPArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
@@ -1010,8 +1011,8 @@ function (oracle::V2IllConditionedLPOracle)(built, certificate)
                      for row in axes(artifact.coefficients, 1))
     primal_value == BigFloat(artifact.objective) || return false
     dual_value == BigFloat(artifact.objective) || return false
-    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("5e-7")
+    # Objective accuracy is enforced centrally by run_instance.
+    true
 end
 
 function _ill_lp_build(artifact::IllConditionedArtifact, ::Type{T};
@@ -1234,8 +1235,8 @@ function lp_tranche_catalog()
     instances = V2Instance[]
     for (index, artifact) in enumerate(artifacts)
         interval = artifact.expected_status === :optimal ?
-            (string(BigFloat(artifact.objective) - BigFloat("5e-7")),
-             string(BigFloat(artifact.objective) + BigFloat("5e-7"))) : nothing
+            (string(BigFloat(artifact.objective)),
+             string(BigFloat(artifact.objective))) : nothing
         reference = V2Reference(artifact.expected_status, artifact.certificate_kind,
             interval, V2LPOracle(artifact), descriptions[index];
             expected_status=artifact.expected_status, disposition=:PASS)
@@ -1273,8 +1274,8 @@ function ill_conditioned_tranche_catalog()
         (instance, result) -> result.validation, (:identity,))
     instances = V2Instance[]
     for (index, artifact) in enumerate(artifacts)
-        interval = (string(BigFloat(artifact.objective) - BigFloat("5e-7")),
-            string(BigFloat(artifact.objective) + BigFloat("5e-7")))
+        interval = (string(BigFloat(artifact.objective)),
+            string(BigFloat(artifact.objective)))
         reference = V2Reference(:optimal, :optimal, interval,
             V2IllConditionedLPOracle(artifact), descriptions[index];
             expected_status=:optimal, disposition=:PASS)
@@ -1549,8 +1550,8 @@ function (oracle::V2RSOCOracle)(built, certificate)
         length(w) == 32 && all(w[2i-1] == 1//2 && w[2i] == 1//1 for i in 1:16) || return false
         all(2 * w[2i-1] * w[2i] >= a.targets[i]^2 for i in 1:16) || return false
     end
-    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    isfinite(value) && abs(value - BigFloat(a.objective)) <= BigFloat("5e-7")
+    # Objective accuracy is enforced centrally by run_instance.
+    true
 end
 
 function _rank_one_psd(w::Matrix{Rational{Int}})
@@ -1594,8 +1595,8 @@ function (oracle::V2SDPOracle)(built, certificate)
         sum(sum(diag(m)) for m in a.primal_witness) == a.objective || return false
         a.dual_parameter == 1//1 || return false # each I-E11 block is PSD
     end
-    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    isfinite(value) && abs(value - BigFloat(a.objective)) <= BigFloat("5e-7")
+    # Objective accuracy is enforced centrally by run_instance.
+    true
 end
 
 function _rsoc_artifacts()
@@ -1625,7 +1626,7 @@ end
 function _typed_optimal_interval(objective::Rational{Int})
     setprecision(BigFloat, 256) do
         value = BigFloat(numerator(objective)) / BigFloat(denominator(objective))
-        (string(value - BigFloat("5e-7")), string(value + BigFloat("5e-7")))
+        (string(value), string(value))
     end
 end
 

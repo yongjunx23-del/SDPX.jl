@@ -263,6 +263,7 @@ struct V2RunResult
     primal_residual::String
     dual_residual::String
     relative_gap::String
+    certificate_metrics::NamedTuple
     iterations::Int
     setup_seconds::Union{Nothing,Float64}
     core_seconds::Union{Nothing,Float64}
@@ -343,20 +344,35 @@ function _validate_precision_spec(precision::V2Precision)
     bits, solver, cert, provider = expected[precision.name]
     precision.bits == bits || throw(ArgumentError(
         "precision $(precision.name) does not match the reviewed bit width"))
-    # `:standard`, `:test`, and `:generic` are explicit local overrides used
-    # by unit tests and exploratory callers.  They still retain the reviewed
-    # arithmetic width, but are not mislabeled as a production provider.
-    if precision.provider in (:standard, :test, :generic)
-        return true
-    end
-    (precision.solver_tolerance, precision.certificate_limit,
-     precision.provider) == (solver, cert, provider) || throw(ArgumentError(
-        "precision $(precision.name) does not match the reviewed arithmetic matrix"))
+    # Test-only specifications must still have a concrete arithmetic backend
+    # and parseable positive tolerances; they cannot use a symbolic backend or
+    # bypass the declaration checks merely by changing the provider label.
+    precision.arithmetic isa Type{<:AbstractFloat} || throw(ArgumentError(
+        "precision $(precision.name) requires a concrete arithmetic backend"))
+    precision.provider in (:standard, :test, :generic) ||
+        ((precision.solver_tolerance, precision.certificate_limit,
+          precision.provider) == (solver, cert, provider) || throw(ArgumentError(
+            "precision $(precision.name) does not match the reviewed arithmetic matrix")))
+    _parse_precision_decimal(precision.arithmetic, precision.solver_tolerance) > zero(precision.arithmetic) ||
+        throw(ArgumentError("precision $(precision.name) has invalid solver tolerance"))
+    _parse_precision_decimal(precision.arithmetic, precision.certificate_limit) > zero(precision.arithmetic) ||
+        throw(ArgumentError("precision $(precision.name) has invalid certificate limit"))
+    precision.arithmetic === Float64 || precision.arithmetic === BigFloat ||
+        (SDPX._multifloats_loaded() && nameof(precision.arithmetic) === :MultiFloat &&
+         52 * (sizeof(precision.arithmetic) ÷ sizeof(Float64)) == precision.bits &&
+         SDPX._multifloat_type_available(precision.arithmetic)) ||
+        throw(ArgumentError("precision $(precision.name) provider is unavailable"))
     return true
 end
 
-for precision in reviewed_precision_specs()
-    _validate_precision_spec(precision)
+function _parse_precision_decimal(::Type{Float64}, text::String)
+    parse(Float64, text)
+end
+function _parse_precision_decimal(::Type{BigFloat}, text::String)
+    BigFloat(text)
+end
+function _parse_precision_decimal(::Type{T}, text::String) where {T<:AbstractFloat}
+    T(text)
 end
 
 """Check the original-coordinate residual fields against a V2 limit.
@@ -364,13 +380,16 @@ end
 Missing fields fail closed.  Infeasibility certificates are checked by their
 independent Farkas/ray oracle instead; this predicate is for optimal results.
 """
-function certificate_gate(certificate, precision::V2Precision)
+function certificate_gate(metrics, precision::V2Precision)
     _validate_precision_spec(precision)
-    for field in (:primal_residual_scaled, :dual_residual_scaled, :relative_gap)
-        hasproperty(certificate, field) || return false
-        value = try BigFloat(getproperty(certificate, field)) catch; return false end
-        isfinite(value) && value >= 0 || return false
-        value <= BigFloat(precision.certificate_limit) || return false
+    hasproperty(metrics, :finite_objectives) && metrics.finite_objectives || return false
+    fields = (:primal_affine, :primal_cone, :dual_affine, :dual_cone,
+              :relative_gap, :relative_complementarity)
+    limit = BigFloat(precision.certificate_limit)
+    for field in fields
+        hasproperty(metrics, field) || return false
+        value = try BigFloat(getproperty(metrics, field)) catch; return false end
+        isfinite(value) && value >= 0 && value <= limit || return false
     end
     return true
 end
@@ -777,15 +796,116 @@ function _parse(::Type{T}, text::String) where {T}
     T === Float64 ? parse(T, text) : T(text)
 end
 
+"""Reconstruct all original-coordinate certification components.
+
+The public compact certificate retains aggregate primal/dual residuals but not
+component breakdowns or complementarity. The V2 runner requests owned primal,
+constraint-dual, and dual-slack vectors and recomputes these components from
+the immutable model expressions. Any missing component fails closed.
+"""
+function _certificate_metrics(model, solved, certificate)
+    T = typeof(certificate.primal_objective)
+    bad = (finite_objectives=false, primal_affine=T(Inf), primal_cone=T(Inf),
+           dual_affine=T(Inf), dual_cone=T(Inf), relative_gap=T(Inf),
+           relative_complementarity=T(Inf))
+    try
+        primal = SDPX.value(solved)
+        row_dual = SDPX.dual(solved)
+        dual_slack = SDPX.dual_slack(solved)
+        n = length(primal)
+        primal_affine = zero(T)
+        primal_cone = zero(T)
+        dual_cone = zero(T)
+        row_values = T[]
+        for block in model.constraint_blocks
+            for expression in block.expressions
+                value_ = expression.constant
+                @inbounds for (index, coefficient) in zip(expression.indices, expression.coefficients)
+                    value_ += coefficient * primal[index]
+                end
+                push!(row_values, value_)
+            end
+            values = view(row_values, (length(row_values) - length(block.expressions) + 1):length(row_values))
+            primal_affine = max(primal_affine,
+                SDPX._public_primal_cone_residual(values, block.domain, block.shape))
+        end
+        for block in model.variable_blocks
+            indices = block.offset:(block.offset + block.length - 1)
+            primal_cone = max(primal_cone,
+                SDPX._public_primal_cone_residual(view(primal, indices), block.domain, block.shape))
+            dual_cone = max(dual_cone,
+                SDPX._public_dual_cone_residual(view(dual_slack, indices), block.domain, block.shape))
+        end
+        c = zeros(T, n)
+        objective = model.objective.expression
+        @inbounds for (index, coefficient) in zip(objective.indices, objective.coefficients)
+            c[index] += coefficient
+        end
+        stationarity = (model.objective.sense isa SDPX.Maximize ? -one(T) : one(T)) .* c
+        row_index = 0
+        @inbounds for block in model.constraint_blocks
+            for expression in block.expressions
+                row_index += 1
+                y = row_dual[row_index]
+                for (index, coefficient) in zip(expression.indices, expression.coefficients)
+                    stationarity[index] -= coefficient * y
+                end
+            end
+        end
+        stationarity .-= dual_slack
+        dual_scale = max(one(T), maximum(abs, c; init=zero(T)),
+                         maximum(abs, row_dual; init=zero(T)),
+                         maximum(abs, dual_slack; init=zero(T)))
+        primal_scale = max(one(T), maximum(abs, primal; init=zero(T)),
+                           maximum(abs, row_values; init=zero(T)))
+        dual_affine = maximum(abs, stationarity; init=zero(T)) / dual_scale
+        primal_affine /= primal_scale
+        primal_cone /= primal_scale
+        objective_scale = max(one(T), abs(certificate.primal_objective),
+                              abs(certificate.dual_objective))
+        relative_gap = abs(certificate.primal_objective - certificate.dual_objective) /
+                       objective_scale
+        relative_complementarity = abs(dot(primal, dual_slack)) / objective_scale
+        finite = isfinite(certificate.primal_objective) &&
+                 isfinite(certificate.dual_objective) && all(isfinite, primal) &&
+                 all(isfinite, row_dual) && all(isfinite, dual_slack) &&
+                 isfinite(primal_affine) && isfinite(primal_cone) &&
+                 isfinite(dual_affine) && isfinite(dual_cone) &&
+                 isfinite(relative_gap) && isfinite(relative_complementarity)
+        return (finite_objectives=finite, primal_affine=primal_affine,
+                primal_cone=primal_cone, dual_affine=dual_affine,
+                dual_cone=dual_cone, relative_gap=relative_gap,
+                relative_complementarity=relative_complementarity)
+    catch
+        return bad
+    end
+end
+
+"""Check an independent objective against the public interval and the
+per-precision certificate allowance. Exact analytic intervals remain
+independent of arithmetic; the effective allowance is evaluated at execution.
+"""
+function _objective_interval_ok(ref::V2Reference, objective::AbstractString,
+                                precision::V2Precision)
+    ref.objective_interval === nothing && return ref.status !== :optimal
+    lower, upper = ref.objective_interval
+    value = try BigFloat(objective) catch; BigFloat(NaN) end
+    lo = BigFloat(lower); hi = BigFloat(upper)
+    public_half_width = abs(hi - lo) / BigFloat(2)
+    center = (lo + hi) / BigFloat(2)
+    allowance = max(public_half_width, BigFloat(precision.certificate_limit))
+    isfinite(value) && center - allowance <= value <= center + allowance
+end
+
 """Solve an ordinary V2 instance via the existing public generic builder."""
 function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
                       precision::V2Precision; settings=nothing, outputs=nothing)
+    _validate_precision_spec(precision)
     instance.reference.status === :build_only && throw(ArgumentError(
         "build-only instance $(instance.id) requires an explicit solve contract"))
     built, setup = build_instance(catalog, instance, precision)
     model = built.problem
     T = precision.arithmetic
-    _validate_precision_spec(precision)
     if settings === nothing
         # Keep the requested solver tolerance distinct from the wider
         # certificate acceptance limit in the reviewed matrix.
@@ -795,23 +915,16 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
             limits=SDPX.Limits(threads=1), verbosity=0, certification=true,
         )
     end
-    measurement = if outputs === nothing
-        @timed SDPX.optimize!(model; settings)
-    else
-        @timed SDPX.optimize!(model; settings, outputs)
-    end
+    outputs === nothing && (outputs = SDPX.Outputs(:all, :all, :all;
+        objectives=true, certificate=:summary, diagnostics=:full,
+        history=false, trace=false))
+    measurement = @timed SDPX.optimize!(model; settings, outputs)
     solved = measurement.value
     certificate = SDPX.certificate(solved)
     objective = string(certificate.primal_objective)
     comparison_bits = max(256, 2 * precision.bits)
     interval_ok = setprecision(BigFloat, comparison_bits) do
-        if instance.reference.objective_interval === nothing
-            instance.reference.status !== :optimal
-        else
-            lower, upper = instance.reference.objective_interval
-            value = try BigFloat(objective) catch; BigFloat(NaN) end
-            isfinite(value) && BigFloat(lower) <= value <= BigFloat(upper)
-        end
+        _objective_interval_ok(instance.reference, objective, precision)
     end
     # Independent exact oracles must not inherit a low ambient BigFloat
     # precision from the caller.  This scope is also the required
@@ -825,13 +938,14 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     # the observed status is the real semantic target and its exact oracle
     # passes; a prior numerical failure remains uncertified.
     observed_status = SDPX.status(solved)
+    metrics = _certificate_metrics(model, solved, certificate)
     cert_ok = instance.reference.status === :build_only ||
         (instance.reference.expected_status in (:primal_infeasible, :dual_infeasible) ?
             (observed_status === instance.reference.expected_status &&
              certificate.valid &&
              ray_certificate_gate(certificate, precision,
                                   instance.reference.expected_status) && oracle_ok) :
-            certificate.valid && certificate_gate(certificate, precision))
+            certificate.valid && certificate_gate(metrics, precision))
     failures = Symbol[]
     interval_ok || push!(failures, :objective_interval)
     oracle_ok || push!(failures, :oracle)
@@ -876,8 +990,8 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
         instance.id, instance.family, instance.tier.name, precision.name, precision.bits,
         SDPX.status(solved), certificate.valid, objective,
         string(certificate.dual_objective), string(certificate.primal_residual),
-        string(certificate.dual_residual), string(certificate.relative_gap), solved.iterations,
-        setup, core_seconds, recovery_seconds, measurement.bytes,
+        string(certificate.dual_residual), string(certificate.relative_gap), metrics,
+        solved.iterations, setup, core_seconds, recovery_seconds, measurement.bytes,
         input_fingerprint(instance), execution_fingerprint(instance, precision), validation,
         _route_receipt(diagnostics),
     )

@@ -90,8 +90,7 @@ end
 
 function _interval(value::BigFloat)
     setprecision(BigFloat, 256) do
-        δ = BigFloat("5e-7")
-        (string(value - δ), string(value + δ))
+        (string(value), string(value))
     end
 end
 
@@ -222,8 +221,8 @@ _power_oracle(oracle::V2PowerOracle, built, certificate) = begin
     actual == get(built.facts, :model_contract_fingerprint, "") || return false
     all(a -> 0//1 < a < 1//1, artifact.alphas) || return false
     artifact.kind === :weighted_mean ? artifact.weighted_values == Rational{Int}[1, 1] : all(==(1//1), artifact.fixed_values) || return false
-    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("5e-7")
+    # Objective accuracy is enforced centrally by run_instance.
+    true
 end
 
 (oracle::V2PowerOracle)(built, certificate) = _power_oracle(oracle, built, certificate)
@@ -303,8 +302,8 @@ function power_tranche_catalog()
              transform=transform, solve_eligible=true), _hex(artifact),
             (wall_seconds=20, memory_bytes=4 * 1024^3),
             V2Reference(:optimal, :optimal,
-                (string(BigFloat(artifact.objective)-BigFloat("5e-7")),
-                 string(BigFloat(artifact.objective)+BigFloat("5e-7"))),
+                (string(BigFloat(artifact.objective)),
+                 string(BigFloat(artifact.objective))),
                 V2PowerOracle(artifact), text), artifact))
     end
     family = V2Family(:power, V2Axis[],

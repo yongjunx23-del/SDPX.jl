@@ -61,8 +61,8 @@ function (oracle::V2SOCOracle)(built, certificate)
                     for row in axes(artifact.A, 1))
     primal_value == BigFloat(artifact.objective) || return false
     dual_value == BigFloat(artifact.objective) || return false
-    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("5e-7")
+    # Objective accuracy is enforced centrally by run_instance.
+    true
 end
 
 function _soc_build(artifact::SOCPArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
@@ -154,8 +154,8 @@ function socp_tranche_catalog()
         (instance, result) -> result.validation, (:identity,))
     instances = V2Instance[]
     for (index, artifact) in enumerate(artifacts)
-        interval = (string(BigFloat(artifact.objective) - BigFloat("5e-7")),
-            string(BigFloat(artifact.objective) + BigFloat("5e-7")))
+        interval = (string(BigFloat(artifact.objective)),
+            string(BigFloat(artifact.objective)))
         reference = V2Reference(:optimal, :optimal, interval,
             V2SOCOracle(artifact), descriptions[index];
             expected_status=:optimal, disposition=:PASS)

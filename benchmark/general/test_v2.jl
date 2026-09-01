@@ -141,21 +141,36 @@ end
 
     reviewed = reviewed_precision_specs()
     @test length(reviewed) == 7
-    @test all(GeneralBenchmarkV2._validate_precision_spec, reviewed)
     @test reviewed[1].bits == 53
     @test reviewed[end].bits == 1024
+    # Reviewed declarations intentionally carry symbolic arithmetic names;
+    # only concrete execution specifications may enter the validator.
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(reviewed[2])
     @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
         V2Precision(:Float64, Float64, 52, "1e-8", "5e-7", :cholmod))
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, Float64, 53, "not-a-number", "5e-7", :cholmod))
+    execution = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :cholmod)
+    @test GeneralBenchmarkV2._validate_precision_spec(execution)
 
-    cert = (primal_residual_scaled=BigFloat("1e-8"),
-            dual_residual_scaled=BigFloat("2e-8"), relative_gap=BigFloat("3e-8"))
-    @test certificate_gate(cert, reviewed[1])
-    @test !certificate_gate((primal_residual_scaled=BigFloat("1"),
-        dual_residual_scaled=BigFloat("0"), relative_gap=BigFloat("0")), reviewed[1])
-    @test !certificate_gate((primal_residual_scaled=BigFloat("0"),
-        dual_residual_scaled=BigFloat("0")), reviewed[1])
-    @test !certificate_gate((primal_residual_scaled=BigFloat("-1"),
-        dual_residual_scaled=BigFloat("0"), relative_gap=BigFloat("0")), reviewed[1])
+    metrics = (finite_objectives=true, primal_affine=BigFloat("1e-8"),
+        primal_cone=BigFloat("2e-8"), dual_affine=BigFloat("1e-8"),
+        dual_cone=BigFloat("2e-8"), relative_gap=BigFloat("3e-8"),
+        relative_complementarity=BigFloat("4e-8"))
+    @test certificate_gate(metrics, execution)
+    @test !certificate_gate(merge(metrics, (relative_complementarity=BigFloat("1"),)), execution)
+    @test !certificate_gate((finite_objectives=true,
+        primal_affine=BigFloat("0"), primal_cone=BigFloat("0"),
+        dual_affine=BigFloat("0"), dual_cone=BigFloat("0"),
+        relative_gap=BigFloat("0")), execution)
+    # The effective objective allowance is precision-specific: a 1e-20 error
+    # is accepted by Float64 but rejected by BigFloat512's 5e-46 limit.
+    exact_ref = V2Reference(:optimal, :optimal,
+        ("1", "1"), (built, certificate) -> true, "synthetic interval"; expected_status=:optimal)
+    x64 = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :cholmod)
+    bf512 = V2Precision(:BigFloat512, BigFloat, 512, "1e-50", "5e-46", :bigfloat_linear_algebra)
+    @test GeneralBenchmarkV2._objective_interval_ok(exact_ref, "1.0", x64)
+    @test !GeneralBenchmarkV2._objective_interval_ok(exact_ref, "1.00000000000000000001", bf512)
 
     # Manifest verification hashes file bytes, not host-endian decoded values,
     # and rejects missing, malformed, duplicate, or escaping entries.
