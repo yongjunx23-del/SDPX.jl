@@ -305,6 +305,10 @@ closed instead of silently falling back to Float64.
 """
 function reviewed_precision_specs()
     return (
+        # `:cholmod` is the declared numeric factor provider for the
+        # Float64 contract; `native_hsd` is the solver engine, not a provider
+        # alias. Bridges must consume this reviewed spec rather than invent a
+        # provider label (the dependent-optimizer bridge is separately tracked).
         V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :cholmod),
         V2Precision(:Float64x2, :Float64x2, 104, "1e-15", "5e-13", :multifloat_linear_algebra),
         V2Precision(:Float64x3, :Float64x3, 156, "1e-21", "5e-18", :multifloat_linear_algebra),

@@ -42,7 +42,9 @@ end
 function _run_once(catalog, instance, precision)
     outputs = SDPX.Outputs(:all, :all, :all; diagnostics=:full,
         certificate=:summary, objectives=true, history=false, trace=false)
-    return V2.run_instance(catalog, instance, precision; outputs)
+    measured = @timed V2.run_instance(catalog, instance, precision; outputs)
+    return (result=measured.value, wall_seconds=Float64(measured.time),
+            allocated_bytes=Int(measured.bytes))
 end
 
 """Run one V2 solve-eligible target and emit the optimizer's typed ProfileRow.
@@ -58,10 +60,14 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
         throw(ArgumentError("schema-v9 adapter currently accepts optimal targets only"))
     get(instance.provenance, :solve_eligible, false) === true ||
         throw(ArgumentError("target is not solve-eligible: $(instance.id)"))
+    any(x -> x.id === instance.id && x.split === :train,
+        V2.training_instances(catalog)) ||
+        throw(ArgumentError("schema-v9 adapter accepts training instances only: $(instance.id)"))
     warmup || throw(ArgumentError("schema-v9 adapter requires one excluded warmup"))
 
     _run_once(catalog, instance, precision)
-    results = [_run_once(catalog, instance, precision) for _ in 1:samples]
+    measured = [_run_once(catalog, instance, precision) for _ in 1:samples]
+    results = [m.result for m in measured]
     all(r -> r.status === :optimal && r.certificate_valid, results) ||
         throw(ArgumentError("V2 target did not certify in every sample"))
     all(r -> r.validation.reference && isempty(r.validation.failures), results) ||
@@ -80,14 +86,21 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
     catalog_fp = V2.catalog_fingerprint(catalog)
     route = routes[1]
     objectives = [parse(Float64, r.objective) for r in results]
-    seconds = [r.core_seconds === nothing ? 0.0 : Float64(r.core_seconds) for r in results]
+    seconds = [m.wall_seconds for m in measured]
+    core_seconds = [r.core_seconds === nothing ? nothing : Float64(r.core_seconds) for r in results]
+    recovery_seconds = [r.recovery_seconds === nothing ? nothing : Float64(r.recovery_seconds) for r in results]
     all(isfinite, seconds) && all(>(0), seconds) ||
-        throw(ArgumentError("V2 core timing must be positive for every sample"))
+        throw(ArgumentError("V2 total timing must be positive for every sample"))
+    all(x -> x === nothing || (isfinite(x) && x >= 0), core_seconds) ||
+        throw(ArgumentError("V2 core timing is invalid"))
+    all(x -> x === nothing || (isfinite(x) && x >= 0), recovery_seconds) ||
+        throw(ArgumentError("V2 recovery timing is invalid"))
     all(isfinite, objectives) || throw(ArgumentError("V2 objective is non-finite"))
-    reference_objective = parse(Float64, first(results).objective)
     interval = instance.reference.objective_interval
     interval === nothing && throw(ArgumentError("optimal V2 target lacks objective interval"))
     lower, upper = interval
+    reference_objective = Float64(
+        (parse(BigFloat, lower) + parse(BigFloat, upper)) / BigFloat(2))
     objective_tolerance = parse(Float64, precision.certificate_limit)
     run_id = get(ENV, "CATALOG_RUN_ID",
         _sha((commit, tree, catalog_fp, instance.id, precision.name)))
@@ -110,13 +123,24 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
         "environment_fingerprint" => _sha(env),
         "provider_fingerprint" => provider_fp,
         "provider_version" => string(precision.provider),
+        "precision_bits" => precision.bits,
+        "provider_match" => begin
+            p = (route.requested_provider, route.executed_provider)
+            any(==("not_declared_by_api"), p) ? "not_declared_by_api" : (p[1] == p[2])
+        end,
+        "unexpected_fallback" => begin
+            r = (route.planned_route, route.executed_route)
+            any(==("not_declared_by_api"), r) ? "not_declared_by_api" : (r[1] != r[2])
+        end,
         "cpu" => env.cpu,
         "julia_threads" => env.julia_threads,
         "blas_threads" => env.blas_threads,
         "omp_threads" => env.omp_threads,
         "gc_threads" => env.gc_threads,
         "objective_interval" => Dict("lower" => lower, "upper" => upper),
-        "actual_objective" => reference_objective,
+        "reference_objective" => reference_objective,
+        "actual_objective" => objectives,
+        "objective_error" => [abs(x - reference_objective) for x in objectives],
         "resolved_tolerances" => Dict("primal" => precision.solver_tolerance,
             "dual" => precision.solver_tolerance, "gap" => precision.solver_tolerance),
         "route_receipt" => route_values,
@@ -145,6 +169,17 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
         "warmup_excluded" => 1,
         "sample_count" => 3,
         "fresh_process" => false,
+        "precision_bits" => precision.bits,
+        "sample_total_seconds" => seconds,
+        "sample_setup_seconds" => [r.setup_seconds for r in results],
+        "sample_core_seconds" => core_seconds,
+        "sample_recovery_seconds" => recovery_seconds,
+        "sample_allocated_bytes" => [m.allocated_bytes for m in measured],
+        "phase_accounting_complete" => false,
+        "production_invariants_valid" => "not_declared_by_api",
+        "full_numerical_gate_valid" => all(r -> r.validation.certificate &&
+            r.validation.reference, results),
+        "catalog_validation_pass" => true,
     )
     return P.ProfileRow(
         case_key=receipt["case_key"], catalog=String(catalog.name), id=String(instance.id),
@@ -153,8 +188,8 @@ function profile_v2_target(catalog, instance, precision; warmup=true, samples=3)
         source=instance.source, status="optimal", certificate_valid=true,
         semantic_pass=true, objective=reference_objective,
         iterations=first(results).iterations, sample_seconds=seconds,
-        sample_core_seconds=seconds, setup_seconds=first(results).setup_seconds,
-        allocation_bytes=Int[r.allocated_bytes for r in results],
+        sample_core_seconds=Float64[x === nothing ? 0.0 : x for x in core_seconds], setup_seconds=first(results).setup_seconds,
+        allocation_bytes=Int[m.allocated_bytes for m in measured],
         sample_iterations=Int[r.iterations for r in results],
         peak_rss_bytes=nothing, reference_status="optimal",
         reference_objective=reference_objective, objective_tolerance=objective_tolerance,
@@ -197,7 +232,7 @@ function schema9_row(row::P.ProfileRow)
     values[:source] = row.source
     values[:purpose] = "solve_eligible_train"
     values[:arithmetic] = row.arithmetic
-    values[:precision_bits] = 53
+    values[:precision_bits] = get(row.receipt, "precision_bits", missing)
     values[:requested_provider] = get(row.receipt, "requested_provider", missing)
     values[:status] = row.status
     values[:reference_status] = row.reference_status
@@ -212,18 +247,21 @@ function schema9_row(row::P.ProfileRow)
     values[:reference_objective] = string(row.reference_objective)
     values[:objective_interval_lower] = row.reference_lower
     values[:objective_interval_upper] = row.reference_upper
-    values[:objective_in_reference_interval] = true
-    values[:objective_error] = 0.0
+    values[:objective_in_reference_interval] = row.reference_lower !== nothing &&
+        row.reference_upper !== nothing && row.objective >= row.reference_lower &&
+        row.objective <= row.reference_upper
+    values[:objective_error] = row.reference_objective === nothing ? missing :
+        abs(row.objective - row.reference_objective)
     values[:certificate_kind] = get(row.receipt, "certificate_kind", "optimal")
     values[:certificate_failures] = ""
     values[:certificate_policy] = "strict_original_coordinate"
     values[:certificate_available] = true
     values[:certificate_valid] = row.certificate_valid
-    values[:provider_match] = true
-    values[:unexpected_fallback] = false
-    values[:production_invariants_valid] = true
-    values[:full_numerical_gate_valid] = true
-    values[:catalog_validation_pass] = true
+    values[:provider_match] = get(row.receipt, "provider_match", missing)
+    values[:unexpected_fallback] = get(row.receipt, "unexpected_fallback", missing)
+    values[:production_invariants_valid] = get(row.receipt, "production_invariants_valid", missing)
+    values[:full_numerical_gate_valid] = get(row.receipt, "full_numerical_gate_valid", missing)
+    values[:catalog_validation_pass] = get(row.receipt, "catalog_validation_pass", missing)
     values[:catalog_validation_failures] = ""
     values[:semantic_pass] = row.semantic_pass
     values[:semantic_failures] = ""
@@ -243,13 +281,17 @@ function schema9_row(row::P.ProfileRow)
     values[:sample_mad_seconds] = 0.0
     values[:sample_spread_seconds] = maximum(row.sample_seconds) - minimum(row.sample_seconds)
     values[:allocated_bytes] = P._median(row.allocation_bytes)
-    values[:setup_seconds] = row.setup_seconds
+    # V2 setup_seconds is model-build/frontend time; do not relabel it as
+    # solver setup. Native diagnostics provide core separately; exact phase
+    # decomposition is unavailable, so these fields remain missing.
+    values[:setup_seconds] = missing
+    values[:frontend_seconds] = row.setup_seconds
     values[:core_seconds] = P._median(row.sample_core_seconds)
     values[:process_peak_rss_bytes] = row.peak_rss_bytes
     values[:memory_budget_bytes] = 4 * 1024^3
-    values[:phase_consistent] = true
-    values[:phase_accounted_seconds] = values[:core_seconds]
-    values[:phase_unaccounted_seconds] = 0.0
+    values[:phase_consistent] = get(row.receipt, "phase_accounting_complete", missing)
+    values[:phase_accounted_seconds] = missing
+    values[:phase_unaccounted_seconds] = missing
     values[:attempt_count] = 1
     values[:input_fingerprint] = row.input_fingerprint
     return NamedTuple{RESULT_COLUMNS}(Tuple(values[field] for field in RESULT_COLUMNS))

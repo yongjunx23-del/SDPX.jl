@@ -198,14 +198,15 @@ end
     receipt = GenericConicBenchmark.validate_external_holdout_manifest(
         manifest; root=data_root)
     @test receipt.rows == 9
-    @test length(receipt.eligible) == 6
+    @test isempty(receipt.eligible)
     @test Set(receipt.eligible) == Set(string(spec.id) for spec in
         GenericConicBenchmark.external_holdout_inventory(; eligible_only=true))
     afiro = only(filter(spec -> spec.id === :netlib_afiro,
         GenericConicBenchmark.external_holdout_inventory()))
     @test afiro.split === :train
     @test afiro.parity_pending
-    @test afiro.solve_eligible
+    @test !afiro.solve_eligible
+    @test isempty(afiro.parity_sha256)
     @test length(afiro.sha256) == 64
     @test length(afiro.parsed_fingerprint) == 64
     deferred = only(filter(spec -> spec.id === :netlib_share2b,
@@ -234,6 +235,7 @@ parsed_fingerprint = \"\"
 official_status = \"optimal\"
 objective_interval = []
 parity_pending = true
+parity_sha256 = ""
 solve_eligible = false
 """)
         result = GenericConicBenchmark.validate_external_holdout_manifest(
