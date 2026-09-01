@@ -1667,3 +1667,5 @@ function sdp_tranche_catalog()
     _rsoc_or_sdp_catalog(:general_v2_sdp_tranche, :sdp, _sdp_artifacts(),
         _typed_sdp_build, V2SDPOracle, :psd_exact_gram)
 end
+
+include(joinpath(@__DIR__, "exp_power_catalog.jl"))
