@@ -54,7 +54,7 @@ function _native_artifact(family, id; split=:train, infeasible=false)
         return V2ConicArtifact(family, id, coefficients, length(coefficients), 1//2, infeasible,
             Symbol(family, :_generator_, split), 1)
     elseif family === :soc
-        coefficients = suffix == 0 ? Rational{Int}[1//4, 3//4] : Rational{Int}[1//2, 1//2]
+        coefficients = suffix == 0 ? Rational{Int}[0, 0] : Rational{Int}[1//2, 1//2]
         return V2ConicArtifact(family, id, coefficients, 2, 1//2, infeasible,
             Symbol(family, :_generator_, split), 1)
     elseif family === :rsoc
@@ -76,13 +76,14 @@ end
 function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractFloat}
     model = SDPX.Model(T; name=String(artifact.id))
     f = artifact.family
+    cone_parameter = _Tq(T, artifact.cone_parameter)
     witness = Rational{Int}[]
     objective = nothing
     if f === :lp
         n = artifact.dimension
         x = SDPX.variable!(model, :x, n; domain=SDPX.Nonnegative())
         for i in 1:n
-            value = _Tq(T, _q(artifact, i)); value >= zero(T) || throw(ArgumentError("LP artifact is not feasible"))
+            value = _Tq(T, _q(artifact, i)) * cone_parameter; value >= zero(T) || throw(ArgumentError("LP artifact is not feasible"))
             _fix!(model, Symbol(:fix_, i), x[i], value, T)
             push!(witness, _q(artifact, i))
         end
@@ -91,7 +92,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
     elseif f === :nonpositive
         x = SDPX.variable!(model, :x, artifact.dimension; domain=SDPX.Nonpositive())
         for i in 1:artifact.dimension
-            value = _Tq(T, _q(artifact, i)); value <= zero(T) || throw(ArgumentError("Nonpositive artifact is not feasible"))
+            value = _Tq(T, _q(artifact, i)) * cone_parameter; value <= zero(T) || throw(ArgumentError("Nonpositive artifact is not feasible"))
             _fix!(model, Symbol(:fix_, i), x[i], value, T); push!(witness, _q(artifact, i))
         end
         artifact.infeasible && _contradict!(model, :contradiction, x[1], _Tq(T, _q(artifact, 1)), T)
@@ -100,7 +101,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         x = SDPX.variable!(model, :x, artifact.dimension; domain=SDPX.Reals())
         vals = [_Tq(T, _q(artifact, i)) for i in 1:artifact.dimension]
         norm(vals) <= one(T) || throw(ArgumentError("SOC artifact is outside Q3"))
-        SDPX.constraint!(model, :soc, Any[T(2), x[1], x[2]], SDPX.LorentzCone())
+        SDPX.constraint!(model, :soc, Any[one(T) + cone_parameter, x[1], x[2]], SDPX.LorentzCone())
         for i in 1:artifact.dimension
             _fix!(model, Symbol(:fix_, i), x[i], vals[i], T); push!(witness, _q(artifact, i))
         end
@@ -109,7 +110,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
     elseif f === :rsoc
         u = SDPX.variable!(model, :left, 1; domain=SDPX.Reals())
         v = SDPX.variable!(model, :right, 1; domain=SDPX.Reals())
-        target = _Tq(T, _q(artifact, 1))
+        target = _Tq(T, _q(artifact, 1)) * cone_parameter
         SDPX.constraint!(model, :rsoc, (u[1], v[1], target), SDPX.RotatedLorentzCone())
         _fix!(model, :fix_left, u[1], one(T), T); _fix!(model, :fix_right, v[1], one(T), T)
         artifact.infeasible && _contradict!(model, :contradiction, u[1], one(T), T)
@@ -119,14 +120,15 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         artifact.dimension == 2 || throw(ArgumentError("native SDP artifact dimension must be 2"))
         X = SDPX.variable!(model, :X, 2, 2; domain=SDPX.PSDCone())
         vals = [_Tq(T, _q(artifact, i)) for i in 1:4]
+        vals[2] *= cone_parameter; vals[3] *= cone_parameter
         _fix!(model, :diag1, X[1, 1], vals[1], T); _fix!(model, :offdiag, X[1, 2], vals[2], T)
         _fix!(model, :offdiag_lower, X[2, 1], vals[3], T); _fix!(model, :diag2, X[2, 2], vals[4], T)
         artifact.infeasible && _contradict!(model, :contradiction, X[1, 1], vals[1], T)
         append!(witness, [_q(artifact, i) for i in 1:4]); objective = X[1, 1] + X[2, 2]
     elseif f === :exp
         x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals()); value = _Tq(T, _q(artifact, 1))
-        value >= one(T) || throw(ArgumentError("EXP artifact is outside the exponential epigraph"))
-        SDPX.constraint!(model, :exp, (zero(T), one(T), x[1]), SDPX.ExponentialCone())
+        value >= cone_parameter || throw(ArgumentError("EXP artifact is outside the exponential epigraph"))
+        SDPX.constraint!(model, :exp, (zero(T), cone_parameter, x[1]), SDPX.ExponentialCone())
         _fix!(model, :fix, x[1], value, T); artifact.infeasible && _contradict!(model, :contradiction, x[1], value, T)
         push!(witness, _q(artifact, 1)); objective = x[1]
     elseif f === :power
@@ -138,7 +140,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
     elseif f === :mixed
         positive = SDPX.variable!(model, :positive, 1; domain=SDPX.Nonnegative())
         negative = SDPX.variable!(model, :negative, 1; domain=SDPX.Nonpositive())
-        SDPX.constraint!(model, :soc, Any[T(2), positive[1], negative[1]], SDPX.LorentzCone())
+        SDPX.constraint!(model, :soc, Any[one(T) + cone_parameter, positive[1], negative[1]], SDPX.LorentzCone())
         p, n = _Tq(T, _q(artifact, 1)), _Tq(T, _q(artifact, 2))
         p >= zero(T) && n <= zero(T) || throw(ArgumentError("mixed artifact domain violation"))
         _fix!(model, :fix_positive, positive[1], p, T); _fix!(model, :fix_negative, negative[1], n, T)
@@ -157,7 +159,9 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
     # exact witness/model source identity.
     expected = f === :sdp ? _q(artifact, 1) + _q(artifact, 4) :
         f === :rsoc ? 2//1 : f === :mixed ? _q(artifact, 1) - _q(artifact, 2) :
-        f === :nonpositive ? -sum(artifact.coefficients[1:artifact.dimension]) :
+        f in (:lp, :nonpositive) ? artifact.cone_parameter *
+            (f === :nonpositive ? -sum(artifact.coefficients[1:artifact.dimension]) :
+             sum(artifact.coefficients[1:artifact.dimension])) :
         sum(witness[1:min(length(witness), artifact.dimension)])
     oracle = V2ExactOracle(artifact.infeasible ? :primal_infeasible : :optimal,
         expected, witness, artifact.infeasibility_ray, artifact)
@@ -216,7 +220,9 @@ function _native_reference(artifact::V2ConicArtifact)
     # input fingerprint even when the objective oracle is unchanged.
     objective = artifact.family === :sdp ? _q(artifact,1)+_q(artifact,4) :
         artifact.family === :rsoc ? 2//1 : artifact.family === :mixed ? _q(artifact,1)-_q(artifact,2) :
-        artifact.family === :nonpositive ? -sum(artifact.coefficients[1:artifact.dimension]) :
+        artifact.family in (:lp, :nonpositive) ? artifact.cone_parameter *
+            (artifact.family === :nonpositive ? -sum(artifact.coefficients[1:artifact.dimension]) :
+             sum(artifact.coefficients[1:artifact.dimension])) :
         sum(artifact.coefficients[1:artifact.dimension])
     exact_value = BigFloat(numerator(objective)) / BigFloat(denominator(objective))
     # Exact decimal interval strings retain the rational oracle while allowing
