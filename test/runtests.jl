@@ -9,6 +9,7 @@ include(joinpath(
     @__DIR__, "..", "benchmark", "general", "GenericConicBenchmark.jl",
 ))
 using .GenericConicBenchmark
+include(joinpath(@__DIR__, "route_guard.jl"))
 
 const E2E_CASE_IDS = (
     :lp_afiro_style,
