@@ -34,7 +34,7 @@ using .GeneralBenchmarkV2
     @test input_fingerprint(instance) != input_fingerprint(mutated)
 
     family = V2Family(:unit, V2Axis[],
-        (i, p) -> V2Built(nothing, nothing, nothing, "source",
+        (i, p) -> V2Built(nothing, nothing, nothing, input_fingerprint(i),
             exact, (source_dimension=1, target_dimension=1),
             (setup_seconds=nothing,)), nothing,
         (i, r) -> V2Validation(:optimal, true, true, Symbol[]), (:halfline_sos,))
@@ -90,11 +90,16 @@ end
     @test all(i -> i.payload isa V2ConicArtifact && i.payload.family == i.family,
               catalog.instances)
     @test all(i -> i.reference.oracle !== nothing, catalog.instances)
+    sent = only(filter(i -> i.split === :sentinel && i.family === :lp, catalog.instances))
+    @test sent.reference.status === :xfail
+    @test sent.reference.expected_status === :primal_infeasible
+    @test sent.reference.disposition === :XFAIL
+    @test sent.reference.oracle.dual_ray == Rational{Int}[1, -1]
     @test all(i -> i.split == :train ? i.id in catalog.suites.train :
                    (i.split == :holdout ? i.id in catalog.suites.holdout : i.id in catalog.suites.sentinel),
               catalog.instances)
     precision = V2Precision(:Float64, Float64, 53, "1e-8", "1e-8", :standard)
-    for family in (:lp, :soc, :rsoc, :sdp, :exp, :power, :mixed)
+    for family in (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed)
         instance = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
         result = run_instance(catalog, instance, precision)
         @test result.status === :optimal
@@ -104,4 +109,21 @@ end
         @test result.setup_seconds !== nothing
         @test result.core_seconds !== nothing
     end
+
+    # Every exact coefficient is semantic input, not decorative metadata.
+    original = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
+    changed_artifact = V2ConicArtifact(:soc, original.id,
+        Rational{Int}[1//3, 2//3], 2, 1//2, false, :changed, 1)
+    changed = V2Instance(original.id, original.family, original.tier,
+        original.axis_values, original.split, original.source, original.provenance,
+        GeneralBenchmarkV2._hex(changed_artifact), original.resource, original.reference, changed_artifact)
+    @test input_fingerprint(changed) != input_fingerprint(original)
+    changed_built, _ = build_instance(catalog, changed, precision)
+    @test changed_built.facts.coefficients == changed_artifact.coefficients
+    @test changed_built.input_fingerprint == input_fingerprint(changed)
+    @test changed_built.input_fingerprint != input_fingerprint(original)
+    # The canonical encoder is explicit for exact rational coefficients and
+    # does not depend on host-endian or struct string formatting.
+    @test GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//3]) !=
+          GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//4])
 end

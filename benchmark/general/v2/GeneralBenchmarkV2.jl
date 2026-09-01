@@ -66,15 +66,28 @@ end
 """Independent reference contract; an absent oracle is explicitly build-only."""
 struct V2Reference{O}
     status::Symbol
+    expected_status::Symbol
+    disposition::Symbol
     certificate_kind::Symbol
     objective_interval::Union{Nothing,Tuple{String,String}}
     oracle::O
     note::String
     function V2Reference(status::Symbol, certificate_kind::Symbol,
-                         objective_interval, oracle, note::AbstractString="")
+                         objective_interval, oracle, note::AbstractString="";
+                         expected_status::Symbol=status,
+                         disposition::Symbol=(status === :xfail ? :XFAIL : :PASS))
         status in (:optimal, :primal_infeasible, :dual_infeasible, :build_only,
                    :discretized, :xfail) ||
             throw(ArgumentError("unsupported reference status $status"))
+        expected_status in (:optimal, :primal_infeasible, :dual_infeasible,
+                            :iteration_limit, :build_only) ||
+            throw(ArgumentError("unsupported expected solver status $expected_status"))
+        disposition in (:PASS, :FAIL, :XFAIL, :XPASS, :RESOLVED) ||
+            throw(ArgumentError("unsupported reference disposition $disposition"))
+        status === :xfail && disposition ∉ (:XFAIL, :XPASS, :RESOLVED) &&
+            throw(ArgumentError("xfail disposition must be XFAIL, XPASS, or RESOLVED"))
+        status !== :xfail && disposition === :XFAIL &&
+            throw(ArgumentError("only xfail references may use XFAIL disposition"))
         certificate_kind in (:optimal, :farkas, :ray, :build_only, :interval_or_bound) ||
             throw(ArgumentError("unsupported certificate kind $certificate_kind"))
         interval = if objective_interval === nothing
@@ -87,9 +100,17 @@ struct V2Reference{O}
             throw(ArgumentError("build-only reference requires certificate_kind=:build_only"))
         status !== :build_only && oracle === nothing &&
             throw(ArgumentError("non-build reference requires an independent oracle"))
+        status === :optimal && (expected_status !== :optimal || certificate_kind !== :optimal || interval === nothing) &&
+            throw(ArgumentError("optimal reference requires optimal status, certificate, and interval"))
+        status === :primal_infeasible && (expected_status !== :primal_infeasible || certificate_kind !== :farkas) &&
+            throw(ArgumentError("primal-infeasible reference requires a Farkas contract"))
         status === :xfail && isempty(note) &&
             throw(ArgumentError("xfail reference requires an issue note"))
-        new{typeof(oracle)}(status, certificate_kind, interval, oracle, String(note))
+        status === :build_only && expected_status !== :build_only &&
+            throw(ArgumentError("build-only expected solver status must be build_only"))
+        status === :xfail && expected_status === :xfail &&
+            throw(ArgumentError("xfail must declare the expected solver status separately"))
+        new{typeof(oracle)}(status, expected_status, disposition, certificate_kind, interval, oracle, String(note))
     end
 end
 
@@ -262,6 +283,8 @@ function _put!(io::IO, value)
         _put_u64be!(io, UInt64(length(bytes))); write(io, bytes)
     elseif value isa Integer
         text = string(value); write(io, UInt8(0x04)); _put_u64be!(io, UInt64(length(text))); write(io, codeunits(text))
+    elseif value isa Rational
+        _put!(io, (:rational, numerator(value), denominator(value)))
     elseif value isa AbstractFloat
         text = sprint(show, value; context=:canonical=>true)
         _put!(io, text)
@@ -282,7 +305,9 @@ function _put!(io::IO, value)
     elseif value isa V2Tier
         _put!(io, (value.name, value.lane, value.wall_seconds, value.memory_bytes, value.solve_policy))
     elseif value isa V2Reference
-        _put!(io, (value.status, value.certificate_kind, value.objective_interval, value.note))
+        _put!(io, (value.status, value.expected_status, value.disposition,
+                   value.certificate_kind, value.objective_interval,
+                   value.oracle, value.note))
     elseif value isa V2Transform
         _put!(io, (value.source_problem_type, value.target_cone_program,
                    value.transform_id, value.version, value.exactness,
@@ -358,6 +383,13 @@ end
 function validate_catalog(catalog::V2Catalog)
     families = _family_map(catalog)
     ids = Set{Symbol}()
+    suite_sets = Dict(
+        :train => Set(Symbol.(catalog.suites.train)),
+        :holdout => Set(Symbol.(catalog.suites.holdout)),
+        :sentinel => Set(Symbol.(catalog.suites.sentinel)),
+    )
+    sum(length, values(suite_sets)) == length(union(values(suite_sets)...)) ||
+        throw(ArgumentError("V2 suites overlap"))
     for instance in catalog.instances
         instance.id in ids && throw(ArgumentError("duplicate V2 instance $(instance.id)"))
         push!(ids, instance.id)
@@ -365,10 +397,16 @@ function validate_catalog(catalog::V2Catalog)
         isempty(instance.checksum) && throw(ArgumentError("missing checksum for $(instance.id)"))
         instance.split in (:train, :holdout, :sentinel) ||
             throw(ArgumentError("invalid split $(instance.split) for $(instance.id)"))
+        instance.id in suite_sets[instance.split] ||
+            throw(ArgumentError("instance $(instance.id) is absent from its suite"))
             (instance.reference.status === :build_only) ==
             (instance.reference.certificate_kind === :build_only) ||
             throw(ArgumentError("build-only reference mismatch for $(instance.id)"))
+        instance.reference.status === :xfail && instance.reference.disposition !== :XFAIL &&
+            throw(ArgumentError("xfail disposition mismatch for $(instance.id)"))
     end
+    union(values(suite_sets)...) == ids ||
+        throw(ArgumentError("V2 suites must partition all instance IDs"))
     return true
 end
 
@@ -377,6 +415,8 @@ function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2P
     started = time_ns()
     built = family.build(instance, precision)
     built isa V2Built || throw(ArgumentError("V2 builder must return V2Built"))
+    built.input_fingerprint == input_fingerprint(instance) ||
+        throw(ArgumentError("builder input fingerprint does not match instance"))
     built.transform.exactness in (:identity, :exact_univariate_halfline,
         :exact_univariate_matrix_halfline_if_proved, :sos_relaxation,
         :finite_grid_surrogate) || throw(ArgumentError("invalid transform metadata"))
@@ -412,16 +452,27 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     solved = measurement.value
     certificate = SDPX.certificate(solved)
     objective = string(certificate.primal_objective)
+    interval_ok = if instance.reference.objective_interval === nothing
+        instance.reference.status !== :optimal
+    else
+        lower, upper = instance.reference.objective_interval
+        value = try BigFloat(objective) catch; BigFloat(NaN) end
+        isfinite(value) && BigFloat(lower) <= value <= BigFloat(upper)
+    end
     oracle_ok = instance.reference.oracle === nothing ?
         instance.reference.status === :build_only : instance.reference.oracle(built, certificate)
     cert_ok = instance.reference.status === :build_only || certificate.valid
     failures = Symbol[]
+    interval_ok || push!(failures, :objective_interval)
     oracle_ok || push!(failures, :oracle)
     cert_ok || push!(failures, :certificate)
-    status_ok = SDPX.status(solved) === instance.reference.status
+    status_ok = SDPX.status(solved) === instance.reference.expected_status
     instance.reference.status === :build_only && (status_ok = true)
     status_ok || push!(failures, :status)
-    validation = V2Validation(SDPX.status(solved), certificate.valid, oracle_ok && status_ok, failures)
+    instance.reference.disposition === :XFAIL &&
+        (status_ok = !status_ok; push!(failures, :xfail_expected_failure))
+    validation = V2Validation(SDPX.status(solved), certificate.valid,
+        oracle_ok && interval_ok && status_ok, failures)
     return V2RunResult(
         instance.id, instance.family, instance.tier.name, precision.name, precision.bits,
         SDPX.status(solved), certificate.valid, objective,
@@ -477,11 +528,14 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
             ref_status === :dual_infeasible ? :ray : ref_status === :xfail ? :interval_or_bound : :optimal
         interval = spec.known_objective === nothing ? nothing :
             (string(spec.known_objective - spec.objective_tolerance), string(spec.known_objective + spec.objective_tolerance))
+        expected_status = ref_status === :xfail ? :iteration_limit : ref_status
         ref = V2Reference(ref_status, cert_kind, interval,
             (built, cert) -> begin
                 spec.known_objective === nothing || isapprox(cert.primal_objective,
                     spec.known_objective; atol=spec.objective_tolerance, rtol=spec.objective_tolerance)
-            end, "Adapted from V1; independent source metadata retained")
+            end, "Adapted from V1; independent source metadata retained";
+            expected_status=expected_status,
+            disposition=(ref_status === :xfail ? :XFAIL : :PASS))
         checksum = _hex((source=spec.source, id=spec.id, params=spec.params,
                          objective=spec.known_objective))
         push!(instances, V2Instance(spec.id, spec.family, tier, spec.params, :train,
