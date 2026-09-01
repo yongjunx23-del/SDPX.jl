@@ -584,6 +584,7 @@ end
             atol=5e-7, rtol=0)
         @test result.core_seconds !== nothing
     end
+end
 
 @testset "typed EXP and Power small tranche" begin
     precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
