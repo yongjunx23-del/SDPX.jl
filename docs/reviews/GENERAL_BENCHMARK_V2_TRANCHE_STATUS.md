@@ -33,14 +33,17 @@ constructor path.
 ### First certified LP lowering
 
 The first family-specific lowering is now implemented for the exact standard-form LP
-artifact. The catalog `lp_tranche_catalog()` registers three Float64-certified
-cases:
+artifact. The catalog `lp_tranche_catalog()` registers four Float64-certified
+optimal cases plus two certified ray cases:
 
 | Kind | Case | Exact optimum | Independent proof |
 |---|---|---:|---|
 | box | `v2_lp_box_small` | -5 | `x+s=(1,2)`, `x,s>=0`; `y=(-1,-2)` gives `c'x=b'y=-5` |
 | sparse planted KKT | `v2_lp_sparse_planted_small` | -4 | `A=[1 1 1 0;0 1 0 1]`, planted `(1,1,0,0)`, `y=(-1,-2)` gives `c'x=b'y=-4` |
 | Nonpositive sign sentinel | `v2_lp_nonpositive_small` | -2 | `x=-2`, `y=1`; sign flip `z=-x=2` reduces to the known nonnegative fixed-point optimum |
+| Chebyshev epigraph | `v2_lp_chebyshev_small` | 1 | `y_i=(-1)^i`, `x_i=max(y_i,0)`, `t=1`; negative datum forces `t>=1`, dual multiplier `-1` proves equality |
+| primal infeasible | `v2_lp_primal_infeasible_small` | — | contradictory `x=1/x=2` rows with exact Farkas multiplier `(1,-1)` |
+| dual infeasible | `v2_lp_unbounded_small` | — | `d=(1,1)` satisfies `Ad=0`, lies in the nonnegative cone, and `c'd=-1` |
 
 The lowering consumes exact rational `A/b/c`, builds the public SDPX model, and
 binds the result to a generated-model fingerprint. The independent oracle checks
@@ -85,11 +88,11 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 
 | Requested family/kind | Current status | Reason / next work |
 |---|---|---|
-| LP: box, sparse planted KKT | **certified tranche** | `lp_tranche_catalog()`: Float64 status/certificate/oracle gates pass; receipts recorded above |
+| LP: box, sparse planted KKT, Chebyshev | **certified tranche** | `lp_tranche_catalog()`: Float64 status/certificate/oracle gates pass; receipts recorded above |
 | LP: duplicate/rank-deficient | open | exact lowering exists as a probe, but current sparse route returns `numerical_breakdown`; no registration |
 | LP: primal infeasible | **certified tranche** | typed Farkas-row artifact, status gate, exact contradiction oracle, and public original-coordinate certificate pass |
 | LP: unbounded | **certified tranche** | typed homogeneous recession ray, dual-infeasible status gate, exact improving-inner-product oracle, and public original-coordinate certificate pass |
-| LP: Chebyshev | open | add epigraph/slack variables and analytic minimax oracle; current artifact is equality-only |
+| LP: Chebyshev | **certified tranche** | `v2_lp_chebyshev_small`: equality-plus-slack epigraph with exact minimax oracle and Float64 certificate |
 | Nonpositive sign sentinel | **certified tranche** | `v2_lp_nonpositive_small`: typed nonpositive partition, Float64 status/certificate/oracle gates pass |
 | SOCP small kinds | open | typed SOC block artifact; existing toy artifact is insufficient for Q33/16 Q3 |
 | RSOC, SDP, EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
@@ -105,10 +108,10 @@ small-tier inventory.
 2. External holdout files, immutable checksums, independent references, and parity.
 3. Full fresh-process/peak-RSS/schema-v9 lifecycle pipeline.
 4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
-5. Certified LP/SOCP/ill-conditioned first tranche: five LP kinds (box,
-   sparse planted KKT, Nonpositive sign, primal-infeasible Farkas, and
-   dual-infeasible improving ray) are solve-eligible with independent Float64
-   receipts. Duplicate/rank-deficient, Chebyshev, SOCP, and ill-conditioned
+5. Certified LP/SOCP/ill-conditioned first tranche: six LP kinds (box,
+   sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible Farkas,
+   and dual-infeasible improving ray) are solve-eligible with independent
+   Float64 receipts. Duplicate/rank-deficient, SOCP, and ill-conditioned
    kinds remain open rather than represented by placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;

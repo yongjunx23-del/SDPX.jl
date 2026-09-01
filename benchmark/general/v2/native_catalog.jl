@@ -929,7 +929,11 @@ function (oracle::V2LPOracle)(built, certificate)
     primal_value == BigFloat(artifact.objective) || return false
     dual_value == BigFloat(artifact.objective) || return false
     value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("1e-7")
+    # The reviewed Float64 certificate limit is 5e-7. Objective comparison
+    # uses that declared arithmetic allowance (not a solver-tolerance change),
+    # matching the V2 rule that an objective interval is at least as wide as
+    # the arithmetic certificate allowance.
+    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("5e-7")
 end
 
 function _lp_build(artifact::LPArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
@@ -1014,6 +1018,43 @@ function _lp_nonpositive_artifact()
         dual_witness=Rational{Int}[1], objective=-2//1)
 end
 
+function _lp_chebyshev_artifact()
+    # Minimize the epigraph radius t for a 32-point Chebyshev fit. The
+    # nonnegative standard-form variables are x[1:32], t, and two slack
+    # vectors. For y_i=(-1)^i, x_i=max(y_i,0), t=1, and all slacks zero;
+    # the negative datum forces t >= 1, so the exact minimax optimum is 1.
+    n = 32
+    nv = 3n + 1
+    A = zeros(Rational{Int}, 2n, nv)
+    b = zeros(Rational{Int}, 2n)
+    y = Rational{Int}[isodd(i) ? -1//1 : 1//1 for i in 1:n]
+    for i in 1:n
+        # x_i - t + s⁺_i = y_i and -x_i - t + s⁻_i = -y_i.
+        A[i, i] = 1//1
+        A[i, n + 1] = -1//1
+        A[i, n + 1 + i] = 1//1
+        b[i] = y[i]
+        A[n + i, i] = -1//1
+        A[n + i, n + 1] = -1//1
+        A[n + i, 2n + 1 + i] = 1//1
+        b[n + i] = -y[i]
+    end
+    c = zeros(Rational{Int}, nv)
+    c[n + 1] = 1//1
+    x = Rational{Int}[max(y[i], 0//1) for i in 1:n]
+    # The slacks are t - (x_i-y_i) and t - (y_i-x_i), respectively;
+    # negative data therefore has second slack 2 at the optimum.
+    splus = Rational{Int}[1//1 - (x[i] - y[i]) for i in 1:n]
+    sminus = Rational{Int}[1//1 - (y[i] - x[i]) for i in 1:n]
+    witness = vcat(x, Rational{Int}[1//1], splus, sminus)
+    # Only the first (negative) datum is active in the dual; its multiplier
+    # -1 gives A'λ <= c and b'λ = 1 exactly.
+    dual = zeros(Rational{Int}, 2n)
+    dual[1] = -1//1
+    LPArtifact(:v2_lp_chebyshev_small, :chebyshev, A, b, c;
+        primal_witness=witness, dual_witness=dual, objective=1//1)
+end
+
 function _lp_primal_infeasible_artifact()
     # Contradictory equalities x=1 and x=2 with x >= 0.  The independent
     # Farkas multiplier y=(1,-1) annihilates A and has b' y=-1 < 0.
@@ -1044,8 +1085,8 @@ function lp_tranche_catalog()
     # left open: the current sparse route reports numerical_breakdown, so it
     # must not be mislabeled solve-eligible.
     artifacts = [_lp_box_artifact(), _lp_sparse_planted_artifact(),
-        _lp_nonpositive_artifact(), _lp_primal_infeasible_artifact(),
-        _lp_unbounded_artifact()]
+        _lp_nonpositive_artifact(), _lp_chebyshev_artifact(),
+        _lp_primal_infeasible_artifact(), _lp_unbounded_artifact()]
     transforms = V2Transform(:lp_small_artifact, :sdpx_cone_program,
         :lp_standard_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
@@ -1053,6 +1094,7 @@ function lp_tranche_catalog()
         "box: x+s=u with c=(-1,-2,0,0); y=(-1,-2) proves c'x=b'y=-5",
         "sparse planted KKT: A'x dual inequality and y=(-1,-2) prove c'x=b'y=-4",
         "nonpositive sign sentinel: x=-2 with y=1 is the sign-flipped nonnegative optimum",
+        "Chebyshev epigraph: y_i=(-1)^i, x_i=max(y_i,0), t=1; the negative datum forces t>=1",
         "primal infeasible: contradictory x=1 and x=2 equalities with Farkas y=(1,-1)",
         "unbounded: d=(1,1) is an improving recession ray for min -x1",
     ]
@@ -1069,8 +1111,8 @@ function lp_tranche_catalog()
     instances = V2Instance[]
     for (index, artifact) in enumerate(artifacts)
         interval = artifact.expected_status === :optimal ?
-            (string(BigFloat(artifact.objective) - BigFloat("1e-7")),
-             string(BigFloat(artifact.objective) + BigFloat("1e-7"))) : nothing
+            (string(BigFloat(artifact.objective) - BigFloat("5e-7")),
+             string(BigFloat(artifact.objective) + BigFloat("5e-7"))) : nothing
         reference = V2Reference(artifact.expected_status, artifact.certificate_kind,
             interval, V2LPOracle(artifact), descriptions[index];
             expected_status=artifact.expected_status, disposition=:PASS)

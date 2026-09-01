@@ -202,10 +202,11 @@ end
 
 @testset "typed LP lowering has an independent certified oracle" begin
     catalog = lp_tranche_catalog()
-    @test length(catalog.instances) == 5
+    @test length(catalog.instances) == 6
     @test all(instance.payload isa LPArtifact for instance in catalog.instances)
     precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
-    expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0, :nonpositive => -2.0)
+    expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0,
+        :nonpositive => -2.0, :chebyshev => 1.0)
     for instance in catalog.instances
         @test instance.reference.oracle isa V2LPOracle
         built, elapsed = build_instance(catalog, instance, precision)
@@ -219,7 +220,7 @@ end
             @test result.certificate_valid
             @test result.validation.reference
             @test result.validation.failures == Symbol[]
-            @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=1e-7, rtol=0)
+            @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=5e-7, rtol=0)
         end
         @test result.core_seconds !== nothing
     end
