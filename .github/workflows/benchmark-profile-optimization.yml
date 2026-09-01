@@ -6,6 +6,12 @@ on:
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      enable_experimental:
+        description: 'Run before the repository-level schema-v9 eligible-target gate is enabled.'
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: benchmark-profile-${{ github.event.workflow_run.head_branch || github.ref }}
@@ -20,9 +26,15 @@ jobs:
     name: Profile certified solve targets and select hotspot
     # A workflow_run job runs from the default branch; all identity must come
     # from the triggering catalog run's head_sha, never github.sha.
+    # Until General Benchmark V2 publishes at least one solve-eligible
+    # schema-v9 receipt, automatic profiling is deliberately disabled.  The
+    # repository variable is enabled only after that prerequisite is reviewed
+    # and merged; manual experimental runs require an explicit true input.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
+      (github.event_name == 'workflow_dispatch' && inputs.enable_experimental) ||
+      (github.event_name == 'workflow_run' &&
+       vars.SDPX_ENABLE_DEPENDENT_OPTIMIZATION == 'true' &&
+       github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.name == 'Benchmark catalog gate')
     runs-on: ubuntu-latest
     timeout-minutes: 120
