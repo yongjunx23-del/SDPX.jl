@@ -1811,8 +1811,28 @@ function _native_hsd_restarted_core(
     fallback_diag = fallback.diagnostics
     initial_t = initial_diag.timings
     fallback_t = fallback_diag.timings
-    requested_route = initial_diag.plan.payload.kkt_route
-    executed_route = fallback_diag.selected_algorithms.executed_kkt_route
+    initial_selected = initial_diag.selected_algorithms
+    fallback_selected = fallback_diag.selected_algorithms
+    # Each child core records the routes it actually attempted.  Compose the
+    # restart receipt from those records rather than reconstructing route names
+    # from the restart policy.  This keeps the receipt honest if a child
+    # terminates before execution and filters only the explicit sentinel.
+    initial_attempts = Tuple(filter(
+        route -> route !== :not_executed,
+        initial_selected.attempted_kkt_routes,
+    ))
+    fallback_attempts = Tuple(filter(
+        route -> route !== :not_executed,
+        fallback_selected.attempted_kkt_routes,
+    ))
+    isempty(initial_attempts) && throw(ArgumentError(
+        "native HSD restart requires an executed initial route receipt",
+    ))
+    isempty(fallback_attempts) && throw(ArgumentError(
+        "native HSD restart requires an executed fallback route receipt",
+    ))
+    attempts = (initial_attempts..., fallback_attempts...)
+    executed_route = fallback_selected.executed_kkt_route
     timings = merge(
         fallback_t,
         (
@@ -1824,27 +1844,46 @@ function _native_hsd_restarted_core(
                   get(initial_t, :total, get(initial_t, :core, 0.0)),
         ),
     )
-    initial_selected = initial_diag.selected_algorithms
-    attempts = (requested_route, :expanded)
+    # Preserve every planning/identity field from the initial receipt, not
+    # just the currently documented aliases.  The fields listed here are
+    # execution outcomes supplied by the final child and therefore must remain
+    # from `fallback_selected`; all other initial fields are planning facts.
+    execution_fields = (
+        :executed_algorithm,
+        :executed_kkt_formulation,
+        :executed_kkt_route,
+        :executed_kkt_storage,
+        :executed_factorization,
+        :executed_factorization_reuse,
+        :executed_factorization_kernel,
+        :row_scaling,
+        :transform,
+        :border_structure,
+        :pivoting,
+        :gram_or_metric,
+        :metric,
+        :route,
+        :execution_path,
+        :executed_scaling,
+        :executed_backend,
+        :backend,
+        :la_executed_provider,
+        :attempted_kkt_routes,
+        :executed_fallback_chain,
+        :executed_threads,
+        :fallback_reason,
+    )
+    planned_fields = Tuple(filter(
+        field -> !(field in execution_fields),
+        propertynames(initial_selected),
+    ))
+    initial_planned = NamedTuple{planned_fields}(
+        Tuple(getproperty(initial_selected, field) for field in planned_fields),
+    )
     selected = merge(
-        fallback_diag.selected_algorithms,
+        fallback_selected,
+        initial_planned,
         (
-            # Planning/request metadata belongs to the initial attempt.  The
-            # fallback's mutable state may report a different plan.
-            requested_kkt_formulation=initial_selected.requested_kkt_formulation,
-            planned_kkt_formulation=initial_selected.planned_kkt_formulation,
-            requested_kkt_route=initial_selected.requested_kkt_route,
-            planned_kkt_route=initial_selected.planned_kkt_route,
-            planned_kkt_storage=initial_selected.planned_kkt_storage,
-            planned_factorization=initial_selected.planned_factorization,
-            factorization_reuse=initial_selected.factorization_reuse,
-            factor_reuse=initial_selected.factor_reuse,
-            factorization_kernel=initial_selected.factorization_kernel,
-            planned_factorization_kernel=initial_selected.planned_factorization_kernel,
-            planned_scaling=initial_selected.planned_scaling,
-            planned_backend=initial_selected.planned_backend,
-            planned_la_provider=initial_selected.planned_la_provider,
-            planned_threads=initial_selected.planned_threads,
             executed_kkt_route=executed_route,
             attempted_kkt_routes=attempts,
             executed_fallback_chain=attempts,

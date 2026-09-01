@@ -60,11 +60,37 @@ end
     @test SDPX.status(duplicate) !== :optimal
     @test !SDPX.certificate(duplicate).valid
     duplicate_selected = SDPX.diagnostics(duplicate).selected_algorithms
+    # This is an execution-level induced failure, not a synthetic status
+    # mutation: the exact duplicate reaches the bordered early residual gate,
+    # then runs the strict expanded terminal restart and exhausts tau recovery.
+    @test duplicate_selected.requested_kkt_formulation === :auto
+    @test duplicate_selected.planned_kkt_formulation === :symmetric_augmented_hsd_core
+    @test duplicate_selected.executed_kkt_formulation === :dense_expanded_quasidefinite
     @test duplicate_selected.requested_kkt_route === :bordered
     @test duplicate_selected.planned_kkt_route === :bordered
     @test duplicate_selected.executed_kkt_route === :expanded
+    @test duplicate_selected.planned_kkt_storage === :sparse
+    @test duplicate_selected.executed_kkt_storage === :dense
+    @test duplicate_selected.planned_factorization === :symmetric_ldl
+    @test duplicate_selected.executed_factorization === :quasidefinite_ldlt
+    @test duplicate_selected.factorization_kernel === :cholmod_symmetric_ldl
+    @test duplicate_selected.planned_factorization_kernel === :cholmod_symmetric_ldl
+    @test duplicate_selected.executed_factorization_kernel === :native_expanded_ldlt
+    @test duplicate_selected.formulation === duplicate_selected.planned_kkt_formulation
+    @test duplicate_selected.route === duplicate_selected.executed_kkt_route
+    @test duplicate_selected.backend === duplicate_selected.executed_backend
+    @test duplicate_selected.fallback_chain === ()
     @test duplicate_selected.attempted_kkt_routes === (:bordered, :expanded)
+    @test duplicate_selected.executed_fallback_chain ===
+        duplicate_selected.attempted_kkt_routes
+    @test duplicate_selected.planned_la_provider === :cholmod
+    @test duplicate_selected.la_executed_provider === :native_serial
+    @test duplicate_selected.factorization_reuse ===
+        :factor_once_homogeneous_predictor_corrector
     @test duplicate.termination.reason === :tau_collapse_recovery_exhausted
+    @test duplicate_selected.route_restart_reason ===
+        :fixed_trace_predictor_residual_failed
+    @test duplicate_selected.route_restart_iteration <= 1
 
     healthy = SDPX.optimize!(_route_guard_healthy_model();
         settings=_route_guard_settings(), outputs=_route_guard_outputs())
@@ -77,17 +103,4 @@ end
     @test healthy_selected.attempted_kkt_routes === (:bordered,)
     @test !hasproperty(healthy_selected, :route_restart_reason)
 
-    # Induce the expanded factor-failure state directly on a real product-HSD
-    # state.  The strict restart state must refuse the expanded->bordered
-    # rebound, while an ordinary expanded state retains its legacy fallback.
-    program = SDPX.compile_product_cone_model(_route_guard_healthy_model())
-    canonical = SDPX.canonicalize(program)
-    strict_state = SDPX.ProductConeHSDState(canonical; kkt_route=:expanded,
-        allow_expanded_bordered_fallback=false)
-    strict_state.expanded.status = SDPX.EXPANDED_KKT_FACTOR_FAILED
-    @test !SDPX._product_hsd_expanded_fallback_allowed(strict_state)
-    ordinary_state = SDPX.ProductConeHSDState(canonical; kkt_route=:expanded,
-        allow_expanded_bordered_fallback=true)
-    ordinary_state.expanded.status = SDPX.EXPANDED_KKT_FACTOR_FAILED
-    @test SDPX._product_hsd_expanded_fallback_allowed(ordinary_state)
 end
