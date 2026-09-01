@@ -135,11 +135,15 @@ function _exp_expected_model(artifact::ExpArtifact, ::Type{T}; precision_bits=25
     transform = V2Transform(:exp_small_artifact, :sdpx_cone_program,
         :exp_cone_lowering, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
-    expected = _exp_expected(artifact)
-    V2Built(model, V2ExpOracle(artifact, _interval(expected), string(expected)),
+    expected_objective = _exp_expected(artifact)
+    expected_model = _source_model_receipt(artifact, model)
+    _actual_model_receipt(model) == expected_model || throw(ArgumentError(
+        "EXP lowering differs from its independently reconstructed source contract"))
+    V2Built(model, V2ExpOracle(artifact, _interval(expected_objective), string(expected_objective)),
         artifact, "", transform,
         (artifact_fingerprint=_hex(artifact), model_fingerprint=actual,
-         model_contract_fingerprint=actual, model_precision_bits=precision_bits,
+         model_contract_fingerprint=_hex(expected_model),
+         model_source_receipt=expected_model, model_precision_bits=SDPX.precision_bits(model),
          source_dimension=artifact.n, target_dimension=artifact.n,
          generator=artifact.generator_id), (setup_seconds=nothing,))
 end
@@ -148,8 +152,10 @@ function _exp_oracle_check(oracle::V2ExpOracle, built, certificate)
     artifact = oracle.artifact
     built.source_artifact === artifact || return false
     actual = _native_model_fingerprint(built.problem)
-    actual == get(built.facts, :model_fingerprint, "") || return false
-    actual == get(built.facts, :model_contract_fingerprint, "") || return false
+    expected_fp = _hex(_source_model_receipt(artifact, built.problem))
+    actual == get(built.facts, :model_fingerprint, "") == expected_fp || return false
+    get(built.facts, :model_contract_fingerprint, "") == expected_fp || return false
+    _model_matches_source_receipt(artifact, built.problem) || return false
     # The witness is an independent analytic point.  EXP transcendental
     # objectives are intentionally checked against a high-precision interval.
     if artifact.kind === :unit_epigraph
@@ -204,9 +210,13 @@ function _power_build(artifact::PowerArtifact, ::Type{T}; precision_bits=256) wh
         :power_cone_lowering, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
     oracle = V2PowerOracle(artifact)
+    expected_model = _source_model_receipt(artifact, model)
+    _actual_model_receipt(model) == expected_model || throw(ArgumentError(
+        "Power lowering differs from its independently reconstructed source contract"))
     V2Built(model, oracle, artifact, "", transform,
         (artifact_fingerprint=_hex(artifact), model_fingerprint=actual,
-         model_contract_fingerprint=actual, model_precision_bits=precision_bits,
+         model_contract_fingerprint=_hex(expected_model),
+         model_source_receipt=expected_model, model_precision_bits=SDPX.precision_bits(model),
          source_dimension=length(artifact.alphas), target_dimension=length(artifact.alphas),
          generator=artifact.generator_id), (setup_seconds=nothing,))
 end
@@ -217,8 +227,10 @@ _power_oracle(oracle::V2PowerOracle, built, certificate) = begin
     artifact = oracle.artifact
     built.source_artifact === artifact || return false
     actual = _native_model_fingerprint(built.problem)
-    actual == get(built.facts, :model_fingerprint, "") || return false
-    actual == get(built.facts, :model_contract_fingerprint, "") || return false
+    expected_fp = _hex(_source_model_receipt(artifact, built.problem))
+    actual == get(built.facts, :model_fingerprint, "") == expected_fp || return false
+    get(built.facts, :model_contract_fingerprint, "") == expected_fp || return false
+    _model_matches_source_receipt(artifact, built.problem) || return false
     all(a -> 0//1 < a < 1//1, artifact.alphas) || return false
     artifact.kind === :weighted_mean ? artifact.weighted_values == Rational{Int}[1, 1] : all(==(1//1), artifact.fixed_values) || return false
     # Objective accuracy is enforced centrally by run_instance.

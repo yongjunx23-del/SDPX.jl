@@ -126,8 +126,12 @@ function _mixed_build(artifact::MixedArtifact, ::Type{T}; precision_bits::Int=25
         validation_receipts=(coefficient_match=true, source_reconstruction=true,
             coupling_rhs_from_primal=true))
     actual = _native_model_fingerprint(model)
+    expected = _source_model_receipt(artifact, model)
+    _actual_model_receipt(model) == expected || throw(ArgumentError(
+        "mixed lowering differs from its independently reconstructed source contract"))
     facts = (artifact_fingerprint=_hex(artifact), model_fingerprint=actual,
-        model_contract_fingerprint=actual, model_precision_bits=precision_bits,
+        model_contract_fingerprint=_hex(expected), model_source_receipt=expected,
+        model_precision_bits=SDPX.precision_bits(model),
         source_dimension=length(artifact.nonnegative) + length(artifact.soc) +
             length(artifact.rsoc) + length(artifact.exponential) + length(artifact.power),
         target_dimension=length(artifact.nonnegative) + length(artifact.soc) +
@@ -165,7 +169,10 @@ function (oracle::V2MixedOracle)(built, certificate)
     artifact = oracle.artifact
     built.source_artifact === artifact || return false
     actual = _native_model_fingerprint(built.problem)
-    actual == built.facts.model_fingerprint == built.facts.model_contract_fingerprint || return false
+    expected_fp = _hex(_source_model_receipt(artifact, built.problem))
+    actual == built.facts.model_fingerprint == expected_fp || return false
+    built.facts.model_contract_fingerprint == expected_fp || return false
+    _model_matches_source_receipt(artifact, built.problem) || return false
     _mixed_strict_cone(artifact) || return false
     w = artifact.primal_witness
     firsts = [w.nonnegative[1], w.soc[1], w.rsoc[1], w.psd[1, 1], w.exponential[1], w.power[1]]

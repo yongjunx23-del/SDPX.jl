@@ -77,7 +77,14 @@ end
         built, elapsed = build_instance(catalog, instance, precision)
         @test elapsed >= 0
         @test built.facts.artifact_fingerprint == instance.checksum
+        # The values agree only because the contract fingerprint is computed
+        # independently from the exact source artifact, then compared against
+        # the receipt extracted from the lowered model.
         @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+        @test built.facts.model_contract_fingerprint ==
+              GeneralBenchmarkV2._hex(GeneralBenchmarkV2._source_model_receipt(
+                  artifact, built.problem))
+        @test GeneralBenchmarkV2._model_matches_source_receipt(artifact, built.problem)
         result = run_instance(catalog, instance, precision)
         @test result.status === :optimal
         @test result.certificate_valid
@@ -132,12 +139,30 @@ end
     @test build_instance(catalog, instance, V2Precision(:Float64, Float64, 53,
         "1e-8", "5e-7", :test))[2] >= 0
 
+    # IDs and generator metadata must not mask identical mathematics across
+    # train/holdout splits.
+    base = lp_tranche_catalog().instances[1]
+    source = base.payload
+    duplicate = LPArtifact(:math_duplicate, source.kind, source.A, source.b, source.c;
+        cone_partition=source.cone_partition, primal_witness=source.primal_witness,
+        dual_witness=source.dual_witness, objective=source.objective,
+        generator_id=:different_generator, generator_version=99)
+    duplicate_instance = V2Instance(:math_duplicate, base.family, base.tier,
+        base.axis_values, :holdout, base.source, base.provenance, GeneralBenchmarkV2._hex(duplicate),
+        base.resource, V2Reference(:optimal, :optimal, base.reference.objective_interval,
+            V2LPOracle(duplicate), "duplicate math test"), duplicate)
+    @test mathematical_fingerprint(base) == mathematical_fingerprint(duplicate_instance)
+    @test_throws ArgumentError V2Catalog(:duplicate_math, 1, [lp_tranche_catalog().families[1]],
+        [base, duplicate_instance], (train=[base.id], holdout=[duplicate_instance.id], sentinel=Symbol[]))
+
     # The compatibility CLI preserves the retired names without silently
     # changing the canonical four-tier taxonomy.
     @test compatibility_tier(:instant) === :small
     @test compatibility_tier(:heavy) === :large
     @test compatibility_tier(:extreme) === :extreme
     @test_throws ArgumentError compatibility_tier(:unknown)
+    @test GenericConicBenchmark.canonical_tier(:instant) === :small
+    @test GenericConicBenchmark.canonical_tier(:heavy) === :large
 
     reviewed = reviewed_precision_specs()
     @test length(reviewed) == 7

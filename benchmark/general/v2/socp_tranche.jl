@@ -37,8 +37,10 @@ function (oracle::V2SOCOracle)(built, certificate)
     artifact = oracle.artifact
     built.source_artifact === artifact || return false
     actual_fp = _native_model_fingerprint(built.problem)
-    actual_fp == built.facts.model_fingerprint || return false
-    actual_fp == get(built.facts, :model_contract_fingerprint, "") || return false
+    expected_fp = _hex(_source_model_receipt(artifact, built.problem))
+    actual_fp == built.facts.model_fingerprint == expected_fp || return false
+    get(built.facts, :model_contract_fingerprint, "") == expected_fp || return false
+    _model_matches_source_receipt(artifact, built.problem) || return false
     ranges = try _soc_block_ranges(artifact) catch; return false end
     length(artifact.primal_witness) == length(artifact.c) || return false
     length(artifact.dual_witness) == size(artifact.A, 1) || return false
@@ -91,8 +93,12 @@ function _soc_build(artifact::SOCPArtifact, ::Type{T}; precision_bits::Int=256) 
     transform = V2Transform(:socp_small_artifact, :sdpx_cone_program,
         :socp_block_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    expected = _source_model_receipt(artifact, model)
+    _actual_model_receipt(model) == expected || throw(ArgumentError(
+        "SOCP lowering differs from its independently reconstructed source contract"))
     facts = (artifact_fingerprint=_hex(artifact), model_fingerprint=actual_fp,
-        model_contract_fingerprint=actual_fp, model_precision_bits=precision_bits,
+        model_contract_fingerprint=_hex(expected), model_source_receipt=expected,
+        model_precision_bits=SDPX.precision_bits(model),
         source_dimension=size(artifact.A, 2), target_dimension=size(artifact.A, 2),
         generator=artifact.generator_id, coefficients=artifact.A)
     return V2Built(model, V2SOCOracle(artifact), artifact, "", transform, facts,
