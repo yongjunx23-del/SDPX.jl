@@ -1,4 +1,6 @@
 using Test
+isdefined(Main, :GenericConicBenchmark) ||
+    include(joinpath(@__DIR__, "GenericConicBenchmark.jl"))
 include(joinpath(@__DIR__, "v2", "GeneralBenchmarkV2.jl"))
 using .GeneralBenchmarkV2
 
@@ -20,7 +22,8 @@ using .GeneralBenchmarkV2
         positive_prefactor_factored=true)
 
     tier = only(filter(t -> t.name === :small, resource_tiers()))
-    ref = V2Reference(:optimal, :optimal, ("0", "1"), nothing, "unit test")
+    ref = V2Reference(:optimal, :optimal, ("0", "1"),
+        (built, cert) -> cert.valid, "unit test")
     instance = V2Instance(:unit, :unit, tier, (dimension=1,), :train,
         "unit-test", (equations=("test",),), "unit-checksum",
         (wall_seconds=1, memory_bytes=1024), ref, nothing)
@@ -73,5 +76,32 @@ end
         @test built.problem !== nothing
         @test built.transform.transform_id === :identity
         @test elapsed >= 0
+    end
+end
+
+@testset "native V2 corpus owns typed artifacts and disjoint suites" begin
+    catalog = native_v2_catalog()
+    @test !isempty(catalog.suites.train)
+    @test !isempty(catalog.suites.holdout)
+    @test !isempty(catalog.suites.sentinel)
+    @test isempty(intersect(Set(catalog.suites.train), Set(catalog.suites.holdout)))
+    @test isempty(intersect(Set(catalog.suites.train), Set(catalog.suites.sentinel)))
+    @test all(i -> i.payload isa V2ConicArtifact, catalog.instances)
+    @test all(i -> i.payload isa V2ConicArtifact && i.payload.family == i.family,
+              catalog.instances)
+    @test all(i -> i.reference.oracle !== nothing, catalog.instances)
+    @test all(i -> i.split == :train ? i.id in catalog.suites.train :
+                   (i.split == :holdout ? i.id in catalog.suites.holdout : i.id in catalog.suites.sentinel),
+              catalog.instances)
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "1e-8", :standard)
+    for family in (:lp, :soc, :rsoc, :sdp, :exp, :power, :mixed)
+        instance = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test result.setup_seconds !== nothing
+        @test result.core_seconds !== nothing
     end
 end

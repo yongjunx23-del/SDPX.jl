@@ -4,13 +4,14 @@ using SHA
 import SDPX
 
 export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
+    AbstractV2SourceArtifact, V2ConicArtifact, native_v2_catalog,
     V2Transform, V2Family, V2Instance, V2Catalog, V2Built, V2Validation,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
     input_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
     precision_matrix
 
-const V2_SCHEMA_VERSION = 1
+const V2_SCHEMA_VERSION = 2
 
 """A finite deterministic parameter axis used to expand benchmark families."""
 struct V2Axis{F}
@@ -84,6 +85,10 @@ struct V2Reference{O}
         end
         status === :build_only && certificate_kind !== :build_only &&
             throw(ArgumentError("build-only reference requires certificate_kind=:build_only"))
+        status !== :build_only && oracle === nothing &&
+            throw(ArgumentError("non-build reference requires an independent oracle"))
+        status === :xfail && isempty(note) &&
+            throw(ArgumentError("xfail reference requires an issue note"))
         new{typeof(oracle)}(status, certificate_kind, interval, oracle, String(note))
     end
 end
@@ -115,7 +120,7 @@ struct V2Transform
                          lifting_dimensions=(source=0, target=0, gram_blocks=0),
                          validation_receipts=(coefficient_match=false,
                                               source_reconstruction=false))
-        exactness in (:exact_univariate_halfline,
+        exactness in (:identity, :exact_univariate_halfline,
                       :exact_univariate_matrix_halfline_if_proved,
                       :sos_relaxation, :finite_grid_surrogate) ||
             throw(ArgumentError("unsupported transform exactness $exactness"))
@@ -238,8 +243,13 @@ function precision_matrix()
     )
 end
 
-# Length-prefixed canonical bytes. This deliberately avoids repr and unordered
-# dictionary iteration for benchmark identity.
+# Length-prefixed canonical bytes. All integer lengths are explicitly
+# big-endian; no host-endian serialization participates in identity.
+function _put_u64be!(io::IO, value::UInt64)
+    for shift in (56, 48, 40, 32, 24, 16, 8, 0)
+        write(io, UInt8((value >> shift) & 0xff))
+    end
+end
 function _put!(io::IO, value)
     if value === nothing
         write(io, UInt8(0x00))
@@ -249,9 +259,9 @@ function _put!(io::IO, value)
         _put!(io, String(value))
     elseif value isa AbstractString
         bytes = codeunits(String(value)); write(io, UInt8(0x03));
-        write(io, UInt64(length(bytes))); write(io, bytes)
+        _put_u64be!(io, UInt64(length(bytes))); write(io, bytes)
     elseif value isa Integer
-        text = string(value); write(io, UInt8(0x04)); write(io, UInt64(length(text))); write(io, codeunits(text))
+        text = string(value); write(io, UInt8(0x04)); _put_u64be!(io, UInt64(length(text))); write(io, codeunits(text))
     elseif value isa AbstractFloat
         text = sprint(show, value; context=:canonical=>true)
         _put!(io, text)
@@ -261,7 +271,7 @@ function _put!(io::IO, value)
         write(io, UInt8(0x05)); _put!(io, collect(keys(value)))
         _put!(io, collect(values(value)))
     elseif value isa Tuple
-        write(io, UInt8(0x06)); write(io, UInt64(length(value)))
+        write(io, UInt8(0x06)); _put_u64be!(io, UInt64(length(value)))
         for item in value; _put!(io, item); end
     elseif value isa AbstractArray
         write(io, UInt8(0x07)); _put!(io, size(value))
@@ -291,21 +301,30 @@ input_fingerprint(instance::V2Instance) = _hex((
     :schema, V2_SCHEMA_VERSION, :instance_id, instance.id, :family, instance.family,
     :tier, instance.tier, :axis_values, instance.axis_values, :source, instance.source,
     :provenance, instance.provenance, :checksum, instance.checksum,
-    :reference_status, instance.reference.status,
-    :certificate_kind, instance.reference.certificate_kind,
+    :reference, instance.reference,
     :transform, instance.payload isa V2Transform ? instance.payload : nothing,
+    :payload, instance.payload,
+    :resource, instance.resource, :split, instance.split,
 ))
 
 catalog_fingerprint(catalog::V2Catalog) = _hex((
     :schema, V2_SCHEMA_VERSION, :catalog, catalog.name, :version, catalog.version,
-    :instances, [(x.id, x.family, x.tier, x.axis_values, x.checksum) for x in catalog.instances],
+    :families, [(f.name, f.axes, f.transforms) for f in catalog.families],
+    :instances, [(x.id, x.family, x.tier, x.axis_values, x.split, x.source,
+                  x.provenance, x.checksum, x.resource, x.reference, x.payload)
+                 for x in catalog.instances],
+    :suites, catalog.suites,
 ))
 
 function execution_fingerprint(instance::V2Instance, precision::V2Precision;
-                               route::Symbol=:sdpx_legacy, manifest::AbstractString="")
+                               route::Symbol=:auto, manifest::AbstractString="",
+                               settings=nothing)
     return _hex((:input, input_fingerprint(instance), :precision, precision.name,
-                 :bits, precision.bits, :provider, precision.provider,
-                 :route, route, :manifest, manifest))
+                 :arithmetic, precision.arithmetic, :bits, precision.bits,
+                 :solver_tolerance, precision.solver_tolerance,
+                 :certificate_limit, precision.certificate_limit,
+                 :provider, precision.provider, :route, route, :settings, settings,
+                 :manifest, manifest))
 end
 
 reference_interval(ref::V2Reference) = ref.objective_interval
@@ -358,7 +377,7 @@ function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2P
     started = time_ns()
     built = family.build(instance, precision)
     built isa V2Built || throw(ArgumentError("V2 builder must return V2Built"))
-    built.transform.exactness in (:exact_univariate_halfline,
+    built.transform.exactness in (:identity, :exact_univariate_halfline,
         :exact_univariate_matrix_halfline_if_proved, :sos_relaxation,
         :finite_grid_surrogate) || throw(ArgumentError("invalid transform metadata"))
     elapsed = (time_ns() - started) * 1.0e-9
@@ -370,14 +389,21 @@ function _parse(::Type{T}, text::String) where {T}
 end
 
 """Solve an ordinary V2 instance via the existing public generic builder."""
-function run_instance(catalog::V2Catalog, instance::V2Instance,
+function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
                       precision::V2Precision; settings=nothing, outputs=nothing)
     instance.reference.status === :build_only && throw(ArgumentError(
         "build-only instance $(instance.id) requires an explicit solve contract"))
     built, setup = build_instance(catalog, instance, precision)
     model = built.problem
     T = precision.arithmetic
-    settings === nothing && (settings = SDPX.Settings{T}(verbosity=0, certification=true))
+    if settings === nothing
+        tol = _parse(T, precision.solver_tolerance)
+        certtol = _parse(T, precision.certificate_limit)
+        settings = SDPX.Settings{T}(
+            tolerances=SDPX.Tolerances{T}(primal=certtol, dual=certtol, gap=certtol),
+            limits=SDPX.Limits(threads=1), verbosity=0, certification=true,
+        )
+    end
     measurement = if outputs === nothing
         @timed SDPX.optimize!(model; settings)
     else
@@ -406,6 +432,15 @@ function run_instance(catalog::V2Catalog, instance::V2Instance,
     )
 end
 
+function run_instance(catalog::V2Catalog, instance::V2Instance,
+                      precision::V2Precision; settings=nothing, outputs=nothing)
+    T = precision.arithmetic
+    T === BigFloat && return setprecision(BigFloat, precision.bits) do
+        _run_instance_impl(catalog, instance, precision; settings, outputs)
+    end
+    return _run_instance_impl(catalog, instance, precision; settings, outputs)
+end
+
 """Adapt existing generic specs without changing their V1 registry/API."""
 function adapt_generic_specs(specs; source_prefix="generic-v1",
                               generic_module=Main.GenericConicBenchmark)
@@ -418,8 +453,8 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
             params = precision.arithmetic === BigFloat ?
                 merge(spec.params, (precision_bits=precision.bits,)) : spec.params
             model = generic_module.build(spec.problem, precision.arithmetic, params)
-            transform = V2Transform(:generic_conic_model, :sdpx_cone_program,
-                :identity, 1, :finite_grid_surrogate;
+                transform = V2Transform(:generic_conic_model, :sdpx_cone_program,
+                :identity, 1, :identity;
                 validation_receipts=(coefficient_match=true,
                                      source_reconstruction=true))
             return V2Built(model, nothing, spec, input_fingerprint(instance), transform,
@@ -443,7 +478,7 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
         interval = spec.known_objective === nothing ? nothing :
             (string(spec.known_objective - spec.objective_tolerance), string(spec.known_objective + spec.objective_tolerance))
         ref = V2Reference(ref_status, cert_kind, interval,
-            ref_status === :xfail ? nothing : (built, cert) -> begin
+            (built, cert) -> begin
                 spec.known_objective === nothing || isapprox(cert.primal_objective,
                     spec.known_objective; atol=spec.objective_tolerance, rtol=spec.objective_tolerance)
             end, "Adapted from V1; independent source metadata retained")
@@ -456,5 +491,7 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
     return V2Catalog(:general_v2, V2_SCHEMA_VERSION, families, instances,
                      (train=Symbol[s.id for s in instances], holdout=Symbol[], sentinel=Symbol[]))
 end
+
+include("native_catalog.jl")
 
 end # module

@@ -1,14 +1,19 @@
 # General benchmark V2 contract
 
-V2 is an additive, typed adapter around the existing general benchmark
-catalog. Existing `BenchmarkSpec`, IDs, builders, and E2E tests remain
-unchanged. V2 adds explicit lifecycle, arithmetic, reference, provenance, and
-identity records without putting benchmark-specific knowledge in `src/`.
+V2 is an additive, typed benchmark corpus. `native_v2_catalog()` owns
+rational source artifacts, family dispatch, train/holdout/sentinel splits, and
+independent reference callbacks for LP/SOC/RSOC/SDP/EXP/Power/mixed. Existing
+`BenchmarkSpec`, IDs, builders, and E2E tests remain unchanged through the
+explicit `adapt_generic_specs` compatibility adapter; that adapter is not the
+authoritative V2 corpus. V2 adds explicit lifecycle, arithmetic, reference,
+provenance, and identity records without putting benchmark-specific knowledge
+in `src/`.
 
 ```julia
 include("benchmark/general/v2/GeneralBenchmarkV2.jl")
 using .GeneralBenchmarkV2
-catalog = adapt_generic_specs(GenericConicBenchmark.inventory())
+catalog = native_v2_catalog()                  # authoritative V2 corpus
+legacy = adapt_generic_specs(v1_specs)        # compatibility-only view
 ```
 
 ## Reference and failure semantics
@@ -20,7 +25,9 @@ kinds are independently named (`:optimal`, `:farkas`, `:ray`,
 `xfail` annotation; it is never treated as a passing certificate.
 
 Objective intervals are serialized as decimal strings and are not narrowed to
-`Float64`. The existing V1 result contract remains available for compatibility.
+`Float64`. Non-build references require an independent oracle; xfail requires
+an issue note and is never solve-eligible. The existing V1 result contract
+remains available only for compatibility.
 
 ## Pluggable source-to-conic transforms
 
@@ -30,8 +37,8 @@ catalogs:
 - source problem type and target cone program;
 - transform ID, version, and an independent transform fingerprint;
 - exactness (`:exact_univariate_halfline`,
-  `:exact_univariate_matrix_halfline_if_proved`, `:sos_relaxation`, or
-  `:finite_grid_surrogate`);
+  `:exact_univariate_matrix_halfline_if_proved`, `:sos_relaxation`,
+  `:finite_grid_surrogate`, or `:identity` for direct conic artifacts);
 - whether a positive prefactor was factored, together with its proof/reference;
 - source/target/Gram lifting dimensions and validation receipts.
 
