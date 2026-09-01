@@ -6,6 +6,16 @@ using .ProfileCatalog
 include(joinpath(@__DIR__, "v2_target_bridge.jl"))
 using .V2TargetBridge
 
+@testset "bridge selects the pinned reviewed Float64 declaration" begin
+    _, v2, _ = V2TargetBridge._load_v2()
+    precision = V2TargetBridge._reviewed_float64_precision(v2)
+    @test precision.name === :Float64
+    @test precision.bits == 53
+    @test precision.provider === :cholmod
+    @test precision.solver_tolerance == "1e-8"
+    @test precision.certificate_limit == "5e-7"
+end
+
 @testset "V2 solve-eligible target closes dependent optimizer precondition" begin
     tmpdir = mktempdir()
     result = try

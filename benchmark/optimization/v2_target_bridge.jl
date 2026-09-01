@@ -32,6 +32,21 @@ function _load_v2()
     return identity, Main.GeneralBenchmarkV2, Main.V2Schema9Adapter
 end
 
+"""Select the reviewed Float64 execution declaration from the pinned V2 module.
+
+The declaration is intentionally selected rather than reconstructed here: this
+keeps the bridge coupled to the V2 review matrix (including its provider label,
+bit width, and decimal tolerances) and prevents drift between the two
+validators.
+"""
+function _reviewed_float64_precision(v2)
+    specs = Base.invokelatest(getfield(v2, :reviewed_precision_specs))
+    matches = filter(spec -> getfield(spec, :name) === :Float64, specs)
+    length(matches) == 1 || throw(ArgumentError(
+        "pinned V2 review matrix must contain exactly one Float64 declaration"))
+    return only(matches)
+end
+
 """Build one real V2 target through the pinned V2 adapter.
 
 The adapter performs one excluded warmup and exactly three rebuilt measured
@@ -46,8 +61,7 @@ function profile_first_target(; case_id::Symbol=:v2_lp_box_small)
     P = Main.ProfileCatalog
     catalog = Base.invokelatest(getfield(v2, :lp_tranche_catalog))
     instance = only(filter(x -> x.id === case_id, catalog.instances))
-    precision = Base.invokelatest(getfield(v2, :V2Precision), :Float64, Float64, 53,
-        "1e-8", "5e-7", :cholmod)
+    precision = _reviewed_float64_precision(v2)
     row = Base.invokelatest(getfield(adapter, :profile_v2_target), catalog, instance, precision;
         warmup=true, samples=3)
     P.validate_profile_row(row; live=true) ||
