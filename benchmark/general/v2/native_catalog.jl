@@ -35,6 +35,8 @@ struct V2ConicArtifact <: AbstractV2SourceArtifact
             throw(ArgumentError("$family artifacts have dimension 2"))
         family === :sdp && dimension != 2 &&
             throw(ArgumentError("SDP artifacts have matrix dimension 2"))
+        family === :sdp && coefficients[2] != coefficients[3] &&
+            throw(ArgumentError("SDP off-diagonal coefficients must be symmetric"))
         length(infeasibility_ray) == 2 || throw(ArgumentError("infeasibility ray must have two entries"))
         new(family, id, coefficients, Int(dimension), cone_parameter, infeasible,
             Rational{Int}.(infeasibility_ray), generator_id, Int(generator_version))
@@ -181,10 +183,10 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}; precision_bits::Int
     end
     objective === nothing && throw(ArgumentError("native artifact has no objective"))
     SDPX.objective!(model, SDPX.Minimize(), objective)
-    actual_model_fp = _native_model_fingerprint(model, precision_bits)
+    actual_model_fp = _native_model_fingerprint(model)
     expected_model_fp = _hex(_expected_model_receipt(artifact, T, precision_bits))
     actual_model_fp == expected_model_fp || begin
-        println(stderr, "ACTUAL_RECEIPT=", repr(_actual_model_receipt(model, precision_bits)))
+        println(stderr, "ACTUAL_RECEIPT=", repr(_actual_model_receipt(model)))
         println(stderr, "EXPECTED_RECEIPT=", repr(_expected_model_receipt(artifact, T, precision_bits)))
         throw(ArgumentError("native lowering differs from its independent model contract: actual=$actual_model_fp expected=$expected_model_fp"))
     end
@@ -200,11 +202,13 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}; precision_bits::Int
             (f === :nonpositive ? -sum(artifact.coefficients[1:artifact.dimension]) :
              sum(artifact.coefficients[1:artifact.dimension])) :
         sum(witness[1:min(length(witness), artifact.dimension)])
-    dual_multipliers = _oracle_dual_multipliers(artifact)
-    dual_bound = artifact.infeasible ? 0//1 : sum(
-        dual_multipliers[i] * witness[i] for i in eachindex(witness))
+    dual_multipliers = artifact.infeasible ? Rational{Int}[] :
+        _oracle_dual_multipliers(artifact)
+    cone_dual_slacks = artifact.infeasible ? Rational{Int}[] :
+        _oracle_cone_dual_slacks(model)
+    dual_bound = artifact.infeasible ? 0//1 : _oracle_objective(artifact)
     oracle = V2ExactOracle(artifact.infeasible ? :primal_infeasible : :optimal,
-        expected, witness, dual_multipliers, dual_bound,
+        expected, witness, dual_multipliers, cone_dual_slacks, dual_bound,
         artifact.infeasibility_ray, artifact)
     return V2Built(model, oracle, artifact, _hex(artifact), transform,
         (source_dimension=artifact.dimension, target_dimension=artifact.dimension,
@@ -223,7 +227,10 @@ function _numeric_token(x)
     return string(BigFloat(x))
 end
 
-function _actual_model_receipt(model, precision_bits)
+function _actual_model_receipt(model)
+    # Read the nominal model precision from the actual arithmetic spec; a
+    # caller-supplied stamp must never be able to forge this identity.
+    actual_precision_bits = SDPX.precision_bits(model)
     variables = Tuple((v.name, string(v.domain), v.shape, v.offset, v.length) for v in model.variable_blocks)
     constraints = Tuple((c.name, string(c.domain), c.shape,
         Tuple((Tuple(e.indices), Tuple(_numeric_token.(e.coefficients)), _numeric_token(e.constant))
@@ -232,7 +239,7 @@ function _actual_model_receipt(model, precision_bits)
         (string(typeof(model.objective.sense)), Tuple(model.objective.expression.indices),
          Tuple(_numeric_token.(model.objective.expression.coefficients)),
          _numeric_token(model.objective.expression.constant))
-    return (precision_bits=precision_bits, variables=variables,
+    return (precision_bits=actual_precision_bits, variables=variables,
             constraints=constraints, objective=objective)
 end
 
@@ -317,8 +324,8 @@ function _expected_model_receipt(artifact::V2ConicArtifact, ::Type{T}, precision
     return (precision_bits=precision_bits, variables=vars, constraints=Tuple(cons), objective=obj)
 end
 
-function _native_model_fingerprint(model, precision_bits=nothing)
-    return _hex(_actual_model_receipt(model, precision_bits))
+function _native_model_fingerprint(model)
+    return _hex(_actual_model_receipt(model))
 end
 
 function _actual_witness(artifact::V2ConicArtifact)
@@ -418,8 +425,11 @@ end
 struct V2ExactOracle
     expected_status::Symbol
     objective::Rational{Int}
+    # primal_witness is in actual packed model coordinates.
     primal_witness::Vector{Rational{Int}}
+    # Equality multipliers are row-indexed; cone slacks are conic-row indexed.
     dual_multipliers::Vector{Rational{Int}}
+    cone_dual_slacks::Vector{Rational{Int}}
     dual_bound::Rational{Int}
     dual_ray::Vector{Rational{Int}}
     artifact::V2ConicArtifact
@@ -427,8 +437,8 @@ end
 
 function _put!(io::IO, oracle::V2ExactOracle)
     _put!(io, (oracle.expected_status, oracle.objective,
-        oracle.primal_witness, oracle.dual_multipliers, oracle.dual_bound,
-        oracle.dual_ray, oracle.artifact))
+        oracle.primal_witness, oracle.dual_multipliers, oracle.cone_dual_slacks,
+        oracle.dual_bound, oracle.dual_ray, oracle.artifact))
 end
 
 function _actual_lower_bound_certificate(built, witness)
@@ -486,19 +496,78 @@ function _actual_lower_bound_certificate(built, witness)
             row_dual_slacks=row_dual_slacks, bound=bound)
 end
 
+function _exact_rational(value)
+    rationalize(Int, BigFloat(value); tol=0)
+end
+
+function _actual_equality_multipliers(model)
+    objective = model.objective.expression
+    objective_coefficients = Dict{Int,BigFloat}()
+    for (index, coefficient) in zip(objective.indices, objective.coefficients)
+        objective_coefficients[index] = get(objective_coefficients, index, zero(BigFloat)) + BigFloat(coefficient)
+    end
+    multipliers = Rational{Int}[]
+    for block in model.constraint_blocks
+        string(block.domain) == "SDPX.ZeroCone()" || continue
+        for expression in block.expressions
+            length(expression.indices) == 1 || return nothing
+            index = only(expression.indices)
+            coefficient = BigFloat(only(expression.coefficients))
+            iszero(coefficient) && push!(multipliers, 0//1)
+            iszero(coefficient) || push!(multipliers,
+                _exact_rational(-get(objective_coefficients, index, zero(BigFloat)) / coefficient))
+        end
+    end
+    multipliers
+end
+
+function _actual_cone_dual_slacks(model)
+    out = Rational{Int}[]
+    # Variable-cone slacks are represented in the packed model coordinates.
+    for block in model.variable_blocks
+        string(block.domain) == "SDPX.Reals()" && continue
+        append!(out, fill(0//1, block.length))
+    end
+    # Explicit cone-constraint slacks are row-indexed by their block shape.
+    for block in model.constraint_blocks
+        string(block.domain) == "SDPX.ZeroCone()" && continue
+        append!(out, fill(0//1, block.shape))
+    end
+    out
+end
+
+function _oracle_cone_dual_slacks(model)
+    _actual_cone_dual_slacks(model)
+end
+
+function _oracle_cone_dual_slacks(artifact::V2ConicArtifact)
+    f = artifact.family
+    f in (:lp, :nonpositive) && return fill(0//1, artifact.dimension)
+    f === :mixed && return fill(0//1, 5)
+    f in (:soc, :rsoc, :exp, :power) && return fill(0//1, 3)
+    f === :sdp && return fill(0//1, 3)
+    throw(ArgumentError("unknown artifact family $f"))
+end
+
 function _oracle_check(oracle::V2ExactOracle, built, certificate)
     built.source_artifact === oracle.artifact || return false
     hasproperty(built.facts, :model_fingerprint) || return false
-    actual_fp = _native_model_fingerprint(built.problem,
-        get(built.facts, :model_precision_bits, nothing))
+    oracle.primal_witness == _actual_witness(oracle.artifact) || return false
+    if oracle.expected_status === :primal_infeasible
+        _farkas_valid(oracle.artifact, built) || return false
+        return oracle.dual_ray == oracle.artifact.infeasibility_ray
+    end
+    actual_fp = _native_model_fingerprint(built.problem)
     actual_fp == built.facts.model_fingerprint || return false
     expected_fp = get(built.facts, :model_contract_fingerprint, "")
     occursin(r"^[0-9a-f]{64}$", String(expected_fp)) || return false
     actual_fp == expected_fp || return false
-    if oracle.expected_status === :primal_infeasible
-        return _farkas_valid(oracle.artifact, built) &&
-            oracle.dual_ray == oracle.artifact.infeasibility_ray
-    end
+    oracle.expected_status === :optimal || return false
+    actual_multipliers = _actual_equality_multipliers(built.problem)
+    actual_multipliers === nothing && return false
+    actual_multipliers == oracle.dual_multipliers || return false
+    actual_cone_slacks = _actual_cone_dual_slacks(built.problem)
+    actual_cone_slacks == oracle.cone_dual_slacks || return false
     oracle.expected_status === :optimal || return false
     _actual_witness_check(oracle.artifact, built) || return false
     witness = _actual_witness(oracle.artifact)
@@ -509,10 +578,8 @@ function _oracle_check(oracle::V2ExactOracle, built, certificate)
     expected_bound = BigFloat(numerator(oracle.objective)) /
                      BigFloat(denominator(oracle.objective))
     lower_bound.bound == expected_bound || return false
-    length(oracle.dual_multipliers) == length(witness) || return false
-    dual_bound = sum(oracle.dual_multipliers[i] * witness[i]
-                     for i in eachindex(witness))
-    dual_bound == oracle.dual_bound == oracle.objective || return false
+    dual_bound = oracle.dual_bound
+    dual_bound == oracle.objective || return false
     expected = BigFloat(numerator(oracle.objective)) /
                BigFloat(denominator(oracle.objective))
     actual = BigFloat(certificate.primal_objective)
@@ -537,28 +604,38 @@ end
 
 function _oracle_dual_multipliers(artifact::V2ConicArtifact)
     f = artifact.family
-    f === :sdp && return Rational{Int}[1, 0, 1]
-    f === :rsoc && return Rational{Int}[1, 1]
-    f === :mixed && return Rational{Int}[1, -1]
-    f === :soc && return Rational{Int}[1, 1]
-    f === :nonpositive && return fill(-1//1, artifact.dimension)
-    f === :lp && return fill(1//1, artifact.dimension)
-    return Rational{Int}[1]
+    f === :sdp && return Rational{Int}[-1, 0, 0, -1]
+    f === :rsoc && return Rational{Int}[-1, -1]
+    f === :mixed && return Rational{Int}[-1, 1]
+    f === :soc && return fill(-1//1, artifact.dimension)
+    f === :nonpositive && return fill(1//1, artifact.dimension)
+    f === :lp && return fill(-1//1, artifact.dimension)
+    f in (:exp, :power) && return Rational{Int}[-1]
+    throw(ArgumentError("unknown artifact family $f"))
 end
 
 function _oracle_objective(artifact::V2ConicArtifact)
-    w = _oracle_witness(artifact)
-    d = _oracle_dual_multipliers(artifact)
-    return sum(d[i] * w[i] for i in eachindex(w))
+    f = artifact.family
+    f === :sdp && return _q(artifact, 1) + _q(artifact, 4)
+    f === :rsoc && return 2//1
+    f === :mixed && return _q(artifact, 1) - _q(artifact, 2)
+    f === :soc && return sum(artifact.coefficients[1:artifact.dimension])
+    f === :nonpositive && return artifact.cone_parameter *
+        (-sum(artifact.coefficients[1:artifact.dimension]))
+    f === :lp && return artifact.cone_parameter *
+        sum(artifact.coefficients[1:artifact.dimension])
+    f in (:exp, :power) && return _q(artifact, 1)
+    throw(ArgumentError("unknown artifact family $f"))
 end
 
 function _native_reference(artifact::V2ConicArtifact)
     if artifact.infeasible
         return V2Reference(:xfail, :farkas, nothing,
-            V2ExactOracle(:primal_infeasible, 0//1, Rational{Int}[], Rational{Int}[],
-                0//1, artifact.infeasibility_ray, artifact),
+            V2ExactOracle(:primal_infeasible, 0//1, _oracle_witness(artifact), Rational{Int}[],
+                Rational{Int}[], 0//1, artifact.infeasibility_ray, artifact),
             "independently described infeasible sentinel; expected status is primal_infeasible";
-            expected_status=:numerical_breakdown, disposition=:XFAIL)
+            expected_status=:primal_infeasible, disposition=:XFAIL,
+            prior_observed_status=:numerical_breakdown)
     end
     # The exact objective is rebuilt by the same typed artifact rules; interval
     # endpoints are deliberately exact decimal strings for this integer-valued
@@ -582,7 +659,8 @@ function _native_reference(artifact::V2ConicArtifact)
     dual_bound = _oracle_objective(artifact)
     objective == dual_bound || throw(ArgumentError("exact primal/dual oracle mismatch"))
     oracle = V2ExactOracle(:optimal, objective, witness, dual_multipliers,
-        dual_bound, artifact.infeasibility_ray, artifact)
+        _oracle_cone_dual_slacks(artifact), dual_bound,
+        artifact.infeasibility_ray, artifact)
     V2Reference(:optimal, :optimal, (lower, upper), oracle, "independently reconstructed exact artifact objective";
         expected_status=:optimal, disposition=:PASS)
 end
@@ -597,7 +675,7 @@ function native_v2_catalog()
             V2Built(built.problem, built.oracle, built.source_artifact,
                 input_fingerprint(instance), built.transform,
                 merge(built.facts, (artifact_fingerprint=_hex(instance.payload),
-                    model_fingerprint=_native_model_fingerprint(built.problem, precision.bits),
+                    model_fingerprint=_native_model_fingerprint(built.problem),
                     model_precision_bits=precision.bits,
                     builder_version=instance.payload.generator_version)), built.resource)
         end
@@ -616,7 +694,9 @@ function native_v2_catalog()
             id = Symbol("v2_$(family)_$(split)")
             artifact = _native_artifact(family, id; split, infeasible)
             ref = _native_reference(artifact)
-            params = (family=family, split=split, dimension=artifact.dimension,
+            # `split` is provenance/suite metadata, never mathematical axis
+            # data. The artifact itself is the complete mathematical payload.
+            params = (family=family, dimension=artifact.dimension,
                 coefficients=artifact.coefficients, cone_parameter=artifact.cone_parameter,
                 infeasible=artifact.infeasible)
             push!(instances, V2Instance(id, family, tiers[:small], params, split,

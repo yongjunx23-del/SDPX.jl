@@ -58,7 +58,8 @@ using .GeneralBenchmarkV2
     @test classify_disposition(:optimal, false, :optimal, true, true, true, true) === :PASS
     @test classify_disposition(:optimal, true, :optimal, true, true, true, true) === :RESOLVED
     @test classify_disposition(:optimal, false, :numerical_breakdown, true, true, true, true) === :FAIL
-    @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, false, false) === :XFAIL
+    @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, false, true, [:certificate]) === :XFAIL
+    @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, false, false, [:certificate]) === :FAIL
     @test classify_disposition(:numerical_breakdown, false, :optimal, true, true, true, true) === :XPASS
     @test classify_disposition(:numerical_breakdown, true, :optimal, true, true, true, true) === :RESOLVED
     @test classify_disposition(:numerical_breakdown, false, :numerical_breakdown, true, true, true, false) === :FAIL
@@ -116,20 +117,26 @@ end
               training_instances(catalog))
     sent = only(filter(i -> i.split === :sentinel && i.family === :lp, catalog.instances))
     @test sent.reference.status === :xfail
-    @test sent.reference.expected_status === :numerical_breakdown
+    @test sent.reference.expected_status === :primal_infeasible
+    @test sent.reference.prior_observed_status === :numerical_breakdown
     @test sent.reference.disposition === :XFAIL
     @test sent.reference.oracle.dual_ray == Rational{Int}[1, -1]
+    @test sent.reference.certificate_kind === :farkas
     train_lp = only(filter(i -> i.family === :lp && i.split === :train, catalog.instances))
     train_soc = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
     train_rsoc = only(filter(i -> i.family === :rsoc && i.split === :train, catalog.instances))
     train_sdp = only(filter(i -> i.family === :sdp && i.split === :train, catalog.instances))
     @test train_lp.reference.oracle.primal_witness == Rational{Int}[1//2]
-    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[1]
+    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[-1]
+    @test train_lp.reference.oracle.cone_dual_slacks == Rational{Int}[0]
     @test train_lp.reference.oracle.dual_bound == train_lp.reference.oracle.objective == 1//2
-    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[1]
+    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[-1]
     @test train_rsoc.reference.oracle.primal_witness == Rational{Int}[1, 1]
     @test train_sdp.reference.oracle.primal_witness == Rational{Int}[1, 0, 1]
-    @test train_sdp.reference.oracle.dual_multipliers == Rational{Int}[1, 0, 1]
+    @test train_sdp.reference.oracle.dual_multipliers == Rational{Int}[-1, 0, 0, -1]
+    @test length(train_sdp.reference.oracle.cone_dual_slacks) == 3
+    @test_throws ArgumentError V2ConicArtifact(:sdp, :asymmetric,
+        Rational{Int}[1, 1//2, 1//3, 1], 2, 1//2, false, :x, 1)
     # Pure mathematical identity excludes ID/split/provenance metadata.
     same_math_a = V2Instance(:a, :soc, train_soc.tier, train_soc.axis_values,
         :train, "source-a", train_soc.provenance, train_soc.checksum,
@@ -139,6 +146,16 @@ end
         train_soc.resource, train_soc.reference, train_soc.payload)
     @test mathematical_fingerprint(same_math_a) == mathematical_fingerprint(same_math_b)
     @test input_fingerprint(same_math_a) == input_fingerprint(same_math_b)
+    bad_id = V2Instance(:wrong_id, :soc, train_soc.tier, train_soc.axis_values,
+        :train, train_soc.source, train_soc.provenance, train_soc.checksum,
+        train_soc.resource, train_soc.reference, train_soc.payload)
+    @test_throws ArgumentError V2Catalog(:bad_id, 2, catalog.families, [bad_id],
+        (train=[:wrong_id], holdout=Symbol[], sentinel=Symbol[]))
+    bad_family = V2Instance(:wrong_family, :lp, train_soc.tier, train_soc.axis_values,
+        :train, train_soc.source, train_soc.provenance, train_soc.checksum,
+        train_soc.resource, train_soc.reference, train_soc.payload)
+    @test_throws ArgumentError V2Catalog(:bad_family, 2, catalog.families, [bad_family],
+        (train=[:wrong_family], holdout=Symbol[], sentinel=Symbol[]))
     @test all(i -> i.split == :train ? i.id in catalog.suites.train :
                    (i.split == :holdout ? i.id in catalog.suites.holdout : i.id in catalog.suites.sentinel),
               catalog.instances)
@@ -188,6 +205,18 @@ end
     soc_built, _ = build_instance(catalog, soc_original, precision)
     soc_built.problem.constraint_blocks[1].expressions[2].coefficients[1] += 1.0
     @test !soc_built.oracle(soc_built, fake_certificate)
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    soc_built.oracle.primal_witness[1] += 1//1
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    soc_built, _ = build_instance(catalog, soc_original, precision)
+    soc_built.oracle.dual_multipliers[1] += 1//1
+    @test !soc_built.oracle(soc_built, fake_certificate)
+    sdp_built, _ = build_instance(catalog, train_sdp, precision)
+    sdp_built.oracle.primal_witness[2] += 1//1
+    @test !sdp_built.oracle(sdp_built, (primal_objective=BigFloat(2),))
+    sdp_built, _ = build_instance(catalog, train_sdp, precision)
+    sdp_built.oracle.dual_multipliers[2] += 1//1
+    @test !sdp_built.oracle(sdp_built, (primal_objective=BigFloat(2),))
 
     # Every exact coefficient is semantic input, not decorative metadata.
     original = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
@@ -246,6 +275,15 @@ end
         GeneralBenchmarkV2._native_reference(original.payload).objective_interval
     end
     @test ref_at_128 == ref_at_512
+    for bits in (256, 512)
+        built_big = setprecision(BigFloat, 79) do
+            build_instance(catalog, train_lp,
+                V2Precision(:BigFloat, BigFloat, bits, "1e-8", "1e-8", :standard))[1]
+        end
+        @test built_big.facts.model_precision_bits == bits
+        @test built_big.facts.model_fingerprint ==
+              GeneralBenchmarkV2._native_model_fingerprint(built_big.problem)
+    end
     @test bytes2hex(GeneralBenchmarkV2._canonical_bytes(Rational{Int}(1, 2))) ==
           "0a4300000000000000013143000000000000000132"
     @test GeneralBenchmarkV2._hex(Rational{Int}(1, 2)) ==

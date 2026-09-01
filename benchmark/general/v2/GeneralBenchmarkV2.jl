@@ -73,10 +73,14 @@ struct V2Reference{O}
     objective_interval::Union{Nothing,Tuple{String,String}}
     oracle::O
     note::String
+    # For XFAIL references, this records the known observed solver status
+    # separately from the semantic expected status and never substitutes for it.
+    prior_observed_status::Union{Nothing,Symbol}
     function V2Reference(status::Symbol, certificate_kind::Symbol,
                          objective_interval, oracle, note::AbstractString="";
                          expected_status::Symbol=status,
-                         disposition::Symbol=(status === :xfail ? :XFAIL : :PASS))
+                         disposition::Symbol=(status === :xfail ? :XFAIL : :PASS),
+                         prior_observed_status::Union{Nothing,Symbol}=nothing)
         status in (:optimal, :primal_infeasible, :dual_infeasible, :build_only,
                    :discretized, :xfail) ||
             throw(ArgumentError("unsupported reference status $status"))
@@ -113,7 +117,12 @@ struct V2Reference{O}
             throw(ArgumentError("xfail must declare the expected solver status separately"))
         status === :xfail && expected_status === :build_only &&
             throw(ArgumentError("xfail must declare a concrete non-build solver status"))
-        new{typeof(oracle)}(status, expected_status, disposition, certificate_kind, interval, oracle, String(note))
+        prior_observed_status === nothing || prior_observed_status in
+            (:optimal, :primal_infeasible, :dual_infeasible, :iteration_limit,
+             :numerical_breakdown, :build_only) || throw(ArgumentError(
+                "invalid prior observed solver status $prior_observed_status"))
+        new{typeof(oracle)}(status, expected_status, disposition, certificate_kind,
+            interval, oracle, String(note), prior_observed_status)
     end
 end
 
@@ -354,7 +363,7 @@ function _put!(io::IO, value)
     elseif value isa V2Reference
         _put!(io, (value.status, value.expected_status, value.disposition,
                    value.certificate_kind, value.objective_interval,
-                   value.oracle, value.note))
+                   value.oracle, value.note, value.prior_observed_status))
     elseif value isa V2Transform
         _put!(io, (value.source_problem_type, value.target_cone_program,
                    value.transform_id, value.version, value.exactness,
@@ -419,13 +428,25 @@ certificate-kind and residual gate passes; an unexpected xfail success is XPASS.
 """
 function classify_disposition(expected_status::Symbol, prior_failure::Bool,
         observed_status::Symbol, oracle_ok::Bool, interval_ok::Bool,
-        certificate_valid::Bool, certificate_kind_ok::Bool, failures=Symbol[])
+        certificate_valid::Bool, certificate_kind_ok::Bool, failures=Symbol[];
+        prior_observed_status::Union{Nothing,Symbol}=nothing)
     gates = oracle_ok && interval_ok && certificate_valid && certificate_kind_ok
     if expected_status === :build_only
         return observed_status === :build_only && oracle_ok && interval_ok &&
                certificate_kind_ok ? :PASS : :FAIL
+    elseif expected_status === :primal_infeasible && prior_observed_status !== nothing
+        # An XFAIL keeps the real semantic expected status (primal infeasible)
+        # while separately accepting a previously observed numerical failure.
+        if observed_status in (expected_status, prior_observed_status) && oracle_ok &&
+           !certificate_valid && certificate_kind_ok && !isempty(failures)
+            return :XFAIL
+        elseif observed_status === :optimal && gates
+            return prior_failure ? :RESOLVED : :XPASS
+        end
+        return :FAIL
     elseif expected_status === :iteration_limit || expected_status === :numerical_breakdown
-        if observed_status === expected_status && oracle_ok && !certificate_valid
+        if observed_status === expected_status && oracle_ok && !certificate_valid &&
+           certificate_kind_ok && !isempty(failures)
             return :XFAIL
         elseif observed_status === :optimal && gates
             return prior_failure ? :RESOLVED : :XPASS
@@ -484,6 +505,12 @@ function validate_catalog(catalog::V2Catalog)
         instance.id in ids && throw(ArgumentError("duplicate V2 instance $(instance.id)"))
         push!(ids, instance.id)
         haskey(families, instance.family) || throw(ArgumentError("unknown family $(instance.family)"))
+        if instance.payload isa AbstractV2SourceArtifact
+            instance.payload.id == instance.id || throw(ArgumentError(
+                "payload ID $(instance.payload.id) does not match instance $(instance.id)"))
+            instance.payload.family == instance.family || throw(ArgumentError(
+                "payload family $(instance.payload.family) does not match instance $(instance.family)"))
+        end
         isempty(instance.checksum) && throw(ArgumentError("missing checksum for $(instance.id)"))
         instance.split in (:train, :holdout, :sentinel) ||
             throw(ArgumentError("invalid split $(instance.split) for $(instance.id)"))
@@ -568,7 +595,7 @@ function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2P
         hasproperty(built.facts, :model_fingerprint) ||
             throw(ArgumentError("builder must publish canonical generated-model fingerprint"))
         actual_model_fingerprint = isdefined(@__MODULE__, :_native_model_fingerprint) ?
-            _native_model_fingerprint(built.problem, precision.bits) : nothing
+            _native_model_fingerprint(built.problem) : nothing
         actual_model_fingerprint === nothing ||
             actual_model_fingerprint == built.facts.model_fingerprint ||
             throw(ArgumentError("builder model fingerprint does not match actual built model"))
@@ -632,12 +659,13 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     reference_ok = oracle_ok && interval_ok && status_ok && cert_ok
     semantic_ok = reference_ok
     cert_kind_ok = instance.reference.status === :build_only ||
-        (instance.reference.status === :primal_infeasible ?
+        (instance.reference.expected_status === :primal_infeasible ?
             instance.reference.certificate_kind in (:farkas, :ray) :
             instance.reference.certificate_kind === :optimal)
     prior_failure = instance.reference.disposition in (:XFAIL, :FAIL)
     disposition = classify_disposition(instance.reference.expected_status, prior_failure,
-        SDPX.status(solved), oracle_ok, interval_ok, certificate.valid, cert_kind_ok, failures)
+        SDPX.status(solved), oracle_ok, interval_ok, certificate.valid, cert_kind_ok, failures;
+        prior_observed_status=instance.reference.prior_observed_status)
     if disposition === :XFAIL
         validation_status = :XFAIL
         semantic_ok = false
