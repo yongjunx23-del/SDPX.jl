@@ -1,5 +1,7 @@
 # Exact Hellerman modular functional PMP front-end and fail-closed contract tests.
 
+using LinearAlgebra
+
 @testset "Original Hellerman modular functional PMP front end" begin
     modular_path = joinpath(@__DIR__, "..", "benchmark", "bootstrap",
         "physics", "modular_pmp", "ModularPMP.jl")
