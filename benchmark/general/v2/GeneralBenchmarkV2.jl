@@ -771,7 +771,10 @@ function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2P
 end
 
 function _parse(::Type{T}, text::String) where {T}
-    T === BigFloat ? T(text) : parse(T, text)
+    # Float64 has no string constructor (use Base.parse); BigFloat and the
+    # MultiFloats backends construct exactly from decimal strings, which
+    # Base.parse cannot do for MultiFloats (no tryparse method).
+    T === Float64 ? parse(T, text) : T(text)
 end
 
 """Solve an ordinary V2 instance via the existing public generic builder."""
