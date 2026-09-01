@@ -22,8 +22,15 @@ There is no blanket V1-to-V2 regression in the EXP/Power families.
   therefore a boundary/heterogeneous-parameter stress case, not evidence that
   the V1 instance was lowered incorrectly.
 
-The V2 `power_tranche_catalog()` intentionally has zero registered instances;
-its three `PowerArtifact` values remain typed source candidates only.
+At the historical diagnosis commit `24a78b6` (based on `da55fdb`), the V2
+`power_tranche_catalog()` intentionally had zero registered instances; its
+three `PowerArtifact` values were typed source candidates only. That sentence
+is retained as historical probe context, not the current catalog status. At
+reviewed HEAD `e14df2a`, the catalog has one separately constructed certified
+interior row, `v2_power_interior_epigraph_small` (alpha=1/2, fixed x=1/2,
+optimum t=1/4), with an exact source oracle and Float64 certificate. The
+historical five-alpha boundary/heterogeneous, weighted-mean, and alpha-sweep
+candidates remain unregistered and open.
 
 ## Exact V1 baselines and V2 counterparts
 
@@ -124,13 +131,15 @@ provide a certified receipt for the proposed aggregate candidate.
 
 ### Fix placement
 
-**Immediate fix: V2-side catalog policy, not solver source.** Keep the Power
-artifacts typed but unregistered (`instances=[]`) until a native Float64
-optimal, certificate-valid receipt exists.  Do not change tolerances, alter
-certificate rules, or claim a Power row from the passing one-cone controls.
-For a future certified tranche, choose an explicit reviewed construction with
-interior fixed values and a bounded homogeneous-alpha size, or retain the
-heterogeneous/boundary case as an honest solver finding.
+**Immediate policy: V2-side catalog, not solver source.** The historical
+five-alpha boundary/heterogeneous and weighted candidates remain typed but
+unregistered because their native receipts fail. The new interior
+`v2_power_interior_epigraph_small` is a distinct artifact, not a relabeling of
+those failures: its exact alpha=1/2, x=1/2 witness reaches t=1/4 and its
+Float64 status/certificate/original-coordinate gates pass. Do not change
+tolerances, alter certificate rules, or promote the harder candidates from
+probe outcomes. Any future Power row needs a new exact source contract,
+independent oracle, and certificate receipt.
 
 **Potential future solver work:** if the product-HSD route is required to
 support the five-cone heterogeneous or exact-boundary cases, investigate
@@ -144,10 +153,11 @@ frozen-trajectory and certificate gates; this diagnosis does not authorize it.
   `known_solver_finding`/unregistered status until native EXP support produces
   an independently certified receipt.  The V2 row-order difference is worth a
   controlled follow-up, but changing order alone is not justified by the probe.
-* **Power separable/alpha-sweep/weighted candidates:** remain open and are not
-  promoted.  A future V2-side redesign can produce a smaller/interior control
-  row, but it must be a new exact artifact with a new independent oracle and
-  certificate receipt; it must not relabel the current failure.
+* **Power boundary/heterogeneous separable, alpha-sweep, and weighted-mean
+  candidates:** remain open and are not promoted. The certified interior row is
+  separate; a future redesign of the harder candidates must still be a new
+  exact artifact with a new independent oracle and certificate receipt, never a
+  relabeling of a failed probe.
 * **V1 `exp_unit_small` and `power_epigraph_small`:** preserve as passing V1
   compatibility cases; the unit EXP V2 construction is already reproduced,
   while the Power row is not mathematically equivalent to the V2 candidates.

@@ -132,52 +132,52 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 
 ## Coverage disposition
 
+This is the single authoritative coverage table for the partial additive
+tranche. “Open” means the kind remains an explicit work item or solver finding;
+no open row is promoted by metadata alone.
+
 | Requested family/kind | Current status | Reason / next work |
 |---|---|---|
-| LP: box, sparse planted KKT, Chebyshev | **certified tranche** | `lp_tranche_catalog()`: Float64 status/certificate/oracle gates pass; receipts recorded above |
-| LP: duplicate/rank-deficient | open | exact lowering exists as a probe, but current sparse route returns `numerical_breakdown`; no registration |
-| LP: primal infeasible | **certified tranche** | typed Farkas-row artifact, status gate, exact contradiction oracle, and public original-coordinate certificate pass |
-| LP: unbounded | **certified tranche** | typed homogeneous recession ray, dual-infeasible status gate, exact improving-inner-product oracle, and public original-coordinate certificate pass |
-| LP: Chebyshev | **certified tranche** | `v2_lp_chebyshev_small`: equality-plus-slack epigraph with exact minimax oracle and Float64 certificate |
-| Nonpositive sign sentinel | **certified tranche** | `v2_lp_nonpositive_small`: typed nonpositive partition, Float64 status/certificate/oracle gates pass |
-| SOCP: single large SOC, Q3 load sharing | **certified tranche** | `socp_tranche_catalog()`: two exact typed artifacts with independent SOC primal/dual oracle and Float64 certificate gates |
-| SOCP: planted portfolio, simplex projection, ill-scaled SOC | open | Current artifact contract lacks the free/nonnegative auxiliary-variable semantics needed for faithful portfolio/projection lowerings; ill-scaled candidate probed `numerical_breakdown`; no placeholders |
-| RSOC: quadratic epigraph, perspective LS, many QR3 | **certified tranche** | `rsoc_tranche_catalog()`: exact rational targets, public RotatedLorentzCone lowerings, rational planted witnesses, and objective/certificate gates pass (1.5 / 0.5 / 24) |
-| SDP: weighted trace, Max-Cut K4, eight PSD(3) multiblock | **certified tranche** | `sdp_tranche_catalog()`: factorized rational Gram witnesses and independent dual PSD proofs; Float64 objective/certificate gates pass (1 / -4 / 8) |
-| EXP: unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact unit epigraph, independent interval/oracle and Float64 certificate pass |
-| Power: interior alpha=1/2 epigraph | **certified tranche** | `v2_power_interior_epigraph_small`: exact rational witness `(t,x)=(1/4,1/2)`, algebraic lower-bound proof `t>=x^2`, independent model receipt, Float64 certificate/original-coordinate gates pass |
-| Mixed: planted six-cone coupling | **certified tranche** | `mixed_tranche_catalog()`: six cone blocks, coupling RHS derived from exact planted witness, independent oracle and Float64 certificate pass (objective 8) |
+| LP: box, sparse planted KKT, primal infeasible/Farkas, unbounded/improving ray, Chebyshev, Nonpositive sign | **certified tranche** | Six LP cases (including the two status/ray contracts) pass independent exact source/oracle and Float64 original-coordinate gates. |
+| LP: duplicate/rank-deficient; near-boundary/boundary | open | Exact probes remain fail-closed (`numerical_breakdown`); duplicate work is equality-induced objective-null degeneracy, not a license to widen tolerances. |
+| SOCP: single large SOC; Q3 load sharing | **certified tranche** | Two typed cases pass independent SOC primal/dual and Float64 certificate gates. |
+| SOCP: planted portfolio; simplex projection; ill-scaled SOC | open | Faithful free/nonnegative auxiliary-variable contracts and a certified ill-scaled SOC receipt are still missing; no placeholders. |
+| RSOC: quadratic epigraph; perspective least squares; many QR3 blocks | **certified tranche** | Exact rational targets/witnesses and independent dual proofs pass (objectives 1.5 / 0.5 / 24). |
+| SDP: weighted trace; complete-graph theta/Max-Cut; PSD multiblock | **certified tranche** | Current weighted trace, Max-Cut K4, and eight-PSD(3) multiblock rows pass exact Gram/dual checks. |
+| SDP: sparse graph; elliptope; theta beyond current K4; larger PSD blocks | open | Sparse/elliptope/theta coverage and mandatory larger dimensions remain to be registered with independent PSD dual witnesses. |
+| EXP: unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small` passes exact analytic/original-coordinate Float64 gates. |
+| EXP: entropy; log-sum-exp; exponential fitting; corrected coercive GP | open | Native entropy/LSE probes fail closed; fitting and corrected coercive geometric-program lowerings need faithful typed artifacts and independent references. |
+| Power: interior alpha=1/2 epigraph | **certified tranche** | `v2_power_interior_epigraph_small` has exact witness `(t,x)=(1/4,1/2)` and passes Float64 status/certificate/original-coordinate gates. |
+| Power: heterogeneous/boundary alpha; alpha sweep; weighted mean; budgeted Power mean | open | The historical five-alpha boundary/heterogeneous and weighted candidates remain unregistered; budgeted mean is not yet modeled or certified. |
+| Mixed: planted active cross-cone coupling | **certified tranche** | One six-cone planted case passes independent source/oracle and Float64 gates. |
+| Mixed: direct-product; sparse many-block; larger active coupling | open | Mandatory direct-product/many-block mixed constructions need distinct exact source contracts and receipts. |
+| Ill-conditioned: diagonal scale ladder; near-rank-loss LP | **certified tranche** | Exact rational source/oracle and Float64 original-coordinate gates pass. |
+| Ill-conditioned: Hilbert/PSD; near-boundary SOC/PSD; high-range EXP/Power | open | Mandatory ill-conditioned PSD and other stress constructions remain open; no solver-support finding is relabeled as certified. |
+| Inventory tiers: medium; large; extreme | open | Current tranche is small/partial; larger dimensions and resource receipts are not yet available. |
+| External holdouts and parity receipts | open | Holdout rows with pending parity are ineligible; independent parity checksums/receipts must pass before promotion. |
+| Lifecycle evidence: fresh-process samples; peak RSS | open | Schema shape exists, but complete fresh-process orchestration and measured peak-RSS evidence remain required. |
+| Provider matrix: Float64x3; BigFloat512; BigFloat1024 | open | Current final matrix covers Float64x2 17/17, Float64x4 17/17 per-case with documented process instability, and BigFloat256 16/17 (only EXP breakdown). |
 
-| EXP unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact `(0,1,x)` exponential cone, optimum 1, Float64 certificate/oracle gate passes |
-| EXP entropy/log-sum-exp/fitting | open | entropy/log-sum-exp typed candidates have high-precision intervals but native runs break down; fitting lowering remains unsupported; no rows registered |
-| Power boundary/heterogeneous separable, weighted-mean, alpha-sweep | open | exact-alpha typed candidates/builders retained; multi-cone boundary/heterogeneous probes fail status/certificate, no placeholder rows |
-| Ill-conditioned diagonal scale ladder | **certified tranche** | `ill_conditioned_tranche_catalog()`: exact row scaling D=diag(10^-6,10^6), independently certified Float64 optimum -5; source/model fingerprints and original-coordinate oracle pass |
-| Ill-conditioned near-rank-loss LP | **certified tranche** | exact row3=row1+10^-8*row2 rational artifact; independent primal/dual oracle and Float64 certificate pass (objective -1.9999999928894998 within 5e-7) |
-| Ill-conditioned near-boundary LP | open | exact 10^-8 slack artifact was probed but solver returned `numerical_breakdown`; no registration |
-| Ill-conditioned Hilbert-6 SDP/boundary SOC/high-range EXP/Power | open | exact coefficient artifacts plus PSD/SOCP/EXP/Power-specific original-coordinate oracles; no placeholders |
-
-No placeholder rows were added. This is a partial additive tranche: 17
-optimal-path cases plus two ray cases are solve-eligible with independent
-Float64 receipts across all eight catalog families, but it must not be called
-the complete reviewed small-tier inventory.
+No placeholder rows were added. This is a **partial additive tranche**: 17
+optimal-path cases plus two rays are solve-eligible across all eight catalog
+families. It must not be called the complete reviewed small-tier inventory.
 
 ## Remaining V2 blockers after this tranche
 
-1. Complete the mandatory small kinds/dimensions and then medium/large/extreme
-   inventories. Duplicate/rank-deficient and near-boundary LPs, EXP entropy/
-   log-sum-exp/fitting, harder Power boundary/heterogeneous rows, SOCP
-   portfolio/simplex/ill-scaled, Hilbert-6 SDP, boundary SOC, and high-range
-   EXP/Power remain explicit solver/support findings rather than placeholders.
-2. Promote external holdouts only after independent parity receipts pass;
-   parity-pending rows are now ineligible by construction.
-3. Add full fresh-process orchestration and peak-RSS capture. The current
-   schema-v9 adapter honestly declares one warmup plus three same-process
-   samples and unavailable fields instead of synthesizing passes.
-4. Finish the provider matrix beyond the current Float64x2/x4/BigFloat256
-   qualification: Float64x3 and BigFloat512/1024 remain open, and Julia 1.12 +
-   MultiFloats process crashes must remain visible provider-stability findings.
-5. Freeze train/holdout/sentinel catalogs and lifecycle receipts before Stage-B
-   performance baselines are selected.
+The table above is exhaustive for the current review queue: the mandatory
+unresolved items are LP duplicate/boundary; SOCP portfolio/simplex/ill-scaled;
+SDP sparse/elliptope/theta; corrected coercive GP and EXP entropy/LSE/fitting;
+Power heterogeneous/boundary/alpha, weighted and budgeted means; mixed
+direct-product/many-block; ill-conditioned PSD; medium/large/extreme tiers;
+external parity receipts; complete fresh-process/peak-RSS lifecycle evidence;
+and Float64x3/BigFloat512/1024 provider qualification. The final provider
+receipts already obtained are Float64x2 17/17, Float64x4 17/17 using per-case
+fresh processes with documented SIGSEGV/retry instability, and BigFloat256
+16/17 with only the EXP unit epigraph in native numerical breakdown.
+
+These open items remain fail-closed and cannot be unlocked by synthetic rows,
+metadata, or a solver status without an independent source/oracle and
+certificate receipt.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none
