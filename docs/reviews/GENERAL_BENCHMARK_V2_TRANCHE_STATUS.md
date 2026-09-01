@@ -30,6 +30,24 @@ The new regression test constructs a `BenchmarkResult{BigFloat}` and validates i
 against a legacy V1 reference, while a real Float64 V1 run checks the runner's
 constructor path.
 
+### First certified LP lowering
+
+The first family-specific lowering is now implemented for the exact standard-form LP
+artifact. The catalog `lp_tranche_catalog()` registers only two Float64-certified
+cases:
+
+| Kind | Case | Exact optimum | Independent proof |
+|---|---|---:|---|
+| box | `v2_lp_box_small` | -5 | `x+s=(1,2)`, `x,s>=0`; `y=(-1,-2)` gives `c'x=b'y=-5` |
+| sparse planted KKT | `v2_lp_sparse_planted_small` | -4 | `A=[1 1 1 0;0 1 0 1]`, planted `(1,1,0,0)`, `y=(-1,-2)` gives `c'x=b'y=-4` |
+
+The lowering consumes exact rational `A/b/c`, builds the public SDPX model, and
+binds the result to a generated-model fingerprint. The independent oracle checks
+source equality feasibility, cone signs, dual inequalities/equalities, strong
+duality, and the returned objective. The duplicate/rank-deficient construction was
+probed but is not registered because the current solver reports `numerical_breakdown`;
+this is an explicit open item rather than a fabricated pass.
+
 ### Architecture decision for the real inventory
 
 The current `V2ConicArtifact` is a deliberately small identity-contract artifact:
@@ -66,8 +84,8 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 
 | Requested family/kind | Current status | Reason / next work |
 |---|---|---|
-| LP: box, sparse planted KKT | open | add typed LP affine artifact + primal/dual oracle |
-| LP: duplicate/rank-deficient | open | preserve duplicate rows and certify independent dual consistency |
+| LP: box, sparse planted KKT | **certified tranche** | `lp_tranche_catalog()`: Float64 status/certificate/oracle gates pass; receipts recorded above |
+| LP: duplicate/rank-deficient | open | exact lowering exists as a probe, but current sparse route returns `numerical_breakdown`; no registration |
 | LP: primal infeasible | open | implement exact Farkas-row artifact and solver-status gate |
 | LP: unbounded | open | implement homogeneous recession ray and improving-inner-product gate |
 | LP: Chebyshev | open | add epigraph/slack variables and analytic minimax oracle |

@@ -200,6 +200,35 @@ end
     end
 end
 
+@testset "typed LP lowering has an independent certified oracle" begin
+    catalog = lp_tranche_catalog()
+    @test length(catalog.instances) == 2
+    @test all(instance.payload isa LPArtifact for instance in catalog.instances)
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0)
+    for instance in catalog.instances
+        @test instance.reference.oracle isa V2LPOracle
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.source_artifact === instance.payload
+        @test built.facts.artifact_fingerprint == instance.checksum
+        @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=1e-7, rtol=0)
+        @test result.core_seconds !== nothing
+    end
+    # A mutation of the lowered objective must fail the independent oracle,
+    # even if a caller supplies a certificate with the expected objective.
+    box = only(filter(instance -> instance.payload.kind === :box, catalog.instances))
+    built2, _ = build_instance(catalog, box, precision)
+    built2.problem.objective.expression.coefficients[1] += 1.0
+    @test !built2.oracle(built2, (primal_objective=BigFloat(-5),))
+end
+
 @testset "native V2 corpus owns typed artifacts and disjoint suites" begin
     catalog = native_v2_catalog()
     @test !isempty(catalog.suites.train)

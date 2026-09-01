@@ -5,9 +5,10 @@ import SDPX
 
 export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
     AbstractV2SourceArtifact, AbstractV2SmallArtifact, LPArtifact,
-    SOCPArtifact, IllConditionedArtifact, V2ConicArtifact, native_v2_catalog,
+    SOCPArtifact, IllConditionedArtifact, V2LPOracle, V2ConicArtifact, native_v2_catalog,
     V2Transform, V2Family, V2Instance, V2Catalog, V2Built, V2Validation,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
+    lp_tranche_catalog,
     input_fingerprint, mathematical_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
     precision_matrix, reviewed_precision_specs, certificate_gate,
@@ -631,8 +632,12 @@ function validate_catalog(catalog::V2Catalog)
         if instance.payload isa AbstractV2SourceArtifact
             instance.payload.id == instance.id || throw(ArgumentError(
                 "payload ID $(instance.payload.id) does not match instance $(instance.id)"))
-            instance.payload.family == instance.family || throw(ArgumentError(
-                "payload family $(instance.payload.family) does not match instance $(instance.family)"))
+            artifact_family = instance.payload isa LPArtifact ? :lp :
+                instance.payload isa SOCPArtifact ? :soc :
+                instance.payload isa IllConditionedArtifact ? :ill_conditioned :
+                hasproperty(instance.payload, :family) ? getproperty(instance.payload, :family) : nothing
+            artifact_family == instance.family || throw(ArgumentError(
+                "payload family $(artifact_family) does not match instance $(instance.family)"))
         end
         isempty(instance.checksum) && throw(ArgumentError("missing checksum for $(instance.id)"))
         instance.split in (:train, :holdout, :sentinel) ||
@@ -655,9 +660,13 @@ function validate_catalog(catalog::V2Catalog)
             declared = get(instance.provenance, :transform, nothing)
             declared isa V2Transform || throw(ArgumentError(
                 "source artifact instance $(instance.id) must declare its transform"))
-            math_fp = _hex((instance.family, instance.payload.coefficients,
-                instance.payload.dimension, instance.payload.cone_parameter,
-                instance.payload.infeasible, instance.payload.infeasibility_ray))
+            math_fp = if instance.payload isa V2ConicArtifact
+                _hex((instance.family, instance.payload.coefficients,
+                    instance.payload.dimension, instance.payload.cone_parameter,
+                    instance.payload.infeasible, instance.payload.infeasibility_ray))
+            else
+                _hex((instance.family, instance.payload))
+            end
             haskey(math_fingerprints, math_fp) &&
                 throw(ArgumentError("duplicate mathematical V2 artifact across splits: $(instance.id) and $(math_fingerprints[math_fp])"))
             math_fingerprints[math_fp] = instance.id

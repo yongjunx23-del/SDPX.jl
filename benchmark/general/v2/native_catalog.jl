@@ -824,6 +824,187 @@ function _native_reference(artifact::V2ConicArtifact)
         expected_status=:optimal, disposition=:PASS)
 end
 
+"""Typed exact LP oracle for the first real V2 lowering tranche.
+
+The oracle is deliberately independent of the solver: it checks the exact
+source witness, equality feasibility, cone signs, dual feasibility, strong
+duality, and the returned objective.  The model fingerprint check binds those
+checks to the actual lowered model rather than to a reconstructed formula.
+"""
+struct V2LPOracle
+    artifact::LPArtifact
+end
+
+function _put!(io::IO, oracle::V2LPOracle)
+    _put!(io, (:V2LPOracle, oracle.artifact))
+end
+
+function _lp_eval(expr, witness)
+    value = BigFloat(expr.constant)
+    for (index, coefficient) in zip(expr.indices, expr.coefficients)
+        value += BigFloat(coefficient) *
+            BigFloat(numerator(witness[index])) / BigFloat(denominator(witness[index]))
+    end
+    value
+end
+
+function (oracle::V2LPOracle)(built, certificate)
+    artifact = oracle.artifact
+    built.source_artifact === artifact || return false
+    actual_fp = _native_model_fingerprint(built.problem)
+    actual_fp == built.facts.model_fingerprint || return false
+    expected_fp = get(built.facts, :model_contract_fingerprint, "")
+    actual_fp == expected_fp || return false
+    witness = artifact.primal_witness
+    length(witness) == size(artifact.A, 2) || return false
+    # Check the source witness in exact arithmetic against every lowered row.
+    for row in axes(artifact.A, 1)
+        sum(BigFloat(artifact.A[row, col]) *
+            (BigFloat(numerator(witness[col])) / BigFloat(denominator(witness[col])))
+            for col in axes(artifact.A, 2)) == BigFloat(artifact.b[row]) || return false
+    end
+    for (value, domain) in zip(witness, artifact.cone_partition)
+        domain === :nonnegative && value < 0//1 && return false
+        domain === :nonpositive && value > 0//1 && return false
+    end
+    # The exact dual witness is an equality multiplier vector.  For a
+    # minimization LP in standard form, A' y <= c on nonnegative variables.
+    length(artifact.dual_witness) == size(artifact.A, 1) || return false
+    for col in axes(artifact.A, 2)
+        lhs = sum(BigFloat(artifact.A[row, col]) * artifact.dual_witness[row]
+                  for row in axes(artifact.A, 1))
+        rhs = BigFloat(artifact.c[col])
+        if artifact.cone_partition[col] === :nonnegative
+            lhs <= rhs || return false
+        elseif artifact.cone_partition[col] === :free
+            lhs == rhs || return false
+        elseif artifact.cone_partition[col] === :nonpositive
+            lhs >= rhs || return false
+        end
+    end
+    primal_value = sum(BigFloat(artifact.c[col]) *
+        (BigFloat(numerator(witness[col])) / BigFloat(denominator(witness[col])))
+        for col in axes(artifact.A, 2))
+    dual_value = sum(BigFloat(artifact.b[row]) * artifact.dual_witness[row]
+                     for row in axes(artifact.A, 1))
+    primal_value == BigFloat(artifact.objective) || return false
+    dual_value == BigFloat(artifact.objective) || return false
+    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
+    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("1e-7")
+end
+
+function _lp_build(artifact::LPArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
+    model = T === BigFloat ? SDPX.Model(BigFloat; precision_bits, name=String(artifact.id)) :
+        SDPX.Model(T; name=String(artifact.id))
+    x = SDPX.variable!(model, :x, size(artifact.A, 2);
+        domain=all(==( :nonnegative), artifact.cone_partition) ? SDPX.Nonnegative() :
+            all(==( :nonpositive), artifact.cone_partition) ? SDPX.Nonpositive() : SDPX.Reals())
+    # Mixed sign partitions are represented with a real block plus explicit
+    # sign cones below; the first tranche's box uses one nonnegative block.
+    for row in axes(artifact.A, 1)
+        expression = -_Tq(T, artifact.b[row])
+        for col in axes(artifact.A, 2)
+            coefficient = _Tq(T, artifact.A[row, col])
+            iszero(coefficient) || (expression += coefficient * x[col])
+        end
+        SDPX.constraint!(model, Symbol(:lp_row_, row), expression, SDPX.ZeroCone())
+    end
+    objective = zero(T)
+    for col in axes(artifact.A, 2)
+        coefficient = _Tq(T, artifact.c[col])
+        iszero(coefficient) || (objective += coefficient * x[col])
+    end
+    SDPX.objective!(model, SDPX.Minimize(), objective)
+    actual_fp = _native_model_fingerprint(model)
+    transform = V2Transform(:lp_small_artifact, :sdpx_cone_program,
+        :lp_standard_form, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    oracle = V2LPOracle(artifact)
+    facts = (artifact_fingerprint=_hex(artifact), model_fingerprint=actual_fp,
+        model_contract_fingerprint=actual_fp, model_precision_bits=precision_bits,
+        source_dimension=size(artifact.A, 2), target_dimension=size(artifact.A, 2),
+        generator=artifact.generator_id, coefficients=artifact.A)
+    return V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
+end
+
+function _lp_box_artifact()
+    # min -x₁-2x₂ subject to x+s=(1,2), x,s >= 0.  The planted point
+    # (1,2,0,0) is optimal; y=(-1,-2) is dual-feasible and gives -5.
+    A = Rational{Int}[1 0 1 0; 0 1 0 1]
+    b = Rational{Int}[1, 2]
+    c = Rational{Int}[-1, -2, 0, 0]
+    LPArtifact(:v2_lp_box_small, :box, A, b, c;
+        primal_witness=Rational{Int}[1, 2, 0, 0],
+        dual_witness=Rational{Int}[-1, -2], objective=-5//1)
+end
+
+"""A solve-eligible V2 catalog containing only independently certified cases."""
+function _lp_sparse_planted_artifact()
+    # min -x₁-3x₂ subject to A*x=b, x>=0, with
+    # A=[1 1 1 0; 0 1 0 1], b=(2,1).  The exact planted point
+    # (1,1,0,0) has value -4; y=(-1,-2) satisfies A'y<=c and b'y=-4.
+    A = Rational{Int}[1 1 1 0; 0 1 0 1]
+    b = Rational{Int}[2, 1]
+    c = Rational{Int}[-1, -3, 0, 0]
+    LPArtifact(:v2_lp_sparse_planted_small, :sparse_planted_kkt, A, b, c;
+        primal_witness=Rational{Int}[1, 1, 0, 0],
+        dual_witness=Rational{Int}[-1, -2], objective=-4//1)
+end
+
+function _lp_duplicate_artifact()
+    # Duplicate and dependent equalities are retained, not rank-reduced:
+    # x₁+x₂+s=1, the same row again, and twice that row.  The planted
+    # (1,0,0), y=(-1,0,0) pair proves the exact optimum -1.
+    A = Rational{Int}[1 1 1; 1 1 1; 2 2 2]
+    b = Rational{Int}[1, 1, 2]
+    c = Rational{Int}[-1, -1, 0]
+    LPArtifact(:v2_lp_duplicate_rank_deficient_small, :duplicate_rank_deficient,
+        A, b, c; primal_witness=Rational{Int}[1, 0, 0],
+        dual_witness=Rational{Int}[-1, 0, 0], objective=-1//1)
+end
+
+function lp_tranche_catalog()
+    # Only artifacts with an observed Float64 certificate may enter this
+    # catalog.  The duplicate/rank-deficient construction is intentionally
+    # left open: the current sparse route reports numerical_breakdown, so it
+    # must not be mislabeled solve-eligible.
+    artifacts = [_lp_box_artifact(), _lp_sparse_planted_artifact()]
+    transforms = V2Transform(:lp_small_artifact, :sdpx_cone_program,
+        :lp_standard_form, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    descriptions = [
+        "box: x+s=u with c=(-1,-2,0,0); y=(-1,-2) proves c'x=b'y=-5",
+        "sparse planted KKT: A'x dual inequality and y=(-1,-2) prove c'x=b'y=-4",
+    ]
+    families = V2Family(:lp, V2Axis[],
+        (instance, precision) -> begin
+            built = _lp_build(instance.payload, precision.arithmetic;
+                precision_bits=precision.bits)
+            V2Built(built.problem, built.oracle, built.source_artifact,
+                input_fingerprint(instance), built.transform,
+                merge(built.facts, (artifact_fingerprint=_hex(instance.payload),)), built.resource)
+        end,
+        (built, certificate) -> built.oracle(built, certificate),
+        (instance, result) -> result.validation, (:identity,))
+    instances = V2Instance[]
+    for (index, artifact) in enumerate(artifacts)
+        lower = string(BigFloat(artifact.objective) - BigFloat("1e-7"))
+        upper = string(BigFloat(artifact.objective) + BigFloat("1e-7"))
+        reference = V2Reference(:optimal, :optimal, (lower, upper),
+            V2LPOracle(artifact), descriptions[index];
+            expected_status=:optimal, disposition=:PASS)
+        push!(instances, V2Instance(artifact.id, :lp,
+            only(filter(t -> t.name === :small, _TIERS)),
+            (kind=artifact.kind,), :train,
+            "general-v2/lp/$(artifact.kind)/small",
+            (generator=artifact.generator_id, version=artifact.generator_version,
+             transform=transforms, solve_eligible=true), _hex(artifact),
+            (wall_seconds=20, memory_bytes=4 * 1024^3), reference, artifact))
+    end
+    V2Catalog(:general_v2_lp_tranche, 2, [families], instances,
+        (train=[instance.id for instance in instances], holdout=Symbol[], sentinel=Symbol[]))
+end
+
 function native_v2_catalog()
     families = Any[]
     family_names = (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed)
