@@ -6,6 +6,17 @@ independent oracle, certificate kind, and Float64 solve have all passed.
 
 ## Completed in this tranche
 
+### Typed source-artifact architecture
+
+The benchmark V2 layer now exposes `AbstractV2SmallArtifact` and exact-source
+contracts for `LPArtifact`, `SOCPArtifact`, and `IllConditionedArtifact`.
+Each constructor validates kind, dimensions, cone partition, expected status,
+certificate kind, and retains rational coefficients, RHS/objective data, and
+independent witness fields. Their canonical fixed-endian fingerprints are
+explicitly encoded and tested. These types are architecture contracts only;
+no instance is catalog-registered until a family-specific lowering, independent
+oracle, and Float64 solve/certificate receipt are present.
+
 ### V1 arithmetic-preserving results
 
 `GenericConicBenchmark.BenchmarkResult` is now parameterized by the requested
@@ -75,8 +86,10 @@ small-tier inventory.
 2. External holdout files, immutable checksums, independent references, and parity.
 3. Full fresh-process/peak-RSS/schema-v9 lifecycle pipeline.
 4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
-5. Typed artifact architecture and the certified LP/SOCP/ill-conditioned first tranche
-   described above.
+5. Certified LP/SOCP/ill-conditioned first tranche: typed source contracts now
+   exist, but no new kind is solve-eligible until its family lowering and
+   independent Float64 certificate receipt are added; all requested kinds
+   remain explicitly open rather than represented by placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none

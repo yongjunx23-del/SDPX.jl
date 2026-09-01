@@ -4,7 +4,8 @@ using SHA
 import SDPX
 
 export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
-    AbstractV2SourceArtifact, V2ConicArtifact, native_v2_catalog,
+    AbstractV2SourceArtifact, AbstractV2SmallArtifact, LPArtifact,
+    SOCPArtifact, IllConditionedArtifact, V2ConicArtifact, native_v2_catalog,
     V2Transform, V2Family, V2Instance, V2Catalog, V2Built, V2Validation,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
     input_fingerprint, mathematical_fingerprint, execution_fingerprint, adapt_generic_specs,

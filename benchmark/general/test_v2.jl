@@ -7,6 +7,45 @@ isdefined(Main, :GenericConicBenchmark) ||
 include(joinpath(@__DIR__, "v2", "GeneralBenchmarkV2.jl"))
 using .GeneralBenchmarkV2
 
+@testset "typed small-tranche artifact contracts" begin
+    # Exact rational source data and independent witnesses are retained by the
+    # artifact layer; these are not catalog rows until a family builder and
+    # Float64 certificate gate have passed.
+    lp = LPArtifact(:lp_box_probe, :box, Rational{Int}[1 0; 0 1],
+        Rational{Int}[1, 1], Rational{Int}[1, 1];
+        primal_witness=Rational{Int}[1, 1],
+        dual_witness=Rational{Int}[1, 1], objective=2//1)
+    @test lp isa AbstractV2SmallArtifact
+    @test lp.A == Rational{Int}[1 0; 0 1]
+    @test lp.b == Rational{Int}[1, 1]
+    @test lp.c == Rational{Int}[1, 1]
+    @test length(GeneralBenchmarkV2._hex(lp)) == 64
+    @test GeneralBenchmarkV2._hex(lp) == GeneralBenchmarkV2._hex(lp)
+    lp_changed = LPArtifact(:lp_box_probe, :box, lp.A, lp.b,
+        Rational{Int}[1, 2]; primal_witness=lp.primal_witness,
+        dual_witness=lp.dual_witness, objective=3//1)
+    @test GeneralBenchmarkV2._hex(lp_changed) != GeneralBenchmarkV2._hex(lp)
+    @test_throws ArgumentError LPArtifact(:bad, :unknown, lp.A, lp.b, lp.c)
+    @test_throws ArgumentError LPArtifact(:bad, :box, lp.A, lp.b, lp.c;
+        cone_partition=[:nonnegative])
+
+    soc = SOCPArtifact(:soc_probe, :simplex_projection,
+        Rational{Int}[1 0; 0 1], Rational{Int}[1, 1], Rational{Int}[1, 1];
+        cone_partition=[2], primal_witness=Rational{Int}[1, 1],
+        objective=2//1)
+    @test soc isa AbstractV2SmallArtifact
+    @test sum(soc.cone_partition) == 2
+    @test length(GeneralBenchmarkV2._hex(soc)) == 64
+
+    ill = IllConditionedArtifact(:ill_probe, :diagonal_scale_ladder, :lp,
+        Rational{Int}[1 0; 0 1], Rational{Int}[1, 1], Rational{Int}[1, 1];
+        scale_exponent=6, primal_witness=Rational{Int}[1, 1], objective=2//1)
+    @test ill isa AbstractV2SmallArtifact
+    @test ill.scale_exponent == 6
+    @test_throws ArgumentError IllConditionedArtifact(:bad, :hilbert6_sdp, :exp,
+        Rational{Int}[1;;], Rational{Int}[1], Rational{Int}[1])
+end
+
 @testset "V1 result storage preserves requested arithmetic" begin
     spec = only(filter(s -> s.id === :lp_afiro_style,
         GenericConicBenchmark.inventory(; tier=:small)))

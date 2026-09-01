@@ -3,6 +3,160 @@
 using LinearAlgebra
 abstract type AbstractV2SourceArtifact end
 
+# Typed source artifacts for the real small-tier tranche.  These are source
+# contracts, not solver state: exact rational coefficients and independent
+# witnesses are retained until a family-specific lowering is implemented.
+abstract type AbstractV2SmallArtifact <: AbstractV2SourceArtifact end
+
+struct LPArtifact <: AbstractV2SmallArtifact
+    id::Symbol
+    kind::Symbol
+    A::Matrix{Rational{Int}}
+    b::Vector{Rational{Int}}
+    c::Vector{Rational{Int}}
+    cone_partition::Vector{Symbol}
+    primal_witness::Vector{Rational{Int}}
+    dual_witness::Vector{Rational{Int}}
+    objective::Rational{Int}
+    expected_status::Symbol
+    certificate_kind::Symbol
+    generator_id::Symbol
+    generator_version::Int
+    function LPArtifact(id::Symbol, kind::Symbol, A, b, c;
+                        cone_partition=fill(:nonnegative, length(c)),
+                        primal_witness=Rational{Int}[],
+                        dual_witness=Rational{Int}[], objective::Rational{Int}=0//1,
+                        expected_status::Symbol=:optimal,
+                        certificate_kind::Symbol=:optimal,
+                        generator_id::Symbol=:lp_small_v1,
+                        generator_version::Integer=1)
+        kind in (:box, :sparse_planted_kkt, :duplicate_rank_deficient,
+                 :primal_infeasible, :unbounded, :chebyshev, :nonpositive) ||
+            throw(ArgumentError("unsupported LP small-tranche kind $kind"))
+        AA = Rational{Int}.(A); bb = Rational{Int}.(b); cc = Rational{Int}.(c)
+        size(AA, 1) == length(bb) || throw(ArgumentError("LP A/b dimensions disagree"))
+        size(AA, 2) == length(cc) || throw(ArgumentError("LP A/c dimensions disagree"))
+        !isempty(cc) || throw(ArgumentError("LP objective must not be empty"))
+        length(cone_partition) == length(cc) ||
+            throw(ArgumentError("LP cone partition must match variable dimension"))
+        all(x -> x in (:nonnegative, :nonpositive, :free), cone_partition) ||
+            throw(ArgumentError("unsupported LP cone partition"))
+        expected_status in (:optimal, :primal_infeasible, :dual_infeasible) ||
+            throw(ArgumentError("unsupported LP expected status"))
+        certificate_kind in (:optimal, :farkas, :ray) ||
+            throw(ArgumentError("unsupported LP certificate kind"))
+        expected_status === :optimal && certificate_kind !== :optimal &&
+            throw(ArgumentError("optimal LP requires certificate_kind=:optimal"))
+        expected_status === :primal_infeasible && certificate_kind !== :farkas &&
+            throw(ArgumentError("primal-infeasible LP requires certificate_kind=:farkas"))
+        expected_status === :dual_infeasible && certificate_kind !== :ray &&
+            throw(ArgumentError("dual-infeasible LP requires certificate_kind=:ray"))
+        generator_version > 0 || throw(ArgumentError("generator version must be positive"))
+        new(id, kind, AA, bb, cc, Symbol.(cone_partition),
+            Rational{Int}.(primal_witness), Rational{Int}.(dual_witness), objective,
+            expected_status, certificate_kind, generator_id, Int(generator_version))
+    end
+end
+
+struct SOCPArtifact <: AbstractV2SmallArtifact
+    id::Symbol
+    kind::Symbol
+    A::Matrix{Rational{Int}}
+    b::Vector{Rational{Int}}
+    c::Vector{Rational{Int}}
+    cone_partition::Vector{Int}
+    primal_witness::Vector{Rational{Int}}
+    dual_witness::Vector{Rational{Int}}
+    objective::Rational{Int}
+    generator_id::Symbol
+    generator_version::Int
+    function SOCPArtifact(id::Symbol, kind::Symbol, A, b, c;
+                          cone_partition=Int[],
+                          primal_witness=Rational{Int}[],
+                          dual_witness=Rational{Int}[], objective::Rational{Int}=0//1,
+                          generator_id::Symbol=:soc_small_v1,
+                          generator_version::Integer=1)
+        kind in (:simplex_projection, :planted_portfolio, :large_soc,
+                 :q3_load_sharing, :ill_scaled_soc) ||
+            throw(ArgumentError("unsupported SOCP small-tranche kind $kind"))
+        AA = Rational{Int}.(A); bb = Rational{Int}.(b); cc = Rational{Int}.(c)
+        size(AA, 1) == length(bb) || throw(ArgumentError("SOCP A/b dimensions disagree"))
+        size(AA, 2) == length(cc) || throw(ArgumentError("SOCP A/c dimensions disagree"))
+        all(>(0), cone_partition) || isempty(cone_partition) ||
+            throw(ArgumentError("SOCP cone block sizes must be positive"))
+        sum(cone_partition) <= length(bb) || throw(ArgumentError("SOCP cone blocks exceed row dimension"))
+        generator_version > 0 || throw(ArgumentError("generator version must be positive"))
+        new(id, kind, AA, bb, cc, Int.(cone_partition),
+            Rational{Int}.(primal_witness), Rational{Int}.(dual_witness), objective,
+            generator_id, Int(generator_version))
+    end
+end
+
+struct IllConditionedArtifact <: AbstractV2SmallArtifact
+    id::Symbol
+    kind::Symbol
+    base_family::Symbol
+    coefficients::Matrix{Rational{Int}}
+    rhs::Vector{Rational{Int}}
+    objective_coefficients::Vector{Rational{Int}}
+    scale_exponent::Int
+    primal_witness::Vector{Rational{Int}}
+    dual_witness::Vector{Rational{Int}}
+    objective::Rational{Int}
+    generator_id::Symbol
+    generator_version::Int
+    function IllConditionedArtifact(id::Symbol, kind::Symbol, base_family::Symbol,
+                                    coefficients, rhs, objective_coefficients;
+                                    scale_exponent::Integer=0,
+                                    primal_witness=Rational{Int}[],
+                                    dual_witness=Rational{Int}[], objective::Rational{Int}=0//1,
+                                    generator_id::Symbol=:ill_conditioned_small_v1,
+                                    generator_version::Integer=1)
+        kind in (:hilbert6_sdp, :diagonal_scale_ladder, :near_rank_loss_lp,
+                 :near_boundary_soc_psd, :high_range_exp_power) ||
+            throw(ArgumentError("unsupported ill-conditioned small-tranche kind $kind"))
+        base_family in (:lp, :soc, :sdp, :exp, :power) ||
+            throw(ArgumentError("unsupported ill-conditioned base family"))
+        kind === :hilbert6_sdp && base_family !== :sdp &&
+            throw(ArgumentError("Hilbert-6 artifact must use the SDP base family"))
+        kind === :near_rank_loss_lp && base_family !== :lp &&
+            throw(ArgumentError("near-rank-loss artifact must use the LP base family"))
+        kind === :diagonal_scale_ladder && base_family !== :lp &&
+            throw(ArgumentError("diagonal scale-ladder artifact must use the LP base family"))
+        AA = Rational{Int}.(coefficients); bb = Rational{Int}.(rhs); cc = Rational{Int}.(objective_coefficients)
+        size(AA, 1) == length(bb) || throw(ArgumentError("ill-conditioned A/b dimensions disagree"))
+        size(AA, 2) == length(cc) || throw(ArgumentError("ill-conditioned A/c dimensions disagree"))
+        scale_exponent >= 0 || throw(ArgumentError("scale exponent must be nonnegative"))
+        generator_version > 0 || throw(ArgumentError("generator version must be positive"))
+        new(id, kind, base_family, AA, bb, cc, Int(scale_exponent),
+            Rational{Int}.(primal_witness), Rational{Int}.(dual_witness), objective,
+            generator_id, Int(generator_version))
+    end
+end
+
+# Canonical source identity for typed artifacts.  Mathematical fields are
+# explicit; generator metadata is included in the artifact fingerprint but
+# never substitutes for coefficients or an oracle.
+function _put!(io::IO, artifact::LPArtifact)
+    _put!(io, (:LPArtifact, artifact.id, artifact.kind, artifact.A, artifact.b,
+        artifact.c, artifact.cone_partition, artifact.primal_witness,
+        artifact.dual_witness, artifact.objective, artifact.expected_status,
+        artifact.certificate_kind, artifact.generator_id, artifact.generator_version))
+end
+function _put!(io::IO, artifact::SOCPArtifact)
+    _put!(io, (:SOCPArtifact, artifact.id, artifact.kind, artifact.A, artifact.b,
+        artifact.c, artifact.cone_partition, artifact.primal_witness,
+        artifact.dual_witness, artifact.objective, artifact.generator_id,
+        artifact.generator_version))
+end
+function _put!(io::IO, artifact::IllConditionedArtifact)
+    _put!(io, (:IllConditionedArtifact, artifact.id, artifact.kind,
+        artifact.base_family, artifact.coefficients, artifact.rhs,
+        artifact.objective_coefficients, artifact.scale_exponent,
+        artifact.primal_witness, artifact.dual_witness, artifact.objective,
+        artifact.generator_id, artifact.generator_version))
+end
+
 struct V2ConicArtifact <: AbstractV2SourceArtifact
     family::Symbol
     id::Symbol
