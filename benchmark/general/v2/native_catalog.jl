@@ -113,14 +113,14 @@ struct IllConditionedArtifact <: AbstractV2SmallArtifact
                                     generator_id::Symbol=:ill_conditioned_small_v1,
                                     generator_version::Integer=1)
         kind in (:hilbert6_sdp, :diagonal_scale_ladder, :near_rank_loss_lp,
-                 :near_boundary_soc_psd, :high_range_exp_power) ||
+                 :near_boundary_lp, :near_boundary_soc_psd, :high_range_exp_power) ||
             throw(ArgumentError("unsupported ill-conditioned small-tranche kind $kind"))
         base_family in (:lp, :soc, :sdp, :exp, :power) ||
             throw(ArgumentError("unsupported ill-conditioned base family"))
         kind === :hilbert6_sdp && base_family !== :sdp &&
             throw(ArgumentError("Hilbert-6 artifact must use the SDP base family"))
-        kind === :near_rank_loss_lp && base_family !== :lp &&
-            throw(ArgumentError("near-rank-loss artifact must use the LP base family"))
+        kind in (:near_rank_loss_lp, :near_boundary_lp) && base_family !== :lp &&
+            throw(ArgumentError("LP ill-conditioned artifact must use the LP base family"))
         kind === :diagonal_scale_ladder && base_family !== :lp &&
             throw(ArgumentError("diagonal scale-ladder artifact must use the LP base family"))
         AA = Rational{Int}.(coefficients); bb = Rational{Int}.(rhs); cc = Rational{Int}.(objective_coefficients)
@@ -1063,6 +1063,35 @@ function _ill_diagonal_scale_artifact()
         dual_witness=dual, objective=-5//1)
 end
 
+function _ill_near_rank_loss_artifact()
+    # Exact near-dependence: row 3 = row 1 + 10^-8 row 2.  The rational
+    # source retains the tiny coefficient; no rank reduction is performed.
+    A = Rational{Int}[1 0 1; 0 1 0; 1 1//100_000_000 1]
+    b = Rational{Int}[1, 1, 100_000_001//100_000_000]
+    c = Rational{Int}[-1, -1, 0]
+    witness = Rational{Int}[1, 1, 0]
+    dual = Rational{Int}[-1, -1, 0]
+    IllConditionedArtifact(:v2_ill_near_rank_loss_small, :near_rank_loss_lp, :lp,
+        A, b, c; scale_exponent=8, primal_witness=witness,
+        dual_witness=dual, objective=-2//1)
+end
+
+function _ill_near_boundary_lp_artifact()
+    # The second equality x+s=1 leaves the nonnegative slack exactly 10^-8;
+    # the first equality fixes x=1-10^-8.  Objective -x makes the planted
+    # point the unique optimum while retaining an exactly rational boundary
+    # distance, without changing the solver tolerances.
+    epsilon = 1//100_000_000
+    A = Rational{Int}[1 0; 1 1]
+    b = Rational{Int}[1 - epsilon, 1]
+    c = Rational{Int}[-1, 0]
+    witness = Rational{Int}[1 - epsilon, epsilon]
+    dual = Rational{Int}[-1, 0]
+    IllConditionedArtifact(:v2_ill_near_boundary_lp_small, :near_boundary_lp, :lp,
+        A, b, c; scale_exponent=8, primal_witness=witness,
+        dual_witness=dual, objective=-(1 - epsilon))
+end
+
 function _lp_box_artifact()
     # min -x₁-2x₂ subject to x+s=(1,2), x,s >= 0.  The planted point
     # (1,2,0,0) is optimal; y=(-1,-2) is dual-feasible and gives -5.
@@ -1223,12 +1252,13 @@ end
 
 """Small ill-conditioned tranche with only observed certified artifacts."""
 function ill_conditioned_tranche_catalog()
-    artifacts = [_ill_diagonal_scale_artifact()]
+    artifacts = [_ill_diagonal_scale_artifact(), _ill_near_rank_loss_artifact()]
     transform = V2Transform(:ill_conditioned_lp_artifact, :sdpx_cone_program,
         :lp_standard_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
     descriptions = [
         "diagonal scale ladder: D=diag(10^-6,10^6) applied to x+s=(1,2); D^-1 dual preserves exact optimum -5",
+        "near-rank-loss LP: row3=row1+10^-8*row2 retained exactly; planted primal/dual pair proves optimum -2",
     ]
     family = V2Family(:ill_conditioned, V2Axis[],
         (instance, precision) -> begin

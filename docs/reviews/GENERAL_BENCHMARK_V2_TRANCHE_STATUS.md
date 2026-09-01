@@ -97,7 +97,9 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 | SOCP small kinds | open | typed SOC block artifact; existing toy artifact is insufficient for Q33/16 Q3 |
 | RSOC, SDP, EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
 | Ill-conditioned diagonal scale ladder | **certified tranche** | `ill_conditioned_tranche_catalog()`: exact row scaling D=diag(10^-6,10^6), independently certified Float64 optimum -5; source/model fingerprints and original-coordinate oracle pass |
-| Ill-conditioned Hilbert/near-rank-loss/boundary/high-range cases | open | exact coefficient artifacts plus PSD/SOCP/EXP/Power-specific original-coordinate oracles; no placeholders |
+| Ill-conditioned near-rank-loss LP | **certified tranche** | exact row3=row1+10^-8*row2 rational artifact; independent primal/dual oracle and Float64 certificate pass (objective -1.9999999928894998 within 5e-7) |
+| Ill-conditioned near-boundary LP | open | exact 10^-8 slack artifact was probed but solver returned `numerical_breakdown`; no registration |
+| Ill-conditioned Hilbert-6 SDP/boundary SOC/high-range EXP/Power | open | exact coefficient artifacts plus PSD/SOCP/EXP/Power-specific original-coordinate oracles; no placeholders |
 
 No placeholder rows were added. The typed LP tranche is the current
 solve-eligible V2 corpus; its scope must not be described as the reviewed full
@@ -111,10 +113,11 @@ small-tier inventory.
 4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
 5. Certified LP/SOCP/ill-conditioned first tranche: six LP kinds (box,
    sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible Farkas,
-   and dual-infeasible improving ray) plus one exact diagonal-scale LP are
-   solve-eligible with independent Float64 receipts. Duplicate/rank-deficient
-   (solver numerical_breakdown), SOCP, Hilbert/near-rank-loss/boundary/high-range
-   ill-conditioned kinds remain open rather than represented by placeholders.
+   and dual-infeasible improving ray) plus two exact ill-conditioned LPs
+   (diagonal-scale and near-rank-loss) are solve-eligible with independent
+   Float64 receipts. Duplicate/rank-deficient and near-boundary LPs
+   (solver `numerical_breakdown`), SOCP, Hilbert-6 SDP, boundary SOC,
+   high-range EXP/Power kinds remain open rather than represented by placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none
