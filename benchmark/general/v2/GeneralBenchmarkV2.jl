@@ -7,7 +7,7 @@ export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
     AbstractV2SourceArtifact, V2ConicArtifact, native_v2_catalog,
     V2Transform, V2Family, V2Instance, V2Catalog, V2Built, V2Validation,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
-    input_fingerprint, execution_fingerprint, adapt_generic_specs,
+    input_fingerprint, mathematical_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
     precision_matrix, training_instances, holdout_instances, sentinel_instances
 
@@ -215,11 +215,20 @@ struct V2Built
 end
 
 struct V2Validation
+    # `status` is the normalized validation status retained for compatibility;
+    # `observed_status` is the actual solver status and `disposition` is the
+    # explicit PASS/FAIL/XFAIL/XPASS/RESOLVED state-machine result.
     status::Symbol
+    observed_status::Symbol
+    disposition::Symbol
     certificate::Bool
     reference::Bool
     failures::Vector{Symbol}
 end
+V2Validation(status::Symbol, certificate::Bool, reference::Bool,
+             failures::Vector{Symbol}) =
+    V2Validation(status, status, status in (:optimal, :PASS) ? :PASS : :FAIL,
+                 certificate, reference, failures)
 
 """Stable result with explicit unavailable lifecycle phases."""
 struct V2RunResult
@@ -273,28 +282,44 @@ function _put_u64be!(io::IO, value::UInt64)
         write(io, UInt8((value >> shift) & 0xff))
     end
 end
+function _put_bytes!(io::IO, tag::UInt8, bytes)
+    write(io, tag); _put_u64be!(io, UInt64(length(bytes))); write(io, bytes)
+end
+function _put_u16be!(io::IO, value::UInt16)
+    write(io, UInt8(value >> 8), UInt8(value & 0xff))
+end
+function _put_u32be!(io::IO, value::UInt32)
+    for shift in (24, 16, 8, 0); write(io, UInt8((value >> shift) & 0xff)); end
+end
 function _put!(io::IO, value)
     if value === nothing
         write(io, UInt8(0x00))
     elseif value isa Bool
         write(io, UInt8(value ? 0x02 : 0x01))
     elseif value isa Symbol
-        _put!(io, String(value))
+        _put_bytes!(io, 0x09, codeunits(String(value)))
     elseif value isa AbstractString
-        bytes = codeunits(String(value)); write(io, UInt8(0x03));
-        _put_u64be!(io, UInt64(length(bytes))); write(io, bytes)
-    elseif value isa Integer
-        text = string(value); write(io, UInt8(0x04)); _put_u64be!(io, UInt64(length(text))); write(io, codeunits(text))
+        _put_bytes!(io, 0x03, codeunits(String(value)))
     elseif value isa Rational
-        _put!(io, (:rational, numerator(value), denominator(value)))
+        write(io, UInt8(0x0a)); _put!(io, numerator(value)); _put!(io, denominator(value))
+    elseif value isa Int8 || value isa Int16 || value isa Int32 || value isa Int64 || value isa Int128
+        _put_bytes!(io, 0x04, codeunits(string(value)))
+    elseif value isa UInt8 || value isa UInt16 || value isa UInt32 || value isa UInt64 || value isa UInt128
+        _put_bytes!(io, 0x0b, codeunits(string(value)))
+    elseif value isa Float16
+        write(io, UInt8(0x0c)); _put_u16be!(io, reinterpret(UInt16, value))
+    elseif value isa Float32
+        write(io, UInt8(0x0d)); _put_u32be!(io, reinterpret(UInt32, value))
+    elseif value isa Float64
+        write(io, UInt8(0x0e)); _put_u64be!(io, reinterpret(UInt64, value))
+    elseif value isa BigFloat
+        write(io, UInt8(0x0f)); _put!(io, precision(value)); _put_bytes!(io, 0x10, codeunits(string(value)))
     elseif value isa AbstractFloat
-        text = sprint(show, value; context=:canonical=>true)
-        _put!(io, text)
+        _put_bytes!(io, 0x11, codeunits(string(typeof(value)) * ":" * repr(value)))
     elseif value isa Type
-        _put!(io, string(value))
+        _put_bytes!(io, 0x12, codeunits(string(value)))
     elseif value isa NamedTuple
-        write(io, UInt8(0x05)); _put!(io, collect(keys(value)))
-        _put!(io, collect(values(value)))
+        write(io, UInt8(0x05)); _put!(io, collect(keys(value))); _put!(io, collect(values(value)))
     elseif value isa Tuple
         write(io, UInt8(0x06)); _put_u64be!(io, UInt64(length(value)))
         for item in value; _put!(io, item); end
@@ -302,7 +327,7 @@ function _put!(io::IO, value)
         write(io, UInt8(0x07)); _put!(io, size(value))
         for item in value; _put!(io, item); end
     elseif value isa AbstractDict
-        write(io, UInt8(0x08)); pairs_sorted = sort!(collect(value); by=x -> String(first(x)))
+        write(io, UInt8(0x08)); pairs_sorted = sort!(collect(value); by=x -> _canonical_bytes(first(x)) )
         _put!(io, length(pairs_sorted)); for (k, v) in pairs_sorted; _put!(io, k); _put!(io, v); end
     elseif value isa V2Tier
         _put!(io, (value.name, value.lane, value.wall_seconds, value.memory_bytes, value.solve_policy))
@@ -316,7 +341,10 @@ function _put!(io::IO, value)
                    value.positive_prefactor_factored, value.positive_prefactor_proof,
                    value.lifting_dimensions, value.validation_receipts, value.fingerprint))
     else
-        _put!(io, string(typeof(value))); _put!(io, string(value))
+        # Include a type tag and length-delimited fallback text. This is a
+        # last-resort identity encoding, never a mathematical witness format.
+        _put_bytes!(io, 0x13, codeunits(string(typeof(value))))
+        _put_bytes!(io, 0x14, codeunits(string(value)))
     end
     return io
 end
@@ -324,14 +352,20 @@ end
 _canonical_bytes(value) = (io=IOBuffer(); _put!(io, value); take!(io))
 _hex(value) = bytes2hex(SHA.sha256(_canonical_bytes(value)))
 
-input_fingerprint(instance::V2Instance) = _hex((
+# Source-artifact metadata (generator IDs, issue/provenance notes) is not
+# mathematical input. Native artifacts specialize this hook below; generic
+# payloads conservatively remain fully represented.
+_math_payload(value) = value
+
+mathematical_fingerprint(instance::V2Instance) = _hex((
     :schema, V2_SCHEMA_VERSION, :instance_id, instance.id, :family, instance.family,
-    :tier, instance.tier, :axis_values, instance.axis_values, :source, instance.source,
-    :provenance, instance.provenance, :checksum, instance.checksum,
-    :reference, instance.reference,
+    :axis_values, instance.axis_values, :split, instance.split,
+    :payload, _math_payload(instance.payload),
+))
+
+input_fingerprint(instance::V2Instance) = _hex((
+    :mathematical, mathematical_fingerprint(instance),
     :transform, get(instance.provenance, :transform, nothing),
-    :payload, instance.payload,
-    :resource, instance.resource, :split, instance.split,
 ))
 
 catalog_fingerprint(catalog::V2Catalog) = _hex((
@@ -443,7 +477,11 @@ function _declared_transform(instance::V2Instance)
 end
 
 training_instances(catalog::V2Catalog) =
-    filter(instance -> instance.split === :train, catalog.instances)
+    filter(instance -> instance.split === :train &&
+                       get(instance.provenance, :solve_eligible, false) === true &&
+                       instance.reference.status !== :build_only &&
+                       instance.reference.status !== :xfail,
+           catalog.instances)
 
 holdout_instances(catalog::V2Catalog) =
     filter(instance -> instance.split === :holdout, catalog.instances)
@@ -452,6 +490,14 @@ sentinel_instances(catalog::V2Catalog) =
     filter(instance -> instance.split === :sentinel, catalog.instances)
 
 function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2Precision)
+    # A direct BigFloat build must honor the requested precision rather than
+    # inheriting the caller's ambient context. The recursive guard is reached
+    # only after entering the requested precision scope.
+    if precision.arithmetic === BigFloat && Base.precision(BigFloat) != precision.bits
+        return setprecision(BigFloat, precision.bits) do
+            build_instance(catalog, instance, precision)
+        end
+    end
     family = only(filter(f -> f.name === instance.family, catalog.families))
     started = time_ns()
     built = family.build(instance, precision)
@@ -462,14 +508,25 @@ function build_instance(catalog::V2Catalog, instance::V2Instance, precision::V2P
         :exact_univariate_matrix_halfline_if_proved, :sos_relaxation,
         :finite_grid_surrogate) || throw(ArgumentError("invalid transform metadata"))
     declared = _declared_transform(instance)
-    declared === nothing || built.transform.fingerprint == declared.fingerprint ||
-        throw(ArgumentError("builder transform does not match instance transform contract"))
+    declared === nothing && throw(ArgumentError("every V2 instance must own an explicit transform contract"))
+    expected_transform = isdefined(@__MODULE__, :_expected_transform) ?
+        _expected_transform(instance) : declared
+    built.transform == expected_transform || throw(ArgumentError(
+        "builder transform does not match independently derived instance contract"))
+    built.transform == declared || throw(ArgumentError("builder transform does not match instance transform contract"))
     if instance.payload isa AbstractV2SourceArtifact
         hasproperty(built.facts, :artifact_fingerprint) &&
             built.facts.artifact_fingerprint == instance.checksum ||
             throw(ArgumentError("builder facts do not bind source artifact fingerprint"))
         hasproperty(built.facts, :model_fingerprint) ||
             throw(ArgumentError("builder must publish canonical generated-model fingerprint"))
+        actual_model_fingerprint = isdefined(@__MODULE__, :_native_model_fingerprint) ?
+            _native_model_fingerprint(built.problem, precision.bits) : nothing
+        actual_model_fingerprint === nothing ||
+            actual_model_fingerprint == built.facts.model_fingerprint ||
+            throw(ArgumentError("builder model fingerprint does not match actual built model"))
+        actual_model_fingerprint == "0"^64 &&
+            throw(ArgumentError("zero generated-model fingerprint is forbidden"))
         occursin(r"^[0-9a-f]{64}$", String(built.facts.model_fingerprint)) ||
             throw(ArgumentError("invalid generated-model fingerprint"))
     end
@@ -543,8 +600,15 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
         end
     end
     status_ok || push!(failures, :status)
-    validation = V2Validation(validation_status, cert_ok,
-        reference_ok, failures)
+    disposition = if instance.reference.disposition === :XFAIL
+        validation_status === :XFAIL ? :XFAIL : :XPASS
+    elseif semantic_ok
+        :PASS
+    else
+        :FAIL
+    end
+    validation = V2Validation(validation_status, SDPX.status(solved), disposition,
+        cert_ok, reference_ok, failures)
     return V2RunResult(
         instance.id, instance.family, instance.tier.name, precision.name, precision.bits,
         SDPX.status(solved), certificate.valid, objective,
@@ -603,10 +667,15 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
             expected_status=:build_only, disposition=:PASS)
         checksum = _hex((source=spec.source, id=spec.id, params=spec.params,
                          objective=spec.known_objective))
+        compatibility_transform = V2Transform(:generic_conic_model,
+            :sdpx_cone_program, :identity, 1, :identity;
+            validation_receipts=(coefficient_match=true,
+                                 source_reconstruction=true))
         push!(instances, V2Instance(spec.id, spec.family, tier, spec.params, :train,
             source_prefix * "/" * spec.source,
             (source=spec.source, v1_id=spec.id, compatibility_only=true,
-             solve_eligible=false, v1_expected_status=v1_status), checksum,
+             solve_eligible=false, v1_expected_status=v1_status,
+             transform=compatibility_transform), checksum,
             (wall_seconds=tier.wall_seconds, memory_bytes=tier.memory_bytes), ref, spec))
     end
     return V2Catalog(:general_v2, V2_SCHEMA_VERSION, families, instances,

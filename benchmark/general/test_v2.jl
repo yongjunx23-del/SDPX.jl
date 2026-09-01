@@ -26,11 +26,11 @@ using .GeneralBenchmarkV2
     ref = V2Reference(:optimal, :optimal, ("0", "1"),
         (built, cert) -> cert.valid, "unit test")
     instance = V2Instance(:unit, :unit, tier, (dimension=1,), :train,
-        "unit-test", (equations=("test",),), "unit-checksum",
+        "unit-test", (equations=("test",), transform=exact), "unit-checksum",
         (wall_seconds=1, memory_bytes=1024), ref, nothing)
     @test length(input_fingerprint(instance)) == 64
     mutated = V2Instance(:unit, :unit, tier, (dimension=2,), :train,
-        "unit-test", (equations=("test",),), "unit-checksum",
+        "unit-test", (equations=("test",), transform=exact), "unit-checksum",
         (wall_seconds=1, memory_bytes=1024), ref, nothing)
     @test input_fingerprint(instance) != input_fingerprint(mutated)
 
@@ -99,14 +99,36 @@ end
     @test all(i -> i.payload isa V2ConicArtifact && i.payload.family == i.family,
               catalog.instances)
     @test all(i -> i.reference.oracle !== nothing, catalog.instances)
+    @test all(i -> i.split === :train && i.reference.status !== :build_only &&
+                   i.reference.status !== :xfail &&
+                   get(i.provenance, :solve_eligible, false) === true,
+              training_instances(catalog))
     sent = only(filter(i -> i.split === :sentinel && i.family === :lp, catalog.instances))
     @test sent.reference.status === :xfail
     @test sent.reference.expected_status === :numerical_breakdown
     @test sent.reference.disposition === :XFAIL
     @test sent.reference.oracle.dual_ray == Rational{Int}[1, -1]
+    train_lp = only(filter(i -> i.family === :lp && i.split === :train, catalog.instances))
+    train_soc = only(filter(i -> i.family === :soc && i.split === :train, catalog.instances))
+    train_rsoc = only(filter(i -> i.family === :rsoc && i.split === :train, catalog.instances))
+    train_sdp = only(filter(i -> i.family === :sdp && i.split === :train, catalog.instances))
+    @test train_lp.reference.oracle.primal_witness == Rational{Int}[1//2]
+    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[1]
+    @test train_lp.reference.oracle.dual_bound == train_lp.reference.oracle.objective == 1//2
+    @test train_lp.reference.oracle.dual_multipliers == Rational{Int}[1]
+    @test train_rsoc.reference.oracle.primal_witness == Rational{Int}[1, 1, 0]
+    @test train_sdp.reference.oracle.primal_witness == Rational{Int}[1, 0, 0, 1]
+    @test train_sdp.reference.oracle.dual_multipliers == Rational{Int}[1, 0, 0, 1]
     @test all(i -> i.split == :train ? i.id in catalog.suites.train :
                    (i.split == :holdout ? i.id in catalog.suites.holdout : i.id in catalog.suites.sentinel),
               catalog.instances)
+    training = training_instances(catalog)
+    @test length(training) == 8
+    @test all(i -> i.split === :train &&
+                   get(i.provenance, :solve_eligible, false) === true &&
+                   i.reference.status !== :xfail &&
+                   i.reference.status !== :build_only,
+              training)
     @test all(family -> begin
         train = only(filter(i -> i.family === family && i.split === :train, catalog.instances))
         holdout = only(filter(i -> i.family === family && i.split === :holdout, catalog.instances))
@@ -149,12 +171,31 @@ end
     sentinel_result = run_instance(catalog, sentinel, precision)
     @test sentinel_result.status === :numerical_breakdown
     @test sentinel_result.validation.status === :XFAIL
+    @test sentinel_result.validation.observed_status == sentinel_result.status
+    @test sentinel_result.validation.disposition === :XFAIL
     @test sentinel_result.validation.reference
-    @test GeneralBenchmarkV2._farkas_valid(sentinel.payload)
+    sentinel_built, _ = build_instance(catalog, sentinel, precision)
+    @test GeneralBenchmarkV2._farkas_valid(sentinel.payload, sentinel_built)
     # The canonical encoder is explicit for exact rational coefficients and
     # does not depend on host-endian or struct string formatting.
+    metadata_variant = V2ConicArtifact(:soc, train_soc.id,
+        train_soc.payload.coefficients, train_soc.payload.dimension,
+        train_soc.payload.cone_parameter, train_soc.payload.infeasible,
+        :different_generator, 99)
+    metadata_instance = V2Instance(train_soc.id, train_soc.family, train_soc.tier,
+        train_soc.axis_values, train_soc.split, train_soc.source, train_soc.provenance,
+        GeneralBenchmarkV2._hex(metadata_variant), train_soc.resource,
+        train_soc.reference, metadata_variant)
+    @test mathematical_fingerprint(metadata_instance) == mathematical_fingerprint(train_soc)
+    @test input_fingerprint(metadata_instance) == input_fingerprint(train_soc)
+    @test catalog_fingerprint(catalog) != catalog_fingerprint(V2Catalog(
+        :general_v2_native, 2, catalog.families,
+        [metadata_instance; filter(i -> i !== train_soc, catalog.instances)], catalog.suites))
     @test GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//3]) !=
           GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//4])
+    @test GeneralBenchmarkV2._canonical_bytes(:x) != GeneralBenchmarkV2._canonical_bytes("x")
+    @test GeneralBenchmarkV2._canonical_bytes(Float32(1)) != GeneralBenchmarkV2._canonical_bytes(Float64(1))
+    @test GeneralBenchmarkV2._canonical_bytes(String) != GeneralBenchmarkV2._canonical_bytes("String")
     # Exact interval bytes do not depend on ambient BigFloat precision.
     ref_at_128 = setprecision(BigFloat, 128) do
         GeneralBenchmarkV2._native_reference(original.payload).objective_interval
@@ -163,4 +204,19 @@ end
         GeneralBenchmarkV2._native_reference(original.payload).objective_interval
     end
     @test ref_at_128 == ref_at_512
+    @test bytes2hex(GeneralBenchmarkV2._canonical_bytes(Rational{Int}(1, 2))) ==
+          "0a0400000000000000013104000000000000000132"
+    @test GeneralBenchmarkV2._hex(Rational{Int}(1, 2)) ==
+          "c3df08f6f0ba4423f587bd5f0c9eada237d6c126a25c39a59758e21adf96a098"
+    # Direct BigFloat builds are scoped by V2Precision.bits and their model
+    # fingerprints are intentionally distinct even when rational coefficients
+    # happen to be exactly representable at both precisions.
+    bf256 = build_instance(catalog, train_sdp,
+        V2Precision(:BigFloat256, BigFloat, 256, "1e-8", "1e-8", :generic))[1]
+    bf512 = build_instance(catalog, train_sdp,
+        V2Precision(:BigFloat512, BigFloat, 512, "1e-8", "1e-8", :generic))[1]
+    @test bf256.facts.model_precision_bits == 256
+    @test bf512.facts.model_precision_bits == 512
+    @test bf256.facts.model_fingerprint != bf512.facts.model_fingerprint
+    @test bf256.transform == train_sdp.provenance.transform
 end

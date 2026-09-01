@@ -41,6 +41,20 @@ struct V2ConicArtifact <: AbstractV2SourceArtifact
     end
 end
 
+function _math_payload(artifact::V2ConicArtifact)
+    return (family=artifact.family, coefficients=artifact.coefficients,
+        dimension=artifact.dimension, cone_parameter=artifact.cone_parameter,
+        infeasible=artifact.infeasible, infeasibility_ray=artifact.infeasibility_ray)
+end
+
+function _expected_transform(instance::V2Instance)
+    instance.payload isa V2ConicArtifact || return _declared_transform(instance)
+    return V2Transform(:native_conic_artifact, :sdpx_cone_program,
+        :identity, 1, :identity;
+        validation_receipts=(coefficient_match=true,
+                             source_reconstruction=true))
+end
+
 function _put!(io::IO, artifact::V2ConicArtifact)
     _put!(io, (artifact.family, artifact.id, artifact.coefficients,
         artifact.dimension, artifact.cone_parameter, artifact.infeasible,
@@ -178,8 +192,12 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
             (f === :nonpositive ? -sum(artifact.coefficients[1:artifact.dimension]) :
              sum(artifact.coefficients[1:artifact.dimension])) :
         sum(witness[1:min(length(witness), artifact.dimension)])
+    dual_multipliers = _oracle_dual_multipliers(artifact)
+    dual_bound = artifact.infeasible ? 0//1 : sum(
+        dual_multipliers[i] * witness[i] for i in eachindex(witness))
     oracle = V2ExactOracle(artifact.infeasible ? :primal_infeasible : :optimal,
-        expected, witness, artifact.infeasibility_ray, artifact)
+        expected, witness, dual_multipliers, dual_bound,
+        artifact.infeasibility_ray, artifact)
     return V2Built(model, oracle, artifact, _hex(artifact), transform,
         (source_dimension=artifact.dimension, target_dimension=artifact.dimension,
          generator=artifact.generator_id, coefficients=artifact.coefficients,
@@ -188,7 +206,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         (setup_seconds=nothing,))
 end
 
-function _native_model_fingerprint(model)
+function _native_model_fingerprint(model, precision_bits=nothing)
     variables = [(v.name, string(v.domain), v.shape, v.offset, v.length,
         v.primal_start, v.dual_slack_start) for v in model.variable_blocks]
     constraints = [(c.name, string(c.domain), c.shape,
@@ -197,8 +215,8 @@ function _native_model_fingerprint(model)
     objective = model.objective === nothing ? nothing :
         (string(typeof(model.objective.sense)), model.objective.expression.indices,
          model.objective.expression.coefficients, model.objective.expression.constant)
-    return _hex((arithmetic=model.arithmetic, variables=variables,
-        constraints=constraints, objective=objective))
+    return _hex((precision_bits=precision_bits, arithmetic=model.arithmetic,
+        variables=variables, constraints=constraints, objective=objective))
 end
 
 function _contradiction_rows(artifact::V2ConicArtifact)
@@ -211,31 +229,64 @@ function _contradiction_rows(artifact::V2ConicArtifact)
     return dot(ray, coefficients), dot(ray, rhs)
 end
 
-function _farkas_valid(artifact::V2ConicArtifact)
+function _actual_contradiction_rows(model)
+    rows = Tuple{Vector{Int},Vector{BigFloat},BigFloat}[]
+    for block in model.constraint_blocks
+        startswith(String(block.name), "contradiction") || continue
+        expression = only(block.expressions)
+        coefficients = BigFloat.(expression.coefficients)
+        rhs = -BigFloat(expression.constant)
+        push!(rows, (Int.(expression.indices), coefficients, rhs))
+    end
+    rows
+end
+
+function _farkas_valid(artifact::V2ConicArtifact, built=nothing)
     artifact.infeasible || return false
     isempty(artifact.infeasibility_ray) && return false
-    lhs, rhs = _contradiction_rows(artifact)
-    iszero(lhs) && !iszero(rhs)
+    rows = built === nothing ? Tuple{Vector{Int},Vector{BigFloat},BigFloat}[] :
+        _actual_contradiction_rows(built.problem)
+    isempty(rows) && return false
+    ray = BigFloat.(artifact.infeasibility_ray)
+    length(ray) == length(rows) || return false
+    coefficients = Dict{Int,BigFloat}()
+    for i in eachindex(rows), (index, coefficient) in zip(rows[i][1], rows[i][2])
+        coefficients[index] = get(coefficients, index, zero(BigFloat)) + ray[i] * coefficient
+    end
+    rhs = sum(ray[i] * rows[i][3] for i in eachindex(rows))
+    all(iszero, values(coefficients)) && !iszero(rhs)
 end
 
 struct V2ExactOracle
     expected_status::Symbol
     objective::Rational{Int}
     primal_witness::Vector{Rational{Int}}
+    dual_multipliers::Vector{Rational{Int}}
+    dual_bound::Rational{Int}
     dual_ray::Vector{Rational{Int}}
     artifact::V2ConicArtifact
 end
 
 function _put!(io::IO, oracle::V2ExactOracle)
     _put!(io, (oracle.expected_status, oracle.objective,
-        oracle.primal_witness, oracle.dual_ray, oracle.artifact))
+        oracle.primal_witness, oracle.dual_multipliers, oracle.dual_bound,
+        oracle.dual_ray, oracle.artifact))
 end
 
 function _oracle_check(oracle::V2ExactOracle, built, certificate)
     built.source_artifact === oracle.artifact || return false
+    if hasproperty(built.facts, :model_fingerprint)
+        expected_fp = _native_model_fingerprint(built.problem,
+            get(built.facts, :model_precision_bits, nothing))
+        expected_fp == built.facts.model_fingerprint || return false
+    end
     if oracle.expected_status === :primal_infeasible
-        return _farkas_valid(oracle.artifact) &&
-            oracle.dual_ray == oracle.artifact.infeasibility_ray
+        # The ray is checked against the actual built contradiction rows below;
+        # no solver certificate field participates in this proof.
+        return _farkas_valid(oracle.artifact, built) &&
+            oracle.dual_ray == oracle.artifact.infeasibility_ray &&
+            hasproperty(built.facts, :model_fingerprint) &&
+            built.facts.model_fingerprint != "0"^64
     end
     oracle.expected_status === :optimal || return false
     # Validate exact primal witness data independently of certificate.valid.
@@ -243,7 +294,8 @@ function _oracle_check(oracle::V2ExactOracle, built, certificate)
     f = oracle.artifact.family
     feasible = if f in (:lp, :nonpositive)
         all((f === :lp ? >=(0) : <=(0)), witness) &&
-            all(witness[i] == _q(oracle.artifact, i) for i in eachindex(witness))
+            all(witness[i] == oracle.artifact.cone_parameter * _q(oracle.artifact, i)
+                for i in eachindex(witness))
     elseif f === :soc
         norm(BigFloat.(witness)) <= one(BigFloat) &&
             all(witness[i] == _q(oracle.artifact, i) for i in eachindex(witness))
@@ -251,7 +303,7 @@ function _oracle_check(oracle::V2ExactOracle, built, certificate)
         length(witness) == 3 || return false
         u, v, target = BigFloat.(witness)
         u >= 0 && v >= 0 && (2u * v >= target^2) &&
-            witness[3] == _q(oracle.artifact, 1)
+            witness[3] == oracle.artifact.cone_parameter * _q(oracle.artifact, 1)
     elseif f === :exp
         length(witness) == 1 || return false
         value = BigFloat(numerator(_q(oracle.artifact, 1))) /
@@ -273,6 +325,9 @@ function _oracle_check(oracle::V2ExactOracle, built, certificate)
         true
     end
     feasible || return false
+    length(oracle.dual_multipliers) == length(witness) || return false
+    dual_bound = sum(oracle.dual_multipliers[i] * witness[i] for i in eachindex(witness))
+    dual_bound == oracle.dual_bound == oracle.objective || return false
     expected = BigFloat(numerator(oracle.objective)) / BigFloat(denominator(oracle.objective))
     actual = BigFloat(certificate.primal_objective)
     return isfinite(actual) && abs(actual - expected) <= BigFloat("1e-7")
@@ -281,16 +336,38 @@ end
 
 function _oracle_witness(artifact::V2ConicArtifact)
     f = artifact.family
-    f === :sdp && return copy(artifact.coefficients)
-    f === :rsoc && return Rational{Int}[1, 1, _q(artifact, 1)]
+    scale = artifact.cone_parameter
+    f === :sdp && return Rational{Int}[
+        _q(artifact, 1), scale * _q(artifact, 2),
+        scale * _q(artifact, 3), _q(artifact, 4)]
+    f === :rsoc && return Rational{Int}[1, 1, scale * _q(artifact, 1)]
     f === :mixed && return copy(artifact.coefficients)
+    f in (:lp, :nonpositive) && return Rational{Int}[scale * q for q in artifact.coefficients]
     return copy(artifact.coefficients[1:artifact.dimension])
+end
+
+function _oracle_dual_multipliers(artifact::V2ConicArtifact)
+    f = artifact.family
+    f === :sdp && return Rational{Int}[1, 0, 0, 1]
+    f === :rsoc && return Rational{Int}[1, 1, 0]
+    f === :mixed && return Rational{Int}[1, -1]
+    f === :soc && return Rational{Int}[1, 1]
+    f === :nonpositive && return fill(-1//1, artifact.dimension)
+    f === :lp && return fill(1//1, artifact.dimension)
+    return Rational{Int}[1]
+end
+
+function _oracle_objective(artifact::V2ConicArtifact)
+    w = _oracle_witness(artifact)
+    d = _oracle_dual_multipliers(artifact)
+    return sum(d[i] * w[i] for i in eachindex(w))
 end
 
 function _native_reference(artifact::V2ConicArtifact)
     if artifact.infeasible
         return V2Reference(:xfail, :farkas, nothing,
-            V2ExactOracle(:primal_infeasible, 0//1, Rational{Int}[], artifact.infeasibility_ray, artifact),
+            V2ExactOracle(:primal_infeasible, 0//1, Rational{Int}[], Rational{Int}[],
+                0//1, artifact.infeasibility_ray, artifact),
             "independently described infeasible sentinel; expected status is primal_infeasible";
             expected_status=:numerical_breakdown, disposition=:XFAIL)
     end
@@ -311,8 +388,12 @@ function _native_reference(artifact::V2ConicArtifact)
         (string(exact_value - BigFloat(1) / BigFloat(10)^7),
          string(exact_value + BigFloat(1) / BigFloat(10)^7))
     end
-    oracle = V2ExactOracle(:optimal, objective, _oracle_witness(artifact),
-        artifact.infeasibility_ray, artifact)
+    witness = _oracle_witness(artifact)
+    dual_multipliers = _oracle_dual_multipliers(artifact)
+    dual_bound = _oracle_objective(artifact)
+    objective == dual_bound || throw(ArgumentError("exact primal/dual oracle mismatch"))
+    oracle = V2ExactOracle(:optimal, objective, witness, dual_multipliers,
+        dual_bound, artifact.infeasibility_ray, artifact)
     V2Reference(:optimal, :optimal, (lower, upper), oracle, "independently reconstructed exact artifact objective";
         expected_status=:optimal, disposition=:PASS)
 end
@@ -326,7 +407,8 @@ function native_v2_catalog()
             V2Built(built.problem, built.oracle, built.source_artifact,
                 input_fingerprint(instance), built.transform,
                 merge(built.facts, (artifact_fingerprint=_hex(instance.payload),
-                    model_fingerprint=_native_model_fingerprint(built.problem),
+                    model_fingerprint=_native_model_fingerprint(built.problem, precision.bits),
+                    model_precision_bits=precision.bits,
                     builder_version=instance.payload.generator_version)), built.resource)
         end
         oracle = (built, cert) -> built.oracle(built, cert)
