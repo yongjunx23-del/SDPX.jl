@@ -1,0 +1,66 @@
+using Test
+using SDPX
+
+if !isdefined(Main, :GeneralBenchmarkV2)
+    include(joinpath(@__DIR__, "..", "general", "v2", "GeneralBenchmarkV2.jl"))
+end
+if !isdefined(Main, :ProfileCatalog)
+    include(joinpath(@__DIR__, "profile_catalog.jl"))
+end
+include(joinpath(@__DIR__, "v2_schema9_adapter.jl"))
+
+using .GeneralBenchmarkV2
+using .ProfileCatalog
+using .V2Schema9Adapter
+
+@testset "V2 schema-v9 adapter validates its own optimizer contract" begin
+    catalog = GeneralBenchmarkV2.lp_tranche_catalog()
+    instance = only(filter(x -> x.id === :v2_lp_box_small, catalog.instances))
+    precision = GeneralBenchmarkV2.V2Precision(
+        :Float64, Float64, 53, "1e-8", "5e-7", :cholmod,
+    )
+    row = profile_v2_target(catalog, instance, precision)
+    @test row.solve_eligible
+    @test !row.build_only
+    @test row.warmup_count == 1
+    @test length(row.sample_seconds) == 3
+    @test length(row.sample_iterations) == 3
+    @test length(unique(row.sample_iterations)) == 1
+    @test length(unique(row.sample_objective)) == 1
+    @test all(row.sample_certificate_valid)
+    @test all(row.sample_semantic_pass)
+    @test length(row.sample_core_seconds) == 3
+    @test validate_profile_row(row; live=true)
+    @test row.receipt["warmup_excluded"] == 1
+    @test row.receipt["sample_count"] == 3
+    @test row.receipt["fresh_process"] === false
+    @test Set(keys(row.receipt["route_receipt"])) == Set((
+        "requested_route", "planned_route", "executed_route",
+        "requested_formulation", "planned_formulation", "executed_formulation",
+        "requested_backend", "planned_backend", "executed_backend",
+        "requested_provider", "planned_provider", "executed_provider",
+        "requested_kernel", "planned_kernel", "executed_kernel", "reuse"))
+
+    output = tempname()
+    paths = write_schema9(output, [row])
+    @test isfile(paths.tsv)
+    @test isfile(paths.toml)
+    text = read(paths.tsv, String)
+    @test occursin("schema_version", first(split(text, '\n')))
+    @test occursin("v2_lp_box_small", text)
+    rm(paths.tsv; force=true)
+    rm(paths.toml; force=true)
+end
+
+@testset "V2 schema-v9 adapter rejects malformed samples" begin
+    catalog = GeneralBenchmarkV2.lp_tranche_catalog()
+    instance = only(filter(x -> x.id === :v2_lp_box_small, catalog.instances))
+    precision = GeneralBenchmarkV2.V2Precision(
+        :Float64, Float64, 53, "1e-8", "5e-7", :cholmod,
+    )
+    row = profile_v2_target(catalog, instance, precision)
+    names = fieldnames(ProfileRow)
+    values = NamedTuple{names}(Tuple(getfield(row, name) for name in names))
+    bad = ProfileRow(; merge(values, (; sample_iterations=[1, 2, 1]))...)
+    @test !validate_profile_row(bad)
+end
