@@ -9,7 +9,7 @@ using SDPX
 
 export AbstractGenericProblem, BenchmarkSpec, BenchmarkResult
 export PrecisionSpec, PrecisionBenchmarkResult, precision_specs, run_precision_case
-export build, inventory, run_one, run_tier, validate_result, main
+export build, inventory, run_one, run_tier, validate_result, main, canonical_tier
 export MPSData, SDPAData, CBFData, read_mps, mps_model, read_sdpa, read_cbf, sdpa_model, EXTERNAL_BENCHMARKS_EXPANDED
 export ExternalBenchmark, external_inventory, read_external, reference_matches
 export ExternalHoldoutSpec, EXTERNAL_HOLDOUTS, external_holdout_inventory,
@@ -211,8 +211,17 @@ function run_tier(tier::Symbol=:small, ::Type{T}=Float64;
     return (; tier, elapsed, results)
 end
 
+const _COMPATIBILITY_TIERS = Dict(:instant => :small, :small => :small,
+                                  :medium => :medium, :heavy => :large,
+                                  :large => :large, :extreme => :extreme)
+canonical_tier(tier::Symbol) = haskey(_COMPATIBILITY_TIERS, tier) ?
+    _COMPATIBILITY_TIERS[tier] : throw(ArgumentError("unknown benchmark tier $tier"))
+
 function main(args=ARGS)
-    tier = isempty(args) ? :small : Symbol(args[1])
+    requested = isempty(args) ? :small : Symbol(args[1])
+    tier = canonical_tier(requested)
+    requested in (:instant, :heavy) && @warn(
+        "legacy benchmark tier '$requested' is deprecated; use '$tier'; old result schema is retired")
     family = length(args) >= 2 ? Symbol(args[2]) : nothing
     allow_large = get(ENV, "SDPX_GENERIC_ALLOW_LARGE", "0") == "1"
     run_tier(tier; family, allow_large,

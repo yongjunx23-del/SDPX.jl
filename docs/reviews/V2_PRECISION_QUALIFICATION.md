@@ -3,7 +3,7 @@
 Generated 2026-09-02 by three fresh per-tier processes (combined in-process runs
 triggered the known Julia 1.12 + MultiFloats parallel-GC corruption even with
 `--gcthreads=1`; per-tier process isolation is the documented safe mode).
-Only the 15 certified optimal-path cases run; the two ray cases are skipped.
+The qualification runner now enumerates the 16 certified optimal-path cases (including the mixed planted case); the two ray cases are skipped. The matrix below predates the mixed row and must be regenerated before release.
 
 Provider status: `MultiFloats` + `MultiFloatLinearAlgebra` and
 `BigFloatLinearAlgebra` loaded per tier. BigFloat runs are inside
@@ -12,7 +12,7 @@ certificate/oracle gates with the STRICT reviewed solver tolerances
 (Float64x2 1e-15, Float64x4 1e-28, BigFloat256 1e-32) and objective allowances
 (5e-13 / 5e-22 / 5e-28). No solver tolerance or formulation is changed.
 
-Summary: Float64x2 5/15, Float64x4 4/15, BigFloat256 12/15.
+The prior 15-case matrix is retained as historical evidence only; a release qualification must regenerate all 16 optimal-path rows from the live catalog.
 Key findings:
 - MultiFloats x2/x4 tiers: most cases return `numerical_breakdown` at iteration 0
   under the reviewed tolerances - a genuine provider/solver limitation at these

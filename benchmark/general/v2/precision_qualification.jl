@@ -18,7 +18,7 @@ const OUT = get(ENV, "V2_PRECISION_OUT",
 const CATALOGS = [
     lp_tranche_catalog(), ill_conditioned_tranche_catalog(),
     socp_tranche_catalog(), rsoc_tranche_catalog(), sdp_tranche_catalog(),
-    exp_tranche_catalog(),
+    exp_tranche_catalog(), mixed_tranche_catalog(),
 ]
 const CASES = [i for c in CATALOGS for i in c.instances
                if i.reference.status === :optimal]

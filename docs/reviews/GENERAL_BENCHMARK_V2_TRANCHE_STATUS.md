@@ -141,10 +141,10 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 | SOCP: planted portfolio, simplex projection, ill-scaled SOC | open | Current artifact contract lacks the free/nonnegative auxiliary-variable semantics needed for faithful portfolio/projection lowerings; ill-scaled candidate probed `numerical_breakdown`; no placeholders |
 | RSOC: quadratic epigraph, perspective LS, many QR3 | **certified tranche** | `rsoc_tranche_catalog()`: exact rational targets, public RotatedLorentzCone lowerings, rational planted witnesses, and objective/certificate gates pass (1.5 / 0.5 / 24) |
 | SDP: weighted trace, Max-Cut K4, eight PSD(3) multiblock | **certified tranche** | `sdp_tranche_catalog()`: factorized rational Gram witnesses and independent dual PSD proofs; Float64 objective/certificate gates pass (1 / -4 / 8) |
-| EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
+| EXP: unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact unit epigraph, independent interval/oracle and Float64 certificate pass |
+| Power | open | typed exact-alpha candidates exist; native boundary probes fail certificate/status; no rows registered |
+| Mixed: planted six-cone coupling | **certified tranche** | `mixed_tranche_catalog()`: six cone blocks, coupling RHS derived from exact planted witness, independent oracle and Float64 certificate pass (objective 8) |
 
-| SOCP small kinds | open | typed SOC block artifact; existing toy artifact is insufficient for Q33/16 Q3 |
-| RSOC, SDP, mixed | open | separate typed builders and independent dual-oracle machinery required |
 | EXP unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact `(0,1,x)` exponential cone, optimum 1, Float64 certificate/oracle gate passes |
 | EXP entropy/log-sum-exp/fitting | open | entropy/log-sum-exp typed candidates have high-precision intervals but native runs break down; fitting lowering remains unsupported; no rows registered |
 | Power separable/weighted-mean/alpha-sweep | open | exact-alpha typed candidates and builders exist; native boundary probes fail certificate/status, no rows registered |
@@ -172,18 +172,17 @@ small-tier inventory.
    near-rank-loss) are solve-eligible with independent Float64 receipts.
    Duplicate/rank-deficient and near-boundary LPs and ill-scaled SOC (solver
    `numerical_breakdown`), SOCP portfolio/simplex-projection, Hilbert-6 SDP,
-   boundary SOC, high-range EXP/Power, and mixed kinds remain open rather
+   boundary SOC, high-range EXP/Power, and Power-family rows remain open rather
    than represented by placeholders.
 
-5. Certified LP/SOCP/ill-conditioned/EXP/Power first tranche: six LP kinds
-   (box, sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible
-   Farkas, and dual-infeasible improving ray), two exact ill-conditioned LPs
-   (diagonal-scale and near-rank-loss), and one EXP unit epigraph are
-   solve-eligible with independent Float64 receipts. Duplicate/rank-deficient
-   and near-boundary LPs (solver `numerical_breakdown`), EXP entropy/
-   log-sum-exp/fitting, Power candidates, SOCP, Hilbert-6 SDP, boundary SOC,
-   and high-range EXP/Power kinds remain open rather than represented by
-   placeholders.
+5. Certified first tranche: 16 optimal-path cases plus two ray cases are
+   solve-eligible with independent Float64 receipts: LP (6), SOCP (2), RSOC
+   (3), SDP (3), EXP unit epigraph (1), ill-conditioned LP (2), and mixed
+   planted six-cone coupling (1). Duplicate/rank-deficient and near-boundary
+   LPs (solver `numerical_breakdown`), EXP entropy/log-sum-exp/fitting, all
+   standalone Power rows, SOCP portfolio/simplex/ill-scaled, Hilbert-6 SDP,
+   boundary SOC, and high-range EXP/Power kinds remain open rather than
+   represented by placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none

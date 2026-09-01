@@ -690,13 +690,11 @@ function validate_catalog(catalog::V2Catalog)
             declared = get(instance.provenance, :transform, nothing)
             declared isa V2Transform || throw(ArgumentError(
                 "source artifact instance $(instance.id) must declare its transform"))
-            math_fp = if instance.payload isa V2ConicArtifact
-                _hex((instance.family, instance.payload.coefficients,
-                    instance.payload.dimension, instance.payload.cone_parameter,
-                    instance.payload.infeasible, instance.payload.infeasibility_ray))
-            else
-                _hex((instance.family, instance.payload))
-            end
+            # Compare mathematical source data only.  Typed artifact
+            # serializers intentionally retain IDs/generator metadata for
+            # provenance, but those fields must not make duplicate math look
+            # distinct across train/holdout splits.
+            math_fp = _hex((instance.family, _math_payload(instance.payload)))
             haskey(math_fingerprints, math_fp) &&
                 throw(ArgumentError("duplicate mathematical V2 artifact across splits: $(instance.id) and $(math_fingerprints[math_fp])"))
             math_fingerprints[math_fp] = instance.id

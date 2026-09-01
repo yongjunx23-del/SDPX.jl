@@ -853,9 +853,10 @@ function (oracle::V2LPOracle)(built, certificate)
     artifact = oracle.artifact
     built.source_artifact === artifact || return false
     actual_fp = _native_model_fingerprint(built.problem)
-    actual_fp == built.facts.model_fingerprint || return false
-    expected_fp = get(built.facts, :model_contract_fingerprint, "")
-    actual_fp == expected_fp || return false
+    expected_fp = _hex(_source_model_receipt(artifact, built.problem))
+    actual_fp == built.facts.model_fingerprint == expected_fp || return false
+    get(built.facts, :model_contract_fingerprint, "") == expected_fp || return false
+    _model_matches_source_receipt(artifact, built.problem) || return false
 
     # Non-optimal contracts use exact normalized certificates rather than an
     # objective comparison.  The returned public certificate still supplies
@@ -964,8 +965,12 @@ function _lp_build(artifact::LPArtifact, ::Type{T}; precision_bits::Int=256) whe
         :lp_standard_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
     oracle = V2LPOracle(artifact)
+    expected = _source_model_receipt(artifact, model)
+    _actual_model_receipt(model) == expected || throw(ArgumentError(
+        "LP lowering differs from its independently reconstructed source contract"))
     facts = (artifact_fingerprint=_hex(artifact), model_fingerprint=actual_fp,
-        model_contract_fingerprint=actual_fp, model_precision_bits=precision_bits,
+        model_contract_fingerprint=_hex(expected), model_source_receipt=expected,
+        model_precision_bits=SDPX.precision_bits(model),
         source_dimension=size(artifact.A, 2), target_dimension=size(artifact.A, 2),
         generator=artifact.generator_id, coefficients=artifact.A)
     return V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
@@ -986,8 +991,10 @@ function (oracle::V2IllConditionedLPOracle)(built, certificate)
     artifact.base_family === :lp || return false
     built.source_artifact === artifact || return false
     actual_fp = _native_model_fingerprint(built.problem)
-    actual_fp == built.facts.model_fingerprint || return false
-    actual_fp == get(built.facts, :model_contract_fingerprint, "") || return false
+    expected_fp = _hex(_source_model_receipt(artifact, built.problem))
+    actual_fp == built.facts.model_fingerprint == expected_fp || return false
+    get(built.facts, :model_contract_fingerprint, "") == expected_fp || return false
+    _model_matches_source_receipt(artifact, built.problem) || return false
     witness = artifact.primal_witness
     dual = artifact.dual_witness
     size(artifact.coefficients, 2) == length(witness) || return false
@@ -1039,8 +1046,12 @@ function _ill_lp_build(artifact::IllConditionedArtifact, ::Type{T};
         :lp_standard_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
     oracle = V2IllConditionedLPOracle(artifact)
+    expected = _source_model_receipt(artifact, model)
+    _actual_model_receipt(model) == expected || throw(ArgumentError(
+        "ill-conditioned LP lowering differs from its independently reconstructed source contract"))
     facts = (artifact_fingerprint=_hex(artifact), model_fingerprint=actual_fp,
-        model_contract_fingerprint=actual_fp, model_precision_bits=precision_bits,
+        model_contract_fingerprint=_hex(expected), model_source_receipt=expected,
+        model_precision_bits=SDPX.precision_bits(model),
         source_dimension=size(artifact.coefficients, 2), target_dimension=size(artifact.coefficients, 2),
         generator=artifact.generator_id, coefficients=artifact.coefficients)
     V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
@@ -1349,11 +1360,12 @@ struct RSOCArtifact <: AbstractV2SmallArtifact
     targets::Vector{Rational{Int}}
     rhs::Vector{Rational{Int}}
     primal_witness::Vector{Rational{Int}}
+    dual_witness::Vector{Rational{Int}}
     objective::Rational{Int}
     generator_id::Symbol
     generator_version::Int
     function RSOCArtifact(id::Symbol, kind::Symbol, targets, rhs;
-                          primal_witness=Rational{Int}[], objective::Rational{Int}=0//1,
+                          primal_witness=Rational{Int}[], dual_witness=Rational{Int}[], objective::Rational{Int}=0//1,
                           generator_id::Symbol=:rsoc_small_v1,
                           generator_version::Integer=1)
         kind in (:quadratic_epigraph, :perspective_ls, :many_qr3) ||
@@ -1368,15 +1380,15 @@ struct RSOCArtifact <: AbstractV2SmallArtifact
         kind === :many_qr3 && (length(ts) == 16 && isempty(rs) ||
             throw(ArgumentError("many-QR3 requires exactly 16 targets")))
         generator_version > 0 || throw(ArgumentError("generator version must be positive"))
-        new(id, kind, ts, rs, Rational{Int}.(primal_witness), objective,
+        new(id, kind, ts, rs, Rational{Int}.(primal_witness), Rational{Int}.(dual_witness), objective,
             generator_id, Int(generator_version))
     end
 end
 
 function _put!(io::IO, artifact::RSOCArtifact)
     _put!(io, (:RSOCArtifact, artifact.id, artifact.kind, artifact.targets,
-        artifact.rhs, artifact.primal_witness, artifact.objective,
-        artifact.generator_id, artifact.generator_version))
+        artifact.rhs, artifact.primal_witness, artifact.dual_witness,
+        artifact.objective, artifact.generator_id, artifact.generator_version))
 end
 
 struct SDPArtifact <: AbstractV2SmallArtifact
@@ -1428,11 +1440,15 @@ end
 
 function _typed_facts(artifact::AbstractV2SmallArtifact, model, precision_bits, generator,
                       target_dimension)
-    fp = _native_model_fingerprint(model)
+    expected = _source_model_receipt(artifact, model)
+    actual = _actual_model_receipt(model)
+    actual == expected || throw(ArgumentError(
+        "lowered model differs from its independently reconstructed source contract"))
+    fp = _hex(actual)
     return (artifact_fingerprint=_hex(artifact), model_fingerprint=fp,
-        model_contract_fingerprint=fp, model_precision_bits=precision_bits,
-        source_dimension=target_dimension, target_dimension=target_dimension,
-        generator=generator)
+        model_contract_fingerprint=_hex(expected), model_source_receipt=expected,
+        model_precision_bits=SDPX.precision_bits(model), source_dimension=target_dimension,
+        target_dimension=target_dimension, generator=generator)
 end
 
 function _typed_rsoc_build(artifact::RSOCArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
@@ -1537,7 +1553,10 @@ function (oracle::V2RSOCOracle)(built, certificate)
     a = oracle.artifact
     built.source_artifact === a || return false
     fp = _native_model_fingerprint(built.problem)
-    fp == built.facts.model_fingerprint == built.facts.model_contract_fingerprint || return false
+    expected_fp = _hex(_source_model_receipt(a, built.problem))
+    fp == built.facts.model_fingerprint == expected_fp || return false
+    built.facts.model_contract_fingerprint == expected_fp || return false
+    _model_matches_source_receipt(a, built.problem) || return false
     w = a.primal_witness
     if a.kind === :quadratic_epigraph
         length(w) == 2 && w == Rational{Int}[1//2, 1] || return false
@@ -1549,6 +1568,35 @@ function (oracle::V2RSOCOracle)(built, certificate)
         length(w) == 32 && all(w[2i-1] == 1//2 && w[2i] == 1//1 for i in 1:16) || return false
         all(2 * w[2i-1] * w[2i] >= a.targets[i]^2 for i in 1:16) || return false
     end
+    dw = a.dual_witness
+    n = a.kind === :many_qr3 ? 16 : 1
+    length(dw) == 3n || return false
+    dual_bound = 0//1
+    for i in 1:n
+        du, dv, dz = dw[3i-2:3i]
+        du >= 0//1 && dv >= 0//1 && 2*du*dv >= dz^2 || return false
+        if a.kind === :perspective_ls
+            # Cone point is (t,v,u-datum*v+target).  Stationarity determines
+            # equality multipliers from the exact cone-dual witness.
+            pt, pv, pu = w
+            pz = pu - a.rhs[1] * pv + a.targets[1]
+            pt*du + pv*dv + pz*dz == 0//1 || return false
+            du == 1//1 || return false                    # objective coefficient of t
+            lambda_v = dv - a.rhs[1] * dz                # v=1 multiplier
+            lambda_u = dz                                # u=0 multiplier
+            dual_bound += -a.targets[1]*dz - lambda_v - lambda_u*0//1
+        else
+            pu, pv = w[2i-1], w[2i]
+            target = a.targets[i]
+            pu*du + pv*dv + target*dz == 0//1 || return false
+            du == 1//1 || return false                    # objective coefficient of left/u
+            lambda_v = dv - 1//1                         # right/v=1 multiplier
+            dual_bound += -target*dz - lambda_v
+        end
+    end
+    primal_value = a.kind === :perspective_ls ? w[1] :
+        sum(w[2i-1] + w[2i] for i in 1:n)
+    primal_value == a.objective == dual_bound || return false
     value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
     isfinite(value) && abs(value - BigFloat(a.objective)) <= BigFloat("5e-7")
 end
@@ -1575,7 +1623,10 @@ function (oracle::V2SDPOracle)(built, certificate)
     a = oracle.artifact
     built.source_artifact === a || return false
     fp = _native_model_fingerprint(built.problem)
-    fp == built.facts.model_fingerprint == built.facts.model_contract_fingerprint || return false
+    expected_fp = _hex(_source_model_receipt(a, built.problem))
+    fp == built.facts.model_fingerprint == expected_fp || return false
+    built.facts.model_contract_fingerprint == expected_fp || return false
+    _model_matches_source_receipt(a, built.problem) || return false
     all(_rank_one_psd, a.primal_witness) || return false
     if a.kind === :weighted_trace
         a.primal_witness[1][1, 1] == 1//1 || return false
@@ -1588,23 +1639,46 @@ function (oracle::V2SDPOracle)(built, certificate)
                                                -1 -1 1 1;
                                                -1 -1 1 1] || return false
         a.objective == -4//1 || return false
-        a.dual_parameter == 1//4 || return false # Diag(1/4)-C is PSD
+        a.dual_parameter == 1//4 || return false # C+Diag(1/4) is PSD
     else
         all(m[1, 1] == 1//1 for m in a.primal_witness) || return false
         sum(sum(diag(m)) for m in a.primal_witness) == a.objective || return false
-        a.dual_parameter == 1//1 || return false # each I-E11 block is PSD
+        a.dual_parameter == 1//1 || return false
     end
+    # Exact source-derived dual slacks, dual lower bounds, and
+    # complementarity.  No floating eigenvalue or comment-only PSD claim.
+    E11 = zeros(Rational{Int}, a.order, a.order); E11[1, 1] = 1//1
+    for block in 1:a.blocks
+        C = a.matrices[block]
+        dual_slack = a.kind === :maxcut_k4 ?
+            C + a.dual_parameter * Matrix{Rational{Int}}(I, a.order, a.order) :
+            C - a.dual_parameter * E11
+        _exact_psd(dual_slack) || return false
+        sum(dual_slack[i, j] * a.primal_witness[block][j, i]
+            for i in 1:a.order, j in 1:a.order) == 0//1 || return false
+    end
+    primal_value = if a.kind === :maxcut_k4
+        -3//1 + sum(a.matrices[1][i, j] * a.primal_witness[1][j, i]
+                    for i in 1:a.order, j in 1:a.order)
+    else
+        sum(a.matrices[block][i, j] * a.primal_witness[block][j, i]
+            for block in 1:a.blocks, i in 1:a.order, j in 1:a.order)
+    end
+    dual_bound = a.kind === :maxcut_k4 ?
+        -3//1 - a.order * a.dual_parameter :
+        a.blocks * a.dual_parameter
+    primal_value == a.objective == dual_bound || return false
     value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
     isfinite(value) && abs(value - BigFloat(a.objective)) <= BigFloat("5e-7")
 end
 
 function _rsoc_artifacts()
     [RSOCArtifact(:v2_rsoc_quadratic_epigraph_small, :quadratic_epigraph,
-        Rational{Int}[1], Rational{Int}[]; primal_witness=Rational{Int}[1//2, 1], objective=3//2),
+        Rational{Int}[1], Rational{Int}[]; primal_witness=Rational{Int}[1//2, 1], dual_witness=Rational{Int}[1, 1//2, -1], objective=3//2),
      RSOCArtifact(:v2_rsoc_perspective_ls_small, :perspective_ls,
-        Rational{Int}[0], Rational{Int}[1]; primal_witness=Rational{Int}[1//2, 1, 0], objective=1//2),
+        Rational{Int}[0], Rational{Int}[1]; primal_witness=Rational{Int}[1//2, 1, 0], dual_witness=Rational{Int}[1, 1//2, 1], objective=1//2),
      RSOCArtifact(:v2_rsoc_many_qr3_small, :many_qr3,
-        fill(1//1, 16), Rational{Int}[]; primal_witness=vcat(fill(Rational{Int}[1//2, 1], 16)...), objective=24//1)]
+        fill(1//1, 16), Rational{Int}[]; primal_witness=vcat(fill(Rational{Int}[1//2, 1], 16)...), dual_witness=vcat(fill(Rational{Int}[1, 1//2, -1], 16)...), objective=24//1)]
 end
 
 function _sdp_artifacts()
@@ -1670,3 +1744,4 @@ end
 
 include(joinpath(@__DIR__, "exp_power_catalog.jl"))
 include(joinpath(@__DIR__, "mixed_tranche.jl"))
+include(joinpath(@__DIR__, "independence_contracts.jl"))
