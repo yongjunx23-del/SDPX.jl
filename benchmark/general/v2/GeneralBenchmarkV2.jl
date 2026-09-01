@@ -369,6 +369,27 @@ function certificate_gate(certificate, precision::V2Precision)
     return true
 end
 
+"""Check the normalized separation margin for an infeasibility ray.
+
+The native result stores a primal-infeasibility Farkas pairing in
+`dual_objective`, and a dual-infeasibility improving pairing in
+`primal_objective`.  Require a 100x certificate-limit margin in addition to
+the native validity bit; this prevents a numerically marginal ray from being
+classified as a certified benchmark result.
+"""
+function ray_certificate_gate(certificate, precision::V2Precision,
+                               expected_status::Symbol)
+    _validate_precision_spec(precision)
+    field = expected_status === :primal_infeasible ? :dual_objective :
+        expected_status === :dual_infeasible ? :primal_objective : nothing
+    field === nothing && return false
+    hasproperty(certificate, field) || return false
+    pairing = try BigFloat(getproperty(certificate, field)) catch; return false end
+    isfinite(pairing) || return false
+    margin = BigFloat(100) * BigFloat(precision.certificate_limit)
+    expected_status === :primal_infeasible ? pairing >= margin : pairing <= -margin
+end
+
 """Validate a fixed-format SHA256 manifest and all referenced files."""
 function validate_manifest(path::AbstractString; root::AbstractString=dirname(path))
     isfile(path) || throw(ArgumentError("checksum manifest is missing: $path"))
@@ -795,7 +816,9 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     cert_ok = instance.reference.status === :build_only ||
         (instance.reference.expected_status in (:primal_infeasible, :dual_infeasible) ?
             (observed_status === instance.reference.expected_status &&
-             certificate.valid && oracle_ok) :
+             certificate.valid &&
+             ray_certificate_gate(certificate, precision,
+                                  instance.reference.expected_status) && oracle_ok) :
             certificate.valid && certificate_gate(certificate, precision))
     failures = Symbol[]
     interval_ok || push!(failures, :objective_interval)
