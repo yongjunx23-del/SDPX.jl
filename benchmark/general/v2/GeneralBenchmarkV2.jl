@@ -9,7 +9,9 @@ export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
     input_fingerprint, mathematical_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
-    precision_matrix, training_instances, holdout_instances, sentinel_instances,
+    precision_matrix, reviewed_precision_specs, certificate_gate,
+    validate_manifest, manifest_fingerprint, compatibility_tier,
+    training_instances, holdout_instances, sentinel_instances,
     classify_disposition
 
 const V2_SCHEMA_VERSION = 2
@@ -284,6 +286,117 @@ function precision_matrix()
         BigFloat1024=(small=:full, medium=:sentinel, large=:sentinel, extreme=:sentinel),
     )
 end
+
+"""The reviewed seven-arithmetic precision declarations.
+
+The non-BigFloat multifloat entries intentionally carry symbolic arithmetic
+identifiers: this module does not import a provider merely to describe the
+catalog.  A runner must resolve those identifiers to a concrete provider
+before calling `build_instance`; an unavailable provider therefore fails
+closed instead of silently falling back to Float64.
+"""
+function reviewed_precision_specs()
+    return (
+        V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :cholmod),
+        V2Precision(:Float64x2, :Float64x2, 104, "1e-15", "5e-13", :multifloat_linear_algebra),
+        V2Precision(:Float64x3, :Float64x3, 156, "1e-21", "5e-18", :multifloat_linear_algebra),
+        V2Precision(:Float64x4, :Float64x4, 208, "1e-28", "5e-22", :multifloat_linear_algebra),
+        V2Precision(:BigFloat256, BigFloat, 256, "1e-32", "5e-28", :bigfloat_linear_algebra),
+        V2Precision(:BigFloat512, BigFloat, 512, "1e-50", "5e-46", :bigfloat_linear_algebra),
+        V2Precision(:BigFloat1024, BigFloat, 1024, "1e-80", "5e-74", :bigfloat_linear_algebra),
+    )
+end
+
+const _COMPATIBILITY_TIERS = Dict(
+    :instant => :small, :small => :small, :medium => :medium,
+    :heavy => :large, :large => :large, :extreme => :extreme,
+)
+
+"""Map the retired V1 tier names without changing their result schema."""
+function compatibility_tier(tier::Symbol)
+    haskey(_COMPATIBILITY_TIERS, tier) ||
+        throw(ArgumentError("unknown compatibility tier $(repr(tier)); expected instant, small, medium, heavy, large, or extreme"))
+    _COMPATIBILITY_TIERS[tier]
+end
+
+"""Fail-closed validation of the reviewed precision contract."""
+function _validate_precision_spec(precision::V2Precision)
+    expected = Dict(
+        :Float64 => (53, "1e-8", "5e-7", :cholmod),
+        :Float64x2 => (104, "1e-15", "5e-13", :multifloat_linear_algebra),
+        :Float64x3 => (156, "1e-21", "5e-18", :multifloat_linear_algebra),
+        :Float64x4 => (208, "1e-28", "5e-22", :multifloat_linear_algebra),
+        :BigFloat256 => (256, "1e-32", "5e-28", :bigfloat_linear_algebra),
+        :BigFloat512 => (512, "1e-50", "5e-46", :bigfloat_linear_algebra),
+        :BigFloat1024 => (1024, "1e-80", "5e-74", :bigfloat_linear_algebra),
+    )
+    haskey(expected, precision.name) || throw(ArgumentError(
+        "unsupported reviewed precision $(precision.name)"))
+    bits, solver, cert, provider = expected[precision.name]
+    precision.bits == bits || throw(ArgumentError(
+        "precision $(precision.name) does not match the reviewed bit width"))
+    # `:standard`, `:test`, and `:generic` are explicit local overrides used
+    # by unit tests and exploratory callers.  They still retain the reviewed
+    # arithmetic width, but are not mislabeled as a production provider.
+    if precision.provider in (:standard, :test, :generic)
+        return true
+    end
+    (precision.solver_tolerance, precision.certificate_limit,
+     precision.provider) == (solver, cert, provider) || throw(ArgumentError(
+        "precision $(precision.name) does not match the reviewed arithmetic matrix"))
+    return true
+end
+
+for precision in reviewed_precision_specs()
+    _validate_precision_spec(precision)
+end
+
+"""Check the original-coordinate residual fields against a V2 limit.
+
+Missing fields fail closed.  Infeasibility certificates are checked by their
+independent Farkas/ray oracle instead; this predicate is for optimal results.
+"""
+function certificate_gate(certificate, precision::V2Precision)
+    _validate_precision_spec(precision)
+    for field in (:primal_residual_scaled, :dual_residual_scaled, :relative_gap)
+        hasproperty(certificate, field) || return false
+        value = try BigFloat(getproperty(certificate, field)) catch; return false end
+        isfinite(value) || return false
+        value <= BigFloat(precision.certificate_limit) || return false
+    end
+    return true
+end
+
+"""Validate a fixed-format SHA256 manifest and all referenced files."""
+function validate_manifest(path::AbstractString; root::AbstractString=dirname(path))
+    isfile(path) || throw(ArgumentError("checksum manifest is missing: $path"))
+    rows = Tuple{String,String}[]
+    seen = Set{String}()
+    for (line_number, raw) in enumerate(eachline(path))
+        line = strip(raw)
+        isempty(line) && continue
+        startswith(line, "#") && continue
+        match_result = match(r"^([0-9A-Fa-f]{64})[[:space:]]+(.+)$", line)
+        match_result === nothing && throw(ArgumentError(
+            "invalid checksum manifest line $line_number"))
+        digest, relative = lowercase(match_result.captures[1]), match_result.captures[2]
+        relative = normpath(relative)
+        (!isabspath(relative) && relative != ".." && !startswith(relative, "../")) ||
+            throw(ArgumentError("manifest path escapes root: $relative"))
+        relative in seen && throw(ArgumentError("duplicate manifest path: $relative"))
+        push!(seen, relative)
+        file = joinpath(root, relative)
+        isfile(file) || throw(ArgumentError("manifest file is missing: $relative"))
+        actual = bytes2hex(SHA.sha256(read(file)))
+        actual == digest || throw(ArgumentError("checksum mismatch for $relative"))
+        push!(rows, (digest, relative))
+    end
+    isempty(rows) && throw(ArgumentError("checksum manifest is empty"))
+    return rows
+end
+
+manifest_fingerprint(path::AbstractString; root::AbstractString=dirname(path)) =
+    _hex((:sha256_manifest_v1, sort(validate_manifest(path; root))))
 
 # Length-prefixed canonical bytes. All integer lengths are explicitly
 # big-endian; no host-endian serialization participates in identity.
@@ -629,11 +742,13 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     built, setup = build_instance(catalog, instance, precision)
     model = built.problem
     T = precision.arithmetic
+    _validate_precision_spec(precision)
     if settings === nothing
+        # Keep the requested solver tolerance distinct from the wider
+        # certificate acceptance limit in the reviewed matrix.
         tol = _parse(T, precision.solver_tolerance)
-        certtol = _parse(T, precision.certificate_limit)
         settings = SDPX.Settings{T}(
-            tolerances=SDPX.Tolerances{T}(primal=certtol, dual=certtol, gap=certtol),
+            tolerances=SDPX.Tolerances{T}(primal=tol, dual=tol, gap=tol),
             limits=SDPX.Limits(threads=1), verbosity=0, certification=true,
         )
     end
@@ -645,15 +760,23 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     solved = measurement.value
     certificate = SDPX.certificate(solved)
     objective = string(certificate.primal_objective)
-    interval_ok = if instance.reference.objective_interval === nothing
-        instance.reference.status !== :optimal
-    else
-        lower, upper = instance.reference.objective_interval
-        value = try BigFloat(objective) catch; BigFloat(NaN) end
-        isfinite(value) && BigFloat(lower) <= value <= BigFloat(upper)
+    comparison_bits = max(256, 2 * precision.bits)
+    interval_ok = setprecision(BigFloat, comparison_bits) do
+        if instance.reference.objective_interval === nothing
+            instance.reference.status !== :optimal
+        else
+            lower, upper = instance.reference.objective_interval
+            value = try BigFloat(objective) catch; BigFloat(NaN) end
+            isfinite(value) && BigFloat(lower) <= value <= BigFloat(upper)
+        end
     end
-    oracle_ok = instance.reference.oracle === nothing ?
-        instance.reference.status === :build_only : instance.reference.oracle(built, certificate)
+    # Independent exact oracles must not inherit a low ambient BigFloat
+    # precision from the caller.  This scope is also the required
+    # max(256, 2*bits) reevaluation boundary for every optimal artifact.
+    oracle_ok = setprecision(BigFloat, comparison_bits) do
+        instance.reference.oracle === nothing ?
+            instance.reference.status === :build_only : instance.reference.oracle(built, certificate)
+    end
     # Infeasibility is independently certified by the exact Farkas oracle;
     # public certificate.valid is optimal-only.  Resolve an XFAIL only when
     # the observed status is the real semantic target and its exact oracle
@@ -661,7 +784,8 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     observed_status = SDPX.status(solved)
     cert_ok = instance.reference.status === :build_only ||
         (instance.reference.expected_status === :primal_infeasible ?
-            (observed_status === :primal_infeasible && oracle_ok) : certificate.valid)
+            (observed_status === :primal_infeasible && oracle_ok) :
+            certificate.valid && certificate_gate(certificate, precision))
     failures = Symbol[]
     interval_ok || push!(failures, :objective_interval)
     oracle_ok || push!(failures, :oracle)
@@ -695,12 +819,16 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     status_ok || push!(failures, :status)
     validation = V2Validation(validation_status, SDPX.status(solved), disposition,
         cert_ok, reference_ok, failures)
+    diagnostics = try SDPX.diagnostics(solved) catch; nothing end
+    timings = diagnostics === nothing ? nothing : getproperty(diagnostics, :timings)
+    core_seconds = timings === nothing ? measurement.time : get(timings, :core, measurement.time)
+    recovery_seconds = timings === nothing ? nothing : get(timings, :reconstruction, nothing)
     return V2RunResult(
         instance.id, instance.family, instance.tier.name, precision.name, precision.bits,
         SDPX.status(solved), certificate.valid, objective,
         string(certificate.dual_objective), string(certificate.primal_residual),
         string(certificate.dual_residual), string(certificate.relative_gap), solved.iterations,
-        setup, measurement.time, nothing, measurement.bytes,
+        setup, core_seconds, recovery_seconds, measurement.bytes,
         input_fingerprint(instance), execution_fingerprint(instance, precision), validation,
     )
 end
