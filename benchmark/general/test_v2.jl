@@ -512,3 +512,50 @@ end
     @test bf256.facts.model_fingerprint != bf512.facts.model_fingerprint
     @test bf256.transform == train_sdp.provenance.transform
 end
+
+
+@testset "typed RSOC lowering has independent exact epigraph oracles" begin
+    catalog = rsoc_tranche_catalog()
+    @test length(catalog.instances) == 3
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    expected = Dict(:quadratic_epigraph => 1.5, :perspective_ls => 0.5,
+        :many_qr3 => 24.0)
+    for instance in catalog.instances
+        @test instance.payload isa RSOCArtifact
+        @test instance.reference.oracle isa V2RSOCOracle
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.facts.artifact_fingerprint == instance.checksum
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind];
+            atol=5e-7, rtol=0)
+        @test result.core_seconds !== nothing
+    end
+end
+
+@testset "typed SDP lowering has independent Gram/dual oracles" begin
+    catalog = sdp_tranche_catalog()
+    @test length(catalog.instances) == 3
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    expected = Dict(:weighted_trace => 1.0, :maxcut_k4 => -4.0,
+        :multiblock => 8.0)
+    for instance in catalog.instances
+        @test instance.payload isa SDPArtifact
+        @test instance.reference.oracle isa V2SDPOracle
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.facts.artifact_fingerprint == instance.checksum
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind];
+            atol=5e-7, rtol=0)
+        @test result.core_seconds !== nothing
+    end
+end

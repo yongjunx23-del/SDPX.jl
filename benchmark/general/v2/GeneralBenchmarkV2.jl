@@ -5,10 +5,12 @@ import SDPX
 
 export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
     AbstractV2SourceArtifact, AbstractV2SmallArtifact, LPArtifact,
-    SOCPArtifact, IllConditionedArtifact, V2LPOracle, V2ConicArtifact, native_v2_catalog,
+    SOCPArtifact, RSOCArtifact, SDPArtifact, IllConditionedArtifact,
+    V2LPOracle, V2RSOCOracle, V2SDPOracle, V2ConicArtifact, native_v2_catalog,
     V2Transform, V2Family, V2Instance, V2Catalog, V2Built, V2Validation,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
     lp_tranche_catalog, ill_conditioned_tranche_catalog,
+    rsoc_tranche_catalog, sdp_tranche_catalog,
     input_fingerprint, mathematical_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
     precision_matrix, reviewed_precision_specs, certificate_gate,
@@ -655,6 +657,8 @@ function validate_catalog(catalog::V2Catalog)
                 "payload ID $(instance.payload.id) does not match instance $(instance.id)"))
             artifact_family = instance.payload isa LPArtifact ? :lp :
                 instance.payload isa SOCPArtifact ? :soc :
+                instance.payload isa RSOCArtifact ? :rsoc :
+                instance.payload isa SDPArtifact ? :sdp :
                 instance.payload isa IllConditionedArtifact ? :ill_conditioned :
                 hasproperty(instance.payload, :family) ? getproperty(instance.payload, :family) : nothing
             artifact_family == instance.family || throw(ArgumentError(
