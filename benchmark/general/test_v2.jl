@@ -1,5 +1,6 @@
 using Test
 using LinearAlgebra
+using SHA
 using SDPX
 isdefined(Main, :GenericConicBenchmark) ||
     include(joinpath(@__DIR__, "GenericConicBenchmark.jl"))
@@ -46,6 +47,45 @@ using .GeneralBenchmarkV2
     @test length(catalog_fingerprint(catalog)) == 64
     @test build_instance(catalog, instance, V2Precision(:Float64, Float64, 53,
         "1e-8", "5e-7", :test))[2] >= 0
+
+    # The compatibility CLI preserves the retired names without silently
+    # changing the canonical four-tier taxonomy.
+    @test compatibility_tier(:instant) === :small
+    @test compatibility_tier(:heavy) === :large
+    @test compatibility_tier(:extreme) === :extreme
+    @test_throws ArgumentError compatibility_tier(:unknown)
+
+    reviewed = reviewed_precision_specs()
+    @test length(reviewed) == 7
+    @test all(GeneralBenchmarkV2._validate_precision_spec, reviewed)
+    @test reviewed[1].bits == 53
+    @test reviewed[end].bits == 1024
+    @test_throws ArgumentError GeneralBenchmarkV2._validate_precision_spec(
+        V2Precision(:Float64, Float64, 52, "1e-8", "5e-7", :cholmod))
+
+    cert = (primal_residual_scaled=BigFloat("1e-8"),
+            dual_residual_scaled=BigFloat("2e-8"), relative_gap=BigFloat("3e-8"))
+    @test certificate_gate(cert, reviewed[1])
+    @test !certificate_gate((primal_residual_scaled=BigFloat("1"),
+        dual_residual_scaled=BigFloat("0"), relative_gap=BigFloat("0")), reviewed[1])
+    @test !certificate_gate((primal_residual_scaled=BigFloat("0"),
+        dual_residual_scaled=BigFloat("0")), reviewed[1])
+
+    # Manifest verification hashes file bytes, not host-endian decoded values,
+    # and rejects missing, malformed, duplicate, or escaping entries.
+    mktempdir() do root
+        data = joinpath(root, "case.dat")
+        write(data, UInt8[0x00, 0x01, 0xff])
+        digest = bytes2hex(SHA.sha256(read(data)))
+        manifest = joinpath(root, "MANIFEST.sha256")
+        write(manifest, digest * "  case.dat\n")
+        @test length(validate_manifest(manifest; root)) == 1
+        @test length(manifest_fingerprint(manifest; root)) == 64
+        write(manifest, digest * "  missing.dat\n")
+        @test_throws ArgumentError validate_manifest(manifest; root)
+        write(manifest, digest * "  ../escape.dat\n")
+        @test_throws ArgumentError validate_manifest(manifest; root)
+    end
 
     @test_throws ArgumentError V2Reference(:build_only, :optimal, nothing, nothing)
     @test_throws ArgumentError V2Reference(:xfail, :interval_or_bound, nothing,
