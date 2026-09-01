@@ -167,7 +167,9 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         expected, witness, artifact.infeasibility_ray, artifact)
     return V2Built(model, oracle, artifact, _hex(artifact), transform,
         (source_dimension=artifact.dimension, target_dimension=artifact.dimension,
-         generator=artifact.generator_id, coefficients=artifact.coefficients),
+         generator=artifact.generator_id, coefficients=artifact.coefficients,
+         dimension=artifact.dimension, cone_parameter=artifact.cone_parameter,
+         infeasible=artifact.infeasible),
         (setup_seconds=nothing,))
 end
 

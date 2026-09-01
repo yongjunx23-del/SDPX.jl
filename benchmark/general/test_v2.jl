@@ -120,6 +120,7 @@ end
     @test input_fingerprint(changed) != input_fingerprint(original)
     changed_built, _ = build_instance(catalog, changed, precision)
     @test changed_built.facts.coefficients == changed_artifact.coefficients
+    @test changed_built.facts.cone_parameter == changed_artifact.cone_parameter
     @test changed_built.input_fingerprint == input_fingerprint(changed)
     @test changed_built.input_fingerprint != input_fingerprint(original)
     # The canonical encoder is explicit for exact rational coefficients and
