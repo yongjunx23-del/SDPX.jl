@@ -65,6 +65,32 @@ end
     @test GenericConicBenchmark.validate_result(typed_spec, exact)
 end
 
+@testset "typed SOCP lowering has an independent certified oracle" begin
+    catalog = socp_tranche_catalog()
+    @test length(catalog.instances) == 2
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    @test all(instance.payload isa SOCPArtifact for instance in catalog.instances)
+    for instance in catalog.instances
+        artifact = instance.payload
+        @test instance.reference.oracle isa V2SOCOracle
+        @test sum(artifact.cone_partition) == length(artifact.c)
+        built, elapsed = build_instance(catalog, instance, precision)
+        @test elapsed >= 0
+        @test built.facts.artifact_fingerprint == instance.checksum
+        @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+        result = run_instance(catalog, instance, precision)
+        @test result.status === :optimal
+        @test result.certificate_valid
+        @test result.validation.reference
+        @test result.validation.failures == Symbol[]
+        @test result.core_seconds !== nothing
+        @test isapprox(parse(Float64, result.objective), Float64(artifact.objective); atol=5e-7, rtol=0)
+    end
+    q3 = only(filter(i -> i.payload.kind === :q3_load_sharing, catalog.instances))
+    @test q3.payload.cone_partition == fill(3, 16)
+    @test q3.payload.A[1, 1] == 1//1
+end
+
 @testset "general benchmark V2 schema and deterministic identity" begin
     axes = [V2Axis(:z, [2, 1]), V2Axis(:a, ["b", "a"])]
     expanded = expand(axes)

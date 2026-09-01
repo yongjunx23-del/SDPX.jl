@@ -84,7 +84,8 @@ struct SOCPArtifact <: AbstractV2SmallArtifact
         size(AA, 2) == length(cc) || throw(ArgumentError("SOCP A/c dimensions disagree"))
         all(>(0), cone_partition) || isempty(cone_partition) ||
             throw(ArgumentError("SOCP cone block sizes must be positive"))
-        sum(cone_partition) <= length(bb) || throw(ArgumentError("SOCP cone blocks exceed row dimension"))
+        sum(cone_partition) == length(cc) || throw(ArgumentError(
+            "SOCP cone blocks must cover every objective variable exactly once"))
         generator_version > 0 || throw(ArgumentError("generator version must be positive"))
         new(id, kind, AA, bb, cc, Int.(cone_partition),
             Rational{Int}.(primal_witness), Rational{Int}.(dual_witness), objective,
@@ -1335,3 +1336,5 @@ function native_v2_catalog()
     return V2Catalog(:general_v2_native, 2, families, instances,
         (train=train, holdout=holdout, sentinel=sentinel))
 end
+
+include(joinpath(@__DIR__, "socp_tranche.jl"))
