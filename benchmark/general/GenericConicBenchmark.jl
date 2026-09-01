@@ -3,6 +3,8 @@ module GenericConicBenchmark
 using LinearAlgebra
 using Printf
 using Random
+using TOML
+using SHA
 using SDPX
 
 export AbstractGenericProblem, BenchmarkSpec, BenchmarkResult
@@ -10,6 +12,9 @@ export PrecisionSpec, PrecisionBenchmarkResult, precision_specs, run_precision_c
 export build, inventory, run_one, run_tier, validate_result, main
 export MPSData, SDPAData, CBFData, read_mps, mps_model, read_sdpa, read_cbf, sdpa_model, EXTERNAL_BENCHMARKS_EXPANDED
 export ExternalBenchmark, external_inventory, read_external, reference_matches
+export ExternalHoldoutSpec, EXTERNAL_HOLDOUTS, external_holdout_inventory,
+    external_case_complete, validate_external_holdout_spec,
+    validate_external_holdout_manifest
 
 abstract type AbstractGenericProblem end
 

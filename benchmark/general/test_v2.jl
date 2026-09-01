@@ -166,6 +166,62 @@ end
     @test classify_disposition(:build_only, false, :build_only, true, true, false, true) === :PASS
 end
 
+@testset "external holdout provenance and fail-closed inventory" begin
+    data_root = joinpath(@__DIR__, "data")
+    manifest = joinpath(data_root, "EXTERNAL_HOLDOUTS.toml")
+    receipt = GenericConicBenchmark.validate_external_holdout_manifest(
+        manifest; root=data_root)
+    @test receipt.rows == 9
+    @test length(receipt.eligible) == 6
+    @test Set(receipt.eligible) == Set(string(spec.id) for spec in
+        GenericConicBenchmark.external_holdout_inventory(; eligible_only=true))
+    afiro = only(filter(spec -> spec.id === :netlib_afiro,
+        GenericConicBenchmark.external_holdout_inventory()))
+    @test afiro.split === :train
+    @test afiro.parity_pending
+    @test afiro.solve_eligible
+    @test length(afiro.sha256) == 64
+    @test length(afiro.parsed_fingerprint) == 64
+    deferred = only(filter(spec -> spec.id === :netlib_share2b,
+        GenericConicBenchmark.external_holdout_inventory()))
+    @test !deferred.solve_eligible
+    @test deferred.parsed_fingerprint == ""
+    @test occursin("legacy encoding", deferred.note)
+
+    # Incomplete metadata is retained for audit but cannot enter the solve set.
+    mktempdir() do root
+        payload = joinpath(root, "case.dat")
+        write(payload, UInt8[0x01, 0x02])
+        digest = bytes2hex(SHA.sha256(read(payload)))
+        write(joinpath(root, "EXTERNAL_HOLDOUTS.toml"), """
+[[case]]
+id = \"deferred\"
+library = \"NETLIB\"
+family = \"lp\"
+tier = \"small\"
+split = \"holdout\"
+relative_path = \"case.dat\"
+source_url = \"https://example.invalid/case\"
+license_note = \"test provenance\"
+sha256 = \"$digest\"
+parsed_fingerprint = \"\"
+official_status = \"optimal\"
+objective_interval = []
+parity_pending = true
+solve_eligible = false
+""")
+        result = GenericConicBenchmark.validate_external_holdout_manifest(
+            joinpath(root, "EXTERNAL_HOLDOUTS.toml"); root)
+        @test result.rows == 1
+        @test isempty(result.eligible)
+        write(joinpath(root, "EXTERNAL_HOLDOUTS.toml"), replace(
+            read(joinpath(root, "EXTERNAL_HOLDOUTS.toml"), String),
+            "solve_eligible = false" => "solve_eligible = true"))
+        @test_throws ArgumentError GenericConicBenchmark.validate_external_holdout_manifest(
+            joinpath(root, "EXTERNAL_HOLDOUTS.toml"); root)
+    end
+end
+
 @testset "general benchmark V2 adapter preserves V1 inventory" begin
     # The adapter is intentionally additive: it consumes V1 specs but does not
     # mutate the include-time V1 registry or rename any existing IDs.
