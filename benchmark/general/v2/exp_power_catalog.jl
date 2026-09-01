@@ -33,11 +33,13 @@ struct PowerArtifact <: AbstractV2SmallArtifact
     alphas::Vector{Rational{Int}}
     fixed_values::Vector{Rational{Int}}
     weighted_values::Vector{Rational{Int}}
+    primal_witness::Vector{Rational{Int}}
     objective::Rational{Int}
     generator_id::Symbol
     generator_version::Int
     function PowerArtifact(id::Symbol, kind::Symbol, alphas, fixed_values,
                            weighted_values, objective::Rational{Int};
+                           primal_witness=Rational{Int}[],
                            generator_id::Symbol=:power_small_v1,
                            generator_version::Integer=1)
         kind in (:separable_p_power, :weighted_mean, :alpha_sweep) ||
@@ -51,8 +53,10 @@ struct PowerArtifact <: AbstractV2SmallArtifact
             throw(ArgumentError("Power fixed values must match alphas"))
         kind === :weighted_mean && length(ww) == 2 ||
             kind !== :weighted_mean || throw(ArgumentError("weighted mean needs two fixed values"))
+        pw = Rational{Int}.(primal_witness)
         generator_version > 0 || throw(ArgumentError("generator version must be positive"))
-        new(:power, id, kind, aa, ff, ww, objective, generator_id, Int(generator_version))
+        new(:power, id, kind, aa, ff, ww, pw, objective,
+            generator_id, Int(generator_version))
     end
 end
 
@@ -62,8 +66,8 @@ function _put!(io::IO, artifact::ExpArtifact)
 end
 function _put!(io::IO, artifact::PowerArtifact)
     _put!(io, (:PowerArtifact, artifact.family, artifact.id, artifact.kind, artifact.alphas,
-        artifact.fixed_values, artifact.weighted_values, artifact.objective,
-        artifact.generator_id, artifact.generator_version))
+        artifact.fixed_values, artifact.weighted_values, artifact.primal_witness,
+        artifact.objective, artifact.generator_id, artifact.generator_version))
 end
 
 struct V2ExpOracle
@@ -169,11 +173,12 @@ function _exp_oracle_check(oracle::V2ExpOracle, built, certificate)
     else
         return false
     end
-    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
-    lower, upper = oracle.objective_interval
-    isfinite(value) && setprecision(BigFloat, 512) do
-        BigFloat(lower) <= value <= BigFloat(upper)
-    end
+    # The source witness proves the analytic optimum. Arithmetic-specific
+    # certificate objective accuracy is enforced exactly once by run_instance,
+    # which expands the public zero-width interval by the declared precision
+    # certificate limit. Do not require bit-exact equality to a transcendental
+    # or exact endpoint here.
+    true
 end
 
 (oracle::V2ExpOracle)(built, certificate) = _exp_oracle_check(oracle, built, certificate)
@@ -232,8 +237,36 @@ _power_oracle(oracle::V2PowerOracle, built, certificate) = begin
     get(built.facts, :model_contract_fingerprint, "") == expected_fp || return false
     _model_matches_source_receipt(artifact, built.problem) || return false
     all(a -> 0//1 < a < 1//1, artifact.alphas) || return false
-    artifact.kind === :weighted_mean ? artifact.weighted_values == Rational{Int}[1, 1] : all(==(1//1), artifact.fixed_values) || return false
-    # Objective accuracy is enforced centrally by run_instance.
+    witness = artifact.primal_witness
+    if artifact.kind in (:separable_p_power, :alpha_sweep)
+        n = length(artifact.alphas)
+        length(artifact.fixed_values) == n && length(witness) == 2n || return false
+        optimum = 0//1
+        for i in 1:n
+            t, x = witness[2i-1], witness[2i]
+            x == artifact.fixed_values[i] && t >= 0//1 || return false
+            alpha = artifact.alphas[i]
+            p, q = numerator(alpha), denominator(alpha)
+            # (t,1,x) in K_alpha implies t^p >= |x|^q. Equality of the
+            # exact rational witness proves both feasibility and the global
+            # lower bound for this separable minimization block.
+            t^p == abs(x)^q || return false
+            optimum += t
+        end
+        optimum == artifact.objective || return false
+    elseif artifact.kind === :weighted_mean
+        length(artifact.alphas) == 1 && length(artifact.weighted_values) == 2 || return false
+        length(witness) == 3 || return false
+        left, right, z = witness
+        left == artifact.weighted_values[1] && right == artifact.weighted_values[2] || return false
+        left >= 0//1 && right >= 0//1 && z >= 0//1 || return false
+        p, q = numerator(artifact.alphas[1]), denominator(artifact.alphas[1])
+        z^q == left^p * right^(q-p) || return false
+        z == artifact.objective || return false
+    else
+        return false
+    end
+    # Arithmetic-specific objective accuracy is enforced centrally.
     true
 end
 
@@ -284,25 +317,19 @@ function exp_tranche_catalog()
 end
 
 function power_tranche_catalog()
-    alphas = Rational{Int}[1//2, 1//3, 2//3, 2//5, 7//10]
-    separable = PowerArtifact(:v2_power_separable_small, :separable_p_power,
-        alphas, fill(1//1, 5), Rational{Int}[], 5//1)
-    weighted = PowerArtifact(:v2_power_weighted_mean_small, :weighted_mean,
-        Rational{Int}[1//2], Rational{Int}[], Rational{Int}[1, 1], 1//1)
-    sweep = PowerArtifact(:v2_power_alpha_sweep_small, :alpha_sweep,
-        alphas, fill(1//1, 5), Rational{Int}[], 5//1)
-    # The exact-alpha candidates are retained as typed source contracts, but
-    # none is registered until the native PowerCone route supplies an
-    # optimal, certificate-valid Float64 receipt.  Current probes return
-    # numerical_breakdown/numerical_failure at the cone boundary.
-    artifacts = PowerArtifact[]
+    # New reviewed interior contract, distinct from the failing boundary /
+    # heterogeneous probe candidates: alpha=1/2 and x=1/2 imply t>=x^2=1/4.
+    # The exact witness reaches the lower bound and certifies the optimum.
+    interior = PowerArtifact(:v2_power_interior_epigraph_small, :separable_p_power,
+        Rational{Int}[1//2], Rational{Int}[1//2], Rational{Int}[], 1//4;
+        primal_witness=Rational{Int}[1//4, 1//2],
+        generator_id=:power_interior_exact_v1)
+    artifacts = PowerArtifact[interior]
     transform = V2Transform(:power_small_artifact, :sdpx_cone_program,
         :power_cone_lowering, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
     desc = [
-        "separable p-power: exact alpha list and x_i=1 force t_i=1, objective 5",
-        "weighted mean: left=right=1 forces z<=1 for every exact alpha, objective 1",
-        "alpha sweep: one exact-rational x=1 epigraph per reviewed alpha, objective 5",
+        "interior power epigraph: alpha=1/2 and x=1/2 imply t>=x^2=1/4; exact witness t=1/4 reaches the global lower bound",
     ]
     instances = V2Instance[]
     for (artifact, text) in zip(artifacts, desc)

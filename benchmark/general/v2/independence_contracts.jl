@@ -37,7 +37,7 @@ end
 function _math_payload(a::PowerArtifact)
     (family=a.family, kind=a.kind, alphas=a.alphas,
      fixed_values=a.fixed_values, weighted_values=a.weighted_values,
-     objective=a.objective)
+     primal_witness=a.primal_witness, objective=a.objective)
 end
 function _math_payload(a::MixedArtifact)
     (kind=a.kind, nonnegative=a.nonnegative, soc=a.soc, rsoc=a.rsoc,
@@ -365,9 +365,15 @@ end
 
 _source_model_receipt(a::AbstractV2SmallArtifact, model::SDPX.Model{T}) where {T<:AbstractFloat} =
     _expected_model_receipt(a, T, SDPX.precision_bits(model))
+function _source_model_receipt(a::AbstractV2SmallArtifact, model::SDPX.Model{BigFloat})
+    bits = SDPX.precision_bits(model)
+    setprecision(BigFloat, bits) do
+        _expected_model_receipt(a, BigFloat, bits)
+    end
+end
 
 function _model_matches_source_receipt(a::AbstractV2SmallArtifact, model::SDPX.Model{T}) where {T<:AbstractFloat}
-    _actual_model_receipt(model) == _expected_model_receipt(a, T, SDPX.precision_bits(model))
+    _actual_model_receipt(model) == _source_model_receipt(a, model)
 end
 
 # Exact PSD check for rational symmetric dual slacks. For these small blocks,

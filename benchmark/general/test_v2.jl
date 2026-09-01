@@ -704,13 +704,33 @@ end
     @test ExpArtifact(:exp_lse_probe, :logsumexp, [0//1, 0//1], [1//2, 1//2]; n=2).kind === :logsumexp
 
     powercat = power_tranche_catalog()
-    @test isempty(powercat.instances)
+    @test length(powercat.instances) == 1
+    power_instance = only(powercat.instances)
+    power_artifact = power_instance.payload
+    @test power_artifact.id === :v2_power_interior_epigraph_small
+    @test power_artifact.alphas == Rational{Int}[1//2]
+    @test power_artifact.fixed_values == Rational{Int}[1//2]
+    @test power_artifact.primal_witness == Rational{Int}[1//4, 1//2]
+    @test power_artifact.objective == 1//4
+    power_built, power_elapsed = build_instance(powercat, power_instance, precision)
+    @test power_elapsed >= 0
+    @test power_built.facts.model_fingerprint == power_built.facts.model_contract_fingerprint
+    power_result = run_instance(powercat, power_instance, precision)
+    @test power_result.status === :optimal
+    @test power_result.certificate_valid
+    @test power_result.validation.reference
+    @test power_result.validation.failures == Symbol[]
+    @test isapprox(parse(Float64, power_result.objective), 0.25; atol=5e-7, rtol=0)
+
     @test reviewed_power_alphas() == Rational{Int}[1//2, 1//3, 2//3, 2//5, 7//10]
+    # Harder boundary/heterogeneous candidates remain typed but unregistered.
     power_candidate = PowerArtifact(:power_probe, :separable_p_power,
-        reviewed_power_alphas(), fill(1//1, 5), Rational{Int}[], 5//1)
+        reviewed_power_alphas(), fill(1//1, 5), Rational{Int}[], 5//1;
+        primal_witness=vcat(fill(Rational{Int}[1//1, 1//1], 5)...))
     @test power_candidate isa PowerArtifact
     weighted_candidate = PowerArtifact(:weighted_probe, :weighted_mean,
-        Rational{Int}[1//2], Rational{Int}[], Rational{Int}[1, 1], 1//1)
+        Rational{Int}[1//2], Rational{Int}[], Rational{Int}[1, 1], 1//1;
+        primal_witness=Rational{Int}[1, 1, 1])
     @test weighted_candidate.weighted_values == Rational{Int}[1, 1]
 end
 

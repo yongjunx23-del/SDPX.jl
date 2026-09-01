@@ -1,7 +1,7 @@
 #!/usr/bin/env julia
 # Provider-backed qualification runner for the certified V2 optimal catalog.
-# Run in a fresh process with --gcthreads=1.  The runner deliberately skips
-# ray cases: this report is for the 15 optimal-path rows only.
+# Run in a fresh process with --gcthreads=1. The runner deliberately skips
+# ray cases and enumerates every live certified optimal-path catalog row.
 using Dates
 using Printf
 using MultiFloats
@@ -18,7 +18,7 @@ const OUT = get(ENV, "V2_PRECISION_OUT",
 const CATALOGS = [
     lp_tranche_catalog(), ill_conditioned_tranche_catalog(),
     socp_tranche_catalog(), rsoc_tranche_catalog(), sdp_tranche_catalog(),
-    exp_tranche_catalog(), mixed_tranche_catalog(),
+    exp_tranche_catalog(), power_tranche_catalog(), mixed_tranche_catalog(),
 ]
 const CASES = [i for c in CATALOGS for i in c.instances
                if i.reference.status === :optimal]
@@ -91,8 +91,8 @@ function main()
         println(io, "# V2 provider-backed precision qualification")
         println(io)
         println(io, "Generated in a fresh Julia process on ", Dates.now(),
-                ". Only the 15 certified optimal-path cases are run; the two ray " *
-                "cases are intentionally skipped by this report.")
+                ". All ", length(CASES), " live certified optimal-path cases are run; " *
+                "the two ray cases are intentionally skipped by this report.")
         println(io)
         println(io, "Provider status: `MultiFloats`, `MultiFloatLinearAlgebra`, and " *
                 "`BigFloatLinearAlgebra` loaded in this process. BigFloat runs " *

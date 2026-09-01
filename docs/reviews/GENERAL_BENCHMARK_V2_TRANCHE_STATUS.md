@@ -79,19 +79,22 @@ certified SOC oracle remains open rather than being represented by a placeholder
 
 `exp_power_catalog.jl` adds exact-rational `ExpArtifact` and `PowerArtifact`
 source contracts, fixed-endian fingerprints, public exponential/power-cone
-builders, and independent original-coordinate oracle checks. The only
-solve-eligible row in this slice is `v2_exp_unit_epigraph_small`: the exact
-constraint `(0,1,x) in K_exp` forces `x >= exp(0) = 1`, and the Float64
+builders, and independent original-coordinate oracle checks. The EXP
+solve-eligible row is `v2_exp_unit_epigraph_small`: the exact constraint
+`(0,1,x) in K_exp` forces `x >= exp(0) = 1`, and the Float64
 certificate/oracle gate passes. Entropy and log-sum-exp retain typed candidates
 with high-precision analytic intervals (`-log(2)` and `log(2)`), but fresh
 native runs currently return `numerical_breakdown`; they are not registered.
 
-The Power layer retains the reviewed exact alphas `1/2, 1/3, 2/3, 2/5, 7/10`
-and typed separable/weighted-mean/sweep candidate contracts. Fresh native
-probes currently return `numerical_breakdown` or `numerical_failure` at the
-boundary, so no Power row is registered. This is an explicit solver/support
-finding, not a placeholder or a tolerance change. `reviewed_power_alphas()`
-exposes the exact rational list for the next lowering iteration.
+The Power family now has one distinct reviewed interior row,
+`v2_power_interior_epigraph_small`: `alpha=1/2`, fixed `x=1/2`, and
+`(t,1,x) in K_alpha` imply exactly `t >= x^2 = 1/4`; the stored rational
+witness `(t,x)=(1/4,1/2)` reaches this global lower bound and the Float64
+certificate/original-coordinate gates pass. Harder five-cone boundary and
+heterogeneous-alpha candidates remain unregistered after the contrast probe
+returned iteration-limit/numerical failures. `reviewed_power_alphas()` keeps
+the exact list `1/2, 1/3, 2/3, 2/5, 7/10`; no tolerance or solver source was
+changed to certify the interior row.
 
 ### Architecture decision for the real inventory
 
@@ -142,47 +145,39 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 | RSOC: quadratic epigraph, perspective LS, many QR3 | **certified tranche** | `rsoc_tranche_catalog()`: exact rational targets, public RotatedLorentzCone lowerings, rational planted witnesses, and objective/certificate gates pass (1.5 / 0.5 / 24) |
 | SDP: weighted trace, Max-Cut K4, eight PSD(3) multiblock | **certified tranche** | `sdp_tranche_catalog()`: factorized rational Gram witnesses and independent dual PSD proofs; Float64 objective/certificate gates pass (1 / -4 / 8) |
 | EXP: unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact unit epigraph, independent interval/oracle and Float64 certificate pass |
-| Power | open | typed exact-alpha candidates exist; native boundary probes fail certificate/status; no rows registered |
+| Power: interior alpha=1/2 epigraph | **certified tranche** | `v2_power_interior_epigraph_small`: exact rational witness `(t,x)=(1/4,1/2)`, algebraic lower-bound proof `t>=x^2`, independent model receipt, Float64 certificate/original-coordinate gates pass |
 | Mixed: planted six-cone coupling | **certified tranche** | `mixed_tranche_catalog()`: six cone blocks, coupling RHS derived from exact planted witness, independent oracle and Float64 certificate pass (objective 8) |
 
 | EXP unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact `(0,1,x)` exponential cone, optimum 1, Float64 certificate/oracle gate passes |
 | EXP entropy/log-sum-exp/fitting | open | entropy/log-sum-exp typed candidates have high-precision intervals but native runs break down; fitting lowering remains unsupported; no rows registered |
-| Power separable/weighted-mean/alpha-sweep | open | exact-alpha typed candidates and builders exist; native boundary probes fail certificate/status, no rows registered |
+| Power boundary/heterogeneous separable, weighted-mean, alpha-sweep | open | exact-alpha typed candidates/builders retained; multi-cone boundary/heterogeneous probes fail status/certificate, no placeholder rows |
 | Ill-conditioned diagonal scale ladder | **certified tranche** | `ill_conditioned_tranche_catalog()`: exact row scaling D=diag(10^-6,10^6), independently certified Float64 optimum -5; source/model fingerprints and original-coordinate oracle pass |
 | Ill-conditioned near-rank-loss LP | **certified tranche** | exact row3=row1+10^-8*row2 rational artifact; independent primal/dual oracle and Float64 certificate pass (objective -1.9999999928894998 within 5e-7) |
 | Ill-conditioned near-boundary LP | open | exact 10^-8 slack artifact was probed but solver returned `numerical_breakdown`; no registration |
 | Ill-conditioned Hilbert-6 SDP/boundary SOC/high-range EXP/Power | open | exact coefficient artifacts plus PSD/SOCP/EXP/Power-specific original-coordinate oracles; no placeholders |
 
-No placeholder rows were added. The typed LP plus EXP unit tranche is the current
-solve-eligible V2 corpus; its scope must not be described as the reviewed full
-small-tier inventory.
+No placeholder rows were added. This is a partial additive tranche: 17
+optimal-path cases plus two ray cases are solve-eligible with independent
+Float64 receipts across all eight catalog families, but it must not be called
+the complete reviewed small-tier inventory.
 
 ## Remaining V2 blockers after this tranche
 
-1. Real four-tier, eight-family inventory and holdout corpus.
-2. External holdout files, immutable checksums, independent references, and parity.
-3. Full fresh-process/peak-RSS/schema-v9 lifecycle pipeline.
-4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
-5. Certified LP/SOCP/RSOC/SDP/ill-conditioned first tranche: six LP kinds (box,
-   sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible Farkas,
-   and dual-infeasible improving ray), two SOCP kinds (single large SOC, Q3
-   load sharing), three RSOC cases (quadratic epigraph, perspective LS, many
-   QR3), three SDP cases (weighted trace, Max-Cut K4, eight PSD(3)
-   multiblock), and two exact ill-conditioned LPs (diagonal-scale and
-   near-rank-loss) are solve-eligible with independent Float64 receipts.
-   Duplicate/rank-deficient and near-boundary LPs and ill-scaled SOC (solver
-   `numerical_breakdown`), SOCP portfolio/simplex-projection, Hilbert-6 SDP,
-   boundary SOC, high-range EXP/Power, and Power-family rows remain open rather
-   than represented by placeholders.
-
-5. Certified first tranche: 16 optimal-path cases plus two ray cases are
-   solve-eligible with independent Float64 receipts: LP (6), SOCP (2), RSOC
-   (3), SDP (3), EXP unit epigraph (1), ill-conditioned LP (2), and mixed
-   planted six-cone coupling (1). Duplicate/rank-deficient and near-boundary
-   LPs (solver `numerical_breakdown`), EXP entropy/log-sum-exp/fitting, all
-   standalone Power rows, SOCP portfolio/simplex/ill-scaled, Hilbert-6 SDP,
-   boundary SOC, and high-range EXP/Power kinds remain open rather than
-   represented by placeholders.
+1. Complete the mandatory small kinds/dimensions and then medium/large/extreme
+   inventories. Duplicate/rank-deficient and near-boundary LPs, EXP entropy/
+   log-sum-exp/fitting, harder Power boundary/heterogeneous rows, SOCP
+   portfolio/simplex/ill-scaled, Hilbert-6 SDP, boundary SOC, and high-range
+   EXP/Power remain explicit solver/support findings rather than placeholders.
+2. Promote external holdouts only after independent parity receipts pass;
+   parity-pending rows are now ineligible by construction.
+3. Add full fresh-process orchestration and peak-RSS capture. The current
+   schema-v9 adapter honestly declares one warmup plus three same-process
+   samples and unavailable fields instead of synthesizing passes.
+4. Finish the provider matrix beyond the current Float64x2/x4/BigFloat256
+   qualification: Float64x3 and BigFloat512/1024 remain open, and Julia 1.12 +
+   MultiFloats process crashes must remain visible provider-stability findings.
+5. Freeze train/holdout/sentinel catalogs and lifecycle receipts before Stage-B
+   performance baselines are selected.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none

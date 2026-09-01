@@ -376,10 +376,17 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}; precision_bits::Int
 end
 
 function _numeric_token(x)
-    # Model identity is mathematical; normalize signed zero so expression
-    # construction order cannot create a spurious contract mismatch.
+    # Model identity must be independent of ambient BigFloat precision.
+    # Normalize signed zero, retain a BigFloat's own stored precision, and
+    # encode MultiFloat limbs exactly rather than rounding through BigFloat.
     iszero(x) && return "0"
-    return string(BigFloat(x))
+    x isa BigFloat && return string(x)
+    if hasfield(typeof(x), :_limbs)
+        limbs = getfield(x, :_limbs)
+        canonical_limbs = map(limb -> iszero(limb) ? zero(limb) : limb, limbs)
+        return string(typeof(x), ":", join(bitstring.(canonical_limbs), ":"))
+    end
+    return repr(x)
 end
 
 function _actual_model_receipt(model)
@@ -1001,24 +1008,21 @@ function (oracle::V2IllConditionedLPOracle)(built, certificate)
     size(artifact.coefficients, 2) == length(witness) || return false
     size(artifact.coefficients, 1) == length(artifact.rhs) == length(dual) || return false
     for row in axes(artifact.coefficients, 1)
-        sum(BigFloat(artifact.coefficients[row, col]) *
-            (BigFloat(numerator(witness[col])) / BigFloat(denominator(witness[col])))
-            for col in axes(artifact.coefficients, 2)) == BigFloat(artifact.rhs[row]) || return false
+        sum(artifact.coefficients[row, col] * witness[col]
+            for col in axes(artifact.coefficients, 2)) == artifact.rhs[row] || return false
     end
     all(>=(0//1), witness) || return false
     for col in axes(artifact.coefficients, 2)
-        lhs = sum(BigFloat(artifact.coefficients[row, col]) * dual[row]
+        lhs = sum(artifact.coefficients[row, col] * dual[row]
                   for row in axes(artifact.coefficients, 1))
-        lhs <= BigFloat(artifact.objective_coefficients[col]) || return false
+        lhs <= artifact.objective_coefficients[col] || return false
     end
-    primal_value = sum(BigFloat(artifact.objective_coefficients[col]) *
-        (BigFloat(numerator(witness[col])) / BigFloat(denominator(witness[col])))
+    primal_value = sum(artifact.objective_coefficients[col] * witness[col]
         for col in axes(artifact.coefficients, 2))
-    dual_value = sum(BigFloat(artifact.rhs[row]) * dual[row]
+    dual_value = sum(artifact.rhs[row] * dual[row]
                      for row in axes(artifact.coefficients, 1))
-    primal_value == BigFloat(artifact.objective) || return false
-    dual_value == BigFloat(artifact.objective) || return false
-    # Objective accuracy is enforced centrally by run_instance.
+    primal_value == artifact.objective == dual_value || return false
+    # Arithmetic-specific certificate objective accuracy is enforced centrally.
     true
 end
 
