@@ -9,7 +9,8 @@ export V2_SCHEMA_VERSION, V2Axis, V2Tier, V2Precision, V2Reference,
     V2RunResult, expand, validate_catalog, catalog_fingerprint,
     input_fingerprint, mathematical_fingerprint, execution_fingerprint, adapt_generic_specs,
     build_instance, run_instance, reference_interval, resource_tiers,
-    precision_matrix, training_instances, holdout_instances, sentinel_instances
+    precision_matrix, training_instances, holdout_instances, sentinel_instances,
+    classify_disposition
 
 const V2_SCHEMA_VERSION = 2
 
@@ -302,10 +303,26 @@ function _put!(io::IO, value)
         _put_bytes!(io, 0x03, codeunits(String(value)))
     elseif value isa Rational
         write(io, UInt8(0x0a)); _put!(io, numerator(value)); _put!(io, denominator(value))
-    elseif value isa Int8 || value isa Int16 || value isa Int32 || value isa Int64 || value isa Int128
-        _put_bytes!(io, 0x04, codeunits(string(value)))
-    elseif value isa UInt8 || value isa UInt16 || value isa UInt32 || value isa UInt64 || value isa UInt128
-        _put_bytes!(io, 0x0b, codeunits(string(value)))
+    elseif value isa Int8
+        _put_bytes!(io, 0x40, codeunits(string(value)))
+    elseif value isa Int16
+        _put_bytes!(io, 0x41, codeunits(string(value)))
+    elseif value isa Int32
+        _put_bytes!(io, 0x42, codeunits(string(value)))
+    elseif value isa Int64
+        _put_bytes!(io, 0x43, codeunits(string(value)))
+    elseif value isa Int128
+        _put_bytes!(io, 0x44, codeunits(string(value)))
+    elseif value isa UInt8
+        _put_bytes!(io, 0x45, codeunits(string(value)))
+    elseif value isa UInt16
+        _put_bytes!(io, 0x46, codeunits(string(value)))
+    elseif value isa UInt32
+        _put_bytes!(io, 0x47, codeunits(string(value)))
+    elseif value isa UInt64
+        _put_bytes!(io, 0x48, codeunits(string(value)))
+    elseif value isa UInt128
+        _put_bytes!(io, 0x49, codeunits(string(value)))
     elseif value isa Float16
         write(io, UInt8(0x0c)); _put_u16be!(io, reinterpret(UInt16, value))
     elseif value isa Float32
@@ -324,7 +341,10 @@ function _put!(io::IO, value)
         write(io, UInt8(0x06)); _put_u64be!(io, UInt64(length(value)))
         for item in value; _put!(io, item); end
     elseif value isa AbstractArray
-        write(io, UInt8(0x07)); _put!(io, size(value))
+        # Arrays carry container type, rank and element type even when empty;
+        # this prevents collisions between e.g. Vector{Int}[] and Matrix{Int}.
+        write(io, UInt8(0x07)); _put!(io, string(typeof(value)))
+        _put!(io, ndims(value)); _put!(io, string(eltype(value))); _put!(io, size(value))
         for item in value; _put!(io, item); end
     elseif value isa AbstractDict
         write(io, UInt8(0x08)); pairs_sorted = sort!(collect(value); by=x -> _canonical_bytes(first(x)) )
@@ -357,9 +377,12 @@ _hex(value) = bytes2hex(SHA.sha256(_canonical_bytes(value)))
 # payloads conservatively remain fully represented.
 _math_payload(value) = value
 
+# Pure mathematics deliberately excludes stable IDs, train/holdout/sentinel
+# split labels and provenance. This lets cross-split duplicate checks compare
+# the actual finite mathematical instance rather than metadata.
 mathematical_fingerprint(instance::V2Instance) = _hex((
-    :schema, V2_SCHEMA_VERSION, :instance_id, instance.id, :family, instance.family,
-    :axis_values, instance.axis_values, :split, instance.split,
+    :schema, V2_SCHEMA_VERSION, :family, instance.family,
+    :axis_values, instance.axis_values,
     :payload, _math_payload(instance.payload),
 ))
 
@@ -389,6 +412,30 @@ function execution_fingerprint(instance::V2Instance, precision::V2Precision;
 end
 
 reference_interval(ref::V2Reference) = ref.objective_interval
+
+"""Classify one observed run using the explicit five-state reference table.
+A prior failure may only become RESOLVED after every current oracle, interval,
+certificate-kind and residual gate passes; an unexpected xfail success is XPASS.
+"""
+function classify_disposition(expected_status::Symbol, prior_failure::Bool,
+        observed_status::Symbol, oracle_ok::Bool, interval_ok::Bool,
+        certificate_valid::Bool, certificate_kind_ok::Bool, failures=Symbol[])
+    gates = oracle_ok && interval_ok && certificate_valid && certificate_kind_ok
+    if expected_status === :build_only
+        return observed_status === :build_only && oracle_ok && interval_ok &&
+               certificate_kind_ok ? :PASS : :FAIL
+    elseif expected_status === :iteration_limit || expected_status === :numerical_breakdown
+        if observed_status === expected_status && oracle_ok && !certificate_valid
+            return :XFAIL
+        elseif observed_status === :optimal && gates
+            return prior_failure ? :RESOLVED : :XPASS
+        end
+        return :FAIL
+    elseif observed_status === expected_status && gates
+        return prior_failure ? :RESOLVED : :PASS
+    end
+    return :FAIL
+end
 
 function expand(axes::AbstractVector{<:V2Axis})
     ordered = sort(collect(axes); by=x -> String(x.name))
@@ -582,33 +629,29 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     status_ok = SDPX.status(solved) === instance.reference.expected_status
     instance.reference.status === :build_only && (status_ok = true)
     validation_status = SDPX.status(solved)
-    # The ordinary reference gate includes the independent certificate gate;
-    # XFAIL handling below explicitly preserves expected-failure semantics.
     reference_ok = oracle_ok && interval_ok && status_ok && cert_ok
     semantic_ok = reference_ok
-    if instance.reference.disposition === :XFAIL
-        if status_ok && oracle_ok
-            # XFAIL means an expected, independently classified failure: it is
-            # not optimizer-eligible and deliberately has semantic_pass=false.
-            validation_status = :XFAIL
-            reference_ok = true
-            semantic_ok = false
-            push!(failures, :xfail_expected_failure)
-        else
-            validation_status = :XPASS
-            reference_ok = false
-            semantic_ok = false
-            push!(failures, :xpass_unexpected_success)
-        end
+    cert_kind_ok = instance.reference.status === :build_only ||
+        (instance.reference.status === :primal_infeasible ?
+            instance.reference.certificate_kind in (:farkas, :ray) :
+            instance.reference.certificate_kind === :optimal)
+    prior_failure = instance.reference.disposition in (:XFAIL, :FAIL)
+    disposition = classify_disposition(instance.reference.expected_status, prior_failure,
+        SDPX.status(solved), oracle_ok, interval_ok, certificate.valid, cert_kind_ok, failures)
+    if disposition === :XFAIL
+        validation_status = :XFAIL
+        semantic_ok = false
+        reference_ok = true
+        push!(failures, :xfail_expected_failure)
+    elseif disposition === :XPASS
+        validation_status = :XPASS
+        semantic_ok = false
+        reference_ok = false
+        push!(failures, :xpass_unexpected_success)
+    elseif disposition !== :PASS && disposition !== :RESOLVED
+        semantic_ok = false
     end
     status_ok || push!(failures, :status)
-    disposition = if instance.reference.disposition === :XFAIL
-        validation_status === :XFAIL ? :XFAIL : :XPASS
-    elseif semantic_ok
-        :PASS
-    else
-        :FAIL
-    end
     validation = V2Validation(validation_status, SDPX.status(solved), disposition,
         cert_ok, reference_ok, failures)
     return V2RunResult(
@@ -684,6 +727,6 @@ function adapt_generic_specs(specs; source_prefix="generic-v1",
                      (train=Symbol[s.id for s in instances], holdout=Symbol[], sentinel=Symbol[]))
 end
 
-include("native_catalog.jl")
+include(joinpath(@__DIR__, "native_catalog.jl"))
 
 end # module

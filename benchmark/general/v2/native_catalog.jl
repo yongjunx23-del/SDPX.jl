@@ -102,8 +102,9 @@ function _native_artifact(family, id; split=:train, infeasible=false)
     throw(ArgumentError("unknown native V2 family $(family)"))
 end
 
-function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractFloat}
-    model = SDPX.Model(T; name=String(artifact.id))
+function _native_build(artifact::V2ConicArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
+    model = T === BigFloat ? SDPX.Model(BigFloat; precision_bits, name=String(artifact.id)) :
+            SDPX.Model(T; name=String(artifact.id))
     f = artifact.family
     cone_parameter = _Tq(T, artifact.cone_parameter)
     witness = Rational{Int}[]
@@ -114,7 +115,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         for i in 1:n
             value = _Tq(T, _q(artifact, i)) * cone_parameter; value >= zero(T) || throw(ArgumentError("LP artifact is not feasible"))
             _fix!(model, Symbol(:fix_, i), x[i], value, T)
-            push!(witness, _q(artifact, i))
+            push!(witness, _q(artifact, i) * artifact.cone_parameter)
         end
         artifact.infeasible && _contradict!(model, :contradiction, x[1], _Tq(T, _q(artifact, 1)), T)
         objective = sum(x[i] for i in 1:n)
@@ -122,7 +123,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         x = SDPX.variable!(model, :x, artifact.dimension; domain=SDPX.Nonpositive())
         for i in 1:artifact.dimension
             value = _Tq(T, _q(artifact, i)) * cone_parameter; value <= zero(T) || throw(ArgumentError("Nonpositive artifact is not feasible"))
-            _fix!(model, Symbol(:fix_, i), x[i], value, T); push!(witness, _q(artifact, i))
+            _fix!(model, Symbol(:fix_, i), x[i], value, T); push!(witness, _q(artifact, i) * artifact.cone_parameter)
         end
         artifact.infeasible && _contradict!(model, :contradiction, x[1], _Tq(T, _q(artifact, 1)), T)
         objective = -sum(x[i] for i in 1:artifact.dimension)
@@ -143,7 +144,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         SDPX.constraint!(model, :rsoc, (u[1], v[1], target), SDPX.RotatedLorentzCone())
         _fix!(model, :fix_left, u[1], one(T), T); _fix!(model, :fix_right, v[1], one(T), T)
         artifact.infeasible && _contradict!(model, :contradiction, u[1], one(T), T)
-        append!(witness, [1//1, 1//1, _q(artifact, 1)])
+        append!(witness, [1//1, 1//1])
         objective = u[1] + v[1]
     elseif f === :sdp
         artifact.dimension == 2 || throw(ArgumentError("native SDP artifact dimension must be 2"))
@@ -153,7 +154,7 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
         _fix!(model, :diag1, X[1, 1], vals[1], T); _fix!(model, :offdiag, X[1, 2], vals[2], T)
         _fix!(model, :offdiag_lower, X[2, 1], vals[3], T); _fix!(model, :diag2, X[2, 2], vals[4], T)
         artifact.infeasible && _contradict!(model, :contradiction, X[1, 1], vals[1], T)
-        append!(witness, [_q(artifact, i) for i in 1:4]); objective = X[1, 1] + X[2, 2]
+        append!(witness, [_q(artifact, 1), artifact.cone_parameter * _q(artifact, 2), _q(artifact, 4)]); objective = X[1, 1] + X[2, 2]
     elseif f === :exp
         x = SDPX.variable!(model, :x, 1; domain=SDPX.Reals()); value = _Tq(T, _q(artifact, 1))
         value >= cone_parameter || throw(ArgumentError("EXP artifact is outside the exponential epigraph"))
@@ -180,6 +181,13 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
     end
     objective === nothing && throw(ArgumentError("native artifact has no objective"))
     SDPX.objective!(model, SDPX.Minimize(), objective)
+    actual_model_fp = _native_model_fingerprint(model, precision_bits)
+    expected_model_fp = _hex(_expected_model_receipt(artifact, T, precision_bits))
+    actual_model_fp == expected_model_fp || begin
+        println(stderr, "ACTUAL_RECEIPT=", repr(_actual_model_receipt(model, precision_bits)))
+        println(stderr, "EXPECTED_RECEIPT=", repr(_expected_model_receipt(artifact, T, precision_bits)))
+        throw(ArgumentError("native lowering differs from its independent model contract: actual=$actual_model_fp expected=$expected_model_fp"))
+    end
     transform = V2Transform(:native_conic_artifact, :sdpx_cone_program,
         :identity, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
@@ -201,22 +209,172 @@ function _native_build(artifact::V2ConicArtifact, ::Type{T}) where {T<:AbstractF
     return V2Built(model, oracle, artifact, _hex(artifact), transform,
         (source_dimension=artifact.dimension, target_dimension=artifact.dimension,
          generator=artifact.generator_id, coefficients=artifact.coefficients,
+         model_contract_fingerprint=_hex(_expected_model_receipt(artifact,
+             T, precision_bits)),
          dimension=artifact.dimension, cone_parameter=artifact.cone_parameter,
          infeasible=artifact.infeasible),
         (setup_seconds=nothing,))
 end
 
-function _native_model_fingerprint(model, precision_bits=nothing)
-    variables = [(v.name, string(v.domain), v.shape, v.offset, v.length,
-        v.primal_start, v.dual_slack_start) for v in model.variable_blocks]
-    constraints = [(c.name, string(c.domain), c.shape,
-        [(e.indices, e.coefficients, e.constant) for e in c.expressions])
-        for c in model.constraint_blocks]
+function _numeric_token(x)
+    # Model identity is mathematical; normalize signed zero so expression
+    # construction order cannot create a spurious contract mismatch.
+    iszero(x) && return "0"
+    return string(BigFloat(x))
+end
+
+function _actual_model_receipt(model, precision_bits)
+    variables = Tuple((v.name, string(v.domain), v.shape, v.offset, v.length) for v in model.variable_blocks)
+    constraints = Tuple((c.name, string(c.domain), c.shape,
+        Tuple((Tuple(e.indices), Tuple(_numeric_token.(e.coefficients)), _numeric_token(e.constant))
+              for e in c.expressions)) for c in model.constraint_blocks)
     objective = model.objective === nothing ? nothing :
-        (string(typeof(model.objective.sense)), model.objective.expression.indices,
-         model.objective.expression.coefficients, model.objective.expression.constant)
-    return _hex((precision_bits=precision_bits, arithmetic=model.arithmetic,
-        variables=variables, constraints=constraints, objective=objective))
+        (string(typeof(model.objective.sense)), Tuple(model.objective.expression.indices),
+         Tuple(_numeric_token.(model.objective.expression.coefficients)),
+         _numeric_token(model.objective.expression.constant))
+    return (precision_bits=precision_bits, variables=variables,
+            constraints=constraints, objective=objective)
+end
+
+function _expected_model_receipt(artifact::V2ConicArtifact, ::Type{T}, precision_bits) where {T}
+    cp = _Tq(T, artifact.cone_parameter)
+    f = artifact.family
+    vars = if f in (:lp, :nonpositive, :soc, :exp, :power)
+        domain = f === :lp ? "SDPX.Nonnegative()" :
+                 f === :nonpositive ? "SDPX.Nonpositive()" : "SDPX.Reals()"
+        ((:x, domain, artifact.dimension, 1, artifact.dimension),)
+    elseif f === :rsoc
+        ((:left, "SDPX.Reals()", 1, 1, 1), (:right, "SDPX.Reals()", 1, 2, 1))
+    elseif f === :sdp
+        ((:X, "SDPX.PSDCone()", 2, 1, 3),)
+    elseif f === :mixed
+        ((:positive, "SDPX.Nonnegative()", 1, 1, 1), (:negative, "SDPX.Nonpositive()", 1, 2, 1))
+    else
+        throw(ArgumentError("unknown artifact family $f"))
+    end
+    expr(indices, coefficients, constant) =
+        (Tuple(indices), Tuple(_numeric_token.(coefficients)), _numeric_token(constant))
+    cons = Any[]
+    if f in (:lp, :nonpositive)
+        for i in 1:artifact.dimension
+            v = _Tq(T, _q(artifact, i)) * cp
+            push!(cons, (Symbol(:fix_, i), "SDPX.ZeroCone()", 1, (expr((i,), (one(T),), -v),)))
+        end
+    elseif f === :soc
+        vals = [_Tq(T, _q(artifact, i)) for i in 1:artifact.dimension]
+        push!(cons, (:soc, "SDPX.LorentzCone()", 3,
+            (expr((), (), one(T)+cp), expr((1,), (one(T),), zero(T)), expr((2,), (one(T),), zero(T)))))
+        for i in 1:artifact.dimension
+            push!(cons, (Symbol(:fix_, i), "SDPX.ZeroCone()", 1, (expr((i,), (one(T),), -vals[i]),)))
+        end
+    elseif f === :rsoc
+        target = _Tq(T, _q(artifact, 1))*cp
+        push!(cons, (:rsoc, "SDPX.RotatedLorentzCone()", 3,
+            (expr((1,), (one(T),), zero(T)), expr((2,), (one(T),), zero(T)), expr((), (), target))))
+        push!(cons, (:fix_left, "SDPX.ZeroCone()", 1, (expr((1,), (one(T),), -one(T)),)))
+        push!(cons, (:fix_right, "SDPX.ZeroCone()", 1, (expr((2,), (one(T),), -one(T)),)))
+    elseif f === :sdp
+        vals = [_Tq(T, _q(artifact, i)) for i in 1:4]; vals[2]*=cp; vals[3]*=cp
+        for (name, idx, val) in ((:diag1,1,vals[1]), (:offdiag,2,vals[2]), (:offdiag_lower,2,vals[3]), (:diag2,3,vals[4]))
+            push!(cons, (name, "SDPX.ZeroCone()", 1, (expr((idx,), (one(T),), -val),)))
+        end
+    elseif f === :exp
+        value = _Tq(T, _q(artifact,1))
+        push!(cons, (:exp, "SDPX.ExponentialCone()", 3,
+            (expr((),(),zero(T)), expr((),(),cp), expr((1,), (one(T),),zero(T)))))
+        push!(cons, (:fix, "SDPX.ZeroCone()", 1, (expr((1,), (one(T),), -value),)))
+    elseif f === :power
+        value = _Tq(T, _q(artifact,1)); alpha=cp
+        push!(cons, (:power, "SDPX.PowerCone{$T}($(alpha))", 3,
+            (expr((1,), (one(T),),zero(T)), expr((),(),one(T)), expr((),(),one(T)))))
+        push!(cons, (:fix, "SDPX.ZeroCone()", 1, (expr((1,), (one(T),), -value),)))
+    elseif f === :mixed
+        vals = (_Tq(T,_q(artifact,1)), _Tq(T,_q(artifact,2)))
+        push!(cons, (:soc, "SDPX.LorentzCone()", 3,
+            (expr((),(),one(T)+cp), expr((1,), (one(T),),zero(T)), expr((2,), (one(T),),zero(T)))))
+        push!(cons, (:fix_positive, "SDPX.ZeroCone()", 1, (expr((1,), (one(T),),-vals[1]),)))
+        push!(cons, (:fix_negative, "SDPX.ZeroCone()", 1, (expr((2,), (one(T),),-vals[2]),)))
+    end
+    if artifact.infeasible
+        value = f === :sdp ? _Tq(T,_q(artifact,1)) :
+            f === :rsoc ? one(T) : f === :mixed ? _Tq(T,_q(artifact,1)) :
+            _Tq(T,_q(artifact,1))
+        idx = f === :rsoc ? 1 : f === :sdp ? 1 : f === :mixed ? 1 : 1
+        push!(cons, (:contradiction_a, "SDPX.ZeroCone()", 1, (expr((idx,), (one(T),), -value),)))
+        push!(cons, (:contradiction_b, "SDPX.ZeroCone()", 1, (expr((idx,), (one(T),), -(value+one(T))),)))
+    end
+    obj = if f === :sdp
+        ("SDPX.Minimize", (1,3), (_numeric_token(one(T)),_numeric_token(one(T))), _numeric_token(zero(T)))
+    elseif f === :rsoc
+        ("SDPX.Minimize", (1,2), (_numeric_token(one(T)),_numeric_token(one(T))), _numeric_token(zero(T)))
+    elseif f === :mixed
+        ("SDPX.Minimize", (1,2), (_numeric_token(one(T)),_numeric_token(-one(T))), _numeric_token(zero(T)))
+    elseif f === :nonpositive
+        ("SDPX.Minimize", Tuple(1:artifact.dimension), Tuple(_numeric_token.(-ones(T,artifact.dimension))), _numeric_token(-zero(T)))
+    else
+        ("SDPX.Minimize", Tuple(1:artifact.dimension), Tuple(_numeric_token.(ones(T,artifact.dimension))), _numeric_token(zero(T)))
+    end
+    return (precision_bits=precision_bits, variables=vars, constraints=Tuple(cons), objective=obj)
+end
+
+function _native_model_fingerprint(model, precision_bits=nothing)
+    return _hex(_actual_model_receipt(model, precision_bits))
+end
+
+function _actual_witness(artifact::V2ConicArtifact)
+    f=artifact.family; cp=artifact.cone_parameter
+    f === :sdp && return Rational{Int}[_q(artifact,1), cp*_q(artifact,2), _q(artifact,4)]
+    f === :rsoc && return Rational{Int}[1,1]
+    f === :mixed && return copy(artifact.coefficients)
+    f in (:lp,:nonpositive) && return Rational{Int}[cp*q for q in artifact.coefficients]
+    return copy(artifact.coefficients[1:artifact.dimension])
+end
+
+function _eval_actual_expr(expr, witness)
+    value=BigFloat(expr.constant)
+    for (idx, coeff) in zip(expr.indices, expr.coefficients)
+        value += BigFloat(coeff)*BigFloat(numerator(witness[idx]))/BigFloat(denominator(witness[idx]))
+    end
+    value
+end
+
+function _actual_witness_check(artifact::V2ConicArtifact, built)
+    witness = _actual_witness(artifact)
+    total = sum(v.length for v in built.problem.variable_blocks)
+    length(witness)==total || return false
+    for v in built.problem.variable_blocks
+        w=witness[v.offset:v.offset+v.length-1]
+        ds=string(v.domain)
+        ds=="SDPX.Nonnegative()" && !all(>=(0),w) && return false
+        ds=="SDPX.Nonpositive()" && !all(<=(0),w) && return false
+        if ds=="SDPX.PSDCone()"
+            length(w)==3 || return false
+            BigFloat(w[1])*BigFloat(w[3])-BigFloat(w[2])^2 >= 0 || return false
+        end
+    end
+    for c in built.problem.constraint_blocks
+        vals=[_eval_actual_expr(e,witness) for e in c.expressions]
+        ds=string(c.domain)
+        if ds=="SDPX.ZeroCone()"
+            all(iszero, vals) || return false
+        elseif ds=="SDPX.LorentzCone()"
+            vals[1] >= sqrt(sum(x^2 for x in vals[2:end])) || return false
+        elseif ds=="SDPX.RotatedLorentzCone()"
+            vals[1]>=0 && vals[2]>=0 && 2*vals[1]*vals[2]>=sum(x^2 for x in vals[3:end]) || return false
+        elseif ds=="SDPX.ExponentialCone()"
+            vals[2]>0 && vals[3] >= vals[2]*exp(vals[1]/vals[2]) || return false
+        elseif startswith(ds,"SDPX.PowerCone")
+            α=BigFloat(numerator(artifact.cone_parameter))/BigFloat(denominator(artifact.cone_parameter))
+            vals[1]>=0 && vals[2]>=0 && abs(vals[3])<=vals[1]^α*vals[2]^(1-α) || return false
+        end
+    end
+    expr=built.problem.objective.expression
+    obj=BigFloat(expr.constant)
+    for (idx,coeff) in zip(expr.indices,expr.coefficients)
+        obj += BigFloat(coeff)*BigFloat(numerator(witness[idx]))/BigFloat(denominator(witness[idx]))
+    end
+    expected=BigFloat(numerator(_oracle_objective(artifact)))/BigFloat(denominator(_oracle_objective(artifact)))
+    obj == expected
 end
 
 function _contradiction_rows(artifact::V2ConicArtifact)
@@ -273,74 +431,105 @@ function _put!(io::IO, oracle::V2ExactOracle)
         oracle.dual_ray, oracle.artifact))
 end
 
+function _actual_lower_bound_certificate(built, witness)
+    model = built.problem
+    objective = model.objective.expression
+    stationarity = Dict{Int,BigFloat}()
+    for k in eachindex(objective.indices)
+        index = objective.indices[k]
+        stationarity[index] = get(stationarity, index, zero(BigFloat)) + BigFloat(objective.coefficients[k])
+    end
+    equality_multipliers = BigFloat[]
+    for block in model.constraint_blocks
+        string(block.domain) == "SDPX.ZeroCone()" || continue
+        for expr in block.expressions
+            length(expr.indices) == 1 || continue
+            index = only(expr.indices)
+            coefficient = BigFloat(only(expr.coefficients))
+            iszero(coefficient) && continue
+            lambda = -get(stationarity, index, zero(BigFloat)) / coefficient
+            push!(equality_multipliers, lambda)
+            stationarity[index] = zero(BigFloat)
+        end
+    end
+    total_variables = 0
+    for variable in model.variable_blocks
+        total_variables += variable.length
+    end
+    variable_dual_slacks = BigFloat[]
+    for index in 1:total_variables
+        push!(variable_dual_slacks, get(stationarity, index, zero(BigFloat)))
+    end
+    row_dual_slacks = BigFloat[]
+    for block in model.constraint_blocks
+        string(block.domain) == "SDPX.ZeroCone()" && continue
+        for _ in 1:block.shape
+            push!(row_dual_slacks, zero(BigFloat))
+        end
+    end
+    bound = zero(BigFloat)
+    for block in model.constraint_blocks
+        string(block.domain) == "SDPX.ZeroCone()" || continue
+        for expr in block.expressions
+            length(expr.indices) == 1 || continue
+            index = only(expr.indices)
+            coefficient = BigFloat(only(expr.coefficients))
+            c = zero(BigFloat)
+            for k in eachindex(objective.indices)
+                objective.indices[k] == index && (c += BigFloat(objective.coefficients[k]))
+            end
+            bound += (-c / coefficient) * BigFloat(expr.constant)
+        end
+    end
+    return (stationarity=stationarity, equality_multipliers=equality_multipliers,
+            variable_dual_slacks=variable_dual_slacks,
+            row_dual_slacks=row_dual_slacks, bound=bound)
+end
+
 function _oracle_check(oracle::V2ExactOracle, built, certificate)
     built.source_artifact === oracle.artifact || return false
-    if hasproperty(built.facts, :model_fingerprint)
-        expected_fp = _native_model_fingerprint(built.problem,
-            get(built.facts, :model_precision_bits, nothing))
-        expected_fp == built.facts.model_fingerprint || return false
-    end
+    hasproperty(built.facts, :model_fingerprint) || return false
+    actual_fp = _native_model_fingerprint(built.problem,
+        get(built.facts, :model_precision_bits, nothing))
+    actual_fp == built.facts.model_fingerprint || return false
+    expected_fp = get(built.facts, :model_contract_fingerprint, "")
+    occursin(r"^[0-9a-f]{64}$", String(expected_fp)) || return false
+    actual_fp == expected_fp || return false
     if oracle.expected_status === :primal_infeasible
-        # The ray is checked against the actual built contradiction rows below;
-        # no solver certificate field participates in this proof.
         return _farkas_valid(oracle.artifact, built) &&
-            oracle.dual_ray == oracle.artifact.infeasibility_ray &&
-            hasproperty(built.facts, :model_fingerprint) &&
-            built.facts.model_fingerprint != "0"^64
+            oracle.dual_ray == oracle.artifact.infeasibility_ray
     end
     oracle.expected_status === :optimal || return false
-    # Validate exact primal witness data independently of certificate.valid.
-    witness = oracle.primal_witness
-    f = oracle.artifact.family
-    feasible = if f in (:lp, :nonpositive)
-        all((f === :lp ? >=(0) : <=(0)), witness) &&
-            all(witness[i] == oracle.artifact.cone_parameter * _q(oracle.artifact, i)
-                for i in eachindex(witness))
-    elseif f === :soc
-        norm(BigFloat.(witness)) <= one(BigFloat) &&
-            all(witness[i] == _q(oracle.artifact, i) for i in eachindex(witness))
-    elseif f === :rsoc
-        length(witness) == 3 || return false
-        u, v, target = BigFloat.(witness)
-        u >= 0 && v >= 0 && (2u * v >= target^2) &&
-            witness[3] == oracle.artifact.cone_parameter * _q(oracle.artifact, 1)
-    elseif f === :exp
-        length(witness) == 1 || return false
-        value = BigFloat(numerator(_q(oracle.artifact, 1))) /
-                BigFloat(denominator(_q(oracle.artifact, 1)))
-        value >= BigFloat(numerator(oracle.artifact.cone_parameter)) /
-                BigFloat(denominator(oracle.artifact.cone_parameter)) &&
-            witness[1] == _q(oracle.artifact, 1)
-    elseif f === :power
-        length(witness) == 1 || return false
-        value = BigFloat(numerator(_q(oracle.artifact, 1))) /
-                BigFloat(denominator(_q(oracle.artifact, 1)))
-        value >= one(BigFloat) && witness[1] == _q(oracle.artifact, 1)
-    elseif f === :sdp
-        determinant = witness[1] * witness[4] - witness[2] * witness[3]
-        witness[1] >= 0 && witness[4] >= 0 && determinant >= 0
-    elseif f === :mixed
-        witness[1] >= 0 && witness[2] <= 0
-    else
-        true
-    end
-    feasible || return false
+    _actual_witness_check(oracle.artifact, built) || return false
+    witness = _actual_witness(oracle.artifact)
+    lower_bound = _actual_lower_bound_certificate(built, witness)
+    all(iszero, values(lower_bound.stationarity)) || return false
+    all(iszero, lower_bound.variable_dual_slacks) &&
+        all(iszero, lower_bound.row_dual_slacks) || return false
+    expected_bound = BigFloat(numerator(oracle.objective)) /
+                     BigFloat(denominator(oracle.objective))
+    lower_bound.bound == expected_bound || return false
     length(oracle.dual_multipliers) == length(witness) || return false
-    dual_bound = sum(oracle.dual_multipliers[i] * witness[i] for i in eachindex(witness))
+    dual_bound = sum(oracle.dual_multipliers[i] * witness[i]
+                     for i in eachindex(witness))
     dual_bound == oracle.dual_bound == oracle.objective || return false
-    expected = BigFloat(numerator(oracle.objective)) / BigFloat(denominator(oracle.objective))
+    expected = BigFloat(numerator(oracle.objective)) /
+               BigFloat(denominator(oracle.objective))
     actual = BigFloat(certificate.primal_objective)
     return isfinite(actual) && abs(actual - expected) <= BigFloat("1e-7")
 end
+
 (oracle::V2ExactOracle)(built, certificate) = _oracle_check(oracle, built, certificate)
 
 function _oracle_witness(artifact::V2ConicArtifact)
     f = artifact.family
     scale = artifact.cone_parameter
+    # Witness is in the actual global packed model-variable coordinates, not
+    # the source artifact's decorative coefficient order. PSD variables use
+    # lower-packed svec coordinates; RSOC target is a constant cone entry.
     f === :sdp && return Rational{Int}[
-        _q(artifact, 1), scale * _q(artifact, 2),
-        scale * _q(artifact, 3), _q(artifact, 4)]
-    f === :rsoc && return Rational{Int}[1, 1, scale * _q(artifact, 1)]
+        _q(artifact, 1), scale * _q(artifact, 2), _q(artifact, 4)]
+    f === :rsoc && return Rational{Int}[1, 1]
     f === :mixed && return copy(artifact.coefficients)
     f in (:lp, :nonpositive) && return Rational{Int}[scale * q for q in artifact.coefficients]
     return copy(artifact.coefficients[1:artifact.dimension])
@@ -348,8 +537,8 @@ end
 
 function _oracle_dual_multipliers(artifact::V2ConicArtifact)
     f = artifact.family
-    f === :sdp && return Rational{Int}[1, 0, 0, 1]
-    f === :rsoc && return Rational{Int}[1, 1, 0]
+    f === :sdp && return Rational{Int}[1, 0, 1]
+    f === :rsoc && return Rational{Int}[1, 1]
     f === :mixed && return Rational{Int}[1, -1]
     f === :soc && return Rational{Int}[1, 1]
     f === :nonpositive && return fill(-1//1, artifact.dimension)
@@ -403,7 +592,8 @@ function native_v2_catalog()
     family_names = (:lp, :nonpositive, :soc, :rsoc, :sdp, :exp, :power, :mixed)
     for family in family_names
         build = (instance, precision) -> begin
-            built = _native_build(instance.payload, precision.arithmetic)
+            built = _native_build(instance.payload, precision.arithmetic;
+                precision_bits=precision.bits)
             V2Built(built.problem, built.oracle, built.source_artifact,
                 input_fingerprint(instance), built.transform,
                 merge(built.facts, (artifact_fingerprint=_hex(instance.payload),
