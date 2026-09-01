@@ -76,4 +76,18 @@ end
     @test healthy_selected.executed_kkt_route === :bordered
     @test healthy_selected.attempted_kkt_routes === (:bordered,)
     @test !hasproperty(healthy_selected, :route_restart_reason)
+
+    # Induce the expanded factor-failure state directly on a real product-HSD
+    # state.  The strict restart state must refuse the expanded->bordered
+    # rebound, while an ordinary expanded state retains its legacy fallback.
+    program = SDPX.compile_product_cone_model(_route_guard_healthy_model())
+    canonical = SDPX.canonicalize(program)
+    strict_state = SDPX.ProductConeHSDState(canonical; kkt_route=:expanded,
+        allow_expanded_bordered_fallback=false)
+    strict_state.expanded.status = SDPX.EXPANDED_KKT_FACTOR_FAILED
+    @test !SDPX._product_hsd_expanded_fallback_allowed(strict_state)
+    ordinary_state = SDPX.ProductConeHSDState(canonical; kkt_route=:expanded,
+        allow_expanded_bordered_fallback=true)
+    ordinary_state.expanded.status = SDPX.EXPANDED_KKT_FACTOR_FAILED
+    @test SDPX._product_hsd_expanded_fallback_allowed(ordinary_state)
 end

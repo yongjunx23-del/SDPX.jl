@@ -985,7 +985,8 @@ function _public_native_hsd_core(
     model::Model{T},
     program::NativeConeProgram{T},
     route::NativeConeRoute,
-    settings::Settings{T},
+    settings::Settings{T};
+    allow_expanded_bordered_fallback::Bool=true,
 ) where {T<:AbstractFloat}
     setup_started = time_ns()
     canonical = canonicalize(program)
@@ -1357,11 +1358,13 @@ function _public_native_hsd_core(
             symmetric_core_current_rss=peak_rss,
             symmetric_core_precision_bits=effective_precision,
             iteration_knobs=settings.iteration_knobs,
+            allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         )
     else
         state = ProductConeHSDState(
             solve_reduced; kkt_route=settings.kkt_route,
             iteration_knobs=settings.iteration_knobs,
+            allow_expanded_bordered_fallback=allow_expanded_bordered_fallback,
         )
         base = state.base
         plan = _native_hsd_plan(
@@ -1821,14 +1824,30 @@ function _native_hsd_restarted_core(
                   get(initial_t, :total, get(initial_t, :core, 0.0)),
         ),
     )
+    initial_selected = initial_diag.selected_algorithms
+    attempts = (requested_route, :expanded)
     selected = merge(
         fallback_diag.selected_algorithms,
         (
-            requested_kkt_route=requested_route,
-            planned_kkt_route=requested_route,
+            # Planning/request metadata belongs to the initial attempt.  The
+            # fallback's mutable state may report a different plan.
+            requested_kkt_formulation=initial_selected.requested_kkt_formulation,
+            planned_kkt_formulation=initial_selected.planned_kkt_formulation,
+            requested_kkt_route=initial_selected.requested_kkt_route,
+            planned_kkt_route=initial_selected.planned_kkt_route,
+            planned_kkt_storage=initial_selected.planned_kkt_storage,
+            planned_factorization=initial_selected.planned_factorization,
+            factorization_reuse=initial_selected.factorization_reuse,
+            factor_reuse=initial_selected.factor_reuse,
+            factorization_kernel=initial_selected.factorization_kernel,
+            planned_factorization_kernel=initial_selected.planned_factorization_kernel,
+            planned_scaling=initial_selected.planned_scaling,
+            planned_backend=initial_selected.planned_backend,
+            planned_la_provider=initial_selected.planned_la_provider,
+            planned_threads=initial_selected.planned_threads,
             executed_kkt_route=executed_route,
-            attempted_kkt_routes=(requested_route, executed_route),
-            executed_fallback_chain=(requested_route, executed_route),
+            attempted_kkt_routes=attempts,
+            executed_fallback_chain=attempts,
             fallback_reason=:bordered_predictor_residual_fallback,
             route_restart_reason=:fixed_trace_predictor_residual_failed,
             route_restart_iteration=initial.iterations,
@@ -1839,7 +1858,7 @@ function _native_hsd_restarted_core(
         (
             route_restart_reason=:fixed_trace_predictor_residual_failed,
             route_restart_iteration=initial.iterations,
-            route_attempts=(requested_route, executed_route),
+            route_attempts=attempts,
         ),
     )
     diagnostics = NativeHSDDiagnostics(
@@ -1895,7 +1914,8 @@ function _public_optimize_native_hsd(
             model, program, fallback_route, fallback_settings, outputs, warm_start,
         )
         fallback_canonical, _, fallback_core = _public_native_hsd_core(
-            model, program, fallback_route, fallback_settings,
+            model, program, fallback_route, fallback_settings;
+            allow_expanded_bordered_fallback=false,
         )
         core = _native_hsd_restarted_core(core, fallback_core)
         canonical = fallback_canonical
