@@ -1,6 +1,7 @@
 # External benchmark provenance/eligibility metadata.
-# A row is solve-eligible only when every required field is complete and
-# parity_pending=true explicitly records that independent checker parity remains.
+# A row is solve-eligible only when every required field is complete and an
+# independent checker receipt is pinned. parity_pending=true rows remain
+# inventory-only until parity_sha256 is populated and the row is revalidated.
 
 [[case]]
 id = "netlib_afiro"
@@ -16,7 +17,8 @@ parsed_fingerprint = "8bb4c6ef83de30cf400b5616390fb0d05bbd17df85d65ae01835b4e586
 official_status = "optimal"
 objective_interval = ["-464.75314486", "-464.75314086"]
 parity_pending = true
-solve_eligible = true
+parity_sha256 = ""
+solve_eligible = false
 note = "Published NETLIB AFIRO interval; independent checker parity pending."
 
 [[case]]
@@ -33,7 +35,8 @@ parsed_fingerprint = "c8884824c0e1dfdaa9fa399ec5e7c602d909f8a49c11b4c301f75e944e
 official_status = "optimal"
 objective_interval = ["225494.96314", "225494.96318"]
 parity_pending = true
-solve_eligible = true
+parity_sha256 = ""
+solve_eligible = false
 note = "Published NETLIB interval; independent checker parity pending."
 
 [[case]]
@@ -50,6 +53,7 @@ parsed_fingerprint = ""
 official_status = "optimal"
 objective_interval = []
 parity_pending = true
+parity_sha256 = ""
 solve_eligible = false
 note = "Downloaded official legacy NETLIB encoding; current strict MPS parser rejects it; deferred until an immutable parsed conversion and published interval are pinned."
 
@@ -67,6 +71,7 @@ parsed_fingerprint = ""
 official_status = "optimal"
 objective_interval = []
 parity_pending = true
+parity_sha256 = ""
 solve_eligible = false
 note = "Downloaded official legacy NETLIB encoding; current strict MPS parser rejects it; deferred until an immutable parsed conversion and published interval are pinned."
 
@@ -84,6 +89,7 @@ parsed_fingerprint = ""
 official_status = "optimal"
 objective_interval = []
 parity_pending = true
+parity_sha256 = ""
 solve_eligible = false
 note = "Downloaded official legacy NETLIB encoding; current strict MPS parser rejects it; deferred until an immutable parsed conversion and published interval are pinned."
 
@@ -101,7 +107,8 @@ parsed_fingerprint = "38e8930bdc5c017b8114ed6ca291a72b531d55146c1d091fa1d68ddd2e
 official_status = "optimal"
 objective_interval = ["16.8835", "16.8837"]
 parity_pending = true
-solve_eligible = true
+parity_sha256 = ""
+solve_eligible = false
 note = "Published SDPLIB objective 1.68836e+01; independent checker parity pending."
 
 [[case]]
@@ -118,7 +125,8 @@ parsed_fingerprint = "bd7798bd9df9e02dfd8c4eb434f6cae0ca49e9faabd93ffc95bafa2b4f
 official_status = "optimal"
 objective_interval = ["22.9999", "23.0001"]
 parity_pending = true
-solve_eligible = true
+parity_sha256 = ""
+solve_eligible = false
 note = "Published SDPLIB objective 2.300000e+01; independent checker parity pending."
 
 [[case]]
@@ -135,7 +143,8 @@ parsed_fingerprint = "4dd112ec32efc1e19cff17436e7254f58413b38eea2edf86898c423688
 official_status = "optimal"
 objective_interval = ["629.1647", "629.1649"]
 parity_pending = true
-solve_eligible = true
+parity_sha256 = ""
+solve_eligible = false
 note = "Published SDPLIB objective 6.291648e+02; independent checker parity pending."
 
 [[case]]
@@ -152,5 +161,6 @@ parsed_fingerprint = "2d1cf6fbad6910f5a2d6a2cf45a09f14a25da119b9d0f5b7d7aa4b75f7
 official_status = "optimal"
 objective_interval = ["-436.01", "-435.99"]
 parity_pending = true
-solve_eligible = true
+parity_sha256 = ""
+solve_eligible = false
 note = "Published SDPLIB objective -4.36000e+02; independent checker parity pending."

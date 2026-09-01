@@ -34,6 +34,22 @@ using .V2Schema9Adapter
     @test row.receipt["warmup_excluded"] == 1
     @test row.receipt["sample_count"] == 3
     @test row.receipt["fresh_process"] === false
+    @test row.receipt["precision_bits"] == 53
+    @test length(row.receipt["sample_total_seconds"]) == 3
+    @test length(row.receipt["sample_core_seconds"]) == 3
+    @test row.receipt["phase_accounting_complete"] === false
+    @test row.receipt["reference_objective"] == -5.0
+    schema = schema9_row(row)
+    @test schema.precision_bits == 53
+    @test schema.total_seconds == ProfileCatalog._median(row.sample_seconds)
+    @test schema.core_seconds == ProfileCatalog._median(row.sample_core_seconds)
+    @test schema.setup_seconds === missing
+    @test schema.frontend_seconds == row.setup_seconds
+    doctored = ProfileRow(; merge(NamedTuple{fieldnames(ProfileRow)}(
+        Tuple(getfield(row, name) for name in fieldnames(ProfileRow))),
+        (; objective=123.0))...)
+    @test schema9_row(doctored).reference_objective == "-5.0"
+    @test schema9_row(doctored).objective_error == abs(123.0 - row.reference_objective)
     @test Set(keys(row.receipt["route_receipt"])) == Set((
         "requested_route", "planned_route", "executed_route",
         "requested_formulation", "planned_formulation", "executed_formulation",
@@ -50,6 +66,19 @@ using .V2Schema9Adapter
     @test occursin("v2_lp_box_small", text)
     rm(paths.tsv; force=true)
     rm(paths.toml; force=true)
+end
+
+@testset "V2 schema-v9 adapter rejects holdout targets" begin
+    catalog = GeneralBenchmarkV2.lp_tranche_catalog()
+    original = only(filter(x -> x.id === :v2_lp_box_small, catalog.instances))
+    holdout = GeneralBenchmarkV2.V2Instance(original.id, original.family, original.tier,
+        original.axis_values, :holdout, original.source, original.provenance,
+        original.checksum, original.resource, original.reference, original.payload)
+    badcatalog = GeneralBenchmarkV2.V2Catalog(:holdout_probe, catalog.version,
+        catalog.families, [holdout], (train=Symbol[], holdout=[holdout.id], sentinel=Symbol[]))
+    precision = GeneralBenchmarkV2.V2Precision(:Float64, Float64, 53,
+        "1e-8", "5e-7", :cholmod)
+    @test_throws ArgumentError profile_v2_target(badcatalog, holdout, precision)
 end
 
 @testset "V2 schema-v9 adapter rejects malformed samples" begin

@@ -12,9 +12,10 @@ end
 """Provenance and eligibility contract for an external train/holdout row.
 
 A row is solve-eligible only when every independent identity/reference field is
-present.  `parity_pending=true` is intentional: the independent-checker run is
-recorded as pending and is a prerequisite for promotion, never silently treated
-as a pass.
+present and an independent checker receipt is available. `parity_pending=true`
+records that checker parity remains pending and therefore makes the row
+ineligible; `parity_sha256` is the fixed-endian SHA-256 of a completed checker
+receipt when parity is eventually passed.
 """
 struct ExternalHoldoutSpec
     id::Symbol
@@ -30,6 +31,7 @@ struct ExternalHoldoutSpec
     official_status::Symbol
     objective_interval::Union{Nothing,Tuple{String,String}}
     parity_pending::Bool
+    parity_sha256::String
     solve_eligible::Bool
     note::String
 end
@@ -44,18 +46,20 @@ function ExternalHoldoutSpec(id::Symbol, library::Symbol, family::Symbol,
                              official_status::Symbol,
                              objective_interval,
                              parity_pending::Bool,
-                             note::AbstractString="")
+                             note::AbstractString="";
+                             parity_sha256::AbstractString="")
     interval = objective_interval === nothing ? nothing :
         (String(objective_interval[1]), String(objective_interval[2]))
     required = !isempty(strip(source_url)) && !isempty(strip(license_note)) &&
         occursin(r"^[0-9a-fA-F]{64}$", sha256) &&
         occursin(r"^[0-9a-fA-F]{64}$", parsed_fingerprint) &&
         official_status in (:optimal, :primal_infeasible, :dual_infeasible) &&
-        interval !== nothing && length(interval) == 2 && parity_pending
+        interval !== nothing && length(interval) == 2 && !parity_pending &&
+        occursin(r"^[0-9a-fA-F]{64}$", parity_sha256)
     ExternalHoldoutSpec(id, library, family, tier, split, String(relative_path),
         String(source_url), String(license_note), lowercase(String(sha256)),
         lowercase(String(parsed_fingerprint)), official_status, interval,
-        parity_pending, required, String(note))
+        parity_pending, lowercase(String(parity_sha256)), required, String(note))
 end
 
 external_case_complete(spec::ExternalHoldoutSpec) = spec.solve_eligible
@@ -145,7 +149,7 @@ end
 """Validate the metadata companion to `MANIFEST.sha256`.
 
 Rows missing any of URL/provenance, byte SHA, parsed fingerprint, official
-reference interval/status, or explicit parity-pending state are retained as
+reference interval/status, or an independent checker receipt are retained as
 inventory metadata but cannot enter the solve enumeration.
 """
 function validate_external_holdout_manifest(path::AbstractString;
@@ -160,7 +164,8 @@ function validate_external_holdout_manifest(path::AbstractString;
         row isa Dict || throw(ArgumentError("external manifest case must be a table"))
         required = ("id", "library", "family", "tier", "split", "relative_path",
                     "source_url", "license_note", "sha256", "parsed_fingerprint",
-                    "official_status", "parity_pending", "solve_eligible")
+                    "official_status", "parity_pending", "parity_sha256",
+                    "solve_eligible")
         all(haskey(row, key) for key in required) ||
             throw(ArgumentError("external manifest row is missing required metadata"))
         id = String(row["id"])
@@ -185,7 +190,9 @@ function validate_external_holdout_manifest(path::AbstractString;
             !isempty(strip(String(row["license_note"]))) &&
             occursin(r"^[0-9a-f]{64}$", fp) &&
             String(row["official_status"]) in ("optimal", "primal_infeasible", "dual_infeasible") &&
-            interval isa Vector && length(interval) == 2 && Bool(row["parity_pending"])
+            interval isa Vector && length(interval) == 2 &&
+            !Bool(row["parity_pending"]) &&
+            occursin(r"^[0-9a-f]{64}$", lowercase(String(row["parity_sha256"])))
         Bool(row["solve_eligible"]) == complete ||
             throw(ArgumentError("external eligibility is not fail-closed for $id"))
         complete && push!(eligible, id)
