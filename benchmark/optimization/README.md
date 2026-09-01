@@ -39,12 +39,19 @@ transform exactness and reference metadata remain in the manifest.
 ## Profile and target selection
 
 ```bash
-SDPX_PROFILE_FIXTURE=1 \
+SDPX_PROFILE_FIXTURE=1 SDPX_OPTIMIZATION_TEST_MODE=1 \
   SDPX_PROFILE_OUTPUT=/tmp/profile.toml \
   julia --project=. benchmark/optimization/profile_catalog.jl
 SDPX_HOTSPOT_MANIFEST=/tmp/profile.toml SDPX_PROFILE_FIXTURE=1 \
-SDPX_OPTIMIZATION_TEST_MODE=1 \
+  SDPX_OPTIMIZATION_TEST_MODE=1 \
   benchmark/optimization/measure_target.sh
+
+Fixture mode is test-only and requires both switches; either one alone is
+rejected. Automatic dependent profiling is readiness-gated by the repository
+variable `SDPX_ENABLE_DEPENDENT_OPTIMIZATION=true`, which may be enabled only
+after the catalog workflow has published a complete solve-eligible schema-v9
+receipt. Manual `workflow_dispatch` additionally requires the explicit
+`enable_experimental=true` input. No fixture may satisfy the live gate.
 ```
 
 The live profile uses one untimed warmup followed by exactly three timed

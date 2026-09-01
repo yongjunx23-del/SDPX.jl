@@ -73,6 +73,7 @@ Base.@kwdef struct ProfileRow
     environment_fingerprint::String = ""
     provider_fingerprint::String = ""
     trajectory_sha::String = ""
+    trajectory_reason::String = ""
     resolved_tolerances::String = ""
     # Canonical machine-readable receipt.  It is intentionally redundant with
     # the typed fields above: profile consumers must not infer identity or
@@ -98,9 +99,32 @@ end
 function _route_receipt(result)
     try
         selected = getfield(SDPX.diagnostics(result), :selected_algorithms)
-        return (requested="auto",
-            planned=string(getproperty(selected, :planned_kkt_route)),
-            executed=string(getproperty(selected, :executed_kkt_route)))
+        pick(names) = begin
+            for name in names
+                hasproperty(selected, name) && return string(getproperty(selected, name))
+            end
+            return nothing
+        end
+        values = (
+            requested_route=pick((:requested_kkt_route, :requested_route)),
+            planned_route=pick((:planned_kkt_route, :planned_route)),
+            executed_route=pick((:executed_kkt_route, :executed_route)),
+            requested_formulation=pick((:requested_kkt_formulation, :requested_formulation)),
+            planned_formulation=pick((:planned_kkt_formulation, :planned_formulation)),
+            executed_formulation=pick((:executed_kkt_formulation, :executed_formulation)),
+            requested_backend=pick((:requested_backend, :la_requested_backend)),
+            planned_backend=pick((:planned_backend, :la_planned_backend)),
+            executed_backend=pick((:executed_backend, :la_executed_backend)),
+            requested_provider=pick((:requested_provider, :la_requested_provider)),
+            planned_provider=pick((:planned_provider, :la_planned_provider)),
+            executed_provider=pick((:executed_provider, :la_executed_provider)),
+            requested_kernel=pick((:requested_kernel, :la_requested_kernel)),
+            planned_kernel=pick((:planned_kernel, :la_planned_kernel)),
+            executed_kernel=pick((:executed_kernel, :la_executed_kernel)),
+            reuse=pick((:reuse, :symbolic_reuse, :pattern_reused)),
+        )
+        all(value -> value !== nothing && !isempty(value), values) || return nothing
+        return values
     catch
         return nothing
     end
@@ -122,14 +146,15 @@ function _generic_module()
     mod = Module(:ProfileGenericConicBenchmark)
     Core.eval(mod, :(import Main))
     Base.include(mod, GENERAL)
-    return getproperty(mod, :GenericConicBenchmark)
+    return Base.invokelatest(() -> getproperty(mod, :GenericConicBenchmark))
 end
 
 function _v1_cases()
     isfile(GENERAL) || return ProfileCase[]
     g = _generic_module()
     cases = ProfileCase[]
-    for spec in Base.invokelatest(g.inventory)
+    inventory = Base.invokelatest(() -> getproperty(g, :inventory)())
+    for spec in inventory
         # V1's legacy adapter cannot currently produce the complete schema-v9
         # receipt required by the dependent optimizer (exact input/tree,
         # resolved tolerances, route/provider/kernel/reuse, and trajectory
@@ -231,6 +256,11 @@ function enumerate_cases(; include_physics=true, include_v2=true)
     sort!(cases; by=_case_sort)
 end
 
+function _valid_trajectory(semantics::AbstractString, sha::AbstractString, reason::AbstractString)
+    semantics == "sha256" && return occursin(r"^[0-9a-f]{64}$", sha) && !isempty(reason)
+    return semantics == "not_applicable" && isempty(sha) && !isempty(reason)
+end
+
 function _median(xs)
     isempty(xs) && return nothing
     y = sort(copy(xs)); n = length(y)
@@ -291,8 +321,10 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
     route = isempty(route_receipts) ? nothing : first(route_receipts)
     identity = _git_identity(); env = _environment_identity()
     # No trajectory hash is invented here. Generic catalog runs have no
-    # published per-iterate trace; explicitly record not_applicable instead.
+    # published per-iterate trace; explicitly record not_applicable plus a
+    # machine-readable reason instead.
     trajectory_sha = ""
+    trajectory_reason = "generic_catalog_has_no_published_per_iterate_trace"
     failed = !semantic ? (status == :iteration_limit ? "iteration_limit" : "semantic_or_certificate") : ""
     receipt = Dict{String,Any}(
         "source_commit" => identity.commit, "tree_fingerprint" => identity.tree,
@@ -310,12 +342,27 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
         "actual_objective" => objective,
         "resolved_tolerances" => Dict("primal" => case.objective_tolerance,
             "dual" => case.objective_tolerance, "gap" => case.objective_tolerance),
-        "requested_route" => route === nothing ? "unavailable" : route.requested,
-        "planned_route" => route === nothing ? "unavailable" : route.planned,
-        "executed_route" => route === nothing ? "unavailable" : route.executed,
+        "requested_route" => route === nothing ? "" : route.requested_route,
+        "planned_route" => route === nothing ? "" : route.planned_route,
+        "executed_route" => route === nothing ? "" : route.executed_route,
+        "route_receipt" => route === nothing ? Dict{String,Any}() :
+            Dict(string(name) => getproperty(route, name) for name in propertynames(route)),
+        "requested_formulation" => route === nothing ? "" : route.requested_formulation,
+        "planned_formulation" => route === nothing ? "" : route.planned_formulation,
+        "executed_formulation" => route === nothing ? "" : route.executed_formulation,
+        "requested_backend" => route === nothing ? "" : route.requested_backend,
+        "planned_backend" => route === nothing ? "" : route.planned_backend,
+        "executed_backend" => route === nothing ? "" : route.executed_backend,
+        "requested_provider" => route === nothing ? "" : route.requested_provider,
+        "planned_provider" => route === nothing ? "" : route.planned_provider,
+        "executed_provider" => route === nothing ? "" : route.executed_provider,
+        "requested_kernel" => route === nothing ? "" : route.requested_kernel,
+        "planned_kernel" => route === nothing ? "" : route.planned_kernel,
+        "executed_kernel" => route === nothing ? "" : route.executed_kernel,
+        "reuse" => route === nothing ? "" : route.reuse,
         "certificate_kind" => "summary", "certificate_failures" => String[],
         "trajectory_semantics" => isempty(trajectory_sha) ? "not_applicable" : "sha256",
-        "trajectory_sha" => trajectory_sha,
+        "trajectory_sha" => trajectory_sha, "trajectory_reason" => trajectory_reason,
         "warmup_excluded" => warmup ? 1 : 0, "sample_count" => 3,
     )
     ProfileRow(case_key=case.key, catalog=String(case.catalog), id=String(case.id),
@@ -333,9 +380,9 @@ function _v1_profile(case::ProfileCase; samples=3, threads=1, warmup=true)
         reference_upper=case.objective === nothing ? nothing : case.objective + case.objective_tolerance,
         transform_exactness=case.transform.exactness,
         transform_fingerprint=case.transform.fingerprint, failure_taxonomy=failed,
-        requested_route=route === nothing ? "unavailable" : route.requested,
-        planned_route=route === nothing ? "unavailable" : route.planned,
-        executed_route=route === nothing ? "unavailable" : route.executed,
+        requested_route=route === nothing ? "" : route.requested_route,
+        planned_route=route === nothing ? "" : route.planned_route,
+        executed_route=route === nothing ? "" : route.executed_route,
         input_fingerprint=_sha((case.source, case.id, case.payload.spec.params)),
         source_commit=identity.commit, tree_fingerprint=identity.tree,
         catalog_fingerprint=_sha((case.catalog, case.id, case.transform)),
@@ -440,9 +487,9 @@ function validate_profile_row(row::ProfileRow; live=false)
             "environment_fingerprint", "provider_fingerprint", "provider_version",
             "cpu", "julia_threads", "blas_threads", "omp_threads", "gc_threads",
             "objective_interval", "actual_objective", "resolved_tolerances",
-            "requested_route", "planned_route", "executed_route", "certificate_kind",
+            "route_receipt", "requested_route", "planned_route", "executed_route", "certificate_kind",
             "certificate_failures", "iterations", "trajectory_semantics",
-            "warmup_excluded", "sample_count")
+            "trajectory_reason", "warmup_excluded", "sample_count")
         all(haskey(row.receipt, key) && !isempty(string(row.receipt[key])) for key in required) || return false
         row.receipt["warmup_excluded"] == 1 && row.receipt["sample_count"] == 3 || return false
         route_fields = ("requested_formulation", "planned_formulation", "executed_formulation",
@@ -450,11 +497,17 @@ function validate_profile_row(row::ProfileRow; live=false)
             "requested_provider", "planned_provider", "executed_provider",
             "requested_kernel", "planned_kernel", "executed_kernel", "reuse")
         all(haskey(row.receipt, key) && !isempty(string(row.receipt[key])) for key in route_fields) || return false
+        route_receipt = row.receipt["route_receipt"]
+        route_receipt isa AbstractDict && Set(keys(route_receipt)) == Set((
+            "requested_route", "planned_route", "executed_route", "requested_formulation",
+            "planned_formulation", "executed_formulation", "requested_backend", "planned_backend",
+            "executed_backend", "requested_provider", "planned_provider", "executed_provider",
+            "requested_kernel", "planned_kernel", "executed_kernel", "reuse",
+        )) && all(!isempty(string(route_receipt[key])) for key in keys(route_receipt)) || return false
         semantics = string(row.receipt["trajectory_semantics"])
-        semantics in ("sha256", "validated", "not_applicable") || return false
         sha = string(get(row.receipt, "trajectory_sha", ""))
-        semantics == "sha256" && !occursin(r"^[0-9a-f]{64}$", sha) && return false
-        semantics != "sha256" && !isempty(sha) && return false
+        reason = string(get(row.receipt, "trajectory_reason", ""))
+        _valid_trajectory(semantics, sha, reason) || return false
         interval = row.receipt["objective_interval"]
         interval isa AbstractDict && haskey(interval, "lower") && haskey(interval, "upper") || return false
         tolerance = row.receipt["resolved_tolerances"]
@@ -508,6 +561,7 @@ function _row_dict(row::ProfileRow)
         "catalog_fingerprint"=>row.catalog_fingerprint, "environment_fingerprint"=>row.environment_fingerprint,
         "provider_fingerprint"=>row.provider_fingerprint, "trajectory_sha"=>row.trajectory_sha,
         "trajectory_semantics"=>(isempty(row.trajectory_sha) ? "not_applicable" : "sha256"),
+        "trajectory_reason"=>row.trajectory_reason,
         "resolved_tolerances"=>row.resolved_tolerances, "receipt"=>row.receipt)
 end
 

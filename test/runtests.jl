@@ -364,3 +364,4 @@ end
 # Dependent benchmark profiling/selection fixture tests.
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_profile_catalog.jl"))
 include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_compare_contract.jl"))
+include(joinpath(@__DIR__, "..", "benchmark", "optimization", "test_measure_target.jl"))

@@ -21,6 +21,11 @@ assert "catalog_artifact_sha256" in s and "provider_version" in s
 assert "requested_formulation" in s and "executed_kernel" in s
 assert "trajectory_sha_ok: { const: true }" in s
 assert "validateTrajectory" in s
+assert 'trajectory_semantics === "not_applicable"' in s
+assert 'trajectory_semantics === "validated"' not in s
+assert "requireSuccessfulStructuredRun" in s
+assert "item.__run_exit_code === 0" in s
+assert "integrationIdentityOk" in s
 assert "checkDeadline();" in s
 assert "stageTimeoutMs(30 * 60 * 1000)" in s
 assert "item.status === \"success\"" in s and "item.exit_code === 0" in s
@@ -29,4 +34,8 @@ assert "item.status === \"success\"" in s and "item.exit_code === 0" in s
 fixture_test = Path(__file__).with_name("test_profile_catalog.jl").read_text()
 assert 'SDPX_PROFILE_FIXTURE" => "1"' in fixture_test
 assert 'SDPX_OPTIMIZATION_TEST_MODE" => "1"' in fixture_test
+readme = Path(__file__).with_name("README.md").read_text()
+assert "SDPX_ENABLE_DEPENDENT_OPTIMIZATION" in readme
+assert "enable_experimental=true" in readme
+assert "benchmark/bootstrap/compare.jl" in Path(__file__).parents[1].joinpath("bootstrap", "compare.jl").read_text()
 print("dependent optimization workflow contract passed")

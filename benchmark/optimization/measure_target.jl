@@ -27,6 +27,67 @@ function _tree()
     return tree
 end
 
+const _TRAJECTORY_SHA256 = r"^[0-9a-f]{64}$"
+
+function _valid_trajectory!(container, label)
+    container isa AbstractDict || throw(ArgumentError("$label receipt must be an AbstractDict"))
+    sem = String(get(container, "trajectory_semantics", ""))
+    sha = String(get(container, "trajectory_sha", ""))
+    reason = String(get(container, "trajectory_reason", ""))
+    if sem == "sha256"
+        occursin(_TRAJECTORY_SHA256, sha) && !isempty(reason) ||
+            throw(ArgumentError("$label sha256 trajectory requires 64 lowercase hex and a reason"))
+    elseif sem == "not_applicable"
+        isempty(sha) && !isempty(reason) ||
+            throw(ArgumentError("$label not_applicable trajectory requires empty SHA and reason"))
+    else
+        throw(ArgumentError("$label trajectory semantics must be sha256 or not_applicable"))
+    end
+    return nothing
+end
+
+function _require_receipt(row)
+    receipt = get(row, "receipt", nothing)
+    receipt isa AbstractDict || throw(ArgumentError("live selected row requires receipt::AbstractDict"))
+    required = ("source_commit", "tree_fingerprint", "catalog", "family", "instance",
+        "input_fingerprint", "project_sha256", "manifest_sha256", "catalog_run_id",
+        "catalog_artifact_sha256", "environment_fingerprint", "provider_fingerprint",
+        "provider_version", "cpu", "julia_threads", "blas_threads", "omp_threads",
+        "gc_threads", "actual_objective", "objective_interval", "resolved_tolerances",
+        "route_receipt", "requested_route", "planned_route", "executed_route", "requested_formulation",
+        "planned_formulation", "executed_formulation", "requested_backend",
+        "planned_backend", "executed_backend", "requested_provider", "planned_provider",
+        "executed_provider", "requested_kernel", "planned_kernel", "executed_kernel",
+        "reuse", "certificate_kind", "certificate_failures", "iterations",
+        "trajectory_semantics", "trajectory_reason", "warmup_excluded", "sample_count")
+    all(haskey(receipt, key) && receipt[key] !== nothing &&
+        !(receipt[key] isa AbstractString && isempty(receipt[key])) for key in required) ||
+        throw(ArgumentError("live selected row receipt is incomplete"))
+    occursin(r"^[0-9a-f]{40}$", String(receipt["source_commit"])) ||
+        throw(ArgumentError("receipt source_commit must be exact lowercase SHA-1"))
+    for field in ("project_sha256", "manifest_sha256", "catalog_artifact_sha256", "input_fingerprint", "environment_fingerprint", "provider_fingerprint")
+        occursin(r"^[0-9a-f]{64}$", String(receipt[field])) ||
+            throw(ArgumentError("receipt $field must be exact lowercase SHA-256"))
+    end
+    receipt["warmup_excluded"] == 1 && receipt["sample_count"] == 3 ||
+        throw(ArgumentError("receipt sample accounting invalid"))
+    interval = receipt["objective_interval"]
+    interval isa AbstractDict && Set(keys(interval)) == Set(("lower", "upper")) &&
+        all(interval[key] !== nothing && !isempty(string(interval[key])) for key in ("lower", "upper")) ||
+        throw(ArgumentError("objective interval must be a closed nonempty dictionary"))
+    tolerances = receipt["resolved_tolerances"]
+    tolerances isa AbstractDict && Set(keys(tolerances)) == Set(("primal", "dual", "gap")) &&
+        all(tolerances[key] !== nothing && !isempty(string(tolerances[key])) for key in ("primal", "dual", "gap")) ||
+        throw(ArgumentError("resolved tolerances must be a closed nonempty dictionary"))
+    route = receipt["route_receipt"]
+    route isa AbstractDict || throw(ArgumentError("route_receipt must be an AbstractDict"))
+    route_keys = ("requested_route", "planned_route", "executed_route", "requested_formulation", "planned_formulation", "executed_formulation", "requested_backend", "planned_backend", "executed_backend", "requested_provider", "planned_provider", "executed_provider", "requested_kernel", "planned_kernel", "executed_kernel", "reuse")
+    Set(keys(route)) == Set(route_keys) && all(!isempty(String(route[key])) for key in route_keys) ||
+        throw(ArgumentError("route_receipt is not a closed complete receipt"))
+    _valid_trajectory!(receipt, "live")
+    return receipt
+end
+
 function _row(manifest, selected)
     key = haskey(manifest, "row") ? "row" : "case"
     rows = get(manifest, key, Any[])
@@ -55,6 +116,9 @@ function _require_live_identity(manifest, selected_row)
 end
 
 function _validate_manifest_samples(row; fixture=false)
+    # Live rows are never display-only: reject a missing/empty/nested-invalid
+    # receipt before inspecting any convenience columns.
+    live_receipt = fixture ? nothing : _require_receipt(row)
     for field in ("sample_seconds", "sample_iterations", "sample_status",
                   "sample_certificate_valid", "sample_semantic_pass", "sample_objective")
         haskey(row, field) || throw(ArgumentError("manifest missing $field"))
@@ -82,11 +146,14 @@ function _validate_manifest_samples(row; fixture=false)
     routes = [String(get(row, field, "")) for field in
         ("requested_route", "planned_route", "executed_route")]
     all(!isempty, routes) || throw(ArgumentError("route receipt incomplete"))
-    semantics = string(get(row, "trajectory_semantics", "not_applicable"))
-    semantics in ("sha256", "validated", "not_applicable") ||
-        throw(ArgumentError("trajectory semantics invalid"))
-    receipt = get(row, "receipt", nothing)
-    if receipt !== nothing && !fixture
+    receipt = fixture ? get(row, "receipt", nothing) : live_receipt
+    if receipt !== nothing
+        semantics = string(get(receipt, "trajectory_semantics", get(row, "trajectory_semantics", "")))
+        semantics in ("sha256", "not_applicable") ||
+            throw(ArgumentError("trajectory semantics invalid"))
+        _valid_trajectory!(receipt, fixture ? "fixture" : "live")
+    end
+    if !fixture
         required = ("source_commit", "tree_fingerprint", "catalog", "family",
             "instance", "input_fingerprint", "project_sha256", "manifest_sha256",
             "catalog_run_id", "catalog_artifact_sha256", "environment_fingerprint",
@@ -112,12 +179,9 @@ function _validate_manifest_samples(row; fixture=false)
         tolerance isa AbstractDict && all(haskey(tolerance, key) for key in ("primal", "dual", "gap")) ||
             throw(ArgumentError("resolved tolerances must contain primal, dual, gap"))
         semantics = String(receipt["trajectory_semantics"])
-        semantics in ("sha256", "validated", "not_applicable") ||
+        semantics in ("sha256", "not_applicable") ||
             throw(ArgumentError("trajectory semantics invalid"))
-        trajectory = String(get(receipt, "trajectory_sha", ""))
-        semantics == "sha256" && occursin(r"^[0-9a-f]{64}$", trajectory) ||
-            semantics != "sha256" && semantics == "not_applicable" && isempty(trajectory) ||
-            throw(ArgumentError("trajectory SHA semantics invalid"))
+        _valid_trajectory!(receipt, "live")
     end
     return nothing
 end
@@ -182,4 +246,6 @@ function main(args=ARGS)
             "allocation_bytes"=>Int.(get(selected_row, "allocation_bytes", [0]))))
     end
 end
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end

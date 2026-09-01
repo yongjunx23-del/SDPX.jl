@@ -41,6 +41,14 @@ end
     @test first(select_max_target([a, b]; metric=:core_seconds)[2]).case_key == "a"
 end
 
+@testset "trajectory semantics are closed" begin
+    @test ProfileCatalog._valid_trajectory("not_applicable", "", "no published per-iterate trace")
+    @test ProfileCatalog._valid_trajectory("sha256", "a"^64, "published trajectory")
+    @test !ProfileCatalog._valid_trajectory("validated", "a"^64, "legacy token rejected")
+    @test !ProfileCatalog._valid_trajectory("sha256", "A"^64, "uppercase rejected")
+    @test !ProfileCatalog._valid_trajectory("not_applicable", "a", "nonempty SHA rejected")
+end
+
 @testset "fixture command" begin
     @test run_fixture().id == "slow"
 end

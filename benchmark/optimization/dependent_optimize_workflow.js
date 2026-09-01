@@ -23,9 +23,16 @@ function stageTimeoutMs(budgetMs) {
 }
 function validateTrajectory(receipt) {
   if (!receipt || receipt.trajectory_semantics === undefined) return false;
-  if (receipt.trajectory_semantics === "sha256") return /^[0-9a-f]{64}$/.test(String(receipt.trajectory_sha || ""));
-  if (receipt.trajectory_semantics === "validated") return String(receipt.trajectory_sha || "").length > 0;
-  return receipt.trajectory_semantics === "not_applicable" && receipt.trajectory_sha === "";
+  const reason = String(receipt.trajectory_reason || "");
+  if (receipt.trajectory_semantics === "sha256")
+    return /^[0-9a-f]{64}$/.test(String(receipt.trajectory_sha || "")) && reason.length > 0;
+  return receipt.trajectory_semantics === "not_applicable" && receipt.trajectory_sha === "" && reason.length > 0;
+}
+function requireSuccessfulStructuredRun(result, label) {
+  const structured = result && (result.structuredOutput || result.output || result);
+  if (!result || result.exitCode !== 0 || !structured || structured.status !== "success")
+    throw new Error(label + " did not return exitCode=0 and structured status=success");
+  return structured;
 }
 function checkDeadline() {
   if (remainingTimeoutMs() <= 0) throw new Error("hard 12h deadline exceeded");
@@ -47,17 +54,23 @@ const receiptProperties = {
   catalog_run_id: { type: "string", minLength: 1 }, catalog_artifact_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
   project_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" }, manifest_sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
   actual_objective: { type: "number" },
-  objective_interval: { type: "object", additionalProperties: false, required: ["lower", "upper"], properties: { lower: { type: "number" }, upper: { type: "number" } } },
-  resolved_tolerances: { type: "object", additionalProperties: false, required: ["primal", "dual", "gap"], properties: { primal: { type: "number", minimum: 0 }, dual: { type: "number", minimum: 0 }, gap: { type: "number", minimum: 0 } } },
+  objective_interval: { type: "object", additionalProperties: false, minProperties: 2, required: ["lower", "upper"], properties: { lower: { type: "number" }, upper: { type: "number" } } },
+  resolved_tolerances: { type: "object", additionalProperties: false, minProperties: 3, required: ["primal", "dual", "gap"], properties: { primal: { type: "number", minimum: 0 }, dual: { type: "number", minimum: 0 }, gap: { type: "number", minimum: 0 } } },
   requested_route: { type: "string", minLength: 1 }, planned_route: { type: "string", minLength: 1 }, executed_route: { type: "string", minLength: 1 },
   requested_formulation: { type: "string", minLength: 1 }, planned_formulation: { type: "string", minLength: 1 }, executed_formulation: { type: "string", minLength: 1 },
   requested_backend: { type: "string", minLength: 1 }, planned_backend: { type: "string", minLength: 1 }, executed_backend: { type: "string", minLength: 1 },
   requested_provider: { type: "string", minLength: 1 }, planned_provider: { type: "string", minLength: 1 }, executed_provider: { type: "string", minLength: 1 },
   requested_kernel: { type: "string", minLength: 1 }, planned_kernel: { type: "string", minLength: 1 }, executed_kernel: { type: "string", minLength: 1 }, reuse: { type: "string", minLength: 1 },
   certificate_kind: { type: "string", minLength: 1 }, certificate_failures: { type: "array", items: { type: "string" } }, iterations: { type: "integer", minimum: 0 },
-  route_receipt: { type: "object", minProperties: 1 },
-  trajectory_sha: { type: "string" },
-  trajectory_semantics: { type: "string", enum: ["sha256", "validated", "not_applicable"] },
+  route_receipt: { type: "object", additionalProperties: false, required: ["requested_route", "planned_route", "executed_route", "requested_formulation", "planned_formulation", "executed_formulation", "requested_backend", "planned_backend", "executed_backend", "requested_provider", "planned_provider", "executed_provider", "requested_kernel", "planned_kernel", "executed_kernel", "reuse"], properties: {
+    requested_route: { type: "string", minLength: 1 }, planned_route: { type: "string", minLength: 1 }, executed_route: { type: "string", minLength: 1 },
+    requested_formulation: { type: "string", minLength: 1 }, planned_formulation: { type: "string", minLength: 1 }, executed_formulation: { type: "string", minLength: 1 },
+    requested_backend: { type: "string", minLength: 1 }, planned_backend: { type: "string", minLength: 1 }, executed_backend: { type: "string", minLength: 1 },
+    requested_provider: { type: "string", minLength: 1 }, planned_provider: { type: "string", minLength: 1 }, executed_provider: { type: "string", minLength: 1 },
+    requested_kernel: { type: "string", minLength: 1 }, planned_kernel: { type: "string", minLength: 1 }, executed_kernel: { type: "string", minLength: 1 }, reuse: { type: "string", minLength: 1 }
+  } },
+  trajectory_sha: { type: "string" }, trajectory_reason: { type: "string", minLength: 1 },
+  trajectory_semantics: { type: "string", enum: ["sha256", "not_applicable"] },
   solver_median_seconds: { type: "number" },
   core_median_seconds: { type: "number" },
   sample_count: { type: "integer", const: 3 },
@@ -71,15 +84,16 @@ const receiptSchema = {
 };
 const profileSchema = {
   type: "object", additionalProperties: false,
-  required: Object.keys(receiptProperties), properties: receiptProperties
+  required: Object.keys(receiptProperties).concat(["status"]),
+  properties: Object.assign({}, receiptProperties, { status: { const: "success" } })
 };
 const scoutSchema = {
   type: "object", additionalProperties: false,
   required: ["candidate_id", "rationale", "files", "falsifier", "expected_metric", "required_gate"],
   properties: {
     candidate_id: { type: "string", minLength: 1 }, rationale: { type: "string", minLength: 1 },
-    files: { type: "array", items: { type: "string" } }, falsifier: { type: "string", minLength: 1 },
-    expected_metric: { type: "string", minLength: 1 }, required_gate: { type: "array", items: { type: "string" } }
+    files: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } }, falsifier: { type: "string", minLength: 1 },
+    expected_metric: { type: "string", minLength: 1 }, required_gate: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } }
   }
 };
 const candidateSchema = {
@@ -88,7 +102,7 @@ const candidateSchema = {
   properties: {
     candidate_id: { type: "string", minLength: 1 }, selected_commit: { type: "string", pattern: "^[0-9a-f]{40}$" },
     selected_branch: { type: "string", minLength: 1 }, patch_files: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
-    status: { const: "success" }, exit_code: { const: 0 }, receipt: receiptSchema, sample_statuses: { type: "array", minItems: 3, maxItems: 3 },
+    status: { const: "success" }, exit_code: { const: 0 }, receipt: receiptSchema, sample_statuses: { type: "array", minItems: 3, maxItems: 3, items: { const: "optimal" } },
     sample_certificates: { type: "array", minItems: 3, maxItems: 3, items: { const: true } },
     sample_semantics: { type: "array", minItems: 3, maxItems: 3, items: { const: true } },
     sample_iterations: { type: "array", minItems: 3, maxItems: 3, items: { type: "integer" } },
@@ -99,9 +113,9 @@ const candidateSchema = {
 };
 const reviewSchema = {
   type: "object", additionalProperties: false,
-  required: ["verdict", "selected_commit", "selected_branch", "improvement_pct", "baseline_median_seconds", "candidate_median_seconds", "benchmark_identity_ok", "objective_interval_ok", "certificate_ok", "semantic_ok", "iteration_determinism_ok", "source_identity_ok", "environment_provider_ok", "trajectory_sha_ok", "rejection_reasons"],
+  required: ["status", "verdict", "selected_commit", "selected_branch", "improvement_pct", "baseline_median_seconds", "candidate_median_seconds", "benchmark_identity_ok", "objective_interval_ok", "certificate_ok", "semantic_ok", "iteration_determinism_ok", "source_identity_ok", "environment_provider_ok", "trajectory_sha_ok", "rejection_reasons"],
   properties: {
-    verdict: { type: "string", enum: ["accept", "reject"] }, selected_commit: { type: "string", pattern: "^$|^[0-9a-f]{40}$" },
+    status: { const: "success" }, verdict: { type: "string", enum: ["accept", "reject"] }, selected_commit: { type: "string", pattern: "^$|^[0-9a-f]{40}$" },
     selected_branch: { type: "string" }, improvement_pct: { type: "number" }, baseline_median_seconds: { type: "number" }, candidate_median_seconds: { type: "number" },
     benchmark_identity_ok: { const: true }, objective_interval_ok: { const: true }, certificate_ok: { const: true }, semantic_ok: { const: true },
     iteration_determinism_ok: { const: true }, source_identity_ok: { const: true }, environment_provider_ok: { const: true }, trajectory_sha_ok: { const: true },
@@ -110,9 +124,9 @@ const reviewSchema = {
 };
 const integrationSchema = {
   type: "object", additionalProperties: false,
-  required: ["selected_commit", "verdict", "improvement_pct", "baseline_median_seconds", "candidate_median_seconds", "all_three_samples_valid", "benchmark_identity_ok", "objective_interval_ok", "certificate_ok", "semantic_ok", "iteration_determinism_ok", "source_identity_ok", "environment_provider_ok", "trajectory_sha_ok", "evidence_paths", "receipt", "sample_statuses", "sample_certificates", "sample_semantics", "sample_iterations", "sample_objectives"],
+  required: ["status", "selected_commit", "verdict", "improvement_pct", "baseline_median_seconds", "candidate_median_seconds", "all_three_samples_valid", "benchmark_identity_ok", "objective_interval_ok", "certificate_ok", "semantic_ok", "iteration_determinism_ok", "source_identity_ok", "environment_provider_ok", "trajectory_sha_ok", "evidence_paths", "receipt", "sample_statuses", "sample_certificates", "sample_semantics", "sample_iterations", "sample_objectives"],
   properties: {
-    selected_commit: { type: "string", pattern: "^[0-9a-f]{40}$" }, verdict: { const: "accept" },
+    status: { const: "success" }, selected_commit: { type: "string", pattern: "^[0-9a-f]{40}$" }, verdict: { const: "accept" },
     improvement_pct: { type: "number" }, baseline_median_seconds: { type: "number" }, candidate_median_seconds: { type: "number" },
     all_three_samples_valid: { const: true }, benchmark_identity_ok: { const: true }, objective_interval_ok: { const: true }, certificate_ok: { const: true }, semantic_ok: { const: true }, iteration_determinism_ok: { const: true }, source_identity_ok: { const: true }, environment_provider_ok: { const: true }, trajectory_sha_ok: { const: true }, evidence_paths: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
     receipt: receiptSchema, sample_statuses: { type: "array", minItems: 3, maxItems: 3, items: { const: "optimal" } },
@@ -127,13 +141,14 @@ const profile = await runs.run("profile-precondition", {
   outputSchema: profileSchema,
   agent: "worker",
   worktree: false,
-  task: "Validate the LIVE exact-head hotspot manifest supplied in the environment. Require SDPX_HOTSPOT_MANIFEST, a 40-hex source_commit equal to checked-out HEAD and the catalog workflow event SHA, a matching 40-hex tree fingerprint, catalog run ID and artifact SHA, and one selected row with exactly one excluded warmup plus exactly three valid warm solve samples. Require complete source/tree/catalog/family/instance/input/project/manifest/environment/CPU/thread/provider/version/hash, objective interval and actual objectives, every tolerance, requested/planned/executed route/formulation/backend/provider/kernel/reuse, certificate kind/failures, iterations, and trajectory semantics (sha256, validated, or not_applicable). Reject missing/stale/mismatched manifests, build-only/xfail rows, failed certificates, semantic failures, nondeterministic iterations/objectives, identity/reference/tolerance/route/provider/environment mismatches. Fixture fallback is forbidden unless both SDPX_PROFILE_FIXTURE=1 and SDPX_OPTIMIZATION_TEST_MODE=1 are explicit. Return exactly the receipt fields defined by the output schema plus sample_count=3 and warmup_excluded=1. Do not edit or push."
+  task: "Validate the LIVE exact-head hotspot manifest supplied in the environment. Require SDPX_HOTSPOT_MANIFEST, a 40-hex source_commit equal to checked-out HEAD and the catalog workflow event SHA, a matching 40-hex tree fingerprint, catalog run ID and artifact SHA, and one selected row with exactly one excluded warmup plus exactly three valid warm solve samples. Require complete source/tree/catalog/family/instance/input/project/manifest/environment/CPU/thread/provider/version/hash, objective interval and actual objectives, every tolerance, requested/planned/executed route/formulation/backend/provider/kernel/reuse, certificate kind/failures, iterations, and trajectory semantics (sha256 or not_applicable with a reason). Reject missing/stale/mismatched manifests, build-only/xfail rows, failed certificates, semantic failures, nondeterministic iterations/objectives, identity/reference/tolerance/route/provider/environment mismatches. Fixture fallback is forbidden unless both SDPX_PROFILE_FIXTURE=1 and SDPX_OPTIMIZATION_TEST_MODE=1 are explicit. Return exactly the receipt fields defined by the output schema, set structured status='success', plus sample_count=3 and warmup_excluded=1. Do not edit or push."
 });
-if (!profile || profile.exitCode !== 0) {
+let profileEvidence;
+try { profileEvidence = requireSuccessfulStructuredRun(profile, "profile-precondition"); }
+catch (error) {
   terminationReason = "profile_precondition_failed";
-  return { workflow: "dependent-benchmark-optimization", termination_reason: terminationReason };
+  return { workflow: "dependent-benchmark-optimization", termination_reason: terminationReason, error: String(error) };
 }
-const profileEvidence = profile.structuredOutput || profile.output || profile;
 const profileText = JSON.stringify(profileEvidence);
 if (String(profileEvidence.source_commit || "").length !== 40) {
   terminationReason = "profile_source_identity_missing";
@@ -205,7 +220,10 @@ for (let round = 1; round <= maxRounds; round += 1) {
   ]);
   const candidateEvidence = JSON.stringify(candidates);
   const candidateReports = [];
-  for (const item of candidates) candidateReports.push(item.structuredOutput || item.output || item);
+  for (const item of candidates) {
+    const report = item.structuredOutput || item.output || item;
+    candidateReports.push(Object.assign({}, report, { __run_exit_code: item.exitCode }));
+  }
   const validCandidateCommits = [];
   const commitSet = new Set();
   for (const item of candidateReports) {
@@ -231,7 +249,9 @@ for (let round = 1; round <= maxRounds; round += 1) {
     worktree: false,
     task: "Independently review these candidate reports against the immutable profile: " + profileText + ". Candidate reports: " + candidateEvidence + ". Return structured verdict exactly accept or reject, selected_commit exactly one candidate commit or empty on reject, selected_branch, improvement_pct, baseline_median_seconds, candidate_median_seconds, benchmark_identity_ok, objective_interval_ok, certificate_ok, semantic_ok, iteration_determinism_ok, source_identity_ok, environment_provider_ok, trajectory_sha_ok, and rejection_reasons. Accept only one candidate with a real stable >=2% timing improvement over the exact hotspot baseline and all three samples valid; reject stale/missing commits, unused candidates, identity drift, tolerance changes, operation reordering, failed certificates, nondeterminism, or allocation-only improvements."
   });
-  const reviewEvidence = review.structuredOutput || review.output || review;
+  let reviewEvidence;
+  try { reviewEvidence = requireSuccessfulStructuredRun(review, "independent-review-" + round); }
+  catch (error) { reviewEvidence = { verdict: "reject", rejection_reasons: [String(error)] }; }
   const reviewText = JSON.stringify(reviewEvidence);
   const selectedCommit = String(reviewEvidence.selected_commit || "");
   const reviewVerdict = String(reviewEvidence.verdict || "reject");
@@ -244,7 +264,9 @@ for (let round = 1; round <= maxRounds; round += 1) {
       Array.isArray(item.sample_semantics) && item.sample_semantics.length === 3 &&
       item.sample_semantics.every(function (value) { return value === true; });
     if (String(item.selected_commit || "") === selectedCommit && item.status === "success" &&
-        item.exit_code === 0 && samplesValid && validateTrajectory(item.receipt)) matchingCandidates.push(item);
+        item.__run_exit_code === 0 && item.exit_code === 0 && item.receipt &&
+        String(item.receipt.source_commit || "") === selectedCommit &&
+        samplesValid && validateTrajectory(item.receipt)) matchingCandidates.push(item);
   }
   if (review.exitCode !== 0 || reviewVerdict !== "accept" || !/^[0-9a-f]{40}$/.test(selectedCommit) ||
       matchingCandidates.length !== 1 || !Number.isFinite(reportedImprovement) || reportedImprovement < 2) {
@@ -263,10 +285,17 @@ for (let round = 1; round <= maxRounds; round += 1) {
     outputSchema: integrationSchema,
     agent: "worker",
     worktree: true,
-    task: "Integrate-validation only: use exactly this independently selected commit and no other candidate: " + selectedCommit + ". The independent review receipt is: " + reviewText + ". In a fresh worktree, check out that exact commit, verify source/tree/catalog/input/environment/provider identities, rerun the complete E2E/certificate/reference/route/iteration/trajectory gates, and rerun exactly three warm target samples. Return structured selected_commit, verdict, improvement_pct, baseline_median_seconds, candidate_median_seconds, all_three_samples_valid, benchmark_identity_ok, objective_interval_ok, certificate_ok, semantic_ok, iteration_determinism_ok, source_identity_ok, environment_provider_ok, trajectory_sha_ok, and evidence_paths. Do not merge or push."
+    task: "Integrate-validation only: use exactly this independently selected commit and no other candidate: " + selectedCommit + ". The independent review receipt is: " + reviewText + ". In a fresh worktree, check out that exact commit, verify source/tree/catalog/input/environment/provider identities, rerun the complete E2E/certificate/reference/route/iteration/trajectory gates, and rerun exactly three warm target samples. Return structured status='success', selected_commit, verdict, improvement_pct, baseline_median_seconds, candidate_median_seconds, all_three_samples_valid, benchmark_identity_ok, objective_interval_ok, certificate_ok, semantic_ok, iteration_determinism_ok, source_identity_ok, environment_provider_ok, trajectory_sha_ok, complete receipt, exactly three sample arrays, and evidence_paths. Do not merge or push."
   });
-  const integrationEvidence = integrate.structuredOutput || integrate.output || integrate;
+  let integrationEvidence;
+  try { integrationEvidence = requireSuccessfulStructuredRun(integrate, "integrate-" + round); }
+  catch (error) { integrationEvidence = { verdict: "reject", evidence_paths: [], rejection_reasons: [String(error)] }; }
   const integrationImprovement = Number(integrationEvidence.improvement_pct);
+  const selectedCandidate = matchingCandidates[0];
+  const integrationIdentityOk = selectedCandidate !== undefined &&
+    integrationEvidence.receipt &&
+    String(integrationEvidence.receipt.source_commit || "") === selectedCommit &&
+    String(integrationEvidence.receipt.tree_fingerprint || "") === String(selectedCandidate.receipt.tree_fingerprint || "");
   const accepted = integrate.exitCode === 0 &&
     String(integrationEvidence.selected_commit || "") === selectedCommit &&
     String(integrationEvidence.verdict || "reject") === "accept" &&
@@ -278,6 +307,7 @@ for (let round = 1; round <= maxRounds; round += 1) {
     integrationEvidence.iteration_determinism_ok === true &&
     integrationEvidence.source_identity_ok === true &&
     integrationEvidence.environment_provider_ok === true &&
+    integrationIdentityOk &&
     integrationEvidence.trajectory_sha_ok === true &&
     validateTrajectory(integrationEvidence.receipt) &&
     Number.isFinite(integrationImprovement) && integrationImprovement >= 2;
