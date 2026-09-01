@@ -4,6 +4,7 @@ version = "0.6.0"
 authors = ["Yongjun Xu <yongjunx23@gmail.com>"]
 
 [deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
 MutableArithmetics = "d8a4904e-b15c-11e9-3269-09a3773c0cb0"
@@ -29,6 +30,7 @@ SDPXMultiFloatLinearAlgebraExt = ["MultiFloats", "MultiFloatLinearAlgebra"]
 SDPXMultiFloatsExt = "MultiFloats"
 
 [compat]
+Dates = "1"
 AppleAccelerate = "0.7"
 BigFloatLinearAlgebra = "0.3"
 GenericLinearAlgebra = "0.3, 0.4"

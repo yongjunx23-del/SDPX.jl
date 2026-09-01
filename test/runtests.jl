@@ -12,6 +12,9 @@ using .GenericConicBenchmark
 include(joinpath(
     @__DIR__, "..", "benchmark", "general", "test_v2.jl",
 ))
+include(joinpath(
+    @__DIR__, "..", "benchmark", "optimization", "test_v2_schema9_adapter.jl",
+))
 
 const E2E_CASE_IDS = (
     :lp_afiro_style,

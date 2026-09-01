@@ -271,6 +271,7 @@ struct V2RunResult
     input_fingerprint::String
     execution_fingerprint::String
     validation::V2Validation
+    route_receipt::NamedTuple
 end
 
 const _TIERS = (
@@ -874,7 +875,44 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
         string(certificate.dual_residual), string(certificate.relative_gap), solved.iterations,
         setup, core_seconds, recovery_seconds, measurement.bytes,
         input_fingerprint(instance), execution_fingerprint(instance, precision), validation,
+        _route_receipt(diagnostics),
     )
+end
+
+function _route_receipt(diagnostics)
+    names = (:requested_route, :planned_route, :executed_route,
+             :requested_formulation, :planned_formulation, :executed_formulation,
+             :requested_backend, :planned_backend, :executed_backend,
+             :requested_provider, :planned_provider, :executed_provider,
+             :requested_kernel, :planned_kernel, :executed_kernel, :reuse)
+    selected = diagnostics === nothing ? nothing : try getproperty(diagnostics, :selected_algorithms) catch; nothing end
+    aliases = Dict(
+        :requested_route => (:requested_kkt_route, :requested_route),
+        :planned_route => (:planned_kkt_route, :planned_route),
+        :executed_route => (:executed_kkt_route, :executed_route),
+        :requested_formulation => (:requested_kkt_formulation, :requested_formulation),
+        :planned_formulation => (:planned_kkt_formulation, :planned_formulation),
+        :executed_formulation => (:executed_kkt_formulation, :executed_formulation),
+        :requested_backend => (:requested_backend,),
+        :planned_backend => (:planned_backend, :planned_algorithm, :planned_backend),
+        :executed_backend => (:executed_backend, :executed_algorithm, :executed_backend),
+        :requested_provider => (:requested_provider,),
+        :planned_provider => (:planned_la_provider, :planned_provider),
+        :executed_provider => (:la_executed_provider, :executed_provider),
+        :requested_kernel => (:requested_kernel,),
+        :planned_kernel => (:planned_factorization_kernel, :planned_kernel),
+        :executed_kernel => (:executed_factorization_kernel, :executed_kernel),
+        :reuse => (:executed_factorization_reuse, :factorization_reuse, :reuse),
+    )
+    pick(name) = selected === nothing ? "not_declared_by_api" :
+        try
+            value = first((getproperty(selected, alias) for alias in aliases[name]
+                           if hasproperty(selected, alias)), nothing)
+            value === nothing ? "not_declared_by_api" : string(value)
+        catch
+            "not_declared_by_api"
+        end
+    return NamedTuple{names}(Tuple(pick(name) for name in names))
 end
 
 function run_instance(catalog::V2Catalog, instance::V2Instance,
