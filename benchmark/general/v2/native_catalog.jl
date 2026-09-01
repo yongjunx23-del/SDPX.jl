@@ -1669,3 +1669,4 @@ function sdp_tranche_catalog()
 end
 
 include(joinpath(@__DIR__, "exp_power_catalog.jl"))
+include(joinpath(@__DIR__, "mixed_tranche.jl"))

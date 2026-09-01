@@ -671,3 +671,42 @@ end
         Rational{Int}[1//2], Rational{Int}[], Rational{Int}[1, 1], 1//1)
     @test weighted_candidate.weighted_values == Rational{Int}[1, 1]
 end
+
+@testset "typed mixed six-cone planted coupling" begin
+    catalog = mixed_tranche_catalog()
+    @test length(catalog.instances) == 1
+    instance = only(catalog.instances)
+    artifact = instance.payload
+    @test artifact isa MixedArtifact
+    @test artifact.kind === :planted_cross_cone
+    @test length(artifact.nonnegative) == 1
+    @test length(artifact.soc) == 4
+    @test length(artifact.rsoc) == 3
+    @test size(artifact.psd) == (2, 2)
+    @test length(artifact.exponential) == 3
+    @test length(artifact.power) == 3
+    @test artifact.coupling_rhs == 8//1
+    @test all(iszero, artifact.dual_witness.nonnegative)
+    @test all(iszero, artifact.dual_witness.soc)
+    @test all(iszero, artifact.dual_witness.rsoc)
+    @test all(iszero, artifact.dual_witness.psd)
+    @test all(iszero, artifact.dual_witness.exponential)
+    @test all(iszero, artifact.dual_witness.power)
+    @test artifact.dual_coupling == 1//1
+    @test sum(artifact.coupling_coefficients .* Rational{Int}[
+        artifact.primal_witness.nonnegative[1], artifact.primal_witness.soc[1],
+        artifact.primal_witness.rsoc[1], artifact.primal_witness.psd[1, 1],
+        artifact.primal_witness.exponential[1], artifact.primal_witness.power[1]]) ==
+        artifact.coupling_rhs
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    built, elapsed = build_instance(catalog, instance, precision)
+    @test elapsed >= 0
+    @test built.facts.artifact_fingerprint == instance.checksum
+    result = run_instance(catalog, instance, precision)
+    @test result.status === :optimal
+    @test result.certificate_valid
+    @test result.validation.reference
+    @test result.validation.failures == Symbol[]
+    @test isapprox(parse(Float64, result.objective), 8.0; atol=5e-7, rtol=0)
+    @test result.core_seconds !== nothing
+end

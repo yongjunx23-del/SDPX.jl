@@ -188,3 +188,24 @@ small-tier inventory.
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none
 exists.
+
+### Mixed six-cone planted coupling
+
+`mixed_tranche_catalog()` adds one solve-eligible, transaction-sized mixed case:
+`v2_mixed_planted_cross_cone_small`.  It contains one nonnegative scalar, one
+order-4 SOC block, one order-3 rotated-SOC block, one 2x2 PSD block, one
+3-coordinate exponential block, and one 3-coordinate alpha=1/2 power block.
+The dimensions are intentionally smaller than the review table's stress counts,
+but every one of the six cone families is present; the reduction is disclosed
+rather than silently called full-tier coverage.
+
+The exact strictly feasible primal witness is
+`(1; (2,0,0,0); (2,2,0); 2I_2; (0,1,2); (1,1,0))`.  The single cross-cone
+equality has unit coefficients and its RHS is derived from the witness's first
+coordinates: `1+2+2+2+0+1 = 8`.  The objective is the same sum of first
+coordinates, hence has exact primal value 8.  The equality multiplier is one;
+all per-cone slacks are zero, so strict cone membership gives exact
+complementary slackness and strong duality.  The oracle independently checks
+all six cone memberships, the coupling identity, model/source fingerprints,
+and the returned objective; it never consumes solver output as its witness.
+The case is registered only after the Float64 status/certificate gate passes.
