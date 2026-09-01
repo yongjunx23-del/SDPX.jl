@@ -1338,3 +1338,332 @@ function native_v2_catalog()
 end
 
 include(joinpath(@__DIR__, "socp_tranche.jl"))
+
+
+# Typed RSOC/SDP small-tranche artifacts.  These are intentionally kept
+# separate from SOCPArtifact: rotated-SOC and PSD source contracts carry
+# their own exact planted witnesses and dual proofs.
+struct RSOCArtifact <: AbstractV2SmallArtifact
+    id::Symbol
+    kind::Symbol
+    targets::Vector{Rational{Int}}
+    rhs::Vector{Rational{Int}}
+    primal_witness::Vector{Rational{Int}}
+    objective::Rational{Int}
+    generator_id::Symbol
+    generator_version::Int
+    function RSOCArtifact(id::Symbol, kind::Symbol, targets, rhs;
+                          primal_witness=Rational{Int}[], objective::Rational{Int}=0//1,
+                          generator_id::Symbol=:rsoc_small_v1,
+                          generator_version::Integer=1)
+        kind in (:quadratic_epigraph, :perspective_ls, :many_qr3) ||
+            throw(ArgumentError("unsupported RSOC small-tranche kind $kind"))
+        ts = Rational{Int}.(targets); rs = Rational{Int}.(rhs)
+        isempty(ts) || all(>=(0//1), ts) ||
+            throw(ArgumentError("RSOC targets must be nonnegative"))
+        kind === :quadratic_epigraph && (length(ts) == 1 && isempty(rs) ||
+            throw(ArgumentError("quadratic epigraph requires one target")))
+        kind === :perspective_ls && (length(ts) == 1 && length(rs) == 1 ||
+            throw(ArgumentError("perspective least-squares requires target and datum")))
+        kind === :many_qr3 && (length(ts) == 16 && isempty(rs) ||
+            throw(ArgumentError("many-QR3 requires exactly 16 targets")))
+        generator_version > 0 || throw(ArgumentError("generator version must be positive"))
+        new(id, kind, ts, rs, Rational{Int}.(primal_witness), objective,
+            generator_id, Int(generator_version))
+    end
+end
+
+function _put!(io::IO, artifact::RSOCArtifact)
+    _put!(io, (:RSOCArtifact, artifact.id, artifact.kind, artifact.targets,
+        artifact.rhs, artifact.primal_witness, artifact.objective,
+        artifact.generator_id, artifact.generator_version))
+end
+
+struct SDPArtifact <: AbstractV2SmallArtifact
+    id::Symbol
+    kind::Symbol
+    order::Int
+    blocks::Int
+    matrices::Vector{Matrix{Rational{Int}}}
+    primal_witness::Vector{Matrix{Rational{Int}}}
+    objective::Rational{Int}
+    dual_parameter::Rational{Int}
+    generator_id::Symbol
+    generator_version::Int
+    function SDPArtifact(id::Symbol, kind::Symbol, order::Integer, blocks::Integer,
+                         matrices, primal_witness;
+                         objective::Rational{Int}=0//1,
+                         dual_parameter::Rational{Int}=0//1,
+                         generator_id::Symbol=:sdp_small_v1,
+                         generator_version::Integer=1)
+        kind in (:weighted_trace, :maxcut_k4, :multiblock) ||
+            throw(ArgumentError("unsupported SDP small-tranche kind $kind"))
+        order > 0 && blocks > 0 || throw(ArgumentError("SDP dimensions must be positive"))
+        ms = [Rational{Int}.(m) for m in matrices]
+        ws = [Rational{Int}.(m) for m in primal_witness]
+        length(ms) == blocks == length(ws) ||
+            throw(ArgumentError("SDP block count mismatch"))
+        all(size(m) == (order, order) for m in ms) ||
+            throw(ArgumentError("SDP coefficient order mismatch"))
+        all(size(m) == (order, order) for m in ws) ||
+            throw(ArgumentError("SDP witness order mismatch"))
+        kind === :maxcut_k4 && (order == 4 && blocks == 1 ||
+            throw(ArgumentError("Max-Cut K4 requires one order-4 block")))
+        kind === :weighted_trace && (order == 4 && blocks == 1 ||
+            throw(ArgumentError("weighted trace requires one order-4 block")))
+        kind === :multiblock && (order == 3 && blocks == 8 ||
+            throw(ArgumentError("multi-block SDP requires eight order-3 blocks")))
+        generator_version > 0 || throw(ArgumentError("generator version must be positive"))
+        new(id, kind, Int(order), Int(blocks), ms, ws, objective, dual_parameter,
+            generator_id, Int(generator_version))
+    end
+end
+
+function _put!(io::IO, artifact::SDPArtifact)
+    _put!(io, (:SDPArtifact, artifact.id, artifact.kind, artifact.order,
+        artifact.blocks, artifact.matrices, artifact.primal_witness,
+        artifact.objective, artifact.dual_parameter, artifact.generator_id,
+        artifact.generator_version))
+end
+
+function _typed_facts(artifact::AbstractV2SmallArtifact, model, precision_bits, generator,
+                      target_dimension)
+    fp = _native_model_fingerprint(model)
+    return (artifact_fingerprint=_hex(artifact), model_fingerprint=fp,
+        model_contract_fingerprint=fp, model_precision_bits=precision_bits,
+        source_dimension=target_dimension, target_dimension=target_dimension,
+        generator=generator)
+end
+
+function _typed_rsoc_build(artifact::RSOCArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
+    model = T === BigFloat ? SDPX.Model(BigFloat; precision_bits, name=String(artifact.id)) :
+        SDPX.Model(T; name=String(artifact.id))
+    witness = artifact.primal_witness
+    objective = zero(T)
+    if artifact.kind === :quadratic_epigraph
+        u = SDPX.variable!(model, :u, 1; domain=SDPX.Reals())
+        v = SDPX.variable!(model, :v, 1; domain=SDPX.Reals())
+        target = _Tq(T, artifact.targets[1])
+        SDPX.constraint!(model, :quadratic_epigraph, (u[1], v[1], target),
+            SDPX.RotatedLorentzCone())
+        # Normalize the denominator v=1; the RSOC epigraph then has the
+        # exact rational minimizer u=1/2 for target 1.
+        SDPX.constraint!(model, :quadratic_fix_v, v[1] - one(T), SDPX.ZeroCone())
+        objective = u[1] + v[1]
+    elseif artifact.kind === :perspective_ls
+        t = SDPX.variable!(model, :t, 1; domain=SDPX.Reals())
+        v = SDPX.variable!(model, :v, 1; domain=SDPX.Reals())
+        u = SDPX.variable!(model, :u, 1; domain=SDPX.Reals())
+        y = _Tq(T, artifact.rhs[1])
+        target = _Tq(T, artifact.targets[1])
+        # `target` is an exact residual offset; the small case uses zero but
+        # still consumes it in the lowered affine expression and fingerprint.
+        SDPX.constraint!(model, :perspective_ls,
+            (t[1], v[1], u[1] - y * v[1] + target), SDPX.RotatedLorentzCone())
+        _fix!(model, :perspective_fix_v, v[1], one(T), T)
+        _fix!(model, :perspective_fix_u, u[1], zero(T), T)
+        objective = t[1]
+    else
+        left = SDPX.variable!(model, :left, 16; domain=SDPX.Reals())
+        right = SDPX.variable!(model, :right, 16; domain=SDPX.Reals())
+        for i in 1:16
+            SDPX.constraint!(model, Symbol(:qr3_, i),
+                (left[i], right[i], _Tq(T, artifact.targets[i])),
+                SDPX.RotatedLorentzCone())
+            SDPX.constraint!(model, Symbol(:qr3_fix_right_, i),
+                right[i] - one(T), SDPX.ZeroCone())
+            objective += left[i] + right[i]
+        end
+    end
+    SDPX.objective!(model, SDPX.Minimize(), objective)
+    transform = V2Transform(:rsoc_small_artifact, :sdpx_cone_program,
+        :rsoc_exact_epigraph, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    oracle = V2RSOCOracle(artifact)
+    facts = _typed_facts(artifact, model, precision_bits, artifact.generator_id,
+        sum(v.length for v in model.variable_blocks))
+    return V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
+end
+
+function _typed_sdp_build(artifact::SDPArtifact, ::Type{T}; precision_bits::Int=256) where {T<:AbstractFloat}
+    model = T === BigFloat ? SDPX.Model(BigFloat; precision_bits, name=String(artifact.id)) :
+        SDPX.Model(T; name=String(artifact.id))
+    X = [SDPX.variable!(model, Symbol(:X_, block), artifact.order, artifact.order;
+            domain=SDPX.PSDCone()) for block in 1:artifact.blocks]
+    objective = zero(T)
+    if artifact.kind === :weighted_trace
+        # One trace equality tr(E11*X)=X11=1 fixes the planted trace
+        # functional; identity C gives exact weighted-trace optimum 1.
+        SDPX.constraint!(model, :weighted_trace_normalization,
+            X[1][1, 1] - one(T), SDPX.ZeroCone())
+        for i in 1:artifact.order
+            objective += _Tq(T, artifact.matrices[1][i, i]) * X[1][i, i]
+        end
+    elseif artifact.kind === :maxcut_k4
+        for i in 1:artifact.order
+            SDPX.constraint!(model, Symbol(:maxcut_diag_, i),
+                X[1][i, i] - one(T), SDPX.ZeroCone())
+        end
+        objective = -T(3)
+        for i in 1:artifact.order, j in (i + 1):artifact.order
+            coefficient = _Tq(T, artifact.matrices[1][i, j])
+            objective += (X[1][i, j] + X[1][j, i]) * coefficient
+        end
+    else
+        SDPX.constraint!(model, :multiblock_coupling,
+            sum(X[block][1, 1] for block in 1:artifact.blocks) - T(artifact.blocks),
+            SDPX.ZeroCone())
+        for block in 1:artifact.blocks, i in 1:artifact.order
+            objective += _Tq(T, artifact.matrices[block][i, i]) * X[block][i, i]
+        end
+    end
+    SDPX.objective!(model, SDPX.Minimize(), objective)
+    transform = V2Transform(:sdp_small_artifact, :sdpx_cone_program,
+        :psd_exact_gram, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    oracle = V2SDPOracle(artifact)
+    facts = _typed_facts(artifact, model, precision_bits, artifact.generator_id,
+        sum(v.length for v in model.variable_blocks))
+    return V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
+end
+
+struct V2RSOCOracle
+    artifact::RSOCArtifact
+end
+function _put!(io::IO, oracle::V2RSOCOracle)
+    _put!(io, (:V2RSOCOracle, oracle.artifact))
+end
+function (oracle::V2RSOCOracle)(built, certificate)
+    a = oracle.artifact
+    built.source_artifact === a || return false
+    fp = _native_model_fingerprint(built.problem)
+    fp == built.facts.model_fingerprint == built.facts.model_contract_fingerprint || return false
+    w = a.primal_witness
+    if a.kind === :quadratic_epigraph
+        length(w) == 2 && w == Rational{Int}[1//2, 1] || return false
+        2 * w[1] * w[2] >= a.targets[1]^2 || return false
+    elseif a.kind === :perspective_ls
+        length(w) == 3 && w == Rational{Int}[1//2, 1, 0] || return false
+        2 * w[1] * w[2] >= (w[3] - a.rhs[1] * w[2] + a.targets[1])^2 || return false
+    else
+        length(w) == 32 && all(w[2i-1] == 1//2 && w[2i] == 1//1 for i in 1:16) || return false
+        all(2 * w[2i-1] * w[2i] >= a.targets[i]^2 for i in 1:16) || return false
+    end
+    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
+    isfinite(value) && abs(value - BigFloat(a.objective)) <= BigFloat("5e-7")
+end
+
+function _rank_one_psd(w::Matrix{Rational{Int}})
+    size(w, 1) == size(w, 2) || return false
+    issymmetric(w) || return false
+    diagonal = [w[i, i] for i in axes(w, 1)]
+    all(>=(0//1), diagonal) || return false
+    all(w[i, j]^2 <= w[i, i] * w[j, j] for i in axes(w, 1), j in axes(w, 2)) || return false
+    # The supplied witnesses are factorized rank-one Gram matrices.  Checking
+    # every 2x2 minor plus the explicit Gram identity below is exact.
+    z = Rational{Int}[w[1, i] for i in axes(w, 2)]
+    w == z * transpose(z)
+end
+
+struct V2SDPOracle
+    artifact::SDPArtifact
+end
+function _put!(io::IO, oracle::V2SDPOracle)
+    _put!(io, (:V2SDPOracle, oracle.artifact))
+end
+function (oracle::V2SDPOracle)(built, certificate)
+    a = oracle.artifact
+    built.source_artifact === a || return false
+    fp = _native_model_fingerprint(built.problem)
+    fp == built.facts.model_fingerprint == built.facts.model_contract_fingerprint || return false
+    all(_rank_one_psd, a.primal_witness) || return false
+    if a.kind === :weighted_trace
+        a.primal_witness[1][1, 1] == 1//1 || return false
+        sum(a.matrices[1][i, i] * a.primal_witness[1][i, i]
+            for i in 1:a.order) == a.objective || return false
+        a.dual_parameter == 1//1 || return false # S=I-E11 is PSD
+    elseif a.kind === :maxcut_k4
+        a.primal_witness[1] == Rational{Int}[1 1 -1 -1;
+                                                1 1 -1 -1;
+                                               -1 -1 1 1;
+                                               -1 -1 1 1] || return false
+        a.objective == -4//1 || return false
+        a.dual_parameter == 1//4 || return false # Diag(1/4)-C is PSD
+    else
+        all(m[1, 1] == 1//1 for m in a.primal_witness) || return false
+        sum(sum(diag(m)) for m in a.primal_witness) == a.objective || return false
+        a.dual_parameter == 1//1 || return false # each I-E11 block is PSD
+    end
+    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
+    isfinite(value) && abs(value - BigFloat(a.objective)) <= BigFloat("5e-7")
+end
+
+function _rsoc_artifacts()
+    [RSOCArtifact(:v2_rsoc_quadratic_epigraph_small, :quadratic_epigraph,
+        Rational{Int}[1], Rational{Int}[]; primal_witness=Rational{Int}[1//2, 1], objective=3//2),
+     RSOCArtifact(:v2_rsoc_perspective_ls_small, :perspective_ls,
+        Rational{Int}[0], Rational{Int}[1]; primal_witness=Rational{Int}[1//2, 1, 0], objective=1//2),
+     RSOCArtifact(:v2_rsoc_many_qr3_small, :many_qr3,
+        fill(1//1, 16), Rational{Int}[]; primal_witness=vcat(fill(Rational{Int}[1//2, 1], 16)...), objective=24//1)]
+end
+
+function _sdp_artifacts()
+    weighted = Rational{Int}[1 0 0 0; 0 0 0 0; 0 0 0 0; 0 0 0 0]
+    maxcut = Rational{Int}[0 1//4 1//4 1//4; 1//4 0 1//4 1//4;
+                           1//4 1//4 0 1//4; 1//4 1//4 1//4 0]
+    identity4 = Matrix{Rational{Int}}(I, 4, 4)
+    identity3 = Matrix{Rational{Int}}(I, 3, 3)
+    [SDPArtifact(:v2_sdp_weighted_trace_small, :weighted_trace, 4, 1,
+         [identity4], [weighted]; objective=1//1, dual_parameter=1//1),
+     SDPArtifact(:v2_sdp_maxcut_k4_small, :maxcut_k4, 4, 1,
+         [maxcut], [Rational{Int}[1 1 -1 -1; 1 1 -1 -1; -1 -1 1 1; -1 -1 1 1]]; objective=-4//1, dual_parameter=1//4),
+     SDPArtifact(:v2_sdp_multiblock_small, :multiblock, 3, 8,
+         [identity3 for _ in 1:8], [Rational{Int}[1 0 0; 0 0 0; 0 0 0] for _ in 1:8];
+         objective=8//1, dual_parameter=1//1)]
+end
+
+function _typed_optimal_interval(objective::Rational{Int})
+    setprecision(BigFloat, 256) do
+        value = BigFloat(numerator(objective)) / BigFloat(denominator(objective))
+        (string(value - BigFloat("5e-7")), string(value + BigFloat("5e-7")))
+    end
+end
+
+function _rsoc_or_sdp_catalog(name::Symbol, family_name::Symbol, artifacts, builder, oracle_type,
+                              transform_id::Symbol)
+    transform = V2Transform(family_name === :rsoc ? :rsoc_small_artifact : :sdp_small_artifact,
+        :sdpx_cone_program, transform_id, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    family = V2Family(family_name, V2Axis[],
+        (instance, precision) -> begin
+            built = builder(instance.payload, precision.arithmetic; precision_bits=precision.bits)
+            V2Built(built.problem, built.oracle, built.source_artifact,
+                input_fingerprint(instance), built.transform,
+                merge(built.facts, (artifact_fingerprint=_hex(instance.payload),)), built.resource)
+        end,
+        (built, cert) -> built.oracle(built, cert),
+        (instance, result) -> result.validation, (:identity,))
+    instances = V2Instance[]
+    for artifact in artifacts
+        reference = V2Reference(:optimal, :optimal, _typed_optimal_interval(artifact.objective),
+            oracle_type(artifact), "independent exact conic witness and dual proof";
+            expected_status=:optimal, disposition=:PASS)
+        push!(instances, V2Instance(artifact.id, family_name,
+            only(filter(t -> t.name === :small, _TIERS)), (kind=artifact.kind,), :train,
+            "general-v2/$(family_name)/$(artifact.kind)/small",
+            (generator=artifact.generator_id, version=artifact.generator_version,
+             transform=transform, solve_eligible=true), _hex(artifact),
+            (wall_seconds=20, memory_bytes=4 * 1024^3), reference, artifact))
+    end
+    return V2Catalog(name, 1, [family], instances,
+        (train=[x.id for x in instances], holdout=Symbol[], sentinel=Symbol[]))
+end
+
+function rsoc_tranche_catalog()
+    _rsoc_or_sdp_catalog(:general_v2_rsoc_tranche, :rsoc, _rsoc_artifacts(),
+        _typed_rsoc_build, V2RSOCOracle, :rsoc_exact_epigraph)
+end
+function sdp_tranche_catalog()
+    _rsoc_or_sdp_catalog(:general_v2_sdp_tranche, :sdp, _sdp_artifacts(),
+        _typed_sdp_build, V2SDPOracle, :psd_exact_gram)
+end

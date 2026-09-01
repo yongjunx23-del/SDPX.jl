@@ -9,8 +9,10 @@ independent oracle, certificate kind, and Float64 solve have all passed.
 ### Typed source-artifact architecture
 
 The benchmark V2 layer now exposes `AbstractV2SmallArtifact` and exact-source
-contracts for `LPArtifact`, `SOCPArtifact`, and `IllConditionedArtifact`.
-Each constructor validates kind, dimensions, cone partition, expected status,
+contracts for `LPArtifact`, `SOCPArtifact`, `RSOCArtifact`, `SDPArtifact`,
+and `IllConditionedArtifact`. RSOC and SDP now have family-specific typed
+lowerings and independent exact witness/dual oracles for the certified cases
+listed below. Each constructor validates kind, dimensions, cone partition, expected status,
 certificate kind, and retains rational coefficients, RHS/objective data, and
 independent witness fields. Their canonical fixed-endian fingerprints are
 explicitly encoded and tested. These types are architecture contracts only;
@@ -88,6 +90,8 @@ add metadata rows:
 AbstractV2SmallArtifact
   LPArtifact(kind, rational A/b/c, cone partition, planted primal/dual oracle)
   SOCPArtifact(kind, rational block A/b/c, SOC partitions, oracle)
+  RSOCArtifact(kind, exact rational targets/datum, planted witness, oracle)
+  SDPArtifact(kind, exact rational coefficient/witness matrices, dual proof, oracle)
   IllConditionedArtifact(base_kind, exact rational/scaled coefficients, oracle)
 ```
 
@@ -117,7 +121,9 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 | Nonpositive sign sentinel | **certified tranche** | `v2_lp_nonpositive_small`: typed nonpositive partition, Float64 status/certificate/oracle gates pass |
 | SOCP: single large SOC, Q3 load sharing | **certified tranche** | `socp_tranche_catalog()`: two exact typed artifacts with independent SOC primal/dual oracle and Float64 certificate gates |
 | SOCP: planted portfolio, simplex projection, ill-scaled SOC | open | Current artifact contract lacks the free/nonnegative auxiliary-variable semantics needed for faithful portfolio/projection lowerings; ill-scaled candidate probed `numerical_breakdown`; no placeholders |
-| RSOC, SDP, EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
+| RSOC: quadratic epigraph, perspective LS, many QR3 | **certified tranche** | `rsoc_tranche_catalog()`: exact rational targets, public RotatedLorentzCone lowerings, rational planted witnesses, and objective/certificate gates pass (1.5 / 0.5 / 24) |
+| SDP: weighted trace, Max-Cut K4, eight PSD(3) multiblock | **certified tranche** | `sdp_tranche_catalog()`: factorized rational Gram witnesses and independent dual PSD proofs; Float64 objective/certificate gates pass (1 / -4 / 8) |
+| EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
 | Ill-conditioned diagonal scale ladder | **certified tranche** | `ill_conditioned_tranche_catalog()`: exact row scaling D=diag(10^-6,10^6), independently certified Float64 optimum -5; source/model fingerprints and original-coordinate oracle pass |
 | Ill-conditioned near-rank-loss LP | **certified tranche** | exact row3=row1+10^-8*row2 rational artifact; independent primal/dual oracle and Float64 certificate pass (objective -1.9999999928894998 within 5e-7) |
 | Ill-conditioned near-boundary LP | open | exact 10^-8 slack artifact was probed but solver returned `numerical_breakdown`; no registration |
@@ -133,14 +139,16 @@ small-tier inventory.
 2. External holdout files, immutable checksums, independent references, and parity.
 3. Full fresh-process/peak-RSS/schema-v9 lifecycle pipeline.
 4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
-5. Certified LP/SOCP/ill-conditioned first tranche: six LP kinds (box,
+5. Certified LP/SOCP/RSOC/SDP/ill-conditioned first tranche: six LP kinds (box,
    sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible Farkas,
-   and dual-infeasible improving ray), four SOCP kinds (single large SOC,
-   Q3 load sharing), plus two exact
-   ill-conditioned LPs (diagonal-scale and near-rank-loss) are solve-eligible
-   with independent Float64 receipts. Duplicate/rank-deficient and
-   near-boundary LPs and ill-scaled SOC (solver `numerical_breakdown`),
-   Hilbert-6 SDP, boundary SOC, high-range EXP/Power kinds remain open rather
+   and dual-infeasible improving ray), two SOCP kinds (single large SOC, Q3
+   load sharing), three RSOC cases (quadratic epigraph, perspective LS, many
+   QR3), three SDP cases (weighted trace, Max-Cut K4, eight PSD(3)
+   multiblock), and two exact ill-conditioned LPs (diagonal-scale and
+   near-rank-loss) are solve-eligible with independent Float64 receipts.
+   Duplicate/rank-deficient and near-boundary LPs and ill-scaled SOC (solver
+   `numerical_breakdown`), SOCP portfolio/simplex-projection, Hilbert-6 SDP,
+   boundary SOC, high-range EXP/Power, and mixed kinds remain open rather
    than represented by placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
