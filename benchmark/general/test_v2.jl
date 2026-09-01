@@ -202,7 +202,7 @@ end
 
 @testset "typed LP lowering has an independent certified oracle" begin
     catalog = lp_tranche_catalog()
-    @test length(catalog.instances) == 3
+    @test length(catalog.instances) == 5
     @test all(instance.payload isa LPArtifact for instance in catalog.instances)
     precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
     expected = Dict(:box => -5.0, :sparse_planted_kkt => -4.0, :nonpositive => -2.0)
@@ -214,11 +214,13 @@ end
         @test built.facts.artifact_fingerprint == instance.checksum
         @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
         result = run_instance(catalog, instance, precision)
-        @test result.status === :optimal
-        @test result.certificate_valid
-        @test result.validation.reference
-        @test result.validation.failures == Symbol[]
-        @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=1e-7, rtol=0)
+        if instance.payload.expected_status === :optimal
+            @test result.status === :optimal
+            @test result.certificate_valid
+            @test result.validation.reference
+            @test result.validation.failures == Symbol[]
+            @test isapprox(parse(Float64, result.objective), expected[instance.payload.kind]; atol=1e-7, rtol=0)
+        end
         @test result.core_seconds !== nothing
     end
     # The sign-oriented case must use the public Nonpositive domain rather
@@ -226,6 +228,25 @@ end
     nonpositive = only(filter(instance -> instance.payload.kind === :nonpositive, catalog.instances))
     @test nonpositive.payload.cone_partition == [:nonpositive]
     @test run_instance(catalog, nonpositive, precision).validation.failures == Symbol[]
+
+    # Non-optimal LPs use explicit ray/Farkas contracts, never an objective
+    # interval. Their public result must carry the matching status and valid
+    # original-coordinate certificate.
+    infeasible = only(filter(instance -> instance.payload.kind === :primal_infeasible, catalog.instances))
+    @test infeasible.reference.certificate_kind === :farkas
+    infeasible_result = run_instance(catalog, infeasible, precision)
+    @test infeasible_result.status === :primal_infeasible
+    @test infeasible_result.certificate_valid
+    @test infeasible_result.validation.reference
+    @test infeasible_result.validation.failures == Symbol[]
+    unbounded = only(filter(instance -> instance.payload.kind === :unbounded, catalog.instances))
+    @test unbounded.reference.expected_status === :dual_infeasible
+    @test unbounded.reference.certificate_kind === :ray
+    unbounded_result = run_instance(catalog, unbounded, precision)
+    @test unbounded_result.status === :dual_infeasible
+    @test unbounded_result.certificate_valid
+    @test unbounded_result.validation.reference
+    @test unbounded_result.validation.failures == Symbol[]
 
     # A mutation of the lowered objective must fail the independent oracle,
     # even if a caller supplies a certificate with the expected objective.

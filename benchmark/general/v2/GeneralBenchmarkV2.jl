@@ -793,8 +793,9 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     # passes; a prior numerical failure remains uncertified.
     observed_status = SDPX.status(solved)
     cert_ok = instance.reference.status === :build_only ||
-        (instance.reference.expected_status === :primal_infeasible ?
-            (observed_status === :primal_infeasible && oracle_ok) :
+        (instance.reference.expected_status in (:primal_infeasible, :dual_infeasible) ?
+            (observed_status === instance.reference.expected_status &&
+             certificate.valid && oracle_ok) :
             certificate.valid && certificate_gate(certificate, precision))
     failures = Symbol[]
     interval_ok || push!(failures, :objective_interval)
@@ -806,8 +807,11 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     reference_ok = oracle_ok && interval_ok && status_ok && cert_ok
     semantic_ok = reference_ok
     cert_kind_ok = instance.reference.status === :build_only ||
-        (instance.reference.expected_status === :primal_infeasible ?
-            instance.reference.certificate_kind in (:farkas, :ray) :
+        (instance.reference.expected_status in (:primal_infeasible, :dual_infeasible) ?
+            ((instance.reference.expected_status === :primal_infeasible &&
+              instance.reference.certificate_kind === :farkas) ||
+             (instance.reference.expected_status === :dual_infeasible &&
+              instance.reference.certificate_kind === :ray)) :
             instance.reference.certificate_kind === :optimal)
     prior_failure = instance.reference.disposition in (:XFAIL, :FAIL)
     disposition = classify_disposition(instance.reference.expected_status, prior_failure,

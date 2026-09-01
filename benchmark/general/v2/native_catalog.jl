@@ -855,6 +855,45 @@ function (oracle::V2LPOracle)(built, certificate)
     actual_fp == built.facts.model_fingerprint || return false
     expected_fp = get(built.facts, :model_contract_fingerprint, "")
     actual_fp == expected_fp || return false
+
+    # Non-optimal contracts use exact normalized certificates rather than an
+    # objective comparison.  The returned public certificate still supplies
+    # the original-coordinate residual/separation gate in run_instance.
+    if artifact.expected_status === :primal_infeasible
+        y = artifact.dual_witness
+        length(y) == size(artifact.A, 1) || return false
+        # Farkas: A' y lies in the dual cone and b' y is strictly negative.
+        for col in axes(artifact.A, 2)
+            lhs = sum(BigFloat(artifact.A[row, col]) * y[row]
+                      for row in axes(artifact.A, 1))
+            domain = artifact.cone_partition[col]
+            domain === :nonnegative && lhs < 0 && return false
+            domain === :nonpositive && lhs > 0 && return false
+            domain === :free && !iszero(lhs) && return false
+        end
+        pairing = sum(BigFloat(artifact.b[row]) * y[row]
+                      for row in axes(artifact.A, 1))
+        return pairing < 0
+    elseif artifact.expected_status === :dual_infeasible
+        d = artifact.primal_witness
+        length(d) == size(artifact.A, 2) || return false
+        # Improving recession ray: A d = 0, d lies in the primal cone, and
+        # c' d is strictly negative for this minimization LP.
+        for row in axes(artifact.A, 1)
+            sum(BigFloat(artifact.A[row, col]) * d[col]
+                for col in axes(artifact.A, 2)) == 0 || return false
+        end
+        for (value, domain) in zip(d, artifact.cone_partition)
+            domain === :nonnegative && value < 0//1 && return false
+            domain === :nonpositive && value > 0//1 && return false
+            domain === :free || continue
+        end
+        improvement = sum(BigFloat(artifact.c[col]) * d[col]
+                          for col in axes(artifact.A, 2))
+        return improvement < 0
+    end
+
+    artifact.expected_status === :optimal || return false
     witness = artifact.primal_witness
     length(witness) == size(artifact.A, 2) || return false
     # Check the source witness in exact arithmetic against every lowered row.
@@ -975,13 +1014,38 @@ function _lp_nonpositive_artifact()
         dual_witness=Rational{Int}[1], objective=-2//1)
 end
 
+function _lp_primal_infeasible_artifact()
+    # Contradictory equalities x=1 and x=2 with x >= 0.  The independent
+    # Farkas multiplier y=(1,-1) annihilates A and has b' y=-1 < 0.
+    A = reshape(Rational{Int}[1, 1], 2, 1)
+    b = Rational{Int}[1, 2]
+    c = Rational{Int}[0]
+    LPArtifact(:v2_lp_primal_infeasible_small, :primal_infeasible, A, b, c;
+        primal_witness=Rational{Int}[], dual_witness=Rational{Int}[1, -1],
+        objective=0//1, expected_status=:primal_infeasible,
+        certificate_kind=:farkas)
+end
+
+function _lp_unbounded_artifact()
+    # min -x₁ subject to x₁-x₂=0 and x >= 0.  The exact improving ray
+    # d=(1,1) satisfies A*d=0 and c'd=-1.
+    A = Rational{Int}[1 -1]
+    b = Rational{Int}[0]
+    c = Rational{Int}[-1, 0]
+    LPArtifact(:v2_lp_unbounded_small, :unbounded, A, b, c;
+        primal_witness=Rational{Int}[1, 1], dual_witness=Rational{Int}[],
+        objective=0//1, expected_status=:dual_infeasible,
+        certificate_kind=:ray)
+end
+
 function lp_tranche_catalog()
     # Only artifacts with an observed Float64 certificate may enter this
     # catalog.  The duplicate/rank-deficient construction is intentionally
     # left open: the current sparse route reports numerical_breakdown, so it
     # must not be mislabeled solve-eligible.
     artifacts = [_lp_box_artifact(), _lp_sparse_planted_artifact(),
-        _lp_nonpositive_artifact()]
+        _lp_nonpositive_artifact(), _lp_primal_infeasible_artifact(),
+        _lp_unbounded_artifact()]
     transforms = V2Transform(:lp_small_artifact, :sdpx_cone_program,
         :lp_standard_form, 1, :identity;
         validation_receipts=(coefficient_match=true, source_reconstruction=true))
@@ -989,6 +1053,8 @@ function lp_tranche_catalog()
         "box: x+s=u with c=(-1,-2,0,0); y=(-1,-2) proves c'x=b'y=-5",
         "sparse planted KKT: A'x dual inequality and y=(-1,-2) prove c'x=b'y=-4",
         "nonpositive sign sentinel: x=-2 with y=1 is the sign-flipped nonnegative optimum",
+        "primal infeasible: contradictory x=1 and x=2 equalities with Farkas y=(1,-1)",
+        "unbounded: d=(1,1) is an improving recession ray for min -x1",
     ]
     families = V2Family(:lp, V2Axis[],
         (instance, precision) -> begin
@@ -1002,11 +1068,12 @@ function lp_tranche_catalog()
         (instance, result) -> result.validation, (:identity,))
     instances = V2Instance[]
     for (index, artifact) in enumerate(artifacts)
-        lower = string(BigFloat(artifact.objective) - BigFloat("1e-7"))
-        upper = string(BigFloat(artifact.objective) + BigFloat("1e-7"))
-        reference = V2Reference(:optimal, :optimal, (lower, upper),
-            V2LPOracle(artifact), descriptions[index];
-            expected_status=:optimal, disposition=:PASS)
+        interval = artifact.expected_status === :optimal ?
+            (string(BigFloat(artifact.objective) - BigFloat("1e-7")),
+             string(BigFloat(artifact.objective) + BigFloat("1e-7"))) : nothing
+        reference = V2Reference(artifact.expected_status, artifact.certificate_kind,
+            interval, V2LPOracle(artifact), descriptions[index];
+            expected_status=artifact.expected_status, disposition=:PASS)
         push!(instances, V2Instance(artifact.id, :lp,
             only(filter(t -> t.name === :small, _TIERS)),
             (kind=artifact.kind,), :train,

@@ -87,15 +87,15 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 |---|---|---|
 | LP: box, sparse planted KKT | **certified tranche** | `lp_tranche_catalog()`: Float64 status/certificate/oracle gates pass; receipts recorded above |
 | LP: duplicate/rank-deficient | open | exact lowering exists as a probe, but current sparse route returns `numerical_breakdown`; no registration |
-| LP: primal infeasible | open | implement exact Farkas-row artifact and solver-status gate |
-| LP: unbounded | open | implement homogeneous recession ray and improving-inner-product gate |
-| LP: Chebyshev | open | add epigraph/slack variables and analytic minimax oracle |
+| LP: primal infeasible | **certified tranche** | typed Farkas-row artifact, status gate, exact contradiction oracle, and public original-coordinate certificate pass |
+| LP: unbounded | **certified tranche** | typed homogeneous recession ray, dual-infeasible status gate, exact improving-inner-product oracle, and public original-coordinate certificate pass |
+| LP: Chebyshev | open | add epigraph/slack variables and analytic minimax oracle; current artifact is equality-only |
 | Nonpositive sign sentinel | **certified tranche** | `v2_lp_nonpositive_small`: typed nonpositive partition, Float64 status/certificate/oracle gates pass |
 | SOCP small kinds | open | typed SOC block artifact; existing toy artifact is insufficient for Q33/16 Q3 |
 | RSOC, SDP, EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
 | Ill-conditioned Hilbert/scale/boundary cases | open | exact coefficient artifacts plus conditioning-specific original-coordinate oracles |
 
-No placeholder rows were added. The existing native catalog remains the only
+No placeholder rows were added. The typed LP tranche is the current
 solve-eligible V2 corpus; its scope must not be described as the reviewed full
 small-tier inventory.
 
@@ -105,11 +105,11 @@ small-tier inventory.
 2. External holdout files, immutable checksums, independent references, and parity.
 3. Full fresh-process/peak-RSS/schema-v9 lifecycle pipeline.
 4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
-5. Certified LP/SOCP/ill-conditioned first tranche: three LP kinds (box,
-   sparse planted KKT, and Nonpositive sign) are solve-eligible with independent
-   Float64 receipts. Duplicate/rank-deficient, ray contracts, Chebyshev,
-   SOCP, and ill-conditioned kinds remain open rather than represented by
-   placeholders.
+5. Certified LP/SOCP/ill-conditioned first tranche: five LP kinds (box,
+   sparse planted KKT, Nonpositive sign, primal-infeasible Farkas, and
+   dual-infeasible improving ray) are solve-eligible with independent Float64
+   receipts. Duplicate/rank-deficient, Chebyshev, SOCP, and ill-conditioned
+   kinds remain open rather than represented by placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none
