@@ -512,3 +512,33 @@ end
     @test bf256.facts.model_fingerprint != bf512.facts.model_fingerprint
     @test bf256.transform == train_sdp.provenance.transform
 end
+
+@testset "typed EXP and Power small tranche" begin
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    expcat = exp_tranche_catalog()
+    @test length(expcat.instances) == 1
+    @test expcat.instances[1].payload isa ExpArtifact
+    built, elapsed = build_instance(expcat, expcat.instances[1], precision)
+    @test elapsed >= 0
+    result = run_instance(expcat, expcat.instances[1], precision)
+    @test result.status === :optimal
+    @test result.certificate_valid
+    @test result.validation.reference
+    @test result.validation.failures == Symbol[]
+    @test result.core_seconds !== nothing
+
+    # These typed candidates are intentionally not catalog rows until a
+    # native certificate-valid receipt exists (the current route breaks down).
+    @test ExpArtifact(:exp_entropy_probe, :entropy, [0//1, 0//1], [1//2, 1//2]; n=2).n == 2
+    @test ExpArtifact(:exp_lse_probe, :logsumexp, [0//1, 0//1], [1//2, 1//2]; n=2).kind === :logsumexp
+
+    powercat = power_tranche_catalog()
+    @test isempty(powercat.instances)
+    @test reviewed_power_alphas() == Rational{Int}[1//2, 1//3, 2//3, 2//5, 7//10]
+    power_candidate = PowerArtifact(:power_probe, :separable_p_power,
+        reviewed_power_alphas(), fill(1//1, 5), Rational{Int}[], 5//1)
+    @test power_candidate isa PowerArtifact
+    weighted_candidate = PowerArtifact(:weighted_probe, :weighted_mean,
+        Rational{Int}[1//2], Rational{Int}[], Rational{Int}[1, 1], 1//1)
+    @test weighted_candidate.weighted_values == Rational{Int}[1, 1]
+end

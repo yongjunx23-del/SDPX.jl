@@ -1335,3 +1335,5 @@ function native_v2_catalog()
     return V2Catalog(:general_v2_native, 2, families, instances,
         (train=train, holdout=holdout, sentinel=sentinel))
 end
+
+include(joinpath(@__DIR__, "exp_power_catalog.jl"))

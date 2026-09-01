@@ -52,6 +52,24 @@ duality, and the returned objective. The duplicate/rank-deficient construction w
 probed but is not registered because the current solver reports `numerical_breakdown`;
 this is an explicit open item rather than a fabricated pass.
 
+### Typed EXP and Power lowerings
+
+`exp_power_catalog.jl` adds exact-rational `ExpArtifact` and `PowerArtifact`
+source contracts, fixed-endian fingerprints, public exponential/power-cone
+builders, and independent original-coordinate oracle checks. The only
+solve-eligible row in this slice is `v2_exp_unit_epigraph_small`: the exact
+constraint `(0,1,x) in K_exp` forces `x >= exp(0) = 1`, and the Float64
+certificate/oracle gate passes. Entropy and log-sum-exp retain typed candidates
+with high-precision analytic intervals (`-log(2)` and `log(2)`), but fresh
+native runs currently return `numerical_breakdown`; they are not registered.
+
+The Power layer retains the reviewed exact alphas `1/2, 1/3, 2/3, 2/5, 7/10`
+and typed separable/weighted-mean/sweep candidate contracts. Fresh native
+probes currently return `numerical_breakdown` or `numerical_failure` at the
+boundary, so no Power row is registered. This is an explicit solver/support
+finding, not a placeholder or a tolerance change. `reviewed_power_alphas()`
+exposes the exact rational list for the next lowering iteration.
+
 ### Architecture decision for the real inventory
 
 The current `V2ConicArtifact` is a deliberately small identity-contract artifact:
@@ -95,13 +113,16 @@ infeasibility status and whose `solve_eligible` receipt has passed.
 | LP: Chebyshev | **certified tranche** | `v2_lp_chebyshev_small`: equality-plus-slack epigraph with exact minimax oracle and Float64 certificate |
 | Nonpositive sign sentinel | **certified tranche** | `v2_lp_nonpositive_small`: typed nonpositive partition, Float64 status/certificate/oracle gates pass |
 | SOCP small kinds | open | typed SOC block artifact; existing toy artifact is insufficient for Q33/16 Q3 |
-| RSOC, SDP, EXP, Power, mixed | open | separate typed builders and independent dual-oracle machinery required |
+| RSOC, SDP, mixed | open | separate typed builders and independent dual-oracle machinery required |
+| EXP unit epigraph | **certified tranche** | `v2_exp_unit_epigraph_small`: exact `(0,1,x)` exponential cone, optimum 1, Float64 certificate/oracle gate passes |
+| EXP entropy/log-sum-exp/fitting | open | entropy/log-sum-exp typed candidates have high-precision intervals but native runs break down; fitting lowering remains unsupported; no rows registered |
+| Power separable/weighted-mean/alpha-sweep | open | exact-alpha typed candidates and builders exist; native boundary probes fail certificate/status, no rows registered |
 | Ill-conditioned diagonal scale ladder | **certified tranche** | `ill_conditioned_tranche_catalog()`: exact row scaling D=diag(10^-6,10^6), independently certified Float64 optimum -5; source/model fingerprints and original-coordinate oracle pass |
 | Ill-conditioned near-rank-loss LP | **certified tranche** | exact row3=row1+10^-8*row2 rational artifact; independent primal/dual oracle and Float64 certificate pass (objective -1.9999999928894998 within 5e-7) |
 | Ill-conditioned near-boundary LP | open | exact 10^-8 slack artifact was probed but solver returned `numerical_breakdown`; no registration |
 | Ill-conditioned Hilbert-6 SDP/boundary SOC/high-range EXP/Power | open | exact coefficient artifacts plus PSD/SOCP/EXP/Power-specific original-coordinate oracles; no placeholders |
 
-No placeholder rows were added. The typed LP tranche is the current
+No placeholder rows were added. The typed LP plus EXP unit tranche is the current
 solve-eligible V2 corpus; its scope must not be described as the reviewed full
 small-tier inventory.
 
@@ -111,13 +132,15 @@ small-tier inventory.
 2. External holdout files, immutable checksums, independent references, and parity.
 3. Full fresh-process/peak-RSS/schema-v9 lifecycle pipeline.
 4. Provider-backed Float64x2/x3/x4 and BigFloat256/512/1024 qualification.
-5. Certified LP/SOCP/ill-conditioned first tranche: six LP kinds (box,
-   sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible Farkas,
-   and dual-infeasible improving ray) plus two exact ill-conditioned LPs
-   (diagonal-scale and near-rank-loss) are solve-eligible with independent
-   Float64 receipts. Duplicate/rank-deficient and near-boundary LPs
-   (solver `numerical_breakdown`), SOCP, Hilbert-6 SDP, boundary SOC,
-   high-range EXP/Power kinds remain open rather than represented by placeholders.
+5. Certified LP/SOCP/ill-conditioned/EXP/Power first tranche: six LP kinds
+   (box, sparse planted KKT, Nonpositive sign, Chebyshev, primal-infeasible
+   Farkas, and dual-infeasible improving ray), two exact ill-conditioned LPs
+   (diagonal-scale and near-rank-loss), and one EXP unit epigraph are
+   solve-eligible with independent Float64 receipts. Duplicate/rank-deficient
+   and near-boundary LPs (solver `numerical_breakdown`), EXP entropy/
+   log-sum-exp/fitting, Power candidates, SOCP, Hilbert-6 SDP, boundary SOC,
+   and high-range EXP/Power kinds remain open rather than represented by
+   placeholders.
 
 The existing fail-closed behavior for unavailable BigFloat providers remains required;
 this note does not claim provider availability or scientific certification where none
