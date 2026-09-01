@@ -382,9 +382,17 @@ _canonical_bytes(value) = (io=IOBuffer(); _put!(io, value); take!(io))
 _hex(value) = bytes2hex(SHA.sha256(_canonical_bytes(value)))
 
 # Source-artifact metadata (generator IDs, issue/provenance notes) is not
-# mathematical input. Native artifacts specialize this hook below; generic
-# payloads conservatively remain fully represented.
-_math_payload(value) = value
+# mathematical input. Native artifacts specialize this hook below. The V1
+# compatibility payload is projected to its problem type and mathematical
+# parameters, deliberately excluding BenchmarkSpec ID/source/reference fields.
+function _math_payload(value)
+    if hasproperty(value, :problem) && hasproperty(value, :params) &&
+       hasproperty(value, :id) && hasproperty(value, :source)
+        return (problem_type=string(typeof(getproperty(value, :problem))),
+                params=getproperty(value, :params))
+    end
+    return value
+end
 
 # Pure mathematics deliberately excludes stable IDs, train/holdout/sentinel
 # split labels and provenance. This lets cross-split duplicate checks compare
@@ -434,14 +442,15 @@ function classify_disposition(expected_status::Symbol, prior_failure::Bool,
     if expected_status === :build_only
         return observed_status === :build_only && oracle_ok && interval_ok &&
                certificate_kind_ok ? :PASS : :FAIL
-    elseif expected_status === :primal_infeasible && prior_observed_status !== nothing
-        # An XFAIL keeps the real semantic expected status (primal infeasible)
-        # while separately accepting a previously observed numerical failure.
-        if observed_status in (expected_status, prior_observed_status) && oracle_ok &&
+    elseif prior_observed_status !== nothing
+        # XFAIL applies only to the explicitly recorded prior failure.  A
+        # certified result at the real semantic target is RESOLVED; an
+        # unrelated (including contradictory optimal) result is FAIL.
+        if observed_status === prior_observed_status && oracle_ok && interval_ok &&
            !certificate_valid && certificate_kind_ok && !isempty(failures)
             return :XFAIL
-        elseif observed_status === :optimal && gates
-            return prior_failure ? :RESOLVED : :XPASS
+        elseif observed_status === expected_status && gates
+            return :RESOLVED
         end
         return :FAIL
     elseif expected_status === :iteration_limit || expected_status === :numerical_breakdown
@@ -645,17 +654,21 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
     end
     oracle_ok = instance.reference.oracle === nothing ?
         instance.reference.status === :build_only : instance.reference.oracle(built, certificate)
-    # Infeasibility is independently certified by the exact Farkas oracle; a
-    # primal certificate.valid field is not required for that status.
+    # Infeasibility is independently certified by the exact Farkas oracle;
+    # public certificate.valid is optimal-only.  Resolve an XFAIL only when
+    # the observed status is the real semantic target and its exact oracle
+    # passes; a prior numerical failure remains uncertified.
+    observed_status = SDPX.status(solved)
     cert_ok = instance.reference.status === :build_only ||
-        (instance.reference.status === :primal_infeasible ? oracle_ok : certificate.valid)
+        (instance.reference.expected_status === :primal_infeasible ?
+            (observed_status === :primal_infeasible && oracle_ok) : certificate.valid)
     failures = Symbol[]
     interval_ok || push!(failures, :objective_interval)
     oracle_ok || push!(failures, :oracle)
     cert_ok || push!(failures, :certificate)
-    status_ok = SDPX.status(solved) === instance.reference.expected_status
+    status_ok = observed_status === instance.reference.expected_status
     instance.reference.status === :build_only && (status_ok = true)
-    validation_status = SDPX.status(solved)
+    validation_status = observed_status
     reference_ok = oracle_ok && interval_ok && status_ok && cert_ok
     semantic_ok = reference_ok
     cert_kind_ok = instance.reference.status === :build_only ||
@@ -664,7 +677,7 @@ function _run_instance_impl(catalog::V2Catalog, instance::V2Instance,
             instance.reference.certificate_kind === :optimal)
     prior_failure = instance.reference.disposition in (:XFAIL, :FAIL)
     disposition = classify_disposition(instance.reference.expected_status, prior_failure,
-        SDPX.status(solved), oracle_ok, interval_ok, certificate.valid, cert_kind_ok, failures;
+        observed_status, oracle_ok, interval_ok, cert_ok, cert_kind_ok, failures;
         prior_observed_status=instance.reference.prior_observed_status)
     if disposition === :XFAIL
         validation_status = :XFAIL

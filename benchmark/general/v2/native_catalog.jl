@@ -398,6 +398,9 @@ function _actual_contradiction_rows(model)
     rows = Tuple{Vector{Int},Vector{BigFloat},BigFloat}[]
     for block in model.constraint_blocks
         startswith(String(block.name), "contradiction") || continue
+        block.domain == SDPX.ZeroCone() || return Tuple{Vector{Int},Vector{BigFloat},BigFloat}[]
+        block.shape == 1 && length(block.expressions) == 1 ||
+            return Tuple{Vector{Int},Vector{BigFloat},BigFloat}[]
         expression = only(block.expressions)
         coefficients = BigFloat.(expression.coefficients)
         rhs = -BigFloat(expression.constant)
@@ -553,15 +556,17 @@ function _oracle_check(oracle::V2ExactOracle, built, certificate)
     built.source_artifact === oracle.artifact || return false
     hasproperty(built.facts, :model_fingerprint) || return false
     oracle.primal_witness == _actual_witness(oracle.artifact) || return false
-    if oracle.expected_status === :primal_infeasible
-        _farkas_valid(oracle.artifact, built) || return false
-        return oracle.dual_ray == oracle.artifact.infeasibility_ray
-    end
+    # Model identity is mandatory for both feasible and infeasible oracles;
+    # a Farkas row must never bypass a stale/wrong builder receipt.
     actual_fp = _native_model_fingerprint(built.problem)
     actual_fp == built.facts.model_fingerprint || return false
     expected_fp = get(built.facts, :model_contract_fingerprint, "")
     occursin(r"^[0-9a-f]{64}$", String(expected_fp)) || return false
     actual_fp == expected_fp || return false
+    if oracle.expected_status === :primal_infeasible
+        _farkas_valid(oracle.artifact, built) || return false
+        return oracle.dual_ray == oracle.artifact.infeasibility_ray
+    end
     oracle.expected_status === :optimal || return false
     actual_multipliers = _actual_equality_multipliers(built.problem)
     actual_multipliers === nothing && return false

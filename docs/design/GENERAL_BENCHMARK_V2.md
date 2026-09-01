@@ -54,15 +54,18 @@ continuum PMP.
 
 ## Identity and lifecycle
 
-`input_fingerprint` hashes schema, stable ID, sorted parameters, provenance,
-source checksum, reference contract, and transform metadata. Native V2 build
-facts additionally bind the exact artifact checksum and generated-model
-canonical fingerprint; artifact shape constructors reject ignored/extra
-coefficients. Train/holdout/sentinel mathematical fingerprints must be
-pairwise unique, and only `training_instances(catalog)` is eligible for inner
-optimization. It is separate
-from `execution_fingerprint`, which additionally includes arithmetic,
-precision, provider, route, and manifest. `V2RunResult` preserves setup/core/
+`mathematical_fingerprint` hashes only the finite mathematical artifact
+(family, typed parameters/coefficient data), excluding stable ID, split,
+provenance and reference policy. `input_fingerprint` composes that mathematical
+identity with the declared transform. Instance/catalog fingerprints separately
+retain stable IDs, splits, source/provenance, resources and reference
+contracts. Native V2 build facts additionally bind the exact artifact checksum
+and independently reconstructed generated-model receipt; artifact shape
+constructors reject ignored/extra coefficients. Train/holdout/sentinel
+mathematical fingerprints must be pairwise unique, and only
+`training_instances(catalog)` is eligible for inner optimization.
+`execution_fingerprint` additionally includes arithmetic, precision, provider,
+route, settings and manifest. `V2RunResult` preserves setup/core/
 recovery timing and allocated bytes; unavailable phases are represented by
 `nothing`, not fabricated zeroes.
 

@@ -244,6 +244,18 @@ end
     @test sentinel_result.validation.reference
     sentinel_built, _ = build_instance(catalog, sentinel, precision)
     @test GeneralBenchmarkV2._farkas_valid(sentinel.payload, sentinel_built)
+    @test classify_disposition(:primal_infeasible, true,
+        :numerical_breakdown, true, true, false, true, [:certificate];
+        prior_observed_status=:numerical_breakdown) === :XFAIL
+    @test classify_disposition(:primal_infeasible, true,
+        :primal_infeasible, true, true, true, true, Symbol[];
+        prior_observed_status=:numerical_breakdown) === :RESOLVED
+    @test classify_disposition(:primal_infeasible, true,
+        :optimal, true, true, true, true, Symbol[];
+        prior_observed_status=:numerical_breakdown) === :FAIL
+    @test classify_disposition(:primal_infeasible, true,
+        :numerical_breakdown, true, true, false, false, [:certificate];
+        prior_observed_status=:numerical_breakdown) === :FAIL
     # The canonical encoder is explicit for exact rational coefficients and
     # does not depend on host-endian or struct string formatting.
     metadata_variant = V2ConicArtifact(:soc, train_soc.id,
@@ -262,6 +274,10 @@ end
     @test GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//3]) !=
           GeneralBenchmarkV2._hex(Rational{Int}[1//2, 1//4])
     @test GeneralBenchmarkV2._canonical_bytes(:x) != GeneralBenchmarkV2._canonical_bytes("x")
+    compat_a = (problem=:fixed, params=(x=1,), id=:a, source="source-a")
+    compat_b = (problem=:fixed, params=(x=1,), id=:b, source="source-b")
+    @test GeneralBenchmarkV2._math_payload(compat_a) ==
+          GeneralBenchmarkV2._math_payload(compat_b)
     @test GeneralBenchmarkV2._canonical_bytes(Float32(1)) != GeneralBenchmarkV2._canonical_bytes(Float64(1))
     @test GeneralBenchmarkV2._canonical_bytes(Int8(1)) != GeneralBenchmarkV2._canonical_bytes(Int16(1))
     @test GeneralBenchmarkV2._canonical_bytes(UInt8(1)) != GeneralBenchmarkV2._canonical_bytes(Int8(1))
