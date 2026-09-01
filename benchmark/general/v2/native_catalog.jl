@@ -970,6 +970,99 @@ function _lp_build(artifact::LPArtifact, ::Type{T}; precision_bits::Int=256) whe
     return V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
 end
 
+"""Independent oracle for an ill-conditioned LP artifact lowered through the
+same exact standard-form builder as the typed LP tranche."""
+struct V2IllConditionedLPOracle
+    artifact::IllConditionedArtifact
+end
+
+function _put!(io::IO, oracle::V2IllConditionedLPOracle)
+    _put!(io, (:V2IllConditionedLPOracle, oracle.artifact))
+end
+
+function (oracle::V2IllConditionedLPOracle)(built, certificate)
+    artifact = oracle.artifact
+    artifact.base_family === :lp || return false
+    built.source_artifact === artifact || return false
+    actual_fp = _native_model_fingerprint(built.problem)
+    actual_fp == built.facts.model_fingerprint || return false
+    actual_fp == get(built.facts, :model_contract_fingerprint, "") || return false
+    witness = artifact.primal_witness
+    dual = artifact.dual_witness
+    size(artifact.coefficients, 2) == length(witness) || return false
+    size(artifact.coefficients, 1) == length(artifact.rhs) == length(dual) || return false
+    for row in axes(artifact.coefficients, 1)
+        sum(BigFloat(artifact.coefficients[row, col]) *
+            (BigFloat(numerator(witness[col])) / BigFloat(denominator(witness[col])))
+            for col in axes(artifact.coefficients, 2)) == BigFloat(artifact.rhs[row]) || return false
+    end
+    all(>=(0//1), witness) || return false
+    for col in axes(artifact.coefficients, 2)
+        lhs = sum(BigFloat(artifact.coefficients[row, col]) * dual[row]
+                  for row in axes(artifact.coefficients, 1))
+        lhs <= BigFloat(artifact.objective_coefficients[col]) || return false
+    end
+    primal_value = sum(BigFloat(artifact.objective_coefficients[col]) *
+        (BigFloat(numerator(witness[col])) / BigFloat(denominator(witness[col])))
+        for col in axes(artifact.coefficients, 2))
+    dual_value = sum(BigFloat(artifact.rhs[row]) * dual[row]
+                     for row in axes(artifact.coefficients, 1))
+    primal_value == BigFloat(artifact.objective) || return false
+    dual_value == BigFloat(artifact.objective) || return false
+    value = try BigFloat(certificate.primal_objective) catch; BigFloat(NaN) end
+    isfinite(value) && abs(value - BigFloat(artifact.objective)) <= BigFloat("5e-7")
+end
+
+function _ill_lp_build(artifact::IllConditionedArtifact, ::Type{T};
+                       precision_bits::Int=256) where {T<:AbstractFloat}
+    artifact.base_family === :lp || throw(ArgumentError("ill LP builder requires base_family=:lp"))
+    model = T === BigFloat ? SDPX.Model(BigFloat; precision_bits, name=String(artifact.id)) :
+        SDPX.Model(T; name=String(artifact.id))
+    x = SDPX.variable!(model, :x, size(artifact.coefficients, 2); domain=SDPX.Nonnegative())
+    for row in axes(artifact.coefficients, 1)
+        expression = -_Tq(T, artifact.rhs[row])
+        for col in axes(artifact.coefficients, 2)
+            coefficient = _Tq(T, artifact.coefficients[row, col])
+            iszero(coefficient) || (expression += coefficient * x[col])
+        end
+        SDPX.constraint!(model, Symbol(:ill_lp_row_, row), expression, SDPX.ZeroCone())
+    end
+    objective = zero(T)
+    for col in axes(artifact.objective_coefficients, 1)
+        coefficient = _Tq(T, artifact.objective_coefficients[col])
+        iszero(coefficient) || (objective += coefficient * x[col])
+    end
+    SDPX.objective!(model, SDPX.Minimize(), objective)
+    actual_fp = _native_model_fingerprint(model)
+    transform = V2Transform(:ill_conditioned_lp_artifact, :sdpx_cone_program,
+        :lp_standard_form, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    oracle = V2IllConditionedLPOracle(artifact)
+    facts = (artifact_fingerprint=_hex(artifact), model_fingerprint=actual_fp,
+        model_contract_fingerprint=actual_fp, model_precision_bits=precision_bits,
+        source_dimension=size(artifact.coefficients, 2), target_dimension=size(artifact.coefficients, 2),
+        generator=artifact.generator_id, coefficients=artifact.coefficients)
+    V2Built(model, oracle, artifact, "", transform, facts, (setup_seconds=nothing,))
+end
+
+function _ill_diagonal_scale_artifact()
+    # Row scaling D=diag(10^-6,10^6) preserves the feasible set and optimum
+    # while producing an exact six-decade coefficient range.  Starting from
+    # x+s=(1,2), c=(-1,-2,0,0), transform A,b by D and the equality dual by D^-1.
+    A = Rational{Int}[1//1 0//1 1//1 0//1;
+                      0//1 1//1 0//1 1//1]
+    b = Rational{Int}[1, 2]
+    d = Rational{Int}[1//1_000_000, 1_000_000//1]
+    scaled_A = Diagonal(d) * A
+    scaled_b = d .* b
+    c = Rational{Int}[-1, -2, 0, 0]
+    witness = Rational{Int}[1, 2, 0, 0]
+    dual = Rational{Int}[-1_000_000, -1//500_000]
+    IllConditionedArtifact(:v2_ill_diag_ladder_small, :diagonal_scale_ladder, :lp,
+        scaled_A, scaled_b, c; scale_exponent=6, primal_witness=witness,
+        dual_witness=dual, objective=-5//1)
+end
+
 function _lp_box_artifact()
     # min -x₁-2x₂ subject to x+s=(1,2), x,s >= 0.  The planted point
     # (1,2,0,0) is optimal; y=(-1,-2) is dual-feasible and gives -5.
@@ -1125,6 +1218,44 @@ function lp_tranche_catalog()
             (wall_seconds=20, memory_bytes=4 * 1024^3), reference, artifact))
     end
     V2Catalog(:general_v2_lp_tranche, 3, [families], instances,
+        (train=[instance.id for instance in instances], holdout=Symbol[], sentinel=Symbol[]))
+end
+
+"""Small ill-conditioned tranche with only observed certified artifacts."""
+function ill_conditioned_tranche_catalog()
+    artifacts = [_ill_diagonal_scale_artifact()]
+    transform = V2Transform(:ill_conditioned_lp_artifact, :sdpx_cone_program,
+        :lp_standard_form, 1, :identity;
+        validation_receipts=(coefficient_match=true, source_reconstruction=true))
+    descriptions = [
+        "diagonal scale ladder: D=diag(10^-6,10^6) applied to x+s=(1,2); D^-1 dual preserves exact optimum -5",
+    ]
+    family = V2Family(:ill_conditioned, V2Axis[],
+        (instance, precision) -> begin
+            built = _ill_lp_build(instance.payload, precision.arithmetic;
+                precision_bits=precision.bits)
+            V2Built(built.problem, built.oracle, built.source_artifact,
+                input_fingerprint(instance), built.transform,
+                merge(built.facts, (artifact_fingerprint=_hex(instance.payload),)), built.resource)
+        end,
+        (built, certificate) -> built.oracle(built, certificate),
+        (instance, result) -> result.validation, (:identity,))
+    instances = V2Instance[]
+    for (index, artifact) in enumerate(artifacts)
+        interval = (string(BigFloat(artifact.objective) - BigFloat("5e-7")),
+            string(BigFloat(artifact.objective) + BigFloat("5e-7")))
+        reference = V2Reference(:optimal, :optimal, interval,
+            V2IllConditionedLPOracle(artifact), descriptions[index];
+            expected_status=:optimal, disposition=:PASS)
+        push!(instances, V2Instance(artifact.id, :ill_conditioned,
+            only(filter(t -> t.name === :small, _TIERS)),
+            (kind=artifact.kind, scale_exponent=artifact.scale_exponent), :train,
+            "general-v2/ill-conditioned/$(artifact.kind)/small",
+            (generator=artifact.generator_id, version=artifact.generator_version,
+             transform=transform, solve_eligible=true), _hex(artifact),
+            (wall_seconds=20, memory_bytes=4 * 1024^3), reference, artifact))
+    end
+    V2Catalog(:general_v2_ill_conditioned_tranche, 1, [family], instances,
         (train=[instance.id for instance in instances], holdout=Symbol[], sentinel=Symbol[]))
 end
 

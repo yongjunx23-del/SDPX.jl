@@ -257,6 +257,35 @@ end
     @test !built2.oracle(built2, (primal_objective=BigFloat(-5),))
 end
 
+@testset "ill-conditioned typed LP lowering has an independent certified oracle" begin
+    catalog = ill_conditioned_tranche_catalog()
+    @test length(catalog.instances) == 1
+    instance = only(catalog.instances)
+    artifact = instance.payload
+    @test artifact isa IllConditionedArtifact
+    @test artifact.kind === :diagonal_scale_ladder
+    @test artifact.base_family === :lp
+    @test artifact.scale_exponent == 6
+    nonzero_coefficients = filter(!iszero, vec(artifact.coefficients))
+    @test minimum(abs, nonzero_coefficients) == Rational{Int}(1, 1_000_000)
+    @test maximum(abs, nonzero_coefficients) == Rational{Int}(1_000_000)
+    @test artifact.objective == -5//1
+    precision = V2Precision(:Float64, Float64, 53, "1e-8", "5e-7", :test)
+    @test validate_catalog(catalog)
+    built, elapsed = build_instance(catalog, instance, precision)
+    @test elapsed >= 0
+    @test built.source_artifact === artifact
+    @test built.facts.artifact_fingerprint == instance.checksum
+    @test built.facts.model_fingerprint == built.facts.model_contract_fingerprint
+    result = run_instance(catalog, instance, precision)
+    @test result.status === :optimal
+    @test result.certificate_valid
+    @test result.validation.reference
+    @test result.validation.failures == Symbol[]
+    @test isapprox(parse(Float64, result.objective), -5.0; atol=5e-7, rtol=0)
+    @test result.core_seconds !== nothing
+end
+
 @testset "native V2 corpus owns typed artifacts and disjoint suites" begin
     catalog = native_v2_catalog()
     @test !isempty(catalog.suites.train)
