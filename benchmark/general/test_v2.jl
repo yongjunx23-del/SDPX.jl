@@ -7,6 +7,25 @@ isdefined(Main, :GenericConicBenchmark) ||
 include(joinpath(@__DIR__, "v2", "GeneralBenchmarkV2.jl"))
 using .GeneralBenchmarkV2
 
+@testset "V1 result storage preserves requested arithmetic" begin
+    spec = only(filter(s -> s.id === :lp_afiro_style,
+        GenericConicBenchmark.inventory(; tier=:small)))
+    float_result = GenericConicBenchmark.run_one(spec, Float64)
+    @test float_result isa GenericConicBenchmark.BenchmarkResult{Float64}
+    @test float_result.objective isa Float64
+    # A typed legacy result retains the backend and validates against a
+    # reference after converting only the reference allowance into that
+    # backend. This guards against reintroducing Float64 field narrowing.
+    exact = GenericConicBenchmark.BenchmarkResult{BigFloat}(
+        :typed_probe, :lp, :small, :optimal,
+        BigFloat("1.25"), BigFloat("1.25"), BigFloat("0"),
+        BigFloat("0"), BigFloat("0"), true, 1, 0.0, 0, 0.0, false)
+    typed_spec = GenericConicBenchmark.BenchmarkSpec(
+        :typed_probe, :lp, :small, GenericConicBenchmark.LPProblem(),
+        (name=:typed_probe,), :optimal, 1.25, 1e-20, "test")
+    @test GenericConicBenchmark.validate_result(typed_spec, exact)
+end
+
 @testset "general benchmark V2 schema and deterministic identity" begin
     axes = [V2Axis(:z, [2, 1]), V2Axis(:a, ["b", "a"])]
     expanded = expand(axes)
