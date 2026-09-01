@@ -70,6 +70,8 @@ using .GeneralBenchmarkV2
         dual_residual_scaled=BigFloat("0"), relative_gap=BigFloat("0")), reviewed[1])
     @test !certificate_gate((primal_residual_scaled=BigFloat("0"),
         dual_residual_scaled=BigFloat("0")), reviewed[1])
+    @test !certificate_gate((primal_residual_scaled=BigFloat("-1"),
+        dual_residual_scaled=BigFloat("0"), relative_gap=BigFloat("0")), reviewed[1])
 
     # Manifest verification hashes file bytes, not host-endian decoded values,
     # and rejects missing, malformed, duplicate, or escaping entries.

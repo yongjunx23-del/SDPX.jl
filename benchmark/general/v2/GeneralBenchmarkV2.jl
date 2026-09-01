@@ -361,7 +361,7 @@ function certificate_gate(certificate, precision::V2Precision)
     for field in (:primal_residual_scaled, :dual_residual_scaled, :relative_gap)
         hasproperty(certificate, field) || return false
         value = try BigFloat(getproperty(certificate, field)) catch; return false end
-        isfinite(value) || return false
+        isfinite(value) && value >= 0 || return false
         value <= BigFloat(precision.certificate_limit) || return false
     end
     return true
