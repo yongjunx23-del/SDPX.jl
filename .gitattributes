@@ -1,0 +1,4 @@
+# External benchmark payloads are checksum-addressed artifacts. Treat them as
+# opaque bytes so their source whitespace is never normalized by Git.
+benchmark/general/data/** binary
+benchmark/general/data/** -diff
